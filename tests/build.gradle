@@ -1,0 +1,267 @@
+plugins {
+	id 'java'
+	id 'org.jetbrains.kotlin.jvm'
+}
+
+def mindustryVersion = 'v160.5'
+
+sourceSets {
+	main {
+		java.srcDirs = ["src"]
+	}
+	test {
+		java.srcDirs = []
+	}
+	ktfixV1 {
+		kotlin.srcDirs = ["ktfix/v1"]
+	}
+	ktfixV2 {
+		kotlin.srcDirs = ["ktfix/v2"]
+	}
+}
+
+dependencies {
+	implementation project(":hotswap-api")
+	implementation project(":hotswap-core")
+	implementation project(":jni-agent")
+	implementation project(":hotswap-plugin-arc")
+	implementation "Anuken:Mindustry:$mindustryVersion"
+	implementation "org.spongepowered:mixin:0.8.5"
+	implementation "com.google.guava:guava:33.4.0-jre"
+
+	def asmVersion = '9.9.1'
+	implementation "org.ow2.asm:asm:$asmVersion"
+	implementation "org.ow2.asm:asm-commons:$asmVersion"
+	implementation "org.ow2.asm:asm-analysis:$asmVersion"
+	implementation "org.ow2.asm:asm-util:$asmVersion"
+	implementation "org.ow2.asm:asm-tree:$asmVersion"
+
+	ktfixV1Implementation "org.jetbrains.kotlin:kotlin-stdlib"
+	ktfixV2Implementation "org.jetbrains.kotlin:kotlin-stdlib"
+
+	implementation platform("org.junit:junit-bom:5.11.4")
+	implementation "org.junit.jupiter:junit-jupiter"
+	runtimeOnly "org.junit.platform:junit-platform-launcher"
+}
+
+// SemAssert 夹具编译
+def hstestFixtureRoot = layout.buildDirectory.dir("hstest-fixtures")
+def hstestFixtureSpecs = [
+	["swap2", "v1", "swap2/Time.java"], ["swap2", "v2", "swap2/Time.java"],
+	["leaf",  "v1", null],              ["leaf",  "v2", null], ["leaf", "v3", null],
+	["deep",  "v1", "deep/Time.java"],  ["deep",  "v2", "deep/Time.java"],
+	["two",   "v1", "two/Time2.java"],  ["two",   "v2", "two/Time2.java"],
+	["deep2", "v1", "deep2/Time3.java"],["deep2", "v2", "deep2/Time3.java"], ["deep2", "v3", "deep2/Time3.java"],
+	["save3", "v1", "save3/Time4.java"],["save3", "v2", "save3/Time4.java"], ["save3", "v3", "save3/Time4.java"],
+]
+def hstestFixtureJdk = 21
+def hstestFixtureTasks = hstestFixtureSpecs.collect { g, v, helper ->
+	tasks.register("hstestFx_${g}_${v}", JavaCompile) {
+		group = "verification"
+		description = "编译 SemAssert 夹具 ${g}/${v} (jdk${hstestFixtureJdk})"
+		source = files(fileTree("${projectDir}/${g}/${v}") { include "**/*.java" },
+		               helper ? [file("${projectDir}/${helper}")] : [])
+		classpath = files()
+		destinationDirectory = hstestFixtureRoot.map { it.dir("jdk${hstestFixtureJdk}/${g}/${v}") }
+		javaCompiler = javaToolchains.compilerFor {
+			languageVersion = JavaLanguageVersion.of(hstestFixtureJdk)
+		}
+		options.encoding = "UTF-8"
+		options.warnings = false
+		options.debug = true
+		options.debugOptions.debugLevel = "source,lines"
+		sourceCompatibility = "${hstestFixtureJdk}"
+		targetCompatibility = "${hstestFixtureJdk}"
+	}
+}
+
+// 1. JUnit 测试入口
+test {
+	group = "verification"
+	description = "运行 181 项 JUnit 拓扑对齐与安全门测试"
+	testClassesDirs = sourceSets.main.output.classesDirs
+	classpath = sourceSets.main.runtimeClasspath
+	dependsOn classes
+	dependsOn project(":hotswap-core").tasks.named("shadowJar")
+	dependsOn project(":jni-agent").tasks.named("jar")
+	dependsOn hstestFixtureTasks
+	inputs.dir(hstestFixtureRoot)
+	useJUnitPlatform()
+	maxParallelForks = 1
+	workingDir = projectDir
+	jvmArgs "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+	        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+	systemProperty "hstest.fixtures", hstestFixtureRoot.get().asFile.absolutePath
+
+	def requiredJdkMajors = [8, 11, 17, 21, 25]
+	doFirst {
+		def missing = []
+		requiredJdkMajors.each { v ->
+			try {
+				systemProperty "hstest.javac${v}", javaToolchains.compilerFor {
+					languageVersion = JavaLanguageVersion.of(v)
+				}.get().executablePath.asFile.absolutePath
+			} catch (Exception e) {
+				missing << v
+			}
+		}
+		if (!missing.isEmpty()) {
+			def msg = "hstestJunit: 缺少 javac toolchain " + missing.join(", ")
+			if (!"false".equalsIgnoreCase(System.getProperty("hstest.requireJdks", "true"))) {
+				throw new GradleException(msg)
+			}
+			logger.warn(msg)
+		}
+	}
+}
+
+// 断言测试总数 ≥ 181 且 0 skipped
+def hstestMinTests = 181
+tasks.register("verifyTestCount") {
+	group = "verification"
+	description = "断言 JUnit 测试数不低于基线 ${hstestMinTests}"
+	dependsOn tasks.named("test")
+	doLast {
+		def dir = layout.buildDirectory.dir("test-results/test").get().asFile
+		int total = 0
+		int skipped = 0
+		dir.listFiles()?.each { f ->
+			if (f.name.startsWith("TEST-") && f.name.endsWith(".xml")) {
+				def text = f.getText("UTF-8")
+				def mt = text =~ /<testsuite[^>]*\btests="(\d+)"/
+				if (mt.find()) total += (mt.group(1) as int)
+				def ms = text =~ /<testsuite[^>]*\bskipped="(\d+)"/
+				if (ms.find()) skipped += (ms.group(1) as int)
+			}
+		}
+		if (skipped > 0) {
+			throw new GradleException("JUnit 有 " + skipped + " 个 skipped 测试：约定是缺 JDK 就硬失败、不跳过")
+		}
+		if (total < hstestMinTests) {
+			throw new GradleException("JUnit 测试数 " + total + " < 基线 " + hstestMinTests)
+		}
+		logger.lifecycle("JUnit 测试数 = " + total + ", skipped = " + skipped + " (>= " + hstestMinTests + ")")
+	}
+}
+
+// 2. Mixin 与外部 JDWP 重定义实测 (E2E)
+tasks.register("mixinProbe", JavaExec) {
+	group = "verification"
+	description = "运行 Mixin 接入与外部 JDWP 热更新兼容性实测 (E2E)"
+	dependsOn classes
+	dependsOn project(":hotswap-core").tasks.named("shadowJar")
+	dependsOn project(":jni-agent").tasks.named("jar")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "nipx.MixinCompatibilityTest"
+	doFirst {
+		jvmArgs "-javaagent:${project(':hotswap-core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+	}
+}
+
+// 3. InitFix 差分 Oracle
+tasks.register("initFixOracle", JavaExec) {
+	group = "verification"
+	description = "运行 InitFix 差分 Oracle（正向值比对 + 负向阻断断言）"
+	dependsOn classes
+	dependsOn project(":hotswap-core").tasks.named("shadowJar")
+	dependsOn project(":jni-agent").tasks.named("jar")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "InitFixOracle"
+	dependsOn tasks.named("compileKtfixV1Kotlin")
+	dependsOn tasks.named("compileKtfixV2Kotlin")
+	systemProperty "nipx.ktfix.v1", sourceSets.ktfixV1.output.classesDirs.asPath
+	systemProperty "nipx.ktfix.v2", sourceSets.ktfixV2.output.classesDirs.asPath
+	jvmArgs "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+	        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+}
+
+// 4. LayoutGateAssert
+tasks.register("layoutGateAssert", JavaExec) {
+	group = "verification"
+	description = "运行 LayoutGate 规则表断言"
+	dependsOn classes
+	dependsOn project(":hotswap-core").tasks.named("shadowJar")
+	dependsOn project(":jni-agent").tasks.named("jar")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "LayoutGateAssert"
+}
+
+// 5. GhostProbe
+tasks.register("ghostProbe", JavaExec) {
+	group = "verification"
+	description = "运行幽灵桩熔断栈探测断言 (GhostProbe)"
+	dependsOn classes
+	dependsOn project(":hotswap-core").tasks.named("shadowJar")
+	dependsOn project(":jni-agent").tasks.named("jar")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "GhostProbe"
+}
+
+// 6. ConcurrencyAssert
+tasks.register("concurrencyAssert", JavaExec) {
+	group = "verification"
+	description = "运行并发入口加固断言"
+	dependsOn classes
+	dependsOn project(":hotswap-core").tasks.named("shadowJar")
+	dependsOn project(":jni-agent").tasks.named("jar")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "ConcurrencyAssert"
+}
+
+// 7. FingerprintAssert
+tasks.register("fingerprintAssert", JavaExec) {
+	group = "verification"
+	description = "运行指纹延后落账断言"
+	dependsOn classes
+	dependsOn project(":hotswap-core").tasks.named("shadowJar")
+	dependsOn project(":jni-agent").tasks.named("jar")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "FingerprintAssert"
+}
+
+// 8. verifyDocStatusMarkers
+tasks.register("verifyDocStatusMarkers") {
+	group = "verification"
+	description = "检查设计规格文档与源码中严禁混入易腐状态标记"
+	doLast {
+		def checkDirs = [
+			file("${rootDir}/docs/initfix"),
+			file("${rootDir}/docs/topology"),
+			file("${rootDir}/hotswap-core/src"),
+			file("${rootDir}/hotswap-api/src"),
+			file("${rootDir}/hotswap-plugin-arc/src")
+		]
+		def pattern = ~/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/
+		def violations = []
+		checkDirs.each { dir ->
+			if (dir.exists()) {
+				dir.eachFileRecurse { f ->
+					if (f.isFile() && (f.name.endsWith(".md") || f.name.endsWith(".java"))) {
+						f.eachLine("UTF-8") { line, lineNum ->
+							if (line =~ pattern) {
+								violations << "${rootDir.toPath().relativize(f.toPath())}:${lineNum}: ${line.trim()}"
+							}
+						}
+					}
+				}
+			}
+		}
+		if (!violations.isEmpty()) {
+			throw new GradleException("发现违规混入的实现状态标记：\n" + violations.join("\n"))
+		}
+		logger.lifecycle("verifyDocStatusMarkers: 全部规范文档与源码均无违规状态标记")
+	}
+}
+
+// check 挂载全部断言
+check.dependsOn test
+check.dependsOn verifyTestCount
+check.dependsOn mixinProbe
+check.dependsOn initFixOracle
+check.dependsOn layoutGateAssert
+check.dependsOn ghostProbe
+check.dependsOn concurrencyAssert
+check.dependsOn fingerprintAssert
+check.dependsOn verifyDocStatusMarkers

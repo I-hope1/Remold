@@ -1,0 +1,22 @@
+plugins {
+	id 'base'
+}
+
+allprojects {
+	group = 'nipx'
+	version = '1.0.0'
+	ext {
+		mindustryVersion = 'v160.5'
+	}
+}
+
+subprojects {
+	tasks.withType(JavaCompile).configureEach {
+		options.encoding = 'UTF-8'
+		options.compilerArgs += [
+			"--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+			"--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
+			"--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED"
+		]
+	}
+}

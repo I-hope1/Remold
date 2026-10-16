@@ -184,6 +184,7 @@ project.plugins.withId("java") {
             val conf = resolveRemoldConfig()
             mainClass.set(conf.mainClass)
             if (conf.executable != "java") {
+                javaLauncher.set(null as org.gradle.jvm.toolchain.JavaLauncher?)
                 executable = conf.executable
             }
             jvmArgs(conf.jvmArgs)

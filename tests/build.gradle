@@ -312,6 +312,7 @@ tasks.register("liveDcevmTest", JavaExec) {
 		if (jbrHome != null) {
 			def javaBin = new File(jbrHome, System.getProperty("os.name").toLowerCase().contains("win") ? "bin/java.exe" : "bin/java")
 			if (javaBin.exists()) {
+				javaLauncher.set((JavaLauncher) null)
 				executable = javaBin.absolutePath
 			}
 		}

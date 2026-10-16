@@ -181,6 +181,7 @@ project.plugins.withId('java') {
             def conf = resolveRemoldConfig()
             mainClass.set(conf.mainClass)
             if (conf.executable != 'java') {
+                javaLauncher.set((JavaLauncher) null)
                 executable = conf.executable
             }
             jvmArgs(conf.jvmArgs)

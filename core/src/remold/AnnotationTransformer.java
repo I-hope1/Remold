@@ -96,6 +96,7 @@ public class AnnotationTransformer implements ClassFileTransformer {
 
 		if (loader == null) return null;
 		if (className.startsWith("org/objectweb/asm/")) return null;
+		// 排除 Agent 自身类以避免递归重入；remold/probe/ 下为测试夹具专用，放行进入转换管线
 		if (className.startsWith("remold/") && !className.startsWith("remold/probe/")) return null;
 
 		// 注册到继承树

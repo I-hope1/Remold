@@ -16,6 +16,8 @@ subprojects {
 		archivesName = "remold-${project.name}"
 	}
 	tasks.withType(JavaCompile).configureEach {
+		sourceCompatibility = JavaVersion.VERSION_21
+		targetCompatibility = JavaVersion.VERSION_21
 		options.encoding = 'UTF-8'
 		options.compilerArgs += [
 			"--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",

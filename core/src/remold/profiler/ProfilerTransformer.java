@@ -13,20 +13,20 @@ public class ProfilerTransformer implements ClassFileTransformer {
 	public static final Map<Class<?>, Set<String>> targetMethods = new HashMap<>();
 
 	public static void addTargetMethods(Class<?> clazz, String... methodNames) {
-		targetMethods.computeIfAbsent(clazz, _ -> new HashSet<>()).addAll(Arrays.asList(methodNames));
+		targetMethods.computeIfAbsent(clazz, k -> new HashSet<>()).addAll(Arrays.asList(methodNames));
 	}
 	public static void addTargetMethod(Class<?> clazz, String methodName) {
-		targetMethods.computeIfAbsent(clazz, _ -> new HashSet<>()).add(methodName);
+		targetMethods.computeIfAbsent(clazz, k -> new HashSet<>()).add(methodName);
 	}
 	public static void clearTargetMethods(Class<?> clazz) { targetMethods.remove(clazz); }
 	public static void removeTargetMethod(Class<?> clazz,
-	                                      String n) { targetMethods.computeIfAbsent(clazz, _ -> new HashSet<>()).remove(n); }
+	                                      String n) { targetMethods.computeIfAbsent(clazz, k -> new HashSet<>()).remove(n); }
 	public static void removeTargetMethods(Class<?> clazz, String... ns) {
-		Set<String> s = targetMethods.computeIfAbsent(clazz, _ -> new HashSet<>());
+		Set<String> s = targetMethods.computeIfAbsent(clazz, k -> new HashSet<>());
 		for (String n : ns) s.remove(n);
 	}
 	public static boolean hasTargetMethod(Class<?> clazz, String n) {
-		return targetMethods.computeIfAbsent(clazz, _ -> new HashSet<>()).contains(n);
+		return targetMethods.computeIfAbsent(clazz, k -> new HashSet<>()).contains(n);
 	}
 
 	ClassReader classReader;

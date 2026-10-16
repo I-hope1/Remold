@@ -1048,7 +1048,7 @@ public class JVMTIEnv {
 	//region Low-level helpers
 	public void jvmtiDeallocate(MemorySegment ptr) {
 		try {
-			int _ = (int) MH_Deallocate.invokeExact(fpDeallocate, jvmtiEnvPtr, ptr);
+			int unused = (int) MH_Deallocate.invokeExact(fpDeallocate, jvmtiEnvPtr, ptr);
 		} catch (Throwable ignored) { }
 	}
 

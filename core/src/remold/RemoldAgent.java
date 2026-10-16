@@ -2263,7 +2263,7 @@ public class RemoldAgent {
 									fileDiskHashes.put(CRC64.hashString(cName), diskHash);
 								}
 							}
-						} catch (Exception _) {
+						} catch (Exception ignored) {
 						} finally {
 							zis.closeEntry();
 						}
@@ -2315,7 +2315,7 @@ public class RemoldAgent {
 												fileDiskHashes.put(CRC64.hashString(cName), diskHash);
 											}
 										}
-									} catch (Exception _) {
+									} catch (Exception ignored) {
 									} finally {
 										zis.closeEntry();
 									}
@@ -2323,7 +2323,7 @@ public class RemoldAgent {
 							}
 							// 批量加入，只锁一次
 							if (!outOfSync.isEmpty()) pendingChanges.addAll(outOfSync);
-						} catch (IOException _) { }
+						} catch (IOException ignored) { }
 						return;
 					}
 					// 原始 .class 文件逻辑（保持不变）
@@ -2348,9 +2348,9 @@ public class RemoldAgent {
 						synchronized (fileDiskHashes) {
 							fileDiskHashes.put(CRC64.hashString(cName), diskHash);
 						}
-					} catch (Exception _) { }
+					} catch (Exception ignored) { }
 				});
-			} catch (IOException _) { }
+			} catch (IOException ignored) { }
 		}
 		// 入参 classes 是调用方在 restartWatchers 之前取的快照，此刻可能已过期
 		// （旧 watcher 排进 scheduler 的任务期间可能又有类被加载）。改走 triggerHotswap()，
@@ -2400,7 +2400,7 @@ public class RemoldAgent {
 				try (Stream<Path> s = Files.walk(tmpDir)) {
 					s.sorted(Comparator.reverseOrder())
 					 .filter(p -> !p.equals(tmpDir))
-					 .forEach(p -> { try { Files.delete(p); } catch (IOException _) { } });
+					 .forEach(p -> { try { Files.delete(p); } catch (IOException ignored) { } });
 				}
 			}
 			Files.createDirectories(tmpDir);
@@ -2655,7 +2655,7 @@ public class RemoldAgent {
 					break;
 				}
 			}
-		} catch (Throwable _) { }
+		} catch (Throwable ignored) { }
 		ENHANCED_HOTSWAP = enhanced;
 	}
 

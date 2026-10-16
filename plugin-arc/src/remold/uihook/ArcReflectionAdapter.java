@@ -61,7 +61,7 @@ public class ArcReflectionAdapter {
 		if (cell == null) return false;
 		try {
 			return cell.isEndRow();
-		} catch (NoSuchFieldError | IllegalAccessError _) { }
+		} catch (NoSuchFieldError | IllegalAccessError ignored) { }
 		if (f_endRow != null) {
 			try {
 				return f_endRow.getBoolean(cell);

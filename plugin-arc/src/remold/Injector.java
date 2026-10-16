@@ -80,7 +80,7 @@ public class Injector {
 	}
 	public static void redefineTask(Class<?> clazz, String methodName, String methodDesc, String lambdaType,
 	                                int lambdaSlot, String wrapMethodName) {
-		todos.computeIfAbsent(clazz, _ -> new ArrayList<>()).add(new Todo(methodName, methodDesc, lambdaType, lambdaSlot, wrapMethodName));
+		todos.computeIfAbsent(clazz, k -> new ArrayList<>()).add(new Todo(methodName, methodDesc, lambdaType, lambdaSlot, wrapMethodName));
 	}
 	/**
 	 * 拦截 Element.update(Runnable) 等方法，

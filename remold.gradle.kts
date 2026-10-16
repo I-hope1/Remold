@@ -184,7 +184,6 @@ project.plugins.withId("java") {
             val conf = resolveRemoldConfig()
             mainClass.set(conf.mainClass)
             if (conf.executable != "java") {
-                javaLauncher.set(null as org.gradle.jvm.toolchain.JavaLauncher?)
                 executable = conf.executable
             }
             jvmArgs(conf.jvmArgs)
@@ -197,6 +196,15 @@ project.plugins.withId("java") {
             }
             if (conf.executable != "java") {
                 logger.lifecycle("  - JBR: ${conf.executable}")
+            }
+        }
+    }
+
+    project.afterEvaluate {
+        tasks.named<JavaExec>("runRemold") {
+            val jbr = remoldExt.jbrPath ?: System.getenv("JBR_HOME") ?: System.getProperty("jbr.home")
+            if (!jbr.isNullOrBlank()) {
+                javaLauncher.set(null as org.gradle.jvm.toolchain.JavaLauncher?)
             }
         }
     }

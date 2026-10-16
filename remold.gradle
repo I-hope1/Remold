@@ -181,7 +181,6 @@ project.plugins.withId('java') {
             def conf = resolveRemoldConfig()
             mainClass.set(conf.mainClass)
             if (conf.executable != 'java') {
-                javaLauncher.set((JavaLauncher) null)
                 executable = conf.executable
             }
             jvmArgs(conf.jvmArgs)
@@ -194,6 +193,15 @@ project.plugins.withId('java') {
             }
             if (conf.executable != 'java') {
                 logger.lifecycle("  - JBR: ${conf.executable}")
+            }
+        }
+    }
+
+    project.afterEvaluate {
+        tasks.named('runRemold', JavaExec) {
+            def jbr = remoldExt.jbrPath ?: System.getenv('JBR_HOME') ?: System.getProperty('jbr.home')
+            if (jbr) {
+                javaLauncher.set((JavaLauncher) null)
             }
         }
     }

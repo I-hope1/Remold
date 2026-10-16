@@ -307,15 +307,15 @@ tasks.register("liveDcevmTest", JavaExec) {
 	dependsOn project(":panama").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "LiveDcevmTest"
-	doFirst {
-		def jbrHome = System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
-		if (jbrHome != null) {
-			def javaBin = new File(jbrHome, System.getProperty("os.name").toLowerCase().contains("win") ? "bin/java.exe" : "bin/java")
-			if (javaBin.exists()) {
-				javaLauncher.set((JavaLauncher) null)
-				executable = javaBin.absolutePath
-			}
+	def jbrHome = System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+	if (jbrHome != null) {
+		def javaBin = new File(jbrHome, System.getProperty("os.name").toLowerCase().contains("win") ? "bin/java.exe" : "bin/java")
+		if (javaBin.exists()) {
+			executable = javaBin.absolutePath
+			javaLauncher.set((JavaLauncher) null)
 		}
+	}
+	doFirst {
 		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
 		        "-XX:+AllowEnhancedClassRedefinition",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",

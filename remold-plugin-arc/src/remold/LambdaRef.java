@@ -128,9 +128,9 @@ public class LambdaRef {
 			bytes = injectEvents(bytes);
 			Injector.redefineOneClass(Events.class, bytes);
 			bytecodeCache.put(Events.class.getName(), bytes);
-			HotSwapAgent.info("[LambdaRef] Successfully hooked arc.Events (on/run/remove)");
+			RemoldAgent.info("[LambdaRef] Successfully hooked arc.Events (on/run/remove)");
 		} catch (Throwable t) {
-			HotSwapAgent.error("[LambdaRef] Failed to hook arc.Events: " + t.getMessage(), t);
+			RemoldAgent.error("[LambdaRef] Failed to hook arc.Events: " + t.getMessage(), t);
 		}
 	}
 

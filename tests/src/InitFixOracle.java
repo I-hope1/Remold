@@ -1,6 +1,6 @@
 import remold.AnnotationTransformer;
 import remold.ClassDiffUtil;
-import remold.HotSwapAgent;
+import remold.RemoldAgent;
 import remold.InstanceTracker;
 import remold.Reflect;
 import remold.ref.InitFix;
@@ -98,14 +98,14 @@ public class InitFixOracle {
 	public static void main(String[] args) {
 		// InitFix.transform 的第一道开关；顺手把 agent 日志静音，只收集 error。
 		System.setProperty("remold.agent.hotswap_plus", "true");
-		HotSwapAgent.logger = new HotSwapAgent.Logger() {
+		RemoldAgent.logger = new RemoldAgent.Logger() {
 			public void log(String msg) { }
 			public void info(String msg) { }
 			public void warn(String msg) { agentWarnings.add(msg); }
 			public void error(String msg) { agentErrors.add(msg); }
 			public void error(String msg, Throwable t) { agentErrors.add(msg + " :: " + t); }
 		};
-		HotSwapAgent.initConfig();
+		RemoldAgent.initConfig();
 
 		scenario("§7.1 案例 A：Kotlin final 参数回溯（正向值比对 + 条件 CAS 不覆盖已赋值）", InitFixOracle::caseA);
 		scenario("§4.3 条件 A/B 均不满足：包级私有源字段 → 阻断", InitFixOracle::caseNonPrivateSource);
@@ -116,11 +116,11 @@ public class InitFixOracle {
 		scenario("§4.4 多根构造器共识：一致放行 / 分歧阻断 / 覆盖不全阻断", InitFixOracle::caseMultiRootConsensus);
 		scenario("§8 P0-2 误杀白名单：Logger 工厂新增静态字段 → 放行", InitFixOracle::caseLoggerWhitelist);
 		scenario("§4.3 Nest 成员二次写入：内部类改源字段 → 阻断", InitFixOracle::caseNestSecondWrite);
-		scenario("§5.3 ClassDiff 合成字段过滤：$nipx$ 标记不入 added*Fields，业务字段仍检出", InitFixOracle::caseInternalMarkerFilter);
+		scenario("§5.3 ClassDiff 合成字段过滤：$remold$ 标记不入 added*Fields，业务字段仍检出", InitFixOracle::caseInternalMarkerFilter);
 		scenario("§4.2 bit 4：ThreadLocal 新增字段可补；读取 ThreadLocal.get() 的切片 → 阻断", InitFixOracle::caseThreadLocal);
 		scenario("§4.2 bit 4/5：可复用缓存字段 + setLength(0) → 阻断；切片内 NEW 的 builder → 放行", InitFixOracle::caseReusableBuilderCache);
 		scenario("§3.2 边界：构造器里的独立语句不进切片（REJECT 边界在哪）", InitFixOracle::caseStatementOutsideSlice);
-		scenario("§1.1 @HotswapReinit：解锁构造器读取 / 强制覆写 / CONDITIONAL 不覆写 / T0 绕过", InitFixOracle::caseHotswapReinit);
+		scenario("§1.1 @RemoldReinit：解锁构造器读取 / 强制覆写 / CONDITIONAL 不覆写 / T0 绕过", InitFixOracle::caseRemoldReinit);
 		scenario("§5.1/§5.2 逐字段驱动：单字段失败不牵连后续字段，依赖失败显式跳过", InitFixOracle::casePerFieldDriver);
 		scenario("§3.2 静态依赖失败必须传播到实例字段：连带跳过并记账", InitFixOracle::caseStaticFailurePropagatesToInstance);
 		scenario("§5.2 失败跳过按实例隔离：单个实例失败不牵连其它实例", InitFixOracle::casePerInstanceSkipIsolation);
@@ -536,19 +536,19 @@ public class InitFixOracle {
 		byte[] forced = AnnotationTransformer.forceStaticLambdas(
 			v2.get(dot), dot.replace('.', '/'), new ByteLoader(v2));
 
-		check(hasField(forced, "$nipx$lambdasForced"),
-			"前置条件：forceStaticLambdas 确实往新字节码里加了 $nipx$ 标记字段");
+		check(hasField(forced, "$remold$lambdasForced"),
+			"前置条件：forceStaticLambdas 确实往新字节码里加了 $remold$ 标记字段");
 
 		ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(v1.get(dot), forced);
 
-		check(!diff.addedStaticFields.contains("$nipx$lambdasForced")
-		      && !diff.addedInstanceFields.contains("$nipx$lambdasForced"),
-			"负向：$nipx$ 标记字段没有进 added*Fields（否则 InitFix 会给它做补丁）");
+		check(!diff.addedStaticFields.contains("$remold$lambdasForced")
+		      && !diff.addedInstanceFields.contains("$remold$lambdasForced"),
+			"负向：$remold$ 标记字段没有进 added*Fields（否则 InitFix 会给它做补丁）");
 		boolean leakedMarker = false;
 		for (String f : diff.changedFields) {
-			if (f.contains("$nipx$")) leakedMarker = true;
+			if (f.contains("$remold$")) leakedMarker = true;
 		}
-		check(!leakedMarker, "负向：$nipx$ 也没进 changedFields");
+		check(!leakedMarker, "负向：$remold$ 也没进 changedFields");
 		check(diff.addedInstanceFields.contains("extra"),
 			"正向：业务新增字段 extra 仍然被检出（过滤没有误杀），实际 addedInstanceFields="
 			+ diff.addedInstanceFields);
@@ -816,7 +816,7 @@ public class InitFixOracle {
 	static final String CASE_T3R_V2 = """
 		package oracle;
 		public class CaseT3 {
-			@remold.annotation.HotswapReinit
+			@remold.annotation.RemoldReinit
 			private final StringBuilder sb = new StringBuilder();
 			public CaseT3() { sb.append("aass"); }
 		}
@@ -895,7 +895,7 @@ public class InitFixOracle {
 		check(r4.patchGenerated(), "CaseT4：不可变类型的新增字段被构造器读取 → 仍然放行（边界是类型敏感的）");
 	}
 
-	// ==================== 场景 14：§1.1 @HotswapReinit ====================
+	// ==================== 场景 14：§1.1 @RemoldReinit ====================
 
 	/** N1：新增 ThreadLocal 缓存 + 构造器里碰过它 —— 场景 13 的 T1 加注解后应当解锁。 */
 	static final String CASE_N1_V1 = """
@@ -908,7 +908,7 @@ public class InitFixOracle {
 	static final String CASE_N1_V2 = """
 		package oracle;
 		public class CaseN1 {
-			@remold.annotation.HotswapReinit
+			@remold.annotation.RemoldReinit
 			private ThreadLocal<StringBuilder> sb = ThreadLocal.withInitial(StringBuilder::new);
 			public CaseN1() { sb.get().append("aass"); }
 		}
@@ -926,7 +926,7 @@ public class InitFixOracle {
 	static final String CASE_N2_V2 = """
 		package oracle;
 		public class CaseN2 {
-			@remold.annotation.HotswapReinit(mode = remold.annotation.HotswapReinit.Mode.OVERWRITE)
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
 			private String tag = "new";
 			public String tag() { return tag; }
 		}
@@ -935,7 +935,7 @@ public class InitFixOracle {
 	static final String CASE_N3_V2 = """
 		package oracle;
 		public class CaseN3 {
-			@remold.annotation.HotswapReinit(mode = remold.annotation.HotswapReinit.Mode.CONDITIONAL)
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.CONDITIONAL)
 			private String tag = "new";
 			public String tag() { return tag; }
 		}
@@ -961,13 +961,13 @@ public class InitFixOracle {
 	static final String CASE_N4_V2 = """
 		package oracle;
 		public class CaseN4 {
-			@remold.annotation.HotswapReinit
+			@remold.annotation.RemoldReinit
 			private int retries = 0;
 			public int retries() { return retries; }
 		}
 		""";
 
-	static void caseHotswapReinit() throws Exception {
+	static void caseRemoldReinit() throws Exception {
 		// ---- N1：注解解锁"新增字段 + 构造器里碰过它" ----
 		Fixture f1 = loadFixture("oracle.CaseN1", CASE_N1_V1, CASE_N1_V2);
 		Object s1 = construct(f1.host);
@@ -977,7 +977,7 @@ public class InitFixOracle {
 		InitFix.PatchReport r1 = f1.transform();
 		expect(r1, false, "sb", InitFix.FieldStatus.ACCEPTED, null);
 		expectWarning(r1, false, "sb", "按线程的值");
-		check(r1.patchGenerated(), "CaseN1：@HotswapReinit 解锁了构造器读取检查，补丁照常生成");
+		check(r1.patchGenerated(), "CaseN1：@RemoldReinit 解锁了构造器读取检查，补丁照常生成");
 		check(agentWarnings.stream().anyMatch(w -> w.contains("CaseN1") && w.contains("热更线程")),
 			"CaseN1：同时打了一条 warn 日志（实测 " + agentWarnings.size() + " 条 warn）");
 		f1.apply();
@@ -2234,7 +2234,7 @@ public class InitFixOracle {
 		byte[] b3 = compile(Map.of(dot, CASE_V_V3)).get(dot);
 
 		Class<?> host = Class.forName(dot, true, new ByteLoader(Map.of(dot, b2)));
-		HotSwapAgent.bytecodeCache.put(dot, b2);
+		RemoldAgent.bytecodeCache.put(dot, b2);
 
 		// ---- 第 1 轮：clean 被拒 → 必须记入台账 ----
 		InitFix.transform(host, b2, ClassDiffUtil.diff(b1, b2));
@@ -2451,7 +2451,7 @@ public class InitFixOracle {
 		} catch (ClassNotFoundException e) {
 			throw new IllegalStateException("Kotlin 夹具加载失败：" + dotName, e);
 		}
-		HotSwapAgent.bytecodeCache.put(dotName, b2);
+		RemoldAgent.bytecodeCache.put(dotName, b2);
 		return new CompiledFixture(new Fixture(dotName, b1, b2, host), oldHost, v2);
 	}
 
@@ -2574,7 +2574,7 @@ public class InitFixOracle {
 	//
 	// javap -c -p 结论（Kotlin 2.3.0，major 69）：
 	//   委托字段 `private static final kotlin.Lazy l$delegate`（ACC_PRIVATE|STATIC|FINAL，
-	//   **非 ACC_SYNTHETIC**，所以不会被 ClassDiffUtil 的合成字段过滤掉；字段名带 $ 但无 $nipx$ 前缀）。
+	//   **非 ACC_SYNTHETIC**，所以不会被 ClassDiffUtil 的合成字段过滤掉；字段名带 $ 但无 $remold$ 前缀）。
 	//   初始化落在 **<clinit>**：
 	//     invokedynamic #0:invoke:()Lkotlin/jvm/functions/Function0;   ← lambda 走 indy，非内部类
 	//     invokestatic kotlin/LazyKt.lazy(Function0)Lazy;
@@ -3041,7 +3041,7 @@ public class InitFixOracle {
 		Class<?> host = Class.forName(dotName, true, new ByteLoader(v2Classes));
 		// 生产环境里 transform 目标的字节码本来就在 bytecodeCache 中（§2.1 "优先读取新版本"），
 		// Nest 成员则走 ClassLoader 资源流兜底。
-		HotSwapAgent.bytecodeCache.put(dotName, v2);
+		RemoldAgent.bytecodeCache.put(dotName, v2);
 		return new Fixture(dotName, v1, v2, host);
 	}
 

@@ -62,7 +62,7 @@ import static remold.MountManager.*;
  *       </ul>
  *   </li>
  *   <li><b>初值纯度审查与补丁装配（InitFix.transform）</b>：
- *       在重定义生效前，{@link remold.ref.InitFix#transform} 针对新增声明字段与标有 {@link remold.annotation.HotswapReinit}
+ *       在重定义生效前，{@link remold.ref.InitFix#transform} 针对新增声明字段与标有 {@link remold.annotation.RemoldReinit}
  *       的字段进行数据依赖切片与纯度安全门审查，生成独立静态方法的 hidden nestmate 伴生类补丁，并在
  *       {@link remold.ref.InitFix#snapshotInstances} 捕获存量实例快照。</li>
  *   <li><b>原子重定义执行（Redefine Execution）</b>：
@@ -132,7 +132,7 @@ public class RemoldAgent {
 	 *   <li>{@code off} —— 完全恢复旧行为：不扫实例、不打日志。</li>
 	 * </ul>
 	 *
-	 * <p>用字符串而非 boolean，是因为将来可能加更多档（如按类注解 {@code @HotswapReinit}），
+	 * <p>用字符串而非 boolean，是因为将来可能加更多档（如按类注解 {@code @RemoldReinit}），
 	 * 那时再加一个值即可，不用再破坏一次属性语义。</p>
 	 */
 	public static String ANON_LAYOUT_GATE = strProp("remold.agent.anon_layout_gate", "reject");
@@ -1628,7 +1628,7 @@ public class RemoldAgent {
 			     + "). Redefine skipped safely: inserting/removing/reordering a same-named local class"
 			     + " shifts their physical numbering, which would silently swap implementations for live"
 			     + " instances. Host and its local/anonymous classes are skipped this round. TO PROCEED:"
-			     + " restart (or make the local class simple name unique), or set -Dnipx.agent."
+			     + " restart (or make the local class simple name unique), or set -Dremold.agent."
 			     + "local_class_guard=warn to force it and accept the mismatch.");
 		}
 		for (String dropped : d.dropped()) dropFromBatch(newBatchBytes, classToPath, dropped);
@@ -1751,7 +1751,7 @@ public class RemoldAgent {
 				     + d.layout().detail() + "). Host " + d.hostName() + " and its anonymous classes are"
 				     + " skipped this round; existing instances keep running the OLD code, so this edit will"
 				     + " NOT take effect for them. TO PROCEED: recreate/restart so the classes load fresh, or"
-				     + " set -Dnipx.agent.layout_gate=warn to force the redefine and accept zeroed/misread"
+				     + " set -Dremold.agent.layout_gate=warn to force the redefine and accept zeroed/misread"
 				     + " fields on surviving instances.");
 				for (String dropped : d.dropped()) dropFromBatch(newBatchBytes, classToPath, dropped);
 				AlignmentTransaction tx = transactions.remove(d.hostName());
@@ -1984,7 +1984,7 @@ public class RemoldAgent {
 		// 直接传入的 jar/zip 文件：立即解压扫描
 		for (Path jar : activeWatchJars) {
 			String stem = jar.getFileName().toString().replaceAll("[^a-zA-Z0-9_-]", "_");
-			Path tmpDir = Paths.get(System.getProperty("java.io.tmpdir"), "nipx-hotswap",
+			Path tmpDir = Paths.get(System.getProperty("java.io.tmpdir"), "remold-hotswap",
 			 stem + "-" + Long.toHexString(CRC64.hashString(jar.toString())));
 			List<Path> outOfSync = new ArrayList<>();
 			try {
@@ -2036,7 +2036,7 @@ public class RemoldAgent {
 						// 对 jar/zip：解压后做 hash 对比，out-of-sync 的类批量加入 pendingChanges
 						Path   absJar = path.toAbsolutePath();
 						String stem   = absJar.getFileName().toString().replaceAll("[^a-zA-Z0-9_-]", "_");
-						Path tmpDir = Paths.get(System.getProperty("java.io.tmpdir"), "nipx-hotswap",
+						Path tmpDir = Paths.get(System.getProperty("java.io.tmpdir"), "remold-hotswap",
 						 stem + "-" + Long.toHexString(CRC64.hashString(absJar.toString())));
 						List<Path> outOfSync = new ArrayList<>();
 						try {
@@ -2139,9 +2139,9 @@ public class RemoldAgent {
 	 */
 	private static void extractJarToTemp(Path jarPath) {
 		try {
-			// 固定路径：<tmpdir>/nipx-hotswap/<stem>-<jarPathHash>
+			// 固定路径：<tmpdir>/remold-hotswap/<stem>-<jarPathHash>
 			String stem = jarPath.getFileName().toString().replaceAll("[^a-zA-Z0-9_-]", "_");
-			Path tmpDir = Paths.get(System.getProperty("java.io.tmpdir"), "nipx-hotswap",
+			Path tmpDir = Paths.get(System.getProperty("java.io.tmpdir"), "remold-hotswap",
 			 stem + "-" + Long.toHexString(CRC64.hashString(jarPath.toString())));
 
 			// 清空旧内容（稳定路径，不删目录本身）

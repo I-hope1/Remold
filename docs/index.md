@@ -113,14 +113,14 @@
 
 ## 1. 系统概述
 
-NipX HotSwap Agent 是一个基于 Java Instrumentation API 的 **热重载框架**。它利用 Java Agent
+Remold Agent 是一个基于 Java Instrumentation API 的 **热重载框架**。它利用 Java Agent
 机制在运行时拦截类的加载和重定义事件，实现目标应用程序代码的零停机更新。整个系统围绕模块化设计构建，涵盖了字节码感知、差异检测、实例追踪和性能分析等多个维度。
 
 ### 1.1 核心能力
 
 | 能力        | 关键类                      | 描述                   |
 |-----------|--------------------------|----------------------|
-| 热重载调度     | `HotSwapAgent`           | 监控文件变化并驱动整个重载流程      |
+| 热重载调度     | `RemoldAgent`           | 监控文件变化并驱动整个重载流程      |
 | 字节码增强     | `MyClassFileTransformer` | 在类加载期间注入追踪和性能分析代码    |
 | 差异检测      | `ClassDiffUtil`          | 精确比较新旧类的结构以决定重载策略    |
 | Lambda 对齐 | `LambdaAligner`          | 解决热交换过程中合成方法名称不匹配的问题 |
@@ -129,7 +129,7 @@ NipX HotSwap Agent 是一个基于 Java Instrumentation API 的 **热重载框�
 
 | 类名                       | 职责                                                              |
 |--------------------------|-----------------------------------------------------------------|
-| `HotSwapAgent`           | Agent 入口点、文件监控、重载调度，是类重定义的核心驱动                                  |
+| `RemoldAgent`           | Agent 入口点、文件监控、重载调度，是类重定义的核心驱动                                  |
 | `MyClassFileTransformer` | `ClassFileTransformer` 的实现，负责在类加载时注入 `@Tracker` 和 `@Profile` 代码 |
 | `ClassDiffUtil`          | 基于 ASM 的字节码级差异分析工具，用于比较字段和方法的增、删、改，识别结构性变化                      |
 | `LambdaAligner`          | Lambda/合成方法名称的对齐器，使用哈希指纹在新旧方法名之间建立映射，以防止 `NoSuchMethodError`    |
@@ -308,7 +308,7 @@ java -XX:+EnableDynamicAgentLoading \
 
 ### 4.2 运行时开关
 
-`HotSwapAgent` 维护以下静态开关，可以根据需要在 Agent 代码中进行调整：
+`RemoldAgent` 维护以下静态开关，可以根据需要在 Agent 代码中进行调整：
 
 | 字段                     | 默认值     | 用途                                      |
 |------------------------|---------|-----------------------------------------|
@@ -317,14 +317,14 @@ java -XX:+EnableDynamicAgentLoading \
 
 ### 4.3 类黑名单
 
-您可以通过调用 `HotSwapAgent.addBlacklist(String prefix)` 将不应处理的类的包前缀添加到黑名单中。这使得 Transformer
+您可以通过调用 `RemoldAgent.addBlacklist(String prefix)` 将不应处理的类的包前缀添加到黑名单中。这使得 Transformer
 直接跳过这些类，避免了不必要的字节码分析开销：
 
 ```java
 void main() {
 	// 在 premain 中或在运行时动态添加
-	HotSwapAgent.addBlacklist("com.thirdparty.legacy");
-	HotSwapAgent.addBlacklist("org.springframework.cglib");
+	RemoldAgent.addBlacklist("com.thirdparty.legacy");
+	RemoldAgent.addBlacklist("org.springframework.cglib");
 }
 ```
 
@@ -382,7 +382,7 @@ void main() {
 - 确认 `.class` 文件确实被写入了受监控的 `watchDir` 目录 (您的 IDE 可能将其输出到不同的路径)。
 - 确保 `ENABLE_HOTSWAP_EVENT` 为 `true`。
 - 如果您添加了新方法或字段，标准 JVM 不支持这种热交换。您需要一个扩展的 JVM，如 DCEVM/HotswapJVM。
-- 检查 `HotSwapAgent.info()` 日志中的 `[DIFF]` 输出，以确认差异检测是否被触发。
+- 检查 `RemoldAgent.info()` 日志中的 `[DIFF]` 输出，以确认差异检测是否被触发。
 
 ### Q2: 热重载后我收到了 `NoSuchMethodError`。如何修复？
 
@@ -428,7 +428,7 @@ void main() {
 void main() {
 	// 读取新的字节码并手动触发重载
 	byte[] newBytes = Files.readAllBytes(Path.of("/path/to/MyClass.class"));
-	HotSwapAgent.redefineClass(MyClass.class, newBytes);
+	RemoldAgent.redefineClass(MyClass.class, newBytes);
 }
 ```
 
@@ -439,7 +439,7 @@ void main() {
 
 ### 7.3 自定义黑名单策略
 
-`isBlacklisted()` 的默认实现使用前缀匹配。如果您需要更复杂的过滤（例如，正则表达式、包含关系），您可以修改 `HotSwapAgent`
+`isBlacklisted()` 的默认实现使用前缀匹配。如果您需要更复杂的过滤（例如，正则表达式、包含关系），您可以修改 `RemoldAgent`
 中的逻辑或提供一个自定义的 `Predicate<String>` 注入到系统中。
 
 > **提示**：建议仅在性能测试或诊断阶段在生产环境中使用 `@Profile`。诊断完成后，移除注解并重新部署，以消除字节码注入带来的微小性能开销。

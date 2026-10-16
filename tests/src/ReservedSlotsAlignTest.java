@@ -1,5 +1,5 @@
 import remold.AnonClassAligner;
-import remold.HotSwapAgent;
+import remold.RemoldAgent;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
@@ -39,8 +39,8 @@ class ReservedSlotsAlignTest {
 		AnonClassAligner.TEST_REVERSE_ORDER = false;
 		AnonClassAligner.MAX_ANON_PER_HOST = 128;
 		AnonClassAligner.ALIGN_TIMEOUT_MS = 2000L;
-		HotSwapAgent.ANON_STRICT = false;
-		HotSwapAgent.ANON_DEBUG = false;
+		RemoldAgent.ANON_STRICT = false;
+		RemoldAgent.ANON_DEBUG = false;
 	}
 
 	// ---------------- 夹具源码（内存 javac）----------------
@@ -197,10 +197,10 @@ class ReservedSlotsAlignTest {
 		assertEquals(legacy.stats.toString(), viaSet.stats.toString(), "空 reserved 下统计必须逐字相同");
 	}
 
-	// ---------------- 4) 接线守卫：HotSwapAgent 必须把挂起快照传进去 -----------------
+	// ---------------- 4) 接线守卫：RemoldAgent 必须把挂起快照传进去 -----------------
 	//
-	// 避让逻辑本身可单测，但"HotSwapAgent 到底有没有传 pendingAlignedClasses 的快照"单测守不住。
-	// 用字节码扫描钉住调用点：必须存在一次 nipx/AnonClassAligner.align 调用，其描述符含
+	// 避让逻辑本身可单测，但"RemoldAgent 到底有没有传 pendingAlignedClasses 的快照"单测守不住。
+	// 用字节码扫描钉住调用点：必须存在一次 remold/AnonClassAligner.align 调用，其描述符含
 	// Ljava/util/Set;（即走了带 reserved 的重载）。与 Scenario 25 的常量池守卫同一思路。
 
 	@Test
@@ -223,7 +223,7 @@ class ReservedSlotsAlignTest {
 			}
 		}
 		assertTrue(callsWithSet,
-			"接线守卫：HotSwapAgent 必须调用带 reserved(Set) 的 align 重载，否则挂起编号避让不会被触发");
+			"接线守卫：RemoldAgent 必须调用带 reserved(Set) 的 align 重载，否则挂起编号避让不会被触发");
 	}
 
 	private static byte[] ownClassBytes(Class<?> c) throws Exception {

@@ -20,7 +20,7 @@ public class ArcHotswapPlugin implements HotswapPlugin {
 
 	@Override
 	public void onAgentInit(Instrumentation inst) {
-		// 触碰 UpdateRef 与 CellPropertyRef，确保其静态块被执行（向 HotSwapAgent 显式注册）
+		// 触碰 UpdateRef 与 CellPropertyRef，确保其静态块被执行（向 RemoldAgent 显式注册）
 		try {
 			Class.forName(UpdateRef.class.getName());
 			Class.forName(CellPropertyRef.class.getName());

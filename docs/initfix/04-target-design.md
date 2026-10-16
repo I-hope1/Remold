@@ -46,7 +46,7 @@
 **当前现状**
 - 补丁只重放字段初始化式，构造器里的其它语句不会为存量实例重放。
 - 新增字段在构造器里被使用（如 `sb.get().append("aass")`）：默认拒绝，存量实例保持默认值（漏补而非误补）。
-- 用 `@HotswapReinit` 豁免后放行，但会 warn 并写入 `FieldDecision.warnings`。
+- 用 `@RemoldReinit` 豁免后放行，但会 warn 并写入 `FieldDecision.warnings`。
 
 **已知边界**：堆遍历抓到其他线程正在运行 `<init>` 且尚未赋值 final 源字段的对象，可能算出非预期初值。此类依赖参数回溯的字段应在报告中标为已知风险。
 
@@ -61,7 +61,7 @@
 | P0   | 参数不可变校验、黑名单/白名单效应防御、`unsafeReason` 透传与 `NOTHING_TO_PATCH`、合成字段过滤、差分 Oracle 流水线                                          |           已完成           |
 | P0.5 | 前置微验证（见下）                                                                                                                                         | 未开始，是 P1 两阶段的门槛 |
 | P1   | 伴生类每字段独立方法 + `PatchDriver`（已完成）；`FieldLedger`（已完成）；两阶段协议与 `ABORT_ON_FATAL`（待 P0.5）；Analyzer 库化                           |           进行中           |
-| P2   | 8 位效应掩码与局部逃逸分析（部分提前落地）；`@HotswapInit`（未做；`@HotswapReinit` 字段级覆写已提前落地）；字段组原子性（`ALL_OR_NOTHING`、`@FieldGroup`） |            部分            |
+| P2   | 8 位效应掩码与局部逃逸分析（部分提前落地）；`@HotswapInit`（未做；`@RemoldReinit` 字段级覆写已提前落地）；字段组原子性（`ALL_OR_NOTHING`、`@FieldGroup`） |            部分            |
 | P3   | 构造器尾部插桩；伴生类 CAS 迁移到 JDK 21+ JEP 471 的 `VarHandle.compareAndSet`                                                                             |           未开始           |
 
 **P0.5 前置验证项**

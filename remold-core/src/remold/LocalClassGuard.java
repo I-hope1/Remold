@@ -26,7 +26,7 @@ import java.util.TreeMap;
  * {@code (EnclosingMethod.owner, innerName)} 归并；**新旧任一侧**出现同名计数 ≥2 即命中。
  * 带宽严的判定：{@link ClassNode#outerClass} 缺失（例如手工字节码）一律不视为局部类，不触发。</p>
  *
- * <p>本类是纯逻辑，无副作用；接线（取字节、执行移出、回滚事务）在 {@code HotSwapAgent}。</p>
+ * <p>本类是纯逻辑，无副作用；接线（取字节、执行移出、回滚事务）在 {@code RemoldAgent}。</p>
  */
 public final class LocalClassGuard {
 

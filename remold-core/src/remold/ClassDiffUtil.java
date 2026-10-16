@@ -278,8 +278,8 @@ public final class ClassDiffUtil {
 	 * <p>热更管线自己往类里塞的字段不是业务变更，必须从 Diff 里剔除，否则会被
 	 * {@code InitFix} 当成"新增字段"去做字段初始化补丁：</p>
 	 * <ul>
-	 *   <li><b>{@code $nipx$} 前缀</b>：{@code AnnotationTransformer.forceStaticLambdas}
-	 *       的幂等标记字段 {@code $nipx$lambdasForced}；</li>
+	 *   <li><b>{@code $remold$} 前缀</b>：{@code AnnotationTransformer.forceStaticLambdas}
+	 *       的幂等标记字段 {@code $remold$lambdasForced}；</li>
 	 *   <li><b>{@code ACC_SYNTHETIC}</b>：javac / Kotlin 生成的
 	 *       {@code this$0}、{@code $stable} 之类内部字段。</li>
 	 * </ul>
@@ -290,7 +290,7 @@ public final class ClassDiffUtil {
 	 */
 	private static boolean isInternalMarkerField(FieldNode f) {
 		return (f.access & Opcodes.ACC_SYNTHETIC) != 0
-		       || (f.name != null && f.name.startsWith("$nipx$"));
+		       || (f.name != null && f.name.startsWith("$remold$"));
 	}
 
 	/**
@@ -344,7 +344,7 @@ public final class ClassDiffUtil {
 	 *                  !Fields:   [+ newField, - oldField]
 	 */
 	static void logDiff(String className, ClassDiffUtil.ClassDiff diff) {
-		HotSwapAgent.log(className + " is " + (diff.hasChange() ? "Changed" : "Unchanged"));
+		RemoldAgent.log(className + " is " + (diff.hasChange() ? "Changed" : "Unchanged"));
 		// 如果没有任何变更，直接返回不输出日志
 		if (!diff.hasChange()) return;
 
@@ -360,8 +360,8 @@ public final class ClassDiffUtil {
 		appendIfNotEmpty(sb, " -Removed:  ", diff.removedMethods);
 		appendIfNotEmpty(sb, " !Fields:   ", diff.changedFields);
 
-		// 通过HotSwapAgent输出日志
-		HotSwapAgent.info(sb.toString());
+		// 通过RemoldAgent输出日志
+		RemoldAgent.info(sb.toString());
 	}
 
 	/** 系统换行符常量，避免重复调用System.lineSeparator() */

@@ -1,6 +1,6 @@
 import remold.AnonClassAligner;
 import remold.AnnotationTransformer;
-import remold.HotSwapAgent;
+import remold.RemoldAgent;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -56,9 +56,9 @@ public class LiveDcevmTest {
 	public static void main(String[] args) throws Exception {
 		System.out.println("=== LiveDcevmTest: 真实 JBR-21 (21.0.9+1) DCEVM 端到端实测套件 ===");
 
-		Instrumentation inst = HotSwapAgent.getInstrumentation();
+		Instrumentation inst = RemoldAgent.getInstrumentation();
 		if (inst == null || !inst.isRedefineClassesSupported()) {
-			System.out.println("   [SKIP] 当前 JVM 不支持增强类重定义或未挂载 HotSwapAgent，跳过 E2E 测试。");
+			System.out.println("   [SKIP] 当前 JVM 不支持增强类重定义或未挂载 RemoldAgent，跳过 E2E 测试。");
 			return;
 		}
 
@@ -335,7 +335,7 @@ public class LiveDcevmTest {
 		check("live/LiveSubject$4".equals(r1.renameMap.get("live/LiveSubject$1")), "轮次 1: 新增类 Other($1) 分配空闲号 $4");
 
 		// 事务建立与乐观前置登记 (preRegister)
-		HotSwapAgent.AlignmentTransaction tx1 = new HotSwapAgent.AlignmentTransaction("live.LiveSubject");
+		RemoldAgent.AlignmentTransaction tx1 = new RemoldAgent.AlignmentTransaction("live.LiveSubject");
 		for (String targetName : Arrays.asList("live/LiveSubject$3", "live/LiveSubject$4")) {
 			byte[] b = r1.alignedAnonClasses.get(targetName);
 			tx1.pendingAdds.put(targetName, b);
@@ -375,9 +375,9 @@ public class LiveDcevmTest {
 		inst.redefineClasses(dHost, d1, d2);
 		tx1.commit();
 
-		HotSwapAgent.bytecodeCache.put("live.LiveSubject", r1.alignedHostBytes);
-		HotSwapAgent.bytecodeCache.put("live.LiveSubject$1", r1.alignedAnonClasses.get("live/LiveSubject$1"));
-		HotSwapAgent.bytecodeCache.put("live.LiveSubject$2", r1.alignedAnonClasses.get("live/LiveSubject$2"));
+		RemoldAgent.bytecodeCache.put("live.LiveSubject", r1.alignedHostBytes);
+		RemoldAgent.bytecodeCache.put("live.LiveSubject$1", r1.alignedAnonClasses.get("live/LiveSubject$1"));
+		RemoldAgent.bytecodeCache.put("live.LiveSubject$2", r1.alignedAnonClasses.get("live/LiveSubject$2"));
 
 		concurrentTask.get(5, TimeUnit.SECONDS);
 		concurrentLoaderPool.shutdown();
@@ -422,7 +422,7 @@ public class LiveDcevmTest {
 		// 第二轮热更的旧侧必须严格从 bytecodeCache 读取（验证登记即写缓存机制）
 		Map<String, byte[]> oldAnonFromCache = new HashMap<>();
 		for (String k : Arrays.asList("live.LiveSubject$1", "live.LiveSubject$2", "live.LiveSubject$3", "live.LiveSubject$4")) {
-			byte[] b = HotSwapAgent.bytecodeCache.get(k);
+			byte[] b = RemoldAgent.bytecodeCache.get(k);
 			check(b != null, "轮次 2 旧侧从 bytecodeCache 成功读取 " + k);
 			oldAnonFromCache.put(k.replace('.', '/'), b);
 		}
@@ -435,7 +435,7 @@ public class LiveDcevmTest {
 		check("live/LiveSubject$5".equals(r2.renameMap.get("live/LiveSubject$1")), "轮次 2: 全新头部类 Header 分配空闲号 $5");
 
 		// 前置登记未加载类 $5
-		HotSwapAgent.AlignmentTransaction tx2 = new HotSwapAgent.AlignmentTransaction("live.LiveSubject");
+		RemoldAgent.AlignmentTransaction tx2 = new RemoldAgent.AlignmentTransaction("live.LiveSubject");
 		tx2.pendingAdds.put("live/LiveSubject$5", r2.alignedAnonClasses.get("live/LiveSubject$5"));
 		tx2.cacheUpdates.put("live.LiveSubject$5", r2.alignedAnonClasses.get("live/LiveSubject$5"));
 		tx2.preRegister();

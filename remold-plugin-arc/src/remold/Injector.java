@@ -22,13 +22,13 @@ import static remold.RemoldAgent.*;
 public class Injector {
 	static final String CL_ELEMENT = "arc/scene/Element";
 	public static void redefineOneClass(Class<?> theClass, byte[] bytes) {
-		HotSwapAgent.enterInternalRedefine(Collections.singleton(theClass.getName()));
+		RemoldAgent.enterInternalRedefine(Collections.singleton(theClass.getName()));
 		try {
 			inst.redefineClasses(new ClassDefinition(theClass, bytes));
 		} catch (Exception e) {
 			throw new RuntimeException(e);
 		} finally {
-			HotSwapAgent.exitInternalRedefine();
+			RemoldAgent.exitInternalRedefine();
 		}
 	}
 	public static void redefineTask(Class<?> clazz, String methodName, String lambdaType) {
@@ -57,13 +57,13 @@ public class Injector {
 		for (ClassDefinition task : tasks) {
 			targetNames.add(task.getDefinitionClass().getName());
 		}
-		HotSwapAgent.enterInternalRedefine(targetNames);
+		RemoldAgent.enterInternalRedefine(targetNames);
 		try {
 			inst.redefineClasses(tasks.toArray(new ClassDefinition[0]));
 		} catch (ClassNotFoundException | UnmodifiableClassException e) {
 			throw new RuntimeException(e);
 		} finally {
-			HotSwapAgent.exitInternalRedefine();
+			RemoldAgent.exitInternalRedefine();
 			todos.clear();
 		}
 	}

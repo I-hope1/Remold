@@ -30,11 +30,11 @@ import java.util.*;
  * <p><b>分工与局部类防护</b>：
  * <ul>
  *   <li><b>匿名类合成字段</b>：由本门作为谓词包装在 {@link AnonClassAligner}（Tier 4 配对前）接入
- *       （受 {@link HotSwapAgent#ANON_LAYOUT_GATE} 控制）；</li>
- *   <li><b>具名类/用户显式字段</b>：在重定义层由 {@link HotSwapAgent} 接入 {@link #checkRedefine}
- *       （受 {@link HotSwapAgent#LAYOUT_GATE} 控制）；</li>
+ *       （受 {@link RemoldAgent#ANON_LAYOUT_GATE} 控制）；</li>
+ *   <li><b>具名类/用户显式字段</b>：在重定义层由 {@link RemoldAgent} 接入 {@link #checkRedefine}
+ *       （受 {@link RemoldAgent#LAYOUT_GATE} 控制）；</li>
  *   <li><b>局部类（{@code Foo$1Local}）</b>：局部类不进匿名类对齐器，其编号漂移已由独立的
- *       {@link LocalClassGuard}（受 {@link HotSwapAgent#LOCAL_CLASS_GUARD} 控制）进行防御。</li>
+ *       {@link LocalClassGuard}（受 {@link RemoldAgent#LOCAL_CLASS_GUARD} 控制）进行防御。</li>
  * </ul>
  * </p>
  *
@@ -287,7 +287,7 @@ public final class LayoutGate {
 		return false;
 	}
 
-	/** 命名常量：默认模式。{@code warn}/{@code off} 见 {@code HotSwapAgent.ANON_LAYOUT_GATE}。 */
+	/** 命名常量：默认模式。{@code warn}/{@code off} 见 {@code RemoldAgent.ANON_LAYOUT_GATE}。 */
 	public static final String MODE_REJECT = "reject";
 	public static final String MODE_WARN   = "warn";
 	public static final String MODE_OFF    = "off";

@@ -31,7 +31,7 @@ Class），其物理类名只能被源码上与之对应的新版本实现重定
 该不变量依靠以下三条机制共同保证：
 
 1. **废除物理名盲配**：历史 Tier 5（按名字盲配）被彻底废除，前 4 层未匹配一律判为"新类/孤儿"而非"沿用旧物理槽位"。
-2. **孤儿类保留（Orphan Retain）**：未匹配的旧类进入 `orphanOldClasses`，在 `HotSwapAgent.processChanges`
+2. **孤儿类保留（Orphan Retain）**：未匹配的旧类进入 `orphanOldClasses`，在 `RemoldAgent.processChanges`
    中被显式跳过重定义，存活实例继续执行旧逻辑以维持语义连续性。
 3. **安全新名分配与初次加载拦截**：新类一律分配 **未被占用**的编号，随后通过 `pendingAlignedClasses`
    登记，在类加载器首次加载时拦截并提供对齐字节码。

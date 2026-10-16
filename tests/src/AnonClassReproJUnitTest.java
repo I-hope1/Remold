@@ -1,6 +1,6 @@
 import remold.AnonClassAligner;
 import remold.AnnotationTransformer;
-import remold.HotSwapAgent;
+import remold.RemoldAgent;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -91,9 +91,9 @@ class AnonClassReproJUnitTest {
 			AnonClassAligner.TEST_REVERSE_ORDER,
 			AnonClassAligner.MAX_ANON_PER_HOST,
 			AnonClassAligner.ALIGN_TIMEOUT_MS,
-			HotSwapAgent.ANON_STRICT,
-			HotSwapAgent.ANON_LAYOUT_GATE,
-			HotSwapAgent.ANON_DEBUG,
+			RemoldAgent.ANON_STRICT,
+			RemoldAgent.ANON_LAYOUT_GATE,
+			RemoldAgent.ANON_DEBUG,
 			AnonClassReproTest.FIXTURE_JDK_MAJOR,
 		};
 		// 快照后再置默认：参数化测试会在方法体内改成参数值，@AfterEach 用快照还原，
@@ -104,7 +104,7 @@ class AnonClassReproJUnitTest {
 		// 逻辑，不是机器速度；只有专测超时的 Scenario 21 自己把 ALIGN_TIMEOUT_MS 调小。
 		AnonClassAligner.ALIGN_TIMEOUT_MS = Long.MAX_VALUE;
 		AnnotationTransformer.pendingAlignedClasses.clear();
-		HotSwapAgent.bytecodeCache.clear();
+		RemoldAgent.bytecodeCache.clear();
 	}
 
 	@AfterEach
@@ -112,12 +112,12 @@ class AnonClassReproJUnitTest {
 		AnonClassAligner.TEST_REVERSE_ORDER = (Boolean) snap[0];
 		AnonClassAligner.MAX_ANON_PER_HOST = (Integer) snap[1];
 		AnonClassAligner.ALIGN_TIMEOUT_MS   = (Long)    snap[2];
-		HotSwapAgent.ANON_STRICT            = (Boolean) snap[3];
-		HotSwapAgent.ANON_LAYOUT_GATE       = (String)  snap[4];
-		HotSwapAgent.ANON_DEBUG             = (Boolean) snap[5];
+		RemoldAgent.ANON_STRICT            = (Boolean) snap[3];
+		RemoldAgent.ANON_LAYOUT_GATE       = (String)  snap[4];
+		RemoldAgent.ANON_DEBUG             = (Boolean) snap[5];
 		AnonClassReproTest.FIXTURE_JDK_MAJOR = (Integer) snap[6];
 		AnnotationTransformer.pendingAlignedClasses.clear();
-		HotSwapAgent.bytecodeCache.clear();
+		RemoldAgent.bytecodeCache.clear();
 	}
 
 	private void expect(int pass) { expect(pass, 0); }

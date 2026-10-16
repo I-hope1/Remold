@@ -45,7 +45,7 @@
 
 ## D6. 拒绝告警出口收敛到一处
 
-**问题**：闭包期的拒绝（后续加工、依赖、成环、根构造器覆盖不全、指纹不一致）历史上只调 `log(...)`，而 `log` 受 `DEBUG` 门控（`HotSwapAgent.DefaultLogger.log`），默认环境下什么都不打印。
+**问题**：闭包期的拒绝（后续加工、依赖、成环、根构造器覆盖不全、指纹不一致）历史上只调 `log(...)`，而 `log` 受 `DEBUG` 门控（`RemoldAgent.DefaultLogger.log`），默认环境下什么都不打印。
 
 **决定**：`transform` 在 `buildPatch` 返回后统一遍历 `PatchReport`，对全部 `REJECTED` 按原因聚合发 `warn`。静默的保守与静默的错误同样难排查。
 
@@ -55,7 +55,7 @@
 
 **决定**：局部集合只继承静态侧失败；全局集合仅用于计数与记账；`InstanceFailureBudget` 每字段每轮 8 次配额，不跨轮累积。
 
-## D8. `@HotswapReinit` 不豁免切片安全门
+## D8. `@RemoldReinit` 不豁免切片安全门
 
 覆写只改变"要不要写"，改变不了"表达式能否被直线提取、读到的值是否正确"。因此它豁免 T0 与后续加工检查，但**不是**"信任通道"。Kotlin 分支类表达式的正解是 `@HotswapInit`（T4 逃生口设计，见路线图）。
 

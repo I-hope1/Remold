@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * 布局门<b>接线</b>的 JUnit 断言（§7.2 风险 1 的重定义层）。
  *
  * <p>与 {@code LayoutGateAssert} 的分工：那边守"规则表 + changedFields 格式对接"；本类守
- * {@link HotSwapAgent#decideLayout} 这个纯函数 —— 它把接线里最易错的部分（取哪份字节、
+ * {@link RemoldAgent#decideLayout} 这个纯函数 —— 它把接线里最易错的部分（取哪份字节、
  * 拒绝要带哪些类、off/skip/waive 三个出口、存活实例分级）抽了出来，可脱离 Instrumentation 单测。</p>
  *
  * <p>调用位置（必须在 {@code applyRedefinitions} 之前）不在本类覆盖范围内，属已知缺口。</p>

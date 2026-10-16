@@ -1,6 +1,6 @@
 package remold.profiler;
 
-import remold.HotSwapAgent;
+import remold.RemoldAgent;
 import org.objectweb.asm.*;
 
 import java.lang.instrument.*;
@@ -11,18 +11,18 @@ public class DynamicProfilerAPI {
 
 	public static void init() {
 		try {
-			Instrumentation inst = HotSwapAgent.getInst();
+			Instrumentation inst = RemoldAgent.getInst();
 			inst.addTransformer(transformer, true);
 		} catch (Throwable t) {
-			HotSwapAgent.error("Failed to initialize DynamicProfilerAPI", t);
+			RemoldAgent.error("Failed to initialize DynamicProfilerAPI", t);
 		}
 	}
 	static void loadWalker() throws Exception {
-		Instrumentation inst   = HotSwapAgent.getInst();
+		Instrumentation inst   = RemoldAgent.getInst();
 		Class<?>        Walker = Class.forName("java.lang.StackStreamFactory$AbstractStackWalker");
-		byte[]          bytes  = HotSwapAgent.fetchOriginalBytecode(Walker);
+		byte[]          bytes  = RemoldAgent.fetchOriginalBytecode(Walker);
 		if (bytes == null) {
-			HotSwapAgent.error("Failed to fetch original bytecode for " + Walker.getName());
+			RemoldAgent.error("Failed to fetch original bytecode for " + Walker.getName());
 			return;
 		}
 		ClassReader cr = new ClassReader(bytes);
@@ -35,7 +35,7 @@ public class DynamicProfilerAPI {
 				// 目标：精准打击 checkState 方法
 				// 它的签名通常是 void checkState() -> ()V
 				if ("checkState".equals(name) && "()V".equals(descriptor)) {
-					HotSwapAgent.info("Clear " + Walker.getName() + "#checkState()");
+					RemoldAgent.info("Clear " + Walker.getName() + "#checkState()");
 					return new MethodVisitor(Opcodes.ASM9, mv) {
 						@Override
 						public void visitCode() {
@@ -56,11 +56,11 @@ public class DynamicProfilerAPI {
 			}
 		}, 0);
 		bytes = cw.toByteArray();
-		HotSwapAgent.enterInternalRedefine(Collections.singleton(Walker.getName()));
+		RemoldAgent.enterInternalRedefine(Collections.singleton(Walker.getName()));
 		try {
 			inst.redefineClasses(new ClassDefinition(Walker, bytes));
 		} finally {
-			HotSwapAgent.exitInternalRedefine();
+			RemoldAgent.exitInternalRedefine();
 		}
 
 		StackWalker internalWalker = StackWalker.getInstance(
@@ -93,7 +93,7 @@ public class DynamicProfilerAPI {
 		}
 		// 获取所有已加载的子类并重转换
 		List<Class<?>>  toRetransform = new ArrayList<>();
-		Instrumentation inst          = HotSwapAgent.getInst();
+		Instrumentation inst          = RemoldAgent.getInst();
 		for (Class<?> clazz : inst.getAllLoadedClasses()) {
 			if (baseClass.isAssignableFrom(clazz) && !clazz.isInterface() && inst.isModifiableClass(clazz)) {
 				toRetransform.add(clazz);
@@ -102,9 +102,9 @@ public class DynamicProfilerAPI {
 
 		try {
 			inst.retransformClasses(toRetransform.toArray(new Class[0]));
-			HotSwapAgent.info("Retransformed " + toRetransform.size() + " classes for " + methodName);
+			RemoldAgent.info("Retransformed " + toRetransform.size() + " classes for " + methodName);
 		} catch (Exception e) {
-			HotSwapAgent.error("Retransform failed", e);
+			RemoldAgent.error("Retransform failed", e);
 		}
 	}
 

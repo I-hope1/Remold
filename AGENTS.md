@@ -7,7 +7,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 
 - 只处理本次 Redefine **新增声明的字段**（存量实例 + 静态）。
 - 禁止实现：修改已有字段初值、删除字段、修改方法签名、动态修改字段描述符类型。
-- 唯一例外：字段标 `@HotswapReinit(mode = OVERWRITE)` 时，才允许覆写存量值。
+- 唯一例外：字段标 `@RemoldReinit(mode = OVERWRITE)` 时，才允许覆写存量值。
 - Android ART 与 `$extras` 扩展槽属于独立子项目（Engine II），不在此处理。
 - 运行时前提：
   - JBR 17/21+：`Lookup.defineHiddenClass`（NESTMATE）+ `jdk.internal.misc.Unsafe`
@@ -57,7 +57,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 台账 | `InitFix.LEDGER`、`getUnpatchedFields` |
 | 逐实例驱动 | `runDependentInstanceTasks` / `runIndependentInstanceTasks`、`InstanceFailureBudget` |
 | 写入桥 | `HotswapBridge`（`KIND_CONDITIONAL` / `KIND_FORCE`） |
-| 注解 | `remold.annotation.HotswapReinit` |
+| 注解 | `remold.annotation.RemoldReinit` |
 | 合成字段过滤 | `ClassDiffUtil.isInternalMarkerField` |
 | 堆实例检索（Native） | `LibTool.getInstances` |
 | 匿名类与局部类安全门 | `AnonClassAligner`、`LayoutGate`、`LocalClassGuard` |
@@ -81,7 +81,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 参数回溯不可变证明 / 多根构造器共识 | ✅ | 条件 A（final）与条件 B（NestView 单写证明）；全根构造器指纹 100% 一致 |
 | 伴生补丁类 / 逐实例驱动与失败配额 | ✅ | 独立静态方法隔离；按实例隔离；单字段失败配额封顶 8 次 |
 | 条件 CAS 写入与跳过报告 | 🔶 | 默认条件 CAS；float/double 走 raw bits（JDK 8 raw bits 缺自动化 CI 差异验证）；跳过计数汇总报告 |
-| `@HotswapReinit` 存量覆写 | ✅ | 豁免 T0 与后续加工检查；不豁免切片安全门 |
+| `@RemoldReinit` 存量覆写 | ✅ | 豁免 T0 与后续加工检查；不豁免切片安全门 |
 | Native JVMTI 堆遍历 (`LibTool`) | ✅ | C++ 底座；Tag 隔离与全局互斥；`InstanceTracker` 字节码回退 |
 | 两阶段重定义 / 构造器插桩 / 跨类拓扑 | ⬜ | 路线图设计（见 `docs/initfix/04-target-design.md`） |
 | 真实 kotlinc 产物验证 | 🔶 | `object` 单例与 `trim` 家族已验证；其它 Kotlin 行为仅经仿真验证 |
@@ -108,7 +108,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 |:--|:--|
 | 判决分层、效应检查、参数回溯、已知限制、单例与 Kotlin 字节码事实、测试夹具机制 | `docs/initfix/01-safety-gate.md` |
 | 依赖闭包、成环、台账、失败策略 | `docs/initfix/02-closure-and-ledger.md` |
-| 补丁驱动、写入协议、`@HotswapReinit` | `docs/initfix/03-runtime-driver.md` |
+| 补丁驱动、写入协议、`@RemoldReinit` | `docs/initfix/03-runtime-driver.md` |
 | 两阶段、基线指纹、构造器插桩、目标设计路线图 | `docs/initfix/04-target-design.md` |
 | JVMTI 堆遍历 | `docs/initfix/05-jvmti-heap.md` |
 | 为什么这么设计、历史缺陷 | `docs/initfix/06-decisions.md` |

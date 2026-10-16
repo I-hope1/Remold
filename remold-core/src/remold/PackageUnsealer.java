@@ -32,7 +32,7 @@ public class PackageUnsealer {
 				sealBaseDirectVh = lookup.findVarHandle(Package.class, "sealBase", URL.class);
 			}
 		} catch (Throwable t) {
-			HotSwapAgent.error("[PackageUnsealer] Failed to initialize VarHandles.", t);
+			RemoldAgent.error("[PackageUnsealer] Failed to initialize VarHandles.", t);
 		}
 		VERSION_INFO_VH = versionInfoVh;
 		SEAL_BASE_VH = sealBaseVh;
@@ -47,16 +47,16 @@ public class PackageUnsealer {
 				Object versionInfo = VERSION_INFO_VH.get(pkg);
 				if (versionInfo != null) {
 					SEAL_BASE_VH.set(versionInfo, null);
-					if (HotSwapAgent.DEBUG) HotSwapAgent.info("[PackageUnsealer] Unsealed package: " + pkg.getName());
+					if (RemoldAgent.DEBUG) RemoldAgent.info("[PackageUnsealer] Unsealed package: " + pkg.getName());
 					return true;
 				}
 			} else if (SEAL_BASE_DIRECT_VH != null) {
 				SEAL_BASE_DIRECT_VH.set(pkg, null);
-				if (HotSwapAgent.DEBUG) HotSwapAgent.info("[PackageUnsealer] Unsealed package: " + pkg.getName());
+				if (RemoldAgent.DEBUG) RemoldAgent.info("[PackageUnsealer] Unsealed package: " + pkg.getName());
 				return true;
 			}
 		} catch (Throwable t) {
-			HotSwapAgent.error("[PackageUnsealer] Failed to unseal package: " + pkg.getName(), t);
+			RemoldAgent.error("[PackageUnsealer] Failed to unseal package: " + pkg.getName(), t);
 		}
 		return false;
 	}

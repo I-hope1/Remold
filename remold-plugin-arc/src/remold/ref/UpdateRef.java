@@ -11,7 +11,7 @@ import arc.scene.ui.TextField.TextFieldValidator;
 import arc.scene.ui.layout.Cell;
 import arc.scene.utils.Disableable;
 import arc.struct.*;
-import remold.HotSwapAgent;
+import remold.RemoldAgent;
 import remold.Reflect;
 import sun.misc.Unsafe;
 
@@ -69,7 +69,7 @@ public class UpdateRef {
 		} catch (Throwable t) {
 			throw new ExceptionInInitializerError(t);
 		}
-		HotSwapAgent.addOrphanBreaker((className, methodName) ->
+		RemoldAgent.addOrphanBreaker((className, methodName) ->
 			UpdateRef.class.getName().equals(className) && methodName.startsWith("run")
 		);
 	}
@@ -1268,19 +1268,19 @@ public class UpdateRef {
 			updateField = Element.class.getDeclaredField("update");
 			updateField.setAccessible(true);
 		} catch (Throwable t) {
-			HotSwapAgent.error("[UpdateRef] Failed to reflect Element.update field: " + t.getMessage(), t);
+			RemoldAgent.error("[UpdateRef] Failed to reflect Element.update field: " + t.getMessage(), t);
 		}
 		try {
 			disabledField = Button.class.getDeclaredField("disabledProvider");
 			disabledField.setAccessible(true);
 		} catch (Throwable t) {
-			HotSwapAgent.error("[UpdateRef] Failed to reflect Button.disabledProvider field: " + t.getMessage(), t);
+			RemoldAgent.error("[UpdateRef] Failed to reflect Button.disabledProvider field: " + t.getMessage(), t);
 		}
 		try {
 			tfListenerField = TextField.class.getDeclaredField("listener");
 			tfListenerField.setAccessible(true);
 		} catch (Throwable t) {
-			HotSwapAgent.error("[UpdateRef] Failed to reflect TextField.listener field: " + t.getMessage(), t);
+			RemoldAgent.error("[UpdateRef] Failed to reflect TextField.listener field: " + t.getMessage(), t);
 		}
 		ELEMENT_UPDATE_FIELD = updateField;
 		BUTTON_DISABLED_PROVIDER_FIELD = disabledField;
@@ -1904,7 +1904,7 @@ public class UpdateRef {
 		} catch (Throwable t) {
 			if (!flushFailLogged) {
 				flushFailLogged = true;
-				HotSwapAgent.error("[UpdateRef] Core.app.post failed, will retry on next trigger: " + t.getMessage(), t);
+				RemoldAgent.error("[UpdateRef] Core.app.post failed, will retry on next trigger: " + t.getMessage(), t);
 			}
 		}
 	}
@@ -2002,7 +2002,7 @@ public class UpdateRef {
 	public static <T> void eventsOn(Class<T> type, Cons<T> listener, ObjectMap<Object, Seq<Cons<?>>> map) {
 		if (listener == null) return;
 		if (map == null) {
-			HotSwapAgent.error("[UpdateRef] eventsOn: Events.events registry map is null! Failed to register event listener for: " + type);
+			RemoldAgent.error("[UpdateRef] eventsOn: Events.events registry map is null! Failed to register event listener for: " + type);
 			throw new IllegalStateException("[UpdateRef] Events.events registry map is null");
 		}
 		if (eventsMap != map) eventsMap = map;
@@ -2055,7 +2055,7 @@ public class UpdateRef {
 	public static void eventsRun(Object type, Runnable listener, ObjectMap<Object, Seq<Cons<?>>> map) {
 		if (listener == null) return;
 		if (map == null) {
-			HotSwapAgent.error("[UpdateRef] eventsRun: Events.events registry map is null! Failed to register event listener for: " + type);
+			RemoldAgent.error("[UpdateRef] eventsRun: Events.events registry map is null! Failed to register event listener for: " + type);
 			throw new IllegalStateException("[UpdateRef] Events.events registry map is null");
 		}
 		if (eventsMap != map) eventsMap = map;
@@ -2449,7 +2449,7 @@ public class UpdateRef {
 		try {
 			r.run();
 		} catch (Throwable t) {
-			HotSwapAgent.error("[UpdateRef] onRemove failed: " + t.getMessage(), t);
+			RemoldAgent.error("[UpdateRef] onRemove failed: " + t.getMessage(), t);
 		}
 	}
 
@@ -2466,7 +2466,7 @@ public class UpdateRef {
 		if (!isHotSwapLinkageError(e)) {
 			throw e;
 		}
-		HotSwapAgent.error("[UpdateRef] LinkageError (" + e.getClass().getSimpleName() + ") from "
+		RemoldAgent.error("[UpdateRef] LinkageError (" + e.getClass().getSimpleName() + ") from "
 		                   + (f == null ? "?" : f.getClass().getName()) + ": " + e.getMessage(), e);
 		clearFn();
 		triggerRemove();

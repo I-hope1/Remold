@@ -24,7 +24,7 @@ import static remold.RemoldAgent.log;
  * Hotswap 时初始化修复器（InitFix）。
  *
  * <p>为热更新（Redefine）后<b>新增声明的字段</b>（存量实例 + 静态环境）以及标有
- * {@link remold.annotation.HotswapReinit} 的已有字段补全初始化值的核心系统。
+ * {@link remold.annotation.RemoldReinit} 的已有字段补全初始化值的核心系统。
  * 设计文档参见 {@code docs/initfix/} 目录系列文档；实现状态参见 {@code docs/status.md} 与 {@code AGENTS.md}。</p>
  *
  * <h2>五条核心不变量（任何改动均不得破坏）</h2>
@@ -87,8 +87,8 @@ import static remold.RemoldAgent.log;
  *   <li><b>逐实例驱动</b>：依赖失败按实例隔离；单字段每轮实例失败配额封顶为 8 次（{@link #MAX_INSTANCE_FAILURES_PER_FIELD}）。</li>
  *   <li><b>写入桥（{@link HotswapBridge}）</b>：默认使用条件 CAS（{@link HotswapBridge#KIND_CONDITIONAL}），
  *       float/double 统一走 raw bits CAS；跳过计数通过 {@code filterReturnValue} 汇总汇报；
- *       {@link remold.annotation.HotswapReinit.Mode#OVERWRITE} 走强制无条件写（{@link HotswapBridge#KIND_FORCE}）。</li>
- *   <li><b>合成标记字段过滤</b>：由 {@link ClassDiffUtil} 对称过滤 {@code ACC_SYNTHETIC} 与 {@code $nipx$} 前缀字段。</li>
+ *       {@link remold.annotation.RemoldReinit.Mode#OVERWRITE} 走强制无条件写（{@link HotswapBridge#KIND_FORCE}）。</li>
+ *   <li><b>合成标记字段过滤</b>：由 {@link ClassDiffUtil} 对称过滤 {@code ACC_SYNTHETIC} 与 {@code $remold$} 前缀字段。</li>
  * </ul>
  *
  * <h2>堆实例检索（{@code docs/initfix/05-jvmti-heap.md}）</h2>
@@ -152,19 +152,15 @@ public class InitFix {
 	 */
 	private static final AtomicInteger DETAILED_FAILURE_LOGS = new AtomicInteger();
 
-	/** 支持新注解 RemoldReinit、过渡注解 HotswapReinit 以及旧版 nipx 注解。 */
+	/** 识别存量重置注解 RemoldReinit。 */
 	private static boolean isReinitDesc(String desc) {
-		return "Lremold/annotation/RemoldReinit;".equals(desc)
-		    || "Lremold/annotation/HotswapReinit;".equals(desc)
-		    || "Lnipx/annotation/HotswapReinit;".equals(desc);
+		return "Lremold/annotation/RemoldReinit;".equals(desc);
 	}
 	private static boolean isReinitModeDesc(String desc) {
-		return "Lremold/annotation/RemoldReinit$Mode;".equals(desc)
-		    || "Lremold/annotation/HotswapReinit$Mode;".equals(desc)
-		    || "Lnipx/annotation/HotswapReinit$Mode;".equals(desc);
+		return "Lremold/annotation/RemoldReinit$Mode;".equals(desc);
 	}
 
-	/** 一个被 {@code @RemoldReinit} / {@code @HotswapReinit} 标注的字段及其写入协议。 */
+	/** 一个被 {@code @RemoldReinit} 标注的字段及其写入协议。 */
 	private record ReinitField(boolean overwrite) { }
 
 	private static final Unsafe UNSAFE = Unsafe.getUnsafe();
@@ -421,7 +417,7 @@ public class InitFix {
 	}
 
 	public static void transform(Class<?> host, byte[] newBytes, ClassDiff diff) {
-		if (!HotSwapAgent.HOTSWAP_PLUS) return;
+		if (!RemoldAgent.HOTSWAP_PLUS) return;
 
 		PENDING.remove(host);
 		cleanupStalePatches();
@@ -451,7 +447,7 @@ public class InitFix {
 			// 运行期失败由 applyPatch 追加记入 —— 两者顺序天然正确（applyPatch 在后）。
 			ledgerUpdateFromReport(host, built.report());
 			// 统一的拒绝告警出口：闭包各阶段（后续加工/依赖/成环/根构造器覆盖/指纹不一致）
-			// 只调 log()，而 log() 是 DEBUG 门控的（HotSwapAgent.DefaultLogger.log），
+			// 只调 log()，而 log() 是 DEBUG 门控的（RemoldAgent.DefaultLogger.log），
 			// 默认环境下这些真正的 REJECTED 对用户完全静默。这里按原因聚合统一发 warn，
 			// 各阶段不必再各自关心日志级别。
 			warnRejectedFields(className, built.report());
@@ -465,7 +461,7 @@ public class InitFix {
 			 built.plan(), built.bytes(), snapshot, System.nanoTime());
 			PENDING.put(host, patch);
 		} catch (Throwable e) {
-			HotSwapAgent.error("Field init patch generation failed for " + className
+			RemoldAgent.error("Field init patch generation failed for " + className
 			                   + ": " + e.getMessage(), e);
 			// docs/initfix/02-closure-and-ledger.md §2：buildPatch 抛异常意味着没生成任何补丁，但 redefine 会照常推进，
 			// 这些新增字段从此不再出现在 Diff 里。必须在这里记账，否则永久遗忘。
@@ -482,7 +478,7 @@ public class InitFix {
 	}
 
 	public static void beforeRedefine(Class<?> clazz) {
-		if (!HotSwapAgent.HOTSWAP_PLUS || clazz == null) return;
+		if (!RemoldAgent.HOTSWAP_PLUS || clazz == null) return;
 
 		PendingPatch existing = PENDING.get(clazz);
 		if (existing == null || !existing.hasInstance()) return;
@@ -584,7 +580,7 @@ public class InitFix {
 		NestView nest = NestView.of(host, newClass);
 
 		// ==================== docs/initfix/03-runtime-driver.md §4 存量重置扩展：候选集 ====================
-		// 默认只处理新增字段；标了 @HotswapReinit 的已有字段按显式声明进入候选集。
+		// 默认只处理新增字段；标了 @RemoldReinit 的已有字段按显式声明进入候选集。
 		Map<String, ReinitField> reinitFields         = scanReinitFields(newClass);
 		Set<String>              targetInstanceFields = new LinkedHashSet<>(addedInstanceFields);
 		Set<String>              targetStaticFields   = new LinkedHashSet<>(addedStaticFields);
@@ -595,11 +591,11 @@ public class InitFix {
 			boolean isStatic = (fn.access & Opcodes.ACC_STATIC) != 0;
 			(isStatic ? targetStaticFields : targetInstanceFields).add(e.getKey());
 			if (e.getValue().overwrite()) forceWriteFields.add(e.getKey());
-			log("@HotswapReinit on " + className + "." + e.getKey()
+			log("@RemoldReinit on " + className + "." + e.getKey()
 			    + " -> mode=" + (e.getValue().overwrite() ? "OVERWRITE" : "CONDITIONAL"));
 		}
 		if (!reinitFields.isEmpty()) {
-			log("@HotswapReinit 扩展候选集 for " + className
+			log("@RemoldReinit 扩展候选集 for " + className
 			    + ": instance=" + targetInstanceFields + ", static=" + targetStaticFields);
 		}
 
@@ -909,7 +905,7 @@ public class InitFix {
 		 acceptedInstance, acceptedStatic, instanceExtracts, staticExtracts,
 		 depInstance, depStatic, className);
 		if (closureViolation != null) {
-			HotSwapAgent.error("Field init patch refused for the whole class " + className
+			RemoldAgent.error("Field init patch refused for the whole class " + className
 			                   + ": dependency closure violated: " + closureViolation);
 			for (String f : new ArrayList<>(acceptedInstance)) {
 				instanceDecisions.put(f, FieldDecision.rejected(
@@ -934,7 +930,7 @@ public class InitFix {
 		if (orderedInstance == null || orderedStatic == null) {
 			// 理论上不可达：成环已在阶段 2 清空。真到了这里说明检测与排序口径不一致，
 			// 属于实现缺陷，宁可整类拒绝也不发射依赖未闭合的补丁。
-			HotSwapAgent.error("Field init patch refused for the whole class " + className
+			RemoldAgent.error("Field init patch refused for the whole class " + className
 			                   + ": cycle survived the fixpoint (instance="
 			                   + (orderedInstance == null) + ", static="
 			                   + (orderedStatic == null) + ")");
@@ -1304,7 +1300,7 @@ public class InitFix {
 	// ==================== docs/initfix/03-runtime-driver.md §4 存量重置扩展：注解扫描 ====================
 
 	/**
-	 * 扫描带 {@code @HotswapReinit} 的字段，解析其写入协议。
+	 * 扫描带 {@code @RemoldReinit} 的字段，解析其写入协议。
 	 *
 	 * <p>只做<b>描述符字符串匹配</b>，不加载注解类 —— 与 {@code docs/initfix/01-safety-gate.md} §5 的离线层级接口同一原则：
 	 * 在 transform 线程上 {@code Class.forName} 注解类型可能触发类加载死锁。
@@ -1347,7 +1343,7 @@ public class InitFix {
 				return !"CONDITIONAL".equals(enumValue[1]);
 			}
 			if (v instanceof String[] other) {
-				log("Unexpected @HotswapReinit mode representation: "
+				log("Unexpected @RemoldReinit mode representation: "
 				    + Arrays.toString(other) + "; falling back to OVERWRITE");
 			}
 			return true;
@@ -1356,7 +1352,7 @@ public class InitFix {
 	}
 
 	/**
-	 * 轻量探测：新字节码里是否存在 {@code @HotswapReinit} 字段注解。
+	 * 轻量探测：新字节码里是否存在 {@code @RemoldReinit} 字段注解。
 	 *
 	 * <p>用途是 {@link #transform} 的快速路径：没有任何新增字段时它本来会直接返回，
 	 * 但"改了已有字段初值 + 标注解"恰恰是没有任何新增字段的形态，必须放行到
@@ -1416,7 +1412,7 @@ public class InitFix {
 		collectRejected(report.staticFields(), "static", byReason);
 
 		for (Map.Entry<String, List<String>> e : byReason.entrySet()) {
-			HotSwapAgent.warn("Field init patch refused for "
+			RemoldAgent.warn("Field init patch refused for "
 			                  + (e.getValue().size() == 1
 			 ? e.getValue().get(0)
 			 : e.getValue().size() + " fields of " + className)
@@ -1572,7 +1568,7 @@ public class InitFix {
 	// ==================== docs/initfix/03-runtime-driver.md §4 注解豁免的告警 ====================
 
 	/**
-	 * {@code @HotswapReinit} 豁免了"构造器里用过该字段"这条门时，把风险显式喊出来。
+	 * {@code @RemoldReinit} 豁免了"构造器里用过该字段"这条门时，把风险显式喊出来。
 	 *
 	 * <p>豁免本身是用户显式声明的（{@code docs/initfix/03-runtime-driver.md} §4），但代价必须可见：</p>
 	 * <ul>
@@ -1594,7 +1590,7 @@ public class InitFix {
 
 		String warning = exemptionWarning(fieldNode, gateReason);
 		if (warned.add(fieldName)) {
-			HotSwapAgent.warn("@HotswapReinit 豁免了 " + className + "."
+			RemoldAgent.warn("@RemoldReinit 豁免了 " + className + "."
 			                  + fieldName + "（" + (isStatic ? "static" : "instance") + "）的门禁："
 			                  + gateReason
 			                  + "；补丁只重建字段初始化式、且在热更线程上单线程执行，"
@@ -1606,7 +1602,7 @@ public class InitFix {
 	/** 报告里那条告警的文本（按类型锐化）。 */
 	private static String exemptionWarning(FieldNode fieldNode, String gateReason) {
 		StringBuilder sb = new StringBuilder();
-		sb.append("@HotswapReinit 豁免了门禁（").append(gateReason).append("）："
+		sb.append("@RemoldReinit 豁免了门禁（").append(gateReason).append("）："
 		                                                                  + "补丁只重建该字段的初始化式，构造器里对它的这部分用法不会被重放");
 		if (fieldNode != null && isThreadAffineType(fieldNode.desc)) {
 			sb.append("；该字段是按线程的值（").append(fieldNode.desc)
@@ -1755,7 +1751,7 @@ public class InitFix {
 	 * 的"该字段在任何地方都没被写过"判定。</p>
 	 *
 	 * <p><b>只读字节码，绝不 {@code Class.forName}</b>：优先取
-	 * {@link HotSwapAgent#bytecodeCache}（内存里当前生效的新版本），退化为 ClassLoader
+	 * {@link RemoldAgent#bytecodeCache}（内存里当前生效的新版本），退化为 ClassLoader
 	 * 资源流。任一成员读不到时 {@link #complete()} 为 false，调用方必须按"无法证明"处理
 	 * （拒绝），而不是当作"没有第二处写入"。</p>
 	 */
@@ -1775,7 +1771,7 @@ public class InitFix {
 				oracle.getNestMembers(hostClass.name);
 				return new NestView(oracle.getNestFieldWrites(hostClass.name), true);
 			} catch (IllegalStateException unavailable) {
-				HotSwapAgent.warn("Nest scan incomplete for " + hostClass.name + ": " + unavailable.getMessage());
+				RemoldAgent.warn("Nest scan incomplete for " + hostClass.name + ": " + unavailable.getMessage());
 				return new NestView(List.of(), false);
 			}
 		}
@@ -1954,7 +1950,7 @@ public class InitFix {
 	 *
 	 * <p>这类字段在构造器里的<b>使用</b>（不只是初始化式）无法被补丁重放：补丁只在
 	 * 热更线程上单线程跑，而构造器当时是在应用线程上跑的，per-thread 副本根本不是同一份。
-	 * 因此它们默认被"后续加工检查"拒绝；{@code @HotswapReinit} 可以显式解锁，但必须告警。</p>
+	 * 因此它们默认被"后续加工检查"拒绝；{@code @RemoldReinit} 可以显式解锁，但必须告警。</p>
 	 */
 	private static final Set<String> THREAD_AFFINE_DESCS = Set.of(
 	 "Ljava/lang/ThreadLocal;", "Ljava/lang/InheritableThreadLocal;");
@@ -2680,7 +2676,7 @@ public class InitFix {
 	 * 把补丁片段里对目标字段的 {@code PUTFIELD}/{@code PUTSTATIC} 改写为
 	 * {@code invokedynamic}，由 {@link HotswapBridge} 在链接期算好 Unsafe offset 后写入：
 	 * {@link HotswapBridge#KIND_CONDITIONAL} 条件 CAS（仅当字段仍是类型默认值），
-	 * {@link HotswapBridge#KIND_FORCE} 无条件写（{@code @HotswapReinit(mode = OVERWRITE)}）。
+	 * {@link HotswapBridge#KIND_FORCE} 无条件写（{@code @RemoldReinit(mode = OVERWRITE)}）。
 	 * <p>final 与非 final 走同一条路径，语义统一。</p>
 	 * @param conditionalFields 走条件 CAS 的字段
 	 * @param forceFields       走强制写的字段（两者不相交；force 优先）
@@ -2729,7 +2725,7 @@ public class InitFix {
 	 * 先复核 JVM 是否真正成功重定义了该类；若被 JVM 拒绝则立即注销并记入台账（保证不变量 5）。
 	 */
 	public static void afterRedefineExternal(Class<?> clazz) {
-		if (!HotSwapAgent.HOTSWAP_PLUS || clazz == null) return;
+		if (!RemoldAgent.HOTSWAP_PLUS || clazz == null) return;
 
 		PendingPatch patch = PENDING.get(clazz);
 		if (patch == null) return;
@@ -2740,7 +2736,7 @@ public class InitFix {
 			try {
 				clazz.getDeclaredField(sampleTask.fieldName());
 			} catch (NoSuchFieldException e) {
-				HotSwapAgent.warn("Class " + clazz.getName() + " was not redefined by JVM; aborting external patch.");
+				RemoldAgent.warn("Class " + clazz.getName() + " was not redefined by JVM; aborting external patch.");
 				afterRedefineFailed(clazz);
 				return;
 			}
@@ -2749,7 +2745,7 @@ public class InitFix {
 	}
 
 	public static void afterRedefine(Class<?> clazz) {
-		if (!HotSwapAgent.HOTSWAP_PLUS || clazz == null) return;
+		if (!RemoldAgent.HOTSWAP_PLUS || clazz == null) return;
 
 		PendingPatch patch = PENDING.remove(clazz);
 		if (patch == null) return;
@@ -2763,7 +2759,7 @@ public class InitFix {
 			for (FieldPatchTask task : patch.plan().allTasks()) {
 				ledgerPut(clazz, task.fieldName(), "patch aborted: " + e);
 			}
-			HotSwapAgent.error("Field init patch failed: " + e.getMessage(), e);
+			RemoldAgent.error("Field init patch failed: " + e.getMessage(), e);
 		}
 	}
 
@@ -2845,13 +2841,13 @@ public class InitFix {
 
 		// ---- 静态字段：整个补丁只跑一次 ----
 		if (!plan.staticTasks().isEmpty()) {
-			HotSwapAgent.info("Applying static field init patch to " + host.getName()
+			RemoldAgent.info("Applying static field init patch to " + host.getName()
 			                  + ", fields=" + plan.staticTasks().size());
 			long start = System.nanoTime();
 			runTasks(host, plan.staticTasks(), staticHandles, null,
 			 failedFields, skippedFields, failureReasons);
 			long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-			HotSwapAgent.info("Static field init patch for " + host.getName()
+			RemoldAgent.info("Static field init patch for " + host.getName()
 			                  + " done in " + elapsedMs + "ms");
 		}
 
@@ -2862,7 +2858,7 @@ public class InitFix {
 
 		// ---- 实例字段：逐实例、逐字段 ----
 		if (plan.hasInstance() && alive != null && !alive.isEmpty()) {
-			HotSwapAgent.info("Applying instance field init patch to " + host.getName()
+			RemoldAgent.info("Applying instance field init patch to " + host.getName()
 			                  + ", count=" + alive.size()
 			                  + ", fields=" + plan.instanceTasks().size());
 
@@ -2883,10 +2879,10 @@ public class InitFix {
 			 .append(", failedFields=").append(failedFields)
 			 .append(", skippedFields=").append(skippedFields)
 			 .append(", elapsed=").append(elapsedMs).append("ms");
-			HotSwapAgent.info(sb.toString());
+			RemoldAgent.info(sb.toString());
 
 			if (elapsedMs > 1000) {
-				HotSwapAgent.warn("Instance field init patch for " + host.getName()
+				RemoldAgent.warn("Instance field init patch for " + host.getName()
 				                  + " took " + elapsedMs
 				                  + "ms, hotswap thread was blocked");
 			}
@@ -2905,7 +2901,7 @@ public class InitFix {
 				ledgerPut(host, f, "skipped: "
 				                   + failureReasons.getOrDefault(f, "a dependency field failed to patch"));
 			}
-			HotSwapAgent.warn("Field init patch incomplete for " + host.getName()
+			RemoldAgent.warn("Field init patch incomplete for " + host.getName()
 			                  + ": failed=" + failedFields + ", skipped=" + skippedFields
 			                  + "（已记入 FieldLedger，下一轮热更会重新纳入候选）");
 		}
@@ -2932,10 +2928,10 @@ public class InitFix {
 				             + host.getName() + " (field already had a non-default value): "
 				             + skippedNames;
 				if (ledgerSnapshot(host).isEmpty()) {
-					HotSwapAgent.warn(msg + "（条件写按设计保守跳过；如需强制覆写请用 @HotswapReinit(OVERWRITE)）");
+					RemoldAgent.warn(msg + "（条件写按设计保守跳过；如需强制覆写请用 @RemoldReinit(OVERWRITE)）");
 				} else {
 					// 重试轮：这些跳过多半来自上一轮已成功补过的实例，属预期
-					HotSwapAgent.info(msg + "（重试轮，通常为上一轮已补过的实例）");
+					RemoldAgent.info(msg + "（重试轮，通常为上一轮已补过的实例）");
 				}
 			}
 		}
@@ -3036,7 +3032,7 @@ public class InitFix {
 					if (skippedFields.add(task.fieldName())) {
 						failureReasons.putIfAbsent(task.fieldName(), "dependency failed: "
 						                                             + intersection(dependencies, localFailed, localSkipped));
-						HotSwapAgent.warn("Skipping field init for " + host.getName() + "."
+						RemoldAgent.warn("Skipping field init for " + host.getName() + "."
 						                  + task.fieldName() + " because a dependency failed");
 					}
 					continue;
@@ -3063,7 +3059,7 @@ public class InitFix {
 		failedFields.add(fieldName);
 		failureReasons.putIfAbsent(fieldName, String.valueOf(failure));
 		if (DETAILED_FAILURE_LOGS.incrementAndGet() <= MAX_DETAILED_FAILURES) {
-			HotSwapAgent.error("Field init patch failed for " + host.getName()
+			RemoldAgent.error("Field init patch failed for " + host.getName()
 			                   + "." + fieldName + ": " + failure.getMessage(), failure);
 		}
 	}
@@ -3084,7 +3080,7 @@ public class InitFix {
 				if (skippedFields.add(task.fieldName())) {
 					failureReasons.putIfAbsent(task.fieldName(), "dependency failed: "
 					                                             + intersection(task.dependencies(), failedFields, skippedFields));
-					HotSwapAgent.warn("Skipping field init for " + host.getName() + "."
+					RemoldAgent.warn("Skipping field init for " + host.getName() + "."
 					                  + task.fieldName() + " because a dependency failed");
 				}
 				continue;
@@ -3235,7 +3231,7 @@ public class InitFix {
 		try {
 			frames = analyze(className, method);
 		} catch (AnalyzerException e) {
-			HotSwapAgent.warn("Analysis failed for " + method.name + method.desc
+			RemoldAgent.warn("Analysis failed for " + method.name + method.desc
 			                  + ": " + e.getMessage());
 			if (outReasons != null) {
 				for (String f : targetFields) {
@@ -3315,7 +3311,7 @@ public class InitFix {
 			}
 
 			if (unsafeReason != null) {
-				HotSwapAgent.warn("Field '" + f.name + "' initialization skipped: " + unsafeReason);
+				RemoldAgent.warn("Field '" + f.name + "' initialization skipped: " + unsafeReason);
 				recordReason(outReasons, f.name,
 				 "no safe initialization expression in " + method.name + method.desc
 				 + ": " + unsafeReason);

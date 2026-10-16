@@ -2,7 +2,7 @@ package remold.profiler;
 
 import arc.Core;
 import arc.graphics.GL30;
-import remold.HotSwapAgent;
+import remold.RemoldAgent;
 
 import java.nio.*;
 import java.util.Arrays;
@@ -98,7 +98,7 @@ public class GlTimerProfiler {
 			info("[GlTimer] Initialized, " + RING + " query slots");
 			return true;
 		} catch (Throwable t) {
-			HotSwapAgent.error("[GlTimer] Failed to initialize OpenGL timer queries", t);
+			RemoldAgent.error("[GlTimer] Failed to initialize OpenGL timer queries", t);
 			queryIds = null;
 			return false;
 		}
@@ -120,7 +120,7 @@ public class GlTimerProfiler {
 		} catch (Throwable t) {
 			isQuerying = false;
 			enabled = false;
-			HotSwapAgent.error("[GlTimer] glBeginQuery failed, disabling GPU profiler", t);
+			RemoldAgent.error("[GlTimer] glBeginQuery failed, disabling GPU profiler", t);
 		}
 	}
 
@@ -132,7 +132,7 @@ public class GlTimerProfiler {
 			writeIdx++;
 		} catch (Throwable t) {
 			enabled = false;
-			HotSwapAgent.error("[GlTimer] glEndQuery failed, disabling GPU profiler", t);
+			RemoldAgent.error("[GlTimer] glEndQuery failed, disabling GPU profiler", t);
 		} finally {
 			isQuerying = false;
 		}
@@ -182,7 +182,7 @@ public class GlTimerProfiler {
 			}
 		} catch (Throwable t) {
 			enabled = false;
-			HotSwapAgent.error("[GlTimer] drainResults failed, disabling GPU profiler", t);
+			RemoldAgent.error("[GlTimer] drainResults failed, disabling GPU profiler", t);
 		}
 	}
 

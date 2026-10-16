@@ -37,7 +37,7 @@ import static org.objectweb.asm.Opcodes.*;
  *       流式解析已加载类的父类、接口与修饰符信息存入轻量继承图，为 {@link remold.ref.ClassHierarchyOracle}
  *       提供全局离线元数据查询能力，避免触发死锁或非预期的类加载。</li>
  *   <li><b>运行时活跃字节码缓存</b>：
- *       将经过管线处理后的最终字节码同步至 {@link HotSwapAgent#bytecodeCache}，
+ *       将经过管线处理后的最终字节码同步至 {@link RemoldAgent#bytecodeCache}，
  *       为后续热更提供可信的基线字节码（避免反复读取磁盘原始编译产物导致编号漂移）。</li>
  *   <li><b>注解驱动的代码注入</b>：
  *       <ul>
@@ -47,16 +47,16 @@ import static org.objectweb.asm.Opcodes.*;
  *   </li>
  *   <li><b>Lambda 静态化增强（{@code HOTSWAP_PLUS}）</b>：
  *       通过 {@link #forceStaticLambdas} 将非捕获/捕获 Lambda 合成方法转化为静态方法以维持签名稳定，
- *       并注入 {@code $nipx$lambdasForced} 标记字段（该字段由 {@link ClassDiffUtil} 对称过滤）。</li>
+ *       并注入 {@code $remold$lambdasForced} 标记字段（该字段由 {@link ClassDiffUtil} 对称过滤）。</li>
  *   <li><b>InitFix 字段初始化补丁准备</b>：
- *       在类被重定义前（{@code classBeingRedefined != null}），由 {@link HotSwapAgent#processChanges}
+ *       在类被重定义前（{@code classBeingRedefined != null}），由 {@link RemoldAgent#processChanges}
  *       触发差分并调用 {@link remold.ref.InitFix#transform}，分析新增字段、反向切片初值表达式并装配伴生补丁类。</li>
  * </ol>
  *
  * @see AnonClassAligner
  * @see remold.ref.InitFix
  * @see InstanceTracker
- * @see HotSwapAgent
+ * @see RemoldAgent
  */
 public class AnnotationTransformer implements ClassFileTransformer {
 
@@ -105,9 +105,9 @@ public class AnnotationTransformer implements ClassFileTransformer {
 		}
 
 		String dotClassName = className.replace('/', '.');
-		if (HotSwapAgent.isBlacklisted(dotClassName)) return null;
+		if (RemoldAgent.isBlacklisted(dotClassName)) return null;
 
-		HotSwapAgent.InternalRedefineContext internalCtx = HotSwapAgent.INTERNAL_CONTEXT.get();
+		RemoldAgent.InternalRedefineContext internalCtx = RemoldAgent.INTERNAL_CONTEXT.get();
 		if (internalCtx != null && internalCtx.isRetransform) {
 			// 内部探测性 retransform（例如 fetchBytecodeMemory），直接返回 null 保持原样
 			return null;
@@ -136,31 +136,31 @@ public class AnnotationTransformer implements ClassFileTransformer {
 		if (classBeingRedefined != null && !isInternal) {
 			// ================== 外部重定义通道 (IDE JDWP / 外部 Agent) ==================
 			// 1. 重新织入 Mixin 注入点
-			byte[] woven = HotSwapAgent.applyTransformerBridges(loader, dotClassName, classBeingRedefined, bytes);
+			byte[] woven = RemoldAgent.applyTransformerBridges(loader, dotClassName, classBeingRedefined, bytes);
 			if (woven != null && woven != bytes) {
 				bytes = woven;
 				modified = true;
 			}
 
 			// 2. 基线获取与 LayoutGate 校验
-			byte[] oldBytecode = HotSwapAgent.bytecodeCache.get(dotClassName);
+			byte[] oldBytecode = RemoldAgent.bytecodeCache.get(dotClassName);
 			if (oldBytecode == null) {
-				oldBytecode = HotSwapAgent.sourceBytecodeCache.get(dotClassName);
+				oldBytecode = RemoldAgent.sourceBytecodeCache.get(dotClassName);
 			}
 			if (oldBytecode == null) {
-				oldBytecode = HotSwapAgent.fetchOriginalBytecode(classBeingRedefined);
+				oldBytecode = RemoldAgent.fetchOriginalBytecode(classBeingRedefined);
 			}
 
 			if (oldBytecode != null) {
 				ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytecode, bytes);
 				if (diff.hierarchyChanged) {
-					HotSwapAgent.error("[EXTERNAL-HOTSWAP] Hierarchy change detected for " + dotClassName + "; rejecting redefine.");
+					RemoldAgent.error("[EXTERNAL-HOTSWAP] Hierarchy change detected for " + dotClassName + "; rejecting redefine.");
 					throw new IllegalClassFormatException("Hierarchy change not supported: " + dotClassName);
 				}
 				LayoutGate.Result layoutRes = LayoutGate.checkChangedFields(diff.changedFields);
-				if (!layoutRes.compatible() && LayoutGate.MODE_REJECT.equals(HotSwapAgent.LAYOUT_GATE)) {
-					if (HotSwapAgent.hasLiveInstances(classBeingRedefined) || LayoutGate.hasStaticFieldChange(diff.changedFields)) {
-						HotSwapAgent.error("[EXTERNAL-HOTSWAP] Layout change rejected by LayoutGate: " + layoutRes.detail());
+				if (!layoutRes.compatible() && LayoutGate.MODE_REJECT.equals(RemoldAgent.LAYOUT_GATE)) {
+					if (RemoldAgent.hasLiveInstances(classBeingRedefined) || LayoutGate.hasStaticFieldChange(diff.changedFields)) {
+						RemoldAgent.error("[EXTERNAL-HOTSWAP] Layout change rejected by LayoutGate: " + layoutRes.detail());
 						throw new IllegalClassFormatException("Field layout change rejected for " + dotClassName + ": " + layoutRes.detail());
 					}
 				}
@@ -197,12 +197,12 @@ public class AnnotationTransformer implements ClassFileTransformer {
 
 			// 4. 快照抓取与后置任务注册
 			InitFix.beforeRedefine(classBeingRedefined);
-			HotSwapAgent.scheduleDeferredPostRedefine(classBeingRedefined);
+			RemoldAgent.scheduleDeferredPostRedefine(classBeingRedefined);
 
 			// 5. 更新基线缓存
 			byte[] finalBytes = modified ? bytes : classfileBuffer;
-			HotSwapAgent.sourceBytecodeCache.put(dotClassName, classfileBuffer);
-			HotSwapAgent.bytecodeCache.put(dotClassName, finalBytes);
+			RemoldAgent.sourceBytecodeCache.put(dotClassName, classfileBuffer);
+			RemoldAgent.bytecodeCache.put(dotClassName, finalBytes);
 
 			if (DEBUG && modified) writeTo(className, bytes);
 			return modified ? bytes : null;
@@ -240,10 +240,10 @@ public class AnnotationTransformer implements ClassFileTransformer {
 				if (classBeingRedefined == null) {
 					if (pending != null) {
 						bytecodeCache.put(dotClassName, resultBytes);
-						HotSwapAgent.sourceBytecodeCache.put(dotClassName, classfileBuffer);
+						RemoldAgent.sourceBytecodeCache.put(dotClassName, classfileBuffer);
 					} else {
 						bytecodeCache.putIfAbsent(dotClassName, resultBytes);
-						HotSwapAgent.sourceBytecodeCache.putIfAbsent(dotClassName, classfileBuffer);
+						RemoldAgent.sourceBytecodeCache.putIfAbsent(dotClassName, classfileBuffer);
 					}
 				}
 				return modified ? bytes : null;
@@ -257,10 +257,10 @@ public class AnnotationTransformer implements ClassFileTransformer {
 		if (classBeingRedefined == null) {
 			if (pending != null) {
 				bytecodeCache.put(dotClassName, resultBytes);
-				HotSwapAgent.sourceBytecodeCache.put(dotClassName, classfileBuffer);
+				RemoldAgent.sourceBytecodeCache.put(dotClassName, classfileBuffer);
 			} else {
 				bytecodeCache.putIfAbsent(dotClassName, resultBytes);
-				HotSwapAgent.sourceBytecodeCache.putIfAbsent(dotClassName, classfileBuffer);
+				RemoldAgent.sourceBytecodeCache.putIfAbsent(dotClassName, classfileBuffer);
 			}
 		}
 		return modified ? bytes : null;
@@ -307,7 +307,7 @@ public class AnnotationTransformer implements ClassFileTransformer {
 	/**
 	 * <p>注入代码到类中，添加方法调用
 	 * <p>跳过构造函数，静态代码块，桥接方法，以及无注解的方法
-	 * @param slashClassName 类名，如 nipx/MyClass
+	 * @param slashClassName 类名，如 remold/MyClass
 	 * @return 如果没有拦截点，则返回原始 bytes，否则返回修改后的字节码
 	 * @see remold.profiler.ProfilerData
 	 */
@@ -385,7 +385,7 @@ public class AnnotationTransformer implements ClassFileTransformer {
 			// 只有发生了实际注入，才返回新字节码，否则返回原始字节码节省内存
 			return cv.anyProfiled ? cw.toByteArray() : bytes;
 		} catch (Throwable e) {
-			HotSwapAgent.error("Profiler injection failed for " + slashClassName, e);
+			RemoldAgent.error("Profiler injection failed for " + slashClassName, e);
 			return bytes;
 		}
 	}
@@ -678,7 +678,7 @@ public class AnnotationTransformer implements ClassFileTransformer {
 			cn.accept(cw);
 			return cw.toByteArray();
 		} catch (Exception e) {
-			HotSwapAgent.error("forceStaticLambdas failed for " + slashClassName, e);
+			RemoldAgent.error("forceStaticLambdas failed for " + slashClassName, e);
 			return bytes;
 		}
 	}
@@ -687,14 +687,14 @@ public class AnnotationTransformer implements ClassFileTransformer {
 	//region Utils
 
 	/**
-	 * 幂等标记字段名。带 {@code $nipx$} 前缀是为了避开与业务字段重名的可能。
+	 * 幂等标记字段名。带 {@code $remold$} 前缀是为了避开与业务字段重名的可能。
 	 * <p>声明为 {@code private static final synthetic} 且<b>不</b>赋值：{@code InitFix}
 	 * 对"在 {@code <clinit>} 里找不到安全初始化表达式"的新增字段一律弃权（见
 	 * {@code InitFix.buildPatch}），因此不会产生初始化代码；它也不参与任何语义。
-	 * 之所以不用自定义 class attribute：那需要额外的读写与兼容处理，而字段在所有
+	 * 之操作不用自定义 class attribute：那需要额外的读写与兼容处理，而字段在所有
 	 * ASM 路径上天然可见，判断只需一次遍历。</p>
 	 */
-	private static final String FORCED_MARKER = "$nipx$lambdasForced";
+	private static final String FORCED_MARKER = "$remold$lambdasForced";
 
 	/** 判断该类是否已被 {@link #forceStaticLambdas} 处理过。 */
 	private static boolean hasForcedMarker(ClassNode cn) {

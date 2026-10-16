@@ -183,7 +183,7 @@ PoC 1 通过时不排期，设计保留作参考，不进入路线图；PoC 1 �
 
 **访问控制**
 
-- 只对 private **方法**做名字重整（`$$nipx$name$Class`），private **字段**直接放宽为包级，不重整。序列化方法、
+- 只对 private **方法**做名字重整（`$$remold$name$Class`），private **字段**直接放宽为包级，不重整。序列化方法、
   `android:onClick` 引用的方法、`@Keep` 成员豁免。
 - 继承自其他包父类的 protected 成员，Patch 类无法访问，静态审查检出后拒绝。
 - super 调用：基线按签名生成带类型的跳板，只覆盖 Host 已覆写的方法；新方法里首次出现的 `super.foo()` 若无跳板则拒绝。

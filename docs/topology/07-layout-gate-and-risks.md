@@ -31,7 +31,7 @@
     - 存活实例感知：仅当该类存在存活实例时触发拒绝（无存活实例时新实例会执行新构造器，安全放行）。
     - 开关控制：`remold.agent.anon_layout_gate`（`reject` / `warn` / `off`，默认 `reject`）。
 2. **重定义层全局门（逐类重定义前）**：
-    - 接入点：`HotSwapAgent.applyRedefineLayoutGate`；
+    - 接入点：`RemoldAgent.applyRedefineLayoutGate`；
     - 判决函数：`LayoutGate.checkRedefine(diff.changedFields)`；
     - 职责：拦截 **具名类及匿名类中用户声明的非合成字段**的删除、类型变更或静态性变更；
     - 判决三态：`COMPATIBLE` 放行、`WAIVED`（warn 模式放行但记录）、`REJECTED` 拒绝；

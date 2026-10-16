@@ -148,7 +148,7 @@ public class JdwpClient implements Closeable {
 			return data;
 		}
 	}
-	public static final String TMP_THREAD_NAME = "nipx-jdwp-suspend";
+	public static final String TMP_THREAD_NAME = "remold-jdwp-suspend";
 	public long getThreadId(Thread thread) throws IOException {
 		long[] ids      = {0};
 		String prevName = thread.getName();

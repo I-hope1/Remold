@@ -136,7 +136,7 @@ public class ProfilerTransformer implements ClassFileTransformer {
 			resetState();
 			return anyProfiled ? bytes : classfileBuffer;
 		} catch (Throwable e) {
-			HotSwapAgent.error("Profiler injection failed for " + className, e);
+			RemoldAgent.error("Profiler injection failed for " + className, e);
 			return null;
 		}
 	}

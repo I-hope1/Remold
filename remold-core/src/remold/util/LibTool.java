@@ -1,6 +1,6 @@
 package remold.util;
 
-import remold.HotSwapAgent;
+import remold.RemoldAgent;
 
 import java.io.File;
 import java.lang.ref.*;
@@ -24,7 +24,7 @@ public class LibTool {
 			System.loadLibrary("tool64");
 		}
 		initialized = true;
-		HotSwapAgent.info("[Lib] Loaded libtool.");
+		RemoldAgent.info("[Lib] Loaded libtool.");
 	}
 
 	private static native Object[] nGetInstances(Class<?> clazz);

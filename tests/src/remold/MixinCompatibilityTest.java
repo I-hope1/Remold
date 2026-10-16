@@ -57,9 +57,9 @@ public class MixinCompatibilityTest {
 		testMixinTransformerBridgeLayoutCompatibility();
 
 		// 3. JVM 实机 redefine 类重定义实测
-		Instrumentation inst = HotSwapAgent.getInstrumentation();
+		Instrumentation inst = RemoldAgent.getInstrumentation();
 		if (inst == null || !inst.isRedefineClassesSupported()) {
-			System.out.println("\n[WARN] 当前 JVM 未挂载 HotSwapAgent agentmain 或不支持 redefineClasses，跳过实机字节码注入测试。");
+			System.out.println("\n[WARN] 当前 JVM 未挂载 RemoldAgent agentmain 或不支持 redefineClasses，跳过实机字节码注入测试。");
 			System.out.println("       可在 Gradle 中配置 -javaagent 运行全套 E2E 实测。");
 		} else {
 			testMixinHookWashoutOnDirectRedefine(inst);
@@ -183,13 +183,13 @@ public class MixinCompatibilityTest {
 		System.out.println("   LayoutGate 判决结果: verdict=" + result.verdict() + ", detail=" + result.detail());
 		check(result.verdict() == Verdict.REMOVED_FIELD, "LayoutGate 判决为 REMOVED_FIELD（字段删除）");
 
-		// 检查 HotSwapAgent.decideLayout 动作
-		HotSwapAgent.LayoutDecision decision = HotSwapAgent.decideLayout(
-			className, diff.changedFields, LayoutGate.MODE_REJECT, HotSwapAgent.Liveness.LIVE, Set.of(className)
+		// 检查 RemoldAgent.decideLayout 动作
+		RemoldAgent.LayoutDecision decision = RemoldAgent.decideLayout(
+			className, diff.changedFields, LayoutGate.MODE_REJECT, RemoldAgent.Liveness.LIVE, Set.of(className)
 		);
-		System.out.println("   HotSwapAgent 布局决策: action=" + decision.action());
-		check(decision.action() == HotSwapAgent.LayoutAction.REJECT, "HotSwapAgent 坚决触发 REJECT 拒绝重定义！");
-		System.out.println("   >>> 实测证明：若不对 Mixin 注入字段进行适配，HotSwapAgent 的安全防护会直接将该类熔断移出！");
+		System.out.println("   RemoldAgent 布局决策: action=" + decision.action());
+		check(decision.action() == RemoldAgent.LayoutAction.REJECT, "RemoldAgent 坚决触发 REJECT 拒绝重定义！");
+		System.out.println("   >>> 实测证明：若不对 Mixin 注入字段进行适配，RemoldAgent 的安全防护会直接将该类熔断移出！");
 	}
 
 	// ================================================================================
@@ -220,10 +220,10 @@ public class MixinCompatibilityTest {
 		LayoutGate.Result bridgedResult = LayoutGate.checkChangedFields(bridgedDiff.changedFields);
 		check(bridgedResult.verdict() == Verdict.COMPATIBLE, "经过桥重织入后，LayoutGate 判定为 COMPATIBLE（放行）");
 
-		HotSwapAgent.LayoutDecision bridgedDecision = HotSwapAgent.decideLayout(
-			className, bridgedDiff.changedFields, LayoutGate.MODE_REJECT, HotSwapAgent.Liveness.LIVE, Set.of(className)
+		RemoldAgent.LayoutDecision bridgedDecision = RemoldAgent.decideLayout(
+			className, bridgedDiff.changedFields, LayoutGate.MODE_REJECT, RemoldAgent.Liveness.LIVE, Set.of(className)
 		);
-		check(bridgedDecision.action() == HotSwapAgent.LayoutAction.PASS, "HotSwapAgent 决策为 PASS，允许重定义！");
+		check(bridgedDecision.action() == RemoldAgent.LayoutAction.PASS, "RemoldAgent 决策为 PASS，允许重定义！");
 		System.out.println("   >>> 实测证明：通过桥接预织入，字段结构完全对齐，LayoutGate 顺利放行！");
 	}
 
@@ -254,11 +254,11 @@ public class MixinCompatibilityTest {
 		// 3. 架构结论
 		System.out.println("   [结论 1] Mixin 自带的 MixinAgent 是专为旧版 MC LaunchWrapper 重载 @Mixin 自身设计的，不托管 Target 类的重更新。");
 		System.out.println("   [结论 2] 在 Fabric/CopperLoader 环境下，Mixin 挂在 ClassLoader 管道中，JVM redefineClasses 必然绕过它。");
-		System.out.println("   [结论 3] 要无缝兼容，HotSwapAgent 只需在 processChanges 提取 disk 字节码后，暴露一个预重织入拦截链 (MixinBridge)！");
+		System.out.println("   [结论 3] 要无缝兼容，RemoldAgent 只需在 processChanges 提取 disk 字节码后，暴露一个预重织入拦截链 (MixinBridge)！");
 	}
 
 	// ================================================================================
-	// 实验六：HotSwapAgent.redefineDynamic 动态类热更与 BytecodeTransformerBridge 实测
+	// 实验六：RemoldAgent.redefineDynamic 动态类热更与 BytecodeTransformerBridge 实测
 	// ================================================================================
 	static void testRedefineDynamicWithBridge(Instrumentation inst) throws Exception {
 		System.out.println("\n--- [实验六] redefineDynamic 与 BytecodeTransformerBridge 全链路热更实测 ---");
@@ -275,22 +275,22 @@ public class MixinCompatibilityTest {
 		check((int) computeMethod.invoke(instance, 5) == 15, "动态类初始执行 compute(5) == 15");
 
 		// 2. 注册 BytecodeTransformerBridge：模拟 Mixin 对 DynamicCalc 的拦截织入
-		HotSwapAgent.BytecodeTransformerBridge mockMixinBridge = (loader, dotClassName, targetClass, sourceBytecode) -> {
+		RemoldAgent.BytecodeTransformerBridge mockMixinBridge = (loader, dotClassName, targetClass, sourceBytecode) -> {
 			if (className.equals(dotClassName)) {
 				// 模拟 Mixin 织入：在 compute(x) 中，当 x == 0 时拦截返回 9999
 				return weaveMixinZeroHook(sourceBytecode, className);
 			}
 			return sourceBytecode;
 		};
-		HotSwapAgent.addTransformerBridge(mockMixinBridge);
+		RemoldAgent.addTransformerBridge(mockMixinBridge);
 
 		try {
 			// 3. 动态代码生成器生成新版本：compute(x) -> x + 50
 			byte[] rawV2 = buildAddServiceBytecode(className, 50);
 
-			// 4. 调用 HotSwapAgent.redefineDynamic
-			boolean ok = HotSwapAgent.redefineDynamic(clazz, rawV2);
-			check(ok, "HotSwapAgent.redefineDynamic 执行成功");
+			// 4. 调用 RemoldAgent.redefineDynamic
+			boolean ok = RemoldAgent.redefineDynamic(clazz, rawV2);
+			check(ok, "RemoldAgent.redefineDynamic 执行成功");
 
 			// 5. 验证执行结果
 			int resNormal = (int) computeMethod.invoke(instance, 5);
@@ -299,13 +299,13 @@ public class MixinCompatibilityTest {
 			check(resZero == 9999, "redefineDynamic 后 compute(0) == 9999（桥接器 Mixin 钩子成功保留生效！）");
 
 			// 6. 验证双基线状态
-			byte[] cachedRuntime = HotSwapAgent.bytecodeCache.get(className);
-			byte[] cachedSource = HotSwapAgent.sourceBytecodeCache.get(className);
+			byte[] cachedRuntime = RemoldAgent.bytecodeCache.get(className);
+			byte[] cachedSource = RemoldAgent.sourceBytecodeCache.get(className);
 			check(cachedRuntime != null && cachedSource != null, "双基线缓存均已建立");
 			check(cachedRuntime != cachedSource, "生效基线与源码基线已正确物理解耦！");
 			System.out.println("   >>> 实测证明：redefineDynamic + BytecodeTransformerBridge 实现了动态生成类的无缝增强热更！");
 		} finally {
-			HotSwapAgent.removeTransformerBridge(mockMixinBridge);
+			RemoldAgent.removeTransformerBridge(mockMixinBridge);
 		}
 	}
 
@@ -319,7 +319,7 @@ public class MixinCompatibilityTest {
 		check(!inst.isModifiableClass(int.class), "int.class 经 inst.isModifiableClass 确认为不可修改");
 
 		// 调用 redefineDynamic 必须被守卫平稳跳过，返回 false，绝不抛出 UnsupportedOperationException 崩溃
-		boolean redefined = HotSwapAgent.redefineDynamic(int.class, new byte[16]);
+		boolean redefined = RemoldAgent.redefineDynamic(int.class, new byte[16]);
 		check(!redefined, "不可修改类被 redefineDynamic 安全跳过并返回 false");
 		System.out.println("   >>> 实测证明：不可修改类守卫健全，不会触发 JVM 崩溃异常！");
 	}
@@ -341,29 +341,29 @@ public class MixinCompatibilityTest {
 		check((int) computeMethod.invoke(instance, 5) == 25, "外部测试类初始 compute(5) == 25");
 
 		// 注册 Mixin 桥接器：拦截 ExternalTarget，当入参为 0 时返回 9999
-		HotSwapAgent.BytecodeTransformerBridge mockMixinBridge = (loader, dotClassName, targetClass, sourceBytecode) -> {
+		RemoldAgent.BytecodeTransformerBridge mockMixinBridge = (loader, dotClassName, targetClass, sourceBytecode) -> {
 			if (className.equals(dotClassName)) {
 				return weaveMixinZeroHook(sourceBytecode, className);
 			}
 			return sourceBytecode;
 		};
-		HotSwapAgent.addTransformerBridge(mockMixinBridge);
+		RemoldAgent.addTransformerBridge(mockMixinBridge);
 
 		try {
 			// 初始化当前基线（模拟之前运行状态）
 			byte[] wovenV1 = weaveMixinZeroHook(rawV1, className);
-			HotSwapAgent.bytecodeCache.put(className, wovenV1);
-			HotSwapAgent.sourceBytecodeCache.put(className, rawV1);
+			RemoldAgent.bytecodeCache.put(className, wovenV1);
+			RemoldAgent.sourceBytecodeCache.put(className, rawV1);
 
 			// 模拟 IDE 重新编译产生 rawV2：compute(x) -> x + 80（不包含 Mixin 钩子）
 			byte[] rawV2 = buildAddServiceBytecode(className, 80);
 
 			// 模拟 IDE Debugger / JDWP 线程：在一个独立线程中直接调用 inst.redefineClasses！
-			// 该线程上 HotSwapAgent.INTERNAL_CONTEXT.get() 必然为 null（外部重定义）
+			// 该线程上 RemoldAgent.INTERNAL_CONTEXT.get() 必然为 null（外部重定义）
 			Throwable[] threadError = {null};
 			Thread ideThread = new Thread(() -> {
 				try {
-					check(HotSwapAgent.INTERNAL_CONTEXT.get() == null, "IDE 线程上 INTERNAL_CONTEXT 必须为 null（判定为外部重定义）");
+					check(RemoldAgent.INTERNAL_CONTEXT.get() == null, "IDE 线程上 INTERNAL_CONTEXT 必须为 null（判定为外部重定义）");
 					inst.redefineClasses(new ClassDefinition(clazz, rawV2));
 				} catch (Throwable t) {
 					threadError[0] = t;
@@ -384,11 +384,11 @@ public class MixinCompatibilityTest {
 			check(resZero == 9999, "IDE 直接重定义后 compute(0) == 9999（Mixin 钩子经外部通道自动重新织入生效！）");
 
 			// 3. 基线缓存已同步更新
-			check(Arrays.equals(HotSwapAgent.sourceBytecodeCache.get(className), rawV2), "sourceBytecodeCache 成功捕获 IDE 传入的原始字节码内容");
-			check(!Arrays.equals(HotSwapAgent.bytecodeCache.get(className), rawV2), "bytecodeCache 存储的是重新织入后的字节码内容");
+			check(Arrays.equals(RemoldAgent.sourceBytecodeCache.get(className), rawV2), "sourceBytecodeCache 成功捕获 IDE 传入的原始字节码内容");
+			check(!Arrays.equals(RemoldAgent.bytecodeCache.get(className), rawV2), "bytecodeCache 存储的是重新织入后的字节码内容");
 			System.out.println("   >>> 实测证明：IDE / JDWP 直接触发重定义时，ThreadLocal 成功识别外部来源并自动完成 Mixin 重新织入！");
 		} finally {
-			HotSwapAgent.removeTransformerBridge(mockMixinBridge);
+			RemoldAgent.removeTransformerBridge(mockMixinBridge);
 		}
 	}
 
@@ -410,8 +410,8 @@ public class MixinCompatibilityTest {
 		Object livingInstance = clazz.getDeclaredConstructor().newInstance();
 
 		// 登记基线与已加载映射
-		HotSwapAgent.bytecodeCache.put(className, rawV1);
-		HotSwapAgent.loadedClassesMap.put(className, clazz);
+		RemoldAgent.bytecodeCache.put(className, rawV1);
+		RemoldAgent.loadedClassesMap.put(className, clazz);
 
 		// 新版本：删除了 fieldB（存在存活实例 livingInstance）
 		byte[] rawV2 = buildTargetClassWithFields(className, Arrays.asList(

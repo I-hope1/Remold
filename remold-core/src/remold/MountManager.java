@@ -29,7 +29,7 @@ import static remold.RemoldAgent.*;
  *   <li><b>独立隔离加载器</b>：支持为未匹配到宿主加载器的路径创建轻量隔离 {@link java.net.URLClassLoader}。</li>
  * </ul>
  *
- * @see HotSwapAgent
+ * @see RemoldAgent
  * @see PackageUnsealer
  */
 public class MountManager {
@@ -89,7 +89,7 @@ public class MountManager {
 		// 溯源：找到该 class 文件所属的根目录。
 		// 正常情况是 watchDir；jar 解压路径（tmpDir）不在 watchDir 内，
 		// findMatchingRoot 会返回 null，此时 fallback 到 classFilePath 向上找到
-		// nipx-hotswap 临时根目录（即 extractJarToTemp 创建的 tmpDir）作为挂载点。
+		// remold-hotswap 临时根目录（即 extractJarToTemp 创建的 tmpDir）作为挂载点。
 		Path rootDir = findMatchingRoot(classFilePath);
 		if (rootDir == null) {
 			rootDir = findTmpMountRoot(classFilePath);
@@ -157,8 +157,8 @@ public class MountManager {
 
 	/**
 	 * 当 classFilePath 来自 jar 解压的临时目录（不在任何 watchDir 下）时，
-	 * 向上遍历路径，找到 nipx-hotswap 下的直属子目录（即 extractJarToTemp 创建的 tmpDir）作为挂载根。
-	 * 例如：/tmp/nipx-hotswap/foo-abc123/com/example/Foo.class → /tmp/nipx-hotswap/foo-abc123
+	 * 向上遍历路径，找到 remold-hotswap 下的直属子目录（即 extractJarToTemp 创建的 tmpDir）作为挂载根。
+	 * 例如：/tmp/remold-hotswap/foo-abc123/com/example/Foo.class → /tmp/remold-hotswap/foo-abc123
 	 */
 	private static Path findTmpMountRoot(Path classFilePath) {
 		Path abs = classFilePath.toAbsolutePath();
@@ -166,8 +166,8 @@ public class MountManager {
 		while (p != null) {
 			Path parent = p.getParent();
 			if (parent != null && parent.getFileName() != null
-			    && parent.getFileName().toString().equals("nipx-hotswap")) {
-				return p; // p 就是 nipx-hotswap/<stem>-<hash>
+			    && parent.getFileName().toString().equals("remold-hotswap")) {
+				return p; // p 就是 remold-hotswap/<stem>-<hash>
 			}
 			p = parent;
 		}
@@ -179,7 +179,7 @@ public class MountManager {
 	static Path findMatchingRoot(Path classFile) {
 		// 必须转化为绝对路径进行比较
 		Path absoluteClass = classFile.toAbsolutePath();
-		for (Path root : HotSwapAgent.activeWatchDirs) {
+		for (Path root : RemoldAgent.activeWatchDirs) {
 			if (absoluteClass.startsWith(root.toAbsolutePath())) {
 				return root;
 			}

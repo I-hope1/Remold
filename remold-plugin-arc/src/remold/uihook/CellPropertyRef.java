@@ -13,7 +13,7 @@ import arc.struct.Seq;
 import arc.util.pooling.Pools;
 import mindustry.Vars;
 import remold.AnnotationTransformer;
-import remold.HotSwapAgent;
+import remold.RemoldAgent;
 import remold.Injector;
 import remold.InstanceTracker;
 import remold.LambdaAligner;
@@ -249,10 +249,10 @@ public class CellPropertyRef {
 	private static volatile byte[]  originalCellBytes;
 
 	static {
-		HotSwapAgent.addTransparentFramePredicate(className ->
+		RemoldAgent.addTransparentFramePredicate(className ->
 			CellPropertyRef.class.getName().equals(className)
 		);
-		HotSwapAgent.addBatchListener(new HotswapBatchListener() {
+		RemoldAgent.addBatchListener(new HotswapBatchListener() {
 			@Override
 			public void afterInternalBatch(List<ClassDefinition> redefinedClasses) {
 				if (!isEnabled()) return;
@@ -2458,7 +2458,7 @@ public class CellPropertyRef {
 			}
 		} catch (Throwable ignored) { }
 		ClassLoader cl = Thread.currentThread().getContextClassLoader();
-		return cl != null ? cl : HotSwapAgent.class.getClassLoader();
+		return cl != null ? cl : RemoldAgent.class.getClassLoader();
 	}
 
 	private static ClassHierarchyOracle.HierarchyCheck checkTableClass(ClassNode cn, String owner) {
@@ -4222,10 +4222,10 @@ public class CellPropertyRef {
 		try {
 			if (tableBuilderField == null) {
 				try {
-					tableBuilderField = Table.class.getField("$nipx$builder");
+					tableBuilderField = Table.class.getField("$remold$builder");
 				} catch (NoSuchFieldException e) {
 					try {
-						tableBuilderField = Table.class.getDeclaredField("$nipx$builder");
+						tableBuilderField = Table.class.getDeclaredField("$remold$builder");
 					} catch (NoSuchFieldException ignored) { }
 				}
 				if (tableBuilderField != null) {
@@ -4246,10 +4246,10 @@ public class CellPropertyRef {
 		try {
 			if (tableBuilderField == null) {
 				try {
-					tableBuilderField = Table.class.getField("$nipx$builder");
+					tableBuilderField = Table.class.getField("$remold$builder");
 				} catch (NoSuchFieldException e) {
 					try {
-						tableBuilderField = Table.class.getDeclaredField("$nipx$builder");
+						tableBuilderField = Table.class.getDeclaredField("$remold$builder");
 					} catch (NoSuchFieldException ignored) { }
 				}
 				if (tableBuilderField != null) {
@@ -4443,7 +4443,7 @@ public class CellPropertyRef {
 		}
 
 		Injector.redefineOneClass(tableClass, injected);
-		info("[CellProperty] Table class redefined with $nipx$builder support");
+		info("[CellProperty] Table class redefined with $remold$builder support");
 	}
 
 	private static boolean containsTableHook(byte[] bytes) {
@@ -4463,7 +4463,7 @@ public class CellPropertyRef {
 				super.visit(version, access, name, signature, superName, interfaces);
 				if (CL_TABLE.equals(name)) {
 					isTable = true;
-					super.visitField(ACC_PUBLIC, "$nipx$builder", "Larc/func/Cons;", null, null).visitEnd();
+					super.visitField(ACC_PUBLIC, "$remold$builder", "Larc/func/Cons;", null, null).visitEnd();
 				}
 			}
 

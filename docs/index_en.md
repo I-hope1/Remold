@@ -115,13 +115,13 @@ English|[中文](index.md)
 
 ## 1. System Overview
 
-NipX HotSwap Agent is a **hot-reload framework** based on the Java Instrumentation API. It utilizes the Java Agent mechanism to intercept class loading and redefinition events at runtime, enabling zero-downtime updates for the target application's code. The entire system is built around a modular design, covering multiple dimensions such as bytecode awareness, difference detection, instance tracking, and performance profiling.
+Remold Agent is a **hot-reload framework** based on the Java Instrumentation API. It utilizes the Java Agent mechanism to intercept class loading and redefinition events at runtime, enabling zero-downtime updates for the target application's code. The entire system is built around a modular design, covering multiple dimensions such as bytecode awareness, difference detection, instance tracking, and performance profiling.
 
 ### 1.1 Core Capabilities
 
 | Capability            | Key Class                | Description                                                                              |
 |-----------------------|--------------------------|------------------------------------------------------------------------------------------|
-| Hot-Reload Scheduling | `HotSwapAgent`           | Monitors file changes and drives the entire reload process                               |
+| Hot-Reload Scheduling | `RemoldAgent`           | Monitors file changes and drives the entire reload process                               |
 | Bytecode Enhancement  | `MyClassFileTransformer` | Injects tracking and performance profiling code during class loading                     |
 | Difference Detection  | `ClassDiffUtil`          | Precisely compares the structure of old and new classes to decide on the reload strategy |
 | Lambda Alignment      | `LambdaAligner`          | Solves the issue of synthetic method name mismatches during hot-swapping                 |
@@ -130,7 +130,7 @@ NipX HotSwap Agent is a **hot-reload framework** based on the Java Instrumentati
 
 | Class Name               | Responsibility                                                                                                                                                  |
 |--------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `HotSwapAgent`           | Agent entry point, file monitoring, reload scheduling, the core driver for class redefinition                                                                   |
+| `RemoldAgent`           | Agent entry point, file monitoring, reload scheduling, the core driver for class redefinition                                                                   |
 | `MyClassFileTransformer` | `ClassFileTransformer` implementation, responsible for injecting `@Tracker` and `@Profile` code during class loading                                            |
 | `ClassDiffUtil`          | A bytecode-level difference analysis tool based on ASM to compare additions, deletions, and modifications of fields and methods, identifying structural changes |
 | `LambdaAligner`          | Aligner for Lambda/synthetic method names, establishes a mapping between old and new method names using hash fingerprints to prevent `NoSuchMethodError`        |
@@ -302,7 +302,7 @@ It is recommended to add a jar application startup configuration in Idea.<br>
 
 ### 4.2 Runtime Switches
 
-`HotSwapAgent` maintains the following static switches, which can be adjusted in the Agent code as needed:
+`RemoldAgent` maintains the following static switches, which can be adjusted in the Agent code as needed:
 
 | Field                  | Default | Purpose                                                                                   |
 |------------------------|---------|-------------------------------------------------------------------------------------------|
@@ -311,13 +311,13 @@ It is recommended to add a jar application startup configuration in Idea.<br>
 
 ### 4.3 Class Blacklist
 
-You can add package prefixes of classes that should not be processed to a blacklist by calling `HotSwapAgent.addBlacklist(String prefix)`. This makes the Transformer skip these classes directly, avoiding unnecessary bytecode analysis overhead:
+You can add package prefixes of classes that should not be processed to a blacklist by calling `RemoldAgent.addBlacklist(String prefix)`. This makes the Transformer skip these classes directly, avoiding unnecessary bytecode analysis overhead:
 
 ```java
 void main() {
     // Add in premain or dynamically at runtime
-    HotSwapAgent.addBlacklist("com.thirdparty.legacy");
-    HotSwapAgent.addBlacklist("org.springframework.cglib");
+    RemoldAgent.addBlacklist("com.thirdparty.legacy");
+    RemoldAgent.addBlacklist("org.springframework.cglib");
 }
 ```
 
@@ -375,7 +375,7 @@ Check the following:
 - Confirm that the `.class` file was actually written to the monitored `watchDir` directory (your IDE might output it to a different path).
 - Ensure `ENABLE_HOTSWAP_EVENT` is `true`.
 - If you've added a new method or field, the standard JVM does not support this kind of hot-swap. You'll need an extended JVM like DCEVM/HotswapJVM.
-- Check the `HotSwapAgent.info()` logs for `[DIFF]` output to confirm if difference detection was triggered.
+- Check the `RemoldAgent.info()` logs for `[DIFF]` output to confirm if difference detection was triggered.
 
 ### Q2: I'm getting a `NoSuchMethodError` after hot-reloading. How do I fix it?
 
@@ -416,7 +416,7 @@ Besides being automatically triggered by file monitoring, you can also programma
 void main() {
     // Read the new bytecode and manually trigger a reload
     byte[] newBytes = Files.readAllBytes(Path.of("/path/to/MyClass.class"));
-    HotSwapAgent.redefineClass(MyClass.class, newBytes);
+    RemoldAgent.redefineClass(MyClass.class, newBytes);
 }
 ```
 
@@ -426,6 +426,6 @@ By default, `ProfilerData` stores statistics in a `ConcurrentHashMap`. If you ne
 
 ### 7.3 Custom Blacklist Strategy
 
-The default implementation of `isBlacklisted()` uses prefix matching. If you need more complex filtering (e.g., regex, containment), you can modify the logic in `HotSwapAgent` or provide a custom `Predicate<String>` to be injected into the system.
+The default implementation of `isBlacklisted()` uses prefix matching. If you need more complex filtering (e.g., regex, containment), you can modify the logic in `RemoldAgent` or provide a custom `Predicate<String>` to be injected into the system.
 
 > **Tip**: It is recommended to use `@Profile` in production environments only during performance testing or diagnostic phases. Once diagnostics are complete, remove the annotation and redeploy to eliminate the minor performance overhead introduced by bytecode injection.

@@ -112,7 +112,7 @@ public class LambdaAligner {
 	public static volatile boolean TEST_REVERSE_GROUP_ORDER = false;
 
 	/**
-	 * 设计级变异测试开关（通过 -Dnipx.mutation=... 或测试代码动态注入）：
+	 * 设计级变异测试开关（通过 -Dremold.mutation=... 或测试代码动态注入）：
 	 * <ul>
 	 *   <li>"A": 屏蔽 alignByHostSequence</li>
 	 *   <li>"B": 去掉 canPair 中的消费者否决</li>
@@ -243,8 +243,8 @@ public class LambdaAligner {
 	 *
 	 * <p>开启方式（任一）：</p>
 	 * <pre>
-	 *   -Dnipx.lambdaAligner.debug=true          系统属性
-	 *   NIPX_LAMBDA_ALIGNER_DEBUG=1              环境变量
+	 *   -Dremold.lambdaAligner.debug=true          系统属性
+	 *   REMOLD_LAMBDA_ALIGNER_DEBUG=1              环境变量
 	 *   LambdaAligner.DEBUG = true               代码/测试直接赋值
 	 * </pre>
 	 *
@@ -255,13 +255,13 @@ public class LambdaAligner {
 	private static boolean initDebug() {
 		String p = System.getProperty("remold.lambdaAligner.debug");
 		if (p != null) return Boolean.parseBoolean(p) || "1".equals(p);
-		String e = System.getenv("NIPX_LAMBDA_ALIGNER_DEBUG");
+		String e = System.getenv("REMOLD_LAMBDA_ALIGNER_DEBUG");
 		return Boolean.parseBoolean(e) || "1".equals(e);
 	}
 
 	/** 诊断输出：仅在 {@link #DEBUG} 打开时打印，统一前缀便于 grep。 */
 	static void dbg(Supplier<String> msg) {
-		if (DEBUG) HotSwapAgent.info("[LambdaAligner] " + msg.get());
+		if (DEBUG) RemoldAgent.info("[LambdaAligner] " + msg.get());
 	}
 
 	/** 按当前测试钩子决定的方向，在 {@code groups} 上迭代（返回下标序列）。 */
@@ -290,12 +290,12 @@ public class LambdaAligner {
 		 * <ul>
 		 *   <li>若由注册的孤儿熔断器（{@link OrphanBreakerPredicate}）发起（UI / 定时轮询 / 事件回调）：抛出 {@link NoSuchMethodError}，
 		 *       触发精准局部熔断，彻底切断高频空转与死循环刷屏；</li>
-		 *   <li>若由普通业务代码发起（未受熔断保护）：经 {@link HotSwapAgent#warn} 打印警告并返回默认值（0 / null / false），
+		 *   <li>若由普通业务代码发起（未受熔断保护）：经 {@link RemoldAgent#warn} 打印警告并返回默认值（0 / null / false），
 		 *       <b>不抛出异常</b>（指幽灵自身不抛；返回的 null / 0 在下游仍可能触发 NPE，需调用方自行判空）。</li>
 		 * </ul>
 		 */
 		SMART_ADAPTIVE,
-		/** 经 {@link HotSwapAgent#warn} 打印一条日志，并返回默认值（0 / null / false）。 */
+		/** 经 {@link RemoldAgent#warn} 打印一条日志，并返回默认值（0 / null / false）。 */
 		LOG_AND_RETURN_DEFAULT,
 		/** 无条件抛出 {@link NoSuchMethodError}。 */
 		THROW_NO_SUCH_METHOD,
@@ -547,7 +547,7 @@ public class LambdaAligner {
 				}
 
 				if (++settleRound >= 64) {
-					HotSwapAgent.warn("[LambdaAligner] settled 循环达到上限(64)仍未收敛 " + ctx.currentClass);
+					RemoldAgent.warn("[LambdaAligner] settled 循环达到上限(64)仍未收敛 " + ctx.currentClass);
 					break;
 				}
 			}
@@ -661,9 +661,9 @@ public class LambdaAligner {
 			// 默认只记一行（热更失败不该刷屏）；DEBUG 下走 Logger 的 (msg, Throwable)
 			// 重载打完整堆栈 —— 而不是直接 printStackTrace，保持输出统一经日志系统。
 			if (DEBUG) {
-				HotSwapAgent.error("[LambdaAligner] align failed, fallback to newBytes", e);
+				RemoldAgent.error("[LambdaAligner] align failed, fallback to newBytes", e);
 			} else {
-				HotSwapAgent.info("[LambdaAligner] align failed, fallback to newBytes: " + e);
+				RemoldAgent.info("[LambdaAligner] align failed, fallback to newBytes: " + e);
 			}
 			return newBytes;
 		} finally {
@@ -892,7 +892,7 @@ public class LambdaAligner {
 				oi.matched = false;
 				ctx.usedOldNames.remove(oi.name);
 				totalUndone++;
-				HotSwapAgent.warn("[LambdaAligner] 引用一致性被违反，撤销配对：" + ni.name
+				RemoldAgent.warn("[LambdaAligner] 引用一致性被违反，撤销配对：" + ni.name
 				                  + " 的子 " + ni.children + " 与 " + oi.name + " 的子 " + oi.children
 				                  + " 不一致（静默错位已降级为熔断）");
 			}
@@ -1652,7 +1652,7 @@ public class LambdaAligner {
 		if (!WARNED_REALIGNMENTS.add(key)) return;
 
 		TEST_EVENTS.add(new AlignmentEvent("POS_MISMATCH", oi.name, newName, owner + "#" + newName + newDesc + "<-" + oi.name + oi.desc));
-		HotSwapAgent.warn("[LambdaAligner] 顺序回退配对但方法体不一致 " + owner
+		RemoldAgent.warn("[LambdaAligner] 顺序回退配对但方法体不一致 " + owner
 		                  + "：旧 " + oi.name + oi.desc + " <- 新 " + newName + newDesc
 		                  + "。同一逻辑组内存在多个同形 lambda 时，插入/删除会使其序号整体位移，"
 		                  + "此时旧名字会被交给一个语义不同的方法：老 CallSite **不会抛异常**，"
@@ -1673,7 +1673,7 @@ public class LambdaAligner {
 		if (!WARNED_REALIGNMENTS.add(key)) return;
 
 		TEST_EVENTS.add(new AlignmentEvent("CONSUMER_MISMATCH", oi.name, newName, oldConsumer + "->" + newConsumer));
-		HotSwapAgent.warn("[LambdaAligner] 消费者特征异化配对 " + owner
+		RemoldAgent.warn("[LambdaAligner] 消费者特征异化配对 " + owner
 		                  + "：旧 " + oi.name + oi.desc + " [" + oldConsumer + "] <- 新 "
 		                  + newName + newDesc + " [" + newConsumer + "]。"
 		                  + "配对双方调用者特征不一致，老 CallSite 可能绑至不同消费者上下文。");
@@ -1723,7 +1723,7 @@ public class LambdaAligner {
 		if (!WARNED_REALIGNMENTS.add(key)) return;
 
 		TEST_EVENTS.add(new AlignmentEvent("ANON_COLLISION", oi.name, newName, owner + "#" + newName + newDesc + "<-" + oi.name + oi.desc));
-		HotSwapAgent.warn("[LambdaAligner] 匿名类归一化导致同组同指纹配对存在歧义 " + owner
+		RemoldAgent.warn("[LambdaAligner] 匿名类归一化导致同组同指纹配对存在歧义 " + owner
 		                  + "：旧 " + oi.name + oi.desc + " <- 新 " + newName + newDesc
 		                  + "。同组内存在多个同形且包含匿名类的 lambda（同指纹），若发生新增、删除或重排可能导致方法语义错位。"
 		                  + "建议将匿名类提取为具名内部类或独立方法以确保语义稳定。");
@@ -1744,7 +1744,7 @@ public class LambdaAligner {
 				String key = ctx.currentClass + "#" + hostKey + "#" + entry.getKey();
 				if (WARNED_REALIGNMENTS.add(key)) {
 					TEST_EVENTS.add(new AlignmentEvent("HOMOMORPHIC_PRUNING", null, null, hostKey + "#hash=" + entry.getKey()));
-					HotSwapAgent.warn("[LambdaAligner] 宿主序列存在多个同构 Lambda 候选且发生缩减 " + ctx.currentClass
+					RemoldAgent.warn("[LambdaAligner] 宿主序列存在多个同构 Lambda 候选且发生缩减 " + ctx.currentClass
 					                  + " (宿主: " + hostKey + ")：存量 CallSite 可能因同构裁剪被幽灵化。建议将关键业务回调提取为独立方法。");
 				}
 				break;
@@ -2044,7 +2044,7 @@ public class LambdaAligner {
 
 	/** 放弃修复时留痕，避免“静默失效”。 */
 	private static void warnSkipSwitch(MethodNode mn, String reason) {
-		HotSwapAgent.info("[LambdaAligner] 跳过 $deserializeLambda$ 的 switch 修复（"
+		RemoldAgent.info("[LambdaAligner] 跳过 $deserializeLambda$ 的 switch 修复（"
 		                  + mn.name + mn.desc + "）：" + reason);
 	}
 
@@ -2476,7 +2476,7 @@ public class LambdaAligner {
 			if (round == 63) {
 				// 明确区分"没算完"与"算完了"：这里留下的是**未定稿**（形状可能为 null），
 				// 而不是一个看似合法的错值。
-				HotSwapAgent.warn("[LambdaAligner] 子树形状在 " + (isOld ? "old" : "new")
+				RemoldAgent.warn("[LambdaAligner] 子树形状在 " + (isOld ? "old" : "new")
 				                  + " 侧 64 轮未收敛（存在环或异常引用），沿用当前值；未定稿者保持 null");
 			}
 		}
@@ -2554,7 +2554,7 @@ public class LambdaAligner {
 				// upDepth 停在 -1，而那行告警**永远打不出来** —— 未收敛被完全静默。
 				if (!changed && !pending) break;
 				if (round == 63) {
-					HotSwapAgent.warn("[LambdaAligner] 上行深度在 " + (isOld ? "old" : "new")
+					RemoldAgent.warn("[LambdaAligner] 上行深度在 " + (isOld ? "old" : "new")
 					                  + " 侧 64 轮未收敛（可能存在环），未定稿者保持 -1");
 				}
 			}
@@ -2609,7 +2609,7 @@ public class LambdaAligner {
 				// 正常 javac 产物不会成环（lambda 的构造关系是 DAG），这里只是防御：
 				// 真出现环时，宁可让少数方法按当前（可能不完整的）语义指纹参与匹配，
 				// 也不能让整次热更失败。
-				HotSwapAgent.warn("[LambdaAligner] 递归语义指纹在 " + className
+				RemoldAgent.warn("[LambdaAligner] 递归语义指纹在 " + className
 				                  + " 上 64 轮未收敛，沿用当前值继续（结果可能不够精确，但不影响可用性）");
 			}
 		}
@@ -2877,7 +2877,7 @@ public class LambdaAligner {
 			if (ghosted.length() > 0) ghosted.append(", ");
 			ghosted.append(mn.name);
 		}
-		HotSwapAgent.info("[LambdaAligner] " + oldCn.name + " 幽灵化 " + toInject.size()
+		RemoldAgent.info("[LambdaAligner] " + oldCn.name + " 幽灵化 " + toInject.size()
 		                  + " 个方法（老 CallSite 将走熔断/降级）：" + ghosted);
 
 		// 3. 以空壳或转发桩形式追加到新类末尾
@@ -3028,14 +3028,14 @@ public class LambdaAligner {
 	/** 日志去重。{@code add} 返回 true 表示本次是首次，才打印。 */
 	private static void logOrphanOnce(String location) {
 		if (LOGGED_ORPHANS.add(location)) {
-			HotSwapAgent.warn("[LambdaAligner] orphaned lambda invoked: " + location
+			RemoldAgent.warn("[LambdaAligner] orphaned lambda invoked: " + location
 			                  + " (subsequent invocations will be muted)");
 		}
 	}
 
 	private static void logForwardOnce(String location) {
 		if (LOGGED_FORWARDS.add(location)) {
-			HotSwapAgent.info("[LambdaAligner] orphaned lambda forwarded to method ref: " + location
+			RemoldAgent.info("[LambdaAligner] orphaned lambda forwarded to method ref: " + location
 			                  + " (ghost, not reclaimed; subsequent invocations will be muted)");
 		}
 	}

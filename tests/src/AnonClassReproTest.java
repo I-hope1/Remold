@@ -10,7 +10,7 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 
-import remold.HotSwapAgent;
+import remold.RemoldAgent;
 import remold.MethodFingerprinter;
 
 import java.io.BufferedReader;
@@ -715,7 +715,7 @@ public class AnonClassReproTest {
 			String dot = slash.replace('/', '.');
 			AnnotationTransformer.pendingAlignedClasses.put(slash, entry.getValue());
 			AnnotationTransformer.pendingAlignedClasses.put(dot, entry.getValue());
-			HotSwapAgent.bytecodeCache.put(dot, entry.getValue());
+			RemoldAgent.bytecodeCache.put(dot, entry.getValue());
 		}
 
 		check(AnnotationTransformer.pendingAlignedClasses.containsKey("testAnon/AnonCase$2"), "Scenario 11: pendingAlignedClasses 已注册位移类 $2");
@@ -747,7 +747,7 @@ public class AnonClassReproTest {
 		check(callsDelete, "Scenario 11: 拦截注入的字节码是真实正确的对齐版本 (Delete)");
 		check(!AnnotationTransformer.pendingAlignedClasses.containsKey("testAnon/AnonCase$2"), "Scenario 11: 消费后 pending 集合清除 slash 键");
 		check(!AnnotationTransformer.pendingAlignedClasses.containsKey("testAnon.AnonCase$2"), "Scenario 11: 消费后 pending 集合清除 dot 键");
-		check(HotSwapAgent.bytecodeCache.containsKey("testAnon.AnonCase$2"), "Scenario 11: bytecodeCache 保持对齐生效版本");
+		check(RemoldAgent.bytecodeCache.containsKey("testAnon.AnonCase$2"), "Scenario 11: bytecodeCache 保持对齐生效版本");
 		AnnotationTransformer.pendingAlignedClasses.clear();
 	}
 
@@ -869,7 +869,7 @@ public class AnonClassReproTest {
 		check("testCombo/ComboHost$1".equals(anonRes.renameMap.get("testCombo/ComboHost$2")), "Scenario 13: 复合位移下 Save 匿名类精准重映射回 $1");
 		check("testCombo/ComboHost$2".equals(anonRes.renameMap.get("testCombo/ComboHost$3")), "Scenario 13: 复合位移下 Delete 匿名类精准重映射回 $2");
 
-		// 构建新侧批次（包含对齐重命名后的匿名类，注册 slash 与 dot 格式键，与 HotSwapAgent 一致）
+		// 构建新侧批次（包含对齐重命名后的匿名类，注册 slash 与 dot 格式键，与 RemoldAgent 一致）
 		Map<String, byte[]> newBatch = new HashMap<>();
 		for (Map.Entry<String, byte[]> entry : anonRes.alignedAnonClasses.entrySet()) {
 			newBatch.put(entry.getKey(), entry.getValue());
@@ -951,7 +951,7 @@ public class AnonClassReproTest {
 		byte[] newV2 = new byte[]{5, 6, 7, 8};
 		byte[] freshAddedV3 = new byte[]{9, 10};
 
-		HotSwapAgent.AlignmentTransaction tx = new HotSwapAgent.AlignmentTransaction("testPin.PinHost");
+		RemoldAgent.AlignmentTransaction tx = new RemoldAgent.AlignmentTransaction("testPin.PinHost");
 		tx.pendingAdds.put("testPin/PinHost$2", newV2);
 		tx.pendingAdds.put("testPin/PinHost$3", freshAddedV3);
 		tx.pinOldBytes.put("testPin/PinHost$2", oldV1);
@@ -965,23 +965,23 @@ public class AnonClassReproTest {
 		check(!AnnotationTransformer.pendingAlignedClasses.containsKey("testPin.PinHost$3"), "Scenario 15: 回滚后新类 $3 dot 键从 pending 中彻底移除");
 		check(Arrays.equals(AnnotationTransformer.pendingAlignedClasses.get("testPin/PinHost$2"), oldV1), "Scenario 15: 旧类 $2 旧版本字节码被成功钉扎在 pending 中");
 		check(Arrays.equals(AnnotationTransformer.pendingAlignedClasses.get("testPin.PinHost$2"), oldV1), "Scenario 15: 旧类 $2 dot 键被成功钉扎在 pending 中");
-		check(!HotSwapAgent.bytecodeCache.containsKey("testPin.PinHost$2") || !Arrays.equals(HotSwapAgent.bytecodeCache.get("testPin.PinHost$2"), newV2), "Scenario 15: bytecodeCache 未被失败/拒绝的事务污染");
+		check(!RemoldAgent.bytecodeCache.containsKey("testPin.PinHost$2") || !Arrays.equals(RemoldAgent.bytecodeCache.get("testPin.PinHost$2"), newV2), "Scenario 15: bytecodeCache 未被失败/拒绝的事务污染");
 
 		// 事务提交模式验证
-		HotSwapAgent.AlignmentTransaction txOk = new HotSwapAgent.AlignmentTransaction("testPin.PinHostOk");
+		RemoldAgent.AlignmentTransaction txOk = new RemoldAgent.AlignmentTransaction("testPin.PinHostOk");
 		txOk.pendingAdds.put("testPin/PinHostOk$1", newV2);
 		txOk.cacheUpdates.put("testPin.PinHostOk$1", newV2);
 		txOk.commit();
 
 		check(Arrays.equals(AnnotationTransformer.pendingAlignedClasses.get("testPin/PinHostOk$1"), newV2), "Scenario 15: 事务提交成功写入 pending");
-		check(Arrays.equals(HotSwapAgent.bytecodeCache.get("testPin.PinHostOk$1"), newV2), "Scenario 15: 事务提交成功写入 bytecodeCache");
+		check(Arrays.equals(RemoldAgent.bytecodeCache.get("testPin.PinHostOk$1"), newV2), "Scenario 15: 事务提交成功写入 bytecodeCache");
 
 		// 清理现场
 		AnnotationTransformer.pendingAlignedClasses.remove("testPin/PinHost$2");
 		AnnotationTransformer.pendingAlignedClasses.remove("testPin.PinHost$2");
 		AnnotationTransformer.pendingAlignedClasses.remove("testPin/PinHostOk$1");
 		AnnotationTransformer.pendingAlignedClasses.remove("testPin.PinHostOk$1");
-		HotSwapAgent.bytecodeCache.remove("testPin.PinHostOk$1");
+		RemoldAgent.bytecodeCache.remove("testPin.PinHostOk$1");
 	}
 
 	// 16. 双向唯一匹配与遍历顺序无关性验证（确证真 Bug 1 修复）
@@ -1420,15 +1420,15 @@ public class AnonClassReproTest {
 			"Scenario 21: 非严格模式下歧义退化为「不配对 + 新增/孤儿」，绝不按名字盲配");
 
 		// ---- 1) strict 模式：歧义 -> 整体拒绝宿主组（§4.3-①） ----
-		boolean savedStrict = HotSwapAgent.ANON_STRICT;
+		boolean savedStrict = RemoldAgent.ANON_STRICT;
 		AnonClassAligner.AlignmentRejectedException strictReject = null;
 		try {
-			HotSwapAgent.ANON_STRICT = true;
+			RemoldAgent.ANON_STRICT = true;
 			AnonClassAligner.align("testGate/GateAmb", hostNew, oldAnon, newAnon, oldRes, newRes);
 		} catch (AnonClassAligner.AlignmentRejectedException e) {
 			strictReject = e;
 		} finally {
-			HotSwapAgent.ANON_STRICT = savedStrict;
+			RemoldAgent.ANON_STRICT = savedStrict;
 		}
 		check(strictReject != null,
 			"Scenario 21: strict 模式下 Tier 4 歧义触发 AlignmentRejectedException（§4.3-①）");
@@ -1605,10 +1605,10 @@ public class AnonClassReproTest {
 		System.out.println("\n--- Scenario 23: strict 是安全门而非匹配策略（拒绝粒度 = 整个宿主组）---");
 		File dir = new File(baseDir, "s23");
 		dir.mkdirs();
-		boolean savedStrict = HotSwapAgent.ANON_STRICT;
+		boolean savedStrict = RemoldAgent.ANON_STRICT;
 		try {
 			// 非 strict 基线：本场景内所有 "relaxed" 调用都在此状态下，避免开关泄漏到下一个小节
-			HotSwapAgent.ANON_STRICT = false;
+			RemoldAgent.ANON_STRICT = false;
 
 			// ================= A. Tier 3 结构相同 + 1-to-N =================
 			// v1: 一个匿名类；v2: 前面插入一个同构匿名类 + 原类方法体改变
@@ -1714,7 +1714,7 @@ public class AnonClassReproTest {
 					&& "testStrict/MixedC".equals(cStrict.reject.hostSlash),
 				"Scenario 23C: 拒绝携带宿主名与无证据候选对数，调用方 rejectHostGroup 据此丢弃宿主+全部匿名类（无半批次）");
 		} finally {
-			HotSwapAgent.ANON_STRICT = savedStrict;
+			RemoldAgent.ANON_STRICT = savedStrict;
 		}
 	}
 
@@ -1732,14 +1732,14 @@ public class AnonClassReproTest {
 	 */
 	static StrictOutcome alignStrict(String hostSlash, File dir, String tag, byte[][] pair) throws Exception {
 		StrictOutcome out = new StrictOutcome();
-		boolean saved = HotSwapAgent.ANON_STRICT;
+		boolean saved = RemoldAgent.ANON_STRICT;
 		try {
-			HotSwapAgent.ANON_STRICT = true;
+			RemoldAgent.ANON_STRICT = true;
 			out.result = alignHost(hostSlash, dir, tag, pair);
 		} catch (AnonClassAligner.AlignmentRejectedException e) {
 			out.reject = e;
 		} finally {
-			HotSwapAgent.ANON_STRICT = saved;
+			RemoldAgent.ANON_STRICT = saved;
 		}
 		return out;
 	}
@@ -2068,8 +2068,8 @@ public class AnonClassReproTest {
 
 		// ---------- warn 模式：有存活实例仍放行，但计数在 waived ----------
 		{
-			String prev = HotSwapAgent.ANON_LAYOUT_GATE;
-			HotSwapAgent.ANON_LAYOUT_GATE = remold.LayoutGate.MODE_WARN;
+			String prev = RemoldAgent.ANON_LAYOUT_GATE;
+			RemoldAgent.ANON_LAYOUT_GATE = remold.LayoutGate.MODE_WARN;
 			try {
 				AnonClassAligner.Result res = AnonClassAligner.align(host, v2Host, oldAnon, newAnon,
 					oldRes, newRes, name -> true);
@@ -2078,14 +2078,14 @@ public class AnonClassReproTest {
 						+ ", waived=" + res.stats.layoutGateWaived + "）");
 				check(res.orphanOldClasses.isEmpty(), "Scenario 27: warn 模式不产生孤儿");
 			} finally {
-				HotSwapAgent.ANON_LAYOUT_GATE = prev;
+				RemoldAgent.ANON_LAYOUT_GATE = prev;
 			}
 		}
 
 		// ---------- off 模式：完全恢复旧行为，不扫实例、不计数 ----------
 		{
-			String prev = HotSwapAgent.ANON_LAYOUT_GATE;
-			HotSwapAgent.ANON_LAYOUT_GATE = remold.LayoutGate.MODE_OFF;
+			String prev = RemoldAgent.ANON_LAYOUT_GATE;
+			RemoldAgent.ANON_LAYOUT_GATE = remold.LayoutGate.MODE_OFF;
 			try {
 				// 判定桩故意设为"有实例"：off 模式必须**不调用**它
 				final boolean[] called = { false };
@@ -2095,7 +2095,7 @@ public class AnonClassReproTest {
 				check(res.stats.layoutGateRejected == 0 && res.stats.layoutGateWaived == 0,
 					"Scenario 27: off 模式两个计数器都保持 0");
 			} finally {
-				HotSwapAgent.ANON_LAYOUT_GATE = prev;
+				RemoldAgent.ANON_LAYOUT_GATE = prev;
 			}
 		}
 
@@ -2487,14 +2487,14 @@ public class AnonClassReproTest {
 
 	static StrictOutcome alignStrictDirs(String hostSlash, File v1, File v2) throws Exception {
 		StrictOutcome out = new StrictOutcome();
-		boolean saved = HotSwapAgent.ANON_STRICT;
+		boolean saved = RemoldAgent.ANON_STRICT;
 		try {
-			HotSwapAgent.ANON_STRICT = true;
+			RemoldAgent.ANON_STRICT = true;
 			out.result = alignDirs(hostSlash, v1, v2);
 		} catch (AnonClassAligner.AlignmentRejectedException e) {
 			out.reject = e;
 		} finally {
-			HotSwapAgent.ANON_STRICT = saved;
+			RemoldAgent.ANON_STRICT = saved;
 		}
 		return out;
 	}
@@ -2561,8 +2561,8 @@ public class AnonClassReproTest {
 
 	/** 在替换后的 logger 下执行一次操作，收集 warn/error 文本（用于断言"保守性损失可见"）。 */
 	static void captureWarns(Runnable action, List<String> out) {
-		HotSwapAgent.Logger saved = HotSwapAgent.logger;
-		HotSwapAgent.logger = new HotSwapAgent.Logger() {
+		RemoldAgent.Logger saved = RemoldAgent.logger;
+		RemoldAgent.logger = new RemoldAgent.Logger() {
 			@Override public void log(String msg) { }
 			@Override public void info(String msg) { }
 			@Override public void warn(String msg) { out.add(msg); }
@@ -2572,7 +2572,7 @@ public class AnonClassReproTest {
 		try {
 			action.run();
 		} finally {
-			HotSwapAgent.logger = saved;
+			RemoldAgent.logger = saved;
 		}
 	}
 

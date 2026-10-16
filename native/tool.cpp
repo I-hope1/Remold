@@ -471,15 +471,6 @@ JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetInstances(
     return *res;
 }
 
-/** 兼容旧版包名的 JNI 导出别名 */
-JNIEXPORT jobjectArray JNICALL Java_nipx_util_LibTool_nGetInstances(
-    JNIEnv* env,
-    jclass clazz,
-    jclass target_clazz
-) {
-    return Java_remold_util_LibTool_nGetInstances(env, clazz, target_clazz);
-}
-
 /** JNI 导出函数：获取指定对象的所有直接引用者，失败时向 Java 抛出异常 */
 JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetReferrers(
     JNIEnv* env,
@@ -500,15 +491,6 @@ JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetReferrers(
     return *res;
 }
 
-/** 兼容旧版包名的 JNI 导出别名 */
-JNIEXPORT jobjectArray JNICALL Java_nipx_util_LibTool_nGetReferrers(
-    JNIEnv* env,
-    jclass clazz,
-    jobject target_object
-) {
-    return Java_remold_util_LibTool_nGetReferrers(env, clazz, target_object);
-}
-
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     if (!vm) return JNI_ERR;
     g_jvm.store(vm, std::memory_order_release);
@@ -521,28 +503,24 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
 
     (void)getOrAcquireJvmti(env);
 
-    const char* classNames[] = { "remold/util/LibTool", "nipx/util/LibTool" };
-    JNINativeMethod methods[] = {
-        {
-            .name = const_cast<char*>("nGetInstances"),
-            .signature = const_cast<char*>("(Ljava/lang/Class;)[Ljava/lang/Object;"),
-            .fnPtr = reinterpret_cast<void*>(&Java_remold_util_LibTool_nGetInstances),
-        },
-        {
-            .name = const_cast<char*>("nGetReferrers"),
-            .signature = const_cast<char*>("(Ljava/lang/Object;)[Ljava/lang/Object;"),
-            .fnPtr = reinterpret_cast<void*>(&Java_remold_util_LibTool_nGetReferrers),
-        },
-    };
-
-    for (const char* className : classNames) {
-        jclass clazz = env->FindClass(className);
-        if (clazz) {
-            env->RegisterNatives(clazz, methods, 2);
-            env->DeleteLocalRef(clazz);
-        } else {
-            env->ExceptionClear();
-        }
+    jclass clazz = env->FindClass("remold/util/LibTool");
+    if (clazz) {
+        JNINativeMethod methods[] = {
+            {
+                .name = const_cast<char*>("nGetInstances"),
+                .signature = const_cast<char*>("(Ljava/lang/Class;)[Ljava/lang/Object;"),
+                .fnPtr = reinterpret_cast<void*>(&Java_remold_util_LibTool_nGetInstances),
+            },
+            {
+                .name = const_cast<char*>("nGetReferrers"),
+                .signature = const_cast<char*>("(Ljava/lang/Object;)[Ljava/lang/Object;"),
+                .fnPtr = reinterpret_cast<void*>(&Java_remold_util_LibTool_nGetReferrers),
+            },
+        };
+        env->RegisterNatives(clazz, methods, 2);
+        env->DeleteLocalRef(clazz);
+    } else {
+        env->ExceptionClear();
     }
 
     return JNI_VERSION_1_6;

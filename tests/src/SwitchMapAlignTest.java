@@ -1,5 +1,5 @@
 import remold.AnonClassAligner;
-import remold.HotSwapAgent;
+import remold.RemoldAgent;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.junit.jupiter.api.AfterEach;
@@ -37,8 +37,8 @@ class SwitchMapAlignTest {
 		AnonClassAligner.TEST_REVERSE_ORDER = false;
 		AnonClassAligner.MAX_ANON_PER_HOST = 128;
 		AnonClassAligner.ALIGN_TIMEOUT_MS = 2000L;
-		HotSwapAgent.ANON_STRICT = false;
-		HotSwapAgent.ANON_DEBUG = false;
+		RemoldAgent.ANON_STRICT = false;
+		RemoldAgent.ANON_DEBUG = false;
 	}
 
 	// ---------------- 夹具源码 ----------------

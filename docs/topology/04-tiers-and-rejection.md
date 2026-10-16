@@ -78,7 +78,7 @@ private static final Comparator<CandidatePair> PAIR_COMPARATOR = (p1, p2) -> {
 3. **后置校验失败**：目标类名发生冲突（非单射），或子类目标前缀未能以父类目标前缀收敛（`validateRenameMap`）；
 4. **数量硬上限与超时**：匿名类数量超过 128 或处理时间超过 2000ms（见 [06-runtime-and-perf.md](06-runtime-and-perf.md)
    §3）；
-5. **对齐总开关关闭**：`-Dnipx.agent.anon_align=false` 时，含匿名类的宿主整体拒绝。
+5. **对齐总开关关闭**：`-Dremold.agent.anon_align=false` 时，含匿名类的宿主整体拒绝。
 
 ### 4.2 拒绝粒度与响应规范
 

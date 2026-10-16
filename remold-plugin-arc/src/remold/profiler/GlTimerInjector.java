@@ -110,19 +110,19 @@ public class GlTimerInjector implements ClassFileTransformer {
 
 	public void load() {
 		try {
-			HotSwapAgent.info("[GlTimerInjector] Retransforming " + batchClass + " and " + frameClass);
-			byte[] batchBytes = HotSwapAgent.fetchOriginalBytecode(SpriteBatch.class);
+			RemoldAgent.info("[GlTimerInjector] Retransforming " + batchClass + " and " + frameClass);
+			byte[] batchBytes = RemoldAgent.fetchOriginalBytecode(SpriteBatch.class);
 			if (batchBytes != null) {
 				byte[] injected = inject(SpriteBatch.class.getClassLoader(), batchClass, batchBytes);
 				if (injected != null) Injector.redefineOneClass(SpriteBatch.class, injected);
 			}
-			byte[] frameBytes = HotSwapAgent.fetchOriginalBytecode(Logic.class);
+			byte[] frameBytes = RemoldAgent.fetchOriginalBytecode(Logic.class);
 			if (frameBytes != null) {
 				byte[] injected = inject(Logic.class.getClassLoader(), frameClass, frameBytes);
 				if (injected != null) Injector.redefineOneClass(Logic.class, injected);
 			}
 		} catch (Throwable t) {
-			HotSwapAgent.error("[GlTimerInjector] Failed to load/retransform classes", t);
+			RemoldAgent.error("[GlTimerInjector] Failed to load/retransform classes", t);
 		}
 	}
 }

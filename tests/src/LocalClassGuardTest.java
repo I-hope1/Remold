@@ -1,5 +1,5 @@
 import remold.AnonClassAligner;
-import remold.HotSwapAgent;
+import remold.RemoldAgent;
 import remold.LocalClassGuard;
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.ClassReader;
@@ -172,7 +172,7 @@ class LocalClassGuardTest {
 
 	@Test
 	void defaultModeIsReject() {
-		assertEquals("reject", HotSwapAgent.LOCAL_CLASS_GUARD, "止血门默认 fail-closed");
+		assertEquals("reject", RemoldAgent.LOCAL_CLASS_GUARD, "止血门默认 fail-closed");
 		assertEquals("reject", LocalClassGuard.MODE_REJECT);
 	}
 
@@ -193,7 +193,7 @@ class LocalClassGuardTest {
 				}
 			}
 		}
-		assertTrue(calls, "接线守卫：HotSwapAgent 必须调用 LocalClassGuard.decide，否则止血门不会触发");
+		assertTrue(calls, "接线守卫：RemoldAgent 必须调用 LocalClassGuard.decide，否则止血门不会触发");
 	}
 
 	// ---- 工具 ----

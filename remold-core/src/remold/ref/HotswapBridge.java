@@ -71,7 +71,7 @@ public final class HotswapBridge {
 	public static final int KIND_CONDITIONAL = 1;
 
 	/**
-	 * 强制写（{@code @HotswapReinit(mode = OVERWRITE)}，参考 {@code docs/initfix/03-runtime-driver.md} §3 与 §4）：
+	 * 强制写（{@code @RemoldReinit(mode = OVERWRITE)}，参考 {@code docs/initfix/03-runtime-driver.md} §3 与 §4）：
 	 * owner 是宿主类。
 	 * <p>与 {@link #KIND_CONDITIONAL} 的唯一差别是<b>不比较旧值</b>：无条件 volatile 写。
 	 * 之操作必须经 Unsafe 而不是 {@code putfield}：{@code final} 字段只允许在声明类的
@@ -504,7 +504,7 @@ public final class HotswapBridge {
 		return new ConstantCallSite(writer.asType(callSiteType));
 	}
 
-	// ==================== 字段强制写（@HotswapReinit OVERWRITE） ====================
+	// ==================== 字段强制写（@RemoldReinit OVERWRITE） ====================
 
 	/**
 	 * {@link #KIND_FORCE} 的调用点：与 {@link #conditionalFieldCallSite} 同构，

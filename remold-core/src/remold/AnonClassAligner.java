@@ -114,10 +114,10 @@ public final class AnonClassAligner {
 		}
 	}
 
-	/** 诊断日志（{@code docs/topology/06-runtime-and-perf.md} §4 {@code -Dnipx.agent.anon_debug} / 别名 {@code -Dnipx.anonAlign.debug}，或全局 DEBUG）。 */
+	/** 诊断日志（{@code docs/topology/06-runtime-and-perf.md} §4 {@code -Dremold.agent.anon_debug} / 别名 {@code -Dremold.anonAlign.debug}，或全局 DEBUG）。 */
 	private static void dbg(String msg) {
-		if (HotSwapAgent.ANON_DEBUG || HotSwapAgent.DEBUG) {
-			HotSwapAgent.info("[ANON_ALIGN] " + msg);
+		if (RemoldAgent.ANON_DEBUG || RemoldAgent.DEBUG) {
+			RemoldAgent.info("[ANON_ALIGN] " + msg);
 		}
 	}
 
@@ -152,7 +152,7 @@ public final class AnonClassAligner {
 		 * 剩余新候选的个数（N-to-1）。只要 &gt; 0 就说明该层存在真实歧义 —— 双向唯一配对是贪心且
 		 * 完备的，凡能唯一确定的都已被取走，留下的必然是"多对多"。</p>
 		 *
-		 * <p>非严格模式下这些类退化为"新增/孤儿"；严格模式（{@code -Dnipx.agent.anon_strict=true}）
+		 * <p>非严格模式下这些类退化为"新增/孤儿"；严格模式（{@code -Dremold.agent.anon_strict=true}）
 		 * 下与 {@link #ambiguousMatches} 一起构成"缺乏唯一证据"的完整集合，任一非零即拒绝整个宿主组。</p>
 		 */
 		public int  ambiguousPairs;
@@ -314,7 +314,7 @@ public final class AnonClassAligner {
 	}
 
 	/**
-	 * 布局门用的"是否有存活实例"判定；由 {@code HotSwapAgent} 注入。
+	 * 布局门用的"是否有存活实例"判定；由 {@code RemoldAgent} 注入。
 	 *
 	 * <p>刻意做成可变静态而不是逐层传参：本类的调用链有 {@code alignCascading} →
 	 * {@code matchHierarchical} → {@code matchTier} 多层，逐层加参数会污染每一层签名，
@@ -396,7 +396,7 @@ public final class AnonClassAligner {
 		try {
 			final String hostSlash  = hostClassName.replace('.', '/');
 			final long   startNanos = System.nanoTime();
-			dbg("begin alignment for host " + hostSlash + " (maxPerHost=" + MAX_ANON_PER_HOST + ", timeoutMs=" + ALIGN_TIMEOUT_MS + ", strict=" + HotSwapAgent.ANON_STRICT + ")");
+			dbg("begin alignment for host " + hostSlash + " (maxPerHost=" + MAX_ANON_PER_HOST + ", timeoutMs=" + ALIGN_TIMEOUT_MS + ", strict=" + RemoldAgent.ANON_STRICT + ")");
 
 			// 归一化输入 Map 为内部名
 			Map<String, byte[]> normOld = normalizeMap(oldAnonClasses, hostSlash);
@@ -450,13 +450,13 @@ public final class AnonClassAligner {
 			for (int l : newByLevel.keySet()) maxLevel = Math.max(maxLevel, l);
 			if (maxLevel > 4) {
 				String msg = "anonymous class nesting depth " + maxLevel + " > 4 detected";
-				if (HotSwapAgent.ANON_STRICT) {
+				if (RemoldAgent.ANON_STRICT) {
 					throw new AlignmentRejectedException(hostSlash, msg + "; strict mode rejects the host group (docs/topology/04-tiers-and-rejection.md §4)");
 				}
 				// 注意：这只是一个**诊断阈值**，不是能力边界 —— 层级推进本身与深度无关，
 				// 真正的闸门是 MAX_ANON_PER_HOST（{@code docs/topology/06-runtime-and-perf.md} §3）与 ALIGN_TIMEOUT_MS（{@code docs/topology/06-runtime-and-perf.md} §3）。
 				// 早期注释曾声称此处"内容哈希退化为 #ANON_relId#"，那是错的：AnonClassHasher.MAX_DEPTH 从不生效（见该类注释）。
-				HotSwapAgent.warn("[ANON_ALIGN] " + msg + ". Diagnostic threshold only"
+				RemoldAgent.warn("[ANON_ALIGN] " + msg + ". Diagnostic threshold only"
 				                  + " (cascade is depth-generic; the real guards are MAX_ANON_PER_HOST=" + MAX_ANON_PER_HOST
 				                  + " and ALIGN_TIMEOUT_MS=" + ALIGN_TIMEOUT_MS + "ms).");
 			}
@@ -576,7 +576,7 @@ public final class AnonClassAligner {
 			//     非严格模式下这些类退化为"新增/孤儿"。
 			//
 			// strict 的定位是**安全门，不是匹配策略**：它不改变任何"双向唯一"配对（含拓扑判定）的结论。
-			if (HotSwapAgent.ANON_STRICT) {
+			if (RemoldAgent.ANON_STRICT) {
 				int unproven = stats.ambiguousMatches + stats.ambiguousPairs;
 				if (unproven > 0) {
 					throw new AlignmentRejectedException(hostSlash,
@@ -588,7 +588,7 @@ public final class AnonClassAligner {
 				// ⚠️ 保守性损失必须**可见**：非严格模式下不仲裁意味着相关的旧匿名类保持为孤儿、
 				// 其**存活实例继续跑旧逻辑**。若这里不打日志，用户看到热更"成功"却没有任何效果，
 				// 会误以为已生效（曾评估的夹具 L：两个同构匿名类原地改体，两条编辑都不作用于存活实例）。
-				HotSwapAgent.warn("[ANON_ALIGN] Host " + hostSlash + ": " + stats.ambiguousPairs
+				RemoldAgent.warn("[ANON_ALIGN] Host " + hostSlash + ": " + stats.ambiguousPairs
 				                  + " candidate pair(s) lack unique evidence; refused to guess"
 				                  + " (topology-equal candidates " + stats.topologyCandidatesBefore
 				                  + " -> " + stats.topologyCandidatesAfter + ", topology-decided " + stats.topologyMatches + ")."
@@ -1081,11 +1081,11 @@ public final class AnonClassAligner {
 			}
 
 			if (instantiators.isEmpty()) {
-				HotSwapAgent.log("[ANON_ALIGN] Could not find instantiator method in host " + hostSlash + " for anonymous class " + anonSlash);
+				RemoldAgent.log("[ANON_ALIGN] Could not find instantiator method in host " + hostSlash + " for anonymous class " + anonSlash);
 				return null;
 			}
 			if (instantiators.size() > 1) {
-				HotSwapAgent.log("[ANON_ALIGN] Multiple instantiator methods found for " + anonSlash + ": " + instantiators.size() + " candidates. Picking first.");
+				RemoldAgent.log("[ANON_ALIGN] Multiple instantiator methods found for " + anonSlash + ": " + instantiators.size() + " candidates. Picking first.");
 			}
 
 			MethodNode  current = instantiators.get(0);
@@ -1109,7 +1109,7 @@ public final class AnonClassAligner {
 				visited.add(caller.name + ":" + caller.desc);
 				current = caller;
 			}
-			HotSwapAgent.log("[ANON_ALIGN] Failed to trace call chain to source method for " + anonSlash + " (bottom=" + instantiators.get(0).name + ")");
+			RemoldAgent.log("[ANON_ALIGN] Failed to trace call chain to source method for " + anonSlash + " (bottom=" + instantiators.get(0).name + ")");
 		} catch (Throwable ignored) { }
 		return null;
 	}
@@ -1298,7 +1298,7 @@ public final class AnonClassAligner {
 		// 为什么必须在这一层挡：布局变化后**存活实例**读新字段得零值，而这类字段
 		// （val$*/this$0，合成）被 ClassDiffUtil 过滤，InitFix 永远补不到。
 		MatchPredicate gateWrapped = tier4Predicate;
-		if (!LayoutGate.MODE_OFF.equals(HotSwapAgent.ANON_LAYOUT_GATE)) {
+		if (!LayoutGate.MODE_OFF.equals(RemoldAgent.ANON_LAYOUT_GATE)) {
 			gateWrapped = (n, o) -> {
 				if (!tier4Predicate.test(n, o)) return false;
 				LayoutGate.Result res = LayoutGate.check(o.fieldInfos, n.fieldInfos);
@@ -1310,14 +1310,14 @@ public final class AnonClassAligner {
 				boolean hasLive = hotswapAlignerHasLiveInstances.test(o.name.replace('/', '.'));
 				if (!hasLive) {
 					stats.layoutGateWaived++;
-					HotSwapAgent.warn("[ANON-LAYOUT] " + n.name + " -> " + o.name
+					RemoldAgent.warn("[ANON-LAYOUT] " + n.name + " -> " + o.name
 					                  + ": incompatible layout but no live instances; pairing anyway (new instances"
 					                  + " initialize correctly). Reason: " + res.detail());
 					return true;
 				}
-				if (LayoutGate.MODE_WARN.equals(HotSwapAgent.ANON_LAYOUT_GATE)) {
+				if (LayoutGate.MODE_WARN.equals(RemoldAgent.ANON_LAYOUT_GATE)) {
 					stats.layoutGateWaived++;
-					HotSwapAgent.warn("[ANON-LAYOUT] " + n.name + " -> " + o.name
+					RemoldAgent.warn("[ANON-LAYOUT] " + n.name + " -> " + o.name
 					                  + ": incompatible layout with LIVE instances, pairing anyway because"
 					                  + " remold.agent.anon_layout_gate=warn. Surviving instances will read 0 for"
 					                  + " the affected field until they are recreated. Reason: " + res.detail());
@@ -1326,7 +1326,7 @@ public final class AnonClassAligner {
 				// reject：不配对。新类随后分配未占用编号，旧类成为孤儿并保留（docs/topology/01-invariants-and-remapping.md §2），
 				// 存活实例继续跑旧逻辑 —— 安全但不再更新，所以必须让用户看得见。
 				stats.layoutGateRejected++;
-				HotSwapAgent.warn("[ANON-LAYOUT] " + n.name + " -> " + o.name
+				RemoldAgent.warn("[ANON-LAYOUT] " + n.name + " -> " + o.name
 				                  + ": REFUSED to pair (incompatible layout with live instances)."
 				                  + " The old class is kept as an orphan; its LIVE instances keep running the OLD"
 				                  + " code, so this edit will NOT take effect for them until they are recreated."
@@ -1444,8 +1444,8 @@ public final class AnonClassAligner {
 			remainingOld.remove(o);
 			remainingNew.remove(n);
 			recordTierMatch(stats, tier);
-			if (HotSwapAgent.DEBUG || tier >= 4) {
-				HotSwapAgent.info("[ANON_MATCH] Tier " + tier + " bi-unique paired: " + n.name + " -> " + o.name);
+			if (RemoldAgent.DEBUG || tier >= 4) {
+				RemoldAgent.info("[ANON_MATCH] Tier " + tier + " bi-unique paired: " + n.name + " -> " + o.name);
 			}
 		}
 
@@ -1504,8 +1504,8 @@ public final class AnonClassAligner {
 			System.err.println("[WARN-ANON] Ambiguous anonymous class match in Tier " + tier +
 			                   " resolved by minDiff: " + pair.n.name + " -> " + pair.o.name +
 			                   " (diff=" + pair.diff + ")");
-			if (HotSwapAgent.DEBUG || tier >= 4) {
-				HotSwapAgent.info("[ANON_MATCH] Tier " + tier + " fallback paired (diff=" + pair.diff + "): " + pair.n.name + " -> " + pair.o.name);
+			if (RemoldAgent.DEBUG || tier >= 4) {
+				RemoldAgent.info("[ANON_MATCH] Tier " + tier + " fallback paired (diff=" + pair.diff + "): " + pair.n.name + " -> " + pair.o.name);
 			}
 		}
 	}
@@ -1624,8 +1624,8 @@ public final class AnonClassAligner {
 				remainingOld.remove(o);
 				if (stats != null) stats.topologyMatches++;
 				progress = true;
-				if (HotSwapAgent.DEBUG) {
-					HotSwapAgent.info("[ANON_MATCH] Tier 3 topology paired: " + n.name + " -> " + o.name
+				if (RemoldAgent.DEBUG) {
+					RemoldAgent.info("[ANON_MATCH] Tier 3 topology paired: " + n.name + " -> " + o.name
 					                  + " " + n.topology);
 				}
 			}

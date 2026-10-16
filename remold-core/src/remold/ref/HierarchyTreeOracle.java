@@ -1,7 +1,7 @@
 package remold.ref;
 
 import remold.AnnotationTransformer;
-import remold.HotSwapAgent;
+import remold.RemoldAgent;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.MethodVisitor;
@@ -19,7 +19,7 @@ import java.util.*;
  * 基于纯字节码元数据与 Agent 缓存实现的 {@link ClassHierarchyOracle}。
  *
  * <p>底层依赖 {@link AnnotationTransformer.HierarchyTree} 维护的轻量继承图（仅保留 {@code superName}、
- * {@code interfaces} 与 {@code access}），并优先从 {@link HotSwapAgent#bytecodeCache}
+ * {@code interfaces} 与 {@code access}），并优先从 {@link RemoldAgent#bytecodeCache}
  * 与 ClassLoader 资源流中读取字节码。在整个查询过程中绝不触发类加载。</p>
  *
  * <p>单次分析实例中通过局部 Map 缓存解析的 {@link ClassNode}，并在 Nest 成员证明中
@@ -268,7 +268,7 @@ public final class HierarchyTreeOracle implements ClassHierarchyOracle {
 	}
 
 	private byte[] readClassBytes(String internalName) {
-		byte[] cached = HotSwapAgent.bytecodeCache.get(internalName.replace('/', '.'));
+		byte[] cached = RemoldAgent.bytecodeCache.get(internalName.replace('/', '.'));
 		if (cached != null) return cached;
 		ClassLoader targetLoader = loader.get();
 		ClassLoader sourceLoader = targetLoader == null ? ClassLoader.getSystemClassLoader() : targetLoader;

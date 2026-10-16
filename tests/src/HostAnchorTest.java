@@ -1,4 +1,4 @@
-import remold.HotSwapAgent;
+import remold.RemoldAgent;
 import remold.LambdaAligner;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -526,9 +526,9 @@ public class HostAnchorTest {
 		String oldP1 = oldTargets.get(0);
 		String oldP2 = oldTargets.get(1);
 
-		HotSwapAgent.Logger oldLogger = HotSwapAgent.logger;
+		RemoldAgent.Logger oldLogger = RemoldAgent.logger;
 		List<String> warnings = new ArrayList<>();
-		HotSwapAgent.logger = new HotSwapAgent.DefaultLogger() {
+		RemoldAgent.logger = new RemoldAgent.DefaultLogger() {
 			@Override
 			public void warn(String msg) {
 				warnings.add(msg);
@@ -539,7 +539,7 @@ public class HostAnchorTest {
 		try {
 			aligned = LambdaAligner.align(v1, v2);
 		} finally {
-			HotSwapAgent.logger = oldLogger;
+			RemoldAgent.logger = oldLogger;
 		}
 		assertNotNull(aligned);
 
@@ -631,9 +631,9 @@ public class HostAnchorTest {
 		String oldP1 = oldTargets.get(0);
 		String oldP2 = oldTargets.get(1);
 
-		HotSwapAgent.Logger oldLogger = HotSwapAgent.logger;
+		RemoldAgent.Logger oldLogger = RemoldAgent.logger;
 		List<String> warnings = new ArrayList<>();
-		HotSwapAgent.logger = new HotSwapAgent.DefaultLogger() {
+		RemoldAgent.logger = new RemoldAgent.DefaultLogger() {
 			@Override
 			public void warn(String msg) {
 				warnings.add(msg);
@@ -644,7 +644,7 @@ public class HostAnchorTest {
 		try {
 			aligned = LambdaAligner.align(v1, v2);
 		} finally {
-			HotSwapAgent.logger = oldLogger;
+			RemoldAgent.logger = oldLogger;
 		}
 		assertNotNull(aligned);
 

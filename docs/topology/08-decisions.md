@@ -99,11 +99,11 @@
 ## D-ANON-7. 继承体系变更一律熔断拒绝（提示重启）
 
 - **原规划条款**：`docs/topology/06-runtime-and-perf.md` §1（原 §6.1-2）曾假定底层 JVM 支持时允许修改继承体系。
-- **实际偏离决策**：**一律熔断拒绝并提示重启**。`HotSwapAgent.processChanges` 对父类（`super_class`）或接口集合（`interfaces`）发生变动的类直接标记失败并发出重编译/重启警告，绝不尝试拓扑映射或强制 Redefine。
+- **实际偏离决策**：**一律熔断拒绝并提示重启**。`RemoldAgent.processChanges` 对父类（`super_class`）或接口集合（`interfaces`）发生变动的类直接标记失败并发出重编译/重启警告，绝不尝试拓扑映射或强制 Redefine。
 - **理由**：
   1. DCEVM / JBR 虽然在特定版本实验性允许修改继承树，但在 JVM 规范与多数 LTS 实现中，变更父类会彻底破坏 `vtable`/`itable` 虚方法分发布局、内联缓存（IC）以及 JIT 编译假设，具有极高崩溃风险；
   2. 匿名类对齐的核心目标是解决相同继承体系下的物理编号漂移。若继承体系本身被篡改，已超出了局部拓扑对齐的安全语义范畴，保守阻断是保证 JVM 稳定性的唯一防线。
-- **关联代码**：`HotSwapAgent.processChanges`，`ClassDiff.isHierarchyChanged`。
+- **关联代码**：`RemoldAgent.processChanges`，`ClassDiff.isHierarchyChanged`。
 
 ---
 

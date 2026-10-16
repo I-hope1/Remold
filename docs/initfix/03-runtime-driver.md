@@ -1,6 +1,6 @@
 # 03 伴生类、补丁驱动与写入协议
 
-适用：修改补丁发射、`applyPatch`、`HotswapBridge`、`@HotswapReinit` 时阅读。实现状态参见 `docs/status.md` 与 `AGENTS.md`。
+适用：修改补丁发射、`applyPatch`、`HotswapBridge`、`@RemoldReinit` 时阅读。实现状态参见 `docs/status.md` 与 `AGENTS.md`。
 
 ## 1. 伴生类（Patch Emitter）
 
@@ -43,12 +43,12 @@
 - 无 CAS 语义的无条件回退（子字模拟、volatile put）统一返回 `true`，不产生跳过计数。
 
 **强制写（`KIND_FORCE`）**
-- 无条件 volatile 写，仅用于 `@HotswapReinit(mode = OVERWRITE)`。
+- 无条件 volatile 写，仅用于 `@RemoldReinit(mode = OVERWRITE)`。
 - 必须经 `Unsafe`，不能用 `putfield`：`final` 字段只允许在声明类构造器里赋值，补丁是 hidden nestmate，直接 `putfield` 会在链接期抛 `IllegalAccessError`。因此 final 字段同样适用。
 
-## 4. `@HotswapReinit`
+## 4. `@RemoldReinit`
 
-- 注解：`remold.annotation.HotswapReinit`，`Mode = {CONDITIONAL, OVERWRITE}`。
+- 注解：`remold.annotation.RemoldReinit`，`Mode = {CONDITIONAL, OVERWRITE}`。
 - `OVERWRITE` 豁免：T0 判定、"构造器读过 / 别处写过"的后续加工检查。
 - **不豁免**：切片安全门。覆写只决定"要不要写"，不能让读脏的值变正确。
 - 触发豁免时打 `warn`，并写入 `PatchReport` 的 `FieldDecision.warnings`：构造器里的那部分用法不会被重放。
@@ -56,4 +56,4 @@
 
 ## 5. 合成字段过滤
 
-- `ClassDiffUtil` 统一过滤携带 `ACC_SYNTHETIC` 或 `$nipx$` 前缀的标记字段（如 `forceStaticLambdas` 生成的 `$nipx$lambdasForced`），避免与业务新增字段混淆。
+- `ClassDiffUtil` 统一过滤携带 `ACC_SYNTHETIC` 或 `$remold$` 前缀的标记字段（如 `forceStaticLambdas` 生成的 `$remold$lambdasForced`），避免与业务新增字段混淆。

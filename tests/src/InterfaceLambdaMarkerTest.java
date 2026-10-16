@@ -55,7 +55,7 @@ public class InterfaceLambdaMarkerTest {
 		new ClassReader(transformed).accept(node, 0);
 		int markerAccess = -1;
 		for (FieldNode field : node.fields) {
-			if ("$nipx$lambdasForced".equals(field.name)) {
+			if ("$remold$lambdasForced".equals(field.name)) {
 				markerAccess = field.access;
 				break;
 			}

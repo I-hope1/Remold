@@ -18,7 +18,53 @@ Remold 作为一个 Java Agent 运行。为了获得类结构变更高性能热�
 
 ---
 
-### 1.2 方式一：IntelliJ IDEA 运行配置 (IDE Run Configuration) —— 最常用
+### 1.2 方式一：Gradle 脚本插件自动化 (推荐，开箱即用)
+
+通过引入轻量脚本插件，免去手动查找类输出路径与拼写复杂 JVM 参数，自动装配并注册 `runRemold` 启动任务：
+
+#### Groovy DSL (`build.gradle`):
+```groovy
+// 引入脚本插件（可直接使用 GitHub 原始链接，或下载到本地引入）
+apply from: 'https://raw.githubusercontent.com/I-hope1/Remold/main/remold.gradle'
+
+remold {
+    // 可选：指定 remold-agent.jar 路径（默认依次寻找 libs/remold-agent.jar、remold-agent.jar 等）
+    // agentJar = "libs/remold-agent.jar"
+
+    // 可选：指定 JBR 路径（默认自动读取环境变量 JBR_HOME 或系统属性 jbr.home）
+    // jbrPath = "/path/to/jbr"
+
+    // 可选：开启本机 JDWP 远程调试（默认 false，监听安全回环 127.0.0.1:5005）
+    // debug = true
+    // debugPort = 5005
+
+    // 可选：主类（若已引入 application 插件会自动推导）
+    // mainClass = "your.package.Main"
+}
+```
+
+#### Kotlin DSL (`build.gradle.kts`):
+```kotlin
+// 引入脚本插件
+apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/main/remold.gradle.kts")
+
+remold {
+    // agentJar = "libs/remold-agent.jar"
+    // jbrPath = "/path/to/jbr"
+    // debug = true
+    // debugPort = 5005
+    // mainClass = "your.package.Main"
+}
+```
+
+一键启动热重载：
+```bash
+./gradlew runRemold
+```
+
+---
+
+### 1.3 方式二：IntelliJ IDEA 运行配置 (IDE Run Configuration)
 
 对于日常在 IDEA 中直接点击 "Run / Debug" 的开发者，直接在运行配置中配置 VM Options 即可：
 
@@ -32,6 +78,7 @@ Remold 作为一个 Java Agent 运行。为了获得类结构变更高性能热�
 -javaagent:/path/to/remold-agent.jar=build/classes/java/main;build/classes/kotlin/main
 --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED
 --add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED
+--add-exports=java.base/jdk.internal.loader=ALL-UNNAMED
 --enable-native-access=ALL-UNNAMED
 ```
 
@@ -43,9 +90,9 @@ Remold 作为一个 Java Agent 运行。为了获得类结构变更高性能热�
 
 ---
 
-### 1.3 方式二：Gradle `JavaExec` 任务自动化 (自动推导输出目录)
+### 1.4 方式三：手动配置 Gradle `JavaExec` 任务
 
-通过 Gradle 任务启动应用，可直接从 `sourceSets` 读取编译输出目录并传给 Agent，彻底免去手动拼写路径的烦恼：
+若不使用脚本插件，也可在项目中直接手动注册 `JavaExec` 任务，从 `sourceSets` 读取编译输出目录并传给 Agent：
 
 #### Kotlin DSL (`build.gradle.kts`):
 ```kotlin
@@ -67,6 +114,7 @@ tasks.register<JavaExec>("runWithRemold") {
         "-javaagent:$agentJar=$watchDirs",
         "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED",
         "--add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED",
+        "--add-exports=java.base/jdk.internal.loader=ALL-UNNAMED",
         "--enable-native-access=ALL-UNNAMED"
     )
 }
@@ -91,13 +139,14 @@ tasks.register("runWithRemold", JavaExec) {
             "-javaagent:${agentJar}=${watchDirs}",
             "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED",
             "--add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED",
+            "--add-exports=java.base/jdk.internal.loader=ALL-UNNAMED",
             "--enable-native-access=ALL-UNNAMED"
 }
 ```
 
 ---
 
-### 1.4 方式三：终端 CLI 启动
+### 1.5 方式四：终端 CLI 启动
 
 从 [Releases](https://github.com/I-hope1/Remold/releases) 下载最新版本的 `remold-agent.jar`（已内嵌重定位 ASM 9.9.1 及原生加速库）：
 
@@ -106,13 +155,14 @@ java -XX:+AllowEnhancedClassRedefinition \
      -javaagent:remold-agent.jar=build/classes/java/main \
      --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
      --add-exports java.base/jdk.internal.reflect=ALL-UNNAMED \
+     --add-exports java.base/jdk.internal.loader=ALL-UNNAMED \
      --enable-native-access=ALL-UNNAMED \
      -jar your-application.jar
 ```
 
 ---
 
-### 1.5 Gradle 依赖接入 (JitPack)
+### 1.6 Gradle 依赖接入 (JitPack)
 
 若在代码中需要使用注解（如 `@RemoldReinit`、`@OnReload`）或扩展 SPI（如 `HotswapPlugin`、`BytecodeTransformerBridge`），可在 Gradle 中引入 `api` 模块：
 

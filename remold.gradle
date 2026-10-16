@@ -1,0 +1,107 @@
+// Remold Gradle Script Plugin (Groovy DSL)
+// Usage: apply from: 'remold.gradle' (or raw GitHub URL)
+
+import org.gradle.api.plugins.JavaApplication
+
+class RemoldExtension {
+    String agentJar
+    String jbrPath
+    boolean debug = false
+    int debugPort = 5005
+    String mainClass
+    List<Object> watchDirs = []
+    List<String> extraJvmArgs = []
+}
+
+def remoldExt = project.extensions.create('remold', RemoldExtension)
+
+project.plugins.withId('java') {
+    def sourceSets = project.extensions.getByType(SourceSetContainer)
+
+    tasks.register('runRemold', JavaExec) {
+        group = 'application'
+        description = 'Runs the application with Remold Java Agent & JBR DCEVM'
+
+        classpath = sourceSets.main.runtimeClasspath
+
+        doFirst {
+            // 1. 解析 mainClass
+            def main = remoldExt.mainClass
+            if (!main && project.extensions.findByName('application')) {
+                main = (project.extensions.findByName('application') as JavaApplication).mainClass.orNull
+            }
+            if (!main && project.hasProperty('mainClassName')) {
+                main = project.property('mainClassName')
+            }
+            if (main) {
+                mainClass.set(main)
+            } else if (!mainClass.isPresent()) {
+                throw new GradleException('[Remold] 未配置 mainClass。请在 remold { mainClass = "..." } 或 application 插件中指定。')
+            }
+
+            // 2. 解析 JBR 路径
+            def jbr = remoldExt.jbrPath ?: System.getenv('JBR_HOME') ?: System.getProperty('jbr.home')
+            if (jbr) {
+                def jbrDir = new File(jbr.toString())
+                def isWin = System.getProperty('os.name').toLowerCase().contains('win')
+                def javaBin = jbrDir.isFile() ? jbrDir : new File(jbrDir, isWin ? 'bin/java.exe' : 'bin/java')
+                if (javaBin.exists()) {
+                    executable = javaBin.absolutePath
+                } else {
+                    logger.warn("[Remold] 指定的 JBR 路径不存在: ${jbr}，将使用默认 JVM 运行。")
+                }
+            }
+
+            // 3. 解析 agent jar
+            File agentFile = remoldExt.agentJar ? new File(remoldExt.agentJar.toString()) : null
+            if (agentFile == null || !agentFile.exists()) {
+                def candidates = [
+                    project.file('libs/remold-agent.jar'),
+                    project.file('remold-agent.jar'),
+                    project.rootProject.file('core/build/libs/remold-agent.jar')
+                ]
+                agentFile = candidates.find { it.exists() }
+            }
+            if (agentFile == null || !agentFile.exists()) {
+                throw new GradleException(
+                    "[Remold] 未找到 remold-agent.jar！\n" +
+                    "请将 agent jar 放置于 libs/remold-agent.jar，或在 remold { agentJar = '/path/to/remold-agent.jar' } 中指定。"
+                )
+            }
+
+            // 4. 自动推导编译输出目录并拼装监听路径
+            def classesDirs = sourceSets.main.output.classesDirs.files
+            def extraDirs = remoldExt.watchDirs.collect { project.file(it) }
+            def allWatchDirs = (classesDirs + extraDirs).findAll { it.exists() }
+            def watchPath = allWatchDirs.collect { it.absolutePath }.join(File.pathSeparator)
+
+            // 5. 装配 JVM 参数
+            def args = [
+                '-XX:+AllowEnhancedClassRedefinition',
+                "-javaagent:${agentFile.absolutePath}=${watchPath}",
+                '--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED',
+                '--add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED',
+                '--add-exports=java.base/jdk.internal.loader=ALL-UNNAMED',
+                '--enable-native-access=ALL-UNNAMED'
+            ]
+
+            if (remoldExt.debug || 'true'.equalsIgnoreCase(System.getProperty('remold.debug'))) {
+                def port = remoldExt.debugPort
+                args << "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:${port}"
+                logger.lifecycle("[Remold] JDWP 调试已开启，仅监听本机: 127.0.0.1:${port}")
+            }
+
+            if (remoldExt.extraJvmArgs) {
+                args.addAll(remoldExt.extraJvmArgs)
+            }
+            jvmArgs(args)
+
+            logger.lifecycle("[Remold] 启动配置已装配:")
+            logger.lifecycle("  - Agent: ${agentFile.absolutePath}")
+            logger.lifecycle("  - Watch 目录 (${allWatchDirs.size()} 个): ${watchPath}")
+            if (executable != 'java') {
+                logger.lifecycle("  - JBR: ${executable}")
+            }
+        }
+    }
+}

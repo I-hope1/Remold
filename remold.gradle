@@ -20,165 +20,254 @@ def remoldExt = project.extensions.create('remold', RemoldExtension)
 project.plugins.withId('java') {
     def sourceSets = project.extensions.getByType(SourceSetContainer)
 
-    tasks.register('runRemold', JavaExec) {
-        group = 'application'
-        description = 'Runs the application with Remold Java Agent & JBR DCEVM'
+    def resolveRemoldConfig = {
+        // 1. 解析 mainClass
+        def main = remoldExt.mainClass
+        if (!main && project.extensions.findByName('application')) {
+            main = (project.extensions.findByName('application') as JavaApplication).mainClass.orNull
+        }
+        if (!main && project.hasProperty('mainClassName')) {
+            main = project.property('mainClassName')
+        }
+        if (!main) {
+            throw new GradleException('[Remold] 未配置 mainClass。请在 remold { mainClass = "..." } 或 application 插件中指定。')
+        }
 
-        classpath = sourceSets.main.runtimeClasspath
-
-        doFirst {
-            // 1. 解析 mainClass
-            def main = remoldExt.mainClass
-            if (!main && project.extensions.findByName('application')) {
-                main = (project.extensions.findByName('application') as JavaApplication).mainClass.orNull
+        // 2. 解析 JBR 路径
+        def execPath = 'java'
+        def jbr = remoldExt.jbrPath ?: System.getenv('JBR_HOME') ?: System.getProperty('jbr.home')
+        if (jbr) {
+            def jbrDir = new File(jbr.toString())
+            def isWin = System.getProperty('os.name').toLowerCase().contains('win')
+            def javaBin = jbrDir.isFile() ? jbrDir : new File(jbrDir, isWin ? 'bin/java.exe' : 'bin/java')
+            if (javaBin.exists()) {
+                execPath = javaBin.absolutePath
+            } else {
+                logger.warn("[Remold] 指定的 JBR 路径不存在: ${jbr}，将使用默认 JVM 运行。")
             }
-            if (!main && project.hasProperty('mainClassName')) {
-                main = project.property('mainClassName')
-            }
-            if (main) {
-                mainClass.set(main)
-            } else if (!mainClass.isPresent()) {
-                throw new GradleException('[Remold] 未配置 mainClass。请在 remold { mainClass = "..." } 或 application 插件中指定。')
-            }
+        }
 
-            // 2. 解析 JBR 路径
-            def jbr = remoldExt.jbrPath ?: System.getenv('JBR_HOME') ?: System.getProperty('jbr.home')
-            if (jbr) {
-                def jbrDir = new File(jbr.toString())
-                def isWin = System.getProperty('os.name').toLowerCase().contains('win')
-                def javaBin = jbrDir.isFile() ? jbrDir : new File(jbrDir, isWin ? 'bin/java.exe' : 'bin/java')
-                if (javaBin.exists()) {
-                    executable = javaBin.absolutePath
-                } else {
-                    logger.warn("[Remold] 指定的 JBR 路径不存在: ${jbr}，将使用默认 JVM 运行。")
-                }
-            }
+        // 3. 解析 agent jar
+        File agentFile = remoldExt.agentJar ? new File(remoldExt.agentJar.toString()) : null
+        if (agentFile == null || !agentFile.exists()) {
+            def candidates = [
+                project.file('libs/remold-agent.jar'),
+                project.file('remold-agent.jar'),
+                project.rootProject.file('core/build/libs/remold-agent.jar')
+            ]
+            agentFile = candidates.find { it.exists() }
+        }
 
-            // 3. 解析 agent jar
-            File agentFile = remoldExt.agentJar ? new File(remoldExt.agentJar.toString()) : null
-            if (agentFile == null || !agentFile.exists()) {
-                def candidates = [
-                    project.file('libs/remold-agent.jar'),
-                    project.file('remold-agent.jar'),
-                    project.rootProject.file('core/build/libs/remold-agent.jar')
-                ]
-                agentFile = candidates.find { it.exists() }
-            }
+        // 若本地未找到，尝试从 Gradle 依赖缓存或官方 Releases 自动下载
+        if (agentFile == null || !agentFile.exists()) {
+            def ver = remoldExt.version ?: '0.1.0'
+            def cacheDir = new File(project.gradle.gradleUserHomeDir, "caches/remold")
+            def cachedJar = new File(cacheDir, "remold-agent-${ver}.jar")
 
-            // 若本地未找到，尝试从 Gradle 依赖缓存或官方 Releases 自动下载
-            if (agentFile == null || !agentFile.exists()) {
-                def ver = remoldExt.version ?: '0.1.0'
-                def cacheDir = new File(project.gradle.gradleUserHomeDir, "caches/remold")
-                def cachedJar = new File(cacheDir, "remold-agent-${ver}.jar")
+            if (cachedJar.exists() && cachedJar.length() > 1024) {
+                agentFile = cachedJar
+            } else {
+                try {
+                    def detached = project.configurations.detachedConfiguration(
+                        project.dependencies.create("com.github.I-hope1.Remold:core:${ver}")
+                    )
+                    detached.transitive = false
+                    def resolved = detached.resolve()
+                    if (!resolved.isEmpty()) {
+                        agentFile = resolved.first()
+                    }
+                } catch (Exception ignored) { }
 
-                if (cachedJar.exists() && cachedJar.length() > 1024) {
-                    agentFile = cachedJar
-                } else {
-                    // 尝试 1: 通过 Gradle detachedConfiguration 从已有仓库（JitPack / MavenLocal 等）解析
-                    try {
-                        def detached = project.configurations.detachedConfiguration(
-                            project.dependencies.create("com.github.I-hope1.Remold:core:${ver}")
-                        )
-                        detached.transitive = false
-                        def resolved = detached.resolve()
-                        if (!resolved.isEmpty()) {
-                            agentFile = resolved.first()
-                        }
-                    } catch (Exception ignored) { }
-
-                    // 尝试 2: 从 GitHub Releases 自动下载至 Gradle 缓存目录
-                    if (agentFile == null || !agentFile.exists()) {
-                        logger.lifecycle("[Remold] 本地未找到 agent jar，正在自动拉取 remold-agent.jar (版本: ${ver})...")
-                        def downloadUrls = [
-                            "https://github.com/I-hope1/Remold/releases/download/v${ver}/remold-agent.jar",
-                            "https://github.com/I-hope1/Remold/releases/download/${ver}/remold-agent.jar"
-                        ]
-                        cacheDir.mkdirs()
-                        for (String urlStr : downloadUrls) {
-                            try {
-                                def uri = java.net.URI.create(urlStr)
-                                def conn = uri.toURL().openConnection()
-                                conn.setConnectTimeout(10000)
-                                conn.setReadTimeout(30000)
-                                if (conn instanceof HttpURLConnection) {
-                                    conn.instanceFollowRedirects = true
-                                    int code = conn.responseCode
-                                    if (code in 300..399) {
-                                        String loc = conn.getHeaderField("Location")
-                                        if (loc) {
-                                            conn = java.net.URI.create(loc).toURL().openConnection()
-                                            conn.setConnectTimeout(10000)
-                                            conn.setReadTimeout(30000)
-                                        }
+                if (agentFile == null || !agentFile.exists()) {
+                    logger.lifecycle("[Remold] 本地未找到 agent jar，正在自动拉取 remold-agent.jar (版本: ${ver})...")
+                    def downloadUrls = [
+                        "https://github.com/I-hope1/Remold/releases/download/v${ver}/remold-agent.jar",
+                        "https://github.com/I-hope1/Remold/releases/download/${ver}/remold-agent.jar"
+                    ]
+                    cacheDir.mkdirs()
+                    for (String urlStr : downloadUrls) {
+                        try {
+                            def uri = java.net.URI.create(urlStr)
+                            def conn = uri.toURL().openConnection()
+                            conn.setConnectTimeout(10000)
+                            conn.setReadTimeout(30000)
+                            if (conn instanceof HttpURLConnection) {
+                                conn.instanceFollowRedirects = true
+                                int code = conn.responseCode
+                                if (code in 300..399) {
+                                    String loc = conn.getHeaderField("Location")
+                                    if (loc) {
+                                        conn = java.net.URI.create(loc).toURL().openConnection()
+                                        conn.setConnectTimeout(10000)
+                                        conn.setReadTimeout(30000)
                                     }
                                 }
-                                conn.inputStream.withCloseable { inStream ->
-                                    cachedJar.withOutputStream { outStream ->
-                                        outStream << inStream
-                                    }
+                            }
+                            conn.inputStream.withCloseable { inStream ->
+                                cachedJar.withOutputStream { outStream ->
+                                    outStream << inStream
                                 }
-                                if (cachedJar.exists() && cachedJar.length() > 1024) {
-                                    agentFile = cachedJar
-                                    logger.lifecycle("[Remold] agent jar 已自动就绪: ${cachedJar.absolutePath}")
-                                    break
-                                } else {
-                                    cachedJar.delete()
-                                }
-                            } catch (Exception ignored) {
+                            }
+                            if (cachedJar.exists() && cachedJar.length() > 1024) {
+                                agentFile = cachedJar
+                                logger.lifecycle("[Remold] agent jar 已自动就绪: ${cachedJar.absolutePath}")
+                                break
+                            } else {
                                 cachedJar.delete()
                             }
+                        } catch (Exception ignored) {
+                            cachedJar.delete()
                         }
                     }
                 }
             }
+        }
 
-            if (agentFile == null || !agentFile.exists()) {
-                throw new GradleException(
-                    "[Remold] 未找到且无法自动下载 remold-agent.jar (目标版本: ${remoldExt.version})！\n" +
-                    "请检查网络或在 remold { version = '...' } 中指定有效版本，\n" +
-                    "亦可在 remold { agentJar = '/path/to/remold-agent.jar' } 中显式指定本地文件。"
-                )
+        if (agentFile == null || !agentFile.exists()) {
+            throw new GradleException(
+                "[Remold] 未找到且无法自动下载 remold-agent.jar (目标版本: ${remoldExt.version})！\n" +
+                "请检查网络或在 remold { version = '...' } 中指定有效版本，\n" +
+                "亦可在 remold { agentJar = '/path/to/remold-agent.jar' } 中显式指定本地文件。"
+            )
+        }
+
+        // 4. 自动推导编译输出目录并拼装监听路径
+        def classesDirs = sourceSets.main.output.classesDirs.files
+        def extraDirs = remoldExt.watchDirs.collect { project.file(it) }
+        def allWatchDirs = (classesDirs + extraDirs).findAll { it.exists() }
+        def watchPath = allWatchDirs.collect { it.absolutePath }.join(File.pathSeparator)
+
+        // 5. 装配 JVM 参数
+        def args = [
+            '-XX:+AllowEnhancedClassRedefinition',
+            "-javaagent:${agentFile.absolutePath}=${watchPath}",
+            '--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED',
+            '--add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED',
+            '--add-exports=java.base/jdk.internal.loader=ALL-UNNAMED',
+            '--enable-native-access=ALL-UNNAMED'
+        ]
+
+        if (remoldExt.debug || 'true'.equalsIgnoreCase(System.getProperty('remold.debug'))) {
+            def port = remoldExt.debugPort
+            args << "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:${port}"
+            logger.lifecycle("[Remold] JDWP 调试已开启，仅监听本机: 127.0.0.1:${port}")
+        }
+
+        if (remoldExt.extraJvmArgs) {
+            args.addAll(remoldExt.extraJvmArgs)
+        }
+        if (remoldExt.fileShakeMs != null) {
+            args << "-Dremold.agent.file_shake_ms=${remoldExt.fileShakeMs}"
+        }
+
+        return [
+            mainClass: main,
+            executable: execPath,
+            agentFile: agentFile,
+            allWatchDirs: allWatchDirs,
+            watchPath: watchPath,
+            jvmArgs: args,
+            runtimeClasspath: sourceSets.main.runtimeClasspath
+        ]
+    }
+
+    tasks.register('runRemold', JavaExec) {
+        group = 'application'
+        description = 'Runs the application with Remold Java Agent & JBR DCEVM (blocking foreground)'
+
+        classpath = sourceSets.main.runtimeClasspath
+
+        doFirst {
+            def conf = resolveRemoldConfig()
+            mainClass.set(conf.mainClass)
+            if (conf.executable != 'java') {
+                executable = conf.executable
             }
-
-            // 4. 自动推导编译输出目录并拼装监听路径
-            def classesDirs = sourceSets.main.output.classesDirs.files
-            def extraDirs = remoldExt.watchDirs.collect { project.file(it) }
-            def allWatchDirs = (classesDirs + extraDirs).findAll { it.exists() }
-            def watchPath = allWatchDirs.collect { it.absolutePath }.join(File.pathSeparator)
-
-            // 5. 装配 JVM 参数
-            def args = [
-                '-XX:+AllowEnhancedClassRedefinition',
-                "-javaagent:${agentFile.absolutePath}=${watchPath}",
-                '--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED',
-                '--add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED',
-                '--add-exports=java.base/jdk.internal.loader=ALL-UNNAMED',
-                '--enable-native-access=ALL-UNNAMED'
-            ]
-
-            if (remoldExt.debug || 'true'.equalsIgnoreCase(System.getProperty('remold.debug'))) {
-                def port = remoldExt.debugPort
-                args << "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:${port}"
-                logger.lifecycle("[Remold] JDWP 调试已开启，仅监听本机: 127.0.0.1:${port}")
-            }
-
-            if (remoldExt.extraJvmArgs) {
-                args.addAll(remoldExt.extraJvmArgs)
-            }
-            if (remoldExt.fileShakeMs != null) {
-                args << "-Dremold.agent.file_shake_ms=${remoldExt.fileShakeMs}"
-            }
-            jvmArgs(args)
+            jvmArgs(conf.jvmArgs)
 
             logger.lifecycle("[Remold] 启动配置已装配:")
-            logger.lifecycle("  - Agent: ${agentFile.absolutePath}")
-            logger.lifecycle("  - Watch 目录 (${allWatchDirs.size()} 个): ${watchPath}")
+            logger.lifecycle("  - Agent: ${conf.agentFile.absolutePath}")
+            logger.lifecycle("  - Watch 目录 (${conf.allWatchDirs.size()} 个): ${conf.watchPath}")
             if (remoldExt.fileShakeMs != null) {
                 logger.lifecycle("  - File Shake: ${remoldExt.fileShakeMs}ms")
             }
-            if (executable != 'java') {
-                logger.lifecycle("  - JBR: ${executable}")
+            if (conf.executable != 'java') {
+                logger.lifecycle("  - JBR: ${conf.executable}")
             }
+        }
+    }
+
+    tasks.register('generateRemoldScript') {
+        group = 'application'
+        description = 'Generates native standalone launcher scripts and args file to run Remold without Gradle Daemon'
+        dependsOn 'classes'
+
+        doLast {
+            def conf = resolveRemoldConfig()
+            def buildDir = project.layout.buildDirectory.asFile.get()
+            def remoldDir = new File(buildDir, 'remold')
+            remoldDir.mkdirs()
+
+            def argsFile = new File(remoldDir, 'remold.args')
+            def lines = []
+            lines.addAll(conf.jvmArgs)
+            lines << '-cp'
+            lines << conf.runtimeClasspath.asPath
+            lines << conf.mainClass
+
+            argsFile.withWriter('UTF-8') { writer ->
+                lines.each { line ->
+                    if (line.contains(' ') || line.contains('\t')) {
+                        writer.writeLine("\"${line.replace('\\', '\\\\')}\"")
+                    } else {
+                        writer.writeLine(line)
+                    }
+                }
+            }
+
+            def batFile = new File(buildDir, 'run-remold.bat')
+            batFile.text = "@echo off\r\nset \"JAVA_EXE=${conf.executable}\"\r\nif not exist \"%JAVA_EXE%\" set \"JAVA_EXE=java\"\r\n\"%JAVA_EXE%\" @\"%~dp0remold\\remold.args\" %*\r\n"
+
+            def shFile = new File(buildDir, 'run-remold.sh')
+            shFile.text = "#!/usr/bin/env bash\nDIR=\"\$(cd \"\$(dirname \"\${BASH_SOURCE[0]}\")\" && pwd)\"\nJAVA_EXE=\"${conf.executable}\"\nif [ ! -f \"\$JAVA_EXE\" ]; then\n    JAVA_EXE=\"java\"\nfi\nexec \"\$JAVA_EXE\" \"@\$DIR/remold/remold.args\" \"\$@\"\n"
+            try {
+                shFile.setExecutable(true, false)
+            } catch (Exception ignored) { }
+
+            logger.lifecycle("[Remold] 已生成原生启动脚本:")
+            logger.lifecycle("  - Windows: ${batFile.absolutePath}")
+            logger.lifecycle("  - Linux/macOS: ${shFile.absolutePath}")
+            logger.lifecycle("  - Args 文件: ${argsFile.absolutePath}")
+            logger.lifecycle("[Remold] 直接运行脚本即可启动应用，不经由 Gradle，零 Daemon 占用！")
+        }
+    }
+
+    tasks.register('startRemold') {
+        group = 'application'
+        description = 'Starts the application in a detached process so Gradle Daemon is immediately freed'
+        dependsOn 'generateRemoldScript'
+
+        doLast {
+            def conf = resolveRemoldConfig()
+            def buildDir = project.layout.buildDirectory.asFile.get()
+            def argsFile = new File(buildDir, 'remold/remold.args')
+            def isWin = System.getProperty('os.name').toLowerCase().contains('win')
+
+            if (isWin) {
+                new ProcessBuilder('cmd', '/c', 'start', "\"Remold [${project.name}]\"", conf.executable, "@${argsFile.absolutePath}")
+                    .directory(project.projectDir)
+                    .start()
+                logger.lifecycle("[Remold] 应用已在独立控制台窗口启动！")
+            } else {
+                def logFile = new File(buildDir, 'remold/remold.log')
+                new ProcessBuilder(conf.executable, "@${argsFile.absolutePath}")
+                    .directory(project.projectDir)
+                    .redirectOutput(logFile)
+                    .redirectErrorStream(true)
+                    .start()
+                logger.lifecycle("[Remold] 应用已在后台脱离启动！输出日志: ${logFile.absolutePath}")
+            }
+            logger.lifecycle("[Remold] Gradle Daemon 已立即释放 (IDLE)。随时可在终端执行 ./gradlew compileJava 触发热重载。")
         }
     }
 }

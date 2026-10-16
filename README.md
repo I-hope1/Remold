@@ -72,6 +72,14 @@ remold {
 ```
 
 > [!TIP]
+> **如何避免独占 Gradle Daemon？**
+> `runRemold` 作为标准的 Gradle `JavaExec` 任务，在前台运行时会阻塞当前构建进程。若希望释放常驻 Gradle Daemon 以便随时执行 `./gradlew compileJava`，可选用以下任一轻量方案：
+> 1. **命令行临时模式**：`./gradlew runRemold --no-daemon`（单次临时 JVM 运行，退出即销毁，绝不占用常驻 Daemon）；
+> 2. **独立窗口脱离启动**：`./gradlew startRemold`（在独立窗口启动应用，启动完成后 Gradle 任务立即结束，Daemon 瞬间恢复为 IDLE）；
+> 3. **生成原生运行脚本**：`./gradlew generateRemoldScript`（自动在 `build/` 下生成 `run-remold.bat` 和 `run-remold.sh`，直接双击或命令行运行，完全脱离 Gradle 进程）；
+> 4. **IDEA 原生启动**：直接使用 IDEA Application 运行配置（见下文方式二，0 Daemon 开销）。
+
+> [!TIP]
 > **想立即体验？** 仓库自带完整演示模块，克隆后直接运行：
 > ```bash
 > ./gradlew :example:runRemold

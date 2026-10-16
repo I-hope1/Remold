@@ -1,5 +1,5 @@
-import nipx.LambdaAligner;
-import nipx.ref.UpdateRef;
+import remold.LambdaAligner;
+import remold.ref.UpdateRef;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

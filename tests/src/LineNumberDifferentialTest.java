@@ -1,5 +1,5 @@
-import nipx.LambdaAligner;
-import nipx.LambdaAligner.AlignmentEvent;
+import remold.LambdaAligner;
+import remold.LambdaAligner.AlignmentEvent;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

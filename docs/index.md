@@ -158,7 +158,7 @@ NipX HotSwap Agent 是一个基于 Java Instrumentation API 的 **热重载框�
 `InstanceTracker.getInstances()`，您可以在运行时获取所有存活实例，这通常用于在热重载后批量刷新实例状态。
 
 ```java
-import nipx.annotation.Tracker;
+import remold.annotation.Tracker;
 
 @Tracker
 public class MyService {
@@ -186,7 +186,7 @@ void main() {
 - 统计数据包括每个方法的调用次数和累积执行时间，可以定期打印或导出。
 
 ```java
-import nipx.annotation.Profile;
+import remold.annotation.Profile;
 
 public class OrderService {
 
@@ -209,8 +209,8 @@ public class OrderService {
 当一个类成功热重载时，系统会扫描该类及其当前存活的实例，并调用被 `@OnReload` 注解的方法。这用于在不重启实例的情况下刷新内部状态。
 
 ```java
-import nipx.annotation.OnReload;
-import nipx.annotation.Tracker;
+import remold.annotation.OnReload;
+import remold.annotation.Tracker;
 
 @Tracker  // 必须与 @Tracker 一起使用以找到存活实例
 public class CacheManager {

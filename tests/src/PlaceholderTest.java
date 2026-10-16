@@ -1,4 +1,4 @@
-import nipx.MethodFingerprinter;
+import remold.MethodFingerprinter;
 import org.objectweb.asm.*;
 import org.objectweb.asm.tree.*;
 

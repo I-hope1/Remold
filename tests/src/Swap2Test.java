@@ -1,7 +1,7 @@
-import nipx.AnnotationTransformer;
-import nipx.ClassDiffUtil;
-import nipx.LambdaAligner;
-import nipx.MethodFingerprinter;
+import remold.AnnotationTransformer;
+import remold.ClassDiffUtil;
+import remold.LambdaAligner;
+import remold.MethodFingerprinter;
 import org.objectweb.asm.*;
 import org.objectweb.asm.tree.*;
 
@@ -55,7 +55,7 @@ public class Swap2Test {
 					MethodNode im = byName.get(h.getName());
 					inner.add(h.getName() + leafOf(im, cn.name) + ghostOf(mn));
 				}
-				if (n instanceof MethodInsnNode m && m.owner.equals("nipx/LambdaAligner")
+				if (n instanceof MethodInsnNode m && m.owner.equals("remold/LambdaAligner")
 				    && m.name.equals("onOrphanInvoked")) {
 					inner.add("【幽灵】");
 				}
@@ -76,7 +76,7 @@ public class Swap2Test {
 
 	static String ghostOf(MethodNode mn) {
 		for (AbstractInsnNode n : mn.instructions) {
-			if (n instanceof MethodInsnNode m && m.owner.equals("nipx/LambdaAligner")
+			if (n instanceof MethodInsnNode m && m.owner.equals("remold/LambdaAligner")
 			    && m.name.equals("onOrphanInvoked")) return "(幽灵)";
 		}
 		return "";

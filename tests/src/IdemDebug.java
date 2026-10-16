@@ -1,4 +1,4 @@
-import nipx.AnnotationTransformer;
+import remold.AnnotationTransformer;
 import org.objectweb.asm.*;
 import org.objectweb.asm.tree.*;
 

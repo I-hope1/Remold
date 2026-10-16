@@ -1,6 +1,6 @@
-import nipx.AnonClassAligner;
-import nipx.AnnotationTransformer;
-import nipx.HotSwapAgent;
+import remold.AnonClassAligner;
+import remold.AnnotationTransformer;
+import remold.HotSwapAgent;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;

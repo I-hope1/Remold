@@ -1,5 +1,5 @@
-import nipx.AnnotationTransformer;
-import nipx.LambdaAligner;
+import remold.AnnotationTransformer;
+import remold.LambdaAligner;
 import org.objectweb.asm.*;
 import org.objectweb.asm.tree.*;
 
@@ -39,7 +39,7 @@ public class SemCheck {
 			}
 			boolean ghost = false;
 			for (AbstractInsnNode n : mn.instructions) {
-				if (n instanceof MethodInsnNode m && m.owner.equals("nipx/LambdaAligner")
+				if (n instanceof MethodInsnNode m && m.owner.equals("remold/LambdaAligner")
 				    && m.name.equals("onOrphanInvoked")) ghost = true;
 			}
 			out.put(mn.name, ghost ? "【幽灵】" : leaves.toString());

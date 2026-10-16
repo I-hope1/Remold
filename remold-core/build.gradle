@@ -1,0 +1,65 @@
+plugins {
+	id 'java-library'
+	id 'maven-publish'
+	id 'com.gradleup.shadow'
+}
+
+sourceSets.main.java.srcDirs = ["src"]
+
+publishing {
+	publications {
+		maven(MavenPublication) {
+			from components.java
+			pom {
+				name = 'remold-core'
+				description = 'Core engine for Remold (InitFix, Anonymous Class Alignment, Native JVMTI)'
+				licenses {
+					license {
+						name = 'The Apache License, Version 2.0'
+						url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+					}
+				}
+			}
+		}
+	}
+}
+dependencies {
+	api project(':remold-api')
+	compileOnly project(':remold-native')
+
+	// asm
+	def asmVersion = '9.9.1'
+	api "org.ow2.asm:asm:$asmVersion"
+	api "org.ow2.asm:asm-commons:$asmVersion"
+	api "org.ow2.asm:asm-analysis:$asmVersion"
+	api "org.ow2.asm:asm-util:$asmVersion"
+	api "org.ow2.asm:asm-tree:$asmVersion"
+}
+
+shadowJar {
+	archiveClassifier.set('')
+	manifest {
+		attributes(
+				'Agent-Class': 'remold.RemoldAgent',
+				'Premain-Class': 'remold.RemoldAgent',
+				'Can-Retransform-Classes': true,
+				'Can-Redefine-Classes': true
+		)
+	}
+	exclude "module-info.class"
+	relocate 'org.objectweb.asm', 'remold.internal.asm'
+}
+
+jar {
+	dependsOn shadowJar
+	archiveClassifier.set('raw')
+}
+
+
+test {
+	useJUnitPlatform()
+	// 本模块没有 JUnit 测试（测试入口是 scratch/hstest 下的 JUnit 套件，由 hstestJunit 跑）。
+	// 不设这一条时，`:test` 会因"有测试源但没发现测试"而失败 —— 那是既有问题，
+	// 与本次改动无关，但会让 `check` 永远红。
+	failOnNoDiscoveredTests = false
+}

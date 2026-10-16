@@ -1,6 +1,6 @@
-import nipx.AnnotationTransformer;
-import nipx.LambdaAligner;
-import nipx.MethodFingerprinter;
+import remold.AnnotationTransformer;
+import remold.LambdaAligner;
+import remold.MethodFingerprinter;
 import org.objectweb.asm.*;
 import org.objectweb.asm.tree.*;
 

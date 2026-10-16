@@ -1,5 +1,5 @@
-import nipx.AnonClassAligner;
-import nipx.HotSwapAgent;
+import remold.AnonClassAligner;
+import remold.HotSwapAgent;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
@@ -205,8 +205,8 @@ class ReservedSlotsAlignTest {
 
 	@Test
 	void hotSwapAgentPassesReservedSnapshot() throws Exception {
-		byte[] bytes = ownClassBytes(HotSwapAgent.class);
-		assertNotNull(bytes, "取不到 HotSwapAgent.class 字节");
+		byte[] bytes = ownClassBytes(remold.RemoldAgent.class);
+		assertNotNull(bytes, "取不到 RemoldAgent.class 字节");
 
 		ClassNode cn = new ClassNode();
 		new ClassReader(bytes).accept(cn, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
@@ -215,7 +215,7 @@ class ReservedSlotsAlignTest {
 			if (mn.instructions == null) continue;
 			for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
 				if (insn instanceof MethodInsnNode min
-				    && "nipx/AnonClassAligner".equals(min.owner)
+				    && "remold/AnonClassAligner".equals(min.owner)
 				    && "align".equals(min.name)
 				    && min.desc.contains("Ljava/util/Set;")) {
 					callsWithSet = true;

@@ -1,4 +1,4 @@
-import nipx.LambdaAligner;
+import remold.LambdaAligner;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.objectweb.asm.*;
@@ -20,7 +20,7 @@ public class CompeteDeleteTest {
 
 	static boolean isGhostNode(MethodNode mn) {
 		for (AbstractInsnNode n : mn.instructions) {
-			if (n instanceof MethodInsnNode m && m.owner.equals("nipx/LambdaAligner")
+			if (n instanceof MethodInsnNode m && m.owner.equals("remold/LambdaAligner")
 			    && m.name.equals("onOrphanInvoked")) return true;
 		}
 		return false;

@@ -1,7 +1,7 @@
-import nipx.AnonClassAligner;
-import nipx.AnonClassHasher;
-import nipx.AnnotationTransformer;
-import nipx.LambdaAligner;
+import remold.AnonClassAligner;
+import remold.AnonClassHasher;
+import remold.AnnotationTransformer;
+import remold.LambdaAligner;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
@@ -10,8 +10,8 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 
-import nipx.HotSwapAgent;
-import nipx.MethodFingerprinter;
+import remold.HotSwapAgent;
+import remold.MethodFingerprinter;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -2069,7 +2069,7 @@ public class AnonClassReproTest {
 		// ---------- warn 模式：有存活实例仍放行，但计数在 waived ----------
 		{
 			String prev = HotSwapAgent.ANON_LAYOUT_GATE;
-			HotSwapAgent.ANON_LAYOUT_GATE = nipx.LayoutGate.MODE_WARN;
+			HotSwapAgent.ANON_LAYOUT_GATE = remold.LayoutGate.MODE_WARN;
 			try {
 				AnonClassAligner.Result res = AnonClassAligner.align(host, v2Host, oldAnon, newAnon,
 					oldRes, newRes, name -> true);
@@ -2085,7 +2085,7 @@ public class AnonClassReproTest {
 		// ---------- off 模式：完全恢复旧行为，不扫实例、不计数 ----------
 		{
 			String prev = HotSwapAgent.ANON_LAYOUT_GATE;
-			HotSwapAgent.ANON_LAYOUT_GATE = nipx.LayoutGate.MODE_OFF;
+			HotSwapAgent.ANON_LAYOUT_GATE = remold.LayoutGate.MODE_OFF;
 			try {
 				// 判定桩故意设为"有实例"：off 模式必须**不调用**它
 				final boolean[] called = { false };
@@ -2247,12 +2247,12 @@ public class AnonClassReproTest {
 		check(outerA != null && outerC != null && !outerA.equals(outerC),
 			"Scenario 25/INV-1（正对照）: 父匿名类**自身**方法体变化必须改变其指纹（" + hex(outerA) + " vs " + hex(outerC) + "）");
 
-		check(!constantPoolMentions(LambdaAligner.class, "nipx/AnonClassAligner"),
+		check(!constantPoolMentions(LambdaAligner.class, "remold/AnonClassAligner"),
 			"Scenario 25/INV-2: LambdaAligner 不得引用 AnonClassAligner（禁止互相递归）");
-		check(!constantPoolMentions(AnonClassAligner.class, "nipx/LambdaAligner"),
+		check(!constantPoolMentions(AnonClassAligner.class, "remold/LambdaAligner"),
 			"Scenario 25/INV-2: AnonClassAligner 不得引用 LambdaAligner");
-		check(constantPoolMentions(LambdaAligner.class, "nipx/AnonClassHasher")
-				&& constantPoolMentions(AnonClassAligner.class, "nipx/AnonClassHasher"),
+		check(constantPoolMentions(LambdaAligner.class, "remold/AnonClassHasher")
+				&& constantPoolMentions(AnonClassAligner.class, "remold/AnonClassHasher"),
 			"Scenario 25/INV-2（正对照）: 两者都只通过纯函数 AnonClassHasher 取指纹");
 	}
 

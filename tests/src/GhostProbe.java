@@ -1,4 +1,4 @@
-import nipx.LambdaAligner;
+import remold.LambdaAligner;
 
 import java.lang.reflect.Method;
 
@@ -28,9 +28,9 @@ public class GhostProbe {
 	public static void main(String[] args) throws Exception {
 		LambdaAligner.setOrphanPolicy(LambdaAligner.OrphanPolicy.SMART_ADAPTIVE);
 
-		Class<?> updateRef = Class.forName("nipx.ref.UpdateRef");
+		Class<?> updateRef = Class.forName("remold.ref.UpdateRef");
 		try {
-			Class.forName("nipx.uihook.CellPropertyRef");
+			Class.forName("remold.uihook.CellPropertyRef");
 		} catch (Throwable ignored) { }
 		Method wrap = updateRef.getMethod("wrap", Runnable.class);
 
@@ -82,10 +82,10 @@ public class GhostProbe {
 		isTransparent.setAccessible(true);
 		checkTransparent(isTransparent, "jdk.proxy2.$Proxy37", true);                     // JDK9+ 动态代理
 		checkTransparent(isTransparent, "com.sun.proxy.$Proxy3", true);                   // JDK8 动态代理
-		checkTransparent(isTransparent, "nipx.uihook.CellPropertyRef", true);             // 代理 handler / invoke
+		checkTransparent(isTransparent, "remold.uihook.CellPropertyRef", true);             // 代理 handler / invoke
 		checkTransparent(isTransparent, "java.lang.invoke.LambdaForm$MH/0x0000000801000400", true); // 方法句柄
 		checkTransparent(isTransparent, "com.example.build.Foo$$Lambda/0x0000000801000400", true);
-		checkTransparent(isTransparent, "nipx.ref.UpdateRef", false);                     // 真实调用者
+		checkTransparent(isTransparent, "remold.ref.UpdateRef", false);                     // 真实调用者
 		checkTransparent(isTransparent, "com.example.Business", false);                   // 业务帧
 
 		System.out.println(FAILURES == 0 ? "GHOST-PROBE: ALL PASSED"

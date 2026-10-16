@@ -1,8 +1,8 @@
-import nipx.HotSwapAgent;
-import nipx.HotSwapAgent.LayoutAction;
-import nipx.HotSwapAgent.LayoutDecision;
-import nipx.HotSwapAgent.Liveness;
-import nipx.LayoutGate.Verdict;
+import remold.RemoldAgent;
+import remold.RemoldAgent.LayoutAction;
+import remold.RemoldAgent.LayoutDecision;
+import remold.RemoldAgent.Liveness;
+import remold.LayoutGate.Verdict;
 import org.junit.jupiter.api.Test;
 
 import java.util.*;
@@ -42,7 +42,7 @@ class LayoutGateWiringTest {
 		HOST, "lg.Host$1", "lg.Host$2", "lg.Host$Builder", "lg.Other"));
 
 	private static LayoutDecision decide(byte[] oldB, byte[] newB, String mode, Liveness live) {
-		return HotSwapAgent.decideLayout(HOST, oldB, newB, mode, live, BATCH);
+		return RemoldAgent.decideLayout(HOST, oldB, newB, mode, live, BATCH);
 	}
 
 	@Test
@@ -124,7 +124,7 @@ class LayoutGateWiringTest {
 
 	@Test
 	void nestedAnonHostResolvesToOuter() {
-		LayoutDecision d = HotSwapAgent.decideLayout("lg.Host$1$2",
+		LayoutDecision d = RemoldAgent.decideLayout("lg.Host$1$2",
 			withField(), withoutField(), "reject", Liveness.LIVE,
 			new LinkedHashSet<>(List.of("lg.Host", "lg.Host$1", "lg.Host$1$2")));
 		assertEquals("lg.Host", d.hostName(), "Foo$1$2 的宿主应归约到 Foo");

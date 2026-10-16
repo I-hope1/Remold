@@ -1,5 +1,5 @@
-import nipx.HotSwapAgent;
-import nipx.LambdaAligner;
+import remold.HotSwapAgent;
+import remold.LambdaAligner;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

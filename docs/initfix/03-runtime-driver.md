@@ -48,7 +48,7 @@
 
 ## 4. `@HotswapReinit`
 
-- 注解：`nipx.annotation.HotswapReinit`，`Mode = {CONDITIONAL, OVERWRITE}`。
+- 注解：`remold.annotation.HotswapReinit`，`Mode = {CONDITIONAL, OVERWRITE}`。
 - `OVERWRITE` 豁免：T0 判定、"构造器读过 / 别处写过"的后续加工检查。
 - **不豁免**：切片安全门。覆写只决定"要不要写"，不能让读脏的值变正确。
 - 触发豁免时打 `warn`，并写入 `PatchReport` 的 `FieldDecision.warnings`：构造器里的那部分用法不会被重放。

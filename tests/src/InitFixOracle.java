@@ -1,10 +1,10 @@
-import nipx.AnnotationTransformer;
-import nipx.ClassDiffUtil;
-import nipx.HotSwapAgent;
-import nipx.InstanceTracker;
-import nipx.Reflect;
-import nipx.ref.InitFix;
-import nipx.ref.HotswapBridge;
+import remold.AnnotationTransformer;
+import remold.ClassDiffUtil;
+import remold.HotSwapAgent;
+import remold.InstanceTracker;
+import remold.Reflect;
+import remold.ref.InitFix;
+import remold.ref.HotswapBridge;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;
@@ -97,7 +97,7 @@ public class InitFixOracle {
 
 	public static void main(String[] args) {
 		// InitFix.transform 的第一道开关；顺手把 agent 日志静音，只收集 error。
-		System.setProperty("nipx.agent.hotswap_plus", "true");
+		System.setProperty("remold.agent.hotswap_plus", "true");
 		HotSwapAgent.logger = new HotSwapAgent.Logger() {
 			public void log(String msg) { }
 			public void info(String msg) { }
@@ -816,7 +816,7 @@ public class InitFixOracle {
 	static final String CASE_T3R_V2 = """
 		package oracle;
 		public class CaseT3 {
-			@nipx.annotation.HotswapReinit
+			@remold.annotation.HotswapReinit
 			private final StringBuilder sb = new StringBuilder();
 			public CaseT3() { sb.append("aass"); }
 		}
@@ -908,7 +908,7 @@ public class InitFixOracle {
 	static final String CASE_N1_V2 = """
 		package oracle;
 		public class CaseN1 {
-			@nipx.annotation.HotswapReinit
+			@remold.annotation.HotswapReinit
 			private ThreadLocal<StringBuilder> sb = ThreadLocal.withInitial(StringBuilder::new);
 			public CaseN1() { sb.get().append("aass"); }
 		}
@@ -926,7 +926,7 @@ public class InitFixOracle {
 	static final String CASE_N2_V2 = """
 		package oracle;
 		public class CaseN2 {
-			@nipx.annotation.HotswapReinit(mode = nipx.annotation.HotswapReinit.Mode.OVERWRITE)
+			@remold.annotation.HotswapReinit(mode = remold.annotation.HotswapReinit.Mode.OVERWRITE)
 			private String tag = "new";
 			public String tag() { return tag; }
 		}
@@ -935,7 +935,7 @@ public class InitFixOracle {
 	static final String CASE_N3_V2 = """
 		package oracle;
 		public class CaseN3 {
-			@nipx.annotation.HotswapReinit(mode = nipx.annotation.HotswapReinit.Mode.CONDITIONAL)
+			@remold.annotation.HotswapReinit(mode = remold.annotation.HotswapReinit.Mode.CONDITIONAL)
 			private String tag = "new";
 			public String tag() { return tag; }
 		}
@@ -961,7 +961,7 @@ public class InitFixOracle {
 	static final String CASE_N4_V2 = """
 		package oracle;
 		public class CaseN4 {
-			@nipx.annotation.HotswapReinit
+			@remold.annotation.HotswapReinit
 			private int retries = 0;
 			public int retries() { return retries; }
 		}
@@ -2402,7 +2402,7 @@ public class InitFixOracle {
 	// ==================== 单例形态 S1：Kotlin object + 新增 val ====================
 	//
 	// 夹具来自**构建期** Kotlin 编译（source set ktfixV1 / ktfixV2，见 build.gradle），
-	// 目录经 -Dnipx.ktfix.v1 / -Dnipx.ktfix.v2 传入，绝不进 classpath。
+	// 目录经 -Dremold.ktfix.v1 / -Dremold.ktfix.v2 传入，绝不进 classpath。
 	//
 	// javap -c -p 结论（Kotlin 2.3.0，major 69 = jvmTarget 25）：
 	//   `object CaseKtObj { val x: Int = 1 + 2 }` 里新增的 x 被编成
@@ -2433,8 +2433,8 @@ public class InitFixOracle {
 	 * 而不是等到 {@code NoClassDefFoundError}。</p>
 	 */
 	static CompiledFixture loadCompiledFixture(String dotName) {
-		Map<String, byte[]> v1 = readCompiledClasses(System.getProperty("nipx.ktfix.v1"), dotName);
-		Map<String, byte[]> v2 = readCompiledClasses(System.getProperty("nipx.ktfix.v2"), dotName);
+		Map<String, byte[]> v1 = readCompiledClasses(System.getProperty("remold.ktfix.v1"), dotName);
+		Map<String, byte[]> v2 = readCompiledClasses(System.getProperty("remold.ktfix.v2"), dotName);
 
 		byte[] b1 = v1.get(dotName);
 		byte[] b2 = v2.get(dotName);
@@ -2458,7 +2458,7 @@ public class InitFixOracle {
 	/** 按名字读取目录（{@code pathSeparator} 分隔的多个目录）下的**全部** .class，含 $ 附属类。 */
 	static Map<String, byte[]> readCompiledClasses(String dirsPath, String dotName) {
 		if (dirsPath == null || dirsPath.isEmpty()) {
-			throw new IllegalStateException("缺少 Kotlin 夹具目录：系统属性 nipx.ktfix.* 未设置。"
+			throw new IllegalStateException("缺少 Kotlin 夹具目录：系统属性 remold.ktfix.* 未设置。"
 				+ "请通过 ./gradlew hstestInitFixOracle 运行，不要直接 java -cp 跑 oracle");
 		}
 		Map<String, byte[]> out = new LinkedHashMap<>();

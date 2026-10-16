@@ -1,5 +1,5 @@
-import nipx.AnonClassAligner;
-import nipx.HotSwapAgent;
+import remold.AnonClassAligner;
+import remold.HotSwapAgent;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.junit.jupiter.api.AfterEach;

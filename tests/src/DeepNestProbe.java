@@ -1,4 +1,4 @@
-import nipx.AnonClassAligner;
+import remold.AnonClassAligner;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
@@ -324,7 +324,7 @@ public class DeepNestProbe {
 		Collections.sort(p.childKinds);
 		p.outerMethod = AnonClassAligner.normalizeEnclosingMethod(cn.outerMethod);
 		p.outerMethodDesc = cn.outerMethodDesc;
-		p.contentHash = nipx.AnonClassHasher.hash(slash, bytes, hostSlash, res, null, null, 0);
+		p.contentHash = remold.AnonClassHasher.hash(slash, bytes, hostSlash, res, null, null, 0);
 		return p;
 	}
 
@@ -684,8 +684,8 @@ public class DeepNestProbe {
 
 		java.util.function.Function<String, byte[]> res =
 			n -> readIfExists(new File(out, n.replace('.', '/') + ".class"));
-		Long ha = nipx.AnonClassHasher.hash("deep/Desc$1", res.apply("deep/Desc$1"), "deep/Desc", res, null, null, 0);
-		Long hb = nipx.AnonClassHasher.hash("deep/Desc$2", res.apply("deep/Desc$2"), "deep/Desc", res, null, null, 0);
+		Long ha = remold.AnonClassHasher.hash("deep/Desc$1", res.apply("deep/Desc$1"), "deep/Desc", res, null, null, 0);
+		Long hb = remold.AnonClassHasher.hash("deep/Desc$2", res.apply("deep/Desc$2"), "deep/Desc", res, null, null, 0);
 		System.out.println("  Desc$1(extra(I)V)=" + hex(ha) + "  Desc$2(extra(Ljava/lang/String;)V)=" + hex(hb));
 		check(ha != null && hb != null && !ha.equals(hb),
 			"extra(I)V 与 extra(Ljava/lang/String;)V 不含匿名类引用 → 屏蔽不得抹平该差异（哈希必须不同）");
@@ -755,7 +755,7 @@ public class DeepNestProbe {
 			}
 			Collections.sort(fs);
 			Collections.sort(ms);
-			Long h = nipx.AnonClassHasher.hash(n, e.getValue(), "deep/Deep", res, null, null, 0);
+			Long h = remold.AnonClassHasher.hash(n, e.getValue(), "deep/Deep", res, null, null, 0);
 			String hostMethod = AnonClassAligner.resolveHostMethodForAnon("deep/Deep", n, res);
 			System.out.println("    " + n
 				+ "\n        hash=" + (h == null ? "null" : Long.toHexString(h))

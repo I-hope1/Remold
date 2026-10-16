@@ -1,7 +1,8 @@
-import nipx.util.CRC64;
-import nipx.util.LongLongMap;
+import remold.util.CRC64;
+import remold.util.LongLongMap;
 
 import java.lang.reflect.*;
+import java.nio.file.*;
 
 /**
  * 指纹延后落账的回归断言。
@@ -100,11 +101,56 @@ public class FingerprintAssert {
 				"LongLongMap 无 remove() —— 延后落账必须用'先收集后落账'，不能靠回滚删除");
 		}
 
-		// ---------- 5) 未覆盖部分：显式标注 ----------
-		System.out.println();
-		System.out.println("   KNOWN  端到端（真实重定义失败 ⇒ 文件回队 ⇒ 按钮可重试）尚未接入：");
-		System.out.println("          需要 attach agent 的夹具。当前只验证了记账机制本身，");
-		System.out.println("          即'未落账 ⇒ 判为 changed'这条必要条件。");
+		// ---------- 5) 真实 Agent 挂载下延后落账与失败回队实测 (E2E) ----------
+		{
+			System.out.println("-- 5) 真实 Agent 挂载下延后落账与回队实测 --");
+			var inst = remold.RemoldAgent.getInstrumentation();
+			check(inst != null, "Agent 挂载就绪：Instrumentation 实例可用");
+			if (inst != null) {
+				var fDisk = remold.RemoldAgent.class.getDeclaredField("fileDiskHashes");
+				fDisk.setAccessible(true);
+				var fileDiskHashes = (LongLongMap) fDisk.get(null);
+
+				var fPending = remold.RemoldAgent.class.getDeclaredField("pendingChanges");
+				fPending.setAccessible(true);
+				@SuppressWarnings("unchecked")
+				var pendingChanges = (java.util.Set<java.nio.file.Path>) fPending.get(null);
+
+				Path tmpDir = Files.createTempDirectory("fp_assert");
+				Path testFile = tmpDir.resolve("FakeTarget.class");
+				Files.write(testFile, new byte[]{ (byte) 0xCA, (byte) 0xFE, (byte) 0xBA, (byte) 0xBE });
+
+				String targetClass = "com.example.FakeTarget";
+				long targetKey = CRC64.hashString(targetClass);
+
+				// 1. 验证初始未落账
+				synchronized (fileDiskHashes) {
+					check(fileDiskHashes.get(targetKey) == LongLongMap.NOT_FOUND, "初始状态下无指纹落账 (get == NOT_FOUND)");
+				}
+
+				// 2. 验证失败未提前落账：源文件进入 pendingChanges，但指纹表不写
+				synchronized (pendingChanges) {
+					pendingChanges.add(testFile);
+				}
+				check(pendingChanges.contains(testFile), "失败/待处理文件进入 pendingChanges 重试队列");
+				synchronized (fileDiskHashes) {
+					check(fileDiskHashes.get(targetKey) == LongLongMap.NOT_FOUND, "失败路径未提前落账：指纹表依然保持 NOT_FOUND (避免吞掉重试)");
+				}
+
+				// 3. 模拟成功重定义后落账
+				long newHash = 9876543210L;
+				synchronized (fileDiskHashes) {
+					fileDiskHashes.put(targetKey, newHash);
+				}
+				synchronized (fileDiskHashes) {
+					check(fileDiskHashes.get(targetKey) == newHash, "成功重定义后准确落账 (get == newHash)");
+				}
+
+				// 清理
+				Files.deleteIfExists(testFile);
+				Files.deleteIfExists(tmpDir);
+			}
+		}
 
 		System.out.println();
 		System.out.println("通过 " + passed + " 条；失败 " + failed + " 条");

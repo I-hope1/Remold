@@ -21,10 +21,10 @@ sourceSets {
 }
 
 dependencies {
-	implementation project(":hotswap-api")
-	implementation project(":hotswap-core")
-	implementation project(":jni-agent")
-	implementation project(":hotswap-plugin-arc")
+	implementation project(":remold-api")
+	implementation project(":remold-core")
+	implementation project(":remold-native")
+	implementation project(":remold-plugin-arc")
 	implementation "Anuken:Mindustry:$mindustryVersion"
 	implementation "org.spongepowered:mixin:0.8.5"
 	implementation "com.google.guava:guava:33.4.0-jre"
@@ -75,15 +75,32 @@ def hstestFixtureTasks = hstestFixtureSpecs.collect { g, v, helper ->
 	}
 }
 
+def detectNativeLib() {
+	def os = System.getProperty("os.name").toLowerCase()
+	def arch = System.getProperty("os.arch").toLowerCase()
+	File lib = null
+	if (os.contains("win")) {
+		lib = rootProject.file("native/libs/tool64.dll")
+	} else if (os.contains("linux")) {
+		lib = rootProject.file("native/libs/libtool64.so")
+	} else if (os.contains("mac")) {
+		lib = (arch.contains("aarch64") || arch.contains("arm")) ?
+			rootProject.file("native/libs/libtoolarm64.dylib") :
+			rootProject.file("native/libs/libtool64.dylib")
+	}
+	return (lib != null && lib.exists()) ? lib.absolutePath : null
+}
+def nativeLibPath = detectNativeLib()
+
 // 1. JUnit 测试入口
 test {
 	group = "verification"
-	description = "运行 181 项 JUnit 拓扑对齐与安全门测试"
+	description = "运行 185 项 JUnit 拓扑对齐、Native 实例扫描与安全门测试"
 	testClassesDirs = sourceSets.main.output.classesDirs
 	classpath = sourceSets.main.runtimeClasspath
 	dependsOn classes
-	dependsOn project(":hotswap-core").tasks.named("shadowJar")
-	dependsOn project(":jni-agent").tasks.named("jar")
+	dependsOn project(":remold-core").tasks.named("shadowJar")
+	dependsOn project(":remold-native").tasks.named("jar")
 	dependsOn hstestFixtureTasks
 	inputs.dir(hstestFixtureRoot)
 	useJUnitPlatform()
@@ -92,6 +109,9 @@ test {
 	jvmArgs "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
 	        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
 	systemProperty "hstest.fixtures", hstestFixtureRoot.get().asFile.absolutePath
+	if (nativeLibPath != null) {
+		systemProperty "remold.path.libtool", nativeLibPath
+	}
 
 	def requiredJdkMajors = [8, 11, 17, 21, 25]
 	doFirst {
@@ -115,8 +135,8 @@ test {
 	}
 }
 
-// 断言测试总数 ≥ 181 且 0 skipped
-def hstestMinTests = 181
+// 断言测试总数 ≥ 185 且 0 skipped
+def hstestMinTests = 185
 tasks.register("verifyTestCount") {
 	group = "verification"
 	description = "断言 JUnit 测试数不低于基线 ${hstestMinTests}"
@@ -149,14 +169,17 @@ tasks.register("mixinProbe", JavaExec) {
 	group = "verification"
 	description = "运行 Mixin 接入与外部 JDWP 热更新兼容性实测 (E2E)"
 	dependsOn classes
-	dependsOn project(":hotswap-core").tasks.named("shadowJar")
-	dependsOn project(":jni-agent").tasks.named("jar")
+	dependsOn project(":remold-core").tasks.named("shadowJar")
+	dependsOn project(":remold-native").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
-	mainClass = "nipx.MixinCompatibilityTest"
+	mainClass = "remold.MixinCompatibilityTest"
 	doFirst {
-		jvmArgs "-javaagent:${project(':hotswap-core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${project(':remold-core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
 		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+		if (nativeLibPath != null) {
+			jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+		}
 	}
 }
 
@@ -165,16 +188,19 @@ tasks.register("initFixOracle", JavaExec) {
 	group = "verification"
 	description = "运行 InitFix 差分 Oracle（正向值比对 + 负向阻断断言）"
 	dependsOn classes
-	dependsOn project(":hotswap-core").tasks.named("shadowJar")
-	dependsOn project(":jni-agent").tasks.named("jar")
+	dependsOn project(":remold-core").tasks.named("shadowJar")
+	dependsOn project(":remold-native").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "InitFixOracle"
 	dependsOn tasks.named("compileKtfixV1Kotlin")
 	dependsOn tasks.named("compileKtfixV2Kotlin")
-	systemProperty "nipx.ktfix.v1", sourceSets.ktfixV1.output.classesDirs.asPath
-	systemProperty "nipx.ktfix.v2", sourceSets.ktfixV2.output.classesDirs.asPath
+	systemProperty "remold.ktfix.v1", sourceSets.ktfixV1.output.classesDirs.asPath
+	systemProperty "remold.ktfix.v2", sourceSets.ktfixV2.output.classesDirs.asPath
 	jvmArgs "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
 	        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+	if (nativeLibPath != null) {
+		jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+	}
 }
 
 // 4. LayoutGateAssert
@@ -182,8 +208,8 @@ tasks.register("layoutGateAssert", JavaExec) {
 	group = "verification"
 	description = "运行 LayoutGate 规则表断言"
 	dependsOn classes
-	dependsOn project(":hotswap-core").tasks.named("shadowJar")
-	dependsOn project(":jni-agent").tasks.named("jar")
+	dependsOn project(":remold-core").tasks.named("shadowJar")
+	dependsOn project(":remold-native").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "LayoutGateAssert"
 }
@@ -193,8 +219,8 @@ tasks.register("ghostProbe", JavaExec) {
 	group = "verification"
 	description = "运行幽灵桩熔断栈探测断言 (GhostProbe)"
 	dependsOn classes
-	dependsOn project(":hotswap-core").tasks.named("shadowJar")
-	dependsOn project(":jni-agent").tasks.named("jar")
+	dependsOn project(":remold-core").tasks.named("shadowJar")
+	dependsOn project(":remold-native").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "GhostProbe"
 }
@@ -202,23 +228,39 @@ tasks.register("ghostProbe", JavaExec) {
 // 6. ConcurrencyAssert
 tasks.register("concurrencyAssert", JavaExec) {
 	group = "verification"
-	description = "运行并发入口加固断言"
+	description = "运行并发入口加固断言 (E2E Agent)"
 	dependsOn classes
-	dependsOn project(":hotswap-core").tasks.named("shadowJar")
-	dependsOn project(":jni-agent").tasks.named("jar")
+	dependsOn project(":remold-core").tasks.named("shadowJar")
+	dependsOn project(":remold-native").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "ConcurrencyAssert"
+	doFirst {
+		jvmArgs "-javaagent:${project(':remold-core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+		if (nativeLibPath != null) {
+			jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+		}
+	}
 }
 
 // 7. FingerprintAssert
 tasks.register("fingerprintAssert", JavaExec) {
 	group = "verification"
-	description = "运行指纹延后落账断言"
+	description = "运行指纹延后落账断言 (E2E Agent)"
 	dependsOn classes
-	dependsOn project(":hotswap-core").tasks.named("shadowJar")
-	dependsOn project(":jni-agent").tasks.named("jar")
+	dependsOn project(":remold-core").tasks.named("shadowJar")
+	dependsOn project(":remold-native").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "FingerprintAssert"
+	doFirst {
+		jvmArgs "-javaagent:${project(':remold-core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+		if (nativeLibPath != null) {
+			jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+		}
+	}
 }
 
 // 8. verifyDocStatusMarkers
@@ -229,9 +271,10 @@ tasks.register("verifyDocStatusMarkers") {
 		def checkDirs = [
 			file("${rootDir}/docs/initfix"),
 			file("${rootDir}/docs/topology"),
-			file("${rootDir}/hotswap-core/src"),
-			file("${rootDir}/hotswap-api/src"),
-			file("${rootDir}/hotswap-plugin-arc/src")
+			file("${rootDir}/remold-core/src"),
+			file("${rootDir}/remold-api/src"),
+			file("${rootDir}/remold-plugin-arc/src"),
+			file("${rootDir}/remold-native/src")
 		]
 		def pattern = ~/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/
 		def violations = []

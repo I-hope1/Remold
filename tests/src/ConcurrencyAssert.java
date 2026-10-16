@@ -1,4 +1,4 @@
-import nipx.HotSwapAgent;
+import remold.RemoldAgent;
 
 import java.nio.file.*;
 import java.util.concurrent.*;
@@ -17,11 +17,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <b>"scheduler 正在处理时，另一个线程调用 {@code triggerHotswap()}"</b>。</p>
  *
  * <p><b>先红后绿的做法</b>：本断言读的是 agent 内的并发探针
- * （{@link HotSwapAgent#peakConcurrentHotswaps()}）。把 {@code HOTSWAP_LOCK} 摘掉后，
+ * （{@link RemoldAgent#peakConcurrentHotswaps()}）。把 {@code HOTSWAP_LOCK} 摘掉后，
  * 峰值应为 2、本断言变红；加锁后恒为 1、变绿。</p>
  *
  * <p><b>当前状态</b>：探针与锁已落地，但本入口尚未接入一个能在进程内 attach agent 的
- * 真实夹具 —— 它需要 {@code Instrumentation} 实例，而 {@code HotSwapAgent.inst} 只能由
+ * 真实夹具 —— 它需要 {@code Instrumentation} 实例，而 {@code RemoldAgent.inst} 只能由
  * agent 入口注入。因此这里先断言**可确定性验证的三件事**，并显式标注尚未覆盖的部分，
  * 避免"测试写了但没测到东西"这种更坏的情况。</p>
  */
@@ -51,7 +51,7 @@ public class ConcurrencyAssert {
 			boolean threw = false;
 			String msg = null;
 			try {
-				var m = HotSwapAgent.class.getDeclaredMethod("triggerHotswapWith", Class[].class);
+				var m = RemoldAgent.class.getDeclaredMethod("triggerHotswapWith", Class[].class);
 				m.setAccessible(true);
 				m.invoke(null, (Object) new Class<?>[0]);
 			} catch (java.lang.reflect.InvocationTargetException e) {
@@ -69,9 +69,9 @@ public class ConcurrencyAssert {
 		// ---------- 2) 探针初始态 ----------
 		{
 			System.out.println("-- 2) 并发探针 --");
-			HotSwapAgent.resetConcurrencyProbe();
-			check(HotSwapAgent.peakConcurrentHotswaps() == 0,
-				"复位后峰值为 0（实际 " + HotSwapAgent.peakConcurrentHotswaps() + "）");
+			RemoldAgent.resetConcurrencyProbe();
+			check(RemoldAgent.peakConcurrentHotswaps() == 0,
+				"复位后峰值为 0（实际 " + RemoldAgent.peakConcurrentHotswaps() + "）");
 		}
 
 		// ---------- 3) 锁本身是可重入的 ----------
@@ -80,7 +80,7 @@ public class ConcurrencyAssert {
 		// 这里直接验证 ReentrantLock 字段的可重入性，避免那条路径在生产上才发现死锁。
 		{
 			System.out.println("-- 3) 锁可重入 --");
-			var f = HotSwapAgent.class.getDeclaredField("HOTSWAP_LOCK");
+			var f = RemoldAgent.class.getDeclaredField("HOTSWAP_LOCK");
 			f.setAccessible(true);
 			var lock = (java.util.concurrent.locks.ReentrantLock) f.get(null);
 			lock.lock();
@@ -97,16 +97,39 @@ public class ConcurrencyAssert {
 			check(!lock.isLocked(), "异常路径后锁已完全释放");
 		}
 
-		// ---------- 4) 未覆盖部分：显式标注 ----------
-		//
-		// 真正的重叠复现需要 Instrumentation 实例 + 真实 attach，
-		// 现有 hstest 入口（SemAssert / InitFixOracle）都不 attach agent。
-		// 把它标成 KNOWN 而不是假装通过 —— "测试绿了但没测到"比"测试没写"更坏。
-		System.out.println();
-		System.out.println("   KNOWN  重叠复现（scheduler 处理中 + 另一线程 triggerHotswap）尚未接入：");
-		System.out.println("          需要能 attach agent 的夹具（Instrumentation 实例），");
-		System.out.println("          当前 hstest 各入口均不 attach。加锁后该场景期望峰值 1；");
-		System.out.println("          摘掉锁期望峰值 2 —— 后者才是这条断言的先红后绿依据。");
+		// ---------- 4) 真实 Agent 挂载下并发重叠与峰值实测 (E2E) ----------
+		{
+			System.out.println("-- 4) 真实 Agent 挂载下并发重叠实测 --");
+			var inst = RemoldAgent.getInstrumentation();
+			check(inst != null, "Agent 挂载就绪：Instrumentation 实例可用");
+			if (inst != null) {
+				RemoldAgent.resetConcurrencyProbe();
+				int threads = 4;
+				var startLatch = new CountDownLatch(1);
+				var doneLatch = new CountDownLatch(threads);
+				var errors = new java.util.concurrent.CopyOnWriteArrayList<Throwable>();
+
+				for (int i = 0; i < threads; i++) {
+					new Thread(() -> {
+						try {
+							startLatch.await();
+							RemoldAgent.triggerHotswap();
+						} catch (Throwable t) {
+							errors.add(t);
+						} finally {
+							doneLatch.countDown();
+						}
+					}, "ConcurrentTrigger-" + i).start();
+				}
+
+				startLatch.countDown();
+				boolean done = doneLatch.await(5, TimeUnit.SECONDS);
+				check(done, "多线程并发触发 triggerHotswap() 全部在超时内完成");
+				check(errors.isEmpty(), "多线程并发触发无异常抛出: " + errors);
+				int peak = RemoldAgent.peakConcurrentHotswaps();
+				check(peak == 1, "全流程严格受 HOTSWAP_LOCK 保护，实测峰值并发数为 1 (实际: " + peak + ")");
+			}
+		}
 
 		System.out.println();
 		System.out.println("通过 " + passed + " 条；失败 " + failed + " 条");

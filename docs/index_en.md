@@ -158,7 +158,7 @@ The system provides 4 annotations as the core API for users. By annotating busin
 Annotate a class with `@Tracker`, and the Agent will enhance its bytecode upon startup, automatically calling `InstanceTracker.register()` every time it is instantiated. In conjunction with `InstanceTracker.getInstances()`, you can get all live instances at runtime, which is often used for batch-refreshing instance states after a hot-reload.
 
 ```java
-import nipx.annotation.Tracker;
+import remold.annotation.Tracker;
 
 @Tracker
 public class MyService {
@@ -186,7 +186,7 @@ Add `@Profile` to any method you need to monitor, and the Agent will inject timi
 - The statistics include the invocation count and cumulative execution time for each method, which can be periodically printed or exported.
 
 ```java
-import nipx.annotation.Profile;
+import remold.annotation.Profile;
 
 public class OrderService {
 
@@ -209,8 +209,8 @@ public class OrderService {
 When a class is successfully hot-reloaded, the system scans the class and its current live instances, invoking the method annotated with `@OnReload`. This is used to refresh internal state without restarting the instances.
 
 ```java
-import nipx.annotation.OnReload;
-import nipx.annotation.Tracker;
+import remold.annotation.OnReload;
+import remold.annotation.Tracker;
 
 @Tracker  // Must be used with @Tracker to find live instances
 public class CacheManager {

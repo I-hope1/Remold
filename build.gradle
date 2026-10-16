@@ -3,7 +3,7 @@ plugins {
 }
 
 allprojects {
-	group = 'nipx'
+	group = 'io.github.i-hope1.remold'
 	version = '1.0.0'
 	ext {
 		mindustryVersion = 'v160.5'

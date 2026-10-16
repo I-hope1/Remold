@@ -1,4 +1,4 @@
-import nipx.MethodFingerprinter;
+import remold.MethodFingerprinter;
 import org.objectweb.asm.tree.MethodNode;
 
 /** 复用产品自己的 MethodFingerprinter 算方法体指纹。 */

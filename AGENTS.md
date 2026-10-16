@@ -57,7 +57,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 台账 | `InitFix.LEDGER`、`getUnpatchedFields` |
 | 逐实例驱动 | `runDependentInstanceTasks` / `runIndependentInstanceTasks`、`InstanceFailureBudget` |
 | 写入桥 | `HotswapBridge`（`KIND_CONDITIONAL` / `KIND_FORCE`） |
-| 注解 | `nipx.annotation.HotswapReinit` |
+| 注解 | `remold.annotation.HotswapReinit` |
 | 合成字段过滤 | `ClassDiffUtil.isInternalMarkerField` |
 | 堆实例检索（Native） | `LibTool.getInstances` |
 | 匿名类与局部类安全门 | `AnonClassAligner`、`LayoutGate`、`LocalClassGuard` |
@@ -89,7 +89,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 ## 6. 测试要求
 
 - 回归任务：`hstestInitFixOracle`（挂在 `check`，当前 48 场景 / 318 断言，以实际输出为准）。需要 Mindustry 运行期依赖（`hstestImplementation`）。
-- 必须通过 `./gradlew hstestInitFixOracle` 运行，不要直接 `java -cp`：Kotlin 夹具由 Gradle 先编译，输出目录经 `-Dnipx.ktfix.v1/v2` 传入。
+- 必须通过 `./gradlew hstestInitFixOracle` 运行，不要直接 `java -cp`：Kotlin 夹具由 Gradle 先编译，输出目录经 `-Dremold.ktfix.v1/v2` 传入。
 - Kotlin 夹具的 v1/v2 输出目录**绝不能**进入任何 classpath（同名类会静默只命中其一，造成假绿）。
 - 迭代期间只跑 `hstestInitFixOracle`，收尾时才跑一次 `./gradlew check`。
 - 匿名类/对齐主题套件已从 `suite.sh`（`hstestRun`）迁到 JUnit：`./gradlew hstestJunit`（挂在 `check`）。入口用 `-Dhstest.javac8/11/17/21/25` 现编夹具，不再有 `expected-count.txt` 基线。

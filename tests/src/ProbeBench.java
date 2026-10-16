@@ -1,4 +1,4 @@
-import nipx.LambdaAligner;
+import remold.LambdaAligner;
 
 /**
  * ① 与「日志路径零分配」的测量。

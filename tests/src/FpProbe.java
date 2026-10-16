@@ -21,15 +21,15 @@ public class FpProbe extends MethodVisitor {
 	public FpProbe(String className) {
 		super(Opcodes.ASM9);
 		this.currentClassName = className;
-		this.crc = nipx.util.CRC64.init();
+		this.crc = remold.util.CRC64.init();
 	}
 
-	private void upd(int v) { crc = nipx.util.CRC64.updateInt(crc, v); }
-	private void upd(long v) { crc = nipx.util.CRC64.updateLong(crc, v); }
+	private void upd(int v) { crc = remold.util.CRC64.updateInt(crc, v); }
+	private void upd(long v) { crc = remold.util.CRC64.updateLong(crc, v); }
 	private void upd(String s) {
 		if (s == null) { upd(-1); return; }
 		upd(s.length());
-		crc = nipx.util.CRC64.updateStringUTF16(crc, s);
+		crc = remold.util.CRC64.updateStringUTF16(crc, s);
 	}
 
 	private boolean isSelfSynthetic(String owner, String name) {
@@ -102,7 +102,7 @@ public class FpProbe extends MethodVisitor {
 			FpProbe p = new FpProbe(cn.name);
 			mn.accept(p);
 			System.out.println("=== " + tag + " : " + mn.name + mn.desc
-				+ "  hash=" + Long.toHexString(nipx.util.CRC64.finish(p.crc)) + " ===");
+				+ "  hash=" + Long.toHexString(remold.util.CRC64.finish(p.crc)) + " ===");
 			for (String s : p.trace) System.out.println(s);
 			System.out.println();
 		}

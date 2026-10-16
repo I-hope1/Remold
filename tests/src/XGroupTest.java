@@ -1,5 +1,5 @@
-import nipx.AnnotationTransformer;
-import nipx.LambdaAligner;
+import remold.AnnotationTransformer;
+import remold.LambdaAligner;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.objectweb.asm.*;
@@ -27,7 +27,7 @@ public class XGroupTest {
 
 	static boolean isGhost(MethodNode mn) {
 		for (AbstractInsnNode n : mn.instructions) {
-			if (n instanceof MethodInsnNode m && m.owner.equals("nipx/LambdaAligner")
+			if (n instanceof MethodInsnNode m && m.owner.equals("remold/LambdaAligner")
 			    && m.name.equals("onOrphanInvoked")) return true;
 		}
 		return false;

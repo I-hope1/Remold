@@ -1,5 +1,5 @@
-import nipx.AnnotationTransformer;
-import nipx.LambdaAligner;
+import remold.AnnotationTransformer;
+import remold.LambdaAligner;
 import org.objectweb.asm.*;
 import org.objectweb.asm.tree.*;
 import java.nio.file.*;
@@ -8,7 +8,7 @@ import java.util.*;
 /** 消融：v1 -> v2（插入无关 lambda）-> v3（再改 B 叶子体）。看外/中层是否保住基线的名字。 */
 public class AblateCheck {
 	static ClassNode parse(byte[] b){ClassNode c=new ClassNode();new ClassReader(b).accept(c,0);return c;}
-	static boolean isGhost(MethodNode mn){for(AbstractInsnNode n:mn.instructions)if(n instanceof MethodInsnNode m&&m.owner.equals("nipx/LambdaAligner")&&m.name.equals("onOrphanInvoked"))return true;return false;}
+	static boolean isGhost(MethodNode mn){for(AbstractInsnNode n:mn.instructions)if(n instanceof MethodInsnNode m&&m.owner.equals("remold/LambdaAligner")&&m.name.equals("onOrphanInvoked"))return true;return false;}
 	static String sem(ClassNode cn,MethodNode mn,int d){
 		if(d>6)return "..."; if(isGhost(mn))return "GHOST";
 		Map<String,MethodNode> by=new HashMap<>(); for(MethodNode m:cn.methods)by.put(m.name,m);

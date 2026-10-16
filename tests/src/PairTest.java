@@ -1,6 +1,6 @@
-import nipx.AnnotationTransformer;
-import nipx.ClassDiffUtil;
-import nipx.LambdaAligner;
+import remold.AnnotationTransformer;
+import remold.ClassDiffUtil;
+import remold.LambdaAligner;
 import org.objectweb.asm.*;
 import org.objectweb.asm.tree.*;
 

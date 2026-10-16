@@ -29,7 +29,7 @@
     - 判决函数：`LayoutGate.check(oldFields, newFields)`；
     - 职责：专门拦截匿名类 **合成捕获字段**（`val$*`, `this$0`）的新增、类型变更或静态性变更；
     - 存活实例感知：仅当该类存在存活实例时触发拒绝（无存活实例时新实例会执行新构造器，安全放行）。
-    - 开关控制：`nipx.agent.anon_layout_gate`（`reject` / `warn` / `off`，默认 `reject`）。
+    - 开关控制：`remold.agent.anon_layout_gate`（`reject` / `warn` / `off`，默认 `reject`）。
 2. **重定义层全局门（逐类重定义前）**：
     - 接入点：`HotSwapAgent.applyRedefineLayoutGate`；
     - 判决函数：`LayoutGate.checkRedefine(diff.changedFields)`；
@@ -38,7 +38,7 @@
     - **静态字段强拒绝**：静态字段为类级共享状态，类只要加载就可能已有有效状态。因此静态字段变更命中时，即便存活堆实例判定为零，依然坚决拒绝（不可
       waive）；
     - 纯新增字段放行：由 InitFix 在重定义后为存活实例执行初始化补丁；
-    - 开关控制：`nipx.agent.layout_gate`（`reject` / `warn` / `off`，默认 `reject`）。
+    - 开关控制：`remold.agent.layout_gate`（`reject` / `warn` / `off`，默认 `reject`）。
 
 ### 1.3 残余风险清单
 
@@ -61,7 +61,7 @@
 * **判据**：自身 `InnerClasses` 条目中 `outerName == null && innerName != null` 且字节码包含 `EnclosingMethod`。
 * **归并与碰撞检测**：按 `(EnclosingMethod.owner, innerName)` 归并；新旧任一侧同名计数 $\ge 2$ 即判定为潜在位移风险。
 * **熔断处置**：一旦命中，把该宿主及其 `host$...` 整族全部移出本轮重定义（复用宿主组原子拒绝通道），存活实例继续保持旧逻辑执行。
-* **开关控制**：`nipx.agent.local_class_guard`（`reject` / `warn` / `off`，默认 `reject`）。
+* **开关控制**：`remold.agent.local_class_guard`（`reject` / `warn` / `off`，默认 `reject`）。
 * **当前覆盖边界与已知残余**：
   当前止血门仅在检测到“同名局部类计数 $\ge 2$”时熔断。对于**“唯一简单名局部类内部的匿名类位移”**（例如单一 `Foo$1Helper`
   内部包含多个匿名类发生位移），当前未予拦截。该形态属于已知残余，完整对齐机制尚待后续推进。

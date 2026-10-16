@@ -159,7 +159,7 @@ Nest 扫描发现 `setTag` 的第二处 `PUTFIELD`，拒绝参数映射；切片
 - 新增 `"ab".toUpperCase()`（无 Locale）：拒绝，`environment-dependent call`，进台账。
 
 **测试夹具机制（改测试前读）**
-- Kotlin 夹具在 `scratch/hstest/ktfix/v1/`、`v2/`，由 `ktfixV1`/`ktfixV2` source set 在构建期编译，输出目录经 `-Dnipx.ktfix.v1/v2` 传给 oracle，由两个独立 `ByteLoader` 加载同名的 v1/v2。
+- Kotlin 夹具在 `scratch/hstest/ktfix/v1/`、`v2/`，由 `ktfixV1`/`ktfixV2` source set 在构建期编译，输出目录经 `-Dremold.ktfix.v1/v2` 传给 oracle，由两个独立 `ByteLoader` 加载同名的 v1/v2。
 - 护栏断言：v1 与 v2 类字节不相等且 `Class` 对象不同；`java.class.path` 不含夹具输出目录；夹具类的定义加载器是我们的 `ByteLoader`。缺夹具目录时报清晰错误，不是 `NoClassDefFoundError`。
 - 夹具类可能带 `$` 附属类，装载时必须读取整个输出目录。
 

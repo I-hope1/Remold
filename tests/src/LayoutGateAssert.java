@@ -1,8 +1,8 @@
-import nipx.AnonClassAligner;
-import nipx.ClassDiffUtil;
-import nipx.LayoutGate;
-import nipx.LayoutGate.FieldInfo;
-import nipx.LayoutGate.Verdict;
+import remold.AnonClassAligner;
+import remold.ClassDiffUtil;
+import remold.LayoutGate;
+import remold.LayoutGate.FieldInfo;
+import remold.LayoutGate.Verdict;
 
 import javax.tools.*;
 import java.io.*;

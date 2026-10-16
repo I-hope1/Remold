@@ -29,10 +29,10 @@ dependencyResolutionManagement {
 	}
 }
 
-rootProject.name = 'nipx-hotswap'
+rootProject.name = 'remold'
 
-include ':hotswap-api'
-include ':hotswap-core'
-include ':jni-agent'
-include ':hotswap-plugin-arc'
+include ':remold-api'
+include ':remold-core'
+include ':remold-native'
+include ':remold-plugin-arc'
 include ':tests'

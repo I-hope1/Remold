@@ -1,6 +1,6 @@
-import nipx.AnnotationTransformer;
-import nipx.ClassDiffUtil;
-import nipx.LambdaAligner;
+import remold.AnnotationTransformer;
+import remold.ClassDiffUtil;
+import remold.LambdaAligner;
 import org.objectweb.asm.*;
 import org.objectweb.asm.tree.*;
 
@@ -29,7 +29,7 @@ public class MoveTest {
 			boolean ghost = false;
 			for (AbstractInsnNode n : mn.instructions) {
 				if (n instanceof LdcInsnNode l && l.cst instanceof String s) ops.add("\"" + s + "\"");
-				if (n instanceof MethodInsnNode m && m.owner.equals("nipx/LambdaAligner")
+				if (n instanceof MethodInsnNode m && m.owner.equals("remold/LambdaAligner")
 				    && m.name.equals("onOrphanInvoked")) ghost = true;
 			}
 			out.add("    " + mn.name + mn.desc + "  " + ops + (ghost ? "   ← 幽灵空壳" : ""));

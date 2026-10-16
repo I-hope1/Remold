@@ -1,4 +1,4 @@
-import nipx.LambdaAligner;
+import remold.LambdaAligner;
 import org.objectweb.asm.*;
 import org.objectweb.asm.tree.*;
 
@@ -56,7 +56,7 @@ public class OrderProbe {
 
 		System.out.println();
 		System.out.println("=== 探针 2：TEST_REVERSE_GROUP_ORDER 是否真的换序 ===");
-		Class<?> la = Class.forName("nipx.LambdaAligner");
+		Class<?> la = Class.forName("remold.LambdaAligner");
 		Field flag = la.getField("TEST_REVERSE_GROUP_ORDER");
 		Method go = null;
 		for (Method m : la.getDeclaredMethods()) {

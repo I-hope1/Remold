@@ -1,5 +1,5 @@
-import nipx.AnnotationTransformer;
-import nipx.LambdaAligner;
+import remold.AnnotationTransformer;
+import remold.LambdaAligner;
 import org.objectweb.asm.*;
 import org.objectweb.asm.tree.*;
 
@@ -20,7 +20,7 @@ public class Save3Test {
 
 	static boolean isGhost(MethodNode mn) {
 		for (AbstractInsnNode n : mn.instructions) {
-			if (n instanceof MethodInsnNode m && m.owner.equals("nipx/LambdaAligner")
+			if (n instanceof MethodInsnNode m && m.owner.equals("remold/LambdaAligner")
 			    && m.name.equals("onOrphanInvoked")) return true;
 		}
 		return false;

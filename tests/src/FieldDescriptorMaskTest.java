@@ -1,6 +1,6 @@
-import nipx.AnonClassHasher;
-import nipx.AnonClassAligner;
-import nipx.LayoutGate;
+import remold.AnonClassHasher;
+import remold.AnonClassAligner;
+import remold.LayoutGate;
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Opcodes;

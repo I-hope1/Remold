@@ -1,4 +1,4 @@
-import nipx.AnonClassAligner;
+import remold.AnonClassAligner;
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
@@ -92,7 +92,7 @@ class FieldDescriptorMaskScopeTest {
 		int end = desc.indexOf(';', i);
 		if (end < 0) return false;
 		String suffix = desc.substring(i + 1 + host.length() + 1, end);
-		return nipx.MethodFingerprinter.isUnstableNestedSuffix(suffix);
+		return remold.MethodFingerprinter.isUnstableNestedSuffix(suffix);
 	}
 
 	// 1) 范围矩阵：只有 L本宿主$<纯数字>; 被改写，其余一律恒等；位移后的同一引用屏蔽结果相同。

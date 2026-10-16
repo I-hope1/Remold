@@ -1,5 +1,5 @@
-import nipx.AnnotationTransformer;
-import nipx.LambdaAligner;
+import remold.AnnotationTransformer;
+import remold.LambdaAligner;
 import org.objectweb.asm.*;
 import org.objectweb.asm.tree.*;
 
@@ -38,7 +38,7 @@ public class NameCheck {
 		List<String> parts = new ArrayList<>();
 		for (AbstractInsnNode n : mn.instructions) {
 			if (n instanceof MethodInsnNode m) {
-				if (m.owner.equals("nipx/LambdaAligner") && m.name.equals("onOrphanInvoked")) ghost = true;
+				if (m.owner.equals("remold/LambdaAligner") && m.name.equals("onOrphanInvoked")) ghost = true;
 				else if (m.owner.equals(cn.name) && !m.name.startsWith("lambda$")) parts.add(m.name);
 			} else if (n instanceof InvokeDynamicInsnNode i && i.bsmArgs != null && i.bsmArgs.length > 1
 			           && i.bsmArgs[1] instanceof Handle h && cn.name.equals(h.getOwner())) {

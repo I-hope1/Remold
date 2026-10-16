@@ -1,16 +1,55 @@
-# nipx-hotswap
+# Remold
 
 **Robust JVM Class Redefinition, Anonymous Class Topological Alignment & Legacy State Reinitialization**
 
-`nipx-hotswap` 是一个面向 JVM 热重载（Class Redefinition / Retransformation）领域的底层 Agent 引擎与字节码对齐框架。它针对类热更新过程中的深层拓扑漂移、存量实例状态丢失、字节码切片被冲刷等痛点，提供了一整套基于置信梯队与安全门的系统性解决方案。
+`Remold` 是一个面向 JVM 热重载（Class Redefinition / Retransformation）领域的底层 Agent 引擎与字节码对齐框架。针对类热更新过程中的深层拓扑漂移、存量实例状态丢失、字节码切片被冲刷等痛点，提供了一整套基于置信梯队与安全门的系统性解决方案。
 
 ---
 
-## 1. 解决什么、没解决什么 (What is Solved vs Known Limitations)
+## 1. 快速开始与使用 (Quick Start)
+
+Remold 作为一个 Java Agent 运行。推荐在 **JetBrains Runtime (JBR 17/21/25+)** 或 **DCEVM (8/11)** 环境下使用以获得最完整的类结构变更高性能热更新体验。
+
+### 1.1 下载与 JVM 启动参数
+
+从 [Releases](https://github.com/I-hope1/Remold/releases) 下载最新版本的 `remold-core-<version>.jar`（已内嵌重定位 ASM 9.9.1 及原生加速库）：
+
+```bash
+java -javaagent:remold-core.jar \
+     --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
+     -jar your-application.jar
+```
+
+若指定外部热更目录或 jar 进行实时监听（以分号或冒号分隔）：
+```bash
+java -javaagent:remold-core.jar=build/classes/java/main;libs/my-mod.jar \
+     --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
+     -jar your-application.jar
+```
+
+### 1.2 Gradle 依赖接入 (JitPack)
+
+若在代码中需要使用注解（如 `@RemoldReinit`、`@OnReload`）或扩展 SPI（如 `HotswapPlugin`、`BytecodeTransformerBridge`），可在 Gradle 中引入 `remold-api`：
+
+```groovy
+repositories {
+    maven { url 'https://jitpack.io' }
+}
+
+dependencies {
+    compileOnly 'com.github.I-hope1.Remold:remold-api:1.0.0'
+}
+```
+
+Maven Central 预留坐标：`io.github.i-hope1.remold:remold-api:1.0.0`。
+
+---
+
+## 2. 解决什么、没解决什么 (What is Solved vs Known Limitations)
 
 坚持工程事实第一，明确界定能力边界：
 
-### 1.1 明确解决的核心领域 (What is Solved)
+### 2.1 明确解决的核心领域 (What is Solved)
 1. **源码变动导致的匿名类拓扑篡夺与错位**：
    - 通过 `AnonClassAligner` 的 Tier 1~4 置信梯队（精确指纹、拓扑同构、Self Hash、调用链追溯），跨编译版本稳定对齐匿名类，彻底废除不可靠的类名直通。
 2. **扩容后存量实例新增字段丢失初值**：
@@ -21,8 +60,10 @@
    - 通过 `LayoutGate` 与 `LocalClassGuard`，在字段被删除或改类型且堆中存在存活实例时坚决熔断阻断重定义，保护内存安全。
 5. **外部 IDE / JDWP 直接重定义的无感接管**：
    - 通过 `ThreadLocal` 状态标记精准区分调用来源，在开发者直接于 IDE 点击 "Reload Changed Classes" 时自动补齐 Mixin 重新织入并执行安全门复核。
+6. **JVMTI 原生全堆实例检索与并发安全隔离**：
+   - 底层 C++ 原生动态库通过全局互斥锁与动态 Tag 隔离实现亚毫秒级全堆实例精确扫描，热更全流程严格由 `HOTSWAP_LOCK` 重入锁串行化保护。
 
-### 1.2 客观承认的已知限制 (Known Limitations)
+### 2.2 客观承认的已知限制 (Known Limitations)
 1. **孤儿 Lambda 的调用栈逃逸**：
    - 仅对受保护的框架分发点（通过 `OrphanBreakerPredicate` 注册）实施局部熔断抛出 `NoSuchMethodError` 以驱动注销；普通非受控业务栈降级为零值，无法物理撤销业务线程持有的 CallSite 引用。
 2. **具名局部类嵌套匿名类**：
@@ -36,80 +77,79 @@
 
 ---
 
-## 2. 模块架构 (Modular Architecture)
+## 3. 模块架构 (Modular Architecture)
 
 本仓库采用彻底解耦的多模块工程设计：
 
 ```mermaid
 flowchart TD
-    API[":hotswap-api<br/>(纯 Java API 与注解，0 外部依赖)"]
-    CORE[":hotswap-core<br/>(纯 JVM Agent 核心引擎，ASM 内部重定位)"]
-    JNI[":jni-agent<br/>(JVMTI 堆遍历与 Panama/JNI 桥接)"]
-    PLUGIN_ARC[":hotswap-plugin-arc<br/>(Arc / Mindustry 框架参考插件)"]
-    TESTS[":tests<br/>(181 JUnit + 318 Oracle + 32 MixinProbe)"]
+    API[":remold-api<br/>(纯 Java API 与注解，0 外部依赖)"]
+    CORE[":remold-core<br/>(纯 JVM Agent 核心引擎，ASM 内部重定位)"]
+    NATIVE[":remold-native<br/>(JVMTI 原生堆扫描与 Panama/JNI 桥接)"]
+    PLUGIN_ARC[":remold-plugin-arc<br/>(Arc / Mindustry 框架参考插件)"]
+    TESTS[":tests<br/>(185 JUnit + 310 Oracle + 32 MixinProbe + E2E)"]
 
     API --> CORE
-    JNI -.-> CORE
+    NATIVE -.-> CORE
     API --> PLUGIN_ARC
     CORE -.-> PLUGIN_ARC
     CORE --> TESTS
     API --> TESTS
-    JNI --> TESTS
+    NATIVE --> TESTS
     PLUGIN_ARC --> TESTS
 ```
 
-- **`:hotswap-api`**：对外公开发行的轻量级 API 包（包含 `@HotswapReinit`、`@OnReload`、`@Profile` 注解以及 `HotswapPlugin`、`OrphanBreakerPredicate`、`BytecodeTransformerBridge` 等扩展 SPI）。
-- **`:hotswap-core`**：核心 Java Agent 引擎。**ASM 9.9.1 100% Shade 且重定位至 `nipx.internal.asm.*`**，杜绝与任何应用层框架（如 Mixin、ByteBuddy、Spring）发生 ASM 版本与 ClassLoader 冲突。
-- **`:jni-agent`**：JVMTI 原生加速与 Panama/JNI 后端，提供亚毫秒级全堆实例检索能力。
-- **`:hotswap-plugin-arc`**：官方参考插件，展示如何通过 SPI 无缝扩展 UI 布局树比对与框架级轮询事件熔断。
-- **`:tests`**：完备的回归与兼容性测试套件，包含 181 项多版本编译矩阵拓扑 JUnit 测试、318 项 InitFix Oracle 正负向断言，以及 32 项 Mixin 与 JDWP 端到端兼容性断言。
+- **`:remold-api`**：对外公开发行的轻量级 API 包（包含 `@RemoldReinit`、`@OnReload`、`@Profile` 注解以及 `HotswapPlugin`、`OrphanBreakerPredicate`、`BytecodeTransformerBridge` 等扩展 SPI）。
+- **`:remold-core`**：核心 Java Agent 引擎。**ASM 9.9.1 100% Shade 且重定位至 `remold.internal.asm.*`**，杜绝与任何应用层框架（如 Mixin、ByteBuddy、Spring）发生 ASM 版本与 ClassLoader 冲突。
+- **`:remold-native`**：JVMTI 原生加速与 Panama/JNI 后端，提供亚毫秒级全堆实例检索能力，支持 Windows (x64)、Linux (x64)、macOS (x64/arm64) 全平台。
+- **`:remold-plugin-arc`**：官方参考插件，展示如何通过 SPI 无缝扩展 UI 布局树比对与框架级轮询事件熔断。
+- **`:tests`**：完备的回归与兼容性测试套件，包含 185 项多版本编译矩阵拓扑 JUnit 测试、310 项 InitFix Oracle 正负向断言，以及 32 项 Mixin 与 JDWP 端到端兼容性断言。
 
 ---
 
-## 3. 快速接入与用法 (Usage)
+## 4. 常用 API 与用法示例 (API & Examples)
 
-### 3.1 启动参数
-作为 JVM Agent 启动：
-```bash
-java -javaagent:hotswap-core.jar \
-     --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
-     -jar your-application.jar
-```
-
-### 3.2 显式注册插件与分发器
+### 4.1 显式注册插件与分发器
 由于 Agent 处于系统类加载器，避免使用 `ServiceLoader`，直接通过静态 API 显式注册：
 ```java
-import nipx.HotSwapAgent;
+import remold.RemoldAgent;
 
 // 1. 设置主线程事件分发器（默认：Runnable::run）
-HotSwapAgent.setMainThreadDispatcher(myAppDispatcher::post);
+RemoldAgent.setMainThreadDispatcher(myAppDispatcher::post);
 
 // 2. 注册自定义框架扩展插件
-HotSwapAgent.registerPlugin(new MyFrameworkHotswapPlugin());
+RemoldAgent.registerPlugin(new MyFrameworkHotswapPlugin());
 
 // 3. 注册字节码重新织入桥接器（例如 Mixin 兼容）
-HotSwapAgent.registerTransformerBridge((className, currentBytes) -> {
+RemoldAgent.addTransformerBridge((loader, className, targetClass, currentBytes) -> {
     return myMixinTransformer.transform(className, currentBytes);
 });
 ```
 
-### 3.3 注解控制存量字段初始化
+### 4.2 注解控制存量字段初始化与生命周期
 ```java
-import nipx.annotation.HotswapReinit;
+import remold.annotation.RemoldReinit;
+import remold.annotation.OnReload;
 
 public class PlayerService {
     // 默认情况：新增字段仅在存量实例中该字段为零值（0/null）时才注入初值
     private String nickname = "DefaultName";
 
     // 显式声明 OVERWRITE：强制以 CAS 覆写存量实例中的非默认初值
-    @HotswapReinit(mode = HotswapReinit.Mode.OVERWRITE)
+    @RemoldReinit(mode = RemoldReinit.Mode.OVERWRITE)
     private int scoreVersion = 2;
+
+    // 热重载完成后的实例生命周期回调
+    @OnReload
+    private void onReload() {
+        System.out.println("PlayerService reloaded for: " + nickname);
+    }
 }
 ```
 
 ---
 
-## 4. 构建与测试 (Building & Verification)
+## 5. 构建与测试 (Building & Verification)
 
 本项目使用 Gradle 构建，要求构建环境具备 JDK 21+。
 
@@ -119,17 +159,17 @@ public class PlayerService {
 ```
 
 验证流程将严格执行：
-1. **181 项 JUnit 拓扑对齐测试**（跨 javac 8/11/17/21/25 现编夹具矩阵，断言 0 skipped 0 failure）；
-2. **318 项 InitFix Oracle 差分断言**（涵盖 Java 与真实 Kotlin 编译产物，正向状态回溯与负向安全阻断）；
+1. **185 项 JUnit 拓扑对齐与 Native 堆扫描测试**（跨 javac 8/11/17/21/25 现编夹具矩阵，断言 0 skipped 0 failure）；
+2. **310 项 InitFix Oracle 差分断言**（涵盖 Java 与真实 Kotlin 编译产物，正向状态回溯与负向安全阻断）；
 3. **32 项 Mixin & JDWP 重定义端到端实测**；
-4. **LayoutGate 规则表、GhostProbe 栈探测、并发不变量断言**；
+4. **LayoutGate 规则表、GhostProbe 栈探测、并发加固多线程实测、指纹延后落账 E2E 断言**；
 5. **规范文档与源码状态标记纯净度扫描 (`verifyDocStatusMarkers`)**。
 
 ---
 
-## 5. 许可协议 (License)
+## 6. 许可协议 (License)
 
 本项目采用分模块的多许可证策略（Multi-licensing）：
 
-- **核心引擎与 API 规范**（`:hotswap-api`、`:hotswap-core`、`:jni-agent`）：采用商业友好的 **[Apache License 2.0](LICENSE)** 协议开源。允许商业化集成、无 Copyleft 传染性，包含专利授权保护；
-- **Mindustry / Arc 框架插件**（`:hotswap-plugin-arc`）：采用 **[GNU General Public License v3.0 (GPL-3.0)](hotswap-plugin-arc/LICENSE)** 协议开源，与 Mindustry 及 Arc 的上游 GPL-3.0 许可完全对齐。
+- **核心引擎、Native 库与 API 规范**（`:remold-api`、`:remold-core`、`:remold-native`）：采用商业友好的 **[Apache License 2.0](LICENSE)** 协议开源。允许商业化集成、无 Copyleft 传染性，包含专利授权保护；
+- **Mindustry / Arc 框架插件**（`:remold-plugin-arc`）：采用 **[GNU General Public License v3.0 (GPL-3.0)](remold-plugin-arc/LICENSE)** 协议开源，与 Mindustry 及 Arc 的上游 GPL-3.0 许可完全对齐。

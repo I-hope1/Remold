@@ -1,4 +1,4 @@
-import nipx.AnnotationTransformer;
+import remold.AnnotationTransformer;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;

@@ -1,6 +1,6 @@
-import nipx.AnnotationTransformer;
-import nipx.ref.ClassHierarchyOracle;
-import nipx.ref.HierarchyTreeOracle;
+import remold.AnnotationTransformer;
+import remold.ref.ClassHierarchyOracle;
+import remold.ref.HierarchyTreeOracle;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;

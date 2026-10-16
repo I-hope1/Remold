@@ -1,7 +1,7 @@
 import arc.Application;
 import arc.Core;
-import nipx.ref.UpdateRef;
-import nipx.ref.UpdateRef.CompositeAction;
+import remold.ref.UpdateRef;
+import remold.ref.UpdateRef.CompositeAction;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

@@ -1,6 +1,6 @@
-import nipx.AnnotationTransformer;
-import nipx.ClassDiffUtil;
-import nipx.LambdaAligner;
+import remold.AnnotationTransformer;
+import remold.ClassDiffUtil;
+import remold.LambdaAligner;
 import org.objectweb.asm.*;
 import org.objectweb.asm.tree.*;
 
@@ -28,7 +28,7 @@ public class DelTest {
 			boolean ghost = false;
 			for (AbstractInsnNode n : mn.instructions) {
 				if (n instanceof MethodInsnNode m) {
-					if (m.owner.equals("nipx/LambdaAligner") && m.name.equals("onOrphanInvoked")) ghost = true;
+					if (m.owner.equals("remold/LambdaAligner") && m.name.equals("onOrphanInvoked")) ghost = true;
 					else if (m.owner.equals(cn.name)) calls.add(m.name);
 				}
 			}

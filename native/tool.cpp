@@ -452,7 +452,7 @@ JNIEXPORT jobjectArray JNICALL GetReferrers(jvmtiEnv* /*ignored*/, JNIEnv* env, 
 }
 
 /** JNI 导出函数：获取指定类所有未回收实例，失败时向 Java 抛出异常 */
-JNIEXPORT jobjectArray JNICALL Java_nipx_util_LibTool_nGetInstances(
+JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetInstances(
     JNIEnv* env,
     jclass,
     jclass target_clazz
@@ -471,8 +471,17 @@ JNIEXPORT jobjectArray JNICALL Java_nipx_util_LibTool_nGetInstances(
     return *res;
 }
 
+/** 兼容旧版包名的 JNI 导出别名 */
+JNIEXPORT jobjectArray JNICALL Java_nipx_util_LibTool_nGetInstances(
+    JNIEnv* env,
+    jclass clazz,
+    jclass target_clazz
+) {
+    return Java_remold_util_LibTool_nGetInstances(env, clazz, target_clazz);
+}
+
 /** JNI 导出函数：获取指定对象的所有直接引用者，失败时向 Java 抛出异常 */
-JNIEXPORT jobjectArray JNICALL Java_nipx_util_LibTool_nGetReferrers(
+JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetReferrers(
     JNIEnv* env,
     jclass,
     jobject target_object
@@ -491,6 +500,15 @@ JNIEXPORT jobjectArray JNICALL Java_nipx_util_LibTool_nGetReferrers(
     return *res;
 }
 
+/** 兼容旧版包名的 JNI 导出别名 */
+JNIEXPORT jobjectArray JNICALL Java_nipx_util_LibTool_nGetReferrers(
+    JNIEnv* env,
+    jclass clazz,
+    jobject target_object
+) {
+    return Java_remold_util_LibTool_nGetReferrers(env, clazz, target_object);
+}
+
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     if (!vm) return JNI_ERR;
     g_jvm.store(vm, std::memory_order_release);
@@ -503,31 +521,28 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
 
     (void)getOrAcquireJvmti(env);
 
-    jclass clazz = env->FindClass("nipx/util/LibTool");
-    if (clazz) {
-        SCOPE_EXIT([&] { env->DeleteLocalRef(clazz); });
+    const char* classNames[] = { "remold/util/LibTool", "nipx/util/LibTool" };
+    JNINativeMethod methods[] = {
+        {
+            .name = const_cast<char*>("nGetInstances"),
+            .signature = const_cast<char*>("(Ljava/lang/Class;)[Ljava/lang/Object;"),
+            .fnPtr = reinterpret_cast<void*>(&Java_remold_util_LibTool_nGetInstances),
+        },
+        {
+            .name = const_cast<char*>("nGetReferrers"),
+            .signature = const_cast<char*>("(Ljava/lang/Object;)[Ljava/lang/Object;"),
+            .fnPtr = reinterpret_cast<void*>(&Java_remold_util_LibTool_nGetReferrers),
+        },
+    };
 
-        JNINativeMethod methods[] = {
-            {
-                .name = const_cast<char*>("nGetInstances"),
-                .signature = const_cast<char*>("(Ljava/lang/Class;)[Ljava/lang/Object;"),
-                .fnPtr = reinterpret_cast<void*>(&Java_nipx_util_LibTool_nGetInstances),
-            },
-            {
-                .name = const_cast<char*>("nGetReferrers"),
-                .signature = const_cast<char*>("(Ljava/lang/Object;)[Ljava/lang/Object;"),
-                .fnPtr = reinterpret_cast<void*>(&Java_nipx_util_LibTool_nGetReferrers),
-            },
-        };
-
-        // 仅在明确找到类但方法绑定失败时返回 JNI_ERR，阻止未完成初始化的模块运行
-        if (env->RegisterNatives(clazz, methods, 2) != JNI_OK) {
+    for (const char* className : classNames) {
+        jclass clazz = env->FindClass(className);
+        if (clazz) {
+            env->RegisterNatives(clazz, methods, 2);
+            env->DeleteLocalRef(clazz);
+        } else {
             env->ExceptionClear();
-            return JNI_ERR;
         }
-    } else {
-        // 未找到类时不阻止加载，以允许纯 Panama FFM 调用方在任意类加载器环境下成功加载该动态库
-        env->ExceptionClear();
     }
 
     return JNI_VERSION_1_6;

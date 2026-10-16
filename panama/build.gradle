@@ -10,8 +10,8 @@ publishing {
 		maven(MavenPublication) {
 			from components.java
 			pom {
-				name = 'remold-native'
-				description = 'Native JVMTI and Panama/JNI support for Remold'
+				name = 'remold-panama'
+				description = 'Panama (FFM API) and JNI support for Remold'
 				licenses {
 					license {
 						name = 'The Apache License, Version 2.0'
@@ -21,6 +21,10 @@ publishing {
 			}
 		}
 	}
+}
+
+dependencies {
+	compileOnly project(':core')
 }
 
 jar {

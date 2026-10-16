@@ -23,7 +23,7 @@ sourceSets {
 dependencies {
 	implementation project(":api")
 	implementation project(":core")
-	implementation project(":native")
+	implementation project(":panama")
 	implementation project(":plugin-arc")
 	implementation "Anuken:Mindustry:$mindustryVersion"
 	implementation "org.spongepowered:mixin:0.8.5"
@@ -80,13 +80,13 @@ def detectNativeLib() {
 	def arch = System.getProperty("os.arch").toLowerCase()
 	File lib = null
 	if (os.contains("win")) {
-		lib = rootProject.file("native/libs/tool64.dll")
+		lib = rootProject.file("core/libs/tool64.dll")
 	} else if (os.contains("linux")) {
-		lib = rootProject.file("native/libs/libtool64.so")
+		lib = rootProject.file("core/libs/libtool64.so")
 	} else if (os.contains("mac")) {
 		lib = (arch.contains("aarch64") || arch.contains("arm")) ?
-			rootProject.file("native/libs/libtoolarm64.dylib") :
-			rootProject.file("native/libs/libtool64.dylib")
+			rootProject.file("core/libs/libtoolarm64.dylib") :
+			rootProject.file("core/libs/libtool64.dylib")
 	}
 	return (lib != null && lib.exists()) ? lib.absolutePath : null
 }
@@ -100,7 +100,7 @@ test {
 	classpath = sourceSets.main.runtimeClasspath
 	dependsOn classes
 	dependsOn project(":core").tasks.named("shadowJar")
-	dependsOn project(":native").tasks.named("jar")
+	dependsOn project(":panama").tasks.named("jar")
 	dependsOn hstestFixtureTasks
 	inputs.dir(hstestFixtureRoot)
 	useJUnitPlatform()
@@ -170,7 +170,7 @@ tasks.register("mixinProbe", JavaExec) {
 	description = "运行 Mixin 接入与外部 JDWP 热更新兼容性实测 (E2E)"
 	dependsOn classes
 	dependsOn project(":core").tasks.named("shadowJar")
-	dependsOn project(":native").tasks.named("jar")
+	dependsOn project(":panama").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "remold.MixinCompatibilityTest"
 	doFirst {
@@ -189,7 +189,7 @@ tasks.register("initFixOracle", JavaExec) {
 	description = "运行 InitFix 差分 Oracle（正向值比对 + 负向阻断断言）"
 	dependsOn classes
 	dependsOn project(":core").tasks.named("shadowJar")
-	dependsOn project(":native").tasks.named("jar")
+	dependsOn project(":panama").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "InitFixOracle"
 	dependsOn tasks.named("compileKtfixV1Kotlin")
@@ -209,7 +209,7 @@ tasks.register("layoutGateAssert", JavaExec) {
 	description = "运行 LayoutGate 规则表断言"
 	dependsOn classes
 	dependsOn project(":core").tasks.named("shadowJar")
-	dependsOn project(":native").tasks.named("jar")
+	dependsOn project(":panama").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "LayoutGateAssert"
 }
@@ -220,7 +220,7 @@ tasks.register("ghostProbe", JavaExec) {
 	description = "运行幽灵桩熔断栈探测断言 (GhostProbe)"
 	dependsOn classes
 	dependsOn project(":core").tasks.named("shadowJar")
-	dependsOn project(":native").tasks.named("jar")
+	dependsOn project(":panama").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "GhostProbe"
 }
@@ -231,7 +231,7 @@ tasks.register("concurrencyAssert", JavaExec) {
 	description = "运行并发入口加固断言 (E2E Agent)"
 	dependsOn classes
 	dependsOn project(":core").tasks.named("shadowJar")
-	dependsOn project(":native").tasks.named("jar")
+	dependsOn project(":panama").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "ConcurrencyAssert"
 	doFirst {
@@ -250,7 +250,7 @@ tasks.register("fingerprintAssert", JavaExec) {
 	description = "运行指纹延后落账断言 (E2E Agent)"
 	dependsOn classes
 	dependsOn project(":core").tasks.named("shadowJar")
-	dependsOn project(":native").tasks.named("jar")
+	dependsOn project(":panama").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "FingerprintAssert"
 	doFirst {
@@ -274,7 +274,7 @@ tasks.register("verifyDocStatusMarkers") {
 			file("${rootDir}/core/src"),
 			file("${rootDir}/api/src"),
 			file("${rootDir}/plugin-arc/src"),
-			file("${rootDir}/native/src")
+			file("${rootDir}/panama/src")
 		]
 		def pattern = ~/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/
 		def violations = []
@@ -295,6 +295,38 @@ tasks.register("verifyDocStatusMarkers") {
 			throw new GradleException("发现违规混入的实现状态标记：\n" + violations.join("\n"))
 		}
 		logger.lifecycle("verifyDocStatusMarkers: 全部规范文档与源码均无违规状态标记")
+	}
+}
+
+// 9. LiveDcevmTest (在支持 DCEVM -XX:+AllowEnhancedClassRedefinition 时运行)
+tasks.register("liveDcevmTest", JavaExec) {
+	group = "verification"
+	description = "运行真实 DCEVM 端到端实测验证套件 (LiveDcevmTest)"
+	dependsOn classes
+	dependsOn project(":core").tasks.named("shadowJar")
+	dependsOn project(":panama").tasks.named("jar")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "LiveDcevmTest"
+	doFirst {
+		def jbrHome = System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+		if (jbrHome != null) {
+			def javaBin = new File(jbrHome, System.getProperty("os.name").toLowerCase().contains("win") ? "bin/java.exe" : "bin/java")
+			if (javaBin.exists()) {
+				executable = javaBin.absolutePath
+			}
+		}
+		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		        "-XX:+AllowEnhancedClassRedefinition",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+		if (nativeLibPath != null) {
+			jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+		}
+		try {
+			def j21 = javaToolchains.compilerFor { languageVersion = JavaLanguageVersion.of(21) }.get().executablePath.asFile.absolutePath
+			systemProperty "hstest.javac21", j21
+			environment "HSTEST_JAVAC21", j21
+		} catch (Exception ignored) {}
 	}
 }
 

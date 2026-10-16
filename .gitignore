@@ -12,4 +12,4 @@ hs_err_pid*
 *.log
 bin/
 **/bin/
-native/libs/tool.lib
+core/libs/tool.lib

@@ -33,6 +33,6 @@ rootProject.name = 'remold'
 
 include ':api'
 include ':core'
-include ':native'
+include ':panama'
 include ':plugin-arc'
 include ':tests'

@@ -4,13 +4,17 @@ plugins {
 
 allprojects {
 	group = 'io.github.i-hope1.remold'
-	version = '1.0.0'
+	version = '0.1.0'
 	ext {
 		mindustryVersion = 'v160.5'
 	}
 }
 
 subprojects {
+	apply plugin: 'base'
+	base {
+		archivesName = "remold-${project.name}"
+	}
 	tasks.withType(JavaCompile).configureEach {
 		options.encoding = 'UTF-8'
 		options.compilerArgs += [

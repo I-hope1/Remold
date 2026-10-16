@@ -12,17 +12,17 @@ Remold 作为一个 Java Agent 运行。推荐在 **JetBrains Runtime (JBR 17/21
 
 ### 1.1 下载与 JVM 启动参数
 
-从 [Releases](https://github.com/I-hope1/Remold/releases) 下载最新版本的 `remold-core-<version>.jar`（已内嵌重定位 ASM 9.9.1 及原生加速库）：
+从 [Releases](https://github.com/I-hope1/Remold/releases) 下载最新版本的 `remold-agent.jar`（已内嵌重定位 ASM 9.9.1 及原生加速库）：
 
 ```bash
-java -javaagent:remold-core.jar \
+java -javaagent:remold-agent.jar \
      --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
      -jar your-application.jar
 ```
 
 若指定外部热更目录或 jar 进行实时监听（以分号或冒号分隔）：
 ```bash
-java -javaagent:remold-core.jar=build/classes/java/main;libs/my-mod.jar \
+java -javaagent:remold-agent.jar=build/classes/java/main;libs/my-mod.jar \
      --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
      -jar your-application.jar
 ```
@@ -37,11 +37,11 @@ repositories {
 }
 
 dependencies {
-    compileOnly 'com.github.I-hope1.Remold:api:1.0.0'
+    compileOnly 'com.github.I-hope1.Remold:api:0.1.0'
 }
 ```
 
-Maven Central 预留坐标：`io.github.i-hope1.remold:api:1.0.0`。
+Maven Central 预留坐标：`io.github.i-hope1.remold:api:0.1.0`。
 
 ---
 
@@ -171,5 +171,5 @@ public class PlayerService {
 
 本项目采用分模块的多许可证策略（Multi-licensing）：
 
-- **核心引擎、Native 库与 API 规范**（`:api`、`:core`、`:native`）：采用商业友好的 **[Apache License 2.0](LICENSE)** 协议开源。允许商业化集成、无 Copyleft 传染性，包含专利授权保护；
+- **核心引擎、Panama 扩展与 API 规范**（`:api`、`:core`、`:panama`）：采用商业友好的 **[Apache License 2.0](LICENSE)** 协议开源。允许商业化集成、无 Copyleft 传染性，包含专利授权保护；
 - **Mindustry / Arc 框架插件**（`:plugin-arc`）：采用 **[GNU General Public License v3.0 (GPL-3.0)](plugin-arc/LICENSE)** 协议开源，与 Mindustry 及 Arc 的上游 GPL-3.0 许可完全对齐。

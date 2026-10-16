@@ -26,7 +26,6 @@ publishing {
 dependencies {
 	compileOnly project(':api')
 	compileOnly project(':core')
-	compileOnly project(':native')
 	compileOnly "Anuken:Mindustry:$mindustryVersion"
 
 	// ASM for bytecode analysis in Injector / CellPropertyRef

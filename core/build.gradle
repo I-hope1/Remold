@@ -25,7 +25,6 @@ publishing {
 }
 dependencies {
 	api project(':api')
-	compileOnly project(':native')
 
 	// asm
 	def asmVersion = '9.9.1'
@@ -37,7 +36,7 @@ dependencies {
 }
 
 shadowJar {
-	archiveClassifier.set('')
+	archiveFileName.set('remold-agent.jar')
 	manifest {
 		attributes(
 				'Agent-Class': 'remold.RemoldAgent',
@@ -46,6 +45,9 @@ shadowJar {
 				'Can-Redefine-Classes': true
 		)
 	}
+	from('libs') {
+		into('libs')
+	}
 	exclude "module-info.class"
 	relocate 'org.objectweb.asm', 'remold.internal.asm'
 }
@@ -53,6 +55,9 @@ shadowJar {
 jar {
 	dependsOn shadowJar
 	archiveClassifier.set('raw')
+	from('libs') {
+		into('libs')
+	}
 }
 
 

@@ -243,11 +243,15 @@ public class MixinCompatibilityTest {
 
 		// 2. 证明 MixinAgent 强绑定旧版 Minecraft LaunchWrapper，在普通环境/现代 Loader 中无法直接初始化
 		boolean throwsOnClinit = false;
+		java.io.PrintStream origErr = System.err;
 		try {
+			System.setErr(new java.io.PrintStream(new java.io.ByteArrayOutputStream()));
 			Class.forName("org.spongepowered.tools.agent.MixinAgent", true, MixinCompatibilityTest.class.getClassLoader());
 		} catch (Throwable t) {
 			throwsOnClinit = true;
-			System.out.println("   [实测验证] 初始化 MixinAgent 抛出: " + t.getClass().getSimpleName() + " (强绑定 LaunchWrapper 无法单飞)");
+			origErr.println("   [实测验证] 初始化 MixinAgent 抛出预期异常: " + t.getClass().getSimpleName() + " (强绑定 LaunchWrapper，无法独立加载)");
+		} finally {
+			System.setErr(origErr);
 		}
 		check(throwsOnClinit, "证明 MixinAgent 在现代环境中无法独立初始化，不能依赖官方 MixinAgent 实现热重载");
 

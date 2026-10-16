@@ -3,7 +3,7 @@ package remold.uihook;
 import arc.scene.ui.layout.Cell;
 import arc.scene.ui.layout.Table;
 import arc.struct.Seq;
-import remold.jni.helper.MasterKey;
+import remold.Reflect;
 
 import java.lang.invoke.MethodHandles.Lookup;
 import java.lang.reflect.AccessibleObject;
@@ -215,6 +215,6 @@ public class ArcReflectionAdapter {
 
 
 	public static Lookup lookup() {
-		return MasterKey.INSTANCE.getTrustedLookup();
+		return Reflect.IMPL_LOOKUP;
 	}
 }

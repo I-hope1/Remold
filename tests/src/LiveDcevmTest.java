@@ -62,8 +62,9 @@ public class LiveDcevmTest {
 			return;
 		}
 
-		String javac = System.getenv("HSTEST_JAVAC21");
-		if (javac == null) javac = "F:/files/java/jdks/openjdk-21.0.2/bin/javac.exe";
+		String javac = System.getProperty("hstest.javac21");
+		if (javac == null || !new File(javac).exists()) javac = System.getenv("HSTEST_JAVAC21");
+		if (javac == null || !new File(javac).exists()) javac = "F:/files/java/jdks/openjdk-21.0.2/bin/javac.exe";
 		if (!new File(javac).exists()) javac = "javac";
 
 		File tempDir = Files.createTempDirectory("dcevm_live_test").toFile();

@@ -2082,6 +2082,7 @@ public class InitFixOracle {
 		}
 		""";
 
+	@SuppressWarnings({"removal", "deprecation"})
 	static void caseZeroValueStaticDependency() throws Exception {
 		Fixture fx = loadFixture("oracle.CaseZ2", CASE_Z2_V1, CASE_Z2_V2);
 
@@ -2493,6 +2494,7 @@ public class InitFixOracle {
 		}
 	}
 
+	@SuppressWarnings({"removal", "deprecation"})
 	static void caseKtObjectAddsInt() throws Exception {
 		CompiledFixture cf = loadCompiledFixture("oracle.CaseKtObj");
 		Fixture fx = cf.fx;

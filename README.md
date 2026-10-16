@@ -8,26 +8,111 @@
 
 ## 1. 快速开始与使用 (Quick Start)
 
-Remold 作为一个 Java Agent 运行。推荐在 **JetBrains Runtime (JBR 17/21/25+)** 或 **DCEVM (8/11)** 环境下使用以获得最完整的类结构变更高性能热更新体验。
+Remold 作为一个 Java Agent 运行。为了获得类结构变更高性能热更新体验，推荐配合 **JetBrains Runtime (JBR 17/21/25+)** 或 **DCEVM (8/11)** 的增强重定义能力使用。
 
-### 1.1 下载与 JVM 启动参数
+### 1.1 运行环境与版本基线
+
+- **推荐运行时**：**JetBrains Runtime (JBR 17/21/25+)**，需附带 `-XX:+AllowEnhancedClassRedefinition` 启动参数。
+- **Panama 模块版本注意**：`remold-panama` 依赖 JDK 22+ 的 Foreign Function & Memory (FFM) API 定稿标准。若运行在 JBR 17/21 环境，建议优先使用 `remold-agent` 内置的 JNI Native 加速库 (`LibTool`)。
+- **Java 24+ 原生访问**：高版本 JDK 需附带 `--enable-native-access=ALL-UNNAMED`。
+
+---
+
+### 1.2 方式一：IntelliJ IDEA 运行配置 (IDE Run Configuration) —— 最常用
+
+对于日常在 IDEA 中直接点击 "Run / Debug" 的开发者，直接在运行配置中配置 VM Options 即可：
+
+1. 在 IDEA 顶部导航栏打开 `Run` → `Edit Configurations...`；
+2. 选中你的 Application 或启动任务；
+3. 点击 `Modify options` → 勾选 `Add VM options`；
+4. 在 VM options 输入框中填入：
+
+```text
+-XX:+AllowEnhancedClassRedefinition
+-javaagent:/path/to/remold-agent.jar=build/classes/java/main;build/classes/kotlin/main
+--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED
+--add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED
+--enable-native-access=ALL-UNNAMED
+```
+
+> [!WARNING]
+> 若需附带 JDWP 远程调试，监听地址务必限定为本机回环 `127.0.0.1:5005`，切勿配置为 `*:5005` 或 `0.0.0.0:5005`（避免远程代码执行风险）：
+> ```text
+> -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:5005
+> ```
+
+---
+
+### 1.3 方式二：Gradle `JavaExec` 任务自动化 (自动推导输出目录)
+
+通过 Gradle 任务启动应用，可直接从 `sourceSets` 读取编译输出目录并传给 Agent，彻底免去手动拼写路径的烦恼：
+
+#### Kotlin DSL (`build.gradle.kts`):
+```kotlin
+tasks.register<JavaExec>("runWithRemold") {
+    group = "application"
+    description = "Run application with Remold Agent & JBR DCEVM"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("your.package.Main")
+
+    // 1. 指定 JBR 路径（推荐配置，或通过 javaLauncher / toolchains 指定）
+    // executable = "/path/to/jbr/bin/java"
+
+    // 2. 自动获取编译输出目录并传给 Agent（免手动配置 build/classes 路径）
+    val watchDirs = sourceSets["main"].output.classesDirs.asPath
+    val agentJar = file("libs/remold-agent.jar").absolutePath
+
+    jvmArgs(
+        "-XX:+AllowEnhancedClassRedefinition",
+        "-javaagent:$agentJar=$watchDirs",
+        "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED",
+        "--add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED",
+        "--enable-native-access=ALL-UNNAMED"
+    )
+}
+```
+
+#### Groovy DSL (`build.gradle`):
+```groovy
+tasks.register("runWithRemold", JavaExec) {
+    group = "application"
+    description = "Run application with Remold Agent & JBR DCEVM"
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = "your.package.Main"
+
+    // 1. 指定 JBR 路径（推荐配置，或通过 javaLauncher / toolchains 指定）
+    // executable = "/path/to/jbr/bin/java"
+
+    // 2. 自动获取编译输出目录并传给 Agent
+    def watchDirs = sourceSets.main.output.classesDirs.asPath
+    def agentJar = file("libs/remold-agent.jar").absolutePath
+
+    jvmArgs "-XX:+AllowEnhancedClassRedefinition",
+            "-javaagent:${agentJar}=${watchDirs}",
+            "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED",
+            "--add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+}
+```
+
+---
+
+### 1.4 方式三：终端 CLI 启动
 
 从 [Releases](https://github.com/I-hope1/Remold/releases) 下载最新版本的 `remold-agent.jar`（已内嵌重定位 ASM 9.9.1 及原生加速库）：
 
 ```bash
-java -javaagent:remold-agent.jar \
+java -XX:+AllowEnhancedClassRedefinition \
+     -javaagent:remold-agent.jar=build/classes/java/main \
      --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
+     --add-exports java.base/jdk.internal.reflect=ALL-UNNAMED \
+     --enable-native-access=ALL-UNNAMED \
      -jar your-application.jar
 ```
 
-若指定外部热更目录或 jar 进行实时监听（以分号或冒号分隔）：
-```bash
-java -javaagent:remold-agent.jar=build/classes/java/main;libs/my-mod.jar \
-     --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
-     -jar your-application.jar
-```
+---
 
-### 1.2 Gradle 依赖接入 (JitPack)
+### 1.5 Gradle 依赖接入 (JitPack)
 
 若在代码中需要使用注解（如 `@RemoldReinit`、`@OnReload`）或扩展 SPI（如 `HotswapPlugin`、`BytecodeTransformerBridge`），可在 Gradle 中引入 `api` 模块：
 

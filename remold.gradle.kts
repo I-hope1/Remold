@@ -5,6 +5,7 @@ import java.io.File
 import org.gradle.api.plugins.JavaApplication
 
 open class RemoldExtension {
+    var version: String = "0.1.0"
     var agentJar: String? = null
     var jbrPath: String? = null
     var debug: Boolean = false
@@ -62,10 +63,79 @@ project.plugins.withId("java") {
                 )
                 agentFile = candidates.firstOrNull { it.exists() }
             }
+
+            // 若本地未找到，尝试从 Gradle 依赖缓存或官方 Releases 自动下载
+            if (agentFile == null || !agentFile.exists()) {
+                val ver = remoldExt.version
+                val cacheDir = File(project.gradle.gradleUserHomeDir, "caches/remold")
+                val cachedJar = File(cacheDir, "remold-agent-$ver.jar")
+
+                if (cachedJar.exists() && cachedJar.length() > 1024) {
+                    agentFile = cachedJar
+                } else {
+                    // 尝试 1: 通过 Gradle detachedConfiguration 从已有仓库（JitPack / MavenLocal 等）解析
+                    try {
+                        val detached = project.configurations.detachedConfiguration(
+                            project.dependencies.create("com.github.I-hope1.Remold:core:$ver")
+                        )
+                        detached.isTransitive = false
+                        val resolved = detached.resolve()
+                        if (resolved.isNotEmpty()) {
+                            agentFile = resolved.first()
+                        }
+                    } catch (_: Exception) { }
+
+                    // 尝试 2: 从 GitHub Releases 自动下载至 Gradle 缓存目录
+                    if (agentFile == null || !agentFile.exists()) {
+                        logger.lifecycle("[Remold] 本地未找到 agent jar，正在自动拉取 remold-agent.jar (版本: $ver)...")
+                        val downloadUrls = listOf(
+                            "https://github.com/I-hope1/Remold/releases/download/v$ver/remold-agent.jar",
+                            "https://github.com/I-hope1/Remold/releases/download/$ver/remold-agent.jar"
+                        )
+                        cacheDir.mkdirs()
+                        for (urlStr in downloadUrls) {
+                            try {
+                                val uri = java.net.URI.create(urlStr)
+                                var conn = uri.toURL().openConnection()
+                                conn.connectTimeout = 10000
+                                conn.readTimeout = 30000
+                                if (conn is java.net.HttpURLConnection) {
+                                    conn.instanceFollowRedirects = true
+                                    val code = conn.responseCode
+                                    if (code in 300..399) {
+                                        val loc = conn.getHeaderField("Location")
+                                        if (!loc.isNullOrBlank()) {
+                                            conn = java.net.URI.create(loc).toURL().openConnection()
+                                            conn.connectTimeout = 10000
+                                            conn.readTimeout = 30000
+                                        }
+                                    }
+                                }
+                                conn.inputStream.use { inStream ->
+                                    cachedJar.outputStream().use { outStream ->
+                                        inStream.copyTo(outStream)
+                                    }
+                                }
+                                if (cachedJar.exists() && cachedJar.length() > 1024) {
+                                    agentFile = cachedJar
+                                    logger.lifecycle("[Remold] agent jar 已自动就绪: ${cachedJar.absolutePath}")
+                                    break
+                                } else {
+                                    cachedJar.delete()
+                                }
+                            } catch (_: Exception) {
+                                cachedJar.delete()
+                            }
+                        }
+                    }
+                }
+            }
+
             if (agentFile == null || !agentFile.exists()) {
                 throw GradleException(
-                    "[Remold] 未找到 remold-agent.jar！\n" +
-                    "请将 agent jar 放置于 libs/remold-agent.jar，或在 remold { agentJar = \"/path/to/remold-agent.jar\" } 中指定。"
+                    "[Remold] 未找到且无法自动下载 remold-agent.jar (目标版本: ${remoldExt.version})！\n" +
+                    "请检查网络或在 remold { version = \"...\" } 中指定有效版本，\n" +
+                    "亦可在 remold { agentJar = \"/path/to/remold-agent.jar\" } 中显式指定本地文件。"
                 )
             }
 

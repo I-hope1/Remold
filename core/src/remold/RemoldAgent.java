@@ -585,7 +585,7 @@ public class RemoldAgent {
 		// if (RETRANSFORM_LOADED) retransformLoaded(loadedClasses);
 		// 重启监控线程
 		if (!activeWatchDirs.equals(newWatchDirs) || !activeWatchJars.equals(newWatchJars)) {
-			info("Watch paths updated — dirs: " + newWatchDirs + "  jars: " + newWatchJars);
+			info("Watch paths updated - dirs: " + newWatchDirs + "  jars: " + newWatchJars);
 			activeWatchDirs.clear();
 			activeWatchDirs.addAll(newWatchDirs);
 			activeWatchJars.clear();

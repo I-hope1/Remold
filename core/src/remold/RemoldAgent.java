@@ -2,6 +2,7 @@ package remold;
 
 import remold.annotation.*;
 import remold.profiler.DynamicProfilerAPI;
+import remold.ref.HotswapBridge;
 import remold.ref.InitFix;
 import remold.util.*;
 import org.objectweb.asm.tree.ClassNode;
@@ -62,19 +63,19 @@ import static remold.MountManager.*;
  *       </ul>
  *   </li>
  *   <li><b>初值纯度审查与补丁装配（InitFix.transform）</b>：
- *       在重定义生效前，{@link remold.ref.InitFix#transform} 针对新增声明字段与标有 {@link remold.annotation.RemoldReinit}
+ *       在重定义生效前，{@link InitFix#transform} 针对新增声明字段与标有 {@link RemoldReinit}
  *       的字段进行数据依赖切片与纯度安全门审查，生成独立静态方法的 hidden nestmate 伴生类补丁，并在
- *       {@link remold.ref.InitFix#snapshotInstances} 捕获存量实例快照。</li>
+ *       {@link InitFix#snapshotInstances(Class)} 捕获存量实例快照。</li>
  *   <li><b>原子重定义执行（Redefine Execution）</b>：
  *       执行事务预登记（{@code tx.preRegister()}），随后调用 {@link Instrumentation#redefineClasses(ClassDefinition...)}。
  *       若发生批量失败，自动尝试单类降级重定义，并在事务一致性校验失败时原子回滚（{@code tx.rollback()}）。</li>
  *   <li><b>存量实例初始化驱动（InitFix.applyPatch）</b>：
- *       重定义生效后，调用 {@link remold.ref.InitFix#applyPatch}，通过 Native JVMTI 堆遍历
- *       （{@link remold.util.LibTool#getInstances(Class)}，参见 {@code docs/initfix/05-jvmti-heap.md}）
- *       或 {@link InstanceTracker} 检索存活实例，执行条件 CAS 写入（{@link remold.ref.HotswapBridge}），
+ *       重定义生效后，调用 {@link InitFix#applyPatch}，通过 Native JVMTI 堆遍历
+ *       （{@link LibTool#getInstances(Class)}，参见 {@code docs/initfix/05-jvmti-heap.md}）
+ *       或 {@link InstanceTracker} 检索存活实例，执行条件 CAS 写入（{@link HotswapBridge}），
  *       并将未解决字段记入台账（{@code FieldLedger}）。</li>
  *   <li><b>生命周期回调（Lifecycle Callbacks）</b>：
- *       扫描类中标记的 {@link remold.annotation.OnReload} 方法，自动调用静态回调或在全部存活实例上执行实例刷新。</li>
+ *       扫描类中标记的 {@link OnReload} 方法，自动调用静态回调或在全部存活实例上执行实例刷新。</li>
  * </ol>
  *
  * <h2>并发控制与锁序纪律（Concurrency & Lock Ordering）</h2>
@@ -90,8 +91,8 @@ import static remold.MountManager.*;
  * @see AnonClassAligner
  * @see LayoutGate
  * @see LocalClassGuard
- * @see remold.ref.InitFix
- * @see remold.ref.HotswapBridge
+ * @see InitFix
+ * @see HotswapBridge
  * @see AnnotationTransformer
  */
 public class RemoldAgent {
@@ -195,6 +196,14 @@ public class RemoldAgent {
 
 	//region Core State Management
 	static               Instrumentation     inst;
+	public static final  String              SOURCE_CLI      = "cli";
+	public static final  String              SOURCE_RUNTIME  = "runtime";
+
+	/** 来源分槽映射表：sourceId -> 该来源下的待监控目录集合 */
+	private static final Map<String, Set<Path>> watchDirSources = new ConcurrentHashMap<>();
+	/** 来源分槽映射表：sourceId -> 该来源下的待监控 Jar 集合 */
+	private static final Map<String, Set<Path>> watchJarSources = new ConcurrentHashMap<>();
+
 	static final         Set<Path>           activeWatchDirs = new CopyOnWriteArraySet<>();
 	/** 直接作为 watch 路径传入的 jar/zip 文件（区别于目录内扫描到的） */
 	static final         Set<Path>           activeWatchJars = new CopyOnWriteArraySet<>();
@@ -322,7 +331,12 @@ public class RemoldAgent {
 
 	/** 注册热重载扩展插件 */
 	public static void registerPlugin(HotswapPlugin plugin) {
-		if (plugin == null || plugins.contains(plugin)) return;
+		if (plugin == null) return;
+		for (HotswapPlugin p : plugins) {
+			if (p == plugin || p.getClass() == plugin.getClass() || (p.getName() != null && p.getName().equals(plugin.getName()))) {
+				return;
+			}
+		}
 		plugins.add(plugin);
 		if (inst != null) {
 			try {
@@ -528,14 +542,24 @@ public class RemoldAgent {
 	static AnnotationTransformer transformer;
 
 	public static void premain(String agentArgs, Instrumentation inst) {
-		agentmain(agentArgs, inst);
+		RemoldAgent.inst = inst;
+		try {
+			if (agentArgs != null && !agentArgs.trim().isEmpty()) {
+				init(SOURCE_CLI, agentArgs, false);
+			} else {
+				initConfig();
+				initTransformer();
+			}
+		} catch (Throwable t) {
+			error("Critical error during agent initialization", t);
+		}
 	}
 
 	public static void agentmain(String agentArgs, Instrumentation inst) {
 		RemoldAgent.inst = inst;
 		try {
 			if (agentArgs != null && !agentArgs.trim().isEmpty()) {
-				init(agentArgs, false);
+				init(SOURCE_RUNTIME, agentArgs, false);
 			} else {
 				initConfig();
 				initTransformer();
@@ -550,38 +574,166 @@ public class RemoldAgent {
 	}
 
 	public static void init(String agentArgs, boolean reinit) {
+		init(SOURCE_RUNTIME, agentArgs, reinit);
+	}
+
+	public static void init(String source, String agentArgs, boolean reinit) {
 		// 整体持锁：本方法包含 retransformLoaded / initializeAgentState / restartWatchers，
 		// 而旧 watcher 排进 scheduler 的任务可能尚未跑完。可重入，末尾 triggerHotswap() 嵌套获取无碍。
 		HOTSWAP_LOCK.lock();
 		try {
-			init0(agentArgs, reinit);
+			init0(source, agentArgs, reinit);
 		} finally {
 			HOTSWAP_LOCK.unlock();
 		}
 	}
 
-	private static void init0(String agentArgs, boolean reinit) {
+	private static void init0(String source, String agentArgs, boolean reinit) {
 		initConfig();
 
 		initTransformer();
-		var loadedClasses = inst.getAllLoadedClasses();
+		var loadedClasses = inst != null ? inst.getAllLoadedClasses() : new Class<?>[0];
 		refreshPackageLoaders(loadedClasses);
 
-		if (RETRANSFORM_LOADED) {
+		if (RETRANSFORM_LOADED && inst != null) {
 			retransformLoaded(loadedClasses);
 		}
 
 		for (HotswapPlugin plugin : plugins) {
 			try {
-				plugin.onAgentInit(inst);
+				if (inst != null) {
+					plugin.onAgentInit(inst);
+				}
 			} catch (Throwable t) {
 				error("[HotswapPlugin] Error initializing plugin: " + plugin.getName(), t);
 			}
 		}
 
-		// 解析传入的监控路径 (支持分号或冒号分割)，按类型分流
+		if (source == null || source.trim().isEmpty()) {
+			source = SOURCE_RUNTIME;
+		}
+
 		Set<Path> newWatchDirs = new HashSet<>();
 		Set<Path> newWatchJars = new HashSet<>();
+		if (agentArgs != null && !agentArgs.trim().isEmpty()) {
+			parseWatchPaths(agentArgs, newWatchDirs, newWatchJars);
+		}
+
+		if (newWatchDirs.isEmpty() && newWatchJars.isEmpty()) {
+			if (activeWatchDirs.isEmpty() && activeWatchJars.isEmpty()) {
+				error("No valid watch paths provided.");
+			}
+			return;
+		}
+
+		setWatchPaths0(source, newWatchDirs, newWatchJars);
+	}
+
+	/**
+	 * 设置指定来源的监控路径（支持分号或冒号分隔的目录或 Jar 路径）。
+	 * 若 paths 为空，则移除该来源对应的监控路径。
+	 *
+	 * @param source 来源标识符（如 "cli", "mod-tools", "runtime" 等）
+	 * @param paths  待监控路径（支持分号或冒号分隔）
+	 */
+	public static void setWatchPaths(String source, String paths) {
+		HOTSWAP_LOCK.lock();
+		try {
+			if (source == null || source.trim().isEmpty()) {
+				source = SOURCE_RUNTIME;
+			}
+			if (paths == null || paths.trim().isEmpty()) {
+				removeWatchSource0(source);
+				return;
+			}
+			Set<Path> dirs = new HashSet<>();
+			Set<Path> jars = new HashSet<>();
+			parseWatchPaths(paths, dirs, jars);
+			setWatchPaths0(source, dirs, jars);
+		} finally {
+			HOTSWAP_LOCK.unlock();
+		}
+	}
+
+	/**
+	 * 设置指定来源的目录与 Jar 路径集合。
+	 */
+	public static void setWatchPaths(String source, Collection<Path> dirs, Collection<Path> jars) {
+		HOTSWAP_LOCK.lock();
+		try {
+			if (source == null || source.trim().isEmpty()) {
+				source = SOURCE_RUNTIME;
+			}
+			setWatchPaths0(source, dirs != null ? new HashSet<>(dirs) : Collections.emptySet(),
+			                      jars != null ? new HashSet<>(jars) : Collections.emptySet());
+		} finally {
+			HOTSWAP_LOCK.unlock();
+		}
+	}
+
+	/**
+	 * 向指定来源追加监控路径。
+	 */
+	public static void addWatchPaths(String source, String paths) {
+		HOTSWAP_LOCK.lock();
+		try {
+			if (source == null || source.trim().isEmpty()) {
+				source = SOURCE_RUNTIME;
+			}
+			if (paths == null || paths.trim().isEmpty()) return;
+			Set<Path> dirs = new HashSet<>(getWatchDirs(source));
+			Set<Path> jars = new HashSet<>(getWatchJars(source));
+			parseWatchPaths(paths, dirs, jars);
+			setWatchPaths0(source, dirs, jars);
+		} finally {
+			HOTSWAP_LOCK.unlock();
+		}
+	}
+
+	/**
+	 * 移除指定来源的全部监控路径。
+	 */
+	public static void removeWatchSource(String source) {
+		HOTSWAP_LOCK.lock();
+		try {
+			if (source == null) return;
+			removeWatchSource0(source);
+		} finally {
+			HOTSWAP_LOCK.unlock();
+		}
+	}
+
+	/** 获取指定来源的监控目录集合（只读不可变副本） */
+	public static Set<Path> getWatchDirs(String source) {
+		Set<Path> s = watchDirSources.get(source);
+		return s == null ? Collections.emptySet() : Collections.unmodifiableSet(new HashSet<>(s));
+	}
+
+	/** 获取指定来源的监控 Jar 集合（只读不可变副本） */
+	public static Set<Path> getWatchJars(String source) {
+		Set<Path> s = watchJarSources.get(source);
+		return s == null ? Collections.emptySet() : Collections.unmodifiableSet(new HashSet<>(s));
+	}
+
+	/** 获取当前所有来源的监控目录映射（只读不可变副本） */
+	public static Map<String, Set<Path>> getAllWatchDirSources() {
+		Map<String, Set<Path>> copy = new LinkedHashMap<>();
+		for (Map.Entry<String, Set<Path>> e : watchDirSources.entrySet()) {
+			copy.put(e.getKey(), Collections.unmodifiableSet(new HashSet<>(e.getValue())));
+		}
+		return Collections.unmodifiableMap(copy);
+	}
+
+	/** 获取当前所有来源的监控 Jar 映射（只读不可变副本） */
+	public static Map<String, Set<Path>> getAllWatchJarSources() {
+		Map<String, Set<Path>> copy = new LinkedHashMap<>();
+		for (Map.Entry<String, Set<Path>> e : watchJarSources.entrySet()) {
+			copy.put(e.getKey(), Collections.unmodifiableSet(new HashSet<>(e.getValue())));
+		}
+		return Collections.unmodifiableMap(copy);
+	}
+
+	private static void parseWatchPaths(String agentArgs, Set<Path> outDirs, Set<Path> outJars) {
 		for (String s : agentArgs.split(File.pathSeparator)) {
 			if (s.trim().isEmpty()) continue;
 			String trimmed = s.trim();
@@ -600,32 +752,76 @@ public class RemoldAgent {
 			Path   p  = Paths.get(trimmed).toAbsolutePath();
 			String ps = p.toString();
 			if (Files.isDirectory(p)) {
-				newWatchDirs.add(p);
+				outDirs.add(p);
 			} else if ((ps.endsWith(".jar") || ps.endsWith(".zip")) && Files.isRegularFile(p)) {
-				newWatchJars.add(p);
+				outJars.add(p);
 			} else {
 				error("Skipping invalid watch path (not a directory or jar/zip): " + p);
 			}
 		}
+	}
 
-		if (newWatchDirs.isEmpty() && newWatchJars.isEmpty()) {
-			error("No valid watch paths provided.");
-			return;
-		}
-
-		// if (RETRANSFORM_LOADED) retransformLoaded(loadedClasses);
-		// 重启监控线程
-		if (!activeWatchDirs.equals(newWatchDirs) || !activeWatchJars.equals(newWatchJars)) {
-			info("Watch paths updated - dirs: " + newWatchDirs + "  jars: " + newWatchJars);
-			activeWatchDirs.clear();
-			activeWatchDirs.addAll(newWatchDirs);
-			activeWatchJars.clear();
-			activeWatchJars.addAll(newWatchJars);
-			initializeAgentState(loadedClasses);
-			restartWatchers();
+	private static void setWatchPaths0(String source, Set<Path> dirs, Set<Path> jars) {
+		if (dirs == null || dirs.isEmpty()) {
+			watchDirSources.remove(source);
 		} else {
-			triggerHotswap();
+			watchDirSources.put(source, new CopyOnWriteArraySet<>(dirs));
 		}
+		if (jars == null || jars.isEmpty()) {
+			watchJarSources.remove(source);
+		} else {
+			watchJarSources.put(source, new CopyOnWriteArraySet<>(jars));
+		}
+		syncAggregatedWatchPaths();
+	}
+
+	private static void removeWatchSource0(String source) {
+		watchDirSources.remove(source);
+		watchJarSources.remove(source);
+		syncAggregatedWatchPaths();
+	}
+
+	private static void syncAggregatedWatchPaths() {
+		Set<Path> aggregatedDirs = new HashSet<>();
+		for (Set<Path> s : watchDirSources.values()) {
+			aggregatedDirs.addAll(s);
+		}
+		Set<Path> aggregatedJars = new HashSet<>();
+		for (Set<Path> s : watchJarSources.values()) {
+			aggregatedJars.addAll(s);
+		}
+
+		if (!activeWatchDirs.equals(aggregatedDirs) || !activeWatchJars.equals(aggregatedJars)) {
+			info("Watch paths updated across sources:" + formatWatchSourcesLog());
+			activeWatchDirs.clear();
+			activeWatchDirs.addAll(aggregatedDirs);
+			activeWatchJars.clear();
+			activeWatchJars.addAll(aggregatedJars);
+			if (inst != null) {
+				initializeAgentState(inst.getAllLoadedClasses());
+				restartWatchers();
+			}
+		} else {
+			if (inst != null) {
+				triggerHotswap();
+			}
+		}
+	}
+
+	private static String formatWatchSourcesLog() {
+		StringBuilder sb = new StringBuilder();
+		Set<String> allSources = new TreeSet<>();
+		allSources.addAll(watchDirSources.keySet());
+		allSources.addAll(watchJarSources.keySet());
+		if (allSources.isEmpty()) {
+			return " (none)";
+		}
+		for (String src : allSources) {
+			Set<Path> d = watchDirSources.getOrDefault(src, Collections.emptySet());
+			Set<Path> j = watchJarSources.getOrDefault(src, Collections.emptySet());
+			sb.append("\n  - [").append(src).append("] dirs=").append(d).append(" jars=").append(j);
+		}
+		return sb.toString();
 	}
 
 	private static void initTransformer() {
@@ -2310,6 +2506,7 @@ public class RemoldAgent {
 
 	/** 对外api，触发热更新 */
 	public static void triggerHotswap() {
+		if (inst == null) return;
 		HOTSWAP_LOCK.lock();
 		try {
 			// 快照必须在锁内取：排队等待期间 getAllLoadedClasses() 的结果会过期
@@ -2623,7 +2820,6 @@ public class RemoldAgent {
 		return sb.toString();
 	}
 
-	/** @see E_Hook.RedefineMode */
 	public enum RedefineMode {
 		inject,
 		lazy_load,

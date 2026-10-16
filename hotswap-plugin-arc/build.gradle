@@ -9,6 +9,16 @@ publishing {
 	publications {
 		maven(MavenPublication) {
 			from components.java
+			pom {
+				name = 'nipx-hotswap-plugin-arc'
+				description = 'Mindustry/Arc integration plugin for nipx-hotswap'
+				licenses {
+					license {
+						name = 'GNU General Public License v3.0'
+						url = 'https://www.gnu.org/licenses/gpl-3.0.txt'
+					}
+				}
+			}
 		}
 	}
 }

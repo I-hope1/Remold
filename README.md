@@ -129,4 +129,7 @@ public class PlayerService {
 
 ## 5. 许可协议 (License)
 
-本项目采用 [Apache License 2.0](LICENSE) 协议开源。
+本项目采用分模块的多许可证策略（Multi-licensing）：
+
+- **核心引擎与 API 规范**（`:hotswap-api`、`:hotswap-core`、`:jni-agent`）：采用商业友好的 **[Apache License 2.0](LICENSE)** 协议开源。允许商业化集成、无 Copyleft 传染性，包含专利授权保护；
+- **Mindustry / Arc 框架插件**（`:hotswap-plugin-arc`）：采用 **[GNU General Public License v3.0 (GPL-3.0)](hotswap-plugin-arc/LICENSE)** 协议开源，与 Mindustry 及 Arc 的上游 GPL-3.0 许可完全对齐。

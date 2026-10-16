@@ -29,7 +29,7 @@ dependencies {
 	compileOnly "Anuken:Mindustry:$mindustryVersion"
 
 	// ASM for bytecode analysis in Injector / CellPropertyRef
-	def asmVersion = '9.9.1'
+	def asmVersion = '9.11'
 	compileOnly "org.ow2.asm:asm:$asmVersion"
 	compileOnly "org.ow2.asm:asm-commons:$asmVersion"
 	compileOnly "org.ow2.asm:asm-analysis:$asmVersion"

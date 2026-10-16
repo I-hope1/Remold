@@ -29,7 +29,7 @@ dependencies {
 	implementation "org.spongepowered:mixin:0.8.5"
 	implementation "com.google.guava:guava:33.4.0-jre"
 
-	def asmVersion = '9.9.1'
+	def asmVersion = '9.11'
 	implementation "org.ow2.asm:asm:$asmVersion"
 	implementation "org.ow2.asm:asm-commons:$asmVersion"
 	implementation "org.ow2.asm:asm-analysis:$asmVersion"

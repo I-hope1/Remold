@@ -31,8 +31,8 @@ dependencyResolutionManagement {
 
 rootProject.name = 'remold'
 
-include ':remold-api'
-include ':remold-core'
-include ':remold-native'
-include ':remold-plugin-arc'
+include ':api'
+include ':core'
+include ':native'
+include ':plugin-arc'
 include ':tests'

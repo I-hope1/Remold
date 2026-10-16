@@ -37,11 +37,11 @@ repositories {
 }
 
 dependencies {
-    compileOnly 'com.github.I-hope1.Remold:remold-api:1.0.0'
+    compileOnly 'com.github.I-hope1.Remold:api:1.0.0'
 }
 ```
 
-Maven Central 预留坐标：`io.github.i-hope1.remold:remold-api:1.0.0`。
+Maven Central 预留坐标：`io.github.i-hope1.remold:api:1.0.0`。
 
 ---
 
@@ -83,10 +83,10 @@ Maven Central 预留坐标：`io.github.i-hope1.remold:remold-api:1.0.0`。
 
 ```mermaid
 flowchart TD
-    API[":remold-api<br/>(纯 Java API 与注解，0 外部依赖)"]
-    CORE[":remold-core<br/>(纯 JVM Agent 核心引擎，ASM 内部重定位)"]
-    NATIVE[":remold-native<br/>(JVMTI 原生堆扫描与 Panama/JNI 桥接)"]
-    PLUGIN_ARC[":remold-plugin-arc<br/>(Arc / Mindustry 框架参考插件)"]
+    API[":api<br/>(纯 Java API 与注解，0 外部依赖)"]
+    CORE[":core<br/>(纯 JVM Agent 核心引擎，ASM 内部重定位)"]
+    NATIVE[":native<br/>(JVMTI 原生堆扫描与 Panama/JNI 桥接)"]
+    PLUGIN_ARC[":plugin-arc<br/>(Arc / Mindustry 框架参考插件)"]
     TESTS[":tests<br/>(185 JUnit + 310 Oracle + 32 MixinProbe + E2E)"]
 
     API --> CORE
@@ -99,10 +99,10 @@ flowchart TD
     PLUGIN_ARC --> TESTS
 ```
 
-- **`:remold-api`**：对外公开发行的轻量级 API 包（包含 `@RemoldReinit`、`@OnReload`、`@Profile` 注解以及 `HotswapPlugin`、`OrphanBreakerPredicate`、`BytecodeTransformerBridge` 等扩展 SPI）。
-- **`:remold-core`**：核心 Java Agent 引擎。**ASM 9.9.1 100% Shade 且重定位至 `remold.internal.asm.*`**，杜绝与任何应用层框架（如 Mixin、ByteBuddy、Spring）发生 ASM 版本与 ClassLoader 冲突。
-- **`:remold-native`**：JVMTI 原生加速与 Panama/JNI 后端，提供亚毫秒级全堆实例检索能力，支持 Windows (x64)、Linux (x64)、macOS (x64/arm64) 全平台。
-- **`:remold-plugin-arc`**：官方参考插件，展示如何通过 SPI 无缝扩展 UI 布局树比对与框架级轮询事件熔断。
+- **`:api`**：对外公开发行的轻量级 API 包（包含 `@RemoldReinit`、`@OnReload`、`@Profile` 注解以及 `HotswapPlugin`、`OrphanBreakerPredicate`、`BytecodeTransformerBridge` 等扩展 SPI）。
+- **`:core`**：核心 Java Agent 引擎。**ASM 9.9.1 100% Shade 且重定位至 `remold.internal.asm.*`**，杜绝与任何应用层框架（如 Mixin、ByteBuddy、Spring）发生 ASM 版本与 ClassLoader 冲突。
+- **`:native`**：JVMTI 原生加速与 Panama/JNI 后端，提供亚毫秒级全堆实例检索能力，支持 Windows (x64)、Linux (x64)、macOS (x64/arm64) 全平台。
+- **`:plugin-arc`**：官方参考插件，展示如何通过 SPI 无缝扩展 UI 布局树比对与框架级轮询事件熔断。
 - **`:tests`**：完备的回归与兼容性测试套件，包含 185 项多版本编译矩阵拓扑 JUnit 测试、310 项 InitFix Oracle 正负向断言，以及 32 项 Mixin 与 JDWP 端到端兼容性断言。
 
 ---
@@ -171,5 +171,5 @@ public class PlayerService {
 
 本项目采用分模块的多许可证策略（Multi-licensing）：
 
-- **核心引擎、Native 库与 API 规范**（`:remold-api`、`:remold-core`、`:remold-native`）：采用商业友好的 **[Apache License 2.0](LICENSE)** 协议开源。允许商业化集成、无 Copyleft 传染性，包含专利授权保护；
-- **Mindustry / Arc 框架插件**（`:remold-plugin-arc`）：采用 **[GNU General Public License v3.0 (GPL-3.0)](remold-plugin-arc/LICENSE)** 协议开源，与 Mindustry 及 Arc 的上游 GPL-3.0 许可完全对齐。
+- **核心引擎、Native 库与 API 规范**（`:api`、`:core`、`:native`）：采用商业友好的 **[Apache License 2.0](LICENSE)** 协议开源。允许商业化集成、无 Copyleft 传染性，包含专利授权保护；
+- **Mindustry / Arc 框架插件**（`:plugin-arc`）：采用 **[GNU General Public License v3.0 (GPL-3.0)](plugin-arc/LICENSE)** 协议开源，与 Mindustry 及 Arc 的上游 GPL-3.0 许可完全对齐。

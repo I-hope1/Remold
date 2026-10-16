@@ -21,10 +21,10 @@ sourceSets {
 }
 
 dependencies {
-	implementation project(":remold-api")
-	implementation project(":remold-core")
-	implementation project(":remold-native")
-	implementation project(":remold-plugin-arc")
+	implementation project(":api")
+	implementation project(":core")
+	implementation project(":native")
+	implementation project(":plugin-arc")
 	implementation "Anuken:Mindustry:$mindustryVersion"
 	implementation "org.spongepowered:mixin:0.8.5"
 	implementation "com.google.guava:guava:33.4.0-jre"
@@ -99,8 +99,8 @@ test {
 	testClassesDirs = sourceSets.main.output.classesDirs
 	classpath = sourceSets.main.runtimeClasspath
 	dependsOn classes
-	dependsOn project(":remold-core").tasks.named("shadowJar")
-	dependsOn project(":remold-native").tasks.named("jar")
+	dependsOn project(":core").tasks.named("shadowJar")
+	dependsOn project(":native").tasks.named("jar")
 	dependsOn hstestFixtureTasks
 	inputs.dir(hstestFixtureRoot)
 	useJUnitPlatform()
@@ -169,12 +169,12 @@ tasks.register("mixinProbe", JavaExec) {
 	group = "verification"
 	description = "运行 Mixin 接入与外部 JDWP 热更新兼容性实测 (E2E)"
 	dependsOn classes
-	dependsOn project(":remold-core").tasks.named("shadowJar")
-	dependsOn project(":remold-native").tasks.named("jar")
+	dependsOn project(":core").tasks.named("shadowJar")
+	dependsOn project(":native").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "remold.MixinCompatibilityTest"
 	doFirst {
-		jvmArgs "-javaagent:${project(':remold-core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
 		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
 		if (nativeLibPath != null) {
@@ -188,8 +188,8 @@ tasks.register("initFixOracle", JavaExec) {
 	group = "verification"
 	description = "运行 InitFix 差分 Oracle（正向值比对 + 负向阻断断言）"
 	dependsOn classes
-	dependsOn project(":remold-core").tasks.named("shadowJar")
-	dependsOn project(":remold-native").tasks.named("jar")
+	dependsOn project(":core").tasks.named("shadowJar")
+	dependsOn project(":native").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "InitFixOracle"
 	dependsOn tasks.named("compileKtfixV1Kotlin")
@@ -208,8 +208,8 @@ tasks.register("layoutGateAssert", JavaExec) {
 	group = "verification"
 	description = "运行 LayoutGate 规则表断言"
 	dependsOn classes
-	dependsOn project(":remold-core").tasks.named("shadowJar")
-	dependsOn project(":remold-native").tasks.named("jar")
+	dependsOn project(":core").tasks.named("shadowJar")
+	dependsOn project(":native").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "LayoutGateAssert"
 }
@@ -219,8 +219,8 @@ tasks.register("ghostProbe", JavaExec) {
 	group = "verification"
 	description = "运行幽灵桩熔断栈探测断言 (GhostProbe)"
 	dependsOn classes
-	dependsOn project(":remold-core").tasks.named("shadowJar")
-	dependsOn project(":remold-native").tasks.named("jar")
+	dependsOn project(":core").tasks.named("shadowJar")
+	dependsOn project(":native").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "GhostProbe"
 }
@@ -230,12 +230,12 @@ tasks.register("concurrencyAssert", JavaExec) {
 	group = "verification"
 	description = "运行并发入口加固断言 (E2E Agent)"
 	dependsOn classes
-	dependsOn project(":remold-core").tasks.named("shadowJar")
-	dependsOn project(":remold-native").tasks.named("jar")
+	dependsOn project(":core").tasks.named("shadowJar")
+	dependsOn project(":native").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "ConcurrencyAssert"
 	doFirst {
-		jvmArgs "-javaagent:${project(':remold-core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
 		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
 		if (nativeLibPath != null) {
@@ -249,12 +249,12 @@ tasks.register("fingerprintAssert", JavaExec) {
 	group = "verification"
 	description = "运行指纹延后落账断言 (E2E Agent)"
 	dependsOn classes
-	dependsOn project(":remold-core").tasks.named("shadowJar")
-	dependsOn project(":remold-native").tasks.named("jar")
+	dependsOn project(":core").tasks.named("shadowJar")
+	dependsOn project(":native").tasks.named("jar")
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "FingerprintAssert"
 	doFirst {
-		jvmArgs "-javaagent:${project(':remold-core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
 		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
 		if (nativeLibPath != null) {
@@ -271,10 +271,10 @@ tasks.register("verifyDocStatusMarkers") {
 		def checkDirs = [
 			file("${rootDir}/docs/initfix"),
 			file("${rootDir}/docs/topology"),
-			file("${rootDir}/remold-core/src"),
-			file("${rootDir}/remold-api/src"),
-			file("${rootDir}/remold-plugin-arc/src"),
-			file("${rootDir}/remold-native/src")
+			file("${rootDir}/core/src"),
+			file("${rootDir}/api/src"),
+			file("${rootDir}/plugin-arc/src"),
+			file("${rootDir}/native/src")
 		]
 		def pattern = ~/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/
 		def violations = []

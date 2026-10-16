@@ -24,9 +24,9 @@ publishing {
 }
 
 dependencies {
-	compileOnly project(':remold-api')
-	compileOnly project(':remold-core')
-	compileOnly project(':remold-native')
+	compileOnly project(':api')
+	compileOnly project(':core')
+	compileOnly project(':native')
 	compileOnly "Anuken:Mindustry:$mindustryVersion"
 
 	// ASM for bytecode analysis in Injector / CellPropertyRef

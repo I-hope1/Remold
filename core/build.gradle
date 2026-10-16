@@ -24,8 +24,8 @@ publishing {
 	}
 }
 dependencies {
-	api project(':remold-api')
-	compileOnly project(':remold-native')
+	api project(':api')
+	compileOnly project(':native')
 
 	// asm
 	def asmVersion = '9.9.1'

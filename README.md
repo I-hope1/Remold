@@ -34,6 +34,9 @@ remold {
     // 可选：指定 JBR 路径（默认自动读取环境变量 JBR_HOME 或系统属性 jbr.home）
     // jbrPath = "/path/to/jbr"
 
+    // 可选：文件变动防抖窗口（毫秒，默认 1200）
+    // fileShakeMs = 1200
+
     // 可选：开启本机 JDWP 远程调试（默认 false，监听安全回环 127.0.0.1:5005）
     // debug = true
     // debugPort = 5005
@@ -51,6 +54,7 @@ apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/main/remold.gradl
 remold {
     // agentJar = "libs/remold-agent.jar"
     // jbrPath = "/path/to/jbr"
+    // fileShakeMs = 1200
     // debug = true
     // debugPort = 5005
     // mainClass = "your.package.Main"

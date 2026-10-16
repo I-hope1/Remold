@@ -12,6 +12,7 @@ open class RemoldExtension {
     var mainClass: String? = null
     var watchDirs: MutableList<File> = mutableListOf()
     var extraJvmArgs: MutableList<String> = mutableListOf()
+    var fileShakeMs: Int? = null
 }
 
 val remoldExt = project.extensions.create<RemoldExtension>("remold")
@@ -89,11 +90,17 @@ project.plugins.withId("java") {
             }
 
             args.addAll(remoldExt.extraJvmArgs)
+            if (remoldExt.fileShakeMs != null) {
+                args.add("-Dremold.agent.file_shake_ms=${remoldExt.fileShakeMs}")
+            }
             jvmArgs(args)
 
             logger.lifecycle("[Remold] 启动配置已装配:")
             logger.lifecycle("  - Agent: ${agentFile.absolutePath}")
             logger.lifecycle("  - Watch 目录 (${allWatchDirs.size} 个): $watchPath")
+            if (remoldExt.fileShakeMs != null) {
+                logger.lifecycle("  - File Shake: ${remoldExt.fileShakeMs}ms")
+            }
             if (executable != "java") {
                 logger.lifecycle("  - JBR: $executable")
             }

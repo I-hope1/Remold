@@ -135,8 +135,8 @@ test {
 	}
 }
 
-// 断言测试总数 ≥ 185 且 0 skipped
-def hstestMinTests = 185
+// 断言测试总数 ≥ 186 且 0 skipped
+def hstestMinTests = 186
 tasks.register("verifyTestCount") {
 	group = "verification"
 	description = "断言 JUnit 测试数不低于基线 ${hstestMinTests}"

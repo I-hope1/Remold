@@ -98,7 +98,13 @@ public class RemoldAgent {
 	//region Configuration Fields
 	public static boolean      DEBUG              = Boolean.parseBoolean(System.getenv("remold.agent.debug"));
 	public static boolean      UCP_APPEND         = Boolean.parseBoolean(System.getProperty("remold.agent.ucp_append", "true"));
-	public static int          FILE_SHAKE_MS      = 1200;
+	/**
+	 * 文件监控防抖时间窗口（毫秒）。
+	 * 支持通过 System Property ({@code -Dremold.agent.file_shake_ms=...} 或 {@code -Dremold.fileShakeMs=...})、
+	 * 环境变量 {@code REMOLD_AGENT_FILE_SHAKE_MS}、agentArgs ({@code file_shake_ms=...}) 或
+	 * {@link #setFileShakeMs(int)} 动态配置。默认 1200ms。
+	 */
+	public static volatile int FILE_SHAKE_MS      = intProp("remold.agent.file_shake_ms", "remold.fileShakeMs", 1200);
 	public static RedefineMode REDEFINE_MODE;
 	public static String[]     HOTSWAP_BLACKLIST  = new String[0];
 	public static boolean      RETRANSFORM_LOADED = Boolean.parseBoolean(System.getProperty("remold.agent.retransform_loaded", "false"));
@@ -504,6 +510,18 @@ public class RemoldAgent {
 	public static int peakConcurrentHotswaps() {
 		return CONCURRENT_HOTSWAP_PEAK.get();
 	}
+
+	/** 动态设置文件防抖等待窗口（毫秒）。负数将被忽略。 */
+	public static void setFileShakeMs(int fileShakeMs) {
+		if (fileShakeMs >= 0) {
+			FILE_SHAKE_MS = fileShakeMs;
+		}
+	}
+
+	/** 获取当前文件防抖等待窗口（毫秒）。 */
+	public static int getFileShakeMs() {
+		return FILE_SHAKE_MS;
+	}
 	//endregion
 
 	//region Agent Initialization
@@ -566,7 +584,20 @@ public class RemoldAgent {
 		Set<Path> newWatchJars = new HashSet<>();
 		for (String s : agentArgs.split(File.pathSeparator)) {
 			if (s.trim().isEmpty()) continue;
-			Path   p  = Paths.get(s.trim()).toAbsolutePath();
+			String trimmed = s.trim();
+			if (trimmed.startsWith("file_shake_ms=") || trimmed.startsWith("shake=") || trimmed.startsWith("fileShakeMs=")) {
+				try {
+					int val = Integer.parseInt(trimmed.substring(trimmed.indexOf('=') + 1).trim());
+					if (val >= 0) {
+						FILE_SHAKE_MS = val;
+						info("File Shake MS configured via agentArgs: " + FILE_SHAKE_MS);
+					}
+				} catch (NumberFormatException e) {
+					warn("Invalid file_shake_ms in agentArgs: " + trimmed);
+				}
+				continue;
+			}
+			Path   p  = Paths.get(trimmed).toAbsolutePath();
 			String ps = p.toString();
 			if (Files.isDirectory(p)) {
 				newWatchDirs.add(p);
@@ -628,6 +659,28 @@ public class RemoldAgent {
 		return v == null ? def : Boolean.parseBoolean(v.trim());
 	}
 
+	private static int intProp(String primary, String alias, int def) {
+		String v = System.getProperty(primary);
+		if (v == null && alias != null) v = System.getProperty(alias);
+		if (v == null) {
+			v = System.getProperty("remold.file_shake_ms");
+		}
+		if (v == null) {
+			String envKey = primary.replace('.', '_').toUpperCase();
+			v = System.getenv(envKey);
+			if (v == null && alias != null) v = System.getenv(alias.replace('.', '_').toUpperCase());
+			if (v == null) v = System.getenv(primary);
+			if (v == null && alias != null) v = System.getenv(alias);
+		}
+		if (v == null || v.trim().isEmpty()) return def;
+		try {
+			int val = Integer.parseInt(v.trim());
+			return val >= 0 ? val : def;
+		} catch (NumberFormatException e) {
+			return def;
+		}
+	}
+
 	public static void initConfig() {
 		info("DEBUG: " + DEBUG);
 		REDEFINE_MODE = RedefineMode.valueOfFail(System.getProperty("remold.agent.redefine_mode", "inject"), RedefineMode.inject);
@@ -646,6 +699,8 @@ public class RemoldAgent {
 		if (LAMBDA_ALIGN) {
 			info("Lambda Alignment ENABLED. Warning: This may cause logical shifts if lambdas are reordered.");
 		}
+		FILE_SHAKE_MS = intProp("remold.agent.file_shake_ms", "remold.fileShakeMs", FILE_SHAKE_MS);
+		info("File Shake MS: " + FILE_SHAKE_MS);
 		UI_HOOK = Boolean.parseBoolean(System.getProperty("remold.agent.ui_hook", "false"));
 		info("UI Hook: " + UI_HOOK);
 		boolean cellPropertyRef = Boolean.parseBoolean(System.getProperty("remold.agent.cell_property_ref", "false"));

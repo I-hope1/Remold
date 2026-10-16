@@ -62,6 +62,13 @@ remold {
 ./gradlew runRemold
 ```
 
+> [!TIP]
+> **想立即体验？** 仓库自带完整演示模块，克隆后直接运行：
+> ```bash
+> ./gradlew :example:runRemold
+> ```
+> 详细操作指引参见 [`example/README.md`](example/README.md)。
+
 ---
 
 ### 1.3 方式二：IntelliJ IDEA 运行配置 (IDE Run Configuration)
@@ -238,6 +245,7 @@ flowchart TD
 - **`:core`**：核心 Java Agent 引擎。**ASM 9.9.1 100% Shade 且重定位至 `remold.internal.asm.*`**，杜绝与任何应用层框架（如 Mixin、ByteBuddy、Spring）发生 ASM 版本与 ClassLoader 冲突。
 - **`:native`**：JVMTI 原生加速与 Panama/JNI 后端，提供亚毫秒级全堆实例检索能力，支持 Windows (x64)、Linux (x64)、macOS (x64/arm64) 全平台。
 - **`:plugin-arc`**：官方参考插件，展示如何通过 SPI 无缝扩展 UI 布局树比对与框架级轮询事件熔断。
+- **`:example`**：极简演示应用，开箱即用体验 Agent 监听、存量实例字段初始化与 `@OnReload` 生命周期回调。
 - **`:tests`**：完备的回归与兼容性测试套件，包含 185 项多版本编译矩阵拓扑 JUnit 测试、310 项 InitFix Oracle 正负向断言，以及 32 项 Mixin 与 JDWP 端到端兼容性断言。
 
 ---

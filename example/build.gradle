@@ -1,0 +1,17 @@
+plugins {
+    id 'application'
+}
+
+application {
+    mainClass = 'example.Main'
+}
+
+dependencies {
+    implementation project(':api')
+}
+
+apply from: rootProject.file('remold.gradle')
+
+tasks.named('runRemold') {
+    dependsOn ':core:shadowJar'
+}

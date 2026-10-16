@@ -29,7 +29,7 @@ java -javaagent:remold-core.jar=build/classes/java/main;libs/my-mod.jar \
 
 ### 1.2 Gradle 依赖接入 (JitPack)
 
-若在代码中需要使用注解（如 `@RemoldReinit`、`@OnReload`）或扩展 SPI（如 `HotswapPlugin`、`BytecodeTransformerBridge`），可在 Gradle 中引入 `remold-api`：
+若在代码中需要使用注解（如 `@RemoldReinit`、`@OnReload`）或扩展 SPI（如 `HotswapPlugin`、`BytecodeTransformerBridge`），可在 Gradle 中引入 `api` 模块：
 
 ```groovy
 repositories {

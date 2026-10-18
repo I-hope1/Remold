@@ -6,6 +6,7 @@ import remold.util.Utils;
 import java.io.*;
 import java.lang.invoke.*;
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Method;
 import java.net.*;
 import java.nio.file.*;
 import java.util.*;
@@ -69,7 +70,17 @@ public class MountManager {
 			loadersGetter = Reflect.IMPL_LOOKUP.findGetter(URLClassPath, "loaders", ArrayList.class);
 			unopenedUrlsGetter = Reflect.IMPL_LOOKUP.findGetter(URLClassPath, "unopenedUrls", ArrayDeque.class);
 			Class<?> Loader = Class.forName(URLClassPath.getName() + "$Loader");
-			getLoaderHandle = Reflect.IMPL_LOOKUP.findVirtual(URLClassPath, "getLoader", MethodType.methodType(Loader, URL.class));
+			MethodHandle gh = null;
+			try {
+				gh = Reflect.IMPL_LOOKUP.findVirtual(URLClassPath, "getLoader", MethodType.methodType(Loader, URL.class));
+			} catch (Throwable ignored) { }
+			if (gh == null) {
+				try {
+					Method m = URLClassPath.getDeclaredMethod("getLoader", URL.class);
+					gh = Reflect.IMPL_LOOKUP.unreflect(m);
+				} catch (Throwable ignored) { }
+			}
+			getLoaderHandle = gh;
 		} catch (Throwable e) {
 			error("[Mount] Failed to initialize method handles.", e);
 		}

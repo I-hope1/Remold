@@ -42,13 +42,42 @@ public class Reflect {
 	}
 
 	static {
+		Lookup impl = null;
+		// 策略 1: 直接通过 Unsafe 静态字段偏移读取 IMPL_LOOKUP（全 JDK 8/11/17/21/25+ 通用，无需 setAccessible）
 		try {
-			Constructor<?> constructor = ReflectionFactory.getReflectionFactory().newConstructorForSerialization(Lookup.class, Lookup.class.getDeclaredConstructor(Class.class));
-			Lookup         lookup      = (Lookup) constructor.newInstance(Lookup.class);
-			IMPL_LOOKUP = (Lookup) lookup.findStaticGetter(Lookup.class, "IMPL_LOOKUP", Lookup.class).invokeExact();
-		} catch (Throwable e) {
-			throw new RuntimeException(e);
+			Field implField = Lookup.class.getDeclaredField("IMPL_LOOKUP");
+			if (UNSAFE != null) {
+				Object base = UNSAFE.staticFieldBase(implField);
+				long offset = UNSAFE.staticFieldOffset(implField);
+				impl = (Lookup) UNSAFE.getObject(base, offset);
+			}
+		} catch (Throwable ignored) { }
+
+		// 策略 2: 反射 setAccessible 兜底
+		if (impl == null) {
+			try {
+				Field implField = Lookup.class.getDeclaredField("IMPL_LOOKUP");
+				implField.setAccessible(true);
+				impl = (Lookup) implField.get(null);
+			} catch (Throwable ignored) { }
 		}
+
+		// 策略 3: ReflectionFactory 构造全特权 Lookup（注意：JDK 11 要求传入非 java.lang.invoke 包下的类如 Object.class）
+		if (impl == null) {
+			try {
+				Constructor<?> constructor = ReflectionFactory.getReflectionFactory().newConstructorForSerialization(
+					Lookup.class, Lookup.class.getDeclaredConstructor(Class.class));
+				Lookup lookup = (Lookup) constructor.newInstance(Object.class);
+				impl = (Lookup) lookup.findStaticGetter(Lookup.class, "IMPL_LOOKUP", Lookup.class).invokeExact();
+			} catch (Throwable ignored) { }
+		}
+
+		// 策略 4: MethodHandles.lookup() 终极兜底
+		if (impl == null) {
+			impl = MethodHandles.lookup();
+		}
+
+		IMPL_LOOKUP = impl;
 	}
 
 	/** {@code ClassLoader.defineClass(String, byte[], int, int, ProtectionDomain)}，形态 {@code (ClassLoader, ...)Class}。 */

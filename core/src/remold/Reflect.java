@@ -21,6 +21,7 @@ import java.security.ProtectionDomain;
  *       {@code ClassLoader.defineClass} 与 {@code Unsafe.defineClass}。</li>
  * </ul>
  */
+@SuppressWarnings({"deprecation", "removal"})
 public class Reflect {
 	public static final Lookup IMPL_LOOKUP;
 	public static final Unsafe UNSAFE = getUnsafe0();
@@ -74,6 +75,7 @@ public class Reflect {
 
 		// 策略 4: MethodHandles.lookup() 终极兜底
 		if (impl == null) {
+			RemoldAgent.warn("[Reflect] Failed to acquire privileged IMPL_LOOKUP; falling back to unprivileged MethodHandles.lookup(). Method injection and hidden class defining may fail.");
 			impl = MethodHandles.lookup();
 		}
 

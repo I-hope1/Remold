@@ -62,8 +62,8 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 堆实例检索（Native） | `LibTool.getInstances` |
 | 匿名类与局部类安全门 | `AnonClassAligner`、`LayoutGate`、`LocalClassGuard` |
 | `Object.toString` 例外 | `InitFix.allowedStringCoercion`、`isInertProducer`、`isIntermediateObjectToString`（`effectReason` 在白名单之后、黑名单之前调用） |
-| 测试夹具（Java） | `scratch/hstest/src/InitFixOracle.java`（内存 `javac`） |
-| 测试夹具（Kotlin） | `scratch/hstest/ktfix/v1/`、`v2/` 下的 `.kt`，由 `ktfixV1`/`ktfixV2` source set 编译 |
+| 测试夹具（Java） | `tests/src/InitFixOracle.java`（内存 `javac`） |
+| 测试夹具（Kotlin） | `tests/ktfix/v1/`、`v2/` 下的 `.kt`，由 `ktfixV1`/`ktfixV2` source set 编译 |
 
 ## 5. 实现状态概要（详细参见 `docs/status.md`）
 
@@ -88,17 +88,17 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 
 ## 6. 测试要求
 
-- 回归任务：`hstestInitFixOracle`（挂在 `check`，当前 48 场景 / 318 断言，以实际输出为准）。需要 Mindustry 运行期依赖（`hstestImplementation`）。
-- 必须通过 `./gradlew hstestInitFixOracle` 运行，不要直接 `java -cp`：Kotlin 夹具由 Gradle 先编译，输出目录经 `-Dremold.ktfix.v1/v2` 传入。
+- 回归任务：`:tests:initFixOracle`（挂在 `check`，当前 48 场景 / 318 断言，以实际输出为准）。纯 JVM 运行环境，0 额外框架依赖。
+- 必须通过 `./gradlew initFixOracle`（或 `./gradlew :tests:initFixOracle`）运行，不要直接 `java -cp`：Kotlin 夹具由 Gradle 先编译，输出目录经 `-Dremold.ktfix.v1/v2` 传入。
 - Kotlin 夹具的 v1/v2 输出目录**绝不能**进入任何 classpath（同名类会静默只命中其一，造成假绿）。
-- 迭代期间只跑 `hstestInitFixOracle`，收尾时才跑一次 `./gradlew check`。
-- 匿名类/对齐主题套件已从 `suite.sh`（`hstestRun`）迁到 JUnit：`./gradlew hstestJunit`（挂在 `check`）。入口用 `-Dhstest.javac8/11/17/21/25` 现编夹具，不再有 `expected-count.txt` 基线。
-- `hstestJunit` 的测试数下限由 `build.gradle` 的 `hstestMinTests` 守卫（`verifyHstestTestCount` 读 XML 断言总数 ≥ 基线且 `skipped == 0`）：删除/禁用/跳过测试会让 `check` 变红，上调基线要有意识地改这一行。
-- CI：`.github/workflows/hstest.yml`（`setup-java` 装 8/11/17/21/25 + `fromEnv`，关 auto-detect/auto-download，`hstest.requireJdks=true`；runner JDK 显式钉成 25）。首次 Linux 跑，Windows 假设（路径分隔符、GBK、`F:/` 默认值）可能暴露，按原因分类再处理。
+- 迭代期间只跑 `./gradlew initFixOracle`，收尾时才跑一次 `./gradlew check`。
+- 匿名类/对齐主题套件为标准 JUnit 测试：`./gradlew test`（或 `./gradlew :tests:test`，挂在 `check`）。入口用 `-Dhstest.javac8/11/17/21/25` 现编夹具，不再有 `expected-count.txt` 基线。
+- `test` 的测试数下限由 `tests/build.gradle` 的 `hstestMinTests` 守卫（`verifyTestCount` 读 XML 断言总数 ≥ 基线且 `skipped == 0`）：删除/禁用/跳过测试会让 `check` 变红，上调基线要有意识地改这一行。
+- CI：`.github/workflows/ci.yml`（`setup-java` 装 8/11/17/21 + runner JDK 25，`hstest.requireJdks=true`；以及 `test-dcevm` 任务在真实 JBR 21 DCEVM 下执行 `liveDcevmTest`）。首次 Linux 跑，Windows 假设（路径分隔符、GBK）可能暴露，按原因分类再处理。
 - 新增或放宽安全门：必须有负向阻断断言。
 - 修复缺陷：必须有先红后绿的回归断言。
 - 新增或放宽安全门例外：除正向、负向用例外，必须做**变异检查**——故意放宽一处实现，确认对应用例会变红，再撤销。
-- 新增测试注释和断言消息用英文，已有中文不改。涉及中文输出的任务需带 UTF-8 JVM 参数（`hstestInitFixOracle` 已配置）。
+- 新增测试注释和断言消息用英文，已有中文不改。涉及中文输出的任务需带 UTF-8 JVM 参数（`initFixOracle` 已配置）。
 - 涉及 float/double CAS：必须在真实 JDK 8 上验证（oracle 跑在 JDK 25，区分不出两种实现）。
 
 ## 7. 按需文档

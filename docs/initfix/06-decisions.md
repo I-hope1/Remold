@@ -86,7 +86,7 @@
 
 ## D11. 对安全门例外做变异检查
 
-**做法**：故意放宽一处实现，只跑 `hstestInitFixOracle`，确认对应用例变红，再撤销。撤销前先确认修复已提交，避免 `git checkout` 抹掉修复。
+**做法**：故意放宽一处实现，只跑 `./gradlew initFixOracle`，确认对应用例变红，再撤销。撤销前先确认修复已提交，避免 `git checkout` 抹掉修复。
 
 **结果**：6 个变异里，放行 `GETSTATIC`、放行任意静态方法被原有用例抓住；放行 `GETFIELD`/`ALOAD`、例外覆盖 `hashCode`、去掉"必须有白名单生产者"、`frames == null` 改放行，在补充 `CaseKtInstFieldTrim`、`CaseKtTrimHash`、`CaseJConstObject`、`caseFramesNullIsFailClosed` 之前原套件抓不住，补充后全部变红。
 

@@ -21,7 +21,7 @@
 
 1. **唯一真相源隔离**：`docs/status.md` 作为全模块实现状态的唯一受权载体，彻底解除规范文档与代码注释维护实现进度的负担。
 2. **双重验收验证机制**：
-   - **自动化机器扫描 (`verifyDocStatusMarkers`)**：纳入主构建验证流程（`./gradlew check` 强制依赖），递归扫描 `docs/initfix/`、`docs/topology/`、`hotswap-core/src/`、`hotswap-api/src/`、`hotswap-plugin-arc/src/`，严格拦截标记 `/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/`。当前状态：**100% 达标全绿**。
+   - **自动化机器扫描 (`verifyDocStatusMarkers`)**：纳入主构建验证流程（`./gradlew check` 强制依赖），递归扫描 `docs/initfix/`、`docs/topology/`、`core/src/`、`api/src/`、`plugin-arc/src/`、`panama/src/`，严格拦截标记 `/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/`。当前状态：**100% 达标全绿**。
    - **规范性内容抽检审计**：禁止规范正文出现“目前已支持”、“当前版本尚未实现”等时态陈述，时态陈述一律归入 `status.md`。全量 14 篇客观设计文档（`docs/topology/` 8 篇、`docs/initfix/` 6 篇）完成人工抽检审查，抽查合格率 100%。
 3. **设计规范文档客观化清理清单**：
    - [`docs/topology/01-invariants-and-remapping.md`](topology/01-invariants-and-remapping.md) ～ [`08-decisions.md`](topology/08-decisions.md)（共 8 篇）：全部重构为纯架构规格、约束契约与客观原理，易腐进度全部剥离，头部统一指引至 `status.md`。
@@ -56,7 +56,7 @@
 
 | 机制 / 条目 | 状态 | 规范章节 | 落地位置 | 验收证据与决策依据 |
 |:---|:---:|:---|:---|:---|
-| javac 8/11/17/21/25 本机编译矩阵支持 | ✅ | [`06-runtime-and-perf.md`](topology/06-runtime-and-perf.md) §1 | `build.gradle` (任务 `hstestJunit`) | `AnonClassReproJUnitTest` / CI `.github/workflows/hstest.yml`（Temurin 25 runner，5 套工具链现编夹具矩阵通过；注意 `SwitchMapAlignTest` 单独在 javac 21 验证） |
+| javac 8/11/17/21/25 本机编译矩阵支持 | ✅ | [`06-runtime-and-perf.md`](topology/06-runtime-and-perf.md) §1 | `tests/build.gradle` (任务 `test`) | `AnonClassReproJUnitTest` / CI `.github/workflows/ci.yml`（Temurin 25 runner，5 套工具链现编夹具矩阵通过；注意 `SwitchMapAlignTest` 单独在 javac 21 验证） |
 | 新 javac 加旧 -target 交叉编译矩阵 | ⬜ | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §3 | 待配置测试矩阵 | 新版 javac 携带 `-target 8/11` 等交叉编译产物的命名与属性表现尚未系统性覆盖 |
 | ECJ 编译器支持 | ⬜ | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §4 | 暂未接入 ECJ 编译器 | 见 `07-layout-gate-and-risks.md` §4；ECJ 不生成 SwitchMap 类，EnclosingMethod 结构存在差异 |
 | 未知 class major 显式拒绝 | ⬜ | [`06-runtime-and-perf.md`](topology/06-runtime-and-perf.md) §1 | `AnonClassAligner.align` 入口待拦截 | 路线图待办；遇到未知高版本 class major 时显式拒绝而非尝试解析，防止 ASM Crash |
@@ -102,12 +102,12 @@
 
 | 机制 / 条目 | 状态 | 规范章节 | 落地位置 | 验收证据与决策依据 |
 |:---|:---:|:---|:---|:---|
-| 五条核心不变量 | ✅ | [`AGENTS.md`](../AGENTS.md) §2 | `InitFix` 主流程入口与熔断保护 | 未初始化守卫、PENDING 弱键 (5min TTL)、PatchReport 解耦、LinkageError 窄熔断、afterRedefineFailed 立即注销；`hstestInitFixOracle` 48 场景持续守卫 |
+| 五条核心不变量 | ✅ | [`AGENTS.md`](../AGENTS.md) §2 | `InitFix` 主流程入口与熔断保护 | 未初始化守卫、PENDING 弱键 (5min TTL)、PatchReport 解耦、LinkageError 窄熔断、afterRedefineFailed 立即注销；`initFixOracle` 48 场景持续守卫 |
 | 离线元数据契约 (`ClassHierarchyOracle`) | ✅ | [`01-safety-gate.md`](initfix/01-safety-gate.md) §5 | `ClassHierarchyOracle` / `HierarchyTreeOracle` | 全程无类加载；流式字节码扫描；`AnnotationTransformer.HierarchyTree` 底座支撑 |
 | 待补字段台账 (`FieldLedger`) | ✅ | [`02-closure-and-ledger.md`](initfix/02-closure-and-ledger.md) §2 | `InitFix.LEDGER` (`FieldLedger`) | 覆盖六种记账情形（分析期被拒、运行期异常、依赖跳过、Redefine 失败、规划期异常、TTL 超时清扫）；`getUnpatchedFields` 状态回流 |
-| T0 零值等价判决 | ✅ | [`01-safety-gate.md`](initfix/01-safety-gate.md) §1 | `InitFix.checkSafe` / `NOTHING_TO_PATCH` | 按位比较排除 `-0.0f`/`NaN`；`NOTHING_TO_PATCH` 零开销放行不告警；`hstestInitFixOracle` 验证通过 |
+| T0 零值等价判决 | ✅ | [`01-safety-gate.md`](initfix/01-safety-gate.md) §1 | `InitFix.checkSafe` / `NOTHING_TO_PATCH` | 按位比较排除 `-0.0f`/`NaN`；`NOTHING_TO_PATCH` 零开销放行不告警；`initFixOracle` 验证通过 |
 | T1 编译期常量 | 🔶 | [`01-safety-gate.md`](initfix/01-safety-gate.md) §1 | `InitFix.extractFieldInits` | 静态 `ConstantValue` 走专用通道；字面量切片仍走常规直线提取 |
-| T2 纯计算切片 | 🔶 | [`01-safety-gate.md`](initfix/01-safety-gate.md) §1 | `InitFix.extractFieldInits` / `AliasInterpreter` | 经 `AliasInterpreter` 逆向切片并通过效应安全门；`hstestInitFixOracle` 多场景覆盖 |
+| T2 纯计算切片 | 🔶 | [`01-safety-gate.md`](initfix/01-safety-gate.md) §1 | `InitFix.extractFieldInits` / `AliasInterpreter` | 经 `AliasInterpreter` 逆向切片并通过效应安全门；`initFixOracle` 多场景覆盖 |
 | T3 复杂/不安全拒绝 | ✅ | [`01-safety-gate.md`](initfix/01-safety-gate.md) §1 | `InitFix.checkSafe` / `InitFix.transform` | 分支、try/catch、环境依赖、可变源字段，统一在 `transform` 发 warn 并记入台账；负向断言全面覆盖 |
 | T4 显式逃生口 `@HotswapInit` | ⬜ | [`01-safety-gate.md`](initfix/01-safety-gate.md) §1 | 待实现于伴生类生成逻辑 | 路线图规划（伴生类直接静态转发至用户指定的初始化工厂方法） |
 | 最小效应检查（P0） | 🔶 | [`01-safety-gate.md`](initfix/01-safety-gate.md) §2 | `InitFix.effectReason` / `blacklistedCallReason` | 拦截 bit 3/6 及 bit 4/5 子集；白名单防误杀；Kotlin `trim` 家族 `Object.toString` 窄例外（变异测试守卫） |
@@ -162,7 +162,7 @@
 |:---|:---:|:---|:---|
 | **`tier5Matches` 残余死字段清理** | P2 | `AnonClassAligner.AlignStats` | Tier 5（物理类名盲配）已彻底拔除，但统计结构体中仍残留 `tier5Matches` 字段与日志引用；需从对齐统计结构体及相关日志中安全移除，避免误导维护者。 |
 | **`MAX_DEPTH` 死代码分支与夹具缺失** | P2 | `RemoldAgent.ANON_STRICT` / `AnonClassAligner` | 常规模式下 `depth > 4` 仅告警不拒绝，且缺乏多层嵌套严格熔断测试夹具；需补充深层嵌套测试夹具并清理冗余判断逻辑。 |
-| **JDK 8 raw-bits CAS 自动化 CI 差异验证缺失** | P2 | `.github/workflows/hstest.yml` / `HotswapBridge` | 当前 CI 仅运行在 Temurin 25，无法区分 raw-bits 与旧实现；JDK 8 raw-bits CAS 为手工验证，非持续自动化覆盖；需在 CI 矩阵中增加 JDK 8 运行期任务以持续守护差异逻辑。 |
+| **JDK 8 raw-bits CAS 自动化 CI 差异验证缺失** | P2 | `.github/workflows/ci.yml` / `HotswapBridge` | 当前 CI 仅运行在 Temurin 25，无法区分 raw-bits 与旧实现；JDK 8 raw-bits CAS 为手工验证，非持续自动化覆盖；需在 CI 矩阵中增加 JDK 8 运行期任务以持续守护差异逻辑。 |
 
 ---
 

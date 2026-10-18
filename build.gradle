@@ -10,23 +10,6 @@ allprojects {
 	}
 }
 
-def jdkExports = [
-	"java.base/jdk.internal.misc",
-	"java.base/jdk.internal.reflect",
-	"java.base/jdk.internal.loader",
-	"java.base/jdk.internal.math",
-	"java.base/jdk.internal.module",
-	"java.base/jdk.internal.org.objectweb.asm",
-	"java.base/jdk.internal.org.objectweb.asm.tree",
-	"java.base/jdk.internal.org.objectweb.asm.util",
-	"jdk.compiler/com.sun.tools.javac.api",
-	"jdk.compiler/com.sun.tools.javac.file",
-	"jdk.compiler/com.sun.tools.javac.util",
-	"jdk.compiler/com.sun.tools.javac.tree",
-	"jdk.compiler/com.sun.tools.javac.main",
-	"jdk.attach/sun.tools.attach",
-]
-
 subprojects {
 	apply plugin: 'base'
 	base {
@@ -41,7 +24,11 @@ subprojects {
 		sourceCompatibility = JavaVersion.VERSION_21
 		targetCompatibility = JavaVersion.VERSION_21
 		options.encoding = 'UTF-8'
-		options.compilerArgs += ["-AtargetVersion=11"]
-		options.compilerArgs.addAll(jdkExports.collectMany { ["--add-exports", "${it}=ALL-UNNAMED"] })
+		options.compilerArgs += [
+			"-AtargetVersion=11",
+			"--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+			"--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
+			"--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED"
+		]
 	}
 }

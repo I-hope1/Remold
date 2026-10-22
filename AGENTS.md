@@ -11,7 +11,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 - Android ART 与 `$extras` 扩展槽属于独立子项目（Engine II），不在此处理。
 - 运行时前提：
   - JBR 17/21+：`Lookup.defineHiddenClass`（NESTMATE）+ `jdk.internal.misc.Unsafe`
-  - DCEVM/TravaJDK 8/11：`Unsafe.defineAnonymousClass` + `sun.misc.Unsafe`
+  - DCEVM/TravaJDK 11：`Unsafe.defineAnonymousClass` + `sun.misc.Unsafe`（产物为 v55，JDK 8 无法加载）
 
 ## 2. 五条不变量（任何改动都不得破坏）
 

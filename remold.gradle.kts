@@ -11,9 +11,24 @@ open class RemoldExtension {
     var debug: Boolean = false
     var debugPort: Int = 5005
     var mainClass: String? = null
+    var jar: Any? = null
+    var args: MutableList<Any> = mutableListOf()
     var watchDirs: MutableList<File> = mutableListOf()
     var extraJvmArgs: MutableList<String> = mutableListOf()
     var fileShakeMs: Int? = null
+    var dependsOn: MutableList<Any> = mutableListOf()
+
+    fun jar(target: Any) {
+        this.jar = target
+    }
+
+    fun args(vararg newArgs: Any) {
+        this.args.addAll(newArgs.toList())
+    }
+
+    fun dependsOn(vararg tasks: Any) {
+        this.dependsOn.addAll(tasks.toList())
+    }
 }
 
 data class RemoldResolvedConfig(
@@ -23,7 +38,9 @@ data class RemoldResolvedConfig(
     val allWatchDirs: List<File>,
     val watchPath: String,
     val jvmArgs: List<String>,
-    val runtimeClasspath: org.gradle.api.file.FileCollection
+    val appArgs: List<String>,
+    val runtimeClasspath: org.gradle.api.file.FileCollection,
+    val targetJar: File?
 )
 
 val remoldExt = project.extensions.create<RemoldExtension>("remold")
@@ -32,11 +49,35 @@ project.plugins.withId("java") {
     val sourceSets = project.extensions.getByType<SourceSetContainer>()
 
     fun resolveRemoldConfig(): RemoldResolvedConfig {
+        // 0. 解析目标 jar (若配置了 jar，进入纯净 JAR 模式)
+        var targetJar: File? = null
+        if (remoldExt.jar != null) {
+            targetJar = project.file(remoldExt.jar!!)
+            if (!targetJar.exists()) {
+                throw GradleException("[Remold] 指定的目标启动 JAR 不存在: ${targetJar.absolutePath}")
+            }
+        }
+
         // 1. 解析 mainClass
-        val main = remoldExt.mainClass
+        var main = remoldExt.mainClass
             ?: (project.extensions.findByName("application") as? JavaApplication)?.mainClass?.orNull
             ?: (project.findProperty("mainClassName") as? String)
-            ?: throw GradleException("[Remold] 未配置 mainClass。请在 remold { mainClass = \"...\" } 或 application 插件中指定。")
+
+        if (main == null && targetJar != null) {
+            try {
+                val jf = java.util.jar.JarFile(targetJar)
+                main = jf.manifest?.mainAttributes?.getValue("Main-Class")
+                jf.close()
+            } catch (_: Exception) { }
+        }
+
+        if (main == null) {
+            if (targetJar != null) {
+                throw GradleException("[Remold] 未能从 ${targetJar.name} 的 MANIFEST.MF 中读取到 Main-Class，请在 remold { mainClass = \"...\" } 中显式指定。")
+            } else {
+                throw GradleException("[Remold] 未配置 mainClass 或 jar。请在 remold { mainClass = \"...\" } 或 remold { jar = \"...\" } 中指定。")
+            }
+        }
 
         // 2. 解析 JBR 路径
         var execPath = "java"
@@ -163,6 +204,9 @@ project.plugins.withId("java") {
             args.add("-Dremold.agent.file_shake_ms=${remoldExt.fileShakeMs}")
         }
 
+        val runtimeClasspath = if (targetJar != null) project.files(targetJar) else sourceSets["main"].runtimeClasspath
+        val appArgs = remoldExt.args.map { it.toString() }
+
         return RemoldResolvedConfig(
             mainClass = main,
             executable = execPath,
@@ -170,7 +214,9 @@ project.plugins.withId("java") {
             allWatchDirs = allWatchDirs,
             watchPath = watchPath,
             jvmArgs = args,
-            runtimeClasspath = sourceSets["main"].runtimeClasspath
+            appArgs = appArgs,
+            runtimeClasspath = runtimeClasspath,
+            targetJar = targetJar
         )
     }
 
@@ -183,14 +229,25 @@ project.plugins.withId("java") {
         doFirst {
             val conf = resolveRemoldConfig()
             mainClass.set(conf.mainClass)
+            classpath = conf.runtimeClasspath
+            if (conf.appArgs.isNotEmpty()) {
+                args(conf.appArgs)
+            }
             if (conf.executable != "java") {
                 executable = conf.executable
             }
             jvmArgs(conf.jvmArgs)
 
             logger.lifecycle("[Remold] 启动配置已装配:")
+            if (conf.targetJar != null) {
+                logger.lifecycle("  - 目标启动 JAR: ${conf.targetJar.absolutePath}")
+            }
+            logger.lifecycle("  - 主类: ${conf.mainClass}")
             logger.lifecycle("  - Agent: ${conf.agentFile.absolutePath}")
             logger.lifecycle("  - Watch 目录 (${conf.allWatchDirs.size} 个): ${conf.watchPath}")
+            if (conf.appArgs.isNotEmpty()) {
+                logger.lifecycle("  - 应用参数: ${conf.appArgs.joinToString(" ")}")
+            }
             if (remoldExt.fileShakeMs != null) {
                 logger.lifecycle("  - File Shake: ${remoldExt.fileShakeMs}ms")
             }
@@ -205,6 +262,19 @@ project.plugins.withId("java") {
             val jbr = remoldExt.jbrPath ?: System.getenv("JBR_HOME") ?: System.getProperty("jbr.home")
             if (!jbr.isNullOrBlank()) {
                 javaLauncher.set(null as org.gradle.jvm.toolchain.JavaLauncher?)
+            }
+            if (remoldExt.dependsOn.isNotEmpty()) {
+                dependsOn(remoldExt.dependsOn)
+            }
+        }
+        tasks.named("startRemold") {
+            if (remoldExt.dependsOn.isNotEmpty()) {
+                dependsOn(remoldExt.dependsOn)
+            }
+        }
+        tasks.named("generateRemoldScript") {
+            if (remoldExt.dependsOn.isNotEmpty()) {
+                dependsOn(remoldExt.dependsOn)
             }
         }
     }
@@ -226,6 +296,9 @@ project.plugins.withId("java") {
             lines.add("-cp")
             lines.add(conf.runtimeClasspath.asPath)
             lines.add(conf.mainClass)
+            if (conf.appArgs.isNotEmpty()) {
+                lines.addAll(conf.appArgs)
+            }
 
             argsFile.bufferedWriter(Charsets.UTF_8).use { writer ->
                 lines.forEach { line ->

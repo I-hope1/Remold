@@ -12,6 +12,14 @@ dependencies {
 
 apply from: rootProject.file('remold.gradle')
 
-tasks.named('runRemold') {
+remold {
+    // 模式一（当前激活）：标准应用模式，自动使用 application.mainClass ('example.Main')
+    // 内部工程构建依赖：启动前确保 agent 被编译就绪（外部使用者无需配置此项，插件会自动下载 Release agent）
     dependsOn ':core:shadowJar'
+
+    // 模式二（模组/游戏推荐）：纯净 JAR 启动模式（例如 Mindustry 模组开发）
+    // 彻底解决类加载器双重加载冲突，无需配置 mainClass（自动从 jar 的 MANIFEST.MF 读取）
+    // jar = "libs/Mindustry.jar"
+    // args = ["-loadmods"]
+    // dependsOn 'jar' // 启动前自动执行打包当前模组
 }

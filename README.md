@@ -47,6 +47,11 @@ remold {
 
     // 可选：主类（若已引入 application 插件会自动推导）
     // mainClass = "your.package.Main"
+
+    // 可选：JAR 启动模式（例如 Mindustry / 游戏模组开发，纯净拉起游戏 JAR，免去类加载器冲突与手动 mainClass）
+    // jar = "libs/Mindustry.jar"
+    // args = ["-loadmods"] // 可选：传递给启动程序的主参数
+    // dependsOn 'jar'       // 可选：启动前自动执行的前置任务（如编译打包模组）
 }
 ```
 
@@ -63,6 +68,11 @@ remold {
     // debug = true
     // debugPort = 5005
     // mainClass = "your.package.Main"
+
+    // JAR 启动模式
+    // jar = "libs/Mindustry.jar"
+    // args("-loadmods")
+    // dependsOn("jar")
 }
 ```
 

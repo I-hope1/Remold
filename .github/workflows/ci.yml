@@ -107,3 +107,46 @@ jobs:
             -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_8_X64,JAVA_HOME_11_X64,JAVA_HOME_17_X64,JAVA_HOME_21_X64,JAVA_HOME_25_X64 \
             -Dorg.gradle.java.installations.auto-detect=false \
             -Dorg.gradle.java.installations.auto-download=false
+
+  build-native:
+    name: Build Native Libraries (Linux x64 & Android arm64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up runner JDK (25)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Compile Linux x86_64 (.so)
+        run: |
+          mkdir -p core/libs
+          g++ -shared -fPIC -std=c++2b -O3 \
+            -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+            core/cpp/tool.cpp -o core/libs/libtool64.so
+          ls -la core/libs/libtool64.so
+
+      - name: Compile Android arm64-v8a (.so)
+        run: |
+          if [ -z "$ANDROID_NDK_HOME" ] && [ -d "$ANDROID_SDK_ROOT/ndk" ]; then
+            export ANDROID_NDK_HOME=$(find "$ANDROID_SDK_ROOT/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          fi
+          echo "Using Android NDK: $ANDROID_NDK_HOME"
+          
+          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang++ \
+            -shared -fPIC -static-libstdc++ -std=c++2b -O3 \
+            -Icore/cpp/jni_posix \
+            -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+            core/cpp/tool.cpp -o core/libs/libtoolarm64.so
+          ls -la core/libs/libtoolarm64.so
+
+      - name: Upload Native Artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: native-libraries
+          path: |
+            core/libs/*.so
+          if-no-files-found: error
+

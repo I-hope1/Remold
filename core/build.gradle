@@ -68,3 +68,59 @@ test {
 	// 与本次改动无关，但会让 `check` 永远红。
 	failOnNoDiscoveredTests = false
 }
+
+tasks.register('compileNativeArm64') {
+	group = 'build'
+	description = 'Compiles core/cpp/tool.cpp into core/libs/libtoolarm64.so using Android NDK'
+	doLast {
+		def ndkDir = System.getenv('ANDROID_NDK_HOME') ?: System.getenv('ANDROID_NDK_ROOT')
+		if (!ndkDir && System.getenv('ANDROID_HOME')) {
+			def ndkRoot = new File(System.getenv('ANDROID_HOME'), 'ndk')
+			if (ndkRoot.exists()) {
+				def ndkList = ndkRoot.listFiles().findAll { it.isDirectory() }.sort { it.name }
+				if (ndkList) ndkDir = ndkList.last().absolutePath
+			}
+		}
+		if (!ndkDir) {
+			logger.warn('[Remold] 未找到 ANDROID_NDK_HOME，无法编译 Android arm64 原生库。')
+			return
+		}
+		def isWin = System.getProperty('os.name').toLowerCase().contains('win')
+		def llvmBin = new File(ndkDir, "toolchains/llvm/prebuilt/${isWin ? 'windows-x86_64' : 'linux-x86_64'}/bin")
+		def compilerName = isWin ? 'aarch64-linux-android30-clang++.cmd' : 'aarch64-linux-android30-clang++'
+		def compiler = new File(llvmBin, compilerName)
+		if (!compiler.exists()) {
+			throw new GradleException("[Remold] 未在 NDK 中找到编译器: ${compiler.absolutePath}")
+		}
+		def javaHome = System.getenv('JAVA_HOME') ?: System.getProperty('java.home')
+		def outLib = file('libs/libtoolarm64.so')
+		outLib.parentFile.mkdirs()
+
+		List<String> cmd = []
+		if (isWin) {
+			cmd.add('cmd.exe')
+			cmd.add('/c')
+		}
+		cmd.add(compiler.absolutePath)
+		cmd.add('-shared')
+		cmd.add('-fPIC')
+		cmd.add('-static-libstdc++')
+		cmd.add('-std=c++2b')
+		cmd.add('-O3')
+		cmd.add("-I${file('cpp/jni_posix').absolutePath}".toString())
+		cmd.add("-I${new File(javaHome, 'include').absolutePath}".toString())
+		cmd.add(file('cpp/tool.cpp').absolutePath)
+		cmd.add('-o')
+		cmd.add(outLib.absolutePath)
+
+		def pb = new ProcessBuilder(cmd).redirectErrorStream(true)
+		def process = pb.start()
+		def output = process.inputStream.text
+		def exitCode = process.waitFor()
+		if (exitCode != 0) {
+			logger.error(output)
+			throw new GradleException("[Remold] 编译 libtoolarm64.so 失败 (code ${exitCode}):\n${output}")
+		}
+		logger.lifecycle("[Remold] Android arm64 原生库编译完成: ${outLib.absolutePath}")
+	}
+}

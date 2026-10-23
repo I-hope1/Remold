@@ -2,11 +2,17 @@ plugins {
 	id 'base'
 }
 
+def remoldVer = project.findProperty('remoldVersion')
+if (!remoldVer) {
+	throw new GradleException('[Remold] 未在 gradle.properties 中配置 remoldVersion 全局版本号！')
+}
+
 allprojects {
 	group = 'io.github.i-hope1.remold'
-	version = '0.1.0'
+	version = remoldVer
 	ext {
 		mindustryVersion = 'v160.5'
+		remoldVersion = remoldVer
 	}
 }
 

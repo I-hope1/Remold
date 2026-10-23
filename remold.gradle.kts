@@ -5,7 +5,7 @@ import java.io.File
 import org.gradle.api.plugins.JavaApplication
 
 open class RemoldExtension {
-    var version: String = "0.1.0"
+    var version: String? = null
     var agentJar: String? = null
     var jbrPath: String? = null
     var debug: Boolean = false
@@ -138,6 +138,10 @@ project.plugins.withId("java") {
         // 若本地未找到，尝试从 Gradle 依赖缓存或官方 Releases 自动下载
         if (agentFile == null || !agentFile.exists()) {
             val ver = remoldExt.version
+                ?: (project.findProperty("remold.version") as? String)
+                ?: (project.findProperty("remoldVersion") as? String)
+                ?: (if (project.rootProject.hasProperty("remoldVersion")) project.rootProject.property("remoldVersion") as? String else null)
+                ?: throw GradleException("[Remold] 未配置 Remold 版本号！请在 remold { version = \"...\" } 或 gradle.properties (remold.version=...) 中指定。")
             val cacheDir = File(project.gradle.gradleUserHomeDir, "caches/remold")
             val cachedJar = File(cacheDir, "remold-agent-$ver.jar")
 

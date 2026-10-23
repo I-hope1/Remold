@@ -61,16 +61,17 @@ project.plugins.withId('java') {
 
     def resolveRemoldConfig = {
         // 0. 解析目标 jar (若配置了 jar，进入纯净 JAR 模式)
+        def jarProp = remoldExt.jar ?: project.findProperty('remold.jar') ?: project.findProperty('remoldJar')
         File targetJar = null
-        if (remoldExt.jar != null) {
-            targetJar = project.file(remoldExt.jar)
+        if (jarProp != null) {
+            targetJar = project.file(jarProp)
             if (!targetJar.exists()) {
                 throw new GradleException("[Remold] 指定的目标启动 JAR 不存在: ${targetJar.absolutePath}")
             }
         }
 
         // 1. 解析 mainClass
-        def main = remoldExt.mainClass
+        def main = remoldExt.mainClass ?: project.findProperty('remold.mainClass') ?: project.findProperty('remoldMainClass')
         if (!main && project.extensions.findByName('application')) {
             main = (project.extensions.findByName('application') as JavaApplication).mainClass.orNull
         }
@@ -88,13 +89,13 @@ project.plugins.withId('java') {
             if (targetJar != null) {
                 throw new GradleException("[Remold] 未能从 ${targetJar.name} 的 MANIFEST.MF 中读取到 Main-Class，请在 remold { mainClass = '...' } 中显式指定。")
             } else {
-                throw new GradleException('[Remold] 未配置 mainClass 或 jar。请在 remold { mainClass = "..." } 或 remold { jar = "..." } 中指定。')
+                throw new GradleException('[Remold] 未配置 mainClass 或 jar。请在 remold { mainClass = "..." }、remold { jar = "..." } 或 gradle.properties 中指定。')
             }
         }
 
         // 2. 解析 JBR 路径
         def execPath = 'java'
-        def jbr = remoldExt.jbrPath ?: System.getenv('JBR_HOME') ?: System.getProperty('jbr.home')
+        def jbr = remoldExt.jbrPath ?: project.findProperty('remold.jbr') ?: project.findProperty('jbr.home') ?: System.getenv('JBR_HOME') ?: System.getProperty('jbr.home')
         if (jbr) {
             def jbrDir = new File(jbr.toString())
             def isWin = System.getProperty('os.name').toLowerCase().contains('win')

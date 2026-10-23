@@ -1,0 +1,23 @@
+# 游戏内显示的模组名称
+displayName: "Remold Java Mod Template"
+
+# 模组内部唯一标识
+name: "example-remold-mod"
+
+# 作者名
+author: "YourName"
+
+# 模组入口主类
+main: "example.ExampleJavaMod"
+
+# 模组描述
+description: "A modern Mindustry Java mod template powered by Remold hot reloading."
+
+# 模组版本
+version: 1.0.0
+
+# 最低游戏版本基线
+minGameVersion: 160.3
+
+# 标记为 Java 模组
+java: true

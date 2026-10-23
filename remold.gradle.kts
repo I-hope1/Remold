@@ -72,9 +72,12 @@ project.plugins.withId("java") {
 
     fun resolveRemoldConfig(): RemoldResolvedConfig {
         // 0. 解析目标 jar (若配置了 jar，进入纯净 JAR 模式)
+        val jarProp = remoldExt.jar
+            ?: project.findProperty("remold.jar")
+            ?: project.findProperty("remoldJar")
         var targetJar: File? = null
-        if (remoldExt.jar != null) {
-            targetJar = project.file(remoldExt.jar!!)
+        if (jarProp != null) {
+            targetJar = project.file(jarProp)
             if (!targetJar.exists()) {
                 throw GradleException("[Remold] 指定的目标启动 JAR 不存在: ${targetJar.absolutePath}")
             }
@@ -82,6 +85,8 @@ project.plugins.withId("java") {
 
         // 1. 解析 mainClass
         var main = remoldExt.mainClass
+            ?: (project.findProperty("remold.mainClass") as? String)
+            ?: (project.findProperty("remoldMainClass") as? String)
             ?: (project.extensions.findByName("application") as? JavaApplication)?.mainClass?.orNull
             ?: (project.findProperty("mainClassName") as? String)
 
@@ -97,13 +102,15 @@ project.plugins.withId("java") {
             if (targetJar != null) {
                 throw GradleException("[Remold] 未能从 ${targetJar.name} 的 MANIFEST.MF 中读取到 Main-Class，请在 remold { mainClass = \"...\" } 中显式指定。")
             } else {
-                throw GradleException("[Remold] 未配置 mainClass 或 jar。请在 remold { mainClass = \"...\" } 或 remold { jar = \"...\" } 中指定。")
+                throw GradleException("[Remold] 未配置 mainClass 或 jar。请在 remold { mainClass = \"...\" }、remold { jar = \"...\" } 或 gradle.properties 中指定。")
             }
         }
 
         // 2. 解析 JBR 路径
         var execPath = "java"
         val jbr = remoldExt.jbrPath
+            ?: (project.findProperty("remold.jbr") as? String)
+            ?: (project.findProperty("jbr.home") as? String)
             ?: System.getenv("JBR_HOME")
             ?: System.getProperty("jbr.home")
         if (!jbr.isNullOrBlank()) {
@@ -256,7 +263,7 @@ project.plugins.withId("java") {
                 args(conf.appArgs)
             }
             if (conf.executable != "java") {
-                executable = conf.executable
+                setExecutable(conf.executable)
             }
             jvmArgs(conf.jvmArgs)
 
@@ -281,6 +288,8 @@ project.plugins.withId("java") {
 
     fun resolveModsDir(): File {
         val custom = remoldExt.modsDir
+            ?: project.findProperty("remold.modsDir")
+            ?: project.findProperty("remoldModsDir")
         return if (custom != null) project.file(custom) else RemoldExtension.getDefaultMindustryModsDir()
     }
 
@@ -296,10 +305,16 @@ project.plugins.withId("java") {
     }
 
     project.afterEvaluate {
-        val shouldAutoDeploy = remoldExt.autoDeploy ?: (remoldExt.modsDir != null)
+        val shouldAutoDeploy = remoldExt.autoDeploy
+            ?: project.findProperty("remold.autoDeploy")?.toString()?.toBoolean()
+            ?: (remoldExt.modsDir != null || project.findProperty("remold.modsDir") != null)
 
         tasks.named<JavaExec>("runRemold") {
-            val jbr = remoldExt.jbrPath ?: System.getenv("JBR_HOME") ?: System.getProperty("jbr.home")
+            val jbr = remoldExt.jbrPath
+                ?: (project.findProperty("remold.jbr") as? String)
+                ?: (project.findProperty("jbr.home") as? String)
+                ?: System.getenv("JBR_HOME")
+                ?: System.getProperty("jbr.home")
             if (!jbr.isNullOrBlank()) {
                 javaLauncher.set(null as org.gradle.jvm.toolchain.JavaLauncher?)
             }

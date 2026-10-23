@@ -51,7 +51,9 @@ remold {
     // 可选：JAR 启动模式（例如 Mindustry / 游戏模组开发，纯净拉起游戏 JAR，免去类加载器冲突与手动 mainClass）
     // jar = "libs/Mindustry.jar"
     // args = ["-loadmods"] // 可选：传递给启动程序的主参数
-    // dependsOn 'jar'       // 可选：启动前自动执行的前置任务（如编译打包模组）
+    // autoDeploy = true    // 可选：启动前自动打包当前模组并复制到系统 Mindustry mods 目录（跨平台自适应）
+    // modsDir = "..."      // 可选：自定义 mods 目标目录（若指定则自动激活 autoDeploy）
+    // dependsOn 'jar'       // 可选：自定义启动前的前置任务
 }
 ```
 
@@ -72,6 +74,8 @@ remold {
     // JAR 启动模式
     // jar = "libs/Mindustry.jar"
     // args("-loadmods")
+    // autoDeploy = true
+    // modsDir("...")
     // dependsOn("jar")
 }
 ```

@@ -17,6 +17,8 @@ open class RemoldExtension {
     var extraJvmArgs: MutableList<String> = mutableListOf()
     var fileShakeMs: Int? = null
     var dependsOn: MutableList<Any> = mutableListOf()
+    var modsDir: Any? = null
+    var autoDeploy: Boolean? = null
 
     fun jar(target: Any) {
         this.jar = target
@@ -28,6 +30,26 @@ open class RemoldExtension {
 
     fun dependsOn(vararg tasks: Any) {
         this.dependsOn.addAll(tasks.toList())
+    }
+
+    fun modsDir(dir: Any) {
+        this.modsDir = dir
+        this.autoDeploy = true
+    }
+
+    companion object {
+        fun getDefaultMindustryModsDir(): File {
+            val os = System.getProperty("os.name", "").lowercase()
+            val userHome = System.getProperty("user.home", ".")
+            return when {
+                os.contains("win") -> {
+                    val appdata = System.getenv("APPDATA") ?: "$userHome/AppData/Roaming"
+                    File(appdata, "Mindustry/mods")
+                }
+                os.contains("mac") -> File(userHome, "Library/Application Support/Mindustry/mods")
+                else -> File(userHome, ".local/share/Mindustry/mods")
+            }
+        }
     }
 }
 
@@ -257,22 +279,49 @@ project.plugins.withId("java") {
         }
     }
 
+    fun resolveModsDir(): File {
+        val custom = remoldExt.modsDir
+        return if (custom != null) project.file(custom) else RemoldExtension.getDefaultMindustryModsDir()
+    }
+
+    tasks.register<Copy>("deployMod") {
+        group = "application"
+        description = "Builds and deploys the mod JAR into the Mindustry mods directory"
+        dependsOn("jar")
+        from(tasks.named("jar"))
+        into(resolveModsDir())
+        doLast {
+            logger.lifecycle("[Remold] 模组已就绪并部署至: ${resolveModsDir().absolutePath}")
+        }
+    }
+
     project.afterEvaluate {
+        val shouldAutoDeploy = remoldExt.autoDeploy ?: (remoldExt.modsDir != null)
+
         tasks.named<JavaExec>("runRemold") {
             val jbr = remoldExt.jbrPath ?: System.getenv("JBR_HOME") ?: System.getProperty("jbr.home")
             if (!jbr.isNullOrBlank()) {
                 javaLauncher.set(null as org.gradle.jvm.toolchain.JavaLauncher?)
+            }
+            if (shouldAutoDeploy) {
+                dependsOn("deployMod")
             }
             if (remoldExt.dependsOn.isNotEmpty()) {
                 dependsOn(remoldExt.dependsOn)
             }
         }
         tasks.named("startRemold") {
+            if (shouldAutoDeploy) {
+                dependsOn("deployMod")
+            }
             if (remoldExt.dependsOn.isNotEmpty()) {
                 dependsOn(remoldExt.dependsOn)
             }
         }
         tasks.named("generateRemoldScript") {
+            if (shouldAutoDeploy) {
+                dependsOn("deployMod")
+            }
             if (remoldExt.dependsOn.isNotEmpty()) {
                 dependsOn(remoldExt.dependsOn)
             }

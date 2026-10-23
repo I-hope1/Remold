@@ -42,9 +42,9 @@
 2. 游戏内的 `ModClassLoader` 又把模组加载了一次；
 3. 导致内存中出现两个互不相等的同名类，产生 `ClassCastException` 崩溃与交叉引用报错。
 
-### Remold 的纯净解决方案：`jar` 启动 + `dependsOn`
+### Remold 的纯净解决方案：`jar` 模式 + `autoDeploy` 自动部署
 
-Remold 提供了对可执行 JAR 的直接托管支持。无需配置 `mainClass`（插件自动从目标 JAR 的 `MANIFEST.MF` 读取），并将 Classpath 严格隔离到仅包含游戏 JAR，模组完全由游戏的 `ModClassLoader` 纯净加载：
+Remold 提供了对游戏可执行 JAR 的直接托管支持。无需配置 `mainClass`（插件自动从目标 JAR 的 `MANIFEST.MF` 读取），并将 Classpath 严格隔离到仅包含游戏 JAR，模组完全由游戏的 `ModClassLoader` 纯净加载：
 
 在模组的 `build.gradle` 中配置：
 
@@ -56,13 +56,16 @@ remold {
     // 1. 指定目标运行的游戏 JAR 路径（例如本地的 Mindustry.jar）
     jar = "D:/Mindustry/Mindustry.jar"
     
-    // 2. mainClass 留空即可！Remold 会自动从 Mindustry.jar 中识别 DesktopLauncher
+    // 2. mainClass 留空！Remold 会自动从 Mindustry.jar 中识别 DesktopLauncher
     
-    // 3. 可选：传递给启动游戏的主参数
+    // 3. 自动打包并部署到游戏 mods 目录（Windows/macOS/Linux 全自动跨平台识别路径）
+    autoDeploy = true
+    
+    // 可选：如果使用的是非系统默认的 Mindustry 目录，可显式指定：
+    // modsDir = "D:/Mindustry/mods"
+    
+    // 可选：传递给启动游戏的主参数
     // args = ["-loadmods"]
-
-    // 4. 前置依赖：启动前自动执行当前模组的 jar 打包或部署任务
-    dependsOn 'jar'
 }
 
 // 模组自身仅声明编译期依赖，坚决不使用 runtimeOnly 污染系统类加载器
@@ -73,11 +76,13 @@ dependencies {
 
 #### 一键启动与热更循环：
 1. 运行 `./gradlew runRemold`：
-   - 插件会自动先执行 `jar` 打包当前模组；
+   - 插件自动打包当前模组；
+   - 插件自动将打包好的模组 jar 复制到系统的 Mindustry `mods/` 文件夹；
    - 自动拉取并挂载 `remold-agent.jar`；
-   - 干净拉起 `Mindustry.jar` 进入游戏；
+   - 纯净拉起 `Mindustry.jar` 进入游戏；
 2. 游戏保持运行，开发期间直接在 IDEA 里改代码并按 `Ctrl + Shift + F9` 编译；
 3. Remold 在后台监听到 `build/classes/java/main` 变动，**直接在游戏内的 `ModClassLoader` 槽位上执行 Native 原位热替换**，零类加载器冲突，体验无感秒级刷新！
+*(注：后续热更新直接在内存中替换字节码，无需重新打包，也无需重新移动到 mods 文件夹！)*
 
 ---
 

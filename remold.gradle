@@ -16,6 +16,8 @@ class RemoldExtension {
     List<String> extraJvmArgs = []
     Integer fileShakeMs
     List<Object> dependsOn = []
+    Object modsDir
+    Boolean autoDeploy
 
     void jar(Object jar) {
         this.jar = jar
@@ -30,6 +32,24 @@ class RemoldExtension {
     void dependsOn(Object... tasks) {
         if (tasks != null) {
             this.dependsOn.addAll(tasks as List)
+        }
+    }
+
+    void modsDir(Object dir) {
+        this.modsDir = dir
+        this.autoDeploy = true
+    }
+
+    static File getDefaultMindustryModsDir() {
+        String os = System.getProperty('os.name', '').toLowerCase()
+        String userHome = System.getProperty('user.home', '.')
+        if (os.contains('win')) {
+            String appdata = System.getenv('APPDATA') ?: (userHome + '/AppData/Roaming')
+            return new File(appdata, 'Mindustry/mods')
+        } else if (os.contains('mac')) {
+            return new File(userHome, 'Library/Application Support/Mindustry/mods')
+        } else {
+            return new File(userHome, '.local/share/Mindustry/mods')
         }
     }
 }
@@ -252,22 +272,51 @@ project.plugins.withId('java') {
         }
     }
 
+    def resolveModsDir = {
+        if (remoldExt.modsDir != null) {
+            return project.file(remoldExt.modsDir)
+        }
+        return RemoldExtension.getDefaultMindustryModsDir()
+    }
+
+    tasks.register('deployMod', Copy) {
+        group = 'application'
+        description = 'Builds and deploys the mod JAR into the Mindustry mods directory'
+        dependsOn 'jar'
+        from tasks.named('jar')
+        into { resolveModsDir() }
+        doLast {
+            logger.lifecycle("[Remold] 模组已就绪并部署至: ${resolveModsDir().absolutePath}")
+        }
+    }
+
     project.afterEvaluate {
+        def shouldAutoDeploy = remoldExt.autoDeploy != null ? remoldExt.autoDeploy : (remoldExt.modsDir != null)
+
         tasks.named('runRemold', JavaExec) {
             def jbr = remoldExt.jbrPath ?: System.getenv('JBR_HOME') ?: System.getProperty('jbr.home')
             if (jbr) {
                 javaLauncher.set((JavaLauncher) null)
+            }
+            if (shouldAutoDeploy) {
+                dependsOn 'deployMod'
             }
             if (remoldExt.dependsOn) {
                 dependsOn remoldExt.dependsOn
             }
         }
         tasks.named('startRemold') {
+            if (shouldAutoDeploy) {
+                dependsOn 'deployMod'
+            }
             if (remoldExt.dependsOn) {
                 dependsOn remoldExt.dependsOn
             }
         }
         tasks.named('generateRemoldScript') {
+            if (shouldAutoDeploy) {
+                dependsOn 'deployMod'
+            }
             if (remoldExt.dependsOn) {
                 dependsOn remoldExt.dependsOn
             }

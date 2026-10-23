@@ -16,6 +16,7 @@ class RemoldExtension {
     List<String> extraJvmArgs = []
     Integer fileShakeMs
     List<Object> dependsOn = []
+    Object deployDir
     Object modsDir
     Boolean autoDeploy
 
@@ -35,22 +36,14 @@ class RemoldExtension {
         }
     }
 
-    void modsDir(Object dir) {
-        this.modsDir = dir
+    void deployDir(Object dir) {
+        this.deployDir = dir
         this.autoDeploy = true
     }
 
-    static File getDefaultMindustryModsDir() {
-        String os = System.getProperty('os.name', '').toLowerCase()
-        String userHome = System.getProperty('user.home', '.')
-        if (os.contains('win')) {
-            String appdata = System.getenv('APPDATA') ?: (userHome + '/AppData/Roaming')
-            return new File(appdata, 'Mindustry/mods')
-        } else if (os.contains('mac')) {
-            return new File(userHome, 'Library/Application Support/Mindustry/mods')
-        } else {
-            return new File(userHome, '.local/share/Mindustry/mods')
-        }
+    void modsDir(Object dir) {
+        this.modsDir = dir
+        this.autoDeploy = true
     }
 }
 
@@ -276,26 +269,39 @@ project.plugins.withId('java') {
         }
     }
 
-    def resolveModsDir = {
-        if (remoldExt.modsDir != null) {
-            return project.file(remoldExt.modsDir)
+    def resolveDeployDir = {
+        def dir = remoldExt.deployDir ?: remoldExt.modsDir ?: project.findProperty('remold.deployDir') ?: project.findProperty('remold.modsDir')
+        if (dir != null) {
+            return project.file(dir)
         }
-        return RemoldExtension.getDefaultMindustryModsDir()
+        return null
     }
 
-    tasks.register('deployMod', Copy) {
+    tasks.register('deployArtifact', Copy) {
         group = 'application'
-        description = 'Builds and deploys the mod JAR into the Mindustry mods directory'
+        description = 'Builds and deploys the output JAR into the specified deploy directory'
         dependsOn 'jar'
         from tasks.named('jar')
-        into { resolveModsDir() }
-        doLast {
-            logger.lifecycle("[Remold] 模组已就绪并部署至: ${resolveModsDir().absolutePath}")
+        into {
+            def target = resolveDeployDir()
+            if (target == null) {
+                throw new GradleException('[Remold] 开启了 autoDeploy 但未指定目标部署目录！请在 remold { deployDir = "..." } 或 gradle.properties (remold.deployDir=...) 中配置。')
+            }
+            return target
         }
+        doLast {
+            logger.lifecycle("[Remold] 产物已自动部署至: ${resolveDeployDir().absolutePath}")
+        }
+    }
+
+    tasks.register('deployMod') {
+        group = 'application'
+        description = 'Alias for deployArtifact'
+        dependsOn 'deployArtifact'
     }
 
     project.afterEvaluate {
-        def shouldAutoDeploy = remoldExt.autoDeploy != null ? remoldExt.autoDeploy : (remoldExt.modsDir != null)
+        def shouldAutoDeploy = remoldExt.autoDeploy != null ? remoldExt.autoDeploy : (remoldExt.deployDir != null || remoldExt.modsDir != null || project.findProperty('remold.deployDir') != null || project.findProperty('remold.modsDir') != null)
 
         tasks.named('runRemold', JavaExec) {
             def jbr = remoldExt.jbrPath ?: System.getenv('JBR_HOME') ?: System.getProperty('jbr.home')
@@ -303,7 +309,7 @@ project.plugins.withId('java') {
                 javaLauncher.set((JavaLauncher) null)
             }
             if (shouldAutoDeploy) {
-                dependsOn 'deployMod'
+                dependsOn 'deployArtifact'
             }
             if (remoldExt.dependsOn) {
                 dependsOn remoldExt.dependsOn
@@ -311,7 +317,7 @@ project.plugins.withId('java') {
         }
         tasks.named('startRemold') {
             if (shouldAutoDeploy) {
-                dependsOn 'deployMod'
+                dependsOn 'deployArtifact'
             }
             if (remoldExt.dependsOn) {
                 dependsOn remoldExt.dependsOn
@@ -319,7 +325,7 @@ project.plugins.withId('java') {
         }
         tasks.named('generateRemoldScript') {
             if (shouldAutoDeploy) {
-                dependsOn 'deployMod'
+                dependsOn 'deployArtifact'
             }
             if (remoldExt.dependsOn) {
                 dependsOn remoldExt.dependsOn

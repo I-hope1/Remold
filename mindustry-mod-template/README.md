@@ -9,17 +9,18 @@
 ## 30 秒快速上手体验
 
 ### 1. 配置游戏路径
-打开 [`build.gradle.kts`](build.gradle.kts)，找到 `remold` 块，将 `jar` 改为你本地的 `Mindustry.jar` 路径：
+打开 [`gradle.properties`](gradle.properties)（或在 [`build.gradle.kts`](build.gradle.kts) 中），将 `remold.jar` 改为你本地的 `Mindustry.jar` 路径：
 
-```kotlin
-remold {
-    // 填入你本地的 Mindustry.jar 路径（Steam 版或 GitHub 下载版均可）
-    jar = "D:/Mindustry/Mindustry.jar"
-    
-    // 保持开启：首次启动前自动打包模组并复制到系统 Mindustry mods 目录
-    autoDeploy = true
-}
+```properties
+# 填入你本地的 Mindustry.jar 路径（Steam 版或 GitHub 下载版均可）
+remold.jar=D:/Mindustry/Mindustry.jar
+
+# 保持开启：首次启动前自动打包模组并复制到系统 Mindustry mods 目录
+remold.autoDeploy=true
 ```
+
+> [!NOTE]
+> 模版默认跨平台自动识别系统的游戏模组目录（Windows: `%APPDATA%/Mindustry/mods`、macOS / Linux 均自适应）。若使用自定义目录，配置 `remold.deployDir=D:/YourModsDir` 即可。
 
 ### 2. 启动游戏
 在终端运行：

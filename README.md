@@ -28,9 +28,9 @@ Remold 作为一个 Java Agent 运行。为了获得类结构变更高性能热�
 apply from: 'https://raw.githubusercontent.com/I-hope1/Remold/main/remold.gradle'
 
 remold {
-    // 可选：指定 Remold 版本（默认 '0.1.0'）
+    // 可选：指定 Remold 版本（默认读取 gradle.properties 中的 remoldVersion）
     // 插件将自动从仓库解析或从 Releases 下载对应版本的 agent jar 并缓存至本地，开发者无需手动下载
-    // version = '0.1.0'
+    // version = '0.1.1'
 
     // 可选：显式指定本地 remold-agent.jar 路径（若不指定，将优先使用本地 libs/remold-agent.jar，不存在时自动下载缓存）
     // agentJar = "libs/remold-agent.jar"
@@ -48,11 +48,11 @@ remold {
     // 可选：主类（若已引入 application 插件会自动推导）
     // mainClass = "your.package.Main"
 
-    // 可选：JAR 启动模式（例如 Mindustry / 游戏模组开发，纯净拉起游戏 JAR，免去类加载器冲突与手动 mainClass）
-    // jar = "libs/Mindustry.jar"
+    // 可选：JAR 启动模式（例如游戏模组/独立客户端开发，纯净拉起目标 JAR，免去类加载器冲突与手动 mainClass）
+    // jar = "libs/game.jar"
     // args = ["-loadmods"] // 可选：传递给启动程序的主参数
-    // autoDeploy = true    // 可选：启动前自动打包当前模组并复制到系统 Mindustry mods 目录（跨平台自适应）
-    // modsDir = "..."      // 可选：自定义 mods 目标目录（若指定则自动激活 autoDeploy）
+    // autoDeploy = true    // 可选：启动前自动打包当前产物并复制到目标部署目录
+    // deployDir = "mods"   // 可选：目标部署目录（若指定则自动激活 autoDeploy，亦支持兼容别名 modsDir）
     // dependsOn 'jar'       // 可选：自定义启动前的前置任务
 }
 ```
@@ -63,7 +63,7 @@ remold {
 apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/main/remold.gradle.kts")
 
 remold {
-    // version = "0.1.0"
+    // version = "0.1.1"
     // agentJar = "libs/remold-agent.jar"
     // jbrPath = "/path/to/jbr"
     // fileShakeMs = 1200
@@ -72,10 +72,10 @@ remold {
     // mainClass = "your.package.Main"
 
     // JAR 启动模式
-    // jar = "libs/Mindustry.jar"
+    // jar = "libs/game.jar"
     // args("-loadmods")
     // autoDeploy = true
-    // modsDir("...")
+    // deployDir("mods")
     // dependsOn("jar")
 }
 ```

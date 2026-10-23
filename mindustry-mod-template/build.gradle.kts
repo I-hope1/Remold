@@ -2,6 +2,28 @@ plugins {
     java
 }
 
+// 默认 Mindustry 模组部署目录：优先支持 MINDUSTRY_DATA_DIR 环境变量，其次按操作系统自适应
+// (Win: %APPDATA%/Mindustry/mods, Mac: ~/Library/Application Support/Mindustry/mods, Linux: ~/.local/share/Mindustry/mods)
+val defaultMindustryModsDir: File = run {
+    val customEnv = System.getenv("MINDUSTRY_DATA_DIR")
+    if (!customEnv.isNullOrBlank()) {
+        return@run File(customEnv, "mods")
+    }
+    val os = System.getProperty("os.name", "").lowercase()
+    val userHome = System.getProperty("user.home", ".")
+    when {
+        os.contains("win") -> {
+            val appdata = System.getenv("APPDATA") ?: "$userHome/AppData/Roaming"
+            File(appdata, "Mindustry/mods")
+        }
+        os.contains("mac") -> File(userHome, "Library/Application Support/Mindustry/mods")
+        else -> File(userHome, ".local/share/Mindustry/mods")
+    }
+}
+if (project.findProperty("remold.deployDir") == null && project.findProperty("remold.modsDir") == null) {
+    extra["remold.deployDir"] = defaultMindustryModsDir.absolutePath
+}
+
 // 引入 Remold 热重载自动化脚本插件 (本地优先，独立运行自动回退 GitHub 官方源)
 val localRemold = rootProject.file("../remold.gradle.kts")
 if (localRemold.exists()) {

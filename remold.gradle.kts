@@ -17,6 +17,7 @@ open class RemoldExtension {
     var extraJvmArgs: MutableList<String> = mutableListOf()
     var fileShakeMs: Int? = null
     var dependsOn: MutableList<Any> = mutableListOf()
+    var deployDir: Any? = null
     var modsDir: Any? = null
     var autoDeploy: Boolean? = null
 
@@ -32,24 +33,14 @@ open class RemoldExtension {
         this.dependsOn.addAll(tasks.toList())
     }
 
-    fun modsDir(dir: Any) {
-        this.modsDir = dir
+    fun deployDir(dir: Any) {
+        this.deployDir = dir
         this.autoDeploy = true
     }
 
-    companion object {
-        fun getDefaultMindustryModsDir(): File {
-            val os = System.getProperty("os.name", "").lowercase()
-            val userHome = System.getProperty("user.home", ".")
-            return when {
-                os.contains("win") -> {
-                    val appdata = System.getenv("APPDATA") ?: "$userHome/AppData/Roaming"
-                    File(appdata, "Mindustry/mods")
-                }
-                os.contains("mac") -> File(userHome, "Library/Application Support/Mindustry/mods")
-                else -> File(userHome, ".local/share/Mindustry/mods")
-            }
-        }
+    fun modsDir(dir: Any) {
+        this.modsDir = dir
+        this.autoDeploy = true
     }
 }
 
@@ -290,28 +281,40 @@ project.plugins.withId("java") {
         }
     }
 
-    fun resolveModsDir(): File {
-        val custom = remoldExt.modsDir
+    fun resolveDeployDir(): File? {
+        val custom = remoldExt.deployDir
+            ?: remoldExt.modsDir
+            ?: project.findProperty("remold.deployDir")
             ?: project.findProperty("remold.modsDir")
+            ?: project.findProperty("remoldDeployDir")
             ?: project.findProperty("remoldModsDir")
-        return if (custom != null) project.file(custom) else RemoldExtension.getDefaultMindustryModsDir()
+        return if (custom != null) project.file(custom) else null
     }
 
-    tasks.register<Copy>("deployMod") {
+    tasks.register<Copy>("deployArtifact") {
         group = "application"
-        description = "Builds and deploys the mod JAR into the Mindustry mods directory"
+        description = "Builds and deploys the output JAR into the specified deploy directory"
         dependsOn("jar")
         from(tasks.named("jar"))
-        into(resolveModsDir())
+        into(provider {
+            resolveDeployDir()
+                ?: throw GradleException("[Remold] 开启了 autoDeploy 但未指定目标部署目录！请在 remold { deployDir = \"...\" } 或 gradle.properties (remold.deployDir=...) 中配置。")
+        })
         doLast {
-            logger.lifecycle("[Remold] 模组已就绪并部署至: ${resolveModsDir().absolutePath}")
+            logger.lifecycle("[Remold] 产物已自动部署至: ${resolveDeployDir()?.absolutePath}")
         }
+    }
+
+    tasks.register("deployMod") {
+        group = "application"
+        description = "Alias for deployArtifact"
+        dependsOn("deployArtifact")
     }
 
     project.afterEvaluate {
         val shouldAutoDeploy = remoldExt.autoDeploy
             ?: project.findProperty("remold.autoDeploy")?.toString()?.toBoolean()
-            ?: (remoldExt.modsDir != null || project.findProperty("remold.modsDir") != null)
+            ?: (remoldExt.deployDir != null || remoldExt.modsDir != null || project.findProperty("remold.deployDir") != null || project.findProperty("remold.modsDir") != null || project.findProperty("remoldDeployDir") != null || project.findProperty("remoldModsDir") != null)
 
         tasks.named<JavaExec>("runRemold") {
             val jbr = remoldExt.jbrPath
@@ -323,7 +326,7 @@ project.plugins.withId("java") {
                 javaLauncher.set(null as org.gradle.jvm.toolchain.JavaLauncher?)
             }
             if (shouldAutoDeploy) {
-                dependsOn("deployMod")
+                dependsOn("deployArtifact")
             }
             if (remoldExt.dependsOn.isNotEmpty()) {
                 dependsOn(remoldExt.dependsOn)
@@ -331,7 +334,7 @@ project.plugins.withId("java") {
         }
         tasks.named("startRemold") {
             if (shouldAutoDeploy) {
-                dependsOn("deployMod")
+                dependsOn("deployArtifact")
             }
             if (remoldExt.dependsOn.isNotEmpty()) {
                 dependsOn(remoldExt.dependsOn)
@@ -339,7 +342,7 @@ project.plugins.withId("java") {
         }
         tasks.named("generateRemoldScript") {
             if (shouldAutoDeploy) {
-                dependsOn("deployMod")
+                dependsOn("deployArtifact")
             }
             if (remoldExt.dependsOn.isNotEmpty()) {
                 dependsOn(remoldExt.dependsOn)

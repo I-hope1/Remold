@@ -5,6 +5,8 @@ import arc.util.*;
 import mindustry.game.EventType.*;
 import mindustry.mod.*;
 import mindustry.ui.dialogs.*;
+import remold.annotation.OnReload;
+import remold.annotation.RemoldReinit;
 
 /**
  * Mindustry 现代 Java 模组模板（集成 Remold 零侵入热重载）。
@@ -20,8 +22,10 @@ import mindustry.ui.dialogs.*;
  */
 public class ExampleJavaMod extends Mod {
 
-    // 可以在这里新增字段、修改数值，热重载时存量实例依然被安全保护
+    // 标注 OVERWRITE 模式：修改初值时允许在热更后强制覆写存量/静态字段
+    @RemoldReinit(mode = RemoldReinit.Mode.OVERWRITE)
     public static String message = "Hello Remold Hot Reloading!";
+
     public static int reloadCount = 0;
 
     public ExampleJavaMod() {
@@ -41,5 +45,14 @@ public class ExampleJavaMod extends Mod {
     @Override
     public void loadContent() {
         Log.info("[ExampleJavaMod] Loading content... (Edit this and press Ctrl+Shift+F9 to see live updates)");
+    }
+
+    /**
+     * 当本模组被热更后，Remold 会自动调度执行此生命周期回调。
+     */
+    @OnReload
+    public void onReload() {
+        reloadCount++;
+        Log.info("[ExampleJavaMod] @OnReload triggered! Reload count: @, Current message: @", reloadCount, message);
     }
 }

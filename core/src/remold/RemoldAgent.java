@@ -12,9 +12,11 @@ import java.lang.instrument.*;
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.*;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.security.ProtectionDomain;
 import java.util.*;
+import java.util.jar.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
@@ -927,7 +929,20 @@ public class RemoldAgent {
 	private static void loadConfiguredPlugins() {
 		if (inst == null) return;
 
-		// 1. 读取并通过 Instrumentation 追加外部插件 JAR 到系统类加载器搜索路径
+		// 1. 读取请求启用的插件名称/过滤集合（若未配置或为 * / all，则默认加载发现的所有插件）
+		String pluginsProp = System.getProperty("remold.plugins");
+		Set<String> requestedPlugins = null;
+		if (pluginsProp != null && !pluginsProp.trim().isEmpty() && !pluginsProp.trim().equals("*") && !pluginsProp.trim().equalsIgnoreCase("all")) {
+			requestedPlugins = new HashSet<>();
+			for (String name : pluginsProp.split("[,;]")) {
+				String trimmed = name.trim().toLowerCase();
+				if (!trimmed.isEmpty()) requestedPlugins.add(trimmed);
+			}
+		}
+
+		List<JarFile> pluginJars = new ArrayList<>();
+
+		// 2. 读取并通过 Instrumentation 追加外部插件 JAR 到系统类加载器搜索路径
 		String pluginJarsProp = System.getProperty("remold.plugin.jars");
 		if (pluginJarsProp != null && !pluginJarsProp.trim().isEmpty()) {
 			String[] jarPaths = pluginJarsProp.split("[;," + File.pathSeparator + "]");
@@ -937,7 +952,9 @@ public class RemoldAgent {
 				File jarFile = new File(path);
 				if (jarFile.exists()) {
 					try {
-						inst.appendToSystemClassLoaderSearch(new java.util.jar.JarFile(jarFile));
+						JarFile jf = new JarFile(jarFile);
+						inst.appendToSystemClassLoaderSearch(jf);
+						pluginJars.add(jf);
 						info("[Plugin] Appended plugin JAR to system search: " + jarFile.getAbsolutePath());
 					} catch (Throwable t) {
 						error("[Plugin] Failed to append plugin JAR: " + path, t);
@@ -948,39 +965,105 @@ public class RemoldAgent {
 			}
 		}
 
-		// 2. 读取配置的插件名称或类名并自动实例化注册
-		String pluginsProp = System.getProperty("remold.plugins");
-		if (pluginsProp != null && !pluginsProp.trim().isEmpty()) {
-			String[] names = pluginsProp.split("[,;]");
-			for (String rawName : names) {
-				String name = rawName.trim();
-				if (name.isEmpty()) continue;
-				String className = name;
-				if ("arc".equalsIgnoreCase(name)) {
-					className = "remold.arc.ArcHotswapPlugin";
-				}
-				try {
-					Class<?> cls = Class.forName(className);
-					if (HotswapPlugin.class.isAssignableFrom(cls)) {
-						HotswapPlugin p = (HotswapPlugin) cls.getDeclaredConstructor().newInstance();
-						registerPlugin(p);
-						info("[Plugin] Automatically loaded and registered plugin: " + p.getName() + " (" + className + ")");
-					} else {
-						warn("[Plugin] Class " + className + " does not implement HotswapPlugin");
+		// 3. 从外部插件 JAR 的元数据中动态解析插件类配置 (SPI services 或 Manifest 声明，无任何名称硬编码)
+		Set<String> candidateClassNames = new LinkedHashSet<>();
+		for (JarFile jf : pluginJars) {
+			// A. 读取 META-INF/services/remold.HotswapPlugin 服务发现配置
+			try {
+				ZipEntry serviceEntry = jf.getEntry("META-INF/services/remold.HotswapPlugin");
+				if (serviceEntry != null) {
+					try (BufferedReader reader = new BufferedReader(new InputStreamReader(jf.getInputStream(serviceEntry), StandardCharsets.UTF_8))) {
+						String line;
+						while ((line = reader.readLine()) != null) {
+							line = line.trim();
+							if (!line.isEmpty() && !line.startsWith("#")) {
+								candidateClassNames.add(line);
+							}
+						}
 					}
-				} catch (Throwable t) {
-					error("[Plugin] Failed to load plugin '" + name + "': " + t.getMessage(), t);
 				}
+			} catch (Throwable t) {
+				warn("[Plugin] Failed to read SPI services descriptor from " + jf.getName() + ": " + t.getMessage());
+			}
+
+			// B. 读取 Manifest 中的 Remold-Plugin-Class 或 Plugin-Class 声明
+			try {
+				Manifest manifest = jf.getManifest();
+				if (manifest != null) {
+					String pluginAttr = manifest.getMainAttributes().getValue("Remold-Plugin-Class");
+					if (pluginAttr == null) {
+						pluginAttr = manifest.getMainAttributes().getValue("Plugin-Class");
+					}
+					if (pluginAttr != null && !pluginAttr.trim().isEmpty()) {
+						for (String cls : pluginAttr.split("[,;]")) {
+							String trimmed = cls.trim();
+							if (!trimmed.isEmpty()) candidateClassNames.add(trimmed);
+						}
+					}
+				}
+			} catch (Throwable t) {
+				warn("[Plugin] Failed to read Manifest from " + jf.getName() + ": " + t.getMessage());
 			}
 		}
 
-		// 3. 通过 ServiceLoader 自动探测系统类加载器中注册的 HotswapPlugin
+		// 4. 实例化并通过插件自声明的名称 (plugin.getName()) 进行匹配注册
+		for (String className : candidateClassNames) {
+			try {
+				Class<?> cls = Class.forName(className, true, ClassLoader.getSystemClassLoader());
+				if (HotswapPlugin.class.isAssignableFrom(cls)) {
+					HotswapPlugin p = (HotswapPlugin) cls.getDeclaredConstructor().newInstance();
+					String pluginName = p.getName() != null ? p.getName().trim().toLowerCase() : "";
+					String classLower = className.toLowerCase();
+					if (requestedPlugins == null || requestedPlugins.contains(pluginName) || requestedPlugins.contains(classLower)) {
+						registerPlugin(p);
+						info("[Plugin] Automatically loaded and registered plugin: " + p.getName() + " (" + className + ")");
+					}
+				} else {
+					warn("[Plugin] Class " + className + " does not implement HotswapPlugin");
+				}
+			} catch (Throwable t) {
+				error("[Plugin] Failed to instantiate plugin class '" + className + "': " + t.getMessage(), t);
+			}
+		}
+
+		// 5. 通过标准 ServiceLoader 探测系统类加载器中已注册的 HotswapPlugin 服务实现
 		try {
 			ServiceLoader<HotswapPlugin> loader = ServiceLoader.load(HotswapPlugin.class, ClassLoader.getSystemClassLoader());
 			for (HotswapPlugin p : loader) {
-				registerPlugin(p);
+				String pluginName = p.getName() != null ? p.getName().trim().toLowerCase() : "";
+				String classLower = p.getClass().getName().toLowerCase();
+				if (requestedPlugins == null || requestedPlugins.contains(pluginName) || requestedPlugins.contains(classLower)) {
+					registerPlugin(p);
+				}
 			}
 		} catch (Throwable ignored) { }
+
+		// 6. 如果用户显式传入了类名（包含 package 点号且尚未被注册），尝试直接反射加载
+		if (requestedPlugins != null) {
+			for (String requested : requestedPlugins) {
+				if (requested.contains(".")) {
+					boolean alreadyRegistered = false;
+					for (HotswapPlugin p : plugins) {
+						if (p.getClass().getName().equalsIgnoreCase(requested)) {
+							alreadyRegistered = true;
+							break;
+						}
+					}
+					if (!alreadyRegistered) {
+						try {
+							Class<?> cls = Class.forName(requested, true, ClassLoader.getSystemClassLoader());
+							if (HotswapPlugin.class.isAssignableFrom(cls)) {
+								HotswapPlugin p = (HotswapPlugin) cls.getDeclaredConstructor().newInstance();
+								registerPlugin(p);
+								info("[Plugin] Loaded explicit plugin class: " + p.getName() + " (" + requested + ")");
+							}
+						} catch (Throwable t) {
+							error("[Plugin] Failed to load explicit plugin class '" + requested + "': " + t.getMessage(), t);
+						}
+					}
+				}
+			}
+		}
 	}
 	//endregion
 

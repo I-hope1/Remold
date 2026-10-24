@@ -42,3 +42,12 @@ test {
 	useJUnitPlatform()
 	failOnNoDiscoveredTests = false
 }
+
+jar {
+	manifest {
+		attributes(
+			'Remold-Plugin-Class': 'remold.arc.ArcHotswapPlugin',
+			'Remold-Plugin-Name': 'arc'
+		)
+	}
+}

@@ -2,7 +2,7 @@
   <configuration default="false" name="Run with Remold" type="Application" factoryName="Application">
     <option name="MAIN_CLASS_NAME" value="example.Main" />
     <module name="example.main" />
-    <option name="VM_PARAMETERS" value="-XX:+AllowEnhancedClassRedefinition -javaagent:$PROJECT_DIR$/core/build/libs/remold-agent.jar=$PROJECT_DIR$/example/build/classes/java/main --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED --add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED --add-exports=java.base/jdk.internal.loader=ALL-UNNAMED --enable-native-access=ALL-UNNAMED" />
+    <option name="VM_PARAMETERS" value="-XX:+IgnoreUnrecognizedVMOptions -XX:+AllowEnhancedClassRedefinition -javaagent:$PROJECT_DIR$/core/build/libs/remold-agent.jar=$PROJECT_DIR$/example/build/classes/java/main --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED --add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED --add-exports=java.base/jdk.internal.loader=ALL-UNNAMED --enable-native-access=ALL-UNNAMED" />
     <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
     <method v="2">
       <option name="Make" enabled="true" />

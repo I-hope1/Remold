@@ -264,6 +264,7 @@ project.plugins.withId("java") {
 
         // 5. 装配 JVM 参数
         val args = mutableListOf<String>()
+        args.add("-XX:+IgnoreUnrecognizedVMOptions")
         args.add("-XX:+AllowEnhancedClassRedefinition")
         args.add("-javaagent:${safeAgent.absolutePath}=$watchPath")
         args.add("--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED")
@@ -505,7 +506,31 @@ project.plugins.withId("java") {
         val sb = StringBuilder()
         sb.append("<component name=\"ProjectRunConfigurationManager\">\n")
 
-        if (conf.targetJar != null) {
+        val isLoom = project.plugins.hasPlugin("fabric-loom") || project.extensions.findByName("loom") != null
+        if (isLoom) {
+            sb.append("  <configuration default=\"false\" name=\"Run with Remold\" type=\"GradleRunConfiguration\" factoryName=\"Gradle\">\n")
+            sb.append("    <ExternalSystemSettings>\n")
+            sb.append("      <option name=\"executionName\" />\n")
+            sb.append("      <option name=\"externalProjectPath\" value=\"\$PROJECT_DIR\$\" />\n")
+            sb.append("      <option name=\"externalSystemIdString\" value=\"GRADLE\" />\n")
+            sb.append("      <option name=\"scriptParameters\" value=\"\" />\n")
+            sb.append("      <option name=\"taskDescriptions\">\n")
+            sb.append("        <list />\n")
+            sb.append("      </option>\n")
+            sb.append("      <option name=\"taskNames\">\n")
+            sb.append("        <list>\n")
+            sb.append("          <option value=\"runClient\" />\n")
+            sb.append("        </list>\n")
+            sb.append("      </option>\n")
+            sb.append("      <option name=\"vmOptions\" value=\"\" />\n")
+            sb.append("    </ExternalSystemSettings>\n")
+            sb.append("    <ExternalSystemDebugServerProcess>true</ExternalSystemDebugServerProcess>\n")
+            sb.append("    <ExternalSystemReAttachDebugProcess>true</ExternalSystemReAttachDebugProcess>\n")
+            sb.append("    <DebugAllEnabled>false</DebugAllEnabled>\n")
+            sb.append("    <RunAsTest>false</RunAsTest>\n")
+            sb.append("    <method v=\"2\" />\n")
+            sb.append("  </configuration>\n")
+        } else if (conf.targetJar != null) {
             val portableJar = makePortable(conf.targetJar.absolutePath)
             sb.append("  <configuration default=\"false\" name=\"Run with Remold\" type=\"JarApplication\">\n")
             sb.append("    <option name=\"JAR_PATH\" value=\"${xmlEscape(portableJar)}\" />\n")

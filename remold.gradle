@@ -251,6 +251,7 @@ project.plugins.withId('java') {
 
         // 5. 装配 JVM 参数
         def args = [
+            '-XX:+IgnoreUnrecognizedVMOptions',
             '-XX:+AllowEnhancedClassRedefinition',
             "-javaagent:${agentFile.absolutePath}=${watchPath}",
             '--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED',
@@ -571,7 +572,31 @@ project.plugins.withId('java') {
         def xml = new StringBuilder()
         xml.append('<component name="ProjectRunConfigurationManager">\n')
 
-        if (conf.targetJar != null) {
+        def isLoom = project.plugins.hasPlugin('fabric-loom') || project.extensions.findByName('loom') != null
+        if (isLoom) {
+            xml.append('  <configuration default="false" name="Run with Remold" type="GradleRunConfiguration" factoryName="Gradle">\n')
+            xml.append('    <ExternalSystemSettings>\n')
+            xml.append('      <option name="executionName" />\n')
+            xml.append('      <option name="externalProjectPath" value="$PROJECT_DIR$" />\n')
+            xml.append('      <option name="externalSystemIdString" value="GRADLE" />\n')
+            xml.append('      <option name="scriptParameters" value="" />\n')
+            xml.append('      <option name="taskDescriptions">\n')
+            xml.append('        <list />\n')
+            xml.append('      </option>\n')
+            xml.append('      <option name="taskNames">\n')
+            xml.append('        <list>\n')
+            xml.append('          <option value="runClient" />\n')
+            xml.append('        </list>\n')
+            xml.append('      </option>\n')
+            xml.append('      <option name="vmOptions" value="" />\n')
+            xml.append('    </ExternalSystemSettings>\n')
+            xml.append('    <ExternalSystemDebugServerProcess>true</ExternalSystemDebugServerProcess>\n')
+            xml.append('    <ExternalSystemReAttachDebugProcess>true</ExternalSystemReAttachDebugProcess>\n')
+            xml.append('    <DebugAllEnabled>false</DebugAllEnabled>\n')
+            xml.append('    <RunAsTest>false</RunAsTest>\n')
+            xml.append('    <method v="2" />\n')
+            xml.append('  </configuration>\n')
+        } else if (conf.targetJar != null) {
             def portableJar = makePortable(conf.targetJar.absolutePath)
             xml.append('  <configuration default="false" name="Run with Remold" type="JarApplication">\n')
             xml.append("    <option name=\"JAR_PATH\" value=\"${xmlEscape(portableJar)}\" />\n")

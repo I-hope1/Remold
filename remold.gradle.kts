@@ -439,11 +439,15 @@ project.plugins.withId("java") {
     tasks.register<Copy>("deployArtifact") {
         group = "application"
         description = "Builds and deploys the output JAR into the specified deploy directory"
-        dependsOn("jar")
+        dependsOn(provider {
+            if (project.tasks.findByName("remapJar") != null) "remapJar" else "jar"
+        })
         doFirst {
             resolveRemoldConfig()
         }
-        from(tasks.named("jar"))
+        from(provider {
+            project.tasks.findByName("remapJar") ?: tasks.named("jar").get()
+        })
         into(provider {
             resolveDeployDir()
                 ?: throw GradleException("[Remold] 开启了 autoDeploy 但未指定目标部署目录！请在 remold { deployDir = \"...\" } 或 gradle.properties (remold.deployDir=...) 中配置。")
@@ -623,6 +627,9 @@ project.plugins.withId("java") {
             if (remoldExt.dependsOn.isNotEmpty()) {
                 dependsOn(remoldExt.dependsOn)
             }
+        }
+        if (shouldAutoDeploy) {
+            tasks.findByName("runClient")?.dependsOn("deployArtifact")
         }
 
         val ideaDir = File(project.rootDir, ".idea")

@@ -427,11 +427,11 @@ project.plugins.withId('java') {
     tasks.register('deployArtifact', Copy) {
         group = 'application'
         description = 'Builds and deploys the output JAR into the specified deploy directory'
-        dependsOn 'jar'
+        dependsOn { project.tasks.findByName('remapJar') ?: 'jar' }
         doFirst {
             resolveRemoldConfig()
         }
-        from tasks.named('jar')
+        from { project.tasks.findByName('remapJar') ?: tasks.named('jar') }
         into {
             def target = resolveDeployDir()
             if (target == null) {
@@ -499,6 +499,9 @@ project.plugins.withId('java') {
             if (remoldExt.dependsOn) {
                 dependsOn remoldExt.dependsOn
             }
+        }
+        if (shouldAutoDeploy) {
+            tasks.findByName('runClient')?.dependsOn('deployArtifact')
         }
 
         def ideaDir = new File(project.rootDir, '.idea')

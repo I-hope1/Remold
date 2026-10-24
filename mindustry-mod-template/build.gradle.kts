@@ -44,6 +44,7 @@ val projectName = project.name
 
 repositories {
     mavenCentral()
+    maven("https://jitpack.io")
 
     // 官方 ivy 规则：从 Mindustry GitHub Releases 下载 dependencies.jar（官方最稳定源）
     ivy {
@@ -79,6 +80,10 @@ java {
 dependencies {
     // 仅在编译期引用 Mindustry，绝不打包进模组，绝不污染系统类加载器
     compileOnly(if (mindustryVersion == "be") "Anuken:MindustryBuilds:latest" else "Anuken:Mindustry:$mindustryVersion")
+
+    // Remold 注解与 API 依赖：提供 @RemoldReinit, @OnReload, @HotRebuild 等热重载控制注解
+    val remoldVersion = (project.findProperty("remold.version") as? String) ?: "0.1.3"
+    compileOnly("com.github.I-hope1.Remold:api:v$remoldVersion") { attributes { attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, 21) } }
 }
 
 // 桌面端模组打包任务
@@ -151,3 +156,4 @@ tasks.register<Jar>("deploy") {
         )
     })
 }
+

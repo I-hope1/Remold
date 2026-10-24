@@ -35,6 +35,10 @@ dependencies {
     mappings("net.fabricmc:yarn:$yarnMappings:v2")
     modImplementation("net.fabricmc:fabric-loader:$loaderVersion")
     modImplementation("net.fabricmc.fabric-api:fabric-api:$fabricVersion")
+
+    // Remold 注解与 API 依赖：提供 @RemoldReinit, @OnReload 等热重载控制注解
+    val remoldVersion = (project.findProperty("remold.version") as? String) ?: "0.1.3"
+    compileOnly("com.github.I-hope1.Remold:api:v$remoldVersion")
 }
 
 // 引入 Remold 热重载自动化脚本插件 (本地开发优先，独立使用回退官方 GitHub 源)

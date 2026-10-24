@@ -243,10 +243,19 @@ project.plugins.withId('java') {
             }
         } catch (Exception ignored) { }
 
-        // 4. 自动推导编译输出目录并拼装监听路径
+        // 4. 自动推导编译输出与资源目录并拼装监听路径
         def classesDirs = sourceSets.main.output.classesDirs.files
+        def resourceDirs = sourceSets.main.resources.srcDirs
+        def assetsDir = new File(project.projectDir, "assets")
+        def outResourceDir = sourceSets.main.output.resourcesDir
         def extraDirs = remoldExt.watchDirs.collect { project.file(it) }
-        def allWatchDirs = (classesDirs + extraDirs).findAll { it.exists() }
+        def allCandidateDirs = []
+        allCandidateDirs.addAll(classesDirs)
+        allCandidateDirs.addAll(resourceDirs)
+        if (assetsDir != null) allCandidateDirs.add(assetsDir)
+        if (outResourceDir != null) allCandidateDirs.add(outResourceDir)
+        allCandidateDirs.addAll(extraDirs)
+        def allWatchDirs = allCandidateDirs.findAll { it != null && it.exists() }.unique()
         def watchPath = allWatchDirs.collect { it.absolutePath }.join(File.pathSeparator)
 
         // 5. 装配 JVM 参数

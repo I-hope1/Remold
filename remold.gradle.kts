@@ -257,9 +257,18 @@ project.plugins.withId("java") {
             }
         } catch (_: Exception) { }
 
-        // 4. 自动推导编译输出目录并拼装监听路径
+        // 4. 自动推导编译输出与资源目录并拼装监听路径
         val classesDirs = sourceSets["main"].output.classesDirs.files
-        val allWatchDirs = (classesDirs + remoldExt.watchDirs).filter { it.exists() }
+        val resourceDirs = sourceSets["main"].resources.srcDirs
+        val assetsDir = File(project.projectDir, "assets")
+        val outResourceDir = sourceSets["main"].output.resourcesDir
+        val allCandidateDirs = mutableListOf<File>()
+        allCandidateDirs.addAll(classesDirs)
+        allCandidateDirs.addAll(resourceDirs)
+        if (assetsDir.exists()) allCandidateDirs.add(assetsDir)
+        if (outResourceDir != null && outResourceDir.exists()) allCandidateDirs.add(outResourceDir)
+        allCandidateDirs.addAll(remoldExt.watchDirs)
+        val allWatchDirs = allCandidateDirs.filter { it.exists() }.distinct()
         val watchPath = allWatchDirs.joinToString(File.pathSeparator) { it.absolutePath }
 
         // 5. 装配 JVM 参数

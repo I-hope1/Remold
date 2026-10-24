@@ -1,6 +1,8 @@
 package remold;
 
 import java.lang.instrument.Instrumentation;
+import java.nio.file.Path;
+import java.util.Set;
 
 /**
  * 热重载插件契约。
@@ -20,4 +22,12 @@ public interface HotswapPlugin {
 
 	/** 配置重载回调 */
 	default void onConfigReload() {}
+
+	/**
+	 * 资源文件变动回调。
+	 * 当监控路径中的资源文件（如贴图、多语言、音频等）变动并经过防抖后被调用。
+	 *
+	 * @param changedAssets 变动的资源文件路径集合
+	 */
+	default void onAssetsChanged(Set<Path> changedAssets) {}
 }

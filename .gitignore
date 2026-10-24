@@ -15,3 +15,4 @@ bin/
 **/bin/
 core/libs/tool.lib
 .workbuddy-ai/
+.sources/

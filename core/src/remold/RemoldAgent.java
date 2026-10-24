@@ -332,6 +332,22 @@ public class RemoldAgent {
 		}
 	}
 
+	/**
+	 * 通知所有注册的扩展插件发生资源文件变动。
+	 *
+	 * @param assetChanges 变动的资源文件路径集合
+	 */
+	public static void notifyAssetChanges(Set<Path> assetChanges) {
+		if (assetChanges == null || assetChanges.isEmpty()) return;
+		for (HotswapPlugin plugin : plugins) {
+			try {
+				plugin.onAssetsChanged(assetChanges);
+			} catch (Throwable t) {
+				error("[HotswapPlugin] Error notifying asset changes to plugin: " + plugin.getName(), t);
+			}
+		}
+	}
+
 	private static final Set<HotswapPlugin> initializedPlugins = Collections.newSetFromMap(new IdentityHashMap<>());
 
 	private static void triggerPluginInit(HotswapPlugin plugin) {
@@ -481,6 +497,8 @@ public class RemoldAgent {
 	private static final Set<Path>                pendingChanges = Collections.synchronizedSet(new HashSet<>());
 	/** 待解压的 jar/zip，防抖后统一解压；所有访问均在 synchronized(pendingChanges) 内，无需额外同步 */
 	private static final Set<Path>                pendingJars    = new HashSet<>();
+	/** 待通知的资源文件变动（非 .class 资源，如贴图、语言包等），防抖后统一通知；所有访问均在 synchronized(pendingChanges) 内 */
+	private static final Set<Path>                pendingAssetChanges = new HashSet<>();
 	/** 临时解压出的 .class 路径 → 来源 jar 路径，用于 ClassLoader 推断 */
 	private static final Map<Path, Path>          tmpToJar       = new ConcurrentHashMap<>();
 	private static final ScheduledExecutorService scheduler      = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -2512,7 +2530,42 @@ public class RemoldAgent {
 		// 入参 classes 是调用方在 restartWatchers 之前取的快照，此刻可能已过期
 		// （旧 watcher 排进 scheduler 的任务期间可能又有类被加载）。改走 triggerHotswap()，
 		// 由它在锁内重新取一份新鲜快照。
-		if (!pendingChanges.isEmpty()) triggerHotswap();
+		if (!pendingChanges.isEmpty() || !pendingAssetChanges.isEmpty()) triggerHotswap();
+	}
+
+	/**
+	 * 判断文件是否为资源文件（贴图、字体、多语言包、配置文件、音频、着色器等）。
+	 * 过滤掉隐藏文件、临时文件及字节码/压缩包。
+	 */
+	public static boolean isAssetFile(Path path) {
+		if (path == null) return false;
+		Path fileName = path.getFileName();
+		if (fileName == null) return false;
+		String name = fileName.toString().toLowerCase();
+		if (name.startsWith(".") || name.endsWith(".tmp") || name.endsWith(".swp") || name.endsWith(".bak") || name.endsWith("~")) {
+			return false;
+		}
+		if (name.endsWith(".class") || name.endsWith(".jar") || name.endsWith(".zip")) {
+			return false;
+		}
+		return name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg")
+		    || name.endsWith(".properties")
+		    || name.endsWith(".json") || name.endsWith(".hjson")
+		    || name.endsWith(".ogg") || name.endsWith(".wav") || name.endsWith(".mp3")
+		    || name.endsWith(".frag") || name.endsWith(".vert") || name.endsWith(".glsl")
+		    || name.endsWith(".fnt") || name.endsWith(".ttf") || name.endsWith(".woff")
+		    || name.endsWith(".atlas") || name.endsWith(".csv") || name.endsWith(".txt");
+	}
+
+	private static void handleAssetChange(Path changedAsset) {
+		if (DEBUG) log("[ASSET] Queued asset change: " + changedAsset);
+		synchronized (pendingChanges) {
+			pendingAssetChanges.add(changedAsset);
+			if (scheduledTask != null && !scheduledTask.isDone()) {
+				scheduledTask.cancel(false);
+			}
+			scheduledTask = scheduler.schedule(RemoldAgent::triggerHotswap, FILE_SHAKE_MS, TimeUnit.MILLISECONDS);
+		}
 	}
 
 	private static void handleFileChange(Path changedFile) {
@@ -2566,16 +2619,28 @@ public class RemoldAgent {
 			tmpToJar.entrySet().removeIf(e -> e.getValue().equals(jarPath));
 
 			List<Path> extracted = new ArrayList<>();
+			List<Path> extractedAssets = new ArrayList<>();
 			try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(Files.newInputStream(jarPath)))) {
 				ZipEntry entry;
 				while ((entry = zis.getNextEntry()) != null) {
 					try {
-						if (!entry.isDirectory() && entry.getName().endsWith(".class")) {
-							Path outPath = tmpDir.resolve(entry.getName().replace('/', File.separatorChar));
-							Files.createDirectories(outPath.getParent());
-							Files.write(outPath, zis.readAllBytes());
-							tmpToJar.put(outPath, jarPath);
-							extracted.add(outPath);
+						if (!entry.isDirectory()) {
+							String entryName = entry.getName();
+							if (entryName.endsWith(".class")) {
+								Path outPath = tmpDir.resolve(entryName.replace('/', File.separatorChar));
+								Files.createDirectories(outPath.getParent());
+								Files.write(outPath, zis.readAllBytes());
+								tmpToJar.put(outPath, jarPath);
+								extracted.add(outPath);
+							} else {
+								Path entryPath = Paths.get(entryName.replace('/', File.separatorChar));
+								if (isAssetFile(entryPath)) {
+									Path outPath = tmpDir.resolve(entryName.replace('/', File.separatorChar));
+									Files.createDirectories(outPath.getParent());
+									Files.write(outPath, zis.readAllBytes());
+									extractedAssets.add(outPath);
+								}
+							}
 						}
 					} finally {
 						zis.closeEntry();
@@ -2583,14 +2648,20 @@ public class RemoldAgent {
 				}
 			}
 
-			if (extracted.isEmpty()) {
-				if (DEBUG) log("[JAR] No .class entries in: " + jarPath);
+			if (extracted.isEmpty() && extractedAssets.isEmpty()) {
+				if (DEBUG) log("[JAR] No relevant entries in: " + jarPath);
 				return;
 			}
-			info("[JAR] Extracted " + extracted.size() + " classes from " + jarPath.getFileName() + " → " + tmpDir);
+			if (!extracted.isEmpty()) {
+				info("[JAR] Extracted " + extracted.size() + " classes from " + jarPath.getFileName() + " → " + tmpDir);
+			}
+			if (!extractedAssets.isEmpty()) {
+				info("[JAR] Extracted " + extractedAssets.size() + " assets from " + jarPath.getFileName() + " → " + tmpDir);
+			}
 			// 批量加入，只锁一次
 			synchronized (pendingChanges) {
-				pendingChanges.addAll(extracted);
+				if (!extracted.isEmpty()) pendingChanges.addAll(extracted);
+				if (!extractedAssets.isEmpty()) pendingAssetChanges.addAll(extractedAssets);
 			}
 		} catch (IOException e) {
 			error("Failed to extract jar/zip: " + jarPath, e);
@@ -2653,12 +2724,20 @@ public class RemoldAgent {
 		jars.forEach(RemoldAgent::extractJarToTemp);
 
 		Set<Path> changes;
+		Set<Path> assetChanges;
 		synchronized (pendingChanges) {
-			if (pendingChanges.isEmpty()) return;
+			if (pendingChanges.isEmpty() && pendingAssetChanges.isEmpty()) return;
 			changes = new HashSet<>(pendingChanges);
 			pendingChanges.clear();
+			assetChanges = new HashSet<>(pendingAssetChanges);
+			pendingAssetChanges.clear();
 		}
-		processChanges(changes, classes);
+		if (!assetChanges.isEmpty()) {
+			notifyAssetChanges(assetChanges);
+		}
+		if (!changes.isEmpty()) {
+			processChanges(changes, classes);
+		}
 	}
 
 	/** 对外api，触发热更新 */
@@ -2948,10 +3027,12 @@ public class RemoldAgent {
 							continue;
 						}
 
-						// 处理普通类文件变化
+						// 处理普通类与资源文件变化
 						String name = fullPath.toString();
 						if (name.endsWith(".class")) {
 							handleFileChange(fullPath);
+						} else if (isAssetFile(fullPath)) {
+							handleAssetChange(fullPath);
 						}
 
 						// 处理 jar / zip 包变化（仅监控 root 一级，子目录不处理）
@@ -2965,13 +3046,18 @@ public class RemoldAgent {
 
 							registerAll(fullPath);
 
-							// 立即扫描该目录下现有的 .class 文件（jar/zip 仅在 root 一级处理，新子目录不扫）
+							// 立即扫描该目录下现有的 .class 与资源文件（jar/zip 仅在 root 一级处理，新子目录不扫）
 							try (Stream<Path> subFiles = Files.walk(fullPath)) {
-								subFiles.filter(p -> p.toString().endsWith(".class"))
-								 .forEach(p -> {
-									 if (DEBUG) log("[WATCH] Found existing file in new dir: " + p);
-									 handleFileChange(p);
-								 });
+								subFiles.filter(Files::isRegularFile).forEach(p -> {
+									String pName = p.toString();
+									if (pName.endsWith(".class")) {
+										if (DEBUG) log("[WATCH] Found existing file in new dir: " + p);
+										handleFileChange(p);
+									} else if (isAssetFile(p)) {
+										if (DEBUG) log("[WATCH] Found existing asset in new dir: " + p);
+										handleAssetChange(p);
+									}
+								});
 							} catch (IOException e) {
 								error("Failed to scan new directory: " + fullPath, e);
 							}

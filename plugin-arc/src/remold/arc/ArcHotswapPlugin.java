@@ -53,4 +53,9 @@ public class ArcHotswapPlugin implements HotswapPlugin {
 			}
 		}
 	}
+
+	@Override
+	public void onAssetsChanged(java.util.Set<java.nio.file.Path> changedAssets) {
+		ArcAssetReloader.onAssetsChanged(changedAssets);
+	}
 }

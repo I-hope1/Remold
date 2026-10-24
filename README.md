@@ -30,7 +30,7 @@ apply from: 'https://raw.githubusercontent.com/I-hope1/Remold/main/remold.gradle
 remold {
     // 可选：指定 Remold 版本（默认读取 gradle.properties 中的 remoldVersion）
     // 插件将自动从仓库解析或从 Releases 下载对应版本的 agent jar 并缓存至本地，开发者无需手动下载
-    // version = '0.1.2'
+    // version = '0.1.3'
 
     // 可选：显式指定本地 remold-agent.jar 路径（若不指定，将优先使用本地 libs/remold-agent.jar，不存在时自动下载缓存）
     // agentJar = "libs/remold-agent.jar"
@@ -63,7 +63,7 @@ remold {
 apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/main/remold.gradle.kts")
 
 remold {
-    // version = "0.1.2"
+    // version = "0.1.3"
     // agentJar = "libs/remold-agent.jar"
     // jbrPath = "/path/to/jbr"
     // fileShakeMs = 1200

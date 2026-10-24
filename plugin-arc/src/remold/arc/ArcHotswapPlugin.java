@@ -28,6 +28,21 @@ public class ArcHotswapPlugin implements HotswapPlugin {
 		} catch (Throwable ignored) {
 		}
 
+		// 自动绑定 Arc 的主线程事件循环调度器
+		try {
+			remold.RemoldAgent.setMainThreadDispatcher(task -> {
+				if (task != null) {
+					try {
+						if (arc.Core.app != null) {
+							arc.Core.app.post(task);
+							return;
+						}
+					} catch (Throwable ignored) { }
+					task.run();
+				}
+			});
+		} catch (Throwable ignored) { }
+
 		// 挂载 GlTimerInjector
 		if (inst != null) {
 			try {

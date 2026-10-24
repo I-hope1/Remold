@@ -329,6 +329,20 @@ public class RemoldAgent {
 		}
 	}
 
+	private static final Set<HotswapPlugin> initializedPlugins = Collections.newSetFromMap(new IdentityHashMap<>());
+
+	private static void triggerPluginInit(HotswapPlugin plugin) {
+		if (plugin == null || inst == null) return;
+		synchronized (initializedPlugins) {
+			if (!initializedPlugins.add(plugin)) return;
+		}
+		try {
+			plugin.onAgentInit(inst);
+		} catch (Throwable t) {
+			error("[HotswapPlugin] Error initializing plugin: " + plugin.getName(), t);
+		}
+	}
+
 	/** 注册热重载扩展插件 */
 	public static void registerPlugin(HotswapPlugin plugin) {
 		if (plugin == null) return;
@@ -338,13 +352,7 @@ public class RemoldAgent {
 			}
 		}
 		plugins.add(plugin);
-		if (inst != null) {
-			try {
-				plugin.onAgentInit(inst);
-			} catch (Throwable t) {
-				error("[HotswapPlugin] Error initializing plugin: " + plugin.getName(), t);
-			}
-		}
+		triggerPluginInit(plugin);
 	}
 
 	/** 注销热重载扩展插件 */
@@ -600,13 +608,7 @@ public class RemoldAgent {
 		}
 
 		for (HotswapPlugin plugin : plugins) {
-			try {
-				if (inst != null) {
-					plugin.onAgentInit(inst);
-				}
-			} catch (Throwable t) {
-				error("[HotswapPlugin] Error initializing plugin: " + plugin.getName(), t);
-			}
+			triggerPluginInit(plugin);
 		}
 
 		if (source == null || source.trim().isEmpty()) {
@@ -901,6 +903,7 @@ public class RemoldAgent {
 		info("UI Hook: " + UI_HOOK);
 		boolean cellPropertyRef = Boolean.parseBoolean(System.getProperty("remold.agent.cell_property_ref", "false"));
 		info("Cell Property Ref: " + cellPropertyRef);
+		loadConfiguredPlugins();
 		for (HotswapPlugin plugin : plugins) {
 			try {
 				plugin.onConfigReload();
@@ -919,6 +922,65 @@ public class RemoldAgent {
 			info("Anonymous Class Alignment DISABLED. Host classes containing anonymous classes will be rejected as a whole.");
 		}
 		info("Structural HotSwap Supported: " + isEnhancedHotswapEnabled());
+	}
+
+	private static void loadConfiguredPlugins() {
+		if (inst == null) return;
+
+		// 1. 读取并通过 Instrumentation 追加外部插件 JAR 到系统类加载器搜索路径
+		String pluginJarsProp = System.getProperty("remold.plugin.jars");
+		if (pluginJarsProp != null && !pluginJarsProp.trim().isEmpty()) {
+			String[] jarPaths = pluginJarsProp.split("[;," + File.pathSeparator + "]");
+			for (String rawPath : jarPaths) {
+				String path = rawPath.trim();
+				if (path.isEmpty()) continue;
+				File jarFile = new File(path);
+				if (jarFile.exists()) {
+					try {
+						inst.appendToSystemClassLoaderSearch(new java.util.jar.JarFile(jarFile));
+						info("[Plugin] Appended plugin JAR to system search: " + jarFile.getAbsolutePath());
+					} catch (Throwable t) {
+						error("[Plugin] Failed to append plugin JAR: " + path, t);
+					}
+				} else {
+					warn("[Plugin] Specified plugin JAR does not exist: " + path);
+				}
+			}
+		}
+
+		// 2. 读取配置的插件名称或类名并自动实例化注册
+		String pluginsProp = System.getProperty("remold.plugins");
+		if (pluginsProp != null && !pluginsProp.trim().isEmpty()) {
+			String[] names = pluginsProp.split("[,;]");
+			for (String rawName : names) {
+				String name = rawName.trim();
+				if (name.isEmpty()) continue;
+				String className = name;
+				if ("arc".equalsIgnoreCase(name)) {
+					className = "remold.arc.ArcHotswapPlugin";
+				}
+				try {
+					Class<?> cls = Class.forName(className);
+					if (HotswapPlugin.class.isAssignableFrom(cls)) {
+						HotswapPlugin p = (HotswapPlugin) cls.getDeclaredConstructor().newInstance();
+						registerPlugin(p);
+						info("[Plugin] Automatically loaded and registered plugin: " + p.getName() + " (" + className + ")");
+					} else {
+						warn("[Plugin] Class " + className + " does not implement HotswapPlugin");
+					}
+				} catch (Throwable t) {
+					error("[Plugin] Failed to load plugin '" + name + "': " + t.getMessage(), t);
+				}
+			}
+		}
+
+		// 3. 通过 ServiceLoader 自动探测系统类加载器中注册的 HotswapPlugin
+		try {
+			ServiceLoader<HotswapPlugin> loader = ServiceLoader.load(HotswapPlugin.class, ClassLoader.getSystemClassLoader());
+			for (HotswapPlugin p : loader) {
+				registerPlugin(p);
+			}
+		} catch (Throwable ignored) { }
 	}
 	//endregion
 

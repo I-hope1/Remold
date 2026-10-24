@@ -4,6 +4,7 @@ plugins {
 }
 
 sourceSets.main.java.srcDirs = ["src"]
+sourceSets.main.resources.srcDirs = ["src"]
 
 publishing {
 	publications {

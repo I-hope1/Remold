@@ -17,6 +17,9 @@ remold.jar=D:/Mindustry/Mindustry.jar
 
 # 保持开启：首次启动前自动打包模组并复制到系统 Mindustry mods 目录
 remold.autoDeploy=true
+
+# 启用 Mindustry / Arc 框架扩展插件（UI 局部熔断保护、@HotRebuild 原位热重构、GL 渲染探针）
+remold.plugins=arc
 ```
 
 > [!NOTE]

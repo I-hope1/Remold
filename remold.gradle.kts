@@ -20,6 +20,11 @@ open class RemoldExtension {
     var deployDir: Any? = null
     var modsDir: Any? = null
     var autoDeploy: Boolean? = null
+    val plugins: MutableList<String> = mutableListOf()
+
+    fun plugins(vararg p: String) {
+        this.plugins.addAll(p.toList())
+    }
 
     fun jar(target: Any) {
         this.jar = target
@@ -117,24 +122,67 @@ project.plugins.withId("java") {
             }
         }
 
-        // 3. 解析 agent jar
+        val downloadRemoteJar = { urlStr: String, targetFile: File ->
+            var ok = false
+            var curUrl = urlStr
+            for (hop in 0 until 5) {
+                try {
+                    val uri = java.net.URI.create(curUrl)
+                    val conn = uri.toURL().openConnection() as? java.net.HttpURLConnection ?: break
+                    conn.connectTimeout = 10000
+                    conn.readTimeout = 30000
+                    conn.instanceFollowRedirects = true
+                    conn.setRequestProperty("User-Agent", "Remold-Gradle-Plugin")
+                    val code = conn.responseCode
+                    if (code in 300..399) {
+                        val loc = conn.getHeaderField("Location")
+                        if (loc.isNullOrBlank()) break
+                        curUrl = if (loc.startsWith("http")) loc else uri.resolve(loc).toString()
+                        continue
+                    }
+                    if (code == 200) {
+                        conn.inputStream.use { inStream ->
+                            targetFile.outputStream().use { outStream ->
+                                inStream.copyTo(outStream)
+                            }
+                        }
+                        if (targetFile.exists() && targetFile.length() > 1024) {
+                            ok = true
+                            break
+                        } else {
+                            targetFile.delete()
+                        }
+                    }
+                    break
+                } catch (_: Exception) {
+                    targetFile.delete()
+                    break
+                }
+            }
+            ok
+        }
+
+        // 3. 解析版本与 agent jar
+        val ver = remoldExt.version
+            ?: (project.findProperty("remold.version") as? String)
+            ?: (project.findProperty("remoldVersion") as? String)
+            ?: (if (project.rootProject.hasProperty("remoldVersion")) project.rootProject.property("remoldVersion") as? String else null)
         var agentFile: File? = remoldExt.agentJar?.let { File(it) }
         if (agentFile == null || !agentFile.exists()) {
             val candidates = listOf(
                 project.file("libs/remold-agent.jar"),
                 project.file("remold-agent.jar"),
-                project.rootProject.file("core/build/libs/remold-agent.jar")
+                project.rootProject.file("core/build/libs/remold-agent.jar"),
+                project.rootProject.file("../core/build/libs/remold-agent.jar")
             )
             agentFile = candidates.firstOrNull { it.exists() }
         }
 
         // 若本地未找到，尝试从 Gradle 依赖缓存或官方 Releases 自动下载
         if (agentFile == null || !agentFile.exists()) {
-            val ver = remoldExt.version
-                ?: (project.findProperty("remold.version") as? String)
-                ?: (project.findProperty("remoldVersion") as? String)
-                ?: (if (project.rootProject.hasProperty("remoldVersion")) project.rootProject.property("remoldVersion") as? String else null)
-                ?: throw GradleException("[Remold] 未配置 Remold 版本号！请在 remold { version = \"...\" } 或 gradle.properties (remold.version=...) 中指定。")
+            if (ver == null) {
+                throw GradleException("[Remold] 未配置 Remold 版本号！请在 remold { version = \"...\" } 或 gradle.properties (remold.version=...) 中指定。")
+            }
             val cacheDir = File(project.gradle.gradleUserHomeDir, "caches/remold")
             val cachedJar = File(cacheDir, "remold-agent-$ver.jar")
 
@@ -160,37 +208,10 @@ project.plugins.withId("java") {
                     )
                     cacheDir.mkdirs()
                     for (urlStr in downloadUrls) {
-                        try {
-                            val uri = java.net.URI.create(urlStr)
-                            var conn = uri.toURL().openConnection()
-                            conn.connectTimeout = 10000
-                            conn.readTimeout = 30000
-                            if (conn is java.net.HttpURLConnection) {
-                                conn.instanceFollowRedirects = true
-                                val code = conn.responseCode
-                                if (code in 300..399) {
-                                    val loc = conn.getHeaderField("Location")
-                                    if (!loc.isNullOrBlank()) {
-                                        conn = java.net.URI.create(loc).toURL().openConnection()
-                                        conn.connectTimeout = 10000
-                                        conn.readTimeout = 30000
-                                    }
-                                }
-                            }
-                            conn.inputStream.use { inStream ->
-                                cachedJar.outputStream().use { outStream ->
-                                    inStream.copyTo(outStream)
-                                }
-                            }
-                            if (cachedJar.exists() && cachedJar.length() > 1024) {
-                                agentFile = cachedJar
-                                project.logger.lifecycle("[Remold] agent jar 已自动就绪: ${cachedJar.absolutePath}")
-                                break
-                            } else {
-                                cachedJar.delete()
-                            }
-                        } catch (_: Exception) {
-                            cachedJar.delete()
+                        if (downloadRemoteJar(urlStr, cachedJar)) {
+                            agentFile = cachedJar
+                            project.logger.lifecycle("[Remold] agent jar 已自动就绪: ${cachedJar.absolutePath}")
+                            break
                         }
                     }
                 }
@@ -242,6 +263,79 @@ project.plugins.withId("java") {
         args.addAll(remoldExt.extraJvmArgs)
         if (remoldExt.fileShakeMs != null) {
             args.add("-Dremold.agent.file_shake_ms=${remoldExt.fileShakeMs}")
+        }
+
+        // 6. 解析扩展插件配置 (如 arc)
+        val requestedPlugins = mutableListOf<String>()
+        requestedPlugins.addAll(remoldExt.plugins.map { it.trim() }.filter { it.isNotEmpty() })
+        val pluginProps = (project.findProperty("remold.plugins") as? String)
+            ?: (project.findProperty("remoldPlugins") as? String)
+        if (!pluginProps.isNullOrBlank()) {
+            requestedPlugins.addAll(pluginProps.split("[,;]").map { it.trim() }.filter { it.isNotEmpty() })
+        }
+        val distinctPlugins = requestedPlugins.distinct()
+
+        val pluginJars = mutableListOf<File>()
+        if (distinctPlugins.isNotEmpty()) {
+            for (pluginName in distinctPlugins) {
+                val candidates = mutableListOf<File>()
+                candidates.add(project.rootProject.file("plugin-$pluginName/build/libs/remold-plugin-$pluginName-$ver.jar"))
+                candidates.add(project.rootProject.file("plugin-$pluginName/build/libs/remold-plugin-$pluginName.jar"))
+                candidates.add(project.rootProject.file("../plugin-$pluginName/build/libs/remold-plugin-$pluginName-$ver.jar"))
+                candidates.add(project.rootProject.file("../plugin-$pluginName/build/libs/remold-plugin-$pluginName.jar"))
+                if (ver != null) {
+                    candidates.add(File(project.gradle.gradleUserHomeDir, "caches/remold/remold-plugin-$pluginName-$ver.jar"))
+                }
+                var resolvedPluginJar = candidates.firstOrNull { it.exists() }
+
+                if ((resolvedPluginJar == null || !resolvedPluginJar.exists()) && ver != null) {
+                    val cacheDir = File(project.gradle.gradleUserHomeDir, "caches/remold")
+                    val cachedJar = File(cacheDir, "remold-plugin-$pluginName-$ver.jar")
+                    if (cachedJar.exists() && cachedJar.length() > 1024) {
+                        resolvedPluginJar = cachedJar
+                    } else {
+                        project.logger.lifecycle("[Remold] 正在自动拉取插件: remold-plugin-$pluginName.jar (版本: $ver)...")
+                        val pluginUrls = listOf(
+                            "https://github.com/I-hope1/Remold/releases/download/v$ver/remold-plugin-$pluginName-$ver.jar",
+                            "https://github.com/I-hope1/Remold/releases/download/v$ver/remold-plugin-$pluginName.jar",
+                            "https://github.com/I-hope1/Remold/releases/download/$ver/remold-plugin-$pluginName-$ver.jar",
+                            "https://github.com/I-hope1/Remold/releases/download/$ver/remold-plugin-$pluginName.jar"
+                        )
+                        cacheDir.mkdirs()
+                        for (urlStr in pluginUrls) {
+                            if (downloadRemoteJar(urlStr, cachedJar)) {
+                                resolvedPluginJar = cachedJar
+                                project.logger.lifecycle("[Remold] 插件已自动就绪: ${cachedJar.absolutePath}")
+                                break
+                            }
+                        }
+                    }
+                }
+
+                if (resolvedPluginJar != null && resolvedPluginJar.exists()) {
+                    try {
+                        val rootCanonical = project.rootDir.canonicalPath
+                        val pluginCanonical = resolvedPluginJar.canonicalPath
+                        if (!pluginCanonical.startsWith(rootCanonical)) {
+                            val localPlugin = File(project.rootDir, ".gradle/remold/plugins/${resolvedPluginJar.name}")
+                            if (!localPlugin.exists() || localPlugin.length() != resolvedPluginJar.length()) {
+                                localPlugin.parentFile.mkdirs()
+                                java.nio.file.Files.copy(resolvedPluginJar.toPath(), localPlugin.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                            }
+                            resolvedPluginJar = localPlugin
+                        }
+                    } catch (_: Exception) { }
+                    pluginJars.add(resolvedPluginJar)
+                } else {
+                    project.logger.warn("[Remold] 未找到插件 remold-plugin-$pluginName 的 Jar 包，若已内嵌或无需外部 Jar 可忽略。")
+                }
+            }
+
+            args.add("-Dremold.plugins=${distinctPlugins.joinToString(",")}")
+            if (pluginJars.isNotEmpty()) {
+                val pluginJarsPath = pluginJars.joinToString(File.pathSeparator) { it.absolutePath }
+                args.add("-Dremold.plugin.jars=$pluginJarsPath")
+            }
         }
 
         val runtimeClasspath = if (targetJar != null) project.files(targetJar) else sourceSets["main"].runtimeClasspath

@@ -291,8 +291,24 @@ flowchart TD
 
 ## 4. 常用 API 与用法示例 (API & Examples)
 
-### 4.1 显式注册插件与分发器
-由于 Agent 处于系统类加载器，避免使用 `ServiceLoader`，直接通过静态 API 显式注册：
+### 4.1 插件扩展与主线程分发器 (Plugins & Dispatcher)
+
+#### 方式一：声明式自动加载（强烈推荐 ⭐）
+Remold Agent 支持通过系统属性或 Gradle 配置声明式加载扩展插件（如 Mindustry / Arc 专用插件 `arc`）：
+- **`gradle.properties`**:
+  ```properties
+  remold.plugins=arc
+  ```
+- **Gradle DSL (`build.gradle.kts` / `build.gradle`)**:
+  ```kotlin
+  remold {
+      plugins("arc")
+  }
+  ```
+  Gradle 插件将自动从远程下载对应的 `remold-plugin-arc.jar`，并通过 JVM 参数（`-Dremold.plugins=arc -Dremold.plugin.jars=...`）自动挂载到主 Agent，**模组与业务代码无需引入任何 Remold 依赖，零侵入无残留！**
+
+#### 方式二：代码显式注册
+若需在应用层代码中编写并注册自定义扩展插件：
 ```java
 import remold.RemoldAgent;
 

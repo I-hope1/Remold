@@ -38,3 +38,18 @@ subprojects {
 		]
 	}
 }
+
+tasks.register('packageModTemplate', Zip) {
+	group = 'distribution'
+	description = 'Packages mindustry-mod-template into a zip file for release distribution'
+	archiveFileName = 'mindustry-mod-template.zip'
+	destinationDirectory = layout.buildDirectory.dir('distributions')
+	from(file('mindustry-mod-template')) {
+		exclude '.gradle'
+		exclude 'build'
+		exclude '.idea'
+		exclude '**/*.iml'
+	}
+}
+
+assemble.dependsOn('packageModTemplate')

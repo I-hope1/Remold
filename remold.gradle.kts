@@ -438,6 +438,91 @@ project.plugins.withId("java") {
         }
     }
 
+    val generateIdeaRunConfigInternal: () -> File? = {
+        val conf = resolveRemoldConfig()
+        val ideaRunDir = File(project.rootDir, ".idea/runConfigurations")
+        ideaRunDir.mkdirs()
+
+        fun xmlEscape(s: String?): String {
+            if (s == null) return ""
+            return s.replace("&", "&amp;")
+                .replace("\"", "&quot;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+        }
+
+        fun makePortable(p: String?): String {
+            if (p == null) return ""
+            val rootPath = project.rootDir.absolutePath.replace('\\', '/')
+            var norm = p.replace('\\', '/')
+            val rootLower = rootPath.lowercase()
+            while (true) {
+                val normLower = norm.lowercase()
+                val idx = normLower.indexOf(rootLower)
+                if (idx == -1) break
+                norm = norm.substring(0, idx) + "\$PROJECT_DIR\$" + norm.substring(idx + rootPath.length)
+            }
+            return norm
+        }
+
+        val portableJvmArgs = conf.jvmArgs.joinToString(" ") { makePortable(it) }
+        val portableAppArgs = conf.appArgs.joinToString(" ") { makePortable(it) }
+        val jrePath = if (conf.executable != "java") conf.executable else ""
+        val hasCustomJre = jrePath.isNotEmpty()
+
+        val xmlFile = File(ideaRunDir, "Run_with_Remold.xml")
+        val sb = StringBuilder()
+        sb.append("<component name=\"ProjectRunConfigurationManager\">\n")
+
+        if (conf.targetJar != null) {
+            val portableJar = makePortable(conf.targetJar.absolutePath)
+            sb.append("  <configuration default=\"false\" name=\"Run with Remold\" type=\"JarApplication\">\n")
+            sb.append("    <option name=\"JAR_PATH\" value=\"${xmlEscape(portableJar)}\" />\n")
+            sb.append("    <option name=\"VM_PARAMETERS\" value=\"${xmlEscape(portableJvmArgs)}\" />\n")
+            if (portableAppArgs.isNotEmpty()) {
+                sb.append("    <option name=\"PROGRAM_PARAMETERS\" value=\"${xmlEscape(portableAppArgs)}\" />\n")
+            }
+            sb.append("    <option name=\"WORKING_DIRECTORY\" value=\"\$PROJECT_DIR\$\" />\n")
+            if (hasCustomJre) {
+                sb.append("    <option name=\"ALTERNATIVE_JRE_PATH\" value=\"${xmlEscape(jrePath)}\" />\n")
+                sb.append("    <option name=\"ALTERNATIVE_JRE_PATH_ENABLED\" value=\"true\" />\n")
+            }
+            sb.append("    <method v=\"2\">\n")
+            val shouldAutoDeploy = remoldExt.autoDeploy
+                ?: project.findProperty("remold.autoDeploy")?.toString()?.toBoolean()
+                ?: (remoldExt.deployDir != null || remoldExt.modsDir != null || project.findProperty("remold.deployDir") != null || project.findProperty("remold.modsDir") != null || project.findProperty("remoldDeployDir") != null || project.findProperty("remoldModsDir") != null)
+            if (shouldAutoDeploy) {
+                sb.append("      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"deployArtifact\" externalProjectPath=\"\$PROJECT_DIR\$\" />\n")
+            } else {
+                sb.append("      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"classes\" externalProjectPath=\"\$PROJECT_DIR\$\" />\n")
+            }
+            sb.append("    </method>\n")
+            sb.append("  </configuration>\n")
+        } else {
+            val moduleName = "${project.name}.main"
+            sb.append("  <configuration default=\"false\" name=\"Run with Remold\" type=\"Application\" factoryName=\"Application\">\n")
+            sb.append("    <option name=\"MAIN_CLASS_NAME\" value=\"${xmlEscape(conf.mainClass)}\" />\n")
+            sb.append("    <module name=\"${xmlEscape(moduleName)}\" />\n")
+            sb.append("    <option name=\"VM_PARAMETERS\" value=\"${xmlEscape(portableJvmArgs)}\" />\n")
+            if (portableAppArgs.isNotEmpty()) {
+                sb.append("    <option name=\"PROGRAM_PARAMETERS\" value=\"${xmlEscape(portableAppArgs)}\" />\n")
+            }
+            sb.append("    <option name=\"WORKING_DIRECTORY\" value=\"\$PROJECT_DIR\$\" />\n")
+            if (hasCustomJre) {
+                sb.append("    <option name=\"ALTERNATIVE_JRE_PATH\" value=\"${xmlEscape(jrePath)}\" />\n")
+                sb.append("    <option name=\"ALTERNATIVE_JRE_PATH_ENABLED\" value=\"true\" />\n")
+            }
+            sb.append("    <method v=\"2\">\n")
+            sb.append("      <option name=\"Make\" enabled=\"true\" />\n")
+            sb.append("    </method>\n")
+            sb.append("  </configuration>\n")
+        }
+        sb.append("</component>\n")
+
+        xmlFile.writeText(sb.toString())
+        xmlFile
+    }
+
     project.afterEvaluate {
         val shouldAutoDeploy = remoldExt.autoDeploy
             ?: project.findProperty("remold.autoDeploy")?.toString()?.toBoolean()
@@ -483,6 +568,21 @@ project.plugins.withId("java") {
                 dependsOn(remoldExt.dependsOn)
             }
         }
+
+        val ideaDir = File(project.rootDir, ".idea")
+        val xmlFile = File(project.rootDir, ".idea/runConfigurations/Run_with_Remold.xml")
+        if (ideaDir.exists()) {
+            tasks.findByName("classes")?.finalizedBy("generateIdeaRunConfig")
+            if (!xmlFile.exists()) {
+                try {
+                    val out = generateIdeaRunConfigInternal()
+                    if (out != null) {
+                        logger.lifecycle("[Remold] 自动就绪 IntelliJ IDEA 运行配置: ${out.absolutePath}")
+                    }
+                } catch (ignored: Throwable) {
+                }
+            }
+        }
     }
 
     tasks.register("generateIdeaRunConfig") {
@@ -491,89 +591,11 @@ project.plugins.withId("java") {
         dependsOn("classes")
 
         doLast {
-            val conf = resolveRemoldConfig()
-            val ideaRunDir = File(project.rootDir, ".idea/runConfigurations")
-            ideaRunDir.mkdirs()
-
-            fun xmlEscape(s: String?): String {
-                if (s == null) return ""
-                return s.replace("&", "&amp;")
-                    .replace("\"", "&quot;")
-                    .replace("<", "&lt;")
-                    .replace(">", "&gt;")
+            val xmlFile = generateIdeaRunConfigInternal()
+            if (xmlFile != null) {
+                logger.lifecycle("[Remold] 已生成 IntelliJ IDEA 运行配置: ${xmlFile.absolutePath}")
+                logger.lifecycle("[Remold] 用 IDEA 打开本项目即可直接点击右上角运行 / 调试按钮！")
             }
-
-            fun makePortable(p: String?): String {
-                if (p == null) return ""
-                val rootPath = project.rootDir.absolutePath.replace('\\', '/')
-                var norm = p.replace('\\', '/')
-                val rootLower = rootPath.lowercase()
-                while (true) {
-                    val normLower = norm.lowercase()
-                    val idx = normLower.indexOf(rootLower)
-                    if (idx == -1) break
-                    norm = norm.substring(0, idx) + "\$PROJECT_DIR\$" + norm.substring(idx + rootPath.length)
-                }
-                return norm
-            }
-
-            val portableJvmArgs = conf.jvmArgs.joinToString(" ") { makePortable(it) }
-            val portableAppArgs = conf.appArgs.joinToString(" ") { makePortable(it) }
-            val jrePath = if (conf.executable != "java") conf.executable else ""
-            val hasCustomJre = jrePath.isNotEmpty()
-
-            val xmlFile = File(ideaRunDir, "Run_with_Remold.xml")
-            val sb = StringBuilder()
-            sb.append("<component name=\"ProjectRunConfigurationManager\">\n")
-
-            if (conf.targetJar != null) {
-                val portableJar = makePortable(conf.targetJar.absolutePath)
-                sb.append("  <configuration default=\"false\" name=\"Run with Remold\" type=\"JarApplication\">\n")
-                sb.append("    <option name=\"JAR_PATH\" value=\"${xmlEscape(portableJar)}\" />\n")
-                sb.append("    <option name=\"VM_PARAMETERS\" value=\"${xmlEscape(portableJvmArgs)}\" />\n")
-                if (portableAppArgs.isNotEmpty()) {
-                    sb.append("    <option name=\"PROGRAM_PARAMETERS\" value=\"${xmlEscape(portableAppArgs)}\" />\n")
-                }
-                sb.append("    <option name=\"WORKING_DIRECTORY\" value=\"\$PROJECT_DIR\$\" />\n")
-                if (hasCustomJre) {
-                    sb.append("    <option name=\"ALTERNATIVE_JRE_PATH\" value=\"${xmlEscape(jrePath)}\" />\n")
-                    sb.append("    <option name=\"ALTERNATIVE_JRE_PATH_ENABLED\" value=\"true\" />\n")
-                }
-                sb.append("    <method v=\"2\">\n")
-                val shouldAutoDeploy = remoldExt.autoDeploy
-                    ?: project.findProperty("remold.autoDeploy")?.toString()?.toBoolean()
-                    ?: (remoldExt.deployDir != null || remoldExt.modsDir != null || project.findProperty("remold.deployDir") != null || project.findProperty("remold.modsDir") != null || project.findProperty("remoldDeployDir") != null || project.findProperty("remoldModsDir") != null)
-                if (shouldAutoDeploy) {
-                    sb.append("      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"deployArtifact\" externalProjectPath=\"\$PROJECT_DIR\$\" />\n")
-                } else {
-                    sb.append("      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"classes\" externalProjectPath=\"\$PROJECT_DIR\$\" />\n")
-                }
-                sb.append("    </method>\n")
-                sb.append("  </configuration>\n")
-            } else {
-                val moduleName = "${project.name}.main"
-                sb.append("  <configuration default=\"false\" name=\"Run with Remold\" type=\"Application\" factoryName=\"Application\">\n")
-                sb.append("    <option name=\"MAIN_CLASS_NAME\" value=\"${xmlEscape(conf.mainClass)}\" />\n")
-                sb.append("    <module name=\"${xmlEscape(moduleName)}\" />\n")
-                sb.append("    <option name=\"VM_PARAMETERS\" value=\"${xmlEscape(portableJvmArgs)}\" />\n")
-                if (portableAppArgs.isNotEmpty()) {
-                    sb.append("    <option name=\"PROGRAM_PARAMETERS\" value=\"${xmlEscape(portableAppArgs)}\" />\n")
-                }
-                sb.append("    <option name=\"WORKING_DIRECTORY\" value=\"\$PROJECT_DIR\$\" />\n")
-                if (hasCustomJre) {
-                    sb.append("    <option name=\"ALTERNATIVE_JRE_PATH\" value=\"${xmlEscape(jrePath)}\" />\n")
-                    sb.append("    <option name=\"ALTERNATIVE_JRE_PATH_ENABLED\" value=\"true\" />\n")
-                }
-                sb.append("    <method v=\"2\">\n")
-                sb.append("      <option name=\"Make\" enabled=\"true\" />\n")
-                sb.append("    </method>\n")
-                sb.append("  </configuration>\n")
-            }
-            sb.append("</component>\n")
-
-            xmlFile.writeText(sb.toString())
-            logger.lifecycle("[Remold] 已生成 IntelliJ IDEA 运行配置: ${xmlFile.absolutePath}")
-            logger.lifecycle("[Remold] 用 IDEA 打开本项目即可直接点击右上角运行 / 调试按钮！")
         }
     }
 

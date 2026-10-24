@@ -28,12 +28,8 @@ remold.plugins=arc
 ### 2. 启动游戏
 
 #### 方式一：IntelliJ IDEA 原生一键启动（强烈推荐 ⭐）
-1. 修改完 `gradle.properties` 中的游戏路径后，在终端运行一次配置生成（或在 IDEA 右侧 Gradle 面板双击该任务）：
-   ```bash
-   ./gradlew generateIdeaRunConfig
-   ```
-   插件会自动解析你的配置并在 `.idea/runConfigurations/` 下生成便携的 `Run with Remold` 运行配置。
-2. 在 IDEA 顶部工具栏选择 **`Run with Remold`**，点击绿色运行（或调试）按钮即可！
+1. 修改完 `gradle.properties` 中的游戏路径后，用 IDEA 打开项目或执行构建，Remold 插件会自动在 `.idea/runConfigurations/` 下就绪便携的 **`Run with Remold`** 运行配置（亦可手动执行 `./gradlew generateIdeaRunConfig` 强制刷新）；
+2. 在 IDEA 顶部工具栏直接选择 **`Run with Remold`**，点击绿色运行（或调试）按钮即可！
 3. 启动前会自动打包并部署模组，且直接支持 IDEA 原生断点调试，零 Gradle Daemon 开销。
 
 #### 方式二：终端命令行启动

@@ -96,8 +96,7 @@ public class InitFixOracle {
 	}
 
 	public static void main(String[] args) {
-		// InitFix.transform 的第一道开关；顺手把 agent 日志静音，只收集 error。
-		System.setProperty("remold.agent.hotswap_plus", "true");
+		// 顺手把 agent 日志静音，只收集 error。
 		RemoldAgent.logger = new RemoldAgent.Logger() {
 			public void log(String msg) { }
 			public void info(String msg) { }

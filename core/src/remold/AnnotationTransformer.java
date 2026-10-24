@@ -45,7 +45,7 @@ import static org.objectweb.asm.Opcodes.*;
  *         <li>{@link Profile}：在被标记方法入口/出口处注入性能探测探针代码。</li>
  *       </ul>
  *   </li>
- *   <li><b>Lambda 静态化增强（{@code HOTSWAP_PLUS}）</b>：
+ *   <li><b>Lambda 静态化增强（{@code FORCE_STATIC_LAMBDA}）</b>：
  *       通过 {@link #forceStaticLambdas} 将非捕获/捕获 Lambda 合成方法转化为静态方法以维持签名稳定，
  *       并注入 {@code $remold$lambdasForced} 标记字段（该字段由 {@link ClassDiffUtil} 对称过滤）。</li>
  *   <li><b>InitFix 字段初始化补丁准备</b>：
@@ -167,12 +167,12 @@ public class AnnotationTransformer implements ClassFileTransformer {
 				}
 
 				// 3. InitFix 补丁构建
-				if (HOTSWAP_PLUS && (!diff.addedInstanceFields.isEmpty() || !diff.addedStaticFields.isEmpty())) {
+				if (INIT_FIX && (!diff.addedInstanceFields.isEmpty() || !diff.addedStaticFields.isEmpty())) {
 					InitFix.transform(classBeingRedefined, bytes, diff);
 				}
 			}
 
-			if (HOTSWAP_PLUS) {
+			if (FORCE_STATIC_LAMBDA) {
 				byte[] forced = forceStaticLambdas(bytes, className, loader);
 				if (forced != bytes) {
 					bytes = forced;
@@ -210,7 +210,7 @@ public class AnnotationTransformer implements ClassFileTransformer {
 		}
 
 		// ================== 内部重定义 或 首次加载 通道 ==================
-		if (HOTSWAP_PLUS) {
+		if (FORCE_STATIC_LAMBDA) {
 			classfileBuffer = forceStaticLambdas(classfileBuffer, className, loader);
 			if (classfileBuffer != bytes) {
 				bytes = classfileBuffer;
@@ -234,25 +234,13 @@ public class AnnotationTransformer implements ClassFileTransformer {
 					bytes = profiled;
 					modified = true;
 				}
-
-				if (DEBUG && modified) writeTo(className, bytes);
-
-				byte[] resultBytes = modified ? bytes : classfileBuffer;
-				if (classBeingRedefined == null) {
-					if (pending != null) {
-						bytecodeCache.put(dotClassName, resultBytes);
-						RemoldAgent.sourceBytecodeCache.put(dotClassName, classfileBuffer);
-					} else {
-						bytecodeCache.putIfAbsent(dotClassName, resultBytes);
-						RemoldAgent.sourceBytecodeCache.putIfAbsent(dotClassName, classfileBuffer);
-					}
-				}
-				return modified ? bytes : null;
 			}
 		} catch (Throwable t) {
 			error("Transformer crashed for class: " + dotClassName, t);
 			return null;
 		}
+
+		if (DEBUG && modified) writeTo(className, bytes);
 
 		byte[] resultBytes = modified ? bytes : classfileBuffer;
 		if (classBeingRedefined == null) {

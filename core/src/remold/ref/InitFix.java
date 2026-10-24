@@ -417,7 +417,7 @@ public class InitFix {
 	}
 
 	public static void transform(Class<?> host, byte[] newBytes, ClassDiff diff) {
-		if (!RemoldAgent.HOTSWAP_PLUS) return;
+		if (!RemoldAgent.INIT_FIX) return;
 
 		PENDING.remove(host);
 		cleanupStalePatches();
@@ -478,7 +478,7 @@ public class InitFix {
 	}
 
 	public static void beforeRedefine(Class<?> clazz) {
-		if (!RemoldAgent.HOTSWAP_PLUS || clazz == null) return;
+		if (!RemoldAgent.INIT_FIX || clazz == null) return;
 
 		PendingPatch existing = PENDING.get(clazz);
 		if (existing == null || !existing.hasInstance()) return;
@@ -2725,7 +2725,7 @@ public class InitFix {
 	 * 先复核 JVM 是否真正成功重定义了该类；若被 JVM 拒绝则立即注销并记入台账（保证不变量 5）。
 	 */
 	public static void afterRedefineExternal(Class<?> clazz) {
-		if (!RemoldAgent.HOTSWAP_PLUS || clazz == null) return;
+		if (!RemoldAgent.INIT_FIX || clazz == null) return;
 
 		PendingPatch patch = PENDING.get(clazz);
 		if (patch == null) return;
@@ -2745,7 +2745,7 @@ public class InitFix {
 	}
 
 	public static void afterRedefine(Class<?> clazz) {
-		if (!RemoldAgent.HOTSWAP_PLUS || clazz == null) return;
+		if (!RemoldAgent.INIT_FIX || clazz == null) return;
 
 		PendingPatch patch = PENDING.remove(clazz);
 		if (patch == null) return;

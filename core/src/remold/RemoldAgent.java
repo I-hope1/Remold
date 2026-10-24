@@ -114,7 +114,8 @@ public class RemoldAgent {
 	public static boolean      ENABLE_HOTSWAP_EVENT;
 	public static boolean      FORCE_REINIT;
 	public static boolean      LAMBDA_ALIGN;
-	public static boolean      HOTSWAP_PLUS;
+	public static boolean      INIT_FIX           = boolProp("remold.agent.init_fix", "remold.initFix", true);
+	public static boolean      FORCE_STATIC_LAMBDA = boolProp("remold.agent.force_static_lambda", "remold.agent.force_static_lambdas", false);
 	public static boolean      UI_HOOK;
 	/**
 	 * 匿名类对齐总开关（{@code docs/topology/06-runtime-and-perf.md} §4）。默认开启。
@@ -888,8 +889,10 @@ public class RemoldAgent {
 		String bl = System.getProperty("remold.agent.hotswap_blacklist", "").trim();
 		HOTSWAP_BLACKLIST = bl.isEmpty() ? new String[0] : bl.split(",");
 		info("Injection Blacklist: " + String.join(",", HOTSWAP_BLACKLIST));
-		HOTSWAP_PLUS = Boolean.parseBoolean(System.getProperty("remold.agent.hotswap_plus", "false"));
-		info("HotSwap Plus: " + HOTSWAP_PLUS);
+		INIT_FIX = boolProp("remold.agent.init_fix", "remold.initFix", true);
+		info("InitFix: " + INIT_FIX);
+		FORCE_STATIC_LAMBDA = boolProp("remold.agent.force_static_lambda", "remold.agent.force_static_lambdas", false);
+		info("Force Static Lambda: " + FORCE_STATIC_LAMBDA);
 		ENABLE_HOTSWAP_EVENT = Boolean.parseBoolean(System.getProperty("remold.agent.hotswap_event", "false"));
 		info("HotSwap Event: " + ENABLE_HOTSWAP_EVENT);
 		FORCE_REINIT = Boolean.parseBoolean(System.getProperty("remold.agent.force_reinit", "true"));
@@ -1400,7 +1403,7 @@ public class RemoldAgent {
 					if (oldBytecode != null) {
 						if (LAMBDA_ALIGN) {
 							// 【基线一致性】oldBytecode 来自 bytecodeCache，是"上一次 transform 之后
-							// JVM 里实际生效"的形态（若开了 HOTSWAP_PLUS，则其中的 lambda 已被
+							// JVM 里实际生效"的形态（若开了 FORCE_STATIC_LAMBDA，则其中的 lambda 已被
 							// forceStaticLambdas 转成"静态 + this 显式首参数"）。而 newBytecode 是刚
 							// 从磁盘读到的原始编译产物，还是"实例 lambda"。两者形态不一致时，
 							// LambdaAligner 会把同一个 lambda 判成"删除 + 新增"，生成
@@ -1409,7 +1412,7 @@ public class RemoldAgent {
 							// NoSuchMethodError。这里让 newBytecode 先过一遍同样的归一化，
 							// 保证比对双方是同一种形态。该方法幂等，即便随后的 transform 再跑一次
 							// 也不会二次前置 this。
-							if (HOTSWAP_PLUS) {
+							if (FORCE_STATIC_LAMBDA) {
 								String slashClassName = className.replace('.', '/');
 								newBytecode = AnnotationTransformer.forceStaticLambdas(
 								 newBytecode, slashClassName, targetClass.getClassLoader());

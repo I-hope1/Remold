@@ -70,7 +70,7 @@ project.plugins.withId("java") {
         if (jarProp != null) {
             targetJar = project.file(jarProp)
             if (!targetJar.exists()) {
-                throw GradleException("[Remold] 指定的目标启动 JAR 不存在: ${targetJar.absolutePath}")
+                project.logger.warn("[Remold] 注意：指定的目标启动 JAR 尚不存在: ${targetJar.absolutePath}（非立即运行时可忽略）")
             }
         }
 
@@ -81,7 +81,7 @@ project.plugins.withId("java") {
             ?: (project.extensions.findByName("application") as? JavaApplication)?.mainClass?.orNull
             ?: (project.findProperty("mainClassName") as? String)
 
-        if (main == null && targetJar != null) {
+        if (main == null && targetJar != null && targetJar.exists()) {
             try {
                 val jf = java.util.jar.JarFile(targetJar)
                 main = jf.manifest?.mainAttributes?.getValue("Main-Class")
@@ -90,8 +90,10 @@ project.plugins.withId("java") {
         }
 
         if (main == null) {
-            if (targetJar != null) {
+            if (targetJar != null && targetJar.exists()) {
                 throw GradleException("[Remold] 未能从 ${targetJar.name} 的 MANIFEST.MF 中读取到 Main-Class，请在 remold { mainClass = \"...\" } 中显式指定。")
+            } else if (targetJar != null) {
+                main = "unknown.MainClass"
             } else {
                 throw GradleException("[Remold] 未配置 mainClass 或 jar。请在 remold { mainClass = \"...\" }、remold { jar = \"...\" } 或 gradle.properties 中指定。")
             }
@@ -203,6 +205,20 @@ project.plugins.withId("java") {
             )
         }
 
+        // 同步一份到项目目录 .gradle/remold/ 以支持 IDEA 运行配置使用 $PROJECT_DIR$ 便携相对路径
+        try {
+            val rootCanonical = project.rootDir.canonicalPath
+            val agentCanonical = agentFile.canonicalPath
+            if (!agentCanonical.startsWith(rootCanonical)) {
+                val localAgent = File(project.rootDir, ".gradle/remold/remold-agent.jar")
+                if (!localAgent.exists() || localAgent.length() != agentFile.length()) {
+                    localAgent.parentFile.mkdirs()
+                    java.nio.file.Files.copy(agentFile.toPath(), localAgent.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                }
+                agentFile = localAgent
+            }
+        } catch (_: Exception) { }
+
         // 4. 自动推导编译输出目录并拼装监听路径
         val classesDirs = sourceSets["main"].output.classesDirs.files
         val allWatchDirs = (classesDirs + remoldExt.watchDirs).filter { it.exists() }
@@ -252,6 +268,9 @@ project.plugins.withId("java") {
 
         doFirst {
             val conf = resolveRemoldConfig()
+            if (conf.targetJar != null && !conf.targetJar.exists()) {
+                throw GradleException("[Remold] 指定的目标启动 JAR 不存在，无法启动应用: ${conf.targetJar.absolutePath}")
+            }
             mainClass.set(conf.mainClass)
             classpath = conf.runtimeClasspath
             if (conf.appArgs.isNotEmpty()) {
@@ -295,6 +314,9 @@ project.plugins.withId("java") {
         group = "application"
         description = "Builds and deploys the output JAR into the specified deploy directory"
         dependsOn("jar")
+        doFirst {
+            resolveRemoldConfig()
+        }
         from(tasks.named("jar"))
         into(provider {
             resolveDeployDir()
@@ -309,6 +331,17 @@ project.plugins.withId("java") {
         group = "application"
         description = "Alias for deployArtifact"
         dependsOn("deployArtifact")
+    }
+
+    tasks.named("classes") {
+        doLast {
+            try {
+                val localAgent = File(project.rootDir, ".gradle/remold/remold-agent.jar")
+                if (!localAgent.exists() || localAgent.length() <= 1024) {
+                    resolveRemoldConfig()
+                }
+            } catch (_: Exception) { }
+        }
     }
 
     project.afterEvaluate {
@@ -348,15 +381,118 @@ project.plugins.withId("java") {
                 dependsOn(remoldExt.dependsOn)
             }
         }
+        tasks.named("generateIdeaRunConfig") {
+            if (shouldAutoDeploy) {
+                dependsOn("deployArtifact")
+            }
+            if (remoldExt.dependsOn.isNotEmpty()) {
+                dependsOn(remoldExt.dependsOn)
+            }
+        }
+    }
+
+    tasks.register("generateIdeaRunConfig") {
+        group = "application"
+        description = "Generates IntelliJ IDEA run configuration into .idea/runConfigurations/Run_with_Remold.xml"
+        dependsOn("classes")
+
+        doLast {
+            val conf = resolveRemoldConfig()
+            val ideaRunDir = File(project.rootDir, ".idea/runConfigurations")
+            ideaRunDir.mkdirs()
+
+            fun xmlEscape(s: String?): String {
+                if (s == null) return ""
+                return s.replace("&", "&amp;")
+                    .replace("\"", "&quot;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+            }
+
+            fun makePortable(p: String?): String {
+                if (p == null) return ""
+                val rootPath = project.rootDir.absolutePath.replace('\\', '/')
+                var norm = p.replace('\\', '/')
+                val rootLower = rootPath.lowercase()
+                while (true) {
+                    val normLower = norm.lowercase()
+                    val idx = normLower.indexOf(rootLower)
+                    if (idx == -1) break
+                    norm = norm.substring(0, idx) + "\$PROJECT_DIR\$" + norm.substring(idx + rootPath.length)
+                }
+                return norm
+            }
+
+            val portableJvmArgs = conf.jvmArgs.joinToString(" ") { makePortable(it) }
+            val portableAppArgs = conf.appArgs.joinToString(" ") { makePortable(it) }
+            val jrePath = if (conf.executable != "java") conf.executable else ""
+            val hasCustomJre = jrePath.isNotEmpty()
+
+            val xmlFile = File(ideaRunDir, "Run_with_Remold.xml")
+            val sb = StringBuilder()
+            sb.append("<component name=\"ProjectRunConfigurationManager\">\n")
+
+            if (conf.targetJar != null) {
+                val portableJar = makePortable(conf.targetJar.absolutePath)
+                sb.append("  <configuration default=\"false\" name=\"Run with Remold\" type=\"JarApplication\">\n")
+                sb.append("    <option name=\"JAR_PATH\" value=\"${xmlEscape(portableJar)}\" />\n")
+                sb.append("    <option name=\"VM_PARAMETERS\" value=\"${xmlEscape(portableJvmArgs)}\" />\n")
+                if (portableAppArgs.isNotEmpty()) {
+                    sb.append("    <option name=\"PROGRAM_PARAMETERS\" value=\"${xmlEscape(portableAppArgs)}\" />\n")
+                }
+                sb.append("    <option name=\"WORKING_DIRECTORY\" value=\"\$PROJECT_DIR\$\" />\n")
+                if (hasCustomJre) {
+                    sb.append("    <option name=\"ALTERNATIVE_JRE_PATH\" value=\"${xmlEscape(jrePath)}\" />\n")
+                    sb.append("    <option name=\"ALTERNATIVE_JRE_PATH_ENABLED\" value=\"true\" />\n")
+                }
+                sb.append("    <method v=\"2\">\n")
+                val shouldAutoDeploy = remoldExt.autoDeploy
+                    ?: project.findProperty("remold.autoDeploy")?.toString()?.toBoolean()
+                    ?: (remoldExt.deployDir != null || remoldExt.modsDir != null || project.findProperty("remold.deployDir") != null || project.findProperty("remold.modsDir") != null || project.findProperty("remoldDeployDir") != null || project.findProperty("remoldModsDir") != null)
+                if (shouldAutoDeploy) {
+                    sb.append("      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"deployArtifact\" externalProjectPath=\"\$PROJECT_DIR\$\" />\n")
+                } else {
+                    sb.append("      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"classes\" externalProjectPath=\"\$PROJECT_DIR\$\" />\n")
+                }
+                sb.append("    </method>\n")
+                sb.append("  </configuration>\n")
+            } else {
+                val moduleName = "${project.name}.main"
+                sb.append("  <configuration default=\"false\" name=\"Run with Remold\" type=\"Application\" factoryName=\"Application\">\n")
+                sb.append("    <option name=\"MAIN_CLASS_NAME\" value=\"${xmlEscape(conf.mainClass)}\" />\n")
+                sb.append("    <module name=\"${xmlEscape(moduleName)}\" />\n")
+                sb.append("    <option name=\"VM_PARAMETERS\" value=\"${xmlEscape(portableJvmArgs)}\" />\n")
+                if (portableAppArgs.isNotEmpty()) {
+                    sb.append("    <option name=\"PROGRAM_PARAMETERS\" value=\"${xmlEscape(portableAppArgs)}\" />\n")
+                }
+                sb.append("    <option name=\"WORKING_DIRECTORY\" value=\"\$PROJECT_DIR\$\" />\n")
+                if (hasCustomJre) {
+                    sb.append("    <option name=\"ALTERNATIVE_JRE_PATH\" value=\"${xmlEscape(jrePath)}\" />\n")
+                    sb.append("    <option name=\"ALTERNATIVE_JRE_PATH_ENABLED\" value=\"true\" />\n")
+                }
+                sb.append("    <method v=\"2\">\n")
+                sb.append("      <option name=\"Make\" enabled=\"true\" />\n")
+                sb.append("    </method>\n")
+                sb.append("  </configuration>\n")
+            }
+            sb.append("</component>\n")
+
+            xmlFile.writeText(sb.toString())
+            logger.lifecycle("[Remold] 已生成 IntelliJ IDEA 运行配置: ${xmlFile.absolutePath}")
+            logger.lifecycle("[Remold] 用 IDEA 打开本项目即可直接点击右上角运行 / 调试按钮！")
+        }
     }
 
     tasks.register("generateRemoldScript") {
         group = "application"
         description = "Generates native standalone launcher scripts and args file to run Remold without Gradle Daemon"
-        dependsOn("classes")
+        dependsOn("classes", "generateIdeaRunConfig")
 
         doLast {
             val conf = resolveRemoldConfig()
+            if (conf.targetJar != null && !conf.targetJar.exists()) {
+                throw GradleException("[Remold] 指定的目标启动 JAR 不存在，无法启动应用: ${conf.targetJar.absolutePath}")
+            }
             val buildDir = project.layout.buildDirectory.asFile.get()
             val remoldDir = File(buildDir, "remold")
             remoldDir.mkdirs()
@@ -405,6 +541,9 @@ project.plugins.withId("java") {
 
         doLast {
             val conf = resolveRemoldConfig()
+            if (conf.targetJar != null && !conf.targetJar.exists()) {
+                throw GradleException("[Remold] 指定的目标启动 JAR 不存在，无法启动应用: ${conf.targetJar.absolutePath}")
+            }
             val buildDir = project.layout.buildDirectory.asFile.get()
             val argsFile = File(buildDir, "remold/remold.args")
             val isWin = System.getProperty("os.name").lowercase().contains("win")

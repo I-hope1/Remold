@@ -23,12 +23,20 @@ remold.autoDeploy=true
 > 模版默认跨平台自动识别系统的游戏模组目录（Windows: `%APPDATA%/Mindustry/mods`、macOS / Linux 均自适应）。若使用自定义目录，配置 `remold.deployDir=D:/YourModsDir` 即可。
 
 ### 2. 启动游戏
+
+#### 方式一：IntelliJ IDEA 原生一键启动（强烈推荐 ⭐）
+本模板已内置 `.idea/runConfigurations/` 运行配置：
+1. 用 IntelliJ IDEA 打开本项目；
+2. 在 IDEA 顶部工具栏直接选择 **`Run with Remold`**，点击绿色运行（或调试）按钮即可！
+3. 启动前会自动打包并部署模组，且直接支持 IDEA 断点调试，零 Gradle Daemon 开销。
+
+#### 方式二：终端命令行启动
 在终端运行：
 ```bash
 ./gradlew runRemold
 ```
 * 插件将**自动编译打包**当前模组；
-* **自动将模组复制**到系统的游戏 `mods/` 目录（全平台跨平台自动识别 Windows/macOS/Linux）；
+* **自动将模组部署**到系统的游戏 `mods/` 目录（全平台跨平台自动识别 Windows/macOS/Linux）；
 * 纯净启动 Mindustry，进入游戏后即可看到模组加载弹出的提示对话框！
 
 ### 3. 体验秒级热重载（无需重启）

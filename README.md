@@ -102,9 +102,17 @@ remold {
 
 ---
 
-### 1.3 方式二：IntelliJ IDEA 运行配置 (IDE Run Configuration)
+### 1.3 方式二：IntelliJ IDEA 原生运行配置 (IDE Run Configuration，推荐 ⭐)
 
-对于日常在 IDEA 中直接点击 "Run / Debug" 的开发者，直接在运行配置中配置 VM Options 即可：
+对于习惯在 IDEA 中直接点击 "Run / Debug" 的开发者，Remold 脚本插件提供了全自动生成 IDEA 运行配置的能力：
+```bash
+./gradlew generateIdeaRunConfig
+```
+* **一键生成**：自动解析项目参数并在 `.idea/runConfigurations/` 下生成便携式的 `Run_with_Remold.xml`；
+* **开箱即用**：用 IDEA 打开项目后，右上角运行下拉菜单将直接出现 **`Run with Remold`**，点击运行或调试即可；
+* **极速原生**：直接使用 IDEA 原生 JVM 进程运行，完美支持断点调试，零 Gradle Daemon 占用。
+
+若需纯手动在 IDEA 运行对话框中配置，步骤如下：
 
 1. 在 IDEA 顶部导航栏打开 `Run` → `Edit Configurations...`；
 2. 选中你的 Application 或启动任务；

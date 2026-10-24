@@ -1412,21 +1412,30 @@ public class RemoldAgent {
 							// NoSuchMethodError。这里让 newBytecode 先过一遍同样的归一化，
 							// 保证比对双方是同一种形态。该方法幂等，即便随后的 transform 再跑一次
 							// 也不会二次前置 this。
+							final ClassLoader alignLoader = targetClass.getClassLoader();
+							final String alignSlash = className.replace('.', '/');
 							if (FORCE_STATIC_LAMBDA) {
-								String slashClassName = className.replace('.', '/');
 								newBytecode = AnnotationTransformer.forceStaticLambdas(
-								 newBytecode, slashClassName, targetClass.getClassLoader());
+								 newBytecode, alignSlash, alignLoader);
 							}
+							// 【两侧基线必须同形态】newBytecode 上面刚归一化过，旧侧也必须归一化。
+							// sourceBytecodeCache 在批量路径上存的是**磁盘原始字节码**（实例 lambda），
+							// 而 JVM 里实际生效的 bytecodeCache 才是归一化后的形态。若旧侧直接用
+							// sourceBytecodeCache，LambdaAligner 会因 desc 不同把同一个 lambda 判成
+							// "删除 + 新增"：复活出的幽灵空壳沿用未归一化的签名（例如
+							// lambda$buildTitle$5(ImageButton)V），而老 CallSite 持有的是归一化后的
+							// 签名（lambda$buildTitle$5(Window, ImageButton)V）——redefine 之后直接
+							// NoSuchMethodError。原 lambda 还会被重复幽灵化出一份同名异型的空壳。
 							java.util.function.Function<String, byte[]> oldResolver =
-							 name -> {
-								String dot = name.replace('/', '.');
-								byte[] src = sourceBytecodeCache.get(dot);
-								return src != null ? src : bytecodeCache.get(dot);
-							 };
+							 normalizeAlignResolver(name -> {
+								byte[] src = sourceBytecodeCache.get(name.replace('/', '.'));
+								return src != null ? src : bytecodeCache.get(name.replace('/', '.'));
+							 }, alignLoader);
 							java.util.function.Function<String, byte[]> newResolver =
-							 name -> newBatchBytes.get(name.replace('/', '.'));
+							 normalizeAlignResolver(name -> newBatchBytes.get(name.replace('/', '.')), alignLoader);
 							byte[] oldSrc = sourceBytecodeCache.get(className);
-							byte[] alignOld = oldSrc != null ? oldSrc : oldBytecode;
+							byte[] alignOld = normalizeAlignBaseline(
+							 oldSrc != null ? oldSrc : oldBytecode, alignSlash, alignLoader);
 							newBytecode = LambdaAligner.align(alignOld, newBytecode, oldResolver, newResolver);
 						}
 					}
@@ -2813,6 +2822,58 @@ public class RemoldAgent {
 	 */
 	public static boolean isEnhancedHotswapEnabled() {
 		return ENHANCED_HOTSWAP;
+	}
+
+	/**
+	 * 把一份「可能仍是磁盘原始形态」的字节码归一化成与送给 redefine 的形态一致。
+	 *
+	 * <p>背景：{@link #sourceBytecodeCache} 记录的是批量对齐产出的<b>源码级</b>字节码
+	 * （实例 lambda），而 {@link #bytecodeCache} 记录的是 transform 之后 JVM 里
+	 * 实际生效的形态。开启 {@code FORCE_STATIC_LAMBDA} 时，后者已被
+	 * {@link AnnotationTransformer#forceStaticLambdas} 转成「静态 + this 显式首参数」。
+	 * 这两者一旦混用，LambdaAligner 的两侧基线就不再是同一形态。</p>
+	 *
+	 * <p>后果不是「配不上对」这么温和：同一个 lambda 会因 desc 不同被判成
+	 * 「删除 + 新增」，{@code resurrectOrphanedLambdas} 复活出的幽灵空壳沿用
+	 * <b>未归一化</b>的签名，而 JVM 里老 {@code CallSite} 绑定的是<b>归一化后</b>
+	 * 的签名。redefine 之后老 CallSite 解析不到方法，直接
+	 * {@link NoSuchMethodError}（典型现象：{@code lambda$buildTitle$5(Window, ImageButton)V}
+	 * 找不到）。同时原 lambda 还会被重复幽灵化出一份同名异型的空壳。</p>
+	 *
+	 * <p>本方法幂等：已带 {@code $remold$lambdasForced} 标记的字节码会被
+	 * {@code forceStaticLambdas} 原样返回，不会二次前置 {@code this}。</p>
+	 *
+	 * @param bytes     待归一化的字节码，可为 {@code null}
+	 * @param slashName 该类的内部名（形如 {@code com/example/Foo}）
+	 * @param loader    用于计算 StackMapTable 的目标 ClassLoader，可为 {@code null}
+	 * @return 归一化后的字节码；关闭开关或输入为 {@code null} 时原样返回
+	 */
+	private static byte[] normalizeAlignBaseline(byte[] bytes, String slashName, ClassLoader loader) {
+		if (bytes == null || !FORCE_STATIC_LAMBDA) return bytes;
+		return AnnotationTransformer.forceStaticLambdas(bytes, slashName, loader);
+	}
+
+	/**
+	 * 给 LambdaAligner 的字节码解析器加一层「归一化 + 结果缓存」。
+	 *
+	 * <p>跨类查询（匿名类、宿主类）拿到的同样是源码级字节码，必须与主类一样归一化，
+	 * 否则两侧基线仍会在别的类上错配。缓存避免同一个类在一次对齐中被反复
+	 * {@code forceStaticLambdas}（每次都是一轮 ASM 解析 + 栈帧重算）。</p>
+	 *
+	 * @param raw    原始解析器，入参为内部名
+	 * @param loader 目标 ClassLoader
+	 * @return 归一化后的解析器；关闭开关时直接返回 {@code raw}
+	 */
+	private static java.util.function.Function<String, byte[]> normalizeAlignResolver(
+	 java.util.function.Function<String, byte[]> raw, ClassLoader loader) {
+		if (!FORCE_STATIC_LAMBDA) return raw;
+		java.util.Map<String, byte[]> cache = new java.util.HashMap<>();
+		return name -> {
+			if (cache.containsKey(name)) return cache.get(name);
+			byte[] out = normalizeAlignBaseline(raw.apply(name), name, loader);
+			cache.put(name, out);
+			return out;
+		};
 	}
 	//endregion
 

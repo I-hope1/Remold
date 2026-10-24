@@ -99,6 +99,8 @@ project.plugins.withId("java") {
                 throw GradleException("[Remold] 未能从 ${targetJar.name} 的 MANIFEST.MF 中读取到 Main-Class，请在 remold { mainClass = \"...\" } 中显式指定。")
             } else if (targetJar != null) {
                 main = "unknown.MainClass"
+            } else if (project.plugins.hasPlugin("fabric-loom") || project.extensions.findByName("loom") != null) {
+                main = "net.fabricmc.loader.impl.launch.knot.KnotClient"
             } else {
                 throw GradleException("[Remold] 未配置 mainClass 或 jar。请在 remold { mainClass = \"...\" }、remold { jar = \"...\" } 或 gradle.properties 中指定。")
             }
@@ -239,17 +241,19 @@ project.plugins.withId("java") {
             )
         }
 
+        var safeAgent: File = agentFile
+
         // 同步一份到项目目录 .gradle/remold/ 以支持 IDEA 运行配置使用 $PROJECT_DIR$ 便携相对路径
         try {
             val rootCanonical = project.rootDir.canonicalPath
-            val agentCanonical = agentFile.canonicalPath
+            val agentCanonical = safeAgent.canonicalPath
             if (!agentCanonical.startsWith(rootCanonical)) {
                 val localAgent = File(project.rootDir, ".gradle/remold/remold-agent.jar")
-                if (!localAgent.exists() || localAgent.length() != agentFile.length()) {
+                if (!localAgent.exists() || localAgent.length() != safeAgent.length()) {
                     localAgent.parentFile.mkdirs()
-                    java.nio.file.Files.copy(agentFile.toPath(), localAgent.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                    java.nio.file.Files.copy(safeAgent.toPath(), localAgent.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
                 }
-                agentFile = localAgent
+                safeAgent = localAgent
             }
         } catch (_: Exception) { }
 
@@ -261,7 +265,7 @@ project.plugins.withId("java") {
         // 5. 装配 JVM 参数
         val args = mutableListOf<String>()
         args.add("-XX:+AllowEnhancedClassRedefinition")
-        args.add("-javaagent:${agentFile.absolutePath}=$watchPath")
+        args.add("-javaagent:${safeAgent.absolutePath}=$watchPath")
         args.add("--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED")
         args.add("--add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED")
         args.add("--add-exports=java.base/jdk.internal.loader=ALL-UNNAMED")
@@ -339,19 +343,20 @@ project.plugins.withId("java") {
                 }
 
                 if (resolvedPluginJar != null && resolvedPluginJar.exists()) {
+                    var safePlugin: File = resolvedPluginJar
                     try {
                         val rootCanonical = project.rootDir.canonicalPath
-                        val pluginCanonical = resolvedPluginJar.canonicalPath
+                        val pluginCanonical = safePlugin.canonicalPath
                         if (!pluginCanonical.startsWith(rootCanonical)) {
-                            val localPlugin = File(project.rootDir, ".gradle/remold/plugins/${resolvedPluginJar.name}")
-                            if (!localPlugin.exists() || localPlugin.length() != resolvedPluginJar.length()) {
+                            val localPlugin = File(project.rootDir, ".gradle/remold/plugins/${safePlugin.name}")
+                            if (!localPlugin.exists() || localPlugin.length() != safePlugin.length()) {
                                 localPlugin.parentFile.mkdirs()
-                                java.nio.file.Files.copy(resolvedPluginJar.toPath(), localPlugin.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                                java.nio.file.Files.copy(safePlugin.toPath(), localPlugin.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
                             }
-                            resolvedPluginJar = localPlugin
+                            safePlugin = localPlugin
                         }
                     } catch (_: Exception) { }
-                    pluginJars.add(resolvedPluginJar)
+                    pluginJars.add(safePlugin)
                 } else {
                     project.logger.warn("[Remold] 未找到插件 remold-plugin-$pluginName 的 Jar 包，若已内嵌或无需外部 Jar 可忽略。")
                 }
@@ -370,7 +375,7 @@ project.plugins.withId("java") {
         return RemoldResolvedConfig(
             mainClass = main,
             executable = execPath,
-            agentFile = agentFile,
+            agentFile = safeAgent,
             allWatchDirs = allWatchDirs,
             watchPath = watchPath,
             jvmArgs = args,
@@ -608,6 +613,26 @@ project.plugins.withId("java") {
                 } catch (ignored: Throwable) {
                 }
             }
+        }
+
+        // 自动适配 Fabric Loom 项目：注入 runClient 运行配置
+        if (project.plugins.hasPlugin("fabric-loom") || project.extensions.findByName("loom") != null) {
+            try {
+                val loom = project.extensions.findByName("loom")
+                if (loom != null) {
+                    val getRuns = loom.javaClass.getMethod("getRuns")
+                    val runs = getRuns.invoke(loom) as? org.gradle.api.NamedDomainObjectContainer<*>
+                    val client = runs?.findByName("client")
+                    if (client != null) {
+                        val conf = resolveRemoldConfig()
+                        val vmArgMethod = client.javaClass.getMethod("vmArg", String::class.java)
+                        for (arg in conf.jvmArgs) {
+                            vmArgMethod.invoke(client, arg)
+                        }
+                        logger.lifecycle("[Remold] 已自动为 Fabric Loom 的 runClient 注入热重载探针参数！")
+                    }
+                }
+            } catch (_: Throwable) { }
         }
     }
 

@@ -93,6 +93,8 @@ project.plugins.withId('java') {
                 throw new GradleException("[Remold] 未能从 ${targetJar.name} 的 MANIFEST.MF 中读取到 Main-Class，请在 remold { mainClass = '...' } 中显式指定。")
             } else if (targetJar != null) {
                 main = 'unknown.MainClass'
+            } else if (project.plugins.hasPlugin('fabric-loom') || project.extensions.findByName('loom') != null) {
+                main = 'net.fabricmc.loader.impl.launch.knot.KnotClient'
             } else {
                 throw new GradleException('[Remold] 未配置 mainClass 或 jar。请在 remold { mainClass = "..." }、remold { jar = "..." } 或 gradle.properties 中指定。')
             }
@@ -510,6 +512,25 @@ project.plugins.withId('java') {
                     }
                 } catch (Throwable ignored) {
                 }
+            }
+        }
+
+        // 自动适配 Fabric Loom 项目：注入 runClient 运行配置
+        if (project.plugins.hasPlugin('fabric-loom') || project.extensions.findByName('loom') != null) {
+            try {
+                def loom = project.extensions.findByName('loom')
+                if (loom != null) {
+                    def runs = loom.getRuns()
+                    def client = runs?.findByName('client')
+                    if (client != null) {
+                        def conf = resolveRemoldConfig()
+                        for (arg in conf.jvmArgs) {
+                            client.vmArg(arg)
+                        }
+                        logger.lifecycle("[Remold] 已自动为 Fabric Loom 的 runClient 注入热重载探针参数！")
+                    }
+                }
+            } catch (Throwable ignored) {
             }
         }
     }

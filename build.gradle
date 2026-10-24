@@ -52,4 +52,19 @@ tasks.register('packageModTemplate', Zip) {
 	}
 }
 
-assemble.dependsOn('packageModTemplate')
+tasks.register('packageFabricTemplate', Zip) {
+	group = 'distribution'
+	description = 'Packages minecraft-fabric-template into a zip file for release distribution'
+	archiveFileName = 'minecraft-fabric-template.zip'
+	destinationDirectory = layout.buildDirectory.dir('distributions')
+	from(file('minecraft-fabric-template')) {
+		exclude '.gradle'
+		exclude 'build'
+		exclude '.idea'
+		exclude '**/*.iml'
+		exclude '.fabric'
+		exclude 'run'
+	}
+}
+
+assemble.dependsOn('packageModTemplate', 'packageFabricTemplate')

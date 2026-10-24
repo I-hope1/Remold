@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "example_mod",
+  "version": "${version}",
+  "name": "Example Fabric Mod",
+  "description": "Modern Minecraft Fabric mod template powered by Remold zero-restart hot reloading.",
+  "authors": [
+    "I-hope1"
+  ],
+  "contact": {
+    "homepage": "https://github.com/I-hope1/Remold"
+  },
+  "license": "MIT",
+  "icon": "assets/example_mod/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.example.ExampleMod"
+    ]
+  },
+  "mixins": [
+    "example_mod.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~1.21.1",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}

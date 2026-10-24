@@ -10,13 +10,13 @@
 
 ### 1. 启动 Minecraft 开发客户端
 在 IntelliJ IDEA 中：
-1. 导入本项目后等待 Gradle 同步完成；
-2. 运行 Gradle 任务生成客户端运行配置：
-   ```bash
-   ./gradlew loom:runClient
-   # 或在 IDEA 右侧 Gradle 面板中双击 fabric -> runClient
-   ```
-3. Remold 脚本插件已自动为 Loom 的 `client` 运行配置注入热重载参数（`-XX:+AllowEnhancedClassRedefinition` 与 `-javaagent` 探针）。
+1. 打开本项目后等待 Gradle 同步完成；
+2. 直接在 IDEA 右上角运行配置中选择 **`Run with Remold`**（或 Loom 自动就绪的 `Minecraft Client`），点击绿色运行按钮即可启动游戏客户端！
+   - 也可以在终端直接执行：
+     ```bash
+     ./gradlew runClient
+     ```
+3. Remold 脚本插件已自动为 Loom 的 `client` 运行配置注入热重载参数（`-XX:+IgnoreUnrecognizedVMOptions -XX:+AllowEnhancedClassRedefinition` 与 `-javaagent` 探针），完美适配任意 JDK 21+（包括 Microsoft OpenJDK、Temurin、Oracle JDK 以及带有 DCEVM 的 JBR 21）。
 
 ### 2. 体验秒级原位热重载（无需退出世界）
 进入游戏中的单人测试世界，输入指令获取演示物品：

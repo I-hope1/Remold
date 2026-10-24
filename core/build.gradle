@@ -9,7 +9,10 @@ sourceSets.main.java.srcDirs = ["src"]
 publishing {
 	publications {
 		maven(MavenPublication) {
-			from components.java
+			artifact(shadowJar) {
+				classifier = null
+			}
+			artifact(jar)
 			pom {
 				name = 'remold-core'
 				description = 'Core engine for Remold (InitFix, Anonymous Class Alignment, Native JVMTI)'

@@ -189,6 +189,19 @@ project.plugins.withId('java') {
                 } catch (Exception ignored) { }
 
                 if (agentFile == null || !agentFile.exists()) {
+                    try {
+                        def detachedAll = project.configurations.detachedConfiguration(
+                            project.dependencies.create("com.github.I-hope1.Remold:core:${ver}:all")
+                        )
+                        detachedAll.transitive = false
+                        def resolvedAll = detachedAll.resolve()
+                        if (!resolvedAll.isEmpty()) {
+                            agentFile = resolvedAll.first()
+                        }
+                    } catch (Exception ignored) { }
+                }
+
+                if (agentFile == null || !agentFile.exists()) {
                     logger.lifecycle("[Remold] 本地未找到 agent jar，正在自动拉取 remold-agent.jar (版本: ${ver})...")
                     def downloadUrls = [
                         "https://github.com/I-hope1/Remold/releases/download/v${ver}/remold-agent.jar",
@@ -279,6 +292,19 @@ project.plugins.withId('java') {
                     ver ? new File(project.gradle.gradleUserHomeDir, "caches/remold/remold-plugin-${pluginName}-${ver}.jar") : null
                 ].findAll { it != null }
                 def resolvedPluginJar = pluginJarCandidates.find { it.exists() }
+
+                if ((resolvedPluginJar == null || !resolvedPluginJar.exists()) && ver) {
+                    try {
+                        def detached = project.configurations.detachedConfiguration(
+                            project.dependencies.create("com.github.I-hope1.Remold:plugin-${pluginName}:${ver}")
+                        )
+                        detached.transitive = false
+                        def resolved = detached.resolve()
+                        if (!resolved.isEmpty()) {
+                            resolvedPluginJar = resolved.first()
+                        }
+                    } catch (Exception ignored) { }
+                }
 
                 if ((resolvedPluginJar == null || !resolvedPluginJar.exists()) && ver) {
                     def cacheDir = new File(project.gradle.gradleUserHomeDir, "caches/remold")

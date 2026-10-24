@@ -18,8 +18,8 @@ import remold.annotation.RemoldReinit;
  */
 public class RemoldWandItem extends Item {
 
-    // 标注 OVERWRITE 模式：允许热重载时强行覆写存量实例中的字段初值
-    @RemoldReinit(mode = RemoldReinit.Mode.OVERWRITE)
+    // 标注 @RemoldReinit（默认即为 OVERWRITE 模式）：允许热更时覆写存量实例中的已有字段初值
+    @RemoldReinit
     public String message = "Hello from Remold Fabric Hot Reload!";
 
     public RemoldWandItem(Settings settings) {

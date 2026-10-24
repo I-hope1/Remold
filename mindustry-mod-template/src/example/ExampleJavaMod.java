@@ -22,8 +22,8 @@ import remold.annotation.RemoldReinit;
  */
 public class ExampleJavaMod extends Mod {
 
-    // 标注 OVERWRITE 模式：修改初值时允许在热更后强制覆写存量/静态字段
-    @RemoldReinit(mode = RemoldReinit.Mode.OVERWRITE)
+    // 标注 @RemoldReinit（默认即为 OVERWRITE 模式）：允许热更时强制覆写存量/静态字段初值
+    @RemoldReinit
     public static String message = "Hello Remold Hot Reloading!";
 
     public static int reloadCount = 0;

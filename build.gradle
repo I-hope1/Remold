@@ -22,6 +22,12 @@ subprojects {
 		archivesName = "remold-${project.name}"
 	}
 	plugins.withType(JavaPlugin).configureEach {
+		java {
+			withSourcesJar()
+		}
+		tasks.withType(AbstractArchiveTask).configureEach {
+			duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+		}
 		dependencies {
 			annotationProcessor files("${rootDir}/_libs/compiler.jar")
 		}

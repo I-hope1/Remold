@@ -13,6 +13,7 @@ publishing {
 				classifier = null
 			}
 			artifact(jar)
+			artifact(sourcesJar)
 			pom {
 				name = 'remold-core'
 				description = 'Core engine for Remold (InitFix, Anonymous Class Alignment, Native JVMTI)'

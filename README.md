@@ -1,8 +1,45 @@
 # Remold
 
-**Robust JVM Class Redefinition, Anonymous Class Topological Alignment & Legacy State Reinitialization**
+**改完代码不用重启 —— 应用跑着，改动半秒生效。**
 
-`Remold` 是一个面向 JVM 热重载（Class Redefinition / Retransformation）领域的底层 Agent 引擎与字节码对齐框架。针对类热更新过程中的深层拓扑漂移、存量实例状态丢失、字节码切片被冲刷等痛点，提供了一整套基于置信梯队与安全门的系统性解决方案。
+简体中文 | [English](README_EN.md)
+
+Remold 是一个 Java Agent：它盯着你的编译输出目录，文件一变就把新字节码原地换进正在运行的 JVM。
+为 Mindustry 与 Minecraft（Fabric）模组开发各准备了一套开箱即用的模板。
+
+## 你是不是这样？
+
+- 改一个数值 → 关游戏 → 重新编译 → 启动 → 读档 → 跑到那个场景 → 发现改错了 → 再来一遍。
+- 给类加了个字段，热更后老对象里全是 `0` / `null`，跑到一半 NPE。
+- 加了 Mixin 的 `@Inject`，热更一次钩子就没了，只能重启。
+- 改了个匿名类里的逻辑，热更后行为串到另一个匿名类上。
+
+## Remold 做了什么
+
+| 你遇到的 | Remold 的处理 |
+|:--|:--|
+| 改完必须重启才生效 | 监视 `build/classes`，保存后约 0.5 秒原位替换字节码，不用重启、不用重进存档 |
+| 新增字段在存量对象里是零值 | 热更后给已存在的对象补初值；只补零值，绝不覆盖你手动改过的状态 |
+| 匿名类 / Lambda 热更后串位 | 按结构指纹把新旧匿名类对齐，不依赖会随编译漂移的类名与编号 |
+| Mixin 钩子被冲掉 | 重定义前先把源码级字节码重新交给 Mixin 织入，保住 `@Inject` / `@Unique` / `@Shadow` |
+| 删字段、改类型后热更崩 | 堆里还有存活实例时坚决拒绝这次重定义，而不是把内存改坏 |
+
+## 30 秒跑起来
+
+```bash
+git clone https://github.com/I-hope1/Remold && cd Remold
+./gradlew :example:runRemold
+```
+
+- Mindustry 模组模板：[`mindustry-mod-template/`](mindustry-mod-template/README.md)（内置 PNG 贴图热更新演示）
+- Minecraft Fabric 模组模板：[`minecraft-fabric-template/`](minecraft-fabric-template/README.md)（内置 Mixin 重织入演示）
+
+## 想看原理？
+
+上面这些能力背后是匿名类拓扑对齐、置信梯队与安全门、字节码切片与效应检查、存量实例补丁驱动等一整套机制。
+不了解它们也能把 Remold 用起来 —— 需要时再看下文 §2「解决什么、没解决什么」与 §3「模块架构」。
+
+> 技术定位：Robust JVM Class Redefinition, Anonymous Class Topological Alignment & Legacy State Reinitialization.
 
 ---
 

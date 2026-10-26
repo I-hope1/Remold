@@ -266,7 +266,7 @@ flowchart TD
     NATIVE[":native<br/>(JVMTI 原生堆扫描与 Panama/JNI 桥接)"]
     PLUGIN_ARC[":plugin-arc<br/>(Arc / Mindustry 框架参考插件)"]
     PLUGIN_MIXIN[":plugin-mixin<br/>(SpongePowered Mixin 重织入插件)"]
-    TESTS[":tests<br/>(185 JUnit + 310 Oracle + 32 MixinProbe + E2E)"]
+    TESTS[":tests<br/>(206 JUnit + 318 Oracle + 32 MixinProbe + E2E)"]
 
     API --> CORE
     NATIVE -.-> CORE
@@ -286,7 +286,7 @@ flowchart TD
 - **`:plugin-arc`**：官方参考插件，展示如何通过 SPI 无缝扩展 UI 布局树比对与框架级轮询事件熔断。
 - **`:plugin-mixin`**：SpongePowered Mixin 生态插件。热重定义前把源码级字节码重新交给 Mixin 织入（保住 `@Inject` / `@Unique` / `@Shadow` 产物），并在 Mixin 类自身被修改时刷新 Mixin 运行时状态、级联重织入其目标类。Fabric Loom 工程由 Gradle 脚本自动挂载。
 - **`:example`**：极简演示应用，开箱即用体验 Agent 监听、存量实例字段初始化与 `@OnReload` 生命周期回调。
-- **`:tests`**：完备的回归与兼容性测试套件，包含 185 项多版本编译矩阵拓扑 JUnit 测试、310 项 InitFix Oracle 正负向断言，以及 32 项 Mixin 与 JDWP 端到端兼容性断言。
+- **`:tests`**：完备的回归与兼容性测试套件，包含 206 项多版本编译矩阵拓扑 JUnit 测试、318 项 InitFix Oracle 正负向断言，以及 32 项 Mixin 与 JDWP 端到端兼容性断言。
 
 ---
 
@@ -360,8 +360,8 @@ public class PlayerService {
 ```
 
 验证流程将严格执行：
-1. **185 项 JUnit 拓扑对齐与 Native 堆扫描测试**（跨 javac 8/11/17/21/25 现编夹具矩阵，断言 0 skipped 0 failure）；
-2. **310 项 InitFix Oracle 差分断言**（涵盖 Java 与真实 Kotlin 编译产物，正向状态回溯与负向安全阻断）；
+1. **206 项 JUnit 拓扑对齐与 Native 堆扫描测试**（跨 javac 8/11/17/21/25 现编夹具矩阵，断言 0 skipped 0 failure）；
+2. **318 项 InitFix Oracle 差分断言**（涵盖 Java 与真实 Kotlin 编译产物，正向状态回溯与负向安全阻断）；
 3. **32 项 Mixin & JDWP 重定义端到端实测**；
 4. **LayoutGate 规则表、GhostProbe 栈探测、并发加固多线程实测、指纹延后落账 E2E 断言**；
 5. **规范文档与源码状态标记纯净度扫描 (`verifyDocStatusMarkers`)**。

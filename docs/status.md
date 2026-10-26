@@ -256,3 +256,20 @@
 - **根治与关闭条件**：落地路线图 §3.1“增强重定义模式四个未覆盖盲区验证与防护”，在真实 JBR 25 及多层 JIT 编译环境下开展压力探针验证。
 - **关联设计规范**：[`docs/topology/07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1。
 - **关联架构决策**：[`docs/topology/08-decisions.md`](topology/08-decisions.md) 附录 A。
+
+---
+
+## 5. 框架集成插件与资源热更新 (Framework Plugins & Asset Hot-Reload)
+
+插件 SPI 契约：[`api/src/remold/HotswapPlugin.java`](../api/src/remold/HotswapPlugin.java)
+
+| 机制 / 条目 | 状态 | 落地位置 | 验收证据与已知边界 |
+|:---|:---:|:---|:---|
+| 资源变动事件分发 | ✅ | `RemoldAgent.isAssetFile` / `notifyAssetChanges` / `WatcherThread` | 递归注册监视目录；按扩展名判定贴图/字体/语言包/音频/着色器/配置；过滤隐藏与临时文件；`AssetReloaderTest` 覆盖判定与分发 |
+| 贴图原位直刷（同尺寸） | ✅ | `plugin-arc` `TextureReloader.reloadTexture` Tier 1 | `Gl.texSubImage2D` 写入既有 rect，零材质重建；linear 过滤下先 `Pixmaps.bleed`；级联刷新地表与单位 `clipSize` |
+| 贴图尺寸变化（Tier 2） | 🔶 | `TextureReloader.reloadTexture` Tier 2 | 清图集 Drawable 缓存、重载 `Tex`/`Styles`、刷内容图标；**region 的 UV 与宽高不随之更新**，画面可能拉伸或溢出，换尺寸应重新部署 |
+| 运行期新增贴图 | 🔶 | `TextureReloader.registerNewSprite` | 独立 `Texture` + `Core.atlas.addRegion`；区域名按「重启后 Mindustry 会用的名字」推导（`sprites/` 加模组前缀、`sprites-override/` 裸名），归属模组靠同目录兄弟贴图反查，推不出即拒绝；独立纹理不在图集页内、不参与合批；`NewSpriteNamingTest` 4 用例含变异检查 |
+| 字体 / 语言包重载 | 🔶 | `plugin-arc` `FontReloader` / `BundleReloader` | 已接入 `ArcAssetReloader` 分发；`BundleReloader` 有缺失文件安全用例；字体重载路径缺自动化覆盖 |
+| Mixin 重织入（普通类） | 🔶 | `plugin-mixin` `MixinReWeaver` | 重定义前把源码级字节码交回 Mixin 织入，非目标类按数组同一性跳过拷贝；端到端需真实 Fabric 客户端验证 |
+| Mixin 类自身变更 → 目标级联重织入 | 🔶 | `plugin-mixin` `MixinHotSwap` | `IMixinTransformer.reload` 刷新 `MixinInfo` 后对已加载目标类走 `redefineDynamic`；结构性改动抛 `MixinReloadException` 时提示重启 |
+| 标准 JVM 能力探测与降级 | ✅ | `RemoldAgent.probeEnhancedHotswap` / `mustSkipForMissingEnhancedRedefinition` / `degradeForMissingEnhancedRedefinition` | 厂商身份 + flag 文本双条件判定；结构变化类在无增强能力时摘批；`FORCE_STATIC_LAMBDA` 强制降级、`INIT_FIX` 刻意不降级；`EnhancedHotswapGateTest` 9 用例含变异检查 |

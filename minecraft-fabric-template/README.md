@@ -160,3 +160,9 @@ Remold 纯粹是开发期挂载在 JVM 上的探针。打包发布给普通玩�
 
 ### Q: 不挂 Remold 直接 `runClient`，会不会报错？
 不会。模板代码不引用任何 Remold 类；Mixin 支持完全由 Agent 侧的插件提供，没挂 Agent 时模组行为与原生 Fabric 模组一致。
+
+---
+
+## 许可协议
+
+本模板采用 [MIT](LICENSE) 协议（与 `src/main/resources/fabric.mod.json` 里的 `"license": "MIT"` 一致）：可直接复制成你自己的模组工程，自由修改、商用、闭源分发。模板只通过构建脚本引用 Remold 与 `compileOnly` 的 API，本身不含 Remold 代码，因此不受插件层 GPL-3.0 约束。

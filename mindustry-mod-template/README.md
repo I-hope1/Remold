@@ -104,3 +104,9 @@ Remold 纯粹是开发期挂在 JVM 上的探针（JavaAgent）。打包发布�
 ### Q: 会引起 Mindustry 经典的类加载器冲突吗？
 **绝对不会！**  
 本模板严格遵守 `compileOnly` 声明，模组 Class 绝不混入 JVM 启动类路径。游戏启动后由原版 `ModClassLoader` 纯净加载，Remold 在 JVM Native 层面原地替换字节码，从原理上 100% 杜绝类加载器双重加载与强转崩溃。
+
+---
+
+## 许可协议
+
+本模板采用 [MIT](LICENSE) 协议：可直接复制成你自己的工程，自由修改、商用、闭源分发。模板只通过构建脚本引用 Remold（`remold.gradle.kts`）与 `compileOnly` 的 API，本身不含 Remold 代码，因此不受插件层 GPL-3.0 约束。

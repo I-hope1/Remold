@@ -30,11 +30,11 @@ Remold 是一个 Java Agent：它盯着你的编译输出目录，文件一变�
 
 ![Mindustry PNG 贴图热更新演示](docs/media/mindustry-png-hot-reload.gif)
 
-**Minecraft (Fabric)：改方法体，`BUILD SUCCESSFUL in 2s` 之后游戏内即时生效**
+**Minecraft (Fabric)：改 `message0` 的字符串值 → `Ctrl+Shift+F9` → 游戏内右键立刻显示新文案**
 
 ![Minecraft 热重载演示](docs/media/minecraft-hot-reload.gif)
 
-**Minecraft (Fabric)：改 Mixin 类本身，`[MixinReload]` 触发后目标类被重新织入**
+**Minecraft (Fabric)：把 Mixin 的注入点从 `@At("TAIL")` 改成 `@At("HEAD")`，`[MixinReload]` 后目标类被重新织入**
 
 ![Minecraft Mixin 重织入演示](docs/media/minecraft-mixin-reweave.gif)
 

@@ -30,11 +30,11 @@ Two ready-to-run templates are included, one for Mindustry mods and one for Mine
 
 ![Mindustry PNG hot-reload demo](docs/media/mindustry-png-hot-reload.gif)
 
-**Minecraft (Fabric): edit a method body — live in-game right after `BUILD SUCCESSFUL in 2s`**
+**Minecraft (Fabric): change `message0`'s string value → `Ctrl+Shift+F9` → right-click in-game shows the new text immediately**
 
 ![Minecraft hot-reload demo](docs/media/minecraft-hot-reload.gif)
 
-**Minecraft (Fabric): edit the Mixin class itself — `[MixinReload]` re-weaves the target classes**
+**Minecraft (Fabric): switch the Mixin injection point from `@At("TAIL")` to `@At("HEAD")` — `[MixinReload]` re-weaves the target class**
 
 ![Minecraft Mixin re-weaving demo](docs/media/minecraft-mixin-reweave.gif)
 

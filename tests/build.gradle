@@ -112,8 +112,12 @@ test {
 	useJUnitPlatform()
 	maxParallelForks = 1
 	workingDir = projectDir
+	// 模拟模板的真实注入方式（见 minecraft-fabric-template/README.md）：标准 JDK 必须靠
+	// IgnoreUnrecognizedVMOptions 才能接受 DCEVM 专有参数，而 RuntimeMXBean.getInputArguments()
+	// 仍会回显它 —— 这正是 EnhancedHotswapGateTest#probeMatchesRealVmOptionState 要锁住的误判场景。
 	jvmArgs "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
-	        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+	        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8",
+	        "-XX:+IgnoreUnrecognizedVMOptions", "-XX:+AllowEnhancedClassRedefinition"
 	systemProperty "hstest.fixtures", hstestFixtureRoot.get().asFile.absolutePath
 	if (nativeLibPath != null) {
 		systemProperty "remold.path.libtool", nativeLibPath
@@ -280,6 +284,7 @@ tasks.register("verifyDocStatusMarkers") {
 			file("${rootDir}/core/src"),
 			file("${rootDir}/api/src"),
 			file("${rootDir}/plugin-arc/src"),
+			file("${rootDir}/plugin-mixin/src"),
 			file("${rootDir}/panama/src")
 		]
 		def pattern = ~/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/

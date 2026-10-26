@@ -21,7 +21,7 @@
 
 1. **唯一真相源隔离**：`docs/status.md` 作为全模块实现状态的唯一受权载体，彻底解除规范文档与代码注释维护实现进度的负担。
 2. **双重验收验证机制**：
-   - **自动化机器扫描 (`verifyDocStatusMarkers`)**：纳入主构建验证流程（`./gradlew check` 强制依赖），递归扫描 `docs/initfix/`、`docs/topology/`、`core/src/`、`api/src/`、`plugin-arc/src/`、`panama/src/`，严格拦截标记 `/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/`。当前状态：**100% 达标全绿**。
+   - **自动化机器扫描 (`verifyDocStatusMarkers`)**：纳入主构建验证流程（`./gradlew check` 强制依赖），递归扫描 `docs/initfix/`、`docs/topology/`、`core/src/`、`api/src/`、`plugin-arc/src/`、`plugin-mixin/src/`、`panama/src/`，严格拦截标记 `/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/`。当前状态：**100% 达标全绿**。
    - **规范性内容抽检审计**：禁止规范正文出现“目前已支持”、“当前版本尚未实现”等时态陈述，时态陈述一律归入 `status.md`。全量 14 篇客观设计文档（`docs/topology/` 8 篇、`docs/initfix/` 6 篇）完成人工抽检审查，抽查合格率 100%。
 3. **设计规范文档客观化清理清单**：
    - [`docs/topology/01-invariants-and-remapping.md`](topology/01-invariants-and-remapping.md) ～ [`08-decisions.md`](topology/08-decisions.md)（共 8 篇）：全部重构为纯架构规格、约束契约与客观原理，易腐进度全部剥离，头部统一指引至 `status.md`。
@@ -81,6 +81,7 @@
 | 事务生命周期与乐观预登记 | ✅ | [`06-runtime-and-perf.md`](topology/06-runtime-and-perf.md) §2 | `AlignmentTransaction.preRegister` | 重定义前预先登记 pending 注入项，消除类加载重入读取磁盘错位产物竞态 |
 | 匿名类合成捕获字段布局门 | ✅ | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1 | `LayoutGate.check` / `RemoldAgent.ANON_LAYOUT_GATE` | 阻断捕获字段增/改导致存活实例读取零值；默认模式 `reject` |
 | 具名类与用户显式字段布局门 | ✅ | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1 | `RemoldAgent.applyRedefineLayoutGate` / `LAYOUT_GATE` | 阻断用户字段删除、类型变更、静态性变更；默认模式 `reject`；纯新增放行交给 InitFix |
+| 标准 JVM 能力探测、结构变化摘批与降级开关 | ✅ | [`06-runtime-and-perf.md`](topology/06-runtime-and-perf.md) §1 | `RemoldAgent.probeEnhancedHotswap` / `mustSkipForMissingEnhancedRedefinition` | 厂商标识 + flag 文本双条件，杜绝 `-XX:+IgnoreUnrecognizedVMOptions` 回显造成的误判；结构变化类在无增强能力时摘出本批，不再拖垮同批纯方法体修改；`FORCE_STATIC_LAMBDA` 在无能力时被强制降级关闭并打 `DEGRADED` 日志（`degradeForMissingEnhancedRedefinition`；`INIT_FIX` 刻意不降级，否则会让直接调用 `InitFix.transform` 的路径静默空转）；`minecraft-fabric-template/README.md` 已按运行时能力分档说明，不再承诺“完美适配任意 JDK 21+”；`EnhancedHotswapGateTest` 9 用例，含变异检查（改回参数文本探测时 `probeMatchesRealVmOptionState` 变红） |
 | 重定义层三态存活判定与静态字段强拒绝 | ✅ | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1 | `RemoldAgent.decideLayout` | `COMPATIBLE` / `WAIVED` / `REJECTED`；静态字段即便零实例也坚决拒绝（类共享状态不可放行） |
 | 同名局部类编号漂移止血门 | 🔶 | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §2 | `LocalClassGuard` / `RemoldAgent.LOCAL_CLASS_GUARD` | 识别同名局部类计数 >= 2 并将宿主整族移出本轮；**未覆盖“唯一简单名局部类内部的匿名类位移”形态**（见风险 5） |
 | 同名局部类完整拓扑对齐 | ⬜ | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §2 | 待实现于 `LocalClassGuard` | 路线图规划；规划准入与保留简单名改号；当前由止血门安全拦截 |

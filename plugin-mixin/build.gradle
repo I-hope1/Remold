@@ -1,0 +1,50 @@
+plugins {
+	id 'java-library'
+	id 'maven-publish'
+}
+
+sourceSets.main.java.srcDirs = ["src"]
+
+publishing {
+	publications {
+		maven(MavenPublication) {
+			from components.java
+			pom {
+				name = 'remold-plugin-mixin'
+				description = 'SpongePowered Mixin integration plugin for Remold (bytecode re-weaving and @Mixin hotswap)'
+				licenses {
+					license {
+						name = 'GNU General Public License v3.0'
+						url = 'https://www.gnu.org/licenses/gpl-3.0.txt'
+					}
+				}
+			}
+		}
+	}
+}
+
+dependencies {
+	// 插件由 Agent 通过 appendToSystemClassLoaderSearch 加载，运行时由 Agent jar 提供 api/core
+	compileOnly project(':api')
+	compileOnly project(':core')
+
+	// Mixin 与 ASM 由宿主（Fabric / Quilt / NeoForge / Sponge）提供，不打包进插件
+	compileOnly 'org.spongepowered:mixin:0.8.5'
+	def asmVersion = '9.11'
+	compileOnly "org.ow2.asm:asm:$asmVersion"
+	compileOnly "org.ow2.asm:asm-tree:$asmVersion"
+}
+
+test {
+	useJUnitPlatform()
+	failOnNoDiscoveredTests = false
+}
+
+jar {
+	manifest {
+		attributes(
+			'Remold-Plugin-Class': 'remold.mixin.MixinHotswapPlugin',
+			'Remold-Plugin-Name': 'mixin'
+		)
+	}
+}

@@ -64,6 +64,8 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | `Object.toString` 例外 | `InitFix.allowedStringCoercion`、`isInertProducer`、`isIntermediateObjectToString`（`effectReason` 在白名单之后、黑名单之前调用） |
 | 测试夹具（Java） | `tests/src/InitFixOracle.java`（内存 `javac`） |
 | 测试夹具（Kotlin） | `tests/ktfix/v1/`、`v2/` 下的 `.kt`，由 `ktfixV1`/`ktfixV2` source set 编译 |
+| 外部引擎源码索引 | `.sources/`（如 `.sources/mindustry/` 指向本地 Mindustry/Arc 真实源码；只读参考，已 gitignore） |
+| Mixin 生态扩展插件 | `plugin-mixin/`（`remold.mixin.MixinHotswapPlugin`、`MixinReWeaver`、`MixinHotSwap`） |
 
 ## 5. 实现状态概要（详细参见 `docs/status.md`）
 

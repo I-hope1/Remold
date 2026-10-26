@@ -265,12 +265,15 @@ flowchart TD
     CORE[":core<br/>(纯 JVM Agent 核心引擎，ASM 内部重定位)"]
     NATIVE[":native<br/>(JVMTI 原生堆扫描与 Panama/JNI 桥接)"]
     PLUGIN_ARC[":plugin-arc<br/>(Arc / Mindustry 框架参考插件)"]
+    PLUGIN_MIXIN[":plugin-mixin<br/>(SpongePowered Mixin 重织入插件)"]
     TESTS[":tests<br/>(185 JUnit + 310 Oracle + 32 MixinProbe + E2E)"]
 
     API --> CORE
     NATIVE -.-> CORE
     API --> PLUGIN_ARC
+    API --> PLUGIN_MIXIN
     CORE -.-> PLUGIN_ARC
+    CORE -.-> PLUGIN_MIXIN
     CORE --> TESTS
     API --> TESTS
     NATIVE --> TESTS
@@ -281,6 +284,7 @@ flowchart TD
 - **`:core`**：核心 Java Agent 引擎。**ASM 9.11 100% Shade 且重定位至 `remold.internal.asm.*`**，杜绝与任何应用层框架（如 Mixin、ByteBuddy、Spring）发生 ASM 版本与 ClassLoader 冲突。
 - **`:native`**：JVMTI 原生加速与 Panama/JNI 后端，提供亚毫秒级全堆实例检索能力，支持 Windows (x64)、Linux (x64)、macOS (x64/arm64) 全平台。
 - **`:plugin-arc`**：官方参考插件，展示如何通过 SPI 无缝扩展 UI 布局树比对与框架级轮询事件熔断。
+- **`:plugin-mixin`**：SpongePowered Mixin 生态插件。热重定义前把源码级字节码重新交给 Mixin 织入（保住 `@Inject` / `@Unique` / `@Shadow` 产物），并在 Mixin 类自身被修改时刷新 Mixin 运行时状态、级联重织入其目标类。Fabric Loom 工程由 Gradle 脚本自动挂载。
 - **`:example`**：极简演示应用，开箱即用体验 Agent 监听、存量实例字段初始化与 `@OnReload` 生命周期回调。
 - **`:tests`**：完备的回归与兼容性测试套件，包含 185 项多版本编译矩阵拓扑 JUnit 测试、310 项 InitFix Oracle 正负向断言，以及 32 项 Mixin 与 JDWP 端到端兼容性断言。
 
@@ -303,6 +307,8 @@ Remold Agent 支持通过系统属性或 Gradle 配置声明式加载扩展插�
   }
   ```
   Gradle 插件将自动从远程下载对应的 `remold-plugin-arc.jar`，并通过 JVM 参数（`-Dremold.plugins=arc -Dremold.plugin.jars=...`）自动挂载到主 Agent，**模组与业务代码无需引入任何 Remold 依赖，零侵入无残留！**
+
+- **Mixin 生态（Fabric / Quilt 等）无需声明**：`remold.gradle(.kts)` 检测到 `fabric-loom` 插件或 `net.fabricmc` / `org.spongepowered` 依赖时会自动挂载 `mixin` 插件；要关掉用 `-Premold.autoMixin=false`。本地开发插件本体时可用 `remold { pluginJar("../<remold 仓库>/plugin-mixin/build/libs/remold-plugin-mixin-<ver>.jar") }` 指定。
 
 #### 方式二：代码显式注册
 若需在应用层代码中编写并注册自定义扩展插件：

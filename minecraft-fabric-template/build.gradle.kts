@@ -1,6 +1,8 @@
 plugins {
     java
-    id("fabric-loom") version "1.8.11"
+    // 版本约束：本模板要求 Gradle JVM = 21（带 DCEVM 的 JBR 21）。
+    // Loom 1.18+ 的插件变体要求 JVM 25，跑在 21 上会解析失败；1.17.x 是「Java 21 + Gradle 9」的最后一个可用组合。
+    id("fabric-loom") version "1.17.21"
 }
 
 val minecraftVersion = property("minecraft_version") as String
@@ -49,11 +51,12 @@ if (localRemold.exists()) {
     apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/main/remold.gradle.kts")
 }
 
+// client 运行目录与 IDE 运行配置沿用 Loom 默认值（runDir = run，ideConfigGenerated = true）。
+// 旧写法 ideConfigGenerated(true) / runDir("run") 在 Loom 1.18 起已废弃，会刷弃用警告。
 loom {
     runs {
         named("client") {
-            ideConfigGenerated(true)
-            runDir("run")
+            // Remold 脚本会向这个运行配置注入 -javaagent 与 DCEVM 参数
         }
     }
 }

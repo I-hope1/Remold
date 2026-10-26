@@ -21,9 +21,15 @@ open class RemoldExtension {
     var modsDir: Any? = null
     var autoDeploy: Boolean? = null
     val plugins: MutableList<String> = mutableListOf()
+    /** 显式指定的插件 Jar（本地开发 Remold 插件时用，优先于自动解析/下载）。 */
+    val pluginJars: MutableList<Any> = mutableListOf()
 
     fun plugins(vararg p: String) {
         this.plugins.addAll(p.toList())
+    }
+
+    fun pluginJar(file: Any) {
+        this.pluginJars.add(file)
     }
 
     fun jar(target: Any) {
@@ -66,6 +72,29 @@ val remoldExt = project.extensions.create<RemoldExtension>("remold")
 project.plugins.withId("java") {
     val sourceSets = project.extensions.getByType<SourceSetContainer>()
 
+    /**
+     * 是否属于 SpongePowered Mixin 生态：Fabric Loom 项目，或显式声明了 net.fabricmc / org.spongepowered 依赖。
+     * 命中即默认挂载 plugin-mixin（可用 -Premold.autoMixin=false 关闭）。
+     */
+    fun usesMixinEcosystem(): Boolean {
+        if (project.plugins.hasPlugin("fabric-loom") || project.extensions.findByName("loom") != null) {
+            return true
+        }
+        return try {
+            project.configurations.any { cfg ->
+                try {
+                    cfg.dependencies.any { dep ->
+                        dep.group == "org.spongepowered" || dep.group == "net.fabricmc"
+                    }
+                } catch (_: Throwable) {
+                    false
+                }
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
     fun resolveRemoldConfig(): RemoldResolvedConfig {
         // 0. 解析目标 jar (若配置了 jar，进入纯净 JAR 模式)
         val jarProp = remoldExt.jar
@@ -106,8 +135,14 @@ project.plugins.withId("java") {
             }
         }
 
-        // 2. 解析 JBR 路径
-        var execPath = "java"
+        // 2. 解析运行用 JVM
+        // 默认使用「运行 Gradle 的这个 JVM」——在 IDEA 里就是 Gradle JVM（项目 SDK），
+        // 而不是 PATH / JAVA_HOME 里的 java，避免构建用的 SDK 与启动用的 JDK 不一致。
+        val isWin = System.getProperty("os.name").lowercase().contains("win")
+        var execPath = File(System.getProperty("java.home"), if (isWin) "bin/java.exe" else "bin/java").absolutePath
+        if (!File(execPath).exists()) {
+            execPath = "java"
+        }
         val jbr = remoldExt.jbrPath
             ?: (project.findProperty("remold.jbr") as? String)
             ?: (project.findProperty("jbr.home") as? String)
@@ -115,12 +150,11 @@ project.plugins.withId("java") {
             ?: System.getProperty("jbr.home")
         if (!jbr.isNullOrBlank()) {
             val jbrDir = File(jbr)
-            val isWin = System.getProperty("os.name").lowercase().contains("win")
             val javaBin = if (jbrDir.isFile) jbrDir else File(jbrDir, if (isWin) "bin/java.exe" else "bin/java")
             if (javaBin.exists()) {
                 execPath = javaBin.absolutePath
             } else {
-                project.logger.warn("[Remold] 指定的 JBR 路径不存在: $jbr，将使用默认 JVM 运行。")
+                project.logger.warn("[Remold] 指定的 JBR 路径不存在: $jbr，将使用项目 SDK 的 JVM 运行。")
             }
         }
 
@@ -169,7 +203,8 @@ project.plugins.withId("java") {
             ?: (project.findProperty("remold.version") as? String)
             ?: (project.findProperty("remoldVersion") as? String)
             ?: (if (project.rootProject.hasProperty("remoldVersion")) project.rootProject.property("remoldVersion") as? String else null)
-        var agentFile: File? = remoldExt.agentJar?.let { File(it) }
+        // 显式指定优先：remold { agentJar = "..." } 或 gradle.properties 的 remold.agentJar
+        var agentFile: File? = (remoldExt.agentJar ?: (project.findProperty("remold.agentJar") as? String))?.let { File(it) }
         if (agentFile == null || !agentFile.exists()) {
             val candidates = listOf(
                 project.file("libs/remold-agent.jar"),
@@ -292,7 +327,7 @@ project.plugins.withId("java") {
             args.add("-Dremold.agent.file_shake_ms=${remoldExt.fileShakeMs}")
         }
 
-        // 6. 解析扩展插件配置 (如 arc)
+        // 6. 解析扩展插件配置 (如 arc / mixin)
         val requestedPlugins = mutableListOf<String>()
         requestedPlugins.addAll(remoldExt.plugins.map { it.trim() }.filter { it.isNotEmpty() })
         val pluginProps = (project.findProperty("remold.plugins") as? String)
@@ -300,16 +335,58 @@ project.plugins.withId("java") {
         if (!pluginProps.isNullOrBlank()) {
             requestedPlugins.addAll(pluginProps.split("[,;]").map { it.trim() }.filter { it.isNotEmpty() })
         }
+        // 自动挂载：Mixin 生态项目（Fabric Loom / 声明了 Mixin 依赖）默认启用 plugin-mixin。
+        // 可用 -Premold.autoMixin=false 关闭。
+        val autoMixin = (project.findProperty("remold.autoMixin") as? String)?.toBoolean() ?: true
+        if (autoMixin && requestedPlugins.none { it.equals("mixin", ignoreCase = true) } && usesMixinEcosystem()) {
+            requestedPlugins.add("mixin")
+        }
         val distinctPlugins = requestedPlugins.distinct()
 
         val pluginJars = mutableListOf<File>()
+        // 显式指定的插件 Jar 优先（本地开发 Remold 插件时无需发布/缓存）
+        for (explicit in remoldExt.pluginJars) {
+            val f = project.file(explicit)
+            if (f.exists()) {
+                pluginJars.add(f)
+            } else {
+                project.logger.warn("[Remold] 指定的插件 Jar 不存在: ${f.absolutePath}")
+            }
+        }
         if (distinctPlugins.isNotEmpty()) {
             for (pluginName in distinctPlugins) {
+                // 该插件已由显式 pluginJar(...) 提供时跳过解析
+                val alreadyProvided = pluginJars.any { it.name.contains("plugin-$pluginName") }
+                if (alreadyProvided) {
+                    continue
+                }
                 val candidates = mutableListOf<File>()
                 candidates.add(project.rootProject.file("plugin-$pluginName/build/libs/remold-plugin-$pluginName-$ver.jar"))
                 candidates.add(project.rootProject.file("plugin-$pluginName/build/libs/remold-plugin-$pluginName.jar"))
                 candidates.add(project.rootProject.file("../plugin-$pluginName/build/libs/remold-plugin-$pluginName-$ver.jar"))
                 candidates.add(project.rootProject.file("../plugin-$pluginName/build/libs/remold-plugin-$pluginName.jar"))
+                // 本地开发便利：模板与 Remold 本体仓库并排放置时（../<repo>/plugin-x/build/libs）
+                try {
+                    project.rootDir.parentFile?.listFiles()?.forEach { sibling ->
+                        if (sibling.isDirectory) {
+                            candidates.add(File(sibling, "plugin-$pluginName/build/libs/remold-plugin-$pluginName-$ver.jar"))
+                            candidates.add(File(sibling, "plugin-$pluginName/build/libs/remold-plugin-$pluginName.jar"))
+                        }
+                    }
+                } catch (_: Throwable) { }
+                // 本地联调：publishToMavenLocal 的产物优先于远端发布版。
+                // 两个坐标不是大小写差异：build.gradle 里 group = 'io.github.i-hope1.remold'（首段 io），
+                // 插件解析走的是 JitPack 约定坐标 com.github.I-hope1.Remold（首段 com），是两个不同命名空间。
+                // 其中 io.github.i-hope1.remold 目前**只在 mavenLocal 存在**（README 标注为预留的 Central 坐标），
+                // 对外可用的一律是 JitPack 坐标。因此下面这条候选只服务本地联调：文件不存在即跳过，
+                // 不会影响其他开发者。按文件路径探测，不依赖 repositories 是否声明 mavenLocal()；
+                // 两种拼法都列，避免在大小写敏感的文件系统（Linux）上漏查。
+                if (ver != null) {
+                    val m2Root = File(System.getProperty("user.home"), ".m2/repository")
+                    listOf("io/github/i-hope1/remold", "com/github/I-hope1/Remold").forEach { groupPath ->
+                        candidates.add(File(m2Root, "$groupPath/plugin-$pluginName/$ver/plugin-$pluginName-$ver.jar"))
+                    }
+                }
                 if (ver != null) {
                     candidates.add(File(project.gradle.gradleUserHomeDir, "caches/remold/remold-plugin-$pluginName-$ver.jar"))
                 }

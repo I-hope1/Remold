@@ -29,7 +29,11 @@ public class RemoldWandItem extends Item {
     @Override
     public TypedActionResult<ItemStack> use(World world, PlayerEntity user, Hand hand) {
         if (!world.isClient()) {
+            // 方法体首尾各一行标记，用来观察 Mixin 注入点的实际位置：
+            // @At("HEAD") 时钩子打印在 begin 之前；@At("TAIL") 时打印在 end 之后。
+            System.out.println("[src] use() begin");
             user.sendMessage(Text.literal("§a[Remold] " + message), false);
+            System.out.println("[src] use() end");
         }
         return TypedActionResult.success(user.getStackInHand(hand));
     }

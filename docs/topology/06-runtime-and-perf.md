@@ -14,6 +14,25 @@
    当检测到类继承关系变更（父类或接口修改，`diff.hierarchyChanged`）时，系统选择安全熔断并拒绝重定义，提示重启应用，确保全局类型系统的稳定性。
 3. **初次加载拦截通道**：
    通过 `AnnotationTransformer.pendingAlignedClasses` 覆盖所有尚未加载的目标类（无论是全新类还是被改名的历史类），确保类加载器首次读入的字节码即为对齐后的正确产物。
+4. **能力探测判据**：
+   增强能力只认「运行时身份」与「flag 开启」两个条件同时成立。
+   `-XX:+AllowEnhancedClassRedefinition` 是 DCEVM 系专有参数：标准 HotSpot 单独加它会在启动阶段报
+   `Unrecognized VM option` 并终止；若同时加了 `-XX:+IgnoreUnrecognizedVMOptions`，标准 HotSpot 会
+   **接受并忽略**它，但 `RuntimeMXBean.getInputArguments()` 仍会原样回显该字符串 —— 因此参数文本单独
+   不构成能力证据，必须叠加厂商身份（`java.vm.vendor` / `java.runtime.version` 含 `JetBrains` /
+   `DCEVM` / `Trava`）判定。
+   探测不通过时，含字段或方法结构变化的类在提交 `redefineClasses` 之前被摘出本批：标准 HotSpot 不允许
+   schema 变化，而批量重定义是全有或全无，放行该类会让同批次纯方法体修改一起失败。
+5. **无增强能力时的降级开关**：
+   探测不通过时，强制关闭 {@code remold.agent.force_static_lambda}，并以
+   `DEGRADED: <开关名> forced OFF. <原因>` 写入初始化日志（用户显式配置的值不会被静默丢弃）。
+   理由是它<b>会自己制造 schema 变化</b>：把实例 lambda 改写为「静态 + 显式 `this` 首参数」会改变方法
+   描述符，在标准 HotSpot 上放行它等于每一轮都主动失败一次。
+
+   `remold.agent.init_fix` 则<b>不降级</b>：它不会失败，只是没机会执行——新增字段构成的 schema 变化
+   已在上一条被整类摘出。强制关闭换不来任何收益，却会波及所有<b>直接</b>调用 `InitFix.transform` 的
+   路径（回归套件 `InitFixOracle` 就在标准 JVM 上跑全部场景），让它们静默空转。降级只关「做了就会失败」
+   的东西，不关「做了也没用」的东西。
 
 ---
 

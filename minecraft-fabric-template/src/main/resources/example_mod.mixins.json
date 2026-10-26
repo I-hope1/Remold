@@ -4,7 +4,8 @@
   "package": "com.example.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
-    "TitleScreenMixin"
+    "TitleScreenMixin",
+    "RemoldWandItemMixin"
   ],
   "injectors": {
     "defaultRequire": 1

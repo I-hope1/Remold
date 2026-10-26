@@ -20,6 +20,8 @@ class RemoldExtension {
     Object modsDir
     Boolean autoDeploy
     List<Object> plugins = []
+    /** 显式指定的插件 Jar（本地开发 Remold 插件时用，优先于自动解析/下载）。 */
+    List<Object> pluginJars = []
 
     void plugins(Object... p) {
         if (p != null) {
@@ -28,6 +30,10 @@ class RemoldExtension {
                 else this.plugins.add(item)
             }
         }
+    }
+
+    void pluginJar(Object file) {
+        if (file != null) this.pluginJars.add(file)
     }
 
     void jar(Object jar) {
@@ -61,6 +67,27 @@ def remoldExt = project.extensions.create('remold', RemoldExtension)
 
 project.plugins.withId('java') {
     def sourceSets = project.extensions.getByType(SourceSetContainer)
+
+    // 是否属于 SpongePowered Mixin 生态：Fabric Loom 项目，或显式声明了 net.fabricmc / org.spongepowered 依赖。
+    // 命中即默认挂载 plugin-mixin（可用 -Premold.autoMixin=false 关闭）。
+    def usesMixinEcosystem = {
+        if (project.plugins.hasPlugin('fabric-loom') || project.extensions.findByName('loom') != null) {
+            return true
+        }
+        try {
+            return project.configurations.any { cfg ->
+                try {
+                    cfg.dependencies.any { dep ->
+                        dep.group == 'org.spongepowered' || dep.group == 'net.fabricmc'
+                    }
+                } catch (Throwable ignored) {
+                    false
+                }
+            }
+        } catch (Throwable ignored) {
+            return false
+        }
+    }
 
     def resolveRemoldConfig = {
         // 0. 解析目标 jar (若配置了 jar，进入纯净 JAR 模式)
@@ -100,17 +127,22 @@ project.plugins.withId('java') {
             }
         }
 
-        // 2. 解析 JBR 路径
-        def execPath = 'java'
+        // 2. 解析运行用 JVM
+        // 默认使用「运行 Gradle 的这个 JVM」——在 IDEA 里就是 Gradle JVM（项目 SDK），
+        // 而不是 PATH / JAVA_HOME 里的 java，避免构建用的 SDK 与启动用的 JDK 不一致。
+        def isWinOs = System.getProperty('os.name').toLowerCase().contains('win')
+        def execPath = new File(System.getProperty('java.home'), isWinOs ? 'bin/java.exe' : 'bin/java').absolutePath
+        if (!new File(execPath).exists()) {
+            execPath = 'java'
+        }
         def jbr = remoldExt.jbrPath ?: project.findProperty('remold.jbr') ?: project.findProperty('jbr.home') ?: System.getenv('JBR_HOME') ?: System.getProperty('jbr.home')
         if (jbr) {
             def jbrDir = new File(jbr.toString())
-            def isWin = System.getProperty('os.name').toLowerCase().contains('win')
-            def javaBin = jbrDir.isFile() ? jbrDir : new File(jbrDir, isWin ? 'bin/java.exe' : 'bin/java')
+            def javaBin = jbrDir.isFile() ? jbrDir : new File(jbrDir, isWinOs ? 'bin/java.exe' : 'bin/java')
             if (javaBin.exists()) {
                 execPath = javaBin.absolutePath
             } else {
-                logger.warn("[Remold] 指定的 JBR 路径不存在: ${jbr}，将使用默认 JVM 运行。")
+                logger.warn("[Remold] 指定的 JBR 路径不存在: ${jbr}，将使用项目 SDK 的 JVM 运行。")
             }
         }
 
@@ -282,7 +314,7 @@ project.plugins.withId('java') {
             args << "-Dremold.agent.file_shake_ms=${remoldExt.fileShakeMs}"
         }
 
-        // 6. 解析扩展插件配置 (如 arc)
+        // 6. 解析扩展插件配置 (如 arc / mixin)
         def requestedPlugins = []
         if (remoldExt.plugins) {
             requestedPlugins.addAll(remoldExt.plugins.collect { it.toString().trim() }.findAll { !it.isEmpty() })
@@ -291,11 +323,30 @@ project.plugins.withId('java') {
         if (pluginProps) {
             requestedPlugins.addAll(pluginProps.toString().split('[,;]').collect { it.trim() }.findAll { !it.isEmpty() })
         }
+        // 自动挂载：Mixin 生态项目（Fabric Loom / 声明了 Mixin 依赖）默认启用 plugin-mixin。
+        // 可用 -Premold.autoMixin=false 关闭。
+        def autoMixin = project.findProperty('remold.autoMixin') == null ? true : project.findProperty('remold.autoMixin').toString().toBoolean()
+        if (autoMixin && !requestedPlugins.any { it.toString().equalsIgnoreCase('mixin') } && usesMixinEcosystem()) {
+            requestedPlugins.add('mixin')
+        }
         requestedPlugins = requestedPlugins.unique()
 
         def pluginJars = []
+        // 显式指定的插件 Jar 优先（本地开发 Remold 插件时无需发布/缓存）
+        remoldExt.pluginJars.each { explicit ->
+            def f = project.file(explicit)
+            if (f.exists()) {
+                pluginJars.add(f)
+            } else {
+                logger.warn("[Remold] 指定的插件 Jar 不存在: ${f.absolutePath}")
+            }
+        }
         if (requestedPlugins) {
             for (String pluginName : requestedPlugins) {
+                // 该插件已由显式 pluginJar(...) 提供时跳过解析
+                if (pluginJars.any { it.name.contains("plugin-${pluginName}") }) {
+                    continue
+                }
                 def pluginJarCandidates = [
                     project.rootProject.file("plugin-${pluginName}/build/libs/remold-plugin-${pluginName}-${ver}.jar"),
                     project.rootProject.file("plugin-${pluginName}/build/libs/remold-plugin-${pluginName}.jar"),
@@ -303,6 +354,15 @@ project.plugins.withId('java') {
                     project.rootProject.file("../plugin-${pluginName}/build/libs/remold-plugin-${pluginName}.jar"),
                     ver ? new File(project.gradle.gradleUserHomeDir, "caches/remold/remold-plugin-${pluginName}-${ver}.jar") : null
                 ].findAll { it != null }
+                // 本地开发便利：模板与 Remold 本体仓库并排放置时（../<repo>/plugin-x/build/libs）
+                try {
+                    project.rootDir.parentFile?.listFiles()?.each { sibling ->
+                        if (sibling.isDirectory) {
+                            pluginJarCandidates.add(new File(sibling, "plugin-${pluginName}/build/libs/remold-plugin-${pluginName}-${ver}.jar"))
+                            pluginJarCandidates.add(new File(sibling, "plugin-${pluginName}/build/libs/remold-plugin-${pluginName}.jar"))
+                        }
+                    }
+                } catch (Throwable ignored) { }
                 def resolvedPluginJar = pluginJarCandidates.find { it.exists() }
 
                 if ((resolvedPluginJar == null || !resolvedPluginJar.exists()) && ver) {

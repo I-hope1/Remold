@@ -145,8 +145,8 @@ test {
 	}
 }
 
-// 断言测试总数 ≥ 191 且 0 skipped
-def hstestMinTests = 191
+// 断言测试总数 ≥ 206 且 0 skipped（206 = 2026-10-26 全量实测，含 NewSpriteNamingTest 的 4 个用例）
+def hstestMinTests = 206
 tasks.register("verifyTestCount") {
 	group = "verification"
 	description = "断言 JUnit 测试数不低于基线 ${hstestMinTests}"

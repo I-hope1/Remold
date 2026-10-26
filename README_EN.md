@@ -24,6 +24,20 @@ Two ready-to-run templates are included, one for Mindustry mods and one for Mine
 | Mixin hooks get washed out | Re-weaves the source-level bytecode through Mixin before redefining, keeping `@Inject` / `@Unique` / `@Shadow` intact |
 | Hot-swapping after deleting a field or changing its type crashes | Refuses the redefinition outright while live instances still exist, instead of corrupting memory |
 
+## Demos
+
+**Mindustry: edit a PNG, the in-game icon updates immediately** (no restart, no reloading your save)
+
+![Mindustry PNG hot-reload demo](docs/media/mindustry-png-hot-reload.gif)
+
+**Minecraft (Fabric): edit a method body — live in-game right after `BUILD SUCCESSFUL in 2s`**
+
+![Minecraft hot-reload demo](docs/media/minecraft-hot-reload.gif)
+
+**Minecraft (Fabric): edit the Mixin class itself — `[MixinReload]` re-weaves the target classes**
+
+![Minecraft Mixin re-weaving demo](docs/media/minecraft-mixin-reweave.gif)
+
 ## Up and running in 30 seconds
 
 ```bash

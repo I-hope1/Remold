@@ -24,6 +24,20 @@ Remold 是一个 Java Agent：它盯着你的编译输出目录，文件一变�
 | Mixin 钩子被冲掉 | 重定义前先把源码级字节码重新交给 Mixin 织入，保住 `@Inject` / `@Unique` / `@Shadow` |
 | 删字段、改类型后热更崩 | 堆里还有存活实例时坚决拒绝这次重定义，而不是把内存改坏 |
 
+## 演示
+
+**Mindustry：改一张 PNG，游戏里的角标立刻变**（不重启、不重进存档）
+
+![Mindustry PNG 贴图热更新演示](docs/media/mindustry-png-hot-reload.gif)
+
+**Minecraft (Fabric)：改方法体，`BUILD SUCCESSFUL in 2s` 之后游戏内即时生效**
+
+![Minecraft 热重载演示](docs/media/minecraft-hot-reload.gif)
+
+**Minecraft (Fabric)：改 Mixin 类本身，`[MixinReload]` 触发后目标类被重新织入**
+
+![Minecraft Mixin 重织入演示](docs/media/minecraft-mixin-reweave.gif)
+
 ## 30 秒跑起来
 
 ```bash

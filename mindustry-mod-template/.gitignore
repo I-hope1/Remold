@@ -2,3 +2,5 @@
 build/
 .idea/
 *.iml
+# 本地联调用的 remold-agent.jar 等构建产物
+libs/

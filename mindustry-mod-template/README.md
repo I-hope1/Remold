@@ -47,6 +47,48 @@ remold.plugins=arc
 2. 按快捷键 **`Ctrl + Shift + F9`**（重新编译当前类）；
 3. **见证奇迹**：Remold 在后台 0.5 秒内自动把内存中的存量类替换为新字节码，游戏内即刻生效！
 
+### 4. 体验 PNG 资源热更新（贴图也能秒换）
+
+模板内置了一张贴图 [`assets/sprites/remold-badge.png`](assets/sprites/remold-badge.png)。Mindustry 会把它注册成图集区域 `example-remold-mod-remold-badge`，进游戏后它会常驻在 **屏幕右侧边缘（竖直居中）**（同时也会出现在启动对话框里），作为观察窗口。
+
+1. 游戏保持运行，直接编辑这张 PNG 并保存（或复制一张备用配色覆盖它）：
+   ```bash
+   # Windows
+   copy demo\remold-badge-amber.png assets\sprites\remold-badge.png
+   # macOS / Linux
+   cp demo/remold-badge-amber.png assets/sprites/remold-badge.png
+   ```
+2. 切回游戏：角标立刻变成新图案，**不重启、不重新进存档、不重新部署**。
+
+刷新路径由 `plugin-arc` 的 `TextureReloader` 决定：
+
+| 情况 | 行为 |
+|:--|:--|
+| 改图且**尺寸不变** | Tier 1 原位直刷（`Gl.texSubImage2D`），零材质重建，开销最小 —— **推荐** |
+| **尺寸改变** | 走 Tier 2（清理图集 Drawable 缓存、重载 `Tex`/`Styles`、刷新地表与内容图标），但图集区域的 UV/尺寸不会跟着更新，画面可能被拉伸或溢出；想换尺寸请重新部署模组 |
+| **新增**一张全新贴图 | 运行期注册成**独立纹理**（`TextureAtlas.addRegion`）：`sprites/` 按 `<模组内部名>-<文件名>` 命名、`sprites-override/` 用裸名；推不出归属模组时拒绝并提示重启 |
+
+因此示例贴图固定为 64×64；`demo/` 下备的两张同尺寸配色（`remold-badge-amber.png`、`remold-badge-violet.png`）直接覆盖过去即可看到变化，用任何图片编辑器改颜色/图案同样有效（保持 64×64）。
+
+新增贴图的边界：
+
+- 区域名严格按「重启后 Mindustry 会用的名字」推导，避免热更与冷启行为分叉；归属模组靠**同目录已存在的兄弟贴图**反查（某个模组前缀能让兄弟贴图命中图集），查不出且启用了多个模组时**拒绝注册**并提示重启；
+- 独立纹理不在打包图集页里，不参与合批；同名重复新增会重建纹理并释放旧的；
+- 只有「运行时按名字查」的代码能看到它（`Core.atlas.find("...")`）；加载期就抓过引用的地方（内容图标、`Tex.*`、样式）不会自动跟随，那类改动仍需重启。
+
+> [!NOTE]
+> 贴图热更新依赖 `gradle.properties` 中的 `remold.plugins=arc`（默认已开启）。Remold 核心只负责把 `assets/` 下的文件变动事件分发出去，真正的显存写入与图集缓存维护在 `plugin-arc` 里；发布版不含这套机制，`./gradlew jar` 产物与普通模组完全一致。
+
+> [!IMPORTANT]
+> **agent 与 `plugin-arc` 必须是含资源热更新能力的同一份构建**，否则改 PNG 会「完全没有反应」——连一条日志都不会有（事件在 agent 侧就被丢掉了）。排查方法：
+> ```bash
+> # 1) agent 是否有资源分发入口（应输出 notifyAssetChanges / isAssetFile）
+> javap -p -cp remold-agent.jar remold.RemoldAgent | findstr Asset
+> # 2) 插件是否含贴图重载器（应输出 remold/arc/TextureReloader.class）
+> jar tf plugin-arc-0.1.3.jar | findstr TextureReloader
+> ```
+> 两者缺一，说明用的是旧发布包。本地联调时先 `./gradlew :plugin-arc:publishToMavenLocal` 重新发布插件（模板会优先取 mavenLocal 里的同名版本），并让模板指向仓库内构建的 `core/build/libs/remold-agent.jar`（`gradle.properties` 的 `remold.agentJar`，或直接把 jar 放到本项目的 `libs/remold-agent.jar`）。
+
 ---
 
 ## 常见疑问解答 (FAQ)

@@ -257,31 +257,36 @@ public class TwoPhaseProbe {
 
 			// 热循环必须写在被编译的 Java 方法里：经 MethodHandle 调 make() 时它会被内联进适配器，
 			// 自己永远停在 C1，C2 内联分配点的场景根本没建立起来，用例会空转通过。
-			loop.invoke(3_000_000);
+			// 用大量「短调用」而不是一次长循环：只有方法级调用计数器才会驱动整方法 C2 编译；
+			// 一次长循环只产生 OSR 版本，而 OSR 版本会被 unstable_if 反复淘汰。
+			for (int i = 0; i < 600_000; i++) loop.invoke(2);
 			check(a.getDeclaredFields().length == 1, "before redefinition A declares only field 'a'");
 
-			int c2Before = countMatching("compilation.log", "\\s4\\s+jit\\.C::loop");
-			System.out.println("   compilation.log: jit.C::loop 行数=" + countLines("compilation.log", "jit.C::loop")
-			                   + "，预热期 C2(level 4) 行数=" + c2Before);
-			check(c2Before > 0,
-				"jit.C::loop must reach C2 before the redefinition, otherwise the inlined-allocation"
-				+ " hazard was never set up and the scenario proves nothing");
-
 			long us = redefine(inst, a, aV2);
-			check(true, "A redefined with the added field (VM operation took " + us + "us)");
 
-			int notEntrant = countMatching("compilation.log", "jit\\.C::loop.*made not entrant");
-			System.out.println("   compilation.log: jit.C::loop made-not-entrant 行数=" + notEntrant);
-			check(notEntrant > 0,
-				"the redefinition must invalidate the compiled loop (made not entrant); without it,"
-				+ " passing only means the hazard was never triggered");
-
-			loop.invoke(200_000);
+			for (int i = 0; i < 200_000; i++) loop.invoke(2);
 			Object sink = c.getField("sink").get(null);
 			check(sink != null && sink.getClass() == a, "the warmed loop still produces instances of A");
 			checkEq("v2:1,42", call(a, sink, "hi"),
 				"the warmed allocation site produces correctly initialized objects after redefinition");
 			checkEq(42, getInt(a, sink, "b"), "the added field is readable on objects from the warmed loop");
+
+			// 日志分析放在最后：unified logging 有缓冲，运行中读文件会读到滞后内容。
+			Thread.sleep(800);
+			long[] window = lastRedefineWindow();
+			int liveBefore = countMatchingBefore("compilation.log", "\\s4\\s+jit\\.C::loop", window[0]);
+			int invalidatedInside = countMatchingInWindow("compilation.log",
+				"jit\\.C::loop.*made not entrant", window[0], window[1]);
+			System.out.println("   redefine 窗口 = [" + window[0] + ", " + window[1] + "]ns（" + us + "us）");
+			System.out.println("   窗口前已有 level-4 编译行数=" + liveBefore
+			                   + "，窗口内 made-not-entrant 行数=" + invalidatedInside);
+			check(window[0] > 0, "the RedefineClasses safepoint window must be visible in the safepoint log");
+			check(liveBefore > 0,
+				"a level-4 version of jit.C::loop must exist before the redefinition, otherwise there is no"
+				+ " compiled allocation site to invalidate and the scenario proves nothing");
+			check(invalidatedInside > 0,
+				"that compiled loop must be invalidated *inside* the RedefineClasses window;"
+				+ " made-not-entrant lines from ordinary tiered compilation prove nothing");
 		} finally {
 			cl.close();
 		}
@@ -320,6 +325,108 @@ public class TwoPhaseProbe {
 		java.util.regex.Pattern p = java.util.regex.Pattern.compile(regex);
 		int n = 0;
 		for (String line : text.split("\n")) {
+			if (p.matcher(line).find()) n++;
+		}
+		return n;
+	}
+
+	/** 最后一次提到该方法的事件是否为「level 4 编译且之后没被淘汰」。 */
+	static boolean lastEventIsLiveLevel4(String method) {
+		String text = readLog("compilation.log");
+		if (text.isEmpty()) return false;
+		String last = null;
+		for (String line : text.split("\n")) {
+			if (line.contains(method)) last = line;
+		}
+		if (last == null) return false;
+		if (last.contains("made not entrant")) return false;
+		return last.matches(".*\\s4\\s+.*" + java.util.regex.Pattern.quote(method) + ".*");
+	}
+
+	/** 取 safepoint 日志里最后一次 {@code RedefineClasses} 的 uptimenanos；两套日志由此对齐。 */
+	static long lastRedefineSafepointNanos() {
+		String text = readLog("safepoint.log");
+		if (text.isEmpty()) return -1;
+		java.util.regex.Pattern p = java.util.regex.Pattern.compile("^\\[(\\d+)ns\\].*Safepoint \"RedefineClasses\"");
+		long max = -1;
+		for (String line : text.split("\n")) {
+			java.util.regex.Matcher m = p.matcher(line);
+			if (m.find()) max = Math.max(max, Long.parseLong(m.group(1)));
+		}
+		return max;
+	}
+
+	/** 统计「时间戳晚于 {@code afterNanos}」且匹配正则的行数。 */
+	static int countMatchingAfter(String logName, String regex, long afterNanos) {
+		if (afterNanos < 0) return 0;
+		String text = readLog(logName);
+		if (text.isEmpty()) return 0;
+		java.util.regex.Pattern ts = java.util.regex.Pattern.compile("^\\[(\\d+)ns\\]");
+		java.util.regex.Pattern p = java.util.regex.Pattern.compile(regex);
+		int n = 0;
+		for (String line : text.split("\n")) {
+			java.util.regex.Matcher m = ts.matcher(line);
+			if (!m.find()) continue;
+			if (Long.parseLong(m.group(1)) <= afterNanos) continue;
+			if (p.matcher(line).find()) n++;
+		}
+		return n;
+	}
+
+	/**
+	 * 取最后一次 {@code RedefineClasses} safepoint 的 [开始, 结束] 窗口（uptimenanos）。
+	 *
+	 * <p>日志行是在 safepoint <b>结束时</b>打印的，所以直接用它的时间戳会漏掉窗口内发生的事件
+	 * （实测编译日志里的 {@code made not entrant} 就落在 Total 那一段里）。开始时刻 = 时间戳 − Total。</p>
+	 */
+	static long[] lastRedefineWindow() {
+		String text = readLog("safepoint.log");
+		if (text.isEmpty()) return new long[]{-1, -1};
+		java.util.regex.Pattern p = java.util.regex.Pattern.compile(
+			"^\\[(\\d+)ns\\].*Safepoint \"RedefineClasses\".*Total: (\\d+) ns");
+		long end = -1, total = 0;
+		for (String line : text.split("\n")) {
+			java.util.regex.Matcher m = p.matcher(line);
+			if (!m.find()) continue;
+			long ts = Long.parseLong(m.group(1));
+			if (ts > end) {
+				end = ts;
+				total = Long.parseLong(m.group(2));
+			}
+		}
+		return new long[]{end < 0 ? -1 : end - total, end};
+	}
+
+	/** 统计时间戳严格早于 {@code beforeNanos} 且匹配正则的行数。 */
+	static int countMatchingBefore(String logName, String regex, long beforeNanos) {
+		if (beforeNanos < 0) return 0;
+		String text = readLog(logName);
+		if (text.isEmpty()) return 0;
+		java.util.regex.Pattern ts = java.util.regex.Pattern.compile("^\\[(\\d+)ns\\]");
+		java.util.regex.Pattern p = java.util.regex.Pattern.compile(regex);
+		int n = 0;
+		for (String line : text.split("\n")) {
+			java.util.regex.Matcher m = ts.matcher(line);
+			if (!m.find()) continue;
+			if (Long.parseLong(m.group(1)) >= beforeNanos) continue;
+			if (p.matcher(line).find()) n++;
+		}
+		return n;
+	}
+
+	/** 统计时间戳落在 [fromNanos, toNanos] 且匹配正则的行数。 */
+	static int countMatchingInWindow(String logName, String regex, long fromNanos, long toNanos) {
+		if (fromNanos < 0 || toNanos < 0) return 0;
+		String text = readLog(logName);
+		if (text.isEmpty()) return 0;
+		java.util.regex.Pattern ts = java.util.regex.Pattern.compile("^\\[(\\d+)ns\\]");
+		java.util.regex.Pattern p = java.util.regex.Pattern.compile(regex);
+		int n = 0;
+		for (String line : text.split("\n")) {
+			java.util.regex.Matcher m = ts.matcher(line);
+			if (!m.find()) continue;
+			long t = Long.parseLong(m.group(1));
+			if (t < fromNanos || t > toNanos) continue;
 			if (p.matcher(line).find()) n++;
 		}
 		return n;

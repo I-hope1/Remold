@@ -101,6 +101,7 @@ public class TwoPhaseProbe {
 			scenario(inst, javac, base, true);
 			scenario(inst, javac, base, false);
 			scenarioJitWarmup(inst, javac, base);
+			scenarioJitControl(inst, javac, base);
 		} finally {
 			deleteRecursively(base);
 		}
@@ -218,12 +219,25 @@ public class TwoPhaseProbe {
 	static final String SRC_JIT_C = """
 		package jit;
 		public class C {
-		    public static Object sink;
+		    public static final Object[] sink = new Object[16];
 		    public static void loop(int n) {
-		        Object last = null;
-		        for (int i = 0; i < n; i++) { last = B.make(); }
-		        sink = last;
+		        for (int i = 0; i < n; i++) { sink[i & 15] = B.make(); }
 		    }
+		}
+		""";
+
+	static final String SRC_JIT_D_V1 = """
+		package jit;
+		public class D {
+		    public int x = 1;
+		}
+		""";
+
+	static final String SRC_JIT_D_V2 = """
+		package jit;
+		public class D {
+		    public int x = 1;
+		    public int y = 2;
 		}
 		""";
 
@@ -265,7 +279,8 @@ public class TwoPhaseProbe {
 			long us = redefine(inst, a, aV2);
 
 			for (int i = 0; i < 200_000; i++) loop.invoke(2);
-			Object sink = c.getField("sink").get(null);
+			Object[] sinkArr = (Object[]) c.getField("sink").get(null);
+			Object sink = sinkArr[0];
 			check(sink != null && sink.getClass() == a, "the warmed loop still produces instances of A");
 			checkEq("v2:1,42", call(a, sink, "hi"),
 				"the warmed allocation site produces correctly initialized objects after redefinition");
@@ -274,19 +289,69 @@ public class TwoPhaseProbe {
 			// 日志分析放在最后：unified logging 有缓冲，运行中读文件会读到滞后内容。
 			Thread.sleep(800);
 			long[] window = lastRedefineWindow();
-			int liveBefore = countMatchingBefore("compilation.log", "\\s4\\s+jit\\.C::loop", window[0]);
-			int invalidatedInside = countMatchingInWindow("compilation.log",
-				"jit\\.C::loop.*made not entrant", window[0], window[1]);
+			long cid = lastLevel4CidBefore("jit.C::loop", window[0]);
+			int invalidated = countInvalidationsForCid(cid, window[0], window[1]);
 			System.out.println("   redefine 窗口 = [" + window[0] + ", " + window[1] + "]ns（" + us + "us）");
-			System.out.println("   窗口前已有 level-4 编译行数=" + liveBefore
-			                   + "，窗口内 made-not-entrant 行数=" + invalidatedInside);
+			System.out.println("   窗口前最后一个 level-4 cid=" + cid + "，该 cid 在窗口内被失效次数=" + invalidated);
 			check(window[0] > 0, "the RedefineClasses safepoint window must be visible in the safepoint log");
-			check(liveBefore > 0,
+			check(cid > 0,
 				"a level-4 version of jit.C::loop must exist before the redefinition, otherwise there is no"
 				+ " compiled allocation site to invalidate and the scenario proves nothing");
-			check(invalidatedInside > 0,
-				"that compiled loop must be invalidated *inside* the RedefineClasses window;"
-				+ " made-not-entrant lines from ordinary tiered compilation prove nothing");
+			check(invalidated > 0,
+				"that exact cid must be invalidated *inside* the RedefineClasses window; counting any"
+				+ " made-not-entrant line (tiered replacement, OSR, another class) would prove nothing");
+		} finally {
+			cl.close();
+		}
+	}
+
+	/**
+	 * 对照组：redefine 一个**无关类** D，同一个已编译的 {@code C.loop} 不得被失效。
+	 *
+	 * <p>没有这条，主场景的「窗口内有 made not entrant」仍然可能来自编译器线程的无关标记；
+	 * 有了它，因果才闭合：只有 redefine A 才会让 C.loop 的那个 cid 失效。</p>
+	 */
+	static void scenarioJitControl(Instrumentation inst, String javac, File base) throws Throwable {
+		System.out.println("\n--- [JIT control] redefining an unrelated class must not invalidate the loop ---");
+		File work = new File(base, "jitctl");
+		File v1Dir = compile(javac, new File(work, "v1"), "A.java", SRC_JIT_A_V1);
+		compile(javac, new File(work, "v1"), "B.java", SRC_JIT_B);
+		compile(javac, new File(work, "v1"), "C.java", SRC_JIT_C);
+		compile(javac, new File(work, "v1"), "D.java", SRC_JIT_D_V1);
+		File v2Dir = compile(javac, new File(work, "v2"), "D.java", SRC_JIT_D_V2);
+		byte[] dV2 = Files.readAllBytes(new File(v2Dir, "jit/D.class").toPath());
+
+		URLClassLoader cl = new URLClassLoader(new URL[]{v1Dir.toURI().toURL()},
+		                                       TwoPhaseProbe.class.getClassLoader());
+		try {
+			Class<?> d = Class.forName("jit.D", true, cl);
+			Class<?> c = Class.forName("jit.C", true, cl);
+			java.lang.invoke.MethodHandle loop =
+				java.lang.invoke.MethodHandles.publicLookup().unreflect(c.getMethod("loop", int.class));
+
+			for (int i = 0; i < 600_000; i++) loop.invoke(2);
+			redefine(inst, d, dV2);
+			for (int i = 0; i < 100_000; i++) loop.invoke(2);
+
+			Thread.sleep(800);
+			long[] window = lastRedefineWindow();
+			long cid = lastLevel4CidBefore("jit.C::loop", window[0]);
+			int invalidated = countInvalidationsForCid(cid, window[0], window[1]);
+			System.out.println("   窗口 = [" + window[0] + ", " + window[1] + "]ns, cid=" + cid
+			                   + ", 窗口内该 cid 被失效=" + invalidated);
+			check(window[0] > 0, "control: the RedefineClasses safepoint window must be visible");
+			check(cid > 0, "control: jit.C::loop must be level-4 compiled before the window");
+			// 这条刻意不断言「必须为 0」：实测它是 1，即 redefine 一个无关类同样会让 C.loop 的 cid 失效。
+			// 结论是「窗口内失效」这个信号不特异，主场景据此无法证明因果——照实记录，不粉饰。
+			if (invalidated == 0) {
+				check(true, "control: unrelated redefinition did not invalidate the loop → the main"
+					+ " scenario's signal is specific to A's redefinition");
+			} else {
+				System.out.println("   [WARN] control: unrelated redefinition ALSO invalidated cid " + cid
+				                   + " → the 'invalidated inside the window' signal is NOT specific;"
+				                   + " causation for the main scenario is NOT established by this method");
+				check(true, "control measured (see the WARN line): the signal is non-specific");
+			}
 		} finally {
 			cl.close();
 		}
@@ -373,28 +438,67 @@ public class TwoPhaseProbe {
 		return n;
 	}
 
+	/** 窗口前最后一次 level-4 编译的 cid；-1 表示没找到。 */
+	static long lastLevel4CidBefore(String method, long beforeNanos) {
+		if (beforeNanos < 0) return -1;
+		String text = readLog("compilation.log");
+		if (text.isEmpty()) return -1;
+		java.util.regex.Pattern p = java.util.regex.Pattern.compile(
+			"^\\[(\\d+)ns\\]\\s+(\\d+)\\s+(?:%\\s+)?4\\s+" + java.util.regex.Pattern.quote(method));
+		long cid = -1;
+		for (String line : text.split("\n")) {
+			java.util.regex.Matcher m = p.matcher(line);
+			if (!m.find()) continue;
+			if (Long.parseLong(m.group(1)) >= beforeNanos) continue;
+			cid = Long.parseLong(m.group(2));
+		}
+		return cid;
+	}
+
+	/** 指定 cid 在窗口内被标记 made not entrant 的次数。 */
+	static int countInvalidationsForCid(long cid, long fromNanos, long toNanos) {
+		if (cid < 0 || fromNanos < 0 || toNanos < 0) return 0;
+		String text = readLog("compilation.log");
+		if (text.isEmpty()) return 0;
+		java.util.regex.Pattern p = java.util.regex.Pattern.compile("^\\[(\\d+)ns\\]\\s+(\\d+)\\s+");
+		int n = 0;
+		for (String line : text.split("\n")) {
+			if (!line.contains("made not entrant")) continue;
+			java.util.regex.Matcher m = p.matcher(line);
+			if (!m.find()) continue;
+			long ts = Long.parseLong(m.group(1));
+			if (ts < fromNanos || ts > toNanos) continue;
+			if (Long.parseLong(m.group(2)) != cid) continue;
+			n++;
+		}
+		return n;
+	}
+
 	/**
 	 * 取最后一次 {@code RedefineClasses} safepoint 的 [开始, 结束] 窗口（uptimenanos）。
 	 *
-	 * <p>日志行是在 safepoint <b>结束时</b>打印的，所以直接用它的时间戳会漏掉窗口内发生的事件
-	 * （实测编译日志里的 {@code made not entrant} 就落在 Total 那一段里）。开始时刻 = 时间戳 − Total。</p>
+	 * <p>日志行在 safepoint <b>结束时</b>打印。用 {@code 时间戳 − Total} 当起点太宽：{@code Total} 里含
+	 * 「Reaching safepoint」的等待时间，那段时间业务线程仍在运行，会把无关的编译器标记算进窗口
+	 * （对照组实测踩到）。这里收窄到真正的停世界段：起点 = 时间戳 − At − Leaving。</p>
 	 */
 	static long[] lastRedefineWindow() {
 		String text = readLog("safepoint.log");
 		if (text.isEmpty()) return new long[]{-1, -1};
 		java.util.regex.Pattern p = java.util.regex.Pattern.compile(
-			"^\\[(\\d+)ns\\].*Safepoint \"RedefineClasses\".*Total: (\\d+) ns");
-		long end = -1, total = 0;
+			"^\\[(\\d+)ns\\].*Safepoint \"RedefineClasses\".*"
+			+ "At safepoint: (\\d+) ns, Leaving safepoint: (\\d+) ns");
+		long end = -1, at = 0, leaving = 0;
 		for (String line : text.split("\n")) {
 			java.util.regex.Matcher m = p.matcher(line);
 			if (!m.find()) continue;
 			long ts = Long.parseLong(m.group(1));
 			if (ts > end) {
 				end = ts;
-				total = Long.parseLong(m.group(2));
+				at = Long.parseLong(m.group(2));
+				leaving = Long.parseLong(m.group(3));
 			}
 		}
-		return new long[]{end < 0 ? -1 : end - total, end};
+		return new long[]{end < 0 ? -1 : end - at - leaving, end};
 	}
 
 	/** 统计时间戳严格早于 {@code beforeNanos} 且匹配正则的行数。 */

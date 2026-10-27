@@ -327,7 +327,7 @@
 | 条目 | 状态 | 落地位置 | 验收证据与已知边界 |
 |:---|:---:|:---|:---|
 | P0.5 前置微验证（连续 Schema Redefine / 阶段 A 链接 / 堆遍历规模） | 🔶 | `tests/src/P05Probe.java`、`tests/src/P05Agent.java`、`tests/build.gradle`（任务 `p05Probe`）、`.github/workflows/ci.yml`（任务 `p05-probe`，JBR 17/21 矩阵） | JBR 21.0.9 本机 **21/21 断言通过**：连续两次 schema 变化均被接受（阶段 A p50 30.9 ms、阶段 C p50 27.3 ms；schema 变更平均触发 1 次 GC ≈ 5 ms，纯方法体变更 0 次）；阶段 A 预注入的私有实例方法、私有静态方法与新 lambda 可被 nestmate 伴生类链接，并带「阶段 A 之前必抛 `NoSuchMethodError`」的负向对照；1M 实例堆遍历 0.87 s、结果数组 4 MiB。**缺口**：JBR 17 数据待 CI `p05-probe` 矩阵产出后回填；单机单次采样，未做 Linux 对照与 JIT 预热隔离。方法与原始数据见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) |
-| 两阶段编排端到端验证 | 🔶 | `tests/src/TwoPhaseProbe.java`、`tests/build.gradle`（任务 `twoPhaseProbe`） | JBR 21 本机 **25/25 断言通过**：`阶段 A → redefine → 阶段 B 补丁 → 阶段 C redefine` 全链路跑通（阶段 A 17~37 ms、阶段 B 7 ms/1 实例、阶段 C 31~35 ms）；对照组证明不插桩时「枚举之后、阶段 C 之前」新建的实例永久停在 `v2:1,0`；另含 **JIT 预热分配点**场景（热循环写在夹具类里、预热期确认 `C.loop` 已到 C2、重定义后确认 `made not entrant`），验证已编译的分配点在重定义后被正确失效。**缺口**：未覆盖中止回滚、多类批次与真实多线程分配竞争；探针在主流程之外，驱动尚未接入。见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §9、§11 |
+| 两阶段编排端到端验证 | 🔶 | `tests/src/TwoPhaseProbe.java`、`tests/build.gradle`（任务 `twoPhaseProbe`） | JBR 21 本机 **28/28 断言通过**：`阶段 A → redefine → 阶段 B 补丁 → 阶段 C redefine` 全链路跑通（阶段 A 17~37 ms、阶段 B 7 ms/1 实例、阶段 C 31~35 ms）；对照组证明不插桩时「枚举之后、阶段 C 之前」新建的实例永久停在 `v2:1,0`；另含 **JIT 预热分配点**场景（对象写进静态数组保证逃逸、按 cid 对齐 safepoint 窗口）：行为正确，但**对照组证伪了因果**——redefine 无关类同样会让该 cid 失效，故此场景只记录"未观测到损坏"，**不作为机制已验证的证据**（见 `07-p05-probe-results.md` §11）。**缺口**：未覆盖中止回滚、多类批次与真实多线程分配竞争；探针在主流程之外，驱动尚未接入。见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §9、§11 |
 
 
 

@@ -7,8 +7,8 @@
 
 | 审计元数据项 | 内容与规格说明 |
 |:---|:---|
-| **基准提交 (Baseline Commit)** | `5bd997f7` (分支: `main`，对应全量结构化重构审计通过点) |
-| **最后更新时间** | 2026-10-13 |
+| **基准提交 (Baseline Commit)** | `72ed000` (分支: `main`，本轮状态校准的起点) |
+| **最后更新时间** | 2026-10-27 |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |
 | **更新触发条件** | 任何合入包含特性落地、架构偏离、安全门调整、测试基线变更或发现已知缺陷/残余风险的 PR/commit 时，必须同步原子化更新本文件。提交时由作者/维护者更新基准哈希。 |
 | **管辖范围与边界声明** | 本状态表权威管辖：<br>1. **匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)**（[`docs/topology/`](topology/)）<br>2. **存量初始化修复器 (InitFix / Legacy Instance & Static Reinitialization)**（[`docs/initfix/`](initfix/)）<br>*边界与后续治理声明*：同属字节码重映射体系的 `LambdaAligner`（Lambda 表达式对齐器）以及 Mindustry UI 胶水层（`CellPropertyRef` / 动态参数表达式指纹），其实现状态当前由各自单元测试覆盖（`CellHelperTest` 6 场景持续全绿、`LambdaAlignerTest` 等）；它们的详细状态审计矩阵尚未并入本总表，计划在下一轮治理中统一建立验收标准并纳入。 |
@@ -141,9 +141,6 @@
 
 | 规划条目 | 优先级 | 规范章节 | 前置依赖 | 目标价值与关联问题 |
 |:---|:---:|:---|:---|:---|
-| **独立仓库远程发布与 CI 矩阵** | P1 | 独立工程提取 | Remold 本地构建与全量测试通过 | 将同级独立仓库推送到 GitHub/Gitee 远程并启用多 JDK 自动化 CI 守护 |
-| **独立制品 Maven Central / JitPack 分发** | P1 | 发布发布配置 | 独立仓库通过远程 CI 检验 | 配置 Maven Central / JitPack 发布元数据与 GPG 签名，对外提供独立依赖坐标 |
-| **mod-tools 消费侧切换与内部副本清理** | P1 | 架构解耦闭环 | 独立制品发布完成 | 将 mod-tools 依赖切换为外部 Maven 坐标，彻底移除仓内 core 副本完成解耦闭环 |
 | **构造器尾部插桩** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §4 | `InitFix` 离线切片提取与直线字节码生成器 (`AliasInterpreter`) | 在阶段 A 构造器尾部注入切片，物理消除堆遍历快照完成到重定义生效之间的并发对象初始化缝隙（闭合风险 1 与风险 6） |
 | **两阶段 Schema-First 重定义** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §1 | 构造器尾部插桩、JBR 21+ 增强重定义 API 探针 | 消除热更新瞬间新方法体读到未就绪字段的读穿异常，以及 `static final` 字段在 redefine 与补丁之间的 JIT 常量折叠 |
 | **PatchPlan 基线指纹校验** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §2 | 离线分析器导出协议 | 校验 Target 当前内存字节码哈希与构建期基线一致性，防止类漂移热更造成严重字节码损坏 |
@@ -161,9 +158,13 @@
 
 | 债务 / 清理项 | 优先级 | 影响位置 | 现状分析与消除方案 |
 |:---|:---:|:---|:---|
-| **`tier5Matches` 残余死字段清理** | P2 | `AnonClassAligner.AlignStats` | Tier 5（物理类名盲配）已彻底拔除，但统计结构体中仍残留 `tier5Matches` 字段与日志引用；需从对齐统计结构体及相关日志中安全移除，避免误导维护者。 |
-| **`MAX_DEPTH` 死代码分支与夹具缺失** | P2 | `RemoldAgent.ANON_STRICT` / `AnonClassAligner` | 常规模式下 `depth > 4` 仅告警不拒绝，且缺乏多层嵌套严格熔断测试夹具；需补充深层嵌套测试夹具并清理冗余判断逻辑。 |
+| **`tier5Matches` 残余死字段清理** | P2 | `AnonClassAligner.AlignStats` / `recordTierMatch` | Tier 5（物理类名盲配）已彻底拔除，但统计结构体中仍残留 `tier5Matches` 字段、日志拼装与 `recordTierMatch` 的 `case 5` 分支；该分支**无任何调用者传入 5**，属可安全移除的死代码，需连同日志字段一并清理，避免误导维护者。 |
+| **嵌套深度 strict 熔断缺少夹具** | P2 | `AnonClassAligner.align`（`maxLevel > 4`）/ `RemoldAgent.ANON_STRICT` | 该阈值是**诊断阈值而非能力边界**：非 strict 模式下仅 `warn`（层级推进本身与深度无关，真正的闸门是 `MAX_ANON_PER_HOST` 与 `ALIGN_TIMEOUT_MS`），strict 模式下抛 `AlignmentRejectedException`。缺的是「`maxLevel > 4` + strict → 宿主组原子拒绝」的负向夹具，判定逻辑本身无须改动。 |
 | **JDK 8 raw-bits CAS 自动化 CI 差异验证缺失** | P2 | `.github/workflows/ci.yml` / `HotswapBridge` | 当前 CI 仅运行在 Temurin 25，无法区分 raw-bits 与旧实现；JDK 8 raw-bits CAS 为手工验证，非持续自动化覆盖；需在 CI 矩阵中增加 JDK 8 运行期任务以持续守护差异逻辑。 |
+| **Mixin 目标类原始字节码读取缺兜底** | P2 | `plugin-mixin` `MixinHotSwap` | 目标类重织入依赖 `Class.getResourceAsStream` 读原始字节码；Fabric dev 环境下若取不到（日志「读不到 ... 原始字节码」），当前无回退路径。缺的是 `IClassBytecodeProvider.getClassNode(name, false)` + ASM 回写兜底。 |
+| **未加载的 `@Mixin` 类被当作新类注入** | P3 | `core` `RemoldAgent` 新类注入路径 | 未加载且带 `@Mixin` 的类会走新类注入并打印 `[INJECTED]`，功能无影响但属日志噪音与多余类定义；彻底消除需在注入路径做常量池级 `@Mixin` 识别后跳过。 |
+
+> 关于 `AnonClassHasher.MAX_DEPTH`：该类注释已明确其为**永不生效的历史遗留常量**（`hash` 不递归自调用，三处调用点全传 `depth = 0`，`DeepNestProbe` 实测 depth 8 仍能正确对齐）。保留它是为了不动公开签名 `hash(..., int depth)`，**不应再作为「嵌套深度上限」引用，也不应作为技术债重复登记**。
 
 ---
 
@@ -273,3 +274,20 @@
 | Mixin 重织入（普通类） | 🔶 | `plugin-mixin` `MixinReWeaver` | 重定义前把源码级字节码交回 Mixin 织入，非目标类按数组同一性跳过拷贝；端到端需真实 Fabric 客户端验证 |
 | Mixin 类自身变更 → 目标级联重织入 | 🔶 | `plugin-mixin` `MixinHotSwap` | `IMixinTransformer.reload` 刷新 `MixinInfo` 后对已加载目标类走 `redefineDynamic`；结构性改动抛 `MixinReloadException` 时提示重启 |
 | 标准 JVM 能力探测与降级 | ✅ | `RemoldAgent.probeEnhancedHotswap` / `mustSkipForMissingEnhancedRedefinition` / `degradeForMissingEnhancedRedefinition` | 厂商身份 + flag 文本双条件判定；结构变化类在无增强能力时摘批；`FORCE_STATIC_LAMBDA` 强制降级、`INIT_FIX` 刻意不降级；`EnhancedHotswapGateTest` 9 用例含变异检查 |
+
+---
+
+## 6. 工程化、构建与分发 (Engineering, Build & Distribution)
+
+> 本节登记**制品产出与对外分发**链路的实现状态。此前的状态表只覆盖运行时机制，导致「仓库已上线、CI 已跑矩阵、JitPack 坐标已被模板消费」等既成事实长期被误记为待办。
+
+| 条目 | 状态 | 落地位置 | 验收证据与已知边界 |
+|:---|:---:|:---|:---|
+| 独立仓库与远程 CI 矩阵 | ✅ | `.github/workflows/ci.yml` | 3 个 job：`test`（`setup-java` 装 Temurin 8/11/17/21 + runner 25，`-Dhstest.requireJdks=true` 与 `auto-download=false` 强制五套工具链真实存在，跑 `./gradlew check`）、`test-dcevm`（JetBrains Runtime 21 真实 DCEVM 下跑 `:tests:liveDcevmTest`）、`build-native`（g++ 编 Linux x86_64 `.so` 与 Android arm64-v8a `.so` 并上传制品） |
+| JitPack 对外分发 | ✅ | `jitpack.yml` + tag `v0.1.0`~`v0.1.3` | 对外坐标 `com.github.I-hope1.Remold:<module>:<tag>`（由 JitPack 按仓库名推导，与项目 `group` 是两个命名空间）；`jitpack.yml` 固定 `openjdk25` 并执行 `publishToMavenLocal -x test`；`README.md` §6、两个模组模板、`remold.gradle(.kts)` 的 agent 与插件解析均消费该坐标 |
+| GitHub Release 发布物 | 🔶 | 手工构建 + 手工上传资产 | `v0.1.0`~`v0.1.3` 四个 Release 均已发布，最新 `v0.1.3`（2026-10-24）含 `remold-agent-0.1.3.jar` / `remold-plugin-arc-0.1.3.jar`；**缺口**：`ci.yml` 无 release/publish job，发布物靠本地手工构建上传，曾发生「Release 资产早于功能代码构建」的事故，需要 tag 触发的自动化构建 + 资产上传 |
+| Maven Central 分发 | ⬜ | `build.gradle` 的 `group = 'io.github.i-hope1.remold'` | 仅 `README.md` 标注为「预留坐标」，未实际发布；走通需 Central Portal + GPG 签名 + `io.github.<user>` 命名空间验证。当前 `publishToMavenLocal` 落盘该 group 仅供本机联调兜底（`remold.gradle(.kts)` 的 m2 候选路径按文件探测，文件不存在即跳过） |
+| mod-tools 消费侧切换与内部副本清理 | ⬜ | 本仓库之外（mod-tools 仓库） | 依赖坐标切换与仓内 core 副本删除均发生在 mod-tools 仓库，本仓库无法提供验收证据；其前置条件（JitPack 坐标可用）已满足 |
+
+
+

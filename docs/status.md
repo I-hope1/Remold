@@ -145,7 +145,7 @@
 | 规划条目 | 优先级 | 规范章节 | 前置依赖 | 目标价值与关联问题 |
 |:---|:---:|:---|:---|:---|
 | **构造器尾部插桩** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §4 | `InitFix` 离线切片提取与直线字节码生成器 (`AliasInterpreter`) | 在阶段 A 构造器尾部注入切片，消除两阶段路径下「阶段 A → 阶段 C」之间由**旧构造器**创建的实例漏补（单次重定义路径的同类缝隙已由枚举后置关闭，见风险 6） |
-| **两阶段 Schema-First 重定义** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §1 | 构造器尾部插桩、P0.5 前置验证（[`07-p05-probe-results.md`](initfix/07-p05-probe-results.md)，JBR 21 已通过） | 消除热更新瞬间新方法体读到未就绪字段的读穿异常（闭合风险 9），以及 `static final` 字段在 redefine 与补丁之间的 JIT 常量折叠 |
+| **两阶段 Schema-First 重定义** | P2 | [`04-target-design.md`](initfix/04-target-design.md) §1 | 组件已备：`StageASkeleton` / `ConstructorTailInjector` 单测覆盖后**原地冻结** | **暂缓接线**：漏补已由「枚举后置」单独关闭，两阶段仅剩读穿窗口收益，不值得让默认路径每次多付一次 redefine（墙钟 16~76 ms），也不值得为此引入跨阶段中止回滚与多类批次的状态机复杂度（单次 redefine 天然原子）。账要等 §4.1 的结构性/仅改方法体代价差与 §4.4 的 STW 内外拆分看清后再谈。 |
 | **PatchPlan 基线指纹校验** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §2 | 离线分析器导出协议 | 校验 Target 当前内存字节码哈希与构建期基线一致性，防止类漂移热更造成严重字节码损坏 |
 | **非方法上下文显式三态作用域规范化** | P2 | [`03-cascading-pipeline.md`](topology/03-cascading-pipeline.md) §2 | ASM EnclosingMethod 属性增强解析 | 引入 `<initializer>`/`<clinit>`/`<init>` 显式三态标签，解决当前非方法作用域主要依靠 `orderIndex` 兜底导致的作用域偶发空指针错配（收敛风险 2） |
 | **跨类批次拓扑排序** | P2 | [`04-target-design.md`](initfix/04-target-design.md) §5 | 跨类字段依赖图构建器 | 解决类 X 新增字段依赖类 Y 新增字段时的跨类多事务批次协调（当前仅支持单类内部拓扑排序） |
@@ -167,6 +167,7 @@
 | **Mixin 目标类原始字节码读取缺兜底** | P2 | `plugin-mixin` `MixinHotSwap` | 目标类重织入依赖 `Class.getResourceAsStream` 读原始字节码；Fabric dev 环境下若取不到（日志「读不到 ... 原始字节码」），当前无回退路径。缺的是 `IClassBytecodeProvider.getClassNode(name, false)` + ASM 回写兜底。 |
 | **未加载的 `@Mixin` 类被当作新类注入** | P3 | `core` `RemoldAgent` 新类注入路径 | 未加载且带 `@Mixin` 的类会走新类注入并打印 `[INJECTED]`，功能无影响但属日志噪音与多余类定义；彻底消除需在注入路径做常量池级 `@Mixin` 识别后跳过。 |
 | **批次内按类重复全堆遍历** | P2 | `InitFix.collectInstancesForPatch` / `LibTool.getInstances` | 每个待补类各调用一次 `IterateOverInstancesOfClass`，而每次调用都是一次 safepoint（1M 匹配实例时 `HeapIterateOperation` 实测约 240 ms，见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10.2）：批次里 N 个待补类 = N 次停世界。可用 `IterateThroughHeap` 一次走完、按类分发，把 N 次停顿压成 1 次。**但这是「N 次短停顿」换「1 次长停顿」**：单遍历没有 VM 内的 klass 过滤，每个对象都要进 native 回调，最大单次停顿大概率更差；对延迟敏感的场景未必划算。做之前必须同时测总停顿与最大单次停顿，并先统计真实批次类数 N（N 很小时很可能不值得）。 |
+| **每次 redefine 会大范围失效已编译代码** | P2 | 实测见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §11 | 对照组实测：redefine 一个**无关类**（无论只改方法体还是新增字段），另一个类的 C2 版本同样在窗口内被 `made not entrant`。意味着每次热更后进程可能大范围回退到解释/C1 执行、出现预热回落。归因未定（可能是 DCEVM 的全局失效策略），但成本真实存在；需要真实场景测一次热更后的吞吐恢复曲线。 |
 | **真实批次规模 N 未知** | P2 | `RemoldAgent`（`HotswapBatchListener` 已暴露批次边界）/ `InitFix.applyPatch`（已记 `count=N` 与 `elapsed`） | 「单遍历按类分发」是否值得，取决于真实热更的批次类数 N 与每类实例数，而这两个量目前只有合成数据。观测手段已具备：批次边界走 `HotswapBatchListener`，每类实例数与耗时由 `applyPatch` 的日志给出；需要的是**几天真实热更的样本**，而不是再加代码。 |
 
 > 关于 `AnonClassHasher.MAX_DEPTH`：该类注释已明确其为**永不生效的历史遗留常量**（`hash` 不递归自调用，三处调用点全传 `depth = 0`，`DeepNestProbe` 实测 depth 8 仍能正确对齐）。保留它是为了不动公开签名 `hash(..., int depth)`，**不应再作为「嵌套深度上限」引用，也不应作为技术债重复登记**。
@@ -275,7 +276,7 @@
   2. `HOTSWAP_LOCK` 只互斥热更调度与事务处理，**不阻塞应用线程读**，因此不构成防护；
   3. T0 零值等价字段不受影响（默认值即正确值），只有真正需要写入的字段暴露在窗口里；
   4. `PatchReport` 与条件 CAS 跳过计数可在事后定位"这次写了哪些字段"，但无法预防窗口内的读。
-- **根治与关闭条件**：路线图 §3.1「两阶段 Schema-First 重定义」接入驱动后关闭。`TwoPhaseProbe` 已在 JBR 21 上实测该路径：阶段 B 期间旧方法体仍返回旧值（`v1:1`），窗口内无读穿。
+- **根治与关闭条件**：两阶段重定义接入驱动后关闭——该路线图条目已降为 P2、暂缓接线（见 §3.1），因此本条窗口在当前主线中**保持敞开**，属已知残余风险。`TwoPhaseProbe` 已在 JBR 21 上实测该路径：阶段 B 期间旧方法体仍返回旧值（`v1:1`），窗口内无读穿。
 - **关联设计规范**：[`docs/initfix/04-target-design.md`](initfix/04-target-design.md) §1、[`docs/initfix/03-runtime-driver.md`](initfix/03-runtime-driver.md) §2。
 - **关联架构决策**：无。
 

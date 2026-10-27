@@ -349,6 +349,46 @@ public class P05Probe {
 		public HeapSubj(int v) { this.v = v; }
 	}
 
+	/** 读探针 JVM 写到 {@code -Dp05.logdir} 下的日志；缺失时返回空串。 */
+	static String readLog(String name) {
+		String dir = System.getProperty("p05.logdir");
+		if (dir == null) return "";
+		File f = new File(dir, name);
+		if (!f.exists()) return "";
+		try {
+			return Files.readString(f.toPath());
+		} catch (Exception e) {
+			return "";
+		}
+	}
+
+	/** safepoint 日志里所有 {@code HeapIterateOperation} 的 (uptimenanos, totalNanos)。 */
+	static List<long[]> heapIterateEntries() {
+		List<long[]> out = new ArrayList<>();
+		String text = readLog("safepoint.log");
+		if (text.isEmpty()) return out;
+		java.util.regex.Pattern p = java.util.regex.Pattern.compile(
+			"^\\[(\\d+)ns\\].*Safepoint \"HeapIterateOperation\".*Total: (\\d+) ns");
+		for (String line : text.split("\n")) {
+			java.util.regex.Matcher m = p.matcher(line);
+			if (m.find()) out.add(new long[]{Long.parseLong(m.group(1)), Long.parseLong(m.group(2))});
+		}
+		return out;
+	}
+
+	/** nanoTime → 日志的 uptimenanos 原点（一次采样对齐，误差在毫秒级）。 */
+	static long uptimeBaseNanos;
+	static long nanoBase;
+
+	static void alignClocks() {
+		nanoBase = System.nanoTime();
+		uptimeBaseNanos = ManagementFactory.getRuntimeMXBean().getUptime() * 1_000_000L;
+	}
+
+	static long toUptimeNanos(long nanoTime) {
+		return uptimeBaseNanos + (nanoTime - nanoBase);
+	}
+
 	static void measureHeapIteration() {
 		System.out.println("\n--- [M3] LibTool.getInstances scaling ---");
 		try {
@@ -358,6 +398,8 @@ public class P05Probe {
 			return;
 		}
 
+		alignClocks();
+		List<long[]> sampleWindows = new ArrayList<>();
 		List<HeapSubj> keep = new ArrayList<>();
 		for (int n : new int[]{0, 100_000, 500_000, 1_000_000}) {
 			keep.clear();
@@ -374,7 +416,9 @@ public class P05Probe {
 			for (int r = 0; r < samples.length; r++) {
 				long t = System.nanoTime();
 				LibTool.getInstances(HeapSubj.class);
-				samples[r] = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - t);
+				long e = System.nanoTime();
+				samples[r] = TimeUnit.NANOSECONDS.toMicros(e - t);
+				sampleWindows.add(new long[]{n, toUptimeNanos(t), toUptimeNanos(e)});
 			}
 			long[] sorted = samples.clone();
 			java.util.Arrays.sort(sorted);
@@ -387,6 +431,35 @@ public class P05Probe {
 			check(LibTool.getInstances(HeapSubj.class).length == n, "repeat call is stable at n=" + n);
 		}
 		keep.clear();
+
+		// 运行结束后再读日志（unified logging 有缓冲），把每次调用的 STW 段与墙钟对齐。
+		try {
+			Thread.sleep(800);
+		} catch (InterruptedException ie) {
+			Thread.currentThread().interrupt();
+		}
+		List<long[]> entries = heapIterateEntries();
+		System.out.println("   [STW 拆分] 每档 5 个样本：墙钟中位数 / 其中 HeapIterateOperation 的 STW");
+		for (int n : new int[]{0, 100_000, 500_000, 1_000_000}) {
+			List<Long> walls = new ArrayList<>();
+			List<Long> stws = new ArrayList<>();
+			for (long[] w : sampleWindows) {
+				if (w[0] != n) continue;
+				walls.add((w[2] - w[1]) / 1000);
+				long stw = 0;
+				for (long[] e : entries) {
+					if (e[0] >= w[1] && e[0] <= w[2]) stw += e[1];
+				}
+				stws.add(stw / 1000);
+			}
+			if (walls.isEmpty()) continue;
+			java.util.Collections.sort(walls);
+			java.util.Collections.sort(stws);
+			long wm = walls.get(walls.size() / 2);
+			long sm = stws.get(stws.size() / 2);
+			System.out.printf("   n=%-8d wallMedian=%-7dus stwMedian=%-7dus outside=%-7dus stwShare=%.0f%%%n",
+			                  n, wm, sm, wm - sm, wm == 0 ? 0.0 : 100.0 * sm / wm);
+		}
 	}
 
 	// ------------------------------------------------------------------------------------------------

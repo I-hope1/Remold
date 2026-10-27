@@ -101,7 +101,8 @@ public class TwoPhaseProbe {
 			scenario(inst, javac, base, true);
 			scenario(inst, javac, base, false);
 			scenarioJitWarmup(inst, javac, base);
-			scenarioJitControl(inst, javac, base);
+			scenarioJitControl(inst, javac, base, "body-only", SRC_JIT_D_V2_BODY);
+			scenarioJitControl(inst, javac, base, "structural", SRC_JIT_D_V2_STRUCT);
 			scenarioInFlightConstructor(inst, javac, base);
 		} finally {
 			deleteRecursively(base);
@@ -231,14 +232,26 @@ public class TwoPhaseProbe {
 		package jit;
 		public class D {
 		    public int x = 1;
+		    public int val() { return x; }
 		}
 		""";
 
-	static final String SRC_JIT_D_V2 = """
+	/** 只改方法体：schema 不变。 */
+	static final String SRC_JIT_D_V2_BODY = """
+		package jit;
+		public class D {
+		    public int x = 1;
+		    public int val() { return x + 1; }
+		}
+		""";
+
+	/** 结构性变化：新增字段。 */
+	static final String SRC_JIT_D_V2_STRUCT = """
 		package jit;
 		public class D {
 		    public int x = 1;
 		    public int y = 2;
+		    public int val() { return x; }
 		}
 		""";
 
@@ -312,14 +325,15 @@ public class TwoPhaseProbe {
 	 * <p>没有这条，主场景的「窗口内有 made not entrant」仍然可能来自编译器线程的无关标记；
 	 * 有了它，因果才闭合：只有 redefine A 才会让 C.loop 的那个 cid 失效。</p>
 	 */
-	static void scenarioJitControl(Instrumentation inst, String javac, File base) throws Throwable {
-		System.out.println("\n--- [JIT control] redefining an unrelated class must not invalidate the loop ---");
-		File work = new File(base, "jitctl");
+	static void scenarioJitControl(Instrumentation inst, String javac, File base,
+	                               String label, String dV2Source) throws Throwable {
+		System.out.println("\n--- [JIT control: " + label + "] redefining an unrelated class ---");
+		File work = new File(base, "jitctl-" + label);
 		File v1Dir = compile(javac, new File(work, "v1"), "A.java", SRC_JIT_A_V1);
 		compile(javac, new File(work, "v1"), "B.java", SRC_JIT_B);
 		compile(javac, new File(work, "v1"), "C.java", SRC_JIT_C);
 		compile(javac, new File(work, "v1"), "D.java", SRC_JIT_D_V1);
-		File v2Dir = compile(javac, new File(work, "v2"), "D.java", SRC_JIT_D_V2);
+		File v2Dir = compile(javac, new File(work, "v2"), "D.java", dV2Source);
 		byte[] dV2 = Files.readAllBytes(new File(v2Dir, "jit/D.class").toPath());
 
 		URLClassLoader cl = new URLClassLoader(new URL[]{v1Dir.toURI().toURL()},
@@ -331,15 +345,15 @@ public class TwoPhaseProbe {
 				java.lang.invoke.MethodHandles.publicLookup().unreflect(c.getMethod("loop", int.class));
 
 			for (int i = 0; i < 600_000; i++) loop.invoke(2);
-			redefine(inst, d, dV2);
+			long us = redefine(inst, d, dV2);
 			for (int i = 0; i < 100_000; i++) loop.invoke(2);
 
 			Thread.sleep(800);
 			long[] window = lastRedefineWindow();
 			long cid = lastLevel4CidBefore("jit.C::loop", window[0]);
 			int invalidated = countInvalidationsForCid(cid, window[0], window[1]);
-			System.out.println("   窗口 = [" + window[0] + ", " + window[1] + "]ns, cid=" + cid
-			                   + ", 窗口内该 cid 被失效=" + invalidated);
+			System.out.println("   [" + label + "] redefine=" + us + "us, 窗口=[" + window[0] + ", " + window[1]
+			                   + "]ns, cid=" + cid + ", 窗口内该 cid 被失效=" + invalidated);
 			check(window[0] > 0, "control: the RedefineClasses safepoint window must be visible");
 			check(cid > 0, "control: jit.C::loop must be level-4 compiled before the window");
 			// 这条刻意不断言「必须为 0」：实测它是 1，即 redefine 一个无关类同样会让 C.loop 的 cid 失效。

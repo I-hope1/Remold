@@ -102,6 +102,7 @@ public class TwoPhaseProbe {
 			scenario(inst, javac, base, false);
 			scenarioJitWarmup(inst, javac, base);
 			scenarioJitControl(inst, javac, base);
+			scenarioInFlightConstructor(inst, javac, base);
 		} finally {
 			deleteRecursively(base);
 		}
@@ -355,6 +356,130 @@ public class TwoPhaseProbe {
 		} finally {
 			cl.close();
 		}
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// in-flight constructor scenario
+	// ------------------------------------------------------------------------------------------------
+
+	static final String SRC_LATCH_A_V1 = """
+		package latch;
+		public class A {
+		    public static final java.util.concurrent.CountDownLatch ENTERED =
+		        new java.util.concurrent.CountDownLatch(1);
+		    public static final java.util.concurrent.CountDownLatch RELEASE =
+		        new java.util.concurrent.CountDownLatch(1);
+		    public int a;
+		    public int b;
+		    public int c;
+		    public A() {
+		        a = 1;
+		        ENTERED.countDown();
+		        try { RELEASE.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+		        b = 1;
+		        c = 3;
+		    }
+		}
+		""";
+
+	static final String SRC_LATCH_A_V2 = """
+		package latch;
+		public class A {
+		    public static final java.util.concurrent.CountDownLatch ENTERED =
+		        new java.util.concurrent.CountDownLatch(1);
+		    public static final java.util.concurrent.CountDownLatch RELEASE =
+		        new java.util.concurrent.CountDownLatch(1);
+		    public int a;
+		    public int b;
+		    public int c;
+		    public int d;
+		    public A() {
+		        a = 1;
+		        ENTERED.countDown();
+		        try { RELEASE.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+		        b = 2;
+		        c = 3;
+		        d = 42;
+		    }
+		}
+		""";
+
+	/**
+	 * A thread parked in the middle of the <b>old</b> {@code <init>} when the class is redefined.
+	 *
+	 * <p>The interesting half is not "the new field is not overwritten" (the old body cannot name it), but
+	 * "the old body keeps writing <b>existing</b> fields at offsets from the old layout". If DCEVM does not
+	 * fix up in-flight frames, those writes land in the wrong slots and silently corrupt neighbours.</p>
+	 *
+	 * <p>To make the result meaningful, two anti-vacuity assertions come first: the thread must really be
+	 * inside {@code latch.A.<init>} before and after the redefinition, and the old/new bodies write
+	 * <b>different</b> values into {@code b} (1 vs 2) so "which bytecode ran" is observable.</p>
+	 */
+	static void scenarioInFlightConstructor(Instrumentation inst, String javac, File base) throws Throwable {
+		System.out.println("\n--- [in-flight <init>] old bytecode keeps running across the redefinition ---");
+		File work = new File(base, "latch");
+		File v1Dir = compile(javac, new File(work, "v1"), "A.java", SRC_LATCH_A_V1);
+		File v2Dir = compile(javac, new File(work, "v2"), "A.java", SRC_LATCH_A_V2);
+		byte[] aV2 = Files.readAllBytes(new File(v2Dir, "latch/A.class").toPath());
+
+		URLClassLoader cl = new URLClassLoader(new URL[]{v1Dir.toURI().toURL()},
+		                                       TwoPhaseProbe.class.getClassLoader());
+		try {
+			Class<?> a = Class.forName("latch.A", true, cl);
+			Object entered = a.getField("ENTERED").get(null);
+			Object release = a.getField("RELEASE").get(null);
+			java.lang.reflect.Method await = entered.getClass().getMethod("await");
+			java.lang.reflect.Method countDown = entered.getClass().getMethod("countDown");
+
+			Object[] holder = new Object[1];
+			Throwable[] failure = new Throwable[1];
+			Thread t = new Thread(() -> {
+				try {
+					holder[0] = a.getConstructor().newInstance();
+				} catch (Throwable e) {
+					failure[0] = e;
+				}
+			}, "in-flight-ctor");
+			t.setDaemon(true);
+			t.start();
+
+			await.invoke(entered);
+			check(stackContains(t, "latch.A", "<init>"),
+				"anti-vacuity: the thread must be parked inside latch.A.<init> before the redefinition");
+
+			long us = redefine(inst, a, aV2);
+			check(stackContains(t, "latch.A", "<init>"),
+				"anti-vacuity: the same frame must still be inside <init> after the redefinition returns");
+			System.out.println("   redefined in " + us + "us while a constructor frame was in flight");
+
+			countDown.invoke(release);
+			t.join(5000);
+			check(!t.isAlive(), "the in-flight constructor must finish after release");
+			check(failure[0] == null, "no exception from the in-flight constructor: " + failure[0]);
+
+			Object inFlight = holder[0];
+			check(inFlight != null, "the in-flight constructor produced an object");
+			checkEq(1, getInt(a, inFlight, "a"), "field written before the block keeps its value");
+			checkEq(1, getInt(a, inFlight, "b"),
+				"b must be 1: the in-flight frame still runs the OLD bytecode (the new body writes 2)");
+			checkEq(3, getInt(a, inFlight, "c"),
+				"c written after the block must be intact — a stale field offset would corrupt it");
+			checkEq(0, getInt(a, inFlight, "d"),
+				"the added field stays at its default for the in-flight object (this probe installs no patch)");
+
+			Object fresh = a.getConstructor().newInstance();
+			checkEq(2, getInt(a, fresh, "b"), "a newly constructed object runs the NEW bytecode (b = 2)");
+			checkEq(42, getInt(a, fresh, "d"), "a newly constructed object gets the added field initializer");
+		} finally {
+			cl.close();
+		}
+	}
+
+	static boolean stackContains(Thread t, String className, String methodName) {
+		for (StackTraceElement e : t.getStackTrace()) {
+			if (className.equals(e.getClassName()) && methodName.equals(e.getMethodName())) return true;
+		}
+		return false;
 	}
 
 	// ------------------------------------------------------------------------------------------------

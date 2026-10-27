@@ -1,7 +1,10 @@
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
+import remold.ClassDiffUtil;
 import remold.Reflect;
+import remold.RemoldAgent;
+import remold.ref.InitFix;
 import remold.util.LibTool;
 
 import java.io.BufferedReader;
@@ -89,6 +92,7 @@ public class P05Probe {
 			measureDoubleRedefine(inst, javac, tempDir);
 			measureStageALinking(inst, javac, tempDir);
 			measureHeapIteration();
+			measurePatchLoop(javac, tempDir);
 		} finally {
 			deleteRecursively(tempDir);
 		}
@@ -378,6 +382,76 @@ public class P05Probe {
 	}
 
 	// ------------------------------------------------------------------------------------------------
+	// M4: enumeration vs patch loop — the two halves of the read-through window
+	// ------------------------------------------------------------------------------------------------
+
+	static final String SRC_BULK_V1 = """
+		package p05;
+		public class Bulk {
+		    public int a = 1;
+		}
+		""";
+
+	static final String SRC_BULK_V2 = """
+		package p05;
+		public class Bulk {
+		    public int a = 1;
+		    public int b = 42;
+		}
+		""";
+
+	/**
+	 * Splits {@code applyPatch} into its two halves, because they sit on different sides of the
+	 * read-through window: enumeration (only present when the snapshot is taken after the
+	 * redefinition) and the conditional-CAS loop.
+	 */
+	static void measurePatchLoop(String javac, File baseDir) throws Exception {
+		System.out.println("\n--- [M4] enumeration vs conditional-CAS loop ---");
+		File work = new File(baseDir, "m4");
+		File outV1 = compileInto(javac, work, "v1", "Bulk.java", SRC_BULK_V1);
+		File outV2 = compileInto(javac, work, "v2", "Bulk.java", SRC_BULK_V2);
+		byte[] v1 = Files.readAllBytes(classFile(outV1, "p05/Bulk.class").toPath());
+		byte[] v2 = Files.readAllBytes(classFile(outV2, "p05/Bulk.class").toPath());
+
+		// Load v2 directly: the field already exists, so no redefinition is needed to exercise the
+		// patch driver — this measurement is about the driver's cost, not about DCEVM.
+		URLClassLoader cl = newLoader(outV2);
+		try {
+			Class<?> host = Class.forName("p05.Bulk", true, cl);
+			Field fb = host.getField("b");
+
+			for (int n : new int[]{100_000, 1_000_000}) {
+				Object[] keep = new Object[n];
+				for (int i = 0; i < n; i++) keep[i] = Reflect.UNSAFE.allocateInstance(host);
+
+				RemoldAgent.bytecodeCache.put("p05.Bulk", v2);
+				InitFix.transform(host, v2, ClassDiffUtil.diff(v1, v2));
+
+				long t0 = System.nanoTime();
+				InitFix.afterRedefine(host);
+				long totalUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - t0);
+
+				long t1 = System.nanoTime();
+				Object[] got = LibTool.getInstances(host);
+				long enumUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - t1);
+
+				long casUs = totalUs - enumUs;
+				System.out.printf("   n=%-8d applyPatch=%-8dus  enumerate=%-8dus  impliedCAS=%-8dus  enumShare=%.1f%%%n",
+				                  n, totalUs, enumUs, casUs, totalUs == 0 ? 0.0 : 100.0 * enumUs / totalUs);
+
+				check(got.length == n, "enumeration still sees all " + n + " live instances");
+				check(fb.getInt(keep[0]) == 42 && fb.getInt(keep[n - 1]) == 42,
+				      "the CAS loop actually wrote the patched value at n=" + n);
+
+				keep = null;
+				System.gc();
+			}
+		} finally {
+			cl.close();
+		}
+	}
+
+	// ------------------------------------------------------------------------------------------------
 	// helpers
 	// ------------------------------------------------------------------------------------------------
 
@@ -430,11 +504,15 @@ public class P05Probe {
 	}
 
 	static File compileInto(String javac, File workDir, String variant, String source) throws Exception {
+		return compileInto(javac, workDir, variant, "Subj.java", source);
+	}
+
+	static File compileInto(String javac, File workDir, String variant, String fileName, String source) throws Exception {
 		File srcDir = new File(workDir, variant + "/src");
 		File outDir = new File(workDir, variant + "/out");
 		srcDir.mkdirs();
 		outDir.mkdirs();
-		File f = new File(srcDir, "Subj.java");
+		File f = new File(srcDir, fileName);
 		Files.writeString(f.toPath(), source);
 		runCmd(javac, "-nowarn", "-encoding", "UTF-8", "-d", outDir.getAbsolutePath(), f.getAbsolutePath());
 		return outDir;
@@ -445,7 +523,9 @@ public class P05Probe {
 	}
 
 	static URLClassLoader newLoader(File outDir) throws Exception {
-		return new URLClassLoader(new URL[]{outDir.toURI().toURL()}, ClassLoader.getPlatformClassLoader());
+		// Parent must be the application loader: the stage-B companion class is a nestmate of the
+		// fixture and links remold.ref.HotswapBridge through its defining loader.
+		return new URLClassLoader(new URL[]{outDir.toURI().toURL()}, P05Probe.class.getClassLoader());
 	}
 
 	static String findJavac() {

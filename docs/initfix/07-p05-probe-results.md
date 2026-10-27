@@ -115,3 +115,40 @@ public static String call(Object o) { return ((Subj) o).nf() + ":" + Subj.ns(); 
 - **JBR 17**：本机无 JBR 17 运行时，表中数据仅来自 JBR 21。`.github/workflows/ci.yml` 的 `p05-probe` 任务已按 JBR 17/21 双版本矩阵接入，17 的数据由 CI 产出。
 - **单机单次采样**：数据来自一台 Windows 机器，未做多轮 JIT 预热隔离与 Linux 对照；redefine 耗时含 safepoint 等待，波动区间较大（min 16 ms ~ max 38 ms），结论只取量级。
 - **未测**：`-Xmx` 变化对 redefine 耗时的影响、百万级对象下的 STW 时长、并发业务线程在 redefine 期间的行为。
+
+## 9. 附：两阶段编排端到端实测（`TwoPhaseProbe`）
+
+P0.5 只验证了 JVM 的裸能力，没有验证「三件套串起来」能否跑通。`TwoPhaseProbe` 在接入主流程之前，
+用纯函数三件套把 `阶段 A → redefine → 阶段 B 补丁 → 阶段 C redefine` 跑一遍。
+
+```bash
+./gradlew :tests:twoPhaseProbe -Pp05.jbr=<dcevm-jdk-home>
+```
+
+跑两个场景：一个带构造器尾部插桩，一个不带（对照组，用来证明缝隙真实存在）。**18/18 断言通过**。
+
+| 观察点 | 带插桩 | 对照（不插桩） |
+|:--|:--|:--|
+| 阶段 A 之后旧方法体 | 仍是 `v1:1` | 仍是 `v1:1` |
+| 阶段 A 之后存量实例的新字段 | `0` | `0` |
+| 阶段 B 之后存量实例 | 被补成 `42` | 被补成 `42` |
+| **枚举之后、阶段 C 之前**新建的实例 | `42` | **`0`** |
+| 阶段 C 之后该实例的方法返回值 | `v2:1,42` | **`v2:1,0`（永久过期）** |
+
+耗时（JBR 21，单类，1 个实例）：`build` 0.9~35 ms、阶段 A redefine 17~37 ms、阶段 B 补丁 7 ms（首调 51 ms）、
+阶段 C redefine 31~35 ms。
+
+### 两个必须在驱动里守住的前提
+
+1. **分析用阶段 C 字节码，redefine 用阶段 A 字节码**。阶段 A 的 `<init>` 已被换回旧体，里面没有新字段的
+   初始化式；拿阶段 A 去抽切片只会得到「没有安全的初始化表达式」，字段直接落进台账。
+2. **`RemoldAgent.bytecodeCache` 必须指向阶段 C**。层级 Oracle 优先从缓存读宿主字节码；缓存里若是
+   加载器上的旧版本，就找不到新字段，字段访问会被判成「无法确定 protected 状态」而整批拒绝
+   （实测踩到过：`cannot determine protected status of field access two/Subj.b:I`）。
+
+### 未覆盖
+
+- **中止回滚**：阶段 B 金丝雀失败后如何干净退回阶段 A，尚未设计验证。
+- **多类批次**：探针只跑单类；跨类依赖与批次原子性不在本次范围。
+- **真实业务线程并发**：探针在单线程里制造「枚举后新建」，未覆盖多线程分配的竞争。
+

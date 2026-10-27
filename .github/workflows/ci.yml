@@ -165,6 +165,14 @@ jobs:
             -Dorg.gradle.java.installations.auto-detect=false \
             -Dorg.gradle.java.installations.auto-download=false
 
+      - name: Run two-phase probe
+        run: |
+          export JAVA_HOME="$JAVA_HOME_25_X64"
+          ./gradlew :tests:twoPhaseProbe -Pp05.jbr="${{ steps.jbr.outputs.path }}" \
+            -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_8_X64,JAVA_HOME_11_X64,JAVA_HOME_17_X64,JAVA_HOME_21_X64,JAVA_HOME_25_X64 \
+            -Dorg.gradle.java.installations.auto-detect=false \
+            -Dorg.gradle.java.installations.auto-download=false
+
   build-native:
     name: Build Native Libraries (Linux x64 & Android arm64)
     runs-on: ubuntu-24.04

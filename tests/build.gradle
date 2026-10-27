@@ -361,38 +361,52 @@ def p05AgentJar = tasks.register("p05AgentJar", Jar) {
 	}
 }
 
-tasks.register("p05Probe", JavaExec) {
-	group = "verification"
-	description = "P0.5 前置微验证探针 (P05Probe)：连续 Schema Redefine、阶段 A 预注入链接、百万级堆遍历"
-	dependsOn classes
-	dependsOn p05AgentJar
-	classpath = sourceSets.main.runtimeClasspath
-	mainClass = "P05Probe"
-	maxHeapSize = "1g"
-	def jbrHome = (project.findProperty("p05.jbr") as String)
-		?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
-	if (jbrHome != null) {
-		def javaBin = new File(jbrHome, System.getProperty("os.name").toLowerCase().contains("win") ? "bin/java.exe" : "bin/java")
-		if (javaBin.exists()) {
-			executable = javaBin.absolutePath
-			javaLauncher.set((JavaLauncher) null)
-		} else {
-			logger.lifecycle("[p05Probe] 指定的运行时不存在，回退当前 JVM: " + javaBin.absolutePath)
+// DCEVM 探针的公共配置：p05Probe 与 twoPhaseProbe 共用。
+// 用 -Pp05.jbr=<jdk-home> 或 JBR_HOME/JAVA_HOME_DCEVM/JAVA_HOME_21_X64 指定运行时。
+def dcevmProbe = { String taskName, String mainClassName, String desc ->
+	tasks.register(taskName, JavaExec) {
+		group = "verification"
+		description = desc
+		dependsOn classes
+		dependsOn p05AgentJar
+		classpath = sourceSets.main.runtimeClasspath
+		mainClass = mainClassName
+		maxHeapSize = "1g"
+		def jbrHome = (project.findProperty("p05.jbr") as String)
+			?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+		if (jbrHome != null) {
+			def javaBin = new File(jbrHome, System.getProperty("os.name").toLowerCase().contains("win") ? "bin/java.exe" : "bin/java")
+			if (javaBin.exists()) {
+				executable = javaBin.absolutePath
+				javaLauncher.set((JavaLauncher) null)
+			} else {
+				logger.lifecycle("[${taskName}] 指定的运行时不存在，回退当前 JVM: " + javaBin.absolutePath)
+			}
 		}
-	}
-	doFirst {
-		jvmArgs "-javaagent:${p05AgentJar.get().archiveFile.get().asFile.absolutePath}",
-		        "-XX:+AllowEnhancedClassRedefinition",
-		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
-		if (nativeLibPath != null) {
-			jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+		doFirst {
+			jvmArgs "-javaagent:${p05AgentJar.get().archiveFile.get().asFile.absolutePath}",
+			        "-XX:+AllowEnhancedClassRedefinition",
+			        // InitFix 的静态初始化直接用 jdk.internal.misc.Unsafe
+			        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+			        "--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
+			        "--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED",
+			        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+			if (nativeLibPath != null) {
+				jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+			}
+			try {
+				def j21 = javaToolchains.compilerFor { languageVersion = JavaLanguageVersion.of(21) }.get().executablePath.asFile.absolutePath
+				systemProperty "hstest.javac21", j21
+			} catch (Exception ignored) {}
 		}
-		try {
-			def j21 = javaToolchains.compilerFor { languageVersion = JavaLanguageVersion.of(21) }.get().executablePath.asFile.absolutePath
-			systemProperty "hstest.javac21", j21
-		} catch (Exception ignored) {}
 	}
 }
+
+dcevmProbe("p05Probe", "P05Probe",
+	"P0.5 前置微验证探针 (P05Probe)：连续 Schema Redefine、阶段 A 预注入链接、百万级堆遍历")
+
+dcevmProbe("twoPhaseProbe", "TwoPhaseProbe",
+	"两阶段编排端到端探针 (TwoPhaseProbe)：阶段 A → redefine → 阶段 B 补丁 → 阶段 C redefine")
 
 // check 挂载全部断言
 check.dependsOn test

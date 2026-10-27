@@ -93,6 +93,7 @@ public class P05Probe {
 			measureStageALinking(inst, javac, tempDir);
 			measureHeapIteration();
 			measurePatchLoop(javac, tempDir);
+			measureHeapProportionality(javac, tempDir);
 		} finally {
 			deleteRecursively(tempDir);
 		}
@@ -449,6 +450,57 @@ public class P05Probe {
 		} finally {
 			cl.close();
 		}
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// M5: does enumeration scale with the target class's instance count, or with the whole heap?
+	// ------------------------------------------------------------------------------------------------
+
+	static void measureHeapProportionality(String javac, File baseDir) throws Exception {
+		System.out.println("\n--- [M5] enumeration cost: target instances vs whole heap ---");
+		File work = new File(baseDir, "m5");
+		File out = compileInto(javac, work, "v2", "Bulk.java", SRC_BULK_V2);
+
+		URLClassLoader cl = newLoader(out);
+		try {
+			Class<?> host = Class.forName("p05.Bulk", true, cl);
+
+			for (int n : new int[]{10_000, 100_000, 1_000_000}) {
+				Object[] keep = new Object[n];
+				for (int i = 0; i < n; i++) keep[i] = Reflect.UNSAFE.allocateInstance(host);
+
+				long us = warmEnumerationMicros(host);
+				System.out.printf("   target=%-8d unrelated=0        enumerate=%-8dus%n", n, us);
+				check(LibTool.getInstances(host).length == n, "enumeration sees exactly " + n + " targets");
+
+				keep = null;
+				System.gc();
+			}
+
+			// Same target count as the "small" case, but a million unrelated objects on the heap.
+			Object[] filler = new Object[1_000_000];
+			for (int i = 0; i < filler.length; i++) filler[i] = new byte[16];
+			Object[] few = new Object[100];
+			for (int i = 0; i < few.length; i++) few[i] = Reflect.UNSAFE.allocateInstance(host);
+
+			long us = warmEnumerationMicros(host);
+			System.out.printf("   target=%-8d unrelated=1M       enumerate=%-8dus%n", 100, us);
+			check(LibTool.getInstances(host).length == 100, "enumeration sees exactly 100 targets");
+
+			filler = null;
+			few = null;
+			System.gc();
+		} finally {
+			cl.close();
+		}
+	}
+
+	/** Second call, to skip the one-off native-library / tag-channel warm-up. */
+	static long warmEnumerationMicros(Class<?> host) {
+		LibTool.getInstances(host);
+		long t0 = System.nanoTime();
+		LibTool.getInstances(host);
+		return TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - t0);
 	}
 
 	// ------------------------------------------------------------------------------------------------

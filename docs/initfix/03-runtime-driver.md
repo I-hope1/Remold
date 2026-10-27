@@ -11,6 +11,12 @@
 
 ## 2. 驱动（`PatchDriver` / `InitFix.applyPatch`）
 
+**枚举时机**
+- 存活实例在**重定义生效之后**、补丁执行之前枚举，不预先拍快照。
+- 理由：重定义之后不可能再产生旧布局实例，枚举天然完备；反之先拍快照会漏掉「快照之后、生效之前」新建的实例，其新增字段永久停在类型默认值。
+- 枚举期间新建的实例由新构造器初始化，条件写对它们是无害的空操作。
+- 回归断言：`InitFixSnapshotTimingTest`。
+
 **调度**
 - 宿主侧逐字段驱动：`PatchPlan`/`FieldPatchTask` 按拓扑序执行。
 - 获取 `MethodHandle` 时必须用 `asType` 适配为 `(Object)void`，再 `invokeExact`。

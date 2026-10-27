@@ -196,8 +196,7 @@ public class AnnotationTransformer implements ClassFileTransformer {
 				error("Transformer crashed for class: " + dotClassName, t);
 			}
 
-			// 4. 快照抓取与后置任务注册
-			InitFix.beforeRedefine(classBeingRedefined);
+			// 4. 后置任务注册（存活实例的枚举推迟到补丁应用时，见 InitFix.PendingPatch）
 			RemoldAgent.scheduleDeferredPostRedefine(classBeingRedefined);
 
 			// 5. 更新基线缓存
@@ -216,9 +215,6 @@ public class AnnotationTransformer implements ClassFileTransformer {
 				bytes = classfileBuffer;
 				modified = true;
 			}
-		}
-		if (classBeingRedefined != null) {
-			InitFix.beforeRedefine(classBeingRedefined);
 		}
 
 		try {

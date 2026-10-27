@@ -310,28 +310,18 @@ public class InitFix {
 		}
 	}
 
+	/**
+	 * 已装配、等待重定义生效后执行的补丁。
+	 *
+	 * <p><b>不持有实例快照</b>：存活实例在 {@code applyPatch} 里、重定义生效<b>之后</b>才枚举。
+	 * 早期版本在 {@code transform}/{@code beforeRedefine} 阶段先拍快照，快照完成到重定义生效之间
+	 * 新建的实例永远进不了快照，其新增字段永久停在类型默认值（{@code docs/status.md} 风险 6）。
+	 * 重定义之后枚举则天然完备：此后不可能再产生旧布局的实例，而新实例由新构造器初始化。</p>
+	 */
 	private record PendingPatch(
 	 PatchPlan plan,
 	 byte[] bytes,
-	 List<WeakReference<Object>> instanceSnapshot,
 	 long createdNanos) {
-
-		PendingPatch {
-			if (!plan.instanceTasks().isEmpty() && instanceSnapshot == null) {
-				throw new IllegalStateException(
-				 "instance tasks require a non-null instance snapshot");
-			}
-		}
-
-		boolean hasStatic() { return plan.hasStatic(); }
-		boolean hasInstance() { return plan.hasInstance(); }
-
-		PendingPatch withSnapshot(List<WeakReference<Object>> snapshot) {
-			return new PendingPatch(
-			 plan, bytes,
-			 new ArrayList<>(snapshot),
-			 System.nanoTime());
-		}
 	}
 
 	private record ProtectedAccess(int opcode, String owner, String name, String desc) { }
@@ -454,11 +444,10 @@ public class InitFix {
 
 			if (!built.hasPatch()) return;
 
-			List<WeakReference<Object>> snapshot =
-			 built.plan().hasInstance() ? snapshotInstances(host) : null;
-
+			// 存活实例不在这里枚举：重定义还没生效，此刻拍下的快照会漏掉「快照之后、生效之前」
+			// 新建的实例。枚举推迟到 applyPatch（重定义之后），见 PendingPatch 的说明。
 			PendingPatch patch = new PendingPatch(
-			 built.plan(), built.bytes(), snapshot, System.nanoTime());
+			 built.plan(), built.bytes(), System.nanoTime());
 			PENDING.put(host, patch);
 		} catch (Throwable e) {
 			RemoldAgent.error("Field init patch generation failed for " + className
@@ -475,16 +464,6 @@ public class InitFix {
 				if (!existing.containsKey(f)) ledgerPut(host, f, reason);
 			}
 		}
-	}
-
-	public static void beforeRedefine(Class<?> clazz) {
-		if (!RemoldAgent.INIT_FIX || clazz == null) return;
-
-		PendingPatch existing = PENDING.get(clazz);
-		if (existing == null || !existing.hasInstance()) return;
-
-		List<WeakReference<Object>> snapshot = snapshotInstances(clazz);
-		PENDING.computeIfPresent(clazz, (k, p) -> p.withSnapshot(snapshot));
 	}
 
 	private static void cleanupStalePatches() {
@@ -2807,7 +2786,7 @@ public class InitFix {
 		PatchPlan    plan  = patch.plan();
 		List<Object> alive = null;
 		if (plan.hasInstance()) {
-			alive = collectInstancesForPatch(patch);
+			alive = collectInstancesForPatch(host);
 			if (alive.isEmpty() && !plan.hasStatic()) {
 				log("No live instances and no static patch needed for " + host.getName()
 				    + ", skip");
@@ -3157,8 +3136,9 @@ public class InitFix {
 	}
 	// (union 由 docs/initfix/02-closure-and-ledger.md §2 的 FieldLedger 使用；P1-③ 落地前保留为工具方法)
 
-	private static List<Object> collectInstancesForPatch(PendingPatch patch) {
-		List<WeakReference<Object>> snapshot = patch.instanceSnapshot();
+	private static List<Object> collectInstancesForPatch(Class<?> host) {
+		// 枚举时机是本方法（重定义生效之后），不是装配补丁时：见 PendingPatch 的说明。
+		List<WeakReference<Object>> snapshot = snapshotInstances(host);
 		List<Object>                alive    = new ArrayList<>(snapshot.size());
 		for (WeakReference<Object> ref : snapshot) {
 			Object o = ref.get();

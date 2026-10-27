@@ -120,6 +120,7 @@
 | 伴生补丁类装配 | ✅ | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §1 | `InitFix.generatePatchClass` / `Lookup.defineHiddenClass` | 每字段生成独立静态直线方法；宿主 hidden nestmate 隔离异常与加载死锁 |
 | 构造器尾部插桩器 | 🔶 | [`04-target-design.md`](initfix/04-target-design.md) §4 | `core/src/remold/ref/ConstructorTailInjector` | 纯函数字节码改写：在每个根构造器的每个 `RETURN` 前插入 `ALOAD 0; <切片>; PUTFIELD`；跳过 `this(...)` 委托构造器（避免沿委托链重复执行）与体内已自行赋值目标字段的构造器（构造器逻辑优先）；只插直线代码、写入侧仅 `COMPUTE_MAXS` 不重算栈帧。`ConstructorTailInjectorTest` 8 用例覆盖多根构造器、多返回路径、`this` 读取切片与覆盖保护，并做过变异检查。**缺口**：尚未接入阶段 A 驱动，`InitFix` 还未把改写后的切片交给它 |
 | 逐实例补丁驱动与失败配额 | ✅ | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §2 | `InitFix.runDependentInstanceTasks` / `InstanceFailureBudget` | 依赖失败按实例隔离；单字段每轮实例失败配额封顶 8 次（`MAX_INSTANCE_FAILURES_PER_FIELD`） |
+| 存活实例枚举时机 | ✅ | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §2 | `InitFix.applyPatch` / `collectInstancesForPatch` | 枚举推迟到重定义生效之后，不再预拍快照：此后不可能再产生旧布局实例，枚举天然完备；枚举期间新建的实例由新构造器初始化，条件 CAS 对它们是无害空操作。`InitFixSnapshotTimingTest` 先红后绿守卫（旧实现在此用例上确实为红） |
 | 写入协议 (`HotswapBridge`) | 🔶 | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §3 | `HotswapBridge` (`KIND_CONDITIONAL` / `KIND_FORCE`) | 默认条件 CAS；float/double raw bits CAS；跳过计数汇总汇报；`KIND_FORCE` 强制写；**缺自动化 CI 差异验证**（当前 CI 为 Temurin 25，无法区分 raw-bits 与旧实现；JDK 8 raw-bits CAS 为手工验证，非持续自动化覆盖，列入技术债 3.2） |
 | 存量覆写扩展 (`@RemoldReinit`) | ✅ | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §4 | `remold.annotation.RemoldReinit` / `InitFix.buildPatch` | 豁免 T0 与后续加工门；不豁免切片安全门；支持 `CONDITIONAL` 与 `OVERWRITE` |
 | 合成标记字段过滤 | ✅ | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §5 | `ClassDiffUtil.isInternalMarkerField` | 对称过滤 `ACC_SYNTHETIC` 与 `$remold$` 前缀字段 |
@@ -142,7 +143,7 @@
 
 | 规划条目 | 优先级 | 规范章节 | 前置依赖 | 目标价值与关联问题 |
 |:---|:---:|:---|:---|:---|
-| **构造器尾部插桩** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §4 | `InitFix` 离线切片提取与直线字节码生成器 (`AliasInterpreter`) | 在阶段 A 构造器尾部注入切片，物理消除堆遍历快照完成到重定义生效之间的并发对象初始化缝隙（闭合风险 1 与风险 6） |
+| **构造器尾部插桩** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §4 | `InitFix` 离线切片提取与直线字节码生成器 (`AliasInterpreter`) | 在阶段 A 构造器尾部注入切片，消除两阶段路径下「阶段 A → 阶段 C」之间由**旧构造器**创建的实例漏补（单次重定义路径的同类缝隙已由枚举后置关闭，见风险 6） |
 | **两阶段 Schema-First 重定义** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §1 | 构造器尾部插桩、P0.5 前置验证（[`07-p05-probe-results.md`](initfix/07-p05-probe-results.md)，JBR 21 已通过） | 消除热更新瞬间新方法体读到未就绪字段的读穿异常，以及 `static final` 字段在 redefine 与补丁之间的 JIT 常量折叠 |
 | **PatchPlan 基线指纹校验** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §2 | 离线分析器导出协议 | 校验 Target 当前内存字节码哈希与构建期基线一致性，防止类漂移热更造成严重字节码损坏 |
 | **非方法上下文显式三态作用域规范化** | P2 | [`03-cascading-pipeline.md`](topology/03-cascading-pipeline.md) §2 | ASM EnclosingMethod 属性增强解析 | 引入 `<initializer>`/`<clinit>`/`<init>` 显式三态标签，解决当前非方法作用域主要依靠 `orderIndex` 兜底导致的作用域偶发空指针错配（收敛风险 2） |
@@ -227,15 +228,13 @@
 - **关联设计规范**：[`docs/topology/07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §2.2。
 - **关联架构决策**：无。
 
-### 风险 6：构造器尾部插桩前的并发实例化缝隙
-- **风险描述与底层机制**：在两阶段重定义与构造器尾部插桩落地前，系统依赖 JVMTI 堆遍历获取存活实例快照。
-- **触发条件**：在快照获取完成至 JVM `redefineClasses` 真正生效的极窄间隙内，应用线程并发创建了新增字段的目标类实例。该实例未被快照捕获，补丁驱动不会对其执行初始化，实例新增字段保持为默认零值。
-- **当前缓解措施**：
-  1. 实例初始化若为 T0（零值等价），无任何语义差异；
-  2. 游戏通常在主线程静止期触发热更新；
-  3. `InstanceFailureBudget` 与错误监控可捕获异常访问。
-- **根治与关闭条件**：落地路线图 §3.1“两阶段重定义与构造器尾部插桩”，在构造器末尾注入切片执行补丁。
-- **关联设计规范**：[`docs/initfix/04-target-design.md`](initfix/04-target-design.md) §4。
+### 风险 6：并发实例化缝隙
+- **风险描述与底层机制**：存活实例的枚举若发生在重定义**之前**，「枚举完成 → 重定义生效」之间新建的实例就不在集合里；重定义后这些实例的新增字段停在类型默认值，且因为它们不再出现在后续 Diff 中，永远不会被补。
+- **触发条件**：热更新期间应用线程仍在分配对象（游戏主循环的常态）。
+- **当前缓解措施**：**枚举已后置到重定义生效之后**（`InitFix.applyPatch` → `collectInstancesForPatch`，见 [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §2）。此后不可能再产生旧布局实例，枚举天然完备；枚举期间新建的实例由新构造器初始化，条件 CAS 对它们是无害的空操作。回归断言 `InitFixSnapshotTimingTest`（先红后绿）。
+- **残余边界**：两阶段重定义路径下，阶段 A 到阶段 C 之间由**旧构造器**创建的实例仍会停在默认值——那段缝隙要等构造器尾部插桩接入阶段 A 驱动才关闭。
+- **根治与关闭条件**：两阶段路径落地构造器尾部插桩（[`04-target-design.md`](initfix/04-target-design.md) §4）。
+- **关联设计规范**：[`docs/initfix/03-runtime-driver.md`](initfix/03-runtime-driver.md) §2、[`docs/initfix/04-target-design.md`](initfix/04-target-design.md) §4。
 - **关联架构决策**：无。
 
 ### 风险 7：InstanceTracker 字节码回退可靠性局限

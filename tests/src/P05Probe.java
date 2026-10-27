@@ -366,19 +366,25 @@ public class P05Probe {
 			for (int i = 0; i < n; i++) keep.add(new HeapSubj(i));
 
 			long heapBefore = usedHeap();
-			long t0 = System.nanoTime();
 			HeapSubj[] got = LibTool.getInstances(HeapSubj.class);
-			long us = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - t0);
 			long heapAfter = usedHeap();
 
-			long t1 = System.nanoTime();
-			HeapSubj[] again = LibTool.getInstances(HeapSubj.class);
-			long us2 = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - t1);
+			// 每档重复 5 次，报 min/median/max：单次采样分不清「温和增长」和「跨次抖动」。
+			long[] samples = new long[5];
+			for (int r = 0; r < samples.length; r++) {
+				long t = System.nanoTime();
+				LibTool.getInstances(HeapSubj.class);
+				samples[r] = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - t);
+			}
+			long[] sorted = samples.clone();
+			java.util.Arrays.sort(sorted);
+			long median = sorted[sorted.length / 2];
 
-			System.out.printf("   n=%-8d first=%-8s repeat=%-8s returned=%-8d arrayHeap=%-6d KiB%n",
-			                  n, us + "us", us2 + "us", got.length, (heapAfter - heapBefore) >> 10);
+			System.out.printf("   n=%-8d min=%-7s median=%-7s max=%-7s perItem=%.2fus  returned=%-8d arrayHeap=%-6d KiB%n",
+			                  n, sorted[0] + "us", median + "us", sorted[sorted.length - 1] + "us",
+			                  n == 0 ? 0.0 : median / (double) n, got.length, (heapAfter - heapBefore) >> 10);
 			check(got.length == n, "getInstances returned exactly " + n + " live instances");
-			check(again.length == n, "repeat call is stable at n=" + n);
+			check(LibTool.getInstances(HeapSubj.class).length == n, "repeat call is stable at n=" + n);
 		}
 		keep.clear();
 	}

@@ -215,6 +215,18 @@ public class TwoPhaseProbe {
 		}
 		""";
 
+	static final String SRC_JIT_C = """
+		package jit;
+		public class C {
+		    public static Object sink;
+		    public static void loop(int n) {
+		        Object last = null;
+		        for (int i = 0; i < n; i++) { last = B.make(); }
+		        sink = last;
+		    }
+		}
+		""";
+
 	/**
 	 * Does a JIT-compiled allocation site survive a schema redefinition of the allocated class?
 	 *
@@ -228,8 +240,10 @@ public class TwoPhaseProbe {
 		File work = new File(base, "jit");
 		File v1Dir = compile(javac, new File(work, "v1"), "A.java", SRC_JIT_A_V1);
 		compile(javac, new File(work, "v1"), "B.java", SRC_JIT_B);
+		compile(javac, new File(work, "v1"), "C.java", SRC_JIT_C);
 		File v2Dir = compile(javac, new File(work, "v2"), "A.java", SRC_JIT_A_V2);
 		compile(javac, new File(work, "v2"), "B.java", SRC_JIT_B);
+		compile(javac, new File(work, "v2"), "C.java", SRC_JIT_C);
 
 		byte[] aV2 = Files.readAllBytes(new File(v2Dir, "jit/A.class").toPath());
 
@@ -237,27 +251,37 @@ public class TwoPhaseProbe {
 		                                       TwoPhaseProbe.class.getClassLoader());
 		try {
 			Class<?> a = Class.forName("jit.A", true, cl);
-			Class<?> b = Class.forName("jit.B", true, cl);
-			java.lang.invoke.MethodHandle make =
-				java.lang.invoke.MethodHandles.publicLookup().unreflect(b.getMethod("make"));
+			Class<?> c = Class.forName("jit.C", true, cl);
+			java.lang.invoke.MethodHandle loop =
+				java.lang.invoke.MethodHandles.publicLookup().unreflect(c.getMethod("loop", int.class));
 
-			int warmup = 500_000;
-			for (int i = 0; i < warmup; i++) make.invoke();
+			// 热循环必须写在被编译的 Java 方法里：经 MethodHandle 调 make() 时它会被内联进适配器，
+			// 自己永远停在 C1，C2 内联分配点的场景根本没建立起来，用例会空转通过。
+			loop.invoke(3_000_000);
 			check(a.getDeclaredFields().length == 1, "before redefinition A declares only field 'a'");
+
+			int c2Before = countMatching("compilation.log", "\\s4\\s+jit\\.C::loop");
+			System.out.println("   compilation.log: jit.C::loop 行数=" + countLines("compilation.log", "jit.C::loop")
+			                   + "，预热期 C2(level 4) 行数=" + c2Before);
+			check(c2Before > 0,
+				"jit.C::loop must reach C2 before the redefinition, otherwise the inlined-allocation"
+				+ " hazard was never set up and the scenario proves nothing");
 
 			long us = redefine(inst, a, aV2);
 			check(true, "A redefined with the added field (VM operation took " + us + "us)");
 
-			int badType = 0;
-			for (int i = 0; i < 200_000; i++) {
-				if (make.invoke().getClass() != a) badType++;
-			}
-			check(badType == 0, "every object from the warmed allocation site is still an instance of A");
+			int notEntrant = countMatching("compilation.log", "jit\\.C::loop.*made not entrant");
+			System.out.println("   compilation.log: jit.C::loop made-not-entrant 行数=" + notEntrant);
+			check(notEntrant > 0,
+				"the redefinition must invalidate the compiled loop (made not entrant); without it,"
+				+ " passing only means the hazard was never triggered");
 
-			Object sample = make.invoke();
-			checkEq("v2:1,42", call(a, sample, "hi"),
+			loop.invoke(200_000);
+			Object sink = c.getField("sink").get(null);
+			check(sink != null && sink.getClass() == a, "the warmed loop still produces instances of A");
+			checkEq("v2:1,42", call(a, sink, "hi"),
 				"the warmed allocation site produces correctly initialized objects after redefinition");
-			checkEq(42, getInt(a, sample, "b"), "the added field is readable on objects from the warmed site");
+			checkEq(42, getInt(a, sink, "b"), "the added field is readable on objects from the warmed loop");
 		} finally {
 			cl.close();
 		}
@@ -266,6 +290,40 @@ public class TwoPhaseProbe {
 	// ------------------------------------------------------------------------------------------------
 	// helpers
 	// ------------------------------------------------------------------------------------------------
+
+	/** 读取探针 JVM 写到 {@code -Dp05.logdir} 下的日志；缺失时返回空串，让相关断言自然失败。 */
+	static String readLog(String name) {
+		String dir = System.getProperty("p05.logdir");
+		if (dir == null) return "";
+		File f = new File(dir, name);
+		if (!f.exists()) return "";
+		try {
+			return Files.readString(f.toPath());
+		} catch (Exception e) {
+			return "";
+		}
+	}
+
+	static int countLines(String logName, String needle) {
+		String text = readLog(logName);
+		if (text.isEmpty()) return 0;
+		int n = 0;
+		for (String line : text.split("\n")) {
+			if (line.contains(needle)) n++;
+		}
+		return n;
+	}
+
+	static int countMatching(String logName, String regex) {
+		String text = readLog(logName);
+		if (text.isEmpty()) return 0;
+		java.util.regex.Pattern p = java.util.regex.Pattern.compile(regex);
+		int n = 0;
+		for (String line : text.split("\n")) {
+			if (p.matcher(line).find()) n++;
+		}
+		return n;
+	}
 
 	static long redefine(Instrumentation inst, Class<?> clazz, byte[] bytes) throws Exception {
 		ClassDefinition def = new ClassDefinition(clazz, bytes);

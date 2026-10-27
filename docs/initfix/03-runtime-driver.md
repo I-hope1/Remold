@@ -17,6 +17,10 @@
 - 枚举期间新建的实例由新构造器初始化，条件写对它们是无害的空操作。
 - 回归断言：`InitFixSnapshotTimingTest`。
 
+**补丁完成之前的读穿窗口**
+- 本驱动的耗时**直接等于**读穿窗口的长度：`redefineClasses` 返回后新方法体即可执行，而字段要等本驱动跑完才写入。
+- 窗口量级、当前缓解与关闭条件见 `docs/status.md` 风险 9；消除目标见 `04-target-design.md` §1。
+
 **调度**
 - 宿主侧逐字段驱动：`PatchPlan`/`FieldPatchTask` 按拓扑序执行。
 - 获取 `MethodHandle` 时必须用 `asType` 适配为 `(Object)void`，再 `invokeExact`。

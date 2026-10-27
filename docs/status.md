@@ -145,7 +145,7 @@
 | 规划条目 | 优先级 | 规范章节 | 前置依赖 | 目标价值与关联问题 |
 |:---|:---:|:---|:---|:---|
 | **构造器尾部插桩** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §4 | `InitFix` 离线切片提取与直线字节码生成器 (`AliasInterpreter`) | 在阶段 A 构造器尾部注入切片，消除两阶段路径下「阶段 A → 阶段 C」之间由**旧构造器**创建的实例漏补（单次重定义路径的同类缝隙已由枚举后置关闭，见风险 6） |
-| **两阶段 Schema-First 重定义** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §1 | 构造器尾部插桩、P0.5 前置验证（[`07-p05-probe-results.md`](initfix/07-p05-probe-results.md)，JBR 21 已通过） | 消除热更新瞬间新方法体读到未就绪字段的读穿异常，以及 `static final` 字段在 redefine 与补丁之间的 JIT 常量折叠 |
+| **两阶段 Schema-First 重定义** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §1 | 构造器尾部插桩、P0.5 前置验证（[`07-p05-probe-results.md`](initfix/07-p05-probe-results.md)，JBR 21 已通过） | 消除热更新瞬间新方法体读到未就绪字段的读穿异常（闭合风险 9），以及 `static final` 字段在 redefine 与补丁之间的 JIT 常量折叠 |
 | **PatchPlan 基线指纹校验** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §2 | 离线分析器导出协议 | 校验 Target 当前内存字节码哈希与构建期基线一致性，防止类漂移热更造成严重字节码损坏 |
 | **非方法上下文显式三态作用域规范化** | P2 | [`03-cascading-pipeline.md`](topology/03-cascading-pipeline.md) §2 | ASM EnclosingMethod 属性增强解析 | 引入 `<initializer>`/`<clinit>`/`<init>` 显式三态标签，解决当前非方法作用域主要依靠 `orderIndex` 兜底导致的作用域偶发空指针错配（收敛风险 2） |
 | **跨类批次拓扑排序** | P2 | [`04-target-design.md`](initfix/04-target-design.md) §5 | 跨类字段依赖图构建器 | 解决类 X 新增字段依赖类 Y 新增字段时的跨类多事务批次协调（当前仅支持单类内部拓扑排序） |
@@ -258,6 +258,19 @@
 - **根治与关闭条件**：落地路线图 §3.1“增强重定义模式四个未覆盖盲区验证与防护”，在真实 JBR 25 及多层 JIT 编译环境下开展压力探针验证。
 - **关联设计规范**：[`docs/topology/07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1。
 - **关联架构决策**：[`docs/topology/08-decisions.md`](topology/08-decisions.md) 附录 A。
+
+### 风险 9：重定义生效到补丁完成之间的读穿窗口
+- **风险描述与底层机制**：**消除目标已登记在路线图 §3.1「两阶段 Schema-First 重定义」，此处不重复描述机制**；本条只记录在两阶段接入驱动之前，这段窗口是**敞开的**，以及它当前的实际影响面。
+- **当前敞开的程度**：读取新增字段的代码在窗口内拿到类型默认值（引用类型 `null`、数值类型 `0`），不抛异常也不打日志。窗口长度与**存活实例数**成正比而非类数：P0.5 实测 1M 实例的堆遍历约 0.87 s，因此百万级堆的窗口在秒级；探针单实例场景约 7 ms。
+- **触发条件**：窗口内有线程执行读取新增字段的代码——本类新方法体、同批重定义的其它类、反射/序列化路径、任意业务线程。
+- **当前缓解措施**：
+  1. 热更通常在主循环安全点或调试暂停期触发，窗口内几乎没有业务读；
+  2. `HOTSWAP_LOCK` 只互斥热更调度与事务处理，**不阻塞应用线程读**，因此不构成防护；
+  3. T0 零值等价字段不受影响（默认值即正确值），只有真正需要写入的字段暴露在窗口里；
+  4. `PatchReport` 与条件 CAS 跳过计数可在事后定位"这次写了哪些字段"，但无法预防窗口内的读。
+- **根治与关闭条件**：路线图 §3.1「两阶段 Schema-First 重定义」接入驱动后关闭。`TwoPhaseProbe` 已在 JBR 21 上实测该路径：阶段 B 期间旧方法体仍返回旧值（`v1:1`），窗口内无读穿。
+- **关联设计规范**：[`docs/initfix/04-target-design.md`](initfix/04-target-design.md) §1、[`docs/initfix/03-runtime-driver.md`](initfix/03-runtime-driver.md) §2。
+- **关联架构决策**：无。
 
 ---
 

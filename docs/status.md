@@ -272,6 +272,14 @@
 - **关联设计规范**：[`docs/initfix/04-target-design.md`](initfix/04-target-design.md) §1、[`docs/initfix/03-runtime-driver.md`](initfix/03-runtime-driver.md) §2。
 - **关联架构决策**：无。
 
+### 风险 10：新增字段参与 hashCode/equals 后哈希容器失效
+- **风险描述与底层机制**：热更把新字段补进存量实例后，若 `hashCode()` / `equals()` 改为依赖该字段，已放进 `HashMap` / `HashSet` / `ConcurrentHashMap` 的实例其哈希值与桶位置不再匹配；`get` / `contains` / `remove` 会静默失效——不抛异常，只是查不到。补丁只负责写入字段值，不感知任何容器。
+- **触发条件**：新增字段被 `hashCode()` 或 `equals()` 引用，且该类实例已被放入哈希容器。
+- **当前缓解措施**：无自动手段。`LayoutGate` 只看字段布局，`effectReason` 的效应检查也不覆盖哈希语义。
+- **根治与关闭条件**：VM 层无法根治（容器由用户代码持有）。可行方向是在分析期扫描新类的 `hashCode()` / `equals()`，一旦发现读取本轮新增字段就**显式拒绝或强告警**，由用户重建容器或重启。
+- **关联设计规范**：[`docs/initfix/01-safety-gate.md`](initfix/01-safety-gate.md) §2。
+- **关联架构决策**：无。
+
 ---
 
 ## 5. 框架集成插件与资源热更新 (Framework Plugins & Asset Hot-Reload)

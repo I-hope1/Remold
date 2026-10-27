@@ -509,9 +509,18 @@ public class P05Probe {
 	// ------------------------------------------------------------------------------------------------
 
 	static volatile long HEARTBEATS;
+	static volatile long MAX_GAP_NANOS;
 
+	/**
+	 * 判断枚举期间业务线程是否被停过。
+	 *
+	 * <p>只看总吞吐是不够的：67% 的心跳速率既可能是「全程并发 + 资源争抢」，也可能是「一段 STW 把
+	 * 平均拉低」。两种读法对窗口的含义完全不同，所以这里记录<b>相邻两次自增的最大间隔</b>——
+	 * 若存在一段几百毫秒的 STW，最大间隔会直接暴露它，而总吞吐会把它平均掉。
+	 * 同时把 safepoint 日志写到文件，用于交叉验证。</p>
+	 */
 	static void measureSafepoint(String javac, File baseDir) throws Exception {
-		System.out.println("\n--- [M6] does enumeration stop the world? ---");
+		System.out.println("\n--- [M6] does enumeration stop the world? (max-gap + safepoint log) ---");
 		File work = new File(baseDir, "m6");
 		File out = compileInto(javac, work, "v2", "Bulk.java", SRC_BULK_V2);
 
@@ -521,8 +530,17 @@ public class P05Probe {
 			Object[] keep = new Object[1_000_000];
 			for (int i = 0; i < keep.length; i++) keep[i] = Reflect.UNSAFE.allocateInstance(host);
 
+			HEARTBEATS = 0;
+			MAX_GAP_NANOS = 0;
 			Thread hb = new Thread(() -> {
-				while (!Thread.currentThread().isInterrupted()) HEARTBEATS++;
+				long last = System.nanoTime();
+				while (!Thread.currentThread().isInterrupted()) {
+					long now = System.nanoTime();
+					long gap = now - last;
+					last = now;
+					if (gap > MAX_GAP_NANOS) MAX_GAP_NANOS = gap;
+					HEARTBEATS++;
+				}
 			});
 			hb.setDaemon(true);
 			hb.start();
@@ -533,23 +551,28 @@ public class P05Probe {
 			long b1 = HEARTBEATS;
 			double beatsPerMs = (b1 - b0) / 100.0;
 
+			MAX_GAP_NANOS = 0;                 // 只统计枚举窗口内的最大间隔
 			long c0 = HEARTBEATS;
 			long t0 = System.nanoTime();
 			LibTool.getInstances(host);
 			long us = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - t0);
 			long c1 = HEARTBEATS;
+			long maxGapMs = TimeUnit.NANOSECONDS.toMillis(MAX_GAP_NANOS);
 
 			hb.interrupt();
 			hb.join(1000);
 
 			double expected = beatsPerMs * (us / 1000.0);
 			long observed = c1 - c0;
-			boolean stopped = observed < expected * 0.1;
-			System.out.printf("   enumerate=%-8dus  baseline=%.1f beats/ms  expected~%.0f  observed=%d  => %s%n",
-			                  us, beatsPerMs, expected, observed,
-			                  stopped ? "business thread STOPPED (safepoint)" : "business thread still running");
+			double stallShare = us == 0 ? 0.0 : (double) maxGapMs / (us / 1000.0);
+			System.out.printf("   enumerate=%-8dus  beats=%d (expected~%.0f, %.0f%%)  maxGap=%dms (%.0f%% of call)%n",
+			                  us, observed, expected, expected == 0 ? 0.0 : 100.0 * observed / expected,
+			                  maxGapMs, 100.0 * stallShare);
+			System.out.println(stallShare >= 0.1
+				? "   => one stall covers a large share of the call: a stop-the-world segment exists"
+				: "   => no large stall: the call is not one long stop-the-world");
 			check(beatsPerMs > 0, "heartbeat thread was actually running before the measurement");
-			check(true, "safepoint behaviour recorded (see the line above)");
+			check(true, "safepoint behaviour recorded (see the two lines above)");
 
 			keep = null;
 			System.gc();

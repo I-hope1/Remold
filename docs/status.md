@@ -166,7 +166,7 @@
 | **JDK 8 raw-bits CAS 自动化 CI 差异验证缺失** | P2 | `.github/workflows/ci.yml` / `HotswapBridge` | 当前 CI 仅运行在 Temurin 25，无法区分 raw-bits 与旧实现；JDK 8 raw-bits CAS 为手工验证，非持续自动化覆盖；需在 CI 矩阵中增加 JDK 8 运行期任务以持续守护差异逻辑。 |
 | **Mixin 目标类原始字节码读取缺兜底** | P2 | `plugin-mixin` `MixinHotSwap` | 目标类重织入依赖 `Class.getResourceAsStream` 读原始字节码；Fabric dev 环境下若取不到（日志「读不到 ... 原始字节码」），当前无回退路径。缺的是 `IClassBytecodeProvider.getClassNode(name, false)` + ASM 回写兜底。 |
 | **未加载的 `@Mixin` 类被当作新类注入** | P3 | `core` `RemoldAgent` 新类注入路径 | 未加载且带 `@Mixin` 的类会走新类注入并打印 `[INJECTED]`，功能无影响但属日志噪音与多余类定义；彻底消除需在注入路径做常量池级 `@Mixin` 识别后跳过。 |
-| **批次内按类重复全堆遍历** | P2 | `InitFix.collectInstancesForPatch` / `LibTool.getInstances` | 每个待补类各调用一次 `IterateOverInstancesOfClass`，而全堆遍历的固定项（实测约 8 ns/无关对象）按类数线性放大：5M 对象的堆上 10 个待补类约 400 ms。可用 `IterateThroughHeap` 一次走完、按类分发，把 N 次遍历压成 1 次。 |
+| **批次内按类重复全堆遍历** | P2 | `InitFix.collectInstancesForPatch` / `LibTool.getInstances` | 每个待补类各调用一次 `IterateOverInstancesOfClass`，而每次调用都是一次 safepoint（1M 匹配实例时 `HeapIterateOperation` 实测约 240 ms，见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10.2）：批次里 N 个待补类 = N 次停世界。可用 `IterateThroughHeap` 一次走完、按类分发，把 N 次停顿压成 1 次；但单遍历没有 VM 内的 klass 过滤，盈亏平衡点要按实测定，N 很小时可能反而更慢。 |
 
 > 关于 `AnonClassHasher.MAX_DEPTH`：该类注释已明确其为**永不生效的历史遗留常量**（`hash` 不递归自调用，三处调用点全传 `depth = 0`，`DeepNestProbe` 实测 depth 8 仍能正确对齐）。保留它是为了不动公开签名 `hash(..., int depth)`，**不应再作为「嵌套深度上限」引用，也不应作为技术债重复登记**。
 
@@ -267,7 +267,7 @@
   - 极端场景（目标类自身 100 万实例）：`applyPatch` 约 1551 ms，其中 CAS 仅 83 ms、弱引用往返 389 ms；
   - 现实场景（堆里几百万对象、目标类只有几百个实例）：实测 100 个目标 + 100 万无关对象仅 8 ms，窗口在**几十毫秒**量级；
   - **随批次线性放大的项**：`getInstances` 按类调用，批次里 N 个待补类 = N 次全堆遍历。
-  - 窗口的墙钟时间**就是**暴露时间：实测（M6）枚举期间业务线程照常运行（心跳线程达到自由速率的 67%），JBR 21 上 `IterateOverInstancesOfClass` 不停世界，不能用「STW 期间读不到」来打折。
+  - **暴露时间要扣掉 STW 段**：实测（M6）每次 `getInstances` 是一次 safepoint，1M 匹配实例时 `HeapIterateOperation` 单次 216~242 ms；停世界期间业务线程读不到未补字段。心跳吞吐只有自由速率的 67%，是「一段 STW + 其余阶段并发」的混合，不是全程争抢。
 - **触发条件**：窗口内有线程执行读取新增字段的代码——本类新方法体、同批重定义的其它类、反射/序列化路径、任意业务线程。
 - **当前缓解措施**：
   1. 热更通常在主循环安全点或调试暂停期触发，窗口内几乎没有业务读；
@@ -281,8 +281,9 @@
 ### 风险 10：新增字段参与 hashCode/equals 后哈希容器失效
 - **风险描述与底层机制**：热更把新字段补进存量实例后，若 `hashCode()` / `equals()` 改为依赖该字段，已放进 `HashMap` / `HashSet` / `ConcurrentHashMap` 的实例其哈希值与桶位置不再匹配；`get` / `contains` / `remove` 会静默失效——不抛异常，只是查不到。补丁只负责写入字段值，不感知任何容器。
 - **触发条件**：新增字段被 `hashCode()` 或 `equals()` 引用，且该类实例已被放入哈希容器。
-- **当前缓解措施**：分析期静态检测 —— `HashSemantics.findDependencies` 扫描新类的 `hashCode()` / `equals()` / `compareTo()`，命中对本轮新增实例字段的直接 `GETFIELD` 时，`InitFix.transform` 经统一出口发 `warn`（`[HASH-SEMANTICS]`），提示重建容器或重启。**刻意只告警不拒绝**：破坏的成因是哈希公式变了，拒绝补丁既不能修复容器，还会让新代码读到 0。`HashSemanticsTest` 7 用例（先红后绿）覆盖三种方法、静态字段、既有字段与无覆写四类边界。
-- **残余边界**：只检测**直接**读取（经辅助方法间接读取不在范围内，与 `01-safety-gate.md` §6「间接依赖读脏」同一边界）；`hashCode`/`equals` 方法体变化但未引用新增字段的情形（同样是通用热更问题）不在本条管辖内，`ClassDiffUtil.modifiedBodyMethods` 已有判定依据。
+- **当前缓解措施**：分析期静态检测 —— `HashSemantics.findDependencies` 在**本类内建调用图**（从 `hashCode()` / `equals()` / `compareTo()` 出发，沿同类 `invoke*` 求可达方法集），命中对本轮新增实例字段的读取时，`InitFix.transform` 经统一出口发 `warn`（`[HASH-SEMANTICS]`）。建调用图是必要的：Lombok `@EqualsAndHashCode` 生成的代码优先调用 getter（字节码是 `invokevirtual getId()`），手写的也常转调私有 `key()` / `computeHash()`，只看直接 `GETFIELD` 会把这两类常见写法全部漏掉。`HashSemanticsTest` 11 用例（先红后绿）。
+- **语义取舍**：当前**只告警不拒绝**。注意「拒绝补丁会让新代码读到 0」只在「拒绝的是补丁、重定义照常进行」时成立；若 reject 指拒绝整个热更，新代码根本不会上线，那是另一种取舍。**严格模式尚未实现**——它需要 `RemoldAgent` 提供整批中止入口（`InitFix.transform` 无法中止批次），属于驱动接入阶段的工作。
+- **残余边界**：只沿**同类**调用（跨类调用不跟进，否则误报面会扩到整条依赖链）；getter 是否被覆写不区分，一律保守命中，宁可多告警。
 - **根治与关闭条件**：VM 层无法根治（容器由用户代码持有）。可行方向是在分析期扫描新类的 `hashCode()` / `equals()`，一旦发现读取本轮新增字段就**显式拒绝或强告警**，由用户重建容器或重启。
 - **关联设计规范**：[`docs/initfix/01-safety-gate.md`](initfix/01-safety-gate.md) §2。
 - **关联架构决策**：无。

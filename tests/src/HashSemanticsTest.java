@@ -136,6 +136,83 @@ class HashSemanticsTest {
 			"nothing added means nothing to warn about");
 	}
 
+	@Test
+	void detectsReadThroughGeneratedGetter() throws Exception {
+		// Lombok @EqualsAndHashCode shape: the generated method calls getters, not GETFIELD.
+		byte[] bytes = compile("hash.H", """
+			package hash;
+			public class H {
+			    public int id;
+			    public int getId() { return id; }
+			    @Override public int hashCode() { return getId() * 31; }
+			}
+			""");
+
+		List<Finding> findings = HashSemantics.findDependencies(bytes, Set.of("id"));
+
+		assertTrue(findings.stream().anyMatch(f -> f.entry().equals("hashCode")
+		                                             && f.method().equals("getId")
+		                                             && f.field().equals("id")),
+			"a getter-based hashCode must be reported with the reading method, got " + findings);
+	}
+
+	@Test
+	void detectsReadThroughHelperChain() throws Exception {
+		byte[] bytes = compile("hash.I", """
+			package hash;
+			public class I {
+			    public int id;
+			    @Override public int hashCode() { return key(); }
+			    private int key() { return mix(); }
+			    private int mix() { return id * 17; }
+			}
+			""");
+
+		List<Finding> findings = HashSemantics.findDependencies(bytes, Set.of("id"));
+
+		assertTrue(findings.stream().anyMatch(f -> f.entry().equals("hashCode")
+		                                             && f.method().equals("mix")
+		                                             && f.field().equals("id")),
+			"a two-hop helper chain must be followed, got " + findings);
+	}
+
+	@Test
+	void doesNotFollowCallsIntoOtherClasses() throws Exception {
+		byte[] bytes = compile("hash.J", """
+			package hash;
+			public class J {
+			    public int id;
+			    @Override public int hashCode() { return new K().hash(); }
+			}
+			class K {
+			    public int id;
+			    public int hash() { return id * 31; }
+			}
+			""");
+
+		List<Finding> findings = HashSemantics.findDependencies(bytes, Set.of("id"));
+
+		assertTrue(findings.isEmpty(),
+			"only same-class calls are followed; K's field is not this class's added field, got " + findings);
+	}
+
+	@Test
+	void survivesRecursiveHelpers() throws Exception {
+		byte[] bytes = compile("hash.L", """
+			package hash;
+			public class L {
+			    public int id;
+			    @Override public int hashCode() { return a(); }
+			    private int a() { return b(); }
+			    private int b() { return a(); }
+			}
+			""");
+
+		// Mutual recursion must terminate the walk; the field is unreachable, so nothing is reported.
+		assertTrue(HashSemantics.findDependencies(bytes, Set.of("id")).isEmpty(),
+			"a cyclic helper chain must terminate instead of hanging");
+	}
+
 	// ------------------------------------------------------------------------------------------------
 
 	private static byte[] compile(String className, String source) throws Exception {

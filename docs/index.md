@@ -70,6 +70,7 @@ flowchart TD
 | [`04-target-design.md`](initfix/04-target-design.md) | 目标架构路线图：两阶段重定义（Two-Phase Redefine）与类加载期构造器插桩设计 |
 | [`05-jvmti-heap.md`](initfix/05-jvmti-heap.md) | JVMTI 全堆实例标记检索底座（`LibTool`）、Tag 隔离与并发重入保护 |
 | [`06-decisions.md`](initfix/06-decisions.md) | InitFix 架构决策记录（ADR）、历史缺陷复盘与例外放宽变异检查要求 |
+| [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) | P0.5 前置验证的实测方法与原始数据（连续 Schema Redefine、阶段 A 伴生类链接、百万级堆遍历） |
 
 ---
 

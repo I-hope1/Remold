@@ -70,6 +70,7 @@ Resolves the issue where newly added fields in existing live heap objects defaul
 | [`04-target-design.md`](initfix/04-target-design.md) | Roadmap target architecture: Two-Phase Redefine and classload-time constructor instrumentation |
 | [`05-jvmti-heap.md`](initfix/05-jvmti-heap.md) | JVMTI full heap instance scanning engine (`LibTool`), tag isolation, and re-entrant concurrency safety |
 | [`06-decisions.md`](initfix/06-decisions.md) | InitFix ADRs, historical defect post-mortems, and mutation testing requirements for gate exemptions |
+| [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) | P0.5 pre-flight measurements: back-to-back schema redefinitions, stage-A companion linkage, million-instance heap scan |
 
 ---
 

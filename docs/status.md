@@ -142,7 +142,7 @@
 | 规划条目 | 优先级 | 规范章节 | 前置依赖 | 目标价值与关联问题 |
 |:---|:---:|:---|:---|:---|
 | **构造器尾部插桩** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §4 | `InitFix` 离线切片提取与直线字节码生成器 (`AliasInterpreter`) | 在阶段 A 构造器尾部注入切片，物理消除堆遍历快照完成到重定义生效之间的并发对象初始化缝隙（闭合风险 1 与风险 6） |
-| **两阶段 Schema-First 重定义** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §1 | 构造器尾部插桩、JBR 21+ 增强重定义 API 探针 | 消除热更新瞬间新方法体读到未就绪字段的读穿异常，以及 `static final` 字段在 redefine 与补丁之间的 JIT 常量折叠 |
+| **两阶段 Schema-First 重定义** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §1 | 构造器尾部插桩、P0.5 前置验证（[`07-p05-probe-results.md`](initfix/07-p05-probe-results.md)，JBR 21 已通过） | 消除热更新瞬间新方法体读到未就绪字段的读穿异常，以及 `static final` 字段在 redefine 与补丁之间的 JIT 常量折叠 |
 | **PatchPlan 基线指纹校验** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §2 | 离线分析器导出协议 | 校验 Target 当前内存字节码哈希与构建期基线一致性，防止类漂移热更造成严重字节码损坏 |
 | **非方法上下文显式三态作用域规范化** | P2 | [`03-cascading-pipeline.md`](topology/03-cascading-pipeline.md) §2 | ASM EnclosingMethod 属性增强解析 | 引入 `<initializer>`/`<clinit>`/`<init>` 显式三态标签，解决当前非方法作用域主要依靠 `orderIndex` 兜底导致的作用域偶发空指针错配（收敛风险 2） |
 | **跨类批次拓扑排序** | P2 | [`04-target-design.md`](initfix/04-target-design.md) §5 | 跨类字段依赖图构建器 | 解决类 X 新增字段依赖类 Y 新增字段时的跨类多事务批次协调（当前仅支持单类内部拓扑排序） |
@@ -288,6 +288,14 @@
 | GitHub Release 发布物 | 🔶 | 手工构建 + 手工上传资产 | `v0.1.0`~`v0.1.3` 四个 Release 均已发布，最新 `v0.1.3`（2026-10-24）含 `remold-agent-0.1.3.jar` / `remold-plugin-arc-0.1.3.jar`；**缺口**：`ci.yml` 无 release/publish job，发布物靠本地手工构建上传，曾发生「Release 资产早于功能代码构建」的事故，需要 tag 触发的自动化构建 + 资产上传 |
 | Maven Central 分发 | ⬜ | `build.gradle` 的 `group = 'io.github.i-hope1.remold'` | 仅 `README.md` 标注为「预留坐标」，未实际发布；走通需 Central Portal + GPG 签名 + `io.github.<user>` 命名空间验证。当前 `publishToMavenLocal` 落盘该 group 仅供本机联调兜底（`remold.gradle(.kts)` 的 m2 候选路径按文件探测，文件不存在即跳过） |
 | mod-tools 消费侧切换与内部副本清理 | ⬜ | 本仓库之外（mod-tools 仓库） | 依赖坐标切换与仓内 core 副本删除均发生在 mod-tools 仓库，本仓库无法提供验收证据；其前置条件（JitPack 坐标可用）已满足 |
+
+---
+
+## 7. 前置验证与实测数据 (Pre-flight Measurements)
+
+| 条目 | 状态 | 落地位置 | 验收证据与已知边界 |
+|:---|:---:|:---|:---|
+| P0.5 前置微验证（连续 Schema Redefine / 阶段 A 链接 / 堆遍历规模） | 🔶 | `tests/src/P05Probe.java`、`tests/src/P05Agent.java`、`tests/build.gradle`（任务 `p05Probe`）、`.github/workflows/ci.yml`（任务 `p05-probe`，JBR 17/21 矩阵） | JBR 21.0.9 本机 **21/21 断言通过**：连续两次 schema 变化均被接受（阶段 A p50 30.9 ms、阶段 C p50 27.3 ms；schema 变更平均触发 1 次 GC ≈ 5 ms，纯方法体变更 0 次）；阶段 A 预注入的私有实例方法、私有静态方法与新 lambda 可被 nestmate 伴生类链接，并带「阶段 A 之前必抛 `NoSuchMethodError`」的负向对照；1M 实例堆遍历 0.87 s、结果数组 4 MiB。**缺口**：JBR 17 数据待 CI `p05-probe` 矩阵产出后回填；单机单次采样，未做 Linux 对照与 JIT 预热隔离。方法与原始数据见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) |
 
 
 

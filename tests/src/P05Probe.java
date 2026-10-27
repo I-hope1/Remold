@@ -94,6 +94,7 @@ public class P05Probe {
 			measureHeapIteration();
 			measurePatchLoop(javac, tempDir);
 			measureHeapProportionality(javac, tempDir);
+			measureSafepoint(javac, tempDir);
 		} finally {
 			deleteRecursively(tempDir);
 		}
@@ -501,6 +502,60 @@ public class P05Probe {
 		long t0 = System.nanoTime();
 		LibTool.getInstances(host);
 		return TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - t0);
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// M6: does heap enumeration stop the world?
+	// ------------------------------------------------------------------------------------------------
+
+	static volatile long HEARTBEATS;
+
+	static void measureSafepoint(String javac, File baseDir) throws Exception {
+		System.out.println("\n--- [M6] does enumeration stop the world? ---");
+		File work = new File(baseDir, "m6");
+		File out = compileInto(javac, work, "v2", "Bulk.java", SRC_BULK_V2);
+
+		URLClassLoader cl = newLoader(out);
+		try {
+			Class<?> host = Class.forName("p05.Bulk", true, cl);
+			Object[] keep = new Object[1_000_000];
+			for (int i = 0; i < keep.length; i++) keep[i] = Reflect.UNSAFE.allocateInstance(host);
+
+			Thread hb = new Thread(() -> {
+				while (!Thread.currentThread().isInterrupted()) HEARTBEATS++;
+			});
+			hb.setDaemon(true);
+			hb.start();
+
+			Thread.sleep(100);
+			long b0 = HEARTBEATS;
+			Thread.sleep(100);
+			long b1 = HEARTBEATS;
+			double beatsPerMs = (b1 - b0) / 100.0;
+
+			long c0 = HEARTBEATS;
+			long t0 = System.nanoTime();
+			LibTool.getInstances(host);
+			long us = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - t0);
+			long c1 = HEARTBEATS;
+
+			hb.interrupt();
+			hb.join(1000);
+
+			double expected = beatsPerMs * (us / 1000.0);
+			long observed = c1 - c0;
+			boolean stopped = observed < expected * 0.1;
+			System.out.printf("   enumerate=%-8dus  baseline=%.1f beats/ms  expected~%.0f  observed=%d  => %s%n",
+			                  us, beatsPerMs, expected, observed,
+			                  stopped ? "business thread STOPPED (safepoint)" : "business thread still running");
+			check(beatsPerMs > 0, "heartbeat thread was actually running before the measurement");
+			check(true, "safepoint behaviour recorded (see the line above)");
+
+			keep = null;
+			System.gc();
+		} finally {
+			cl.close();
+		}
 	}
 
 	// ------------------------------------------------------------------------------------------------

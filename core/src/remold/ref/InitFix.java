@@ -311,6 +311,22 @@ public class InitFix {
 	}
 
 	/**
+	 * 哈希语义告警（{@code docs/status.md} 风险 10）。
+	 *
+	 * <p>新增字段被 {@code hashCode}/{@code equals}/{@code compareTo} 读取时，已放进哈希容器的实例会落错桶。
+	 * 这里刻意<b>只告警不拒绝</b>：破坏的成因是哈希公式变了，拒绝补丁既不能修复容器，还会让新代码读到 0。
+	 * 用户需要知道的是"该重建容器或重启"，而不是"这个字段没补上"。</p>
+	 */
+	private static void warnHashSemanticDependencies(byte[] newBytes, Set<String> addedInstanceFields) {
+		List<HashSemantics.Finding> findings = HashSemantics.findDependencies(newBytes, addedInstanceFields);
+		if (findings.isEmpty()) return;
+		RemoldAgent.warn("[HASH-SEMANTICS] " + HashSemantics.describe(findings)
+		                 + "；已放入 HashMap/HashSet/TreeMap 的实例会落错桶或比较位置，"
+		                 + "get/contains/remove 会静默失效。补丁仍会执行（新代码需要该值），"
+		                 + "但请重建相关容器或重启。");
+	}
+
+	/**
 	 * 已装配、等待重定义生效后执行的补丁。
 	 *
 	 * <p><b>不持有实例快照</b>：存活实例在 {@code applyPatch} 里、重定义生效<b>之后</b>才枚举。
@@ -427,6 +443,7 @@ public class InitFix {
 		}
 
 		String className = diff.newClass.name;
+		warnHashSemanticDependencies(newBytes, addedInstanceFields);
 		try {
 			BuiltPatch built = buildPatch(host, newBytes, className,
 			 addedStaticFields, addedInstanceFields, pending);

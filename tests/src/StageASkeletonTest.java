@@ -1,6 +1,15 @@
 import org.junit.jupiter.api.Test;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.InsnList;
+import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
+import org.objectweb.asm.tree.MethodInsnNode;
+import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TypeInsnNode;
+import org.objectweb.asm.tree.VarInsnNode;
 import remold.ref.ConstructorTailInjector;
 import remold.ref.ConstructorTailInjector.FieldInit;
 import remold.ref.StageASkeleton;
@@ -13,9 +22,12 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -208,9 +220,102 @@ class StageASkeletonTest {
 		assertTrue(type.getDeclaredMethods().length >= 1, "the class must still be loadable and usable");
 	}
 
+	@Test
+	void everyPreexistingMethodKeepsItsOldBodyVerbatim() throws Exception {
+		byte[] v1 = compile("stage.I", """
+			package stage;
+			public class I {
+			    public int a = 1;
+			    public int b;
+			    public String changed() { return "old"; }
+			    public String untouched() { return "same"; }
+			    public int compute(int x) { return x * 2 + a; }
+			}
+			""");
+		byte[] v2 = compile("stage.I", """
+			package stage;
+			public class I {
+			    public int a = 1;
+			    public int b;
+			    public String changed() { return "new:" + b; }
+			    public String untouched() { return "same"; }
+			    public int compute(int x) { return x * 3 + a; }
+			}
+			""");
+
+		byte[] stageA = StageASkeleton.build(v1, v2);
+
+		Map<String, String> oldBodies = methodBodies(v1);
+		Map<String, String> stageBodies = methodBodies(stageA);
+
+		for (Map.Entry<String, String> e : oldBodies.entrySet()) {
+			assertEquals(e.getValue(), stageBodies.get(e.getKey()),
+				"stage A must run the old bytecode for " + e.getKey()
+				+ " — the transactional abort path ('stay on the stable old version') depends on it,"
+				+ " so restoring every pre-existing body is deliberate, not an oversight");
+		}
+	}
+
+	@Test
+	void newMethodsAreNotReverted() throws Exception {
+		byte[] v1 = compile("stage.J", """
+			package stage;
+			public class J {
+			    public int a = 1;
+			}
+			""");
+		byte[] v2 = compile("stage.J", """
+			package stage;
+			public class J {
+			    public int a = 1;
+			    public String fresh() { return "fresh"; }
+			}
+			""");
+
+		byte[] stageA = StageASkeleton.build(v1, v2);
+
+		assertFalse(methodBodies(v1).containsKey("fresh()Ljava/lang/String;"),
+			"precondition: the method does not exist in the old version");
+		assertTrue(methodBodies(stageA).containsKey("fresh()Ljava/lang/String;"),
+			"a method that only exists in the new version must be pre-injected (dormant), not dropped");
+		assertEquals("fresh", call(load(stageA, "stage.J"), "fresh"),
+			"the pre-injected method must carry its new body");
+	}
+
 	// ------------------------------------------------------------------------------------------------
 	// fixtures
 	// ------------------------------------------------------------------------------------------------
+
+	/** {@code name+desc -> 指令指纹}，只取真实指令，忽略 label / line number / frame。 */
+	private static Map<String, String> methodBodies(byte[] bytes) {
+		ClassNode cn = new ClassNode();
+		new ClassReader(bytes).accept(cn, 0);
+		Map<String, String> out = new LinkedHashMap<>();
+		for (MethodNode mn : cn.methods) {
+			StringBuilder sb = new StringBuilder();
+			for (AbstractInsnNode n : mn.instructions) {
+				int op = n.getOpcode();
+				if (op < 0) continue;
+				sb.append(op);
+				if (n instanceof FieldInsnNode f) {
+					sb.append(' ').append(f.owner).append('.').append(f.name).append(':').append(f.desc);
+				} else if (n instanceof MethodInsnNode m) {
+					sb.append(' ').append(m.owner).append('.').append(m.name).append(m.desc);
+				} else if (n instanceof LdcInsnNode l) {
+					sb.append(' ').append(l.cst);
+				} else if (n instanceof VarInsnNode v) {
+					sb.append(" #").append(v.var);
+				} else if (n instanceof IntInsnNode i) {
+					sb.append(" #").append(i.operand);
+				} else if (n instanceof TypeInsnNode t) {
+					sb.append(' ').append(t.desc);
+				}
+				sb.append(';');
+			}
+			out.put(mn.name + mn.desc, sb.toString());
+		}
+		return out;
+	}
 
 	private static String call(Class<?> type, String method) throws Exception {
 		Method m = type.getMethod(method);

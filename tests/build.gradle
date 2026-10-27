@@ -342,6 +342,58 @@ tasks.register("liveDcevmTest", JavaExec) {
 	}
 }
 
+// 9.5 P05Probe (P0.5 前置微验证：两阶段重定义 / 阶段 A 链接 / 堆遍历规模)
+// 需要 DCEVM 能力，不挂 check；用 -Pp05.jbr=<jdk-home> 或 JBR_HOME/JAVA_HOME_DCEVM/JAVA_HOME_21_X64 指定运行时。
+// 刻意使用最小 agent（P05Agent）而非 remold-agent：测量目标是 JVM/DCEVM 原生能力，
+// 不能让 Remold 自身的 LayoutGate / InitFix / Mindustry 钩子介入被测的重定义。
+def p05AgentJar = tasks.register("p05AgentJar", Jar) {
+	archiveFileName = "p05-agent.jar"
+	destinationDirectory = layout.buildDirectory.dir("p05")
+	from(sourceSets.main.output) {
+		include "P05Agent*.class"
+	}
+	manifest {
+		attributes(
+			"Premain-Class": "P05Agent",
+			"Can-Redefine-Classes": "true",
+			"Can-Retransform-Classes": "true"
+		)
+	}
+}
+
+tasks.register("p05Probe", JavaExec) {
+	group = "verification"
+	description = "P0.5 前置微验证探针 (P05Probe)：连续 Schema Redefine、阶段 A 预注入链接、百万级堆遍历"
+	dependsOn classes
+	dependsOn p05AgentJar
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "P05Probe"
+	maxHeapSize = "1g"
+	def jbrHome = (project.findProperty("p05.jbr") as String)
+		?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+	if (jbrHome != null) {
+		def javaBin = new File(jbrHome, System.getProperty("os.name").toLowerCase().contains("win") ? "bin/java.exe" : "bin/java")
+		if (javaBin.exists()) {
+			executable = javaBin.absolutePath
+			javaLauncher.set((JavaLauncher) null)
+		} else {
+			logger.lifecycle("[p05Probe] 指定的运行时不存在，回退当前 JVM: " + javaBin.absolutePath)
+		}
+	}
+	doFirst {
+		jvmArgs "-javaagent:${p05AgentJar.get().archiveFile.get().asFile.absolutePath}",
+		        "-XX:+AllowEnhancedClassRedefinition",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+		if (nativeLibPath != null) {
+			jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+		}
+		try {
+			def j21 = javaToolchains.compilerFor { languageVersion = JavaLanguageVersion.of(21) }.get().executablePath.asFile.absolutePath
+			systemProperty "hstest.javac21", j21
+		} catch (Exception ignored) {}
+	}
+}
+
 // check 挂载全部断言
 check.dependsOn test
 check.dependsOn verifyTestCount

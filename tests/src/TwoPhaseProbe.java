@@ -76,7 +76,7 @@ public class TwoPhaseProbe {
 		}
 		""";
 
-	public static void main(String[] args) throws Exception {
+	public static void main(String[] args) throws Throwable {
 		System.out.println("=== TwoPhaseProbe: stage A -> B -> C orchestration ===");
 		System.out.println("   java.vm.name = " + System.getProperty("java.vm.name")
 		                   + ", java.version = " + System.getProperty("java.version"));
@@ -100,6 +100,7 @@ public class TwoPhaseProbe {
 		try {
 			scenario(inst, javac, base, true);
 			scenario(inst, javac, base, false);
+			scenarioJitWarmup(inst, javac, base);
 		} finally {
 			deleteRecursively(base);
 		}
@@ -187,6 +188,82 @@ public class TwoPhaseProbe {
 	}
 
 	// ------------------------------------------------------------------------------------------------
+	// JIT warm-up scenario
+	// ------------------------------------------------------------------------------------------------
+
+	static final String SRC_JIT_A_V1 = """
+		package jit;
+		public class A {
+		    public int a = 1;
+		    public String hi() { return "v1:" + a; }
+		}
+		""";
+
+	static final String SRC_JIT_A_V2 = """
+		package jit;
+		public class A {
+		    public int a = 1;
+		    public int b = 42;
+		    public String hi() { return "v2:" + a + "," + b; }
+		}
+		""";
+
+	static final String SRC_JIT_B = """
+		package jit;
+		public class B {
+		    public static A make() { return new A(); }
+		}
+		""";
+
+	/**
+	 * Does a JIT-compiled allocation site survive a schema redefinition of the allocated class?
+	 *
+	 * <p>This is the sharper version of the "in-flight constructor" case: {@code B.make()} is warmed
+	 * until the JIT inlines {@code new A()} with A's <b>old instance size</b>. If the redefinition's
+	 * dependency invalidation has a hole, the compiled site keeps allocating old-sized objects and the
+	 * new field lands outside them — memory corruption rather than a wrong value.</p>
+	 */
+	static void scenarioJitWarmup(Instrumentation inst, String javac, File base) throws Throwable {
+		System.out.println("\n--- [JIT warm-up] does a compiled allocation site survive redefinition? ---");
+		File work = new File(base, "jit");
+		File v1Dir = compile(javac, new File(work, "v1"), "A.java", SRC_JIT_A_V1);
+		compile(javac, new File(work, "v1"), "B.java", SRC_JIT_B);
+		File v2Dir = compile(javac, new File(work, "v2"), "A.java", SRC_JIT_A_V2);
+		compile(javac, new File(work, "v2"), "B.java", SRC_JIT_B);
+
+		byte[] aV2 = Files.readAllBytes(new File(v2Dir, "jit/A.class").toPath());
+
+		URLClassLoader cl = new URLClassLoader(new URL[]{v1Dir.toURI().toURL()},
+		                                       TwoPhaseProbe.class.getClassLoader());
+		try {
+			Class<?> a = Class.forName("jit.A", true, cl);
+			Class<?> b = Class.forName("jit.B", true, cl);
+			java.lang.invoke.MethodHandle make =
+				java.lang.invoke.MethodHandles.publicLookup().unreflect(b.getMethod("make"));
+
+			int warmup = 500_000;
+			for (int i = 0; i < warmup; i++) make.invoke();
+			check(a.getDeclaredFields().length == 1, "before redefinition A declares only field 'a'");
+
+			long us = redefine(inst, a, aV2);
+			check(true, "A redefined with the added field (VM operation took " + us + "us)");
+
+			int badType = 0;
+			for (int i = 0; i < 200_000; i++) {
+				if (make.invoke().getClass() != a) badType++;
+			}
+			check(badType == 0, "every object from the warmed allocation site is still an instance of A");
+
+			Object sample = make.invoke();
+			checkEq("v2:1,42", call(a, sample, "hi"),
+				"the warmed allocation site produces correctly initialized objects after redefinition");
+			checkEq(42, getInt(a, sample, "b"), "the added field is readable on objects from the warmed site");
+		} finally {
+			cl.close();
+		}
+	}
+
+	// ------------------------------------------------------------------------------------------------
 	// helpers
 	// ------------------------------------------------------------------------------------------------
 
@@ -206,13 +283,19 @@ public class TwoPhaseProbe {
 	}
 
 	static File compile(String javac, File workDir, String source) throws Exception {
+		return compile(javac, workDir, "Subj.java", source);
+	}
+
+	static File compile(String javac, File workDir, String fileName, String source) throws Exception {
 		File srcDir = new File(workDir, "src");
 		File outDir = new File(workDir, "out");
 		srcDir.mkdirs();
 		outDir.mkdirs();
-		File f = new File(srcDir, "Subj.java");
+		File f = new File(srcDir, fileName);
 		Files.writeString(f.toPath(), source);
-		runCmd(javac, "-nowarn", "-encoding", "UTF-8", "-d", outDir.getAbsolutePath(), f.getAbsolutePath());
+		runCmd(javac, "-nowarn", "-encoding", "UTF-8",
+		       "-cp", outDir.getAbsolutePath(),
+		       "-d", outDir.getAbsolutePath(), f.getAbsolutePath());
 		return outDir;
 	}
 

@@ -393,7 +393,9 @@ def dcevmProbe = { String taskName, String mainClassName, String desc ->
 			        "--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
 			        "--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED",
 			        // 交叉验证 M6：枚举期间到底有没有一段 STW
+			        // 观测先行：safepoint 看停顿、gc 看分配压力（探针的结论必须能被日志交叉验证）
 			        "-Xlog:safepoint=info:file=${new File(p05Dir, 'safepoint.log').absolutePath}",
+			        "-Xlog:gc*=info:file=${new File(p05Dir, 'gc.log').absolutePath}",
 			        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
 			if (nativeLibPath != null) {
 				jvmArgs "-Dremold.path.libtool=${nativeLibPath}"

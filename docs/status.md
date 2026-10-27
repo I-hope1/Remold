@@ -166,7 +166,7 @@
 | **JDK 8 raw-bits CAS 自动化 CI 差异验证缺失** | P2 | `.github/workflows/ci.yml` / `HotswapBridge` | 当前 CI 仅运行在 Temurin 25，无法区分 raw-bits 与旧实现；JDK 8 raw-bits CAS 为手工验证，非持续自动化覆盖；需在 CI 矩阵中增加 JDK 8 运行期任务以持续守护差异逻辑。 |
 | **Mixin 目标类原始字节码读取缺兜底** | P2 | `plugin-mixin` `MixinHotSwap` | 目标类重织入依赖 `Class.getResourceAsStream` 读原始字节码；Fabric dev 环境下若取不到（日志「读不到 ... 原始字节码」），当前无回退路径。缺的是 `IClassBytecodeProvider.getClassNode(name, false)` + ASM 回写兜底。 |
 | **未加载的 `@Mixin` 类被当作新类注入** | P3 | `core` `RemoldAgent` 新类注入路径 | 未加载且带 `@Mixin` 的类会走新类注入并打印 `[INJECTED]`，功能无影响但属日志噪音与多余类定义；彻底消除需在注入路径做常量池级 `@Mixin` 识别后跳过。 |
-| **批次内按类重复全堆遍历** | P2 | `InitFix.collectInstancesForPatch` / `LibTool.getInstances` | 每个待补类各调用一次 `IterateOverInstancesOfClass`，而每次调用都是一次 safepoint（1M 匹配实例时 `HeapIterateOperation` 实测约 240 ms，见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10.2）：批次里 N 个待补类 = N 次停世界。可用 `IterateThroughHeap` 一次走完、按类分发，把 N 次停顿压成 1 次；但单遍历没有 VM 内的 klass 过滤，盈亏平衡点要按实测定，N 很小时可能反而更慢。 |
+| **批次内按类重复全堆遍历** | P2 | `InitFix.collectInstancesForPatch` / `LibTool.getInstances` | 每个待补类各调用一次 `IterateOverInstancesOfClass`，而每次调用都是一次 safepoint（1M 匹配实例时 `HeapIterateOperation` 实测约 240 ms，见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10.2）：批次里 N 个待补类 = N 次停世界。可用 `IterateThroughHeap` 一次走完、按类分发，把 N 次停顿压成 1 次。**但这是「N 次短停顿」换「1 次长停顿」**：单遍历没有 VM 内的 klass 过滤，每个对象都要进 native 回调，最大单次停顿大概率更差；对延迟敏感的场景未必划算。做之前必须同时测总停顿与最大单次停顿，并先统计真实批次类数 N（N 很小时很可能不值得）。 |
 
 > 关于 `AnonClassHasher.MAX_DEPTH`：该类注释已明确其为**永不生效的历史遗留常量**（`hash` 不递归自调用，三处调用点全传 `depth = 0`，`DeepNestProbe` 实测 depth 8 仍能正确对齐）。保留它是为了不动公开签名 `hash(..., int depth)`，**不应再作为「嵌套深度上限」引用，也不应作为技术债重复登记**。
 
@@ -283,7 +283,7 @@
 - **触发条件**：新增字段被 `hashCode()` 或 `equals()` 引用，且该类实例已被放入哈希容器。
 - **当前缓解措施**：分析期静态检测 —— `HashSemantics.findDependencies` 在**本类内建调用图**（从 `hashCode()` / `equals()` / `compareTo()` 出发，沿同类 `invoke*` 求可达方法集），命中对本轮新增实例字段的读取时，`InitFix.transform` 经统一出口发 `warn`（`[HASH-SEMANTICS]`）。建调用图是必要的：Lombok `@EqualsAndHashCode` 生成的代码优先调用 getter（字节码是 `invokevirtual getId()`），手写的也常转调私有 `key()` / `computeHash()`，只看直接 `GETFIELD` 会把这两类常见写法全部漏掉。`HashSemanticsTest` 11 用例（先红后绿）。
 - **语义取舍**：当前**只告警不拒绝**。注意「拒绝补丁会让新代码读到 0」只在「拒绝的是补丁、重定义照常进行」时成立；若 reject 指拒绝整个热更，新代码根本不会上线，那是另一种取舍。**严格模式尚未实现**——它需要 `RemoldAgent` 提供整批中止入口（`InitFix.transform` 无法中止批次），属于驱动接入阶段的工作。
-- **残余边界**：只沿**同类**调用（跨类调用不跟进，否则误报面会扩到整条依赖链）；getter 是否被覆写不区分，一律保守命中，宁可多告警。
+- **残余边界**：只沿**同类**调用（跨类调用不跟进，否则误报面会扩到整条依赖链）；getter 是否被覆写不区分，一律保守命中，宁可多告警。**两处已知漏报**：①**子类**——新增字段声明在被热更类 P，但子类 C 的 `hashCode()` 里写 `this.id`，`getfield` 的 owner 是 C，而 `transform` 只扫 P 自己的方法，需对被热更类的已加载子类各扫一遍才能覆盖；②**跨类读取**——`Key.hashCode()` 调 `inner.getId()`（`inner` 是被热更类的实例）扫不到，要建跨类调用图，成本高，暂列为已知边界不实现。
 - **根治与关闭条件**：VM 层无法根治（容器由用户代码持有）。可行方向是在分析期扫描新类的 `hashCode()` / `equals()`，一旦发现读取本轮新增字段就**显式拒绝或强告警**，由用户重建容器或重启。
 - **关联设计规范**：[`docs/initfix/01-safety-gate.md`](initfix/01-safety-gate.md) §2。
 - **关联架构决策**：无。
@@ -326,7 +326,7 @@
 | 条目 | 状态 | 落地位置 | 验收证据与已知边界 |
 |:---|:---:|:---|:---|
 | P0.5 前置微验证（连续 Schema Redefine / 阶段 A 链接 / 堆遍历规模） | 🔶 | `tests/src/P05Probe.java`、`tests/src/P05Agent.java`、`tests/build.gradle`（任务 `p05Probe`）、`.github/workflows/ci.yml`（任务 `p05-probe`，JBR 17/21 矩阵） | JBR 21.0.9 本机 **21/21 断言通过**：连续两次 schema 变化均被接受（阶段 A p50 30.9 ms、阶段 C p50 27.3 ms；schema 变更平均触发 1 次 GC ≈ 5 ms，纯方法体变更 0 次）；阶段 A 预注入的私有实例方法、私有静态方法与新 lambda 可被 nestmate 伴生类链接，并带「阶段 A 之前必抛 `NoSuchMethodError`」的负向对照；1M 实例堆遍历 0.87 s、结果数组 4 MiB。**缺口**：JBR 17 数据待 CI `p05-probe` 矩阵产出后回填；单机单次采样，未做 Linux 对照与 JIT 预热隔离。方法与原始数据见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) |
-| 两阶段编排端到端验证 | 🔶 | `tests/src/TwoPhaseProbe.java`、`tests/build.gradle`（任务 `twoPhaseProbe`） | JBR 21 本机 **18/18 断言通过**：`阶段 A → redefine → 阶段 B 补丁 → 阶段 C redefine` 全链路跑通（阶段 A 17~37 ms、阶段 B 7 ms/1 实例、阶段 C 31~35 ms）；对照组证明不插桩时「枚举之后、阶段 C 之前」新建的实例永久停在 `v2:1,0`。**缺口**：未覆盖中止回滚、多类批次与真实多线程分配竞争；探针在主流程之外，驱动尚未接入。见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §9 |
+| 两阶段编排端到端验证 | 🔶 | `tests/src/TwoPhaseProbe.java`、`tests/build.gradle`（任务 `twoPhaseProbe`） | JBR 21 本机 **23/23 断言通过**：`阶段 A → redefine → 阶段 B 补丁 → 阶段 C redefine` 全链路跑通（阶段 A 17~37 ms、阶段 B 7 ms/1 实例、阶段 C 31~35 ms）；对照组证明不插桩时「枚举之后、阶段 C 之前」新建的实例永久停在 `v2:1,0`；另含 **JIT 预热分配点**场景（预热 50 万次 `B.make()` 后 redefine A，继续调用 20 万次全部正常），验证已编译的 `new A()` 在重定义后被正确失效。**缺口**：未覆盖中止回滚、多类批次与真实多线程分配竞争；探针在主流程之外，驱动尚未接入。见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §9、§11 |
 
 
 

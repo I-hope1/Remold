@@ -434,7 +434,7 @@ M7 的夹具（`B` 不改、继续读 `A.x`）**不是**正常的编辑—编译
 | `C ∈ 本批` | **新**字节码（`newBatchBytes`） | 批次落地后跑的是新字节码；若它仍引用该字段，说明改动本身不自洽 |
 | `C ∉ 本批` | **当前**字节码（`bytecodeCache` / `fetchOriginalBytecode`） | 它不会被重定义，现在读什么，批次落地后还读什么 |
 
-命中 `Fieldref O/x`（**`O ∈ {A} ∪ descendants(A)`**，不能只匹配 `A`——原因见 §13.6.2）→ 拒绝，并把**具体类名**写进报告；全无命中 → 放行。
+命中 `Fieldref O/x`（**`O ∈ {A} ∪ descendants(A)`**，不能只匹配 `A`，但要按遮蔽截断——原因见 §13.6.2）→ 拒绝，并把**具体类名**写进报告；全无命中 → 放行。
 
 #### 13.6.1 两条被"一刀切"误杀的安全删除
 
@@ -465,21 +465,38 @@ static void writeViaSub(Sub s, int v) { s.x = v; }
 **同一个字段 `A.x`，owner 可以是 `A`，也可以是任意子类。** 所以删 `A.x` 时，匹配规则必须是：
 
 ```
-owner ∈ {A} ∪ descendants(A)
+owner ∈ {A} ∪ descendants(A)      ← 但要按下面的"遮蔽截断"裁剪
 ```
 
-`descendants` 取**已加载**的子类集合（未加载子类的读者属于 §13.6.4 的覆盖缺口）。索引查询因此不是一个 key，而是 `{A} ∪ descendants(A)` 这组 key 的并集。
+`descendants` 取**已加载**的子类集合（未加载子类的读者属于 §13.6.4 的覆盖缺口）。索引查询因此不是一个 key，而是这组 key 的并集。
 
-两个附带结论：
+##### 遮蔽截断（否则误报）
 
-- **扫常量池而不是扫指令**天然覆盖全部四种访问：`GETFIELD` / `PUTFIELD` / `GETSTATIC` / `PUTSTATIC` 引用的是同一个 `Fieldref`/`Fieldref` 常量，不必按 opcode 分叉。上面 `writeViaSub` 的 `putfield` 就是同一个 `#7` 常量。
-- **private 的便宜路径不受影响**：能合法读 `A` 的 private 字段的类必在 nest 内，所以"只扫 nest 成员"这个范围仍然成立；只是匹配时同样要按 `owner ∈ {A} ∪ descendants(A)` 判，不能假定 owner 就是 `A`。
+字段可以被**遮蔽**：子类自己声明同名字段后，`Sub/x` 解析到的是 `Sub.x`，不是 `A.x`。实测（`A{public int x}`、`Sub extends A{public int x}`、`SubSub extends Sub`）：
+
+```
+viaA(A a)        -> Field Hide$A.x:I
+viaSub(Sub s)    -> Field Hide$Sub.x:I        ← 指向 Sub.x，不是 A.x
+viaSubSub(SubSub s) -> Field Hide$SubSub.x:I  ← 同样解析到 Sub.x
+viaSubCastA(Sub s)  -> Field Hide$A.x:I       ← 显式转成 A 才回到 A.x
+```
+
+所以展开要**在第一个重新声明处停止，且该子类本身也不算**。精确判据（等价于 JVMS 5.4.3.2 的字段解析）：
+
+> `O` 计入，当且仅当从 `O` 开始沿父类链查找 `(x, desc)`，**第一个声明它的类是 `A`**。
+
+注意截断要按 **name + desc** 一起判——字段解析同时匹配名字和描述符；子类声明了同名但不同类型的 `x` 时，`Fieldref O/x:I` 仍会向上解析到 `A.x:I`，此时 `O` 必须计入。
+
+##### 两个附带结论
+
+- **扫常量池而不是扫指令**天然覆盖全部四种访问：`GETFIELD` / `PUTFIELD` / `GETSTATIC` / `PUTSTATIC` 引用的是同一个 `Fieldref` 常量，不必按 opcode 分叉。上面 `writeViaSub` 的 `putfield` 就是同一个 `#7` 常量。
+- **private 字段不需要展开**：JLS §6.6 / §8.3 规定 private 成员不被继承，`s.x`（`s` 是子类类型）根本编译不过，必须写成 `((A) s).x`——而一旦强转，qualifying type 就是 `A`。实测：nest 内 `((A) s).x` 产出 `Field NestTest$A.x:I`。所以 private 字段的 owner **恒为 `A`**，展开与遮蔽截断都可以省掉。此前这里写成"private 也要展开"属于过度近似（只多算不漏检），但会白白多遍历一遍继承树。
 
 #### 13.6.3 实现分层与成本
 
 1. **一次热更建一次索引**：遍历已加载类，常量池扫 `Fieldref`（pre-11 还要看 `Methodref` 的 `access$*`），得到 `(owner.name) → 读者类名集合`。之后每个被删成员查一次表（按 §13.6.2 展开 owner）。
 2. **只在"本轮有成员被删"时才建索引**——删除是罕见事件，不拖慢常规热更。
-3. **private 字段可以先走便宜路径**：`ClassHierarchyOracle.getNestMembers` 已经现成，取 `nest ∩ 批次外` 逐个扫；nest 通常只有几个类，比全量扫描便宜得多。非 private 字段再走全量索引。
+3. **private 字段可以先走便宜路径**：`ClassHierarchyOracle.getNestMembers` 已经现成，取 `nest ∩ 批次外` 逐个扫；nest 通常只有几个类，比全量扫描便宜得多。且 private 的 owner **恒为 `A`**（§13.6.2），连继承树展开与遮蔽截断都省掉。非 private 字段再走全量索引。
 
 #### 13.6.4 扫描范围：判据的完备性完全取决于它
 
@@ -543,3 +560,5 @@ major < 55 才需要上面这套折算。
 - **读者扫描的成本**：§13.6 的判据未实现，也未测过"枚举已加载类 + 扫常量池"的耗时；扫描范围取哪一档（§13.6.4）尚未决策。
 - **合成访问器的折算未实现**：§13.6.5 只给出判据（`access$*` 的目标变了就等价于旧目标被删），没有代码。
 - **`access$` 编号规则的完整形态**：只测了"两个 int 字段、删前一个"这一种组合。javac 的编号里还编码了访问种类（读/写/调用），多字段、混合读写、字段与方法混合时编号如何分配**未逐一验证**。
+- **接口方法删除的失败形态**：只观察到 `InterfaceMethodref`(11) 这个 tag 存在（实测 `#7 = InterfaceMethodref I.d:()I`），没有实测"删 default 方法后陈旧调用者抛什么"。机制上应是 `NoSuchMethodError`，未验证。
+- **字段遮蔽的跨层形态**：只测了"子类遮蔽、孙类继承子类的 `x`"这一种。多级遮蔽、同名但不同类型（描述符不同）时 `Fieldref` 的解析结果**未逐一验证**。

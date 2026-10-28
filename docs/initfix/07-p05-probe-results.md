@@ -434,7 +434,7 @@ M7 的夹具（`B` 不改、继续读 `A.x`）**不是**正常的编辑—编译
 | `C ∈ 本批` | **新**字节码（`newBatchBytes`） | 批次落地后跑的是新字节码；若它仍引用该字段，说明改动本身不自洽 |
 | `C ∉ 本批` | **当前**字节码（`bytecodeCache` / `fetchOriginalBytecode`） | 它不会被重定义，现在读什么，批次落地后还读什么 |
 
-命中 `Fieldref A/x` → 拒绝，并把**具体类名**写进报告；全无命中 → 放行。
+命中 `Fieldref O/x`（**`O ∈ {A} ∪ descendants(A)`**，不能只匹配 `A`——原因见 §13.6.2）→ 拒绝，并把**具体类名**写进报告；全无命中 → 放行。
 
 #### 13.6.1 两条被"一刀切"误杀的安全删除
 
@@ -445,13 +445,43 @@ M7 的夹具（`B` 不改、继续读 `A.x`）**不是**正常的编辑—编译
 
 这也说明 `WAIVE` 的 liveness 代理对删除为什么错：它回答"**现在**有没有实例会被错读"，而删除要问的是"**批次落地后**还有没有代码会读"。两个问题正交——所以修法不是"删除不适用 `WAIVE`"，而是"删除改问另一个问题"（`docs/status.md` 风险 12）。
 
-#### 13.6.2 实现分层与成本
+#### 13.6.2 `Fieldref` 的 owner 不是声明类，必须沿继承树展开
 
-1. **一次热更建一次索引**：遍历已加载类，常量池扫 `Fieldref`（pre-11 还要看 `Methodref` 的 `access$*`），得到 `(owner.name) → 读者类名集合`。之后每个被删成员查一次表。
+这是判据里最容易写漏的一处，且会直接导致**漏报**。
+
+`CONSTANT_Fieldref_info` 的 `class_index` 记的是**编译期静态类型**（qualifying type），不是字段实际声明所在的类。实测（javac 21，`A { public int x; protected int p; }`，`Sub extends A`，`Reader` 两种静态类型各读一遍）：
+
+```
+static int viaSub(Sub s) { return s.x + s.p; }
+    getfield  Field Sub.x:I
+    getfield  Field Sub.p:I
+static int viaA(A a)   { return a.x + a.p; }
+    getfield  Field A.x:I
+    getfield  Field A.p:I
+static void writeViaSub(Sub s, int v) { s.x = v; }
+    putfield  Field Sub.x:I
+```
+
+**同一个字段 `A.x`，owner 可以是 `A`，也可以是任意子类。** 所以删 `A.x` 时，匹配规则必须是：
+
+```
+owner ∈ {A} ∪ descendants(A)
+```
+
+`descendants` 取**已加载**的子类集合（未加载子类的读者属于 §13.6.4 的覆盖缺口）。索引查询因此不是一个 key，而是 `{A} ∪ descendants(A)` 这组 key 的并集。
+
+两个附带结论：
+
+- **扫常量池而不是扫指令**天然覆盖全部四种访问：`GETFIELD` / `PUTFIELD` / `GETSTATIC` / `PUTSTATIC` 引用的是同一个 `Fieldref`/`Fieldref` 常量，不必按 opcode 分叉。上面 `writeViaSub` 的 `putfield` 就是同一个 `#7` 常量。
+- **private 的便宜路径不受影响**：能合法读 `A` 的 private 字段的类必在 nest 内，所以"只扫 nest 成员"这个范围仍然成立；只是匹配时同样要按 `owner ∈ {A} ∪ descendants(A)` 判，不能假定 owner 就是 `A`。
+
+#### 13.6.3 实现分层与成本
+
+1. **一次热更建一次索引**：遍历已加载类，常量池扫 `Fieldref`（pre-11 还要看 `Methodref` 的 `access$*`），得到 `(owner.name) → 读者类名集合`。之后每个被删成员查一次表（按 §13.6.2 展开 owner）。
 2. **只在"本轮有成员被删"时才建索引**——删除是罕见事件，不拖慢常规热更。
 3. **private 字段可以先走便宜路径**：`ClassHierarchyOracle.getNestMembers` 已经现成，取 `nest ∩ 批次外` 逐个扫；nest 通常只有几个类，比全量扫描便宜得多。非 private 字段再走全量索引。
 
-#### 13.6.3 扫描范围：判据的完备性完全取决于它
+#### 13.6.4 扫描范围：判据的完备性完全取决于它
 
 这是本判据最容易含糊过去的地方，必须写死。`bytecodeCache` 的实际覆盖范围是**已加载且被 agent 处理过的类**
 （`applyRedefineLayoutGate` 用 `fetchOriginalBytecode` 补已加载类、`applyRedefinitions` 成功后写入、
@@ -467,7 +497,7 @@ M7 的夹具（`B` 不改、继续读 `A.x`）**不是**正常的编辑—编译
 它给出的不是安全，而是**虚假的安全感**——比现在一律拒绝更糟。所以实现时的最低档位应是
 "已加载类 + 工程构建输出"，并在报告里明确"第三方 jar 中的陈旧读者仍可能漏"。
 
-#### 13.6.4 pre-11 的合成访问器：实测结果比"归到风险 11"复杂
+#### 13.6.5 pre-11 的合成访问器：实测结果比"归到风险 11"复杂
 
 javac 8 给 nest 访问生成 `access$NNN` 桥。实测（javac 21 `--release 8`，两个 private 字段 `x`、`y`）：
 
@@ -500,9 +530,9 @@ v2（删掉 x）:  private int y;
 由此还有一个版本分叉：major ≥ 55（Java 11+，nestmate）没有桥，直接 `GETFIELD`，扫 `Fieldref` 就够；
 major < 55 才需要上面这套折算。
 
-#### 13.6.5 其他边界
+#### 13.6.6 其他边界
 
-- 索引只覆盖**已加载**的类；之后从过期 jar 新加载的类仍可能引用它（见 §13.6.3 的档位取舍）。
+- 索引只覆盖**已加载**的类；之后从过期 jar 新加载的类仍可能引用它（见 §13.6.4 的档位取舍）。
 - 成本未实测：一次热更做一遍"全部已加载类 + 常量池扫描"，量级与 `getAllLoadedClasses()` 的规模成正比。
 
 ### 13.7 未覆盖
@@ -510,6 +540,6 @@ major < 55 才需要上面这套折算。
 - **静态字段删除**：机制上同样是 `GETSTATIC` 解析失败，但未实测；`LayoutGate` 对静态字段是强拒绝（不可 waive）。
 - **引用类型字段删除**：本用例只测 `int`。
 - **JBR 17 / 标准 HotSpot**：只在 JBR 21.0.9 上测过；标准 HotSpot 直接拒绝 schema 变更，无从对比。
-- **读者扫描的成本**：§13.6 的判据未实现，也未测过"枚举已加载类 + 扫常量池"的耗时；扫描范围取哪一档（§13.6.3）尚未决策。
-- **合成访问器的折算未实现**：§13.6.4 只给出判据（`access$*` 的目标变了就等价于旧目标被删），没有代码。
+- **读者扫描的成本**：§13.6 的判据未实现，也未测过"枚举已加载类 + 扫常量池"的耗时；扫描范围取哪一档（§13.6.4）尚未决策。
+- **合成访问器的折算未实现**：§13.6.5 只给出判据（`access$*` 的目标变了就等价于旧目标被删），没有代码。
 - **`access$` 编号规则的完整形态**：只测了"两个 int 字段、删前一个"这一种组合。javac 的编号里还编码了访问种类（读/写/调用），多字段、混合读写、字段与方法混合时编号如何分配**未逐一验证**。

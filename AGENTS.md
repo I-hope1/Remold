@@ -72,6 +72,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 构造器尾部插桩 | `ConstructorTailInjector`（`core/src/remold/ref/`，纯函数：根构造器 `RETURN` 前注入字段切片） |
 | 哈希语义门控 | `HashSemantics`（`core/src/remold/ref/`，本类内调用图扫 `hashCode`/`equals`/`compareTo` 及其可达方法是否读新增实例字段，只告警不拒绝） |
 | 删除成员的读者分析 | `RemovedMemberReaders`（`core/src/remold/ref/`，纯函数：按 JVMS 5.4.3.2/5.4.3.3 判"改动后引用是否悬空"，区分读者 / 判不了 / 改指向三种结果） |
+| 读者扫描成本探针 | `tests/src/ReaderScanProbe.java`（`./gradlew :tests:readerScanProbe`，不需要 DCEVM）：常量池扫描 vs 方法体精扫、三档扫描范围的真实成本 |
 | 阶段 A 骨架合成 | `StageASkeleton`（`core/src/remold/ref/`，纯函数：新结构 + 旧执行体，成员按旧 ∪ 新） |
 | 注解 | `remold.annotation.RemoldReinit` |
 | 合成字段过滤 | `ClassDiffUtil.isInternalMarkerField` |
@@ -134,6 +135,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 - 迭代期间只跑 `./gradlew initFixOracle`，收尾时才跑一次 `./gradlew check`。
 - 匿名类/对齐主题套件为标准 JUnit 测试：`./gradlew test`（或 `./gradlew :tests:test`，挂在 `check`）。入口用 `-Dhstest.javac8/11/17/21/25` 现编夹具，不再有 `expected-count.txt` 基线。
 - P0.5 前置验证：`./gradlew :tests:p05Probe -Pp05.jbr=<DCEVM JDK 目录>`（或设 `JBR_HOME`）。**不挂 `check`**，因为需要 JBR 17/21 的 `-XX:+AllowEnhancedClassRedefinition`；CI 由 `p05-probe` 的 JBR 17/21 矩阵承担。探针刻意用最小 agent（`P05Agent`）而非 `remold-agent.jar`，避免 `LayoutGate`/`InitFix` 介入被测重定义。
+- 读者扫描成本验证：`./gradlew :tests:readerScanProbe`（只需 `-javaagent` 提供 Instrumentation，不需要 DCEVM）。改动 `RemovedMemberReaders.refs` 后必须先跑它：其中一条断言要求"常量池扫描是方法体精扫的超集"。
 - 两阶段编排验证：`./gradlew :tests:twoPhaseProbe -Pp05.jbr=<DCEVM JDK 目录>`，把 `StageASkeleton` / `ConstructorTailInjector` / `InitFix` 串成 `A → redefine → B → C → redefine` 跑一遍（同样不挂 `check`）。改动两阶段相关代码后必须先跑它，再考虑动 `RemoldAgent`。
 - 耗时类探针固定报 **min / median / max** 三个数；结论必须同时对 min 与 median 成立，只对其中一个成立时标注「口径敏感」，不得只报有利的那个。统计量不得在看到数据之后才选。
 - 探针日志默认带 `-Xlog:safepoint`（`uptimenanos` 装饰符）、`-Xlog:gc*`、`-Xlog:jit+compilation=debug`，落在 `build/p05/`。断言里引用日志时间戳时，基准必须取 safepoint 窗口的**开始**（`时间戳 − Total`）——日志行是在 safepoint 结束时打印的；unified logging 有缓冲，日志分析要放在运行结束后做。

@@ -418,6 +418,22 @@ dcevmProbe("p05Probe", "P05Probe",
 dcevmProbe("twoPhaseProbe", "TwoPhaseProbe",
 	"两阶段编排端到端探针 (TwoPhaseProbe)：阶段 A → redefine → 阶段 B 补丁 → 阶段 C redefine")
 
+// 读者扫描成本探针：不需要 DCEVM，只需要 Instrumentation 来枚举已加载类。
+tasks.register("readerScanProbe", JavaExec) {
+	group = "verification"
+	description = "读者扫描成本探针 (ReaderScanProbe)：纯常量池扫描 vs 方法体精扫，以及三档扫描范围的真实成本"
+	dependsOn classes
+	dependsOn p05AgentJar
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "ReaderScanProbe"
+	maxHeapSize = "1g"
+	doFirst {
+		jvmArgs "-javaagent:${p05AgentJar.get().archiveFile.get().asFile.absolutePath}",
+		        "-Dremold.projectRoot=${rootDir.absolutePath}",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+	}
+}
+
 // check 挂载全部断言
 check.dependsOn test
 check.dependsOn verifyTestCount

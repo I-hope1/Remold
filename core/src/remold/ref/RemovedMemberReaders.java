@@ -1,15 +1,8 @@
 package remold.ref;
 
 import org.objectweb.asm.ClassReader;
-import org.objectweb.asm.Handle;
-import org.objectweb.asm.Opcodes;
-import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
-import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.FieldNode;
-import org.objectweb.asm.tree.InvokeDynamicInsnNode;
-import org.objectweb.asm.tree.LdcInsnNode;
-import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 
 import java.util.ArrayList;
@@ -185,47 +178,126 @@ public final class RemovedMemberReaders {
 	/**
 	 * 扫出一个类里所有可能"读某个成员"的引用。
 	 *
-	 * <p>除了 {@code GETFIELD} / {@code PUTFIELD} / {@code GETSTATIC} / {@code PUTSTATIC} 与
-	 * {@code invoke*}，还包括 {@code invokedynamic} 引导参数与 {@code LDC} 里的 {@code MethodHandle}
-	 * ——方法引用（{@code A::foo}）与 lambda 的目标就是以 Handle 形式存在的，只看指令会把它们漏掉。</p>
+	 * <p><b>只扫常量池，不进方法体</b>。理由是 {@code CONSTANT_MethodHandle_info}（tag 15）的
+	 * {@code reference_index} 在规范上<b>必须</b>指向同一个常量池里的
+	 * {@code Fieldref}(9) / {@code Methodref}(10) / {@code InterfaceMethodref}(11)
+	 * （JVMS §4.4.8）。因此：</p>
+	 * <ul>
+	 *   <li>{@code GETFIELD} / {@code PUTFIELD} / {@code GETSTATIC} / {@code PUTSTATIC} 与
+	 *       {@code invoke*} 引用的就是 9/10/11；</li>
+	 *   <li>{@code LDC} / {@code LDC_W} 装的方法句柄、{@code invokedynamic} 引导参数里的方法引用
+	 *       （{@code A::foo}、lambda 目标）都以 tag 15 存在，而 15 必然回指 9/10/11。</li>
+	 * </ul>
+	 * <p>所以扫一遍 9/10/11 就<b>一网打尽</b>，不需要再走 {@code MethodVisitor}。副作用是快：
+	 * 解析完常量池即可返回，跳过字段表、方法表、{@code Code}、行号表与 {@code StackMapTable}
+	 * ——这些占了 class 文件体积的绝大部分。</p>
+	 *
+	 * <p><b>代价是它是超集</b>：常量池里可能存在"没有任何指令引用"的条目（某些编译器会留下）。
+	 * 这种条目永远不会执行，因此不会抛 {@code LinkageError}。对门控来说这是<b>保守方向</b>
+	 * （宁可多拦），但要知道它会比"精确到指令"多报。若将来需要精确判定，可在本方法命中之后
+	 * 再对该类做一次方法体精扫——两级漏斗，成本只落在真正命中的少数类上。</p>
+	 *
+	 * @throws IllegalArgumentException 常量池结构无法解析（调用方应把它记为"判不了"，不能当成"没有引用"）
 	 */
 	public static List<Ref> refs(byte[] classBytes) {
-		ClassNode cn = new ClassNode();
-		new ClassReader(classBytes).accept(cn, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
-		Set<Ref> out = new LinkedHashSet<>();
-		if (cn.methods == null) return List.of();
-		for (MethodNode m : cn.methods) {
-			if (m.instructions == null) continue;
-			for (AbstractInsnNode insn = m.instructions.getFirst(); insn != null; insn = insn.getNext()) {
-				if (insn instanceof FieldInsnNode f) {
-					out.add(new Ref(KIND_FIELD, f.owner, f.name, f.desc));
-				} else if (insn instanceof MethodInsnNode mi) {
-					out.add(new Ref(mi.itf ? KIND_INTERFACE_METHOD : KIND_METHOD, mi.owner, mi.name, mi.desc));
-				} else if (insn instanceof InvokeDynamicInsnNode indy) {
-					if (indy.bsmArgs != null) {
-						for (Object arg : indy.bsmArgs) {
-							if (arg instanceof Handle h) addHandle(out, h);
-						}
-					}
-				} else if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Handle h) {
-					addHandle(out, h);
+		int count = u2(classBytes, 8);
+		int p = 10;
+		byte[] tag = new byte[count];
+		String[] utf8 = new String[count];
+		int[] classNameIndex = new int[count];   // tag 7  -> name_index
+		int[] refClassIndex = new int[count];    // tag 9/10/11 -> class_index
+		int[] refNameTypeIndex = new int[count]; // tag 9/10/11 -> name_and_type_index
+		int[] nameTypeName = new int[count];     // tag 12 -> name_index
+		int[] nameTypeDesc = new int[count];     // tag 12 -> descriptor_index
+
+		for (int i = 1; i < count; i++) {
+			int t = classBytes[p++] & 0xFF;
+			tag[i] = (byte) t;
+			switch (t) {
+				case 1 -> {                       // Utf8
+					int len = u2(classBytes, p);
+					p += 2;
+					utf8[i] = decodeModifiedUtf8(classBytes, p, len);
+					p += len;
 				}
+				case 3, 4 -> p += 4;              // Integer / Float
+				case 5, 6 -> {                    // Long / Double 占两个槽位
+					p += 8;
+					i++;
+				}
+				case 7 -> {                       // Class
+					classNameIndex[i] = u2(classBytes, p);
+					p += 2;
+				}
+				case 8 -> p += 2;                 // String
+				case 9, 10, 11 -> {               // Fieldref / Methodref / InterfaceMethodref
+					refClassIndex[i] = u2(classBytes, p);
+					refNameTypeIndex[i] = u2(classBytes, p + 2);
+					p += 4;
+				}
+				case 12 -> {                      // NameAndType
+					nameTypeName[i] = u2(classBytes, p);
+					nameTypeDesc[i] = u2(classBytes, p + 2);
+					p += 4;
+				}
+				case 15 -> p += 3;                // MethodHandle：reference_kind + reference_index
+				case 16 -> p += 2;                // MethodType
+				case 17, 18 -> p += 4;            // Dynamic / InvokeDynamic
+				case 19, 20 -> p += 2;            // Module / Package
+				default -> throw new IllegalArgumentException("unsupported constant pool tag " + t + " at #" + i);
 			}
+		}
+
+		Set<Ref> out = new LinkedHashSet<>();
+		for (int i = 1; i < count; i++) {
+			int t = tag[i] & 0xFF;
+			if (t != 9 && t != 10 && t != 11) continue;
+			int nameType = refNameTypeIndex[i];
+			String owner = utf8[classNameIndex[refClassIndex[i]]];
+			String name = utf8[nameTypeName[nameType]];
+			String desc = utf8[nameTypeDesc[nameType]];
+			if (owner == null || name == null || desc == null) {
+				throw new IllegalArgumentException("dangling constant pool reference at #" + i);
+			}
+			out.add(new Ref(t == 9 ? KIND_FIELD : t == 11 ? KIND_INTERFACE_METHOD : KIND_METHOD,
+			                owner, name, desc));
 		}
 		return new ArrayList<>(out);
 	}
 
-	private static void addHandle(Set<Ref> out, Handle h) {
-		switch (h.getTag()) {
-			case Opcodes.H_GETFIELD, Opcodes.H_PUTFIELD, Opcodes.H_GETSTATIC, Opcodes.H_PUTSTATIC ->
-				out.add(new Ref(KIND_FIELD, h.getOwner(), h.getName(), h.getDesc()));
-			case Opcodes.H_INVOKEINTERFACE ->
-				out.add(new Ref(KIND_INTERFACE_METHOD, h.getOwner(), h.getName(), h.getDesc()));
-			case Opcodes.H_INVOKEVIRTUAL, Opcodes.H_INVOKESTATIC, Opcodes.H_INVOKESPECIAL,
-			     Opcodes.H_NEWINVOKESPECIAL ->
-				out.add(new Ref(KIND_METHOD, h.getOwner(), h.getName(), h.getDesc()));
-			default -> { /* 其它 tag 不引用成员 */ }
+	private static int u2(byte[] b, int offset) {
+		if (offset < 0 || offset + 1 >= b.length) {
+			throw new IllegalArgumentException("truncated class file at " + offset);
 		}
+		return ((b[offset] & 0xFF) << 8) | (b[offset + 1] & 0xFF);
+	}
+
+	/**
+	 * 解码 {@code CONSTANT_Utf8} 的 modified UTF-8。
+	 *
+	 * <p>与标准 UTF-8 的差别只有两处：{@code NUL} 编成 {@code C0 80}，增补字符按代理对拆成两个三字节序列。
+	 * 这里两种都按"逐字节还原成 char"处理，正好得到 Java 字符串语义。</p>
+	 */
+	private static String decodeModifiedUtf8(byte[] b, int offset, int length) {
+		char[] chars = new char[length];
+		int n = 0;
+		int i = offset;
+		int end = offset + length;
+		while (i < end) {
+			int c = b[i++] & 0xFF;
+			if (c < 0x80) {
+				chars[n++] = (char) c;
+			} else if ((c & 0xE0) == 0xC0 && i < end) {
+				chars[n++] = (char) (((c & 0x1F) << 6) | (b[i++] & 0x3F));
+			} else if ((c & 0xF0) == 0xE0 && i + 1 < end) {
+				int c2 = b[i++] & 0x3F;
+				int c3 = b[i++] & 0x3F;
+				chars[n++] = (char) (((c & 0x0F) << 12) | (c2 << 6) | c3);
+			} else {
+				throw new IllegalArgumentException("malformed modified UTF-8 at " + (i - 1));
+			}
+		}
+		return new String(chars, 0, n);
 	}
 
 	// ------------------------------------------------------------------------------------------------
@@ -316,7 +388,15 @@ public final class RemovedMemberReaders {
 
 		for (Map.Entry<String, byte[]> e : postChangeBytes.entrySet()) {
 			String reader = e.getKey();
-			for (Ref ref : refs(e.getValue())) {
+			List<Ref> classRefs;
+			try {
+				classRefs = refs(e.getValue());
+			} catch (RuntimeException parseFailure) {
+				// 解析不了就不能断言"没有引用"——把危险当成安全是本类最不该犯的错。
+				inconclusive.add(reader + " (unparseable: " + parseFailure.getMessage() + ")");
+				continue;
+			}
+			for (Ref ref : classRefs) {
 				List<RemovedMember> candidates = byKey.get(ref.name() + ":" + ref.desc());
 				if (candidates == null) continue;
 				boolean refIsField = KIND_FIELD.equals(ref.kind());

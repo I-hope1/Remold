@@ -1,0 +1,346 @@
+import org.junit.jupiter.api.Test;
+import remold.ref.RemovedMemberReaders;
+import remold.ref.RemovedMemberReaders.RemovedMember;
+import remold.ref.RemovedMemberReaders.Result;
+import remold.ref.RemovedMemberReaders.TypeInfo;
+
+import javax.tools.JavaCompiler;
+import javax.tools.StandardJavaFileManager;
+import javax.tools.ToolProvider;
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * 「批次外读者」判据的断言（{@code docs/status.md} 风险 11 / 风险 12，
+ * 判据推导见 {@code docs/initfix/07-p05-probe-results.md} §13.6）。
+ *
+ * <p>每条用例都编译两轮：v1 是改动前的世界（读者能编译），v2 只重编真正变化的类；读者的字节码沿用 v1
+ * ——这正是"陈旧读者"的形态。断言同时看两件事：改动前引用是否真的指向被删成员（归属），改动后是否悬空
+ * （后果）。只判其中一半都会出错，所以反向对照不可省。</p>
+ */
+class RemovedMemberReadersTest {
+
+	// ------------------------------------------------------------------------------------------------
+	// 字段：owner 是静态类型
+	// ------------------------------------------------------------------------------------------------
+
+	/**
+	 * {@code Fieldref} 的 owner 是编译期静态类型，不是声明类。读者用子类静态类型读父类字段时，
+	 * 引用写成 {@code Field Sub.x}——只按声明类匹配会漏报。
+	 */
+	@Test
+	void readerThroughSubclassOwnerIsFound() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/A", "package p; public class A { public int x = 1; }",
+			       "p/Sub", "package p; public class Sub extends A { }",
+			       "p/Reader", "package p; public class Reader { static int read(Sub s) { return s.x; } }"),
+			Map.of("p/A", "package p; public class A { }"));
+
+		Result r = find(w, removedField("p/A", "x", "I", false));
+
+		assertTrue(r.hasReaders(), "a reader through a subclass-typed receiver must be reported");
+		assertEquals("p/Reader", r.hits().get(0).reader());
+		assertEquals("p/Sub", r.hits().get(0).refOwner(),
+			"the reference owner is the static type (Sub), not the declaring class (A)");
+	}
+
+	/** 去触发对照：读者被重编成不再读该字段，同一批字节码里就不该再报出读者。 */
+	@Test
+	void readerThatNoLongerReadsIsNotReported() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/A", "package p; public class A { public int x = 1; }",
+			       "p/Sub", "package p; public class Sub extends A { }",
+			       "p/Reader", "package p; public class Reader { static int read(Sub s) { return s.x; } }"),
+			Map.of("p/A", "package p; public class A { }",
+			       "p/Reader", "package p; public class Reader { static int read(Sub s) { return 0; } }"));
+
+		assertFalse(find(w, removedField("p/A", "x", "I", false)).hasReaders(),
+			"a reader whose new bytecode dropped the read must not be reported");
+	}
+
+	/** 换无关输入对照：删的是另一个类的同名字段，读者不该被算到它头上。 */
+	@Test
+	void sameNameInAnotherClassIsNotReported() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/A", "package p; public class A { public int x = 1; }",
+			       "p/B", "package p; public class B { public int x = 2; }",
+			       "p/Reader", "package p; public class Reader { static int read(B b) { return b.x; } }"),
+			Map.of("p/A", "package p; public class A { }"));
+
+		assertFalse(find(w, removedField("p/A", "x", "I", false)).hasReaders(),
+			"removing A.x must not be blamed on a reader of B.x");
+	}
+
+	/** 子类自己声明了同名字段时，{@code Sub.x} 指向 {@code Sub.x}，不是被删的 {@code A.x}。 */
+	@Test
+	void hidingSubclassFieldIsNotAReader() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/A", "package p; public class A { public int x = 1; }",
+			       "p/Sub", "package p; public class Sub extends A { public int x = 2; }",
+			       "p/Reader", "package p; public class Reader { static int read(Sub s) { return s.x; } }"),
+			Map.of("p/A", "package p; public class A { }"));
+
+		assertFalse(find(w, removedField("p/A", "x", "I", false)).hasReaders(),
+			"a hiding subclass field resolves to Sub.x, not the removed A.x");
+	}
+
+	/**
+	 * 同一次热更里两个类都删掉同名同描述的字段时，引用必须归属到<b>它本来指向的那个</b>。
+	 * 只判"改动后悬空"而不做改动前的归属，会把 B 的读者同时算到 A 头上。
+	 */
+	@Test
+	void attributionPicksTheRightOwnerWhenTwoClassesLoseTheSameField() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/A", "package p; public class A { public int x = 1; }",
+			       "p/B", "package p; public class B { public int x = 2; }",
+			       "p/Reader", "package p; public class Reader { static int read(B b) { return b.x; } }"),
+			Map.of("p/A", "package p; public class A { }",
+			       "p/B", "package p; public class B { }"));
+
+		Result r = RemovedMemberReaders.find(RemovedMemberReaders.universe(w.pre()),
+			RemovedMemberReaders.universe(w.post()), w.post(),
+			List.of(removedField("p/A", "x", "I", false), removedField("p/B", "x", "I", false)));
+
+		assertEquals(1, r.hits().size(), "only the member the reference actually pointed at may be blamed");
+		assertEquals("p/B", r.hits().get(0).member().owner());
+	}
+
+	/**
+	 * 接口字段截胡：改动前 {@code Sub.x} 指向 {@code A.x}，改动后接口 {@code I} 多了一个同名字段，
+	 * 解析改落到 {@code I.x}。它不抛 {@code LinkageError}，但读到的东西变了——必须与"读者"分开报。
+	 *
+	 * <p>这个夹具只能用两轮编译造出来：v1 里 {@code I} 没有 {@code x}（否则 {@code s.x} 在 javac 阶段
+	 * 就是"引用不明确"），v2 里给 {@code I} 加上。</p>
+	 */
+	@Test
+	void interfaceFieldHijackIsReportedAsRetargetedNotAsReader() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/I", "package p; public interface I { }",
+			       "p/A", "package p; public class A { public int x = 2; }",
+			       "p/Sub", "package p; public class Sub extends A implements I { }",
+			       "p/Reader", "package p; public class Reader { static int read(Sub s) { return s.x; } }"),
+			Map.of("p/I", "package p; public interface I { int x = 1; }",
+			       "p/A", "package p; public class A { }"));
+
+		assertTrue(hasRef(w.post().get("p/Reader"), "field", "p/Sub", "x", "I"),
+			"precondition: the fixture must contain Fieldref p/Sub.x:I");
+
+		Result r = find(w, removedField("p/A", "x", "I", false));
+		assertFalse(r.hasReaders(),
+			"field resolution searches superinterfaces before the superclass, so after the change"
+			+ " Sub.x lands on I.x instead of dangling");
+		assertFalse(r.retargeted().isEmpty(),
+			"but the retargeting must be surfaced — the reference now reads a different field");
+	}
+
+	/**
+	 * private 字段的 {@code Fieldref} owner 恒为声明类：读者必须强转成 {@code A} 才能编译，
+	 * 强转后静态类型就是 {@code A}。这类成员按 owner 直判，不依赖解析。
+	 */
+	@Test
+	void privateFieldIsMatchedByOwnerDirectly() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/Outer", """
+				package p;
+				public class Outer {
+				    public static class A { private int x = 1; }
+				    public static class Sub extends A { }
+				    public static class Reader { static int read(Sub s) { return ((A) s).x; } }
+				}
+				"""),
+			// v2 必须重编整个 Outer 才能产出 Outer$A，但本轮真正变化的只有 A 自己，
+			// 所以只把 Outer$A 的字节码换进来，Reader 保持 v1 —— 这才是"陈旧读者"的形态。
+			Map.of("p/Outer", """
+				package p;
+				public class Outer {
+				    public static class A { }
+				    public static class Sub extends A { }
+				    public static class Reader { static int read(Sub s) { return 0; } }
+				}
+				"""),
+			Set.of("p/Outer$A"));
+
+		Result r = find(w, removedField("p/Outer$A", "x", "I", true));
+		assertTrue(r.hasReaders(), "the nestmate reader of a private field must be reported");
+		assertEquals("p/Outer$Reader", r.hits().get(0).reader());
+		assertEquals("p/Outer$A", r.hits().get(0).refOwner(),
+			"a private field's Fieldref owner is always the declaring class");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// 方法
+	// ------------------------------------------------------------------------------------------------
+
+	/** 继承来的方法经子类静态类型调用时，引用 owner 是子类。 */
+	@Test
+	void inheritedMethodCallIsFound() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/A", "package p; public class A { public int foo() { return 1; } }",
+			       "p/Sub", "package p; public class Sub extends A { }",
+			       "p/Reader", "package p; public class Reader { static int read(Sub s) { return s.foo(); } }"),
+			Map.of("p/A", "package p; public class A { }"));
+
+		Result r = find(w, removedMethod("p/A", "foo", "()I"));
+		assertTrue(r.hasReaders(), "an inherited method call must be reported");
+		assertEquals("p/Sub", r.hits().get(0).refOwner());
+	}
+
+	/** 接口 default 方法走 {@code InterfaceMethodref}，与 {@code Methodref} 是两个常量池 tag。 */
+	@Test
+	void interfaceDefaultMethodIsFound() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/I", "package p; public interface I { default int d() { return 1; } }",
+			       "p/Reader", "package p; public class Reader { static int read(I i) { return i.d(); } }"),
+			Map.of("p/I", "package p; public interface I { }"));
+
+		assertTrue(hasRef(w.post().get("p/Reader"), "interfaceMethod", "p/I", "d", "()I"),
+			"precondition: a default-method call is an InterfaceMethodref, not a Methodref");
+
+		Result r = find(w, removedMethod("p/I", "d", "()I"));
+		assertTrue(r.hasReaders(), "a default-method caller must be reported");
+		assertEquals("interfaceMethod", r.hits().get(0).kind());
+	}
+
+	/** 方法引用（{@code A::foo}）以 MethodHandle 存在，不是 invoke 指令。 */
+	@Test
+	void methodReferenceIsFound() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/A", "package p; public class A { public static void foo() { } }",
+			       "p/Reader", "package p; public class Reader { static Runnable r = A::foo; }"),
+			Map.of("p/A", "package p; public class A { }"));
+
+		Result r = find(w, removedMethod("p/A", "foo", "()V"));
+		assertTrue(r.hasReaders(), "a method reference (MethodHandle in the constant pool) must be reported");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// 判不了 ≠ 没有
+	// ------------------------------------------------------------------------------------------------
+
+	@Test
+	void missingHierarchyIsReportedAsInconclusive() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/A", "package p; public class A { public int x = 1; }",
+			       "p/Sub", "package p; public class Sub extends A { }",
+			       "p/Reader", "package p; public class Reader { static int read(Sub s) { return s.x; } }"),
+			Map.of("p/A", "package p; public class A { }"));
+
+		// 改动后的世界故意缺 Sub：悬空判定在第一步就断掉
+		Map<String, TypeInfo> pruned = new LinkedHashMap<>(RemovedMemberReaders.universe(w.post()));
+		pruned.remove("p/Sub");
+
+		Result r = RemovedMemberReaders.find(RemovedMemberReaders.universe(w.pre()), pruned, w.post(),
+			List.of(removedField("p/A", "x", "I", false)));
+
+		assertFalse(r.hasReaders(), "an unresolvable reference must not be silently reported as a reader");
+		assertFalse(r.inconclusive().isEmpty(),
+			"but it must be surfaced as inconclusive — treating 'cannot tell' as 'no reader' is exactly"
+			+ " the failure mode this bucket exists to prevent");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// fixtures
+	// ------------------------------------------------------------------------------------------------
+
+	/** 改动前后的两套世界。{@code post} 里未重编的类沿用 {@code pre} 的字节码。 */
+	private record Worlds(Map<String, byte[]> pre, Map<String, byte[]> post) { }
+
+	private static RemovedMember removedField(String owner, String name, String desc, boolean isPrivate) {
+		return new RemovedMember(owner, name, desc, true, isPrivate);
+	}
+
+	private static RemovedMember removedMethod(String owner, String name, String desc) {
+		return new RemovedMember(owner, name, desc, false, false);
+	}
+
+	private static Result find(Worlds w, RemovedMember member) {
+		return RemovedMemberReaders.find(RemovedMemberReaders.universe(w.pre()),
+			RemovedMemberReaders.universe(w.post()), w.post(), List.of(member));
+	}
+
+	private static boolean hasRef(byte[] classBytes, String kind, String owner, String name, String desc) {
+		return RemovedMemberReaders.refs(classBytes).stream().anyMatch(
+			r -> r.kind().equals(kind) && r.owner().equals(owner) && r.name().equals(name)
+			     && r.desc().equals(desc));
+	}
+
+	/**
+	 * 编译两轮：v1 是改动前的完整世界，v2 只包含真正重编的类（以 v1 为 classpath）。
+	 * v2 里没出现的类沿用 v1 的字节码——这就是"陈旧读者"的形态。
+	 */
+	private static Worlds worlds(Map<String, String> v1, Map<String, String> v2) throws Exception {
+		return worlds(v1, v2, v2.keySet());
+	}
+
+	/**
+	 * @param replaced 只把这些类的字节码换成 v2 的；其余全部沿用 v1。
+	 *                 用于"本轮只重编了其中几个类"的形态——注意它和 v2 的源码 key 可以不同
+	 *                 （重编 {@code Outer} 会顺带产出 {@code Outer$A}，但本轮真正变的只有后者）。
+	 */
+	private static Worlds worlds(Map<String, String> v1, Map<String, String> v2,
+	                             Set<String> replaced) throws Exception {
+		Path d1 = Files.createTempDirectory("readers_v1");
+		compileInto(d1, v1, null);
+		Map<String, byte[]> pre = readClasses(d1);
+
+		Map<String, byte[]> post = new LinkedHashMap<>(pre);
+		if (!v2.isEmpty()) {
+			Path d2 = Files.createTempDirectory("readers_v2");
+			compileInto(d2, v2, d1.toString());
+			Map<String, byte[]> v2Classes = readClasses(d2);
+			for (String name : replaced) {
+				byte[] bytes = v2Classes.get(name);
+				if (bytes == null) throw new IllegalStateException("v2 did not produce " + name);
+				post.put(name, bytes);
+			}
+		}
+		return new Worlds(pre, post);
+	}
+
+	private static void compileInto(Path dir, Map<String, String> sources, String extraClasspath) throws Exception {
+		List<File> files = new ArrayList<>();
+		for (Map.Entry<String, String> e : sources.entrySet()) {
+			Path src = dir.resolve(e.getKey() + ".java");
+			Files.createDirectories(src.getParent());
+			Files.writeString(src, e.getValue(), StandardCharsets.UTF_8);
+			files.add(src.toFile());
+		}
+
+		JavaCompiler javac = ToolProvider.getSystemJavaCompiler();
+		if (javac == null) throw new IllegalStateException("a JDK (not a JRE) is required to compile fixtures");
+		List<String> options = new ArrayList<>(List.of("-d", dir.toString(), "-g", "-nowarn"));
+		if (extraClasspath != null) {
+			options.add("-cp");
+			options.add(extraClasspath);
+		}
+		try (StandardJavaFileManager fm = javac.getStandardFileManager(null, null, StandardCharsets.UTF_8)) {
+			Boolean ok = javac.getTask(null, fm, null, options, null, fm.getJavaFileObjectsFromFiles(files)).call();
+			if (!Boolean.TRUE.equals(ok)) {
+				throw new IllegalStateException("fixture compilation failed: " + sources.keySet());
+			}
+		}
+	}
+
+	private static Map<String, byte[]> readClasses(Path dir) throws Exception {
+		Map<String, byte[]> out = new LinkedHashMap<>();
+		try (var walk = Files.walk(dir)) {
+			for (Path p : walk.filter(Files::isRegularFile).toList()) {
+				String rel = dir.relativize(p).toString().replace('\\', '/');
+				if (!rel.endsWith(".class")) continue;
+				out.put(rel.substring(0, rel.length() - ".class".length()), Files.readAllBytes(p));
+			}
+		}
+		return out;
+	}
+}

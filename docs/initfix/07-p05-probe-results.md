@@ -688,8 +688,13 @@ max 列的毫秒级离群值是 JIT 预热与 GC，不影响中位。
 - **永远 `return null`**，不改字节、不参与任何决策。
 
 **为什么不塞进 `AnnotationTransformer`**：后者对首次加载的类会做对齐替换
-（`pendingAlignedClasses`），在它里面提前 `return null` 会跳过对齐。注册在它**之后**则天然拿到
-对齐后的字节（transform 链是顺序的），而且对加载流程零影响。
+（`pendingAlignedClasses`），在它里面提前 `return null` 会跳过对齐。独立注册则不碰那条逻辑，
+而且对加载流程零影响。
+
+**注册标志必须是 `canRetransform = true`（这一条踩过坑）**：JVM 先跑完**所有**
+`canRetransform=false` 的 transformer，再跑 `canRetransform=true` 的那一组，**注册顺序只在组内生效**。
+所以若把本 transformer 注册成 `false`，首次加载时它会先于 `AnnotationTransformer` 执行，
+拿到的正是对齐/织入**之前**的原始字节——缓存里存的就是错版本。改判据没用，得改注册标志。
 
 **② 补漏网之鱼用一次批量 retransform，不逐类调。** Transformer 注册之前就已加载的类不会经过它；
 `scanRemovedFieldReaders` 把这些类收成一个数组，**一次** `inst.retransformClasses(array)` 补齐
@@ -704,3 +709,14 @@ max 列的毫秒级离群值是 JIT 预热与 GC，不影响中位。
 `CacheWarmingTransformerTest` 6 用例覆盖：首次加载入缓存、重定义通道不入、hidden class 跳过、
 agent 自身跳过、非工程位置跳过、缓存的是原始引用。变异检查：去掉"区分首次加载"后
 `doesNotCacheRedefinitionPath` 变红。
+
+**集成探针 `CacheWarmingProbe`（`./gradlew :tests:cacheWarmingProbe`）** 把上面那条分组顺序规则
+实测了一遍：注册一个 `canRetransform=false` 的前置观察者、一个 `true` 组的字节替换者（模拟
+`pendingAlignedClasses`）、再注册被验证的 `CacheWarmingTransformer`（`true` 组，排在替换者之后），
+然后加载一个 v1 类、由替换者换成 v2。结果：
+
+- 前置观察者（`false` 组）看到的是 **v1** —— 证明"非可重转换组整组先跑"；
+- `bytecodeCache` 里是 **v2** —— 证明被验证者拿到的是替换之后的最终字节。
+
+**变异检查**：把探针里的注册改回 `false`，最后一条断言立刻变红（缓存里是 v1）——这正是修之前的
+真实缺陷。7/7 通过。

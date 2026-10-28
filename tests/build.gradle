@@ -434,6 +434,20 @@ tasks.register("readerScanProbe", JavaExec) {
 	}
 }
 
+// 缓存填充探针：验证 transformer 的分组执行顺序，以及缓存里存的是对齐/织入之后的字节。
+tasks.register("cacheWarmingProbe", JavaExec) {
+	group = "verification"
+	description = "缓存填充集成探针 (CacheWarmingProbe)：canRetransform 分组顺序 + 缓存必须是最终字节"
+	dependsOn classes
+	dependsOn p05AgentJar
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "CacheWarmingProbe"
+	doFirst {
+		jvmArgs "-javaagent:${p05AgentJar.get().archiveFile.get().asFile.absolutePath}",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+	}
+}
+
 // check 挂载全部断言
 check.dependsOn test
 check.dependsOn verifyTestCount

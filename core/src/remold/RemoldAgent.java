@@ -852,9 +852,11 @@ public class RemoldAgent {
 		if (transformer == null) {
 			transformer = new AnnotationTransformer();
 			inst.addTransformer(transformer, true);
-			// 注册在 AnnotationTransformer **之后**：transform 链是顺序的，所以这里看到的
-			// 是对齐/织入之后的字节码——正是 JVM 会拿去定义的那一份。
-			inst.addTransformer(new CacheWarmingTransformer(), false);
+			// 必须也是 canRetransform = true：JVM 先跑完**所有** canRetransform=false 的 transformer，
+			// 再跑 canRetransform=true 的那组（注册顺序只在组内生效）。若这里传 false，
+			// 首次加载时本 transformer 会先于 AnnotationTransformer 执行，拿到的是对齐/织入**之前**
+			// 的字节——缓存就存错了版本。同组内按注册顺序执行，所以它仍然排在 AnnotationTransformer 之后。
+			inst.addTransformer(new CacheWarmingTransformer(), true);
 			if (isEnhancedHotswapEnabled()) {
 				try {
 					DynamicProfilerAPI.init();
@@ -880,7 +882,12 @@ public class RemoldAgent {
 	 *
 	 * <p>只抄工程自身的类：判定见 {@link #isProjectLocation}。数组类与 hidden class 不会走到这里。</p>
 	 */
-	static final class CacheWarmingTransformer implements ClassFileTransformer {
+	/**
+	 * <p><b>为什么是 public</b>：集成探针 {@code CacheWarmingProbe} 要注册<b>同一个类</b>来验证
+	 * "缓存里存的确实是对齐/织入之后的字节"，自己复制一份等价实现就测不到真实接线了。
+	 * 除探针外不要在别处 new 它——它的唯一注册点在 {@link #initTransformer()}。</p>
+	 */
+	public static final class CacheWarmingTransformer implements ClassFileTransformer {
 		@Override
 		public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
 		                        ProtectionDomain protectionDomain, byte[] classfileBuffer) {

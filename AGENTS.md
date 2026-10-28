@@ -7,7 +7,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 
 - 只处理本次 Redefine **新增声明的字段**（存量实例 + 静态）。
 - 禁止实现：修改已有字段初值、删除字段、修改方法签名、动态修改字段描述符类型。
-  - 删除字段在**具名类**上被重定义层拒绝（`REMOVED_FIELD`），但在**匿名类合成字段**上放行（`LayoutGate.check` 判 `COMPATIBLE`）——两层的判据都是"读者是否必为空"，匿名类可证、具名类**尚未实现**这个证明（可做：枚举已加载类 + 扫常量池 `Fieldref`）。实测后果见 `docs/initfix/07-p05-probe-results.md` §13：布局不压缩、废弃槽位不复用，失败形态是批次外读者抛 `NoSuchFieldError`（`LinkageError`），不是读到脏数据。注意"读者在批次外"需要额外成因（批次撕裂 / 预编译依赖 / 增量编译未传播）——正常全量重建下删字段必然让读者一起改，读者会进入批次。
+  - 删除字段在**具名类**上被重定义层拒绝（`REMOVED_FIELD`），但在**匿名类合成字段**上放行（`LayoutGate.check` 判 `COMPATIBLE`）——两层的判据都是"读者是否必为空"，匿名类可证、具名类**尚未实现**这个证明（可做：枚举已加载类 + 扫常量池 `Fieldref`）。注意**有存活实例时被拒的是删字段的类本身**（diff 里就有 `- x`），它连同匿名类被移出本批、保持旧字节码，所以"读者在批次外"轮不到发生；**无存活实例时会被 `WAIVE` 放行**，而那条理由对删除不成立（`docs/status.md` 风险 12）。实测后果见 `docs/initfix/07-p05-probe-results.md` §13：布局不压缩、废弃槽位不复用，失败形态是批次外读者抛 `NoSuchFieldError`（`LinkageError`），不是读到脏数据。
 - 唯一例外：字段标 `@RemoldReinit(mode = OVERWRITE)` 时，才允许覆写存量值。
 - Android ART 与 `$extras` 扩展槽属于独立子项目（Engine II），不在此处理。
 - 运行时前提：

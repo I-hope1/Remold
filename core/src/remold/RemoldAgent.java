@@ -2301,6 +2301,9 @@ public class RemoldAgent {
 		}
 		// 无存活实例且不涉及静态字段：没有状态会被错读，放行。
 		// UNKNOWN 落入下面的 REJECT 分支（按"可能有实例"处理）。
+		// 注意这条理由只对"新增/改类型"成立。对"删除字段"，风险不是"已有实例被错读"，
+		// 而是"未来的实例被陈旧代码读"——那与当前有无实例无关，故 WAIVE 对删除并不安全。
+		// 见 docs/status.md 风险 12。
 		if (liveness == Liveness.NONE && !LayoutGate.hasStaticFieldChange(changedFields)) {
 			return new LayoutDecision(LayoutAction.WAIVE, res, host, Set.of());
 		}

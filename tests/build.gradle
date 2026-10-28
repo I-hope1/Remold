@@ -145,7 +145,7 @@ test {
 	}
 }
 
-// 断言测试总数 ≥ 236 且 0 skipped（236 = 2026-10-28 全量实测，含 ConstructorTailInjectorTest 8 个、InitFixSnapshotTimingTest 1 个、StageASkeletonTest 9 个、HashSemanticsTest 11 个与 LibToolTest 5 个用例）
+// 断言测试总数 ≥ 239 且 0 skipped（239 = 2026-10-28 全量实测，含 ConstructorTailInjectorTest 8 个、InitFixSnapshotTimingTest 1 个、StageASkeletonTest 9 个、HashSemanticsTest 11 个、LibToolTest 5 个与 OnReloadTimingTest 3 个用例）
 def hstestMinTests = 239
 tasks.register("verifyTestCount") {
 	group = "verification"

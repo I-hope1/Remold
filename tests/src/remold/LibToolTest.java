@@ -17,6 +17,11 @@ public class LibToolTest {
 		TargetDummy(String tag) { this.tag = tag; }
 	}
 
+	/** Subclass used to pin down whether a heap query is exact-class or class-plus-subclasses. */
+	static class SubDummy extends TargetDummy {
+		SubDummy(String tag) { super(tag); }
+	}
+
 	static class DummyHolder {
 		final TargetDummy target;
 		DummyHolder(TargetDummy target) { this.target = target; }
@@ -62,5 +67,35 @@ public class LibToolTest {
 	void primitiveAndArrayTypesRejected() {
 		assertThrows(IllegalArgumentException.class, () -> LibTool.getInstances(int.class));
 		assertThrows(IllegalArgumentException.class, () -> LibTool.getInstances(String[].class));
+	}
+
+	/**
+	 * Pins down the match scope of a heap query: {@code getInstances(P)} returns P's instances
+	 * <b>and</b> those of its subclasses, while {@code getInstances(C)} never returns parent instances.
+	 *
+	 * <p>This is not cosmetic. {@code InitFix} patches every object the query returns, so a query that
+	 * silently widened or narrowed would either write into objects of the wrong class or skip
+	 * surviving instances. The pending "single heap traversal, dispatch by class" optimisation also
+	 * has to reproduce exactly this asymmetry, which is why it is asserted here rather than inferred
+	 * from the Javadoc.</p>
+	 */
+	@Test
+	void heapScanIncludesSubclassesButNotSuperclasses() {
+		if (!LibTool.initialized()) {
+			LibTool.init();
+		}
+		TargetDummy base = new TargetDummy("parent");
+		SubDummy sub = new SubDummy("child");
+
+		TargetDummy[] fromParent = LibTool.getInstances(TargetDummy.class);
+		assertTrue(Arrays.asList(fromParent).contains(base), "querying a parent must return its own instances");
+		assertTrue(Arrays.asList(fromParent).contains(sub),
+			"querying a parent must also return instances of subclasses (LibTool contract)");
+
+		TargetDummy[] fromChild = LibTool.getInstances(SubDummy.class);
+		assertTrue(Arrays.asList(fromChild).contains(sub), "querying a subclass must return its own instances");
+		assertFalse(Arrays.asList(fromChild).contains(base),
+			"querying a subclass must NOT return parent instances: the patch loop would otherwise"
+			+ " write into objects whose class was never redefined");
 	}
 }

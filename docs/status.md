@@ -80,7 +80,7 @@
 | 嵌套深度硬上限 | 🔶 | [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §4.1 | `RemoldAgent.ANON_STRICT` / `MAX_DEPTH` | strict 模式下 `depth > 4` 拒绝；常规模式下仅告警，`MAX_DEPTH` 死代码尚无独立夹具（列入技术债 3.2） |
 | 事务生命周期与乐观预登记 | ✅ | [`06-runtime-and-perf.md`](topology/06-runtime-and-perf.md) §2 | `AlignmentTransaction.preRegister` | 重定义前预先登记 pending 注入项，消除类加载重入读取磁盘错位产物竞态 |
 | 匿名类合成捕获字段布局门 | ✅ | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1 | `LayoutGate.check` / `RemoldAgent.ANON_LAYOUT_GATE` | 阻断捕获字段增/改导致存活实例读取零值；默认模式 `reject` |
-| 具名类与用户显式字段布局门 | ✅ | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1 | `RemoldAgent.applyRedefineLayoutGate` / `LAYOUT_GATE` | 阻断用户字段删除、类型变更、静态性变更；默认模式 `reject`；纯新增放行交给 InitFix。**删除的判据是"读者是否必为空"**：具名类拿不到这个证明，故拒绝；匿名类合成字段可证，故 `LayoutGate.check` 放行。实测后果（JBR 21，[`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §13）：布局不压缩、废弃槽位不复用，批次外读者抛 `NoSuchFieldError`——是"错误被推迟到热更事务之外"，不是"读到脏数据" |
+| 具名类与用户显式字段布局门 | ✅ | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1 | `RemoldAgent.applyRedefineLayoutGate` / `LAYOUT_GATE` | 阻断用户字段删除、类型变更、静态性变更；默认模式 `reject`；纯新增放行交给 InitFix。**删除的判据是"读者是否必为空"**：具名类尚未做这个证明（可做：枚举已加载类 + 扫常量池 `Fieldref`，见 §13.6），故拒绝；匿名类合成字段可证，故 `LayoutGate.check` 放行。实测后果（JBR 21，[`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §13）：布局不压缩、废弃槽位不复用，批次外读者抛 `NoSuchFieldError`——是"错误被推迟到热更事务之外"，不是"读到脏数据"；而"读者在批次外"本身需要额外成因（批次撕裂 / 预编译依赖 / 增量编译未传播），正常全量重建下读者会一起进入批次（§13.5） |
 | 标准 JVM 能力探测、结构变化摘批与降级开关 | ✅ | [`06-runtime-and-perf.md`](topology/06-runtime-and-perf.md) §1 | `RemoldAgent.probeEnhancedHotswap` / `mustSkipForMissingEnhancedRedefinition` | 厂商标识 + flag 文本双条件，杜绝 `-XX:+IgnoreUnrecognizedVMOptions` 回显造成的误判；结构变化类在无增强能力时摘出本批，不再拖垮同批纯方法体修改；`FORCE_STATIC_LAMBDA` 在无能力时被强制降级关闭并打 `DEGRADED` 日志（`degradeForMissingEnhancedRedefinition`；`INIT_FIX` 刻意不降级，否则会让直接调用 `InitFix.transform` 的路径静默空转）；`minecraft-fabric-template/README.md` 已按运行时能力分档说明，不再承诺“完美适配任意 JDK 21+”；`EnhancedHotswapGateTest` 9 用例，含变异检查（改回参数文本探测时 `probeMatchesRealVmOptionState` 变红） |
 | 重定义层三态存活判定与静态字段强拒绝 | ✅ | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1 | `RemoldAgent.decideLayout` | `COMPATIBLE` / `WAIVED` / `REJECTED`；静态字段即便零实例也坚决拒绝（类共享状态不可放行） |
 | 同名局部类编号漂移止血门 | 🔶 | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §2 | `LocalClassGuard` / `RemoldAgent.LOCAL_CLASS_GUARD` | 识别同名局部类计数 >= 2 并将宿主整族移出本轮；**未覆盖“唯一简单名局部类内部的匿名类位移”形态**（见风险 5） |
@@ -288,6 +288,14 @@
 - **残余边界**：只沿**同类**调用（跨类调用不跟进，否则误报面会扩到整条依赖链）；getter 是否被覆写不区分，一律保守命中，宁可多告警。**两处已知漏报**：①**子类**——**触发条件**是「新增字段声明在父类 P、被热更的是 P、且某个已加载子类 C 的 `hashCode`/`equals`/`compareTo` 读取了该字段」；此时 `getfield` 的 owner 是 C，而 `transform` 只扫 P 自己的方法，会漏。覆盖办法是对被热更类的已加载子类各扫一遍（未做）。②**跨类读取**——`Key.hashCode()` 调 `inner.getId()`（`inner` 是被热更类的实例）扫不到，要建跨类调用图，成本高，暂列为已知边界不实现。
 - **根治与关闭条件**：VM 层无法根治（容器由用户代码持有）。可行方向是在分析期扫描新类的 `hashCode()` / `equals()`，一旦发现读取本轮新增字段就**显式拒绝或强告警**，由用户重建容器或重启。
 - **关联设计规范**：[`docs/initfix/01-safety-gate.md`](initfix/01-safety-gate.md) §2。
+- **关联架构决策**：无。
+
+### 风险 11：方法删除没有任何门禁，与字段删除同类
+- **风险描述与底层机制**：`ClassDiffUtil` 会算出 `removedMethods`，但它只用于日志摘要（`toString`），**没有任何门消费它**。`LayoutGate` 只看字段。因此删掉一个方法后，批次外的调用者会在执行到调用点时抛 `NoSuchMethodError`——与字段删除的 `NoSuchFieldError` 同属 `LinkageError`，同样在热更事务之外、无法回滚、无法归因。
+- **触发条件**：被删方法有批次外调用者。与字段删除一样，**正常全量重建下不会发生**（删方法必然让调用者一起改，调用者因此进入批次）；可达成因同 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §13.5：批次撕裂、预编译依赖、增量编译未传播、生成/注入的字节码。
+- **当前缓解措施**：无。字段删除被 `REMOVED_FIELD` 拒绝，方法删除放行——这个不对称目前**没有设计依据**：项目最初拒字段删除的理由是"静默丢状态"，但实测表明字段删除同样是响亮的 `LinkageError`，那么同一理由对方法删除也成立，反之亦然。
+- **根治与关闭条件**：与字段删除共用同一个证明——"枚举已加载类 + 扫常量池"，方法用 `Methodref`（[`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §13.6）。在此之前需要先明确取舍：要么承认"方法删除放行"是有意选择（并写明理由），要么把两类删除统一交给同一个判据。
+- **关联设计规范**：[`docs/topology/07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1。
 - **关联架构决策**：无。
 
 ---

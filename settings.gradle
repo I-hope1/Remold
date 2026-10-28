@@ -33,6 +33,7 @@ rootProject.name = 'remold'
 
 include ':api'
 include ':core'
+include ':gradle-plugin'
 include ':panama'
 include ':plugin-arc'
 include ':plugin-mixin'

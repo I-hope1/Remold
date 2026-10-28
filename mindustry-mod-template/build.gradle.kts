@@ -2,35 +2,24 @@ plugins {
     java
 }
 
-// 默认 Mindustry 模组部署目录：优先支持 MINDUSTRY_DATA_DIR 环境变量，其次按操作系统自适应
-// (Win: %APPDATA%/Mindustry/mods, Mac: ~/Library/Application Support/Mindustry/mods, Linux: ~/.local/share/Mindustry/mods)
-val defaultMindustryModsDir: File = run {
-    val customEnv = System.getenv("MINDUSTRY_DATA_DIR")
-    if (!customEnv.isNullOrBlank()) {
-        return@run File(customEnv, "mods")
+// Mindustry 的 mods 目录 = <dataDir>/mods。dataDir 优先级与游戏本体一致（ClientLauncher 先读
+// -Dmindustry.data.dir，再读 MINDUSTRY_DATA_DIR），默认值对齐 arc 的 OS.getAppDataDirectoryString：
+// Win %APPDATA%/Mindustry、macOS ~/Library/Application Support/Mindustry、Linux $XDG_DATA_HOME/Mindustry 或 ~/.local/share/Mindustry。
+if (findProperty("remold.deployDir") == null && findProperty("remold.modsDir") == null) {
+    val os = System.getProperty("os.name").lowercase()
+    val home = System.getProperty("user.home")
+    val base = when {
+        os.contains("win") -> System.getenv("APPDATA") ?: "$home/AppData/Roaming"
+        os.contains("mac") -> "$home/Library/Application Support"
+        else -> System.getenv("XDG_DATA_HOME") ?: "$home/.local/share"
     }
-    val os = System.getProperty("os.name", "").lowercase()
-    val userHome = System.getProperty("user.home", ".")
-    when {
-        os.contains("win") -> {
-            val appdata = System.getenv("APPDATA") ?: "$userHome/AppData/Roaming"
-            File(appdata, "Mindustry/mods")
-        }
-        os.contains("mac") -> File(userHome, "Library/Application Support/Mindustry/mods")
-        else -> File(userHome, ".local/share/Mindustry/mods")
-    }
-}
-if (project.findProperty("remold.deployDir") == null && project.findProperty("remold.modsDir") == null) {
-    extra["remold.deployDir"] = defaultMindustryModsDir.absolutePath
+    val dataDir = System.getProperty("mindustry.data.dir") ?: System.getenv("MINDUSTRY_DATA_DIR") ?: "$base/Mindustry"
+    extra["remold.deployDir"] = File(dataDir, "mods").absolutePath
 }
 
-// 引入 Remold 热重载自动化脚本插件 (本地优先，独立运行自动回退 GitHub 官方源)
-val localRemold = rootProject.file("../remold.gradle.kts")
-if (localRemold.exists()) {
-    apply(from = localRemold)
-} else {
-    apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/main/remold.gradle.kts")
-}
+// 本地源码树里开发 Remold 时用上一层的脚本（改了立即生效），否则按 tag 拉取对应版本
+apply(from = file("../remold.gradle.kts").takeIf { it.isFile }
+    ?: "https://raw.githubusercontent.com/I-Hope1/Remold/v${findProperty("remold.version") ?: "0.1.3"}/remold.gradle.kts")
 
 sourceSets.main {
     java.setSrcDirs(listOf("src"))

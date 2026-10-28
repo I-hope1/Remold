@@ -84,6 +84,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | `@HotswapInit` 设计契约 | `docs/initfix/09-hotswapinit-design.md`（T4 逃生口的豁免边界、签名与调用基数、重复触发、异常边界、用例清单） |
 | 外部引擎源码索引 | `.sources/`（如 `.sources/mindustry/` 指向本地 Mindustry/Arc 真实源码；只读参考，已 gitignore） |
 | Mixin 生态扩展插件 | `plugin-mixin/`（`remold.mixin.MixinHotswapPlugin`、`MixinReWeaver`、`MixinHotSwap`） |
+| Gradle 插件坐标 | `gradle-plugin/`（`java-gradle-plugin`；把仓库根 `remold.gradle(.kts)` 打进 jar 后展开应用，供 JitPack 的 `plugins { id("io.github.i-hope1.remold") }` 引入；脚本仍是唯一实现，勿在此另写一套） |
 
 ## 5. 实现状态概要（详细参见 `docs/status.md`）
 

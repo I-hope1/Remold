@@ -23,7 +23,9 @@ remold.plugins=arc
 ```
 
 > [!NOTE]
-> 模版默认跨平台自动识别系统的游戏模组目录（Windows: `%APPDATA%/Mindustry/mods`、macOS / Linux 均自适应）。若使用自定义目录，配置 `remold.deployDir=D:/YourModsDir` 即可。
+> 模版默认按**游戏本体同一套规则**推导 mods 目录：`-Dmindustry.data.dir` → `MINDUSTRY_DATA_DIR` → 平台默认
+> （Win `%APPDATA%/Mindustry/mods`、macOS `~/Library/Application Support/Mindustry/mods`、Linux `$XDG_DATA_HOME/Mindustry/mods`）。
+> 想固定目录，在 `gradle.properties` 里配 `remold.deployDir=D:/YourModsDir` 即可（优先级最高）。
 
 ### 2. 启动游戏
 

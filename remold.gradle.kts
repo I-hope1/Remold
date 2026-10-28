@@ -1,5 +1,9 @@
 // Remold Gradle Script Plugin (Kotlin DSL)
-// Usage: apply(from = "remold.gradle.kts") (or raw GitHub URL)
+// Usage: apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/v<version>/remold.gradle.kts")
+//        本地开发: apply(from = file("../remold.gradle.kts"))
+// 注意：远程引入务必用 **tag**（v0.1.3）而不是 main —— 脚本与 agent / api 必须同版本，
+//       否则脚本按新接口拼参数、agent 还是旧版本，会在运行期才炸。完整引导块（本地多路径优先 +
+//       版本缓存 + -Premold.script 覆盖）见 mindustry-mod-template / minecraft-fabric-template 的构建脚本。
 
 import java.io.File
 import org.gradle.api.plugins.JavaApplication
@@ -58,6 +62,8 @@ open class RemoldExtension {
 data class RemoldResolvedConfig(
     val mainClass: String,
     val executable: String,
+    /** 运行用 JVM 的家目录（JDK/JRE home）。IDE 只认家目录，不认 `bin/java[.exe]`。 */
+    val executableHome: String,
     val agentFile: File,
     val allWatchDirs: List<File>,
     val watchPath: String,
@@ -139,9 +145,33 @@ project.plugins.withId("java") {
         // 默认使用「运行 Gradle 的这个 JVM」——在 IDEA 里就是 Gradle JVM（项目 SDK），
         // 而不是 PATH / JAVA_HOME 里的 java，避免构建用的 SDK 与启动用的 JDK 不一致。
         val isWin = System.getProperty("os.name").lowercase().contains("win")
+
+        /**
+         * 由 JVM 家目录或 java 可执行文件反推出 IDE 认可的 **JRE 家目录**。
+         * IDEA 的 ALTERNATIVE_JRE_PATH 只接受家目录（或已注册的 SDK 名）；写入 `...\bin\java.exe`
+         * 会被判定为路径不存在并直接弹框拒绝启动。取不到时返回空串（此时不写该字段）。
+         */
+        fun toJreHome(path: String?): String {
+            if (path.isNullOrBlank()) return ""
+            var f = File(path)
+            if (f.isFile || f.name.equals("java", true) || f.name.equals("java.exe", true)) {
+                val bin = f.parentFile ?: return ""
+                if (!bin.name.equals("bin", true)) return ""
+                f = bin.parentFile ?: return ""
+            }
+            // JDK 8 的 java.home 通常是 <jdk>/jre，向上取一层才是 IDE 认可的 JDK 家目录
+            if (f.name.equals("jre", true)) {
+                val parent = f.parentFile
+                if (parent != null && File(parent, if (isWin) "bin/java.exe" else "bin/java").exists()) f = parent
+            }
+            return if (f.isDirectory) f.absolutePath else ""
+        }
+
         var execPath = File(System.getProperty("java.home"), if (isWin) "bin/java.exe" else "bin/java").absolutePath
+        var execHome = toJreHome(System.getProperty("java.home"))
         if (!File(execPath).exists()) {
             execPath = "java"
+            execHome = ""
         }
         val jbr = remoldExt.jbrPath
             ?: (project.findProperty("remold.jbr") as? String)
@@ -153,6 +183,7 @@ project.plugins.withId("java") {
             val javaBin = if (jbrDir.isFile) jbrDir else File(jbrDir, if (isWin) "bin/java.exe" else "bin/java")
             if (javaBin.exists()) {
                 execPath = javaBin.absolutePath
+                execHome = toJreHome(javaBin.absolutePath)
             } else {
                 project.logger.warn("[Remold] 指定的 JBR 路径不存在: $jbr，将使用项目 SDK 的 JVM 运行。")
             }
@@ -462,6 +493,7 @@ project.plugins.withId("java") {
         return RemoldResolvedConfig(
             mainClass = main,
             executable = execPath,
+            executableHome = execHome,
             agentFile = safeAgent,
             allWatchDirs = allWatchDirs,
             watchPath = watchPath,
@@ -589,7 +621,9 @@ project.plugins.withId("java") {
 
         val portableJvmArgs = conf.jvmArgs.joinToString(" ") { makePortable(it) }
         val portableAppArgs = conf.appArgs.joinToString(" ") { makePortable(it) }
-        val jrePath = if (conf.executable != "java") conf.executable else ""
+        // IDEA 的 ALTERNATIVE_JRE_PATH 只认 JRE/JDK 家目录（或已注册的 SDK 名），
+        // 写 java.exe 会被判为无效并弹框拒绝启动；统一转成家目录，并改用 / 分隔以对齐 IDE 的注册表口径。
+        val jrePath = conf.executableHome.replace('\\', '/')
         val hasCustomJre = jrePath.isNotEmpty()
 
         val xmlFile = File(ideaRunDir, "Run_with_Remold.xml")

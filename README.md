@@ -73,10 +73,16 @@ Remold 作为一个 Java Agent 运行。为了获得类结构变更高性能热�
 
 通过引入轻量脚本插件，免去手动查找类输出路径与拼写复杂 JVM 参数，自动装配并注册 `runRemold` 启动任务：
 
+> [!IMPORTANT]
+> **脚本插件也必须锁定版本。** `apply(from = ...)` 没有 `plugins { id(...) version ... }` 那样的版本坐标，
+> 因此**务必用 tag 地址**（`.../v0.1.3/remold.gradle.kts`）而不是 `.../main/...`：脚本与 `agent`/`api` 必须同版本，
+> 否则脚本按新接口拼参数、agent 还是旧版本，问题只会在运行期才暴露。
+
 #### Groovy DSL (`build.gradle`):
 ```groovy
-// 引入脚本插件（可直接使用 GitHub 原始链接，或下载到本地引入）
-apply from: 'https://raw.githubusercontent.com/I-hope1/Remold/main/remold.gradle'
+// 引入脚本插件（tag 锁版本；本地开发可换成 rootProject.file('remold.gradle')）
+def remoldRef = (findProperty('remold.version') ?: '0.1.3')
+apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remold.gradle"
 
 remold {
     // 可选：指定 Remold 版本（默认读取 gradle.properties 中的 remoldVersion）
@@ -110,26 +116,61 @@ remold {
 
 #### Kotlin DSL (`build.gradle.kts`):
 ```kotlin
-// 引入脚本插件
-apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/main/remold.gradle.kts")
+// 引入脚本插件（tag 锁版本；本地开发可换成 file("../remold.gradle.kts")）
+val remoldRef = (findProperty("remold.version") as String?) ?: "0.1.3"
+apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/v$remoldRef/remold.gradle.kts")
 
-remold {
-    // version = "0.1.3"
-    // agentJar = "libs/remold-agent.jar"
-    // jbrPath = "/path/to/jbr"
-    // fileShakeMs = 1200
-    // debug = true
-    // debugPort = 5005
-    // mainClass = "your.package.Main"
-
-    // JAR 启动模式
-    // jar = "libs/game.jar"
-    // args("-loadmods")
-    // autoDeploy = true
-    // deployDir("mods")
-    // dependsOn("jar")
-}
+// 注意：Kotlin DSL 下 `remold { }` 不可用——扩展类型 RemoldExtension 定义在脚本里，
+// IDE 无法为脚本类生成类型安全访问器（Groovy DSL 是动态语言，不受影响）。
+// 配置改走 gradle.properties 或 extra，等价写法如下：
+extra["remold.mainClass"] = "your.package.Main"
+// extra["remold.version"] = "0.1.3"
+// extra["remold.agentJar"] = "libs/remold-agent.jar"
+// extra["remold.jbr"] = "/path/to/jbr"
+// extra["remold.debug"] = true
+// extra["remold.jar"] = "libs/game.jar"       // JAR 启动模式
+// extra["remold.autoDeploy"] = true
+// extra["remold.deployDir"] = "mods"
 ```
+
+#### 本地开发 / 版本锁定
+
+加载脚本插件其实只有一件事要决定：**从哪拿**。模板里就这两行：
+
+```kotlin
+// 本地源码树里开发 Remold 时用上一层的脚本（改了立即生效），否则按 tag 拉取对应版本
+apply(from = file("../remold.gradle.kts").takeIf { it.isFile }
+    ?: "https://raw.githubusercontent.com/I-Hope1/Remold/v${findProperty("remold.version") ?: "0.1.3"}/remold.gradle.kts")
+```
+
+- 仓库内开发：`../remold.gradle.kts` 存在 → 直接用本地脚本，改完立即生效、不联网；
+- 外部用户：文件不存在 → 按 `remold.version` 的 tag 拉取，版本与 agent / api 同源。
+
+#### 变体：Gradle 插件坐标（走 Gradle 依赖缓存，可离线）
+
+把逻辑全交给插件 jar，构建脚本只剩 4 行，且走 Gradle 的依赖缓存 / 校验 / 离线：
+
+```kotlin
+buildscript {
+    repositories { maven("https://jitpack.io") }
+    dependencies { classpath("com.github.I-Hope1.Remold:gradle-plugin:v0.1.4") }   // 版本 = Git tag
+}
+apply(plugin = "io.github.i-hope1.remold")
+```
+
+插件内部不含第二份实现：它把仓库根的 `remold.gradle(.kts)` 打进 jar，展开到 `.gradle/remold/scripts/` 后原样应用
+（Kotlin DSL 工程用 `.kts`，Groovy 工程用 `.gradle`），所以两条路行为一致。配置方式同方式一
+（`gradle.properties` / `extra[...]`；Groovy 可用 `remold { }`）。
+
+> [!TIP]
+> `gradle-plugin` 模块从**包含它的第一个 tag**（`v0.1.4` 起）才有构建产物；在那之前可以写 `master-SNAPSHOT` 尝鲜
+> （随分支变化，不适合长期锁定）。
+
+> [!NOTE]
+> 想写成 `plugins { id("io.github.i-hope1.remold") version "v0.1.4" }` 也可以，但 JitPack 不托管「插件标记」
+> （`<插件id>:<插件id>.gradle.plugin`），需要在 `settings.gradle.kts` 的 `pluginManagement.resolutionStrategy.eachPlugin`
+> 里 `useModule("com.github.I-Hope1.Remold:gradle-plugin:${requested.version}")` 映射一次。发到 Gradle Plugin Portal
+> 才能省掉这段。
 
 一键启动热重载：
 ```bash

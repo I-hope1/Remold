@@ -1,0 +1,59 @@
+plugins {
+	id 'java-gradle-plugin'
+	id 'maven-publish'
+}
+
+sourceSets {
+	main.java.srcDirs = ["src"]
+	test.java.srcDirs = ["test"]
+}
+
+dependencies {
+	testImplementation gradleTestKit()
+	testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
+}
+
+// 脚本插件本体（仓库根的 remold.gradle / remold.gradle.kts）直接打进 jar，
+// 让「Gradle 插件」与「apply(from=...) 脚本插件」永远共用同一份实现，不存在两套代码漂移。
+processResources {
+	from(rootProject.file('remold.gradle')) { into 'remold' }
+	from(rootProject.file('remold.gradle.kts')) { into 'remold' }
+}
+
+gradlePlugin {
+	plugins {
+		remold {
+			// 插件 id 与 build.gradle 里的 group（io.github.i-hope1.remold）保持同源；
+			// 实现类的包名去掉了连字符（Java 标识符不允许 '-'），两者不必逐字相同。
+			id = 'io.github.i-hope1.remold'
+			implementationClass = 'io.github.ihope1.remold.gradle.RemoldPlugin'
+			displayName = 'Remold Hot Reload'
+			description = 'Hot-reload Gradle plugin for Remold: assembles -javaagent/DCEVM arguments, registers runRemold and the IDEA run configuration.'
+		}
+	}
+}
+
+// 统一 artifactId，避免消费者拿到 remold-gradle-plugin 与 gradle-plugin 两种写法
+publishing {
+	publications.withType(MavenPublication).configureEach {
+		if (name == 'pluginMaven') {
+			artifactId = 'gradle-plugin'
+			pom {
+				name = 'remold-gradle-plugin'
+				description = 'Gradle plugin for Remold hot reload'
+				licenses {
+					license {
+						name = 'GNU General Public License v3.0'
+						url = 'https://www.gnu.org/licenses/gpl-3.0.txt'
+					}
+				}
+			}
+		}
+	}
+}
+
+test {
+	useJUnitPlatform()
+	failOnNoDiscoveredTests = false
+}

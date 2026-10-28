@@ -73,10 +73,17 @@ Remold runs as a Java Agent. For high-performance hot reloading of class structu
 
 The lightweight script plugin resolves your class output paths, assembles the JVM arguments, and registers a `runRemold` task for you:
 
+> [!IMPORTANT]
+> **The script plugin must be version-pinned too.** `apply(from = ...)` has no `plugins { id(...) version ... }`
+> coordinate, so always use a **tag** URL (`.../v0.1.3/remold.gradle.kts`) instead of `.../main/...`.
+> The script and the `agent`/`api` must stay on the same version, otherwise the script builds arguments for a
+> newer agent while the old agent runs — and it only blows up at runtime.
+
 #### Groovy DSL (`build.gradle`):
 ```groovy
-// Apply the script plugin (use the raw GitHub URL directly, or vendor it locally)
-apply from: 'https://raw.githubusercontent.com/I-hope1/Remold/main/remold.gradle'
+// Apply the script plugin (tag-pinned; for local development use rootProject.file('remold.gradle'))
+def remoldRef = (findProperty('remold.version') ?: '0.1.3')
+apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remold.gradle"
 
 remold {
     // Optional: pin the Remold version (defaults to remoldVersion in gradle.properties)
@@ -113,26 +120,62 @@ remold {
 
 #### Kotlin DSL (`build.gradle.kts`):
 ```kotlin
-// Apply the script plugin
-apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/main/remold.gradle.kts")
+// Apply the script plugin (tag-pinned; for local development use file("../remold.gradle.kts"))
+val remoldRef = (findProperty("remold.version") as String?) ?: "0.1.3"
+apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/v$remoldRef/remold.gradle.kts")
 
-remold {
-    // version = "0.1.3"
-    // agentJar = "libs/remold-agent.jar"
-    // jbrPath = "/path/to/jbr"
-    // fileShakeMs = 1200
-    // debug = true
-    // debugPort = 5005
-    // mainClass = "your.package.Main"
-
-    // JAR launch mode
-    // jar = "libs/game.jar"
-    // args("-loadmods")
-    // autoDeploy = true
-    // deployDir("mods")
-    // dependsOn("jar")
-}
+// Note: `remold { }` does NOT work from Kotlin DSL — the extension type lives inside the script plugin,
+// so the IDE cannot generate a type-safe accessor for it (Groovy is dynamic and unaffected).
+// Configure through gradle.properties or extra instead:
+extra["remold.mainClass"] = "your.package.Main"
+// extra["remold.version"] = "0.1.3"
+// extra["remold.agentJar"] = "libs/remold-agent.jar"
+// extra["remold.jbr"] = "/path/to/jbr"
+// extra["remold.debug"] = true
+// extra["remold.jar"] = "libs/game.jar"       // JAR launch mode
+// extra["remold.autoDeploy"] = true
+// extra["remold.deployDir"] = "mods"
 ```
+
+#### Local development / version pinning
+
+Loading a script plugin only has one real decision: **where to take it from**. The templates use these two lines:
+
+```kotlin
+// inside the Remold source tree, use the parent script (edits apply immediately); otherwise fetch the tag
+apply(from = file("../remold.gradle.kts").takeIf { it.isFile }
+    ?: "https://raw.githubusercontent.com/I-Hope1/Remold/v${findProperty("remold.version") ?: "0.1.3"}/remold.gradle.kts")
+```
+
+- In the repo: `../remold.gradle.kts` exists → the local script is used, edits take effect immediately, no network;
+- Outside: the file does not exist → fetch the tag matching `remold.version`, the same version as the agent and api.
+
+#### Variant: Gradle plugin coordinates (uses Gradle's dependency cache, works offline)
+
+Hand everything to the plugin jar; the build script keeps 4 lines and gets Gradle's dependency cache, checksums and
+offline mode:
+
+```kotlin
+buildscript {
+    repositories { maven("https://jitpack.io") }
+    dependencies { classpath("com.github.I-Hope1.Remold:gradle-plugin:v0.1.4") }   // version = Git tag
+}
+apply(plugin = "io.github.i-hope1.remold")
+```
+
+The plugin carries no second implementation: it bundles the repo-root `remold.gradle(.kts)` into its jar, extracts it to
+`.gradle/remold/scripts/` and applies it verbatim (`.kts` for Kotlin DSL projects, `.gradle` for Groovy ones), so both
+routes behave identically. Configuration is the same as Option 1 (`gradle.properties` / `extra[...]`; Groovy may use `remold { }`).
+
+> [!TIP]
+> The `gradle-plugin` module only has artifacts from the **first tag that contains it** (`v0.1.4` onwards). Before that,
+> `master-SNAPSHOT` works for a quick look (moves with the branch, not suitable for pinning).
+
+> [!NOTE]
+> You may also write `plugins { id("io.github.i-hope1.remold") version "v0.1.4" }`, but JitPack does not host plugin
+> markers (`<plugin-id>:<plugin-id>.gradle.plugin`), so you must map it once via
+> `pluginManagement.resolutionStrategy.eachPlugin { useModule("com.github.I-Hope1.Remold:gradle-plugin:${requested.version}") }`
+> in `settings.gradle.kts`. Publishing to the Gradle Plugin Portal is what removes that block.
 
 Launch with hot reloading:
 ```bash

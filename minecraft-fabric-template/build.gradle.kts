@@ -43,13 +43,9 @@ dependencies {
     compileOnly("com.github.I-hope1.Remold:api:v$remoldVersion")
 }
 
-// 引入 Remold 热重载自动化脚本插件 (本地开发优先，独立使用回退官方 GitHub 源)
-val localRemold = rootProject.file("../remold.gradle.kts")
-if (localRemold.exists()) {
-    apply(from = localRemold)
-} else {
-    apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/main/remold.gradle.kts")
-}
+// 本地源码树里开发 Remold 时用上一层的脚本（改了立即生效），否则按 tag 拉取对应版本
+apply(from = file("../remold.gradle.kts").takeIf { it.isFile }
+    ?: "https://raw.githubusercontent.com/I-Hope1/Remold/v${findProperty("remold.version") ?: "0.1.3"}/remold.gradle.kts")
 
 // client 运行目录与 IDE 运行配置沿用 Loom 默认值（runDir = run，ideConfigGenerated = true）。
 // 旧写法 ideConfigGenerated(true) / runDir("run") 在 Loom 1.18 起已废弃，会刷弃用警告。

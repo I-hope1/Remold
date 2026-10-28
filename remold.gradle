@@ -1,5 +1,8 @@
 // Remold Gradle Script Plugin (Groovy DSL)
-// Usage: apply from: 'remold.gradle' (or raw GitHub URL)
+// Usage: apply from: 'https://raw.githubusercontent.com/I-hope1/Remold/v<version>/remold.gradle'
+//        本地开发: apply from: rootProject.file('remold.gradle')
+// 注意：远程引入务必用 **tag**（v0.1.3）而不是 main —— 脚本与 agent / api 必须同版本，
+//       否则脚本按新接口拼参数、agent 还是旧版本，会在运行期才炸。
 
 import org.gradle.api.plugins.JavaApplication
 
@@ -131,9 +134,32 @@ project.plugins.withId('java') {
         // 默认使用「运行 Gradle 的这个 JVM」——在 IDEA 里就是 Gradle JVM（项目 SDK），
         // 而不是 PATH / JAVA_HOME 里的 java，避免构建用的 SDK 与启动用的 JDK 不一致。
         def isWinOs = System.getProperty('os.name').toLowerCase().contains('win')
+
+        // 由 JVM 家目录或 java 可执行文件反推出 IDE 认可的 JRE 家目录。
+        // IDEA 的 ALTERNATIVE_JRE_PATH 只接受家目录（或已注册的 SDK 名），写入 ...\bin\java.exe
+        // 会被判定为路径不存在并直接弹框拒绝启动。取不到时返回空串（此时不写该字段）。
+        def toJreHome = { String path ->
+            if (!path) return ''
+            def f = new File(path)
+            if (f.isFile() || f.name.equalsIgnoreCase('java') || f.name.equalsIgnoreCase('java.exe')) {
+                def bin = f.parentFile
+                if (bin == null || !bin.name.equalsIgnoreCase('bin')) return ''
+                f = bin.parentFile
+                if (f == null) return ''
+            }
+            // JDK 8 的 java.home 通常是 <jdk>/jre，向上取一层才是 IDE 认可的 JDK 家目录
+            if (f.name.equalsIgnoreCase('jre')) {
+                def parent = f.parentFile
+                if (parent != null && new File(parent, isWinOs ? 'bin/java.exe' : 'bin/java').exists()) f = parent
+            }
+            return f.isDirectory() ? f.absolutePath : ''
+        }
+
         def execPath = new File(System.getProperty('java.home'), isWinOs ? 'bin/java.exe' : 'bin/java').absolutePath
+        def execHome = toJreHome(System.getProperty('java.home'))
         if (!new File(execPath).exists()) {
             execPath = 'java'
+            execHome = ''
         }
         def jbr = remoldExt.jbrPath ?: project.findProperty('remold.jbr') ?: project.findProperty('jbr.home') ?: System.getenv('JBR_HOME') ?: System.getProperty('jbr.home')
         if (jbr) {
@@ -141,6 +167,7 @@ project.plugins.withId('java') {
             def javaBin = jbrDir.isFile() ? jbrDir : new File(jbrDir, isWinOs ? 'bin/java.exe' : 'bin/java')
             if (javaBin.exists()) {
                 execPath = javaBin.absolutePath
+                execHome = toJreHome(javaBin.absolutePath)
             } else {
                 logger.warn("[Remold] 指定的 JBR 路径不存在: ${jbr}，将使用项目 SDK 的 JVM 运行。")
             }
@@ -435,6 +462,7 @@ project.plugins.withId('java') {
         return [
             mainClass: main,
             executable: execPath,
+            executableHome: execHome,
             agentFile: agentFile,
             allWatchDirs: allWatchDirs,
             watchPath: watchPath,
@@ -637,7 +665,9 @@ project.plugins.withId('java') {
 
         def portableJvmArgs = conf.jvmArgs.collect { makePortable(it) }.join(' ')
         def portableAppArgs = conf.appArgs.collect { makePortable(it) }.join(' ')
-        def jrePath = conf.executable != 'java' ? conf.executable : ''
+        // IDEA 的 ALTERNATIVE_JRE_PATH 只认 JRE/JDK 家目录（或已注册的 SDK 名），
+        // 写 java.exe 会被判为无效并弹框拒绝启动；统一转成家目录，并改用 / 分隔以对齐 IDE 的注册表口径。
+        def jrePath = (conf.executableHome ?: '').replace('\\', '/')
         def hasCustomJre = !jrePath.isEmpty()
 
         def xmlFile = new File(ideaRunDir, 'Run_with_Remold.xml')

@@ -95,6 +95,7 @@ public class P05Probe {
 			measurePatchLoop(javac, tempDir);
 			measureHeapProportionality(javac, tempDir);
 			measureSafepoint(javac, tempDir);
+			measureFieldRemoval(javac, tempDir);
 		} finally {
 			deleteRecursively(tempDir);
 		}
@@ -661,6 +662,214 @@ public class P05Probe {
 	}
 
 	// ------------------------------------------------------------------------------------------------
+	// M7: named-class field removal
+	// ------------------------------------------------------------------------------------------------
+
+	/** v1: fields x,y,z in that declaration order — the order decides the slot layout. */
+	static final String SRC_REM_A_V1 = """
+		package rem;
+		public class A {
+		    public int x = 11;
+		    public int y = 22;
+		    public int z = 33;
+		    public int readY() { return y; }
+		    public int readZ() { return z; }
+		}
+		""";
+
+	/** v2: {@code x} removed, everything else byte-identical. */
+	static final String SRC_REM_A_V2 = """
+		package rem;
+		public class A {
+		    public int y = 22;
+		    public int z = 33;
+		    public int readY() { return y; }
+		    public int readZ() { return z; }
+		}
+		""";
+
+	/** Compiled against v1, never redefined: its {@code GETFIELD rem/A.x} is the out-of-batch reader. */
+	static final String SRC_REM_B = """
+		package rem;
+		public class B {
+		    public static int readX(A a) { return a.x; }
+		}
+		""";
+
+	/** Compiled against v1, never redefined: {@code w} sits after A's three fields. */
+	static final String SRC_REM_C = """
+		package rem;
+		public class C extends A {
+		    public int w = 44;
+		    public int readW() { return w; }
+		    public void writeW(int v) { w = v; }
+		}
+		""";
+
+	/**
+	 * v3: after {@code x} was removed, add a brand-new field {@code q}. The question this answers is
+	 * whether the JVM reuses the abandoned slot — if it does, {@code q} on a surviving instance reads
+	 * whatever {@code x} used to hold, and {@code InitFix}'s conditional CAS (which only writes when
+	 * the field is still the type default) would skip it, leaving the field permanently stale.
+	 */
+	static final String SRC_REM_A_V3 = """
+		package rem;
+		public class A {
+		    public int y = 22;
+		    public int z = 33;
+		    public int q = 77;
+		    public int readY() { return y; }
+		    public int readZ() { return z; }
+		    public int readQ() { return q; }
+		}
+		""";
+
+	/**
+	 * Why is field removal on a <em>named</em> class refused? The measured answer, split into the
+	 * cases that actually differ:
+	 *
+	 * <ul>
+	 *   <li><b>M7a</b> out-of-batch reader whose constant-pool entry was already resolved
+	 *       (it ran before the removal) — the cached offset may still be usable, so it can silently
+	 *       return the value of a field that no longer exists;</li>
+	 *   <li><b>M7b</b> the same reader, but never executed before the removal — re-resolution has to
+	 *       look the field up again and may fail cleanly;</li>
+	 *   <li><b>M7c</b> a <em>new</em> instance after the removal: if {@code readY} still returns 22
+	 *       the old slot layout was preserved; if it returns 0 the layout was compacted and the
+	 *       redefined class now disagrees with every surviving instance;</li>
+	 *   <li><b>M7d</b> a surviving instance's other fields;</li>
+	 *   <li><b>M7e</b> a subclass that was not redefined and whose field sits after the removed one.</li>
+	 * </ul>
+	 *
+	 * <p>These are observations, not assertions about what the JVM is supposed to do: the point is
+	 * to replace "删除字段后果不可预期" with a concrete failure mode.</p>
+	 */
+	static void measureFieldRemoval(String javac, File baseDir) throws Exception {
+		System.out.println("\n--- [M7] named-class field removal: out-of-batch readers ---");
+		File work = new File(baseDir, "m7");
+		File v1 = compileInto(javac, work, "v1", "A.java", SRC_REM_A_V1);
+		compileInto(javac, work, "v1", "B.java", SRC_REM_B);
+		compileInto(javac, work, "v1", "C.java", SRC_REM_C);
+		File v2 = compileInto(javac, work, "v2", "A.java", SRC_REM_A_V2);
+		File aV2 = new File(v2, "rem/A.class");
+		File v3 = compileInto(javac, work, "v3", "A.java", SRC_REM_A_V3);
+		File aV3 = new File(v3, "rem/A.class");
+
+		// ---- M7a: reader already executed, so its constant-pool entry is resolved and cached ----
+		URLClassLoader cl = newLoader(v1);
+		try {
+			Class<?> a = Class.forName("rem.A", true, cl);
+			Class<?> b = Class.forName("rem.B", true, cl);
+			Object inst = a.getConstructor().newInstance();
+			checkEq(11, invokeInt(b, "readX", new Class<?>[]{a}, null, inst),
+			        "M7a precondition: the out-of-batch reader sees x=11 before the removal");
+			checkEq(22, invokeInt(a, "readY", new Class<?>[0], inst, null),
+			        "M7a precondition: surviving field y=22 before the removal");
+
+			long us = redefineMicros(P05Agent.instrumentation(), a, aV2);
+			System.out.println("   [M7a] redefine accepted, " + us + "us (x removed, live instance present)");
+
+			System.out.println("        resolved-CP reader  -> " + tryInt(b, "readX", new Class<?>[]{a}, null, inst));
+			System.out.println("        surviving y / z on the old instance -> "
+			                   + tryInt(a, "readY", new Class<?>[0], inst, null) + " / "
+			                   + tryInt(a, "readZ", new Class<?>[0], inst, null));
+
+			// M7c: a brand-new instance. Its slot layout comes from the *redefined* class; the
+			// pre-existing instance still has the old one. If readY differs between them, the
+			// redefined class disagrees with the survivors.
+			Object fresh = a.getConstructor().newInstance();
+			System.out.println("        NEW instance y / z -> "
+			                   + tryInt(a, "readY", new Class<?>[0], fresh, null) + " / "
+			                   + tryInt(a, "readZ", new Class<?>[0], fresh, null));
+			System.out.println("        NEW instance readX (field is gone from the class) -> "
+			                   + tryInt(b, "readX", new Class<?>[]{a}, null, fresh));
+			check(true, "M7a/M7c outcomes recorded (see the lines above)");
+		} finally {
+			cl.close();
+		}
+
+		// ---- M7b: same reader, but its constant-pool entry was never resolved before the removal ----
+		cl = newLoader(v1);
+		try {
+			Class<?> a = Class.forName("rem.A", true, cl);
+			Class<?> b = Class.forName("rem.B", true, cl);
+			Object inst = a.getConstructor().newInstance();
+			// Deliberately do NOT call readX here: its GETFIELD must stay unresolved.
+			checkEq(22, invokeInt(a, "readY", new Class<?>[0], inst, null),
+			        "M7b precondition: A is loaded and usable, but B.readX has never run");
+
+			redefineMicros(P05Agent.instrumentation(), a, aV2);
+			System.out.println("   [M7b] unresolved-CP reader -> "
+			                   + tryInt(b, "readX", new Class<?>[]{a}, null, inst));
+			check(true, "M7b outcome recorded (see the line above)");
+		} finally {
+			cl.close();
+		}
+
+		// ---- M7f: remove x, then add a new field q — is the abandoned slot reused? ----
+		cl = newLoader(v1);
+		try {
+			Class<?> a = Class.forName("rem.A", true, cl);
+			Class<?> b = Class.forName("rem.B", true, cl);
+			Object inst = a.getConstructor().newInstance();
+			checkEq(11, invokeInt(b, "readX", new Class<?>[]{a}, null, inst),
+			        "M7f precondition: x=11 is physically present in the slot that is about to be abandoned");
+			checkEq(22, invokeInt(a, "readY", new Class<?>[0], inst, null),
+			        "M7f precondition: y=22 before the removals");
+			redefineMicros(P05Agent.instrumentation(), a, aV2);
+			redefineMicros(P05Agent.instrumentation(), a, aV3);
+			String q = tryInt(a, "readQ", new Class<?>[0], inst, null);
+			System.out.println("   [M7f] after remove-x then add-q, q on the SURVIVING instance -> " + q);
+			System.out.println("         (0 = the slot was appended; 11 = the abandoned x slot was reused,"
+			                   + " which makes InitFix's conditional CAS skip it forever)");
+			Object fresh = a.getConstructor().newInstance();
+			System.out.println("         q on a NEW instance -> " + tryInt(a, "readQ", new Class<?>[0], fresh, null));
+			check(true, "M7f outcome recorded (see the lines above)");
+		} finally {
+			cl.close();
+		}
+
+		// ---- M7e: subclass not in the batch, its field sits after the removed one ----
+		cl = newLoader(v1);
+		try {
+			Class<?> a = Class.forName("rem.A", true, cl);
+			Class<?> c = Class.forName("rem.C", true, cl);
+			Object ci = c.getConstructor().newInstance();
+			checkEq(44, invokeInt(c, "readW", new Class<?>[0], ci, null),
+			        "M7e precondition: subclass field w=44 before the removal");
+
+			redefineMicros(P05Agent.instrumentation(), a, aV2);
+			System.out.println("   [M7e] subclass w after removing a parent field -> "
+			                   + tryInt(c, "readW", new Class<?>[0], ci, null));
+			c.getMethod("writeW", int.class).invoke(ci, 99);
+			System.out.println("        after writeW(99): w=" + tryInt(c, "readW", new Class<?>[0], ci, null)
+			                   + ", parent y=" + tryInt(a, "readY", new Class<?>[0], ci, null)
+			                   + ", parent z=" + tryInt(a, "readZ", new Class<?>[0], ci, null));
+			check(true, "M7e outcome recorded (see the lines above)");
+		} finally {
+			cl.close();
+		}
+	}
+
+	/** Calls a static/instance method and renders the value or the thrown exception as text. */
+	static String tryInt(Class<?> owner, String name, Class<?>[] paramTypes, Object target, Object... args) {
+		try {
+			Object r = owner.getMethod(name, paramTypes).invoke(target, args);
+			return String.valueOf(r);
+		} catch (InvocationTargetException e) {
+			Throwable c = e.getCause();
+			return "threw " + c.getClass().getName() + ": " + c.getMessage();
+		} catch (Throwable t) {
+			return "threw " + t.getClass().getName() + ": " + t.getMessage();
+		}
+	}
+
+	static int invokeInt(Class<?> owner, String name, Class<?>[] paramTypes, Object target, Object... args)
+		throws Exception {
+		return (int) owner.getMethod(name, paramTypes).invoke(target, args);
+	}
+
+	// ------------------------------------------------------------------------------------------------
 	// helpers
 	// ------------------------------------------------------------------------------------------------
 
@@ -723,7 +932,10 @@ public class P05Probe {
 		outDir.mkdirs();
 		File f = new File(srcDir, fileName);
 		Files.writeString(f.toPath(), source);
-		runCmd(javac, "-nowarn", "-encoding", "UTF-8", "-d", outDir.getAbsolutePath(), f.getAbsolutePath());
+		// 输出目录必须在 classpath 上：多文件夹具要互相引用（B 编译时引用 A 的字段）。
+		runCmd(javac, "-nowarn", "-encoding", "UTF-8",
+		       "-cp", outDir.getAbsolutePath(),
+		       "-d", outDir.getAbsolutePath(), f.getAbsolutePath());
 		return outDir;
 	}
 

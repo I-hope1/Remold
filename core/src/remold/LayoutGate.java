@@ -64,9 +64,15 @@ public final class LayoutGate {
 		/**
 		 * 字段被删除（重定义层入口专有）。
 		 *
-		 * <p>与 {@link #check} 中"纯删除放行"不同：重定义层面对的是<b>用户显式编辑</b>，
-		 * 静默删掉字段会让用户以为无损（旧值随新布局消失）。因此这里保守地拒绝，
-		 * 交给用户重新热更一次或重启确认。见 {@code docs/topology/07-layout-gate-and-risks.md} §1 的分级门表。</p>
+		 * <p>与 {@link #check} 中"纯删除放行"不同。那个判据是"读者必为空"，它在匿名类里成立
+		 * （合成字段只被类自身读，而类本身在批次内被重编），在具名类里<b>拿不到</b>：
+		 * 被删字段之前就存在，任何已加载的类都可能已经持有它的 {@code GETFIELD}，而这些类不在批次内。</p>
+		 *
+		 * <p>实测（JBR 21，{@code docs/initfix/07-p05-probe-results.md} §13）表明失败形态是<b>确定</b>的：
+		 * 布局不压缩、其余字段偏移不变、废弃槽位不复用，批次外读者抛 {@code NoSuchFieldError}。
+		 * 拒绝的理由因此不是"会读到脏数据"，而是<b>错误被推迟</b>——热更本身成功，
+		 * 随后业务线程在任意一次执行到该读点时抛 {@code LinkageError}，抛点在热更事务之外，
+		 * 既无法回滚也无法归因。见 {@code docs/topology/07-layout-gate-and-risks.md} §1 的分级门表。</p>
 		 */
 		REMOVED_FIELD,
 		/**

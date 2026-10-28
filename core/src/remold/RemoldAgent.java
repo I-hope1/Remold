@@ -1599,9 +1599,10 @@ public class RemoldAgent {
 			     + "RESTART is required for those.");
 		}
 
-		processAnnotations(definitions);
+		List<ClassDefinition> successfulDefinitions = new ArrayList<>(definitions.size());
 		for (ClassDefinition def : definitions) {
 			if (!redefinedOk.contains(def.getDefinitionClass().getName())) continue;
+			successfulDefinitions.add(def);
 			try {
 				InitFix.afterRedefine(def.getDefinitionClass());
 			} catch (Throwable e) {
@@ -1609,12 +1610,10 @@ public class RemoldAgent {
 				InitFix.afterRedefineFailed(def.getDefinitionClass());
 			}
 		}
-		List<ClassDefinition> successfulDefinitions = new ArrayList<>(definitions.size());
-		for (ClassDefinition def : definitions) {
-			if (redefinedOk.contains(def.getDefinitionClass().getName())) {
-				successfulDefinitions.add(def);
-			}
-		}
+
+		// 必须在 InitFix 补丁（静态字段与存量实例字段）全部就位后，再对成功重定义的类触发 @OnReload 回调；
+		// 严禁在补丁就绪前触发，否则回调读到未初始化的零值（时序反转）。
+		processAnnotations(successfulDefinitions);
 		notifyBatchListeners(successfulDefinitions);
 
 		if (skippedCount > 0) info("Skipped " + skippedCount + " unchanged classes.");
@@ -1692,49 +1691,58 @@ public class RemoldAgent {
 	static final         java.util.concurrent.atomic.AtomicLong LIVE_INSTANCE_SCAN_MILLIS =
 	 new java.util.concurrent.atomic.AtomicLong();
 
-	/** 在 applyRedefinitions(definitions) 后调用 */
-	private static void processAnnotations(List<ClassDefinition> definitions) {
-		if (!ENABLE_HOTSWAP_EVENT) return;
-
+	/**
+	 * 在重定义与 InitFix 补丁（静态字段与存量实例字段）全部就位后调用。
+	 *
+	 * <p>扫描目标类中标记了 {@link OnReload} 的方法并触发调用。必须在 InitFix 之后触发，
+	 * 保证回调执行时新增/覆写的字段已处于就绪态，杜绝时序反转读到零值。</p>
+	 */
+	static void processAnnotations(List<ClassDefinition> definitions) {
+		if (definitions == null || definitions.isEmpty()) return;
 		for (ClassDefinition def : definitions) {
 			Class<?> clazz = def.getDefinitionClass();
-
-			if (!(FORCE_REINIT || clazz.isAnnotationPresent(Reloadable.class))) continue;
-
-			postToMain(() -> postToMain(() -> processAnnotationsInternal(clazz)));
+			if (clazz == null) continue;
+			postToMain(() -> processAnnotationsInternal(clazz));
 		}
 	}
-	private static void processAnnotationsInternal(Class<?> clazz) {
-		Method reloadMethod = null;
+
+	static void processAnnotationsInternal(Class<?> clazz) {
+		if (clazz == null) return;
+		List<Method> staticMethods = new ArrayList<>(2);
+		List<Method> instanceMethods = new ArrayList<>(2);
 		for (Method m : clazz.getDeclaredMethods()) {
 			if (m.isAnnotationPresent(OnReload.class)) {
-				reloadMethod = m;
-				reloadMethod.setAccessible(true);
-				break;
+				m.setAccessible(true);
+				if (Modifier.isStatic(m.getModifiers())) {
+					staticMethods.add(m);
+				} else {
+					instanceMethods.add(m);
+				}
 			}
 		}
-		if (reloadMethod == null) return;
+		if (staticMethods.isEmpty() && instanceMethods.isEmpty()) return;
 		info("[Reload] Found @OnReload on " + clazz);
 
-		if (Modifier.isStatic(reloadMethod.getModifiers())) {
+		for (Method m : staticMethods) {
 			try {
-				reloadMethod.invoke(null);
-				if (DEBUG) log("[Reload] Invoked @OnReload static method.");
-			} catch (Exception e) {
-				error("Error invoking @OnReload", e);
+				m.invoke(null);
+				if (DEBUG) log("[Reload] Invoked @OnReload static method: " + m.getName());
+			} catch (Throwable e) {
+				error("Error invoking static @OnReload method " + m.getName() + " on " + clazz.getName(), e);
 			}
-			if (DEBUG) log("[Reload] Invoked @OnReload on " + clazz);
-			return;
 		}
 
-		Object[] instances = LibTool.initialized() ? LibTool.getInstances(clazz) : InstanceTracker.getInstances(clazz).toArray();
-
-		for (Object obj : instances) {
-			try {
-				reloadMethod.invoke(obj);
-				if (DEBUG) log("[Reload] Invoked @OnReload on " + obj);
-			} catch (Exception e) {
-				error("Error invoking @OnReload", e);
+		if (!instanceMethods.isEmpty()) {
+			Object[] instances = LibTool.initialized() ? LibTool.getInstances(clazz) : InstanceTracker.getInstances(clazz).toArray();
+			for (Object obj : instances) {
+				for (Method m : instanceMethods) {
+					try {
+						m.invoke(obj);
+						if (DEBUG) log("[Reload] Invoked @OnReload on " + obj + "." + m.getName());
+					} catch (Throwable e) {
+						error("Error invoking @OnReload on " + obj + "." + m.getName(), e);
+					}
+				}
 			}
 		}
 	}
@@ -2820,6 +2828,7 @@ public class RemoldAgent {
 					error("Failed to run InitFix after redefine for " + className, t);
 					InitFix.afterRedefineFailed(targetClass);
 				}
+				processAnnotations(Collections.singletonList(new ClassDefinition(targetClass, runtimeBytes)));
 				notifyBatchListeners(Collections.singletonList(new ClassDefinition(targetClass, runtimeBytes)));
 				info("[DYNAMIC-REDEFINE] Successfully redefined " + className);
 				return true;

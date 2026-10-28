@@ -21,8 +21,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
@@ -67,6 +69,7 @@ public final class ReaderScanProbe {
 		measureLoadedClasses(inst);
 		measureProjectClasses(root);
 		measureWholeCorpus();
+		measureWiringPipeline(root);
 
 		System.out.println("\n=== READER SCAN PROBE SUMMARY: passed=" + passed + ", failed=" + failed + " ===");
 		if (failed > 0) System.exit(1);
@@ -271,6 +274,43 @@ public final class ReaderScanProbe {
 			System.out.printf("   median speedup on jdk sample=%.1fx%n",
 			                  (double) median(Arrays.copyOf(legacy, n)) / Math.max(1L, median(Arrays.copyOf(cp, n))));
 		}
+	}
+
+	/**
+	 * 接线后的完整管线：{@code universe()}（ASM 结构解析）+ {@code find()}（常量池扫描 + 解析）。
+	 *
+	 * <p>真实接线里已加载的工程类走 {@code bytecodeCache}（字节已在内存）；这里用磁盘字节代替，
+	 * 因此测到的是<b>管线本身</b>的成本，不含 IO，也不含"缓存命中"带来的节省。</p>
+	 */
+	private static void measureWiringPipeline(Path root) throws Exception {
+		System.out.println("\n--- [E] wiring pipeline: universe + find ---");
+		Map<String, byte[]> bytes = new LinkedHashMap<>();
+		for (byte[] b : collectProjectClasses(root, Integer.MAX_VALUE)) {
+			ClassNode cn = new ClassNode();
+			new ClassReader(b).accept(cn, ClassReader.SKIP_CODE);
+			bytes.put(cn.name, b);
+		}
+		if (bytes.isEmpty()) {
+			System.out.println("   [SKIP] no project classes found under " + root);
+			return;
+		}
+		// 一个不存在的成员：让 find 走完整条路径，但不会因为命中而提前结束
+		RemovedMemberReaders.RemovedMember probe =
+			new RemovedMemberReaders.RemovedMember("p/DoesNotExist", "nope", "I", true, false);
+
+		long[] universeNanos = new long[5];
+		long[] findNanos = new long[5];
+		for (int r = 0; r < universeNanos.length; r++) {
+			long t0 = System.nanoTime();
+			Map<String, RemovedMemberReaders.TypeInfo> u = RemovedMemberReaders.universe(bytes);
+			universeNanos[r] = System.nanoTime() - t0;
+			t0 = System.nanoTime();
+			RemovedMemberReaders.find(u, u, bytes, List.of(probe));
+			findNanos[r] = System.nanoTime() - t0;
+		}
+		System.out.printf("   classes=%d%n", bytes.size());
+		reportNanos("universe (ASM describe)", universeNanos);
+		reportNanos("find (refs + resolve)", findNanos);
 	}
 
 	private static void scanClassPathEntries(long[] acc) throws Exception {

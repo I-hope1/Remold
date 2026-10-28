@@ -4,8 +4,12 @@ import remold.annotation.*;
 import remold.profiler.DynamicProfilerAPI;
 import remold.ref.HotswapBridge;
 import remold.ref.InitFix;
+import remold.ref.RemovedMemberReaders;
 import remold.util.*;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldNode;
 
 import java.io.*;
 import java.lang.instrument.*;
@@ -2121,10 +2125,232 @@ public class RemoldAgent {
 	 * <p>判决本身是纯函数 {@link #decideLayout}（给定旧/新字节、开关、批次类名集 → 动作 + 要移出的类）；
 	 * 这里只负责"取字节、执行动作、撤销事务"的接线。{@code remold.agent.layout_gate=off} 时整体跳过。</p>
 	 */
+	/**
+	 * 扫描"批次外读者"：本批被删的实例字段，在批次落地之后还有谁解析得到它
+	 * （判据见 {@code docs/initfix/07-p05-probe-results.md} §13.6）。
+	 *
+	 * <h2>字节源：已加载的类只能读内存</h2>
+	 * <p>已加载且不在本批的类，其字节码只从 {@link #bytecodeCache} 取——那是 JVM 里当前生效的那份。
+	 * <b>严禁</b>回退去读磁盘构建目录：批次撕裂时（bulk 重定义失败后退回逐类、个别类失败被吞），
+	 * 磁盘上的 {@code Reader.class} 可能已经是重编后的新版本，而 JVM 里跑的仍是旧字节码；
+	 * 读磁盘会把真正的读者当成"已不再读"而漏掉。磁盘目录只用来补充<b>尚未加载</b>的工程类。</p>
+	 *
+	 * <p>取不到某个已加载工程类的内存字节时，本轮扫描判为<b>不完整</b>，整体退回存活实例判据
+	 * ——把"没扫全"当成"没有读者"是本条最危险的读法。</p>
+	 *
+	 * <h2>范围</h2>
+	 * <p>只覆盖工程自身的构建输出（由本批类的路径反推根目录）。JDK 与第三方 jar 不在范围内：
+	 * 那里的读者属于已知边界，不是本函数能解决的（见 {@code docs/status.md} 风险 12）。</p>
+	 *
+	 * @return 类名 → 该类被删字段的批次外读者；空 map 表示本轮不做判定（没有删除，或扫描不完整）
+	 */
+	private static Map<String, RemovedFieldReaders> scanRemovedFieldReaders(
+			Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath) {
+		long start = System.nanoTime();
+
+		// ---- 1. 本批被删的**实例**字段（静态字段不参与，理由见 decideLayout 的注释）----
+		Map<String, List<RemovedMemberReaders.RemovedMember>> removedByClass = new LinkedHashMap<>();
+		Map<String, byte[]> oldBatchBytes = new LinkedHashMap<>();
+		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
+			String className = e.getKey();
+			byte[] oldBytes = bytecodeCache.get(className);
+			if (oldBytes == null) {
+				Class<?> c = loadedClassesMap.get(className);
+				if (c != null) {
+					try {
+						oldBytes = fetchOriginalBytecode(c);
+					} catch (Throwable ignored) {
+						// 取不到旧基线：这个类无法判定，下面会因为 removedByClass 为空而整体跳过
+					}
+				}
+			}
+			if (oldBytes == null) continue;
+			oldBatchBytes.put(internalName(className), oldBytes);
+			List<RemovedMemberReaders.RemovedMember> removed = removedInstanceFields(oldBytes, e.getValue());
+			if (!removed.isEmpty()) removedByClass.put(className, removed);
+		}
+		if (removedByClass.isEmpty()) return Map.of();
+
+		// ---- 2. 读者字节码：本批用新字节，批次外已加载的工程类用内存字节，未加载的工程类读磁盘 ----
+		Map<String, byte[]> post = new LinkedHashMap<>();
+		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
+			post.put(internalName(e.getKey()), e.getValue());
+		}
+
+		Set<Path> roots = projectClassRoots(classToPath);
+		int uncached = 0;
+		for (Map.Entry<String, Class<?>> e : loadedClassesMap.entrySet()) {
+			String name = e.getKey();
+			if (newBatchBytes.containsKey(name)) continue;
+			if (!isProjectClass(e.getValue(), roots)) continue;
+			byte[] bytes = bytecodeCache.get(name);
+			if (bytes == null) {
+				uncached++;
+				continue;
+			}
+			post.putIfAbsent(internalName(name), bytes);
+		}
+		if (uncached > 0) {
+			warn("[LAYOUT-READERS] " + uncached + " loaded project class(es) have no cached bytecode;"
+			     + " reader scan is inconclusive this round, falling back to the liveness check."
+			     + " (Reading them from the build output would be wrong: after a torn batch the file"
+			     + " may already be the new version while the JVM still runs the old one.)");
+			return Map.of();
+		}
+		for (Path root : roots) collectClassFiles(root, post);
+
+		// ---- 3. 判定 ----
+		Map<String, byte[]> pre = new LinkedHashMap<>(post);
+		pre.putAll(oldBatchBytes);
+		List<RemovedMemberReaders.RemovedMember> allRemoved = new ArrayList<>();
+		for (List<RemovedMemberReaders.RemovedMember> l : removedByClass.values()) allRemoved.addAll(l);
+
+		RemovedMemberReaders.Result result;
+		try {
+			result = RemovedMemberReaders.find(RemovedMemberReaders.universe(pre),
+			                                   RemovedMemberReaders.universe(post), post, allRemoved);
+		} catch (Throwable t) {
+			warn("[LAYOUT-READERS] reader scan failed (" + t + "); falling back to the liveness check.");
+			return Map.of();
+		}
+		if (!result.inconclusive().isEmpty()) {
+			warn("[LAYOUT-READERS] reader scan is inconclusive for " + result.inconclusive().size()
+			     + " reference(s), e.g. " + result.inconclusive().get(0)
+			     + "; falling back to the liveness check.");
+			return Map.of();
+		}
+
+		Map<String, List<String>> readersByClass = new LinkedHashMap<>();
+		for (String className : removedByClass.keySet()) readersByClass.put(className, new ArrayList<>());
+		for (RemovedMemberReaders.Hit hit : result.hits()) {
+			List<String> readers = readersByClass.get(dotted(hit.member().owner()));
+			if (readers == null) continue;
+			String reader = dotted(hit.reader());
+			if (!readers.contains(reader)) readers.add(reader);
+		}
+
+		Map<String, RemovedFieldReaders> out = new LinkedHashMap<>();
+		for (Map.Entry<String, List<String>> e : readersByClass.entrySet()) {
+			out.put(e.getKey(), new RemovedFieldReaders(true, e.getValue()));
+		}
+		long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+		info("[LAYOUT-READERS] scanned " + post.size() + " class(es) for removed fields of "
+		     + removedByClass.size() + " class(es) in " + ms + "ms; readers outside the batch: "
+		     + (result.hits().isEmpty() ? "none" : String.valueOf(result.hits().size())));
+		return out;
+	}
+
+	/** 旧版里有、新版里没有的**实例**字段（合成标记字段不计，它们由对齐器负责）。 */
+	private static List<RemovedMemberReaders.RemovedMember> removedInstanceFields(byte[] oldBytes,
+	                                                                              byte[] newBytes) {
+		ClassNode oldClass = new ClassNode();
+		ClassNode newClass = new ClassNode();
+		new ClassReader(oldBytes).accept(oldClass, ClassReader.SKIP_CODE);
+		new ClassReader(newBytes).accept(newClass, ClassReader.SKIP_CODE);
+
+		Set<String> survivors = new HashSet<>();
+		for (FieldNode f : newClass.fields) survivors.add(f.name + ":" + f.desc);
+
+		List<RemovedMemberReaders.RemovedMember> out = new ArrayList<>();
+		for (FieldNode f : oldClass.fields) {
+			if ((f.access & Opcodes.ACC_STATIC) != 0) continue;
+			if ((f.access & Opcodes.ACC_SYNTHETIC) != 0 || f.name.startsWith("$remold$")) continue;
+			if (survivors.contains(f.name + ":" + f.desc)) continue;
+			out.add(new RemovedMemberReaders.RemovedMember(oldClass.name, f.name, f.desc, true,
+			                                               (f.access & Opcodes.ACC_PRIVATE) != 0));
+		}
+		return out;
+	}
+
+	/**
+	 * 由本批类的文件路径反推工程构建输出根目录（{@code .../build/classes/java/main} 之类）。
+	 * 做法是把类名里的包段数从路径末尾去掉。
+	 */
+	private static Set<Path> projectClassRoots(Map<String, Path> classToPath) {
+		Set<Path> roots = new LinkedHashSet<>();
+		if (classToPath == null) return roots;
+		for (Map.Entry<String, Path> e : classToPath.entrySet()) {
+			Path p = e.getValue();
+			if (p == null) continue;
+			int depth = e.getKey().split("\\.").length;
+			for (int i = 0; i < depth && p != null; i++) p = p.getParent();
+			if (p != null) roots.add(p.toAbsolutePath().normalize());
+		}
+		return roots;
+	}
+
+	/** 该已加载类是否属于工程自身的构建输出（按 code source 位置判断，不触发 IO）。 */
+	private static boolean isProjectClass(Class<?> c, Set<Path> roots) {
+		if (roots.isEmpty()) return false;
+		ClassLoader loader = c.getClassLoader();
+		if (loader == null || loader == ClassLoader.getPlatformClassLoader()) return false;
+		String name = c.getName();
+		for (String prefix : NON_PROJECT_PREFIXES) {
+			if (name.startsWith(prefix)) return false;
+		}
+		try {
+			java.security.CodeSource cs = c.getProtectionDomain() == null
+			 ? null : c.getProtectionDomain().getCodeSource();
+			if (cs == null || cs.getLocation() == null) return false;
+			Path location = Path.of(cs.getLocation().toURI()).toAbsolutePath().normalize();
+			for (Path root : roots) {
+				if (location.startsWith(root)) return true;
+			}
+		} catch (Throwable ignored) {
+			// 拿不到位置就按"不是工程类"处理：范围外的读者是已知边界，不能因此判成"没有读者"。
+		}
+		return false;
+	}
+
+	/** 把构建输出里的 class 补进读者集合（只补尚未收录的：内存字节优先）。 */
+	private static void collectClassFiles(Path root, Map<String, byte[]> into) {
+		if (!Files.isDirectory(root)) return;
+		try (var walk = Files.walk(root)) {
+			for (Path p : walk.filter(Files::isRegularFile).toList()) {
+				if (into.size() > MAX_READER_SCAN_CLASSES) {
+					warn("[LAYOUT-READERS] class file cap (" + MAX_READER_SCAN_CLASSES
+					     + ") reached under " + root + "; reader scan may be incomplete.");
+					return;
+				}
+				if (!p.toString().endsWith(".class")) continue;
+				Path rel = root.relativize(p);
+				String internal = rel.toString().replace('\\', '/');
+				internal = internal.substring(0, internal.length() - ".class".length());
+				if (into.containsKey(internal)) continue;
+				try {
+					into.put(internal, Files.readAllBytes(p));
+				} catch (Throwable ignored) {
+					// 单个文件读失败不影响整体；缺失的类会在解析期表现为 UNKNOWN 并被判为不完整。
+				}
+			}
+		} catch (Throwable t) {
+			warn("[LAYOUT-READERS] cannot walk " + root + ": " + t);
+		}
+	}
+
+	private static String internalName(String dottedName) {
+		return dottedName.replace('.', '/');
+	}
+
+	private static String dotted(String internalName) {
+		return internalName.replace('/', '.');
+	}
+
+	/** 读者扫描只看工程自身的类；这些前缀是 JDK / 标准库，不可能引用工程字段。 */
+	private static final String[] NON_PROJECT_PREFIXES = {
+		"java.", "javax.", "jdk.", "sun.", "com.sun.", "org.w3c.", "org.xml.", "kotlin."
+	};
+
+	/** 读者扫描的类数上限，防止异常路径下把整个磁盘拖进来。 */
+	private static final int MAX_READER_SCAN_CLASSES = 20_000;
+
 	private static void applyRedefineLayoutGate(Map<String, byte[]> newBatchBytes,
 	                                            Map<String, Path> classToPath,
 	                                            Map<String, AlignmentTransaction> transactions) {
 		if (LayoutGate.MODE_OFF.equals(LAYOUT_GATE)) return;
+
+		// 本轮有"删实例字段"时才做读者扫描（内部先 diff 判断，没有删除就直接返回空表，零成本）。
+		Map<String, RemovedFieldReaders> readersByClass = scanRemovedFieldReaders(newBatchBytes, classToPath);
 
 		Set<String> rejectedHosts = new LinkedHashSet<>();
 		for (String className : new ArrayList<>(newBatchBytes.keySet())) {
@@ -2174,13 +2400,24 @@ public class RemoldAgent {
 			 : (hasLiveInstances(className) ? Liveness.LIVE : Liveness.NONE);
 
 			LayoutDecision d = decideLayout(className, changed, LAYOUT_GATE, liveness,
-			                                newBatchBytes.keySet());
+			                                newBatchBytes.keySet(),
+			                                readersByClass.getOrDefault(className, RemovedFieldReaders.NOT_SCANNED));
 
 			// 显式出口：取不到基线 / 无法 diff 就不是"放行"，而是"没法判"。
 			// 静默放行会重演"整轮静默失效"那类难排查的问题，所以必须说出来。
 			if (d.action() == LayoutAction.SKIP) {
 				warn("[LAYOUT-SKIP] " + className + ": layout gate skipped — no usable baseline"
 				     + " bytecode to diff. Redefining without a field-layout check.");
+				continue;
+			}
+
+			if (d.action() == LayoutAction.WAIVE_NO_READERS) {
+				LAYOUT_GATE_WAIVED.incrementAndGet();
+				warn("[LAYOUT-WAIVE] " + className + ": field(s) removed ("
+				     + d.layout().detail() + ") and no out-of-batch reader resolves to them any more;"
+				     + " redefining. Surviving instances lose the removed slot, which nothing reads."
+				     + " Scope note: only project classes were scanned — a reader inside a third-party"
+				     + " jar is outside this check.");
 				continue;
 			}
 
@@ -2225,10 +2462,32 @@ public class RemoldAgent {
 		PASS,
 		/** 布局不兼容，但无存活实例且不涉及静态字段 —— 放行（调用方应记 waived + 告警）。 */
 		WAIVE,
+		/**
+		 * 删除字段，但<b>批次外没有读者</b> —— 放行。
+		 *
+		 * <p>与 {@link #WAIVE} 分开是因为理由不同：{@code WAIVE} 靠"没有存活实例"，本条靠
+		 * "改动后没有代码还会解析到这个字段"。日志文案必须能区分，否则排查时会把两者混为一谈。</p>
+		 */
+		WAIVE_NO_READERS,
 		/** 拒绝并整组移出本批。 */
 		REJECT,
 		/** 无法判定（取不到基线 / diff 失败）—— 放行但必须告警，不得静默。 */
 		SKIP
+	}
+
+	/**
+	 * 某类被删<b>实例字段</b>在<b>批次外</b>的读者判定
+	 * （判据见 {@code docs/initfix/07-p05-probe-results.md} §13.6）。
+	 *
+	 * <p>{@code scanned == false} 表示本轮没有做这项判定（本批没有删除、或扫描前置条件不满足）。
+	 * 这种情况必须退回原来的存活实例判据，<b>不能</b>当成"没有读者"。</p>
+	 */
+	public record RemovedFieldReaders(boolean scanned, List<String> readers) {
+		public static final RemovedFieldReaders NOT_SCANNED = new RemovedFieldReaders(false, List.of());
+
+		public RemovedFieldReaders {
+			readers = readers == null ? List.of() : List.copyOf(readers);
+		}
 	}
 
 	/**
@@ -2252,6 +2511,14 @@ public class RemoldAgent {
 	 */
 	public static LayoutDecision decideLayout(String className, byte[] oldBytes, byte[] newBytes,
 	                                          String mode, Liveness liveness, Set<String> batchNames) {
+		return decideLayout(className, oldBytes, newBytes, mode, liveness, batchNames,
+		                    RemovedFieldReaders.NOT_SCANNED);
+	}
+
+	/** 便捷重载（带批次外读者判定）。 */
+	public static LayoutDecision decideLayout(String className, byte[] oldBytes, byte[] newBytes,
+	                                          String mode, Liveness liveness, Set<String> batchNames,
+	                                          RemovedFieldReaders removedFieldReaders) {
 		if (LayoutGate.MODE_OFF.equals(mode)) {
 			return new LayoutDecision(LayoutAction.PASS, null, hostNameOf(className), Set.of());
 		}
@@ -2264,7 +2531,7 @@ public class RemoldAgent {
 		} catch (Throwable t) {
 			return new LayoutDecision(LayoutAction.SKIP, null, hostNameOf(className), Set.of());
 		}
-		return decideLayout(className, changed, mode, liveness, batchNames);
+		return decideLayout(className, changed, mode, liveness, batchNames, removedFieldReaders);
 	}
 
 	/**
@@ -2288,6 +2555,27 @@ public class RemoldAgent {
 	 */
 	public static LayoutDecision decideLayout(String className, List<String> changedFields,
 	                                          String mode, Liveness liveness, Set<String> batchNames) {
+		return decideLayout(className, changedFields, mode, liveness, batchNames,
+		                    RemovedFieldReaders.NOT_SCANNED);
+	}
+
+	/**
+	 * 带"批次外读者"判定的版本。
+	 *
+	 * <p><b>删除字段的判据不是存活实例</b>：删掉字段后，存活实例只是丢了一个没人读的槽位，
+	 * 真正会出事的是<b>改动后还有代码解析得到它</b>——那会在未来任意一次执行时抛
+	 * {@code NoSuchFieldError}，且抛点在热更事务之外。所以本条只看 {@code removedFieldReaders}：
+	 * 读者为空则放行，有读者则拒绝并列出类名。</p>
+	 *
+	 * <p>其余不兼容（改类型 / 改静态性）与删除的差别在于：它们的旧值会被<b>静默</b>丢弃或错读，
+	 * 读者集合证明不了安全，因此仍按存活实例判。</p>
+	 *
+	 * <p>{@code removedFieldReaders.scanned() == false} 时必须退回存活实例判据——
+	 * 把"没扫"当成"没读者"是本条最危险的读法。</p>
+	 */
+	public static LayoutDecision decideLayout(String className, List<String> changedFields,
+	                                          String mode, Liveness liveness, Set<String> batchNames,
+	                                          RemovedFieldReaders removedFieldReaders) {
 		String host = hostNameOf(className);
 		if (LayoutGate.MODE_OFF.equals(mode)) {
 			return new LayoutDecision(LayoutAction.PASS, null, host, Set.of());
@@ -2299,17 +2587,30 @@ public class RemoldAgent {
 		if (res.compatible() || LayoutGate.MODE_WARN.equals(mode)) {
 			return new LayoutDecision(LayoutAction.PASS, res, host, Set.of());
 		}
+
+		boolean staticChange = LayoutGate.hasStaticFieldChange(changedFields);
+
+		// 删除实例字段：按"批次外读者"判，与存活实例无关（见方法注释）。
+		// 静态字段不走这条：静态值是类级共享的，删掉它的读者判定同样成立，但静态字段的
+		// 写入/初始化还有别的路径，保持原来的强拒绝，等有实测再放宽。
+		if (res.verdict() == LayoutGate.Verdict.REMOVED_FIELD && !staticChange
+		    && removedFieldReaders.scanned()) {
+			if (removedFieldReaders.readers().isEmpty()) {
+				return new LayoutDecision(LayoutAction.WAIVE_NO_READERS, res, host, Set.of());
+			}
+			return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames));
+		}
+
 		// 无存活实例且不涉及静态字段：没有状态会被错读，放行。
 		// UNKNOWN 落入下面的 REJECT 分支（按"可能有实例"处理）。
-		// 注意这条理由只对"新增/改类型"成立。对"删除字段"，风险不是"已有实例被错读"，
-		// 而是"未来的实例被陈旧代码读"——与本轮有无实例正交，故 liveness 不是删除的判据。
-		// 删除的正确判据是"批次外读者为空"：批次内的类扫新字节码、批次外的扫当前字节码，
-		// 命中 Fieldref 才拒绝。注意不能简单地"有删除就拒"——那会误杀删 private 字段
-		// （读者被约束在 nest 内）和正常连带重编的批次（读者新字节码已不再读）。
-		// 见 docs/status.md 风险 12 与 docs/initfix/07-p05-probe-results.md §13.6。
-		if (liveness == Liveness.NONE && !LayoutGate.hasStaticFieldChange(changedFields)) {
+		if (liveness == Liveness.NONE && !staticChange) {
 			return new LayoutDecision(LayoutAction.WAIVE, res, host, Set.of());
 		}
+		return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames));
+	}
+
+	/** 拒绝时要移出本批的类：宿主 + 其下属全部匿名类。 */
+	private static Set<String> droppedOf(String host, Set<String> batchNames) {
 		Set<String> dropped = new LinkedHashSet<>();
 		dropped.add(host);
 		if (batchNames != null) {
@@ -2317,7 +2618,7 @@ public class RemoldAgent {
 				if (AnonClassAligner.isAnonymousClassName(host, n)) dropped.add(n);
 			}
 		}
-		return new LayoutDecision(LayoutAction.REJECT, res, host, dropped);
+		return dropped;
 	}
 
 	/**

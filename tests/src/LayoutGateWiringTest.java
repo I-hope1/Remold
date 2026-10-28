@@ -132,4 +132,77 @@ class LayoutGateWiringTest {
 		assertTrue(d.dropped().contains("lg.Host$1") && d.dropped().contains("lg.Host$1$2"),
 			"嵌套匿名类也归约到最外层宿主整组");
 	}
+
+	// ------------------------------------------------------------------------------------------------
+	// 删除字段：判据是"批次外读者为空"，不是存活实例
+	// （判据推导见 docs/initfix/07-p05-probe-results.md §13.6）
+	// ------------------------------------------------------------------------------------------------
+
+	private static LayoutDecision decideWithReaders(byte[] oldB, byte[] newB, Liveness live,
+	                                                RemoldAgent.RemovedFieldReaders readers) {
+		return RemoldAgent.decideLayout(HOST, oldB, newB, "reject", live, BATCH, readers);
+	}
+
+	/**
+	 * 删字段 + 扫描完成 + 批次外没有读者 → 放行，**哪怕还有存活实例**。
+	 * 存活实例只是丢了一个没人读的槽位，不会让任何代码读到零值或抛错。
+	 */
+	@Test
+	void removedFieldWithNoOutOfBatchReaderIsWaivedEvenWithLiveInstances() {
+		LayoutDecision d = decideWithReaders(withField(), withoutField(), Liveness.LIVE,
+		                                     new RemoldAgent.RemovedFieldReaders(true, List.of()));
+
+		assertEquals(LayoutAction.WAIVE_NO_READERS, d.action(),
+			"deleting a field nobody reads after the change is safe regardless of live instances");
+		assertEquals(Verdict.REMOVED_FIELD, d.layout().verdict());
+		assertTrue(d.dropped().isEmpty(), "放行时不得移出任何类");
+	}
+
+	/** 有批次外读者 → 拒绝，并把宿主整组带走。 */
+	@Test
+	void removedFieldWithOutOfBatchReaderIsRejected() {
+		LayoutDecision d = decideWithReaders(withField(), withoutField(), Liveness.LIVE,
+		                                     new RemoldAgent.RemovedFieldReaders(
+			                                     true, List.of("lg.Reader")));
+
+		assertEquals(LayoutAction.REJECT, d.action());
+		assertEquals(Set.of(HOST, "lg.Host$1", "lg.Host$2"), d.dropped());
+	}
+
+	/**
+	 * 没做扫描（{@code scanned == false}）时必须退回存活实例判据——
+	 * 把"没扫"当成"没读者"是这条最危险的读法。
+	 */
+	@Test
+	void unscannedRemovalFallsBackToLiveness() {
+		LayoutDecision live = decideWithReaders(withField(), withoutField(), Liveness.LIVE,
+		                                        RemoldAgent.RemovedFieldReaders.NOT_SCANNED);
+		assertEquals(LayoutAction.REJECT, live.action(),
+			"without a reader scan the old liveness rule must still apply");
+
+		LayoutDecision none = decideWithReaders(withField(), withoutField(), Liveness.NONE,
+		                                        RemoldAgent.RemovedFieldReaders.NOT_SCANNED);
+		assertEquals(LayoutAction.WAIVE, none.action());
+	}
+
+	/** 静态字段不走读者判据：删静态字段即使无读者也保持强拒绝。 */
+	@Test
+	void staticFieldRemovalIgnoresReaderScan() {
+		LayoutDecision d = decideWithReaders(staticField(), noStatic(), Liveness.NONE,
+		                                     new RemoldAgent.RemovedFieldReaders(true, List.of()));
+		assertEquals(LayoutAction.REJECT, d.action(),
+			"the reader-based rule is scoped to instance fields; static field changes stay rejected");
+	}
+
+	/**
+	 * 换无关输入对照：改类型（不是删除）即使"没有读者"也仍按存活实例判——
+	 * 因为旧值会被静默丢弃/错读，读者集合证明不了安全。
+	 */
+	@Test
+	void typeChangeIgnoresReaderScan() {
+		LayoutDecision d = decideWithReaders(withField(), retypedField(), Liveness.LIVE,
+		                                     new RemoldAgent.RemovedFieldReaders(true, List.of()));
+		assertEquals(LayoutAction.REJECT, d.action(),
+			"a type change silently discards the old value, so an empty reader set proves nothing");
+	}
 }

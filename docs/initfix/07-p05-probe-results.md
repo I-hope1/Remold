@@ -670,3 +670,37 @@ max 列的毫秒级离群值是 JIT 预热与 GC，不影响中位。
 
 **口径说明**：这里用磁盘字节代替 `bytecodeCache`，所以测到的是管线本身；真实接线里缓存命中时
 连这部分读都没有，只会更低。
+
+### 14.7 缓存覆盖：为什么需要一个"首次加载填充"的 transformer
+
+接线时发现一个会让判据**永久失效**的缺口：`bytecodeCache` 原先只在热更/对齐过程中被动填充，
+而读者扫描要求"已加载类读内存里当前生效的字节码"（§13.6.4 的字节源约束）。首轮热更时缓存几乎是空的
+→ 扫描判不完整 → 退回存活实例判据。也就是说，**判据接上了线，但永远不会生效**。
+
+修法是两条：
+
+**① 首次加载时填缓存。** 注册一个独立的 `CacheWarmingTransformer`：
+
+- 只在 `classBeingRedefined == null`（首次加载）时动作；
+- 只认工程自身的位置（先按 agent 的 watch 目录/jar 判，监听配置为空时退回"`file:` 目录"判据——
+  jar 里的类按依赖处理）；
+- 跳过 hidden class（名字含 `/0x`）与 agent 自身（`remold/`）；
+- **永远 `return null`**，不改字节、不参与任何决策。
+
+**为什么不塞进 `AnnotationTransformer`**：后者对首次加载的类会做对齐替换
+（`pendingAlignedClasses`），在它里面提前 `return null` 会跳过对齐。注册在它**之后**则天然拿到
+对齐后的字节（transform 链是顺序的），而且对加载流程零影响。
+
+**② 补漏网之鱼用一次批量 retransform，不逐类调。** Transformer 注册之前就已加载的类不会经过它；
+`scanRemovedFieldReaders` 把这些类收成一个数组，**一次** `inst.retransformClasses(array)` 补齐
+（一次 safepoint）。逐类调会触发 N 次 safepoint，这是不能接受的。
+
+**③ 过滤数组类与 hidden class（否则 `uncached` 永远大于 0）。** JBR 25 下，工程类的数组
+`[Lp.Foo;` 与 lambda 隐藏类 `p.Foo$$Lambda/0x…` 都会继承宿主的 CodeSource（工程构建目录），
+但它们**永远不进 `ClassFileTransformer`**；不滤掉的话 `uncached` 恒为正，判据永久退回。
+数组没有代码、hidden class 的引用由宿主类的常量池覆盖，跳过它们不损失覆盖。
+另外跳过 `!inst.isModifiableClass(clazz)`——retransform 会直接抛 `UnmodifiableClassException`。
+
+`CacheWarmingTransformerTest` 6 用例覆盖：首次加载入缓存、重定义通道不入、hidden class 跳过、
+agent 自身跳过、非工程位置跳过、缓存的是原始引用。变异检查：去掉"区分首次加载"后
+`doesNotCacheRedefinitionPath` 变红。

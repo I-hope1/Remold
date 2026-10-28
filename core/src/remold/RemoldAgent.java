@@ -852,6 +852,9 @@ public class RemoldAgent {
 		if (transformer == null) {
 			transformer = new AnnotationTransformer();
 			inst.addTransformer(transformer, true);
+			// 注册在 AnnotationTransformer **之后**：transform 链是顺序的，所以这里看到的
+			// 是对齐/织入之后的字节码——正是 JVM 会拿去定义的那一份。
+			inst.addTransformer(new CacheWarmingTransformer(), false);
 			if (isEnhancedHotswapEnabled()) {
 				try {
 					DynamicProfilerAPI.init();
@@ -860,6 +863,132 @@ public class RemoldAgent {
 				info("Skipped dynamic profiler injector because structural hotswap is unsupported.");
 			}
 		}
+	}
+
+	/**
+	 * 首次加载时把工程类的字节码抄进 {@link #bytecodeCache}。
+	 *
+	 * <p><b>为什么需要它</b>：删除字段的读者扫描要求"已加载类读内存里当前生效的字节码"，
+	 * 而 {@code bytecodeCache} 原先只在热更/对齐过程中被动填充。没有这一层，首轮热更时缓存几乎是空的，
+	 * 扫描会判为不完整并退回存活实例判据——判据等于没接线
+	 * （{@code docs/initfix/07-p05-probe-results.md} §14.7）。</p>
+	 *
+	 * <p><b>为什么是独立 transformer 而不是塞进 {@link AnnotationTransformer}</b>：后者对首次加载的类
+	 * 会做对齐替换（{@code pendingAlignedClasses}），在它里面提前 {@code return null} 会跳过对齐；
+	 * 注册在它之后则天然拿到对齐后的字节，而且本 transformer <b>永远返回 {@code null}</b>
+	 * （不改字节、不参与任何决策），对加载流程零影响。</p>
+	 *
+	 * <p>只抄工程自身的类：判定见 {@link #isProjectLocation}。数组类与 hidden class 不会走到这里。</p>
+	 */
+	static final class CacheWarmingTransformer implements ClassFileTransformer {
+		@Override
+		public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
+		                        ProtectionDomain protectionDomain, byte[] classfileBuffer) {
+			if (classBeingRedefined != null || className == null || classfileBuffer == null) return null;
+			if (loader == null) return null;                        // bootstrap
+			if (className.contains("/0x")) return null;             // hidden class（lambda 等）
+			if (className.startsWith("remold/")) return null;        // agent 自身，避免递归
+			if (!isProjectLocation(protectionDomain)) return null;
+			bytecodeCache.putIfAbsent(className.replace('/', '.'), classfileBuffer);
+			return null;
+		}
+	}
+
+	/** CodeSource 位置 → 是否属于工程自身。按位置字符串缓存，避免每个类都解析一次 URI。 */
+	private static final Map<String, Boolean> projectLocations = new ConcurrentHashMap<>();
+
+	/**
+	 * 判定一个保护域的位置是否属于"工程自身"。
+	 *
+	 * <p>先认 agent 正在监听的目录与 jar（{@code watchDirSources} / {@code watchJarSources} /
+	 * {@code activeWatchJars}）——那才是工程的边界，mod 以 jar 形式分发时也成立。
+	 * 监听配置为空时退回"file: 目录"判据：jar 里的类按依赖处理，不属于工程自身。</p>
+	 */
+	private static boolean isProjectLocation(ProtectionDomain pd) {
+		if (pd == null) return false;
+		java.security.CodeSource cs = pd.getCodeSource();
+		if (cs == null || cs.getLocation() == null) return false;
+		String key = cs.getLocation().toString();
+		Boolean cached = projectLocations.get(key);
+		if (cached != null) return cached;
+
+		boolean project = false;
+		try {
+			java.net.URI uri = cs.getLocation().toURI();
+			Path location = Path.of(uri).toAbsolutePath().normalize();
+			for (Set<Path> dirs : watchDirSources.values()) {
+				for (Path dir : dirs) {
+					if (location.startsWith(dir.toAbsolutePath().normalize())) {
+						project = true;
+						break;
+					}
+				}
+				if (project) break;
+			}
+			if (!project) {
+				for (Path jar : activeWatchJars) {
+					if (location.equals(jar.toAbsolutePath().normalize())) {
+						project = true;
+						break;
+					}
+				}
+			}
+			if (!project) {
+				for (Set<Path> jars : watchJarSources.values()) {
+					for (Path jar : jars) {
+						if (location.equals(jar.toAbsolutePath().normalize())) {
+							project = true;
+							break;
+						}
+					}
+					if (project) break;
+				}
+			}
+			if (!project && watchDirSources.isEmpty() && activeWatchJars.isEmpty()) {
+				project = "file".equals(uri.getScheme()) && Files.isDirectory(location);
+			}
+		} catch (Throwable ignored) {
+			project = false;
+		}
+		projectLocations.put(key, project);
+		return project;
+	}
+
+	/**
+	 * 一次批量 {@code retransformClasses} 把缺字节的类补进缓存。
+	 *
+	 * <p><b>必须批量</b>：{@code retransformClasses} 每次调用都是一次 safepoint，逐类调会把热更拖成
+	 * 几百次停顿。这里只用一个捕获型 transformer，不改字节、不参与布局判定。</p>
+	 */
+	private static void warmBytecodeCache(List<Class<?>> classes) {
+		if (classes.isEmpty()) return;
+		Class<?>[] targets = classes.toArray(new Class<?>[0]);
+		Map<String, byte[]> captured = new HashMap<>();
+		ClassFileTransformer capture = new ClassFileTransformer() {
+			@Override
+			public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
+			                        ProtectionDomain pd, byte[] buffer) {
+				if (classBeingRedefined != null && className != null && buffer != null) {
+					captured.put(className.replace('/', '.'), buffer);
+				}
+				return null;
+			}
+		};
+		inst.addTransformer(capture, true);
+		try {
+			enterInternalRetransform(new LinkedHashSet<>(classes.stream().map(Class::getName).toList()));
+			try {
+				inst.retransformClasses(targets);
+			} finally {
+				exitInternalRedefine();
+			}
+		} catch (Throwable t) {
+			warn("[LAYOUT-READERS] bulk retransform for cache warm-up failed: " + t);
+			return;
+		} finally {
+			inst.removeTransformer(capture);
+		}
+		captured.forEach(bytecodeCache::putIfAbsent);
 	}
 
 
@@ -2178,17 +2307,37 @@ public class RemoldAgent {
 		}
 
 		Set<Path> roots = projectClassRoots(classToPath);
-		int uncached = 0;
+		List<Class<?>> missing = new ArrayList<>();
 		for (Map.Entry<String, Class<?>> e : loadedClassesMap.entrySet()) {
 			String name = e.getKey();
 			if (newBatchBytes.containsKey(name)) continue;
-			if (!isProjectClass(e.getValue(), roots)) continue;
+			Class<?> clazz = e.getValue();
+			// 数组类没有代码；hidden class（lambda 等）既不进 ClassFileTransformer 也不可重定义，
+			// 它们引用的成员由宿主类的常量池覆盖。不滤掉这两类，uncached 会永远大于 0，
+			// 判据等于永久失效（JBR 25 下 [Lp.Foo; 与 p.Foo$$Lambda/0x… 都会继承宿主的 CodeSource）。
+			if (clazz.isArray() || clazz.isHidden()) continue;
+			if (!inst.isModifiableClass(clazz)) continue;
+			if (!isProjectClass(clazz, roots)) continue;
 			byte[] bytes = bytecodeCache.get(name);
 			if (bytes == null) {
-				uncached++;
+				missing.add(clazz);
 				continue;
 			}
 			post.putIfAbsent(internalName(name), bytes);
+		}
+
+		// Transformer 注册之前就已加载的漏网之鱼：一次批量 retransform 补齐（不要逐类调）。
+		int uncached = 0;
+		if (!missing.isEmpty()) {
+			warmBytecodeCache(missing);
+			for (Class<?> clazz : missing) {
+				byte[] bytes = bytecodeCache.get(clazz.getName());
+				if (bytes == null) {
+					uncached++;
+					continue;
+				}
+				post.putIfAbsent(internalName(clazz.getName()), bytes);
+			}
 		}
 		if (uncached > 0) {
 			warn("[LAYOUT-READERS] " + uncached + " loaded project class(es) have no cached bytecode;"

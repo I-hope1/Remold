@@ -434,7 +434,7 @@ M7 的夹具（`B` 不改、继续读 `A.x`）**不是**正常的编辑—编译
 | `C ∈ 本批` | **新**字节码（`newBatchBytes`） | 批次落地后跑的是新字节码；若它仍引用该字段，说明改动本身不自洽 |
 | `C ∉ 本批` | **当前**字节码（`bytecodeCache` / `fetchOriginalBytecode`） | 它不会被重定义，现在读什么，批次落地后还读什么 |
 
-命中 `Fieldref O/x`（**`O ∈ {A} ∪ descendants(A)`**，不能只匹配 `A`，但要按遮蔽截断——原因见 §13.6.2）→ 拒绝，并把**具体类名**写进报告；全无命中 → 放行。
+命中 `Fieldref O/x`（**`O ∈ {A} ∪ descendants(A)`**，不能只匹配 `A`；且必须按 JVMS 5.4.3.2 判"解析是否真的落在 `A` 上"——父类遮蔽与**接口字段截胡**都要处理，见 §13.6.2）→ 拒绝，并把**具体类名**写进报告；全无命中 → 放行。
 
 #### 13.6.1 两条被"一刀切"误杀的安全删除
 
@@ -470,7 +470,7 @@ owner ∈ {A} ∪ descendants(A)      ← 但要按下面的"遮蔽截断"裁剪
 
 `descendants` 取**已加载**的子类集合（未加载子类的读者属于 §13.6.4 的覆盖缺口）。索引查询因此不是一个 key，而是这组 key 的并集。
 
-##### 遮蔽截断（否则误报）
+##### 展开不能只看"父类链"：接口字段会截胡
 
 字段可以被**遮蔽**：子类自己声明同名字段后，`Sub/x` 解析到的是 `Sub.x`，不是 `A.x`。实测（`A{public int x}`、`Sub extends A{public int x}`、`SubSub extends Sub`）：
 
@@ -481,16 +481,35 @@ viaSubSub(SubSub s) -> Field Hide$SubSub.x:I  ← 同样解析到 Sub.x
 viaSubCastA(Sub s)  -> Field Hide$A.x:I       ← 显式转成 A 才回到 A.x
 ```
 
-所以展开要**在第一个重新声明处停止，且该子类本身也不算**。精确判据（等价于 JVMS 5.4.3.2 的字段解析）：
+但这还只是"父类链"的一半。**JVMS 5.4.3.2 的字段解析在父类之前先搜父接口**，所以接口里同名的字段会截胡。实测（`interface I { int x = 1; }`、`class A { public int x = 2; }`、`class Sub extends A implements I`，用 `MethodHandles.lookup().findStaticGetter(Sub.class, "x", int.class)` 走 JVM 解析）：
 
-> `O` 计入，当且仅当从 `O` 开始沿父类链查找 `(x, desc)`，**第一个声明它的类是 `A`**。
+```
+resolve (Sub, x, int) -> 命中 STATIC 字段，值 = 1        ← 接口 I.x 抢先，不是父类 A.x
+resolve (A,   x, int) -> IllegalAccessException:
+                         expected a static field: JvmsProbe$A.x/int/getField
+```
 
-注意截断要按 **name + desc** 一起判——字段解析同时匹配名字和描述符；子类声明了同名但不同类型的 `x` 时，`Fieldref O/x:I` 仍会向上解析到 `A.x:I`，此时 `O` 必须计入。
+对照那一行证明 `A.x` 是实例字段、解析确实是先落到 `I.x` 上（静态），而不是先落 `A.x` 再报静态性错误。
+
+所以精确判据必须**照抄 JVMS 5.4.3.2，不能只写"沿父类链"**：
+
+> `O` 计入，当且仅当对 `(O, name, desc)` 做字段解析，**结果落在 `A` 声明的那个字段上**。
+> 解析顺序是：`O` 自身声明 → **`O` 的父接口（递归）** → `O` 的父类（递归）。
+
+被接口截胡的 `Fieldref` **不算读者**（它不指向 `A.x`）；顺带它本身是个隐患——`getfield` 访问一个解析到静态字段的引用会抛 `IncompatibleClassChangeError`，属另一类问题。
+
+**可达性**：javac 在"父类与接口同时有同名同描述字段"时会直接报"对 `x` 的引用不明确"（实测），所以这个形态通常**不由 javac 直接产出**。但它仍可能来自：其它编译器（ecj / kotlinc）、ASM / Mixin 生成的字节码，或**本轮热更恰好给接口加了同名字段**（读者是上一版编的，当时不歧义，删除后才被截胡）。因此判据按 JVMS 走，不按 javac 的行为简化。
+
+截断还要按 **name + desc** 一起判——字段解析同时匹配名字和描述符；子类声明了同名但不同类型的 `x` 时，`Fieldref O/x:I` 仍会向上解析到 `A.x:I`，此时 `O` 必须计入。
 
 ##### 两个附带结论
 
 - **扫常量池而不是扫指令**天然覆盖全部四种访问：`GETFIELD` / `PUTFIELD` / `GETSTATIC` / `PUTSTATIC` 引用的是同一个 `Fieldref` 常量，不必按 opcode 分叉。上面 `writeViaSub` 的 `putfield` 就是同一个 `#7` 常量。
-- **private 字段不需要展开**：JLS §6.6 / §8.3 规定 private 成员不被继承，`s.x`（`s` 是子类类型）根本编译不过，必须写成 `((A) s).x`——而一旦强转，qualifying type 就是 `A`。实测：nest 内 `((A) s).x` 产出 `Field NestTest$A.x:I`。所以 private 字段的 owner **恒为 `A`**，展开与遮蔽截断都可以省掉。此前这里写成"private 也要展开"属于过度近似（只多算不漏检），但会白白多遍历一遍继承树。
+- **private 字段不需要展开**。证据要分两段，缺一段就是循环论证：
+  1. **不加强转根本编译不过**——JLS §6.6 / §8.3 规定 private 成员不被继承，`s.x`（`s` 是子类类型）在 nest 内也是错。实测 javac 报"x 在 A 中是 private 访问控制"。
+  2. **一旦强转成 `A`，owner 必然是 `A`**——这一点与 private 无关，是强转本身把静态类型变成了 `A`：上面 `viaSubCastA` 用的是 **public** 字段，同样产出 `Field Hide$A.x:I`。
+  两段合起来才是结论：private 字段的 owner **恒为 `A`**，展开与截断都可省掉。
+  （此前这里写"实测 `((A) s).x` 产出 owner A，所以 private 恒为 A"——那是**循环论证**：强转已经把静态类型变成 `A` 了，换成 public 字段结果一模一样，证明不了 private 的任何特殊性。)
 
 #### 13.6.3 实现分层与成本
 
@@ -562,3 +581,4 @@ major < 55 才需要上面这套折算。
 - **`access$` 编号规则的完整形态**：只测了"两个 int 字段、删前一个"这一种组合。javac 的编号里还编码了访问种类（读/写/调用），多字段、混合读写、字段与方法混合时编号如何分配**未逐一验证**。
 - **接口方法删除的失败形态**：只观察到 `InterfaceMethodref`(11) 这个 tag 存在（实测 `#7 = InterfaceMethodref I.d:()I`），没有实测"删 default 方法后陈旧调用者抛什么"。机制上应是 `NoSuchMethodError`，未验证。
 - **字段遮蔽的跨层形态**：只测了"子类遮蔽、孙类继承子类的 `x`"这一种。多级遮蔽、同名但不同类型（描述符不同）时 `Fieldref` 的解析结果**未逐一验证**。
+- **接口字段截胡的运行期表现**：只验证了"解析先落到接口字段"（`findStaticGetter` 命中静态 `I.x`），没有实测"`getfield` 访问一个解析到静态字段的引用"到底抛什么（按 JVMS 应是 `IncompatibleClassChangeError`）。

@@ -10,6 +10,7 @@ import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
+import org.objectweb.asm.tree.MethodNode;
 
 import java.io.*;
 import java.lang.instrument.*;
@@ -2280,7 +2281,7 @@ public class RemoldAgent {
 	 *
 	 * @return 类名 → 该类被删字段的批次外读者；空 map 表示本轮不做判定（没有删除，或扫描不完整）
 	 */
-	private static Map<String, RemovedFieldReaders> scanRemovedFieldReaders(
+	private static Map<String, RemovedMemberScan> scanRemovedMembers(
 			Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath) {
 		long start = System.nanoTime();
 
@@ -2302,7 +2303,7 @@ public class RemoldAgent {
 			}
 			if (oldBytes == null) continue;
 			oldBatchBytes.put(internalName(className), oldBytes);
-			List<RemovedMemberReaders.RemovedMember> removed = removedInstanceFields(oldBytes, e.getValue());
+			List<RemovedMemberReaders.RemovedMember> removed = removedMembers(oldBytes, e.getValue());
 			if (!removed.isEmpty()) removedByClass.put(className, removed);
 		}
 		if (removedByClass.isEmpty()) return Map.of();
@@ -2361,59 +2362,102 @@ public class RemoldAgent {
 		List<RemovedMemberReaders.RemovedMember> allRemoved = new ArrayList<>();
 		for (List<RemovedMemberReaders.RemovedMember> l : removedByClass.values()) allRemoved.addAll(l);
 
+		// 先按"未扫描"铺好结果。扫描失败时也必须带着 removedMethods 标志返回：方法删除没有存活实例
+		// 判据可以退，调用方若把"没扫成"读成"没读者"，删方法就会被静默放行。
+		Map<String, RemovedMemberScan> out = new LinkedHashMap<>();
+		for (Map.Entry<String, List<RemovedMemberReaders.RemovedMember>> e : removedByClass.entrySet()) {
+			out.put(e.getKey(), RemovedMemberScan.unscanned(e.getValue().stream().anyMatch(m -> !m.isField())));
+		}
+
 		RemovedMemberReaders.Result result;
 		try {
 			result = RemovedMemberReaders.find(RemovedMemberReaders.universe(pre),
 			                                   RemovedMemberReaders.universe(post), post, allRemoved);
 		} catch (Throwable t) {
 			warn("[LAYOUT-READERS] reader scan failed (" + t + "); falling back to the liveness check.");
-			return Map.of();
+			return out;
 		}
 		if (!result.inconclusive().isEmpty()) {
 			warn("[LAYOUT-READERS] reader scan is inconclusive for " + result.inconclusive().size()
 			     + " reference(s), e.g. " + result.inconclusive().get(0)
 			     + "; falling back to the liveness check.");
-			return Map.of();
+			return out;
 		}
 
 		Map<String, List<String>> readersByClass = new LinkedHashMap<>();
-		for (String className : removedByClass.keySet()) readersByClass.put(className, new ArrayList<>());
-		for (RemovedMemberReaders.Hit hit : result.hits()) {
-			List<String> readers = readersByClass.get(dotted(hit.member().owner()));
+		Map<String, List<String>> shiftedByClass = new LinkedHashMap<>();
+		for (String className : removedByClass.keySet()) {
+			readersByClass.put(className, new ArrayList<>());
+			shiftedByClass.put(className, new ArrayList<>());
+		}
+		collectFindings(result.hits(), readersByClass);
+		collectFindings(result.abstractMissing(), readersByClass);
+		collectFindings(result.dispatchShifted(), shiftedByClass);
+
+		for (Map.Entry<String, RemovedMemberScan> e : out.entrySet()) {
+			String className = e.getKey();
+			e.setValue(new RemovedMemberScan(true, readersByClass.get(className),
+			                                 shiftedByClass.get(className), e.getValue().removedMethods()));
+		}
+
+		long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+		info("[LAYOUT-READERS] scanned " + post.size() + " class(es) for removed members of "
+		     + removedByClass.size() + " class(es) in " + ms + "ms; dangling=" + result.hits().size()
+		     + ", abstract-gaps=" + result.abstractMissing().size()
+		     + ", dispatch-shifts=" + result.dispatchShifted().size());
+		return out;
+	}
+
+	/** 把命中的 reader 归到"被删成员所属的类"上。 */
+	private static void collectFindings(List<RemovedMemberReaders.Hit> hits,
+	                                    Map<String, List<String>> byClass) {
+		for (RemovedMemberReaders.Hit hit : hits) {
+			List<String> readers = byClass.get(dotted(hit.member().owner()));
 			if (readers == null) continue;
 			String reader = dotted(hit.reader());
 			if (!readers.contains(reader)) readers.add(reader);
 		}
-
-		Map<String, RemovedFieldReaders> out = new LinkedHashMap<>();
-		for (Map.Entry<String, List<String>> e : readersByClass.entrySet()) {
-			out.put(e.getKey(), new RemovedFieldReaders(true, e.getValue()));
-		}
-		long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-		info("[LAYOUT-READERS] scanned " + post.size() + " class(es) for removed fields of "
-		     + removedByClass.size() + " class(es) in " + ms + "ms; readers outside the batch: "
-		     + (result.hits().isEmpty() ? "none" : String.valueOf(result.hits().size())));
-		return out;
 	}
 
-	/** 旧版里有、新版里没有的**实例**字段（合成标记字段不计，它们由对齐器负责）。 */
-	private static List<RemovedMemberReaders.RemovedMember> removedInstanceFields(byte[] oldBytes,
-	                                                                              byte[] newBytes) {
+	/**
+	 * 旧版里有、新版里没有的成员（实例字段 + 方法）。
+	 *
+	 * <p>合成标记字段不计（它们由对齐器负责）；{@code <init>} / {@code <clinit>} 不计——构造器不会被
+	 * "删除后仍能工作"，删掉它们类本身就不可用了，那属于另一类问题。{@code $remold$} 前缀是热更管线
+	 * 自己注入的，不算业务变更。</p>
+	 *
+	 * <p>方法与字段的差别在于<b>失败形态</b>：字段悬空抛 {@code NoSuchFieldError}；方法可能悬空
+	 * （{@code NoSuchMethodError}），也可能被祖先实现静默接住（分派转移），或让具体类失去接口方法
+	 * 的唯一实现（{@code AbstractMethodError}）。三者都由 {@link RemovedMemberReaders} 分类。</p>
+	 */
+	private static List<RemovedMemberReaders.RemovedMember> removedMembers(byte[] oldBytes,
+	                                                                      byte[] newBytes) {
 		ClassNode oldClass = new ClassNode();
 		ClassNode newClass = new ClassNode();
 		new ClassReader(oldBytes).accept(oldClass, ClassReader.SKIP_CODE);
 		new ClassReader(newBytes).accept(newClass, ClassReader.SKIP_CODE);
 
-		Set<String> survivors = new HashSet<>();
-		for (FieldNode f : newClass.fields) survivors.add(f.name + ":" + f.desc);
+		Set<String> fieldSurvivors = new HashSet<>();
+		for (FieldNode f : newClass.fields) fieldSurvivors.add(f.name + ":" + f.desc);
 
 		List<RemovedMemberReaders.RemovedMember> out = new ArrayList<>();
 		for (FieldNode f : oldClass.fields) {
 			if ((f.access & Opcodes.ACC_STATIC) != 0) continue;
 			if ((f.access & Opcodes.ACC_SYNTHETIC) != 0 || f.name.startsWith("$remold$")) continue;
-			if (survivors.contains(f.name + ":" + f.desc)) continue;
+			if (fieldSurvivors.contains(f.name + ":" + f.desc)) continue;
 			out.add(new RemovedMemberReaders.RemovedMember(oldClass.name, f.name, f.desc, true,
 			                                               (f.access & Opcodes.ACC_PRIVATE) != 0));
+		}
+
+		Set<String> methodSurvivors = new HashSet<>();
+		for (MethodNode m : newClass.methods) methodSurvivors.add(m.name + ":" + m.desc);
+		for (MethodNode m : oldClass.methods) {
+			if ("<init>".equals(m.name) || "<clinit>".equals(m.name)) continue;
+			if (m.name.startsWith("$remold$")) continue;
+			if (methodSurvivors.contains(m.name + ":" + m.desc)) continue;
+			out.add(new RemovedMemberReaders.RemovedMember(oldClass.name, m.name, m.desc, false,
+			                                               (m.access & Opcodes.ACC_PRIVATE) != 0,
+			                                               (m.access & Opcodes.ACC_STATIC) != 0));
 		}
 		return out;
 	}
@@ -2506,7 +2550,7 @@ public class RemoldAgent {
 		if (LayoutGate.MODE_OFF.equals(LAYOUT_GATE)) return;
 
 		// 本轮有"删实例字段"时才做读者扫描（内部先 diff 判断，没有删除就直接返回空表，零成本）。
-		Map<String, RemovedFieldReaders> readersByClass = scanRemovedFieldReaders(newBatchBytes, classToPath);
+		Map<String, RemovedMemberScan> readersByClass = scanRemovedMembers(newBatchBytes, classToPath);
 
 		Set<String> rejectedHosts = new LinkedHashSet<>();
 		for (String className : new ArrayList<>(newBatchBytes.keySet())) {
@@ -2557,7 +2601,7 @@ public class RemoldAgent {
 
 			LayoutDecision d = decideLayout(className, changed, LAYOUT_GATE, liveness,
 			                                newBatchBytes.keySet(),
-			                                readersByClass.getOrDefault(className, RemovedFieldReaders.NOT_SCANNED));
+			                                readersByClass.getOrDefault(className, RemovedMemberScan.NOT_SCANNED));
 
 			// 显式出口：取不到基线 / 无法 diff 就不是"放行"，而是"没法判"。
 			// 静默放行会重演"整轮静默失效"那类难排查的问题，所以必须说出来。
@@ -2587,12 +2631,14 @@ public class RemoldAgent {
 
 			if (d.action() == LayoutAction.REJECT) {
 				LAYOUT_GATE_REJECTED.incrementAndGet();
-				warn("[LAYOUT-REJECT] " + className + ": REFUSED redefine — field layout incompatible ("
-				     + d.layout().detail() + "). Host " + d.hostName() + " and its anonymous classes are"
+				String why = d.reason() != null
+					? d.reason()
+					: "field layout incompatible (" + (d.layout() == null ? "unknown" : d.layout().detail()) + ")";
+				warn("[LAYOUT-REJECT] " + className + ": REFUSED redefine — " + why + ". Host "
+				     + d.hostName() + " and its anonymous classes are"
 				     + " skipped this round; existing instances keep running the OLD code, so this edit will"
 				     + " NOT take effect for them. TO PROCEED: recreate/restart so the classes load fresh, or"
-				     + " set -Dremold.agent.layout_gate=warn to force the redefine and accept zeroed/misread"
-				     + " fields on surviving instances.");
+				     + " set -Dremold.agent.layout_gate=warn to force the redefine and accept the consequences.");
 				for (String dropped : d.dropped()) dropFromBatch(newBatchBytes, classToPath, dropped);
 				AlignmentTransaction tx = transactions.remove(d.hostName());
 				if (tx != null) tx.rollback(false);
@@ -2638,11 +2684,35 @@ public class RemoldAgent {
 	 * <p>{@code scanned == false} 表示本轮没有做这项判定（本批没有删除、或扫描前置条件不满足）。
 	 * 这种情况必须退回原来的存活实例判据，<b>不能</b>当成"没有读者"。</p>
 	 */
-	public record RemovedFieldReaders(boolean scanned, List<String> readers) {
-		public static final RemovedFieldReaders NOT_SCANNED = new RemovedFieldReaders(false, List.of());
+	/**
+	 * 一轮"被删成员的批次外读者"扫描结果。
+	 *
+	 * @param scanned         本轮扫描是否完成。{@code false} 时调用方<b>必须</b>退回原判据——
+	 *                        把"没扫成"读成"没读者"是这个判据最危险的失败模式
+	 * @param readers         会悬空（{@code NoSuchFieldError} / {@code NoSuchMethodError}）或抛
+	 *                        {@code AbstractMethodError} 的引用所在的类
+	 * @param dispatchShifted 分派目标静默改变的引用所在的类（不抛错，但行为变了）
+	 * @param removedMethods  本轮该类是否有<b>方法</b>被删。方法不经过 {@code LayoutGate}
+	 *                        （{@code changedFields} 只描述字段），必须靠这个标志才知道要不要套方法判据
+	 */
+	public record RemovedMemberScan(boolean scanned, List<String> readers,
+	                                List<String> dispatchShifted, boolean removedMethods) {
+		public static final RemovedMemberScan NOT_SCANNED =
+			new RemovedMemberScan(false, List.of(), List.of(), false);
 
-		public RemovedFieldReaders {
+		public RemovedMemberScan {
 			readers = readers == null ? List.of() : List.copyOf(readers);
+			dispatchShifted = dispatchShifted == null ? List.of() : List.copyOf(dispatchShifted);
+		}
+
+		/** 扫描没能完成时的占位：仍然保留"本轮删过方法"这个事实。 */
+		public static RemovedMemberScan unscanned(boolean removedMethods) {
+			return new RemovedMemberScan(false, List.of(), List.of(), removedMethods);
+		}
+
+		/** 是否存在落地后会出问题的引用。 */
+		public boolean hasFindings() {
+			return !readers.isEmpty() || !dispatchShifted.isEmpty();
 		}
 	}
 
@@ -2658,9 +2728,17 @@ public class RemoldAgent {
 	 * @param layout   规则结果；{@code null} 表示 OFF 或无法判定（此时看 {@code action}）
 	 * @param hostName 由类名推出的宿主名（{@code Foo$1$2 -> Foo}）
 	 * @param dropped  仅 REJECT 时非空：宿主 + 其下属全部匿名类（取自批次类名集）
+	 * @param reason   仅 REJECT 时可能非空：说明拒绝的原因。{@code null} 表示"字段布局不兼容"
+	 *                 （沿用旧日志文案）；方法删除这类不经过 {@code LayoutGate} 的情形必须自带说明，
+	 *                 否则日志会把它说成"field layout incompatible"，误导排查方向
 	 */
 	public record LayoutDecision(LayoutAction action, LayoutGate.Result layout,
-	                             String hostName, Set<String> dropped) { }
+	                             String hostName, Set<String> dropped, String reason) {
+		public LayoutDecision(LayoutAction action, LayoutGate.Result layout,
+		                      String hostName, Set<String> dropped) {
+			this(action, layout, hostName, dropped, null);
+		}
+	}
 
 	/**
 	 * 便捷重载：先 diff 两版字节，再交给核心纯函数。diff 失败 / 取不到字节 → SKIP。
@@ -2668,13 +2746,13 @@ public class RemoldAgent {
 	public static LayoutDecision decideLayout(String className, byte[] oldBytes, byte[] newBytes,
 	                                          String mode, Liveness liveness, Set<String> batchNames) {
 		return decideLayout(className, oldBytes, newBytes, mode, liveness, batchNames,
-		                    RemovedFieldReaders.NOT_SCANNED);
+		                    RemovedMemberScan.NOT_SCANNED);
 	}
 
 	/** 便捷重载（带批次外读者判定）。 */
 	public static LayoutDecision decideLayout(String className, byte[] oldBytes, byte[] newBytes,
 	                                          String mode, Liveness liveness, Set<String> batchNames,
-	                                          RemovedFieldReaders removedFieldReaders) {
+	                                          RemovedMemberScan removedFieldReaders) {
 		if (LayoutGate.MODE_OFF.equals(mode)) {
 			return new LayoutDecision(LayoutAction.PASS, null, hostNameOf(className), Set.of());
 		}
@@ -2712,7 +2790,7 @@ public class RemoldAgent {
 	public static LayoutDecision decideLayout(String className, List<String> changedFields,
 	                                          String mode, Liveness liveness, Set<String> batchNames) {
 		return decideLayout(className, changedFields, mode, liveness, batchNames,
-		                    RemovedFieldReaders.NOT_SCANNED);
+		                    RemovedMemberScan.NOT_SCANNED);
 	}
 
 	/**
@@ -2731,7 +2809,7 @@ public class RemoldAgent {
 	 */
 	public static LayoutDecision decideLayout(String className, List<String> changedFields,
 	                                          String mode, Liveness liveness, Set<String> batchNames,
-	                                          RemovedFieldReaders removedFieldReaders) {
+	                                          RemovedMemberScan scan) {
 		String host = hostNameOf(className);
 		if (LayoutGate.MODE_OFF.equals(mode)) {
 			return new LayoutDecision(LayoutAction.PASS, null, host, Set.of());
@@ -2740,6 +2818,26 @@ public class RemoldAgent {
 			return new LayoutDecision(LayoutAction.SKIP, null, host, Set.of());
 		}
 		LayoutGate.Result res = LayoutGate.checkChangedFields(changedFields);
+
+		// 方法删除不经过 LayoutGate（{@code changedFields} 只描述字段），必须单独判，而且要放在
+		// compatible 早退<b>之前</b>——本轮完全可能只删了方法、字段一个都没动。
+		//
+		// 判据与字段同源（"批次外读者为空"），但失败形态不同：可能是 NoSuchMethodError、
+		// AbstractMethodError，也可能是<b>静默的分派转移</b>（实测见 docs/initfix/07-p05-probe-results.md §15）。
+		// 三种都拒绝——分派转移不抛异常，但行为已经变了。
+		if (scan.removedMethods() && !LayoutGate.MODE_WARN.equals(mode)) {
+			if (!scan.scanned()) {
+				// 方法删除没有存活实例判据可以退：删除的影响与"当前有没有实例"正交。
+				return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
+					"method(s) removed but the reader scan could not complete — refusing because"
+					+ " method removal has no liveness fallback");
+			}
+			if (scan.hasFindings()) {
+				return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
+					"method(s) removed and " + describeFindings(scan) + " still resolve to them");
+			}
+		}
+
 		if (res.compatible() || LayoutGate.MODE_WARN.equals(mode)) {
 			return new LayoutDecision(LayoutAction.PASS, res, host, Set.of());
 		}
@@ -2750,8 +2848,10 @@ public class RemoldAgent {
 		// 静态字段不走这条：静态值是类级共享的，删掉它的读者判定同样成立，但静态字段的
 		// 写入/初始化还有别的路径，保持原来的强拒绝，等有实测再放宽。
 		if (res.verdict() == LayoutGate.Verdict.REMOVED_FIELD && !staticChange
-		    && removedFieldReaders.scanned()) {
-			if (removedFieldReaders.readers().isEmpty()) {
+		    && scan.scanned()) {
+			// 用 hasFindings() 而不是只看 readers()：字段侧不会产生 dispatchShifted，
+			// 但把"任何 finding 都算不放行"写成显式条件，将来字段也支持分派判定时不会漏。
+			if (!scan.hasFindings()) {
 				return new LayoutDecision(LayoutAction.WAIVE_NO_READERS, res, host, Set.of());
 			}
 			return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames));
@@ -2763,6 +2863,19 @@ public class RemoldAgent {
 			return new LayoutDecision(LayoutAction.WAIVE, res, host, Set.of());
 		}
 		return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames));
+	}
+
+	/** 把扫描结果说成人能读的一句话，用于拒绝日志。 */
+	private static String describeFindings(RemovedMemberScan scan) {
+		StringBuilder sb = new StringBuilder();
+		if (!scan.readers().isEmpty()) {
+			sb.append(scan.readers().size()).append(" out-of-batch reader(s)");
+		}
+		if (!scan.dispatchShifted().isEmpty()) {
+			if (sb.length() > 0) sb.append(" and ");
+			sb.append(scan.dispatchShifted().size()).append(" silent dispatch shift(s)");
+		}
+		return sb.length() == 0 ? "an unknown number of references" : sb.toString();
 	}
 
 	/** 拒绝时要移出本批的类：宿主 + 其下属全部匿名类。 */

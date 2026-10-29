@@ -224,6 +224,143 @@ class RemovedMemberReadersTest {
 		assertTrue(r.hasReaders(), "a method reference (MethodHandle in the constant pool) must be reported");
 	}
 
+	/**
+	 * 删掉<b>重写</b>方法时，上转型读者的常量池里根本没有 {@code A.m}。
+	 *
+	 * <p>这是方法与字段最本质的差异：字段引用向上解析，owner 必须是被删类的后代；实例方法还有一层
+	 * 向下分派（JVMS 5.4.6），receiver 的实际类型决定执行谁，所以引用 owner 可以是 {@code A} 的
+	 * <b>任何祖先</b>。只按 {@code declaring == A} 归属会把这些读者<b>全部漏掉</b>。</p>
+	 *
+	 * <p>实测（{@code P05Probe} M8a）：{@code viaI} / {@code viaSuper} / {@code viaA} 三条路径在删除后
+	 * 都变成 {@code Super.m}，<b>一个异常都不抛</b>。</p>
+	 */
+	@Test
+	void overriddenMethodRemovalIsFoundThroughUpcastReaders() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/I", "package p; public interface I { int m(); }",
+			       "p/Super", "package p; public class Super { public int m() { return 1; } }",
+			       "p/A", "package p; public class A extends Super implements I { public int m() { return 2; } }",
+			       "p/Reader", """
+			       	package p;
+			       	public class Reader {
+			       	    static int viaI(I i) { return i.m(); }
+			       	    static int viaSuper(Super s) { return s.m(); }
+			       	}
+			       	"""),
+			Map.of("p/A", "package p; public class A extends Super implements I { }"));
+
+		// 前置：读者的常量池里写的是 I.m / Super.m，从不出现 A.m —— 漏判的根源就在这里。
+		assertTrue(hasRef(w.post().get("p/Reader"), "interfaceMethod", "p/I", "m", "()I"),
+			"precondition: the upcast reader names I.m");
+		assertTrue(hasRef(w.post().get("p/Reader"), "method", "p/Super", "m", "()I"),
+			"precondition: the other upcast reader names Super.m");
+		assertFalse(hasRef(w.post().get("p/Reader"), "method", "p/A", "m", "()I"),
+			"precondition: nothing in the reader mentions A.m, so owner matching alone cannot find it");
+
+		Result r = find(w, removedMethod("p/A", "m", "()I"));
+		assertTrue(r.hasReaders(), "an upcast reader must be reported even though it never names A.m");
+		assertFalse(r.dispatchShifted().isEmpty(),
+			"dispatch silently moves to Super.m — no exception, behaviour changed");
+		assertTrue(r.hits().isEmpty(), "nothing throws NoSuchMethodError here: the superclass body still resolves");
+	}
+
+	/**
+	 * 删掉接口方法的<b>唯一实现</b>：具体类不再有方法体，调用抛 {@code AbstractMethodError}。
+	 *
+	 * <p>这与上一条的差别是"祖先有没有实现"——有实现就静默转移，没有实现就炸。
+	 * 实测（{@code P05Probe} M8b）：{@code AbstractMethodError: Receiver class rem3.Only does not
+	 * define or inherit an implementation of the resolved method 'abstract java.lang.String n()' of
+	 * interface rem3.J}。</p>
+	 */
+	@Test
+	void soleInterfaceImplementationRemovalLeavesAbstractMethod() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/J", "package p; public interface J { int n(); }",
+			       "p/Only", "package p; public class Only implements J { public int n() { return 3; } }",
+			       "p/Reader", "package p; public class Reader { static int viaJ(J j) { return j.n(); } }"),
+			// post 写成 abstract 只是为了让 javac 通过（具体类不覆盖抽象方法编译不过）；
+			// 判据不看 abstract 标志——它只关心"有没有方法体"。
+			Map.of("p/Only", "package p; public abstract class Only implements J { }"));
+
+		Result r = find(w, removedMethod("p/Only", "n", "()I"));
+		assertTrue(r.hasReaders(), "a concrete class losing its only implementation must be reported");
+		assertFalse(r.abstractMissing().isEmpty(), "the failure mode here is AbstractMethodError");
+		assertTrue(r.dispatchShifted().isEmpty(), "there is no implementation left to shift to");
+	}
+
+	/** 回退到接口的 default 实现：不抛错，但分派目标变了——必须与"抽象方法缺失"区分开。 */
+	@Test
+	void fallingBackToInterfaceDefaultIsDispatchShiftNotAbstract() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/I", "package p; public interface I { default int d() { return 1; } }",
+			       "p/A", "package p; public class A implements I { public int d() { return 2; } }",
+			       "p/Reader", "package p; public class Reader { static int r(A a) { return a.d(); } }"),
+			Map.of("p/A", "package p; public class A implements I { }"));
+
+		Result r = find(w, removedMethod("p/A", "d", "()I"));
+		assertTrue(r.hasReaders(), "falling back to the default changes behaviour and must be reported");
+		assertFalse(r.dispatchShifted().isEmpty(), "the interface default is a real implementation, not a missing one");
+		assertTrue(r.abstractMissing().isEmpty(), "a default body means no AbstractMethodError");
+	}
+
+	/**
+	 * 子接口把父接口的 {@code default} <b>重新声明为 abstract</b>：更具体的声明覆盖父接口的实现，
+	 * 所以删掉类里的实现之后<b>没有</b>可执行体。
+	 *
+	 * <p>这条守的是方法选择里的 maximally-specific 规则。只按"先遇到 default 就返回"会把这里误判成
+	 * "回退到 default 实现"（静默转移），而实际是 {@code AbstractMethodError}——两者都是拒绝，
+	 * 但报告给用户的原因完全不同。</p>
+	 */
+	@Test
+	void subInterfaceRedeclaringDefaultAsAbstractLeavesNoBody() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/Base", "package p; public interface Base { default int d() { return 1; } }",
+			       "p/Sub", "package p; public interface Sub extends Base { int d(); }",
+			       "p/A", "package p; public class A implements Sub { public int d() { return 2; } }",
+			       "p/Reader", "package p; public class Reader { static int r(A a) { return a.d(); } }"),
+			// abstract 只是为了让 javac 通过；判据只看"有没有方法体"。
+			Map.of("p/A", "package p; public abstract class A implements Sub { }"));
+
+		Result r = find(w, removedMethod("p/A", "d", "()I"));
+		assertTrue(r.hasReaders(), "the more specific abstract redeclaration wins over the inherited default");
+		assertFalse(r.abstractMissing().isEmpty(),
+			"Sub re-declares d as abstract, so Base's default is shadowed and nothing is executable");
+		assertTrue(r.dispatchShifted().isEmpty(), "there is no default left to fall back to");
+	}
+
+	/** 对照组：没人重写的方法删除仍是响亮的 {@code NoSuchMethodError}，走的是原来的解析判据。 */
+	@Test
+	void nonOverriddenMethodRemovalIsStillALinkageError() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/P", "package p; public class P { public int q() { return 1; } }",
+			       "p/Reader", "package p; public class Reader { static int call(P p) { return p.q(); } }"),
+			Map.of("p/P", "package p; public class P { }"));
+
+		Result r = find(w, removedMethod("p/P", "q", "()I"));
+		assertTrue(r.hasReaders(), "no ancestor declares q(), so the reference dangles");
+		assertFalse(r.hits().isEmpty(), "the failure mode is NoSuchMethodError, i.e. a hit");
+		assertTrue(r.dispatchShifted().isEmpty(), "there is nothing to dispatch to");
+	}
+
+	/**
+	 * 去触发对照：同一条继承链上删掉一个<b>没有任何引用</b>的方法，不能报出读者。
+	 *
+	 * <p>没有这条，上面几个用例的"报出来了"可能只是"只要删方法就报"。</p>
+	 */
+	@Test
+	void unrelatedMethodRemovalOnTheSameHierarchyIsNotReported() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/I", "package p; public interface I { int m(); }",
+			       "p/Super", "package p; public class Super { public int m() { return 1; } }",
+			       "p/A", "package p; public class A extends Super implements I {"
+			              + " public int m() { return 2; } public void unused() { } }",
+			       "p/Reader", "package p; public class Reader { static int viaI(I i) { return i.m(); } }"),
+			Map.of("p/A", "package p; public class A extends Super implements I { public int m() { return 2; } }"));
+
+		Result r = find(w, removedMethod("p/A", "unused", "()V"));
+		assertFalse(r.hasReaders(), "nobody calls A.unused(), so removing it is safe");
+	}
+
 	// ------------------------------------------------------------------------------------------------
 	// 判不了 ≠ 没有
 	// ------------------------------------------------------------------------------------------------

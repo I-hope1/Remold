@@ -1,12 +1,15 @@
 package remold.ref;
 
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.MethodNode;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -65,16 +68,34 @@ import java.util.Set;
 public final class RemovedMemberReaders {
 
 	/** 一个被删除的成员。{@code owner} / {@code name} / {@code desc} 均为字节码形态（owner 用内部名）。 */
-	public record RemovedMember(String owner, String name, String desc, boolean isField, boolean isPrivate) {
+	public record RemovedMember(String owner, String name, String desc,
+	                            boolean isField, boolean isPrivate, boolean isStatic) {
 		public RemovedMember {
 			Objects.requireNonNull(owner, "owner");
 			Objects.requireNonNull(name, "name");
 			Objects.requireNonNull(desc, "desc");
 		}
 
+		/** 只关心可见性时的便捷构造（{@code isStatic} 按 false 处理）。 */
+		public RemovedMember(String owner, String name, String desc, boolean isField, boolean isPrivate) {
+			this(owner, name, desc, isField, isPrivate, false);
+		}
+
 		/** 调试用的一行表示。 */
 		public String key() {
 			return owner + "." + name + desc;
+		}
+
+		/**
+		 * 该方法是否参与<b>虚分派</b>——决定归属方向是"向上解析"还是"向下分派"。
+		 *
+		 * <p>{@code private} / {@code static} / {@code <init>} 都只有"引用直接指向声明类"这一条路：
+		 * 前者只能在本类（或 nest）内用 {@code invokespecial} 调用，{@code static} 由 {@code invokestatic}
+		 * 按解析向上命中，构造器不被继承。只有普通的实例方法才会被 {@code invokevirtual} /
+		 * {@code invokeinterface} 按 receiver 的实际类型向下分派。</p>
+		 */
+		public boolean participatesInVirtualDispatch() {
+			return !isField && !isPrivate && !isStatic && !"<init>".equals(name) && !"<clinit>".equals(name);
 		}
 	}
 
@@ -84,33 +105,78 @@ public final class RemovedMemberReaders {
 	 * @param reader   持有该引用的类（内部名）
 	 * @param refOwner 引用在常量池里的 owner，可能与 {@code member.owner()} 不同
 	 * @param kind     {@code field} / {@code method} / {@code interfaceMethod}
+	 * @param detail   {@code null} 表示"引用悬空"；否则说明实际发生的事（分派到谁 / 谁缺实现）
 	 */
-	public record Hit(RemovedMember member, String reader, String refOwner, String kind) { }
+	public record Hit(RemovedMember member, String reader, String refOwner, String kind, String detail) {
+		public Hit(RemovedMember member, String reader, String refOwner, String kind) {
+			this(member, reader, refOwner, kind, null);
+		}
+	}
 
 	/**
 	 * 分析结果。
-	 * @param hits         改动后会悬空的引用（真正的读者）
-	 * @param inconclusive 归属对得上、但类型信息不足无法判定
-	 * @param retargeted   改动前指向被删成员、改动后指向了别处（不抛错，但读到的东西变了）
+	 *
+	 * <p>五种结果分开，因为它们的<b>失败形态不同</b>，混在一起会丢掉可操作性：</p>
+	 * <ul>
+	 *   <li>{@code hits} —— 引用悬空，执行到就抛 {@code NoSuchFieldError} / {@code NoSuchMethodError}；</li>
+	 *   <li>{@code abstractMissing} —— 具体类失去了接口方法的唯一实现，调用时抛 {@code AbstractMethodError}；</li>
+	 *   <li>{@code dispatchShifted} —— 方法引用仍然解析得到，但<b>分派目标换成了祖先实现</b>；
+	 *       不抛任何异常，行为静默改变；</li>
+	 *   <li>{@code retargeted} —— 字段引用改指向了别的成员（典型是接口字段截胡），同样静默；</li>
+	 *   <li>{@code inconclusive} —— 类型信息不足，判不了。</li>
+	 * </ul>
+	 *
+	 * <p>{@link #hasReaders()} 计入前三项。字段的 {@code retargeted} 沿用既有取舍（只记录不拒绝），
+	 * 与 {@code dispatchShifted} 的不对称见 {@code docs/initfix/07-p05-probe-results.md} §15.4。</p>
+	 *
+	 * @param hits           改动后会悬空的引用（真正的读者）
+	 * @param inconclusive   归属对得上、但类型信息不足无法判定
+	 * @param retargeted     改动前指向被删字段、改动后指向了别处（不抛错，但读到的东西变了）
+	 * @param abstractMissing 具体类失去接口方法的唯一实现
+	 * @param dispatchShifted 方法分派目标从被删实现转到了祖先实现
 	 */
-	public record Result(List<Hit> hits, List<String> inconclusive, List<String> retargeted) {
+	public record Result(List<Hit> hits, List<String> inconclusive, List<String> retargeted,
+	                     List<Hit> abstractMissing, List<Hit> dispatchShifted) {
 		public Result {
 			hits = List.copyOf(hits);
 			inconclusive = List.copyOf(inconclusive);
 			retargeted = List.copyOf(retargeted);
+			abstractMissing = List.copyOf(abstractMissing);
+			dispatchShifted = List.copyOf(dispatchShifted);
 		}
 
+		/** 只有悬空与改指向时的便捷构造。 */
+		public Result(List<Hit> hits, List<String> inconclusive, List<String> retargeted) {
+			this(hits, inconclusive, retargeted, List.of(), List.of());
+		}
+
+		/** 是否存在会让热更落地后出问题的引用（悬空 / 抽象方法缺失 / 分派转移）。 */
 		public boolean hasReaders() {
-			return !hits.isEmpty();
+			return !hits.isEmpty() || !abstractMissing.isEmpty() || !dispatchShifted.isEmpty();
 		}
 	}
 
-	/** 类型的解析相关声明。{@code fields} / {@code methods} 的元素是 {@code name:desc}。 */
-	public record TypeInfo(String superName, List<String> interfaces, Set<String> fields, Set<String> methods) {
+	/**
+	 * 类型的解析相关声明。
+	 *
+	 * @param fields          元素是 {@code name:desc}
+	 * @param methods         元素是 {@code name:desc}
+	 * @param abstractMethods {@code methods} 中带 {@code ACC_ABSTRACT} 的子集——方法选择要靠它区分
+	 *                        "有实现"与"只有声明"
+	 * @param isInterface     该类型是接口（决定方法选择走类链还是接口层级）
+	 */
+	public record TypeInfo(String superName, List<String> interfaces, Set<String> fields,
+	                       Set<String> methods, Set<String> abstractMethods, boolean isInterface) {
 		public TypeInfo {
 			interfaces = interfaces == null ? List.of() : List.copyOf(interfaces);
 			fields = fields == null ? Set.of() : Set.copyOf(fields);
 			methods = methods == null ? Set.of() : Set.copyOf(methods);
+			abstractMethods = abstractMethods == null ? Set.of() : Set.copyOf(abstractMethods);
+		}
+
+		/** 不关心抽象性与接口标志时的便捷构造。 */
+		public TypeInfo(String superName, List<String> interfaces, Set<String> fields, Set<String> methods) {
+			this(superName, interfaces, fields, methods, Set.of(), false);
 		}
 	}
 
@@ -160,10 +226,16 @@ public final class RemovedMemberReaders {
 			for (FieldNode f : cn.fields) fields.add(f.name + ":" + f.desc);
 		}
 		Set<String> methods = new LinkedHashSet<>();
+		Set<String> abstractMethods = new LinkedHashSet<>();
 		if (cn.methods != null) {
-			for (MethodNode m : cn.methods) methods.add(m.name + ":" + m.desc);
+			for (MethodNode m : cn.methods) {
+				String key = m.name + ":" + m.desc;
+				methods.add(key);
+				if ((m.access & Opcodes.ACC_ABSTRACT) != 0) abstractMethods.add(key);
+			}
 		}
-		return new TypeInfo(cn.superName, cn.interfaces, fields, methods);
+		return new TypeInfo(cn.superName, cn.interfaces, fields, methods, abstractMethods,
+		                    (cn.access & Opcodes.ACC_INTERFACE) != 0);
 	}
 
 	/** 由 {@code 内部类名 -> 字节码} 构建解析用的类型世界。 */
@@ -345,6 +417,120 @@ public final class RemovedMemberReaders {
 		return "java/lang/Object".equals(internalName) ? OBJECT : null;
 	}
 
+	/**
+	 * {@code sub} 是否与 {@code sup} 相同或是它的子类型（类链与父接口都算）。
+	 *
+	 * <p>路径上出现未提供的类型时按"走不通"处理而不是报 {@code UNKNOWN}：这里只用来回答
+	 * "会不会有关系"，多算一步的代价是可能多报，漏算则会放过真正的读者。真正的判定留给
+	 * {@link #selectMethod}，它的 {@code UNKNOWN} 会被如实上报。</p>
+	 */
+	public static boolean isSubtype(Map<String, TypeInfo> world, String sub, String sup) {
+		if (sub == null || sup == null) return false;
+		if (sub.equals(sup)) return true;
+		if ("java/lang/Object".equals(sup)) return true;
+		Set<String> seen = new HashSet<>();
+		Deque<String> stack = new ArrayDeque<>();
+		stack.push(sub);
+		while (!stack.isEmpty()) {
+			String c = stack.pop();
+			if (!seen.add(c)) continue;
+			TypeInfo t = typeOf(world, c);
+			if (t == null) continue;
+			if (t.superName() != null) {
+				if (t.superName().equals(sup)) return true;
+				stack.push(t.superName());
+			}
+			for (String itf : t.interfaces()) {
+				if (itf.equals(sup)) return true;
+				stack.push(itf);
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * 方法选择的结果。
+	 *
+	 * @param declaring    找到的声明处（{@code state != FOUND} 时为 null）
+	 * @param abstractOnly 该声明是抽象方法（接口里没有 default 实现，或抽象类里的抽象方法）。
+	 *                     调用时如果 receiver 没有更具体的实现，就是 {@code AbstractMethodError}
+	 */
+	public record Selection(State state, String declaring, boolean abstractOnly) { }
+
+	private static final Selection SELECT_NOT_FOUND = new Selection(State.NOT_FOUND, null, false);
+	private static final Selection SELECT_UNKNOWN = new Selection(State.UNKNOWN, null, false);
+
+	/**
+	 * JVMS 5.4.6 method selection 的静态上界：给定 receiver 类型，找出会被执行的那个实现。
+	 *
+	 * <p>这是方法与字段的<b>根本差异</b>。字段只有解析（JVMS 5.4.3.2，沿 owner 向上）；方法在解析之后
+	 * 还有一层<b>向下</b>的分派——receiver 的实际类型决定执行哪个实现。所以删掉 {@code A.m} 之后：</p>
+	 * <ul>
+	 *   <li>如果祖先有同签名的<b>类</b>实现，分派会落到它上面，<b>不抛错</b>（实测
+	 *       {@code viaI} / {@code viaSuper} / {@code viaA} 三条路径全部变成 {@code Super.m}）；</li>
+	 *   <li>如果只有接口声明而没有实现，调用时抛 {@code AbstractMethodError}；</li>
+	 *   <li>只有整条链都找不到时才是 {@code NoSuchMethodError}。</li>
+	 * </ul>
+	 *
+	 * <p>顺序：类链（含自身）→ 父接口。接口里优先取 <b>非抽象</b>（default）方法——default 优先于
+	 * 纯声明，这是选择与解析最大的不同（解析一旦在接口里命中就停，选择还要继续找可执行的）。</p>
+	 */
+	public static Selection selectMethod(Map<String, TypeInfo> world, String receiver, String name, String desc) {
+		if (receiver == null) return SELECT_NOT_FOUND;
+		String key = name + ":" + desc;
+
+		Set<String> seen = new HashSet<>();
+		List<String> roots = new ArrayList<>();
+		String c = receiver;
+		while (c != null) {
+			if (!seen.add(c)) break;
+			TypeInfo t = typeOf(world, c);
+			if (t == null) return SELECT_UNKNOWN;
+			if (t.methods().contains(key)) {
+				return new Selection(State.FOUND, c, t.abstractMethods().contains(key));
+			}
+			roots.addAll(t.interfaces());
+			// 接口没有父类链：它的 superName 是 java/lang/Object，在接口上继续走没有意义。
+			c = t.isInterface() ? null : t.superName();
+		}
+
+		Set<String> decls = new LinkedHashSet<>();
+		Deque<String> stack = new ArrayDeque<>(roots);
+		Set<String> visited = new HashSet<>();
+		while (!stack.isEmpty()) {
+			String itf = stack.pop();
+			if (!visited.add(itf)) continue;
+			TypeInfo t = typeOf(world, itf);
+			if (t == null) return SELECT_UNKNOWN;
+			if (t.methods().contains(key)) decls.add(itf);
+			stack.addAll(t.interfaces());
+		}
+		if (decls.isEmpty()) return SELECT_NOT_FOUND;
+
+		// 只保留 maximally-specific 的声明。有更具体的子接口也声明了同一签名时，父接口的声明被覆盖
+		// ——包括"子接口把 default 重新声明为 abstract"这种情形，此时<b>没有</b>可执行实现。
+		// 只按"先遇到 default 就返回"会把它误判成分派转移，而实际是 AbstractMethodError。
+		List<String> maximal = new ArrayList<>();
+		for (String d : decls) {
+			boolean shadowed = false;
+			for (String other : decls) {
+				if (!other.equals(d) && isSubtype(world, other, d)) {
+					shadowed = true;
+					break;
+				}
+			}
+			if (!shadowed) maximal.add(d);
+		}
+		if (maximal.isEmpty()) maximal = new ArrayList<>(decls);   // 循环继承等异常形态，退化为全部
+
+		for (String d : maximal) {
+			if (!typeOf(world, d).abstractMethods().contains(key)) {
+				return new Selection(State.FOUND, d, false);   // 有 default 实现就用它
+			}
+		}
+		return new Selection(State.FOUND, maximal.get(0), true);
+	}
+
 	private static Resolved declaringInInterfaces(Map<String, TypeInfo> world, List<String> interfaces,
 	                                              String key, boolean method, Set<String> visited) {
 		if (interfaces == null) return null;
@@ -379,6 +565,8 @@ public final class RemovedMemberReaders {
 		List<Hit> hits = new ArrayList<>();
 		Set<String> inconclusive = new LinkedHashSet<>();
 		Set<String> retargeted = new LinkedHashSet<>();
+		List<Hit> abstractMissing = new ArrayList<>();
+		List<Hit> dispatchShifted = new ArrayList<>();
 
 		Map<String, List<RemovedMember>> byKey = new LinkedHashMap<>();
 		for (RemovedMember m : removed) {
@@ -405,8 +593,14 @@ public final class RemovedMemberReaders {
 					String where = reader + " -> " + ref.owner() + "." + ref.name() + ref.desc();
 
 					if (m.isPrivate()) {
-						// private 成员的 Fieldref owner 恒为声明类（JLS §6.6 + 强转），不需要解析。
+						// private 成员的引用 owner 恒为声明类（JLS §6.6 + 强转），不需要解析。
 						if (ref.owner().equals(m.owner())) hits.add(new Hit(m, reader, ref.owner(), ref.kind()));
+						continue;
+					}
+
+					if (m.participatesInVirtualDispatch()) {
+						classifyDispatch(preWorld, postWorld, ref, m, reader, where,
+						                 hits, inconclusive, abstractMissing, dispatchShifted);
 						continue;
 					}
 
@@ -432,7 +626,59 @@ public final class RemovedMemberReaders {
 				}
 			}
 		}
-		return new Result(hits, new ArrayList<>(inconclusive), new ArrayList<>(retargeted));
+		return new Result(hits, new ArrayList<>(inconclusive), new ArrayList<>(retargeted),
+		                  abstractMissing, dispatchShifted);
+	}
+
+	/**
+	 * 实例方法的删除判定。与字段/静态方法的差别是<b>归属方向反了</b>：
+	 *
+	 * <p>字段与静态方法的引用<b>向上</b>解析（JVMS 5.4.3.2 / 5.4.3.3），所以引用 owner 必须是
+	 * 被删成员的<b>后代</b>才会命中它。实例方法还要经过一层<b>向下</b>分派（JVMS 5.4.6）：
+	 * receiver 的实际类型决定执行哪个实现，因此引用 owner 可以是 {@code A} 的<b>任何祖先</b>——
+	 * 上转型读者写的是 {@code InterfaceMethodref I.m} / {@code Methodref Super.m}，<b>从不出现</b>
+	 * {@code A.m}（实测见 {@code docs/initfix/07-p05-probe-results.md} §15）。</p>
+	 *
+	 * <p>所以这里用 {@link #isSubtype} 判"receiver 可能是 A"，再用 {@link #selectMethod} 在
+	 * {@code A} 上问"现在会执行哪个实现"，三种答案对应三种失败形态。</p>
+	 */
+	private static void classifyDispatch(Map<String, TypeInfo> preWorld,
+	                                     Map<String, TypeInfo> postWorld,
+	                                     Ref ref, RemovedMember m, String reader, String where,
+	                                     List<Hit> hits, Set<String> inconclusive,
+	                                     List<Hit> abstractMissing, List<Hit> dispatchShifted) {
+		boolean related = isSubtype(preWorld, m.owner(), ref.owner());
+		if (!related) {
+			// 不是"receiver 可能是 A"的形态；退回直接解析，覆盖 owner 恰好写的是 A 的情形
+			// （此时 isSubtype 本就为真，这条只是兜底，避免 isSubtype 因类型缺失而误判为无关）。
+			Resolved before = resolveMethod(preWorld, ref.owner(), m.name(), m.desc());
+			if (before.state() == State.UNKNOWN) {
+				inconclusive.add(where + " (pre)");
+				return;
+			}
+			if (before.state() != State.FOUND || !before.declaring().equals(m.owner())) return;
+		}
+
+		// 在 A 上做选择：A 是"最可能受影响的 receiver"——它自己、以及它的子类，都会走这条分派。
+		// 更远的子类若重写了该方法则不受影响，静态上无法枚举，这里取保守上界。
+		Selection sel = selectMethod(postWorld, m.owner(), m.name(), m.desc());
+		switch (sel.state()) {
+			case NOT_FOUND -> hits.add(new Hit(m, reader, ref.owner(), ref.kind()));
+			case UNKNOWN   -> inconclusive.add(where + " (post)");
+			case FOUND     -> {
+				if (sel.abstractOnly()) {
+					abstractMissing.add(new Hit(m, reader, ref.owner(), ref.kind(),
+					                            dotted(sel.declaring()) + " declares it abstract"));
+				} else if (!sel.declaring().equals(m.owner())) {
+					dispatchShifted.add(new Hit(m, reader, ref.owner(), ref.kind(),
+					                            "now dispatches to " + dotted(sel.declaring())));
+				}
+			}
+		}
+	}
+
+	private static String dotted(String internalName) {
+		return internalName == null ? "?" : internalName.replace('/', '.');
 	}
 
 	private static Resolved resolve(Map<String, TypeInfo> world, Ref ref, boolean isField) {

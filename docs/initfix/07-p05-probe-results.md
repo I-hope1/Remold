@@ -720,3 +720,97 @@ agent 自身跳过、非工程位置跳过、缓存的是原始引用。变异�
 
 **变异检查**：把探针里的注册改回 `false`，最后一条断言立刻变红（缓存里是 v1）——这正是修之前的
 真实缺陷。7/7 通过。
+
+## 15. 方法删除：向上解析与向下分派是两回事（`P05Probe` M8）
+
+§13 的判据对字段是完备的，直接搬到方法上会**漏掉一大类读者**。原因不是实现细节，而是
+JVMS 给两者定义了两套不同的查找规则。
+
+### 15.1 引用长什么样
+
+`javac` 把常量池里的 owner 写成**编译期静态类型**，不是声明类：
+
+```
+viaI(I i)        -> InterfaceMethodref mp/I.m:()V
+viaSuper(Super s)-> Methodref          mp/Super.m:()V
+viaA(A a)        -> Methodref          mp/A.m:()V
+```
+
+夹具是 `interface I { void m(); }`、`class Super { public void m() {} }`、
+`class A extends Super implements I { public void m() {} }`。删掉 `A.m` 之后，前两条引用**从不出现**
+`A.m`——只按 `declaring == A` 归属的判据对它们完全失明。
+
+### 15.2 实测（JBR 21.0.9 + DCEVM）
+
+| 场景 | 删除前 | 删除后 |
+|:--|:--|:--|
+| **M8a** `viaI(I)`（`A` 重写 `Super.m` 并实现 `I.m`） | `A.m` | **`Super.m`** |
+| **M8a** `viaSuper(Super)` | `A.m` | **`Super.m`** |
+| **M8a** `viaA(A)`（owner 就是 `A`） | `A.m` | **`Super.m`** |
+| **M8b** `viaJ(J)`（`Only` 是接口方法的唯一实现） | `Only.n` | **`AbstractMethodError`** |
+| **M8c** `call(Plain)`（无人重写） | `Plain.p` | **`NoSuchMethodError`** |
+
+三条基线都先断言"删除前确实分派到被删方法"，否则后面的变化说明不了任何事。
+
+### 15.3 关键发现：连 `owner == A` 的直接引用也不抛错
+
+M8a 的第三行是最反直觉的一条。`Methodref A.m` 在 `A` 不再声明 `m` 之后，**解析会继续沿父类链向上**
+（JVMS 5.4.3.3），于是落到 `Super.m`——调用成功，返回值变了，**一个异常都没有**。
+
+这与字段不同：字段的 `GETFIELD A.x` 在 `A` 没有 `x` 且父类也没有时抛 `NoSuchFieldError`（§13 实测），
+因为那条链上确实找不到。方法的"找不到"只有在**整条链都没有同签名方法**时才成立（M8c）。
+
+所以方法删除的三种失败形态必须分开：
+
+| 形态 | 触发条件 | 是否抛错 |
+|:--|:--|:--|
+| `NoSuchMethodError` | 整条链都没有同签名方法 | 是 |
+| `AbstractMethodError` | 只有接口声明、没有实现 | 是（`Error`，不是 `LinkageError`） |
+| **分派转移** | 祖先有实现，静默接住 | **否** |
+
+第三种最危险：热更"成功"、日志干净、行为已经变了。
+
+### 15.4 判据：归属方向要反
+
+- **字段 / 静态方法 / private / `<init>`**：引用**向上**解析，owner 必须是被删成员的**后代**才会命中它。
+  沿用 §13 的判据即可。
+- **实例方法（参与虚分派）**：还要经过**向下**分派（JVMS 5.4.6），receiver 的实际类型决定执行谁。
+  因此 owner 可以是 `A` 的**任何祖先**。归属条件变成"`A` 是 `owner` 的子类型"，再用
+  **method selection** 在 `A` 上问"现在会执行哪个实现"。
+
+selection 与解析的另一个差别是 **maximally-specific**：接口层级里，更具体的声明会覆盖父接口的。
+`interface Sub extends Base { int d(); }` 把 `Base` 的 `default d()` 重新声明为 abstract 之后，
+`Base` 的 default **不再可用**——删掉类里的实现就是 `AbstractMethodError`，不是"回退到 default"。
+只按"先遇到 default 就返回"会把它误判成分派转移（同样拒绝，但报告的原因完全错）。
+
+### 15.5 接线：方法不经过 `LayoutGate`
+
+`LayoutGate.checkChangedFields` 只解析 `changedFields`（字段），方法删除**没有任何门**。
+接线时必须注意两点：
+
+1. **必须在 `res.compatible()` 早退之前判**。本轮完全可能只删了方法、字段一个都没动——
+   那时 `compatible()` 为 true，放在后面就永远走不到。
+2. **扫描未完成时不能退回存活实例判据**。方法删除的影响与"当前有没有实例"正交（M8a 就是在
+   有存活实例的情况下三条路径全部静默转移），所以 `scanned == false` 只能拒绝。
+
+拒绝原因通过 `LayoutDecision.reason` 带出，否则日志会把它说成 "field layout incompatible"。
+
+### 15.6 判定力
+
+`RemovedMemberReadersTest` 新增 6 例、`LayoutGateWiringTest` 新增 6 例，三处变异检查各自只打红对应用例：
+
+| 注入的破坏 | 变红的用例 |
+|:--|:--|
+| `participatesInVirtualDispatch()` 恒 false（退化为只有向上解析） | `overriddenMethodRemoval…` / `soleInterfaceImplementation…` / `fallingBackToInterfaceDefault…` |
+| 去掉 maximally-specific 筛选 | `subInterfaceRedeclaringDefaultAsAbstract…` |
+| `hasReaders()` 不计分派转移 | `overriddenMethodRemoval…` / `fallingBackToInterfaceDefault…` |
+| 去掉 `decideLayout` 的方法分支 | `removedMethodWithOutOfBatchReader…` / `…DispatchShift…` / `unscannedMethodRemoval…` |
+
+### 15.7 未覆盖
+
+- **`invokespecial` 的 `super.m()`**：`A` 里 `super.m()` 编译成 `Methodref Super.m` 且是 `invokespecial`，
+  不做分派。本类按 `kind` 无法区分 `invokevirtual` 与 `invokespecial`（常量池只记 tag 10），
+  因此会把这类引用当成"可能分派"，方向偏保守（多报不会漏报）。
+- **接口 default 方法删除后由类实现接住**：机制上应属分派转移，未单独实测。
+- **多级遮蔽与重载**：只测了单层重写；重载（同名字不同描述符）由 `name:desc` 键天然隔离，未专门验证。
+- **`AbstractMethodError` 在标准 HotSpot 上的形态**：只在 JBR 21 + DCEVM 上测过。

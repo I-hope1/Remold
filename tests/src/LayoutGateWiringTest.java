@@ -36,6 +36,8 @@ class LayoutGateWiringTest {
 	private static byte[] retypedField() { return cls(HOST, "package lg;\npublic class Host { long a; }\n"); }
 	private static byte[] staticField()  { return cls(HOST, "package lg;\npublic class Host { static int s; }\n"); }
 	private static byte[] noStatic()     { return cls(HOST, "package lg;\npublic class Host { }\n"); }
+	private static byte[] withMethod()   { return cls(HOST, "package lg;\npublic class Host { void m() { } }\n"); }
+	private static byte[] withoutMethod(){ return cls(HOST, "package lg;\npublic class Host { }\n"); }
 
 	/** 批次类名集：宿主 + 两个匿名类 + 一个具名内部类（后者不得被整组带走）+ 无关类。 */
 	private static final Set<String> BATCH = new LinkedHashSet<>(List.of(
@@ -139,7 +141,7 @@ class LayoutGateWiringTest {
 	// ------------------------------------------------------------------------------------------------
 
 	private static LayoutDecision decideWithReaders(byte[] oldB, byte[] newB, Liveness live,
-	                                                RemoldAgent.RemovedFieldReaders readers) {
+	                                                RemoldAgent.RemovedMemberScan readers) {
 		return RemoldAgent.decideLayout(HOST, oldB, newB, "reject", live, BATCH, readers);
 	}
 
@@ -150,7 +152,7 @@ class LayoutGateWiringTest {
 	@Test
 	void removedFieldWithNoOutOfBatchReaderIsWaivedEvenWithLiveInstances() {
 		LayoutDecision d = decideWithReaders(withField(), withoutField(), Liveness.LIVE,
-		                                     new RemoldAgent.RemovedFieldReaders(true, List.of()));
+		                                     new RemoldAgent.RemovedMemberScan(true, List.of(), List.of(), false));
 
 		assertEquals(LayoutAction.WAIVE_NO_READERS, d.action(),
 			"deleting a field nobody reads after the change is safe regardless of live instances");
@@ -162,8 +164,8 @@ class LayoutGateWiringTest {
 	@Test
 	void removedFieldWithOutOfBatchReaderIsRejected() {
 		LayoutDecision d = decideWithReaders(withField(), withoutField(), Liveness.LIVE,
-		                                     new RemoldAgent.RemovedFieldReaders(
-			                                     true, List.of("lg.Reader")));
+		                                     new RemoldAgent.RemovedMemberScan(
+			                                     true, List.of("lg.Reader"), List.of(), false));
 
 		assertEquals(LayoutAction.REJECT, d.action());
 		assertEquals(Set.of(HOST, "lg.Host$1", "lg.Host$2"), d.dropped());
@@ -176,12 +178,12 @@ class LayoutGateWiringTest {
 	@Test
 	void unscannedRemovalFallsBackToLiveness() {
 		LayoutDecision live = decideWithReaders(withField(), withoutField(), Liveness.LIVE,
-		                                        RemoldAgent.RemovedFieldReaders.NOT_SCANNED);
+		                                        RemoldAgent.RemovedMemberScan.NOT_SCANNED);
 		assertEquals(LayoutAction.REJECT, live.action(),
 			"without a reader scan the old liveness rule must still apply");
 
 		LayoutDecision none = decideWithReaders(withField(), withoutField(), Liveness.NONE,
-		                                        RemoldAgent.RemovedFieldReaders.NOT_SCANNED);
+		                                        RemoldAgent.RemovedMemberScan.NOT_SCANNED);
 		assertEquals(LayoutAction.WAIVE, none.action());
 	}
 
@@ -189,7 +191,7 @@ class LayoutGateWiringTest {
 	@Test
 	void staticFieldRemovalIgnoresReaderScan() {
 		LayoutDecision d = decideWithReaders(staticField(), noStatic(), Liveness.NONE,
-		                                     new RemoldAgent.RemovedFieldReaders(true, List.of()));
+		                                     new RemoldAgent.RemovedMemberScan(true, List.of(), List.of(), false));
 		assertEquals(LayoutAction.REJECT, d.action(),
 			"the reader-based rule is scoped to instance fields; static field changes stay rejected");
 	}
@@ -201,8 +203,91 @@ class LayoutGateWiringTest {
 	@Test
 	void typeChangeIgnoresReaderScan() {
 		LayoutDecision d = decideWithReaders(withField(), retypedField(), Liveness.LIVE,
-		                                     new RemoldAgent.RemovedFieldReaders(true, List.of()));
+		                                     new RemoldAgent.RemovedMemberScan(true, List.of(), List.of(), false));
 		assertEquals(LayoutAction.REJECT, d.action(),
 			"a type change silently discards the old value, so an empty reader set proves nothing");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// 删除方法：不走 LayoutGate，靠 removedMethods 标志单独判
+	// （机制差异与实测见 docs/initfix/07-p05-probe-results.md §15）
+	// ------------------------------------------------------------------------------------------------
+
+	private static RemoldAgent.RemovedMemberScan methodScan(boolean scanned, List<String> readers,
+	                                                       List<String> shifted) {
+		return new RemoldAgent.RemovedMemberScan(scanned, readers, shifted, true);
+	}
+
+	/**
+	 * 删方法 + 批次外有读者 → 拒绝。注意这里<b>字段一个都没动</b>（{@code changedFields} 是空的），
+	 * 所以判据必须在 {@code compatible} 早退之前——否则"只删方法"的编辑永远不会被拦。
+	 */
+	@Test
+	void removedMethodWithOutOfBatchReaderIsRejected() {
+		LayoutDecision d = decideWithReaders(withMethod(), withoutMethod(), Liveness.LIVE,
+		                                     methodScan(true, List.of("lg.Reader"), List.of()));
+
+		assertEquals(LayoutAction.REJECT, d.action(),
+			"a dangling method reference must be refused even though no field changed");
+		assertEquals(Set.of(HOST, "lg.Host$1", "lg.Host$2"), d.dropped());
+		assertNotNull(d.reason(), "the log must not blame the field layout here");
+		assertTrue(d.reason().contains("method"), "reason should say the removal was of methods: " + d.reason());
+	}
+
+	/** 分派静默转移（祖先实现接住了调用）同样拒绝：不抛异常，但行为已经变了。 */
+	@Test
+	void removedMethodWithDispatchShiftIsRejected() {
+		LayoutDecision d = decideWithReaders(withMethod(), withoutMethod(), Liveness.LIVE,
+		                                     methodScan(true, List.of(), List.of("lg.Reader")));
+
+		assertEquals(LayoutAction.REJECT, d.action(),
+			"a silent dispatch shift changes behaviour without throwing, so it cannot be allowed");
+		assertTrue(d.reason().contains("dispatch"), "reason should name the dispatch shift: " + d.reason());
+	}
+
+	/** 证明"批次外无读者"之后放行——字段侧 compatible，所以整体 PASS。 */
+	@Test
+	void removedMethodWithNoReaderPasses() {
+		LayoutDecision d = decideWithReaders(withMethod(), withoutMethod(), Liveness.LIVE,
+		                                     methodScan(true, List.of(), List.of()));
+
+		assertEquals(LayoutAction.PASS, d.action(), "no reader resolves to the removed method any more");
+		assertTrue(d.dropped().isEmpty());
+	}
+
+	/**
+	 * 扫描没完成 → 拒绝。方法删除<b>没有</b>存活实例判据可以退：它的影响与"当前有没有实例"正交
+	 * （实测 M8a：有存活实例时三条路径照样全部静默转移）。
+	 */
+	@Test
+	void unscannedMethodRemovalIsRejectedEvenWithoutLiveInstances() {
+		LayoutDecision none = decideWithReaders(withMethod(), withoutMethod(), Liveness.NONE,
+		                                        methodScan(false, List.of(), List.of()));
+		assertEquals(LayoutAction.REJECT, none.action(),
+			"without a completed scan there is nothing to prove safety with");
+
+		LayoutDecision live = decideWithReaders(withMethod(), withoutMethod(), Liveness.LIVE,
+		                                        methodScan(false, List.of(), List.of()));
+		assertEquals(LayoutAction.REJECT, live.action());
+	}
+
+	/** warn 模式仍然放行（用户显式接受风险），但不静默——由调用方告警。 */
+	@Test
+	void removedMethodInWarnModePasses() {
+		LayoutDecision d = RemoldAgent.decideLayout(HOST, withMethod(), withoutMethod(), "warn",
+			Liveness.LIVE, BATCH, methodScan(true, List.of("lg.Reader"), List.of()));
+		assertEquals(LayoutAction.PASS, d.action());
+	}
+
+	/**
+	 * 换无关输入对照：本轮<b>没删方法</b>（{@code removedMethods == false}）时，
+	 * 即使扫描报出读者也不能影响字段侧的判决。
+	 */
+	@Test
+	void readerScanWithoutRemovedMethodsDoesNotRejectOnItsOwn() {
+		LayoutDecision d = decideWithReaders(withField(), addedField(), Liveness.LIVE,
+			new RemoldAgent.RemovedMemberScan(true, List.of("lg.Reader"), List.of(), false));
+		assertEquals(LayoutAction.PASS, d.action(),
+			"a pure field addition must not be rejected because some unrelated scan reported readers");
 	}
 }

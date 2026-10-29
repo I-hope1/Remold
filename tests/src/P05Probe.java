@@ -1,6 +1,8 @@
+import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.tree.ClassNode;
 import remold.ClassDiffUtil;
 import remold.Reflect;
 import remold.RemoldAgent;
@@ -96,6 +98,7 @@ public class P05Probe {
 			measureHeapProportionality(javac, tempDir);
 			measureSafepoint(javac, tempDir);
 			measureFieldRemoval(javac, tempDir);
+			measureMethodRemoval(javac, tempDir);
 		} finally {
 			deleteRecursively(tempDir);
 		}
@@ -851,6 +854,206 @@ public class P05Probe {
 		}
 	}
 
+	// ------------------------------------------------------------------------------------------------
+	// M8: named-class method removal — upcast readers and virtual dispatch
+	// ------------------------------------------------------------------------------------------------
+
+	/**
+	 * A reader's constant-pool entry names the <b>compile-time static type</b>, so when the removed
+	 * method overrides a supertype method the {@code Methodref} / {@code InterfaceMethodref} owner
+	 * sits <b>above</b> the declaring class:
+	 *
+	 * <pre>
+	 *   viaI(I i)      -&gt; InterfaceMethodref rem2/I.m:()Ljava/lang/String;
+	 *   viaSuper(Super)-&gt; Methodref          rem2/Super.m:()Ljava/lang/String;
+	 *   viaA(A a)      -&gt; Methodref          rem2/A.m:()Ljava/lang/String;
+	 * </pre>
+	 *
+	 * <p>Resolution only walks <em>up</em> (JVMS 5.4.3.3), so the first two resolve to {@code I.m} /
+	 * {@code Super.m} and never mention {@code A.m}. An analysis that only matches
+	 * {@code declaring == A} therefore misses them. Dispatch, on the other hand, walks <em>down</em>
+	 * (JVMS 5.4.6): before the removal both of them land on {@code A.m}. That asymmetry is exactly
+	 * what this measurement is about.</p>
+	 */
+	static final String SRC_M8_I = """
+		package rem2;
+		public interface I { String m(); }
+		""";
+
+	static final String SRC_M8_SUPER = """
+		package rem2;
+		public class Super { public String m() { return "Super.m"; } }
+		""";
+
+	static final String SRC_M8_A_V1 = """
+		package rem2;
+		public class A extends Super implements I {
+		    @Override public String m() { return "A.m"; }
+		}
+		""";
+
+	/** Same class with {@code m} removed: the override and the interface implementation are gone. */
+	static final String SRC_M8_A_V2 = """
+		package rem2;
+		public class A extends Super implements I {
+		}
+		""";
+
+	static final String SRC_M8_READER = """
+		package rem2;
+		public class Reader {
+		    public static String viaI(I i) { return i.m(); }
+		    public static String viaSuper(Super s) { return s.m(); }
+		    public static String viaA(A a) { return a.m(); }
+		}
+		""";
+
+	/** No superclass implementation: removing {@code n} leaves a concrete class with no body. */
+	static final String SRC_M8_J = """
+		package rem3;
+		public interface J { String n(); }
+		""";
+
+	static final String SRC_M8_ONLY_V1 = """
+		package rem3;
+		public class Only implements J {
+		    @Override public String n() { return "Only.n"; }
+		}
+		""";
+
+	static final String SRC_M8_ONLY_V2 = """
+		package rem3;
+		public class Only implements J {
+		}
+		""";
+
+	static final String SRC_M8_READER3 = """
+		package rem3;
+		public class Reader3 { public static String viaJ(J j) { return j.n(); } }
+		""";
+
+	/** Control: a method nobody overrides — the reference resolves straight to the declaring class. */
+	static final String SRC_M8_PLAIN_V1 = """
+		package rem4;
+		public class Plain { public String p() { return "Plain.p"; } }
+		""";
+
+	static final String SRC_M8_PLAIN_V2 = """
+		package rem4;
+		public class Plain { }
+		""";
+
+	static final String SRC_M8_READER4 = """
+		package rem4;
+		public class Reader4 { public static String call(Plain x) { return x.p(); } }
+		""";
+
+	/**
+	 * Method removal splits into two mechanisms, and they fail differently:
+	 *
+	 * <ul>
+	 *   <li><b>M8a</b> the removed method overrides a superclass method <em>and</em> implements an
+	 *       interface method, and a superclass implementation remains. Upcast readers
+	 *       ({@code viaI}, {@code viaSuper}) resolve above {@code A}, so a naive
+	 *       {@code declaring == A} attribution never sees them; at run time they keep working but
+	 *       <b>silently dispatch somewhere else</b>. The downcast reader ({@code viaA}) names
+	 *       {@code A} directly and fails loudly.</li>
+	 *   <li><b>M8b</b> the removed method was the only implementation of an interface method. The
+	 *       upcast reader resolves to {@code J.n}, and the concrete class is left with no body.</li>
+	 *   <li><b>M8c</b> control: nobody overrides it, so resolution already names the declaring
+	 *       class and the existing judgement handles it.</li>
+	 * </ul>
+	 */
+	static void measureMethodRemoval(String javac, File baseDir) throws Exception {
+		System.out.println("\n--- [M8] named-class method removal: upcast readers and virtual dispatch ---");
+
+		// ---- M8a: override + interface implementation, superclass implementation survives ----
+		File workA = new File(baseDir, "m8a");
+		File a1 = compileInto(javac, workA, "v1", "I.java", SRC_M8_I);
+		compileInto(javac, workA, "v1", "Super.java", SRC_M8_SUPER);
+		compileInto(javac, workA, "v1", "A.java", SRC_M8_A_V1);
+		compileInto(javac, workA, "v1", "Reader.java", SRC_M8_READER);
+		File a2 = compileInto(javac, workA, "v2", "A.java", SRC_M8_A_V2, a1);
+
+		URLClassLoader cl = newLoader(a1);
+		try {
+			Class<?> a = Class.forName("rem2.A", true, cl);
+			Class<?> i = Class.forName("rem2.I", true, cl);
+			Class<?> sup = Class.forName("rem2.Super", true, cl);
+			Class<?> rd = Class.forName("rem2.Reader", true, cl);
+			Object inst = a.getConstructor().newInstance();
+
+			// Baseline first: if these do not dispatch to A.m before the removal, a later change
+			// proves nothing. Both upcast paths have to land on A.m.
+			checkEq("A.m", tryInt(rd, "viaI", new Class<?>[]{i}, null, inst),
+			        "M8a precondition: viaI(I) dispatches to A.m before the removal");
+			checkEq("A.m", tryInt(rd, "viaSuper", new Class<?>[]{sup}, null, inst),
+			        "M8a precondition: viaSuper(Super) dispatches to A.m before the removal");
+			checkEq("A.m", tryInt(rd, "viaA", new Class<?>[]{a}, null, inst),
+			        "M8a precondition: viaA(A) calls A.m directly before the removal");
+
+			long us = redefineMicros(P05Agent.instrumentation(), a, new File(a2, "rem2/A.class"));
+			System.out.println("   [M8a] redefine accepted, " + us + "us (A.m removed, live instance present)");
+
+			System.out.println("        viaI(I) after removal      -> " + tryInt(rd, "viaI", new Class<?>[]{i}, null, inst));
+			System.out.println("        viaSuper(Super) after      -> " + tryInt(rd, "viaSuper", new Class<?>[]{sup}, null, inst));
+			System.out.println("        viaA(A) after              -> " + tryInt(rd, "viaA", new Class<?>[]{a}, null, inst));
+			check(true, "M8a outcomes recorded (see the lines above)");
+		} finally {
+			cl.close();
+		}
+
+		// ---- M8b: the removed method was the only implementation of J.n ----
+		// 这一档不能源码编译：删掉唯一实现后 `Only` 是具体类却未覆盖抽象方法，javac 直接报错。
+		// 只能直接改字节码——要测的是 JVM 的行为，不是 javac 的检查。
+		File workB = new File(baseDir, "m8b");
+		File b1 = compileInto(javac, workB, "v1", "J.java", SRC_M8_J);
+		compileInto(javac, workB, "v1", "Only.java", SRC_M8_ONLY_V1);
+		compileInto(javac, workB, "v1", "Reader3.java", SRC_M8_READER3);
+		byte[] onlyV2 = removeMethod(Files.readAllBytes(new File(b1, "rem3/Only.class").toPath()),
+		                             "n", "()Ljava/lang/String;");
+
+		cl = newLoader(b1);
+		try {
+			Class<?> only = Class.forName("rem3.Only", true, cl);
+			Class<?> j = Class.forName("rem3.J", true, cl);
+			Class<?> rd = Class.forName("rem3.Reader3", true, cl);
+			Object inst = only.getConstructor().newInstance();
+			checkEq("Only.n", tryInt(rd, "viaJ", new Class<?>[]{j}, null, inst),
+			        "M8b precondition: viaJ(J) dispatches to Only.n before the removal");
+
+			redefineMicros(P05Agent.instrumentation(), only, onlyV2);
+			System.out.println("   [M8b] Only.n removed; viaJ(J) -> "
+			                   + tryInt(rd, "viaJ", new Class<?>[]{j}, null, inst));
+			System.out.println("         (a concrete class left without the interface body)");
+			check(true, "M8b outcome recorded (see the line above)");
+		} finally {
+			cl.close();
+		}
+
+		// ---- M8c: control, nobody overrides p() ----
+		File workC = new File(baseDir, "m8c");
+		File c1 = compileInto(javac, workC, "v1", "Plain.java", SRC_M8_PLAIN_V1);
+		compileInto(javac, workC, "v1", "Reader4.java", SRC_M8_READER4);
+		File c2 = compileInto(javac, workC, "v2", "Plain.java", SRC_M8_PLAIN_V2, c1);
+
+		cl = newLoader(c1);
+		try {
+			Class<?> plain = Class.forName("rem4.Plain", true, cl);
+			Class<?> rd = Class.forName("rem4.Reader4", true, cl);
+			Object inst = plain.getConstructor().newInstance();
+			checkEq("Plain.p", tryInt(rd, "call", new Class<?>[]{plain}, null, inst),
+			        "M8c precondition: call(Plain) reaches Plain.p before the removal");
+
+			redefineMicros(P05Agent.instrumentation(), plain, new File(c2, "rem4/Plain.class"));
+			System.out.println("   [M8c] Plain.p removed; call(Plain) -> "
+			                   + tryInt(rd, "call", new Class<?>[]{plain}, null, inst));
+			check(true, "M8c outcome recorded (see the line above)");
+		} finally {
+			cl.close();
+		}
+	}
+
 	/** Calls a static/instance method and renders the value or the thrown exception as text. */
 	static String tryInt(Class<?> owner, String name, Class<?>[] paramTypes, Object target, Object... args) {
 		try {
@@ -881,11 +1084,34 @@ public class P05Probe {
 	}
 
 	static long redefineMicros(Instrumentation inst, Class<?> clazz, File classFile) throws Exception {
-		byte[] bytes = Files.readAllBytes(classFile.toPath());
+		return redefineMicros(inst, clazz, Files.readAllBytes(classFile.toPath()));
+	}
+
+	static long redefineMicros(Instrumentation inst, Class<?> clazz, byte[] bytes) throws Exception {
 		ClassDefinition def = new ClassDefinition(clazz, bytes);
 		long t0 = System.nanoTime();
 		inst.redefineClasses(def);
 		return TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - t0);
+	}
+
+	/**
+	 * 从字节码里删掉一个方法。
+	 *
+	 * <p>有些删除形态<b>无法用源码表达</b>：删掉一个具体类对接口方法的唯一实现后，源码本身就不合法
+	 * （javac 会报"未覆盖抽象方法"）。这类夹具只能直接改字节码，否则测的就不是 JVM 的行为而是
+	 * javac 的检查。</p>
+	 */
+	static byte[] removeMethod(byte[] classBytes, String name, String desc) {
+		ClassNode cn = new ClassNode();
+		new ClassReader(classBytes).accept(cn, 0);
+		int before = cn.methods.size();
+		cn.methods.removeIf(m -> m.name.equals(name) && m.desc.equals(desc));
+		if (cn.methods.size() == before) {
+			throw new IllegalStateException("no such method: " + name + desc);
+		}
+		ClassWriter cw = new ClassWriter(0);
+		cn.accept(cw);
+		return cw.toByteArray();
 	}
 
 	static String callString(Class<?> clazz, Object target, String name) throws Exception {
@@ -926,6 +1152,15 @@ public class P05Probe {
 	}
 
 	static File compileInto(String javac, File workDir, String variant, String fileName, String source) throws Exception {
+		return compileInto(javac, workDir, variant, fileName, source, null);
+	}
+
+	/**
+	 * @param extraCp 额外放在 classpath 上的输出目录。多版本夹具要用它：v2 只重编被改的那个类，
+	 *                它引用的父类/接口仍来自 v1 的输出目录。
+	 */
+	static File compileInto(String javac, File workDir, String variant, String fileName, String source,
+	                        File extraCp) throws Exception {
 		File srcDir = new File(workDir, variant + "/src");
 		File outDir = new File(workDir, variant + "/out");
 		srcDir.mkdirs();
@@ -933,8 +1168,10 @@ public class P05Probe {
 		File f = new File(srcDir, fileName);
 		Files.writeString(f.toPath(), source);
 		// 输出目录必须在 classpath 上：多文件夹具要互相引用（B 编译时引用 A 的字段）。
+		String cp = outDir.getAbsolutePath();
+		if (extraCp != null) cp = cp + File.pathSeparator + extraCp.getAbsolutePath();
 		runCmd(javac, "-nowarn", "-encoding", "UTF-8",
-		       "-cp", outDir.getAbsolutePath(),
+		       "-cp", cp,
 		       "-d", outDir.getAbsolutePath(), f.getAbsolutePath());
 		return outDir;
 	}

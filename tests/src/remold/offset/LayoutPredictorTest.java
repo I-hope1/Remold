@@ -181,4 +181,147 @@ public class LayoutPredictorTest {
 		);
 		assertTrue(passDead.isSafe(), "Must pass when dynamic holder has NO live instances on heap");
 	}
+
+	@Test
+	@DisplayName("predictLayout 与 Gate：删除字段冲突检测 (DELETED_FIELD_OFFSET_CONFLICT)")
+	public void testDeletedFieldConflictGate() throws Exception {
+		String internal = "remold/offset/test/DelSample";
+		String dotName = internal.replace('/', '.');
+
+		byte[] v1Bytes = genClass(internal, "java/lang/Object", List.of(
+			new String[]{"x", "I", "instance"},
+			new String[]{"y", "I", "instance"}
+		));
+
+		LayoutPredictor.EphemeralClassLoader loaderV1 = new LayoutPredictor.EphemeralClassLoader(
+			Map.of(internal, v1Bytes), null, LayoutPredictorTest.class.getClassLoader()
+		);
+		Class<?> liveClass = Class.forName(dotName, false, loaderV1);
+
+		// v2: 删掉 x
+		byte[] v2Bytes = genClass(internal, "java/lang/Object", Collections.singletonList(
+			new String[]{"y", "I", "instance"}
+		));
+
+		LayoutPredictor.PredictionResult result = LayoutPredictor.predictLayout(
+			liveClass,
+			v2Bytes,
+			Map.of(internal, v2Bytes),
+			name -> null,
+			base -> Collections.emptySet()
+		);
+
+		assertTrue(result.isComplete(), "Prediction must be complete");
+		assertTrue(result.hasDeletedFields(), "Must detect deleted field 'x'");
+		assertEquals(1, result.deletedFields().size());
+		assertEquals("x", result.deletedFields().get(0).fieldName());
+
+		// 绑定图中缓存了被删除的字段 x -> 阻断
+		Binding bindingX = new Binding(
+			internal, "x",
+			Kind.INSTANCE_OFFSET, Sink.STATIC_FIELD,
+			"remold/offset/test/Holder", "X_OFF",
+			"Holder.<clinit>:1", Confidence.EXACT
+		);
+		OffsetBindingIndex indexWithX = OffsetBindingIndex.from(List.of(bindingX));
+
+		DriftDecision decision = SuperclassDriftGate.checkLayoutDrift(
+			internal,
+			result,
+			indexWithX,
+			holder -> false,
+			false,
+			0
+		);
+
+		assertFalse(decision.isSafe(), "Must reject when deleted field has cached holder");
+		assertTrue(decision.formatReport().contains("DELETED_FIELD_OFFSET_CONFLICT"),
+			"Report must identify DELETED_FIELD_OFFSET_CONFLICT");
+		assertEquals(1, decision.deletedHits().size());
+
+		// 对照组：绑定图中只缓存了未删除的 y，且 y 未漂移 -> 放行
+		Binding bindingY = new Binding(
+			internal, "y",
+			Kind.INSTANCE_OFFSET, Sink.STATIC_FIELD,
+			"remold/offset/test/Holder", "Y_OFF",
+			"Holder.<clinit>:2", Confidence.EXACT
+		);
+		OffsetBindingIndex indexWithY = OffsetBindingIndex.from(List.of(bindingY));
+
+		// 如果 y 漂移了则根据漂移判定，若无漂移则放行
+		LayoutPredictor.PredictionResult noDriftResult = LayoutPredictor.PredictionResult.complete(
+			Collections.emptyList(),
+			List.of(new LayoutPredictor.DeletedField(internal, "x", 12))
+		);
+		DriftDecision decisionPass = SuperclassDriftGate.checkLayoutDrift(
+			internal,
+			noDriftResult,
+			indexWithY,
+			holder -> false,
+			false,
+			0
+		);
+		assertTrue(decisionPass.isSafe(), "Control: Must pass when deleted field is NOT cached and others didn't drift");
+	}
+
+	@Test
+	@DisplayName("Incomplete Prediction 与严格模式安全门 (UNPREDICTABLE_LAYOUT_DRIFT)")
+	public void testIncompletePredictionAndStrictMode() {
+		String target = "remold/offset/test/BaseTarget";
+		String unpredictedDescendant = "remold/offset/test/UnknownSub";
+
+		LayoutPredictor.PredictionResult incomplete = LayoutPredictor.PredictionResult.partial(
+			Collections.emptyList(),
+			Collections.emptyList(),
+			Set.of(unpredictedDescendant)
+		);
+
+		OffsetBindingIndex emptyIndex = OffsetBindingIndex.from(Collections.emptyList());
+
+		// 1. 严格模式下：存在未复现子孙类 -> 直接阻断
+		DriftDecision rejectStrict = SuperclassDriftGate.checkLayoutDrift(
+			target,
+			incomplete,
+			emptyIndex,
+			holder -> false,
+			true, // strictMode
+			3 // blindSpots
+		);
+		assertFalse(rejectStrict.isSafe(), "Strict mode must reject when descendant prediction is incomplete");
+		assertTrue(rejectStrict.formatReport().contains("UNPREDICTABLE_LAYOUT_DRIFT"),
+			"Report must state UNPREDICTABLE_LAYOUT_DRIFT in strict mode");
+		assertTrue(rejectStrict.formatReport().contains("Blind spot count: 3"),
+			"Report must include blind spot count");
+
+		// 2. 非严格模式下：未复现子孙类没有任何缓存持有者 -> 容忍放行
+		DriftDecision passNonStrict = SuperclassDriftGate.checkLayoutDrift(
+			target,
+			incomplete,
+			emptyIndex,
+			holder -> false,
+			false, // non-strict
+			3
+		);
+		assertTrue(passNonStrict.isSafe(), "Non-strict mode must pass when unpredicted class has no cached holders");
+		assertTrue(passNonStrict.formatReport().contains("Blind spots: 3"),
+			"Pass report must log blind spots for observability");
+
+		// 3. 非严格模式下：未复现子孙类有通配或字段持有者 -> 依然 fail-closed 阻断
+		Binding subBinding = new Binding(
+			unpredictedDescendant, "*",
+			Kind.INSTANCE_OFFSET, Sink.STATIC_FIELD,
+			"remold/offset/test/Holder", "SUB_OFF",
+			"Holder.<clinit>:1", Confidence.WILDCARD_FIELD
+		);
+		OffsetBindingIndex subIndex = OffsetBindingIndex.from(List.of(subBinding));
+		DriftDecision rejectNonStrictWithHolder = SuperclassDriftGate.checkLayoutDrift(
+			target,
+			incomplete,
+			subIndex,
+			holder -> false,
+			false,
+			1
+		);
+		assertFalse(rejectNonStrictWithHolder.isSafe(), "Non-strict mode must still reject when unpredicted class has cached holder");
+	}
 }

@@ -13,6 +13,9 @@ import java.io.File;
 import java.io.InputStreamReader;
 import java.lang.instrument.ClassDefinition;
 import java.lang.instrument.Instrumentation;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.lang.reflect.Field;
 import java.net.URL;
 import java.net.URLClassLoader;
@@ -80,12 +83,18 @@ public class OffsetStabilityProbe {
 			probeA_SingleClassStability(inst, javac, base);
 			probeA3_RedefineVsCleanLoadPrediction(inst, javac, base);
 			probeA4_FieldDeletionLayout(inst, javac, base);
+			probeA4_2_M7Reconciliation(inst, javac, base);
 			probeB_SuperclassDrift(inst, javac, base);
 			probeC_AccessorCorruptionAndGate(inst, javac, base);
 			probeE_MethodHandleAccessorUnderDrift(inst, javac, base);
+			probeE2_VarHandleAndMethodHandleUnderDrift(inst, javac, base);
 			probeF_UpdaterOffsetC2ConstantFolding(inst, javac, base);
 			probeD_C2Deopt(inst, javac, base);
 			probeD2_InliningChainDeopt(inst, javac, base);
+		} catch (Throwable t) {
+			System.out.println("FATAL IN PROBE: " + t);
+			t.printStackTrace(System.out);
+			failed++;
 		} finally {
 			deleteRecursively(base);
 		}
@@ -433,6 +442,76 @@ public class OffsetStabilityProbe {
 	}
 
 	// =========================================================================
+	// Probe A4-2: M7 vs A4 Reconciliation (Offset Compression vs Instance Migration)
+	// =========================================================================
+
+	private static final String SRC_M7_V1 = """
+		package probem7;
+		public class M7A {
+		    public int x = 11;
+		    public int y = 22;
+		    public int z = 33;
+		    public int readY() { return y; }
+		    public int readZ() { return z; }
+		}
+		""";
+
+	private static final String SRC_M7_V2 = """
+		package probem7;
+		public class M7A {
+		    public int y = 22;
+		    public int z = 33;
+		    public int readY() { return y; }
+		    public int readZ() { return z; }
+		}
+		""";
+
+	private static void probeA4_2_M7Reconciliation(Instrumentation inst, String javac, File base) throws Exception {
+		System.out.println("\n--- [Probe A4-2] M7 vs A4 Reconciliation: Field Deletion Offset Compression vs Instance Migration ---");
+		File workM7 = new File(base, "probe_m7");
+		File v1Dir = compile(javac, new File(workM7, "v1"), "M7A.java", SRC_M7_V1);
+		File v2Dir = compile(javac, new File(workM7, "v2"), "M7A.java", SRC_M7_V2);
+
+		URLClassLoader clM7 = new URLClassLoader(new URL[]{v1Dir.toURI().toURL()},
+		                                         OffsetStabilityProbe.class.getClassLoader());
+		Class<?> m7Class = Class.forName("probem7.M7A", true, clM7);
+		Object liveObj = m7Class.getConstructor().newInstance();
+
+		long off_x_v1 = UNSAFE.objectFieldOffset(m7Class.getField("x"));
+		long off_y_v1 = UNSAFE.objectFieldOffset(m7Class.getField("y"));
+		long off_z_v1 = UNSAFE.objectFieldOffset(m7Class.getField("z"));
+		System.out.printf("   pre-deletion M7A layout: x=%d, y=%d, z=%d%n", off_x_v1, off_y_v1, off_z_v1);
+
+		int readY_v1 = (int) m7Class.getMethod("readY").invoke(liveObj);
+		int readZ_v1 = (int) m7Class.getMethod("readZ").invoke(liveObj);
+		checkEq(22, readY_v1, "M7 Baseline: liveObj.readY() == 22");
+		checkEq(33, readZ_v1, "M7 Baseline: liveObj.readZ() == 33");
+
+		byte[] v2Bytes = Files.readAllBytes(new File(v2Dir, "probem7/M7A.class").toPath());
+		inst.redefineClasses(new ClassDefinition(m7Class, v2Bytes));
+
+		long off_y_v2 = UNSAFE.objectFieldOffset(m7Class.getField("y"));
+		long off_z_v2 = UNSAFE.objectFieldOffset(m7Class.getField("z"));
+		System.out.printf("   post-deletion M7A layout: y=%d, z=%d (deleted x originally at %d)%n",
+		                  off_y_v2, off_z_v2, off_x_v1);
+
+		int readY_v2 = (int) m7Class.getMethod("readY").invoke(liveObj);
+		int readZ_v2 = (int) m7Class.getMethod("readZ").invoke(liveObj);
+		System.out.printf("   post-deletion method calls: readY()=%d, readZ()=%d%n", readY_v2, readZ_v2);
+
+		// Read raw memory at old offset off_y_v1
+		int rawAtOldYOffset = UNSAFE.getInt(liveObj, off_y_v1);
+		System.out.printf("   UNSAFE.getInt(liveObj, oldOffset_y=%d) returns %d%n", off_y_v1, rawAtOldYOffset);
+
+		// Assertions reconciling M7
+		checkEq(22, readY_v2, "DCEVM instance migration preserved y's value to 22");
+		checkEq(33, readZ_v2, "DCEVM instance migration preserved z's value to 33");
+		checkEq(off_x_v1, off_y_v2, "Physical offset: y compressed into deleted x's slot (12)");
+		checkEq(off_y_v1, off_z_v2, "Physical offset: z compressed into y's old slot (16)");
+		checkEq(33, rawAtOldYOffset, "Raw memory at old y offset returns 33 (z) due to offset compression!");
+	}
+
+	// =========================================================================
 	// Probe B: Superclass Field Addition & Descendant Offset Drift
 	// =========================================================================
 
@@ -675,6 +754,130 @@ public class OffsetStabilityProbe {
 		} else {
 			System.out.println("   [Finding] Cached Field object accessor held stale offset!");
 			check(false, "Cached Field object held stale offset (val=" + valViaCachedField + ", currentS1=" + currentS1 + ")");
+		}
+	}
+
+	// =========================================================================
+	// Probe E2: VarHandle, MethodHandle, and C2 Field.getInt under Superclass Drift
+	// =========================================================================
+
+	private static final String SRC_BASE_E2_V1 = """
+		package probee2;
+		public class BaseE2 {
+		    public int b1 = 10;
+		}
+		""";
+
+	private static final String SRC_BASE_E2_V2 = """
+		package probee2;
+		public class BaseE2 {
+		    public int b1 = 10;
+		    public long b2 = 0x123456789ABCDEF0L;
+		}
+		""";
+
+	private static final String SRC_SUB_E2 = """
+		package probee2;
+		public class SubE2 extends BaseE2 {
+		    public int s1 = 100;
+		    public long s2 = 200L;
+		}
+		""";
+
+	private static final String SRC_FIELD_CALLER_E2 = """
+		package probee2;
+		import java.lang.reflect.Field;
+		public class FieldCallerE2 {
+		    public static int readField(Field f, Object o) throws Exception {
+		        return f.getInt(o);
+		    }
+		    public static void loop(Field f, Object o, int n) throws Exception {
+		        for (int i = 0; i < n; i++) {
+		            readField(f, o);
+		        }
+		    }
+		}
+		""";
+
+	private static void probeE2_VarHandleAndMethodHandleUnderDrift(Instrumentation inst, String javac, File base) throws Throwable {
+		System.out.println("\n--- [Probe E2] VarHandle, MethodHandle & C2 Field.get under Superclass Drift ---");
+		File workE2 = new File(base, "probe_e2");
+		File v1Dir = compileMulti(javac, new File(workE2, "v1"),
+		                          Map.of("BaseE2.java", SRC_BASE_E2_V1,
+		                                 "SubE2.java", SRC_SUB_E2,
+		                                 "FieldCallerE2.java", SRC_FIELD_CALLER_E2));
+		File v2Dir = compile(javac, new File(workE2, "v2"), "BaseE2.java", SRC_BASE_E2_V2);
+
+		URLClassLoader clE2 = new URLClassLoader(new URL[]{v1Dir.toURI().toURL()},
+		                                         OffsetStabilityProbe.class.getClassLoader());
+		Class<?> baseE2 = Class.forName("probee2.BaseE2", true, clE2);
+		Class<?> subE2 = Class.forName("probee2.SubE2", true, clE2);
+		Class<?> callerE2 = Class.forName("probee2.FieldCallerE2", true, clE2);
+
+		Object subObj = subE2.getConstructor().newInstance();
+
+		// 1. Pre-materialize accessors prior to redefinition
+		Field cachedField = subE2.getField("s1");
+		MethodHandles.Lookup lookup = MethodHandles.lookup();
+		VarHandle vh = lookup.findVarHandle(subE2, "s1", int.class);
+		MethodHandle mhGet = lookup.findGetter(subE2, "s1", int.class);
+		MethodHandle mhSet = lookup.findSetter(subE2, "s1", int.class);
+
+		long off_s1_v1 = UNSAFE.objectFieldOffset(cachedField);
+		System.out.printf("   pre-redefinition SubE2.s1 offset: %d%n", off_s1_v1);
+
+		// Baseline calls
+		checkEq(100, cachedField.getInt(subObj), "Baseline: Field.getInt reads initial s1=100");
+		checkEq(100, (int) vh.get(subObj), "Baseline: VarHandle.get reads initial s1=100");
+		checkEq(100, (int) mhGet.invoke(subObj), "Baseline: MethodHandle getter reads initial s1=100");
+
+		// Warm up FieldCallerE2.readField to C2 compile it with cachedField
+		for (int i = 0; i < 5; i++) {
+			callerE2.getMethod("loop", Field.class, Object.class, int.class).invoke(null, cachedField, subObj, 20_000);
+			Thread.sleep(20);
+		}
+		int c2ValBefore = (int) callerE2.getMethod("readField", Field.class, Object.class).invoke(null, cachedField, subObj);
+		checkEq(100, c2ValBefore, "Baseline: C2-compiled Field.getInt reads initial s1=100");
+
+		// 2. Redefine BaseE2 with added long b2 -> shifts subE2.s1 by +8 bytes
+		byte[] baseV2Bytes = Files.readAllBytes(new File(v2Dir, "probee2/BaseE2.class").toPath());
+		inst.redefineClasses(new ClassDefinition(baseE2, baseV2Bytes));
+
+		long off_s1_v2 = UNSAFE.objectFieldOffset(subE2.getField("s1"));
+		long delta = off_s1_v2 - off_s1_v1;
+		System.out.printf("   post-redefinition SubE2.s1 offset: %d (delta=+%d)%n", off_s1_v2, delta);
+
+		// 3. Test C2-compiled Field.getInt
+		int c2ValAfter = (int) callerE2.getMethod("readField", Field.class, Object.class).invoke(null, cachedField, subObj);
+		System.out.printf("   C2-compiled Field.getInt(subObj)=%d%n", c2ValAfter);
+		checkEq(100, c2ValAfter, "C2-compiled Field.getInt automatically updated / deoptimized to new offset");
+
+		// 4. Test VarHandle.get
+		int vhVal = (int) vh.get(subObj);
+		System.out.printf("   pre-existing VarHandle.get(subObj)=%d (hex 0x%08X)%n", vhVal, vhVal);
+
+		// 5. Test MethodHandle.invoke
+		int mhVal = (int) mhGet.invoke(subObj);
+		System.out.printf("   pre-existing MethodHandle getter.invoke(subObj)=%d (hex 0x%08X)%n", mhVal, mhVal);
+
+		// 6. Test writing via MethodHandle / VarHandle
+		boolean vhStale = (vhVal != 100);
+		boolean mhStale = (mhVal != 100);
+
+		if (vhStale) {
+			System.out.println("   [Finding] VarHandle DID NOT auto-heal! It accessed stale memory offset!");
+			check(true, "VarHandle did not auto-heal under superclass drift (confirms S1 hypothesis)");
+		} else {
+			System.out.println("   [Finding] VarHandle auto-healed to new offset!");
+			check(true, "VarHandle auto-healed to new offset");
+		}
+
+		if (mhStale) {
+			System.out.println("   [Finding] MethodHandle getter DID NOT auto-heal! It accessed stale memory offset!");
+			check(true, "MethodHandle getter did not auto-heal under superclass drift (confirms S1 hypothesis)");
+		} else {
+			System.out.println("   [Finding] MethodHandle getter auto-healed to new offset!");
+			check(true, "MethodHandle getter auto-healed to new offset");
 		}
 	}
 

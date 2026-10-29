@@ -175,6 +175,14 @@ public class RemoldAgent {
 	public static String LAYOUT_GATE = strProp("remold.agent.layout_gate", "reject");
 
 	/**
+	 * 内存偏移漂移与访问器安全门严格模式（{@code -Dremold.agent.offset_strict=true} / {@code -Dremold.offsetStrict=true}）。
+	 *
+	 * <p>开启后，当类发生物理字段漂移或增删时，若存在无法 clean-load 验证的子孙类或未解析盲区，
+	 * 直接 fail-closed 阻断该类的重定义，避免静默内存破坏。</p>
+	 */
+	public static boolean OFFSET_STRICT = boolProp("remold.agent.offset_strict", "remold.offsetStrict", false);
+
+	/**
 	 * 同名局部类编号漂移止血门（{@code docs/topology/07-layout-gate-and-risks.md} §2）模式：{@code reject} / {@code warn} / {@code off}。
 	 *
 	 * <p>局部类原名直通（{@code isAnonymousClassName} 拒绝准入），重定义按类名一一对应。同一宿主内
@@ -2790,7 +2798,7 @@ public class RemoldAgent {
 		}
 		if (!hasInstanceFieldChange) return null;
 
-		List<LayoutPredictor.DriftingField> driftingFields = LayoutPredictor.findDriftingFields(
+		LayoutPredictor.PredictionResult prediction = LayoutPredictor.predictLayout(
 			targetClass,
 			newBytes,
 			newBatchBytes,
@@ -2798,7 +2806,18 @@ public class RemoldAgent {
 			base -> getLoadedDescendantInternalNames(targetClass)
 		);
 
-		if (driftingFields == null) {
+		int blindSpots = (offsetIndex != null ? offsetIndex.dynamicHolders().size() : 0);
+
+		SuperclassDriftGate.DriftDecision decision = SuperclassDriftGate.checkLayoutDrift(
+			internalName(className),
+			prediction,
+			offsetIndex,
+			RemoldAgent::hasLiveInstances,
+			OFFSET_STRICT,
+			blindSpots
+		);
+
+		if (decision == null) {
 			// 如果预测器无法 clean-load 预测（如缺少依赖），退回保守全量子孙类扫描
 			return SuperclassDriftGate.checkSuperclassDrift(
 				internalName(className),
@@ -2809,12 +2828,7 @@ public class RemoldAgent {
 			);
 		}
 
-		return SuperclassDriftGate.checkLayoutDrift(
-			internalName(className),
-			driftingFields,
-			offsetIndex,
-			RemoldAgent::hasLiveInstances
-		);
+		return decision;
 	}
 
 	private static Set<String> getLoadedDescendantInternalNames(Class<?> baseClass) {

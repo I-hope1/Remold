@@ -86,22 +86,67 @@ public final class SuperclassDriftGate {
 	}
 
 	/**
+	 * 被删除字段存在缓存持有者命中。
+	 */
+	public record DeletedFieldHit(
+		String targetClass,
+		String fieldName,
+		long oldOffset,
+		Binding binding
+	) {
+		@Override
+		public String toString() {
+			return targetClass + "." + fieldName + " (deleted, former offset " + oldOffset + ") -> cached by "
+			       + binding.holderClass() + "." + binding.holderMember()
+			       + " (" + binding.kind() + ", " + binding.conf() + ") @ " + binding.site();
+		}
+	}
+
+	/**
 	 * 漂移判定结论。
 	 */
 	public record DriftDecision(
 		boolean isSafe,
 		String baseClass,
 		List<DriftHit> hits,
-		List<DynamicDriftHit> dynamicHits
+		List<DynamicDriftHit> dynamicHits,
+		List<DeletedFieldHit> deletedHits,
+		Set<String> unpredictedClasses,
+		int blindSpotCount,
+		String rejectReason
 	) {
 		public static DriftDecision pass(String baseClass) {
-			return new DriftDecision(true, baseClass, Collections.emptyList(), Collections.emptyList());
+			return new DriftDecision(true, baseClass,
+				Collections.emptyList(), Collections.emptyList(), Collections.emptyList(),
+				Collections.emptySet(), 0, null);
+		}
+
+		public static DriftDecision pass(String baseClass, int blindSpotCount) {
+			return new DriftDecision(true, baseClass,
+				Collections.emptyList(), Collections.emptyList(), Collections.emptyList(),
+				Collections.emptySet(), blindSpotCount, null);
 		}
 
 		public static DriftDecision reject(String baseClass, List<DriftHit> hits, List<DynamicDriftHit> dynamicHits) {
 			return new DriftDecision(false, baseClass,
 				Collections.unmodifiableList(hits),
-				Collections.unmodifiableList(dynamicHits));
+				Collections.unmodifiableList(dynamicHits),
+				Collections.emptyList(),
+				Collections.emptySet(),
+				0,
+				null);
+		}
+
+		public static DriftDecision reject(String baseClass, List<DriftHit> hits, List<DynamicDriftHit> dynamicHits,
+		                                    List<DeletedFieldHit> deletedHits, Set<String> unpredictedClasses,
+		                                    int blindSpotCount, String rejectReason) {
+			return new DriftDecision(false, baseClass,
+				hits != null ? Collections.unmodifiableList(hits) : Collections.emptyList(),
+				dynamicHits != null ? Collections.unmodifiableList(dynamicHits) : Collections.emptyList(),
+				deletedHits != null ? Collections.unmodifiableList(deletedHits) : Collections.emptyList(),
+				unpredictedClasses != null ? Collections.unmodifiableSet(unpredictedClasses) : Collections.emptySet(),
+				blindSpotCount,
+				rejectReason);
 		}
 
 		/**
@@ -109,25 +154,49 @@ public final class SuperclassDriftGate {
 		 */
 		public String formatReport() {
 			if (isSafe) {
-				return "[DRIFT-GATE] PASS: Base class " + baseClass
-				       + " added instance field(s), no cached offset holders detected for loaded descendants.";
+				StringBuilder sb = new StringBuilder();
+				sb.append("[DRIFT-GATE] PASS: Base class ").append(baseClass)
+				  .append(" added/modified instance field(s), no cached offset conflicts detected.");
+				if (blindSpotCount > 0) {
+					sb.append(" (Blind spots: ").append(blindSpotCount).append(" unresolved holder/target classes)");
+				}
+				return sb.toString();
 			}
 
 			StringBuilder sb = new StringBuilder();
-			boolean isSubclassOnly = true;
-			for (DriftHit h : hits) {
-				if (h.descendantClass().equals(baseClass)) {
-					isSubclassOnly = false;
-					break;
+			if (!deletedHits.isEmpty()) {
+				sb.append("[DELETED_FIELD_OFFSET_CONFLICT] Class ").append(baseClass)
+				  .append(" deleted instance field(s) with pre-cached offset holders:\n");
+			} else if (rejectReason != null && rejectReason.contains("UNPREDICTABLE")) {
+				sb.append("[UNPREDICTABLE_LAYOUT_DRIFT] Class ").append(baseClass)
+				  .append(" layout verification failed (fail-closed):\n")
+				  .append("  Reason: ").append(rejectReason).append("\n");
+			} else {
+				boolean isSubclassOnly = true;
+				for (DriftHit h : hits) {
+					if (h.descendantClass().equals(baseClass)) {
+						isSubclassOnly = false;
+						break;
+					}
+				}
+				if (isSubclassOnly) {
+					sb.append("[SUPERCLASS_FIELD_DRIFT] Base class ").append(baseClass)
+					  .append(" added instance field(s), shifting memory layout for descendants:\n");
+				} else {
+					sb.append("[LAYOUT_DRIFT] Class ").append(baseClass)
+					  .append(" physical memory layout shifted (hole filling / type clustering / drift):\n");
 				}
 			}
 
-			if (isSubclassOnly) {
-				sb.append("[SUPERCLASS_FIELD_DRIFT] Base class ").append(baseClass)
-				  .append(" added instance field(s), shifting memory layout for descendants:\n");
-			} else {
-				sb.append("[LAYOUT_DRIFT] Class ").append(baseClass)
-				  .append(" physical memory layout shifted (hole filling / type clustering / drift):\n");
+			if (!deletedHits.isEmpty()) {
+				sb.append("  Detected ").append(deletedHits.size()).append(" cached holder(s) referencing deleted field(s):\n");
+				for (DeletedFieldHit dh : deletedHits) {
+					sb.append("    - Field:         ").append(dh.targetClass).append(".").append(dh.fieldName)
+					  .append(" (former offset ").append(dh.oldOffset).append(")\n")
+					  .append("      Cached by:     ").append(dh.binding.holderClass()).append(".").append(dh.binding.holderMember())
+					  .append(" (").append(dh.binding.kind()).append(", ").append(dh.binding.conf()).append(")\n")
+					  .append("      Trigger site:  ").append(dh.binding.site()).append("\n");
+				}
 			}
 
 			if (!hits.isEmpty()) {
@@ -146,6 +215,13 @@ public final class SuperclassDriftGate {
 					sb.append("    - Holder: ").append(dh.holderClass)
 					  .append(" (").append(dh.reason).append(")\n");
 				}
+			}
+
+			if (!unpredictedClasses.isEmpty()) {
+				sb.append("  Unpredicted descendant class(es): ").append(unpredictedClasses).append("\n");
+			}
+			if (blindSpotCount > 0) {
+				sb.append("  Blind spot count: ").append(blindSpotCount).append("\n");
 			}
 
 			sb.append("  Action: FAIL-CLOSED. Redefinition rejected to prevent silent memory corruption.");
@@ -168,24 +244,75 @@ public final class SuperclassDriftGate {
 		OffsetBindingIndex index,
 		LiveInstancePredicate liveInstancePredicate
 	) {
-		if (rootClassInternal == null || driftingFields == null || driftingFields.isEmpty() || index == null || index.isEmpty()) {
-			return DriftDecision.pass(rootClassInternal);
+		return checkLayoutDrift(
+			rootClassInternal,
+			LayoutPredictor.PredictionResult.complete(driftingFields, Collections.emptyList()),
+			index,
+			liveInstancePredicate,
+			false,
+			0
+		);
+	}
+
+	/**
+	 * 结果型物理布局漂移与删除冲突判定：基于完整预测结果，核验字段漂移、被删除字段残留缓存、未复现子孙类及盲区。
+	 *
+	 * @param rootClassInternal     被重定义的类内部名（如 {@code "com/example/Base"}）
+	 * @param prediction            LayoutPredictor 测算得出的完整预测结果
+	 * @param index                 偏移绑定索引
+	 * @param liveInstancePredicate 动态持有者堆存活实例探测谓词
+	 * @param strictMode            是否启用严格模式（未复现子孙类或预测失败直接 fail-closed 阻断）
+	 * @param blindSpotCount        盲区统计计数（如未解析动态持有者总数）
+	 * @return 判定结论（安全放行或阻断拒绝；若无法预测且非严格模式则返回 null 以便退回全量保守扫描）
+	 */
+	public static DriftDecision checkLayoutDrift(
+		String rootClassInternal,
+		LayoutPredictor.PredictionResult prediction,
+		OffsetBindingIndex index,
+		LiveInstancePredicate liveInstancePredicate,
+		boolean strictMode,
+		int blindSpotCount
+	) {
+		if (rootClassInternal == null) {
+			return DriftDecision.pass(rootClassInternal, blindSpotCount);
+		}
+		if (prediction == null) {
+			if (strictMode) {
+				return DriftDecision.reject(rootClassInternal, Collections.emptyList(), Collections.emptyList(),
+					Collections.emptyList(), Collections.emptySet(), blindSpotCount,
+					"UNPREDICTABLE_LAYOUT_DRIFT: LayoutPredictor returned null (cannot clean-load in ephemeral loader)");
+			}
+			return null;
 		}
 
 		List<DriftHit> hits = new ArrayList<>();
+		List<DeletedFieldHit> deletedHits = new ArrayList<>();
+		List<DynamicDriftHit> dynamicHits = new ArrayList<>();
 
-		// 1. 遍历全部发生物理偏移漂移的字段，检查是否存在已知偏移持有者
-		for (LayoutPredictor.DriftingField df : driftingFields) {
-			if (df == null) continue;
-			List<Binding> bound = index.lookup(df.internalClassName(), df.fieldName());
-			for (Binding b : bound) {
-				hits.add(new DriftHit(df.internalClassName(), df.fieldName(), b));
+		// 1. 检查被删除的字段是否有残留缓存持有者 (DELETED_FIELD_OFFSET_CONFLICT)
+		if (prediction.hasDeletedFields() && index != null && !index.isEmpty()) {
+			for (LayoutPredictor.DeletedField df : prediction.deletedFields()) {
+				if (df == null) continue;
+				List<Binding> bound = index.lookup(df.internalClassName(), df.fieldName());
+				for (Binding b : bound) {
+					deletedHits.add(new DeletedFieldHit(df.internalClassName(), df.fieldName(), df.oldOffset(), b));
+				}
 			}
 		}
 
-		// 2. 如果存在漂移字段，检查动态持有者（UNRESOLVED_CLASS）是否在堆上有存活实例
-		List<DynamicDriftHit> dynamicHits = new ArrayList<>();
-		if (liveInstancePredicate != null) {
+		// 2. 遍历发生物理偏移漂移的字段，检查是否存在已知偏移持有者
+		if (prediction.hasDrift() && index != null && !index.isEmpty()) {
+			for (LayoutPredictor.DriftingField df : prediction.driftingFields()) {
+				if (df == null) continue;
+				List<Binding> bound = index.lookup(df.internalClassName(), df.fieldName());
+				for (Binding b : bound) {
+					hits.add(new DriftHit(df.internalClassName(), df.fieldName(), b));
+				}
+			}
+		}
+
+		// 3. 如果存在漂移或删除字段，检查动态持有者（UNRESOLVED_CLASS）是否在堆上有存活实例
+		if ((prediction.hasDrift() || prediction.hasDeletedFields()) && index != null && liveInstancePredicate != null) {
 			for (String dynamicHolder : index.dynamicHolders()) {
 				if (dynamicHolder == null) continue;
 				if (liveInstancePredicate.hasLiveInstances(dynamicHolder)) {
@@ -197,11 +324,33 @@ public final class SuperclassDriftGate {
 			}
 		}
 
-		if (hits.isEmpty() && dynamicHits.isEmpty()) {
-			return DriftDecision.pass(rootClassInternal);
+		// 4. 检查未能在抛弃式加载器中复现的子孙类 (Incomplete Prediction)
+		if (!prediction.isComplete()) {
+			if (strictMode) {
+				return DriftDecision.reject(rootClassInternal, hits, dynamicHits, deletedHits,
+					prediction.unpredictedClasses(), blindSpotCount,
+					"UNPREDICTABLE_LAYOUT_DRIFT: Incomplete layout prediction in strict mode for: " + prediction.unpredictedClasses());
+			}
+			// 非严格模式下：如果未复现的子孙类自身在 index 中被引用，仍必须阻断
+			if (index != null && !index.isEmpty()) {
+				for (String unpredClass : prediction.unpredictedClasses()) {
+					List<Binding> bound = index.lookup(unpredClass, "*");
+					if (!bound.isEmpty()) {
+						for (Binding b : bound) {
+							hits.add(new DriftHit(unpredClass, "*", b));
+						}
+					}
+				}
+			}
 		}
 
-		return DriftDecision.reject(rootClassInternal, hits, dynamicHits);
+		if (hits.isEmpty() && dynamicHits.isEmpty() && deletedHits.isEmpty()) {
+			return DriftDecision.pass(rootClassInternal, blindSpotCount);
+		}
+
+		return DriftDecision.reject(rootClassInternal, hits, dynamicHits, deletedHits,
+			prediction.unpredictedClasses(), blindSpotCount,
+			!deletedHits.isEmpty() ? "DELETED_FIELD_OFFSET_CONFLICT" : "LAYOUT_DRIFT");
 	}
 
 	/**

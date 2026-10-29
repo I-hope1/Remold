@@ -44,6 +44,69 @@ public final class LayoutPredictor {
 	}
 
 	/**
+	 * 单个被删除字段记录。
+	 */
+	public record DeletedField(
+		String internalClassName,
+		String fieldName,
+		long oldOffset
+	) {
+		@Override
+		public String toString() {
+			return internalClassName + "." + fieldName + " (deleted, former offset " + oldOffset + ")";
+		}
+	}
+
+	/**
+	 * 物理布局预测结果。
+	 */
+	public record PredictionResult(
+		boolean isComplete,
+		List<DriftingField> driftingFields,
+		List<DeletedField> deletedFields,
+		Set<String> unpredictedClasses,
+		String failureReason
+	) {
+		public static PredictionResult complete(List<DriftingField> drifting, List<DeletedField> deleted) {
+			return new PredictionResult(
+				true,
+				drifting != null ? Collections.unmodifiableList(drifting) : Collections.emptyList(),
+				deleted != null ? Collections.unmodifiableList(deleted) : Collections.emptyList(),
+				Collections.emptySet(),
+				null
+			);
+		}
+
+		public static PredictionResult partial(List<DriftingField> drifting, List<DeletedField> deleted, Set<String> unpredicted) {
+			return new PredictionResult(
+				false,
+				drifting != null ? Collections.unmodifiableList(drifting) : Collections.emptyList(),
+				deleted != null ? Collections.unmodifiableList(deleted) : Collections.emptyList(),
+				unpredicted != null ? Collections.unmodifiableSet(unpredicted) : Collections.emptySet(),
+				"Prediction incomplete for classes: " + unpredicted
+			);
+		}
+
+		public static PredictionResult failure(String reason, Set<String> unpredicted) {
+			return new PredictionResult(
+				false,
+				Collections.emptyList(),
+				Collections.emptyList(),
+				unpredicted != null ? Collections.unmodifiableSet(unpredicted) : Collections.emptySet(),
+				reason
+			);
+		}
+
+		public boolean hasDrift() {
+			return !driftingFields.isEmpty();
+		}
+
+		public boolean hasDeletedFields() {
+			return !deletedFields.isEmpty();
+		}
+	}
+
+	/**
 	 * 字节码提供器：给定类内部名，返回字节码。
 	 */
 	@FunctionalInterface
@@ -92,23 +155,25 @@ public final class LayoutPredictor {
 	}
 
 	/**
-	 * 扫描目标类自身及其所有已加载子孙类中发生物理偏移漂移的所有实例字段。
+	 * 预测目标类自身及其所有已加载子孙类在应用新字节码后的物理字段布局结果。
 	 *
 	 * @param targetClass        正在被重定义的 live Class 对象
 	 * @param newBytes           该类的新字节码
 	 * @param newBatchBytes      本次重定义批次中所有类的新字节码（key: 内部名）
 	 * @param fallbackProvider   字节码提供器（读取子孙类或旧类的字节码）
 	 * @param descendantSupplier 获取已加载子孙类的提供器
-	 * @return 发生漂移的字段列表；若无漂移则返回空列表；若无法预测则返回 null（保守提示无法预测）
+	 * @return 布局预测完整结果，包含漂移字段、删除字段以及未能成功验证的子孙类集合
 	 */
-	public static List<DriftingField> findDriftingFields(
+	public static PredictionResult predictLayout(
 		Class<?> targetClass,
 		byte[] newBytes,
 		Map<String, byte[]> newBatchBytes,
 		BytecodeProvider fallbackProvider,
 		DescendantSupplier descendantSupplier
 	) {
-		if (targetClass == null || newBytes == null) return Collections.emptyList();
+		if (targetClass == null || newBytes == null) {
+			return PredictionResult.complete(Collections.emptyList(), Collections.emptyList());
+		}
 
 		String targetDotName = targetClass.getName();
 		String targetInternal = targetDotName.replace('.', '/');
@@ -121,6 +186,8 @@ public final class LayoutPredictor {
 		EphemeralClassLoader cl = new EphemeralClassLoader(batch, fallbackProvider, parentLoader);
 
 		List<DriftingField> drifting = new ArrayList<>();
+		List<DeletedField> deleted = new ArrayList<>();
+		Set<String> unpredicted = new LinkedHashSet<>();
 
 		// 1. 检查目标类自身的所有已有实例字段
 		try {
@@ -128,21 +195,23 @@ public final class LayoutPredictor {
 			for (Field liveField : targetClass.getDeclaredFields()) {
 				if ((liveField.getModifiers() & Modifier.STATIC) != 0) continue;
 				String fn = liveField.getName();
+				long oldOff = UNSAFE.objectFieldOffset(liveField);
 				Field predField;
 				try {
 					predField = predictedTarget.getDeclaredField(fn);
 				} catch (NoSuchFieldException e) {
-					// 字段被删除，不属于已有字段偏移漂移
+					// 字段被删除：记录到删除字段中，以便后续检查是否有缓存持有者
+					deleted.add(new DeletedField(targetInternal, fn, oldOff));
 					continue;
 				}
-				long oldOff = UNSAFE.objectFieldOffset(liveField);
 				long newOff = UNSAFE.objectFieldOffset(predField);
 				if (oldOff != newOff) {
 					drifting.add(new DriftingField(targetInternal, fn, oldOff, newOff));
 				}
 			}
 		} catch (Throwable t) {
-			return null;
+			unpredicted.add(targetInternal);
+			return PredictionResult.failure("Failed to clean-load target class " + targetDotName + ": " + t, unpredicted);
 		}
 
 		// 2. 检查所有已加载子孙类的已有实例字段
@@ -158,26 +227,55 @@ public final class LayoutPredictor {
 						for (Field liveField : liveDescClass.getDeclaredFields()) {
 							if ((liveField.getModifiers() & Modifier.STATIC) != 0) continue;
 							String fn = liveField.getName();
+							long oldOff = UNSAFE.objectFieldOffset(liveField);
 							Field predField;
 							try {
 								predField = predDescClass.getDeclaredField(fn);
 							} catch (NoSuchFieldException e) {
+								deleted.add(new DeletedField(descInternal, fn, oldOff));
 								continue;
 							}
-							long oldOff = UNSAFE.objectFieldOffset(liveField);
 							long newOff = UNSAFE.objectFieldOffset(predField);
 							if (oldOff != newOff) {
 								drifting.add(new DriftingField(descInternal, fn, oldOff, newOff));
 							}
 						}
-					} catch (Throwable ignored) {
-						// 单个子孙类无法通过抛弃式加载器加载时容错
+					} catch (Throwable t) {
+						// 子孙类无法在抛弃式加载器中复现（如动态生成类、hidden class、无法读取字节码或链接报错）
+						unpredicted.add(descInternal);
 					}
 				}
 			}
 		}
 
-		return drifting;
+		if (!unpredicted.isEmpty()) {
+			return PredictionResult.partial(drifting, deleted, unpredicted);
+		}
+		return PredictionResult.complete(drifting, deleted);
+	}
+
+	/**
+	 * 扫描目标类自身及其所有已加载子孙类中发生物理偏移漂移的所有实例字段（简化视图）。
+	 *
+	 * @param targetClass        正在被重定义的 live Class 对象
+	 * @param newBytes           该类的新字节码
+	 * @param newBatchBytes      本次重定义批次中所有类的新字节码（key: 内部名）
+	 * @param fallbackProvider   字节码提供器（读取子孙类或旧类的字节码）
+	 * @param descendantSupplier 获取已加载子孙类的提供器
+	 * @return 发生漂移的字段列表；若无漂移则返回空列表；若无法预测目标类则返回 null
+	 */
+	public static List<DriftingField> findDriftingFields(
+		Class<?> targetClass,
+		byte[] newBytes,
+		Map<String, byte[]> newBatchBytes,
+		BytecodeProvider fallbackProvider,
+		DescendantSupplier descendantSupplier
+	) {
+		PredictionResult res = predictLayout(targetClass, newBytes, newBatchBytes, fallbackProvider, descendantSupplier);
+		if (!res.isComplete() && targetClass != null && res.unpredictedClasses().contains(targetClass.getName().replace('.', '/'))) {
+			return null;
+		}
+		return res.driftingFields();
 	}
 
 	/**

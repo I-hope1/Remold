@@ -118,16 +118,17 @@ class RemovedMemberReadersTest {
 
 	/**
 	 * 接口字段截胡：改动前 {@code Sub.x} 指向 {@code A.x}，改动后接口 {@code I} 多了一个同名字段，
-	 * 解析改落到 {@code I.x}。它不抛 {@code LinkageError}，但<b>读到的是另一个值</b>。
+	 * 解析改落到 {@code I.x}。
 	 *
-	 * <p>所以 {@link Result#hasReaders()} 把它算作问题：静默改指向与方法的分派转移是同一类危险
-	 * （热更成功、日志干净、行为已变）。此前它只被记录、不阻止落地，那是个漏洞。</p>
+	 * <p>接口字段必然是 {@code public static final}，所以这次改指向是<b>静态性翻转</b>：
+	 * {@code GETFIELD} 落到静态字段上抛 {@code IncompatibleClassChangeError}——这是真错误，
+	 * 必须阻断。与"同静态性的回退"（只记录不阻断）区分开。</p>
 	 *
 	 * <p>这个夹具只能用两轮编译造出来：v1 里 {@code I} 没有 {@code x}（否则 {@code s.x} 在 javac 阶段
 	 * 就是"引用不明确"），v2 里给 {@code I} 加上。</p>
 	 */
 	@Test
-	void interfaceFieldHijackIsReportedAsRetargeted() throws Exception {
+	void interfaceFieldHijackIsIncompatibleAccess() throws Exception {
 		Worlds w = worlds(
 			Map.of("p/I", "package p; public interface I { }",
 			       "p/A", "package p; public class A { public int x = 2; }",
@@ -140,17 +141,12 @@ class RemovedMemberReadersTest {
 			"precondition: the fixture must contain Fieldref p/Sub.x:I");
 
 		Result r = find(w, removedField("p/A", "x", "I", false));
-		assertTrue(r.hasReaders(),
-			"a silent retarget must block the redefine: the call still succeeds but reads a"
-			+ " different field, which is the same hazard as a shifted method dispatch");
-		assertTrue(r.hits().isEmpty(),
-			"nothing dangles here — field resolution searches superinterfaces before the superclass,"
-			+ " so Sub.x lands on I.x");
-		assertFalse(r.retargeted().isEmpty(),
-			"the retargeting is what makes it unsafe, and it must be surfaced with a reason");
-		assertTrue(r.retargeted().get(0).detail().contains("IncompatibleClassChangeError"),
-			"interface fields are static, so a GETFIELD landing on one is an ICCE rather than a"
-			+ " silent read: " + r.retargeted().get(0).detail());
+		assertTrue(r.hasReaders(), "an ICCE blocks the redefine");
+		assertTrue(r.hits().isEmpty(), "nothing dangles — resolution lands on I.x");
+		assertFalse(r.incompatibleAccess().isEmpty(),
+			"the target is static while the reference is a GETFIELD, which is IncompatibleClassChangeError");
+		assertTrue(r.retargeted().isEmpty(),
+			"a staticness flip is not a benign fallback, so it must not be filed under retargeted");
 	}
 
 	/**
@@ -242,9 +238,12 @@ class RemovedMemberReadersTest {
 	 *
 	 * <p>实测（{@code P05Probe} M8a）：{@code viaI} / {@code viaSuper} / {@code viaA} 三条路径在删除后
 	 * 都变成 {@code Super.m}，<b>一个异常都不抛</b>。</p>
+	 *
+	 * <p>正因为零异常，这属于<b>合法回退</b>：开发者删掉 Override 的本意就是回到父类实现，
+	 * 调用方源码不需要改，全量重编后字节码也仍然能正确解析。所以只记录、不阻断。</p>
 	 */
 	@Test
-	void overriddenMethodRemovalIsFoundThroughUpcastReaders() throws Exception {
+	void overriddenMethodRemovalFallsBackToSuperclass() throws Exception {
 		Worlds w = worlds(
 			Map.of("p/I", "package p; public interface I { int m(); }",
 			       "p/Super", "package p; public class Super { public int m() { return 1; } }",
@@ -267,10 +266,12 @@ class RemovedMemberReadersTest {
 			"precondition: nothing in the reader mentions A.m, so owner matching alone cannot find it");
 
 		Result r = find(w, removedMethod("p/A", "m", "()I"));
-		assertTrue(r.hasReaders(), "an upcast reader must be reported even though it never names A.m");
+		assertFalse(r.hasReaders(),
+			"falling back to Super.m is what deleting the override was meant to do — no exception,"
+			+ " and the reader needs no source change");
 		assertFalse(r.dispatchShifted().isEmpty(),
-			"dispatch silently moves to Super.m — no exception, behaviour changed");
-		assertTrue(r.hits().isEmpty(), "nothing throws NoSuchMethodError here: the superclass body still resolves");
+			"but the fallback must be surfaced: those references now run a different body");
+		assertTrue(r.hits().isEmpty(), "nothing throws NoSuchMethodError here");
 	}
 
 	/**
@@ -297,9 +298,9 @@ class RemovedMemberReadersTest {
 		assertTrue(r.dispatchShifted().isEmpty(), "there is no implementation left to shift to");
 	}
 
-	/** 回退到接口的 default 实现：不抛错，但分派目标变了——必须与"抽象方法缺失"区分开。 */
+	/** 回退到接口的 default 实现：不抛错，且这正是删掉 Override 的本意——记录但不阻断。 */
 	@Test
-	void fallingBackToInterfaceDefaultIsDispatchShiftNotAbstract() throws Exception {
+	void fallingBackToInterfaceDefaultIsNotBlocking() throws Exception {
 		Worlds w = worlds(
 			Map.of("p/I", "package p; public interface I { default int d() { return 1; } }",
 			       "p/A", "package p; public class A implements I { public int d() { return 2; } }",
@@ -307,8 +308,8 @@ class RemovedMemberReadersTest {
 			Map.of("p/A", "package p; public class A implements I { }"));
 
 		Result r = find(w, removedMethod("p/A", "d", "()I"));
-		assertTrue(r.hasReaders(), "falling back to the default changes behaviour and must be reported");
-		assertFalse(r.dispatchShifted().isEmpty(), "the interface default is a real implementation, not a missing one");
+		assertFalse(r.hasReaders(), "the interface default is a real implementation; nothing throws");
+		assertFalse(r.dispatchShifted().isEmpty(), "the fallback must still be reported");
 		assertTrue(r.abstractMissing().isEmpty(), "a default body means no AbstractMethodError");
 	}
 
@@ -393,8 +394,9 @@ class RemovedMemberReadersTest {
 
 		Result r = find(w, removedField("p/A", "x", "I", false));
 		assertTrue(r.hasReaders(), "the reference now lands on a static field, which GETFIELD cannot read");
-		assertTrue(r.retargeted().get(0).detail().contains("IncompatibleClassChangeError"),
-			"the report must name the actual error: " + r.retargeted().get(0).detail());
+		assertFalse(r.incompatibleAccess().isEmpty(), "staticness flip: ICCE");
+		assertTrue(r.incompatibleAccess().get(0).detail().contains("IncompatibleClassChangeError"),
+			"the report must name the actual error: " + r.incompatibleAccess().get(0).detail());
 	}
 
 	/**
@@ -427,11 +429,12 @@ class RemovedMemberReadersTest {
 	}
 
 	/**
-	 * 删静态字段、父类有同名字段：引用不悬空，但<b>静默读到父类的值</b>。
+	 * 删静态字段、父类有同名字段：引用不悬空，落到父类的<b>同静态性</b>字段上——这是合法回退
+	 * （删掉子类的遮蔽字段，本意就是回到父类的那个），旧字节码本来就能正确解析，运行期零异常。
 	 * 实测（`P05Probe` M9b）确认 `GETSTATIC A.s` 会向上解析到 `Super.s`。
 	 */
 	@Test
-	void staticFieldAbsorbedBySuperclassIsRetargeted() throws Exception {
+	void staticFieldAbsorbedBySuperclassIsABenignFallback() throws Exception {
 		Worlds w = worlds(
 			Map.of("p/Super", "package p; public class Super { public static int s = 22; }",
 			       "p/A", "package p; public class A extends Super { public static int s = 11; }",
@@ -439,12 +442,10 @@ class RemovedMemberReadersTest {
 			Map.of("p/A", "package p; public class A extends Super { }"));
 
 		Result r = find(w, removedStaticField("p/A", "s", "I"));
-		assertTrue(r.hasReaders(), "reading the superclass value instead is a silent behaviour change");
+		assertFalse(r.hasReaders(), "same-kind fallback throws nothing and needs no source change");
 		assertTrue(r.hits().isEmpty(), "resolution walks up and finds Super.s, so nothing dangles");
-		assertFalse(r.retargeted().isEmpty(), "the retargeting is the whole hazard here");
-		assertTrue(r.retargeted().get(0).detail().contains("silently"),
-			"both sides are static, so this is a silent read of a different value: "
-			+ r.retargeted().get(0).detail());
+		assertTrue(r.incompatibleAccess().isEmpty(), "both sides are static, so no ICCE");
+		assertFalse(r.retargeted().isEmpty(), "the fallback must still be reported");
 	}
 
 	/**
@@ -461,8 +462,9 @@ class RemovedMemberReadersTest {
 
 		Result r = find(w, removedStaticField("p/A", "s", "I"));
 		assertTrue(r.hasReaders(), "a GETSTATIC landing on an instance field blows up at run time");
-		assertTrue(r.retargeted().get(0).detail().contains("IncompatibleClassChangeError"),
-			"the report must name the actual error: " + r.retargeted().get(0).detail());
+		assertFalse(r.incompatibleAccess().isEmpty(), "staticness flip: ICCE");
+		assertTrue(r.incompatibleAccess().get(0).detail().contains("IncompatibleClassChangeError"),
+			"the report must name the actual error: " + r.incompatibleAccess().get(0).detail());
 	}
 
 	/**

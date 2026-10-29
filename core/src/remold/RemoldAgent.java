@@ -2397,7 +2397,11 @@ public class RemoldAgent {
 		}
 		collectFindings(result.hits(), readersByClass);
 		collectFindings(result.abstractMissing(), readersByClass);
+		collectFindings(result.incompatibleAccess(), readersByClass);
+		// 合法回退只记录、不阻断：删掉子类 Override 方法 / 遮蔽字段后，读者解析到父类实现或
+		// 同静态性的父类字段。旧字节码本来就能正确解析（全量重编也一样），运行期零异常。
 		collectFindings(result.dispatchShifted(), shiftedByClass);
+		collectFindings(result.retargeted(), shiftedByClass);
 
 		for (Map.Entry<String, RemovedMemberScan> e : out.entrySet()) {
 			String className = e.getKey();
@@ -2623,9 +2627,23 @@ public class RemoldAgent {
 
 			if (d.action() == LayoutAction.WAIVE_NO_READERS) {
 				LAYOUT_GATE_WAIVED.incrementAndGet();
-				warn("[LAYOUT-WAIVE] " + className + ": field(s) removed ("
-				     + d.layout().detail() + ") and no out-of-batch reader resolves to them any more;"
-				     + " redefining. Surviving instances lose the removed slot, which nothing reads."
+				RemovedMemberScan memberScan =
+					readersByClass.getOrDefault(className, RemovedMemberScan.NOT_SCANNED);
+				StringBuilder note = new StringBuilder();
+				if (!memberScan.dispatchShifted().isEmpty()) {
+					note.append(" Fallback(s): ").append(memberScan.dispatchShifted().size())
+					    .append(" reference(s) now resolve to a supertype implementation or a")
+					    .append(" same-kind field — that is what removing the override/shadow meant.");
+				}
+				if (memberScan.hasConstantFields()) {
+					note.append(" Compile-time constant(s) removed: ").append(memberScan.constantFields())
+					    .append(" — readers that inlined the value keep it and never touch the field;")
+					    .append(" recompile them to pick up the new value.");
+				}
+				warn("[LAYOUT-WAIVE] " + className + ": member(s) removed ("
+				     + (d.layout() == null ? "?" : d.layout().detail()) + ") and no out-of-batch reader"
+				     + " still needs them; redefining. Surviving instances lose the removed slot, which"
+				     + " nothing reads." + note
 				     + " Scope note: only project classes were scanned — a reader inside a third-party"
 				     + " jar is outside this check.");
 				continue;
@@ -2730,9 +2748,16 @@ public class RemoldAgent {
 			                             removedStaticFields, constantFields);
 		}
 
-		/** 是否存在落地后会出问题的引用。 */
+		/**
+		 * 是否存在<b>会导致运行期出错</b>的引用：悬空（{@code NoSuchFieldError} /
+		 * {@code NoSuchMethodError}）、抽象方法缺失（{@code AbstractMethodError}）、
+		 * 静态性翻转（{@code IncompatibleClassChangeError}）。
+		 *
+		 * <p>{@link #dispatchShifted()} 与 {@link #constantFields()} <b>不算</b>——前者是合法回退，
+		 * 后者是编译期内联，都不抛异常、也不需要读者改代码。</p>
+		 */
 		public boolean hasFindings() {
-			return !readers.isEmpty() || !dispatchShifted.isEmpty();
+			return !readers.isEmpty();
 		}
 
 		/** 是否有<b>编译期常量</b>被删——这类读者在常量池里没有 Fieldref，扫描看不到。 */
@@ -2844,15 +2869,11 @@ public class RemoldAgent {
 		}
 		LayoutGate.Result res = LayoutGate.checkChangedFields(changedFields);
 
-		// 编译期常量（{@code ConstantValue}，JLS §13.4.9）：javac 把基本类型与 String 常量直接内联进
-		// 读者的 {@code ldc} / {@code bipush}，读者常量池里<b>根本没有 Fieldref</b>。所以"扫描不到读者"
-		// 在这里不是安全证明，而是<b>没有信号</b>——批次撕裂下旧读者会带着内联的旧值继续跑，静默且
-		// 不可观测。实测见 docs/initfix/07-p05-probe-results.md §16.1。因此保持强拒绝。
-		if (scan.hasConstantFields() && !LayoutGate.MODE_WARN.equals(mode)) {
-			return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
-				"compile-time constant(s) removed (" + String.join(", ", scan.constantFields()) + ")"
-				+ " — javac inlines these into readers, so no Fieldref exists for the scan to find");
-		}
+		// 编译期常量（{@code ConstantValue}，JLS §13.4.9）<b>不阻断</b>：javac 把值内联进读者的
+		// {@code ldc} / {@code bipush}，那些读者在运行期<b>根本不解析这个字段</b>，删掉它零异常；
+		// 而未内联的读者常量池里仍有 {@code Fieldref}，会被 hits 正常抓到。
+		// "内联"既不是错误，也不需要读者改代码——它本来就是 Java 常量的既有语义（改常量值同样
+		// 要全量重编才生效）。调用方把 constantFields 打进日志即可，见 §16.1 的修订说明。
 
 		// 方法删除不经过 LayoutGate（{@code changedFields} 只描述字段），必须单独判，而且要放在
 		// compatible 早退<b>之前</b>——本轮完全可能只删了方法、字段一个都没动。

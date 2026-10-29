@@ -232,19 +232,17 @@ class LayoutGateWiringTest {
 	}
 
 	/**
-	 * 编译期常量（{@code ConstantValue}）：javac 把值内联进读者的 {@code ldc}/{@code bipush}，
-	 * 读者常量池里<b>没有 Fieldref</b>。所以"扫描不到读者"不是安全证明，而是没有信号——
-	 * 必须保持强拒绝，哪怕读者集合是空的。
+	 * 编译期常量（{@code ConstantValue}）删除<b>放行</b>：已内联的读者运行期根本不解析这个字段
+	 * （零异常），未内联的读者常量池里仍有 {@code Fieldref}，会被读者判据正常抓到。
+	 * 内联是 Java 常量的既有语义，不是热更引入的风险。
 	 */
 	@Test
-	void constantFieldRemovalIsRejectedEvenWithNoReaders() {
+	void constantFieldRemovalIsAllowed() {
 		LayoutDecision d = decideWithReaders(constantField(), noConstant(), Liveness.LIVE,
 			new RemoldAgent.RemovedMemberScan(true, List.of(), List.of(), false, true, List.of("C")));
-		assertEquals(LayoutAction.REJECT, d.action(),
-			"an empty reader set proves nothing when readers inline the value at compile time");
-		assertNotNull(d.reason());
-		assertTrue(d.reason().contains("C"), "reason should name the constant: " + d.reason());
-		assertTrue(d.reason().contains("inline"), "reason should explain why the scan is blind: " + d.reason());
+		assertEquals(LayoutAction.WAIVE_NO_READERS, d.action(),
+			"readers that inlined the value never touch the field; the rest have a Fieldref");
+		assertTrue(d.dropped().isEmpty());
 	}
 
 	/**
@@ -285,15 +283,18 @@ class LayoutGateWiringTest {
 		assertTrue(d.reason().contains("method"), "reason should say the removal was of methods: " + d.reason());
 	}
 
-	/** 分派静默转移（祖先实现接住了调用）同样拒绝：不抛异常，但行为已经变了。 */
+	/**
+	 * 分派回退（祖先实现接住了调用）<b>放行</b>：这是删掉 Override 的本意——零异常，读者源码不用改，
+	 * 全量重编后字节码也仍然能正确解析。只记录不阻断。
+	 */
 	@Test
-	void removedMethodWithDispatchShiftIsRejected() {
+	void removedMethodWithDispatchFallbackIsAllowed() {
 		LayoutDecision d = decideWithReaders(withMethod(), withoutMethod(), Liveness.LIVE,
 		                                     methodScan(true, List.of(), List.of("lg.Reader")));
 
-		assertEquals(LayoutAction.REJECT, d.action(),
-			"a silent dispatch shift changes behaviour without throwing, so it cannot be allowed");
-		assertTrue(d.reason().contains("dispatch"), "reason should name the dispatch shift: " + d.reason());
+		assertEquals(LayoutAction.PASS, d.action(),
+			"falling back to a superclass implementation is legal: no exception, no source change");
+		assertTrue(d.dropped().isEmpty(), "nothing may be dropped for a benign fallback");
 	}
 
 	/** 证明"批次外无读者"之后放行——字段侧 compatible，所以整体 PASS。 */

@@ -142,30 +142,36 @@ public final class RemovedMemberReaders {
 	 * @param dispatchShifted 方法分派目标从被删实现转到了祖先实现
 	 */
 	public record Result(List<Hit> hits, List<String> inconclusive, List<Hit> retargeted,
-	                     List<Hit> abstractMissing, List<Hit> dispatchShifted) {
+	                     List<Hit> abstractMissing, List<Hit> dispatchShifted,
+	                     List<Hit> incompatibleAccess) {
 		public Result {
 			hits = List.copyOf(hits);
 			inconclusive = List.copyOf(inconclusive);
 			retargeted = List.copyOf(retargeted);
 			abstractMissing = List.copyOf(abstractMissing);
 			dispatchShifted = List.copyOf(dispatchShifted);
+			incompatibleAccess = List.copyOf(incompatibleAccess);
 		}
 
 		/** 只有悬空与改指向时的便捷构造。 */
 		public Result(List<Hit> hits, List<String> inconclusive, List<Hit> retargeted) {
-			this(hits, inconclusive, retargeted, List.of(), List.of());
+			this(hits, inconclusive, retargeted, List.of(), List.of(), List.of());
 		}
 
 		/**
-		 * 是否存在会让热更落地后出问题的引用。
+		 * 是否存在<b>会让运行期出错</b>的引用。
 		 *
-		 * <p>包含 {@code retargeted}：字段改指向（接口字段截胡、父类同名字段接住）<b>不抛错</b>，
-		 * 但读到的是另一个值——与方法的分派转移是同一类问题，同样不能放行。实测见
-		 * {@code docs/initfix/07-p05-probe-results.md} §16。</p>
+		 * <p>只算三类会抛错的：{@code hits}（{@code NoSuchFieldError} / {@code NoSuchMethodError}）、
+		 * {@code abstractMissing}（{@code AbstractMethodError}）、{@code incompatibleAccess}
+		 * （静态/实例翻转，{@code IncompatibleClassChangeError}）。</p>
+		 *
+		 * <p><b>不算</b> {@code dispatchShifted} 与 {@code retargeted}：它们是<b>合法回退</b>——
+		 * 删掉子类 Override 方法 / 遮蔽字段后，读者解析到父类实现或同静态性的父类字段。
+		 * 旧字节码本来就能正确解析，即使全量重编、零批次撕裂，读者字节码也不会变、运行期零异常。
+		 * 把它们算作读者会让"只要有人调过父类方法，子类就永远删不掉任何 Override"。</p>
 		 */
 		public boolean hasReaders() {
-			return !hits.isEmpty() || !abstractMissing.isEmpty()
-			    || !dispatchShifted.isEmpty() || !retargeted.isEmpty();
+			return !hits.isEmpty() || !abstractMissing.isEmpty() || !incompatibleAccess.isEmpty();
 		}
 	}
 
@@ -593,6 +599,7 @@ public final class RemovedMemberReaders {
 		List<Hit> retargeted = new ArrayList<>();
 		List<Hit> abstractMissing = new ArrayList<>();
 		List<Hit> dispatchShifted = new ArrayList<>();
+		List<Hit> incompatibleAccess = new ArrayList<>();
 
 		// 后代集合按被删成员缓存：跨分支查找要遍历它，不能对每条引用重扫整个类型世界。
 		Map<String, Set<String>> descendantsByOwner = new LinkedHashMap<>();
@@ -650,8 +657,15 @@ public final class RemovedMemberReaders {
 						case UNKNOWN   -> inconclusive.add(where + " (post)");
 						case FOUND     -> {
 							if (!after.declaring().equals(m.owner())) {
-								retargeted.add(new Hit(m, reader, ref.owner(), ref.kind(),
-									describeFieldRetarget(postWorld, after.declaring(), m)));
+								Hit hit = new Hit(m, reader, ref.owner(), ref.kind(),
+									describeFieldRetarget(postWorld, after.declaring(), m));
+								// 静态性翻转会抛 ICCE，是真错误；同静态性只是"回退到父类的同名字段"，
+								// 旧字节码本来就能正确解析（全量重编也一样），属于合法回退。
+								if (isAccessKindMismatch(postWorld, after.declaring(), m)) {
+									incompatibleAccess.add(hit);
+								} else {
+									retargeted.add(hit);
+								}
 							}
 						}
 					}
@@ -659,7 +673,7 @@ public final class RemovedMemberReaders {
 			}
 		}
 		return new Result(hits, new ArrayList<>(inconclusive), retargeted,
-		                  abstractMissing, dispatchShifted);
+		                  abstractMissing, dispatchShifted, incompatibleAccess);
 	}
 
 	/**
@@ -752,19 +766,30 @@ public final class RemovedMemberReaders {
 	 * 落到另一个静态字段（或接口常量）上则是<b>静默</b>读到另一个值——两者都必须拒绝，
 	 * 但报告给用户的原因不同。
 	 */
+	/**
+	 * 目标字段的静态性是否与被删字段<b>相反</b>。
+	 *
+	 * <p>引用的访问方式必然与被删字段一致（否则改动前就编译不过），所以用 {@code m.isStatic()}
+	 * 代表访问方式。两者不匹配时 JVM 抛 {@code IncompatibleClassChangeError}——
+	 * {@code linkResolver.cpp} 里就是 {@code if (is_static != fd.is_static())}，两个方向都查。</p>
+	 */
+	private static boolean isAccessKindMismatch(Map<String, TypeInfo> world, String declaring,
+	                                            RemovedMember m) {
+		TypeInfo t = world.get(declaring);
+		boolean targetIsStatic = t != null && t.staticFields().contains(m.name() + ":" + m.desc());
+		return targetIsStatic != m.isStatic();
+	}
+
 	private static String describeFieldRetarget(Map<String, TypeInfo> world, String declaring,
 	                                            RemovedMember m) {
 		String target = dotted(declaring) + "." + m.name();
-		TypeInfo t = world.get(declaring);
-		boolean targetIsStatic = t != null && t.staticFields().contains(m.name() + ":" + m.desc());
-		// 引用的访问方式必须与被删字段的静态性一致（否则改动前就编译不过），所以用 m.isStatic()
-		// 代表访问方式。两者不匹配时 JVM 抛 ICCE —— linkResolver.cpp 里就是
-		// `if (is_static != fd.is_static()) ... "Expected %s field %s.%s"`，两个方向都查。
-		if (targetIsStatic != m.isStatic()) {
+		if (isAccessKindMismatch(world, declaring, m)) {
+			TypeInfo t = world.get(declaring);
+			boolean targetIsStatic = t != null && t.staticFields().contains(m.name() + ":" + m.desc());
 			return "now resolves to " + target + (targetIsStatic ? " (static)" : " (INSTANCE)")
 			     + " — IncompatibleClassChangeError";
 		}
-		return "now resolves to " + target + " — silently reads a different field";
+		return "now resolves to " + target + " — falls back to a same-kind field in a supertype";
 	}
 
 	private static String dotted(String internalName) {

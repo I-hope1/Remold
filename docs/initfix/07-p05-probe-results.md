@@ -805,14 +805,16 @@ selection 与解析的另一个差别是 **maximally-specific**：接口层级�
 
 ### 15.6 判定力
 
-`RemovedMemberReadersTest` 新增 6 例、`LayoutGateWiringTest` 新增 6 例，三处变异检查各自只打红对应用例：
+`RemovedMemberReadersTest` 新增 6 例、`LayoutGateWiringTest` 新增 6 例。变异检查各自只打红
+对应用例（§16.4 调整过"回退算不算读者"的口径之后，这里的期望值也随之更新）：
 
 | 注入的破坏 | 变红的用例 |
 |:--|:--|
-| `participatesInVirtualDispatch()` 恒 false（退化为只有向上解析） | `overriddenMethodRemoval…` / `soleInterfaceImplementation…` / `fallingBackToInterfaceDefault…` |
+| `participatesInVirtualDispatch()` 恒 false（退化为只有向上解析） | `overriddenMethodRemovalFallsBackToSuperclass` / `soleInterfaceImplementation…` / `fallingBackToInterfaceDefaultIsNotBlocking` |
 | 去掉 maximally-specific 筛选 | `subInterfaceRedeclaringDefaultAsAbstract…` |
-| `hasReaders()` 不计分派转移 | `overriddenMethodRemoval…` / `fallingBackToInterfaceDefault…` |
-| 去掉 `decideLayout` 的方法分支 | `removedMethodWithOutOfBatchReader…` / `…DispatchShift…` / `unscannedMethodRemoval…` |
+| `hasReaders()` 把 `dispatchShifted` 算回去（防卫过当） | `overriddenMethodRemovalFallsBackToSuperclass` / `fallingBackToInterfaceDefaultIsNotBlocking` |
+| `isAccessKindMismatch` 恒 false（不区分 ICCE） | `interfaceFieldHijackIsIncompatibleAccess` / 两条 `…LandingOn…ReportsIncompatibleChange` |
+| 去掉 `decideLayout` 的方法分支 | `removedMethodWithOutOfBatchReader…` / `unscannedMethodRemoval…` |
 
 ### 15.7 未覆盖
 
@@ -857,8 +859,12 @@ Holder.plain   (static int)                    ->  getstatic  Fieldref
 批次撕裂下，陈旧读者会带着内联的旧值继续跑，热更"成功"、日志干净、行为已经变了，而且
 **永远不会有异常**提醒你。
 
-判据因此**保持强拒绝**：`RemovedMemberScan.hasConstantFields()` 非空就直接 `REJECT`，
-不走"无读者就放行"。`RemovedMemberReadersTest.compileTimeConstantsLeaveNoFieldrefInReaders`
+**但这不等于必须强拒。** 两个方向都不抛异常：已内联的读者运行期<b>根本不解析这个字段</b>；
+未内联的读者常量池里仍有 `Fieldref`，会被 `hits` 正常抓到。而且"内联"本来就是 Java 常量的
+既有语义——改常量值同样要全量重编才生效，这不是热更引入的风险。
+
+所以门禁对常量字段<b>放行</b>，只把 `constantFields` 打进日志，提示"已内联的读者需要重编
+才能看到新值"。`RemovedMemberReadersTest.compileTimeConstantsLeaveNoFieldrefInReaders`
 把这条编译期事实固化成了断言（含"引用类型与普通 static 仍有 Fieldref"的对照）。
 
 ### 16.2 三种失败形态（实测，JBR 21.0.9 + DCEVM）
@@ -876,9 +882,10 @@ M9d / M9e 是同一个检查的两面（`is_static != fd.is_static()`），凑�
 "接口字段"不是特例——它必然是 `public static final`，走的是同一条 ICCE，只是经由
 "接口先于父类"的字段搜索路径命中。
 
-M9b/M9c 是"不抛错的失败"，与方法的分派转移（§15）同类。实例字段的接口截胡不属于这一类：
-接口字段都是 `static final`，`GETFIELD` 落到它上面是 `ICCE`（§16.7），虽然也是"读到别处"，
-但至少是响亮的。
+M9b / M9c 是**合法回退**（同静态性）：删掉子类的遮蔽字段，本意就是回到父类/父接口的那个，
+零异常、读者源码不用改，因此放行（§16.4）。M9d / M9e / M9f 是**静态性翻转**，必抛 ICCE，
+必须拦。所以"接口字段截胡"要看方向：删**静态**字段落到接口常量上是回退（M9c，放行）；
+删**实例**字段落到接口常量上是 ICCE（`interfaceFieldHijackIsIncompatibleAccess`，拦截）。
 M9d 是新的一种：解析成功，但解析到的东西**静态性不对**。
 
 ### 16.3 判据：静态字段并入读者判据，删除不再有 liveness 兜底
@@ -890,18 +897,30 @@ M9d 是新的一种：解析成功，但解析到的东西**静态性不对**。
   无实例就放行），而风险 12 的描述其实早已指出这个洞——补上后三条路径口径一致。
 - 编译期常量单独拦（§16.1）。
 
-### 16.4 一处行为变更：`retargeted` 现在计入 `hasReaders()`
+### 16.4 只拦"会抛错"的：合法回退不算读者
 
-此前字段的"改指向"只记录、不阻止落地，理由是它不抛 `LinkageError`。但 M9b/M9c 说明它同样
-是**静默读到另一个值**——与方法的分派转移没有本质区别，而后者已经计入。两者统一：
+初版把 `dispatchShifted` 与 `retargeted` 都算进 `hasReaders()`，理由是"静默读到别的值也是行为
+变化"。那是**防卫过当**——它把两类完全不同的东西混在一起：
+
+- **真错误**：`hits`（`NoSuchFieldError` / `NoSuchMethodError`）、`abstractMissing`
+  （`AbstractMethodError`）、静态性翻转（`IncompatibleClassChangeError`）。这些即使全量重编、
+  零批次撕裂也会炸，因为字节码本身就不自洽。
+- **合法回退**：删掉子类 Override 方法 / 遮蔽字段后，读者解析到父类实现或**同静态性**的父类
+  字段。旧字节码本来就能正确解析，全量重编后也仍然对得上，运行期**零异常**，读者源码不用改。
+  这正是开发者删除的本意。
+
+把后者算作读者会导致"只要工程里有人调过父类方法（甚至 `Object.toString()`），子类就永远删不掉
+任何 Override"。
+
+现在的划分：
 
 ```java
-hasReaders() = !hits.isEmpty() || !abstractMissing.isEmpty()
-            || !dispatchShifted.isEmpty() || !retargeted.isEmpty();
+hasReaders() = !hits.isEmpty() || !abstractMissing.isEmpty() || !incompatibleAccess.isEmpty();
 ```
 
-这会让原本放行的"接口字段截胡"场景变成拒绝。`interfaceFieldHijackIsReportedAsRetargeted`
-用例的断言随之从 `assertFalse(hasReaders())` 改成 `assertTrue(...)`，并在注释里写明为什么改。
+`retargeted` / `dispatchShifted` 仍然上报，只是不阻断；接线层把它们打进 `[LAYOUT-WAIVE]` 的
+日志（"Fallback(s): N reference(s) now resolve to a supertype implementation or a same-kind
+field"）。静态性翻转被单独拆成 `incompatibleAccess`，因为它是真 ICCE，必须继续拦。
 
 ### 16.5 成本
 

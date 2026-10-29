@@ -69,16 +69,22 @@ public final class RemovedMemberReaders {
 
 	/** 一个被删除的成员。{@code owner} / {@code name} / {@code desc} 均为字节码形态（owner 用内部名）。 */
 	public record RemovedMember(String owner, String name, String desc,
-	                            boolean isField, boolean isPrivate, boolean isStatic) {
+	                            boolean isField, boolean isPrivate, boolean isStatic,
+	                            boolean hasConstantValue) {
 		public RemovedMember {
 			Objects.requireNonNull(owner, "owner");
 			Objects.requireNonNull(name, "name");
 			Objects.requireNonNull(desc, "desc");
 		}
 
-		/** 只关心可见性时的便捷构造（{@code isStatic} 按 false 处理）。 */
+		/** 只关心可见性时的便捷构造（{@code isStatic} / {@code hasConstantValue} 按 false 处理）。 */
 		public RemovedMember(String owner, String name, String desc, boolean isField, boolean isPrivate) {
-			this(owner, name, desc, isField, isPrivate, false);
+			this(owner, name, desc, isField, isPrivate, false, false);
+		}
+
+		public RemovedMember(String owner, String name, String desc,
+		                     boolean isField, boolean isPrivate, boolean isStatic) {
+			this(owner, name, desc, isField, isPrivate, isStatic, false);
 		}
 
 		/** 调试用的一行表示。 */
@@ -135,7 +141,7 @@ public final class RemovedMemberReaders {
 	 * @param abstractMissing 具体类失去接口方法的唯一实现
 	 * @param dispatchShifted 方法分派目标从被删实现转到了祖先实现
 	 */
-	public record Result(List<Hit> hits, List<String> inconclusive, List<String> retargeted,
+	public record Result(List<Hit> hits, List<String> inconclusive, List<Hit> retargeted,
 	                     List<Hit> abstractMissing, List<Hit> dispatchShifted) {
 		public Result {
 			hits = List.copyOf(hits);
@@ -146,13 +152,20 @@ public final class RemovedMemberReaders {
 		}
 
 		/** 只有悬空与改指向时的便捷构造。 */
-		public Result(List<Hit> hits, List<String> inconclusive, List<String> retargeted) {
+		public Result(List<Hit> hits, List<String> inconclusive, List<Hit> retargeted) {
 			this(hits, inconclusive, retargeted, List.of(), List.of());
 		}
 
-		/** 是否存在会让热更落地后出问题的引用（悬空 / 抽象方法缺失 / 分派转移）。 */
+		/**
+		 * 是否存在会让热更落地后出问题的引用。
+		 *
+		 * <p>包含 {@code retargeted}：字段改指向（接口字段截胡、父类同名字段接住）<b>不抛错</b>，
+		 * 但读到的是另一个值——与方法的分派转移是同一类问题，同样不能放行。实测见
+		 * {@code docs/initfix/07-p05-probe-results.md} §16。</p>
+		 */
 		public boolean hasReaders() {
-			return !hits.isEmpty() || !abstractMissing.isEmpty() || !dispatchShifted.isEmpty();
+			return !hits.isEmpty() || !abstractMissing.isEmpty()
+			    || !dispatchShifted.isEmpty() || !retargeted.isEmpty();
 		}
 	}
 
@@ -166,17 +179,20 @@ public final class RemovedMemberReaders {
 	 * @param isInterface     该类型是接口（决定方法选择走类链还是接口层级）
 	 */
 	public record TypeInfo(String superName, List<String> interfaces, Set<String> fields,
-	                       Set<String> methods, Set<String> abstractMethods, boolean isInterface) {
+	                       Set<String> methods, Set<String> abstractMethods, Set<String> staticFields,
+	                       Set<String> staticMethods, boolean isInterface) {
 		public TypeInfo {
 			interfaces = interfaces == null ? List.of() : List.copyOf(interfaces);
 			fields = fields == null ? Set.of() : Set.copyOf(fields);
 			methods = methods == null ? Set.of() : Set.copyOf(methods);
 			abstractMethods = abstractMethods == null ? Set.of() : Set.copyOf(abstractMethods);
+			staticFields = staticFields == null ? Set.of() : Set.copyOf(staticFields);
+			staticMethods = staticMethods == null ? Set.of() : Set.copyOf(staticMethods);
 		}
 
-		/** 不关心抽象性与接口标志时的便捷构造。 */
+		/** 不关心抽象性、静态性与接口标志时的便捷构造。 */
 		public TypeInfo(String superName, List<String> interfaces, Set<String> fields, Set<String> methods) {
-			this(superName, interfaces, fields, methods, Set.of(), false);
+			this(superName, interfaces, fields, methods, Set.of(), Set.of(), Set.of(), false);
 		}
 	}
 
@@ -222,20 +238,27 @@ public final class RemovedMemberReaders {
 		new ClassReader(classBytes)
 		 .accept(cn, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
 		Set<String> fields = new LinkedHashSet<>();
+		Set<String> staticFields = new LinkedHashSet<>();
 		if (cn.fields != null) {
-			for (FieldNode f : cn.fields) fields.add(f.name + ":" + f.desc);
+			for (FieldNode f : cn.fields) {
+				String key = f.name + ":" + f.desc;
+				fields.add(key);
+				if ((f.access & Opcodes.ACC_STATIC) != 0) staticFields.add(key);
+			}
 		}
 		Set<String> methods = new LinkedHashSet<>();
 		Set<String> abstractMethods = new LinkedHashSet<>();
+		Set<String> staticMethods = new LinkedHashSet<>();
 		if (cn.methods != null) {
 			for (MethodNode m : cn.methods) {
 				String key = m.name + ":" + m.desc;
 				methods.add(key);
 				if ((m.access & Opcodes.ACC_ABSTRACT) != 0) abstractMethods.add(key);
+				if ((m.access & Opcodes.ACC_STATIC) != 0) staticMethods.add(key);
 			}
 		}
-		return new TypeInfo(cn.superName, cn.interfaces, fields, methods, abstractMethods,
-		                    (cn.access & Opcodes.ACC_INTERFACE) != 0);
+		return new TypeInfo(cn.superName, cn.interfaces, fields, methods, abstractMethods, staticFields,
+		                    staticMethods, (cn.access & Opcodes.ACC_INTERFACE) != 0);
 	}
 
 	/** 由 {@code 内部类名 -> 字节码} 构建解析用的类型世界。 */
@@ -486,7 +509,10 @@ public final class RemovedMemberReaders {
 			if (!seen.add(c)) break;
 			TypeInfo t = typeOf(world, c);
 			if (t == null) return SELECT_UNKNOWN;
-			if (t.methods().contains(key)) {
+			// HotSpot 的 lookup_instance_method_in_klasses 在类链上遇到 static 方法会<b>继续向上</b>
+			// （linkResolver.cpp 的 while 循环），因为 static 方法不参与虚分派。这里保持一致：
+			// 否则会把它误当成"可执行实现"，把 AbstractMethodError 报成静默转移。
+			if (t.methods().contains(key) && !t.staticMethods().contains(key)) {
 				return new Selection(State.FOUND, c, t.abstractMethods().contains(key));
 			}
 			roots.addAll(t.interfaces());
@@ -564,9 +590,12 @@ public final class RemovedMemberReaders {
 	                          Collection<RemovedMember> removed) {
 		List<Hit> hits = new ArrayList<>();
 		Set<String> inconclusive = new LinkedHashSet<>();
-		Set<String> retargeted = new LinkedHashSet<>();
+		List<Hit> retargeted = new ArrayList<>();
 		List<Hit> abstractMissing = new ArrayList<>();
 		List<Hit> dispatchShifted = new ArrayList<>();
+
+		// 后代集合按被删成员缓存：跨分支查找要遍历它，不能对每条引用重扫整个类型世界。
+		Map<String, Set<String>> descendantsByOwner = new LinkedHashMap<>();
 
 		Map<String, List<RemovedMember>> byKey = new LinkedHashMap<>();
 		for (RemovedMember m : removed) {
@@ -600,6 +629,8 @@ public final class RemovedMemberReaders {
 
 					if (m.participatesInVirtualDispatch()) {
 						classifyDispatch(preWorld, postWorld, ref, m, reader, where,
+						                 descendantsByOwner.computeIfAbsent(m.owner(),
+						                     k -> descendantsOf(preWorld, k)),
 						                 hits, inconclusive, abstractMissing, dispatchShifted);
 						continue;
 					}
@@ -619,15 +650,53 @@ public final class RemovedMemberReaders {
 						case UNKNOWN   -> inconclusive.add(where + " (post)");
 						case FOUND     -> {
 							if (!after.declaring().equals(m.owner())) {
-								retargeted.add(where + " -> now " + after.declaring());
+								retargeted.add(new Hit(m, reader, ref.owner(), ref.kind(),
+									describeFieldRetarget(postWorld, after.declaring(), m)));
 							}
 						}
 					}
 				}
 			}
 		}
-		return new Result(hits, new ArrayList<>(inconclusive), new ArrayList<>(retargeted),
+		return new Result(hits, new ArrayList<>(inconclusive), retargeted,
 		                  abstractMissing, dispatchShifted);
+	}
+
+	/**
+	 * 找出"能同时到达 {@code declared} 与 {@code refOwner} 的 receiver 类型"。
+	 *
+	 * <p>最直接的情形是 {@code declared} 自己就是 {@code refOwner} 的子类型——{@code A implements I}，
+	 * receiver 可以是 {@code A}。</p>
+	 *
+	 * <p>但还有一类<b>跨分支继承实现</b>：{@code class A { m() } } 并不实现 {@code I}，
+	 * 是子类 {@code Sub extends A implements I} 靠<b>继承</b> {@code A.m} 满足 {@code I.m}。
+	 * 此时 {@code A} 与 {@code I} 没有直接子类型关系，只判 {@code isSubtype(A, I)} 会漏掉——
+	 * 而 receiver 是 {@code Sub} 时，删掉 {@code A.m} 就让它失去了实现。所以这里要找
+	 * {@code Sub} 这个"桥"：它同时是两者的后代。</p>
+	 *
+	 * <p>只有 {@code refOwner} 是<b>接口</b>时才需要枚举：若它是类，receiver 必须是它的子类型，
+	 * 而 {@code declared} 不是它的子类型，那就说明 {@code declared} 的方法根本到不了这个 receiver。</p>
+	 *
+	 * @return 可用作 selection 起点的类型；{@code null} 表示这条引用与 {@code declared} 无关
+	 */
+	private static String bridgingSubtype(Map<String, TypeInfo> world, String declared,
+	                                      Set<String> descendants, String refOwner) {
+		if (isSubtype(world, declared, refOwner)) return declared;
+		TypeInfo owner = typeOf(world, refOwner);
+		if (owner == null || !owner.isInterface()) return null;
+		for (String c : descendants) {
+			if (isSubtype(world, c, refOwner)) return c;
+		}
+		return null;
+	}
+
+	/** {@code declared} 的全部后代（不含自身）。按被删成员缓存一次，避免对每条引用都重扫世界。 */
+	private static Set<String> descendantsOf(Map<String, TypeInfo> world, String declared) {
+		Set<String> out = new LinkedHashSet<>();
+		for (String c : world.keySet()) {
+			if (!c.equals(declared) && isSubtype(world, c, declared)) out.add(c);
+		}
+		return out;
 	}
 
 	/**
@@ -639,29 +708,30 @@ public final class RemovedMemberReaders {
 	 * 上转型读者写的是 {@code InterfaceMethodref I.m} / {@code Methodref Super.m}，<b>从不出现</b>
 	 * {@code A.m}（实测见 {@code docs/initfix/07-p05-probe-results.md} §15）。</p>
 	 *
-	 * <p>所以这里用 {@link #isSubtype} 判"receiver 可能是 A"，再用 {@link #selectMethod} 在
-	 * {@code A} 上问"现在会执行哪个实现"，三种答案对应三种失败形态。</p>
+	 * <p>所以这里用 {@link #bridgingSubtype} 判"receiver 可能是 A（或 A 的某个后代）"，再用
+	 * {@link #selectMethod} 在<b>那个 receiver</b> 上问"现在会执行哪个实现"，三种答案对应三种失败形态。</p>
 	 */
 	private static void classifyDispatch(Map<String, TypeInfo> preWorld,
 	                                     Map<String, TypeInfo> postWorld,
 	                                     Ref ref, RemovedMember m, String reader, String where,
+	                                     Set<String> descendants,
 	                                     List<Hit> hits, Set<String> inconclusive,
 	                                     List<Hit> abstractMissing, List<Hit> dispatchShifted) {
-		boolean related = isSubtype(preWorld, m.owner(), ref.owner());
-		if (!related) {
-			// 不是"receiver 可能是 A"的形态；退回直接解析，覆盖 owner 恰好写的是 A 的情形
-			// （此时 isSubtype 本就为真，这条只是兜底，避免 isSubtype 因类型缺失而误判为无关）。
+		String receiver = bridgingSubtype(preWorld, m.owner(), descendants, ref.owner());
+		if (receiver == null) {
+			// 不是"receiver 可能是 A 的后代"的形态；退回直接解析，覆盖 owner 恰好写的是 A 的情形。
 			Resolved before = resolveMethod(preWorld, ref.owner(), m.name(), m.desc());
 			if (before.state() == State.UNKNOWN) {
 				inconclusive.add(where + " (pre)");
 				return;
 			}
 			if (before.state() != State.FOUND || !before.declaring().equals(m.owner())) return;
+			receiver = m.owner();
 		}
 
-		// 在 A 上做选择：A 是"最可能受影响的 receiver"——它自己、以及它的子类，都会走这条分派。
+		// 在这个 receiver 上做选择：它自己、以及它的子类，都会走这条分派。
 		// 更远的子类若重写了该方法则不受影响，静态上无法枚举，这里取保守上界。
-		Selection sel = selectMethod(postWorld, m.owner(), m.name(), m.desc());
+		Selection sel = selectMethod(postWorld, receiver, m.name(), m.desc());
 		switch (sel.state()) {
 			case NOT_FOUND -> hits.add(new Hit(m, reader, ref.owner(), ref.kind()));
 			case UNKNOWN   -> inconclusive.add(where + " (post)");
@@ -675,6 +745,26 @@ public final class RemovedMemberReaders {
 				}
 			}
 		}
+	}
+
+	/**
+	 * 字段改指向之后会发生什么。静态访问落到实例字段上是 {@code IncompatibleClassChangeError}，
+	 * 落到另一个静态字段（或接口常量）上则是<b>静默</b>读到另一个值——两者都必须拒绝，
+	 * 但报告给用户的原因不同。
+	 */
+	private static String describeFieldRetarget(Map<String, TypeInfo> world, String declaring,
+	                                            RemovedMember m) {
+		String target = dotted(declaring) + "." + m.name();
+		TypeInfo t = world.get(declaring);
+		boolean targetIsStatic = t != null && t.staticFields().contains(m.name() + ":" + m.desc());
+		// 引用的访问方式必须与被删字段的静态性一致（否则改动前就编译不过），所以用 m.isStatic()
+		// 代表访问方式。两者不匹配时 JVM 抛 ICCE —— linkResolver.cpp 里就是
+		// `if (is_static != fd.is_static()) ... "Expected %s field %s.%s"`，两个方向都查。
+		if (targetIsStatic != m.isStatic()) {
+			return "now resolves to " + target + (targetIsStatic ? " (static)" : " (INSTANCE)")
+			     + " — IncompatibleClassChangeError";
+		}
+		return "now resolves to " + target + " — silently reads a different field";
 	}
 
 	private static String dotted(String internalName) {

@@ -582,7 +582,7 @@ major < 55 才需要上面这套折算。
 - **`access$` 编号规则的完整形态**：只测了"两个 int 字段、删前一个"这一种组合。javac 的编号里还编码了访问种类（读/写/调用），多字段、混合读写、字段与方法混合时编号如何分配**未逐一验证**。
 - **接口方法删除的失败形态**：只观察到 `InterfaceMethodref`(11) 这个 tag 存在（实测 `#7 = InterfaceMethodref I.d:()I`），没有实测"删 default 方法后陈旧调用者抛什么"。机制上应是 `NoSuchMethodError`，未验证。
 - **字段遮蔽的跨层形态**：只测了"子类遮蔽、孙类继承子类的 `x`"这一种。多级遮蔽、同名但不同类型（描述符不同）时 `Fieldref` 的解析结果**未逐一验证**。
-- **接口字段截胡的运行期表现**：只验证了"解析先落到接口字段"（`findStaticGetter` 命中静态 `I.x`），没有实测"`getfield` 访问一个解析到静态字段的引用"到底抛什么（按 JVMS 应是 `IncompatibleClassChangeError`）。
+- **接口字段截胡的运行期表现**：只验证了"解析先落到接口字段"（`findStaticGetter` 命中静态 `I.x`），没有跑过真实的 `getfield` 调用。HotSpot 的 `LinkResolver::resolve_field` 里那句 `if (is_static != fd.is_static())` 会抛 `IncompatibleClassChangeError: Expected non-static field ...`，且这个检查是**双向**的（§16.7）——判据按这个语义实现，但缺一次运行期实测。
 
 ## 14. 读者扫描的成本（`ReaderScanProbe`）
 
@@ -778,6 +778,14 @@ M8a 的第三行是最反直觉的一条。`Methodref A.m` 在 `A` 不再声明 
   因此 owner 可以是 `A` 的**任何祖先**。归属条件变成"`A` 是 `owner` 的子类型"，再用
   **method selection** 在 `A` 上问"现在会执行哪个实现"。
 
+**跨分支继承实现**是归属判定里最容易漏的一类：`class A { m() }` 自己**不**实现 `I`，是子类
+`Sub extends A implements I` 靠**继承** `A.m` 满足 `I.m`。此时 `A` 与 `I` 没有直接子类型关系，
+只判 `isSubtype(A, I)` 会漏掉——而 receiver 是 `Sub` 时，删掉 `A.m` 就让它失去了实现。
+判据要额外找那个"桥"：同时是 `A` 与 `I` 后代的类型。只有 `refOwner` 是**接口**时才需要枚举
+（若它是类，receiver 必须是它的子类型，而 `A` 不是，说明这条引用到不了 `A` 的方法）。
+测试 `crossBranchInheritanceStillReachesTheDeletedImplementation` 守这一条——它先断言
+`isSubtype(A, I) == false`，再断言删除仍被报告。
+
 selection 与解析的另一个差别是 **maximally-specific**：接口层级里，更具体的声明会覆盖父接口的。
 `interface Sub extends Base { int d(); }` 把 `Base` 的 `default d()` 重新声明为 abstract 之后，
 `Base` 的 default **不再可用**——删掉类里的实现就是 `AbstractMethodError`，不是"回退到 default"。
@@ -808,9 +816,131 @@ selection 与解析的另一个差别是 **maximally-specific**：接口层级�
 
 ### 15.7 未覆盖
 
-- **`invokespecial` 的 `super.m()`**：`A` 里 `super.m()` 编译成 `Methodref Super.m` 且是 `invokespecial`，
-  不做分派。本类按 `kind` 无法区分 `invokevirtual` 与 `invokespecial`（常量池只记 tag 10），
-  因此会把这类引用当成"可能分派"，方向偏保守（多报不会漏报）。
+- **`invokespecial` 的 `super.m()`**：`A` 里 `super.m()` 编译成 `Methodref Super.m` 且是 `invokespecial`。
+  它不是**虚**分派，但也不是纯静态——HotSpot 的 `runtime_resolve_special_method` 会从
+  `current_klass->super()` 重新做一次 `lookup_instance_method_in_klasses`（old-style super 查找），
+  找不到就抛 `AbstractMethodError`。本类按 `kind` 无法区分 `invokevirtual` 与 `invokespecial`
+  （常量池都记 tag 10），因此把它当成"可能分派"处理，方向偏保守（多报不会漏报）。
 - **接口 default 方法删除后由类实现接住**：机制上应属分派转移，未单独实测。
 - **多级遮蔽与重载**：只测了单层重写；重载（同名字不同描述符）由 `name:desc` 键天然隔离，未专门验证。
 - **`AbstractMethodError` 在标准 HotSpot 上的形态**：只在 JBR 21 + DCEVM 上测过。
+- **跨分支的桥接类型必须在扫描范围内**：`bridgingSubtype` 只在传给它的类型世界里找那个"同时是
+  `A` 与 `I` 后代"的类。若 `Sub` 尚未加载且不在工程构建输出里，就找不到桥，这条会被漏判。
+  这属于 §13.6.4 的扫描范围缺口，不是判据本身的缺陷。
+
+## 16. 静态字段删除与编译期常量（`P05Probe` M9）
+
+§13 只测了实例字段。静态字段的解析路径相同（JVMS 5.4.3.2 沿 owner 向上），但失败形态多一种：
+落到**实例**字段上是 `IncompatibleClassChangeError`，而不是悬空或静默转移。更麻烦的是有一类
+读者<b>根本不产生引用</b>，扫描完全看不到。
+
+### 16.1 编译期常量：读者常量池里没有 Fieldref
+
+`javac` 把 `static final` 的基本类型与 `String` 常量（有 `ConstantValue` 属性，JLS §13.4.9）
+**直接内联**进读者的指令：
+
+```
+Holder.CONST (static final int = 42)   ->  bipush 42        （无 Fieldref）
+Holder.TEXT  (static final String)     ->  ldc "hi"         （无 Fieldref）
+Holder.LONG  (static final long = 7L)  ->  ldc2_w 7L        （无 Fieldref）
+Holder.FLAG  (static final boolean)    ->  iconst_1         （无 Fieldref）
+
+Holder.RUNTIME (static final int = compute())  ->  getstatic  Fieldref
+Holder.REF     (static final Object)           ->  getstatic  Fieldref
+Holder.plain   (static int)                    ->  getstatic  Fieldref
+```
+
+`Holder.class` 里只有前四个带 `ConstantValue` 属性，后三个没有。所以**边界不在 `final`，在
+`ConstantValue`**——运行期初始化的 `static final` 与引用类型都照常走 `Fieldref`。
+
+**这意味着"读者为空"这个结论对编译期常量是空洞的**：不是证明安全，而是<b>没有信号</b>。
+批次撕裂下，陈旧读者会带着内联的旧值继续跑，热更"成功"、日志干净、行为已经变了，而且
+**永远不会有异常**提醒你。
+
+判据因此**保持强拒绝**：`RemovedMemberScan.hasConstantFields()` 非空就直接 `REJECT`，
+不走"无读者就放行"。`RemovedMemberReadersTest.compileTimeConstantsLeaveNoFieldrefInReaders`
+把这条编译期事实固化成了断言（含"引用类型与普通 static 仍有 Fieldref"的对照）。
+
+### 16.2 三种失败形态（实测，JBR 21.0.9 + DCEVM）
+
+| 场景 | 删除前 | 删除后 |
+|:--|:--|:--|
+| **M9a** 没有别的声明 | `11` | `NoSuchFieldError: Class rem5.A does not have member field 'int s'` |
+| **M9b** 父类有 `static s` | `11` | **`22`**（静默读到父类的值） |
+| **M9c** 父接口有 `s`（接口常量） | `11` | **`33`**（静默转移，接口优先于父类） |
+| **M9d** 父类只有**实例** `s` | `11` | `IncompatibleClassChangeError: Expected static field rem8.A.s` |
+
+M9b/M9c 是"不抛错的失败"，与方法的分派转移（§15）同类。实例字段的接口截胡不属于这一类：
+接口字段都是 `static final`，`GETFIELD` 落到它上面是 `ICCE`（§16.7），虽然也是"读到别处"，
+但至少是响亮的。
+M9d 是新的一种：解析成功，但解析到的东西**静态性不对**。
+
+### 16.3 判据：静态字段并入读者判据，但没有 liveness 兜底
+
+- 静态字段删除与实例字段**共用**"批次外读者为空"：证明无读者就 `WAIVE_NO_READERS`。
+- 但静态值不随实例存在，所以**扫描未完成时不能退回存活实例判据**，只能拒绝
+  （`RemovedMemberScan.removedStaticFields()` 为真且 `scanned == false` → `REJECT`）。
+- 编译期常量单独拦（§16.1）。
+
+### 16.4 一处行为变更：`retargeted` 现在计入 `hasReaders()`
+
+此前字段的"改指向"只记录、不阻止落地，理由是它不抛 `LinkageError`。但 M9b/M9c 说明它同样
+是**静默读到另一个值**——与方法的分派转移没有本质区别，而后者已经计入。两者统一：
+
+```java
+hasReaders() = !hits.isEmpty() || !abstractMissing.isEmpty()
+            || !dispatchShifted.isEmpty() || !retargeted.isEmpty();
+```
+
+这会让原本放行的"接口字段截胡"场景变成拒绝。`interfaceFieldHijackIsReportedAsRetargeted`
+用例的断言随之从 `assertFalse(hasReaders())` 改成 `assertTrue(...)`，并在注释里写明为什么改。
+
+### 16.5 成本
+
+`find()` 因为要枚举后代做跨分支查找（§15.4），从 10.8 ms 涨到 20.5 ms。按被删成员缓存
+后代集合后回落到 **17.4 ms**；`universe()` 10.8 ms。441 个工程类合计约 **28 ms**，
+加"走一遍构建输出"9 ms，整条约 37 ms。仍然只在本轮有成员被删时触发。
+
+### 16.6 未覆盖
+
+- **`static final` 数组常量**：`static final int[] A = {1,2}` 没有 `ConstantValue`（数组不是
+  常量表达式），走 `Fieldref`，但未单独实测。
+- **`ConstantValue` 与 `InitFix` 的交互**：常量字段被删后存活实例没有槽位，这是另一条路径，未测。
+- **枚举常量的 `$VALUES` / `values()`**：编译器生成的合成成员，被 `removedMembers` 的
+  `$remold$` / synthetic 过滤规则覆盖到什么程度未验证。
+- **M9 只测了 `int`**：`long`/引用类型的失败形态未逐一实测（机制上同为 `Fieldref` 解析）。
+
+### 16.7 按 HotSpot `LinkResolver` 核对后修正的三处
+
+拿到 `linkResolver.cpp` 的实现之后回头对判据，发现三处偏差（两处代码、一处文档）：
+
+1. **`IncompatibleClassChangeError` 的条件是双向的**。`resolve_field` 里是
+   `if (is_static != fd.is_static())`，两个方向都抛：`GETSTATIC` 落到实例字段上是
+   `Expected static field`，`GETFIELD` 落到静态字段上是 `Expected non-static field`。
+   原实现只处理了前者（`if (!m.isStatic()) return "静默读"`），把后者误报成"静默读到另一个值"。
+   判据改成比较 `targetIsStatic != m.isStatic()`——引用的访问方式必然与被删字段的静态性一致
+   （否则改动前就编译不过），所以用 `m.isStatic()` 代表访问方式。
+   这条顺带更正了**接口字段截胡**的后果：接口字段都是 `static final`，所以 `Sub/x` 从实例字段
+   改指向接口常量时是 **ICCE**，不是"静默读到 `I.x`"。
+
+2. **方法选择要跳过类链上的 `static` 方法**。`lookup_instance_method_in_klasses` 里有个
+   `while (result != NULL && result->is_static() && ...)` 的循环，遇到 static 会继续向上——
+   因为 static 方法不参与虚分派。原实现的 `selectMethod` 在类链上找到第一个声明就返回，
+   会把 static 方法误当成"可执行实现"，把 `AbstractMethodError` 报成静默转移。
+   `TypeInfo` 因此增加了 `staticMethods`。
+   **注意**：这个形态用 Java 源码造不出来（同一层级里 instance 与 static 同签名非法），
+   所以没有对应用例，属于"与 HotSpot 对齐的防御性修正"。
+
+3. **`AbstractMethodError` 的两条触发路径**。`runtime_resolve_virtual_method` 里
+   `selected_method.is_null()` 与 `selected_method->is_abstract()` 都走
+   `throw_abstract_method_error`，消息格式正是 M8b 实测到的
+   `Receiver class %s does not define or inherit an implementation of the resolved method ...`。
+   判据里的 `NOT_FOUND` 与 `abstractOnly` 正好对应这两条，无需改动。
+
+另外两处**核对后确认一致**、不必改的：
+
+- 字段解析 `find_field` 走 JVMS 5.4.3.2（自身 → 接口 → 父类），与 `resolveField` 一致；
+- 方法解析 `resolve_method` 是"类链（含 default_methods 表）→ 接口（skip_defaults）"，
+  与 `resolveMethod` 一致。default 方法在类加载时由 `defaultMethods.cpp` 预先算好
+  maximally-specific 集合，这解释了为什么"子接口把 default 重新声明为 abstract"会让父接口的
+  default 消失——它不是运行期选择的结果，而是那张表里就没有它。

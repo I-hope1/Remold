@@ -8,6 +8,9 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 - 只处理本次 Redefine **新增声明的字段**（存量实例 + 静态）。
 - 禁止实现：修改已有字段初值、删除字段、修改方法签名、动态修改字段描述符类型。
   - 删除字段：具名类走重定义层，匿名类合成字段走 `LayoutGate.check`（判 `COMPATIBLE`）。两层判据都是"**批次外读者为空**"（批次内扫新字节码、批次外扫当前字节码），已实现并接线（`RemovedMemberReaders` + `decideLayout`），做法见 `docs/initfix/07-p05-probe-results.md` §13.6。不能简化成"有删除就拒"——删 private 字段与正常连带重编的批次都是安全的。有存活实例时若无读者也放行（`WAIVE_NO_READERS`）；扫描未完成则退回存活实例判据，因为那条理由对删除不成立（`docs/status.md` 风险 12）。实测后果见 §13：布局不压缩、废弃槽位不复用，失败形态是批次外读者抛 `NoSuchFieldError`（`LinkageError`），不是读到脏数据。
+    - **静态字段**走同一判据，但**没有 liveness 兜底**：静态值不随实例存在，扫描未完成时只能拒绝。失败形态实测三种（§16.2）：`NoSuchFieldError`、被父类/父接口同名字段**静默接住**、落到父类实例字段上抛 `IncompatibleClassChangeError`。
+    - **编译期常量**（`ConstantValue`，JLS §13.4.9，基本类型与 `String` 的 `static final`）**强拒绝**：javac 把值内联进读者的 `ldc`/`bipush`，读者常量池里**没有 `Fieldref`**——"无读者"不是安全证明，而是没有信号。边界不在 `final` 而在 `ConstantValue`：运行期初始化的 `static final` 与引用类型照常走 `Fieldref`（§16.1）。
+    - 字段的**改指向**（父类/接口同名字段接住）现在计入 `hasReaders()`——它不抛错但读到别的值，与方法的分派转移同类（§16.4）。
   - 删除方法：**与字段不是同一套查找规则**。字段只有向上解析（JVMS 5.4.3.2）；实例方法还有向下分派（JVMS 5.4.6），因此引用 owner 可以是 `A` 的**任何祖先**（`InterfaceMethodref I.m` / `Methodref Super.m`），只按 `declaring == A` 归属会整类漏掉。失败形态有三种：`NoSuchMethodError`（整条链都没有同签名方法）、`AbstractMethodError`（只有接口声明、没有实现）、**静默分派转移**（祖先实现接住——连 `Methodref A.m` 本身都不抛错）。判据与字段共用"批次外读者为空"，但**扫描未完成时只能拒绝**：方法删除没有存活实例判据可以退，它的影响与"当前有没有实例"正交。实测与判据见 `docs/initfix/07-p05-probe-results.md` §15。
 - 唯一例外：字段标 `@RemoldReinit(mode = OVERWRITE)` 时，才允许覆写存量值。
 - Android ART 与 `$extras` 扩展槽属于独立子项目（Engine II），不在此处理。
@@ -141,7 +144,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 - 两阶段编排验证：`./gradlew :tests:twoPhaseProbe -Pp05.jbr=<DCEVM JDK 目录>`，把 `StageASkeleton` / `ConstructorTailInjector` / `InitFix` 串成 `A → redefine → B → C → redefine` 跑一遍（同样不挂 `check`）。改动两阶段相关代码后必须先跑它，再考虑动 `RemoldAgent`。
 - 耗时类探针固定报 **min / median / max** 三个数；结论必须同时对 min 与 median 成立，只对其中一个成立时标注「口径敏感」，不得只报有利的那个。统计量不得在看到数据之后才选。
 - 探针日志默认带 `-Xlog:safepoint`（`uptimenanos` 装饰符）、`-Xlog:gc*`、`-Xlog:jit+compilation=debug`，落在 `build/p05/`。断言里引用日志时间戳时，基准必须取 safepoint 窗口的**开始**（`时间戳 − Total`）——日志行是在 safepoint 结束时打印的；unified logging 有缓冲，日志分析要放在运行结束后做。
-- `test` 的测试数下限由 `tests/build.gradle` 的 `hstestMinTests` 守卫（当前 273，以实际输出为准；`verifyTestCount` 读 XML 断言总数 ≥ 基线且 `skipped == 0`）：删除/禁用/跳过测试会让 `check` 变红，上调基线要有意识地改这一行。
+- `test` 的测试数下限由 `tests/build.gradle` 的 `hstestMinTests` 守卫（当前 281，以实际输出为准；`verifyTestCount` 读 XML 断言总数 ≥ 基线且 `skipped == 0`）：删除/禁用/跳过测试会让 `check` 变红，上调基线要有意识地改这一行。
 - CI：`.github/workflows/ci.yml`（`setup-java` 装 8/11/17/21 + runner JDK 25，`hstest.requireJdks=true`；以及 `test-dcevm` 任务在真实 JBR 21 DCEVM 下执行 `liveDcevmTest`）。首次 Linux 跑，Windows 假设（路径分隔符、GBK）可能暴露，按原因分类再处理。
 - 新增或放宽安全门：必须有负向阻断断言。
 - 修复缺陷：必须有先红后绿的回归断言。

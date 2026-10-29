@@ -118,13 +118,16 @@ class RemovedMemberReadersTest {
 
 	/**
 	 * 接口字段截胡：改动前 {@code Sub.x} 指向 {@code A.x}，改动后接口 {@code I} 多了一个同名字段，
-	 * 解析改落到 {@code I.x}。它不抛 {@code LinkageError}，但读到的东西变了——必须与"读者"分开报。
+	 * 解析改落到 {@code I.x}。它不抛 {@code LinkageError}，但<b>读到的是另一个值</b>。
+	 *
+	 * <p>所以 {@link Result#hasReaders()} 把它算作问题：静默改指向与方法的分派转移是同一类危险
+	 * （热更成功、日志干净、行为已变）。此前它只被记录、不阻止落地，那是个漏洞。</p>
 	 *
 	 * <p>这个夹具只能用两轮编译造出来：v1 里 {@code I} 没有 {@code x}（否则 {@code s.x} 在 javac 阶段
 	 * 就是"引用不明确"），v2 里给 {@code I} 加上。</p>
 	 */
 	@Test
-	void interfaceFieldHijackIsReportedAsRetargetedNotAsReader() throws Exception {
+	void interfaceFieldHijackIsReportedAsRetargeted() throws Exception {
 		Worlds w = worlds(
 			Map.of("p/I", "package p; public interface I { }",
 			       "p/A", "package p; public class A { public int x = 2; }",
@@ -137,11 +140,17 @@ class RemovedMemberReadersTest {
 			"precondition: the fixture must contain Fieldref p/Sub.x:I");
 
 		Result r = find(w, removedField("p/A", "x", "I", false));
-		assertFalse(r.hasReaders(),
-			"field resolution searches superinterfaces before the superclass, so after the change"
-			+ " Sub.x lands on I.x instead of dangling");
+		assertTrue(r.hasReaders(),
+			"a silent retarget must block the redefine: the call still succeeds but reads a"
+			+ " different field, which is the same hazard as a shifted method dispatch");
+		assertTrue(r.hits().isEmpty(),
+			"nothing dangles here — field resolution searches superinterfaces before the superclass,"
+			+ " so Sub.x lands on I.x");
 		assertFalse(r.retargeted().isEmpty(),
-			"but the retargeting must be surfaced — the reference now reads a different field");
+			"the retargeting is what makes it unsafe, and it must be surfaced with a reason");
+		assertTrue(r.retargeted().get(0).detail().contains("IncompatibleClassChangeError"),
+			"interface fields are static, so a GETFIELD landing on one is an ICCE rather than a"
+			+ " silent read: " + r.retargeted().get(0).detail());
 	}
 
 	/**
@@ -328,7 +337,149 @@ class RemovedMemberReadersTest {
 		assertTrue(r.dispatchShifted().isEmpty(), "there is no default left to fall back to");
 	}
 
-	/** 对照组：没人重写的方法删除仍是响亮的 {@code NoSuchMethodError}，走的是原来的解析判据。 */
+	/**
+	 * 编译期常量（{@code ConstantValue}，JLS §13.4.9）的读者常量池里<b>没有 Fieldref</b>。
+	 *
+	 * <p>这是"读者扫描对它完全失明"的直接证据，也是"必须强拒绝"的依据：空的读者集合在这里
+	 * 不是安全证明，而是<b>没有信号</b>。对照组证明边界划在哪——运行期初始化的
+	 * {@code static final} 与普通 {@code static} 都有 Fieldref。</p>
+	 */
+	@Test
+	void compileTimeConstantsLeaveNoFieldrefInReaders() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/Holder", """
+				package p;
+				public class Holder {
+				    public static final int CONST = 42;
+				    public static final String TEXT = "hi";
+				    public static final Object REF = new Object();
+				    public static int plain = 5;
+				}
+				""",
+			       "p/Reader", """
+				package p;
+				public class Reader {
+				    static int c() { return Holder.CONST; }
+				    static String t() { return Holder.TEXT; }
+				    static Object r() { return Holder.REF; }
+				    static int p() { return Holder.plain; }
+				}
+				"""),
+			Map.of());
+
+		byte[] reader = w.post().get("p/Reader");
+		assertFalse(hasRef(reader, "field", "p/Holder", "CONST", "I"),
+			"a compile-time int constant is inlined as bipush — no Fieldref exists to scan for");
+		assertFalse(hasRef(reader, "field", "p/Holder", "TEXT", "Ljava/lang/String;"),
+			"a compile-time String constant is inlined as ldc — no Fieldref exists either");
+		assertTrue(hasRef(reader, "field", "p/Holder", "REF", "Ljava/lang/Object;"),
+			"control: a static final *reference* is not a compile-time constant, it still uses getstatic");
+		assertTrue(hasRef(reader, "field", "p/Holder", "plain", "I"),
+			"control: a plain static field is not inlined either");
+	}
+
+	/**
+	 * 反方向：删的是<b>实例</b>字段，父类同名的是<b>静态</b>字段。{@code GETFIELD} 解析到静态字段上
+	 * 同样是 {@code IncompatibleClassChangeError}——HotSpot 的 `resolve_field` 里那句
+	 * {@code is_static != fd.is_static()} 是<b>双向</b>检查的。
+	 */
+	@Test
+	void instanceFieldLandingOnStaticFieldReportsIncompatibleChange() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/Super", "package p; public class Super { public static int x = 1; }",
+			       "p/A", "package p; public class A extends Super { public int x = 2; }",
+			       "p/Reader", "package p; public class Reader { static int read(A a) { return a.x; } }"),
+			Map.of("p/A", "package p; public class A extends Super { }"));
+
+		Result r = find(w, removedField("p/A", "x", "I", false));
+		assertTrue(r.hasReaders(), "the reference now lands on a static field, which GETFIELD cannot read");
+		assertTrue(r.retargeted().get(0).detail().contains("IncompatibleClassChangeError"),
+			"the report must name the actual error: " + r.retargeted().get(0).detail());
+	}
+
+	/**
+	 * 跨分支继承实现：{@code A} 自己<b>不</b>实现 {@code I}，是子类 {@code Sub extends A implements I}
+	 * 靠<b>继承</b> {@code A.m} 来满足 {@code I.m}。此时 {@code A} 与 {@code I} 没有直接子类型关系，
+	 * 但删掉 {@code A.m} 会让 {@code Sub} 失去实现。
+	 *
+	 * <p>只判 {@code isSubtype(A, refOwner)} 的写法会漏掉这一类——它必须再看
+	 * "有没有 {@code A} 的后代同时是 {@code refOwner} 的子类型"。</p>
+	 */
+	@Test
+	void crossBranchInheritanceStillReachesTheDeletedImplementation() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/I", "package p; public interface I { int m(); }",
+			       "p/A", "package p; public class A { public int m() { return 1; } }",
+			       "p/Sub", "package p; public class Sub extends A implements I { }",
+			       "p/Reader", "package p; public class Reader { static int r(I i) { return i.m(); } }"),
+			Map.of("p/A", "package p; public class A { }"));
+
+		assertTrue(hasRef(w.post().get("p/Reader"), "interfaceMethod", "p/I", "m", "()I"),
+			"precondition: the reader names I.m, and A never mentions I");
+		assertFalse(RemovedMemberReaders.isSubtype(RemovedMemberReaders.universe(w.pre()),
+				"p/A", "p/I"),
+			"precondition: A is not a subtype of I — the direct check cannot see this path");
+
+		Result r = find(w, removedMethod("p/A", "m", "()I"));
+		assertTrue(r.hasReaders(),
+			"Sub implements I.m by inheriting A.m, so deleting A.m leaves Sub without a body");
+		assertFalse(r.abstractMissing().isEmpty(), "the failure mode is AbstractMethodError");
+	}
+
+	/**
+	 * 删静态字段、父类有同名字段：引用不悬空，但<b>静默读到父类的值</b>。
+	 * 实测（`P05Probe` M9b）确认 `GETSTATIC A.s` 会向上解析到 `Super.s`。
+	 */
+	@Test
+	void staticFieldAbsorbedBySuperclassIsRetargeted() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/Super", "package p; public class Super { public static int s = 22; }",
+			       "p/A", "package p; public class A extends Super { public static int s = 11; }",
+			       "p/Reader", "package p; public class Reader { static int read() { return A.s; } }"),
+			Map.of("p/A", "package p; public class A extends Super { }"));
+
+		Result r = find(w, removedStaticField("p/A", "s", "I"));
+		assertTrue(r.hasReaders(), "reading the superclass value instead is a silent behaviour change");
+		assertTrue(r.hits().isEmpty(), "resolution walks up and finds Super.s, so nothing dangles");
+		assertFalse(r.retargeted().isEmpty(), "the retargeting is the whole hazard here");
+		assertTrue(r.retargeted().get(0).detail().contains("silently"),
+			"both sides are static, so this is a silent read of a different value: "
+			+ r.retargeted().get(0).detail());
+	}
+
+	/**
+	 * 删静态字段、父类只有<b>实例</b>字段：`GETSTATIC` 落到实例字段上是
+	 * {@code IncompatibleClassChangeError}（实测 `P05Probe` M9d）。
+	 */
+	@Test
+	void staticFieldLandingOnInstanceFieldReportsIncompatibleChange() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/Super", "package p; public class Super { public int s = 22; }",
+			       "p/A", "package p; public class A extends Super { public static int s = 11; }",
+			       "p/Reader", "package p; public class Reader { static int read() { return A.s; } }"),
+			Map.of("p/A", "package p; public class A extends Super { }"));
+
+		Result r = find(w, removedStaticField("p/A", "s", "I"));
+		assertTrue(r.hasReaders(), "a GETSTATIC landing on an instance field blows up at run time");
+		assertTrue(r.retargeted().get(0).detail().contains("IncompatibleClassChangeError"),
+			"the report must name the actual error: " + r.retargeted().get(0).detail());
+	}
+
+	/**
+	 * 对照组：静态字段删除但没人读 → 干净。没有这条，"报了"可能只是"只要删静态字段就报"。
+	 */
+	@Test
+	void staticFieldRemovalWithNoReaderIsClean() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/A", "package p; public class A { public static int s = 11; }",
+			       "p/Reader", "package p; public class Reader { static int read() { return 1; } }"),
+			Map.of("p/A", "package p; public class A { }"));
+
+		Result r = find(w, removedStaticField("p/A", "s", "I"));
+		assertFalse(r.hasReaders(), "nobody references A.s, so removing it is safe");
+	}
+
+
 	@Test
 	void nonOverriddenMethodRemovalIsStillALinkageError() throws Exception {
 		Worlds w = worlds(
@@ -399,6 +550,10 @@ class RemovedMemberReadersTest {
 
 	private static RemovedMember removedMethod(String owner, String name, String desc) {
 		return new RemovedMember(owner, name, desc, false, false);
+	}
+
+	private static RemovedMember removedStaticField(String owner, String name, String desc) {
+		return new RemovedMember(owner, name, desc, true, false, true, false);
 	}
 
 	private static Result find(Worlds w, RemovedMember member) {

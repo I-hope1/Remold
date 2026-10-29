@@ -37,6 +37,8 @@ class LayoutGateWiringTest {
 	private static byte[] staticField()  { return cls(HOST, "package lg;\npublic class Host { static int s; }\n"); }
 	private static byte[] noStatic()     { return cls(HOST, "package lg;\npublic class Host { }\n"); }
 	private static byte[] withMethod()   { return cls(HOST, "package lg;\npublic class Host { void m() { } }\n"); }
+	private static byte[] constantField(){ return cls(HOST, "package lg;\npublic class Host { public static final int C = 1; }\n"); }
+	private static byte[] noConstant()   { return cls(HOST, "package lg;\npublic class Host { }\n"); }
 	private static byte[] withoutMethod(){ return cls(HOST, "package lg;\npublic class Host { }\n"); }
 
 	/** 批次类名集：宿主 + 两个匿名类 + 一个具名内部类（后者不得被整组带走）+ 无关类。 */
@@ -187,13 +189,51 @@ class LayoutGateWiringTest {
 		assertEquals(LayoutAction.WAIVE, none.action());
 	}
 
-	/** 静态字段不走读者判据：删静态字段即使无读者也保持强拒绝。 */
+	/**
+	 * 静态字段删除与实例字段共用读者判据。实测（`P05Probe` M9）表明它的失败形态同样有
+	 * "静默转移"（父类静态字段 / 接口字段接住）与"响亮的错"（`NoSuchFieldError`、
+	 * `IncompatibleClassChangeError`），所以"无读者"同样是有效的放行依据。
+	 */
 	@Test
-	void staticFieldRemovalIgnoresReaderScan() {
+	void staticFieldRemovalUsesTheSameReaderRule() {
+		LayoutDecision clean = decideWithReaders(staticField(), noStatic(), Liveness.LIVE,
+			new RemoldAgent.RemovedMemberScan(true, List.of(), List.of(), false, true, List.of()));
+		assertEquals(LayoutAction.WAIVE_NO_READERS, clean.action(),
+			"a static field nobody reads after the change is safe regardless of live instances");
+
+		LayoutDecision dirty = decideWithReaders(staticField(), noStatic(), Liveness.LIVE,
+			new RemoldAgent.RemovedMemberScan(true, List.of("lg.Reader"), List.of(), false, true, List.of()));
+		assertEquals(LayoutAction.REJECT, dirty.action(),
+			"a dangling or retargeted static read must still be refused");
+	}
+
+	/**
+	 * 静态字段删除<b>没有</b>存活实例兜底：静态值不随实例存在，扫描未完成时只能拒绝。
+	 */
+	@Test
+	void unscannedStaticFieldRemovalIsRejected() {
 		LayoutDecision d = decideWithReaders(staticField(), noStatic(), Liveness.NONE,
-		                                     new RemoldAgent.RemovedMemberScan(true, List.of(), List.of(), false));
+			new RemoldAgent.RemovedMemberScan(false, List.of(), List.of(), false, true, List.of()));
 		assertEquals(LayoutAction.REJECT, d.action(),
-			"the reader-based rule is scoped to instance fields; static field changes stay rejected");
+			"liveness says nothing about static state, so an incomplete scan cannot be waived");
+		assertNotNull(d.reason());
+		assertTrue(d.reason().contains("static"), "reason should name static state: " + d.reason());
+	}
+
+	/**
+	 * 编译期常量（{@code ConstantValue}）：javac 把值内联进读者的 {@code ldc}/{@code bipush}，
+	 * 读者常量池里<b>没有 Fieldref</b>。所以"扫描不到读者"不是安全证明，而是没有信号——
+	 * 必须保持强拒绝，哪怕读者集合是空的。
+	 */
+	@Test
+	void constantFieldRemovalIsRejectedEvenWithNoReaders() {
+		LayoutDecision d = decideWithReaders(constantField(), noConstant(), Liveness.LIVE,
+			new RemoldAgent.RemovedMemberScan(true, List.of(), List.of(), false, true, List.of("C")));
+		assertEquals(LayoutAction.REJECT, d.action(),
+			"an empty reader set proves nothing when readers inline the value at compile time");
+		assertNotNull(d.reason());
+		assertTrue(d.reason().contains("C"), "reason should name the constant: " + d.reason());
+		assertTrue(d.reason().contains("inline"), "reason should explain why the scan is blind: " + d.reason());
 	}
 
 	/**

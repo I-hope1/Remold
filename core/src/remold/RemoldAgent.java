@@ -2366,7 +2366,12 @@ public class RemoldAgent {
 		// 判据可以退，调用方若把"没扫成"读成"没读者"，删方法就会被静默放行。
 		Map<String, RemovedMemberScan> out = new LinkedHashMap<>();
 		for (Map.Entry<String, List<RemovedMemberReaders.RemovedMember>> e : removedByClass.entrySet()) {
-			out.put(e.getKey(), RemovedMemberScan.unscanned(e.getValue().stream().anyMatch(m -> !m.isField())));
+			List<RemovedMemberReaders.RemovedMember> list = e.getValue();
+			out.put(e.getKey(), RemovedMemberScan.unscanned(
+				list.stream().anyMatch(m -> !m.isField()),
+				list.stream().anyMatch(m -> m.isField() && m.isStatic()),
+				list.stream().filter(RemovedMemberReaders.RemovedMember::hasConstantValue)
+				    .map(RemovedMemberReaders.RemovedMember::name).toList()));
 		}
 
 		RemovedMemberReaders.Result result;
@@ -2396,8 +2401,10 @@ public class RemoldAgent {
 
 		for (Map.Entry<String, RemovedMemberScan> e : out.entrySet()) {
 			String className = e.getKey();
+			RemovedMemberScan before = e.getValue();
 			e.setValue(new RemovedMemberScan(true, readersByClass.get(className),
-			                                 shiftedByClass.get(className), e.getValue().removedMethods()));
+			                                 shiftedByClass.get(className), before.removedMethods(),
+			                                 before.removedStaticFields(), before.constantFields()));
 		}
 
 		long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
@@ -2442,11 +2449,14 @@ public class RemoldAgent {
 
 		List<RemovedMemberReaders.RemovedMember> out = new ArrayList<>();
 		for (FieldNode f : oldClass.fields) {
-			if ((f.access & Opcodes.ACC_STATIC) != 0) continue;
 			if ((f.access & Opcodes.ACC_SYNTHETIC) != 0 || f.name.startsWith("$remold$")) continue;
 			if (fieldSurvivors.contains(f.name + ":" + f.desc)) continue;
 			out.add(new RemovedMemberReaders.RemovedMember(oldClass.name, f.name, f.desc, true,
-			                                               (f.access & Opcodes.ACC_PRIVATE) != 0));
+				(f.access & Opcodes.ACC_PRIVATE) != 0,
+				(f.access & Opcodes.ACC_STATIC) != 0,
+				// ASM 把 ConstantValue 属性解析成 FieldNode.value。非 null 就是编译期常量，
+				// javac 会把它内联进读者的 ldc/bipush——读者常量池里没有 Fieldref，扫描无从下手。
+				f.value != null));
 		}
 
 		Set<String> methodSurvivors = new HashSet<>();
@@ -2696,23 +2706,38 @@ public class RemoldAgent {
 	 *                        （{@code changedFields} 只描述字段），必须靠这个标志才知道要不要套方法判据
 	 */
 	public record RemovedMemberScan(boolean scanned, List<String> readers,
-	                                List<String> dispatchShifted, boolean removedMethods) {
+	                                List<String> dispatchShifted, boolean removedMethods,
+	                                boolean removedStaticFields, List<String> constantFields) {
 		public static final RemovedMemberScan NOT_SCANNED =
-			new RemovedMemberScan(false, List.of(), List.of(), false);
+			new RemovedMemberScan(false, List.of(), List.of(), false, false, List.of());
 
 		public RemovedMemberScan {
 			readers = readers == null ? List.of() : List.copyOf(readers);
 			dispatchShifted = dispatchShifted == null ? List.of() : List.copyOf(dispatchShifted);
+			constantFields = constantFields == null ? List.of() : List.copyOf(constantFields);
 		}
 
-		/** 扫描没能完成时的占位：仍然保留"本轮删过方法"这个事实。 */
-		public static RemovedMemberScan unscanned(boolean removedMethods) {
-			return new RemovedMemberScan(false, List.of(), List.of(), removedMethods);
+		/** 只关心方法与读者时的便捷构造。 */
+		public RemovedMemberScan(boolean scanned, List<String> readers,
+		                         List<String> dispatchShifted, boolean removedMethods) {
+			this(scanned, readers, dispatchShifted, removedMethods, false, List.of());
+		}
+
+		/** 扫描没能完成时的占位：仍然保留"本轮删过方法/静态字段/常量"这些事实。 */
+		public static RemovedMemberScan unscanned(boolean removedMethods, boolean removedStaticFields,
+		                                          List<String> constantFields) {
+			return new RemovedMemberScan(false, List.of(), List.of(), removedMethods,
+			                             removedStaticFields, constantFields);
 		}
 
 		/** 是否存在落地后会出问题的引用。 */
 		public boolean hasFindings() {
 			return !readers.isEmpty() || !dispatchShifted.isEmpty();
+		}
+
+		/** 是否有<b>编译期常量</b>被删——这类读者在常量池里没有 Fieldref，扫描看不到。 */
+		public boolean hasConstantFields() {
+			return !constantFields.isEmpty();
 		}
 	}
 
@@ -2819,6 +2844,16 @@ public class RemoldAgent {
 		}
 		LayoutGate.Result res = LayoutGate.checkChangedFields(changedFields);
 
+		// 编译期常量（{@code ConstantValue}，JLS §13.4.9）：javac 把基本类型与 String 常量直接内联进
+		// 读者的 {@code ldc} / {@code bipush}，读者常量池里<b>根本没有 Fieldref</b>。所以"扫描不到读者"
+		// 在这里不是安全证明，而是<b>没有信号</b>——批次撕裂下旧读者会带着内联的旧值继续跑，静默且
+		// 不可观测。实测见 docs/initfix/07-p05-probe-results.md §16.1。因此保持强拒绝。
+		if (scan.hasConstantFields() && !LayoutGate.MODE_WARN.equals(mode)) {
+			return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
+				"compile-time constant(s) removed (" + String.join(", ", scan.constantFields()) + ")"
+				+ " — javac inlines these into readers, so no Fieldref exists for the scan to find");
+		}
+
 		// 方法删除不经过 LayoutGate（{@code changedFields} 只描述字段），必须单独判，而且要放在
 		// compatible 早退<b>之前</b>——本轮完全可能只删了方法、字段一个都没动。
 		//
@@ -2844,13 +2879,20 @@ public class RemoldAgent {
 
 		boolean staticChange = LayoutGate.hasStaticFieldChange(changedFields);
 
-		// 删除实例字段：按"批次外读者"判，与存活实例无关（见方法注释）。
-		// 静态字段不走这条：静态值是类级共享的，删掉它的读者判定同样成立，但静态字段的
-		// 写入/初始化还有别的路径，保持原来的强拒绝，等有实测再放宽。
-		if (res.verdict() == LayoutGate.Verdict.REMOVED_FIELD && !staticChange
-		    && scan.scanned()) {
-			// 用 hasFindings() 而不是只看 readers()：字段侧不会产生 dispatchShifted，
-			// 但把"任何 finding 都算不放行"写成显式条件，将来字段也支持分派判定时不会漏。
+		// 删静态字段：静态值不随实例存在，所以和实例字段一样按"批次外读者"判，
+		// 但<b>不能</b>退回存活实例判据——扫描未完成时只能拒绝。
+		if (res.verdict() == LayoutGate.Verdict.REMOVED_FIELD && scan.removedStaticFields()
+		    && !scan.scanned() && !LayoutGate.MODE_WARN.equals(mode)) {
+			return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
+				"static field(s) removed but the reader scan could not complete — a static value is"
+				+ " not tied to any instance, so the liveness check cannot stand in for it");
+		}
+
+		// 删除字段（实例或静态）：按"批次外读者"判，与存活实例无关（见方法注释）。
+		// 改类型 / 改静态性不走这条：它们的旧值会被静默丢弃或错读，读者集合证明不了安全。
+		if (res.verdict() == LayoutGate.Verdict.REMOVED_FIELD && scan.scanned()) {
+			// 用 hasFindings() 而不是只看 readers()：字段改指向（父类/接口同名字段接住）
+			// 不抛错但读到别的值，与方法的分派转移同类，同样不放行。
 			if (!scan.hasFindings()) {
 				return new LayoutDecision(LayoutAction.WAIVE_NO_READERS, res, host, Set.of());
 			}

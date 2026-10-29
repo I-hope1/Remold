@@ -99,6 +99,7 @@ public class P05Probe {
 			measureSafepoint(javac, tempDir);
 			measureFieldRemoval(javac, tempDir);
 			measureMethodRemoval(javac, tempDir);
+			measureStaticFieldRemoval(javac, tempDir);
 		} finally {
 			deleteRecursively(tempDir);
 		}
@@ -1049,6 +1050,166 @@ public class P05Probe {
 			System.out.println("   [M8c] Plain.p removed; call(Plain) -> "
 			                   + tryInt(rd, "call", new Class<?>[]{plain}, null, inst));
 			check(true, "M8c outcome recorded (see the line above)");
+		} finally {
+			cl.close();
+		}
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// M9: static field removal — dangling / silently absorbed / incompatible
+	// ------------------------------------------------------------------------------------------------
+
+	/** Nobody else declares {@code s}: the reference just dangles. */
+	static final String SRC_M9_A_V1 = """
+		package rem5;
+		public class A { public static int s = 11; }
+		""";
+
+	static final String SRC_M9_A_V2 = """
+		package rem5;
+		public class A { }
+		""";
+
+	static final String SRC_M9_READER = """
+		package rem5;
+		public class Reader { public static int read() { return A.s; } }
+		""";
+
+	/** The superclass has a <b>static</b> field of the same name: resolution walks up and finds it. */
+	static final String SRC_M9B_SUPER = """
+		package rem6;
+		public class Super { public static int s = 22; }
+		""";
+
+	static final String SRC_M9B_A_V1 = """
+		package rem6;
+		public class A extends Super { public static int s = 11; }
+		""";
+
+	static final String SRC_M9B_A_V2 = """
+		package rem6;
+		public class A extends Super { }
+		""";
+
+	static final String SRC_M9B_READER = """
+		package rem6;
+		public class Reader { public static int read() { return A.s; } }
+		""";
+
+	/** An <b>interface</b> field wins over the superclass — JVMS 5.4.3.2 searches interfaces first. */
+	static final String SRC_M9C_I = """
+		package rem7;
+		public interface I { int s = 33; }
+		""";
+
+	static final String SRC_M9C_A_V1 = """
+		package rem7;
+		public class A implements I { public static int s = 11; }
+		""";
+
+	static final String SRC_M9C_A_V2 = """
+		package rem7;
+		public class A implements I { }
+		""";
+
+	static final String SRC_M9C_READER = """
+		package rem7;
+		public class Reader { public static int read() { return A.s; } }
+		""";
+
+	/** The superclass field is an <b>instance</b> field: {@code GETSTATIC} on it is illegal. */
+	static final String SRC_M9D_SUPER = """
+		package rem8;
+		public class Super { public int s = 22; }
+		""";
+
+	static final String SRC_M9D_A_V1 = """
+		package rem8;
+		public class A extends Super { public static int s = 11; }
+		""";
+
+	static final String SRC_M9D_A_V2 = """
+		package rem8;
+		public class A extends Super { }
+		""";
+
+	static final String SRC_M9D_READER = """
+		package rem8;
+		public class Reader { public static int read() { return A.s; } }
+		""";
+
+	/**
+	 * Static field removal. The point is that {@code GETSTATIC A.s} does <b>not</b> simply dangle:
+	 * resolution walks up (JVMS 5.4.3.2) and can be absorbed by a superclass or interface field,
+	 * or blow up with a different error if the field it lands on is not static.
+	 *
+	 * <ul>
+	 *   <li><b>M9a</b> nobody declares it → {@code NoSuchFieldError};</li>
+	 *   <li><b>M9b</b> superclass static field → silently reads the superclass value;</li>
+	 *   <li><b>M9c</b> interface field → same, and interfaces are searched <em>before</em> the
+	 *       superclass (this is the same ordering that makes field shadowing subtle);</li>
+	 *   <li><b>M9d</b> superclass <em>instance</em> field → {@code IncompatibleClassChangeError}.</li>
+	 * </ul>
+	 *
+	 * <p>Compile-time constants ({@code ConstantValue}, JLS §13.4.9) are <b>not</b> covered here
+	 * because there is nothing to observe at run time: {@code javac} inlines them into
+	 * {@code ldc} / {@code bipush}, so the reader never holds a {@code Fieldref} at all. That case
+	 * is asserted separately in {@code RemovedMemberReadersTest}.</p>
+	 */
+	static void measureStaticFieldRemoval(String javac, File baseDir) throws Exception {
+		System.out.println("\n--- [M9] static field removal: dangling / absorbed / incompatible ---");
+
+		// ---- M9a: nobody else declares s ----
+		File workA = new File(baseDir, "m9a");
+		File a1 = compileInto(javac, workA, "v1", "A.java", SRC_M9_A_V1);
+		compileInto(javac, workA, "v1", "Reader.java", SRC_M9_READER);
+		File a2 = compileInto(javac, workA, "v2", "A.java", SRC_M9_A_V2, a1);
+		runStaticRemovalCase("M9a", a1, a2, "rem5/A.class",
+			"no other declaration of s", 11);
+
+		// ---- M9b: superclass static field absorbs the reference ----
+		File workB = new File(baseDir, "m9b");
+		File b1 = compileInto(javac, workB, "v1", "Super.java", SRC_M9B_SUPER);
+		compileInto(javac, workB, "v1", "A.java", SRC_M9B_A_V1);
+		compileInto(javac, workB, "v1", "Reader.java", SRC_M9B_READER);
+		File b2 = compileInto(javac, workB, "v2", "A.java", SRC_M9B_A_V2, b1);
+		runStaticRemovalCase("M9b", b1, b2, "rem6/A.class",
+			"Super declares a static s", 11);
+
+		// ---- M9c: interface field absorbs it (interfaces are searched before the superclass) ----
+		File workC = new File(baseDir, "m9c");
+		File c1 = compileInto(javac, workC, "v1", "I.java", SRC_M9C_I);
+		compileInto(javac, workC, "v1", "A.java", SRC_M9C_A_V1);
+		compileInto(javac, workC, "v1", "Reader.java", SRC_M9C_READER);
+		File c2 = compileInto(javac, workC, "v2", "A.java", SRC_M9C_A_V2, c1);
+		runStaticRemovalCase("M9c", c1, c2, "rem7/A.class",
+			"I declares a (constant) field s", 11);
+
+		// ---- M9d: the field resolution lands on an INSTANCE field ----
+		File workD = new File(baseDir, "m9d");
+		File d1 = compileInto(javac, workD, "v1", "Super.java", SRC_M9D_SUPER);
+		compileInto(javac, workD, "v1", "A.java", SRC_M9D_A_V1);
+		compileInto(javac, workD, "v1", "Reader.java", SRC_M9D_READER);
+		File d2 = compileInto(javac, workD, "v2", "A.java", SRC_M9D_A_V2, d1);
+		runStaticRemovalCase("M9d", d1, d2, "rem8/A.class",
+			"Super declares an INSTANCE field s", 11);
+	}
+
+	/** Loads {@code Reader}, asserts the baseline, removes the field from {@code A}, reports the call. */
+	private static void runStaticRemovalCase(String label, File v1, File v2, String aClassPath,
+	                                         String note, int baseline) throws Exception {
+		URLClassLoader cl = newLoader(v1);
+		try {
+			Class<?> a = Class.forName(aClassPath.replace('/', '.').replace(".class", ""), true, cl);
+			Class<?> reader = Class.forName(
+				aClassPath.substring(0, aClassPath.indexOf('/')) + ".Reader", true, cl);
+			checkEq(String.valueOf(baseline), tryInt(reader, "read", new Class<?>[0], null, (Object[]) null),
+				label + " precondition: read() sees " + baseline + " before the removal");
+
+			redefineMicros(P05Agent.instrumentation(), a, new File(v2, aClassPath));
+			System.out.println("   [" + label + "] " + note + "; read() after removal -> "
+			                   + tryInt(reader, "read", new Class<?>[0], null, (Object[]) null));
+			check(true, label + " outcome recorded (see the line above)");
 		} finally {
 			cl.close();
 		}

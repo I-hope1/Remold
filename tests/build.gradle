@@ -145,8 +145,8 @@ test {
 	}
 }
 
-// 断言测试总数 ≥ 273 且 0 skipped（273 = 2026-10-29 全量实测，含 ConstructorTailInjectorTest 8 个、InitFixSnapshotTimingTest 1 个、StageASkeletonTest 9 个、HashSemanticsTest 11 个、LibToolTest 5 个、OnReloadTimingTest 3 个、RemovedMemberReadersTest 17 个与 LayoutGateWiringTest 21 个用例）
-def hstestMinTests = 273
+// 断言测试总数 ≥ 281 且 0 skipped（281 = 2026-10-29 全量实测，含 ConstructorTailInjectorTest 8 个、InitFixSnapshotTimingTest 1 个、StageASkeletonTest 9 个、HashSemanticsTest 11 个、LibToolTest 5 个、OnReloadTimingTest 3 个、RemovedMemberReadersTest 23 个与 LayoutGateWiringTest 23 个用例）
+def hstestMinTests = 281
 tasks.register("verifyTestCount") {
 	group = "verification"
 	description = "断言 JUnit 测试数不低于基线 ${hstestMinTests}"

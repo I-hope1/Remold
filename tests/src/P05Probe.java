@@ -1139,6 +1139,52 @@ public class P05Probe {
 		""";
 
 	/**
+	 * 反方向：删的是<b>实例</b>字段，解析落到父类的<b>静态</b>同名字段上。
+	 * {@code GETFIELD} 访问静态字段与 {@code GETSTATIC} 访问实例字段是同一个检查的两面
+	 * （HotSpot {@code LinkResolver::resolve_field} 里 {@code is_static != fd.is_static()}）。
+	 */
+	static final String SRC_M9E_SUPER = """
+		package rem9;
+		public class Super { public static int x = 22; }
+		""";
+
+	static final String SRC_M9E_A_V1 = """
+		package rem9;
+		public class A extends Super { public int x = 11; }
+		""";
+
+	static final String SRC_M9E_A_V2 = """
+		package rem9;
+		public class A extends Super { }
+		""";
+
+	static final String SRC_M9E_READER = """
+		package rem9;
+		public class Reader { public static int read(A a) { return a.x; } }
+		""";
+
+	/** 接口字段必然是 {@code public static final}，所以同一条 ICCE 也会由接口来源触发。 */
+	static final String SRC_M9F_I = """
+		package rem10;
+		public interface I { int x = 33; }
+		""";
+
+	static final String SRC_M9F_A_V1 = """
+		package rem10;
+		public class A implements I { public int x = 11; }
+		""";
+
+	static final String SRC_M9F_A_V2 = """
+		package rem10;
+		public class A implements I { }
+		""";
+
+	static final String SRC_M9F_READER = """
+		package rem10;
+		public class Reader { public static int read(A a) { return a.x; } }
+		""";
+
+	/**
 	 * Static field removal. The point is that {@code GETSTATIC A.s} does <b>not</b> simply dangle:
 	 * resolution walks up (JVMS 5.4.3.2) and can be absorbed by a superclass or interface field,
 	 * or blow up with a different error if the field it lands on is not static.
@@ -1193,6 +1239,58 @@ public class P05Probe {
 		File d2 = compileInto(javac, workD, "v2", "A.java", SRC_M9D_A_V2, d1);
 		runStaticRemovalCase("M9d", d1, d2, "rem8/A.class",
 			"Super declares an INSTANCE field s", 11);
+
+		// ---- M9e: reverse direction — an INSTANCE field is removed and resolution lands on a
+		//      STATIC one. M9d covers getstatic-on-instance; this covers getfield-on-static.
+		//      Together they close the loop on `is_static != fd.is_static()`. ----
+		File workE = new File(baseDir, "m9e");
+		File e1 = compileInto(javac, workE, "v1", "Super.java", SRC_M9E_SUPER);
+		compileInto(javac, workE, "v1", "A.java", SRC_M9E_A_V1);
+		compileInto(javac, workE, "v1", "Reader.java", SRC_M9E_READER);
+		File e2 = compileInto(javac, workE, "v2", "A.java", SRC_M9E_A_V2, e1);
+
+		URLClassLoader eCl = newLoader(e1);
+		try {
+			Class<?> a = Class.forName("rem9.A", true, eCl);
+			Class<?> reader = Class.forName("rem9.Reader", true, eCl);
+			Object inst = a.getConstructor().newInstance();
+			checkEq("11", tryInt(reader, "read", new Class<?>[]{a}, null, inst),
+				"M9e precondition: the instance field read returns 11");
+
+			redefineMicros(P05Agent.instrumentation(), a, new File(e2, "rem9/A.class"));
+			System.out.println("   [M9e] instance x removed, Super has a STATIC x; read(A) -> "
+			                   + tryInt(reader, "read", new Class<?>[]{a}, null, inst));
+			System.out.println("         (GETFIELD landing on a static field: the mirror of M9d)");
+			check(true, "M9e outcome recorded (see the line above)");
+		} finally {
+			eCl.close();
+		}
+
+		// ---- M9f: same direction as M9e, but the static field comes from an INTERFACE ----
+		// Interface fields are implicitly public static final, so this exercises the same ICCE
+		// check from a different resolution path (interfaces are searched before the superclass).
+		File workF = new File(baseDir, "m9f");
+		File f1 = compileInto(javac, workF, "v1", "I.java", SRC_M9F_I);
+		compileInto(javac, workF, "v1", "A.java", SRC_M9F_A_V1);
+		compileInto(javac, workF, "v1", "Reader.java", SRC_M9F_READER);
+		File f2 = compileInto(javac, workF, "v2", "A.java", SRC_M9F_A_V2, f1);
+
+		URLClassLoader fCl = newLoader(f1);
+		try {
+			Class<?> a = Class.forName("rem10.A", true, fCl);
+			Class<?> reader = Class.forName("rem10.Reader", true, fCl);
+			Object inst = a.getConstructor().newInstance();
+			checkEq("11", tryInt(reader, "read", new Class<?>[]{a}, null, inst),
+				"M9f precondition: the instance field read returns 11");
+
+			redefineMicros(P05Agent.instrumentation(), a, new File(f2, "rem10/A.class"));
+			System.out.println("   [M9f] instance x removed, interface I has a (static) x; read(A) -> "
+			                   + tryInt(reader, "read", new Class<?>[]{a}, null, inst));
+			System.out.println("         (same ICCE, reached through the interface-first field search)");
+			check(true, "M9f outcome recorded (see the line above)");
+		} finally {
+			fCl.close();
+		}
 	}
 
 	/** Loads {@code Reader}, asserts the baseline, removes the field from {@code A}, reports the call. */

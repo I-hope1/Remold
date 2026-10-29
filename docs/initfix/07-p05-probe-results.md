@@ -582,7 +582,7 @@ major < 55 才需要上面这套折算。
 - **`access$` 编号规则的完整形态**：只测了"两个 int 字段、删前一个"这一种组合。javac 的编号里还编码了访问种类（读/写/调用），多字段、混合读写、字段与方法混合时编号如何分配**未逐一验证**。
 - **接口方法删除的失败形态**：只观察到 `InterfaceMethodref`(11) 这个 tag 存在（实测 `#7 = InterfaceMethodref I.d:()I`），没有实测"删 default 方法后陈旧调用者抛什么"。机制上应是 `NoSuchMethodError`，未验证。
 - **字段遮蔽的跨层形态**：只测了"子类遮蔽、孙类继承子类的 `x`"这一种。多级遮蔽、同名但不同类型（描述符不同）时 `Fieldref` 的解析结果**未逐一验证**。
-- **接口字段截胡的运行期表现**：只验证了"解析先落到接口字段"（`findStaticGetter` 命中静态 `I.x`），没有跑过真实的 `getfield` 调用。HotSpot 的 `LinkResolver::resolve_field` 里那句 `if (is_static != fd.is_static())` 会抛 `IncompatibleClassChangeError: Expected non-static field ...`，且这个检查是**双向**的（§16.7）——判据按这个语义实现，但缺一次运行期实测。
+- **接口字段截胡的运行期表现**：已由 M9f 覆盖（`Expected non-static field`），不再是缺口。
 
 ## 14. 读者扫描的成本（`ReaderScanProbe`）
 
@@ -869,6 +869,12 @@ Holder.plain   (static int)                    ->  getstatic  Fieldref
 | **M9b** 父类有 `static s` | `11` | **`22`**（静默读到父类的值） |
 | **M9c** 父接口有 `s`（接口常量） | `11` | **`33`**（静默转移，接口优先于父类） |
 | **M9d** 父类只有**实例** `s` | `11` | `IncompatibleClassChangeError: Expected static field rem8.A.s` |
+| **M9e** 删**实例** `x`，父类有 `static x` | `11` | `IncompatibleClassChangeError: Expected non-static field rem9.A.x` |
+| **M9f** 删**实例** `x`，父接口有 `x` | `11` | `IncompatibleClassChangeError: Expected non-static field rem10.A.x` |
+
+M9d / M9e 是同一个检查的两面（`is_static != fd.is_static()`），凑成双向闭环；M9f 证明
+"接口字段"不是特例——它必然是 `public static final`，走的是同一条 ICCE，只是经由
+"接口先于父类"的字段搜索路径命中。
 
 M9b/M9c 是"不抛错的失败"，与方法的分派转移（§15）同类。实例字段的接口截胡不属于这一类：
 接口字段都是 `static final`，`GETFIELD` 落到它上面是 `ICCE`（§16.7），虽然也是"读到别处"，
@@ -921,7 +927,8 @@ hasReaders() = !hits.isEmpty() || !abstractMissing.isEmpty()
    判据改成比较 `targetIsStatic != m.isStatic()`——引用的访问方式必然与被删字段的静态性一致
    （否则改动前就编译不过），所以用 `m.isStatic()` 代表访问方式。
    这条顺带更正了**接口字段截胡**的后果：接口字段都是 `static final`，所以 `Sub/x` 从实例字段
-   改指向接口常量时是 **ICCE**，不是"静默读到 `I.x`"。
+   改指向接口常量时是 **ICCE**，不是"静默读到 `I.x`"。M9d / M9e 已经把两个方向都跑通
+   （`Expected static field` / `Expected non-static field`），M9f 证明接口来源走的是同一条检查。
 
 2. **方法选择要跳过类链上的 `static` 方法**。`lookup_instance_method_in_klasses` 里有个
    `while (result != NULL && result->is_static() && ...)` 的循环，遇到 static 会继续向上——

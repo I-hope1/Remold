@@ -85,7 +85,12 @@ public final class LayoutGate {
 		 * 而 layoutprobe 实测这种情况旧值会被丢弃。因此这个 static 位只在本门比较，
 		 * <b>不得</b>加进哈希 —— 那会扰动所有 Tier 1/2 的配对。</p>
 		 */
-		CHANGED_STATICNESS;
+		CHANGED_STATICNESS,
+		/**
+		 * 基类新增实例字段导致已加载的子孙类字段物理内存偏移漂移，且检测到存在偏移量缓存持有者。
+		 * 见 {@code remold.offset.SuperclassDriftGate}。
+		 */
+		SUPERCLASS_FIELD_DRIFT;
 	}
 
 	/** 一个字段的判定相关属性：名、描述符、是否 static、是否合成。 */

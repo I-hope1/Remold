@@ -91,6 +91,8 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | `@HotswapInit` 设计契约 | `docs/initfix/09-hotswapinit-design.md`（T4 逃生口的豁免边界、签名与调用基数、重复触发、异常边界、用例清单） |
 | 外部引擎源码索引 | `.sources/`（如 `.sources/mindustry/` 指向本地 Mindustry/Arc 真实源码；只读参考，已 gitignore） |
 | Mixin 生态扩展插件 | `plugin-mixin/`（`remold.mixin.MixinHotswapPlugin`、`MixinReWeaver`、`MixinHotSwap`） |
+| 偏移量与访问器扫描器 | `OffsetScanner`（`core/src/remold/offset/`，常量池预过滤 + 多轮过程间数据流分析，识别 `objectFieldOffset`/`newUpdater`/`findVarHandle` 产生源） |
+| 偏移绑定索引与漂移安全门 | `OffsetBindingIndex` / `SuperclassDriftGate`（`core/src/remold/offset/`，父类新增实例字段时检测子孙类全部实例字段是否被缓存，结合 `LibTool` 堆存活探测，阻断漂移） |
 | Gradle 插件坐标 | `gradle-plugin/`（`java-gradle-plugin`；把仓库根 `remold.gradle(.kts)` 打进 jar 后展开应用，供 JitPack 的 `plugins { id("io.github.i-hope1.remold") }` 引入；脚本仍是唯一实现，勿在此另写一套） |
 
 ## 5. 实现状态概要（详细参见 `docs/status.md`）
@@ -144,7 +146,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 - 两阶段编排验证：`./gradlew :tests:twoPhaseProbe -Pp05.jbr=<DCEVM JDK 目录>`，把 `StageASkeleton` / `ConstructorTailInjector` / `InitFix` 串成 `A → redefine → B → C → redefine` 跑一遍（同样不挂 `check`）。改动两阶段相关代码后必须先跑它，再考虑动 `RemoldAgent`。
 - 耗时类探针固定报 **min / median / max** 三个数；结论必须同时对 min 与 median 成立，只对其中一个成立时标注「口径敏感」，不得只报有利的那个。统计量不得在看到数据之后才选。
 - 探针日志默认带 `-Xlog:safepoint`（`uptimenanos` 装饰符）、`-Xlog:gc*`、`-Xlog:jit+compilation=debug`，落在 `build/p05/`。断言里引用日志时间戳时，基准必须取 safepoint 窗口的**开始**（`时间戳 − Total`）——日志行是在 safepoint 结束时打印的；unified logging 有缓冲，日志分析要放在运行结束后做。
-- `test` 的测试数下限由 `tests/build.gradle` 的 `hstestMinTests` 守卫（当前 283，以实际输出为准；`verifyTestCount` 读 XML 断言总数 ≥ 基线且 `skipped == 0`）：删除/禁用/跳过测试会让 `check` 变红，上调基线要有意识地改这一行。
+- `test` 的测试数下限由 `tests/build.gradle` 的 `hstestMinTests` 守卫（当前 289，以实际输出为准；`verifyTestCount` 读 XML 断言总数 ≥ 基线且 `skipped == 0`）：删除/禁用/跳过测试会让 `check` 变红，上调基线要有意识地改这一行。
 - CI：`.github/workflows/ci.yml`（`setup-java` 装 8/11/17/21 + runner JDK 25，`hstest.requireJdks=true`；以及 `test-dcevm` 任务在真实 JBR 21 DCEVM 下执行 `liveDcevmTest`）。首次 Linux 跑，Windows 假设（路径分隔符、GBK）可能暴露，按原因分类再处理。
 - 新增或放宽安全门：必须有负向阻断断言。
 - 修复缺陷：必须有先红后绿的回归断言。

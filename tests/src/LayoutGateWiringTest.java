@@ -436,4 +436,17 @@ class LayoutGateWiringTest {
 		RemoldAgent.clearRejected("lg.A");
 		RemoldAgent.clearRejected("lg.B");
 	}
+
+	@Test
+	void layoutDriftOnHostClass() {
+		Binding binding = new Binding(HOST.replace('.', '/'), "a", Kind.INSTANCE_OFFSET, Sink.STATIC_FIELD, "lg/Holder", "A_OFF", "Holder.<clinit>:10", Confidence.EXACT);
+		DriftDecision drift = DriftDecision.reject(HOST.replace('.', '/'), List.of(new DriftHit(HOST.replace('.', '/'), "a", binding)), List.of());
+
+		LayoutDecision d = RemoldAgent.decideLayout(HOST, withField(), addedField(), "reject", Liveness.LIVE, BATCH, null, drift);
+		assertEquals(LayoutAction.REJECT, d.action(), "本类自身物理偏移漂移拦截在 reject 模式下必须判 REJECT");
+		assertEquals(Verdict.LAYOUT_DRIFT, d.layout().verdict());
+		assertEquals(HOST, d.hostName());
+		assertTrue(d.dropped().contains(HOST) && d.dropped().contains("lg.Host$1"));
+		assertTrue(d.reason().contains("LAYOUT_DRIFT"));
+	}
 }

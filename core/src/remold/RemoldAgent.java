@@ -1,6 +1,7 @@
 package remold;
 
 import remold.annotation.*;
+import remold.offset.LayoutPredictor;
 import remold.offset.OffsetBindingIndex;
 import remold.offset.OffsetScanner;
 import remold.offset.SuperclassDriftGate;
@@ -2772,24 +2773,46 @@ public class RemoldAgent {
 	}
 
 	private static SuperclassDriftGate.DriftDecision checkSuperclassDriftIfApplicable(
-			String className, Class<?> targetClass, List<String> changedFields) {
-		if (targetClass == null || changedFields == null || changedFields.isEmpty()) {
+			String className, Class<?> targetClass, List<String> changedFields,
+			byte[] newBytes, Map<String, byte[]> newBatchBytes) {
+		if (targetClass == null || changedFields == null || changedFields.isEmpty() || offsetIndex == null || offsetIndex.isEmpty()) {
 			return null;
 		}
-		boolean hasAddedInstanceField = false;
+		boolean hasInstanceFieldChange = false;
 		for (String cf : changedFields) {
-			if (cf != null && cf.startsWith("+") && !cf.startsWith("+ *") && !cf.startsWith("+*")) {
-				hasAddedInstanceField = true;
+			if (cf != null && (cf.startsWith("+") || cf.startsWith("-") || cf.startsWith("~"))
+			    && !cf.startsWith("+ *") && !cf.startsWith("+*")
+			    && !cf.startsWith("- *") && !cf.startsWith("-*")
+			    && !cf.startsWith("~ *") && !cf.startsWith("~*")) {
+				hasInstanceFieldChange = true;
 				break;
 			}
 		}
-		if (!hasAddedInstanceField) return null;
+		if (!hasInstanceFieldChange) return null;
 
-		return SuperclassDriftGate.checkSuperclassDrift(
+		List<LayoutPredictor.DriftingField> driftingFields = LayoutPredictor.findDriftingFields(
+			targetClass,
+			newBytes,
+			newBatchBytes,
+			RemoldAgent::fetchBytecodeForOffsetScanner,
+			base -> getLoadedDescendantInternalNames(targetClass)
+		);
+
+		if (driftingFields == null) {
+			// 如果预测器无法 clean-load 预测（如缺少依赖），退回保守全量子孙类扫描
+			return SuperclassDriftGate.checkSuperclassDrift(
+				internalName(className),
+				offsetIndex,
+				base -> getLoadedDescendantInternalNames(targetClass),
+				RemoldAgent::getDeclaredInstanceFields,
+				RemoldAgent::hasLiveInstances
+			);
+		}
+
+		return SuperclassDriftGate.checkLayoutDrift(
 			internalName(className),
+			driftingFields,
 			offsetIndex,
-			base -> getLoadedDescendantInternalNames(targetClass),
-			RemoldAgent::getDeclaredInstanceFields,
 			RemoldAgent::hasLiveInstances
 		);
 	}
@@ -2902,7 +2925,8 @@ public class RemoldAgent {
 			 ? Liveness.LIVE
 			 : (hasLiveInstances(className) ? Liveness.LIVE : Liveness.NONE);
 
-			SuperclassDriftGate.DriftDecision drift = checkSuperclassDriftIfApplicable(className, targetClass, changed);
+			SuperclassDriftGate.DriftDecision drift = checkSuperclassDriftIfApplicable(
+				className, targetClass, changed, newBytes, newBatchBytes);
 
 			LayoutDecision d = decideLayout(className, changed, LAYOUT_GATE, liveness,
 			                                newBatchBytes.keySet(),
@@ -3224,11 +3248,14 @@ public class RemoldAgent {
 			}
 		}
 
-		// 父类新增实例字段导致的子孙类物理偏移漂移检查（S1 门控）：
-		// 即使本类自身字段变动看起来是兼容新增（COMPATIBLE），但若引发了子孙类实例字段漂移且存在持有者，则必须拦截
+		// 物理内存字段偏移漂移检查（S1 门控）：
+		// 即使本类自身字段变动看起来是兼容新增（COMPATIBLE），但若引发了本类或子孙类实例字段漂移且存在持有者，则必须拦截
 		if (drift != null && !drift.isSafe()) {
+			LayoutGate.Verdict v = drift.formatReport().contains("[SUPERCLASS_FIELD_DRIFT]")
+				? LayoutGate.Verdict.SUPERCLASS_FIELD_DRIFT
+				: LayoutGate.Verdict.LAYOUT_DRIFT;
 			LayoutGate.Result driftRes = new LayoutGate.Result(
-				LayoutGate.Verdict.SUPERCLASS_FIELD_DRIFT,
+				v,
 				drift.formatReport()
 			);
 			if (LayoutGate.MODE_WARN.equals(mode)) {
@@ -3309,7 +3336,7 @@ public class RemoldAgent {
 
 		String action = d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.REMOVED_FIELD
 		 ? "restore the removed field(s) or restart to continue"
-		 : (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.SUPERCLASS_FIELD_DRIFT
+		 : (d.layout() != null && (d.layout().verdict() == LayoutGate.Verdict.SUPERCLASS_FIELD_DRIFT || d.layout().verdict() == LayoutGate.Verdict.LAYOUT_DRIFT)
 		    ? "avoid adding instance field(s) to superclass or restart to continue"
 		    : "revert the field change or restart to continue");
 		return RoundSkips.verdict("LAYOUT-REJECT", detail, action);

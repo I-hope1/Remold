@@ -835,7 +835,10 @@ public class OffsetStabilityProbe {
 		Object targetObj = targetClass.getConstructor().newInstance();
 
 		// Warm up CallerD.readVal to ensure it is compiled by C2
-		callerClass.getMethod("loop", targetClass, int.class).invoke(null, targetObj, 30_000);
+		for (int i = 0; i < 5; i++) {
+			callerClass.getMethod("loop", targetClass, int.class).invoke(null, targetObj, 20_000);
+			Thread.sleep(20);
+		}
 		int initialVal = (int) callerClass.getMethod("readVal", targetClass).invoke(null, targetObj);
 		checkEq(12345, initialVal, "Baseline: CallerD reads initial TargetD.val=12345");
 
@@ -949,7 +952,10 @@ public class OffsetStabilityProbe {
 		Object targetObj = targetClass.getConstructor().newInstance();
 
 		// Warm up CallerOuterD2.loop to ensure C2 compiles callOuter AND inlines CallerInnerD2.readVal
-		outerClass.getMethod("loop", targetClass, int.class).invoke(null, targetObj, 40_000);
+		for (int i = 0; i < 5; i++) {
+			outerClass.getMethod("loop", targetClass, int.class).invoke(null, targetObj, 20_000);
+			Thread.sleep(20);
+		}
 		int initialVal = (int) outerClass.getMethod("callOuter", targetClass).invoke(null, targetObj);
 		checkEq(11111, initialVal, "Baseline: CallerOuterD2 reads initial TargetD2.val=11111");
 

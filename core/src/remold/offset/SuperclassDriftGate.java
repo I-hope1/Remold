@@ -114,13 +114,26 @@ public final class SuperclassDriftGate {
 			}
 
 			StringBuilder sb = new StringBuilder();
-			sb.append("[SUPERCLASS_FIELD_DRIFT] Base class ").append(baseClass)
-			  .append(" added instance field(s), shifting memory layout for descendants:\n");
+			boolean isSubclassOnly = true;
+			for (DriftHit h : hits) {
+				if (h.descendantClass().equals(baseClass)) {
+					isSubclassOnly = false;
+					break;
+				}
+			}
+
+			if (isSubclassOnly) {
+				sb.append("[SUPERCLASS_FIELD_DRIFT] Base class ").append(baseClass)
+				  .append(" added instance field(s), shifting memory layout for descendants:\n");
+			} else {
+				sb.append("[LAYOUT_DRIFT] Class ").append(baseClass)
+				  .append(" physical memory layout shifted (hole filling / type clustering / drift):\n");
+			}
 
 			if (!hits.isEmpty()) {
 				sb.append("  Detected ").append(hits.size()).append(" cached offset holder(s):\n");
 				for (DriftHit hit : hits) {
-					sb.append("    - Subclass field: ").append(hit.descendantClass).append(".").append(hit.fieldName)
+					sb.append("    - Field:         ").append(hit.descendantClass).append(".").append(hit.fieldName)
 					  .append("\n      Cached by:     ").append(hit.binding.holderClass()).append(".").append(hit.binding.holderMember())
 					  .append(" (").append(hit.binding.kind()).append(", ").append(hit.binding.conf()).append(")")
 					  .append("\n      Trigger site:  ").append(hit.binding.site()).append("\n");
@@ -138,6 +151,57 @@ public final class SuperclassDriftGate {
 			sb.append("  Action: FAIL-CLOSED. Redefinition rejected to prevent silent memory corruption.");
 			return sb.toString();
 		}
+	}
+
+	/**
+	 * 结果型物理布局漂移判定：基于预测出的具体漂移字段集合，与偏移绑定索引进行交集判定。
+	 *
+	 * @param rootClassInternal     被重定义的类内部名（如 {@code "com/example/Base"}）
+	 * @param driftingFields        通过 LayoutPredictor 探测出的所有发生物理偏移漂移的字段列表
+	 * @param index                 偏移绑定索引
+	 * @param liveInstancePredicate 动态持有者堆存活实例探测谓词
+	 * @return 判定结论（安全放行或阻断拒绝）
+	 */
+	public static DriftDecision checkLayoutDrift(
+		String rootClassInternal,
+		List<LayoutPredictor.DriftingField> driftingFields,
+		OffsetBindingIndex index,
+		LiveInstancePredicate liveInstancePredicate
+	) {
+		if (rootClassInternal == null || driftingFields == null || driftingFields.isEmpty() || index == null || index.isEmpty()) {
+			return DriftDecision.pass(rootClassInternal);
+		}
+
+		List<DriftHit> hits = new ArrayList<>();
+
+		// 1. 遍历全部发生物理偏移漂移的字段，检查是否存在已知偏移持有者
+		for (LayoutPredictor.DriftingField df : driftingFields) {
+			if (df == null) continue;
+			List<Binding> bound = index.lookup(df.internalClassName(), df.fieldName());
+			for (Binding b : bound) {
+				hits.add(new DriftHit(df.internalClassName(), df.fieldName(), b));
+			}
+		}
+
+		// 2. 如果存在漂移字段，检查动态持有者（UNRESOLVED_CLASS）是否在堆上有存活实例
+		List<DynamicDriftHit> dynamicHits = new ArrayList<>();
+		if (liveInstancePredicate != null) {
+			for (String dynamicHolder : index.dynamicHolders()) {
+				if (dynamicHolder == null) continue;
+				if (liveInstancePredicate.hasLiveInstances(dynamicHolder)) {
+					dynamicHits.add(new DynamicDriftHit(
+						dynamicHolder,
+						"live instances exist; unresolved target offset may shift"
+					));
+				}
+			}
+		}
+
+		if (hits.isEmpty() && dynamicHits.isEmpty()) {
+			return DriftDecision.pass(rootClassInternal);
+		}
+
+		return DriftDecision.reject(rootClassInternal, hits, dynamicHits);
 	}
 
 	/**

@@ -148,7 +148,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 - 偏移量稳定性与漂移实测：`./gradlew :tests:offsetStabilityProbe -Pp05.jbr=<DCEVM JDK 目录>`（同样不挂 `check`），实测单类稳定性（空洞填补、类型重排）、父类字段漂移步长、Updater 错位破坏与 C2 常量折叠使用方逆优化。
 - 耗时类探针固定报 **min / median / max** 三个数；结论必须同时对 min 与 median 成立，只对其中一个成立时标注「口径敏感」，不得只报有利的那个。统计量不得在看到数据之后才选。
 - 探针日志默认带 `-Xlog:safepoint`（`uptimenanos` 装饰符）、`-Xlog:gc*`、`-Xlog:jit+compilation=debug`，落在 `build/p05/`。断言里引用日志时间戳时，基准必须取 safepoint 窗口的**开始**（`时间戳 − Total`）——日志行是在 safepoint 结束时打印的；unified logging 有缓冲，日志分析要放在运行结束后做。
-- `test` 的测试数下限由 `tests/build.gradle` 的 `hstestMinTests` 守卫（当前 305，以实际输出为准；`verifyTestCount` 读 XML 断言总数 ≥ 基线且 `skipped == 0`）：删除/禁用/跳过测试会让 `check` 变红，上调基线要有意识地改这一行。
+- `test` 的测试数下限由 `tests/build.gradle` 的 `hstestMinTests` 守卫（当前 311，以实际输出为准；`verifyTestCount` 读 XML 断言总数 ≥ 基线且 `skipped == 0`）：删除/禁用/跳过测试会让 `check` 变红，上调基线要有意识地改这一行。
 - CI：`.github/workflows/ci.yml`（`setup-java` 装 8/11/17/21 + runner JDK 25，`hstest.requireJdks=true`；以及 `test-dcevm` 任务在真实 JBR 21 DCEVM 下执行 `liveDcevmTest`）。首次 Linux 跑，Windows 假设（路径分隔符、GBK）可能暴露，按原因分类再处理。
 - 新增或放宽安全门：必须有负向阻断断言。
 - 修复缺陷：必须有先红后绿的回归断言。

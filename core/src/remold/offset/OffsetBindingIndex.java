@@ -20,21 +20,24 @@ import static remold.offset.OffsetScanner.Report;
 public final class OffsetBindingIndex {
 
 	private static final OffsetBindingIndex EMPTY = new OffsetBindingIndex(
-		Collections.emptyMap(), Collections.emptyMap(), Collections.emptySet(), 0
+		Collections.emptyMap(), Collections.emptyMap(), Collections.emptySet(), Collections.emptyMap(), 0
 	);
 
 	private final Map<String, Map<String, List<Binding>>> exact;
 	private final Map<String, List<Binding>>             wildcard;
 	private final Set<String>                           dynamicHolders;
+	private final Map<String, Set<String>>              readers;
 	private final int                                   totalCount;
 
 	private OffsetBindingIndex(Map<String, Map<String, List<Binding>>> exact,
 	                           Map<String, List<Binding>> wildcard,
 	                           Set<String> dynamicHolders,
+	                           Map<String, Set<String>> readers,
 	                           int totalCount) {
 		this.exact = exact;
 		this.wildcard = wildcard;
 		this.dynamicHolders = dynamicHolders;
+		this.readers = readers;
 		this.totalCount = totalCount;
 	}
 
@@ -43,38 +46,44 @@ public final class OffsetBindingIndex {
 	}
 
 	public static OffsetBindingIndex from(Report report) {
-		if (report == null || report.bindings.isEmpty()) return empty();
-		return from(report.bindings);
+		if (report == null || (report.bindings.isEmpty() && report.fieldReaders.isEmpty())) return empty();
+		return from(report.bindings, report.fieldReaders);
 	}
 
 	public static OffsetBindingIndex from(Collection<Binding> bindings) {
-		if (bindings == null || bindings.isEmpty()) return empty();
+		return from(bindings, Collections.emptyMap());
+	}
+
+	public static OffsetBindingIndex from(Collection<Binding> bindings, Map<String, Set<String>> fieldReaders) {
+		if ((bindings == null || bindings.isEmpty()) && (fieldReaders == null || fieldReaders.isEmpty())) return empty();
 
 		Map<String, Map<String, List<Binding>>> exactMap = new LinkedHashMap<>();
 		Map<String, List<Binding>> wildcardMap = new LinkedHashMap<>();
 		Set<String> dynamicSet = new LinkedHashSet<>();
 		int count = 0;
 
-		for (Binding b : bindings) {
-			if (b == null) continue;
-			count++;
+		if (bindings != null) {
+			for (Binding b : bindings) {
+				if (b == null) continue;
+				count++;
 
-			String targetClass = b.targetClass();
-			String targetField = b.targetField();
+				String targetClass = b.targetClass();
+				String targetField = b.targetField();
 
-			if (b.conf() == Confidence.UNRESOLVED_CLASS || targetClass == null) {
-				if (b.holderClass() != null) {
-					dynamicSet.add(b.holderClass());
+				if (b.conf() == Confidence.UNRESOLVED_CLASS || targetClass == null) {
+					if (b.holderClass() != null) {
+						dynamicSet.add(b.holderClass());
+					}
+					continue;
 				}
-				continue;
-			}
 
-			if (targetField == null || b.conf() == Confidence.WILDCARD_FIELD) {
-				wildcardMap.computeIfAbsent(targetClass, k -> new ArrayList<>()).add(b);
-			} else {
-				exactMap.computeIfAbsent(targetClass, k -> new LinkedHashMap<>())
-				        .computeIfAbsent(targetField, k -> new ArrayList<>())
-				        .add(b);
+				if (targetField == null || b.conf() == Confidence.WILDCARD_FIELD) {
+					wildcardMap.computeIfAbsent(targetClass, k -> new ArrayList<>()).add(b);
+				} else {
+					exactMap.computeIfAbsent(targetClass, k -> new LinkedHashMap<>())
+					        .computeIfAbsent(targetField, k -> new ArrayList<>())
+					        .add(b);
+				}
 			}
 		}
 
@@ -93,12 +102,35 @@ public final class OffsetBindingIndex {
 			frozenWildcard.put(entry.getKey(), Collections.unmodifiableList(entry.getValue()));
 		}
 
+		Map<String, Set<String>> frozenReaders = new LinkedHashMap<>();
+		if (fieldReaders != null) {
+			for (Map.Entry<String, Set<String>> entry : fieldReaders.entrySet()) {
+				if (entry.getKey() != null && entry.getValue() != null && !entry.getValue().isEmpty()) {
+					frozenReaders.put(entry.getKey(), Set.copyOf(entry.getValue()));
+				}
+			}
+		}
+
 		return new OffsetBindingIndex(
 			Collections.unmodifiableMap(frozenExact),
 			Collections.unmodifiableMap(frozenWildcard),
 			Collections.unmodifiableSet(dynamicSet),
+			Collections.unmodifiableMap(frozenReaders),
 			count
 		);
+	}
+
+	/**
+	 * 获取指定 static final 偏移量持有者字段的所有读者类（包含 GETSTATIC 该字段的类）。
+	 *
+	 * @param holderClass  持有者类内部名（如 "probed/HolderD"）
+	 * @param holderMember 静态字段名（如 "OFFSET"）
+	 * @return 读者类的内部名集合（不可变）
+	 */
+	public Set<String> getReaders(String holderClass, String holderMember) {
+		if (holderClass == null || holderMember == null) return Collections.emptySet();
+		Set<String> r = readers.get(holderClass + "." + holderMember);
+		return r != null ? r : Collections.emptySet();
 	}
 
 	/**

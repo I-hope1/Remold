@@ -147,4 +147,57 @@ public class OffsetScannerTest {
 						&& b.conf() == OffsetScanner.Confidence.UNRESOLVED_CLASS);
 		assertTrue(hasDynamicHolder, "AtomicIntegerFieldUpdaterImpl must produce UNRESOLVED_CLASS dynamic holder");
 	}
+
+	@Test
+	@DisplayName("静态字段读者索引与多轮扫描发现")
+	public void testStaticFieldReadersAndIndex() {
+		// 生成 Holder 类：调用 Unsafe.objectFieldOffset 并存入 static final long OFF
+		ClassWriter cwH = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+		cwH.visit(Opcodes.V11, Opcodes.ACC_PUBLIC, "remold/offset/test/ScanHolder", null, "java/lang/Object", null);
+		cwH.visitField(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL, "OFF", "J", null, null).visitEnd();
+		var mvH = cwH.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null);
+		mvH.visitCode();
+		mvH.visitInsn(Opcodes.ACONST_NULL); // null Unsafe
+		mvH.visitInsn(Opcodes.ACONST_NULL); // null Field
+		mvH.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "sun/misc/Unsafe", "objectFieldOffset", "(Ljava/lang/reflect/Field;)J", false);
+		mvH.visitFieldInsn(Opcodes.PUTSTATIC, "remold/offset/test/ScanHolder", "OFF", "J");
+		mvH.visitInsn(Opcodes.RETURN);
+		mvH.visitMaxs(2, 0);
+		mvH.visitEnd();
+		cwH.visitEnd();
+		byte[] holderBytes = cwH.toByteArray();
+
+		// 生成 Reader 类：包含 GETSTATIC remold/offset/test/ScanHolder.OFF
+		ClassWriter cwR = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+		cwR.visit(Opcodes.V11, Opcodes.ACC_PUBLIC, "remold/offset/test/ScanReader", null, "java/lang/Object", null);
+		var mvR = cwR.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "read", "()J", null, null);
+		mvR.visitCode();
+		mvR.visitFieldInsn(Opcodes.GETSTATIC, "remold/offset/test/ScanHolder", "OFF", "J");
+		mvR.visitInsn(Opcodes.LRETURN);
+		mvR.visitMaxs(2, 0);
+		mvR.visitEnd();
+		cwR.visitEnd();
+		byte[] readerBytes = cwR.toByteArray();
+
+		Map<String, byte[]> pool = Map.of(
+			"remold/offset/test/ScanHolder", holderBytes,
+			"remold/offset/test/ScanReader", readerBytes
+		);
+
+		OffsetScanner sc = new OffsetScanner(pool::get);
+		// 故意把 Reader 排在 Holder 前面，验证多轮自动发现
+		OffsetScanner.Report rep = sc.scanAll(List.of("remold/offset/test/ScanReader", "remold/offset/test/ScanHolder"));
+
+		OffsetBindingIndex index = OffsetBindingIndex.from(rep);
+		Set<String> readers = index.getReaders("remold/offset/test/ScanHolder", "OFF");
+
+		assertNotNull(readers);
+		assertTrue(readers.contains("remold/offset/test/ScanReader"),
+			"Reader class 'ScanReader' must be indexed as a reader of 'ScanHolder.OFF'");
+
+		// 对照组：无关字段查询应返回空集合
+		Set<String> noReaders = index.getReaders("remold/offset/test/ScanHolder", "NON_EXISTENT");
+		assertNotNull(noReaders);
+		assertTrue(noReaders.isEmpty(), "Control: Unreferenced field must have 0 readers");
+	}
 }

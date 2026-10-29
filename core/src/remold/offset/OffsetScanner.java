@@ -50,11 +50,13 @@ public final class OffsetScanner {
 
     public static final class Report {
         public final Set<Binding> bindings = new LinkedHashSet<>();
+        public final Map<String, Set<String>> fieldReaders = new LinkedHashMap<>();
         public final Set<String> unreadable = new TreeSet<>();
         public final Set<String> analysisFailed = new TreeSet<>();
         public int scannedClasses, skippedByPrefilter, depthExceeded, cycles;
         @Override public String toString() {
             return "scanned=" + scannedClasses + " skipped=" + skippedByPrefilter + " bindings=" + bindings.size()
+                    + " readers=" + fieldReaders.size()
                     + " unreadable=" + unreadable.size() + " failed=" + analysisFailed.size()
                     + " depthExceeded=" + depthExceeded + " cycles=" + cycles;
         }
@@ -233,11 +235,13 @@ public final class OffsetScanner {
     private final Set<String> staticsDone = new HashSet<>();
     private final Map<String, Map<String, AV>> statics = new HashMap<>();
     private final Set<String> producerClasses = new HashSet<>();
+    private final Set<String> holderClasses = new HashSet<>();
 
     public OffsetScanner(ClassSource src) { this.src = src; }
 
     public Report report() { return rep; }
     public Set<String> producerClasses() { return Collections.unmodifiableSet(producerClasses); }
+    public Set<String> holderClasses() { return Collections.unmodifiableSet(holderClasses); }
 
     /** 释放 ClassNode / 摘要缓存（大型应用扫描后调用）。Report 与 producerClasses 保留。 */
     public void clearCaches() { nodes.clear(); results.clear(); statics.clear(); staticsDone.clear(); }
@@ -276,7 +280,7 @@ public final class OffsetScanner {
     private boolean shouldScan(byte[] b) {
         Set<String> refs;
         try { refs = classRefs(b); } catch (RuntimeException e) { return false; }
-        for (String r : refs) if (TRIGGERS.contains(r) || producerClasses.contains(r)) return true;
+        for (String r : refs) if (TRIGGERS.contains(r) || producerClasses.contains(r) || holderClasses.contains(r)) return true;
         if (refs.contains(LOOKUP)) {
             String raw = new String(b, StandardCharsets.ISO_8859_1);
             return raw.contains("VarHandle") || raw.contains("Getter") || raw.contains("Setter");
@@ -423,10 +427,19 @@ public final class OffsetScanner {
             if (f == null) continue;                       // 不可达
             AbstractInsnNode insn = insns[i];
             switch (insn.getOpcode()) {
+                case GETSTATIC -> {
+                    FieldInsnNode fi = (FieldInsnNode) insn;
+                    if (!isJdk(fi.owner)) {
+                        rep.fieldReaders.computeIfAbsent(fi.owner + "." + fi.name, k -> new LinkedHashSet<>()).add(cn.name);
+                    }
+                }
                 case PUTSTATIC -> {
                     FieldInsnNode fi = (FieldInsnNode) insn;
                     AV v = peek(f, 0);
-                    if (v.is(Tag.PROD)) out.add(mk(v, Sink.STATIC_FIELD, cn, mn, insn, fi.owner + "." + fi.name));
+                    if (v.is(Tag.PROD)) {
+                        out.add(mk(v, Sink.STATIC_FIELD, cn, mn, insn, fi.owner + "." + fi.name));
+                        if (!isJdk(fi.owner)) holderClasses.add(fi.owner);
+                    }
                     else if (clinit && isFinalOwn(cn, fi) && keepable(v))
                         statics.computeIfAbsent(fi.owner, k -> new HashMap<>()).put(fi.name, v);
                 }

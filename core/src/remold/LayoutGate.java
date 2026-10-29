@@ -87,6 +87,11 @@ public final class LayoutGate {
 		 */
 		CHANGED_STATICNESS,
 		/**
+		 * 物理内存字段偏移发生漂移（如空洞填补、类型重排、基类字段插入），且检测到存在偏移量或访问器缓存持有者。
+		 * 见 {@code remold.offset.SuperclassDriftGate} 与 {@code remold.offset.LayoutPredictor}。
+		 */
+		LAYOUT_DRIFT,
+		/**
 		 * 基类新增实例字段导致已加载的子孙类字段物理内存偏移漂移，且检测到存在偏移量缓存持有者。
 		 * 见 {@code remold.offset.SuperclassDriftGate}。
 		 */

@@ -101,11 +101,18 @@ class LayoutGateWiringTest {
 			decide(withField(), null, "reject", Liveness.LIVE).action());
 	}
 
+	/**
+	 * 无存活实例时，<b>改类型</b>放行——旧值随布局一起丢弃，新实例走新构造器。
+	 *
+	 * <p>这条<b>不适用于删除</b>：删除的风险是"之后的实例被陈旧代码读"，与当前有无实例正交
+	 * （`docs/status.md` 风险 12）。删字段走读者判据，见 `unscannedRemovalFallsBackToLiveness`
+	 * 与 `removedFieldWithNoOutOfBatchReaderIsWaivedEvenWithLiveInstances`。</p>
+	 */
 	@Test
-	void noLiveInstancesWaivesInstanceFieldChange() {
-		LayoutDecision d = decide(withField(), withoutField(), "reject", Liveness.NONE);
+	void noLiveInstancesWaivesTypeChange() {
+		LayoutDecision d = decide(withField(), retypedField(), "reject", Liveness.NONE);
 		assertEquals(LayoutAction.WAIVE, d.action(),
-			"无存活实例的实例字段变更 → 放行（新建实例走新构造器）");
+			"a type change with no surviving instances is safe: the old values are gone either way");
 		assertFalse(d.layout().compatible(), "但仍带非兼容规则结果供调用方记 waived");
 		assertTrue(d.dropped().isEmpty());
 	}
@@ -182,11 +189,15 @@ class LayoutGateWiringTest {
 		LayoutDecision live = decideWithReaders(withField(), withoutField(), Liveness.LIVE,
 		                                        RemoldAgent.RemovedMemberScan.NOT_SCANNED);
 		assertEquals(LayoutAction.REJECT, live.action(),
-			"without a reader scan the old liveness rule must still apply");
+			"without a reader scan nothing proves the deletion is safe");
 
+		// 无实例也必须拒绝：liveness 回答的是"现在有没有实例会被错读"，而删除的风险是
+		// "之后新建的实例被陈旧代码读"——两者正交。这里退回 WAIVE 就是把"没扫成"读成
+		// "没读者"，正是风险 12 本身。
 		LayoutDecision none = decideWithReaders(withField(), withoutField(), Liveness.NONE,
 		                                        RemoldAgent.RemovedMemberScan.NOT_SCANNED);
-		assertEquals(LayoutAction.WAIVE, none.action());
+		assertEquals(LayoutAction.REJECT, none.action(),
+			"an empty liveness result says nothing about stale readers that will run later");
 	}
 
 	/**
@@ -217,7 +228,7 @@ class LayoutGateWiringTest {
 		assertEquals(LayoutAction.REJECT, d.action(),
 			"liveness says nothing about static state, so an incomplete scan cannot be waived");
 		assertNotNull(d.reason());
-		assertTrue(d.reason().contains("static"), "reason should name static state: " + d.reason());
+		assertTrue(d.reason().contains("scan"), "reason should name the incomplete scan: " + d.reason());
 	}
 
 	/**

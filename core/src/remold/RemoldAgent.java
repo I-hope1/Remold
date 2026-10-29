@@ -2879,13 +2879,17 @@ public class RemoldAgent {
 
 		boolean staticChange = LayoutGate.hasStaticFieldChange(changedFields);
 
-		// 删静态字段：静态值不随实例存在，所以和实例字段一样按"批次外读者"判，
-		// 但<b>不能</b>退回存活实例判据——扫描未完成时只能拒绝。
-		if (res.verdict() == LayoutGate.Verdict.REMOVED_FIELD && scan.removedStaticFields()
-		    && !scan.scanned() && !LayoutGate.MODE_WARN.equals(mode)) {
+		// 删除字段（实例或静态）但读者扫描未完成 → 只能拒绝。
+		//
+		// 这里不能退回下面的 liveness 判据：liveness 回答的是"**现在**有没有实例会被错读"，
+		// 而删除的风险是"**之后**新建的实例 / 静态访问被陈旧代码读"——两者正交。
+		// 无实例时 `WAIVE` 会放行，等于把"没扫成"读成"没读者"，正是风险 12 本身。
+		if (res.verdict() == LayoutGate.Verdict.REMOVED_FIELD && !scan.scanned()
+		    && !LayoutGate.MODE_WARN.equals(mode)) {
 			return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
-				"static field(s) removed but the reader scan could not complete — a static value is"
-				+ " not tied to any instance, so the liveness check cannot stand in for it");
+				"field(s) removed but the reader scan could not complete — the liveness check"
+				+ " answers a different question (whether an instance exists now, not whether stale"
+				+ " code will read the field later)");
 		}
 
 		// 删除字段（实例或静态）：按"批次外读者"判，与存活实例无关（见方法注释）。

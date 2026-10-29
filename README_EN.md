@@ -38,6 +38,52 @@ Two ready-to-run templates are included, one for Mindustry mods and one for Mine
 
 ![Minecraft Mixin re-weaving demo](docs/media/minecraft-mixin-reweave.gif)
 
+## Field note: adding a DPS dummy unit to Mindustry
+
+A full record of one real session — the game stays running, Remold hot-swaps every edit, and IDEA Debugger
+pulls the numbers on the main thread. Every figure below is measured output from the debugger, not an estimate.
+
+**What was added**
+
+- `DpsDummyUnit` — the DPS test dummy
+  - `DpsDummyEntity extends UnitEntity`, overriding `rawDamage(float)`. Decompiling v160 shows `damage()` is
+    `applyArmor → /healthMultiplier → /rules.unitHealth(team) → rawDamage`, and `damagePierce` also feeds
+    `rawDamage` directly — so this is the single convergence point for every damage path, one override covers all of it.
+  - 1e7 HP, with each hit clamped to `health - 1`, so it always survives with 1 HP and can be measured for minutes.
+  - Placed on the enemy team (`rules.waveTeam`) — player turrets and units only lock onto hostiles, so a friendly dummy never gets shot.
+  - A 1-second window reports window DPS / peak / cumulative; after 1 second of ceasefire it settles as
+    "first hit → last hit" and never charges idle time to the denominator.
+  - `EntityMapping.register("dps-dummy-entity", ...)` so saves and multiplayer can restore the custom entity by name.
+  - Reuses `UnitTypes.flare`'s texture (checking for the `error` placeholder, not just null) and refreshes
+    construction-time properties and localization in `@OnReload`.
+- `ExampleJavaMod` — spawn entry: press <kbd>F8</kbd> at the cursor to spawn a dummy (`Trigger.update` polling,
+  and it does not steal the key while the chat box is focused); plus `spawnDummyAt(x, y)` for the debugger / console.
+  Bundle strings added in both Chinese and English.
+
+**Measured (executed on the debugger's main thread, not derived)**
+
+```plaintext
+[VT-0] spawned=true cls=DpsDummyEntity team=crux hp=1.0E7
+[VT-A] healthDrop=6000.0 counted=6000.0 diff=0.0          <- 60x100 damage, counter matches actual HP loss exactly
+[VT-B] overkillDrop=9993999.0 healthLeft=1.0 alive=true   <- 2x max HP of overkill still leaves 1 HP
+[VT-C] windowDamage=0.0 windows=1 bestDps=249.99998       <- 300 damage in a 1.20s window -> 250.0/s
+[VT-E] windowsDelta=1 windowStart=-1.0 closed=true        <- settled after ceasefire: 400 damage / 1.00s -> 400.0/s
+[VT-D] dummyTotalUnchanged=true                           <- control group: hitting a vanilla flare leaves the counter alone
+```
+
+**A real bug found along the way**: `Time.time` is in ticks, while `Time.toSeconds` measures 60 (ticks per second),
+not 1/60. The first version multiplied by it, so a 1.2-second window became 4320 seconds and DPS read 0.07/s;
+dividing instead landed exactly on 250.0/s. The same pass fixed "the window never closes → 0/s printed every second after ceasefire".
+
+**Signals observed on the hot-swap path**: adding methods printed `+Added: [debugDpsSelfTest, runDpsSelfTest, lambda]`
+→ `HotSwap successful`; deleting them printed `[LAYOUT-READERS] ... dangling=0` → `-Removed: [...]` → `HotSwap successful`.
+That round both added and removed 3 methods, with no restart at any point. Removing the temporary self-check code took
+effect on the next hot-swap, and a cold start afterwards logged `[ExampleJavaMod] Loading content...` with no anomalies.
+
+**On the debugger**: `evaluate_expression` compiles its evaluation class separately, so a lambda that references
+`arc`, `mindustry`, or project types fails. The workaround was to write the checks as static methods inside the mod,
+call them from the debugger, and delete them afterwards — it works, but it is a detour.
+
 ## Up and running in 30 seconds
 
 ```bash

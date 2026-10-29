@@ -38,6 +38,49 @@ Remold 是一个 Java Agent：它盯着你的编译输出目录，文件一变�
 
 ![Minecraft Mixin 重织入演示](docs/media/minecraft-mixin-reweave.gif)
 
+## 实战记录：给 Mindustry 加一个 DPS 靶子
+
+一次真实会话的完整记录 —— 游戏开着，用 Remold 边改边热更，用 IDEA Debugger 在主线程里取数验证。
+下面每个数字都是调试器实测输出，不是推算。
+
+**新增内容**
+
+- `DpsDummyUnit` —— DPS 测试靶单位
+  - 实体 `DpsDummyEntity extends UnitEntity`，覆写 `rawDamage(float)`。反编译确认 v160 里
+    `damage()` 是 `applyArmor → /healthMultiplier → /rules.unitHealth(team) → rawDamage`，
+    `damagePierce` 也直接进 `rawDamage`，所以这是所有伤害路径的唯一汇合点，一处覆盖全统计。
+  - 血量 1e7，单次扣血夹到 `health - 1`，永远剩 1 点血，可连续测几分钟。
+  - 挂敌方阵营（`rules.waveTeam`）—— 玩家炮塔/单位只锁敌对阵营，挂自己阵营永远没人打。
+  - 1 秒窗口报「窗口 DPS / 峰值 / 累计」；停火满 1 秒按「起点 → 最后一击」结算，不把停火时间算进分母。
+  - `EntityMapping.register("dps-dummy-entity", ...)`，存档 / 联机可按名字还原自定义实体。
+  - 复用 `UnitTypes.flare` 的贴图（判 `error` 占位，不只判空），`@OnReload` 里刷新构造期属性和本地化。
+- `ExampleJavaMod` —— 刷靶入口：游戏内鼠标指位置按 <kbd>F8</kbd> 生成靶子
+  （`Trigger.update` 轮询，聊天框聚焦时不抢键）；另留 `spawnDummyAt(x, y)` 给调试器 / 控制台直调。bundle 里补了中英文案。
+
+**实测（Debugger 主线程执行，非推算）**
+
+```plaintext
+[VT-0] spawned=true cls=DpsDummyEntity team=crux hp=1.0E7
+[VT-A] healthDrop=6000.0 counted=6000.0 diff=0.0          ← 60x100 伤害，计数与实际扣血完全一致
+[VT-B] overkillDrop=9993999.0 healthLeft=1.0 alive=true   ← 打进 2 倍满血仍留 1 点血
+[VT-C] windowDamage=0.0 windows=1 bestDps=249.99998       ← 1.20s 窗口 300 伤害 → 250.0/s
+[VT-E] windowsDelta=1 windowStart=-1.0 closed=true        ← 停火收口 400 伤害/1.00s → 400.0/s
+[VT-D] dummyTotalUnchanged=true                           ← 对照组：打原版 flare 不影响靶子计数
+```
+
+**过程中抓到一个真 bug**：`Time.time` 的单位是 tick，而 `Time.toSeconds` 的实测值是 60（每秒多少 tick），
+不是 1/60。第一版乘了它，1.2 秒窗口被算成 4320 秒、DPS 变成 0.07/s；改成相除后 250.0/s 精确对上。
+同时修了「窗口永不关闭 → 停火后每秒刷 0/s」。
+
+**热更链路上的实测信号**：加方法 `+Added: [debugDpsSelfTest, runDpsSelfTest, lambda]` → `HotSwap successful`；
+删方法 `[LAYOUT-READERS] ↓ ... dangling=0` → `-Removed: [...]` → `HotSwap successful`。
+这一轮既加过 3 个方法，也删过它们，全程没重启。临时自检代码删除后热更立即生效，
+随后冷启动一次游戏，日志确认 `[ExampleJavaMod] Loading content...` 正常无异常。
+
+**关于调试器**：`evaluate_expression` 生成的求值类在独立编译，lambda 里一引用 `arc`、`mindustry`
+或项目中的类型就会失败。所以把验证步骤临时写成模组内的静态方法，由调试器调用，验证完再删掉
+—— 这条路径能走通，但要绕。
+
 ## 30 秒跑起来
 
 ```bash

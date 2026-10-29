@@ -899,6 +899,7 @@ public class RemoldAgent {
 			if (loader == null) return null;                        // bootstrap
 			if (className.contains("/0x")) return null;             // hidden class（lambda 等）
 			if (className.startsWith("remold/")) return null;        // agent 自身，避免递归
+			scanLoadedClassForOffsets(classfileBuffer);
 			if (!isProjectLocation(protectionDomain)) return null;
 			bytecodeCache.putIfAbsent(className.replace('/', '.'), classfileBuffer);
 			return null;
@@ -2720,11 +2721,136 @@ public class RemoldAgent {
 	/** 读者扫描的类数上限，防止异常路径下把整个磁盘拖进来。 */
 	private static final int MAX_READER_SCAN_CLASSES = 20_000;
 
+	private static final OffsetScanner offsetScanner = new OffsetScanner(RemoldAgent::fetchBytecodeForOffsetScanner);
+	private static final Map<String, OffsetScanner.Binding> scannedOffsetBindings = new ConcurrentHashMap<>();
+	private static volatile OffsetBindingIndex offsetIndex = OffsetBindingIndex.empty();
+
+	public static OffsetBindingIndex getOffsetIndex() {
+		return offsetIndex;
+	}
+
+	public static void registerOffsetBinding(OffsetScanner.Binding binding) {
+		if (binding != null) {
+			scannedOffsetBindings.put(binding.toString(), binding);
+			offsetIndex = OffsetBindingIndex.from(scannedOffsetBindings.values());
+		}
+	}
+
+	public static void clearOffsetIndex() {
+		scannedOffsetBindings.clear();
+		offsetIndex = OffsetBindingIndex.empty();
+	}
+
+	private static void scanLoadedClassForOffsets(byte[] classfileBuffer) {
+		if (classfileBuffer == null) return;
+		try {
+			List<OffsetScanner.Binding> list = offsetScanner.scan(classfileBuffer);
+			if (list != null && !list.isEmpty()) {
+				for (OffsetScanner.Binding b : list) {
+					scannedOffsetBindings.put(b.toString(), b);
+				}
+				offsetIndex = OffsetBindingIndex.from(scannedOffsetBindings.values());
+			}
+		} catch (Throwable ignored) { }
+	}
+
+	private static byte[] fetchBytecodeForOffsetScanner(String internalName) {
+		String dotName = dotted(internalName);
+		byte[] b = bytecodeCache.get(dotName);
+		if (b != null) return b;
+		Class<?> c = loadedClassesMap.get(dotName);
+		if (c != null) {
+			try {
+				b = fetchOriginalBytecode(c);
+				if (b != null) return b;
+			} catch (Throwable ignored) { }
+		}
+		try (InputStream in = RemoldAgent.class.getClassLoader().getResourceAsStream(internalName + ".class")) {
+			if (in != null) return in.readAllBytes();
+		} catch (Throwable ignored) { }
+		return null;
+	}
+
+	private static SuperclassDriftGate.DriftDecision checkSuperclassDriftIfApplicable(
+			String className, Class<?> targetClass, List<String> changedFields) {
+		if (targetClass == null || changedFields == null || changedFields.isEmpty()) {
+			return null;
+		}
+		boolean hasAddedInstanceField = false;
+		for (String cf : changedFields) {
+			if (cf != null && cf.startsWith("+") && !cf.startsWith("+ *") && !cf.startsWith("+*")) {
+				hasAddedInstanceField = true;
+				break;
+			}
+		}
+		if (!hasAddedInstanceField) return null;
+
+		return SuperclassDriftGate.checkSuperclassDrift(
+			internalName(className),
+			offsetIndex,
+			base -> getLoadedDescendantInternalNames(targetClass),
+			RemoldAgent::getDeclaredInstanceFields,
+			RemoldAgent::hasLiveInstances
+		);
+	}
+
+	private static Set<String> getLoadedDescendantInternalNames(Class<?> baseClass) {
+		if (baseClass == null || baseClass.isInterface()) return Collections.emptySet();
+		Set<String> descendants = new HashSet<>();
+		for (Class<?> c : loadedClassesMap.values()) {
+			if (c != null && c != baseClass && !c.isInterface() && baseClass.isAssignableFrom(c)) {
+				descendants.add(internalName(c.getName()));
+			}
+		}
+		return descendants;
+	}
+
+	private static Collection<String> getDeclaredInstanceFields(String internalName) {
+		String dotName = dotted(internalName);
+		Class<?> c = loadedClassesMap.get(dotName);
+		if (c != null) {
+			List<String> fields = new ArrayList<>();
+			for (Field f : c.getDeclaredFields()) {
+				if (!Modifier.isStatic(f.getModifiers())) {
+					fields.add(f.getName());
+				}
+			}
+			return fields;
+		}
+		byte[] b = bytecodeCache.get(dotName);
+		if (b != null) {
+			return parseInstanceFieldsFromBytecode(b);
+		}
+		return Collections.emptyList();
+	}
+
+	private static Collection<String> parseInstanceFieldsFromBytecode(byte[] b) {
+		try {
+			ClassReader cr = new ClassReader(b);
+			ClassNode cn = new ClassNode();
+			cr.accept(cn, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+			List<String> fields = new ArrayList<>();
+			for (FieldNode fn : cn.fields) {
+				if ((fn.access & Opcodes.ACC_STATIC) == 0) {
+					fields.add(fn.name);
+				}
+			}
+			return fields;
+		} catch (Throwable ignored) {
+			return Collections.emptyList();
+		}
+	}
+
 	private static void applyRedefineLayoutGate(Map<String, byte[]> newBatchBytes,
 	                                            Map<String, Path> classToPath,
 	                                            Map<String, AlignmentTransaction> transactions,
 	                                            RoundSkips skips) {
 		if (LayoutGate.MODE_OFF.equals(LAYOUT_GATE)) return;
+
+		// 扫一遍本次批次的新字节码，及时发现本批新引入的偏移量缓存
+		for (byte[] newBytes : newBatchBytes.values()) {
+			if (newBytes != null) scanLoadedClassForOffsets(newBytes);
+		}
 
 		// 本轮有"删实例字段"时才做读者扫描（内部先 diff 判断，没有删除就直接返回空表，零成本）。
 		Map<String, RemovedMemberScan> readersByClass = scanRemovedMembers(newBatchBytes, classToPath);
@@ -2776,9 +2902,12 @@ public class RemoldAgent {
 			 ? Liveness.LIVE
 			 : (hasLiveInstances(className) ? Liveness.LIVE : Liveness.NONE);
 
+			SuperclassDriftGate.DriftDecision drift = checkSuperclassDriftIfApplicable(className, targetClass, changed);
+
 			LayoutDecision d = decideLayout(className, changed, LAYOUT_GATE, liveness,
 			                                newBatchBytes.keySet(),
-			                                readersByClass.getOrDefault(className, RemovedMemberScan.NOT_SCANNED));
+			                                readersByClass.getOrDefault(className, RemovedMemberScan.NOT_SCANNED),
+			                                drift);
 
 			// 显式出口：取不到基线 / 无法 diff 就不是"放行"，而是"没法判"。
 			// 静默放行会重演"整轮静默失效"那类难排查的问题，所以必须说出来。
@@ -2982,6 +3111,15 @@ public class RemoldAgent {
 	public static LayoutDecision decideLayout(String className, byte[] oldBytes, byte[] newBytes,
 	                                          String mode, Liveness liveness, Set<String> batchNames,
 	                                          RemovedMemberScan removedFieldReaders) {
+		return decideLayout(className, oldBytes, newBytes, mode, liveness, batchNames,
+		                    removedFieldReaders, null);
+	}
+
+	/** 便捷重载（带批次外读者判定与父类字段漂移判定）。 */
+	public static LayoutDecision decideLayout(String className, byte[] oldBytes, byte[] newBytes,
+	                                          String mode, Liveness liveness, Set<String> batchNames,
+	                                          RemovedMemberScan removedFieldReaders,
+	                                          SuperclassDriftGate.DriftDecision drift) {
 		if (LayoutGate.MODE_OFF.equals(mode)) {
 			return new LayoutDecision(LayoutAction.PASS, null, hostNameOf(className), Set.of());
 		}
@@ -2994,7 +3132,7 @@ public class RemoldAgent {
 		} catch (Throwable t) {
 			return new LayoutDecision(LayoutAction.SKIP, null, hostNameOf(className), Set.of());
 		}
-		return decideLayout(className, changed, mode, liveness, batchNames, removedFieldReaders);
+		return decideLayout(className, changed, mode, liveness, batchNames, removedFieldReaders, drift);
 	}
 
 	/**
@@ -3039,12 +3177,25 @@ public class RemoldAgent {
 	public static LayoutDecision decideLayout(String className, List<String> changedFields,
 	                                          String mode, Liveness liveness, Set<String> batchNames,
 	                                          RemovedMemberScan scan) {
+		return decideLayout(className, changedFields, mode, liveness, batchNames, scan, null);
+	}
+
+	/**
+	 * 带"批次外读者"判定与"父类实例字段漂移"判定的全功能版本。
+	 */
+	public static LayoutDecision decideLayout(String className, List<String> changedFields,
+	                                          String mode, Liveness liveness, Set<String> batchNames,
+	                                          RemovedMemberScan scan,
+	                                          SuperclassDriftGate.DriftDecision drift) {
 		String host = hostNameOf(className);
 		if (LayoutGate.MODE_OFF.equals(mode)) {
 			return new LayoutDecision(LayoutAction.PASS, null, host, Set.of());
 		}
 		if (changedFields == null) {
 			return new LayoutDecision(LayoutAction.SKIP, null, host, Set.of());
+		}
+		if (scan == null) {
+			scan = RemovedMemberScan.NOT_SCANNED;
 		}
 		LayoutGate.Result res = LayoutGate.checkChangedFields(changedFields);
 
@@ -3071,6 +3222,19 @@ public class RemoldAgent {
 				return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
 					"method(s) removed and " + describeFindings(scan) + " still resolve to them");
 			}
+		}
+
+		// 父类新增实例字段导致的子孙类物理偏移漂移检查（S1 门控）：
+		// 即使本类自身字段变动看起来是兼容新增（COMPATIBLE），但若引发了子孙类实例字段漂移且存在持有者，则必须拦截
+		if (drift != null && !drift.isSafe()) {
+			LayoutGate.Result driftRes = new LayoutGate.Result(
+				LayoutGate.Verdict.SUPERCLASS_FIELD_DRIFT,
+				drift.formatReport()
+			);
+			if (LayoutGate.MODE_WARN.equals(mode)) {
+				return new LayoutDecision(LayoutAction.PASS, driftRes, host, Set.of());
+			}
+			return new LayoutDecision(LayoutAction.REJECT, driftRes, host, droppedOf(host, batchNames), drift.formatReport());
 		}
 
 		if (res.compatible() || LayoutGate.MODE_WARN.equals(mode)) {
@@ -3122,7 +3286,7 @@ public class RemoldAgent {
 	 *
 	 * <p>包内可见，供 {@code HotswapSkipSummaryTest} 直接断言这一行的措辞。</p>
 	 */
-	static String skipVerdictForLayout(LayoutDecision d, RemovedMemberScan scan) {
+	public static String skipVerdictForLayout(LayoutDecision d, RemovedMemberScan scan) {
 		String detail = d.layout() == null ? null : d.layout().detail();
 		if (detail != null) {
 			detail = detail.replace("[", "").replace("]", "").trim();
@@ -3145,7 +3309,9 @@ public class RemoldAgent {
 
 		String action = d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.REMOVED_FIELD
 		 ? "restore the removed field(s) or restart to continue"
-		 : "revert the field change or restart to continue";
+		 : (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.SUPERCLASS_FIELD_DRIFT
+		    ? "avoid adding instance field(s) to superclass or restart to continue"
+		    : "revert the field change or restart to continue");
 		return RoundSkips.verdict("LAYOUT-REJECT", detail, action);
 	}
 

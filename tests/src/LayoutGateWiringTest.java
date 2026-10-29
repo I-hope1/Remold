@@ -3,6 +3,13 @@ import remold.RemoldAgent.LayoutAction;
 import remold.RemoldAgent.LayoutDecision;
 import remold.RemoldAgent.Liveness;
 import remold.LayoutGate.Verdict;
+import remold.offset.SuperclassDriftGate;
+import remold.offset.SuperclassDriftGate.DriftDecision;
+import remold.offset.SuperclassDriftGate.DriftHit;
+import remold.offset.OffsetScanner.Binding;
+import remold.offset.OffsetScanner.Kind;
+import remold.offset.OffsetScanner.Sink;
+import remold.offset.OffsetScanner.Confidence;
 import org.junit.jupiter.api.Test;
 
 import java.util.*;
@@ -380,6 +387,51 @@ class LayoutGateWiringTest {
 		assertEquals(1, RemoldAgent.noteRejected("lg.A", "r"));
 		assertEquals(1, RemoldAgent.noteRejected("lg.B", "r"));
 		assertEquals(2, RemoldAgent.noteRejected("lg.A", "r"));
+	}
+
+	@Test
+	void driftRejectionInRejectMode() {
+		Binding binding = new Binding("lg/Sub", "x", Kind.INSTANCE_OFFSET, Sink.STATIC_FIELD, "lg/Holder", "X_OFF", "Holder.<clinit>:10", Confidence.EXACT);
+		DriftDecision drift = DriftDecision.reject("lg/Host", List.of(new DriftHit("lg/Sub", "x", binding)), List.of());
+
+		LayoutDecision d = RemoldAgent.decideLayout(HOST, withField(), addedField(), "reject", Liveness.LIVE, BATCH, null, drift);
+		assertEquals(LayoutAction.REJECT, d.action(), "漂移门拦截在 reject 模式下必须判 REJECT");
+		assertEquals(Verdict.SUPERCLASS_FIELD_DRIFT, d.layout().verdict());
+		assertEquals(HOST, d.hostName());
+		assertTrue(d.dropped().contains(HOST) && d.dropped().contains("lg.Host$1"), "宿主及其匿名类应被整组移除");
+		assertTrue(d.reason().contains("SUPERCLASS_FIELD_DRIFT"));
+	}
+
+	@Test
+	void driftPassesInWarnMode() {
+		Binding binding = new Binding("lg/Sub", "x", Kind.INSTANCE_OFFSET, Sink.STATIC_FIELD, "lg/Holder", "X_OFF", "Holder.<clinit>:10", Confidence.EXACT);
+		DriftDecision drift = DriftDecision.reject("lg/Host", List.of(new DriftHit("lg/Sub", "x", binding)), List.of());
+
+		LayoutDecision d = RemoldAgent.decideLayout(HOST, withField(), addedField(), "warn", Liveness.LIVE, BATCH, null, drift);
+		assertEquals(LayoutAction.PASS, d.action(), "warn 模式下必须放行");
+		assertEquals(Verdict.SUPERCLASS_FIELD_DRIFT, d.layout().verdict());
+		assertTrue(d.dropped().isEmpty(), "warn 模式不移除类");
+	}
+
+	@Test
+	void driftSafePassesInRejectMode() {
+		DriftDecision drift = DriftDecision.pass("lg/Host");
+
+		LayoutDecision d = RemoldAgent.decideLayout(HOST, withField(), addedField(), "reject", Liveness.LIVE, BATCH, null, drift);
+		assertEquals(LayoutAction.PASS, d.action(), "无漂移冲突时纯新增必须放行");
+		assertEquals(Verdict.COMPATIBLE, d.layout().verdict());
+		assertTrue(d.dropped().isEmpty());
+	}
+
+	@Test
+	void skipVerdictForSuperclassDrift() {
+		Binding binding = new Binding("lg/Sub", "x", Kind.INSTANCE_OFFSET, Sink.STATIC_FIELD, "lg/Holder", "X_OFF", "Holder.<clinit>:10", Confidence.EXACT);
+		DriftDecision drift = DriftDecision.reject("lg/Host", List.of(new DriftHit("lg/Sub", "x", binding)), List.of());
+		LayoutDecision d = RemoldAgent.decideLayout(HOST, withField(), addedField(), "reject", Liveness.LIVE, BATCH, null, drift);
+
+		String verdictStr = RemoldAgent.skipVerdictForLayout(d, null);
+		assertTrue(verdictStr.contains("avoid adding instance field(s) to superclass or restart to continue"),
+			"SUPERCLASS_FIELD_DRIFT 的提示词必须为建议避免给基类加实例字段: " + verdictStr);
 
 		RemoldAgent.clearRejected("lg.A");
 		RemoldAgent.clearRejected("lg.B");

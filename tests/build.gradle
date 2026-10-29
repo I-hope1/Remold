@@ -145,8 +145,8 @@ test {
 	}
 }
 
-// 断言测试总数 ≥ 302 且 0 skipped（302 = 2026-10-29 全量实测，含 ConstructorTailInjectorTest 8 个、InitFixSnapshotTimingTest 1 个、StageASkeletonTest 9 个、HashSemanticsTest 11 个、LibToolTest 5 个、OnReloadTimingTest 3 个、RemovedMemberReadersTest 23 个、LayoutGateWiringTest 29 个与 HotswapSkipSummaryTest 9 个用例）
-def hstestMinTests = 302
+// 断言测试总数 ≥ 305 且 0 skipped（305 = 2026-10-29 全量实测，含 ConstructorTailInjectorTest 8 个、InitFixSnapshotTimingTest 1 个、StageASkeletonTest 9 个、HashSemanticsTest 11 个、LibToolTest 5 个、OnReloadTimingTest 3 个、RemovedMemberReadersTest 23 个、LayoutGateWiringTest 29 个、HotswapSkipSummaryTest 9 个与 OffsetScannerTest 3 个用例）
+def hstestMinTests = 305
 tasks.register("verifyTestCount") {
 	group = "verification"
 	description = "断言 JUnit 测试数不低于基线 ${hstestMinTests}"
@@ -417,6 +417,9 @@ dcevmProbe("p05Probe", "P05Probe",
 
 dcevmProbe("twoPhaseProbe", "TwoPhaseProbe",
 	"两阶段编排端到端探针 (TwoPhaseProbe)：阶段 A → redefine → 阶段 B 补丁 → 阶段 C redefine")
+
+dcevmProbe("offsetStabilityProbe", "OffsetStabilityProbe",
+	"偏移量稳定性与漂移实测探针 (OffsetStabilityProbe)：单类加字段稳定性、父类漂移、Updater破坏与C2逆优化")
 
 // 读者扫描成本探针：不需要 DCEVM，只需要 Instrumentation 来枚举已加载类。
 tasks.register("readerScanProbe", JavaExec) {

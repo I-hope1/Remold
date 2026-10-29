@@ -72,6 +72,18 @@ public final class OffsetScanner {
         static Sym c(String s) { return new Sym('C', s, -1); }
         boolean isConst() { return k == 'C'; }
         Sym merge(Sym o) { return equals(o) ? this : UNK; }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof Sym other)) return false;
+            return k == other.k && p == other.p && Objects.equals(v, other.v);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(k, v, p);
+        }
     }
 
     enum Tag {
@@ -85,11 +97,42 @@ public final class OffsetScanner {
         PROD      // 偏移量 / Updater / 句柄: kind, a = 目标类, b = 目标字段名
     }
 
-    record Fn(String owner, String name, String desc) {}
+    record Fn(String owner, String name, String desc) {
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof Fn other)) return false;
+            return Objects.equals(owner, other.owner)
+                    && Objects.equals(name, other.name)
+                    && Objects.equals(desc, other.desc);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(owner, name, desc);
+        }
+    }
 
     record AV(int size, Tag tag, Sym a, Sym b, Kind kind, Fn fn) implements Value {
         @Override public int getSize() { return size; }
         boolean is(Tag t) { return tag == t; }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof AV other)) return false;
+            return size == other.size
+                    && tag == other.tag
+                    && Objects.equals(a, other.a)
+                    && Objects.equals(b, other.b)
+                    && kind == other.kind
+                    && Objects.equals(fn, other.fn);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(size, tag, a, b, kind, fn);
+        }
 
         static AV top(int s) { return new AV(s, Tag.TOP, null, null, null, null); }
         static AV bot(int s) { return new AV(s, Tag.BOT, null, null, null, null); }

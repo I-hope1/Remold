@@ -203,6 +203,7 @@ Launch with hot reloading:
 
 If you prefer clicking "Run / Debug" in IDEA, the script plugin prepares everything for you:
 * **Generated automatically**: opening the project or running a build writes a portable `Run_with_Remold.xml` into `.idea/runConfigurations/` (run `./gradlew generateIdeaRunConfig` to refresh it at any time);
+* **One canonical location**: the agent and plugin jars are always synced into the project-local `.gradle/remold/` (plugins under `plugins/`), so the generated configuration only ever references `$PROJECT_DIR$/.gradle/remold/...` — never `build/libs` (wiped by `clean`) or `~/.gradle` paths that break on another machine;
 * **Ready to use**: the run dropdown in the top-right corner shows **`Run with Remold`** — just hit run or debug;
 * **Native and fast**: runs as a plain IDEA JVM process with full breakpoint support and zero Gradle daemon usage.
 

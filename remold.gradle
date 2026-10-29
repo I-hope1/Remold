@@ -214,6 +214,25 @@ project.plugins.withId('java') {
             return ok
         }
 
+        // 统一的项目本地缓存目录：IDEA 运行配置只引用 $PROJECT_DIR$/.gradle/remold/ 下的副本，
+        // 与 jar 的真实来源（仓库内构建输出 / libs / Gradle 缓存 / 远端下载）解耦。
+        // 否则同一份配置里会出现 agent 指 build/libs、插件指 .gradle/remold 的混合路径。
+        def localRemoldDir = new File(project.rootDir, '.gradle/remold')
+
+        def syncIntoLocalRemold = { File src, File dest ->
+            if (src == null || !src.exists()) return dest
+            try {
+                if (src.canonicalPath == dest.canonicalPath) return src
+                if (dest.exists() && dest.length() == src.length() && dest.lastModified() == src.lastModified()) return dest
+                dest.parentFile.mkdirs()
+                java.nio.file.Files.copy(src.toPath(), dest.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                dest.setLastModified(src.lastModified())
+                return dest
+            } catch (Exception ignored) {
+                return src
+            }
+        }
+
         // 3. 解析版本与 agent jar
         def ver = remoldExt.version ?: project.findProperty('remold.version') ?: project.findProperty('remoldVersion') ?: (project.rootProject.hasProperty('remoldVersion') ? project.rootProject.property('remoldVersion') : null)
         File agentFile = remoldExt.agentJar ? new File(remoldExt.agentJar.toString()) : null
@@ -222,7 +241,10 @@ project.plugins.withId('java') {
                 project.file('libs/remold-agent.jar'),
                 project.file('remold-agent.jar'),
                 project.rootProject.file('core/build/libs/remold-agent.jar'),
-                project.rootProject.file('../core/build/libs/remold-agent.jar')
+                project.rootProject.file('../core/build/libs/remold-agent.jar'),
+                // 上次同步到项目本地的副本：clean 掉 build/libs 后仍可用，
+                // 避免静默退回 Gradle 缓存里的发布版 agent（版本可能对不上）
+                new File(localRemoldDir, 'remold-agent.jar')
             ]
             agentFile = candidates.find { it.exists() }
         }
@@ -288,19 +310,9 @@ project.plugins.withId('java') {
             )
         }
 
-        // 同步一份到项目目录 .gradle/remold/ 以支持 IDEA 运行配置使用 $PROJECT_DIR$ 便携相对路径
-        try {
-            def rootCanonical = project.rootDir.canonicalPath
-            def agentCanonical = agentFile.canonicalPath
-            if (!agentCanonical.startsWith(rootCanonical)) {
-                def localAgent = new File(project.rootDir, ".gradle/remold/remold-agent.jar")
-                if (!localAgent.exists() || localAgent.length() != agentFile.length()) {
-                    localAgent.parentFile.mkdirs()
-                    java.nio.file.Files.copy(agentFile.toPath(), localAgent.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
-                }
-                agentFile = localAgent
-            }
-        } catch (Exception ignored) { }
+        // 无论来源（仓库内构建输出 / libs / Gradle 缓存 / 远端下载），一律同步到
+        // .gradle/remold/remold-agent.jar，保证 IDEA 运行配置里 agent 与插件落在同一目录。
+        agentFile = syncIntoLocalRemold(agentFile, new File(localRemoldDir, 'remold-agent.jar'))
 
         // 4. 自动推导编译输出与资源目录并拼装监听路径
         def classesDirs = sourceSets.main.output.classesDirs.files
@@ -363,7 +375,8 @@ project.plugins.withId('java') {
         remoldExt.pluginJars.each { explicit ->
             def f = project.file(explicit)
             if (f.exists()) {
-                pluginJars.add(f)
+                // 同样落到 .gradle/remold/plugins/，避免运行配置里出现仓库外的绝对路径
+                pluginJars.add(syncIntoLocalRemold(f, new File(localRemoldDir, "plugins/${f.name}")))
             } else {
                 logger.warn("[Remold] 指定的插件 Jar 不存在: ${f.absolutePath}")
             }
@@ -430,20 +443,9 @@ project.plugins.withId('java') {
                 }
 
                 if (resolvedPluginJar != null && resolvedPluginJar.exists()) {
-                    // 同步到项目本地 .gradle/remold/plugins/ 下以支持 IDEA 相对路径
-                    try {
-                        def rootCanonical = project.rootDir.canonicalPath
-                        def pluginCanonical = resolvedPluginJar.canonicalPath
-                        if (!pluginCanonical.startsWith(rootCanonical)) {
-                            def localPlugin = new File(project.rootDir, ".gradle/remold/plugins/${resolvedPluginJar.name}")
-                            if (!localPlugin.exists() || localPlugin.length() != resolvedPluginJar.length()) {
-                                localPlugin.parentFile.mkdirs()
-                                java.nio.file.Files.copy(resolvedPluginJar.toPath(), localPlugin.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
-                            }
-                            resolvedPluginJar = localPlugin
-                        }
-                    } catch (Exception ignored) { }
-                    pluginJars.add(resolvedPluginJar)
+                    // 与 agent 同口径：统一落到 .gradle/remold/plugins/，
+                    // IDEA 配置里不再混入 plugin-x/build/libs 这类随 clean 消失的路径
+                    pluginJars.add(syncIntoLocalRemold(resolvedPluginJar, new File(localRemoldDir, "plugins/${resolvedPluginJar.name}")))
                 } else {
                     logger.warn("[Remold] 未找到插件 remold-plugin-${pluginName} 的 Jar 包，若已内嵌或无需外部 Jar 可忽略。")
                 }

@@ -198,6 +198,7 @@ apply(plugin = "io.github.i-hope1.remold")
 
 对于习惯在 IDEA 中直接点击 "Run / Debug" 的开发者，Remold 脚本插件提供了全自动就绪 IDEA 运行配置的能力：
 * **全自动就绪**：在 IntelliJ IDEA 打开项目或执行构建时，插件会自动解析参数并在 `.idea/runConfigurations/` 下生成便携式的 `Run_with_Remold.xml`（亦可随时运行 `./gradlew generateIdeaRunConfig` 强制刷新）；
+* **路径统一**：agent 与插件 Jar 一律同步到项目本地 `.gradle/remold/`（插件在 `plugins/` 子目录），运行配置只引用 `$PROJECT_DIR$/.gradle/remold/...`，不会混入 `build/libs` 这类会被 `clean` 清掉、或 `~/.gradle` 这类跨机器失效的绝对路径；
 * **开箱即用**：用 IDEA 打开项目后，右上角运行下拉菜单将直接出现 **`Run with Remold`**，点击运行或调试即可；
 * **极速原生**：直接使用 IDEA 原生 JVM 进程运行，完美支持断点调试，零 Gradle Daemon 占用。
 

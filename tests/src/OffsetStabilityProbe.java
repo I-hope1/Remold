@@ -78,9 +78,14 @@ public class OffsetStabilityProbe {
 		File base = Files.createTempDirectory("offset_stability_probe").toFile();
 		try {
 			probeA_SingleClassStability(inst, javac, base);
+			probeA3_RedefineVsCleanLoadPrediction(inst, javac, base);
+			probeA4_FieldDeletionLayout(inst, javac, base);
 			probeB_SuperclassDrift(inst, javac, base);
 			probeC_AccessorCorruptionAndGate(inst, javac, base);
+			probeE_MethodHandleAccessorUnderDrift(inst, javac, base);
+			probeF_UpdaterOffsetC2ConstantFolding(inst, javac, base);
 			probeD_C2Deopt(inst, javac, base);
+			probeD2_InliningChainDeopt(inst, javac, base);
 		} finally {
 			deleteRecursively(base);
 		}
@@ -233,6 +238,198 @@ public class OffsetStabilityProbe {
 		check(off_s1_v1 != off_ref_s1_v2,
 		      "Empirical finding: existing s1 pushed from " + off_s1_v1 + " to " + off_ref_s1_v2 + " by primitive clustering");
 		checkEq(off_i1_v1, off_ref_i1_v2, "RefClass.i1 primitive offset remained unchanged");
+	}
+
+	// =========================================================================
+	// Probe A3: Redefine Layout == Clean-Load Layout Prediction (LayoutPredictor)
+	// =========================================================================
+
+	private static final String SRC_PRED_V1 = """
+		package probea3;
+		public class PredTarget {
+		    public byte b1 = 1;
+		    public int i1 = 2;
+		    public Object o1 = "hello";
+		}
+		""";
+
+	private static final String SRC_PRED_V2 = """
+		package probea3;
+		public class PredTarget {
+		    public byte b1 = 1;
+		    public short s1 = 3;
+		    public int i1 = 2;
+		    public long l1 = 4L;
+		    public double d1 = 5.0;
+		    public Object o1 = "hello";
+		    public String str1 = "world";
+		}
+		""";
+
+	private static final String SRC_PRED_GP_V1 = """
+		package probea3;
+		public class GrandParent {
+		    public int g1 = 1;
+		}
+		""";
+
+	private static final String SRC_PRED_GP_V2 = """
+		package probea3;
+		public class GrandParent {
+		    public int g1 = 1;
+		    public long g2 = 99L;
+		}
+		""";
+
+	private static final String SRC_PRED_P = """
+		package probea3;
+		public class Parent extends GrandParent {
+		    public long p1 = 2L;
+		}
+		""";
+
+	private static final String SRC_PRED_C = """
+		package probea3;
+		public class Child extends Parent {
+		    public int c1 = 3;
+		    public Object c2 = "c";
+		}
+		""";
+
+	private static void probeA3_RedefineVsCleanLoadPrediction(Instrumentation inst, String javac, File base) throws Exception {
+		System.out.println("\n--- [Probe A3.1] Layout prediction on single complex class ---");
+		File workA3 = new File(base, "probe_a3");
+		File v1Dir = compile(javac, new File(workA3, "v1"), "PredTarget.java", SRC_PRED_V1);
+		File v2Dir = compile(javac, new File(workA3, "v2"), "PredTarget.java", SRC_PRED_V2);
+
+		URLClassLoader liveCl = new URLClassLoader(new URL[]{v1Dir.toURI().toURL()},
+		                                           OffsetStabilityProbe.class.getClassLoader());
+		Class<?> liveClass = Class.forName("probea3.PredTarget", true, liveCl);
+
+		// 1. Clean load via throwaway classloader (LayoutPredictor simulation)
+		URLClassLoader throwawayCl = new URLClassLoader(new URL[]{v2Dir.toURI().toURL()}, null);
+		Class<?> predClass = Class.forName("probea3.PredTarget", true, throwawayCl);
+
+		Map<String, Long> predOffsets = new LinkedHashMap<>();
+		for (String fn : List.of("b1", "s1", "i1", "l1", "d1", "o1", "str1")) {
+			predOffsets.put(fn, UNSAFE.objectFieldOffset(predClass.getField(fn)));
+		}
+		System.out.println("   predicted clean-load offsets: " + predOffsets);
+
+		// 2. Perform live redefinition
+		byte[] v2Bytes = Files.readAllBytes(new File(v2Dir, "probea3/PredTarget.class").toPath());
+		inst.redefineClasses(new ClassDefinition(liveClass, v2Bytes));
+
+		Map<String, Long> actualOffsets = new LinkedHashMap<>();
+		for (String fn : List.of("b1", "s1", "i1", "l1", "d1", "o1", "str1")) {
+			actualOffsets.put(fn, UNSAFE.objectFieldOffset(liveClass.getField(fn)));
+		}
+		System.out.println("   actual post-redefine offsets: " + actualOffsets);
+
+		checkEq(predOffsets, actualOffsets, "Predicted clean-load layout matches DCEVM redefined layout exactly on single class");
+
+		System.out.println("\n--- [Probe A3.2] Layout prediction across 3-level inheritance ---");
+		File workInherit = new File(base, "probe_a3_inherit");
+		File v1InhDir = compileMulti(javac, new File(workInherit, "v1"),
+		                             Map.of("GrandParent.java", SRC_PRED_GP_V1,
+		                                    "Parent.java", SRC_PRED_P,
+		                                    "Child.java", SRC_PRED_C));
+		File v2InhDir = compileMulti(javac, new File(workInherit, "v2"),
+		                             Map.of("GrandParent.java", SRC_PRED_GP_V2,
+		                                    "Parent.java", SRC_PRED_P,
+		                                    "Child.java", SRC_PRED_C));
+
+		URLClassLoader liveInhCl = new URLClassLoader(new URL[]{v1InhDir.toURI().toURL()},
+		                                              OffsetStabilityProbe.class.getClassLoader());
+		Class<?> liveGP = Class.forName("probea3.GrandParent", true, liveInhCl);
+		Class<?> liveChild = Class.forName("probea3.Child", true, liveInhCl);
+
+		// Predict via clean load
+		URLClassLoader predInhCl = new URLClassLoader(new URL[]{v2InhDir.toURI().toURL()}, null);
+		Class<?> predChild = Class.forName("probea3.Child", true, predInhCl);
+
+		Map<String, Long> predInhOffsets = new LinkedHashMap<>();
+		for (String fn : List.of("g1", "g2", "p1", "c1", "c2")) {
+			predInhOffsets.put(fn, UNSAFE.objectFieldOffset(predChild.getField(fn)));
+		}
+		System.out.println("   predicted inheritance offsets: " + predInhOffsets);
+
+		// Redefine GrandParent
+		byte[] gpV2Bytes = Files.readAllBytes(new File(v2InhDir, "probea3/GrandParent.class").toPath());
+		inst.redefineClasses(new ClassDefinition(liveGP, gpV2Bytes));
+
+		Map<String, Long> actualInhOffsets = new LinkedHashMap<>();
+		for (String fn : List.of("g1", "g2", "p1", "c1", "c2")) {
+			actualInhOffsets.put(fn, UNSAFE.objectFieldOffset(liveChild.getField(fn)));
+		}
+		System.out.println("   actual inheritance offsets:    " + actualInhOffsets);
+
+		checkEq(predInhOffsets, actualInhOffsets,
+		        "Predicted clean-load layout matches DCEVM redefined layout across 3-level inheritance");
+	}
+
+	// =========================================================================
+	// Probe A4: Field Deletion Layout (Hole Retention vs Compression)
+	// =========================================================================
+
+	private static final String SRC_DEL_V1 = """
+		package probea4;
+		public class DelTarget {
+		    public int a = 10;
+		    public int b = 20;
+		    public int c = 30;
+		    public long d = 40L;
+		}
+		""";
+
+	private static final String SRC_DEL_V2 = """
+		package probea4;
+		public class DelTarget {
+		    public int a = 10;
+		    public int c = 30;
+		    public long d = 40L;
+		}
+		""";
+
+	private static void probeA4_FieldDeletionLayout(Instrumentation inst, String javac, File base) throws Exception {
+		System.out.println("\n--- [Probe A4] Field deletion layout behavior ---");
+		File workA4 = new File(base, "probe_a4");
+		File v1Dir = compile(javac, new File(workA4, "v1"), "DelTarget.java", SRC_DEL_V1);
+		File v2Dir = compile(javac, new File(workA4, "v2"), "DelTarget.java", SRC_DEL_V2);
+
+		URLClassLoader clA4 = new URLClassLoader(new URL[]{v1Dir.toURI().toURL()},
+		                                         OffsetStabilityProbe.class.getClassLoader());
+		Class<?> delClass = Class.forName("probea4.DelTarget", true, clA4);
+		Object liveObj = delClass.getConstructor().newInstance();
+
+		long off_a_v1 = UNSAFE.objectFieldOffset(delClass.getField("a"));
+		long off_b_v1 = UNSAFE.objectFieldOffset(delClass.getField("b"));
+		long off_c_v1 = UNSAFE.objectFieldOffset(delClass.getField("c"));
+		long off_d_v1 = UNSAFE.objectFieldOffset(delClass.getField("d"));
+		System.out.printf("   pre-deletion layout: a=%d, b=%d, c=%d, d=%d%n",
+		                  off_a_v1, off_b_v1, off_c_v1, off_d_v1);
+
+		byte[] v2Bytes = Files.readAllBytes(new File(v2Dir, "probea4/DelTarget.class").toPath());
+		inst.redefineClasses(new ClassDefinition(delClass, v2Bytes));
+
+		long off_a_v2 = UNSAFE.objectFieldOffset(delClass.getField("a"));
+		long off_c_v2 = UNSAFE.objectFieldOffset(delClass.getField("c"));
+		long off_d_v2 = UNSAFE.objectFieldOffset(delClass.getField("d"));
+		System.out.printf("   post-deletion layout: a=%d, c=%d, d=%d (deleted b originally at %d)%n",
+		                  off_a_v2, off_c_v2, off_d_v2, off_b_v1);
+
+		int valA = delClass.getField("a").getInt(liveObj);
+		int valC = delClass.getField("c").getInt(liveObj);
+		long valD = delClass.getField("d").getLong(liveObj);
+		System.out.printf("   pre-existing instance read: a=%d, c=%d, d=%d%n", valA, valC, valD);
+
+		boolean compressed = (off_c_v2 == off_b_v1);
+		System.out.println("   deletion behavior: " + (compressed ? "COMPRESSED (b's slot reclaimed)" : "HOLE-RETAINED (uncompressed)"));
+
+		// Assert invariant: existing instance values must be verified against whichever layout HotSpot chose
+		checkEq(10, valA, "Instance field a remains intact");
+		checkEq(30, valC, "Instance field c value is intact on pre-existing instance");
+		checkEq(40L, valD, "Instance field d value is intact on pre-existing instance");
 	}
 
 	// =========================================================================
@@ -405,6 +602,179 @@ public class OffsetStabilityProbe {
 	}
 
 	// =========================================================================
+	// Probe E: MethodHandle / Field Accessor Under Superclass Drift
+	// =========================================================================
+
+	private static final String SRC_BASE_E_V1 = """
+		package probee;
+		public class BaseE {
+		    public int b1 = 10;
+		}
+		""";
+
+	private static final String SRC_BASE_E_V2 = """
+		package probee;
+		public class BaseE {
+		    public int b1 = 10;
+		    public long b2 = 999999999L;
+		}
+		""";
+
+	private static final String SRC_SUB_E = """
+		package probee;
+		public class SubE extends BaseE {
+		    public int s1 = 100;
+		    public long s2 = 200L;
+		}
+		""";
+
+	private static void probeE_MethodHandleAccessorUnderDrift(Instrumentation inst, String javac, File base) throws Exception {
+		System.out.println("\n--- [Probe E] Field.get/set accessor behavior under superclass drift ---");
+		File workE = new File(base, "probe_e");
+		File v1Dir = compileMulti(javac, new File(workE, "v1"),
+		                          Map.of("BaseE.java", SRC_BASE_E_V1, "SubE.java", SRC_SUB_E));
+		File v2Dir = compile(javac, new File(workE, "v2"), "BaseE.java", SRC_BASE_E_V2);
+
+		URLClassLoader clE = new URLClassLoader(new URL[]{v1Dir.toURI().toURL()},
+		                                        OffsetStabilityProbe.class.getClassLoader());
+		Class<?> baseE = Class.forName("probee.BaseE", true, clE);
+		Class<?> subE = Class.forName("probee.SubE", true, clE);
+
+		Object subObj = subE.getConstructor().newInstance();
+
+		// Cache the Field instance prior to redefinition
+		Field cachedField_s1 = subE.getField("s1");
+		long off_s1_v1 = UNSAFE.objectFieldOffset(cachedField_s1);
+		checkEq(100, cachedField_s1.getInt(subObj), "Baseline confirmation: cached Field reads initial s1=100");
+
+		// Redefine BaseE with added long b2 -> shifts subE fields by 8 bytes
+		byte[] baseV2Bytes = Files.readAllBytes(new File(v2Dir, "probee/BaseE.class").toPath());
+		inst.redefineClasses(new ClassDefinition(baseE, baseV2Bytes));
+
+		long off_s1_v2 = UNSAFE.objectFieldOffset(subE.getField("s1"));
+		System.out.printf("   SubE.s1 offset shifted from %d to %d%n", off_s1_v1, off_s1_v2);
+
+		// Now test reading through the PRE-EXISTING cached Field instance
+		int valViaCachedField = cachedField_s1.getInt(subObj);
+		System.out.println("   val via pre-redefine cached Field: " + valViaCachedField);
+
+		// And through a freshly fetched Field instance
+		Field freshField_s1 = subE.getField("s1");
+		int valViaFreshField = freshField_s1.getInt(subObj);
+		System.out.println("   val via newly fetched Field:       " + valViaFreshField);
+
+		// Test writing via cached Field instance
+		cachedField_s1.setInt(subObj, 888);
+		int currentS1 = subE.getField("s1").getInt(subObj);
+		System.out.println("   after cachedField.setInt(subObj, 888), live s1 is: " + currentS1);
+
+		// Evaluate whether accessor held stale offset or updated
+		if (valViaCachedField == 100 && currentS1 == 888) {
+			System.out.println("   [Finding] Cached Field object accessor auto-updated across class redefinition!");
+			check(true, "Cached Field object accessor automatically updated to new offset");
+		} else {
+			System.out.println("   [Finding] Cached Field object accessor held stale offset!");
+			check(false, "Cached Field object held stale offset (val=" + valViaCachedField + ", currentS1=" + currentS1 + ")");
+		}
+	}
+
+	// =========================================================================
+	// Probe F: AtomicIntegerFieldUpdaterImpl Offset C2 Constant Folding
+	// =========================================================================
+
+	private static final String SRC_TARGET_F = """
+		package probef;
+		public class TargetF {
+		    public volatile int val = 12345;
+		    public volatile int val2 = 67890;
+		}
+		""";
+
+	private static final String SRC_HOLDER_F = """
+		package probef;
+		import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+		public class HolderF {
+		    public static final AtomicIntegerFieldUpdater<TargetF> UPDATER =
+		        AtomicIntegerFieldUpdater.newUpdater(TargetF.class, "val");
+		}
+		""";
+
+	private static final String SRC_CALLER_F = """
+		package probef;
+		public class CallerF {
+		    public static int readVal(TargetF t) {
+		        return HolderF.UPDATER.get(t);
+		    }
+		    public static void loop(TargetF t, int n) {
+		        for (int i = 0; i < n; i++) {
+		            readVal(t);
+		        }
+		    }
+		}
+		""";
+
+	private static void probeF_UpdaterOffsetC2ConstantFolding(Instrumentation inst, String javac, File base) throws Exception {
+		System.out.println("\n--- [Probe F] AtomicIntegerFieldUpdater offset C2 constant folding ---");
+		File workF = new File(base, "probe_f");
+		File outDir = compileMulti(javac, new File(workF, "classes"),
+		                           Map.of("TargetF.java", SRC_TARGET_F,
+		                                  "HolderF.java", SRC_HOLDER_F,
+		                                  "CallerF.java", SRC_CALLER_F));
+
+		URLClassLoader clF = new URLClassLoader(new URL[]{outDir.toURI().toURL()},
+		                                        OffsetStabilityProbe.class.getClassLoader());
+		Class<?> targetClass = Class.forName("probef.TargetF", true, clF);
+		Class<?> holderClass = Class.forName("probef.HolderF", true, clF);
+		Class<?> callerClass = Class.forName("probef.CallerF", true, clF);
+
+		Object targetObj = targetClass.getConstructor().newInstance();
+
+		// Warm up CallerF.readVal to ensure it is compiled by C2
+		callerClass.getMethod("loop", targetClass, int.class).invoke(null, targetObj, 30_000);
+		int initialVal = (int) callerClass.getMethod("readVal", targetClass).invoke(null, targetObj);
+		checkEq(12345, initialVal, "Baseline: CallerF reads initial TargetF.val=12345");
+
+		// Locate the private final long offset inside HolderF.UPDATER
+		Object updaterInstance = holderClass.getField("UPDATER").get(null);
+		Field offsetField = null;
+		Class<?> curr = updaterInstance.getClass();
+		while (curr != null && curr != Object.class) {
+			for (Field f : curr.getDeclaredFields()) {
+				if (f.getName().equals("offset") && f.getType() == long.class) {
+					offsetField = f;
+					break;
+				}
+			}
+			if (offsetField != null) break;
+			curr = curr.getSuperclass();
+		}
+		if (offsetField == null) {
+			System.err.println("   [SKIP] Could not find 'offset' field in " + updaterInstance.getClass());
+			return;
+		}
+
+		long offVal2 = UNSAFE.objectFieldOffset(targetClass.getField("val2"));
+		long updaterOffsetFieldOffset = UNSAFE.objectFieldOffset(offsetField);
+		// Mutate updaterInstance.offset to point to val2
+		UNSAFE.putLongVolatile(updaterInstance, updaterOffsetFieldOffset, offVal2);
+
+		int valImmediately = (int) callerClass.getMethod("readVal", targetClass).invoke(null, targetObj);
+		System.out.printf("   after mutating Updater.offset in heap (no retransform): CallerF.readVal()=%d%n", valImmediately);
+
+		boolean folded = (valImmediately == 12345);
+		System.out.println("   [Finding] C2 constant folding of Updater.offset: " + (folded ? "YES (folded into nmethod)" : "NO (heap dereferenced)"));
+
+		if (folded) {
+			inst.retransformClasses(callerClass);
+			int valAfterDeopt = (int) callerClass.getMethod("readVal", targetClass).invoke(null, targetObj);
+			System.out.printf("   after CallerF retransform: CallerF.readVal()=%d%n", valAfterDeopt);
+			checkEq(67890, valAfterDeopt, "Retransforming CallerF deoptimizes folded Updater.offset call");
+		} else {
+			checkEq(67890, valImmediately, "Updater.offset was loaded dynamically from heap");
+		}
+	}
+
+	// =========================================================================
 	// Probe D: C2 Constant Folding & Caller Retransform Deoptimization
 	// =========================================================================
 
@@ -505,6 +875,117 @@ public class OffsetStabilityProbe {
 
 		checkEq(67890, valAfterCallerRetransform,
 		        "Retransforming CallerD forces JIT deoptimization and successfully picks up updated offset -> val2=67890");
+	}
+
+	// =========================================================================
+	// Probe D2: Inlining Chain Deoptimization (evol_method)
+	// =========================================================================
+
+	private static final String SRC_TARGET_D2 = """
+		package probed2;
+		public class TargetD2 {
+		    public int val = 11111;
+		    public int val2 = 22222;
+		}
+		""";
+
+	private static final String SRC_HOLDER_D2 = """
+		package probed2;
+		import sun.misc.Unsafe;
+		import java.lang.reflect.Field;
+		public class HolderD2 {
+		    public static final Unsafe U;
+		    public static final long OFFSET;
+		    static {
+		        try {
+		            Field f = Unsafe.class.getDeclaredField("theUnsafe");
+		            f.setAccessible(true);
+		            U = (Unsafe) f.get(null);
+		            OFFSET = U.objectFieldOffset(TargetD2.class.getField("val"));
+		        } catch (Exception e) { throw new Error(e); }
+		    }
+		}
+		""";
+
+	private static final String SRC_CALLER_INNER_D2 = """
+		package probed2;
+		public class CallerInnerD2 {
+		    public static int readVal(TargetD2 t) {
+		        return HolderD2.U.getInt(t, HolderD2.OFFSET);
+		    }
+		}
+		""";
+
+	private static final String SRC_CALLER_OUTER_D2 = """
+		package probed2;
+		public class CallerOuterD2 {
+		    public static int callOuter(TargetD2 t) {
+		        return CallerInnerD2.readVal(t);
+		    }
+		    public static void loop(TargetD2 t, int n) {
+		        for (int i = 0; i < n; i++) {
+		            callOuter(t);
+		        }
+		    }
+		}
+		""";
+
+	private static void probeD2_InliningChainDeopt(Instrumentation inst, String javac, File base) throws Exception {
+		System.out.println("\n--- [Probe D2] Inlining chain deoptimization (callee vs caller retransform) ---");
+		File workD2 = new File(base, "probe_d2");
+		File outDir = compileMulti(javac, new File(workD2, "classes"),
+		                           Map.of("TargetD2.java", SRC_TARGET_D2,
+		                                  "HolderD2.java", SRC_HOLDER_D2,
+		                                  "CallerInnerD2.java", SRC_CALLER_INNER_D2,
+		                                  "CallerOuterD2.java", SRC_CALLER_OUTER_D2));
+
+		URLClassLoader clD2 = new URLClassLoader(new URL[]{outDir.toURI().toURL()},
+		                                         OffsetStabilityProbe.class.getClassLoader());
+		Class<?> targetClass = Class.forName("probed2.TargetD2", true, clD2);
+		Class<?> holderClass = Class.forName("probed2.HolderD2", true, clD2);
+		Class<?> innerClass = Class.forName("probed2.CallerInnerD2", true, clD2);
+		Class<?> outerClass = Class.forName("probed2.CallerOuterD2", true, clD2);
+
+		Object targetObj = targetClass.getConstructor().newInstance();
+
+		// Warm up CallerOuterD2.loop to ensure C2 compiles callOuter AND inlines CallerInnerD2.readVal
+		outerClass.getMethod("loop", targetClass, int.class).invoke(null, targetObj, 40_000);
+		int initialVal = (int) outerClass.getMethod("callOuter", targetClass).invoke(null, targetObj);
+		checkEq(11111, initialVal, "Baseline: CallerOuterD2 reads initial TargetD2.val=11111");
+
+		String compLog = readLog("compilation.log");
+		for (String line : compLog.split("\n")) {
+			if (line.contains("CallerOuterD2") || line.contains("CallerInnerD2") || line.contains("probed2")) {
+				System.out.println("   [compilation.log] " + line.trim());
+			}
+		}
+
+		// Mutate HolderD2.OFFSET to point to val2
+		Field offsetField = holderClass.getField("OFFSET");
+		Object staticBase = UNSAFE.staticFieldBase(offsetField);
+		long staticOffset = UNSAFE.staticFieldOffset(offsetField);
+		long newTargetOffset = UNSAFE.objectFieldOffset(targetClass.getField("val2"));
+		UNSAFE.putLongVolatile(staticBase, staticOffset, newTargetOffset);
+
+		int valBeforeRetransform = (int) outerClass.getMethod("callOuter", targetClass).invoke(null, targetObj);
+		System.out.printf("   before retransform: CallerOuterD2.callOuter()=%d%n", valBeforeRetransform);
+		checkEq(11111, valBeforeRetransform, "Pre-condition: C2 inlined the constant into CallerOuter nmethod");
+
+		// Step 1: Retransform ONLY the inlined callee (CallerInnerD2)
+		inst.retransformClasses(innerClass);
+		int valAfterInnerRetransform = (int) outerClass.getMethod("callOuter", targetClass).invoke(null, targetObj);
+		System.out.printf("   after retransforming ONLY inlined callee (CallerInnerD2): callOuter()=%d%n", valAfterInnerRetransform);
+
+		if (valAfterInnerRetransform == 22222) {
+			System.out.println("   [Finding] evol_method dependency: Retransforming inlined callee automatically deoptimized outer caller!");
+			check(true, "evol_method dependency deoptimized outer caller when inlined callee was retransformed");
+		} else {
+			System.out.println("   [Finding] Retransforming inlined callee did NOT deoptimize outer caller; outer caller retransform required!");
+			inst.retransformClasses(outerClass);
+			int valAfterOuterRetransform = (int) outerClass.getMethod("callOuter", targetClass).invoke(null, targetObj);
+			System.out.printf("   after retransforming outer caller (CallerOuterD2): callOuter()=%d%n", valAfterOuterRetransform);
+			checkEq(22222, valAfterOuterRetransform, "Retransforming outer caller successfully deoptimizes compiled method");
+		}
 	}
 
 	// =========================================================================

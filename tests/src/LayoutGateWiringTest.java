@@ -342,4 +342,46 @@ class LayoutGateWiringTest {
 		assertEquals(LayoutAction.PASS, d.action(),
 			"a pure field addition must not be rejected because some unrelated scan reported readers");
 	}
+
+	// ------------------------------------------------------------------------------------------------
+	// 重复拒绝的诊断：被拒不改运行态，所以下一次会 diff 出同一条变更、得到同一个结论
+	// ------------------------------------------------------------------------------------------------
+
+	/**
+	 * 拒绝只把类移出本批，运行态字节码不变，于是源码与运行态之间的差异永久保留——下一次热更会
+	 * 得到同一个结论。这不是缺陷（放行就会抛 {@code LinkageError}），但用户容易误以为"再热一次
+	 * 就好了"，所以统计次数并在第二次起额外提示。
+	 */
+	@Test
+	void repeatedRejectionForTheSameReasonIsCounted() {
+		String cls = "lg.Stuck";
+		RemoldAgent.clearRejected(cls);
+
+		assertEquals(1, RemoldAgent.noteRejected(cls, "same reason"));
+		assertEquals(2, RemoldAgent.noteRejected(cls, "same reason"));
+		assertEquals(3, RemoldAgent.noteRejected(cls, "same reason"));
+
+		// 换无关输入对照：原因变了就是新的一次拒绝，计数从 1 重新开始
+		assertEquals(1, RemoldAgent.noteRejected(cls, "a different reason"));
+
+		// 成功落地后清除，下一次又从 1 开始
+		RemoldAgent.clearRejected(cls);
+		assertEquals(1, RemoldAgent.noteRejected(cls, "a different reason"));
+
+		RemoldAgent.clearRejected(cls);
+	}
+
+	/** 换无关输入对照：另一个类的记录互不影响。 */
+	@Test
+	void rejectionHistoryIsPerClass() {
+		RemoldAgent.clearRejected("lg.A");
+		RemoldAgent.clearRejected("lg.B");
+
+		assertEquals(1, RemoldAgent.noteRejected("lg.A", "r"));
+		assertEquals(1, RemoldAgent.noteRejected("lg.B", "r"));
+		assertEquals(2, RemoldAgent.noteRejected("lg.A", "r"));
+
+		RemoldAgent.clearRejected("lg.A");
+		RemoldAgent.clearRejected("lg.B");
+	}
 }

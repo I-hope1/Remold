@@ -2245,6 +2245,34 @@ public class RemoldAgent {
 	/** 布局门拒绝的类/宿主次数（诊断用，见 {@link #applyRedefineLayoutGate}）。 */
 	static final java.util.concurrent.atomic.AtomicLong LAYOUT_GATE_REJECTED =
 	 new java.util.concurrent.atomic.AtomicLong();
+
+	/** 一次拒绝的记录：原因 + 同一原因连续出现的次数。 */
+	private record RejectRecord(String reason, int count) { }
+
+	/**
+	 * 类名 → 最近一次拒绝的记录。
+	 *
+	 * <p>拒绝<b>不会</b>更新运行态字节码（{@link #dropFromBatch} 只把类移出本批），而源码已经改了，
+	 * 于是源码与运行态之间的差异会一直保留：下一次热更会 diff 出同一条变更、得到同一个结论。
+	 * 这不是缺陷——放行就会让批次外读者在运行期抛 {@code LinkageError}——但用户很容易误以为
+	 * "再热一次就好了"。这里统计次数，第二次起额外提示"这是循环，需要重启"。</p>
+	 *
+	 * <p>成功重定义后清除（见 {@link #clearRejected}）。</p>
+	 */
+	private static final Map<String, RejectRecord> REJECT_HISTORY = new ConcurrentHashMap<>();
+
+	/** 记录一次拒绝，返回同一原因连续出现的次数（含本次）。 */
+	public static int noteRejected(String className, String reason) {
+		RejectRecord prev = REJECT_HISTORY.get(className);
+		int n = (prev != null && prev.reason().equals(reason)) ? prev.count() + 1 : 1;
+		REJECT_HISTORY.put(className, new RejectRecord(reason, n));
+		return n;
+	}
+
+	/** 该类成功落地后清除拒绝记录。 */
+	public static void clearRejected(String className) {
+		REJECT_HISTORY.remove(className);
+	}
 	/** 布局门"放行但记录"的次数（warn 模式 / 无存活实例 waive）。 */
 	static final java.util.concurrent.atomic.AtomicLong LAYOUT_GATE_WAIVED =
 	 new java.util.concurrent.atomic.AtomicLong();
@@ -2627,6 +2655,7 @@ public class RemoldAgent {
 
 			if (d.action() == LayoutAction.WAIVE_NO_READERS) {
 				LAYOUT_GATE_WAIVED.incrementAndGet();
+				clearRejected(className);
 				RemovedMemberScan memberScan =
 					readersByClass.getOrDefault(className, RemovedMemberScan.NOT_SCANNED);
 				StringBuilder note = new StringBuilder();
@@ -2651,6 +2680,7 @@ public class RemoldAgent {
 
 			if (d.action() == LayoutAction.WAIVE) {
 				LAYOUT_GATE_WAIVED.incrementAndGet();
+				clearRejected(className);
 				warn("[LAYOUT-WAIVE] " + className + ": incompatible field layout ("
 				     + d.layout().detail() + ") but no live instances; redefining anyway — new"
 				     + " instances go through the new constructor and initialize correctly.");
@@ -2662,11 +2692,22 @@ public class RemoldAgent {
 				String why = d.reason() != null
 					? d.reason()
 					: "field layout incompatible (" + (d.layout() == null ? "unknown" : d.layout().detail()) + ")";
+				int repeats = noteRejected(className, why);
 				warn("[LAYOUT-REJECT] " + className + ": REFUSED redefine — " + why + ". Host "
 				     + d.hostName() + " and its anonymous classes are"
 				     + " skipped this round; existing instances keep running the OLD code, so this edit will"
 				     + " NOT take effect for them. TO PROCEED: recreate/restart so the classes load fresh, or"
 				     + " set -Dremold.agent.layout_gate=warn to force the redefine and accept the consequences.");
+				if (repeats >= 2) {
+					// 拒绝不改运行态：类仍带旧布局，而源码已经不同 → 下次 diff 出同一条变更 → 又被拒。
+					// 用户很容易以为"再热一次就好了"，实际上只有重启或改读者能打破。
+					warn("[LAYOUT-STUCK] " + className + ": refused " + repeats + " times for the same"
+					     + " reason since its last successful redefine. The running class still holds the"
+					     + " old layout while the source no longer matches it, so every later hotswap of"
+					     + " this class will be refused the same way — including method-body-only edits,"
+					     + " which are dropped together with the whole class. Restart (or otherwise"
+					     + " recreate the class) to break the loop.");
+				}
 				for (String dropped : d.dropped()) dropFromBatch(newBatchBytes, classToPath, dropped);
 				AlignmentTransaction tx = transactions.remove(d.hostName());
 				if (tx != null) tx.rollback(false);
@@ -2675,6 +2716,7 @@ public class RemoldAgent {
 			}
 
 			// action == PASS：可能是"字段没变/纯新增"，也可能是 warn 模式下的强制放行。
+			clearRejected(className);
 			if (d.layout() != null && !d.layout().compatible()) {
 				LAYOUT_GATE_WAIVED.incrementAndGet();
 				warn("[LAYOUT-WARN] " + className + ": incompatible field layout ("

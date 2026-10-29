@@ -29,7 +29,8 @@ public class PlayerService {
     }
 
     /**
-     * 当该类被热更重定义后，Remold 会在主线程安全调度执行 @OnReload 标注的生命周期方法。
+     * 本类被热更重定义后，Remold 会对<b>每个存活实例</b>各调用一次本方法（这里是实例方法，
+     * 不是"应用收到热更通知"）：应用里创建了几个 PlayerService，下面这段就打印几次。
      */
     @OnReload
     private void onReload() {

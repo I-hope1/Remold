@@ -1,6 +1,9 @@
 package remold;
 
 import remold.annotation.*;
+import remold.offset.OffsetBindingIndex;
+import remold.offset.OffsetScanner;
+import remold.offset.SuperclassDriftGate;
 import remold.profiler.DynamicProfilerAPI;
 import remold.ref.HotswapBridge;
 import remold.ref.InitFix;
@@ -1295,6 +1298,8 @@ public class RemoldAgent {
 
 		Map<String, byte[]> newBatchBytes = new LinkedHashMap<>(changedFiles.size());
 		Map<String, Path>   classToPath   = new HashMap<>(changedFiles.size());
+		// 本轮"改了但没生效"的台账：摘要行据此点名跳过了谁（见 RoundSkips）。
+		RoundSkips skips = new RoundSkips();
 		for (Path p : changedFiles) {
 			try {
 				byte[] bc = Files.readAllBytes(p);
@@ -1303,7 +1308,10 @@ public class RemoldAgent {
 					newBatchBytes.put(cn, bc);
 					classToPath.put(cn, p);
 				} else {
-					skippedCount++;
+					// 不并进 skippedCount：那个计数只统计"磁盘哈希没变"的类，含义是"本来就没改"。
+					// 读不出类名是"改了但读不了"，属于跳过，进台账由摘要点名。
+					skips.add(p.toString(), RoundSkips.verdict("NO-CLASS-NAME",
+						"unreadable class file", "recompile it and hot-swap again"));
 					error("[SKIP] No className: " + p);
 				}
 			} catch (Throwable ignored) { }
@@ -1375,7 +1383,7 @@ public class RemoldAgent {
 			if (!ANON_ALIGN) {
 				// 总开关关闭：**不能**退化成"按类名照旧重定义" —— 那正是编号位移篡夺场景本身。
 				// 唯一安全的关闭语义是把该宿主组整体移出本批重定义。
-				rejectHostGroup(newBatchBytes, classToPath, hostName,
+				rejectHostGroup(newBatchBytes, classToPath, hostName, skips,
 				 new AnonClassAligner.AlignmentRejectedException(hostSlash,
 					"anonymous class alignment disabled (remold.agent.anon_align=false)"));
 				continue;
@@ -1413,7 +1421,7 @@ public class RemoldAgent {
 				// 结果是"本轮所有类的热更静默失效"（异常最终只留在 ScheduledFuture 里，无人观测）；
 				// 而对齐失败也不能只跳过匿名类 —— 该宿主的新字节码会引用到未对齐的 Foo$N。
 				// 因此正确做法是连宿主一起移出本批，其余宿主照常处理。
-				rejectHostGroup(newBatchBytes, classToPath, hostName, t);
+				rejectHostGroup(newBatchBytes, classToPath, hostName, skips, t);
 				continue;
 			}
 
@@ -1483,7 +1491,7 @@ public class RemoldAgent {
 		//
 		// 位置：宿主匿名对齐之后、实例布局门之前。局部类不在匿名对齐视野内（名字含简单名，被准入闸门
 		// 拒绝），故单开一道门。命中即把宿主及其 `host$...` 整族移出本批，复用同一宿主组拒绝通道。
-		applyLocalClassGuard(newBatchBytes, classToPath, transactions);
+		applyLocalClassGuard(newBatchBytes, classToPath, transactions, skips);
 
 		// ---- 实例状态布局安全门（docs/topology/07-layout-gate-and-risks.md §1，全体类，非仅匿名类）----
 		//
@@ -1494,7 +1502,7 @@ public class RemoldAgent {
 		// 分工：对齐器的 Tier 4 门只挡匿名类的**合成捕获字段**（ClassDiff 会过滤掉它们，
 		// 这里看不见）；本门只看现成的 `ClassDiff.changedFields`，即**非合成**字段的
 		// 删/改类型/改静态性。纯新增放行（交给 InitFix）。
-		applyRedefineLayoutGate(newBatchBytes, classToPath, transactions);
+		applyRedefineLayoutGate(newBatchBytes, classToPath, transactions, skips);
 
 		for (Map.Entry<String, byte[]> batchEntry : newBatchBytes.entrySet()) {
 			String className = batchEntry.getKey();
@@ -1510,6 +1518,8 @@ public class RemoldAgent {
 			try {
 				if (isBlacklisted(className)) {
 					if (DEBUG) log("[SKIP-BLACKLIST] " + className);
+					skips.add(className, RoundSkips.verdict("BLACKLIST",
+						"matches remold.agent.hotswap.blacklist", "drop the prefix or restart"));
 					continue;
 				}
 
@@ -1541,6 +1551,8 @@ public class RemoldAgent {
 					// 过滤 JVM 不可修改类（如 Hidden Class、VM 内部动态代理类等）
 					if (inst != null && !inst.isModifiableClass(targetClass)) {
 						if (DEBUG) log("[SKIP-UNMODIFIABLE] " + className + " is not modifiable by JVM.");
+						skips.add(className, RoundSkips.verdict("NOT-MODIFIABLE",
+							"hidden / VM-generated class the JVM refuses to redefine", "restart"));
 						continue;
 					}
 					// 类已加载：无论模式，都必须执行 redefinition
@@ -1609,6 +1621,9 @@ public class RemoldAgent {
 								transactions.remove(className);
 							}
 							// 直接跳过该类的重定义，避免抛出 UnsupportedOperationException
+							skips.add(className, RoundSkips.verdict("HIERARCHY-CHANGED",
+								"superclass / interfaces changed",
+								"restart — the JVM cannot apply this"));
 							continue;
 						}
 
@@ -1628,6 +1643,9 @@ public class RemoldAgent {
 							}
 							// 与 hierarchyChanged 同理：受 JVM 能力限制的拒绝，重试永远不会成功，
 							// 不登记 retryCandidates，避免"每次触发都失败一次"的噪音。
+							skips.add(className, RoundSkips.verdict("NO-ENHANCED-REDEFINE",
+								"field/method structure changed but this JVM has no enhanced redefinition",
+								"run on JBR/DCEVM, or restart"));
 							continue;
 						}
 						if (diff.structureChanged()) {
@@ -1685,7 +1703,7 @@ public class RemoldAgent {
 		}
 
 		// 批量执行重定义（针对已加载类）
-		RedefineOutcome outcome     = applyRedefinitions(definitions, transactions.values());
+		RedefineOutcome outcome     = applyRedefinitions(definitions, transactions.values(), skips);
 		Set<String>     redefinedOk = outcome.successful();
 		Set<String>     rolledBack  = outcome.rolledBack();
 
@@ -1757,7 +1775,8 @@ public class RemoldAgent {
 		processAnnotations(successfulDefinitions);
 		notifyBatchListeners(successfulDefinitions);
 
-		if (skippedCount > 0) info("Skipped " + skippedCount + " unchanged classes.");
+		// 与上面的 [HOTSWAP-SKIPPED] 区分：这里是"磁盘哈希没变，本来就没改"，不是被门拦下。
+		if (skippedCount > 0) info("Unchanged: " + skippedCount + " class(es) had identical bytes on disk.");
 		if (injectedCount > 0) info("Injected " + injectedCount + " new classes.");
 	}
 
@@ -1875,6 +1894,20 @@ public class RemoldAgent {
 
 		if (!instanceMethods.isEmpty()) {
 			Object[] instances = LibTool.initialized() ? LibTool.getInstances(clazz) : InstanceTracker.getInstances(clazz).toArray();
+			// 实例回调是"对存量实例"，不是"模组收到通知"：零实例时它一次都不会跑。
+			// 这种情况原先完全静默（只打一行 "Found @OnReload"），最容易被误读成"回调没生效"，
+			// 所以必须显式说明"没有调用"以及为什么。
+			if (instances.length == 0) {
+				warn("[Reload] " + clazz.getName() + " declares " + instanceMethods.size()
+				     + " instance @OnReload method(s) but NO live instance was found — they were NOT"
+				     + " invoked. @OnReload on an instance method is a per-instance callback, not a"
+				     + " 'mod reloaded' notification: a static-only holder (or a class whose instances"
+				     + " are already gone) never receives it. Use a static @OnReload method instead if"
+				     + " you want one call per hotswap.");
+			} else {
+				info("[Reload] Invoking " + instanceMethods.size() + " instance @OnReload method(s) on "
+				     + instances.length + " live instance(s) of " + clazz.getName() + ".");
+			}
 			for (Object obj : instances) {
 				for (Method m : instanceMethods) {
 					try {
@@ -2092,9 +2125,10 @@ public class RemoldAgent {
 	 * 的"以宿主 + 其下属全部匿名类为原子单元整体拒绝回滚"一致。</p>
 	 * @param t 触发拒绝的异常；{@link AnonClassAligner.AlignmentRejectedException} 视为**预期**拒绝
 	 *          （打 {@code [HOTSWAP-REJECT]} 告警），其它异常视为对齐器缺陷（打 error + 堆栈）
+	 * @param skips 本轮摘要台账：宿主与整组匿名类都要登记，否则摘要里只剩"成功了几个"
 	 */
 	private static void rejectHostGroup(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,
-	                                    String hostName, Throwable t) {
+	                                    String hostName, RoundSkips skips, Throwable t) {
 		boolean expected = t instanceof AnonClassAligner.AlignmentRejectedException;
 		String reason = expected
 		 ? ((AnonClassAligner.AlignmentRejectedException) t).reason
@@ -2108,7 +2142,9 @@ public class RemoldAgent {
 			      + ". Redefine skipped safely. Reason: " + reason
 			      + ". Please hot-swap again or restart.", t);
 		}
-		dropHostGroup(newBatchBytes, classToPath, hostName);
+		List<String> dropped = dropHostGroup(newBatchBytes, classToPath, hostName);
+		skips.addGroup(dropped, hostName, RoundSkips.verdict("ANON-ALIGN-REJECT", reason,
+			"hot-swap again, or restart if it repeats"));
 	}
 
 	/** 从批次中移除一个类（点分与斜杠两种键形态都移除，避免因键写法不同而漏删）。 */
@@ -2127,8 +2163,8 @@ public class RemoldAgent {
 	 * <p>{@link #rejectHostGroup}（对齐器拒绝）与 {@link #applyRedefineLayoutGate}（布局门拒绝）
 	 * 共用同一机制，只是日志与触发理由不同 —— 保证两种拒绝的"原子单元"语义完全一致。</p>
 	 */
-	private static void dropHostGroup(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,
-	                                  String hostName) {
+	private static List<String> dropHostGroup(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,
+	                                          String hostName) {
 		String hostSlash = hostName.replace('.', '/');
 		List<String> anons = new ArrayList<>();
 		for (String cn : new ArrayList<>(newBatchBytes.keySet())) {
@@ -2136,6 +2172,94 @@ public class RemoldAgent {
 		}
 		dropFromBatch(newBatchBytes, classToPath, hostName);
 		for (String anon : anons) dropFromBatch(newBatchBytes, classToPath, anon);
+		List<String> dropped = new ArrayList<>(1 + anons.size());
+		dropped.add(hostName);
+		dropped.addAll(anons);
+		return dropped;
+	}
+
+	/**
+	 * 一轮热更里"改了但没生效"的类：类名 → 判决码。
+	 *
+	 * <p>存在的唯一理由是<b>摘要行</b>。{@code HotSwap successful: N classes redefined} 只报了成功的
+	 * 个数，被布局门 / 对齐器 / 结构门拦下的类不会出现在任何一行汇总里：用户看到"成功"，实际运行态
+	 * 还是旧代码，只能靠翻全量日志才知道自己关心的那个类被跳过了。这里把"跳过了谁"集中起来，
+	 * 紧跟成功行点名。</p>
+	 *
+	 * <p>只收"<b>本该生效却被拦下</b>"的类。磁盘哈希未变（本来就没改）不属于这一类 —— 把它也收进来，
+	 * 每轮都会刷出一大串无关类名，摘要立刻失去意义。</p>
+	 *
+	 * <p>实例随 {@code processChanges} 逐层传递，<b>不做静态共享</b>：并发热更时两轮的记录不能混。</p>
+	 *
+	 * <p>包内可见（而非 private）只为让 {@code tests/src/remold/HotswapSkipSummaryTest} 直接断言
+	 * 台账语义与摘要格式；接线点仍需实机热更才能覆盖。</p>
+	 */
+	static final class RoundSkips {
+		/** 摘要里最多点名的类数；超出只报个数，完整信息在同轮的拒绝日志里。 */
+		static final int MAX_LISTED = 15;
+
+		private final Map<String, String> byClass = new LinkedHashMap<>();
+
+		/** 记一条。同名只保留<b>首个</b>判决 —— 第一个拦下它的门才是真正原因。 */
+		void add(String className, String verdict) {
+			if (className == null || className.isEmpty()) return;
+			byClass.putIfAbsent(className, verdict == null ? "SKIPPED" : verdict);
+		}
+
+		/**
+		 * 整组记（宿主 + 其匿名类）。
+		 *
+		 * <p>从属的匿名类单独标注"属于哪个宿主组"，否则摘要里冒出一串 {@code Foo$3} 完全看不懂
+		 * 它们为什么被跳过。</p>
+		 */
+		void addGroup(Collection<String> classNames, String host, String verdict) {
+			if (classNames == null) return;
+			for (String n : classNames) {
+				add(n, n.equals(host) ? verdict : verdict + " (same host group as " + host + ")");
+			}
+		}
+
+		boolean isEmpty() { return byClass.isEmpty(); }
+
+		/** 被跳过的类数（用于成功行上的"还有几个没进来"）。 */
+		int size() { return byClass.size(); }
+
+		/**
+		 * 拼一条紧凑判决：{@code CODE: detail — action}（detail / action 为空则省略）。
+		 *
+		 * <p>摘要行必须能<b>单独读懂</b>：只给 {@code LAYOUT-REJECT} 这个码，用户还得往上翻几屏
+		 * 才知道是哪个字段、该干什么。所以判决码后面直接跟"具体是什么"和"怎么办"，
+		 * 形如 {@code LAYOUT-REJECT: field(s) removed: COST — restore the removed field(s) or restart}。</p>
+		 */
+		static String verdict(String code, String detail, String action) {
+			StringBuilder sb = new StringBuilder(code == null ? "SKIPPED" : code);
+			if (detail != null && !detail.isEmpty()) sb.append(": ").append(detail);
+			if (action != null && !action.isEmpty()) sb.append(" — ").append(action);
+			return sb.toString();
+		}
+
+		/**
+		 * 打摘要。
+		 *
+		 * <p>必须走 {@code warn}：这是"你以为生效了其实没有"的路径，不能受 {@code DEBUG} 门控。</p>
+		 *
+		 * <p>方法名不叫 {@code log}：那会遮蔽外层的 {@code RemoldAgent.log(String)}，让本类里想打
+		 * DEBUG 日志的代码编译不过（同名方法优先于外层静态导入式的解析）。</p>
+		 */
+		void report() {
+			if (byClass.isEmpty()) return;
+			warn("[HOTSWAP-SKIPPED] " + byClass.size() + " class(es) were skipped this round and did NOT"
+			     + " take effect — the running code is still the previous version:");
+			int shown = 0;
+			for (Map.Entry<String, String> e : byClass.entrySet()) {
+				if (shown++ >= MAX_LISTED) break;
+				warn("[HOTSWAP-SKIPPED]   " + e.getKey() + "  <- " + e.getValue());
+			}
+			if (byClass.size() > MAX_LISTED) {
+				warn("[HOTSWAP-SKIPPED]   ... and " + (byClass.size() - MAX_LISTED)
+				     + " more (each one has its own reason in the log lines above).");
+			}
+		}
 	}
 
 	/** 由点分类名求宿主类名：{@code Foo$1$2 -> Foo}；非匿名（含具名内部类 {@code Foo$Bar}）原样返回。 */
@@ -2164,7 +2288,8 @@ public class RemoldAgent {
 	 */
 	private static void applyLocalClassGuard(Map<String, byte[]> newBatchBytes,
 	                                         Map<String, Path>   classToPath,
-	                                         Map<String, AlignmentTransaction> transactions) {
+	                                         Map<String, AlignmentTransaction> transactions,
+	                                         RoundSkips skips) {
 		if (LocalClassGuard.MODE_OFF.equals(LOCAL_CLASS_GUARD)) return;
 
 		// 新侧：解析批次全部类，收集局部类宿主（斜杠内部名）。
@@ -2220,6 +2345,15 @@ public class RemoldAgent {
 			     + "local_class_guard=warn to force it and accept the mismatch.");
 		}
 		for (String dropped : d.dropped()) dropFromBatch(newBatchBytes, classToPath, dropped);
+		// 摘要台账：宿主自己与它名下的局部/匿名类分开标注（多个宿主时不能互相挂错组）。
+		String localVerdict = RoundSkips.verdict("LOCAL-CLASS-REJECT",
+			"same-named local classes shifted their numbering",
+			"rename the local class (or restart) to continue");
+		for (String dropped : d.dropped()) {
+			skips.add(dropped, d.hosts().contains(dropped)
+			 ? localVerdict
+			 : localVerdict + " (same host group as its enclosing class)");
+		}
 		for (String hostDot : d.hosts()) {
 			LOCAL_CLASS_REJECTED.incrementAndGet();
 			AlignmentTransaction tx = transactions.remove(hostDot);
@@ -2588,7 +2722,8 @@ public class RemoldAgent {
 
 	private static void applyRedefineLayoutGate(Map<String, byte[]> newBatchBytes,
 	                                            Map<String, Path> classToPath,
-	                                            Map<String, AlignmentTransaction> transactions) {
+	                                            Map<String, AlignmentTransaction> transactions,
+	                                            RoundSkips skips) {
 		if (LayoutGate.MODE_OFF.equals(LAYOUT_GATE)) return;
 
 		// 本轮有"删实例字段"时才做读者扫描（内部先 diff 判断，没有删除就直接返回空表，零成本）。
@@ -2709,6 +2844,8 @@ public class RemoldAgent {
 					     + " recreate the class) to break the loop.");
 				}
 				for (String dropped : d.dropped()) dropFromBatch(newBatchBytes, classToPath, dropped);
+				skips.addGroup(d.dropped(), d.hostName(),
+				 skipVerdictForLayout(d, readersByClass.getOrDefault(className, RemovedMemberScan.NOT_SCANNED)));
 				AlignmentTransaction tx = transactions.remove(d.hostName());
 				if (tx != null) tx.rollback(false);
 				rejectedHosts.add(d.hostName());
@@ -2974,6 +3111,44 @@ public class RemoldAgent {
 		return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames));
 	}
 
+	/**
+	 * 布局门拒绝的紧凑判决串（摘要行用）。
+	 *
+	 * <p>形如 {@code LAYOUT-REJECT: field(s) removed: COST — restore the removed field(s) or restart}：
+	 * 判决码 + <b>具体是哪个字段</b> + <b>下一步怎么办</b>，一行读完不需要往上翻。</p>
+	 *
+	 * <p>细节取自 {@link LayoutDecision#layout()} 的 {@code detail()}（已点名字段名，去掉方括号便于阅读）。
+	 * 读者侧信息只在<b>确实扫出了东西</b>时追加；扫描没做（改类型 / 无存活实例）时不能凭空补一句。</p>
+	 *
+	 * <p>包内可见，供 {@code HotswapSkipSummaryTest} 直接断言这一行的措辞。</p>
+	 */
+	static String skipVerdictForLayout(LayoutDecision d, RemovedMemberScan scan) {
+		String detail = d.layout() == null ? null : d.layout().detail();
+		if (detail != null) {
+			detail = detail.replace("[", "").replace("]", "").trim();
+			// "field(s) removed: COST" → "field removed: COST"：只有一个字段时用单数，
+			// 读起来不像模板腔（LayoutGate 那边要同时服务日志，保持中性写法，这里只做展示层归一）。
+			String many = "field(s) removed: ";
+			if (detail.startsWith(many) && detail.indexOf(',') < 0) {
+				detail = "field removed: " + detail.substring(many.length());
+			}
+		}
+
+		String note = null;
+		if (d.reason() != null) {
+			// 扫描没完成本身就是拒绝理由，必须说出来：否则"只是删了个字段"看起来像能放行。
+			note = "(reader scan could not complete)";
+		} else if (scan != null && scan.hasFindings()) {
+			note = "(" + describeFindings(scan) + ")";
+		}
+		if (note != null) detail = detail == null ? note : detail + " " + note;
+
+		String action = d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.REMOVED_FIELD
+		 ? "restore the removed field(s) or restart to continue"
+		 : "revert the field change or restart to continue";
+		return RoundSkips.verdict("LAYOUT-REJECT", detail, action);
+	}
+
 	/** 把扫描结果说成人能读的一句话，用于拒绝日志。 */
 	private static String describeFindings(RemovedMemberScan scan) {
 		StringBuilder sb = new StringBuilder();
@@ -3015,12 +3190,21 @@ public class RemoldAgent {
 	 * </ul>
 	 */
 	private static RedefineOutcome applyRedefinitions(List<ClassDefinition> definitions,
-	                                                  Collection<AlignmentTransaction> transactions) {
+	                                                  Collection<AlignmentTransaction> transactions,
+	                                                  RoundSkips skips) {
 		Set<String> successfulClasses = new HashSet<>();
 		Set<String> rolledBackClasses = new HashSet<>();
 		if (definitions.isEmpty()) {
 			for (AlignmentTransaction tx : transactions) {
 				tx.commit();
+			}
+			// 一条都没进 redefine 时，原来这里**完全静默**：用户只看到若干条 warn，然后等不到任何
+			// "成功/失败"汇总，只能猜是不是热更没触发。有跳过项就必须点名，这是"整轮静默失效"
+			// 那类最难排查的问题的正面对冲。
+			if (!skips.isEmpty()) {
+				warn("[HOTSWAP-SUMMARY] 0 class(es) were redefined this round — nothing reached the JVM."
+				     + " The classes below are the ones that did not take effect:");
+				skips.report();
 			}
 			return new RedefineOutcome(successfulClasses, rolledBackClasses);
 		}
@@ -3046,7 +3230,11 @@ public class RemoldAgent {
 		enterInternalRedefine(targetNames);
 		try {
 			inst.redefineClasses(definitions.toArray(new ClassDefinition[0]));
-			info("HotSwap successful: " + definitions.size() + " classes redefined.");
+			// 成功行本身也要带上"还有谁没进来"：用户最先看的就是这一行，只报成功个数会让
+			// "我关心的类其实被跳过了"完全隐形。详细名单紧跟其后由 skips.report() 输出。
+			info("HotSwap successful: " + definitions.size() + " classes redefined."
+			     + (skips.isEmpty() ? "" : " " + skips.size()
+			        + " class(es) were skipped this round — listed below."));
 			for (ClassDefinition def : definitions) {
 				bytecodeCache.put(def.getDefinitionClass().getName(), def.getDefinitionClassFile());
 				successfulClasses.add(def.getDefinitionClass().getName());
@@ -3066,6 +3254,8 @@ public class RemoldAgent {
 					if (DEBUG) log("[OK] " + def.getDefinitionClass().getName());
 				} catch (Throwable e) {
 					error("[FAIL] " + def.getDefinitionClass().getName(), e);
+					skips.add(def.getDefinitionClass().getName(), RoundSkips.verdict("REDEFINE-FAILED",
+						e.getClass().getSimpleName(), "see the stack trace above; the file is requeued"));
 					InitFix.afterRedefineFailed(def.getDefinitionClass());
 				}
 			}
@@ -3092,11 +3282,19 @@ public class RemoldAgent {
 					// 原因：宿主可能已生效、而 cache/pending 被钉回旧版本，重试基线不一致。
 					rolledBackClasses.add(tx.hostName);
 					rolledBackClasses.addAll(tx.targetClasses);
+					// 摘要台账：这些类的运行态可能已经半生效（宿主成功、匿名类失败），
+					// 所以判决码不能写成"没生效"，必须说清"状态不一致，需重启"。
+					skips.add(tx.hostName, RoundSkips.verdict("ROLLED-BACK",
+						"host may already be live, its anonymous classes were not",
+						"restart required"));
+					skips.addGroup(tx.targetClasses, tx.hostName, RoundSkips.verdict("ROLLED-BACK",
+						"group inconsistent with its host", "restart required"));
 				}
 			}
 		} finally {
 			exitInternalRedefine();
 		}
+		skips.report();
 		return new RedefineOutcome(successfulClasses, rolledBackClasses);
 	}
 

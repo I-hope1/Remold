@@ -448,6 +448,12 @@ public class PlayerService {
 }
 ```
 
+> **`@OnReload` is a callback on the existing instances of *that class*, not a "your mod was reloaded" notification.**
+> An instance method runs once per live instance (zero instances means it never runs); a static method runs once
+> per hotswap. It looks like a mod-level notification only because a mod main class usually has exactly one
+> instance in the process. If the class was not successfully redefined this round (rejected by the layout gate or
+> the aligner), the callback never fires. See the `OnReload` Javadoc for the full contract.
+
 ---
 
 ## 5. Building & Verification

@@ -66,7 +66,12 @@ public class ExampleJavaMod extends Mod {
     }
 
     /**
-     * 当本模组被热更后，Remold 会自动调度执行此生命周期回调。
+     * 本类被热更重定义后，Remold 会对<b>本类的每个存活实例</b>各调用一次本方法。
+     *
+     * <p>注意这是<b>对实例的回调</b>，不是"模组收到热更通知"：它之所以看起来像模组级事件，只是因为
+     * Mindustry 在进程里恰好只持有一个 {@code Mod} 实例。把同样的注解写到有多个实例的类上会被调用
+     * 多次；写到纯静态工具类上（零实例）则一次都不会调用 —— 那种场景请改用 {@code static} 方法，
+     * 静态方法每轮热更调用一次。</p>
      */
     @OnReload
     public void onReload() {

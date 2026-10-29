@@ -60,6 +60,35 @@
   诊断：同一类因同一原因被拒第二次起，额外输出 `[LAYOUT-STUCK]` 说明这是循环而非"再热一次就好"。
   实现见 `RemoldAgent.noteRejected` / `REJECT_HISTORY`。
 
+* **"成功"的计数不等于"你要的那个类生效了"**：`HotSwap successful: N classes redefined` 只统计
+  进入 `redefineClasses` 且成功的类。被布局门 / 对齐器 / 结构门拦下的类不在其中，也不在任何一行
+  汇总里 —— 用户看到"成功"、实际运行态仍是旧代码，只能靠翻全量日志才能发现自己关心的那个类被跳过。
+
+  因此每轮维护一份"改了但没生效"的台账（`RemoldAgent.RoundSkips`），在成功行之后以
+  `[HOTSWAP-SKIPPED]` 点名每个被跳过的类及其判决码（`LAYOUT-REJECT` / `ANON-ALIGN-REJECT` /
+  `LOCAL-CLASS-REJECT` / `HIERARCHY-CHANGED` / `NO-ENHANCED-REDEFINE` / `BLACKLIST` /
+  `NOT-MODIFIABLE` / `REDEFINE-FAILED` / `ROLLED-BACK`），宿主组的匿名类标注其归属。
+
+  每条判决的格式是 **`CODE: 具体是什么 — 怎么办`**，一行读完不需要往上翻：
+
+  ```
+  [HOTSWAP-SKIPPED]   com.example.LightSpeedConveyor  <- LAYOUT-REJECT: field removed: COST — restore the removed field(s) or restart to continue
+  [HOTSWAP-SKIPPED]   com.example.LightSpeedConveyor$1  <- LAYOUT-REJECT: ... (same host group as com.example.LightSpeedConveyor)
+  ```
+
+  "具体是什么"取自 `LayoutGate.Result.detail()`（已点名字段）；读者侧信息只在**确实扫出了东西**时
+  追加（`3 out-of-batch reader(s)`），扫描没完成时追加 `(reader scan could not complete)` ——
+  否则"只是删了个字段"看起来像"删字段就会被拒"，而实际规则是"删字段且证明不了没有批次外读者才拒"。
+
+  三条刻意的取舍：
+  1. **只收"本该生效却被拦下"的类**。磁盘哈希未变（本来就没改）不计入 —— 否则每轮刷出一大串
+     无关类名，摘要立刻失去意义；那类计数单独输出为 `Unchanged: N class(es) had identical bytes on disk.`
+  2. **走 `warn` 而非 `log`**。`log` 受 `DEBUG` 门控（默认关），摘要若走它就等于在发布版里消失，
+     而"跳过了谁"恰恰是默认配置下最需要看见的信息。
+  3. **只列前 15 个类名 + 总数**。整批被拒时不刷屏，但总数必须准确，否则会让人低估影响面。
+
+  台账按轮次传递（随 `processChanges` 逐层下传，非静态共享），并发热更时两轮记录不会混。
+
 ---
 
 ## 2. 同名局部类编号漂移与止血门（`LocalClassGuard`）

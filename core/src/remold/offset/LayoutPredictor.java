@@ -137,7 +137,15 @@ public final class LayoutPredictor {
 		BytecodeProvider fallbackProvider,
 		ClassLoader parentLoader
 	) {
-		EphemeralClassLoader cl = new EphemeralClassLoader(newBytecodes, fallbackProvider, parentLoader);
+		Map<String, byte[]> batch = new HashMap<>();
+		if (newBytecodes != null) batch.putAll(newBytecodes);
+		if (parentLoader != null && fallbackProvider != null) {
+			try {
+				Class<?> liveClass = Class.forName(targetClassDotName, false, parentLoader);
+				populateNonJdkSuperclasses(liveClass, batch, fallbackProvider);
+			} catch (Throwable ignored) {}
+		}
+		EphemeralClassLoader cl = new EphemeralClassLoader(batch, fallbackProvider, parentLoader);
 		try {
 			Class<?> clazz = Class.forName(targetClassDotName, false, cl);
 			Map<String, Long> offsets = new LinkedHashMap<>();
@@ -183,6 +191,26 @@ public final class LayoutPredictor {
 		batch.put(targetInternal, newBytes);
 
 		ClassLoader parentLoader = targetClass.getClassLoader();
+
+		// 将 targetClass 的整条非 JDK 祖先链预先注入 batch，避免委派给 parentLoader
+		// 导致 package-private 祖先类跨 Loader 抛出 IllegalAccessError (Runtime Package 隔离)
+		populateNonJdkSuperclasses(targetClass, batch, fallbackProvider);
+
+		// 如果有子孙类，也同样预注入子孙类自身的整条非 JDK 祖先链
+		Set<String> descendants = null;
+		if (descendantSupplier != null) {
+			descendants = descendantSupplier.getDescendants(targetInternal);
+			if (descendants != null && !descendants.isEmpty()) {
+				for (String descInternal : descendants) {
+					if (descInternal == null || descInternal.equals(targetInternal)) continue;
+					try {
+						Class<?> liveDescClass = Class.forName(descInternal.replace('/', '.'), false, parentLoader);
+						populateNonJdkSuperclasses(liveDescClass, batch, fallbackProvider);
+					} catch (Throwable ignored) {}
+				}
+			}
+		}
+
 		EphemeralClassLoader cl = new EphemeralClassLoader(batch, fallbackProvider, parentLoader);
 
 		List<DriftingField> drifting = new ArrayList<>();
@@ -215,35 +243,32 @@ public final class LayoutPredictor {
 		}
 
 		// 2. 检查所有已加载子孙类的已有实例字段
-		if (descendantSupplier != null) {
-			Set<String> descendants = descendantSupplier.getDescendants(targetInternal);
-			if (descendants != null && !descendants.isEmpty()) {
-				for (String descInternal : descendants) {
-					if (descInternal == null || descInternal.equals(targetInternal)) continue;
-					String descDotName = descInternal.replace('/', '.');
-					try {
-						Class<?> liveDescClass = Class.forName(descDotName, false, parentLoader);
-						Class<?> predDescClass = Class.forName(descDotName, false, cl);
-						for (Field liveField : liveDescClass.getDeclaredFields()) {
-							if ((liveField.getModifiers() & Modifier.STATIC) != 0) continue;
-							String fn = liveField.getName();
-							long oldOff = UNSAFE.objectFieldOffset(liveField);
-							Field predField;
-							try {
-								predField = predDescClass.getDeclaredField(fn);
-							} catch (NoSuchFieldException e) {
-								deleted.add(new DeletedField(descInternal, fn, oldOff));
-								continue;
-							}
-							long newOff = UNSAFE.objectFieldOffset(predField);
-							if (oldOff != newOff) {
-								drifting.add(new DriftingField(descInternal, fn, oldOff, newOff));
-							}
+		if (descendants != null && !descendants.isEmpty()) {
+			for (String descInternal : descendants) {
+				if (descInternal == null || descInternal.equals(targetInternal)) continue;
+				String descDotName = descInternal.replace('/', '.');
+				try {
+					Class<?> liveDescClass = Class.forName(descDotName, false, parentLoader);
+					Class<?> predDescClass = Class.forName(descDotName, false, cl);
+					for (Field liveField : liveDescClass.getDeclaredFields()) {
+						if ((liveField.getModifiers() & Modifier.STATIC) != 0) continue;
+						String fn = liveField.getName();
+						long oldOff = UNSAFE.objectFieldOffset(liveField);
+						Field predField;
+						try {
+							predField = predDescClass.getDeclaredField(fn);
+						} catch (NoSuchFieldException e) {
+							deleted.add(new DeletedField(descInternal, fn, oldOff));
+							continue;
 						}
-					} catch (Throwable t) {
-						// 子孙类无法在抛弃式加载器中复现（如动态生成类、hidden class、无法读取字节码或链接报错）
-						unpredicted.add(descInternal);
+						long newOff = UNSAFE.objectFieldOffset(predField);
+						if (oldOff != newOff) {
+							drifting.add(new DriftingField(descInternal, fn, oldOff, newOff));
+						}
 					}
+				} catch (Throwable t) {
+					// 子孙类无法在抛弃式加载器中复现（如动态生成类、hidden class、无法读取字节码或链接报错）
+					unpredicted.add(descInternal);
 				}
 			}
 		}
@@ -252,6 +277,41 @@ public final class LayoutPredictor {
 			return PredictionResult.partial(drifting, deleted, unpredicted);
 		}
 		return PredictionResult.complete(drifting, deleted);
+	}
+
+	private static boolean isJdk(String name) {
+		return name.startsWith("java.") || name.startsWith("javax.")
+				|| name.startsWith("jdk.") || name.startsWith("sun.")
+				|| name.startsWith("com.sun.");
+	}
+
+	private static void populateNonJdkSuperclasses(
+		Class<?> clazz,
+		Map<String, byte[]> batch,
+		BytecodeProvider fallbackProvider
+	) {
+		if (clazz == null || fallbackProvider == null) return;
+		for (Class<?> curr = clazz.getSuperclass(); curr != null && curr != Object.class; curr = curr.getSuperclass()) {
+			String name = curr.getName();
+			if (isJdk(name)) break;
+			String internal = name.replace('.', '/');
+			if (!batch.containsKey(internal)) {
+				byte[] bytes = fallbackProvider.getBytecode(internal);
+				if (bytes != null) {
+					batch.put(internal, bytes);
+				}
+			}
+			for (Class<?> itf : curr.getInterfaces()) {
+				String itfName = itf.getName();
+				if (!isJdk(itfName)) {
+					String itfInternal = itfName.replace('.', '/');
+					if (!batch.containsKey(itfInternal)) {
+						byte[] b = fallbackProvider.getBytecode(itfInternal);
+						if (b != null) batch.put(itfInternal, b);
+					}
+				}
+			}
+		}
 	}
 
 	/**
@@ -300,7 +360,7 @@ public final class LayoutPredictor {
 					// 2. Child-first: 优先在本批次新字节码及回退字节码中查找
 					String internal = name.replace('.', '/');
 					byte[] bytes = definedBytes.get(internal);
-					if (bytes == null && fallback != null) {
+					if (bytes == null && fallback != null && !isJdk(name)) {
 						bytes = fallback.getBytecode(internal);
 					}
 					if (bytes != null) {

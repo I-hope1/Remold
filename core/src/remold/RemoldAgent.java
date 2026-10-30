@@ -344,6 +344,23 @@ public class RemoldAgent {
 				error("[HotswapBatchListener] Error notifying external redefine: " + clazz.getName(), t);
 			}
 		}
+		remold.evict.ReflectionCacheManager.evictAll(Collections.singleton(clazz));
+	}
+
+	public static void registerCacheEvictor(remold.evict.ReflectionCacheEvictor evictor) {
+		remold.evict.ReflectionCacheManager.registerEvictor(evictor);
+	}
+
+	public static void registerArcJson(Object json) {
+		remold.evict.ReflectionCacheManager.registerArcJson(json);
+	}
+
+	public static void registerObjectMapper(Object mapper) {
+		remold.evict.ReflectionCacheManager.registerObjectMapper(mapper);
+	}
+
+	public static void registerGson(Object gson) {
+		remold.evict.ReflectionCacheManager.registerGson(gson);
 	}
 
 	/**
@@ -1784,6 +1801,12 @@ public class RemoldAgent {
 		// 严禁在补丁就绪前触发，否则回调读到未初始化的零值（时序反转）。
 		processAnnotations(successfulDefinitions);
 		notifyBatchListeners(successfulDefinitions);
+
+		Set<Class<?>> successfulClasses = new HashSet<>();
+		for (ClassDefinition def : successfulDefinitions) {
+			successfulClasses.add(def.getDefinitionClass());
+		}
+		remold.evict.ReflectionCacheManager.evictAll(successfulClasses);
 
 		// 与上面的 [HOTSWAP-SKIPPED] 区分：这里是"磁盘哈希没变，本来就没改"，不是被门拦下。
 		if (skippedCount > 0) info("Unchanged: " + skippedCount + " class(es) had identical bytes on disk.");

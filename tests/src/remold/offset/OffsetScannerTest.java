@@ -84,6 +84,7 @@ public class OffsetScannerTest {
 		exp.put("Derived", Set.of("INSTANCE_OFFSET STATIC_FIELD remold/offset/cases/Foo.x EXACT"));
 		exp.put("Logged", Set.of("INSTANCE_OFFSET STATIC_FIELD remold/offset/cases/Foo.y EXACT"));
 		exp.put("Plain", Set.of());
+		exp.put("MHGetter", Set.of());
 		exp.put("CondyVH", Set.of("VARHANDLE STATIC_FIELD remold/offset/cases/Foo.x EXACT"));
 
 		// 故意把依赖 helper 的类排在 Util 之前，验证 producer 多轮收敛

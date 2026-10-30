@@ -93,6 +93,8 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | Mixin 生态扩展插件 | `plugin-mixin/`（`remold.mixin.MixinHotswapPlugin`、`MixinReWeaver`、`MixinHotSwap`） |
 | 偏移量与访问器扫描器 | `OffsetScanner`（`core/src/remold/offset/`，常量池预过滤 + 多轮过程间数据流分析，识别 `objectFieldOffset`/`newUpdater`/`findVarHandle` 产生源） |
 | 偏移绑定索引与漂移安全门 | `OffsetBindingIndex` / `SuperclassDriftGate`（`core/src/remold/offset/`，父类新增实例字段时检测子孙类全部实例字段是否被缓存，结合 `LibTool` 堆存活探测，阻断漂移） |
+| 布局预测器 | `LayoutPredictor`（`core/src/remold/offset/`，抛弃式加载器干净加载预测物理偏移，协同注入非 JDK 祖先链防御 package-private 运行时包隔离） |
+| 反射与序列化缓存驱逐 | `ReflectionCacheManager`（`core/src/remold/evict/`，Arc Json/Jackson/Gson 实例级缓存清除 SPI） |
 | 偏移量稳定性与漂移探针 | `tests/src/OffsetStabilityProbe.java`（`./gradlew :tests:offsetStabilityProbe -Pp05.jbr=<dcevm-jdk>`，实测单类稳定性、父类漂移、Updater 破坏与 C2 逆优化） |
 | Gradle 插件坐标 | `gradle-plugin/`（`java-gradle-plugin`；把仓库根 `remold.gradle(.kts)` 打进 jar 后展开应用，供 JitPack 的 `plugins { id("io.github.i-hope1.remold") }` 引入；脚本仍是唯一实现，勿在此另写一套） |
 
@@ -148,7 +150,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 - 偏移量稳定性与漂移实测：`./gradlew :tests:offsetStabilityProbe -Pp05.jbr=<DCEVM JDK 目录>`（同样不挂 `check`），实测单类稳定性（空洞填补、类型重排）、父类字段漂移步长、Updater 错位破坏与 C2 常量折叠使用方逆优化。
 - 耗时类探针固定报 **min / median / max** 三个数；结论必须同时对 min 与 median 成立，只对其中一个成立时标注「口径敏感」，不得只报有利的那个。统计量不得在看到数据之后才选。
 - 探针日志默认带 `-Xlog:safepoint`（`uptimenanos` 装饰符）、`-Xlog:gc*`、`-Xlog:jit+compilation=debug`，落在 `build/p05/`。断言里引用日志时间戳时，基准必须取 safepoint 窗口的**开始**（`时间戳 − Total`）——日志行是在 safepoint 结束时打印的；unified logging 有缓冲，日志分析要放在运行结束后做。
-- `test` 的测试数下限由 `tests/build.gradle` 的 `hstestMinTests` 守卫（当前 313，以实际输出为准；`verifyTestCount` 读 XML 断言总数 ≥ 基线且 `skipped == 0`）：删除/禁用/跳过测试会让 `check` 变红，上调基线要有意识地改这一行。
+- `test` 的测试数下限由 `tests/build.gradle` 的 `hstestMinTests` 守卫（当前 318，以实际输出为准；`verifyTestCount` 读 XML 断言总数 ≥ 基线且 `skipped == 0`）：删除/禁用/跳过测试会让 `check` 变红，上调基线要有意识地改这一行。
 - CI：`.github/workflows/ci.yml`（`setup-java` 装 8/11/17/21 + runner JDK 25，`hstest.requireJdks=true`；以及 `test-dcevm` 任务在真实 JBR 21 DCEVM 下执行 `liveDcevmTest`）。首次 Linux 跑，Windows 假设（路径分隔符、GBK）可能暴露，按原因分类再处理。
 - 新增或放宽安全门：必须有负向阻断断言。
 - 修复缺陷：必须有先红后绿的回归断言。
@@ -180,3 +182,8 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | JBR-21/DCEVM 能力与限制、事务乐观预登记、数量与超时闸门、开关配置 | `docs/topology/06-runtime-and-perf.md` |
 | 实例状态布局安全门（LayoutGate）、局部类编号漂移止血门（LocalClassGuard）、蜕变测试 | `docs/topology/07-layout-gate-and-risks.md` |
 | 架构决策记录、偏离原因、JBR 8 组真机数据 | `docs/topology/08-decisions.md` |
+
+### 物理内存偏移与第三方缓存驱逐 (P0 / P1)
+| 修改内容 | 先读 |
+|:--|:--|
+| 物理偏移漂移判决、布局预测器、VarHandle 阻断、MethodHandle 自愈边界与缓存驱逐 SPI | `docs/offset/01-offset-and-reflection-cache.md` |

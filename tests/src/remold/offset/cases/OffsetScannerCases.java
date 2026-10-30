@@ -175,3 +175,13 @@ class Logged {
 
 // 16. 负向：无任何绑定
 class Plain { int a; int f() { return a + 1; } }
+
+// 17. 负向：MethodHandle getter/setter 自动自愈，不应产生任何绑定
+class MHGetter {
+    static final java.lang.invoke.MethodHandle H;
+    static {
+        try {
+            H = java.lang.invoke.MethodHandles.lookup().findGetter(Foo.class, "x", int.class);
+        } catch (ReflectiveOperationException e) { throw new Error(e); }
+    }
+}

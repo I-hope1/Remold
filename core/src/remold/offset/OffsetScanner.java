@@ -31,7 +31,7 @@ public final class OffsetScanner {
 
     /* ======================= 对外模型 ======================= */
 
-    public enum Kind { INSTANCE_OFFSET, STATIC_OFFSET, STATIC_BASE, UPDATER, VARHANDLE, METHODHANDLE }
+    public enum Kind { INSTANCE_OFFSET, STATIC_OFFSET, STATIC_BASE, UPDATER, VARHANDLE, @Deprecated METHODHANDLE }
     public enum Sink { STATIC_FIELD, INSTANCE_FIELD, ESCAPED }
     public enum Confidence { EXACT, WILDCARD_FIELD, UNRESOLVED_CLASS }
 
@@ -283,7 +283,7 @@ public final class OffsetScanner {
         for (String r : refs) if (TRIGGERS.contains(r) || producerClasses.contains(r) || holderClasses.contains(r)) return true;
         if (refs.contains(LOOKUP)) {
             String raw = new String(b, StandardCharsets.ISO_8859_1);
-            return raw.contains("VarHandle") || raw.contains("Getter") || raw.contains("Setter");
+            return raw.contains("VarHandle");
         }
         return false;
     }
@@ -756,17 +756,17 @@ public final class OffsetScanner {
                 return AV.prod(Kind.UPDATER, clsSym(a.get(0)), strSym(a.get(a.size() - 1)), 1);
             }
 
-            /* 4. MethodHandles.Lookup 句柄工厂（receiver 是 Lookup，参数已剥离） */
+            /* 4. MethodHandles.Lookup 句柄工厂（receiver 是 Lookup，参数已剥离）
+             * 注意：实测证明 MethodHandle 的 getter/setter (findGetter/unreflectGetter 等)
+             * 在 DCEVM 下随版本感知自动重定向自愈（见 OffsetStabilityProbe E2），
+             * 不是偏移漂移的受害者，严禁将其抓入 Binding，避免误杀 Jackson/Record 等现代框架。
+             * 此处仅拦截缺乏自愈能力、漂移后产生内存污染的 VarHandle。 */
             if (o.equals(LOOKUP)) {
                 switch (n) {
                     case "findVarHandle", "findStaticVarHandle":
                         return AV.prod(Kind.VARHANDLE, clsSym(a.get(0)), strSym(a.get(1)), 1);
-                    case "findGetter", "findSetter", "findStaticGetter", "findStaticSetter":
-                        return AV.prod(Kind.METHODHANDLE, clsSym(a.get(0)), strSym(a.get(1)), 1);
                     case "unreflectVarHandle":
                         return fieldToProd(Kind.VARHANDLE, a.get(0), 1);
-                    case "unreflectGetter", "unreflectSetter":
-                        return fieldToProd(Kind.METHODHANDLE, a.get(0), 1);
                     default: break;
                 }
             }

@@ -145,8 +145,8 @@ test {
 	}
 }
 
-// 断言测试总数 ≥ 311 且 0 skipped（311 = 2026-10-29 全量实测，含 LayoutPredictorTest 4 个、OffsetScannerTest 4 个、LayoutGateWiringTest 30 个等用例）
-def hstestMinTests = 313
+// 断言测试总数 ≥ 318 且 0 skipped（318 = 2026-10-30 全量实测，含 LayoutPredictorTest 5 个、ReflectionCacheManagerTest 4 个、OffsetScannerTest 4 个、LayoutGateWiringTest 30 个等用例）
+def hstestMinTests = 318
 tasks.register("verifyTestCount") {
 	group = "verification"
 	description = "断言 JUnit 测试数不低于基线 ${hstestMinTests}"

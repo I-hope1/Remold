@@ -324,4 +324,93 @@ public class LayoutPredictorTest {
 		);
 		assertFalse(rejectNonStrictWithHolder.isSafe(), "Non-strict mode must still reject when unpredicted class has cached holder");
 	}
+
+	@Test
+	@DisplayName("包级私有父类与 Runtime Package 跨 Loader 访问安全 (IllegalAccessError 防御与对照)")
+	public void testPackagePrivateSuperclassRuntimePackageAccess() throws Exception {
+		String baseInternal = "remold/offset/testpkg/PkgPrivateBase";
+		String childInternal = "remold/offset/testpkg/PublicChild";
+		String childDot = "remold.offset.testpkg.PublicChild";
+
+		// 1. 生成包级私有父类（无 ACC_PUBLIC）与公共子类
+		ClassWriter cwBase = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+		cwBase.visit(Opcodes.V11, 0, baseInternal, null, "java/lang/Object", null);
+		cwBase.visitField(Opcodes.ACC_PUBLIC, "baseField", "I", null, null).visitEnd();
+		var mvBase = cwBase.visitMethod(0, "<init>", "()V", null, null);
+		mvBase.visitCode();
+		mvBase.visitVarInsn(Opcodes.ALOAD, 0);
+		mvBase.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+		mvBase.visitInsn(Opcodes.RETURN);
+		mvBase.visitMaxs(1, 1);
+		mvBase.visitEnd();
+		cwBase.visitEnd();
+		byte[] baseBytes = cwBase.toByteArray();
+
+		ClassWriter cwChild = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+		cwChild.visit(Opcodes.V11, Opcodes.ACC_PUBLIC, childInternal, null, baseInternal, null);
+		cwChild.visitField(Opcodes.ACC_PUBLIC, "childField", "I", null, null).visitEnd();
+		var mvChild = cwChild.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+		mvChild.visitCode();
+		mvChild.visitVarInsn(Opcodes.ALOAD, 0);
+		mvChild.visitMethodInsn(Opcodes.INVOKESPECIAL, baseInternal, "<init>", "()V", false);
+		mvChild.visitInsn(Opcodes.RETURN);
+		mvChild.visitMaxs(1, 1);
+		mvChild.visitEnd();
+		cwChild.visitEnd();
+		byte[] childV1Bytes = cwChild.toByteArray();
+
+		// 子类 v2（新增一个字段）
+		ClassWriter cwChildV2 = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+		cwChildV2.visit(Opcodes.V11, Opcodes.ACC_PUBLIC, childInternal, null, baseInternal, null);
+		cwChildV2.visitField(Opcodes.ACC_PUBLIC, "childField", "I", null, null).visitEnd();
+		cwChildV2.visitField(Opcodes.ACC_PUBLIC, "childField2", "J", null, null).visitEnd();
+		var mvChildV2 = cwChildV2.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+		mvChildV2.visitCode();
+		mvChildV2.visitVarInsn(Opcodes.ALOAD, 0);
+		mvChildV2.visitMethodInsn(Opcodes.INVOKESPECIAL, baseInternal, "<init>", "()V", false);
+		mvChildV2.visitInsn(Opcodes.RETURN);
+		mvChildV2.visitMaxs(1, 1);
+		mvChildV2.visitEnd();
+		cwChildV2.visitEnd();
+		byte[] childV2Bytes = cwChildV2.toByteArray();
+
+		// 用独立 ClassLoader 加载已有类
+		ClassLoader testParentLoader = new ClassLoader(LayoutPredictorTest.class.getClassLoader()) {
+			@Override
+			protected Class<?> findClass(String name) throws ClassNotFoundException {
+				if ("remold.offset.testpkg.PkgPrivateBase".equals(name)) {
+					return defineClass(name, baseBytes, 0, baseBytes.length);
+				}
+				if ("remold.offset.testpkg.PublicChild".equals(name)) {
+					return defineClass(name, childV1Bytes, 0, childV1Bytes.length);
+				}
+				return super.findClass(name);
+			}
+		};
+
+		Class<?> liveChildClass = Class.forName(childDot, false, testParentLoader);
+
+		// 正向验证：fallbackProvider 提供了父类字节码 -> 自动注入同一 EphemeralClassLoader，成功预测
+		LayoutPredictor.PredictionResult successRes = LayoutPredictor.predictLayout(
+			liveChildClass,
+			childV2Bytes,
+			Collections.emptyMap(),
+			internal -> baseInternal.equals(internal) ? baseBytes : null,
+			desc -> Collections.emptySet()
+		);
+		assertTrue(successRes.isComplete(), "When ancestor bytecode is provided, prediction must succeed without IllegalAccessError");
+		assertTrue(successRes.unpredictedClasses().isEmpty(), "Unpredicted classes must be empty");
+
+		// 负向对照：fallbackProvider 无法提供父类字节码 -> 委派给父 Loader 发生 Runtime Package 隔离，必须捕获并进入 unpredictedClasses
+		LayoutPredictor.PredictionResult failedRes = LayoutPredictor.predictLayout(
+			liveChildClass,
+			childV2Bytes,
+			Collections.emptyMap(),
+			internal -> null, // 无父类字节码
+			desc -> Collections.emptySet()
+		);
+		assertFalse(failedRes.isComplete(), "Counterfactual: Without ancestor bytecode, package-private superclass must fail clean-load");
+		assertTrue(failedRes.unpredictedClasses().contains(childInternal),
+			"Child class must be marked unpredicted due to IllegalAccessError cross-loader access");
+	}
 }

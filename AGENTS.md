@@ -118,6 +118,8 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | Native JVMTI 堆遍历 (`LibTool`) | ✅ | C++ 底座；Tag 隔离与全局互斥；`InstanceTracker` 字节码回退 |
 | 两阶段重定义 / 构造器插桩 / 跨类拓扑 | ⬜ | 路线图设计（见 `docs/initfix/04-target-design.md`） |
 | 真实 kotlinc 产物验证 | 🔶 | `object` 单例与 `trim` 家族已验证；其它 Kotlin 行为仅经仿真验证 |
+| 物理偏移漂移安全门与布局预测器 | ✅ | 抛弃式加载器事前预测物理布局；`SuperclassDriftGate` 结合堆存活阻断漂移；预注入祖先链防御包级私有隔离 |
+| 反射与序列化实例缓存驱逐 | ✅ | Arc Json、Jackson、Gson 实例级清空 SPI，重定义成功后自动触发 |
 | Arc 资源热更新（贴图/字体/语言包） | 🔶 | 贴图同尺寸原位直刷；尺寸变化与运行期新增贴图各有已知边界；字体/语言包已接线但缺自动化覆盖 |
 | Mixin 生态插件 | 🔶 | 重织入与目标级联已落地；端到端仍需真实 Fabric 客户端验证 |
 

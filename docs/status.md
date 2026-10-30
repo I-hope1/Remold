@@ -7,11 +7,11 @@
 
 | 审计元数据项 | 内容与规格说明 |
 |:---|:---|
-| **基准提交 (Baseline Commit)** | `72ed000` (分支: `main`，本轮状态校准的起点) |
-| **最后更新时间** | 2026-10-27 |
+| **基准提交 (Baseline Commit)** | `675f6b2` (分支: `main`，本轮状态校准的起点) |
+| **最后更新时间** | 2026-10-30 |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |
 | **更新触发条件** | 任何合入包含特性落地、架构偏离、安全门调整、测试基线变更或发现已知缺陷/残余风险的 PR/commit 时，必须同步原子化更新本文件。提交时由作者/维护者更新基准哈希。 |
-| **管辖范围与边界声明** | 本状态表权威管辖：<br>1. **匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)**（[`docs/topology/`](topology/)）<br>2. **存量初始化修复器 (InitFix / Legacy Instance & Static Reinitialization)**（[`docs/initfix/`](initfix/)）<br>*边界与后续治理声明*：同属字节码重映射体系的 `LambdaAligner`（Lambda 表达式对齐器）以及 Mindustry UI 胶水层（`CellPropertyRef` / 动态参数表达式指纹），其实现状态当前由各自单元测试覆盖（`CellHelperTest` 6 场景持续全绿、`LambdaAlignerTest` 等）；它们的详细状态审计矩阵尚未并入本总表，计划在下一轮治理中统一建立验收标准并纳入。 |
+| **管辖范围与边界声明** | 本状态表权威管辖：<br>1. **匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)**（[`docs/topology/`](topology/)）<br>2. **存量初始化修复器 (InitFix / Legacy Instance & Static Reinitialization)**（[`docs/initfix/`](initfix/)）<br>3. **物理内存偏移稳定性与第三方缓存驱逐 (Physical Memory Offset Stability & Reflection Cache Eviction)**（[`docs/offset/`](offset/)）<br>*边界与后续治理声明*：同属字节码重映射体系的 `LambdaAligner`（Lambda 表达式对齐器）以及 Mindustry UI 胶水层（`CellPropertyRef` / 动态参数表达式指纹），其实现状态当前由各自单元测试覆盖（`CellHelperTest` 6 场景持续全绿、`LambdaAlignerTest` 等）；它们的详细状态审计矩阵尚未并入本总表，计划在下一轮治理中统一建立验收标准并纳入。 |
 
 ---
 
@@ -21,11 +21,12 @@
 
 1. **唯一真相源隔离**：`docs/status.md` 作为全模块实现状态的唯一受权载体，彻底解除规范文档与代码注释维护实现进度的负担。
 2. **双重验收验证机制**：
-   - **自动化机器扫描 (`verifyDocStatusMarkers`)**：纳入主构建验证流程（`./gradlew check` 强制依赖），递归扫描 `docs/initfix/`、`docs/topology/`、`core/src/`、`api/src/`、`plugin-arc/src/`、`plugin-mixin/src/`、`panama/src/`，严格拦截标记 `/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/`。当前状态：**100% 达标全绿**。
-   - **规范性内容抽检审计**：禁止规范正文出现“目前已支持”、“当前版本尚未实现”等时态陈述，时态陈述一律归入 `status.md`。全量 14 篇客观设计文档（`docs/topology/` 8 篇、`docs/initfix/` 6 篇）完成人工抽检审查，抽查合格率 100%。
+   - **自动化机器扫描 (`verifyDocStatusMarkers`)**：纳入主构建验证流程（`./gradlew check` 强制依赖），递归扫描 `docs/initfix/`、`docs/topology/`、`docs/offset/`、`core/src/`、`api/src/`、`plugin-arc/src/`、`plugin-mixin/src/`、`panama/src/`，严格拦截标记 `/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/`。当前状态：**100% 达标全绿**。
+   - **规范性内容抽检审计**：禁止规范正文出现“目前已支持”、“当前版本尚未实现”等时态陈述，时态陈述一律归入 `status.md`。全量 15 篇客观设计文档（`docs/topology/` 8 篇、`docs/initfix/` 6 篇、`docs/offset/` 1 篇）完成人工抽检审查，抽查合格率 100%。
 3. **设计规范文档客观化清理清单**：
    - [`docs/topology/01-invariants-and-remapping.md`](topology/01-invariants-and-remapping.md) ～ [`08-decisions.md`](topology/08-decisions.md)（共 8 篇）：全部重构为纯架构规格、约束契约与客观原理，易腐进度全部剥离，头部统一指引至 `status.md`。
    - [`docs/initfix/01-safety-gate.md`](initfix/01-safety-gate.md) ～ [`06-decisions.md`](initfix/06-decisions.md)（共 6 篇）：全部完成规格客观化改造，彻底消除进度标记。
+   - [`docs/offset/01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md)（共 1 篇）：定义物理偏移稳定性与第三方缓存驱逐契约，客观化规格无状态标记。
    - [`AGENTS.md`](../AGENTS.md)：高层导读章节精简，保留五条不变量与高价值概括，详细状态全部外链至 `status.md`。
 
 ---
@@ -68,12 +69,12 @@
 | Tier 1: 内容哈希 + 宿主方法精确匹配 | ✅ | [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §1 | `AnonClassHasher` + `AnonClassAligner` | 双方哈希完全一致且同宿主方法，置信度最高 (0.99) |
 | Tier 1.5: 内容相似度 | ⬜ | [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §1 | 待实现于 `AnonClassAligner` | 路线图规划；规划计算指令哈希交集率与字符串 Jaccard；用于根治拓扑无信息同构候选平局 |
 | Tier 2: 全局唯一内容哈希匹配 | ✅ | [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §1 | `AnonClassAligner` | 仅全类唯一孤本采纳，严禁跨方法 minDiff |
-| Tier 3: 结构签名 + 拓扑相等过滤 | ✅ | [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §2 | `AnonClassAligner.topologyEqual` | minDiff 已被拓扑相等过滤取代以杜绝前插错配；夹具 M（拓扑无信息）与夹具 L（2×2 同构）的保守拒绝属于客观设计意图（杜绝静默错配的必要代价，见 [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §2.3），非未完成功能；其边界收敛计划归入 §3.1“子类引用多重集独立正交维度” |
+| Tier 3: 结构签名 + 拓扑相等过滤 | ✅ | [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §2 | `AnonClassAligner.topologyEqual` | minDiff 已被拓扑相等过滤取代以杜绝前插错配；夹具 M（拓扑无信息）与夹具 L（2×2 同构）的保守拒绝属于客观设计意图（杜绝静默错配的必要代价，见 [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §2.3），非未完成功能；其边界收敛计划归入 §4.1“子类引用多重集独立正交维度” |
 | 夹具 L KNOWN 保守代价收敛 | ⬜ | [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §2.3 | `AnonClassReproTest.known` | 夹具 L 当前作为 KNOWN 保护保守拒绝行为；未来需引入正交维度以在安全前提下恢复配对 |
 | Tier 4: 松散结构 + 状态布局门包装 | 🔶 | [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §1 / [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1 | `AnonClassAligner` + `LayoutGate` | 同宿主方法与基类/接口；禁止 minDiff；包装布局门防存活实例零值污染；**存在残余风险**：依赖 `normalizeEnclosingMethod` 的 scope 偶然不一致，若旧匿名类宿主方法同样无法反向追溯退化为 null，可能与非方法匿名类或 SwitchMap 误配（见风险 2） |
 | Tier 5: 物理类名盲配 | ❌ | [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §1 | `AnonClassAligner` (已物理拔除) | 为守卫核心不变量已彻底移除，前 4 层未匹配直接判为新类/孤儿，杜绝槽位篡夺 |
 | 嵌套匿名类描述符定向屏蔽与后置校验 | ✅ | [`01-invariants-and-remapping.md`](topology/01-invariants-and-remapping.md) §2.2 | `MethodFingerprinter.maskDescriptor` + `AnonClassAligner.verifyFieldLayoutAfterRename` | 字段、方法与构造器描述符定向屏蔽外层纯数字序号，后置校验防止改名碰撞 |
-| 非方法上下文作用域归约 | 🔶 | [`03-cascading-pipeline.md`](topology/03-cascading-pipeline.md) §2 | `AnonClassAligner.normalizeEnclosingMethod` | 无显式三态标签（`<initializer>`/`<clinit>`/`<init>`），靠 `orderIndex` 与结构签名区分（演进规划见 §3.1） |
+| 非方法上下文作用域归约 | 🔶 | [`03-cascading-pipeline.md`](topology/03-cascading-pipeline.md) §2 | `AnonClassAligner.normalizeEnclosingMethod` | 无显式三态标签（`<initializer>`/`<clinit>`/`<init>`），靠 `orderIndex` 与结构签名区分（演进规划见 §4.1） |
 | INV-1 自描述指纹与 INV-2 禁止互相递归 | ✅ | [`03-cascading-pipeline.md`](topology/03-cascading-pipeline.md) §4 | `AnonClassHasher` / `AnonClassAligner` | `AnonClassReproJUnitTest.s25_designInvariants`；常量池扫描与内容变异架构守卫，防止雪崩污染与循环调用 |
 | 宿主级原子拒绝机制 | ✅ | [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §4 | `AlignmentRejectedException` / `RemoldAgent.rejectHostGroup` | strict 歧义、超限、超时或关闭时，宿主与派生类整组移出本轮并输出 `[HOTSWAP-REJECT]` |
 | 性能安全硬闸门 | ✅ | [`06-runtime-and-perf.md`](topology/06-runtime-and-perf.md) §3 | `AnonClassAligner.MAX_ANON_PER_HOST` (128), `ALIGN_TIMEOUT_MS` (2000) | 数量超限或超时直接触发宿主组原子拒绝 |
@@ -130,11 +131,33 @@
 
 ---
 
-## 3. 演进路线与技术债务清单 (Roadmap & Technical Debt)
+## 3. 物理内存偏移稳定性与第三方缓存驱逐 (Physical Memory Offset Stability & Reflection Cache Eviction)
+
+设计规格文档：[`docs/offset/01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md)  
+实测探针源码：[`tests/src/OffsetStabilityProbe.java`](../tests/src/OffsetStabilityProbe.java)（JBR 21 DCEVM 47/47 断言通过）
+
+| 机制 / 条目 | 状态 | 规范章节 | 落地位置 | 验收证据与决策依据 |
+|:---|:---:|:---|:---|:---|
+| 物理字段布局预测器 (`LayoutPredictor`) | ✅ | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §3.1 | `core/src/remold/offset/LayoutPredictor` | 独立 `EphemeralClassLoader` clean-load 预测物理偏移；Probe A3 实测预测值与重定义后实际物理布局逐字节 100% 一致；`LayoutPredictorTest` 覆盖单类填洞、引用顺移与 3 层继承体系 |
+| 包级私有父类运行时包隔离防御 | ✅ | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §3.1 | `LayoutPredictor.populateNonJdkSuperclasses` | 预先提取整条非 JDK 祖先链注入同一 EphemeralClassLoader，杜绝跨 Loader 导致包级私有父类抛出 `IllegalAccessError`；`LayoutPredictorTest.testPackagePrivateSuperclassRuntimePackageAccess` 正反向对照通过 |
+| 偏移量与访问器扫描器 (`OffsetScanner`) | ✅ | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §2 | `core/src/remold/offset/OffsetScanner` | 常量池预过滤（owner 命中率 < 2%）+ ASM Analyzer 多轮过程间数据流分析；识别 `Unsafe.objectFieldOffset`、`Atomic*FieldUpdater`、`VarHandle` 等产生源；`OffsetScannerTest` 21 个样例类与真实 JDK 类（CHM、AQS、ForkJoinPool 等）全覆盖 |
+| 访问器自愈与受害者边界收敛 | ✅ | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §2 | `OffsetScanner` / `OffsetStabilityProbe` (Probe E/E2) | 实测证明 `Field.getInt()` 与 `MethodHandle` getter（`findGetter`/`unreflectGetter`）在 DCEVM 下自动自愈至新偏移，不作为漂移受害者；仅拦截不会自愈且错读相邻字段的 `VarHandle`，避免对 Jackson/Record 等现代框架造成误杀 |
+| 物理偏移漂移安全门 (`SuperclassDriftGate`) | ✅ | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §3.2 | `core/src/remold/offset/SuperclassDriftGate` | 结果驱动型门控：对所有物理偏移发生漂移的字段比对 `OffsetBindingIndex`；阻断 `SUPERCLASS_FIELD_DRIFT` 与 `LAYOUT_DRIFT`；`OffsetStabilityProbe` Probe C2 与 `SuperclassDriftGateTest` 6 场景持续验证通过 |
+| 删除字段物理槽位冲突门 (`DELETED_FIELD_OFFSET_CONFLICT`) | ✅ | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §1.2 | `SuperclassDriftGate.checkLayoutDrift` | Probe A4/A4-2 实测证实删除字段后物理槽位紧缩（旧偏移被相邻字段抢占），若存在旧物理偏移持有者则坚决阻断；`LayoutPredictorTest.testDeletedFieldConflictGate` 验证通过 |
+| 预测未完成容错与严格模式 | ✅ | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §3.2 | `SuperclassDriftGate` / `RemoldAgent.OFFSET_STRICT` | 未复现子孙类记入 `unpredictedClasses`；`-Dremold.agent.offset_strict=true` 严格模式下强阻断；默认模式下若无缓存持有者则容错放行，有持有者坚决拦截；`LayoutPredictorTest.testIncompletePredictionAndStrictMode` 验证通过 |
+| 盲区透明化结构日志 | ✅ | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §3.2 | `OffsetBindingIndex` / `SuperclassDriftGate` | 统计不可读类（`unreadableClasses`）、深度超限（`depthExceeded`）与未决动态持有者（`unresolvedHolders`），门控决策报告完整输出，杜绝静默假安全 |
+| 第三方框架实例级缓存驱逐管理器 | ✅ | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §4 | `core/src/remold/evict/ReflectionCacheManager` | `ReflectionCacheEvictor` SPI 契约；接线 `RemoldAgent` 重定义成功出口；原生堆遍历（`LibTool.getInstances`）+ 弱引用显式注册双通道；`ReflectionCacheManagerTest` 4 用例覆盖注册生命周期与异常隔离 |
+| Arc `Json` 实例级缓存驱逐器 | ✅ | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §4.3 | `ReflectionCacheManager.ArcJsonEvictor` | 自动清除 `typeToFields`、`classToDefaultValues`、`classToSerializer` 针对被重定义类的元数据缓存，使新增字段立即可见；`ReflectionCacheManagerTest.testArcJsonInstanceEviction` 先红后绿对照验证 |
+| Jackson `ObjectMapper` 实例级缓存驱逐器 | ✅ | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §4.3 | `ReflectionCacheManager.JacksonEvictor` | 全局 `TypeFactory.clearCache()` + 实例级 `_serializerCache` 与 `_cache` 刷新；彻底废除无效的 `Class.reflectionData` 反射侵入 |
+| Gson `Gson` 实例级缓存驱逐器 | ✅ | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §4.3 | `ReflectionCacheManager.GsonEvictor` | 清除实例级 `typeTokenCache` 映射；`ReflectionCacheManagerTest.testGsonInstanceEviction` 验证通过 |
+
+---
+
+## 4. 演进路线与技术债务清单 (Roadmap & Technical Debt)
 
 本节将尚未落地的目标设计规格与工程技术债务严格区分，分别建立优先级、前置依赖与验收目标。
 
-### 3.1 目标能力演进规划 (Feature Roadmap & Architecture Evolution)
+### 4.1 目标能力演进规划 (Feature Roadmap & Architecture Evolution)
 
 设计规格文档：[`docs/initfix/04-target-design.md`](initfix/04-target-design.md) 与各专题规范
 
@@ -157,8 +180,10 @@
 | **ECJ 编译器矩阵支持** | P3 | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §4 | ECJ 构建环境夹具 | 针对 Eclipse 编译器的 switch table 实现（内部 `$SWITCH_TABLE$` 方法）与 EnclosingMethod 结构差异建立对齐与防护 |
 | **新 javac 加旧 -target 交叉编译矩阵支持** | P3 | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §3 | CI 交叉编译任务配置 | 验证新版 javac 携带 `-target 8/11` 等产物的命名与属性表现 |
 | **未知 class major 显式拒绝** | P3 | [`06-runtime-and-perf.md`](topology/06-runtime-and-perf.md) §1 | 无 | 遇到高于当前 JVM 支持的 class major 版本时显式拒绝而非尝试解析，防止 ASM Crash |
+| **槽位预留与侧表免漂移 (S2)** | P2 | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §3.3 | 基类字节码注入器 | 针对游戏高频基类预留 slot 或引入 `$extras` 侧表虚拟字段，实现基类新增字段物理布局完全零漂移 |
+| **持有者内存原地覆写与使用方 C2 逆优化 (S3)** | P3 | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §3.4 | `OffsetBindingIndex.getReaders` | 利用 `staticFieldBase/Offset` 原地更新 static final 常量，并对 direct reader 执行 `retransformClasses` 触发 C2 evol_method 依赖链逆优化 |
 
-### 3.2 技术债与死代码消除清单 (Tech Debt & Code Cleanup)
+### 4.2 技术债与死代码消除清单 (Tech Debt & Code Cleanup)
 
 | 债务 / 清理项 | 优先级 | 影响位置 | 现状分析与消除方案 |
 |:---|:---:|:---|:---|
@@ -168,14 +193,14 @@
 | **Mixin 目标类原始字节码读取缺兜底** | P2 | `plugin-mixin` `MixinHotSwap` | 目标类重织入依赖 `Class.getResourceAsStream` 读原始字节码；Fabric dev 环境下若取不到（日志「读不到 ... 原始字节码」），当前无回退路径。缺的是 `IClassBytecodeProvider.getClassNode(name, false)` + ASM 回写兜底。 |
 | **未加载的 `@Mixin` 类被当作新类注入** | P3 | `core` `RemoldAgent` 新类注入路径 | 未加载且带 `@Mixin` 的类会走新类注入并打印 `[INJECTED]`，功能无影响但属日志噪音与多余类定义；彻底消除需在注入路径做常量池级 `@Mixin` 识别后跳过。 |
 | **批次内按类重复全堆遍历** | P2 | `InitFix.collectInstancesForPatch` / `LibTool.getInstances` | 每个待补类各调用一次 `IterateOverInstancesOfClass`，而每次调用都是一次 safepoint（1M 匹配实例时 `HeapIterateOperation` 实测约 240 ms，见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10.2）：批次里 N 个待补类 = N 次停世界。可用 `IterateThroughHeap` 一次走完、按类分发，把 N 次停顿压成 1 次。**但这是「N 次短停顿」换「1 次长停顿」**：单遍历没有 VM 内的 klass 过滤，每个对象都要进 native 回调，最大单次停顿大概率更差；对延迟敏感的场景未必划算。做之前必须同时测总停顿与最大单次停顿，并先统计真实批次类数 N（N 很小时很可能不值得）。**另有一条已固定的语义约束**：`getInstances(P)` 含子类实例、`getInstances(C)` 不含父类实例（`remold.LibToolTest#heapScanIncludesSubclassesButNotSuperclasses`，见 [`08-test-audit.md`](initfix/08-test-audit.md) §3.1），单遍历按类分发时必须复现这个**不对称**，而不是简单按 klass 精确匹配。 |
-| **每次 redefine 会大范围失效已编译代码** | P2 | 实测见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §11 | 对照组实测：redefine 一个**无关类**（无论只改方法体还是新增字段），另一个类的 C2 版本同样在窗口内被 `made not entrant`。意味着每次热更后进程可能大范围回退到解释/C1 执行、出现预热回落。归因未定（可能是 DCEVM 的全局失效策略），但成本真实存在；需要真实场景测一次热更后的吞吐恢复曲线。该成本按 redefine **次数**计，因此两阶段的两次 redefine 会把回落代价翻倍（见 §3.1 两阶段条目）。 |
+| **每次 redefine 会大范围失效已编译代码** | P2 | 实测见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §11 | 对照组实测：redefine 一个**无关类**（无论只改方法体还是新增字段），另一个类的 C2 版本同样在窗口内被 `made not entrant`。意味着每次热更后进程可能大范围回退到解释/C1 执行、出现预热回落。归因未定（可能是 DCEVM 的全局失效策略），但成本真实存在；需要真实场景测一次热更后的吞吐恢复曲线。该成本按 redefine **次数**计，因此两阶段的两次 redefine 会把回落代价翻倍（见 §4.1 两阶段条目）。 |
 | **真实批次规模 N 未知** | P2 | `RemoldAgent`（`HotswapBatchListener` 已暴露批次边界）/ `InitFix.applyPatch`（已记 `count=N` 与 `elapsed`） | 「单遍历按类分发」是否值得，取决于真实热更的批次类数 N 与每类实例数，而这两个量目前只有合成数据。观测手段已具备：批次边界走 `HotswapBatchListener`，每类实例数与耗时由 `applyPatch` 的日志给出；需要的是**几天真实热更的样本**，而不是再加代码。 |
 
 > 关于 `AnonClassHasher.MAX_DEPTH`：该类注释已明确其为**永不生效的历史遗留常量**（`hash` 不递归自调用，三处调用点全传 `depth = 0`，`DeepNestProbe` 实测 depth 8 仍能正确对齐）。保留它是为了不动公开签名 `hash(..., int depth)`，**不应再作为「嵌套深度上限」引用，也不应作为技术债重复登记**。
 
 ---
 
-## 4. 已知风险、残余盲区与折衷清单 (Known Residual Risks & Limitations)
+## 5. 已知风险、残余盲区与折衷清单 (Known Residual Risks & Limitations)
 
 本节系统记录热更新基础设施中被评审确认、因工程代价或架构边界有意保留的已知残余风险，统一按六段式元结构规范登记：
 
@@ -186,7 +211,7 @@
   1. 重定义全程持有 `HOTSWAP_LOCK` 全局互斥锁；
   2. 游戏通常在主循环安全点或调试暂停期触发热更；
   3. 若类已存在已知存活实例，直接进入 InitFix 逐实例补丁队列，不依赖“零实例豁免”。
-- **根治与关闭条件**：落地路线图 §3.1“两阶段重定义与构造器尾部插桩”；或在 HotSwap 期间通过 JVM TI 暂停全部应用线程（代价过高，目前维持极窄竞态记录）。
+- **根治与关闭条件**：落地路线图 §4.1“两阶段重定义与构造器尾部插桩”；或在 HotSwap 期间通过 JVM TI 暂停全部应用线程（代价过高，目前维持极窄竞态记录）。
 - **关联设计规范**：[`docs/topology/07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1.3。
 - **关联架构决策**：无（属并发系统已知 TOCTOU 折衷）。
 
@@ -197,7 +222,7 @@
   1. **通用规则的偶然防护**：Tier 4 通用的基类与接口完全一致校验规则，恰好覆盖了绝大多数 SwitchMap 误配路径（SwitchMap 基类为 Object 且无接口，而业务匿名类几乎均实现特定接口或抽象基类）。这不是专门为 SwitchMap 添加的规则，但客观上构成了首道防线；
   2. **合成捕获字段布局门拦截**：SwitchMap 类通常无捕获字段，若发生实例字段变动会被 `LayoutGate` 拦截；
   3. **专测夹具持续断言**：专用测试夹具 `SwitchMapAlignTest` 在 javac 21 真实产物下持续断言未发生篡夺。
-- **根治与关闭条件**：引入 SwitchMap 特异性特征识别（`Synthetic` + 静态 `int[]` 字段 + 宿主类前缀），将其显式纳入保留名域并排斥在匿名类候选集之外；或推进 §3.1“非方法显式三态作用域规范化”。
+- **根治与关闭条件**：引入 SwitchMap 特异性特征识别（`Synthetic` + 静态 `int[]` 字段 + 宿主类前缀），将其显式纳入保留名域并排斥在匿名类候选集之外；或推进 §4.1“非方法显式三态作用域规范化”。
 - **关联设计规范**：[`docs/topology/04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §1。
 - **关联架构决策**：[`docs/topology/08-decisions.md#d-anon-3`](topology/08-decisions.md#d-anon-3)。
 
@@ -229,7 +254,7 @@
 - **当前缓解措施**：
   1. `LayoutGate` 能够阻断捕获字段或显式字段发生结构性变动的非法重定义；
   2. 日常编码中极少出现局部类内部深度嵌套匿名类且局部类频繁增删的形态。
-- **根治与关闭条件**：落地路线图 §3.1“同名局部类完整拓扑对齐”，将局部类内部嵌套匿名类同样递归纳入拓扑对齐引擎。
+- **根治与关闭条件**：落地路线图 §4.1“同名局部类完整拓扑对齐”，将局部类内部嵌套匿名类同样递归纳入拓扑对齐引擎。
 - **关联设计规范**：[`docs/topology/07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §2.2。
 - **关联架构决策**：无。
 
@@ -252,19 +277,20 @@
 - **关联设计规范**：[`docs/initfix/05-jvmti-heap.md`](initfix/05-jvmti-heap.md)。
 - **关联架构决策**：无。
 
-### 风险 8：JBR 字段布局探针实验局限
-- **风险描述与底层机制**：JetBrains Runtime 增强类重定义底层允许新增字段，但其物理内存布局在 JIT 极端优化下的行为较为复杂。
-- **触发条件**：JIT C2 编译器执行激进内联后，编译期代码可能基于旧对象偏移量（Offset）访问内存，或对新增的 `volatile`/`final` 字段存在可见性延迟；此外，父子类同名字段遮蔽可能引发偏移混淆。
+### 风险 8：JBR 字段布局探针实验局限（已闭环收敛）
+- **风险描述与底层机制**：增强类重定义下物理内存布局在 JIT 极端优化下的行为较为复杂；早前假设单类新增字段为纯尾部追加（H1）以及父类加字段不影响子类已被物理探针证伪。
+- **触发条件**：新增字段填补空洞或基本类型聚类导致存量字段物理偏移漂移；JIT C2 激进常量折叠导致读取旧偏移；VarHandle 固化旧偏移错读相邻字段。
 - **当前缓解措施**：
-  1. JBR 21 生产基准测试已证实常规新增实例字段与静态字段行为稳定；
-  2. `LayoutGate` 严禁字段删除与类型变更，仅放行纯新增字段；
-  3. 静态字段强制条件 CAS 写入，保证跨线程可见性。
-- **根治与关闭条件**：落地路线图 §3.1“增强重定义模式四个未覆盖盲区验证与防护”，在真实 JBR 25 及多层 JIT 编译环境下开展压力探针验证。
-- **关联设计规范**：[`docs/topology/07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1。
+  1. `OffsetStabilityProbe`（47 项断言通过）全量实测了 DCEVM 字段布局规律、空洞填补、类型重排、继承体系漂移、C2 常量折叠以及访问器自愈边界；
+  2. 落地 `LayoutPredictor`，在重定义前通过抛弃式加载器 clean-load 预测物理偏移（与 DCEVM 重定义后 100% 吻合）；
+  3. 落地 `SuperclassDriftGate`，阻断存在偏移持有者的 `LAYOUT_DRIFT`、`SUPERCLASS_FIELD_DRIFT` 以及 `DELETED_FIELD_OFFSET_CONFLICT`；
+  4. 落地 `populateNonJdkSuperclasses` 预注入整条非 JDK 祖先链，防御 package-private 运行时包隔离。
+- **根治与关闭条件**：已通过 P0/P1 的 `LayoutPredictor` 与 `SuperclassDriftGate` 达成事前确定性拦截；未来探索 S2 槽位预留或 S3 使用方 C2 逆优化以进一步放宽阻断。
+- **关联设计规范**：[`docs/offset/01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md)。
 - **关联架构决策**：[`docs/topology/08-decisions.md`](topology/08-decisions.md) 附录 A。
 
 ### 风险 9：重定义生效到补丁完成之间的读穿窗口
-- **风险描述与底层机制**：**消除目标已登记在路线图 §3.1「两阶段 Schema-First 重定义」，此处不重复描述机制**；本条只记录在两阶段接入驱动之前，这段窗口是**敞开的**，以及它当前的实际影响面。
+- **风险描述与底层机制**：**消除目标已登记在路线图 §4.1「两阶段 Schema-First 重定义」，此处不重复描述机制**；本条只记录在两阶段接入驱动之前，这段窗口是**敞开的**，以及它当前的实际影响面。
 - **当前敞开的程度**：读取新增字段的代码在窗口内拿到类型默认值（引用类型 `null`、数值类型 `0`），不抛异常也不打日志。窗口 = 枚举 + 弱引用往返 + 条件 CAS，实测拆分见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10：
   - 枚举成本 = **无关对象约 8 ns/个**（全堆遍历固定项）+ **匹配实例约 0.3~1 µs/个**（打 tag 与物化数组）；
   - 极端场景（目标类自身 100 万实例）：`applyPatch` 约 1551 ms，其中 CAS 仅 83 ms、弱引用往返 389 ms；
@@ -277,7 +303,7 @@
   2. `HOTSWAP_LOCK` 只互斥热更调度与事务处理，**不阻塞应用线程读**，因此不构成防护；
   3. T0 零值等价字段不受影响（默认值即正确值），只有真正需要写入的字段暴露在窗口里；
   4. `PatchReport` 与条件 CAS 跳过计数可在事后定位"这次写了哪些字段"，但无法预防窗口内的读。
-- **根治与关闭条件**：两阶段重定义接入驱动后关闭——该路线图条目已降为 P2、暂缓接线（见 §3.1），因此本条窗口在当前主线中**保持敞开**，属已知残余风险。`TwoPhaseProbe` 已在 JBR 21 上实测该路径：阶段 B 期间旧方法体仍返回旧值（`v1:1`），窗口内无读穿。
+- **根治与关闭条件**：两阶段重定义接入驱动后关闭——该路线图条目已降为 P2、暂缓接线（见 §4.1），因此本条窗口在当前主线中**保持敞开**，属已知残余风险。`TwoPhaseProbe` 已在 JBR 21 上实测该路径：阶段 B 期间旧方法体仍返回旧值（`v1:1`），窗口内无读穿。
 - **关联设计规范**：[`docs/initfix/04-target-design.md`](initfix/04-target-design.md) §1、[`docs/initfix/03-runtime-driver.md`](initfix/03-runtime-driver.md) §2。
 - **关联架构决策**：无。
 
@@ -321,7 +347,7 @@
 
 ---
 
-## 5. 框架集成插件与资源热更新 (Framework Plugins & Asset Hot-Reload)
+## 6. 框架集成插件与资源热更新 (Framework Plugins & Asset Hot-Reload)
 
 插件 SPI 契约：[`api/src/remold/HotswapPlugin.java`](../api/src/remold/HotswapPlugin.java)
 
@@ -338,7 +364,7 @@
 
 ---
 
-## 6. 工程化、构建与分发 (Engineering, Build & Distribution)
+## 7. 工程化、构建与分发 (Engineering, Build & Distribution)
 
 > 本节登记**制品产出与对外分发**链路的实现状态。此前的状态表只覆盖运行时机制，导致「仓库已上线、CI 已跑矩阵、JitPack 坐标已被模板消费」等既成事实长期被误记为待办。
 
@@ -352,12 +378,13 @@
 
 ---
 
-## 7. 前置验证与实测数据 (Pre-flight Measurements)
+## 8. 前置验证与实测数据 (Pre-flight Measurements)
 
 | 条目 | 状态 | 落地位置 | 验收证据与已知边界 |
 |:---|:---:|:---|:---|
 | P0.5 前置微验证（连续 Schema Redefine / 阶段 A 链接 / 堆遍历规模） | 🔶 | `tests/src/P05Probe.java`、`tests/src/P05Agent.java`、`tests/build.gradle`（任务 `p05Probe`）、`.github/workflows/ci.yml`（任务 `p05-probe`，JBR 17/21 矩阵） | JBR 21.0.9 本机 **61/61 断言通过**（M1~M9）：连续两次 schema 变化均被接受（阶段 A p50 30.9 ms、阶段 C p50 27.3 ms；schema 变更平均触发 1 次 GC ≈ 5 ms，纯方法体变更 0 次）；阶段 A 预注入的私有实例方法、私有静态方法与新 lambda 可被 nestmate 伴生类链接，并带「阶段 A 之前必抛 `NoSuchMethodError`」的负向对照；1M 实例堆遍历 0.87 s、结果数组 4 MiB；M7 分离实验（具名类删字段）见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §13；M8（方法删除：向上解析 vs 向下分派，三种失败形态）见 §15；M9（静态字段删除的三种形态 + 编译期常量内联 + `getfield`/`getstatic` 双向 ICCE）见 §16。**缺口**：JBR 17 数据待 CI `p05-probe` 矩阵产出后回填；M3 的「1M 实例枚举」在内存压力下有**已知偶发失败**（同一轮内重跑即过，故该探针不挂 `check`）；单机单次采样，未做 Linux 对照与 JIT 预热隔离。方法与原始数据见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) |
 | 两阶段编排端到端验证 | 🔶 | `tests/src/TwoPhaseProbe.java`、`tests/build.gradle`（任务 `twoPhaseProbe`） | JBR 21 本机 **39/39 断言通过**：`阶段 A → redefine → 阶段 B 补丁 → 阶段 C redefine` 全链路跑通（阶段 A 17~37 ms、阶段 B 7 ms/1 实例、阶段 C 31~35 ms）；对照组证明不插桩时「枚举之后、阶段 C 之前」新建的实例永久停在 `v2:1,0`；另含 **JIT 预热分配点**场景（对象写进静态数组保证逃逸、按 cid 对齐 safepoint 窗口）：行为正确，但**对照组证伪了因果**——redefine 无关类同样会让该 cid 失效，故此场景只记录"未观测到损坏"，**不作为机制已验证的证据**（见 `07-p05-probe-results.md` §11）。另含 **在途旧构造器帧**场景（线程阻塞在旧 `<init>` 中途时 redefine，两条防空转断言先证明帧确实在途、且新旧构造器写入可区分的值）：在途对象 `b=1`（旧字节码）、`c` 完好、新对象 `b=2`/`d=42`，证明 DCEVM 在重定义内部正确处理了在途帧的字段偏移（§12）。**缺口**：未覆盖中止回滚、多类批次与真实多线程分配竞争；探针在主流程之外，驱动尚未接入。见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §9、§11、§12 |
+| 物理偏移稳定性与漂移探针 (OffsetStabilityProbe) | ✅ | `tests/src/OffsetStabilityProbe.java`、`tests/build.gradle`（任务 `offsetStabilityProbe`） | JBR 21.0.9 本机 **47/47 断言通过**（A1~A4 单类布局规律/空洞填补/类型重排、B1~B3 继承体系漂移步长、C1~C2 VarHandle 错位破坏、D1~D2 使用方 C2 逆优化与重编译恢复、E1~E2 Field 与 MethodHandle 访问器自愈边界）；与 `LayoutPredictor` 及 `SuperclassDriftGate` 形成事前预测阻断闭环 |
 
 
 

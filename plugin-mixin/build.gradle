@@ -30,7 +30,7 @@ dependencies {
 
 	// Mixin 与 ASM 由宿主（Fabric / Quilt / NeoForge / Sponge）提供，不打包进插件
 	compileOnly 'org.spongepowered:mixin:0.8.5'
-	def asmVersion = '9.11'
+
 	compileOnly "org.ow2.asm:asm:$asmVersion"
 	compileOnly "org.ow2.asm:asm-tree:$asmVersion"
 }

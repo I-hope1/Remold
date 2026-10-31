@@ -15,6 +15,14 @@ import java.util.Arrays;
 import static org.junit.jupiter.api.Assertions.*;
 
 public class InterfaceLambdaMarkerTest {
+
+	/**
+	 * 被执行到的 {@code consume} 次数。public 是必需的：转换后的接口由子加载器定义，
+	 * 与被测类不在同一运行期包内，package-private 访问会抛 {@code IllegalAccessError}。
+	 */
+	public static final java.util.concurrent.atomic.AtomicInteger consumed =
+		new java.util.concurrent.atomic.AtomicInteger();
+
 	public interface LambdaFixture {
 		default Runnable capturing() {
 			return () -> consume(this);
@@ -25,6 +33,7 @@ public class InterfaceLambdaMarkerTest {
 		}
 
 		static void consume(LambdaFixture value) {
+			consumed.incrementAndGet();
 		}
 	}
 
@@ -86,10 +95,15 @@ public class InterfaceLambdaMarkerTest {
 
 		Object instance = Proxy.newProxyInstance(loader, new Class<?>[]{defined},
 			(proxy, method, arguments) -> InvocationHandler.invokeDefault(proxy, method, arguments));
+		int before = consumed.get();
 		for (String methodName : new String[]{"capturing", "nonCapturing"}) {
 			Runnable lambda = (Runnable) defined.getMethod(methodName).invoke(instance);
 			lambda.run();
 		}
-		assertTrue(true, "capturing and non-capturing lambdas link and execute");
+		// 终局断言：两个 lambda 都必须真的执行到 consume()。只断言"没抛异常"会被
+		// "链接成功但方法体被丢弃/换成空实现"这种退化骗过去。
+		assertEquals(2, consumed.get() - before,
+			"capturing 与 nonCapturing 两个 lambda 都必须真的执行到 consume()（实际增加 "
+				+ (consumed.get() - before) + " 次）");
 	}
 }

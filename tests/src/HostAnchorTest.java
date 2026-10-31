@@ -306,12 +306,43 @@ public class HostAnchorTest {
 		assertNotNull(aligned);
 		assertNotNull(LambdaAligner.LAST_STATS);
 
-		// 父级哈希改变导致无法通过 L:hash 锚点对齐；
 		// 叶子降级回 Step 1a 同名贪婪匹配（L2' 匹配 L1），父级随之落入 Pass A/B
 		assertEquals(0, LambdaAligner.LAST_STATS.anchorPairs,
 			"父级哈希异化导致锚点失配，anchorPairs 应为 0: " + LambdaAligner.LAST_STATS);
 		assertTrue(LambdaAligner.LAST_STATS.hashMismatchPairs > 0,
 			"退化路径应准确记录到哈希异化配对 (hashMismatchPairs > 0): " + LambdaAligner.LAST_STATS);
+
+		// —— 终局断言：计数器只说"走了降级路径"，产物字节码才说"降级后老 callsite 还能不能用" ——
+		ClassNode out = readClass(aligned);
+
+		// 1. 被删语句的旧父级（$3）与旧叶子（$2）必须各留一个孤儿桩：
+		//    老 callsite 不能抛 NoSuchMethodError，也不能继续跑旧叶子体。
+		assertEquals(2, countGhosts(out),
+			"被删语句的旧父级/旧叶子必须各留一个孤儿桩（实际方法表: " + methodTable(out) + "）");
+		assertTrue(callsMethod(findMethod(out, "lambda$build$3"), "onOrphanInvoked"),
+			"旧父级 lambda$build$3 必须是孤儿桩（实际: " + methodTable(out) + "）");
+		assertTrue(callsMethod(findMethod(out, "lambda$build$2"), "onOrphanInvoked"),
+			"旧叶子 lambda$build$2 必须是孤儿桩（实际: " + methodTable(out) + "）");
+		assertFalse(callsMethod(findMethod(out, "lambda$build$2"), "leaf"),
+			"孤儿桩不得继续执行旧叶子体 leaf()");
+
+		// 2. 新链完整且执行新语义：build() -> lambda$build$1 -> lambda$build$0 -> leaf()
+		MethodNode container = findMethod(out, "lambda$build$1");
+		assertNotNull(container, "新容器 lambda$build$1 必须存在（实际: " + methodTable(out) + "）");
+		assertFalse(callsMethod(container, "onOrphanInvoked"), "新容器不能是孤儿桩");
+		assertTrue(callsMethod(container, "x2_mod"), "新容器必须执行新语句的 x2_mod()");
+		assertFalse(callsMethod(container, "x1"), "旧父级体（x1）不得被复活到新容器上");
+		assertEquals(List.of("lambda$build$0"), findIndyTargets(out, "lambda$build$1"),
+			"容器必须仍指向叶子 lambda$build$0（实际: " + findIndyTargets(out, "lambda$build$1") + "）");
+
+		MethodNode leafNode = findMethod(out, "lambda$build$0");
+		assertNotNull(leafNode, "叶子 lambda$build$0 必须存在（实际: " + methodTable(out) + "）");
+		assertFalse(callsMethod(leafNode, "onOrphanInvoked"), "叶子不能是孤儿桩");
+		assertTrue(callsMethod(leafNode, "leaf"), "叶子体必须仍调用 leaf()");
+
+		// 3. 产物自洽：不得出现重复的 name+desc。
+		assertEquals(new HashSet<>(methodKeys(out)).size(), out.methods.size(),
+			"产物方法名+描述符必须唯一（实际: " + methodTable(out) + "）");
 	}
 
 	@Test
@@ -903,6 +934,33 @@ public class HostAnchorTest {
 			}
 		}
 		return false;
+	}
+
+	/** 产物里孤儿熔断桩的个数（以是否调用 {@code onOrphanInvoked} 判定）。 */
+	private static int countGhosts(ClassNode cn) {
+		int n = 0;
+		for (MethodNode mn : cn.methods) {
+			if (callsMethod(mn, "onOrphanInvoked")) n++;
+		}
+		return n;
+	}
+
+	private static List<String> methodKeys(ClassNode cn) {
+		List<String> keys = new ArrayList<>();
+		for (MethodNode mn : cn.methods) keys.add(mn.name + mn.desc);
+		return keys;
+	}
+
+	/** 失败信息里带上合成方法表：名字 + 描述符 + 是否孤儿桩。 */
+	private static String methodTable(ClassNode cn) {
+		StringBuilder sb = new StringBuilder("[");
+		for (MethodNode mn : cn.methods) {
+			if (mn.name.startsWith("lambda$") || callsMethod(mn, "onOrphanInvoked")) {
+				sb.append(mn.name).append(mn.desc)
+					.append(callsMethod(mn, "onOrphanInvoked") ? "(GHOST) " : " ");
+			}
+		}
+		return sb.append("]").toString();
 	}
 
 	static String javac21() {

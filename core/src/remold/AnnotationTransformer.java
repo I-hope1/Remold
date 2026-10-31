@@ -88,6 +88,19 @@ public class AnnotationTransformer implements ClassFileTransformer {
 	 */
 	public static final Map<String, byte[]> pendingAlignedClasses = new ConcurrentHashMap<>();
 
+	/**
+	 * An external redefine carries no new declaration when its bytes match either the
+	 * pre-weave source baseline or the current runtime baseline. Such events (IDE hotswap
+	 * re-sending unchanged bytes, external retransforms) must not fire {@code @OnReload}.
+	 */
+	static boolean isNoOpExternalRedefine(String dotClassName, byte[] rawBytes) {
+		if (dotClassName == null || rawBytes == null) return false;
+		byte[] source = RemoldAgent.sourceBytecodeCache.get(dotClassName);
+		if (source != null && Arrays.equals(source, rawBytes)) return true;
+		byte[] runtime = RemoldAgent.bytecodeCache.get(dotClassName);
+		return runtime != null && Arrays.equals(runtime, rawBytes);
+	}
+
 	//region ClassFileTransformer Core
 	@Override
 	public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
@@ -136,6 +149,11 @@ public class AnnotationTransformer implements ClassFileTransformer {
 
 		if (classBeingRedefined != null && !isInternal) {
 			// ================== 外部重定义通道 (IDE JDWP / 外部 Agent) ==================
+			// 0. 无变化判定：IDE/外部 Agent 的 retransform 或重复提交会带着与基线一致的字节进来，
+			//    这不是"本轮真的被重定义"，不得再触发 @OnReload 等后置回调。
+			boolean noOpExternal = isNoOpExternalRedefine(dotClassName, classfileBuffer);
+			boolean captureOnly = internalCtx != null && internalCtx.suppressesPostRedefine();
+
 			// 1. 重新织入 Mixin 注入点
 			byte[] woven = RemoldAgent.applyTransformerBridges(loader, dotClassName, classBeingRedefined, bytes);
 			if (woven != null && woven != bytes) {
@@ -197,12 +215,19 @@ public class AnnotationTransformer implements ClassFileTransformer {
 			}
 
 			// 4. 后置任务注册（存活实例的枚举推迟到补丁应用时，见 InitFix.PendingPatch）
-			RemoldAgent.scheduleDeferredPostRedefine(classBeingRedefined);
+			if (!noOpExternal && !captureOnly) {
+				RemoldAgent.scheduleDeferredPostRedefine(classBeingRedefined);
+			}
 
 			// 5. 更新基线缓存
 			byte[] finalBytes = modified ? bytes : classfileBuffer;
 			RemoldAgent.sourceBytecodeCache.put(dotClassName, classfileBuffer);
 			RemoldAgent.bytecodeCache.put(dotClassName, finalBytes);
+
+			// 记下外部已应用（含织入）的字节指纹，让后续内部批次按"磁盘未变"跳过，避免同一改动二次回调
+			if (!noOpExternal && !captureOnly) {
+				RemoldAgent.recordExternalDiskBaseline(dotClassName, finalBytes);
+			}
 
 			if (DEBUG && modified) writeTo(className, bytes);
 			return modified ? bytes : null;
@@ -562,7 +587,18 @@ public class AnnotationTransformer implements ClassFileTransformer {
 			    })) {
 				needConversionToStatic.add(key);
 			} else if (staticSyntheticMethods.contains(key)
-			           && refs.stream().allMatch(r -> r.impl.getTag() == H_INVOKESTATIC && r.isContainerInstance)) {
+			           && refs.stream().allMatch(r -> r.impl.getTag() == H_INVOKESTATIC && r.isContainerInstance)
+			           // 【不变量：每个 lambda 恰好一个 receiver】
+			           //
+			           // 只给**零捕获**的静态 lambda 补 this。已经捕获了参数的静态 lambda 说明
+			           // javac 已经把它写成"显式 receiver"形态（典型来源：源码里写了 `self.field`），
+			           // 再前置一个 this 会得到 `(T,T)`——同一个 lambda 在"隐式 this"轮次里被
+			           // 转成 `(T)`、在"显式 self"轮次里被转成 `(T,T)`，两轮描述符对不上：
+			           // 旧槽位认不出新方法，被幽灵化，老 CallSite 静默失效（sg_b 实测）。
+			           //
+			           // 这条也顺手保证了"加不加 this"不取决于源码写法：无论 `this.x` 还是
+			           // `self.x`，最终都是 `(T)`。
+			           && refs.stream().allMatch(r -> Type.getArgumentTypes(r.indy.desc).length == 0)) {
 				// 核心防护：必须所有引用点都在"可安全取 this"的实例方法里
 				needForceCaptureThis.add(key);
 			}

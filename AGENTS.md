@@ -88,6 +88,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | P0.5 前置验证探针 | `tests/src/P05Probe.java`（配套最小 agent `P05Agent.java`，`./gradlew :tests:p05Probe -Pp05.jbr=<dcevm-jdk>`） |
 | 两阶段编排探针 | `tests/src/TwoPhaseProbe.java`（`./gradlew :tests:twoPhaseProbe -Pp05.jbr=<dcevm-jdk>`，串起 A → B → C） |
 | 测试判定力审计记录 | `docs/initfix/08-test-audit.md`（变异检查证据；审计产生的缺口与结论，一次性证据不放状态表） |
+| lambda 对齐压力测试 | `tests/src/LambdaAlignTortureTest.java`（旧 callsite 名字 → body 归属的自动断言；JDK 8/17/21 × 前插/删除/重排，覆盖 `lambda$static$N`/`lambda$new$N`；含判定力自检） |
 | `@HotswapInit` 设计契约 | `docs/initfix/09-hotswapinit-design.md`（T4 逃生口的豁免边界、签名与调用基数、重复触发、异常边界、用例清单） |
 | 外部引擎源码索引 | `.sources/`（如 `.sources/mindustry/` 指向本地 Mindustry/Arc 真实源码；只读参考，已 gitignore） |
 | Mixin 生态扩展插件 | `plugin-mixin/`（`remold.mixin.MixinHotswapPlugin`、`MixinReWeaver`、`MixinHotSwap`） |
@@ -120,7 +121,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 真实 kotlinc 产物验证 | 🔶 | `object` 单例与 `trim` 家族已验证；其它 Kotlin 行为仅经仿真验证 |
 | 物理偏移漂移安全门与布局预测器 | ✅ | 抛弃式加载器事前预测物理布局；`SuperclassDriftGate` 结合堆存活阻断漂移；预注入祖先链防御包级私有隔离 |
 | 反射与序列化实例缓存驱逐 | ✅ | Arc Json、Jackson、Gson 实例级清空 SPI，重定义成功后自动触发 |
-| Arc 资源热更新（贴图/字体/语言包） | 🔶 | 贴图同尺寸原位直刷；尺寸变化与运行期新增贴图各有已知边界；字体/语言包已接线但缺自动化覆盖 |
+| Arc 资源热更新（贴图/字体/语言包/音频/着色器） | 🔶 | 贴图同尺寸原位直刷；尺寸变化与运行期新增贴图各有已知边界；语言包重载会同步回写内容缓存字段；字体按文件路由到对应槽位；音效与音乐原位重载；内置着色器按文件映射原位重编，模组着色器/content JSON/图集明确提示需重启 |
 | Mixin 生态插件 | 🔶 | 重织入与目标级联已落地；端到端仍需真实 Fabric 客户端验证 |
 
 ## 6. 测试要求

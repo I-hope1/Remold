@@ -452,6 +452,59 @@ tasks.register("cacheWarmingProbe", JavaExec) {
 	}
 }
 
+// 对齐基线回归探针：跑 agent 的真实批处理路径，断言喂给 LambdaAligner 的旧基线是哪一份字节码。
+// 存在理由：align 本身有大量单测，但"agent 传进来的是什么"一直没覆盖，曾出现
+// align(old == new) 静默不做事而全部用例全绿（docs/initfix/08-test-audit.md §10.5）。
+// 需要 DCEVM/JBR 才能改 schema：-Pp05.jbr=<jdk-home> 或 JBR_HOME。
+def alignProbeRoot = layout.buildDirectory.dir("align-probe")
+def alignProbeCompile = ["v1", "v2", "v3"].collect { v ->
+	tasks.register("alignProbeCompile_${v}", JavaCompile) {
+		source = fileTree("${projectDir}/alignprobe/${v}") { include "**/*.java" }
+		classpath = files()
+		destinationDirectory = alignProbeRoot.map { it.dir(v) }
+		javaCompiler = javaToolchains.compilerFor {
+			languageVersion = JavaLanguageVersion.of(21)
+		}
+		options.encoding = "UTF-8"
+		options.warnings = false
+	}
+}
+def alignProbeSetup = tasks.register("alignProbeSetup", Copy) {
+	dependsOn alignProbeCompile
+	from alignProbeRoot.map { it.dir("v1") }
+	into alignProbeRoot.map { it.dir("live") }
+}
+tasks.register("alignBaselineProbe", JavaExec) {
+	group = "verification"
+	description = "agent 调用路径回归探针：连续两轮 redefine，断言对齐基线不是上一轮源码字节"
+	dependsOn classes
+	dependsOn alignProbeSetup
+	dependsOn project(":core").tasks.named("shadowJar")
+	classpath = sourceSets.main.runtimeClasspath +
+		files(alignProbeRoot.map { it.dir("v1") }, alignProbeRoot.map { it.dir("live") })
+	mainClass = "AlignBaselineProbe"
+	def jbrHome = (project.findProperty("p05.jbr") as String)
+		?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+	if (jbrHome != null) {
+		def javaBin = new File(jbrHome, System.getProperty("os.name").toLowerCase().contains("win") ? "bin/java.exe" : "bin/java")
+		if (javaBin.exists()) {
+			executable = javaBin.absolutePath
+			javaLauncher.set((JavaLauncher) null)
+		}
+	}
+	doFirst {
+		def liveDir = alignProbeRoot.get().dir("live").asFile
+		args = [liveDir.absolutePath,
+		        alignProbeRoot.get().dir("v2/T.class").asFile.absolutePath,
+		        alignProbeRoot.get().dir("v3/T.class").asFile.absolutePath]
+		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}=${liveDir.absolutePath}",
+		        "-XX:+AllowEnhancedClassRedefinition",
+		        "--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+	}
+}
+
 // check 挂载全部断言
 check.dependsOn test
 check.dependsOn verifyTestCount

@@ -52,9 +52,16 @@ import java.util.function.Supplier;
  * 可能因名字未对齐而失效——这是与“不崩溃”的设计目标一致的取舍。</p>
  *
  * <p><b>已知限制：幽灵方法不参与复活认领（单向退休）。</b>
- * 幽灵方法（空壳）在扫描阶段被识别为 {@code ghost} 并被所有匹配阶段硬性排除，仅保留其名字在避障集以防止新方法重名冲突。
- * 若开发者在 V2 删除了某个 Lambda，V3 又把它加回来，V3 的新方法不会也无法认领回旧幽灵方法的名字，而是会分配全新的 fresh name。
- * 这保证了历史陈旧空壳不会与新 Lambda 发生多对多误配，但意味着“撤销删除”无法自动恢复历史旧 CallSite 的活跃调用（老 CallSite 继续命中熔断桩）。</p>
+ * 幽灵方法（空壳）在扫描阶段被识别为 {@code ghost}，并被 Step 1 / Pass A / Pass B 等<b>常规匹配阶段</b>硬性排除，
+ * 仅保留其名字在避障集以防止新方法重名冲突。
+ * 但"删掉一个 Lambda 又原封不动加回来"是常见操作，因此额外有一条<b>只认指纹</b>的复活通道
+ * （{@link #stepGhostRevive}）：注入桩体时把生前指纹写进 {@code LDC <long>; POP2} 标记，
+ * 下一轮若某个新 lambda 的指纹与某幽灵的生前指纹完全一致且描述符相同，就认领回该槽位。
+ * 方法体改过的 lambda 指纹不同，不会复活——宁可让它拿新槽位，也不做"多对多误配"。
+ * 该通道由 {@code -Dremold.agent.ghost_revive=true} 开启，<b>默认关闭</b>：
+ * 现有三条不变量（`LineNumberDifferentialTest` 的"幽灵单向退休"、`HostAnchorTest` 的
+ * "V3 加回的新 L1 不认领旧桩名"、`NameIndexTest` 的"第二轮零改动"）都按"不复活"编码，
+ * 默认开启会直接推翻它们。要改契约需同步改这三处。</p>
  *
  * <p><b>已知限制：转发桩仍是 ghost（不参与复活认领）。</b>
  * 当 Lambda 被改写为方法引用时（如 {@code () -> this.xxx()} 改为 {@code this::xxx}），
@@ -224,6 +231,28 @@ public class LambdaAligner {
 
 	/** 仅供单线程测试断言读取的最近一次对齐统计。测试调用前请先置 null。 */
 	public static volatile AlignmentStats    LAST_STATS;
+
+	/**
+	 * 最近一次 {@link #align} 之后，类里仍然存在的"由对齐器自造的名字"集合。
+	 *
+	 * <p>调用方（agent）必须把它存起来，并在下一轮作为 {@code inventedOldNames} 传回去。
+	 * 不传的后果见 {@link #align(byte[], byte[], java.util.function.Function,
+	 * java.util.function.Function, java.util.Set)} 的说明：自造名会被误当成 javac 原名，
+	 * 让"同名优先"把老 CallSite 绑到别的 lambda 上。</p>
+	 */
+	public static volatile java.util.Set<String> LAST_INVENTED_NAMES = java.util.Set.of();
+
+	/**
+	 * 最近一次 {@link #align} 的输入快照（长度与内容哈希），供 agent 调用路径的回归探针断言。
+	 *
+	 * <p>存在理由：{@code align} 本身的行为有大量单测覆盖，但"agent 传进来的是什么"没有——
+	 * 曾出现过旧基线被本轮新字节覆盖、{@code align(old == new)} 静默不做事，
+	 * 而 339 个用例全绿的情况（见 {@code docs/initfix/08-test-audit.md} §10.5）。</p>
+	 */
+	public static volatile int  LAST_ALIGN_OLD_LEN  = -1;
+	public static volatile int  LAST_ALIGN_NEW_LEN  = -1;
+	public static volatile long LAST_ALIGN_OLD_HASH = 0L;
+	public static volatile long LAST_ALIGN_NEW_HASH = 0L;
 	public static volatile Map<String, Long> LAST_OLD_ANON_HASHES;
 	public static volatile Map<String, Long> LAST_NEW_ANON_HASHES;
 	/**
@@ -376,6 +405,18 @@ public class LambdaAligner {
 		final Set<String> usedOldNames = new HashSet<>(64);
 
 		/**
+		 * 上一轮由对齐器自造的 lambda 方法名（仍在旧类里）。
+		 *
+		 * <p>这些名字<b>不是</b> javac 会产出的编号，因此不能作为"同名 = 同一个 lambda"
+		 * 的证据。见 {@link #align(byte[], byte[], java.util.function.Function,
+		 * java.util.function.Function, java.util.Set)}。</p>
+		 */
+		java.util.Set<String> inventedOldNames = java.util.Set.of();
+
+		/** 本轮新分配的自造名，用于计算 {@link #LAST_INVENTED_NAMES}。 */
+		final Set<String> newlyInvented = new HashSet<>(8);
+
+		/**
 		 * 新类里<b>所有</b>方法的名字（含构造函数、静态块、桥接、普通业务方法、
 		 * 合成方法），作为 fresh name 的避障集。由 {@code scan} 无条件填充。</p>
 		 */
@@ -443,6 +484,8 @@ public class LambdaAligner {
 			simpleNameWitness.clear();
 			ambiguousNames.clear();
 			usedOldNames.clear();
+			inventedOldNames = java.util.Set.of();
+			newlyInvented.clear();
 			existingNewNames.clear();
 			oldNameDescSet.clear();
 			oldAnonHashes.clear();
@@ -493,11 +536,43 @@ public class LambdaAligner {
 	public static byte[] align(byte[] oldBytes, byte[] newBytes,
 	                           java.util.function.Function<String, byte[]> oldBytecodeResolver,
 	                           java.util.function.Function<String, byte[]> newBytecodeResolver) {
+		return align(oldBytes, newBytes, oldBytecodeResolver, newBytecodeResolver, java.util.Set.of());
+	}
+
+	/**
+	 * 对齐主入口（带"上一轮由本对齐器自造的名字"集合）。
+	 *
+	 * <p><b>为什么需要这个参数</b>：对齐会给"在旧类里找不到对应物"的新 lambda 分配一个
+	 * 避障用的新槽位名（例如旧类占用了 {@code $0..$2}，新 lambda 就拿 {@code $4}）。
+	 * 这个 {@code $4} 不是 javac 会产出的名字，但对齐完成后它就**留在类里**了。
+	 * 下一轮 javac 重新从 0 编号时，某个真正的新 lambda 完全可能正好也叫 {@code $4}——
+	 * 此时"同名优先"会把旧 {@code $4}（其实是上一轮另一个 lambda）当成它的对应物，
+	 * 于是老 CallSite 被绑到一个语义不同的方法体上：<b>不抛异常、静默跑错</b>。
+	 *
+	 * <p>把自造名传进来后，"同名"这条证据只在旧名字确实是 javac 原名时才被采信，
+	 * 自造名一律退回按顺序配对（顺序配对在这种情况下是正确的：javac 按源序降序发射
+	 * 合成方法，前置插入只会让整体位移，不会打乱相对次序）。</p>
+	 *
+	 * @param inventedOldNames 上一轮由对齐器自造、且仍在旧类里的 lambda 方法名；可为 null
+	 */
+	public static byte[] align(byte[] oldBytes, byte[] newBytes,
+	                           java.util.function.Function<String, byte[]> oldBytecodeResolver,
+	                           java.util.function.Function<String, byte[]> newBytecodeResolver,
+	                           java.util.Set<String> inventedOldNames) {
+		LAST_ALIGN_OLD_LEN = oldBytes == null ? -1 : oldBytes.length;
+		LAST_ALIGN_NEW_LEN = newBytes == null ? -1 : newBytes.length;
+		LAST_ALIGN_OLD_HASH = oldBytes == null ? 0 : java.util.Arrays.hashCode(oldBytes);
+		LAST_ALIGN_NEW_HASH = newBytes == null ? 0 : java.util.Arrays.hashCode(newBytes);
+		// 先清空：下面有"旧字节为空直接返回"的早退路径，不清会让调用方读到上一轮的值，
+		// 把 A 类的自造名落账到 B 类头上。
+		LAST_INVENTED_NAMES = java.util.Set.of();
 		if (oldBytes == null || oldBytes.length == 0) return newBytes;
 
 		MatchContext ctx = CONTEXT.get();
 		try {
 			ctx.reset();
+			ctx.inventedOldNames = inventedOldNames != null ? inventedOldNames : java.util.Set.of();
+			ctx.newlyInvented.clear();
 
 			// 一次读取即拿到 ClassNode：oldCn 会被 resurrectOrphanedLambdas 复用，
 			// newCn 会在“无重命名”路径下直接提供 presentKeys。
@@ -552,6 +627,10 @@ public class LambdaAligner {
 				}
 			}
 
+			// 【阶段一·末】幽灵复活：删掉又原样加回来的 lambda 认领回生前槽位。
+			// 必须在阶段二之前跑，否则新方法先拿到避障名，就再也回不去了。
+			stepGhostRevive(ctx);
+
 			// 【阶段一·校验】配对后的引用一致性校验（收口防线）。
 			//
 			// 不变量：配对成功的 (新, 旧) 必须"子归属一致" —— 新方法体内的每个子 lambda
@@ -597,6 +676,9 @@ public class LambdaAligner {
 
 						recordRename(ctx, ni, freshName);
 						ctx.usedOldNames.add(freshName);
+						// 这个名字不是 javac 会产出的编号，登记为"自造"，
+						// 下一轮不许把它当"同名 = 同一个 lambda"的证据。
+						ctx.newlyInvented.add(freshName);
 					} else {
 						// 无冲突：保持原名，但同样要留下见证
 						recordRename(ctx, ni, ni.name);
@@ -650,13 +732,18 @@ public class LambdaAligner {
 			LAST_ALIGNED_CLASS = oldCn.name;
 
 			// 传入 oldCn（已解析过一次）—— 避免 resurrectOrphanedLambdas 二次读 oldBytes
-			return resurrectOrphanedLambdas(oldCn, alignedBytes, presentKeys, oldMethodRefs, newMethodRefs, ctx);
+			byte[] result = resurrectOrphanedLambdas(oldCn, alignedBytes, presentKeys, oldMethodRefs, newMethodRefs, ctx);
+			// 自造名必须从**最终产物**统计：复活阶段会往类里加回幽灵方法，
+			// 只在 alignedCn 上扫会漏掉它们（幽灵仍占着那个名字，下一轮照样会被误当 javac 原名）。
+			LAST_INVENTED_NAMES = collectInventedNames(result, ctx);
+			return result;
 		} catch (Exception | LinkageError | StackOverflowError e) {
 			LAST_STATS = null;
 			LAST_OLD_ANON_HASHES = null;
 			LAST_NEW_ANON_HASHES = null;
 			LAST_METHOD_MAPPING = null;
 			LAST_ALIGNED_CLASS = null;
+			LAST_INVENTED_NAMES = java.util.Set.of();
 			// 降级：不崩溃，返回原始字节码。捕获 Exception 与 LinkageError、StackOverflowError 等。
 			// 默认只记一行（热更失败不该刷屏）；DEBUG 下走 Logger 的 (msg, Throwable)
 			// 重载打完整堆栈 —— 而不是直接 printStackTrace，保持输出统一经日志系统。
@@ -1049,7 +1136,21 @@ public class LambdaAligner {
 			anyProgressed |= progressed;
 		} while (progressed);
 
-		// 2. A 趟：全类范围配对"上行深度 + shape 都相等"的对（迭代至收敛）
+		// 2. 骨架趟：同组内骨架（忽略字面量）在两侧都唯一的对。放在 Pass A 之前，
+		//    让"只改了常量"的编辑先按指令结构锁定，而不是退化成 (深度, shape) 的盲盒。
+		boolean skelProgressed;
+		do {
+			skelProgressed = false;
+			for (int idx : groupOrder(newGroups)) {
+				List<SyntheticInfo> newGroup = newGroups.valueAt(idx);
+				List<SyntheticInfo> oldGroup = oldGroups.get(newGroups.keyAt(idx));
+				if (newGroup == null || oldGroup == null) continue;
+				skelProgressed |= step2SkeletonPass(ctx, newGroup, oldGroup);
+			}
+			anyProgressed |= skelProgressed;
+		} while (skelProgressed);
+
+		// 3. A 趟：全类范围配对"上行深度 + shape 都相等"的对（迭代至收敛）
 		boolean aProgressed;
 		do {
 			aProgressed = false;
@@ -1177,6 +1278,11 @@ public class LambdaAligner {
 		boolean progressed = false;
 
 		// 第一优先：同组、同 hash、**同名**（证据最强）
+		//
+		// 这里的"同名"不需要额外区分自造名：{@code acceptCandidate} 已经要求
+		// {@code sameSemantics}——同名 + 同语义 ⇒ 就是同一个 lambda，不存在"编号巧合"。
+		// 真正需要设防的是 Pass A / Pass B 的"同名优先"：那两处只按 (深度, shape) 收窄，
+		// 不校验语义，所以走 {@link #isSameNameEvidence}。
 		for (SyntheticInfo ni : newGroup) {
 			if (!ni.renameable || ni.matched) continue;
 			if (hasUnmatchedChild(ctx, ni)) continue;
@@ -1272,6 +1378,55 @@ public class LambdaAligner {
 	}
 
 	/**
+	 * 从**最终产物字节码**里统计"仍然存在的自造名"。
+	 *
+	 * <p>必须在复活之后调用：{@code resurrectOrphanedLambdas} 会往类里加回幽灵方法，
+	 * 其中可能就有上一轮的自造名。若只在重命名后的 {@code alignedCn} 上扫，这些幽灵会被漏掉，
+	 * 下一轮它们占着的名字又会被当成 javac 原名。</p>
+	 */
+	private static java.util.Set<String> collectInventedNames(byte[] finalBytes, MatchContext ctx) {
+		if (ctx.newlyInvented.isEmpty() && ctx.inventedOldNames.isEmpty()) return java.util.Set.of();
+
+		Set<String> presentNames = new HashSet<>();
+		try {
+			ClassNode cn = new ClassNode();
+			new ClassReader(finalBytes).accept(cn, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG);
+			for (MethodNode mn : cn.methods) presentNames.add(mn.name);
+		} catch (Exception e) {
+			// 解析失败就保守地把两批都报上去：多报只会让下一轮少用一次"同名"证据，
+			// 少报则可能让老 CallSite 静默跑错，两者代价不对称。
+			presentNames.addAll(ctx.newlyInvented);
+			presentNames.addAll(ctx.inventedOldNames);
+		}
+
+		Set<String> stillInvented = new HashSet<>(ctx.newlyInvented);
+		for (String name : ctx.inventedOldNames) {
+			if (presentNames.contains(name)) stillInvented.add(name);
+		}
+		stillInvented.retainAll(presentNames);
+		return java.util.Collections.unmodifiableSet(stillInvented);
+	}
+
+	/**
+	 * "同名"能不能当证据用。
+	 *
+	 * <p>同名的前提是<b>两侧名字都出自 javac</b>。旧侧如果是上一轮对齐器自造的避障名
+	 * （见 {@link #align(byte[], byte[], java.util.function.Function,
+	 * java.util.function.Function, java.util.Set)}），那这个"同名"可能纯属巧合：javac 这一轮
+	 * 从头编号，某个真正的新 lambda 完全可能正好落在这个号上。此时按同名配对会把老
+	 * CallSite 绑到别的 lambda 体上——不抛异常、静默跑错。</p>
+	 *
+	 * <p><b>自造名不是一律作废，而是要求指纹佐证</b>：方法体逐字节相同 ⇒ 就是同一个 lambda
+	 * （这种情况本来多半已在 Step 1a 被同组同语义配掉，这里只是兜底）。只有"同名但体不同"
+	 * 才退回按顺序配对——javac 按源序发射合成方法，插入/删除只让整体位移、不打乱相对次序。</p>
+	 */
+	private static boolean isSameNameEvidence(MatchContext ctx, SyntheticInfo oi, SyntheticInfo ni) {
+		if (!oi.name.equals(ni.name)) return false;
+		if (!ctx.inventedOldNames.contains(oi.name)) return true;
+		return sameSemantics(ni, oi);
+	}
+
+	/**
 	 * Step 2 的 **A 趟**：只配"上行深度 + shape 都相等"的对。
 	 *
 	 * <p>必须在**全类**上先跑完 A 趟，再进 B 趟（见调用处的说明）—— 混在同一个单组循环里
@@ -1301,11 +1456,18 @@ public class LambdaAligner {
 				if (!sameNestingLevel(ni, oi)) continue;  // 形状必须相等
 				if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
 				if (!calleesPairTo(ni, oi)) continue;     // 必须满足结构证据（后代修改时的关键防护）
-				if (oi.name.equals(ni.name)) {
+				if (isSameNameEvidence(ctx, oi, ni)) {
 					bestOld = oi;
 					break;
-				}   // 同名者优先
-				if (bestOld == null) bestOld = oi;
+				}   // 同名者优先（自造名不算证据）
+				if (bestOld == null) {
+					bestOld = oi;
+				} else if (hasSameExplicitConsumer(ni, oi) && !hasSameExplicitConsumer(ni, bestOld)) {
+					// 没有同名证据时，优先选"消费端指令相同"的候选：
+					// 同一宿主方法里 btnSave(...) / btnDelete(...) 的 lambda 形状完全一样，
+					// 只有 consumer 能把它们分开。仅作偏好，不构成硬约束（消费点本身可能被改）。
+					bestOld = oi;
+				}
 			}
 			if (bestOld == null) continue;
 
@@ -1355,7 +1517,7 @@ public class LambdaAligner {
 				if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
 				if (!sameNestingLevel(ni, oi)) continue;
 				if (!calleesPairTo(ni, oi)) continue;
-				if (oi.name.equals(ni.name)) {
+				if (isSameNameEvidence(ctx, oi, ni)) {
 					bestOld = oi;
 					break;
 				}
@@ -2267,6 +2429,8 @@ public class LambdaAligner {
 			// 它必须留在 oldGroups 里供孤儿计算复现，但名字已经是"死名字"，
 			// 不能再被当成某个新 lambda 的目标 —— 否则会把它挤到别的名字上去。
 			info.ghost = isGhostMethod(mn);
+			if (info.ghost) info.ghostOriginalHash = readGhostOriginalHash(mn);
+			info.skeletonHash = skeletonHash(mn);
 			info.children = collectChildLambdaNames(mn, cn.name);
 			if (!isOld) putNameIndex(ctx.childIndex, info);
 			// 完整名字索引（两侧各一份），供 infoByName 做 O(1) 查找。
@@ -2767,6 +2931,15 @@ public class LambdaAligner {
 			if (i.getOpcode() >= 0) real.add(i);
 		}
 
+		// 先剥掉"生前指纹"标记：LDC <long>; POP2。它是 injectDummyBody 加的，不是桩体语义的一部分。
+		// 不剥掉的话，下面的转发前缀检测会把它当成 LDC loc，整段判定失效（转发桩退化成空壳）。
+		if (real.size() >= 2
+		    && real.get(0) instanceof LdcInsnNode marker
+		    && marker.cst instanceof Long
+		    && real.get(1).getOpcode() == Opcodes.POP2) {
+			real = new ArrayList<>(real.subList(2, real.size()));
+		}
+
 		// 跳过上一轮转发桩的固定前缀：LDC loc; ICONST_0/1; INVOKESTATIC onOrphanInvoked
 		int start = 0;
 		boolean wasForwarding = false;
@@ -2886,6 +3059,19 @@ public class LambdaAligner {
 		ClassWriter  cw        = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
 		final String className = cr.getClassName();
 
+		// 生前指纹必须按 name+desc 精确取：幽灵可能**同名不同描述符**
+		// （JDK 8 的 lambda$null$0(II) 与 lambda$null$0(I) 就是这样），
+		// 而 infoByName 只按名字索引，取到哪一个取决于索引写入顺序 —— 会让标记值在轮次间抖动，
+		// 破坏"第二轮产物与第一轮逐字节相同"这类不变量。
+		final java.util.Map<String, Long> ghostHashByKey = new java.util.HashMap<>();
+		for (int gi = ctx.oldGroups.nextEntry(-1); gi != -1; gi = ctx.oldGroups.nextEntry(gi)) {
+			List<SyntheticInfo> g = ctx.oldGroups.valueAt(gi);
+			if (g == null) continue;
+			for (SyntheticInfo oi : g) {
+				ghostHashByKey.put(oi.name + oi.desc, oi.ghost ? oi.ghostOriginalHash : oi.hash);
+			}
+		}
+
 		ClassVisitor cv = new ClassVisitor(Opcodes.ASM9, cw) {
 			@Override
 			public void visitEnd() {
@@ -2907,7 +3093,8 @@ public class LambdaAligner {
 							canForward = delegate.wasForwarding ? (newCount > 0) : (newCount > oldCount);
 						}
 						TEST_EVENTS.add(new AlignmentEvent("GHOST", mn.name, null, className + "#" + mn.name + mn.desc));
-						injectDummyBody(dummy, className, mn.name, mn.desc, canForward ? delegate : null);
+						injectDummyBody(dummy, className, mn.name, mn.desc, canForward ? delegate : null,
+						 ghostHashByKey.getOrDefault(mn.name + mn.desc, 0L));
 					}
 				}
 				super.visitEnd();
@@ -2931,9 +3118,22 @@ public class LambdaAligner {
 	 * 从而在各版本 JVM 下无需 StackMapTable 即可 100% 通过类验证。
 	 * </p>
 	 */
-	private static void injectDummyBody(MethodVisitor mv, String className, String name, String desc, Delegate delegate) {
+	private static void injectDummyBody(MethodVisitor mv, String className, String name, String desc,
+	                                    Delegate delegate, long originalHash) {
 		mv.visitCode();
 		boolean willForward = delegate != null;
+
+		// 0. 生前指纹标记：LDC <long>; POP2。
+		//
+		// 桩体一注入，这个方法的指纹就变成空壳的指纹，再也认不出"原封不动加回来"的同一个
+		// lambda。把生前指纹钉在桩体里（跟着字节码走，不依赖任何外部内存），下一轮扫描时
+		// 由 readGhostOriginalHash 读回来，供 stepGhostRevive 认领。
+		// 放在最前面且紧跟 POP2，保证不影响后续指令的栈平衡；getPureDelegate 的转发前缀
+		// 检测会跳过这 2 条指令。
+		if (originalHash != 0L) {
+			mv.visitLdcInsn(originalHash);
+			mv.visitInsn(Opcodes.POP2);
+		}
 
 		// 1. 调用纯 Java 静态方法：统一处理策略分发、熔断栈探测及日志去重。
 		//
@@ -3279,6 +3479,198 @@ public class LambdaAligner {
 	}
 
 	/**
+	 * 读出幽灵桩体开头的"生前指纹"标记（{@code LDC <long>; POP2}）。
+	 *
+	 * <p>标记必须放在方法体最前面，且只认前 3 条指令内出现的 long 常量——避免把业务方法里
+	 * 偶然出现的 long 常量误当成标记。返回 0 表示没有标记（旧版本注入的桩、或转发桩）。</p>
+	 */
+	private static long readGhostOriginalHash(MethodNode mn) {
+		int steps = 0;
+		for (AbstractInsnNode n = mn.instructions.getFirst(); n != null && steps < 3; n = n.getNext(), steps++) {
+			if (n instanceof LdcInsnNode ldc && ldc.cst instanceof Long v) return v;
+		}
+		return 0L;
+	}
+
+	/**
+	 * 幽灵复活：把"原封不动加回来"的 lambda 认领回它生前的槽位。
+	 *
+	 * <p>为什么需要独立一趟：{@link #acceptCandidate} 明确排除幽灵（幽灵是"死名字"，不能当
+	 * 普通匹配目标）。但"删掉一个 lambda 再原样加回来"是常见操作，此时新 lambda 在旧类里
+	 * 只有幽灵这一个对应物——指纹一致（生前指纹存在桩体标记里）+ 描述符相同，就是确证。
+	 * 认领后新方法占用幽灵的名字，{@code presentKeys} 里就有了它，幽灵不会再被注入。</p>
+	 *
+	 * <p>只在<b>指纹完全一致</b>时复活：方法体改过的 lambda 不算"同一个"，宁可让它拿新槽位。</p>
+	 */
+	private static void stepGhostRevive(MatchContext ctx) {
+		if (!Boolean.getBoolean("remold.agent.ghost_revive")) return;
+		for (int gi = ctx.newGroups.nextEntry(-1); gi != -1; gi = ctx.newGroups.nextEntry(gi)) {
+			List<SyntheticInfo> newGroup = ctx.newGroups.valueAt(gi);
+			if (newGroup == null) continue;
+			for (SyntheticInfo ni : newGroup) {
+				if (ni.matched || !ni.renameable) continue;
+				for (int oj = ctx.oldGroups.nextEntry(-1); oj != -1; oj = ctx.oldGroups.nextEntry(oj)) {
+					List<SyntheticInfo> oldGroup = ctx.oldGroups.valueAt(oj);
+					if (oldGroup == null) continue;
+					for (SyntheticInfo oi : oldGroup) {
+						if (!oi.ghost || oi.matched) continue;
+						if (oi.ghostOriginalHash == 0L) continue;          // 无标记：不猜
+						if (oi.ghostOriginalHash != ni.hash) continue;      // 生前指纹必须一致
+						if (!oi.desc.equals(ni.desc)) continue;             // 形状必须完全一致
+						if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
+						if (ctx.usedOldNames.contains(oi.name)) continue;
+						pair(ctx, ni, oi, "GHOST_REVIVE");
+						TEST_EVENTS.add(new AlignmentEvent("GHOST_REVIVE", oi.name, ni.name,
+							ctx.currentClass + "#" + ni.name + ni.desc + " 复活回 " + oi.name));
+						RemoldAgent.info("[LambdaAligner] 幽灵复活 " + ctx.currentClass + "#"
+							+ oi.name + oi.desc + "（原封不动加回来，指纹一致）");
+						break;
+					}
+					if (ni.matched) break;
+				}
+			}
+		}
+	}
+
+	/**
+	 * 忽略字面量常量的"指令骨架"指纹。
+	 *
+	 * <p>与 {@link MethodFingerprinter} 的区别只有一条：**字面量只记类型、不记值**。
+	 * 于是"把 {@code "A1:v1"} 改成 {@code "A1:v2"}"不会改变骨架，而"50 行循环"与"2 行字符串拼接"
+	 * 骨架必然不同。局部变量槽位下标与跳转目标也不参与（它们会随捕获列表变化而位移）。</p>
+	 *
+	 * <p>用途仅限 {@link #step2SkeletonPass} 的保守配对：要求该骨架在新旧两侧都**只出现一次**，
+	 * 因此不会把"两个同骨架 lambda"硬配在一起。</p>
+	 */
+	private static long skeletonHash(MethodNode mn) {
+		if (mn.instructions == null) return 0L;
+		long h = 1125899906842597L;
+		for (AbstractInsnNode insn : mn.instructions) {
+			int op = insn.getOpcode();
+			if (op < 0) continue;                       // Label / LineNumber / Frame
+			h = h * 31 + op;
+
+			if (insn instanceof MethodInsnNode m) {
+				h = h * 31 + m.owner.hashCode();
+				h = h * 31 + m.name.hashCode();
+				h = h * 31 + m.desc.hashCode();
+			} else if (insn instanceof FieldInsnNode f) {
+				h = h * 31 + f.owner.hashCode();
+				h = h * 31 + f.name.hashCode();
+				h = h * 31 + f.desc.hashCode();
+			} else if (insn instanceof TypeInsnNode t) {
+				h = h * 31 + t.desc.hashCode();
+			} else if (insn instanceof InvokeDynamicInsnNode indy) {
+				h = h * 31 + indy.name.hashCode();
+				h = h * 31 + indy.desc.hashCode();
+				if (indy.bsm != null) {
+					h = h * 31 + indy.bsm.getOwner().hashCode();
+					h = h * 31 + indy.bsm.getName().hashCode();
+				}
+				if (indy.bsmArgs != null) {
+					// bsmArgs 里既有字符串常量（recipe / 方法名），也有 Handle / Type。
+					// 字符串只记类型，Handle 记完整目标（它是结构信息）。
+					for (Object a : indy.bsmArgs) {
+						if (a instanceof Handle hd) {
+							h = h * 31 + hd.getOwner().hashCode();
+							h = h * 31 + hd.getName().hashCode();
+							h = h * 31 + hd.getDesc().hashCode();
+						} else {
+							h = h * 31 + literalTypeTag(a);
+						}
+					}
+				}
+			} else if (insn instanceof LdcInsnNode ldc) {
+				h = h * 31 + literalTypeTag(ldc.cst);
+			} else if (insn instanceof IntInsnNode ii) {
+				// NEWARRAY 的 operand 是数组类型（结构信息）；BIPUSH / SIPUSH 是字面量，忽略。
+				if (op == Opcodes.NEWARRAY) h = h * 31 + ii.operand;
+			}
+			// VarInsnNode / IincInsnNode 的槽位下标忽略：捕获列表一变，槽位就整体位移。
+		}
+		return h;
+	}
+
+	/** 字面量的"类型标签"，用于骨架指纹（不暴露具体值）。 */
+	private static int literalTypeTag(Object cst) {
+		if (cst == null) return 0;
+		if (cst instanceof String) return 1;
+		if (cst instanceof Integer) return 2;
+		if (cst instanceof Long) return 3;
+		if (cst instanceof Float) return 4;
+		if (cst instanceof Double) return 5;
+		if (cst instanceof Type) return 6;
+		if (cst instanceof Handle) return 7;
+		return 8;
+	}
+
+	/**
+	 * 骨架配对：同组内、骨架在**两侧都唯一**时才配对。
+	 *
+	 * <p>这是"只改常量"那一类编辑的正解：普通指纹失效后，Pass A/B 只剩 (深度, shape)，
+	 * 同方法里的多个 lambda 会退化成盲盒。骨架指纹保留指令结构，能把这些盲盒拆开。</p>
+	 *
+	 * <p><b>保守条件</b>：该骨架在新侧未匹配方法里只出现一次、在旧侧未匹配方法里也只出现一次。
+	 * 只要有一侧出现两次，就说明骨架没有区分度（例如三个都只做字符串拼接的 lambda），
+	 * 此时宁可不配，交给后面的 Pass A/B 按顺序兜底——避免引入新的错配。</p>
+	 */
+	private static boolean step2SkeletonPass(MatchContext ctx, List<SyntheticInfo> newGroup,
+	                                         List<SyntheticInfo> oldGroup) {
+		Map<Long, Integer> newCount = new HashMap<>();
+		Map<Long, Integer> oldCount = new HashMap<>();
+		for (SyntheticInfo ni : newGroup) {
+			if (!skeletonEligibleNew(ni)) continue;
+			newCount.merge(ni.skeletonHash, 1, Integer::sum);
+		}
+		if (newCount.isEmpty()) return false;
+		for (SyntheticInfo oi : oldGroup) {
+			if (!skeletonEligibleOld(ctx, oi)) continue;
+			oldCount.merge(oi.skeletonHash, 1, Integer::sum);
+		}
+
+		boolean progressed = false;
+		for (SyntheticInfo ni : newGroup) {
+			if (!skeletonEligibleNew(ni)) continue;
+			if (newCount.getOrDefault(ni.skeletonHash, 0) != 1) continue;   // 新侧必须唯一
+			if (oldCount.getOrDefault(ni.skeletonHash, 0) != 1) continue;   // 旧侧必须唯一
+
+			for (SyntheticInfo oi : oldGroup) {
+				if (!skeletonEligibleOld(ctx, oi)) continue;
+				if (oi.skeletonHash != ni.skeletonHash) continue;
+				if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
+				if (!sameNestingLevel(ni, oi)) continue;
+				if (!calleesPairTo(ni, oi)) continue;
+				pair(ctx, ni, oi, "SKELETON");
+				progressed = true;
+				break;
+			}
+		}
+		return progressed;
+	}
+
+	private static boolean skeletonEligibleNew(SyntheticInfo ni) {
+		return !ni.matched && ni.renameable && ni.upDepth >= 0;
+	}
+
+	private static boolean skeletonEligibleOld(MatchContext ctx, SyntheticInfo oi) {
+		return !oi.matched && !oi.ghost && oi.renameable
+		       && oi.upDepth >= 0 && !ctx.usedOldNames.contains(oi.name);
+	}
+
+	/**
+	 * 两侧都有明确且相同的 consumer（消费端指令特征）——同一调用点的最强证据。
+	 *
+	 * <p>{@code consumer} 形如 {@code CALL:Owner.btnSave(Ljava/util/function/Supplier;)V}，
+	 * 描述"这个 lambda 被传给谁"。同一宿主方法里的 {@code btnSave(...)} 与 {@code btnDelete(...)}
+	 * 因此可以区分；它和宿主方法名（组 key 的一部分）是两回事。</p>
+	 */
+	private static boolean hasSameExplicitConsumer(SyntheticInfo ni, SyntheticInfo oi) {
+		return ni.consumer != null && !ni.consumer.isEmpty()
+		       && oi.consumer != null && !oi.consumer.isEmpty()
+		       && ni.consumer.equals(oi.consumer);
+	}
+
+	/**
 	 * 判断两个合成方法的签名是否<b>逻辑等价</b>。
 	 *
 	 * <p>背景：同一段 lambda 体，在不同编译/变换轮次里可能以两种形态出现——</p>
@@ -3427,6 +3819,25 @@ public class LambdaAligner {
 		 * {@code CallSite}，绝不该再被当成某个新 lambda 的匹配目标。</p>
 		 */
 		boolean ghost;
+
+		/**
+		 * 幽灵桩"生前"的方法体指纹（0 = 未知）。
+		 *
+		 * <p>桩体会被换成 {@code onOrphanInvoked} 空壳，它自己的 {@link #hash} 就变成了空壳的指纹，
+		 * 再也认不出"原封不动加回来"的同一个 lambda。所以注入桩体时把生前指纹写进桩体的
+		 * {@code LDC <long>; POP2} 标记里，下一轮扫描时读回来，供 {@code GHOST_REVIVE} 认领。</p>
+		 */
+		long ghostOriginalHash;
+
+		/**
+		 * 忽略字面量常量的"指令骨架"指纹。
+		 *
+		 * <p>普通指纹含 {@code LDC} 常量，所以"只改了一个字符的常量"就会让指纹全失效，
+		 * 方法掉进 Pass A/B 后只剩 (深度, shape) 可用——而这两项对同一方法里的多个 lambda
+		 * 往往完全相同。骨架指纹保留操作码序列、调用目标、类型，只把字面量换成"类型标签"，
+		 * 于是 {@code 50 行循环 + "v2"} 与 {@code 2 行 + "v2"} 依然可区分。</p>
+		 */
+		long skeletonHash;
 
 		/**
 		 * 该方法体里<b>直接引用</b>的本类 lambda 系方法名集合（内层 lambda）。

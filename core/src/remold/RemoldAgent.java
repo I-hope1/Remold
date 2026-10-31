@@ -236,6 +236,21 @@ public class RemoldAgent {
 	public static final Map<String, byte[]> bytecodeCache = new ConcurrentHashMap<>();
 
 	/**
+	 * 每个类当前"由对齐器自造的 lambda 槽位名"（dotClassName -> names）。
+	 *
+	 * <p>自造名是上一轮给"旧类里找不到对应物"的新 lambda 分配的避障名，不是 javac 会产出的编号。
+	 * 必须回传给 {@link LambdaAligner#align}，否则下一轮 javac 从头编号时，某个真正的新 lambda
+	 * 可能正好落在同一个号上，"同名优先"会把老 CallSite 绑到别的 lambda 体上（静默跑错）。</p>
+	 *
+	 * <p>生命周期与 {@link #bytecodeCache} 严格一致：只在 redefine 成功后落账，
+	 * 失败/回滚不动，避免"用一份从未加载过的版本"当身份依据。</p>
+	 */
+	public static final Map<String, java.util.Set<String>> inventedSlots = new ConcurrentHashMap<>();
+
+	/** 本轮算出的自造名，redefine 成功后才并入 {@link #inventedSlots}。 */
+	private static final Map<String, java.util.Set<String>> pendingInvented = new ConcurrentHashMap<>();
+
+	/**
 	 * 源码级未织入基线缓存（用于对齐器与源码变更分析，避免 Mixin 等增强注入的合成方法/字段污染对齐逻辑）
 	 * dotClassName -> sourceBytecode
 	 */
@@ -454,18 +469,33 @@ public class RemoldAgent {
 		public final Set<String> targetDotClasses;
 		public final long timestampNanos;
 		public final boolean isRetransform;
+		/**
+		 * Baseline capture (e.g. {@link #retransformLoaded}): run the external transform path to
+		 * refresh bytecode caches, but treat it as "not a real redefinition" so no {@code @OnReload}
+		 * is fired for classes that were merely retransformed.
+		 */
+		public final boolean suppressPostRedefine;
 		final InternalRedefineContext previous;
 
 		public InternalRedefineContext(Collection<String> targetDotClasses, boolean isRetransform, InternalRedefineContext previous) {
+			this(targetDotClasses, isRetransform, false, previous);
+		}
+
+		InternalRedefineContext(Collection<String> targetDotClasses, boolean isRetransform, boolean suppressPostRedefine, InternalRedefineContext previous) {
 			this.targetDotClasses = targetDotClasses == null ? Collections.emptySet() : new HashSet<>(targetDotClasses);
 			this.timestampNanos = System.nanoTime();
 			this.isRetransform = isRetransform;
+			this.suppressPostRedefine = suppressPostRedefine;
 			this.previous = previous;
 		}
 
 		public boolean isTarget(String dotClassName) {
 			if (targetDotClasses.contains(dotClassName)) return true;
 			return previous != null && previous.isTarget(dotClassName);
+		}
+
+		boolean suppressesPostRedefine() {
+			return suppressPostRedefine || (previous != null && previous.suppressesPostRedefine());
 		}
 	}
 
@@ -479,6 +509,15 @@ public class RemoldAgent {
 	public static void enterInternalRetransform(Collection<String> dotClassNames) {
 		InternalRedefineContext prev = INTERNAL_CONTEXT.get();
 		INTERNAL_CONTEXT.set(new InternalRedefineContext(dotClassNames, true, prev));
+	}
+
+	/**
+	 * Marks a caller-driven bulk retransform (see {@link #retransformLoaded()}) as baseline capture:
+	 * caches are refreshed but no post-redefine callbacks or disk-baseline records are emitted.
+	 */
+	static void enterBaselineCapture() {
+		InternalRedefineContext prev = INTERNAL_CONTEXT.get();
+		INTERNAL_CONTEXT.set(new InternalRedefineContext(Collections.emptySet(), false, true, prev));
 	}
 
 	public static void exitInternalRedefine() {
@@ -524,6 +563,25 @@ public class RemoldAgent {
 
 	// 仅记录byte的指纹
 	private static final LongLongMap fileDiskHashes = new LongLongMap(2048);
+
+	/**
+	 * Records the bytes an external redefine (IDE JDWP / external agent) already applied, so the
+	 * watcher's next round sees an unchanged disk hash and does not redefine / notify twice.
+	 */
+	static void recordExternalDiskBaseline(String dotClassName, byte[] bytes) {
+		if (dotClassName == null || bytes == null) return;
+		synchronized (fileDiskHashes) {
+			fileDiskHashes.put(CRC64.hashString(dotClassName), calculateHash(bytes));
+		}
+	}
+
+	/** Package-private probe for tests: the recorded disk hash for a class, or {@link Long#MIN_VALUE}. */
+	static long recordedDiskBaseline(String dotClassName) {
+		if (dotClassName == null) return Long.MIN_VALUE;
+		synchronized (fileDiskHashes) {
+			return fileDiskHashes.get(CRC64.hashString(dotClassName));
+		}
+	}
 
 	private static final Set<Path>                pendingChanges = Collections.synchronizedSet(new HashSet<>());
 	/** 待解压的 jar/zip，防抖后统一解压；所有访问均在 synchronized(pendingChanges) 内，无需额外同步 */
@@ -1283,7 +1341,12 @@ public class RemoldAgent {
 		if (candidates.isEmpty()) return;
 		info("Found " + candidates.size() + " classes loaded before Agent start. Retransforming...");
 		try {
-			inst.retransformClasses(candidates.toArray(new Class[0]));
+			enterBaselineCapture();
+			try {
+				inst.retransformClasses(candidates.toArray(new Class[0]));
+			} finally {
+				exitInternalRedefine();
+			}
 			info("Retransform complete.");
 		} catch (UnmodifiableClassException e) {
 			error("Failed to retransform some classes", e);
@@ -1485,6 +1548,15 @@ public class RemoldAgent {
 		}
 
 		// 记录源码级对齐基线
+		//
+		// 注意：这里写入的是**本轮新字节**，而同一方法里的 lambda 对齐（下面约 150 行后）
+		// 需要的是**上一轮的源码基线**。所以先把旧值快照下来，供本轮对齐读取；
+		// 否则 align(old == new) 会静默地什么都不做（实测见 docs/initfix/08-test-audit.md §10.5）。
+		Map<String, byte[]> prevSourceBytes = new HashMap<>();
+		for (String key : newBatchBytes.keySet()) {
+			byte[] prev = sourceBytecodeCache.get(key);
+			if (prev != null) prevSourceBytes.put(key, prev);
+		}
 		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
 			sourceBytecodeCache.put(e.getKey(), e.getValue());
 		}
@@ -1626,15 +1698,31 @@ public class RemoldAgent {
 							// NoSuchMethodError。原 lambda 还会被重复幽灵化出一份同名异型的空壳。
 							java.util.function.Function<String, byte[]> oldResolver =
 							 normalizeAlignResolver(name -> {
-								byte[] src = sourceBytecodeCache.get(name.replace('/', '.'));
+								byte[] src = prevSourceBytes.get(name.replace('/', '.'));
+								if (src == null) src = sourceBytecodeCache.get(name.replace('/', '.'));
 								return src != null ? src : bytecodeCache.get(name.replace('/', '.'));
 							 }, alignLoader);
 							java.util.function.Function<String, byte[]> newResolver =
 							 normalizeAlignResolver(name -> newBatchBytes.get(name.replace('/', '.')), alignLoader);
-							byte[] oldSrc = sourceBytecodeCache.get(className);
+							byte[] oldSrc = prevSourceBytes.get(className);
+							// 基线优先用 JVM 里**实际生效**的那份（bytecodeCache，含上一轮注入的孤儿桩）：
+							// 源码基线不含桩，多轮序列下会与运行期真实形态脱节（rs_revive 实测：
+							// 删 A2 再加回，第二轮 A2 槽位串到 A3、A3 直接 NoSuchMethodError）。
 							byte[] alignOld = normalizeAlignBaseline(
-							 oldSrc != null ? oldSrc : oldBytecode, alignSlash, alignLoader);
-							newBytecode = LambdaAligner.align(alignOld, newBytecode, oldResolver, newResolver);
+							 oldBytecode != null ? oldBytecode : oldSrc, alignSlash, alignLoader);
+							// 只在"运行期基线确实变了、但选出来的对齐基线却等于新字节"时才告警：
+							// IDE 重复构建、字节码没变时 oldBytecode 也等于 newBytecode，那属于正常情况。
+							if (java.util.Arrays.equals(alignOld, newBytecode)
+								&& oldBytecode != null && !java.util.Arrays.equals(oldBytecode, newBytecode)) {
+								warn("[LambdaAligner] baseline == new bytes for " + className
+									+ " while the loaded class differs — alignment had nothing to align"
+									+ " (stale source cache?). Old callsites will bind by raw javac numbering this round.");
+							}
+							newBytecode = LambdaAligner.align(alignOld, newBytecode, oldResolver, newResolver,
+							 inventedSlots.getOrDefault(className, java.util.Set.of()));
+							// 本轮算出的"自造名"先挂起，等 redefine 成功再落账（失败就丢弃，
+							// 因为旧基线没前进，下一轮仍然是同一份旧字节）。
+							pendingInvented.put(className, LambdaAligner.LAST_INVENTED_NAMES);
 						}
 					}
 					if (oldBytecode != null) {
@@ -3405,6 +3493,23 @@ public class RemoldAgent {
 	}
 
 	/**
+	 * redefine 成功后，把本轮算出的"自造槽位名"并入 {@link #inventedSlots}。
+	 *
+	 * <p>只在成功路径调用：失败/回滚时旧基线（{@link #bytecodeCache}）没有前进，
+	 * 自造名集合也必须保持与旧基线一致，否则下一轮会拿"从未加载过的版本"的身份去做配对。</p>
+	 */
+	private static void commitInvented(String className) {
+		java.util.Set<String> pending = pendingInvented.remove(className);
+		if (pending == null) {
+			inventedSlots.remove(className);
+		} else if (pending.isEmpty()) {
+			inventedSlots.remove(className);
+		} else {
+			inventedSlots.put(className, pending);
+		}
+	}
+
+	/**
 	 * 分块执行 Redefine，防止其中一个类出错导致所有类失败，并依据重定义成败驱动事务提交或回滚。
 	 *
 	 * <p>注：真正的多类原子一致性依赖 JVM 批量 {@code inst.redefineClasses(definitions)} 的原子调用；
@@ -3467,6 +3572,7 @@ public class RemoldAgent {
 			        + " class(es) were skipped this round — listed below."));
 			for (ClassDefinition def : definitions) {
 				bytecodeCache.put(def.getDefinitionClass().getName(), def.getDefinitionClassFile());
+				commitInvented(def.getDefinitionClass().getName());
 				successfulClasses.add(def.getDefinitionClass().getName());
 			}
 			for (AlignmentTransaction tx : transactions) {
@@ -3480,6 +3586,7 @@ public class RemoldAgent {
 				try {
 					inst.redefineClasses(def);
 					bytecodeCache.put(def.getDefinitionClass().getName(), def.getDefinitionClassFile());
+					commitInvented(def.getDefinitionClass().getName());
 					successfulClasses.add(def.getDefinitionClass().getName());
 					if (DEBUG) log("[OK] " + def.getDefinitionClass().getName());
 				} catch (Throwable e) {

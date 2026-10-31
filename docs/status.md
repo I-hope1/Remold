@@ -125,7 +125,7 @@
 | 逐实例补丁驱动与失败配额 | ✅ | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §2 | `InitFix.runDependentInstanceTasks` / `InstanceFailureBudget` | 依赖失败按实例隔离；单字段每轮实例失败配额封顶 8 次（`MAX_INSTANCE_FAILURES_PER_FIELD`） |
 | 存活实例枚举时机 | ✅ | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §2 | `InitFix.applyPatch` / `collectInstancesForPatch` | 枚举推迟到重定义生效之后，不再预拍快照：此后不可能再产生旧布局实例，枚举天然完备；枚举期间新建的实例由新构造器初始化，条件 CAS 对它们是无害空操作。`InitFixSnapshotTimingTest` 先红后绿守卫（旧实现在此用例上确实为红） |
 | 写入协议 (`HotswapBridge`) | 🔶 | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §3 | `HotswapBridge` (`KIND_CONDITIONAL` / `KIND_FORCE`) | 默认条件 CAS；float/double raw bits CAS；跳过计数汇总汇报；`KIND_FORCE` 强制写；**缺自动化 CI 差异验证**（当前 CI 为 Temurin 25，无法区分 raw-bits 与旧实现；JDK 8 raw-bits CAS 为手工验证，非持续自动化覆盖，列入技术债 3.2） |
-| 存量覆写扩展 (`@RemoldReinit`) | ✅ | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §4 | `remold.annotation.RemoldReinit` / `InitFix.buildPatch` | 豁免 T0 与后续加工门；不豁免切片安全门；支持 `CONDITIONAL` 与 `OVERWRITE` |
+| 存量覆写扩展 (`@RemoldReinit`) | ✅ | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §4 | `remold.annotation.RemoldReinit` / `InitFix.buildPatch` / `InitFix.reinitHint` / `InitFix.isClosedSlice` | 豁免 T0 与后续加工门；不豁免切片安全门；支持 `CONDITIONAL` 与 `OVERWRITE`；生效时 `applyPatch` 输出 `[REINIT]` 点名字段与模式，未生效的标 `failed`/`skipped`/`no live instance`；重置时机为"初值表达式变了"，封闭表达式可跳过、开放表达式（跨类调用/他类静态字段）照常每轮重置 |
 | 合成标记字段过滤 | ✅ | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §5 | `ClassDiffUtil.isInternalMarkerField` | 对称过滤 `ACC_SYNTHETIC` 与 `$remold$` 前缀字段 |
 | JVMTI 多态堆实例检索 | ✅ | [`05-jvmti-heap.md`](initfix/05-jvmti-heap.md) | `LibTool.getInstances` / `InstanceTracker` | `LibTool.getInstances` C++ 底座；Tag 隔离与全局互斥；`InstanceTracker` 字节码回退 |
 
@@ -357,7 +357,11 @@
 | 贴图原位直刷（同尺寸） | ✅ | `plugin-arc` `TextureReloader.reloadTexture` Tier 1 | `Gl.texSubImage2D` 写入既有 rect，零材质重建；linear 过滤下先 `Pixmaps.bleed`；级联刷新地表与单位 `clipSize` |
 | 贴图尺寸变化（Tier 2） | 🔶 | `TextureReloader.reloadTexture` Tier 2 | 清图集 Drawable 缓存、重载 `Tex`/`Styles`、刷内容图标；**region 的 UV 与宽高不随之更新**，画面可能拉伸或溢出，换尺寸应重新部署 |
 | 运行期新增贴图 | 🔶 | `TextureReloader.registerNewSprite` | 独立 `Texture` + `Core.atlas.addRegion`；区域名按「重启后 Mindustry 会用的名字」推导（`sprites/` 加模组前缀、`sprites-override/` 裸名），归属模组靠同目录兄弟贴图反查，推不出即拒绝；独立纹理不在图集页内、不参与合批；`NewSpriteNamingTest` 4 用例含变异检查 |
-| 字体 / 语言包重载 | 🔶 | `plugin-arc` `FontReloader` / `BundleReloader` | 已接入 `ArcAssetReloader` 分发；`BundleReloader` 有缺失文件安全用例；字体重载路径缺自动化覆盖 |
+| 字体 / 语言包重载 | 🔶 | `plugin-arc` `FontReloader` / `BundleReloader` | 已接入 `ArcAssetReloader` 分发；`BundleReloader` 按 `Mods.buildFiles` 的 locale 规则只写入匹配的父链 bundle（base 文件写根层，`bundle_<locale>` 写对应语言层），合并属性后回写 `UnlockableContent` 的 `localizedName`/`description`/`details`/`credit`，仅覆写仍等于合并前 bundle 解析值的字段（保留 `OreBlock` 等程序化派生名）；`FontReloader` 按文件名把 `font.woff` 路由到 `def`/`outline`、`icon.ttf` 路由到 `icon`/`iconLarge`，`monospace`/`logic`/`tech` 各自独立，未知文件名回退到 generator 路径匹配（覆盖 `font_jp` override）；`AssetReloaderTest` 覆盖缓存刷新、locale 路由、派生名保护、槽位映射与缺失文件安全用例；字体重载仍缺真实 UI 自动化覆盖 |
+| 音效原位重载 | 🔶 | `plugin-arc` `SoundReloader` | 同时扫描 `mindustry.gen.Sounds` 静态字段与 `FileTree.loadedSounds`，按 `Sound.file` 绝对路径匹配后对同一实例执行 `stop`/`dispose`/`load` 并恢复控制参数；未播放的 lazy sound 延迟到下次播放；无匹配时告警需重启；缺真实音频设备下的自动化覆盖 |
+| 音乐原位重载 | 🔶 | `plugin-arc` `MusicReloader` | 扫描 `mindustry.gen.Musics` 与 `FileTree.loadedMusic`，按 `Music.file` 匹配；先停止并释放旧 handle，再删除 `Music.load` 的同名同长度缓存并重载，避免长度不变时命中旧内容；播放中的曲目重载后从头继续，无匹配时告警需重启；缺真实音频设备下的自动化覆盖 |
+| 内置着色器原位重编 | 🔶 | `plugin-arc` `ShaderReloader` | 按文件到 `Shaders` 静态字段的绑定重新编译，把新 program/句柄/uniform/attribute 表回写到原对象，保留 `CacheLayer`、`PlanetMesh` 等既有引用；编译失败保留旧程序；未知文件与模组自定义着色器仍提示重启；缺真实 GL 设备下的自动化覆盖 |
+| 不可热更资源提示 | ✅ | `ArcAssetReloader.classify` | 模组/未知着色器、content JSON/HJSON、图集、普通数据文件不再静默忽略，统一输出“需要重启”的 warn；`AssetReloaderTest` 覆盖分类路由 |
 | Mixin 重织入（普通类） | 🔶 | `plugin-mixin` `MixinReWeaver` | 重定义前把源码级字节码交回 Mixin 织入，非目标类按数组同一性跳过拷贝；端到端需真实 Fabric 客户端验证 |
 | Mixin 类自身变更 → 目标级联重织入 | 🔶 | `plugin-mixin` `MixinHotSwap` | `IMixinTransformer.reload` 刷新 `MixinInfo` 后对已加载目标类走 `redefineDynamic`；结构性改动抛 `MixinReloadException` 时提示重启 |
 | 标准 JVM 能力探测与降级 | ✅ | `RemoldAgent.probeEnhancedHotswap` / `mustSkipForMissingEnhancedRedefinition` / `degradeForMissingEnhancedRedefinition` | 厂商身份 + flag 文本双条件判定；结构变化类在无增强能力时摘批；`FORCE_STATIC_LAMBDA` 强制降级、`INIT_FIX` 刻意不降级；`EnhancedHotswapGateTest` 9 用例含变异检查 |

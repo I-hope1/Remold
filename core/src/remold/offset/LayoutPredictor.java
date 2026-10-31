@@ -18,6 +18,7 @@ import java.util.*;
  * DCEVM 重定义后的类布局与全新类加载的布局 100% 一致（经单类复杂类型排布、对齐空洞、
  * 三层继承继承链实测验证）。</p>
  */
+@SuppressWarnings("removal")
 public final class LayoutPredictor {
 
 	private static final Unsafe UNSAFE = Reflect.UNSAFE;

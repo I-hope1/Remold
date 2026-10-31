@@ -64,6 +64,42 @@
 - 触发豁免时打 `warn`，并写入 `PatchReport` 的 `FieldDecision.warnings`：构造器里的那部分用法不会被重放。
 - 补丁只在热更线程上单线程执行，按线程的值要注意这一点。
 
+**触发时机是"初值表达式变了"，不是"类被 redefine 了"**
+- 注解字段每轮都会进候选集（它永远不会再出现在 Diff 里）。若不加约束，
+  只改一个方法体的无关 redefine 也会把存量值打回初值 —— 热更改的是代码，不该动数据。
+- 判据是切片指纹（`InitFix.reinitRecordKey`，模式 + `fingerprint`），与上次应用时记录的比较；
+  记录存 `REINIT_APPLIED`（弱键 + 纯字符串，不反向持有 `Class`）。
+- **只对封闭表达式生效**（`isClosedSlice`）：切片里只有常量、算术、类型转换、栈操作与最终写指令。
+  此时"字节码不变 ⟹ 值不变"是定理，跳过安全。
+- **开放表达式一律照常重置**：切片里出现 `INVOKESTATIC`/`INVOKEVIRTUAL`/`GETSTATIC`/`GETFIELD`/`NEW` 等外部读取。
+  `private String tag = ConfigLoader.getDefaultTag();` 的切片一个字都没变，但 `ConfigLoader`
+  的方法体可能恰在这一轮被改 —— 宿主类的字节码里完全看不出来。指纹相同**不等于**值相同，
+  判不了就必须写：宁可多写一次，也不静默留下过期值（与 §3「拿不准就拒绝」同一取向）。
+  他类静态字段（`Other.VALUE`）同理。
+- **判不了的其他情形同样照常重置**：首轮（没有"上次"）、上次没写成（运行期失败/跳过会撤回记录，
+  redefine 失败与待补过期会整类作废）、多根构造器切片口径不一致。
+- **注解变化不在 `ClassDiff` 里**：它只比字段 `name+desc` 的增删（含 static 位翻转）与方法代码，
+  注解、初值、`final`/`volatile` 都不参与；而"是否 redefine"由上游按**字节哈希**判定，
+  所以只改一个注解也会走到 `transform`。由此产生一条必须自己兜住的路径：
+  注解被摘掉那轮字段不进候选集，记录若留着，重新标注解且初值没改时会被判成"初值未变"而跳过
+  （用户刚要求重置却什么都没发生）。因此每轮 `transform` 都要按新字节码的注解集合
+  `pruneReinitRecords` 一次；记录键里也带上模式，`OVERWRITE ↔ CONDITIONAL` 的切换同样会重新生效。
+- 日志：跳过时输出 `[REINIT] @RemoldReinit kept as-is on <类>（初值表达式自上次应用以来未变…）`；
+  真正写入时输出 `[REINIT] @RemoldReinit applied to <类>: <字段> (<模式>, <static|instance>)`。
+
+**已知限制：跨类初值依赖**
+- 若被依赖的类变了、而宿主类本轮<b>没有</b>被 redefine，`InitFix` 根本不会对该类运行，
+  存量实例保持旧值而新实例是新值（分叉）。这是"初值读外部状态"的固有限制，
+  上面的跳过策略既不制造也不消除它；要收敛只能在宿主类上也做一次改动，或用 `@OnReload` 自行刷新。
+
+**生效必须点名**：`applyPatch` 在实例阶段结束后输出一行 `[REINIT]` `info`，逐个列出靠注解进入候选集的字段
+  （`field (OVERWRITE|CONDITIONAL, static|instance)`）。补丁日志只报"打了几个字段"，
+  `Applying static field init patch ..., fields=1` 无法区分"新增字段"与"注解要求重置存量值"；
+  未生效的字段在同一行里标注原因（`failed` / `skipped` / `no live instance`），
+  一个注解字段都没兑现时整行改为 `did not take effect`。没有注解字段时不输出（保持静默）。
+  文案由纯函数 `InitFix.reinitHint` 生成，`PatchPlan.reinitFields()` 是它唯一的数据来源
+  （只收真正进了补丁的字段，被安全门拒绝的不点名）。
+
 ## 5. 合成字段过滤
 
 - `ClassDiffUtil` 统一过滤携带 `ACC_SYNTHETIC` 或 `$remold$` 前缀的标记字段（如 `forceStaticLambdas` 生成的 `$remold$lambdasForced`），避免与业务新增字段混淆。

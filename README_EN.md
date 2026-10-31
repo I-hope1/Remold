@@ -500,6 +500,21 @@ public class PlayerService {
 > instance in the process. If the class was not successfully redefined this round (rejected by the layout gate or
 > the aligner), the callback never fires. See the `OnReload` Javadoc for the full contract.
 
+> **When `@RemoldReinit` takes effect, the log names the fields**:
+> `[REINIT] @RemoldReinit applied to example.ExampleJavaMod: message (OVERWRITE, static)`.
+> The patch log itself only says "N fields patched", which cannot tell "a new field was initialized" apart from
+> "the annotation asked for a live value to be reset". Fields that did not take effect are marked on the same
+> line with `failed` / `skipped` / `no live instance`. Nothing is printed when no field carries the annotation.
+
+> **It resets when the initializer expression changes, not whenever the class is hotswapped**: a method-body-only
+> reload no longer throws live values back to their initializers (the log then shows
+> `[REINIT] @RemoldReinit kept as-is`). The decision is made from the initializer slice fingerprint, and only for
+> **closed expressions** — literals and constant arithmetic whose value is fully determined by their own bytecode.
+> If the initializer reads external state — `= ConfigLoader.getDefaultTag()`, `= Other.VALUE` — the slice can stay
+> byte-for-byte identical while the callee changes what it returns in that very round. That case cannot be proven
+> unchanged, so it **still resets on every reload**: one redundant write beats silently keeping a stale value.
+> See the `RemoldReinit` Javadoc for the full contract.
+
 ---
 
 ## 5. Building & Verification
@@ -525,6 +540,7 @@ The pipeline enforces:
 This project uses a per-module multi-licensing scheme:
 
 - **Core engine, Panama extension, and API specification** (`:api`, `:core`, `:panama`): **[Apache License 2.0](LICENSE)** — commercially friendly, no copyleft, includes a patent grant.
+- **Gradle build plugin** (`:gradle-plugin`): **[Apache License 2.0](LICENSE)**. It only materializes and applies `remold.gradle(.kts)` and assembles JVM arguments at build time; it neither links nor ships Mindustry / Arc code, so it does not inherit the GPL-3.0 of `:plugin-arc`.
 - **Mindustry / Arc framework plugin** (`:plugin-arc`): **[GNU General Public License v3.0 (GPL-3.0)](plugin-arc/LICENSE)**, fully aligned with the upstream GPL-3.0 of Mindustry and Arc.
 - **Mixin ecosystem plugin** (`:plugin-mixin`): **[GNU General Public License v3.0 (GPL-3.0)](plugin-mixin/LICENSE)**, consistent with `:plugin-arc`. The copyleft here is **a deliberate policy, not license contagion**: SpongePowered Mixin is MIT and Fabric API is Apache-2.0, and both are `compileOnly` dependencies that are never shipped with the artifact.
 - **Mod templates** (`mindustry-mod-template`, `minecraft-fabric-template`): **[MIT](mindustry-mod-template/LICENSE)**, so you can copy them into your own project and modify, commercialize, or distribute them closed-source. The templates only reference Remold through build scripts and the `compileOnly` API — they contain no Remold code, so the GPL-3.0 of the plugin layer does not apply to them.

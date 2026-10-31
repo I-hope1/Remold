@@ -44,7 +44,10 @@ public class ExampleJavaMod extends Mod {
     /** HUD 角标容器；置为静态，避免同一进程内重复挂载。 */
     private static Table badge;
 
-    // 标注 @RemoldReinit（默认即为 OVERWRITE 模式）：允许热更时强制覆写存量/静态字段初值
+    // 标注 @RemoldReinit（默认即为 OVERWRITE 模式）：允许热更时强制覆写存量/静态字段初值。
+    // 重置时机是"这个初值表达式变了"，不是"类被热更了" —— 只改别的方法体不会把值打回去；
+    // 生效时控制台会多打一行 [REINIT] @RemoldReinit applied to ...: message (OVERWRITE, static)，
+    // 用来和"本次新增字段被初始化"区分开。初值若读外部状态（如 Config.getX()），无法证明值没变，会每轮重置。
     @RemoldReinit
     public static String message = "Hello Remold Hot Reloading!";
 

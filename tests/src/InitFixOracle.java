@@ -74,6 +74,8 @@ public class InitFixOracle {
 	/** 被静音掉的 agent 日志里的 error/warn 计数，失败时打印出来便于定位。 */
 	static final List<String> agentErrors = new ArrayList<>();
 	static final List<String> agentWarnings = new ArrayList<>();
+	/** info 级日志（例如 {@code [REINIT]} 生效点名）：文案本身是被断言的对象。 */
+	static final List<String> agentInfos = new ArrayList<>();
 
 	static void check(boolean ok, String msg) {
 		System.out.println((ok ? "   PASS  " : "   FAIL  ") + msg);
@@ -99,7 +101,7 @@ public class InitFixOracle {
 		// 顺手把 agent 日志静音，只收集 error。
 		RemoldAgent.logger = new RemoldAgent.Logger() {
 			public void log(String msg) { }
-			public void info(String msg) { }
+			public void info(String msg) { agentInfos.add(msg); }
 			public void warn(String msg) { agentWarnings.add(msg); }
 			public void error(String msg) { agentErrors.add(msg); }
 			public void error(String msg, Throwable t) { agentErrors.add(msg + " :: " + t); }
@@ -155,6 +157,9 @@ public class InitFixOracle {
 		scenario("A+ rejected: Kotlin Object.toString() without a constant whitelisted producer chain", InitFixOracle::caseKtStringOpsRejected);
 		scenario("A+ rejected: Java new Object()/field receiver/CharSequence field/hashCode/user method", InitFixOracle::caseJavaObjectToStringRejected);
 		scenario("A+ regression: Java \"  a \".trim() still accepted (no Object.toString coercion)", InitFixOracle::caseJavaTrimRegression);
+		scenario("§4.2 前提：跨类调用 / 他类静态字段型初值确实会被放行", InitFixOracle::caseExternalDependencyAccepted);
+		scenario("§4.2 @RemoldReinit 只在初值表达式变了时重置：封闭可跳过、开放必须照写", InitFixOracle::caseReinitOnlyWhenInitializerChanges);
+		scenario("§4.2 注解摘掉再重新加上：记录必须作废，否则重置被吃掉", InitFixOracle::caseReinitReaddedAfterRemoval);
 
 		System.out.println();
 		System.out.println("通过 " + passed + " 条；失败 " + failed + " 条；合计 " + (passed + failed) + " 条");
@@ -966,6 +971,29 @@ public class InitFixOracle {
 		}
 		""";
 
+	/**
+	 * N7：既有<b>静态</b>字段改了初值。
+	 *
+	 * <p>与实例字段走同一套注解语义，但 {@code applyPatch} 的生效点名必须标出 {@code static}：
+	 * 静态值全局唯一、没有 liveness 兜底，用户最需要知道它到底有没有被改。</p>
+	 */
+	static final String CASE_N7_V1 = """
+		package oracle;
+		public class CaseN7 {
+			private static String msg = "old";
+			public static String msg() { return msg; }
+		}
+		""";
+
+	static final String CASE_N7_V2 = """
+		package oracle;
+		public class CaseN7 {
+			@remold.annotation.RemoldReinit
+			private static String msg = "new";
+			public static String msg() { return msg; }
+		}
+		""";
+
 	static void caseRemoldReinit() throws Exception {
 		// ---- N1：注解解锁"新增字段 + 构造器里碰过它" ----
 		Fixture f1 = loadFixture("oracle.CaseN1", CASE_N1_V1, CASE_N1_V2);
@@ -996,6 +1024,8 @@ public class InitFixOracle {
 		check("new".equals(read(f2.host, s2, "tag")),
 			"CaseN2：OVERWRITE 无条件覆写了存量值（期望 new，实际 "
 			+ describe(read(f2.host, s2, "tag")) + "）");
+		// 用户侧的痛点：补丁日志只说 "fields=1"，分不清"新增字段"与"注解要求重置存量"。
+		expectReinitHint("CaseN2", "tag (OVERWRITE, instance)");
 
 		// ---- N3：既有字段 + CONDITIONAL → 非默认值不动 ----
 		Fixture f3 = loadFixture("oracle.CaseN3",
@@ -1010,6 +1040,7 @@ public class InitFixOracle {
 		check("old".equals(read(f3.host, s3, "tag")),
 			"CaseN3：CONDITIONAL 没覆盖已有非默认值（期望 old，实际 "
 			+ describe(read(f3.host, s3, "tag")) + "）");
+		expectReinitHint("CaseN3", "tag (CONDITIONAL, instance)");
 
 		// ---- N5：同样的改动但不标注解 → 不产生补丁（对照） ----
 		Fixture f5 = loadFixture("oracle.CaseN5",
@@ -1024,6 +1055,7 @@ public class InitFixOracle {
 		f5.apply();
 		check("old".equals(read(f5.host, s5, "tag")),
 			"CaseN5 对照：存量值保持 old（实际 " + describe(read(f5.host, s5, "tag")) + "）");
+		expectNoReinitHint("CaseN5");
 
 		// ---- N6：注解解锁的是"构造器用法未重放"这条风险，与类型无关；
 		//          非按线程类型也应告警，但文案不应误报"按线程的值" ----
@@ -1048,6 +1080,321 @@ public class InitFixOracle {
 		check(Integer.valueOf(0).equals(read(f4.host, s4, "retries")),
 			"CaseN4：显式重置为零值没有被 T0 吞掉（期望 0，实际 "
 			+ describe(read(f4.host, s4, "retries")) + "）");
+
+		// ---- N7：静态字段 + 注解（用户实测形态：改了 static 初值，存量静态环境被重置） ----
+		Fixture f7 = loadFixture("oracle.CaseN7", CASE_N7_V1, CASE_N7_V2);
+		// 宿主类是从 v2 字节码加载的，<clinit> 已经把值跑成 new；先按 Unsafe/反射置回 old，
+		// 才有"存量静态环境还是旧值"这个前置状态，否则下面的断言是空转。
+		setField(f7.host, null, "msg", "old");
+		check("old".equals(read(f7.host, null, "msg")),
+			"CaseN7 前置：静态环境已被置回 old（实际 " + describe(read(f7.host, null, "msg")) + "）");
+
+		InitFix.PatchReport r7 = f7.transform();
+		expect(r7, true, "msg", InitFix.FieldStatus.ACCEPTED, null);
+		check(r7.patchGenerated(), "CaseN7：静态字段靠注解进入候选集并生成补丁");
+		f7.apply();
+		check("new".equals(read(f7.host, null, "msg")),
+			"CaseN7：静态值被覆写成 new（实际 " + describe(read(f7.host, null, "msg")) + "）");
+		expectReinitHint("CaseN7", "msg (OVERWRITE, static)");
+	}
+
+	// ==================== 探针：外部依赖型初值（跨类调用 / 他类静态字段）是否被放行 ====================
+
+	static final String CASE_CFG = """
+		package oracle;
+		public class Cfg {
+			public static String getDefaultTag() { return "cfg"; }
+			public static String VALUE = "static";
+		}
+		""";
+
+	static final String CASE_EXT_V1 = """
+		package oracle;
+		public class CaseExt {
+			private String tag = "old";
+			private String other = "old";
+			public String tag() { return tag; }
+			public String other() { return other; }
+		}
+		""";
+
+	static final String CASE_EXT_V2 = """
+		package oracle;
+		public class CaseExt {
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private String tag = oracle.Cfg.getDefaultTag();
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private String other = oracle.Cfg.VALUE;
+			public String tag() { return tag; }
+			public String other() { return other; }
+		}
+		""";
+
+	/** 前提断言：这两种"外部依赖型"初值确实会被放行（不放行就谈不上"跳过会漏写"）。 */
+	static void caseExternalDependencyAccepted() throws Exception {
+		Map<String, byte[]> v1 = compile(Map.of("oracle.Cfg", CASE_CFG, "oracle.CaseExt", CASE_EXT_V1));
+		Map<String, byte[]> v2 = compile(Map.of("oracle.Cfg", CASE_CFG, "oracle.CaseExt", CASE_EXT_V2));
+		Class<?> host = Class.forName("oracle.CaseExt", true, new ByteLoader(v2));
+		RemoldAgent.bytecodeCache.put("oracle.CaseExt", v2.get("oracle.CaseExt"));
+		Fixture fx = new Fixture("oracle.CaseExt", v1.get("oracle.CaseExt"), v2.get("oracle.CaseExt"), host);
+
+		InitFix.PatchReport r = fx.transform();
+		InitFix.FieldDecision tag   = r.instanceFields().get("tag");
+		InitFix.FieldDecision other = r.instanceFields().get("other");
+		check(tag != null && tag.status() == InitFix.FieldStatus.ACCEPTED,
+			"跨类调用型初值（Cfg.getDefaultTag）被放行："
+			+ (tag == null ? "无决策" : tag.status() + " / " + tag.reason()));
+		check(other != null && other.status() == InitFix.FieldStatus.ACCEPTED,
+			"他类静态字段型初值（Cfg.VALUE）被放行："
+			+ (other == null ? "无决策" : other.status() + " / " + other.reason()));
+	}
+
+	// ==================== 场景 16：§4.2 注解只在"初值表达式变了"时重置 ====================
+
+	static final String CASE_RC_V1 = """
+		package oracle;
+		public class CaseRc {
+			private String tag = "old";
+			public String tag() { return tag; }
+			public int v() { return 1; }
+		}
+		""";
+
+	/** 初值改成字面量 "new" + 注解（封闭表达式）。 */
+	static final String CASE_RC_V2 = """
+		package oracle;
+		public class CaseRc {
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private String tag = "new";
+			public String tag() { return tag; }
+			public int v() { return 1; }
+		}
+		""";
+
+	/** 与 V2 的差别只在方法体：字段声明与注解一字未动（这就是"无关 redefine"）。 */
+	static final String CASE_RC_V3 = """
+		package oracle;
+		public class CaseRc {
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private String tag = "new";
+			public String tag() { return tag; }
+			public int v() { return 2; }
+		}
+		""";
+
+	/** 初值再改一次：new -> newer。跳过得是可撤销的，不能一劳永逸。 */
+	static final String CASE_RC_V4 = """
+		package oracle;
+		public class CaseRc {
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private String tag = "newer";
+			public String tag() { return tag; }
+			public int v() { return 2; }
+		}
+		""";
+
+	static final String CASE_RC_OPEN_V1 = """
+		package oracle;
+		public class CaseRcOpen {
+			private String tag = "old";
+			public String tag() { return tag; }
+		}
+		""";
+
+	/** 初值换成跨类调用：切片里是 INVOKESTATIC，属开放表达式。 */
+	static final String CASE_RC_OPEN_V2 = """
+		package oracle;
+		public class CaseRcOpen {
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private String tag = oracle.Cfg.getDefaultTag();
+			public String tag() { return tag; }
+		}
+		""";
+
+	static final String CASE_RC_OPEN_V3 = """
+		package oracle;
+		public class CaseRcOpen {
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private String tag = oracle.Cfg.getDefaultTag();
+			public String tag() { return tag; }
+			public int v() { return 2; }
+		}
+		""";
+
+	/**
+	 * {@code @RemoldReinit} 的重置时机：只在"初值表达式变了"时写。
+	 *
+	 * <p>三组对照，缺一不可：</p>
+	 * <ul>
+	 *   <li><b>R1 封闭 + 无关 redefine</b>：不得重写（这是用户提的原始诉求）；</li>
+	 *   <li><b>R1' 封闭 + 初值再变</b>：必须重新生效（跳过不是一劳永逸，否则成了永久漏写）；</li>
+	 *   <li><b>R2 开放（跨类调用）</b>：指纹相同也<b>必须照写</b> ——
+	 *       {@code Cfg.getDefaultTag()} 的方法体可能在这一轮被改，而宿主类字节码看不出任何变化。
+	 *       这条是"纯指纹"方案的漏洞所在，缺了它整套优化就是静默写过期值。</li>
+	 * </ul>
+	 */
+	static void caseReinitOnlyWhenInitializerChanges() throws Exception {
+		// ---- R1：封闭表达式（字面量）----
+		Fixture f1 = loadFixture("oracle.CaseRc", CASE_RC_V1, CASE_RC_V2);
+		Object s1 = construct(f1.host);
+		InstanceTracker.register(s1);
+
+		InitFix.PatchReport r1 = f1.transform();
+		check(r1.patchGenerated(), "R1 首轮：初值 old -> new 且带注解，必须生成补丁");
+		f1.apply();
+		check("new".equals(read(f1.host, s1, "tag")),
+			"R1 首轮：存量实例被重置成 new（实际 " + describe(read(f1.host, s1, "tag")) + "）");
+
+		// 运行期改写：无关 redefine 不该把它打回去
+		setField(f1.host, s1, "tag", "runtime");
+		Map<String, byte[]> rc3 = compile(Map.of("oracle.CaseRc", CASE_RC_V3));
+		RemoldAgent.bytecodeCache.put("oracle.CaseRc", rc3.get("oracle.CaseRc"));
+		Fixture f2 = new Fixture("oracle.CaseRc", f1.v2, rc3.get("oracle.CaseRc"), f1.host);
+		InitFix.PatchReport r2 = f2.transform();
+		check(!r2.patchGenerated(), "R1 第二轮（只改方法体）：初值未变，不得重新生成补丁");
+		check(reinitKeptLine("CaseRc") != null,
+			"R1 第二轮：必须打出 [REINIT] kept as-is，说明为什么没重置（实际 " + reinitLines("CaseRc") + "）");
+		f2.apply();
+		check("runtime".equals(read(f1.host, s1, "tag")),
+			"R1 第二轮：运行期值不得被打回（实际 " + describe(read(f1.host, s1, "tag")) + "）");
+
+		// 初值再变：必须重新生效（跳过的可撤销性）
+		Map<String, byte[]> rc4 = compile(Map.of("oracle.CaseRc", CASE_RC_V4));
+		RemoldAgent.bytecodeCache.put("oracle.CaseRc", rc4.get("oracle.CaseRc"));
+		Fixture f3 = new Fixture("oracle.CaseRc", rc3.get("oracle.CaseRc"), rc4.get("oracle.CaseRc"), f1.host);
+		InitFix.PatchReport r3 = f3.transform();
+		check(r3.patchGenerated(), "R1 第三轮：初值 new -> newer，必须重新生成补丁");
+		f3.apply();
+		check("newer".equals(read(f1.host, s1, "tag")),
+			"R1 第三轮：被重置成 newer（实际 " + describe(read(f1.host, s1, "tag")) + "）");
+
+		// ---- R2：开放表达式（跨类调用）—— 判不了，必须照写 ----
+		Map<String, byte[]> o1 = compile(Map.of("oracle.Cfg", CASE_CFG, "oracle.CaseRcOpen", CASE_RC_OPEN_V1));
+		Map<String, byte[]> o2 = compile(Map.of("oracle.Cfg", CASE_CFG, "oracle.CaseRcOpen", CASE_RC_OPEN_V2));
+		Class<?> host = Class.forName("oracle.CaseRcOpen", true, new ByteLoader(o2));
+		RemoldAgent.bytecodeCache.put("oracle.CaseRcOpen", o2.get("oracle.CaseRcOpen"));
+		Fixture g1 = new Fixture("oracle.CaseRcOpen",
+			o1.get("oracle.CaseRcOpen"), o2.get("oracle.CaseRcOpen"), host);
+		Object s2 = construct(host);
+		InstanceTracker.register(s2);
+
+		InitFix.PatchReport q1 = g1.transform();
+		check(q1.patchGenerated(), "R2 首轮：跨类调用型初值被放行并生成补丁");
+		g1.apply();
+		check("cfg".equals(read(host, s2, "tag")),
+			"R2 首轮：tag 取自 Cfg.getDefaultTag()（实际 " + describe(read(host, s2, "tag")) + "）");
+
+		setField(host, s2, "tag", "runtime");
+		Map<String, byte[]> o3 = compile(Map.of("oracle.Cfg", CASE_CFG, "oracle.CaseRcOpen", CASE_RC_OPEN_V3));
+		RemoldAgent.bytecodeCache.put("oracle.CaseRcOpen", o3.get("oracle.CaseRcOpen"));
+		Fixture g2 = new Fixture("oracle.CaseRcOpen",
+			o2.get("oracle.CaseRcOpen"), o3.get("oracle.CaseRcOpen"), host);
+		InitFix.PatchReport q2 = g2.transform();
+		check(q2.patchGenerated(),
+			"R2 第二轮：开放表达式判不了值有没有变（被调用方可能改了），必须仍然生成补丁");
+		g2.apply();
+		check("cfg".equals(read(host, s2, "tag")),
+			"R2 第二轮：照常重置回 cfg（实际 " + describe(read(host, s2, "tag")) + "）");
+		check(reinitKeptLine("CaseRcOpen") == null,
+			"R2 第二轮：开放表达式不得出现 kept as-is（实际 " + reinitLines("CaseRcOpen") + "）");
+	}
+
+	static final String CASE_RD_V1 = """
+		package oracle;
+		public class CaseRd {
+			private String tag = "old";
+			public String tag() { return tag; }
+		}
+		""";
+
+	static final String CASE_RD_V2 = """
+		package oracle;
+		public class CaseRd {
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private String tag = "new";
+			public String tag() { return tag; }
+		}
+		""";
+
+	/** 与 V2 只差"注解被摘掉"：初值一个字没变。 */
+	static final String CASE_RD_V3 = """
+		package oracle;
+		public class CaseRd {
+			private String tag = "new";
+			public String tag() { return tag; }
+		}
+		""";
+
+	/** 与 V2 只差 mode：初值一个字没变。 */
+	static final String CASE_RD_V4 = """
+		package oracle;
+		public class CaseRd {
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.CONDITIONAL)
+			private String tag = "new";
+			public String tag() { return tag; }
+		}
+		""";
+
+	/**
+	 * 注解被摘掉再重新加上：{@code ClassDiff} 看不见注解变化，只能靠"记录作废"兜住。
+	 *
+	 * <p>漏掉这一步的后果很具体：摘掉注解那轮字段不进候选集，记录却还留着；
+	 * 重新标注解时初值恰好没改 → 被判成"初值未变"而跳过 —— 用户明明刚要求重置，什么都没发生。</p>
+	 */
+	static void caseReinitReaddedAfterRemoval() throws Exception {
+		Fixture f1 = loadFixture("oracle.CaseRd", CASE_RD_V1, CASE_RD_V2);
+		Object s = construct(f1.host);
+		InstanceTracker.register(s);
+
+		f1.transform();
+		f1.apply();
+		check("new".equals(read(f1.host, s, "tag")),
+			"RD 首轮：带注解，重置成 new（实际 " + describe(read(f1.host, s, "tag")) + "）");
+
+		// 运行期改写，然后摘掉注解（初值不变）
+		setField(f1.host, s, "tag", "runtime");
+		Map<String, byte[]> rd3 = compile(Map.of("oracle.CaseRd", CASE_RD_V3));
+		RemoldAgent.bytecodeCache.put("oracle.CaseRd", rd3.get("oracle.CaseRd"));
+		Fixture f2 = new Fixture("oracle.CaseRd", f1.v2, rd3.get("oracle.CaseRd"), f1.host);
+		InitFix.PatchReport r2 = f2.transform();
+		check(!r2.patchGenerated(), "RD 摘掉注解那轮：字段不在候选集，不生成补丁");
+		f2.apply();
+		check("runtime".equals(read(f1.host, s, "tag")),
+			"RD 摘掉注解那轮：存量值不动（实际 " + describe(read(f1.host, s, "tag")) + "）");
+
+		// 重新标注解（初值仍是 "new"）：必须重新生效
+		RemoldAgent.bytecodeCache.put("oracle.CaseRd", f1.v2);
+		Fixture f3 = new Fixture("oracle.CaseRd", rd3.get("oracle.CaseRd"), f1.v2, f1.host);
+		InitFix.PatchReport r3 = f3.transform();
+		check(r3.patchGenerated(),
+			"RD 重新标注解：必须重新生成补丁（记录残留会把这次重置吃掉）");
+		f3.apply();
+		check("new".equals(read(f1.host, s, "tag")),
+			"RD 重新标注解：被重置成 new（实际 " + describe(read(f1.host, s, "tag")) + "）");
+
+		// 只改 mode（初值不变）：记录键里带模式，必须重新生效
+		Map<String, byte[]> rd4 = compile(Map.of("oracle.CaseRd", CASE_RD_V4));
+		RemoldAgent.bytecodeCache.put("oracle.CaseRd", rd4.get("oracle.CaseRd"));
+		Fixture f4 = new Fixture("oracle.CaseRd", f1.v2, rd4.get("oracle.CaseRd"), f1.host);
+		InitFix.PatchReport r4 = f4.transform();
+		check(r4.patchGenerated(),
+			"RD 只改 mode（OVERWRITE -> CONDITIONAL）：必须重新生成补丁，不得被旧记录跳过");
+	}
+
+	/** 取该类"初值未变而跳过"的那一行；没有则返回 null。 */	static String reinitKeptLine(String className) {
+		for (String line : reinitLines(className)) {
+			if (line.contains("kept as-is")) return line;
+		}
+		return null;
+	}
+
+	/** 只取该类的 {@code [REINIT]} 行：失败信息里不要把整轮 info 都倒出来。 */
+	static List<String> reinitLines(String className) {
+		List<String> out = new ArrayList<>();
+		for (String line : agentInfos) {
+			if (line.startsWith("[REINIT]") && line.contains(className)) out.add(line);
+		}
+		return out;
 	}
 
 	// ==================== 场景 15：§5.1/§5.2 逐字段驱动 ====================
@@ -3162,6 +3509,39 @@ public class InitFixOracle {
 			if (part == null || w.contains(part)) hit = true;
 		}
 		check(hit, tag + " 应带风险告警（含 \"" + part + "\"），实际 warnings=" + d.warnings());
+	}
+
+	/**
+	 * 断言 {@code applyPatch} 真的打出了 {@code @RemoldReinit} 生效点名，且文案包含全部片段。
+	 *
+	 * <p>断言落在<b>日志终局</b>而不是"格式化函数能算出这句话"：接线断了（例如忘了在
+	 * {@code applyPatch} 里调用）时这里必须变红。</p>
+	 */
+	static void expectReinitHint(String className, String... parts) {
+		for (String line : agentInfos) {
+			if (!line.startsWith("[REINIT]") || !line.contains(className)) continue;
+			boolean all = true;
+			for (String p : parts) {
+				if (!line.contains(p)) { all = false; break; }
+			}
+			if (all) {
+				check(true, className + " 的 @RemoldReinit 生效点名已输出（含 " + String.join(" / ", parts) + "）");
+				return;
+			}
+		}
+		check(false, className + " 缺少 @RemoldReinit 生效点名（含 " + String.join(" / ", parts)
+		             + "），实际 info=" + agentInfos);
+	}
+
+	/** 阴性对照：该类的 {@code @RemoldReinit} 一行都不该出现。 */
+	static void expectNoReinitHint(String className) {
+		for (String line : agentInfos) {
+			if (line.startsWith("[REINIT]") && line.contains(className)) {
+				check(false, className + " 没有注解字段，不该出现 @RemoldReinit 点名：" + line);
+				return;
+			}
+		}
+		check(true, className + " 没有注解字段时保持静默");
 	}
 
 	/** 正向值比对：被补丁字段必须等于控制组构造器算出的值。 */

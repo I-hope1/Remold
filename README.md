@@ -489,6 +489,17 @@ public class PlayerService {
 > 写在 Mod 主类上之所以看起来像"模组收到通知"，只是因为该主类在进程里通常恰好只有一个实例。
 > 类本轮没被重定义成功（被布局门 / 对齐器拒绝）时回调不会发生。完整契约见 `OnReload` 的 Javadoc。
 
+> **`@RemoldReinit` 生效时会在日志里点名**：`[REINIT] @RemoldReinit applied to example.ExampleJavaMod: message (OVERWRITE, static)`。
+> 补丁日志本身只报"给几个字段打了补丁"，这一行用来区分"新增字段被初始化"与"注解要求重置存量值"；
+> 没兑现的字段会在同一行标出 `failed` / `skipped` / `no live instance`。没有注解字段时保持静默。
+
+> **重置时机是"初值表达式变了"，不是"类被热更了"**：只改一个方法体的无关热更不会把存量值打回初值
+> （日志里会打 `[REINIT] @RemoldReinit kept as-is`）。判据是初值切片的指纹，且只对**封闭表达式**生效
+> （`= "abc"`、常量算术这类值完全由自身字节码决定的形态）。
+> 若初值读外部状态——`= ConfigLoader.getDefaultTag()`、`= Other.VALUE`——切片的字节码可以一个字都不变，
+> 而被调用方恰在这一轮改了返回值；这种情况无法证明"值没变"，因此**照常每轮重置**。
+> 宁可多写一次，也不静默留下过期值。完整契约见 `RemoldReinit` 的 Javadoc。
+
 ---
 
 ## 5. 构建与测试 (Building & Verification)
@@ -514,6 +525,7 @@ public class PlayerService {
 本项目采用分模块的多许可证策略（Multi-licensing）：
 
 - **核心引擎、Panama 扩展与 API 规范**（`:api`、`:core`、`:panama`）：采用商业友好的 **[Apache License 2.0](LICENSE)** 协议开源。允许商业化集成、无 Copyleft 传染性，包含专利授权保护；
+- **Gradle 构建插件**（`:gradle-plugin`）：采用 **[Apache License 2.0](LICENSE)**。它只在构建期展开并应用 `remold.gradle(.kts)`、拼装 JVM 参数，不链接也不分发 Mindustry / Arc 代码，因此不随 `:plugin-arc` 的 GPL-3.0 变化。
 - **Mindustry / Arc 框架插件**（`:plugin-arc`）：采用 **[GNU General Public License v3.0 (GPL-3.0)](plugin-arc/LICENSE)** 协议开源，与 Mindustry 及 Arc 的上游 GPL-3.0 许可完全对齐。
 - **Mixin 生态插件**（`:plugin-mixin`）：与 `:plugin-arc` 保持一致，采用 **[GNU General Public License v3.0 (GPL-3.0)](plugin-mixin/LICENSE)**。这一层的 copyleft 属于**主动策略而非许可传染**：上游依赖 SpongePowered Mixin 为 MIT、Fabric API 为 Apache-2.0，且插件对二者均为 `compileOnly`（不随产物分发）。
 - **模组模板**（`mindustry-mod-template`、`minecraft-fabric-template`）：采用 **[MIT](mindustry-mod-template/LICENSE)** 协议，便于直接复制成自己的工程并自由修改、商用、闭源分发。模板只是通过构建脚本引用 Remold 与 `compileOnly` 的 API，本身不含 Remold 代码，因此不受插件层 GPL-3.0 约束。

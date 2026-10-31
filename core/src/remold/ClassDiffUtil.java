@@ -102,7 +102,17 @@ public final class ClassDiffUtil {
 		public final List<String> addedMethods        = new ArrayList<>();
 		/** 删除的方法列表：存储格式为 "methodName + methodDescriptor" */
 		public final List<String> removedMethods      = new ArrayList<>();
-		/** 字段变更列表：包括新增和删除的字段，存储格式为 "+ fieldName" 或 "- fieldName" */
+		/**
+		 * 字段变更列表：包括新增和删除的字段，存储格式为 "+ fieldName" 或 "- fieldName"。
+		 *
+		 * <p><b>只反映结构</b>：字段的键是 {@code name + desc}（外加 {@code static} 位），
+		 * 所以<b>注解、初值表达式、{@code final}/{@code volatile} 等修饰符的改动都不会出现在这里</b>。
+		 * 初值是否变了要由 {@code InitFix} 自己比切片；注解是否还在要由它自己扫新字节码
+		 * （{@code docs/initfix/03-runtime-driver.md} §4）。</p>
+		 *
+		 * <p>注意"Diff 里没有变化"并不等于"这个类不会被热更"：是否 redefine 由上游按
+		 * <b>字节哈希</b>判定（{@code RemoldAgent}），只改一个注解也会走 redefine。</p>
+		 */
 		public final List<String> changedFields       = new ArrayList<>();
 
 		/** 用于分析新增的实例字段 */

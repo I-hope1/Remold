@@ -44,6 +44,19 @@ import java.lang.annotation.*;
  *   <li><b>按线程的状态仍然无解</b>：{@code ThreadLocal.get()} 之类的读照样拒绝，
  *       构造器里对缓存的写入也不会重放（补丁在热更线程上执行）。要按实例、按正确线程
  *       补齐请用 {@link OnReload}。</li>
+ *   <li><b>生效会点名</b>：注解字段真的被重置时，热更日志里会出现一行 {@code [REINIT]}，
+ *       逐个列出 {@code 字段 (OVERWRITE|CONDITIONAL, static|instance)}；没兑现的字段在同一行里
+ *       标出原因（{@code failed} / {@code skipped} / {@code no live instance}）。
+ *       默认作用域只含本次新增字段，所以"这个字段为什么被改了"与"我改了初值为什么没生效"
+ *       这两件事，靠这一行区分。</li>
+ *   <li><b>重置时机是"初值表达式变了"，不是"类被 redefine 了"</b>：只改一个方法体的无关热更
+ *       不会把存量值打回初值。判据是初值切片的指纹，且只对<b>封闭表达式</b>生效
+ *       （{@code = "abc"}、常量算术这类值完全由自身字节码决定的形态）。</li>
+ *   <li><b>初值读外部状态时每轮都重置</b>：{@code = ConfigLoader.getDefaultTag()}、
+ *       {@code = Other.VALUE} 这类切片的字节码可以一个字都不变，而被调用方/被读字段
+ *       恰在这一轮改了值 —— 宿主类的字节码里看不出来。这种情况无法证明"值没变"，
+ *       因此照常重置（宁可多写一次，也不静默留下过期值）。想避免这种覆盖，
+ *       把初值改成封闭形态，或用 {@link OnReload} 按需刷新。</li>
  * </ul>
  */
 @Retention(RetentionPolicy.RUNTIME)

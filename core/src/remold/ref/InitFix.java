@@ -194,7 +194,22 @@ public class InitFix {
 	/** 台账里的一条未决字段。 */
 	public record UnpatchedField(String fieldName, String reason) { }
 
-	/** 只读视图：当前台账里该宿主的未决字段（测试与诊断用）。 */
+	/**
+	 * {@code @RemoldReinit} 已应用记录：{@code Class -> (字段名 -> "模式|初值切片指纹")}。
+	 *
+	 * <p>用途只有一个：判断"这个字段的初值表达式自上次应用以来有没有变"，从而让
+	 * {@code OVERWRITE} 不再对<b>无关 redefine</b>（只改了别的方法体）重复覆写存量值
+	 * （{@code docs/initfix/03-runtime-driver.md} §4）。</p>
+	 *
+	 * <p><b>只在封闭表达式上生效</b>（见 {@link #isClosedSlice}）。切片里一旦出现外部读取
+	 * ——{@code ConfigLoader.getDefaultTag()} 这类跨类调用、{@code Other.VALUE} 这类他类静态字段——
+	 * "字节码没变"就不再等价于"值没变"：被调用方的改动在宿主类的字节码里根本不可见。
+	 * 这类字段一律不跳过，维持每轮重置的保守行为，宁可多写一次也不静默留下过期值。</p>
+	 *
+	 * <p>与 {@link #LEDGER} 同一策略：弱键 + 纯字符串值，不阻止类卸载、不反向持有 {@code Class}。</p>
+	 */
+	private static final Map<Class<?>, Map<String, String>> REINIT_APPLIED =
+	 Collections.synchronizedMap(new WeakHashMap<>());	/** 只读视图：当前台账里该宿主的未决字段（测试与诊断用）。 */
 	public static Set<UnpatchedField> getUnpatchedFields(Class<?> host) {
 		if (host == null) return Set.of();
 		synchronized (LEDGER) {
@@ -247,6 +262,126 @@ public class InitFix {
 		}
 	}
 
+	// ==================== @RemoldReinit 已应用记录（docs/initfix/03-runtime-driver.md §4） ====================
+
+	private static String reinitAppliedGet(Class<?> host, String fieldName) {
+		synchronized (REINIT_APPLIED) {
+			Map<String, String> m = REINIT_APPLIED.get(host);
+			return m == null ? null : m.get(fieldName);
+		}
+	}
+
+	private static void reinitAppliedPut(Class<?> host, String fieldName, String key) {
+		if (host == null || fieldName == null || key == null) return;
+		synchronized (REINIT_APPLIED) {
+			REINIT_APPLIED.computeIfAbsent(host, k -> new LinkedHashMap<>()).put(fieldName, key);
+		}
+	}
+
+	private static void reinitAppliedRemove(Class<?> host, String fieldName) {
+		if (host == null) return;
+		synchronized (REINIT_APPLIED) {
+			Map<String, String> m = REINIT_APPLIED.get(host);
+			if (m == null) return;
+			m.remove(fieldName);
+			if (m.isEmpty()) REINIT_APPLIED.remove(host);
+		}
+	}
+
+	/** 整类记录作废：补丁没生效（redefine 失败 / 待补过期）时，下一轮必须重新写。 */
+	private static void reinitAppliedClear(Class<?> host) {
+		if (host == null) return;
+		REINIT_APPLIED.remove(host);
+	}
+
+	/**
+	 * 只保留仍然带注解的字段的记录。
+	 *
+	 * <p>{@code ClassDiff} 看不见注解变化（它只比字段 {@code name+desc} 的增删与方法代码），
+	 * 所以"注解被摘掉"这件事只能靠扫描新字节码得知。摘掉那轮字段根本不进候选集，
+	 * 记录若留着，重新标注解时就会被判成"初值未变"而跳过。</p>
+	 */
+	private static void pruneReinitRecords(Class<?> host, Set<String> annotatedFields) {
+		synchronized (REINIT_APPLIED) {
+			Map<String, String> m = REINIT_APPLIED.get(host);
+			if (m == null) return;
+			m.keySet().retainAll(annotatedFields);
+			if (m.isEmpty()) REINIT_APPLIED.remove(host);
+		}
+	}
+
+	/**
+	 * 该字段"初值表达式"的身份：{@code 模式|切片指纹}；切片不封闭时返回 {@code null}。
+	 *
+	 * <p>返回 {@code null} 的含义是"<b>判不了</b>"，调用方必须按"照常重置"处理 ——
+	 * 这正是 {@code ConfigLoader.getDefaultTag()} 那一类字段的处境：切片本身一个字没变，
+	 * 但被调用方的返回值可能变了，指纹看不出来。</p>
+	 *
+	 * <p>多根构造器口径不一致（各根的切片指纹不同）时同样返回 {@code null}：那种字段后续
+	 * 会被 {@code fingerprintMismatchReason} 拒绝，不该在这里先替它做判断。</p>
+	 */
+	private static String reinitRecordKey(ReinitField mode, List<FieldExtract> extracts) {
+		if (mode == null || extracts == null || extracts.isEmpty()) return null;
+		String fp = null;
+		for (FieldExtract fe : extracts) {
+			if (!isClosedSlice(fe.instructions())) return null;
+			String cur = fingerprint(fe.instructions());
+			if (fp == null) fp = cur;
+			else if (!fp.equals(cur)) return null;
+		}
+		return (mode.overwrite() ? "OVERWRITE" : "CONDITIONAL") + "|" + fp;
+	}
+
+	/**
+	 * 封闭表达式判定：切片是否只由常量、算术、类型转换、栈操作与最终的那条写指令构成。
+	 *
+	 * <p>只有封闭切片的"字节码不变 ⟹ 值不变"才是定理。任何一次外部读取都会破坏它：</p>
+	 * <ul>
+	 *   <li>{@code INVOKESTATIC/INVOKEVIRTUAL/...}：被调用方的实现可能在本轮被改（跨类时
+	 *       宿主类字节码完全看不出变化）；</li>
+	 *   <li>{@code GETSTATIC}/{@code GETFIELD}：读的是运行期状态，可能被别处改写；</li>
+	 *   <li>{@code INVOKEDYNAMIC}：同上，且引导方法可能读外部；</li>
+	 *   <li>{@code NEW} 及其数组形态：新对象的身份每次不同，跳过与否都改变可观测行为，
+	 *       交给调用方按"照常重置"处理更安全。</li>
+	 * </ul>
+	 *
+	 * <p>这是<b>保守</b>判定：{@code new StringBuilder("a").toString()} 这种其实封闭的形态
+	 * 也会被判为开放，代价只是"仍然每轮重置"（即改造前的行为），不会漏写。</p>
+	 */
+	private static boolean isClosedSlice(List<AbstractInsnNode> insns) {
+		if (insns == null) return false;
+		for (AbstractInsnNode n : insns) {
+			switch (n.getOpcode()) {
+				case Opcodes.GETSTATIC:
+				case Opcodes.GETFIELD:
+				case Opcodes.INVOKEVIRTUAL:
+				case Opcodes.INVOKESPECIAL:
+				case Opcodes.INVOKESTATIC:
+				case Opcodes.INVOKEINTERFACE:
+				case Opcodes.INVOKEDYNAMIC:
+				case Opcodes.NEW:
+				case Opcodes.NEWARRAY:
+				case Opcodes.ANEWARRAY:
+				case Opcodes.MULTIANEWARRAY:
+				case Opcodes.IALOAD:
+				case Opcodes.LALOAD:
+				case Opcodes.FALOAD:
+				case Opcodes.DALOAD:
+				case Opcodes.AALOAD:
+				case Opcodes.BALOAD:
+				case Opcodes.CALOAD:
+				case Opcodes.SALOAD:
+				case Opcodes.MONITORENTER:
+				case Opcodes.MONITOREXIT:
+				case Opcodes.ATHROW:
+					return false;
+				default:
+					break;
+			}
+		}
+		return true;
+	}
+
 	/**
 	 * 统一的补丁 bridge bootstrap：{@link HotswapBridge} 按 {@code kind} 分派到
 	 * protected 成员桥接或新增字段的条件 CAS 写。
@@ -288,13 +423,30 @@ public class InitFix {
 	/**
 	 * 一次热更的补丁计划：按拓扑序排列的逐字段任务（{@code docs/initfix/03-runtime-driver.md} §1 每字段独立静态方法 +
 	 * {@code docs/initfix/03-runtime-driver.md} §2 宿主驱动调度）。
+	 *
+	 * @param reinitFields 本轮真正进了补丁的 {@code @RemoldReinit} 字段 -> 写入模式名
+	 *                     （{@code OVERWRITE}/{@code CONDITIONAL}），按注解声明顺序保序。
+	 *                     只收"注解确实兑现了"的字段：被安全门拒绝的不会出现在这里。
+	 *                     用途见 {@link InitFix#reinitHint}（{@code docs/initfix/03-runtime-driver.md} §4）。
 	 */
-	public record PatchPlan(List<FieldPatchTask> instanceTasks, List<FieldPatchTask> staticTasks) {
-		public static final PatchPlan EMPTY = new PatchPlan(List.of(), List.of());
+	public record PatchPlan(
+	 List<FieldPatchTask> instanceTasks, List<FieldPatchTask> staticTasks,
+	 Map<String, String> reinitFields) {
+
+		public static final PatchPlan EMPTY = new PatchPlan(List.of(), List.of(), Map.of());
 
 		public PatchPlan {
 			instanceTasks = instanceTasks == null ? List.of() : List.copyOf(instanceTasks);
 			staticTasks = staticTasks == null ? List.of() : List.copyOf(staticTasks);
+			// 保序副本：日志里字段的先后必须与注解声明顺序一致（Map.copyOf 不保证顺序）。
+			reinitFields = reinitFields == null || reinitFields.isEmpty()
+			 ? Map.of()
+			 : Collections.unmodifiableMap(new LinkedHashMap<>(reinitFields));
+		}
+
+		/** 兼容不带注解信息的构造：本轮没有 {@code @RemoldReinit} 参与时用它。 */
+		public PatchPlan(List<FieldPatchTask> instanceTasks, List<FieldPatchTask> staticTasks) {
+			this(instanceTasks, staticTasks, Map.of());
 		}
 
 		public boolean isEmpty() { return instanceTasks.isEmpty() && staticTasks.isEmpty(); }
@@ -428,6 +580,16 @@ public class InitFix {
 		PENDING.remove(host);
 		cleanupStalePatches();
 
+		// 注解被摘掉的字段：作废它的"已应用"记录（docs/initfix/03-runtime-driver.md §4）。
+		//
+		// ClassDiff 只比结构（字段 name+desc 的增删、方法代码），**注解完全不参与**；
+		// 而热更是否发生是上游按字节哈希判的 —— 所以"只摘掉一个注解"照样会走到这里。
+		// 不在这里清理的话，将来重新标注解、初值又恰好没改时，会被判成"初值未变"而跳过：
+		// 用户明明刚要求重置，却什么都不会发生。
+		if (diff != null && diff.newClass != null) {
+			pruneReinitRecords(host, scanReinitFields(diff.newClass).keySet());
+		}
+
 		Set<String> addedStaticFields   = diff.addedStaticFields;
 		Set<String> addedInstanceFields = diff.addedInstanceFields;
 
@@ -521,6 +683,8 @@ public class InitFix {
 		for (StalePatch s : stale) {
 			Class<?> host = s.host().get();
 			if (host == null) continue;   // 宿主已被回收：台账（弱键）也随之消失，无需记账
+			// 补丁已过期、一个字段都没写进去：撤回"已应用"记录，下一轮重新判定而不是凭旧指纹跳过。
+			reinitAppliedClear(host);
 			for (String f : s.fields()) {
 				// 只在台账尚无该字段时补记：不覆盖更具体的原因。
 				// （ACCEPTED 字段在 transform 时已出账，所以这里写的是"真的没补上"的。）
@@ -604,6 +768,7 @@ public class InitFix {
 			if (fn == null) {
 				// 字段已从新版本里消失：无法再补，按已解决出账（避免台账里留死条目）
 				ledgerRemove(host, f);
+				reinitAppliedRemove(host, f);   // 记录随字段一起作废，防止同名重加时被误判"初值未变"
 				log("FieldLedger: dropping " + className + "." + f
 				    + " (field no longer declared)");
 				continue;
@@ -680,6 +845,19 @@ public class InitFix {
 		List<MethodNode> staticScanMethods = new ArrayList<>(initMethods);
 		if (clinitMethod != null) staticScanMethods.add(clinitMethod);
 
+		// ==================== 阶段 0.4：@RemoldReinit 初值指纹（docs/initfix/03-runtime-driver.md §4） ====================
+		// 只对"封闭表达式"建指纹：它的值完全由自身字节码决定，字节码没变就等于值没变。
+		// 开放表达式（跨类调用、他类静态字段……）这里拿不到 key —— 它们的值可能被外部改动带走，
+		// 指纹相同也不能据此跳过，否则会静默留下过期值。
+		Map<String, String> reinitKeys = new LinkedHashMap<>();
+		for (Map.Entry<String, ReinitField> e : reinitFields.entrySet()) {
+			String             f  = e.getKey();
+			List<FieldExtract> ex = instanceExtracts.containsKey(f)
+			 ? instanceExtracts.get(f) : staticExtracts.get(f);
+			String key = reinitRecordKey(e.getValue(), ex);
+			if (key != null) reinitKeys.put(f, key);
+		}
+
 		// ==================== 阶段 0.5：T0 零值等价过滤（docs/initfix/01-safety-gate.md §1） ====================
 		// 显式 = null / = 0 / = false、仅声明未赋值、以及 static ConstantValue 按位为零的字段，
 		// 存量实例与静态环境本来就是默认值：零开销放行，不生成补丁（也不会生成恒等 CAS 写）。
@@ -706,13 +884,35 @@ public class InitFix {
 			    + ": instance=" + zeroInstanceFields + ", static=" + zeroStaticFields);
 		}
 
+		// ==================== 阶段 0.6：@RemoldReinit 初值未变则跳过（docs/initfix/03-runtime-driver.md §4） ====================
+		// 注解字段每轮都被拉进候选集（它永远不会再出现在 Diff 里）。若它的初值表达式一个字都没变，
+		// 且表达式封闭（值只由自身字节码决定），这一轮重置唯一的效果就是把运行期改过的值打回去 ——
+		// 只改了个方法体的热更不该动数据，跳过。
+		//
+		// 判不了的一律不跳过：开放表达式、新增字段（没有"上次"）、以及记录缺失（首轮/上次没写成）。
+		Set<String> unchangedInstance = new LinkedHashSet<>();
+		Set<String> unchangedStatic   = new LinkedHashSet<>();
+		for (Map.Entry<String, String> e : reinitKeys.entrySet()) {
+			String f = e.getKey();
+			if (addedInstanceFields.contains(f) || addedStaticFields.contains(f)) continue;
+			if (!e.getValue().equals(reinitAppliedGet(host, f))) continue;
+			(staticExtracts.containsKey(f) ? unchangedStatic : unchangedInstance).add(f);
+		}
+		for (String f : unchangedInstance) instanceExtracts.remove(f);
+		for (String f : unchangedStatic) staticExtracts.remove(f);
+		if (!unchangedInstance.isEmpty() || !unchangedStatic.isEmpty()) {
+			RemoldAgent.info("[REINIT] @RemoldReinit kept as-is on " + className
+				+ "（初值表达式自上次应用以来未变，且其值完全由字节码决定，不重写）："
+				+ "instance=" + unchangedInstance + ", static=" + unchangedStatic);
+		}
+
 		// ==================== 阶段 1：单字段判定（实例） ====================
 		// 先把所有待处理字段标记为拒绝；有 extract 的会在此后覆盖为 ACCEPTED 或被具体原因拒绝。
 		// 这样即便某字段在 extractFieldInits 里就被拒（不进 instanceExtracts），
 		// PatchReport 里依然有它的一条决策记录，且原因是提取期记录下来的真实原因。
 		Map<String, FieldDecision> instanceDecisions = new LinkedHashMap<>();
 		for (String f : targetInstanceFields) {
-			if (zeroInstanceFields.contains(f)) {
+			if (zeroInstanceFields.contains(f) || unchangedInstance.contains(f)) {
 				instanceDecisions.put(f, FieldDecision.NOTHING_TO_PATCH);
 				continue;
 			}
@@ -761,7 +961,7 @@ public class InitFix {
 		// 同上：先全部标记拒绝（带提取期记录的真实原因），再让 extract 命中的字段覆盖。
 		Map<String, FieldDecision> staticDecisions = new LinkedHashMap<>();
 		for (String f : targetStaticFields) {
-			if (zeroStaticFields.contains(f)) {
+			if (zeroStaticFields.contains(f) || unchangedStatic.contains(f)) {
 				staticDecisions.put(f, FieldDecision.NOTHING_TO_PATCH);
 				continue;
 			}
@@ -999,7 +1199,24 @@ public class InitFix {
 			 dependencyOf(fieldName, staticExtracts, className, acceptedStatic)));
 		}
 
-		PatchPlan plan = new PatchPlan(instanceTasks, staticTasks);
+		// 注解字段里"真的兑现了"的那些：只有进了有序任务表才算数（被安全门拒绝的字段不该被点名）。
+		// applyPatch 靠它把"这个字段是注解要求重置的"和"这个字段是本次新增的"分开报，
+		// 否则用户只看到 "Applying ... fields=1"，无从判断存量值为什么会被改。
+		Map<String, String> reinitApplied = new LinkedHashMap<>();
+		for (Map.Entry<String, ReinitField> e : reinitFields.entrySet()) {
+			String f = e.getKey();
+			if (!orderedInstance.contains(f) && !orderedStatic.contains(f)) continue;
+			reinitApplied.put(f, e.getValue().overwrite() ? "OVERWRITE" : "CONDITIONAL");
+		}
+
+		PatchPlan plan = new PatchPlan(instanceTasks, staticTasks, reinitApplied);
+
+		// 记录本轮"应用了哪个初值表达式"（docs/initfix/03-runtime-driver.md §4）：下一轮据此判断是否还需要重置。
+		// 只记真正进了补丁的字段；运行期失败/跳过由 applyPatch 撤回，redefine 失败/待补过期由对应路径整类作废。
+		for (String f : reinitApplied.keySet()) {
+			String key = reinitKeys.get(f);
+			if (key != null) reinitAppliedPut(host, f, key);
+		}
 
 		PatchReport report = new PatchReport(
 		 Collections.unmodifiableMap(instanceDecisions),
@@ -2763,6 +2980,8 @@ public class InitFix {
 		if (clazz == null) return;
 		PendingPatch dropped = PENDING.remove(clazz);
 		if (dropped != null) {
+			// 补丁一个字段都没写进去，"已应用"记录跟着作废：下一轮必须重新判定，不能凭旧指纹跳过。
+			reinitAppliedClear(clazz);
 			// docs/initfix/02-closure-and-ledger.md §2 的核心场景：redefine 失败，但补丁计划已经生成、类结构随时可能推进；
 			// 这些字段一个都没补，必须记账，否则它们再也不会出现在 Diff 里。
 			for (FieldPatchTask task : dropped.plan().allTasks()) {
@@ -2884,6 +3103,17 @@ public class InitFix {
 			}
 		}
 
+		// 没真正写进去的注解字段：撤回"已应用"记录，否则下一轮会被"初值未变"误跳过，永久停在旧值。
+		for (String f : plan.reinitFields().keySet()) {
+			if (failedFields.contains(f) || skippedFields.contains(f)) reinitAppliedRemove(host, f);
+		}
+
+		// @RemoldReinit 生效点名（docs/initfix/03-runtime-driver.md §4）：
+		// "存量值被重置"与"新增字段被初始化"是两件不同的事，补丁日志只报"打了几个字段"分不出来。
+		String reinitLine = reinitHint(host.getName(), plan,
+		 failedFields, skippedFields, alive == null ? 0 : alive.size());
+		if (reinitLine != null) RemoldAgent.info(reinitLine);
+
 		if (!failedFields.isEmpty() || !skippedFields.isEmpty()) {
 			// docs/initfix/02-closure-and-ledger.md §2 待补台账：本轮没补上的字段记入，下一轮候选集自动并回来。
 			// 先写 failed，再写 skipped —— 熔断字段同时属于两者（它确实失败过，
@@ -2931,6 +3161,67 @@ public class InitFix {
 				}
 			}
 		}
+	}
+
+	/**
+	 * {@code @RemoldReinit} 生效点名的文案（{@code docs/initfix/03-runtime-driver.md} §4）。
+	 *
+	 * <p>默认作用域只含"本次新增字段"，已有字段能进补丁<b>只能</b>是注解要求的。但补丁日志本身
+	 * 只报"给几个字段打了补丁"，两者在日志里长得一模一样：用户看到
+	 * {@code Applying static field init patch ..., fields=1} 时无从判断自己的存量值为什么被改了，
+	 * 也不知道"我改了初值却没生效"是因为没标注解。这一行负责把这件事说破。</p>
+	 *
+	 * <p>纯函数（只读入参，不碰 {@link RemoldAgent}），文案因此可以被测试直接断言。</p>
+	 *
+	 * @param className       宿主类名，仅用于日志
+	 * @param plan            本轮补丁计划；{@link PatchPlan#reinitFields()} 为空时整行不输出
+	 * @param failedFields    运行期失败的字段
+	 * @param skippedFields   因依赖失败被放弃的字段
+	 * @param instanceTargets 实例阶段实际处理的实例数；0 表示没有存活实例
+	 * @return 需要输出的整行日志；没有任何注解字段真正生效时返回 {@code null}（保持静默）
+	 */
+	static String reinitHint(
+	 String className, PatchPlan plan, Set<String> failedFields,
+	 Set<String> skippedFields, int instanceTargets) {
+
+		if (plan == null || plan.reinitFields().isEmpty()) return null;
+
+		Set<String> staticNames = new HashSet<>();
+		for (FieldPatchTask task : plan.staticTasks()) staticNames.add(task.fieldName());
+
+		StringBuilder applied = new StringBuilder();
+		StringBuilder notDone = new StringBuilder();
+		for (Map.Entry<String, String> e : plan.reinitFields().entrySet()) {
+			String        field    = e.getKey();
+			boolean       isStatic = staticNames.contains(field);
+			String        why;
+			if (failedFields.contains(field)) {
+				why = "failed";
+			} else if (skippedFields.contains(field)) {
+				why = "skipped";
+			} else if (!isStatic && instanceTargets == 0) {
+				// 计划里有、但没有实例可写：说"生效"就是撒谎。
+				why = "no live instance";
+			} else {
+				why = null;
+			}
+
+			StringBuilder target = why == null ? applied : notDone;
+			if (target.length() > 0) target.append(", ");
+			target.append(field).append(" (").append(e.getValue())
+			 .append(isStatic ? ", static" : ", instance").append(')');
+			if (why != null) target.append(" - ").append(why);
+		}
+
+		StringBuilder line = new StringBuilder("[REINIT] @RemoldReinit ");
+		if (applied.length() > 0) {
+			line.append("applied to ").append(className).append(": ").append(applied);
+			if (notDone.length() > 0) line.append("; not applied: ").append(notDone);
+			return line.append("（默认作用域只含本次新增字段，这些字段是靠注解才进候选集的；"
+			                    + "未标注的已有字段改初值不会被重置）").toString();
+		}
+		return line.append("did not take effect on ").append(className)
+		 .append(": ").append(notDone).toString();
 	}
 
 	private record BoundInstanceTask(String fieldName, Set<String> dependencies, MethodHandle handle) { }

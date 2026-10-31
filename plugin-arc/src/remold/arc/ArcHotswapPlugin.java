@@ -28,6 +28,11 @@ public class ArcHotswapPlugin implements HotswapPlugin {
 		} catch (Throwable ignored) {
 		}
 
+		// 注册 Arc Json 实例级缓存驱逐器：Arc 专属知识只存在于本插件，核心引擎不持有
+		try {
+			remold.RemoldAgent.registerCacheEvictor(ArcJsonEvictor.INSTANCE);
+		} catch (Throwable ignored) { }
+
 		// 自动绑定 Arc 的主线程事件循环调度器
 		try {
 			remold.RemoldAgent.setMainThreadDispatcher(task -> {

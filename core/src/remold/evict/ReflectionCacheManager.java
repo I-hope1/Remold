@@ -11,20 +11,21 @@ import java.util.concurrent.CopyOnWriteArrayList;
 /**
  * 反射与序列化框架实例级缓存驱逐管理器（S4）。
  *
- * <p>用于在重定义完成后清除各第三方框架（Arc Json、Jackson、Gson 等）
- * 内部针对被重定义类的元数据缓存，使新增字段与类型变化对序列化器立即可见。</p>
+ * <p>用于在重定义完成后清除各第三方框架（Jackson、Gson 等）内部针对被重定义类的元数据缓存，
+ * 使新增字段与类型变化对序列化器立即可见。</p>
+ *
+ * <p>本类只持有与具体游戏引擎无关的通用实现；引擎专属驱逐器（如 Arc {@code Json}）
+ * 由对应扩展插件通过 {@link #registerEvictor} 自行注册，核心不持有其类名与私有字段名。</p>
  */
 public final class ReflectionCacheManager {
 
 	private static final List<ReflectionCacheEvictor> evictors = new CopyOnWriteArrayList<>();
 
 	// 注册的特定框架实例缓存（使用弱键集合，避免内存泄漏）
-	private static final Set<Object> registeredArcJsons = Collections.newSetFromMap(new WeakHashMap<>());
 	private static final Set<Object> registeredObjectMappers = Collections.newSetFromMap(new WeakHashMap<>());
 	private static final Set<Object> registeredGsons = Collections.newSetFromMap(new WeakHashMap<>());
 
 	static {
-		registerEvictor(new ArcJsonEvictor());
 		registerEvictor(new JacksonEvictor());
 		registerEvictor(new GsonEvictor());
 	}
@@ -40,14 +41,6 @@ public final class ReflectionCacheManager {
 	public static void unregisterEvictor(ReflectionCacheEvictor evictor) {
 		if (evictor != null) {
 			evictors.remove(evictor);
-		}
-	}
-
-	public static void registerArcJson(Object json) {
-		if (json != null) {
-			synchronized (registeredArcJsons) {
-				registeredArcJsons.add(json);
-			}
 		}
 	}
 
@@ -99,80 +92,6 @@ public final class ReflectionCacheManager {
 			} catch (NoSuchFieldException ignored) {}
 		}
 		return null;
-	}
-
-	/**
-	 * Arc {@code arc.util.serialization.Json} 实例级字段元数据缓存驱逐器。
-	 */
-	public static final class ArcJsonEvictor implements ReflectionCacheEvictor {
-		@Override
-		public String getName() { return "ArcJson"; }
-
-		@Override
-		public int evict(Set<Class<?>> redefinedClasses) {
-			int count = 0;
-			Set<Object> instances = new HashSet<>();
-			synchronized (registeredArcJsons) {
-				instances.addAll(registeredArcJsons);
-			}
-
-			try {
-				Class<?> jsonClass = Class.forName("arc.util.serialization.Json");
-				Object[] heapInstances = LibTool.getInstances(jsonClass);
-				if (heapInstances != null) {
-					Collections.addAll(instances, heapInstances);
-				}
-			} catch (Throwable ignored) {}
-
-			if (instances.isEmpty()) return 0;
-
-			for (Object json : instances) {
-				if (json == null) continue;
-				try {
-					Class<?> jc = json.getClass();
-					// 1. typeToFields
-					Field fTypeToFields = findField(jc, "typeToFields");
-					if (fTypeToFields != null) {
-						fTypeToFields.setAccessible(true);
-						Object map = fTypeToFields.get(json);
-						if (map != null) {
-							Method mRemove = map.getClass().getMethod("remove", Object.class);
-							for (Class<?> c : redefinedClasses) {
-								mRemove.invoke(map, c);
-								count++;
-							}
-						}
-					}
-					// 2. classToDefaultValues
-					Field fDefaults = findField(jc, "classToDefaultValues");
-					if (fDefaults != null) {
-						fDefaults.setAccessible(true);
-						Object map = fDefaults.get(json);
-						if (map != null) {
-							Method mRemove = map.getClass().getMethod("remove", Object.class);
-							for (Class<?> c : redefinedClasses) {
-								mRemove.invoke(map, c);
-							}
-						}
-					}
-					// 3. classToSerializer
-					Field fSerializers = findField(jc, "classToSerializer");
-					if (fSerializers != null) {
-						fSerializers.setAccessible(true);
-						Object map = fSerializers.get(json);
-						if (map != null) {
-							Method mRemove = map.getClass().getMethod("remove", Object.class);
-							for (Class<?> c : redefinedClasses) {
-								mRemove.invoke(map, c);
-							}
-						}
-					}
-				} catch (Throwable t) {
-					if (RemoldAgent.DEBUG) RemoldAgent.log("[ArcJsonEvict] Failed on instance: " + t);
-				}
-			}
-			return count;
-		}
 	}
 
 	/**

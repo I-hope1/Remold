@@ -526,6 +526,6 @@ public class PlayerService {
 
 - **核心引擎、Panama 扩展与 API 规范**（`:api`、`:core`、`:panama`）：采用商业友好的 **[Apache License 2.0](LICENSE)** 协议开源。允许商业化集成、无 Copyleft 传染性，包含专利授权保护；
 - **Gradle 构建插件**（`:gradle-plugin`）：采用 **[Apache License 2.0](LICENSE)**。它只在构建期展开并应用 `remold.gradle(.kts)`、拼装 JVM 参数，不链接也不分发 Mindustry / Arc 代码，因此不随 `:plugin-arc` 的 GPL-3.0 变化。
-- **Mindustry / Arc 框架插件**（`:plugin-arc`）：采用 **[GNU General Public License v3.0 (GPL-3.0)](plugin-arc/LICENSE)** 协议开源，与 Mindustry 及 Arc 的上游 GPL-3.0 许可完全对齐。
+- **Mindustry / Arc 框架插件**（`:plugin-arc`）：采用 **[GNU General Public License v3.0 (GPL-3.0)](plugin-arc/LICENSE)** 协议开源。选择 GPL-3.0 的原因是它 `compileOnly` 链接上游 **Mindustry**（GPL-3.0）；Arc 本身与 libGDX 一致，为 Apache-2.0。核心引擎不引用、不分发、也不持有任何 Arc 类名或私有字段名——Arc 专属逻辑（如 `ArcJsonEvictor`）全部收敛在本插件内，由插件在初始化时向核心注册。
 - **Mixin 生态插件**（`:plugin-mixin`）：与 `:plugin-arc` 保持一致，采用 **[GNU General Public License v3.0 (GPL-3.0)](plugin-mixin/LICENSE)**。这一层的 copyleft 属于**主动策略而非许可传染**：上游依赖 SpongePowered Mixin 为 MIT、Fabric API 为 Apache-2.0，且插件对二者均为 `compileOnly`（不随产物分发）。
 - **模组模板**（`mindustry-mod-template`、`minecraft-fabric-template`）：采用 **[MIT](mindustry-mod-template/LICENSE)** 协议，便于直接复制成自己的工程并自由修改、商用、闭源分发。模板只是通过构建脚本引用 Remold 与 `compileOnly` 的 API，本身不含 Remold 代码，因此不受插件层 GPL-3.0 约束。

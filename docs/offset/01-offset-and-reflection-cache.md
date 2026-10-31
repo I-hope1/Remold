@@ -113,16 +113,16 @@ flowchart LR
         R2["notifyExternalClassRedefined 外部通道"]
     end
 
-    subgraph Manager["ReflectionCacheManager"]
+    subgraph Manager["ReflectionCacheManager (core)"]
         M1["evictAll(redefinedClasses)"]
         H1["LibTool.getInstances (堆遍历)"]
         H2["WeakHashMap (显式注册实例)"]
     end
 
     subgraph Evictors["SPI 驱逐器实现"]
-        E1["ArcJsonEvictor (typeToFields, classToDefaultValues)"]
-        E2["JacksonEvictor (TypeFactory, SerializerCache)"]
-        E3["GsonEvictor (typeTokenCache)"]
+        E1["ArcJsonEvictor (plugin-arc 注册)"]
+        E2["JacksonEvictor (core 内置)"]
+        E3["GsonEvictor (core 内置)"]
     end
 
     Trigger --> M1
@@ -132,14 +132,15 @@ flowchart LR
 
 ### 4.3 框架适配规格
 
-1. **Arc `arc.util.serialization.Json`**：
+1. **Arc `arc.util.serialization.Json`**（实现位于 `:plugin-arc` 的 `remold.arc.ArcJsonEvictor`）：
    * 目标字段：`typeToFields`（`ObjectMap<Class, OrderedMap<String, FieldMetadata>>`）、`classToDefaultValues`（`ObjectMap<Class, Object[]>`）、`classToSerializer`（`ObjectMap<Class, Serializer>`）；
-   * 动作：调用 `remove(redefinedClass)` 清除变动类的缓存条目，驱逐后下次读写自动重新反射字段元数据。
-2. **Jackson `ObjectMapper`**：
+   * 动作：调用 `remove(redefinedClass)` 清除变动类的缓存条目，驱逐后下次读写自动重新反射字段元数据；
+   * 分层约束：类与字段以 Arc 编译期类型引用（`Json`、`ObjectMap`），只有"私有字段名"仍是字符串契约；字段不可读时在装载期 `warn`，不静默失效。该驱逐器由 `ArcHotswapPlugin.onAgentInit` 经 `RemoldAgent.registerCacheEvictor` 注册，核心引擎不持有任何 Arc 类名或字段名。
+2. **Jackson `ObjectMapper`**（`core` 内置）：
    * 全局缓存：调用 `TypeFactory.defaultInstance().clearCache()`；
    * 实例缓存：对每个存活 `ObjectMapper`，分别对其 `_serializerProvider._serializerCache` 与 `_deserializationContext._cache` 执行 `flush()`。
 3. **Gson `Gson`**：
    * 实例缓存：对每个存活 `Gson` 实例，清除其 `typeTokenCache`（`ConcurrentMap`）。
 4. **双通道获取策略**：
    * **原生堆遍历通道**：若 Native 探针 `LibTool` 可用，通过 `LibTool.getInstances(targetClass)` 自动发现堆中所有存活解析器实例，实现免注册无感清理；
-   * **显式注册通道**：提供 `RemoldAgent.registerArcJson`、`registerObjectMapper`、`registerGson`，使用弱引用集合持有，作为无 native 时的确定性通道。
+   * **显式注册通道**：使用弱引用集合持有实例，作为无 native 时的确定性通道。各框架的注册入口归属其实现所在层：`RemoldAgent.registerObjectMapper` / `registerGson`（core）与 `ArcJsonEvictor.register`（plugin-arc）。

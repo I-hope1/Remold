@@ -366,8 +366,8 @@ public class RemoldAgent {
 		remold.evict.ReflectionCacheManager.registerEvictor(evictor);
 	}
 
-	public static void registerArcJson(Object json) {
-		remold.evict.ReflectionCacheManager.registerArcJson(json);
+	public static void unregisterCacheEvictor(remold.evict.ReflectionCacheEvictor evictor) {
+		remold.evict.ReflectionCacheManager.unregisterEvictor(evictor);
 	}
 
 	public static void registerObjectMapper(Object mapper) {

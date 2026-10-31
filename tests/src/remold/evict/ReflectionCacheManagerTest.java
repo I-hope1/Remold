@@ -2,6 +2,7 @@ package remold.evict;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import remold.arc.ArcJsonEvictor;
 
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -10,16 +11,9 @@ import static org.junit.jupiter.api.Assertions.*;
 
 public class ReflectionCacheManagerTest {
 
-	static class SampleTarget1 {}
+	static class SampleTarget1 { int value; }
 	static class SampleTarget2 {}
-	static class UnrelatedTarget {}
-
-	// 模拟 Arc Json 内部结构
-	static class MockArcJson {
-		final Map<Class<?>, Object> typeToFields = new HashMap<>();
-		final Map<Class<?>, Object[]> classToDefaultValues = new HashMap<>();
-		final Map<Class<?>, Object> classToSerializer = new HashMap<>();
-	}
+	static class UnrelatedTarget { int other; }
 
 	// 模拟 Gson 内部结构
 	static class MockGson {
@@ -61,34 +55,42 @@ public class ReflectionCacheManagerTest {
 	}
 
 	@Test
-	@DisplayName("Arc Json 实例级缓存驱逐因果性与对照组")
+	@DisplayName("Arc Json 实例级缓存驱逐因果性与对照组（真实 Arc 类型）")
 	public void testArcJsonInstanceEviction() {
-		MockArcJson mockJson = new MockArcJson();
-		mockJson.typeToFields.put(SampleTarget1.class, "meta1");
-		mockJson.typeToFields.put(UnrelatedTarget.class, "unrelatedMeta");
-		mockJson.classToDefaultValues.put(SampleTarget1.class, new Object[]{"def"});
-		mockJson.classToSerializer.put(SampleTarget1.class, "ser");
+		arc.util.serialization.Json json = new arc.util.serialization.Json();
 
-		// 前置基线断言
-		assertTrue(mockJson.typeToFields.containsKey(SampleTarget1.class), "Baseline: Target1 must be in cache");
-		assertTrue(mockJson.typeToFields.containsKey(UnrelatedTarget.class), "Baseline: Unrelated must be in cache");
+		// 前置基线：字段表已进入缓存，且二次读取命中同一实例（证明缓存确实生效）
+		arc.struct.OrderedMap<String, arc.util.serialization.Json.FieldMetadata> baseline =
+			json.getFields(SampleTarget1.class);
+		assertSame(baseline, json.getFields(SampleTarget1.class),
+			"Baseline: second getFields must hit the cached map");
 
-		// 注册实例并触发重定义驱逐
-		ReflectionCacheManager.registerArcJson(mockJson);
-		int evicted = ReflectionCacheManager.evictAll(Set.of(SampleTarget1.class));
-		assertTrue(evicted >= 1, "Must report evicted count for Target1");
+		// 对照组基线：无关类同样进入缓存
+		arc.struct.OrderedMap<String, arc.util.serialization.Json.FieldMetadata> control =
+			json.getFields(UnrelatedTarget.class);
 
-		// 因果终局断言：Target1 被精准清出，但 UnrelatedTarget 依然完好
-		assertFalse(mockJson.typeToFields.containsKey(SampleTarget1.class),
-			"Causal End-State: Target1 must be evicted from typeToFields");
-		assertFalse(mockJson.classToDefaultValues.containsKey(SampleTarget1.class),
-			"Causal End-State: Target1 must be evicted from classToDefaultValues");
-		assertFalse(mockJson.classToSerializer.containsKey(SampleTarget1.class),
-			"Causal End-State: Target1 must be evicted from classToSerializer");
+		// 注册实例与驱逐器，触发重定义驱逐
+		ArcJsonEvictor.register(json);
+		ReflectionCacheManager.registerEvictor(ArcJsonEvictor.INSTANCE);
+		try {
+			ReflectionCacheManager.evictAll(Set.of(SampleTarget1.class));
+		} finally {
+			ReflectionCacheManager.unregisterEvictor(ArcJsonEvictor.INSTANCE);
+			ArcJsonEvictor.unregister(json);
+		}
 
-		// 对照组：无关类未受任何影响
-		assertTrue(mockJson.typeToFields.containsKey(UnrelatedTarget.class),
-			"Counterfactual Control: UnrelatedTarget must remain in cache");
+		// 因果终局断言：Target1 的缓存条目被丢弃，重新反射出新的字段表
+		assertNotSame(baseline, json.getFields(SampleTarget1.class),
+			"Causal End-State: Target1 field cache must be re-derived, not the cached instance");
+
+		// 对照组：无关类缓存原样保留
+		assertSame(control, json.getFields(UnrelatedTarget.class),
+			"Counterfactual Control: UnrelatedTarget cache must be untouched");
+
+		// 计数语义：getFields 只填充 typeToFields，故重新填充后恰好命中 1 条
+		json.getFields(SampleTarget1.class);
+		assertEquals(1, ArcJsonEvictor.INSTANCE.evict(Set.of(SampleTarget1.class)),
+			"Evictor must report exactly the entries it removed from typeToFields");
 	}
 
 	@Test

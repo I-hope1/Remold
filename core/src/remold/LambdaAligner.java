@@ -2609,7 +2609,7 @@ public class LambdaAligner {
 				if (n instanceof InvokeDynamicInsnNode i && i.bsmArgs != null && i.bsmArgs.length > 1
 				    && i.bsmArgs[1] instanceof Handle h && cn.name.equals(h.getOwner())) {
 					callee = h.getName();
-					recordLambdaShape(nameIndex.get(callee), i, h);
+					recordLambdaShape(nameIndex.get(callee), i, h, mn);
 				} else if (n instanceof MethodInsnNode m && cn.name.equals(m.owner)) {
 					callee = m.name;
 				}
@@ -2662,7 +2662,7 @@ public class LambdaAligner {
 				if (n instanceof InvokeDynamicInsnNode i && i.bsmArgs != null && i.bsmArgs.length > 1
 				    && i.bsmArgs[1] instanceof Handle h && cn.name.equals(h.getOwner())) {
 					callee = h.getName();
-					recordLambdaShape(nameIndex.get(callee), i, h);
+					recordLambdaShape(nameIndex.get(callee), i, h, mn);
 				} else if (n instanceof MethodInsnNode m && cn.name.equals(m.owner)) {
 					callee = m.name;
 				}
@@ -2924,17 +2924,60 @@ public class LambdaAligner {
 	 * <p>只取<b>先见到的</b>那个调用点：同一个合成方法被多处 indy 引用时，各处的捕获表
 	 * 必然一致（它就是方法签名的一部分），不一致只可能来自索引错位，此时保留第一份。</p>
 	 */
-	private static void recordLambdaShape(SyntheticInfo info, InvokeDynamicInsnNode indy, Handle impl) {
+	private static void recordLambdaShape(SyntheticInfo info, InvokeDynamicInsnNode indy, Handle impl,
+	                                      MethodNode host) {
 		if (info == null || info.captured != null) return;
 		if (!info.desc.equals(impl.getDesc())) return;
 		if (indy.bsmArgs.length < 3) return;
 		if (!(indy.bsmArgs[0] instanceof Type sam) || !(indy.bsmArgs[2] instanceof Type inst)) return;
-		List<String> caps = new ArrayList<>();
-		for (Type t : Type.getArgumentTypes(indy.desc)) caps.add(t.getDescriptor());
-		info.captured = caps;
+		Type[] caps = Type.getArgumentTypes(indy.desc);
+		List<String> captured = new ArrayList<>(caps.length);
+		for (Type t : caps) captured.add(t.getDescriptor());
+		info.captured = captured;
 		info.fiType = Type.getReturnType(indy.desc).getInternalName();
 		info.samSig = sam.getDescriptor();
 		info.instSig = inst.getDescriptor();
+		info.captureSlots = captureSlotsOf(indy, caps);
+	}
+
+	/**
+	 * 回溯每个捕获实参来自宿主方法的哪个局部变量槽。
+	 *
+	 * <p>javac 在 indy 之前按捕获顺序把实参压栈，所以从 indy 往前数 {@code captured.length}
+	 * 条真实指令就是它们的来源。只认<b>直接的局部变量加载</b>：实参若是临时值
+	 * （{@code () -> use(make(a))} 会先算出一个临时槽再捕获），槽号没有跨版本的身份，
+	 * 回溯一律判失败——宁可退回类型推断，也不能拿一个随机槽号去"证明"映射。</p>
+	 *
+	 * @return 与 {@code captured} 对齐的槽号；无法回溯时 {@code null}
+	 */
+	private static List<Integer> captureSlotsOf(InvokeDynamicInsnNode indy, Type[] captured) {
+		int n = captured.length;
+		if (n == 0) return List.of();
+		int[] slots = new int[n];
+		AbstractInsnNode cur = indy.getPrevious();
+		for (int k = n - 1; k >= 0; k--) {
+			while (cur != null && cur.getOpcode() < 0) cur = cur.getPrevious();   // 跳过 Label/LineNumber
+			if (!(cur instanceof VarInsnNode v)) return null;
+			if (!loadMatches(v.getOpcode(), captured[k])) return null;
+			slots[k] = v.var;
+			cur = cur.getPrevious();
+		}
+		List<Integer> out = new ArrayList<>(n);
+		for (int s : slots) out.add(s);
+		return out;
+	}
+
+	/** 加载指令与类型是否匹配（用于校验回溯没有错位）。 */
+	private static boolean loadMatches(int op, Type t) {
+		switch (t.getSort()) {
+			case Type.BOOLEAN: case Type.CHAR: case Type.BYTE: case Type.SHORT: case Type.INT:
+				return op == Opcodes.ILOAD;
+			case Type.LONG:   return op == Opcodes.LLOAD;
+			case Type.FLOAT:  return op == Opcodes.FLOAD;
+			case Type.DOUBLE: return op == Opcodes.DLOAD;
+			case Type.OBJECT: case Type.ARRAY: return op == Opcodes.ALOAD;
+			default: return false;
+		}
 	}
 
 	/** 在已扫描的旧/新分组里按名字找 SyntheticInfo（供子指纹计算使用）。 */
@@ -3215,7 +3258,7 @@ public class LambdaAligner {
 			SyntheticInfo only = null;
 			int hits = 0;
 			for (SyntheticInfo ni : unpairedNew) {
-				if (!canBridge(oi, ni)) continue;
+				if (bridgeMapping(oi, ni) == null) continue;
 				only = ni;
 				if (++hits > 1) break;
 			}
@@ -3230,7 +3273,7 @@ public class LambdaAligner {
 			if (claims.getOrDefault(ni.name + ni.desc, 0) != 1) continue;   // 一个目标被多抢：全部拒绝
 			SyntheticInfo oi = findOldByKey(ctx, e.getKey());
 			if (oi == null) continue;
-			int[] map = uniqueSubsequence(oi.captured, ni.captured);
+			int[] map = bridgeMapping(oi, ni);
 			if (map == null) continue;
 			String target = ni.name + ni.desc;
 			ctx.bridges.put(e.getKey(), new BridgeSpec(oi.desc, ni.name, ni.desc, map, oi.isStatic(),
@@ -3280,16 +3323,122 @@ public class LambdaAligner {
 	 *
 	 * @see #stepCaptureBridge
 	 */
-	private static boolean canBridge(SyntheticInfo oi, SyntheticInfo ni) {
+	/**
+	 * 判定能否建桥，并给出"新形参 → 老形参"的映射。
+	 *
+	 * <p>返回 {@code null} 表示不建桥。映射的来源按可靠性分两级：</p>
+	 * <ol>
+	 *   <li><b>证明</b>：两侧宿主描述符完全一致、且都能回溯出捕获槽号时，按<b>槽号</b>定映射。
+	 *       槽号是"同一个变量"的直接证据，连类型层面无解的歧义（{@code (int,int) → (int)}
+	 *       里到底是哪一个）也能定下来；</li>
+	 *   <li><b>推断</b>：槽号不可用（宿主签名变了、实参是临时值）时，按<b>类型唯一性</b>定映射。</li>
+	 * </ol>
+	 *
+	 * <p>两级都必须满足"每个新形参恰好一个来源 + 整体内射"。内射是硬要求：两个新形参
+	 * 共用一个旧值意味着它们是<b>两个不同的变量</b>，值不一定相同，喂同一个值是静默错值。</p>
+	 */
+	private static int[] bridgeMapping(SyntheticInfo oi, SyntheticInfo ni) {
 		// static 位是另一条轴（normalizeStaticShape 的地盘）。两轴同时变就不再有可证的映射。
-		if (oi.isStatic() != ni.isStatic()) return false;
-		if (!sameHost(oi, ni)) return false;
-		if (!Objects.equals(oi.fiType, ni.fiType)) return false;
-		if (!Objects.equals(oi.samSig, ni.samSig)) return false;
-		if (!Objects.equals(oi.instSig, ni.instSig)) return false;
-		if (!layoutHolds(oi) || !layoutHolds(ni)) return false;
-		if (ni.captured.size() >= oi.captured.size()) return false;
-		return uniqueSubsequence(oi.captured, ni.captured) != null;
+		if (oi.isStatic() != ni.isStatic()) return null;
+		if (!sameHost(oi, ni)) return null;
+		if (!Objects.equals(oi.fiType, ni.fiType)) return null;
+		if (!Objects.equals(oi.samSig, ni.samSig)) return null;
+		if (!Objects.equals(oi.instSig, ni.instSig)) return null;
+		if (!layoutHolds(oi) || !layoutHolds(ni)) return null;
+		if (ni.captured.size() > oi.captured.size()) return null;
+
+		// 证明优先：槽号可比的前提是宿主描述符完全一致，否则槽号整体位移。
+		int[] bySlot = null;
+		if (oi.hostKey != null && oi.hostKey.equals(ni.hostKey)) {
+			bySlot = mappingBySlots(oi, ni);
+		}
+		// 捕获数"不变"只可能是重排，而重排本身不构成"这两个是同一个 lambda"的证据：
+		// 同一个宿主里换个体、换个返回值的 lambda 也会落在同一 SAM 上。所以等长时
+		// 必须有槽位证明，且不能是空捕获表（空表下槽位证明是空洞的）。
+		// 变少则不同：少了一个捕获本身就是要桥接的那类编辑，允许退回类型推断。
+		if (ni.captured.size() == oi.captured.size()) {
+			if (ni.captured.isEmpty()) return null;
+			if (bySlot == null) return null;
+			return bySlot;
+		}
+		return bySlot != null ? bySlot : mappingByType(oi.captured, ni.captured);
+	}
+
+	/**
+	 * 按宿主局部变量槽号证明映射（宿主描述符必须完全一致）。
+	 *
+	 * @return {@code 新形参下标 → 老形参下标}；槽号不可用或无解时 {@code null}
+	 */
+	private static int[] mappingBySlots(SyntheticInfo oi, SyntheticInfo ni) {
+		if (oi.captureSlots == null || ni.captureSlots == null) return null;
+		if (oi.captureSlots.size() != oi.captured.size()) return null;
+		if (ni.captureSlots.size() != ni.captured.size()) return null;
+		int n = oi.captured.size(), m = ni.captured.size();
+		if (m > n) return null;
+		int[] map = new int[m];
+		boolean[] used = new boolean[n];
+		for (int j = 0; j < m; j++) {
+			int only = -1;
+			for (int i = 0; i < n; i++) {
+				if (!oi.captureSlots.get(i).equals(ni.captureSlots.get(j))) continue;
+				if (!oi.captured.get(i).equals(ni.captured.get(j))) return null;   // 同槽换型：矛盾
+				if (only >= 0) return null;
+				only = i;
+			}
+			if (only < 0 || used[only]) return null;
+			used[only] = true;
+			map[j] = only;
+		}
+		return map;
+	}
+
+	/**
+	 * 按类型唯一性推断映射（退路）。每个新形参必须在旧捕获表里<b>恰好</b>命中一个同类型位置。
+	 *
+	 * @return {@code 新形参下标 → 老形参下标}；有歧义或无解时 {@code null}
+	 */
+	private static int[] mappingByType(List<String> oldL, List<String> newL) {
+		int n = oldL.size(), m = newL.size();
+		if (m > n) return null;
+		int[] map = new int[m];
+		boolean[] used = new boolean[n];
+		for (int j = 0; j < m; j++) {
+			int only = -1;
+			for (int i = 0; i < n; i++) {
+				if (!oldL.get(i).equals(newL.get(j))) continue;
+				if (only >= 0) return null;               // 同类型多个候选：歧义
+				only = i;
+			}
+			if (only < 0 || used[only]) return null;
+			used[only] = true;
+			map[j] = only;
+		}
+		return map;
+	}
+
+	/**
+	 * 布局自检：{@code 捕获表 ++ 实例化 SAM 形参} 必须恰好等于 impl 描述符。
+	 *
+	 * <p>成立就说明"捕获值前置、SAM 形参在后"不是假设而是每例现验的；不成立说明这个
+	 * 调用点的布局另有蹊跷（编译器版本差异、或根本不是 LambdaMetafactory 产生的），
+	 * 此时任何参数映射都是猜的。</p>
+	 *
+	 * <p><b>实例 lambda 的捕获表含接收者</b>：{@code () -> use(this.x)} 编译成
+	 * {@code aload_0; indy (LC;)LRunnable;}，而 impl 是 {@code private void lambda$f$0()}
+	 * ——接收者不在描述符里。所以非 static 时必须先剥掉第一个捕获再拼。</p>
+	 */
+	private static boolean layoutHolds(SyntheticInfo info) {
+		if (info.captured == null || info.instSig == null) return false;
+		List<String> caps = info.captured;
+		if (!info.isStatic()) {
+			if (caps.isEmpty()) return false;
+			caps = caps.subList(1, caps.size());
+		}
+		StringBuilder sb = new StringBuilder("(");
+		for (String c : caps) sb.append(c);
+		for (Type t : Type.getArgumentTypes(info.instSig)) sb.append(t.getDescriptor());
+		sb.append(')').append(Type.getReturnType(info.instSig).getDescriptor());
+		return sb.toString().equals(info.desc);
 	}
 
 	/**
@@ -3318,59 +3467,6 @@ public class LambdaAligner {
 		return paren < 0 ? hostKey : hostKey.substring(0, paren);
 	}
 
-	/**
-	 * 布局自检：{@code 捕获表 ++ 实例化 SAM 形参} 必须恰好等于 impl 描述符。
-	 *
-	 * <p>成立就说明"捕获值前置、SAM 形参在后"不是假设而是每例现验的；不成立说明这个
-	 * 调用点的布局另有蹊跷（编译器版本差异、或根本不是 LambdaMetafactory 产生的），
-	 * 此时任何参数映射都是猜的。</p>
-	 */
-	private static boolean layoutHolds(SyntheticInfo info) {
-		if (info.captured == null || info.instSig == null) return false;
-		StringBuilder sb = new StringBuilder("(");
-		for (String c : info.captured) sb.append(c);
-		for (Type t : Type.getArgumentTypes(info.instSig)) sb.append(t.getDescriptor());
-		sb.append(')').append(Type.getReturnType(info.instSig).getDescriptor());
-		return sb.toString().equals(info.desc);
-	}
-
-	/**
-	 * {@code newL} 是否是 {@code oldL} 的<b>唯一</b>子序列嵌入；是则返回
-	 * {@code 新形参下标 -> 老形参下标} 的映射，否则返回 {@code null}。
-	 *
-	 * <p>唯一性必须显式数一遍：{@code [int,int] → [int]} 有两种删法，任选其一都可能把
-	 * 另一个参数的值搬过去——那是静默错值，比不建桥糟糕得多。</p>
-	 */
-	private static int[] uniqueSubsequence(List<String> oldL, List<String> newL) {
-		int n = oldL.size(), m = newL.size();
-		if (m > n) return null;
-		int[][] cnt = new int[n + 1][m + 1];                     // 方案数，截断到 2
-		for (int i = 0; i <= n; i++) cnt[i][0] = 1;
-		for (int i = 1; i <= n; i++) {
-			for (int j = 1; j <= m; j++) {
-				int v = cnt[i - 1][j];
-				if (oldL.get(i - 1).equals(newL.get(j - 1))) v += cnt[i - 1][j - 1];
-				cnt[i][j] = Math.min(v, 2);
-			}
-		}
-		if (cnt[n][m] != 1) return null;
-		int[] map = new int[m];
-		int i = n, j = m;
-		while (j > 0) {
-			if (i <= 0) return null;                              // 理论上不可达
-			boolean take = oldL.get(i - 1).equals(newL.get(j - 1))
-			               && cnt[i - 1][j] == 0 && cnt[i - 1][j - 1] == 1;
-			if (take) {
-				map[j - 1] = i - 1;
-				i--;
-				j--;
-			} else {
-				i--;
-			}
-		}
-		return map;
-	}
-
 	/** 桥体：{@code [标记] [aload_0] 加载保留下来的老形参 → 调目标 → 返回}。 */
 	private static void injectBridgeBody(MethodVisitor mv, String className, boolean itf, BridgeSpec spec) {
 		mv.visitCode();
@@ -3387,8 +3483,17 @@ public class LambdaAligner {
 			slotOf[i] = slot;
 			slot += oldArgs[i].getSize();
 		}
-		for (int pi : spec.oldParamIndex) {
-			mv.visitVarInsn(oldArgs[pi].getOpcode(Opcodes.ILOAD), slotOf[pi]);
+		// 捕获表下标 → 描述符形参下标：实例 impl 的捕获表第 0 项是<b>接收者</b>
+		// （工厂描述符里是 LC;，impl 描述符里没有），而接收者已经由上面的 aload 0 压好了。
+		int first = spec.isStatic ? 0 : 1;
+		for (int j = first; j < spec.oldParamIndex.length; j++) {
+			int capIdx = spec.oldParamIndex[j];
+			int argIdx = capIdx - first;
+			if (argIdx < 0 || argIdx >= oldArgs.length) {
+				throw new IllegalStateException("bridge param mapping out of range: cap=" + capIdx
+					+ " desc=" + spec.oldDesc);
+			}
+			mv.visitVarInsn(oldArgs[argIdx].getOpcode(Opcodes.ILOAD), slotOf[argIdx]);
 		}
 		// itf 必须跟着宿主走：接口里的合成方法在常量池里是 InterfaceMethodref，
 		// 写成 false 会得到一条指向 Methodref 的调用指令，校验/解析直接失败。
@@ -4412,6 +4517,18 @@ public class LambdaAligner {
 
 		/** indy 工厂描述符的返回类型（功能接口的内部名）。 */
 		String fiType;
+
+		/**
+		 * 每个捕获实参在<b>宿主方法</b>里的局部变量槽号，与 {@link #captured} 下标对齐。
+		 *
+		 * <p>javac 把捕获按<b>首次引用顺序</b>排列，实参就是 indy 前面那串 {@code xLOAD}；
+		 * 回溯出来的槽号是"同一个变量"的直接证据，比"类型相同"硬得多。两侧宿主描述符
+		 * 完全一致时槽号可直接比较，于是映射能从"按类型猜"升级为"按槽位证"，连
+		 * "两个 int 里到底是哪一个"这种类型层面无解的歧义也能定下来。</p>
+		 *
+		 * <p>{@code null} 表示回溯失败（实参是临时值、或加载序列不规整），此时退回类型推断。</p>
+		 */
+		List<Integer> captureSlots;
 
 		/** {@code bsmArgs[0]}：SAM 的<b>擦除</b>签名。 */
 		String samSig;

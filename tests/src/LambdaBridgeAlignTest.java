@@ -210,6 +210,97 @@ public class LambdaBridgeAlignTest {
 	}
 
 	// ------------------------------------------------------------------------------------------------
+	// 重排与槽位证明
+	// ------------------------------------------------------------------------------------------------
+
+	/**
+	 * 只交换两个捕获的使用顺序：{@code a + b} → {@code b + a}。
+	 *
+	 * <p>javac 按<b>首次引用顺序</b>排列捕获，所以描述符从 {@code (String,int)} 变成
+	 * {@code (int,String)}。旧值集合完全一样，只是位置换了——这类编辑此前会被
+	 * "新捕获表必须是旧表的子序列"判否，退化成幽灵桩（void 回调静默 no-op）。</p>
+	 */
+	@Test
+	void reorderOnlyEditIsBridgedWithReorderedLoads(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_TWO_CAPTURES).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_SWAPPED_USE).resolve("B.class"));
+
+		assertNotNull(byKey(parse(v1), "lambda$f$0", "(Ljava/lang/String;I)V"), "夹具前提：v1 捕获顺序 (String,int)");
+		assertNotNull(byKey(parse(v2), "lambda$f$0", "(ILjava/lang/String;)V"), "夹具前提：v2 捕获顺序 (int,String)");
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode bridge = byKey(out, "lambda$f$0", "(Ljava/lang/String;I)V");
+		assertNotNull(bridge, "重排也必须建桥：" + table(out));
+		assertFalse(containsCall(bridge, "onOrphanInvoked"), "不能退化成幽灵桩");
+
+		// 老实例按 (String,int) 调用；新方法要 (int,String)，所以先压 int（老槽 1）再压 String（老槽 0）。
+		List<AbstractInsnNode> loads = loadsOf(bridge);
+		assertEquals(2, loads.size(), "桥必须恰好加载两个形参");
+		assertLoad(loads.get(0), Opcodes.ILOAD, 1, "第一个压栈的必须是 int（新方法的第 0 个形参）");
+		assertLoad(loads.get(1), Opcodes.ALOAD, 0, "第二个压栈的必须是 String（新方法的第 1 个形参）");
+
+		MethodInsnNode call = onlyCoreCall(bridge);
+		assertEquals("(ILjava/lang/String;)V", call.desc, "转发目标用 v2 的描述符");
+		assertEquals(1, LambdaAligner.LAST_RESULT.bridgeCount);
+	}
+
+	/**
+	 * 两个同类型捕获里只留下一个：类型层面无解（{@code [int,int] → [int]} 有两种删法），
+	 * 但宿主描述符没变 ⇒ 槽号可比 ⇒ 能<b>证明</b>留下的是哪一个。
+	 */
+	@Test
+	void slotIdentityResolvesSameTypeAmbiguity(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_TWO_INTS).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ONE_INT_SAME_HOST).resolve("B.class"));
+
+		assertNotNull(byKey(parse(v1), "lambda$f$0", "(II)V"), "夹具前提：v1 捕获 (int,int)");
+		assertNotNull(byKey(parse(v2), "lambda$f$0", "(I)V"), "夹具前提：v2 只捕获第二个 int");
+		assertEquals(byKey(parse(v1), "f", "(II)V") != null, byKey(parse(v2), "f", "(II)V") != null,
+			"夹具前提：宿主描述符不变，槽号才可比");
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode bridge = byKey(out, "lambda$f$0", "(II)V");
+		assertNotNull(bridge, "槽号证明成立时必须建桥（类型推断在这里是无解的）：" + table(out));
+		assertFalse(containsCall(bridge, "onOrphanInvoked"));
+
+		// 留下的那个 int 是宿主槽 1（变量 b），所以桥必须加载槽 1 而不是槽 0。
+		List<AbstractInsnNode> loads = loadsOf(bridge);
+		assertEquals(1, loads.size(), "桥只该加载一个形参");
+		assertLoad(loads.get(0), Opcodes.ILOAD, 1, "必须加载宿主槽 1（b），不能按位置取槽 0（a）");
+		assertEquals("(I)V", onlyCoreCall(bridge).desc);
+	}
+
+	/**
+	 * 实例 lambda：工厂描述符里带接收者（{@code LC;}），而 impl 是实例方法、描述符里不含它。
+	 * 布局自检必须先剥掉第一个捕获才能成立，否则实例 lambda 永远建不出桥。
+	 */
+	@Test
+	void instanceLambdaKeepsItsReceiverOutOfTheDescriptor(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_INSTANCE).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_INSTANCE).resolve("B.class"));
+
+		assertNotNull(byKey(parse(v1), "lambda$d$0", "(Ljava/lang/String;I)V"), "夹具前提：实例 impl 不含接收者");
+		assertNotNull(byKey(parse(v2), "lambda$d$0", "(I)V"), "夹具前提：删掉 String 捕获");
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode bridge = byKey(out, "lambda$d$0", "(Ljava/lang/String;I)V");
+		assertNotNull(bridge, "实例 lambda 也要能建桥：" + table(out));
+		assertEquals(0, (bridge.access & Opcodes.ACC_STATIC), "桥必须跟着目标保持实例方法");
+		assertTrue(containsCall(bridge, "onBridgeInvoked"));
+
+		// 实例方法的形参从槽 1 起：String 在 1、int 在 2；转发给 (I)V 只压 int（槽 2），
+		// 接收者用 aload 0。
+		List<AbstractInsnNode> loads = loadsOf(bridge);
+		assertLoad(loads.get(0), Opcodes.ALOAD, 0, "先压接收者");
+		assertLoad(loads.get(1), Opcodes.ILOAD, 2, "再压活下来的 int（老槽 2）");
+		assertEquals("(I)V", onlyCoreCall(bridge).desc);
+		assertEquals(Opcodes.INVOKESPECIAL, onlyCoreCall(bridge).getOpcode(), "私有实例方法用 INVOKESPECIAL 转发");
+	}
+
+	// ------------------------------------------------------------------------------------------------
 	// 熔断豁免：桥必须能在受熔断器保护的调用者面前活下来
 	// ------------------------------------------------------------------------------------------------
 
@@ -326,6 +417,42 @@ public class LambdaBridgeAlignTest {
 		}
 		""";
 
+	/** 只交换使用顺序：{@code a + b} → {@code b + a}，捕获顺序随之变成 (int,String)。 */
+	static final String V2_SWAPPED_USE = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(String s, int k) { r = () -> last = k + s; }
+		}
+		""";
+
+	/** 宿主描述符不变、只留第二个 int：类型推断无解，槽号可证。 */
+	static final String V2_ONE_INT_SAME_HOST = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(int a, int b) { r = () -> last = "v2:" + b; }
+		}
+		""";
+
+	/** 实例 lambda：捕获表里带接收者，impl 是实例方法。 */
+	static final String V1_INSTANCE = """
+		public class B {
+		    public Runnable r;
+		    public String   last = "";
+		    public void d(String s, int k) { r = () -> last = s + k + this; }
+		}
+		""";
+
+	/** 实例 lambda + 删掉 String 捕获。 */
+	static final String V2_INSTANCE = """
+		public class B {
+		    public Runnable r;
+		    public String   last = "";
+		    public void d(int k) { r = () -> last = "v2:" + k + this; }
+		}
+		""";
+
 	// ------------------------------------------------------------------------------------------------
 	// 工具
 	// ------------------------------------------------------------------------------------------------
@@ -368,6 +495,24 @@ public class LambdaBridgeAlignTest {
 			if (i instanceof VarInsnNode v && v.getOpcode() == opcode && v.var == slot) return true;
 		}
 		return false;
+	}
+
+	/** 方法体里所有变量加载指令（按出现顺序）。 */
+	static List<AbstractInsnNode> loadsOf(MethodNode mn) {
+		List<AbstractInsnNode> out = new ArrayList<>();
+		for (AbstractInsnNode i : mn.instructions) {
+			if (!(i instanceof VarInsnNode v)) continue;
+			int op = v.getOpcode();
+			if (op >= Opcodes.ILOAD && op <= Opcodes.ALOAD) out.add(i);
+		}
+		return out;
+	}
+
+	static void assertLoad(AbstractInsnNode insn, int opcode, int slot, String msg) {
+		assertTrue(insn instanceof VarInsnNode, msg + "（不是变量加载指令）");
+		VarInsnNode v = (VarInsnNode) insn;
+		assertEquals(opcode, v.getOpcode(), msg + "（opcode）");
+		assertEquals(slot, v.var, msg + "（槽号）");
 	}
 
 	static boolean containsCall(MethodNode mn, String name) {

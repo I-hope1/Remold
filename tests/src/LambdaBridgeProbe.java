@@ -100,6 +100,9 @@ public class LambdaBridgeProbe {
 
 			// 5. 端到端：把对齐器的产物 redefine 进去，老实例必须继续工作。
 			bridgeEndToEnd(inst, javac, tempDir);
+
+			// 6. 端到端（实例 lambda）：桥本身是实例方法，转发走 INVOKESPECIAL。
+			bridgeEndToEndInstance(inst, javac, tempDir);
 		} finally {
 			deleteRecursively(tempDir);
 		}
@@ -224,10 +227,48 @@ public class LambdaBridgeProbe {
 		}
 	}
 
+	/**
+	 * 端到端（实例 lambda）：{@code () -> use(this.x)} 编译成实例 impl，捕获表里带接收者，
+	 * 而 impl 描述符里没有它。桥必须跟着做实例方法，转发走 {@code INVOKESPECIAL}。
+	 */
+	static void bridgeEndToEndInstance(Instrumentation inst, String javac, File base) throws Exception {
+		System.out.println("\n--- [bridge-end-to-end-instance] 实例 lambda ---");
+		File work = new File(base, "e2e-inst");
+		File outV1 = compile(javac, work, "v1", V1_INSTANCE);
+		File outV2 = compile(javac, work, "v2", V2_INSTANCE);
+		byte[] v1 = Files.readAllBytes(new File(outV1, "lam/Host.class").toPath());
+		byte[] v2 = Files.readAllBytes(new File(outV2, "lam/Host.class").toPath());
+
+		byte[] aligned = LambdaAligner.align(v1, v2);
+		System.out.println("   对齐器建桥数 = " + LambdaAligner.LAST_RESULT.bridgeCount);
+		check(LambdaAligner.LAST_RESULT.bridgeCount == 1, "前提：实例 lambda 也要建出桥");
+
+		URLClassLoader cl = new URLClassLoader(
+			new URL[]{outV1.toURI().toURL()}, LambdaBridgeProbe.class.getClassLoader());
+		try {
+			Class<?> host = Class.forName("lam.Host", true, cl);
+			Object self = host.getDeclaredConstructor().newInstance();
+			host.getDeclaredMethod("d", String.class, int.class).invoke(self, "A", 1);
+
+			Runnable old = cached(host);
+			check(invoke(old).equals("ok") && "A17".equals(last(host)),
+			      "前提：redefine 前老实例跑的是 v1 方法体（last=" + last(host) + "）");
+
+			inst.redefineClasses(new ClassDefinition(host, aligned));
+
+			String after = invoke(old);
+			String lastAfter = last(host);
+			System.out.println("   redefine 后同一实例调用 -> " + after + "（last=" + lastAfter + "）");
+			check(after.equals("ok"), "实例 lambda 建桥后老实例必须继续可调用（实测 " + after + "）");
+			check("v2:17".equals(lastAfter), "必须执行新方法体（last=" + lastAfter + "，期望 v2:17）");
+		} finally {
+			cl.close();
+		}
+	}
+
 	// ------------------------------------------------------------------------------------------------
 	// 夹具：捕获表变化 + 方法体变化
-	// ------------------------------------------------------------------------------------------------
-	/** v1：两个捕获（String, int）→ {@code lambda$install$0(Ljava/lang/String;I)V}。 */
+	// ------------------------------------------------------------------------------------------------	/** v1：两个捕获（String, int）→ {@code lambda$install$0(Ljava/lang/String;I)V}。 */
 	static final String V1_TWO_CAPTURES = """
 		package lam;
 		public class Host {
@@ -272,6 +313,28 @@ public class LambdaBridgeProbe {
 		    public static void install(String s, int k) {
 		        cached = () -> last = "v2:" + s + k;
 		    }
+		}
+		""";
+
+	/** 实例 lambda：捕获表里带接收者，impl 是实例方法。 */
+	static final String V1_INSTANCE = """
+		package lam;
+		public class Host {
+		    public static Runnable cached;
+		    public static String   last = "";
+		    public int tag = 7;
+		    public void d(String s, int k) { cached = () -> last = s + k + tag; }
+		}
+		""";
+
+	/** 实例 lambda + 删掉 String 捕获。 */
+	static final String V2_INSTANCE = """
+		package lam;
+		public class Host {
+		    public static Runnable cached;
+		    public static String   last = "";
+		    public int tag = 7;
+		    public void d(int k) { cached = () -> last = "v2:" + k + tag; }
 		}
 		""";
 

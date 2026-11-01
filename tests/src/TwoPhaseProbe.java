@@ -701,9 +701,10 @@ public class TwoPhaseProbe {
 		outDir.mkdirs();
 		File f = new File(srcDir, fileName);
 		Files.writeString(f.toPath(), source);
-		runCmd(javac, "-nowarn", "-encoding", "UTF-8",
+		// 夹具必须编成当前运行时能加载的版本，否则在 JBR 17 上会先抛 UnsupportedClassVersionError。
+		runCmd(ProbeJavac.command(javac, "-nowarn", "-encoding", "UTF-8",
 		       "-cp", outDir.getAbsolutePath(),
-		       "-d", outDir.getAbsolutePath(), f.getAbsolutePath());
+		       "-d", outDir.getAbsolutePath(), f.getAbsolutePath()));
 		return outDir;
 	}
 

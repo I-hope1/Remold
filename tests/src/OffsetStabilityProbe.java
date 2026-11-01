@@ -1222,15 +1222,12 @@ public class OffsetStabilityProbe {
 		File outDir = new File(workDir, "out");
 		srcDir.mkdirs();
 		outDir.mkdirs();
-		List<String> cmd = new ArrayList<>();
-		cmd.add(javac);
-		cmd.add("-nowarn");
-		cmd.add("-encoding");
-		cmd.add("UTF-8");
-		cmd.add("-cp");
-		cmd.add(outDir.getAbsolutePath());
-		cmd.add("-d");
-		cmd.add(outDir.getAbsolutePath());
+		// 夹具必须编成当前运行时能加载的版本（见 ProbeJavac），否则在低版本运行时上先抛
+		// UnsupportedClassVersionError，跟被测的偏移稳定性毫无关系。
+		List<String> cmd = new ArrayList<>(Arrays.asList(
+			ProbeJavac.command(javac, "-nowarn", "-encoding", "UTF-8",
+			                   "-cp", outDir.getAbsolutePath(),
+			                   "-d", outDir.getAbsolutePath())));
 		for (Map.Entry<String, String> e : sources.entrySet()) {
 			File f = new File(srcDir, e.getKey());
 			Files.writeString(f.toPath(), e.getValue());

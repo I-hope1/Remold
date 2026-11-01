@@ -1478,9 +1478,10 @@ public class P05Probe {
 		// 输出目录必须在 classpath 上：多文件夹具要互相引用（B 编译时引用 A 的字段）。
 		String cp = outDir.getAbsolutePath();
 		if (extraCp != null) cp = cp + File.pathSeparator + extraCp.getAbsolutePath();
-		runCmd(javac, "-nowarn", "-encoding", "UTF-8",
+		// 夹具必须编成当前运行时能加载的版本，否则在 JBR 17 上会先抛 UnsupportedClassVersionError。
+		runCmd(ProbeJavac.command(javac, "-nowarn", "-encoding", "UTF-8",
 		       "-cp", cp,
-		       "-d", outDir.getAbsolutePath(), f.getAbsolutePath());
+		       "-d", outDir.getAbsolutePath(), f.getAbsolutePath()));
 		return outDir;
 	}
 

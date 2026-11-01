@@ -1,0 +1,143 @@
+# Lambda 捕获桥（单向）
+
+> **实现状态与验收证据**：本文件只定义规格与判据。当前落地情况、测试矩阵与已知边界见
+> [`docs/status.md`](../status.md) 的管辖范围声明与 `LambdaBridgeAlignTest` / `LambdaBridgeProbe`。
+
+---
+
+## 1. 问题
+
+lambda 实例是 `LambdaMetafactory` 在首次调用时现场 spin 出来的隐藏类，它<b>不复制</b>方法体，
+而是在常量池里钉一条 `Methodref Host.lambda$f$0(<旧形参表>)V`，每次调用转发回宿主类。
+
+删掉一个捕获变量后，javac 会**复用同一个编号**、把描述符缩水：
+`lambda$f$0(Ljava/lang/String;I)V` → `lambda$f$0(I)V`。
+
+`LambdaBridgeProbe` 实测（JBR 21）：redefine 之后老实例再调用，抛
+
+```
+NoSuchMethodError: 'void lam.Host.lambda$install$0(java.lang.String, int)'
+```
+
+报错文本里带的是**旧描述符**，说明解析键确实是 `name + descriptor`（JVMS 5.4.3.2），
+VM 不会按名字错配到同名的新方法上；且异常抛在调用点之前，旧方法体一次都没跑。
+对照组（捕获表不动、只改方法体）照常工作。
+
+对齐器此前只能给这个旧键注入幽灵桩——对 `void` 回调而言就是"点了没反应"。
+捕获桥把这种静默降级换成一次真正的转发。
+
+---
+
+## 2. 边界：只支持"删除捕获变量"
+
+**删除方向可证**：新描述符的形参表是旧形参表的<b>子序列</b>，被删掉的槽位在新方法体里
+物理上不存在（验证器保证读不到）。桥做的是"丢弃一个新代码永远不会读的值"——不是伪造值，
+也没有任何写入。
+
+**新增方向不可证**：老实例里没有那个值，桥只能编一个 `0` / `null` 填进去，而新方法体
+很可能真读它。这是静默写入假值，违反"宁可漏补，不可静默写入过期值"，一律拒绝。
+
+**明确不覆盖**（各有专门机制或本来就是缺口，不要在这里兜）：
+
+| 形态 | 处理 |
+|:--|:--|
+| `static` 位翻转（`this` 隐式捕获 ↔ 显式形参） | 交给 `normalizeStaticShape`；两轴同时变则拒绝 |
+| 功能接口 / SAM 变更 | 拒绝。老实例对象本身还绑在旧接口上，桥接 impl 救不了 |
+| 宿主本身是 lambda（`hostKey` 以 `L:` 开头） | 不放松宿主门。父的票据哈希变了说明父自己也没配上，此时谈"同一个宿主"只是猜 |
+| 目标方法被改名 | 支持：桥每轮重生成，目标取本轮配对结果 |
+| 目标方法消失 | 退回幽灵桩 |
+| 桥的桥（连续两轮各删一个捕获） | 支持：识别后按本轮配对重新指向，链式不累积 |
+
+---
+
+## 3. 判定：三道门 + 布局自检
+
+对每一个"没配上对、且新类里没有同键"的老 lambda，在<b>未配对的新 lambda</b> 中找候选：
+
+| 门 | 判据 | 不成立时 |
+|:--|:--|:--|
+| **SAM 不变** | 工厂描述符返回类型（功能接口）、`bsmArgs[0]`（擦除 SAM）、`bsmArgs[2]`（实例化 SAM）三者相等 | 拒绝 |
+| **宿主相同** | `M:` 键只比<b>方法名</b>（被删的捕获往往就是宿主形参，宿主描述符必然跟着变）；`L:` 键要求整个键相等 | 拒绝 |
+| **映射唯一** | 新捕获表必须是老捕获表的<b>唯一</b>子序列嵌入（显式数方案数，截断到 2） | 拒绝 |
+
+外加两条前置：
+
+- **布局自检**：`捕获表 ++ 实例化 SAM 形参` 必须<b>恰好等于</b> impl 描述符。这条等式让
+  "捕获值前置、SAM 形参在后"从假设变成每例现验。注意必须用 `bsmArgs[2]`（实例化签名）
+  而不是 `bsmArgs[0]`：泛型接口的 SAM 是擦除后的，`Consumer<String>` 的 `bsmArgs[0]`
+  是 `(Ljava/lang/Object;)V`，拼不出 impl 描述符。
+- **1:1 唯一**：一个老键命中多个候选 → 拒绝；一个候选被多个老键命中 → 全部拒绝。
+
+任一条不成立，退回原有的幽灵桩路径（行为与引入本机制前完全一致）。
+
+---
+
+## 4. 产物形态
+
+桥**不参与改名**：新方法保留自己的名字，桥占用旧键。两者描述符必然不同，可以共存
+（javac 复用编号时两者同名不同描述符，这也是合法的）。
+
+```text
+lambda$f$0(Ljava/lang/String;I)V      ← 桥（旧键，转发）
+    LDC        "Host#lambda$f$0(Ljava/lang/String;I)V -> lambda$f$0(I)V"
+    INVOKESTATIC remold/LambdaAligner.onBridgeInvoked(Ljava/lang/String;)V
+    ILOAD      1                      ← 只加载活下来的那个形参（槽 0 的 String 被丢弃）
+    INVOKESTATIC Host.lambda$f$0(I)V  ← 目标；实例方法用 INVOKESPECIAL
+    RETURN
+
+lambda$f$0(I)V                        ← 新方法体，原样保留
+```
+
+无分支、无 `Label`，因此不需要 `StackMapTable`，与既有空壳桩的设计一致。
+
+---
+
+## 5. 多轮身份（最容易踩的坑）
+
+桥的键在新版本里<b>天然没有对应物</b>，若下一轮认不出它，它会被当成"又被删了一次"重新
+幽灵化——第一轮的成果当场作废。所以：
+
+1. **识别**：`isBridgeMethod` 看开头两条指令（`LDC` + `INVOKESTATIC onBridgeInvoked`）。
+   刻意用独立的方法名，与幽灵桩的两条前缀形态（3 指令带 `ICONST`、2 指令 1 参重载）
+   天然不冲突。
+2. **解析**：`getBridgeDelegate` 允许<b>跳过形参槽位</b>（子序列加载）。不能复用
+   `getPureDelegate`——它要求"每个形参按槽位顺序恰好加载一次"，跳槽位的桥在它眼里
+   就是 `null`，直接退化成死幽灵。这条放宽<b>只作用于带桥标记的方法</b>，不影响
+   `getPureDelegate` 对普通 lambda 的严格性（那份严格性是 `wasForwarding` 可信的前提）。
+3. **重生成**：目标取本轮配对结果（`旧目标键 → findNewForOld → 新方法`），而不是沿用
+   旧桥体。这样 `ctx.renameMap` 改名天然跟上，不需要额外维护映射。
+4. **目标消失** → 不生成桥，退回幽灵桩。
+
+由此派生出三条"桥不是 lambda 体"的推论，缺一条都会破坏配对：
+
+- `putNameIndex`：桥与它指向的目标同名不同描述符（javac 复用编号），按名字索引时
+  **必须让真 lambda 体压过桥**；
+- `children`：桥不登记子 lambda。否则桥体内那条 `INVOKESTATIC` 会让目标平白多出一个
+  永远配不上对的父，把 `hasUnmatchedChild` 卡死；
+- 兜底遍历（leftovers）：跳过桥，并按 `name + desc` 精确解析（按名字会取到对方，
+  把目标方法的 `hostKey` 改写成 `L:<桥的哈希>`）。
+
+---
+
+## 6. 熔断豁免
+
+`onOrphanInvoked` 在 `SMART_ADAPTIVE` 下<b>先</b>判 `isOrphanBreakerTriggered()`、<b>后</b>看
+`willForward`。桥若复用这个入口，挂在 UI / 定时器熔断器上的回调会在转发<b>之前</b>被直接
+炸断，桥等于白建。
+
+所以桥走独立入口 `onBridgeInvoked(String)`，<b>永不查询熔断器</b>：桥按构造就不是死孤儿
+——它的目标方法存在，且被三道门证明过兼容。该入口只做去重日志。
+
+> 附带记录：现有 `willForward` 转发桩同样会被熔断器先炸，看起来是独立缺陷（转发桩的目标
+> 是活的，不该触发熔断）。改它要动 `MethodRefForwardTest` 已编码的语义，应单独立决策记录，
+> 不要顺手塞进本机制。
+
+---
+
+## 7. 判定力
+
+- `LambdaBridgeAlignTest`（对齐期，不需要 DCEVM）：正向建桥 / 第二轮保持并重指向 /
+  新增捕获拒绝 / 捕获类型变化拒绝 / 重复类型歧义拒绝 / SAM 变化拒绝 / 目标消失退化为幽灵 /
+  熔断豁免对照。
+- `LambdaBridgeProbe`（运行时，需要 DCEVM）：`./gradlew :tests:lambdaBridgeProbe -Pp05.jbr=<dcevm-jdk>`，
+  实测老实例在删除/新增捕获后的真实失败形态，含"捕获表不动"的对照组。

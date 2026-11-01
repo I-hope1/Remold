@@ -60,7 +60,7 @@ public class AnonClassTest {
 			}
 		};
 
-		LambdaAligner.LAST_STATS = null;
+		LambdaAligner.LAST_RESULT = null;
 		byte[] aligned = LambdaAligner.align(v1, v2, oldResolver, newResolver);
 
 		assertNotNull(aligned, "aligned 产物非空");

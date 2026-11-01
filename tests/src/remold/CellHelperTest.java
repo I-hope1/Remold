@@ -696,11 +696,13 @@ class CellHelperTest {
 			"lambda$build$1:()V", List.of()
 		);
 
-		Map<String, String> prevMapping = LambdaAligner.LAST_METHOD_MAPPING;
-		String prevClass = LambdaAligner.LAST_ALIGNED_CLASS;
+		// 存/取整个快照：早先要分别保存 mapping 与 class 两个字段，漏存一个就会污染后续用例。
+		LambdaAligner.AlignmentResult prev = LambdaAligner.LAST_RESULT;
 		try {
-			LambdaAligner.LAST_METHOD_MAPPING = Map.of("lambda$build$0:()V", "lambda$build$1:()V");
-			LambdaAligner.LAST_ALIGNED_CLASS = "TargetHost";
+			LambdaAligner.LAST_RESULT = LambdaAligner.AlignmentResult.builder()
+				.methodMapping(Map.of("lambda$build$0:()V", "lambda$build$1:()V"))
+				.alignedClass("TargetHost")
+				.build();
 
 			// Class matches TargetHost -> mapping is used
 			Map<String, String> resMatch = (Map<String, String>) matchM.invoke(null, "TargetHost", oldM, newM);
@@ -710,8 +712,7 @@ class CellHelperTest {
 			Map<String, String> resDiff = (Map<String, String>) matchM.invoke(null, "OtherHost", oldM, newM);
 			assertNull(resDiff.get("lambda$build$0:()V"));
 		} finally {
-			LambdaAligner.LAST_METHOD_MAPPING = prevMapping;
-			LambdaAligner.LAST_ALIGNED_CLASS = prevClass;
+			LambdaAligner.LAST_RESULT = prev;
 		}
 	}
 

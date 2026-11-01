@@ -57,7 +57,7 @@ public class LineNumberDifferentialTest {
 	@AfterEach
 	void resetState() {
 		LambdaAligner.TEST_REVERSE_GROUP_ORDER = false;
-		LambdaAligner.LAST_STATS = null;
+		LambdaAligner.LAST_RESULT = null;
 		LambdaAligner.ACTIVE_MUTATION = "";
 		LambdaAligner.clearLoggedWarnings();
 	}

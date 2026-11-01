@@ -229,46 +229,113 @@ public class LambdaAligner {
 		}
 	}
 
-	/** 仅供单线程测试断言读取的最近一次对齐统计。测试调用前请先置 null。 */
-	public static volatile AlignmentStats    LAST_STATS;
+	/**
+	 * 一次 {@link #align} 的结果快照。
+	 *
+	 * <p><b>为什么收成一个对象</b>：早先这些信息散在十个 {@code volatile} 静态字段里，读者
+	 * 逐个读，读到的可能是<b>不同轮次</b>的拼接——{@code CellPropertyRef} 就同时读
+	 * {@link #methodMapping} 与 {@link #alignedClass} 并比较两者是否自洽，两个独立字段之间
+	 * 没有任何顺序保证，热更期间一旦插进另一轮对齐，比较的就是跨轮的结论。
+	 * 收成不可变对象后只有<b>一次</b> volatile 读，快照天然一致。</p>
+	 *
+	 * <p>空值语义分两种，不要混：{@link #inventedNames} 永远非 {@code null}（空集即"没有自造名"，
+	 * 调用方会直接把它喂回下一轮）；而 {@link #stats}、{@link #oldAnonHashes}、
+	 * {@link #newAnonHashes}、{@link #methodMapping}、{@link #alignedClass} 在
+	 * <b>本轮没有产出结论</b>时保持 {@code null}——"没算"和"算出来是空"是两件事，
+	 * 后者用空集合表达，前者必须能被区分。</p>
+	 */
+	public static final class AlignmentResult {
+		/** 配对统计；{@code null} 表示本轮对齐失败（或压根没跑）。 */
+		public final AlignmentStats stats;
+		/** 产物里仍然存在的"由对齐器自造的名字"。非 null。 */
+		public final Set<String> inventedNames;
+		/** 输入快照：旧/新字节的长度与内容哈希。 */
+		public final int  oldLen, newLen;
+		public final long oldHash, newHash;
+		/** 旧/新两侧的匿名类内容哈希；未解析时为 null。 */
+		public final Map<String, Long> oldAnonHashes, newAnonHashes;
+		/** {@code oldName:oldDesc -> newName:newDesc}；无映射时为 null。 */
+		public final Map<String, String> methodMapping;
+		/** 本轮对齐的类名（内部名）；未对齐时为 null。 */
+		public final String alignedClass;
+		/** 本轮生成的捕获桥数量。 */
+		public final int bridgeCount;
+
+		private AlignmentResult(Builder b) {
+			this.stats = b.stats;
+			this.inventedNames = b.inventedNames == null ? Set.of() : Set.copyOf(b.inventedNames);
+			this.oldLen = b.oldLen;
+			this.newLen = b.newLen;
+			this.oldHash = b.oldHash;
+			this.newHash = b.newHash;
+			this.oldAnonHashes = b.oldAnonHashes;
+			this.newAnonHashes = b.newAnonHashes;
+			this.methodMapping = b.methodMapping;
+			this.alignedClass = b.alignedClass;
+			this.bridgeCount = b.bridgeCount;
+		}
+
+		public static Builder builder() {
+			return new Builder();
+		}
+
+		/**
+		 * 只带输入快照的结果：{@code align} 提前返回（旧字节为空）或失败时用。
+		 *
+		 * <p>{@link #stats} 为 {@code null}，调用方据此区分"没跑完"与"跑了但没配到"。
+		 * 两种情况在这里不细分——从调用方视角它们都意味着"本轮没有可用的对齐结论"。</p>
+		 */
+		static AlignmentResult empty(int oldLen, int newLen, long oldHash, long newHash) {
+			return builder().input(oldLen, newLen, oldHash, newHash).build();
+		}
+
+		public static final class Builder {
+			private AlignmentStats stats;
+			private Set<String> inventedNames;
+			private int  oldLen = -1, newLen = -1;
+			private long oldHash, newHash;
+			private Map<String, Long> oldAnonHashes, newAnonHashes;
+			private Map<String, String> methodMapping;
+			private String alignedClass;
+			private int bridgeCount;
+
+			public Builder stats(AlignmentStats v)            { this.stats = v; return this; }
+			public Builder inventedNames(Set<String> v)       { this.inventedNames = v; return this; }
+			public Builder input(int ol, int nl, long oh, long nh) {
+				this.oldLen = ol; this.newLen = nl; this.oldHash = oh; this.newHash = nh; return this;
+			}
+			public Builder anonHashes(Map<String, Long> old, Map<String, Long> neu) {
+				this.oldAnonHashes = old; this.newAnonHashes = neu; return this;
+			}
+			public Builder methodMapping(Map<String, String> v) { this.methodMapping = v; return this; }
+			public Builder alignedClass(String v)               { this.alignedClass = v; return this; }
+			public Builder bridgeCount(int v)                   { this.bridgeCount = v; return this; }
+
+			public AlignmentResult build() { return new AlignmentResult(this); }
+		}
+
+		@Override
+		public String toString() {
+			return "AlignmentResult{" + alignedClass
+			       + ", old=" + oldLen + "B/" + Long.toHexString(oldHash)
+			       + ", new=" + newLen + "B/" + Long.toHexString(newHash)
+			       + ", bridges=" + bridgeCount
+			       + ", stats=" + stats + "}";
+		}
+	}
 
 	/**
-	 * 最近一次 {@link #align} 生成了多少个捕获桥（0 = 没有捕获表缩水的 lambda）。
+	 * 最近一次 {@link #align} 的结果。<b>每次对齐只写一次</b>（单次 volatile 发布），
+	 * 读者拿到的永远是同一轮的完整快照。
 	 *
-	 * <p>桥不参与配对计数，所以 {@link AlignmentStats} 里没有它的位置；但"旧 lambda 要么
-	 * 配对、要么幽灵、要么建桥"这条账必须能平，故单独暴露一个计数。</p>
-	 */
-	public static volatile int LAST_BRIDGE_COUNT;
-
-	/**
-	 * 最近一次 {@link #align} 之后，类里仍然存在的"由对齐器自造的名字"集合。
+	 * <p>调用方（agent）必须把 {@link AlignmentResult#inventedNames} 存起来，并在下一轮作为
+	 * {@code inventedOldNames} 传回去。不传的后果见 {@link #align(byte[], byte[],
+	 * java.util.function.Function, java.util.function.Function, java.util.Set)} 的说明：
+	 * 自造名会被误当成 javac 原名，让"同名优先"把老 CallSite 绑到别的 lambda 上。</p>
 	 *
-	 * <p>调用方（agent）必须把它存起来，并在下一轮作为 {@code inventedOldNames} 传回去。
-	 * 不传的后果见 {@link #align(byte[], byte[], java.util.function.Function,
-	 * java.util.function.Function, java.util.Set)} 的说明：自造名会被误当成 javac 原名，
-	 * 让"同名优先"把老 CallSite 绑到别的 lambda 上。</p>
+	 * <p>{@code null} 表示"本轮还没跑过"（进程刚起，或测试显式清空以检测是否记录）。</p>
 	 */
-	public static volatile java.util.Set<String> LAST_INVENTED_NAMES = java.util.Set.of();
-
-	/**
-	 * 最近一次 {@link #align} 的输入快照（长度与内容哈希），供 agent 调用路径的回归探针断言。
-	 *
-	 * <p>存在理由：{@code align} 本身的行为有大量单测覆盖，但"agent 传进来的是什么"没有——
-	 * 曾出现过旧基线被本轮新字节覆盖、{@code align(old == new)} 静默不做事，
-	 * 而 339 个用例全绿的情况（见 {@code docs/initfix/08-test-audit.md} §10.5）。</p>
-	 */
-	public static volatile int  LAST_ALIGN_OLD_LEN  = -1;
-	public static volatile int  LAST_ALIGN_NEW_LEN  = -1;
-	public static volatile long LAST_ALIGN_OLD_HASH = 0L;
-	public static volatile long LAST_ALIGN_NEW_HASH = 0L;
-	public static volatile Map<String, Long> LAST_OLD_ANON_HASHES;
-	public static volatile Map<String, Long> LAST_NEW_ANON_HASHES;
-	/**
-	 * 最近一次 align 的方法映射表（oldName:oldDesc -> newName:newDesc）。
-	 * 供 CellPropertyRef 等 UI 追踪系统共享对齐结论。
-	 */
-	public static volatile Map<String, String> LAST_METHOD_MAPPING;
-	public static volatile String              LAST_ALIGNED_CLASS;
+	public static volatile AlignmentResult LAST_RESULT;
 
 	/**
 	 * 诊断开关：打开后打印配对决策的细节（谁在哪个阶段拿了哪个旧名字）。
@@ -421,7 +488,7 @@ public class LambdaAligner {
 		 */
 		java.util.Set<String> inventedOldNames = java.util.Set.of();
 
-		/** 本轮新分配的自造名，用于计算 {@link #LAST_INVENTED_NAMES}。 */
+		/** 本轮新分配的自造名，用于计算 {@link AlignmentResult#inventedNames}。 */
 		final Set<String> newlyInvented = new HashSet<>(8);
 
 		/**
@@ -577,14 +644,13 @@ public class LambdaAligner {
 	                           java.util.function.Function<String, byte[]> oldBytecodeResolver,
 	                           java.util.function.Function<String, byte[]> newBytecodeResolver,
 	                           java.util.Set<String> inventedOldNames) {
-		LAST_ALIGN_OLD_LEN = oldBytes == null ? -1 : oldBytes.length;
-		LAST_ALIGN_NEW_LEN = newBytes == null ? -1 : newBytes.length;
-		LAST_ALIGN_OLD_HASH = oldBytes == null ? 0 : java.util.Arrays.hashCode(oldBytes);
-		LAST_ALIGN_NEW_HASH = newBytes == null ? 0 : java.util.Arrays.hashCode(newBytes);
-		// 先清空：下面有"旧字节为空直接返回"的早退路径，不清会让调用方读到上一轮的值，
+		int  oldLen  = oldBytes == null ? -1 : oldBytes.length;
+		int  newLen  = newBytes == null ? -1 : newBytes.length;
+		long oldHash = oldBytes == null ? 0 : java.util.Arrays.hashCode(oldBytes);
+		long newHash = newBytes == null ? 0 : java.util.Arrays.hashCode(newBytes);
+		// 先发布空结果：下面有"旧字节为空直接返回"的早退路径，不发布会让调用方读到上一轮的值，
 		// 把 A 类的自造名落账到 B 类头上。
-		LAST_INVENTED_NAMES = java.util.Set.of();
-		LAST_BRIDGE_COUNT = 0;
+		LAST_RESULT = AlignmentResult.empty(oldLen, newLen, oldHash, newHash);
 		if (oldBytes == null || oldBytes.length == 0) return newBytes;
 
 		MatchContext ctx = CONTEXT.get();
@@ -735,11 +801,11 @@ public class LambdaAligner {
 			// 后置廉价校验：确保本地 indy 句柄引用的目标方法实际存在
 			validateIndyTargets(alignedCn, presentKeys);
 
-			LAST_STATS = new AlignmentStats(ctx.step1Pairs, ctx.passAPairs, ctx.passBPairs,
-			                                ctx.step1AnchorPairs, ctx.hashMismatchPairs, ctx.consumerMismatchPairs,
-			                                ctx.consumerMismatchWarnPairs, ctx.consumerMismatchDebugPairs, ctx.prunedPairs);
-			LAST_OLD_ANON_HASHES = new HashMap<>(ctx.oldAnonHashes);
-			LAST_NEW_ANON_HASHES = new HashMap<>(ctx.newAnonHashes);
+			AlignmentStats stats = new AlignmentStats(ctx.step1Pairs, ctx.passAPairs, ctx.passBPairs,
+			                                         ctx.step1AnchorPairs, ctx.hashMismatchPairs,
+			                                         ctx.consumerMismatchPairs,
+			                                         ctx.consumerMismatchWarnPairs, ctx.consumerMismatchDebugPairs,
+			                                         ctx.prunedPairs);
 
 			Map<String, String> methodMapping = new HashMap<>();
 			for (int idx = newGroups.nextEntry(-1); idx != -1; idx = newGroups.nextEntry(idx)) {
@@ -753,23 +819,28 @@ public class LambdaAligner {
 					}
 				}
 			}
-			LAST_METHOD_MAPPING = methodMapping;
-			LAST_ALIGNED_CLASS = oldCn.name;
 
 			// 传入 oldCn（已解析过一次）—— 避免 resurrectOrphanedLambdas 二次读 oldBytes
 			byte[] result = resurrectOrphanedLambdas(oldCn, alignedBytes, presentKeys, oldMethodRefs, newMethodRefs, ctx);
 			// 自造名必须从**最终产物**统计：复活阶段会往类里加回幽灵方法，
 			// 只在 alignedCn 上扫会漏掉它们（幽灵仍占着那个名字，下一轮照样会被误当 javac 原名）。
-			LAST_INVENTED_NAMES = collectInventedNames(result, ctx);
+			Set<String> invented = collectInventedNames(result, ctx);
+
+			// 唯一的发布点：一次 volatile 写，读者不会读到跨轮拼接。
+			LAST_RESULT = AlignmentResult.builder()
+			                             .stats(stats)
+			                             .inventedNames(invented)
+			                             .input(oldLen, newLen, oldHash, newHash)
+			                             .anonHashes(new HashMap<>(ctx.oldAnonHashes),
+			                                         new HashMap<>(ctx.newAnonHashes))
+			                             .methodMapping(methodMapping)
+			                             .alignedClass(oldCn.name)
+			                             .bridgeCount(ctx.bridges.size())
+			                             .build();
 			return result;
 		} catch (Exception | LinkageError | StackOverflowError e) {
-			LAST_STATS = null;
-			LAST_BRIDGE_COUNT = 0;
-			LAST_OLD_ANON_HASHES = null;
-			LAST_NEW_ANON_HASHES = null;
-			LAST_METHOD_MAPPING = null;
-			LAST_ALIGNED_CLASS = null;
-			LAST_INVENTED_NAMES = java.util.Set.of();
+			// 失败也发布：否则调用方会读到上一轮的旧快照，把两轮结果拼在一起。
+			LAST_RESULT = AlignmentResult.empty(oldLen, newLen, oldHash, newHash);
 			// 降级：不崩溃，返回原始字节码。捕获 Exception 与 LinkageError、StackOverflowError 等。
 			// 默认只记一行（热更失败不该刷屏）；DEBUG 下走 Logger 的 (msg, Throwable)
 			// 重载打完整堆栈 —— 而不是直接 printStackTrace，保持输出统一经日志系统。
@@ -3202,8 +3273,6 @@ public class LambdaAligner {
 			TEST_EVENTS.add(new AlignmentEvent("BRIDGE_REPOINT", oi.name, now.name,
 				ctx.currentClass + "#" + oldKey + " -> " + target));
 		}
-
-		LAST_BRIDGE_COUNT = ctx.bridges.size();
 	}
 
 	/**

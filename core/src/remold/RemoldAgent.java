@@ -1722,7 +1722,10 @@ public class RemoldAgent {
 							 inventedSlots.getOrDefault(className, java.util.Set.of()));
 							// 本轮算出的"自造名"先挂起，等 redefine 成功再落账（失败就丢弃，
 							// 因为旧基线没前进，下一轮仍然是同一份旧字节）。
-							pendingInvented.put(className, LambdaAligner.LAST_INVENTED_NAMES);
+							// 从本轮快照里取，避免读到别的轮次（失败时快照的集合是空的，不是 null）。
+							LambdaAligner.AlignmentResult aligned = LambdaAligner.LAST_RESULT;
+							pendingInvented.put(className,
+							 aligned == null ? java.util.Set.of() : aligned.inventedNames);
 						}
 					}
 					if (oldBytecode != null) {

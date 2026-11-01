@@ -892,17 +892,17 @@ public class AnonClassReproTest {
 		check(finalHost != null, "Scenario 13: 对齐后的宿主成功通过 LambdaAligner 流水线");
 
 		// 断言哈希器表命中：验证 MethodFingerprinter 处理时已包含重命名后的匿名类哈希
-		Map<String, Long> lastHashes = LambdaAligner.LAST_NEW_ANON_HASHES;
-		check(lastHashes != null, "Scenario 13: 成功读取 LAST_NEW_ANON_HASHES");
+		Map<String, Long> lastHashes = LambdaAligner.LAST_RESULT.newAnonHashes;
+		check(lastHashes != null, "Scenario 13: 成功读取 newAnonHashes");
 		check(lastHashes.containsKey("testCombo/ComboHost$1"), "Scenario 13: 哈希器新侧解析表成功按重命名后的类名 $1 命中");
 		check(lastHashes.containsKey("testCombo/ComboHost$2"), "Scenario 13: 哈希器新侧解析表成功按重命名后的类名 $2 命中");
 		check(lastHashes.get("testCombo/ComboHost$1") != null, "Scenario 13: 命中哈希值非空，证明未静默退回纯序号模式");
 
-		Map<String, Long> oldHashes = LambdaAligner.LAST_OLD_ANON_HASHES;
-		check(oldHashes != null, "Scenario 13: 成功读取 LAST_OLD_ANON_HASHES");
+		Map<String, Long> oldHashes = LambdaAligner.LAST_RESULT.oldAnonHashes;
+		check(oldHashes != null, "Scenario 13: 成功读取 oldAnonHashes");
 		check(oldHashes.containsKey("testCombo/ComboHost$1"), "Scenario 13: 哈希器旧侧解析表成功命中 $1");
 		check(oldHashes.containsKey("testCombo/ComboHost$2"), "Scenario 13: 哈希器旧侧解析表成功命中 $2");
-		check(LambdaAligner.LAST_STATS != null && LambdaAligner.LAST_STATS.step1Pairs > 0, "Scenario 13: 匿名类哈希助力 LambdaAligner Step 1 配对成功 (step1Pairs > 0)");
+		check(LambdaAligner.LAST_RESULT.stats != null && LambdaAligner.LAST_RESULT.stats.step1Pairs > 0, "Scenario 13: 匿名类哈希助力 LambdaAligner Step 1 配对成功 (step1Pairs > 0)");
 	}
 
 	// 14. 嵌套匿名类 Foo$1$1 结构识别与对齐

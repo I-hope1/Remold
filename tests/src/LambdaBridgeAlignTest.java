@@ -51,7 +51,7 @@ public class LambdaBridgeAlignTest {
 		assertNotNull(byKey(parse(v2), "lambda$f$0", "(I)V"),
 			"夹具前提：v2 的合成方法是 lambda$f$0(I)V");
 
-		LambdaAligner.LAST_BRIDGE_COUNT = 0;
+		LambdaAligner.LAST_RESULT = null;
 		ClassNode out = parse(LambdaAligner.align(v1, v2));
 
 		MethodNode bridge = byKey(out, "lambda$f$0", "(Ljava/lang/String;I)V");
@@ -74,7 +74,7 @@ public class LambdaBridgeAlignTest {
 		assertEquals("(I)V", call.desc, "转发目标用的是 v2 的描述符");
 		assertEquals(Opcodes.INVOKESTATIC, call.getOpcode(), "静态 lambda 用 INVOKESTATIC 转发");
 
-		assertEquals(1, LambdaAligner.LAST_BRIDGE_COUNT, "本轮应当只建一座桥");
+		assertEquals(1, LambdaAligner.LAST_RESULT.bridgeCount, "本轮应当只建一座桥");
 		assertNotNull(byKey(out, "lambda$f$0", "(I)V"), "新方法本身必须原样保留（桥不改名）");
 	}
 
@@ -88,11 +88,11 @@ public class LambdaBridgeAlignTest {
 		// 第一轮：建桥。基准必须是"上一轮对齐之后的字节码"，不是原始编译产物。
 		byte[] r1 = LambdaAligner.align(v1, v2);
 		assertNotNull(byKey(parse(r1), "lambda$f$0", "(Ljava/lang/String;I)V"), "第一轮必须建出桥");
-		assertEquals(1, LambdaAligner.LAST_BRIDGE_COUNT);
+		assertEquals(1, LambdaAligner.LAST_RESULT.bridgeCount);
 
 		// 第二轮：用户只改了方法体，没再动捕获表。
 		// 这里的失败形态是"桥被当成又被删了一次，重新幽灵化"——第一轮成果当场作废。
-		ClassNode out = parse(LambdaAligner.align(r1, v3, null, null, LambdaAligner.LAST_INVENTED_NAMES));
+		ClassNode out = parse(LambdaAligner.align(r1, v3, null, null, LambdaAligner.LAST_RESULT.inventedNames));
 
 		MethodNode bridge = byKey(out, "lambda$f$0", "(Ljava/lang/String;I)V");
 		assertNotNull(bridge, "第二轮桥不能消失：" + table(out));
@@ -101,7 +101,7 @@ public class LambdaBridgeAlignTest {
 		MethodInsnNode call = onlyCoreCall(bridge);
 		assertEquals("lambda$f$0", call.name, "重生成之后目标名仍是本轮定稿的名字");
 		assertEquals("(I)V", call.desc);
-		assertEquals(1, LambdaAligner.LAST_BRIDGE_COUNT, "第二轮应当重新生成同一座桥");
+		assertEquals(1, LambdaAligner.LAST_RESULT.bridgeCount, "第二轮应当重新生成同一座桥");
 	}
 
 	// ------------------------------------------------------------------------------------------------
@@ -115,7 +115,7 @@ public class LambdaBridgeAlignTest {
 		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V1_TWO_CAPTURES).resolve("B.class"));
 
 		ClassNode out = parse(LambdaAligner.align(v1, v2));
-		assertEquals(0, LambdaAligner.LAST_BRIDGE_COUNT,
+		assertEquals(0, LambdaAligner.LAST_RESULT.bridgeCount,
 			"新增捕获必须拒绝：老实例没有那个值，桥只能编 0/null 塞进去，那是静默假值");
 		MethodNode ghost = byKey(out, "lambda$f$0", "(I)V");
 		assertNotNull(ghost, "旧键仍然要留桩（兜住 NoSuchMethodError）");
@@ -129,7 +129,7 @@ public class LambdaBridgeAlignTest {
 		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_LONG_CAPTURE).resolve("B.class"));
 
 		ClassNode out = parse(LambdaAligner.align(v1, v2));
-		assertEquals(0, LambdaAligner.LAST_BRIDGE_COUNT,
+		assertEquals(0, LambdaAligner.LAST_RESULT.bridgeCount,
 			"捕获类型变了就不是子序列，不能靠位置硬搬");
 		assertTrue(containsCall(byKey(out, "lambda$f$0", "(Ljava/lang/String;I)V"), "onOrphanInvoked"),
 			"拒绝桥接的形态是幽灵桩");
@@ -142,7 +142,7 @@ public class LambdaBridgeAlignTest {
 		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ONE_INT).resolve("B.class"));
 
 		ClassNode out = parse(LambdaAligner.align(v1, v2));
-		assertEquals(0, LambdaAligner.LAST_BRIDGE_COUNT,
+		assertEquals(0, LambdaAligner.LAST_RESULT.bridgeCount,
 			"[int,int] → [int] 有两种删法，任选其一都可能搬错值：必须拒绝");
 		assertTrue(containsCall(byKey(out, "lambda$f$0", "(II)V"), "onOrphanInvoked"),
 			"拒绝桥接的形态是幽灵桩");
@@ -157,7 +157,7 @@ public class LambdaBridgeAlignTest {
 		// 这一例的捕获表恰好是合法子序列（[I] ⊂ [String,int]），唯一挡住它的就是 SAM 门：
 		// Runnable 的 ()V 与 IntConsumer 的 (I)V 不同，老实例对象本身还绑在旧接口上。
 		ClassNode out = parse(LambdaAligner.align(v1, v2));
-		assertEquals(0, LambdaAligner.LAST_BRIDGE_COUNT,
+		assertEquals(0, LambdaAligner.LAST_RESULT.bridgeCount,
 			"功能接口变了就不是「同一个 lambda 少了个捕获」，桥接 impl 救不了接口不匹配");
 		assertTrue(containsCall(byKey(out, "lambda$f$0", "(Ljava/lang/String;I)V"), "onOrphanInvoked"),
 			"拒绝桥接的形态是幽灵桩");
@@ -174,12 +174,12 @@ public class LambdaBridgeAlignTest {
 		assertNotNull(byKey(parse(r1), "lambda$f$0", "(Ljava/lang/String;I)V"), "第一轮必须建出桥");
 
 		// 第二轮把 lambda 整个删了：目标没了，桥只能退化成幽灵桩（不是继续转发到空气）。
-		ClassNode out = parse(LambdaAligner.align(r1, v3, null, null, LambdaAligner.LAST_INVENTED_NAMES));
+		ClassNode out = parse(LambdaAligner.align(r1, v3, null, null, LambdaAligner.LAST_RESULT.inventedNames));
 		MethodNode stub = byKey(out, "lambda$f$0", "(Ljava/lang/String;I)V");
 		assertNotNull(stub, "旧键仍要留桩：" + table(out));
 		assertTrue(containsCall(stub, "onOrphanInvoked"),
 			"目标消失后必须退化成幽灵桩，不能还挂着转发");
-		assertEquals(0, LambdaAligner.LAST_BRIDGE_COUNT, "本轮没有可转发的目标");
+		assertEquals(0, LambdaAligner.LAST_RESULT.bridgeCount, "本轮没有可转发的目标");
 	}
 
 	// ------------------------------------------------------------------------------------------------

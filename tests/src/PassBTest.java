@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * {@code () -> act2()}，于是它的 upDepth 从 0 变成 1。Pass A 要求深度相等，会跳过它；
  * Pass B 放宽条件，把这个新叶子兜底配回旧叶子的槽位。</p>
  *
- * <p><b>判据分两层</b>：{@code LAST_STATS} 只能说明"走了哪条路"，产物字节码才说明
+ * <p><b>判据分两层</b>：{@code AlignmentResult.stats} 只能说明"走了哪条路"，产物字节码才说明
  * "配对结果对不对"。所以除了计数器，还必须断言终局形态——老 callsite 的名字仍在、
  * 仍是活方法、且执行的是新语义。</p>
  *
@@ -46,15 +46,15 @@ public class PassBTest {
 		byte[] v1 = Files.readAllBytes(outV1.resolve("testPassB/PassBCase.class"));
 		byte[] v2 = Files.readAllBytes(outV2.resolve("testPassB/PassBCase.class"));
 
-		LambdaAligner.LAST_STATS = null;
+		LambdaAligner.LAST_RESULT = null;
 		byte[] aligned = LambdaAligner.align(v1, v2);
 
 		assertNotNull(aligned, "aligned 产物非空");
-		assertNotNull(LambdaAligner.LAST_STATS, "LAST_STATS 已记录");
-		assertTrue(LambdaAligner.LAST_STATS.passBPairs > 0,
-			"passB 计数器成功记录到非零配对: " + LambdaAligner.LAST_STATS);
-		assertEquals(0, LambdaAligner.LAST_STATS.passAPairs,
-			"passA 跳过深度不匹配候选 (passA == 0): " + LambdaAligner.LAST_STATS);
+		assertNotNull(LambdaAligner.LAST_RESULT, "对齐结果已记录");
+		assertTrue(LambdaAligner.LAST_RESULT.stats.passBPairs > 0,
+			"passB 计数器成功记录到非零配对: " + LambdaAligner.LAST_RESULT.stats);
+		assertEquals(0, LambdaAligner.LAST_RESULT.stats.passAPairs,
+			"passA 跳过深度不匹配候选 (passA == 0): " + LambdaAligner.LAST_RESULT.stats);
 
 		// —— 以下才是终局断言：计数器只说明走了哪条路，产物字节码才说明配得对不对 ——
 		ClassNode out = parse(aligned);

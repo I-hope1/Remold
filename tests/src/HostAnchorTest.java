@@ -41,7 +41,7 @@ public class HostAnchorTest {
 	@AfterEach
 	void resetState() {
 		LambdaAligner.TEST_REVERSE_GROUP_ORDER = false;
-		LambdaAligner.LAST_STATS = null;
+		LambdaAligner.LAST_RESULT = null;
 		LambdaAligner.clearLoggedWarnings();
 	}
 
@@ -100,11 +100,11 @@ public class HostAnchorTest {
 		// 执行对齐
 		byte[] aligned = LambdaAligner.align(v1, v2);
 		assertNotNull(aligned, "对齐产物非空");
-		assertNotNull(LambdaAligner.LAST_STATS, "LAST_STATS 已记录");
-		assertTrue(LambdaAligner.LAST_STATS.anchorPairs > 0,
-			"宿主锚点应至少产生 1 次配对: " + LambdaAligner.LAST_STATS);
-		assertEquals(0, LambdaAligner.LAST_STATS.hashMismatchPairs,
-			"不应存在票据哈希不匹配的错位配对: " + LambdaAligner.LAST_STATS);
+		assertNotNull(LambdaAligner.LAST_RESULT, "对齐结果已记录");
+		assertTrue(LambdaAligner.LAST_RESULT.stats.anchorPairs > 0,
+			"宿主锚点应至少产生 1 次配对: " + LambdaAligner.LAST_RESULT.stats);
+		assertEquals(0, LambdaAligner.LAST_RESULT.stats.hashMismatchPairs,
+			"不应存在票据哈希不匹配的错位配对: " + LambdaAligner.LAST_RESULT.stats);
 
 		// 解析对齐产物
 		ClassNode cnAligned = readClass(aligned);
@@ -304,13 +304,13 @@ public class HostAnchorTest {
 
 		byte[] aligned = LambdaAligner.align(v1, v2);
 		assertNotNull(aligned);
-		assertNotNull(LambdaAligner.LAST_STATS);
+		assertNotNull(LambdaAligner.LAST_RESULT);
 
 		// 叶子降级回 Step 1a 同名贪婪匹配（L2' 匹配 L1），父级随之落入 Pass A/B
-		assertEquals(0, LambdaAligner.LAST_STATS.anchorPairs,
-			"父级哈希异化导致锚点失配，anchorPairs 应为 0: " + LambdaAligner.LAST_STATS);
-		assertTrue(LambdaAligner.LAST_STATS.hashMismatchPairs > 0,
-			"退化路径应准确记录到哈希异化配对 (hashMismatchPairs > 0): " + LambdaAligner.LAST_STATS);
+		assertEquals(0, LambdaAligner.LAST_RESULT.stats.anchorPairs,
+			"父级哈希异化导致锚点失配，anchorPairs 应为 0: " + LambdaAligner.LAST_RESULT.stats);
+		assertTrue(LambdaAligner.LAST_RESULT.stats.hashMismatchPairs > 0,
+			"退化路径应准确记录到哈希异化配对 (hashMismatchPairs > 0): " + LambdaAligner.LAST_RESULT.stats);
 
 		// —— 终局断言：计数器只说"走了降级路径"，产物字节码才说"降级后老 callsite 还能不能用" ——
 		ClassNode out = readClass(aligned);
@@ -397,11 +397,11 @@ public class HostAnchorTest {
 
 		byte[] aligned = LambdaAligner.align(v1, v2);
 		assertNotNull(aligned);
-		assertNotNull(LambdaAligner.LAST_STATS);
+		assertNotNull(LambdaAligner.LAST_RESULT);
 
 		// 父子语义完全等价时，哈希完全匹配
-		assertEquals(0, LambdaAligner.LAST_STATS.hashMismatchPairs,
-			"语义完全一致，无哈希异化: " + LambdaAligner.LAST_STATS);
+		assertEquals(0, LambdaAligner.LAST_RESULT.stats.hashMismatchPairs,
+			"语义完全一致，无哈希异化: " + LambdaAligner.LAST_RESULT.stats);
 
 		ClassNode cnAligned = readClass(aligned);
 		List<String> alignedTargets = findIndyTargets(cnAligned, "build");
@@ -880,11 +880,11 @@ public class HostAnchorTest {
 
 		byte[] aligned = LambdaAligner.align(hostV1, hostV2, v1Cache::get, v2Cache::get);
 		assertNotNull(aligned);
-		assertNotNull(LambdaAligner.LAST_OLD_ANON_HASHES);
-		assertNotNull(LambdaAligner.LAST_NEW_ANON_HASHES);
-		assertFalse(LambdaAligner.LAST_OLD_ANON_HASHES.isEmpty(), "4参数重载应成功解析并记录匿名类内容哈希");
-		assertEquals(LambdaAligner.LAST_OLD_ANON_HASHES.get("test/AnonHostCase$1"),
-		             LambdaAligner.LAST_NEW_ANON_HASHES.get("test/AnonHostCase$1"),
+		assertNotNull(LambdaAligner.LAST_RESULT.oldAnonHashes);
+		assertNotNull(LambdaAligner.LAST_RESULT.newAnonHashes);
+		assertFalse(LambdaAligner.LAST_RESULT.oldAnonHashes.isEmpty(), "4参数重载应成功解析并记录匿名类内容哈希");
+		assertEquals(LambdaAligner.LAST_RESULT.oldAnonHashes.get("test/AnonHostCase$1"),
+		             LambdaAligner.LAST_RESULT.newAnonHashes.get("test/AnonHostCase$1"),
 		             "相同匿名类的真实内容哈希在新旧侧应完全一致");
 	}
 
@@ -1143,15 +1143,15 @@ public class HostAnchorTest {
 
 		byte[] aligned = LambdaAligner.align(v1, v2);
 		assertNotNull(aligned);
-		assertNotNull(LambdaAligner.LAST_STATS);
+		assertNotNull(LambdaAligner.LAST_RESULT);
 
 		// 记录退化指标：LCS 锚点因消费者异化放弃配对，退化走 Step 1a 同名贪婪
-		assertEquals(0, LambdaAligner.LAST_STATS.anchorPairs, "LCS 锚点必须放弃配对");
-		assertEquals(1, LambdaAligner.LAST_STATS.step1Pairs, "退化至 Step 1a 同名命中");
-		assertTrue(LambdaAligner.LAST_STATS.consumerMismatchPairs > 0,
-			"消费者异化但退化配对时，必须明确记录 consumerMismatchPairs 信号: " + LambdaAligner.LAST_STATS);
-		assertTrue(LambdaAligner.LAST_STATS.consumerMismatchWarnPairs > 0,
-			"因存在多候选歧义，消费者异化必须升级为 WARN: " + LambdaAligner.LAST_STATS);
+		assertEquals(0, LambdaAligner.LAST_RESULT.stats.anchorPairs, "LCS 锚点必须放弃配对");
+		assertEquals(1, LambdaAligner.LAST_RESULT.stats.step1Pairs, "退化至 Step 1a 同名命中");
+		assertTrue(LambdaAligner.LAST_RESULT.stats.consumerMismatchPairs > 0,
+			"消费者异化但退化配对时，必须明确记录 consumerMismatchPairs 信号: " + LambdaAligner.LAST_RESULT.stats);
+		assertTrue(LambdaAligner.LAST_RESULT.stats.consumerMismatchWarnPairs > 0,
+			"因存在多候选歧义，消费者异化必须升级为 WARN: " + LambdaAligner.LAST_RESULT.stats);
 
 		ClassNode cnAligned = readClass(aligned);
 		String activeL = findIndyTargets(cnAligned, "build").get(0);
@@ -1204,12 +1204,12 @@ public class HostAnchorTest {
 
 		byte[] aligned = LambdaAligner.align(v1, v2);
 		assertNotNull(aligned);
-		assertNotNull(LambdaAligner.LAST_STATS);
+		assertNotNull(LambdaAligner.LAST_RESULT);
 
 		// 核心断言：良性编辑记录 consumerMismatchPairs 与 debugPairs，但 warnPairs 严格为 0
-		assertEquals(1, LambdaAligner.LAST_STATS.consumerMismatchPairs, "必须记录消费者变化");
-		assertEquals(1, LambdaAligner.LAST_STATS.consumerMismatchDebugPairs, "同名且桶内唯一必须降级为 DEBUG");
-		assertEquals(0, LambdaAligner.LAST_STATS.consumerMismatchWarnPairs, "良性重构绝不触发 WARN 噪音");
+		assertEquals(1, LambdaAligner.LAST_RESULT.stats.consumerMismatchPairs, "必须记录消费者变化");
+		assertEquals(1, LambdaAligner.LAST_RESULT.stats.consumerMismatchDebugPairs, "同名且桶内唯一必须降级为 DEBUG");
+		assertEquals(0, LambdaAligner.LAST_RESULT.stats.consumerMismatchWarnPairs, "良性重构绝不触发 WARN 噪音");
 	}
 
 	/**

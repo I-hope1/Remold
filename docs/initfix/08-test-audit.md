@@ -392,7 +392,7 @@ ak_e_ctrl 的"没错配"什么也没证明。它们现在的用途是：修好�
 （JavaExec，带真 agent 与 `-XX:+AllowEnhancedClassRedefinition`，需要 `-Pp05.jbr=`）。
 
 探针自己覆盖 `live/T.class` 跑两轮（v1 → v2 删 A2 → v3 加回 A2），用
-`LambdaAligner.LAST_ALIGN_OLD_HASH` 断言：
+`LambdaAligner.LAST_RESULT.oldHash` 断言：
 
 | 断言 | 目的 |
 |:--|:--|
@@ -472,7 +472,7 @@ V3 轮:  A1 → Z1:v3    A2 → A1:v3    A3 → A2:v3      （3 条 WARN，但�
 - 第 2 轮：javac 从头编号，A3 恰好叫 `$4`；"同名优先"就把新 A3 配给了旧 `$4`（其实是 Z1），
   于是后续全部位移一格。
 
-**修法**：`align` 新增 `inventedOldNames` 入参 + `LAST_INVENTED_NAMES` 出参；自造名不再作为
+**修法**：`align` 新增 `inventedOldNames` 入参 + `LAST_RESULT.inventedNames` 出参；自造名不再作为
 "同名 = 同一个 lambda"的证据（除非指纹也一致）。自造名集合从**最终产物**（含复活阶段注入的
 幽灵）统计，并由 agent 在 redefine 成功后才落账（失败不回滚基线，也就不推进集合）。
 

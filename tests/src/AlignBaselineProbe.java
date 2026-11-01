@@ -8,7 +8,7 @@ import java.util.function.*;
  * <p><b>为什么需要它</b>：{@code LambdaAligner.align} 本身有大量单测，但"agent 传进来的是什么"
  * 一直没有覆盖。曾出现旧基线被本轮新字节覆盖、{@code align(old == new)} 静默不做事，
  * 而全部用例仍然全绿（见 {@code docs/initfix/08-test-audit.md} §10.5）。本探针直接跑
- * agent 的批处理路径，用 {@link remold.LambdaAligner#LAST_ALIGN_OLD_HASH} 断言喂进去的旧基线
+ * agent 的批处理路径，用 {@link remold.LambdaAligner.AlignmentResult#oldHash} 断言喂进去的旧基线
  * 到底是哪一份字节码。</p>
  *
  * <p>用法（由 {@code :tests:alignBaselineProbe} 启动）：
@@ -41,11 +41,11 @@ public class AlignBaselineProbe {
 
 		runRound(live, v2Bytes);
 		check("第 1 轮：喂给 align 的旧基线应是已加载的 v1",
-			remold.LambdaAligner.LAST_ALIGN_OLD_HASH == v1Hash,
-			"oldHash=" + remold.LambdaAligner.LAST_ALIGN_OLD_HASH + " v1Hash=" + v1Hash);
+			remold.LambdaAligner.LAST_RESULT.oldHash == v1Hash,
+			"oldHash=" + remold.LambdaAligner.LAST_RESULT.oldHash + " v1Hash=" + v1Hash);
 		check("第 1 轮：old 与 new 不能相同（这正是本轮 bug 的形态）",
-			remold.LambdaAligner.LAST_ALIGN_OLD_HASH != remold.LambdaAligner.LAST_ALIGN_NEW_HASH,
-			"old==new hash=" + remold.LambdaAligner.LAST_ALIGN_NEW_HASH);
+			remold.LambdaAligner.LAST_RESULT.oldHash != remold.LambdaAligner.LAST_RESULT.newHash,
+			"old==new hash=" + remold.LambdaAligner.LAST_RESULT.newHash);
 
 		// 第 2 轮：v2 -> v3（把 A2 加回来）
 		// 关键断言：这一轮的旧基线必须是第 1 轮**成功 redefine 后的产物**，
@@ -53,11 +53,11 @@ public class AlignBaselineProbe {
 		byte[] v3Bytes = Files.readAllBytes(v3);
 		runRound(live, v3Bytes);
 		check("第 2 轮：旧基线不能是上一轮的源码字节 v2（源码缓存不得被当基线）",
-			remold.LambdaAligner.LAST_ALIGN_OLD_HASH != v2Hash,
-			"oldHash=" + remold.LambdaAligner.LAST_ALIGN_OLD_HASH + " v2Hash=" + v2Hash);
+			remold.LambdaAligner.LAST_RESULT.oldHash != v2Hash,
+			"oldHash=" + remold.LambdaAligner.LAST_RESULT.oldHash + " v2Hash=" + v2Hash);
 		check("第 2 轮：old 与 new 不能相同",
-			remold.LambdaAligner.LAST_ALIGN_OLD_HASH != remold.LambdaAligner.LAST_ALIGN_NEW_HASH,
-			"old==new hash=" + remold.LambdaAligner.LAST_ALIGN_NEW_HASH);
+			remold.LambdaAligner.LAST_RESULT.oldHash != remold.LambdaAligner.LAST_RESULT.newHash,
+			"old==new hash=" + remold.LambdaAligner.LAST_RESULT.newHash);
 
 		// 旧实例仍在：只断言不抛 NoSuchMethodError（语义正确性由 E2E 夹具负责）
 		String after = eval(held.get("A1"));
@@ -73,17 +73,17 @@ public class AlignBaselineProbe {
 	/** 覆盖 live/T.class 并等到 align 真的用这份新字节跑过一轮。 */
 	static void runRound(Path live, byte[] newBytes) throws Exception {
 		long expect = Arrays.hashCode(newBytes);
-		long before = remold.LambdaAligner.LAST_ALIGN_NEW_HASH;
+		long before = remold.LambdaAligner.LAST_RESULT.newHash;
 		Files.copy(newBytes.length > 0 ? writeTemp(live, newBytes) : null,
 			live.resolve("T.class"), StandardCopyOption.REPLACE_EXISTING);
 		long deadline = System.currentTimeMillis() + TIMEOUT_MS;
 		while (System.currentTimeMillis() < deadline) {
-			long now = remold.LambdaAligner.LAST_ALIGN_NEW_HASH;
+			long now = remold.LambdaAligner.LAST_RESULT.newHash;
 			if (now == expect && now != before) return;
 			Thread.sleep(100L);
 		}
 		throw new IllegalStateException("等不到 align 处理新字节（expect=" + expect + " last="
-			+ remold.LambdaAligner.LAST_ALIGN_NEW_HASH + "）");
+			+ remold.LambdaAligner.LAST_RESULT.newHash + "）");
 	}
 
 	static Path writeTemp(Path live, byte[] bytes) throws Exception {

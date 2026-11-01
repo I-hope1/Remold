@@ -1166,11 +1166,15 @@ public class CellPropertyRef {
 			if (!isLambdaKey(k) && newM.containsKey(k)) out.put(k, k);
 		}
 
-		// 1. 优先采用 LambdaAligner 产出的权威映射（oldKey -> newKey），且仅作用于当前对齐的类
-		Map<String, String> alignerMapping = LambdaAligner.LAST_METHOD_MAPPING;
-		if (alignerMapping != null && !alignerMapping.isEmpty()
-		    && Objects.equals(slashName, LambdaAligner.LAST_ALIGNED_CLASS)) {
-			for (Entry<String, String> e : alignerMapping.entrySet()) {
+		// 1. 优先采用 LambdaAligner 产出的权威映射（oldKey -> newKey），且仅作用于当前对齐的类。
+		//
+		// 映射与类名必须来自**同一个快照**：早先它们是两个独立的 volatile 字段，分别读取时
+		// 中间可能插进另一轮对齐，于是"拿 A 类的映射去比 B 类的类名"，比较结果毫无意义。
+		LambdaAligner.AlignmentResult aligned = LambdaAligner.LAST_RESULT;
+		if (aligned != null
+		    && aligned.methodMapping != null && !aligned.methodMapping.isEmpty()
+		    && Objects.equals(slashName, aligned.alignedClass)) {
+			for (Entry<String, String> e : aligned.methodMapping.entrySet()) {
 				String ok = e.getKey();
 				String nk = e.getValue();
 				if (oldM.containsKey(ok) && newM.containsKey(nk) && !out.containsKey(ok)) {

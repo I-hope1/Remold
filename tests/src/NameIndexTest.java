@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * 幽灵叶子（同名不同描述符）时，名字索引必须保留活方法；因此第二轮应在 Step 1 就完成配对
  * （step1Pairs == 2，passAPairs == 0）。矩阵覆盖 JDK 8/17/21 × 正反序。</p>
  *
- * <p><b>判据分两层</b>：{@code LAST_STATS} 只能说明"走了哪条路"，产物字节码才说明
+ * <p><b>判据分两层</b>：{@code AlignmentResult.stats} 只能说明"走了哪条路"，产物字节码才说明
  * "活方法有没有被幽灵抢走名字"。所以除了计数器，还必须断言第二轮的产物形态。</p>
  */
 public class NameIndexTest {
@@ -48,17 +48,19 @@ public class NameIndexTest {
 		System.out.println("== " + label + orderTag + " ==");
 
 		// 第一轮：V1 -> V2
-		LambdaAligner.LAST_STATS = null;
+		LambdaAligner.LAST_RESULT = null;
 		byte[] out1 = align(v1, v2, reverse);
 		assertNotNull(out1, label + orderTag + " 第一轮 align 返回非空");
 
 		// 第二轮：V2产物 -> V2（检测同名活/幽灵对共存下的索引行为）
-		LambdaAligner.LAST_STATS = null;
+		LambdaAligner.LAST_RESULT = null;
 		byte[] out2 = align(out1, v2, reverse);
 		assertNotNull(out2, label + orderTag + " 第二轮 align 返回非空");
 
-		LambdaAligner.AlignmentStats stats = LambdaAligner.LAST_STATS;
-		assertNotNull(stats, label + orderTag + " 第二轮配对统计非空（已正常写入 LAST_STATS）");
+		LambdaAligner.AlignmentResult result = LambdaAligner.LAST_RESULT;
+		assertNotNull(result, label + orderTag + " 第二轮对齐结果非空");
+		LambdaAligner.AlignmentStats stats = result.stats;
+		assertNotNull(stats, label + orderTag + " 第二轮配对统计非空");
 
 		System.out.println("   第二轮统计: " + stats);
 		if (stats != null) {

@@ -165,16 +165,18 @@ public class LambdaAlignTortureTest {
 		int oldLambdas = 0;
 		for (MethodNode mn : parse(base).methods) if (mn.name.startsWith("lambda$")) oldLambdas++;
 
-		LambdaAligner.LAST_STATS = null;
+		LambdaAligner.LAST_RESULT = null;
 		ClassNode aligned = parse(LambdaAligner.align(base, next));
-		LambdaAligner.AlignmentStats s = LambdaAligner.LAST_STATS;
-		assertNotNull(s, "LAST_STATS 未记录");
+		LambdaAligner.AlignmentResult r = LambdaAligner.LAST_RESULT;
+		assertNotNull(r, "对齐结果未记录");
+		LambdaAligner.AlignmentStats s = r.stats;
+		assertNotNull(s, "stats 未记录");
 
 		int matched = s.step1Pairs + s.passAPairs + s.passBPairs;
 		int ghosts = 0;
 		for (MethodNode mn : aligned.methods) if (isGhost(mn)) ghosts++;
 		// 第三桶：捕获桥。它既不参与配对（桥不改名），也不是幽灵桩（它真的转发）。
-		int bridges = LambdaAligner.LAST_BRIDGE_COUNT;
+		int bridges = r.bridgeCount;
 
 		assertEquals(oldLambdas, matched + ghosts + bridges,
 			"旧 lambda 共 " + oldLambdas + " 个，但三趟配对合计 " + matched + " + 幽灵 " + ghosts
@@ -430,7 +432,7 @@ public class LambdaAlignTortureTest {
 		for (int round = 1; round < versions.length; round++) {
 			ClassNode oldCn = parse(cur);
 			byte[] aligned = LambdaAligner.align(cur, versions[round], null, null, invented);
-			invented = LambdaAligner.LAST_INVENTED_NAMES;
+			invented = LambdaAligner.LAST_RESULT.inventedNames;
 			// 第 1 轮会插入 Z1 并给它一个自造槽位；如果这里为空，说明"自造名上报"退化，
 			// 后面的轮次就会失去保护却仍然全绿——必须先钉住这个前提。
 			if (round == 1) {
@@ -490,7 +492,7 @@ public class LambdaAlignTortureTest {
 
 		Set<String> invented = Set.of();
 		byte[] r1 = LambdaAligner.align(v1, v2, null, null, invented);
-		invented = LambdaAligner.LAST_INVENTED_NAMES;
+		invented = LambdaAligner.LAST_RESULT.inventedNames;
 
 		// 前置基线：第 1 轮给 Z1 分配了一个自造槽位，且旧类里确实存在这个槽位。
 		assertFalse(invented.isEmpty(), "第 1 轮应当产生自造槽位名，否则用例测不到东西");

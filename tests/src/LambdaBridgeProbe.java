@@ -199,8 +199,8 @@ public class LambdaBridgeProbe {
 		byte[] v2 = Files.readAllBytes(new File(outV2, "lam/Host.class").toPath());
 
 		byte[] aligned = LambdaAligner.align(v1, v2);
-		System.out.println("   对齐器建桥数 = " + LambdaAligner.LAST_BRIDGE_COUNT);
-		check(LambdaAligner.LAST_BRIDGE_COUNT == 1, "前提：对齐器必须为这组编辑建一座捕获桥");
+		System.out.println("   对齐器建桥数 = " + LambdaAligner.LAST_RESULT.bridgeCount);
+		check(LambdaAligner.LAST_RESULT.bridgeCount == 1, "前提：对齐器必须为这组编辑建一座捕获桥");
 
 		URLClassLoader cl = new URLClassLoader(
 			new URL[]{outV1.toURI().toURL()}, LambdaBridgeProbe.class.getClassLoader());

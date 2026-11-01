@@ -1,6 +1,7 @@
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.MethodNode;
+import remold.LambdaAligner;
 
 import java.io.File;
 import java.lang.instrument.ClassDefinition;
@@ -96,6 +97,9 @@ public class LambdaBridgeProbe {
 			         "lambda$install$0(Ljava/lang/String;I)V", "lambda$install$0(Ljava/lang/String;I)V",
 			         null, "v2:A1",
 			         "A", 1);
+
+			// 5. 端到端：把对齐器的产物 redefine 进去，老实例必须继续工作。
+			bridgeEndToEnd(inst, javac, tempDir);
 		} finally {
 			deleteRecursively(tempDir);
 		}
@@ -105,7 +109,8 @@ public class LambdaBridgeProbe {
 		System.out.println("   结论：只有「名字 + 描述符」都不变时，redefine 前建好的 lambda 实例才能继续工作；"
 		                   + "删除或新增捕获都以 NoSuchMethodError 终止，且报错文本里带的是旧描述符 —— "
 		                   + "解析键是 name+desc，不会按名字错配到同名的新方法上。"
-		                   + "这正是「单向桥接」有收益、且必须保留旧描述符的原因。");
+		                   + "这正是「单向桥接」有收益、且必须保留旧描述符的原因。"
+		                   + "端到端场景进一步证明：把对齐器产物 redefine 进去后，同一个实例跑的是新方法体。");
 	}
 
 	/**
@@ -178,10 +183,50 @@ public class LambdaBridgeProbe {
 		}
 	}
 
+	/**
+	 * 端到端：把 {@link LambdaAligner#align} 的产物 redefine 进去，老实例必须继续工作。
+	 *
+	 * <p>这是本机制的验收点。前面四个场景证明的是"不建桥会怎样"，这里证明"建了桥会怎样"：
+	 * 同一个 {@code Runnable} 实例，redefine 之前跑的是 v1 的方法体，redefine 之后
+	 * 必须跑 v2 的方法体——而不是抛 {@code NoSuchMethodError}，也不是静默 no-op。</p>
+	 */
+	static void bridgeEndToEnd(Instrumentation inst, String javac, File base) throws Exception {
+		System.out.println("\n--- [bridge-end-to-end] 对齐器产物 + redefine ---");
+		File work = new File(base, "e2e");
+		File outV1 = compile(javac, work, "v1", V1_TWO_CAPTURES);
+		File outV2 = compile(javac, work, "v2", V2_ONE_CAPTURE);
+		byte[] v1 = Files.readAllBytes(new File(outV1, "lam/Host.class").toPath());
+		byte[] v2 = Files.readAllBytes(new File(outV2, "lam/Host.class").toPath());
+
+		byte[] aligned = LambdaAligner.align(v1, v2);
+		System.out.println("   对齐器建桥数 = " + LambdaAligner.LAST_BRIDGE_COUNT);
+		check(LambdaAligner.LAST_BRIDGE_COUNT == 1, "前提：对齐器必须为这组编辑建一座捕获桥");
+
+		URLClassLoader cl = new URLClassLoader(
+			new URL[]{outV1.toURI().toURL()}, LambdaBridgeProbe.class.getClassLoader());
+		try {
+			Class<?> host = Class.forName("lam.Host", true, cl);
+			callInstall(host, "A", 1);
+			Runnable old = cached(host);
+			check(invoke(old).equals("ok") && "A1".equals(last(host)),
+			      "前提：redefine 前老实例跑的是 v1 方法体（last=" + last(host) + "）");
+
+			inst.redefineClasses(new ClassDefinition(host, aligned));
+
+			String after = invoke(old);
+			String lastAfter = last(host);
+			System.out.println("   redefine 后同一实例调用 -> " + after + "（last=" + lastAfter + "）");
+			check(after.equals("ok"), "建桥后老实例必须继续可调用，而不是 NoSuchMethodError");
+			check("v2:1".equals(lastAfter),
+			      "必须执行新方法体（last=" + lastAfter + "，期望 v2:1）");
+		} finally {
+			cl.close();
+		}
+	}
+
 	// ------------------------------------------------------------------------------------------------
 	// 夹具：捕获表变化 + 方法体变化
 	// ------------------------------------------------------------------------------------------------
-
 	/** v1：两个捕获（String, int）→ {@code lambda$install$0(Ljava/lang/String;I)V}。 */
 	static final String V1_TWO_CAPTURES = """
 		package lam;

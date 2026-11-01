@@ -233,6 +233,14 @@ public class LambdaAligner {
 	public static volatile AlignmentStats    LAST_STATS;
 
 	/**
+	 * 最近一次 {@link #align} 生成了多少个捕获桥（0 = 没有捕获表缩水的 lambda）。
+	 *
+	 * <p>桥不参与配对计数，所以 {@link AlignmentStats} 里没有它的位置；但"旧 lambda 要么
+	 * 配对、要么幽灵、要么建桥"这条账必须能平，故单独暴露一个计数。</p>
+	 */
+	public static volatile int LAST_BRIDGE_COUNT;
+
+	/**
 	 * 最近一次 {@link #align} 之后，类里仍然存在的"由对齐器自造的名字"集合。
 	 *
 	 * <p>调用方（agent）必须把它存起来，并在下一轮作为 {@code inventedOldNames} 传回去。
@@ -428,6 +436,15 @@ public class LambdaAligner {
 		 */
 		final Set<String> oldNameDescSet = new HashSet<>(64);
 
+		/**
+		 * 老键（{@code name + desc}）→ 本轮要重新生成的捕获桥。
+		 *
+		 * <p>桥是"老名字+老描述符 → 新方法"的适配器。它<b>不参与改名</b>：新方法保留自己的
+		 * 名字，桥占用老键，两者共存（老键的 desc 与新方法的 desc 必然不同，不会撞车）。
+		 * 见 {@link #stepCaptureBridge}。</p>
+		 */
+		final Map<String, BridgeSpec> bridges = new HashMap<>(16);
+
 		final MethodFingerprinter fingerprinter = MethodFingerprinter.CONTEXT.get();
 
 		/** 当前处理的类名（内部名，形如 {@code com/example/Foo}）。 */
@@ -488,6 +505,7 @@ public class LambdaAligner {
 			newlyInvented.clear();
 			existingNewNames.clear();
 			oldNameDescSet.clear();
+			bridges.clear();
 			oldAnonHashes.clear();
 			newAnonHashes.clear();
 			fingerprinter.reset();
@@ -566,6 +584,7 @@ public class LambdaAligner {
 		// 先清空：下面有"旧字节为空直接返回"的早退路径，不清会让调用方读到上一轮的值，
 		// 把 A 类的自造名落账到 B 类头上。
 		LAST_INVENTED_NAMES = java.util.Set.of();
+		LAST_BRIDGE_COUNT = 0;
 		if (oldBytes == null || oldBytes.length == 0) return newBytes;
 
 		MatchContext ctx = CONTEXT.get();
@@ -707,6 +726,12 @@ public class LambdaAligner {
 			Map<String, Integer> newMethodRefs = countHandleTargets(alignedCn);
 			Map<String, Integer> oldMethodRefs = countHandleTargets(oldCn);
 
+			// 【阶段三】捕获桥：删掉捕获变量的 lambda，用"老签名 → 新方法"的适配器兜住老实例。
+			//
+			// 必须放在这里：阶段二可能给未配对的新方法分配避障名，桥要指向的是**最终**名字；
+			// 同时 presentKeys 已经就绪，可以据此判断"哪些老键本来会变成幽灵"。
+			stepCaptureBridge(oldCn, ctx, presentKeys);
+
 			// 后置廉价校验：确保本地 indy 句柄引用的目标方法实际存在
 			validateIndyTargets(alignedCn, presentKeys);
 
@@ -739,6 +764,7 @@ public class LambdaAligner {
 			return result;
 		} catch (Exception | LinkageError | StackOverflowError e) {
 			LAST_STATS = null;
+			LAST_BRIDGE_COUNT = 0;
 			LAST_OLD_ANON_HASHES = null;
 			LAST_NEW_ANON_HASHES = null;
 			LAST_METHOD_MAPPING = null;
@@ -2430,8 +2456,13 @@ public class LambdaAligner {
 			// 不能再被当成某个新 lambda 的目标 —— 否则会把它挤到别的名字上去。
 			info.ghost = isGhostMethod(mn);
 			if (info.ghost) info.ghostOriginalHash = readGhostOriginalHash(mn);
+			// 上一轮注入的捕获桥：键在新版本里天然没有对应物，必须在幽灵化之前认出来，
+			// 否则第一轮的成果会在第二轮被自己抹掉（见 stepCaptureBridge）。
+			info.bridge = isBridgeMethod(mn);
 			info.skeletonHash = skeletonHash(mn);
-			info.children = collectChildLambdaNames(mn, cn.name);
+			// 桥不是 lambda 体：它体内那条 INVOKESTATIC 指向目标方法，若照常登记成"子 lambda"，
+			// 目标就会平白多出一个（永远配不上对的）父，把 hasUnmatchedChild 卡死。
+			info.children = info.bridge ? Collections.emptyList() : collectChildLambdaNames(mn, cn.name);
 			if (!isOld) putNameIndex(ctx.childIndex, info);
 			// 完整名字索引（两侧各一份），供 infoByName 做 O(1) 查找。
 			// 这里就地填充即可：scan 的循环体已经走完该名字对应的 SyntheticInfo 构建。
@@ -2507,6 +2538,7 @@ public class LambdaAligner {
 				if (n instanceof InvokeDynamicInsnNode i && i.bsmArgs != null && i.bsmArgs.length > 1
 				    && i.bsmArgs[1] instanceof Handle h && cn.name.equals(h.getOwner())) {
 					callee = h.getName();
+					recordLambdaShape(nameIndex.get(callee), i, h);
 				} else if (n instanceof MethodInsnNode m && cn.name.equals(m.owner)) {
 					callee = m.name;
 				}
@@ -2546,8 +2578,10 @@ public class LambdaAligner {
 		}
 		leftovers.sort(Comparator.comparing(m -> m.name + m.desc));
 		for (MethodNode mn : leftovers) {
-			SyntheticInfo info = nameIndex.get(mn.name);
-			if (info == null || !info.renameable || info.ghost) continue;
+			// 必须按 name+desc 精确取：桥与它指向的目标<b>同名不同描述符</b>（javac 复用编号），
+			// 按名字索引会取到对方，把目标方法的 hostKey 改写成 "L:<桥的哈希>"。
+			SyntheticInfo info = findByKey(groups, mn.name, mn.desc);
+			if (info == null || !info.renameable || info.ghost || info.bridge) continue;
 			// 孤立/死代码不分配正向 callOrder，保持 -1 以标记不可达
 			String hostKey = "L:" + info.hash + (!isMutationActive("1") && info.consumer != null && !info.consumer.isEmpty() ? ":" + info.consumer : "");
 			Map<AbstractInsnNode, String> consumers = findConsumers(cn.name, mn);
@@ -2557,6 +2591,7 @@ public class LambdaAligner {
 				if (n instanceof InvokeDynamicInsnNode i && i.bsmArgs != null && i.bsmArgs.length > 1
 				    && i.bsmArgs[1] instanceof Handle h && cn.name.equals(h.getOwner())) {
 					callee = h.getName();
+					recordLambdaShape(nameIndex.get(callee), i, h);
 				} else if (n instanceof MethodInsnNode m && cn.name.equals(m.owner)) {
 					callee = m.name;
 				}
@@ -2790,10 +2825,14 @@ public class LambdaAligner {
 	 */
 	private static void putNameIndex(Map<String, SyntheticInfo> index, SyntheticInfo info) {
 		SyntheticInfo prev = index.get(info.name);
-		if (prev == null || (prev.ghost && !info.ghost)) {
-			// 新写入，或已有幽灵、后遇到活方法：活方法覆盖幽灵
+		// 桥与它指向的目标同名不同描述符（javac 复用编号）。索引按名字键，谁最后写谁赢，
+		// 所以必须让"真 lambda 体"压过桥：桥是适配器，不是任何人的匹配目标。
+		boolean infoSecondary = info.ghost || info.bridge;
+		boolean prevSecondary = prev == null || prev.ghost || prev.bridge;
+		if (prev == null || (prevSecondary && !infoSecondary)) {
+			// 新写入，或已有幽灵/桥、后遇到活方法：活方法覆盖
 			index.put(info.name, info);
-		} else if (!info.ghost) {
+		} else if (!infoSecondary) {
 			// 两个都是活方法：后写覆盖，并在同名不同 desc 时留痕
 			if (!prev.desc.equals(info.desc)) {
 				dbg(() -> "COLLISION: same-name live methods with different desc: " + info.name
@@ -2801,12 +2840,34 @@ public class LambdaAligner {
 			}
 			index.put(info.name, info);
 		}
-		// 若已有活方法且当前为幽灵（!prev.ghost && info.ghost）：保留活方法，静默忽略幽灵
+		// 若已有活方法且当前为幽灵/桥：保留活方法，静默忽略
+	}
+
+	/**
+	 * 把 indy 调用点上的 lambda 形状（捕获表 / 功能接口 / SAM 签名）记到目标合成方法上。
+	 *
+	 * <p><b>必须再比一次描述符</b>：{@code nameIndex} 是按名字索引的，同名不同描述符的重载
+	 * （JDK 8 的 {@code lambda$null$0(II)} 与 {@code lambda$null$0(I)}）会互相覆盖。
+	 * 不比的话会把 A 的捕获表贴到 B 上，桥接的参数映射会直接错位——那是静默错值。</p>
+	 *
+	 * <p>只取<b>先见到的</b>那个调用点：同一个合成方法被多处 indy 引用时，各处的捕获表
+	 * 必然一致（它就是方法签名的一部分），不一致只可能来自索引错位，此时保留第一份。</p>
+	 */
+	private static void recordLambdaShape(SyntheticInfo info, InvokeDynamicInsnNode indy, Handle impl) {
+		if (info == null || info.captured != null) return;
+		if (!info.desc.equals(impl.getDesc())) return;
+		if (indy.bsmArgs.length < 3) return;
+		if (!(indy.bsmArgs[0] instanceof Type sam) || !(indy.bsmArgs[2] instanceof Type inst)) return;
+		List<String> caps = new ArrayList<>();
+		for (Type t : Type.getArgumentTypes(indy.desc)) caps.add(t.getDescriptor());
+		info.captured = caps;
+		info.fiType = Type.getReturnType(indy.desc).getInternalName();
+		info.samSig = sam.getDescriptor();
+		info.instSig = inst.getDescriptor();
 	}
 
 	/** 在已扫描的旧/新分组里按名字找 SyntheticInfo（供子指纹计算使用）。 */
-	private static SyntheticInfo infoByName(MatchContext ctx, boolean isOld, String name) {
-		// O(1) 查索引。早先是"遍历所有 group 的所有成员"的双重循环，而本方法被
+	private static SyntheticInfo infoByName(MatchContext ctx, boolean isOld, String name) {		// O(1) 查索引。早先是"遍历所有 group 的所有成员"的双重循环，而本方法被
 		// **三个 64 轮定稿循环**按"每个方法 × 每个子"调用，最坏合计 O(64·N²)。
 		// 见 MatchContext.oldNameIndex / newNameIndex 的说明。
 		return (isOld ? ctx.oldNameIndex : ctx.newNameIndex).get(name);
@@ -2995,6 +3056,441 @@ public class LambdaAligner {
 		return new Delegate(core, body, wasForwarding);
 	}
 
+	// ------------------------------------------------------------------------------------------------
+	// 捕获桥（单向：只支持"删除捕获变量"）
+	// ------------------------------------------------------------------------------------------------
+
+	/**
+	 * 桥接规格：老键（名字+描述符）→ 本轮目标方法 + 参数映射。
+	 *
+	 * <p>桥<b>不参与改名</b>：新方法保留自己的名字，桥占用老键。两者的描述符必然不同
+	 * （捕获表缩水了），可以共存。这样老隐藏类常量池里那条 {@code (name, 旧desc)} 引用
+	 * 仍然解析得到，而它指向的桥把参数丢给新方法。</p>
+	 */
+	static final class BridgeSpec {
+		final String  oldDesc;
+		final String  targetName;
+		final String  targetDesc;
+		/** 目标方法的第 j 个形参，取自老方法的第 {@code oldParamIndex[j]} 个形参。 */
+		final int[]   oldParamIndex;
+		final boolean isStatic;
+		final String  location;
+
+		BridgeSpec(String oldDesc, String targetName, String targetDesc,
+		           int[] oldParamIndex, boolean isStatic, String location) {
+			this.oldDesc = oldDesc;
+			this.targetName = targetName;
+			this.targetDesc = targetDesc;
+			this.oldParamIndex = oldParamIndex;
+			this.isStatic = isStatic;
+			this.location = location;
+		}
+	}
+
+	/** 上一轮注入的桥体解析结果：目标调用 + 按顺序被加载的老形参下标。 */
+	private record BridgeDelegate(MethodInsnNode target, int[] oldParamIndex) {}
+
+	/**
+	 * 捕获桥：把"这一轮删掉了捕获变量"的老 lambda 与它的新方法接起来。
+	 *
+	 * <p><b>为什么只做删除方向</b>：新描述符的形参表是老形参表的子序列，被删掉的那个槽位
+	 * 在新方法体里<b>物理上不存在</b>（验证器保证读不到），所以桥做的是"丢弃一个新代码
+	 * 永远不会读的值"——不是伪造值，也没有任何写入。反方向（新增捕获）必须替老实例编一个
+	 * {@code 0}/{@code null} 填进去，而新方法体很可能真读它，那就是静默写入假值。</p>
+	 *
+	 * <p><b>三道门</b>（任一不成立就退回幽灵桩，不猜）：</p>
+	 * <ol>
+	 *   <li><b>SAM 不变</b>：功能接口、{@code samMethodType}、{@code instantiatedMethodType}
+	 *       三者都必须相等。否则是"功能接口变了"（{@code BiFunction} → {@code Function}），
+	 *       老实例对象本身还绑在旧接口上，桥接 impl 救不了。</li>
+	 *   <li><b>宿主相同</b>：同一个 {@code hostKey}，否则"同一个 lambda"只是猜。</li>
+	 *   <li><b>映射唯一</b>：新捕获表必须是老捕获表的<b>唯一</b>子序列嵌入。重复类型
+	 *       （{@code [int,int] → [int]}）有歧义，直接拒绝。</li>
+	 * </ol>
+	 *
+	 * <p>另有一条<b>布局自检</b>：{@code 捕获表 ++ 实例化 SAM 形参} 必须恰好等于 impl 描述符。
+	 * 这条等式不成立就说明我们对这个调用点的参数布局理解有误，一律不建桥。</p>
+	 *
+	 * <p><b>第二轮的坑</b>：桥的键在新版本里天然没有对应物，若不在这里重新认领，它会被
+	 * 当成"又被删了一次"重新幽灵化。所以先认桥（{@link #getBridgeDelegate}），把它上一轮
+	 * 的目标顺着本轮的配对关系挪到新名字上，再重生成桥体——而不是"识别后沿用旧体"，
+	 * 那样 {@code ctx.renameMap} 一改名桥就指向空气。</p>
+	 */
+	private static void stepCaptureBridge(ClassNode oldCn, MatchContext ctx, Set<String> presentKeys) {
+		List<SyntheticInfo> allOld = new ArrayList<>();
+		for (int gi = ctx.oldGroups.nextEntry(-1); gi != -1; gi = ctx.oldGroups.nextEntry(gi)) {
+			List<SyntheticInfo> g = ctx.oldGroups.valueAt(gi);
+			if (g == null) continue;
+			allOld.addAll(g);
+		}
+		List<SyntheticInfo> unpairedNew = new ArrayList<>();
+		for (int ni = ctx.newGroups.nextEntry(-1); ni != -1; ni = ctx.newGroups.nextEntry(ni)) {
+			List<SyntheticInfo> g = ctx.newGroups.valueAt(ni);
+			if (g == null) continue;
+			for (SyntheticInfo n : g) {
+				if (n.matched || n.ghost || !n.renameable) continue;
+				if (n.captured == null) continue;
+				unpairedNew.add(n);
+			}
+		}
+
+		// ---- 1. 第一轮：老 lambda 删了捕获，且新类里没有同键（本来会变成幽灵） ----
+		Map<String, SyntheticInfo> claim = new HashMap<>();      // oldKey -> 唯一候选
+		Map<String, Integer>      claims = new HashMap<>();      // newKey -> 被几个老键抢
+		for (SyntheticInfo oi : allOld) {
+			if (oi.matched || oi.ghost || oi.bridge || !oi.renameable) continue;
+			if (presentKeys.contains(oi.name + oi.desc)) continue;
+			if (oi.captured == null) continue;
+			SyntheticInfo only = null;
+			int hits = 0;
+			for (SyntheticInfo ni : unpairedNew) {
+				if (!canBridge(oi, ni)) continue;
+				only = ni;
+				if (++hits > 1) break;
+			}
+			if (hits != 1) continue;                              // 零个或歧义：拒绝
+			String oldKey = oi.name + oi.desc;
+			String newKey = only.name + only.desc;
+			claim.put(oldKey, only);
+			claims.merge(newKey, 1, Integer::sum);
+		}
+		for (Map.Entry<String, SyntheticInfo> e : claim.entrySet()) {
+			SyntheticInfo ni = e.getValue();
+			if (claims.getOrDefault(ni.name + ni.desc, 0) != 1) continue;   // 一个目标被多抢：全部拒绝
+			SyntheticInfo oi = findOldByKey(ctx, e.getKey());
+			if (oi == null) continue;
+			int[] map = uniqueSubsequence(oi.captured, ni.captured);
+			if (map == null) continue;
+			String target = ni.name + ni.desc;
+			ctx.bridges.put(e.getKey(), new BridgeSpec(oi.desc, ni.name, ni.desc, map, oi.isStatic(),
+				locationOf(ctx.currentClass, oi.name, oi.desc) + " -> " + target));
+			TEST_EVENTS.add(new AlignmentEvent("BRIDGE", oi.name, ni.name,
+				ctx.currentClass + "#" + e.getKey() + " -> " + target));
+			RemoldAgent.info("[LambdaAligner] 捕获桥 " + ctx.currentClass + "#" + e.getKey()
+			                 + " -> " + target + "（捕获表 " + oi.captured.size() + " → "
+			                 + ni.captured.size() + "，旧实例继续可用）");
+		}
+
+		// ---- 2. 第二轮：上一轮建好的桥，把目标挪到本轮的名字上并重生成 ----
+		for (SyntheticInfo oi : allOld) {
+			if (!oi.bridge) continue;
+			String oldKey = oi.name + oi.desc;
+			if (presentKeys.contains(oldKey)) continue;
+			MethodNode mn = findMethod(oldCn, oi.name, oi.desc);
+			if (mn == null) continue;
+			BridgeDelegate bd = getBridgeDelegate(mn);
+			if (bd == null) {
+				dbg(() -> "BRIDGE unrecognized body: " + oldKey);
+				continue;                                          // 认不出：让它按幽灵处理
+			}
+			SyntheticInfo prevTarget = findOldByKey(ctx, bd.target.name + bd.target.desc);
+			if (prevTarget == null) {
+				dbg(() -> "BRIDGE target vanished: " + oldKey + " -> " + bd.target.name + bd.target.desc);
+				continue;
+			}
+			// 配对关系只记在新侧（pair 里 ni.matchedWith = oi），反向要自己找。
+			SyntheticInfo now = findNewForOld(ctx, prevTarget);
+			if (now == null) {
+				dbg(() -> "BRIDGE target unpaired: " + oldKey + " -> " + bd.target.name + bd.target.desc);
+				continue;                                          // 目标真没了
+			}
+			if (now.ghost || !now.renameable) continue;
+			if (presentKeys.contains(oldKey)) continue;
+			String target = now.name + now.desc;
+			ctx.bridges.put(oldKey, new BridgeSpec(oi.desc, now.name, now.desc, bd.oldParamIndex,
+				oi.isStatic(), locationOf(ctx.currentClass, oi.name, oi.desc) + " -> " + target));
+			TEST_EVENTS.add(new AlignmentEvent("BRIDGE_REPOINT", oi.name, now.name,
+				ctx.currentClass + "#" + oldKey + " -> " + target));
+		}
+
+		LAST_BRIDGE_COUNT = ctx.bridges.size();
+	}
+
+	/**
+	 * 三道门 + 布局自检 + "只支持删捕获"。
+	 *
+	 * @see #stepCaptureBridge
+	 */
+	private static boolean canBridge(SyntheticInfo oi, SyntheticInfo ni) {
+		// static 位是另一条轴（normalizeStaticShape 的地盘）。两轴同时变就不再有可证的映射。
+		if (oi.isStatic() != ni.isStatic()) return false;
+		if (!sameHost(oi, ni)) return false;
+		if (!Objects.equals(oi.fiType, ni.fiType)) return false;
+		if (!Objects.equals(oi.samSig, ni.samSig)) return false;
+		if (!Objects.equals(oi.instSig, ni.instSig)) return false;
+		if (!layoutHolds(oi) || !layoutHolds(ni)) return false;
+		if (ni.captured.size() >= oi.captured.size()) return false;
+		return uniqueSubsequence(oi.captured, ni.captured) != null;
+	}
+
+	/**
+	 * 宿主门：是不是"在同一个地方创建的那个 lambda"。
+	 *
+	 * <p>{@code M:} 键只比<b>方法名</b>。原因是<b>被删掉的捕获变量往往就是宿主方法的形参</b>
+	 * ——{@code void f(String s, int k)} 改成 {@code void f(int k)} 时，宿主描述符必然跟着变。
+	 * 若要求整个 {@code hostKey} 相等，最常见的那个场景反而永远建不出桥。</p>
+	 *
+	 * <p>{@code L:} 键（宿主本身是个 lambda）不放松：父 lambda 的票据哈希变了，说明父自己
+	 * 也没配对成功，此时谈"同一个宿主"只是猜。</p>
+	 *
+	 * <p><b>代价</b>：同名重载的宿主（{@code f(I)} 与 {@code f(II)} 同时存在）会共用宿主门，
+	 * 只能靠 SAM 门、子序列门与"1:1 唯一"三道约束去消歧；仍有歧义时两侧都退回幽灵桩。</p>
+	 */
+	private static boolean sameHost(SyntheticInfo a, SyntheticInfo b) {
+		if (a.hostKey == null || b.hostKey == null) return false;
+		if (a.hostKey.equals(b.hostKey)) return true;
+		if (!a.hostKey.startsWith("M:") || !b.hostKey.startsWith("M:")) return false;
+		return hostName(a.hostKey).equals(hostName(b.hostKey));
+	}
+
+	/** {@code "M:name+desc"} → {@code "M:name"}。 */
+	private static String hostName(String hostKey) {
+		int paren = hostKey.indexOf('(');
+		return paren < 0 ? hostKey : hostKey.substring(0, paren);
+	}
+
+	/**
+	 * 布局自检：{@code 捕获表 ++ 实例化 SAM 形参} 必须恰好等于 impl 描述符。
+	 *
+	 * <p>成立就说明"捕获值前置、SAM 形参在后"不是假设而是每例现验的；不成立说明这个
+	 * 调用点的布局另有蹊跷（编译器版本差异、或根本不是 LambdaMetafactory 产生的），
+	 * 此时任何参数映射都是猜的。</p>
+	 */
+	private static boolean layoutHolds(SyntheticInfo info) {
+		if (info.captured == null || info.instSig == null) return false;
+		StringBuilder sb = new StringBuilder("(");
+		for (String c : info.captured) sb.append(c);
+		for (Type t : Type.getArgumentTypes(info.instSig)) sb.append(t.getDescriptor());
+		sb.append(')').append(Type.getReturnType(info.instSig).getDescriptor());
+		return sb.toString().equals(info.desc);
+	}
+
+	/**
+	 * {@code newL} 是否是 {@code oldL} 的<b>唯一</b>子序列嵌入；是则返回
+	 * {@code 新形参下标 -> 老形参下标} 的映射，否则返回 {@code null}。
+	 *
+	 * <p>唯一性必须显式数一遍：{@code [int,int] → [int]} 有两种删法，任选其一都可能把
+	 * 另一个参数的值搬过去——那是静默错值，比不建桥糟糕得多。</p>
+	 */
+	private static int[] uniqueSubsequence(List<String> oldL, List<String> newL) {
+		int n = oldL.size(), m = newL.size();
+		if (m > n) return null;
+		int[][] cnt = new int[n + 1][m + 1];                     // 方案数，截断到 2
+		for (int i = 0; i <= n; i++) cnt[i][0] = 1;
+		for (int i = 1; i <= n; i++) {
+			for (int j = 1; j <= m; j++) {
+				int v = cnt[i - 1][j];
+				if (oldL.get(i - 1).equals(newL.get(j - 1))) v += cnt[i - 1][j - 1];
+				cnt[i][j] = Math.min(v, 2);
+			}
+		}
+		if (cnt[n][m] != 1) return null;
+		int[] map = new int[m];
+		int i = n, j = m;
+		while (j > 0) {
+			if (i <= 0) return null;                              // 理论上不可达
+			boolean take = oldL.get(i - 1).equals(newL.get(j - 1))
+			               && cnt[i - 1][j] == 0 && cnt[i - 1][j - 1] == 1;
+			if (take) {
+				map[j - 1] = i - 1;
+				i--;
+				j--;
+			} else {
+				i--;
+			}
+		}
+		return map;
+	}
+
+	/** 桥体：{@code [标记] [aload_0] 加载保留下来的老形参 → 调目标 → 返回}。 */
+	private static void injectBridgeBody(MethodVisitor mv, String className, boolean itf, BridgeSpec spec) {
+		mv.visitCode();
+		// 标记 + 日志。刻意走独立入口而不是 onOrphanInvoked：桥不是死孤儿，见 onBridgeInvoked。
+		mv.visitLdcInsn(spec.location);
+		mv.visitMethodInsn(Opcodes.INVOKESTATIC, Type.getInternalName(LambdaAligner.class),
+		                   "onBridgeInvoked", "(Ljava/lang/String;)V", false);
+		if (!spec.isStatic) mv.visitVarInsn(Opcodes.ALOAD, 0);
+
+		Type[] oldArgs = Type.getArgumentTypes(spec.oldDesc);
+		int[]  slotOf  = new int[oldArgs.length];
+		int    slot    = spec.isStatic ? 0 : 1;
+		for (int i = 0; i < oldArgs.length; i++) {
+			slotOf[i] = slot;
+			slot += oldArgs[i].getSize();
+		}
+		for (int pi : spec.oldParamIndex) {
+			mv.visitVarInsn(oldArgs[pi].getOpcode(Opcodes.ILOAD), slotOf[pi]);
+		}
+		// itf 必须跟着宿主走：接口里的合成方法在常量池里是 InterfaceMethodref，
+		// 写成 false 会得到一条指向 Methodref 的调用指令，校验/解析直接失败。
+		mv.visitMethodInsn(spec.isStatic ? Opcodes.INVOKESTATIC : Opcodes.INVOKESPECIAL,
+		                   className, spec.targetName, spec.targetDesc, itf);
+		mv.visitInsn(Type.getReturnType(spec.targetDesc).getOpcode(Opcodes.IRETURN));
+		mv.visitMaxs(0, 0);
+		mv.visitEnd();
+	}
+
+	/** 该方法的开头是不是桥体标记（{@code LDC loc; INVOKESTATIC onBridgeInvoked}）。 */
+	private static boolean isBridgeMethod(MethodNode mn) {
+		List<AbstractInsnNode> real = realInsns(mn);
+		if (real == null) return false;
+		real = stripGhostHash(real);
+		return real.size() >= 2
+		       && real.get(0) instanceof LdcInsnNode
+		       && real.get(1) instanceof MethodInsnNode p
+		       && p.owner.equals(Type.getInternalName(LambdaAligner.class))
+		       && p.name.equals("onBridgeInvoked");
+	}
+
+	/**
+	 * 解析上一轮注入的桥体：跳过标记前缀，按顺序收集被加载的老形参，最后那条调用就是目标。
+	 *
+	 * <p>与 {@link #getPureDelegate} 的关键区别：<b>允许跳过形参槽位</b>。桥本来就是
+	 * "少加载几个形参"的，若沿用那条"每个形参必须按槽位顺序恰好加载一次"的严格判据，
+	 * 跳槽位的桥在下一轮会判不出 delegate，直接退化成死幽灵——第一轮的成果当场作废。</p>
+	 *
+	 * <p>这条放宽只作用于带桥标记的方法，不影响 {@code getPureDelegate} 对普通 lambda
+	 * 的严格性（那份严格性是 {@code wasForwarding} 可信的前提）。</p>
+	 */
+	private static BridgeDelegate getBridgeDelegate(MethodNode mn) {
+		List<AbstractInsnNode> real = realInsns(mn);
+		if (real == null) return null;
+		real = stripGhostHash(real);
+		if (real.size() < 4) return null;
+		if (!(real.get(0) instanceof LdcInsnNode)
+		    || !(real.get(1) instanceof MethodInsnNode p)
+		    || !p.owner.equals(Type.getInternalName(LambdaAligner.class))
+		    || !p.name.equals("onBridgeInvoked")) {
+			return null;
+		}
+		int i = 2;
+		boolean isStatic = (mn.access & Opcodes.ACC_STATIC) != 0;
+		if (!isStatic) {
+			if (!(real.get(i) instanceof VarInsnNode v) || v.getOpcode() != Opcodes.ALOAD || v.var != 0) return null;
+			i++;
+		}
+		// 形参槽位 -> 形参下标
+		Type[] args = Type.getArgumentTypes(mn.desc);
+		Map<Integer, Integer> paramAtSlot = new HashMap<>();
+		int slot = isStatic ? 0 : 1;
+		for (int k = 0; k < args.length; k++) {
+			paramAtSlot.put(slot, k);
+			slot += args[k].getSize();
+		}
+
+		List<Integer> loaded = new ArrayList<>();
+		int lastSlot = -1;
+		MethodInsnNode core = null;
+		for (; i < real.size(); i++) {
+			AbstractInsnNode insn = real.get(i);
+			int op = insn.getOpcode();
+			if (insn instanceof VarInsnNode v && op >= Opcodes.ILOAD && op <= Opcodes.ALOAD) {
+				Integer pi = paramAtSlot.get(v.var);
+				if (pi == null) return null;                      // 加载了非形参槽位：不是我们的桥
+				if (v.var <= lastSlot) return null;               // 顺序被打乱：不认
+				lastSlot = v.var;
+				loaded.add(pi);
+			} else if (op >= Opcodes.IRETURN && op <= Opcodes.RETURN) {
+				// ok
+			} else if (insn instanceof MethodInsnNode m) {
+				if (core != null) return null;                    // 只能有一条核心调用
+				core = m;
+			} else {
+				return null;
+			}
+		}
+		if (core == null) return null;
+		int[] idx = new int[loaded.size()];
+		for (int k = 0; k < idx.length; k++) idx[k] = loaded.get(k);
+		return new BridgeDelegate(core, idx);
+	}
+
+	/** 全部真实指令（跳过 {@code opcode < 0} 的伪指令）；空方法返回 {@code null}。 */
+	private static List<AbstractInsnNode> realInsns(MethodNode mn) {
+		if (mn.instructions == null || mn.instructions.size() == 0) return null;
+		List<AbstractInsnNode> real = new ArrayList<>();
+		for (AbstractInsnNode i : mn.instructions) {
+			if (i.getOpcode() >= 0) real.add(i);
+		}
+		return real;
+	}
+
+	/** 剥掉"生前指纹"标记 {@code LDC <long>; POP2}。 */
+	private static List<AbstractInsnNode> stripGhostHash(List<AbstractInsnNode> real) {
+		if (real.size() >= 2
+		    && real.get(0) instanceof LdcInsnNode marker
+		    && marker.cst instanceof Long
+		    && real.get(1).getOpcode() == Opcodes.POP2) {
+			return new ArrayList<>(real.subList(2, real.size()));
+		}
+		return real;
+	}
+
+	private static SyntheticInfo findOldByKey(MatchContext ctx, String key) {
+		for (int gi = ctx.oldGroups.nextEntry(-1); gi != -1; gi = ctx.oldGroups.nextEntry(gi)) {
+			List<SyntheticInfo> g = ctx.oldGroups.valueAt(gi);
+			if (g == null) continue;
+			for (SyntheticInfo oi : g) {
+				if ((oi.name + oi.desc).equals(key)) return oi;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * 反查：这个旧方法在本轮被配给了哪个新方法。
+	 *
+	 * <p>{@link #pair} 只写 {@code ni.matchedWith = oi}（新侧单向指针），旧侧的
+	 * {@code matchedWith} 始终是 {@code null}，所以从旧找新必须扫新侧。</p>
+	 */
+	private static SyntheticInfo findNewForOld(MatchContext ctx, SyntheticInfo oi) {
+		if (oi == null || !oi.matched) return null;
+		for (int gi = ctx.newGroups.nextEntry(-1); gi != -1; gi = ctx.newGroups.nextEntry(gi)) {
+			List<SyntheticInfo> g = ctx.newGroups.valueAt(gi);
+			if (g == null) continue;
+			for (SyntheticInfo ni : g) {
+				if (ni.matchedWith == oi) return ni;
+			}
+		}
+		return null;
+	}
+
+	/** 按 {@code name + desc} 精确查（{@code nameIndex} 按名字索引，同名异描述符时会取错）。 */
+	private static SyntheticInfo findByKey(LongObjectMap<List<SyntheticInfo>> groups, String name, String desc) {		for (int gi = groups.nextEntry(-1); gi != -1; gi = groups.nextEntry(gi)) {
+			List<SyntheticInfo> g = groups.valueAt(gi);
+			if (g == null) continue;
+			for (SyntheticInfo i : g) {
+				if (i.name.equals(name) && i.desc.equals(desc)) return i;
+			}
+		}
+		return null;
+	}
+
+	private static MethodNode findMethod(ClassNode cn, String name, String desc) {
+		for (MethodNode mn : cn.methods) {
+			if (mn.name.equals(name) && mn.desc.equals(desc)) return mn;
+		}
+		return null;
+	}
+
+	/**
+	 * 捕获桥被调用时进入（由注入的桥体字节码调用）。
+	 *
+	 * <p><b>刻意不查熔断器</b>：{@link #onOrphanInvoked} 在 {@code SMART_ADAPTIVE} 下先判
+	 * {@code isOrphanBreakerTriggered()} 再抛 {@link NoSuchMethodError}，而桥按构造就
+	 * <b>不是</b>死孤儿——它的目标方法存在、且被三道门证明过兼容。若复用那个入口，
+	 * 挂在 UI / 定时器熔断器上的回调会在转发之前被直接炸断，桥等于白建。</p>
+	 */
+	public static void onBridgeInvoked(String location) {
+		if (LOGGED_BRIDGES.add(location)) {
+			RemoldAgent.info("[LambdaAligner] bridged lambda invoked: " + location
+			                 + " (capture list shrank; forwarding to the new body)");
+		}
+	}
+
+	private static final Set<String> LOGGED_BRIDGES =
+	 Collections.newSetFromMap(new ConcurrentHashMap<>());
+
 	/**
 	 * 将被删除的 lambda 以“空方法体或透明转发桩”的形式复活注入到新字节码中，
 	 * 防止被缓存的 {@code CallSite} 抛出 {@link NoSuchMethodError}。
@@ -3046,12 +3542,18 @@ public class LambdaAligner {
 		// 可观测性：幽灵化是"静默"发生在对齐期的。把这行与
 		// warnPositionalMismatch 放在一起看，就能认出"删除 + 改体同时发生"这一形态
 		StringBuilder ghosted = new StringBuilder();
+		int bridgeCount = 0;
 		for (MethodNode mn : toInject) {
+			if (ctx.bridges.containsKey(mn.name + mn.desc)) {
+				bridgeCount++;
+				continue;
+			}
 			if (ghosted.length() > 0) ghosted.append(", ");
 			ghosted.append(mn.name);
 		}
-		RemoldAgent.info("[LambdaAligner] " + oldCn.name + " 幽灵化 " + toInject.size()
-		                  + " 个方法（老 CallSite 将走熔断/降级）：" + ghosted);
+		RemoldAgent.info("[LambdaAligner] " + oldCn.name + " 幽灵化 " + (toInject.size() - bridgeCount)
+		                  + " 个方法（老 CallSite 将走熔断/降级）：" + ghosted
+		                  + (bridgeCount > 0 ? "；另建 " + bridgeCount + " 座捕获桥（转发给新方法）" : ""));
 
 		// 3. 以空壳或转发桩形式追加到新类末尾
 		ClassReader cr = new ClassReader(newBytes);
@@ -3082,6 +3584,15 @@ public class LambdaAligner {
 					 access, mn.name, mn.desc, mn.signature,
 					 mn.exceptions == null ? null : mn.exceptions.toArray(new String[0]));
 					if (dummy != null) {
+						// 捕获桥优先：这个老键不是"死了"，只是参数表缩水，转发给新方法即可。
+						BridgeSpec bridge = ctx.bridges.get(mn.name + mn.desc);
+						if (bridge != null) {
+							TEST_EVENTS.add(new AlignmentEvent("BRIDGE_INJECT", mn.name, bridge.targetName,
+							 className + "#" + mn.name + mn.desc));
+							injectBridgeBody(dummy, className,
+							 (oldCn.access & Opcodes.ACC_INTERFACE) != 0, bridge);
+							continue;
+						}
 						Delegate delegate = getPureDelegate(mn);
 						boolean canForward = false;
 						if (delegate != null) {
@@ -3819,6 +4330,39 @@ public class LambdaAligner {
 		 * {@code CallSite}，绝不该再被当成某个新 lambda 的匹配目标。</p>
 		 */
 		boolean ghost;
+
+		/**
+		 * 该 lambda 在 indy 工厂描述符里的<b>捕获表</b>（按声明顺序的类型描述符，例如
+		 * {@code ["Ljava/lang/String;", "I"]}）。
+		 *
+		 * <p>{@code null} 表示"没有任何 indy 调用点指向它"——上一轮注入的幽灵桩/桥、
+		 * 或从未被遍历到的死代码。捕获桥以 {@code null} 为拒绝条件：看不到捕获表就无法
+		 * 证明参数布局，只能按老路幽灵化。</p>
+		 */
+		List<String> captured;
+
+		/** indy 工厂描述符的返回类型（功能接口的内部名）。 */
+		String fiType;
+
+		/** {@code bsmArgs[0]}：SAM 的<b>擦除</b>签名。 */
+		String samSig;
+
+		/**
+		 * {@code bsmArgs[2]}：SAM 的<b>实例化</b>签名。
+		 *
+		 * <p>重建 impl 描述符必须用它而不是 {@link #samSig}：泛型功能接口的 SAM 是擦除后的
+		 * （{@code Consumer<String>} 的 samSig 是 {@code (Ljava/lang/Object;)V}），
+		 * 只有实例化签名才和 impl 方法的形参类型对得上。</p>
+		 */
+		String instSig;
+
+		/**
+		 * 本方法是上一轮注入的<b>捕获桥</b>，不是真 lambda 体。
+		 *
+		 * <p>桥的键（旧 name+desc）在新版本里天然没有对应物。若下一轮认不出它，它会被
+		 * 当成"又被删了一次"重新幽灵化，第一轮的成果当场作废。</p>
+		 */
+		boolean bridge;
 
 		/**
 		 * 幽灵桩"生前"的方法体指纹（0 = 未知）。

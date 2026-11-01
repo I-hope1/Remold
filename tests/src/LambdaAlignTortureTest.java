@@ -173,9 +173,12 @@ public class LambdaAlignTortureTest {
 		int matched = s.step1Pairs + s.passAPairs + s.passBPairs;
 		int ghosts = 0;
 		for (MethodNode mn : aligned.methods) if (isGhost(mn)) ghosts++;
+		// 第三桶：捕获桥。它既不参与配对（桥不改名），也不是幽灵桩（它真的转发）。
+		int bridges = LambdaAligner.LAST_BRIDGE_COUNT;
 
-		assertEquals(oldLambdas, matched + ghosts,
+		assertEquals(oldLambdas, matched + ghosts + bridges,
 			"旧 lambda 共 " + oldLambdas + " 个，但三趟配对合计 " + matched + " + 幽灵 " + ghosts
+				+ " + 捕获桥 " + bridges
 				+ " 对不上（stats=" + s + "，方法表 " + table(aligned) + "）");
 		assertTrue(s.hashMismatchPairs <= matched,
 			"hashMismatchPairs(" + s.hashMismatchPairs + ") 是配对的叠加标记，不该超过配对总数 " + matched);

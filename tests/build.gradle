@@ -476,6 +476,9 @@ dcevmProbe("twoPhaseProbe", "TwoPhaseProbe",
 dcevmProbe("offsetStabilityProbe", "OffsetStabilityProbe",
 	"偏移量稳定性与漂移实测探针 (OffsetStabilityProbe)：单类加字段稳定性、父类漂移、Updater破坏与C2逆优化")
 
+dcevmProbe("lambdaBridgeProbe", "LambdaBridgeProbe",
+	"删除捕获变量后的老 callsite 行为探针 (LambdaBridgeProbe)：同名异描述符 / 改名 / 加捕获 / 仅改方法体")
+
 // 读者扫描成本探针：不需要 DCEVM，只需要 Instrumentation 来枚举已加载类。
 tasks.register("readerScanProbe", JavaExec) {
 	group = "verification"

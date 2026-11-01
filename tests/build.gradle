@@ -363,6 +363,30 @@ def p05AgentJar = tasks.register("p05AgentJar", Jar) {
 
 // DCEVM 探针的公共配置：p05Probe 与 twoPhaseProbe 共用。
 // 用 -Pp05.jbr=<jdk-home> 或 JBR_HOME/JAVA_HOME_DCEVM/JAVA_HOME_21_X64 指定运行时。
+def probeIsWindows = System.getProperty("os.name").toLowerCase().contains("win")
+
+/**
+ * 先试跑一次，确认目标运行时接受这条 -Xlog 选择器。
+ *
+ * <p>各 JDK 大版本的 tag 集合并不一致：{@code deoptimization} 在 17 上根本不存在，
+ * 写进命令行会让 JVM 直接 "Could not create the Java Virtual Machine" 退出，探针一行输出都没有
+ * （CI 的 JBR 17 腿就是这么挂的）。所以这里一律先证明再用——少一路日志可以显式声明，
+ * 起不来则整个探针报废。</p>
+ */
+def jvmAcceptsXlog = { File javaBin, File logFile, String selection ->
+	try {
+		def proc = new ProcessBuilder(javaBin.absolutePath,
+			"-Xlog:${selection}:file=${logFile.absolutePath}:uptimenanos", "-version")
+			.redirectErrorStream(true)
+			.redirectOutput(ProcessBuilder.Redirect.DISCARD)
+			.start()
+		proc.waitFor()
+		return proc.exitValue() == 0
+	} catch (Exception ignored) {
+		return false
+	}
+}
+
 def dcevmProbe = { String taskName, String mainClassName, String desc ->
 	tasks.register(taskName, JavaExec) {
 		group = "verification"
@@ -375,7 +399,7 @@ def dcevmProbe = { String taskName, String mainClassName, String desc ->
 		def jbrHome = (project.findProperty("p05.jbr") as String)
 			?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
 		if (jbrHome != null) {
-			def javaBin = new File(jbrHome, System.getProperty("os.name").toLowerCase().contains("win") ? "bin/java.exe" : "bin/java")
+			def javaBin = new File(jbrHome, probeIsWindows ? "bin/java.exe" : "bin/java")
 			if (javaBin.exists()) {
 				executable = javaBin.absolutePath
 				javaLauncher.set((JavaLauncher) null)
@@ -386,20 +410,51 @@ def dcevmProbe = { String taskName, String mainClassName, String desc ->
 		doFirst {
 			def p05Dir = project.layout.buildDirectory.dir("p05").get().asFile
 			p05Dir.mkdirs()
+
+			// 探针实际会用的那个 java：优先显式 executable，其次 toolchain launcher，最后退回 Gradle 自己的 JVM。
+			// -Xlog 的选择器要按这个 JVM 探测，不能按跑 Gradle 的那个。
+			File probeJava = null
+			if (getExecutable() != null) {
+				probeJava = new File(getExecutable())
+			} else {
+				try {
+					if (javaLauncher.present) probeJava = javaLauncher.get().executablePath.asFile
+				} catch (Exception ignored) { }
+			}
+			if (probeJava == null || !probeJava.exists()) {
+				probeJava = new File(System.getProperty("java.home"), probeIsWindows ? "bin/java.exe" : "bin/java")
+			}
+
 			jvmArgs "-javaagent:${p05AgentJar.get().archiveFile.get().asFile.absolutePath}",
 			        "-XX:+AllowEnhancedClassRedefinition",
 			        // InitFix 的静态初始化直接用 jdk.internal.misc.Unsafe
 			        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
 			        "--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
-			        "--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED",
-			        // 交叉验证 M6：枚举期间到底有没有一段 STW
-			        // 观测先行：safepoint 看停顿、gc 看分配压力、deopt/compilation 验证 JIT 场景不是空转。
-			        // uptimenanos 装饰符让三类日志能和探针里的 nanoTime 对齐。
-			        "-Xlog:safepoint=info:file=${new File(p05Dir, 'safepoint.log').absolutePath}:uptimenanos",
-			        "-Xlog:gc*=info:file=${new File(p05Dir, 'gc.log').absolutePath}:uptimenanos",
-			        "-Xlog:deoptimization=debug:file=${new File(p05Dir, 'deopt.log').absolutePath}:uptimenanos",
-			        "-Xlog:jit+compilation=debug:file=${new File(p05Dir, 'compilation.log').absolutePath}:uptimenanos",
-			        "-Dp05.logdir=${p05Dir.absolutePath}",
+			        "--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED"
+
+			// 交叉验证 M6：枚举期间到底有没有一段 STW
+			// 观测先行：safepoint 看停顿、gc 看分配压力、deopt/compilation 验证 JIT 场景不是空转。
+			// uptimenanos 装饰符让三类日志能和探针里的 nanoTime 对齐。
+			// 逐条探测：不支持的（如 17 上的 deoptimization）跳过，并把缺失项交给探针显式声明。
+			def skippedXlog = []
+			[['safepoint=info', 'safepoint.log'],
+			 ['gc*=info', 'gc.log'],
+			 ['deoptimization=debug', 'deopt.log'],
+			 ['jit+compilation=debug', 'compilation.log']].each { spec ->
+				String selection = spec[0]
+				File logFile = new File(p05Dir, spec[1])
+				if (jvmAcceptsXlog(probeJava, logFile, selection)) {
+					jvmArgs "-Xlog:${selection}:file=${logFile.absolutePath}:uptimenanos"
+				} else {
+					skippedXlog << selection
+				}
+			}
+			if (!skippedXlog.isEmpty()) {
+				logger.lifecycle("[${taskName}] ${probeJava} 不接受 -Xlog 选择器 ${skippedXlog}，已跳过（探针会声明该路证据缺失）")
+				systemProperty "p05.xlog.skipped", skippedXlog.join(",")
+			}
+
+			jvmArgs "-Dp05.logdir=${p05Dir.absolutePath}",
 			        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
 			if (nativeLibPath != null) {
 				jvmArgs "-Dremold.path.libtool=${nativeLibPath}"

@@ -77,6 +77,11 @@ public class P05Probe {
 		                   + ", java.version = " + System.getProperty("java.version"));
 		System.out.println("   enhanced redefine flag present = " + hasEnhancedFlag());
 		System.out.println("   max heap = " + (Runtime.getRuntime().maxMemory() >> 20) + " MiB");
+		String skippedXlog = System.getProperty("p05.xlog.skipped", "");
+		if (!skippedXlog.isEmpty()) {
+			System.out.println("   [EVIDENCE-MISSING] 本运行时没有这些 -Xlog 选择器: " + skippedXlog
+			                   + " —— 对应交叉验证日志为空。这是证据缺失，不是断言失败。");
+		}
 
 		Instrumentation inst = P05Agent.instrumentation();
 		if (inst == null) {
@@ -507,34 +512,78 @@ public class P05Probe {
 			Field fb = host.getField("b");
 
 			for (int n : new int[]{100_000, 1_000_000}) {
-				Object[] keep = new Object[n];
-				for (int i = 0; i < n; i++) keep[i] = Reflect.UNSAFE.allocateInstance(host);
-
-				RemoldAgent.bytecodeCache.put("p05.Bulk", v2);
-				InitFix.transform(host, v2, ClassDiffUtil.diff(v1, v2));
-
-				long t0 = System.nanoTime();
-				InitFix.afterRedefine(host);
-				long totalUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - t0);
-
-				long t1 = System.nanoTime();
-				Object[] got = LibTool.getInstances(host);
-				long enumUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - t1);
-
-				long casUs = totalUs - enumUs;
-				System.out.printf("   n=%-8d applyPatch=%-8dus  enumerate=%-8dus  impliedCAS=%-8dus  enumShare=%.1f%%%n",
-				                  n, totalUs, enumUs, casUs, totalUs == 0 ? 0.0 : 100.0 * enumUs / totalUs);
-
-				check(got.length == n, "enumeration still sees all " + n + " live instances");
-				check(fb.getInt(keep[0]) == 42 && fb.getInt(keep[n - 1]) == 42,
-				      "the CAS loop actually wrote the patched value at n=" + n);
-
-				keep = null;
-				System.gc();
+				runPatchRound(host, v1, v2, fb, n);
 			}
 		} finally {
 			cl.close();
 		}
+	}
+
+	/**
+	 * 单轮：分配 n 个实例 → 打补丁 → 枚举 → 断言。
+	 *
+	 * <p><b>必须独立成方法</b>：{@code keep} 与 {@code got} 都是装着本轮全部实例的强引用数组。
+	 * 两者留在同一个栈帧里跨轮存活时，下一轮枚举到的是 {@code n + 上一轮 n} 个实例
+	 * （CI 上实测 1M 轮打出 {@code count=1100000}），那条"枚举看到全部 n 个"的断言就变成了
+	 * 在测自己上一轮的残留——看起来像内存压力的偶发，实质是引用泄漏。
+	 * 返回即出栈，配合末尾的置空与 {@code gc}，下一轮才能从干净堆开始。</p>
+	 */
+	static void runPatchRound(Class<?> host, byte[] v1, byte[] v2, Field fb, int n) throws Exception {
+		// 前置基线：本轮 n 的语义是"堆里恰好有 n 个"。上一轮没收干净就先说出来，
+		// 免得下面那条断言把"测试残留"报成"枚举漏实例"。
+		int residue = awaitNoInstances(host, 5);
+		check(residue == 0, "heap holds no stale p05.Bulk before n=" + n + " (residue=" + residue + ")");
+
+		Object[] keep = new Object[n];
+		for (int i = 0; i < n; i++) keep[i] = Reflect.UNSAFE.allocateInstance(host);
+
+		RemoldAgent.bytecodeCache.put("p05.Bulk", v2);
+		InitFix.transform(host, v2, ClassDiffUtil.diff(v1, v2));
+
+		long t0 = System.nanoTime();
+		InitFix.afterRedefine(host);
+		long totalUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - t0);
+
+		long t1 = System.nanoTime();
+		Object[] got = LibTool.getInstances(host);
+		long enumUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - t1);
+
+		long casUs = totalUs - enumUs;
+		System.out.printf("   n=%-8d applyPatch=%-8dus  enumerate=%-8dus  impliedCAS=%-8dus  enumShare=%.1f%%%n",
+		                  n, totalUs, enumUs, casUs, totalUs == 0 ? 0.0 : 100.0 * enumUs / totalUs);
+
+		check(got.length == n, "enumeration still sees all " + n + " live instances (got " + got.length + ")");
+		check(fb.getInt(keep[0]) == 42 && fb.getInt(keep[n - 1]) == 42,
+		      "the CAS loop actually wrote the patched value at n=" + n);
+
+		// 置空后才 gc：局部变量在返回前仍可达，直接 gc 收不掉本轮这批。
+		keep = null;
+		got = null;
+		System.gc();
+	}
+
+	/**
+	 * 反复 {@code gc} 直到堆里一个该类的实例都不剩，返回最后一次的残留数量。
+	 *
+	 * <p>{@link LibTool#getInstances} 连"不可达但尚未被物理回收"的对象也会返回，
+	 * 所以只能看 {@code System.gc()} 是否真的跑过——它只是建议，不是保证。</p>
+	 */
+	static int awaitNoInstances(Class<?> host, int attempts) {
+		int residue = -1;
+		for (int i = 0; i < attempts; i++) {
+			Object[] live = LibTool.getInstances(host);
+			residue = live.length;
+			live = null;
+			if (residue == 0) return 0;
+			System.gc();
+			try {
+				Thread.sleep(50L);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				return residue;
+			}
+		}
+		return residue;
 	}
 
 	// ------------------------------------------------------------------------------------------------

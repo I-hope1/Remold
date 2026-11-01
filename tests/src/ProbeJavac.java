@@ -43,6 +43,16 @@ final class ProbeJavac {
 		return jc > 0 ? Math.min(runtime, jc) : runtime;
 	}
 
+	/**
+	 * 运行时能接受的 class 文件主版本号（Java 8 = 52，每代 +1）。
+	 *
+	 * <p>ASM 直接生成的字节码同样要按这个落版本：写死 {@code Opcodes.V21} 在 17 上会在
+	 * {@code defineHiddenClass} 处被 VM 的类文件解析器直接拒掉，跟被测机制无关。</p>
+	 */
+	static int classFileVersion() {
+		return Runtime.version().feature() + 44;
+	}
+
 	private static int javacFeature(String javac) {
 		if (cachedFeature != 0 && javac.equals(cachedJavac)) return cachedFeature;
 		int feature = -1;

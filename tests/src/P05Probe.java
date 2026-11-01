@@ -322,7 +322,8 @@ public class P05Probe {
 	 */
 	static byte[] companionBytes() {
 		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
-		cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, "p05/Companion", null, "java/lang/Object", null);
+		// 版本跟着运行时走：写死 V21 在 JBR 17 上会被 defineHiddenClass 直接拒掉。
+		cw.visit(ProbeJavac.classFileVersion(), Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, "p05/Companion", null, "java/lang/Object", null);
 		MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
 		                                  "call", "(Ljava/lang/Object;)Ljava/lang/String;", null, null);
 		mv.visitCode();
@@ -1509,10 +1510,19 @@ public class P05Probe {
 		return System.getProperty("os.name").toLowerCase().contains("win");
 	}
 
+	/**
+	 * 异常摘要。带 cause 链：只看最外层的话，{@code RuntimeException: Failed to define hidden
+	 * class} 这种包装会把真正的原因（{@code UnsupportedClassVersionError} 之类）整个吞掉。
+	 */
 	static String describe(Throwable t) {
 		if (t == null) return "none";
-		String s = t.getClass().getSimpleName();
-		return t.getMessage() == null ? s : s + ": " + t.getMessage();
+		StringBuilder sb = new StringBuilder();
+		for (int i = 0; t != null && i < 4; i++, t = t.getCause()) {
+			if (i > 0) sb.append(" <- ");
+			sb.append(t.getClass().getSimpleName());
+			if (t.getMessage() != null) sb.append(": ").append(t.getMessage());
+		}
+		return sb.toString();
 	}
 
 	static void runCmd(String... cmd) throws Exception {

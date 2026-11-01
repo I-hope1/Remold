@@ -618,26 +618,58 @@ public class TwoPhaseProbe {
 	 *
 	 * <p>日志行在 safepoint <b>结束时</b>打印。用 {@code 时间戳 − Total} 当起点太宽：{@code Total} 里含
 	 * 「Reaching safepoint」的等待时间，那段时间业务线程仍在运行，会把无关的编译器标记算进窗口
-	 * （对照组实测踩到）。这里收窄到真正的停世界段：起点 = 时间戳 − At − Leaving。</p>
+	 * （对照组实测踩到）。这里收窄到真正的停世界段。</p>
+	 *
+	 * <p><b>字段集合随版本变</b>：21+ 的行是
+	 * {@code ..., Cleanup: N ns, At safepoint: N ns, Leaving safepoint: N ns, Total: N ns}，
+	 * 17 没有 {@code Cleanup} 与 {@code Leaving}，只有 {@code Reaching / At / Total}
+	 * （本机 17.0.2 与 JBR 21 逐条比对确认）。所以不能写死字段组合：</p>
+	 * <ul>
+	 *   <li>有 {@code At} + {@code Leaving}：停世界段 = {@code At + Leaving}；</li>
+	 *   <li>没有 {@code Leaving}：停世界段 = {@code Total − Reaching}，在 17 上正好等于
+	 *       {@code At + Leaving}（{@code Total = Reaching + At + Leaving}）；</li>
+	 *   <li>只有 {@code At}：退化为 {@code At}，并把这一点显式标注出来。</li>
+	 * </ul>
 	 */
 	static long[] lastRedefineWindow() {
 		String text = readLog("safepoint.log");
 		if (text.isEmpty()) return new long[]{-1, -1};
-		java.util.regex.Pattern p = java.util.regex.Pattern.compile(
-			"^\\[(\\d+)ns\\].*Safepoint \"RedefineClasses\".*"
-			+ "At safepoint: (\\d+) ns, Leaving safepoint: (\\d+) ns");
-		long end = -1, at = 0, leaving = 0;
+		java.util.regex.Pattern head = java.util.regex.Pattern.compile(
+			"^\\[(\\d+)ns\\].*Safepoint \"RedefineClasses\"");
+		java.util.regex.Pattern at      = java.util.regex.Pattern.compile("At safepoint: (\\d+) ns");
+		java.util.regex.Pattern leaving = java.util.regex.Pattern.compile("Leaving safepoint: (\\d+) ns");
+		java.util.regex.Pattern total   = java.util.regex.Pattern.compile("Total: (\\d+) ns");
+		java.util.regex.Pattern reach   = java.util.regex.Pattern.compile("Reaching safepoint: (\\d+) ns");
+		long end = -1, atNs = -1, leavingNs = -1, totalNs = -1, reachNs = -1;
 		for (String line : text.split("\n")) {
-			java.util.regex.Matcher m = p.matcher(line);
+			java.util.regex.Matcher m = head.matcher(line);
 			if (!m.find()) continue;
 			long ts = Long.parseLong(m.group(1));
-			if (ts > end) {
-				end = ts;
-				at = Long.parseLong(m.group(2));
-				leaving = Long.parseLong(m.group(3));
-			}
+			if (ts <= end) continue;
+			end = ts;
+			atNs = grab(at, line);
+			leavingNs = grab(leaving, line);
+			totalNs = grab(total, line);
+			reachNs = grab(reach, line);
 		}
-		return new long[]{end < 0 ? -1 : end - at - leaving, end};
+		if (end < 0) return new long[]{-1, -1};
+		long stopWorld;
+		if (atNs >= 0 && leavingNs >= 0) {
+			stopWorld = atNs + leavingNs;
+		} else if (totalNs >= 0 && reachNs >= 0) {
+			stopWorld = totalNs - reachNs;
+		} else if (atNs >= 0) {
+			stopWorld = atNs;
+		} else {
+			return new long[]{-1, -1};
+		}
+		return new long[]{end - stopWorld, end};
+	}
+
+	/** 正则第一次命中的数字；没命中返回 -1。 */
+	private static long grab(java.util.regex.Pattern p, String line) {
+		java.util.regex.Matcher m = p.matcher(line);
+		return m.find() ? Long.parseLong(m.group(1)) : -1;
 	}
 
 	/** 统计时间戳严格早于 {@code beforeNanos} 且匹配正则的行数。 */

@@ -109,7 +109,11 @@ test {
 	dependsOn hstestFixtureTasks
 	inputs.dir(hstestFixtureRoot)
 	useJUnitPlatform()
-	maxParallelForks = 1
+	// 并行度：默认**串行**。实测（本机 8 核 Windows）4 fork 反而更慢——5m43s vs 串行 5m07s。
+	// 瓶颈不是 CPU 而是密集的 `javac` 子进程（每个测试都起外部编译器），多 fork 只是把它们
+	// 排到同一批核上互相抢。Linux/CI 上可以试 -Phstest.forks=N；本机排查偶发失败时用 1。
+	// 注意：这是 Task 的运行时配置，不作为 input，改它不会让 test 失效重跑（需要 --rerun-tasks）。
+	maxParallelForks = (project.findProperty("hstest.forks") ?: 1).toInteger()
 	workingDir = projectDir
 	// 模拟模板的真实注入方式（见 minecraft-fabric-template/README.md）：标准 JDK 必须靠
 	// IgnoreUnrecognizedVMOptions 才能接受 DCEVM 专有参数，而 RuntimeMXBean.getInputArguments()
@@ -224,8 +228,7 @@ tasks.register("layoutGateAssert", JavaExec) {
 }
 
 // 5. GhostProbe
-tasks.register("ghostProbe", JavaExec) {
-	group = "verification"
+tasks.register("ghostProbe", JavaExec) {	group = "verification"
 	description = "运行幽灵桩熔断栈探测断言 (GhostProbe)"
 	dependsOn classes
 	dependsOn project(":core").tasks.named("shadowJar")
@@ -270,6 +273,40 @@ tasks.register("fingerprintAssert", JavaExec) {
 			jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
 		}
 	}
+}
+
+// ------------------------------------------------------------------------------------------------
+// 断言型探针的增量与构建缓存
+//
+// 这几个任务跑完只关心 exit code，是**断言**而不是**测量**，所以可以安全地 up-to-date：
+// 输入（classpath / main / Kotlin 夹具目录）没变且上次通过，就没有理由再冷启动一次 JVM。
+//
+// 测量型探针（p05 / twoPhase / offset / lambdaBridge / readerScan / cacheWarming / alignBaseline）
+// 刻意**不**这么做：它们要的是本次运行的真实数字，跳过等于给你一份假数据。要复跑用
+// `--rerun-tasks`。
+// ------------------------------------------------------------------------------------------------
+["mixinProbe", "initFixOracle", "ghostProbe", "concurrencyAssert", "fingerprintAssert"].each { name ->
+	tasks.named(name, JavaExec) {
+		inputs.files(classpath).withPropertyName("probeClasspath")
+		inputs.property("mainClass", mainClass)
+		// agent 是显式 -javaagent 传进去的，不在 classpath 里，得单独声明。
+		if (name != "initFixOracle") {
+			inputs.files(project(":core").tasks.named("shadowJar"))
+			      .withPropertyName("agentJar")
+		}
+		def stamp = layout.buildDirectory.file("probes/${name}.ok")
+		outputs.file(stamp)
+		doLast {
+			def f = stamp.get().asFile
+			f.parentFile.mkdirs()
+			f.text = "ok\n"
+		}
+	}
+}
+// InitFix 的 Kotlin 夹具是独立 sourceSet，走 systemProperty 传路径，不在 classpath 里。
+tasks.named("initFixOracle", JavaExec) {
+	inputs.files(sourceSets.ktfixV1.output.classesDirs, sourceSets.ktfixV2.output.classesDirs)
+	      .withPropertyName("ktfixFixtures")
 }
 
 // 8. verifyDocStatusMarkers
@@ -366,25 +403,43 @@ def p05AgentJar = tasks.register("p05AgentJar", Jar) {
 def probeIsWindows = System.getProperty("os.name").toLowerCase().contains("win")
 
 /**
- * 先试跑一次，确认目标运行时接受这条 -Xlog 选择器。
+ * 先试跑一次，确认目标运行时接受这些 -Xlog 选择器。
  *
  * <p>各 JDK 大版本的 tag 集合并不一致：{@code deoptimization} 在 17 上根本不存在，
  * 写进命令行会让 JVM 直接 "Could not create the Java Virtual Machine" 退出，探针一行输出都没有
  * （CI 的 JBR 17 腿就是这么挂的）。所以这里一律先证明再用——少一路日志可以显式声明，
  * 起不来则整个探针报废。</p>
+ *
+ * <p><b>一次进程搞定</b>：常态（21+）下四条选择器全支持，把它们塞进同一条命令行试一次即可；
+ * 只有失败时才逐条二分。结果按 java 路径缓存，四个探针任务共用一次探测。</p>
  */
-def jvmAcceptsXlog = { File javaBin, File logFile, String selection ->
+def xlogSupportCache = [:]
+def runJavaQuietly = { File javaBin, List<String> args ->
 	try {
-		def proc = new ProcessBuilder(javaBin.absolutePath,
-			"-Xlog:${selection}:file=${logFile.absolutePath}:uptimenanos", "-version")
-			.redirectErrorStream(true)
-			.redirectOutput(ProcessBuilder.Redirect.DISCARD)
-			.start()
-		proc.waitFor()
-		return proc.exitValue() == 0
+		// 必须逐元素 toString：Groovy 的字符串插值产出 GString，而 ProcessBuilder(List)
+		// 不会做逐元素强转，start() 时才抛 ArrayStoreException——被下面的 catch 吞掉后
+		// 表现成"这条选择器不支持"，整批日志会被静默跳过。
+		def cmd = ([javaBin.absolutePath] + args).collect { it.toString() }
+		def p = new ProcessBuilder(cmd).redirectErrorStream(true)
+			.redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
+		p.waitFor()
+		return p.exitValue() == 0
 	} catch (Exception ignored) {
 		return false
 	}
+}
+def supportedXlog = { File javaBin, List<String> selections ->
+	String key = javaBin.absolutePath
+	if (xlogSupportCache.containsKey(key)) return xlogSupportCache[key]
+	List<String> ok
+	def asArgs = { List<String> sel -> sel.collect { "-Xlog:${it}:stdout:uptimenanos".toString() } }
+	if (runJavaQuietly(javaBin, asArgs(selections) + ["-version"])) {
+		ok = new ArrayList<>(selections)
+	} else {
+		ok = selections.findAll { runJavaQuietly(javaBin, asArgs([it]) + ["-version"]) }
+	}
+	xlogSupportCache[key] = ok
+	return ok
 }
 
 def dcevmProbe = { String taskName, String mainClassName, String desc ->
@@ -436,17 +491,17 @@ def dcevmProbe = { String taskName, String mainClassName, String desc ->
 			// 观测先行：safepoint 看停顿、gc 看分配压力、deopt/compilation 验证 JIT 场景不是空转。
 			// uptimenanos 装饰符让三类日志能和探针里的 nanoTime 对齐。
 			// 逐条探测：不支持的（如 17 上的 deoptimization）跳过，并把缺失项交给探针显式声明。
+			def wantedXlog = [['safepoint=info', 'safepoint.log'],
+			                  ['gc*=info', 'gc.log'],
+			                  ['deoptimization=debug', 'deopt.log'],
+			                  ['jit+compilation=debug', 'compilation.log']]
+			def supported = supportedXlog(probeJava, wantedXlog.collect { it[0] })
 			def skippedXlog = []
-			[['safepoint=info', 'safepoint.log'],
-			 ['gc*=info', 'gc.log'],
-			 ['deoptimization=debug', 'deopt.log'],
-			 ['jit+compilation=debug', 'compilation.log']].each { spec ->
-				String selection = spec[0]
-				File logFile = new File(p05Dir, spec[1])
-				if (jvmAcceptsXlog(probeJava, logFile, selection)) {
-					jvmArgs "-Xlog:${selection}:file=${logFile.absolutePath}:uptimenanos"
+			wantedXlog.each { spec ->
+				if (supported.contains(spec[0])) {
+					jvmArgs "-Xlog:${spec[0]}:file=${new File(p05Dir, spec[1]).absolutePath}:uptimenanos"
 				} else {
-					skippedXlog << selection
+					skippedXlog << spec[0]
 				}
 			}
 			if (!skippedXlog.isEmpty()) {
@@ -562,13 +617,54 @@ tasks.register("alignBaselineProbe", JavaExec) {
 	}
 }
 
-// check 挂载全部断言
+// ------------------------------------------------------------------------------------------------
+// 验证分层：日常快检 / 独立进程 E2E / DCEVM 探针
+//
+// 分层的依据是"要不要额外起 JVM、要不要拉起 Kotlin 编译器"，不是"重不重要"。
+// `check` 曾经把下面三档全挂上，于是改一行 Java 也要先编两次 Kotlin、再冷启动 5 个 JVM。
+// ------------------------------------------------------------------------------------------------
+
+// 第 1 档（日常）：纯 JUnit + 纯文本扫描，不冷启动额外 JVM、不触发 Kotlin 编译器。
 check.dependsOn test
 check.dependsOn verifyTestCount
-check.dependsOn mixinProbe
-check.dependsOn initFixOracle
-check.dependsOn layoutGateAssert
-check.dependsOn ghostProbe
-check.dependsOn concurrencyAssert
-check.dependsOn fingerprintAssert
 check.dependsOn verifyDocStatusMarkers
+
+// 第 2 档：需要独立 JVM / -javaagent / Kotlin 夹具编译的断言。./gradlew e2eProbe
+tasks.register("e2eProbe") {
+	group = "verification"
+	description = "独立 JVM 与 Agent E2E 断言（含 Kotlin InitFix 差分）：check 之外的第二档"
+	dependsOn "mixinProbe"
+	dependsOn "initFixOracle"
+	// layoutGateAssert 已收编为 JUnit（LayoutGateRulesTest）：它是纯函数规则表，
+	// 不碰 Instrumentation，没必要为它冷启动一个 JVM。
+	dependsOn "ghostProbe"
+	dependsOn "concurrencyAssert"
+	dependsOn "fingerprintAssert"
+}
+
+// 第 3 档：DCEVM 机制探针。需要 JBR，本来就不参与门禁，聚起来只为方便一键跑。
+tasks.register("dcevmProbeSuite") {
+	group = "verification"
+	description = "全部 DCEVM 机制探针（需要 JBR）：liveDcevmTest / p05 / twoPhase / offset / lambdaBridge / readerScan / cacheWarming / alignBaseline"
+	dependsOn "liveDcevmTest"
+	dependsOn "p05Probe"
+	dependsOn "twoPhaseProbe"
+	dependsOn "offsetStabilityProbe"
+	dependsOn "lambdaBridgeProbe"
+	dependsOn "readerScanProbe"
+	dependsOn "cacheWarmingProbe"
+	dependsOn "alignBaselineProbe"
+}
+
+// 全量门禁：CI 与提交前用这个（第 1 + 2 档）。第 3 档仍按需单跑。
+tasks.register("fullCheck") {
+	group = "verification"
+	description = "check + e2eProbe 全量验证"
+	dependsOn check
+	dependsOn "e2eProbe"
+}
+
+// 兼容旧习惯：./gradlew check -Pfull 等价于 fullCheck
+if (project.hasProperty("full")) {
+	check.dependsOn "e2eProbe"
+}

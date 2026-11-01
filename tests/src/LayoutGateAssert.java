@@ -41,6 +41,19 @@ public class LayoutGateAssert {
 	static List<FieldInfo> list(FieldInfo... fs) { return new ArrayList<>(Arrays.asList(fs)); }
 
 	public static void main(String[] args) {
+		if (run() != 0) System.exit(1);
+	}
+
+	/**
+	 * 跑完整张规则表，返回失败条数。
+	 *
+	 * <p>抽成可调用方法，是为了让 JUnit 直接跑它（{@link LayoutGateRulesTest}）：这份断言
+	 * 不碰 {@code Instrumentation}、也不挂 agent，只是 {@code LayoutGate.check} 这个纯函数的
+	 * 规则表。以前它是个独立 JavaExec，每次 {@code check} 都要冷启动一个 JVM，纯属浪费。</p>
+	 */
+	static int run() {
+		passed = 0;
+		failed = 0;
 		System.out.println("== LayoutGate 规则表 ==");
 
 		// ---------- 1) 字段集合完全相同 → 放行 ----------
@@ -360,7 +373,7 @@ public class LayoutGateAssert {
 		System.out.println();
 		System.out.println("通过 " + passed + " 条；失败 " + failed + " 条");
 		System.out.println(failed == 0 ? "ALL ASSERTIONS PASSED" : (failed + " ASSERTION(S) FAILED"));
-		if (failed != 0) System.exit(1);
+		return failed;
 	}
 
 	/** 收集某宿主下的匿名类（点分类名 → 字节码）。 */

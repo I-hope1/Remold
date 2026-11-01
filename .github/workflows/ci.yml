@@ -48,7 +48,9 @@ jobs:
           export JAVA_HOME="$JAVA_HOME_25_X64"
           echo "runner JAVA_HOME=$JAVA_HOME"
           java -version
-          ./gradlew check \
+          # fullCheck = check（JUnit + 文本扫描）+ e2eProbe（独立 JVM / Agent / Kotlin 差分）。
+          # 本地日常只跑 check，提交前与 CI 跑全量，避免丢掉探针覆盖。
+          ./gradlew fullCheck \
             -Dhstest.requireJdks=true \
             -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_8_X64,JAVA_HOME_11_X64,JAVA_HOME_17_X64,JAVA_HOME_21_X64,JAVA_HOME_25_X64 \
             -Dorg.gradle.java.installations.auto-detect=false \

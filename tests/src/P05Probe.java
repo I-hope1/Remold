@@ -817,7 +817,7 @@ public class P05Probe {
 			Object inst = a.getConstructor().newInstance();
 			checkEq(11, invokeInt(b, "readX", new Class<?>[]{a}, null, inst),
 			        "M7a precondition: the out-of-batch reader sees x=11 before the removal");
-			checkEq(22, invokeInt(a, "readY", new Class<?>[0], inst, null),
+			checkEq(22, invokeInt(a, "readY", new Class<?>[0], inst, (Object[]) null),
 			        "M7a precondition: surviving field y=22 before the removal");
 
 			long us = redefineMicros(P05Agent.instrumentation(), a, aV2);
@@ -825,16 +825,16 @@ public class P05Probe {
 
 			System.out.println("        resolved-CP reader  -> " + tryInt(b, "readX", new Class<?>[]{a}, null, inst));
 			System.out.println("        surviving y / z on the old instance -> "
-			                   + tryInt(a, "readY", new Class<?>[0], inst, null) + " / "
-			                   + tryInt(a, "readZ", new Class<?>[0], inst, null));
+			                   + tryInt(a, "readY", new Class<?>[0], inst, (Object[]) null) + " / "
+			                   + tryInt(a, "readZ", new Class<?>[0], inst, (Object[]) null));
 
 			// M7c: a brand-new instance. Its slot layout comes from the *redefined* class; the
 			// pre-existing instance still has the old one. If readY differs between them, the
 			// redefined class disagrees with the survivors.
 			Object fresh = a.getConstructor().newInstance();
 			System.out.println("        NEW instance y / z -> "
-			                   + tryInt(a, "readY", new Class<?>[0], fresh, null) + " / "
-			                   + tryInt(a, "readZ", new Class<?>[0], fresh, null));
+			                   + tryInt(a, "readY", new Class<?>[0], fresh, (Object[]) null) + " / "
+			                   + tryInt(a, "readZ", new Class<?>[0], fresh, (Object[]) null));
 			System.out.println("        NEW instance readX (field is gone from the class) -> "
 			                   + tryInt(b, "readX", new Class<?>[]{a}, null, fresh));
 			check(true, "M7a/M7c outcomes recorded (see the lines above)");
@@ -849,7 +849,7 @@ public class P05Probe {
 			Class<?> b = Class.forName("rem.B", true, cl);
 			Object inst = a.getConstructor().newInstance();
 			// Deliberately do NOT call readX here: its GETFIELD must stay unresolved.
-			checkEq(22, invokeInt(a, "readY", new Class<?>[0], inst, null),
+			checkEq(22, invokeInt(a, "readY", new Class<?>[0], inst, (Object[]) null),
 			        "M7b precondition: A is loaded and usable, but B.readX has never run");
 
 			redefineMicros(P05Agent.instrumentation(), a, aV2);
@@ -868,16 +868,16 @@ public class P05Probe {
 			Object inst = a.getConstructor().newInstance();
 			checkEq(11, invokeInt(b, "readX", new Class<?>[]{a}, null, inst),
 			        "M7f precondition: x=11 is physically present in the slot that is about to be abandoned");
-			checkEq(22, invokeInt(a, "readY", new Class<?>[0], inst, null),
+			checkEq(22, invokeInt(a, "readY", new Class<?>[0], inst, (Object[]) null),
 			        "M7f precondition: y=22 before the removals");
 			redefineMicros(P05Agent.instrumentation(), a, aV2);
 			redefineMicros(P05Agent.instrumentation(), a, aV3);
-			String q = tryInt(a, "readQ", new Class<?>[0], inst, null);
+			String q = tryInt(a, "readQ", new Class<?>[0], inst, (Object[]) null);
 			System.out.println("   [M7f] after remove-x then add-q, q on the SURVIVING instance -> " + q);
 			System.out.println("         (0 = the slot was appended; 11 = the abandoned x slot was reused,"
 			                   + " which makes InitFix's conditional CAS skip it forever)");
 			Object fresh = a.getConstructor().newInstance();
-			System.out.println("         q on a NEW instance -> " + tryInt(a, "readQ", new Class<?>[0], fresh, null));
+			System.out.println("         q on a NEW instance -> " + tryInt(a, "readQ", new Class<?>[0], fresh, (Object[]) null));
 			check(true, "M7f outcome recorded (see the lines above)");
 		} finally {
 			cl.close();
@@ -889,16 +889,16 @@ public class P05Probe {
 			Class<?> a = Class.forName("rem.A", true, cl);
 			Class<?> c = Class.forName("rem.C", true, cl);
 			Object ci = c.getConstructor().newInstance();
-			checkEq(44, invokeInt(c, "readW", new Class<?>[0], ci, null),
+			checkEq(44, invokeInt(c, "readW", new Class<?>[0], ci, (Object[]) null),
 			        "M7e precondition: subclass field w=44 before the removal");
 
 			redefineMicros(P05Agent.instrumentation(), a, aV2);
 			System.out.println("   [M7e] subclass w after removing a parent field -> "
-			                   + tryInt(c, "readW", new Class<?>[0], ci, null));
+			                   + tryInt(c, "readW", new Class<?>[0], ci, (Object[]) null));
 			c.getMethod("writeW", int.class).invoke(ci, 99);
-			System.out.println("        after writeW(99): w=" + tryInt(c, "readW", new Class<?>[0], ci, null)
-			                   + ", parent y=" + tryInt(a, "readY", new Class<?>[0], ci, null)
-			                   + ", parent z=" + tryInt(a, "readZ", new Class<?>[0], ci, null));
+			System.out.println("        after writeW(99): w=" + tryInt(c, "readW", new Class<?>[0], ci, (Object[]) null)
+			                   + ", parent y=" + tryInt(a, "readY", new Class<?>[0], ci, (Object[]) null)
+			                   + ", parent z=" + tryInt(a, "readZ", new Class<?>[0], ci, (Object[]) null));
 			check(true, "M7e outcome recorded (see the lines above)");
 		} finally {
 			cl.close();

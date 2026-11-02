@@ -274,6 +274,7 @@ lambda$d$0(I)V                        ← 桥（仍是实例方法，槽 0 是 t
     **同签名换序拦截**（描述符不变、捕获顺序反了 → 改名 + 桥，不原地配对）/
     **实例 → 静态**（删掉 `this`：桥仍是实例方法、目标静态、新方法被改成避障名）/
     **实例桥的第二轮**（捕获下标 vs 描述符形参下标差 1 的坑）/
+    **换序桥的第二轮**（桥体故意倒序压栈，旧判据"槽号必须递增"会把它认成非桥）/
     **forceStatic 开启**（接收者归一成 `$this`；两个同类型捕获只能靠它消歧）；
   - 负向：新增捕获拒绝 / 捕获类型变化拒绝 / 重复类型歧义拒绝（宿主签名变了，槽号不可比）/
     SAM 变化拒绝 / 目标消失退化为幽灵；
@@ -288,6 +289,7 @@ lambda$d$0(I)V                        ← 桥（仍是实例方法，槽 0 是 t
 | 允许"实例 → 静态" | `droppingTheReceiverBridgesInstanceToStaticWithoutKeyCollision`、`secondRoundKeepsTheInstanceToStaticBridge` | 建桥数 0 / 桥变幽灵 |
 | 桥体允许不压接收者 | `secondRoundKeepsTheInstanceToStaticBridge` | 第二轮认不出桥 |
 | 解析旧桥体时按捕获下标记 | `secondRoundKeepsTheInstanceBridgeAndItsParamMapping`、`secondRoundKeepsTheInstanceToStaticBridge` | `ILOAD` 变成 `ALOAD`（去加载 String 槽） |
+| 解析旧桥体时要求槽号递增 | `secondRoundKeepsTheReorderBridge` | 换序桥第二轮退化成幽灵桩 |
 
 - `LambdaBridgeProbe`（运行时，需要 DCEVM）：`./gradlew :tests:lambdaBridgeProbe -Pp05.jbr=<dcevm-jdk>`，
   实测老实例在删除/新增捕获后的真实失败形态，含"捕获表不动"的对照组与两个端到端场景

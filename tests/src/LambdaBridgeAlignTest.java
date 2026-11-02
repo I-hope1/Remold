@@ -398,6 +398,41 @@ public class LambdaBridgeAlignTest {
 			"目标必须被改名——否则它会和桥占同一个键");
 	}
 
+	/**
+	 * 换序桥的第二轮：捕获表不动、只改方法体。
+	 *
+	 * <p>这是"多轮保活"里最容易漏的一档。旧版解析器要求被加载的槽号<b>递增</b>，而换序桥
+	 * 就是<b>故意</b>倒着压栈的（先 b 后 a），于是它在第二轮被判定成"不认识"，直接幽灵化——
+	 * 第一轮建立的交换当场作废，而且没有任何异常提示。</p>
+	 */
+	@Test
+	void secondRoundKeepsTheReorderBridge(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_ORDER_AB, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ORDER_BA, true).resolve("B.class"));
+		byte[] v3 = Files.readAllBytes(compile(javac, tmp, "v3", V3_ORDER_BA_BODY, true).resolve("B.class"));
+
+		byte[] r1 = LambdaAligner.align(v1, v2);
+		assertNotNull(byKey(parse(r1), "lambda$f$0", "(II)V"), "第一轮必须建出换序桥");
+		assertEquals(1, LambdaAligner.LAST_RESULT.bridgeCount);
+
+		ClassNode out = parse(LambdaAligner.align(r1, v3, null, null, LambdaAligner.LAST_RESULT.inventedNames));
+		MethodNode bridge = byKey(out, "lambda$f$0", "(II)V");
+		assertNotNull(bridge, "换序桥第二轮不能消失：" + table(out));
+		assertTrue(containsCall(bridge, "onBridgeInvoked"),
+			"必须仍是转发桥；退化成幽灵桩说明倒序压栈的桥体没被认出来");
+
+		List<AbstractInsnNode> loads = loadsOf(bridge);
+		assertEquals(2, loads.size(), "仍要按新顺序搬两个实参");
+		assertLoad(loads.get(0), Opcodes.ILOAD, 1, "先搬 b（老槽 1）");
+		assertLoad(loads.get(1), Opcodes.ILOAD, 0, "再搬 a（老槽 0）——顺序与槽号递增相反");
+
+		MethodInsnNode call = onlyCoreCall(bridge);
+		assertEquals(Opcodes.INVOKESTATIC, call.getOpcode());
+		assertEquals("(II)V", call.desc);
+		assertNotEquals("lambda$f$0", call.name, "目标仍是本轮定稿的避障名");
+	}
+
 	// ------------------------------------------------------------------------------------------------
 	// 实例 → 静态：删掉 this 引用
 	// ------------------------------------------------------------------------------------------------
@@ -830,6 +865,15 @@ public class LambdaBridgeAlignTest {
 		    public static Runnable r;
 		    public static String   last = "";
 		    public static void f(int a, int b) { r = () -> last = "" + b + "-" + a; }
+		}
+		""";
+
+	/** 第三轮：捕获顺序仍是 (b, a)，只改方法体。 */
+	static final String V3_ORDER_BA_BODY = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(int a, int b) { r = () -> last = "v3:" + b + "-" + a; }
 		}
 		""";
 

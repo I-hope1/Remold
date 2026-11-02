@@ -3939,22 +3939,47 @@ public class LambdaAligner {
 		return op >= Opcodes.ILOAD && op <= Opcodes.ALOAD;
 	}
 
+	/**
+	 * 二元算术/位运算。
+	 *
+	 * <p><b>必须按类型逐个列，不能用 opcode 区间</b>：JVM 的算术指令是<b>按类型交错</b>编号的
+	 * （{@code iadd=96, ladd=97, fadd=98, dadd=99}），区间判断会把别的类型一起圈进来，
+	 * 再拿 {@code popInt} 去弹 {@code Long} → 静默失效。</p>
+	 */
 	private static boolean isBinaryOp(int op) {
+		return isIntBinary(op) || isLongBinary(op) || isFloatBinary(op) || isDoubleBinary(op);
+	}
+
+	private static boolean isIntBinary(int op) {
 		switch (op) {
 			case Opcodes.IADD: case Opcodes.ISUB: case Opcodes.IMUL: case Opcodes.IDIV:
 			case Opcodes.IREM: case Opcodes.ISHL: case Opcodes.ISHR: case Opcodes.IUSHR:
 			case Opcodes.IAND: case Opcodes.IOR:  case Opcodes.IXOR:
-			case Opcodes.LADD: case Opcodes.LSUB: case Opcodes.LMUL: case Opcodes.LDIV:
-			case Opcodes.LREM: case Opcodes.LSHL: case Opcodes.LSHR: case Opcodes.LUSHR:
-			case Opcodes.LAND: case Opcodes.LOR:  case Opcodes.LXOR:
-			case Opcodes.FADD: case Opcodes.FSUB: case Opcodes.FMUL: case Opcodes.FDIV:
-			case Opcodes.FREM:
-			case Opcodes.DADD: case Opcodes.DSUB: case Opcodes.DMUL: case Opcodes.DDIV:
-			case Opcodes.DREM:
 				return true;
 			default:
 				return false;
 		}
+	}
+
+	private static boolean isLongBinary(int op) {
+		switch (op) {
+			case Opcodes.LADD: case Opcodes.LSUB: case Opcodes.LMUL: case Opcodes.LDIV:
+			case Opcodes.LREM: case Opcodes.LSHL: case Opcodes.LSHR: case Opcodes.LUSHR:
+			case Opcodes.LAND: case Opcodes.LOR:  case Opcodes.LXOR:
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	private static boolean isFloatBinary(int op) {
+		return op == Opcodes.FADD || op == Opcodes.FSUB || op == Opcodes.FMUL
+		    || op == Opcodes.FDIV || op == Opcodes.FREM;
+	}
+
+	private static boolean isDoubleBinary(int op) {
+		return op == Opcodes.DADD || op == Opcodes.DSUB || op == Opcodes.DMUL
+		    || op == Opcodes.DDIV || op == Opcodes.DREM;
 	}
 
 	private static boolean isUnaryOp(int op) {
@@ -3974,7 +3999,7 @@ public class LambdaAligner {
 	/** 在 {@code st} 上执行一条算术/转换指令；类型不匹配或栈不够时返回 {@code false}。 */
 	private static boolean evalOp(int op, ArrayDeque<Object> st) {
 		// ---- int 二元 ----
-		if (op >= Opcodes.IADD && op <= Opcodes.IXOR) {
+		if (isIntBinary(op)) {
 			Integer b = popInt(st), a = popInt(st);
 			if (a == null || b == null) return false;
 			int x = a, y = b;
@@ -3993,20 +4018,30 @@ public class LambdaAligner {
 				default: return false;
 			}
 		}
-		// ---- long 二元（移位量是 int） ----
-		if (op >= Opcodes.LADD && op <= Opcodes.LXOR) {
-			Long b = popLong(st), a = popLong(st);
-			if (a == null || b == null) return false;
-			long x = a, y = b;
+		// ---- long 二元（移位量是 int，必须单独弹） ----
+		if (isLongBinary(op)) {
+			boolean shift = op == Opcodes.LSHL || op == Opcodes.LSHR || op == Opcodes.LUSHR;
+			Object bo = st.poll();
+			Long a = popLong(st);
+			if (a == null || bo == null) return false;
+			long x = a;
+			if (shift) {
+				if (!(bo instanceof Integer)) return false;
+				int n = (Integer) bo;
+				switch (op) {
+					case Opcodes.LSHL: st.push(x << n); return true;
+					case Opcodes.LSHR: st.push(x >> n); return true;
+					default: st.push(x >>> n); return true;
+				}
+			}
+			if (!(bo instanceof Long)) return false;
+			long y = (Long) bo;
 			switch (op) {
 				case Opcodes.LADD: st.push(x + y); return true;
 				case Opcodes.LSUB: st.push(x - y); return true;
 				case Opcodes.LMUL: st.push(x * y); return true;
 				case Opcodes.LDIV: st.push(x / y); return true;
 				case Opcodes.LREM: st.push(x % y); return true;
-				case Opcodes.LSHL: st.push(x << (int) y); return true;
-				case Opcodes.LSHR: st.push(x >> (int) y); return true;
-				case Opcodes.LUSHR: st.push(x >>> (int) y); return true;
 				case Opcodes.LAND: st.push(x & y); return true;
 				case Opcodes.LOR: st.push(x | y); return true;
 				case Opcodes.LXOR: st.push(x ^ y); return true;
@@ -4014,7 +4049,7 @@ public class LambdaAligner {
 			}
 		}
 		// ---- float 二元 ----
-		if (op >= Opcodes.FADD && op <= Opcodes.FREM) {
+		if (isFloatBinary(op)) {
 			Float b = popFloat(st), a = popFloat(st);
 			if (a == null || b == null) return false;
 			float x = a, y = b;
@@ -4028,7 +4063,7 @@ public class LambdaAligner {
 			}
 		}
 		// ---- double 二元 ----
-		if (op >= Opcodes.DADD && op <= Opcodes.DREM) {
+		if (isDoubleBinary(op)) {
 			Double b = popDouble(st), a = popDouble(st);
 			if (a == null || b == null) return false;
 			double x = a, y = b;

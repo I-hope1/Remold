@@ -311,7 +311,7 @@ lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
 
 ## 7. 判定力
 
-- `LambdaBridgeAlignTest`（对齐期，不需要 DCEVM，共 29 例）：
+- `LambdaBridgeAlignTest`（对齐期，不需要 DCEVM，共 35 例）：
   - 正向：建桥 / 第二轮保持并重指向 / **纯重排**（`a+b` → `b+a`，桥按新顺序压栈）/
     **槽位证明消歧**（`(int,int) → (int)`，宿主描述符不变）/ **实例 lambda**（桥是实例方法、
     `INVOKESPECIAL` 转发、接收者不进描述符）/ 接口宿主（`itf=true`）/
@@ -321,8 +321,9 @@ lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
     **实例桥的第二轮**（捕获下标 vs 描述符形参下标差 1 的坑）/
     **换序桥的第二轮**（桥体故意倒序压栈，旧判据"槽号必须递增"会把它认成非桥）/
     **forceStatic 开启**（接收者归一成 `$this`；两个同类型捕获只能靠它消歧）/
-    **新增捕获的纯源重放**（常量 / `static final` / `final` 实例字段）及其**第二轮保活**；
-  - 负向：新增捕获拒绝（宿主形参 / 算式 / 非 final 字段）/ 捕获类型变化拒绝 /
+    **新增捕获的纯源重放**（常量 / `static final` / `final` 实例字段 / 可折叠算式（含
+    `long` 移位与 `float` 乘法）/ 构造器参数经 `final` 字段）及其**第二轮保活**；
+  - 负向：新增捕获拒绝（宿主形参 / 算式不可折 / 非 final 字段 / 静态桥无接收者）/ 捕获类型变化拒绝 /
     重复类型歧义拒绝（宿主签名变了，槽号不可比）/ SAM 变化拒绝 / 目标消失退化为幽灵；
   - 熔断豁免对照。
 
@@ -339,6 +340,14 @@ lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
 | 关闭纯源合成 | 4 条 `added*IsSynthesized` / `secondRoundKeepsTheSynthesizedConstant` | 建桥数 0 |
 | 不校验字段 `final` | `addedNonFinalFieldCaptureIsRefused` | 非 final 字段被当成常量重放 |
 | 解析旧桥体时不认常量位 | `secondRoundKeepsTheSynthesizedConstant` | 桥退化成幽灵桩 |
+| 关掉常量折叠 | `addedComputedButFoldableCaptureIsSynthesized` | 可折叠算式被拒 |
+| 关掉"构造器参数经字段" | `addedCaptureFromConstructorParamIsSynthesizedViaField` | 构造器参数被拒 |
+| 二元运算按 opcode **区间**分组（而非逐类型列） | `addedLongShiftCaptureIsFolded`、`addedFloatMultiplyCaptureIsFolded` | 别的类型被 int 区间吞掉 → 整段放弃 |
+| long 移位不特判（把移位量当 long 弹） | `addedLongShiftCaptureIsFolded` | 操作数类型不匹配 → 整段放弃 |
+
+> 最后两行是收尾清扫时发现的：JVM 的算术指令**按类型交错**编号（`iadd=96, ladd=97,
+> fadd=98, dadd=99`），用 `op >= IADD && op <= IXOR` 分组会把 long/float/double 一起圈进
+> int 分支，再拿 `popInt` 去弹 `Long` → 静默失效。改成逐类型列 opcode 后才有这两条用例。
 
 - `LambdaBridgeProbe`（运行时，需要 DCEVM）：`./gradlew :tests:lambdaBridgeProbe -Pp05.jbr=<dcevm-jdk>`，
   实测老实例在删除/新增捕获后的真实失败形态，含"捕获表不动"的对照组与两个端到端场景

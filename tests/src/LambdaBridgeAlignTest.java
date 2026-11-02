@@ -851,6 +851,49 @@ public class LambdaBridgeAlignTest {
 	}
 
 	/**
+	 * long 移位：{@code base << 40}。
+	 *
+	 * <p>钉的是"移位量是 int 不是 long"——按 long 去弹第二个操作数会失败，整段放弃。</p>
+	 */
+	@Test
+	void addedLongShiftCaptureIsFolded(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_NO_MARK, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ADDED_LONG_SHIFT, true).resolve("B.class"));
+
+		assertNotNull(byKey(parse(v2), "lambda$f$0", "(IJ)V"), "夹具前提：v2 捕获 (int, long)");
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode bridge = byKey(out, "lambda$f$0", "(I)V");
+		assertNotNull(bridge, "long 移位应当能折：" + table(out));
+
+		List<AbstractInsnNode> pushes = valuePushes(bridge);
+		assertEquals(2, pushes.size(), "k + 折出来的 long");
+		assertTrue(pushes.get(1) instanceof LdcInsnNode l
+		           && Long.valueOf(1L << 40).equals(l.cst),
+			"base << 40 必须折成 1099511627776L");
+	}
+
+	/** float 乘法：{@code half * 2.0f}。钉的是 float 二元分支（不能被 int 区间误吞）。 */
+	@Test
+	void addedFloatMultiplyCaptureIsFolded(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_NO_MARK, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ADDED_FLOAT_MUL, true).resolve("B.class"));
+
+		assertNotNull(byKey(parse(v2), "lambda$f$0", "(IF)V"), "夹具前提：v2 捕获 (int, float)");
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode bridge = byKey(out, "lambda$f$0", "(I)V");
+		assertNotNull(bridge, "float 乘法应当能折：" + table(out));
+
+		List<AbstractInsnNode> pushes = valuePushes(bridge);
+		assertEquals(2, pushes.size(), "k + 折出来的 float");
+		assertTrue(pushes.get(1) instanceof LdcInsnNode l && Float.valueOf(3.0f).equals(l.cst),
+			"1.5f * 2.0f 必须折成 3.0f");
+	}
+
+	/**
 	 * 构造器参数 → {@code final} 字段：桥用 {@code ALOAD 0; GETFIELD} 把当年那个参数取回来。
 	 *
 	 * <p>前提是桥自己持有 {@code this}——所以老 lambda 必须已经是实例 lambda。</p>
@@ -1331,6 +1374,32 @@ public class LambdaBridgeAlignTest {
 		    public static void f(int k) {
 		        int pad = 10;
 		        float scaled = pad * 2;
+		        r = () -> last = "v2:" + k + scaled;
+		    }
+		}
+		""";
+
+	/** 新增捕获是 long 移位：{@code long big = base << 40}。 */
+	static final String V2_ADDED_LONG_SHIFT = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(int k) {
+		        long base = 1L;
+		        long big = base << 40;
+		        r = () -> last = "v2:" + k + big;
+		    }
+		}
+		""";
+
+	/** 新增捕获是 float 乘法：{@code float scaled = half * 2.0f}。 */
+	static final String V2_ADDED_FLOAT_MUL = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(int k) {
+		        float half = 1.5f;
+		        float scaled = half * 2.0f;
 		        r = () -> last = "v2:" + k + scaled;
 		    }
 		}

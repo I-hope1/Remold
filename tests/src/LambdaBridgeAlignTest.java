@@ -954,6 +954,105 @@ public class LambdaBridgeAlignTest {
 	}
 
 	// ------------------------------------------------------------------------------------------------
+	// 运行时常量：显式登记的无参静态访问器
+	// ------------------------------------------------------------------------------------------------
+
+	/**
+	 * 已登记的"运行时常量"访问器（这里用 {@code System.lineSeparator()} 代替 Arc 的 {@code Scl.scl()}）。
+	 *
+	 * <p>桥里重放的就是<b>同一次调用</b>，不是编一个值——等价性由登记方承诺："整个运行期返回
+	 * 同一个值"。没登记的同形调用必须仍然被拒，否则等于把任意静态调用都当成常量。</p>
+	 */
+	@Test
+	void registeredRuntimeConstantIsReplayed(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_NO_MARK, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ADDED_RUNTIME_CONST, true).resolve("B.class"));
+
+		assertNotNull(byKey(parse(v2), "lambda$f$0", "(ILjava/lang/String;)V"),
+			"夹具前提：v2 捕获 (int, String)");
+
+		remold.RuntimeConstants.register("java/lang/System", "lineSeparator", "()Ljava/lang/String;");
+		try {
+			ClassNode out = parse(LambdaAligner.align(v1, v2));
+			MethodNode bridge = byKey(out, "lambda$f$0", "(I)V");
+			assertNotNull(bridge, "登记过的访问器可重放：" + table(out));
+			assertTrue(containsCall(bridge, "onBridgeInvoked"), "必须是转发桥");
+
+			List<AbstractInsnNode> pushes = valuePushes(bridge);
+			assertEquals(2, pushes.size(), "k + 访问器调用");
+			assertLoad(pushes.get(0), Opcodes.ILOAD, 0, "k");
+			assertTrue(pushes.get(1) instanceof MethodInsnNode c
+			           && c.getOpcode() == Opcodes.INVOKESTATIC
+			           && c.owner.equals("java/lang/System") && c.name.equals("lineSeparator"),
+				"新增位必须重放 INVOKESTATIC System.lineSeparator()");
+		} finally {
+			remold.RuntimeConstants.unregister("java/lang/System", "lineSeparator", "()Ljava/lang/String;");
+		}
+	}
+
+	/**
+	 * 运行时常量位跨轮保活：第二轮只改方法体。
+	 *
+	 * <p>解析旧桥体时要能把"已登记的 {@code INVOKESTATIC}"认成压值，而不是核心调用——
+	 * 两者 opcode 相同，只能靠登记表区分。</p>
+	 */
+	@Test
+	void secondRoundKeepsTheRuntimeConstant(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_NO_MARK, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ADDED_RUNTIME_CONST, true).resolve("B.class"));
+		byte[] v3 = Files.readAllBytes(compile(javac, tmp, "v3", V3_ADDED_RUNTIME_CONST_BODY, true).resolve("B.class"));
+
+		remold.RuntimeConstants.register("java/lang/System", "lineSeparator", "()Ljava/lang/String;");
+		try {
+			byte[] r1 = LambdaAligner.align(v1, v2);
+			assertNotNull(byKey(parse(r1), "lambda$f$0", "(I)V"), "第一轮必须建出桥");
+			assertEquals(1, LambdaAligner.LAST_RESULT.bridgeCount);
+
+			ClassNode out = parse(LambdaAligner.align(r1, v3, null, null,
+				LambdaAligner.LAST_RESULT.inventedNames));
+			MethodNode bridge = byKey(out, "lambda$f$0", "(I)V");
+			assertNotNull(bridge, "第二轮桥不能消失：" + table(out));
+			assertTrue(containsCall(bridge, "onBridgeInvoked"), "必须仍认得出这是桥");
+
+			List<AbstractInsnNode> pushes = valuePushes(bridge);
+			assertEquals(2, pushes.size(), "k + 访问器调用");
+			assertTrue(pushes.get(1) instanceof MethodInsnNode c && c.name.equals("lineSeparator"),
+				"运行时常量位必须仍然重放那条调用");
+		} finally {
+			remold.RuntimeConstants.unregister("java/lang/System", "lineSeparator", "()Ljava/lang/String;");
+		}
+	}
+
+	/** 同一个夹具，但<b>没有登记</b>：普通静态调用不是常量，必须拒绝。 */
+	@Test
+	void unregisteredStaticCallIsStillRefused(@TempDir Path tmp) throws Exception {		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_NO_MARK, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ADDED_RUNTIME_CONST, true).resolve("B.class"));
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		assertEquals(0, LambdaAligner.LAST_RESULT.bridgeCount,
+			"没登记就不是常量：把任意静态调用当常量等于编值");
+		assertTrue(containsCall(byKey(out, "lambda$f$0", "(I)V"), "onOrphanInvoked"));
+	}
+
+	/** 登记口自身的契约：带参数或返回 void 的访问器不可能是常量，登记时就该失败。 */
+	@Test
+	void runtimeConstantRegistryRejectsNonConstantShapes() {
+		assertThrows(IllegalArgumentException.class,
+			() -> remold.RuntimeConstants.register("x/Y", "f", "(I)I"),
+			"带参数的调用不可能是常量");
+		assertThrows(IllegalArgumentException.class,
+			() -> remold.RuntimeConstants.register("x/Y", "f", "()V"),
+			"返回 void 的调用没有值可用");
+		assertDoesNotThrow(() -> {
+			remold.RuntimeConstants.register("x/Y", "f", "()I");
+			remold.RuntimeConstants.unregister("x/Y", "f", "()I");
+		});
+	}
+
+	// ------------------------------------------------------------------------------------------------
 	// 熔断豁免：桥必须能在受熔断器保护的调用者面前活下来
 	// ------------------------------------------------------------------------------------------------
 
@@ -1405,6 +1504,30 @@ public class LambdaBridgeAlignTest {
 		}
 		""";
 
+	/** 新增捕获来自一个"运行时常量"访问器（无参静态调用）。 */
+	static final String V2_ADDED_RUNTIME_CONST = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(int k) {
+		        String sep = System.lineSeparator();
+		        r = () -> last = "v2:" + k + sep;
+		    }
+		}
+		""";
+
+	/** 第三轮：只改方法体，运行时常量位必须跨轮保留。 */
+	static final String V3_ADDED_RUNTIME_CONST_BODY = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(int k) {
+		        String sep = System.lineSeparator();
+		        r = () -> last = "v3:" + k + sep;
+		    }
+		}
+		""";
+
 	/** 构造器把参数存进了 final 字段；lambda 只捕获 this。 */
 	static final String V1_CTOR_THIS_ONLY = """
 		public class B {
@@ -1515,19 +1638,19 @@ public class LambdaBridgeAlignTest {
 	}
 
 	/**
-	 * 桥体里"压值"的那段指令：跳过 {@code LDC loc; onBridgeInvoked} 标记，到核心调用为止。
+	 * 桥体里"压值"的那段指令：跳过 {@code LDC loc; onBridgeInvoked} 标记，到<b>核心调用</b>为止。
 	 *
-	 * <p>用来断言"合成位到底压了什么"——只看 {@code loadsOf} 会漏掉常量与字段读。</p>
+	 * <p>不能"遇到第一条方法调用就停"——运行时常量访问器本身就是一条 {@code INVOKESTATIC}，
+	 * 它属于"压值"而不是转发。核心调用恒是 RETURN 之前那一条，所以取<b>最后</b>一条方法调用作边界。</p>
 	 */
 	static List<AbstractInsnNode> valuePushes(MethodNode mn) {
 		List<AbstractInsnNode> real = real(mn);
-		List<AbstractInsnNode> out = new ArrayList<>();
-		for (int i = 2; i < real.size(); i++) {          // 前两条是标记
-			AbstractInsnNode n = real.get(i);
-			if (n instanceof MethodInsnNode) break;      // 核心调用之后只剩 return
-			out.add(n);
+		int lastCall = -1;
+		for (int i = 2; i < real.size(); i++) {
+			if (real.get(i) instanceof MethodInsnNode) lastCall = i;
 		}
-		return out;
+		if (lastCall < 0) return new ArrayList<>();
+		return new ArrayList<>(real.subList(2, lastCall));
 	}
 
 	/** 这条指令压的是哪个 int 常量（ICONST_* / BIPUSH / SIPUSH / LDC 都算）。 */

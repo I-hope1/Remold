@@ -3373,40 +3373,48 @@ public class LambdaAligner {
 	 * 那等于编一个值，属于"静默写入假值"。</p>
 	 */
 	static final class ParamSource {
-		static final int OLD = 0, CONST = 1, GETSTATIC = 2, GETFIELD = 3;
+		static final int OLD = 0, CONST = 1, GETSTATIC = 2, GETFIELD = 3, RUNTIME_CALL = 4;
 
 		final int    kind;
 		/** {@link #OLD}：老捕获表下标。 */
 		final int    oldIndex;
 		/** {@link #CONST}：Integer / Long / Float / Double / String，或 null。 */
 		final Object constant;
-		/** {@link #GETSTATIC} / {@link #GETFIELD} 的字段三元组。 */
+		/** {@link #GETSTATIC} / {@link #GETFIELD} 的字段三元组，或 {@link #RUNTIME_CALL} 的方法三元组。 */
 		final String owner, name, desc;
+		/** {@link #RUNTIME_CALL}：调用指令是否指向接口（决定常量池条目类型）。 */
+		final boolean itf;
 
 		private ParamSource(int kind, int oldIndex, Object constant,
-		                    String owner, String name, String desc) {
+		                    String owner, String name, String desc, boolean itf) {
 			this.kind = kind;
 			this.oldIndex = oldIndex;
 			this.constant = constant;
 			this.owner = owner;
 			this.name = name;
 			this.desc = desc;
+			this.itf = itf;
 		}
 
 		static ParamSource old(int oldIndex) {
-			return new ParamSource(OLD, oldIndex, null, null, null, null);
+			return new ParamSource(OLD, oldIndex, null, null, null, null, false);
 		}
 
 		static ParamSource constant(Object value) {
-			return new ParamSource(CONST, -1, value, null, null, null);
+			return new ParamSource(CONST, -1, value, null, null, null, false);
 		}
 
 		static ParamSource getStatic(String owner, String name, String desc) {
-			return new ParamSource(GETSTATIC, -1, null, owner, name, desc);
+			return new ParamSource(GETSTATIC, -1, null, owner, name, desc, false);
 		}
 
 		static ParamSource getField(String owner, String name, String desc) {
-			return new ParamSource(GETFIELD, -1, null, owner, name, desc);
+			return new ParamSource(GETFIELD, -1, null, owner, name, desc, false);
+		}
+
+		/** 已登记的运行时常量访问器（无参静态调用）：桥里重放这次调用。 */
+		static ParamSource runtimeCall(String owner, String name, String desc, boolean itf) {
+			return new ParamSource(RUNTIME_CALL, -1, null, owner, name, desc, itf);
 		}
 
 		/** 这个来源产出的值是不是正好是 {@code want} 类型（写错类型会在验证期直接失败）。 */
@@ -3420,6 +3428,9 @@ public class LambdaAligner {
 						return want.getSort() == Type.OBJECT || want.getSort() == Type.ARRAY;
 					}
 					return constantType().equals(want);
+				case RUNTIME_CALL:
+					// desc 是<b>方法</b>描述符，取返回值类型；GETSTATIC/GETFIELD 的 desc 是字段类型。
+					return Type.getReturnType(desc).equals(want);
 				default:
 					return Type.getType(desc).equals(want);
 			}
@@ -3438,10 +3449,11 @@ public class LambdaAligner {
 		/** 供日志/事件使用：一眼看出这一位是"搬"还是"重放"。 */
 		String describe() {
 			switch (kind) {
-				case OLD:      return "old[" + oldIndex + "]";
-				case CONST:    return "const(" + constant + ")";
-				case GETSTATIC: return "static " + owner + "." + name;
-				default:        return "field " + owner + "." + name;
+				case OLD:        return "old[" + oldIndex + "]";
+				case CONST:      return "const(" + constant + ")";
+				case GETSTATIC:  return "static " + owner + "." + name;
+				case RUNTIME_CALL: return "runtime-const " + owner + "." + name;
+				default:         return "field " + owner + "." + name;
 			}
 		}
 	}
@@ -3732,7 +3744,11 @@ public class LambdaAligner {
 			}
 			ParamSource src = synthesize(ni.hostMethod, ni.captureSlots.get(j),
 				ni.hostParamEndSlot, !oi.isStatic(), newCn, ni.captured.get(j));
-			if (src == null) return null;
+			if (src == null) {
+				int jj = j;
+				dbg(() -> "BRIDGE synth refused: " + nn.get(jj) + " slot=" + ni.captureSlots.get(jj));
+				return null;
+			}
 			plan[j] = src;
 			synthesized = true;
 		}
@@ -3790,6 +3806,12 @@ public class LambdaAligner {
 		    && a.getOpcode() == Opcodes.ALOAD && a.var == 0
 		    && prev instanceof FieldInsnNode g && g.getOpcode() == Opcodes.GETFIELD) {
 			return isFinalField(newCn, g) ? ParamSource.getField(g.owner, g.name, g.desc) : null;
+		}
+		// 4) 已登记的"运行时常量"访问器：无参静态调用，整个运行期返回同一个值。
+		//    为什么它不是"编一个值"：桥里重放的就是同一次调用，语义上等价于把当年那次调用
+		//    的结果再取一遍——前提由登记方承诺（见 RuntimeConstants）。
+		if (prev instanceof MethodInsnNode m && RuntimeConstants.isRuntimeConstant(m)) {
+			return ParamSource.runtimeCall(m.owner, m.name, m.desc, m.itf);
 		}
 		// 4) 纯算式：整段在编译期算成一个常量（`float scaled = pad * 2;` 这类）。
 		//    只认算术/位运算/类型转换，且叶子必须都能折成常量；任何一条不满足就整体放弃。
@@ -4375,6 +4397,9 @@ public class LambdaAligner {
 				case ParamSource.GETSTATIC:
 					mv.visitFieldInsn(Opcodes.GETSTATIC, s.owner, s.name, s.desc);
 					break;
+				case ParamSource.RUNTIME_CALL:
+					mv.visitMethodInsn(Opcodes.INVOKESTATIC, s.owner, s.name, s.desc, s.itf);
+					break;
 				default:                                          // GETFIELD：接收者就是桥自己的 this
 					mv.visitVarInsn(Opcodes.ALOAD, 0);
 					mv.visitFieldInsn(Opcodes.GETFIELD, s.owner, s.name, s.desc);
@@ -4482,6 +4507,12 @@ public class LambdaAligner {
 			} else if (op >= Opcodes.IRETURN && op <= Opcodes.RETURN) {
 				// ok
 			} else if (insn instanceof MethodInsnNode m) {
+				// 已登记的运行时常量访问器是"压值"，不是核心调用。判据用登记表而不是
+				// "位置"：核心调用也是 INVOKESTATIC，只能靠身份区分。
+				if (RuntimeConstants.isRuntimeConstant(m)) {
+					loaded.add(ParamSource.runtimeCall(m.owner, m.name, m.desc, m.itf));
+					continue;
+				}
 				if (core != null) return null;                    // 只能有一条核心调用
 				core = m;
 			} else {

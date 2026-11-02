@@ -2265,6 +2265,10 @@ public class InitFix {
 
 	/** 误杀白名单：命中即放行，优先于包级黑名单。 */
 	private static boolean isWhitelistedCall(MethodInsnNode m) {
+		// 已登记的"运行时常量"访问器：调用方已断言它在整个运行期返回同一个值，
+		// 于是它对切片来说是常量来源，不是副作用。（见 remold.RuntimeConstants）
+		if (remold.RuntimeConstants.isRuntimeConstant(m)) return true;
+
 		if ("<init>".equals(m.name) && "()V".equals(m.desc)
 		    && PURE_NOARG_CTOR_OWNERS.contains(m.owner)) { return true; }
 

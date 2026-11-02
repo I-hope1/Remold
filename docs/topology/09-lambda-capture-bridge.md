@@ -67,7 +67,7 @@ VM 不会按名字错配到同名的新方法上；且异常抛在调用点之�
 |:--|:--|:--|
 | **SAM 不变** | 工厂描述符返回类型（功能接口）、`bsmArgs[0]`（擦除 SAM）、`bsmArgs[2]`（实例化 SAM）三者相等 | 拒绝 |
 | **宿主相同** | `M:` 键只比<b>方法名</b>（被删的捕获往往就是宿主形参，宿主描述符必然跟着变）；`L:` 键要求整个键相等 | 拒绝 |
-| **映射唯一** | 每个新形参在旧捕获表里<b>恰好</b>命中一个同类型位置，且整体内射（见 §3.1 两级来源） | 拒绝 |
+| **映射唯一** | 每个新形参在旧捕获表里<b>恰好</b>命中一个同身份位置，且整体内射（见 §3.1 三级来源） | 拒绝 |
 
 外加两条前置：
 
@@ -100,6 +100,26 @@ VM 不会按名字错配到同名的新方法上；且异常抛在调用点之�
 `捕获数` 条真实指令就是它们的来源，每条必须是<b>直接的局部变量加载</b>。实参若是临时值
 （`() -> use(make(a))` 会先算出临时槽再捕获），槽号没有跨版本身份，回溯判失败、退回推断。
 
+**接收者槽统一记作 `$this`**。它不是源码变量名，而是一个"两侧必然相等"的占位符。归一它
+是因为 `forceStaticLambdas` 让接收者有**两种**字节码来源，两者留下的 `LocalVariableTable`
+不一样：
+
+| 来源 | 槽 0 的 LVT | 读出来 |
+|:--|:--|:--|
+| 实例方法被改成静态（`needConversionToStatic`） | javac 原本写了 `this`，改写不动 LVT | `"this"` |
+| 零捕获静态 lambda 被前置 receiver（`needForceCaptureThis`） | 槽是新增的，**没有 LVT 条目** | `null` |
+
+两者指同一个东西。不归一的话，"任一位缺名字就整体放弃按名映射"这条严格判据会把第二种
+判成"没证据"；而同一个 lambda 在两种来源之间切换时，`"this"` vs `null` 还会让两侧对不上。
+
+判据用**"首形参类型 == 当前类"**而不是"名字为空"：真正的同名局部变量
+（`void observe(Foo other)` 里类型恰好是本类的 `other`）会带自己的名字，不能被误当成接收者。
+
+> 顺带纠正一处曾写在设计里的错误：`needForceCaptureThis` 只对**零捕获**的静态 lambda 生效
+> （它要求 `indy.desc` 的参数个数为 0），所以 `int a=1, b=2; () -> a+b` 这种**带捕获**的
+> lambda 不会被前置 receiver，`[null, "a", "b"]` 这个具体形态并不会从这条路径产生。归一
+> 仍然是必要的——真实形态是上表第二行（`[null]`），以及它与第一行之间的不一致。
+
 ### 3.2 同签名的捕获换序必须在配对层拦住
 
 `(II)V → (II)V` 这种"描述符完全没变、只是捕获顺序换了"的编辑，是所有判据里最危险的：
@@ -114,6 +134,43 @@ VM 不会按名字错配到同名的新方法上；且异常抛在调用点之�
 
 拒绝配对之后走的是既有链路：阶段二给新方法分配避障名（`oldNameDescSet` 里已有该键 ⇒
 冲突 ⇒ 改名），旧键因此变成孤儿，捕获桥按新顺序重排实参。
+
+### 3.3 实例 ↔ 静态：允许一个方向，且要拆成两位
+
+`forceStaticLambdas` **关闭**时，"删掉 `this` 引用"会让合成方法从实例变静态：
+
+```text
+V1: public void d(int k) { r = () -> LAST = "" + k + this; }
+      private void        lambda$d$0(int)   indy (LB;I)   ← 捕获 [this, k]
+V2: public void d(int k) { r = () -> LAST = "v2:" + k; }
+      private static void lambda$d$0(int)   indy (I)      ← 捕获 [k]
+```
+
+两者的 **name + desc 完全相同**（`lambda$d$0(I)V`），只差 `ACC_STATIC`。由此有两件事必须
+分开处理：
+
+**方向只允许"实例 → 静态"**。这是"删掉接收者捕获"，新方法体物理上读不到它，桥丢弃即可。
+反方向（静态 → 实例）等于**新增**一个接收者捕获，老实例里没有这个值，一律拒绝。
+
+**桥的形态与目标的形态是两位**，不能共用一个 `isStatic`：
+
+| 位 | 由谁决定 | 影响 |
+|:--|:--|:--|
+| `isStatic`（桥自身） | **老**方法 | 老隐藏类按老形态调用它。老方法是实例方法，桥就必须是实例方法（槽 0 = 接收者） |
+| `targetStatic`（目标） | **新**方法 | 决定转发指令：静态 `INVOKESTATIC`（不压接收者）；实例 `INVOKESPECIAL`（先 `aload_0`） |
+
+混成一位就会写出"实例桥去 `INVOKESTATIC` 一个要接收者的目标"，或者反过来压了一个多余的
+接收者。为什么实例目标用 `INVOKESPECIAL` 而不是 `INVOKEVIRTUAL`：目标一定是本类里的
+`private` 合成方法。
+
+**同名同描述符的碰撞**由既有改名链路解决，但**顺序很关键**：配对阶段 `isSignatureCompatible`
+先因为静态位不同而拒绝配对 → 阶段二发现 `oldNameDescSet` 里已有该键 ⇒ 冲突 ⇒ 给新方法
+分配避障名 → `presentKeys` 里不再有老键 ⇒ 老键变成孤儿 ⇒ 才轮得到桥。若顺序反了（先建桥
+再改名），桥与目标会撞在同一个 `name + desc` 上，产物直接 `ClassFormatError`。
+
+**第二轮若目标静态位翻转，退回幽灵桩**：桥体里"搬哪些实参"是按上一轮目标的形态定的。
+目标从静态变回实例（比如它又用回了 `this`）时，那份记录就不成立——照着重放会少压一个实参，
+验证期直接失败。这条路径不猜，直接降级（`bd.targetStatic != now.isStatic()`）。
 
 任一条不成立，退回原有的幽灵桩路径（行为与引入本机制前完全一致）。
 
@@ -147,6 +204,19 @@ lambda$d$0(Ljava/lang/String;I)V      ← 桥（实例方法，槽 0 是 this）
     INVOKESPECIAL Host.lambda$d$0(I)V
     RETURN
 ```
+
+**"删掉 this"的桥**（实例 → 静态，见 §3.3）则没有 `aload_0`：
+
+```text
+lambda$d$0(I)V                        ← 桥（仍是实例方法，槽 0 是 this）
+    LDC loc; INVOKESTATIC onBridgeInvoked
+    ILOAD      1                      ← 只搬 k；接收者被丢弃
+    INVOKESTATIC Host.lambda$d$1(I)V  ← 目标被改成避障名（否则与桥同键）
+    RETURN
+```
+
+所以解析旧桥体时**不能要求它以 `aload_0` 开头**：接收者压栈是可选的，取决于目标是否实例
+方法。判据改为"压没压接收者"与"核心调用是不是 `INVOKESTATIC`"必须**相反**，两者交叉验证。
 
 无分支、无 `Label`，因此不需要 `StackMapTable`，与既有空壳桩的设计一致。
 
@@ -196,18 +266,32 @@ lambda$d$0(Ljava/lang/String;I)V      ← 桥（实例方法，槽 0 是 this）
 
 ## 7. 判定力
 
-- `LambdaBridgeAlignTest`（对齐期，不需要 DCEVM）：
+- `LambdaBridgeAlignTest`（对齐期，不需要 DCEVM，共 21 例）：
   - 正向：建桥 / 第二轮保持并重指向 / **纯重排**（`a+b` → `b+a`，桥按新顺序压栈）/
     **槽位证明消歧**（`(int,int) → (int)`，宿主描述符不变）/ **实例 lambda**（桥是实例方法、
     `INVOKESPECIAL` 转发、接收者不进描述符）/ 接口宿主（`itf=true`）/
     **局部变量名字证明**（删掉前序同类型局部后槽号位移，只有名字能定）/
-    **同签名换序拦截**（描述符不变、捕获顺序反了 → 改名 + 桥，不原地配对）；
+    **同签名换序拦截**（描述符不变、捕获顺序反了 → 改名 + 桥，不原地配对）/
+    **实例 → 静态**（删掉 `this`：桥仍是实例方法、目标静态、新方法被改成避障名）/
+    **实例桥的第二轮**（捕获下标 vs 描述符形参下标差 1 的坑）/
+    **forceStatic 开启**（接收者归一成 `$this`；两个同类型捕获只能靠它消歧）；
   - 负向：新增捕获拒绝 / 捕获类型变化拒绝 / 重复类型歧义拒绝（宿主签名变了，槽号不可比）/
     SAM 变化拒绝 / 目标消失退化为幽灵；
   - 熔断豁免对照。
+
+**消融验证**（逐条撤掉修复，确认对应断言必挂，而不是"全绿即通过"）：
+
+| 撤掉的修复 | 必挂的用例 | 挂点 |
+|:--|:--|:--|
+| 接收者归一成 `$this` | `forcedStaticReceiverWithNoLvtEntryIsNamedInsteadOfNull` | 读出来是 `null` |
+| 同上（只归一 `null`、不归一 `"this"`） | `forcedStaticReceiverNameBreaksTheTieBetweenSameTypedCaptures` | 按名映射整体弃权 → 退化成幽灵桩 |
+| 允许"实例 → 静态" | `droppingTheReceiverBridgesInstanceToStaticWithoutKeyCollision`、`secondRoundKeepsTheInstanceToStaticBridge` | 建桥数 0 / 桥变幽灵 |
+| 桥体允许不压接收者 | `secondRoundKeepsTheInstanceToStaticBridge` | 第二轮认不出桥 |
+| 解析旧桥体时按捕获下标记 | `secondRoundKeepsTheInstanceBridgeAndItsParamMapping`、`secondRoundKeepsTheInstanceToStaticBridge` | `ILOAD` 变成 `ALOAD`（去加载 String 槽） |
+
 - `LambdaBridgeProbe`（运行时，需要 DCEVM）：`./gradlew :tests:lambdaBridgeProbe -Pp05.jbr=<dcevm-jdk>`，
   实测老实例在删除/新增捕获后的真实失败形态，含"捕获表不动"的对照组与两个端到端场景
-  （静态 lambda / 实例 lambda，redefine 后同一个实例跑的是新方法体）。
+  （静态 lambda / 实例 lambda，redefine 后同一个实例跑的是新方法体）。当前 35/35。
 
 ---
 

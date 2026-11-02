@@ -8,6 +8,7 @@ import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.VarInsnNode;
+import remold.AnnotationTransformer;
 import remold.LambdaAligner;
 import remold.OrphanBreakerPredicate;
 
@@ -300,6 +301,41 @@ public class LambdaBridgeAlignTest {
 		assertEquals(Opcodes.INVOKESPECIAL, onlyCoreCall(bridge).getOpcode(), "私有实例方法用 INVOKESPECIAL 转发");
 	}
 
+	/**
+	 * 实例桥的第二轮：上一轮的桥把 {@code (String, int)} 里的 String 丢了，这一轮只改方法体。
+	 *
+	 * <p>钉的是"捕获表下标"与"描述符形参下标"不能混用：实例方法的捕获表第 0 项是接收者，
+	 * 两者差 1。解析旧桥体时若按描述符下标记、重建时又按捕获下标读，就会把 String 的槽
+	 * 当成 int 加载——{@code ILOAD} 一个引用槽，验证期直接失败。</p>
+	 */
+	@Test
+	void secondRoundKeepsTheInstanceBridgeAndItsParamMapping(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_INSTANCE).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_INSTANCE).resolve("B.class"));
+		byte[] v3 = Files.readAllBytes(compile(javac, tmp, "v3", V3_INSTANCE_BODY).resolve("B.class"));
+
+		byte[] r1 = LambdaAligner.align(v1, v2);
+		MethodNode first = byKey(parse(r1), "lambda$d$0", "(Ljava/lang/String;I)V");
+		assertNotNull(first, "第一轮必须建出实例桥");
+		assertEquals(1, LambdaAligner.LAST_RESULT.bridgeCount);
+
+		ClassNode out = parse(LambdaAligner.align(r1, v3, null, null, LambdaAligner.LAST_RESULT.inventedNames));
+		MethodNode bridge = byKey(out, "lambda$d$0", "(Ljava/lang/String;I)V");
+		assertNotNull(bridge, "第二轮桥不能消失：" + table(out));
+		assertTrue(containsCall(bridge, "onBridgeInvoked"), "第二轮必须仍认得出这是桥");
+
+		List<AbstractInsnNode> loads = loadsOf(bridge);
+		assertEquals(2, loads.size(), "接收者 + 活下来的 int");
+		assertLoad(loads.get(0), Opcodes.ALOAD, 0, "先压接收者");
+		assertLoad(loads.get(1), Opcodes.ILOAD, 2,
+			"int 在槽 2；按描述符下标当成捕获下标会去 ILOAD 槽 1（String）");
+
+		MethodInsnNode call = onlyCoreCall(bridge);
+		assertEquals(Opcodes.INVOKESPECIAL, call.getOpcode());
+		assertEquals("(I)V", call.desc);
+	}
+
 	// ------------------------------------------------------------------------------------------------
 	// LVT 形参名：比槽号更硬的证据
 	// ------------------------------------------------------------------------------------------------
@@ -360,6 +396,243 @@ public class LambdaBridgeAlignTest {
 		assertEquals("(II)V", call.desc);
 		assertNotEquals("lambda$f$0", call.name,
 			"目标必须被改名——否则它会和桥占同一个键");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// 实例 → 静态：删掉 this 引用
+	// ------------------------------------------------------------------------------------------------
+
+	/**
+	 * V1 的合成方法是<b>实例</b>方法、V2 的是<b>静态</b>方法，两者的 name+desc 完全相同
+	 * （{@code lambda$d$0(I)V}），只差 {@code ACC_STATIC}。
+	 *
+	 * <p>两个陷阱叠在一起：</p>
+	 * <ol>
+	 *   <li>同名同描述符不能共存（{@code ClassFormatError}）——新方法必须被改成避障名，
+	 *       老键才腾得出来给桥；</li>
+	 *   <li>桥必须<b>保持实例方法</b>（老隐藏类按 {@code INVOKESPECIAL} 调它），而转发目标是
+	 *       静态方法。"桥的形态"与"目标的形态"是两位，共用一个 {@code isStatic} 就会写出
+	 *       "实例桥去 {@code INVOKESTATIC} 一个要接收者的目标"这类非法字节码。</li>
+	 * </ol>
+	 */
+	@Test
+	void droppingTheReceiverBridgesInstanceToStaticWithoutKeyCollision(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_THIS_AND_PARAM).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_THIS_DROPPED).resolve("B.class"));
+
+		// 前提：同 name+desc，只差 ACC_STATIC。夹具一旦变形，这个用例就测不到目标形态。
+		MethodNode oldM = byKey(parse(v1), "lambda$d$0", "(I)V");
+		MethodNode newM = byKey(parse(v2), "lambda$d$0", "(I)V");
+		assertNotNull(oldM, "夹具前提：v1 的合成方法是 lambda$d$0(I)V");
+		assertNotNull(newM, "夹具前提：v2 的合成方法是 lambda$d$0(I)V");
+		assertEquals(0, oldM.access & Opcodes.ACC_STATIC, "v1 必须是实例方法（引用了 this）");
+		assertNotEquals(0, newM.access & Opcodes.ACC_STATIC, "v2 必须是静态方法（不再引用 this）");
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+
+		// 1) 同 name+desc 只能有一个方法：新方法必须让位（改名），否则就是 ClassFormatError
+		int sameKey = 0;
+		for (MethodNode mn : out.methods) {
+			if (mn.name.equals("lambda$d$0") && mn.desc.equals("(I)V")) sameKey++;
+		}
+		assertEquals(1, sameKey, "同名同描述符只能留一个方法（桥），新方法必须换成避障名：" + table(out));
+
+		// 2) 老键仍在，且是实例方法——老隐藏类按 INVOKESPECIAL 调它，形态不能变
+		MethodNode bridge = byKey(out, "lambda$d$0", "(I)V");
+		assertNotNull(bridge, "老键必须仍然存在：" + table(out));
+		assertEquals(0, bridge.access & Opcodes.ACC_STATIC,
+			"桥必须保持实例方法：老调用点是 INVOKESPECIAL，改成静态会 IncompatibleClassChangeError");
+		assertTrue(containsCall(bridge, "onBridgeInvoked"), "必须是转发桥，不是幽灵桩");
+		assertFalse(containsCall(bridge, "onOrphanInvoked"), "桥不能走熔断入口");
+
+		// 3) 桥体：丢弃接收者（不压 this），只搬 k（实例方法里在槽 1），静态转发
+		List<AbstractInsnNode> loads = loadsOf(bridge);
+		assertEquals(1, loads.size(), "只该搬 k；接收者必须被丢弃");
+		assertLoad(loads.get(0), Opcodes.ILOAD, 1, "k 在实例方法的槽 1");
+
+		MethodInsnNode call = onlyCoreCall(bridge);
+		assertEquals(Opcodes.INVOKESTATIC, call.getOpcode(),
+			"目标是静态方法，必须 INVOKESTATIC，不能先压接收者再 INVOKESPECIAL");
+		assertEquals("(I)V", call.desc);
+		assertNotEquals("lambda$d$0", call.name, "目标必须被改名，否则与桥占同一个键");
+		assertNotNull(byKey(out, call.name, "(I)V"), "转发目标必须真实存在于产物里：" + table(out));
+		assertEquals(1, LambdaAligner.LAST_RESULT.bridgeCount);
+	}
+
+	/**
+	 * 上一轮建的是"实例桥 → 静态目标"，这一轮只改方法体。
+	 *
+	 * <p>桥体里<b>没有</b> {@code aload_0}（目标静态，不需要接收者），而旧版解析器无条件要求
+	 * 桥体以 {@code aload_0} 开头，于是这类桥在第二轮认不出来、退化成死幽灵。这条用例钉的是
+	 * "接收者压栈是可选的"。</p>
+	 */
+	@Test
+	void secondRoundKeepsTheInstanceToStaticBridge(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_THIS_AND_PARAM).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_THIS_DROPPED).resolve("B.class"));
+		byte[] v3 = Files.readAllBytes(compile(javac, tmp, "v3", V3_THIS_DROPPED_BODY).resolve("B.class"));
+
+		byte[] r1 = LambdaAligner.align(v1, v2);
+		assertNotNull(byKey(parse(r1), "lambda$d$0", "(I)V"), "第一轮必须建出实例桥");
+		assertEquals(1, LambdaAligner.LAST_RESULT.bridgeCount);
+
+		ClassNode out = parse(LambdaAligner.align(r1, v3, null, null, LambdaAligner.LAST_RESULT.inventedNames));
+
+		MethodNode bridge = byKey(out, "lambda$d$0", "(I)V");
+		assertNotNull(bridge, "第二轮桥不能消失：" + table(out));
+		assertEquals(0, bridge.access & Opcodes.ACC_STATIC, "第二轮桥仍须是实例方法");
+		assertTrue(containsCall(bridge, "onBridgeInvoked"),
+			"第二轮必须仍认得出这是桥（桥体可以不以 aload_0 开头）");
+
+		List<AbstractInsnNode> loads = loadsOf(bridge);
+		assertEquals(1, loads.size(), "第二轮仍只该搬 k");
+		assertLoad(loads.get(0), Opcodes.ILOAD, 1, "k 在槽 1");
+
+		MethodInsnNode call = onlyCoreCall(bridge);
+		assertEquals(Opcodes.INVOKESTATIC, call.getOpcode(), "目标仍是静态方法");
+		assertEquals("(I)V", call.desc);
+	}
+
+	/**
+	 * 实例 lambda 的捕获换序：描述符完全相同（{@code (II)V}），只是实参顺序反了。
+	 *
+	 * <p>与静态版同一个道理，但多一层：桥是实例方法，接收者走 {@code aload_0}，两个 int 的
+	 * 槽号是 1 和 2。若把"捕获表下标"与"描述符形参下标"混用（差 1），这里会搬到错的值。</p>
+	 */
+	@Test
+	void instanceLambdaCaptureSwapIsBridged(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_INSTANCE_ORDER_AB, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_INSTANCE_ORDER_BA, true).resolve("B.class"));
+
+		assertNotNull(byKey(parse(v1), "lambda$d$0", "(II)V"), "夹具前提：v1 是实例方法 (II)V");
+		assertNotNull(byKey(parse(v2), "lambda$d$0", "(II)V"), "夹具前提：v2 也是 (II)V，仅顺序不同");
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode bridge = byKey(out, "lambda$d$0", "(II)V");
+		assertNotNull(bridge, "换序必须走桥：" + table(out));
+		assertTrue(containsCall(bridge, "onBridgeInvoked"), "产物必须是转发桥，不是原地配对的新方法体");
+		assertEquals(0, bridge.access & Opcodes.ACC_STATIC, "实例桥必须保持实例方法");
+
+		// 新顺序是 (b, a)：先压 b（老槽 2）、再压 a（老槽 1）。
+		List<AbstractInsnNode> loads = loadsOf(bridge);
+		assertEquals(3, loads.size(), "接收者 + 两个实参");
+		assertLoad(loads.get(0), Opcodes.ALOAD, 0, "先压接收者");
+		assertLoad(loads.get(1), Opcodes.ILOAD, 2, "新第 0 个形参是 b（老槽 2）");
+		assertLoad(loads.get(2), Opcodes.ILOAD, 1, "新第 1 个形参是 a（老槽 1）");
+
+		MethodInsnNode call = onlyCoreCall(bridge);
+		assertEquals(Opcodes.INVOKESPECIAL, call.getOpcode(), "目标是私有实例方法，走 INVOKESPECIAL");
+		assertEquals("(II)V", call.desc);
+		assertNotEquals("lambda$d$0", call.name, "目标必须改名，否则与桥同键");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// forceStaticLambdas 开启：接收者变成显式首形参
+	// ------------------------------------------------------------------------------------------------
+
+	/**
+	 * {@code forceStaticLambdas} 把实例方法改成静态方法，{@code this} 变成显式首形参。
+	 *
+	 * <p>接收者槽的名字取决于来源：被改写的实例方法在 LVT 里留着 javac 写的 {@code "this"}；
+	 * 而给零捕获静态 lambda 前置的 receiver 槽<b>没有 LVT 条目</b>，读出来是 {@code null}。
+	 * 不归一的话，"任一位缺名字就整体放弃按名映射"会把这类 lambda 判成没证据——这里捕获来自
+	 * 宿主<b>局部变量</b>，槽位证明本来就不成立（局部槽会随前序变量位移），按名映射是唯一出路。</p>
+	 */
+	@Test
+	void forcedStaticReceiverIsNamedSoNameMappingStillWorks(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = force(Files.readAllBytes(
+			compile(javac, tmp, "v1", V1_FORCED_LOCALS, true).resolve("B.class")));
+		byte[] v2 = force(Files.readAllBytes(
+			compile(javac, tmp, "v2", V2_FORCED_LOCALS, true).resolve("B.class")));
+
+		// 前提：接收者被前置成显式首形参，且名字已被归一（不能留 null）
+		String[] p1 = LambdaAligner.readLambdaParamNames(v1).get("lambda$d$0(LB;II)V");
+		assertNotNull(p1, "夹具前提：forceStatic 之后是静态的 lambda$d$0(LB;II)V");
+		assertEquals(LambdaAligner.RECEIVER_NAME, p1[0], "接收者槽必须归一，不能留 null");
+		assertEquals("a", p1[1], "其余形参保留源码名");
+		assertEquals("b", p1[2]);
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode bridge = byKey(out, "lambda$d$0", "(LB;II)V");
+		assertNotNull(bridge, "删掉一个捕获仍要建桥（只能靠名字，槽位证明对局部变量不成立）：" + table(out));
+		assertTrue(containsCall(bridge, "onBridgeInvoked"));
+
+		// 目标是 (I)V（v2 只剩一个捕获 b，forceStatic 不再给它前置 receiver）：
+		// 桥要搬捕获 2（b，老槽 2），丢弃 a 与接收者。
+		List<AbstractInsnNode> loads = loadsOf(bridge);
+		assertEquals(1, loads.size(), "只该搬 b");
+		assertLoad(loads.get(0), Opcodes.ILOAD, 2, "b 在老方法的槽 2（a 与接收者都不要）");
+
+		MethodInsnNode call = onlyCoreCall(bridge);
+		assertEquals(Opcodes.INVOKESTATIC, call.getOpcode(), "两侧都是静态方法");
+		assertEquals("(I)V", call.desc);
+	}
+
+	/**
+	 * 接收者的名字是<b>唯一</b>能定下映射的证据：捕获表里两个 {@code LB;}，一个是局部变量
+	 * {@code other}、一个是接收者。
+	 *
+	 * <p>类型层面两个同类型候选 → 歧义；槽位层面 {@code other} 在宿主局部槽，槽位证明本来
+	 * 就弃权。此时若接收者名字是 {@code null}，"任一位缺名字就整体放弃按名映射"会把这一例
+	 * 判成"没证据"，桥建不出来。</p>
+	 */
+	@Test
+	void forcedStaticReceiverNameBreaksTheTieBetweenSameTypedCaptures(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = force(Files.readAllBytes(
+			compile(javac, tmp, "v1", V1_FORCED_TWO_SAME_TYPES, true).resolve("B.class")));
+		byte[] v2 = force(Files.readAllBytes(
+			compile(javac, tmp, "v2", V2_FORCED_NO_CAPTURE, true).resolve("B.class")));
+
+		assertNotNull(byKey(parse(v1), "lambda$d$0", "(LB;LB;)V"),
+			"夹具前提：v1 是 (LB;LB)V（接收者 + other）");
+		assertNotNull(byKey(parse(v2), "lambda$d$0", "(LB;)V"),
+			"夹具前提：v2 是零捕获 + 前置 receiver");
+
+		String[] p1 = LambdaAligner.readLambdaParamNames(v1).get("lambda$d$0(LB;LB;)V");
+		assertNotNull(p1);
+		assertEquals(LambdaAligner.RECEIVER_NAME, p1[0], "前置的 receiver 必须归一，不能留 null");
+		assertEquals("other", p1[1]);
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode bridge = byKey(out, "lambda$d$0", "(LB;LB;)V");
+		assertNotNull(bridge,
+			"两个同类型捕获只能靠名字定映射；接收者名字为 null 就会整体弃权：" + table(out));
+		assertTrue(containsCall(bridge, "onBridgeInvoked"),
+			"必须是转发桥；退化成幽灵桩就说明按名映射整体弃权了");
+
+		List<AbstractInsnNode> loads = loadsOf(bridge);
+		assertEquals(1, loads.size(), "只该搬接收者（other 被删）");
+		assertLoad(loads.get(0), Opcodes.ALOAD, 0, "接收者：老方法的槽 0");
+
+		MethodInsnNode call = onlyCoreCall(bridge);
+		assertEquals(Opcodes.INVOKESTATIC, call.getOpcode());
+		assertEquals("(LB;)V", call.desc);
+	}
+
+	/**
+	 * 零捕获静态 lambda 被前置 receiver：那个槽是新增的，<b>没有 LVT 条目</b>。
+	 *
+	 * <p>这是 {@code [null, ...]} 形态的唯一真实来源，直接钉住提取器的归一行为。</p>
+	 */
+	@Test
+	void forcedStaticReceiverWithNoLvtEntryIsNamedInsteadOfNull(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] forced = force(Files.readAllBytes(
+			compile(javac, tmp, "v1", V1_ZERO_CAPTURE, true).resolve("B.class")));
+
+		assertNotNull(byKey(parse(forced), "lambda$d$0", "(LB;)V"),
+			"夹具前提：零捕获静态 lambda 被前置了 receiver");
+
+		String[] names = LambdaAligner.readLambdaParamNames(forced).get("lambda$d$0(LB;)V");
+		assertNotNull(names, "必须有这条合成方法的记录");
+		assertEquals(1, names.length);
+		assertEquals(LambdaAligner.RECEIVER_NAME, names[0],
+			"新增的 receiver 槽没有 LVT 条目，必须归一成 $this 而不是留 null");
 	}
 
 	// ------------------------------------------------------------------------------------------------
@@ -515,6 +788,15 @@ public class LambdaBridgeAlignTest {
 		}
 		""";
 
+	/** 第二轮：只改方法体，捕获表不再动（仍是实例方法、仍是 {@code (LString;I)V} 的老键）。 */
+	static final String V3_INSTANCE_BODY = """
+		public class B {
+		    public Runnable r;
+		    public String   last = "";
+		    public void d(int k) { r = () -> last = "v3:" + k + this; }
+		}
+		""";
+
 	/** 捕获两个宿主<b>局部变量</b>：槽 0 = a、槽 1 = b。 */
 	static final String V1_TWO_LOCAL_INTS = """
 		public class B {
@@ -551,6 +833,110 @@ public class LambdaBridgeAlignTest {
 		}
 		""";
 
+	// --- 实例 lambda：捕获表带接收者 ---------------------------------------------------------------
+
+	/** 实例 lambda，捕获 (this, k)：合成方法是实例方法 {@code lambda$d$0(I)V}。 */
+	static final String V1_THIS_AND_PARAM = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public void d(int k) { r = () -> LAST = "" + k + this; }
+		}
+		""";
+
+	/**
+	 * 删掉 this 引用：合成方法变成<b>静态</b>的 {@code lambda$d$0(I)V}。
+	 *
+	 * <p>与 V1 的 name+desc 完全相同，只差 {@code ACC_STATIC}——这正是"同名同描述符
+	 * 必须避障改名"的形态。</p>
+	 */
+	static final String V2_THIS_DROPPED = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public void d(int k) { r = () -> LAST = "v2:" + k; }
+		}
+		""";
+
+	/** 第二轮：只改方法体，捕获表不再动。 */
+	static final String V3_THIS_DROPPED_BODY = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public void d(int k) { r = () -> LAST = "v3:" + k; }
+		}
+		""";
+
+	/** 实例 lambda，捕获顺序 (a, b)。 */
+	static final String V1_INSTANCE_ORDER_AB = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public void d(int a, int b) { r = () -> LAST = "" + a + "-" + b + this; }
+		}
+		""";
+
+	/** 实例 lambda，捕获顺序 (b, a)：描述符与 V1 完全相同。 */
+	static final String V2_INSTANCE_ORDER_BA = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public void d(int a, int b) { r = () -> LAST = "" + b + "-" + a + this; }
+		}
+		""";
+
+	// --- forceStaticLambdas 开启后的形态 ------------------------------------------------------------
+
+	/** 实例 lambda 捕获两个宿主局部变量 + 接收者：会被改成静态 {@code (LB;II)V}。 */
+	static final String V1_FORCED_LOCALS = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public void d() { int a = 1; int b = 2; r = () -> LAST = "" + a + "-" + b + this; }
+		}
+		""";
+
+	/** 删掉 a、也不再引用 this：静态 {@code (I)V}（捕获数 1，forceStatic 不再前置 receiver）。 */
+	static final String V2_FORCED_LOCALS = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public void d() { int b = 2; r = () -> LAST = "v2:" + b; }
+		}
+		""";
+
+	/** 零捕获静态 lambda：forceStatic 会给它前置一个<b>没有 LVT 条目</b>的 receiver。 */
+	static final String V1_ZERO_CAPTURE = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public void d() { r = () -> LAST = "v1"; }
+		}
+		""";
+
+	/**
+	 * 捕获表里两个<b>同类型</b>值：{@code other}（局部变量）与 {@code this}（接收者）。
+	 *
+	 * <p>类型层面无法区分，槽位层面也不行（局部槽会位移）。只有名字能定，而名字里恰好有一个
+	 * 是"被前置的接收者"——它没有 LVT 条目。</p>
+	 */
+	static final String V1_FORCED_TWO_SAME_TYPES = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public void d() { B other = this; r = () -> LAST = "" + other + this; }
+		}
+		""";
+
+	/** 同一宿主，改成零捕获（不再引用 other / this）。 */
+	static final String V2_FORCED_NO_CAPTURE = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public void d() { r = () -> LAST = "v2"; }
+		}
+		""";
+
 	// ------------------------------------------------------------------------------------------------
 	// 工具
 	// ------------------------------------------------------------------------------------------------
@@ -571,8 +957,18 @@ public class LambdaBridgeAlignTest {
 		return outDir;
 	}
 
-	static ClassNode parse(byte[] bytes) {
-		ClassNode cn = new ClassNode();
+	/**
+	 * 走一遍 {@code AnnotationTransformer.forceStaticLambdas}，把类变成"实例 lambda 也已静态化"
+	 * 的形态——这正是线上 {@code RemoldAgent} 在开关打开时喂给对齐器的字节码。
+	 */
+	static byte[] force(byte[] bytes) {
+		String slash = new ClassReader(bytes).getClassName();
+		AnnotationTransformer.HierarchyTree.register(bytes);
+		return AnnotationTransformer.forceStaticLambdas(
+			bytes, slash, LambdaBridgeAlignTest.class.getClassLoader());
+	}
+
+	static ClassNode parse(byte[] bytes) {		ClassNode cn = new ClassNode();
 		new ClassReader(bytes).accept(cn, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
 		return cn;
 	}

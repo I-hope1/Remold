@@ -2941,19 +2941,27 @@ public class LambdaAligner {
 	 * <p>名字是比槽号更硬的证据：宿主方法里增删前序局部变量会让槽号整体位移，名字不会。
 	 * 未带 {@code -g} 编译时整张表为空，调用方退回槽号/类型判据。</p>
 	 *
+	 * <p><b>静态方法的首形参可能是被前置的接收者</b>：{@code forceStaticLambdas} 会把实例方法
+	 * 改成静态方法并把 {@code this} 变成显式首形参，而那个槽是<b>新加的、没有 LVT 条目</b>的，
+	 * 读出来是 {@code null}。这里统一记成 {@link #RECEIVER_NAME}——否则"任一位缺名字就整体
+	 * 放弃按名映射"那条严格判据会把这类 lambda 全部判成没证据。</p>
+	 *
 	 * @return {@code name + desc -> 形参名字数组}（按形参顺序；实例方法不含接收者）
 	 */
-	static Map<String, String[]> readLambdaParamNames(byte[] bytes) {
+	public static Map<String, String[]> readLambdaParamNames(byte[] bytes) {
 		Map<String, String[]> out = new HashMap<>();
 		if (bytes == null || bytes.length == 0) return out;
-		new ClassReader(bytes).accept(new ClassVisitor(Opcodes.ASM9) {
+		ClassReader cr = new ClassReader(bytes);
+		final String owner = cr.getClassName();
+		cr.accept(new ClassVisitor(Opcodes.ASM9) {
 			@Override
 			public MethodVisitor visitMethod(int acc, String name, String desc,
 			                                 String sig, String[] ex) {
 				if (!MethodFingerprinter.isSyntheticName(name) || name.startsWith("access$")) return null;
+				boolean isStatic = (acc & Opcodes.ACC_STATIC) != 0;
 				Type[] args = Type.getArgumentTypes(desc);
 				int[] slotOf = new int[args.length];
-				int s = (acc & Opcodes.ACC_STATIC) != 0 ? 0 : 1;
+				int s = isStatic ? 0 : 1;
 				for (int i = 0; i < args.length; i++) {
 					slotOf[i] = s;
 					s += args[i].getSize();
@@ -2972,6 +2980,21 @@ public class LambdaAligner {
 							}
 						}
 					}
+
+					@Override
+					public void visitEnd() {
+						// 静态方法的首形参可能是 forceStaticLambdas 前置的接收者：槽是新增的，
+						// 没有 LVT 条目，读出来是 null；若它本来就是实例方法、只是被改成静态，
+						// LVT 里留着 javac 写的 "this"。两者指同一个东西，统一记成 RECEIVER_NAME，
+						// 否则同一个 lambda 在两种来源之间切换会因 "this" vs null 对不上而丢掉按名映射。
+						// 判据是"类型是本类"而不是"名字为空"——真正的同名局部变量会带自己的名字。
+						if (isStatic && names.length > 0
+						    && (names[0] == null || "this".equals(names[0]))
+						    && isReceiverType(args[0].getDescriptor(), owner)) {
+							names[0] = RECEIVER_NAME;
+						}
+						super.visitEnd();
+					}
 				};
 			}
 		}, ClassReader.SKIP_FRAMES);
@@ -2979,18 +3002,44 @@ public class LambdaAligner {
 	}
 
 	/**
-	 * 把合成方法的形参名裁成"捕获名"：前 {@code captured - offset} 项即捕获变量
-	 * （实例 lambda 的形参表不含接收者，故 {@code captured[0]} 固定为 {@code null}）。
+	 * 接收者在捕获表里的统一名字。
+	 *
+	 * <p>它<b>不是</b>源码里的变量名，只是一个"两侧必然相等"的占位符。归一它的理由是
+	 * {@code forceStaticLambdas} 让接收者有<b>两种</b>字节码来源，而这两种来源留下的
+	 * {@code LocalVariableTable} 不一样：</p>
+	 * <ul>
+	 *   <li>实例方法被改成静态：javac 原本给槽 0 写了 {@code "this"}，改写不动 LVT，读出来是 {@code "this"}；</li>
+	 *   <li>零捕获静态 lambda 被前置 receiver：槽 0 是新增的，<b>没有 LVT 条目</b>，读出来是 {@code null}。</li>
+	 * </ul>
+	 * <p>两者指的是同一个东西。不归一的话，同一个 lambda 在两种来源之间切换就会出现
+	 * {@code "this"} vs {@code null} 的名字不匹配，而"任一位缺名字就整体放弃按名映射"这条
+	 * 严格判据会把它判成"没证据"，白白退回槽号/类型推断。</p>
+	 *
+	 * <p>用 {@code $} 开头是为了不可能与 Java 标识符冲突（{@code $this} 不是合法变量名）。</p>
 	 */
-	private static List<String> captureNamesOf(String[] paramNames, int capturedCount, boolean isStatic) {
+	public static final String RECEIVER_NAME = "$this";
+
+	/**
+	 * 把合成方法的形参名裁成"捕获名"：前 {@code captured - offset} 项即捕获变量
+	 * （实例 lambda 的形参表不含接收者，故 {@code captured[0]} 由这里补上）。
+	 *
+	 * <p>接收者槽一律记作 {@link #RECEIVER_NAME}；静态方法里那个"被前置的接收者"
+	 * 已经由 {@link #readLambdaParamNames} 归一好了，这里只需处理实例 lambda 的隐式接收者。</p>
+	 */
+	private static List<String> captureNamesOf(String[] paramNames, List<String> captured, boolean isStatic) {
 		if (paramNames == null) return null;
 		int offset = isStatic ? 0 : 1;
-		int n = capturedCount - offset;
+		int n = captured.size() - offset;
 		if (n < 0 || paramNames.length < n) return null;
-		List<String> out = new ArrayList<>(capturedCount);
-		if (!isStatic) out.add(null);                              // 接收者没有源码名
+		List<String> out = new ArrayList<>(captured.size());
+		if (!isStatic) out.add(RECEIVER_NAME);                     // 接收者没有源码名
 		for (int i = 0; i < n; i++) out.add(paramNames[i]);
 		return out;
+	}
+
+	/** 该描述符是不是"当前类自己的引用"（{@code forceStaticLambdas} 前置 receiver 的形态）。 */
+	private static boolean isReceiverType(String desc, String owner) {
+		return owner != null && desc != null && desc.equals("L" + owner + ";");
 	}
 
 	/**
@@ -3017,7 +3066,7 @@ public class LambdaAligner {
 		info.samSig = sam.getDescriptor();
 		info.instSig = inst.getDescriptor();
 		info.captureSlots = captureSlotsOf(indy, caps);
-		info.captureNames = captureNamesOf(paramNames.get(info.name + info.desc), captured.size(),
+		info.captureNames = captureNamesOf(paramNames.get(info.name + info.desc), captured,
 			info.isStatic());
 		info.hostParamEndSlot = paramEndSlot(host);
 	}
@@ -3274,24 +3323,45 @@ public class LambdaAligner {
 		final String  oldDesc;
 		final String  targetName;
 		final String  targetDesc;
-		/** 目标方法的第 j 个形参，取自老方法的第 {@code oldParamIndex[j]} 个形参。 */
+		/**
+		 * 目标方法的第 j 个形参，取自老方法的第 {@code oldParamIndex[j]} 个<b>捕获</b>。
+		 *
+		 * <p>长度恒等于<b>新</b>捕获表长度：第 {@code j} 项对应新捕获表下标 {@code j}。
+		 * 实例桥的接收者（捕获 0）也在里面，虽然它在桥体里是单独 {@code aload_0} 压的。</p>
+		 */
 		final int[]   oldParamIndex;
+		/**
+		 * 桥方法自身是不是静态的（由<b>老</b>方法决定）。
+		 *
+		 * <p>老隐藏类按老方法的形态调用它：老方法是实例方法，它就得是实例方法、槽 0 是接收者。
+		 * 这一位只影响"桥怎么取自己的实参"，与"目标怎么被调"无关。</p>
+		 */
 		final boolean isStatic;
+		/**
+		 * <b>目标</b>方法是不是静态的（由<b>新</b>方法决定）。
+		 *
+		 * <p>与 {@link #isStatic} 必须分开：{@code forceStaticLambdas} 关闭时，"删掉 this 引用"
+		 * 会让合成方法从实例变静态，而桥仍得是实例方法（老调用点按 {@code INVOKESPECIAL} 调它）。
+		 * 把两者混成一位，就会写出"实例桥去 {@code INVOKESTATIC} 一个要接收者的目标"或
+		 * 反之的非法字节码。</p>
+		 */
+		final boolean targetStatic;
 		final String  location;
 
 		BridgeSpec(String oldDesc, String targetName, String targetDesc,
-		           int[] oldParamIndex, boolean isStatic, String location) {
+		           int[] oldParamIndex, boolean isStatic, boolean targetStatic, String location) {
 			this.oldDesc = oldDesc;
 			this.targetName = targetName;
 			this.targetDesc = targetDesc;
 			this.oldParamIndex = oldParamIndex;
 			this.isStatic = isStatic;
+			this.targetStatic = targetStatic;
 			this.location = location;
 		}
 	}
 
-	/** 上一轮注入的桥体解析结果：目标调用 + 按顺序被加载的老形参下标。 */
-	private record BridgeDelegate(MethodInsnNode target, int[] oldParamIndex) {}
+	/** 上一轮注入的桥体解析结果：目标调用 + 按顺序被加载的老捕获下标。 */
+	private record BridgeDelegate(MethodInsnNode target, int[] oldParamIndex, boolean targetStatic) {}
 
 	/**
 	 * 捕获桥：把"这一轮删掉了捕获变量"的老 lambda 与它的新方法接起来。
@@ -3366,7 +3436,8 @@ public class LambdaAligner {
 			if (map == null) continue;
 			String targetName = finalName(ctx, ni);
 			String target = targetName + ni.desc;
-			ctx.bridges.put(e.getKey(), new BridgeSpec(oi.desc, targetName, ni.desc, map, oi.isStatic(),
+			ctx.bridges.put(e.getKey(), new BridgeSpec(oi.desc, targetName, ni.desc, map,
+				oi.isStatic(), ni.isStatic(),
 				locationOf(ctx.currentClass, oi.name, oi.desc) + " -> " + target));
 			TEST_EVENTS.add(new AlignmentEvent("BRIDGE", oi.name, ni.name,
 				ctx.currentClass + "#" + e.getKey() + " -> " + target));
@@ -3400,10 +3471,18 @@ public class LambdaAligner {
 			}
 			if (now.ghost || !now.renameable) continue;
 			if (presentKeys.contains(oldKey)) continue;
+			// 目标的静态位若与上一轮不同，上一轮那份"搬哪些实参"的记录就不再成立
+			// （比如它又用回了 this，目标从静态变回实例，而桥当时把接收者丢掉了）。
+			// 这种情况不猜，退回幽灵桩。
+			if (bd.targetStatic() != now.isStatic()) {
+				dbg(() -> "BRIDGE target staticness changed: " + oldKey);
+				continue;
+			}
 			String targetName = finalName(ctx, now);
 			String target = targetName + now.desc;
 			ctx.bridges.put(oldKey, new BridgeSpec(oi.desc, targetName, now.desc, bd.oldParamIndex,
-				oi.isStatic(), locationOf(ctx.currentClass, oi.name, oi.desc) + " -> " + target));
+				oi.isStatic(), now.isStatic(),
+				locationOf(ctx.currentClass, oi.name, oi.desc) + " -> " + target));
 			TEST_EVENTS.add(new AlignmentEvent("BRIDGE_REPOINT", oi.name, now.name,
 				ctx.currentClass + "#" + oldKey + " -> " + target));
 		}
@@ -3437,8 +3516,12 @@ public class LambdaAligner {
 	 * 共用一个旧值意味着它们是<b>两个不同的变量</b>，值不一定相同，喂同一个值是静默错值。</p>
 	 */
 	private static int[] bridgeMapping(SyntheticInfo oi, SyntheticInfo ni) {
-		// static 位是另一条轴（normalizeStaticShape 的地盘）。两轴同时变就不再有可证的映射。
-		if (oi.isStatic() != ni.isStatic()) return null;
+		// 方向限制：
+		//  - 实例 → 静态：允许。这正是"删掉 this 引用"的形态（新方法体物理上读不到接收者），
+		//    桥丢弃接收者转发即可，没有伪造值。
+		//  - 静态 → 实例：拒绝。那等于"新增一个接收者捕获"，老实例里没有这个值，
+		//    桥只能编 null 塞进去，而新体必然读它（否则 javac 不会把它写成实例方法）。
+		if (oi.isStatic() && !ni.isStatic()) return null;
 		if (!sameHost(oi, ni)) return null;
 		if (!Objects.equals(oi.fiType, ni.fiType)) return null;
 		if (!Objects.equals(oi.samSig, ni.samSig)) return null;
@@ -3466,7 +3549,7 @@ public class LambdaAligner {
 			if (ni.captured.isEmpty()) return null;
 			return bySlot;
 		}
-		return bySlot != null ? bySlot : mappingByType(oi.captured, ni.captured);
+		return bySlot != null ? bySlot : mappingByType(oi, ni);
 	}
 
 	/**
@@ -3486,17 +3569,17 @@ public class LambdaAligner {
 		if (m > n) return null;
 		int[] map = new int[m];
 		boolean[] used = new boolean[n];
-		int first = oi.isStatic() ? 0 : 1;
-		if (first == 1) {
-			if (m == 0) return null;
+		// 两侧各自跳过接收者：静态位可以不同（实例 → 静态是"删掉 this"），此时新侧没有接收者。
+		int of = oi.firstCapture(), nf = ni.firstCapture();
+		if (of == 1 && nf == 1) {
 			map[0] = 0;                                            // 接收者 ↔ 接收者
 			used[0] = true;
 		}
-		for (int j = first; j < m; j++) {
+		for (int j = nf; j < m; j++) {
 			String name = nn.get(j);
 			if (name == null) return null;
 			int only = -1;
-			for (int i = first; i < n; i++) {
+			for (int i = of; i < n; i++) {
 				if (!name.equals(on.get(i))) continue;
 				if (!oi.captured.get(i).equals(ni.captured.get(j))) return null;   // 同名换型：矛盾
 				if (only >= 0) return null;
@@ -3529,9 +3612,17 @@ public class LambdaAligner {
 		if (m > n) return null;
 		int[] map = new int[m];
 		boolean[] used = new boolean[n];
-		for (int j = 0; j < m; j++) {
+		int of = oi.firstCapture(), nf = ni.firstCapture();
+		if (of == 1 && nf == 1) {
+			// 接收者恒在槽 0（javac 把 aload_0 放在捕获序列最前）。回溯不到槽 0 说明
+			// 我们对这个调用点的布局理解有误，不能拿"槽号 0 恰好相同"糊过去。
+			if (oi.captureSlots.get(0) != 0 || ni.captureSlots.get(0) != 0) return null;
+			map[0] = 0;
+			used[0] = true;
+		}
+		for (int j = nf; j < m; j++) {
 			int only = -1;
-			for (int i = 0; i < n; i++) {
+			for (int i = of; i < n; i++) {
 				if (!oi.captureSlots.get(i).equals(ni.captureSlots.get(j))) continue;
 				if (!oi.captured.get(i).equals(ni.captured.get(j))) return null;   // 同槽换型：矛盾
 				if (only >= 0) return null;
@@ -3549,14 +3640,20 @@ public class LambdaAligner {
 	 *
 	 * @return {@code 新形参下标 → 老形参下标}；有歧义或无解时 {@code null}
 	 */
-	private static int[] mappingByType(List<String> oldL, List<String> newL) {
+	private static int[] mappingByType(SyntheticInfo oi, SyntheticInfo ni) {
+		List<String> oldL = oi.captured, newL = ni.captured;
 		int n = oldL.size(), m = newL.size();
 		if (m > n) return null;
 		int[] map = new int[m];
 		boolean[] used = new boolean[n];
-		for (int j = 0; j < m; j++) {
+		int of = oi.firstCapture(), nf = ni.firstCapture();
+		if (of == 1 && nf == 1) {
+			map[0] = 0;                                            // 接收者 ↔ 接收者
+			used[0] = true;
+		}
+		for (int j = nf; j < m; j++) {
 			int only = -1;
-			for (int i = 0; i < n; i++) {
+			for (int i = of; i < n; i++) {
 				if (!oldL.get(i).equals(newL.get(j))) continue;
 				if (only >= 0) return null;               // 同类型多个候选：歧义
 				only = i;
@@ -3626,7 +3723,9 @@ public class LambdaAligner {
 		mv.visitLdcInsn(spec.location);
 		mv.visitMethodInsn(Opcodes.INVOKESTATIC, Type.getInternalName(LambdaAligner.class),
 		                   "onBridgeInvoked", "(Ljava/lang/String;)V", false);
-		if (!spec.isStatic) mv.visitVarInsn(Opcodes.ALOAD, 0);
+		// 目标要接收者时先把它压到栈底。此时桥必为实例方法（"静态 → 实例"已被
+		// bridgeMapping 拒绝，那等于凭空造一个接收者值），槽 0 就是接收者。
+		if (!spec.targetStatic) mv.visitVarInsn(Opcodes.ALOAD, 0);
 
 		Type[] oldArgs = Type.getArgumentTypes(spec.oldDesc);
 		int[]  slotOf  = new int[oldArgs.length];
@@ -3635,12 +3734,14 @@ public class LambdaAligner {
 			slotOf[i] = slot;
 			slot += oldArgs[i].getSize();
 		}
-		// 捕获表下标 → 描述符形参下标：实例 impl 的捕获表第 0 项是<b>接收者</b>
-		// （工厂描述符里是 LC;，impl 描述符里没有），而接收者已经由上面的 aload 0 压好了。
-		int first = spec.isStatic ? 0 : 1;
-		for (int j = first; j < spec.oldParamIndex.length; j++) {
+		// 捕获表下标 → 描述符形参下标。两侧的"第一个非接收者捕获"下标可以不同：
+		// 实例 → 静态时老侧有接收者（oldFirst = 1）、新侧没有（newFirst = 0），
+		// 老描述符的形参也从老侧的接收者之后开始数。
+		int oldFirst = spec.isStatic ? 0 : 1;
+		int newFirst = spec.targetStatic ? 0 : 1;
+		for (int j = newFirst; j < spec.oldParamIndex.length; j++) {
 			int capIdx = spec.oldParamIndex[j];
-			int argIdx = capIdx - first;
+			int argIdx = capIdx - oldFirst;
 			if (argIdx < 0 || argIdx >= oldArgs.length) {
 				throw new IllegalStateException("bridge param mapping out of range: cap=" + capIdx
 					+ " desc=" + spec.oldDesc);
@@ -3649,7 +3750,9 @@ public class LambdaAligner {
 		}
 		// itf 必须跟着宿主走：接口里的合成方法在常量池里是 InterfaceMethodref，
 		// 写成 false 会得到一条指向 Methodref 的调用指令，校验/解析直接失败。
-		mv.visitMethodInsn(spec.isStatic ? Opcodes.INVOKESTATIC : Opcodes.INVOKESPECIAL,
+		// 目标若是实例方法，只能走 INVOKESPECIAL：它一定是本类里的 private 合成方法，
+		// 而 INVOKEVIRTUAL 对 private 方法在 nestmate 之前是非法/不可解析的。
+		mv.visitMethodInsn(spec.targetStatic ? Opcodes.INVOKESTATIC : Opcodes.INVOKESPECIAL,
 		                   className, spec.targetName, spec.targetDesc, itf);
 		mv.visitInsn(Type.getReturnType(spec.targetDesc).getOpcode(Opcodes.IRETURN));
 		mv.visitMaxs(0, 0);
@@ -3691,8 +3794,14 @@ public class LambdaAligner {
 		}
 		int i = 2;
 		boolean isStatic = (mn.access & Opcodes.ACC_STATIC) != 0;
-		if (!isStatic) {
-			if (!(real.get(i) instanceof VarInsnNode v) || v.getOpcode() != Opcodes.ALOAD || v.var != 0) return null;
+		// 接收者压栈是可选的：目标若是静态方法（"删掉 this" 的桥），桥体不会压它。
+		// 不能像旧版那样无条件要求 aload_0 —— 那会让这类桥在第二轮认不出来，
+		// 白白退化成死幽灵。判据放在最后与目标调用指令一起交叉验证。
+		boolean receiverPushed = false;
+		if (!isStatic && i < real.size()
+		    && real.get(i) instanceof VarInsnNode v0
+		    && v0.getOpcode() == Opcodes.ALOAD && v0.var == 0) {
+			receiverPushed = true;
 			i++;
 		}
 		// 形参槽位 -> 形参下标
@@ -3705,17 +3814,21 @@ public class LambdaAligner {
 		}
 
 		List<Integer> loaded = new ArrayList<>();
-		int lastSlot = -1;
 		MethodInsnNode core = null;
+		// 桥体把"捕获表下标"记下来（不是描述符形参下标）：实例方法的捕获表第 0 项是接收者，
+		// 两种下标差 1，混用会让第二轮按错位的下标搬实参。
+		int firstCap = isStatic ? 0 : 1;
 		for (; i < real.size(); i++) {
 			AbstractInsnNode insn = real.get(i);
 			int op = insn.getOpcode();
 			if (insn instanceof VarInsnNode v && op >= Opcodes.ILOAD && op <= Opcodes.ALOAD) {
 				Integer pi = paramAtSlot.get(v.var);
 				if (pi == null) return null;                      // 加载了非形参槽位：不是我们的桥
-				if (v.var <= lastSlot) return null;               // 顺序被打乱：不认
-				lastSlot = v.var;
-				loaded.add(pi);
+				int capIdx = pi + firstCap;
+				// 只查重、不要求槽号递增：换序桥就是<b>故意</b>倒着压栈的（b 然后 a），
+				// 旧的"必须递增"判据会把它判成不认识，第二轮直接幽灵化。
+				if (loaded.contains(capIdx)) return null;         // 同一个捕获搬两次：不是我们的桥
+				loaded.add(capIdx);
 			} else if (op >= Opcodes.IRETURN && op <= Opcodes.RETURN) {
 				// ok
 			} else if (insn instanceof MethodInsnNode m) {
@@ -3726,9 +3839,15 @@ public class LambdaAligner {
 			}
 		}
 		if (core == null) return null;
+		boolean targetStatic = core.getOpcode() == Opcodes.INVOKESTATIC;
+		// 交叉验证：实例桥必压接收者、且只在目标也是实例方法时才压；静态桥反之。
+		if (receiverPushed == targetStatic) return null;
+		// 对齐 {@link BridgeSpec#oldParamIndex} 的契约（长度 == 新捕获表长度）：
+		// 接收者被单独压栈、没进 loaded，这里补回捕获下标 0（实例方法的接收者恒为捕获 0）。
+		if (receiverPushed) loaded.add(0, 0);
 		int[] idx = new int[loaded.size()];
 		for (int k = 0; k < idx.length; k++) idx[k] = loaded.get(k);
-		return new BridgeDelegate(core, idx);
+		return new BridgeDelegate(core, idx, targetStatic);
 	}
 
 	/** 全部真实指令（跳过 {@code opcode < 0} 的伪指令）；空方法返回 {@code null}。 */
@@ -4886,6 +5005,18 @@ public class LambdaAligner {
 
 		boolean isStatic() {
 			return (access & Opcodes.ACC_STATIC) != 0;
+		}
+
+		/**
+		 * 捕获表里第一个<b>非接收者</b>捕获的下标。
+		 *
+		 * <p>实例 lambda 的捕获表第 0 项是接收者（工厂描述符里是 {@code LC;}，impl 描述符里
+		 * 没有它）；静态 lambda 没有这一项。所有"按捕获表搬实参"的逻辑都必须用这个下标
+		 * 而不是硬编码 0/1——{@code forceStaticLambdas} 会把实例方法改写成静态方法并把接收者
+		 * 变成<b>显式首形参</b>，此时它既是静态方法、又仍有接收者槽。</p>
+		 */
+		int firstCapture() {
+			return isStatic() ? 0 : 1;
 		}
 	}
 	//endregion

@@ -2625,7 +2625,7 @@ public class LambdaAligner {
 				    && i.bsmArgs[1] instanceof Handle h && cn.name.equals(h.getOwner())) {
 					callee = h.getName();
 					recordLambdaShape(nameIndex.get(callee), i, h, mn,
-					                  isOld ? ctx.oldParamNames : ctx.newParamNames);
+					                  isOld ? ctx.oldParamNames : ctx.newParamNames, cn.name);
 				} else if (n instanceof MethodInsnNode m && cn.name.equals(m.owner)) {
 					callee = m.name;
 				}
@@ -2679,7 +2679,7 @@ public class LambdaAligner {
 				    && i.bsmArgs[1] instanceof Handle h && cn.name.equals(h.getOwner())) {
 					callee = h.getName();
 					recordLambdaShape(nameIndex.get(callee), i, h, mn,
-					                  isOld ? ctx.oldParamNames : ctx.newParamNames);
+					                  isOld ? ctx.oldParamNames : ctx.newParamNames, cn.name);
 				} else if (n instanceof MethodInsnNode m && cn.name.equals(m.owner)) {
 					callee = m.name;
 				}
@@ -2946,6 +2946,12 @@ public class LambdaAligner {
 	 * 读出来是 {@code null}。这里统一记成 {@link #RECEIVER_NAME}——否则"任一位缺名字就整体
 	 * 放弃按名映射"那条严格判据会把这类 lambda 全部判成没证据。</p>
 	 *
+	 * <p><b>这里只归一 {@code null} 与 {@code "this"}，不碰 {@code "this$0"}</b>：前两者是
+	 * 无歧义的（{@code this} 是关键字，不可能是变量名；{@code null} 表示没有 LVT 条目），
+	 * 而 {@code this$0} 是合法的 Java 标识符——一个真叫 {@code this$0} 的局部变量会被误归一。
+	 * 那一档留给 {@link #captureNamesOf}：它手里有捕获的宿主槽号，能证明"这一位到底是不是
+	 * 宿主 {@code aload 0} 压上来的"。本方法只报告 LVT 里写了什么。</p>
+	 *
 	 * @return {@code name + desc -> 形参名字数组}（按形参顺序；实例方法不含接收者）
 	 */
 	public static Map<String, String[]> readLambdaParamNames(byte[] bytes) {
@@ -3005,17 +3011,27 @@ public class LambdaAligner {
 	 * 接收者在捕获表里的统一名字。
 	 *
 	 * <p>它<b>不是</b>源码里的变量名，只是一个"两侧必然相等"的占位符。归一它的理由是
-	 * {@code forceStaticLambdas} 让接收者有<b>两种</b>字节码来源，而这两种来源留下的
-	 * {@code LocalVariableTable} 不一样：</p>
+	 * 同一个"捕获到的外层 {@code this}"在不同来源下留下的 {@code LocalVariableTable}
+	 * 不一样，而"任一位缺名字就整体放弃按名映射"这条严格判据会把它们判成"没证据"：</p>
 	 * <ul>
-	 *   <li>实例方法被改成静态：javac 原本给槽 0 写了 {@code "this"}，改写不动 LVT，读出来是 {@code "this"}；</li>
-	 *   <li>零捕获静态 lambda 被前置 receiver：槽 0 是新增的，<b>没有 LVT 条目</b>，读出来是 {@code null}。</li>
+	 *   <li>实例方法被 {@code forceStaticLambdas} 改成静态：javac 原本给槽 0 写了
+	 *       {@code "this"}，改写不动 LVT，读出来是 {@code "this"}；</li>
+	 *   <li>零捕获静态 lambda 被前置 receiver：槽 0 是新增的，<b>没有 LVT 条目</b>，读出来是 {@code null}；</li>
+	 *   <li><b>kotlinc 原生产物</b>：Indy lambda 天生就是 {@code ACC_STATIC}，槽 0 的 LVT 名字是
+	 *       {@code "this$0"}（kotlinc 对外层 this 的一贯写法，与它给内部类合成字段的命名同源）。
+	 *       实测（kotlin-compiler-embeddable 2.1.20，{@code -jvm-target 21}）：
+	 *       <pre>
+	 *   private static final void d$lambda$0(K, int);        // flags: ACC_PRIVATE|STATIC|FINAL
+	 *       LocalVariableTable:
+	 *           0      11     0 this$0   LK;                 // ← 不是 "this"
+	 *           0      11     1    $k   I
+	 *       </pre></li>
 	 * </ul>
-	 * <p>两者指的是同一个东西。不归一的话，同一个 lambda 在两种来源之间切换就会出现
-	 * {@code "this"} vs {@code null} 的名字不匹配，而"任一位缺名字就整体放弃按名映射"这条
-	 * 严格判据会把它判成"没证据"，白白退回槽号/类型推断。</p>
 	 *
-	 * <p>用 {@code $} 开头是为了不可能与 Java 标识符冲突（{@code $this} 不是合法变量名）。</p>
+	 * <p>归一本身是<b>启发式</b>：{@code this$0} 是合法的 Java 标识符（源码里真能写
+	 * {@code void d(Foo this$0)}），光看名字分不清"接收者"与"恰好这么命名的局部变量"。
+	 * 所以真正的判据在 {@link #captureNamesOf}：能拿到宿主槽号时以槽号为准（接收者的来源恒为
+	 * 宿主实例方法的 {@code aload 0}），名字只在回溯失败时兜底。</p>
 	 */
 	public static final String RECEIVER_NAME = "$this";
 
@@ -3023,10 +3039,27 @@ public class LambdaAligner {
 	 * 把合成方法的形参名裁成"捕获名"：前 {@code captured - offset} 项即捕获变量
 	 * （实例 lambda 的形参表不含接收者，故 {@code captured[0]} 由这里补上）。
 	 *
-	 * <p>接收者槽一律记作 {@link #RECEIVER_NAME}；静态方法里那个"被前置的接收者"
-	 * 已经由 {@link #readLambdaParamNames} 归一好了，这里只需处理实例 lambda 的隐式接收者。</p>
+	 * <p>接收者槽一律记作 {@link #RECEIVER_NAME}。静态方法里那个"被前置的接收者"有<b>三种</b>
+	 * 字节码来源（见 {@link #RECEIVER_NAME}），{@code LocalVariableTable} 各不相同，所以归一
+	 * 分两档：</p>
+	 * <ul>
+	 *   <li><b>结构证据优先</b>：{@code captureSlots[0] == 0} 且宿主是非静态方法，说明这一位
+	 *       就是从宿主方法里 {@code aload 0} 压上来的 {@code this}。这是证明，不看名字。</li>
+	 *   <li><b>没有结构证据时</b>（回溯失败）才退回名字：{@code null} / {@code "this"} /
+	 *       {@code "this$0"}。</li>
+	 * </ul>
+	 *
+	 * <p>反过来，结构证据<b>证伪</b>（首捕获的槽号不是 0）时，名字即使是 {@code "this$0"} 也
+	 * <b>不得</b>归一：{@code this$0} 是合法的 Java 标识符，源码里真的可以写
+	 * {@code void d(Foo this$0)}。把这种变量当成接收者，桥就会把接收者喂给一个本该是别的对象
+	 * 的位置——静默错值。宁可这一位没名字（按名映射整体弃权，退回槽号/类型推断），也不猜。</p>
+	 *
+	 * @param captureSlots 每个捕获在<b>宿主方法</b>里的局部变量槽号；回溯失败时为 {@code null}
+	 * @param hostIsStatic 宿主方法是否静态（静态宿主的槽 0 是形参，不可能是 {@code this}）
 	 */
-	private static List<String> captureNamesOf(String[] paramNames, List<String> captured, boolean isStatic) {
+	private static List<String> captureNamesOf(String[] paramNames, List<String> captured,
+	                                           boolean isStatic, String owner,
+	                                           List<Integer> captureSlots, boolean hostIsStatic) {
 		if (paramNames == null) return null;
 		int offset = isStatic ? 0 : 1;
 		int n = captured.size() - offset;
@@ -3034,7 +3067,23 @@ public class LambdaAligner {
 		List<String> out = new ArrayList<>(captured.size());
 		if (!isStatic) out.add(RECEIVER_NAME);                     // 接收者没有源码名
 		for (int i = 0; i < n; i++) out.add(paramNames[i]);
+		if (!out.isEmpty() && isReceiverType(captured.get(0), owner)) {
+			boolean structural = captureSlots != null && !captureSlots.isEmpty() && !hostIsStatic;
+			boolean receiver = structural ? captureSlots.get(0) == 0 : isReceiverName(out.get(0));
+			if (receiver) out.set(0, RECEIVER_NAME);
+		}
 		return out;
+	}
+
+	/**
+	 * 各编译器给"捕获到的外层 {@code this}"写过的 {@code LocalVariableTable} 名字。
+	 *
+	 * <p>javac 写 {@code "this"}（且只在实例方法被改写成静态时保留下来），kotlinc 写
+	 * {@code "this$0"}，{@code forceStaticLambdas} 前置的新槽干脆没有条目（{@code null}）。
+	 * 三者指同一个东西。</p>
+	 */
+	private static boolean isReceiverName(String n) {
+		return n == null || RECEIVER_NAME.equals(n) || "this".equals(n) || "this$0".equals(n);
 	}
 
 	/** 该描述符是不是"当前类自己的引用"（{@code forceStaticLambdas} 前置 receiver 的形态）。 */
@@ -3053,7 +3102,8 @@ public class LambdaAligner {
 	 * 必然一致（它就是方法签名的一部分），不一致只可能来自索引错位，此时保留第一份。</p>
 	 */
 	private static void recordLambdaShape(SyntheticInfo info, InvokeDynamicInsnNode indy, Handle impl,
-	                                      MethodNode host, Map<String, String[]> paramNames) {
+	                                      MethodNode host, Map<String, String[]> paramNames,
+	                                      String owner) {
 		if (info == null || info.captured != null) return;
 		if (!info.desc.equals(impl.getDesc())) return;
 		if (indy.bsmArgs.length < 3) return;
@@ -3067,7 +3117,8 @@ public class LambdaAligner {
 		info.instSig = inst.getDescriptor();
 		info.captureSlots = captureSlotsOf(indy, caps);
 		info.captureNames = captureNamesOf(paramNames.get(info.name + info.desc), captured,
-			info.isStatic());
+			info.isStatic(), owner, info.captureSlots,
+			host != null && (host.access & Opcodes.ACC_STATIC) != 0);
 		info.hostParamEndSlot = paramEndSlot(host);
 		info.hostMethod = host;
 	}

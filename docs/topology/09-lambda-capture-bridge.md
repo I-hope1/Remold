@@ -144,16 +144,38 @@ VM 不会按名字错配到同名的新方法上；且异常抛在调用点之�
 （`() -> use(make(a))` 会先算出临时槽再捕获），槽号没有跨版本身份，回溯判失败、退回推断。
 
 **接收者槽统一记作 `$this`**。它不是源码变量名，而是一个"两侧必然相等"的占位符。归一它
-是因为 `forceStaticLambdas` 让接收者有**两种**字节码来源，两者留下的 `LocalVariableTable`
-不一样：
+是因为"捕获到的外层 `this`"有**三种**字节码来源，留下的 `LocalVariableTable` 各不相同：
 
 | 来源 | 槽 0 的 LVT | 读出来 |
 |:--|:--|:--|
 | 实例方法被改成静态（`needConversionToStatic`） | javac 原本写了 `this`，改写不动 LVT | `"this"` |
 | 零捕获静态 lambda 被前置 receiver（`needForceCaptureThis`） | 槽是新增的，**没有 LVT 条目** | `null` |
+| **kotlinc 原生产物**（Indy lambda 天生 `ACC_STATIC`） | kotlinc 对外层 this 的一贯写法 | `"this$0"` |
 
-两者指同一个东西。不归一的话，"任一位缺名字就整体放弃按名映射"这条严格判据会把第二种
-判成"没证据"；而同一个 lambda 在两种来源之间切换时，`"this"` vs `null` 还会让两侧对不上。
+三者指同一个东西。不归一的话，"任一位缺名字就整体放弃按名映射"这条严格判据会把后两种
+判成"没证据"；而同一个 lambda 在不同来源之间切换时，`"this"` / `null` / `"this$0"` 还会让
+两侧对不上。kotlinc 那条尤其容易踩：老侧是 javac + `forceStatic`（`"this"`）、新侧是 kotlinc
+原生产物（`"this$0"`），按名映射直接失配，退回类型推断后撞上两个同类型捕获的歧义。
+
+kotlinc 的实测形态（`kotlin-compiler-embeddable` 2.1.20，`-jvm-target 21`）：
+
+```text
+private static final void d$lambda$0(K, int);        // flags: ACC_PRIVATE|STATIC|FINAL
+    LocalVariableTable:
+        0      11     0 this$0   LK;
+        0      11     1    $k   I
+```
+
+**判据分两档，结构优先**：
+
+1. 能拿到捕获的宿主槽号时，以槽号为准——接收者的来源恒为宿主**实例方法**里的 `aload 0`，
+   所以 `captureSlots[0] == 0 && !hostIsStatic` 就是证明，不看名字。
+2. 回溯失败（生产者不是直接的局部变量加载）时才退回名字：`null` / `"this"` / `"this$0"`。
+
+结构证据**证伪**时（槽号不是 0）名字即使是 `"this$0"` 也不得归一：`this$0` 是**合法的 Java
+标识符**，源码里真能写 `void d(B this$0)`，那是另一个对象。把它当成接收者，桥就会把接收者
+喂给一个本该是那个变量的位置——静默错值。所以提取器（`readLambdaParamNames`）只归一
+`null` 与 `"this"`（前者无歧义、后者是关键字），`"this$0"` 留给有槽位信息的那一层处理。
 
 判据用**"首形参类型 == 当前类"**而不是"名字为空"：真正的同名局部变量
 （`void observe(Foo other)` 里类型恰好是本类的 `other`）会带自己的名字，不能被误当成接收者。
@@ -161,7 +183,7 @@ VM 不会按名字错配到同名的新方法上；且异常抛在调用点之�
 > 顺带纠正一处曾写在设计里的错误：`needForceCaptureThis` 只对**零捕获**的静态 lambda 生效
 > （它要求 `indy.desc` 的参数个数为 0），所以 `int a=1, b=2; () -> a+b` 这种**带捕获**的
 > lambda 不会被前置 receiver，`[null, "a", "b"]` 这个具体形态并不会从这条路径产生。归一
-> 仍然是必要的——真实形态是上表第二行（`[null]`），以及它与第一行之间的不一致。
+> 仍然是必要的——真实形态是上表第二行（`[null]`），以及它与第一行、第三行之间的不一致。
 
 ### 3.2 同签名的捕获换序必须在配对层拦住
 
@@ -324,7 +346,7 @@ lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
 
 ## 7. 判定力
 
-- `LambdaBridgeAlignTest`（对齐期，不需要 DCEVM，共 35 例）：
+- `LambdaBridgeAlignTest`（对齐期，不需要 DCEVM，共 44 例）：
   - 正向：建桥 / 第二轮保持并重指向 / **纯重排**（`a+b` → `b+a`，桥按新顺序压栈）/
     **槽位证明消歧**（`(int,int) → (int)`，宿主描述符不变）/ **实例 lambda**（桥是实例方法、
     `INVOKESPECIAL` 转发、接收者不进描述符）/ 接口宿主（`itf=true`）/
@@ -334,10 +356,12 @@ lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
     **实例桥的第二轮**（捕获下标 vs 描述符形参下标差 1 的坑）/
     **换序桥的第二轮**（桥体故意倒序压栈，旧判据"槽号必须递增"会把它认成非桥）/
     **forceStatic 开启**（接收者归一成 `$this`；两个同类型捕获只能靠它消歧）/
+    **kotlinc 兼容**（`this$0` 与 `$this` 归一：结构证据在时按槽号，回溯失败时按名字）/
     **新增捕获的纯源重放**（常量 / `static final` / `final` 实例字段 / 可折叠算式（含
     `long` 移位与 `float` 乘法）/ 构造器参数经 `final` 字段）及其**第二轮保活**；
   - 负向：新增捕获拒绝（宿主形参 / 算式不可折 / 非 final 字段 / 静态桥无接收者）/ 捕获类型变化拒绝 /
-    重复类型歧义拒绝（宿主签名变了，槽号不可比）/ SAM 变化拒绝 / 目标消失退化为幽灵；
+    重复类型歧义拒绝（宿主签名变了，槽号不可比）/ SAM 变化拒绝 / 目标消失退化为幽灵 /
+    **真叫 `this$0` 的局部变量不得当成接收者**（槽号证伪）；
   - 熔断豁免对照。
 
 **消融验证**（逐条撤掉修复，确认对应断言必挂，而不是"全绿即通过"）：
@@ -346,6 +370,8 @@ lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
 |:--|:--|:--|
 | 接收者归一成 `$this` | `forcedStaticReceiverWithNoLvtEntryIsNamedInsteadOfNull` | 读出来是 `null` |
 | 同上（只归一 `null`、不归一 `"this"`） | `forcedStaticReceiverNameBreaksTheTieBetweenSameTypedCaptures` | 按名映射整体弃权 → 退化成幽灵桩 |
+| 名字集合里去掉 `"this$0"` | `kotlincStyleReceiverNameWorksWhenCaptureSlotsAreUnknown` | 回溯失败后只剩名字，桥变幽灵桩（结构证据那一档仍能过，见下行） |
+| 去掉结构证据、只按名字判接收者 | `realLocalNamedThisDollarZeroIsNotTreatedAsReceiver` | 真叫 `this$0` 的形参被归一成 `$this`，建桥数 0 → 1（把形参对象当接收者喂给新体） |
 | 允许"实例 → 静态" | `droppingTheReceiverBridgesInstanceToStaticWithoutKeyCollision`、`secondRoundKeepsTheInstanceToStaticBridge` | 建桥数 0 / 桥变幽灵 |
 | 桥体允许不压接收者 | `secondRoundKeepsTheInstanceToStaticBridge` | 第二轮认不出桥 |
 | 解析旧桥体时按捕获下标记 | `secondRoundKeepsTheInstanceBridgeAndItsParamMapping`、`secondRoundKeepsTheInstanceToStaticBridge` | `ILOAD` 变成 `ALOAD`（去加载 String 槽） |

@@ -1,12 +1,16 @@
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldInsnNode;
+import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
+import org.objectweb.asm.tree.LocalVariableNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.VarInsnNode;
@@ -670,6 +674,113 @@ public class LambdaBridgeAlignTest {
 		assertEquals(1, names.length);
 		assertEquals(LambdaAligner.RECEIVER_NAME, names[0],
 			"新增的 receiver 槽没有 LVT 条目，必须归一成 $this 而不是留 null");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// kotlinc 兼容：外层 this 在 LVT 里叫 this$0（不是 this）
+	// ------------------------------------------------------------------------------------------------
+
+	/**
+	 * kotlinc 给"捕获到的外层 {@code this}"写的 LVT 名字是 {@code this$0}，不是 javac 的
+	 * {@code this}——而且它的 Indy lambda 天生就是 {@code ACC_STATIC}，不经过
+	 * {@code forceStaticLambdas}。实测（kotlin-compiler-embeddable 2.1.20，{@code -jvm-target 21}）：
+	 *
+	 * <pre>
+	 * private static final void d$lambda$0(K, int);        // flags: ACC_PRIVATE|STATIC|FINAL
+	 *     LocalVariableTable:
+	 *         0      11     0 this$0   LK;
+	 *         0      11     1    $k   I
+	 * </pre>
+	 *
+	 * <p>两侧都出自同一个编译器时名字自然一致；危险的是<b>跨来源</b>——老侧是 javac +
+	 * {@code forceStatic}（{@code "this"}），新侧是 kotlinc 原生产物（{@code "this$0"}），
+	 * 按名映射会因 {@code "this" != "this$0"} 整体弃权，退回类型推断后撞上两个同类型捕获
+	 * 的歧义，桥建不出来。</p>
+	 *
+	 * <p>这里用"把 javac 夹具槽 0 的 LVT 名字改成 {@code this$0}"来复刻那个形态：除了名字，
+	 * 其余（indy 形状、捕获表、宿主）都是真实 javac 产物，变量只有名字一个。</p>
+	 */
+	@Test
+	void kotlincStyleReceiverNameIsStillMappedToTheReceiver(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] raw = force(Files.readAllBytes(
+			compile(javac, tmp, "v1", V1_FORCED_TWO_SAME_TYPES, true).resolve("B.class")));
+		byte[] v1 = renameLvt(raw, "lambda$d$0", "(LB;LB;)V", 0, "this$0");
+		byte[] v2 = force(Files.readAllBytes(
+			compile(javac, tmp, "v2", V2_FORCED_NO_CAPTURE, true).resolve("B.class")));
+
+		// 提取器只报告 LVT 里写了什么：this$0 原样返回，归一是下一层的事。
+		String[] names = LambdaAligner.readLambdaParamNames(v1).get("lambda$d$0(LB;LB;)V");
+		assertNotNull(names);
+		assertEquals("this$0", names[0], "提取器不该替编译器改名字");
+		assertEquals("other", names[1]);
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode bridge = byKey(out, "lambda$d$0", "(LB;LB;)V");
+		assertNotNull(bridge, "this$0 与 $this 必须归一到同一个名字，否则按名映射整体弃权：" + table(out));
+		assertTrue(containsCall(bridge, "onBridgeInvoked"), "必须是转发桥");
+
+		List<AbstractInsnNode> loads = loadsOf(bridge);
+		assertEquals(1, loads.size(), "只该搬接收者（other 被删）");
+		assertLoad(loads.get(0), Opcodes.ALOAD, 0, "接收者：老方法的槽 0");
+	}
+
+	/**
+	 * 捕获槽回溯失败时（生产者的形状不是直接的局部变量加载），只能靠名字判断哪一位是接收者。
+	 *
+	 * <p>{@code this$0} 必须和 {@code "this"} / {@code null} 一样被认成接收者，否则这一档会
+	 * 退化成"没证据"。这里在 indy 前插一条 {@code NOP} 让回溯失败——{@code NOP} 不改栈、
+	 * 不改语义，只让"紧邻 indy 的那几条指令是局部变量加载"这个前提不成立。</p>
+	 */
+	@Test
+	void kotlincStyleReceiverNameWorksWhenCaptureSlotsAreUnknown(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] raw = force(Files.readAllBytes(
+			compile(javac, tmp, "v1", V1_FORCED_TWO_SAME_TYPES, true).resolve("B.class")));
+		byte[] v1 = insertNopBeforeIndy(
+			renameLvt(raw, "lambda$d$0", "(LB;LB;)V", 0, "this$0"), "d", "()V");
+		byte[] v2 = force(Files.readAllBytes(
+			compile(javac, tmp, "v2", V2_FORCED_NO_CAPTURE, true).resolve("B.class")));
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode bridge = byKey(out, "lambda$d$0", "(LB;LB;)V");
+		assertNotNull(bridge,
+			"槽号回溯失败后只剩名字可用；this$0 没归一就整体弃权，两个同类型捕获只能靠类型猜：" + table(out));
+		assertTrue(containsCall(bridge, "onBridgeInvoked"), "必须是转发桥");
+	}
+
+	/**
+	 * 反向：源码里真的有一个叫 {@code this$0} 的局部变量时，<b>不得</b>把它当接收者。
+	 *
+	 * <p>{@code this$0} 是合法的 Java 标识符，{@code void d(B this$0)} 能编过。这个变量的值
+	 * 与 {@code this} 是<b>两个不同的对象</b>：把它当成接收者，桥就会把接收者喂给一个本该是
+	 * 那个变量的位置——静默错值。结构证据（捕获槽 1 ≠ 0）能证伪，此时必须弃权。</p>
+	 *
+	 * <p>两个版本的同签名 lambda 一个捕获形参、一个捕获 {@code this}，映射没有任何证据能
+	 * 证明"这是同一个值"，正确结果是<b>不建桥</b>（退回幽灵桩），而不是建一座喂错对象的桥。</p>
+	 */
+	@Test
+	void realLocalNamedThisDollarZeroIsNotTreatedAsReceiver(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = force(Files.readAllBytes(
+			compile(javac, tmp, "v1", V1_PARAM_NAMED_THIS_0, true).resolve("B.class")));
+		byte[] v2 = force(Files.readAllBytes(
+			compile(javac, tmp, "v2", V2_CAPTURES_THIS, true).resolve("B.class")));
+
+		assertEquals("this$0",
+			LambdaAligner.readLambdaParamNames(v1).get("lambda$d$0(LB;LB;)V")[0],
+			"夹具前提：v1 捕获的形参就叫 this$0");
+		assertEquals("other",
+			LambdaAligner.readLambdaParamNames(v1).get("lambda$d$0(LB;LB;)V")[1],
+			"夹具前提：v1 还有第二个同类型捕获");
+		assertNotNull(byKey(parse(v2), "lambda$d$0", "(LB;)V"),
+			"夹具前提：v2 只捕获接收者");
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		assertEquals(0, LambdaAligner.LAST_RESULT.bridgeCount,
+			"this$0 是形参、不是接收者：把它归一成 $this 就会把形参对象当成接收者喂给新体");
+		assertTrue(containsCall(byKey(out, "lambda$d$0", "(LB;LB;)V"), "onOrphanInvoked"),
+			"应当退回幽灵桩：" + table(out));
 	}
 
 	// ------------------------------------------------------------------------------------------------
@@ -1426,6 +1537,27 @@ public class LambdaBridgeAlignTest {
 		}
 		""";
 
+	/**
+	 * 形参<b>就叫</b> {@code this$0}：{@code $} 是合法的 Java 标识符字符，这个名字编得过，
+	 * 但它指的是一个普通对象，不是接收者。
+	 */
+	static final String V1_PARAM_NAMED_THIS_0 = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public void d(B this$0) { B other = new B(); r = () -> LAST = "v1:" + this$0 + other; }
+		}
+		""";
+
+	/** 同宿主，但只捕获接收者 {@code this}——与上一份的两个 B 都不是同一个对象。 */
+	static final String V2_CAPTURES_THIS = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public void d(B this$0) { r = () -> LAST = "v2:" + this; }
+		}
+		""";
+
 	// --- 新增捕获的纯源 ---------------------------------------------------------------
 
 	/** 基线：捕获 (String, int)。 */
@@ -1711,6 +1843,57 @@ public class LambdaBridgeAlignTest {
 	static ClassNode parse(byte[] bytes) {		ClassNode cn = new ClassNode();
 		new ClassReader(bytes).accept(cn, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
 		return cn;
+	}
+
+	/** 连调试信息一起读（{@link #parse} 会丢掉 LVT，改写 LVT 的辅助方法不能用它）。 */
+	static ClassNode parseWithDebug(byte[] bytes) {
+		ClassNode cn = new ClassNode();
+		new ClassReader(bytes).accept(cn, 0);
+		return cn;
+	}
+
+	/**
+	 * 改掉某个方法里指定槽位的 LVT 名字，用来复刻 kotlinc 给外层 {@code this} 写的
+	 * {@code this$0}。除了这个名字，其余字节码原样保留。
+	 */
+	static byte[] renameLvt(byte[] bytes, String name, String desc, int slot, String newName) {
+		ClassNode cn = parseWithDebug(bytes);
+		MethodNode mn = byKey(cn, name, desc);
+		assertNotNull(mn, "夹具前提：找不到 " + name + desc);
+		assertNotNull(mn.localVariables, "夹具前提：该夹具必须带 -g");
+		boolean hit = false;
+		for (LocalVariableNode lv : mn.localVariables) {
+			if (lv.index == slot) {
+				lv.name = newName;
+				hit = true;
+			}
+		}
+		assertTrue(hit, "夹具前提：槽 " + slot + " 必须有 LVT 条目");
+		ClassWriter cw = new ClassWriter(0);
+		cn.accept(cw);
+		return cw.toByteArray();
+	}
+
+	/**
+	 * 在指定方法的第一条 indy 之前插一条 {@code NOP}：不改栈、不改语义，只让"紧邻 indy 的
+	 * 那几条指令是局部变量加载"这个前提不成立，从而逼捕获槽回溯失败。
+	 */
+	static byte[] insertNopBeforeIndy(byte[] bytes, String name, String desc) {
+		ClassNode cn = parseWithDebug(bytes);
+		MethodNode mn = byKey(cn, name, desc);
+		assertNotNull(mn, "夹具前提：找不到 " + name + desc);
+		boolean hit = false;
+		for (AbstractInsnNode i : mn.instructions.toArray()) {
+			if (i instanceof InvokeDynamicInsnNode) {
+				mn.instructions.insertBefore(i, new InsnNode(Opcodes.NOP));
+				hit = true;
+				break;
+			}
+		}
+		assertTrue(hit, "夹具前提：该方法里必须有 indy");
+		ClassWriter cw = new ClassWriter(0);
+		cn.accept(cw);
+		return cw.toByteArray();
 	}
 
 	static MethodNode byKey(ClassNode cn, String name, String desc) {

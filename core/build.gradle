@@ -85,7 +85,7 @@ tasks.register('compileNativeArm64') {
 			}
 		}
 		if (!ndkDir) {
-			logger.warn('[Remold] 未找到 ANDROID_NDK_HOME，无法编译 Android arm64 原生库。')
+			logger.warn('[Remold] ANDROID_NDK_HOME not found; skipping Android arm64 native library compilation.')
 			return
 		}
 		def isWin = System.getProperty('os.name').toLowerCase().contains('win')
@@ -93,7 +93,7 @@ tasks.register('compileNativeArm64') {
 		def compilerName = isWin ? 'aarch64-linux-android30-clang++.cmd' : 'aarch64-linux-android30-clang++'
 		def compiler = new File(llvmBin, compilerName)
 		if (!compiler.exists()) {
-			throw new GradleException("[Remold] 未在 NDK 中找到编译器: ${compiler.absolutePath}")
+			throw new GradleException("[Remold] Compiler not found in NDK: ${compiler.absolutePath}")
 		}
 		def javaHome = System.getenv('JAVA_HOME') ?: System.getProperty('java.home')
 		def outLib = file('libs/libtoolarm64.so')
@@ -122,8 +122,8 @@ tasks.register('compileNativeArm64') {
 		def exitCode = process.waitFor()
 		if (exitCode != 0) {
 			logger.error(output)
-			throw new GradleException("[Remold] 编译 libtoolarm64.so 失败 (code ${exitCode}):\n${output}")
+			throw new GradleException("[Remold] Failed to compile libtoolarm64.so (code ${exitCode}):\n${output}")
 		}
-		logger.lifecycle("[Remold] Android arm64 原生库编译完成: ${outLib.absolutePath}")
+		logger.lifecycle("[Remold] Android arm64 native library compilation completed: ${outLib.absolutePath}")
 	}
 }

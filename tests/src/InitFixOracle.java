@@ -1003,9 +1003,9 @@ public class InitFixOracle {
 
 		InitFix.PatchReport r1 = f1.transform();
 		expect(r1, false, "sb", InitFix.FieldStatus.ACCEPTED, null);
-		expectWarning(r1, false, "sb", "按线程的值");
+		expectWarning(r1, false, "sb", "per-thread copy");
 		check(r1.patchGenerated(), "CaseN1：@RemoldReinit 解锁了构造器读取检查，补丁照常生成");
-		check(agentWarnings.stream().anyMatch(w -> w.contains("CaseN1") && w.contains("热更线程")),
+		check(agentWarnings.stream().anyMatch(w -> w.contains("CaseN1") && (w.contains("hotswap thread") || w.contains("热更线程"))),
 			"CaseN1：同时打了一条 warn 日志（实测 " + agentWarnings.size() + " 条 warn）");
 		f1.apply();
 		check(read(f1.host, s1, "sb") instanceof ThreadLocal,
@@ -1062,9 +1062,9 @@ public class InitFixOracle {
 		Fixture f6 = loadFixture("oracle.CaseT3", CASE_T3_V1, CASE_T3R_V2);
 		InitFix.PatchReport r6 = f6.transform();
 		expect(r6, false, "sb", InitFix.FieldStatus.ACCEPTED, null);
-		expectWarning(r6, false, "sb", "构造器里对它的这部分用法不会被重放");
+		expectWarning(r6, false, "sb", "constructor usage will not be replayed");
 		check(r6.instanceFields().get("sb").warnings().stream()
-		      .noneMatch(w -> w.contains("按线程的值")),
+		      .noneMatch(w -> w.contains("per-thread copy") || w.contains("按线程的值")),
 			"CaseT3+注解：非按线程类型不应误报「按线程的值」");
 		f6.apply();
 

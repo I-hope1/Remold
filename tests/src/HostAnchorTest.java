@@ -575,7 +575,9 @@ public class HostAnchorTest {
 		assertNotNull(aligned);
 
 		// 断言同构缩减告警在镜像场景下也必须被触发
-		boolean hasPruningWarn = warnings.stream().anyMatch(w -> w.contains("宿主序列存在多个同构 Lambda 候选且发生缩减"));
+		boolean hasPruningWarn = warnings.stream().anyMatch(w -> w.contains("Multiple isomorphic lambda candidates pruned")
+				|| w.contains("Multiple isomorphic lambda candidates in host sequence with reduction")
+				|| w.contains("宿主序列存在多个同构 Lambda 候选且发生缩减"));
 		assertTrue(hasPruningWarn, "镜像场景下多个完全同构（同体且同消费者）Lambda 候选缩减时，必须触发警告: " + warnings);
 
 		ClassNode cnAligned = readClass(aligned);
@@ -680,7 +682,9 @@ public class HostAnchorTest {
 		assertNotNull(aligned);
 
 		// 1. 断言同构缩减告警必须被触发
-		boolean hasPruningWarn = warnings.stream().anyMatch(w -> w.contains("宿主序列存在多个同构 Lambda 候选且发生缩减"));
+		boolean hasPruningWarn = warnings.stream().anyMatch(w -> w.contains("Multiple isomorphic lambda candidates pruned")
+				|| w.contains("Multiple isomorphic lambda candidates in host sequence with reduction")
+				|| w.contains("宿主序列存在多个同构 Lambda 候选且发生缩减"));
 		assertTrue(hasPruningWarn, "同构缩减场景下必须触发警告: " + warnings);
 
 		// 2. 断言当前前缀约定：留存项对齐到 oldP1，未对齐的 oldP2 降级为幽灵桩

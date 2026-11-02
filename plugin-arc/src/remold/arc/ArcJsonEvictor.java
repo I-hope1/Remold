@@ -114,7 +114,7 @@ public final class ArcJsonEvictor implements ReflectionCacheEvictor {
 			f.setAccessible(true);
 			return f;
 		} catch (Throwable t) {
-			RemoldAgent.warn("[ArcJsonEvict] Arc Json." + name + " 不可访问，该缓存通道失效: " + t);
+			RemoldAgent.warn("[ArcJsonEvict] Arc Json." + name + " is inaccessible; cache channel disabled: " + t);
 			return null;
 		}
 	}

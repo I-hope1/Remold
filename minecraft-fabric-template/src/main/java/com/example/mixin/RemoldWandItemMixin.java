@@ -41,6 +41,6 @@ public abstract class RemoldWandItemMixin {
             return;
         }
         this.remold$useCount++;
-        System.out.println("[Remold] mixin hook alive: use() 第 " + this.remold$useCount + " 次调用");
+        System.out.println("[Remold] mixin hook alive: use() call #" + this.remold$useCount);
     }
 }

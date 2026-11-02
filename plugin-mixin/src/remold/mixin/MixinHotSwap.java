@@ -2,6 +2,8 @@ package remold.mixin;
 
 import java.io.InputStream;
 import java.lang.instrument.Instrumentation;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -15,6 +17,9 @@ import java.util.concurrent.Executors;
 
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.tree.ClassNode;
+import org.spongepowered.asm.mixin.MixinEnvironment;
+import org.spongepowered.asm.mixin.extensibility.IMixinConfig;
+import org.spongepowered.asm.mixin.transformer.Config;
 import org.spongepowered.asm.mixin.transformer.IMixinTransformer;
 
 import remold.RemoldAgent;
@@ -26,7 +31,7 @@ import remold.RemoldAgent;
  * 在 JVM 里既没有可 redefine 的类，Remold 的常规批次也不会去重织入它的目标类。本类补的就是这段：</p>
  *
  * <ol>
- *   <li><b>识别</b>：常量池里出现 {@code @Mixin} 描述符的类，按 Mixin 类处理。</li>
+ *   <li><b>识别</b>：常量池里出现 {@code @Mixin} 描述符或包路径匹配已知 Mixin 配置的类，按 Mixin 类处理。</li>
  *   <li><b>刷新 Mixin 内部状态</b>：调用 {@code IMixinTransformer.reload(name, 新 ClassNode)}。
  *       Mixin 会用它重建 {@code MixinInfo} 状态，并校验结构契约（目标类、接口、内部类、优先级）。
  *       校验不过抛 {@code MixinReloadException}，此时明确提示需要重启。</li>
@@ -62,55 +67,222 @@ public final class MixinHotSwap {
 	}
 
 	/**
+	 * 判断指定类是否为 Mixin 模板类或位于已知 Mixin 包中。
+	 *
+	 * @param dotClassName 点分隔类名
+	 * @param bytes        类的最新字节码
+	 * @return {@code true} 表示属于 Mixin 类或 Mixin 包
+	 */
+	public static boolean isMixin(String dotClassName, byte[] bytes) {
+		if (bytes != null && looksLikeMixin(bytes)) {
+			return true;
+		}
+		if (dotClassName != null && isInMixinPackage(dotClassName)) {
+			return true;
+		}
+		return false;
+	}
+
+	/**
 	 * 若改动的是 Mixin 类，则刷新 Mixin 内部状态并调度目标类的重织入。
 	 *
 	 * @param dotClassName  点分隔类名
 	 * @param newMixinBytes 该类最新的源码级字节码
 	 * @return {@code true} 表示已按 Mixin 类处理（调用方不要再把它当普通类重织入）
 	 */
-	static boolean handleIfMixin(String dotClassName, byte[] newMixinBytes) {
+	public static boolean handleIfMixin(String dotClassName, byte[] newMixinBytes) {
 		try {
 			return handleIfMixin0(dotClassName, newMixinBytes);
 		} catch (Throwable t) {
 			// 连 Mixin 相关类都解析不了（例如宿主把 Mixin 放在另一个 ClassLoader）时，
 			// 交回普通重织入路径，避免整条桥因单个类失败而中断。
 			if (REPORTED.add("<handler>")) {
-				RemoldAgent.warn("Mixin 热更处理不可用: " + t);
+				RemoldAgent.warn("[Mixin] Mixin hot-swap handler unavailable: " + t);
 			}
 			return false;
 		}
 	}
 
 	private static boolean handleIfMixin0(String dotClassName, byte[] newMixinBytes) {
-		if (dotClassName == null || newMixinBytes == null || !looksLikeMixin(newMixinBytes)) {
+		if (dotClassName == null || newMixinBytes == null) {
+			return false;
+		}
+		if (!isMixin(dotClassName, newMixinBytes)) {
 			return false;
 		}
 		IMixinTransformer transformer = MixinReWeaver.activeTransformer();
 		if (transformer == null) {
-			return false;
+			return true;
 		}
 
-		List<String> targets;
+		ensureConfigsSelected(transformer);
+
+		List<String> targets = Collections.emptyList();
 		try {
 			// 必须完整解析：@Inject 的 handler 方法体要从这里搬进目标类，跳过 code 会织出空方法。
 			ClassNode node = new ClassNode();
 			new ClassReader(newMixinBytes).accept(node, 0);
-			targets = normalize(transformer.reload(dotClassName, node));
+			List<String> raw = transformer.reload(dotClassName, node);
+			if (raw == null || raw.isEmpty()) {
+				raw = transformer.reload(dotClassName.replace('.', '/'), node);
+			}
+			targets = normalize(raw);
 		} catch (Throwable t) {
 			reportReloadFailure(dotClassName, t);
 			return true;
 		}
 
 		if (targets.isEmpty()) {
-			// 不是 Mixin（或该 Mixin 没有目标）：交回普通重织入路径，避免误判导致类被跳过重织入。
-			return false;
+			RemoldAgent.info("[Mixin] " + dotClassName + " reloaded (no active targets to re-weave)");
+			return true;
 		}
-		RemoldAgent.info("Mixin " + dotClassName + " 已重新解析，受影响目标: " + targets);
+		RemoldAgent.info("[Mixin] " + dotClassName + " reloaded; affected target(s): " + targets);
 		synchronized (PENDING_LOCK) {
 			PENDING.addAll(targets);
 		}
 		WORKER.execute(MixinHotSwap::flushPendingTargets);
 		return true;
+	}
+
+	/**
+	 * 检查类名是否位于已注册的 Mixin 配置所管辖的包下。
+	 */
+	public static boolean isInMixinPackage(String dotClassName) {
+		if (dotClassName == null || dotClassName.isEmpty()) {
+			return false;
+		}
+		if (checkConfigMap(dotClassName)) {
+			return true;
+		}
+		IMixinTransformer transformer = MixinReWeaver.activeTransformer();
+		if (transformer != null && checkProcessorConfigs(transformer, dotClassName)) {
+			return true;
+		}
+		return false;
+	}
+
+	private static boolean checkConfigMap(String dotClassName) {
+		try {
+			Class<?> configClass = Class.forName("org.spongepowered.asm.mixin.transformer.Config");
+			Field allConfigsField = findField(configClass, "allConfigs");
+			if (allConfigsField != null) {
+				allConfigsField.setAccessible(true);
+				Object map = allConfigsField.get(null);
+				if (map instanceof Map) {
+					Map<?, ?> copy;
+					synchronized (map) {
+						copy = new HashMap<>((Map<?, ?>) map);
+					}
+					for (Object cfgObj : copy.values()) {
+						if (cfgObj instanceof Config) {
+							IMixinConfig mc = ((Config) cfgObj).getConfig();
+							if (mc != null && matchesMixinPackage(mc.getMixinPackage(), dotClassName)) {
+								return true;
+							}
+						}
+					}
+				}
+			}
+		} catch (Throwable ignored) {
+		}
+		return false;
+	}
+
+	private static boolean checkProcessorConfigs(IMixinTransformer transformer, String dotClassName) {
+		try {
+			Field procField = findField(transformer.getClass(), "processor");
+			if (procField != null) {
+				procField.setAccessible(true);
+				Object processor = procField.get(transformer);
+				if (processor != null) {
+					Field configsField = findField(processor.getClass(), "configs");
+					if (configsField != null) {
+						configsField.setAccessible(true);
+						Object list = configsField.get(processor);
+						if (list instanceof List) {
+							List<?> copy;
+							synchronized (list) {
+								copy = new ArrayList<>((List<?>) list);
+							}
+							for (Object cfg : copy) {
+								if (cfg instanceof IMixinConfig) {
+									IMixinConfig mc = (IMixinConfig) cfg;
+									if (matchesMixinPackage(mc.getMixinPackage(), dotClassName)) {
+										return true;
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		} catch (Throwable ignored) {
+		}
+		return false;
+	}
+
+	private static boolean matchesMixinPackage(String mixinPackage, String dotClassName) {
+		if (mixinPackage == null || mixinPackage.isEmpty() || dotClassName == null) {
+			return false;
+		}
+		String prefix = mixinPackage.endsWith(".") ? mixinPackage : mixinPackage + ".";
+		return dotClassName.startsWith(prefix) || dotClassName.equals(mixinPackage);
+	}
+
+	private static void ensureConfigsSelected(IMixinTransformer transformer) {
+		if (transformer == null) {
+			return;
+		}
+		try {
+			MixinEnvironment env = MixinEnvironment.getCurrentEnvironment();
+			Field procField = findField(transformer.getClass(), "processor");
+			if (procField != null) {
+				procField.setAccessible(true);
+				Object processor = procField.get(transformer);
+				if (processor != null) {
+					Method checkSelect = findMethod(processor.getClass(), "checkSelect", MixinEnvironment.class);
+					if (checkSelect != null) {
+						checkSelect.setAccessible(true);
+						checkSelect.invoke(processor, env);
+						return;
+					}
+				}
+			}
+		} catch (Throwable ignored) {
+		}
+		try {
+			MixinEnvironment env = MixinEnvironment.getCurrentEnvironment();
+			ClassNode dummyNode = new ClassNode();
+			dummyNode.name = "remold/dummy/SelectTrigger";
+			dummyNode.version = 52;
+			dummyNode.superName = "java/lang/Object";
+			transformer.transformClass(env, "remold.dummy.SelectTrigger", dummyNode);
+		} catch (Throwable ignored) {
+		}
+	}
+
+	private static Field findField(Class<?> clazz, String fieldName) {
+		for (Class<?> c = clazz; c != null && c != Object.class; c = c.getSuperclass()) {
+			try {
+				Field f = c.getDeclaredField(fieldName);
+				f.setAccessible(true);
+				return f;
+			} catch (NoSuchFieldException ignored) {
+			}
+		}
+		return null;
+	}
+
+	private static Method findMethod(Class<?> clazz, String methodName, Class<?>... paramTypes) {
+		for (Class<?> c = clazz; c != null && c != Object.class; c = c.getSuperclass()) {
+			try {
+				Method m = c.getDeclaredMethod(methodName, paramTypes);
+				m.setAccessible(true);
+				return m;
+			} catch (NoSuchMethodException ignored) {
+			}
+		}
+		return null;
 	}
 
 	/**
@@ -149,7 +321,7 @@ public final class MixinHotSwap {
 
 		Instrumentation inst = RemoldAgent.getInstrumentation();
 		if (inst == null) {
-			RemoldAgent.warn("无法获取 Instrumentation，跳过 Mixin 目标类重织入");
+			RemoldAgent.warn("[Mixin] Instrumentation unavailable; skipping target class re-weaving");
 			return;
 		}
 
@@ -165,18 +337,18 @@ public final class MixinHotSwap {
 			Class<?> targetClass = loaded.get(name);
 			if (targetClass == null) {
 				// 未加载 ⇒ 下次加载时会直接用新的 Mixin 定义织入，无需热更。
-				RemoldAgent.info("目标类 " + name + " 尚未加载，下次加载自动应用新 Mixin");
+				RemoldAgent.info("[Mixin] Target class " + name + " is not yet loaded; new mixin will apply upon initial load");
 				continue;
 			}
 			byte[] originalBytes = readOriginalBytes(targetClass);
 			if (originalBytes == null) {
-				RemoldAgent.warn("读不到 " + name + " 的原始字节码，跳过重织入（运行时生成的类不支持）");
+				RemoldAgent.warn("[Mixin] Unable to read original bytecode for " + name + "; skipping re-weaving (runtime-generated classes not supported)");
 				continue;
 			}
 			if (RemoldAgent.redefineDynamic(targetClass, originalBytes)) {
-				RemoldAgent.info("目标类 " + name + " 已用新 Mixin 重新织入并重定义");
+				RemoldAgent.info("[Mixin] Target class " + name + " re-woven with updated mixin and redefined");
 			} else {
-				RemoldAgent.warn("目标类 " + name + " 重织入后未能重定义：结构变化需带 DCEVM 的 JBR，或该改动需重启客户端");
+				RemoldAgent.warn("[Mixin] Target class " + name + " could not be redefined after re-weaving: structural changes require JBR with DCEVM, or restart the client");
 			}
 		}
 	}
@@ -214,10 +386,10 @@ public final class MixinHotSwap {
 	private static void reportReloadFailure(String dotClassName, Throwable t) {
 		String reason = t.getMessage() != null ? t.getMessage() : t.toString();
 		if (isStructuralRejection(t)) {
-			RemoldAgent.warn("Mixin " + dotClassName
-				+ " 属于结构性改动（目标类/接口/内部类/优先级变化），无法热更，请重启客户端：" + reason);
+			RemoldAgent.warn("[Mixin] " + dotClassName
+				+ " has structural changes (targets/interfaces/inner classes/priority); hot-swap unavailable, please restart client: " + reason);
 		} else {
-			RemoldAgent.warn("Mixin " + dotClassName + " 重新解析失败，请重启客户端：" + reason);
+			RemoldAgent.warn("[Mixin] Failed to reload " + dotClassName + ", please restart client: " + reason);
 		}
 	}
 

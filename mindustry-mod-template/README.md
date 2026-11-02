@@ -87,7 +87,7 @@ remold.plugins=arc
 > # 1) agent 是否有资源分发入口（应输出 notifyAssetChanges / isAssetFile）
 > javap -p -cp remold-agent.jar remold.RemoldAgent | findstr Asset
 > # 2) 插件是否含贴图重载器（应输出 remold/arc/TextureReloader.class）
-> jar tf plugin-arc-0.1.3.jar | findstr TextureReloader
+> jar tf plugin-arc-0.2.0.jar | findstr TextureReloader
 > ```
 > 两者缺一，说明用的是旧发布包。本地联调时先 `./gradlew :plugin-arc:publishToMavenLocal` 重新发布插件（模板会优先取 mavenLocal 里的同名版本），并让模板指向仓库内构建的 `core/build/libs/remold-agent.jar`（`gradle.properties` 的 `remold.agentJar`，或直接把 jar 放到本项目的 `libs/remold-agent.jar`）。
 

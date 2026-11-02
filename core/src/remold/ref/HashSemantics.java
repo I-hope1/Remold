@@ -140,8 +140,8 @@ public final class HashSemantics {
 		for (Finding f : findings) {
 			if (sb.length() > 0) sb.append(", ");
 			sb.append(f.entry()).append("()");
-			if (!f.entry().equals(f.method())) sb.append(" 经 ").append(f.method()).append("()");
-			sb.append(" 读取了新增字段 '").append(f.field()).append('\'');
+			if (!f.entry().equals(f.method())) sb.append(" via ").append(f.method()).append("()");
+			sb.append(" reads added field '").append(f.field()).append('\'');
 		}
 		return sb.toString();
 	}

@@ -74,7 +74,7 @@ public class DynamicProfilerAPI {
 			}
 			internalWalker.walk(s -> {
 				s.forEach(frame -> {
-					System.out.println("捕获到线程 A 的栈帧: " + frame);
+					System.out.println("[Profiler] Captured stack frame of Thread A: " + frame);
 				});
 				return null;
 			});

@@ -26,9 +26,9 @@ public class MixinHotswapPlugin implements HotswapPlugin {
 	public void onAgentInit(Instrumentation inst) {
 		try {
 			RemoldAgent.addTransformerBridge(new MixinBytecodeBridge());
-			RemoldAgent.info("Mixin 重织入桥已注册（plugin-mixin）");
+			RemoldAgent.info("[Mixin] Re-weaving bridge registered (plugin-mixin)");
 		} catch (Throwable t) {
-			RemoldAgent.warn("Mixin 重织入桥注册失败，本次运行按未接入 Mixin 处理: " + t);
+			RemoldAgent.warn("[Mixin] Failed to register re-weaving bridge; proceeding without Mixin support: " + t);
 		}
 	}
 }

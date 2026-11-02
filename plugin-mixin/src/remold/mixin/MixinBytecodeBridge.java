@@ -19,14 +19,15 @@ public final class MixinBytecodeBridge implements BytecodeTransformerBridge {
 	@Override
 	public byte[] transform(ClassLoader loader, String dotClassName, Class<?> targetClass, byte[] sourceBytecode) {
 		try {
-			if (MixinHotSwap.handleIfMixin(dotClassName, sourceBytecode)) {
+			if (MixinHotSwap.isMixin(dotClassName, sourceBytecode)) {
+				MixinHotSwap.handleIfMixin(dotClassName, sourceBytecode);
 				return sourceBytecode;
 			}
 			return MixinReWeaver.reweave(dotClassName, sourceBytecode);
 		} catch (Throwable t) {
 			// Mixin 不在当前 ClassLoader（例如宿主未启用 Mixin）时，整条桥退化为不重织入。
 			if (REPORTED.compareAndSet(false, true)) {
-				remold.RemoldAgent.warn("Mixin 相关类不可用，本次运行不做重织入: " + t);
+				remold.RemoldAgent.warn("[Mixin] Mixin classes are unavailable; bytecode re-weaving disabled for this run: " + t);
 			}
 			return sourceBytecode;
 		}

@@ -38,10 +38,10 @@ public class LibTool {
 	public synchronized static <T> T[] getInstances(Class<T> clazz) {
 		Objects.requireNonNull(clazz, "clazz cannot be null");
 		if (clazz.isPrimitive()) {
-			throw new IllegalArgumentException("基本类型在堆中没有实例: " + clazz);
+			throw new IllegalArgumentException("Primitive types have no heap instances: " + clazz);
 		}
 		if (clazz.isArray()) {
-			throw new IllegalArgumentException("不支持数组类型的实例查询: " + clazz);
+			throw new IllegalArgumentException("Array types are not supported for instance queries: " + clazz);
 		}
 		if (!initialized) init();
 		T[] res = (T[]) nGetInstances(clazz);

@@ -722,7 +722,7 @@ public class LambdaAligner {
 				}
 
 				if (++settleRound >= 64) {
-					RemoldAgent.warn("[LambdaAligner] settled 循环达到上限(64)仍未收敛 " + ctx.currentClass);
+					RemoldAgent.warn("[LambdaAligner] settled loop reached limit (64) without converging for " + ctx.currentClass);
 					break;
 				}
 			}
@@ -1091,9 +1091,9 @@ public class LambdaAligner {
 				oi.matched = false;
 				ctx.usedOldNames.remove(oi.name);
 				totalUndone++;
-				RemoldAgent.warn("[LambdaAligner] 引用一致性被违反，撤销配对：" + ni.name
-				                  + " 的子 " + ni.children + " 与 " + oi.name + " 的子 " + oi.children
-				                  + " 不一致（静默错位已降级为熔断）");
+				RemoldAgent.warn("[LambdaAligner] Reference consistency violated; reverted pairing: " + ni.name
+				                  + " children " + ni.children + " inconsistent with " + oi.name + " children " + oi.children
+				                  + " (silent misalignment downgraded to fuse)");
 			}
 		}
 		return totalUndone;
@@ -1137,13 +1137,13 @@ public class LambdaAligner {
 					String b  = blockedBy;
 					long   lc = leafCand;
 					dbg(() -> "BLOCKED parent=" + ni.name + " by child=" + b
-					          + "(childMatched=false, 旧侧候选数=" + lc + ")"
+					          + "(childMatched=false, oldCandidates=" + lc + ")"
 					          + " parentHash=" + ni.hash + " parentSem=" + ni.semanticHash
 					          + " parentCand=" + cand);
 				} else {
 					dbg(() -> "NO-CANDIDATE " + ni.name
 					          + " hash=" + ni.hash + " sem=" + ni.semanticHash
-					          + " 旧侧候选数=" + cand);
+					          + " oldCandidates=" + cand);
 				}
 			}
 		}
@@ -1483,7 +1483,7 @@ public class LambdaAligner {
 				warnConsumerMismatch(ctx.currentClass, oi, ni.name, ni.desc, oi.consumer, ni.consumer);
 			} else {
 				ctx.consumerMismatchDebugPairs++;
-				dbg(() -> "消费者特征变更（同名唯一良性重构）" + ctx.currentClass
+				dbg(() -> "Consumer signature changed (benign refactor with unique name) " + ctx.currentClass
 				          + ": " + oi.name + " [" + oi.consumer + "] -> [" + ni.consumer + "]");
 			}
 		}
@@ -1926,12 +1926,12 @@ public class LambdaAligner {
 		if (!WARNED_REALIGNMENTS.add(key)) return;
 
 		TEST_EVENTS.add(new AlignmentEvent("POS_MISMATCH", oi.name, newName, owner + "#" + newName + newDesc + "<-" + oi.name + oi.desc));
-		RemoldAgent.warn("[LambdaAligner] 顺序回退配对但方法体不一致 " + owner
-		                  + "：旧 " + oi.name + oi.desc + " <- 新 " + newName + newDesc
-		                  + "。同一逻辑组内存在多个同形 lambda 时，插入/删除会使其序号整体位移，"
-		                  + "此时旧名字会被交给一个语义不同的方法：老 CallSite **不会抛异常**，"
-		                  + "而是安静地执行新方法体（实测确认：deep2 变体乙里旧 $2 承载了 doB2 的语义）。"
-		                  + "建议把每个 lambda 放进独立的私有方法，让身份由结构而非位置决定。");
+		RemoldAgent.warn("[LambdaAligner] Fallback order pairing with inconsistent body in " + owner
+		                  + ": old " + oi.name + oi.desc + " <- new " + newName + newDesc
+		                  + ". When multiple isomorphic lambdas exist in the same logical group, insertions/deletions shift indices, "
+		                  + "causing old names to bind to different semantics. Old CallSites will execute the new body quietly instead of throwing exceptions. "
+		                  + "Consider placing each lambda in a distinct private method to bind identity structurally rather than positionally.");
+
 	}
 
 	/**
@@ -1947,10 +1947,10 @@ public class LambdaAligner {
 		if (!WARNED_REALIGNMENTS.add(key)) return;
 
 		TEST_EVENTS.add(new AlignmentEvent("CONSUMER_MISMATCH", oi.name, newName, oldConsumer + "->" + newConsumer));
-		RemoldAgent.warn("[LambdaAligner] 消费者特征异化配对 " + owner
-		                  + "：旧 " + oi.name + oi.desc + " [" + oldConsumer + "] <- 新 "
-		                  + newName + newDesc + " [" + newConsumer + "]。"
-		                  + "配对双方调用者特征不一致，老 CallSite 可能绑至不同消费者上下文。");
+		RemoldAgent.warn("[LambdaAligner] Consumer profile diverged pairing in " + owner
+		                  + ": old " + oi.name + oi.desc + " [" + oldConsumer + "] <- new "
+		                  + newName + newDesc + " [" + newConsumer + "]. "
+		                  + "Caller consumer profiles diverge; old CallSite may bind to different consumer context.");
 	}
 
 	private static boolean hasMultipleHashCandidates(MatchContext ctx, long hash) {
@@ -1997,10 +1997,10 @@ public class LambdaAligner {
 		if (!WARNED_REALIGNMENTS.add(key)) return;
 
 		TEST_EVENTS.add(new AlignmentEvent("ANON_COLLISION", oi.name, newName, owner + "#" + newName + newDesc + "<-" + oi.name + oi.desc));
-		RemoldAgent.warn("[LambdaAligner] 匿名类归一化导致同组同指纹配对存在歧义 " + owner
-		                  + "：旧 " + oi.name + oi.desc + " <- 新 " + newName + newDesc
-		                  + "。同组内存在多个同形且包含匿名类的 lambda（同指纹），若发生新增、删除或重排可能导致方法语义错位。"
-		                  + "建议将匿名类提取为具名内部类或独立方法以确保语义稳定。");
+		RemoldAgent.warn("[LambdaAligner] Anon class normalization caused ambiguous pairing for same-fingerprint group in " + owner
+		                  + ": old " + oi.name + oi.desc + " <- new " + newName + newDesc
+		                  + ". Multiple isomorphic lambdas containing anonymous classes share fingerprints; additions, deletions, or reordering may shift semantics. "
+		                  + "Consider extracting anonymous classes to named inner classes or standalone methods.");
 	}
 
 	/** 宿主序列存在多个同构候选且发生数量缩减时的告警。 */
@@ -2018,8 +2018,8 @@ public class LambdaAligner {
 				String key = ctx.currentClass + "#" + hostKey + "#" + entry.getKey();
 				if (WARNED_REALIGNMENTS.add(key)) {
 					TEST_EVENTS.add(new AlignmentEvent("HOMOMORPHIC_PRUNING", null, null, hostKey + "#hash=" + entry.getKey()));
-					RemoldAgent.warn("[LambdaAligner] 宿主序列存在多个同构 Lambda 候选且发生缩减 " + ctx.currentClass
-					                  + " (宿主: " + hostKey + ")：存量 CallSite 可能因同构裁剪被幽灵化。建议将关键业务回调提取为独立方法。");
+					RemoldAgent.warn("[LambdaAligner] Multiple isomorphic lambda candidates pruned in " + ctx.currentClass
+					                  + " (host: " + hostKey + "): surviving CallSites may be ghosted. Consider extracting critical callbacks into standalone methods.");
 				}
 				break;
 			}
@@ -2177,7 +2177,7 @@ public class LambdaAligner {
 				}
 			}
 			if (!ok) {
-				warnSkipSwitch(mn, "重算后出现 hashCode 碰撞");
+				warnSkipSwitch(mn, "hashCode collision detected after recalculation");
 				continue;
 			}
 
@@ -2318,8 +2318,8 @@ public class LambdaAligner {
 
 	/** 放弃修复时留痕，避免“静默失效”。 */
 	private static void warnSkipSwitch(MethodNode mn, String reason) {
-		RemoldAgent.info("[LambdaAligner] 跳过 $deserializeLambda$ 的 switch 修复（"
-		                  + mn.name + mn.desc + "）：" + reason);
+		RemoldAgent.info("[LambdaAligner] Skipped $deserializeLambda$ switch repair ("
+		                  + mn.name + mn.desc + "): " + reason);
 	}
 
 	/**
@@ -2763,8 +2763,8 @@ public class LambdaAligner {
 			if (round == 63) {
 				// 明确区分"没算完"与"算完了"：这里留下的是**未定稿**（形状可能为 null），
 				// 而不是一个看似合法的错值。
-				RemoldAgent.warn("[LambdaAligner] 子树形状在 " + (isOld ? "old" : "new")
-				                  + " 侧 64 轮未收敛（存在环或异常引用），沿用当前值；未定稿者保持 null");
+				RemoldAgent.warn("[LambdaAligner] Subtree shape in " + (isOld ? "old" : "new")
+				                  + " side did not converge in 64 rounds (cycle or abnormal reference); retaining current values");
 			}
 		}
 		// 仍为 null 的（理论上只在成环时出现）退化为叶子形状，保证后续比较不 NPE。
@@ -2841,8 +2841,8 @@ public class LambdaAligner {
 				// upDepth 停在 -1，而那行告警**永远打不出来** —— 未收敛被完全静默。
 				if (!changed && !pending) break;
 				if (round == 63) {
-					RemoldAgent.warn("[LambdaAligner] 上行深度在 " + (isOld ? "old" : "new")
-					                  + " 侧 64 轮未收敛（可能存在环），未定稿者保持 -1");
+					RemoldAgent.warn("[LambdaAligner] Ascendant depth in " + (isOld ? "old" : "new")
+					                  + " side did not converge in 64 rounds (possible cycle); unfinalized nodes keep -1");
 				}
 			}
 		}
@@ -2896,8 +2896,8 @@ public class LambdaAligner {
 				// 正常 javac 产物不会成环（lambda 的构造关系是 DAG），这里只是防御：
 				// 真出现环时，宁可让少数方法按当前（可能不完整的）语义指纹参与匹配，
 				// 也不能让整次热更失败。
-				RemoldAgent.warn("[LambdaAligner] 递归语义指纹在 " + className
-				                  + " 上 64 轮未收敛，沿用当前值继续（结果可能不够精确，但不影响可用性）");
+				RemoldAgent.warn("[LambdaAligner] Recursive semantic fingerprint did not converge in 64 rounds for " + className
+				                  + "; proceeding with current values");
 			}
 		}
 	}
@@ -3613,14 +3613,14 @@ public class LambdaAligner {
 			if (synth.length() > 0) {
 				TEST_EVENTS.add(new AlignmentEvent("BRIDGE_SYNTH", oi.name, ni.name,
 					ctx.currentClass + "#" + e.getKey() + " " + synth));
-				RemoldAgent.info("[LambdaAligner] 捕获桥重放新增捕获 " + ctx.currentClass + "#"
-				                 + e.getKey() + "：" + synth);
+				RemoldAgent.info("[LambdaAligner] Capture bridge replaying added capture: " + ctx.currentClass + "#"
+				                 + e.getKey() + ": " + synth);
 			}
 			TEST_EVENTS.add(new AlignmentEvent("BRIDGE", oi.name, ni.name,
 				ctx.currentClass + "#" + e.getKey() + " -> " + target));
-			RemoldAgent.info("[LambdaAligner] 捕获桥 " + ctx.currentClass + "#" + e.getKey()
-			                 + " -> " + target + "（捕获表 " + oi.captured.size() + " → "
-			                 + ni.captured.size() + "，旧实例继续可用）");
+			RemoldAgent.info("[LambdaAligner] Capture bridge " + ctx.currentClass + "#" + e.getKey()
+			                 + " -> " + target + " (captures: " + oi.captured.size() + " -> "
+			                 + ni.captured.size() + ", old instances remain active)");
 		}
 
 		// ---- 2. 第二轮：上一轮建好的桥，把目标挪到本轮的名字上并重生成 ----
@@ -4776,9 +4776,9 @@ public class LambdaAligner {
 			if (ghosted.length() > 0) ghosted.append(", ");
 			ghosted.append(mn.name);
 		}
-		RemoldAgent.info("[LambdaAligner] " + oldCn.name + " 幽灵化 " + (toInject.size() - bridgeCount)
-		                  + " 个方法（老 CallSite 将走熔断/降级）：" + ghosted
-		                  + (bridgeCount > 0 ? "；另建 " + bridgeCount + " 座捕获桥（转发给新方法）" : ""));
+		RemoldAgent.info("[LambdaAligner] " + oldCn.name + " ghosted " + (toInject.size() - bridgeCount)
+		                  + " method(s) (old CallSites will fuse/degrade): " + ghosted
+		                  + (bridgeCount > 0 ? "; created " + bridgeCount + " capture bridge(s) (forwarding to new methods)" : ""));
 
 		// 3. 以空壳或转发桩形式追加到新类末尾
 		ClassReader cr = new ClassReader(newBytes);
@@ -5257,9 +5257,9 @@ public class LambdaAligner {
 						if (ctx.usedOldNames.contains(oi.name)) continue;
 						pair(ctx, ni, oi, "GHOST_REVIVE");
 						TEST_EVENTS.add(new AlignmentEvent("GHOST_REVIVE", oi.name, ni.name,
-							ctx.currentClass + "#" + ni.name + ni.desc + " 复活回 " + oi.name));
-						RemoldAgent.info("[LambdaAligner] 幽灵复活 " + ctx.currentClass + "#"
-							+ oi.name + oi.desc + "（原封不动加回来，指纹一致）");
+							ctx.currentClass + "#" + ni.name + ni.desc + " revived to " + oi.name));
+						RemoldAgent.info("[LambdaAligner] Ghost revived: " + ctx.currentClass + "#"
+							+ oi.name + oi.desc + " (restored verbatim with identical fingerprint)");
 						break;
 					}
 					if (ni.matched) break;

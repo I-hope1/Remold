@@ -40,6 +40,9 @@ public final class MixinReWeaver {
 		if (dotClassName == null || sourceBytecode == null) {
 			return sourceBytecode;
 		}
+		if (MixinHotSwap.isMixin(dotClassName, sourceBytecode)) {
+			return sourceBytecode;
+		}
 		IMixinTransformer weaver = activeTransformer();
 		if (weaver == null) {
 			return sourceBytecode;
@@ -48,8 +51,12 @@ public final class MixinReWeaver {
 			byte[] woven = weaver.transformClassBytes(dotClassName, dotClassName, sourceBytecode);
 			return woven != null ? woven : sourceBytecode;
 		} catch (Throwable t) {
+			if (isIllegalClassLoadError(t)) {
+				RemoldAgent.info("[Mixin] Skipping bytecode re-weaving for mixin package class: " + dotClassName);
+				return sourceBytecode;
+			}
 			// 织入失败时回退源码字节码：交给 LayoutGate / JVM 拒绝，而不是带着半成品重定义。
-			reportOnce(dotClassName, "Mixin 重织入失败，已回退源码字节码", t);
+			reportOnce(dotClassName, "[Mixin] Bytecode re-weaving failed; falling back to source bytecode", t);
 			return sourceBytecode;
 		}
 	}
@@ -69,9 +76,18 @@ public final class MixinReWeaver {
 				transformer = (IMixinTransformer) active;
 			}
 		} catch (Throwable t) {
-			reportOnce("<resolver>", "无法获取 Mixin 织入器，本次运行不做重织入", t);
+			reportOnce("<resolver>", "[Mixin] Unable to acquire Mixin transformer; re-weaving disabled for this run", t);
 		}
 		return transformer;
+	}
+
+	private static boolean isIllegalClassLoadError(Throwable t) {
+		for (Throwable cur = t; cur != null; cur = cur.getCause()) {
+			if ("IllegalClassLoadError".equals(cur.getClass().getSimpleName())) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private static void reportOnce(String key, String message, Throwable t) {

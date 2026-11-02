@@ -73,6 +73,9 @@ public class MixinCompatibilityTest {
 		// 4. 分析 MixinAgent 的内置行为
 		testMixinAgentBuiltinAnalysis();
 
+		// 5. Mixin 自身热更与 IllegalClassLoadError 防御实测
+		testMixinClassHotSwapBypassesReweaver();
+
 		System.out.println("\n================================================================================");
 		System.out.println("   实测汇总：全部测试通过！(PASSED=" + passed + ", FAILED=" + failed + ")");
 		System.out.println("================================================================================");
@@ -575,6 +578,47 @@ public class MixinCompatibilityTest {
 
 		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
 		cn.accept(cw);
+		return cw.toByteArray();
+	}
+
+	static void testMixinClassHotSwapBypassesReweaver() {
+		System.out.println("\n--- [实验十] Mixin 类自身热重载分流与 IllegalClassLoadError 防御实测 ---");
+		String mixinClassName = "com.example.mixin.RemoldWandItemMixin";
+		byte[] mixinBytes = buildMockMixinBytecode(mixinClassName);
+
+		// 1. isMixin 准确识别带有 @Mixin 的类
+		boolean isMix = remold.mixin.MixinHotSwap.isMixin(mixinClassName, mixinBytes);
+		check(isMix, "remold.mixin.MixinHotSwap.isMixin 必须识别带有 @Mixin 的类");
+
+		// 2. handleIfMixin 处理 Mixin 类并返回 true，不落入 reweave
+		boolean handled = remold.mixin.MixinHotSwap.handleIfMixin(mixinClassName, mixinBytes);
+		check(handled, "remold.mixin.MixinHotSwap.handleIfMixin 处理 Mixin 类必须返回 true（绝不回退 false）");
+
+		// 3. MixinBytecodeBridge.transform 遇到 Mixin 类原样返回 sourceBytecode，不触发 reweave
+		remold.mixin.MixinBytecodeBridge bridge = new remold.mixin.MixinBytecodeBridge();
+		byte[] transformed = bridge.transform(MixinCompatibilityTest.class.getClassLoader(), mixinClassName, null, mixinBytes);
+		check(transformed == mixinBytes, "MixinBytecodeBridge 遇到 Mixin 类必须直接返回原始字节码");
+
+		// 4. MixinReWeaver.reweave 遇到 Mixin 类直接返回 sourceBytecode
+		byte[] reweaved = remold.mixin.MixinReWeaver.reweave(mixinClassName, mixinBytes);
+		check(reweaved == mixinBytes, "MixinReWeaver.reweave 遇到 Mixin 类必须直接返回原始字节码，防御 IllegalClassLoadError");
+	}
+
+	static byte[] buildMockMixinBytecode(String className) {
+		ClassWriter cw = new ClassWriter(0);
+		cw.visit(Opcodes.V11, Opcodes.ACC_PUBLIC, className.replace('.', '/'), null, "java/lang/Object", null);
+		AnnotationVisitor av = cw.visitAnnotation("Lorg/spongepowered/asm/mixin/Mixin;", true);
+		if (av != null) {
+			av.visitEnd();
+		}
+		MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+		mv.visitCode();
+		mv.visitVarInsn(Opcodes.ALOAD, 0);
+		mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+		mv.visitInsn(Opcodes.RETURN);
+		mv.visitMaxs(1, 1);
+		mv.visitEnd();
+		cw.visitEnd();
 		return cw.toByteArray();
 	}
 

@@ -1,7 +1,7 @@
 // Remold Gradle Script Plugin (Kotlin DSL)
 // Usage: apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/v<version>/remold.gradle.kts")
 //        本地开发: apply(from = file("../remold.gradle.kts"))
-// 注意：远程引入务必用 **tag**（v0.1.3）而不是 main —— 脚本与 agent / api 必须同版本，
+// 注意：远程引入务必用 **tag**（v0.2.0）而不是 main —— 脚本与 agent / api 必须同版本，
 //       否则脚本按新接口拼参数、agent 还是旧版本，会在运行期才炸。完整引导块（本地多路径优先 +
 //       版本缓存 + -Premold.script 覆盖）见 mindustry-mod-template / minecraft-fabric-template 的构建脚本。
 
@@ -110,7 +110,7 @@ project.plugins.withId("java") {
         if (jarProp != null) {
             targetJar = project.file(jarProp)
             if (!targetJar.exists()) {
-                project.logger.warn("[Remold] 注意：指定的目标启动 JAR 尚不存在: ${targetJar.absolutePath}（非立即运行时可忽略）")
+                project.logger.warn("[Remold] Notice: Target launch JAR does not exist yet: ${targetJar.absolutePath} (can be ignored if not running immediately)")
             }
         }
 
@@ -131,13 +131,13 @@ project.plugins.withId("java") {
 
         if (main == null) {
             if (targetJar != null && targetJar.exists()) {
-                throw GradleException("[Remold] 未能从 ${targetJar.name} 的 MANIFEST.MF 中读取到 Main-Class，请在 remold { mainClass = \"...\" } 中显式指定。")
+                throw GradleException("[Remold] Could not read Main-Class from MANIFEST.MF of ${targetJar.name}. Please specify it explicitly via remold { mainClass = \"...\" }.")
             } else if (targetJar != null) {
                 main = "unknown.MainClass"
             } else if (project.plugins.hasPlugin("fabric-loom") || project.extensions.findByName("loom") != null) {
                 main = "net.fabricmc.loader.impl.launch.knot.KnotClient"
             } else {
-                throw GradleException("[Remold] 未配置 mainClass 或 jar。请在 remold { mainClass = \"...\" }、remold { jar = \"...\" } 或 gradle.properties 中指定。")
+                throw GradleException("[Remold] Neither mainClass nor jar is configured. Please specify via remold { mainClass = \"...\" }, remold { jar = \"...\" }, or gradle.properties.")
             }
         }
 
@@ -185,7 +185,7 @@ project.plugins.withId("java") {
                 execPath = javaBin.absolutePath
                 execHome = toJreHome(javaBin.absolutePath)
             } else {
-                project.logger.warn("[Remold] 指定的 JBR 路径不存在: $jbr，将使用项目 SDK 的 JVM 运行。")
+                project.logger.warn("[Remold] Specified JBR path does not exist: $jbr. Falling back to project SDK JVM.")
             }
         }
 
@@ -275,7 +275,7 @@ project.plugins.withId("java") {
         // 若本地未找到，尝试从 Gradle 依赖缓存或官方 Releases 自动下载
         if (agentFile == null || !agentFile.exists()) {
             if (ver == null) {
-                throw GradleException("[Remold] 未配置 Remold 版本号！请在 remold { version = \"...\" } 或 gradle.properties (remold.version=...) 中指定。")
+                throw GradleException("[Remold] Remold version is not configured! Please specify via remold { version = \"...\" } or gradle.properties (remold.version=...).")
             }
             val cacheDir = File(project.gradle.gradleUserHomeDir, "caches/remold")
             val cachedJar = File(cacheDir, "remold-agent-$ver.jar")
@@ -308,7 +308,7 @@ project.plugins.withId("java") {
                 }
 
                 if (agentFile == null || !agentFile.exists()) {
-                    project.logger.lifecycle("[Remold] 本地未找到 agent jar，正在自动拉取 remold-agent.jar (版本: $ver)...")
+                    project.logger.lifecycle("[Remold] Local agent jar not found; downloading remold-agent.jar (version: $ver)...")
                     val downloadUrls = listOf(
                         "https://github.com/I-hope1/Remold/releases/download/v$ver/remold-agent.jar",
                         "https://github.com/I-hope1/Remold/releases/download/$ver/remold-agent.jar"
@@ -317,7 +317,7 @@ project.plugins.withId("java") {
                     for (urlStr in downloadUrls) {
                         if (downloadRemoteJar(urlStr, cachedJar)) {
                             agentFile = cachedJar
-                            project.logger.lifecycle("[Remold] agent jar 已自动就绪: ${cachedJar.absolutePath}")
+                            project.logger.lifecycle("[Remold] Agent jar ready: ${cachedJar.absolutePath}")
                             break
                         }
                     }
@@ -327,9 +327,9 @@ project.plugins.withId("java") {
 
         if (agentFile == null || !agentFile.exists()) {
             throw GradleException(
-                "[Remold] 未找到且无法自动下载 remold-agent.jar (目标版本: ${remoldExt.version})！\n" +
-                "请检查网络或在 remold { version = \"...\" } 中指定有效版本，\n" +
-                "亦可在 remold { agentJar = \"/path/to/remold-agent.jar\" } 中显式指定本地文件。"
+                "[Remold] remold-agent.jar was not found and could not be downloaded automatically (target version: ${remoldExt.version})!\n" +
+                "Please check your network connection or specify a valid version in remold { version = \"...\" },\n" +
+                "or specify a local file explicitly in remold { agentJar = \"/path/to/remold-agent.jar\" }."
             )
         }
 
@@ -366,7 +366,7 @@ project.plugins.withId("java") {
         if (remoldExt.debug || "true".equals(System.getProperty("remold.debug"), ignoreCase = true)) {
             val port = remoldExt.debugPort
             args.add("-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:$port")
-            project.logger.lifecycle("[Remold] JDWP 调试已开启，仅监听本机: 127.0.0.1:$port")
+            project.logger.lifecycle("[Remold] JDWP debugging enabled, listening on localhost: 127.0.0.1:$port")
         }
 
         args.addAll(remoldExt.extraJvmArgs)
@@ -398,7 +398,7 @@ project.plugins.withId("java") {
                 // 同样落到 .gradle/remold/plugins/，避免运行配置里出现仓库外的绝对路径
                 pluginJars.add(syncIntoLocalRemold(f, File(localRemoldDir, "plugins/${f.name}")))
             } else {
-                project.logger.warn("[Remold] 指定的插件 Jar 不存在: ${f.absolutePath}")
+                project.logger.warn("[Remold] Specified plugin jar does not exist: ${f.absolutePath}")
             }
         }
         if (distinctPlugins.isNotEmpty()) {
@@ -459,7 +459,7 @@ project.plugins.withId("java") {
                     if (cachedJar.exists() && cachedJar.length() > 1024) {
                         resolvedPluginJar = cachedJar
                     } else {
-                        project.logger.lifecycle("[Remold] 正在自动拉取插件: remold-plugin-$pluginName.jar (版本: $ver)...")
+                        project.logger.lifecycle("[Remold] Downloading plugin: remold-plugin-$pluginName.jar (version: $ver)...")
                         val pluginUrls = listOf(
                             "https://github.com/I-hope1/Remold/releases/download/v$ver/remold-plugin-$pluginName-$ver.jar",
                             "https://github.com/I-hope1/Remold/releases/download/v$ver/remold-plugin-$pluginName.jar",
@@ -470,7 +470,7 @@ project.plugins.withId("java") {
                         for (urlStr in pluginUrls) {
                             if (downloadRemoteJar(urlStr, cachedJar)) {
                                 resolvedPluginJar = cachedJar
-                                project.logger.lifecycle("[Remold] 插件已自动就绪: ${cachedJar.absolutePath}")
+                                project.logger.lifecycle("[Remold] Plugin ready: ${cachedJar.absolutePath}")
                                 break
                             }
                         }
@@ -482,7 +482,7 @@ project.plugins.withId("java") {
                     // IDEA 配置里不再混入 plugin-x/build/libs 这类随 clean 消失的路径
                     pluginJars.add(syncIntoLocalRemold(resolvedPluginJar, File(localRemoldDir, "plugins/${resolvedPluginJar.name}")))
                 } else {
-                    project.logger.warn("[Remold] 未找到插件 remold-plugin-$pluginName 的 Jar 包，若已内嵌或无需外部 Jar 可忽略。")
+                    project.logger.warn("[Remold] Plugin remold-plugin-$pluginName jar not found; can be ignored if embedded or not required.")
                 }
             }
 
@@ -519,7 +519,7 @@ project.plugins.withId("java") {
         doFirst {
             val conf = resolveRemoldConfig()
             if (conf.targetJar != null && !conf.targetJar.exists()) {
-                throw GradleException("[Remold] 指定的目标启动 JAR 不存在，无法启动应用: ${conf.targetJar.absolutePath}")
+                throw GradleException("[Remold] Target launch JAR does not exist; cannot launch application: ${conf.targetJar.absolutePath}")
             }
             mainClass.set(conf.mainClass)
             classpath = conf.runtimeClasspath
@@ -531,15 +531,15 @@ project.plugins.withId("java") {
             }
             jvmArgs(conf.jvmArgs)
 
-            logger.lifecycle("[Remold] 启动配置已装配:")
+            logger.lifecycle("[Remold] Launch configuration assembled:")
             if (conf.targetJar != null) {
-                logger.lifecycle("  - 目标启动 JAR: ${conf.targetJar.absolutePath}")
+                logger.lifecycle("  - Target JAR: ${conf.targetJar.absolutePath}")
             }
-            logger.lifecycle("  - 主类: ${conf.mainClass}")
+            logger.lifecycle("  - Main class: ${conf.mainClass}")
             logger.lifecycle("  - Agent: ${conf.agentFile.absolutePath}")
-            logger.lifecycle("  - Watch 目录 (${conf.allWatchDirs.size} 个): ${conf.watchPath}")
+            logger.lifecycle("  - Watch directories (${conf.allWatchDirs.size}): ${conf.watchPath}")
             if (conf.appArgs.isNotEmpty()) {
-                logger.lifecycle("  - 应用参数: ${conf.appArgs.joinToString(" ")}")
+                logger.lifecycle("  - App arguments: ${conf.appArgs.joinToString(" ")}")
             }
             if (remoldExt.fileShakeMs != null) {
                 logger.lifecycle("  - File Shake: ${remoldExt.fileShakeMs}ms")
@@ -574,10 +574,10 @@ project.plugins.withId("java") {
         })
         into(provider {
             resolveDeployDir()
-                ?: throw GradleException("[Remold] 开启了 autoDeploy 但未指定目标部署目录！请在 remold { deployDir = \"...\" } 或 gradle.properties (remold.deployDir=...) 中配置。")
+                ?: throw GradleException("[Remold] autoDeploy is enabled but deploy directory is not configured! Please specify via remold { deployDir = \"...\" } or gradle.properties (remold.deployDir=...).")
         })
         doLast {
-            logger.lifecycle("[Remold] 产物已自动部署至: ${resolveDeployDir()?.absolutePath}")
+            logger.lifecycle("[Remold] Artifact deployed to: ${resolveDeployDir()?.absolutePath}")
         }
     }
 
@@ -766,7 +766,7 @@ project.plugins.withId("java") {
                 try {
                     val out = generateIdeaRunConfigInternal()
                     if (out != null) {
-                        logger.lifecycle("[Remold] 自动就绪 IntelliJ IDEA 运行配置: ${out.absolutePath}")
+                        logger.lifecycle("[Remold] IntelliJ IDEA run configuration ready: ${out.absolutePath}")
                     }
                 } catch (ignored: Throwable) {
                 }
@@ -787,7 +787,7 @@ project.plugins.withId("java") {
                         for (arg in conf.jvmArgs) {
                             vmArgMethod.invoke(client, arg)
                         }
-                        logger.lifecycle("[Remold] 已自动为 Fabric Loom 的 runClient 注入热重载探针参数！")
+                        logger.lifecycle("[Remold] Injected hot-reload agent parameters into Fabric Loom runClient!")
                     }
                 }
             } catch (_: Throwable) { }
@@ -802,8 +802,8 @@ project.plugins.withId("java") {
         doLast {
             val xmlFile = generateIdeaRunConfigInternal()
             if (xmlFile != null) {
-                logger.lifecycle("[Remold] 已生成 IntelliJ IDEA 运行配置: ${xmlFile.absolutePath}")
-                logger.lifecycle("[Remold] 用 IDEA 打开本项目即可直接点击右上角运行 / 调试按钮！")
+                logger.lifecycle("[Remold] Generated IntelliJ IDEA run configuration: ${xmlFile.absolutePath}")
+                logger.lifecycle("[Remold] Open this project in IDEA to launch directly with the run/debug configuration.")
             }
         }
     }
@@ -816,7 +816,7 @@ project.plugins.withId("java") {
         doLast {
             val conf = resolveRemoldConfig()
             if (conf.targetJar != null && !conf.targetJar.exists()) {
-                throw GradleException("[Remold] 指定的目标启动 JAR 不存在，无法启动应用: ${conf.targetJar.absolutePath}")
+                throw GradleException("[Remold] Target launch JAR does not exist; cannot launch application: ${conf.targetJar.absolutePath}")
             }
             val buildDir = project.layout.buildDirectory.asFile.get()
             val remoldDir = File(buildDir, "remold")
@@ -851,11 +851,11 @@ project.plugins.withId("java") {
                 shFile.setExecutable(true, false)
             } catch (_: Exception) { }
 
-            logger.lifecycle("[Remold] 已生成原生启动脚本:")
+            logger.lifecycle("[Remold] Generated native launch script:")
             logger.lifecycle("  - Windows: ${batFile.absolutePath}")
             logger.lifecycle("  - Linux/macOS: ${shFile.absolutePath}")
-            logger.lifecycle("  - Args 文件: ${argsFile.absolutePath}")
-            logger.lifecycle("[Remold] 直接运行脚本即可启动应用，不经由 Gradle，零 Daemon 占用！")
+            logger.lifecycle("  - Args file: ${argsFile.absolutePath}")
+            logger.lifecycle("[Remold] Run the script directly to launch the application without Gradle daemon overhead.")
         }
     }
 
@@ -867,7 +867,7 @@ project.plugins.withId("java") {
         doLast {
             val conf = resolveRemoldConfig()
             if (conf.targetJar != null && !conf.targetJar.exists()) {
-                throw GradleException("[Remold] 指定的目标启动 JAR 不存在，无法启动应用: ${conf.targetJar.absolutePath}")
+                throw GradleException("[Remold] Target launch JAR does not exist; cannot launch application: ${conf.targetJar.absolutePath}")
             }
             val buildDir = project.layout.buildDirectory.asFile.get()
             val argsFile = File(buildDir, "remold/remold.args")
@@ -877,7 +877,7 @@ project.plugins.withId("java") {
                 ProcessBuilder("cmd", "/c", "start", "\"Remold [${project.name}]\"", conf.executable, "@${argsFile.absolutePath}")
                     .directory(project.projectDir)
                     .start()
-                logger.lifecycle("[Remold] 应用已在独立控制台窗口启动！")
+                logger.lifecycle("[Remold] Application launched in a separate console window.")
             } else {
                 val logFile = File(buildDir, "remold/remold.log")
                 ProcessBuilder(conf.executable, "@${argsFile.absolutePath}")
@@ -885,9 +885,9 @@ project.plugins.withId("java") {
                     .redirectOutput(logFile)
                     .redirectErrorStream(true)
                     .start()
-                logger.lifecycle("[Remold] 应用已在后台脱离启动！输出日志: ${logFile.absolutePath}")
+                logger.lifecycle("[Remold] Application launched in background. Output log: ${logFile.absolutePath}")
             }
-            logger.lifecycle("[Remold] Gradle Daemon 已立即释放 (IDLE)。随时可在终端执行 ./gradlew compileJava 触发热重载。")
+            logger.lifecycle("[Remold] Gradle Daemon released (IDLE). Run ./gradlew compileJava in terminal anytime to trigger hot-reload.")
         }
     }
 }

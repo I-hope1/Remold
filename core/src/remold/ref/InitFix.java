@@ -473,9 +473,9 @@ public class InitFix {
 		List<HashSemantics.Finding> findings = HashSemantics.findDependencies(newBytes, addedInstanceFields);
 		if (findings.isEmpty()) return;
 		RemoldAgent.warn("[HASH-SEMANTICS] " + HashSemantics.describe(findings)
-		                 + "；已放入 HashMap/HashSet/TreeMap 的实例会落错桶或比较位置，"
-		                 + "get/contains/remove 会静默失效。补丁仍会执行（新代码需要该值），"
-		                 + "但请重建相关容器或重启。");
+		                 + "; instances already stored in HashMap/HashSet/TreeMap may end up in incorrect buckets or comparison order, "
+		                 + "causing get/contains/remove to fail silently. Patches will still be applied, "
+		                 + "but please rebuild the affected containers or restart.");
 	}
 
 	/**
@@ -755,7 +755,7 @@ public class InitFix {
 			    + " -> mode=" + (e.getValue().overwrite() ? "OVERWRITE" : "CONDITIONAL"));
 		}
 		if (!reinitFields.isEmpty()) {
-			log("@RemoldReinit 扩展候选集 for " + className
+			log("@RemoldReinit expanded candidate set for " + className
 			    + ": instance=" + targetInstanceFields + ", static=" + targetStaticFields);
 		}
 
@@ -902,7 +902,7 @@ public class InitFix {
 		for (String f : unchangedStatic) staticExtracts.remove(f);
 		if (!unchangedInstance.isEmpty() || !unchangedStatic.isEmpty()) {
 			RemoldAgent.info("[REINIT] @RemoldReinit kept as-is on " + className
-				+ "（初值表达式自上次应用以来未变，且其值完全由字节码决定，不重写）："
+				+ " (initializer expression has not changed since last applied and is fully determined by bytecode; not rewriting): "
 				+ "instance=" + unchangedInstance + ", static=" + unchangedStatic);
 		}
 
@@ -1803,11 +1803,11 @@ public class InitFix {
 
 		String warning = exemptionWarning(fieldNode, gateReason);
 		if (warned.add(fieldName)) {
-			RemoldAgent.warn("@RemoldReinit 豁免了 " + className + "."
-			                  + fieldName + "（" + (isStatic ? "static" : "instance") + "）的门禁："
+			RemoldAgent.warn("[InitFix] @RemoldReinit waived safety gate for " + className + "."
+			                  + fieldName + " (" + (isStatic ? "static" : "instance") + "): "
 			                  + gateReason
-			                  + "；补丁只重建字段初始化式、且在热更线程上单线程执行，"
-			                  + "构造器里的这部分用法不会被重放");
+			                  + "; patch only reconstructs field initializer and executes on hotswap thread, "
+			                  + "constructor usage will not be replayed");
 		}
 		return warning;
 	}
@@ -1815,12 +1815,12 @@ public class InitFix {
 	/** 报告里那条告警的文本（按类型锐化）。 */
 	private static String exemptionWarning(FieldNode fieldNode, String gateReason) {
 		StringBuilder sb = new StringBuilder();
-		sb.append("@RemoldReinit 豁免了门禁（").append(gateReason).append("）："
-		                                                                  + "补丁只重建该字段的初始化式，构造器里对它的这部分用法不会被重放");
+		sb.append("@RemoldReinit waived gate (").append(gateReason).append("): "
+		                                                                  + "patch only reconstructs initializer, constructor usage will not be replayed");
 		if (fieldNode != null && isThreadAffineType(fieldNode.desc)) {
-			sb.append("；该字段是按线程的值（").append(fieldNode.desc)
-			 .append("），补丁在热更线程上单线程执行，构造线程的 per-thread 副本无法还原，"
-			         + "如需按实例/按应用线程补齐请用 @OnReload");
+			sb.append("; field has thread-affine type (").append(fieldNode.desc)
+			 .append("), patch executes single-threaded on hotswap thread, per-thread copy cannot be restored, "
+			         + "use @OnReload if per-instance/thread replenishment is needed");
 		}
 		return sb.toString();
 	}
@@ -2296,7 +2296,7 @@ public class InitFix {
 
 		if (THREAD_LOCAL_OWNERS.contains(owner) && THREAD_LOCAL_STATEFUL.contains(name)) {
 			return "thread-local heap state " + owner + "." + name
-			       + " (值取决于执行线程，补丁在热更线程上重算会读脏)";
+			       + " (value depends on execution thread; recomputing on hotswap thread would yield dirty value)";
 		}
 
 		if ("java/lang/System".equals(owner)) {
@@ -2429,7 +2429,7 @@ public class InitFix {
 			}
 		}
 		return "mutates a reusable " + m.owner + " obtained outside the slice"
-		       + " (接收者来源: " + (origin.length() == 0 ? "未知" : origin) + ")";
+		       + " (receiver origin: " + (origin.length() == 0 ? "unknown" : origin) + ")";
 	}
 
 	private static void appendOrigin(StringBuilder sb, String what) {
@@ -2704,7 +2704,7 @@ public class InitFix {
 
 		// 条件 B：private + 全 Nest 单写
 		if ((field.access & Opcodes.ACC_PRIVATE) == 0) {
-			return "not final and not private (条件 A/B 均不满足)";
+			return "not final and not private (neither condition A nor B satisfied)";
 		}
 		if (!nest.complete()) {
 			return "cannot read every nest member to prove a single write";
@@ -3133,7 +3133,7 @@ public class InitFix {
 			}
 			RemoldAgent.warn("Field init patch incomplete for " + host.getName()
 			                  + ": failed=" + failedFields + ", skipped=" + skippedFields
-			                  + "（已记入 FieldLedger，下一轮热更会重新纳入候选）");
+			                  + " (recorded in FieldLedger; will be reconsidered in next hotswap cycle)");
 		}
 
 		// 条件 CAS 跳过汇总：字段在补丁执行前已被别的线程赋过非默认值 → CAS 失败 → 补丁未生效。
@@ -3158,10 +3158,10 @@ public class InitFix {
 				             + host.getName() + " (field already had a non-default value): "
 				             + skippedNames;
 				if (ledgerSnapshot(host).isEmpty()) {
-					RemoldAgent.warn(msg + "（条件写按设计保守跳过；如需强制覆写请用 @RemoldReinit(OVERWRITE)）");
+					RemoldAgent.warn(msg + " (conditional write conservatively skipped by design; use @RemoldReinit(OVERWRITE) to force overwrite)");
 				} else {
 					// 重试轮：这些跳过多半来自上一轮已成功补过的实例，属预期
-					RemoldAgent.info(msg + "（重试轮，通常为上一轮已补过的实例）");
+					RemoldAgent.info(msg + " (retry pass, typically instance already patched in prior round)");
 				}
 			}
 		}
@@ -3221,8 +3221,8 @@ public class InitFix {
 		if (applied.length() > 0) {
 			line.append("applied to ").append(className).append(": ").append(applied);
 			if (notDone.length() > 0) line.append("; not applied: ").append(notDone);
-			return line.append("（默认作用域只含本次新增字段，这些字段是靠注解才进候选集的；"
-			                    + "未标注的已有字段改初值不会被重置）").toString();
+			return line.append(" (default scope only includes newly added fields; these fields entered candidates via annotation; "
+			                    + "modifying initial values of unannotated existing fields will not be reset)").toString();
 		}
 		return line.append("did not take effect on ").append(className)
 		 .append(": ").append(notDone).toString();

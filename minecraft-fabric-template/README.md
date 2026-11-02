@@ -35,7 +35,7 @@
 /give @s example_mod:remold_wand
 ```
 拿着魔法棒在空中右键，屏幕会弹出绿色提示文字：`[Remold] Hello from Remold Fabric Hot Reload!`。
-同时控制台会打印 `[Remold] mixin hook alive: use() 第 N 次调用`——这行来自 `RemoldWandItemMixin`，说明 Mixin 钩子正处于生效状态，可以拿它对照后面的热更行为。
+同时控制台会打印 `[Remold] mixin hook alive: use() call #N`——这行来自 `RemoldWandItemMixin`，说明 Mixin 钩子正处于生效状态，可以拿它对照后面的热更行为。
 
 **现在见证热重载奇迹**：
 1. **修改代码**：保持游戏客户端开着别关，在 IDEA 中打开 [`src/main/java/com/example/item/RemoldWandItem.java`](src/main/java/com/example/item/RemoldWandItem.java)；
@@ -43,7 +43,7 @@
 3. **甚至可以新增字段**：例如新增一个 `public int clickCount = 0;` 并让右键时递增显示，Remold 的 **InitFix** 引擎会自动为游戏世界中已拿在手里的存量实例初始化该字段（此步骤需要带 DCEVM 的 JBR 21；标准 JDK 上会被明确拒绝并提示重启，见上文表格）；
 4. 按快捷键 **`Ctrl + Shift + F9`**（重新编译当前类）；
 5. 切换回游戏窗口，再次右键魔法棒——**新逻辑和新增字段立刻生效！** 控制台里的 `mixin hook alive` 计数会继续递增，说明热更后 Mixin 钩子没有被抹掉。
-6. **再试一次改 Mixin 本身**：打开 [`src/main/java/com/example/mixin/RemoldWandItemMixin.java`](src/main/java/com/example/mixin/RemoldWandItemMixin.java)，把 `println` 的文案改掉，再按 `Ctrl + Shift + F9`。控制台会依次出现 `Mixin ... 已重新解析，受影响目标: [...]` 和 `目标类 ... 已用新 Mixin 重新织入并重定义`，下次右键就是新文案——这一步走的是「改 Mixin 类 → 重织入目标类」链路。
+6. **再试一次改 Mixin 本身**：打开 [`src/main/java/com/example/mixin/RemoldWandItemMixin.java`](src/main/java/com/example/mixin/RemoldWandItemMixin.java)，把 `println` 的文案改掉，再按 `Ctrl + Shift + F9`。控制台会依次出现 `[Mixin] ... reloaded; affected target(s): [...]` 和 `[Mixin] Target class ... re-woven with updated mixin and redefined`，下次右键就是新文案——这一步走的是「改 Mixin 类 → 重织入目标类」链路。
 
 ---
 
@@ -73,7 +73,7 @@ Remold 在**类对齐之后、布局安全门与 `redefineClasses` 之前**调�
 
 **自动挂载**：`remold.gradle(.kts)` 检测到 Fabric Loom 插件，或工程里声明了 `net.fabricmc` / `org.spongepowered` 依赖时，会自动把 `mixin` 加进 `-Dremold.plugins`，并依次从 `plugin-mixin/build/libs`、Gradle 缓存、JitPack、GitHub Release 解析插件 jar。模组侧零配置、零依赖。
 
-> 本地开发 Remold 本体时，插件 jar 可能还没发布。此时用 `remold { pluginJar("../<remold 仓库>/plugin-mixin/build/libs/remold-plugin-mixin-0.1.3.jar") }` 显式指定，或先执行 `./gradlew :plugin-mixin:jar` 并把它拷到 `~/.gradle/caches/remold/`。
+> 本地开发 Remold 本体时，插件 jar 可能还没发布。此时用 `remold { pluginJar("../<remold 仓库>/plugin-mixin/build/libs/remold-plugin-mixin-0.2.0.jar") }` 显式指定，或先执行 `./gradlew :plugin-mixin:jar` 并把它拷到 `~/.gradle/caches/remold/`。
 
 ### 改 Mixin 类本身（目标类重织入）
 
@@ -155,7 +155,7 @@ Remold 纯粹是开发期挂载在 JVM 上的探针。打包发布给普通玩�
 说明 `plugin-mixin` 的 jar 没解析到。按顺序检查：
 
 1. 构建输出里有没有 `[Remold] 未找到插件 remold-plugin-mixin 的 Jar 包` 的警告。
-2. 本地开发 Remold 本体时，先在仓库根目录执行 `./gradlew :plugin-mixin:jar`，再用 `remold { pluginJar("../<remold 仓库>/plugin-mixin/build/libs/remold-plugin-mixin-0.1.3.jar") }` 指过去。
+2. 本地开发 Remold 本体时，先在仓库根目录执行 `./gradlew :plugin-mixin:jar`，再用 `remold { pluginJar("../<remold 仓库>/plugin-mixin/build/libs/remold-plugin-mixin-0.2.0.jar") }` 指过去。
 3. 正式使用时，需要该版本已发布带 `plugin-mixin` 的 Release / JitPack 制品。
 
 ### Q: 不挂 Remold 直接 `runClient`，会不会报错？

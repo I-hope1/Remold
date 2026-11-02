@@ -121,21 +121,21 @@ The lightweight script plugin resolves your class output paths, assembles the JV
 
 > [!IMPORTANT]
 > **The script plugin must be version-pinned too.** `apply(from = ...)` has no `plugins { id(...) version ... }`
-> coordinate, so always use a **tag** URL (`.../v0.1.3/remold.gradle.kts`) instead of `.../main/...`.
+> coordinate, so always use a **tag** URL (`.../v0.2.0/remold.gradle.kts`) instead of `.../main/...`.
 > The script and the `agent`/`api` must stay on the same version, otherwise the script builds arguments for a
 > newer agent while the old agent runs — and it only blows up at runtime.
 
 #### Groovy DSL (`build.gradle`):
 ```groovy
 // Apply the script plugin (tag-pinned; for local development use rootProject.file('remold.gradle'))
-def remoldRef = (findProperty('remold.version') ?: '0.1.3')
+def remoldRef = (findProperty('remold.version') ?: '0.2.0')
 apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remold.gradle"
 
 remold {
     // Optional: pin the Remold version (defaults to remoldVersion in gradle.properties)
     // The plugin resolves the matching agent jar from the repository or Releases and caches it
     // locally, so you never download it by hand.
-    // version = '0.1.3'
+    // version = '0.2.0'
 
     // Optional: point at a local remold-agent.jar. Otherwise libs/remold-agent.jar is preferred,
     // and the plugin downloads and caches one if it is missing.
@@ -167,14 +167,14 @@ remold {
 #### Kotlin DSL (`build.gradle.kts`):
 ```kotlin
 // Apply the script plugin (tag-pinned; for local development use file("../remold.gradle.kts"))
-val remoldRef = (findProperty("remold.version") as String?) ?: "0.1.3"
+val remoldRef = (findProperty("remold.version") as String?) ?: "0.2.0"
 apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/v$remoldRef/remold.gradle.kts")
 
 // Note: `remold { }` does NOT work from Kotlin DSL — the extension type lives inside the script plugin,
 // so the IDE cannot generate a type-safe accessor for it (Groovy is dynamic and unaffected).
 // Configure through gradle.properties or extra instead:
 extra["remold.mainClass"] = "your.package.Main"
-// extra["remold.version"] = "0.1.3"
+// extra["remold.version"] = "0.2.0"
 // extra["remold.agentJar"] = "libs/remold-agent.jar"
 // extra["remold.jbr"] = "/path/to/jbr"
 // extra["remold.debug"] = true
@@ -190,7 +190,7 @@ Loading a script plugin only has one real decision: **where to take it from**. T
 ```kotlin
 // inside the Remold source tree, use the parent script (edits apply immediately); otherwise fetch the tag
 apply(from = file("../remold.gradle.kts").takeIf { it.isFile }
-    ?: "https://raw.githubusercontent.com/I-Hope1/Remold/v${findProperty("remold.version") ?: "0.1.3"}/remold.gradle.kts")
+    ?: "https://raw.githubusercontent.com/I-Hope1/Remold/v${findProperty("remold.version") ?: "0.2.0"}/remold.gradle.kts")
 ```
 
 - In the repo: `../remold.gradle.kts` exists → the local script is used, edits take effect immediately, no network;

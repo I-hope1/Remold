@@ -10,7 +10,7 @@ val osName = System.getProperty("os.name").lowercase()
 val isWindows = osName.contains("win")
 
 // Remold 版本：脚本 / agent / api 三者必须同版本（apply 拉脚本 与 api 依赖共用这一份）
-val remoldVersion = (findProperty("remold.version") as? String) ?: "0.1.3"
+val remoldVersion = (findProperty("remold.version") as? String) ?: "0.2.0"
 
 // 目标 Mindustry 版本 (如 v160, v160.5, latest, be)。
 // 默认值可被 -PmindustryVersion=... / gradle.properties 里的 mindustryVersion= 覆盖。
@@ -252,7 +252,7 @@ val jarAndroid = tasks.register("jarAndroid") {
         if (!androidJarOut.isFile) {
             throw GradleException("[jarAndroid] d8 返回成功但未生成 ${androidJarOut.absolutePath}。")
         }
-        logger.lifecycle("[jarAndroid] 已生成: ${androidJarOut.absolutePath}")
+        logger.lifecycle("[jarAndroid] Generated: ${androidJarOut.absolutePath}")
     }
 }
 
@@ -286,8 +286,7 @@ tasks.register<Jar>("deploy") {
     doFirst {
         if (!androidAvailable) {
             logger.warn(
-                "[deploy] 未检测到可用的 Android 工具链（ANDROID_HOME / ANDROID_SDK_ROOT + platforms + build-tools），" +
-                    "本次只打包桌面版；如需 Android dex 包，安装 SDK 后重新执行。"
+                "[deploy] No Android SDK found (ANDROID_HOME / ANDROID_SDK_ROOT); packaging desktop version only. Install Android SDK if Android dex is required."
             )
         }
     }

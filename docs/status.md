@@ -7,8 +7,8 @@
 
 | 审计元数据项 | 内容与规格说明 |
 |:---|:---|
-| **基准提交 (Baseline Commit)** | `675f6b2` (分支: `main`，本轮状态校准的起点) |
-| **最后更新时间** | 2026-10-30 |
+| **基准提交 (Baseline Commit)** | `af53887` (分支: `main`，本轮状态校准的起点) |
+| **最后更新时间** | 2026-11-02 |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |
 | **更新触发条件** | 任何合入包含特性落地、架构偏离、安全门调整、测试基线变更或发现已知缺陷/残余风险的 PR/commit 时，必须同步原子化更新本文件。提交时由作者/维护者更新基准哈希。 |
 | **管辖范围与边界声明** | 本状态表权威管辖：<br>1. **匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)**（[`docs/topology/`](topology/)）<br>2. **存量初始化修复器 (InitFix / Legacy Instance & Static Reinitialization)**（[`docs/initfix/`](initfix/)）<br>3. **物理内存偏移稳定性与第三方缓存驱逐 (Physical Memory Offset Stability & Reflection Cache Eviction)**（[`docs/offset/`](offset/)）<br>*边界与后续治理声明*：同属字节码重映射体系的 `LambdaAligner`（Lambda 表达式对齐器）以及 Mindustry UI 胶水层（`CellPropertyRef` / 动态参数表达式指纹），其实现状态当前由各自单元测试覆盖（`CellHelperTest` 6 场景持续全绿、`LambdaAlignerTest` 等）；它们的详细状态审计矩阵尚未并入本总表，计划在下一轮治理中统一建立验收标准并纳入。 |
@@ -375,8 +375,8 @@
 | 条目 | 状态 | 落地位置 | 验收证据与已知边界 |
 |:---|:---:|:---|:---|
 | 独立仓库与远程 CI 矩阵 | ✅ | `.github/workflows/ci.yml` | 3 个 job：`test`（`setup-java` 装 Temurin 8/11/17/21 + runner 25，`-Dhstest.requireJdks=true` 与 `auto-download=false` 强制五套工具链真实存在，跑 `./gradlew check`）、`test-dcevm`（JetBrains Runtime 21 真实 DCEVM 下跑 `:tests:liveDcevmTest`）、`build-native`（g++ 编 Linux x86_64 `.so` 与 Android arm64-v8a `.so` 并上传制品） |
-| JitPack 对外分发 | ✅ | `jitpack.yml` + tag `v0.1.0`~`v0.1.3` | 对外坐标 `com.github.I-hope1.Remold:<module>:<tag>`（由 JitPack 按仓库名推导，与项目 `group` 是两个命名空间）；`jitpack.yml` 固定 `openjdk25` 并执行 `publishToMavenLocal -x test`；`README.md` §6、两个模组模板、`remold.gradle(.kts)` 的 agent 与插件解析均消费该坐标 |
-| GitHub Release 发布物 | 🔶 | 手工构建 + 手工上传资产 | `v0.1.0`~`v0.1.3` 四个 Release 均已发布，最新 `v0.1.3`（2026-10-24）含 `remold-agent-0.1.3.jar` / `remold-plugin-arc-0.1.3.jar`；**缺口**：`ci.yml` 无 release/publish job，发布物靠本地手工构建上传，曾发生「Release 资产早于功能代码构建」的事故，需要 tag 触发的自动化构建 + 资产上传 |
+| JitPack 对外分发 | ✅ | `jitpack.yml` + tag `v0.1.0`~`v0.2.0` | 对外坐标 `com.github.I-hope1.Remold:<module>:<tag>`（由 JitPack 按仓库名推导，与项目 `group` 是两个命名空间）；`jitpack.yml` 固定 `openjdk25` 并执行 `publishToMavenLocal -x test`；`README.md` §6、两个模组模板、`remold.gradle(.kts)` 的 agent 与插件解析均消费该坐标 |
+| GitHub Release 发布物 | ✅ | `.github/workflows/release.yml` | Tag `v*` 触发全量前置验证矩阵（javac 8/11/17/21/25 测试、DCEVM 测试、P0.5 探针与 Linux/Android 原生库编译），全绿后自动打包 12 项 Release 资产并发布到 GitHub Releases，消除资产早于构建事故；支持 `workflow_dispatch` 手动触发与 `--clobber` 覆写更新 |
 | Maven Central 分发 | ⬜ | `build.gradle` 的 `group = 'io.github.i-hope1.remold'` | 仅 `README.md` 标注为「预留坐标」，未实际发布；走通需 Central Portal + GPG 签名 + `io.github.<user>` 命名空间验证。当前 `publishToMavenLocal` 落盘该 group 仅供本机联调兜底（`remold.gradle(.kts)` 的 m2 候选路径按文件探测，文件不存在即跳过） |
 | mod-tools 消费侧切换与内部副本清理 | ⬜ | 本仓库之外（mod-tools 仓库） | 依赖坐标切换与仓内 core 副本删除均发生在 mod-tools 仓库，本仓库无法提供验收证据；其前置条件（JitPack 坐标可用）已满足 |
 

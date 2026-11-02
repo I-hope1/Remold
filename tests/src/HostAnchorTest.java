@@ -973,6 +973,9 @@ public class HostAnchorTest {
 	}
 
 	static void runCmd(String... cmd) throws Exception {
+		// javac 走常驻服务（同版本、同选项，产物一致）；不可用时照旧起外部进程。
+		// 这一处此前漏了钩子，16 个用例 × 2 次编译全都在起外部 javac，是全套里最后一个大头。
+		if (JavacDaemon.tryRun(cmd)) return;
 		Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
 		StringBuilder out = new StringBuilder();
 		try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {

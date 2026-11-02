@@ -28,22 +28,40 @@ VM 不会按名字错配到同名的新方法上；且异常抛在调用点之�
 
 ---
 
-## 2. 边界：只支持"删除捕获变量"
+## 2. 边界：删除 + 「可证明的新增」
 
 **删除方向可证**：新描述符的形参表是旧形参表的<b>子序列</b>，被删掉的槽位在新方法体里
 物理上不存在（验证器保证读不到）。桥做的是"丢弃一个新代码永远不会读的值"——不是伪造值，
 也没有任何写入。
 
-**新增方向不可证**：老实例里没有那个值，桥只能编一个 `0` / `null` 填进去，而新方法体
-很可能真读它。这是静默写入假值，违反"宁可漏补，不可静默写入过期值"，一律拒绝。
+**新增方向分两种**：
 
-> **注意**：这里的"不可证"只针对**旧实例里没有对应值**的情形。早先曾据此推出"可证的新增
-> 捕获是空集"，那是错的——只有带显式 `final` 且初值为常量的**常量变量**（JLS §4.12.4）
-> 才被 javac 内联；`int margin = 10;` 这种 effectively final（JLS §15.27.2 允许捕获）
-> 会照常编译成 `bipush 10; istore_N; iload_N; invokedynamic (I)`，是实打实的捕获。
-> 既然 JLS 保证被捕获的局部变量在宿主方法里只有**唯一一处** `xSTORE`，那处写入的逆向
-> 切片若只由字面量 / `GETSTATIC` / `this.field` 构成，桥就能在调用时 100% 重放。
-> 这是后续工作，不在本版范围内；实测对照见 §8。
+- **纯源重放（支持）**：JLS §15.27.2 保证被捕获的局部变量在宿主方法里只有**唯一一处**
+  `xSTORE`。那一处写入的"生产者"若只由下面三种之一构成，桥就能在调用时 100% 重放同一个值，
+  不是编值：
+
+  | 生产者 | 桥里重放 | 前提 |
+  |:--|:--|:--|
+  | 字面量常量（`ICONST_*` / `BIPUSH` / `SIPUSH` / `LDC` / `ACONST_NULL`） | 同一个常量 | 恒成立 |
+  | `GETSTATIC f` | `GETSTATIC f` | `f` 带 `ACC_FINAL` |
+  | `ALOAD 0; GETFIELD f` | `ALOAD 0; GETFIELD f` | `f` 带 `ACC_FINAL`，且桥自身持有 `this` |
+
+  **为什么要求 `final`**：桥在**调用时**求值，而 lambda 在**创建时**捕获。非 final 字段
+  可能在两者之间被改写，读它就等于编一个"看起来像"的值。`final` 保证引用/值之后不可能再变，
+  于是"调用时读"与"创建时读"必然相同。（与 `InitFix` 的源字段不可变性证明同一条理由。）
+
+- **其余一律拒绝**：宿主形参（值由调用方给，方法体里没有"它从哪来"）、算式 / 方法调用
+  （依赖创建时的栈帧）、非 final 字段、继承来的字段（看不到定义）。这些情况下桥只能编
+  `0`/`null` 填进去，而新方法体很可能真读它——静默写入假值。
+
+**合成只在"两侧名字齐全"时尝试**（都带 `-g`）。没有名字就无法区分"这一位是新增的"和
+"老变量换了名字"，合成会退化成猜值。名字齐全时先把仍然存在的老捕获按名字对上（沿用老实例
+存下来的值），剩下的才重放——所以"删一个 + 加一个"的混合编辑也能处理。
+
+> **语义说明**：若一次编辑实际上是"把变量 `a` 换成 `b`"（旧名消失、新名出现），按名匹配会
+> 判成"删 a + 加 b"，桥把 `b` 的当前值喂给新方法体。这**不是**保留旧语义——旧体读 `a`、
+> 新体读 `b`，两者本就没有共同的可保留状态。相对"幽灵桩（void 回调静默 no-op）"这仍是
+> 更好的结果，但它是一次可观测的行为变化，日志里会打 `BRIDGE_SYNTH` 事件。
 
 **明确不覆盖**（各有专门机制或本来就是缺口，不要在这里兜）：
 
@@ -56,6 +74,7 @@ VM 不会按名字错配到同名的新方法上；且异常抛在调用点之�
 | 目标方法被改名 | 支持：桥每轮重生成，目标取本轮配对结果 |
 | 目标方法消失 | 退回幽灵桩 |
 | 桥的桥（连续两轮各删一个捕获） | 支持：识别后按本轮配对重新指向，链式不累积 |
+| 零捕获 → 新增捕获 | 拒绝。老实例完全没有状态，谈"同一个 lambda"没有任何依据（`LambdaAlignTortureTest` 的"删掉中间层"就是靠这条不被误接成桥） |
 
 ---
 
@@ -218,6 +237,21 @@ lambda$d$0(I)V                        ← 桥（仍是实例方法，槽 0 是 t
 所以解析旧桥体时**不能要求它以 `aload_0` 开头**：接收者压栈是可选的，取决于目标是否实例
 方法。判据改为"压没压接收者"与"核心调用是不是 `INVOKESTATIC`"必须**相反**，两者交叉验证。
 
+**"新增捕获"的桥**（纯源重放，见 §2）多一条"现场造值"的指令，位置按新方法的形参顺序：
+
+```text
+lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
+    LDC loc; INVOKESTATIC onBridgeInvoked
+    ALOAD      0                      ← s
+    ILOAD      1                      ← k
+    BIPUSH     10                     ← 新增的 margin：重放宿主里那唯一一处 istore 的常量
+    INVOKESTATIC Host.lambda$f$0(Ljava/lang/String;II)V
+    RETURN
+```
+
+所以解析旧桥体时要认得三种"压值"形态：形参加载、常量、`GETSTATIC`、以及
+`ALOAD 0; GETFIELD`（后者要与"接收者压栈"区分开——判据是 `ALOAD 0` 后面是否紧跟 `GETFIELD`）。
+
 无分支、无 `Label`，因此不需要 `StackMapTable`，与既有空壳桩的设计一致。
 
 ---
@@ -266,7 +300,7 @@ lambda$d$0(I)V                        ← 桥（仍是实例方法，槽 0 是 t
 
 ## 7. 判定力
 
-- `LambdaBridgeAlignTest`（对齐期，不需要 DCEVM，共 21 例）：
+- `LambdaBridgeAlignTest`（对齐期，不需要 DCEVM，共 29 例）：
   - 正向：建桥 / 第二轮保持并重指向 / **纯重排**（`a+b` → `b+a`，桥按新顺序压栈）/
     **槽位证明消歧**（`(int,int) → (int)`，宿主描述符不变）/ **实例 lambda**（桥是实例方法、
     `INVOKESPECIAL` 转发、接收者不进描述符）/ 接口宿主（`itf=true`）/
@@ -275,9 +309,10 @@ lambda$d$0(I)V                        ← 桥（仍是实例方法，槽 0 是 t
     **实例 → 静态**（删掉 `this`：桥仍是实例方法、目标静态、新方法被改成避障名）/
     **实例桥的第二轮**（捕获下标 vs 描述符形参下标差 1 的坑）/
     **换序桥的第二轮**（桥体故意倒序压栈，旧判据"槽号必须递增"会把它认成非桥）/
-    **forceStatic 开启**（接收者归一成 `$this`；两个同类型捕获只能靠它消歧）；
-  - 负向：新增捕获拒绝 / 捕获类型变化拒绝 / 重复类型歧义拒绝（宿主签名变了，槽号不可比）/
-    SAM 变化拒绝 / 目标消失退化为幽灵；
+    **forceStatic 开启**（接收者归一成 `$this`；两个同类型捕获只能靠它消歧）/
+    **新增捕获的纯源重放**（常量 / `static final` / `final` 实例字段）及其**第二轮保活**；
+  - 负向：新增捕获拒绝（宿主形参 / 算式 / 非 final 字段）/ 捕获类型变化拒绝 /
+    重复类型歧义拒绝（宿主签名变了，槽号不可比）/ SAM 变化拒绝 / 目标消失退化为幽灵；
   - 熔断豁免对照。
 
 **消融验证**（逐条撤掉修复，确认对应断言必挂，而不是"全绿即通过"）：
@@ -290,6 +325,9 @@ lambda$d$0(I)V                        ← 桥（仍是实例方法，槽 0 是 t
 | 桥体允许不压接收者 | `secondRoundKeepsTheInstanceToStaticBridge` | 第二轮认不出桥 |
 | 解析旧桥体时按捕获下标记 | `secondRoundKeepsTheInstanceBridgeAndItsParamMapping`、`secondRoundKeepsTheInstanceToStaticBridge` | `ILOAD` 变成 `ALOAD`（去加载 String 槽） |
 | 解析旧桥体时要求槽号递增 | `secondRoundKeepsTheReorderBridge` | 换序桥第二轮退化成幽灵桩 |
+| 关闭纯源合成 | 4 条 `added*IsSynthesized` / `secondRoundKeepsTheSynthesizedConstant` | 建桥数 0 |
+| 不校验字段 `final` | `addedNonFinalFieldCaptureIsRefused` | 非 final 字段被当成常量重放 |
+| 解析旧桥体时不认常量位 | `secondRoundKeepsTheSynthesizedConstant` | 桥退化成幽灵桩 |
 
 - `LambdaBridgeProbe`（运行时，需要 DCEVM）：`./gradlew :tests:lambdaBridgeProbe -Pp05.jbr=<dcevm-jdk>`，
   实测老实例在删除/新增捕获后的真实失败形态，含"捕获表不动"的对照组与两个端到端场景
@@ -305,6 +343,17 @@ lambda$d$0(I)V                        ← 桥（仍是实例方法，槽 0 是 t
 |:--|:--|:--|
 | `int margin = 10;` | `bipush 10; istore_0; iload_0; indy (I)` | `lambda$a$0(int)` ← **是捕获** |
 | `final int margin = 10;` | `bipush 10; istore_0;` 然后 `indy ()` | `lambda$b$1()` ← 内联，无捕获 |
+| `int margin = p;`（effectively final，初值非常量） | `iload_0; istore_1; iload_1; indy (I)` | `lambda$c$2(int)` ← **是捕获** |
+
+**"effectively final" ≠ "constant variable"**，这两条是不同条款、管不同的事：
+
+- **effectively final**（JLS §4.12.4 末段 / §15.27.2）只回答"能不能被捕获"——初始化后从未再赋值即可。
+  它<b>不</b>让变量变成常量。
+- **constant variable**（JLS §4.12.4）要求**显式 `final`** + 基本类型或 `String` + **常量表达式**初值。
+  只有这类才会被内联（§13.1）。`int x = 1;` 没写 `final`，不是常量变量，照常成为捕获。
+
+这条区别正是"新增捕获可重放"的立足点：恰恰因为**没被内联**，宿主方法里才留着那唯一一处
+`istore`，桥才有东西可回溯。写了 `final` 的反而根本不会成为捕获，桥永远看不到它。
 | `String tag = "x";` | `ldc "x"; astore_0; aload_0; indy (LString;)` | `lambda$c$2(String)` ← **是捕获** |
 
 其余两条与桥接实现直接相关的事实：

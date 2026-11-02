@@ -5,6 +5,7 @@
 //       否则脚本按新接口拼参数、agent 还是旧版本，会在运行期才炸。
 
 import org.gradle.api.plugins.JavaApplication
+import org.gradle.api.tasks.compile.JavaCompile
 
 class RemoldExtension {
     String version
@@ -69,6 +70,12 @@ class RemoldExtension {
 def remoldExt = project.extensions.create('remold', RemoldExtension)
 
 project.plugins.withId('java') {
+    // 确保编译输出包含完整调试符号（行号、源码、局部变量表），供 InitFix 参数回溯、Lambda 对齐与调试使用
+    tasks.withType(JavaCompile).configureEach {
+        options.debug = true
+        options.debugOptions.debugLevel = "source,lines,vars"
+    }
+
     def sourceSets = project.extensions.getByType(SourceSetContainer)
 
     // 是否属于 SpongePowered Mixin 生态：Fabric Loom 项目，或显式声明了 net.fabricmc / org.spongepowered 依赖。

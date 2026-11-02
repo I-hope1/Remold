@@ -25,6 +25,27 @@ publishing {
 				}
 			}
 		}
+		// 本地联调兼容：将 JitPack 约定的 GitHub 坐标 (com.github.I-hope1.Remold:core:v<ver>) 同步发布到 mavenLocal
+		jitpack(MavenPublication) {
+			groupId = 'com.github.I-hope1.Remold'
+			artifactId = 'core'
+			version = "v${version}"
+			artifact(shadowJar) {
+				classifier = null
+			}
+			artifact(jar)
+			artifact(sourcesJar)
+			pom {
+				name = 'remold-core'
+				description = 'Core engine for Remold (InitFix, Anonymous Class Alignment, Native JVMTI) (JitPack compatible)'
+				licenses {
+					license {
+						name = 'The Apache License, Version 2.0'
+						url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+					}
+				}
+			}
+		}
 	}
 }
 dependencies {
@@ -44,6 +65,7 @@ shadowJar {
 		attributes(
 				'Agent-Class': 'remold.RemoldAgent',
 				'Premain-Class': 'remold.RemoldAgent',
+				'Boot-Class-Path': 'remold-agent.jar',
 				'Can-Retransform-Classes': true,
 				'Can-Redefine-Classes': true
 		)

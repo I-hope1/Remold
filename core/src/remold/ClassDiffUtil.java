@@ -118,6 +118,10 @@ public final class ClassDiffUtil {
 		/** 用于分析新增的实例字段 */
 		public final Set<String> addedInstanceFields = new HashSet<>();
 		public final Set<String> addedStaticFields   = new HashSet<>();
+		/** 类型发生变更的字段名集合（desc 变了但同名同 static 属性） */
+		public final Set<String> typeChangedFields   = new HashSet<>();
+		/** 标注了 @RemoldReinit 的字段名集合 */
+		public final Set<String> reinitFields        = new HashSet<>();
 
 		/** 继承层次是否发生变化（父类或接口变更） */
 		public       boolean      hierarchyChanged = false;
@@ -135,6 +139,8 @@ public final class ClassDiffUtil {
 			changedFields.clear();
 			addedInstanceFields.clear();
 			addedStaticFields.clear();
+			typeChangedFields.clear();
+			reinitFields.clear();
 			hierarchyChanged = false;
 			errors.clear();
 		}
@@ -217,25 +223,34 @@ public final class ClassDiffUtil {
 
 		// 字段对比：检测字段的增删变化
 		var oldFieldsMap = ctx.fieldMap;
+		Map<String, FieldDescInfo> oldFieldInfoMap = new HashMap<>(oldC.fields.size());
 		// 将旧版本所有字段放入映射表，key为字段名和描述符的复合哈希
 		for (FieldNode f : oldC.fields) {
 			if (isInternalMarkerField(f)) continue;
 			boolean isStatic = (f.access & Opcodes.ACC_STATIC) != 0;
 			oldFieldsMap.put(Utils.compositeHash(f.name, f.desc), (isStatic ? "*" : "") + f.name);
+			oldFieldInfoMap.put(f.name, new FieldDescInfo(f.desc, isStatic));
 		}
 
 		// 遍历新版本字段
 		for (FieldNode newF : newC.fields) {
 			if (isInternalMarkerField(newF)) continue;
+			if (hasRemoldReinit(newF)) {
+				d.reinitFields.add(newF.name);
+			}
 			long    key         = Utils.compositeHash(newF.name, newF.desc);
 			String  oldVal      = oldFieldsMap.remove(key);
 			boolean newIsStatic = (newF.access & Opcodes.ACC_STATIC) != 0;
 
-			// 如果旧映射表中没有此key，说明是新增字段
+			// 如果旧映射表中没有此key，说明是新增字段（或改了描述符/改了静态性）
 			if (oldVal == null) {
 				d.changedFields.add("+ " + (newIsStatic ? "*" : "") + newF.name);
 
 				(newIsStatic ? d.addedStaticFields : d.addedInstanceFields).add(newF.name);
+				FieldDescInfo oldInfo = oldFieldInfoMap.get(newF.name);
+				if (oldInfo != null && !oldInfo.desc.equals(newF.desc) && oldInfo.isStatic == newIsStatic) {
+					d.typeChangedFields.add(newF.name);
+				}
 			} else {
 				boolean oldIsStatic = oldVal.startsWith("*");
 				if (oldIsStatic != newIsStatic) {
@@ -298,6 +313,22 @@ public final class ClassDiffUtil {
 	 * {@code changedFields}，也不进 {@code addedInstanceFields}/{@code addedStaticFields}，
 	 * 同时不会让 {@link ClassDiff#structureChanged()} 出现假阳性。</p>
 	 */
+	private record FieldDescInfo(String desc, boolean isStatic) {}
+
+	private static boolean hasRemoldReinit(FieldNode f) {
+		if (f == null) return false;
+		if (hasRemoldReinitAnnotation(f.visibleAnnotations)) return true;
+		return hasRemoldReinitAnnotation(f.invisibleAnnotations);
+	}
+
+	private static boolean hasRemoldReinitAnnotation(List<AnnotationNode> annotations) {
+		if (annotations == null) return false;
+		for (AnnotationNode a : annotations) {
+			if ("Lremold/annotation/RemoldReinit;".equals(a.desc)) return true;
+		}
+		return false;
+	}
+
 	private static boolean isInternalMarkerField(FieldNode f) {
 		return (f.access & Opcodes.ACC_SYNTHETIC) != 0
 		       || (f.name != null && f.name.startsWith("$remold$"));

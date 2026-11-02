@@ -21,6 +21,23 @@ publishing {
 				}
 			}
 		}
+		// 本地联调兼容：将 JitPack 约定的 GitHub 坐标 (com.github.I-hope1.Remold:plugin-arc:v<ver>) 同步发布到 mavenLocal
+		jitpack(MavenPublication) {
+			groupId = 'com.github.I-hope1.Remold'
+			artifactId = 'plugin-arc'
+			version = "v${version}"
+			from components.java
+			pom {
+				name = 'remold-plugin-arc'
+				description = 'Mindustry/Arc integration plugin for Remold (JitPack compatible)'
+				licenses {
+					license {
+						name = 'GNU General Public License v3.0'
+						url = 'https://www.gnu.org/licenses/gpl-3.0.txt'
+					}
+				}
+			}
+		}
 	}
 }
 

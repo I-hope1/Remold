@@ -289,6 +289,33 @@ public final class LayoutGate {
 	}
 
 	/**
+	 * 从 {@code changedFields} 中提取所有类型发生变更（描述符不同但 static 属性未变）的字段名。
+	 */
+	public static List<String> typeChangedFields(List<String> changedFields) {
+		if (changedFields == null || changedFields.isEmpty()) return List.of();
+		Map<String, Boolean> added   = new LinkedHashMap<>();
+		Map<String, Boolean> removed = new LinkedHashMap<>();
+		for (String raw : changedFields) {
+			if (raw == null || raw.length() < 2) continue;
+			char   sign   = raw.charAt(0);
+			String body   = raw.substring(1).trim();
+			boolean statik = body.startsWith("*");
+			String  name   = statik ? body.substring(1) : body;
+			if (sign == '+')      added.put(name, statik);
+			else if (sign == '-') removed.put(name, statik);
+		}
+		List<String> typeChanged = new ArrayList<>();
+		for (Map.Entry<String, Boolean> e : removed.entrySet()) {
+			String  name = e.getKey();
+			Boolean neu  = added.get(name);
+			if (neu != null && neu.equals(e.getValue())) {
+				typeChanged.add(name);
+			}
+		}
+		return Collections.unmodifiableList(typeChanged);
+	}
+
+	/**
 	 * 该组 {@code changedFields} 是否涉及<b>静态字段</b>（条目名带 {@code *} 前缀）。
 	 *
 	 * <p>用于存活实例分级：实例字段的旧值只存在于实例上，没有实例就无所谓"读到旧值/零值"；

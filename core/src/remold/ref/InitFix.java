@@ -586,8 +586,13 @@ public class InitFix {
 		// 而热更是否发生是上游按字节哈希判的 —— 所以"只摘掉一个注解"照样会走到这里。
 		// 不在这里清理的话，将来重新标注解、初值又恰好没改时，会被判成"初值未变"而跳过：
 		// 用户明明刚要求重置，却什么都不会发生。
-		if (diff != null && diff.newClass != null) {
-			pruneReinitRecords(host, scanReinitFields(diff.newClass).keySet());
+		if (diff != null) {
+			if (diff.newClass != null) {
+				pruneReinitRecords(host, scanReinitFields(diff.newClass).keySet());
+			}
+			for (String f : diff.typeChangedFields) {
+				reinitAppliedRemove(host, f);
+			}
 		}
 
 		Set<String> addedStaticFields   = diff.addedStaticFields;

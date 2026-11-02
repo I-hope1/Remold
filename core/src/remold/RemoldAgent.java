@@ -659,8 +659,28 @@ public class RemoldAgent {
 	//region Agent Initialization
 	static AnnotationTransformer transformer;
 
+	private static final java.util.concurrent.atomic.AtomicBoolean BOOTSTRAP_APPENDED =
+		new java.util.concurrent.atomic.AtomicBoolean();
+
+	private static void appendSelfToBootstrapSearch(Instrumentation inst) {
+		if (inst == null || !BOOTSTRAP_APPENDED.compareAndSet(false, true)) return;
+		try {
+			java.security.CodeSource cs = RemoldAgent.class.getProtectionDomain().getCodeSource();
+			if (cs != null && cs.getLocation() != null) {
+				File file = new File(cs.getLocation().toURI());
+				if (file.isFile() && file.getName().endsWith(".jar")) {
+					inst.appendToBootstrapClassLoaderSearch(new java.util.jar.JarFile(file));
+					log("[Agent] Appended agent JAR to bootstrap classloader search: " + file.getName());
+				}
+			}
+		} catch (Throwable t) {
+			warn("[Agent] Failed to append agent JAR to bootstrap classloader search: " + t);
+		}
+	}
+
 	public static void premain(String agentArgs, Instrumentation inst) {
 		RemoldAgent.inst = inst;
+		appendSelfToBootstrapSearch(inst);
 		try {
 			if (agentArgs != null && !agentArgs.trim().isEmpty()) {
 				init(SOURCE_CLI, agentArgs, false);
@@ -675,6 +695,7 @@ public class RemoldAgent {
 
 	public static void agentmain(String agentArgs, Instrumentation inst) {
 		RemoldAgent.inst = inst;
+		appendSelfToBootstrapSearch(inst);
 		try {
 			if (agentArgs != null && !agentArgs.trim().isEmpty()) {
 				init(SOURCE_RUNTIME, agentArgs, false);
@@ -708,6 +729,10 @@ public class RemoldAgent {
 
 	private static void init0(String source, String agentArgs, boolean reinit) {
 		initConfig();
+		if (inst != null) {
+			appendSelfToBootstrapSearch(inst);
+		}
+		remold.util.LibTool.tryInit();
 
 		initTransformer();
 		var loadedClasses = inst != null ? inst.getAllLoadedClasses() : new Class<?>[0];
@@ -2017,7 +2042,18 @@ public class RemoldAgent {
 		}
 
 		if (!instanceMethods.isEmpty()) {
-			Object[] instances = LibTool.initialized() ? LibTool.getInstances(clazz) : InstanceTracker.getInstances(clazz).toArray();
+			Object[] instances = null;
+			try {
+				instances = remold.util.LibTool.getInstances(clazz);
+			} catch (Throwable ignored) {
+			}
+			if (instances == null || instances.length == 0) {
+				List<?> trackerInstances = InstanceTracker.getInstances(clazz);
+				if (!trackerInstances.isEmpty()) {
+					instances = trackerInstances.toArray();
+				}
+			}
+			if (instances == null) instances = new Object[0];
 			// 实例回调是"对存量实例"，不是"模组收到通知"：零实例时它一次都不会跑。
 			// 这种情况原先完全静默（只打一行 "Found @OnReload"），最容易被误读成"回调没生效"，
 			// 所以必须显式说明"没有调用"以及为什么。
@@ -3039,8 +3075,11 @@ public class RemoldAgent {
 			}
 
 			List<String> changed;
+			Set<String> reinitFields = Set.of();
 			try {
-				changed = ClassDiffUtil.diff(oldBytes, newBytes).changedFields;
+				ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, newBytes);
+				changed = diff.changedFields;
+				reinitFields = diff.reinitFields;
 			} catch (Throwable t) {
 				warn("[LAYOUT-SKIP] " + className + ": layout gate skipped — cannot diff ("
 				     + t.getClass().getSimpleName() + "). Redefining without a field-layout check.");
@@ -3059,7 +3098,8 @@ public class RemoldAgent {
 			LayoutDecision d = decideLayout(className, changed, LAYOUT_GATE, liveness,
 			                                newBatchBytes.keySet(),
 			                                readersByClass.getOrDefault(className, RemovedMemberScan.NOT_SCANNED),
-			                                drift);
+			                                drift,
+			                                reinitFields);
 
 			// 显式出口：取不到基线 / 无法 diff 就不是"放行"，而是"没法判"。
 			// 静默放行会重演"整轮静默失效"那类难排查的问题，所以必须说出来。
@@ -3094,6 +3134,14 @@ public class RemoldAgent {
 				continue;
 			}
 
+			if (d.action() == LayoutAction.WAIVE_REINIT) {
+				LAYOUT_GATE_WAIVED.incrementAndGet();
+				clearRejected(className);
+				info("[LAYOUT-REINIT] " + className + ": 经 @RemoldReinit 授权放行字段类型变更 ("
+				     + (d.layout() == null ? "?" : d.layout().detail()) + ")");
+				continue;
+			}
+
 			if (d.action() == LayoutAction.WAIVE) {
 				LAYOUT_GATE_WAIVED.incrementAndGet();
 				clearRejected(className);
@@ -3109,10 +3157,14 @@ public class RemoldAgent {
 					? d.reason()
 					: "field layout incompatible (" + (d.layout() == null ? "unknown" : d.layout().detail()) + ")";
 				int repeats = noteRejected(className, why);
+				String hint = "";
+				if (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.CHANGED_FIELD_TYPE) {
+					hint = "可在该字段上添加 @RemoldReinit 后再次编译保存，即可在不重启的情况下完成类型切换并重置初值；或 ";
+				}
 				warn("[LAYOUT-REJECT] " + className + ": REFUSED redefine — " + why + ". Host "
 				     + d.hostName() + " and its anonymous classes are"
 				     + " skipped this round; existing instances keep running the OLD code, so this edit will"
-				     + " NOT take effect for them. TO PROCEED: recreate/restart so the classes load fresh, or"
+				     + " NOT take effect for them. TO PROCEED: " + hint + "recreate/restart so the classes load fresh, or"
 				     + " set -Dremold.agent.layout_gate=warn to force the redefine and accept the consequences.");
 				if (repeats >= 2) {
 					// 拒绝不改运行态：类仍带旧布局，而源码已经不同 → 下次 diff 出同一条变更 → 又被拒。
@@ -3159,6 +3211,10 @@ public class RemoldAgent {
 		 * "改动后没有代码还会解析到这个字段"。日志文案必须能区分，否则排查时会把两者混为一谈。</p>
 		 */
 		WAIVE_NO_READERS,
+		/**
+		 * 字段类型变更，且<b>经 @RemoldReinit 授权</b> —— 放行。
+		 */
+		WAIVE_REINIT,
 		/** 拒绝并整组移出本批。 */
 		REJECT,
 		/** 无法判定（取不到基线 / diff 失败）—— 放行但必须告警，不得静默。 */
@@ -3279,12 +3335,15 @@ public class RemoldAgent {
 			return new LayoutDecision(LayoutAction.SKIP, null, hostNameOf(className), Set.of());
 		}
 		List<String> changed;
+		Set<String> reinitFields = Set.of();
 		try {
-			changed = ClassDiffUtil.diff(oldBytes, newBytes).changedFields;
+			ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, newBytes);
+			changed = diff.changedFields;
+			reinitFields = diff.reinitFields;
 		} catch (Throwable t) {
 			return new LayoutDecision(LayoutAction.SKIP, null, hostNameOf(className), Set.of());
 		}
-		return decideLayout(className, changed, mode, liveness, batchNames, removedFieldReaders, drift);
+		return decideLayout(className, changed, mode, liveness, batchNames, removedFieldReaders, drift, reinitFields);
 	}
 
 	/**
@@ -3339,6 +3398,17 @@ public class RemoldAgent {
 	                                          String mode, Liveness liveness, Set<String> batchNames,
 	                                          RemovedMemberScan scan,
 	                                          SuperclassDriftGate.DriftDecision drift) {
+		return decideLayout(className, changedFields, mode, liveness, batchNames, scan, drift, Set.of());
+	}
+
+	/**
+	 * 带"批次外读者"判定、"父类实例字段漂移"判定与"@RemoldReinit 授权重置字段"的全功能版本。
+	 */
+	public static LayoutDecision decideLayout(String className, List<String> changedFields,
+	                                          String mode, Liveness liveness, Set<String> batchNames,
+	                                          RemovedMemberScan scan,
+	                                          SuperclassDriftGate.DriftDecision drift,
+	                                          Set<String> reinitFields) {
 		String host = hostNameOf(className);
 		if (LayoutGate.MODE_OFF.equals(mode)) {
 			return new LayoutDecision(LayoutAction.PASS, null, host, Set.of());
@@ -3397,6 +3467,27 @@ public class RemoldAgent {
 		}
 
 		boolean staticChange = LayoutGate.hasStaticFieldChange(changedFields);
+
+		// 字段类型变更（CHANGED_FIELD_TYPE）安全门控：
+		if (res.verdict() == LayoutGate.Verdict.CHANGED_FIELD_TYPE) {
+			List<String> typeChanged = LayoutGate.typeChangedFields(changedFields);
+			if (scan.scanned() && scan.hasFindings()) {
+				return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
+					"field type changed and " + describeFindings(scan) + " still resolve to old descriptor");
+			}
+			// 情况 A：堆上无存活实例（liveInstances == 0）且非静态字段 → 直接放行
+			if (liveness == Liveness.NONE && !staticChange) {
+				return new LayoutDecision(LayoutAction.WAIVE, res, host, Set.of());
+			}
+			// 情况 B：堆上有存活实例（liveInstances > 0），且新字节码中该字段标有 @RemoldReinit → 直接放行
+			if (!staticChange && reinitFields != null && !typeChanged.isEmpty() && reinitFields.containsAll(typeChanged)) {
+				return new LayoutDecision(LayoutAction.WAIVE_REINIT, res, host, Set.of());
+			}
+			// 情况 C：堆上有存活实例且未标 @RemoldReinit → 维持 LAYOUT-REJECT，优化提示文案
+			String typeChangeHint = "可在该字段上添加 @RemoldReinit 后再次编译保存，即可在不重启的情况下完成类型切换并重置初值";
+			return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
+				"field type changed: " + typeChanged + " with surviving instances (" + typeChangeHint + ")");
+		}
 
 		// 删除字段（实例或静态）但读者扫描未完成 → 只能拒绝。
 		//
@@ -3464,9 +3555,11 @@ public class RemoldAgent {
 
 		String action = d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.REMOVED_FIELD
 		 ? "restore the removed field(s) or restart to continue"
-		 : (d.layout() != null && (d.layout().verdict() == LayoutGate.Verdict.SUPERCLASS_FIELD_DRIFT || d.layout().verdict() == LayoutGate.Verdict.LAYOUT_DRIFT)
-		    ? "avoid adding instance field(s) to superclass or restart to continue"
-		    : "revert the field change or restart to continue");
+		 : (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.CHANGED_FIELD_TYPE
+		    ? "annotate field(s) with @RemoldReinit, or revert the field change, or restart to continue"
+		    : (d.layout() != null && (d.layout().verdict() == LayoutGate.Verdict.SUPERCLASS_FIELD_DRIFT || d.layout().verdict() == LayoutGate.Verdict.LAYOUT_DRIFT)
+		       ? "avoid adding instance field(s) to superclass or restart to continue"
+		       : "revert the field change or restart to continue"));
 		return RoundSkips.verdict("LAYOUT-REJECT", detail, action);
 	}
 

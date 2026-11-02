@@ -27,6 +27,7 @@ java {
 }
 
 repositories {
+    mavenLocal()
     mavenCentral()
     maven("https://maven.fabricmc.net/")
     maven("https://jitpack.io")

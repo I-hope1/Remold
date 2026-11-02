@@ -98,4 +98,9 @@ public class LibToolTest {
 			"querying a subclass must NOT return parent instances: the patch loop would otherwise"
 			+ " write into objects whose class was never redefined");
 	}
+
+	@Test
+	void clinitAutomaticallyInitializesLibTool() {
+		assertTrue(LibTool.initialized(), "LibTool static initializer must initialize native library automatically");
+	}
 }

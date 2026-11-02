@@ -41,6 +41,12 @@ class LayoutGateWiringTest {
 	private static byte[] withoutField() { return cls(HOST, "package lg;\npublic class Host { }\n"); }
 	private static byte[] addedField()   { return cls(HOST, "package lg;\npublic class Host { int a; int b; }\n"); }
 	private static byte[] retypedField() { return cls(HOST, "package lg;\npublic class Host { long a; }\n"); }
+	private static byte[] retypedWithReinit() {
+		return cls(HOST, "package lg;\nimport remold.annotation.RemoldReinit;\npublic class Host { @RemoldReinit public long a; }\n");
+	}
+	private static byte[] staticRetypedWithReinit() {
+		return cls(HOST, "package lg;\nimport remold.annotation.RemoldReinit;\npublic class Host { @RemoldReinit public static long s; }\n");
+	}
 	private static byte[] staticField()  { return cls(HOST, "package lg;\npublic class Host { static int s; }\n"); }
 	private static byte[] noStatic()     { return cls(HOST, "package lg;\npublic class Host { }\n"); }
 	private static byte[] withMethod()   { return cls(HOST, "package lg;\npublic class Host { void m() { } }\n"); }
@@ -448,5 +454,42 @@ class LayoutGateWiringTest {
 		assertEquals(HOST, d.hostName());
 		assertTrue(d.dropped().contains(HOST) && d.dropped().contains("lg.Host$1"));
 		assertTrue(d.reason().contains("LAYOUT_DRIFT"));
+	}
+
+	@Test
+	void typeChangeWithLiveInstancesAndRemoldReinitWaived() {
+		RemoldAgent.RemovedMemberScan clean = new RemoldAgent.RemovedMemberScan(true, List.of(), List.of(), false);
+		LayoutDecision d = RemoldAgent.decideLayout(HOST, withField(), retypedWithReinit(), "reject",
+			Liveness.LIVE, BATCH, clean);
+		assertEquals(LayoutAction.WAIVE_REINIT, d.action(),
+			"标有 @RemoldReinit 且无外部悬空读者时，字段类型变更应放行 (WAIVE_REINIT)");
+		assertEquals(Verdict.CHANGED_FIELD_TYPE, d.layout().verdict());
+		assertTrue(d.dropped().isEmpty());
+	}
+
+	@Test
+	void typeChangeWithLiveInstancesAndRemoldReinitRejectedIfDangling() {
+		RemoldAgent.RemovedMemberScan dirty = new RemoldAgent.RemovedMemberScan(true, List.of("lg.OtherReader"), List.of(), false);
+		LayoutDecision d = RemoldAgent.decideLayout(HOST, withField(), retypedWithReinit(), "reject",
+			Liveness.LIVE, BATCH, dirty);
+		assertEquals(LayoutAction.REJECT, d.action(),
+			"即便有 @RemoldReinit，只要存在外部悬空读者就必须拒绝");
+		assertTrue(d.reason().contains("out-of-batch reader"));
+	}
+
+	@Test
+	void typeChangeWithLiveInstancesWithoutRemoldReinitRejectedWithHint() {
+		LayoutDecision d = decide(withField(), retypedField(), "reject", Liveness.LIVE);
+		assertEquals(LayoutAction.REJECT, d.action());
+		assertEquals(Verdict.CHANGED_FIELD_TYPE, d.layout().verdict());
+		assertTrue(d.reason().contains("@RemoldReinit"),
+			"拒绝提示文案必须明确告知可在该字段添加 @RemoldReinit 完成类型切换: " + d.reason());
+	}
+
+	@Test
+	void typeChangeStaticRejectedEvenWithRemoldReinit() {
+		LayoutDecision d = RemoldAgent.decideLayout(HOST, staticField(), staticRetypedWithReinit(), "reject",
+			Liveness.LIVE, BATCH);
+		assertEquals(LayoutAction.REJECT, d.action(), "静态字段改类型不可放行");
 	}
 }

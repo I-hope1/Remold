@@ -13,7 +13,26 @@ public class PlayerService {
     private int score;
     private int level = 1;
 
-    // 新增字段热注入演示：默认仅在存量实例中字段为零值时注入初值；指定 OVERWRITE 则强制重置
+    // =========================================================================================
+    // 【动手试试 1：修改已有字段初值（@RemoldReinit）】
+    // 标注 @RemoldReinit(mode = OVERWRITE)：允许热重载时强制将新初值覆写到存量运行实例上。
+    // 保持进程运行，试着修改下方 statusTitle 的初值，例如改成 "Legendary Master"：
+    // 在 IDEA 中按 Ctrl+Shift+F9（或在另一个终端运行 ./gradlew :example:compileJava），
+    // 观察终端输出：statusTitle 被即时重置，且存活实例的其他状态（如累加的 score）完好保留！
+    //
+    // 【动手试试 2：动态变更字段类型（Field Type Changed）】
+    // Remold 支持运行期动态改变字段类型：
+    // 试着将 statusTitle 的类型从 String 改为 int：
+    //   @RemoldReinit
+    //   private int statusTitle = 999;
+    // 并将 tick() 中的 %s 适配为 %d。重新编译，Remold 经 @RemoldReinit 授权直接放行！
+    //
+    // 【动手试试 3：新增全新字段（InitFix 自动装配初值）】
+    // 试着新增一个普通字段（不需要标 @RemoldReinit）：
+    //   private String guild = "Remold Adventurers";
+    //   private int rank = 10;
+    // 重新编译，Remold 的 InitFix 引擎会自动安全回溯构造器并为内存中的存量实例装配初值！
+    // =========================================================================================
     @RemoldReinit(mode = RemoldReinit.Mode.OVERWRITE)
     private String statusTitle = "Novice Adventurer";
 
@@ -22,12 +41,22 @@ public class PlayerService {
         this.score = 100;
     }
 
+    // =========================================================================================
+    // 【动手试试 4：修改业务逻辑与方法体】
+    // 试着修改下方 tick() 中的得分增长逻辑（例如改为 this.score += 100）或输出格式，
+    // 重新编译，下一次循环即刻应用新逻辑，无需重启 Java 进程！
+    // =========================================================================================
     public void tick() {
         this.score += 10;
         System.out.printf("[%s] [PlayerService] Name: %s | Title: %s | Level: %d | Score: %d%n",
                 LocalTime.now().format(TIME_FORMAT), name, statusTitle, level, score);
     }
 
+    // =========================================================================================
+    // 【动手试试 5：监听热重载生命周期（@OnReload）】
+    // 存量实例被热更新后，Remold 会自动调用标有 @OnReload 的方法。
+    // 试着修改 onReload() 方法体，例如打印更多自定义调试信息或重置临时计数器。
+    // =========================================================================================
     /**
      * 本类被热更重定义后，Remold 会对<b>每个存活实例</b>各调用一次本方法（这里是实例方法，
      * 不是"应用收到热更通知"）：应用里创建了几个 PlayerService，下面这段就打印几次。

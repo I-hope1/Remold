@@ -44,10 +44,29 @@ public class ExampleJavaMod extends Mod {
     /** HUD 角标容器；置为静态，避免同一进程内重复挂载。 */
     private static Table badge;
 
+    // =========================================================================================
+    // 【动手试试 1：修改已有字段初值（@RemoldReinit）】
     // 标注 @RemoldReinit（默认即为 OVERWRITE 模式）：允许热更时强制覆写存量/静态字段初值。
+    // 试着修改下方字符串（例如改成 "🎉 恭喜！Mindustry 模组秒级原位热重载成功！"），
+    // 在 IDEA 中按 Ctrl+Shift+F9（重新编译），观察控制台输出：
+    //   [REINIT] @RemoldReinit applied to example/ExampleJavaMod: message (OVERWRITE, static)
     // 重置时机是"这个初值表达式变了"，不是"类被热更了" —— 只改别的方法体不会把值打回去；
-    // 生效时控制台会多打一行 [REINIT] @RemoldReinit applied to ...: message (OVERWRITE, static)，
-    // 用来和"本次新增字段被初始化"区分开。初值若读外部状态（如 Config.getX()），无法证明值没变，会每轮重置。
+    // 生效时控制台会多打一行 [REINIT] 用来和"本次新增字段被初始化"区分开。
+    //
+    // 【动手试试 2：动态变更字段类型（Field Type Changed）】
+    // Remold 支持在运行期动态切换已有字段的数据类型（只要批次外无类依赖旧类型）：
+    // 试着把 String 改为 int：
+    //   @RemoldReinit
+    //   public static int message = 2026;
+    // 并相应把用到 message 的地方改为字符串拼接。按 Ctrl+Shift+F9 重新编译，
+    // Remold 经 @RemoldReinit 授权放行，存量实例与静态环境无缝迁移至新类型与新初值！
+    //
+    // 【动手试试 3：新增全新字段（InitFix 自动装配初值）】
+    // 试着新增一个普通静态或实例字段（不需要带 @RemoldReinit）：
+    //   public static String subTitle = "由 Remold InitFix 自动装配初始值";
+    //   public int sessionScore = 100 * 2;
+    // 按 Ctrl+Shift+F9 重新编译，InitFix 会自动为存量环境执行安全初始化，绝不为 null/0！
+    // =========================================================================================
     @RemoldReinit
     public static String message = "Hello Remold Hot Reloading!";
 
@@ -68,6 +87,13 @@ public class ExampleJavaMod extends Mod {
         Log.info("[ExampleJavaMod] Loading content... (Edit this and press Ctrl+Shift+F9 to see live updates)");
     }
 
+    // =========================================================================================
+    // 【动手试试 6：监听热重载生命周期（@OnReload）】
+    // 本类被热更重定义后，Remold 会对本类的每个存活实例各调用一次本方法。
+    // 试着在下方加入游戏内浮动提示：
+    //   if (Vars.ui != null) Vars.ui.showInfoToast("[green]模组热更新成功！重载次数: " + reloadCount, 3f);
+    // 按 Ctrl+Shift+F9 重新编译，每次热重载都会弹出游戏内浮窗，实时反馈！
+    // =========================================================================================
     /**
      * 本类被热更重定义后，Remold 会对<b>本类的每个存活实例</b>各调用一次本方法。
      *
@@ -119,6 +145,14 @@ public class ExampleJavaMod extends Mod {
         return Core.atlas.find(name);
     }
 
+    // =========================================================================================
+    // 【动手试试 5：PNG 贴图原位热更新（零重启游戏）】
+    // 模板在 assets/sprites/remold-badge.png 准备了常驻角标贴图（并在屏幕右侧显示）。
+    // 游戏运行期间，直接用画图/绘图工具编辑该 PNG（或复制 demo/remold-badge-amber.png 覆盖它）：
+    //   Windows: copy demo\remold-badge-amber.png assets\sprites\remold-badge.png
+    //   macOS/Linux: cp demo/remold-badge-amber.png assets/sprites/remold-badge.png
+    // 切回游戏，屏幕右侧常驻的角标贴图瞬间直刷显存变色，无需重新启动游戏或重新部署模组！
+    // =========================================================================================
     /** 在 HUD 右侧边缘挂一个常驻角标，作为贴图热更新的观察窗口。 */
     private static void showBadge() {
         if (badge != null || Vars.ui == null || Vars.ui.hudGroup == null) return;
@@ -142,6 +176,12 @@ public class ExampleJavaMod extends Mod {
         Log.info("[ExampleJavaMod] Badge bound to atlas region '@'; edit assets/sprites/@.png to hot-reload it.", badgeRegionName(), BADGE_SPRITE);
     }
 
+    // =========================================================================================
+    // 【动手试试 4：动态修改 UI 对话框与交互逻辑】
+    // 试着给下面的对话框新增一个按钮，或者修改提示文案与窗口标题：
+    //   dialog.cont.button("动态新增的按钮", () -> Vars.ui.showInfo("来自热更后的点击响应！")).size(160f, 50f).row();
+    // 按 Ctrl+Shift+F9 重新编译，重新调用 showDialog()（或者触发对应事件）即可看到最新 UI。
+    // =========================================================================================
     private static void showDialog() {
         BaseDialog dialog = new BaseDialog("Remold Mod Template");
 

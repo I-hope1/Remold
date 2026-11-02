@@ -7,6 +7,7 @@
 
 import java.io.File
 import org.gradle.api.plugins.JavaApplication
+import org.gradle.api.tasks.compile.JavaCompile
 
 open class RemoldExtension {
     var version: String? = null
@@ -76,6 +77,12 @@ data class RemoldResolvedConfig(
 val remoldExt = project.extensions.create<RemoldExtension>("remold")
 
 project.plugins.withId("java") {
+    // 确保编译输出包含完整调试符号（行号、源码、局部变量表），供 InitFix 参数回溯、Lambda 对齐与调试使用
+    tasks.withType<JavaCompile>().configureEach {
+        options.isDebug = true
+        options.debugOptions.debugLevel = "source,lines,vars"
+    }
+
     val sourceSets = project.extensions.getByType<SourceSetContainer>()
 
     /**

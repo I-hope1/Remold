@@ -13,6 +13,7 @@ import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import remold.annotation.RemoldReinit;
 
 /**
  * 织入本模组自身类的 Mixin，用于演示热更时的「重织入」链路。
@@ -21,16 +22,26 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * 加本 Mixin 织入而来（多出一个 {@code @Unique} 字段和一个 handler 方法）。
  * Remold 重定义前会调用 {@code RemoldMixinBridge}，把新源码字节码重新织入，
  * 因此这两个成员不会在重定义中丢失，{@code redefineClasses} 也不会因为结构变化被拒。</p>
- *
- * <p>关闭重织入（{@code -Dremold.mixin.bridge=false}）后热更本类，可以对比观察：
- * 布局安全门报告字段/方法被移除而拒绝该次热更，模组不会带着残缺字节码继续运行。</p>
  */
 @Mixin(RemoldWandItem.class)
 public abstract class RemoldWandItemMixin {
 
+    // =========================================================================================
+    // 【动手试试 6：Mixin 中使用 @Unique 与 @RemoldReinit】
+    // 试试在 Mixin 类里增加新的 @Unique 字段，并标注 @RemoldReinit：
+    //     @Unique
+    //     @RemoldReinit
+    //     private String remold$author = "Modder";
+    // 并在下方的 countUse 注入方法里打印它！按 Ctrl + Shift + F9，Mixin 会自动重新织入并热更生效！
+    // =========================================================================================
     @Unique
     private int remold$useCount = 0;
 
+    // =========================================================================================
+    // 【动手试试 7：动态修改 Mixin 注入切入点或逻辑】
+    // 试试把 at = @At("HEAD") 改为 at = @At("TAIL")，
+    // 观察控制台日志中 mixin 钩子与 [src] use() begin / end 的相对打印顺序立即反转！
+    // =========================================================================================
     @Inject(method = "use", at = @At("HEAD"))
     private void remold$countUse(World world, PlayerEntity user, Hand hand,
                                  CallbackInfoReturnable<TypedActionResult<ItemStack>> cir) {

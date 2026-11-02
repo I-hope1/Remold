@@ -37,11 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 引入运行时常量访问器登记表（`RuntimeConstants`），支持 `Scl.scl()` 及带参形态 `Scl.scl(float)`；
   - 引入 LVT 形参名定捕获身份，拦截同签名换序的静默错值；
   - 骨架指纹与 consumer 偏好拆开同形 lambda，消除多轮静默串位。
-- **构建与测试体验提速**:
+- **字段描述符类型变更热重载 (`LayoutGate` / `@RemoldReinit`)**:
+  - 当字段类型发生变化（oldDesc != newDesc）且批次外无悬空读者时，在堆上无实例或标有 `@RemoldReinit` 时直接放行；
+  - 自动清空旧类型 `REINIT_APPLIED` 指纹缓存，重定义后由 InitFix 安全写入新类型的初始值；若有实例未标 `@RemoldReinit` 则给出明确引导文案。
+- **构建与测试体验提速与开发者引导**:
+  - 脚本与 Gradle 插件自动为 `JavaCompile` 注入全量调试符号（`debug = true`, `source,lines,vars`），为 LVT 形参捕获与参数回溯提供高精度符号支撑；
+  - 为子模块增设本地 JitPack 兼容发布通道（`com.github.I-hope1.Remold:*:v<ver>`），支持下游模版在尚未发布远程 Tag 时无缝本地联调；
+  - 为 Minecraft Fabric、Mindustry 及示例工程补充系统化的「动手试试」系列引导教程注释；
   - 新增常驻 Javac 守护进程 (`JavacDaemon`)，测试夹具编译提速 60x（2370ms → 35ms）；
   - 新增 Gradle 插件封装模块 `:gradle-plugin`（`io.github.i-hope1.remold`）；
   - 新增 GitHub Tag 自动化 Release 工作流（`.github/workflows/release.yml`）；
-  - 测试套件扩充至 389 个 JUnit 断言，持续守卫架构不变量。
+  - 测试套件扩充至 397 个 JUnit 测试，持续守卫架构不变量。
 
 ### Changed
 - 基础许可证切换为 Apache-2.0（插件模块保持各自生态兼容许可）；

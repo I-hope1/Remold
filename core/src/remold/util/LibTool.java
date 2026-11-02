@@ -3,6 +3,9 @@ package remold.util;
 import remold.RemoldAgent;
 
 import java.io.File;
+import java.io.InputStream;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.lang.ref.*;
 import java.lang.reflect.Array;
 import java.util.*;
@@ -11,20 +14,117 @@ import java.util.*;
 public class LibTool {
 	private static volatile boolean initialized;
 
+	static {
+		tryInit();
+	}
+
 	public static boolean initialized() {
 		return initialized;
 	}
 
+	public static boolean tryInit() {
+		if (initialized) return true;
+		try {
+			init();
+			return true;
+		} catch (Throwable t) {
+			return false;
+		}
+	}
+
 	public synchronized static void init() {
 		if (initialized) return;
+
+		// 1. 显式指定属性优先（测试夹具或自定义路径）
 		String libPath = System.getProperty("remold.path.libtool");
-		if (libPath != null && !libPath.isEmpty()) {
-			System.load(new File(libPath).getAbsolutePath());
-		} else {
-			System.loadLibrary("tool64");
+		if (libPath != null && !libPath.trim().isEmpty()) {
+			File file = new File(libPath.trim());
+			if (file.exists() && file.isFile()) {
+				System.load(file.getAbsolutePath());
+				initialized = true;
+				RemoldAgent.info("[Lib] Loaded libtool from property: " + file.getAbsolutePath());
+				return;
+			}
 		}
-		initialized = true;
-		RemoldAgent.info("[Lib] Loaded libtool.");
+
+		// 2. 尝试从系统 java.library.path 加载
+		try {
+			System.loadLibrary("tool64");
+			initialized = true;
+			RemoldAgent.info("[Lib] Loaded libtool from java.library.path.");
+			return;
+		} catch (Throwable ignored) {
+		}
+
+		// 3. 从 Jar 资源或本地工程目录解包加载
+		File resolved = resolveNativeLibrary();
+		if (resolved != null && resolved.exists()) {
+			System.load(resolved.getAbsolutePath());
+			initialized = true;
+			RemoldAgent.info("[Lib] Loaded libtool from: " + resolved.getAbsolutePath());
+			return;
+		}
+
+		throw new UnsatisfiedLinkError("Cannot locate or load tool64 native library (tried remold.path.libtool, java.library.path, and embedded resources)");
+	}
+
+	private static File resolveNativeLibrary() {
+		String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+		String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
+		String libName;
+		if (os.contains("win")) {
+			libName = "tool64.dll";
+		} else if (os.contains("mac") || os.contains("darwin")) {
+			libName = "libtool64.dylib";
+		} else if (arch.contains("aarch64") || arch.contains("arm")) {
+			libName = "libtoolarm64.so";
+		} else {
+			libName = "libtool64.so";
+		}
+
+		// 3.1 尝试从 classpath / jar 内部解包
+		String resourcePath = "/libs/" + libName;
+		try (InputStream in = LibTool.class.getResourceAsStream(resourcePath)) {
+			if (in != null) {
+				byte[] bytes = in.readAllBytes();
+				if (bytes.length > 0) {
+					File tempDir = new File(System.getProperty("java.io.tmpdir"), "remold_natives");
+					if (!tempDir.exists() && !tempDir.mkdirs() && !tempDir.isDirectory()) {
+						tempDir = new File(System.getProperty("user.home"), ".remold/natives");
+						tempDir.mkdirs();
+					}
+					File target = new File(tempDir, libName);
+					if (!target.exists() || target.length() != bytes.length) {
+						try {
+							Files.write(target.toPath(), bytes);
+						} catch (IOException e) {
+							// Windows 上同名 DLL 可能已被其他并发进程锁定，生成独立文件名
+							target = new File(tempDir, System.currentTimeMillis() + "_" + Math.abs(new Random().nextInt()) + "_" + libName);
+							Files.write(target.toPath(), bytes);
+						}
+						target.deleteOnExit();
+					}
+					return target;
+				}
+			}
+		} catch (Throwable ignored) {
+		}
+
+		// 3.2 开发环境探测本地相对路径
+		String[] searchPaths = {
+			"core/libs/" + libName,
+			"../core/libs/" + libName,
+			"libs/" + libName,
+			"../../core/libs/" + libName
+		};
+		for (String p : searchPaths) {
+			File f = new File(p);
+			if (f.exists() && f.isFile()) {
+				return f.getAbsoluteFile();
+			}
+		}
+
+		return null;
 	}
 
 	private static native Object[] nGetInstances(Class<?> clazz);

@@ -29,6 +29,10 @@ class RemoldPluginTest {
 
         Assertions.assertNotNull(project.getExtensions().findByName("remold"), "remold extension should be registered");
         Assertions.assertNotNull(project.getTasks().findByName("runRemold"), "runRemold task should be registered");
+
+        org.gradle.api.tasks.compile.JavaCompile compileJava = (org.gradle.api.tasks.compile.JavaCompile) project.getTasks().getByName("compileJava");
+        Assertions.assertTrue(compileJava.getOptions().isDebug(), "compileJava should have debug enabled");
+        Assertions.assertEquals("source,lines,vars", compileJava.getOptions().getDebugOptions().getDebugLevel(), "debugLevel should be source,lines,vars");
     }
 
     @Test

@@ -196,7 +196,7 @@ apply(from = file("../remold.gradle.kts").takeIf { it.isFile }
 ```kotlin
 buildscript {
     repositories { maven("https://jitpack.io") }
-    dependencies { classpath("com.github.I-Hope1.Remold:gradle-plugin:v0.1.4") }   // 版本 = Git tag
+    dependencies { classpath("com.github.I-Hope1.Remold:gradle-plugin:v0.2.0") }   // 版本 = Git tag
 }
 apply(plugin = "io.github.i-hope1.remold")
 ```
@@ -206,11 +206,11 @@ apply(plugin = "io.github.i-hope1.remold")
 （`gradle.properties` / `extra[...]`；Groovy 可用 `remold { }`）。
 
 > [!TIP]
-> `gradle-plugin` 模块从**包含它的第一个 tag**（`v0.1.4` 起）才有构建产物；在那之前可以写 `master-SNAPSHOT` 尝鲜
+> `gradle-plugin` 模块从 **`v0.2.0`** 起正式提供稳定的构建产物；在那之前可以写 `master-SNAPSHOT` 尝鲜
 > （随分支变化，不适合长期锁定）。
 
 > [!NOTE]
-> 想写成 `plugins { id("io.github.i-hope1.remold") version "v0.1.4" }` 也可以，但 JitPack 不托管「插件标记」
+> 想写成 `plugins { id("io.github.i-hope1.remold") version "v0.2.0" }` 也可以，但 JitPack 不托管「插件标记」
 > （`<插件id>:<插件id>.gradle.plugin`），需要在 `settings.gradle.kts` 的 `pluginManagement.resolutionStrategy.eachPlugin`
 > 里 `useModule("com.github.I-Hope1.Remold:gradle-plugin:${requested.version}")` 映射一次。发到 Gradle Plugin Portal
 > 才能省掉这段。
@@ -351,11 +351,11 @@ repositories {
 }
 
 dependencies {
-    compileOnly 'com.github.I-hope1.Remold:api:0.1.0'
+    compileOnly 'com.github.I-hope1.Remold:api:v0.2.0'
 }
 ```
 
-Maven Central 预留坐标：`io.github.i-hope1.remold:api:0.1.0`。
+Maven Central 预留坐标：`io.github.i-hope1.remold:api:0.2.0`。
 
 ---
 

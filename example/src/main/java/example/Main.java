@@ -18,7 +18,13 @@ public class Main {
             tickCount++;
             player.tick();
 
-            // 演示匿名类调用：即使修改匿名类实现，Remold 拓扑对齐也能确保不会错位
+            // =================================================================================
+            // 【动手试试 6：匿名内部类与 Lambda 表达式热重载】
+            // 试着在下面的 Runnable 匿名内部类中添加业务打印，或者将其重构成带有局部变量捕获的 Lambda：
+            //   Runnable task = () -> System.out.println("  [Lambda] Hot reloaded at tick: " + tickCount);
+            // Remold 的 AnonClassAligner（4 阶拓扑对齐）与 LambdaAligner 会自动进行编号对齐与 CallSite 映射，
+            // 彻底杜绝匿名类/Lambda 增删重排导致的 NoSuchMethodError 崩溃！
+            // =================================================================================
             Runnable task = new Runnable() {
                 @Override
                 public void run() {

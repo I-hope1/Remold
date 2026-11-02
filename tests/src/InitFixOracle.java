@@ -994,6 +994,23 @@ public class InitFixOracle {
 		}
 		""";
 
+	static final String CASE_N8_V1 = """
+		package oracle;
+		public class CaseN8 {
+			public int count = 10;
+			public int count() { return count; }
+		}
+		""";
+
+	static final String CASE_N8_V2 = """
+		package oracle;
+		public class CaseN8 {
+			@remold.annotation.RemoldReinit
+			public String count = "twenty";
+			public String count() { return count; }
+		}
+		""";
+
 	static void caseRemoldReinit() throws Exception {
 		// ---- N1：注解解锁"新增字段 + 构造器里碰过它" ----
 		Fixture f1 = loadFixture("oracle.CaseN1", CASE_N1_V1, CASE_N1_V2);
@@ -1096,6 +1113,21 @@ public class InitFixOracle {
 		check("new".equals(read(f7.host, null, "msg")),
 			"CaseN7：静态值被覆写成 new（实际 " + describe(read(f7.host, null, "msg")) + "）");
 		expectReinitHint("CaseN7", "msg (OVERWRITE, static)");
+
+		// ---- N8：字段类型变更（int -> String）+ @RemoldReinit ----
+		Fixture f8 = loadFixture("oracle.CaseN8", CASE_N8_V1, CASE_N8_V2);
+		Object s8 = construct(f8.host);
+		// 模拟 DCEVM 将新类型字段初始化为默认零值 null
+		resetToDefault(f8.host, s8, "count", "Ljava/lang/String;");
+		InstanceTracker.register(s8);
+
+		InitFix.PatchReport r8 = f8.transform();
+		expect(r8, false, "count", InitFix.FieldStatus.ACCEPTED, null);
+		check(r8.patchGenerated(), "CaseN8：类型变更字段经 @RemoldReinit 授权进入候选集并生成补丁");
+		f8.apply();
+		check("twenty".equals(read(f8.host, s8, "count")),
+			"CaseN8：存量实例写入了新类型初值（期望 twenty，实际 " + describe(read(f8.host, s8, "count")) + "）");
+		expectReinitHint("CaseN8", "count (OVERWRITE, instance)");
 	}
 
 	// ==================== 探针：外部依赖型初值（跨类调用 / 他类静态字段）是否被放行 ====================

@@ -3731,7 +3731,7 @@ public class LambdaAligner {
 				continue;
 			}
 			ParamSource src = synthesize(ni.hostMethod, ni.captureSlots.get(j),
-				ni.hostParamEndSlot, !oi.isStatic(), newCn);
+				ni.hostParamEndSlot, !oi.isStatic(), newCn, ni.captured.get(j));
 			if (src == null) return null;
 			plan[j] = src;
 			synthesized = true;
@@ -3759,22 +3759,19 @@ public class LambdaAligner {
 	 * @param bridgeHasThis 桥自身是不是实例方法（{@code this.field} 需要槽 0 的接收者）
 	 */
 	private static ParamSource synthesize(MethodNode host, int slot, int hostParamEndSlot,
-	                                      boolean bridgeHasThis, ClassNode newCn) {
+	                                      boolean bridgeHasThis, ClassNode newCn, String wantDesc) {
 		if (host == null || slot < 0) return null;
-		// 宿主形参：值由调用方给，方法体里没有"它从哪来"，无从重放。
-		if (hostParamEndSlot >= 0 && slot < hostParamEndSlot) return null;
 		List<AbstractInsnNode> real = realInsns(host);
 		if (real == null) return null;
 
-		int storeAt = -1, stores = 0;
-		for (int i = 0; i < real.size(); i++) {
-			AbstractInsnNode x = real.get(i);
-			if (x instanceof VarInsnNode v && isStoreOpcode(v.getOpcode()) && v.var == slot) {
-				stores++;
-				storeAt = i;
-			}
+		// 宿主形参：值由调用方给，方法体里没有"它从哪来"——唯一例外是构造器把它存进了
+		// 不可变字段（`this.cfg = cfg`），那样桥可以靠 `ALOAD 0; GETFIELD` 把它取回来。
+		if (hostParamEndSlot >= 0 && slot < hostParamEndSlot) {
+			return paramViaField(host, real, slot, wantDesc, bridgeHasThis, newCn);
 		}
-		if (stores != 1 || storeAt < 1) return null;
+
+		int storeAt = storeOf(real, slot);
+		if (storeAt < 1) return null;
 
 		AbstractInsnNode prev = real.get(storeAt - 1);
 		// 1) 常量：值恒定，重放恒等价（`int margin = 10` 这类）。
@@ -3794,7 +3791,299 @@ public class LambdaAligner {
 		    && prev instanceof FieldInsnNode g && g.getOpcode() == Opcodes.GETFIELD) {
 			return isFinalField(newCn, g) ? ParamSource.getField(g.owner, g.name, g.desc) : null;
 		}
+		// 4) 纯算式：整段在编译期算成一个常量（`float scaled = pad * 2;` 这类）。
+		//    只认算术/位运算/类型转换，且叶子必须都能折成常量；任何一条不满足就整体放弃。
+		Object folded = foldSlot(host, real, slot, 0, new HashSet<>());
+		return folded == NOT_A_CONSTANT ? null : ParamSource.constant(folded);
+	}
+
+	/**
+	 * 构造器参数 → 不可变字段：{@code this.f = cfg} 之后，桥用 {@code ALOAD 0; GETFIELD f}
+	 * 就能把"当年那个构造器参数"的值取回来。
+	 *
+	 * <p>为什么只需要证明字段 {@code final}：JVM 保证 {@code final} 字段只在构造器里被写一次，
+	 * 所以"构造完成后读它"与"构造时参数的值"必然相同。这也正是 {@code InitFix.scanParamFields}
+	 * 的条件 A——比它的条件 B（非 final 但 private + 全 Nest 单处 PUTFIELD）更严，但不需要
+	 * 扫 Nest。</p>
+	 *
+	 * <p><b>前提是桥自己持有 {@code this}</b>：静态桥没有接收者，拿不到那个实例。此时不猜。</p>
+	 */
+	private static ParamSource paramViaField(MethodNode host, List<AbstractInsnNode> real, int slot,
+	                                         String wantDesc, boolean bridgeHasThis, ClassNode newCn) {
+		if (!"<init>".equals(host.name) || !bridgeHasThis) return null;
+		String paramDesc = paramDescAt(host, slot);
+		if (paramDesc == null || !paramDesc.equals(wantDesc)) return null;
+
+		FieldInsnNode only = null;
+		for (int i = 0; i + 2 < real.size(); i++) {
+			AbstractInsnNode a = real.get(i), b = real.get(i + 1), c = real.get(i + 2);
+			if (!(a instanceof VarInsnNode va) || va.getOpcode() != Opcodes.ALOAD || va.var != 0) continue;
+			if (!(b instanceof VarInsnNode vb) || vb.var != slot || !isLoadOpcode(vb.getOpcode())) continue;
+			if (!(c instanceof FieldInsnNode fc) || fc.getOpcode() != Opcodes.PUTFIELD) continue;
+			if (!fc.desc.equals(paramDesc)) continue;
+			// 同一个参数存进了多个字段：哪个才是"那个值"不再唯一，不猜。
+			if (only != null && !(only.name.equals(fc.name) && only.desc.equals(fc.desc))) return null;
+			only = fc;
+		}
+		if (only == null || !isFinalField(newCn, only)) return null;
+		return ParamSource.getField(only.owner, only.name, only.desc);
+	}
+
+	/** 宿主方法第 {@code slot} 个形参的描述符；不是形参则 {@code null}。 */
+	private static String paramDescAt(MethodNode host, int slot) {
+		int s = (host.access & Opcodes.ACC_STATIC) != 0 ? 0 : 1;
+		for (Type t : Type.getArgumentTypes(host.desc)) {
+			if (s == slot) return t.getDescriptor();
+			s += t.getSize();
+		}
 		return null;
+	}
+
+	/** 该槽在方法体里唯一一处 {@code xSTORE} 的下标；不是唯一一处则 {@code -1}。 */
+	private static int storeOf(List<AbstractInsnNode> real, int slot) {
+		int at = -1, n = 0;
+		for (int i = 0; i < real.size(); i++) {
+			AbstractInsnNode x = real.get(i);
+			if (x instanceof VarInsnNode v && isStoreOpcode(v.getOpcode()) && v.var == slot) {
+				n++;
+				at = i;
+			}
+		}
+		return n == 1 ? at : -1;
+	}
+
+	/** 折叠深度上限：链式局部变量最多跟四层，再深就放弃（宁可漏补）。 */
+	private static final int FOLD_DEPTH = 4;
+
+	/**
+	 * 把"槽 {@code slot} 那唯一一处 store 的生产者"在编译期算成一个常量。
+	 *
+	 * <p>为什么是"算成常量"而不是"把原指令序列搬进桥"：搬序列要保证栈形状、类型、操作码
+	 * 全部一致，任何一处错位都是验证期失败或静默错值；而算成一个常量只有一种失败模式——
+	 * 算不出来就返回 {@link #NOT_A_CONSTANT}，调用方退回幽灵桩。这也正是 javac 自己会对
+	 * 常量表达式做的事。</p>
+	 *
+	 * <p>求值语义必须与 JVM 一致：`int`/`long` 的环绕、`float`/`double` 的 IEEE 754（Java 17
+	 * 起一律 strictfp）都与字节码逐位相同，所以"用 Java 算一遍"是等价的，不是近似。</p>
+	 */
+	private static Object foldSlot(MethodNode host, List<AbstractInsnNode> real, int slot,
+	                               int depth, Set<Integer> seen) {
+		if (depth > FOLD_DEPTH || !seen.add(slot)) return NOT_A_CONSTANT;
+		int storeAt = storeOf(real, slot);
+		if (storeAt < 1) return NOT_A_CONSTANT;
+		return foldRange(host, real, storeAt, depth, seen);
+	}
+
+	/**
+	 * 折叠"紧邻 {@code storeAt} 之前的那段表达式"。
+	 *
+	 * <p>先用反向栈高度求出表达式起点（{@code need = need - pushed + consumed}），再正向
+	 * 在一条小栈上求值。反向定界保证只碰这一段，不会把前面的语句卷进来。</p>
+	 */
+	private static Object foldRange(MethodNode host, List<AbstractInsnNode> real, int storeAt,
+	                                int depth, Set<Integer> seen) {
+		int need = 1, start = storeAt - 1;
+		while (need > 0) {
+			if (start < 0) return NOT_A_CONSTANT;
+			int[] eff = stackEffect(real.get(start));
+			if (eff == null) return NOT_A_CONSTANT;              // 不认识的指令：整段放弃
+			need = need - eff[0] + eff[1];
+			start--;
+		}
+		start++;
+		ArrayDeque<Object> st = new ArrayDeque<>();
+		for (int i = start; i < storeAt; i++) {
+			if (!evalOne(host, real, real.get(i), st, depth, seen)) return NOT_A_CONSTANT;
+		}
+		return st.size() == 1 ? st.pop() : NOT_A_CONSTANT;
+	}
+
+	private static boolean evalOne(MethodNode host, List<AbstractInsnNode> real, AbstractInsnNode n,
+	                               ArrayDeque<Object> st, int depth, Set<Integer> seen) {
+		int op = n.getOpcode();
+		if (isConstPush(n)) {
+			Object c = constValue(n);
+			if (c == NOT_A_CONSTANT) return false;
+			st.push(c);
+			return true;
+		}
+		if (n instanceof VarInsnNode v && isLoadOpcode(op)) {
+			if (op == Opcodes.ALOAD) return false;               // 引用型局部变量：不在折叠范围
+			Object c = foldSlot(host, real, v.var, depth + 1, seen);
+			if (c == NOT_A_CONSTANT) return false;
+			st.push(c);
+			return true;
+		}
+		try {
+			return evalOp(op, st);
+		} catch (ArithmeticException e) {
+			return false;                                        // 除零：原代码创建时就会抛，不重放
+		}
+	}
+
+	/** 一段指令的栈效应 {@code {pushed, consumed}}；不在白名单内返回 {@code null}。 */
+	private static int[] stackEffect(AbstractInsnNode n) {
+		int op = n.getOpcode();
+		if (isConstPush(n)) return new int[]{1, 0};
+		if (n instanceof VarInsnNode) {
+			if (isLoadOpcode(op)) return new int[]{1, 0};
+			if (isStoreOpcode(op)) return new int[]{0, 1};
+			return null;
+		}
+		if (isBinaryOp(op)) return new int[]{1, 2};
+		if (isUnaryOp(op)) return new int[]{1, 1};
+		return null;
+	}
+
+	private static boolean isLoadOpcode(int op) {
+		return op >= Opcodes.ILOAD && op <= Opcodes.ALOAD;
+	}
+
+	private static boolean isBinaryOp(int op) {
+		switch (op) {
+			case Opcodes.IADD: case Opcodes.ISUB: case Opcodes.IMUL: case Opcodes.IDIV:
+			case Opcodes.IREM: case Opcodes.ISHL: case Opcodes.ISHR: case Opcodes.IUSHR:
+			case Opcodes.IAND: case Opcodes.IOR:  case Opcodes.IXOR:
+			case Opcodes.LADD: case Opcodes.LSUB: case Opcodes.LMUL: case Opcodes.LDIV:
+			case Opcodes.LREM: case Opcodes.LSHL: case Opcodes.LSHR: case Opcodes.LUSHR:
+			case Opcodes.LAND: case Opcodes.LOR:  case Opcodes.LXOR:
+			case Opcodes.FADD: case Opcodes.FSUB: case Opcodes.FMUL: case Opcodes.FDIV:
+			case Opcodes.FREM:
+			case Opcodes.DADD: case Opcodes.DSUB: case Opcodes.DMUL: case Opcodes.DDIV:
+			case Opcodes.DREM:
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	private static boolean isUnaryOp(int op) {
+		switch (op) {
+			case Opcodes.INEG: case Opcodes.LNEG: case Opcodes.FNEG: case Opcodes.DNEG:
+			case Opcodes.I2L: case Opcodes.I2F: case Opcodes.I2D:
+			case Opcodes.L2I: case Opcodes.L2F: case Opcodes.L2D:
+			case Opcodes.F2I: case Opcodes.F2L: case Opcodes.F2D:
+			case Opcodes.D2I: case Opcodes.D2L: case Opcodes.D2F:
+			case Opcodes.I2B: case Opcodes.I2C: case Opcodes.I2S:
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	/** 在 {@code st} 上执行一条算术/转换指令；类型不匹配或栈不够时返回 {@code false}。 */
+	private static boolean evalOp(int op, ArrayDeque<Object> st) {
+		// ---- int 二元 ----
+		if (op >= Opcodes.IADD && op <= Opcodes.IXOR) {
+			Integer b = popInt(st), a = popInt(st);
+			if (a == null || b == null) return false;
+			int x = a, y = b;
+			switch (op) {
+				case Opcodes.IADD: st.push(x + y); return true;
+				case Opcodes.ISUB: st.push(x - y); return true;
+				case Opcodes.IMUL: st.push(x * y); return true;
+				case Opcodes.IDIV: st.push(x / y); return true;
+				case Opcodes.IREM: st.push(x % y); return true;
+				case Opcodes.ISHL: st.push(x << y); return true;
+				case Opcodes.ISHR: st.push(x >> y); return true;
+				case Opcodes.IUSHR: st.push(x >>> y); return true;
+				case Opcodes.IAND: st.push(x & y); return true;
+				case Opcodes.IOR: st.push(x | y); return true;
+				case Opcodes.IXOR: st.push(x ^ y); return true;
+				default: return false;
+			}
+		}
+		// ---- long 二元（移位量是 int） ----
+		if (op >= Opcodes.LADD && op <= Opcodes.LXOR) {
+			Long b = popLong(st), a = popLong(st);
+			if (a == null || b == null) return false;
+			long x = a, y = b;
+			switch (op) {
+				case Opcodes.LADD: st.push(x + y); return true;
+				case Opcodes.LSUB: st.push(x - y); return true;
+				case Opcodes.LMUL: st.push(x * y); return true;
+				case Opcodes.LDIV: st.push(x / y); return true;
+				case Opcodes.LREM: st.push(x % y); return true;
+				case Opcodes.LSHL: st.push(x << (int) y); return true;
+				case Opcodes.LSHR: st.push(x >> (int) y); return true;
+				case Opcodes.LUSHR: st.push(x >>> (int) y); return true;
+				case Opcodes.LAND: st.push(x & y); return true;
+				case Opcodes.LOR: st.push(x | y); return true;
+				case Opcodes.LXOR: st.push(x ^ y); return true;
+				default: return false;
+			}
+		}
+		// ---- float 二元 ----
+		if (op >= Opcodes.FADD && op <= Opcodes.FREM) {
+			Float b = popFloat(st), a = popFloat(st);
+			if (a == null || b == null) return false;
+			float x = a, y = b;
+			switch (op) {
+				case Opcodes.FADD: st.push(x + y); return true;
+				case Opcodes.FSUB: st.push(x - y); return true;
+				case Opcodes.FMUL: st.push(x * y); return true;
+				case Opcodes.FDIV: st.push(x / y); return true;
+				case Opcodes.FREM: st.push(x % y); return true;
+				default: return false;
+			}
+		}
+		// ---- double 二元 ----
+		if (op >= Opcodes.DADD && op <= Opcodes.DREM) {
+			Double b = popDouble(st), a = popDouble(st);
+			if (a == null || b == null) return false;
+			double x = a, y = b;
+			switch (op) {
+				case Opcodes.DADD: st.push(x + y); return true;
+				case Opcodes.DSUB: st.push(x - y); return true;
+				case Opcodes.DMUL: st.push(x * y); return true;
+				case Opcodes.DDIV: st.push(x / y); return true;
+				case Opcodes.DREM: st.push(x % y); return true;
+				default: return false;
+			}
+		}
+		// ---- 一元：取负与类型转换 ----
+		switch (op) {
+			case Opcodes.INEG: { Integer a = popInt(st); if (a == null) return false; st.push(-a); return true; }
+			case Opcodes.LNEG: { Long a = popLong(st); if (a == null) return false; st.push(-a); return true; }
+			case Opcodes.FNEG: { Float a = popFloat(st); if (a == null) return false; st.push(-a); return true; }
+			case Opcodes.DNEG: { Double a = popDouble(st); if (a == null) return false; st.push(-a); return true; }
+			case Opcodes.I2L: { Integer a = popInt(st); if (a == null) return false; st.push((long) a); return true; }
+			case Opcodes.I2F: { Integer a = popInt(st); if (a == null) return false; st.push((float) a); return true; }
+			case Opcodes.I2D: { Integer a = popInt(st); if (a == null) return false; st.push((double) a); return true; }
+			case Opcodes.L2I: { Long a = popLong(st); if (a == null) return false; st.push((int) (long) a); return true; }
+			case Opcodes.L2F: { Long a = popLong(st); if (a == null) return false; st.push((float) (long) a); return true; }
+			case Opcodes.L2D: { Long a = popLong(st); if (a == null) return false; st.push((double) (long) a); return true; }
+			case Opcodes.F2I: { Float a = popFloat(st); if (a == null) return false; st.push((int) (float) a); return true; }
+			case Opcodes.F2L: { Float a = popFloat(st); if (a == null) return false; st.push((long) (float) a); return true; }
+			case Opcodes.F2D: { Float a = popFloat(st); if (a == null) return false; st.push((double) (float) a); return true; }
+			case Opcodes.D2I: { Double a = popDouble(st); if (a == null) return false; st.push((int) (double) a); return true; }
+			case Opcodes.D2L: { Double a = popDouble(st); if (a == null) return false; st.push((long) (double) a); return true; }
+			case Opcodes.D2F: { Double a = popDouble(st); if (a == null) return false; st.push((float) (double) a); return true; }
+			case Opcodes.I2B: { Integer a = popInt(st); if (a == null) return false; st.push((int) (byte) (int) a); return true; }
+			case Opcodes.I2C: { Integer a = popInt(st); if (a == null) return false; st.push((int) (char) (int) a); return true; }
+			case Opcodes.I2S: { Integer a = popInt(st); if (a == null) return false; st.push((int) (short) (int) a); return true; }
+			default: return false;
+		}
+	}
+
+	private static Integer popInt(ArrayDeque<Object> st) {
+		Object o = st.poll();
+		return o instanceof Integer ? (Integer) o : null;
+	}
+
+	private static Long popLong(ArrayDeque<Object> st) {
+		Object o = st.poll();
+		return o instanceof Long ? (Long) o : null;
+	}
+
+	private static Float popFloat(ArrayDeque<Object> st) {
+		Object o = st.poll();
+		return o instanceof Float ? (Float) o : null;
+	}
+
+	private static Double popDouble(ArrayDeque<Object> st) {
+		Object o = st.poll();
+		return o instanceof Double ? (Double) o : null;
 	}
 
 	/** 字段必须在本类里声明且带 {@code ACC_FINAL}；继承来的字段看不到定义，不猜。 */

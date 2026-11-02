@@ -824,6 +824,92 @@ public class LambdaBridgeAlignTest {
 		assertTrue(containsCall(byKey(out, "lambda$f$0", "(I)V"), "onOrphanInvoked"));
 	}
 
+	/**
+	 * 新增捕获是<b>算出来的</b>，但整段能在编译期折成常量：{@code int pad = 10; float scaled = pad * 2;}
+	 *
+	 * <p>折叠不是"把原指令搬进桥"（那要保证栈形状、类型、操作码全对），而是算成一个常量。
+	 * 失败模式只有一种：算不出来就放弃。</p>
+	 */
+	@Test
+	void addedComputedButFoldableCaptureIsSynthesized(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_NO_MARK, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ADDED_FOLDED_EXPR, true).resolve("B.class"));
+
+		assertNotNull(byKey(parse(v2), "lambda$f$0", "(IF)V"), "夹具前提：v2 捕获 (int, float)");
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode bridge = byKey(out, "lambda$f$0", "(I)V");
+		assertNotNull(bridge, "可折叠的算式应当能建桥：" + table(out));
+		assertTrue(containsCall(bridge, "onBridgeInvoked"));
+
+		List<AbstractInsnNode> pushes = valuePushes(bridge);
+		assertEquals(2, pushes.size(), "k + 折出来的常量");
+		assertLoad(pushes.get(0), Opcodes.ILOAD, 0, "k");
+		assertTrue(pushes.get(1) instanceof LdcInsnNode l && Float.valueOf(20.0f).equals(l.cst),
+			"pad * 2 必须折成 20.0f（不是 0，也不是 10）");
+	}
+
+	/**
+	 * 构造器参数 → {@code final} 字段：桥用 {@code ALOAD 0; GETFIELD} 把当年那个参数取回来。
+	 *
+	 * <p>前提是桥自己持有 {@code this}——所以老 lambda 必须已经是实例 lambda。</p>
+	 */
+	@Test
+	void addedCaptureFromConstructorParamIsSynthesizedViaField(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_CTOR_THIS_ONLY, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_CTOR_USES_PARAM, true).resolve("B.class"));
+
+		assertNotNull(byKey(parse(v1), "lambda$new$0", "()V"), "夹具前提：v1 只捕获 this");
+		assertNotNull(byKey(parse(v2), "lambda$new$0", "(Ljava/lang/String;)V"),
+			"夹具前提：v2 多捕获构造器参数 tag");
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode bridge = byKey(out, "lambda$new$0", "()V");
+		assertNotNull(bridge, "构造器参数经不可变字段可重放：" + table(out));
+		assertEquals(0, bridge.access & Opcodes.ACC_STATIC, "桥必须是实例方法（要靠 this 取字段）");
+
+		List<AbstractInsnNode> pushes = valuePushes(bridge);
+		assertEquals(3, pushes.size(), "接收者 + (ALOAD 0, GETFIELD TAG)");
+		assertLoad(pushes.get(0), Opcodes.ALOAD, 0, "先压接收者");
+		assertLoad(pushes.get(1), Opcodes.ALOAD, 0, "字段读的接收者");
+		assertTrue(pushes.get(2) instanceof FieldInsnNode g
+		           && g.getOpcode() == Opcodes.GETFIELD && g.name.equals("TAG"),
+			"新增位必须是 GETFIELD B.TAG");
+	}
+
+	/** 字段不是 final：构造完成后可能被改写，不能当"参数的值"用。 */
+	@Test
+	void addedCaptureFromConstructorParamIsRefusedWhenFieldIsMutable(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_CTOR_THIS_ONLY, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_CTOR_USES_PARAM_NONFINAL, true).resolve("B.class"));
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		assertEquals(0, LambdaAligner.LAST_RESULT.bridgeCount,
+			"非 final 字段不构成「构造完成后不再变」的证明");
+		assertTrue(containsCall(byKey(out, "lambda$new$0", "()V"), "onOrphanInvoked"));
+	}
+
+	/**
+	 * 静态桥没有接收者：构造器参数经字段重放这条路走不通。
+	 *
+	 * <p>这条是<b>已知限制</b>，不是缺陷——桥手里根本没有那个实例。</p>
+	 */
+	@Test
+	void addedCaptureFromConstructorParamIsRefusedForStaticBridge(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] old = Files.readAllBytes(compile(javac, tmp, "old", V1_CTOR_STATIC_ONLY, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_CTOR_USES_PARAM_STATIC, true).resolve("B.class"));
+
+		ClassNode out = parse(LambdaAligner.align(old, v2));
+
+		assertEquals(0, LambdaAligner.LAST_RESULT.bridgeCount,
+			"静态桥拿不到 this，读不到 this.TAG");
+		assertTrue(containsCall(byKey(out, "lambda$new$0", "()V"), "onOrphanInvoked"));
+	}
+
 	// ------------------------------------------------------------------------------------------------
 	// 熔断豁免：桥必须能在受熔断器保护的调用者面前活下来
 	// ------------------------------------------------------------------------------------------------
@@ -1234,6 +1320,69 @@ public class LambdaBridgeAlignTest {
 		    public static String LAST = "";
 		    public Object BASE = new Object();
 		    public void d(int k) { Object x = BASE; r = () -> LAST = "" + k + x + this; }
+		}
+		""";
+
+	/** 新增捕获是<b>算出来的</b>：{@code float scaled = pad * 2}，pad 是局部常量。 */
+	static final String V2_ADDED_FOLDED_EXPR = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(int k) {
+		        int pad = 10;
+		        float scaled = pad * 2;
+		        r = () -> last = "v2:" + k + scaled;
+		    }
+		}
+		""";
+
+	/** 构造器把参数存进了 final 字段；lambda 只捕获 this。 */
+	static final String V1_CTOR_THIS_ONLY = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public final String TAG;
+		    public B(String tag) { this.TAG = tag; r = () -> LAST = "v1:" + this; }
+		}
+		""";
+
+	/** 同一构造器，lambda 开始<b>直接用参数 tag</b>：桥靠 {@code this.TAG} 把它取回来。 */
+	static final String V2_CTOR_USES_PARAM = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public final String TAG;
+		    public B(String tag) { this.TAG = tag; r = () -> LAST = "v2:" + tag + this; }
+		}
+		""";
+
+	/** 同上，但字段不是 final：构造完成后可能被改写，不能当"参数的值"用。 */
+	static final String V2_CTOR_USES_PARAM_NONFINAL = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public String TAG;
+		    public B(String tag) { this.TAG = tag; r = () -> LAST = "v2:" + tag + this; }
+		}
+		""";
+
+	/** 静态 lambda（不持有 this）想用构造器参数：桥没有接收者，取不到那个实例。 */
+	static final String V2_CTOR_USES_PARAM_STATIC = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public final String TAG;
+		    public B(String tag) { this.TAG = tag; r = () -> LAST = "v2:" + tag; }
+		}
+		""";
+
+	/** 同上，但老侧是"静态、零捕获"的 lambda。 */
+	static final String V1_CTOR_STATIC_ONLY = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public final String TAG;
+		    public B(String tag) { this.TAG = tag; r = () -> LAST = "v1"; }
 		}
 		""";
 

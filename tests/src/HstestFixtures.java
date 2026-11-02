@@ -42,8 +42,21 @@ final class HstestFixtures {
 
 	/** 用给定 javac 把 sources 编到 out（自动建目录）。 */
 	static void compile(String javac, Path out, File... sources) throws Exception {
+		compile(javac, out, List.of(), sources);
+	}
+
+	/**
+	 * 同上，可附加编译选项。
+	 *
+	 * <p>{@code -g} 会带上 {@code LocalVariableTable}，对齐器据此拿到捕获变量的源码名
+	 * （名字不随宿主局部槽位移，是"同一个变量"最硬的证据）。</p>
+	 */
+	static void compile(String javac, Path out, List<String> extraOptions, File... sources) throws Exception {
 		Files.createDirectories(out);
-		List<String> cmd = new ArrayList<>(Arrays.asList(javac, "-nowarn", "-encoding", "UTF-8", "-d", out.toString()));
+		List<String> cmd = new ArrayList<>(Arrays.asList(javac, "-nowarn", "-encoding", "UTF-8"));
+		cmd.addAll(extraOptions);
+		cmd.add("-d");
+		cmd.add(out.toString());
 		for (File s : sources) cmd.add(s.getAbsolutePath());
 		runCmd(cmd.toArray(new String[0]));
 	}

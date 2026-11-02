@@ -301,6 +301,68 @@ public class LambdaBridgeAlignTest {
 	}
 
 	// ------------------------------------------------------------------------------------------------
+	// LVT 形参名：比槽号更硬的证据
+	// ------------------------------------------------------------------------------------------------
+
+	/**
+	 * 捕获的是宿主<b>局部变量</b>：删掉前一个同类型局部变量后，`b` 从槽 1 挪到槽 0。
+	 *
+	 * <p>这一例把三种判据的边界摆在一起：类型层面 {@code [int,int] → [int]} 无解；
+	 * 槽号层面更糟——新槽 0 恰好等于旧槽 0，按槽号会<b>把 a 的值喂给 b</b>；
+	 * 只有源码变量名能证明"留下的是 b"。</p>
+	 */
+	@Test
+	void localVariableNamesProveTheMappingWhenSlotsShift(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_TWO_LOCAL_INTS, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ONE_LOCAL_INT, true).resolve("B.class"));
+
+		assertNotNull(byKey(parse(v1), "lambda$f$0", "(II)V"), "夹具前提：v1 捕获两个局部 int");
+		assertNotNull(byKey(parse(v2), "lambda$f$0", "(I)V"), "夹具前提：v2 只捕获 b");
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode bridge = byKey(out, "lambda$f$0", "(II)V");
+		assertNotNull(bridge, "有 -g 时必须按名字建桥（类型无解、槽号会指错）：" + table(out));
+
+		List<AbstractInsnNode> loads = loadsOf(bridge);
+		assertEquals(1, loads.size(), "桥只该加载一个形参");
+		assertLoad(loads.get(0), Opcodes.ILOAD, 1,
+			"必须加载旧槽 1（b）；按槽号相等取槽 0 会把 a 的值喂给 b");
+		assertEquals("(I)V", onlyCoreCall(bridge).desc);
+	}
+
+	/**
+	 * 同描述符、同类型、只换捕获顺序：老隐藏类会按<b>旧顺序</b>压栈，新方法体按<b>新顺序</b>解读。
+	 *
+	 * <p>这种形态没有"名字变化"可依，配对器原本会把它当成同一个 lambda 原地更新——静默错值。
+	 * 必须拦住配对，让新方法改名、由捕获桥重排实参。</p>
+	 */
+	@Test
+	void sameSignatureCaptureSwapIsBridgedInsteadOfPairedInPlace(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_ORDER_AB, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ORDER_BA, true).resolve("B.class"));
+
+		assertNotNull(byKey(parse(v1), "lambda$f$0", "(II)V"), "夹具前提：v1 捕获 (a,b)");
+		assertNotNull(byKey(parse(v2), "lambda$f$0", "(II)V"), "夹具前提：v2 捕获 (b,a)，描述符相同");
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode bridge = byKey(out, "lambda$f$0", "(II)V");
+		assertNotNull(bridge, "换序必须走桥，不能原地配对：" + table(out));
+		assertTrue(containsCall(bridge, "onBridgeInvoked"), "换序的产物必须是转发桥，不是新方法体本身");
+
+		List<AbstractInsnNode> loads = loadsOf(bridge);
+		assertEquals(2, loads.size(), "桥要按新顺序搬两个实参");
+		assertLoad(loads.get(0), Opcodes.ILOAD, 1, "新方法第 0 个形参是 b（旧槽 1）");
+		assertLoad(loads.get(1), Opcodes.ILOAD, 0, "新方法第 1 个形参是 a（旧槽 0）");
+
+		MethodInsnNode call = onlyCoreCall(bridge);
+		assertEquals("(II)V", call.desc);
+		assertNotEquals("lambda$f$0", call.name,
+			"目标必须被改名——否则它会和桥占同一个键");
+	}
+
+	// ------------------------------------------------------------------------------------------------
 	// 熔断豁免：桥必须能在受熔断器保护的调用者面前活下来
 	// ------------------------------------------------------------------------------------------------
 
@@ -453,18 +515,59 @@ public class LambdaBridgeAlignTest {
 		}
 		""";
 
+	/** 捕获两个宿主<b>局部变量</b>：槽 0 = a、槽 1 = b。 */
+	static final String V1_TWO_LOCAL_INTS = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f() { int a = 1; int b = 2; r = () -> last = "" + a + "-" + b; }
+		}
+		""";
+
+	/** 删掉局部变量 a：b 从槽 1 挪到槽 0，槽号证明失效，只剩名字可用。 */
+	static final String V2_ONE_LOCAL_INT = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f() { int b = 2; r = () -> last = "v2:" + b; }
+		}
+		""";
+
+	/** 捕获顺序 (a, b)。 */
+	static final String V1_ORDER_AB = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(int a, int b) { r = () -> last = "" + a + "-" + b; }
+		}
+		""";
+
+	/** 捕获顺序 (b, a)：描述符不变，但实参顺序反了。 */
+	static final String V2_ORDER_BA = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(int a, int b) { r = () -> last = "" + b + "-" + a; }
+		}
+		""";
+
 	// ------------------------------------------------------------------------------------------------
 	// 工具
 	// ------------------------------------------------------------------------------------------------
 
 	static Path compile(String javac, Path root, String sub, String source) throws Exception {
+		return compile(javac, root, sub, source, false);
+	}
+
+	/** @param debug 是否带 {@code -g}（带 LVT 才有捕获变量的源码名） */
+	static Path compile(String javac, Path root, String sub, String source, boolean debug) throws Exception {
 		java.util.regex.Matcher m = java.util.regex.Pattern.compile("public (?:class|interface) (\\w+)").matcher(source);
 		if (!m.find()) throw new IllegalArgumentException("夹具源码里找不到 public class/interface");
 		Path srcDir = Files.createDirectories(root.resolve(sub).resolve("src"));
 		Path outDir = Files.createDirectories(root.resolve(sub).resolve("out"));
 		Path file = srcDir.resolve(m.group(1) + ".java");
 		Files.writeString(file, source);
-		HstestFixtures.compile(javac, outDir, file.toFile());
+		HstestFixtures.compile(javac, outDir, debug ? List.of("-g") : List.of(), file.toFile());
 		return outDir;
 	}
 

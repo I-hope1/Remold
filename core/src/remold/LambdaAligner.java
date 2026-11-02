@@ -512,6 +512,15 @@ public class LambdaAligner {
 		 */
 		final Map<String, BridgeSpec> bridges = new HashMap<>(16);
 
+		/**
+		 * 两侧合成方法的形参名（{@code name+desc -> 形参名数组}），由
+		 * {@link #readLambdaParamNames} 在 {@link #align} 入口一次性读出。
+		 *
+		 * <p>只用于捕获变量的<b>身份</b>判定，不参与指纹；未带 {@code -g} 时为空表。</p>
+		 */
+		Map<String, String[]> oldParamNames = java.util.Collections.emptyMap();
+		Map<String, String[]> newParamNames = java.util.Collections.emptyMap();
+
 		final MethodFingerprinter fingerprinter = MethodFingerprinter.CONTEXT.get();
 
 		/** 当前处理的类名（内部名，形如 {@code com/example/Foo}）。 */
@@ -573,6 +582,8 @@ public class LambdaAligner {
 			existingNewNames.clear();
 			oldNameDescSet.clear();
 			bridges.clear();
+			oldParamNames = java.util.Collections.emptyMap();
+			newParamNames = java.util.Collections.emptyMap();
 			oldAnonHashes.clear();
 			newAnonHashes.clear();
 			fingerprinter.reset();
@@ -658,6 +669,10 @@ public class LambdaAligner {
 			ctx.reset();
 			ctx.inventedOldNames = inventedOldNames != null ? inventedOldNames : java.util.Set.of();
 			ctx.newlyInvented.clear();
+			// 只读一遍取形参名：名字是"同一个变量"最硬的证据（槽号会随前序局部变量增删而位移）。
+			// 未带 -g 时两张表为空，后续判据自动退回槽号/类型。
+			ctx.oldParamNames = readLambdaParamNames(oldBytes);
+			ctx.newParamNames = readLambdaParamNames(newBytes);
 
 			// 一次读取即拿到 ClassNode：oldCn 会被 resurrectOrphanedLambdas 复用，
 			// newCn 会在“无重命名”路径下直接提供 presentKeys。
@@ -2609,7 +2624,8 @@ public class LambdaAligner {
 				if (n instanceof InvokeDynamicInsnNode i && i.bsmArgs != null && i.bsmArgs.length > 1
 				    && i.bsmArgs[1] instanceof Handle h && cn.name.equals(h.getOwner())) {
 					callee = h.getName();
-					recordLambdaShape(nameIndex.get(callee), i, h, mn);
+					recordLambdaShape(nameIndex.get(callee), i, h, mn,
+					                  isOld ? ctx.oldParamNames : ctx.newParamNames);
 				} else if (n instanceof MethodInsnNode m && cn.name.equals(m.owner)) {
 					callee = m.name;
 				}
@@ -2662,7 +2678,8 @@ public class LambdaAligner {
 				if (n instanceof InvokeDynamicInsnNode i && i.bsmArgs != null && i.bsmArgs.length > 1
 				    && i.bsmArgs[1] instanceof Handle h && cn.name.equals(h.getOwner())) {
 					callee = h.getName();
-					recordLambdaShape(nameIndex.get(callee), i, h, mn);
+					recordLambdaShape(nameIndex.get(callee), i, h, mn,
+					                  isOld ? ctx.oldParamNames : ctx.newParamNames);
 				} else if (n instanceof MethodInsnNode m && cn.name.equals(m.owner)) {
 					callee = m.name;
 				}
@@ -2915,6 +2932,68 @@ public class LambdaAligner {
 	}
 
 	/**
+	 * 只读一遍字节码，取合成方法<b>形参槽</b>的 {@code LocalVariableTable} 名字。
+	 *
+	 * <p>为什么单开一趟而不是把 {@code scan} 的 {@code SKIP_DEBUG} 去掉：{@code scan} 要读
+	 * 指令流算指纹，多带调试信息会拖慢主路径，也会让指纹受 {@code -g} 设置影响。这里只关心
+	 * 名字，非合成方法直接 {@code return null}，连 {@code Code} 都不展开。</p>
+	 *
+	 * <p>名字是比槽号更硬的证据：宿主方法里增删前序局部变量会让槽号整体位移，名字不会。
+	 * 未带 {@code -g} 编译时整张表为空，调用方退回槽号/类型判据。</p>
+	 *
+	 * @return {@code name + desc -> 形参名字数组}（按形参顺序；实例方法不含接收者）
+	 */
+	static Map<String, String[]> readLambdaParamNames(byte[] bytes) {
+		Map<String, String[]> out = new HashMap<>();
+		if (bytes == null || bytes.length == 0) return out;
+		new ClassReader(bytes).accept(new ClassVisitor(Opcodes.ASM9) {
+			@Override
+			public MethodVisitor visitMethod(int acc, String name, String desc,
+			                                 String sig, String[] ex) {
+				if (!MethodFingerprinter.isSyntheticName(name) || name.startsWith("access$")) return null;
+				Type[] args = Type.getArgumentTypes(desc);
+				int[] slotOf = new int[args.length];
+				int s = (acc & Opcodes.ACC_STATIC) != 0 ? 0 : 1;
+				for (int i = 0; i < args.length; i++) {
+					slotOf[i] = s;
+					s += args[i].getSize();
+				}
+				int paramEnd = s;
+				String[] names = new String[args.length];
+				out.put(name + desc, names);
+				return new MethodVisitor(Opcodes.ASM9) {
+					@Override
+					public void visitLocalVariable(String n, String d, String sg,
+					                               Label st, Label en, int idx) {
+						if (idx >= paramEnd) return;              // 只要形参，丢弃方法体局部变量
+						for (int i = 0; i < slotOf.length; i++) {
+							if (slotOf[i] == idx && args[i].getDescriptor().equals(d) && names[i] == null) {
+								names[i] = n;
+							}
+						}
+					}
+				};
+			}
+		}, ClassReader.SKIP_FRAMES);
+		return out;
+	}
+
+	/**
+	 * 把合成方法的形参名裁成"捕获名"：前 {@code captured - offset} 项即捕获变量
+	 * （实例 lambda 的形参表不含接收者，故 {@code captured[0]} 固定为 {@code null}）。
+	 */
+	private static List<String> captureNamesOf(String[] paramNames, int capturedCount, boolean isStatic) {
+		if (paramNames == null) return null;
+		int offset = isStatic ? 0 : 1;
+		int n = capturedCount - offset;
+		if (n < 0 || paramNames.length < n) return null;
+		List<String> out = new ArrayList<>(capturedCount);
+		if (!isStatic) out.add(null);                              // 接收者没有源码名
+		for (int i = 0; i < n; i++) out.add(paramNames[i]);
+		return out;
+	}
+
+	/**
 	 * 把 indy 调用点上的 lambda 形状（捕获表 / 功能接口 / SAM 签名）记到目标合成方法上。
 	 *
 	 * <p><b>必须再比一次描述符</b>：{@code nameIndex} 是按名字索引的，同名不同描述符的重载
@@ -2925,7 +3004,7 @@ public class LambdaAligner {
 	 * 必然一致（它就是方法签名的一部分），不一致只可能来自索引错位，此时保留第一份。</p>
 	 */
 	private static void recordLambdaShape(SyntheticInfo info, InvokeDynamicInsnNode indy, Handle impl,
-	                                      MethodNode host) {
+	                                      MethodNode host, Map<String, String[]> paramNames) {
 		if (info == null || info.captured != null) return;
 		if (!info.desc.equals(impl.getDesc())) return;
 		if (indy.bsmArgs.length < 3) return;
@@ -2938,6 +3017,16 @@ public class LambdaAligner {
 		info.samSig = sam.getDescriptor();
 		info.instSig = inst.getDescriptor();
 		info.captureSlots = captureSlotsOf(indy, caps);
+		info.captureNames = captureNamesOf(paramNames.get(info.name + info.desc), captured.size(),
+			info.isStatic());
+		info.hostParamEndSlot = paramEndSlot(host);
+	}
+
+	/** 宿主方法形参槽的结束位置（第一个局部变量所在的槽）。 */
+	private static int paramEndSlot(MethodNode host) {
+		int s = (host.access & Opcodes.ACC_STATIC) != 0 ? 0 : 1;
+		for (Type t : Type.getArgumentTypes(host.desc)) s += t.getSize();
+		return s;
 	}
 
 	/**
@@ -3275,8 +3364,9 @@ public class LambdaAligner {
 			if (oi == null) continue;
 			int[] map = bridgeMapping(oi, ni);
 			if (map == null) continue;
-			String target = ni.name + ni.desc;
-			ctx.bridges.put(e.getKey(), new BridgeSpec(oi.desc, ni.name, ni.desc, map, oi.isStatic(),
+			String targetName = finalName(ctx, ni);
+			String target = targetName + ni.desc;
+			ctx.bridges.put(e.getKey(), new BridgeSpec(oi.desc, targetName, ni.desc, map, oi.isStatic(),
 				locationOf(ctx.currentClass, oi.name, oi.desc) + " -> " + target));
 			TEST_EVENTS.add(new AlignmentEvent("BRIDGE", oi.name, ni.name,
 				ctx.currentClass + "#" + e.getKey() + " -> " + target));
@@ -3310,8 +3400,9 @@ public class LambdaAligner {
 			}
 			if (now.ghost || !now.renameable) continue;
 			if (presentKeys.contains(oldKey)) continue;
-			String target = now.name + now.desc;
-			ctx.bridges.put(oldKey, new BridgeSpec(oi.desc, now.name, now.desc, bd.oldParamIndex,
+			String targetName = finalName(ctx, now);
+			String target = targetName + now.desc;
+			ctx.bridges.put(oldKey, new BridgeSpec(oi.desc, targetName, now.desc, bd.oldParamIndex,
 				oi.isStatic(), locationOf(ctx.currentClass, oi.name, oi.desc) + " -> " + target));
 			TEST_EVENTS.add(new AlignmentEvent("BRIDGE_REPOINT", oi.name, now.name,
 				ctx.currentClass + "#" + oldKey + " -> " + target));
@@ -3319,22 +3410,30 @@ public class LambdaAligner {
 	}
 
 	/**
-	 * 三道门 + 布局自检 + "只支持删捕获"。
+	 * 该方法在本轮产物里的<b>最终</b>名字。
 	 *
-	 * @see #stepCaptureBridge
+	 * <p>阶段二可能给未配对的新方法分配避障名，而改名只记在 {@code ctx.renameMap} 里、
+	 * {@link SyntheticInfo#name} 保持编译期原名。桥的目标必须用最终名字——否则会指回自己
+	 * （键相同就是无限递归）。</p>
 	 */
+	private static String finalName(MatchContext ctx, SyntheticInfo info) {
+		String renamed = ctx.renameMap.get(info.name + info.desc);
+		return renamed != null ? renamed : info.name;
+	}
+
 	/**
 	 * 判定能否建桥，并给出"新形参 → 老形参"的映射。
 	 *
-	 * <p>返回 {@code null} 表示不建桥。映射的来源按可靠性分两级：</p>
+	 * <p>返回 {@code null} 表示不建桥。映射按可靠性分三级：</p>
 	 * <ol>
-	 *   <li><b>证明</b>：两侧宿主描述符完全一致、且都能回溯出捕获槽号时，按<b>槽号</b>定映射。
-	 *       槽号是"同一个变量"的直接证据，连类型层面无解的歧义（{@code (int,int) → (int)}
-	 *       里到底是哪一个）也能定下来；</li>
-	 *   <li><b>推断</b>：槽号不可用（宿主签名变了、实参是临时值）时，按<b>类型唯一性</b>定映射。</li>
+	 *   <li><b>形参名</b>（最硬）：两侧都带 {@code -g} 时，源码里的变量名直接就是身份。
+	 *       名字不随宿主方法增删局部变量而变，所以宿主签名变了也照样能定映射；</li>
+	 *   <li><b>宿主形参槽号</b>：只对"捕获来自宿主形参"成立——形参槽在宿主描述符不变时稳定，
+	 *       而<b>局部变量槽会随前序局部增删整体位移</b>，槽号相等不构成证明；</li>
+	 *   <li><b>类型唯一性</b>（兜底）：每个新形参在旧捕获表里恰好一个同类型位置。</li>
 	 * </ol>
 	 *
-	 * <p>两级都必须满足"每个新形参恰好一个来源 + 整体内射"。内射是硬要求：两个新形参
+	 * <p>三级都必须满足"每个新形参恰好一个来源 + 整体内射"。内射是硬要求：两个新形参
 	 * 共用一个旧值意味着它们是<b>两个不同的变量</b>，值不一定相同，喂同一个值是静默错值。</p>
 	 */
 	private static int[] bridgeMapping(SyntheticInfo oi, SyntheticInfo ni) {
@@ -3346,33 +3445,86 @@ public class LambdaAligner {
 		if (!Objects.equals(oi.instSig, ni.instSig)) return null;
 		if (!layoutHolds(oi) || !layoutHolds(ni)) return null;
 		if (ni.captured.size() > oi.captured.size()) return null;
+		// 空捕获表下任何"证明"都是空洞的：两侧都空，映射算出来是个空数组，证明通过却什么也没证。
+		// 这类 lambda 没有实参可搬，建桥没有任何意义，一律不建（必须放在按名字映射之前——
+		// 名字映射对 0 个捕获会返回一个合法的空数组，正好绕过下面那道等长闸）。
+		if (oi.captured.isEmpty()) return null;
 
-		// 证明优先：槽号可比的前提是宿主描述符完全一致，否则槽号整体位移。
+		int[] byName = mappingByNames(oi, ni);
+		if (byName != null) return byName;
+
+		// 槽号可比的前提是宿主描述符完全一致，否则槽号整体位移。
 		int[] bySlot = null;
 		if (oi.hostKey != null && oi.hostKey.equals(ni.hostKey)) {
-			bySlot = mappingBySlots(oi, ni);
+			bySlot = mappingByHostSlots(oi, ni);
 		}
 		// 捕获数"不变"只可能是重排，而重排本身不构成"这两个是同一个 lambda"的证据：
 		// 同一个宿主里换个体、换个返回值的 lambda 也会落在同一 SAM 上。所以等长时
-		// 必须有槽位证明，且不能是空捕获表（空表下槽位证明是空洞的）。
+		// 必须有证明（名字或形参槽），且不能是空捕获表（空表下证明是空洞的）。
 		// 变少则不同：少了一个捕获本身就是要桥接的那类编辑，允许退回类型推断。
 		if (ni.captured.size() == oi.captured.size()) {
 			if (ni.captured.isEmpty()) return null;
-			if (bySlot == null) return null;
 			return bySlot;
 		}
 		return bySlot != null ? bySlot : mappingByType(oi.captured, ni.captured);
 	}
 
 	/**
-	 * 按宿主局部变量槽号证明映射（宿主描述符必须完全一致）。
+	 * 按源码变量名建立映射（两侧都必须带 {@code -g}）。
 	 *
-	 * @return {@code 新形参下标 → 老形参下标}；槽号不可用或无解时 {@code null}
+	 * <p>名字是"同一个变量"最硬的证据：它不随宿主方法里增删局部变量而位移，也不随宿主签名
+	 * 变化而失效——这正是槽号做不到的两种情形。</p>
+	 *
+	 * <p>要求严格：只要有一个捕获位缺名字就整体放弃（不能"有的按名、有的按猜"）；
+	 * 同名换型视为矛盾直接拒绝。实例 lambda 的第 0 位是接收者，两侧固定对齐。</p>
 	 */
-	private static int[] mappingBySlots(SyntheticInfo oi, SyntheticInfo ni) {
+	private static int[] mappingByNames(SyntheticInfo oi, SyntheticInfo ni) {
+		List<String> on = oi.captureNames, nn = ni.captureNames;
+		if (on == null || nn == null) return null;
+		int n = oi.captured.size(), m = ni.captured.size();
+		if (on.size() != n || nn.size() != m) return null;
+		if (m > n) return null;
+		int[] map = new int[m];
+		boolean[] used = new boolean[n];
+		int first = oi.isStatic() ? 0 : 1;
+		if (first == 1) {
+			if (m == 0) return null;
+			map[0] = 0;                                            // 接收者 ↔ 接收者
+			used[0] = true;
+		}
+		for (int j = first; j < m; j++) {
+			String name = nn.get(j);
+			if (name == null) return null;
+			int only = -1;
+			for (int i = first; i < n; i++) {
+				if (!name.equals(on.get(i))) continue;
+				if (!oi.captured.get(i).equals(ni.captured.get(j))) return null;   // 同名换型：矛盾
+				if (only >= 0) return null;
+				only = i;
+			}
+			if (only < 0 || used[only]) return null;
+			used[only] = true;
+			map[j] = only;
+		}
+		return map;
+	}
+
+	/**
+	 * 按<b>宿主形参</b>槽号证明映射（宿主描述符必须完全一致）。
+	 *
+	 * <p>只认宿主形参：局部变量槽会随前序局部变量的增删整体位移，槽号相等说明不了是同一个
+	 * 变量。任一捕获来自宿主局部变量时整体放弃，退回类型唯一性。</p>
+	 *
+	 * @return {@code 新形参下标 → 老形参下标}；不可用或无解时 {@code null}
+	 */
+	private static int[] mappingByHostSlots(SyntheticInfo oi, SyntheticInfo ni) {
 		if (oi.captureSlots == null || ni.captureSlots == null) return null;
 		if (oi.captureSlots.size() != oi.captured.size()) return null;
 		if (ni.captureSlots.size() != ni.captured.size()) return null;
+		if (oi.hostParamEndSlot < 0 || ni.hostParamEndSlot < 0) return null;
+		// 只认宿主形参：局部变量槽会随前序局部变量的增删整体位移，槽号相等说明不了是同一个变量。
+		for (int s : oi.captureSlots) if (s >= oi.hostParamEndSlot) return null;
+		for (int s : ni.captureSlots) if (s >= ni.hostParamEndSlot) return null;
 		int n = oi.captured.size(), m = ni.captured.size();
 		if (m > n) return null;
 		int[] map = new int[m];
@@ -4388,9 +4540,57 @@ public class LambdaAligner {
 	private static boolean isSignatureCompatible(String owner, SyntheticInfo a, SyntheticInfo b) {
 		boolean sa = a.isStatic();
 		boolean sb = b.isStatic();
-		if (sa == sb) return a.desc.equals(b.desc);
+		if (sa == sb) {
+			if (!a.desc.equals(b.desc)) return false;
+			// 同签名但捕获顺序被换过：原地配对会让老实例按<b>旧顺序</b>喂新方法体，而新体按
+			// <b>新顺序</b>解读 —— 静默错值。必须让它们"配不上"，由阶段二改名 + 捕获桥重排实参。
+			return !isPermutedPair(a, b);
+		}
 		if (owner == null) return false;
 		return normalizeStaticShape(owner, sa, a.desc).equals(normalizeStaticShape(owner, sb, b.desc));
+	}
+
+	/**
+	 * 同签名的两个 lambda，捕获顺序是否被换过。
+	 *
+	 * <p>只认"身份集合相同、顺序不同"这一种形态：身份优先取源码变量名，取不到时退回宿主形参
+	 * 槽号（同样要求全部来自形参）。变量整体改名时集合不同，那是"同一位置换了变量"，原地配对
+	 * 仍然正确，不拦。</p>
+	 */
+	private static boolean isPermutedPair(SyntheticInfo a, SyntheticInfo b) {
+		List<String> ia = captureIdentity(a), ib = captureIdentity(b);
+		if (ia == null || ib == null || ia.size() != ib.size()) return false;
+		if (ia.equals(ib)) return false;                        // 顺序一致
+		List<String> sa = new ArrayList<>(ia), sb = new ArrayList<>(ib);
+		Collections.sort(sa);
+		Collections.sort(sb);
+		return sa.equals(sb);                                   // 集合相同 + 顺序不同 ⇒ 纯换序
+	}
+
+	/** 捕获位的"身份"序列（名字优先，其次宿主形参槽号）；取不到返回 {@code null}。 */
+	private static List<String> captureIdentity(SyntheticInfo info) {
+		int first = info.isStatic() ? 0 : 1;
+		if (info.captured == null || info.captured.size() <= first) return null;
+		List<String> names = info.captureNames;
+		if (names != null && names.size() == info.captured.size()) {
+			List<String> byName = new ArrayList<>();
+			boolean complete = true;
+			for (int i = first; i < names.size(); i++) {
+				String n = names.get(i);
+				if (n == null) { complete = false; break; }
+				byName.add(n);
+			}
+			if (complete) return byName;
+		}
+		if (info.captureSlots == null || info.captureSlots.size() != info.captured.size()) return null;
+		if (info.hostParamEndSlot < 0) return null;
+		List<String> bySlot = new ArrayList<>();
+		for (int i = first; i < info.captureSlots.size(); i++) {
+			int s = info.captureSlots.get(i);
+			if (s >= info.hostParamEndSlot) return null;        // 局部槽不可比
+			bySlot.add("#" + s);
+		}
+		return bySlot;
 	}
 
 	/**
@@ -4529,6 +4729,25 @@ public class LambdaAligner {
 		 * <p>{@code null} 表示回溯失败（实参是临时值、或加载序列不规整），此时退回类型推断。</p>
 		 */
 		List<Integer> captureSlots;
+
+		/**
+		 * 捕获变量在<b>源码里的名字</b>，与 {@link #captured} 下标对齐；实例 lambda 的第 0 位是
+		 * 接收者，固定为 {@code null}。
+		 *
+		 * <p>来自合成方法形参槽的 {@code LocalVariableTable}（见 {@link #readLambdaParamNames}）。
+		 * 名字比槽号更硬：槽号会随宿主方法里增删前序局部变量而整体位移，名字不会。
+		 * 只在编译带 {@code -g} 时才有，没有就退回槽号/类型。</p>
+		 */
+		List<String> captureNames;
+
+		/**
+		 * 宿主方法的形参槽结束位置（第一个局部变量的槽号）。
+		 *
+		 * <p>用来区分"这个捕获来自宿主形参"还是"来自宿主局部变量"：形参槽在宿主描述符不变时
+		 * 是稳定的，局部变量槽不是——删掉一个前序局部变量，后面所有局部槽整体前移。
+		 * 所以槽位证明只对形参成立（见 {@code mappingByHostSlots}）。</p>
+		 */
+		int hostParamEndSlot = -1;
 
 		/** {@code bsmArgs[0]}：SAM 的<b>擦除</b>签名。 */
 		String samSig;

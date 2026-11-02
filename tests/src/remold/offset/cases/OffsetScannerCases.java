@@ -6,8 +6,7 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.lang.reflect.Field;
-import java.security.AccessController;
-import java.security.PrivilegedExceptionAction;
+import java.security.*;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
@@ -45,6 +44,7 @@ class Direct {
 }
 
 // 2. 局部变量中转（原文四行固定序列会漏）
+@SuppressWarnings("removal")
 class ViaLocal {
     static final long OFF;
     static { try { Field f = Foo.class.getDeclaredField("y"); OFF = Uns.U.objectFieldOffset(f); } catch (Exception e) { throw new Error(e); } }
@@ -119,6 +119,7 @@ class Concat {
 }
 
 // 6. 遍历 getDeclaredFields 存数组 → ESCAPED + 通配
+@SuppressWarnings("removal")
 class Loop {
     static final long[] OFFS = new long[8];
     static { int i = 0; for (Field f : Foo.class.getDeclaredFields()) OFFS[i++] = Uns.U.objectFieldOffset(f); }

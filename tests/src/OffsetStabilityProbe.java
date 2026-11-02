@@ -43,6 +43,7 @@ import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
  *
  * <p>Run via {@code ./gradlew :tests:offsetStabilityProbe "-Pp05.jbr=<dcevm-jdk-home>"}.</p>
  */
+@SuppressWarnings("removal")
 public class OffsetStabilityProbe {
 
 	private static final Unsafe UNSAFE = Reflect.UNSAFE;

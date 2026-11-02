@@ -4,6 +4,8 @@ import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldInsnNode;
+import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
@@ -671,6 +673,158 @@ public class LambdaBridgeAlignTest {
 	}
 
 	// ------------------------------------------------------------------------------------------------
+	// 新增捕获：纯源重放
+	// ------------------------------------------------------------------------------------------------
+
+	/**
+	 * 新增一个"常量捕获"：老实例里没有 {@code margin}，但它的值可证明恒为 10，桥直接压常量。
+	 *
+	 * <p>这是唯一能证明"新增捕获"合法的方式：不是编一个 0 塞进去，而是把宿主方法里
+	 * 那唯一一处 {@code istore} 的<b>生产者</b>原样重放。</p>
+	 */
+	@Test
+	void addedConstantCaptureIsSynthesized(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_NO_MARGIN, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ADDED_CONST, true).resolve("B.class"));
+
+		assertNotNull(byKey(parse(v1), "lambda$f$0", "(Ljava/lang/String;I)V"), "夹具前提：v1 捕获 (String,int)");
+		assertNotNull(byKey(parse(v2), "lambda$f$0", "(Ljava/lang/String;II)V"),
+			"夹具前提：v2 多捕获一个 int（margin）");
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode bridge = byKey(out, "lambda$f$0", "(Ljava/lang/String;I)V");
+		assertNotNull(bridge, "新增的常量捕获必须能建桥：" + table(out));
+		assertTrue(containsCall(bridge, "onBridgeInvoked"), "必须是转发桥，不是幽灵桩");
+
+		List<AbstractInsnNode> pushes = valuePushes(bridge);
+		assertEquals(3, pushes.size(), "String + int + 常量，各压一次");
+		assertLoad(pushes.get(0), Opcodes.ALOAD, 0, "s（老槽 0）");
+		assertLoad(pushes.get(1), Opcodes.ILOAD, 1, "k（老槽 1）");
+		assertEquals(Integer.valueOf(10), intConstOf(pushes.get(2)),
+			"新增的 margin 必须压常量 10——不是 0，也不是别的什么");
+
+		assertEquals("(Ljava/lang/String;II)V", onlyCoreCall(bridge).desc);
+	}
+
+	/**
+	 * 合成位跨轮保活：第二轮只改方法体。
+	 *
+	 * <p>桥体里同时有形参加载、常量、核心调用，解析器必须把"常量"也认出来——只认形参加载
+	 * 的话第二轮会判不出这一位，桥直接退化成幽灵桩（老实例又变哑）。</p>
+	 */
+	@Test
+	void secondRoundKeepsTheSynthesizedConstant(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_NO_MARGIN, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ADDED_CONST, true).resolve("B.class"));
+		byte[] v3 = Files.readAllBytes(compile(javac, tmp, "v3", V3_ADDED_CONST_BODY, true).resolve("B.class"));
+
+		byte[] r1 = LambdaAligner.align(v1, v2);
+		assertNotNull(byKey(parse(r1), "lambda$f$0", "(Ljava/lang/String;I)V"), "第一轮必须建出带常量的桥");
+		assertEquals(1, LambdaAligner.LAST_RESULT.bridgeCount);
+
+		ClassNode out = parse(LambdaAligner.align(r1, v3, null, null, LambdaAligner.LAST_RESULT.inventedNames));
+		MethodNode bridge = byKey(out, "lambda$f$0", "(Ljava/lang/String;I)V");
+		assertNotNull(bridge, "第二轮桥不能消失：" + table(out));
+		assertTrue(containsCall(bridge, "onBridgeInvoked"),
+			"必须仍认得出这是桥（桥体里既有形参加载也有常量）");
+
+		List<AbstractInsnNode> pushes = valuePushes(bridge);
+		assertEquals(3, pushes.size(), "String + int + 常量");
+		assertEquals(Integer.valueOf(10), intConstOf(pushes.get(2)), "常量位必须仍然重放 10");
+	}
+
+	/** 新增捕获来自 {@code static final} 字段：桥里重放一条 {@code GETSTATIC}。 */
+	@Test
+	void addedStaticFinalCaptureIsSynthesized(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_NO_MARK, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ADDED_STATIC_FINAL, true).resolve("B.class"));
+
+		assertNotNull(byKey(parse(v1), "lambda$f$0", "(I)V"), "夹具前提：v1 只捕获 k");
+		assertNotNull(byKey(parse(v2), "lambda$f$0", "(ILjava/lang/Object;)V"),
+			"夹具前提：v2 多捕获一个 Object（MARK 的副本）");
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode bridge = byKey(out, "lambda$f$0", "(I)V");
+		assertNotNull(bridge, "static final 字段可重放：" + table(out));
+
+		List<AbstractInsnNode> pushes = valuePushes(bridge);
+		assertEquals(2, pushes.size(), "k + MARK");
+		assertLoad(pushes.get(0), Opcodes.ILOAD, 0, "k");
+		assertTrue(pushes.get(1) instanceof FieldInsnNode f
+		           && f.getOpcode() == Opcodes.GETSTATIC && f.name.equals("MARK"),
+			"新增位必须是 GETSTATIC B.MARK，不能是 null");
+	}
+
+	/** 新增捕获来自 {@code this.field}（final）：桥里重放 {@code ALOAD 0; GETFIELD}。 */
+	@Test
+	void addedFinalFieldCaptureIsSynthesized(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_INSTANCE_PARAM, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ADDED_FINAL_FIELD, true).resolve("B.class"));
+
+		assertNotNull(byKey(parse(v1), "lambda$d$0", "(I)V"), "夹具前提：v1 实例 lambda 捕获 (this,k)");
+		assertNotNull(byKey(parse(v2), "lambda$d$0", "(ILjava/lang/Object;)V"),
+			"夹具前提：v2 多捕获一个 Object（x）");
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode bridge = byKey(out, "lambda$d$0", "(I)V");
+		assertNotNull(bridge, "final 实例字段可重放：" + table(out));
+		assertEquals(0, bridge.access & Opcodes.ACC_STATIC, "桥仍是实例方法");
+
+		List<AbstractInsnNode> pushes = valuePushes(bridge);
+		assertEquals(4, pushes.size(), "接收者 + k + (ALOAD 0, GETFIELD)");
+		assertLoad(pushes.get(0), Opcodes.ALOAD, 0, "先压接收者");
+		assertLoad(pushes.get(1), Opcodes.ILOAD, 1, "k 在实例方法的槽 1");
+		assertLoad(pushes.get(2), Opcodes.ALOAD, 0, "字段读的接收者");
+		assertTrue(pushes.get(3) instanceof FieldInsnNode g
+		           && g.getOpcode() == Opcodes.GETFIELD && g.name.equals("BASE"),
+			"新增位必须是 GETFIELD B.BASE");
+	}
+
+	/** 非 final 字段会在创建之后被改写，读它等于编一个"看起来像"的值：必须拒绝。 */
+	@Test
+	void addedNonFinalFieldCaptureIsRefused(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_INSTANCE_PARAM, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ADDED_NONFINAL_FIELD, true).resolve("B.class"));
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		assertEquals(0, LambdaAligner.LAST_RESULT.bridgeCount,
+			"非 final 字段不构成「值恒定」的证明，宁可退化成幽灵桩");
+		assertTrue(containsCall(byKey(out, "lambda$d$0", "(I)V"), "onOrphanInvoked"),
+			"拒绝桥接的形态是幽灵桩");
+	}
+
+	/** 新增捕获来自宿主<b>形参</b>：值由调用方给，方法体里没有"它从哪来"，无从重放。 */
+	@Test
+	void addedCaptureFromHostParamIsRefused(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_NO_MARK, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_TWO_PARAMS, true).resolve("B.class"));
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		assertEquals(0, LambdaAligner.LAST_RESULT.bridgeCount,
+			"宿主形参没有「唯一 XSTORE」可回溯，不能凭类型猜一个值");
+		assertTrue(containsCall(byKey(out, "lambda$f$0", "(I)V"), "onOrphanInvoked"));
+	}
+
+	/** 新增捕获来自算式：值依赖创建时的栈帧，桥执行时已经不存在。 */
+	@Test
+	void addedComputedCaptureIsRefused(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_NO_MARK, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_COMPUTED_CAPTURE, true).resolve("B.class"));
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		assertEquals(0, LambdaAligner.LAST_RESULT.bridgeCount,
+			"int x = k + 1 的生产者是三条指令且依赖局部变量，不是纯源");
+		assertTrue(containsCall(byKey(out, "lambda$f$0", "(I)V"), "onOrphanInvoked"));
+	}
+
+	// ------------------------------------------------------------------------------------------------
 	// 熔断豁免：桥必须能在受熔断器保护的调用者面前活下来
 	// ------------------------------------------------------------------------------------------------
 
@@ -981,6 +1135,108 @@ public class LambdaBridgeAlignTest {
 		}
 		""";
 
+	// --- 新增捕获的纯源 ---------------------------------------------------------------
+
+	/** 基线：捕获 (String, int)。 */
+	static final String V1_NO_MARGIN = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(String s, int k) { r = () -> last = s + k; }
+		}
+		""";
+
+	/** 多捕获一个 {@code int margin = 10}：常量可重放。 */
+	static final String V2_ADDED_CONST = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(String s, int k) { int margin = 10; r = () -> last = "v2:" + s + k + margin; }
+		}
+		""";
+
+	/** 第三轮：捕获表不动，只改方法体（合成位必须跨轮保留）。 */
+	static final String V3_ADDED_CONST_BODY = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(String s, int k) { int margin = 10; r = () -> last = "v3:" + s + k + margin; }
+		}
+		""";
+
+	/** 基线：只捕获 {@code int k}。 */
+	static final String V1_NO_MARK = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(int k) { r = () -> last = "" + k; }
+		}
+		""";
+
+	/** 多捕获一个 {@code Object m = MARK}（static final，非编译期常量 → 真 GETSTATIC）。 */
+	static final String V2_ADDED_STATIC_FINAL = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    private static final Object MARK = new Object();
+		    public static void f(int k) { Object m = MARK; r = () -> last = "v2:" + k + m; }
+		}
+		""";
+
+	/** 多捕获一个 {@code int j}，而 j 是宿主<b>形参</b>：无从重放。 */
+	static final String V2_TWO_PARAMS = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(int k, int j) { r = () -> last = "" + k + j; }
+		}
+		""";
+
+	/** 多捕获一个 {@code int x = k + 1}：生产者是算式且依赖局部变量。 */
+	static final String V2_COMPUTED_CAPTURE = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(int k) { int x = k + 1; r = () -> last = "v2:" + k + x; }
+		}
+		""";
+
+	/**
+	 * 实例 lambda 基线：捕获 (this, k)。
+	 *
+	 * <p>{@code BASE} 刻意用 {@code Object} 而不是 {@code final int base = 7}：后者是<b>常量变量</b>
+	 * （JLS §4.12.4），javac 会直接内联成 {@code bipush 7}，根本不会出现 {@code GETFIELD}——
+	 * 那样测到的其实是常量路径，不是字段路径。</p>
+	 */
+	static final String V1_INSTANCE_PARAM = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public final Object BASE = new Object();
+		    public void d(int k) { r = () -> LAST = "" + k + this; }
+		}
+		""";
+
+	/** 多捕获一个 {@code Object x = BASE}，BASE 是 final 实例字段（非编译期常量 → 真 GETFIELD）。 */
+	static final String V2_ADDED_FINAL_FIELD = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public final Object BASE = new Object();
+		    public void d(int k) { Object x = BASE; r = () -> LAST = "" + k + x + this; }
+		}
+		""";
+
+	/** 同上，但 BASE 不是 final：读到的值可能在创建之后被改写，必须拒绝。 */
+	static final String V2_ADDED_NONFINAL_FIELD = """
+		public class B {
+		    public Runnable r;
+		    public static String LAST = "";
+		    public Object BASE = new Object();
+		    public void d(int k) { Object x = BASE; r = () -> LAST = "" + k + x + this; }
+		}
+		""";
+
 	// ------------------------------------------------------------------------------------------------
 	// 工具
 	// ------------------------------------------------------------------------------------------------
@@ -1040,9 +1296,33 @@ public class LambdaBridgeAlignTest {
 		return false;
 	}
 
-	/** 方法体里所有变量加载指令（按出现顺序）。 */
-	static List<AbstractInsnNode> loadsOf(MethodNode mn) {
+	/**
+	 * 桥体里"压值"的那段指令：跳过 {@code LDC loc; onBridgeInvoked} 标记，到核心调用为止。
+	 *
+	 * <p>用来断言"合成位到底压了什么"——只看 {@code loadsOf} 会漏掉常量与字段读。</p>
+	 */
+	static List<AbstractInsnNode> valuePushes(MethodNode mn) {
+		List<AbstractInsnNode> real = real(mn);
 		List<AbstractInsnNode> out = new ArrayList<>();
+		for (int i = 2; i < real.size(); i++) {          // 前两条是标记
+			AbstractInsnNode n = real.get(i);
+			if (n instanceof MethodInsnNode) break;      // 核心调用之后只剩 return
+			out.add(n);
+		}
+		return out;
+	}
+
+	/** 这条指令压的是哪个 int 常量（ICONST_* / BIPUSH / SIPUSH / LDC 都算）。 */
+	static Integer intConstOf(AbstractInsnNode n) {
+		int op = n.getOpcode();
+		if (op >= Opcodes.ICONST_M1 && op <= Opcodes.ICONST_5) return op - Opcodes.ICONST_0;
+		if (n instanceof IntInsnNode i) return i.operand;
+		if (n instanceof LdcInsnNode l && l.cst instanceof Integer) return (Integer) l.cst;
+		return null;
+	}
+
+	/** 方法体里所有变量加载指令（按出现顺序）。 */
+	static List<AbstractInsnNode> loadsOf(MethodNode mn) {		List<AbstractInsnNode> out = new ArrayList<>();
 		for (AbstractInsnNode i : mn.instructions) {
 			if (!(i instanceof VarInsnNode v)) continue;
 			int op = v.getOpcode();

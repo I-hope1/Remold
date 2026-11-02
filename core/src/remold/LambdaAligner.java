@@ -3384,9 +3384,16 @@ public class LambdaAligner {
 		final String owner, name, desc;
 		/** {@link #RUNTIME_CALL}：调用指令是否指向接口（决定常量池条目类型）。 */
 		final boolean itf;
+		/**
+		 * {@link #RUNTIME_CALL} 的实参：全部是编译期折出来的常量，按形参顺序。
+		 *
+		 * <p>带参的"运行时常量"是<b>纯函数</b>（{@code Scl.scl(float) = v * Scl.scl()}）：
+		 * 给定同样的实参，整个运行期返回同样的值。所以桥里重放时要把这几个常量原样压回去。</p>
+		 */
+		final Object[] args;
 
 		private ParamSource(int kind, int oldIndex, Object constant,
-		                    String owner, String name, String desc, boolean itf) {
+		                    String owner, String name, String desc, boolean itf, Object[] args) {
 			this.kind = kind;
 			this.oldIndex = oldIndex;
 			this.constant = constant;
@@ -3394,28 +3401,32 @@ public class LambdaAligner {
 			this.name = name;
 			this.desc = desc;
 			this.itf = itf;
+			this.args = args;
 		}
 
 		static ParamSource old(int oldIndex) {
-			return new ParamSource(OLD, oldIndex, null, null, null, null, false);
+			return new ParamSource(OLD, oldIndex, null, null, null, null, false, null);
 		}
 
 		static ParamSource constant(Object value) {
-			return new ParamSource(CONST, -1, value, null, null, null, false);
+			return new ParamSource(CONST, -1, value, null, null, null, false, null);
 		}
 
 		static ParamSource getStatic(String owner, String name, String desc) {
-			return new ParamSource(GETSTATIC, -1, null, owner, name, desc, false);
+			return new ParamSource(GETSTATIC, -1, null, owner, name, desc, false, null);
 		}
 
 		static ParamSource getField(String owner, String name, String desc) {
-			return new ParamSource(GETFIELD, -1, null, owner, name, desc, false);
+			return new ParamSource(GETFIELD, -1, null, owner, name, desc, false, null);
 		}
 
-		/** 已登记的运行时常量访问器（无参静态调用）：桥里重放这次调用。 */
-		static ParamSource runtimeCall(String owner, String name, String desc, boolean itf) {
-			return new ParamSource(RUNTIME_CALL, -1, null, owner, name, desc, itf);
+		/** 已登记的运行时常量访问器（静态调用）：桥里重放这次调用，实参是折出来的常量。 */
+		static ParamSource runtimeCall(String owner, String name, String desc, boolean itf, Object[] args) {
+			return new ParamSource(RUNTIME_CALL, -1, null, owner, name, desc, itf,
+				args == null ? EMPTY_ARGS : args);
 		}
+
+		static final Object[] EMPTY_ARGS = new Object[0];
 
 		/** 这个来源产出的值是不是正好是 {@code want} 类型（写错类型会在验证期直接失败）。 */
 		boolean produces(Type want) {
@@ -3427,7 +3438,7 @@ public class LambdaAligner {
 					if (constant == null) {
 						return want.getSort() == Type.OBJECT || want.getSort() == Type.ARRAY;
 					}
-					return constantType().equals(want);
+					return typeOf(constant).equals(want);
 				case RUNTIME_CALL:
 					// desc 是<b>方法</b>描述符，取返回值类型；GETSTATIC/GETFIELD 的 desc 是字段类型。
 					return Type.getReturnType(desc).equals(want);
@@ -3436,7 +3447,8 @@ public class LambdaAligner {
 			}
 		}
 
-		private Type constantType() {
+		/** 一个已折出的常量对应的类型（用于逐位校验实参/返回值）。 */
+		static Type typeOf(Object constant) {
 			if (constant == null) return Type.getType("Ljava/lang/Object;");
 			if (constant instanceof Integer) return Type.INT_TYPE;
 			if (constant instanceof Long) return Type.LONG_TYPE;
@@ -3452,7 +3464,8 @@ public class LambdaAligner {
 				case OLD:        return "old[" + oldIndex + "]";
 				case CONST:      return "const(" + constant + ")";
 				case GETSTATIC:  return "static " + owner + "." + name;
-				case RUNTIME_CALL: return "runtime-const " + owner + "." + name;
+				case RUNTIME_CALL:
+					return "runtime-const " + owner + "." + name + "(" + args.length + " args)";
 				default:         return "field " + owner + "." + name;
 			}
 		}
@@ -3807,11 +3820,22 @@ public class LambdaAligner {
 		    && prev instanceof FieldInsnNode g && g.getOpcode() == Opcodes.GETFIELD) {
 			return isFinalField(newCn, g) ? ParamSource.getField(g.owner, g.name, g.desc) : null;
 		}
-		// 4) 已登记的"运行时常量"访问器：无参静态调用，整个运行期返回同一个值。
+		// 4) 已登记的"运行时常量"访问器：静态调用，返回值在整个运行期不变。
 		//    为什么它不是"编一个值"：桥里重放的就是同一次调用，语义上等价于把当年那次调用
 		//    的结果再取一遍——前提由登记方承诺（见 RuntimeConstants）。
+		//    带参形态（Scl.scl(float) = v * Scl.scl()）是<b>纯函数</b>：实参必须是可折的常量，
+		//    桥里把折出来的实参原样压回去再调用。
 		if (prev instanceof MethodInsnNode m && RuntimeConstants.isRuntimeConstant(m)) {
-			return ParamSource.runtimeCall(m.owner, m.name, m.desc, m.itf);
+			Type[] argTypes = Type.getArgumentTypes(m.desc);
+			if (argTypes.length == 0) {
+				return ParamSource.runtimeCall(m.owner, m.name, m.desc, m.itf, ParamSource.EMPTY_ARGS);
+			}
+			Object[] args = foldValues(host, real, storeAt - 1, argTypes.length, 0, new HashSet<>());
+			if (args == null) return null;                        // 实参不是常量：无从重放
+			for (int i = 0; i < argTypes.length; i++) {
+				if (!ParamSource.typeOf(args[i]).equals(argTypes[i])) return null;
+			}
+			return ParamSource.runtimeCall(m.owner, m.name, m.desc, m.itf, args);
 		}
 		// 4) 纯算式：整段在编译期算成一个常量（`float scaled = pad * 2;` 这类）。
 		//    只认算术/位运算/类型转换，且叶子必须都能折成常量；任何一条不满足就整体放弃。
@@ -3897,27 +3921,40 @@ public class LambdaAligner {
 	}
 
 	/**
-	 * 折叠"紧邻 {@code storeAt} 之前的那段表达式"。
+	 * 折叠"紧邻 {@code end} 之前、恰好产出 {@code count} 个值"的那段表达式。
 	 *
 	 * <p>先用反向栈高度求出表达式起点（{@code need = need - pushed + consumed}），再正向
 	 * 在一条小栈上求值。反向定界保证只碰这一段，不会把前面的语句卷进来。</p>
+	 *
+	 * @return 按<b>压栈顺序</b>（栈底 → 栈顶）排列的常量数组；折不出来返回 {@code null}
 	 */
-	private static Object foldRange(MethodNode host, List<AbstractInsnNode> real, int storeAt,
-	                                int depth, Set<Integer> seen) {
-		int need = 1, start = storeAt - 1;
+	private static Object[] foldValues(MethodNode host, List<AbstractInsnNode> real, int end,
+	                                   int count, int depth, Set<Integer> seen) {
+		int need = count, start = end - 1;
 		while (need > 0) {
-			if (start < 0) return NOT_A_CONSTANT;
+			if (start < 0) return null;
 			int[] eff = stackEffect(real.get(start));
-			if (eff == null) return NOT_A_CONSTANT;              // 不认识的指令：整段放弃
+			if (eff == null) return null;                        // 不认识的指令：整段放弃
 			need = need - eff[0] + eff[1];
 			start--;
 		}
 		start++;
 		ArrayDeque<Object> st = new ArrayDeque<>();
-		for (int i = start; i < storeAt; i++) {
-			if (!evalOne(host, real, real.get(i), st, depth, seen)) return NOT_A_CONSTANT;
+		for (int i = start; i < end; i++) {
+			if (!evalOne(host, real, real.get(i), st, depth, seen)) return null;
 		}
-		return st.size() == 1 ? st.pop() : NOT_A_CONSTANT;
+		if (st.size() != count) return null;
+		Object[] out = new Object[count];
+		java.util.Iterator<Object> it = st.descendingIterator();  // 栈底 → 栈顶
+		for (int i = 0; i < count; i++) out[i] = it.next();
+		return out;
+	}
+
+	/** 单值版本：{@code storeAt} 之前那段表达式折成一个常量。 */
+	private static Object foldRange(MethodNode host, List<AbstractInsnNode> real, int storeAt,
+	                                int depth, Set<Integer> seen) {
+		Object[] v = foldValues(host, real, storeAt, 1, depth, seen);
+		return v == null ? NOT_A_CONSTANT : v[0];
 	}
 
 	private static boolean evalOne(MethodNode host, List<AbstractInsnNode> real, AbstractInsnNode n,
@@ -4398,6 +4435,10 @@ public class LambdaAligner {
 					mv.visitFieldInsn(Opcodes.GETSTATIC, s.owner, s.name, s.desc);
 					break;
 				case ParamSource.RUNTIME_CALL:
+					for (Object a : s.args) {
+						if (a == null) mv.visitInsn(Opcodes.ACONST_NULL);
+						else mv.visitLdcInsn(a);
+					}
 					mv.visitMethodInsn(Opcodes.INVOKESTATIC, s.owner, s.name, s.desc, s.itf);
 					break;
 				default:                                          // GETFIELD：接收者就是桥自己的 this
@@ -4510,7 +4551,16 @@ public class LambdaAligner {
 				// 已登记的运行时常量访问器是"压值"，不是核心调用。判据用登记表而不是
 				// "位置"：核心调用也是 INVOKESTATIC，只能靠身份区分。
 				if (RuntimeConstants.isRuntimeConstant(m)) {
-					loaded.add(ParamSource.runtimeCall(m.owner, m.name, m.desc, m.itf));
+					// 带参形态：紧邻它的前 N 个"压值"就是实参，必须全是常量。
+					int argc = Type.getArgumentTypes(m.desc).length;
+					if (argc > loaded.size()) return null;
+					Object[] callArgs = new Object[argc];
+					for (int k = argc - 1; k >= 0; k--) {
+						ParamSource a = loaded.remove(loaded.size() - 1);
+						if (a.kind != ParamSource.CONST) return null;
+						callArgs[k] = a.constant;
+					}
+					loaded.add(ParamSource.runtimeCall(m.owner, m.name, m.desc, m.itf, callArgs));
 					continue;
 				}
 				if (core != null) return null;                    // 只能有一条核心调用

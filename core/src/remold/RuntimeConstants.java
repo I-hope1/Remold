@@ -23,12 +23,19 @@ import java.util.concurrent.ConcurrentHashMap;
  * 显式登记而不是推断——"这个调用返回值永远不变"是<b>运行期性质</b>，从字节码里看不出来，
  * 只能由知道那个 API 的人断言。</p>
  *
- * <p><b>登记即承诺</b>：被登记的访问器在同一个 JVM 运行期内必须返回同一个值。违反承诺的
- * 后果不是崩溃，而是"老对象看到的是当前值而不是当年快照"——一次可观测的行为变化。所以
- * 只登记真正稳定的量，不要图省事把"大多数时候不变"的东西放进来。</p>
+ * <p><b>登记即承诺</b>，分两种形态：</p>
+ * <ul>
+ *   <li><b>无参</b>（{@code Scl.scl()F}）：整个运行期内每次调用都返回同一个值。</li>
+ *   <li><b>带参</b>（{@code Scl.scl(F)F}）：<b>纯函数</b>——给定同样的实参，整个运行期内返回
+ *       同样的值，且无副作用。桥只会在"实参全部是编译期常量"时重放它，所以实参不同的情形
+ *       根本不会走到这里。</li>
+ * </ul>
  *
- * <p>要求：静态、无参、有返回值。带参数的调用不可能是常量，直接拒绝登记（快速失败，
- * 避免登记了一个永远不会命中的键）。</p>
+ * <p>违反承诺的后果不是崩溃，而是"老对象看到的是当前值而不是当年快照"——一次可观测的行为
+ * 变化。所以只登记真正稳定的量，不要图省事把"大多数时候不变"的东西放进来。</p>
+ *
+ * <p>返回 {@code void} 的调用没有值可用，直接拒绝登记（快速失败，避免登记一个永远不会命中
+ * 的键）。</p>
  */
 public final class RuntimeConstants {
 
@@ -37,20 +44,16 @@ public final class RuntimeConstants {
 	private RuntimeConstants() {}
 
 	/**
-	 * 登记一个运行时常量访问器。
+	 * 登记一个运行时常量访问器（无参，或"实参相同则结果相同"的纯函数）。
 	 *
 	 * @param owner 内部名（如 {@code arc/scene/ui/layout/Scl}）
 	 * @param name  方法名
-	 * @param desc  描述符，必须无参且有返回值
-	 * @throws IllegalArgumentException 描述符带参数或返回 {@code void}
+	 * @param desc  描述符，必须有返回值
+	 * @throws IllegalArgumentException 描述符返回 {@code void}
 	 */
 	public static void register(String owner, String name, String desc) {
 		if (owner == null || name == null || desc == null) {
 			throw new IllegalArgumentException("runtime constant needs owner/name/desc");
-		}
-		if (Type.getArgumentTypes(desc).length != 0) {
-			throw new IllegalArgumentException(
-				"runtime constant must take no arguments: " + owner + "." + name + desc);
 		}
 		if (Type.getReturnType(desc).getSort() == Type.VOID) {
 			throw new IllegalArgumentException(

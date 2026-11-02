@@ -33,11 +33,15 @@ public class ArcHotswapPlugin implements HotswapPlugin {
 			remold.RemoldAgent.registerCacheEvictor(ArcJsonEvictor.INSTANCE);
 		} catch (Throwable ignored) { }
 
-		// Scl.scl() 是全局 UI 缩放系数：启动时按设置算一次，之后不再变。登记为「运行时常量」，
-		// 让 InitFix 的效应审查与捕获桥的常量合成能把它当常量来源——桥里重放这次调用，
-		// 而不是编一个值。（Arc 专属知识，所以登记放在本插件，core 不认识它。）
+		// Scl.scl() 是全局 UI 缩放系数：启动时按设置算一次，之后不再变（改设置会要求重启）。
+		// 登记为「运行时常量」，让 InitFix 的效应审查与捕获桥的常量合成能把它当常量来源——
+		// 桥里重放这次调用，而不是编一个值。
+		// Scl.scl(float) = v * Scl.scl() 是它的带参形态：纯函数，给定实参则结果恒定，所以
+		// 也登记（桥只在实参全是编译期常量时重放它）。
+		// （Arc 专属知识，所以登记放在本插件，core 不认识它。）
 		try {
 			remold.RuntimeConstants.register("arc/scene/ui/layout/Scl", "scl", "()F");
+			remold.RuntimeConstants.register("arc/scene/ui/layout/Scl", "scl", "(F)F");
 		} catch (Throwable ignored) { }
 
 		// 自动绑定 Arc 的主线程事件循环调度器

@@ -1037,19 +1037,82 @@ public class LambdaBridgeAlignTest {
 		assertTrue(containsCall(byKey(out, "lambda$f$0", "(I)V"), "onOrphanInvoked"));
 	}
 
-	/** 登记口自身的契约：带参数或返回 void 的访问器不可能是常量，登记时就该失败。 */
+	/** 登记口自身的契约：返回 void 的调用没有值可用，登记时就该失败。 */
 	@Test
-	void runtimeConstantRegistryRejectsNonConstantShapes() {
-		assertThrows(IllegalArgumentException.class,
-			() -> remold.RuntimeConstants.register("x/Y", "f", "(I)I"),
-			"带参数的调用不可能是常量");
+	void runtimeConstantRegistryRejectsVoidReturnOnly() {
 		assertThrows(IllegalArgumentException.class,
 			() -> remold.RuntimeConstants.register("x/Y", "f", "()V"),
 			"返回 void 的调用没有值可用");
 		assertDoesNotThrow(() -> {
-			remold.RuntimeConstants.register("x/Y", "f", "()I");
+			remold.RuntimeConstants.register("x/Y", "f", "()I");        // 无参
+			remold.RuntimeConstants.register("x/Y", "g", "(I)I");       // 带参纯函数
 			remold.RuntimeConstants.unregister("x/Y", "f", "()I");
-		});
+			remold.RuntimeConstants.unregister("x/Y", "g", "(I)I");
+		}, "带参形态（纯函数）是允许登记的");
+	}
+
+	/**
+	 * 带参的运行时常量访问器：{@code Scl.scl(float) = v * Scl.scl()} 那一类。
+	 *
+	 * <p>它本身是<b>纯函数</b>——给定实参则结果恒定。所以桥里要先把折出来的实参压回去，
+	 * 再重放调用。实参不是常量时无从重放（下一个用例钉住）。</p>
+	 */
+	@Test
+	void registeredRuntimeConstantWithConstantArgsIsReplayed(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_NO_MARK, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ADDED_RUNTIME_CONST_ARGS, true).resolve("B.class"));
+		byte[] v3 = Files.readAllBytes(compile(javac, tmp, "v3", V3_ADDED_RUNTIME_CONST_ARGS_BODY, true).resolve("B.class"));
+
+		assertNotNull(byKey(parse(v2), "lambda$f$0", "(II)V"), "夹具前提：v2 捕获 (int, int)");
+
+		remold.RuntimeConstants.register("java/lang/Math", "max", "(II)I");
+		try {
+			byte[] r1 = LambdaAligner.align(v1, v2);
+			MethodNode bridge = byKey(parse(r1), "lambda$f$0", "(I)V");
+			assertNotNull(bridge, "带参的运行时常量可重放：" + table(parse(r1)));
+			assertTrue(containsCall(bridge, "onBridgeInvoked"), "必须是转发桥");
+
+			List<AbstractInsnNode> pushes = valuePushes(bridge);
+			assertEquals(4, pushes.size(), "k + 两个实参 + 调用");
+			assertLoad(pushes.get(0), Opcodes.ILOAD, 0, "k");
+			assertEquals(Integer.valueOf(7), intConstOf(pushes.get(1)), "第 0 个实参是 7");
+			assertEquals(Integer.valueOf(3), intConstOf(pushes.get(2)), "第 1 个实参是 3");
+			assertTrue(pushes.get(3) instanceof MethodInsnNode c
+			           && c.getOpcode() == Opcodes.INVOKESTATIC && c.name.equals("max"),
+				"最后重放 Math.max(II)I");
+
+			// 第二轮：解析旧桥体时要把"两个常量 + 一次调用"重新拼回一个带参来源。
+			ClassNode out = parse(LambdaAligner.align(r1, v3, null, null,
+				LambdaAligner.LAST_RESULT.inventedNames));
+			MethodNode again = byKey(out, "lambda$f$0", "(I)V");
+			assertNotNull(again, "第二轮桥不能消失：" + table(out));
+			assertTrue(containsCall(again, "onBridgeInvoked"), "必须仍认得出这是桥");
+			List<AbstractInsnNode> p2 = valuePushes(again);
+			assertEquals(4, p2.size(), "第二轮仍是 k + 两个实参 + 调用");
+			assertEquals(Integer.valueOf(7), intConstOf(p2.get(1)), "实参 7 必须被重新拼回");
+			assertEquals(Integer.valueOf(3), intConstOf(p2.get(2)), "实参 3 必须被重新拼回");
+		} finally {
+			remold.RuntimeConstants.unregister("java/lang/Math", "max", "(II)I");
+		}
+	}
+
+	/** 带参形态但实参依赖宿主形参：折不出常量，必须拒绝。 */
+	@Test
+	void registeredRuntimeConstantWithDynamicArgIsRefused(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_NO_MARK, true).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_ADDED_RUNTIME_CONST_DYNAMIC_ARG, true).resolve("B.class"));
+
+		remold.RuntimeConstants.register("java/lang/Math", "max", "(II)I");
+		try {
+			ClassNode out = parse(LambdaAligner.align(v1, v2));
+			assertEquals(0, LambdaAligner.LAST_RESULT.bridgeCount,
+				"实参依赖宿主形参时折不出常量，不能重放");
+			assertTrue(containsCall(byKey(out, "lambda$f$0", "(I)V"), "onOrphanInvoked"));
+		} finally {
+			remold.RuntimeConstants.unregister("java/lang/Math", "max", "(II)I");
+		}
 	}
 
 	// ------------------------------------------------------------------------------------------------
@@ -1524,6 +1587,42 @@ public class LambdaBridgeAlignTest {
 		    public static void f(int k) {
 		        String sep = System.lineSeparator();
 		        r = () -> last = "v3:" + k + sep;
+		    }
+		}
+		""";
+
+	/** 带参形态：{@code Math.max(7, 3)}——实参全是编译期常量。 */
+	static final String V2_ADDED_RUNTIME_CONST_ARGS = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(int k) {
+		        int c = Math.max(7, 3);
+		        r = () -> last = "v2:" + k + c;
+		    }
+		}
+		""";
+
+	/** 第三轮：只改方法体，带参的运行时常量位必须跨轮保留。 */
+	static final String V3_ADDED_RUNTIME_CONST_ARGS_BODY = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(int k) {
+		        int c = Math.max(7, 3);
+		        r = () -> last = "v3:" + k + c;
+		    }
+		}
+		""";
+
+	/** 带参形态但实参<b>不是</b>常量：无从重放。 */
+	static final String V2_ADDED_RUNTIME_CONST_DYNAMIC_ARG = """
+		public class B {
+		    public static Runnable r;
+		    public static String   last = "";
+		    public static void f(int k) {
+		        int c = Math.max(k, 3);
+		        r = () -> last = "v2:" + k + c;
 		    }
 		}
 		""";

@@ -91,6 +91,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | lambda 对齐压力测试 | `tests/src/LambdaAlignTortureTest.java`（旧 callsite 名字 → body 归属的自动断言；JDK 8/17/21 × 前插/删除/重排，覆盖 `lambda$static$N`/`lambda$new$N`；含判定力自检） |
 | 捕获桥（单向：只支持删除捕获变量） | `LambdaAligner.stepCaptureBridge` / `getBridgeDelegate` / `onBridgeInvoked`；规格见 `docs/topology/09-lambda-capture-bridge.md` |
 | 捕获桥判定力 | `tests/src/LambdaBridgeAlignTest.java`（对齐期，无需 DCEVM）；`tests/src/LambdaBridgeProbe.java`（`./gradlew :tests:lambdaBridgeProbe -Pp05.jbr=<dcevm-jdk>`，实测运行时失败形态） |
+| 常驻 javac（测试提速） | `tests/src/JavacDaemon.java`（客户端）+ `tests/javacdaemon/JavacDaemonServer.java`（服务端，`--release 8`，任务 `javacDaemonServer`）；每个 JDK 一个进程、复用 `JavaCompiler`/`FileManager`，失败自动回退外部 javac；`-Phstest.noJavacDaemon` 可强制回退 |
 | `@HotswapInit` 设计契约 | `docs/initfix/09-hotswapinit-design.md`（T4 逃生口的豁免边界、签名与调用基数、重复触发、异常边界、用例清单） |
 | 外部引擎源码索引 | `.sources/`（如 `.sources/mindustry/` 指向本地 Mindustry/Arc 真实源码；只读参考，已 gitignore） |
 | Mixin 生态扩展插件 | `plugin-mixin/`（`remold.mixin.MixinHotswapPlugin`、`MixinReWeaver`、`MixinHotSwap`） |

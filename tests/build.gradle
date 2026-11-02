@@ -97,6 +97,35 @@ def detectNativeLib() {
 }
 def nativeLibPath = detectNativeLib()
 
+// ------------------------------------------------------------------------------------------------
+// 常驻 javac：把服务端编成 v52，让 JDK 8 也能加载
+//
+// 外部 javac 单次约 2.4s（其中 JVM 启动只占 0.4s，其余是 javac 自己的符号表初始化），
+// 复用同一个 JavaCompiler + StandardJavaFileManager 后约 35ms。所以服务端必须**常驻**并复用
+// 编译器实例；而它要在 8/11/17/21 各自的进程里跑，字节码只能是 v52。
+// ------------------------------------------------------------------------------------------------
+def javacDaemonDir = layout.buildDirectory.dir("javacdaemon")
+def javacDaemonServer = tasks.register("javacDaemonServer", JavaCompile) {
+	group = "build"
+	description = "编译常驻 javac 服务端（--release 8，供各 JDK 版本加载）"
+	source = fileTree("${projectDir}/javacdaemon") { include "**/*.java" }
+	classpath = files()
+	destinationDirectory = javacDaemonDir
+	options.encoding = "UTF-8"
+	// 根项目的 withType(JavaCompile) 会给所有编译任务塞 -AtargetVersion=11 与 --add-exports，
+	// 这些在 --release 8 下是非法的（JDK 8 没有这些选项）。服务端是独立的纯 Java 8 小程序，
+	// 不需要注解处理器也不需要导出内部包，整组参数在这里清掉。
+	options.compilerArgs = ["-Xlint:-options"]
+	doFirst {
+		options.compilerArgs = options.compilerArgs.findAll {
+			!it.startsWith("--add-") && !it.startsWith("-A")
+		}
+	}
+	options.release = 8
+	sourceCompatibility = "8"
+	targetCompatibility = "8"
+}
+
 // 1. JUnit 测试入口
 test {
 	group = "verification"
@@ -108,6 +137,14 @@ test {
 	dependsOn project(":panama").tasks.named("jar")
 	dependsOn hstestFixtureTasks
 	inputs.dir(hstestFixtureRoot)
+	// 常驻 javac 服务端：类路径变了要重跑测试（否则可能用着旧协议）。
+	dependsOn javacDaemonServer
+	inputs.dir(javacDaemonDir)
+	systemProperty "hstest.javacDaemon.classpath", javacDaemonDir.get().asFile.absolutePath
+	// 逃生口：-Phstest.noJavacDaemon 强制回退外部 javac（怀疑守护进程有问题时用）。
+	if (project.hasProperty("hstest.noJavacDaemon")) {
+		systemProperty "hstest.javacDaemon", "false"
+	}
 	useJUnitPlatform()
 	// 并行度：默认**串行**。实测（本机 8 核 Windows）4 fork 反而更慢——5m43s vs 串行 5m07s。
 	// 瓶颈不是 CPU 而是密集的 `javac` 子进程（每个测试都起外部编译器），多 fork 只是把它们

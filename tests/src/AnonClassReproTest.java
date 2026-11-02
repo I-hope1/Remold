@@ -2607,6 +2607,8 @@ public class AnonClassReproTest {
 	}
 
 	static void runCmd(String... cmd) throws Exception {
+		// javac 走常驻服务（同版本、同选项，产物一致）；不可用时照旧起外部进程。
+		if (JavacDaemon.tryRun(cmd)) return;
 		Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
 		try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
 			String line;

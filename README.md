@@ -127,19 +127,19 @@ Remold 作为一个 Java Agent 运行。为了获得类结构变更高性能热�
 
 > [!IMPORTANT]
 > **脚本插件也必须锁定版本。** `apply(from = ...)` 没有 `plugins { id(...) version ... }` 那样的版本坐标，
-> 因此**务必用 tag 地址**（`.../v0.2.0/remold.gradle.kts`）而不是 `.../main/...`：脚本与 `agent`/`api` 必须同版本，
+> 因此**务必用 tag 地址**（`.../v0.2.1/remold.gradle.kts`）而不是 `.../main/...`：脚本与 `agent`/`api` 必须同版本，
 > 否则脚本按新接口拼参数、agent 还是旧版本，问题只会在运行期才暴露。
 
 #### Groovy DSL (`build.gradle`):
 ```groovy
 // 引入脚本插件（tag 锁版本；本地开发可换成 rootProject.file('remold.gradle')）
-def remoldRef = (findProperty('remold.version') ?: '0.2.0')
+def remoldRef = (findProperty('remold.version') ?: '0.2.1')
 apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remold.gradle"
 
 remold {
     // 可选：指定 Remold 版本（默认读取 gradle.properties 中的 remoldVersion）
     // 插件将自动从仓库解析或从 Releases 下载对应版本的 agent jar 并缓存至本地，开发者无需手动下载
-    // version = '0.2.0'
+    // version = '0.2.1'
 
     // 可选：显式指定本地 remold-agent.jar 路径（若不指定，将优先使用本地 libs/remold-agent.jar，不存在时自动下载缓存）
     // agentJar = "libs/remold-agent.jar"
@@ -169,14 +169,14 @@ remold {
 #### Kotlin DSL (`build.gradle.kts`):
 ```kotlin
 // 引入脚本插件（tag 锁版本；本地开发可换成 file("../remold.gradle.kts")）
-val remoldRef = (findProperty("remold.version") as String?) ?: "0.2.0"
+val remoldRef = (findProperty("remold.version") as String?) ?: "0.2.1"
 apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/v$remoldRef/remold.gradle.kts")
 
 // 注意：Kotlin DSL 下 `remold { }` 不可用——扩展类型 RemoldExtension 定义在脚本里，
 // IDE 无法为脚本类生成类型安全访问器（Groovy DSL 是动态语言，不受影响）。
 // 配置改走 gradle.properties 或 extra，等价写法如下：
 extra["remold.mainClass"] = "your.package.Main"
-// extra["remold.version"] = "0.2.0"
+// extra["remold.version"] = "0.2.1"
 // extra["remold.agentJar"] = "libs/remold-agent.jar"
 // extra["remold.jbr"] = "/path/to/jbr"
 // extra["remold.debug"] = true
@@ -192,7 +192,7 @@ extra["remold.mainClass"] = "your.package.Main"
 ```kotlin
 // 本地源码树里开发 Remold 时用上一层的脚本（改了立即生效），否则按 tag 拉取对应版本
 apply(from = file("../remold.gradle.kts").takeIf { it.isFile }
-    ?: "https://raw.githubusercontent.com/I-Hope1/Remold/v${findProperty("remold.version") ?: "0.2.0"}/remold.gradle.kts")
+    ?: "https://raw.githubusercontent.com/I-Hope1/Remold/v${findProperty("remold.version") ?: "0.2.1"}/remold.gradle.kts")
 ```
 
 - 仓库内开发：`../remold.gradle.kts` 存在 → 直接用本地脚本，改完立即生效、不联网；
@@ -205,7 +205,7 @@ apply(from = file("../remold.gradle.kts").takeIf { it.isFile }
 ```kotlin
 buildscript {
     repositories { maven("https://jitpack.io") }
-    dependencies { classpath("com.github.I-Hope1.Remold:gradle-plugin:v0.2.0") }   // 版本 = Git tag
+    dependencies { classpath("com.github.I-Hope1.Remold:gradle-plugin:v0.2.1") }   // 版本 = Git tag
 }
 apply(plugin = "io.github.i-hope1.remold")
 ```
@@ -219,7 +219,7 @@ apply(plugin = "io.github.i-hope1.remold")
 > （随分支变化，不适合长期锁定）。
 
 > [!NOTE]
-> 想写成 `plugins { id("io.github.i-hope1.remold") version "v0.2.0" }` 也可以，但 JitPack 不托管「插件标记」
+> 想写成 `plugins { id("io.github.i-hope1.remold") version "v0.2.1" }` 也可以，但 JitPack 不托管「插件标记」
 > （`<插件id>:<插件id>.gradle.plugin`），需要在 `settings.gradle.kts` 的 `pluginManagement.resolutionStrategy.eachPlugin`
 > 里 `useModule("com.github.I-Hope1.Remold:gradle-plugin:${requested.version}")` 映射一次。发到 Gradle Plugin Portal
 > 才能省掉这段。
@@ -372,11 +372,11 @@ repositories {
 }
 
 dependencies {
-    compileOnly 'com.github.I-hope1.Remold:api:v0.2.0'
+    compileOnly 'com.github.I-hope1.Remold:api:v0.2.1'
 }
 ```
 
-Maven Central 预留坐标：`io.github.i-hope1.remold:api:0.2.0`。
+Maven Central 预留坐标：`io.github.i-hope1.remold:api:0.2.1`。
 
 ---
 
@@ -442,6 +442,7 @@ flowchart TD
 - **`:native`**：JVMTI 原生加速与 Panama/JNI 后端，提供亚毫秒级全堆实例检索能力，支持 Windows (x64)、Linux (x64)、macOS (x64/arm64) 全平台。
 - **`:plugin-arc`**：官方参考插件，展示如何通过 SPI 无缝扩展 UI 布局树比对与框架级轮询事件熔断。
 - **`:plugin-mixin`**：SpongePowered Mixin 生态插件。热重定义前把源码级字节码重新交给 Mixin 织入（保住 `@Inject` / `@Unique` / `@Shadow` 产物），并在 Mixin 类自身被修改时刷新 Mixin 运行时状态、级联重织入其目标类。Fabric Loom 工程由 Gradle 脚本自动挂载。
+- **`:plugin-forge`**：Minecraft Forge 与 NeoForge 统一自适应插件。穿透 ModLauncher / NeoForge 类加载器隔离执行 Mixin 增量重织入，并在 `@SubscribeEvent` / `@EventBusSubscriber` 增删时自动刷新与重挂载事件总线。ForgeGradle 与 ModDevGradle 工程由 Gradle 脚本自动挂载。
 - **`:example`**：极简演示应用，开箱即用体验 Agent 监听、存量实例字段初始化与 `@OnReload` 生命周期回调。
 - **`:tests`**：完备的回归与兼容性测试套件，包含 206 项多版本编译矩阵拓扑 JUnit 测试、318 项 InitFix Oracle 正负向断言，以及 32 项 Mixin 与 JDWP 端到端兼容性断言。
 
@@ -466,6 +467,7 @@ Remold Agent 支持通过系统属性或 Gradle 配置声明式加载扩展插�
   Gradle 插件将自动从远程下载对应的 `remold-plugin-arc.jar`，并通过 JVM 参数（`-Dremold.plugins=arc -Dremold.plugin.jars=...`）自动挂载到主 Agent，**模组与业务代码无需引入任何 Remold 依赖，零侵入无残留！**
 
 - **Mixin 生态（Fabric / Quilt 等）无需声明**：`remold.gradle(.kts)` 检测到 `fabric-loom` 插件或 `net.fabricmc` / `org.spongepowered` 依赖时会自动挂载 `mixin` 插件；要关掉用 `-Premold.autoMixin=false`。本地开发插件本体时可用 `remold { pluginJar("../<remold 仓库>/plugin-mixin/build/libs/remold-plugin-mixin-<ver>.jar") }` 指定。
+- **Forge / NeoForge 生态无需声明**：`remold.gradle(.kts)` 检测到 ForgeGradle 或 ModDevGradle 时会自动挂载 `forge` 插件；要关掉用 `-Premold.autoForge=false`。
 
 #### 方式二：代码显式注册
 若需在应用层代码中编写并注册自定义扩展插件：

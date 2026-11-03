@@ -130,21 +130,21 @@ The lightweight script plugin resolves your class output paths, assembles the JV
 
 > [!IMPORTANT]
 > **The script plugin must be version-pinned too.** `apply(from = ...)` has no `plugins { id(...) version ... }`
-> coordinate, so always use a **tag** URL (`.../v0.2.0/remold.gradle.kts`) instead of `.../main/...`.
+> coordinate, so always use a **tag** URL (`.../v0.2.1/remold.gradle.kts`) instead of `.../main/...`.
 > The script and the `agent`/`api` must stay on the same version, otherwise the script builds arguments for a
 > newer agent while the old agent runs — and it only blows up at runtime.
 
 #### Groovy DSL (`build.gradle`):
 ```groovy
 // Apply the script plugin (tag-pinned; for local development use rootProject.file('remold.gradle'))
-def remoldRef = (findProperty('remold.version') ?: '0.2.0')
+def remoldRef = (findProperty('remold.version') ?: '0.2.1')
 apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remold.gradle"
 
 remold {
     // Optional: pin the Remold version (defaults to remoldVersion in gradle.properties)
     // The plugin resolves the matching agent jar from the repository or Releases and caches it
     // locally, so you never download it by hand.
-    // version = '0.2.0'
+    // version = '0.2.1'
 
     // Optional: point at a local remold-agent.jar. Otherwise libs/remold-agent.jar is preferred,
     // and the plugin downloads and caches one if it is missing.
@@ -176,14 +176,14 @@ remold {
 #### Kotlin DSL (`build.gradle.kts`):
 ```kotlin
 // Apply the script plugin (tag-pinned; for local development use file("../remold.gradle.kts"))
-val remoldRef = (findProperty("remold.version") as String?) ?: "0.2.0"
+val remoldRef = (findProperty("remold.version") as String?) ?: "0.2.1"
 apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/v$remoldRef/remold.gradle.kts")
 
 // Note: `remold { }` does NOT work from Kotlin DSL — the extension type lives inside the script plugin,
 // so the IDE cannot generate a type-safe accessor for it (Groovy is dynamic and unaffected).
 // Configure through gradle.properties or extra instead:
 extra["remold.mainClass"] = "your.package.Main"
-// extra["remold.version"] = "0.2.0"
+// extra["remold.version"] = "0.2.1"
 // extra["remold.agentJar"] = "libs/remold-agent.jar"
 // extra["remold.jbr"] = "/path/to/jbr"
 // extra["remold.debug"] = true
@@ -199,7 +199,7 @@ Loading a script plugin only has one real decision: **where to take it from**. T
 ```kotlin
 // inside the Remold source tree, use the parent script (edits apply immediately); otherwise fetch the tag
 apply(from = file("../remold.gradle.kts").takeIf { it.isFile }
-    ?: "https://raw.githubusercontent.com/I-Hope1/Remold/v${findProperty("remold.version") ?: "0.2.0"}/remold.gradle.kts")
+    ?: "https://raw.githubusercontent.com/I-Hope1/Remold/v${findProperty("remold.version") ?: "0.2.1"}/remold.gradle.kts")
 ```
 
 - In the repo: `../remold.gradle.kts` exists → the local script is used, edits take effect immediately, no network;
@@ -213,7 +213,7 @@ offline mode:
 ```kotlin
 buildscript {
     repositories { maven("https://jitpack.io") }
-    dependencies { classpath("com.github.I-Hope1.Remold:gradle-plugin:v0.2.0") }   // version = Git tag
+    dependencies { classpath("com.github.I-Hope1.Remold:gradle-plugin:v0.2.1") }   // version = Git tag
 }
 apply(plugin = "io.github.i-hope1.remold")
 ```
@@ -227,7 +227,7 @@ routes behave identically. Configuration is the same as Option 1 (`gradle.proper
 > `master-SNAPSHOT` works for a quick look (moves with the branch, not suitable for pinning).
 
 > [!NOTE]
-> You may also write `plugins { id("io.github.i-hope1.remold") version "v0.2.0" }`, but JitPack does not host plugin
+> You may also write `plugins { id("io.github.i-hope1.remold") version "v0.2.1" }`, but JitPack does not host plugin
 > markers (`<plugin-id>:<plugin-id>.gradle.plugin`), so you must map it once via
 > `pluginManagement.resolutionStrategy.eachPlugin { useModule("com.github.I-Hope1.Remold:gradle-plugin:${requested.version}") }`
 > in `settings.gradle.kts`. Publishing to the Gradle Plugin Portal is what removes that block.
@@ -380,11 +380,11 @@ repositories {
 }
 
 dependencies {
-    compileOnly 'com.github.I-hope1.Remold:api:v0.2.0'
+    compileOnly 'com.github.I-hope1.Remold:api:v0.2.1'
 }
 ```
 
-Maven Central coordinates are reserved: `io.github.i-hope1.remold:api:0.2.0`.
+Maven Central coordinates are reserved: `io.github.i-hope1.remold:api:0.2.1`.
 
 ---
 
@@ -452,6 +452,7 @@ flowchart TD
 - **`:native`**: JVMTI acceleration with Panama/JNI backends, providing sub-millisecond whole-heap instance lookup on Windows (x64), Linux (x64), and macOS (x64/arm64).
 - **`:plugin-arc`**: the reference plugin, showing how to extend UI layout-tree comparison and framework-level polling circuit breaks through the SPI.
 - **`:plugin-mixin`**: the SpongePowered Mixin ecosystem plugin. It hands the source-level bytecode back to Mixin before redefinition (preserving `@Inject` / `@Unique` / `@Shadow` output), and when a Mixin class itself changes it refreshes the Mixin runtime state and re-weaves the affected target classes. Fabric Loom projects mount it automatically through the Gradle script.
+- **`:plugin-forge`**: the adaptive Minecraft Forge & NeoForge plugin. It punches through ModLauncher / NeoForge classloader isolation for Mixin re-weaving and automatically refreshes and re-registers the event bus upon `@SubscribeEvent` / `@EventBusSubscriber` changes. ForgeGradle and ModDevGradle projects mount it automatically through the Gradle script.
 - **`:example`**: a minimal demo app for agent watching, live-instance field initialization, and the `@OnReload` lifecycle callback.
 - **`:tests`**: the regression and compatibility suite — 206 multi-version JUnit topology tests, 318 InitFix Oracle positive/negative assertions, and 32 Mixin and JDWP end-to-end assertions.
 
@@ -476,6 +477,7 @@ Remold can load extension plugins declaratively through system properties or Gra
   The Gradle plugin downloads the matching `remold-plugin-arc.jar` and mounts it on the agent through JVM arguments (`-Dremold.plugins=arc -Dremold.plugin.jars=...`). **Your mod or application code pulls in no Remold dependency at all — zero intrusion, zero residue.**
 
 - **Mixin ecosystems (Fabric / Quilt and friends) need no declaration**: `remold.gradle(.kts)` detects the `fabric-loom` plugin or `net.fabricmc` / `org.spongepowered` dependencies and mounts the `mixin` plugin automatically. Disable it with `-Premold.autoMixin=false`. When developing the plugin itself, point at a local build with `remold { pluginJar("../<remold repo>/plugin-mixin/build/libs/remold-plugin-mixin-<ver>.jar") }`.
+- **Forge / NeoForge ecosystems need no declaration**: `remold.gradle(.kts)` detects ForgeGradle or ModDevGradle and mounts the `forge` plugin automatically. Disable it with `-Premold.autoForge=false`.
 
 #### Option 2: explicit registration in code
 To write and register a custom plugin from application code:

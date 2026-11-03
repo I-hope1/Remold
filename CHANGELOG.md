@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-11-03
+
+### Added
+- **Minecraft Forge & NeoForge 统一自适应插件 (`:plugin-forge`)**:
+  - 新增扩展插件 `:plugin-forge`（`remold-plugin-forge.jar`），提供 `remold.HotswapPlugin` SPI 实现，支持 `forge` 与 `neoforge` 双别名挂载；
+  - 跨 ClassLoader 穿透重织入（`ModLauncherMixinBridge`）：解决 ModLauncher / NeoForge 模块化类加载器与 Agent 间的 ClassLoader 隔离，穿透执行 Mixin 增量重织入；
+  - 事件总线自动刷新（`ForgeEventBusRefresher`）：监听重定义批次，自动识别 `@SubscribeEvent` / `@EventBusSubscriber` 的监听器增删，并在 `EVENT_BUS` 上自动注销与重新注册；
+  - Gradle 脚本（`remold.gradle`/`remold.gradle.kts`）自动识别 Forge/NeoForge 生态（`autoForge`），并自动向 ModDevGradle（`runs.client`）与 ForgeGradle（`minecraft.runs.client`）注入热重载探针参数；
+  - GitHub Release CI 自动化打包并发布 `remold-plugin-forge.jar`。
+- **Fabric Loom 原生 Application 启动与守护进程解绑**:
+  - 模板默认配置 `loom.runs.configureEach { preferGradleTask = false }`，解除游戏运行对 Gradle 守护进程（Daemon）的独占锁定，转为原生 Application 启动；
+  - 自动化同步 `Minecraft Client` 与 `Minecraft Server` 的 BeforeRunTask 为 `deployArtifact`，运行前自动将最新构建产物同步至 `run/mods`；
+  - 优化 `Minecraft_Client.xml` 与 `Minecraft_Server.xml` 的 JVM 参数同步机制，使用 `Matcher.quoteReplacement` 原位更新 `-javaagent`，杜绝重复追加与 regex 符号转义损坏。
+- **IDE 原生编译目录实时监控 (`out/production`)**:
+  - 脚本层自动探测并创建工程根目录下的 `out/production`，纳入 `-javaagent` 监控目录表；
+  - `RemoldAgent` 增强：显式指定未建的 `out/production` 时自动创建，当监控包含 `build/classes/...` 时自动向上查找到项目根目录探查并挂载 `out/production`；
+  - 在 IDEA 中通过单文件编译快捷键（`Ctrl + Shift + F9`）编译的 class 改动能直接在 200ms 内触发热重载，无需等待 Gradle 完整构建。
+- **测试套件与守卫**:
+  - 新增 `ForgePluginTest` 与 `WatchPathTest`，测试基线提升至 403 个 JUnit 测试；
+  - 规范状态标记扫描 (`verifyDocStatusMarkers`) 将 `plugin-forge/src` 纳入守卫范围，全量代码与客观设计文档 100% 保持无易腐标记。
+
 ## [0.2.0] - 2026-11-02
 
 ### Added

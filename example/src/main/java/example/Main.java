@@ -14,10 +14,10 @@ public class Main {
      * 彻底杜绝匿名类/Lambda 增删重排导致的 NoSuchMethodError 崩溃！
      * </p>
      *
-     * <p>👉 <b>恭喜通关！</b>按住 Ctrl 点击循环跳转回起点【动手试试 1~5】：
+     * <p>👉 <b>恭喜通关！</b>按住 {@code Ctrl} 点击循环跳转回起点【动手试试 1~5】：
      * {@link PlayerService}</p>
      *
-     * <p>更多进阶文档与原理解析请见 Remold 官方主仓库：https://github.com/I-hope1/Remold</p>
+     * <p>更多进阶文档与原理解析请见 Remold 官方主仓库：<a href="https://github.com/I-hope1/Remold">Remold</a></p>
      */
     public static void main(String[] args) throws InterruptedException {
         System.out.println("================================================================");

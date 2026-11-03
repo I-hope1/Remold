@@ -4238,6 +4238,10 @@ public class RemoldAgent {
 
 			byte[] oldBytes = bytecodeCache.get(className);
 			if (oldBytes != null) {
+				if (Arrays.equals(oldBytes, runtimeBytes)) {
+					if (DEBUG) log("[DYNAMIC-REDEFINE] " + className + " runtime bytecode unchanged; skipped.");
+					return true;
+				}
 				ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, runtimeBytes);
 				if (diff.hierarchyChanged) {
 					error("REJECTED: Class hierarchy change detected for dynamic class " + className);

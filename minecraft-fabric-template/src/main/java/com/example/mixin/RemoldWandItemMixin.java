@@ -26,22 +26,30 @@ import remold.annotation.RemoldReinit;
 @Mixin(RemoldWandItem.class)
 public abstract class RemoldWandItemMixin {
 
-    // =========================================================================================
-    // 【动手试试 6：Mixin 中使用 @Unique 与 @RemoldReinit】
-    // 试试在 Mixin 类里增加新的 @Unique 字段，并标注 @RemoldReinit：
-    //     @Unique
-    //     @RemoldReinit
-    //     private String remold$author = "Modder";
-    // 并在下方的 countUse 注入方法里打印它！按 Ctrl + Shift + F9，Mixin 会自动重新织入并热更生效！
-    // =========================================================================================
+    /**
+     * 【动手试试 6：Mixin 中使用 @Unique 与 @RemoldReinit】
+     * 试试在 Mixin 类里增加新的 @Unique 字段，并标注 @RemoldReinit：
+     * <pre>{@code
+     *     @Unique
+     *     @RemoldReinit
+     *     private String remold$author = "Modder";
+     * }</pre>
+     * 并在下方的 countUse 注入方法里打印它！按 Ctrl + Shift + F9，Mixin 会自动重新织入并热更生效！
+     *
+     * <p>👉 <b>下一步</b>：体验动态修改 Mixin 注入切入点或逻辑，按住 Ctrl 点击跳转到【动手试试 7】：
+     * {@link #remold$countUse(World, PlayerEntity, Hand, CallbackInfoReturnable)}</p>
+     */
     @Unique
     private int remold$useCount = 0;
 
-    // =========================================================================================
-    // 【动手试试 7：动态修改 Mixin 注入切入点或逻辑】
-    // 试试把 at = @At("HEAD") 改为 at = @At("TAIL")，
-    // 观察控制台日志中 mixin 钩子与 [src] use() begin / end 的相对打印顺序立即反转！
-    // =========================================================================================
+    /**
+     * 【动手试试 7：动态修改 Mixin 注入切入点或逻辑】
+     * 试试把 at = @At("HEAD") 改为 at = @At("TAIL")，
+     * 观察控制台日志中 mixin 钩子与 [src] use() begin / end 的相对打印顺序立即反转！
+     *
+     * <p>👉 <b>下一步</b>：体验原版类 (TitleScreen) 的 Mixin 热重载，按住 Ctrl 点击跳转到下一个【动手试试 8】：
+     * {@link TitleScreenMixin}</p>
+     */
     @Inject(method = "use", at = @At("HEAD"))
     private void remold$countUse(World world, PlayerEntity user, Hand hand,
                                  CallbackInfoReturnable<TypedActionResult<ItemStack>> cir) {
@@ -54,10 +62,4 @@ public abstract class RemoldWandItemMixin {
         this.remold$useCount++;
         System.out.println("[Remold] mixin hook alive: use() call #" + this.remold$useCount);
     }
-
-    // =========================================================================================
-    // 👉 下一步：体验原版类 (TitleScreen) 的 Mixin 热重载
-    // 按住 Ctrl 点击跳转到下一个【动手试试 8】：
-    // {@link com.example.mixin.TitleScreenMixin}
-    // =========================================================================================
 }

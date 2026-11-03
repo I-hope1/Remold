@@ -2,6 +2,15 @@
 
 **Edit code without restarting — the app keeps running, your change lands in half a second.**
 
+[![Release](https://img.shields.io/github/v/release/I-hope1/Remold?color=007ec6&logo=github&label=version)](https://github.com/I-hope1/Remold/releases)
+[![JitPack](https://jitpack.io/v/I-hope1/Remold.svg)](https://jitpack.io/#I-hope1/Remold)
+[![Downloads Total](https://img.shields.io/github/downloads/I-hope1/Remold/total?color=brightgreen&label=downloads)](https://github.com/I-hope1/Remold/releases)
+[![Downloads Latest](https://img.shields.io/github/downloads/I-hope1/Remold/latest/total?color=green&label=downloads@latest)](https://github.com/I-hope1/Remold/releases)
+[![Issues](https://img.shields.io/github/issues/I-hope1/Remold?color=yellow)](https://github.com/I-hope1/Remold/issues)
+[![Contributors](https://img.shields.io/github/contributors/I-hope1/Remold)](https://github.com/I-hope1/Remold/graphs/contributors)
+[![CI](https://img.shields.io/github/actions/workflow/status/I-hope1/Remold/ci.yml?branch=main&label=CI)](https://github.com/I-hope1/Remold/actions)
+[![License](https://img.shields.io/badge/license-Apache--2.0-orange.svg)](LICENSE)
+
 English | [简体中文](README.md)
 
 Remold is a Java Agent: it watches your compiled output directory and swaps the new bytecode into the live JVM in place.
@@ -204,7 +213,7 @@ offline mode:
 ```kotlin
 buildscript {
     repositories { maven("https://jitpack.io") }
-    dependencies { classpath("com.github.I-Hope1.Remold:gradle-plugin:v0.1.4") }   // version = Git tag
+    dependencies { classpath("com.github.I-Hope1.Remold:gradle-plugin:v0.2.0") }   // version = Git tag
 }
 apply(plugin = "io.github.i-hope1.remold")
 ```
@@ -214,11 +223,11 @@ The plugin carries no second implementation: it bundles the repo-root `remold.gr
 routes behave identically. Configuration is the same as Option 1 (`gradle.properties` / `extra[...]`; Groovy may use `remold { }`).
 
 > [!TIP]
-> The `gradle-plugin` module only has artifacts from the **first tag that contains it** (`v0.1.4` onwards). Before that,
+> The `gradle-plugin` module is published as stable artifacts starting from **`v0.2.0`**. Before that,
 > `master-SNAPSHOT` works for a quick look (moves with the branch, not suitable for pinning).
 
 > [!NOTE]
-> You may also write `plugins { id("io.github.i-hope1.remold") version "v0.1.4" }`, but JitPack does not host plugin
+> You may also write `plugins { id("io.github.i-hope1.remold") version "v0.2.0" }`, but JitPack does not host plugin
 > markers (`<plugin-id>:<plugin-id>.gradle.plugin`), so you must map it once via
 > `pluginManagement.resolutionStrategy.eachPlugin { useModule("com.github.I-Hope1.Remold:gradle-plugin:${requested.version}") }`
 > in `settings.gradle.kts`. Publishing to the Gradle Plugin Portal is what removes that block.
@@ -252,6 +261,18 @@ If you prefer clicking "Run / Debug" in IDEA, the script plugin prepares everyth
 * **One canonical location**: the agent and plugin jars are always synced into the project-local `.gradle/remold/` (plugins under `plugins/`), so the generated configuration only ever references `$PROJECT_DIR$/.gradle/remold/...` — never `build/libs` (wiped by `clean`) or `~/.gradle` paths that break on another machine;
 * **Ready to use**: the run dropdown in the top-right corner shows **`Run with Remold`** — just hit run or debug;
 * **Native and fast**: runs as a plain IDEA JVM process with full breakpoint support and zero Gradle daemon usage.
+
+> [!TIP]
+> **Pro Tip: 0.2s Incremental Compilation (Bypassing Gradle Daemon)**
+> By default, IDEA may delegate builds to Gradle (*Settings -> Build Tools -> Gradle -> Build and run using: Gradle*). Running your application will monopolize the Gradle Daemon, forcing subsequent rebuilds to cold-start a second Gradle Daemon (costing 15~30s).
+> **Best Practice**:
+> 1. In IDEA *Settings -> Build, Execution, Deployment -> Build Tools -> Gradle*, switch **`Build and run using`** and **`Run tests using`** to **`IntelliJ IDEA`**;
+> 2. After editing code, don't run a Gradle task. Simply press **`Ctrl + Shift + F9`** (on macOS: **`Cmd + Shift + F9`**) to recompile only the active file;
+> 3. IDEA's built-in Javac compiles the single `.class` in **100~200ms**, completely bypassing the Gradle Daemon, and Remold swaps it into the live JVM instantly!
+
+> [!NOTE]
+> **Fabric Loom Run Configuration Auto-Sync**:
+> In Minecraft Fabric development, Loom's `Minecraft Client` run configuration does not automatically update VM parameters once generated. The Remold script automatically inspects and updates `Minecraft_Client.xml` during `classes` or config generation, injecting `-Dremold.plugins=mixin` and the plugin jar so Mixin re-weaving is guaranteed to be active regardless of which launch configuration you pick.
 
 To configure it by hand instead:
 
@@ -359,11 +380,11 @@ repositories {
 }
 
 dependencies {
-    compileOnly 'com.github.I-hope1.Remold:api:0.1.0'
+    compileOnly 'com.github.I-hope1.Remold:api:v0.2.0'
 }
 ```
 
-Maven Central coordinates are reserved: `io.github.i-hope1.remold:api:0.1.0`.
+Maven Central coordinates are reserved: `io.github.i-hope1.remold:api:0.2.0`.
 
 ---
 

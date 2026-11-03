@@ -2,6 +2,15 @@
 
 **改完代码不用重启 —— 应用跑着，改动半秒生效。**
 
+[![Release](https://img.shields.io/github/v/release/I-hope1/Remold?color=007ec6&logo=github&label=version)](https://github.com/I-hope1/Remold/releases)
+[![JitPack](https://jitpack.io/v/I-hope1/Remold.svg)](https://jitpack.io/#I-hope1/Remold)
+[![Downloads Total](https://img.shields.io/github/downloads/I-hope1/Remold/total?color=brightgreen&label=downloads)](https://github.com/I-hope1/Remold/releases)
+[![Downloads Latest](https://img.shields.io/github/downloads/I-hope1/Remold/latest/total?color=green&label=downloads@latest)](https://github.com/I-hope1/Remold/releases)
+[![Issues](https://img.shields.io/github/issues/I-hope1/Remold?color=yellow)](https://github.com/I-hope1/Remold/issues)
+[![Contributors](https://img.shields.io/github/contributors/I-hope1/Remold)](https://github.com/I-hope1/Remold/graphs/contributors)
+[![CI](https://img.shields.io/github/actions/workflow/status/I-hope1/Remold/ci.yml?branch=main&label=CI)](https://github.com/I-hope1/Remold/actions)
+[![License](https://img.shields.io/badge/license-Apache--2.0-orange.svg)](LICENSE)
+
 简体中文 | [English](README_EN.md)
 
 Remold 是一个 Java Agent：它盯着你的编译输出目录，文件一变就把新字节码原地换进正在运行的 JVM。
@@ -244,6 +253,18 @@ apply(plugin = "io.github.i-hope1.remold")
 * **路径统一**：agent 与插件 Jar 一律同步到项目本地 `.gradle/remold/`（插件在 `plugins/` 子目录），运行配置只引用 `$PROJECT_DIR$/.gradle/remold/...`，不会混入 `build/libs` 这类会被 `clean` 清掉、或 `~/.gradle` 这类跨机器失效的绝对路径；
 * **开箱即用**：用 IDEA 打开项目后，右上角运行下拉菜单将直接出现 **`Run with Remold`**，点击运行或调试即可；
 * **极速原生**：直接使用 IDEA 原生 JVM 进程运行，完美支持断点调试，零 Gradle Daemon 占用。
+
+> [!TIP]
+> **开发热更秘诀：0.2 秒极速增量编译（彻底告别 Gradle Daemon 争抢）**
+> IDEA 默认可能将构建委托给 Gradle（*Settings -> Build Tools -> Gradle -> Build and run using: Gradle*），这会导致前台运行游戏或服务时占用唯一的 Gradle Daemon，再次编译时被迫冷启动第 2 个 Gradle 守护进程（耗时 15~30 秒）。
+> **最佳实践推荐**：
+> 1. 打开 IDEA 设置：*Settings (设置) -> Build, Execution, Deployment -> Build Tools -> Gradle*，将 **`Build and run using`** 与 **`Run tests using`** 改为 **`IntelliJ IDEA`**；
+> 2. 修改代码后，无需点击绿色运行按钮，直接在编辑器中按快捷键 **`Ctrl + Shift + F9`**（macOS 为 `Cmd + Shift + F9`，重新编译当前类）；
+> 3. IDEA 内置 Javac 仅需 **0.1 ~ 0.2 秒** 便能增量写出单个 `.class`，完全绕过 Gradle，零 Daemon 开销，Remold 瞬时完成热更！
+
+> [!NOTE]
+> **Fabric Loom 项目运行配置自动同步**：
+> 在 Minecraft Fabric 模组开发中，Loom 生成的 `Minecraft Client` 运行配置在首次生成后不会自动刷新 VM 参数。Remold 脚本在 `classes` 或生成配置阶段会**自动检测并补全 `Minecraft_Client.xml`**，自动将 `-Dremold.plugins=mixin` 与对应插件 Jar 同步进去，确保无论通过 `Run with Remold` 还是 `Minecraft Client` 启动，Mixin 重织入桥均能 100% 自动加载，彻底避免存量 Mixin 字段被误洗。
 
 若需纯手动在 IDEA 运行对话框中配置，步骤如下：
 

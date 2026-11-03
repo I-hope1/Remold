@@ -713,6 +713,31 @@ project.plugins.withId("java") {
         sb.append("</component>\n")
 
         xmlFile.writeText(sb.toString())
+
+        // 自动适配 Fabric Loom：若存在 Loom 生成的 Minecraft_Client.xml，自动同步 Remold 插件与探针参数
+        try {
+            val clientXml = File(ideaRunDir, "Minecraft_Client.xml")
+            if (clientXml.exists()) {
+                val content = clientXml.readText()
+                val regex = Regex("""<option name="VM_PARAMETERS" value="([^"]*)"/>""")
+                val match = regex.find(content)
+                if (match != null) {
+                    val existing = match.groupValues[1]
+                    var updated = existing
+                    for (arg in conf.jvmArgs) {
+                        val portableArg = makePortable(arg)
+                        if (!updated.contains(portableArg) && !updated.contains(arg)) {
+                            updated = if (updated.isNotBlank()) "$updated $portableArg" else portableArg
+                        }
+                    }
+                    if (updated != existing) {
+                        clientXml.writeText(content.replace(match.value, "<option name=\"VM_PARAMETERS\" value=\"${xmlEscape(updated)}\"/>"))
+                        logger.lifecycle("[Remold] Automatically synchronized Remold parameters into Minecraft_Client.xml")
+                    }
+                }
+            }
+        } catch (_: Throwable) { }
+
         xmlFile
     }
 

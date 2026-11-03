@@ -892,8 +892,35 @@ public class RemoldAgent {
 				outDirs.add(p);
 			} else if ((ps.endsWith(".jar") || ps.endsWith(".zip")) && Files.isRegularFile(p)) {
 				outJars.add(p);
+			} else if (ps.endsWith("out" + File.separator + "production") || ps.endsWith("out/production") || ps.endsWith("out\\production")) {
+				try {
+					Files.createDirectories(p);
+					outDirs.add(p);
+				} catch (Throwable ignored) {
+					error("Skipping invalid watch path (not a directory or jar/zip): " + p);
+				}
 			} else {
 				error("Skipping invalid watch path (not a directory or jar/zip): " + p);
+			}
+		}
+
+		// 自动探测并补充 IDEA 的 out/production 目录
+		for (Path dir : new HashSet<>(outDirs)) {
+			Path current = dir;
+			while (current != null && current.getParent() != null) {
+				Path outProd = current.resolve("out").resolve("production");
+				if (Files.isDirectory(outProd)) {
+					outDirs.add(outProd.toAbsolutePath().normalize());
+					break;
+				}
+				if (current.getFileName() != null && current.getFileName().toString().equals("build")) {
+					Path rootOutProd = current.getParent().resolve("out").resolve("production");
+					if (Files.isDirectory(rootOutProd)) {
+						outDirs.add(rootOutProd.toAbsolutePath().normalize());
+					}
+					break;
+				}
+				current = current.getParent();
 			}
 		}
 	}

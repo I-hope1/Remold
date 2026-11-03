@@ -349,12 +349,17 @@ project.plugins.withId('java') {
         def resourceDirs = sourceSets.main.resources.srcDirs
         def assetsDir = new File(project.projectDir, "assets")
         def outResourceDir = sourceSets.main.output.resourcesDir
+        def ideaOutDir = new File(project.projectDir, "out/production")
+        if (!ideaOutDir.exists()) {
+            try { ideaOutDir.mkdirs() } catch (Throwable ignored) {}
+        }
         def extraDirs = remoldExt.watchDirs.collect { project.file(it) }
         def allCandidateDirs = []
         allCandidateDirs.addAll(classesDirs)
         allCandidateDirs.addAll(resourceDirs)
         if (assetsDir != null) allCandidateDirs.add(assetsDir)
         if (outResourceDir != null) allCandidateDirs.add(outResourceDir)
+        if (ideaOutDir.exists()) allCandidateDirs.add(ideaOutDir)
         allCandidateDirs.addAll(extraDirs)
         def allWatchDirs = allCandidateDirs.findAll { it != null && it.exists() }.unique()
         def watchPath = allWatchDirs.collect { it.absolutePath }.join(File.pathSeparator)
@@ -823,13 +828,20 @@ project.plugins.withId('java') {
             def clientXml = new File(ideaRunDir, 'Minecraft_Client.xml')
             if (clientXml.exists()) {
                 def content = clientXml.text
-                def matcher = (content =~ /<option name="VM_PARAMETERS" value="([^"]*)"\/>/)
+                def matcher = (content =~ /<option name="VM_PARAMETERS" value="([^"]*)"\s*\/>/)
                 if (matcher.find()) {
                     def existing = matcher.group(1)
                     def updated = existing
                     conf.jvmArgs.each { arg ->
                         def portableArg = makePortable(arg)
-                        if (!updated.contains(portableArg) && !updated.contains(arg)) {
+                        if (arg.startsWith('-javaagent:') && arg.contains('remold-agent.jar')) {
+                            def agentRegex = /(?:^|\s)-javaagent:[^\s=]+remold-agent\.jar[^\s]*/
+                            if (updated =~ agentRegex) {
+                                updated = updated.replaceAll(agentRegex, java.util.regex.Matcher.quoteReplacement(" ${portableArg}")).trim()
+                            } else if (!updated.contains(portableArg)) {
+                                updated = updated ? "${updated} ${portableArg}" : portableArg
+                            }
+                        } else if (!updated.contains(portableArg) && !updated.contains(arg)) {
                             updated = updated ? "${updated} ${portableArg}" : portableArg
                         }
                     }

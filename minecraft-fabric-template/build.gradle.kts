@@ -55,6 +55,10 @@ loom {
         named("client") {
             // Remold 脚本会向这个运行配置注入 -javaagent 与 DCEVM 参数
         }
+        configureEach {
+            // 禁用 Gradle 任务模式，强制生成原生的 IDEA Application 启动项
+            preferGradleTask = false
+        }
     }
 }
 

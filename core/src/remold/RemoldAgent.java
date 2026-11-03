@@ -4152,7 +4152,15 @@ public class RemoldAgent {
 				}
 				LayoutGate.Result layoutRes = LayoutGate.checkChangedFields(diff.changedFields);
 				if (!layoutRes.compatible() && LayoutGate.MODE_REJECT.equals(LAYOUT_GATE)) {
-					if (hasLiveInstances(className) || LayoutGate.hasStaticFieldChange(diff.changedFields)) {
+					boolean waiveReinit = false;
+					if (layoutRes.verdict() == LayoutGate.Verdict.CHANGED_FIELD_TYPE) {
+						List<String> typeChanged = LayoutGate.typeChangedFields(diff.changedFields);
+						if (!LayoutGate.hasStaticFieldChange(diff.changedFields) && diff.reinitFields != null && !typeChanged.isEmpty() && diff.reinitFields.containsAll(typeChanged)) {
+							waiveReinit = true;
+							info("[LAYOUT-REINIT] Dynamic class " + className + ": 经 @RemoldReinit 授权放行字段类型变更 (" + layoutRes.detail() + ")");
+						}
+					}
+					if (!waiveReinit && (hasLiveInstances(className) || LayoutGate.hasStaticFieldChange(diff.changedFields))) {
 						warn("[LAYOUT-REJECT] Dynamic class " + className + " rejected: " + layoutRes.detail());
 						return false;
 					}

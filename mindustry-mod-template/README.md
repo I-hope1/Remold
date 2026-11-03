@@ -112,3 +112,13 @@ Remold 纯粹是开发期挂在 JVM 上的探针（JavaAgent）。打包发布�
 ## 许可协议
 
 本模板采用 [MIT](LICENSE) 协议：可直接复制成你自己的工程，自由修改、商用、闭源分发。模板只通过构建脚本引用 Remold（`remold.gradle.kts`）与 `compileOnly` 的 API，本身不含 Remold 代码，因此不受插件层 GPL-3.0 约束。
+
+---
+
+## 🔗 相关跳转与链接
+
+* 🏠 **Remold 官方主仓库**：[https://github.com/I-hope1/Remold](https://github.com/I-hope1/Remold)
+* 📦 **版本发布与资产下载**：[GitHub Releases](https://github.com/I-hope1/Remold/releases)
+* 💡 **问题反馈与建议**：[GitHub Issues](https://github.com/I-hope1/Remold/issues)
+* 📖 **底层设计与架构文档**：[Remold Documentation](https://github.com/I-hope1/Remold/tree/main/docs)
+

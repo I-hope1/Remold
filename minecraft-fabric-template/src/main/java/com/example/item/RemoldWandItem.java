@@ -65,6 +65,9 @@ public class RemoldWandItem extends Item {
             // @At("HEAD") 时钩子打印在 begin 之前；@At("TAIL") 时打印在 end 之后。
             System.out.println("[src] use() begin");
             user.sendMessage(Text.literal("§a[Remold] " + message + " (威力: " + fireballPower + ")"), false);
+            user.sendMessage(Text.literal("§b👉 [点击跳转 Remold 官方仓库]")
+                .styled(style -> style.withClickEvent(new net.minecraft.text.ClickEvent(
+                    net.minecraft.text.ClickEvent.Action.OPEN_URL, "https://github.com/I-hope1/Remold"))), false);
             System.out.println("[src] use() end");
         }
         return TypedActionResult.success(user.getStackInHand(hand));
@@ -78,4 +81,10 @@ public class RemoldWandItem extends Item {
     public void onReload() {
         System.out.println(">>> [Remold] RemoldWandItem 热重载成功回调！当前 message=" + message + ", fireballPower=" + fireballPower);
     }
+
+    // =========================================================================================
+    // 【相关跳转与官方仓库】
+    // 想了解更多关于 Remold 的热重载机制、安全门设计与其它游戏模组开发：
+    // 请访问 Remold 官方主仓库：https://github.com/I-hope1/Remold
+    // =========================================================================================
 }

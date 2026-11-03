@@ -192,7 +192,14 @@ public class ExampleJavaMod extends Mod {
 
         dialog.cont.add(message).pad(10f).row();
         dialog.cont.add("[lightgray]Edit assets/sprites/" + BADGE_SPRITE + ".png to hot-reload this icon").pad(4f).row();
+        dialog.cont.button("Remold GitHub", () -> arc.Core.app.openURI("https://github.com/I-hope1/Remold")).size(140f, 50f);
         dialog.cont.button("I see", dialog::hide).size(120f, 50f);
         dialog.show();
     }
+
+    // =========================================================================================
+    // 【相关跳转与官方仓库】
+    // 想了解更多关于 Remold 的热重载机制、Arc 全套资源热更与安全门设计：
+    // 请访问 Remold 官方主仓库：https://github.com/I-hope1/Remold
+    // =========================================================================================
 }

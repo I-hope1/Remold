@@ -178,14 +178,22 @@ public class AnnotationTransformer implements ClassFileTransformer {
 				}
 				LayoutGate.Result layoutRes = LayoutGate.checkChangedFields(diff.changedFields);
 				if (!layoutRes.compatible() && LayoutGate.MODE_REJECT.equals(RemoldAgent.LAYOUT_GATE)) {
-					if (RemoldAgent.hasLiveInstances(classBeingRedefined) || LayoutGate.hasStaticFieldChange(diff.changedFields)) {
+					boolean waiveReinit = false;
+					if (layoutRes.verdict() == LayoutGate.Verdict.CHANGED_FIELD_TYPE) {
+						List<String> typeChanged = LayoutGate.typeChangedFields(diff.changedFields);
+						if (!LayoutGate.hasStaticFieldChange(diff.changedFields) && diff.reinitFields != null && !typeChanged.isEmpty() && diff.reinitFields.containsAll(typeChanged)) {
+							waiveReinit = true;
+							RemoldAgent.info("[LAYOUT-REINIT] " + dotClassName + ": 经 @RemoldReinit 授权放行字段类型变更 (" + layoutRes.detail() + ")");
+						}
+					}
+					if (!waiveReinit && (RemoldAgent.hasLiveInstances(classBeingRedefined) || LayoutGate.hasStaticFieldChange(diff.changedFields))) {
 						RemoldAgent.error("[EXTERNAL-HOTSWAP] Layout change rejected by LayoutGate: " + layoutRes.detail());
 						throw new IllegalClassFormatException("Field layout change rejected for " + dotClassName + ": " + layoutRes.detail());
 					}
 				}
 
 				// 3. InitFix 补丁构建
-				if (INIT_FIX && (!diff.addedInstanceFields.isEmpty() || !diff.addedStaticFields.isEmpty())) {
+				if (INIT_FIX && (!diff.addedInstanceFields.isEmpty() || !diff.addedStaticFields.isEmpty() || !diff.reinitFields.isEmpty() || !diff.typeChangedFields.isEmpty())) {
 					InitFix.transform(classBeingRedefined, bytes, diff);
 				}
 			}

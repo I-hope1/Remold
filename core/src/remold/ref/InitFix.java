@@ -742,7 +742,8 @@ public class InitFix {
 
 		// 宿主 Nest 视图：docs/initfix/01-safety-gate.md §3 的"全 Nest 单写证明"与 §1 T0 的"无写入"判定都基于它。
 		// 全程只读字节码，不调用 Class.forName，避免在 transform 线程上触发类加载死锁。
-		NestView nest = NestView.of(host, newClass);
+		HierarchyTreeOracle oracle = new HierarchyTreeOracle(host == null ? null : host.getClassLoader(), newClass);
+		NestView nest = NestView.of(host, newClass, oracle);
 
 		// ==================== docs/initfix/03-runtime-driver.md §4 存量重置扩展：候选集 ====================
 		// 默认只处理新增字段；标了 @RemoldReinit 的已有字段按显式声明进入候选集。
@@ -807,7 +808,7 @@ public class InitFix {
 			}
 			Map<String, FieldExtract> perField = extractFieldInits(
 			 host, className, init, targetInstanceFields, false, privateMethods,
-			 paramFields, scan.rejected(), fromRoot, selfAssignedFields, instanceReasons);
+			 paramFields, scan.rejected(), fromRoot, selfAssignedFields, instanceReasons, oracle);
 
 			for (Map.Entry<String, FieldExtract> fe : perField.entrySet()) {
 				instanceExtracts
@@ -822,7 +823,7 @@ public class InitFix {
 		if (clinitMethod != null) {
 			Map<String, FieldExtract> perField = extractFieldInits(
 			 host, className, clinitMethod, targetStaticFields,
-			 true, privateMethods, Map.of(), Map.of(), true, null, staticReasons);
+			 true, privateMethods, Map.of(), Map.of(), true, null, staticReasons, oracle);
 			for (Map.Entry<String, FieldExtract> fe : perField.entrySet()) {
 				staticExtracts
 				 .computeIfAbsent(fe.getKey(), x -> new ArrayList<>())
@@ -1984,8 +1985,11 @@ public class InitFix {
 
 		static NestView of(Class<?> host, ClassNode hostClass) {
 			ClassLoader loader = host == null ? null : host.getClassLoader();
+			return of(host, hostClass, new HierarchyTreeOracle(loader, hostClass));
+		}
+
+		static NestView of(Class<?> host, ClassNode hostClass, HierarchyTreeOracle oracle) {
 			try {
-				HierarchyTreeOracle oracle = new HierarchyTreeOracle(loader, hostClass);
 				oracle.getNestMembers(hostClass.name);
 				return new NestView(oracle.getNestFieldWrites(hostClass.name), true);
 			} catch (IllegalStateException unavailable) {
@@ -3520,7 +3524,7 @@ public class InitFix {
 	 boolean isStatic, Set<String> privateMethods,
 	 Map<Integer, ParamField> paramFields, Map<Integer, String> rejectedParamSlots,
 	 boolean fromRootCtor, Set<String> outSelfAssigned,
-	 Map<String, String> outReasons) {
+	 Map<String, String> outReasons, ClassHierarchyOracle oracle) {
 
 		if (method == null || targetFields.isEmpty()) return Map.of();
 
@@ -3597,7 +3601,7 @@ public class InitFix {
 				} else {
 					unsafeReason = checkSafe(host, className, method, insns, jumpTargets,
 					 frames, receiver, collected, minIdx, i, isStatic, privateMethods,
-					 paramFields, rejectedParamSlots, localProtected);
+					 paramFields, rejectedParamSlots, localProtected, oracle);
 					if (unsafeReason == null && !isStackBalanced(frames, minIdx, i, isStatic)) {
 						unsafeReason = "unbalanced stack after extraction";
 					}
@@ -3833,7 +3837,8 @@ public class InitFix {
 	                                Set<String> privateMethods,
 	                                Map<Integer, ParamField> paramFields,
 	                                Map<Integer, String> rejectedParamSlots,
-	                                Map<AbstractInsnNode, ProtectedAccess> outProtectedAccesses) {
+	                                Map<AbstractInsnNode, ProtectedAccess> outProtectedAccesses,
+	                                ClassHierarchyOracle oracle) {
 		if (!isStatic) {
 			if (receiver == null || receiver.insns.size() != 1) return "unexpected receiver";
 			AbstractInsnNode recv = receiver.insns.iterator().next();
@@ -3843,7 +3848,9 @@ public class InitFix {
 			}
 		}
 
-		ClassHierarchyOracle oracle = new HierarchyTreeOracle(host.getClassLoader());
+		if (oracle == null) {
+			oracle = new HierarchyTreeOracle(host == null ? null : host.getClassLoader());
+		}
 		for (int k = minIdx; k <= putIdx; k++) {
 			AbstractInsnNode n = insns.get(k);
 			if (n.getOpcode() != -1 && !collected.contains(n)) {

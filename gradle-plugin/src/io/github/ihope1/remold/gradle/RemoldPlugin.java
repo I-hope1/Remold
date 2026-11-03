@@ -1,68 +1,380 @@
 package io.github.ihope1.remold.gradle;
 
+import java.io.BufferedWriter;
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
+import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.Map;
+import java.util.List;
 
 import org.gradle.api.GradleException;
+import org.gradle.api.NamedDomainObjectContainer;
 import org.gradle.api.Plugin;
 import org.gradle.api.Project;
+import org.gradle.api.Task;
+import org.gradle.api.plugins.ExtensionAware;
+import org.gradle.api.provider.ListProperty;
+import org.gradle.api.tasks.Copy;
+import org.gradle.api.tasks.JavaExec;
+import org.gradle.api.tasks.SourceSet;
+import org.gradle.api.tasks.SourceSetContainer;
+import org.gradle.api.tasks.compile.JavaCompile;
 
 /**
- * Remold Gradle 插件：把仓库根的脚本插件（{@code remold.gradle} / {@code remold.gradle.kts}）从插件 jar 中展开到
- * {@code <rootDir>/.gradle/remold/scripts/} 后应用。
+ * Remold Gradle Plugin (Binary Plugin).
  *
- * <p>这样做的好处是「插件坐标」与「脚本实现」只有一份真相：脚本继续按文件维护、可单独下载调试，
- * 而消费者可以用 {@code plugins { id("io.github.i-hope1.remold") version "..." }} 获得 Gradle 原生的版本锁定、
- * 依赖缓存与离线构建能力。
- *
- * <p>脚本选择依据消费方构建文件的扩展名：Kotlin DSL 工程用 {@code remold.gradle.kts}，Groovy 工程用 {@code remold.gradle}。
+ * <p>Usage in {@code build.gradle.kts}:
+ * <pre>{@code
+ * plugins {
+ *     id("io.github.i-hope1.remold") version "0.2.1"
+ * }
+ * remold {
+ *     version = "0.2.1"
+ * }
+ * }</pre>
  */
 public final class RemoldPlugin implements Plugin<Project> {
 
-    private static final String GROOVY_SCRIPT = "/remold/remold.gradle";
-    private static final String KOTLIN_SCRIPT = "/remold/remold.gradle.kts";
-
     @Override
     public void apply(Project project) {
-        File buildFile = project.getBuildFile();
-        boolean kotlinDsl = (buildFile != null && buildFile.getName().endsWith(".kts"))
-                || new File(project.getProjectDir(), "build.gradle.kts").isFile();
-        String resource = kotlinDsl ? KOTLIN_SCRIPT : GROOVY_SCRIPT;
-        String fileName = kotlinDsl ? "remold.gradle.kts" : "remold.gradle";
-        File script = materialize(project, resource, fileName);
-        Map<String, Object> applyArgs = Collections.<String, Object>singletonMap("from", script);
-        project.apply(applyArgs);
-    }
+        RemoldExtension ext = project.getExtensions().create("remold", RemoldExtension.class);
+        RemoldConfigResolver resolver = new RemoldConfigResolver();
 
-    private static File materialize(Project project, String resource, String fileName) {
-        File dir = new File(project.getRootDir(), ".gradle/remold/scripts");
-        File target = new File(dir, fileName);
-        try (InputStream in = RemoldPlugin.class.getResourceAsStream(resource)) {
-            if (in == null) {
-                throw new GradleException("[Remold] 插件 jar 内缺少脚本资源: " + resource);
-            }
-            byte[] bytes = in.readAllBytes();
-            if (target.isFile() && target.length() == bytes.length && Arrays.equals(Files.readAllBytes(target.toPath()), bytes)) {
-                return target;
-            }
-            Files.createDirectories(dir.toPath());
-            Path part = new File(dir, fileName + "." + System.nanoTime() + ".part").toPath();
-            Files.write(part, bytes);
-            try {
-                Files.move(part, target.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            } catch (IOException ignored) {
-                Files.move(part, target.toPath(), StandardCopyOption.REPLACE_EXISTING);
-            }
-            return target;
-        } catch (IOException e) {
-            throw new GradleException("[Remold] 无法展开脚本插件到 " + target.getAbsolutePath(), e);
-        }
+        project.getPlugins().withId("java", javaPlugin -> {
+            // Ensure full debugging symbols (source, lines, vars) for InitFix parameter tracking & lambda alignment
+            project.getTasks().withType(JavaCompile.class).configureEach(compile -> {
+                compile.getOptions().setDebug(true);
+                compile.getOptions().getDebugOptions().setDebugLevel("source,lines,vars");
+            });
+
+            SourceSetContainer sourceSets = (SourceSetContainer) project.getExtensions().getByName("sourceSets");
+            SourceSet mainSourceSet = sourceSets.getByName("main");
+
+            // Register runRemold
+            project.getTasks().register("runRemold", JavaExec.class, task -> {
+                task.setGroup("application");
+                task.setDescription("Runs the application with Remold Java Agent & JBR DCEVM (blocking foreground)");
+                task.setClasspath(mainSourceSet.getRuntimeClasspath());
+
+                task.doFirst(t -> {
+                    RemoldResolvedConfig conf = resolver.resolve(project, ext);
+                    if (conf.getTargetJar() != null && !conf.getTargetJar().exists()) {
+                        throw new GradleException("[Remold] Target launch JAR does not exist; cannot launch application: " + conf.getTargetJar().getAbsolutePath());
+                    }
+                    task.getMainClass().set(conf.getMainClass());
+                    task.setClasspath(conf.getRuntimeClasspath());
+                    if (!conf.getAppArgs().isEmpty()) {
+                        task.args(conf.getAppArgs());
+                    }
+                    if (!"java".equals(conf.getExecutable())) {
+                        task.setExecutable(conf.getExecutable());
+                    }
+                    task.jvmArgs(conf.getJvmArgs());
+
+                    project.getLogger().lifecycle("[Remold] Launch configuration assembled:");
+                    if (conf.getTargetJar() != null) {
+                        project.getLogger().lifecycle("  - Target JAR: " + conf.getTargetJar().getAbsolutePath());
+                    }
+                    project.getLogger().lifecycle("  - Main class: " + conf.getMainClass());
+                    project.getLogger().lifecycle("  - Agent: " + conf.getAgentFile().getAbsolutePath());
+                    project.getLogger().lifecycle("  - Watch directories (" + conf.getAllWatchDirs().size() + "): " + conf.getWatchPath());
+                    if (!conf.getAppArgs().isEmpty()) {
+                        project.getLogger().lifecycle("  - App arguments: " + String.join(" ", conf.getAppArgs()));
+                    }
+                    if (ext.getFileShakeMs() != null) {
+                        project.getLogger().lifecycle("  - File Shake: " + ext.getFileShakeMs() + "ms");
+                    }
+                    if (!"java".equals(conf.getExecutable())) {
+                        project.getLogger().lifecycle("  - JBR: " + conf.getExecutable());
+                    }
+                });
+            });
+
+            // Register deployArtifact
+            project.getTasks().register("deployArtifact", Copy.class, task -> {
+                task.setGroup("application");
+                task.setDescription("Builds and deploys the output JAR into the specified deploy directory");
+                task.dependsOn(project.provider(() -> project.getTasks().findByName("remapJar") != null ? "remapJar" : "jar"));
+                task.doFirst(t -> resolver.resolve(project, ext));
+                task.from(project.provider(() -> {
+                    Task remap = project.getTasks().findByName("remapJar");
+                    return remap != null ? remap : project.getTasks().getByName("jar");
+                }));
+                task.into(project.provider(() -> {
+                    File deployDir = RemoldConfigResolver.resolveDeployDir(project, ext);
+                    if (deployDir == null) {
+                        throw new GradleException("[Remold] autoDeploy is enabled but deploy directory is not configured! Please specify via remold { deployDir = \"...\" } or gradle.properties (remold.deployDir=...).");
+                    }
+                    return deployDir;
+                }));
+                task.doLast(t -> {
+                    File deployDir = RemoldConfigResolver.resolveDeployDir(project, ext);
+                    project.getLogger().lifecycle("[Remold] Artifact deployed to: " + (deployDir != null ? deployDir.getAbsolutePath() : "unknown"));
+                });
+            });
+
+            // Register deployMod
+            project.getTasks().register("deployMod", task -> {
+                task.setGroup("application");
+                task.setDescription("Alias for deployArtifact");
+                task.dependsOn("deployArtifact");
+            });
+
+            // Hook classes doLast
+            project.getTasks().named("classes").configure(task -> {
+                task.doLast(t -> {
+                    try {
+                        File localAgent = new File(project.getRootDir(), ".gradle/remold/remold-agent.jar");
+                        if (!localAgent.exists() || localAgent.length() <= 1024) {
+                            resolver.resolve(project, ext);
+                        }
+                    } catch (Exception ignored) {
+                    }
+                });
+            });
+
+            // Register generateIdeaRunConfig
+            project.getTasks().register("generateIdeaRunConfig", task -> {
+                task.setGroup("application");
+                task.setDescription("Generates IntelliJ IDEA run configuration into .idea/runConfigurations/Run_with_Remold.xml");
+                task.dependsOn("classes");
+
+                task.doLast(t -> {
+                    RemoldResolvedConfig conf = resolver.resolve(project, ext);
+                    boolean shouldAutoDeploy = RemoldConfigResolver.shouldAutoDeploy(project, ext);
+                    boolean isLoom = project.getPlugins().hasPlugin("fabric-loom") || project.getExtensions().findByName("loom") != null;
+                    File xmlFile = IdeaRunConfigGenerator.generate(project, conf, shouldAutoDeploy, isLoom);
+                    if (xmlFile != null) {
+                        project.getLogger().lifecycle("[Remold] Generated IntelliJ IDEA run configuration: " + xmlFile.getAbsolutePath());
+                        project.getLogger().lifecycle("[Remold] Open this project in IDEA to launch directly with the run/debug configuration.");
+                    }
+                });
+            });
+
+            // Register generateRemoldScript
+            project.getTasks().register("generateRemoldScript", task -> {
+                task.setGroup("application");
+                task.setDescription("Generates native standalone launcher scripts and args file to run Remold without Gradle Daemon");
+                task.dependsOn("classes", "generateIdeaRunConfig");
+
+                task.doLast(t -> {
+                    RemoldResolvedConfig conf = resolver.resolve(project, ext);
+                    if (conf.getTargetJar() != null && !conf.getTargetJar().exists()) {
+                        throw new GradleException("[Remold] Target launch JAR does not exist; cannot launch application: " + conf.getTargetJar().getAbsolutePath());
+                    }
+                    File buildDir = project.getLayout().getBuildDirectory().getAsFile().get();
+                    File remoldDir = new File(buildDir, "remold");
+                    remoldDir.mkdirs();
+
+                    File argsFile = new File(remoldDir, "remold.args");
+                    List<String> lines = new ArrayList<>(conf.getJvmArgs());
+                    lines.add("-cp");
+                    lines.add(conf.getRuntimeClasspath().getAsPath());
+                    lines.add(conf.getMainClass());
+                    lines.addAll(conf.getAppArgs());
+
+                    try (BufferedWriter writer = Files.newBufferedWriter(argsFile.toPath(), StandardCharsets.UTF_8)) {
+                        for (String line : lines) {
+                            if (line.contains(" ") || line.contains("\t")) {
+                                writer.write("\"" + line.replace("\\", "\\\\") + "\"\n");
+                            } else {
+                                writer.write(line + "\n");
+                            }
+                        }
+                    } catch (IOException e) {
+                        throw new GradleException("[Remold] Failed to write args file: " + argsFile.getAbsolutePath(), e);
+                    }
+
+                    File batFile = new File(buildDir, "run-remold.bat");
+                    String batContent = "@echo off\r\nset \"JAVA_EXE=" + conf.getExecutable() + "\"\r\nif not exist \"%JAVA_EXE%\" set \"JAVA_EXE=java\"\r\n\"%JAVA_EXE%\" @\"%~dp0remold\\remold.args\" %*\r\n";
+                    try {
+                        Files.write(batFile.toPath(), batContent.getBytes(StandardCharsets.UTF_8));
+                    } catch (IOException e) {
+                        throw new GradleException("[Remold] Failed to write bat script: " + batFile.getAbsolutePath(), e);
+                    }
+
+                    File shFile = new File(buildDir, "run-remold.sh");
+                    String shContent = "#!/usr/bin/env bash\nDIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")\" && pwd)\"\nJAVA_EXE=\"" + conf.getExecutable() + "\"\nif [ ! -f \"$JAVA_EXE\" ]; then\n    JAVA_EXE=\"java\"\nfi\nexec \"$JAVA_EXE\" \"@$DIR/remold/remold.args\" \"$@\"\n";
+                    try {
+                        Files.write(shFile.toPath(), shContent.getBytes(StandardCharsets.UTF_8));
+                        shFile.setExecutable(true, false);
+                    } catch (Exception ignored) {
+                    }
+
+                    project.getLogger().lifecycle("[Remold] Generated native launch script:");
+                    project.getLogger().lifecycle("  - Windows: " + batFile.getAbsolutePath());
+                    project.getLogger().lifecycle("  - Linux/macOS: " + shFile.getAbsolutePath());
+                    project.getLogger().lifecycle("  - Args file: " + argsFile.getAbsolutePath());
+                    project.getLogger().lifecycle("[Remold] Run the script directly to launch the application without Gradle daemon overhead.");
+                });
+            });
+
+            // Register startRemold
+            project.getTasks().register("startRemold", task -> {
+                task.setGroup("application");
+                task.setDescription("Starts the application in a detached process so Gradle Daemon is immediately freed");
+                task.dependsOn("generateRemoldScript");
+
+                task.doLast(t -> {
+                    RemoldResolvedConfig conf = resolver.resolve(project, ext);
+                    if (conf.getTargetJar() != null && !conf.getTargetJar().exists()) {
+                        throw new GradleException("[Remold] Target launch JAR does not exist; cannot launch application: " + conf.getTargetJar().getAbsolutePath());
+                    }
+                    File buildDir = project.getLayout().getBuildDirectory().getAsFile().get();
+                    File argsFile = new File(buildDir, "remold/remold.args");
+                    boolean isWin = System.getProperty("os.name").toLowerCase().contains("win");
+
+                    try {
+                        if (isWin) {
+                            new ProcessBuilder("cmd", "/c", "start", "\"Remold [" + project.getName() + "]\"", conf.getExecutable(), "@" + argsFile.getAbsolutePath())
+                                    .directory(project.getProjectDir())
+                                    .start();
+                            project.getLogger().lifecycle("[Remold] Application launched in a separate console window.");
+                        } else {
+                            File logFile = new File(buildDir, "remold/remold.log");
+                            new ProcessBuilder(conf.getExecutable(), "@" + argsFile.getAbsolutePath())
+                                    .directory(project.getProjectDir())
+                                    .redirectOutput(logFile)
+                                    .redirectErrorStream(true)
+                                    .start();
+                            project.getLogger().lifecycle("[Remold] Application launched in background. Output log: " + logFile.getAbsolutePath());
+                        }
+                    } catch (IOException e) {
+                        throw new GradleException("[Remold] Failed to start application process", e);
+                    }
+                    project.getLogger().lifecycle("[Remold] Gradle Daemon released (IDLE). Run ./gradlew compileJava in terminal anytime to trigger hot-reload.");
+                });
+            });
+
+            // Hook afterEvaluate
+            project.afterEvaluate(p -> {
+                boolean shouldAutoDeploy = RemoldConfigResolver.shouldAutoDeploy(project, ext);
+
+                // Configure toolchain unset on runRemold if custom JBR provided
+                String[] execAndHome = RemoldConfigResolver.resolveExecutableAndHome(project, ext);
+                if (!"java".equals(execAndHome[0])) {
+                    project.getTasks().named("runRemold", JavaExec.class, t -> {
+                        t.getJavaLauncher().set((org.gradle.jvm.toolchain.JavaLauncher) null);
+                    });
+                }
+
+                // Deduplicated task dependency wiring
+                List<String> targetTasks = Arrays.asList("runRemold", "startRemold", "generateRemoldScript", "generateIdeaRunConfig");
+                for (String taskName : targetTasks) {
+                    project.getTasks().named(taskName, t -> {
+                        if (shouldAutoDeploy) {
+                            t.dependsOn("deployArtifact");
+                        }
+                        if (!ext.getDependsOn().isEmpty()) {
+                            t.dependsOn(ext.getDependsOn());
+                        }
+                    });
+                }
+
+                if (shouldAutoDeploy) {
+                    Task runClient = project.getTasks().findByName("runClient");
+                    if (runClient != null) {
+                        runClient.dependsOn("deployArtifact");
+                    }
+                }
+
+                File ideaDir = new File(project.getRootDir(), ".idea");
+                File xmlFile = new File(project.getRootDir(), ".idea/runConfigurations/Run_with_Remold.xml");
+                if (ideaDir.exists()) {
+                    Task classesTask = project.getTasks().findByName("classes");
+                    if (classesTask != null) {
+                        classesTask.finalizedBy("generateIdeaRunConfig");
+                    }
+                    if (!xmlFile.exists()) {
+                        try {
+                            RemoldResolvedConfig conf = resolver.resolve(project, ext);
+                            boolean isLoom = project.getPlugins().hasPlugin("fabric-loom") || project.getExtensions().findByName("loom") != null;
+                            File out = IdeaRunConfigGenerator.generate(project, conf, shouldAutoDeploy, isLoom);
+                            if (out != null) {
+                                project.getLogger().lifecycle("[Remold] IntelliJ IDEA run configuration ready: " + out.getAbsolutePath());
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+
+                // Fabric Loom auto injection
+                if (project.getPlugins().hasPlugin("fabric-loom") || project.getExtensions().findByName("loom") != null) {
+                    try {
+                        Object loom = project.getExtensions().findByName("loom");
+                        if (loom != null) {
+                            Method getRuns = loom.getClass().getMethod("getRuns");
+                            NamedDomainObjectContainer<?> runs = (NamedDomainObjectContainer<?>) getRuns.invoke(loom);
+                            Object client = runs != null ? runs.findByName("client") : null;
+                            if (client != null) {
+                                RemoldResolvedConfig conf = resolver.resolve(project, ext);
+                                Method vmArgMethod = client.getClass().getMethod("vmArg", String.class);
+                                for (String arg : conf.getJvmArgs()) {
+                                    vmArgMethod.invoke(client, arg);
+                                }
+                                project.getLogger().lifecycle("[Remold] Injected hot-reload agent parameters into Fabric Loom runClient!");
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+
+                // NeoForge ModDevGradle auto injection
+                try {
+                    Object runsExt = project.getExtensions().findByName("runs");
+                    if (runsExt == null && project.getExtensions().findByName("neoForge") instanceof ExtensionAware) {
+                        runsExt = ((ExtensionAware) project.getExtensions().findByName("neoForge")).getExtensions().findByName("runs");
+                    }
+                    if (runsExt != null) {
+                        Method getByName = runsExt.getClass().getMethod("findByName", String.class);
+                        Object clientRun = getByName.invoke(runsExt, "client");
+                        if (clientRun != null) {
+                            RemoldResolvedConfig conf = resolver.resolve(project, ext);
+                            try {
+                                Object jvmArgsProp = clientRun.getClass().getMethod("getJvmArguments").invoke(clientRun);
+                                if (jvmArgsProp instanceof ListProperty) {
+                                    @SuppressWarnings("unchecked")
+                                    ListProperty<String> listProp = (ListProperty<String>) jvmArgsProp;
+                                    listProp.addAll(conf.getJvmArgs());
+                                    project.getLogger().lifecycle("[Remold] Injected hot-reload agent parameters into NeoForge ModDevGradle runClient!");
+                                }
+                            } catch (Throwable t) {
+                                try {
+                                    Method jvmArgMethod = clientRun.getClass().getMethod("jvmArg", String.class);
+                                    for (String arg : conf.getJvmArgs()) {
+                                        jvmArgMethod.invoke(clientRun, arg);
+                                    }
+                                    project.getLogger().lifecycle("[Remold] Injected hot-reload agent parameters into NeoForge runClient!");
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+
+                // ForgeGradle auto injection
+                try {
+                    Object mcExt = project.getExtensions().findByName("minecraft");
+                    if (mcExt != null) {
+                        Method getRuns = mcExt.getClass().getMethod("getRuns");
+                        NamedDomainObjectContainer<?> runs = (NamedDomainObjectContainer<?>) getRuns.invoke(mcExt);
+                        Object client = runs != null ? runs.findByName("client") : null;
+                        if (client != null) {
+                            RemoldResolvedConfig conf = resolver.resolve(project, ext);
+                            Method jvmArgMethod = client.getClass().getMethod("jvmArg", String.class);
+                            for (String arg : conf.getJvmArgs()) {
+                                jvmArgMethod.invoke(client, arg);
+                            }
+                            project.getLogger().lifecycle("[Remold] Injected hot-reload agent parameters into ForgeGradle runClient!");
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+            });
+        });
     }
 }

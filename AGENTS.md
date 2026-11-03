@@ -102,7 +102,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 布局预测器 | `LayoutPredictor`（`core/src/remold/offset/`，抛弃式加载器干净加载预测物理偏移，协同注入非 JDK 祖先链防御 package-private 运行时包隔离） |
 | 反射与序列化缓存驱逐 | `ReflectionCacheManager`（`core/src/remold/evict/`，实例级缓存清除 SPI，内置 Jackson/Gson）；Arc `Json` 驱逐器在 `plugin-arc/src/remold/arc/ArcJsonEvictor`，由插件注册 |
 | 偏移量稳定性与漂移探针 | `tests/src/OffsetStabilityProbe.java`（`./gradlew :tests:offsetStabilityProbe -Pp05.jbr=<dcevm-jdk>`，实测单类稳定性、父类漂移、Updater 破坏与 C2 逆优化） |
-| Gradle 插件坐标 | `gradle-plugin/`（`java-gradle-plugin`；把仓库根 `remold.gradle(.kts)` 打进 jar 后展开应用，供 JitPack 的 `plugins { id("io.github.i-hope1.remold") }` 引入；脚本仍是唯一实现，勿在此另写一套） |
+| Gradle 插件坐标 | `gradle-plugin/`（`java-gradle-plugin`，坐标 `io.github.i-hope1.remold`；二进制插件实现 `RemoldPlugin` + `RemoldExtension` 类型安全 DSL + 配置缓存，同时将仓库根 `remold.gradle(.kts)` 打包进 jar 作为脚本资源） |
 
 ## 5. 实现状态概要（详细参见 `docs/status.md`）
 

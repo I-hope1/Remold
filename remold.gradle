@@ -68,123 +68,42 @@ class RemoldExtension {
 }
 
 def remoldExt = project.extensions.create('remold', RemoldExtension)
+def cachedConfig = null
 
 project.plugins.withId('java') {
     // 确保编译输出包含完整调试符号（行号、源码、局部变量表），供 InitFix 参数回溯、Lambda 对齐与调试使用
     tasks.withType(JavaCompile).configureEach {
         options.debug = true
-        options.debugOptions.debugLevel = "source,lines,vars"
+        options.debugOptions.debugLevel = 'source,lines,vars'
     }
 
-    def sourceSets = project.extensions.getByType(SourceSetContainer)
+    def isWinOs = System.getProperty('os.name').toLowerCase().contains('win')
+    def localRemoldDir = new File(project.rootDir, '.gradle/remold')
 
-    // 是否属于 SpongePowered Mixin 生态：Fabric Loom 项目，或显式声明了 net.fabricmc / org.spongepowered 依赖。
-    // 命中即默认挂载 plugin-mixin（可用 -Premold.autoMixin=false 关闭）。
-    def usesMixinEcosystem = {
-        if (project.plugins.hasPlugin('fabric-loom') || project.extensions.findByName('loom') != null) {
-            return true
+    /**
+     * 由 JVM 家目录或 java 可执行文件反推出 IDE 认可的 **JRE 家目录**。
+     * IDEA 的 ALTERNATIVE_JRE_PATH 只接受家目录（或已注册的 SDK 名）；写入 `...\bin\java.exe`
+     * 会被判定为路径不存在并直接弹框拒绝启动。取不到时返回空串（此时不写该字段）。
+     */
+    def toJreHome = { String path ->
+        if (!path) return ''
+        def f = new File(path)
+        if (f.isFile() || f.name.equalsIgnoreCase('java') || f.name.equalsIgnoreCase('java.exe')) {
+            def bin = f.parentFile
+            if (bin == null || !bin.name.equalsIgnoreCase('bin')) return ''
+            f = bin.parentFile
+            if (f == null) return ''
         }
-        try {
-            return project.configurations.any { cfg ->
-                try {
-                    cfg.dependencies.any { dep ->
-                        dep.group == 'org.spongepowered' || dep.group == 'net.fabricmc'
-                    }
-                } catch (Throwable ignored) {
-                    false
-                }
-            }
-        } catch (Throwable ignored) {
-            return false
+        // JDK 8 的 java.home 通常是 <jdk>/jre，向上取一层才是 IDE 认可的 JDK 家目录
+        if (f.name.equalsIgnoreCase('jre')) {
+            def parent = f.parentFile
+            if (parent != null && new File(parent, isWinOs ? 'bin/java.exe' : 'bin/java').exists()) f = parent
         }
+        return f.isDirectory() ? f.absolutePath : ''
     }
 
-    // 是否属于 Minecraft Forge / NeoForge 生态：声明了对应 Gradle 插件或依赖。
-    // 命中即默认挂载 plugin-forge（可用 -Premold.autoForge=false 关闭）。
-    def usesForgeEcosystem = {
-        if (project.plugins.hasPlugin('net.minecraftforge.gradle') || project.plugins.hasPlugin('net.neoforged.moddev')
-                || project.plugins.hasPlugin('net.neoforged.gradle.userdev') || project.extensions.findByName('neoForge') != null
-                || project.extensions.findByName('minecraft') != null) {
-            return true
-        }
-        try {
-            return project.configurations.any { cfg ->
-                try {
-                    cfg.dependencies.any { dep ->
-                        dep.group == 'net.minecraftforge' || dep.group == 'net.neoforged' || dep.group?.startsWith('net.neoforged')
-                    }
-                } catch (Throwable ignored) {
-                    false
-                }
-            }
-        } catch (Throwable ignored) {
-            return false
-        }
-    }
-
-    def resolveRemoldConfig = {
-        // 0. 解析目标 jar (若配置了 jar，进入纯净 JAR 模式)
-        def jarProp = remoldExt.jar ?: project.findProperty('remold.jar') ?: project.findProperty('remoldJar')
-        File targetJar = null
-        if (jarProp != null) {
-            targetJar = project.file(jarProp)
-            if (!targetJar.exists()) {
-                logger.warn("[Remold] Notice: Target launch JAR does not exist yet: ${targetJar.absolutePath} (can be ignored if not running immediately)")
-            }
-        }
-
-        // 1. 解析 mainClass
-        def main = remoldExt.mainClass ?: project.findProperty('remold.mainClass') ?: project.findProperty('remoldMainClass')
-        if (!main && project.extensions.findByName('application')) {
-            main = (project.extensions.findByName('application') as JavaApplication).mainClass.orNull
-        }
-        if (!main && project.hasProperty('mainClassName')) {
-            main = project.property('mainClassName')
-        }
-        if (!main && targetJar != null && targetJar.exists()) {
-            try {
-                def jf = new java.util.jar.JarFile(targetJar)
-                main = jf.manifest?.mainAttributes?.getValue('Main-Class')
-                jf.close()
-            } catch (Exception ignored) { }
-        }
-        if (!main) {
-            if (targetJar != null && targetJar.exists()) {
-                throw new GradleException("[Remold] Could not read Main-Class from MANIFEST.MF of ${targetJar.name}. Please specify it explicitly via remold { mainClass = '...' }.")
-            } else if (targetJar != null) {
-                main = 'unknown.MainClass'
-            } else if (project.plugins.hasPlugin('fabric-loom') || project.extensions.findByName('loom') != null) {
-                main = 'net.fabricmc.loader.impl.launch.knot.KnotClient'
-            } else {
-                throw new GradleException('[Remold] Neither mainClass nor jar is configured. Please specify via remold { mainClass = "..." }, remold { jar = "..." }, or gradle.properties.')
-            }
-        }
-
-        // 2. 解析运行用 JVM
-        // 默认使用「运行 Gradle 的这个 JVM」——在 IDEA 里就是 Gradle JVM（项目 SDK），
-        // 而不是 PATH / JAVA_HOME 里的 java，避免构建用的 SDK 与启动用的 JDK 不一致。
-        def isWinOs = System.getProperty('os.name').toLowerCase().contains('win')
-
-        // 由 JVM 家目录或 java 可执行文件反推出 IDE 认可的 JRE 家目录。
-        // IDEA 的 ALTERNATIVE_JRE_PATH 只接受家目录（或已注册的 SDK 名），写入 ...\bin\java.exe
-        // 会被判定为路径不存在并直接弹框拒绝启动。取不到时返回空串（此时不写该字段）。
-        def toJreHome = { String path ->
-            if (!path) return ''
-            def f = new File(path)
-            if (f.isFile() || f.name.equalsIgnoreCase('java') || f.name.equalsIgnoreCase('java.exe')) {
-                def bin = f.parentFile
-                if (bin == null || !bin.name.equalsIgnoreCase('bin')) return ''
-                f = bin.parentFile
-                if (f == null) return ''
-            }
-            // JDK 8 的 java.home 通常是 <jdk>/jre，向上取一层才是 IDE 认可的 JDK 家目录
-            if (f.name.equalsIgnoreCase('jre')) {
-                def parent = f.parentFile
-                if (parent != null && new File(parent, isWinOs ? 'bin/java.exe' : 'bin/java').exists()) f = parent
-            }
-            return f.isDirectory() ? f.absolutePath : ''
-        }
-
+    /** 解析运行用 JVM（可执行文件路径与 JRE 家目录）。 */
+    def resolveJbr = {
         def execPath = new File(System.getProperty('java.home'), isWinOs ? 'bin/java.exe' : 'bin/java').absolutePath
         def execHome = toJreHome(System.getProperty('java.home'))
         if (!new File(execPath).exists()) {
@@ -202,146 +121,242 @@ project.plugins.withId('java') {
                 logger.warn("[Remold] Specified JBR path does not exist: ${jbr}. Falling back to project SDK JVM.")
             }
         }
+        return [execPath: execPath, execHome: execHome]
+    }
 
-        def downloadRemoteJar = { String urlStr, File targetFile ->
-            boolean ok = false
-            String curUrl = urlStr
-            for (int hop = 0; hop < 5; hop++) {
-                try {
-                    def uri = java.net.URI.create(curUrl)
-                    def conn = uri.toURL().openConnection()
-                    if (!(conn instanceof HttpURLConnection)) break
-                    conn.connectTimeout = 10000
-                    conn.readTimeout = 30000
-                    conn.instanceFollowRedirects = true
-                    conn.setRequestProperty("User-Agent", "Remold-Gradle-Plugin")
-                    int code = conn.responseCode
-                    if (code in 300..399) {
-                        String loc = conn.getHeaderField("Location")
-                        if (!loc) break
-                        curUrl = loc.startsWith("http") ? loc : uri.resolve(loc).toString()
-                        continue
-                    }
-                    if (code == 200) {
-                        conn.inputStream.withCloseable { inStream ->
-                            targetFile.withOutputStream { outStream ->
-                                outStream << inStream
-                            }
-                        }
-                        if (targetFile.exists() && targetFile.length() > 1024) {
-                            ok = true
-                            break
-                        } else {
-                            targetFile.delete()
-                        }
-                    }
-                    break
-                } catch (Exception ignored) {
-                    targetFile.delete()
-                    break
-                }
-            }
-            return ok
-        }
+    /** 解析部署目标目录。 */
+    def resolveDeployDir = {
+        def dir = remoldExt.deployDir ?: remoldExt.modsDir ?: project.findProperty('remold.deployDir') ?: project.findProperty('remold.modsDir') ?: project.findProperty('remoldDeployDir') ?: project.findProperty('remoldModsDir')
+        return dir != null ? project.file(dir) : null
+    }
 
-        // 统一的项目本地缓存目录：IDEA 运行配置只引用 $PROJECT_DIR$/.gradle/remold/ 下的副本，
-        // 与 jar 的真实来源（仓库内构建输出 / libs / Gradle 缓存 / 远端下载）解耦。
-        // 否则同一份配置里会出现 agent 指 build/libs、插件指 .gradle/remold 的混合路径。
-        def localRemoldDir = new File(project.rootDir, '.gradle/remold')
+    /** 是否自动执行 deployArtifact。 */
+    def shouldAutoDeploy = {
+        return remoldExt.autoDeploy != null ? remoldExt.autoDeploy : (project.findProperty('remold.autoDeploy') ? project.findProperty('remold.autoDeploy').toString().toBoolean() : (resolveDeployDir() != null))
+    }
 
-        def syncIntoLocalRemold = { File src, File dest ->
-            if (src == null || !src.exists()) return dest
+    def downloadRemoteJar = { String urlStr, File targetFile ->
+        boolean ok = false
+        String curUrl = urlStr
+        for (int hop = 0; hop < 5; hop++) {
             try {
-                if (src.canonicalPath == dest.canonicalPath) return src
-                if (dest.exists() && dest.length() == src.length() && dest.lastModified() == src.lastModified()) return dest
-                dest.parentFile.mkdirs()
-                java.nio.file.Files.copy(src.toPath(), dest.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
-                dest.setLastModified(src.lastModified())
-                return dest
+                def uri = java.net.URI.create(curUrl)
+                def conn = uri.toURL().openConnection()
+                if (!(conn instanceof HttpURLConnection)) break
+                conn.connectTimeout = 10000
+                conn.readTimeout = 30000
+                conn.instanceFollowRedirects = true
+                conn.setRequestProperty("User-Agent", "Remold-Gradle-Plugin")
+                int code = conn.responseCode
+                if (code in 300..399) {
+                    String loc = conn.getHeaderField("Location")
+                    if (!loc) break
+                    curUrl = loc.startsWith("http") ? loc : uri.resolve(loc).toString()
+                    continue
+                }
+                if (code == 200) {
+                    conn.inputStream.withCloseable { inStream ->
+                        targetFile.withOutputStream { outStream ->
+                            outStream << inStream
+                        }
+                    }
+                    if (targetFile.exists() && targetFile.length() > 1024) {
+                        ok = true
+                        break
+                    } else {
+                        targetFile.delete()
+                    }
+                }
+                break
             } catch (Exception ignored) {
-                return src
+                targetFile.delete()
+                break
             }
         }
+        return ok
+    }
 
-        // 3. 解析版本与 agent jar
-        def ver = remoldExt.version ?: project.findProperty('remold.version') ?: project.findProperty('remoldVersion') ?: (project.rootProject.hasProperty('remoldVersion') ? project.rootProject.property('remoldVersion') : null)
-        File agentFile = remoldExt.agentJar ? new File(remoldExt.agentJar.toString()) : null
-        if (agentFile == null || !agentFile.exists()) {
-            def candidates = [
-                project.file('libs/remold-agent.jar'),
-                project.file('remold-agent.jar'),
-                project.rootProject.file('core/build/libs/remold-agent.jar'),
-                project.rootProject.file('../core/build/libs/remold-agent.jar'),
-                // 上次同步到项目本地的副本：clean 掉 build/libs 后仍可用，
-                // 避免静默退回 Gradle 缓存里的发布版 agent（版本可能对不上）
-                new File(localRemoldDir, 'remold-agent.jar')
-            ]
-            agentFile = candidates.find { it.exists() }
+    def syncIntoLocalRemold = { File src, File dest ->
+        if (src == null || !src.exists()) return dest
+        try {
+            if (src.canonicalPath == dest.canonicalPath) return src
+            if (dest.exists() && dest.length() == src.length() && dest.lastModified() == src.lastModified()) return dest
+            dest.parentFile.mkdirs()
+            java.nio.file.Files.copy(src.toPath(), dest.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            dest.setLastModified(src.lastModified())
+            return dest
+        } catch (Exception ignored) {
+            return src
         }
+    }
 
-        // 若本地未找到，尝试从 Gradle 依赖缓存或官方 Releases 自动下载
-        if (agentFile == null || !agentFile.exists()) {
-            if (!ver) {
-                throw new GradleException('[Remold] Remold version is not configured! Please specify via remold { version = "..." } or gradle.properties (remold.version=...).')
-            }
-            def cacheDir = new File(project.gradle.gradleUserHomeDir, "caches/remold")
-            def cachedJar = new File(cacheDir, "remold-agent-${ver}.jar")
-
-            if (cachedJar.exists() && cachedJar.length() > 1024) {
-                agentFile = cachedJar
-            } else {
+    /**
+     * 统一的 Jar 本地查找、Gradle 缓存探测、detachedConfiguration 解析与远端 Releases 下载。
+     */
+    def resolveOrDownloadJar = { String artifactLabel, String ver, List<File> candidates, File cachedJar, List<String> mavenNotations, List<String> downloadUrls ->
+        def found = candidates.find { it != null && it.exists() }
+        if (found != null && found.exists()) {
+            return found
+        }
+        if (cachedJar != null && cachedJar.exists() && cachedJar.length() > 1024) {
+            return cachedJar
+        }
+        File resolvedJar = null
+        if (ver) {
+            for (String notation : mavenNotations) {
                 try {
                     def detached = project.configurations.detachedConfiguration(
-                        project.dependencies.create("com.github.I-hope1.Remold:core:${ver}")
+                        project.dependencies.create(notation)
                     )
                     detached.transitive = false
                     def resolved = detached.resolve()
                     if (!resolved.isEmpty()) {
-                        agentFile = resolved.first()
+                        resolvedJar = resolved.first()
+                        break
                     }
                 } catch (Exception ignored) { }
-
-                if (agentFile == null || !agentFile.exists()) {
-                    try {
-                        def detachedAll = project.configurations.detachedConfiguration(
-                            project.dependencies.create("com.github.I-hope1.Remold:core:${ver}:all")
-                        )
-                        detachedAll.transitive = false
-                        def resolvedAll = detachedAll.resolve()
-                        if (!resolvedAll.isEmpty()) {
-                            agentFile = resolvedAll.first()
-                        }
-                    } catch (Exception ignored) { }
-                }
-
-                if (agentFile == null || !agentFile.exists()) {
-                    logger.lifecycle("[Remold] Local agent jar not found; downloading remold-agent.jar (version: ${ver})...")
-                    def downloadUrls = [
-                        "https://github.com/I-hope1/Remold/releases/download/v${ver}/remold-agent.jar",
-                        "https://github.com/I-hope1/Remold/releases/download/${ver}/remold-agent.jar"
-                    ]
-                    cacheDir.mkdirs()
-                    for (String urlStr : downloadUrls) {
-                        if (downloadRemoteJar(urlStr, cachedJar)) {
-                            agentFile = cachedJar
-                            logger.lifecycle("[Remold] Agent jar ready: ${cachedJar.absolutePath}")
-                            break
-                        }
-                    }
+            }
+        }
+        if ((resolvedJar == null || !resolvedJar.exists()) && cachedJar != null && downloadUrls) {
+            logger.lifecycle("[Remold] Downloading ${artifactLabel} (version: ${ver})...")
+            cachedJar.parentFile?.mkdirs()
+            for (String urlStr : downloadUrls) {
+                if (downloadRemoteJar(urlStr, cachedJar)) {
+                    resolvedJar = cachedJar
+                    logger.lifecycle("[Remold] ${artifactLabel} ready: ${cachedJar.absolutePath}")
+                    break
                 }
             }
         }
+        return resolvedJar
+    }
+
+    /**
+     * 是否属于 SpongePowered Mixin 生态：Fabric Loom 项目，或显式声明了 net.fabricmc / org.spongepowered 依赖。
+     * 命中即默认挂载 plugin-mixin（可用 -Premold.autoMixin=false 关闭）。
+     */
+    def usesMixinEcosystem = {
+        if (project.plugins.hasPlugin('fabric-loom') || project.extensions.findByName('loom') != null) {
+            return true
+        }
+        try {
+            return project.configurations.any { cfg ->
+                try {
+                    return cfg.dependencies.any { dep ->
+                        dep.group == 'org.spongepowered' || dep.group == 'net.fabricmc'
+                    }
+                } catch (Throwable ignored) {
+                    return false
+                }
+            }
+        } catch (Throwable ignored) {
+            return false
+        }
+    }
+
+    /**
+     * 是否属于 Minecraft Forge / NeoForge 生态：声明了对应 Gradle 插件或依赖。
+     * 命中即默认挂载 plugin-forge（可用 -Premold.autoForge=false 关闭）。
+     */
+    def usesForgeEcosystem = {
+        if (project.plugins.hasPlugin('net.minecraftforge.gradle')
+            || project.plugins.hasPlugin('net.neoforged.moddev')
+            || project.plugins.hasPlugin('net.neoforged.gradle.userdev')
+            || project.extensions.findByName('neoForge') != null
+            || project.extensions.findByName('minecraft') != null
+        ) {
+            return true
+        }
+        try {
+            return project.configurations.any { cfg ->
+                try {
+                    return cfg.dependencies.any { dep ->
+                        dep.group == 'net.minecraftforge' || dep.group == 'net.neoforged' || (dep.group != null && dep.group.startsWith('net.neoforged'))
+                    }
+                } catch (Throwable ignored) {
+                    return false
+                }
+            }
+        } catch (Throwable ignored) {
+            return false
+        }
+    }
+
+    def resolveRemoldConfig = {
+        if (cachedConfig != null) {
+            return cachedConfig
+        }
+
+        // 0. 解析目标 jar (若配置了 jar，进入纯净 JAR 模式)
+        def jarProp = remoldExt.jar ?: project.findProperty('remold.jar') ?: project.findProperty('remoldJar')
+        File targetJar = null
+        if (jarProp != null) {
+            targetJar = project.file(jarProp)
+            if (!targetJar.exists()) {
+                logger.warn("[Remold] Notice: Target launch JAR does not exist yet: ${targetJar.absolutePath} (can be ignored if not running immediately)")
+            }
+        }
+
+        // 1. 解析 mainClass
+        def main = remoldExt.mainClass ?: project.findProperty('remold.mainClass') ?: project.findProperty('remoldMainClass') ?: (project.extensions.findByName('application') instanceof JavaApplication ? project.extensions.findByName('application').mainClass.orNull : null) ?: project.findProperty('mainClassName')
+
+        if (main == null && targetJar != null && targetJar.exists()) {
+            try {
+                def jf = new java.util.jar.JarFile(targetJar)
+                main = jf.manifest?.mainAttributes?.getValue('Main-Class')
+                jf.close()
+            } catch (Exception ignored) { }
+        }
+
+        if (main == null) {
+            if (targetJar != null && targetJar.exists()) {
+                throw new GradleException("[Remold] Could not read Main-Class from MANIFEST.MF of ${targetJar.name}. Please specify it explicitly via remold { mainClass = '...' }.")
+            } else if (targetJar != null) {
+                main = 'unknown.MainClass'
+            } else if (project.plugins.hasPlugin('fabric-loom') || project.extensions.findByName('loom') != null) {
+                main = 'net.fabricmc.loader.impl.launch.knot.KnotClient'
+            } else {
+                throw new GradleException("[Remold] Neither mainClass nor jar is configured. Please specify via remold { mainClass = '...' }, remold { jar = '...' }, or gradle.properties.")
+            }
+        }
+
+        // 2. 解析运行用 JVM
+        def jvm = resolveJbr()
+        def execPath = jvm.execPath
+        def execHome = jvm.execHome
+
+        // 3. 解析版本与 agent jar
+        def ver = remoldExt.version ?: project.findProperty('remold.version') ?: project.findProperty('remoldVersion') ?: (project.rootProject.hasProperty('remoldVersion') ? project.rootProject.property('remoldVersion') : null)
+        File agentFile = remoldExt.agentJar ? new File(remoldExt.agentJar.toString()) : null
+        def agentCandidates = []
+        if (agentFile != null) {
+            agentCandidates.add(agentFile)
+        }
+        agentCandidates.addAll([
+            project.file('libs/remold-agent.jar'),
+            project.file('remold-agent.jar'),
+            project.rootProject.file('core/build/libs/remold-agent.jar'),
+            project.rootProject.file('../core/build/libs/remold-agent.jar'),
+            new File(localRemoldDir, 'remold-agent.jar')
+        ])
+
+        def cachedAgentJar = ver ? new File(project.gradle.gradleUserHomeDir, "caches/remold/remold-agent-${ver}.jar") : null
+        def agentNotations = ver ? ["com.github.I-hope1.Remold:core:${ver}", "com.github.I-hope1.Remold:core:${ver}:all"] : []
+        def agentUrls = ver ? [
+            "https://github.com/I-hope1/Remold/releases/download/v${ver}/remold-agent.jar",
+            "https://github.com/I-hope1/Remold/releases/download/${ver}/remold-agent.jar"
+        ] : []
+
+        agentFile = resolveOrDownloadJar('remold-agent.jar', ver ? ver.toString() : null, agentCandidates, cachedAgentJar, agentNotations, agentUrls)
 
         if (agentFile == null || !agentFile.exists()) {
             throw new GradleException(
-                "[Remold] remold-agent.jar was not found and could not be downloaded automatically (target version: ${remoldExt.version})!\n" +
+                "[Remold] remold-agent.jar was not found and could not be downloaded automatically (target version: ${ver})!\n" +
                 "Please check your network connection or specify a valid version in remold { version = '...' },\n" +
                 "or specify a local file explicitly in remold { agentJar = '/path/to/remold-agent.jar' }."
             )
         }
 
-        // 无论来源（仓库内构建输出 / libs / Gradle 缓存 / 远端下载），一律同步到
-        // .gradle/remold/remold-agent.jar，保证 IDEA 运行配置里 agent 与插件落在同一目录。
         agentFile = syncIntoLocalRemold(agentFile, new File(localRemoldDir, 'remold-agent.jar'))
 
         // 4. 自动推导编译输出与资源目录并拼装监听路径
@@ -361,21 +376,21 @@ project.plugins.withId('java') {
         if (outResourceDir != null) allCandidateDirs.add(outResourceDir)
         if (ideaOutDir.exists()) allCandidateDirs.add(ideaOutDir)
         allCandidateDirs.addAll(extraDirs)
-        def allWatchDirs = allCandidateDirs.findAll { it != null && it.exists() }.unique()
+        def allWatchDirs = allCandidateDirs.findAll { it.exists() }.unique()
         def watchPath = allWatchDirs.collect { it.absolutePath }.join(File.pathSeparator)
 
         // 5. 装配 JVM 参数
         def args = [
-            '-XX:+IgnoreUnrecognizedVMOptions',
-            '-XX:+AllowEnhancedClassRedefinition',
+            "-XX:+IgnoreUnrecognizedVMOptions",
+            "-XX:+AllowEnhancedClassRedefinition",
             "-javaagent:${agentFile.absolutePath}=${watchPath}",
-            '--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED',
-            '--add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED',
-            '--add-exports=java.base/jdk.internal.loader=ALL-UNNAMED',
-            '--enable-native-access=ALL-UNNAMED'
+            "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED",
+            "--add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED",
+            "--add-exports=java.base/jdk.internal.loader=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
         ]
 
-        if (remoldExt.debug || 'true'.equalsIgnoreCase(System.getProperty('remold.debug'))) {
+        if (remoldExt.debug || "true".equalsIgnoreCase(System.getProperty("remold.debug"))) {
             def port = remoldExt.debugPort
             args << "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:${port}"
             logger.lifecycle("[Remold] JDWP debugging enabled, listening on localhost: 127.0.0.1:${port}")
@@ -397,14 +412,10 @@ project.plugins.withId('java') {
         if (pluginProps) {
             requestedPlugins.addAll(pluginProps.toString().split('[,;]').collect { it.trim() }.findAll { !it.isEmpty() })
         }
-        // 自动挂载：Mixin 生态项目（Fabric Loom / 声明了 Mixin 依赖）默认启用 plugin-mixin。
-        // 可用 -Premold.autoMixin=false 关闭。
         def autoMixin = project.findProperty('remold.autoMixin') == null ? true : project.findProperty('remold.autoMixin').toString().toBoolean()
         if (autoMixin && !requestedPlugins.any { it.toString().equalsIgnoreCase('mixin') } && usesMixinEcosystem()) {
             requestedPlugins.add('mixin')
         }
-        // 自动挂载：Forge / NeoForge 生态项目默认启用 plugin-forge。
-        // 可用 -Premold.autoForge=false 关闭。
         def autoForge = project.findProperty('remold.autoForge') == null ? true : project.findProperty('remold.autoForge').toString().toBoolean()
         if (autoForge && !requestedPlugins.any { it.toString().equalsIgnoreCase('forge') || it.toString().equalsIgnoreCase('neoforge') } && usesForgeEcosystem()) {
             requestedPlugins.add('forge')
@@ -412,11 +423,9 @@ project.plugins.withId('java') {
         requestedPlugins = requestedPlugins.unique()
 
         def pluginJars = []
-        // 显式指定的插件 Jar 优先（本地开发 Remold 插件时无需发布/缓存）
         remoldExt.pluginJars.each { explicit ->
             def f = project.file(explicit)
             if (f.exists()) {
-                // 同样落到 .gradle/remold/plugins/，避免运行配置里出现仓库外的绝对路径
                 pluginJars.add(syncIntoLocalRemold(f, new File(localRemoldDir, "plugins/${f.name}")))
             } else {
                 logger.warn("[Remold] Specified plugin jar does not exist: ${f.absolutePath}")
@@ -425,8 +434,7 @@ project.plugins.withId('java') {
         if (requestedPlugins) {
             for (String pluginName : requestedPlugins) {
                 def targetModule = pluginName.equalsIgnoreCase('neoforge') ? 'forge' : pluginName
-                // 该插件已由显式 pluginJar(...) 提供时跳过解析
-                if (pluginJars.any { it.name.contains("plugin-${targetModule}") || it.name.contains("plugin-${targetModule}") }) {
+                if (pluginJars.any { it.name.contains("remold-plugin-${targetModule}") || it.name.contains("plugin-${targetModule}") }) {
                     continue
                 }
                 def pluginJarCandidates = [
@@ -436,7 +444,6 @@ project.plugins.withId('java') {
                     project.rootProject.file("../plugin-${targetModule}/build/libs/remold-plugin-${targetModule}.jar"),
                     ver ? new File(project.gradle.gradleUserHomeDir, "caches/remold/remold-plugin-${targetModule}-${ver}.jar") : null
                 ].findAll { it != null }
-                // 本地开发便利：模板与 Remold 本体仓库并排放置时（../<repo>/plugin-x/build/libs）
                 try {
                     project.rootDir.parentFile?.listFiles()?.each { sibling ->
                         if (sibling.isDirectory) {
@@ -445,48 +452,19 @@ project.plugins.withId('java') {
                         }
                     }
                 } catch (Throwable ignored) { }
-                def resolvedPluginJar = pluginJarCandidates.find { it.exists() }
 
-                if ((resolvedPluginJar == null || !resolvedPluginJar.exists()) && ver) {
-                    try {
-                        def detached = project.configurations.detachedConfiguration(
-                            project.dependencies.create("com.github.I-hope1.Remold:plugin-${targetModule}:${ver}")
-                        )
-                        detached.transitive = false
-                        def resolved = detached.resolve()
-                        if (!resolved.isEmpty()) {
-                            resolvedPluginJar = resolved.first()
-                        }
-                    } catch (Exception ignored) { }
-                }
+                def cachedPluginJar = ver ? new File(project.gradle.gradleUserHomeDir, "caches/remold/remold-plugin-${targetModule}-${ver}.jar") : null
+                def pluginNotations = ver ? ["com.github.I-hope1.Remold:plugin-${targetModule}:${ver}"] : []
+                def pluginUrls = ver ? [
+                    "https://github.com/I-hope1/Remold/releases/download/v${ver}/remold-plugin-${targetModule}-${ver}.jar",
+                    "https://github.com/I-hope1/Remold/releases/download/v${ver}/remold-plugin-${targetModule}.jar",
+                    "https://github.com/I-hope1/Remold/releases/download/${ver}/remold-plugin-${targetModule}-${ver}.jar",
+                    "https://github.com/I-hope1/Remold/releases/download/${ver}/remold-plugin-${targetModule}.jar"
+                ] : []
 
-                if ((resolvedPluginJar == null || !resolvedPluginJar.exists()) && ver) {
-                    def cacheDir = new File(project.gradle.gradleUserHomeDir, "caches/remold")
-                    def cachedJar = new File(cacheDir, "remold-plugin-${targetModule}-${ver}.jar")
-                    if (cachedJar.exists() && cachedJar.length() > 1024) {
-                        resolvedPluginJar = cachedJar
-                    } else {
-                        logger.lifecycle("[Remold] Downloading plugin: remold-plugin-${targetModule}.jar (version: ${ver})...")
-                        def pluginUrls = [
-                            "https://github.com/I-hope1/Remold/releases/download/v${ver}/remold-plugin-${targetModule}-${ver}.jar",
-                            "https://github.com/I-hope1/Remold/releases/download/v${ver}/remold-plugin-${targetModule}.jar",
-                            "https://github.com/I-hope1/Remold/releases/download/${ver}/remold-plugin-${targetModule}-${ver}.jar",
-                            "https://github.com/I-hope1/Remold/releases/download/${ver}/remold-plugin-${targetModule}.jar"
-                        ]
-                        cacheDir.mkdirs()
-                        for (String urlStr : pluginUrls) {
-                            if (downloadRemoteJar(urlStr, cachedJar)) {
-                                resolvedPluginJar = cachedJar
-                                logger.lifecycle("[Remold] Plugin ready: ${cachedJar.absolutePath}")
-                                break
-                            }
-                        }
-                    }
-                }
+                def resolvedPluginJar = resolveOrDownloadJar("remold-plugin-${targetModule}.jar", ver ? ver.toString() : null, pluginJarCandidates, cachedPluginJar, pluginNotations, pluginUrls)
 
                 if (resolvedPluginJar != null && resolvedPluginJar.exists()) {
-                    // 与 agent 同口径：统一落到 .gradle/remold/plugins/，
-                    // IDEA 配置里不再混入 plugin-x/build/libs 这类随 clean 消失的路径
                     pluginJars.add(syncIntoLocalRemold(resolvedPluginJar, new File(localRemoldDir, "plugins/${resolvedPluginJar.name}")))
                 } else {
                     logger.warn("[Remold] Plugin remold-plugin-${targetModule} jar not found; can be ignored if embedded or not required.")
@@ -503,7 +481,7 @@ project.plugins.withId('java') {
         def runtimeClasspath = targetJar != null ? project.files(targetJar) : sourceSets.main.runtimeClasspath
         def appArgs = remoldExt.args.collect { it.toString() }
 
-        return [
+        cachedConfig = [
             mainClass: main,
             executable: execPath,
             executableHome: execHome,
@@ -515,6 +493,7 @@ project.plugins.withId('java') {
             runtimeClasspath: runtimeClasspath,
             targetJar: targetJar
         ]
+        return cachedConfig
     }
 
     tasks.register('runRemold', JavaExec) {
@@ -557,14 +536,6 @@ project.plugins.withId('java') {
         }
     }
 
-    def resolveDeployDir = {
-        def dir = remoldExt.deployDir ?: remoldExt.modsDir ?: project.findProperty('remold.deployDir') ?: project.findProperty('remold.modsDir')
-        if (dir != null) {
-            return project.file(dir)
-        }
-        return null
-    }
-
     tasks.register('deployArtifact', Copy) {
         group = 'application'
         description = 'Builds and deploys the output JAR into the specified deploy directory'
@@ -602,46 +573,182 @@ project.plugins.withId('java') {
         }
     }
 
-    project.afterEvaluate {
-        def shouldAutoDeploy = remoldExt.autoDeploy != null ? remoldExt.autoDeploy : (remoldExt.deployDir != null || remoldExt.modsDir != null || project.findProperty('remold.deployDir') != null || project.findProperty('remold.modsDir') != null)
+    def generateIdeaRunConfigInternal = {
+        def conf = resolveRemoldConfig()
+        def ideaRunDir = new File(project.rootDir, '.idea/runConfigurations')
+        ideaRunDir.mkdirs()
 
-        tasks.named('runRemold', JavaExec) {
-            def jbr = remoldExt.jbrPath ?: System.getenv('JBR_HOME') ?: System.getProperty('jbr.home')
-            if (jbr) {
+        def xmlEscape = { String s ->
+            if (s == null) return ''
+            return s.replace('&', '&amp;')
+                    .replace('"', '&quot;')
+                    .replace('<', '&lt;')
+                    .replace('>', '&gt;')
+        }
+
+        def makePortable = { String p ->
+            if (p == null) return ''
+            def rootPath = project.rootDir.absolutePath.replace('\\', '/')
+            def norm = p.replace('\\', '/')
+            def rootLower = rootPath.toLowerCase()
+            while (true) {
+                def normLower = norm.toLowerCase()
+                def idx = normLower.indexOf(rootLower)
+                if (idx == -1) break
+                norm = norm.substring(0, idx) + '$PROJECT_DIR$' + norm.substring(idx + rootPath.length())
+            }
+            return norm
+        }
+
+        def portableJvmArgs = conf.jvmArgs.collect { makePortable(it) }.join(' ')
+        def portableAppArgs = conf.appArgs.collect { makePortable(it) }.join(' ')
+        def jrePath = (conf.executableHome ?: '').replace('\\', '/')
+        def hasCustomJre = !jrePath.isEmpty()
+
+        def xmlFile = new File(ideaRunDir, 'Run_with_Remold.xml')
+        def xml = new StringBuilder()
+        xml.append('<component name="ProjectRunConfigurationManager">\n')
+
+        def isLoom = project.plugins.hasPlugin('fabric-loom') || project.extensions.findByName('loom') != null
+        if (isLoom) {
+            xml.append('  <configuration default="false" name="Run with Remold" type="GradleRunConfiguration" factoryName="Gradle">\n')
+            xml.append('    <ExternalSystemSettings>\n')
+            xml.append('      <option name="executionName" />\n')
+            xml.append('      <option name="externalProjectPath" value="$PROJECT_DIR$" />\n')
+            xml.append('      <option name="externalSystemIdString" value="GRADLE" />\n')
+            xml.append('      <option name="scriptParameters" value="" />\n')
+            xml.append('      <option name="taskDescriptions">\n')
+            xml.append('        <list />\n')
+            xml.append('      </option>\n')
+            xml.append('      <option name="taskNames">\n')
+            xml.append('        <list>\n')
+            xml.append('          <option value="runClient" />\n')
+            xml.append('        </list>\n')
+            xml.append('      </option>\n')
+            xml.append('      <option name="vmOptions" value="" />\n')
+            xml.append('    </ExternalSystemSettings>\n')
+            xml.append('    <ExternalSystemDebugServerProcess>true</ExternalSystemDebugServerProcess>\n')
+            xml.append('    <ExternalSystemReAttachDebugProcess>true</ExternalSystemReAttachDebugProcess>\n')
+            xml.append('    <DebugAllEnabled>false</DebugAllEnabled>\n')
+            xml.append('    <RunAsTest>false</RunAsTest>\n')
+            xml.append('    <method v="2" />\n')
+            xml.append('  </configuration>\n')
+        } else if (conf.targetJar != null) {
+            def portableJar = makePortable(conf.targetJar.absolutePath)
+            xml.append('  <configuration default="false" name="Run with Remold" type="JarApplication">\n')
+            xml.append("    <option name=\"JAR_PATH\" value=\"${xmlEscape(portableJar)}\" />\n")
+            xml.append("    <option name=\"VM_PARAMETERS\" value=\"${xmlEscape(portableJvmArgs)}\" />\n")
+            if (portableAppArgs) {
+                xml.append("    <option name=\"PROGRAM_PARAMETERS\" value=\"${xmlEscape(portableAppArgs)}\" />\n")
+            }
+            xml.append('    <option name=\"WORKING_DIRECTORY\" value=\"$PROJECT_DIR$\" />\n')
+            if (hasCustomJre) {
+                xml.append("    <option name=\"ALTERNATIVE_JRE_PATH\" value=\"${xmlEscape(jrePath)}\" />\n")
+                xml.append('    <option name=\"ALTERNATIVE_JRE_PATH_ENABLED\" value=\"true\" />\n')
+            }
+            xml.append('    <method v=\"2\">\n')
+            if (shouldAutoDeploy()) {
+                xml.append('      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"deployArtifact\" externalProjectPath=\"$PROJECT_DIR$\" />\n')
+            } else {
+                xml.append('      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"classes\" externalProjectPath=\"$PROJECT_DIR$\" />\n')
+            }
+            xml.append('    </method>\n')
+            xml.append('  </configuration>\n')
+        } else {
+            def moduleName = "${project.name}.main"
+            xml.append('  <configuration default="false" name="Run with Remold" type="Application" factoryName="Application">\n')
+            xml.append("    <option name=\"MAIN_CLASS_NAME\" value=\"${xmlEscape(conf.mainClass)}\" />\n")
+            xml.append("    <module name=\"${xmlEscape(moduleName)}\" />\n")
+            xml.append("    <option name=\"VM_PARAMETERS\" value=\"${xmlEscape(portableJvmArgs)}\" />\n")
+            if (portableAppArgs) {
+                xml.append("    <option name=\"PROGRAM_PARAMETERS\" value=\"${xmlEscape(portableAppArgs)}\" />\n")
+            }
+            xml.append('    <option name=\"WORKING_DIRECTORY\" value=\"$PROJECT_DIR$\" />\n')
+            if (hasCustomJre) {
+                xml.append("    <option name=\"ALTERNATIVE_JRE_PATH\" value=\"${xmlEscape(jrePath)}\" />\n")
+                xml.append('    <option name=\"ALTERNATIVE_JRE_PATH_ENABLED\" value=\"true\" />\n')
+            }
+            xml.append('    <method v=\"2\">\n')
+            xml.append('      <option name=\"Make\" enabled=\"true\" />\n')
+            xml.append('    </method>\n')
+            xml.append('  </configuration>\n')
+        }
+        xml.append('</component>\n')
+
+        xmlFile.write(xml.toString(), 'UTF-8')
+
+        // 自动适配 Fabric Loom：若存在 Loom 生成的 Minecraft_Client.xml / Minecraft_Server.xml，自动同步 Remold 插件、探针参数与运行前 deployArtifact
+        try {
+            def loomRunConfigs = ['Minecraft_Client.xml', 'Minecraft_Server.xml']
+            for (String configName : loomRunConfigs) {
+                def clientXml = new File(ideaRunDir, configName)
+                if (!clientXml.exists()) continue
+
+                def content = clientXml.getText('UTF-8')
+                def modified = false
+
+                // 1. 同步 VM_PARAMETERS
+                def regex = ~/<option name="VM_PARAMETERS" value="([^"]*)"\s*\/>/
+                def matcher = regex.matcher(content)
+                if (matcher.find()) {
+                    def existing = matcher.group(1)
+                    def updated = existing
+                    def agentRegex = ~/(?:^|\s)-javaagent:[^\s=]+remold-agent\.jar[^\s]*/
+                    for (String arg : conf.jvmArgs) {
+                        def portableArg = makePortable(arg)
+                        if (arg.startsWith('-javaagent:') && arg.contains('remold-agent.jar')) {
+                            if (agentRegex.matcher(updated).find()) {
+                                updated = agentRegex.matcher(updated).replaceAll(java.util.regex.Matcher.quoteReplacement(" ${portableArg}")).trim()
+                            } else if (!updated.contains(portableArg)) {
+                                updated = updated.trim() ? "${updated} ${portableArg}" : portableArg
+                            }
+                        } else if (!updated.contains(portableArg) && !updated.contains(arg)) {
+                            updated = updated.trim() ? "${updated} ${portableArg}" : portableArg
+                        }
+                    }
+                    if (updated != existing) {
+                        content = content.replace(matcher.group(0), "<option name=\"VM_PARAMETERS\" value=\"${xmlEscape(updated)}\"/>")
+                        modified = true
+                    }
+                }
+
+                // 2. 运行前任务同步：将 <method v="2"> 改为运行前执行 deployArtifact
+                def beforeRunBlock = '    <method v="2">\n      <option name="Gradle.BeforeRunTask" enabled="true" tasks="deployArtifact" externalProjectPath="$PROJECT_DIR$" vmOptions="" scriptParameters="" />\n    </method>'
+                def methodRegex = ~/(?s)<method v="2">.*?<\/method>|<method v="2"\s*\/>/
+                if (!content.contains('tasks="deployArtifact"')) {
+                    if (methodRegex.matcher(content).find()) {
+                        content = methodRegex.matcher(content).replaceFirst(java.util.regex.Matcher.quoteReplacement(beforeRunBlock))
+                        modified = true
+                    }
+                }
+
+                if (modified) {
+                    clientXml.write(content, 'UTF-8')
+                    logger.lifecycle("[Remold] Automatically synchronized Remold parameters and deployArtifact into ${configName}")
+                }
+            }
+        } catch (Throwable ignored) { }
+
+        return xmlFile
+    }
+
+    project.afterEvaluate {
+        def autoDeploy = shouldAutoDeploy()
+
+        def jvm = resolveJbr()
+        if (jvm.execPath != 'java') {
+            tasks.named('runRemold', JavaExec) {
                 javaLauncher.set((JavaLauncher) null)
             }
-            if (shouldAutoDeploy) {
-                dependsOn 'deployArtifact'
-            }
-            if (remoldExt.dependsOn) {
-                dependsOn remoldExt.dependsOn
+        }
+
+        ['runRemold', 'startRemold', 'generateRemoldScript', 'generateIdeaRunConfig'].each { name ->
+            tasks.named(name) {
+                if (autoDeploy) dependsOn 'deployArtifact'
+                if (remoldExt.dependsOn) dependsOn remoldExt.dependsOn
             }
         }
-        tasks.named('startRemold') {
-            if (shouldAutoDeploy) {
-                dependsOn 'deployArtifact'
-            }
-            if (remoldExt.dependsOn) {
-                dependsOn remoldExt.dependsOn
-            }
-        }
-        tasks.named('generateRemoldScript') {
-            if (shouldAutoDeploy) {
-                dependsOn 'deployArtifact'
-            }
-            if (remoldExt.dependsOn) {
-                dependsOn remoldExt.dependsOn
-            }
-        }
-        tasks.named('generateIdeaRunConfig') {
-            if (shouldAutoDeploy) {
-                dependsOn 'deployArtifact'
-            }
-            if (remoldExt.dependsOn) {
-                dependsOn remoldExt.dependsOn
-            }
-        }
-        if (shouldAutoDeploy) {
+        if (autoDeploy) {
             tasks.findByName('runClient')?.dependsOn('deployArtifact')
         }
 
@@ -716,167 +823,6 @@ project.plugins.withId('java') {
         } catch (Throwable ignored) { }
     }
 
-    def generateIdeaRunConfigInternal = {
-        def conf = resolveRemoldConfig()
-        def ideaRunDir = new File(project.rootDir, '.idea/runConfigurations')
-        ideaRunDir.mkdirs()
-
-        def xmlEscape = { String s ->
-            if (s == null) return ''
-            return s.replace('&', '&amp;')
-                    .replace('"', '&quot;')
-                    .replace('<', '&lt;')
-                    .replace('>', '&gt;')
-        }
-
-        def makePortable = { String p ->
-            if (p == null) return ''
-            def rootPath = project.rootDir.absolutePath.replace('\\', '/')
-            def norm = p.replace('\\', '/')
-            def rootLower = rootPath.toLowerCase()
-            while (true) {
-                def normLower = norm.toLowerCase()
-                def idx = normLower.indexOf(rootLower)
-                if (idx == -1) break
-                norm = norm.substring(0, idx) + '$PROJECT_DIR$' + norm.substring(idx + rootPath.length())
-            }
-            return norm
-        }
-
-        def portableJvmArgs = conf.jvmArgs.collect { makePortable(it) }.join(' ')
-        def portableAppArgs = conf.appArgs.collect { makePortable(it) }.join(' ')
-        // IDEA 的 ALTERNATIVE_JRE_PATH 只认 JRE/JDK 家目录（或已注册的 SDK 名），
-        // 写 java.exe 会被判为无效并弹框拒绝启动；统一转成家目录，并改用 / 分隔以对齐 IDE 的注册表口径。
-        def jrePath = (conf.executableHome ?: '').replace('\\', '/')
-        def hasCustomJre = !jrePath.isEmpty()
-
-        def xmlFile = new File(ideaRunDir, 'Run_with_Remold.xml')
-        def xml = new StringBuilder()
-        xml.append('<component name="ProjectRunConfigurationManager">\n')
-
-        def isLoom = project.plugins.hasPlugin('fabric-loom') || project.extensions.findByName('loom') != null
-        if (isLoom) {
-            xml.append('  <configuration default="false" name="Run with Remold" type="GradleRunConfiguration" factoryName="Gradle">\n')
-            xml.append('    <ExternalSystemSettings>\n')
-            xml.append('      <option name="executionName" />\n')
-            xml.append('      <option name="externalProjectPath" value="$PROJECT_DIR$" />\n')
-            xml.append('      <option name="externalSystemIdString" value="GRADLE" />\n')
-            xml.append('      <option name="scriptParameters" value="" />\n')
-            xml.append('      <option name="taskDescriptions">\n')
-            xml.append('        <list />\n')
-            xml.append('      </option>\n')
-            xml.append('      <option name="taskNames">\n')
-            xml.append('        <list>\n')
-            xml.append('          <option value="runClient" />\n')
-            xml.append('        </list>\n')
-            xml.append('      </option>\n')
-            xml.append('      <option name="vmOptions" value="" />\n')
-            xml.append('    </ExternalSystemSettings>\n')
-            xml.append('    <ExternalSystemDebugServerProcess>true</ExternalSystemDebugServerProcess>\n')
-            xml.append('    <ExternalSystemReAttachDebugProcess>true</ExternalSystemReAttachDebugProcess>\n')
-            xml.append('    <DebugAllEnabled>false</DebugAllEnabled>\n')
-            xml.append('    <RunAsTest>false</RunAsTest>\n')
-            xml.append('    <method v="2" />\n')
-            xml.append('  </configuration>\n')
-        } else if (conf.targetJar != null) {
-            def portableJar = makePortable(conf.targetJar.absolutePath)
-            xml.append('  <configuration default="false" name="Run with Remold" type="JarApplication">\n')
-            xml.append("    <option name=\"JAR_PATH\" value=\"${xmlEscape(portableJar)}\" />\n")
-            xml.append("    <option name=\"VM_PARAMETERS\" value=\"${xmlEscape(portableJvmArgs)}\" />\n")
-            if (portableAppArgs) {
-                xml.append("    <option name=\"PROGRAM_PARAMETERS\" value=\"${xmlEscape(portableAppArgs)}\" />\n")
-            }
-            xml.append('    <option name=\"WORKING_DIRECTORY\" value=\"$PROJECT_DIR$\" />\n')
-            if (hasCustomJre) {
-                xml.append("    <option name=\"ALTERNATIVE_JRE_PATH\" value=\"${xmlEscape(jrePath)}\" />\n")
-                xml.append('    <option name=\"ALTERNATIVE_JRE_PATH_ENABLED\" value=\"true\" />\n')
-            }
-            xml.append('    <method v=\"2\">\n')
-            def shouldAutoDeploy = remoldExt.autoDeploy != null ? remoldExt.autoDeploy : (remoldExt.deployDir != null || remoldExt.modsDir != null || project.findProperty('remold.deployDir') != null || project.findProperty('remold.modsDir') != null)
-            if (shouldAutoDeploy) {
-                xml.append('      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"deployArtifact\" externalProjectPath=\"$PROJECT_DIR$\" />\n')
-            } else {
-                xml.append('      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"classes\" externalProjectPath=\"$PROJECT_DIR$\" />\n')
-            }
-            xml.append('    </method>\n')
-            xml.append('  </configuration>\n')
-        } else {
-            def moduleName = "${project.name}.main"
-            xml.append('  <configuration default="false" name="Run with Remold" type="Application" factoryName="Application">\n')
-            xml.append("    <option name=\"MAIN_CLASS_NAME\" value=\"${xmlEscape(conf.mainClass)}\" />\n")
-            xml.append("    <module name=\"${xmlEscape(moduleName)}\" />\n")
-            xml.append("    <option name=\"VM_PARAMETERS\" value=\"${xmlEscape(portableJvmArgs)}\" />\n")
-            if (portableAppArgs) {
-                xml.append("    <option name=\"PROGRAM_PARAMETERS\" value=\"${xmlEscape(portableAppArgs)}\" />\n")
-            }
-            xml.append('    <option name=\"WORKING_DIRECTORY\" value=\"$PROJECT_DIR$\" />\n')
-            if (hasCustomJre) {
-                xml.append("    <option name=\"ALTERNATIVE_JRE_PATH\" value=\"${xmlEscape(jrePath)}\" />\n")
-                xml.append('    <option name=\"ALTERNATIVE_JRE_PATH_ENABLED\" value=\"true\" />\n')
-            }
-            xml.append('    <method v=\"2\">\n')
-            xml.append('      <option name=\"Make\" enabled=\"true\" />\n')
-            xml.append('    </method>\n')
-            xml.append('  </configuration>\n')
-        }
-        xml.append('</component>\n')
-
-        xmlFile.text = xml.toString()
-
-        // 自动适配 Fabric Loom：若存在 Loom 生成的 Minecraft_Client.xml / Minecraft_Server.xml，自动同步 Remold 插件、探针参数与运行前 deployArtifact
-        try {
-            def loomRunConfigs = ['Minecraft_Client.xml', 'Minecraft_Server.xml']
-            loomRunConfigs.each { configName ->
-                def clientXml = new File(ideaRunDir, configName)
-                if (!clientXml.exists()) return
-
-                def content = clientXml.text
-                def modified = false
-
-                // 1. 同步 VM_PARAMETERS
-                def matcher = (content =~ /<option name="VM_PARAMETERS" value="([^"]*)"\s*\/>/)
-                if (matcher.find()) {
-                    def existing = matcher.group(1)
-                    def updated = existing
-                    conf.jvmArgs.each { arg ->
-                        def portableArg = makePortable(arg)
-                        if (arg.startsWith('-javaagent:') && arg.contains('remold-agent.jar')) {
-                            def agentRegex = /(?:^|\s)-javaagent:[^\s=]+remold-agent\.jar[^\s]*/
-                            if (updated =~ agentRegex) {
-                                updated = updated.replaceAll(agentRegex, java.util.regex.Matcher.quoteReplacement(" ${portableArg}")).trim()
-                            } else if (!updated.contains(portableArg)) {
-                                updated = updated ? "${updated} ${portableArg}" : portableArg
-                            }
-                        } else if (!updated.contains(portableArg) && !updated.contains(arg)) {
-                            updated = updated ? "${updated} ${portableArg}" : portableArg
-                        }
-                    }
-                    if (updated != existing) {
-                        content = content.replace(matcher.group(0), "<option name=\"VM_PARAMETERS\" value=\"${xmlEscape(updated)}\"/>")
-                        modified = true
-                    }
-                }
-
-                // 2. 运行前任务同步：将 <method v="2"> 改为运行前执行 deployArtifact
-                def beforeRunBlock = '    <method v="2">\n      <option name="Gradle.BeforeRunTask" enabled="true" tasks="deployArtifact" externalProjectPath="$PROJECT_DIR$" vmOptions="" scriptParameters="" />\n    </method>'
-                def methodRegex = /(?s)<method v="2">.*?<\/method>|<method v="2"\s*\/>/
-                if (!content.contains('tasks="deployArtifact"')) {
-                    if (content =~ methodRegex) {
-                        content = content.replaceAll(methodRegex, java.util.regex.Matcher.quoteReplacement(beforeRunBlock))
-                        modified = true
-                    }
-                }
-
-                if (modified) {
-                    clientXml.text = content
-                    logger.lifecycle("[Remold] Automatically synchronized Remold parameters and deployArtifact into ${configName}")
-                }
-            }
-        } catch (Throwable ignored) { }
-
-        return xmlFile
-    }
-
     tasks.register('generateIdeaRunConfig') {
         group = 'application'
         description = 'Generates IntelliJ IDEA run configuration into .idea/runConfigurations/Run_with_Remold.xml'
@@ -908,9 +854,9 @@ project.plugins.withId('java') {
             def argsFile = new File(remoldDir, 'remold.args')
             def lines = []
             lines.addAll(conf.jvmArgs)
-            lines << '-cp'
-            lines << conf.runtimeClasspath.asPath
-            lines << conf.mainClass
+            lines.add('-cp')
+            lines.add(conf.runtimeClasspath.asPath)
+            lines.add(conf.mainClass)
             if (conf.appArgs) {
                 lines.addAll(conf.appArgs)
             }
@@ -918,18 +864,18 @@ project.plugins.withId('java') {
             argsFile.withWriter('UTF-8') { writer ->
                 lines.each { line ->
                     if (line.contains(' ') || line.contains('\t')) {
-                        writer.writeLine("\"${line.replace('\\', '\\\\')}\"")
+                        writer.write("\"${line.replace('\\', '\\\\')}\"\n")
                     } else {
-                        writer.writeLine(line)
+                        writer.write("${line}\n")
                     }
                 }
             }
 
             def batFile = new File(buildDir, 'run-remold.bat')
-            batFile.text = "@echo off\r\nset \"JAVA_EXE=${conf.executable}\"\r\nif not exist \"%JAVA_EXE%\" set \"JAVA_EXE=java\"\r\n\"%JAVA_EXE%\" @\"%~dp0remold\\remold.args\" %*\r\n"
+            batFile.write("@echo off\r\nset \"JAVA_EXE=${conf.executable}\"\r\nif not exist \"%JAVA_EXE%\" set \"JAVA_EXE=java\"\r\n\"%JAVA_EXE%\" @\"%~dp0remold\\remold.args\" %*\r\n", 'UTF-8')
 
             def shFile = new File(buildDir, 'run-remold.sh')
-            shFile.text = "#!/usr/bin/env bash\nDIR=\"\$(cd \"\$(dirname \"\${BASH_SOURCE[0]}\")\" && pwd)\"\nJAVA_EXE=\"${conf.executable}\"\nif [ ! -f \"\$JAVA_EXE\" ]; then\n    JAVA_EXE=\"java\"\nfi\nexec \"\$JAVA_EXE\" \"@\$DIR/remold/remold.args\" \"\$@\"\n"
+            shFile.write("#!/usr/bin/env bash\nDIR=\"\$(cd \"\$(dirname \"\${BASH_SOURCE[0]}\")\" && pwd)\"\nJAVA_EXE=\"${conf.executable}\"\nif [ ! -f \"\$JAVA_EXE\" ]; then\n    JAVA_EXE=\"java\"\nfi\nexec \"\$JAVA_EXE\" \"@\$DIR/remold/remold.args\" \"\$@\"\n", 'UTF-8')
             try {
                 shFile.setExecutable(true, false)
             } catch (Exception ignored) { }
@@ -954,9 +900,8 @@ project.plugins.withId('java') {
             }
             def buildDir = project.layout.buildDirectory.asFile.get()
             def argsFile = new File(buildDir, 'remold/remold.args')
-            def isWin = System.getProperty('os.name').toLowerCase().contains('win')
 
-            if (isWin) {
+            if (isWinOs) {
                 new ProcessBuilder('cmd', '/c', 'start', "\"Remold [${project.name}]\"", conf.executable, "@${argsFile.absolutePath}")
                     .directory(project.projectDir)
                     .start()

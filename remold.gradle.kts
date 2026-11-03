@@ -75,6 +75,7 @@ data class RemoldResolvedConfig(
 )
 
 val remoldExt = project.extensions.create<RemoldExtension>("remold")
+var cachedConfig: RemoldResolvedConfig? = null
 
 project.plugins.withId("java") {
     // 确保编译输出包含完整调试符号（行号、源码、局部变量表），供 InitFix 参数回溯、Lambda 对齐与调试使用
@@ -84,6 +85,179 @@ project.plugins.withId("java") {
     }
 
     val sourceSets = project.extensions.getByType<SourceSetContainer>()
+    val isWin = System.getProperty("os.name").lowercase().contains("win")
+    val localRemoldDir = File(project.rootDir, ".gradle/remold")
+
+    /**
+     * 由 JVM 家目录或 java 可执行文件反推出 IDE 认可的 **JRE 家目录**。
+     * IDEA 的 ALTERNATIVE_JRE_PATH 只接受家目录（或已注册的 SDK 名）；写入 `...\bin\java.exe`
+     * 会被判定为路径不存在并直接弹框拒绝启动。取不到时返回空串（此时不写该字段）。
+     */
+    fun toJreHome(path: String?): String {
+        if (path.isNullOrBlank()) return ""
+        var f = File(path)
+        if (f.isFile || f.name.equals("java", true) || f.name.equals("java.exe", true)) {
+            val bin = f.parentFile ?: return ""
+            if (!bin.name.equals("bin", true)) return ""
+            f = bin.parentFile ?: return ""
+        }
+        // JDK 8 的 java.home 通常是 <jdk>/jre，向上取一层才是 IDE 认可的 JDK 家目录
+        if (f.name.equals("jre", true)) {
+            val parent = f.parentFile
+            if (parent != null && File(parent, if (isWin) "bin/java.exe" else "bin/java").exists()) f = parent
+        }
+        return if (f.isDirectory) f.absolutePath else ""
+    }
+
+    /** 解析运行用 JVM（可执行文件路径与 JRE 家目录）。 */
+    fun resolveJbr(): Pair<String, String> {
+        var execPath = File(System.getProperty("java.home"), if (isWin) "bin/java.exe" else "bin/java").absolutePath
+        var execHome = toJreHome(System.getProperty("java.home"))
+        if (!File(execPath).exists()) {
+            execPath = "java"
+            execHome = ""
+        }
+        val jbr = remoldExt.jbrPath
+            ?: (project.findProperty("remold.jbr") as? String)
+            ?: (project.findProperty("jbr.home") as? String)
+            ?: System.getenv("JBR_HOME")
+            ?: System.getProperty("jbr.home")
+        if (!jbr.isNullOrBlank()) {
+            val jbrDir = File(jbr)
+            val javaBin = if (jbrDir.isFile) jbrDir else File(jbrDir, if (isWin) "bin/java.exe" else "bin/java")
+            if (javaBin.exists()) {
+                execPath = javaBin.absolutePath
+                execHome = toJreHome(javaBin.absolutePath)
+            } else {
+                project.logger.warn("[Remold] Specified JBR path does not exist: $jbr. Falling back to project SDK JVM.")
+            }
+        }
+        return Pair(execPath, execHome)
+    }
+
+    /** 解析部署目标目录。 */
+    fun resolveDeployDir(): File? {
+        val custom = remoldExt.deployDir
+            ?: remoldExt.modsDir
+            ?: project.findProperty("remold.deployDir")
+            ?: project.findProperty("remold.modsDir")
+            ?: project.findProperty("remoldDeployDir")
+            ?: project.findProperty("remoldModsDir")
+        return if (custom != null) project.file(custom) else null
+    }
+
+    /** 是否自动执行 deployArtifact。 */
+    fun shouldAutoDeploy(): Boolean {
+        return remoldExt.autoDeploy
+            ?: project.findProperty("remold.autoDeploy")?.toString()?.toBoolean()
+            ?: (resolveDeployDir() != null)
+    }
+
+    fun downloadRemoteJar(urlStr: String, targetFile: File): Boolean {
+        var ok = false
+        var curUrl = urlStr
+        for (hop in 0 until 5) {
+            try {
+                val uri = java.net.URI.create(curUrl)
+                val conn = uri.toURL().openConnection() as? java.net.HttpURLConnection ?: break
+                conn.connectTimeout = 10000
+                conn.readTimeout = 30000
+                conn.instanceFollowRedirects = true
+                conn.setRequestProperty("User-Agent", "Remold-Gradle-Plugin")
+                val code = conn.responseCode
+                if (code in 300..399) {
+                    val loc = conn.getHeaderField("Location")
+                    if (loc.isNullOrBlank()) break
+                    curUrl = if (loc.startsWith("http")) loc else uri.resolve(loc).toString()
+                    continue
+                }
+                if (code == 200) {
+                    conn.inputStream.use { inStream ->
+                        targetFile.outputStream().use { outStream ->
+                            inStream.copyTo(outStream)
+                        }
+                    }
+                    if (targetFile.exists() && targetFile.length() > 1024) {
+                        ok = true
+                        break
+                    } else {
+                        targetFile.delete()
+                    }
+                }
+                break
+            } catch (_: Exception) {
+                targetFile.delete()
+                break
+            }
+        }
+        return ok
+    }
+
+    fun syncIntoLocalRemold(src: File?, dest: File): File {
+        if (src == null || !src.exists()) return dest
+        return try {
+            if (src.canonicalPath == dest.canonicalPath) {
+                src
+            } else if (dest.exists() && dest.length() == src.length() && dest.lastModified() == src.lastModified()) {
+                dest
+            } else {
+                dest.parentFile.mkdirs()
+                java.nio.file.Files.copy(src.toPath(), dest.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                dest.setLastModified(src.lastModified())
+                dest
+            }
+        } catch (_: Exception) {
+            src
+        }
+    }
+
+    /**
+     * 统一的 Jar 本地查找、Gradle 缓存探测、detachedConfiguration 解析与远端 Releases 下载。
+     */
+    fun resolveOrDownloadJar(
+        artifactLabel: String,
+        ver: String?,
+        candidates: List<File>,
+        cachedJar: File?,
+        mavenNotations: List<String>,
+        downloadUrls: List<String>
+    ): File? {
+        val localFound = candidates.firstOrNull { it.exists() }
+        if (localFound != null && localFound.exists()) {
+            return localFound
+        }
+        if (cachedJar != null && cachedJar.exists() && cachedJar.length() > 1024) {
+            return cachedJar
+        }
+        var resolvedJar: File? = null
+        if (ver != null) {
+            for (notation in mavenNotations) {
+                try {
+                    val detached = project.configurations.detachedConfiguration(
+                        project.dependencies.create(notation)
+                    )
+                    detached.isTransitive = false
+                    val resolved = detached.resolve()
+                    if (resolved.isNotEmpty()) {
+                        resolvedJar = resolved.first()
+                        break
+                    }
+                } catch (_: Exception) { }
+            }
+        }
+        if ((resolvedJar == null || !resolvedJar.exists()) && cachedJar != null && downloadUrls.isNotEmpty()) {
+            project.logger.lifecycle("[Remold] Downloading $artifactLabel (version: $ver)...")
+            cachedJar.parentFile?.mkdirs()
+            for (urlStr in downloadUrls) {
+                if (downloadRemoteJar(urlStr, cachedJar)) {
+                    resolvedJar = cachedJar
+                    project.logger.lifecycle("[Remold] $artifactLabel ready: ${cachedJar.absolutePath}")
+                    break
+                }
+            }
+        }
+        return resolvedJar
+    }
 
     /**
      * 是否属于 SpongePowered Mixin 生态：Fabric Loom 项目，或显式声明了 net.fabricmc / org.spongepowered 依赖。
@@ -137,6 +311,8 @@ project.plugins.withId("java") {
     }
 
     fun resolveRemoldConfig(): RemoldResolvedConfig {
+        cachedConfig?.let { return it }
+
         // 0. 解析目标 jar (若配置了 jar，进入纯净 JAR 模式)
         val jarProp = remoldExt.jar
             ?: project.findProperty("remold.jar")
@@ -177,202 +353,55 @@ project.plugins.withId("java") {
         }
 
         // 2. 解析运行用 JVM
-        // 默认使用「运行 Gradle 的这个 JVM」——在 IDEA 里就是 Gradle JVM（项目 SDK），
-        // 而不是 PATH / JAVA_HOME 里的 java，避免构建用的 SDK 与启动用的 JDK 不一致。
-        val isWin = System.getProperty("os.name").lowercase().contains("win")
-
-        /**
-         * 由 JVM 家目录或 java 可执行文件反推出 IDE 认可的 **JRE 家目录**。
-         * IDEA 的 ALTERNATIVE_JRE_PATH 只接受家目录（或已注册的 SDK 名）；写入 `...\bin\java.exe`
-         * 会被判定为路径不存在并直接弹框拒绝启动。取不到时返回空串（此时不写该字段）。
-         */
-        fun toJreHome(path: String?): String {
-            if (path.isNullOrBlank()) return ""
-            var f = File(path)
-            if (f.isFile || f.name.equals("java", true) || f.name.equals("java.exe", true)) {
-                val bin = f.parentFile ?: return ""
-                if (!bin.name.equals("bin", true)) return ""
-                f = bin.parentFile ?: return ""
-            }
-            // JDK 8 的 java.home 通常是 <jdk>/jre，向上取一层才是 IDE 认可的 JDK 家目录
-            if (f.name.equals("jre", true)) {
-                val parent = f.parentFile
-                if (parent != null && File(parent, if (isWin) "bin/java.exe" else "bin/java").exists()) f = parent
-            }
-            return if (f.isDirectory) f.absolutePath else ""
-        }
-
-        var execPath = File(System.getProperty("java.home"), if (isWin) "bin/java.exe" else "bin/java").absolutePath
-        var execHome = toJreHome(System.getProperty("java.home"))
-        if (!File(execPath).exists()) {
-            execPath = "java"
-            execHome = ""
-        }
-        val jbr = remoldExt.jbrPath
-            ?: (project.findProperty("remold.jbr") as? String)
-            ?: (project.findProperty("jbr.home") as? String)
-            ?: System.getenv("JBR_HOME")
-            ?: System.getProperty("jbr.home")
-        if (!jbr.isNullOrBlank()) {
-            val jbrDir = File(jbr)
-            val javaBin = if (jbrDir.isFile) jbrDir else File(jbrDir, if (isWin) "bin/java.exe" else "bin/java")
-            if (javaBin.exists()) {
-                execPath = javaBin.absolutePath
-                execHome = toJreHome(javaBin.absolutePath)
-            } else {
-                project.logger.warn("[Remold] Specified JBR path does not exist: $jbr. Falling back to project SDK JVM.")
-            }
-        }
-
-        val downloadRemoteJar = { urlStr: String, targetFile: File ->
-            var ok = false
-            var curUrl = urlStr
-            for (hop in 0 until 5) {
-                try {
-                    val uri = java.net.URI.create(curUrl)
-                    val conn = uri.toURL().openConnection() as? java.net.HttpURLConnection ?: break
-                    conn.connectTimeout = 10000
-                    conn.readTimeout = 30000
-                    conn.instanceFollowRedirects = true
-                    conn.setRequestProperty("User-Agent", "Remold-Gradle-Plugin")
-                    val code = conn.responseCode
-                    if (code in 300..399) {
-                        val loc = conn.getHeaderField("Location")
-                        if (loc.isNullOrBlank()) break
-                        curUrl = if (loc.startsWith("http")) loc else uri.resolve(loc).toString()
-                        continue
-                    }
-                    if (code == 200) {
-                        conn.inputStream.use { inStream ->
-                            targetFile.outputStream().use { outStream ->
-                                inStream.copyTo(outStream)
-                            }
-                        }
-                        if (targetFile.exists() && targetFile.length() > 1024) {
-                            ok = true
-                            break
-                        } else {
-                            targetFile.delete()
-                        }
-                    }
-                    break
-                } catch (_: Exception) {
-                    targetFile.delete()
-                    break
-                }
-            }
-            ok
-        }
-
-        // 统一的项目本地缓存目录：IDEA 运行配置只引用 $PROJECT_DIR$/.gradle/remold/ 下的副本，
-        // 与 jar 的真实来源（仓库内构建输出 / libs / Gradle 缓存 / 远端下载）解耦。
-        // 否则同一份配置里会出现 agent 指 build/libs、插件指 .gradle/remold 的混合路径。
-        val localRemoldDir = File(project.rootDir, ".gradle/remold")
-
-        fun syncIntoLocalRemold(src: File?, dest: File): File {
-            if (src == null || !src.exists()) return dest
-            return try {
-                if (src.canonicalPath == dest.canonicalPath) {
-                    src
-                } else if (dest.exists() && dest.length() == src.length() && dest.lastModified() == src.lastModified()) {
-                    dest
-                } else {
-                    dest.parentFile.mkdirs()
-                    java.nio.file.Files.copy(src.toPath(), dest.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
-                    dest.setLastModified(src.lastModified())
-                    dest
-                }
-            } catch (_: Exception) {
-                src
-            }
-        }
+        val (execPath, execHome) = resolveJbr()
 
         // 3. 解析版本与 agent jar
         val ver = remoldExt.version
             ?: (project.findProperty("remold.version") as? String)
             ?: (project.findProperty("remoldVersion") as? String)
             ?: (if (project.rootProject.hasProperty("remoldVersion")) project.rootProject.property("remoldVersion") as? String else null)
-        // 显式指定优先：remold { agentJar = "..." } 或 gradle.properties 的 remold.agentJar
+
         var agentFile: File? = (remoldExt.agentJar ?: (project.findProperty("remold.agentJar") as? String))?.let { File(it) }
-        if (agentFile == null || !agentFile.exists()) {
-            val candidates = listOf(
-                project.file("libs/remold-agent.jar"),
-                project.file("remold-agent.jar"),
-                project.rootProject.file("core/build/libs/remold-agent.jar"),
-                project.rootProject.file("../core/build/libs/remold-agent.jar"),
-                // 上次同步到项目本地的副本：clean 掉 build/libs 后仍可用，
-                // 避免静默退回 Gradle 缓存里的发布版 agent（版本可能对不上）
-                File(localRemoldDir, "remold-agent.jar")
-            )
-            agentFile = candidates.firstOrNull { it.exists() }
+        val agentCandidates = mutableListOf<File>()
+        if (agentFile != null) {
+            agentCandidates.add(agentFile)
         }
+        agentCandidates.addAll(listOf(
+            project.file("libs/remold-agent.jar"),
+            project.file("remold-agent.jar"),
+            project.rootProject.file("core/build/libs/remold-agent.jar"),
+            project.rootProject.file("../core/build/libs/remold-agent.jar"),
+            File(localRemoldDir, "remold-agent.jar")
+        ))
 
-        // 若本地未找到，尝试从 Gradle 依赖缓存或官方 Releases 自动下载
-        if (agentFile == null || !agentFile.exists()) {
-            if (ver == null) {
-                throw GradleException("[Remold] Remold version is not configured! Please specify via remold { version = \"...\" } or gradle.properties (remold.version=...).")
-            }
-            val cacheDir = File(project.gradle.gradleUserHomeDir, "caches/remold")
-            val cachedJar = File(cacheDir, "remold-agent-$ver.jar")
+        val cachedAgentJar = ver?.let { File(project.gradle.gradleUserHomeDir, "caches/remold/remold-agent-$ver.jar") }
+        val agentNotations = if (ver != null) listOf(
+            "com.github.I-hope1.Remold:core:$ver",
+            "com.github.I-hope1.Remold:core:$ver:all"
+        ) else emptyList()
+        val agentUrls = if (ver != null) listOf(
+            "https://github.com/I-hope1/Remold/releases/download/v$ver/remold-agent.jar",
+            "https://github.com/I-hope1/Remold/releases/download/$ver/remold-agent.jar"
+        ) else emptyList()
 
-            if (cachedJar.exists() && cachedJar.length() > 1024) {
-                agentFile = cachedJar
-            } else {
-                try {
-                    val detached = project.configurations.detachedConfiguration(
-                        project.dependencies.create("com.github.I-hope1.Remold:core:$ver")
-                    )
-                    detached.isTransitive = false
-                    val resolved = detached.resolve()
-                    if (resolved.isNotEmpty()) {
-                        agentFile = resolved.first()
-                    }
-                } catch (_: Exception) { }
-
-                if (agentFile == null || !agentFile.exists()) {
-                    try {
-                        val detachedAll = project.configurations.detachedConfiguration(
-                            project.dependencies.create("com.github.I-hope1.Remold:core:$ver:all")
-                        )
-                        detachedAll.isTransitive = false
-                        val resolvedAll = detachedAll.resolve()
-                        if (resolvedAll.isNotEmpty()) {
-                            agentFile = resolvedAll.first()
-                        }
-                    } catch (_: Exception) { }
-                }
-
-                if (agentFile == null || !agentFile.exists()) {
-                    project.logger.lifecycle("[Remold] Local agent jar not found; downloading remold-agent.jar (version: $ver)...")
-                    val downloadUrls = listOf(
-                        "https://github.com/I-hope1/Remold/releases/download/v$ver/remold-agent.jar",
-                        "https://github.com/I-hope1/Remold/releases/download/$ver/remold-agent.jar"
-                    )
-                    cacheDir.mkdirs()
-                    for (urlStr in downloadUrls) {
-                        if (downloadRemoteJar(urlStr, cachedJar)) {
-                            agentFile = cachedJar
-                            project.logger.lifecycle("[Remold] Agent jar ready: ${cachedJar.absolutePath}")
-                            break
-                        }
-                    }
-                }
-            }
-        }
+        agentFile = resolveOrDownloadJar(
+            "remold-agent.jar",
+            ver,
+            agentCandidates,
+            cachedAgentJar,
+            agentNotations,
+            agentUrls
+        )
 
         if (agentFile == null || !agentFile.exists()) {
             throw GradleException(
-                "[Remold] remold-agent.jar was not found and could not be downloaded automatically (target version: ${remoldExt.version})!\n" +
+                "[Remold] remold-agent.jar was not found and could not be downloaded automatically (target version: $ver)!\n" +
                 "Please check your network connection or specify a valid version in remold { version = \"...\" },\n" +
                 "or specify a local file explicitly in remold { agentJar = \"/path/to/remold-agent.jar\" }."
             )
         }
 
-        var safeAgent: File = agentFile
-
-        // 无论来源（仓库内构建输出 / libs / Gradle 缓存 / 远端下载），一律同步到
-        // .gradle/remold/remold-agent.jar，保证 IDEA 运行配置里 agent 与插件落在同一目录。
-        safeAgent = syncIntoLocalRemold(safeAgent, File(localRemoldDir, "remold-agent.jar"))
+        val safeAgent = syncIntoLocalRemold(agentFile, File(localRemoldDir, "remold-agent.jar"))
 
         // 4. 自动推导编译输出与资源目录并拼装监听路径
         val classesDirs = sourceSets["main"].output.classesDirs.files
@@ -422,14 +451,10 @@ project.plugins.withId("java") {
         if (!pluginProps.isNullOrBlank()) {
             requestedPlugins.addAll(pluginProps.split("[,;]").map { it.trim() }.filter { it.isNotEmpty() })
         }
-        // 自动挂载：Mixin 生态项目（Fabric Loom / 声明了 Mixin 依赖）默认启用 plugin-mixin。
-        // 可用 -Premold.autoMixin=false 关闭。
         val autoMixin = (project.findProperty("remold.autoMixin") as? String)?.toBoolean() ?: true
         if (autoMixin && requestedPlugins.none { it.equals("mixin", ignoreCase = true) } && usesMixinEcosystem()) {
             requestedPlugins.add("mixin")
         }
-        // 自动挂载：Forge / NeoForge 生态项目默认启用 plugin-forge。
-        // 可用 -Premold.autoForge=false 关闭。
         val autoForge = (project.findProperty("remold.autoForge") as? String)?.toBoolean() ?: true
         if (autoForge && requestedPlugins.none { it.equals("forge", ignoreCase = true) || it.equals("neoforge", ignoreCase = true) } && usesForgeEcosystem()) {
             requestedPlugins.add("forge")
@@ -437,11 +462,9 @@ project.plugins.withId("java") {
         val distinctPlugins = requestedPlugins.distinct()
 
         val pluginJars = mutableListOf<File>()
-        // 显式指定的插件 Jar 优先（本地开发 Remold 插件时无需发布/缓存）
         for (explicit in remoldExt.pluginJars) {
             val f = project.file(explicit)
             if (f.exists()) {
-                // 同样落到 .gradle/remold/plugins/，避免运行配置里出现仓库外的绝对路径
                 pluginJars.add(syncIntoLocalRemold(f, File(localRemoldDir, "plugins/${f.name}")))
             } else {
                 project.logger.warn("[Remold] Specified plugin jar does not exist: ${f.absolutePath}")
@@ -450,83 +473,55 @@ project.plugins.withId("java") {
         if (distinctPlugins.isNotEmpty()) {
             for (pluginName in distinctPlugins) {
                 val targetModule = if (pluginName.equals("neoforge", ignoreCase = true)) "forge" else pluginName
-                // 该插件已由显式 pluginJar(...) 提供时跳过解析
-                val alreadyProvided = pluginJars.any { it.name.contains("plugin-$targetModule") || it.name.contains("plugin-$targetModule") }
+                val alreadyProvided = pluginJars.any { it.name.contains("remold-plugin-$targetModule") || it.name.contains("plugin-$targetModule") }
                 if (alreadyProvided) {
                     continue
                 }
                 val candidates = mutableListOf<File>()
-                candidates.add(project.rootProject.file("plugin-$targetModule/build/libs/remold-plugin-$targetModule-$ver.jar"))
+                if (ver != null) {
+                    candidates.add(project.rootProject.file("plugin-$targetModule/build/libs/remold-plugin-$targetModule-$ver.jar"))
+                }
                 candidates.add(project.rootProject.file("plugin-$targetModule/build/libs/remold-plugin-$targetModule.jar"))
-                candidates.add(project.rootProject.file("../plugin-$targetModule/build/libs/remold-plugin-$targetModule-$ver.jar"))
+                if (ver != null) {
+                    candidates.add(project.rootProject.file("../plugin-$targetModule/build/libs/remold-plugin-$targetModule-$ver.jar"))
+                }
                 candidates.add(project.rootProject.file("../plugin-$targetModule/build/libs/remold-plugin-$targetModule.jar"))
-                // 本地开发便利：模板与 Remold 本体仓库并排放置时（../<repo>/plugin-x/build/libs）
                 try {
                     project.rootDir.parentFile?.listFiles()?.forEach { sibling ->
                         if (sibling.isDirectory) {
-                            candidates.add(File(sibling, "plugin-$targetModule/build/libs/remold-plugin-$targetModule-$ver.jar"))
+                            if (ver != null) {
+                                candidates.add(File(sibling, "plugin-$targetModule/build/libs/remold-plugin-$targetModule-$ver.jar"))
+                            }
                             candidates.add(File(sibling, "plugin-$targetModule/build/libs/remold-plugin-$targetModule.jar"))
                         }
                     }
                 } catch (_: Throwable) { }
-                // 本地联调：publishToMavenLocal 的产物优先于远端发布版。
-                // 两个坐标不是大小写差异：build.gradle 里 group = 'io.github.i-hope1.remold'（首段 io），
-                // 插件解析走的是 JitPack 约定坐标 com.github.I-hope1.Remold（首段 com），是两个不同命名空间。
-                // 其中 io.github.i-hope1.remold 目前**只在 mavenLocal 存在**（README 标注为预留的 Central 坐标），
-                // 对外可用的一律是 JitPack 坐标。因此下面这条候选只服务本地联调：文件不存在即跳过，
-                // 不会影响其他开发者。按文件路径探测，不依赖 repositories 是否声明 mavenLocal()；
-                // 两种拼法都列，避免在大小写敏感的文件系统（Linux）上漏查。
                 if (ver != null) {
                     val m2Root = File(System.getProperty("user.home"), ".m2/repository")
                     listOf("io/github/i-hope1/remold", "com/github/I-hope1/Remold").forEach { groupPath ->
                         candidates.add(File(m2Root, "$groupPath/plugin-$targetModule/$ver/plugin-$targetModule-$ver.jar"))
                     }
                 }
-                if (ver != null) {
-                    candidates.add(File(project.gradle.gradleUserHomeDir, "caches/remold/remold-plugin-$targetModule-$ver.jar"))
-                }
-                var resolvedPluginJar = candidates.firstOrNull { it.exists() }
 
-                if ((resolvedPluginJar == null || !resolvedPluginJar.exists()) && ver != null) {
-                    try {
-                        val detached = project.configurations.detachedConfiguration(
-                            project.dependencies.create("com.github.I-hope1.Remold:plugin-$targetModule:$ver")
-                        )
-                        detached.isTransitive = false
-                        val resolved = detached.resolve()
-                        if (resolved.isNotEmpty()) {
-                            resolvedPluginJar = resolved.first()
-                        }
-                    } catch (_: Exception) { }
-                }
+                val cachedPluginJar = ver?.let { File(project.gradle.gradleUserHomeDir, "caches/remold/remold-plugin-$targetModule-$ver.jar") }
+                val pluginNotations = if (ver != null) listOf("com.github.I-hope1.Remold:plugin-$targetModule:$ver") else emptyList()
+                val pluginUrls = if (ver != null) listOf(
+                    "https://github.com/I-hope1/Remold/releases/download/v$ver/remold-plugin-$targetModule-$ver.jar",
+                    "https://github.com/I-hope1/Remold/releases/download/v$ver/remold-plugin-$targetModule.jar",
+                    "https://github.com/I-hope1/Remold/releases/download/$ver/remold-plugin-$targetModule-$ver.jar",
+                    "https://github.com/I-hope1/Remold/releases/download/$ver/remold-plugin-$targetModule.jar"
+                ) else emptyList()
 
-                if ((resolvedPluginJar == null || !resolvedPluginJar.exists()) && ver != null) {
-                    val cacheDir = File(project.gradle.gradleUserHomeDir, "caches/remold")
-                    val cachedJar = File(cacheDir, "remold-plugin-$targetModule-$ver.jar")
-                    if (cachedJar.exists() && cachedJar.length() > 1024) {
-                        resolvedPluginJar = cachedJar
-                    } else {
-                        project.logger.lifecycle("[Remold] Downloading plugin: remold-plugin-$targetModule.jar (version: $ver)...")
-                        val pluginUrls = listOf(
-                            "https://github.com/I-hope1/Remold/releases/download/v$ver/remold-plugin-$targetModule-$ver.jar",
-                            "https://github.com/I-hope1/Remold/releases/download/v$ver/remold-plugin-$targetModule.jar",
-                            "https://github.com/I-hope1/Remold/releases/download/$ver/remold-plugin-$targetModule-$ver.jar",
-                            "https://github.com/I-hope1/Remold/releases/download/$ver/remold-plugin-$targetModule.jar"
-                        )
-                        cacheDir.mkdirs()
-                        for (urlStr in pluginUrls) {
-                            if (downloadRemoteJar(urlStr, cachedJar)) {
-                                resolvedPluginJar = cachedJar
-                                project.logger.lifecycle("[Remold] Plugin ready: ${cachedJar.absolutePath}")
-                                break
-                            }
-                        }
-                    }
-                }
+                val resolvedPluginJar = resolveOrDownloadJar(
+                    "remold-plugin-$targetModule.jar",
+                    ver,
+                    candidates,
+                    cachedPluginJar,
+                    pluginNotations,
+                    pluginUrls
+                )
 
                 if (resolvedPluginJar != null && resolvedPluginJar.exists()) {
-                    // 与 agent 同口径：统一落到 .gradle/remold/plugins/，
-                    // IDEA 配置里不再混入 plugin-x/build/libs 这类随 clean 消失的路径
                     pluginJars.add(syncIntoLocalRemold(resolvedPluginJar, File(localRemoldDir, "plugins/${resolvedPluginJar.name}")))
                 } else {
                     project.logger.warn("[Remold] Plugin remold-plugin-$targetModule jar not found; can be ignored if embedded or not required.")
@@ -543,7 +538,7 @@ project.plugins.withId("java") {
         val runtimeClasspath = if (targetJar != null) project.files(targetJar) else sourceSets["main"].runtimeClasspath
         val appArgs = remoldExt.args.map { it.toString() }
 
-        return RemoldResolvedConfig(
+        val resolved = RemoldResolvedConfig(
             mainClass = main,
             executable = execPath,
             executableHome = execHome,
@@ -555,6 +550,8 @@ project.plugins.withId("java") {
             runtimeClasspath = runtimeClasspath,
             targetJar = targetJar
         )
+        cachedConfig = resolved
+        return resolved
     }
 
     tasks.register<JavaExec>("runRemold") {
@@ -595,16 +592,6 @@ project.plugins.withId("java") {
                 logger.lifecycle("  - JBR: ${conf.executable}")
             }
         }
-    }
-
-    fun resolveDeployDir(): File? {
-        val custom = remoldExt.deployDir
-            ?: remoldExt.modsDir
-            ?: project.findProperty("remold.deployDir")
-            ?: project.findProperty("remold.modsDir")
-            ?: project.findProperty("remoldDeployDir")
-            ?: project.findProperty("remoldModsDir")
-        return if (custom != null) project.file(custom) else null
     }
 
     tasks.register<Copy>("deployArtifact") {
@@ -674,8 +661,6 @@ project.plugins.withId("java") {
 
         val portableJvmArgs = conf.jvmArgs.joinToString(" ") { makePortable(it) }
         val portableAppArgs = conf.appArgs.joinToString(" ") { makePortable(it) }
-        // IDEA 的 ALTERNATIVE_JRE_PATH 只认 JRE/JDK 家目录（或已注册的 SDK 名），
-        // 写 java.exe 会被判为无效并弹框拒绝启动；统一转成家目录，并改用 / 分隔以对齐 IDE 的注册表口径。
         val jrePath = conf.executableHome.replace('\\', '/')
         val hasCustomJre = jrePath.isNotEmpty()
 
@@ -721,10 +706,7 @@ project.plugins.withId("java") {
                 sb.append("    <option name=\"ALTERNATIVE_JRE_PATH_ENABLED\" value=\"true\" />\n")
             }
             sb.append("    <method v=\"2\">\n")
-            val shouldAutoDeploy = remoldExt.autoDeploy
-                ?: project.findProperty("remold.autoDeploy")?.toString()?.toBoolean()
-                ?: (remoldExt.deployDir != null || remoldExt.modsDir != null || project.findProperty("remold.deployDir") != null || project.findProperty("remold.modsDir") != null || project.findProperty("remoldDeployDir") != null || project.findProperty("remoldModsDir") != null)
-            if (shouldAutoDeploy) {
+            if (shouldAutoDeploy()) {
                 sb.append("      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"deployArtifact\" externalProjectPath=\"\$PROJECT_DIR\$\" />\n")
             } else {
                 sb.append("      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"classes\" externalProjectPath=\"\$PROJECT_DIR\$\" />\n")
@@ -810,51 +792,22 @@ project.plugins.withId("java") {
     }
 
     project.afterEvaluate {
-        val shouldAutoDeploy = remoldExt.autoDeploy
-            ?: project.findProperty("remold.autoDeploy")?.toString()?.toBoolean()
-            ?: (remoldExt.deployDir != null || remoldExt.modsDir != null || project.findProperty("remold.deployDir") != null || project.findProperty("remold.modsDir") != null || project.findProperty("remoldDeployDir") != null || project.findProperty("remoldModsDir") != null)
+        val autoDeploy = shouldAutoDeploy()
 
-        tasks.named<JavaExec>("runRemold") {
-            val jbr = remoldExt.jbrPath
-                ?: (project.findProperty("remold.jbr") as? String)
-                ?: (project.findProperty("jbr.home") as? String)
-                ?: System.getenv("JBR_HOME")
-                ?: System.getProperty("jbr.home")
-            if (!jbr.isNullOrBlank()) {
+        val (execPath, _) = resolveJbr()
+        if (execPath != "java") {
+            tasks.named<JavaExec>("runRemold") {
                 javaLauncher.set(null as org.gradle.jvm.toolchain.JavaLauncher?)
             }
-            if (shouldAutoDeploy) {
-                dependsOn("deployArtifact")
-            }
-            if (remoldExt.dependsOn.isNotEmpty()) {
-                dependsOn(remoldExt.dependsOn)
+        }
+
+        listOf("runRemold", "startRemold", "generateRemoldScript", "generateIdeaRunConfig").forEach { name ->
+            tasks.named(name) {
+                if (autoDeploy) dependsOn("deployArtifact")
+                if (remoldExt.dependsOn.isNotEmpty()) dependsOn(remoldExt.dependsOn)
             }
         }
-        tasks.named("startRemold") {
-            if (shouldAutoDeploy) {
-                dependsOn("deployArtifact")
-            }
-            if (remoldExt.dependsOn.isNotEmpty()) {
-                dependsOn(remoldExt.dependsOn)
-            }
-        }
-        tasks.named("generateRemoldScript") {
-            if (shouldAutoDeploy) {
-                dependsOn("deployArtifact")
-            }
-            if (remoldExt.dependsOn.isNotEmpty()) {
-                dependsOn(remoldExt.dependsOn)
-            }
-        }
-        tasks.named("generateIdeaRunConfig") {
-            if (shouldAutoDeploy) {
-                dependsOn("deployArtifact")
-            }
-            if (remoldExt.dependsOn.isNotEmpty()) {
-                dependsOn(remoldExt.dependsOn)
-            }
-        }
-        if (shouldAutoDeploy) {
+        if (autoDeploy) {
             tasks.findByName("runClient")?.dependsOn("deployArtifact")
         }
 

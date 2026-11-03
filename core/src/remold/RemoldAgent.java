@@ -470,6 +470,43 @@ public class RemoldAgent {
 	public static byte[] getRuntimeBytecode(String dotClassName) {
 		return dotClassName != null ? bytecodeCache.get(dotClassName) : null;
 	}
+
+	/**
+	 * 从监控目录中查找指定类的最新磁盘字节码（未经过字节码重织入的原始 .class）。
+	 *
+	 * @param dotClassName 目标类的点分全限定名（如 com.example.item.RemoldWandItem）
+	 * @return 磁盘上的最新字节码，若未找到则返回 null
+	 */
+	public static byte[] findClassBytesOnDisk(String dotClassName) {
+		if (dotClassName == null || activeWatchDirs.isEmpty()) return null;
+		String relPath = dotClassName.replace('.', File.separatorChar) + ".class";
+		Path newestPath = null;
+		java.nio.file.attribute.FileTime newestTime = null;
+		for (Path dir : activeWatchDirs) {
+			try {
+				Path p = dir.resolve(relPath);
+				if (Files.isRegularFile(p)) {
+					java.nio.file.attribute.FileTime time = Files.getLastModifiedTime(p);
+					if (newestTime == null || time.compareTo(newestTime) > 0) {
+						newestTime = time;
+						newestPath = p;
+					}
+				}
+			} catch (Throwable ignored) {
+			}
+		}
+		if (newestPath != null) {
+			try {
+				return Files.readAllBytes(newestPath);
+			} catch (Throwable ignored) {
+			}
+		}
+		return null;
+	}
+
+	public static byte[] findClassBytesOnDisk(Class<?> clazz) {
+		return clazz != null ? findClassBytesOnDisk(clazz.getName()) : null;
+	}
 	//endregion
 
 	/**

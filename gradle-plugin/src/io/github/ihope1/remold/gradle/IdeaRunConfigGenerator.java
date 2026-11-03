@@ -153,6 +153,27 @@ public final class IdeaRunConfigGenerator {
                             } else if (!updated.contains(portableArg)) {
                                 updated = !updated.trim().isEmpty() ? updated + " " + portableArg : portableArg;
                             }
+                        } else if (arg.startsWith("-Dremold.plugin.jars=")) {
+                            Pattern p = Pattern.compile("(?:^|\\s)-Dremold\\.plugin\\.jars=[^\\s]*");
+                            Matcher m = p.matcher(updated);
+                            if (m.find()) {
+                                updated = m.replaceAll("").trim();
+                            }
+                            updated = !updated.trim().isEmpty() ? updated + " " + portableArg : portableArg;
+                        } else if (arg.startsWith("-Dremold.plugins=")) {
+                            Pattern p = Pattern.compile("(?:^|\\s)-Dremold\\.plugins=[^\\s]*");
+                            Matcher m = p.matcher(updated);
+                            if (m.find()) {
+                                updated = m.replaceAll("").trim();
+                            }
+                            updated = !updated.trim().isEmpty() ? updated + " " + portableArg : portableArg;
+                        } else if (arg.startsWith("-Dremold.build_mode=")) {
+                            Pattern p = Pattern.compile("(?:^|\\s)-Dremold\\.build_mode=[^\\s]*");
+                            Matcher m = p.matcher(updated);
+                            if (m.find()) {
+                                updated = m.replaceAll("").trim();
+                            }
+                            updated = !updated.trim().isEmpty() ? updated + " " + portableArg : portableArg;
                         } else if (!updated.contains(portableArg) && !updated.contains(arg)) {
                             updated = !updated.trim().isEmpty() ? updated + " " + portableArg : portableArg;
                         }
@@ -163,17 +184,22 @@ public final class IdeaRunConfigGenerator {
                     }
                 }
 
-                if (!content.contains("tasks=\"deployArtifact\"")) {
+                String expectedBeforeRunTask = "idea".equals(conf.getBuildMode())
+                        ? "      <option name=\"Make\" enabled=\"true\" />\n"
+                        : "      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\":classes\" externalProjectPath=\"$PROJECT_DIR$\" vmOptions=\"\" scriptParameters=\"\" />\n";
+                String expectedBeforeRunBlock = "    <method v=\"2\">\n" + expectedBeforeRunTask + "    </method>";
+
+                if (content.contains("tasks=\"deployArtifact\"") || ("idea".equals(conf.getBuildMode()) && !content.contains("<option name=\"Make\" enabled=\"true\" />"))) {
                     Matcher mm = methodRegex.matcher(content);
                     if (mm.find()) {
-                        content = mm.replaceFirst(Matcher.quoteReplacement(beforeRunBlock));
+                        content = mm.replaceFirst(Matcher.quoteReplacement(expectedBeforeRunBlock));
                         modified = true;
                     }
                 }
 
                 if (modified) {
                     Files.write(clientXml.toPath(), content.getBytes(StandardCharsets.UTF_8));
-                    project.getLogger().lifecycle("[Remold] Automatically synchronized Remold parameters and deployArtifact into " + configName);
+                    project.getLogger().lifecycle("[Remold] Automatically synchronized Remold parameters into " + configName);
                 }
             } catch (Throwable ignored) {
             }

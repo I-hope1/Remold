@@ -356,10 +356,24 @@ public final class MixinHotSwap {
 	/**
 	 * 读取类的原始（未织入）字节码。
 	 *
-	 * <p>必须用类路径里的那份：JVM 当前持有的字节码已经织入了旧 Mixin，再织一遍会重复注入。</p>
+	 * <p>必须用未织入的原始字节码：JVM 当前持有的字节码已经织入了旧 Mixin，再织一遍会重复注入。
+	 * 读取优先级：
+	 * 1. {@link RemoldAgent#getSourceBytecode(String)}：热更期间捕获的最新源码级基线；
+	 * 2. {@link RemoldAgent#findClassBytesOnDisk(Class)}：当前工程监控目录中的最新 .class；
+	 * 3. {@link Class#getResourceAsStream(String)}：仅针对外部/原版只读类（如 Minecraft TitleScreen）回退读取。</p>
 	 */
 	private static byte[] readOriginalBytes(Class<?> type) {
-		String resource = "/" + type.getName().replace('.', '/') + ".class";
+		if (type == null) return null;
+		String name = type.getName();
+		byte[] src = RemoldAgent.getSourceBytecode(name);
+		if (src != null) {
+			return src;
+		}
+		byte[] disk = RemoldAgent.findClassBytesOnDisk(type);
+		if (disk != null) {
+			return disk;
+		}
+		String resource = "/" + name.replace('.', '/') + ".class";
 		try (InputStream in = type.getResourceAsStream(resource)) {
 			return in == null ? null : in.readAllBytes();
 		} catch (Throwable t) {

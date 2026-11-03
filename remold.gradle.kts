@@ -792,6 +792,18 @@ project.plugins.withId("java") {
                             } else if (!updated.contains(portableArg)) {
                                 updated = if (updated.isNotBlank()) "$updated $portableArg" else portableArg
                             }
+                        } else if (arg.startsWith("-Dremold.plugin.jars=")) {
+                            val p = Regex("""(?:^|\s)-Dremold\.plugin\.jars=[^\s]*""")
+                            updated = p.replace(updated, "").trim()
+                            updated = if (updated.isNotBlank()) "$updated $portableArg" else portableArg
+                        } else if (arg.startsWith("-Dremold.plugins=")) {
+                            val p = Regex("""(?:^|\s)-Dremold\.plugins=[^\s]*""")
+                            updated = p.replace(updated, "").trim()
+                            updated = if (updated.isNotBlank()) "$updated $portableArg" else portableArg
+                        } else if (arg.startsWith("-Dremold.build_mode=")) {
+                            val p = Regex("""(?:^|\s)-Dremold\.build_mode=[^\s]*""")
+                            updated = p.replace(updated, "").trim()
+                            updated = if (updated.isNotBlank()) "$updated $portableArg" else portableArg
                         } else if (!updated.contains(portableArg) && !updated.contains(arg)) {
                             updated = if (updated.isNotBlank()) "$updated $portableArg" else portableArg
                         }
@@ -802,19 +814,24 @@ project.plugins.withId("java") {
                     }
                 }
 
-                // 2. 运行前任务同步：将 <method v="2"> 改为运行前执行 deployArtifact
-                val beforeRunBlock = "    <method v=\"2\">\n      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"deployArtifact\" externalProjectPath=\"\$PROJECT_DIR\$\" vmOptions=\"\" scriptParameters=\"\" />\n    </method>"
+                val expectedBeforeRunTask = if ("idea" == conf.buildMode) {
+                    "      <option name=\"Make\" enabled=\"true\" />\n"
+                } else {
+                    "      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\":classes\" externalProjectPath=\"\$PROJECT_DIR\$\" vmOptions=\"\" scriptParameters=\"\" />\n"
+                }
+                val expectedBeforeRunBlock = "    <method v=\"2\">\n$expectedBeforeRunTask    </method>"
                 val methodRegex = Regex("""(?s)<method v="2">.*?</method>|<method v="2"\s*/>""")
-                if (!content.contains("tasks=\"deployArtifact\"")) {
+
+                if (content.contains("tasks=\"deployArtifact\"") || ("idea" == conf.buildMode && !content.contains("<option name=\"Make\" enabled=\"true\" />"))) {
                     if (methodRegex.containsMatchIn(content)) {
-                        content = methodRegex.replace(content, java.util.regex.Matcher.quoteReplacement(beforeRunBlock))
+                        content = methodRegex.replace(content, java.util.regex.Matcher.quoteReplacement(expectedBeforeRunBlock))
                         modified = true
                     }
                 }
 
                 if (modified) {
                     clientXml.writeText(content)
-                    logger.lifecycle("[Remold] Automatically synchronized Remold parameters and deployArtifact into $configName")
+                    logger.lifecycle("[Remold] Automatically synchronized Remold parameters into $configName")
                 }
             }
         } catch (_: Throwable) { }

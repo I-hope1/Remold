@@ -124,6 +124,63 @@ class RemoldPluginTest {
     }
 
     @Test
+    void syncLoomRunConfigsFixesDeployArtifactAndDeduplicatesPluginJars() throws Exception {
+        Project project = ProjectBuilder.builder()
+                .withProjectDir(tempDir)
+                .build();
+        project.getPluginManager().apply("java");
+
+        File ideaRunDir = new File(tempDir, ".idea/runConfigurations");
+        Files.createDirectories(ideaRunDir.toPath());
+        File clientXml = new File(ideaRunDir, "Minecraft_Client.xml");
+
+        // Existing xml with duplicate/stale plugin jars and deployArtifact
+        String existingXml = "<component name=\"ProjectRunConfigurationManager\">\n" +
+                "  <configuration default=\"false\" factoryName=\"Application\" name=\"Minecraft Client\" type=\"Application\">\n" +
+                "    <option name=\"VM_PARAMETERS\" value=\"-Dremold.plugins=mixin -Dremold.plugin.jars=$PROJECT_DIR$/.gradle/remold/plugins/remold-plugin-mixin-0.2.0.jar\"/>\n" +
+                "    <method v=\"2\">\n" +
+                "      <option enabled=\"true\" externalProjectPath=\"$PROJECT_DIR$\" name=\"Gradle.BeforeRunTask\" scriptParameters=\"\" tasks=\"deployArtifact\" vmOptions=\"\"/>\n" +
+                "    </method>\n" +
+                "  </configuration>\n" +
+                "</component>\n";
+        Files.writeString(clientXml.toPath(), existingXml);
+
+        File dummyAgent = new File(tempDir, "agent.jar");
+        Files.write(dummyAgent.toPath(), new byte[2048]);
+
+        RemoldResolvedConfig conf = new RemoldResolvedConfig(
+                "net.fabricmc.devlaunchinjector.Main",
+                "java",
+                "java",
+                dummyAgent,
+                Collections.emptyList(),
+                "",
+                Arrays.asList(
+                        "-javaagent:" + dummyAgent.getAbsolutePath(),
+                        "-Dremold.plugins=mixin",
+                        "-Dremold.plugin.jars=" + tempDir.getAbsolutePath() + "/.gradle/remold/plugins/remold-plugin-mixin-0.2.1.jar",
+                        "-Dremold.build_mode=gradle"
+                ),
+                Collections.emptyList(),
+                project.files(),
+                null,
+                "gradle"
+        );
+
+        IdeaRunConfigGenerator.syncLoomRunConfigs(project, conf, ideaRunDir);
+
+        String syncedXml = Files.readString(clientXml.toPath());
+        // Verify old 0.2.0 jar is gone, replaced by 0.2.1 jar
+        Assertions.assertFalse(syncedXml.contains("0.2.0.jar"), "Stale 0.2.0 jar should be replaced");
+        Assertions.assertTrue(syncedXml.contains("0.2.1.jar"), "New 0.2.1 jar should be present");
+        Assertions.assertEquals(1, syncedXml.split("-Dremold\\.plugin\\.jars=").length - 1, "There should only be one -Dremold.plugin.jars");
+
+        // Verify deployArtifact was replaced with :classes
+        Assertions.assertFalse(syncedXml.contains("tasks=\"deployArtifact\""), "Loom beforeRun should not use deployArtifact");
+        Assertions.assertTrue(syncedXml.contains("tasks=\":classes\""), "Loom beforeRun should use :classes in gradle mode");
+    }
+
+    @Test
     void embeddedScriptResourcesArePresentAndValid() throws Exception {
         try (InputStream groovy = RemoldPlugin.class.getResourceAsStream("/remold/remold.gradle");
              InputStream kotlin = RemoldPlugin.class.getResourceAsStream("/remold/remold.gradle.kts")) {

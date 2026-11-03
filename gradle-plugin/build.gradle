@@ -1,6 +1,7 @@
 plugins {
 	id 'java-gradle-plugin'
 	id 'maven-publish'
+	id 'com.gradle.plugin-publish' version '1.3.1'
 }
 
 sourceSets {
@@ -22,7 +23,14 @@ processResources {
 	from(rootProject.file('LICENSE')) { into 'META-INF' }
 }
 
+javadoc {
+	options.encoding = 'UTF-8'
+	options.addStringOption('Xdoclint:none', '-quiet')
+}
+
 gradlePlugin {
+	website = 'https://github.com/I-hope1/Remold'
+	vcsUrl = 'https://github.com/I-hope1/Remold.git'
 	plugins {
 		remold {
 			// 插件 id 与 build.gradle 里的 group（io.github.i-hope1.remold）保持同源；
@@ -31,6 +39,7 @@ gradlePlugin {
 			implementationClass = 'io.github.ihope1.remold.gradle.RemoldPlugin'
 			displayName = 'Remold Hot Reload'
 			description = 'Hot-reload Gradle plugin for Remold: assembles -javaagent/DCEVM arguments, registers runRemold and the IDEA run configuration.'
+			tags.set(['hotswap', 'hot-reload', 'dcevm', 'agent', 'jvm'])
 		}
 	}
 }

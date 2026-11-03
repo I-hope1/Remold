@@ -32,6 +32,7 @@ dependencies {
 	implementation project(":panama")
 	implementation project(":plugin-arc")
 	implementation project(":plugin-mixin")
+	implementation project(":plugin-forge")
 	implementation "Anuken:Mindustry:$mindustryVersion"
 	implementation "org.spongepowered:mixin:0.8.5"
 	implementation "com.google.guava:guava:33.4.0-jre"
@@ -187,7 +188,7 @@ test {
 }
 
 // 断言测试总数 ≥ 318 且 0 skipped（318 = 2026-10-30 全量实测，含 LayoutPredictorTest 5 个、ReflectionCacheManagerTest 4 个、OffsetScannerTest 4 个、LayoutGateWiringTest 30 个等用例）
-def hstestMinTests = 397
+def hstestMinTests = 401
 tasks.register("verifyTestCount") {
 	group = "verification"
 	description = "断言 JUnit 测试数不低于基线 ${hstestMinTests}"
@@ -360,6 +361,7 @@ tasks.register("verifyDocStatusMarkers") {
 			file("${rootDir}/api/src"),
 			file("${rootDir}/plugin-arc/src"),
 			file("${rootDir}/plugin-mixin/src"),
+			file("${rootDir}/plugin-forge/src"),
 			file("${rootDir}/panama/src")
 		]
 		def pattern = ~/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/

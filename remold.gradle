@@ -99,6 +99,29 @@ project.plugins.withId('java') {
         }
     }
 
+    // 是否属于 Minecraft Forge / NeoForge 生态：声明了对应 Gradle 插件或依赖。
+    // 命中即默认挂载 plugin-forge（可用 -Premold.autoForge=false 关闭）。
+    def usesForgeEcosystem = {
+        if (project.plugins.hasPlugin('net.minecraftforge.gradle') || project.plugins.hasPlugin('net.neoforged.moddev')
+                || project.plugins.hasPlugin('net.neoforged.gradle.userdev') || project.extensions.findByName('neoForge') != null
+                || project.extensions.findByName('minecraft') != null) {
+            return true
+        }
+        try {
+            return project.configurations.any { cfg ->
+                try {
+                    cfg.dependencies.any { dep ->
+                        dep.group == 'net.minecraftforge' || dep.group == 'net.neoforged' || dep.group?.startsWith('net.neoforged')
+                    }
+                } catch (Throwable ignored) {
+                    false
+                }
+            }
+        } catch (Throwable ignored) {
+            return false
+        }
+    }
+
     def resolveRemoldConfig = {
         // 0. 解析目标 jar (若配置了 jar，进入纯净 JAR 模式)
         def jarProp = remoldExt.jar ?: project.findProperty('remold.jar') ?: project.findProperty('remoldJar')
@@ -375,6 +398,12 @@ project.plugins.withId('java') {
         if (autoMixin && !requestedPlugins.any { it.toString().equalsIgnoreCase('mixin') } && usesMixinEcosystem()) {
             requestedPlugins.add('mixin')
         }
+        // 自动挂载：Forge / NeoForge 生态项目默认启用 plugin-forge。
+        // 可用 -Premold.autoForge=false 关闭。
+        def autoForge = project.findProperty('remold.autoForge') == null ? true : project.findProperty('remold.autoForge').toString().toBoolean()
+        if (autoForge && !requestedPlugins.any { it.toString().equalsIgnoreCase('forge') || it.toString().equalsIgnoreCase('neoforge') } && usesForgeEcosystem()) {
+            requestedPlugins.add('forge')
+        }
         requestedPlugins = requestedPlugins.unique()
 
         def pluginJars = []
@@ -390,23 +419,24 @@ project.plugins.withId('java') {
         }
         if (requestedPlugins) {
             for (String pluginName : requestedPlugins) {
+                def targetModule = pluginName.equalsIgnoreCase('neoforge') ? 'forge' : pluginName
                 // 该插件已由显式 pluginJar(...) 提供时跳过解析
-                if (pluginJars.any { it.name.contains("plugin-${pluginName}") }) {
+                if (pluginJars.any { it.name.contains("plugin-${targetModule}") || it.name.contains("plugin-${targetModule}") }) {
                     continue
                 }
                 def pluginJarCandidates = [
-                    project.rootProject.file("plugin-${pluginName}/build/libs/remold-plugin-${pluginName}-${ver}.jar"),
-                    project.rootProject.file("plugin-${pluginName}/build/libs/remold-plugin-${pluginName}.jar"),
-                    project.rootProject.file("../plugin-${pluginName}/build/libs/remold-plugin-${pluginName}-${ver}.jar"),
-                    project.rootProject.file("../plugin-${pluginName}/build/libs/remold-plugin-${pluginName}.jar"),
-                    ver ? new File(project.gradle.gradleUserHomeDir, "caches/remold/remold-plugin-${pluginName}-${ver}.jar") : null
+                    project.rootProject.file("plugin-${targetModule}/build/libs/remold-plugin-${targetModule}-${ver}.jar"),
+                    project.rootProject.file("plugin-${targetModule}/build/libs/remold-plugin-${targetModule}.jar"),
+                    project.rootProject.file("../plugin-${targetModule}/build/libs/remold-plugin-${targetModule}-${ver}.jar"),
+                    project.rootProject.file("../plugin-${targetModule}/build/libs/remold-plugin-${targetModule}.jar"),
+                    ver ? new File(project.gradle.gradleUserHomeDir, "caches/remold/remold-plugin-${targetModule}-${ver}.jar") : null
                 ].findAll { it != null }
                 // 本地开发便利：模板与 Remold 本体仓库并排放置时（../<repo>/plugin-x/build/libs）
                 try {
                     project.rootDir.parentFile?.listFiles()?.each { sibling ->
                         if (sibling.isDirectory) {
-                            pluginJarCandidates.add(new File(sibling, "plugin-${pluginName}/build/libs/remold-plugin-${pluginName}-${ver}.jar"))
-                            pluginJarCandidates.add(new File(sibling, "plugin-${pluginName}/build/libs/remold-plugin-${pluginName}.jar"))
+                            pluginJarCandidates.add(new File(sibling, "plugin-${targetModule}/build/libs/remold-plugin-${targetModule}-${ver}.jar"))
+                            pluginJarCandidates.add(new File(sibling, "plugin-${targetModule}/build/libs/remold-plugin-${targetModule}.jar"))
                         }
                     }
                 } catch (Throwable ignored) { }
@@ -415,7 +445,7 @@ project.plugins.withId('java') {
                 if ((resolvedPluginJar == null || !resolvedPluginJar.exists()) && ver) {
                     try {
                         def detached = project.configurations.detachedConfiguration(
-                            project.dependencies.create("com.github.I-hope1.Remold:plugin-${pluginName}:${ver}")
+                            project.dependencies.create("com.github.I-hope1.Remold:plugin-${targetModule}:${ver}")
                         )
                         detached.transitive = false
                         def resolved = detached.resolve()
@@ -427,16 +457,16 @@ project.plugins.withId('java') {
 
                 if ((resolvedPluginJar == null || !resolvedPluginJar.exists()) && ver) {
                     def cacheDir = new File(project.gradle.gradleUserHomeDir, "caches/remold")
-                    def cachedJar = new File(cacheDir, "remold-plugin-${pluginName}-${ver}.jar")
+                    def cachedJar = new File(cacheDir, "remold-plugin-${targetModule}-${ver}.jar")
                     if (cachedJar.exists() && cachedJar.length() > 1024) {
                         resolvedPluginJar = cachedJar
                     } else {
-                        logger.lifecycle("[Remold] Downloading plugin: remold-plugin-${pluginName}.jar (version: ${ver})...")
+                        logger.lifecycle("[Remold] Downloading plugin: remold-plugin-${targetModule}.jar (version: ${ver})...")
                         def pluginUrls = [
-                            "https://github.com/I-hope1/Remold/releases/download/v${ver}/remold-plugin-${pluginName}-${ver}.jar",
-                            "https://github.com/I-hope1/Remold/releases/download/v${ver}/remold-plugin-${pluginName}.jar",
-                            "https://github.com/I-hope1/Remold/releases/download/${ver}/remold-plugin-${pluginName}-${ver}.jar",
-                            "https://github.com/I-hope1/Remold/releases/download/${ver}/remold-plugin-${pluginName}.jar"
+                            "https://github.com/I-hope1/Remold/releases/download/v${ver}/remold-plugin-${targetModule}-${ver}.jar",
+                            "https://github.com/I-hope1/Remold/releases/download/v${ver}/remold-plugin-${targetModule}.jar",
+                            "https://github.com/I-hope1/Remold/releases/download/${ver}/remold-plugin-${targetModule}-${ver}.jar",
+                            "https://github.com/I-hope1/Remold/releases/download/${ver}/remold-plugin-${targetModule}.jar"
                         ]
                         cacheDir.mkdirs()
                         for (String urlStr : pluginUrls) {
@@ -454,7 +484,7 @@ project.plugins.withId('java') {
                     // IDEA 配置里不再混入 plugin-x/build/libs 这类随 clean 消失的路径
                     pluginJars.add(syncIntoLocalRemold(resolvedPluginJar, new File(localRemoldDir, "plugins/${resolvedPluginJar.name}")))
                 } else {
-                    logger.warn("[Remold] Plugin remold-plugin-${pluginName} jar not found; can be ignored if embedded or not required.")
+                    logger.warn("[Remold] Plugin remold-plugin-${targetModule} jar not found; can be ignored if embedded or not required.")
                 }
             }
 
@@ -643,6 +673,42 @@ project.plugins.withId('java') {
             } catch (Throwable ignored) {
             }
         }
+
+        // 自动适配 NeoForge ModDevGradle 项目：注入 client 运行配置
+        try {
+            def runsExt = project.extensions.findByName('runs') ?: project.extensions.findByName('neoForge')?.extensions?.findByName('runs')
+            if (runsExt != null) {
+                def clientRun = runsExt.findByName('client')
+                if (clientRun != null) {
+                    def conf = resolveRemoldConfig()
+                    try {
+                        clientRun.jvmArguments.addAll(conf.jvmArgs)
+                        logger.lifecycle("[Remold] Injected hot-reload agent parameters into NeoForge ModDevGradle runClient!")
+                    } catch (Throwable ignored) {
+                        for (arg in conf.jvmArgs) {
+                            clientRun.jvmArg(arg)
+                        }
+                        logger.lifecycle("[Remold] Injected hot-reload agent parameters into NeoForge runClient!")
+                    }
+                }
+            }
+        } catch (Throwable ignored) { }
+
+        // 自动适配 ForgeGradle 项目：注入 minecraft.runs.client 运行配置
+        try {
+            def mcExt = project.extensions.findByName('minecraft')
+            if (mcExt != null) {
+                def runs = mcExt.getRuns()
+                def client = runs?.findByName('client')
+                if (client != null) {
+                    def conf = resolveRemoldConfig()
+                    for (arg in conf.jvmArgs) {
+                        client.jvmArg(arg)
+                    }
+                    logger.lifecycle("[Remold] Injected hot-reload agent parameters into ForgeGradle runClient!")
+                }
+            }
+        } catch (Throwable ignored) { }
     }
 
     def generateIdeaRunConfigInternal = {

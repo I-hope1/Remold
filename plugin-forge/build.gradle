@@ -1,0 +1,66 @@
+plugins {
+	id 'java-library'
+	id 'maven-publish'
+}
+
+sourceSets.main.java.srcDirs = ["src"]
+sourceSets.main.resources.srcDirs = ["src"]
+
+publishing {
+	publications {
+		maven(MavenPublication) {
+			from components.java
+			pom {
+				name = 'remold-plugin-forge'
+				description = 'Minecraft Forge and NeoForge integration plugin for Remold (cross-ClassLoader Mixin re-weaving and EventBus hot-reload)'
+				licenses {
+					license {
+						name = 'GNU General Public License v3.0'
+						url = 'https://www.gnu.org/licenses/gpl-3.0.txt'
+					}
+				}
+			}
+		}
+		// 本地联调兼容：将 JitPack 约定的 GitHub 坐标 (com.github.I-hope1.Remold:plugin-forge:v<ver>) 同步发布到 mavenLocal
+		jitpack(MavenPublication) {
+			groupId = 'com.github.I-hope1.Remold'
+			artifactId = 'plugin-forge'
+			version = "v${version}"
+			from components.java
+			pom {
+				name = 'remold-plugin-forge'
+				description = 'Minecraft Forge and NeoForge integration plugin for Remold (JitPack compatible)'
+				licenses {
+					license {
+						name = 'GNU General Public License v3.0'
+						url = 'https://www.gnu.org/licenses/gpl-3.0.txt'
+					}
+				}
+			}
+		}
+	}
+}
+
+dependencies {
+	compileOnly project(':api')
+	compileOnly project(':core')
+
+	// Mixin & ASM provided by host at runtime
+	compileOnly 'org.spongepowered:mixin:0.8.5'
+	compileOnly "org.ow2.asm:asm:$asmVersion"
+	compileOnly "org.ow2.asm:asm-tree:$asmVersion"
+}
+
+test {
+	useJUnitPlatform()
+	failOnNoDiscoveredTests = false
+}
+
+jar {
+	manifest {
+		attributes(
+			'Remold-Plugin-Class': 'remold.forge.ForgeHotswapPlugin',
+			'Remold-Plugin-Name': 'forge'
+		)
+	}
+}

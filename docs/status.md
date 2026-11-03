@@ -21,7 +21,7 @@
 
 1. **唯一真相源隔离**：`docs/status.md` 作为全模块实现状态的唯一受权载体，彻底解除规范文档与代码注释维护实现进度的负担。
 2. **双重验收验证机制**：
-   - **自动化机器扫描 (`verifyDocStatusMarkers`)**：纳入主构建验证流程（`./gradlew check` 强制依赖），递归扫描 `docs/initfix/`、`docs/topology/`、`docs/offset/`、`core/src/`、`api/src/`、`plugin-arc/src/`、`plugin-mixin/src/`、`panama/src/`，严格拦截标记 `/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/`。当前状态：**100% 达标全绿**。
+   - **自动化机器扫描 (`verifyDocStatusMarkers`)**：纳入主构建验证流程（`./gradlew check` 强制依赖），递归扫描 `docs/initfix/`、`docs/topology/`、`docs/offset/`、`core/src/`、`api/src/`、`plugin-arc/src/`、`plugin-mixin/src/`、`plugin-forge/src/`、`panama/src/`，严格拦截标记 `/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/`。当前状态：**100% 达标全绿**。
    - **规范性内容抽检审计**：禁止规范正文出现“目前已支持”、“当前版本尚未实现”等时态陈述，时态陈述一律归入 `status.md`。全量 15 篇客观设计文档（`docs/topology/` 8 篇、`docs/initfix/` 6 篇、`docs/offset/` 1 篇）完成人工抽检审查，抽查合格率 100%。
 3. **设计规范文档客观化清理清单**：
    - [`docs/topology/01-invariants-and-remapping.md`](topology/01-invariants-and-remapping.md) ～ [`08-decisions.md`](topology/08-decisions.md)（共 8 篇）：全部重构为纯架构规格、约束契约与客观原理，易腐进度全部剥离，头部统一指引至 `status.md`。
@@ -364,6 +364,8 @@
 | 不可热更资源提示 | ✅ | `ArcAssetReloader.classify` | 模组/未知着色器、content JSON/HJSON、图集、普通数据文件不再静默忽略，统一输出“需要重启”的 warn；`AssetReloaderTest` 覆盖分类路由 |
 | Mixin 重织入（普通类） | 🔶 | `plugin-mixin` `MixinReWeaver` | 重定义前把源码级字节码交回 Mixin 织入，非目标类按数组同一性跳过拷贝；端到端需真实 Fabric 客户端验证 |
 | Mixin 类自身变更 → 目标级联重织入 | 🔶 | `plugin-mixin` `MixinHotSwap` | `IMixinTransformer.reload` 刷新 `MixinInfo` 后对已加载目标类走 `redefineDynamic`；结构性改动抛 `MixinReloadException` 时提示重启 |
+| Forge / NeoForge 跨 ClassLoader Mixin 重织入 | 🔶 | `plugin-forge` `ModLauncherMixinBridge` | 通过 `BytecodeTransformerBridge` 穿透 ModLauncher / NeoForge 类加载器反射定位 `IMixinTransformer` 织入重定义字节码；解决 Forge 与 Agent 间 ClassLoader 隔离；端到端需真实 Forge / NeoForge 客户端验证 |
+| Forge / NeoForge EventBus 监听器刷新 | 🔶 | `plugin-forge` `ForgeEventBusRefresher` | 监听批次完成事件，识别新增/移除的 `@SubscribeEvent` / `@EventBusSubscriber` 并自动在 `EVENT_BUS` 注销与重新登记；端到端需真实 Forge / NeoForge 客户端验证 |
 | 标准 JVM 能力探测与降级 | ✅ | `RemoldAgent.probeEnhancedHotswap` / `mustSkipForMissingEnhancedRedefinition` / `degradeForMissingEnhancedRedefinition` | 厂商身份 + flag 文本双条件判定；结构变化类在无增强能力时摘批；`FORCE_STATIC_LAMBDA` 强制降级、`INIT_FIX` 刻意不降级；`EnhancedHotswapGateTest` 9 用例含变异检查 |
 
 ---

@@ -20,6 +20,7 @@ public final class RemoldResolvedConfig {
     private final List<String> appArgs;
     private final FileCollection runtimeClasspath;
     private final File targetJar;
+    private final String buildMode;
 
     public RemoldResolvedConfig(
             String mainClass,
@@ -32,6 +33,21 @@ public final class RemoldResolvedConfig {
             List<String> appArgs,
             FileCollection runtimeClasspath,
             File targetJar) {
+        this(mainClass, executable, executableHome, agentFile, allWatchDirs, watchPath, jvmArgs, appArgs, runtimeClasspath, targetJar, "gradle");
+    }
+
+    public RemoldResolvedConfig(
+            String mainClass,
+            String executable,
+            String executableHome,
+            File agentFile,
+            List<File> allWatchDirs,
+            String watchPath,
+            List<String> jvmArgs,
+            List<String> appArgs,
+            FileCollection runtimeClasspath,
+            File targetJar,
+            String buildMode) {
         this.mainClass = mainClass;
         this.executable = executable;
         this.executableHome = executableHome;
@@ -42,6 +58,7 @@ public final class RemoldResolvedConfig {
         this.appArgs = appArgs != null ? Collections.unmodifiableList(appArgs) : Collections.emptyList();
         this.runtimeClasspath = runtimeClasspath;
         this.targetJar = targetJar;
+        this.buildMode = buildMode != null ? buildMode : "gradle";
     }
 
     public String getMainClass() {
@@ -82,5 +99,9 @@ public final class RemoldResolvedConfig {
 
     public File getTargetJar() {
         return targetJar;
+    }
+
+    public String getBuildMode() {
+        return buildMode;
     }
 }

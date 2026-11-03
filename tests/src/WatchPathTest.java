@@ -55,6 +55,36 @@ public class WatchPathTest {
 	}
 
 	@Test
+	@DisplayName("RemoldAgent with buildMode=gradle does not auto-discover out/production")
+	public void testGradleBuildModeBlocksAutoDiscovery() throws Exception {
+		String prevMode = RemoldAgent.getBuildMode();
+		RemoldAgent.setBuildMode("gradle");
+		Path tempProject = Files.createTempDirectory("remold-test-gradle-mode-");
+		try {
+			Path buildClasses = tempProject.resolve("build").resolve("classes").resolve("java").resolve("main");
+			Files.createDirectories(buildClasses);
+
+			Path ideaOutProd = tempProject.resolve("out").resolve("production");
+			Files.createDirectories(ideaOutProd);
+
+			String sourceId = "test-gradle-mode";
+			assertTrue(RemoldAgent.getWatchDirs(sourceId).isEmpty(), "Baseline: watch dirs initially empty");
+
+			RemoldAgent.setWatchPaths(sourceId, buildClasses.toString());
+
+			Set<Path> watched = RemoldAgent.getWatchDirs(sourceId);
+			// 终局断言：仅监控 buildClasses，绝不引入 out/production
+			assertTrue(watched.contains(buildClasses.toAbsolutePath().normalize()), "Must watch buildClasses");
+			assertFalse(watched.contains(ideaOutProd.toAbsolutePath().normalize()), "Must NOT auto-discover out/production in gradle mode");
+
+			RemoldAgent.removeWatchSource(sourceId);
+		} finally {
+			RemoldAgent.setBuildMode(prevMode);
+			deleteRecursively(tempProject);
+		}
+	}
+
+	@Test
 	@DisplayName("RemoldAgent creates non-existent out/production path if explicitly specified")
 	public void testCreateNonExistentIdeaOutProduction() throws Exception {
 		Path tempProject = Files.createTempDirectory("remold-test-proj-create-");

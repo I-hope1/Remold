@@ -25,6 +25,7 @@ open class RemoldExtension {
     var deployDir: Any? = null
     var modsDir: Any? = null
     var autoDeploy: Boolean? = null
+    var buildMode: String? = null
     val plugins: MutableList<String> = mutableListOf()
     /** 显式指定的插件 Jar（本地开发 Remold 插件时用，优先于自动解析/下载）。 */
     val pluginJars: MutableList<Any> = mutableListOf()
@@ -71,7 +72,8 @@ data class RemoldResolvedConfig(
     val jvmArgs: List<String>,
     val appArgs: List<String>,
     val runtimeClasspath: org.gradle.api.file.FileCollection,
-    val targetJar: File?
+    val targetJar: File?,
+    val buildMode: String = "gradle"
 )
 
 val remoldExt = project.extensions.create<RemoldExtension>("remold")
@@ -404,20 +406,39 @@ project.plugins.withId("java") {
         val safeAgent = syncIntoLocalRemold(agentFile, File(localRemoldDir, "remold-agent.jar"))
 
         // 4. 自动推导编译输出与资源目录并拼装监听路径
+        val buildMode = remoldExt.buildMode
+            ?: project.findProperty("remold.buildMode")?.toString()
+            ?: project.findProperty("remold.build_mode")?.toString()
+            ?: project.findProperty("remold.builder")?.toString()
+            ?: project.findProperty("remoldBuildMode")?.toString()
+            ?: "gradle"
+        val normalizedBuildMode = buildMode.trim().lowercase()
+
         val classesDirs = sourceSets["main"].output.classesDirs.files
         val resourceDirs = sourceSets["main"].resources.srcDirs
         val assetsDir = File(project.projectDir, "assets")
         val outResourceDir = sourceSets["main"].output.resourcesDir
-        val ideaOutDir = File(project.projectDir, "out/production")
-        if (!ideaOutDir.exists()) {
-            try { ideaOutDir.mkdirs() } catch (_: Throwable) {}
-        }
+
         val allCandidateDirs = mutableListOf<File>()
-        allCandidateDirs.addAll(classesDirs)
+        if (normalizedBuildMode == "idea") {
+            val ideaOutDir = File(project.projectDir, "out/production")
+            val subs = if (ideaOutDir.isDirectory) ideaOutDir.listFiles { f -> f.isDirectory } else null
+            if (!subs.isNullOrEmpty()) {
+                allCandidateDirs.addAll(subs)
+            } else {
+                allCandidateDirs.add(ideaOutDir)
+            }
+        } else if (normalizedBuildMode == "auto") {
+            allCandidateDirs.addAll(classesDirs)
+            val ideaOutDir = File(project.projectDir, "out/production")
+            if (ideaOutDir.isDirectory) allCandidateDirs.add(ideaOutDir)
+        } else {
+            allCandidateDirs.addAll(classesDirs)
+        }
+
         allCandidateDirs.addAll(resourceDirs)
         if (assetsDir.exists()) allCandidateDirs.add(assetsDir)
         if (outResourceDir != null && outResourceDir.exists()) allCandidateDirs.add(outResourceDir)
-        if (ideaOutDir.exists()) allCandidateDirs.add(ideaOutDir)
         allCandidateDirs.addAll(remoldExt.watchDirs)
         val allWatchDirs = allCandidateDirs.filter { it.exists() }.distinct()
         val watchPath = allWatchDirs.joinToString(File.pathSeparator) { it.absolutePath }
@@ -427,6 +448,7 @@ project.plugins.withId("java") {
         args.add("-XX:+IgnoreUnrecognizedVMOptions")
         args.add("-XX:+AllowEnhancedClassRedefinition")
         args.add("-javaagent:${safeAgent.absolutePath}=$watchPath")
+        args.add("-Dremold.build_mode=$normalizedBuildMode")
         args.add("--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED")
         args.add("--add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED")
         args.add("--add-exports=java.base/jdk.internal.loader=ALL-UNNAMED")
@@ -548,7 +570,8 @@ project.plugins.withId("java") {
             jvmArgs = args,
             appArgs = appArgs,
             runtimeClasspath = runtimeClasspath,
-            targetJar = targetJar
+            targetJar = targetJar,
+            buildMode = normalizedBuildMode
         )
         cachedConfig = resolved
         return resolved
@@ -706,7 +729,9 @@ project.plugins.withId("java") {
                 sb.append("    <option name=\"ALTERNATIVE_JRE_PATH_ENABLED\" value=\"true\" />\n")
             }
             sb.append("    <method v=\"2\">\n")
-            if (shouldAutoDeploy()) {
+            if (conf.buildMode == "idea") {
+                sb.append("      <option name=\"Make\" enabled=\"true\" />\n")
+            } else if (shouldAutoDeploy()) {
                 sb.append("      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"deployArtifact\" externalProjectPath=\"\$PROJECT_DIR\$\" />\n")
             } else {
                 sb.append("      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"classes\" externalProjectPath=\"\$PROJECT_DIR\$\" />\n")
@@ -728,7 +753,13 @@ project.plugins.withId("java") {
                 sb.append("    <option name=\"ALTERNATIVE_JRE_PATH_ENABLED\" value=\"true\" />\n")
             }
             sb.append("    <method v=\"2\">\n")
-            sb.append("      <option name=\"Make\" enabled=\"true\" />\n")
+            if (conf.buildMode == "idea") {
+                sb.append("      <option name=\"Make\" enabled=\"true\" />\n")
+            } else if (shouldAutoDeploy()) {
+                sb.append("      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"deployArtifact\" externalProjectPath=\"\$PROJECT_DIR\$\" />\n")
+            } else {
+                sb.append("      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"classes\" externalProjectPath=\"\$PROJECT_DIR\$\" />\n")
+            }
             sb.append("    </method>\n")
             sb.append("  </configuration>\n")
         }

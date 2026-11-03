@@ -229,6 +229,17 @@ public class RemoldAgent {
 	static final         Set<Path>           activeWatchJars = new CopyOnWriteArraySet<>();
 	private static final List<WatcherThread> activeWatchers  = new CopyOnWriteArrayList<>();
 
+	/** 构建模式：gradle（默认仅监控 build/classes）、idea（仅监控 out/production）、auto（两者均监控并时间戳仲裁） */
+	public static volatile String BUILD_MODE = System.getProperty("remold.build_mode", "auto");
+
+	public static void setBuildMode(String mode) {
+		BUILD_MODE = mode != null ? mode.toLowerCase() : "auto";
+	}
+
+	public static String getBuildMode() {
+		return BUILD_MODE;
+	}
+
 	/**
 	 * 在不使用retransform的情况下，确保旧bytecode正确的唯一方法
 	 * dotClassName -> bytecode（JVM 实际生效/织入后基线，供 LayoutGate、InitFix、redefineClasses 使用）
@@ -886,6 +897,14 @@ public class RemoldAgent {
 				}
 				continue;
 			}
+			if (trimmed.startsWith("build_mode=") || trimmed.startsWith("buildMode=")) {
+				String mode = trimmed.substring(trimmed.indexOf('=') + 1).trim();
+				if (!mode.isEmpty()) {
+					BUILD_MODE = mode.toLowerCase();
+					info("Build mode configured via agentArgs: " + BUILD_MODE);
+				}
+				continue;
+			}
 			Path   p  = Paths.get(trimmed).toAbsolutePath();
 			String ps = p.toString();
 			if (Files.isDirectory(p)) {
@@ -893,6 +912,9 @@ public class RemoldAgent {
 			} else if ((ps.endsWith(".jar") || ps.endsWith(".zip")) && Files.isRegularFile(p)) {
 				outJars.add(p);
 			} else if (ps.endsWith("out" + File.separator + "production") || ps.endsWith("out/production") || ps.endsWith("out\\production")) {
+				if ("gradle".equalsIgnoreCase(BUILD_MODE)) {
+					continue;
+				}
 				try {
 					Files.createDirectories(p);
 					outDirs.add(p);
@@ -904,23 +926,25 @@ public class RemoldAgent {
 			}
 		}
 
-		// 自动探测并补充 IDEA 的 out/production 目录
-		for (Path dir : new HashSet<>(outDirs)) {
-			Path current = dir;
-			while (current != null && current.getParent() != null) {
-				Path outProd = current.resolve("out").resolve("production");
-				if (Files.isDirectory(outProd)) {
-					outDirs.add(outProd.toAbsolutePath().normalize());
-					break;
-				}
-				if (current.getFileName() != null && current.getFileName().toString().equals("build")) {
-					Path rootOutProd = current.getParent().resolve("out").resolve("production");
-					if (Files.isDirectory(rootOutProd)) {
-						outDirs.add(rootOutProd.toAbsolutePath().normalize());
+		// 自动探测并补充 IDEA 的 out/production 目录（gradle 构建模式下不自动探测）
+		if (!"gradle".equalsIgnoreCase(BUILD_MODE)) {
+			for (Path dir : new HashSet<>(outDirs)) {
+				Path current = dir;
+				while (current != null && current.getParent() != null) {
+					Path outProd = current.resolve("out").resolve("production");
+					if (Files.isDirectory(outProd)) {
+						outDirs.add(outProd.toAbsolutePath().normalize());
+						break;
 					}
-					break;
+					if (current.getFileName() != null && current.getFileName().toString().equals("build")) {
+						Path rootOutProd = current.getParent().resolve("out").resolve("production");
+						if (Files.isDirectory(rootOutProd)) {
+							outDirs.add(rootOutProd.toAbsolutePath().normalize());
+						}
+						break;
+					}
+					current = current.getParent();
 				}
-				current = current.getParent();
 			}
 		}
 	}
@@ -1447,6 +1471,18 @@ public class RemoldAgent {
 				byte[] bc = Files.readAllBytes(p);
 				String cn = Utils.getClassNameASM(bc);
 				if (cn != null) {
+					Path existingPath = classToPath.get(cn);
+					if (existingPath != null) {
+						try {
+							java.nio.file.attribute.FileTime curTime = Files.getLastModifiedTime(p);
+							java.nio.file.attribute.FileTime oldTime = Files.getLastModifiedTime(existingPath);
+							if (curTime.compareTo(oldTime) <= 0) {
+								if (DEBUG) log("[TIMESTAMP-SKIP] Skipping older class file " + p + " for " + cn + " (existing " + existingPath + " is newer)");
+								continue;
+							}
+						} catch (Throwable ignored) {
+						}
+					}
 					newBatchBytes.put(cn, bc);
 					classToPath.put(cn, p);
 				} else {
@@ -3813,6 +3849,8 @@ public class RemoldAgent {
 				error("Failed to scan direct jar: " + jar, e);
 			}
 		}
+		Map<String, Path> latestClassPaths = new HashMap<>();
+		Map<String, byte[]> latestClassBytes = new HashMap<>();
 		for (Path root : activeWatchDirs) {
 			try (Stream<Path> walk = Files.walk(root)) {
 				walk.filter(p -> {
@@ -3865,31 +3903,49 @@ public class RemoldAgent {
 						} catch (IOException ignored) { }
 						return;
 					}
-					// 原始 .class 文件逻辑（保持不变）
+					// 原始 .class 文件逻辑：按类名聚合，并取最后修改时间最新者
 					try {
 						byte[] diskBytes = Files.readAllBytes(path);
 						String cName     = Utils.getClassNameASM(diskBytes);
 						if (cName == null || isBlacklisted(cName)) return;
 
-						long diskHash = calculateHash(diskBytes);
-
-						// 获取内存中的字节码（这是 transformLoaded 偷出来的）
-						byte[] memBytes = bytecodeCache.get(cName);
-						if (memBytes != null) {
-							long memHash = calculateHash(memBytes);
-							if (diskHash != memHash) {
-								// 发现磁盘和内存不一致，手动加入待处理队列
-								if (DEBUG) log("[INIT-SYNC] " + cName + " is out of sync. Reloading...");
-								pendingChanges.add(path);
+						Path existing = latestClassPaths.get(cName);
+						if (existing != null) {
+							try {
+								if (Files.getLastModifiedTime(path).compareTo(Files.getLastModifiedTime(existing)) <= 0) {
+									return;
+								}
+							} catch (Throwable ignored) {
 							}
 						}
-						// 只有在这里才记录磁盘哈希
-						synchronized (fileDiskHashes) {
-							fileDiskHashes.put(CRC64.hashString(cName), diskHash);
-						}
+						latestClassPaths.put(cName, path);
+						latestClassBytes.put(cName, diskBytes);
 					} catch (Exception ignored) { }
 				});
 			} catch (IOException ignored) { }
+		}
+
+		// 统一对最新版本的 .class 进行哈希比对与落账
+		for (Map.Entry<String, Path> entry : latestClassPaths.entrySet()) {
+			String cName = entry.getKey();
+			Path   path  = entry.getValue();
+			byte[] diskBytes = latestClassBytes.get(cName);
+			if (diskBytes == null) continue;
+
+			try {
+				long diskHash = calculateHash(diskBytes);
+				byte[] memBytes = bytecodeCache.get(cName);
+				if (memBytes != null) {
+					long memHash = calculateHash(memBytes);
+					if (diskHash != memHash) {
+						if (DEBUG) log("[INIT-SYNC] " + cName + " is out of sync. Reloading...");
+						pendingChanges.add(path);
+					}
+				}
+				synchronized (fileDiskHashes) {
+					fileDiskHashes.put(CRC64.hashString(cName), diskHash);
+				}
+			} catch (Exception ignored) { }
 		}
 		// 入参 classes 是调用方在 restartWatchers 之前取的快照，此刻可能已过期
 		// （旧 watcher 排进 scheduler 的任务期间可能又有类被加载）。改走 triggerHotswap()，

@@ -79,7 +79,9 @@ public final class IdeaRunConfigGenerator {
                 sb.append("    <option name=\"ALTERNATIVE_JRE_PATH_ENABLED\" value=\"true\" />\n");
             }
             sb.append("    <method v=\"2\">\n");
-            if (shouldAutoDeploy) {
+            if ("idea".equals(conf.getBuildMode())) {
+                sb.append("      <option name=\"Make\" enabled=\"true\" />\n");
+            } else if (shouldAutoDeploy) {
                 sb.append("      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"deployArtifact\" externalProjectPath=\"$PROJECT_DIR$\" />\n");
             } else {
                 sb.append("      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"classes\" externalProjectPath=\"$PROJECT_DIR$\" />\n");
@@ -101,7 +103,13 @@ public final class IdeaRunConfigGenerator {
                 sb.append("    <option name=\"ALTERNATIVE_JRE_PATH_ENABLED\" value=\"true\" />\n");
             }
             sb.append("    <method v=\"2\">\n");
-            sb.append("      <option name=\"Make\" enabled=\"true\" />\n");
+            if ("idea".equals(conf.getBuildMode())) {
+                sb.append("      <option name=\"Make\" enabled=\"true\" />\n");
+            } else if (shouldAutoDeploy) {
+                sb.append("      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"deployArtifact\" externalProjectPath=\"$PROJECT_DIR$\" />\n");
+            } else {
+                sb.append("      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"classes\" externalProjectPath=\"$PROJECT_DIR$\" />\n");
+            }
             sb.append("    </method>\n");
             sb.append("  </configuration>\n");
         }

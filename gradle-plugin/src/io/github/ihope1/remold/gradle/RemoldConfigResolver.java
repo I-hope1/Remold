@@ -175,26 +175,43 @@ public final class RemoldConfigResolver {
         File safeAgent = syncIntoLocalRemold(agentFile, new File(localRemoldDir, "remold-agent.jar"));
 
         // 4. Derive compilation outputs and resources watch paths
+        String buildMode = resolveBuildMode(project, ext);
         SourceSetContainer sourceSets = (SourceSetContainer) project.getExtensions().getByName("sourceSets");
         SourceSet mainSourceSet = sourceSets.getByName("main");
         Set<File> classesDirs = mainSourceSet.getOutput().getClassesDirs().getFiles();
         Set<File> resourceDirs = mainSourceSet.getResources().getSrcDirs();
         File assetsDir = new File(project.getProjectDir(), "assets");
         File outResourceDir = mainSourceSet.getOutput().getResourcesDir();
-        File ideaOutDir = new File(project.getProjectDir(), "out/production");
-        if (!ideaOutDir.exists()) {
-            try {
-                ideaOutDir.mkdirs();
-            } catch (Throwable ignored) {
-            }
-        }
 
         Set<File> allCandidateDirs = new LinkedHashSet<>();
-        allCandidateDirs.addAll(classesDirs);
+        if ("idea".equals(buildMode)) {
+            File ideaOutDir = new File(project.getProjectDir(), "out/production");
+            boolean foundModuleOut = false;
+            if (ideaOutDir.isDirectory()) {
+                File[] subs = ideaOutDir.listFiles(File::isDirectory);
+                if (subs != null) {
+                    for (File sub : subs) {
+                        allCandidateDirs.add(sub);
+                        foundModuleOut = true;
+                    }
+                }
+            }
+            if (!foundModuleOut) {
+                allCandidateDirs.add(ideaOutDir);
+            }
+        } else if ("auto".equals(buildMode)) {
+            allCandidateDirs.addAll(classesDirs);
+            File ideaOutDir = new File(project.getProjectDir(), "out/production");
+            if (ideaOutDir.isDirectory()) {
+                allCandidateDirs.add(ideaOutDir);
+            }
+        } else {
+            allCandidateDirs.addAll(classesDirs);
+        }
+
         allCandidateDirs.addAll(resourceDirs);
         if (assetsDir.exists()) allCandidateDirs.add(assetsDir);
         if (outResourceDir != null && outResourceDir.exists()) allCandidateDirs.add(outResourceDir);
-        if (ideaOutDir.exists()) allCandidateDirs.add(ideaOutDir);
         allCandidateDirs.addAll(ext.getWatchDirs());
 
         List<File> allWatchDirs = new ArrayList<>();
@@ -228,6 +245,7 @@ public final class RemoldConfigResolver {
         }
 
         jvmArgs.addAll(ext.getExtraJvmArgs());
+        jvmArgs.add("-Dremold.build_mode=" + buildMode);
         if (ext.getFileShakeMs() != null) {
             jvmArgs.add("-Dremold.agent.file_shake_ms=" + ext.getFileShakeMs());
         }
@@ -323,7 +341,8 @@ public final class RemoldConfigResolver {
                 jvmArgs,
                 appArgs,
                 runtimeClasspath,
-                targetJar
+                targetJar,
+                buildMode
         );
         return cachedConfig;
     }
@@ -384,6 +403,26 @@ public final class RemoldConfigResolver {
             }
         }
         return f.isDirectory() ? f.getAbsolutePath() : "";
+    }
+
+    public static String resolveBuildMode(Project project, RemoldExtension ext) {
+        String mode = ext.getBuildMode();
+        if (mode == null && project.findProperty("remold.buildMode") != null) {
+            mode = String.valueOf(project.findProperty("remold.buildMode"));
+        }
+        if (mode == null && project.findProperty("remold.build_mode") != null) {
+            mode = String.valueOf(project.findProperty("remold.build_mode"));
+        }
+        if (mode == null && project.findProperty("remold.builder") != null) {
+            mode = String.valueOf(project.findProperty("remold.builder"));
+        }
+        if (mode == null && project.findProperty("remoldBuildMode") != null) {
+            mode = String.valueOf(project.findProperty("remoldBuildMode"));
+        }
+        if (mode == null || mode.trim().isEmpty()) {
+            mode = "gradle";
+        }
+        return mode.trim().toLowerCase();
     }
 
     public static File resolveDeployDir(Project project, RemoldExtension ext) {

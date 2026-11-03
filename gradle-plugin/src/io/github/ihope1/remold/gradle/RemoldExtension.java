@@ -37,6 +37,7 @@ public class RemoldExtension {
     private Object deployDir;
     private Object modsDir;
     private Boolean autoDeploy;
+    private String buildMode;
     private final List<String> plugins = new ArrayList<>();
     private final List<Object> pluginJars = new ArrayList<>();
 
@@ -208,5 +209,17 @@ public class RemoldExtension {
 
     public void pluginJar(Object file) {
         if (file != null) this.pluginJars.add(file);
+    }
+
+    public String getBuildMode() {
+        return buildMode;
+    }
+
+    public void setBuildMode(String buildMode) {
+        this.buildMode = buildMode;
+    }
+
+    public void buildMode(String buildMode) {
+        this.buildMode = buildMode;
     }
 }

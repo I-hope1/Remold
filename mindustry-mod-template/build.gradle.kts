@@ -1,5 +1,6 @@
 plugins {
     java
+    id("io.github.i-hope1.remold")
 }
 
 // ==================== 统一常量 ====================
@@ -36,9 +37,6 @@ if (findProperty("remold.deployDir") == null && findProperty("remold.modsDir") =
     extra["remold.deployDir"] = File(dataDir, "mods").absolutePath
 }
 
-// 本地源码树里开发 Remold 时用上一层的脚本（改了立即生效），否则按 tag 拉取对应版本
-apply(from = file("../remold.gradle.kts").takeIf { it.isFile }
-    ?: "https://raw.githubusercontent.com/I-Hope1/Remold/v$remoldVersion/remold.gradle.kts")
 
 sourceSets.main {
     java.setSrcDirs(listOf("src"))
@@ -121,9 +119,11 @@ tasks.named<Jar>("jar") {
 
 // ==================== Remold 热重载自动化配置 ====================
 // 推荐直接在 gradle.properties 中配置 remold.jar 与 remold.autoDeploy=true
-// 亦可在本脚本中通过 extra 属性覆盖配置，例如：
-// extra["remold.jar"] = "D:/Mindustry/Mindustry.jar"
-// extra["remold.autoDeploy"] = true
+// 亦可在本脚本中通过 remold { ... } 类型安全 DSL 覆盖配置，例如：
+// remold {
+//     jar = "D:/Mindustry/Mindustry.jar"
+//     autoDeploy = true
+// }
 
 // ==================== 可选：Android d8/dex 打包任务 (与官方模版对齐) ====================
 // 把 Desktop.jar 转成 classes.dex 打进 Android.jar，供移动端加载。

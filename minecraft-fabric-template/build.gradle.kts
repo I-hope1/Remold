@@ -5,20 +5,25 @@ plugins {
     id("fabric-loom") version "1.17.21"
 }
 
-val minecraftVersion = property("minecraft_version") as String
-val yarnMappings = property("yarn_mappings") as String
-val loaderVersion = property("loader_version") as String
-val fabricVersion = property("fabric_version") as String
+fun prop(name: String): String = providers.gradleProperty(name).get()
 
-val modId = property("mod_id") as String
-val modVersion = property("mod_version") as String
-val modGroup = property("mod_group") as String
+val minecraftVersion = prop("minecraft_version")
+val yarnMappings = prop("yarn_mappings")
+val loaderVersion = prop("loader_version")
+val fabricVersion = prop("fabric_version")
+
+val modId = prop("mod_id")
+val modVersion = prop("mod_version")
+val modGroup = prop("mod_group")
+
+// Remold 版本：脚本 / agent / api 三者必须同版本
+val remoldVersion = providers.gradleProperty("remold.version").getOrElse("0.2.1")
 
 version = modVersion
 group = modGroup
 
 base {
-    archivesName.set(modId)
+    archivesName = modId
 }
 
 java {
@@ -40,13 +45,12 @@ dependencies {
     modImplementation("net.fabricmc.fabric-api:fabric-api:$fabricVersion")
 
     // Remold 注解与 API 依赖：提供 @RemoldReinit, @OnReload 等热重载控制注解
-    val remoldVersion = (project.findProperty("remold.version") as? String) ?: "0.2.1"
     compileOnly("com.github.I-hope1.Remold:api:v$remoldVersion")
 }
 
 // 本地源码树里开发 Remold 时用上一层的脚本（改了立即生效），否则按 tag 拉取对应版本
 apply(from = file("../remold.gradle.kts").takeIf { it.isFile }
-    ?: "https://raw.githubusercontent.com/I-Hope1/Remold/v${findProperty("remold.version") ?: "0.2.1"}/remold.gradle.kts")
+    ?: "https://raw.githubusercontent.com/I-Hope1/Remold/v$remoldVersion/remold.gradle.kts")
 
 // client 运行目录与 IDE 运行配置沿用 Loom 默认值（runDir = run，ideConfigGenerated = true）。
 // 旧写法 ideConfigGenerated(true) / runDir("run") 在 Loom 1.18 起已废弃，会刷弃用警告。
@@ -63,20 +67,19 @@ loom {
 }
 
 tasks.processResources {
-    inputs.property("version", modVersion)
-    inputs.property("minecraft_version", minecraftVersion)
-    inputs.property("loader_version", loaderVersion)
+    val resourceTargets = mapOf(
+        "version" to modVersion,
+        "minecraft_version" to minecraftVersion,
+        "loader_version" to loaderVersion
+    )
+    inputs.properties(resourceTargets)
 
     filesMatching("fabric.mod.json") {
-        expand(
-            "version" to modVersion,
-            "minecraft_version" to minecraftVersion,
-            "loader_version" to loaderVersion
-        )
+        expand(resourceTargets)
     }
 }
 
 tasks.withType<JavaCompile>().configureEach {
     options.encoding = "UTF-8"
-    options.release.set(21)
+    options.release = 21
 }

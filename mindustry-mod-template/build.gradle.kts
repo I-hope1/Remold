@@ -10,7 +10,7 @@ val osName = System.getProperty("os.name").lowercase()
 val isWindows = osName.contains("win")
 
 // Remold 版本：脚本 / agent / api 三者必须同版本（apply 拉脚本 与 api 依赖共用这一份）
-val remoldVersion = (findProperty("remold.version") as? String) ?: "0.2.1"
+val remoldVersion = providers.gradleProperty("remold.version").getOrElse("0.2.1")
 
 // 目标 Mindustry 版本 (如 v160, v160.5, latest, be)。
 // 默认值可被 -PmindustryVersion=... / gradle.properties 里的 mindustryVersion= 覆盖。
@@ -103,7 +103,7 @@ dependencies {
 
 // 桌面端模组打包任务
 tasks.named<Jar>("jar") {
-    archiveFileName.set("${project.name}Desktop.jar")
+    archiveFileName = "${project.name}Desktop.jar"
 
     from(configurations.runtimeClasspath.map { files ->
         files.map { if (it.isDirectory) it else zipTree(it) }
@@ -266,7 +266,7 @@ tasks.register<Jar>("deploy") {
     }
     dependsOn(tasks.named("jar"))
 
-    archiveFileName.set("${project.name}.jar")
+    archiveFileName = "${project.name}.jar"
 
     // 两个 jar 都带 mod.hjson / assets / META-INF：默认 INCLUDE 会把同名条目重复写进归档。
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE

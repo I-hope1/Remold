@@ -754,11 +754,17 @@ project.plugins.withId("java") {
 
         xmlFile.writeText(sb.toString())
 
-        // 自动适配 Fabric Loom：若存在 Loom 生成的 Minecraft_Client.xml，自动同步 Remold 插件与探针参数
+        // 自动适配 Fabric Loom：若存在 Loom 生成的 Minecraft_Client.xml / Minecraft_Server.xml，自动同步 Remold 插件、探针参数与运行前 deployArtifact
         try {
-            val clientXml = File(ideaRunDir, "Minecraft_Client.xml")
-            if (clientXml.exists()) {
-                val content = clientXml.readText()
+            val loomRunConfigs = listOf("Minecraft_Client.xml", "Minecraft_Server.xml")
+            for (configName in loomRunConfigs) {
+                val clientXml = File(ideaRunDir, configName)
+                if (!clientXml.exists()) continue
+
+                var content = clientXml.readText()
+                var modified = false
+
+                // 1. 同步 VM_PARAMETERS
                 val regex = Regex("""<option name="VM_PARAMETERS" value="([^"]*)"\s*/>""")
                 val match = regex.find(content)
                 if (match != null) {
@@ -778,9 +784,24 @@ project.plugins.withId("java") {
                         }
                     }
                     if (updated != existing) {
-                        clientXml.writeText(content.replace(match.value, "<option name=\"VM_PARAMETERS\" value=\"${xmlEscape(updated)}\"/>"))
-                        logger.lifecycle("[Remold] Automatically synchronized Remold parameters into Minecraft_Client.xml")
+                        content = content.replace(match.value, "<option name=\"VM_PARAMETERS\" value=\"${xmlEscape(updated)}\"/>")
+                        modified = true
                     }
+                }
+
+                // 2. 运行前任务同步：将 <method v="2"> 改为运行前执行 deployArtifact
+                val beforeRunBlock = "    <method v=\"2\">\n      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"deployArtifact\" externalProjectPath=\"\$PROJECT_DIR\$\" vmOptions=\"\" scriptParameters=\"\" />\n    </method>"
+                val methodRegex = Regex("""(?s)<method v="2">.*?</method>|<method v="2"\s*/>""")
+                if (!content.contains("tasks=\"deployArtifact\"")) {
+                    if (methodRegex.containsMatchIn(content)) {
+                        content = methodRegex.replace(content, java.util.regex.Matcher.quoteReplacement(beforeRunBlock))
+                        modified = true
+                    }
+                }
+
+                if (modified) {
+                    clientXml.writeText(content)
+                    logger.lifecycle("[Remold] Automatically synchronized Remold parameters and deployArtifact into $configName")
                 }
             }
         } catch (_: Throwable) { }

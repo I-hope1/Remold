@@ -184,12 +184,9 @@ public final class IdeaRunConfigGenerator {
                     }
                 }
 
-                String expectedBeforeRunTask = "idea".equals(conf.getBuildMode())
-                        ? "      <option name=\"Make\" enabled=\"true\" />\n"
-                        : "      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\":classes\" externalProjectPath=\"$PROJECT_DIR$\" vmOptions=\"\" scriptParameters=\"\" />\n";
-                String expectedBeforeRunBlock = "    <method v=\"2\">\n" + expectedBeforeRunTask + "    </method>";
+                String expectedBeforeRunBlock = "    <method v=\"2\">\n      <option name=\"Make\" enabled=\"true\" />\n    </method>";
 
-                if (content.contains("tasks=\"deployArtifact\"") || ("idea".equals(conf.getBuildMode()) && !content.contains("<option name=\"Make\" enabled=\"true\" />"))) {
+                if (content.contains("tasks=\"deployArtifact\"") || content.contains("tasks=\":classes\"") || content.contains("tasks=\"classes\"") || !content.contains("<option name=\"Make\" enabled=\"true\" />")) {
                     Matcher mm = methodRegex.matcher(content);
                     if (mm.find()) {
                         content = mm.replaceFirst(Matcher.quoteReplacement(expectedBeforeRunBlock));

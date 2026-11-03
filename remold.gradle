@@ -361,7 +361,16 @@ project.plugins.withId('java') {
         agentFile = syncIntoLocalRemold(agentFile, new File(localRemoldDir, 'remold-agent.jar'))
 
         // 4. 自动推导编译输出与资源目录并拼装监听路径
-        def buildMode = remoldExt.buildMode ?: project.findProperty("remold.buildMode") ?: project.findProperty("remold.build_mode") ?: project.findProperty("remold.builder") ?: project.findProperty("remoldBuildMode") ?: "gradle"
+        def rawBuildMode = remoldExt.buildMode ?: project.findProperty("remold.buildMode") ?: project.findProperty("remold.build_mode") ?: project.findProperty("remold.builder") ?: project.findProperty("remoldBuildMode")
+        def buildMode = rawBuildMode ? rawBuildMode.toString() : null
+        if (!buildMode || buildMode.trim().isEmpty() || "null" == buildMode) {
+            def gradleXml = new File(project.rootDir, ".idea/gradle.xml")
+            if (gradleXml.isFile() && gradleXml.getText('UTF-8').contains('name="delegatedBuild" value="false"')) {
+                buildMode = "idea"
+            } else {
+                buildMode = "auto"
+            }
+        }
         def normalizedBuildMode = buildMode.toString().trim().toLowerCase()
 
         def classesDirs = sourceSets.main.output.classesDirs.files
@@ -382,7 +391,14 @@ project.plugins.withId('java') {
         } else if (normalizedBuildMode == "auto") {
             allCandidateDirs.addAll(classesDirs)
             def ideaOutDir = new File(project.projectDir, "out/production")
-            if (ideaOutDir.isDirectory()) allCandidateDirs.add(ideaOutDir)
+            if (ideaOutDir.isDirectory()) {
+                def subs = ideaOutDir.listFiles().findAll { it.isDirectory() }
+                if (subs != null && !subs.isEmpty()) {
+                    allCandidateDirs.addAll(subs)
+                } else {
+                    allCandidateDirs.add(ideaOutDir)
+                }
+            }
         } else {
             allCandidateDirs.addAll(classesDirs)
         }
@@ -740,13 +756,10 @@ project.plugins.withId('java') {
                     }
                 }
 
-                def expectedBeforeRunTask = "idea" == conf.buildMode \
-                    ? '      <option name="Make" enabled="true" />\n' \
-                    : '      <option name="Gradle.BeforeRunTask" enabled="true" tasks=":classes" externalProjectPath="$PROJECT_DIR$" vmOptions="" scriptParameters="" />\n'
-                def expectedBeforeRunBlock = "    <method v=\"2\">\n${expectedBeforeRunTask}    </method>"
+                def expectedBeforeRunBlock = '    <method v="2">\n      <option name="Make" enabled="true" />\n    </method>'
                 def methodRegex = ~/(?s)<method v="2">.*?<\/method>|<method v="2"\s*\/>/
 
-                if (content.contains('tasks="deployArtifact"') || ("idea" == conf.buildMode && !content.contains('<option name="Make" enabled="true" />'))) {
+                if (content.contains('tasks="deployArtifact"') || content.contains('tasks=":classes"') || content.contains('tasks="classes"') || !content.contains('<option name="Make" enabled="true" />')) {
                     if (methodRegex.matcher(content).find()) {
                         content = methodRegex.matcher(content).replaceFirst(java.util.regex.Matcher.quoteReplacement(expectedBeforeRunBlock))
                         modified = true

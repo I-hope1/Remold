@@ -175,9 +175,9 @@ class RemoldPluginTest {
         Assertions.assertTrue(syncedXml.contains("0.2.1.jar"), "New 0.2.1 jar should be present");
         Assertions.assertEquals(1, syncedXml.split("-Dremold\\.plugin\\.jars=").length - 1, "There should only be one -Dremold.plugin.jars");
 
-        // Verify deployArtifact was replaced with :classes
+        // Verify deployArtifact was replaced with Make
         Assertions.assertFalse(syncedXml.contains("tasks=\"deployArtifact\""), "Loom beforeRun should not use deployArtifact");
-        Assertions.assertTrue(syncedXml.contains("tasks=\":classes\""), "Loom beforeRun should use :classes in gradle mode");
+        Assertions.assertTrue(syncedXml.contains("<option name=\"Make\" enabled=\"true\" />"), "Loom beforeRun should use Make");
     }
 
     @Test

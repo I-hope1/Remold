@@ -406,12 +406,22 @@ project.plugins.withId("java") {
         val safeAgent = syncIntoLocalRemold(agentFile, File(localRemoldDir, "remold-agent.jar"))
 
         // 4. 自动推导编译输出与资源目录并拼装监听路径
-        val buildMode = remoldExt.buildMode
+        val rawBuildMode = remoldExt.buildMode
             ?: project.findProperty("remold.buildMode")?.toString()
             ?: project.findProperty("remold.build_mode")?.toString()
             ?: project.findProperty("remold.builder")?.toString()
             ?: project.findProperty("remoldBuildMode")?.toString()
-            ?: "gradle"
+
+        val buildMode = if (!rawBuildMode.isNullOrBlank() && rawBuildMode != "null") {
+            rawBuildMode
+        } else {
+            val gradleXml = File(project.rootDir, ".idea/gradle.xml")
+            if (gradleXml.isFile && gradleXml.readText().contains("name=\"delegatedBuild\" value=\"false\"")) {
+                "idea"
+            } else {
+                "auto"
+            }
+        }
         val normalizedBuildMode = buildMode.trim().lowercase()
 
         val classesDirs = sourceSets["main"].output.classesDirs.files
@@ -431,7 +441,14 @@ project.plugins.withId("java") {
         } else if (normalizedBuildMode == "auto") {
             allCandidateDirs.addAll(classesDirs)
             val ideaOutDir = File(project.projectDir, "out/production")
-            if (ideaOutDir.isDirectory) allCandidateDirs.add(ideaOutDir)
+            if (ideaOutDir.isDirectory) {
+                val subs = ideaOutDir.listFiles { f -> f.isDirectory }
+                if (!subs.isNullOrEmpty()) {
+                    allCandidateDirs.addAll(subs)
+                } else {
+                    allCandidateDirs.add(ideaOutDir)
+                }
+            }
         } else {
             allCandidateDirs.addAll(classesDirs)
         }
@@ -814,15 +831,10 @@ project.plugins.withId("java") {
                     }
                 }
 
-                val expectedBeforeRunTask = if ("idea" == conf.buildMode) {
-                    "      <option name=\"Make\" enabled=\"true\" />\n"
-                } else {
-                    "      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\":classes\" externalProjectPath=\"\$PROJECT_DIR\$\" vmOptions=\"\" scriptParameters=\"\" />\n"
-                }
-                val expectedBeforeRunBlock = "    <method v=\"2\">\n$expectedBeforeRunTask    </method>"
+                val expectedBeforeRunBlock = "    <method v=\"2\">\n      <option name=\"Make\" enabled=\"true\" />\n    </method>"
                 val methodRegex = Regex("""(?s)<method v="2">.*?</method>|<method v="2"\s*/>""")
 
-                if (content.contains("tasks=\"deployArtifact\"") || ("idea" == conf.buildMode && !content.contains("<option name=\"Make\" enabled=\"true\" />"))) {
+                if (content.contains("tasks=\"deployArtifact\"") || content.contains("tasks=\":classes\"") || content.contains("tasks=\"classes\"") || !content.contains("<option name=\"Make\" enabled=\"true\" />")) {
                     if (methodRegex.containsMatchIn(content)) {
                         content = methodRegex.replace(content, java.util.regex.Matcher.quoteReplacement(expectedBeforeRunBlock))
                         modified = true

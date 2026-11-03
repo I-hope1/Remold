@@ -6,6 +6,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
@@ -203,7 +204,17 @@ public final class RemoldConfigResolver {
             allCandidateDirs.addAll(classesDirs);
             File ideaOutDir = new File(project.getProjectDir(), "out/production");
             if (ideaOutDir.isDirectory()) {
-                allCandidateDirs.add(ideaOutDir);
+                File[] subs = ideaOutDir.listFiles(File::isDirectory);
+                boolean foundSub = false;
+                if (subs != null) {
+                    for (File sub : subs) {
+                        allCandidateDirs.add(sub);
+                        foundSub = true;
+                    }
+                }
+                if (!foundSub) {
+                    allCandidateDirs.add(ideaOutDir);
+                }
             }
         } else {
             allCandidateDirs.addAll(classesDirs);
@@ -419,8 +430,18 @@ public final class RemoldConfigResolver {
         if (mode == null && project.findProperty("remoldBuildMode") != null) {
             mode = String.valueOf(project.findProperty("remoldBuildMode"));
         }
-        if (mode == null || mode.trim().isEmpty()) {
-            mode = "gradle";
+        if (mode == null || mode.trim().isEmpty() || "null".equals(mode)) {
+            File gradleXml = new File(project.getRootDir(), ".idea/gradle.xml");
+            if (gradleXml.isFile()) {
+                try {
+                    String content = new String(Files.readAllBytes(gradleXml.toPath()), StandardCharsets.UTF_8);
+                    if (content.contains("name=\"delegatedBuild\" value=\"false\"")) {
+                        return "idea";
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            mode = "auto";
         }
         return mode.trim().toLowerCase();
     }

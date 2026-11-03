@@ -54,4 +54,10 @@ public abstract class RemoldWandItemMixin {
         this.remold$useCount++;
         System.out.println("[Remold] mixin hook alive: use() call #" + this.remold$useCount);
     }
+
+    // =========================================================================================
+    // 👉 下一步：体验原版类 (TitleScreen) 的 Mixin 热重载
+    // 按住 Ctrl 点击跳转到下一个【动手试试 8】：
+    // {@link com.example.mixin.TitleScreenMixin}
+    // =========================================================================================
 }

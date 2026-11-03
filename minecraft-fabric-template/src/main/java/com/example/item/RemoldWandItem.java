@@ -83,8 +83,10 @@ public class RemoldWandItem extends Item {
     }
 
     // =========================================================================================
-    // 【相关跳转与官方仓库】
-    // 想了解更多关于 Remold 的热重载机制、安全门设计与其它游戏模组开发：
-    // 请访问 Remold 官方主仓库：https://github.com/I-hope1/Remold
+    // 👉 下一步：体验 Mixin 钩子与 @Unique 字段热更
+    // 按住 Ctrl 点击跳转到下一个【动手试试 6 & 7】：
+    // {@link com.example.mixin.RemoldWandItemMixin}
+    //
+    // 更多进阶文档与原理解析请见 Remold 官方主仓库：https://github.com/I-hope1/Remold
     // =========================================================================================
 }

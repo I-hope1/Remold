@@ -18,4 +18,10 @@ public class TitleScreenMixin {
     private void init(CallbackInfo info) {
         System.out.println("[Remold] TitleScreen initialized! Mixin active with Remold bytecode bridge.");
     }
+
+    // =========================================================================================
+    // 🎉 恭喜！你已体验完全部 8 个热重载核心场景！
+    // 随时按住 Ctrl 点击跳转返回起点：{@link com.example.item.RemoldWandItem}
+    // 官方主仓库与进阶机制说明：https://github.com/I-hope1/Remold
+    // =========================================================================================
 }

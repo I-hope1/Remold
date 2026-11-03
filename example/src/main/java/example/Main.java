@@ -24,6 +24,11 @@ public class Main {
             //   Runnable task = () -> System.out.println("  [Lambda] Hot reloaded at tick: " + tickCount);
             // Remold 的 AnonClassAligner（4 阶拓扑对齐）与 LambdaAligner 会自动进行编号对齐与 CallSite 映射，
             // 彻底杜绝匿名类/Lambda 增删重排导致的 NoSuchMethodError 崩溃！
+            //
+            // 👉 恭喜通关！按住 Ctrl 点击循环跳转回起点【动手试试 1~5】：
+            // {@link PlayerService}
+            //
+            // 更多进阶文档与原理解析请见 Remold 官方主仓库：https://github.com/I-hope1/Remold
             // =================================================================================
             Runnable task = new Runnable() {
                 @Override

@@ -44,6 +44,10 @@ public class RemoldWandItem extends Item {
     // 试试取消下面这一行的注释，或者新增你自己的字段（即使不标 @RemoldReinit 也是安全的）：
     //     public int clickCount = 1;
     // 并在 use() 中写 clickCount++。Remold 的 InitFix 引擎会在重定义后自动给存量实例注入初值，绝不读到 0！
+    //
+    // 👉 下一步：体验修改方法体业务逻辑
+    // 按住 Ctrl 点击跳转到【动手试试 4】：
+    // {@link #use(World, PlayerEntity, Hand)}
     // =========================================================================================
 
     public RemoldWandItem(Settings settings) {
@@ -72,6 +76,12 @@ public class RemoldWandItem extends Item {
         }
         return TypedActionResult.success(user.getStackInHand(hand));
     }
+
+    // =========================================================================================
+    // 👉 下一步：体验热重载生命周期回调
+    // 按住 Ctrl 点击跳转到【动手试试 5】：
+    // {@link #onReload()}
+    // =========================================================================================
 
     // =========================================================================================
     // 【动手试试 5：监听热更生命周期（@OnReload）】

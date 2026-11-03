@@ -66,6 +66,10 @@ public class ExampleJavaMod extends Mod {
     //   public static String subTitle = "由 Remold InitFix 自动装配初始值";
     //   public int sessionScore = 100 * 2;
     // 按 Ctrl+Shift+F9 重新编译，InitFix 会自动为存量环境执行安全初始化，绝不为 null/0！
+    //
+    // 👉 下一步：体验热重载生命周期回调
+    // 按住 Ctrl 点击跳转到【动手试试 4】：
+    // {@link #onReload()}
     // =========================================================================================
     @RemoldReinit
     public static String message = "Hello Remold Hot Reloading!";
@@ -88,11 +92,15 @@ public class ExampleJavaMod extends Mod {
     }
 
     // =========================================================================================
-    // 【动手试试 6：监听热重载生命周期（@OnReload）】
+    // 【动手试试 4：监听热重载生命周期（@OnReload）】
     // 本类被热更重定义后，Remold 会对本类的每个存活实例各调用一次本方法。
     // 试着在下方加入游戏内浮动提示：
     //   if (Vars.ui != null) Vars.ui.showInfoToast("[green]模组热更新成功！重载次数: " + reloadCount, 3f);
     // 按 Ctrl+Shift+F9 重新编译，每次热重载都会弹出游戏内浮窗，实时反馈！
+    //
+    // 👉 下一步：体验 PNG 贴图原位热更新（零重启直刷显存）
+    // 按住 Ctrl 点击跳转到【动手试试 5】：
+    // {@link #showBadge()}
     // =========================================================================================
     /**
      * 本类被热更重定义后，Remold 会对<b>本类的每个存活实例</b>各调用一次本方法。
@@ -152,6 +160,10 @@ public class ExampleJavaMod extends Mod {
     //   Windows: copy demo\remold-badge-amber.png assets\sprites\remold-badge.png
     //   macOS/Linux: cp demo/remold-badge-amber.png assets/sprites/remold-badge.png
     // 切回游戏，屏幕右侧常驻的角标贴图瞬间直刷显存变色，无需重新启动游戏或重新部署模组！
+    //
+    // 👉 下一步：体验动态修改 UI 对话框与交互
+    // 按住 Ctrl 点击跳转到【动手试试 6】：
+    // {@link #showDialog()}
     // =========================================================================================
     /** 在 HUD 右侧边缘挂一个常驻角标，作为贴图热更新的观察窗口。 */
     private static void showBadge() {
@@ -177,10 +189,16 @@ public class ExampleJavaMod extends Mod {
     }
 
     // =========================================================================================
-    // 【动手试试 4：动态修改 UI 对话框与交互逻辑】
+    // 【动手试试 6：动态修改 UI 对话框与交互逻辑】
     // 试着给下面的对话框新增一个按钮，或者修改提示文案与窗口标题：
     //   dialog.cont.button("动态新增的按钮", () -> Vars.ui.showInfo("来自热更后的点击响应！")).size(160f, 50f).row();
     // 按 Ctrl+Shift+F9 重新编译，重新调用 showDialog()（或者触发对应事件）即可看到最新 UI。
+    //
+    // 👉 恭喜通关！按住 Ctrl 点击循环跳转回起点【动手试试 1】：
+    // {@link #message}
+    //
+    // 想了解更多关于 Remold 的热重载机制、Arc 全套资源热更与安全门设计：
+    // 请访问 Remold 官方主仓库：https://github.com/I-hope1/Remold
     // =========================================================================================
     private static void showDialog() {
         BaseDialog dialog = new BaseDialog("Remold Mod Template");
@@ -196,10 +214,4 @@ public class ExampleJavaMod extends Mod {
         dialog.cont.button("I see", dialog::hide).size(120f, 50f);
         dialog.show();
     }
-
-    // =========================================================================================
-    // 【相关跳转与官方仓库】
-    // 想了解更多关于 Remold 的热重载机制、Arc 全套资源热更与安全门设计：
-    // 请访问 Remold 官方主仓库：https://github.com/I-hope1/Remold
-    // =========================================================================================
 }

@@ -32,6 +32,10 @@ public class PlayerService {
     //   private String guild = "Remold Adventurers";
     //   private int rank = 10;
     // 重新编译，Remold 的 InitFix 引擎会自动安全回溯构造器并为内存中的存量实例装配初值！
+    //
+    // 👉 下一步：体验修改方法体与业务逻辑
+    // 按住 Ctrl 点击跳转到【动手试试 4】：
+    // {@link #tick()}
     // =========================================================================================
     @RemoldReinit(mode = RemoldReinit.Mode.OVERWRITE)
     private String statusTitle = "Novice Adventurer";
@@ -45,6 +49,10 @@ public class PlayerService {
     // 【动手试试 4：修改业务逻辑与方法体】
     // 试着修改下方 tick() 中的得分增长逻辑（例如改为 this.score += 100）或输出格式，
     // 重新编译，下一次循环即刻应用新逻辑，无需重启 Java 进程！
+    //
+    // 👉 下一步：体验热重载生命周期回调
+    // 按住 Ctrl 点击跳转到【动手试试 5】：
+    // {@link #onReload()}
     // =========================================================================================
     public void tick() {
         this.score += 10;
@@ -69,4 +77,10 @@ public class PlayerService {
         System.out.println(">>> Notice that live instance state (like score=" + score + ") is safely preserved! <<<");
         System.out.println("----------------------------------------------------------------");
     }
+
+    // =========================================================================================
+    // 👉 下一步：体验匿名内部类与 Lambda 表达式热重载
+    // 按住 Ctrl 点击跳转到下一个【动手试试 6】：
+    // {@link Main#main(String[])}
+    // =========================================================================================
 }

@@ -3,6 +3,7 @@ package io.github.ihope1.remold.gradle;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.List;
 
 /**
@@ -127,6 +128,21 @@ public class RemoldExtension {
         if (dir != null) this.watchDirs.add(dir);
     }
 
+    /**
+     * Accepts a {@link File} or a path string.
+     *
+     * <p>Script-plugin users wrote {@code watchDirs = ["build/classes"]} with strings; the typed
+     * {@link #watchDir(File)} overload cannot take those, so this one keeps that syntax working.</p>
+     */
+    public void watchDir(Object dir) {
+        if (dir == null) return;
+        if (dir instanceof File) {
+            this.watchDirs.add((File) dir);
+        } else {
+            this.watchDirs.add(new File(dir.toString()));
+        }
+    }
+
     public List<String> getExtraJvmArgs() {
         return extraJvmArgs;
     }
@@ -201,6 +217,32 @@ public class RemoldExtension {
 
     public void plugins(String... p) {
         if (p != null) this.plugins.addAll(Arrays.asList(p));
+    }
+
+    /**
+     * Script-plugin compatible form: {@code plugins("arc")}, {@code plugins(["arc", "mixin"])}.
+     *
+     * <p>The script implementation flattened one level, so {@code plugins(["arc"])} must not add a
+     * {@code List} object as a plugin name.</p>
+     */
+    public void plugins(Object... p) {
+        if (p == null) return;
+        for (Object item : p) {
+            if (item == null) continue;
+            if (item instanceof Collection) {
+                for (Object nested : (Collection<?>) item) {
+                    if (nested != null) this.plugins.add(nested.toString());
+                }
+            } else {
+                this.plugins.add(item.toString());
+            }
+        }
+    }
+
+    /** Property-style assignment: {@code plugins = ["arc"]}. */
+    public void setPlugins(List<String> plugins) {
+        this.plugins.clear();
+        if (plugins != null) this.plugins.addAll(plugins);
     }
 
     public List<Object> getPluginJars() {

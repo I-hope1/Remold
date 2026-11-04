@@ -123,12 +123,18 @@ Remold 作为一个 Java Agent 运行。为了获得类结构变更高性能热�
 
 ### 1.2 方式一：Gradle 脚本插件自动化 (推荐，开箱即用)
 
-通过引入轻量脚本插件，免去手动查找类输出路径与拼写复杂 JVM 参数，自动装配并注册 `runRemold` 启动任务：
+`remold.gradle(.kts)` 只是一个**薄壳**：它把构建逻辑所在的二进制插件挂到当前工程上，
+免去手动查找类输出路径与拼写复杂 JVM 参数，自动装配并注册 `runRemold` 等任务。
+解析、任务注册与参数拼装只有一份实现，在 `:gradle-plugin` 里（脚本不复制任何逻辑）。
 
 > [!IMPORTANT]
 > **脚本插件也必须锁定版本。** `apply(from = ...)` 没有 `plugins { id(...) version ... }` 那样的版本坐标，
-> 因此**务必用 tag 地址**（`.../v0.2.1/remold.gradle.kts`）而不是 `.../main/...`：脚本与 `agent`/`api` 必须同版本，
-> 否则脚本按新接口拼参数、agent 还是旧版本，问题只会在运行期才暴露。
+> 因此**务必用 tag 地址**（`.../v0.2.1/remold.gradle.kts`）而不是 `.../main/...`；
+> 壳里的默认插件版本与 `agent`/`api` 必须同版本，否则按新接口拼参数、agent 还是旧版本，问题只会在运行期才暴露。
+>
+> **首次配置需要能解析到插件**（脚本按 `v<version>` 从 JitPack 取 `com.github.I-Hope1.Remold:gradle-plugin`）。
+> 离线或内网环境用 `-Premold.pluginJar=<path/to/remold-gradle-plugin.jar>`（或环境变量 `REMOLD_PLUGIN_JAR`）
+> 直接指定本地插件 jar；`-Premold.version=<版本>` 可覆盖脚本内联的默认版本。
 
 #### Groovy DSL (`build.gradle`):
 ```groovy
@@ -210,9 +216,10 @@ buildscript {
 apply(plugin = "io.github.i-hope1.remold")
 ```
 
-插件内部不含第二份实现：它把仓库根的 `remold.gradle(.kts)` 打进 jar，展开到 `.gradle/remold/scripts/` 后原样应用
-（Kotlin DSL 工程用 `.kts`，Groovy 工程用 `.gradle`），所以两条路行为一致。配置方式同方式一
-（`gradle.properties` / `extra[...]`；Groovy 可用 `remold { }`）。
+两条入口共用同一份实现：构建逻辑只存在于 `:gradle-plugin`，仓库根的 `remold.gradle(.kts)` 只是把该插件
+挂到工程上的薄壳（`apply(from=...)` 走的是它），所以行为一致。配置方式同方式一
+（`gradle.properties` / `extra[...]`；Groovy 与 Kotlin DSL 的 `plugins {}` 入口都可用 `remold { }`；
+纯 `apply(from=...)` 的 Kotlin DSL 工程因类型安全访问器不可用，请用属性配置或改用 `plugins {}` 入口）。
 
 > [!TIP]
 > `gradle-plugin` 模块从 **`v0.2.0`** 起正式提供稳定的构建产物；在那之前可以写 `master-SNAPSHOT` 尝鲜

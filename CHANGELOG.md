@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Gradle 脚本插件瘦身为薄壳**：`remold.gradle` / `remold.gradle.kts` 从 1,031 / 1,120 行的完整实现缩到 ~40 行，
+  只负责把二进制插件 `io.github.i-hope1.remold` 挂到工程上；解析、任务注册与参数拼装全部收敛到 `:gradle-plugin`
+  （此前是脚本 + 插件两套并行实现，且 README 与打包注释声称"只有一份"，与事实相反）。
+  插件来源优先 `-Premold.pluginJar` / `REMOLD_PLUGIN_JAR`，否则按版本取 JitPack 坐标。
+- **`RemoldExtension` 补齐脚本语法面**：`plugins(Object...)` 支持 `plugins(['arc'])` 展平、新增 `setPlugins`、
+  `watchDir(Object)` 接受路径字符串；resolver 用 `project.file(...)` 归一字符串形式的 `watchDirs`。
+- `gradle-plugin` 的 `processResources` 注释改为"随 jar 附带薄壳副本"，不再声称脚本是共享实现。
 - **加载器集成从 core 迁出（`plugin-fabric`）**：`fabric.classPathGroups` 注入、`run/mods` 残留制品巡检与 `mods` 目录监听排除不再由引擎核心承担，改由 `remold-plugin-fabric` 通过 `HotswapPlugin` 的通用窗口实现；`core` 不再出现任何加载器专属的目录或属性约定。
 - **`RemoldAgent` 拆分**：布局门判决、被删成员读者扫描、监控路径记账、监听线程、jar 解压、环境能力探测分别搬到 `LayoutDecisionEngine` / `RemovedMemberScanner` / `WatchPathRegistry` / `FileWatcherService` / `JarExtractor` / `EnvironmentProbe`；公共 API 与全部调用方保持不变。
 

@@ -11,6 +11,12 @@ dependencies {
     compileOnly project(':api')
 }
 
+// remold.gradle 只是薄壳：实现全在 :gradle-plugin。仓库内优先用刚构建出的本地插件 jar（离线可用），
+// 没有时回退到壳里的 JitPack 默认坐标（首次需要网络）。也可显式 -Premold.pluginJar=<jar> 覆盖。
+def remoldPluginJar = rootProject.file("gradle-plugin/build/libs/remold-gradle-plugin-${rootProject.findProperty('remoldVersion') ?: '0.2.1'}.jar")
+if (remoldPluginJar.isFile() && findProperty('remold.pluginJar') == null) {
+    ext.set('remold.pluginJar', remoldPluginJar.absolutePath)
+}
 apply from: rootProject.file('remold.gradle')
 
 remold {

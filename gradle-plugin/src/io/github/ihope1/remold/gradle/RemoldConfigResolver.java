@@ -223,7 +223,10 @@ public final class RemoldConfigResolver {
         allCandidateDirs.addAll(resourceDirs);
         if (assetsDir.exists()) allCandidateDirs.add(assetsDir);
         if (outResourceDir != null && outResourceDir.exists()) allCandidateDirs.add(outResourceDir);
-        allCandidateDirs.addAll(ext.getWatchDirs());
+        // watchDirs may arrive as File or as a path string (script-plugin syntax); project.file handles both.
+        for (Object watchDir : ext.getWatchDirs()) {
+            if (watchDir != null) allCandidateDirs.add(project.file(watchDir));
+        }
 
         List<File> allWatchDirs = new ArrayList<>();
         for (File dir : allCandidateDirs) {

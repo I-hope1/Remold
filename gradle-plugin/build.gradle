@@ -15,8 +15,8 @@ dependencies {
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
 }
 
-// 脚本插件本体（仓库根的 remold.gradle / remold.gradle.kts）直接打进 jar，
-// 让「Gradle 插件」与「apply(from=...) 脚本插件」永远共用同一份实现，不存在两套代码漂移。
+// 仓库根的 remold.gradle / remold.gradle.kts 是薄壳（只负责把本插件挂到工程上），随 jar 附带一份，
+// 方便离线/内网用户直接取出使用。实现只有一份：就在本模块里，脚本里没有任何构建逻辑。
 processResources {
 	from(rootProject.file('remold.gradle')) { into 'remold' }
 	from(rootProject.file('remold.gradle.kts')) { into 'remold' }
@@ -83,4 +83,13 @@ publishing {
 test {
 	useJUnitPlatform()
 	failOnNoDiscoveredTests = false
+	// The script-shim test boots a nested build that must resolve the plugin from a real jar
+	// (apply-from scripts cannot see the test classpath). Hand it the freshly built artifact.
+	dependsOn tasks.named('jar')
+	// archiveFile can only be queried once the jar task is ready, so resolve it right before the fork.
+	doFirst {
+		systemProperty 'remold.pluginJar', tasks.named('jar').get().archiveFile.get().asFile.absolutePath
+	}
+	systemProperty 'remold.shimGroovy', rootProject.file('remold.gradle').absolutePath
+	systemProperty 'remold.shimKts', rootProject.file('remold.gradle.kts').absolutePath
 }

@@ -129,12 +129,16 @@ flowchart TD
   ```
 - 若检测到原有配置包含 `deployArtifact`、`:classes` 或 `classes`，无条件替换为原生 `Make`，杜绝启动前误触发打包任务。
 
-### 4.4 运行时自身残留制品巡检契约 (`plugin-fabric`)
+### 4.4 运行时残留制品隔离契约 (`plugin-fabric`)
 为了防止开发者曾经手动运行过 `jar` 任务或从旧配置残留了 JAR：
 1. **元数据提取**：监控路径装配完成时（`HotswapPlugin.onWatchPathsChanged`），从监听路径中的 `fabric.mod.json` 或 `META-INF/neoforge.mods.toml` / `META-INF/mods.toml` 读取当前开发项目的唯一标识符（`id` / `modId`）；
 2. **零文件锁极速探测**：通过 `java.util.zip.ZipFile`（短连接即开即关，不产生 Windows 文件锁）极速遍历 `run/mods/*.jar` 的根目录元数据；
-3. **高可见度报警**：一旦发现 `run/mods/` 中存在同名 `modId` 的静态 JAR，立即在控制台打印高可见度黄色警告：
-   `[Remold] [WARN] Found stale build artifact in run/mods with identical modId '%s': %s. This causes duplicate mod conflicts or ClassNotFoundException in dev environments! Please delete it.`
+3. **就地隔离（不是只报警）**：一旦发现 `run/mods/` 中存在同名 `modId` 的静态 JAR，把它重命名为
+   `<name>.jar.remold-disabled`（**只改名、不删除**，改回原名即可恢复），并打印高可见度黄色警告说明改了什么、为什么、怎么恢复。
+   只处理与当前工程同 `modId` 的制品，其它模组 JAR 一律不动；改名失败（占用/只读）时退回告警，绝不中断启动。
+   关闭方式：`-Dremold.agent.mods_quarantine=false`。
+   **依据**：同 `modId` 的打包 JAR 留在 `run/mods` 时，加载器会把它当作该开发中模组的候选容器，开发期实际运行的可能是 JAR 里的旧字节码，
+   而散装类路径被忽略——且不报错。仅告警不改变这一行为。
 4. **监听剔除**：文件监听系统（`WatchService`）明确忽略任何路径包含 `/mods/` 或 `\mods\` 的 `.jar` 变更，阻断监听风暴。
 
 > **归属**：以上四项均由 `plugin-fabric` 通过 `HotswapPlugin` 的三个通用窗口（`onPremain` / `onWatchPathsChanged` / `isWatchPathIgnored`）实现，引擎核心（`core`）不含任何加载器专属的目录或属性约定。Gradle 侧检测到 Loom 系生态时自动挂载该插件（`-Premold.autoFabric=false` 可关闭）；直接用 `-javaagent` 且未配置 `remold.plugin.jars` 时不加载，因此不会有 class path group 注入与 `mods` 目录排除。

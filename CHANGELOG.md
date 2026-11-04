@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`RemoldAgent` 拆分**：布局门判决、被删成员读者扫描、监控路径记账、监听线程、jar 解压、环境能力探测分别搬到 `LayoutDecisionEngine` / `RemovedMemberScanner` / `WatchPathRegistry` / `FileWatcherService` / `JarExtractor` / `EnvironmentProbe`；公共 API 与全部调用方保持不变。
 
 ### Added
+- **残留构建 JAR 从"告警"升级为"隔离"**：`plugin-fabric` 在 premain 阶段把 `run/mods` 中与本工程同 modId 的 JAR 就地改名为
+  `.jar.remold-disabled`（只改名不删除）。原因：同 modId 的打包 JAR 会让加载器把它当作开发中模组的候选容器，
+  实际可能运行 JAR 里的旧字节码而忽略 `build/classes`，且不报错——仅告警无法阻止这种"改了没反应"。
+  只处理同 modId 制品；改名失败退回告警；`-Dremold.agent.mods_quarantine=false` 关闭。
 - `HotswapPlugin` 新增三个默认方法：`onPremain(String agentArgs)`（插件发现后、`init` 前）、`onWatchPathsChanged(Set<Path>, Set<Path>)`、`isWatchPathIgnored(Path)`（监听排除投票）。
 - 新增模块 `:plugin-fabric`（`remold-plugin-fabric.jar`），Gradle 侧检测到 Loom 系生态时自动挂载（`-Premold.autoFabric=false` 可关闭）。
 - 新增 `tests/src/remold/PluginWatchPathTest`：锁住"core 无加载器专属排除规则 / 插件投票被采纳 / 插件抛异常不中断路径判定"。

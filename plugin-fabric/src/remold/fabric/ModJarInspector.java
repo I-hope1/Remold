@@ -29,7 +29,7 @@ import static remold.RemoldAgent.warn;
  * 这类故障表现为"改的代码不生效 / 类找不到"，但根因在构建产物，不在热更链路，
  * 预先点名比事后排查便宜得多。</p>
  *
- * <p><b>为什么独立成类</b>：本类只做"读文件、解析元数据、告警"，不持有任何热更状态，也不参与
+ * <p><b>为什么独立成类</b>：本类只做"读文件、解析元数据、隔离残留制品"，不持有任何热更状态，也不参与
  * 重定义决策。它原先挤在 {@link RemoldAgent} 里，与监听、对齐、布局门共享同一个类体，
  * 使一个纯文件巡检逻辑看起来像热更流水线的一部分。</p>
  *
@@ -52,12 +52,14 @@ public final class ModJarInspector {
 			if (currentModId == null || currentModId.isEmpty()) {
 				return;
 			}
+			boolean quarantine = quarantineEnabled();
 			List<Path> candidateModsDirs = List.of(
 				Paths.get("run", "mods"),
 				Paths.get("mods"),
 				Paths.get("run"),
 				Paths.get(".")
 			);
+			java.util.Set<Path> visited = new java.util.HashSet<>();
 			for (Path modsDir : candidateModsDirs) {
 				if (!Files.isDirectory(modsDir)) continue;
 				Path targetDir = modsDir;
@@ -69,18 +71,15 @@ public final class ModJarInspector {
 						continue;
 					}
 				}
+				// 候选目录会互相折叠（run/mods 与 run→/mods 指向同一处），同一目录只扫一次，避免重复告警
+				if (!visited.add(targetDir.toAbsolutePath().normalize())) continue;
 				try (Stream<Path> stream = Files.list(targetDir)) {
 					stream.filter(p -> {
 						String s = p.getFileName().toString().toLowerCase(Locale.ROOT);
 						return s.endsWith(".jar") || s.endsWith(".zip");
 					}).forEach(jarPath -> {
 						String staleModId = readModIdFromJar(jarPath);
-						if (currentModId.equals(staleModId)) {
-							String yellow = "\u001B[33m";
-							String reset = "\u001B[0m";
-							warn(yellow + "Found stale build artifact in " + jarPath + " with identical modId '" + currentModId + "'.");
-							warn("In-development runs directly use loose classes. A packaged JAR in run/mods causes duplicate mod conflicts, namespace crashes, or ClassNotFoundException! Please delete this JAR." + reset);
-						}
+						if (currentModId.equals(staleModId)) quarantineOrWarn(jarPath, currentModId, quarantine);
 					});
 				}
 			}
@@ -201,5 +200,67 @@ public final class ModJarInspector {
 			}
 		} catch (Throwable ignored) { }
 		return null;
+	}
+
+	/** 隔离后缀：不以 {@code .jar} 结尾，因此不会再被任何扫描 {@code *.jar} 的加载器拣到。 */
+	static final String QUARANTINE_SUFFIX = ".remold-disabled";
+
+	/** 关闭方式：{@code -Dremold.agent.mods_quarantine=false}（退回只告警）。 */
+	private static boolean quarantineEnabled() {
+		String v = System.getProperty("remold.agent.mods_quarantine");
+		if (v == null) v = System.getProperty("remold.agent.modsQuarantine");
+		return v == null || Boolean.parseBoolean(v.trim());
+	}
+
+	/**
+	 * 命中"与当前工程同 modId 的残留构建 JAR"时的动作。
+	 *
+	 * <p><b>为什么是隔离而不是告警</b>：告警救不了实际行为。同一 modId 的打包 JAR 一旦留在
+	 * {@code run/mods}，加载器就会把它当作这个开发中模组的候选容器，开发期跑起来的可能是
+	 * <b>JAR 里的旧字节码</b>，散装类路径（{@code build/classes}）根本不生效——表现为"改了代码没反应"，
+	 * 而且不报错。让那种候选不存在，比事后提醒可靠。</p>
+	 *
+	 * <p><b>只改名、不删除</b>：{@code foo.jar} → {@code foo.jar.remold-disabled}，文件仍在原地，
+	 * 改回原名即可恢复；只处理同 modId 的制品，其它模组 JAR 一律不动。改名失败（占用、只读）时
+	 * 退回告警，绝不因此中断启动。</p>
+	 */
+	static void quarantineOrWarn(Path jarPath, String currentModId, boolean quarantine) {
+		String yellow = "[33m";
+		String reset = "[0m";
+		if (!quarantine) {
+			warn(yellow + "Found stale build artifact in " + jarPath + " with identical modId '" + currentModId + "'.");
+			warn("In-development runs directly use loose classes. A packaged JAR in run/mods can shadow them, so the OLD jar may be what actually runs! Please delete this JAR." + reset);
+			return;
+		}
+		Path quarantined = quarantine(jarPath);
+		if (quarantined != null) {
+			warn(yellow + "Quarantined stale build artifact with identical modId '" + currentModId + "': "
+			     + jarPath.getFileName() + " -> " + quarantined.getFileName()
+			     + " (renamed, not deleted; rename it back to re-enable). In-development runs use loose"
+			     + " classes, and a packaged JAR here would shadow them." + reset);
+		} else {
+			warn(yellow + "Found stale build artifact in " + jarPath + " with identical modId '" + currentModId
+			     + "', but it could NOT be quarantined (locked or read-only). In-development runs use loose"
+			     + " classes, and this JAR may shadow them - delete it manually." + reset);
+		}
+	}
+
+	/**
+	 * 把 JAR 改名到同目录的 {@code <name>.remold-disabled}（重名时追加时间戳）。
+	 *
+	 * @return 隔离后的路径；改名失败返回 {@code null}（调用方退回告警）
+	 */
+	static Path quarantine(Path jarPath) {
+		try {
+			Path target = jarPath.resolveSibling(jarPath.getFileName() + QUARANTINE_SUFFIX);
+			if (Files.exists(target)) {
+				target = jarPath.resolveSibling(jarPath.getFileName() + QUARANTINE_SUFFIX + "." + System.currentTimeMillis());
+			}
+			Files.move(jarPath, target);
+			return target;
+		} catch (Throwable t) {
+			if (DEBUG) log("[CHECK-STALE] Could not quarantine " + jarPath + ": " + t);
+			return null;
+		}
 	}
 }

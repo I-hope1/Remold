@@ -4,6 +4,7 @@ plugins {
 }
 
 sourceSets.main.java.srcDirs = ["src"]
+sourceSets.test.java.srcDirs = ["test"]
 
 publishing {
 	publications {
@@ -44,6 +45,12 @@ dependencies {
 	// 插件由 Agent 通过 appendToSystemClassLoaderSearch 加载，运行时由 Agent jar 提供 api/core
 	compileOnly project(':api')
 	compileOnly project(':core')
+
+	// 隔离逻辑会经 RemoldAgent.warn 打日志，测试期需要真实的 core 在 classpath 上
+	testImplementation project(':api')
+	testImplementation project(':core')
+	testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
 }
 
 test {

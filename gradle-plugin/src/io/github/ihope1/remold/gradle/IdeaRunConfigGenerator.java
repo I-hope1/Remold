@@ -174,6 +174,13 @@ public final class IdeaRunConfigGenerator {
                                 updated = m.replaceAll("").trim();
                             }
                             updated = !updated.trim().isEmpty() ? updated + " " + portableArg : portableArg;
+                        } else if (arg.startsWith("-Dfabric.classPathGroups=")) {
+                            Pattern p = Pattern.compile("(?:^|\\s)-Dfabric\\.classPathGroups=[^\\s]*");
+                            Matcher m = p.matcher(updated);
+                            if (m.find()) {
+                                updated = m.replaceAll("").trim();
+                            }
+                            updated = !updated.trim().isEmpty() ? updated + " " + portableArg : portableArg;
                         } else if (!updated.contains(portableArg) && !updated.contains(arg)) {
                             updated = !updated.trim().isEmpty() ? updated + " " + portableArg : portableArg;
                         }

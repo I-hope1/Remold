@@ -261,7 +261,7 @@ jobs:
           cp core/build/libs/remold-agent.jar "release-assets/remold-agent-${VERSION}.jar"
           
           # 2. Plugin Jars (both canonical and versioned)
-          for p in arc mixin forge; do
+          for p in arc mixin forge fabric; do
             SRC=$(ls plugin-$p/build/libs/remold-plugin-$p-*.jar 2>/dev/null | grep -v 'sources' | head -n 1)
             if [ -n "$SRC" ] && [ -f "$SRC" ]; then
               cp "$SRC" release-assets/

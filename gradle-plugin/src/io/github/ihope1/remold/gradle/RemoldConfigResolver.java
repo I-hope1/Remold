@@ -261,6 +261,24 @@ public final class RemoldConfigResolver {
             jvmArgs.add("-Dremold.agent.file_shake_ms=" + ext.getFileShakeMs());
         }
 
+        if (project.getPlugins().hasPlugin("fabric-loom") || project.getExtensions().findByName("loom") != null || usesMixinEcosystem(project)) {
+            File ideaClasses = new File(project.getProjectDir(), "out/production/classes");
+            File ideaResources = new File(project.getProjectDir(), "out/production/resources");
+            List<String> groupsList = new ArrayList<>();
+            groupsList.add(ideaClasses.getAbsolutePath() + File.pathSeparator + ideaResources.getAbsolutePath());
+            if (!classesDirs.isEmpty() && outResourceDir != null) {
+                StringBuilder grp = new StringBuilder();
+                for (File cd : classesDirs) {
+                    if (grp.length() > 0) grp.append(File.pathSeparator);
+                    grp.append(cd.getAbsolutePath());
+                }
+                grp.append(File.pathSeparator).append(outResourceDir.getAbsolutePath());
+                groupsList.add(grp.toString());
+            }
+            String groupSep = File.pathSeparator + File.pathSeparator;
+            jvmArgs.add("-Dfabric.classPathGroups=" + String.join(groupSep, groupsList));
+        }
+
         // 6. Resolve plugins (e.g., arc, mixin, forge)
         List<String> requestedPlugins = new ArrayList<>();
         for (String p : ext.getPlugins()) {
@@ -290,6 +308,12 @@ public final class RemoldConfigResolver {
                 || Boolean.parseBoolean(String.valueOf(project.findProperty("remold.autoForge")));
         if (autoForge && !containsIgnoreCase(requestedPlugins, "forge") && !containsIgnoreCase(requestedPlugins, "neoforge") && usesForgeEcosystem(project)) {
             requestedPlugins.add("forge");
+        }
+
+        boolean autoFabric = project.findProperty("remold.autoFabric") == null
+                || Boolean.parseBoolean(String.valueOf(project.findProperty("remold.autoFabric")));
+        if (autoFabric && !containsIgnoreCase(requestedPlugins, "fabric") && usesFabricEcosystem(project)) {
+            requestedPlugins.add("fabric");
         }
 
         List<File> pluginJars = new ArrayList<>();
@@ -673,6 +697,36 @@ public final class RemoldConfigResolver {
                 try {
                     for (Dependency dep : cfg.getDependencies()) {
                         if ("org.spongepowered".equals(dep.getGroup()) || "net.fabricmc".equals(dep.getGroup())) {
+                            return true;
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    /**
+     * 是否属于 Minecraft Fabric / Quilt 生态：声明了 Loom 系插件、loom 扩展或 net.fabricmc / org.quiltmc 依赖。
+     *
+     * 命中即默认挂载 plugin-fabric（可用 {@code -Premold.autoFabric=false} 关闭）：class path group 注入、
+     * {@code mods} 目录排除与残留制品巡检都在该插件里，缺失的表现是"热更静默不生效"。
+     */
+    public static boolean usesFabricEcosystem(Project project) {
+        if (project.getPlugins().hasPlugin("fabric-loom")
+                || project.getPlugins().hasPlugin("dev.architectury.loom")
+                || project.getPlugins().hasPlugin("org.quiltmc.loom")
+                || project.getExtensions().findByName("loom") != null) {
+            return true;
+        }
+        try {
+            for (Configuration cfg : project.getConfigurations()) {
+                try {
+                    for (Dependency dep : cfg.getDependencies()) {
+                        String grp = dep.getGroup();
+                        if ("net.fabricmc".equals(grp) || "org.quiltmc".equals(grp)) {
                             return true;
                         }
                     }

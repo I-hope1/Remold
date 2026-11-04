@@ -1,0 +1,61 @@
+plugins {
+	id 'java-library'
+	id 'maven-publish'
+}
+
+sourceSets.main.java.srcDirs = ["src"]
+
+publishing {
+	publications {
+		maven(MavenPublication) {
+			from components.java
+			pom {
+				name = 'remold-plugin-fabric'
+				description = 'Minecraft Fabric/Quilt dev-runtime integration for Remold (class path groups, stale artifact guard, watch exclusion)'
+				licenses {
+					license {
+						name = 'GNU General Public License v3.0'
+						url = 'https://www.gnu.org/licenses/gpl-3.0.txt'
+					}
+				}
+			}
+		}
+		// 本地联调兼容：将 JitPack 约定的 GitHub 坐标 (com.github.I-hope1.Remold:plugin-fabric:v<ver>) 同步发布到 mavenLocal
+		jitpack(MavenPublication) {
+			groupId = 'com.github.I-hope1.Remold'
+			artifactId = 'plugin-fabric'
+			version = "v${version}"
+			from components.java
+			pom {
+				name = 'remold-plugin-fabric'
+				description = 'Minecraft Fabric/Quilt dev-runtime integration for Remold (JitPack compatible)'
+				licenses {
+					license {
+						name = 'GNU General Public License v3.0'
+						url = 'https://www.gnu.org/licenses/gpl-3.0.txt'
+					}
+				}
+			}
+		}
+	}
+}
+
+dependencies {
+	// 插件由 Agent 通过 appendToSystemClassLoaderSearch 加载，运行时由 Agent jar 提供 api/core
+	compileOnly project(':api')
+	compileOnly project(':core')
+}
+
+test {
+	useJUnitPlatform()
+	failOnNoDiscoveredTests = false
+}
+
+jar {
+	manifest {
+		attributes(
+			'Remold-Plugin-Class': 'remold.fabric.FabricHotswapPlugin',
+			'Remold-Plugin-Name': 'fabric'
+		)
+	}
+}

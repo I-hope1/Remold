@@ -8,13 +8,11 @@ import remold.offset.SuperclassDriftGate;
 import remold.profiler.DynamicProfilerAPI;
 import remold.ref.HotswapBridge;
 import remold.ref.InitFix;
-import remold.ref.RemovedMemberReaders;
 import remold.util.*;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
-import org.objectweb.asm.tree.MethodNode;
 
 import java.io.*;
 import java.lang.instrument.*;
@@ -49,7 +47,7 @@ import static remold.MountManager.*;
  * <h2>热更处理完整流水线（Pipeline）</h2>
  * <ol>
  *   <li><b>监听与防抖（Watch & Debounce）</b>：
- *       通过 {@link WatcherThread} 监控源码编译输出目录与 JAR 包，文件变动由单线程调度器
+ *       通过 {@link FileWatcherService} 监控源码编译输出目录与 JAR 包，文件变动由单线程调度器
  *       进行时间窗口防抖（{@link #FILE_SHAKE_MS}），收集变动路径后统一进入 {@link #processChanges}。</li>
  *   <li><b>读取与差分分析（Read & Diff）</b>：
  *       从磁盘读取新编译字节码并与 {@link #bytecodeCache} 中当前运行的活跃字节码对比，
@@ -220,15 +218,13 @@ public class RemoldAgent {
 	public static final  String              SOURCE_CLI      = "cli";
 	public static final  String              SOURCE_RUNTIME  = "runtime";
 
-	/** 来源分槽映射表：sourceId -> 该来源下的待监控目录集合 */
-	private static final Map<String, Set<Path>> watchDirSources = new ConcurrentHashMap<>();
-	/** 来源分槽映射表：sourceId -> 该来源下的待监控 Jar 集合 */
-	private static final Map<String, Set<Path>> watchJarSources = new ConcurrentHashMap<>();
-
+	/**
+	 * 聚合后的监控目录集合：所有来源（{@code cli} / {@code runtime} / 插件）去重后的并集，
+	 * 由 {@link WatchPathRegistry} 在来源变化时重建。监听器与 ClassLoader 推断都只读它。
+	 */
 	static final         Set<Path>           activeWatchDirs = new CopyOnWriteArraySet<>();
 	/** 直接作为 watch 路径传入的 jar/zip 文件（区别于目录内扫描到的） */
 	static final         Set<Path>           activeWatchJars = new CopyOnWriteArraySet<>();
-	private static final List<WatcherThread> activeWatchers  = new CopyOnWriteArrayList<>();
 
 	/** 构建模式：gradle（默认仅监控 build/classes）、idea（仅监控 out/production）、auto（两者均监控并时间戳仲裁） */
 	public static volatile String BUILD_MODE = System.getProperty("remold.build_mode", "auto");
@@ -402,6 +398,37 @@ public class RemoldAgent {
 				plugin.onAssetsChanged(assetChanges);
 			} catch (Throwable t) {
 				error("[HotswapPlugin] Error notifying asset changes to plugin: " + plugin.getName(), t);
+			}
+		}
+	}
+
+	/**
+	 * 该路径是否被任一插件声明为"不监听"。
+	 *
+	 * <p>引擎自身不认识任何具体加载器的目录约定；"哪些目录在开发期不能监听"由插件投票。
+	 * 调用频率高（目录遍历 + 每个监听事件），实现必须廉价。</p>
+	 */
+	static boolean isWatchPathIgnored(Path path) {
+		if (path == null) return false;
+		for (HotswapPlugin plugin : plugins) {
+			try {
+				if (plugin.isWatchPathIgnored(path)) return true;
+			} catch (Throwable t) {
+				if (DEBUG) log("[HotswapPlugin] isWatchPathIgnored failed for " + plugin.getName() + ": " + t);
+			}
+		}
+		return false;
+	}
+
+	/** 通知所有插件：聚合后的监控路径集合已更新。 */
+	static void notifyWatchPathsChanged() {
+		Set<Path> dirs = Set.copyOf(activeWatchDirs);
+		Set<Path> jars = Set.copyOf(activeWatchJars);
+		for (HotswapPlugin plugin : plugins) {
+			try {
+				plugin.onWatchPathsChanged(dirs, jars);
+			} catch (Throwable t) {
+				error("[HotswapPlugin] Error in onWatchPathsChanged for " + plugin.getName(), t);
 			}
 		}
 	}
@@ -632,13 +659,12 @@ public class RemoldAgent {
 		}
 	}
 
-	private static final Set<Path>                pendingChanges = Collections.synchronizedSet(new HashSet<>());
+	/** 待处理的 .class 变动；包内可见以让 {@link JarExtractor} 批量入队（所有访问均在 synchronized(pendingChanges) 内） */
+	static final Set<Path>                pendingChanges = Collections.synchronizedSet(new HashSet<>());
 	/** 待解压的 jar/zip，防抖后统一解压；所有访问均在 synchronized(pendingChanges) 内，无需额外同步 */
 	private static final Set<Path>                pendingJars    = new HashSet<>();
 	/** 待通知的资源文件变动（非 .class 资源，如贴图、语言包等），防抖后统一通知；所有访问均在 synchronized(pendingChanges) 内 */
-	private static final Set<Path>                pendingAssetChanges = new HashSet<>();
-	/** 临时解压出的 .class 路径 → 来源 jar 路径，用于 ClassLoader 推断 */
-	private static final Map<Path, Path>          tmpToJar       = new ConcurrentHashMap<>();
+	static final Set<Path>                pendingAssetChanges = new HashSet<>();
 	private static final ScheduledExecutorService scheduler      = Executors.newSingleThreadScheduledExecutor(r -> {
 		Thread t = new Thread(r, "HotSwap-Scheduler");
 		t.setDaemon(true);
@@ -655,7 +681,7 @@ public class RemoldAgent {
 	 *   <li>公开的 {@link #triggerHotswap()} —— 例如 {@code HotSwapDialog} 的 refresh 按钮，
 	 *       它用 {@code Threads.daemon(...)} 起了<b>第二个线程源</b>，与 scheduler 上正在跑的那一轮重叠；</li>
 	 *   <li>{@link #init} 的 else 分支（监控路径未变时直接同步调用）；</li>
-	 *   <li>{@link #init} 整体（含 {@code initializeAgentState} / {@code restartWatchers}）—— 旧 watcher
+	 *   <li>{@link #init} 整体（含 {@code initializeAgentState} / {@link FileWatcherService#restart}）—— 旧 watcher
 	 *       排进 scheduler 的任务可能尚未跑完；</li>
 	 *   <li>公开的 {@link #retransformLoaded()} —— 同样对应一个 UI 按钮。</li>
 	 * </ul>
@@ -726,10 +752,10 @@ public class RemoldAgent {
 			warn("[Agent] Failed to append agent JAR to bootstrap classloader search: " + t);
 		}
 	}
-
 	public static void premain(String agentArgs, Instrumentation inst) {
 		RemoldAgent.inst = inst;
 		appendSelfToBootstrapSearch(inst);
+		bootstrapPlugins(agentArgs);
 		try {
 			if (agentArgs != null && !agentArgs.trim().isEmpty()) {
 				init(SOURCE_CLI, agentArgs, false);
@@ -745,6 +771,7 @@ public class RemoldAgent {
 	public static void agentmain(String agentArgs, Instrumentation inst) {
 		RemoldAgent.inst = inst;
 		appendSelfToBootstrapSearch(inst);
+		bootstrapPlugins(agentArgs);
 		try {
 			if (agentArgs != null && !agentArgs.trim().isEmpty()) {
 				init(SOURCE_RUNTIME, agentArgs, false);
@@ -766,7 +793,7 @@ public class RemoldAgent {
 	}
 
 	public static void init(String source, String agentArgs, boolean reinit) {
-		// 整体持锁：本方法包含 retransformLoaded / initializeAgentState / restartWatchers，
+		// 整体持锁：本方法包含 retransformLoaded / initializeAgentState / FileWatcherService.restart，
 		// 而旧 watcher 排进 scheduler 的任务可能尚未跑完。可重入，末尾 triggerHotswap() 嵌套获取无碍。
 		HOTSWAP_LOCK.lock();
 		try {
@@ -802,7 +829,7 @@ public class RemoldAgent {
 		Set<Path> newWatchDirs = new HashSet<>();
 		Set<Path> newWatchJars = new HashSet<>();
 		if (agentArgs != null && !agentArgs.trim().isEmpty()) {
-			parseWatchPaths(agentArgs, newWatchDirs, newWatchJars);
+			WatchPathRegistry.parse(agentArgs, newWatchDirs, newWatchJars);
 		}
 
 		if (newWatchDirs.isEmpty() && newWatchJars.isEmpty()) {
@@ -812,12 +839,15 @@ public class RemoldAgent {
 			return;
 		}
 
-		setWatchPaths0(source, newWatchDirs, newWatchJars);
+		WatchPathRegistry.set(source, newWatchDirs, newWatchJars);
 	}
 
 	/**
 	 * 设置指定来源的监控路径（支持分号或冒号分隔的目录或 Jar 路径）。
 	 * 若 paths 为空，则移除该来源对应的监控路径。
+	 *
+	 * <p>锁纪律：路径变更会重建监听器并重扫已加载类，必须与热更互斥，因此统一在此持
+	 * {@link #HOTSWAP_LOCK}；分槽记账与聚合见 {@link WatchPathRegistry}。</p>
 	 *
 	 * @param source 来源标识符（如 "cli", "mod-tools", "runtime" 等）
 	 * @param paths  待监控路径（支持分号或冒号分隔）
@@ -829,13 +859,13 @@ public class RemoldAgent {
 				source = SOURCE_RUNTIME;
 			}
 			if (paths == null || paths.trim().isEmpty()) {
-				removeWatchSource0(source);
+				WatchPathRegistry.remove(source);
 				return;
 			}
 			Set<Path> dirs = new HashSet<>();
 			Set<Path> jars = new HashSet<>();
-			parseWatchPaths(paths, dirs, jars);
-			setWatchPaths0(source, dirs, jars);
+			WatchPathRegistry.parse(paths, dirs, jars);
+			WatchPathRegistry.set(source, dirs, jars);
 		} finally {
 			HOTSWAP_LOCK.unlock();
 		}
@@ -850,7 +880,7 @@ public class RemoldAgent {
 			if (source == null || source.trim().isEmpty()) {
 				source = SOURCE_RUNTIME;
 			}
-			setWatchPaths0(source, dirs != null ? new HashSet<>(dirs) : Collections.emptySet(),
+			WatchPathRegistry.set(source, dirs != null ? new HashSet<>(dirs) : Collections.emptySet(),
 			                      jars != null ? new HashSet<>(jars) : Collections.emptySet());
 		} finally {
 			HOTSWAP_LOCK.unlock();
@@ -869,8 +899,8 @@ public class RemoldAgent {
 			if (paths == null || paths.trim().isEmpty()) return;
 			Set<Path> dirs = new HashSet<>(getWatchDirs(source));
 			Set<Path> jars = new HashSet<>(getWatchJars(source));
-			parseWatchPaths(paths, dirs, jars);
-			setWatchPaths0(source, dirs, jars);
+			WatchPathRegistry.parse(paths, dirs, jars);
+			WatchPathRegistry.set(source, dirs, jars);
 		} finally {
 			HOTSWAP_LOCK.unlock();
 		}
@@ -883,7 +913,7 @@ public class RemoldAgent {
 		HOTSWAP_LOCK.lock();
 		try {
 			if (source == null) return;
-			removeWatchSource0(source);
+			WatchPathRegistry.remove(source);
 		} finally {
 			HOTSWAP_LOCK.unlock();
 		}
@@ -891,163 +921,22 @@ public class RemoldAgent {
 
 	/** 获取指定来源的监控目录集合（只读不可变副本） */
 	public static Set<Path> getWatchDirs(String source) {
-		Set<Path> s = watchDirSources.get(source);
-		return s == null ? Collections.emptySet() : Collections.unmodifiableSet(new HashSet<>(s));
+		return WatchPathRegistry.dirs(source);
 	}
 
 	/** 获取指定来源的监控 Jar 集合（只读不可变副本） */
 	public static Set<Path> getWatchJars(String source) {
-		Set<Path> s = watchJarSources.get(source);
-		return s == null ? Collections.emptySet() : Collections.unmodifiableSet(new HashSet<>(s));
+		return WatchPathRegistry.jars(source);
 	}
 
 	/** 获取当前所有来源的监控目录映射（只读不可变副本） */
 	public static Map<String, Set<Path>> getAllWatchDirSources() {
-		Map<String, Set<Path>> copy = new LinkedHashMap<>();
-		for (Map.Entry<String, Set<Path>> e : watchDirSources.entrySet()) {
-			copy.put(e.getKey(), Collections.unmodifiableSet(new HashSet<>(e.getValue())));
-		}
-		return Collections.unmodifiableMap(copy);
+		return WatchPathRegistry.allDirSources();
 	}
 
 	/** 获取当前所有来源的监控 Jar 映射（只读不可变副本） */
 	public static Map<String, Set<Path>> getAllWatchJarSources() {
-		Map<String, Set<Path>> copy = new LinkedHashMap<>();
-		for (Map.Entry<String, Set<Path>> e : watchJarSources.entrySet()) {
-			copy.put(e.getKey(), Collections.unmodifiableSet(new HashSet<>(e.getValue())));
-		}
-		return Collections.unmodifiableMap(copy);
-	}
-
-	private static void parseWatchPaths(String agentArgs, Set<Path> outDirs, Set<Path> outJars) {
-		for (String s : agentArgs.split(File.pathSeparator)) {
-			if (s.trim().isEmpty()) continue;
-			String trimmed = s.trim();
-			if (trimmed.startsWith("file_shake_ms=") || trimmed.startsWith("shake=") || trimmed.startsWith("fileShakeMs=")) {
-				try {
-					int val = Integer.parseInt(trimmed.substring(trimmed.indexOf('=') + 1).trim());
-					if (val >= 0) {
-						FILE_SHAKE_MS = val;
-						info("File Shake MS configured via agentArgs: " + FILE_SHAKE_MS);
-					}
-				} catch (NumberFormatException e) {
-					warn("Invalid file_shake_ms in agentArgs: " + trimmed);
-				}
-				continue;
-			}
-			if (trimmed.startsWith("build_mode=") || trimmed.startsWith("buildMode=")) {
-				String mode = trimmed.substring(trimmed.indexOf('=') + 1).trim();
-				if (!mode.isEmpty()) {
-					BUILD_MODE = mode.toLowerCase();
-					info("Build mode configured via agentArgs: " + BUILD_MODE);
-				}
-				continue;
-			}
-			Path   p  = Paths.get(trimmed).toAbsolutePath();
-			String ps = p.toString();
-			if (Files.isDirectory(p)) {
-				outDirs.add(p);
-			} else if ((ps.endsWith(".jar") || ps.endsWith(".zip")) && Files.isRegularFile(p)) {
-				outJars.add(p);
-			} else if (ps.endsWith("out" + File.separator + "production") || ps.endsWith("out/production") || ps.endsWith("out\\production")) {
-				if ("gradle".equalsIgnoreCase(BUILD_MODE)) {
-					continue;
-				}
-				try {
-					Files.createDirectories(p);
-					outDirs.add(p);
-				} catch (Throwable ignored) {
-					error("Skipping invalid watch path (not a directory or jar/zip): " + p);
-				}
-			} else {
-				error("Skipping invalid watch path (not a directory or jar/zip): " + p);
-			}
-		}
-
-		// 自动探测并补充 IDEA 的 out/production 目录（gradle 构建模式下不自动探测）
-		if (!"gradle".equalsIgnoreCase(BUILD_MODE)) {
-			for (Path dir : new HashSet<>(outDirs)) {
-				Path current = dir;
-				while (current != null && current.getParent() != null) {
-					Path outProd = current.resolve("out").resolve("production");
-					if (Files.isDirectory(outProd)) {
-						outDirs.add(outProd.toAbsolutePath().normalize());
-						break;
-					}
-					if (current.getFileName() != null && current.getFileName().toString().equals("build")) {
-						Path rootOutProd = current.getParent().resolve("out").resolve("production");
-						if (Files.isDirectory(rootOutProd)) {
-							outDirs.add(rootOutProd.toAbsolutePath().normalize());
-						}
-						break;
-					}
-					current = current.getParent();
-				}
-			}
-		}
-	}
-
-	private static void setWatchPaths0(String source, Set<Path> dirs, Set<Path> jars) {
-		if (dirs == null || dirs.isEmpty()) {
-			watchDirSources.remove(source);
-		} else {
-			watchDirSources.put(source, new CopyOnWriteArraySet<>(dirs));
-		}
-		if (jars == null || jars.isEmpty()) {
-			watchJarSources.remove(source);
-		} else {
-			watchJarSources.put(source, new CopyOnWriteArraySet<>(jars));
-		}
-		syncAggregatedWatchPaths();
-	}
-
-	private static void removeWatchSource0(String source) {
-		watchDirSources.remove(source);
-		watchJarSources.remove(source);
-		syncAggregatedWatchPaths();
-	}
-
-	private static void syncAggregatedWatchPaths() {
-		Set<Path> aggregatedDirs = new HashSet<>();
-		for (Set<Path> s : watchDirSources.values()) {
-			aggregatedDirs.addAll(s);
-		}
-		Set<Path> aggregatedJars = new HashSet<>();
-		for (Set<Path> s : watchJarSources.values()) {
-			aggregatedJars.addAll(s);
-		}
-
-		if (!activeWatchDirs.equals(aggregatedDirs) || !activeWatchJars.equals(aggregatedJars)) {
-			info("Watch paths updated across sources:" + formatWatchSourcesLog());
-			activeWatchDirs.clear();
-			activeWatchDirs.addAll(aggregatedDirs);
-			activeWatchJars.clear();
-			activeWatchJars.addAll(aggregatedJars);
-			if (inst != null) {
-				initializeAgentState(inst.getAllLoadedClasses());
-				restartWatchers();
-			}
-		} else {
-			if (inst != null) {
-				triggerHotswap();
-			}
-		}
-	}
-
-	private static String formatWatchSourcesLog() {
-		StringBuilder sb = new StringBuilder();
-		Set<String> allSources = new TreeSet<>();
-		allSources.addAll(watchDirSources.keySet());
-		allSources.addAll(watchJarSources.keySet());
-		if (allSources.isEmpty()) {
-			return " (none)";
-		}
-		for (String src : allSources) {
-			Set<Path> d = watchDirSources.getOrDefault(src, Collections.emptySet());
-			Set<Path> j = watchJarSources.getOrDefault(src, Collections.emptySet());
-			sb.append("\n  - [").append(src).append("] dirs=").append(d).append(" jars=").append(j);
-		}
-		return sb.toString();
+		return WatchPathRegistry.allJarSources();
 	}
 
 	private static void initTransformer() {
@@ -1126,7 +1015,7 @@ public class RemoldAgent {
 		try {
 			java.net.URI uri = cs.getLocation().toURI();
 			Path location = Path.of(uri).toAbsolutePath().normalize();
-			for (Set<Path> dirs : watchDirSources.values()) {
+			for (Set<Path> dirs : WatchPathRegistry.dirSources().values()) {
 				for (Path dir : dirs) {
 					if (location.startsWith(dir.toAbsolutePath().normalize())) {
 						project = true;
@@ -1144,7 +1033,7 @@ public class RemoldAgent {
 				}
 			}
 			if (!project) {
-				for (Set<Path> jars : watchJarSources.values()) {
+				for (Set<Path> jars : WatchPathRegistry.jarSources().values()) {
 					for (Path jar : jars) {
 						if (location.equals(jar.toAbsolutePath().normalize())) {
 							project = true;
@@ -1154,7 +1043,7 @@ public class RemoldAgent {
 					if (project) break;
 				}
 			}
-			if (!project && watchDirSources.isEmpty() && activeWatchJars.isEmpty()) {
+			if (!project && WatchPathRegistry.dirSources().isEmpty() && activeWatchJars.isEmpty()) {
 				project = "file".equals(uri.getScheme()) && Files.isDirectory(location);
 			}
 		} catch (Throwable ignored) {
@@ -1163,44 +1052,6 @@ public class RemoldAgent {
 		projectLocations.put(key, project);
 		return project;
 	}
-
-	/**
-	 * 一次批量 {@code retransformClasses} 把缺字节的类补进缓存。
-	 *
-	 * <p><b>必须批量</b>：{@code retransformClasses} 每次调用都是一次 safepoint，逐类调会把热更拖成
-	 * 几百次停顿。这里只用一个捕获型 transformer，不改字节、不参与布局判定。</p>
-	 */
-	private static void warmBytecodeCache(List<Class<?>> classes) {
-		if (classes.isEmpty()) return;
-		Class<?>[] targets = classes.toArray(new Class<?>[0]);
-		Map<String, byte[]> captured = new HashMap<>();
-		ClassFileTransformer capture = new ClassFileTransformer() {
-			@Override
-			public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
-			                        ProtectionDomain pd, byte[] buffer) {
-				if (classBeingRedefined != null && className != null && buffer != null) {
-					captured.put(className.replace('/', '.'), buffer);
-				}
-				return null;
-			}
-		};
-		inst.addTransformer(capture, true);
-		try {
-			enterInternalRetransform(new LinkedHashSet<>(classes.stream().map(Class::getName).toList()));
-			try {
-				inst.retransformClasses(targets);
-			} finally {
-				exitInternalRedefine();
-			}
-		} catch (Throwable t) {
-			warn("[LAYOUT-READERS] bulk retransform for cache warm-up failed: " + t);
-			return;
-		} finally {
-			inst.removeTransformer(capture);
-		}
-		captured.forEach(bytecodeCache::putIfAbsent);
-	}
-
 
 	/**
 	 * 读取布尔开关：优先 {@code primary}，缺省时回退到 {@code alias}。
@@ -1290,8 +1141,37 @@ public class RemoldAgent {
 		info("Structural HotSwap Supported: " + isEnhancedHotswapEnabled());
 	}
 
+	/**
+	 * 插件只发现一次：{@link #bootstrapPlugins} 会在 premain 首段先跑，之后 {@link #initConfig} 再调
+	 * 到这里时应直接返回，否则每次 {@code init()} 都会重新实例化一遍插件（注册口按类名去重，
+	 * 新实例会被丢弃，白付构造开销与副作用）。
+	 */
+	private static final java.util.concurrent.atomic.AtomicBoolean PLUGINS_LOADED =
+	 new java.util.concurrent.atomic.AtomicBoolean();
+
+	/**
+	 * 极早插件引导：完成插件发现并触发 {@link HotswapPlugin#onPremain}。
+	 *
+	 * <p><b>为什么必须早于 {@code init}</b>：有些运行期集成只有在宿主类加载器初始化之前设置才生效
+	 * （例如按 class path group 模拟模组隔离的启动器）。这类知识属于具体加载器，因此放在插件里，
+	 * 由引擎在 premain 首段统一提供窗口。</p>
+	 *
+	 * @param agentArgs 原始 agent 参数串，可为 {@code null}
+	 */
+	static void bootstrapPlugins(String agentArgs) {
+		loadConfiguredPlugins();
+		for (HotswapPlugin plugin : plugins) {
+			try {
+				plugin.onPremain(agentArgs);
+			} catch (Throwable t) {
+				error("[HotswapPlugin] Error in onPremain for " + plugin.getName(), t);
+			}
+		}
+	}
+
 	private static void loadConfiguredPlugins() {
 		if (inst == null) return;
+		if (!PLUGINS_LOADED.compareAndSet(false, true)) return;
 
 		// 1. 读取请求启用的插件名称/过滤集合（若未配置或为 * / all，则默认加载发现的所有插件）
 		String pluginsProp = System.getProperty("remold.plugins");
@@ -1912,8 +1792,8 @@ public class RemoldAgent {
 					if (DEBUG) log("[NEW] " + className);
 					// 类尚未加载：根据 REDEFINE_MODE 处理
 					// 若 path 来自 jar 临时目录，需还原为 watchDir 内的虚拟路径以正确推断 ClassLoader
-					Path clHintPath = tmpToJar.containsKey(path)
-					 ? resolveWatchDirPath(tmpToJar.get(path), className)
+					Path clHintPath = JarExtractor.tmpToJar().containsKey(path)
+					 ? JarExtractor.resolveWatchDirPath(JarExtractor.tmpToJar().get(path), className)
 					 : path;
 					// clHintPath == null 表示来自直接传入的 activeWatchJar，无虚拟 watchDir 路径，
 					// 退化到纯包名推断（findTargetClassLoader(className)），inject 照常走，lazy_load 挂 tmpDir 路径
@@ -1931,7 +1811,7 @@ public class RemoldAgent {
 						ClassLoader loader = findTargetClassLoader(className, clHintPath);
 						// lazy_load + jar：ClassLoader 推断用虚拟路径（clHintPath），
 						// 实际挂载用真实 tmpDir 路径，否则 ClassLoader 找不到 class 文件
-						Path mountPath = tmpToJar.containsKey(path) ? path : clHintPath;
+						Path mountPath = JarExtractor.tmpToJar().containsKey(path) ? path : clHintPath;
 						if (mountPath != null) {
 							PackageUnsealer.unsealClassPackage(loader, className);
 							mountForClass(loader, mountPath);
@@ -2523,11 +2403,6 @@ public class RemoldAgent {
 		}
 	}
 
-	/** 由点分类名求宿主类名：{@code Foo$1$2 -> Foo}；非匿名（含具名内部类 {@code Foo$Bar}）原样返回。 */
-	private static String hostNameOf(String className) {
-		return className.replaceAll("\\$\\d+(\\$\\d+)*$", "");
-	}
-
 	/** 局部类止血门拒绝的宿主次数（诊断用，见 {@link #applyLocalClassGuard}）。 */
 	static final java.util.concurrent.atomic.AtomicLong LOCAL_CLASS_REJECTED =
 	 new java.util.concurrent.atomic.AtomicLong();
@@ -2685,301 +2560,21 @@ public class RemoldAgent {
 	 * <p>判决本身是纯函数 {@link #decideLayout}（给定旧/新字节、开关、批次类名集 → 动作 + 要移出的类）；
 	 * 这里只负责"取字节、执行动作、撤销事务"的接线。{@code remold.agent.layout_gate=off} 时整体跳过。</p>
 	 */
-	/**
-	 * 扫描"批次外读者"：本批被删的实例字段，在批次落地之后还有谁解析得到它
-	 * （判据见 {@code docs/initfix/07-p05-probe-results.md} §13.6）。
-	 *
-	 * <h2>字节源：已加载的类只能读内存</h2>
-	 * <p>已加载且不在本批的类，其字节码只从 {@link #bytecodeCache} 取——那是 JVM 里当前生效的那份。
-	 * <b>严禁</b>回退去读磁盘构建目录：批次撕裂时（bulk 重定义失败后退回逐类、个别类失败被吞），
-	 * 磁盘上的 {@code Reader.class} 可能已经是重编后的新版本，而 JVM 里跑的仍是旧字节码；
-	 * 读磁盘会把真正的读者当成"已不再读"而漏掉。磁盘目录只用来补充<b>尚未加载</b>的工程类。</p>
-	 *
-	 * <p>取不到某个已加载工程类的内存字节时，本轮扫描判为<b>不完整</b>，整体退回存活实例判据
-	 * ——把"没扫全"当成"没有读者"是本条最危险的读法。</p>
-	 *
-	 * <h2>范围</h2>
-	 * <p>只覆盖工程自身的构建输出（由本批类的路径反推根目录）。JDK 与第三方 jar 不在范围内：
-	 * 那里的读者属于已知边界，不是本函数能解决的（见 {@code docs/status.md} 风险 12）。</p>
-	 *
-	 * @return 类名 → 该类被删字段的批次外读者；空 map 表示本轮不做判定（没有删除，或扫描不完整）
-	 */
-	private static Map<String, RemovedMemberScan> scanRemovedMembers(
-			Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath) {
-		long start = System.nanoTime();
-
-		// ---- 1. 本批被删的**实例**字段（静态字段不参与，理由见 decideLayout 的注释）----
-		Map<String, List<RemovedMemberReaders.RemovedMember>> removedByClass = new LinkedHashMap<>();
-		Map<String, byte[]> oldBatchBytes = new LinkedHashMap<>();
-		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
-			String className = e.getKey();
-			byte[] oldBytes = bytecodeCache.get(className);
-			if (oldBytes == null) {
-				Class<?> c = loadedClassesMap.get(className);
-				if (c != null) {
-					try {
-						oldBytes = fetchOriginalBytecode(c);
-					} catch (Throwable ignored) {
-						// 取不到旧基线：这个类无法判定，下面会因为 removedByClass 为空而整体跳过
-					}
-				}
-			}
-			if (oldBytes == null) continue;
-			oldBatchBytes.put(internalName(className), oldBytes);
-			List<RemovedMemberReaders.RemovedMember> removed = removedMembers(oldBytes, e.getValue());
-			if (!removed.isEmpty()) removedByClass.put(className, removed);
-		}
-		if (removedByClass.isEmpty()) return Map.of();
-
-		// ---- 2. 读者字节码：本批用新字节，批次外已加载的工程类用内存字节，未加载的工程类读磁盘 ----
-		Map<String, byte[]> post = new LinkedHashMap<>();
-		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
-			post.put(internalName(e.getKey()), e.getValue());
-		}
-
-		Set<Path> roots = projectClassRoots(classToPath);
-		List<Class<?>> missing = new ArrayList<>();
-		for (Map.Entry<String, Class<?>> e : loadedClassesMap.entrySet()) {
-			String name = e.getKey();
-			if (newBatchBytes.containsKey(name)) continue;
-			Class<?> clazz = e.getValue();
-			// 数组类没有代码；hidden class（lambda 等）既不进 ClassFileTransformer 也不可重定义，
-			// 它们引用的成员由宿主类的常量池覆盖。不滤掉这两类，uncached 会永远大于 0，
-			// 判据等于永久失效（JBR 25 下 [Lp.Foo; 与 p.Foo$$Lambda/0x… 都会继承宿主的 CodeSource）。
-			if (clazz.isArray() || clazz.isHidden()) continue;
-			if (!inst.isModifiableClass(clazz)) continue;
-			if (!isProjectClass(clazz, roots)) continue;
-			byte[] bytes = bytecodeCache.get(name);
-			if (bytes == null) {
-				missing.add(clazz);
-				continue;
-			}
-			post.putIfAbsent(internalName(name), bytes);
-		}
-
-		// Transformer 注册之前就已加载的漏网之鱼：一次批量 retransform 补齐（不要逐类调）。
-		int uncached = 0;
-		if (!missing.isEmpty()) {
-			warmBytecodeCache(missing);
-			for (Class<?> clazz : missing) {
-				byte[] bytes = bytecodeCache.get(clazz.getName());
-				if (bytes == null) {
-					uncached++;
-					continue;
-				}
-				post.putIfAbsent(internalName(clazz.getName()), bytes);
-			}
-		}
-		if (uncached > 0) {
-			warn("[LAYOUT-READERS] " + uncached + " loaded project class(es) have no cached bytecode;"
-			     + " reader scan is inconclusive this round, falling back to the liveness check."
-			     + " (Reading them from the build output would be wrong: after a torn batch the file"
-			     + " may already be the new version while the JVM still runs the old one.)");
-			return Map.of();
-		}
-		for (Path root : roots) collectClassFiles(root, post);
-
-		// ---- 3. 判定 ----
-		Map<String, byte[]> pre = new LinkedHashMap<>(post);
-		pre.putAll(oldBatchBytes);
-		List<RemovedMemberReaders.RemovedMember> allRemoved = new ArrayList<>();
-		for (List<RemovedMemberReaders.RemovedMember> l : removedByClass.values()) allRemoved.addAll(l);
-
-		// 先按"未扫描"铺好结果。扫描失败时也必须带着 removedMethods 标志返回：方法删除没有存活实例
-		// 判据可以退，调用方若把"没扫成"读成"没读者"，删方法就会被静默放行。
-		Map<String, RemovedMemberScan> out = new LinkedHashMap<>();
-		for (Map.Entry<String, List<RemovedMemberReaders.RemovedMember>> e : removedByClass.entrySet()) {
-			List<RemovedMemberReaders.RemovedMember> list = e.getValue();
-			out.put(e.getKey(), RemovedMemberScan.unscanned(
-				list.stream().anyMatch(m -> !m.isField()),
-				list.stream().anyMatch(m -> m.isField() && m.isStatic()),
-				list.stream().filter(RemovedMemberReaders.RemovedMember::hasConstantValue)
-				    .map(RemovedMemberReaders.RemovedMember::name).toList()));
-		}
-
-		RemovedMemberReaders.Result result;
-		try {
-			result = RemovedMemberReaders.find(RemovedMemberReaders.universe(pre),
-			                                   RemovedMemberReaders.universe(post), post, allRemoved);
-		} catch (Throwable t) {
-			warn("[LAYOUT-READERS] reader scan failed (" + t + "); falling back to the liveness check.");
-			return out;
-		}
-		if (!result.inconclusive().isEmpty()) {
-			warn("[LAYOUT-READERS] reader scan is inconclusive for " + result.inconclusive().size()
-			     + " reference(s), e.g. " + result.inconclusive().get(0)
-			     + "; falling back to the liveness check.");
-			return out;
-		}
-
-		Map<String, List<String>> readersByClass = new LinkedHashMap<>();
-		Map<String, List<String>> shiftedByClass = new LinkedHashMap<>();
-		for (String className : removedByClass.keySet()) {
-			readersByClass.put(className, new ArrayList<>());
-			shiftedByClass.put(className, new ArrayList<>());
-		}
-		collectFindings(result.hits(), readersByClass);
-		collectFindings(result.abstractMissing(), readersByClass);
-		collectFindings(result.incompatibleAccess(), readersByClass);
-		// 合法回退只记录、不阻断：删掉子类 Override 方法 / 遮蔽字段后，读者解析到父类实现或
-		// 同静态性的父类字段。旧字节码本来就能正确解析（全量重编也一样），运行期零异常。
-		collectFindings(result.dispatchShifted(), shiftedByClass);
-		collectFindings(result.retargeted(), shiftedByClass);
-
-		for (Map.Entry<String, RemovedMemberScan> e : out.entrySet()) {
-			String className = e.getKey();
-			RemovedMemberScan before = e.getValue();
-			e.setValue(new RemovedMemberScan(true, readersByClass.get(className),
-			                                 shiftedByClass.get(className), before.removedMethods(),
-			                                 before.removedStaticFields(), before.constantFields()));
-		}
-
-		long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-		info("[LAYOUT-READERS] scanned " + post.size() + " class(es) for removed members of "
-		     + removedByClass.size() + " class(es) in " + ms + "ms; dangling=" + result.hits().size()
-		     + ", abstract-gaps=" + result.abstractMissing().size()
-		     + ", dispatch-shifts=" + result.dispatchShifted().size());
-		return out;
-	}
-
-	/** 把命中的 reader 归到"被删成员所属的类"上。 */
-	private static void collectFindings(List<RemovedMemberReaders.Hit> hits,
-	                                    Map<String, List<String>> byClass) {
-		for (RemovedMemberReaders.Hit hit : hits) {
-			List<String> readers = byClass.get(dotted(hit.member().owner()));
-			if (readers == null) continue;
-			String reader = dotted(hit.reader());
-			if (!readers.contains(reader)) readers.add(reader);
-		}
-	}
 
 	/**
-	 * 旧版里有、新版里没有的成员（实例字段 + 方法）。
+	 * 点分类名（{@code a.b.C}）→ 内部名（{@code a/b/C}）。
 	 *
-	 * <p>合成标记字段不计（它们由对齐器负责）；{@code <init>} / {@code <clinit>} 不计——构造器不会被
-	 * "删除后仍能工作"，删掉它们类本身就不可用了，那属于另一类问题。{@code $remold$} 前缀是热更管线
-	 * 自己注入的，不算业务变更。</p>
-	 *
-	 * <p>方法与字段的差别在于<b>失败形态</b>：字段悬空抛 {@code NoSuchFieldError}；方法可能悬空
-	 * （{@code NoSuchMethodError}），也可能被祖先实现静默接住（分派转移），或让具体类失去接口方法
-	 * 的唯一实现（{@code AbstractMethodError}）。三者都由 {@link RemovedMemberReaders} 分类。</p>
+	 * <p>包内可见：读者扫描（{@link RemovedMemberScanner}）与偏移量扫描共用同一套命名换算，
+	 * 两边各写一份会在改写字节码时静默错位。</p>
 	 */
-	private static List<RemovedMemberReaders.RemovedMember> removedMembers(byte[] oldBytes,
-	                                                                      byte[] newBytes) {
-		ClassNode oldClass = new ClassNode();
-		ClassNode newClass = new ClassNode();
-		new ClassReader(oldBytes).accept(oldClass, ClassReader.SKIP_CODE);
-		new ClassReader(newBytes).accept(newClass, ClassReader.SKIP_CODE);
-
-		Set<String> fieldSurvivors = new HashSet<>();
-		for (FieldNode f : newClass.fields) fieldSurvivors.add(f.name + ":" + f.desc);
-
-		List<RemovedMemberReaders.RemovedMember> out = new ArrayList<>();
-		for (FieldNode f : oldClass.fields) {
-			if ((f.access & Opcodes.ACC_SYNTHETIC) != 0 || f.name.startsWith("$remold$")) continue;
-			if (fieldSurvivors.contains(f.name + ":" + f.desc)) continue;
-			out.add(new RemovedMemberReaders.RemovedMember(oldClass.name, f.name, f.desc, true,
-				(f.access & Opcodes.ACC_PRIVATE) != 0,
-				(f.access & Opcodes.ACC_STATIC) != 0,
-				// ASM 把 ConstantValue 属性解析成 FieldNode.value。非 null 就是编译期常量，
-				// javac 会把它内联进读者的 ldc/bipush——读者常量池里没有 Fieldref，扫描无从下手。
-				f.value != null));
-		}
-
-		Set<String> methodSurvivors = new HashSet<>();
-		for (MethodNode m : newClass.methods) methodSurvivors.add(m.name + ":" + m.desc);
-		for (MethodNode m : oldClass.methods) {
-			if ("<init>".equals(m.name) || "<clinit>".equals(m.name)) continue;
-			if (m.name.startsWith("$remold$")) continue;
-			if (methodSurvivors.contains(m.name + ":" + m.desc)) continue;
-			out.add(new RemovedMemberReaders.RemovedMember(oldClass.name, m.name, m.desc, false,
-			                                               (m.access & Opcodes.ACC_PRIVATE) != 0,
-			                                               (m.access & Opcodes.ACC_STATIC) != 0));
-		}
-		return out;
-	}
-
-	/**
-	 * 由本批类的文件路径反推工程构建输出根目录（{@code .../build/classes/java/main} 之类）。
-	 * 做法是把类名里的包段数从路径末尾去掉。
-	 */
-	private static Set<Path> projectClassRoots(Map<String, Path> classToPath) {
-		Set<Path> roots = new LinkedHashSet<>();
-		if (classToPath == null) return roots;
-		for (Map.Entry<String, Path> e : classToPath.entrySet()) {
-			Path p = e.getValue();
-			if (p == null) continue;
-			int depth = e.getKey().split("\\.").length;
-			for (int i = 0; i < depth && p != null; i++) p = p.getParent();
-			if (p != null) roots.add(p.toAbsolutePath().normalize());
-		}
-		return roots;
-	}
-
-	/** 该已加载类是否属于工程自身的构建输出（按 code source 位置判断，不触发 IO）。 */
-	private static boolean isProjectClass(Class<?> c, Set<Path> roots) {
-		if (roots.isEmpty()) return false;
-		ClassLoader loader = c.getClassLoader();
-		if (loader == null || loader == ClassLoader.getPlatformClassLoader()) return false;
-		String name = c.getName();
-		for (String prefix : NON_PROJECT_PREFIXES) {
-			if (name.startsWith(prefix)) return false;
-		}
-		try {
-			java.security.CodeSource cs = c.getProtectionDomain() == null
-			 ? null : c.getProtectionDomain().getCodeSource();
-			if (cs == null || cs.getLocation() == null) return false;
-			Path location = Path.of(cs.getLocation().toURI()).toAbsolutePath().normalize();
-			for (Path root : roots) {
-				if (location.startsWith(root)) return true;
-			}
-		} catch (Throwable ignored) {
-			// 拿不到位置就按"不是工程类"处理：范围外的读者是已知边界，不能因此判成"没有读者"。
-		}
-		return false;
-	}
-
-	/** 把构建输出里的 class 补进读者集合（只补尚未收录的：内存字节优先）。 */
-	private static void collectClassFiles(Path root, Map<String, byte[]> into) {
-		if (!Files.isDirectory(root)) return;
-		try (var walk = Files.walk(root)) {
-			for (Path p : walk.filter(Files::isRegularFile).toList()) {
-				if (into.size() > MAX_READER_SCAN_CLASSES) {
-					warn("[LAYOUT-READERS] class file cap (" + MAX_READER_SCAN_CLASSES
-					     + ") reached under " + root + "; reader scan may be incomplete.");
-					return;
-				}
-				if (!p.toString().endsWith(".class")) continue;
-				Path rel = root.relativize(p);
-				String internal = rel.toString().replace('\\', '/');
-				internal = internal.substring(0, internal.length() - ".class".length());
-				if (into.containsKey(internal)) continue;
-				try {
-					into.put(internal, Files.readAllBytes(p));
-				} catch (Throwable ignored) {
-					// 单个文件读失败不影响整体；缺失的类会在解析期表现为 UNKNOWN 并被判为不完整。
-				}
-			}
-		} catch (Throwable t) {
-			warn("[LAYOUT-READERS] cannot walk " + root + ": " + t);
-		}
-	}
-
-	private static String internalName(String dottedName) {
+	static String internalName(String dottedName) {
 		return dottedName.replace('.', '/');
 	}
 
-	private static String dotted(String internalName) {
+	/** 内部名 → 点分类名；与 {@link #internalName} 互为逆运算。 */
+	static String dotted(String internalName) {
 		return internalName.replace('/', '.');
 	}
-
-	/** 读者扫描只看工程自身的类；这些前缀是 JDK / 标准库，不可能引用工程字段。 */
-	private static final String[] NON_PROJECT_PREFIXES = {
-		"java.", "javax.", "jdk.", "sun.", "com.sun.", "org.w3c.", "org.xml.", "kotlin."
-	};
-
-	/** 读者扫描的类数上限，防止异常路径下把整个磁盘拖进来。 */
-	private static final int MAX_READER_SCAN_CLASSES = 20_000;
 
 	private static final OffsetScanner offsetScanner = new OffsetScanner(RemoldAgent::fetchBytecodeForOffsetScanner);
 	private static final Map<String, OffsetScanner.Binding> scannedOffsetBindings = new ConcurrentHashMap<>();
@@ -3141,12 +2736,12 @@ public class RemoldAgent {
 		}
 
 		// 本轮有"删实例字段"时才做读者扫描（内部先 diff 判断，没有删除就直接返回空表，零成本）。
-		Map<String, RemovedMemberScan> readersByClass = scanRemovedMembers(newBatchBytes, classToPath);
+		Map<String, RemovedMemberScan> readersByClass = RemovedMemberScanner.scan(newBatchBytes, classToPath);
 
 		Set<String> rejectedHosts = new LinkedHashSet<>();
 		for (String className : new ArrayList<>(newBatchBytes.keySet())) {
 			if (isBlacklisted(className)) continue;
-			if (rejectedHosts.contains(hostNameOf(className))) continue;
+			if (rejectedHosts.contains(LayoutDecisionEngine.hostNameOf(className))) continue;
 
 			byte[] newBytes = newBatchBytes.get(className);
 			if (newBytes == null) continue;
@@ -3408,285 +3003,67 @@ public class RemoldAgent {
 	}
 
 	/**
-	 * 便捷重载：先 diff 两版字节，再交给核心纯函数。diff 失败 / 取不到字节 → SKIP。
+	 * 布局门判决的对外入口，算法见 {@link LayoutDecisionEngine}。
+	 *
+	 * <p>{@link LayoutDecision} / {@link LayoutAction} / {@link Liveness} / {@link RemovedMemberScan}
+	 * 这几个类型仍由本类声明：它们是宿主与回归用例绑定的判决词汇。算法搬到协作类后，
+	 * 「为什么拒绝」的推演不再需要读整条热更流水线。</p>
 	 */
 	public static LayoutDecision decideLayout(String className, byte[] oldBytes, byte[] newBytes,
 	                                          String mode, Liveness liveness, Set<String> batchNames) {
-		return decideLayout(className, oldBytes, newBytes, mode, liveness, batchNames,
-		                    RemovedMemberScan.NOT_SCANNED);
+		return LayoutDecisionEngine.decide(className, oldBytes, newBytes, mode, liveness, batchNames);
 	}
 
-	/** 便捷重载（带批次外读者判定）。 */
+	/** @see LayoutDecisionEngine#decide(String, byte[], byte[], String, Liveness, Set, RemovedMemberScan) */
 	public static LayoutDecision decideLayout(String className, byte[] oldBytes, byte[] newBytes,
 	                                          String mode, Liveness liveness, Set<String> batchNames,
 	                                          RemovedMemberScan removedFieldReaders) {
-		return decideLayout(className, oldBytes, newBytes, mode, liveness, batchNames,
-		                    removedFieldReaders, null);
+		return LayoutDecisionEngine.decide(className, oldBytes, newBytes, mode, liveness, batchNames,
+		                                   removedFieldReaders);
 	}
 
-	/** 便捷重载（带批次外读者判定与父类字段漂移判定）。 */
+	/** @see LayoutDecisionEngine#decide(String, byte[], byte[], String, Liveness, Set, RemovedMemberScan, SuperclassDriftGate.DriftDecision) */
 	public static LayoutDecision decideLayout(String className, byte[] oldBytes, byte[] newBytes,
 	                                          String mode, Liveness liveness, Set<String> batchNames,
 	                                          RemovedMemberScan removedFieldReaders,
 	                                          SuperclassDriftGate.DriftDecision drift) {
-		if (LayoutGate.MODE_OFF.equals(mode)) {
-			return new LayoutDecision(LayoutAction.PASS, null, hostNameOf(className), Set.of());
-		}
-		if (oldBytes == null || newBytes == null) {
-			return new LayoutDecision(LayoutAction.SKIP, null, hostNameOf(className), Set.of());
-		}
-		List<String> changed;
-		Set<String> reinitFields = Set.of();
-		try {
-			ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, newBytes);
-			changed = diff.changedFields;
-			reinitFields = diff.reinitFields;
-		} catch (Throwable t) {
-			return new LayoutDecision(LayoutAction.SKIP, null, hostNameOf(className), Set.of());
-		}
-		return decideLayout(className, changed, mode, liveness, batchNames, removedFieldReaders, drift, reinitFields);
+		return LayoutDecisionEngine.decide(className, oldBytes, newBytes, mode, liveness, batchNames,
+		                                   removedFieldReaders, drift);
 	}
 
-	/**
-	 * 核心纯函数：给定已算出的 {@code changedFields}、模式、存活实例判定与批次类名集，判定动作。
-	 *
-	 * <p>把接线里最容易出错的部分（拒绝要带哪些类、off/skip/waive 出口）抽成可单测的纯逻辑。
-	 * 调用位置（必须在 {@code applyRedefinitions} 之前）由 {@code applyRedefineLayoutGate} 的接线守卫。</p>
-	 *
-	 * <ul>
-	 *   <li>{@code OFF} → PASS，不解析。</li>
-	 *   <li>{@code changedFields == null}（无法 diff）→ SKIP（调用方负责告警）。</li>
-	 *   <li>字段兼容（含纯新增）→ PASS。</li>
-	 *   <li>不兼容 + {@code warn} → PASS，但 {@code layout} 非兼容（调用方强告警）。</li>
-	 *   <li>不兼容 + {@code reject}（默认）+ <b>无存活实例且非静态字段</b> → WAIVE。</li>
-	 *   <li>不兼容 + {@code reject} + 有/未知存活实例，或涉及静态字段 → REJECT +
-	 *       {@code dropped} = 宿主 + 匿名子类。</li>
-	 * </ul>
-	 *
-	 * <p><b>为什么有一条静态例外</b>：实例字段的旧值只在实例上，没有实例就无所谓"读到旧值/零值"；
-	 * 静态字段是类级别共享的，类只要加载过就可能已被写入，故不因无实例而放行。</p>
-	 */
+	/** @see LayoutDecisionEngine#decide(String, List, String, Liveness, Set) */
 	public static LayoutDecision decideLayout(String className, List<String> changedFields,
 	                                          String mode, Liveness liveness, Set<String> batchNames) {
-		return decideLayout(className, changedFields, mode, liveness, batchNames,
-		                    RemovedMemberScan.NOT_SCANNED);
+		return LayoutDecisionEngine.decide(className, changedFields, mode, liveness, batchNames);
 	}
 
-	/**
-	 * 带"批次外读者"判定的版本。
-	 *
-	 * <p><b>删除字段的判据不是存活实例</b>：删掉字段后，存活实例只是丢了一个没人读的槽位，
-	 * 真正会出事的是<b>改动后还有代码解析得到它</b>——那会在未来任意一次执行时抛
-	 * {@code NoSuchFieldError}，且抛点在热更事务之外。所以本条只看 {@code removedFieldReaders}：
-	 * 读者为空则放行，有读者则拒绝并列出类名。</p>
-	 *
-	 * <p>其余不兼容（改类型 / 改静态性）与删除的差别在于：它们的旧值会被<b>静默</b>丢弃或错读，
-	 * 读者集合证明不了安全，因此仍按存活实例判。</p>
-	 *
-	 * <p>{@code removedFieldReaders.scanned() == false} 时必须退回存活实例判据——
-	 * 把"没扫"当成"没读者"是本条最危险的读法。</p>
-	 */
+	/** @see LayoutDecisionEngine#decide(String, List, String, Liveness, Set, RemovedMemberScan) */
 	public static LayoutDecision decideLayout(String className, List<String> changedFields,
 	                                          String mode, Liveness liveness, Set<String> batchNames,
 	                                          RemovedMemberScan scan) {
-		return decideLayout(className, changedFields, mode, liveness, batchNames, scan, null);
+		return LayoutDecisionEngine.decide(className, changedFields, mode, liveness, batchNames, scan);
 	}
 
-	/**
-	 * 带"批次外读者"判定与"父类实例字段漂移"判定的全功能版本。
-	 */
+	/** @see LayoutDecisionEngine#decide(String, List, String, Liveness, Set, RemovedMemberScan, SuperclassDriftGate.DriftDecision) */
 	public static LayoutDecision decideLayout(String className, List<String> changedFields,
 	                                          String mode, Liveness liveness, Set<String> batchNames,
 	                                          RemovedMemberScan scan,
 	                                          SuperclassDriftGate.DriftDecision drift) {
-		return decideLayout(className, changedFields, mode, liveness, batchNames, scan, drift, Set.of());
+		return LayoutDecisionEngine.decide(className, changedFields, mode, liveness, batchNames, scan, drift);
 	}
 
-	/**
-	 * 带"批次外读者"判定、"父类实例字段漂移"判定与"@RemoldReinit 授权重置字段"的全功能版本。
-	 */
+	/** @see LayoutDecisionEngine#decide(String, List, String, Liveness, Set, RemovedMemberScan, SuperclassDriftGate.DriftDecision, Set) */
 	public static LayoutDecision decideLayout(String className, List<String> changedFields,
 	                                          String mode, Liveness liveness, Set<String> batchNames,
 	                                          RemovedMemberScan scan,
 	                                          SuperclassDriftGate.DriftDecision drift,
 	                                          Set<String> reinitFields) {
-		String host = hostNameOf(className);
-		if (LayoutGate.MODE_OFF.equals(mode)) {
-			return new LayoutDecision(LayoutAction.PASS, null, host, Set.of());
-		}
-		if (changedFields == null) {
-			return new LayoutDecision(LayoutAction.SKIP, null, host, Set.of());
-		}
-		if (scan == null) {
-			scan = RemovedMemberScan.NOT_SCANNED;
-		}
-		LayoutGate.Result res = LayoutGate.checkChangedFields(changedFields);
-
-		// 编译期常量（{@code ConstantValue}，JLS §13.4.9）<b>不阻断</b>：javac 把值内联进读者的
-		// {@code ldc} / {@code bipush}，那些读者在运行期<b>根本不解析这个字段</b>，删掉它零异常；
-		// 而未内联的读者常量池里仍有 {@code Fieldref}，会被 hits 正常抓到。
-		// "内联"既不是错误，也不需要读者改代码——它本来就是 Java 常量的既有语义（改常量值同样
-		// 要全量重编才生效）。调用方把 constantFields 打进日志即可，见 §16.1 的修订说明。
-
-		// 方法删除不经过 LayoutGate（{@code changedFields} 只描述字段），必须单独判，而且要放在
-		// compatible 早退<b>之前</b>——本轮完全可能只删了方法、字段一个都没动。
-		//
-		// 判据与字段同源（"批次外读者为空"），但失败形态不同：可能是 NoSuchMethodError、
-		// AbstractMethodError，也可能是<b>静默的分派转移</b>（实测见 docs/initfix/07-p05-probe-results.md §15）。
-		// 三种都拒绝——分派转移不抛异常，但行为已经变了。
-		if (scan.removedMethods() && !LayoutGate.MODE_WARN.equals(mode)) {
-			if (!scan.scanned()) {
-				// 方法删除没有存活实例判据可以退：删除的影响与"当前有没有实例"正交。
-				return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
-					"method(s) removed but the reader scan could not complete — refusing because"
-					+ " method removal has no liveness fallback");
-			}
-			if (scan.hasFindings()) {
-				return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
-					"method(s) removed and " + describeFindings(scan) + " still resolve to them");
-			}
-		}
-
-		// 物理内存字段偏移漂移检查（S1 门控）：
-		// 即使本类自身字段变动看起来是兼容新增（COMPATIBLE），但若引发了本类或子孙类实例字段漂移且存在持有者，则必须拦截
-		if (drift != null && !drift.isSafe()) {
-			LayoutGate.Verdict v = drift.formatReport().contains("[SUPERCLASS_FIELD_DRIFT]")
-				? LayoutGate.Verdict.SUPERCLASS_FIELD_DRIFT
-				: LayoutGate.Verdict.LAYOUT_DRIFT;
-			LayoutGate.Result driftRes = new LayoutGate.Result(
-				v,
-				drift.formatReport()
-			);
-			if (LayoutGate.MODE_WARN.equals(mode)) {
-				return new LayoutDecision(LayoutAction.PASS, driftRes, host, Set.of());
-			}
-			return new LayoutDecision(LayoutAction.REJECT, driftRes, host, droppedOf(host, batchNames), drift.formatReport());
-		}
-
-		if (res.compatible() || LayoutGate.MODE_WARN.equals(mode)) {
-			return new LayoutDecision(LayoutAction.PASS, res, host, Set.of());
-		}
-
-		boolean staticChange = LayoutGate.hasStaticFieldChange(changedFields);
-
-		// 字段类型变更（CHANGED_FIELD_TYPE）安全门控：
-		if (res.verdict() == LayoutGate.Verdict.CHANGED_FIELD_TYPE) {
-			List<String> typeChanged = LayoutGate.typeChangedFields(changedFields);
-			if (scan.scanned() && scan.hasFindings()) {
-				return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
-					"field type changed and " + describeFindings(scan) + " still resolve to old descriptor");
-			}
-			// 情况 A：堆上无存活实例（liveInstances == 0）且非静态字段 → 直接放行
-			if (liveness == Liveness.NONE && !staticChange) {
-				return new LayoutDecision(LayoutAction.WAIVE, res, host, Set.of());
-			}
-			// 情况 B：堆上有存活实例（liveInstances > 0），且新字节码中该字段标有 @RemoldReinit → 直接放行
-			if (!staticChange && reinitFields != null && !typeChanged.isEmpty() && reinitFields.containsAll(typeChanged)) {
-				return new LayoutDecision(LayoutAction.WAIVE_REINIT, res, host, Set.of());
-			}
-			// 情况 C：堆上有存活实例且未标 @RemoldReinit → 维持 LAYOUT-REJECT，优化提示文案
-			String typeChangeHint = "可在该字段上添加 @RemoldReinit 后再次编译保存，即可在不重启的情况下完成类型切换并重置初值";
-			return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
-				"field type changed: " + typeChanged + " with surviving instances (" + typeChangeHint + ")");
-		}
-
-		// 删除字段（实例或静态）但读者扫描未完成 → 只能拒绝。
-		//
-		// 这里不能退回下面的 liveness 判据：liveness 回答的是"**现在**有没有实例会被错读"，
-		// 而删除的风险是"**之后**新建的实例 / 静态访问被陈旧代码读"——两者正交。
-		// 无实例时 `WAIVE` 会放行，等于把"没扫成"读成"没读者"，正是风险 12 本身。
-		if (res.verdict() == LayoutGate.Verdict.REMOVED_FIELD && !scan.scanned()
-		    && !LayoutGate.MODE_WARN.equals(mode)) {
-			return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
-				"field(s) removed but the reader scan could not complete — the liveness check"
-				+ " answers a different question (whether an instance exists now, not whether stale"
-				+ " code will read the field later)");
-		}
-
-		// 删除字段（实例或静态）：按"批次外读者"判，与存活实例无关（见方法注释）。
-		// 改类型 / 改静态性不走这条：它们的旧值会被静默丢弃或错读，读者集合证明不了安全。
-		if (res.verdict() == LayoutGate.Verdict.REMOVED_FIELD && scan.scanned()) {
-			// 用 hasFindings() 而不是只看 readers()：字段改指向（父类/接口同名字段接住）
-			// 不抛错但读到别的值，与方法的分派转移同类，同样不放行。
-			if (!scan.hasFindings()) {
-				return new LayoutDecision(LayoutAction.WAIVE_NO_READERS, res, host, Set.of());
-			}
-			return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames));
-		}
-
-		// 无存活实例且不涉及静态字段：没有状态会被错读，放行。
-		// UNKNOWN 落入下面的 REJECT 分支（按"可能有实例"处理）。
-		if (liveness == Liveness.NONE && !staticChange) {
-			return new LayoutDecision(LayoutAction.WAIVE, res, host, Set.of());
-		}
-		return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames));
+		return LayoutDecisionEngine.decide(className, changedFields, mode, liveness, batchNames, scan, drift, reinitFields);
 	}
 
-	/**
-	 * 布局门拒绝的紧凑判决串（摘要行用）。
-	 *
-	 * <p>形如 {@code LAYOUT-REJECT: field(s) removed: COST — restore the removed field(s) or restart}：
-	 * 判决码 + <b>具体是哪个字段</b> + <b>下一步怎么办</b>，一行读完不需要往上翻。</p>
-	 *
-	 * <p>细节取自 {@link LayoutDecision#layout()} 的 {@code detail()}（已点名字段名，去掉方括号便于阅读）。
-	 * 读者侧信息只在<b>确实扫出了东西</b>时追加；扫描没做（改类型 / 无存活实例）时不能凭空补一句。</p>
-	 *
-	 * <p>包内可见，供 {@code HotswapSkipSummaryTest} 直接断言这一行的措辞。</p>
-	 */
+	/** @see LayoutDecisionEngine#skipVerdictForLayout(LayoutDecision, RemovedMemberScan) */
 	public static String skipVerdictForLayout(LayoutDecision d, RemovedMemberScan scan) {
-		String detail = d.layout() == null ? null : d.layout().detail();
-		if (detail != null) {
-			detail = detail.replace("[", "").replace("]", "").trim();
-			// "field(s) removed: COST" → "field removed: COST"：只有一个字段时用单数，
-			// 读起来不像模板腔（LayoutGate 那边要同时服务日志，保持中性写法，这里只做展示层归一）。
-			String many = "field(s) removed: ";
-			if (detail.startsWith(many) && detail.indexOf(',') < 0) {
-				detail = "field removed: " + detail.substring(many.length());
-			}
-		}
-
-		String note = null;
-		if (d.reason() != null) {
-			// 扫描没完成本身就是拒绝理由，必须说出来：否则"只是删了个字段"看起来像能放行。
-			note = "(reader scan could not complete)";
-		} else if (scan != null && scan.hasFindings()) {
-			note = "(" + describeFindings(scan) + ")";
-		}
-		if (note != null) detail = detail == null ? note : detail + " " + note;
-
-		String action = d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.REMOVED_FIELD
-		 ? "restore the removed field(s) or restart to continue"
-		 : (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.CHANGED_FIELD_TYPE
-		    ? "annotate field(s) with @RemoldReinit, or revert the field change, or restart to continue"
-		    : (d.layout() != null && (d.layout().verdict() == LayoutGate.Verdict.SUPERCLASS_FIELD_DRIFT || d.layout().verdict() == LayoutGate.Verdict.LAYOUT_DRIFT)
-		       ? "avoid adding instance field(s) to superclass or restart to continue"
-		       : "revert the field change or restart to continue"));
-		return RoundSkips.verdict("LAYOUT-REJECT", detail, action);
-	}
-
-	/** 把扫描结果说成人能读的一句话，用于拒绝日志。 */
-	private static String describeFindings(RemovedMemberScan scan) {
-		StringBuilder sb = new StringBuilder();
-		if (!scan.readers().isEmpty()) {
-			sb.append(scan.readers().size()).append(" out-of-batch reader(s)");
-		}
-		if (!scan.dispatchShifted().isEmpty()) {
-			if (sb.length() > 0) sb.append(" and ");
-			sb.append(scan.dispatchShifted().size()).append(" silent dispatch shift(s)");
-		}
-		return sb.length() == 0 ? "an unknown number of references" : sb.toString();
-	}
-
-	/** 拒绝时要移出本批的类：宿主 + 其下属全部匿名类。 */
-	private static Set<String> droppedOf(String host, Set<String> batchNames) {
-		Set<String> dropped = new LinkedHashSet<>();
-		dropped.add(host);
-		if (batchNames != null) {
-			for (String n : batchNames) {
-				if (AnonClassAligner.isAnonymousClassName(host, n)) dropped.add(n);
-			}
-		}
-		return dropped;
+		return LayoutDecisionEngine.skipVerdictForLayout(d, scan);
 	}
 
 	/**
@@ -3843,168 +3220,7 @@ public class RemoldAgent {
 
 	//region File Processing Utilities
 
-	/**
-	 * 巡检运行目录下（如 run/mods/ 或 mods/）是否存在与当前工程 modId 冲突的残留旧构建 JAR。
-	 * 在 Minecraft (Fabric / NeoForge / Forge) 等散装类开发环境中，若存在同名 modId 的已打包 JAR，
-	 * 会引发双源加载、命名空间断裂（Intermediary vs Named）、资源覆写或 ClassNotFoundException。
-	 */
-	private static void checkStaleModJarsInRunMods() {
-		try {
-			String currentModId = detectCurrentProjectModId();
-			if (currentModId == null || currentModId.isEmpty()) {
-				return;
-			}
-			List<Path> candidateModsDirs = List.of(
-				Paths.get("run", "mods"),
-				Paths.get("mods"),
-				Paths.get("run"),
-				Paths.get(".")
-			);
-			for (Path modsDir : candidateModsDirs) {
-				if (!Files.isDirectory(modsDir)) continue;
-				Path targetDir = modsDir;
-				if (modsDir.getFileName() != null && !modsDir.getFileName().toString().equals("mods")) {
-					Path subMods = modsDir.resolve("mods");
-					if (Files.isDirectory(subMods)) {
-						targetDir = subMods;
-					} else {
-						continue;
-					}
-				}
-				try (Stream<Path> stream = Files.list(targetDir)) {
-					stream.filter(p -> {
-						String s = p.getFileName().toString().toLowerCase(Locale.ROOT);
-						return s.endsWith(".jar") || s.endsWith(".zip");
-					}).forEach(jarPath -> {
-						String staleModId = readModIdFromJar(jarPath);
-						if (currentModId.equals(staleModId)) {
-							String yellow = "\u001B[33m";
-							String reset = "\u001B[0m";
-							warn(yellow + "Found stale build artifact in " + jarPath + " with identical modId '" + currentModId + "'.");
-							warn("In-development runs directly use loose classes. A packaged JAR in run/mods causes duplicate mod conflicts, namespace crashes, or ClassNotFoundException! Please delete this JAR." + reset);
-						}
-					});
-				}
-			}
-		} catch (Throwable t) {
-			if (DEBUG) log("[CHECK-STALE] Stale JAR check encountered: " + t);
-		}
-	}
-
-	private static String detectCurrentProjectModId() {
-		for (Path dir : activeWatchDirs) {
-			if (!Files.isDirectory(dir)) continue;
-			Path fabricJson = dir.resolve("fabric.mod.json");
-			if (Files.isRegularFile(fabricJson)) {
-				String id = extractJsonModId(fabricJson);
-				if (id != null) return id;
-			}
-			Path quiltJson = dir.resolve("quilt.mod.json");
-			if (Files.isRegularFile(quiltJson)) {
-				String id = extractJsonModId(quiltJson);
-				if (id != null) return id;
-			}
-			Path neoForgeToml = dir.resolve("META-INF").resolve("neoforge.mods.toml");
-			if (Files.isRegularFile(neoForgeToml)) {
-				String id = extractTomlModId(neoForgeToml);
-				if (id != null) return id;
-			}
-			Path forgeToml = dir.resolve("META-INF").resolve("mods.toml");
-			if (Files.isRegularFile(forgeToml)) {
-				String id = extractTomlModId(forgeToml);
-				if (id != null) return id;
-			}
-		}
-		try {
-			ClassLoader cl = RemoldAgent.class.getClassLoader();
-			if (cl == null) cl = ClassLoader.getSystemClassLoader();
-			if (cl != null) {
-				try (InputStream in = cl.getResourceAsStream("fabric.mod.json")) {
-					if (in != null) {
-						String content = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-						String id = extractModIdFromJsonString(content);
-						if (id != null) return id;
-					}
-				}
-				try (InputStream in = cl.getResourceAsStream("META-INF/neoforge.mods.toml")) {
-					if (in != null) {
-						String content = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-						String id = extractModIdFromTomlString(content);
-						if (id != null) return id;
-					}
-				}
-				try (InputStream in = cl.getResourceAsStream("META-INF/mods.toml")) {
-					if (in != null) {
-						String content = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-						String id = extractModIdFromTomlString(content);
-						if (id != null) return id;
-					}
-				}
-			}
-		} catch (Throwable ignored) { }
-		return null;
-	}
-
-	private static String extractJsonModId(Path path) {
-		try {
-			String content = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
-			return extractModIdFromJsonString(content);
-		} catch (Throwable ignored) {
-			return null;
-		}
-	}
-
-	private static String extractModIdFromJsonString(String json) {
-		Pattern p = Pattern.compile("\"id\"\\s*:\\s*\"([^\"]+)\"");
-		Matcher m = p.matcher(json);
-		if (m.find()) {
-			return m.group(1).trim();
-		}
-		return null;
-	}
-
-	private static String extractTomlModId(Path path) {
-		try {
-			String content = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
-			return extractModIdFromTomlString(content);
-		} catch (Throwable ignored) {
-			return null;
-		}
-	}
-
-	private static String extractModIdFromTomlString(String toml) {
-		Pattern p = Pattern.compile("modId\\s*=\\s*[\"']([^\"']+)[\"']");
-		Matcher m = p.matcher(toml);
-		if (m.find()) {
-			return m.group(1).trim();
-		}
-		return null;
-	}
-
-	private static String readModIdFromJar(Path jarPath) {
-		try (ZipFile zf = new ZipFile(jarPath.toFile())) {
-			ZipEntry entry = zf.getEntry("fabric.mod.json");
-			if (entry == null) entry = zf.getEntry("quilt.mod.json");
-			if (entry != null) {
-				try (InputStream in = zf.getInputStream(entry)) {
-					String json = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-					return extractModIdFromJsonString(json);
-				}
-			}
-			ZipEntry tomlEntry = zf.getEntry("META-INF/neoforge.mods.toml");
-			if (tomlEntry == null) tomlEntry = zf.getEntry("META-INF/mods.toml");
-			if (tomlEntry != null) {
-				try (InputStream in = zf.getInputStream(tomlEntry)) {
-					String toml = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-					return extractModIdFromTomlString(toml);
-				}
-			}
-		} catch (Throwable ignored) { }
-		return null;
-	}
-
-	private static void initializeAgentState(Class<?>[] classes) {
-		checkStaleModJarsInRunMods();
+	static void initializeAgentState(Class<?>[] classes) {
 		info("Scanning files...");
 		// 直接传入的 jar/zip 文件：立即解压扫描
 		for (Path jar : activeWatchJars) {
@@ -4014,7 +3230,7 @@ public class RemoldAgent {
 			List<Path> outOfSync = new ArrayList<>();
 			try {
 				Files.createDirectories(tmpDir);
-				tmpToJar.entrySet().removeIf(e -> e.getValue().equals(jar));
+				JarExtractor.tmpToJar().entrySet().removeIf(e -> e.getValue().equals(jar));
 				try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(Files.newInputStream(jar)))) {
 					ZipEntry entry;
 					while ((entry = zis.getNextEntry()) != null) {
@@ -4027,7 +3243,7 @@ public class RemoldAgent {
 								Path outPath  = tmpDir.resolve(entry.getName().replace('/', File.separatorChar));
 								Files.createDirectories(outPath.getParent());
 								Files.write(outPath, diskBytes);
-								tmpToJar.put(outPath, jar);
+								JarExtractor.tmpToJar().put(outPath, jar);
 								byte[] memBytes = bytecodeCache.get(cName);
 								if (memBytes != null && calculateHash(memBytes) != diskHash) {
 									if (DEBUG) log("[INIT-SYNC] " + cName + " (direct jar) out of sync.");
@@ -4054,7 +3270,7 @@ public class RemoldAgent {
 			try (Stream<Path> walk = Files.walk(root)) {
 				walk.filter(p -> {
 					String s = p.toString().replace('\\', '/');
-					if (s.contains("/mods/") || s.contains("/run/mods/")) return false;
+					if (isWatchPathIgnored(p)) return false;
 					// jar/zip 只取 root 直属子文件（depth == 1），.class 全量递归
 					if (s.endsWith(".jar") || s.endsWith(".zip")) return p.getParent().equals(root);
 					return s.endsWith(".class");
@@ -4085,7 +3301,7 @@ public class RemoldAgent {
 												Path outPath = tmpDir.resolve(entry.getName().replace('/', File.separatorChar));
 												Files.createDirectories(outPath.getParent());
 												Files.write(outPath, diskBytes);
-												tmpToJar.put(outPath, absJar);
+												JarExtractor.tmpToJar().put(outPath, absJar);
 												outOfSync.add(outPath);
 											}
 											synchronized (fileDiskHashes) {
@@ -4147,7 +3363,7 @@ public class RemoldAgent {
 				}
 			} catch (Exception ignored) { }
 		}
-		// 入参 classes 是调用方在 restartWatchers 之前取的快照，此刻可能已过期
+		// 入参 classes 是调用方在 FileWatcherService.restart 之前取的快照，此刻可能已过期
 		// （旧 watcher 排进 scheduler 的任务期间可能又有类被加载）。改走 triggerHotswap()，
 		// 由它在锁内重新取一份新鲜快照。
 		if (!pendingChanges.isEmpty() || !pendingAssetChanges.isEmpty()) triggerHotswap();
@@ -4177,7 +3393,7 @@ public class RemoldAgent {
 		    || name.endsWith(".atlas") || name.endsWith(".csv") || name.endsWith(".txt");
 	}
 
-	private static void handleAssetChange(Path changedAsset) {
+	static void handleAssetChange(Path changedAsset) {
 		if (DEBUG) log("[ASSET] Queued asset change: " + changedAsset);
 		synchronized (pendingChanges) {
 			pendingAssetChanges.add(changedAsset);
@@ -4188,7 +3404,7 @@ public class RemoldAgent {
 		}
 	}
 
-	private static void handleFileChange(Path changedFile) {
+	static void handleFileChange(Path changedFile) {
 		synchronized (pendingChanges) {
 			pendingChanges.add(changedFile);
 			if (scheduledTask != null && !scheduledTask.isDone()) {
@@ -4200,9 +3416,9 @@ public class RemoldAgent {
 
 	/**
 	 * 处理 jar/zip 变化：仅入队，与 .class 共用防抖，防止读到写了一半的 jar。
-	 * 真正的解压在防抖结束后由 triggerHotswapWith → extractJarToTemp 完成。
+	 * 真正的解压在防抖结束后由 triggerHotswapWith → {@link JarExtractor#extract} 完成。
 	 */
-	private static void handleJarChange(Path jarPath) {
+	static void handleJarChange(Path jarPath) {
 		if (DEBUG) log("[JAR] Queued for extraction: " + jarPath);
 		synchronized (pendingChanges) {
 			pendingJars.add(jarPath.toAbsolutePath());
@@ -4211,102 +3427,6 @@ public class RemoldAgent {
 			}
 			scheduledTask = scheduler.schedule(RemoldAgent::triggerHotswap, FILE_SHAKE_MS, TimeUnit.MILLISECONDS);
 		}
-	}
-
-	/**
-	 * 将 jar/zip 内所有 .class 解压到固定临时目录（基于 jar 路径 hash 保持稳定），
-	 * 每次更新前先清空旧内容，避免 tmpdir 无限膨胀。
-	 * 解压结果批量加入 pendingChanges，并维护 tmpToJar 映射。
-	 */
-	private static void extractJarToTemp(Path jarPath) {
-		try {
-			// 固定路径：<tmpdir>/remold-hotswap/<stem>-<jarPathHash>
-			String stem = jarPath.getFileName().toString().replaceAll("[^a-zA-Z0-9_-]", "_");
-			Path tmpDir = Paths.get(System.getProperty("java.io.tmpdir"), "remold-hotswap",
-			 stem + "-" + Long.toHexString(CRC64.hashString(jarPath.toString())));
-
-			// 清空旧内容（稳定路径，不删目录本身）
-			if (Files.exists(tmpDir)) {
-				try (Stream<Path> s = Files.walk(tmpDir)) {
-					s.sorted(Comparator.reverseOrder())
-					 .filter(p -> !p.equals(tmpDir))
-					 .forEach(p -> { try { Files.delete(p); } catch (IOException ignored) { } });
-				}
-			}
-			Files.createDirectories(tmpDir);
-
-			// 清理该 jar 上一次留下的 tmpToJar 条目，防止 map 无限增长
-			tmpToJar.entrySet().removeIf(e -> e.getValue().equals(jarPath));
-
-			List<Path> extracted = new ArrayList<>();
-			List<Path> extractedAssets = new ArrayList<>();
-			try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(Files.newInputStream(jarPath)))) {
-				ZipEntry entry;
-				while ((entry = zis.getNextEntry()) != null) {
-					try {
-						if (!entry.isDirectory()) {
-							String entryName = entry.getName();
-							if (entryName.endsWith(".class")) {
-								Path outPath = tmpDir.resolve(entryName.replace('/', File.separatorChar));
-								Files.createDirectories(outPath.getParent());
-								Files.write(outPath, zis.readAllBytes());
-								tmpToJar.put(outPath, jarPath);
-								extracted.add(outPath);
-							} else {
-								Path entryPath = Paths.get(entryName.replace('/', File.separatorChar));
-								if (isAssetFile(entryPath)) {
-									Path outPath = tmpDir.resolve(entryName.replace('/', File.separatorChar));
-									Files.createDirectories(outPath.getParent());
-									Files.write(outPath, zis.readAllBytes());
-									extractedAssets.add(outPath);
-								}
-							}
-						}
-					} finally {
-						zis.closeEntry();
-					}
-				}
-			}
-
-			if (extracted.isEmpty() && extractedAssets.isEmpty()) {
-				if (DEBUG) log("[JAR] No relevant entries in: " + jarPath);
-				return;
-			}
-			if (!extracted.isEmpty()) {
-				info("[JAR] Extracted " + extracted.size() + " classes from " + jarPath.getFileName() + " → " + tmpDir);
-			}
-			if (!extractedAssets.isEmpty()) {
-				info("[JAR] Extracted " + extractedAssets.size() + " assets from " + jarPath.getFileName() + " → " + tmpDir);
-			}
-			// 批量加入，只锁一次
-			synchronized (pendingChanges) {
-				if (!extracted.isEmpty()) pendingChanges.addAll(extracted);
-				if (!extractedAssets.isEmpty()) pendingAssetChanges.addAll(extractedAssets);
-			}
-		} catch (IOException e) {
-			error("Failed to extract jar/zip: " + jarPath, e);
-		}
-	}
-
-	/**
-	 * 将临时 .class 路径映射回 watchDir 内的虚拟路径，
-	 * 供 findTargetClassLoader / mountForClass 正确推断 ClassLoader。
-	 */
-	private static Path resolveWatchDirPath(Path jarPath, String className) {
-		// 情况一：jar 在某个 watchDir 目录下（目录模式）
-		for (Path watchDir : activeWatchDirs) {
-			if (jarPath.startsWith(watchDir)) {
-				return watchDir.resolve(className.replace('.', File.separatorChar) + ".class");
-			}
-		}
-		// 情况二：jar 本身就是直接传入的 activeWatchJar。
-		// 此时没有对应的 watchDir，不需要虚拟路径，返回 null 让调用方
-		// 退化到 findTargetClassLoader(className) 纯包名推断即可。
-		if (activeWatchJars.contains(jarPath)) {
-			return null;
-		}
-		error("[WARN] resolveWatchDirPath: jar not under any watchDir or watchJar: " + jarPath);
-		return null;
 	}
 
 	private static void triggerHotswapWith(Class<?>[] classes) {
@@ -4341,7 +3461,7 @@ public class RemoldAgent {
 			jars = new HashSet<>(pendingJars);
 			pendingJars.clear();
 		}
-		jars.forEach(RemoldAgent::extractJarToTemp);
+		jars.forEach(JarExtractor::extract);
 
 		Set<Path> changes;
 		Set<Path> assetChanges;
@@ -4508,128 +3628,35 @@ public class RemoldAgent {
 	//endregion
 
 	//region Environment Detection
-	static Class<?> cl_Element;
-
-	private static final boolean ENHANCED_HOTSWAP;
-
-	static {
-		ENHANCED_HOTSWAP = probeEnhancedHotswap();
-	}
-
 	/**
-	 * 探测当前 JVM 是否<b>真的</b>具备增强重定义能力（新增字段/方法）。
+	 * 增强重定义能力探测与降级，实现见 {@link EnvironmentProbe}。
 	 *
-	 * <p><b>为什么不能看命令行参数</b>：{@code -XX:+AllowEnhancedClassRedefinition} 只存在于
-	 * DCEVM/JBR 系构建里。标准 HotSpot 单独加它会直接启动失败（{@code Unrecognized VM option}）；
-	 * 而一旦同时加了 {@code -XX:+IgnoreUnrecognizedVMOptions}，标准 HotSpot 会<b>接受并忽略</b>它，
-	 * 但 {@link java.lang.management.RuntimeMXBean#getInputArguments()} 仍会原样回显这个字符串。
-	 * 按参数文本判断就会把标准 JVM 误判成支持增强重定义，随后 {@code redefineClasses} 因
-	 * schema 变化抛 {@code UnsupportedOperationException}，并连带同批次其它类一起失败。</p>
-	 *
-	 * <p><b>实际探测方式</b>：向 {@code HotSpotDiagnosticMXBean} 查询该 VM option。
-	 * 标准 HotSpot 没有这个 option，会抛 {@code IllegalArgumentException}；DCEVM/JBR 系会返回
-	 * {@code VMOption}，其 {@code value} 即该 flag 的实际状态。注意 JBR 的 non-DCEVM 构建
-	 * 同样认识这个 flag，所以「option 存在」只说明是 JBR 系，真正的能力仍以 {@code value} 为准。</p>
-	 *
-	 * <p>任何异常（MXBean 不可用、非 HotSpot 运行时）一律返回 {@code false}：能力探测必须
-	 * fail-closed，把「不知道」当成「没有」。</p>
-	 */
-	private static boolean probeEnhancedHotswap() {
-		// 厂商标识是可靠证据：标准 HotSpot（Oracle / Adoptium / Zulu…）不会自称
-		// JetBrains / DCEVM / Trava，而 DCEVM 系构建会。
-		String runtime = System.getProperty("java.vm.vendor", "")
-		 + ' ' + System.getProperty("java.vm.name", "")
-		 + ' ' + System.getProperty("java.runtime.version", "");
-		if (!looksLikeEnhancedRuntime(runtime)) return false;
-		// 厂商对上了，再看 flag 是否真的开启。参数文本单独不可信（标准 JVM 靠
-		// -XX:+IgnoreUnrecognizedVMOptions 也会回显它），但配合厂商标识就是可靠的。
-		return ManagementFactory.getRuntimeMXBean().getInputArguments()
-		 .contains("-XX:+AllowEnhancedClassRedefinition");
-	}
-
-	/**
-	 * 运行时标识是否属于支持增强重定义的构建（DCEVM 系）。
-	 *
-	 * <p>抽成纯函数以便单测：{@code tests/src/EnhancedHotswapGateTest} 用真实的
-	 * 厂商字符串断言标准 HotSpot 不会被判成增强运行时。</p>
+	 * <p>这里只保留门面入口：{@link RemoldAgent} 是外部调用方（插件、宿主、测试）唯一认识的类，
+	 * 而探测与降级的判定逻辑已经搬到协作类，不再与热更流水线共享同一个类体。</p>
 	 */
 	public static boolean looksLikeEnhancedRuntime(String runtimeIdentity) {
-		if (runtimeIdentity == null) return false;
-		String s = runtimeIdentity.toLowerCase(java.util.Locale.ROOT);
-		return s.contains("jetbrains") || s.contains("dcevm") || s.contains("trava");
+		return EnvironmentProbe.looksLikeEnhancedRuntime(runtimeIdentity);
 	}
 
-	/**
-	 * 当前 JVM 是否支持增强型热重载（增加字段/方法等）。
-	 *
-	 * @see #probeEnhancedHotswap()
-	 */
+	/** @see EnvironmentProbe#isEnhancedHotswapEnabled() */
 	public static boolean isEnhancedHotswapEnabled() {
-		return ENHANCED_HOTSWAP;
+		return EnvironmentProbe.isEnhancedHotswapEnabled();
 	}
 
-	/**
-	 * 该类的结构变化是否必须因「当前 JVM 没有增强重定义」而被摘出本批重定义。
-	 *
-	 * <p>抽成纯函数是为了让 {@code tests/src/EnhancedHotswapGateTest} 能脱离 Instrumentation
-	 * 锁住两个方向：有结构变化且无能力时必须摘出；<b>没有</b>结构变化时绝不摘出。
-	 * 后者是真实缺陷的回归断言 —— 早期实现把判断写成了 {@code !structureChanged()}，
-	 * 导致真结构变化静默放行、无结构变化反而误报。</p>
-	 *
-	 * <p>{@code public} 仅为可测性，不是对外 API。</p>
-	 */
+	/** @see EnvironmentProbe#mustSkipForMissingEnhancedRedefinition(boolean, boolean) */
 	public static boolean mustSkipForMissingEnhancedRedefinition(
 	 boolean structureChanged, boolean enhanced) {
-		return structureChanged && !enhanced;
+		return EnvironmentProbe.mustSkipForMissingEnhancedRedefinition(structureChanged, enhanced);
 	}
 
-	/**
-	 * 无增强重定义能力时的降级：把<b>会自己制造 schema 变化</b>的开关强制关掉。
-	 *
-	 * <p>只降级 {@code FORCE_STATIC_LAMBDA}：它把实例 lambda 改写成「静态 + 显式 {@code this} 首参数」，
-	 * 方法描述符随之改变，这本身就是 schema 变化。在标准 HotSpot 上放行它，等于每一轮都主动制造
-	 * 一次 {@code UnsupportedOperationException}。</p>
-	 *
-	 * <p><b>为什么不连 {@code INIT_FIX} 一起关</b>：{@code INIT_FIX} 不会失败，它只是<b>没机会执行</b>——
-	 * 新增字段构成的 schema 变化已在 {@link #mustSkipForMissingEnhancedRedefinition} 那一层被整类摘出。
-	 * 强制关闭它换不来任何收益，却会波及所有<b>直接</b>调用 {@link remold.ref.InitFix#transform} 的路径
-	 * （回归套件 {@code InitFixOracle} 就在标准 JVM 上跑 48 个场景），让它们静默空转。
-	 * 降级只关「做了就会失败」的东西，不关「做了也没用」的东西。</p>
-	 *
-	 * <p>为什么降级而不报错：用户显式打开这个开关，说明他期望的是增强能力，而当前 JVM 给不了。
-	 * 与其让每一轮热更都失败一次，不如关掉做不了的部分，让仍然合法的方法体热更继续工作。</p>
-	 *
-	 * <p>{@code enhanced} 抽成参数而不是内部直接调用 {@link #isEnhancedHotswapEnabled()}，
-	 * 是为了让 {@code tests/src/EnhancedHotswapGateTest} 能锁住两个方向（有/无能力）。
-	 * 本方法会修改 {@link #FORCE_STATIC_LAMBDA}。</p>
-	 *
-	 * @return 被降级关闭的开关名，顺序固定；空列表表示无需降级
-	 *
-	 * <p>{@code public} 仅为可测性，不是对外 API。</p>
-	 */
+	/** @see EnvironmentProbe#degradeForMissingEnhancedRedefinition(boolean) */
 	public static java.util.List<String> degradeForMissingEnhancedRedefinition(boolean enhanced) {
-		java.util.List<String> degraded = new java.util.ArrayList<>(1);
-		if (enhanced) return degraded;
-		if (FORCE_STATIC_LAMBDA) {
-			FORCE_STATIC_LAMBDA = false;
-			degraded.add("remold.agent.force_static_lambda");
-		}
-		return degraded;
+		return EnvironmentProbe.degradeForMissingEnhancedRedefinition(enhanced);
 	}
 
-	/**
-	 * 降级原因文案，与 {@link #degradeForMissingEnhancedRedefinition(boolean)} 产出的开关名一一对应。
-	 *
-	 * <p>抽出来是为了让「为什么关」写在唯一一处，日志与文档不必各自维护一份说法。</p>
-	 *
-	 * <p>{@code public} 仅为可测性，不是对外 API。</p>
-	 */
+	/** @see EnvironmentProbe#degradationReason(String) */
 	public static String degradationReason(String switchName) {
-		if ("remold.agent.force_static_lambda".equals(switchName)) {
-			return "Rewriting instance lambdas into static ones changes their method descriptors,"
-			 + " which is a schema change this JVM cannot apply.";
-		}
-		return "not supported by this JVM.";
+		return EnvironmentProbe.degradationReason(switchName);
 	}
 
 	/**
@@ -4682,158 +3709,6 @@ public class RemoldAgent {
 			cache.put(name, out);
 			return out;
 		};
-	}
-	//endregion
-
-	//region File Watcher Implementation
-	private static void restartWatchers() {
-		activeWatchers.forEach(Thread::interrupt);
-		activeWatchers.clear();
-
-		for (Path dir : activeWatchDirs) {
-			try {
-				WatcherThread watcher = new WatcherThread(dir, null);
-				watcher.setDaemon(true);
-				watcher.start();
-				activeWatchers.add(watcher);
-			} catch (IOException e) {
-				error("Failed to start watcher for: " + dir, e);
-			}
-		}
-
-		// 直接传入的 jar/zip：监控其父目录，但只响应该文件本身的事件
-		for (Path jar : activeWatchJars) {
-			Path parentDir = jar.getParent();
-			if (parentDir == null) {
-				error("Cannot determine parent directory for jar: " + jar);
-				continue;
-			}
-			try {
-				WatcherThread watcher = new WatcherThread(parentDir, jar);
-				watcher.setDaemon(true);
-				watcher.start();
-				activeWatchers.add(watcher);
-				info("[Watch] Watching jar: " + jar);
-			} catch (IOException e) {
-				error("Failed to start watcher for jar: " + jar, e);
-			}
-		}
-	}
-	/** 文件监控线程，这个类的设计本身就是可复用的 */
-	private static class WatcherThread extends Thread {
-		private final Path         root;
-		private final Path         specificJar; // 非 null 时只响应该文件的事件（直接传入的 jar 模式）
-		private final WatchService watchService;
-
-		WatcherThread(Path root, Path specificJar) throws IOException {
-			super("HotSwap-FileWatcher-" + root.getFileName()
-			      + (specificJar != null ? "[" + specificJar.getFileName() + "]" : ""));
-			this.root = root;
-			this.specificJar = specificJar != null ? specificJar.toAbsolutePath() : null;
-			this.watchService = FileSystems.getDefault().newWatchService();
-		}
-
-		@Override
-		public void run() {
-			if (DEBUG) log("[Watch] File watcher started for: " + root);
-			try {
-				registerAll(root);
-				while (!Thread.currentThread().isInterrupted()) {
-					WatchKey key          = watchService.take();
-					Path     triggeredDir = (Path) key.watchable();
-
-					for (WatchEvent<?> event : key.pollEvents()) {
-						if (event.kind() == StandardWatchEventKinds.OVERFLOW) continue;
-
-						Path context  = (Path) event.context();
-						Path fullPath = triggeredDir.resolve(context);
-
-						String norm = fullPath.toString().replace('\\', '/');
-						if (norm.contains("/mods/") || norm.contains("/run/mods/")) {
-							continue;
-						}
-
-						// specificJar 模式：只响应目标 jar 文件本身，忽略其他一切
-						if (specificJar != null) {
-							if (fullPath.toAbsolutePath().equals(specificJar)) {
-								handleJarChange(fullPath);
-							}
-							continue;
-						}
-
-						// 处理普通类与资源文件变化
-						String name = fullPath.toString();
-						if (name.endsWith(".class")) {
-							handleFileChange(fullPath);
-						} else if (isAssetFile(fullPath)) {
-							handleAssetChange(fullPath);
-						}
-
-						// 处理 jar / zip 包变化（仅监控 root 一级，子目录不处理）
-						if ((name.endsWith(".jar") || name.endsWith(".zip")) && triggeredDir.equals(root)) {
-							handleJarChange(fullPath);
-						}
-
-						// 处理新目录创建
-						if (event.kind() == StandardWatchEventKinds.ENTRY_CREATE && Files.isDirectory(fullPath)) {
-							if (DEBUG) log("[WATCH] New directory detected: " + fullPath);
-
-							registerAll(fullPath);
-
-							// 立即扫描该目录下现有的 .class 与资源文件（jar/zip 仅在 root 一级处理，新子目录不扫）
-							try (Stream<Path> subFiles = Files.walk(fullPath)) {
-								subFiles.filter(Files::isRegularFile).forEach(p -> {
-									String pName = p.toString();
-									if (pName.endsWith(".class")) {
-										if (DEBUG) log("[WATCH] Found existing file in new dir: " + p);
-										handleFileChange(p);
-									} else if (isAssetFile(p)) {
-										if (DEBUG) log("[WATCH] Found existing asset in new dir: " + p);
-										handleAssetChange(p);
-									}
-								});
-							} catch (IOException e) {
-								error("Failed to scan new directory: " + fullPath, e);
-							}
-						}
-					}
-					if (!key.reset()) {
-						if (DEBUG) log("WatchKey no longer valid: " + triggeredDir);
-					}
-				}
-			} catch (IOException e) {
-				error("File watcher encountered an error in " + getName(), e);
-			} catch (InterruptedException e) {
-				Thread.currentThread().interrupt();
-			} catch (UncheckedIOException e) {
-				error("File watcher encountered an unchecked IO error", e);
-			} finally {
-				if (DEBUG) log("[Watch] File watcher stopped for: " + root);
-				try {
-					watchService.close();
-				} catch (IOException e) {
-					error("Error closing watch service for " + root, e);
-				}
-			}
-		}
-
-		private void registerAll(Path startDir) throws IOException {
-			if (!Files.exists(startDir)) {
-				if (DEBUG) log("Skipping registration for non-existent directory: " + startDir);
-				return;
-			}
-			try (Stream<Path> stream = Files.walk(startDir)) {
-				stream.filter(Files::isDirectory).forEach(dir -> {
-					try {
-						dir.register(watchService,
-						 StandardWatchEventKinds.ENTRY_CREATE,
-						 StandardWatchEventKinds.ENTRY_MODIFY);
-					} catch (IOException e) {
-						if (DEBUG) log("Failed to register directory: " + dir);
-					}
-				});
-			}
-		}
 	}
 	//endregion
 

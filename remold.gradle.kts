@@ -320,6 +320,34 @@ project.plugins.withId("java") {
     }
 
     /**
+     * 是否属于 Minecraft Fabric / Quilt 生态：声明了 Loom 系插件、loom 扩展或 net.fabricmc / org.quiltmc 依赖。
+     * 命中即默认挂载 plugin-fabric（可用 -Premold.autoFabric=false 关闭）：class path group 注入、
+     * mods 目录排除与残留制品巡检都在该插件里，缺失的表现是"热更静默不生效"。
+     */
+    fun usesFabricEcosystem(): Boolean {
+        if (project.plugins.hasPlugin("fabric-loom")
+            || project.plugins.hasPlugin("dev.architectury.loom")
+            || project.plugins.hasPlugin("org.quiltmc.loom")
+            || project.extensions.findByName("loom") != null
+        ) {
+            return true
+        }
+        return try {
+            project.configurations.any { cfg ->
+                try {
+                    cfg.dependencies.any { dep ->
+                        dep.group == "net.fabricmc" || dep.group == "org.quiltmc"
+                    }
+                } catch (_: Throwable) {
+                    false
+                }
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
      * 是否属于 Minecraft Forge / NeoForge 生态：声明了对应 Gradle 插件或依赖。
      * 命中即默认挂载 plugin-forge（可用 -Premold.autoForge=false 关闭）。
      */
@@ -532,6 +560,10 @@ project.plugins.withId("java") {
         val autoForge = (project.findProperty("remold.autoForge") as? String)?.toBoolean() ?: true
         if (autoForge && requestedPlugins.none { it.equals("forge", ignoreCase = true) || it.equals("neoforge", ignoreCase = true) } && usesForgeEcosystem()) {
             requestedPlugins.add("forge")
+        }
+        val autoFabric = (project.findProperty("remold.autoFabric") as? String)?.toBoolean() ?: true
+        if (autoFabric && requestedPlugins.none { it.equals("fabric", ignoreCase = true) } && usesFabricEcosystem()) {
+            requestedPlugins.add("fabric")
         }
         val distinctPlugins = requestedPlugins.distinct()
 

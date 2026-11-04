@@ -289,6 +289,33 @@ project.plugins.withId('java') {
     }
 
     /**
+     * 是否属于 Minecraft Fabric / Quilt 生态：声明了 Loom 系插件、loom 扩展或 net.fabricmc 依赖。
+     * 命中即默认挂载 plugin-fabric（可用 -Premold.autoFabric=false 关闭）。
+     */
+    def usesFabricEcosystem = {
+        if (project.plugins.hasPlugin('fabric-loom')
+            || project.plugins.hasPlugin('dev.architectury.loom')
+            || project.plugins.hasPlugin('org.quiltmc.loom')
+            || project.extensions.findByName('loom') != null
+        ) {
+            return true
+        }
+        try {
+            return project.configurations.any { cfg ->
+                try {
+                    return cfg.dependencies.any { dep ->
+                        dep.group == 'net.fabricmc' || dep.group == 'org.quiltmc'
+                    }
+                } catch (Throwable ignored) {
+                    return false
+                }
+            }
+        } catch (Throwable ignored) {
+            return false
+        }
+    }
+
+    /**
      * 是否属于 Minecraft Forge / NeoForge 生态：声明了对应 Gradle 插件或依赖。
      * 命中即默认挂载 plugin-forge（可用 -Premold.autoForge=false 关闭）。
      */
@@ -484,6 +511,12 @@ project.plugins.withId('java') {
         def autoForge = project.findProperty('remold.autoForge') == null ? true : project.findProperty('remold.autoForge').toString().toBoolean()
         if (autoForge && !requestedPlugins.any { it.toString().equalsIgnoreCase('forge') || it.toString().equalsIgnoreCase('neoforge') } && usesForgeEcosystem()) {
             requestedPlugins.add('forge')
+        }
+        // Fabric / Quilt：class path group 注入、mods 目录排除与残留制品巡检都在该插件里。
+        // 必须自动挂载：这些护栏一旦缺失，表现是"热更静默不生效"，不会被察觉。
+        def autoFabric = project.findProperty('remold.autoFabric') == null ? true : project.findProperty('remold.autoFabric').toString().toBoolean()
+        if (autoFabric && !requestedPlugins.any { it.toString().equalsIgnoreCase('fabric') } && usesFabricEcosystem()) {
+            requestedPlugins.add('fabric')
         }
         requestedPlugins = requestedPlugins.unique()
 

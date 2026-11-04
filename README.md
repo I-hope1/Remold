@@ -468,6 +468,7 @@ Remold Agent 支持通过系统属性或 Gradle 配置声明式加载扩展插�
 
 - **Mixin 生态（Fabric / Quilt 等）无需声明**：`remold.gradle(.kts)` 检测到 `fabric-loom` 插件或 `net.fabricmc` / `org.spongepowered` 依赖时会自动挂载 `mixin` 插件；要关掉用 `-Premold.autoMixin=false`。本地开发插件本体时可用 `remold { pluginJar("../<remold 仓库>/plugin-mixin/build/libs/remold-plugin-mixin-<ver>.jar") }` 指定。
 - **Forge / NeoForge 生态无需声明**：`remold.gradle(.kts)` 检测到 ForgeGradle 或 ModDevGradle 时会自动挂载 `forge` 插件；要关掉用 `-Premold.autoForge=false`。
+- **Fabric / Quilt 开发运行期集成无需声明**：`remold.gradle(.kts)` 检测到 `fabric-loom` / `dev.architectury.loom` / `org.quiltmc.loom` / `loom` 扩展或 `net.fabricmc` / `org.quiltmc` 依赖时自动挂载 `fabric` 插件——它负责 `fabric.classPathGroups` 注入（缺失会导致热更静默不生效）、`mods` 目录监听排除与残留构建 JAR 巡检；要关掉用 `-Premold.autoFabric=false`。
 
 #### 方式二：代码显式注册
 若需在应用层代码中编写并注册自定义扩展插件：

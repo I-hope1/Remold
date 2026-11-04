@@ -3037,7 +3037,7 @@ public class InitFix {
 		if (plan.hasInstance()) {
 			alive = collectInstancesForPatch(host);
 			if (alive.isEmpty() && !plan.hasStatic()) {
-				log("No live instances and no static patch needed for " + host.getName()
+				RemoldAgent.info("[InitFix] No live instances and no static patch needed for " + host.getName()
 				    + ", skip");
 				return;
 			}

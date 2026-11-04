@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **加载器集成从 core 迁出（`plugin-fabric`）**：`fabric.classPathGroups` 注入、`run/mods` 残留制品巡检与 `mods` 目录监听排除不再由引擎核心承担，改由 `remold-plugin-fabric` 通过 `HotswapPlugin` 的通用窗口实现；`core` 不再出现任何加载器专属的目录或属性约定。
+- **`RemoldAgent` 拆分**：布局门判决、被删成员读者扫描、监控路径记账、监听线程、jar 解压、环境能力探测分别搬到 `LayoutDecisionEngine` / `RemovedMemberScanner` / `WatchPathRegistry` / `FileWatcherService` / `JarExtractor` / `EnvironmentProbe`；公共 API 与全部调用方保持不变。
+
+### Added
+- `HotswapPlugin` 新增三个默认方法：`onPremain(String agentArgs)`（插件发现后、`init` 前）、`onWatchPathsChanged(Set<Path>, Set<Path>)`、`isWatchPathIgnored(Path)`（监听排除投票）。
+- 新增模块 `:plugin-fabric`（`remold-plugin-fabric.jar`），Gradle 侧检测到 Loom 系生态时自动挂载（`-Premold.autoFabric=false` 可关闭）。
+- 新增 `tests/src/remold/PluginWatchPathTest`：锁住"core 无加载器专属排除规则 / 插件投票被采纳 / 插件抛异常不中断路径判定"。
+
 ## [0.2.1] - 2026-11-03
 
 ### Added

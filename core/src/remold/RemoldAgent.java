@@ -1882,6 +1882,10 @@ public class RemoldAgent {
 			     + "RESTART is required for those.");
 		}
 
+		// 后处理是否真的跑起来了，必须能从日志里看出来：这一阶段的缺失（InitFix 补丁、@OnReload 回调）
+		// 与"重定义成功"长得一模一样，真机排查时无法区分。DEBUG 下打首尾两行即可定性。
+		if (DEBUG) log("[POST] post-processing " + redefinedOk.size() + " class(es): " + redefinedOk);
+
 		List<ClassDefinition> successfulDefinitions = new ArrayList<>(definitions.size());
 		for (ClassDefinition def : definitions) {
 			if (!redefinedOk.contains(def.getDefinitionClass().getName())) continue;
@@ -1897,6 +1901,7 @@ public class RemoldAgent {
 		// 必须在 InitFix 补丁（静态字段与存量实例字段）全部就位后，再对成功重定义的类触发 @OnReload 回调；
 		// 严禁在补丁就绪前触发，否则回调读到未初始化的零值（时序反转）。
 		processAnnotations(successfulDefinitions);
+		if (DEBUG) log("[POST] post-processing done for " + successfulDefinitions.size() + " class(es)");
 		notifyBatchListeners(successfulDefinitions);
 
 		Set<Class<?>> successfulClasses = new HashSet<>();
@@ -3452,7 +3457,29 @@ public class RemoldAgent {
 		}
 	}
 
+	/**
+	 * 一轮热更的统一错误边界。
+	 *
+	 * <p><b>为什么必须有</b>：本方法由防抖调度器以 {@code scheduler.schedule(RemoldAgent::triggerHotswap, ...)}
+	 * 调用，抛出的一切都会被 {@link java.util.concurrent.Future} 静默吞掉——没有任何线程的
+	 * uncaught handler 会看到它。而 {@code processChanges} 的后处理（InitFix 补丁、{@code @OnReload}
+	 * 回调、缓存驱逐）排在 {@code redefineClasses} 成功之后：那里一旦抛异常，用户看到的就是
+	 * 日志里"HotSwap successful"之后<b>再无下文</b>——新增字段停在 0、回调不触发，且毫无线索。</p>
+	 *
+	 * <p>所以这里兜住 {@link Throwable} 并显式 {@code error(...)}：宁可让这一轮失败得大声，
+	 * 也不要让它失败得像成功。</p>
+	 */
 	private static void triggerHotswapWith0(Class<?>[] classes) {
+		try {
+			triggerHotswapWith0Unchecked(classes);
+		} catch (Throwable t) {
+			error("[HOTSWAP] Hot-swap pipeline aborted: redefine and post-processing are not atomic,"
+			      + " so classes may have been redefined WITHOUT InitFix patches or @OnReload callbacks."
+			      + " The next save re-runs from the current baseline; if it keeps failing, restart.", t);
+		}
+	}
+
+	private static void triggerHotswapWith0Unchecked(Class<?>[] classes) {
 		// 实例存活状况每轮都可能变（对象被创建/回收），缓存必须按轮清空
 		resetLiveInstanceCache();
 		// 先把所有待处理的 jar 解压（防抖已结束，文件写入完毕）

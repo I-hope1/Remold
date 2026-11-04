@@ -420,6 +420,39 @@ tasks.register("liveDcevmTest", JavaExec) {
 	}
 }
 
+// 9.4 AddFieldReloadProbe（复现：一轮里"新增字段 + 改方法体"是否都落地；需要 DCEVM）
+tasks.register("addFieldProbe", JavaExec) {
+	group = "verification"
+	description = "Repro: add a field and change a method body in one hot swap (needs DCEVM)"
+	dependsOn classes
+	dependsOn project(":core").tasks.named("shadowJar")
+	classpath = sourceSets.main.runtimeClasspath + files(layout.buildDirectory.dir("addfield/classes"))
+	mainClass = "AddFieldReloadProbe"
+	def jbrHome = project.findProperty("p05.jbr") ?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+	if (jbrHome != null) {
+		def javaBin = new File(jbrHome.toString(), System.getProperty("os.name").toLowerCase().contains("win") ? "bin/java.exe" : "bin/java")
+		if (javaBin.exists()) {
+			executable = javaBin.absolutePath
+			javaLauncher.set((JavaLauncher) null)
+		}
+	}
+	doFirst {
+		def watchDir = file("$buildDir/addfield/classes")
+		watchDir.mkdirs()
+		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}=${watchDir.absolutePath}",
+		        "-XX:+AllowEnhancedClassRedefinition",
+		        "-Dremold.agent.file_shake_ms=200",
+		        "-Dremold.plugins=__probe_none__",
+		        "--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
+		        "-Dremold.addfield.dir=${watchDir.absolutePath}",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+		// DEBUG 读的是环境变量而不是系统属性
+		environment "remold.agent.debug", "true"
+	}
+}
+
 // 9.5 P05Probe (P0.5 前置微验证：两阶段重定义 / 阶段 A 链接 / 堆遍历规模)
 // 需要 DCEVM 能力，不挂 check；用 -Pp05.jbr=<jdk-home> 或 JBR_HOME/JAVA_HOME_DCEVM/JAVA_HOME_21_X64 指定运行时。
 // 刻意使用最小 agent（P05Agent）而非 remold-agent：测量目标是 JVM/DCEVM 原生能力，

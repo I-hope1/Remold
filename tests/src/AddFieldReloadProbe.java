@@ -15,11 +15,38 @@ import java.nio.file.Paths;
  * {@code style -> ...}，而 lambda 对齐（{@code Lambda Align}）默认开启——前三轮若不动它，
  * 就不会走到对齐路径，也就复现不到问题。</p>
  *
+ * <p><b>回归的是"预测副本顶掉活类"那个缺陷</b>：{@code LayoutPredictor} 只在
+ * {@code offsetIndex} 非空时才工作，而 {@code OffsetScanner} 只登记真实存在的绑定。
+ * 因此本类静态初始化里真的调一次 {@code objectFieldOffset}（见 {@link #probeAnchorOffset()}）——
+ * 少了这一条，探针在缺陷版本上也会全绿（第一版探针就是这样漏掉该 bug 的）。</p>
+ *
  * <p>跑法：{@code ./gradlew :tests:addFieldProbe -Pp05.jbr=<DCEVM JDK>}。</p>
  */
 public class AddFieldReloadProbe {
 
 	private static final String CLASS_NAME = "probe.probe_Case";
+
+	/** 供 {@code OffsetScanner} 登记绑定用的锚点字段（类型在两版之间保持不变）。 */
+	private int probeAnchor;
+
+	/**
+	 * 在索引里造一条真实的 offset 绑定。
+	 *
+	 * <p>{@code RemoldAgent.checkSuperclassDriftIfApplicable} 在 {@code offsetIndex} 为空时直接返回，
+	 * 于是 {@code LayoutPredictor} 不会预测布局、也不会创建抛弃式加载器副本——那条缺陷路径就
+	 * 根本不会被执行。探针必须先把这条前置条件造出来，否则是假绿。</p>
+	 */
+	private static final long PROBE_ANCHOR_OFFSET = probeAnchorOffset();
+
+	private static long probeAnchorOffset() {
+		try {
+			return remold.Reflect.UNSAFE.objectFieldOffset(
+				AddFieldReloadProbe.class.getDeclaredField("probeAnchor"));
+		} catch (Throwable t) {
+			System.out.println("PROBE-WARN: cannot create an offset binding (case may not reproduce): " + t);
+			return -1L;
+		}
+	}
 
 	private static Path classesDir;
 	private static Path srcDir;
@@ -82,7 +109,7 @@ public class AddFieldReloadProbe {
 			String d = describe();
 			if (roundNo == 1) return d.startsWith("v2:");
 			if (roundNo == 2) return d.startsWith("v3:L1:MAX");
-			return d.startsWith("v4:L4:") && d.endsWith(":10");
+			return d.startsWith("v4:L4:") && d.endsWith(":10") && onReloadFired();
 		} catch (Throwable t) {
 			return false;
 		}

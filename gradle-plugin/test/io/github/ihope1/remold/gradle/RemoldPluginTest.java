@@ -181,6 +181,26 @@ class RemoldPluginTest {
     }
 
     @Test
+    void classBasedEnvironmentDetectionAndAutoDeployBlocking() {
+        Project project = ProjectBuilder.builder().build();
+        project.getPlugins().apply("java");
+
+        RemoldExtension ext = new RemoldExtension();
+        ext.setAutoDeploy(true);
+        ext.setDeployDir("run/mods");
+
+        // Normal java project: shouldAutoDeploy is true
+        Assertions.assertFalse(RemoldConfigResolver.isClassBasedEnvironment(project));
+        Assertions.assertTrue(RemoldConfigResolver.shouldAutoDeploy(project, ext));
+
+        // When loom extension is present (Minecraft / Loom environment)
+        project.getExtensions().add("loom", new Object());
+        Assertions.assertTrue(RemoldConfigResolver.isClassBasedEnvironment(project));
+        // In class-based environment, shouldAutoDeploy must be blocked (return false)
+        Assertions.assertFalse(RemoldConfigResolver.shouldAutoDeploy(project, ext));
+    }
+
+    @Test
     void embeddedScriptResourcesArePresentAndValid() throws Exception {
         try (InputStream groovy = RemoldPlugin.class.getResourceAsStream("/remold/remold.gradle");
              InputStream kotlin = RemoldPlugin.class.getResourceAsStream("/remold/remold.gradle.kts")) {

@@ -31,6 +31,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Stream;
 import java.util.zip.*;
+import java.util.regex.*;
 
 import static remold.MountManager.*;
 
@@ -3842,7 +3843,168 @@ public class RemoldAgent {
 
 	//region File Processing Utilities
 
+	/**
+	 * 巡检运行目录下（如 run/mods/ 或 mods/）是否存在与当前工程 modId 冲突的残留旧构建 JAR。
+	 * 在 Minecraft (Fabric / NeoForge / Forge) 等散装类开发环境中，若存在同名 modId 的已打包 JAR，
+	 * 会引发双源加载、命名空间断裂（Intermediary vs Named）、资源覆写或 ClassNotFoundException。
+	 */
+	private static void checkStaleModJarsInRunMods() {
+		try {
+			String currentModId = detectCurrentProjectModId();
+			if (currentModId == null || currentModId.isEmpty()) {
+				return;
+			}
+			List<Path> candidateModsDirs = List.of(
+				Paths.get("run", "mods"),
+				Paths.get("mods"),
+				Paths.get("run"),
+				Paths.get(".")
+			);
+			for (Path modsDir : candidateModsDirs) {
+				if (!Files.isDirectory(modsDir)) continue;
+				Path targetDir = modsDir;
+				if (modsDir.getFileName() != null && !modsDir.getFileName().toString().equals("mods")) {
+					Path subMods = modsDir.resolve("mods");
+					if (Files.isDirectory(subMods)) {
+						targetDir = subMods;
+					} else {
+						continue;
+					}
+				}
+				try (Stream<Path> stream = Files.list(targetDir)) {
+					stream.filter(p -> {
+						String s = p.getFileName().toString().toLowerCase(Locale.ROOT);
+						return s.endsWith(".jar") || s.endsWith(".zip");
+					}).forEach(jarPath -> {
+						String staleModId = readModIdFromJar(jarPath);
+						if (currentModId.equals(staleModId)) {
+							String yellow = "\u001B[33m";
+							String reset = "\u001B[0m";
+							warn(yellow + "Found stale build artifact in " + jarPath + " with identical modId '" + currentModId + "'.");
+							warn("In-development runs directly use loose classes. A packaged JAR in run/mods causes duplicate mod conflicts, namespace crashes, or ClassNotFoundException! Please delete this JAR." + reset);
+						}
+					});
+				}
+			}
+		} catch (Throwable t) {
+			if (DEBUG) log("[CHECK-STALE] Stale JAR check encountered: " + t);
+		}
+	}
+
+	private static String detectCurrentProjectModId() {
+		for (Path dir : activeWatchDirs) {
+			if (!Files.isDirectory(dir)) continue;
+			Path fabricJson = dir.resolve("fabric.mod.json");
+			if (Files.isRegularFile(fabricJson)) {
+				String id = extractJsonModId(fabricJson);
+				if (id != null) return id;
+			}
+			Path quiltJson = dir.resolve("quilt.mod.json");
+			if (Files.isRegularFile(quiltJson)) {
+				String id = extractJsonModId(quiltJson);
+				if (id != null) return id;
+			}
+			Path neoForgeToml = dir.resolve("META-INF").resolve("neoforge.mods.toml");
+			if (Files.isRegularFile(neoForgeToml)) {
+				String id = extractTomlModId(neoForgeToml);
+				if (id != null) return id;
+			}
+			Path forgeToml = dir.resolve("META-INF").resolve("mods.toml");
+			if (Files.isRegularFile(forgeToml)) {
+				String id = extractTomlModId(forgeToml);
+				if (id != null) return id;
+			}
+		}
+		try {
+			ClassLoader cl = RemoldAgent.class.getClassLoader();
+			if (cl == null) cl = ClassLoader.getSystemClassLoader();
+			if (cl != null) {
+				try (InputStream in = cl.getResourceAsStream("fabric.mod.json")) {
+					if (in != null) {
+						String content = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+						String id = extractModIdFromJsonString(content);
+						if (id != null) return id;
+					}
+				}
+				try (InputStream in = cl.getResourceAsStream("META-INF/neoforge.mods.toml")) {
+					if (in != null) {
+						String content = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+						String id = extractModIdFromTomlString(content);
+						if (id != null) return id;
+					}
+				}
+				try (InputStream in = cl.getResourceAsStream("META-INF/mods.toml")) {
+					if (in != null) {
+						String content = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+						String id = extractModIdFromTomlString(content);
+						if (id != null) return id;
+					}
+				}
+			}
+		} catch (Throwable ignored) { }
+		return null;
+	}
+
+	private static String extractJsonModId(Path path) {
+		try {
+			String content = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
+			return extractModIdFromJsonString(content);
+		} catch (Throwable ignored) {
+			return null;
+		}
+	}
+
+	private static String extractModIdFromJsonString(String json) {
+		Pattern p = Pattern.compile("\"id\"\\s*:\\s*\"([^\"]+)\"");
+		Matcher m = p.matcher(json);
+		if (m.find()) {
+			return m.group(1).trim();
+		}
+		return null;
+	}
+
+	private static String extractTomlModId(Path path) {
+		try {
+			String content = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
+			return extractModIdFromTomlString(content);
+		} catch (Throwable ignored) {
+			return null;
+		}
+	}
+
+	private static String extractModIdFromTomlString(String toml) {
+		Pattern p = Pattern.compile("modId\\s*=\\s*[\"']([^\"']+)[\"']");
+		Matcher m = p.matcher(toml);
+		if (m.find()) {
+			return m.group(1).trim();
+		}
+		return null;
+	}
+
+	private static String readModIdFromJar(Path jarPath) {
+		try (ZipFile zf = new ZipFile(jarPath.toFile())) {
+			ZipEntry entry = zf.getEntry("fabric.mod.json");
+			if (entry == null) entry = zf.getEntry("quilt.mod.json");
+			if (entry != null) {
+				try (InputStream in = zf.getInputStream(entry)) {
+					String json = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+					return extractModIdFromJsonString(json);
+				}
+			}
+			ZipEntry tomlEntry = zf.getEntry("META-INF/neoforge.mods.toml");
+			if (tomlEntry == null) tomlEntry = zf.getEntry("META-INF/mods.toml");
+			if (tomlEntry != null) {
+				try (InputStream in = zf.getInputStream(tomlEntry)) {
+					String toml = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+					return extractModIdFromTomlString(toml);
+				}
+			}
+		} catch (Throwable ignored) { }
+		return null;
+	}
+
 	private static void initializeAgentState(Class<?>[] classes) {
+		checkStaleModJarsInRunMods();
 		info("Scanning files...");
 		// 直接传入的 jar/zip 文件：立即解压扫描
 		for (Path jar : activeWatchJars) {
@@ -3891,7 +4053,8 @@ public class RemoldAgent {
 		for (Path root : activeWatchDirs) {
 			try (Stream<Path> walk = Files.walk(root)) {
 				walk.filter(p -> {
-					String s = p.toString();
+					String s = p.toString().replace('\\', '/');
+					if (s.contains("/mods/") || s.contains("/run/mods/")) return false;
 					// jar/zip 只取 root 直属子文件（depth == 1），.class 全量递归
 					if (s.endsWith(".jar") || s.endsWith(".zip")) return p.getParent().equals(root);
 					return s.endsWith(".class");
@@ -4584,6 +4747,11 @@ public class RemoldAgent {
 
 						Path context  = (Path) event.context();
 						Path fullPath = triggeredDir.resolve(context);
+
+						String norm = fullPath.toString().replace('\\', '/');
+						if (norm.contains("/mods/") || norm.contains("/run/mods/")) {
+							continue;
+						}
 
 						// specificJar 模式：只响应目标 jar 文件本身，忽略其他一切
 						if (specificJar != null) {

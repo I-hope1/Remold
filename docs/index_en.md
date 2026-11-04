@@ -72,6 +72,20 @@ Resolves the issue where newly added fields in existing live heap objects defaul
 | [`06-decisions.md`](initfix/06-decisions.md) | InitFix ADRs, historical defect post-mortems, and mutation testing requirements for gate exemptions |
 | [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) | P0.5 pre-flight measurements: back-to-back schema redefinitions, stage-A companion linkage, million-instance heap scan |
 
+### 2.3 Physical Offset Stability & Reflection Cache Eviction (Offset & Reflection Cache)
+Resolves physical offset drift on subclass fields when inserting fields into superclasses, unsafe memory corruptions, and reflection metadata cache staleness:
+
+| Document | Subject & Core Contents |
+| :--- | :--- |
+| [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) | Layout predictor (`LayoutPredictor`), drift safety gate (`SuperclassDriftGate`), and reflection cache eviction SPI |
+
+### 2.4 Ecosystem & Build Integration Specification (Ecosystem)
+Governs paradigms across mod environments (Minecraft Fabric/NeoForge/Forge vs. Mindustry/Arc) regarding loose classes vs. JAR packaging, BeforeRunTask orchestration, and stale artifact defense:
+
+| Document | Subject & Core Contents |
+| :--- | :--- |
+| [`01-mod-artifact-and-class-isolation.md`](ecosystem/01-mod-artifact-and-class-isolation.md) | Mod ecosystem duality, 5 build artifact hazards, 3D environment detection matrix, and runtime stale JAR guard |
+
 ---
 
 ## 3. Build & Infrastructure

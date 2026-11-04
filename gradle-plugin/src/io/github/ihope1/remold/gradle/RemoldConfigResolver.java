@@ -456,7 +456,61 @@ public final class RemoldConfigResolver {
         return custom != null ? project.file(custom) : null;
     }
 
+    /**
+     * 判断当前工程是否属于基于散装类路径（Classpath-based）驱动的模组开发生态（如 Minecraft Fabric / Quilt / NeoForge / Forge）。
+     * 在该生态中，运行期直接消费散装 .class，严禁在运行前执行 jar / remapJar 打包部署到 run/mods/。
+     */
+    public static boolean isClassBasedEnvironment(Project project) {
+        if (project == null) return false;
+
+        // 1. 插件 ID 判定
+        String[] pluginIds = {
+            "fabric-loom",
+            "dev.architectury.loom",
+            "org.quiltmc.loom",
+            "net.neoforged.moddev",
+            "net.neoforged.gradle.userdev",
+            "net.minecraftforge.gradle",
+            "gg.essential.multi-version"
+        };
+        for (String id : pluginIds) {
+            if (project.getPlugins().hasPlugin(id)) {
+                return true;
+            }
+        }
+
+        // 2. 扩展对象（Extension）判定
+        String[] extensionNames = {"loom", "minecraft", "neoForge"};
+        for (String extName : extensionNames) {
+            if (project.getExtensions().findByName(extName) != null) {
+                return true;
+            }
+        }
+
+        // 3. 核心任务特征判定（存在 runClient 且伴随 remapJar 或 jar）
+        if (project.getTasks().findByName("runClient") != null) {
+            if (project.getTasks().findByName("remapJar") != null || project.getTasks().findByName("jar") != null) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public static boolean shouldAutoDeploy(Project project, RemoldExtension ext) {
+        if (isClassBasedEnvironment(project)) {
+            // 散装类生态下强制禁用 autoDeploy，防止向 run/mods 输出未混淆或已混淆 JAR 引发双源加载冲突与 Mixin 崩溃
+            boolean explicitAutoDeploy = ext.getAutoDeploy() != null && ext.getAutoDeploy();
+            Object prop = project.findProperty("remold.autoDeploy");
+            if (prop != null && Boolean.parseBoolean(String.valueOf(prop))) {
+                explicitAutoDeploy = true;
+            }
+            if (explicitAutoDeploy) {
+                project.getLogger().warn("[Remold] [WARN] 'autoDeploy = true' is ignored in Minecraft/Loom environment. In-dev runs use loose classes; outputting JARs to run/mods causes namespace crashes and bytecode rollbacks.");
+            }
+            return false;
+        }
+
         if (ext.getAutoDeploy() != null) {
             return ext.getAutoDeploy();
         }

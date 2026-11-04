@@ -72,6 +72,20 @@ flowchart TD
 | [`06-decisions.md`](initfix/06-decisions.md) | InitFix 架构决策记录（ADR）、历史缺陷复盘与例外放宽变异检查要求 |
 | [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) | P0.5 前置验证的实测方法与原始数据（连续 Schema Redefine、阶段 A 伴生类链接、百万级堆遍历） |
 
+### 2.3 物理偏移稳定性与反射缓存驱逐 (Offset & Reflection Cache)
+解决父类插入新字段导致子孙类字段物理偏移漂移、`Unsafe` 错位踩踏破坏内存，以及 Jackson/Gson/Arc 反射元数据缓存滞后问题：
+
+| 文档 | 主题与核心内容 |
+| :--- | :--- |
+| [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) | 物理偏移量预测器（`LayoutPredictor`）、漂移安全门（`SuperclassDriftGate`）与反射/序列化缓存驱逐 SPI |
+
+### 2.4 模组生态与构建集成规范 (Ecosystem & Build Integration)
+解决不同模组开发框架（Minecraft Fabric/NeoForge/Forge 与 Mindustry/Arc）在散装类与制品打包、启动前任务调度及残留制品防御上的范式差异：
+
+| 文档 | 主题与核心内容 |
+| :--- | :--- |
+| [`01-mod-artifact-and-class-isolation.md`](ecosystem/01-mod-artifact-and-class-isolation.md) | 模组生态二元分类、五大构建制品冲突危害、3D 环境探测矩阵与运行时残留 JAR 巡检契约 |
+
 ---
 
 ## 3. 构建机制与基础设施 (Build & Infrastructure)

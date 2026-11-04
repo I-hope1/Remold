@@ -148,8 +148,43 @@ project.plugins.withId("java") {
         return if (custom != null) project.file(custom) else null
     }
 
+    /** 是否属于基于散装类路径（Classpath-based）驱动的模组开发生态（如 Minecraft Fabric / Quilt / NeoForge / Forge）。 */
+    fun isClassBasedEnvironment(): Boolean {
+        val pluginIds = listOf(
+            "fabric-loom",
+            "dev.architectury.loom",
+            "org.quiltmc.loom",
+            "net.neoforged.moddev",
+            "net.neoforged.gradle.userdev",
+            "net.minecraftforge.gradle",
+            "gg.essential.multi-version"
+        )
+        for (id in pluginIds) {
+            if (project.plugins.hasPlugin(id)) return true
+        }
+        val extNames = listOf("loom", "minecraft", "neoForge")
+        for (ext in extNames) {
+            if (project.extensions.findByName(ext) != null) return true
+        }
+        if (project.tasks.findByName("runClient") != null) {
+            if (project.tasks.findByName("remapJar") != null || project.tasks.findByName("jar") != null) {
+                return true
+            }
+        }
+        return false
+    }
+
     /** 是否自动执行 deployArtifact。 */
     fun shouldAutoDeploy(): Boolean {
+        if (isClassBasedEnvironment()) {
+            val explicitAutoDeploy = remoldExt.autoDeploy
+                ?: project.findProperty("remold.autoDeploy")?.toString()?.toBoolean()
+                ?: false
+            if (explicitAutoDeploy) {
+                project.logger.warn("[Remold] [WARN] 'autoDeploy = true' is ignored in Minecraft/Loom environment. In-dev runs use loose classes; outputting JARs to run/mods causes namespace crashes and bytecode rollbacks.")
+            }
+            return false
+        }
         return remoldExt.autoDeploy
             ?: project.findProperty("remold.autoDeploy")?.toString()?.toBoolean()
             ?: (resolveDeployDir() != null)

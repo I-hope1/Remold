@@ -357,6 +357,7 @@ tasks.register("verifyDocStatusMarkers") {
 			file("${rootDir}/docs/initfix"),
 			file("${rootDir}/docs/topology"),
 			file("${rootDir}/docs/offset"),
+			file("${rootDir}/docs/ecosystem"),
 			file("${rootDir}/core/src"),
 			file("${rootDir}/api/src"),
 			file("${rootDir}/plugin-arc/src"),

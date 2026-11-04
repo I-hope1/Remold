@@ -1354,12 +1354,33 @@ public class RemoldAgent {
 	public static volatile ConcurrentHashMap<String, Class<?>> loadedClassesMap = new ConcurrentHashMap<>();
 
 
+	/**
+	 * 同名类存在多个副本时的取舍：优先"活"的那个。
+	 *
+	 * <p>{@link remold.offset.LayoutPredictor} 用抛弃式加载器独立加载新字节码预测物理布局，
+	 * 该加载器以真实加载器为 parent 且 child-first，因此它定义的副本在类层级上"更子"。
+	 * 但那份副本从不初始化、也没有任何实例：
+	 * 一旦它赢下同名仲裁，后续每轮热更都会 redefine 一个死副本——日志照样打
+	 * {@code HotSwap successful}，而 InitFix 因"类未初始化"跳过补丁、{@code @OnReload}
+	 * 也扫不到，用户看到的就是"字段加了却不生效"。</p>
+	 *
+	 * <p>所以预测副本永远不参与仲裁：它既不能取代活类，也不能顶掉已选中的活类。</p>
+	 */
+	public static boolean isBetterLoadedClassCandidate(Class<?> candidate, Class<?> existing) {
+		if (candidate == null) return false;
+		ClassLoader candidateLoader = candidate.getClassLoader();
+		if (LayoutPredictor.isEphemeralLoader(candidateLoader)) return false;
+		if (existing == null) return true;
+		if (LayoutPredictor.isEphemeralLoader(existing.getClassLoader())) return true;
+		return isChildClassLoader(candidateLoader, existing.getClassLoader());
+	}
+
 	private static void loadClassSnap(Class<?>[] classes) {
 		var newMap = new ConcurrentHashMap<String, Class<?>>((int) (classes.length / 0.75f) + 1);
 		for (Class<?> c : classes) {
 			String   name     = c.getName();
 			Class<?> existing = newMap.get(name);
-			if (existing == null || isChildClassLoader(c.getClassLoader(), existing.getClassLoader())) {
+			if (isBetterLoadedClassCandidate(c, existing)) {
 				newMap.put(name, c);
 			}
 		}

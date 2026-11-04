@@ -340,14 +340,32 @@ public final class LayoutPredictor {
 	}
 
 	/**
+	 * 存活中的抛弃式加载器。它们以真实加载器为 parent 且 child-first，因此定义出的同名类
+	 * 在类层级上"更子"，但从不初始化、也不承载任何实例——不是"活"的那个副本。
+	 */
+	private static final Set<ClassLoader> EPHEMERAL_LOADERS =
+		Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
+
+	/**
+	 * 该加载器是否为本类创建的抛弃式预测加载器。
+	 *
+	 * <p>调用方据此把预测副本从"同名类候选"里剔除：预测只关心物理布局，它定义的类
+	 * 一旦被当成目标，后续热更就会 redefine 一个死副本。</p>
+	 */
+	public static boolean isEphemeralLoader(ClassLoader loader) {
+		return loader != null && EPHEMERAL_LOADERS.contains(loader);
+	}
+
+	/**
 	 * 抛弃式 ClassLoader：用于独立干净加载新字节码，完全隔离主应用环境。
 	 */
-	static final class EphemeralClassLoader extends ClassLoader {
+	public static final class EphemeralClassLoader extends ClassLoader {
 		private final Map<String, byte[]> definedBytes;
 		private final BytecodeProvider fallback;
 
-		EphemeralClassLoader(Map<String, byte[]> definedBytes, BytecodeProvider fallback, ClassLoader parent) {
+		public EphemeralClassLoader(Map<String, byte[]> definedBytes, BytecodeProvider fallback, ClassLoader parent) {
 			super(parent);
+			EPHEMERAL_LOADERS.add(this);
 			this.definedBytes = definedBytes != null ? definedBytes : Collections.emptyMap();
 			this.fallback = fallback;
 		}

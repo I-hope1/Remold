@@ -334,7 +334,8 @@ public class MountManager {
 	static void refreshPackageLoaders(Class<?>[] classes) {
 		for (Class<?> clazz : classes) {
 			ClassLoader cl = clazz.getClassLoader();
-			if (cl != null && clazz.getPackage() != null) {
+			// 抛弃式预测加载器定义的副本不是"活"的那份，它的包映射会把后续类加载指到死加载器上
+			if (cl != null && !remold.offset.LayoutPredictor.isEphemeralLoader(cl) && clazz.getPackage() != null) {
 				// 简单策略：记录该包最后一次出现的 ClassLoader
 				packageLoaders.put(clazz.getPackage().getName(), new WeakReference<>(cl));
 			}

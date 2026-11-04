@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **热更目标被布局预测副本顶掉（"加了字段却不生效"的真因）**：`LayoutPredictor` 用抛弃式加载器
+  （以真实加载器为 parent、child-first）独立加载新字节码预测物理布局，而 `loadClassSnap` 按"最子层优先"
+  选同名类，于是预测副本会盖掉活类。此后每一轮热更都在 redefine 一个从不初始化、也没有任何实例的死副本：
+  日志照样打 `HotSwap successful`，但 InitFix 因"类未初始化"跳过补丁、`@OnReload` 也扫不到。
+  现在预测副本（`LayoutPredictor.isEphemeralLoader`）不参与同名类仲裁，也不进入 `MountManager` 的包→加载器映射。
+- **后处理阶段失败不再静默**：`triggerHotswapWith0` 由调度器以 `Future` 承载，其中抛出的异常会被完全吞掉，
+  而 InitFix 补丁 / `@OnReload` 回调 / 缓存驱逐都排在 `redefineClasses` 成功之后。现在该入口兜 `Throwable`
+  并显式报告；DEBUG 下另有 `[POST]` 首尾两行标示后处理是否进入与结束。
+
 ### Changed
 - **Gradle 脚本插件瘦身为薄壳**：`remold.gradle` / `remold.gradle.kts` 从 1,031 / 1,120 行的完整实现缩到 ~40 行，
   只负责把二进制插件 `io.github.i-hope1.remold` 挂到工程上；解析、任务注册与参数拼装全部收敛到 `:gradle-plugin`

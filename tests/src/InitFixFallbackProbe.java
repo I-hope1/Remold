@@ -178,7 +178,8 @@ public class InitFixFallbackProbe {
 		check(badLedger.stream().anyMatch(f -> f.reason().contains("redefine failed")),
 			"Bad's ledger records the redefine failure (actual=" + badLedger + ")");
 		check(!pendingContains(bad), "Bad's pending patch was popped");
-		checkEq("v2:1,42,7", call(good, goodInstance, "hi"), "Good still runs the redefined body");
+		check("v2:1,42,7".equals(call(good, goodInstance, "hi")),
+			"Good's body remains v2 after the failed Bad retry");
 
 		System.out.println("\n=== INITFIX FALLBACK PROBE SUMMARY: passed=" + passed + ", failed=" + failed + " ===");
 		if (failed > 0) System.exit(1);

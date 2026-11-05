@@ -7,8 +7,8 @@
 
 | 审计元数据项 | 内容与规格说明 |
 |:---|:---|
-| **基准提交 (Baseline Commit)** | `4c92b81` (分支: `main`，发布 `v0.2.1` 验收基线) |
-| **最后更新时间** | 2026-11-03 |
+| **基准提交 (Baseline Commit)** | `7c55d02` (分支: `main`，`v0.2.2` 修复前基线；发布提交见 git log) |
+| **最后更新时间** | 2026-11-05 |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |
 | **更新触发条件** | 任何合入包含特性落地、架构偏离、安全门调整、测试基线变更或发现已知缺陷/残余风险的 PR/commit 时，必须同步原子化更新本文件。提交时由作者/维护者更新基准哈希。 |
 | **管辖范围与边界声明** | 本状态表权威管辖：<br>1. **匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)**（[`docs/topology/`](topology/)）<br>2. **存量初始化修复器 (InitFix / Legacy Instance & Static Reinitialization)**（[`docs/initfix/`](initfix/)）<br>3. **物理内存偏移稳定性与第三方缓存驱逐 (Physical Memory Offset Stability & Reflection Cache Eviction)**（[`docs/offset/`](offset/)）<br>*边界与后续治理声明*：同属字节码重映射体系的 `LambdaAligner`（Lambda 表达式对齐器）以及 Mindustry UI 胶水层（`CellPropertyRef` / 动态参数表达式指纹），其实现状态当前由各自单元测试覆盖（`CellHelperTest` 6 场景持续全绿、`LambdaAlignerTest` 等）；它们的详细状态审计矩阵尚未并入本总表，计划在下一轮治理中统一建立验收标准并纳入。 |
@@ -28,6 +28,23 @@
    - [`docs/initfix/01-safety-gate.md`](initfix/01-safety-gate.md) ～ [`06-decisions.md`](initfix/06-decisions.md)（共 6 篇）：全部完成规格客观化改造，彻底消除进度标记。
    - [`docs/offset/01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md)（共 1 篇）：定义物理偏移稳定性与第三方缓存驱逐契约，客观化规格无状态标记。
    - [`AGENTS.md`](../AGENTS.md)：高层导读章节精简，保留五条不变量与高价值概括，详细状态全部外链至 `status.md`。
+
+---
+
+## 0.1 v0.2.2 修复记录 (2026-11-05)
+
+本轮针对“动手试试 6”在真实 Fabric 1.21.1 客户端暴露的 Mixin 热更链路缺陷完成修复。以下条目为**已观测**证据：
+真实客户端日志 + 自动化回归；未能自动化的端到端部分在“验收证据”中单独标注。
+
+| 修复 | 状态 | 代码位置 | 验收证据 |
+|:---|:---:|:---|:---|
+| Mixin 新增 `@Unique` 字段触发的 `ClassInfo` 陈旧 NPE | ✅ | `plugin-mixin` `MixinClassInfoSync`；`MixinHotSwap.handleIfMixin` | `MixinClassInfoSyncTest`（先断言旧元数据找不到新字段，同步后可找到；变异检查：禁用补成员即变红）；真实客户端：`class-info sync addedFields=1` → 重织入 → redefine 成功 |
+| 目标类原始字节码被“已织入产物”污染 | ✅ | `plugin-mixin` `MixinHotSwap.readOriginalBytes`（磁盘原始字节优先） | `MixinRawSourcePriorityTest`（污染 `sourceBytecodeCache` 后仍读回磁盘字节；变异检查：恢复旧优先级即变红）；真实客户端 `bridge in sourceBytes=4000`（不再出现 5103） |
+| Mixin 模板类被当新类 `defineClass` | ✅ | `core` `RemoldAgent.markNonLoadableClass` / `injectNewClass` / `loadClassSnap`；`RemovedMemberScanner` | `NonLoadableClassTest` 两个出口（快照排除、注入短路；变异检查分别变红）；真实客户端不再出现 `[NEW] com.example.mixin...` / `[INJECTED] ... into KnotClassLoader` |
+| 动态单类重定义删除字段被布局门误拒 | ✅ | `core` `RemoldAgent.decideDynamicLayout` + `RemovedMemberScanner` | `DynamicGateWiringTest`（target 必须在 inBatch；变异检查：把 target 移出批次即变红）、`DynamicLayoutWaiverTest`（无读者 WAIVE / 有读者 REJECT / 未扫描 REJECT；变异检查：WAIVE→REJECT 即变红）；真实客户端 `[LAYOUT-WAIVE] ... no out-of-batch reader` → redefine 成功 |
+| 失败提示误导用户更换 DCEVM JDK | ✅ | `plugin-mixin` `MixinHotSwap.flushPendingTargets` | `isEnhancedHotswapEnabled() == true` 时不再提示“requires JBR with DCEVM”，改为指向 `[LAYOUT-REJECT]` / `[DYNAMIC-REDEFINE]`；真实客户端本轮为成功路径，失败分支待下一次拒绝场景验证 |
+
+> 端到端边界：Fabric 1.21.1 的真实客户端验收为人工执行，CI 尚无自动 Fabric 客户端 E2E；上述单测覆盖的是判决/扫描/反射契约与接线分支。
 
 ---
 
@@ -190,8 +207,6 @@
 | **`tier5Matches` 残余死字段清理** | P2 | `AnonClassAligner.AlignStats` / `recordTierMatch` | Tier 5（物理类名盲配）已彻底拔除，但统计结构体中仍残留 `tier5Matches` 字段、日志拼装与 `recordTierMatch` 的 `case 5` 分支；该分支**无任何调用者传入 5**，属可安全移除的死代码，需连同日志字段一并清理，避免误导维护者。 |
 | **嵌套深度 strict 熔断缺少夹具** | P2 | `AnonClassAligner.align`（`maxLevel > 4`）/ `RemoldAgent.ANON_STRICT` | 该阈值是**诊断阈值而非能力边界**：非 strict 模式下仅 `warn`（层级推进本身与深度无关，真正的闸门是 `MAX_ANON_PER_HOST` 与 `ALIGN_TIMEOUT_MS`），strict 模式下抛 `AlignmentRejectedException`。缺的是「`maxLevel > 4` + strict → 宿主组原子拒绝」的负向夹具，判定逻辑本身无须改动。 |
 | **JDK 8 raw-bits CAS 自动化 CI 差异验证缺失** | P2 | `.github/workflows/ci.yml` / `HotswapBridge` | 当前 CI 仅运行在 Temurin 25，无法区分 raw-bits 与旧实现；JDK 8 raw-bits CAS 为手工验证，非持续自动化覆盖；需在 CI 矩阵中增加 JDK 8 运行期任务以持续守护差异逻辑。 |
-| **Mixin 目标类原始字节码读取缺兜底** | P2 | `plugin-mixin` `MixinHotSwap` | 目标类重织入依赖 `Class.getResourceAsStream` 读原始字节码；Fabric dev 环境下若取不到（日志「读不到 ... 原始字节码」），当前无回退路径。缺的是 `IClassBytecodeProvider.getClassNode(name, false)` + ASM 回写兜底。 |
-| **未加载的 `@Mixin` 类被当作新类注入** | P3 | `core` `RemoldAgent` 新类注入路径 | 未加载且带 `@Mixin` 的类会走新类注入并打印 `[INJECTED]`，功能无影响但属日志噪音与多余类定义；彻底消除需在注入路径做常量池级 `@Mixin` 识别后跳过。 |
 | **批次内按类重复全堆遍历** | P2 | `InitFix.collectInstancesForPatch` / `LibTool.getInstances` | 每个待补类各调用一次 `IterateOverInstancesOfClass`，而每次调用都是一次 safepoint（1M 匹配实例时 `HeapIterateOperation` 实测约 240 ms，见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10.2）：批次里 N 个待补类 = N 次停世界。可用 `IterateThroughHeap` 一次走完、按类分发，把 N 次停顿压成 1 次。**但这是「N 次短停顿」换「1 次长停顿」**：单遍历没有 VM 内的 klass 过滤，每个对象都要进 native 回调，最大单次停顿大概率更差；对延迟敏感的场景未必划算。做之前必须同时测总停顿与最大单次停顿，并先统计真实批次类数 N（N 很小时很可能不值得）。**另有一条已固定的语义约束**：`getInstances(P)` 含子类实例、`getInstances(C)` 不含父类实例（`remold.LibToolTest#heapScanIncludesSubclassesButNotSuperclasses`，见 [`08-test-audit.md`](initfix/08-test-audit.md) §3.1），单遍历按类分发时必须复现这个**不对称**，而不是简单按 klass 精确匹配。 |
 | **每次 redefine 会大范围失效已编译代码** | P2 | 实测见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §11 | 对照组实测：redefine 一个**无关类**（无论只改方法体还是新增字段），另一个类的 C2 版本同样在窗口内被 `made not entrant`。意味着每次热更后进程可能大范围回退到解释/C1 执行、出现预热回落。归因未定（可能是 DCEVM 的全局失效策略），但成本真实存在；需要真实场景测一次热更后的吞吐恢复曲线。该成本按 redefine **次数**计，因此两阶段的两次 redefine 会把回落代价翻倍（见 §4.1 两阶段条目）。 |
 | **真实批次规模 N 未知** | P2 | `RemoldAgent`（`HotswapBatchListener` 已暴露批次边界）/ `InitFix.applyPatch`（已记 `count=N` 与 `elapsed`） | 「单遍历按类分发」是否值得，取决于真实热更的批次类数 N 与每类实例数，而这两个量目前只有合成数据。观测手段已具备：批次边界走 `HotswapBatchListener`，每类实例数与耗时由 `applyPatch` 的日志给出；需要的是**几天真实热更的样本**，而不是再加代码。 |
@@ -362,8 +377,8 @@
 | 音乐原位重载 | 🔶 | `plugin-arc` `MusicReloader` | 扫描 `mindustry.gen.Musics` 与 `FileTree.loadedMusic`，按 `Music.file` 匹配；先停止并释放旧 handle，再删除 `Music.load` 的同名同长度缓存并重载，避免长度不变时命中旧内容；播放中的曲目重载后从头继续，无匹配时告警需重启；缺真实音频设备下的自动化覆盖 |
 | 内置着色器原位重编 | 🔶 | `plugin-arc` `ShaderReloader` | 按文件到 `Shaders` 静态字段的绑定重新编译，把新 program/句柄/uniform/attribute 表回写到原对象，保留 `CacheLayer`、`PlanetMesh` 等既有引用；编译失败保留旧程序；未知文件与模组自定义着色器仍提示重启；缺真实 GL 设备下的自动化覆盖 |
 | 不可热更资源提示 | ✅ | `ArcAssetReloader.classify` | 模组/未知着色器、content JSON/HJSON、图集、普通数据文件不再静默忽略，统一输出“需要重启”的 warn；`AssetReloaderTest` 覆盖分类路由 |
-| Mixin 重织入（普通类） | 🔶 | `plugin-mixin` `MixinReWeaver` | 重定义前把源码级字节码交回 Mixin 织入，非目标类按数组同一性跳过拷贝；端到端需真实 Fabric 客户端验证 |
-| Mixin 类自身变更 → 目标级联重织入 | 🔶 | `plugin-mixin` `MixinHotSwap` | `IMixinTransformer.reload` 刷新 `MixinInfo` 后对已加载目标类走 `redefineDynamic`；结构性改动抛 `MixinReloadException` 时提示重启 |
+| Mixin 重织入（普通类） | ✅ | `plugin-mixin` `MixinReWeaver` | 重定义前把源码级字节码交回 Mixin 织入，非目标类按数组同一性跳过拷贝；真实 Fabric 1.21.1 客户端已验收（新增/删除 `@Unique` 字段、后续 target 编辑）；`MixinRawSourcePriorityTest` 守住原始字节来源；CI 无自动 Fabric 客户端 E2E |
+| Mixin 类自身变更 → 目标级联重织入 | ✅ | `plugin-mixin` `MixinHotSwap` + `MixinClassInfoSync` | `reload` 后同步新增字段/方法的 `ClassInfo`，再对已加载目标类走 `redefineDynamic`；真实 Fabric 1.21.1 客户端已验收（新增/删除字段、`TitleScreen` 重织入）；`MixinClassInfoSyncTest` / `DynamicLayoutWaiverTest`；`@Mixin` 模板类不再进入 `loadedClassesMap`（`NonLoadableClassTest`） |
 | Forge / NeoForge 跨 ClassLoader Mixin 重织入 | 🔶 | `plugin-forge` `ModLauncherMixinBridge` | 通过 `BytecodeTransformerBridge` 穿透 ModLauncher / NeoForge 类加载器反射定位 `IMixinTransformer` 织入重定义字节码；解决 Forge 与 Agent 间 ClassLoader 隔离；端到端需真实 Forge / NeoForge 客户端验证 |
 | Forge / NeoForge EventBus 监听器刷新 | 🔶 | `plugin-forge` `ForgeEventBusRefresher` | 监听批次完成事件，识别新增/移除的 `@SubscribeEvent` / `@EventBusSubscriber` 并自动在 `EVENT_BUS` 注销与重新登记；端到端需真实 Forge / NeoForge 客户端验证 |
 | 标准 JVM 能力探测与降级 | ✅ | `RemoldAgent.probeEnhancedHotswap` / `mustSkipForMissingEnhancedRedefinition` / `degradeForMissingEnhancedRedefinition` | 厂商身份 + flag 文本双条件判定；结构变化类在无增强能力时摘批；`FORCE_STATIC_LAMBDA` 强制降级、`INIT_FIX` 刻意不降级；`EnhancedHotswapGateTest` 9 用例含变异检查 |

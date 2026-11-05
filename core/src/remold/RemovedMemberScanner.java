@@ -110,6 +110,7 @@ final class RemovedMemberScanner {
 		for (Map.Entry<String, Class<?>> e : loadedClassesMap.entrySet()) {
 			String name = e.getKey();
 			if (newBatchBytes.containsKey(name)) continue;
+			if (RemoldAgent.isNonLoadableClass(name)) continue;
 			Class<?> clazz = e.getValue();
 			// 数组类没有代码；hidden class（lambda 等）既不进 ClassFileTransformer 也不可重定义，
 			// 它们引用的成员由宿主类的常量池覆盖。不滤掉这两类，uncached 会永远大于 0，
@@ -321,6 +322,9 @@ final class RemovedMemberScanner {
 				Path rel = root.relativize(p);
 				String internal = rel.toString().replace('\\', '/');
 				internal = internal.substring(0, internal.length() - ".class".length());
+				// Mixin 等模板类不是可加载类，不能进入读者集合；
+				// 否则它自己的字段引用可能被误算成"批次外读者"。
+				if (RemoldAgent.isNonLoadableClass(internal.replace('/', '.'))) continue;
 				if (into.containsKey(internal)) continue;
 				try {
 					into.put(internal, Files.readAllBytes(p));

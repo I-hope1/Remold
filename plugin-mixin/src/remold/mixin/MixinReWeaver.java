@@ -41,15 +41,38 @@ public final class MixinReWeaver {
 			return sourceBytecode;
 		}
 		if (MixinHotSwap.isMixin(dotClassName, sourceBytecode)) {
+			if (RemoldAgent.DEBUG) {
+				RemoldAgent.log("[Mixin] bridge in: " + dotClassName
+					+ " classified as mixin; bypassing re-weave, sourceBytes=" + sourceBytecode.length);
+			}
 			return sourceBytecode;
 		}
 		IMixinTransformer weaver = activeTransformer();
 		if (weaver == null) {
+			if (RemoldAgent.DEBUG) {
+				RemoldAgent.log("[Mixin] bridge in: " + dotClassName
+					+ " has no active transformer; returning sourceBytes=" + sourceBytecode.length);
+			}
 			return sourceBytecode;
+		}
+		if (RemoldAgent.DEBUG) {
+			RemoldAgent.log("[Mixin] bridge in: " + dotClassName
+				+ ", sourceBytes=" + sourceBytecode.length
+				+ ", transformer=" + weaver.getClass().getName());
 		}
 		try {
 			byte[] woven = weaver.transformClassBytes(dotClassName, dotClassName, sourceBytecode);
-			return woven != null ? woven : sourceBytecode;
+			if (woven == null) {
+				reportOnce(dotClassName, "[Mixin] Bytecode re-weaving returned null; falling back to source bytecode", null);
+				return sourceBytecode;
+			}
+			boolean unchanged = woven == sourceBytecode || java.util.Arrays.equals(woven, sourceBytecode);
+			if (RemoldAgent.DEBUG) {
+				RemoldAgent.log("[Mixin] bridge out: " + dotClassName
+					+ ", wovenBytes=" + woven.length
+					+ (unchanged ? " (unchanged from source; no mixin applied or already woven)" : " (rewritten)"));
+			}
+			return unchanged ? sourceBytecode : woven;
 		} catch (Throwable t) {
 			if (isIllegalClassLoadError(t)) {
 				RemoldAgent.info("[Mixin] Skipping bytecode re-weaving for mixin package class: " + dotClassName);
@@ -92,7 +115,44 @@ public final class MixinReWeaver {
 
 	private static void reportOnce(String key, String message, Throwable t) {
 		if (REPORTED.add(key)) {
-			RemoldAgent.warn(message + ": " + key + " (" + t + ")");
+			if (t == null) {
+				RemoldAgent.warn(message + ": " + key);
+			} else {
+				RemoldAgent.warn(message + ": " + key + "\n" + describeFull(t));
+			}
 		}
+	}
+
+	/**
+	 * 把 Throwable 的完整 cause 链与每层栈帧格式化成一行一条的形式。
+	 *
+	 * <p>排查纪律要求：Mixin 抛出的 {@code MixinTransformerError} 只是外层包装，
+	 * 真正的失败原因在 {@code getCause()} 里。只打 {@code toString()} 会让真因
+	 * 完全不可见，热更失败现场只能靠猜。这里逐层展开 cause 并打印栈帧，
+	 * 让日志本身就能回答失败发生在哪。
+	 */
+	private static String describeFull(Throwable t) {
+		StringBuilder sb = new StringBuilder();
+		java.util.Set<Throwable> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+		Throwable cur = t;
+		int depth = 0;
+		while (cur != null && depth < 12 && seen.add(cur)) {
+			sb.append(depth == 0 ? "" : "\n  Caused by: ")
+				.append(cur.getClass().getName());
+			if (cur.getMessage() != null) {
+				sb.append(": ").append(cur.getMessage());
+			}
+			StackTraceElement[] frames = cur.getStackTrace();
+			int limit = Math.min(frames.length, 16);
+			for (int i = 0; i < limit; i++) {
+				sb.append("\n      at ").append(frames[i]);
+			}
+			if (frames.length > limit) {
+				sb.append("\n      ... ").append(frames.length - limit).append(" more");
+			}
+			cur = cur.getCause();
+			depth++;
+		}
+		return sb.toString();
 	}
 }

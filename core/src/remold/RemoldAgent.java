@@ -293,6 +293,31 @@ public class RemoldAgent {
 		}
 	}
 
+	/**
+	 * 不可加载的模板类（Mixin 等）。
+	 *
+	 * <p>Mixin 类只是字节码模板，不是 JVM 里的普通类。Fabric 的 Knot 明确禁止直接加载它；
+	 * 若 Remold 的「新类注入」把它 {@code defineClass} 进宿主 ClassLoader，会让它出现在
+	 * {@code loadedClassesMap} / 读者扫描里，既污染布局判定，也可能在别处触发
+	 * {@code NoClassDefFoundError}。</p>
+	 *
+	 * <p>插件在识别出 Mixin 模板后调用 {@link #markNonLoadableClass(String)}；核心据此
+	 * 把它移出本批、跳过 {@code defineClass}，并让读者扫描忽略它。</p>
+	 */
+	private static final Set<String> NON_LOADABLE_CLASSES = ConcurrentHashMap.newKeySet();
+
+	/** 登记一个只作为字节码模板存在的类（例如 Mixin）。 */
+	public static void markNonLoadableClass(String dotClassName) {
+		if (dotClassName != null && !dotClassName.isEmpty()) {
+			NON_LOADABLE_CLASSES.add(dotClassName);
+		}
+	}
+
+	/** 该类是否已被登记为不可加载的模板类。 */
+	public static boolean isNonLoadableClass(String dotClassName) {
+		return dotClassName != null && NON_LOADABLE_CLASSES.contains(dotClassName);
+	}
+
 	/** 执行所有已注册的字节码重织入桥 */
 	public static byte[] applyTransformerBridges(ClassLoader loader, String dotClassName, Class<?> targetClass, byte[] bytecode) {
 		if (transformerBridges.isEmpty() || bytecode == null) return bytecode;
@@ -1379,6 +1404,11 @@ public class RemoldAgent {
 		var newMap = new ConcurrentHashMap<String, Class<?>>((int) (classes.length / 0.75f) + 1);
 		for (Class<?> c : classes) {
 			String   name     = c.getName();
+			if (isNonLoadableClass(name)) {
+				// 模板类若被历史版本误注入过，这里把它排除出已加载快照：
+				// 既不重定义，也不让读者扫描把它当外部读者。
+				continue;
+			}
 			Class<?> existing = newMap.get(name);
 			if (isBetterLoadedClassCandidate(c, existing)) {
 				newMap.put(name, c);
@@ -1613,6 +1643,10 @@ public class RemoldAgent {
 			}
 		}
 
+		// 插件在桥接阶段会把 Mixin 等模板类登记为"不可加载"。它们不能进入本批：
+		// 既不能被当作普通新类 defineClass，也不能被当作已加载类 redefine，更不能参与读者扫描。
+		newBatchBytes.keySet().removeIf(RemoldAgent::isNonLoadableClass);
+
 		// ---- 同名局部类编号漂移止血门（docs/topology/07-layout-gate-and-risks.md §2）----
 		//
 		// 位置：宿主匿名对齐之后、实例布局门之前。局部类不在匿名对齐视野内（名字含简单名，被准入闸门
@@ -1635,6 +1669,11 @@ public class RemoldAgent {
 			byte[] bytecode  = batchEntry.getValue();
 			Path   path      = classToPath.get(className);
 			if (DEBUG) log("Processing changes: " + (path != null ? path : className));
+
+			if (isNonLoadableClass(className)) {
+				if (DEBUG) log("[SKIP-TEMPLATE] " + className + " is a non-loadable template; skipped");
+				continue;
+			}
 
 			if (allOrphanClasses.contains(className)) {
 				if (DEBUG) log("[ORPHAN-RETAIN] Retaining orphan class: " + className);
@@ -2196,6 +2235,12 @@ public class RemoldAgent {
 	 * 直接定义类，而不是被动加载
 	 */
 	private static boolean injectNewClass(String className, Path path, byte[] bytes) {
+		if (isNonLoadableClass(className)) {
+			// Mixin 模板类不是可加载类：defineClass 会污染宿主 ClassLoader，
+			// 并让读者扫描把它误认为外部读者。
+			info("[SKIP-INJECT] " + className + " is registered as a non-loadable template; defineClass skipped");
+			return false;
+		}
 		try {
 			ClassLoader loader = findTargetClassLoader(className, path);
 			if (loader == null) {
@@ -3578,20 +3623,34 @@ public class RemoldAgent {
 					error("REJECTED: Class hierarchy change detected for dynamic class " + className);
 					return false;
 				}
-				LayoutGate.Result layoutRes = LayoutGate.checkChangedFields(diff.changedFields);
-				if (!layoutRes.compatible() && LayoutGate.MODE_REJECT.equals(LAYOUT_GATE)) {
-					boolean waiveReinit = false;
-					if (layoutRes.verdict() == LayoutGate.Verdict.CHANGED_FIELD_TYPE) {
-						List<String> typeChanged = LayoutGate.typeChangedFields(diff.changedFields);
-						if (!LayoutGate.hasStaticFieldChange(diff.changedFields) && diff.reinitFields != null && !typeChanged.isEmpty() && diff.reinitFields.containsAll(typeChanged)) {
-							waiveReinit = true;
-							info("[LAYOUT-REINIT] Dynamic class " + className + ": 经 @RemoldReinit 授权放行字段类型变更 (" + layoutRes.detail() + ")");
-						}
-					}
-					if (!waiveReinit && (hasLiveInstances(className) || LayoutGate.hasStaticFieldChange(diff.changedFields))) {
-						warn("[LAYOUT-REJECT] Dynamic class " + className + " rejected: " + layoutRes.detail());
+				LayoutDecision decision = decideDynamicLayout(targetClass, className, diff, runtimeBytes);
+				String why = decision.reason() != null
+					? decision.reason()
+					: (decision.layout() != null ? decision.layout().detail() : "unknown reason");
+				switch (decision.action()) {
+					case PASS:
+						break;
+					case WAIVE_NO_READERS:
+						warn("[LAYOUT-WAIVE] Dynamic class " + className + ": member(s) removed ("
+						     + why + ") and no out-of-batch reader still needs them; redefining.");
+						break;
+					case WAIVE:
+						warn("[LAYOUT-WAIVE] Dynamic class " + className + ": incompatible field layout ("
+						     + why + ") but no live instances; redefining anyway — new instances go"
+						     + " through the new constructor and initialize correctly.");
+						break;
+					case WAIVE_REINIT:
+						info("[LAYOUT-REINIT] Dynamic class " + className
+						     + ": 经 @RemoldReinit 授权放行字段类型变更 (" + why + ")");
+						break;
+					case SKIP:
+						warn("[LAYOUT-SKIP] Dynamic class " + className + ": layout gate skipped — no"
+						     + " usable baseline; redefining without a field-layout check.");
+						break;
+					case REJECT:
+					default:
+						warn("[LAYOUT-REJECT] Dynamic class " + className + " rejected: " + why);
 						return false;
-					}
 				}
 				InitFix.transform(targetClass, runtimeBytes, diff);
 			}
@@ -3620,6 +3679,57 @@ public class RemoldAgent {
 			return false;
 		} finally {
 			HOTSWAP_LOCK.unlock();
+		}
+	}
+
+	/**
+	 * 动态单类重定义的布局判决。
+	 *
+	 * <p>与批量路径共用 {@link LayoutDecisionEngine}，但必须显式构造"批次"：{@code targetClass}
+	 * 自己就是本批唯一成员。只有这样读者扫描才会把它当作批次内类（用新字节），而不是从
+	 * {@code bytecodeCache} 里拿它的旧字节当成外部读者——否则删字段永远会被自己旧 handler 挡下。</p>
+	 */
+	private static LayoutDecision decideDynamicLayout(Class<?> targetClass, String className,
+	                                                   ClassDiffUtil.ClassDiff diff, byte[] runtimeBytes) {
+		if (LayoutGate.MODE_OFF.equals(LAYOUT_GATE)) {
+			return new LayoutDecision(LayoutAction.PASS, null, className, Set.of());
+		}
+		LayoutGate.Result layoutRes = LayoutGate.checkChangedFields(diff.changedFields);
+		Liveness liveness = layoutRes.compatible()
+			? Liveness.LIVE
+			: (hasLiveInstances(className) ? Liveness.LIVE : Liveness.NONE);
+
+		RemovedMemberScan scan = RemovedMemberScan.NOT_SCANNED;
+		Path classFile = classFilePath(targetClass);
+		if (classFile != null) {
+			// inBatch 必须包含 target 自己。读者扫描器据此排除"本批类"，只扫批次外其他类。
+			Map<String, RemovedMemberScan> scans = RemovedMemberScanner.scan(
+				Map.of(className, runtimeBytes), Map.of(className, classFile));
+			scan = scans.getOrDefault(className, RemovedMemberScan.NOT_SCANNED);
+		}
+
+		SuperclassDriftGate.DriftDecision drift = checkSuperclassDriftIfApplicable(
+			className, targetClass, diff.changedFields, runtimeBytes, Map.of(className, runtimeBytes));
+
+		return decideLayout(className, diff.changedFields, LAYOUT_GATE, liveness,
+			Set.of(className), scan, drift, diff.reinitFields);
+	}
+
+	/**
+	 * 由已加载类的 CodeSource 还原它在磁盘上的 .class 路径，供读者扫描反推工程根目录。
+	 * 取不到（运行时生成类、无 CodeSource 等）时返回 {@code null}；调用方必须退回"未扫描"判据。
+	 */
+	private static Path classFilePath(Class<?> type) {
+		try {
+			if (type == null || type.getProtectionDomain() == null
+			    || type.getProtectionDomain().getCodeSource() == null
+			    || type.getProtectionDomain().getCodeSource().getLocation() == null) {
+				return null;
+			}
+			Path root = Path.of(type.getProtectionDomain().getCodeSource().getLocation().toURI());
+			return root.resolve(type.getName().replace('.', '/') + ".class");
+		} catch (Throwable t) {
+			return null;
 		}
 	}
 

@@ -110,6 +110,9 @@ public final class MixinHotSwap {
 		if (!isMixin(dotClassName, newMixinBytes)) {
 			return false;
 		}
+		// Mixin 只是织入模板，不是可加载类：登记后核心会跳过 defineClass / redefine，
+		// 读者扫描也不会把它当成外部读者。
+		RemoldAgent.markNonLoadableClass(dotClassName);
 		IMixinTransformer transformer = MixinReWeaver.activeTransformer();
 		if (transformer == null) {
 			return true;
@@ -126,6 +129,9 @@ public final class MixinHotSwap {
 			if (raw == null || raw.isEmpty()) {
 				raw = transformer.reload(dotClassName.replace('.', '/'), node);
 			}
+			// reload 只更新 MixinInfo 的 state，其 ClassInfo 仍指向 reload 前的旧对象；
+			// 新增字段/方法因此不在元数据里，attach 阶段会 NPE。这里把新成员补进去。
+			MixinClassInfoSync.sync(transformer, dotClassName, node);
 			targets = normalize(raw);
 		} catch (Throwable t) {
 			reportReloadFailure(dotClassName, t);
@@ -347,8 +353,16 @@ public final class MixinHotSwap {
 			}
 			if (RemoldAgent.redefineDynamic(targetClass, originalBytes)) {
 				RemoldAgent.info("[Mixin] Target class " + name + " re-woven with updated mixin and redefined");
+			} else if (RemoldAgent.isEnhancedHotswapEnabled()) {
+				// 结构化热更已经开启：拒绝来自 Remold 的安全门或 JVM 本身，不是 JDK 能力不足。
+				// 继续提示"换 DCEVM 的 JBR"会把用户引向错误方向。
+				RemoldAgent.warn("[Mixin] Target class " + name + " was re-woven but the redefine was refused:"
+					+ " this JVM already supports structural hot-swap (JBR/DCEVM active), so the blocker is"
+					+ " Remold's LayoutGate or the JVM's redefine rules — see the [LAYOUT-REJECT] /"
+					+ " [DYNAMIC-REDEFINE] log above. Fix the reported field change, or restart the client.");
 			} else {
-				RemoldAgent.warn("[Mixin] Target class " + name + " could not be redefined after re-weaving: structural changes require JBR with DCEVM, or restart the client");
+				RemoldAgent.warn("[Mixin] Target class " + name + " could not be redefined after re-weaving:"
+					+ " structural changes require JBR with DCEVM, or restart the client");
 			}
 		}
 	}
@@ -358,27 +372,33 @@ public final class MixinHotSwap {
 	 *
 	 * <p>必须用未织入的原始字节码：JVM 当前持有的字节码已经织入了旧 Mixin，再织一遍会重复注入。
 	 * 读取优先级：
-	 * 1. {@link RemoldAgent#getSourceBytecode(String)}：热更期间捕获的最新源码级基线；
-	 * 2. {@link RemoldAgent#findClassBytesOnDisk(Class)}：当前工程监控目录中的最新 .class；
-	 * 3. {@link Class#getResourceAsStream(String)}：仅针对外部/原版只读类（如 Minecraft TitleScreen）回退读取。</p>
+	 * 1. {@link RemoldAgent#findClassBytesOnDisk(Class)}：当前工程监控目录中的最新 .class，
+	 *    这是唯一保证「编译产物、未经任何 transformer」的来源；
+	 * 2. {@link Class#getResourceAsStream(String)}：外部/原版只读类（如 Minecraft TitleScreen）
+	 *    从宿主 ClassLoader 读取的原始资源；
+	 * 3. {@link RemoldAgent#getSourceBytecode(String)}：动态生成类等没有磁盘/资源来源时的兜底。</p>
+	 *
+	 * <p><b>为什么 sourceBytecodeCache 排在最后</b>：首次加载时该缓存由
+	 * {@code AnnotationTransformer} 用 {@code classfileBuffer} 填充，而 Fabric 的 Mixin
+	 * transformer 可能已经先执行过——缓存里拿到的可能是<b>已织入</b>的字节。把它当源码再织一遍
+	 * 会造成重复注入：{@code @Unique} 字段/处理器被追加第二份，运行期基线与后续重织入的字段名
+	 * 对不上，下一轮 target 热更就会被 LayoutGate 判为「移除了 Mixin 字段」。
+	 * 工程类优先取磁盘原始字节即可绕开这份被污染的缓存。</p>
 	 */
 	private static byte[] readOriginalBytes(Class<?> type) {
 		if (type == null) return null;
 		String name = type.getName();
-		byte[] src = RemoldAgent.getSourceBytecode(name);
-		if (src != null) {
-			return src;
-		}
 		byte[] disk = RemoldAgent.findClassBytesOnDisk(type);
 		if (disk != null) {
 			return disk;
 		}
 		String resource = "/" + name.replace('.', '/') + ".class";
 		try (InputStream in = type.getResourceAsStream(resource)) {
-			return in == null ? null : in.readAllBytes();
-		} catch (Throwable t) {
-			return null;
+			if (in != null) return in.readAllBytes();
+		} catch (Throwable ignored) {
+			// 落到 source cache 兜底
 		}
+		return RemoldAgent.getSourceBytecode(name);
 	}
 
 	/** 常量池里是否含 {@code @Mixin} 描述符。便宜的前置过滤，避免给每个类都做一次 ASM 解析。 */

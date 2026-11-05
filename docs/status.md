@@ -360,6 +360,16 @@
 - **关联设计规范**：[`docs/topology/07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1。
 - **关联架构决策**：无。
 
+### 风险 13：JBR 25 增强重定义对畸形 `ClassDefinition` 直接崩溃 VM
+- **风险描述与底层机制**：`Instrumentation.redefineClasses` 收到畸形/非法 `ClassDefinition`（例如截断的 class 文件、二进制名与目标类不匹配的字节）时，JBR 25.0.2 + `-XX:+AllowEnhancedClassRedefinition` 不是抛 `LinkageError`，而是在 `VM_EnhancedRedefineClasses::do_topological_class_sorting` 触发 `EXCEPTION_ACCESS_VIOLATION`，整个 JVM 终止。`RemoldAgent.applyRedefinitions` 没有对传入字节做格式/类名校验，批量与逐类两条路径都会把字节直接交给 JVM。
+- **触发条件**：`applyRedefinitions` 的批量 `redefineClasses` 或逐类兜底收到畸形 `ClassDefinition`。本轮实测两种构造均触发：截断字节（`new byte[]{0x00}`）与“合法 class 文件但二进制名不匹配”。批量与逐类都触发过。
+- **已观测证据**：JBR 25.0.2（`jbrsdk_jcef-25.0.2`）两次崩溃，`hs_err` 文件为 `tests/hs_err_pid20676.log`、`tests/hs_err_pid15436.log`（另有一次 `tests/hs_err_pid19664.log`）；栈顶 `V [jvm.dll+0x5fda20] VM_EnhancedRedefineClasses::do_topological_class_sorting+0x270`。这些日志在记录后已删除，未提交。
+- **影响**：开发进程直接死亡，且没有 Java 层异常可供上层捕获/回滚；与“补丁生命周期”类问题不同，这是 VM 级故障。
+- **当前处置**：本轮不修。回归探针 `InitFixFallbackProbe` 改为在 `Instrumentation` 边界注入失败，避免把 VM 崩溃当作可重复的测试路径。
+- **候选关闭方向**：在 `applyRedefinitions` 入口校验 `ClassDefinition` 的 class 名与字节可解析性；或把 redefine 调用隔离到可重启的辅助进程（代价高）。需先确认 JBR 25 的触发边界（是否只在批量排序阶段）。
+- **关联设计规范**：无。
+- **关联架构决策**：无。
+
 ---
 
 ## 6. 框架集成插件与资源热更新 (Framework Plugins & Asset Hot-Reload)

@@ -152,6 +152,28 @@ public class FingerprintAssert {
 			}
 		}
 
+		// ---------- 6) 对齐/织入后的字节 ≠ 磁盘原始字节：指纹必须用磁盘侧 ----------
+		//
+		// 匿名类重命名或 Mixin 重织入会改写 newBatchBytes；若拿改写后的字节算指纹，
+		// 下一轮拿磁盘原始字节比对必然不相等，于是“没改源码”也会再次对齐/重定义。
+		{
+			System.out.println("-- 6) 对齐后 hash 与磁盘 hash 不一致 --");
+			LongLongMap table = new LongLongMap(16);
+			String cls = "com.example.Aligned";
+			long key = CRC64.hashString(cls);
+			byte[] raw = "disk-raw-bytes".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+			byte[] aligned = "aligned-bytes".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+			long rawHash = CRC64.update(raw);
+			long alignedHash = CRC64.update(aligned);
+			check(rawHash != alignedHash, "对齐后的字节与磁盘原始字节 hash 确实不同（前提成立）");
+
+			table.put(key, rawHash);                 // 正确：落账磁盘原始 hash
+			check(isUnchanged(table, key, rawHash),
+				"落账磁盘 hash 后，下一轮同一磁盘字节判为 unchanged");
+			check(!isUnchanged(table, key, alignedHash),
+				"拿对齐后的 hash 比对必须判为 changed —— 这正是“未改源码却再次对齐”的成因");
+		}
+
 		System.out.println();
 		System.out.println("通过 " + passed + " 条；失败 " + failed + " 条");
 		System.out.println(failed == 0 ? "ALL ASSERTIONS PASSED" : (failed + " ASSERTION(S) FAILED"));

@@ -1433,6 +1433,10 @@ public class RemoldAgent {
 
 		Map<String, byte[]> newBatchBytes = new LinkedHashMap<>(changedFiles.size());
 		Map<String, Path>   classToPath   = new HashMap<>(changedFiles.size());
+		// 磁盘原始字节的指纹：只由 Files.readAllBytes 的结果计算，绝不含对齐/织入后的改写。
+		Map<String, Long>   rawDiskHashes  = new HashMap<>(changedFiles.size());
+		// 目标类名 -> 它在磁盘上的原始类名（匿名类重命名后两者不同）。
+		Map<String, String> targetToRawName = new HashMap<>(changedFiles.size());
 		// 本轮"改了但没生效"的台账：摘要行据此点名跳过了谁（见 RoundSkips）。
 		RoundSkips skips = new RoundSkips();
 		for (Path p : changedFiles) {
@@ -1454,6 +1458,8 @@ public class RemoldAgent {
 					}
 					newBatchBytes.put(cn, bc);
 					classToPath.put(cn, p);
+					rawDiskHashes.put(cn, calculateHash(bc));
+					targetToRawName.put(cn, cn);
 				} else {
 					// 不并进 skippedCount：那个计数只统计"磁盘哈希没变"的类，含义是"本来就没改"。
 					// 读不出类名是"改了但读不了"，属于跳过，进台账由摘要点名。
@@ -1575,6 +1581,12 @@ public class RemoldAgent {
 			if (res.alignedHostBytes != null) {
 				newBatchBytes.put(hostName, res.alignedHostBytes);
 			}
+			// 对齐重命名后，目标类名对应的磁盘原始类名可能不同；指纹必须跟随原始磁盘文件。
+			for (Map.Entry<String, String> rename : res.renameMap.entrySet()) {
+				String rawDot    = rename.getKey().replace('/', '.');
+				String targetDot = rename.getValue().replace('/', '.');
+				targetToRawName.put(targetDot, rawDot);
+			}
 
 			for (String orphan : res.orphanOldClasses) {
 				allOrphanClasses.add(orphan.replace('/', '.'));
@@ -1688,8 +1700,11 @@ public class RemoldAgent {
 					continue;
 				}
 
-				long newHash      = calculateHash(bytecode); // 现在返回 long
-				long classNameKey = CRC64.hashString(className); // 类名也转为 long
+				// 指纹取磁盘原始字节：对齐/织入后的 bytecode 不能参与“磁盘是否变化”的判定。
+				String rawName    = targetToRawName.getOrDefault(className, className);
+				Long   rawHash    = rawDiskHashes.get(rawName);
+				long   newHash    = rawHash != null ? rawHash : calculateHash(bytecode);
+				long   classNameKey = CRC64.hashString(rawName);
 
 				// 检查指纹
 				synchronized (fileDiskHashes) {
@@ -1862,9 +1877,12 @@ public class RemoldAgent {
 							bytecodeCache.put(className, bytecode);
 							injectedCount++;
 							// 注入成功即视为生效：指纹可立即落账（不经过 applyRedefinitions）。
-							// 失败时不落账，下次触发会重试。
+							// 失败时不落账，下次触发会重试。指纹同样只记磁盘原始字节。
+							String injectRawName = targetToRawName.getOrDefault(className, className);
+							Long   injectRawHash = rawDiskHashes.get(injectRawName);
+							long   diskHash = injectRawHash != null ? injectRawHash : calculateHash(bytecode);
 							synchronized (fileDiskHashes) {
-								fileDiskHashes.put(CRC64.hashString(className), calculateHash(bytecode));
+								fileDiskHashes.put(CRC64.hashString(injectRawName), diskHash);
 							}
 						}
 					} else if (REDEFINE_MODE == RedefineMode.lazy_load && UCP_APPEND) {
@@ -1907,9 +1925,10 @@ public class RemoldAgent {
 		for (Map.Entry<String, Path> e : retryCandidates.entrySet()) {
 			String className = e.getKey();
 			if (redefinedOk.contains(className)) {
-				// 成功：落账指纹
+				// 成功：落账指纹（键必须是磁盘原始类名，不能是重命名后的目标类名）
+				String rawName = targetToRawName.getOrDefault(className, className);
 				synchronized (fileDiskHashes) {
-					fileDiskHashes.put(CRC64.hashString(className), pendingHashes.get(CRC64.hashString(className)));
+					fileDiskHashes.put(CRC64.hashString(rawName), pendingHashes.get(CRC64.hashString(rawName)));
 				}
 				continue;
 			}

@@ -270,7 +270,10 @@ jobs:
           done
           
           # 3. Gradle Plugin Jar
-          SRC_GRADLE=$(ls gradle-plugin/build/libs/remold-gradle-plugin-*.jar 2>/dev/null | grep -v 'sources' | head -n 1)
+          SRC_GRADLE=$(ls "gradle-plugin/build/libs/remold-gradle-plugin-${VERSION}.jar" 2>/dev/null | head -n 1)
+          if [ -z "$SRC_GRADLE" ]; then
+            SRC_GRADLE=$(ls gradle-plugin/build/libs/remold-gradle-plugin-*.jar 2>/dev/null | grep -vE 'sources|javadoc' | head -n 1)
+          fi
           if [ -n "$SRC_GRADLE" ] && [ -f "$SRC_GRADLE" ]; then
             cp "$SRC_GRADLE" release-assets/
             cp "$SRC_GRADLE" "release-assets/remold-gradle-plugin.jar"

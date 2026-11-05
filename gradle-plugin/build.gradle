@@ -29,7 +29,10 @@ javadoc {
 }
 
 gradlePlugin {
-	website = 'https://github.com/I-hope1/Remold'
+	// Portal 审核要求 "project URL 指向英文文档或源码"：仓库根 README 以中文为主，
+	// 直接指到仓库根会被判为 "lacks documentation in English"（v0.2.1 首次提交即因此被拒）。
+	// 指 README_EN.md 而不是 main 分支上还没推送的新文件，确保审核点开时链接立即可用。
+	website = 'https://github.com/I-hope1/Remold/blob/main/README_EN.md'
 	vcsUrl = 'https://github.com/I-hope1/Remold.git'
 	plugins {
 		remold {

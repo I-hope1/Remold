@@ -232,6 +232,9 @@ routes behave identically. Configuration is the same as Option 1 (`gradle.proper
 > `pluginManagement.resolutionStrategy.eachPlugin { useModule("com.github.I-Hope1.Remold:gradle-plugin:${requested.version}") }`
 > in `settings.gradle.kts`. Publishing to the Gradle Plugin Portal is what removes that block.
 
+A standalone reference for the binary plugin (coordinates, DSL options, task list, requirements) lives in
+[`gradle-plugin/README.md`](gradle-plugin/README.md).
+
 Launch with hot reloading:
 ```bash
 ./gradlew runRemold

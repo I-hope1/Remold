@@ -13,6 +13,12 @@
 
 简体中文 | [English](README_EN.md)
 
+> **English summary** — Remold is a JVM hot-reload agent. It watches your compiled output and swaps new bytecode
+> into the running JVM in place, backfills newly added fields on live instances (InitFix), realigns anonymous
+> classes and lambdas by structural fingerprint, and re-weaves Mixin hooks before redefining. The bundled Gradle
+> plugin (`io.github.i-hope1.remold`) wires the agent, the JBR/DCEVM arguments and the `runRemold` task for you.
+> Full English documentation: [README_EN.md](README_EN.md) · [Gradle plugin reference](gradle-plugin/README.md).
+
 Remold 是一个 Java Agent：它盯着你的编译输出目录，文件一变就把新字节码原地换进正在运行的 JVM。
 为 Mindustry 与 Minecraft（Fabric）模组开发各准备了一套开箱即用的模板。
 
@@ -230,6 +236,9 @@ apply(plugin = "io.github.i-hope1.remold")
 > （`<插件id>:<插件id>.gradle.plugin`），需要在 `settings.gradle.kts` 的 `pluginManagement.resolutionStrategy.eachPlugin`
 > 里 `useModule("com.github.I-Hope1.Remold:gradle-plugin:${requested.version}")` 映射一次。发到 Gradle Plugin Portal
 > 才能省掉这段。
+
+二进制插件自身的参考资料（坐标、DSL 选项、任务清单、环境要求）见
+[`gradle-plugin/README.md`](gradle-plugin/README.md)。
 
 一键启动热重载：
 ```bash

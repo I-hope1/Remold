@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   并显式报告；DEBUG 下另有 `[POST]` 首尾两行标示后处理是否进入与结束。
 
 ### Changed
+- **Gradle Plugin Portal 退回后补齐英文文档**：`v0.2.1` 的 `publishPlugins` 已进入人工审核，被判定
+  "lacks documentation in English" 并取消该次提交（官方邮件明确可复用同一版本号）。此前 `gradlePlugin.website`
+  指向仓库根，而根 README 以中文为主，审核看到的就是中文。现在新增英文插件文档 `gradle-plugin/README.md`
+  （坐标、DSL 选项、任务清单、环境要求），`website` 指向该文档，并在 `README.md` 顶部加英文摘要 + 指向
+  `README_EN.md` / 插件文档的链接；重新 `publishPlugins` 后再由审核结果定论。
 - **Gradle 脚本插件瘦身为薄壳**：`remold.gradle` / `remold.gradle.kts` 从 1,031 / 1,120 行的完整实现缩到 ~40 行，
   只负责把二进制插件 `io.github.i-hope1.remold` 挂到工程上；解析、任务注册与参数拼装全部收敛到 `:gradle-plugin`
   （此前是脚本 + 插件两套并行实现，且 README 与打包注释声称"只有一份"，与事实相反）。

@@ -3225,9 +3225,9 @@ public class RemoldAgent {
 			}
 		} catch (Throwable t) {
 			error("Bulk Redefine failed, switching to individual mode...", t);
+			// redefineClasses 对一批类是原子的：批量失败意味着没有任何类生效。
+			// 因此 PENDING 补丁必须保留，留给下面的逐类重试；只有逐类重试也失败时才丢弃。
 			for (ClassDefinition def : definitions) {
-				// 批量删除缓存
-				InitFix.afterRedefineFailed(def.getDefinitionClass());
 				try {
 					inst.redefineClasses(def);
 					bytecodeCache.put(def.getDefinitionClass().getName(), def.getDefinitionClassFile());

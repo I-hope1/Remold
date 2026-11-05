@@ -608,6 +608,38 @@ dcevmProbe("offsetStabilityProbe", "OffsetStabilityProbe",
 dcevmProbe("lambdaBridgeProbe", "LambdaBridgeProbe",
 	"删除捕获变量后的老 callsite 行为探针 (LambdaBridgeProbe)：同名异描述符 / 改名 / 加捕获 / 仅改方法体")
 
+// InitFix 批量失败 -> 逐类兜底的生命周期回归：批量失败是原子的，补丁必须留到逐类重试成功后再应用。
+tasks.register("initFixFallbackProbe", JavaExec) {
+	group = "verification"
+	description = "InitFix 兜底路径回归 (InitFixFallbackProbe)：批量失败后逐类重试成功必须保留补丁"
+	dependsOn classes
+	dependsOn project(":core").tasks.named("shadowJar")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "InitFixFallbackProbe"
+	maxHeapSize = "1g"
+	def jbrHome = (project.findProperty("p05.jbr") as String)
+		?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+	if (jbrHome != null) {
+		def javaBin = new File(jbrHome, probeIsWindows ? "bin/java.exe" : "bin/java")
+		if (javaBin.exists()) {
+			executable = javaBin.absolutePath
+			javaLauncher.set((JavaLauncher) null)
+		}
+	}
+	doFirst {
+		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		        "-XX:+IgnoreUnrecognizedVMOptions",
+		        "-XX:+AllowEnhancedClassRedefinition",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+		if (nativeLibPath != null) {
+			jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+		}
+	}
+}
+
 // 读者扫描成本探针：不需要 DCEVM，只需要 Instrumentation 来枚举已加载类。
 tasks.register("readerScanProbe", JavaExec) {
 	group = "verification"

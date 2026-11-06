@@ -641,6 +641,45 @@ tasks.register("initFixFallbackProbe", JavaExec) {
 	}
 }
 
+
+// 完整 agent 探针（需要 -javaagent 提供 Instrumentation 与 Remold 的初始化路径）。
+// 适用于要真实 redefine、并且需要 InitFix / 对齐 / 布局门一起参与的回归探针。
+def agentProbe = { String taskName, String mainClassName, String desc ->
+	tasks.register(taskName, JavaExec) {
+		group = "verification"
+		description = desc
+		dependsOn classes
+		dependsOn project(":core").tasks.named("shadowJar")
+		classpath = sourceSets.main.runtimeClasspath
+		mainClass = mainClassName
+		maxHeapSize = "1g"
+		def jbrHome = (project.findProperty("p05.jbr") as String)
+			?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+		if (jbrHome != null) {
+			def javaBin = new File(jbrHome, probeIsWindows ? "bin/java.exe" : "bin/java")
+			if (javaBin.exists()) {
+				executable = javaBin.absolutePath
+				javaLauncher.set((JavaLauncher) null)
+			}
+		}
+		doFirst {
+			jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+			        "-XX:+IgnoreUnrecognizedVMOptions",
+			        "-XX:+AllowEnhancedClassRedefinition",
+			        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+			        "--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
+			        "--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED",
+			        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+			if (nativeLibPath != null) {
+				jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+			}
+		}
+	}
+}
+
+agentProbe("retryBookkeepingProbe", "RetryBookkeepingProbe",
+	"逐类重试的记账回归 (RetryBookkeepingProbe)：redefine 成功但记账抛错时不得判定为 redefining failed")
+
 tasks.register("fingerprintDiskHashProbe", JavaExec) {
 	group = "verification"
 	description = "任务 2 复现：匿名类重命名后，未变化的第二轮必须零副作用"

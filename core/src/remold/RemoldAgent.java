@@ -3280,18 +3280,30 @@ public class RemoldAgent {
 			// redefineClasses 对一批类是原子的：批量失败意味着没有任何类生效。
 			// 因此 PENDING 补丁必须保留，留给下面的逐类重试；只有逐类重试也失败时才丢弃。
 			for (ClassDefinition def : definitions) {
+				String className = def.getDefinitionClass().getName();
+				boolean redefined = false;
 				try {
 					inst.redefineClasses(def);
-					bytecodeCache.put(def.getDefinitionClass().getName(), def.getDefinitionClassFile());
-					commitInvented(def.getDefinitionClass().getName());
-					successfulClasses.add(def.getDefinitionClass().getName());
-					if (DEBUG) log("[OK] " + def.getDefinitionClass().getName());
+					redefined = true;
 				} catch (Throwable e) {
-					error("[FAIL] " + def.getDefinitionClass().getName(), e);
-					skips.add(def.getDefinitionClass().getName(), RoundSkips.verdict("REDEFINE-FAILED",
+					error("[FAIL] " + className, e);
+					skips.add(className, RoundSkips.verdict("REDEFINE-FAILED",
 						e.getClass().getSimpleName(), "see the stack trace above; the file is requeued"));
 					InitFix.afterRedefineFailed(def.getDefinitionClass());
 				}
+				if (!redefined) continue;
+				// 记账不属于重定义事务：JVM 已经应用了这个类，此处再抛错不能回退成
+				// "redefine 失败" —— 那会 afterRedefineFailed（弹补丁 + 假台账）并让调用方
+				// 跳过 afterRedefine，结果是类已生效但存量实例保持类型默认值。
+				try {
+					bytecodeCache.put(className, def.getDefinitionClassFile());
+					commitInvented(className);
+				} catch (Throwable be) {
+					error("[BOOKKEEPING] " + className + " was redefined, but recording the new baseline failed."
+						+ " The class is live; its pending InitFix patch is kept and will be applied.", be);
+				}
+				successfulClasses.add(className);
+				if (DEBUG) log("[OK] " + className);
 			}
 			// 校验事务组的一致性
 			for (AlignmentTransaction tx : transactions) {

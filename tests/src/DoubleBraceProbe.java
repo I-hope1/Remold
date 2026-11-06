@@ -1,0 +1,823 @@
+import remold.LayoutGate;
+import remold.Reflect;
+import remold.RemoldAgent;
+import remold.offset.OffsetScanner;
+import remold.ref.InitFix;
+import remold.util.LibTool;
+
+import java.lang.instrument.Instrumentation;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Investigation-only probe for double-brace initialization (`new XXX() {{ ... }}`).
+ *
+ * <p>Each scenario uses a distinct package so static caches (bytecodeCache, fileDiskHashes,
+ * InitFix PENDING/LEDGER) cannot leak between them. No production code is modified.</p>
+ *
+ * <p>Run via {@code ./gradlew :tests:doubleBraceProbe}.</p>
+ */
+public class DoubleBraceProbe {
+
+	static int passed = 0;
+	static int failed = 0;
+	static Instrumentation inst;
+
+	static void check(boolean ok, String msg) {
+		System.out.println((ok ? "   [PASS] " : "   [FAIL] ") + msg);
+		if (ok) passed++; else failed++;
+	}
+
+	static void checkEq(Object expected, Object actual, String msg) {
+		boolean ok = expected == null ? actual == null : expected.equals(actual);
+		check(ok, msg + " [expected=" + expected + ", actual=" + actual + "]");
+	}
+
+	public static void main(String[] args) throws Throwable {
+		System.out.println("=== DoubleBraceProbe ===");
+		inst = RemoldAgent.getInstrumentation();
+		if (inst == null) {
+			System.err.println("[FAIL] no instrumentation");
+			System.exit(1);
+		}
+		RemoldAgent.INIT_FIX = true;
+		RemoldAgent.ANON_ALIGN = true;
+		RemoldAgent.LAYOUT_GATE = LayoutGate.MODE_REJECT;
+		RemoldAgent.OFFSET_STRICT = false;
+		RemoldAgent.DEBUG = false;
+		try {
+			if (!LibTool.initialized()) LibTool.init();
+		} catch (Throwable t) {
+			System.err.println("[FAIL] native libtool unavailable: " + t);
+			System.exit(1);
+		}
+
+		scenarioA1();
+		scenarioA2();
+		scenarioB();
+		scenarioC();
+		scenarioD1();
+		scenarioD1b();
+		scenarioD2();
+		scenarioD2b();
+		scenarioB2();
+		scenarioE1();
+		scenarioE2();
+		scenarioE3();
+
+		System.out.println("\n=== DOUBLE-BRACE PROBE SUMMARY: passed=" + passed + ", failed=" + failed + " ===");
+		if (failed > 0) System.exit(1);
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// A1: v2 adds a double-brace anonymous class where none existed.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioA1() throws Exception {
+		System.out.println("\n--- A1: v2 adds new double-brace anonymous class ---");
+		String pkg = "dba1";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Host", """
+				package dba1;
+				public class Host {
+				    public XXX make() { return null; }
+				}
+				""",
+			pkg + ".XXX", """
+				package dba1;
+				public class XXX { public int property; }
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Host", """
+				package dba1;
+				public class Host {
+				    public XXX make() { return new XXX() {{ property = 7; }}; }
+				}
+				""",
+			pkg + ".XXX", """
+				package dba1;
+				public class XXX { public int property; }
+				""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		f.hotswapAll();
+		Object anon = call0(host, "make");
+		Class<?> xxx = Class.forName(pkg + ".XXX", true, f.loader);
+		check(anon != null, "A1 make() returns a new anonymous instance");
+		checkEq(pkg + ".Host$1", anon.getClass().getName(), "A1 new class is Host$1");
+		check(anon.getClass().getSuperclass() == xxx, "A1 anonymous class extends XXX");
+		checkEq(7, getInt(anon, xxx, "property"), "A1 double-brace initializer ran (property)");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// A2: v2 inserts a new double-brace anonymous class before an existing one.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioA2() throws Exception {
+		System.out.println("\n--- A2: new double-brace anonymous class inserted before existing one ---");
+		String pkg = "dba2";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Host", """
+				package dba2;
+				public class Host {
+				    public XXX[] make() {
+				        return new XXX[]{ new XXX() {{ property = 1; }} };
+				    }
+				}
+				""",
+			pkg + ".XXX", """
+				package dba2;
+				public class XXX { public int property; }
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Host", """
+				package dba2;
+				public class Host {
+				    public XXX[] make() {
+				        return new XXX[]{
+				            new XXX() {{ property = 99; }},
+				            new XXX() {{ property = 1; }}
+				        };
+				    }
+				}
+				""",
+			pkg + ".XXX", """
+				package dba2;
+				public class XXX { public int property; }
+				""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		Object oldAnon = ((Object[]) call0(host, "make"))[0];
+		f.hotswapAll();
+		Object[] arr = (Object[]) call0(host, "make");
+		Class<?> xxx = Class.forName(pkg + ".XXX", true, f.loader);
+		checkEq(2, arr.length, "A2 make() now returns two anonymous instances");
+		checkEq(99, getInt(arr[0], xxx, "property"), "A2 inserted first instance has property=99");
+		checkEq(1, getInt(arr[1], xxx, "property"), "A2 existing slot has property=1");
+		check(arr[1].getClass() == oldAnon.getClass(),
+			"A2 existing anonymous class kept its old Class (actual=" + arr[1].getClass().getName()
+			+ ", old=" + oldAnon.getClass().getName() + ")");
+		check(arr[0].getClass() != oldAnon.getClass(),
+			"A2 inserted instance is a new Class (actual=" + arr[0].getClass().getName() + ")");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// B: existing double-brace instance, initializer block value changed.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioB() throws Exception {
+		System.out.println("\n--- B: existing instance, initializer block 1 -> 2 ---");
+		String pkg = "dbb";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Host", """
+				package dbb;
+				public class Host {
+				    public XXX make() { return new XXX() {{ property = 1; }}; }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbb;
+				public class XXX { public int property; }
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Host", """
+				package dbb;
+				public class Host {
+				    public XXX make() { return new XXX() {{ property = 2; }}; }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbb;
+				public class XXX { public int property; }
+				""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		Object old = call0(host, "make");
+		Class<?> anon = old.getClass();
+		Class<?> xxx = Class.forName(pkg + ".XXX", true, f.loader);
+		checkEq(1, getInt(old, xxx, "property"), "B precondition: old instance property=1");
+
+		f.hotswapAll();
+		Object fresh = call0(host, "make");
+		checkEq(1, getInt(old, xxx, "property"), "B old instance keeps property=1 (no constructor replay)");
+		checkEq(2, getInt(fresh, xxx, "property"), "B new instance gets property=2");
+		InitFix.PatchReport report = InitFix.getLastReport(anon);
+		check(report == null || !report.patchGenerated(),
+			"B InitFix did not generate a patch for the anonymous class (report=" + report + ")");
+		check(InitFix.getUnpatchedFields(anon).isEmpty(),
+			"B no FieldLedger entry (actual=" + InitFix.getUnpatchedFields(anon) + ")");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// B2: Mindustry-style parent field health, anonymous subclass initializer 90 -> 100;
+	// parent field marked @RemoldReinit in v2.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioB2() throws Exception {
+		System.out.println("\n--- B2: parent Block.health, anonymous initializer 90 -> 100, parent @RemoldReinit ---");
+		String pkg = "dbb2";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Block", """
+				package dbb2;
+				public class Block { public int health = 1; }
+				""",
+			pkg + ".Host", """
+				package dbb2;
+				public class Host {
+				    public Block make() { return new Block() {{ health = 90; }}; }
+				}
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Block", """
+				package dbb2;
+				import remold.annotation.RemoldReinit;
+				public class Block {
+				    @RemoldReinit(mode = RemoldReinit.Mode.OVERWRITE)
+				    public int health = 1;
+				}
+				""",
+			pkg + ".Host", """
+				package dbb2;
+				public class Host {
+				    public Block make() { return new Block() {{ health = 100; }}; }
+				}
+				""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		Object old = call0(host, "make");
+		Class<?> anon = old.getClass();
+		Class<?> block = Class.forName(pkg + ".Block", true, f.loader);
+		checkEq(90, getInt(old, block, "health"), "B2 precondition: old anon health=90");
+
+		f.hotswapAll();
+		Object fresh = call0(host, "make");
+		int oldHealth = getInt(old, block, "health");
+		InitFix.PatchReport anonReport = InitFix.getLastReport(anon);
+		InitFix.PatchReport blockReport = InitFix.getLastReport(block);
+		System.out.println("   [OBS] B2 old.health=" + oldHealth
+			+ ", new.health=" + getInt(fresh, block, "health")
+			+ ", anonPatch=" + (anonReport != null && anonReport.patchGenerated())
+			+ ", blockPatch=" + (blockReport != null && blockReport.patchGenerated())
+			+ ", anonLedger=" + InitFix.getUnpatchedFields(anon)
+			+ ", blockLedger=" + InitFix.getUnpatchedFields(block));
+		checkEq(100, getInt(fresh, block, "health"), "B2 new instance gets 100");
+		check(oldHealth == 90 || oldHealth == 1,
+			"B2 old instance stays 90 (no anon replay) or is reset by parent @RemoldReinit to 1; actual=" + oldHealth);
+		check(anonReport == null || !anonReport.patchGenerated(),
+			"B2 anonymous class itself has no InitFix patch (actual=" + anonReport + ")");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// C: add a field inside the double-brace anonymous class.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioC() throws Exception {
+		System.out.println("\n--- C: add field inside double-brace anonymous class ---");
+		String pkg = "dbc";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Host", """
+				package dbc;
+				public class Host {
+				    public XXX make() { return new XXX() {{ property = 1; }}; }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbc;
+				public class XXX { public int property; }
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Host", """
+				package dbc;
+				public class Host {
+				    public XXX make() {
+				        return new XXX() {
+				            { property = 1; }
+				            int extra = 5;
+				        };
+				    }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbc;
+				public class XXX { public int property; }
+				""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		Object old = call0(host, "make");
+		Class<?> anon = old.getClass();
+		Class<?> xxx = Class.forName(pkg + ".XXX", true, f.loader);
+		checkEq(1, getInt(old, xxx, "property"), "C precondition: old instance property=1");
+
+		f.hotswapAll();
+		Object fresh = call0(host, "make");
+		checkEq(5, getInt(old, anon, "extra"), "C old anonymous instance received extra=5");
+		checkEq(5, getInt(fresh, anon, "extra"), "C new anonymous instance has extra=5");
+		InitFix.PatchReport report = InitFix.getLastReport(anon);
+		check(report != null && report.patchGenerated(), "C InitFix generated a patch (report=" + report + ")");
+		check(InitFix.getUnpatchedFields(anon).isEmpty(),
+			"C no FieldLedger entry (actual=" + InitFix.getUnpatchedFields(anon) + ")");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// D1: added field initializer reads a newly added captured local (val$x).
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioD1() throws Exception {
+		System.out.println("\n--- D1: added field initializer reads newly added captured local (val$x) ---");
+		String pkg = "dbd1";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Host", """
+				package dbd1;
+				public class Host {
+				    public XXX make(int seed) { return new XXX() {{ property = 1; }}; }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbd1;
+				public class XXX { public int property; }
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Host", """
+				package dbd1;
+				public class Host {
+				    public XXX make(int seed) {
+				        final int outer = seed;
+				        return new XXX() {
+				            int extra;
+				            { property = 1; extra = 100 + outer; }
+				        };
+				    }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbd1;
+				public class XXX { public int property; }
+				""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		Object old = call1(host, "make", int.class, 42);
+		Class<?> anon = old.getClass();
+		Class<?> xxx = Class.forName(pkg + ".XXX", true, f.loader);
+		checkEq(1, getInt(old, xxx, "property"), "D1 precondition: old instance property=1");
+
+		f.hotswapAll();
+		Object fresh = call1(host, "make", int.class, 42);
+		boolean oldHasExtra = hasField(anon, "extra");
+		int oldExtra = oldHasExtra ? getInt(old, anon, "extra") : -1;
+		boolean freshHasExtra = hasField(fresh.getClass(), "extra");
+		int freshExtra = freshHasExtra ? getInt(fresh, fresh.getClass(), "extra") : -1;
+		InitFix.PatchReport report = InitFix.getLastReport(anon);
+		System.out.println("   [OBS] D1 oldClass=" + anon.getName() + ", oldHasExtra=" + oldHasExtra
+			+ ", old.extra=" + oldExtra + ", newClass=" + fresh.getClass().getName()
+			+ ", new.extra=" + freshExtra
+			+ ", patch=" + (report != null && report.patchGenerated())
+			+ ", ledger=" + InitFix.getUnpatchedFields(anon));
+		checkEq(142, freshExtra, "D1 new instance gets 100 + captured 42 = 142");
+		check(!oldHasExtra || oldExtra == 100,
+			"D1 old instance cannot recover the captured value; oldHasExtra=" + oldHasExtra
+			+ ", old.extra=" + oldExtra);
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// D1b: v1 already captures the local; v2 adds a field that reads the same captured value.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioD1b() throws Exception {
+		System.out.println("\n--- D1b: v1 already captures val$x; v2 adds field reading it ---");
+		String pkg = "dbd1b";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Host", """
+				package dbd1b;
+				public class Host {
+				    public XXX make(int seed) {
+				        final int outer = seed;
+				        return new XXX() {{ property = outer; }};
+				    }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbd1b;
+				public class XXX { public int property; }
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Host", """
+				package dbd1b;
+				public class Host {
+				    public XXX make(int seed) {
+				        final int outer = seed;
+				        return new XXX() {
+				            int extra;
+				            { property = outer; extra = 100 + outer; }
+				        };
+				    }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbd1b;
+				public class XXX { public int property; }
+				""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		Object old = call1(host, "make", int.class, 42);
+		Class<?> anon = old.getClass();
+		Class<?> xxx = Class.forName(pkg + ".XXX", true, f.loader);
+		checkEq(42, getInt(old, xxx, "property"), "D1b precondition: old.property=42 (captured)");
+		f.hotswapAll();
+		Object fresh = call1(host, "make", int.class, 42);
+		boolean oldHasExtra = hasField(anon, "extra");
+		int oldExtra = oldHasExtra ? getInt(old, anon, "extra") : -1;
+		boolean freshHasExtra = hasField(fresh.getClass(), "extra");
+		int freshExtra = freshHasExtra ? getInt(fresh, fresh.getClass(), "extra") : -1;
+		InitFix.PatchReport report = InitFix.getLastReport(anon);
+		System.out.println("   [OBS] D1b oldHasExtra=" + oldHasExtra + ", old.extra=" + oldExtra
+			+ ", new.extra=" + freshExtra
+			+ ", patch=" + (report != null && report.patchGenerated())
+			+ ", ledger=" + InitFix.getUnpatchedFields(anon));
+		check(oldHasExtra && oldExtra == 142, "D1b old instance gets extra=142 from existing val$x");
+		checkEq(142, freshExtra, "D1b new instance gets 142");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// D2: added field initializer reads a newly added outer this (this$0).
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioD2() throws Exception {
+		System.out.println("\n--- D2: added field initializer reads newly added outer this (this$0) ---");
+		String pkg = "dbd2";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Host", """
+				package dbd2;
+				public class Host {
+				    public int value = 7;
+				    public XXX make() { return new XXX() {{ property = 1; }}; }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbd2;
+				public class XXX { public int property; }
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Host", """
+				package dbd2;
+				public class Host {
+				    public int value = 7;
+				    public XXX make() {
+				        return new XXX() {
+				            int extra;
+				            { property = 1; extra = 100 + Host.this.value; }
+				        };
+				    }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbd2;
+				public class XXX { public int property; }
+				""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		Object old = call0(host, "make");
+		Class<?> anon = old.getClass();
+		Class<?> xxx = Class.forName(pkg + ".XXX", true, f.loader);
+		checkEq(1, getInt(old, xxx, "property"), "D2 precondition: old instance property=1");
+
+		f.hotswapAll();
+		Object fresh = call0(host, "make");
+		boolean oldHasExtra = hasField(anon, "extra");
+		int oldExtra = oldHasExtra ? getInt(old, anon, "extra") : -1;
+		boolean freshHasExtra = hasField(fresh.getClass(), "extra");
+		int freshExtra = freshHasExtra ? getInt(fresh, fresh.getClass(), "extra") : -1;
+		InitFix.PatchReport report = InitFix.getLastReport(anon);
+		System.out.println("   [OBS] D2 oldClass=" + anon.getName() + ", oldHasExtra=" + oldHasExtra
+			+ ", old.extra=" + oldExtra + ", newClass=" + fresh.getClass().getName()
+			+ ", new.extra=" + freshExtra
+			+ ", patch=" + (report != null && report.patchGenerated())
+			+ ", ledger=" + InitFix.getUnpatchedFields(anon));
+		checkEq(107, freshExtra, "D2 new instance gets 100 + outer.value 7 = 107");
+		check(!oldHasExtra || oldExtra == 100 || oldExtra == 107,
+			"D2 old instance did not get a crash; oldHasExtra=" + oldHasExtra
+			+ ", old.extra=" + oldExtra);
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// D2b: v1 already uses outer this; v2 adds a field reading the same this$0.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioD2b() throws Exception {
+		System.out.println("\n--- D2b: v1 already uses this$0; v2 adds field reading it ---");
+		String pkg = "dbd2b";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Host", """
+				package dbd2b;
+				public class Host {
+				    public int value = 7;
+				    public XXX make() { return new XXX() {{ property = Host.this.value; }}; }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbd2b;
+				public class XXX { public int property; }
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Host", """
+				package dbd2b;
+				public class Host {
+				    public int value = 7;
+				    public XXX make() {
+				        return new XXX() {
+				            int extra;
+				            { property = Host.this.value; extra = 100 + Host.this.value; }
+				        };
+				    }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbd2b;
+				public class XXX { public int property; }
+				""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		Object old = call0(host, "make");
+		Class<?> anon = old.getClass();
+		Class<?> xxx = Class.forName(pkg + ".XXX", true, f.loader);
+		checkEq(7, getInt(old, xxx, "property"), "D2b precondition: old.property=7 (outer this)");
+		f.hotswapAll();
+		Object fresh = call0(host, "make");
+		boolean oldHasExtra = hasField(anon, "extra");
+		int oldExtra = oldHasExtra ? getInt(old, anon, "extra") : -1;
+		boolean freshHasExtra = hasField(fresh.getClass(), "extra");
+		int freshExtra = freshHasExtra ? getInt(fresh, fresh.getClass(), "extra") : -1;
+		InitFix.PatchReport report = InitFix.getLastReport(anon);
+		System.out.println("   [OBS] D2b oldHasExtra=" + oldHasExtra + ", old.extra=" + oldExtra
+			+ ", new.extra=" + freshExtra
+			+ ", patch=" + (report != null && report.patchGenerated())
+			+ ", ledger=" + InitFix.getUnpatchedFields(anon));
+		check(oldHasExtra && oldExtra == 107, "D2b old instance gets extra=107 from existing this$0");
+		checkEq(107, freshExtra, "D2b new instance gets 107");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// E1: superclass XXX gains a field; existing anonymous subclass instance.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioE1() throws Exception {
+		System.out.println("\n--- E1: superclass XXX gains a field; existing Host$1 instance ---");
+		String pkg = "dbe1";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Host", """
+				package dbe1;
+				public class Host {
+				    public XXX make() { return new XXX() {{ property = 1; }}; }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbe1;
+				public class XXX { public int base = 1; public int property; }
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Host", """
+				package dbe1;
+				public class Host {
+				    public XXX make() { return new XXX() {{ property = 1; }}; }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbe1;
+				public class XXX { public int base = 1; public int added = 9; public int property; }
+				""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		Object old = call0(host, "make");
+		Class<?> anon = old.getClass();
+		Class<?> xxx = Class.forName(pkg + ".XXX", true, f.loader);
+		checkEq(1, getInt(old, xxx, "base"), "E1 precondition: old.base=1");
+		checkEq(1, getInt(old, xxx, "property"), "E1 precondition: old.property=1");
+
+		f.hotswap(pkg + ".XXX");
+		Field added = xxx.getDeclaredField("added");
+		added.setAccessible(true);
+		int oldAdded = added.getInt(old);
+		InitFix.PatchReport report = InitFix.getLastReport(xxx);
+		System.out.println("   [OBS] E1 old.added=" + oldAdded + ", patch=" + (report != null && report.patchGenerated())
+			+ ", ledger=" + InitFix.getUnpatchedFields(xxx));
+		checkEq(9, oldAdded, "E1 existing anonymous subclass instance received superclass field added=9");
+		checkEq(1, getInt(old, xxx, "property"), "E1 existing anonymous field property survived");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// E2: binding on an INHERITED field of the anonymous subclass; measure the real offset drift.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioE2() throws Exception {
+		System.out.println("\n--- E2: superclass XXX gains a field; binding on INHERITED Host$1.property ---");
+		String pkg = "dbe2";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Host", """
+				package dbe2;
+				public class Host {
+				    public XXX make() { return new XXX() {{ property = 1; }}; }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbe2;
+				public class XXX { public int base = 1; public int property; }
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Host", """
+				package dbe2;
+				public class Host {
+				    public XXX make() { return new XXX() {{ property = 1; }}; }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbe2;
+				public class XXX { public int base = 1; public int added = 9; public int property; }
+				""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		Object old = call0(host, "make");
+		Class<?> anon = old.getClass();
+		Class<?> xxx = Class.forName(pkg + ".XXX", true, f.loader);
+		checkEq(1, getInt(old, xxx, "property"), "E2 precondition: old.property=1");
+
+		Field propBefore = xxx.getDeclaredField("property");
+		propBefore.setAccessible(true);
+		long offsetBefore = Reflect.UNSAFE.objectFieldOffset(propBefore);
+
+		RemoldAgent.registerOffsetBinding(new OffsetScanner.Binding(
+			pkg.replace('.', '/') + "/Host$1", "property",
+			OffsetScanner.Kind.INSTANCE_OFFSET, OffsetScanner.Sink.STATIC_FIELD,
+			pkg.replace('.', '/') + "/Holder", "OFF", "probe", OffsetScanner.Confidence.EXACT));
+		try {
+			f.hotswap(pkg + ".XXX");
+		} finally {
+			RemoldAgent.clearOffsetIndex();
+		}
+
+		Field propAfter = xxx.getDeclaredField("property");
+		propAfter.setAccessible(true);
+		long offsetAfter = Reflect.UNSAFE.objectFieldOffset(propAfter);
+		int viaNew = Reflect.UNSAFE.getInt(old, offsetAfter);
+		int viaOld = Reflect.UNSAFE.getInt(old, offsetBefore);
+		boolean addedExists;
+		try {
+			xxx.getDeclaredField("added");
+			addedExists = true;
+		} catch (NoSuchFieldException e) {
+			addedExists = false;
+		}
+		System.out.println("   [OBS] E2 offsetBefore=" + offsetBefore + ", offsetAfter=" + offsetAfter
+			+ ", viaNew=" + viaNew + ", viaOld=" + viaOld + ", addedExists=" + addedExists);
+		check(addedExists, "E2 binding on INHERITED field property was NOT detected (XXX was redefined)");
+		checkEq(1, viaNew, "E2 new offset still reads property=1");
+		if (offsetBefore != offsetAfter) {
+			check(viaOld != 1,
+				"E2 offset moved and old offset no longer reads property=1 (old=" + viaOld + ")");
+		} else {
+			check(true, "E2 offset did not move; only a documentation correction is needed");
+		}
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// E3: binding on a field DECLARED in the anonymous subclass; the gate should reject.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioE3() throws Exception {
+		System.out.println("\n--- E3: superclass XXX gains a field; binding on Host$1 declared field ---");
+		String pkg = "dbe3";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Host", """
+				package dbe3;
+				public class Host {
+				    public XXX make() {
+				        return new XXX() { int own = 1; { property = 1; } };
+				    }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbe3;
+				public class XXX { public int base = 1; public int property; }
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Host", """
+				package dbe3;
+				public class Host {
+				    public XXX make() {
+				        return new XXX() { int own = 1; { property = 1; } };
+				    }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbe3;
+				public class XXX { public int base = 1; public int added = 9; public int property; }
+				""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		Object old = call0(host, "make");
+		Class<?> anon = old.getClass();
+		Class<?> xxx = Class.forName(pkg + ".XXX", true, f.loader);
+		checkEq(1, getInt(old, anon, "own"), "E3 precondition: old.own=1");
+
+		RemoldAgent.registerOffsetBinding(new OffsetScanner.Binding(
+			pkg.replace('.', '/') + "/Host$1", "own",
+			OffsetScanner.Kind.INSTANCE_OFFSET, OffsetScanner.Sink.STATIC_FIELD,
+			pkg.replace('.', '/') + "/Holder", "OFF", "probe", OffsetScanner.Confidence.EXACT));
+		try {
+			f.hotswap(pkg + ".XXX");
+		} finally {
+			RemoldAgent.clearOffsetIndex();
+		}
+		boolean addedExists;
+		try {
+			xxx.getDeclaredField("added");
+			addedExists = true;
+		} catch (NoSuchFieldException e) {
+			addedExists = false;
+		}
+		check(!addedExists, "E3 binding on DECLARED field own caused SuperclassDriftGate to reject");
+		checkEq(1, getInt(old, anon, "own"), "E3 existing instance kept own=1");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// Fixture helpers
+	// ------------------------------------------------------------------------------------------------
+
+	static final class Fixture {
+		final Map<String, byte[]> v2;
+		final FixtureLoader loader;
+		final Map<String, Path> paths = new HashMap<>();
+
+		Fixture(Map<String, byte[]> v2, FixtureLoader loader) {
+			this.v2 = v2;
+			this.loader = loader;
+		}
+
+		Object newHost() throws Exception {
+			Class<?> host = Class.forName(loader.firstHost, true, loader);
+			return host.getConstructor().newInstance();
+		}
+
+		void hotswapAll() throws Exception {
+			hotswap(v2.keySet().toArray(new String[0]));
+		}
+
+		void hotswap(String... classNames) throws Exception {
+			Set<Path> changed = new LinkedHashSet<>();
+			for (String name : classNames) {
+				Path p = paths.get(name);
+				if (p == null) throw new IllegalArgumentException("no path for " + name);
+				changed.add(p);
+			}
+			Method process = RemoldAgent.class.getDeclaredMethod("processChanges", Set.class, Class[].class);
+			process.setAccessible(true);
+			process.invoke(null, changed, inst.getAllLoadedClasses());
+		}
+	}
+
+	static Fixture fixture(Map<String, String> v1Sources, Map<String, String> v2Sources) throws Exception {
+		Map<String, byte[]> v1 = LayoutGateAssert.compile(v1Sources);
+		Map<String, byte[]> v2 = LayoutGateAssert.compile(v2Sources);
+		String firstHost = v1Sources.keySet().stream().filter(k -> k.endsWith(".Host")).findFirst().orElseThrow();
+		FixtureLoader loader = new FixtureLoader(v1, firstHost);
+		for (Map.Entry<String, byte[]> e : v1.entrySet()) {
+			RemoldAgent.bytecodeCache.put(e.getKey(), e.getValue());
+			RemoldAgent.sourceBytecodeCache.put(e.getKey(), e.getValue());
+		}
+		Path dir = Files.createTempDirectory("double_brace");
+		Fixture f = new Fixture(v2, loader);
+		for (Map.Entry<String, byte[]> e : v2.entrySet()) {
+			Path p = dir.resolve(e.getKey().replace('.', '/') + ".class");
+			Files.createDirectories(p.getParent());
+			Files.write(p, e.getValue());
+			f.paths.put(e.getKey(), p);
+		}
+		return f;
+	}
+
+	static final class FixtureLoader extends ClassLoader {
+		final Map<String, byte[]> classes;
+		final String firstHost;
+		FixtureLoader(Map<String, byte[]> classes, String firstHost) {
+			super(DoubleBraceProbe.class.getClassLoader());
+			this.classes = classes;
+			this.firstHost = firstHost;
+		}
+		@Override protected Class<?> findClass(String name) throws ClassNotFoundException {
+			byte[] bytes = classes.get(name);
+			if (bytes == null) throw new ClassNotFoundException(name);
+			return defineClass(name, bytes, 0, bytes.length);
+		}
+	}
+
+	static Object call0(Object target, String name) throws Exception {
+		return target.getClass().getMethod(name).invoke(target);
+	}
+
+	static Object call1(Object target, String name, Class<?> type, Object arg) throws Exception {
+		return target.getClass().getMethod(name, type).invoke(target, arg);
+	}
+
+	static boolean hasField(Class<?> type, String name) {
+		try { type.getDeclaredField(name); return true; }
+		catch (NoSuchFieldException e) { return false; }
+	}
+
+	static int getInt(Object target, Class<?> declaring, String name) throws Exception {
+		Field f = declaring.getDeclaredField(name);
+		f.setAccessible(true);
+		return f.getInt(target);
+	}
+}

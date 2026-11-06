@@ -266,7 +266,7 @@ public final class LayoutPredictor {
 							if ((liveField.getModifiers() & Modifier.STATIC) != 0) continue;
 							if (liveField.isSynthetic()) continue;
 							String fn = liveField.getName();
-							if (!seen.add(fn)) continue;
+							if (!seen.add(c.getName() + "#" + fn)) continue;
 							long oldOff = UNSAFE.objectFieldOffset(liveField);
 							Field predField = findField(predDescClass, fn);
 							if (predField == null) {

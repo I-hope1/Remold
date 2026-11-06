@@ -461,4 +461,38 @@ public class LayoutPredictorTest {
 			name -> true);
 		assertTrue(d.isSafe(), "no binding means no cached holder; must not reject: " + d.formatReport());
 	}
+
+	@Test
+	@DisplayName("同名遮蔽：子类与父类各声明 property，两个绑定都必须命中")
+	public void shadowedPropertyBindingsBothHit() throws Exception {
+		String base = "remold/offset/testpkg/ShadowBase";
+		String child = "remold/offset/testpkg/ShadowChild";
+		byte[] baseV1 = genClass(base, "java/lang/Object", Collections.singletonList(
+			new String[]{"property", "I", "instance"}));
+		byte[] baseV2 = genClass(base, "java/lang/Object", List.of(
+			new String[]{"property", "I", "instance"},
+			new String[]{"added", "I", "instance"}));
+		byte[] childV1 = genClass(child, base, Collections.singletonList(
+			new String[]{"property", "I", "instance"}));
+		LayoutPredictor.EphemeralClassLoader loader = new LayoutPredictor.EphemeralClassLoader(
+			Map.of(base, baseV1, child, childV1), null,
+			LayoutPredictorTest.class.getClassLoader());
+		Class<?> liveChild = Class.forName(child.replace('/', '.'), false, loader);
+
+		Binding baseBinding = new Binding(base, "property", Kind.INSTANCE_OFFSET,
+			Sink.STATIC_FIELD, "remold/offset/testpkg/Holder", "B", "probe", Confidence.EXACT);
+		Binding childBinding = new Binding(child, "property", Kind.INSTANCE_OFFSET,
+			Sink.STATIC_FIELD, "remold/offset/testpkg/Holder", "C", "probe", Confidence.EXACT);
+		LayoutPredictor.PredictionResult prediction = LayoutPredictor.predictLayout(
+			Class.forName(base.replace('/', '.'), false, loader),
+			baseV2,
+			Map.of(base, baseV2, child, childV1),
+			internal -> base.equals(internal) ? baseV1 : child.equals(internal) ? childV1 : null,
+			desc -> Set.of(child));
+		DriftDecision d = SuperclassDriftGate.checkLayoutDrift(base, prediction,
+			OffsetBindingIndex.from(List.of(baseBinding, childBinding)), name -> true, false, 0);
+		assertFalse(d.isSafe(), "both shadowed bindings must be detected: " + d.formatReport());
+		assertTrue(d.hits().stream().anyMatch(h -> h.fieldName().equals("property")),
+			"expected property drift hit, actual=" + d.hits());
+	}
 }

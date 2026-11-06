@@ -1623,18 +1623,17 @@ public class RemoldAgent {
 		// 否则 align(old == new) 会静默地什么都不做（实测见 docs/initfix/08-test-audit.md §10.5）。
 		Map<String, byte[]> prevSourceBytes = new HashMap<>();
 		Map<String, byte[]> sourceBefore = new HashMap<>();
+		Map<String, byte[]> driftOldBytes = new HashMap<>();
 		Set<String> loadedBefore = new HashSet<>(loadedClassesMap.keySet());
 		for (String key : newBatchBytes.keySet()) {
 			byte[] prev = sourceBytecodeCache.get(key);
 			sourceBefore.put(key, prev);
+			driftOldBytes.put(key, bytecodeCache.get(key));
 			if (prev != null) prevSourceBytes.put(key, prev);
 		}
 		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
 			sourceBytecodeCache.put(e.getKey(), e.getValue());
 		}
-
-		// L0: make an existing-field initializer change visible; detection only, no patch.
-		remold.ref.InitializerDrift.report(newBatchBytes);
 
 		// ---- 字节码重织入桥（Mixin / AspectJ / 自定义字节码增强器）----
 		// 位置：源码级对齐之后、局部类门与布局门之前。
@@ -1919,6 +1918,14 @@ public class RemoldAgent {
 		// 对齐阶段必须先看到本轮新字节，所以上面暂存写入；这里按类回滚未生效的已加载类。
 		// 注入的新类不在 loadedBefore 中，保持新源码；成功类保持新源码。
 		rollbackSourceCache(sourceBefore, redefinedOk, loadedBefore);
+
+		// L0 only sees classes that actually reached the JVM: gate-rejected/skipped
+		// classes must produce zero INIT-DRIFT and no instance enumeration.
+		Map<String, byte[]> appliedForDrift = new LinkedHashMap<>();
+		for (String key : newBatchBytes.keySet()) {
+			if (redefinedOk.contains(key)) appliedForDrift.put(key, newBatchBytes.get(key));
+		}
+		remold.ref.InitializerDrift.report(appliedForDrift, driftOldBytes);
 
 		// ---- 指纹落账 + 失败回队 ----
 		//
@@ -2262,7 +2269,10 @@ public class RemoldAgent {
 
 	//region Class Injection and Redefinition
 	/**
-	 * 直接定义类，而不是被动加载
+	 * 直接定义类，而不是被动加载。
+	 *
+	 * <p>基线顺序：bytecodeCache → fetchOriginalBytecode → sourceBytecodeCache；
+	 * 三者都没有时 warn 并拒绝，不能跳过 LayoutGate/InitFix 静默重定义。</p>
 	 */
 	private static boolean injectNewClass(String className, Path path, byte[] bytes) {
 		if (isNonLoadableClass(className)) {
@@ -3655,47 +3665,53 @@ public class RemoldAgent {
 			byte[] runtimeBytes = applyTransformerBridges(targetClass.getClassLoader(), className, targetClass, newBytecode);
 
 			byte[] oldBytes = bytecodeCache.get(className);
-			if (oldBytes != null) {
-				if (Arrays.equals(oldBytes, runtimeBytes)) {
-					if (DEBUG) log("[DYNAMIC-REDEFINE] " + className + " runtime bytecode unchanged; skipped.");
-					return true;
-				}
-				ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, runtimeBytes);
-				if (diff.hierarchyChanged) {
-					error("REJECTED: Class hierarchy change detected for dynamic class " + className);
-					return false;
-				}
-				LayoutDecision decision = decideDynamicLayout(targetClass, className, diff, runtimeBytes);
-				String why = decision.reason() != null
-					? decision.reason()
-					: (decision.layout() != null ? decision.layout().detail() : "unknown reason");
-				switch (decision.action()) {
-					case PASS:
-						break;
-					case WAIVE_NO_READERS:
-						warn("[LAYOUT-WAIVE] Dynamic class " + className + ": member(s) removed ("
-						     + why + ") and no out-of-batch reader still needs them; redefining.");
-						break;
-					case WAIVE:
-						warn("[LAYOUT-WAIVE] Dynamic class " + className + ": incompatible field layout ("
-						     + why + ") but no live instances; redefining anyway — new instances go"
-						     + " through the new constructor and initialize correctly.");
-						break;
-					case WAIVE_REINIT:
-						info("[LAYOUT-REINIT] Dynamic class " + className
-						     + ": 经 @RemoldReinit 授权放行字段类型变更 (" + why + ")");
-						break;
-					case SKIP:
-						warn("[LAYOUT-SKIP] Dynamic class " + className + ": layout gate skipped — no"
-						     + " usable baseline; redefining without a field-layout check.");
-						break;
-					case REJECT:
-					default:
-						warn("[LAYOUT-REJECT] Dynamic class " + className + " rejected: " + why);
-						return false;
-				}
-				InitFix.transform(targetClass, runtimeBytes, diff);
+			if (oldBytes == null) oldBytes = fetchOriginalBytecode(targetClass);
+			if (oldBytes == null) oldBytes = sourceBytecodeCache.get(className);
+			if (oldBytes == null) {
+				warn("[DYNAMIC-REDEFINE] No baseline for " + className
+					+ " (bytecodeCache/sourceBytecodeCache/fetchOriginalBytecode all empty);"
+					+ " refusing to redefine without LayoutGate and InitFix.");
+				return false;
 			}
+			if (Arrays.equals(oldBytes, runtimeBytes)) {
+				if (DEBUG) log("[DYNAMIC-REDEFINE] " + className + " runtime bytecode unchanged; skipped.");
+				return true;
+			}
+			ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, runtimeBytes);
+			if (diff.hierarchyChanged) {
+				error("REJECTED: Class hierarchy change detected for dynamic class " + className);
+				return false;
+			}
+			LayoutDecision decision = decideDynamicLayout(targetClass, className, diff, runtimeBytes);
+			String why = decision.reason() != null
+				? decision.reason()
+				: (decision.layout() != null ? decision.layout().detail() : "unknown reason");
+			switch (decision.action()) {
+				case PASS:
+					break;
+				case WAIVE_NO_READERS:
+					warn("[LAYOUT-WAIVE] Dynamic class " + className + ": member(s) removed ("
+					     + why + ") and no out-of-batch reader still needs them; redefining.");
+					break;
+				case WAIVE:
+					warn("[LAYOUT-WAIVE] Dynamic class " + className + ": incompatible field layout ("
+					     + why + ") but no live instances; redefining anyway — new instances go"
+					     + " through the new constructor and initialize correctly.");
+					break;
+				case WAIVE_REINIT:
+					info("[LAYOUT-REINIT] Dynamic class " + className
+					     + ": 经 @RemoldReinit 授权放行字段类型变更 (" + why + ")");
+					break;
+				case SKIP:
+					warn("[LAYOUT-SKIP] Dynamic class " + className + ": layout gate skipped — no"
+					     + " usable baseline; redefining without a field-layout check.");
+					break;
+				case REJECT:
+				default:
+					warn("[LAYOUT-REJECT] Dynamic class " + className + " rejected: " + why);
+					return false;
+			}
+			InitFix.transform(targetClass, runtimeBytes, diff);
 
 			enterInternalRedefine(Collections.singleton(className));
 			try {

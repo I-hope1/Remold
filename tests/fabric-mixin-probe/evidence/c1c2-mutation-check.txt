@@ -1,0 +1,10 @@
+Mutation check for the C1/C2 regression tests (scratch worktree build/wt-mut @ 6091057, removed afterwards)
+date: 2026-11-06T20:14:23+08:00
+
+--- mutation 1: revert the C2 fix in AnnotationTransformer (always re-weave) ---
+expected: AnnotationTransformerBridgeCountTest red, EntityProbeRetransformContextTest green
+observed: 2 tests completed, 1 failed -> AnnotationTransformerBridgeCountTest > bridgeRunsOnlyForRealSourceRedefines() FAILED
+
+--- mutation 2: remove enterInternalRetransform/exitInternalRedefine from DynamicProfilerAPI.toggleEntityProbe ---
+expected: EntityProbeRetransformContextTest red, AnnotationTransformerBridgeCountTest green
+observed: 2 tests completed, 1 failed -> EntityProbeRetransformContextTest > entityProbeRetransformRunsAsInternalRetransform() FAILED

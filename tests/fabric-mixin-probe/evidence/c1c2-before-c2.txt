@@ -1,0 +1,38 @@
+C1+C2 joint reproduction: entity-probe toggle -> duplicate @Unique fields -> LayoutGate
+variant: before-c2  (f2ff6bf (C2 fix absent))
+date: 2026-11-06T20:10:30+08:00
+branch: agent/batch-c-mixin-fix
+server: real Fabric 1.21.1 KnotServer, real Remold -javaagent
+toggle: DynamicProfilerAPI.toggleEntityProbe(com.example.item.RemoldWandItem, "use", true)
+
+=== C1+C2 joint reproduction: before-c2 ===
+agent_jar_sha256=68372519d222c1da481dac6a678d6491efd9f8365dbdfcea8bc53d68d98d8c22
+server_exit=0
+[C1C2] PHASE0 cache_sha=0f8bc4f21967f054(5482B) live_sha=4209a89477d7da63(5272B)
+[C1C2] WAIT-TOGGLE
+[C1C2] TOGGLE invoking toggleEntityProbe(com.example.item.RemoldWandItem, "use", true) [self]
+[Remold] Retransformed 1 classes for use
+[C1C2] TOGGLE returned normally
+[C1C2] TOGGLE cache_sha=92baf6e768746e03(5683B) cache_fields=[message, fireballPower, remold$useCount, remold$state, fdea52d3$example_mod$remold$useCount$0, fdea52d3$example_mod$remold$state$1]
+[C1C2] TOGGLE cache_state_field_count=1 cache_useCount_field_count=1
+[C1C2] TOGGLE cache_duplicate_fields=[]
+[C1C2] TOGGLE fetchBytecodeMemory=null; falling back to direct capture
+[C1C2] CAPTURE-DEBUG modifiable=true retransformSupported=true
+[C1C2] CAPTURE-DEBUG retransformClasses returned, captured=false
+[C1C2] TOGGLE live-bytes unavailable: both capture paths returned null
+[C1C2] TOGGLE reflective fields (may be stale on this JBR)=[message, fireballPower, remold$useCount, remold$state]
+[C1C2] TOGGLE-DONE
+[C1C2] WAIT-HOTSWAP
+[Remold] [LAYOUT-READERS] scanned 9 class(es) for removed members of 1 class(es) in 168ms; dangling=2, abstract-gaps=0, dispatch-shifts=0
+[Remold] [ANON-LAYOUT] instance scan com.example.item.RemoldWandItem -> LIVE (105 ms)
+[Remold] [WARN] [LAYOUT-REJECT] com.example.item.RemoldWandItem: REFUSED redefine — field layout incompatible (field(s) removed: [fdea52d3$example_mod$remold$useCount$0, fdea52d3$example_mod$remold$state$1]). Host com.example.item.RemoldWandItem and its anonymous classes are skipped this round; existing instances keep running the OLD code, so this edit will NOT take effect for them. TO PROCEED: recreate/restart so the classes load fresh, or set -Dremold.agent.layout_gate=warn to force the redefine and accept the consequences.
+[Remold] [WARN] [HOTSWAP-SKIPPED]   com.example.item.RemoldWandItem  <- LAYOUT-REJECT: field(s) removed: fdea52d3$example_mod$remold$useCount$0, fdea52d3$example_mod$remold$state$1 (1 out-of-batch reader(s)) — restore the removed field(s) or restart to continue
+[C1C2] HOTSWAP success=false rejected=true
+[C1C2] HOTSWAP cache_sha=92baf6e768746e03(5683B) cache_fields=[message, fireballPower, remold$useCount, remold$state, fdea52d3$example_mod$remold$useCount$0, fdea52d3$example_mod$remold$state$1]
+[C1C2] HOTSWAP cache_state_field_count=1
+[C1C2] HOTSWAP cache_duplicate_fields=[]
+[C1C2] LOG [Remold] [LAYOUT-READERS] scanned 9 class(es) for removed members of 1 class(es) in 168ms; dangling=2, abstract-gaps=0, dispatch-shifts=0
+[C1C2] LOG [Remold] [ANON-LAYOUT] instance scan com.example.item.RemoldWandItem -> LIVE (105 ms)
+[C1C2] LOG [Remold] [WARN] [LAYOUT-REJECT] com.example.item.RemoldWandItem: REFUSED redefine — field layout incompatible (field(s) removed: [fdea52d3$example_mod$remold$useCount$0, fdea52d3$example_mod$remold$state$1]). Host com.example.item.RemoldWandItem and its anonymous classes are skipped this round; existing instances keep running the OLD code, so this edit will NOT take effect for them. TO PROCEED: recreate/restart so the classes load fresh, or set -Dremold.agent.layout_gate=warn to force the redefine and accept the consequences.
+[C1C2] LOG [Remold] [WARN] [HOTSWAP-SKIPPED]   com.example.item.RemoldWandItem  <- LAYOUT-REJECT: field(s) removed: fdea52d3$example_mod$remold$useCount$0, fdea52d3$example_mod$remold$state$1 (1 out-of-batch reader(s)) — restore the removed field(s) or restart to continue
+[C1C2] DONE

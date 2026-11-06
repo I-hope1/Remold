@@ -154,8 +154,13 @@ public class AnnotationTransformer implements ClassFileTransformer {
 			boolean noOpExternal = isNoOpExternalRedefine(dotClassName, classfileBuffer);
 			boolean captureOnly = internalCtx != null && internalCtx.suppressesPostRedefine();
 
-			// 1. 重新织入 Mixin 注入点
-			byte[] woven = RemoldAgent.applyTransformerBridges(loader, dotClassName, classBeingRedefined, bytes);
+			// 1. 重新织入 Mixin 注入点。
+			// 基线捕获路径（retransformLoaded / 外部 retransform）拿到的 classfileBuffer 已经是
+			// JVM 里实际生效的字节（对 Mixin 目标而言已织入）；再走一遍桥会在已织入字节上二次织入，
+			// 追加 hash-mangled 的 @Unique 重复字段，之后 LayoutGate 会把它们看成"被删除"。
+			// 因此 captureOnly 时直接把 JVM 输入当作基线，不再织入。
+			byte[] woven = captureOnly ? bytes
+				: RemoldAgent.applyTransformerBridges(loader, dotClassName, classBeingRedefined, bytes);
 			if (woven != null && woven != bytes) {
 				bytes = woven;
 				modified = true;

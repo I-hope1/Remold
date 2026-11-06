@@ -370,6 +370,17 @@
 - **关联设计规范**：无。
 - **关联架构决策**：无。
 
+
+### 风险 14：`SuperclassDriftGate` 漏检子类继承字段的偏移绑定
+- **风险描述与底层机制**：`LayoutPredictor` 在预测父类新增字段造成的漂移时，只遍历已加载子孙类的 `getDeclaredFields()`；`SuperclassDriftGate` 的兜底路径也只取 `getDeclaredInstanceFields`。因此，偏移绑定指向**子类从父类继承来的字段**时（例如 `Host$1.property` 实际声明在 `XXX`），父类新增字段导致的物理偏移变化不会被检测，`XXX` 仍会被 redefine。
+- **触发条件**：`OffsetBindingIndex` 中存在 `targetClass = 子类`、`targetField = 继承字段` 的绑定；父类新增实例字段并进入同一轮 redefine。
+- **已观测证据**：`DoubleBraceProbe` E2（JBR 25.0.2）：`XXX` 新增 `added` 前后，`Host$1.property` 的 `Unsafe.objectFieldOffset` 从 **16** 变为 **20**；`offsetAfter` 读 `property=1`，`offsetBefore` 读到新字段 `added=9`。本轮没有 `LAYOUT-REJECT`/`SUPERCLASS_FIELD_DRIFT`，`XXX` 仍被重定义。
+- **影响**：真实代码若缓存了该继承字段的旧偏移，会静默读到相邻字段；属于 P2（数据错读，非进程崩溃）。
+- **当前处置**：本轮只记录，未修；`docs/offset/01` 的“全部实例字段”已改为“自身声明字段”并标注该盲区。
+- **候选关闭方向**：在漂移检测中沿继承链展开子类的字段（含继承字段），或让 `OffsetBindingIndex` 把继承字段的绑定归属到声明类；同时补 E2 的正向回归。
+- **关联设计规范**：[`docs/offset/01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §1.1。
+- **关联架构决策**：无。
+
 ---
 
 ## 6. 框架集成插件与资源热更新 (Framework Plugins & Asset Hot-Reload)

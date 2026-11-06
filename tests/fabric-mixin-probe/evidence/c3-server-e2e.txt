@@ -1,0 +1,120 @@
+C3 end-to-end: real Fabric 1.21.1 KnotServer + real Remold -javaagent
+date: 2026-11-06T19:48:48+08:00
+git branch: agent/batch-c-mixin-fix
+git HEAD: d5327fee299e1a919a50d7c808ae7ab489dcc4e2
+JVM: Picked up JAVA_TOOL_OPTIONS: -XX:UseAVX=2
+agent jar sha256: f1fb5068d300557d275712d40b34ec1a8571d375ec269c47a56ee7121b5b1e40
+plugin-mixin sha256: 9e18006d1b94b14813b2e2cd854813f58998e40d5133c020941b1922d32664e6
+fabric loader: 0.16.9  minecraft: 1.21.1  mixin: 0.8.7 (sponge-mixin 0.15.4+mixin.0.8.7)
+command: env remold.agent.debug=true <jbr21>/bin/java @build/remold/server.args
+
+=== driver summary ===
+server_exit=0
+--- [C3] probe lines ---
+[C3] LISTENER registered via remold.RemoldAgent (interface loader=null)
+[C3] PHASE0 target=com.example.item.RemoldWandItem loader=net.fabricmc.loader.impl.launch.knot.KnotClassLoader@30a3107a
+[C3] PHASE0 itemClass=com.example.item.RemoldWandItem state=7
+[C3] PHASE0 reflective fields (STALE on JBR after redefine, recorded only)=[message, fireballPower, remold$useCount, remold$state]
+[C3] PHASE0 reflective methods (STALE on JBR after redefine, recorded only)=[use, onReload, handler$zdp000$example_mod$remold$countUse, handler$zdp000$example_mod$remold$c3ProbeDump, lambda$use$0]
+[C3] WAIT-STAGE1
+[C3] BATCH#1 classes=[com.example.item.RemoldWandItem]
+[C3] PASS stage1 real redefine batch contains com.example.item.RemoldWandItem
+[C3] PASS stage1 applied bytes contain method remold$c3Method
+[C3] PASS stage1 applied bytes keep exactly one @Unique field remold$state
+[C3] PASS stage1 applied bytes keep exactly one @Unique field remold$useCount
+[C3] PASS stage1 applied bytes have no duplicate field names
+[C3] PASS stage1 applied bytes keep one @Inject handler remold$countUse
+[C3] PASS stage1 @OnReload on live instance saw new method
+[C3] PASS stage1 @Inject handler alive and @Unique state preserved (7)
+[C3] STAGE1 applied fields=[message, fireballPower, remold$useCount, remold$state]
+[C3] STAGE1 applied methods=[<init>, remold$c3Method, use, onReload, lambda$use$0, handler$zdp000$example_mod$remold$c3ProbeDump, handler$zdp000$example_mod$remold$countUse]
+[C3] STAGE1-DONE
+[C3] WAIT-STAGE2
+[C3] BATCH#2 classes=[com.example.item.RemoldWandItem]
+[C3] PASS stage2 real redefine batch contains com.example.item.RemoldWandItem
+[C3] PASS stage2 applied bytes contain exactly one field remold$c3Added
+[C3] PASS stage2 applied bytes have no duplicate field names
+[C3] PASS stage2 applied bytes keep exactly one @Unique field remold$state
+[C3] PASS stage2 applied bytes keep one @Inject handler remold$countUse
+[C3] PASS stage2 InitFix patched live instance: @OnReload read added=456
+[C3] PASS stage2 @Unique state still 7 on the live instance
+[C3] STAGE2 applied fields=[message, fireballPower, remold$c3Added, remold$useCount, remold$state]
+[C3] STAGE2 applied methods=[<init>, remold$c3Method, use, onReload, lambda$use$0, handler$zdp000$example_mod$remold$c3ProbeDump, handler$zdp000$example_mod$remold$countUse]
+[C3] STAGE2-DONE
+[C3] WAIT-STAGE3
+[C3] PASS no-op round #1 produced no redefine batch
+[C3] PASS no-op round #1 produced no @OnReload callback
+[C3] PASS no-op round #1 applied bytes unchanged
+[C3] STAGE3-DONE
+[C3] WAIT-STAGE4
+[C3] PASS no-op round #2 produced no redefine batch
+[C3] PASS no-op round #2 produced no @OnReload callback
+[C3] PASS no-op round #2 applied bytes unchanged
+[C3] STAGE4-DONE
+[C3] WAIT-STAGE5
+[C3] BATCH#3 classes=[com.example.item.RemoldWandItem]
+[C3] PASS stage5 MixinHotSwap batch contains com.example.item.RemoldWandItem
+[C3] PASS stage5 applied bytes contain exactly one mixin @Unique field remold$author
+[C3] PASS stage5 applied bytes have no duplicate field names
+[C3] PASS stage5 applied bytes keep exactly one @Unique field remold$state
+[C3] PASS stage5 mixin @Inject handler saw state=7 and the new @Unique field
+[C3] STAGE5 applied fields=[message, fireballPower, remold$c3Added, remold$useCount, remold$state, remold$author]
+[C3] STAGE5 applied methods=[<init>, remold$c3Method, use, onReload, lambda$use$0, handler$zdp000$example_mod$remold$c3ProbeDump, handler$zdp000$example_mod$remold$countUse]
+[C3] STAGE5-DONE
+[C3] RESULT PASS failures=[]
+--- [C3-READ] target @OnReload lines ---
+[C3-READ] stage1 method=C3-METHOD-V1 message=Hello from Remold Fabric Hot Reload! fireballPower=21
+[C3-READ] stage2 method=C3-METHOD-V1 added=456 message=Hello from Remold Fabric Hot Reload! fireballPower=21
+[C3-READ] stage2 method=C3-METHOD-V1 added=456 message=Hello from Remold Fabric Hot Reload! fireballPower=21
+--- [C3-MIXIN] @Inject/@Unique lines ---
+[C3-MIXIN] onReload state=7 useCount=0
+[C3-MIXIN] onReload state=7 useCount=0
+[C3-MIXIN] onReload state=7 useCount=0 author=Modder
+--- hot-swap pipeline lines ---
+[Remold] [Mixin] Re-weaving bridge registered (plugin-mixin)
+[Remold] [Mixin] class-info sync: com.example.mixin.RemoldWandItemMixin addedFields=0, addedMethods=0
+[Remold] [Mixin] com.example.mixin.RemoldWandItemMixin reloaded; affected target(s): [com.example.item.RemoldWandItem]
+[Remold] [Mixin] bridge in: com.example.ExampleMod, sourceBytes=1612, transformer=org.spongepowered.asm.mixin.transformer.MixinTransformer
+[Remold] [Mixin] bridge out: com.example.ExampleMod, wovenBytes=1612 (unchanged from source; no mixin applied or already woven)
+[Remold] [Mixin] bridge in: com.example.item.RemoldWandItem, sourceBytes=4163, transformer=org.spongepowered.asm.mixin.transformer.MixinTransformer
+[Remold] [Mixin] bridge out: com.example.item.RemoldWandItem, wovenBytes=5770 (rewritten)
+[Remold] HotSwap successful: 1 classes redefined.
+[Remold] [POST] post-processing 1 class(es): [com.example.item.RemoldWandItem]
+[Remold] [POST] post-processing done for 1 class(es)
+[Remold] Unchanged: 1 class(es) had identical bytes on disk.
+[Remold] [Mixin] bridge in: com.example.item.RemoldWandItem, sourceBytes=4163, transformer=org.spongepowered.asm.mixin.transformer.MixinTransformer
+[Remold] [Mixin] bridge out: com.example.item.RemoldWandItem, wovenBytes=5770 (rewritten)
+[Remold] [Mixin] Target class com.example.item.RemoldWandItem re-woven with updated mixin and redefined
+[Remold] [Mixin] class-info sync: com.example.mixin.RemoldWandItemMixin addedFields=0, addedMethods=0
+[Remold] [Mixin] com.example.mixin.RemoldWandItemMixin reloaded; affected target(s): [com.example.item.RemoldWandItem]
+[Remold] [Mixin] bridge in: com.example.ExampleMod, sourceBytes=1612, transformer=org.spongepowered.asm.mixin.transformer.MixinTransformer
+[Remold] [Mixin] bridge out: com.example.ExampleMod, wovenBytes=1612 (unchanged from source; no mixin applied or already woven)
+[Remold] [Mixin] bridge in: com.example.item.RemoldWandItem, sourceBytes=4222, transformer=org.spongepowered.asm.mixin.transformer.MixinTransformer
+[Remold] [Mixin] bridge out: com.example.item.RemoldWandItem, wovenBytes=5829 (rewritten)
+[Remold] HotSwap successful: 1 classes redefined.
+[Remold] [POST] post-processing 1 class(es): [com.example.item.RemoldWandItem]
+[Remold] [POST] post-processing done for 1 class(es)
+[Remold] Unchanged: 1 class(es) had identical bytes on disk.
+[Remold] [Mixin] bridge in: com.example.item.RemoldWandItem, sourceBytes=4222, transformer=org.spongepowered.asm.mixin.transformer.MixinTransformer
+[Remold] [Mixin] bridge out: com.example.item.RemoldWandItem, wovenBytes=5829 (rewritten)
+[Remold] [Mixin] Target class com.example.item.RemoldWandItem re-woven with updated mixin and redefined
+[Remold] [Mixin] bridge in: com.example.item.RemoldWandItem, sourceBytes=4222, transformer=org.spongepowered.asm.mixin.transformer.MixinTransformer
+[Remold] [Mixin] bridge out: com.example.item.RemoldWandItem, wovenBytes=5829 (rewritten)
+[Remold] [POST] post-processing 0 class(es): []
+[Remold] [POST] post-processing done for 0 class(es)
+[Remold] Unchanged: 1 class(es) had identical bytes on disk.
+[Remold] [Mixin] bridge in: com.example.item.RemoldWandItem, sourceBytes=4222, transformer=org.spongepowered.asm.mixin.transformer.MixinTransformer
+[Remold] [Mixin] bridge out: com.example.item.RemoldWandItem, wovenBytes=5829 (rewritten)
+[Remold] [POST] post-processing 0 class(es): []
+[Remold] [POST] post-processing done for 0 class(es)
+[Remold] Unchanged: 1 class(es) had identical bytes on disk.
+[Remold] [Mixin] class-info sync: com.example.mixin.RemoldWandItemMixin addedFields=1, addedMethods=0
+[Remold] [Mixin] com.example.mixin.RemoldWandItemMixin reloaded; affected target(s): [com.example.item.RemoldWandItem]
+[Remold] [POST] post-processing 0 class(es): []
+[Remold] [POST] post-processing done for 0 class(es)
+[Remold] [Mixin] bridge in: com.example.item.RemoldWandItem, sourceBytes=4222, transformer=org.spongepowered.asm.mixin.transformer.MixinTransformer
+[Remold] [Mixin] bridge out: com.example.item.RemoldWandItem, wovenBytes=5943 (rewritten)
+[Remold] [Mixin] Target class com.example.item.RemoldWandItem re-woven with updated mixin and redefined
+--- INIT-DRIFT lines (must be empty) ---
+init_drift_count=0
+0

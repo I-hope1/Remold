@@ -371,4 +371,69 @@ public class InitializerDriftTest {
 		assertTrue(InitializerDrift.detect(v1.get("idl13.Host"), v2.get("idl13.Host")).isEmpty(),
 			"L0 intentionally does not cover static fields");
 	}
+
+	@Test
+	void inheritedWordingDoesNotRecommendReinit() throws Exception {
+		Map<String, byte[]> v1 = compile("idl14", """
+			package idl14;
+			public class Host { public Parent make() { return new Parent() {{ health = 90; }}; } }
+			""", """
+			package idl14;
+			public class Parent { public int health; }
+			""");
+		Map<String, byte[]> v2 = compile("idl14", """
+			package idl14;
+			public class Host { public Parent make() { return new Parent() {{ health = 100; }}; } }
+			""", """
+			package idl14;
+			public class Parent { public int health; }
+			""");
+		java.util.List<String> warns = warningsFor("idl14.Host$1", v1.get("idl14.Host$1"),
+			Map.of("idl14.Host$1", v2.get("idl14.Host$1")));
+		assertEquals(1, warns.size(), warns.toString());
+		assertTrue(warns.get(0).contains("inherited field initializer"), warns.get(0));
+		assertFalse(warns.get(0).contains("use @RemoldReinit"), warns.get(0));
+	}
+
+	@Test
+	void moreThanFiveClassesAreAggregated() throws Exception {
+		java.util.Map<String, byte[]> batch = new java.util.LinkedHashMap<>();
+		java.util.Map<String, byte[]> old = new java.util.LinkedHashMap<>();
+		for (int i = 0; i < 6; i++) {
+			String pkg = "idl15_" + i;
+			Map<String, byte[]> v1 = compile(pkg, """
+				package %s;
+				public class Host { public Parent make() { return new Parent() {{ health = 1; }}; } }
+				""".formatted(pkg), """
+				package %s;
+				public class Parent { public int health; }
+				""".formatted(pkg));
+			Map<String, byte[]> v2 = compile(pkg, """
+				package %s;
+				public class Host { public Parent make() { return new Parent() {{ health = 2; }}; } }
+				""".formatted(pkg), """
+				package %s;
+				public class Parent { public int health; }
+				""".formatted(pkg));
+			String key = pkg + ".Host$1";
+			batch.put(key, v2.get(key));
+			old.put(key, v1.get(key));
+		}
+		java.util.List<String> warns = new java.util.ArrayList<>();
+		remold.RemoldAgent.Logger oldLogger = remold.RemoldAgent.logger;
+		remold.RemoldAgent.logger = new remold.RemoldAgent.Logger() {
+			public void log(String msg) {}
+			public void info(String msg) {}
+			public void warn(String msg) { warns.add(msg); }
+			public void error(String msg) {}
+			public void error(String msg, Throwable t) {}
+		};
+		try {
+			InitializerDrift.report(batch, old);
+		} finally {
+			remold.RemoldAgent.logger = oldLogger;
+		}
+		assertEquals(1, warns.size(), "six classes must aggregate into one warn: " + warns);
+		assertTrue(warns.get(0).contains("6 classes"), warns.get(0));
+	}
 }

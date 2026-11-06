@@ -10,9 +10,11 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -28,6 +30,7 @@ public class DoubleBraceProbe {
 
 	static int passed = 0;
 	static int failed = 0;
+	static final List<String> WARNINGS = new ArrayList<>();
 	static Instrumentation inst;
 
 	static void check(boolean ok, String msg) {
@@ -56,6 +59,14 @@ public class DoubleBraceProbe {
 		RemoldAgent.LAYOUT_GATE = LayoutGate.MODE_REJECT;
 		RemoldAgent.OFFSET_STRICT = false;
 		RemoldAgent.DEBUG = false;
+		RemoldAgent.Logger baseLogger = RemoldAgent.logger;
+		RemoldAgent.logger = new RemoldAgent.Logger() {
+			public void log(String msg) { baseLogger.log(msg); }
+			public void info(String msg) { baseLogger.info(msg); }
+			public void warn(String msg) { WARNINGS.add(msg); baseLogger.warn(msg); }
+			public void error(String msg) { baseLogger.error(msg); }
+			public void error(String msg, Throwable t) { baseLogger.error(msg, t); }
+		};
 		try {
 			if (!LibTool.initialized()) LibTool.init();
 		} catch (Throwable t) {
@@ -170,6 +181,8 @@ public class DoubleBraceProbe {
 			+ ", old=" + oldAnon.getClass().getName() + ")");
 		check(arr[0].getClass() != oldAnon.getClass(),
 			"A2 inserted instance is a new Class (actual=" + arr[0].getClass().getName() + ")");
+		long a2Drift = WARNINGS.stream().filter(w -> w.contains("[INIT-DRIFT]")).count();
+		check(a2Drift == 0, "A2 insertion produces zero INIT-DRIFT warns (actual=" + a2Drift + ")");
 	}
 
 	// ------------------------------------------------------------------------------------------------
@@ -876,6 +889,7 @@ public class DoubleBraceProbe {
 		Class<?> xxx = Class.forName(pkg + ".XXX", true, f.loader);
 		checkEq(1, getInt(old, anon, "own"), "E3 precondition: old.own=1");
 
+		long driftBeforeE3 = WARNINGS.stream().filter(w -> w.contains("[INIT-DRIFT]")).count();
 		byte[] sourceBefore = RemoldAgent.sourceBytecodeCache.get(pkg + ".XXX");
 		RemoldAgent.registerOffsetBinding(new OffsetScanner.Binding(
 			pkg.replace('.', '/') + "/Host$1", "own",
@@ -901,6 +915,10 @@ public class DoubleBraceProbe {
 			+ ", equal=" + Arrays.equals(sourceBefore, sourceAfter));
 		check(sourceBefore != null && Arrays.equals(sourceBefore, sourceAfter),
 			"E3 rejected class keeps its previous sourceBytecodeCache baseline");
+		long driftAfterE3 = WARNINGS.stream().filter(w -> w.contains("[INIT-DRIFT]")).count();
+		check(driftAfterE3 == driftBeforeE3,
+			"E3 layout-rejected class produces zero INIT-DRIFT warns (before=" + driftBeforeE3
+			+ ", after=" + driftAfterE3 + ")");
 	}
 
 	// ------------------------------------------------------------------------------------------------

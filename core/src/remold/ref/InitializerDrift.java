@@ -45,6 +45,10 @@ public final class InitializerDrift {
 
 	/** One warn per class per call; no-op when old bytes are unavailable. */
 	public static void report(Map<String, byte[]> newBatchBytes) {
+		report(newBatchBytes, null);
+	}
+
+	public static void report(Map<String, byte[]> newBatchBytes, Map<String, byte[]> oldBytesByClass) {
 		if (newBatchBytes == null || newBatchBytes.isEmpty()) return;
 		Set<String> reinitFields = new HashSet<>();
 		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
@@ -59,7 +63,8 @@ public final class InitializerDrift {
 			String className = e.getKey();
 			byte[] newBytes = e.getValue();
 			if (className == null || newBytes == null) continue;
-			byte[] oldBytes = RemoldAgent.bytecodeCache.get(className);
+			byte[] oldBytes = oldBytesByClass != null
+				? oldBytesByClass.get(className) : RemoldAgent.bytecodeCache.get(className);
 			if (oldBytes == null) continue;
 			Drift drift;
 			try {

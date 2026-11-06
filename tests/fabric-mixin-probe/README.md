@@ -216,6 +216,37 @@ Agent start`, and the Mixin bridge is invoked **0** times during that retransfor
 Mixin target exists at premain. See
 [`evidence/c1c2-retransform-loaded-count.txt`](evidence/c1c2-retransform-loaded-count.txt).
 
+## C5: Forge (ModLauncher) end-to-end (`c5/C5Probe.java` + `c5/run-c5.sh`)
+
+Forge 1.21.1 (`1.21.1-52.1.21`) via the ForgeGradle 7 MDK (Gradle 9.3.1, JBR 21.0.9). The
+MDK builds with `./gradlew build` (first run: `BUILD SUCCESSFUL in 9m 36s`, 3 tasks). The
+server run is a real `runServer` with the real Remold agent attached via
+`-javaagent:<agent.jar>=<proj>/build/sourceSets/main` plus
+`-XX:+AllowEnhancedClassRedefinition`.
+
+Measured (`evidence/c5-forge-e2e.txt`):
+
+- hot-swapped class loader identity:
+  `TransformingClassLoader[TRANSFORMER]@…` / `cpw.mods.modlauncher.TransformingClassLoader`;
+- Q1 retransform input = 1088 B (equal to `bytecodeCache` / `sourceBytecodeCache`);
+  Q2 `fetchOriginalBytecode = null` (dev launch, the only resource is under the watched dir);
+- stage 1 (add a method, real `javac` into the watched dir): `HotSwap successful`,
+  `[C5-READ] stage1 method=C5-V1 value=7` — the new method is callable on the existing
+  instance and the old `value` is preserved;
+- stage 2 (add a field): `Instance field init patch … fields=1`, `[C5-READ] stage2 method=C5-V1
+  added=456 value=7` — InitFix patched the live instance;
+- zero `[INIT-DRIFT]`, zero `LAYOUT-REJECT`, `RESULT PASS`.
+
+To reproduce: use the ForgeGradle 7 MDK, add `c5/C5Probe.java` and
+`c5/stages/HotswapTarget.v1.java` under `src/main/java/com/example/examplemod/`, call
+`C5Probe.start()` at the end of the mod constructor, add
+`compileOnly "com.github.I-hope1.Remold:api:v0.2.1"`, and wire the `runServer` task with the
+`-javaagent` / `-XX:+AllowEnhancedClassRedefinition` / `-Dremold.probe.c5=true` arguments
+(see the `tasks.configureEach { if (name == 'runServer') … }` block used by the driver). The
+driver compiles each stage with plain `javac` against the classpath printed by
+`./gradlew -q printCompileCp` (a second Gradle build would block on the run task's lock), and
+keeps stdin open because `--nogui` stops the server on EOF.
+
 ## Evidence
 
 `evidence/` contains the raw stdout/stderr of the runs referenced in the analysis doc:
@@ -237,6 +268,7 @@ Mixin target exists at premain. See
 | `c2-exitcode.txt` | `MixinProbe` exit-code assertion: 0 with the fix, 3 against `f2ff6bf` |
 | `c1c2-mutation-check.txt` | reverting each fix turns exactly one regression test red |
 | `c4-q4-baseline.md` | Q4 baseline table: fallback order, bytes, real-redefine vs no-op vs fail-closed |
+| `c5-forge-e2e.txt` | Forge 1.21.1 ModLauncher: classloader identity, Q1/Q2, method+field hot-swap, `RESULT PASS`, zero INIT-DRIFT |
 
 Cross-run SHA-256 values are not comparable: Mixin embeds a random
 `@MixinMerged(sessionId=...)` in every process. Use the hashes inside one log file.

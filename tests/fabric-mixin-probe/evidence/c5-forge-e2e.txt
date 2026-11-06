@@ -1,0 +1,42 @@
+C5: Forge 1.21.1 (ModLauncher / ForgeGradle 7) end-to-end
+date: 2026-11-06T20:44:56+08:00
+branch: agent/batch-c-mixin-fix
+Forge: 1.21.1-52.1.21, ForgeGradle 7 (MDK), Gradle 9.3.1, JBR 21.0.9
+MDK build: ./gradlew build -> BUILD SUCCESSFUL in 9m 36s (first run; 3 tasks executed)
+server launch: JAVA_HOME=<jbr21> ./gradlew runServer --console=plain
+  with -javaagent:<remold-agent.jar>=<proj>/build/sourceSets/main
+  -XX:+IgnoreUnrecognizedVMOptions -XX:+AllowEnhancedClassRedefinition
+  -Dremold.probe.c5=true -Dremold.build_mode=auto
+
+class loader identity of the hot-swapped class:
+[C5] PHASE0 target=com.example.examplemod.HotswapTarget
+[C5] PHASE0 classLoader=TransformingClassLoader[TRANSFORMER]@1183912264 classLoaderClass=cpw.mods.modlauncher.TransformingClassLoader
+[C5] PHASE0 instanceLoader=TransformingClassLoader[TRANSFORMER]@1183912264
+
+Q1/Q2 (retransform input / fetchOriginal):
+[C5] Q1_retransform_input: len=1088 sha256=15cb38b8279752d63f56931be08765b9f19c61e696b266f9807afe3baffff983
+[C5] Q2_fetchOriginal: null
+[C5] Q2_bytecodeCache: len=1088 sha256=15cb38b8279752d63f56931be08765b9f19c61e696b266f9807afe3baffff983
+[C5] Q2_sourceBytecodeCache: len=1088 sha256=15cb38b8279752d63f56931be08765b9f19c61e696b266f9807afe3baffff983
+
+stages (real source edit compiled with javac into the watched dir):
+[C5] LISTENER registered
+[C5] WAIT-STAGE1
+[Remold] HotSwap successful: 1 classes redefined.
+[C5-READ] stage1 method=C5-V1 value=7
+[C5] BATCH#1 classes=[com.example.examplemod.HotswapTarget]
+[C5] PASS stage1 redefine batch observed
+[C5] PASS stage1 @OnReload on live instance saw the new method
+[C5] STAGE1-DONE
+[C5] WAIT-STAGE2
+[Remold] HotSwap successful: 1 classes redefined.
+[Remold] Instance field init patch for com.example.examplemod.HotswapTarget done: fields=1, failedFields=[], skippedFields=[], elapsed=27ms
+[C5-READ] stage2 method=C5-V1 added=456 value=7
+[C5] BATCH#2 classes=[com.example.examplemod.HotswapTarget]
+[C5] PASS stage2 redefine batch observed
+[C5] PASS stage2 InitFix patched live instance: @OnReload read added=456
+[C5] STAGE2-DONE
+[C5] RESULT PASS failures=[]
+
+init_drift_count=0
+layout_reject_count=0

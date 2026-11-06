@@ -497,12 +497,28 @@ public class InitializerDriftTest {
 			public void error(String msg) {}
 			public void error(String msg, Throwable t) {}
 		};
+		// A loaded sentinel makes the old per-class enumeration observable: each of the six
+		// keys resolves to a live Class, so the aggregation path must still not touch LibTool.
+		java.util.concurrent.ConcurrentHashMap<String, Class<?>> previousLoaded =
+			remold.RemoldAgent.loadedClassesMap;
+		long enumerationsBefore = InitializerDrift.INSTANCE_ENUMERATIONS.get();
 		try {
+			remold.RemoldAgent.loadedClassesMap = new java.util.concurrent.ConcurrentHashMap<>();
+			for (String key : batch.keySet()) {
+				remold.RemoldAgent.loadedClassesMap.put(key, InitializerDriftTest.class);
+			}
 			InitializerDrift.report(batch, old);
 		} finally {
+			remold.RemoldAgent.loadedClassesMap = previousLoaded;
 			remold.RemoldAgent.logger = oldLogger;
 		}
+		long enumerationsAfter = InitializerDrift.INSTANCE_ENUMERATIONS.get();
+		assertEquals(enumerationsBefore, enumerationsAfter,
+			"the >5 class aggregation path must not enumerate live instances (attempts="
+			+ (enumerationsAfter - enumerationsBefore) + ")");
 		assertEquals(1, warns.size(), "six classes must aggregate into one warn: " + warns);
 		assertTrue(warns.get(0).contains("6 classes"), warns.get(0));
+		assertTrue(warns.get(0).contains("实例数未统计"),
+			"aggregated warn must state that instance counts were not collected: " + warns.get(0));
 	}
 }

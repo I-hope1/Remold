@@ -22,6 +22,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * L0: report changes to an <b>existing</b> field's initializer expression.
@@ -39,6 +40,13 @@ import java.util.Set;
 public final class InitializerDrift {
 
 	private static final String REINIT_DESC = "Lremold/annotation/RemoldReinit;";
+
+	/**
+	 * 诊断计数：L0 尝试枚举存活实例的次数。
+	 *
+	 * <p>只用于探针断言"大批次聚合路径不做实例枚举"；不参与任何判定。</p>
+	 */
+	public static final AtomicLong INSTANCE_ENUMERATIONS = new AtomicLong();
 
 	private InitializerDrift() {
 	}
@@ -58,7 +66,7 @@ public final class InitializerDrift {
 				if (hasReinit(f)) reinitFields.add(node.name + "." + f.name);
 			}
 		}
-		List<DriftLine> lines = new ArrayList<>();
+		List<DriftEntry> entries = new ArrayList<>();
 		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
 			String className = e.getKey();
 			byte[] newBytes = e.getValue();
@@ -74,16 +82,6 @@ public final class InitializerDrift {
 			}
 			if (drift.changed().isEmpty() && drift.inherited().isEmpty()
 				&& drift.inheritedReinit().isEmpty()) continue;
-
-			// Enumerate only after drift is detected; this is the expensive JVMTI step.
-			long t0 = System.nanoTime();
-			int instances = -1;
-			try {
-				Class<?> clazz = RemoldAgent.loadedClassesMap.get(className);
-				if (clazz != null) instances = remold.util.LibTool.getInstances(clazz).length;
-			} catch (Throwable ignored) {
-			}
-			long enumUs = (System.nanoTime() - t0) / 1_000;
 
 			StringBuilder text = new StringBuilder("[INIT-DRIFT] ").append(className).append(": ");
 			if (!drift.inheritedReinit().isEmpty()) {
@@ -102,27 +100,42 @@ public final class InitializerDrift {
 					.append(String.join(", ", drift.changed()))
 					.append(" (default InitFix only patches added fields; 不会重放，请手动处理（如需重置，标 @RemoldReinit）)");
 			}
-			text.append(" [live instances=").append(instances < 0 ? "unknown" : instances)
-				.append(", enum=").append(enumUs).append("us]");
-			lines.add(new DriftLine(text.toString(), instances != 0));
+			entries.add(new DriftEntry(className, text.toString()));
 		}
-		if (lines.size() > 5) {
+		if (entries.size() > 5) {
+			// 大批次刻意不枚举实例：6 个类以上时 per-class JVMTI 堆遍历可能是数百毫秒，
+			// 而"这一轮有 N 个类初值变化了"本身就是可行动的信号，不值得为此扫堆。
 			StringBuilder summary = new StringBuilder("[INIT-DRIFT] ")
-				.append(lines.size()).append(" classes have initializer drift this round (aggregated): ");
-			for (int i = 0; i < lines.size(); i++) {
+				.append(entries.size()).append(" classes have initializer drift this round")
+				.append(" (aggregated; 实例数未统计, instance enumeration skipped): ");
+			for (int i = 0; i < entries.size(); i++) {
 				if (i > 0) summary.append("; ");
-				summary.append(lines.get(i).text());
+				summary.append(entries.get(i).text());
 			}
 			RemoldAgent.warn(summary.toString());
 			return;
 		}
-		for (DriftLine line : lines) {
-			if (line.warn()) RemoldAgent.warn(line.text());
-			else RemoldAgent.info(line.text());
+		for (DriftEntry entry : entries) {
+			// Enumerate only after drift is detected; this is the expensive JVMTI step.
+			long t0 = System.nanoTime();
+			int instances = -1;
+			try {
+				Class<?> clazz = RemoldAgent.loadedClassesMap.get(entry.className);
+				if (clazz != null) {
+					INSTANCE_ENUMERATIONS.incrementAndGet();
+					instances = remold.util.LibTool.getInstances(clazz).length;
+				}
+			} catch (Throwable ignored) {
+			}
+			long enumUs = (System.nanoTime() - t0) / 1_000;
+			String text = entry.text + " [live instances=" + (instances < 0 ? "unknown" : instances)
+				+ ", enum=" + enumUs + "us]";
+			if (instances != 0) RemoldAgent.warn(text);
+			else RemoldAgent.info(text);
 		}
 	}
 
-	private record DriftLine(String text, boolean warn) {
+	private record DriftEntry(String className, String text) {
 	}
 
 	public record Drift(List<String> changed, List<String> inherited, List<String> inheritedReinit) {

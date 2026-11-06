@@ -3674,7 +3674,11 @@ public class RemoldAgent {
 				return false;
 			}
 			if (Arrays.equals(oldBytes, runtimeBytes)) {
-				if (DEBUG) log("[DYNAMIC-REDEFINE] " + className + " runtime bytecode unchanged; skipped.");
+				// 返回 true 在这里表示"无需变更"，不是"热更已生效"：没有任何类被 redefine，
+				// 也不会触发 InitFix / @OnReload / 批次回调。必须默认可见地打出来，否则调用方
+				// 无法区分"真重定义了"与"字节相同直接返回"。
+				info("[DYNAMIC-REDEFINE] no-op: " + className
+				     + " runtime bytecode equals the baseline; no redefine performed (nothing to change).");
 				return true;
 			}
 			ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, runtimeBytes);

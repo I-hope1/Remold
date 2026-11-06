@@ -236,6 +236,7 @@ Mixin target exists at premain. See
 | `c1c2-retransform-loaded-count.txt` | `retransformLoaded` startup count: 1120 classes, 0 Mixin targets |
 | `c2-exitcode.txt` | `MixinProbe` exit-code assertion: 0 with the fix, 3 against `f2ff6bf` |
 | `c1c2-mutation-check.txt` | reverting each fix turns exactly one regression test red |
+| `c4-q4-baseline.md` | Q4 baseline table: fallback order, bytes, real-redefine vs no-op vs fail-closed |
 
 Cross-run SHA-256 values are not comparable: Mixin embeds a random
 `@MixinMerged(sessionId=...)` in every process. Use the hashes inside one log file.

@@ -235,6 +235,7 @@ public class DoubleBraceProbe {
 				public class Host {
 				    public Block makeA() { return new Block() {{ health = 90; }}; }
 				    public Block makeB() { return new Block() {{ health = 91; }}; }
+				    public Block makeC() { return new Block() {{ health = 50; }}; }
 				}
 				""");
 		Map<String, String> v2 = Map.of(
@@ -251,51 +252,73 @@ public class DoubleBraceProbe {
 				public class Host {
 				    public Block makeA() { return new Block() {{ health = 100; }}; }
 				    public Block makeB() { return new Block() {{ health = 101; }}; }
+				    public Block makeC() { return new Block() {{ health = 50; }}; }
 				}
 				""");
 		Fixture f = fixture(v1, v2);
 		Object host = f.newHost();
 		Object oldA = call0(host, "makeA");
 		Object oldB = call0(host, "makeB");
+		Object oldC = call0(host, "makeC");
 		Class<?> anonA = oldA.getClass();
 		Class<?> anonB = oldB.getClass();
+		Class<?> anonC = oldC.getClass();
 		Class<?> block = Class.forName(pkg + ".Block", true, f.loader);
 		checkEq(90, getInt(oldA, block, "health"), "B2 precondition: oldA.health=90");
 		checkEq(91, getInt(oldB, block, "health"), "B2 precondition: oldB.health=91");
+		checkEq(50, getInt(oldC, block, "health"), "B2 precondition: oldC.health=50 (unchanged initializer)");
 
 		f.hotswapAll();
 		Object freshA = call0(host, "makeA");
 		Object freshB = call0(host, "makeB");
+		Object freshC = call0(host, "makeC");
 		int oldHealthA = getInt(oldA, block, "health");
 		int oldHealthB = getInt(oldB, block, "health");
+		int oldHealthC = getInt(oldC, block, "health");
 		InitFix.PatchReport anonReportA = InitFix.getLastReport(anonA);
 		InitFix.PatchReport anonReportB = InitFix.getLastReport(anonB);
+		InitFix.PatchReport anonReportC = InitFix.getLastReport(anonC);
 		InitFix.PatchReport blockReport = InitFix.getLastReport(block);
 		int blockInstances = LibTool.getInstances(block).length;
 		System.out.println("   [OBS] B2 oldA.health=" + oldHealthA + ", oldB.health=" + oldHealthB
+			+ ", oldC.health=" + oldHealthC
 			+ ", newA.health=" + getInt(freshA, block, "health")
 			+ ", newB.health=" + getInt(freshB, block, "health")
+			+ ", newC.health=" + getInt(freshC, block, "health")
 			+ ", anonPatchA=" + (anonReportA != null && anonReportA.patchGenerated())
 			+ ", anonPatchB=" + (anonReportB != null && anonReportB.patchGenerated())
+			+ ", anonPatchC=" + (anonReportC != null && anonReportC.patchGenerated())
 			+ ", blockPatch=" + (blockReport != null && blockReport.patchGenerated())
 			+ ", blockInstances=" + blockInstances
 			+ ", anonLedgerA=" + InitFix.getUnpatchedFields(anonA)
 			+ ", anonLedgerB=" + InitFix.getUnpatchedFields(anonB)
+			+ ", anonLedgerC=" + InitFix.getUnpatchedFields(anonC)
 			+ ", blockLedger=" + InitFix.getUnpatchedFields(block));
+		System.out.println("   [OBS] B2 instances: oldA=" + System.identityHashCode(oldA)
+			+ " (before), oldB=" + System.identityHashCode(oldB)
+			+ " (before), oldC=" + System.identityHashCode(oldC)
+			+ " (before), freshA=" + System.identityHashCode(freshA)
+			+ " (after), freshB=" + System.identityHashCode(freshB)
+			+ " (after), freshC=" + System.identityHashCode(freshC) + " (after)");
 
 		checkEq(100, getInt(freshA, block, "health"), "B2 newA gets 100");
 		checkEq(101, getInt(freshB, block, "health"), "B2 newB gets 101");
+		checkEq(50, getInt(freshC, block, "health"), "B2 newC keeps 50 (unchanged initializer)");
 		check(anonReportA == null || !anonReportA.patchGenerated(),
 			"B2 anonymous class A has no InitFix patch (actual=" + anonReportA + ")");
 		check(anonReportB == null || !anonReportB.patchGenerated(),
 			"B2 anonymous class B has no InitFix patch (actual=" + anonReportB + ")");
 		check(InitFix.getUnpatchedFields(anonA).isEmpty(), "B2 anon A ledger empty");
 		check(InitFix.getUnpatchedFields(anonB).isEmpty(), "B2 anon B ledger empty");
+		check(anonReportC == null || !anonReportC.patchGenerated(),
+			"B2 anonymous class C (unchanged) has no InitFix patch (actual=" + anonReportC + ")");
+		check(InitFix.getUnpatchedFields(anonC).isEmpty(), "B2 anon C ledger empty");
 		check(blockReport != null && blockReport.patchGenerated(),
 			"B2 parent Block has a patch (actual=" + blockReport + ")");
-		check(blockInstances >= 2, "B2 parent patch enumerates both subclass instances (actual=" + blockInstances + ")");
+		check(blockInstances >= 6, "B2 parent patch enumerates six instances (3 old + 3 fresh; actual=" + blockInstances + ")");
 		checkEq(1, oldHealthA, "B2 parent @RemoldReinit resets oldA to parent initializer 1");
 		checkEq(1, oldHealthB, "B2 parent @RemoldReinit resets oldB to parent initializer 1");
+		checkEq(1, oldHealthC, "B2 parent @RemoldReinit also resets UNCHANGED anon C (50 -> 1)");
 	}
 
 	// ------------------------------------------------------------------------------------------------

@@ -21,8 +21,8 @@ installed (`org.spongepowered.asm.mixin.transformer.MixinTransformer`, Mixin 0.8
 | Launch points | real `KnotServer` and real `KnotClient` (both logs retained) |
 
 The probe source is committed at
-[`tests/fabric-mixin-probe/MixinProbe.java`](../../tests/fabric-mixin-probe/MixinProbe.java);
-raw outputs are under [`tests/fabric-mixin-probe/evidence/`](../../tests/fabric-mixin-probe/evidence/).
+[`MixinProbe.java`](MixinProbe.java);
+raw outputs are under [`evidence/`](evidence/).
 
 ## 12.2 Probe design
 
@@ -237,6 +237,6 @@ To close the Forge column, install a real Forge or NeoForge MDK, add a Mixin wit
 
 ## 12.10 Reproduction
 
-See [`tests/fabric-mixin-probe/README.md`](../../tests/fabric-mixin-probe/README.md)
+See [`README.md`](README.md)
 for the exact template edits and launch commands. Raw logs are in
-[`tests/fabric-mixin-probe/evidence/`](../../tests/fabric-mixin-probe/evidence/).
+[`evidence/`](evidence/).

@@ -235,8 +235,9 @@ public class FingerprintDiskHashProbe {
 		RemoldAgent.bytecodeCache.put("fpm.Host", v1.get("fpm.Host"));
 		RemoldAgent.sourceBytecodeCache.put("fpm.Host", v1.get("fpm.Host"));
 
+		java.util.concurrent.atomic.AtomicInteger weave = new java.util.concurrent.atomic.AtomicInteger();
 		BytecodeTransformerBridge bridge = (cl, name, target, bytes) ->
-			"fpm.Host".equals(name) ? addMarker(bytes) : bytes;
+			"fpm.Host".equals(name) ? addMarker(bytes, "remold$probeMarker" + weave.incrementAndGet()) : bytes;
 		RemoldAgent.addTransformerBridge(bridge);
 		Field instField = RemoldAgent.class.getDeclaredField("inst");
 		instField.setAccessible(true);
@@ -247,6 +248,9 @@ public class FingerprintDiskHashProbe {
 			process.invoke(null, changed, real.getAllLoadedClasses());
 			int first = intField(host, "reloads");
 			check(first == 1, "Mixin first round fires @OnReload once (actual=" + first + ")");
+			boolean marker = java.util.Arrays.stream(host.getDeclaredMethods())
+				.anyMatch(m -> m.getName().startsWith("remold$probeMarker"));
+			check(marker, "Mixin bridge actually wove a marker method into fpm.Host");
 
 			process.invoke(null, changed, real.getAllLoadedClasses());
 			int second = intField(host, "reloads");
@@ -257,14 +261,14 @@ public class FingerprintDiskHashProbe {
 		}
 	}
 
-	static byte[] addMarker(byte[] bytes) {
+	static byte[] addMarker(byte[] bytes, String markerName) {
 		ClassReader cr = new ClassReader(bytes);
 		ClassWriter cw = new ClassWriter(0);
 		cr.accept(new ClassVisitor(Opcodes.ASM9, cw) {
 			@Override
 			public void visitEnd() {
 				MethodVisitor mv = cv.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
-					"remold$probeMarker", "()V", null, null);
+					markerName, "()V", null, null);
 				mv.visitCode();
 				mv.visitInsn(Opcodes.RETURN);
 				mv.visitMaxs(0, 0);

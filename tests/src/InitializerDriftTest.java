@@ -249,4 +249,126 @@ public class InitializerDriftTest {
 			&& w.contains("does NOT replay this class's initializer")),
 			"expected inherited-reinit warning, actual=" + warns);
 	}
+
+	@Test
+	void methodBodyOnlyChangeIsNotReported() throws Exception {
+		Map<String, byte[]> v1 = compile("idl9", """
+			package idl9;
+			public class Host { public int x = 1; public int f() { return 1; } }
+			""", """
+			package idl9;
+			public class Parent { public int unused; }
+			""");
+		Map<String, byte[]> v2 = compile("idl9", """
+			package idl9;
+			public class Host { public int x = 1; public int f() { return 2; } }
+			""", """
+			package idl9;
+			public class Parent { public int unused; }
+			""");
+		assertTrue(InitializerDrift.detect(v1.get("idl9.Host"), v2.get("idl9.Host")).isEmpty(),
+			"method-body-only change must not be reported");
+	}
+
+	@Test
+	void lambdaRenumberingIsNotReported() throws Exception {
+		Map<String, byte[]> v1 = compile("idl10", """
+			package idl10;
+			public class Host {
+			    public int x = 1;
+			    public Runnable r = () -> System.out.println("a");
+			}
+			""", """
+			package idl10;
+			public class Parent { public int unused; }
+			""");
+		Map<String, byte[]> v2 = compile("idl10", """
+			package idl10;
+			public class Host {
+			    public int x = 1;
+			    public Runnable first = () -> System.out.println("new");
+			    public Runnable r = () -> System.out.println("a");
+			}
+			""", """
+			package idl10;
+			public class Parent { public int unused; }
+			""");
+		assertTrue(InitializerDrift.detect(v1.get("idl10.Host"), v2.get("idl10.Host")).isEmpty(),
+			"lambda renumbering must not be reported");
+	}
+
+	@Test
+	void anonymousInsertionRenumberingIsNotReported() throws Exception {
+		Map<String, byte[]> v1 = compile("idl11", """
+			package idl11;
+			public class Host {
+			    public int x = 1;
+			    public Object make() { return new Object() { public String toString() { return "a"; } }; }
+			}
+			""", """
+			package idl11;
+			public class Parent { public int unused; }
+			""");
+		Map<String, byte[]> v2 = compile("idl11", """
+			package idl11;
+			public class Host {
+			    public int x = 1;
+			    public Object make() {
+			        Object first = new Object() { public String toString() { return "new"; } };
+			        return new Object() { public String toString() { return "a"; } };
+			    }
+			}
+			""", """
+			package idl11;
+			public class Parent { public int unused; }
+			""");
+		assertTrue(InitializerDrift.detect(v1.get("idl11.Host"), v2.get("idl11.Host")).isEmpty(),
+			"anonymous insertion/renumbering must not be reported on the host");
+	}
+
+	@Test
+	void constructorBodyAssignmentIsNotReported() throws Exception {
+		Map<String, byte[]> v1 = compile("idl12", """
+			package idl12;
+			public class Host {
+			    public int x = 1;
+			    public Host() { this.x = x + 1; }
+			}
+			""", """
+			package idl12;
+			public class Parent { public int unused; }
+			""");
+		Map<String, byte[]> v2 = compile("idl12", """
+			package idl12;
+			public class Host {
+			    public int x = 1;
+			    public Host() { this.x = x + 1; }
+			}
+			""", """
+			package idl12;
+			public class Parent { public int unused; }
+			""");
+		assertTrue(InitializerDrift.detect(v1.get("idl12.Host"), v2.get("idl12.Host")).isEmpty(),
+			"constructor body assignment must not be confused with the field initializer");
+	}
+
+	@Test
+	void staticFieldIsNotCovered() throws Exception {
+		Map<String, byte[]> v1 = compile("idl13", """
+			package idl13;
+			public class Host { public static int s = 1; }
+			""", """
+			package idl13;
+			public class Parent { public int unused; }
+			""");
+		Map<String, byte[]> v2 = compile("idl13", """
+			package idl13;
+			public class Host { public static int s = 2; }
+			""", """
+			package idl13;
+			public class Parent { public int unused; }
+			""");
+		assertTrue(InitializerDrift.detect(v1.get("idl13.Host"), v2.get("idl13.Host")).isEmpty(),
+			"L0 intentionally does not cover static fields");
+	}
 }

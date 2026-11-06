@@ -54,6 +54,7 @@ public final class InitializerDrift {
 				if (hasReinit(f)) reinitFields.add(node.name + "." + f.name);
 			}
 		}
+		List<DriftLine> lines = new ArrayList<>();
 		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
 			String className = e.getKey();
 			byte[] newBytes = e.getValue();
@@ -66,34 +67,74 @@ public final class InitializerDrift {
 			} catch (Throwable t) {
 				continue;
 			}
+			if (drift.changed().isEmpty() && drift.inherited().isEmpty()
+				&& drift.inheritedReinit().isEmpty()) continue;
+
+			// Enumerate only after drift is detected; this is the expensive JVMTI step.
+			long t0 = System.nanoTime();
+			int instances = -1;
+			try {
+				Class<?> clazz = RemoldAgent.loadedClassesMap.get(className);
+				if (clazz != null) instances = remold.util.LibTool.getInstances(clazz).length;
+			} catch (Throwable ignored) {
+			}
+			long enumUs = (System.nanoTime() - t0) / 1_000;
+
+			StringBuilder text = new StringBuilder("[INIT-DRIFT] ").append(className).append(": ");
 			if (!drift.inheritedReinit().isEmpty()) {
-				RemoldAgent.warn("[INIT-DRIFT] " + className
-					+ ": inherited field(s) written by this class's initializer are annotated @RemoldReinit on the parent: "
-					+ String.join(", ", drift.inheritedReinit())
-					+ ". Parent @RemoldReinit resets ALL subclass instances to the PARENT initializer;"
-					+ " it does NOT replay this class's initializer value. Do not use @RemoldReinit on inherited fields"
-					+ " when the anonymous subclass sets its own value; use @OnReload or a subclass-owned field.");
+				text.append("inherited field(s) written by this class's initializer are annotated @RemoldReinit on the parent: ")
+					.append(String.join(", ", drift.inheritedReinit()))
+					.append(". Parent @RemoldReinit resets ALL subclass instances to the PARENT initializer;")
+					.append(" it does NOT replay this class's initializer value. Do not use @RemoldReinit on inherited fields")
+					.append(" when the anonymous subclass sets its own value; use @OnReload or a subclass-owned field.");
+			} else if (!drift.inherited().isEmpty()) {
+				text.append("inherited field initializer changed but will NOT be replayed: ")
+					.append(String.join(", ", drift.inherited()))
+					.append(" (default InitFix only patches added fields; use @OnReload or a subclass-owned field.")
+					.append(" Do NOT use parent @RemoldReinit: it resets all subclass instances to the parent initializer.)");
+			} else {
+				text.append("existing field initializer changed but will NOT be replayed: ")
+					.append(String.join(", ", drift.changed()))
+					.append(" (default InitFix only patches added fields; use @RemoldReinit or @OnReload to reset)");
 			}
-			if (!drift.changed().isEmpty()) {
-				RemoldAgent.warn("[INIT-DRIFT] " + className
-					+ ": existing field initializer changed but will NOT be replayed: "
-					+ String.join(", ", drift.changed())
-					+ " (default InitFix only patches added fields; use @RemoldReinit or @OnReload to reset)");
+			text.append(" [live instances=").append(instances < 0 ? "unknown" : instances)
+				.append(", enum=").append(enumUs).append("us]");
+			lines.add(new DriftLine(text.toString(), instances != 0));
+		}
+		if (lines.size() > 5) {
+			StringBuilder summary = new StringBuilder("[INIT-DRIFT] ")
+				.append(lines.size()).append(" classes have initializer drift this round (aggregated): ");
+			for (int i = 0; i < lines.size(); i++) {
+				if (i > 0) summary.append("; ");
+				summary.append(lines.get(i).text());
 			}
+			RemoldAgent.warn(summary.toString());
+			return;
+		}
+		for (DriftLine line : lines) {
+			if (line.warn()) RemoldAgent.warn(line.text());
+			else RemoldAgent.info(line.text());
 		}
 	}
 
-	public record Drift(List<String> changed, List<String> inheritedReinit) {
+	private record DriftLine(String text, boolean warn) {
+	}
+
+	public record Drift(List<String> changed, List<String> inherited, List<String> inheritedReinit) {
 	}
 
 	public static List<String> detect(byte[] oldBytes, byte[] newBytes) {
-		return detectDetailed(oldBytes, newBytes, Set.of()).changed();
+		Drift d = detectDetailed(oldBytes, newBytes, Set.of());
+		List<String> all = new ArrayList<>(d.changed());
+		all.addAll(d.inherited());
+		all.addAll(d.inheritedReinit());
+		return all;
 	}
 
 	public static Drift detectDetailed(byte[] oldBytes, byte[] newBytes, Set<String> reinitFields) {
 		ClassNode oldNode = read(oldBytes);
 		ClassNode newNode = read(newBytes);
-		if (oldNode == null || newNode == null) return new Drift(List.of(), List.of());
+		if (oldNode == null || newNode == null) return new Drift(List.of(), List.of(), List.of());
 
 		Map<String, FieldNode> oldFields = fields(oldNode);
 		Map<String, FieldNode> newFields = fields(newNode);
@@ -101,6 +142,7 @@ public final class InitializerDrift {
 		Map<String, Set<String>> newSlices = slices(newNode, newFields);
 
 		List<String> changed = new ArrayList<>();
+		List<String> inherited = new ArrayList<>();
 		List<String> inheritedReinit = new ArrayList<>();
 		Set<String> names = new HashSet<>(oldSlices.keySet());
 		names.addAll(newSlices.keySet());
@@ -124,11 +166,13 @@ public final class InitializerDrift {
 			boolean parentAnnotated = reinitFields.stream().anyMatch(s -> s.endsWith("." + name));
 			if (!hostDeclared && parentAnnotated) {
 				inheritedReinit.add(name);
+			} else if (!hostDeclared) {
+				inherited.add(name);
 			} else {
 				changed.add(name);
 			}
 		}
-		return new Drift(changed, inheritedReinit);
+		return new Drift(changed, inherited, inheritedReinit);
 	}
 
 

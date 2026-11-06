@@ -302,14 +302,26 @@ jobs:
         run: |
           TAG="${{ steps.prepare.outputs.tag }}"
           echo "Publishing to Release tag: $TAG"
-          
+
+          # Prefer a checked-in English release-notes file; fall back to generated notes.
+          # (gh --generate-notes only lists PRs/commits and produced an empty body for v0.2.2/v0.2.3.)
+          NOTES_FILE="docs/releases/${TAG}.md"
+          NOTES_ARGS=()
+          if [ -f "$NOTES_FILE" ]; then
+            echo "Using release notes file: $NOTES_FILE"
+            NOTES_ARGS=(--notes-file "$NOTES_FILE")
+          else
+            echo "No $NOTES_FILE; falling back to --generate-notes"
+            NOTES_ARGS=(--generate-notes)
+          fi
+
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists, uploading/overwriting assets..."
             gh release upload "$TAG" release-assets/* --clobber
+            if [ -f "$NOTES_FILE" ]; then
+              gh release edit "$TAG" --notes-file "$NOTES_FILE"
+            fi
           else
             echo "Creating new release $TAG..."
-            gh release create "$TAG" \
-              release-assets/* \
-              --title "Remold $TAG" \
-              --generate-notes
+            gh release create "$TAG" release-assets/* --title "Remold $TAG" "${NOTES_ARGS[@]}"
           fi

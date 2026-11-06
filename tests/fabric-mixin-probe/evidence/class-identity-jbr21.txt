@@ -1,16 +1,20 @@
    [PASS] instrumentation available
-IDENTITY phase=before classId=1006227006 instanceClassId=1006227006 instanceClassSame=true
+IDENTITY phase=before canonicalId=1006227006 instanceClassId=1006227006 instanceClassSame=true
+   [OBS] pre-redefine: map.size=1 set.size=1 instanceFieldId=1006227006 arrayId=1006227006
    [PASS] structural redefine (add field b) returned true
-IDENTITY phase=after classId=1006227006 sameClassObject=true instanceClassId=1006227006 instanceStillSameClass=true
-IDENTITY refs phase=after localId=1006227006 staticFieldId=549293029 holderStaticId=549293029 instanceClassId=1006227006 forNameId=1006227006 staticSame=false holderSame=false staticEqForName=false holderEqForName=false forNameEqLocal=true staticName=ci.Host forNameName=ci.Host staticStable=true
-IDENTITY method-only phase=after ok=true localId=1006227006 staticFieldId=1320105604 holderStaticId=1320105604 forNameId=1006227006 staticSame=false holderSame=false
+IDENTITY phase=after canonicalId=1006227006 forNameId=1006227006 sameClassObject=true instanceClassId=1006227006
    [PASS] canonical Class identity unchanged across structural redefine
-   [OBS] static-field Class reference rewritten: staticRefSame=false holderSame=false
-   [PASS] instance.getClass() still the same Class object
-   [PASS] added field b is visible through the same Class reference
-   [PASS] added field b is visible through a fresh Class.forName lookup
-   [PASS] LibTool.getInstances(oldClass) still finds the live instance (count=1)
-IDENTITY direct-redefine phase=after localId=1152606315 staticFieldId=589987187 holderStaticId=589987187 forNameId=1152606315 staticSame=false holderSame=false forNameSame=true
-   [OBS] direct Instrumentation.redefineClasses: staticRefSame=false holderSame=false canonicalSame=true
-=== SUMMARY: passed=7, failed=0 ===
-BUILD SUCCESSFUL in 4s
+IDENTITY heap-refs phase=after instanceFieldId=1006227006 arrayId=1006227006 instanceFieldSame=true arraySame=true instanceFieldIsShadow=false arrayIsShadow=false
+   [OBS] heap instance field rewritten=false heap array element rewritten=false
+IDENTITY map phase=after size=1 getCanonical=canonical-value getForName=canonical-value getShadow=null containsCanonical=true containsShadow=false
+IDENTITY map.key id=1006227006 sameCanonical=true isShadow=false name=ci.Host
+IDENTITY set phase=after size=1 containsCanonical=true containsShadow=false
+IDENTITY set.key id=1006227006 sameCanonical=true isShadow=false
+   [OBS] map.get(canonical)=canonical-value map.get(shadow)=null set.contains(canonical)=true set.contains(shadow)=false
+IDENTITY shadow-meta shadowId=37981645 shadowName=ci.Host shadowLoaderSame=true shadowFields=[a] canonicalFields=[a,b]
+   [OBS] shadow.getDeclaredFields() sees added field b=false (canonical sees b=true)
+   [OBS] LibTool.getInstances(shadow) count=0
+   [OBS] LibTool.getInstances(canonical) count=1
+   [OBS] retransformClasses(shadow): returned normally (no exception)
+=== SUMMARY: passed=3, failed=0 ===
+BUILD SUCCESSFUL in 3s

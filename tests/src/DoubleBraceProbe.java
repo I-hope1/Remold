@@ -67,6 +67,7 @@ public class DoubleBraceProbe {
 		scenarioD2();
 		scenarioD2b();
 		scenarioB2();
+		scenarioB2NoReinit();
 		scenarioE1();
 		scenarioE2();
 		scenarioE3();
@@ -216,7 +217,7 @@ public class DoubleBraceProbe {
 	// parent field marked @RemoldReinit in v2.
 	// ------------------------------------------------------------------------------------------------
 	static void scenarioB2() throws Exception {
-		System.out.println("\n--- B2: parent Block.health, anonymous initializer 90 -> 100, parent @RemoldReinit ---");
+		System.out.println("--- B2: parent Block.health, two anonymous subclasses, parent @RemoldReinit ---");
 		String pkg = "dbb2";
 		Map<String, String> v1 = Map.of(
 			pkg + ".Block", """
@@ -226,7 +227,8 @@ public class DoubleBraceProbe {
 			pkg + ".Host", """
 				package dbb2;
 				public class Host {
-				    public Block make() { return new Block() {{ health = 90; }}; }
+				    public Block makeA() { return new Block() {{ health = 90; }}; }
+				    public Block makeB() { return new Block() {{ health = 91; }}; }
 				}
 				""");
 		Map<String, String> v2 = Map.of(
@@ -241,32 +243,107 @@ public class DoubleBraceProbe {
 			pkg + ".Host", """
 				package dbb2;
 				public class Host {
-				    public Block make() { return new Block() {{ health = 100; }}; }
+				    public Block makeA() { return new Block() {{ health = 100; }}; }
+				    public Block makeB() { return new Block() {{ health = 101; }}; }
 				}
 				""");
 		Fixture f = fixture(v1, v2);
 		Object host = f.newHost();
-		Object old = call0(host, "make");
-		Class<?> anon = old.getClass();
+		Object oldA = call0(host, "makeA");
+		Object oldB = call0(host, "makeB");
+		Class<?> anonA = oldA.getClass();
+		Class<?> anonB = oldB.getClass();
 		Class<?> block = Class.forName(pkg + ".Block", true, f.loader);
-		checkEq(90, getInt(old, block, "health"), "B2 precondition: old anon health=90");
+		checkEq(90, getInt(oldA, block, "health"), "B2 precondition: oldA.health=90");
+		checkEq(91, getInt(oldB, block, "health"), "B2 precondition: oldB.health=91");
 
 		f.hotswapAll();
-		Object fresh = call0(host, "make");
-		int oldHealth = getInt(old, block, "health");
-		InitFix.PatchReport anonReport = InitFix.getLastReport(anon);
+		Object freshA = call0(host, "makeA");
+		Object freshB = call0(host, "makeB");
+		int oldHealthA = getInt(oldA, block, "health");
+		int oldHealthB = getInt(oldB, block, "health");
+		InitFix.PatchReport anonReportA = InitFix.getLastReport(anonA);
+		InitFix.PatchReport anonReportB = InitFix.getLastReport(anonB);
 		InitFix.PatchReport blockReport = InitFix.getLastReport(block);
-		System.out.println("   [OBS] B2 old.health=" + oldHealth
-			+ ", new.health=" + getInt(fresh, block, "health")
-			+ ", anonPatch=" + (anonReport != null && anonReport.patchGenerated())
+		int blockInstances = LibTool.getInstances(block).length;
+		System.out.println("   [OBS] B2 oldA.health=" + oldHealthA + ", oldB.health=" + oldHealthB
+			+ ", newA.health=" + getInt(freshA, block, "health")
+			+ ", newB.health=" + getInt(freshB, block, "health")
+			+ ", anonPatchA=" + (anonReportA != null && anonReportA.patchGenerated())
+			+ ", anonPatchB=" + (anonReportB != null && anonReportB.patchGenerated())
 			+ ", blockPatch=" + (blockReport != null && blockReport.patchGenerated())
-			+ ", anonLedger=" + InitFix.getUnpatchedFields(anon)
+			+ ", blockInstances=" + blockInstances
+			+ ", anonLedgerA=" + InitFix.getUnpatchedFields(anonA)
+			+ ", anonLedgerB=" + InitFix.getUnpatchedFields(anonB)
 			+ ", blockLedger=" + InitFix.getUnpatchedFields(block));
-		checkEq(100, getInt(fresh, block, "health"), "B2 new instance gets 100");
-		check(oldHealth == 90 || oldHealth == 1,
-			"B2 old instance stays 90 (no anon replay) or is reset by parent @RemoldReinit to 1; actual=" + oldHealth);
-		check(anonReport == null || !anonReport.patchGenerated(),
-			"B2 anonymous class itself has no InitFix patch (actual=" + anonReport + ")");
+
+		checkEq(100, getInt(freshA, block, "health"), "B2 newA gets 100");
+		checkEq(101, getInt(freshB, block, "health"), "B2 newB gets 101");
+		check(anonReportA == null || !anonReportA.patchGenerated(),
+			"B2 anonymous class A has no InitFix patch (actual=" + anonReportA + ")");
+		check(anonReportB == null || !anonReportB.patchGenerated(),
+			"B2 anonymous class B has no InitFix patch (actual=" + anonReportB + ")");
+		check(InitFix.getUnpatchedFields(anonA).isEmpty(), "B2 anon A ledger empty");
+		check(InitFix.getUnpatchedFields(anonB).isEmpty(), "B2 anon B ledger empty");
+		check(blockReport != null && blockReport.patchGenerated(),
+			"B2 parent Block has a patch (actual=" + blockReport + ")");
+		check(blockInstances >= 2, "B2 parent patch enumerates both subclass instances (actual=" + blockInstances + ")");
+		checkEq(1, oldHealthA, "B2 parent @RemoldReinit resets oldA to parent initializer 1");
+		checkEq(1, oldHealthB, "B2 parent @RemoldReinit resets oldB to parent initializer 1");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// B2-no-reinit: same shape without @RemoldReinit; old instances must stay at 90/91.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioB2NoReinit() throws Exception {
+		System.out.println("--- B2-no-reinit: parent Block.health without @RemoldReinit ---");
+		String pkg = "dbb2n";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Block", """
+				package dbb2n;
+				public class Block { public int health = 1; }
+				""",
+			pkg + ".Host", """
+				package dbb2n;
+				public class Host {
+				    public Block makeA() { return new Block() {{ health = 90; }}; }
+				    public Block makeB() { return new Block() {{ health = 91; }}; }
+				}
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Block", """
+				package dbb2n;
+				public class Block { public int health = 1; }
+				""",
+			pkg + ".Host", """
+				package dbb2n;
+				public class Host {
+				    public Block makeA() { return new Block() {{ health = 100; }}; }
+				    public Block makeB() { return new Block() {{ health = 101; }}; }
+				}
+				""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		Object oldA = call0(host, "makeA");
+		Object oldB = call0(host, "makeB");
+		Class<?> block = Class.forName(pkg + ".Block", true, f.loader);
+		f.hotswapAll();
+		Object freshA = call0(host, "makeA");
+		int oldHealthA = getInt(oldA, block, "health");
+		int oldHealthB = getInt(oldB, block, "health");
+		InitFix.PatchReport anonReportA = InitFix.getLastReport(oldA.getClass());
+		InitFix.PatchReport blockReport = InitFix.getLastReport(block);
+		System.out.println("   [OBS] B2n oldA.health=" + oldHealthA + ", oldB.health=" + oldHealthB
+			+ ", newA.health=" + getInt(freshA, block, "health")
+			+ ", anonPatchA=" + (anonReportA != null && anonReportA.patchGenerated())
+			+ ", blockPatch=" + (blockReport != null && blockReport.patchGenerated())
+			+ ", anonLedgerA=" + InitFix.getUnpatchedFields(oldA.getClass())
+			+ ", blockLedger=" + InitFix.getUnpatchedFields(block));
+		checkEq(100, getInt(freshA, block, "health"), "B2n newA gets 100");
+		checkEq(90, oldHealthA, "B2n oldA stays 90 without @RemoldReinit");
+		checkEq(91, oldHealthB, "B2n oldB stays 91 without @RemoldReinit");
+		check(anonReportA == null || !anonReportA.patchGenerated(), "B2n anon A has no patch");
+		check(blockReport == null || !blockReport.patchGenerated(), "B2n parent Block has no patch");
 	}
 
 	// ------------------------------------------------------------------------------------------------

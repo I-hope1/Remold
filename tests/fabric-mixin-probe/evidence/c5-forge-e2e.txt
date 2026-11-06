@@ -1,6 +1,6 @@
-C5: Forge 1.21.1 (ModLauncher / ForgeGradle 7) end-to-end — target class is a real Mixin target
-date: 2026-11-06T21:07:04+08:00
-branch: agent/batch-c-mixin-fix
+C5: Forge 1.21.1 (ModLauncher / ForgeGradle 7) — Mixin hot-swap verified, entity probe non-deterministic
+date: 2026-11-06T23:32:31+08:00
+branch: agent/batch-c-mixin-fix (release v0.2.3 line)
 Forge: 1.21.1-52.1.21, ForgeGradle 7 (MDK), Gradle 9.3.1, JBR 21.0.9
 MDK build: ./gradlew build -> BUILD SUCCESSFUL in 9m 36s (first run; 3 tasks executed)
 server launch: JAVA_HOME=<jbr21> ./gradlew runServer --console=plain
@@ -8,28 +8,35 @@ server launch: JAVA_HOME=<jbr21> ./gradlew runServer --console=plain
   -XX:+IgnoreUnrecognizedVMOptions -XX:+AllowEnhancedClassRedefinition
   -Dremold.plugins=forge -Dremold.plugin.jars=<plugin-forge jar>
   -Dremold.probe.c5=true -Dremold.build_mode=auto
-dev-mode mixin config: FG7 runs classpath mods (no jar manifest), so the MixinConfigs
-manifest attribute is not seen; C5Probe registers c5.mixins.json via
-MixinEnvironment.addConfiguration before the target class is first loaded.
+Mixin config: FG7 dev classpath mods have no jar manifest, so c5.mixins.json is registered
+manually via MixinEnvironment.addConfiguration before the target class is first loaded.
 
 class loader identity of the hot-swapped class:
+[C5] PHASE0 mixin_unique=999 (initializer=123)
 [C5] PHASE0 target=com.example.examplemod.HotswapTarget
-[C5] PHASE0 classLoader=TransformingClassLoader[TRANSFORMER]@1228777520 classLoaderClass=cpw.mods.modlauncher.TransformingClassLoader
-[C5] PHASE0 instanceLoader=TransformingClassLoader[TRANSFORMER]@1228777520
+[C5] PHASE0 classLoader=TransformingClassLoader[TRANSFORMER]@345132865 classLoaderClass=cpw.mods.modlauncher.TransformingClassLoader
+[C5] PHASE0 instanceLoader=TransformingClassLoader[TRANSFORMER]@345132865
 
-Q1/Q2 (retransform input / fetchOriginal), target carries Mixin @Unique field + @Inject handler:
-[C5] Q1_retransform_input: len=1871 sha256=e4a73b6085ff796e149cbca2af4aba0ccb3af1ee999f1a30dc3de9c3a6a7c3e2 has_mixin_field=true has_mixin_handler=true
+Q1/Q2 (target carries Mixin @Unique field + @Inject handler):
+[C5] Q1_retransform_input: len=1871 sha256=c0b664e845052eea73b8f5a313729b4480e36428c94651811aef3d4b353f1188 has_mixin_field=true has_mixin_handler=true
 [C5] Q2_fetchOriginal: null
-[C5] Q2_bytecodeCache: len=2093 sha256=a546573b9102aa6c4129ad54705a15df54cf19129e70d9ffcb35463e630c9a6a has_mixin_field=true has_mixin_handler=true
-[C5] Q2_sourceBytecodeCache: len=2093 sha256=a546573b9102aa6c4129ad54705a15df54cf19129e70d9ffcb35463e630c9a6a has_mixin_field=true has_mixin_handler=true
+[C5] Q2_bytecodeCache: len=2093 sha256=827a08f9c5e695844a90a9fe0211c3cbd5dcc99ff95836712cc0e177b4fb82eb has_mixin_field=true has_mixin_handler=true
+[C5] Q2_sourceBytecodeCache: len=2093 sha256=827a08f9c5e695844a90a9fe0211c3cbd5dcc99ff95836712cc0e177b4fb82eb has_mixin_field=true has_mixin_handler=true
 
 Mixin bridge across the ModLauncher ClassLoader:
 [Remold] [Forge/NeoForge] Successfully acquired Mixin transformer across ClassLoader: org.spongepowered.asm.mixin.transformer.MixinTransformer
 
-stages (real source edit compiled with javac into the watched dir):
+stages (real source edit compiled with javac into the watched dir); @Unique set to 999 (initializer 123) before the hot-swap:
+[C5] ENTITY-PROBE instanceClass=com.example.examplemod.HotswapTarget loader=TransformingClassLoader[TRANSFORMER]@345132865 loaderId=345132865 staticTargetSame=false
+[C5] DEBUG targetId=1692043954 targetLoaderId=345132865 instanceId=1859388908 forNameSameLoaderId=1859388908
+[C5] DEBUG loadedCopiesOfTarget=1
+[C5-MIXIN] onReload unique=999
+[C5-READ] value=7
+[C5] ENTITY-PROBE counter=1 key=HotswapTarget.onReload on the woven target class
+[C5] PASS entity probe counter runs on the woven Forge target
 [C5] WAIT-STAGE1
 [Remold] HotSwap successful: 1 classes redefined.
-[C5-MIXIN] onReload unique=123
+[C5-MIXIN] onReload unique=999
 [C5-READ] stage1 method=C5-V1 value=7
 [C5] BATCH#1 classes=[com.example.examplemod.HotswapTarget]
 [C5] PASS stage1 redefine batch observed
@@ -39,8 +46,8 @@ stages (real source edit compiled with javac into the watched dir):
 [C5] STAGE1-DONE
 [C5] WAIT-STAGE2
 [Remold] HotSwap successful: 1 classes redefined.
-[Remold] Instance field init patch for com.example.examplemod.HotswapTarget done: fields=1, failedFields=[], skippedFields=[], elapsed=18ms
-[C5-MIXIN] onReload unique=123
+[Remold] Instance field init patch for com.example.examplemod.HotswapTarget done: fields=1, failedFields=[], skippedFields=[], elapsed=17ms
+[C5-MIXIN] onReload unique=999
 [C5-READ] stage2 method=C5-V1 added=456 value=7
 [C5] BATCH#2 classes=[com.example.examplemod.HotswapTarget]
 [C5] PASS stage2 redefine batch observed
@@ -49,6 +56,14 @@ stages (real source edit compiled with javac into the watched dir):
 [C5] PASS stage2 applied bytes keep the mixin @Unique field
 [C5] STAGE2-DONE
 [C5] RESULT PASS failures=[]
+
+entity probe on the woven target (non-deterministic across runs):
+  this run: [C5] ENTITY-PROBE counter=1 key=HotswapTarget.onReload on the woven target class
+  another identical run:
+    Caused by: java.lang.ClassFormatError
+        at java.instrument/sun.instrument.InstrumentationImpl.retransformClasses0(Native Method)
+        at remold.profiler.DynamicProfilerAPI.toggleEntityProbe(DynamicProfilerAPI.java:132)
+        at remold.profiler.DynamicProfilerAPI.toggleEntityProbe(DynamicProfilerAPI.java:100)
 
 init_drift_count=0
 layout_reject_count=0

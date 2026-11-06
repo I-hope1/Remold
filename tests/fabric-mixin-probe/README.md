@@ -224,6 +224,15 @@ server run is a real `runServer` with the real Remold agent attached via
 `-javaagent:<agent.jar>=<proj>/build/sourceSets/main` plus
 `-XX:+AllowEnhancedClassRedefinition`.
 
+**Verification scope (narrowed).** Verified: Mixin hot-swap re-weave on Forge 1.21.1-52.1.21
+in a **minimal ForgeGradle 7 MDK probe mod**, dedicated-server dev run, official mappings,
+with the Mixin config registered **manually** via `MixinEnvironment.addConfiguration` (FG7 dev
+classpath mods have no jar manifest). **Not verified:** the `mods.toml` / `MixinConfigs`
+manifest declaration path, real modpacks or clients, production refmap; and the **entity
+probe does not pass on the woven target** — `toggleEntityProbe` throws `ClassFormatError`
+(see `docs/status.md` risk 19). Do not read the `RESULT PASS` below as "Forge end-to-end is
+fully verified".
+
 The hot-swapped class `HotswapTarget` **is also a real Mixin target**
 (`c5/HotswapTargetMixin.java` adds a `@Unique int c5Unique = 123` and an
 `@Inject(method = "onReload")` handler). FG7 dev runs classpath mods without a jar manifest, so
@@ -240,14 +249,22 @@ Measured (`evidence/c5-forge-e2e.txt`):
   resource is under the watched dir);
 - `[Remold] [Forge/NeoForge] Successfully acquired Mixin transformer across ClassLoader:
   org.spongepowered.asm.mixin.transformer.MixinTransformer`;
+- `@Unique` state preservation: the Mixin `@Unique` field is set to a **non-initializer value
+  999** before the hot-swap (initializer is 123); after both stages the re-woven `@Inject`
+  handler prints `[C5-MIXIN] onReload unique=999` — the existing instance's state is preserved,
+  not reset by the re-weave/redefine;
 - stage 1 (add a method, real `javac` into the watched dir): `HotSwap successful`,
-  `[C5-MIXIN] onReload unique=123`, `[C5-READ] stage1 method=C5-V1 value=7` — the new method is
+  `[C5-MIXIN] onReload unique=999`, `[C5-READ] stage1 method=C5-V1 value=7` — the new method is
   callable on the existing instance, the Mixin `@Inject` handler still runs and the `@Unique`
   field is retained (applied bytes still contain `c5Unique`);
 - stage 2 (add a field): `Instance field init patch … fields=1`,
-  `[C5-MIXIN] onReload unique=123`, `[C5-READ] stage2 method=C5-V1 added=456 value=7` — InitFix
+  `[C5-MIXIN] onReload unique=999`, `[C5-READ] stage2 method=C5-V1 added=456 value=7` — InitFix
   patched the live instance and the Mixin members survived the re-weave;
-- zero `[INIT-DRIFT]`, zero `LAYOUT-REJECT`, `RESULT PASS`.
+- zero `[INIT-DRIFT]`, zero `LAYOUT-REJECT`, `RESULT PASS` **for the Mixin hot-swap path only**;
+- **entity probe on the woven target: not verified (non-deterministic)** — one run threw
+  `java.lang.ClassFormatError` from `InstrumentationImpl.retransformClasses0`, another
+  identical run reported `ENTITY-PROBE counter=1`. The path is therefore not claimed as
+  verified until the bisection in the next round explains the difference.
 
 To reproduce: use the ForgeGradle 7 MDK, add `c5/C5Probe.java` and
 `c5/stages/HotswapTarget.v1.java` under `src/main/java/com/example/examplemod/`, call

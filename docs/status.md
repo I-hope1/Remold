@@ -63,7 +63,7 @@
 | L0 存量字段初值变更检测（含实例门、继承措辞、聚合、诊断） | ✅ | `remold.ref.InitializerDrift` | `InitializerDriftTest` + `DoubleBraceProbe` L0 断言（80/0） |
 | 偏移漂移：继承字段检测、遮蔽去重、点分类名归一 | ✅ | `LayoutPredictor` / `SuperclassDriftGate` 绑定索引 | `LayoutPredictorTest` + `bdf245b` 用例 |
 | 真实 Fabric 1.21.1 主路径（含 Mixin 类自身热更） | ✅ | 探针：`tests/fabric-mixin-probe/C3Probe.java` | `RESULT PASS`、零 `INIT-DRIFT`（`evidence/c3-server-e2e.txt`） |
-| Forge 1.21.1（ModLauncher）端到端 + Mixin 目标重织入 | ✅ | 探针：`tests/fabric-mixin-probe/c5/` | `RESULT PASS`、`@Unique`/`@Inject` 保留、InitFix 补字段成功（`evidence/c5-forge-e2e.txt`） |
+| Forge 1.21.1（ModLauncher）Mixin 热更重织入 | 🔶 | 探针：`tests/fabric-mixin-probe/c5/` | 最小 MDK 探针（服务端 dev run、official mappings、Mixin 配置经 `MixinEnvironment.addConfiguration` 手动注册）下 `RESULT PASS`：`@Unique` 非初值 999 保留、`@Inject` 存活、InitFix 补字段成功（`evidence/c5-forge-e2e.txt`）。**未验证**：`mods.toml`/manifest 声明路径、真实模组/客户端、生产 refmap；实体探针在织入后的目标类上抛 `ClassFormatError`（见风险 19） |
 | 用户人工验收（模板场景 1–8，真实 Fabric 1.21.1 客户端） | ⬜ | — | 下一轮登记；Forge 列保持“未验证” |
 
 ---
@@ -444,6 +444,16 @@
 - **关联架构决策**：无。
 
 ---
+
+### 风险 19：实体探针在 Forge + Mixin 织入后的目标类上抛 `ClassFormatError`（P2，v0.2.3 已知问题）
+- **风险描述与底层机制**：`DynamicProfilerAPI.toggleEntityProbe` 对已加载类做 `retransformClasses`。当目标类同时是 Forge/ModLauncher 下的 Mixin 目标时，JVM 交给 transformer 的 `classfileBuffer` 已经是织入后的字节；`ProfilerTransformer` 在其上插桩后，JVM 校验抛 `java.lang.ClassFormatError`（栈：`InstrumentationImpl.retransformClasses0` ← `DynamicProfilerAPI.toggleEntityProbe`）。同一探针在 Fabric 的非 Mixin 目标上正常（C1C2 探针）；Fabric + Mixin 目标上的计数器尚未验证。
+- **触发条件**：Forge（ModLauncher）环境 + 目标类为 Mixin 目标 + 调用 `toggleEntityProbe`（实体探针开关）。
+- **非确定性观测（重要）**：同一份探针代码在同一 Forge/Mixin 目标上，一次运行抛 `ClassFormatError`，另一次运行计数器正常（`counter=1`）。因此当前**不宣称**该路径已验证；二分矩阵需要重复运行才能定性。
+- **后果**：异常穿到调用方；探针注册状态可能残留（`ProfilerTransformer.targetMethods` 已加入但重转换失败）。实体探针在 Forge Mixin 目标上不稳定。
+- **当前处置**：登记为 v0.2.3 已知问题（非确定性），不阻塞 Mixin 热更主路径（C5 的 Mixin 重织入/`@Unique` 保留/InitFix 补字段仍通过）；二分与根因修复排入下一轮（矩阵：普通类/Mixin 目标 × Fabric/Forge × `d5327fe`/`6091057`，并转储 `ProfilerTransformer` 输出字节做 `CheckClassAdapter` 校验）。
+- **候选方向**：先让 `toggleEntityProbe` 捕获 `Throwable`、清理注册状态并返回失败；再按转储定位是 `ProfilerTransformer` 在织入字节上的栈帧/成员问题，还是 Forge 侧 transformer 链问题。
+- **关联设计规范**：`docs/initfix/03-runtime-driver.md` §4（`@RemoldReinit` 与实体探针均属显式 opt-in 通道）。
+- **关联架构决策**：无。
 
 ## 6. 框架集成插件与资源热更新 (Framework Plugins & Asset Hot-Reload)
 

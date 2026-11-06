@@ -51,10 +51,7 @@ public final class InitializerDrift {
 			ClassNode node = read(e.getValue());
 			if (node == null) continue;
 			for (FieldNode f : node.fields) {
-				if (hasReinit(f)) {
-					reinitFields.add(node.name + "." + f.name);
-					reinitFields.add(f.name);
-				}
+				if (hasReinit(f)) reinitFields.add(node.name + "." + f.name);
 			}
 		}
 		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
@@ -63,40 +60,48 @@ public final class InitializerDrift {
 			if (className == null || newBytes == null) continue;
 			byte[] oldBytes = RemoldAgent.bytecodeCache.get(className);
 			if (oldBytes == null) continue;
-			List<String> changed;
+			Drift drift;
 			try {
-				changed = detect(oldBytes, newBytes, reinitFields);
+				drift = detectDetailed(oldBytes, newBytes, reinitFields);
 			} catch (Throwable t) {
 				continue;
 			}
-			if (!changed.isEmpty()) {
+			if (!drift.inheritedReinit().isEmpty()) {
+				RemoldAgent.warn("[INIT-DRIFT] " + className
+					+ ": inherited field(s) written by this class's initializer are annotated @RemoldReinit on the parent: "
+					+ String.join(", ", drift.inheritedReinit())
+					+ ". Parent @RemoldReinit resets ALL subclass instances to the PARENT initializer;"
+					+ " it does NOT replay this class's initializer value. Do not use @RemoldReinit on inherited fields"
+					+ " when the anonymous subclass sets its own value; use @OnReload or a subclass-owned field.");
+			}
+			if (!drift.changed().isEmpty()) {
 				RemoldAgent.warn("[INIT-DRIFT] " + className
 					+ ": existing field initializer changed but will NOT be replayed: "
-					+ String.join(", ", changed)
+					+ String.join(", ", drift.changed())
 					+ " (default InitFix only patches added fields; use @RemoldReinit or @OnReload to reset)");
 			}
 		}
 	}
 
-	/**
-	 * Returns the names of fields present in both versions whose &lt;init&gt; write
-	 * slice changed. Added/removed fields and synthetic/@RemoldReinit fields are excluded.
-	 */
-	public static List<String> detect(byte[] oldBytes, byte[] newBytes) {
-		return detect(oldBytes, newBytes, Set.of());
+	public record Drift(List<String> changed, List<String> inheritedReinit) {
 	}
 
-	public static List<String> detect(byte[] oldBytes, byte[] newBytes, Set<String> reinitFields) {
+	public static List<String> detect(byte[] oldBytes, byte[] newBytes) {
+		return detectDetailed(oldBytes, newBytes, Set.of()).changed();
+	}
+
+	public static Drift detectDetailed(byte[] oldBytes, byte[] newBytes, Set<String> reinitFields) {
 		ClassNode oldNode = read(oldBytes);
 		ClassNode newNode = read(newBytes);
-		if (oldNode == null || newNode == null) return List.of();
+		if (oldNode == null || newNode == null) return new Drift(List.of(), List.of());
 
 		Map<String, FieldNode> oldFields = fields(oldNode);
 		Map<String, FieldNode> newFields = fields(newNode);
-		Map<String, Set<String>> oldSlices = slices(oldNode, oldFields, reinitFields);
-		Map<String, Set<String>> newSlices = slices(newNode, newFields, reinitFields);
+		Map<String, Set<String>> oldSlices = slices(oldNode, oldFields);
+		Map<String, Set<String>> newSlices = slices(newNode, newFields);
 
 		List<String> changed = new ArrayList<>();
+		List<String> inheritedReinit = new ArrayList<>();
 		Set<String> names = new HashSet<>(oldSlices.keySet());
 		names.addAll(newSlices.keySet());
 		for (String name : names) {
@@ -104,18 +109,28 @@ public final class InitializerDrift {
 			FieldNode oldField = oldFields.get(name);
 			FieldNode newField = newFields.get(name);
 			if (oldField != null && newField != null) {
-				if (!oldField.desc.equals(newField.desc)) continue; // type change handled elsewhere
+				if (!oldField.desc.equals(newField.desc)) continue;
 				if (isSynthetic(oldField) || isSynthetic(newField)) continue;
-				if (hasReinit(oldField) || hasReinit(newField)) continue;
 			}
 			Set<String> oldSet = oldSlices.getOrDefault(name, Set.of());
 			Set<String> newSet = newSlices.getOrDefault(name, Set.of());
-			// Added field: only the new side has a write. Removed: only the old side.
 			if (oldSet.isEmpty() || newSet.isEmpty()) continue;
-			if (!oldSet.equals(newSet)) changed.add(name);
+			if (oldSet.equals(newSet)) continue;
+
+			boolean hostDeclared = newFields.containsKey(name);
+			boolean hostAnnotated = reinitFields.contains(newNode.name + "." + name);
+			if (hostDeclared && hostAnnotated) continue; // explicit host-level reinit: no warning
+
+			boolean parentAnnotated = reinitFields.stream().anyMatch(s -> s.endsWith("." + name));
+			if (!hostDeclared && parentAnnotated) {
+				inheritedReinit.add(name);
+			} else {
+				changed.add(name);
+			}
 		}
-		return changed;
+		return new Drift(changed, inheritedReinit);
 	}
+
 
 	private static ClassNode read(byte[] bytes) {
 		if (bytes == null || bytes.length == 0) return null;
@@ -151,8 +166,18 @@ public final class InitializerDrift {
 		return false;
 	}
 
-	private static Map<String, Set<String>> slices(ClassNode node, Map<String, FieldNode> fields,
-		Set<String> reinitFields) {
+	private static String ownerOf(ClassNode node, String fieldName) {
+		for (MethodNode m : node.methods) {
+			if (!"<init>".equals(m.name) || m.instructions == null) continue;
+			for (AbstractInsnNode insn = m.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+				if (insn instanceof FieldInsnNode fi && fi.getOpcode() == Opcodes.PUTFIELD
+					&& fieldName.equals(fi.name)) return fi.owner;
+			}
+		}
+		return null;
+	}
+
+	private static Map<String, Set<String>> slices(ClassNode node, Map<String, FieldNode> fields) {
 		Map<String, Set<String>> out = new HashMap<>();
 		for (MethodNode m : node.methods) {
 			if (!"<init>".equals(m.name) || m.instructions == null) continue;
@@ -164,7 +189,6 @@ public final class InitializerDrift {
 				AbstractInsnNode insn = insns.get(i);
 				if (!(insn instanceof FieldInsnNode fi) || fi.getOpcode() != Opcodes.PUTFIELD) continue;
 				if (fi.name.startsWith("this$") || fi.name.startsWith("val$")) continue;
-				if (reinitFields.contains(fi.owner + "." + fi.name) || reinitFields.contains(fi.name)) continue;
 				String slice = slice(insns, i);
 				if (!slice.isEmpty()) out.computeIfAbsent(fi.name, k -> new LinkedHashSet<>()).add(slice);
 			}

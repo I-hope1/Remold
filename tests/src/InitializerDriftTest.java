@@ -113,4 +113,55 @@ public class InitializerDriftTest {
 		List<String> changed = InitializerDrift.detect(v1.get("idl4.Host$1"), v2.get("idl4.Host$1"));
 		assertTrue(changed.isEmpty(), "unchanged initializer must not be reported; changed=" + changed);
 	}
+
+	@Test
+	void inheritedFieldWithParentReinitGetsDedicatedWarning() throws Exception {
+		String pkg = "idl5";
+		Map<String, byte[]> v1 = compile(pkg, """
+			package idl5;
+			public class Host {
+			    public Parent make() { return new Parent() {{ health = 90; }}; }
+			}
+			""", """
+			package idl5;
+			public class Parent { public int health; }
+			""");
+		Map<String, byte[]> v2 = LayoutGateAssert.compile(Map.of(
+			"idl5.Host", """
+				package idl5;
+				public class Host {
+				    public Parent make() { return new Parent() {{ health = 100; }}; }
+				}
+				""",
+			"idl5.Parent", """
+				package idl5;
+				import remold.annotation.RemoldReinit;
+				public class Parent {
+				    @RemoldReinit(mode = RemoldReinit.Mode.OVERWRITE)
+				    public int health;
+				}
+				"""));
+		remold.RemoldAgent.bytecodeCache.put("idl5.Host$1", v1.get("idl5.Host$1"));
+
+		java.util.List<String> warns = new java.util.ArrayList<>();
+		remold.RemoldAgent.Logger old = remold.RemoldAgent.logger;
+		remold.RemoldAgent.logger = new remold.RemoldAgent.Logger() {
+			public void log(String msg) {}
+			public void info(String msg) {}
+			public void warn(String msg) { warns.add(msg); }
+			public void error(String msg) {}
+			public void error(String msg, Throwable t) {}
+		};
+		try {
+			InitializerDrift.report(Map.of(
+				"idl5.Host$1", v2.get("idl5.Host$1"),
+				"idl5.Parent", v2.get("idl5.Parent")));
+		} finally {
+			remold.RemoldAgent.logger = old;
+		}
+		assertTrue(warns.stream().anyMatch(w -> w.contains("Parent @RemoldReinit")
+			&& w.contains("resets ALL subclass instances")
+			&& w.contains("does NOT replay this class's initializer")),
+			"expected inherited-reinit warning, actual=" + warns);
+	}
 }

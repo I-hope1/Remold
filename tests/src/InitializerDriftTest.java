@@ -465,6 +465,72 @@ public class InitializerDriftTest {
 	}
 
 	@Test
+	void zeroLiveInstancesUsesInfoNotWarn() throws Exception {
+		Map<String, byte[]> v1 = compile("idl19", """
+			package idl19;
+			public class Host { public int x = 1; }
+			""", """
+			package idl19;
+			public class Parent { public int unused; }
+			""");
+		Map<String, byte[]> v2 = compile("idl19", """
+			package idl19;
+			public class Host { public int x = 2; }
+			""", """
+			package idl19;
+			public class Parent { public int unused; }
+			""");
+		// Load the v1 class but never instantiate it: the class is live, the instance count is 0.
+		Class<?> host = Class.forName("idl19.Host", false, new ByteLoader(v1));
+		java.util.concurrent.ConcurrentHashMap<String, Class<?>> previousLoaded =
+			remold.RemoldAgent.loadedClassesMap;
+		remold.RemoldAgent.bytecodeCache.put("idl19.Host", v1.get("idl19.Host"));
+		java.util.List<String> warns = new java.util.ArrayList<>();
+		java.util.List<String> infos = new java.util.ArrayList<>();
+		remold.RemoldAgent.Logger oldLogger = remold.RemoldAgent.logger;
+		remold.RemoldAgent.logger = new remold.RemoldAgent.Logger() {
+			public void log(String msg) {}
+			public void info(String msg) { infos.add(msg); }
+			public void warn(String msg) { warns.add(msg); }
+			public void error(String msg) {}
+			public void error(String msg, Throwable t) {}
+		};
+		long enumerationsBefore = InitializerDrift.INSTANCE_ENUMERATIONS.get();
+		try {
+			remold.RemoldAgent.loadedClassesMap = new java.util.concurrent.ConcurrentHashMap<>();
+			remold.RemoldAgent.loadedClassesMap.put("idl19.Host", host);
+			InitializerDrift.report(Map.of("idl19.Host", v2.get("idl19.Host")), v1);
+		} finally {
+			remold.RemoldAgent.loadedClassesMap = previousLoaded;
+			remold.RemoldAgent.logger = oldLogger;
+		}
+		long enumerationsAfter = InitializerDrift.INSTANCE_ENUMERATIONS.get();
+		java.util.List<String> driftInfos = infos.stream()
+			.filter(x -> x.contains("[INIT-DRIFT]")).toList();
+		assertEquals(1, enumerationsAfter - enumerationsBefore,
+			"precondition: the small-batch path must actually enumerate the class once");
+		assertEquals(0, warns.size(), "zero live instances must not warn: " + warns);
+		assertEquals(1, driftInfos.size(), "zero live instances must produce one drift info line: " + infos);
+		assertTrue(driftInfos.get(0).contains("live instances=0"), driftInfos.get(0));
+	}
+
+	static final class ByteLoader extends ClassLoader {
+		private final Map<String, byte[]> classes;
+
+		ByteLoader(Map<String, byte[]> classes) {
+			super(InitializerDriftTest.class.getClassLoader());
+			this.classes = classes;
+		}
+
+		@Override
+		protected Class<?> findClass(String name) throws ClassNotFoundException {
+			byte[] bytes = classes.get(name);
+			if (bytes == null) throw new ClassNotFoundException(name);
+			return defineClass(name, bytes, 0, bytes.length);
+		}
+	}
+
+	@Test
 	void moreThanFiveClassesAreAggregated() throws Exception {
 		java.util.Map<String, byte[]> batch = new java.util.LinkedHashMap<>();
 		java.util.Map<String, byte[]> old = new java.util.LinkedHashMap<>();

@@ -413,4 +413,39 @@ public class LayoutPredictorTest {
 		assertTrue(failedRes.unpredictedClasses().contains(childInternal),
 			"Child class must be marked unpredicted due to IllegalAccessError cross-loader access");
 	}
+
+	@Test
+	@DisplayName("批次表使用点分 key 时，父类新字节码仍必须参与预测")
+	public void dotKeyedBatchUsesSuperclassNewBytes() throws Exception {
+		String baseInternal = "remold/offset/testpkg/DotBase";
+		String childInternal = "remold/offset/testpkg/DotChild";
+		String baseDot = baseInternal.replace('/', '.');
+		String childDot = childInternal.replace('/', '.');
+
+		byte[] baseV1 = genClass(baseInternal, "java/lang/Object",
+			Collections.singletonList(new String[]{"base", "I", "instance"}));
+		byte[] baseV2 = genClass(baseInternal, "java/lang/Object", List.of(
+			new String[]{"base", "I", "instance"},
+			new String[]{"added", "I", "instance"}));
+		byte[] childV1 = genClass(childInternal, baseInternal,
+			Collections.singletonList(new String[]{"child", "I", "instance"}));
+
+		LayoutPredictor.EphemeralClassLoader loader = new LayoutPredictor.EphemeralClassLoader(
+			Map.of(baseInternal, baseV1, childInternal, childV1), null,
+			LayoutPredictorTest.class.getClassLoader());
+		Class<?> child = Class.forName(childDot, false, loader);
+
+		LayoutPredictor.PredictionResult result = LayoutPredictor.predictLayout(
+			child,
+			childV1,
+			Map.of(baseDot, baseV2),       // production-style dot key
+			internal -> baseInternal.equals(internal) ? baseV1
+				: childInternal.equals(internal) ? childV1 : null,
+			desc -> Collections.emptySet());
+
+		assertTrue(result.isComplete(), "Prediction must be complete");
+		assertTrue(result.driftingFields().stream().anyMatch(f -> f.fieldName().equals("child")),
+			"Dot-keyed batch must still feed the new superclass bytes into the prediction;"
+			+ " actual drifting=" + result.driftingFields());
+	}
 }

@@ -188,7 +188,14 @@ public final class LayoutPredictor {
 		String targetInternal = targetDotName.replace('.', '/');
 
 		Map<String, byte[]> batch = new HashMap<>();
-		if (newBatchBytes != null) batch.putAll(newBatchBytes);
+		if (newBatchBytes != null) {
+			// 生产端 newBatchBytes 以点分类名为 key；本方法内部按内部名（斜杠）查找。
+			// 两种形式都接受，避免“批次里明明有父类新字节码，却被 fallback 旧字节码盖掉”。
+			for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
+				String key = e.getKey() == null ? null : e.getKey().replace('.', '/');
+				if (key != null) batch.put(key, e.getValue());
+			}
+		}
 		batch.put(targetInternal, newBytes);
 
 		ClassLoader parentLoader = targetClass.getClassLoader();

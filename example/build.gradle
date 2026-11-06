@@ -12,9 +12,9 @@ dependencies {
 }
 
 // remold.gradle 只是薄壳：实现全在 :gradle-plugin。仓库内优先用刚构建出的本地插件 jar（离线可用）。
-// 干净检出（CI / 首次 clone）时本地 jar 还不存在；此时不能用 JitPack 的 v0.2.2 坐标——该版本尚未发布，
+// 干净检出（CI / 首次 clone）时本地 jar 还不存在；此时不能用 JitPack 的 v0.2.3 坐标——该版本尚未发布，
 // 解析失败会阻断整个 check。这里改为“没有本地 jar 就跳过 remold 集成”，example 仍可正常编译。
-def remoldPluginJar = rootProject.file("gradle-plugin/build/libs/remold-gradle-plugin-${rootProject.findProperty('remoldVersion') ?: '0.2.2'}.jar")
+def remoldPluginJar = rootProject.file("gradle-plugin/build/libs/remold-gradle-plugin-${rootProject.findProperty('remoldVersion') ?: '0.2.3'}.jar")
 def configuredPluginJar = findProperty('remold.pluginJar')
 if (configuredPluginJar == null && remoldPluginJar.isFile()) {
     ext.set('remold.pluginJar', remoldPluginJar.absolutePath)

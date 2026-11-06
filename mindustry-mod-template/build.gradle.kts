@@ -11,7 +11,7 @@ val osName = System.getProperty("os.name").lowercase()
 val isWindows = osName.contains("win")
 
 // Remold 版本：脚本 / agent / api 三者必须同版本（apply 拉脚本 与 api 依赖共用这一份）
-val remoldVersion = providers.gradleProperty("remold.version").getOrElse("0.2.1")
+val remoldVersion = providers.gradleProperty("remold.version").getOrElse("0.2.3")
 
 // 目标 Mindustry 版本 (如 v160, v160.5, latest, be)。
 // 默认值可被 -PmindustryVersion=... / gradle.properties 里的 mindustryVersion= 覆盖。

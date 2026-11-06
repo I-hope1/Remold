@@ -16,7 +16,7 @@
 buildscript {
 	// 常量必须定义在 buildscript 闭包内：该闭包的 delegate 是 ScriptHandler 且为 DELEGATE_FIRST，
 	// 引用脚本级 def 会直接抛 "unknown property" 而不会回退到 owner。
-	def shimVersion = '0.2.2'
+	def shimVersion = '0.2.3'
 	def explicitJar = project.findProperty('remold.pluginJar') ?: System.getenv('REMOLD_PLUGIN_JAR')
 	def version = project.findProperty('remold.version')
 		?: project.findProperty('remoldVersion')

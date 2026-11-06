@@ -7,8 +7,8 @@
 
 | 审计元数据项 | 内容与规格说明 |
 |:---|:---|
-| **基准提交 (Baseline Commit)** | `7c55d02` (分支: `main`，`v0.2.2` 修复前基线；发布提交见 git log) |
-| **最后更新时间** | 2026-11-05 |
+| **基准提交 (Baseline Commit)** | `208279f` (分支: `main`，`v0.2.3` 发布前基线；发布提交见 git log) |
+| **最后更新时间** | 2026-11-06 |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |
 | **更新触发条件** | 任何合入包含特性落地、架构偏离、安全门调整、测试基线变更或发现已知缺陷/残余风险的 PR/commit 时，必须同步原子化更新本文件。提交时由作者/维护者更新基准哈希。 |
 | **管辖范围与边界声明** | 本状态表权威管辖：<br>1. **匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)**（[`docs/topology/`](topology/)）<br>2. **存量初始化修复器 (InitFix / Legacy Instance & Static Reinitialization)**（[`docs/initfix/`](initfix/)）<br>3. **物理内存偏移稳定性与第三方缓存驱逐 (Physical Memory Offset Stability & Reflection Cache Eviction)**（[`docs/offset/`](offset/)）<br>*边界与后续治理声明*：同属字节码重映射体系的 `LambdaAligner`（Lambda 表达式对齐器）以及 Mindustry UI 胶水层（`CellPropertyRef` / 动态参数表达式指纹），其实现状态当前由各自单元测试覆盖（`CellHelperTest` 6 场景持续全绿、`LambdaAlignerTest` 等）；它们的详细状态审计矩阵尚未并入本总表，计划在下一轮治理中统一建立验收标准并纳入。 |
@@ -45,6 +45,26 @@
 | 失败提示误导用户更换 DCEVM JDK | ✅ | `plugin-mixin` `MixinHotSwap.flushPendingTargets` | `isEnhancedHotswapEnabled() == true` 时不再提示“requires JBR with DCEVM”，改为指向 `[LAYOUT-REJECT]` / `[DYNAMIC-REDEFINE]`；真实客户端本轮为成功路径，失败分支待下一次拒绝场景验证 |
 
 > 端到端边界：Fabric 1.21.1 的真实客户端验收为人工执行，CI 尚无自动 Fabric 客户端 E2E；上述单测覆盖的是判决/扫描/反射契约与接线分支。
+
+---
+
+## 0.2 v0.2.3 修复记录 (2026-11-06)
+
+本轮由批次 A（P3 / L0）、B（真实 Fabric Mixin 探针）、C（Mixin 主路径修复 / 实体探针 / C4 / C5）
+合并而来；`main` 与已测集成分支 `integration/abc` 同一提交。以下条目均以自动化回归 + 真实环境
+探针为验收证据，未自动化的用户端到端验收在下一轮单独登记。
+
+| 修复 / 能力 | 状态 | 代码位置 | 验收证据 |
+|:---|:---:|:---|:---|
+| Mixin 目标基线二次织入（重复 `@Unique` 字段导致后续热更被 LayoutGate 拒绝） | ✅ | `AnnotationTransformer.transform` 外部重定义通道 | `MixinProbe` exit-code 断言：修复前 `REMOVED_FIELD`/exit 3，修复后 `RESULT PASS`/exit 0（`tests/fabric-mixin-probe/evidence/c2-exitcode.txt`） |
+| 实体探针开关污染热更基线 | ✅ | `DynamicProfilerAPI.toggleEntityProbe`（内部重转换上下文） | C1+C2 联合复现：修复前 5683 B 重复字段 + `LAYOUT-REJECT`，修复后 5482 B 不变 + `HotSwap successful`；`EntityProbeToggleProbe` 5/5 |
+| `redefineDynamic` 无基线回退 / no-op 语义可见 | ✅ | `RemoldAgent.redefineDynamic` | `RedefineDynamicNoBaselineProbe` 13/0；no-op 不触发批次回调且打印显式日志 |
+| 重试台账 / 注入冲突 / 源码基线回滚 / 原始字节指纹 | ✅ | `RemoldAgent`（A 批次 P3） | `RetryBookkeepingProbe` 15/0、`InjectConflictProbe` 8/0、`FingerprintDiskHashProbe` 18/0 |
+| L0 存量字段初值变更检测（含实例门、继承措辞、聚合、诊断） | ✅ | `remold.ref.InitializerDrift` | `InitializerDriftTest` + `DoubleBraceProbe` L0 断言（80/0） |
+| 偏移漂移：继承字段检测、遮蔽去重、点分类名归一 | ✅ | `LayoutPredictor` / `SuperclassDriftGate` 绑定索引 | `LayoutPredictorTest` + `bdf245b` 用例 |
+| 真实 Fabric 1.21.1 主路径（含 Mixin 类自身热更） | ✅ | 探针：`tests/fabric-mixin-probe/C3Probe.java` | `RESULT PASS`、零 `INIT-DRIFT`（`evidence/c3-server-e2e.txt`） |
+| Forge 1.21.1（ModLauncher）端到端 + Mixin 目标重织入 | ✅ | 探针：`tests/fabric-mixin-probe/c5/` | `RESULT PASS`、`@Unique`/`@Inject` 保留、InitFix 补字段成功（`evidence/c5-forge-e2e.txt`） |
+| 用户人工验收（模板场景 1–8，真实 Fabric 1.21.1 客户端） | ⬜ | — | 下一轮登记；Forge 列保持“未验证” |
 
 ---
 

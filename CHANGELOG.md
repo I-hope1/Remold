@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-06
+
+### Fixed
+- **Mixin 目标基线被二次织入污染（热更静默失效）**：外部重定义 / 基线捕获通道把 JVM 已织入的
+  `classfileBuffer` 再交给 Mixin 桥，追加 hash 混淆的重复 `@Unique` 字段；这些字段写进基线缓存后，
+  下一轮真实热更会被 LayoutGate 判成 `field(s) removed` 并整类拒绝（日志只有拒绝，编辑不生效）。
+  基线捕获路径现在直接采用 JVM 输入字节，不再重织入。
+- **实体探针开关污染热更基线**：`DynamicProfilerAPI.toggleEntityProbe` 的重转换走外部重定义通道，
+  对已织入的 Mixin 目标同样二次织入。该重转换现在运行在 `RemoldAgent.enterInternalRetransform` 内：
+  探针仍正常插桩/去插桩，但 `AnnotationTransformer` 不再改缓存；`exitInternalRedefine` 在 `finally`。
+- **`redefineDynamic` 无基线时跳过布局门与 InitFix**：基线按
+  `bytecodeCache → fetchOriginalBytecode → sourceBytecodeCache` 回退，三者全缺时 fail-closed；
+  运行期字节等于基线的 no-op 分支（返回 `true` 但并未重定义）改为默认可见日志。
+- **重试台账与注入冲突误判**：per-class 重试台账移出 redefine 的 `catch`，避免后处理失败被记成
+  `REDEFINE-FAILED`；`injectNewClass` 遇到 `LinkageError` 时先校验已加载字节，冲突不再被当成成功。
+- **源码基线未回滚 / 指纹口径错误**：未实际生效的类回滚 `sourceBytecodeCache`；磁盘指纹只记
+  `Files.readAllBytes` 的原始字节，不含对齐/织入产物。
+- **偏移漂移漏检与误报**：检测子孙类继承字段的漂移；漂移绑定按 `declaringClass#field` 去重，
+  同名遮蔽字段不再互相顶掉；`LayoutPredictor` 归一化点分/斜杠类名。
+- **L0 告警口径**：只在真正重定义成功的类上运行；删除 `@OnReload` 建议；聚合超过 5 个类时跳过
+  实例枚举；继承字段的父类 `@RemoldReinit` 单独告警。
+- **Fabric 插件 agent 参数拆分**：只按平台路径分隔符拆分，补跨平台覆盖。
+
+### Added
+- **L0 存量字段初值变更检测**：`InitializerDrift` 对本次重定义类的每个已有字段做 `<init>` 切片比对，
+  检测"字段还在但初值变了"（`INIT-DRIFT`）；含实例门、继承字段措辞、聚合告警与
+  `INSTANCE_ENUMERATIONS` 诊断。
+- **真实环境端到端探针与证据**（`tests/fabric-mixin-probe/`）：
+  - Fabric 1.21.1 主路径 C3：真实 `KnotServer` + 真实 `-javaagent`，加方法 / 加字段 / 连续两轮
+    no-op / 修改 Mixin 类本身（`MixinHotSwap`），零 `INIT-DRIFT`；
+  - 实体探针 C1+C2 联合复现：修复前基线出现重复 `@Unique` 字段且下一轮被 LayoutGate 拒绝，
+    修复后基线不变、热更成功；
+  - Forge 1.21.1（ModLauncher / ForgeGradle 7）端到端：目标类同时是真实 Mixin 目标，
+    经 `plugin-forge` 跨 ClassLoader 重织入后 `@Unique`/`@Inject` 保留、InitFix 补字段成功。
+- **新增回归测试**：Mixin 桥接调用计数（基线捕获/内部重转换不得调用桥、真实源码变更必须调用）、
+  实体探针内部重转换上下文、L0 初值漂移、偏移继承漂移、`redefineDynamic` no-op 与 fail-closed 等。
+
+### Changed
+- 测试基线：JUnit 446 项（0 skipped / 0 failures），`fullCheck` 门禁不变；新增断言型探针
+  `entityProbeToggleProbe` 等，探针与证据统一收在 `tests/fabric-mixin-probe/`。
+
+## [0.2.2] - 2026-11-05
+
 ### Fixed
 - **热更目标被布局预测副本顶掉（"加了字段却不生效"的真因）**：`LayoutPredictor` 用抛弃式加载器
   （以真实加载器为 parent、child-first）独立加载新字节码预测物理布局，而 `loadClassSnap` 按"最子层优先"

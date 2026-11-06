@@ -11,6 +11,14 @@ import static org.junit.jupiter.api.Assertions.*;
 class FabricClassPathGroupsTest {
 
 	@Test
+	void parserAcceptsExplicitSeparatorOnAnyPlatform() {
+		assertEquals(java.util.List.of("E:\\a", "E:\\b"),
+			FabricClassPathGroups.parseAgentArgs("E:\\a;E:\\b", ";"));
+		assertEquals(java.util.List.of("/a", "/b"),
+			FabricClassPathGroups.parseAgentArgs("/a:/b", ":"));
+	}
+
+	@Test
 	void agentArgsKeepDriveLetterOnWindowsStylePaths() throws Exception {
 		Path root = Files.createTempDirectory("fabric-cpg");
 		Path classes = Files.createDirectories(root.resolve("build").resolve("classes"));

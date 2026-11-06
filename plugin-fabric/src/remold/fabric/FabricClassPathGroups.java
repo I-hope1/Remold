@@ -34,6 +34,17 @@ public final class FabricClassPathGroups {
 
 	private FabricClassPathGroups() { }
 
+	/** 包级可见：按给定分隔符切 agentArgs；测试可显式传 ";" / ":"，不依赖宿主平台。 */
+	static java.util.List<String> parseAgentArgs(String agentArgs, String pathSeparator) {
+		java.util.List<String> out = new java.util.ArrayList<>();
+		if (agentArgs == null || agentArgs.trim().isEmpty()) return out;
+		for (String token : agentArgs.split(Pattern.quote(pathSeparator))) {
+			token = token.trim();
+			if (!token.isEmpty()) out.add(token);
+		}
+		return out;
+	}
+
 	/** 若当前运行时是 Fabric 开发环境，则按监控目录补齐 {@code fabric.classPathGroups}；否则什么都不做。 */
 	public static void apply(String agentArgs) {
 		try {
@@ -56,15 +67,10 @@ public final class FabricClassPathGroups {
 			}
 
 			List<File> candidates = new ArrayList<>();
-			if (agentArgs != null && !agentArgs.trim().isEmpty()) {
-				// 只按平台路径分隔符切：Windows 的盘符冒号（C:）不能被当成两段。
-				for (String token : agentArgs.split(Pattern.quote(File.pathSeparator))) {
-					token = token.trim();
-					if (token.isEmpty()) continue;
-					File f = new File(token);
-					if (f.isDirectory() && !candidates.contains(f)) {
-						candidates.add(f);
-					}
+			for (String token : parseAgentArgs(agentArgs, File.pathSeparator)) {
+				File f = new File(token);
+				if (f.isDirectory() && !candidates.contains(f)) {
+					candidates.add(f);
 				}
 			}
 

@@ -2293,8 +2293,27 @@ public class RemoldAgent {
 			info("[INJECTED] Successfully defined new class: " + className + " into " + loader);
 			return true;
 		} catch (LinkageError le) {
-			if (DEBUG) error("Class already loaded: " + className, le);
-			return true;
+			// 同名类已经存在：只有当前已加载字节与本次字节完全一致时，才能算"已经注入成功"。
+			// 不一致时必须返回 false —— 调用方据此跳过 bytecodeCache.put 与指纹落账，
+			// 否则运行基线会被一份从未生效的字节覆盖，后续对齐/InitFix 全部基于假基线。
+			Class<?> loaded = loadedClassesMap.get(className);
+			byte[] live = null;
+			if (loaded != null) {
+				try {
+					live = fetchBytecodeMemory(loaded);
+				} catch (Throwable ignored) {
+					// retransform 不可用 / 被其它 transformer 拒绝：无法证明一致，只能保守拒绝。
+				}
+			}
+			if (live != null && java.util.Arrays.equals(live, bytes)) {
+				if (DEBUG) log("[INJECT-SKIP] " + className
+					+ " was already loaded with identical bytes; nothing to do");
+				return true;
+			}
+			warn("[INJECT-CONFLICT] " + className + " is already loaded with "
+				+ (live == null ? "unverifiable" : "different") + " bytes; the new bytes were NOT recorded"
+				+ " as the runtime baseline. Restart so the class is defined fresh.");
+			return false;
 		} catch (Exception e) {
 			error("Failed to inject new class: " + className + ". CAUTION: This may cause NoClassDefFoundError.", e);
 			return false;
@@ -3280,18 +3299,30 @@ public class RemoldAgent {
 			// redefineClasses 对一批类是原子的：批量失败意味着没有任何类生效。
 			// 因此 PENDING 补丁必须保留，留给下面的逐类重试；只有逐类重试也失败时才丢弃。
 			for (ClassDefinition def : definitions) {
+				String className = def.getDefinitionClass().getName();
+				boolean redefined = false;
 				try {
 					inst.redefineClasses(def);
-					bytecodeCache.put(def.getDefinitionClass().getName(), def.getDefinitionClassFile());
-					commitInvented(def.getDefinitionClass().getName());
-					successfulClasses.add(def.getDefinitionClass().getName());
-					if (DEBUG) log("[OK] " + def.getDefinitionClass().getName());
+					redefined = true;
 				} catch (Throwable e) {
-					error("[FAIL] " + def.getDefinitionClass().getName(), e);
-					skips.add(def.getDefinitionClass().getName(), RoundSkips.verdict("REDEFINE-FAILED",
+					error("[FAIL] " + className, e);
+					skips.add(className, RoundSkips.verdict("REDEFINE-FAILED",
 						e.getClass().getSimpleName(), "see the stack trace above; the file is requeued"));
 					InitFix.afterRedefineFailed(def.getDefinitionClass());
 				}
+				if (!redefined) continue;
+				// 记账不属于重定义事务：JVM 已经应用了这个类，此处再抛错不能回退成
+				// "redefine 失败" —— 那会 afterRedefineFailed（弹补丁 + 假台账）并让调用方
+				// 跳过 afterRedefine，结果是类已生效但存量实例保持类型默认值。
+				try {
+					bytecodeCache.put(className, def.getDefinitionClassFile());
+					commitInvented(className);
+				} catch (Throwable be) {
+					error("[BOOKKEEPING] " + className + " was redefined, but recording the new baseline failed."
+						+ " The class is live; its pending InitFix patch is kept and will be applied.", be);
+				}
+				successfulClasses.add(className);
+				if (DEBUG) log("[OK] " + className);
 			}
 			// 校验事务组的一致性
 			for (AlignmentTransaction tx : transactions) {

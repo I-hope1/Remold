@@ -463,21 +463,38 @@ public class LayoutPredictorTest {
 	}
 
 	@Test
-	@DisplayName("同名遮蔽：子类与父类各声明 property，两个绑定都必须命中")
+	@DisplayName("同名遮蔽：父类字段重排时，子类继承的 property 与子类自身的 property 都必须被考虑")
 	public void shadowedPropertyBindingsBothHit() throws Exception {
 		String base = "remold/offset/testpkg/ShadowBase";
 		String child = "remold/offset/testpkg/ShadowChild";
-		byte[] baseV1 = genClass(base, "java/lang/Object", Collections.singletonList(
-			new String[]{"property", "I", "instance"}));
-		byte[] baseV2 = genClass(base, "java/lang/Object", List.of(
+		// V2 only reorders the superclass fields: ShadowBase.property moves 12 -> 16 while the
+		// total instance size is unchanged, so ShadowChild's own shadowing declaration stays at
+		// the same offset. The field that drifts is the *inherited* ShadowBase.property on a
+		// child instance. A binding index entry "(ShadowChild, property)" cannot say which of
+		// the two declarations it resolved to, so neither declaration may be skipped.
+		byte[] baseV1 = genClass(base, "java/lang/Object", List.of(
 			new String[]{"property", "I", "instance"},
-			new String[]{"added", "I", "instance"}));
+			new String[]{"z", "I", "instance"}));
+		byte[] baseV2 = genClass(base, "java/lang/Object", List.of(
+			new String[]{"z", "I", "instance"},
+			new String[]{"property", "I", "instance"}));
 		byte[] childV1 = genClass(child, base, Collections.singletonList(
 			new String[]{"property", "I", "instance"}));
 		LayoutPredictor.EphemeralClassLoader loader = new LayoutPredictor.EphemeralClassLoader(
 			Map.of(base, baseV1, child, childV1), null,
 			LayoutPredictorTest.class.getClassLoader());
 		Class<?> liveChild = Class.forName(child.replace('/', '.'), false, loader);
+
+		// Precondition (baseline confirmation): the child's own declaration does not move.
+		Map<String, Long> liveChildOffsets = LayoutPredictor.predictOffsets(
+			child.replace('/', '.'), Map.of(base, baseV1, child, childV1), name -> null,
+			LayoutPredictorTest.class.getClassLoader());
+		Map<String, Long> predictedChildOffsets = LayoutPredictor.predictOffsets(
+			child.replace('/', '.'), Map.of(base, baseV2, child, childV1), name -> null,
+			LayoutPredictorTest.class.getClassLoader());
+		assertEquals(liveChildOffsets.get("property"), predictedChildOffsets.get("property"),
+			"precondition: the subclass's own shadowing field must keep its offset;"
+			+ " live=" + liveChildOffsets + ", predicted=" + predictedChildOffsets);
 
 		Binding baseBinding = new Binding(base, "property", Kind.INSTANCE_OFFSET,
 			Sink.STATIC_FIELD, "remold/offset/testpkg/Holder", "B", "probe", Confidence.EXACT);
@@ -489,10 +506,27 @@ public class LayoutPredictorTest {
 			Map.of(base, baseV2, child, childV1),
 			internal -> base.equals(internal) ? baseV1 : child.equals(internal) ? childV1 : null,
 			desc -> Set.of(child));
+		assertTrue(prediction.isComplete(), "prediction must be complete: " + prediction);
+		assertTrue(prediction.driftingFields().stream().anyMatch(f ->
+				f.internalClassName().equals(base) && f.fieldName().equals("property")),
+			"precondition: the reordered superclass field must drift; actual="
+			+ prediction.driftingFields());
+		// The only entry that can match the inherited declaration is produced by walking the
+		// child's superclass chain; the child's own declaration is at an unchanged offset.
+		assertTrue(prediction.driftingFields().stream().anyMatch(f ->
+				f.internalClassName().equals(child) && f.fieldName().equals("property")
+					&& f.oldOffset() != f.newOffset()),
+			"the inherited ShadowBase.property on a child instance must be checked too; actual="
+			+ prediction.driftingFields());
 		DriftDecision d = SuperclassDriftGate.checkLayoutDrift(base, prediction,
 			OffsetBindingIndex.from(List.of(baseBinding, childBinding)), name -> true, false, 0);
 		assertFalse(d.isSafe(), "both shadowed bindings must be detected: " + d.formatReport());
-		assertTrue(d.hits().stream().anyMatch(h -> h.fieldName().equals("property")),
-			"expected property drift hit, actual=" + d.hits());
+		assertTrue(d.hits().stream().anyMatch(h ->
+				h.fieldName().equals("property") && h.binding().targetClass().equals(base)),
+			"expected the superclass binding to hit, actual=" + d.hits());
+		assertTrue(d.hits().stream().anyMatch(h ->
+				h.fieldName().equals("property") && h.binding().targetClass().equals(child)),
+			"expected the subclass binding to hit, actual=" + d.hits());
 	}
+
 }

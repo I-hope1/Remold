@@ -373,6 +373,14 @@
 
 
 
+### 风险 18：L0 不覆盖 lambda 体变化（P3）
+- **风险描述**：L0 只比较 `<init>` 中已有字段的写入切片；lambda 体变化（包括 lambda 前插导致的 `lambda$...$N` 重编号）不会产生 `[INIT-DRIFT]`。`InitializerDriftTest`/`L0-lambda` 端到端用例已验证：真实 `processChanges` 下 Host v1→v2、lambda 插入，`[INIT-DRIFT]` 新增 0。
+- **触发条件**：只改 lambda 体或 lambda 顺序/编号，且没有已有字段初始化块变化。
+- **当前处置**：设计上不覆盖（lambda 由 LambdaAligner 负责）；只记录，不实现。
+- **候选方向**：如需可见性，单独比较 `invokedynamic` bootstrap 参数或 lambda 方法体；不要混入字段初值检测。
+- **关联设计规范**：`docs/initfix/10-initializer-change-detection.md`。
+- **关联架构决策**：无。
+
 ### 风险 17：L0 不覆盖静态字段初值变化（P3）
 - **风险描述**：`InitializerDrift` 只扫描 `<init>` 的实例字段 `PUTFIELD`；`<clinit>`/`PUTSTATIC` 不在 L0 范围。`static int s = 1` 改为 `2` 不会产生 `[INIT-DRIFT]`，存量静态值不会重置。
 - **触发条件**：只改静态字段初值，且没有新增静态字段/`@RemoldReinit`。

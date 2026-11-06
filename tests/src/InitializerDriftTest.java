@@ -393,6 +393,141 @@ public class InitializerDriftTest {
 		assertEquals(1, warns.size(), warns.toString());
 		assertTrue(warns.get(0).contains("inherited field initializer"), warns.get(0));
 		assertFalse(warns.get(0).contains("use @RemoldReinit"), warns.get(0));
+		assertTrue(warns.get(0).contains("不会重放，请手动处理"), warns.get(0));
+	}
+
+	@Test
+	void allDriftWarningsDropOnReloadRecommendation() throws Exception {
+		java.util.List<String> all = new java.util.ArrayList<>();
+
+		Map<String, byte[]> v1 = compile("idl16", """
+			package idl16;
+			public class Host { public int x = 1; }
+			""", """
+			package idl16;
+			public class Parent { public int unused; }
+			""");
+		Map<String, byte[]> v2 = compile("idl16", """
+			package idl16;
+			public class Host { public int x = 2; }
+			""", """
+			package idl16;
+			public class Parent { public int unused; }
+			""");
+		all.addAll(warningsFor("idl16.Host", v1.get("idl16.Host"), Map.of("idl16.Host", v2.get("idl16.Host"))));
+
+		Map<String, byte[]> iv1 = compile("idl17", """
+			package idl17;
+			public class Host { public Parent make() { return new Parent() {{ health = 90; }}; } }
+			""", """
+			package idl17;
+			public class Parent { public int health; }
+			""");
+		Map<String, byte[]> iv2 = compile("idl17", """
+			package idl17;
+			public class Host { public Parent make() { return new Parent() {{ health = 100; }}; } }
+			""", """
+			package idl17;
+			public class Parent { public int health; }
+			""");
+		all.addAll(warningsFor("idl17.Host$1", iv1.get("idl17.Host$1"),
+			Map.of("idl17.Host$1", iv2.get("idl17.Host$1"))));
+
+		Map<String, byte[]> rv1 = compile("idl18", """
+			package idl18;
+			public class Host { public Parent make() { return new Parent() {{ health = 90; }}; } }
+			""", """
+			package idl18;
+			public class Parent { public int health; }
+			""");
+		Map<String, byte[]> rv2 = LayoutGateAssert.compile(Map.of(
+			"idl18.Host", """
+				package idl18;
+				public class Host { public Parent make() { return new Parent() {{ health = 100; }}; } }
+				""",
+			"idl18.Parent", """
+				package idl18;
+				import remold.annotation.RemoldReinit;
+				public class Parent {
+				    @RemoldReinit(mode = RemoldReinit.Mode.OVERWRITE)
+				    public int health;
+				}
+				"""));
+		remold.RemoldAgent.bytecodeCache.put("idl18.Host$1", rv1.get("idl18.Host$1"));
+		all.addAll(warningsFor("idl18.Host$1", rv1.get("idl18.Host$1"),
+			Map.of("idl18.Host$1", rv2.get("idl18.Host$1"), "idl18.Parent", rv2.get("idl18.Parent"))));
+
+		assertEquals(3, all.size(), "expected one warn per drift variant, actual=" + all);
+		for (String w : all) {
+			assertFalse(w.contains("@OnReload"), "warn must not recommend @OnReload: " + w);
+			assertTrue(w.contains("不会重放，请手动处理"), "warn must say the value is not replayed: " + w);
+		}
+	}
+
+	@Test
+	void zeroLiveInstancesUsesInfoNotWarn() throws Exception {
+		Map<String, byte[]> v1 = compile("idl19", """
+			package idl19;
+			public class Host { public int x = 1; }
+			""", """
+			package idl19;
+			public class Parent { public int unused; }
+			""");
+		Map<String, byte[]> v2 = compile("idl19", """
+			package idl19;
+			public class Host { public int x = 2; }
+			""", """
+			package idl19;
+			public class Parent { public int unused; }
+			""");
+		// Load the v1 class but never instantiate it: the class is live, the instance count is 0.
+		Class<?> host = Class.forName("idl19.Host", false, new ByteLoader(v1));
+		java.util.concurrent.ConcurrentHashMap<String, Class<?>> previousLoaded =
+			remold.RemoldAgent.loadedClassesMap;
+		remold.RemoldAgent.bytecodeCache.put("idl19.Host", v1.get("idl19.Host"));
+		java.util.List<String> warns = new java.util.ArrayList<>();
+		java.util.List<String> infos = new java.util.ArrayList<>();
+		remold.RemoldAgent.Logger oldLogger = remold.RemoldAgent.logger;
+		remold.RemoldAgent.logger = new remold.RemoldAgent.Logger() {
+			public void log(String msg) {}
+			public void info(String msg) { infos.add(msg); }
+			public void warn(String msg) { warns.add(msg); }
+			public void error(String msg) {}
+			public void error(String msg, Throwable t) {}
+		};
+		long enumerationsBefore = InitializerDrift.INSTANCE_ENUMERATIONS.get();
+		try {
+			remold.RemoldAgent.loadedClassesMap = new java.util.concurrent.ConcurrentHashMap<>();
+			remold.RemoldAgent.loadedClassesMap.put("idl19.Host", host);
+			InitializerDrift.report(Map.of("idl19.Host", v2.get("idl19.Host")), v1);
+		} finally {
+			remold.RemoldAgent.loadedClassesMap = previousLoaded;
+			remold.RemoldAgent.logger = oldLogger;
+		}
+		long enumerationsAfter = InitializerDrift.INSTANCE_ENUMERATIONS.get();
+		java.util.List<String> driftInfos = infos.stream()
+			.filter(x -> x.contains("[INIT-DRIFT]")).toList();
+		assertEquals(1, enumerationsAfter - enumerationsBefore,
+			"precondition: the small-batch path must actually enumerate the class once");
+		assertEquals(0, warns.size(), "zero live instances must not warn: " + warns);
+		assertEquals(1, driftInfos.size(), "zero live instances must produce one drift info line: " + infos);
+		assertTrue(driftInfos.get(0).contains("live instances=0"), driftInfos.get(0));
+	}
+
+	static final class ByteLoader extends ClassLoader {
+		private final Map<String, byte[]> classes;
+
+		ByteLoader(Map<String, byte[]> classes) {
+			super(InitializerDriftTest.class.getClassLoader());
+			this.classes = classes;
+		}
+
+		@Override
+		protected Class<?> findClass(String name) throws ClassNotFoundException {
+			byte[] bytes = classes.get(name);
+			if (bytes == null) throw new ClassNotFoundException(name);
+			return defineClass(name, bytes, 0, bytes.length);
+		}
 	}
 
 	@Test
@@ -428,12 +563,28 @@ public class InitializerDriftTest {
 			public void error(String msg) {}
 			public void error(String msg, Throwable t) {}
 		};
+		// A loaded sentinel makes the old per-class enumeration observable: each of the six
+		// keys resolves to a live Class, so the aggregation path must still not touch LibTool.
+		java.util.concurrent.ConcurrentHashMap<String, Class<?>> previousLoaded =
+			remold.RemoldAgent.loadedClassesMap;
+		long enumerationsBefore = InitializerDrift.INSTANCE_ENUMERATIONS.get();
 		try {
+			remold.RemoldAgent.loadedClassesMap = new java.util.concurrent.ConcurrentHashMap<>();
+			for (String key : batch.keySet()) {
+				remold.RemoldAgent.loadedClassesMap.put(key, InitializerDriftTest.class);
+			}
 			InitializerDrift.report(batch, old);
 		} finally {
+			remold.RemoldAgent.loadedClassesMap = previousLoaded;
 			remold.RemoldAgent.logger = oldLogger;
 		}
+		long enumerationsAfter = InitializerDrift.INSTANCE_ENUMERATIONS.get();
+		assertEquals(enumerationsBefore, enumerationsAfter,
+			"the >5 class aggregation path must not enumerate live instances (attempts="
+			+ (enumerationsAfter - enumerationsBefore) + ")");
 		assertEquals(1, warns.size(), "six classes must aggregate into one warn: " + warns);
 		assertTrue(warns.get(0).contains("6 classes"), warns.get(0));
+		assertTrue(warns.get(0).contains("实例数未统计"),
+			"aggregated warn must state that instance counts were not collected: " + warns.get(0));
 	}
 }

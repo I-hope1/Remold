@@ -88,6 +88,8 @@ public class DoubleBraceProbe {
 		scenarioE2();
 		scenarioE2Own();
 		scenarioE3();
+		scenarioE4();
+		scenarioL0LambdaRenumber();
 
 		System.out.println("\n=== DOUBLE-BRACE PROBE SUMMARY: passed=" + passed + ", failed=" + failed + " ===");
 		if (failed > 0) System.exit(1);
@@ -919,6 +921,132 @@ public class DoubleBraceProbe {
 		check(driftAfterE3 == driftBeforeE3,
 			"E3 layout-rejected class produces zero INIT-DRIFT warns (before=" + driftBeforeE3
 			+ ", after=" + driftAfterE3 + ")");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// E4: the layout-rejected class itself has a changed EXISTING field initializer.
+	//
+	// E3 was vacuous for L0: it only added a field, so even a pre-gate L0 call had nothing to
+	// report. Here XXX's own `property = 1 -> 2` initializer changes in the same round in which
+	// the superclass-drift binding rejects XXX. A pre-gate L0 warns about XXX; L0 must only see
+	// classes that actually reached the JVM, so the post-apply call must stay silent and must not
+	// enumerate the rejected class.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioE4() throws Exception {
+		System.out.println("\n--- E4: layout-rejected class with a changed existing initializer ---");
+		String pkg = "dbe4";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Host", """
+				package dbe4;
+				public class Host {
+				    public XXX make() {
+				        return new XXX() { int own = 1; { property = 1; } };
+				    }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbe4;
+				public class XXX { public int base = 1; public int property = 1; }
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Host", """
+				package dbe4;
+				public class Host {
+				    public XXX make() {
+				        return new XXX() { int own = 1; { property = 1; } };
+				    }
+				}
+				""",
+			pkg + ".XXX", """
+				package dbe4;
+				public class XXX { public int base = 1; public int added = 9; public int property = 2; }
+				""");
+		Map<String, byte[]> v1Bytes = LayoutGateAssert.compile(v1);
+		Map<String, byte[]> v2Bytes = LayoutGateAssert.compile(v2);
+		check(remold.ref.InitializerDrift.detect(v1Bytes.get(pkg + ".XXX"), v2Bytes.get(pkg + ".XXX"))
+				.contains("property"),
+			"E4 precondition: the detector would report XXX.property if the class reached L0");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		Object old = call0(host, "make");
+		Class<?> anon = old.getClass();
+		Class<?> xxx = Class.forName(pkg + ".XXX", true, f.loader);
+		checkEq(1, getInt(old, xxx, "property"), "E4 precondition: old.property=1");
+
+		long driftBefore = WARNINGS.stream().filter(w -> w.contains("[INIT-DRIFT]")).count();
+		Long enumBefore = l0EnumerationCount();
+		RemoldAgent.registerOffsetBinding(new OffsetScanner.Binding(
+			pkg.replace('.', '/') + "/Host$1", "own",
+			OffsetScanner.Kind.INSTANCE_OFFSET, OffsetScanner.Sink.STATIC_FIELD,
+			pkg.replace('.', '/') + "/Holder", "OFF", "probe", OffsetScanner.Confidence.EXACT));
+		try {
+			f.hotswap(pkg + ".XXX");
+		} finally {
+			RemoldAgent.clearOffsetIndex();
+		}
+		boolean addedExists;
+		try {
+			xxx.getDeclaredField("added");
+			addedExists = true;
+		} catch (NoSuchFieldException e) {
+			addedExists = false;
+		}
+		check(!addedExists, "E4 superclass-drift binding caused LayoutGate to reject XXX");
+		long driftAfter = WARNINGS.stream().filter(w -> w.contains("[INIT-DRIFT]")).count();
+		check(driftAfter == driftBefore,
+			"E4 layout-rejected class with a changed existing initializer produces zero INIT-DRIFT"
+			+ " warns (before=" + driftBefore + ", after=" + driftAfter + ")");
+		Long enumAfter = l0EnumerationCount();
+		if (enumBefore != null && enumAfter != null) {
+			check(enumAfter.equals(enumBefore),
+				"E4 rejected class is not enumerated for live instances (before=" + enumBefore
+				+ ", after=" + enumAfter + ")");
+		}
+	}
+
+	/** L0's diagnostic counter. Returns null on historical revisions that predate it. */
+	static Long l0EnumerationCount() {
+		try {
+			Object counter = Class.forName("remold.ref.InitializerDrift")
+				.getField("INSTANCE_ENUMERATIONS").get(null);
+			return ((java.util.concurrent.atomic.AtomicLong) counter).get();
+		} catch (Throwable t) {
+			return null;
+		}
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// L0: lambda renumbering through the real processChanges path must stay silent.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioL0LambdaRenumber() throws Exception {
+		System.out.println("\n--- L0: lambda renumbering through real processChanges ---");
+		String pkg = "l0lambda";
+		Map<String, String> v1 = Map.of(pkg + ".Host", """
+			package l0lambda;
+			public class Host {
+			    public int x = 1;
+			    public Runnable r = () -> System.out.println("a");
+			    public String tag() { return "v1"; }
+			}
+			""");
+		Map<String, String> v2 = Map.of(pkg + ".Host", """
+			package l0lambda;
+			public class Host {
+			    public int x = 1;
+			    public Runnable first = () -> System.out.println("new");
+			    public Runnable r = () -> System.out.println("a");
+			    public String tag() { return "v2"; }
+			}
+			""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		checkEq("v1", call0(host, "tag"), "L0-lambda precondition: Host runs v1");
+		long before = WARNINGS.stream().filter(w -> w.contains("[INIT-DRIFT]")).count();
+		f.hotswap(pkg + ".Host");
+		checkEq("v2", call0(host, "tag"), "L0-lambda: processChanges redefined Host");
+		long after = WARNINGS.stream().filter(w -> w.contains("[INIT-DRIFT]")).count();
+		check(after == before, "lambda renumbering through processChanges produces zero INIT-DRIFT"
+			+ " warns (before=" + before + ", after=" + after + ")");
 	}
 
 	// ------------------------------------------------------------------------------------------------

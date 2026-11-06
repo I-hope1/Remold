@@ -269,6 +269,8 @@ public class DoubleBraceProbe {
 		checkEq(50, getInt(oldC, block, "health"), "B2 precondition: oldC.health=50 (unchanged initializer)");
 
 		f.hotswapAll();
+		// Measured after the patch, before any fresh instance exists: the patch saw only oldA/B/C.
+		int blockInstancesAtPatch = LibTool.getInstances(block).length;
 		Object freshA = call0(host, "makeA");
 		Object freshB = call0(host, "makeB");
 		Object freshC = call0(host, "makeC");
@@ -279,7 +281,9 @@ public class DoubleBraceProbe {
 		InitFix.PatchReport anonReportB = InitFix.getLastReport(anonB);
 		InitFix.PatchReport anonReportC = InitFix.getLastReport(anonC);
 		InitFix.PatchReport blockReport = InitFix.getLastReport(block);
-		int blockInstances = LibTool.getInstances(block).length;
+		int blockInstancesAfterFresh = LibTool.getInstances(block).length;
+		System.out.println("   [OBS] B2 blockInstancesAtPatch=" + blockInstancesAtPatch
+			+ ", blockInstancesAfterFresh=" + blockInstancesAfterFresh);
 		System.out.println("   [OBS] B2 oldA.health=" + oldHealthA + ", oldB.health=" + oldHealthB
 			+ ", oldC.health=" + oldHealthC
 			+ ", newA.health=" + getInt(freshA, block, "health")
@@ -289,7 +293,7 @@ public class DoubleBraceProbe {
 			+ ", anonPatchB=" + (anonReportB != null && anonReportB.patchGenerated())
 			+ ", anonPatchC=" + (anonReportC != null && anonReportC.patchGenerated())
 			+ ", blockPatch=" + (blockReport != null && blockReport.patchGenerated())
-			+ ", blockInstances=" + blockInstances
+			+ ", blockInstancesAtPatch=" + blockInstancesAtPatch
 			+ ", anonLedgerA=" + InitFix.getUnpatchedFields(anonA)
 			+ ", anonLedgerB=" + InitFix.getUnpatchedFields(anonB)
 			+ ", anonLedgerC=" + InitFix.getUnpatchedFields(anonC)
@@ -315,7 +319,8 @@ public class DoubleBraceProbe {
 		check(InitFix.getUnpatchedFields(anonC).isEmpty(), "B2 anon C ledger empty");
 		check(blockReport != null && blockReport.patchGenerated(),
 			"B2 parent Block has a patch (actual=" + blockReport + ")");
-		check(blockInstances >= 6, "B2 parent patch enumerates six instances (3 old + 3 fresh; actual=" + blockInstances + ")");
+		checkEq(3, blockInstancesAtPatch, "B2 patch-time enumeration sees exactly 3 old instances");
+		checkEq(6, blockInstancesAfterFresh, "B2 later query sees 6 after freshA/B/C are created");
 		checkEq(1, oldHealthA, "B2 parent @RemoldReinit resets oldA to parent initializer 1");
 		checkEq(1, oldHealthB, "B2 parent @RemoldReinit resets oldB to parent initializer 1");
 		checkEq(1, oldHealthC, "B2 parent @RemoldReinit also resets UNCHANGED anon C (50 -> 1)");
@@ -357,6 +362,8 @@ public class DoubleBraceProbe {
 		Object oldB = call0(host, "makeB");
 		Class<?> block = Class.forName(pkg + ".Block", true, f.loader);
 		f.hotswapAll();
+		// Measured after the patch, before any fresh instance exists: the patch saw only oldA/B/C.
+		int blockInstancesAtPatch = LibTool.getInstances(block).length;
 		Object freshA = call0(host, "makeA");
 		int oldHealthA = getInt(oldA, block, "health");
 		int oldHealthB = getInt(oldB, block, "health");

@@ -33,6 +33,9 @@ public final class MixinProbe implements ModInitializer {
 
 	private static final Class<?> AGENT = agentClass();
 
+	/** Non-zero exit when a pinned invariant does not hold; lets a shell driver assert `$?`. */
+	private static int FAILURES;
+
 	@Override
 	public void onInitialize() {
 		if (!Boolean.getBoolean("remold.probe")) {
@@ -46,8 +49,9 @@ public final class MixinProbe implements ModInitializer {
 			t.printStackTrace(System.out);
 		} finally {
 			System.out.flush();
+			out("RESULT " + (FAILURES == 0 ? "PASS" : "FAIL") + " failures=" + FAILURES);
 			// The probe runs in the mod initializer: no world/GUI is needed.
-			Runtime.getRuntime().halt(0);
+			Runtime.getRuntime().halt(FAILURES == 0 ? 0 : 3);
 		}
 	}
 
@@ -118,6 +122,10 @@ public final class MixinProbe implements ModInitializer {
 		out("Q3 diff(baseline, woven).changedFields = " + diffAgainstWoven);
 		out("Q3 gate(baseline, raw) = " + gateVerdict(diffAgainstRaw));
 		out("Q3 gate(baseline, woven) = " + gateVerdict(diffAgainstWoven));
+		check("Q3 baseline capture keeps the single-weave bytes (diff(baseline, woven) empty)",
+			diffAgainstWoven.isEmpty());
+		check("Q3 gate(baseline, woven) = COMPATIBLE",
+			"COMPATIBLE".equals(gateVerdict(diffAgainstWoven)));
 
 		// ---- rollback semantics: only sourceBytecodeCache is restored ----
 		Map<String, byte[]> sourceBefore = new HashMap<>();
@@ -159,6 +167,10 @@ public final class MixinProbe implements ModInitializer {
 		out("B diff(retransform_input, woven) = " + dInput + " gate=" + gateVerdict(dInput));
 		out("B diff(baseline, raw) = " + dBaselineRaw + " gate=" + gateVerdict(dBaselineRaw));
 		out("B diff(baseline, woven) = " + dBaselineWoven + " gate=" + gateVerdict(dBaselineWoven));
+		check("B baseline capture keeps the single-weave bytes (diff(baseline, woven) empty)",
+			dBaselineWoven.isEmpty());
+		check("B gate(baseline, woven) = COMPATIBLE",
+			"COMPATIBLE".equals(gateVerdict(dBaselineWoven)));
 
 		Map<String, byte[]> sourceBefore = new HashMap<>();
 		sourceBefore.put(TARGET, raw);
@@ -202,6 +214,9 @@ public final class MixinProbe implements ModInitializer {
 		report("Q4_runtime_bytecodeCache_after", (byte[]) staticField(AGENT, "bytecodeCache", Map.class).get(TARGET));
 		out("Q4 redefineDynamic(ok=" + ok + ") state after=" + after
 			+ " (initializer=" + STATE_INIT + ", set-before=" + set + ")");
+		check("Q4 no-baseline fallback redefine succeeded", ok);
+		check("Q4 existing @Unique state preserved / new state initialized",
+			after == (set == 0 ? Integer.parseInt(STATE_INIT) : set));
 
 		// ---- completely missing baseline: fail-closed ----
 		staticField(AGENT, "bytecodeCache", Map.class).remove(TARGET);
@@ -210,6 +225,7 @@ public final class MixinProbe implements ModInitializer {
 			boolean none = (Boolean) callStatic(AGENT, "redefineDynamic",
 				new Class<?>[]{Class.class, byte[].class}, target, sourceBytes);
 			out("Q4 no-baseline-at-all redefineDynamic(ok=" + none + ") state=" + state.getInt(item));
+			check("Q4 completely missing baseline fails closed", !none);
 		} else {
 			out("Q4 no-baseline-at-all not reachable: fetchOriginalBytecode returned a resource");
 		}
@@ -332,6 +348,15 @@ public final class MixinProbe implements ModInitializer {
 		Field f = type.getDeclaredField(name);
 		f.setAccessible(true);
 		return (T) f.get(null);
+	}
+
+	private static void check(String what, boolean ok) {
+		if (ok) {
+			out("PASS " + what);
+		} else {
+			out("FAIL " + what);
+			FAILURES++;
+		}
 	}
 
 	private static void out(String msg) {

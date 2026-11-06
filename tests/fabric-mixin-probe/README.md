@@ -103,6 +103,24 @@ the root Remold build.
    `net.fabricmc.loader.impl.launch.knot.KnotClient`; the probe halts the JVM from
    the mod initializer.
 
+   `MixinProbe` now pins the invariants that must hold after the C2 fix and exits
+   `0` on `RESULT PASS` / `3` on `RESULT FAIL`, so a shell driver can assert `$?`:
+
+   ```bash
+   env remold.agent.debug=true <jbr21>/bin/java @build/remold/server-mixin.args
+   echo "probe exit=$?"   # 0 expected with the fixed agent; 3 against f2ff6bf
+   ```
+
+   The raw resource jar (step 4) must be prepended to the `-cp` value in that args file.
+   See [`evidence/c2-exitcode.txt`](evidence/c2-exitcode.txt) for both runs.
+
+   Regression tests for the same two channels live in the root test suite:
+   `tests/src/remold/AnnotationTransformerBridgeCountTest.java` (bridge is not invoked for
+   baseline capture / internal retransform, but is for a real source redefine) and
+   `tests/src/remold/profiler/EntityProbeRetransformContextTest.java` (the entity-probe
+   retransform runs inside an internal retransform context). Mutation check:
+   [`evidence/c1c2-mutation-check.txt`](evidence/c1c2-mutation-check.txt).
+
 ## C3: main-path end-to-end (`C3Probe.java` + `c3/run-c3.sh`)
 
 `MixinProbe` answers cache/`retransformLoaded` questions by calling agent internals directly.
@@ -216,6 +234,8 @@ Mixin target exists at premain. See
 | `c1c2-after-c2.txt` | same on `d5327fe`: still duplicates + rejection (C2 fix does not cover this entry) |
 | `c1c2-after-fix.txt` | same with the C1 fix: cache unchanged by the toggle, `HotSwap successful` |
 | `c1c2-retransform-loaded-count.txt` | `retransformLoaded` startup count: 1120 classes, 0 Mixin targets |
+| `c2-exitcode.txt` | `MixinProbe` exit-code assertion: 0 with the fix, 3 against `f2ff6bf` |
+| `c1c2-mutation-check.txt` | reverting each fix turns exactly one regression test red |
 
 Cross-run SHA-256 values are not comparable: Mixin embeds a random
 `@MixinMerged(sessionId=...)` in every process. Use the hashes inside one log file.

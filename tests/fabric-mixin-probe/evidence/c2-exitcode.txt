@@ -1,0 +1,25 @@
+MixinProbe exit-code assertion (real KnotServer + real -javaagent, hash mode with raw resource jar)
+date: 2026-11-06T20:14:22+08:00
+
+--- green: current agent (C2 fix) ---
+command: env remold.agent.debug=true <jbr21>/bin/java @build/remold/server-mixin.args; echo $?
+[MIXIN-PROBE] Q3 diff(baseline, raw).changedFields = []
+[MIXIN-PROBE] Q3 diff(baseline, woven).changedFields = []
+[MIXIN-PROBE] Q3 gate(baseline, raw) = COMPATIBLE
+[MIXIN-PROBE] Q3 gate(baseline, woven) = COMPATIBLE
+[MIXIN-PROBE] PASS Q3 baseline capture keeps the single-weave bytes (diff(baseline, woven) empty)
+[MIXIN-PROBE] PASS Q3 gate(baseline, woven) = COMPATIBLE
+[MIXIN-PROBE] RESULT PASS failures=0
+exit_code=0
+
+--- red: pre-C2 agent (build/wt-batch-b @ f2ff6bf) ---
+[MIXIN-PROBE] Q3 diff(baseline, raw).changedFields = [- fda68c56$example_mod$remold$useCount$0, - fda68c56$example_mod$remold$state$1]
+[MIXIN-PROBE] Q3 diff(baseline, woven).changedFields = [- fda68c56$example_mod$remold$useCount$0, - fda68c56$example_mod$remold$state$1]
+[MIXIN-PROBE] Q3 gate(baseline, raw) = REMOVED_FIELD
+[MIXIN-PROBE] Q3 gate(baseline, woven) = REMOVED_FIELD
+[MIXIN-PROBE] FAIL Q3 baseline capture keeps the single-weave bytes (diff(baseline, woven) empty)
+[MIXIN-PROBE] FAIL Q3 gate(baseline, woven) = COMPATIBLE
+[MIXIN-PROBE] RESULT FAIL failures=2
+exit_code=3
+
+=> The probe halts with 3 when a pinned invariant fails, so a shell driver can assert $?.

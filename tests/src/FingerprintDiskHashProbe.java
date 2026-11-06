@@ -4,7 +4,6 @@ import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import remold.BytecodeTransformerBridge;
-import remold.AnnotationTransformer;
 import remold.RemoldAgent;
 import remold.util.CRC64;
 import remold.util.LongLongMap;
@@ -177,15 +176,14 @@ public class FingerprintDiskHashProbe {
 			check(firstLog.stream().anyMatch(m -> m.contains("[ANON_ALIGN] Aligning anonymous classes")),
 				"first round really ran anonymous-class alignment");
 
-			int pendingBeforeSecond = AnnotationTransformer.pendingAlignedClasses.size();
+			Class<?> anon1Before = Class.forName("fp.Host$1", false, host.getClassLoader());
+			Class<?> anon2Before = Class.forName("fp.Host$2", false, host.getClassLoader());
 			process.invoke(null, changed, real.getAllLoadedClasses());
 			List<String> secondLog = new ArrayList<>(captured);
 			int afterSecond = intField(host, "reloads");
 			int callsAfterSecond = redefineCalls.get();
 			check(secondLog.stream().noneMatch(m -> m.contains("[ANON_ALIGN] Aligning anonymous classes")),
 				"second unchanged round must not run anonymous-class alignment");
-			check(AnnotationTransformer.pendingAlignedClasses.size() == pendingBeforeSecond,
-				"second unchanged round did not register new aligned classes (idempotent)");
 			check(afterSecond == 1,
 				"second unchanged round must not fire @OnReload (actual=" + afterSecond + ")");
 			check(callsAfterSecond == callsAfterFirst,
@@ -197,13 +195,18 @@ public class FingerprintDiskHashProbe {
 			write(dir, "fp/Host$1.class", v3.get("fp.Host$1"));
 			write(dir, "fp/Host$2.class", v3.get("fp.Host$2"));
 			process.invoke(null, changed, real.getAllLoadedClasses());
-			List<String> thirdLog = new ArrayList<>(captured);
 			int afterThird = intField(host, "reloads");
 			int callsAfterThird = redefineCalls.get();
+			Class<?> anon1After = Class.forName("fp.Host$1", false, host.getClassLoader());
+			Class<?> anon2After = Class.forName("fp.Host$2", false, host.getClassLoader());
 			check(afterThird == 2, "a real source change still fires @OnReload (actual=" + afterThird + ")");
 			check(callsAfterThird > callsAfterSecond,
 				"a real source change still redefines (second=" + callsAfterSecond
 				+ ", third=" + callsAfterThird + ")");
+			check(anon1After == anon1Before,
+				"third real change keeps Host$1 class identity stable (before=" + anon1Before + ", after=" + anon1After + ")");
+			check(anon2After == anon2Before,
+				"third real change keeps Host$2 class identity stable (before=" + anon2Before + ", after=" + anon2After + ")");
 		} finally {
 			instField.set(null, real);
 		}

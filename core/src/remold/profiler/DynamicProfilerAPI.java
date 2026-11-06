@@ -1,6 +1,7 @@
 package remold.profiler;
 
 import remold.RemoldAgent;
+import remold.util.ClassIdentity;
 import org.objectweb.asm.*;
 
 import java.lang.instrument.*;
@@ -85,32 +86,62 @@ public class DynamicProfilerAPI {
 	 * @param methodName 方法名
 	 * @param enable     开启或关闭
 	 */
-	public static void toggleEntityProbe(Class<?> baseClass, String methodName, boolean enable) {
-		if (baseClass == null || methodName == null) return;
+	public static boolean toggleEntityProbe(Class<?> baseClass, String methodName, boolean enable) {
+		Instrumentation inst = RemoldAgent.getInst();
+		if (inst == null) {
+			RemoldAgent.warn("[Profiler] Instrumentation unavailable; entity probe retransform skipped.");
+			return false;
+		}
+		return toggleEntityProbe(inst, baseClass, methodName, enable);
+	}
+
+	/**
+	 * Failure-safe toggle: registers/removes the target, retransforms, and rolls back on any
+	 * {@link Throwable} (including {@link ClassFormatError}) so a failed enable never leaves a
+	 * half-registered target in {@link ProfilerTransformer#targetMethods}.
+	 */
+	static boolean toggleEntityProbe(Instrumentation inst, Class<?> baseClass, String methodName, boolean enable) {
+		baseClass = ClassIdentity.canonicalize(baseClass);
+		if (baseClass == null || methodName == null) return false;
+		Set<String> prev = ProfilerTransformer.targetMethods.get(baseClass);
+		Set<String> prevSnapshot = prev == null ? null : new HashSet<>(prev);
 		if (enable) {
 			ProfilerTransformer.addTargetMethod(baseClass, methodName);
 		} else {
 			ProfilerTransformer.removeTargetMethod(baseClass, methodName);
 		}
-		Instrumentation inst = RemoldAgent.getInst();
-		if (inst == null) {
-			RemoldAgent.warn("[Profiler] Instrumentation unavailable; entity probe retransform skipped.");
-			return;
+		try {
+			retransformForProbe(inst, baseClass, methodName);
+			return true;
+		} catch (Throwable e) {
+			RemoldAgent.error("Retransform failed for " + baseClass.getName() + "#" + methodName, e);
+			if (enable) {
+				// enable failed: restore the pre-call registration exactly
+				if (prevSnapshot == null || prevSnapshot.isEmpty()) {
+					ProfilerTransformer.targetMethods.remove(baseClass);
+				} else {
+					ProfilerTransformer.targetMethods.put(baseClass, prevSnapshot);
+				}
+			} else {
+				// disable failed: the probe bytecode is still live, so bookkeeping must keep it
+				ProfilerTransformer.addTargetMethod(baseClass, methodName);
+			}
+			return false;
 		}
-		toggleEntityProbe(inst, baseClass, methodName);
 	}
 
-	/**
-	 * 测试接缝：用给定的 {@link Instrumentation} 执行实体探针重转换。
-	 *
-	 * <p><b>必须</b>放在 {@link RemoldAgent#enterInternalRetransform} 内执行。这次重转换只给
-	 * 已加载类插性能探针，<b>不是</b> Remold 的热更：JVM 交给 transformer 的
-	 * {@code classfileBuffer} 已经是织入后的字节（Mixin 目标含 {@code @Unique} 字段与 handler），
-	 * 若走外部重定义通道，会再执行一遍重织入桥，追加 hash 混淆的重复 {@code @Unique} 字段。
-	 * 这些字段会被写进基线缓存，下一轮真实热更时 LayoutGate 把它们判成
-	 * {@code field(s) removed} 并整类拒绝——热更从此对该类静默失效，只能重启。</p>
-	 */
+	/** Test seam (kept for existing callers): retransform only, never throws. */
 	static void toggleEntityProbe(Instrumentation inst, Class<?> baseClass, String methodName) {
+		try {
+			retransformForProbe(inst, baseClass, methodName);
+		} catch (Throwable e) {
+			RemoldAgent.error("Retransform failed", e);
+		}
+	}
+
+	private static void retransformForProbe(Instrumentation inst, Class<?> baseClass, String methodName)
+	 throws Exception {
+		baseClass = ClassIdentity.canonicalize(baseClass);
 		// 获取所有已加载的子类并重转换
 		List<Class<?>> toRetransform = new ArrayList<>();
 		for (Class<?> clazz : inst.getAllLoadedClasses()) {
@@ -131,11 +162,8 @@ public class DynamicProfilerAPI {
 		try {
 			inst.retransformClasses(toRetransform.toArray(new Class[0]));
 			RemoldAgent.info("Retransformed " + toRetransform.size() + " classes for " + methodName);
-		} catch (Exception e) {
-			RemoldAgent.error("Retransform failed", e);
 		} finally {
 			RemoldAgent.exitInternalRedefine();
 		}
 	}
-
 }

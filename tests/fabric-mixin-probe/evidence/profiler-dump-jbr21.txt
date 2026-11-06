@@ -1,0 +1,26 @@
+ProfilerTransformer bytecode dump — Forge/Mixin target (fixed agent, JBR 21.0.9)
+date: 2026-11-07T00:25:04+08:00
+command: JAVA_TOOL_OPTIONS=-Dremold.profiler.dump.dir=build/profiler-dump bash c5/run-c5.sh
+input : com_example_examplemod_HotswapTarget-in.class  sha256=fd2ad58d33ff39964a4dbce017c55ebc87b6bd600ccbe363634153bfd0ecdcdd
+output: com_example_examplemod_HotswapTarget-out.class sha256=08032d3d6f04cb8a72b918f4cb5e7cbcee9c8f66dd5e155ff7eeb8a54eb85ec4
+
+[C5] ENTITY-PROBE instanceClass=com.example.examplemod.HotswapTarget loader=TransformingClassLoader[TRANSFORMER]@345132865 loaderId=345132865 staticTargetSame=false
+[Remold] [PROFILER-DUMP] com/example/examplemod/HotswapTarget profiled=true in=1871 out=2057 dupMembers=[]
+[C5] ENTITY-PROBE counter=1 key=HotswapTarget.onReload on the woven target class
+[C5] RESULT PASS failures=[]
+
+javap -v output (out.class) — rc=0, valid class file:
+  major version: 65
+  interfaces: 0, fields: 2, methods: 3, attributes: 4
+  #91 = Utf8               recordEntry
+  #92 = NameAndType        #91:#59        // recordEntry:(Ljava/lang/String;)V
+  #93 = Methodref          #90.#92        // remold/profiler/ProfilerData.recordEntry:(Ljava/lang/String;)V
+  #94 = Utf8               recordExit
+  #96 = NameAndType        #94:#95        // recordExit:(Ljava/lang/String;J)V
+  #97 = Methodref          #90.#96        // remold/profiler/ProfilerData.recordExit:(Ljava/lang/String;J)V
+  public void onReload();
+         7: invokestatic  #93                 // Method remold/profiler/ProfilerData.recordEntry:(Ljava/lang/String;)V
+        51: invokestatic  #97                 // Method remold/profiler/ProfilerData.recordExit:(Ljava/lang/String;J)V
+
+ASM duplicate member scan (from [PROFILER-DUMP] log): dupMembers=[]
+javap parsed the output class without error; no duplicate field/method name+desc; advice calls recordEntry/recordExit present; javap parsed the output class successfully (no frame table needed for the straight-line onReload method).

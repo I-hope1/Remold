@@ -1015,6 +1015,34 @@ tasks.register("entityProbeToggleProbe", JavaExec) {
 	}
 }
 
+// Item 2 red/green: shadow Class (static-field Class rewritten by JBR redefine) must be
+// canonicalized before JVMTI / retransform / profiler target registration.
+tasks.register("shadowClassProbe", JavaExec) {
+	group = "verification"
+	description = "影子 Class 归一化：LibTool.getInstances / toggleEntityProbe 必须作用到 canonical 类"
+	dependsOn classes
+	dependsOn project(":core").tasks.named("shadowJar")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "ShadowClassProbe"
+	maxHeapSize = "1g"
+	def jbrHome = (project.findProperty("p05.jbr") as String)
+		?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+	if (jbrHome != null) {
+		def javaBin = new File(jbrHome, probeIsWindows ? "bin/java.exe" : "bin/java")
+		if (javaBin.exists()) {
+			executable = javaBin.absolutePath
+			javaLauncher.set((JavaLauncher) null)
+		}
+	}
+	doFirst {
+		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		        "-XX:+IgnoreUnrecognizedVMOptions",
+		        "-XX:+AllowEnhancedClassRedefinition",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+	}
+}
+
 // Problem B diagnosis: Class identity across a structural redefine (agent + DCEVM, no Forge).
 tasks.register("classIdentityProbe", JavaExec) {
 	group = "verification"

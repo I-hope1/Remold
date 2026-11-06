@@ -137,6 +137,7 @@ public class LibTool {
 	@SuppressWarnings("unchecked")
 	public synchronized static <T> T[] getInstances(Class<T> clazz) {
 		Objects.requireNonNull(clazz, "clazz cannot be null");
+		clazz = (Class<T>) ClassIdentity.canonicalize(clazz);
 		if (clazz.isPrimitive()) {
 			throw new IllegalArgumentException("Primitive types have no heap instances: " + clazz);
 		}

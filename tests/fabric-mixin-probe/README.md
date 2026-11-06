@@ -261,10 +261,12 @@ Measured (`evidence/c5-forge-e2e.txt`):
   `[C5-MIXIN] onReload unique=999`, `[C5-READ] stage2 method=C5-V1 added=456 value=7` — InitFix
   patched the live instance and the Mixin members survived the re-weave;
 - zero `[INIT-DRIFT]`, zero `LAYOUT-REJECT`, `RESULT PASS` **for the Mixin hot-swap path only**;
-- **entity probe on the woven target: not verified (non-deterministic)** — one run threw
-  `java.lang.ClassFormatError` from `InstrumentationImpl.retransformClasses0`, another
-  identical run reported `ENTITY-PROBE counter=1`. The path is therefore not claimed as
-  verified until the bisection in the next round explains the difference.
+- **entity probe on the woven target: root cause fixed (shared-state race)** — the bisection
+  (Forge plain/Mixin × `d5327fe`/`6091057`) showed no `ClassFormatError` at steady state and
+  reproduced the real failure as a `ProfilerTransformer` shared-mutable-state NPE when a
+  concurrent class load re-entered the transformer. After the local-state refactor the Forge
+  C5 run reports `ENTITY-PROBE counter=1` and `RESULT PASS`. Fabric plain/Mixin probe cells
+  were **not run** (time cap); see `evidence/bisect/SUMMARY.md`.
 
 To reproduce: use the ForgeGradle 7 MDK, add `c5/C5Probe.java` and
 `c5/stages/HotswapTarget.v1.java` under `src/main/java/com/example/examplemod/`, call

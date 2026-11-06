@@ -1014,3 +1014,31 @@ tasks.register("entityProbeToggleProbe", JavaExec) {
 		if (nativeLibPath != null) jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
 	}
 }
+
+// Problem B diagnosis: Class identity across a structural redefine (agent + DCEVM, no Forge).
+tasks.register("classIdentityProbe", JavaExec) {
+	group = "verification"
+	description = "结构性 redefine（加字段）前后 Class 身份对比（问题 B 诊断）"
+	dependsOn classes
+	dependsOn project(":core").tasks.named("shadowJar")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "ClassIdentityProbe"
+	maxHeapSize = "1g"
+	def jbrHome = (project.findProperty("p05.jbr") as String)
+		?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+	if (jbrHome != null) {
+		def javaBin = new File(jbrHome, probeIsWindows ? "bin/java.exe" : "bin/java")
+		if (javaBin.exists()) {
+			executable = javaBin.absolutePath
+			javaLauncher.set((JavaLauncher) null)
+		}
+	}
+	doFirst {
+		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		        "-XX:+IgnoreUnrecognizedVMOptions",
+		        "-XX:+AllowEnhancedClassRedefinition",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+		if (nativeLibPath != null) jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+	}
+}

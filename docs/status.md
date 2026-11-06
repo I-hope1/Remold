@@ -451,7 +451,8 @@
 - **非确定性观测（重要）**：同一份探针代码在同一 Forge/Mixin 目标上，一次运行抛 `ClassFormatError`，另一次运行计数器正常（`counter=1`）。因此当前**不宣称**该路径已验证；二分矩阵需要重复运行才能定性。
 - **后果**：异常穿到调用方；探针注册状态可能残留（`ProfilerTransformer.targetMethods` 已加入但重转换失败）。实体探针在 Forge Mixin 目标上不稳定。
 - **当前处置**：登记为 v0.2.3 已知问题（非确定性），不阻塞 Mixin 热更主路径（C5 的 Mixin 重织入/`@Unique` 保留/InitFix 补字段仍通过）；二分与根因修复排入下一轮（矩阵：普通类/Mixin 目标 × Fabric/Forge × `d5327fe`/`6091057`，并转储 `ProfilerTransformer` 输出字节做 `CheckClassAdapter` 校验）。
-- **候选方向**：先让 `toggleEntityProbe` 捕获 `Throwable`、清理注册状态并返回失败；再按转储定位是 `ProfilerTransformer` 在织入字节上的栈帧/成员问题，还是 Forge 侧 transformer 链问题。
+- **问题 B 根因（已观测，2026-11-06）**：JBR 21.0.9（DCEVM）的 `redefineClasses` 会把**静态字段里的 `Class` 引用改写成另一个同名 `Class` 对象**；局部变量、`instance.getClass()`、`Class.forName` 仍返回原对象。直接 `Instrumentation.redefineClasses`（不经过 Remold 任何代码）同样复现，结构性与仅方法体 redefine 都复现（证据：`tests/fabric-mixin-probe/evidence/class-identity-jbr21.txt`，探针 `:tests:classIdentityProbe`）。因此 C5 探针里 `static Class<?> target` 在第一次 redefine 后变成“影子对象”，与 `instance.getClass()` 不再是同一个 Class；`ProfilerTransformer.targetMethods` 以调用方传入的 Class 为键，若该引用来自静态字段，重定义后与 `classBeingRedefined` 不匹配，可解释“计数器 0/时好时坏”。`ClassFormatError` 是否同因仍待二分（推断，未观测）。
+- **候选方向**：先让 `toggleEntityProbe` 捕获 `Throwable`、清理注册状态并返回失败；`targetMethods` 改为按类名/描述符键（或在入口用 canonical `Class.forName` 归一）；再按转储定位 `ClassFormatError` 是否另有原因（`ProfilerTransformer` 在织入字节上的栈帧/成员问题）。
 - **关联设计规范**：`docs/initfix/03-runtime-driver.md` §4（`@RemoldReinit` 与实体探针均属显式 opt-in 通道）。
 - **关联架构决策**：无。
 

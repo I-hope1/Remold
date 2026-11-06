@@ -1,0 +1,16 @@
+   [PASS] instrumentation available
+IDENTITY phase=before classId=1006227006 instanceClassId=1006227006 instanceClassSame=true
+   [PASS] structural redefine (add field b) returned true
+IDENTITY phase=after classId=1006227006 sameClassObject=true instanceClassId=1006227006 instanceStillSameClass=true
+IDENTITY refs phase=after localId=1006227006 staticFieldId=549293029 holderStaticId=549293029 instanceClassId=1006227006 forNameId=1006227006 staticSame=false holderSame=false staticEqForName=false holderEqForName=false forNameEqLocal=true staticName=ci.Host forNameName=ci.Host staticStable=true
+IDENTITY method-only phase=after ok=true localId=1006227006 staticFieldId=1320105604 holderStaticId=1320105604 forNameId=1006227006 staticSame=false holderSame=false
+   [PASS] canonical Class identity unchanged across structural redefine
+   [OBS] static-field Class reference rewritten: staticRefSame=false holderSame=false
+   [PASS] instance.getClass() still the same Class object
+   [PASS] added field b is visible through the same Class reference
+   [PASS] added field b is visible through a fresh Class.forName lookup
+   [PASS] LibTool.getInstances(oldClass) still finds the live instance (count=1)
+IDENTITY direct-redefine phase=after localId=1152606315 staticFieldId=589987187 holderStaticId=589987187 forNameId=1152606315 staticSame=false holderSame=false forNameSame=true
+   [OBS] direct Instrumentation.redefineClasses: staticRefSame=false holderSame=false canonicalSame=true
+=== SUMMARY: passed=7, failed=0 ===
+BUILD SUCCESSFUL in 4s

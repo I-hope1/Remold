@@ -397,6 +397,7 @@
 - **触发条件**：Loader A 已加载 `Host$1`；对齐事务 commit（pending 留下）；A 的 `Host$1` redefine 成功；Loader B 首次加载同名 `Host$1`。
 - **已观测证据**：`PendingAlignedMultiLoaderProbe`（提交 `3061b9c` 之后的修订版）：A 已加载 → commit → `inst.redefineClasses` 成功 → pending 仍在 → B 首次加载返回 `alignedMarker=true`，条目随后被 B 消费；断言标记为 `[KNOWN-BUG]`。
 - **影响**：B 的类会拿到 A 宿主对齐后的字段布局/编号，可能与 B 的宿主结构不一致；P3（错误注入/错配，非必然崩溃）。
+- **目标环境**：Forge + Mixin；以 Forge 实测的 ClassLoader 身份为准（Fabric 探针只能证明单 JVM 内的类名键冲突，不能替代 Forge 多 loader 实测）。
 - **当前处置**：只记录，未修。
 - **候选关闭方向**：pending 键改为 `(ClassLoader 身份, 类名)`，或 commit 时对已加载类不登记 pending；消费时校验 loader；补多 loader 回归。
 - **关联设计规范**：`docs/topology/03-cascading-pipeline.md`。

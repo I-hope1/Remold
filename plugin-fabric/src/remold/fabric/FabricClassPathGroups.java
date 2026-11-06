@@ -57,7 +57,8 @@ public final class FabricClassPathGroups {
 
 			List<File> candidates = new ArrayList<>();
 			if (agentArgs != null && !agentArgs.trim().isEmpty()) {
-				for (String token : agentArgs.split("[;:]")) {
+				// 只按平台路径分隔符切：Windows 的盘符冒号（C:）不能被当成两段。
+				for (String token : agentArgs.split(Pattern.quote(File.pathSeparator))) {
 					token = token.trim();
 					if (token.isEmpty()) continue;
 					File f = new File(token);

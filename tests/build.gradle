@@ -33,6 +33,7 @@ dependencies {
 	implementation project(":plugin-arc")
 	implementation project(":plugin-mixin")
 	implementation project(":plugin-forge")
+	implementation project(":plugin-fabric")
 	implementation "Anuken:Mindustry:$mindustryVersion"
 	implementation "org.spongepowered:mixin:0.8.5"
 	implementation "com.google.guava:guava:33.4.0-jre"

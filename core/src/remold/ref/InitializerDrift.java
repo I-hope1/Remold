@@ -91,16 +91,16 @@ public final class InitializerDrift {
 					.append(String.join(", ", drift.inheritedReinit()))
 					.append(". Parent @RemoldReinit resets ALL subclass instances to the PARENT initializer;")
 					.append(" it does NOT replay this class's initializer value. Do not use @RemoldReinit on inherited fields")
-					.append(" when the anonymous subclass sets its own value; use @OnReload or a subclass-owned field.");
+					.append(" when the anonymous subclass sets its own value; 不会重放，请手动处理（或把值放到子类自己声明的字段上）。");
 			} else if (!drift.inherited().isEmpty()) {
 				text.append("inherited field initializer changed but will NOT be replayed: ")
 					.append(String.join(", ", drift.inherited()))
-					.append(" (default InitFix only patches added fields; use @OnReload or a subclass-owned field.")
+					.append(" (default InitFix only patches added fields; 不会重放，请手动处理（或把值放到子类自己声明的字段上）。")
 					.append(" Do NOT use parent @RemoldReinit: it resets all subclass instances to the parent initializer.)");
 			} else {
 				text.append("existing field initializer changed but will NOT be replayed: ")
 					.append(String.join(", ", drift.changed()))
-					.append(" (default InitFix only patches added fields; use @RemoldReinit or @OnReload to reset)");
+					.append(" (default InitFix only patches added fields; 不会重放，请手动处理（如需重置，标 @RemoldReinit）)");
 			}
 			text.append(" [live instances=").append(instances < 0 ? "unknown" : instances)
 				.append(", enum=").append(enumUs).append("us]");

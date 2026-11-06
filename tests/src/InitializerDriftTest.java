@@ -393,6 +393,75 @@ public class InitializerDriftTest {
 		assertEquals(1, warns.size(), warns.toString());
 		assertTrue(warns.get(0).contains("inherited field initializer"), warns.get(0));
 		assertFalse(warns.get(0).contains("use @RemoldReinit"), warns.get(0));
+		assertTrue(warns.get(0).contains("不会重放，请手动处理"), warns.get(0));
+	}
+
+	@Test
+	void allDriftWarningsDropOnReloadRecommendation() throws Exception {
+		java.util.List<String> all = new java.util.ArrayList<>();
+
+		Map<String, byte[]> v1 = compile("idl16", """
+			package idl16;
+			public class Host { public int x = 1; }
+			""", """
+			package idl16;
+			public class Parent { public int unused; }
+			""");
+		Map<String, byte[]> v2 = compile("idl16", """
+			package idl16;
+			public class Host { public int x = 2; }
+			""", """
+			package idl16;
+			public class Parent { public int unused; }
+			""");
+		all.addAll(warningsFor("idl16.Host", v1.get("idl16.Host"), Map.of("idl16.Host", v2.get("idl16.Host"))));
+
+		Map<String, byte[]> iv1 = compile("idl17", """
+			package idl17;
+			public class Host { public Parent make() { return new Parent() {{ health = 90; }}; } }
+			""", """
+			package idl17;
+			public class Parent { public int health; }
+			""");
+		Map<String, byte[]> iv2 = compile("idl17", """
+			package idl17;
+			public class Host { public Parent make() { return new Parent() {{ health = 100; }}; } }
+			""", """
+			package idl17;
+			public class Parent { public int health; }
+			""");
+		all.addAll(warningsFor("idl17.Host$1", iv1.get("idl17.Host$1"),
+			Map.of("idl17.Host$1", iv2.get("idl17.Host$1"))));
+
+		Map<String, byte[]> rv1 = compile("idl18", """
+			package idl18;
+			public class Host { public Parent make() { return new Parent() {{ health = 90; }}; } }
+			""", """
+			package idl18;
+			public class Parent { public int health; }
+			""");
+		Map<String, byte[]> rv2 = LayoutGateAssert.compile(Map.of(
+			"idl18.Host", """
+				package idl18;
+				public class Host { public Parent make() { return new Parent() {{ health = 100; }}; } }
+				""",
+			"idl18.Parent", """
+				package idl18;
+				import remold.annotation.RemoldReinit;
+				public class Parent {
+				    @RemoldReinit(mode = RemoldReinit.Mode.OVERWRITE)
+				    public int health;
+				}
+				"""));
+		remold.RemoldAgent.bytecodeCache.put("idl18.Host$1", rv1.get("idl18.Host$1"));
+		all.addAll(warningsFor("idl18.Host$1", rv1.get("idl18.Host$1"),
+			Map.of("idl18.Host$1", rv2.get("idl18.Host$1"), "idl18.Parent", rv2.get("idl18.Parent"))));
+
+		assertEquals(3, all.size(), "expected one warn per drift variant, actual=" + all);
+		for (String w : all) {
+			assertFalse(w.contains("@OnReload"), "warn must not recommend @OnReload: " + w);
+			assertTrue(w.contains("不会重放，请手动处理"), "warn must say the value is not replayed: " + w);
+		}
 	}
 
 	@Test

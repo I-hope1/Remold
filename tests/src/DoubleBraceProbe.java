@@ -88,6 +88,7 @@ public class DoubleBraceProbe {
 		scenarioE2();
 		scenarioE2Own();
 		scenarioE3();
+		scenarioL0LambdaRenumber();
 
 		System.out.println("\n=== DOUBLE-BRACE PROBE SUMMARY: passed=" + passed + ", failed=" + failed + " ===");
 		if (failed > 0) System.exit(1);
@@ -919,6 +920,40 @@ public class DoubleBraceProbe {
 		check(driftAfterE3 == driftBeforeE3,
 			"E3 layout-rejected class produces zero INIT-DRIFT warns (before=" + driftBeforeE3
 			+ ", after=" + driftAfterE3 + ")");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// L0: lambda renumbering through the real processChanges path must stay silent.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioL0LambdaRenumber() throws Exception {
+		System.out.println("\n--- L0: lambda renumbering through real processChanges ---");
+		String pkg = "l0lambda";
+		Map<String, String> v1 = Map.of(pkg + ".Host", """
+			package l0lambda;
+			public class Host {
+			    public int x = 1;
+			    public Runnable r = () -> System.out.println("a");
+			    public String tag() { return "v1"; }
+			}
+			""");
+		Map<String, String> v2 = Map.of(pkg + ".Host", """
+			package l0lambda;
+			public class Host {
+			    public int x = 1;
+			    public Runnable first = () -> System.out.println("new");
+			    public Runnable r = () -> System.out.println("a");
+			    public String tag() { return "v2"; }
+			}
+			""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		checkEq("v1", call0(host, "tag"), "L0-lambda precondition: Host runs v1");
+		long before = WARNINGS.stream().filter(w -> w.contains("[INIT-DRIFT]")).count();
+		f.hotswap(pkg + ".Host");
+		checkEq("v2", call0(host, "tag"), "L0-lambda: processChanges redefined Host");
+		long after = WARNINGS.stream().filter(w -> w.contains("[INIT-DRIFT]")).count();
+		check(after == before, "lambda renumbering through processChanges produces zero INIT-DRIFT"
+			+ " warns (before=" + before + ", after=" + after + ")");
 	}
 
 	// ------------------------------------------------------------------------------------------------

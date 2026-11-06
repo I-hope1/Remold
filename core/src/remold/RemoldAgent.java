@@ -2293,8 +2293,27 @@ public class RemoldAgent {
 			info("[INJECTED] Successfully defined new class: " + className + " into " + loader);
 			return true;
 		} catch (LinkageError le) {
-			if (DEBUG) error("Class already loaded: " + className, le);
-			return true;
+			// 同名类已经存在：只有当前已加载字节与本次字节完全一致时，才能算"已经注入成功"。
+			// 不一致时必须返回 false —— 调用方据此跳过 bytecodeCache.put 与指纹落账，
+			// 否则运行基线会被一份从未生效的字节覆盖，后续对齐/InitFix 全部基于假基线。
+			Class<?> loaded = loadedClassesMap.get(className);
+			byte[] live = null;
+			if (loaded != null) {
+				try {
+					live = fetchBytecodeMemory(loaded);
+				} catch (Throwable ignored) {
+					// retransform 不可用 / 被其它 transformer 拒绝：无法证明一致，只能保守拒绝。
+				}
+			}
+			if (live != null && java.util.Arrays.equals(live, bytes)) {
+				if (DEBUG) log("[INJECT-SKIP] " + className
+					+ " was already loaded with identical bytes; nothing to do");
+				return true;
+			}
+			warn("[INJECT-CONFLICT] " + className + " is already loaded with "
+				+ (live == null ? "unverifiable" : "different") + " bytes; the new bytes were NOT recorded"
+				+ " as the runtime baseline. Restart so the class is defined fresh.");
+			return false;
 		} catch (Exception e) {
 			error("Failed to inject new class: " + className + ". CAUTION: This may cause NoClassDefFoundError.", e);
 			return false;

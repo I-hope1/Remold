@@ -680,6 +680,9 @@ def agentProbe = { String taskName, String mainClassName, String desc ->
 agentProbe("retryBookkeepingProbe", "RetryBookkeepingProbe",
 	"逐类重试的记账回归 (RetryBookkeepingProbe)：redefine 成功但记账抛错时不得判定为 redefining failed")
 
+agentProbe("injectConflictProbe", "InjectConflictProbe",
+	"新类注入冲突回归 (InjectConflictProbe)：LinkageError 且字节不一致时不得更新 bytecodeCache 基线")
+
 tasks.register("fingerprintDiskHashProbe", JavaExec) {
 	group = "verification"
 	description = "任务 2 复现：匿名类重命名后，未变化的第二轮必须零副作用"

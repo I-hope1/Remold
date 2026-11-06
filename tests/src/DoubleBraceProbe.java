@@ -775,14 +775,10 @@ public class DoubleBraceProbe {
 		}
 		System.out.println("   [OBS] E2 offsetBefore=" + offsetBefore + ", offsetAfter=" + offsetAfter
 			+ ", viaNew=" + viaNew + ", viaOld=" + viaOld + ", addedExists=" + addedExists);
-		knownBug("E2 binding on INHERITED field property was NOT detected (XXX was redefined)");
+		check(!addedExists, "E2 binding on INHERITED field property is now detected (XXX was not redefined)");
 		checkEq(1, viaNew, "E2 new offset still reads property=1");
-		if (offsetBefore != offsetAfter) {
-			knownBug("E2 offset moved " + offsetBefore + " -> " + offsetAfter
-				+ " and the old offset reads " + viaOld + " (not property=1)");
-		} else {
-			knownBug("E2 offset did not move; only a documentation correction would be needed");
-		}
+		checkEq(1, viaOld, "E2 old offset still reads property=1");
+		checkEq(offsetBefore, offsetAfter, "E2 rejected redefine leaves the offset unchanged");
 	}
 
 	// ------------------------------------------------------------------------------------------------

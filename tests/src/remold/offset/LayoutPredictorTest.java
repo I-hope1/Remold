@@ -448,4 +448,17 @@ public class LayoutPredictorTest {
 			"Dot-keyed batch must still feed the new superclass bytes into the prediction;"
 			+ " actual drifting=" + result.driftingFields());
 	}
+
+	@Test
+	@DisplayName("无绑定守卫：有漂移但没有缓存持有者时仍放行")
+	public void noBindingStillPasses() {
+		DriftingField df = new DriftingField("remold/offset/testpkg/NoBindChild",
+			"property", 16, 20);
+		DriftDecision d = SuperclassDriftGate.checkLayoutDrift(
+			"remold/offset/testpkg/NoBindBase",
+			List.of(df),
+			OffsetBindingIndex.from(List.of()),
+			name -> true);
+		assertTrue(d.isSafe(), "no binding means no cached holder; must not reject: " + d.formatReport());
+	}
 }

@@ -258,20 +258,25 @@ public final class LayoutPredictor {
 				try {
 					Class<?> liveDescClass = Class.forName(descDotName, false, parentLoader);
 					Class<?> predDescClass = Class.forName(descDotName, false, cl);
-					for (Field liveField : liveDescClass.getDeclaredFields()) {
-						if ((liveField.getModifiers() & Modifier.STATIC) != 0) continue;
-						String fn = liveField.getName();
-						long oldOff = UNSAFE.objectFieldOffset(liveField);
-						Field predField;
-						try {
-							predField = predDescClass.getDeclaredField(fn);
-						} catch (NoSuchFieldException e) {
-							deleted.add(new DeletedField(descInternal, fn, oldOff));
-							continue;
-						}
-						long newOff = UNSAFE.objectFieldOffset(predField);
-						if (oldOff != newOff) {
-							drifting.add(new DriftingField(descInternal, fn, oldOff, newOff));
+					// Declared + inherited instance fields: a binding can target a subclass field
+					// that is declared on its superclass (E2: Host$1.property declared in XXX).
+					Set<String> seen = new HashSet<>();
+					for (Class<?> c = liveDescClass; c != null && c != Object.class; c = c.getSuperclass()) {
+						for (Field liveField : c.getDeclaredFields()) {
+							if ((liveField.getModifiers() & Modifier.STATIC) != 0) continue;
+							if (liveField.isSynthetic()) continue;
+							String fn = liveField.getName();
+							if (!seen.add(fn)) continue;
+							long oldOff = UNSAFE.objectFieldOffset(liveField);
+							Field predField = findField(predDescClass, fn);
+							if (predField == null) {
+								deleted.add(new DeletedField(descInternal, fn, oldOff));
+								continue;
+							}
+							long newOff = UNSAFE.objectFieldOffset(predField);
+							if (oldOff != newOff) {
+								drifting.add(new DriftingField(descInternal, fn, oldOff, newOff));
+							}
 						}
 					}
 				} catch (Throwable t) {
@@ -332,6 +337,14 @@ public final class LayoutPredictor {
 	 * @param descendantSupplier 获取已加载子孙类的提供器
 	 * @return 发生漂移的字段列表；若无漂移则返回空列表；若无法预测目标类则返回 null
 	 */
+	private static Field findField(Class<?> type, String name) {
+		for (Class<?> c = type; c != null && c != Object.class; c = c.getSuperclass()) {
+			try { return c.getDeclaredField(name); }
+			catch (NoSuchFieldException ignored) { }
+		}
+		return null;
+	}
+
 	public static List<DriftingField> findDriftingFields(
 		Class<?> targetClass,
 		byte[] newBytes,

@@ -373,6 +373,14 @@
 
 
 
+### 风险 17：L0 不覆盖静态字段初值变化（P3）
+- **风险描述**：`InitializerDrift` 只扫描 `<init>` 的实例字段 `PUTFIELD`；`<clinit>`/`PUTSTATIC` 不在 L0 范围。`static int s = 1` 改为 `2` 不会产生 `[INIT-DRIFT]`，存量静态值不会重置。
+- **触发条件**：只改静态字段初值，且没有新增静态字段/`@RemoldReinit`。
+- **当前处置**：设计上不覆盖（L0 只做实例字段可见性）；`InitializerDriftTest.staticFieldIsNotCovered` 明确断言为空，不实现静态检测。
+- **候选方向**：L0 扩展 `<clinit>` 切片比较，或由 InitFix 静态补丁路径单独处理。
+- **关联设计规范**：`docs/initfix/10-initializer-change-detection.md`。
+- **关联架构决策**：无。
+
 ### 风险 16：`sourceBytecodeCache` 写入到回滚之间的并发窗口（P3）
 - **风险描述与底层机制**：`processChanges` 不是 `synchronized`，`AnnotationTransformer.isNoOpExternalRedefine` / `oldBytecode` 读取 `sourceBytecodeCache` 时也不持有同一把锁。本轮源码在匿名类对齐后、门与 redefine 前就写入缓存；未生效类要等 `applyRedefinitions` 后才回滚。这段窗口内其他线程可能读到“尚未生效”的新源码。
 - **触发条件**：`processChanges` 正在处理一批类（尤其对齐/布局门/重定义耗时较长）时，外部重定义通道或 `retransformLoaded()` 读取 `sourceBytecodeCache`。
@@ -381,6 +389,8 @@
 - **候选关闭方向**：按设计稿引入 `SourceRound` staged/commit，读取方只读已提交版本；或把 `processChanges` 与读取方统一到同一锁。
 - **关联设计规范**：`docs/initfix/11-source-bytecode-cache.md` §9。
 - **关联架构决策**：无。
+
+- **修复后行为**：继承字段存在偏移绑定时，`SuperclassDriftGate` 现在会拒绝父类 redefine（`SUPERCLASS_FIELD_DRIFT`），该类及其匿名类本轮不生效；需要重启或重建类才能继续。已由 `DoubleBraceProbe` E2 实测（`addedExists=false`、偏移保持 16）。
 
 ### 风险 15：`pendingAlignedClasses` 只有类名键，多 ClassLoader 串用（P3）
 - **风险描述与底层机制**：`AnnotationTransformer.pendingAlignedClasses` 是 `Map<String, byte[]>`，键只有类内部名/点分名，没有 ClassLoader 身份。`AlignmentTransaction.commit()` 对已加载的匿名类仍会保留 pending 条目；该类在宿主 Loader 中 redefine 时不会消费 pending（`classBeingRedefined != null`），条目会留到**另一个 ClassLoader 首次加载同名类**时被 `transform(..., classBeingRedefined=null, ...)` 消费。

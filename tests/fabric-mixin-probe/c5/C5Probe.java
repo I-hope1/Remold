@@ -48,6 +48,17 @@ public final class C5Probe {
             installTee();
             agent = Class.forName("remold.RemoldAgent");
             registerListener();
+            // Dev-mode mixin config registration: FG7 runs classpath mods (no jar manifest),
+            // so the MixinConfigs manifest attribute is not seen. Register the config before
+            // the target class is loaded for the first time.
+            try {
+                Class<?> envClass = Class.forName("org.spongepowered.asm.mixin.MixinEnvironment");
+                Object env = envClass.getMethod("getDefaultEnvironment").invoke(null);
+                envClass.getMethod("addConfiguration", String.class).invoke(env, "c5.mixins.json");
+                out("MIXIN-CONFIG registered programmatically");
+            } catch (Throwable t) {
+                out("MIXIN-CONFIG registration failed: " + t);
+            }
             target = Class.forName(TARGET, true, C5Probe.class.getClassLoader());
             Object instance = target.getConstructor().newInstance();
             Field value = target.getDeclaredField("value");
@@ -67,6 +78,10 @@ public final class C5Probe {
             check("stage1 redefine batch observed", true);
             check("stage1 @OnReload on live instance saw the new method",
                 awaitCaptured("[C5-READ] stage1 method=C5-V1", 60_000));
+            check("stage1 @Inject handler alive and @Unique state retained (mixin re-weaved)",
+                awaitCaptured("[C5-MIXIN] onReload unique=123", 60_000));
+            check("stage1 applied bytes keep the mixin @Unique field",
+                contains(cache("bytecodeCache"), "c5Unique"));
             out("STAGE1-DONE");
 
             out("WAIT-STAGE2");
@@ -75,6 +90,10 @@ public final class C5Probe {
             check("stage2 redefine batch observed", true);
             check("stage2 InitFix patched live instance: @OnReload read added=456",
                 awaitCaptured("[C5-READ] stage2 method=C5-V1 added=456", 60_000));
+            check("stage2 @Inject handler alive and @Unique state retained (mixin re-weaved)",
+                awaitCaptured("[C5-MIXIN] onReload unique=123", 60_000));
+            check("stage2 applied bytes keep the mixin @Unique field",
+                contains(cache("bytecodeCache"), "c5Unique"));
             out("STAGE2-DONE");
         } catch (Throwable t) {
             out("PROBE-ERROR " + t);
@@ -134,7 +153,19 @@ public final class C5Probe {
 
     private static void report(String label, byte[] bytes) throws Exception {
         if (bytes == null) { out(label + ": null"); return; }
-        out(label + ": len=" + bytes.length + " sha256=" + sha(bytes));
+        out(label + ": len=" + bytes.length + " sha256=" + sha(bytes)
+            + " has_mixin_field=" + contains(bytes, "c5Unique")
+            + " has_mixin_handler=" + contains(bytes, "c5Inject"));
+    }
+
+    private static boolean contains(byte[] haystack, String needle) {
+        byte[] n = needle.getBytes(StandardCharsets.UTF_8);
+        outer:
+        for (int i = 0; i <= haystack.length - n.length; i++) {
+            for (int j = 0; j < n.length; j++) if (haystack[i + j] != n[j]) continue outer;
+            return true;
+        }
+        return false;
     }
 
     private static String sha(byte[] bytes) throws Exception {

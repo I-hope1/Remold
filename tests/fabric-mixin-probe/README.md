@@ -224,17 +224,29 @@ server run is a real `runServer` with the real Remold agent attached via
 `-javaagent:<agent.jar>=<proj>/build/sourceSets/main` plus
 `-XX:+AllowEnhancedClassRedefinition`.
 
+The hot-swapped class `HotswapTarget` **is also a real Mixin target**
+(`c5/HotswapTargetMixin.java` adds a `@Unique int c5Unique = 123` and an
+`@Inject(method = "onReload")` handler). FG7 dev runs classpath mods without a jar manifest, so
+the `MixinConfigs` manifest attribute is not seen; `C5Probe` registers `c5.mixins.json` via
+`MixinEnvironment.addConfiguration` before the target class is first loaded. The Forge bridge
+is loaded with `-Dremold.plugins=forge -Dremold.plugin.jars=<plugin-forge jar>`.
+
 Measured (`evidence/c5-forge-e2e.txt`):
 
 - hot-swapped class loader identity:
   `TransformingClassLoader[TRANSFORMER]@…` / `cpw.mods.modlauncher.TransformingClassLoader`;
-- Q1 retransform input = 1088 B (equal to `bytecodeCache` / `sourceBytecodeCache`);
-  Q2 `fetchOriginalBytecode = null` (dev launch, the only resource is under the watched dir);
+- Q1 retransform input = 1871 B with `has_mixin_field=true has_mixin_handler=true`
+  (`bytecodeCache` = 2093 B); Q2 `fetchOriginalBytecode = null` (dev launch, the only
+  resource is under the watched dir);
+- `[Remold] [Forge/NeoForge] Successfully acquired Mixin transformer across ClassLoader:
+  org.spongepowered.asm.mixin.transformer.MixinTransformer`;
 - stage 1 (add a method, real `javac` into the watched dir): `HotSwap successful`,
-  `[C5-READ] stage1 method=C5-V1 value=7` — the new method is callable on the existing
-  instance and the old `value` is preserved;
-- stage 2 (add a field): `Instance field init patch … fields=1`, `[C5-READ] stage2 method=C5-V1
-  added=456 value=7` — InitFix patched the live instance;
+  `[C5-MIXIN] onReload unique=123`, `[C5-READ] stage1 method=C5-V1 value=7` — the new method is
+  callable on the existing instance, the Mixin `@Inject` handler still runs and the `@Unique`
+  field is retained (applied bytes still contain `c5Unique`);
+- stage 2 (add a field): `Instance field init patch … fields=1`,
+  `[C5-MIXIN] onReload unique=123`, `[C5-READ] stage2 method=C5-V1 added=456 value=7` — InitFix
+  patched the live instance and the Mixin members survived the re-weave;
 - zero `[INIT-DRIFT]`, zero `LAYOUT-REJECT`, `RESULT PASS`.
 
 To reproduce: use the ForgeGradle 7 MDK, add `c5/C5Probe.java` and

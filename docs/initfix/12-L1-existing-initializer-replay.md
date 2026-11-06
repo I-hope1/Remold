@@ -22,7 +22,20 @@ L1 不是“自动重放构造器”，只重放**字段写入表达式切片**�
 - 字段没有 `@RemoldReinit`（避免与显式路径重复）；
 - 字段不是 `final`（final 只能走 `@RemoldReinit(OVERWRITE)` 的 Unsafe 通道）。
 
-继承字段（双括号写父类字段）**必须纳入第一版**：Mindustry 的 `Blocks.java` 里 81 个双括号匿名 `Block` 子类、304 处 `health`/`size`/`armor`/`buildTime` 赋值，写的几乎全是 `Block` 的继承字段；排除继承字段等于不覆盖核心用例。做法：
+继承字段（双括号写父类字段）**必须纳入第一版**。
+
+统计来源：`.sources/mindustry/mindustry/content/Blocks.java`（本地只读源码镜像；镜像内没有 git/版本元数据，无法给出 commit/tag，版本号未知）。脚本：
+
+```bash
+# 双括号初始化块总数
+grep -c 'new .*() *{{' .sources/mindustry/mindustry/content/Blocks.java
+# 五个常见字段的赋值总数（含普通构造器/方法，不只是双括号块）
+for f in health size armor buildTime speed; do
+  printf '%s ' "$f"; grep -c "$f *=" .sources/mindustry/mindustry/content/Blocks.java
+done
+```
+
+实测：双括号块 **81** 个；`health=79`、`size=182`、`armor=13`、`buildTime=1`、`speed=29`，合计 304 处。`Block` 自身声明 `health`/`size`/`armor`/`buildTime`（`speed` 不属于 `Block`，可能来自其它类型），所以 304 不是“全部继承字段”，但主要形态确实是匿名 `Block` 子类写继承字段。排除继承字段等于不覆盖核心用例。做法：
 
 - 补丁 owner 仍是声明类，但**执行实例集合必须是 `LibTool.getInstances(该匿名类)`**，不能是 `LibTool.getInstances(父类)`；后者会复现 B2 的批量误伤（未修改的匿名子类也被写成父类初值）。
 - 字段可访问性：声明类字段若是 private，走 Unsafe（InitFix 已有 hidden nestmate/Unsafe 路径）；不因 private 放弃。

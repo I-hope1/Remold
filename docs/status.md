@@ -371,6 +371,17 @@
 - **关联架构决策**：无。
 
 
+
+### 风险 15：`pendingAlignedClasses` 只有类名键，多 ClassLoader 串用（P3）
+- **风险描述与底层机制**：`AnnotationTransformer.pendingAlignedClasses` 是 `Map<String, byte[]>`，键只有类内部名/点分名，没有 ClassLoader 身份。`AlignmentTransaction.commit()` 对已加载的匿名类仍会保留 pending 条目；该类在宿主 Loader 中 redefine 时不会消费 pending（`classBeingRedefined != null`），条目会留到**另一个 ClassLoader 首次加载同名类**时被 `transform(..., classBeingRedefined=null, ...)` 消费。
+- **触发条件**：Loader A 已加载 `Host$1`；对齐事务 commit（pending 留下）；A 的 `Host$1` redefine 成功；Loader B 首次加载同名 `Host$1`。
+- **已观测证据**：`PendingAlignedMultiLoaderProbe`（提交 `3061b9c` 之后的修订版）：A 已加载 → commit → `inst.redefineClasses` 成功 → pending 仍在 → B 首次加载返回 `alignedMarker=true`，条目随后被 B 消费；断言标记为 `[KNOWN-BUG]`。
+- **影响**：B 的类会拿到 A 宿主对齐后的字段布局/编号，可能与 B 的宿主结构不一致；P3（错误注入/错配，非必然崩溃）。
+- **当前处置**：只记录，未修。
+- **候选关闭方向**：pending 键改为 `(ClassLoader 身份, 类名)`，或 commit 时对已加载类不登记 pending；消费时校验 loader；补多 loader 回归。
+- **关联设计规范**：`docs/topology/03-cascading-pipeline.md`。
+- **关联架构决策**：无。
+
 ### 风险 14：`SuperclassDriftGate` 漏检子类继承字段的偏移绑定
 - **风险描述与底层机制**：`LayoutPredictor` 在预测父类新增字段造成的漂移时，只遍历已加载子孙类的 `getDeclaredFields()`；`SuperclassDriftGate` 的兜底路径也只取 `getDeclaredInstanceFields`。因此，偏移绑定指向**子类从父类继承来的字段**时（例如 `Host$1.property` 实际声明在 `XXX`），父类新增字段导致的物理偏移变化不会被检测，`XXX` 仍会被 redefine。
 - **触发条件**：`OffsetBindingIndex` 中存在 `targetClass = 子类`、`targetField = 继承字段` 的绑定；父类新增实例字段并进入同一轮 redefine。

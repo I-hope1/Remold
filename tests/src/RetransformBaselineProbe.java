@@ -75,7 +75,16 @@ public class RetransformBaselineProbe {
 		instField.set(null, proxy);
 		Method retransform = RemoldAgent.class.getDeclaredMethod("retransformLoaded", Class[].class);
 		retransform.setAccessible(true);
+		RemoldAgent.Logger oldLogger = RemoldAgent.logger;
+		RemoldAgent.logger = new RemoldAgent.Logger() {
+			public void log(String msg) { System.out.println("[RAW-LOG] " + msg); }
+			public void info(String msg) { System.out.println("[RAW-INFO] " + msg); }
+			public void warn(String msg) { System.out.println("[RAW-WARN] " + msg); }
+			public void error(String msg) { System.out.println("[RAW-ERROR] " + msg); }
+			public void error(String msg, Throwable t) { System.out.println("[RAW-ERROR] " + msg); }
+		};
 		try {
+			System.out.println("--- raw retransform #1: schema class already in bytecodeCache ---");
 			retransform.invoke(null, (Object) new Class<?>[]{host});
 			check(retransforms.get() == 0,
 				"retransformLoaded skips a class already present in bytecodeCache (actual=" + retransforms.get() + ")");
@@ -84,6 +93,7 @@ public class RetransformBaselineProbe {
 
 			// Force the class into the candidate set to exercise the fallback path.
 			RemoldAgent.bytecodeCache.remove("rb.Host");
+			System.out.println("--- raw retransform #2: bytecodeCache removed, fallback path ---");
 			retransform.invoke(null, (Object) new Class<?>[]{host});
 			check(retransforms.get() > 0,
 				"forced retransform actually reached retransformClasses (actual=" + retransforms.get() + ")");
@@ -91,6 +101,7 @@ public class RetransformBaselineProbe {
 				"fallback baseline is the applied v2 source, not v1");
 			check(hasField(host, "b"), "class still has b after forced retransform (no delete-field rejection)");
 		} finally {
+			RemoldAgent.logger = oldLogger;
 			instField.set(null, real);
 		}
 		System.out.println("=== SUMMARY: passed=" + passed + ", failed=" + failed + " ===");

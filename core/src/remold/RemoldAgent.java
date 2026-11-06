@@ -1622,8 +1622,11 @@ public class RemoldAgent {
 		// 需要的是**上一轮的源码基线**。所以先把旧值快照下来，供本轮对齐读取；
 		// 否则 align(old == new) 会静默地什么都不做（实测见 docs/initfix/08-test-audit.md §10.5）。
 		Map<String, byte[]> prevSourceBytes = new HashMap<>();
+		Map<String, byte[]> sourceBefore = new HashMap<>();
+		Set<String> loadedBefore = new HashSet<>(loadedClassesMap.keySet());
 		for (String key : newBatchBytes.keySet()) {
 			byte[] prev = sourceBytecodeCache.get(key);
+			sourceBefore.put(key, prev);
 			if (prev != null) prevSourceBytes.put(key, prev);
 		}
 		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
@@ -1911,6 +1914,18 @@ public class RemoldAgent {
 		RedefineOutcome outcome     = applyRedefinitions(definitions, transactions.values(), skips);
 		Set<String>     redefinedOk = outcome.successful();
 		Set<String>     rolledBack  = outcome.rolledBack();
+
+		// sourceBytecodeCache 是“最近一次实际生效的源码基线”，不是“本轮编译结果”。
+		// 对齐阶段必须先看到本轮新字节，所以上面暂存写入；这里按类回滚未生效的已加载类。
+		// 注入的新类不在 loadedBefore 中，保持新源码；成功类保持新源码。
+		for (String key : sourceBefore.keySet()) {
+			if (redefinedOk.contains(key)) continue;
+			byte[] prev = sourceBefore.get(key);
+			// 新注入类（没有旧源码、也不在 loadedBefore）保持新源码；其余未成功类回滚。
+			if (prev == null && !loadedBefore.contains(key)) continue;
+			if (prev == null) sourceBytecodeCache.remove(key);
+			else sourceBytecodeCache.put(key, prev);
+		}
 
 		// ---- 指纹落账 + 失败回队 ----
 		//

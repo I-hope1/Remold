@@ -10,6 +10,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
@@ -849,6 +850,7 @@ public class DoubleBraceProbe {
 		Class<?> xxx = Class.forName(pkg + ".XXX", true, f.loader);
 		checkEq(1, getInt(old, anon, "own"), "E3 precondition: old.own=1");
 
+		byte[] sourceBefore = RemoldAgent.sourceBytecodeCache.get(pkg + ".XXX");
 		RemoldAgent.registerOffsetBinding(new OffsetScanner.Binding(
 			pkg.replace('.', '/') + "/Host$1", "own",
 			OffsetScanner.Kind.INSTANCE_OFFSET, OffsetScanner.Sink.STATIC_FIELD,
@@ -867,6 +869,12 @@ public class DoubleBraceProbe {
 		}
 		check(!addedExists, "E3 binding on DECLARED field own caused SuperclassDriftGate to reject");
 		checkEq(1, getInt(old, anon, "own"), "E3 existing instance kept own=1");
+		byte[] sourceAfter = RemoldAgent.sourceBytecodeCache.get(pkg + ".XXX");
+		System.out.println("   [OBS] E3 sourceBefore=" + (sourceBefore == null ? "null" : sourceBefore.length)
+			+ ", sourceAfter=" + (sourceAfter == null ? "null" : sourceAfter.length)
+			+ ", equal=" + Arrays.equals(sourceBefore, sourceAfter));
+		check(sourceBefore != null && Arrays.equals(sourceBefore, sourceAfter),
+			"E3 rejected class keeps its previous sourceBytecodeCache baseline");
 	}
 
 	// ------------------------------------------------------------------------------------------------

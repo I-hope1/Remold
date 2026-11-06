@@ -1,0 +1,342 @@
+Picked up JAVA_TOOL_OPTIONS: -XX:UseAVX=2
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by net.rubygrapefruit.platform.internal.NativeLibraryLoader in an unnamed module (file:/D:/data/.gradle/wrapper/dists/gradle-9.7.1-bin/1w1c7tv4s851m17nbqdsro2tv/gradle-9.7.1/lib/native-platform-0.22-milestone-29.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+Starting a Gradle Daemon, 2 busy and 1 incompatible and 1 stopped Daemons could not be reused, use --status for details
+
+> Configure project :example
+[example] Local Remold Gradle plugin jar not found; skipping remold integration. Run ':gradle-plugin:jar' or pass -Premold.pluginJar=<jar> to enable it.
+
+> Task :api:compileJava
+targetVersion: 11 (JDK1_11)
+Compiler initialed in 549.5949ms
+Process (init) in 3.1226ms
+
+> Task :api:processResources NO-SOURCE
+> Task :api:classes
+> Task :api:jar UP-TO-DATE
+
+> Task :core:compileJava
+targetVersion: 11 (JDK1_11)
+Compiler initialed in 758.99054ms
+Process (init) in 16.5224ms
+注: E:\Users\ASUS\Desktop\Mods\nipx-hotswap\build\wt-batch-b\core\src\remold\AnonClassAligner.java使用或覆盖了已过时的 API。
+注: 有关详细信息, 请使用 -Xlint:deprecation 重新编译。
+
+> Task :core:processResources NO-SOURCE
+> Task :core:classes
+> Task :core:shadowJar
+> Task :core:jar
+
+> Task :panama:compileJava
+targetVersion: 11 (JDK1_11)
+Compiler initialed in 141.1671ms
+Process (init) in 5.2566ms
+
+> Task :panama:processResources NO-SOURCE
+> Task :panama:classes
+> Task :panama:jar
+
+> Task :plugin-arc:compileJava
+targetVersion: 11 (JDK1_11)
+Compiler initialed in 386.07022ms
+Process (init) in 10.0883ms
+
+> Task :plugin-arc:processResources
+> Task :plugin-arc:classes
+> Task :plugin-arc:jar
+
+> Task :plugin-fabric:compileJava
+targetVersion: 11 (JDK1_11)
+Compiler initialed in 112.7067ms
+Process (init) in 2.1914ms
+
+> Task :plugin-fabric:processResources NO-SOURCE
+> Task :plugin-fabric:classes
+> Task :plugin-fabric:jar
+
+> Task :plugin-forge:compileJava
+targetVersion: 11 (JDK1_11)
+Compiler initialed in 108.3927ms
+Process (init) in 0.6506ms
+
+> Task :plugin-forge:processResources
+> Task :plugin-forge:classes
+> Task :plugin-forge:jar
+> Task :plugin-mixin:compileJava UP-TO-DATE
+> Task :plugin-mixin:processResources NO-SOURCE
+> Task :plugin-mixin:classes UP-TO-DATE
+> Task :plugin-mixin:jar UP-TO-DATE
+> Task :tests:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :tests:compileKotlin NO-SOURCE
+
+> Task :tests:compileJava
+targetVersion: 11 (JDK1_11)
+Compiler initialed in 817.5034ms
+Process (init) in 24.8491ms
+E:\Users\ASUS\Desktop\Mods\nipx-hotswap\build\wt-batch-b\tests\src\AddFieldReloadProbe.java:43: 警告: [removal] Unsafe 中的 objectFieldOffset(Field) 已过时, 且标记为待删除
+			return remold.Reflect.UNSAFE.objectFieldOffset(
+			                            ^
+E:\Users\ASUS\Desktop\Mods\nipx-hotswap\build\wt-batch-b\tests\src\DoubleBraceProbe.java:765: 警告: [removal] Unsafe 中的 objectFieldOffset(Field) 已过时, 且标记为待删除
+		long offsetBefore = Reflect.UNSAFE.objectFieldOffset(propBefore);
+		                                  ^
+E:\Users\ASUS\Desktop\Mods\nipx-hotswap\build\wt-batch-b\tests\src\DoubleBraceProbe.java:779: 警告: [removal] Unsafe 中的 objectFieldOffset(Field) 已过时, 且标记为待删除
+		long offsetAfter = Reflect.UNSAFE.objectFieldOffset(propAfter);
+		                                 ^
+E:\Users\ASUS\Desktop\Mods\nipx-hotswap\build\wt-batch-b\tests\src\DoubleBraceProbe.java:780: 警告: [removal] Unsafe 中的 getInt(Object,long) 已过时, 且标记为待删除
+		int viaNew = Reflect.UNSAFE.getInt(old, offsetAfter);
+		                           ^
+E:\Users\ASUS\Desktop\Mods\nipx-hotswap\build\wt-batch-b\tests\src\DoubleBraceProbe.java:781: 警告: [removal] Unsafe 中的 getInt(Object,long) 已过时, 且标记为待删除
+		int viaOld = Reflect.UNSAFE.getInt(old, offsetBefore);
+		                           ^
+注: 某些输入文件使用或覆盖了已过时的 API。
+注: 有关详细信息, 请使用 -Xlint:deprecation 重新编译。
+注: E:\Users\ASUS\Desktop\Mods\nipx-hotswap\build\wt-batch-b\tests\src\remold\CellHelperTest.java使用了未经检查或不安全的操作。
+注: 有关详细信息, 请使用 -Xlint:unchecked 重新编译。
+5 个警告
+
+> Task :tests:processResources NO-SOURCE
+> Task :tests:classes
+
+> Task :tests:retransformBaselineProbe
+Picked up JAVA_TOOL_OPTIONS: -XX:UseAVX=2
+[Remold] [GlTimerInjector] Retransforming arc/graphics/g2d/SpriteBatch and mindustry/core/Logic
+[Remold] [GlTimerInjector] Failed to load/retransform classes
+java.lang.IllegalAccessError: class remold.Injector tried to access field remold.RemoldAgent.inst (remold.Injector is in unnamed module of loader 'app'; remold.RemoldAgent is in unnamed module of loader 'bootstrap')
+	at remold.Injector.redefineOneClass(Injector.java:27)
+	at remold.profiler.GlTimerInjector.load(GlTimerInjector.java:117)
+	at remold.arc.ArcHotswapPlugin.onAgentInit(ArcHotswapPlugin.java:67)
+	at remold.RemoldAgent.triggerPluginInit(RemoldAgent.java:469)
+	at remold.RemoldAgent.registerPlugin(RemoldAgent.java:484)
+	at remold.RemoldAgent.loadConfiguredPlugins(RemoldAgent.java:1305)
+	at remold.RemoldAgent.bootstrapPlugins(RemoldAgent.java:1187)
+	at remold.RemoldAgent.premain(RemoldAgent.java:783)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.instrument/sun.instrument.InstrumentationImpl.loadClassAndStartAgent(InstrumentationImpl.java:560)
+	at java.instrument/sun.instrument.InstrumentationImpl.loadClassAndCallPremain(InstrumentationImpl.java:572)
+[Remold] [Forge] Forge & NeoForge hot-reload integration initialized (via plugin: forge)
+[Remold] DEBUG: false
+[Remold] Redefine Mode: inject
+[Remold] Injection Blacklist: 
+[Remold] InitFix: true
+[Remold] Force Static Lambda: false
+[Remold] HotSwap Event: false
+[Remold] Force Reinit: true
+[Remold] Lambda Align: true
+[Remold] Lambda Alignment ENABLED. Warning: This may cause logical shifts if lambdas are reordered.
+[Remold] File Shake MS: 1200
+[Remold] UI Hook: false
+[Remold] Cell Property Ref: false
+[Remold] Anon Align: true (strict=false, debug=false, maxPerHost=128, timeoutMs=2000, layoutGate=reject, redefineLayoutGate=reject, localClassGuard=reject)
+[Remold] Anonymous Class Alignment ENABLED. Ambiguity is resolved conservatively (never by class name).
+[Remold] Structural HotSwap Supported: true
+=== RetransformBaselineProbe ===
+   [PASS] precondition: class runs v1
+   [PASS] precondition: no schema field b
+[18:49:37] [mixin/DEBUG] Mixin bootstrap service org.spongepowered.asm.service.mojang.MixinServiceLaunchWrapperBootstrap is not available: LaunchWrapper is not available
+[18:49:37] [mixin/DEBUG] Mixin bootstrap service org.spongepowered.asm.service.modlauncher.MixinServiceModLauncherBootstrap is not available: ModLauncher is not available
+[18:49:37] [mixin/ERROR] No mixin host service is available. Services:  and 2 other invalid services.
+org.spongepowered.asm.service.ServiceNotAvailableError: No mixin host service is available. Services:  and 2 other invalid services.
+	at org.spongepowered.asm.service.MixinService.initService(MixinService.java:232)
+	at org.spongepowered.asm.service.MixinService.getServiceInstance(MixinService.java:189)
+	at org.spongepowered.asm.service.MixinService.getService(MixinService.java:183)
+	at org.spongepowered.asm.mixin.MixinEnvironment.<clinit>(MixinEnvironment.java:1036)
+	at java.base/jdk.internal.misc.Unsafe.ensureClassInitialized0(Native Method)
+	at java.base/jdk.internal.misc.Unsafe.ensureClassInitialized(Unsafe.java:1160)
+	at java.base/jdk.internal.reflect.MethodHandleAccessorFactory.ensureClassInitialized(MethodHandleAccessorFactory.java:300)
+	at java.base/jdk.internal.reflect.MethodHandleAccessorFactory.newMethodAccessor(MethodHandleAccessorFactory.java:71)
+	at java.base/jdk.internal.reflect.ReflectionFactory.newMethodAccessor(ReflectionFactory.java:159)
+	at java.base/java.lang.reflect.Method.acquireMethodAccessor(Method.java:726)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:577)
+	at remold.forge.ModLauncherMixinBridge.resolveTransformer(ModLauncherMixinBridge.java:86)
+	at remold.forge.ModLauncherMixinBridge.transform(ModLauncherMixinBridge.java:44)
+	at remold.RemoldAgent.applyTransformerBridges(RemoldAgent.java:327)
+	at remold.RemoldAgent.processChanges(RemoldAgent.java:1647)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at RetransformBaselineProbe.main(RetransformBaselineProbe.java:63)
+[Remold] [WARN] [Forge/NeoForge] Unable to resolve Mixin transformer across ClassLoader: <resolver> (org.spongepowered.asm.service.ServiceNotAvailableError: No mixin host service is available. Services:  and 2 other invalid services.)
+[Remold] [DIFF] rb.Host:
+ *Modified: [<init>()V, hi()Ljava/lang/String;]
+ !Fields:   [+ b]
+
+[Remold] HotSwap successful: 1 classes redefined.
+[Remold] [Lib] Loaded libtool from property: E:\Users\ASUS\Desktop\Mods\nipx-hotswap\build\wt-batch-b\core\libs\tool64.dll
+[Remold] Applying instance field init patch to rb.Host, count=1, fields=1
+[Remold] Instance field init patch for rb.Host done: fields=1, failedFields=[], skippedFields=[], elapsed=10ms
+   [PASS] schema hot swap applied field b
+   [PASS] bytecodeCache holds the applied v2 baseline
+   [PASS] sourceBytecodeCache holds the applied v2 baseline
+--- raw retransform #1: schema class already in bytecodeCache ---
+[RAW-INFO] Force retransform all loaded classes...
+   [PASS] retransformLoaded skips a class already present in bytecodeCache (actual=0)
+   [PASS] skipped retransform leaves the v2 source baseline (not v1)
+--- raw retransform #2: bytecodeCache removed, fallback path ---
+[RAW-INFO] Force retransform all loaded classes...
+[RAW-INFO] Found 1 classes loaded before Agent start. Retransforming...
+[RAW-INFO] Retransform complete.
+   [PASS] forced retransform actually reached retransformClasses (actual=1)
+   [PASS] fallback baseline is the applied v2 source, not v1
+   [PASS] class still has b after forced retransform (no delete-field rejection)
+=== SUMMARY: passed=10, failed=0 ===
+
+> Task :tests:redefineDynamicNoBaselineProbe
+Picked up JAVA_TOOL_OPTIONS: -XX:UseAVX=2
+[Remold] [GlTimerInjector] Retransforming arc/graphics/g2d/SpriteBatch and mindustry/core/Logic
+[Remold] [GlTimerInjector] Failed to load/retransform classes
+java.lang.IllegalAccessError: class remold.Injector tried to access field remold.RemoldAgent.inst (remold.Injector is in unnamed module of loader 'app'; remold.RemoldAgent is in unnamed module of loader 'bootstrap')
+	at remold.Injector.redefineOneClass(Injector.java:27)
+	at remold.profiler.GlTimerInjector.load(GlTimerInjector.java:117)
+	at remold.arc.ArcHotswapPlugin.onAgentInit(ArcHotswapPlugin.java:67)
+	at remold.RemoldAgent.triggerPluginInit(RemoldAgent.java:469)
+	at remold.RemoldAgent.registerPlugin(RemoldAgent.java:484)
+	at remold.RemoldAgent.loadConfiguredPlugins(RemoldAgent.java:1305)
+	at remold.RemoldAgent.bootstrapPlugins(RemoldAgent.java:1187)
+	at remold.RemoldAgent.premain(RemoldAgent.java:783)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.instrument/sun.instrument.InstrumentationImpl.loadClassAndStartAgent(InstrumentationImpl.java:560)
+	at java.instrument/sun.instrument.InstrumentationImpl.loadClassAndCallPremain(InstrumentationImpl.java:572)
+[Remold] [Forge] Forge & NeoForge hot-reload integration initialized (via plugin: forge)
+[Remold] DEBUG: false
+[Remold] Redefine Mode: inject
+[Remold] Injection Blacklist: 
+[Remold] InitFix: true
+[Remold] Force Static Lambda: false
+[Remold] HotSwap Event: false
+[Remold] Force Reinit: true
+[Remold] Lambda Align: true
+[Remold] Lambda Alignment ENABLED. Warning: This may cause logical shifts if lambdas are reordered.
+[Remold] File Shake MS: 1200
+[Remold] UI Hook: false
+[Remold] Cell Property Ref: false
+[Remold] Anon Align: true (strict=false, debug=false, maxPerHost=128, timeoutMs=2000, layoutGate=reject, redefineLayoutGate=reject, localClassGuard=reject)
+[Remold] Anonymous Class Alignment ENABLED. Ambiguity is resolved conservatively (never by class name).
+[Remold] Structural HotSwap Supported: true
+=== RedefineDynamicNoBaselineProbe ===
+   [PASS] instrumentation available
+   [PASS] precondition: no bytecodeCache baseline
+   [PASS] precondition: sourceBytecodeCache has v1 as fallback
+[18:49:39] [mixin/DEBUG] Mixin bootstrap service org.spongepowered.asm.service.mojang.MixinServiceLaunchWrapperBootstrap is not available: LaunchWrapper is not available
+[18:49:39] [mixin/DEBUG] Mixin bootstrap service org.spongepowered.asm.service.modlauncher.MixinServiceModLauncherBootstrap is not available: ModLauncher is not available
+[18:49:39] [mixin/ERROR] No mixin host service is available. Services:  and 2 other invalid services.
+org.spongepowered.asm.service.ServiceNotAvailableError: No mixin host service is available. Services:  and 2 other invalid services.
+	at org.spongepowered.asm.service.MixinService.initService(MixinService.java:232)
+	at org.spongepowered.asm.service.MixinService.getServiceInstance(MixinService.java:189)
+	at org.spongepowered.asm.service.MixinService.getService(MixinService.java:183)
+	at org.spongepowered.asm.mixin.MixinEnvironment.<clinit>(MixinEnvironment.java:1036)
+	at java.base/jdk.internal.misc.Unsafe.ensureClassInitialized0(Native Method)
+	at java.base/jdk.internal.misc.Unsafe.ensureClassInitialized(Unsafe.java:1160)
+	at java.base/jdk.internal.reflect.MethodHandleAccessorFactory.ensureClassInitialized(MethodHandleAccessorFactory.java:300)
+	at java.base/jdk.internal.reflect.MethodHandleAccessorFactory.newMethodAccessor(MethodHandleAccessorFactory.java:71)
+	at java.base/jdk.internal.reflect.ReflectionFactory.newMethodAccessor(ReflectionFactory.java:159)
+	at java.base/java.lang.reflect.Method.acquireMethodAccessor(Method.java:726)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:577)
+	at remold.forge.ModLauncherMixinBridge.resolveTransformer(ModLauncherMixinBridge.java:86)
+	at remold.forge.ModLauncherMixinBridge.transform(ModLauncherMixinBridge.java:44)
+	at remold.RemoldAgent.applyTransformerBridges(RemoldAgent.java:327)
+	at remold.RemoldAgent.redefineDynamic(RemoldAgent.java:3665)
+	at RedefineDynamicNoBaselineProbe.main(RedefineDynamicNoBaselineProbe.java:46)
+[Remold] [WARN] [Forge/NeoForge] Unable to resolve Mixin transformer across ClassLoader: <resolver> (org.spongepowered.asm.service.ServiceNotAvailableError: No mixin host service is available. Services:  and 2 other invalid services.)
+[Remold] [Lib] Loaded libtool from property: E:\Users\ASUS\Desktop\Mods\nipx-hotswap\build\wt-batch-b\core\libs\tool64.dll
+[Remold] Applying instance field init patch to rd.Host, count=1, fields=1
+[Remold] Instance field init patch for rd.Host done: fields=1, failedFields=[], skippedFields=[], elapsed=12ms
+[Remold] [DYNAMIC-REDEFINE] Successfully redefined rd.Host
+   [PASS] redefineDynamic returned true
+   [PASS] schema field b exists after redefine
+   [OBS] existing instance b=42
+   [PASS] existing instance received InitFix patch b=42 (actual=42)
+[Remold] [WARN] [DYNAMIC-REDEFINE] No baseline for rd.None (bytecodeCache/sourceBytecodeCache/fetchOriginalBytecode all empty); refusing to redefine without LayoutGate and InitFix.
+   [PASS] all three baselines missing => fail closed (actual=false)
+=== SUMMARY: passed=7, failed=0 ===
+
+> Task :tests:fingerprintDiskHashProbe
+Picked up JAVA_TOOL_OPTIONS: -XX:UseAVX=2
+[Remold] [GlTimerInjector] Retransforming arc/graphics/g2d/SpriteBatch and mindustry/core/Logic
+[Remold] [GlTimerInjector] Failed to load/retransform classes
+java.lang.IllegalAccessError: class remold.Injector tried to access field remold.RemoldAgent.inst (remold.Injector is in unnamed module of loader 'app'; remold.RemoldAgent is in unnamed module of loader 'bootstrap')
+	at remold.Injector.redefineOneClass(Injector.java:27)
+	at remold.profiler.GlTimerInjector.load(GlTimerInjector.java:117)
+	at remold.arc.ArcHotswapPlugin.onAgentInit(ArcHotswapPlugin.java:67)
+	at remold.RemoldAgent.triggerPluginInit(RemoldAgent.java:469)
+	at remold.RemoldAgent.registerPlugin(RemoldAgent.java:484)
+	at remold.RemoldAgent.loadConfiguredPlugins(RemoldAgent.java:1305)
+	at remold.RemoldAgent.bootstrapPlugins(RemoldAgent.java:1187)
+	at remold.RemoldAgent.premain(RemoldAgent.java:783)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.instrument/sun.instrument.InstrumentationImpl.loadClassAndStartAgent(InstrumentationImpl.java:560)
+	at java.instrument/sun.instrument.InstrumentationImpl.loadClassAndCallPremain(InstrumentationImpl.java:572)
+[Remold] [Forge] Forge & NeoForge hot-reload integration initialized (via plugin: forge)
+[Remold] DEBUG: false
+[Remold] Redefine Mode: inject
+[Remold] Injection Blacklist: 
+[Remold] InitFix: true
+[Remold] Force Static Lambda: false
+[Remold] HotSwap Event: false
+[Remold] Force Reinit: true
+[Remold] Lambda Align: true
+[Remold] Lambda Alignment ENABLED. Warning: This may cause logical shifts if lambdas are reordered.
+[Remold] File Shake MS: 1200
+[Remold] UI Hook: false
+[Remold] Cell Property Ref: false
+[Remold] Anon Align: true (strict=false, debug=false, maxPerHost=128, timeoutMs=2000, layoutGate=reject, redefineLayoutGate=reject, localClassGuard=reject)
+[Remold] Anonymous Class Alignment ENABLED. Ambiguity is resolved conservatively (never by class name).
+[Remold] Structural HotSwap Supported: true
+=== FingerprintDiskHashProbe: unchanged second round ===
+   [PASS] v1 has one anonymous class (actual keys=[fp.Host$1, fp.Host])
+   [PASS] v2 has two anonymous classes (actual keys=[fp.Host$1, fp.Host$2, fp.Host])
+   [PASS] precondition: reload counter starts at 0
+[18:49:42] [mixin/DEBUG] Mixin bootstrap service org.spongepowered.asm.service.mojang.MixinServiceLaunchWrapperBootstrap is not available: LaunchWrapper is not available
+[18:49:42] [mixin/DEBUG] Mixin bootstrap service org.spongepowered.asm.service.modlauncher.MixinServiceModLauncherBootstrap is not available: ModLauncher is not available
+[18:49:42] [mixin/ERROR] No mixin host service is available. Services:  and 2 other invalid services.
+org.spongepowered.asm.service.ServiceNotAvailableError: No mixin host service is available. Services:  and 2 other invalid services.
+	at org.spongepowered.asm.service.MixinService.initService(MixinService.java:232)
+	at org.spongepowered.asm.service.MixinService.getServiceInstance(MixinService.java:189)
+	at org.spongepowered.asm.service.MixinService.getService(MixinService.java:183)
+	at org.spongepowered.asm.mixin.MixinEnvironment.<clinit>(MixinEnvironment.java:1036)
+	at java.base/jdk.internal.misc.Unsafe.ensureClassInitialized0(Native Method)
+	at java.base/jdk.internal.misc.Unsafe.ensureClassInitialized(Unsafe.java:1160)
+	at java.base/jdk.internal.reflect.MethodHandleAccessorFactory.ensureClassInitialized(MethodHandleAccessorFactory.java:300)
+	at java.base/jdk.internal.reflect.MethodHandleAccessorFactory.newMethodAccessor(MethodHandleAccessorFactory.java:71)
+	at java.base/jdk.internal.reflect.ReflectionFactory.newMethodAccessor(ReflectionFactory.java:159)
+	at java.base/java.lang.reflect.Method.acquireMethodAccessor(Method.java:726)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:577)
+	at remold.forge.ModLauncherMixinBridge.resolveTransformer(ModLauncherMixinBridge.java:86)
+	at remold.forge.ModLauncherMixinBridge.transform(ModLauncherMixinBridge.java:44)
+	at remold.RemoldAgent.applyTransformerBridges(RemoldAgent.java:327)
+	at remold.RemoldAgent.processChanges(RemoldAgent.java:1647)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at FingerprintDiskHashProbe.main(FingerprintDiskHashProbe.java:161)
+   [PASS] fileDiskHashes records the raw disk hash, not aligned bytes (disk=7352889882629047471, raw=7352889882629047471)
+   [PASS] first round fires @OnReload exactly once (actual=1)
+   [PASS] first round really redefined classes (actual=1)
+   [PASS] first round really ran anonymous-class alignment
+   [PASS] second unchanged round must not run anonymous-class alignment
+   [PASS] second unchanged round must not fire @OnReload (actual=1)
+   [PASS] second unchanged round must not redefine (first=1, second=1)
+   [PASS] a real source change still fires @OnReload (actual=2)
+   [PASS] a real source change still redefines (second=1, third=2)
+   [PASS] third real change keeps Host$1 class identity stable (before=class fp.Host$1, after=class fp.Host$1)
+   [PASS] third real change keeps Host$2 class identity stable (before=class fp.Host$2, after=class fp.Host$2)
+--- Mixin coverage: woven bytes must not become the disk fingerprint ---
+   [PASS] Mixin precondition: reload counter starts at 0
+   [PASS] Mixin first round fires @OnReload once (actual=1)
+   [PASS] Mixin bridge actually wove a marker method into fpm.Host
+   [PASS] Mixin second unchanged round must not redefine woven bytes (actual=1)
+=== FINGERPRINT DISK HASH PROBE SUMMARY: passed=18, failed=0 ===
+
+[Incubating] Problems report is available at: file:///E:/Users/ASUS/Desktop/Mods/nipx-hotswap/build/wt-batch-b/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.7.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 42s
+21 actionable tasks: 18 executed, 3 up-to-date

@@ -56,6 +56,17 @@ public class RedefineDynamicNoBaselineProbe {
 		}
 		System.out.println("   [OBS] existing instance b=" + b);
 		check(b == 42, "existing instance received InitFix patch b=42 (actual=" + b + ")");
+		// Fail-closed: a second class with no bytecodeCache/source/resource baseline.
+		Map<String, byte[]> none = LayoutGateAssert.compile(Map.of("rd.None", """
+			package rd;
+			public class None { public int a = 1; }
+			"""));
+		FixtureLoader noneLoader = new FixtureLoader(none);
+		Class<?> noneClass = Class.forName("rd.None", true, noneLoader);
+		RemoldAgent.bytecodeCache.remove("rd.None");
+		RemoldAgent.sourceBytecodeCache.remove("rd.None");
+		boolean noneOk = RemoldAgent.redefineDynamic(noneClass, none.get("rd.None"));
+		check(!noneOk, "all three baselines missing => fail closed (actual=" + noneOk + ")");
 		System.out.println("=== SUMMARY: passed=" + passed + ", failed=" + failed + " ===");
 		if (failed > 0) System.exit(1);
 	}

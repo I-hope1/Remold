@@ -372,6 +372,16 @@
 
 
 
+
+### 风险 16：`sourceBytecodeCache` 写入到回滚之间的并发窗口（P3）
+- **风险描述与底层机制**：`processChanges` 不是 `synchronized`，`AnnotationTransformer.isNoOpExternalRedefine` / `oldBytecode` 读取 `sourceBytecodeCache` 时也不持有同一把锁。本轮源码在匿名类对齐后、门与 redefine 前就写入缓存；未生效类要等 `applyRedefinitions` 后才回滚。这段窗口内其他线程可能读到“尚未生效”的新源码。
+- **触发条件**：`processChanges` 正在处理一批类（尤其对齐/布局门/重定义耗时较长）时，外部重定义通道或 `retransformLoaded()` 读取 `sourceBytecodeCache`。
+- **后果**：外部重定义 no-op 判定可能把新源码当成已生效基线而跳过织入；旧侧基线可能取到未生效版本。是语义错判，不是内存竞争。
+- **当前处置**：只记录，未升级为 staged；快照+回滚已缩短窗口，但未消除。证据：`SourceBytecodeCacheTest` 四路径 helper 测试、E3 端到端、变异检查（注释回滚调用仅 E3 变红）。
+- **候选关闭方向**：按设计稿引入 `SourceRound` staged/commit，读取方只读已提交版本；或把 `processChanges` 与读取方统一到同一锁。
+- **关联设计规范**：`docs/initfix/11-source-bytecode-cache.md` §9。
+- **关联架构决策**：无。
+
 ### 风险 15：`pendingAlignedClasses` 只有类名键，多 ClassLoader 串用（P3）
 - **风险描述与底层机制**：`AnnotationTransformer.pendingAlignedClasses` 是 `Map<String, byte[]>`，键只有类内部名/点分名，没有 ClassLoader 身份。`AlignmentTransaction.commit()` 对已加载的匿名类仍会保留 pending 条目；该类在宿主 Loader 中 redefine 时不会消费 pending（`classBeingRedefined != null`），条目会留到**另一个 ClassLoader 首次加载同名类**时被 `transform(..., classBeingRedefined=null, ...)` 消费。
 - **触发条件**：Loader A 已加载 `Host$1`；对齐事务 commit（pending 留下）；A 的 `Host$1` redefine 成功；Loader B 首次加载同名 `Host$1`。

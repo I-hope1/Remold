@@ -14,6 +14,91 @@ public class InitializerDriftTest {
 			pkg + ".Parent", parent));
 	}
 
+
+	private static java.util.List<String> warningsFor(String key, byte[] oldBytes, Map<String, byte[]> batch) {
+		remold.RemoldAgent.bytecodeCache.put(key, oldBytes);
+		java.util.List<String> warns = new java.util.ArrayList<>();
+		remold.RemoldAgent.Logger old = remold.RemoldAgent.logger;
+		remold.RemoldAgent.logger = new remold.RemoldAgent.Logger() {
+			public void log(String msg) {}
+			public void info(String msg) {}
+			public void warn(String msg) { warns.add(msg); }
+			public void error(String msg) {}
+			public void error(String msg, Throwable t) {}
+		};
+		try {
+			InitializerDrift.report(batch);
+		} finally {
+			remold.RemoldAgent.logger = old;
+		}
+		return warns;
+	}
+
+	@Test
+	void changeEmitsExactlyOneWarn() throws Exception {
+		Map<String, byte[]> v1 = compile("idl6", """
+			package idl6;
+			public class Host { public Parent make() { return new Parent() {{ property = 1; }}; } }
+			""", """
+			package idl6;
+			public class Parent { public int property; }
+			""");
+		Map<String, byte[]> v2 = compile("idl6", """
+			package idl6;
+			public class Host { public Parent make() { return new Parent() {{ property = 2; }}; } }
+			""", """
+			package idl6;
+			public class Parent { public int property; }
+			""");
+		java.util.List<String> warns = warningsFor("idl6.Host$1", v1.get("idl6.Host$1"),
+			Map.of("idl6.Host$1", v2.get("idl6.Host$1")));
+		assertEquals(1, warns.size(), "one warn per class/round, actual=" + warns);
+		assertTrue(warns.get(0).contains("property"), warns.get(0));
+	}
+
+	@Test
+	void unchangedEmitsNoWarn() throws Exception {
+		Map<String, byte[]> v1 = compile("idl7", """
+			package idl7;
+			public class Host { public Parent make() { return new Parent() {{ property = 7; }}; } }
+			""", """
+			package idl7;
+			public class Parent { public int property; }
+			""");
+		Map<String, byte[]> v2 = compile("idl7", """
+			package idl7;
+			public class Host { public Parent make() { return new Parent() {{ property = 7; }}; } }
+			""", """
+			package idl7;
+			public class Parent { public int property; }
+			""");
+		java.util.List<String> warns = warningsFor("idl7.Host$1", v1.get("idl7.Host$1"),
+			Map.of("idl7.Host$1", v2.get("idl7.Host$1")));
+		assertTrue(warns.isEmpty(), "unchanged initializer must be silent, actual=" + warns);
+	}
+
+	@Test
+	void twoChangedFieldsStillOneWarnPerClass() throws Exception {
+		Map<String, byte[]> v1 = compile("idl8", """
+			package idl8;
+			public class Host { public Parent make() { return new Parent() {{ a = 1; b = 2; }}; } }
+			""", """
+			package idl8;
+			public class Parent { public int a; public int b; }
+			""");
+		Map<String, byte[]> v2 = compile("idl8", """
+			package idl8;
+			public class Host { public Parent make() { return new Parent() {{ a = 3; b = 4; }}; } }
+			""", """
+			package idl8;
+			public class Parent { public int a; public int b; }
+			""");
+		java.util.List<String> warns = warningsFor("idl8.Host$1", v1.get("idl8.Host$1"),
+			Map.of("idl8.Host$1", v2.get("idl8.Host$1")));
+		assertEquals(1, warns.size(), "two fields must aggregate into one warn, actual=" + warns);
+		assertTrue(warns.get(0).contains("a") && warns.get(0).contains("b"), warns.get(0));
+	}
+
 	@Test
 	void existingDoubleBraceFieldChangeIsDetected() throws Exception {
 		String pkg = "idl";

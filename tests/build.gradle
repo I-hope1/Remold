@@ -669,6 +669,17 @@ tasks.register("fingerprintDiskHashProbe", JavaExec) {
 	}
 }
 
+tasks.register("initDriftNoiseProbe", JavaExec) {
+	group = "verification"
+	description = "L0 具名类 int x=1 -> 2 的实际 warn 输出"
+	dependsOn classes
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "InitDriftNoiseProbe"
+	doFirst {
+		jvmArgs "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+	}
+}
+
 tasks.register("initDriftPerfProbe", JavaExec) {
 	group = "verification"
 	description = "L0 已有字段初值变化检测的每类/批次耗时探针"
@@ -676,6 +687,7 @@ tasks.register("initDriftPerfProbe", JavaExec) {
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "InitDriftPerfProbe"
 	doFirst {
+		systemProperty "initdrift.l0", System.getProperty("initdrift.l0", "true")
 		jvmArgs "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
 	}
 }

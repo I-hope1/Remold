@@ -1,3 +1,4 @@
+import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
@@ -31,26 +32,37 @@ public class InitDriftPerfProbe {
 			InitializerDrift.detect(oldBytes.get(i % N), newBytes.get(i % N));
 		}
 
+		boolean l0 = !"false".equals(System.getProperty("initdrift.l0"));
 		double[] perClassMs = new double[N * ROUNDS];
 		double[] batchMs = new double[ROUNDS];
 		int k = 0;
+		int triggered = 0;
 		for (int r = 0; r < ROUNDS; r++) {
 			long batchStart = System.nanoTime();
 			for (int i = 0; i < N; i++) {
 				long t0 = System.nanoTime();
-				List<String> changed = InitializerDrift.detect(oldBytes.get(i), newBytes.get(i));
-				long dt = System.nanoTime() - t0;
-				if (changed.size() != 1 || !"health".equals(changed.get(0))) {
-					throw new AssertionError("detector missed health at " + i + ": " + changed);
+				if (l0) {
+					List<String> changed = InitializerDrift.detect(oldBytes.get(i), newBytes.get(i));
+					if (changed.size() != 1 || !"health".equals(changed.get(0))) {
+						throw new AssertionError("detector missed health at " + i + ": " + changed);
+					}
+					triggered++;
+				} else {
+					// 对照组：只做新旧两份 ClassReader 解析，不跑字段切片比较。
+					new ClassReader(oldBytes.get(i)).accept(new org.objectweb.asm.tree.ClassNode(),
+						ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+					new ClassReader(newBytes.get(i)).accept(new org.objectweb.asm.tree.ClassNode(),
+						ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
 				}
-				perClassMs[k++] = dt / 1_000_000.0;
+				perClassMs[k++] = (System.nanoTime() - t0) / 1_000_000.0;
 			}
 			batchMs[r] = (System.nanoTime() - batchStart) / 1_000_000.0;
 		}
 
 		Arrays.sort(perClassMs);
 		Arrays.sort(batchMs);
-		System.out.println("L0 InitDriftPerfProbe: N=" + N + " warmup=" + WARMUP + " rounds=" + ROUNDS);
+		System.out.println("L0 InitDriftPerfProbe: N=" + N + " warmup=" + WARMUP + " rounds=" + ROUNDS
+			+ " l0=" + l0 + " triggers=" + triggered);
 		System.out.printf("per-class ms: min=%.4f median=%.4f max=%.4f%n",
 			perClassMs[0], perClassMs[perClassMs.length / 2], perClassMs[perClassMs.length - 1]);
 		System.out.printf("batch(%d) ms: min=%.4f median=%.4f max=%.4f%n",

@@ -2,7 +2,7 @@
 
 This directory contains the probe source and raw evidence for the real Fabric 1.21.1
 Mixin retransform investigation. The analysis and hash tables are in
-[`docs/initfix/12-mixin-retransform-probe.md`](../../docs/initfix/12-mixin-retransform-probe.md).
+[`ANALYSIS.md`](ANALYSIS.md).
 
 `MixinProbe.java` is **not** part of the root Gradle build. It is copied into a real
 Fabric Loom project as a second `main` entrypoint; it compiles without Remold on the

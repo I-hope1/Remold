@@ -1,0 +1,44 @@
+C1+C2 joint reproduction: entity-probe toggle -> duplicate @Unique fields -> LayoutGate
+variant: after-c2  (d5327fe (C2 fix present, C1 entry not covered))
+date: 2026-11-06T20:10:30+08:00
+branch: agent/batch-c-mixin-fix
+server: real Fabric 1.21.1 KnotServer, real Remold -javaagent
+toggle: DynamicProfilerAPI.toggleEntityProbe(com.example.item.RemoldWandItem, "use", true)
+
+=== C1+C2 joint reproduction: after-c2 ===
+agent_jar_sha256=f1fb5068d300557d275712d40b34ec1a8571d375ec269c47a56ee7121b5b1e40
+server_exit=0
+[C1C2] PHASE0 cache_sha=47bfa70dcaaa507b(5482B) live_sha=d64a8f9dfa09ace7(5272B)
+[C1C2] WAIT-TOGGLE
+[C1C2] TOGGLE invoking toggleEntityProbe(com.example.item.RemoldWandItem, "use", true) [self]
+[Remold] Retransformed 1 classes for use
+[C1C2] TOGGLE returned normally
+[C1C2] TOGGLE cache_sha=e77844babd2bcb6f(5683B) cache_fields=[message, fireballPower, remold$useCount, remold$state, fd670ea1$example_mod$remold$useCount$0, fd670ea1$example_mod$remold$state$1]
+[C1C2] TOGGLE cache_state_field_count=1 cache_useCount_field_count=1
+[C1C2] TOGGLE cache_duplicate_fields=[]
+[C1C2] TOGGLE fetchBytecodeMemory=null; falling back to direct capture
+[C1C2] CAPTURE-DEBUG modifiable=true retransformSupported=true
+[C1C2] CAPTURE-DEBUG retransformClasses returned, captured=false
+[C1C2] TOGGLE live-bytes unavailable: both capture paths returned null
+[C1C2] TOGGLE reflective fields (may be stale on this JBR)=[message, fireballPower, remold$useCount, remold$state]
+[C1C2] TOGGLE-DONE
+[C1C2] WAIT-HOTSWAP
+[Remold] [LAYOUT-READERS] scanned 9 class(es) for removed members of 1 class(es) in 217ms; dangling=2, abstract-gaps=0, dispatch-shifts=0
+[Remold] [ANON-LAYOUT] instance scan com.example.item.RemoldWandItem -> LIVE (61 ms)
+[Remold] [WARN] [LAYOUT-REJECT] com.example.item.RemoldWandItem: REFUSED redefine — field layout incompatible (field(s) removed: [fd670ea1$example_mod$remold$state$1, fd670ea1$example_mod$remold$useCount$0]). Host com.example.item.RemoldWandItem and its anonymous classes are skipped this round; existing instances keep running the OLD code, so this edit will NOT take effect for them. TO PROCEED: recreate/restart so the classes load fresh, or set -Dremold.agent.layout_gate=warn to force the redefine and accept the consequences.
+[Remold] [WARN] [HOTSWAP-SKIPPED]   com.example.item.RemoldWandItem  <- LAYOUT-REJECT: field(s) removed: fd670ea1$example_mod$remold$state$1, fd670ea1$example_mod$remold$useCount$0 (1 out-of-batch reader(s)) — restore the removed field(s) or restart to continue
+[Remold] [LAYOUT-READERS] scanned 9 class(es) for removed members of 1 class(es) in 98ms; dangling=2, abstract-gaps=0, dispatch-shifts=0
+[Remold] [WARN] [LAYOUT-REJECT] Dynamic class com.example.item.RemoldWandItem rejected: field(s) removed: [fd670ea1$example_mod$remold$state$1, fd670ea1$example_mod$remold$useCount$0]
+[Remold] [WARN] [Mixin] Target class com.example.item.RemoldWandItem was re-woven but the redefine was refused: this JVM already supports structural hot-swap (JBR/DCEVM active), so the blocker is Remold's LayoutGate or the JVM's redefine rules — see the [LAYOUT-REJECT] / [DYNAMIC-REDEFINE] log above. Fix the reported field change, or restart the client.
+[C1C2] HOTSWAP success=false rejected=true
+[C1C2] HOTSWAP cache_sha=e77844babd2bcb6f(5683B) cache_fields=[message, fireballPower, remold$useCount, remold$state, fd670ea1$example_mod$remold$useCount$0, fd670ea1$example_mod$remold$state$1]
+[C1C2] HOTSWAP cache_state_field_count=1
+[C1C2] HOTSWAP cache_duplicate_fields=[]
+[C1C2] LOG [Remold] [LAYOUT-READERS] scanned 9 class(es) for removed members of 1 class(es) in 217ms; dangling=2, abstract-gaps=0, dispatch-shifts=0
+[C1C2] LOG [Remold] [ANON-LAYOUT] instance scan com.example.item.RemoldWandItem -> LIVE (61 ms)
+[C1C2] LOG [Remold] [WARN] [LAYOUT-REJECT] com.example.item.RemoldWandItem: REFUSED redefine — field layout incompatible (field(s) removed: [fd670ea1$example_mod$remold$state$1, fd670ea1$example_mod$remold$useCount$0]). Host com.example.item.RemoldWandItem and its anonymous classes are skipped this round; existing instances keep running the OLD code, so this edit will NOT take effect for them. TO PROCEED: recreate/restart so the classes load fresh, or set -Dremold.agent.layout_gate=warn to force the redefine and accept the consequences.
+[C1C2] LOG [Remold] [WARN] [HOTSWAP-SKIPPED]   com.example.item.RemoldWandItem  <- LAYOUT-REJECT: field(s) removed: fd670ea1$example_mod$remold$state$1, fd670ea1$example_mod$remold$useCount$0 (1 out-of-batch reader(s)) — restore the removed field(s) or restart to continue
+[C1C2] LOG [Remold] [LAYOUT-READERS] scanned 9 class(es) for removed members of 1 class(es) in 98ms; dangling=2, abstract-gaps=0, dispatch-shifts=0
+[C1C2] LOG [Remold] [WARN] [LAYOUT-REJECT] Dynamic class com.example.item.RemoldWandItem rejected: field(s) removed: [fd670ea1$example_mod$remold$state$1, fd670ea1$example_mod$remold$useCount$0]
+[C1C2] LOG [Remold] [WARN] [Mixin] Target class com.example.item.RemoldWandItem was re-woven but the redefine was refused: this JVM already supports structural hot-swap (JBR/DCEVM active), so the blocker is Remold's LayoutGate or the JVM's redefine rules — see the [LAYOUT-REJECT] / [DYNAMIC-REDEFINE] log above. Fix the reported field change, or restart the client.
+[C1C2] DONE

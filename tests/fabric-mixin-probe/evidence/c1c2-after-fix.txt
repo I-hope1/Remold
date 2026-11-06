@@ -1,0 +1,32 @@
+C1+C2 joint reproduction: entity-probe toggle -> duplicate @Unique fields -> LayoutGate
+variant: after-fix  (working tree on top of d5327fe (C1 entry fix applied))
+date: 2026-11-06T20:10:30+08:00
+branch: agent/batch-c-mixin-fix
+server: real Fabric 1.21.1 KnotServer, real Remold -javaagent
+toggle: DynamicProfilerAPI.toggleEntityProbe(com.example.item.RemoldWandItem, "use", true)
+
+=== C1+C2 joint reproduction: after-fix ===
+agent_jar_sha256=9bb9fbbfba86d019815c7588088aff00ea9aea853cdee740aac7d6427763636f
+server_exit=0
+[C1C2] PHASE0 cache_sha=0d24ffc5e4cf4d53(5482B) live_sha=c42f7b5b7cfa7a68(5272B)
+[C1C2] WAIT-TOGGLE
+[C1C2] TOGGLE invoking toggleEntityProbe(com.example.item.RemoldWandItem, "use", true) [self]
+[Remold] Retransformed 1 classes for use
+[C1C2] TOGGLE returned normally
+[C1C2] TOGGLE cache_sha=0d24ffc5e4cf4d53(5482B) cache_fields=[message, fireballPower, remold$useCount, remold$state]
+[C1C2] TOGGLE cache_state_field_count=1 cache_useCount_field_count=1
+[C1C2] TOGGLE cache_duplicate_fields=[]
+[C1C2] TOGGLE fetchBytecodeMemory=null; falling back to direct capture
+[C1C2] CAPTURE-DEBUG modifiable=true retransformSupported=true
+[C1C2] CAPTURE-DEBUG retransformClasses returned, captured=false
+[C1C2] TOGGLE live-bytes unavailable: both capture paths returned null
+[C1C2] TOGGLE reflective fields (may be stale on this JBR)=[message, fireballPower, remold$useCount, remold$state]
+[C1C2] TOGGLE-DONE
+[C1C2] WAIT-HOTSWAP
+[Remold] HotSwap successful: 1 classes redefined.
+[C1C2] HOTSWAP success=true rejected=false
+[C1C2] HOTSWAP cache_sha=90149cd1adbc01ec(5770B) cache_fields=[message, fireballPower, remold$useCount, remold$state]
+[C1C2] HOTSWAP cache_state_field_count=1
+[C1C2] HOTSWAP cache_duplicate_fields=[]
+[C1C2] LOG [Remold] HotSwap successful: 1 classes redefined.
+[C1C2] DONE

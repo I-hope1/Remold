@@ -146,6 +146,58 @@ To run it, set up the Loom probe project exactly as in "Setup" below, then:
 Raw evidence: [`evidence/c3-server-e2e.txt`](evidence/c3-server-e2e.txt) — `RESULT PASS
 failures=[]`, `init_drift_count=0`.
 
+## C1+C2 joint reproduction: entity-probe toggle (`C1C2Probe.java` + `c3/run-c1c2.sh`)
+
+`DynamicProfilerAPI.toggleEntityProbe(base, method, true)` retransforms every loaded subclass
+of `base`. For an already-woven Mixin target that retransform used to enter
+`AnnotationTransformer`'s external-redefine channel with **no** internal context, so the C2
+`captureOnly` guard did not apply and the woven `classfileBuffer` was fed to the Mixin bridge
+again. Measured sequence (real KnotServer, real `-javaagent`):
+
+1. `toggleEntityProbe(RemoldWandItem.class, "use", true)`,
+2. one real source-edit hot-swap (add a method, real `gradlew compileJava`).
+
+Outputs per run: `bytecodeCache` SHA-256 of the target, its field table (the hash-mangled
+duplicates), and the LayoutGate verdict of the following hot-swap.
+
+| Agent jar | after toggle: cache | duplicates | following hot-swap |
+|:--|:--|:--|:--|
+| `f2ff6bf` (before C2 fix) | 5683 B | `fd…$remold$state$1`, `fd…$remold$useCount$0` | `[LAYOUT-REJECT]` — `field(s) removed: [...]`, edit does not take effect |
+| `d5327fe` (C2 fix) | 5683 B | same two fields | `[LAYOUT-REJECT]` — C2 does not cover this entry |
+| working tree (C1 fix) | 5482 B (unchanged) | none | `HotSwap successful: 1 classes redefined` |
+
+The fix wraps the profiler retransform in `RemoldAgent.enterInternalRetransform(...)`: the
+entity-probe retransform is not a Remold hot-swap, so `AnnotationTransformer` passes the class
+through untouched instead of re-weaving already-woven bytes.
+
+Run it as in "Setup", with `C1C2Probe.java` added to `entrypoints.main` and the C1 probe
+entrypoint enabled, then:
+
+```bash
+bash c3/run-c1c2.sh <remold-agent.jar> <label>
+```
+
+`run-c1c2.sh` swaps the given agent jar into `.gradle/remold/remold-agent.jar`, launches the
+server, toggles the probe, performs the real source-edit hot-swap, restores the jar, and writes
+`c3/c1c2-<label>-summary.txt`. Raw evidence:
+[`evidence/c1c2-before-c2.txt`](evidence/c1c2-before-c2.txt),
+[`evidence/c1c2-after-c2.txt`](evidence/c1c2-after-c2.txt),
+[`evidence/c1c2-after-fix.txt`](evidence/c1c2-after-fix.txt).
+
+Live-class byte capture note: after the toggle both `fetchBytecodeMemory` and a direct
+last-in-chain capture transformer returned `null` (`modifiable=true`,
+`retransformSupported=true`), so the duplicate-field observation is taken from the bytes
+Remold's transformer returned to the JVM (`bytecodeCache`, which `retransformClasses` applies)
+plus the LayoutGate rejection that names those exact fields. Reflective metadata is stale on
+this JBR after a redefinition and is recorded only.
+
+`retransformLoaded` reachability at `-javaagent` startup (default
+`RETRANSFORM_LOADED=false`, so the entry is not executed at all): with
+`-Dremold.agent.retransform_loaded=true` the log reports `Found 1120 classes loaded before
+Agent start`, and the Mixin bridge is invoked **0** times during that retransform — no woven
+Mixin target exists at premain. See
+[`evidence/c1c2-retransform-loaded-count.txt`](evidence/c1c2-retransform-loaded-count.txt).
+
 ## Evidence
 
 `evidence/` contains the raw stdout/stderr of the runs referenced in the analysis doc:
@@ -160,6 +212,10 @@ failures=[]`, `init_drift_count=0`.
 | `server-dev-reset.txt` | KnotServer without raw jar: null fallback is a no-op |
 | `prior-probes.txt` | `RetransformBaselineProbe` 10/10, `RedefineDynamicNoBaselineProbe` 7/7, `FingerprintDiskHashProbe` 18/18 |
 | `c3-server-e2e.txt` | C3 main path, real KnotServer + real `-javaagent`: stages 1/2/3/4/5, `RESULT PASS`, zero `[INIT-DRIFT]` |
+| `c1c2-before-c2.txt` | entity-probe toggle on `f2ff6bf`: duplicate `@Unique` fields in the baseline + `[LAYOUT-REJECT]` |
+| `c1c2-after-c2.txt` | same on `d5327fe`: still duplicates + rejection (C2 fix does not cover this entry) |
+| `c1c2-after-fix.txt` | same with the C1 fix: cache unchanged by the toggle, `HotSwap successful` |
+| `c1c2-retransform-loaded-count.txt` | `retransformLoaded` startup count: 1120 classes, 0 Mixin targets |
 
 Cross-run SHA-256 values are not comparable: Mixin embeds a random
 `@MixinMerged(sessionId=...)` in every process. Use the hashes inside one log file.

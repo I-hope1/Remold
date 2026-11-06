@@ -86,25 +86,55 @@ public class DynamicProfilerAPI {
 	 * @param enable     开启或关闭
 	 */
 	public static void toggleEntityProbe(Class<?> baseClass, String methodName, boolean enable) {
+		if (baseClass == null || methodName == null) return;
 		if (enable) {
 			ProfilerTransformer.addTargetMethod(baseClass, methodName);
 		} else {
 			ProfilerTransformer.removeTargetMethod(baseClass, methodName);
 		}
+		Instrumentation inst = RemoldAgent.getInst();
+		if (inst == null) {
+			RemoldAgent.warn("[Profiler] Instrumentation unavailable; entity probe retransform skipped.");
+			return;
+		}
+		toggleEntityProbe(inst, baseClass, methodName);
+	}
+
+	/**
+	 * 测试接缝：用给定的 {@link Instrumentation} 执行实体探针重转换。
+	 *
+	 * <p><b>必须</b>放在 {@link RemoldAgent#enterInternalRetransform} 内执行。这次重转换只给
+	 * 已加载类插性能探针，<b>不是</b> Remold 的热更：JVM 交给 transformer 的
+	 * {@code classfileBuffer} 已经是织入后的字节（Mixin 目标含 {@code @Unique} 字段与 handler），
+	 * 若走外部重定义通道，会再执行一遍重织入桥，追加 hash 混淆的重复 {@code @Unique} 字段。
+	 * 这些字段会被写进基线缓存，下一轮真实热更时 LayoutGate 把它们判成
+	 * {@code field(s) removed} 并整类拒绝——热更从此对该类静默失效，只能重启。</p>
+	 */
+	static void toggleEntityProbe(Instrumentation inst, Class<?> baseClass, String methodName) {
 		// 获取所有已加载的子类并重转换
-		List<Class<?>>  toRetransform = new ArrayList<>();
-		Instrumentation inst          = RemoldAgent.getInst();
+		List<Class<?>> toRetransform = new ArrayList<>();
 		for (Class<?> clazz : inst.getAllLoadedClasses()) {
 			if (baseClass.isAssignableFrom(clazz) && !clazz.isInterface() && inst.isModifiableClass(clazz)) {
 				toRetransform.add(clazz);
 			}
 		}
+		if (toRetransform.isEmpty()) {
+			RemoldAgent.info("No loaded subclasses to retransform for " + methodName);
+			return;
+		}
+		Set<String> names = new HashSet<>();
+		for (Class<?> clazz : toRetransform) {
+			names.add(clazz.getName());
+		}
 
+		RemoldAgent.enterInternalRetransform(names);
 		try {
 			inst.retransformClasses(toRetransform.toArray(new Class[0]));
 			RemoldAgent.info("Retransformed " + toRetransform.size() + " classes for " + methodName);
 		} catch (Exception e) {
 			RemoldAgent.error("Retransform failed", e);
+		} finally {
+			RemoldAgent.exitInternalRedefine();
 		}
 	}
 

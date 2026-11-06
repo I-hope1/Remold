@@ -1,0 +1,13 @@
+retransformLoaded reachability at -javaagent startup
+date: 2026-11-06T20:10:30+08:00
+launch flag: -Dremold.agent.retransform_loaded=true (default is false)
+command: env remold.agent.debug=true <jbr21>/bin/java @build/remold/server-rl.args
+
+[Remold] Force retransform all loaded classes...
+[Remold] Found 1120 classes loaded before Agent start. Retransforming...
+[Remold] Retransform complete.
+
+Mixin bridge invocations during that startup retransform: 0
+=> 0 woven Mixin targets entered retransformLoaded at -javaagent startup (no Minecraft/Mixin classes are loaded at premain).
+=> With the default flag the entry is not executed at all (RETRANSFORM_LOADED=false).
+=> The reachable no-cache woven-target entry is the entity-probe toggle (C1).

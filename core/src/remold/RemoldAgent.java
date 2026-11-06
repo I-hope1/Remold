@@ -1630,6 +1630,9 @@ public class RemoldAgent {
 			sourceBytecodeCache.put(e.getKey(), e.getValue());
 		}
 
+		// L0: make an existing-field initializer change visible; detection only, no patch.
+		remold.ref.InitializerDrift.report(newBatchBytes);
+
 		// ---- 字节码重织入桥（Mixin / AspectJ / 自定义字节码增强器）----
 		// 位置：源码级对齐之后、局部类门与布局门之前。
 		// 保证对齐器看到的是纯净源码，而布局门与 JVM redefine 看到的是织入后的物理结构。

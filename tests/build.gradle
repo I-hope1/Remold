@@ -669,6 +669,17 @@ tasks.register("fingerprintDiskHashProbe", JavaExec) {
 	}
 }
 
+tasks.register("initDriftPerfProbe", JavaExec) {
+	group = "verification"
+	description = "L0 已有字段初值变化检测的每类/批次耗时探针"
+	dependsOn classes
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "InitDriftPerfProbe"
+	doFirst {
+		jvmArgs "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+	}
+}
+
 tasks.register("doubleBraceProbe", JavaExec) {
 	group = "verification"
 	description = "双括号匿名类 A~E / B2 调查探针"

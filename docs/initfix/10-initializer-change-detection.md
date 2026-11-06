@@ -41,7 +41,7 @@ class Block { int health; }
 new Block() {{ health = 90; }}
 ```
 
-匿名类 `<init>` 里是 `PUTFIELD Block.health`，owner 是**父类**，不是匿名类自身；现有过滤器会直接看不到。L0 的检测变体必须：
+匿名类 `<init>` 里的字段写入以接收者的静态类型作为 owner。**实测**（javac 11 / 17 / 21 / 25）该 owner 是**匿名类自身**（`T$1.health`，`Fieldref` 的 class 为 `T$1`），而不是父类；JVM 解析时会沿父类链找到 `Block.health`。因此“owner 不等于父类”这一点本身不会让写入消失，真正的风险在**同名遮蔽**与其它编译器/写法可能直接以声明类为 owner（例如显式 `((Block) this).health = ...`）。L0 的检测变体必须：
 
 - 接受 owner 是宿主自身或宿主的祖先；
 - 用 `ClassHierarchyOracle`/字段解析确认该 `Fieldref` 解析到的就是目标字段（避免同名遮蔽误判）；

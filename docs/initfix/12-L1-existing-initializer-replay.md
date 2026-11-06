@@ -22,7 +22,11 @@ L1 不是“自动重放构造器”，只重放**字段写入表达式切片**�
 - 字段没有 `@RemoldReinit`（避免与显式路径重复）；
 - 字段不是 `final`（final 只能走 `@RemoldReinit(OVERWRITE)` 的 Unsafe 通道）。
 
-继承字段（双括号写父类字段）单独处理：补丁写入 owner 是父类，但执行目标是子类实例；必须确认字段可访问/可用 Unsafe，且不能把父类所有子类实例误写。第一版 L1 只支持**宿主自己声明**的字段；继承字段仍由 L0 warn + `@RemoldReinit`。
+继承字段（双括号写父类字段）**必须纳入第一版**：Mindustry 的 `Blocks.java` 里 81 个双括号匿名 `Block` 子类、304 处 `health`/`size`/`armor`/`buildTime` 赋值，写的几乎全是 `Block` 的继承字段；排除继承字段等于不覆盖核心用例。做法：
+
+- 补丁 owner 仍是声明类，但**执行实例集合必须是 `LibTool.getInstances(该匿名类)`**，不能是 `LibTool.getInstances(父类)`；后者会复现 B2 的批量误伤（未修改的匿名子类也被写成父类初值）。
+- 字段可访问性：声明类字段若是 private，走 Unsafe（InitFix 已有 hidden nestmate/Unsafe 路径）；不因 private 放弃。
+- 若 `LibTool.getInstances(匿名类)` 返回空，跳过并 warn，不退回父类枚举。
 
 ## 3. 写入协议
 
@@ -43,15 +47,15 @@ L1 必须复用 InitFix 的切片安全门，不新增旁路：
 
 ## 5. 开关与输出
 
-建议：
+放行手段不用全局 `init_drift=replay`（B2 已证明全局重放会批量误伤），改为**按父类名的白名单**：
 
 ```text
--Dremold.agent.init_drift=warn|replay|off
+-Dremold.agent.init_drift.parents=arc.struct.Block,arc.world.Block
 ```
 
-- `warn`：L0 行为（默认）；
-- `replay`：L0 + L1 候选补丁；
-- `off`：关闭检测与重放。
+- 只有白名单父类的匿名子类、且 `LibTool.getInstances(匿名类)` 精确枚举到的实例，才生成 L1 补丁；
+- 白名单为空时 L1 关闭，L0 仍 warn；
+- 全局 `init_drift=off` 只用于关闭检测，不用于放行重放。
 
 输出：
 
@@ -67,7 +71,7 @@ L1 必须复用 InitFix 的切片安全门，不新增旁路：
 ## 7. 非目标
 
 - 不重放构造器；
-- 不自动处理继承字段（第一版）；
+- 不在白名单父类之外的继承字段上自动重放；
 - 不替代 `@RemoldReinit` / `@OnReload`；
 - 不在默认配置下改变存量数据。
 

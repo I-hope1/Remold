@@ -1,3 +1,10 @@
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Opcodes;
+import remold.BytecodeTransformerBridge;
+import remold.AnnotationTransformer;
 import remold.RemoldAgent;
 import remold.util.CRC64;
 import remold.util.LongLongMap;
@@ -77,6 +84,28 @@ public class FingerprintDiskHashProbe {
 		}
 		""";
 
+	static final String MIXIN_V1 = """
+		package fpm;
+		import remold.annotation.OnReload;
+		public class Host {
+		    public static int reloads;
+		    public int value = 1;
+		    @OnReload
+		    public static void onReload() { reloads++; }
+		}
+		""";
+
+	static final String MIXIN_V2 = """
+		package fpm;
+		import remold.annotation.OnReload;
+		public class Host {
+		    public static int reloads;
+		    public int value = 2;
+		    @OnReload
+		    public static void onReload() { reloads++; }
+		}
+		""";
+
 	public static void main(String[] args) throws Throwable {
 		System.out.println("=== FingerprintDiskHashProbe: unchanged second round ===");
 		Instrumentation real = RemoldAgent.getInstrumentation();
@@ -148,12 +177,15 @@ public class FingerprintDiskHashProbe {
 			check(firstLog.stream().anyMatch(m -> m.contains("[ANON_ALIGN] Aligning anonymous classes")),
 				"first round really ran anonymous-class alignment");
 
+			int pendingBeforeSecond = AnnotationTransformer.pendingAlignedClasses.size();
 			process.invoke(null, changed, real.getAllLoadedClasses());
 			List<String> secondLog = new ArrayList<>(captured);
 			int afterSecond = intField(host, "reloads");
 			int callsAfterSecond = redefineCalls.get();
 			check(secondLog.stream().noneMatch(m -> m.contains("[ANON_ALIGN] Aligning anonymous classes")),
 				"second unchanged round must not run anonymous-class alignment");
+			check(AnnotationTransformer.pendingAlignedClasses.size() == pendingBeforeSecond,
+				"second unchanged round did not register new aligned classes (idempotent)");
 			check(afterSecond == 1,
 				"second unchanged round must not fire @OnReload (actual=" + afterSecond + ")");
 			check(callsAfterSecond == callsAfterFirst,
@@ -174,12 +206,73 @@ public class FingerprintDiskHashProbe {
 				+ ", third=" + callsAfterThird + ")");
 		} finally {
 			instField.set(null, real);
-			RemoldAgent.logger = originalLogger;
-			RemoldAgent.DEBUG = originalDebug;
 		}
 
-		System.out.println("\n=== FINGERPRINT DISK HASH PROBE SUMMARY: passed=" + passed + ", failed=" + failed + " ===");
+		mixinCoverageScenario();
+
+		System.out.println("=== FINGERPRINT DISK HASH PROBE SUMMARY: passed=" + passed + ", failed=" + failed + " ===");
 		if (failed > 0) System.exit(1);
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// Mixin-style bridge: raw disk bytes are unchanged, but the bridge rewrites the class each round.
+	// The second round must still be a no-op because the fingerprint is the raw disk hash.
+	// ------------------------------------------------------------------------------------------------
+	static void mixinCoverageScenario() throws Throwable {
+		System.out.println("--- Mixin coverage: woven bytes must not become the disk fingerprint ---");
+		Map<String, byte[]> v1 = LayoutGateAssert.compile(Map.of("fpm.Host", MIXIN_V1));
+		Map<String, byte[]> v2 = LayoutGateAssert.compile(Map.of("fpm.Host", MIXIN_V2));
+		FixtureLoader loader = new FixtureLoader(v1);
+		Class<?> host = Class.forName("fpm.Host", true, loader);
+		check(intField(host, "reloads") == 0, "Mixin precondition: reload counter starts at 0");
+
+		Path dir = Files.createTempDirectory("fp_mixin");
+		Path hostFile = dir.resolve("fpm/Host.class");
+		Files.createDirectories(hostFile.getParent());
+		Files.write(hostFile, v2.get("fpm.Host"));
+		Set<Path> changed = new HashSet<>(Set.of(hostFile));
+
+		RemoldAgent.bytecodeCache.put("fpm.Host", v1.get("fpm.Host"));
+		RemoldAgent.sourceBytecodeCache.put("fpm.Host", v1.get("fpm.Host"));
+
+		BytecodeTransformerBridge bridge = (cl, name, target, bytes) ->
+			"fpm.Host".equals(name) ? addMarker(bytes) : bytes;
+		RemoldAgent.addTransformerBridge(bridge);
+		Field instField = RemoldAgent.class.getDeclaredField("inst");
+		instField.setAccessible(true);
+		Instrumentation real = (Instrumentation) instField.get(null);
+		try {
+			Method process = RemoldAgent.class.getDeclaredMethod("processChanges", Set.class, Class[].class);
+			process.setAccessible(true);
+			process.invoke(null, changed, real.getAllLoadedClasses());
+			int first = intField(host, "reloads");
+			check(first == 1, "Mixin first round fires @OnReload once (actual=" + first + ")");
+
+			process.invoke(null, changed, real.getAllLoadedClasses());
+			int second = intField(host, "reloads");
+			check(second == 1,
+				"Mixin second unchanged round must not redefine woven bytes (actual=" + second + ")");
+		} finally {
+			RemoldAgent.removeTransformerBridge(bridge);
+		}
+	}
+
+	static byte[] addMarker(byte[] bytes) {
+		ClassReader cr = new ClassReader(bytes);
+		ClassWriter cw = new ClassWriter(0);
+		cr.accept(new ClassVisitor(Opcodes.ASM9, cw) {
+			@Override
+			public void visitEnd() {
+				MethodVisitor mv = cv.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+					"remold$probeMarker", "()V", null, null);
+				mv.visitCode();
+				mv.visitInsn(Opcodes.RETURN);
+				mv.visitMaxs(0, 0);
+				mv.visitEnd();
+				super.visitEnd();
+			}
+		}, 0);
+		return cw.toByteArray();
 	}
 
 	static Instrumentation counting(Instrumentation real, AtomicInteger calls) {

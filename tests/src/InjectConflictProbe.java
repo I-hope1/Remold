@@ -1,6 +1,14 @@
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.FieldVisitor;
+import org.objectweb.asm.Opcodes;
 import remold.RemoldAgent;
 import remold.util.LibTool;
 
+import java.lang.instrument.ClassFileTransformer;
+import java.security.ProtectionDomain;
+import java.lang.instrument.Instrumentation;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
@@ -150,8 +158,51 @@ public class InjectConflictProbe {
 		check("v1".equals(call(conflict, instance, "hi")),
 			"the already-loaded class still runs its original v1 bytes");
 
+		// Already-loaded class was modified by a transformer: live bytes differ from the
+		// bytes we are asked to inject. This must be a conflict, not success.
+		Instrumentation inst = RemoldAgent.getInstrumentation();
+		ClassFileTransformer marker = new ClassFileTransformer() {
+			@Override public byte[] transform(ClassLoader l, String name, Class<?> cbr,
+				ProtectionDomain pd, byte[] buf) {
+				return "inject/Conflict".equals(name) ? addMarker(buf) : null;
+			}
+		};
+		inst.addTransformer(marker, true);
+		List<String> transformerWarns = new ArrayList<>();
+		RemoldAgent.Logger oldLogger2 = RemoldAgent.logger;
+		RemoldAgent.logger = new RemoldAgent.Logger() {
+			public void log(String msg) { }
+			public void info(String msg) { }
+			public void warn(String msg) { transformerWarns.add(msg); }
+			public void error(String msg) { }
+			public void error(String msg, Throwable t) { }
+		};
+		try {
+			Object transformed = inject.invoke(null, "inject.Conflict", null, conflictV1);
+			check(Boolean.FALSE.equals(transformed),
+				"transformer-modified already-loaded bytes must return false (actual=" + transformed + ")");
+			check(transformerWarns.stream().anyMatch(w -> w.contains("[INJECT-CONFLICT]")),
+				"transformer-modified bytes emit [INJECT-CONFLICT] (warns=" + transformerWarns + ")");
+		} finally {
+			RemoldAgent.logger = oldLogger2;
+			inst.removeTransformer(marker);
+		}
+
 		System.out.println("\n=== INJECT CONFLICT PROBE SUMMARY: passed=" + passed + ", failed=" + failed + " ===");
 		if (failed > 0) System.exit(1);
+	}
+
+	static byte[] addMarker(byte[] bytes) {
+		ClassReader cr = new ClassReader(bytes);
+		ClassWriter cw = new ClassWriter(0);
+		cr.accept(new ClassVisitor(Opcodes.ASM9, cw) {
+			@Override public void visitEnd() {
+				FieldVisitor fv = cv.visitField(Opcodes.ACC_PUBLIC, "transformedMarker", "I", null, null);
+				fv.visitEnd();
+				super.visitEnd();
+			}
+		}, 0);
+		return cw.toByteArray();
 	}
 
 	static Object call(Class<?> type, Object instance, String method) throws Exception {

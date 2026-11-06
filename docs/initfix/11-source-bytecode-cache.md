@@ -135,3 +135,21 @@ finally {
 - 不改变 `bytecodeCache` 的提交时机；
 - 不改变 `pendingAlignedClasses` 的 pin 语义；
 - 不引入按 ClassLoader 分槽的 source cache（留待多加载器专题）。
+
+## 9. 并发窗口（已确认，不是设计假设）
+
+`processChanges` **没有**与 `AnnotationTransformer` 的读取方共用一把锁：
+
+- `processChanges` 是普通 private 方法，没有 `synchronized`；
+- `sourceBytecodeCache` 是 `ConcurrentHashMap`，只保证单次读写原子，不保证“本轮写入 → 回滚”这段是一个原子区间；
+- `AnnotationTransformer.isNoOpExternalRedefine` / `oldBytecode` 读取时也不持有 `processChanges` 的锁。
+
+因此从“本轮源码写入”到“未生效类回滚”之间存在真实窗口，跨度包含匿名类对齐、局部类门、布局门、`redefineClasses`。窗口长度取决于本轮类数/对齐成本/重定义耗时，没有固定上界。
+
+读到未生效字节的后果：
+
+- `isNoOpExternalRedefine` 可能把外部重定义判定成 no-op，从而跳过外部字节的织入；
+- 旧侧基线可能被当成“已生效”，下一轮对齐/`oldBytecode` 使用错误版本；
+- 这不是数据竞争导致的内存错误，而是**语义窗口**；staged 方案可以消除它，快照+回滚只能缩短到“回滚完成前”。
+
+在升级为 staged 之前，这条窗口是已知取舍。

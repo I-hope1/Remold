@@ -1918,14 +1918,7 @@ public class RemoldAgent {
 		// sourceBytecodeCache 是“最近一次实际生效的源码基线”，不是“本轮编译结果”。
 		// 对齐阶段必须先看到本轮新字节，所以上面暂存写入；这里按类回滚未生效的已加载类。
 		// 注入的新类不在 loadedBefore 中，保持新源码；成功类保持新源码。
-		for (String key : sourceBefore.keySet()) {
-			if (redefinedOk.contains(key)) continue;
-			byte[] prev = sourceBefore.get(key);
-			// 新注入类（没有旧源码、也不在 loadedBefore）保持新源码；其余未成功类回滚。
-			if (prev == null && !loadedBefore.contains(key)) continue;
-			if (prev == null) sourceBytecodeCache.remove(key);
-			else sourceBytecodeCache.put(key, prev);
-		}
+		rollbackSourceCache(sourceBefore, redefinedOk, loadedBefore);
 
 		// ---- 指纹落账 + 失败回队 ----
 		//
@@ -3206,6 +3199,18 @@ public class RemoldAgent {
 	 *       此时重试会拿"基线与 JVM 实际状态不一致"的数据重新对齐，<b>不得回队</b>。</li>
 	 * </ul>
 	 */
+	static void rollbackSourceCache(Map<String, byte[]> sourceBefore, Set<String> applied,
+	                                Set<String> loadedBefore) {
+		for (String key : sourceBefore.keySet()) {
+			if (applied.contains(key)) continue;
+			byte[] prev = sourceBefore.get(key);
+			// 新注入类（没有旧源码、也不在 loadedBefore）保持新源码；其余未成功类回滚。
+			if (prev == null && !loadedBefore.contains(key)) continue;
+			if (prev == null) sourceBytecodeCache.remove(key);
+			else sourceBytecodeCache.put(key, prev);
+		}
+	}
+
 	private static RedefineOutcome applyRedefinitions(List<ClassDefinition> definitions,
 	                                                  Collection<AlignmentTransaction> transactions,
 	                                                  RoundSkips skips) {

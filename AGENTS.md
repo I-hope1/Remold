@@ -98,7 +98,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | `@HotswapInit` 设计契约 | `docs/initfix/09-hotswapinit-design.md`（T4 逃生口的豁免边界、签名与调用基数、重复触发、异常边界、用例清单） |
 | 外部引擎源码索引 | `.sources/`（如 `.sources/mindustry/` 指向本地 Mindustry/Arc 真实源码；只读参考，已 gitignore） |
 | Mixin 生态扩展插件 | `plugin-mixin/`（`remold.mixin.MixinHotswapPlugin`、`MixinReWeaver`、`MixinHotSwap`） |
-| Forge 与 NeoForge 扩展插件 | `plugin-forge/`（`remold.forge.ForgeHotswapPlugin`、`NeoForgeHotswapPlugin`、`ModLauncherMixinBridge`、`ForgeEventBusRefresher`） |
+| Forge 与 NeoForge 扩展插件 | `plugin-forge/`（`remold.forge.ForgeHotswapPlugin`、`NeoForgeHotswapPlugin`、`ModLauncherMixinBridge`、`ForgeEventBusRefresher`、`ForgeMixinHotSwap`（Mixin 模板热更 + 目标级联）、`ForgeClassInfoSync`（跨 ClassLoader 把新增字段/方法补进 Mixin `ClassInfo`，拒绝时回滚）） |
 | 偏移量与访问器扫描器 | `OffsetScanner`（`core/src/remold/offset/`，常量池预过滤 + 多轮过程间数据流分析，识别 `objectFieldOffset`/`newUpdater`/`findVarHandle` 产生源） |
 | 偏移绑定索引与漂移安全门 | `OffsetBindingIndex` / `SuperclassDriftGate`（`core/src/remold/offset/`，父类新增实例字段时检测子孙类全部实例字段是否被缓存，结合 `LibTool` 堆存活探测，阻断漂移） |
 | 布局预测器 | `LayoutPredictor`（`core/src/remold/offset/`，抛弃式加载器干净加载预测物理偏移，协同注入非 JDK 祖先链防御 package-private 运行时包隔离） |
@@ -156,6 +156,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 - 匿名类/对齐主题套件为标准 JUnit 测试：`./gradlew test`（或 `./gradlew :tests:test`，挂在 `check`）。入口用 `-Dhstest.javac8/11/17/21/25` 现编夹具，不再有 `expected-count.txt` 基线。
 - P0.5 前置验证：`./gradlew :tests:p05Probe -Pp05.jbr=<DCEVM JDK 目录>`（或设 `JBR_HOME`）。**不挂 `check`**，因为需要 JBR 17/21 的 `-XX:+AllowEnhancedClassRedefinition`；CI 由 `p05-probe` 的 JBR 17/21 矩阵承担。探针刻意用最小 agent（`P05Agent`）而非 `remold-agent.jar`，避免 `LayoutGate`/`InitFix` 介入被测重定义。
 - 缓存填充验证：`./gradlew :tests:cacheWarmingProbe`（只需 `-javaagent`）。改动 transformer 注册顺序或`canRetransform` 标志后必须跑它：它实测"`canRetransform=false` 组整组先于 `true` 组执行"这条规则，并断言 `bytecodeCache` 里存的是对齐/织入**之后**的字节。
+- Forge ClassInfo 成员同步 E2E：`tests/fabric-mixin-probe/forge-classinfo/`（真实 Forge 1.21.1 `runServer`，红基线 + 修复后绿跑；`bash run-forge-classinfo.sh` 复跑，Windows 下用 `verify-evidence.cmd` 做验收；同样不挂 `check`）。改动 `ForgeClassInfoSync` / `ForgeMixinHotSwap.reload` 时序前必须先跑它。
 - 读者扫描成本验证：`./gradlew :tests:readerScanProbe`（只需 `-javaagent` 提供 Instrumentation，不需要 DCEVM）。改动 `RemovedMemberReaders.refs` 后必须先跑它：其中一条断言要求"常量池扫描是方法体精扫的超集"。
 - 两阶段编排验证：`./gradlew :tests:twoPhaseProbe -Pp05.jbr=<DCEVM JDK 目录>`，把 `StageASkeleton` / `ConstructorTailInjector` / `InitFix` 串成 `A → redefine → B → C → redefine` 跑一遍（同样不挂 `check`）。改动两阶段相关代码后必须先跑它，再考虑动 `RemoldAgent`。
 - 偏移量稳定性与漂移实测：`./gradlew :tests:offsetStabilityProbe -Pp05.jbr=<DCEVM JDK 目录>`（同样不挂 `check`），实测单类稳定性（空洞填补、类型重排）、父类字段漂移步长、Updater 错位破坏与 C2 常量折叠使用方逆优化。

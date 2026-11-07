@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `plugin-forge` `ForgeClassInfoSync`: Mixin `ClassInfo` member sync across ModLauncher's
+  ClassLoader boundary. Newly declared `@Mixin` fields/methods are added to the same `ClassInfo`
+  instance **before** `IMixinTransformer.reload` and rolled back when reload is rejected; every
+  member lookup is resolved against the host ClassLoader's own `FieldNode`/`MethodNode` types, so a
+  stale agent-side ASM copy cannot be matched.
+- `tests/fabric-mixin-probe/forge-classinfo/`: real Forge 1.21.1 dedicated-server E2E for the above
+  (stage 1 adds an `@Inject` handler method, stage 2 adds a `@Unique` field), with a witness-based
+  `Verdict` whose discriminating power is pinned by red / green / not-attempted / self-contradictory
+  fixtures (`verify-evidence.sh`).
+
+### Fixed
+- Forge/NeoForge: adding an `@Inject` handler method or a `@Unique` field to an existing `@Mixin`
+  template was rejected at reload (`Conform error ... please restart client`, followed by a
+  `ClassInfo$Method.isUnique()` NPE) because `MixinInfo.reloadMixin` reuses the **pre-reload**
+  `ClassInfo` and the new members were invisible to its conform check. Forge/NeoForge now hot-swap
+  those changes instead of demanding a restart; Fabric parity with `MixinClassInfoSync`.
+
 ## [0.2.4] - 2026-11-07
 
 ### Added

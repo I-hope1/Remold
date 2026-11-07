@@ -1,0 +1,10 @@
+// Minimal ModDevGradle workspace for the NeoForge native-[[mixins]] probe.
+// Materialised into <repo>/build/neoforge-probe/mdk by run-neoforge.sh.
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        maven { url = uri('https://maven.neoforged.net/releases') }
+    }
+}
+
+rootProject.name = 'neprobe'

@@ -1,0 +1,77 @@
+// Minimal ModDevGradle workspace: NeoForge 21.1.x dev runtime (MC 1.21.1) for the NeoForge
+// native-[[mixins]] probe. Materialised into <repo>/build/neoforge-probe/mdk by run-neoforge.sh;
+// the mod sources come from tests/neoforge-mixin-probe/mdk-overlay.
+//
+// ModDevGradle (not NeoGradle): it is the plugin NeoForge itself recommends for 21.x, and its
+// `runServer` task is the dev runtime this probe has to exercise.
+plugins {
+    id 'java'
+    id 'net.neoforged.moddev' version '2.0.148'
+}
+
+version = '1.0.0'
+group = 'neprobe'
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+neoForge {
+    version = '21.1.265'
+
+    runs {
+        server {
+            server()
+            programArguments.add('--nogui')
+        }
+    }
+
+    mods {
+        neprobe {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+// The driver javacs the stage sources while runServer holds the project lock (a second Gradle
+// build cannot run concurrently), so it captures the compile classpath before launching.
+tasks.register('printCompileCp') {
+    def cp = sourceSets.main.compileClasspath
+    doLast { println cp.asPath }
+}
+
+tasks.configureEach {
+    if (name == 'runServer') {
+        def npAgent = project.findProperty('npAgentJar')
+        def npPlugin = project.findProperty('npPluginJar')
+        def npControl = project.findProperty('npControlDir')
+        // Only the compiled classes carry the Mixin templates: the file watcher has to see the
+        // stage javac land here, exactly like a dev-mode classpath mod.
+        def watched = "${projectDir}/build/classes/java/main".replace('\\', '/')
+        jvmArguments.addAll(
+            "-javaagent:${npAgent}=" + watched,
+            "-XX:+IgnoreUnrecognizedVMOptions",
+            "-XX:+AllowEnhancedClassRedefinition",
+            "-Dremold.build_mode=auto",
+            "-Dremold.plugins=forge",
+            "-Dremold.plugin.jars=${npPlugin}",
+            "-Dremold.agent.file_shake_ms=500",
+            "-Dremold.probe.neoforge=true",
+            "-Dremold.probe.neoforge.control=" + npControl,
+            "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED",
+            "--add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED",
+            "--add-exports=java.base/jdk.internal.loader=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        )
+        // The probe namespace is a named JPMS module in NeoForge 21.1 (sponge-mixin ships
+        // module-info and only opens org.spongepowered.asm.mixin.transformer to gson), so the
+        // bridge's deep reflection needs an explicit --add-opens. The driver decides whether to
+        // pass it (NP_ADD_OPENS=1) so the before/after difference can be recorded as evidence.
+        if (project.hasProperty('npAddOpens')) {
+            jvmArguments.add('--add-opens=org.spongepowered.mixin/org.spongepowered.asm.mixin.transformer=ALL-UNNAMED')
+            jvmArguments.add('--add-opens=org.spongepowered.mixin/org.spongepowered.asm.mixin=ALL-UNNAMED')
+        }
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}

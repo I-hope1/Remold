@@ -1,0 +1,19 @@
+# Synthetic fixture — NOT evidence. The hot swap never reached the Mixin reload path at all
+# ("nothing happened"): the probe must not report this as a red result, Verdict must return INVALID.
+=== fixture: neoforge-mixin-probe not-attempted ===
+[NP] PROBE-VERSION=neoforge-mixin-probe/1 control=E:/tmp/np-control
+[NP] PROBE-START
+[NP] BASELINE d1=1 d2=0 d3=1 seen1=123 seen3=-1 ret=T0 err=none
+[NP] CHECK NP-BASE PASS d1=1 d2=0 d3=1 seen1=123 seen3=-1 ret=T0 err=none
+[NP] NEXT stage1
+[NP] STAGE1 d1=1 d2=0 d3=1 seen1=123 seen3=-1 ret=T0 err=none
+[NP] CHECK NP-M1 FAIL new-handler-per-call-delta=0 err=none
+[NP] CHECK NP-PRESERVE-1 PASS baseline-handler-per-call-delta=1 seen1=123 err=none
+[NP] NEXT stage2
+[NP] STAGE2 d1=1 d2=0 d3=1 seen1=123 seen3=-1 ret=T0 err=none
+[NP] CHECK NP-M2 FAIL new-unique-field-value=-1 err=none
+[NP] CHECK NP-PRESERVE-2 PASS template1-handler-delta=1 template2-handler-delta=1 seen1=123 err=none
+[NP] RESULT-PROBE-DONE
+[NP] HALT rc=0
+[NP-DRIVER] phase=stage1 reload=not-attempted
+[NP-DRIVER] phase=stage2 reload=not-attempted

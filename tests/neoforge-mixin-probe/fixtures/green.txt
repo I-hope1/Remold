@@ -1,0 +1,25 @@
+# Synthetic fixture — NOT evidence. Shape of a NeoForge run where the new template members are
+# synced into Mixin's ClassInfo before the reload, so both hot updates take effect and the
+# pre-existing members keep firing. Used by verify-evidence.sh to prove Verdict.java is not vacuous.
+=== fixture: neoforge-mixin-probe green ===
+[NP] PROBE-VERSION=neoforge-mixin-probe/1 control=E:/tmp/np-control
+[NP] PROBE-START
+[NP] BASELINE d1=1 d2=0 d3=1 seen1=123 seen3=-1 ret=T0 err=none
+[NP] CHECK NP-BASE PASS d1=1 d2=0 d3=1 seen1=123 seen3=-1 ret=T0 err=none
+[NP] NEXT stage1
+[Remold] [Forge/NeoForge] Mixin class-info sync: neprobe.mixin.ProbeTargetMixin addedFields=0, addedMethods=1
+[Remold] [Forge/NeoForge] Mixin neprobe.mixin.ProbeTargetMixin reloaded; affected target(s): [neprobe.ProbeTarget]
+[NP] STAGE1 d1=1 d2=1 d3=1 seen1=123 seen3=-1 ret=T0 err=none
+[NP] CHECK NP-M1 PASS new-handler-per-call-delta=1 err=none
+[NP] CHECK NP-PRESERVE-1 PASS baseline-handler-per-call-delta=1 seen1=123 err=none
+[NP] NEXT stage2
+[Remold] [Forge/NeoForge] Mixin class-info sync: neprobe.mixin.ProbeTargetSecondMixin addedFields=1, addedMethods=0
+[Remold] [Forge/NeoForge] Mixin neprobe.mixin.ProbeTargetSecondMixin reloaded; affected target(s): [neprobe.ProbeTarget]
+[Remold] [Forge/NeoForge] Target class neprobe.ProbeTarget re-woven with the updated Mixin and redefined
+[NP] STAGE2 d1=1 d2=1 d3=1 seen1=123 seen3=456 ret=T0 err=none
+[NP] CHECK NP-M2 PASS new-unique-field-value=456 err=none
+[NP] CHECK NP-PRESERVE-2 PASS template1-handler-delta=1 template2-handler-delta=1 seen1=123 err=none
+[NP] RESULT-PROBE-DONE
+[NP] HALT rc=0
+[NP-DRIVER] phase=stage1 reload=success
+[NP-DRIVER] phase=stage2 reload=success

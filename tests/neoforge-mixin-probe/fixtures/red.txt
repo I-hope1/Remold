@@ -1,0 +1,28 @@
+# Synthetic fixture — NOT evidence. Shape of a NeoForge run where Mixin's internal ClassInfo never
+# learns the new template members (the ClassInfoSync path disabled):
+#   stage 1 -> the new @Inject handler fails reload validation ("Conform error ... method is null"),
+#   stage 2 -> the new @Unique field is accepted on reload but the target re-weave fails and the
+#              bridge falls back to source bytes, silently dropping the woven members.
+# Used by verify-evidence.sh to prove Verdict.java still separates red from green.
+=== fixture: neoforge-mixin-probe red ===
+[NP] PROBE-VERSION=neoforge-mixin-probe/1 control=E:/tmp/np-control
+[NP] PROBE-START
+[NP] BASELINE d1=1 d2=0 d3=1 seen1=123 seen3=-1 ret=T0 err=none
+[NP] CHECK NP-BASE PASS d1=1 d2=0 d3=1 seen1=123 seen3=-1 ret=T0 err=none
+[NP] NEXT stage1
+[Remold] [WARN] [Forge/NeoForge] Failed to reload Mixin neprobe.mixin.ProbeTargetMixin; restart the game to apply this change: java.lang.reflect.InvocationTargetException
+  Caused by: org.spongepowered.asm.mixin.transformer.throwables.MixinPreProcessorException: Conform error for neprobe.mixins.json:ProbeTargetMixin during activity: [Conform injector npInject2(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V]
+  Caused by: java.lang.NullPointerException: Cannot invoke "org.spongepowered.asm.mixin.transformer.ClassInfo$Method.isUnique()" because "method" is null
+[NP] STAGE1 d1=1 d2=0 d3=1 seen1=123 seen3=-1 ret=T0 err=none
+[NP] CHECK NP-M1 FAIL new-handler-per-call-delta=0 err=none
+[NP] CHECK NP-PRESERVE-1 PASS baseline-handler-per-call-delta=1 seen1=123 err=none
+[NP] NEXT stage2
+[Remold] [Forge/NeoForge] Mixin neprobe.mixin.ProbeTargetSecondMixin reloaded; affected target(s): [neprobe.ProbeTarget]
+[Remold] [WARN] [Forge/NeoForge] Mixin re-weaving failed; falling back to source bytecode: neprobe.ProbeTarget (java.lang.reflect.InvocationTargetException)
+[NP] STAGE2 d1=0 d2=0 d3=0 seen1=-1 seen3=-1 ret=none err=NoSuchFieldError: uniqueA
+[NP] CHECK NP-M2 FAIL new-unique-field-value=-1 err=NoSuchFieldError: uniqueA
+[NP] CHECK NP-PRESERVE-2 FAIL template1-handler-delta=0 template2-handler-delta=0 seen1=-1 err=NoSuchFieldError: uniqueA
+[NP] RESULT-PROBE-DONE
+[NP] HALT rc=0
+[NP-DRIVER] phase=stage1 reload=rejected
+[NP-DRIVER] phase=stage2 reload=weave-failed

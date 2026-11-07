@@ -1,0 +1,22 @@
+# Synthetic fixture — NOT evidence. Every member check fails, but the log shows the metadata sync
+# itself broke (the bridge could not reach the transformer because the JPMS module refuses the
+# reflection). Without the degradation rule this would be reported as a red result; it must be
+# INVALID instead (campaign invariant N2: no silent degradation).
+=== fixture: neoforge-mixin-probe degraded ===
+[NP] PROBE-VERSION=neoforge-mixin-probe/1 control=E:/tmp/np-control
+[NP] PROBE-START
+[NP] BASELINE d1=1 d2=0 d3=1 seen1=123 seen3=-1 ret=T0 err=none
+[NP] CHECK NP-BASE PASS d1=1 d2=0 d3=1 seen1=123 seen3=-1 ret=T0 err=none
+[NP] NEXT stage1
+[Remold] [WARN] [Forge/NeoForge] Failed to sync Mixin class metadata for neprobe.mixin.ProbeTargetMixin; a newly added field/method may not hot-swap: java.lang.reflect.InaccessibleObjectException: Unable to make field private final java.util.Set org.spongepowered.asm.mixin.transformer.ClassInfo.fields accessible: module org.spongepowered.mixin does not "opens org.spongepowered.asm.mixin.transformer" to unnamed module @1b6d3586
+[NP] STAGE1 d1=1 d2=0 d3=1 seen1=123 seen3=-1 ret=T0 err=none
+[NP] CHECK NP-M1 FAIL new-handler-per-call-delta=0 err=none
+[NP] CHECK NP-PRESERVE-1 PASS baseline-handler-per-call-delta=1 seen1=123 err=none
+[NP] NEXT stage2
+[NP] STAGE2 d1=1 d2=0 d3=1 seen1=123 seen3=-1 ret=T0 err=none
+[NP] CHECK NP-M2 FAIL new-unique-field-value=-1 err=none
+[NP] CHECK NP-PRESERVE-2 PASS template1-handler-delta=1 template2-handler-delta=1 seen1=123 err=none
+[NP] RESULT-PROBE-DONE
+[NP] HALT rc=0
+[NP-DRIVER] phase=stage1 reload=rejected
+[NP-DRIVER] phase=stage2 reload=rejected

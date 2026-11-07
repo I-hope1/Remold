@@ -1,0 +1,15 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+license = "All Rights Reserved"
+
+[[mods]]
+modId = "neprobe"
+version = "1.0.0"
+displayName = "Remold NeoForge mixin probe"
+description = '''Fixture mod for the NeoForge native-[[mixins]] Mixin reload E2E probe.'''
+
+# NeoForge-native Mixin config registration (FML 4+ / NeoForge 20.5+): ModFileParser.getMixinConfigs
+# turns this into a DeferredMixinConfigRegistration, so the config is registered by the loader
+# itself. The probe must NOT call MixinEnvironment.addConfiguration anywhere.
+[[mixins]]
+config = "neprobe.mixins.json"

@@ -3,6 +3,8 @@ package remold.ref;
 import jdk.internal.misc.Unsafe;
 import remold.ClassDiffUtil.ClassDiff;
 import remold.*;
+import remold.annotation.RemoldReinit;
+import remold.util.ClassIdentity;
 import remold.util.LibTool;
 import org.objectweb.asm.*;
 import org.objectweb.asm.tree.*;
@@ -159,9 +161,22 @@ public class InitFix {
 	private static boolean isReinitModeDesc(String desc) {
 		return "Lremold/annotation/RemoldReinit$Mode;".equals(desc);
 	}
+	private static boolean isReinitScopeDesc(String desc) {
+		return "Lremold/annotation/RemoldReinit$Scope;".equals(desc);
+	}
 
-	/** 一个被 {@code @RemoldReinit} 标注的字段及其写入协议。 */
-	private record ReinitField(boolean overwrite) { }
+	/**
+	 * 一个被 {@code @RemoldReinit} 标注的字段及其写入协议。
+	 *
+	 * @param overwrite    写入协议：{@code OVERWRITE} 无条件覆写，否则条件 CAS
+	 * @param selfOnly     {@code scope = SELF}：只重置运行时类恰好等于声明类的实例；
+	 *                     {@code INCLUDE_SUBCLASSES}（默认）覆盖子类/匿名子类实例
+	 * @param scopeExplicit 注解里是否<b>显式</b>写了 {@code scope} 元素。
+	 *                     ASM 只序列化显式给出的元素，因此可据此区分"用户写了 scope"
+	 *                     与"注解默认值"：静态字段只有一个槽位，作用域对它没有意义，
+	 *                     只有用户显式写 scope 时才需要提醒（{@code docs/initfix/03-runtime-driver.md} §4）。
+	 */
+	private record ReinitField(boolean overwrite, boolean selfOnly, boolean scopeExplicit) { }
 
 	private static final Unsafe UNSAFE = Unsafe.getUnsafe();
 
@@ -411,12 +426,21 @@ public class InitFix {
 	 * @param fieldName    字段名（报告/失败台账的键）
 	 * @param isStatic     静态字段（方法无参，整个补丁只调用一次）
 	 * @param dependencies 本字段切片读取的其它<b>本轮受补</b>字段
+	 * @param selfOnly     {@code @RemoldReinit(scope = SELF)}：只对运行时类恰好等于宿主的实例执行，
+	 *                     枚举出来的子类/匿名子类实例必须跳过（{@code docs/initfix/03-runtime-driver.md} §4）
 	 */
 	public record FieldPatchTask(
-	 String methodName, String fieldName, boolean isStatic, Set<String> dependencies) {
+	 String methodName, String fieldName, boolean isStatic, Set<String> dependencies,
+	 boolean selfOnly) {
 
 		public FieldPatchTask {
 			dependencies = dependencies == null ? Set.of() : Set.copyOf(dependencies);
+		}
+
+		/** 默认作用域（{@code INCLUDE_SUBCLASSES}）的任务：子类实例同样要补。 */
+		public FieldPatchTask(String methodName, String fieldName, boolean isStatic,
+		                      Set<String> dependencies) {
+			this(methodName, fieldName, isStatic, dependencies, false);
 		}
 	}
 
@@ -751,14 +775,33 @@ public class InitFix {
 		Set<String>              targetInstanceFields = new LinkedHashSet<>(addedInstanceFields);
 		Set<String>              targetStaticFields   = new LinkedHashSet<>(addedStaticFields);
 		Set<String>              forceWriteFields     = new LinkedHashSet<>();
+		Set<String>              selfOnlyFields       = new LinkedHashSet<>();
+		List<String>             staticScopeIgnored   = new ArrayList<>();
 		for (Map.Entry<String, ReinitField> e : reinitFields.entrySet()) {
 			FieldNode fn = fieldNodes.get(e.getKey());
 			if (fn == null) continue;   // 注解在不存在的字段上（理论上不可能）
-			boolean isStatic = (fn.access & Opcodes.ACC_STATIC) != 0;
+			boolean     isStatic = (fn.access & Opcodes.ACC_STATIC) != 0;
+			ReinitField rf       = e.getValue();
 			(isStatic ? targetStaticFields : targetInstanceFields).add(e.getKey());
-			if (e.getValue().overwrite()) forceWriteFields.add(e.getKey());
+			if (rf.overwrite()) forceWriteFields.add(e.getKey());
+			if (isStatic) {
+				// 静态字段只有一个槽位，"只重置本类实例"无从谈起：作用域对静态字段没有意义。
+				// 只在用户显式写了 scope 时提醒（默认值不是用户的声明，不该刷警告），然后忽略它。
+				if (rf.scopeExplicit()) staticScopeIgnored.add(e.getKey());
+			} else if (rf.selfOnly()) {
+				selfOnlyFields.add(e.getKey());
+			}
 			log("@RemoldReinit on " + className + "." + e.getKey()
-			    + " -> mode=" + (e.getValue().overwrite() ? "OVERWRITE" : "CONDITIONAL"));
+			    + " -> mode=" + (rf.overwrite() ? "OVERWRITE" : "CONDITIONAL")
+			    + (isStatic ? "" : ", scope=" + (rf.selfOnly() ? "SELF" : "INCLUDE_SUBCLASSES")));
+		}
+		if (!staticScopeIgnored.isEmpty()) {
+			// 单行告警：静态字段的 scope 被忽略，但静态补丁本身照常执行（不是拒绝路径）。
+			RemoldAgent.warn("[REINIT-SCOPE] scope has no effect on static field(s) "
+			                 + className.replace('/', '.') + "."
+			                 + String.join(", ", staticScopeIgnored)
+			                 + " and is ignored: a static field has a single slot, so SELF vs"
+			                 + " INCLUDE_SUBCLASSES cannot select different targets.");
 		}
 		if (!reinitFields.isEmpty()) {
 			log("@RemoldReinit expanded candidate set for " + className
@@ -1191,7 +1234,8 @@ public class InitFix {
 			 dependencyOf(fieldName, instanceExtracts, className, acceptedInstance));
 			instanceDeps.addAll(
 			 dependencyOf(fieldName, instanceExtracts, className, acceptedStatic));
-			instanceTasks.add(new FieldPatchTask(method, fieldName, false, instanceDeps));
+			instanceTasks.add(new FieldPatchTask(method, fieldName, false, instanceDeps,
+			 selfOnlyFields.contains(fieldName)));
 		}
 
 		for (String fieldName : orderedStatic) {
@@ -1519,18 +1563,19 @@ public class InitFix {
 	// ==================== docs/initfix/03-runtime-driver.md §4 存量重置扩展：注解扫描 ====================
 
 	/**
-	 * 扫描带 {@code @RemoldReinit} 的字段，解析其写入协议。
+	 * 扫描带 {@code @RemoldReinit} 的字段，解析其写入协议与实例作用域。
 	 *
 	 * <p>只做<b>描述符字符串匹配</b>，不加载注解类 —— 与 {@code docs/initfix/01-safety-gate.md} §5 的离线层级接口同一原则：
 	 * 在 transform 线程上 {@code Class.forName} 注解类型可能触发类加载死锁。
-	 * 元素缺省时按注解声明取默认值 {@code OVERWRITE}。</p>
+	 * 元素缺省时按注解声明取默认值：{@code mode = OVERWRITE}、{@code scope = INCLUDE_SUBCLASSES}。</p>
 	 */
 	private static Map<String, ReinitField> scanReinitFields(ClassNode newClass) {
 		Map<String, ReinitField> out = new LinkedHashMap<>();
 		for (FieldNode f : newClass.fields) {
 			AnnotationNode reinit = findReinit(f);
 			if (reinit == null) continue;
-			out.put(f.name, new ReinitField(readOverwriteMode(reinit)));
+			out.put(f.name, new ReinitField(readOverwriteMode(reinit),
+			 readSelfOnlyScope(reinit), hasScopeElement(reinit)));
 		}
 		return out;
 	}
@@ -1568,6 +1613,42 @@ public class InitFix {
 			return true;
 		}
 		return true;
+	}
+
+	/**
+	 * 读 {@code scope} 元素（{@code docs/initfix/03-runtime-driver.md} §4）。
+	 *
+	 * <p>ASM 把注解里的枚举值表示成 {@code String[]{描述符, 常量名}}。缺省、无法识别或形态异常时
+	 * 一律退回默认的 {@code INCLUDE_SUBCLASSES}：那是"覆盖子类实例"的既有行为，
+	 * 也是更保守的取法（漏掉子类实例意味着用户要求的重置没发生）。</p>
+	 *
+	 * @return true 表示 {@code SELF}（只重置恰好等于声明类的实例）
+	 */
+	private static boolean readSelfOnlyScope(AnnotationNode a) {
+		if (a.values == null) return false;
+		for (int i = 0; i + 1 < a.values.size(); i += 2) {
+			if (!"scope".equals(a.values.get(i))) continue;
+			Object v = a.values.get(i + 1);
+			if (v instanceof String[] enumValue && enumValue.length == 2
+			    && isReinitScopeDesc(enumValue[0])) {
+				return "SELF".equals(enumValue[1]);
+			}
+			if (v instanceof String[] other) {
+				log("Unexpected @RemoldReinit scope representation: "
+				    + Arrays.toString(other) + "; falling back to INCLUDE_SUBCLASSES");
+			}
+			return false;
+		}
+		return false;
+	}
+
+	/** 注解里是否<b>显式</b>写了 {@code scope} 元素（ASM 只序列化显式给出的元素，默认值不出现）。 */
+	private static boolean hasScopeElement(AnnotationNode a) {
+		if (a.values == null) return false;
+		for (int i = 0; i + 1 < a.values.size(); i += 2) {
+			if ("scope".equals(a.values.get(i))) return true;
+		}
+		return false;
 	}
 
 	/**
@@ -3017,6 +3098,13 @@ public class InitFix {
 	 * JVM 打破，继续修补没有意义。</p>
 	 */
 	private static void applyPatch(Class<?> host, PendingPatch patch) throws Throwable {
+		// 影子 Class 归一（docs/initfix/03-runtime-driver.md §4 的 SELF 作用域判定前提）：
+		// JBR 结构性 redefine 会把静态字段里持有的 Class 引用改写成旧版本影子对象
+		// （同名同加载器、旧字段元数据）。影子类上的 LibTool.getInstances 返回 0，
+		// 且存活实例的 getClass() 是 canonical 类而不是影子类 —— 不归一的话
+		// "运行时类恰好等于声明类"会把所有实例判成不匹配，SELF 静默什么都不写。
+		host = ClassIdentity.canonicalize(host);
+
 		// 详细失败日志配额是"本轮"的（见 DETAILED_FAILURE_LOGS 的 Javadoc）：
 		// 不重置的话它是进程级累计，前几轮热更失败满 5 次之后，
 		// 之后所有热更都不再打详细栈。
@@ -3043,6 +3131,22 @@ public class InitFix {
 			}
 		}
 
+		// SELF 作用域的可写目标数：枚举结果含子类/匿名子类实例，只有运行时类恰好等于宿主的那部分
+		// 才能承接 SELF 字段的写入（docs/initfix/03-runtime-driver.md §4）。这个计数同时喂给
+		// reinitHint —— 否则"SELF 字段没有任何本类实例可写"会被误报成已生效。
+		// 没有 SELF 字段时整段跳过：它按实例做身份比较，纯属白付。
+		boolean hasSelfOnlyTasks = false;
+		for (FieldPatchTask task : plan.instanceTasks()) {
+			hasSelfOnlyTasks |= task.selfOnly();
+		}
+		int selfOnlyTargets = 0;
+		if (hasSelfOnlyTasks && alive != null) {
+			// host 在本方法开头已经归一为 canonical 类，这里走不重复 Class.forName 的快路径。
+			for (Object o : alive) {
+				if (scopeMatchesCanonical(host, o, RemoldReinit.Scope.SELF)) selfOnlyTargets++;
+			}
+		}
+
 		Lookup   h  = Reflect.defineHiddenClass(host, patch.bytes());
 		Class<?> pc = h.lookupClass();
 
@@ -3053,7 +3157,8 @@ public class InitFix {
 			FieldPatchTask task = plan.instanceTasks().get(i);
 			MethodHandle handle = h.findStatic(pc, task.methodName(), MethodType.methodType(void.class, host))
 			 .asType(MethodType.methodType(void.class, Object.class));
-			instanceTasks[i] = new BoundInstanceTask(task.fieldName(), task.dependencies(), handle);
+			instanceTasks[i] = new BoundInstanceTask(task.fieldName(), task.dependencies(), handle,
+			 task.selfOnly());
 			hasInstanceDependencies |= !task.dependencies().isEmpty();
 		}
 
@@ -3088,6 +3193,7 @@ public class InitFix {
 		if (plan.hasInstance() && alive != null && !alive.isEmpty()) {
 			RemoldAgent.info("Applying instance field init patch to " + host.getName()
 			                  + ", count=" + alive.size()
+			                  + (hasSelfOnlyTasks ? ", selfScopeTargets=" + selfOnlyTargets : "")
 			                  + ", fields=" + plan.instanceTasks().size());
 
 			long start = System.nanoTime();
@@ -3124,7 +3230,7 @@ public class InitFix {
 		// @RemoldReinit 生效点名（docs/initfix/03-runtime-driver.md §4）：
 		// "存量值被重置"与"新增字段被初始化"是两件不同的事，补丁日志只报"打了几个字段"分不出来。
 		String reinitLine = reinitHint(host.getName(), plan,
-		 failedFields, skippedFields, alive == null ? 0 : alive.size());
+		 failedFields, skippedFields, alive == null ? 0 : alive.size(), selfOnlyTargets);
 		if (reinitLine != null) RemoldAgent.info(reinitLine);
 
 		if (!failedFields.isEmpty() || !skippedFields.isEmpty()) {
@@ -3190,29 +3296,37 @@ public class InitFix {
 	 * @param plan            本轮补丁计划；{@link PatchPlan#reinitFields()} 为空时整行不输出
 	 * @param failedFields    运行期失败的字段
 	 * @param skippedFields   因依赖失败被放弃的字段
-	 * @param instanceTargets 实例阶段实际处理的实例数；0 表示没有存活实例
+	 * @param instanceTargets 实例阶段枚举到的实例数（{@code INCLUDE_SUBCLASSES} 字段的可写目标数）
+	 * @param selfTargets     {@code SELF} 字段的可写目标数（运行时类恰好等于宿主的实例数）；
+	 *                        SELF 字段不能用 {@code instanceTargets} 判"有没有实例可写"，
+	 *                        否则"只有子类实例存活"会被误报成已生效
 	 * @return 需要输出的整行日志；没有任何注解字段真正生效时返回 {@code null}（保持静默）
 	 */
 	static String reinitHint(
 	 String className, PatchPlan plan, Set<String> failedFields,
-	 Set<String> skippedFields, int instanceTargets) {
+	 Set<String> skippedFields, int instanceTargets, int selfTargets) {
 
 		if (plan == null || plan.reinitFields().isEmpty()) return null;
 
 		Set<String> staticNames = new HashSet<>();
 		for (FieldPatchTask task : plan.staticTasks()) staticNames.add(task.fieldName());
+		Set<String> selfOnlyNames = new HashSet<>();
+		for (FieldPatchTask task : plan.instanceTasks()) {
+			if (task.selfOnly()) selfOnlyNames.add(task.fieldName());
+		}
 
 		StringBuilder applied = new StringBuilder();
 		StringBuilder notDone = new StringBuilder();
 		for (Map.Entry<String, String> e : plan.reinitFields().entrySet()) {
-			String        field    = e.getKey();
-			boolean       isStatic = staticNames.contains(field);
-			String        why;
+			String  field    = e.getKey();
+			boolean isStatic = staticNames.contains(field);
+			int     targets  = selfOnlyNames.contains(field) ? selfTargets : instanceTargets;
+			String  why;
 			if (failedFields.contains(field)) {
 				why = "failed";
 			} else if (skippedFields.contains(field)) {
 				why = "skipped";
-			} else if (!isStatic && instanceTargets == 0) {
+			} else if (!isStatic && targets == 0) {
 				// 计划里有、但没有实例可写：说"生效"就是撒谎。
 				why = "no live instance";
 			} else {
@@ -3237,7 +3351,39 @@ public class InitFix {
 		 .append(": ").append(notDone).toString();
 	}
 
-	private record BoundInstanceTask(String fieldName, Set<String> dependencies, MethodHandle handle) { }
+	/**
+	 * 判断一个存活实例是否落在该注解字段的重置作用域内（{@code docs/initfix/03-runtime-driver.md} §4）。
+	 *
+	 * <p>纯函数：不碰堆、不写状态，供驱动层与测试直接调用。</p>
+	 *
+	 * <p><b>必须先归一宿主 Class</b>：JBR 结构性 redefine 会把静态字段里持有的 Class 引用改写成
+	 * 旧版本影子对象（同名同加载器、旧字段元数据）。影子类与 canonical 类不是同一个
+	 * {@code java.lang.Class}，直接拿它做 {@code isInstance} / 身份比较会把所有实例判成不匹配。</p>
+	 *
+	 * @param host     声明该字段的宿主类（允许是影子类，内部归一）
+	 * @param instance 堆里的存活实例
+	 * @param scope    {@link RemoldReinit.Scope#SELF} 只匹配运行时类恰好等于宿主的实例；
+	 *                 {@code INCLUDE_SUBCLASSES}（含 {@code null}）匹配宿主及其子类/匿名子类实例
+	 * @return 该实例是否应被写入；{@code null} 入参一律返回 {@code false}（fail-closed）
+	 */
+	public static boolean scopeMatches(Class<?> host, Object instance, RemoldReinit.Scope scope) {
+		if (host == null || instance == null) return false;
+		return scopeMatchesCanonical(ClassIdentity.canonicalize(host), instance, scope);
+	}
+
+	/**
+	 * {@link #scopeMatches} 的已归一快路径：调用方保证 {@code canonicalHost} 已经是 canonical 类
+	 * （例如 {@code applyPatch} 开头统一归一后的宿主），因此不再逐实例调用 {@code Class.forName}。
+	 */
+	private static boolean scopeMatchesCanonical(Class<?> canonicalHost, Object instance,
+	                                             RemoldReinit.Scope scope) {
+		if (canonicalHost == null || instance == null) return false;
+		if (scope == RemoldReinit.Scope.SELF) return instance.getClass() == canonicalHost;
+		return canonicalHost.isInstance(instance);
+	}
+
+	private record BoundInstanceTask(String fieldName, Set<String> dependencies, MethodHandle handle,
+	                                 boolean selfOnly) { }
 
 	private static void runIndependentInstanceTasks(
 	 Class<?> host, List<Object> targets, BoundInstanceTask[] tasks,
@@ -3245,6 +3391,9 @@ public class InitFix {
 		InstanceFailureBudget budget = new InstanceFailureBudget();
 		for (Object target : targets) {
 			for (BoundInstanceTask task : tasks) {
+				// SELF 作用域：枚举结果里含子类/匿名子类实例，只有恰好等于宿主的那部分可写。
+				// host 在 applyPatch 开头已归一，用快路径避免逐实例 Class.forName。
+				if (task.selfOnly() && !scopeMatchesCanonical(host, target, RemoldReinit.Scope.SELF)) continue;
 				if (budget.exhausted(task.fieldName())) {
 					budget.recordGiveUp(task.fieldName(), skippedFields, failureReasons);
 					continue;
@@ -3316,6 +3465,8 @@ public class InitFix {
 			Set<String> localSkipped = new LinkedHashSet<>();
 
 			for (BoundInstanceTask task : tasks) {
+				// SELF 作用域：子类/匿名子类实例不承接该字段的写入。
+				if (task.selfOnly() && !scopeMatchesCanonical(host, target, RemoldReinit.Scope.SELF)) continue;
 				// 熔断：该字段在本轮已连续失败多次，不再对后续实例重试。
 				if (budget.exhausted(task.fieldName())) {
 					localSkipped.add(task.fieldName());

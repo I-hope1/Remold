@@ -1043,6 +1043,36 @@ tasks.register("shadowClassProbe", JavaExec) {
 	}
 }
 
+// Item 4 red/green: @RemoldReinit(scope = SELF|INCLUDE_SUBCLASSES) instance-selection semantics
+// across annotation-only and structural redefines (agent + DCEVM, no Forge; runs in seconds).
+tasks.register("scopeReinitProbe", JavaExec) {
+	group = "verification"
+	description = "@RemoldReinit scope: SELF vs INCLUDE_SUBCLASSES on live parent/subclass instances"
+	dependsOn classes
+	dependsOn project(":core").tasks.named("shadowJar")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "ScopeReinitProbe"
+	maxHeapSize = "1g"
+	def jbrHome = (project.findProperty("p05.jbr") as String)
+		?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+	if (jbrHome != null) {
+		def javaBin = new File(jbrHome, probeIsWindows ? "bin/java.exe" : "bin/java")
+		if (javaBin.exists()) {
+			executable = javaBin.absolutePath
+			javaLauncher.set((JavaLauncher) null)
+		}
+	}
+	doFirst {
+		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		        "-XX:+IgnoreUnrecognizedVMOptions",
+		        "-XX:+AllowEnhancedClassRedefinition",
+		        "-Dremold.plugins=__probe_none__",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+		if (nativeLibPath != null) jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+	}
+}
+
 // Problem B diagnosis: Class identity across a structural redefine (agent + DCEVM, no Forge).
 tasks.register("classIdentityProbe", JavaExec) {
 	group = "verification"
@@ -1093,6 +1123,7 @@ tasks.register("probeAll") {
 	dependsOn "cacheWarmingProbe"
 	dependsOn "entityProbeToggleProbe"
 	dependsOn "shadowClassProbe"
+	dependsOn "scopeReinitProbe"
 	dependsOn "classIdentityProbe"
 	dependsOn "doubleBraceProbe"
 	dependsOn "retryBookkeepingProbe"

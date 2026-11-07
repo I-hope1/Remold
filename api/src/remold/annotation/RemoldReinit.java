@@ -57,6 +57,12 @@ import java.lang.annotation.*;
  *       恰在这一轮改了值 —— 宿主类的字节码里看不出来。这种情况无法证明"值没变"，
  *       因此照常重置（宁可多写一次，也不静默留下过期值）。想避免这种覆盖，
  *       把初值改成封闭形态，或用 {@link OnReload} 按需刷新。</li>
+ *   <li><b>作用域（{@link #scope()}）</b>：声明这个字段的存量重置要覆盖哪些存活实例。
+ *       默认 {@link Scope#INCLUDE_SUBCLASSES} 与既有行为一致（声明类及其全部子类/匿名子类实例）；
+ *       {@link Scope#SELF} 只重置运行时类<b>恰好等于</b>声明类的实例，子类实例保持原值。
+ *       字段声明在父类、而子类在初始化块里写了自己的值（或根本不该被重置）时用 {@code SELF}，
+ *       避免"父类初值被写进全部子类实例"。静态字段只有一个槽位，作用域对它没有意义：
+ *       显式写 {@code scope} 会被忽略并打一条 warn（见 {@code docs/initfix/03-runtime-driver.md} §4）。</li>
  * </ul>
  */
 @Retention(RetentionPolicy.RUNTIME)
@@ -64,6 +70,32 @@ import java.lang.annotation.*;
 public @interface RemoldReinit {
 
 	Mode mode() default Mode.OVERWRITE;
+
+	/**
+	 * 存量重置的实例作用域（{@code docs/initfix/03-runtime-driver.md} §4）。
+	 *
+	 * <p>默认保持既有行为，因此新增该元素不改变已有标注的语义。</p>
+	 */
+	Scope scope() default Scope.INCLUDE_SUBCLASSES;
+
+	/** 实例作用域：一次重置要覆盖哪些存活实例。 */
+	enum Scope {
+		/**
+		 * 只重置运行时类<b>恰好等于</b>声明类的实例。
+		 *
+		 * <p>子类/匿名子类实例保持原值。适用于字段声明在父类、但子类初始化块里有自己的赋值，
+		 * 或子类实例不应被父类初值覆盖的场景。</p>
+		 */
+		SELF,
+
+		/**
+		 * 重置声明类及其全部子类/匿名子类的存活实例（默认）。
+		 *
+		 * <p>与"父类字段标 {@code @RemoldReinit}"的既有语义一致：所有存活实例统一写成声明类的初值，
+		 * 子类初始化块里的赋值不会被重放。</p>
+		 */
+		INCLUDE_SUBCLASSES
+	}
 
 	enum Mode {
 		/**

@@ -1,0 +1,63 @@
+=== Forge ClassInfo member-sync E2E evidence ===
+label=forge-1.21.1-baseline
+date=2026-11-07T21:51:22+08:00
+git_head=5c91bdf23ac6369ba561c3f0b59df97b5169f1de
+forge=1.21.1-52.1.21 forgegradle=7.0.40 jbr=openjdk version "21.0.9" 2025-10-21
+launcher=ForgeGradle7 runServer --offline (dedicated server, official mappings)
+agent_jar=remold-agent.jar sha256=f54550364e65bb846a9ef3f97c37314232bedff7121ca7c9ce0a68ef77ad2c53
+plugin_jar=remold-plugin-forge-0.2.4.jar sha256=ecb07e279820121e2e10e598deaf84c806cd8c33b101861be425d5fcfd2fe25b
+probe_tree_sha256=d07f4a2fdb1e51d7e1b4002bb6cbb88c72cd457c4704c4069d809f742e8b4dc1
+gradle_exit=0
+--- server log (Remold + probe markers) ---
+[Remold] [Plugin] Appended plugin JAR to system search: E:\Users\ASUS\Desktop\Mods\nipx-hotswap\plugin-forge\build\libs\remold-plugin-forge-0.2.4.jar
+[Remold] [Forge] Forge & NeoForge hot-reload integration initialized (via plugin: forge)
+[Remold] [Plugin] Automatically loaded and registered plugin: forge (remold.forge.ForgeHotswapPlugin)
+[Remold] DEBUG: false
+[Remold] Redefine Mode: inject
+[Remold] Injection Blacklist: 
+[Remold] InitFix: true
+[Remold] Force Static Lambda: false
+[Remold] HotSwap Event: false
+[Remold] Force Reinit: true
+[Remold] Lambda Align: true
+[Remold] Lambda Alignment ENABLED. Warning: This may cause logical shifts if lambdas are reordered.
+[Remold] File Shake MS: 500
+[Remold] UI Hook: false
+[Remold] Cell Property Ref: false
+[Remold] Anon Align: true (strict=false, debug=false, maxPerHost=128, timeoutMs=2000, layoutGate=reject, redefineLayoutGate=reject, localClassGuard=reject)
+[Remold] Anonymous Class Alignment ENABLED. Ambiguity is resolved conservatively (never by class name).
+[Remold] Structural HotSwap Supported: true
+[Remold] [Lib] Loaded libtool from: F:\windowTmp\remold_natives\tool64.dll
+[Remold] Watch paths updated across sources:
+[Remold] Scanning files...
+[m[CI] PROBE-VERSION=forge-classinfo/1 control=E:\Users\ASUS\Desktop\Mods\nipx-hotswap\build\forge-classinfo\control
+[m> [CI] SERVER-STARTED
+  [33m[21:51:07] [ci-probe/WARN] [mixin/]: MixinEnvironment::addConfiguration is deprecated and will be removed. Use Mixins::addConfiguration instead!
+[m> [CI] MIXIN-CONFIG registered ci.mixins.json
+[CI] BASELINE d1=1 d2=0 d3=1 uniqueSeen1=123 uniqueSeen3=-1 err=none
+[CI] CHECK CI-BASE PASS d1=1 d2=0 d3=1 uniqueSeen1=123 uniqueSeen3=-1 err=none
+[CI] NEXT stage1
+[Remold] [Forge/NeoForge] Successfully acquired Mixin transformer across ClassLoader: org.spongepowered.asm.mixin.transformer.MixinTransformer
+[Remold] [Forge/NeoForge] Mixin class-info sync: ciprobe.mixin.ClassInfoTargetMixin addedFields=0, addedMethods=1
+[Remold] [Forge/NeoForge] Mixin ciprobe.mixin.ClassInfoTargetMixin reloaded; affected target(s): [ciprobe.ClassInfoTarget]
+[CI] STAGE1 d1=1 d2=1 d3=1 uniqueSeen1=123 uniqueSeen3=-1 err=none
+[CI] CHECK CI-M1 PASS new-handler-per-call-delta=1 err=
+[CI] CHECK CI-PRESERVE-1 PASS baseline-handler-per-call-delta=1 uniqueSeen1=123
+[CI] NEXT stage2
+[Remold] [DYNAMIC-REDEFINE] Successfully redefined ciprobe.ClassInfoTarget
+[Remold] [Forge/NeoForge] Target class ciprobe.ClassInfoTarget re-woven with the updated Mixin and redefined
+[Remold] [Forge/NeoForge] Mixin class-info sync: ciprobe.mixin.ClassInfoTargetSecondMixin addedFields=1, addedMethods=0
+[Remold] [Forge/NeoForge] Mixin ciprobe.mixin.ClassInfoTargetSecondMixin reloaded; affected target(s): [ciprobe.ClassInfoTarget]
+[Remold] Applying instance field init patch to ciprobe.ClassInfoTarget, count=1, fields=1
+[Remold] Instance field init patch for ciprobe.ClassInfoTarget done: fields=1, failedFields=[], skippedFields=[], elapsed=18ms
+[Remold] [DYNAMIC-REDEFINE] Successfully redefined ciprobe.ClassInfoTarget
+[Remold] [Forge/NeoForge] Target class ciprobe.ClassInfoTarget re-woven with the updated Mixin and redefined
+[CI] STAGE2 d1=1 d2=1 d3=1 uniqueSeen1=123 uniqueSeen3=456 err=none
+[CI] CHECK CI-M2 PASS new-unique-field-value=456 err=
+[CI] CHECK CI-PRESERVE-2 PASS template1-handler-delta=1 template2-handler-delta=1 uniqueSeen1=123
+[CI] RESULT-PROBE-DONE
+[CI] HALT rc=0
+--- driver facts ---
+[CI-DRIVER] phase=stage1 reload=unknown
+[CI-DRIVER] phase=stage2 reload=success
+[CI] VERDICT INVALID reasons=PRECOND-RELOAD-stage1=unknown reload={stage1=unknown, stage2=success}

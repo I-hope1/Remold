@@ -44,6 +44,8 @@
 
 ```bash
 bash tests/fabric-mixin-probe/forge-classinfo/verify-evidence.sh
+# Windows: cmd 里 `bash` 可能是 WSL（拿不到 Windows JDK），用不依赖引用的入口：
+testsabric-mixin-probeorge-classinfoerify-evidence.cmd
 ```
 
 三段互相独立的检查（全部离线、确定性）：

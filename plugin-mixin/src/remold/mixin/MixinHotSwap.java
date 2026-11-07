@@ -121,19 +121,24 @@ public final class MixinHotSwap {
 		ensureConfigsSelected(transformer);
 
 		List<String> targets = Collections.emptyList();
+		MixinClassInfoSync.SyncToken syncToken = MixinClassInfoSync.SyncToken.EMPTY;
 		try {
 			// 必须完整解析：@Inject 的 handler 方法体要从这里搬进目标类，跳过 code 会织出空方法。
 			ClassNode node = new ClassNode();
 			new ClassReader(newMixinBytes).accept(node, 0);
+			// reload 的校验阶段（MixinInfo.State.validate → MixinPreProcessorStandard.conform）
+			// 会拿新字节码里的 @Inject handler 去查 Mixin 的 ClassInfo；而 Reloaded 状态复用的是
+			// reload 之前的旧 ClassInfo。新增/改名的 handler 必须先补进元数据再 reload，
+			// 否则 reload 直接抛 "Conform error ... please restart client"，热更被迫降级为重启。
+			syncToken = MixinClassInfoSync.sync(transformer, dotClassName, node);
 			List<String> raw = transformer.reload(dotClassName, node);
 			if (raw == null || raw.isEmpty()) {
 				raw = transformer.reload(dotClassName.replace('.', '/'), node);
 			}
-			// reload 只更新 MixinInfo 的 state，其 ClassInfo 仍指向 reload 前的旧对象；
-			// 新增字段/方法因此不在元数据里，attach 阶段会 NPE。这里把新成员补进去。
-			MixinClassInfoSync.sync(transformer, dotClassName, node);
 			targets = normalize(raw);
 		} catch (Throwable t) {
+			// reload 被拒绝时撤销 reload 前补入的成员，让旧元数据保持可用。
+			MixinClassInfoSync.rollback(syncToken);
 			reportReloadFailure(dotClassName, t);
 			return true;
 		}

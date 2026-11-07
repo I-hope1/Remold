@@ -86,27 +86,23 @@ rm -f "$CTRL"/*.go
 cd "$MDK" || fail "cannot cd $MDK"
 
 # ---------------------------------------------------------- compile pass -----
-# A previous run may have javac'ed the staged templates into the watched classes directory; drop
-# the compiled output so the baseline can never start from a stale (already-staged) template.
+# Compile with javac straight into the watched directory instead of driving Gradle's compileJava:
+# an external `rm -rf` of the output dir raced Gradle's up-to-date/VFS state and intermittently left
+# the directory without classes ("has no probe classes after compile"), which silently turned a
+# real run into a harness failure. javac + a resource copy is deterministic and matches exactly what
+# ForgeGradle puts on the run classpath.
+log "compiling probe mod (javac into the watched classes dir)"
 rm -rf "$MDK/build/sourceSets/main"
-log "compiling probe mod (offline)"
-JAVA_HOME="$JBR" ./gradlew --offline -q compileJava > "$BUILD/compile.log" 2>&1 \
-  || { tail -30 "$BUILD/compile.log"; fail "compileJava failed"; }
-# A restored-from-cache or up-to-date compileJava does not always repopulate the watched directory;
-# without the probe classes the server would fail to construct the mod ("constructor 0 mods").
-if [ ! -f "$MDK/build/sourceSets/main/ciprobe/CiMod.class" ] \
-   || [ ! -f "$MDK/build/sourceSets/main/META-INF/mods.toml" ]; then
-  log "watched classes dir incomplete after compileJava; forcing a rebuild"
-  JAVA_HOME="$JBR" ./gradlew --offline -q compileJava processResources --rerun > "$BUILD/compile.log" 2>&1 \
-    || { tail -30 "$BUILD/compile.log"; fail "forced compileJava/processResources failed"; }
-fi
-[ -f "$MDK/build/sourceSets/main/ciprobe/CiMod.class" ] \
-  || fail "watched classes dir has no probe classes after compile"
-[ -f "$MDK/build/sourceSets/main/META-INF/mods.toml" ] \
-  || fail "watched classes dir has no mods.toml after compile"
+mkdir -p "$MDK/build/sourceSets/main"
 JAVA_HOME="$JBR" ./gradlew --offline -q printCompileCp 2>/dev/null | tail -1 > "$BUILD/cp.txt"
 [ -s "$BUILD/cp.txt" ] || fail "could not capture the compile classpath"
+CLASSES_OUT="$(cygpath -m "$MDK/build/sourceSets/main")"
+# shellcheck disable=SC2046
+"$JBR/bin/javac" --release 21 -proc:none -encoding UTF-8 -cp "$(cat "$BUILD/cp.txt")"   -d "$CLASSES_OUT" $(find "$MDK/src/main/java" -name '*.java')   || fail "javac of the probe sources failed"
+cp -R "$MDK/src/main/resources/." "$MDK/build/sourceSets/main/"
 log "compile classpath: $(wc -c < "$BUILD/cp.txt") bytes"
+[ -f "$MDK/build/sourceSets/main/ciprobe/CiMod.class" ]   || fail "watched classes dir has no probe classes after javac"
+[ -f "$MDK/build/sourceSets/main/META-INF/mods.toml" ]   || fail "watched classes dir has no mods.toml after the resource copy"
 
 # ------------------------------------------------------------ server run -----
 rm -f "$SERVER_LOG"
@@ -216,18 +212,23 @@ segment() { # <begin marker> <end marker>
 classify() { # <template dotted name>; the stage segment arrives on stdin
   local mixin="$1" seg
   seg="$(cat)"
-  if grep -qF "Mixin re-weaving failed; falling back to source bytecode: ciprobe.ClassInfoTarget" <<<"$seg"; then
-    echo weave-failed   # reload accepted but the target could not be re-woven: members not applied
-  elif grep -qF "Target class ciprobe.ClassInfoTarget re-woven with the updated Mixin and redefined" <<<"$seg"; then
-    echo success
-  elif grep -qF "Failed to reload Mixin $mixin;" <<<"$seg"; then
+  # Attribution answers ONE question: was the template reload attempted, and was it accepted or
+  # rejected? Whether the members actually reached the live target is the probe's job (CI-M1/CI-M2/
+  # CI-PRESERVE on business end state) — the bridge re-weaves on a worker thread, and its
+  # "re-woven ... redefined" line is emitted from that thread, so it can interleave after the next
+  # stage marker. Requiring it inside the stage window made a working run look unattributable.
+  if grep -qF "Failed to reload Mixin $mixin;" <<<"$seg"; then
     echo rejected
+  elif echo "$seg" | grep -qF "Mixin $mixin reloaded"; then
+    echo success
+  elif grep -qF "Mixin re-weaving failed; falling back to source bytecode: ciprobe.ClassInfoTarget" <<<"$seg"; then
+    echo weave-failed   # no accepted reload, but the bridge did try to re-weave the target
   elif grep -qF "Unable to read original bytecode for ciprobe.ClassInfoTarget;" <<<"$seg"; then
     echo unknown
-  elif grep -qF "Mixin $mixin reloaded" <<<"$seg"; then
-    echo unknown   # reload happened but the target was not re-woven: not attributable
   elif grep -qF "$mixin is a Mixin template whose class changed" <<<"$seg"; then
     echo unknown
+  elif grep -qF "Mixin class-info sync: $mixin" <<<"$seg"; then
+    echo unknown   # metadata sync ran but the reload verdict never reached the log
   else
     echo not-attempted
   fi

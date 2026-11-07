@@ -63,6 +63,8 @@ public class ScopeReinitProbe {
 	static Class<?> parentClass;
 
 	static final List<String> logLines = Collections.synchronizedList(new ArrayList<>());
+	/** Strong references to the scenario instances: the heap scan must find them, so they must not be GC'd. */
+	static final List<Object> KEEPALIVE = new ArrayList<>();
 
 	// ---------------------------------------------------------------- fixtures (compiled in-memory)
 
@@ -203,6 +205,9 @@ public class ScopeReinitProbe {
 		Object p = parent.getConstructor().newInstance();
 		Object a = childA.getConstructor().newInstance();
 		Object b = childB.getConstructor().newInstance();
+		KEEPALIVE.add(p);
+		KEEPALIVE.add(a);
+		KEEPALIVE.add(b);
 
 		Method value = parent.getMethod("value");
 		check(intOf(value, p) == 1 && intOf(value, a) == 1 && intOf(value, b) == 1,
@@ -236,6 +241,9 @@ public class ScopeReinitProbe {
 		Object p = parent.getConstructor().newInstance();
 		Object a = childA.getConstructor().newInstance();
 		Object b = childB.getConstructor().newInstance();
+		KEEPALIVE.add(p);
+		KEEPALIVE.add(a);
+		KEEPALIVE.add(b);
 
 		Method value = parent.getMethod("value");
 		check(intOf(value, p) == 1 && intOf(value, a) == 1 && intOf(value, b) == 1,

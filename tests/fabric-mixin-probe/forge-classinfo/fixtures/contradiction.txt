@@ -1,0 +1,14 @@
+# Synthetic fixture — NOT evidence. Self-contradictory evidence: every member check "passes"
+# while the driver saw the reload rejected. Verdict must refuse to call this green.
+=== fixture: forge-classinfo contradiction ===
+[CI] PROBE-VERSION=forge-classinfo/1
+[CI] SERVER-STARTED
+[CI] CHECK CI-BASE PASS hits1=1 hits2=0 uniqueSeen1=123 err=none
+[CI] CHECK CI-M1 PASS new-handler-hits=1 err=none
+[CI] CHECK CI-PRESERVE-1 PASS hits1=41 uniqueSeen1=123
+[CI] CHECK CI-M2 PASS uniqueSeen3=456 err=none
+[CI] CHECK CI-PRESERVE-2 PASS hits1=81 uniqueSeen1=123
+[CI] RESULT-PROBE-DONE
+[CI] HALT rc=0
+[CI-DRIVER] phase=stage1 reload=rejected
+[CI-DRIVER] phase=stage2 reload=success

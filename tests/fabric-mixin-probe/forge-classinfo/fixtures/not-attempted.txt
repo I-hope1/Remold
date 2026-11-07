@@ -1,0 +1,19 @@
+# Synthetic fixture — NOT evidence. The hot swap never reached the Mixin reload path at all
+# ("nothing happened"): the probe must not report this as a red result, Verdict must return INVALID.
+=== fixture: forge-classinfo not-attempted ===
+[CI] PROBE-VERSION=forge-classinfo/1
+[CI] SERVER-STARTED
+[CI] BASELINE hits1=1 hits2=0 uniqueSeen1=123 err=none
+[CI] CHECK CI-BASE PASS hits1=1 hits2=0 uniqueSeen1=123 err=none
+[CI] NEXT stage1
+[CI] STAGE1 hits1=41 hits2=0 uniqueSeen1=123 err=none
+[CI] CHECK CI-M1 FAIL new-handler-hits=0 err=none
+[CI] CHECK CI-PRESERVE-1 PASS hits1=41 uniqueSeen1=123
+[CI] NEXT stage2
+[CI] STAGE2 hits1=81 hits2=0 uniqueSeen3=-1 uniqueSeen1=123 err=none
+[CI] CHECK CI-M2 FAIL uniqueSeen3=-1 err=none
+[CI] CHECK CI-PRESERVE-2 PASS hits1=81 uniqueSeen1=123
+[CI] RESULT-PROBE-DONE
+[CI] HALT rc=0
+[CI-DRIVER] phase=stage1 reload=not-attempted
+[CI-DRIVER] phase=stage2 reload=not-attempted

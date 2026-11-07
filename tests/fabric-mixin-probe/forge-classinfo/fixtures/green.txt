@@ -1,0 +1,21 @@
+# Synthetic fixture — NOT evidence. Shape of a Forge run where the new template members are
+# synced into Mixin's ClassInfo before the reload, so both hot updates take effect and the
+# pre-existing members keep firing. Used by verify-evidence.sh to prove Verdict.java is not vacuous.
+=== fixture: forge-classinfo green ===
+[CI] PROBE-VERSION=forge-classinfo/1
+[CI] SERVER-STARTED
+[CI] MIXIN-CONFIG registered ci.mixins.json
+[CI] BASELINE d1=1 d2=0 d3=1 uniqueSeen1=123 uniqueSeen3=-1 err=none
+[CI] CHECK CI-BASE PASS d1=1 d2=0 d3=1 uniqueSeen1=123 uniqueSeen3=-1 err=none
+[CI] NEXT stage1
+[CI] STAGE1 d1=1 d2=1 d3=1 uniqueSeen1=123 uniqueSeen3=-1 err=none
+[CI] CHECK CI-M1 PASS new-handler-per-call-delta=1 err=none
+[CI] CHECK CI-PRESERVE-1 PASS baseline-handler-per-call-delta=1 uniqueSeen1=123
+[CI] NEXT stage2
+[CI] STAGE2 d1=1 d2=1 d3=1 uniqueSeen1=123 uniqueSeen3=456 err=none
+[CI] CHECK CI-M2 PASS new-unique-field-value=456 err=none
+[CI] CHECK CI-PRESERVE-2 PASS template1-handler-delta=1 template2-handler-delta=1 uniqueSeen1=123
+[CI] RESULT-PROBE-DONE
+[CI] HALT rc=0
+[CI-DRIVER] phase=stage1 reload=success
+[CI-DRIVER] phase=stage2 reload=success

@@ -1,0 +1,24 @@
+# Synthetic fixture — NOT evidence. Shape of a Forge run where Mixin's internal ClassInfo never
+# learns the new template members (the Forge side without member sync):
+#   stage 1 -> the new @Inject handler fails reload validation ("Conform error ... method is null"),
+#   stage 2 -> the new @Unique field is accepted on reload but the target re-weave fails and the
+#              bridge falls back to source bytes, silently dropping the woven members.
+# Used by verify-evidence.sh to prove Verdict.java still separates red from green.
+=== fixture: forge-classinfo red ===
+[CI] PROBE-VERSION=forge-classinfo/1
+[CI] SERVER-STARTED
+[CI] MIXIN-CONFIG registered ci.mixins.json
+[CI] BASELINE d1=1 d2=0 d3=1 uniqueSeen1=123 uniqueSeen3=-1 err=none
+[CI] CHECK CI-BASE PASS d1=1 d2=0 d3=1 uniqueSeen1=123 uniqueSeen3=-1 err=none
+[CI] NEXT stage1
+[CI] STAGE1 d1=1 d2=0 d3=1 uniqueSeen1=123 uniqueSeen3=-1 err=none
+[CI] CHECK CI-M1 FAIL new-handler-per-call-delta=0 err=none
+[CI] CHECK CI-PRESERVE-1 PASS baseline-handler-per-call-delta=1 uniqueSeen1=123
+[CI] NEXT stage2
+[CI] STAGE2 d1=0 d2=0 d3=0 uniqueSeen1=-1 uniqueSeen3=-1 err=NoSuchFieldError: ciUnique
+[CI] CHECK CI-M2 FAIL new-unique-field-value=-1 err=NoSuchFieldError: ciUnique
+[CI] CHECK CI-PRESERVE-2 FAIL template1-handler-delta=0 template2-handler-delta=0 uniqueSeen1=-1
+[CI] RESULT-PROBE-DONE
+[CI] HALT rc=0
+[CI-DRIVER] phase=stage1 reload=rejected
+[CI-DRIVER] phase=stage2 reload=weave-failed

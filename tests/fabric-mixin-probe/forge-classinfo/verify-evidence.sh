@@ -89,11 +89,11 @@ grep -q "ciAdded" "$HERE/mdk-overlay/src/main/java/ciprobe/mixin/ClassInfoTarget
 
 # ------------------------------------------------------- 1. discrimination -----
 # Exit codes: 0 GREEN, 1 RED, 2 INVALID. The reasons pin down *which* checks did the separating.
-expect_verdict "$HERE/fixtures/red.log"           "RED"     "CI-M1,CI-M2"
-expect_verdict "$HERE/fixtures/green.log"         "GREEN"
-expect_verdict "$HERE/fixtures/not-attempted.log" "INVALID" "PRECOND-RELOAD-stage1"
-expect_verdict "$HERE/fixtures/contradiction.log" "INVALID" "SELF-CONTRADICTION"
-if [ ! -f "$HERE/fixtures/red.log" ] || [ ! -f "$HERE/fixtures/green.log" ]; then
+expect_verdict "$HERE/fixtures/red.txt"           "RED"     "CI-M1,CI-M2"
+expect_verdict "$HERE/fixtures/green.txt"         "GREEN"
+expect_verdict "$HERE/fixtures/not-attempted.txt" "INVALID" "PRECOND-RELOAD-stage1"
+expect_verdict "$HERE/fixtures/contradiction.txt" "INVALID" "SELF-CONTRADICTION"
+if [ ! -f "$HERE/fixtures/red.txt" ] || [ ! -f "$HERE/fixtures/green.txt" ]; then
   bad "fixtures missing; the probe's discriminating power is unproven"
 fi
 

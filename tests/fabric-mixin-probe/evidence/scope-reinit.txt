@@ -1,0 +1,147 @@
+# Item 4 — @RemoldReinit(scope = SELF | INCLUDE_SUBCLASSES): probe + mutation-check evidence
+
+Date: 2026-11-07
+Branch: `agent/scope-reinit` (base `3aa774b`, worktree `build/wt-scope-reinit`)
+Runtime: JBR 25.0.2 (DCEVM — agent log `Structural HotSwap Supported: true`), Git Bash / Windows.
+No Minecraft/Fabric/Forge server involved: plain JVM + `-javaagent:remold-agent.jar` + DCEVM.
+All runs below are SECONDS-scale.
+
+Commands:
+
+```
+./gradlew :tests:test --tests ScopeReinitTest        # plain JUnit contract tests
+./gradlew :tests:scopeReinitProbe                    # agent + DCEVM probe
+```
+
+---
+
+## 1. Plain JUnit contract tests — GREEN
+
+`tests/build/test-results/test/TEST-ScopeReinitTest.xml`:
+`tests="9" skipped="0" failures="0" errors="0"`.
+
+Covers: `scope()` default = `INCLUDE_SUBCLASSES`, `mode()` default unchanged (`OVERWRITE`),
+enum members exactly `[SELF, INCLUDE_SUBCLASSES]`, annotation values readable, and the pure
+`InitFix.scopeMatches` helper (SELF exact-class / INCLUDE subclasses / unrelated / null fail-closed).
+
+---
+
+## 2. JVM probe — GREEN (`:tests:scopeReinitProbe`)
+
+Exit code 0. Verbatim probe output (framework/WARN noise removed):
+
+```
+=== ScopeReinitProbe (item 4: @RemoldReinit scope) ===
+   [PASS] instrumentation available
+   [PASS] LibTool JVMTI heap scan available (required to enumerate live instances)
+-- scenario 1: SELF on parent with two live subclass instances --
+   [PASS] baseline (before redefine): parent and both subclass instances have value=1
+   [PASS] annotation-only redefine (scope=SELF) returned true
+   [PASS] canonical Class identity stable across annotation-only redefine
+   [PASS] SELF: declaring-class instance reinitialized to the new initializer (7), was 7
+   [PASS] SELF: direct subclass instance must stay at its old value (1), was 1
+   [PASS] SELF: second subclass instance must stay at its old value (1), was 1
+-- scenario 2: default INCLUDE_SUBCLASSES --
+   [PASS] baseline (before redefine): parent and both subclass instances have value=1
+   [PASS] annotation-only redefine (default scope) returned true
+   [PASS] INCLUDE_SUBCLASSES: declaring-class instance reset to 7, was 7
+   [PASS] INCLUDE_SUBCLASSES: direct subclass instance reset to 7, was 7
+   [PASS] INCLUDE_SUBCLASSES: second subclass instance reset to 7, was 7
+-- scenario 3: structural redefine + shadow-Class identity --
+   [PASS] baseline: scenario 1 left a loaded Parent class + loader to reuse
+   [PASS] baseline: the three live instances from scenario 1 are still reachable
+   [PASS] baseline (before structural redefine): SELF state is p=7, a=1, b=1
+   [PASS] baseline (before structural redefine): added() reports -1 (field does not exist yet)
+   [PASS] structural redefine (add field 'added') returned true
+   [PASS] canonical Class identity stable across structural redefine
+   [PASS] SELF after structural redefine: declaring-class instance reset to 9, was 9
+   [PASS] SELF after structural redefine: subclass instance value untouched (1), was 1
+   [PASS] SELF after structural redefine: second subclass instance value untouched (1), was 1
+   [PASS] added field patched on declaring-class instance (5), was 5
+   [PASS] added field patched on subclass instance (5), was 5
+   [PASS] added field patched on second subclass instance (5), was 5
+   [OBS] static-field host ref after structural redefine: same=false, shadowOccurred=true
+   [PASS] static-field Class reference normalizes to the canonical Class (shadow handled)
+   [PASS] SELF via the shadow host still matches the declaring-class instance
+   [PASS] SELF via the shadow host still excludes both subclass instances
+   [PASS] INCLUDE_SUBCLASSES via the shadow host still matches subclass instances
+   [PASS] LibTool.getInstances(shadow) enumerates all 3 live instances after canonicalization (3)
+-- scenario 4: scope on a static field is ignored with a warn --
+   [PASS] baseline (before redefine): static counter=1
+[Remold] [WARN] [REINIT-SCOPE] scope has no effect on static field(s) sr.StaticHost.counter and is ignored: a static field has a single slot, so SELF vs INCLUDE_SUBCLASSES cannot select different targets.
+   [PASS] static-field redefine (scope=SELF) returned true
+   [PASS] static @RemoldReinit field is still reinitialized to 3 (scope ignored), was 3
+   [PASS] exactly one warn line for the meaningless static scope (before=0, after=1)
+   [PASS] the warn line names the offending static field sr.StaticHost.counter
+=== SUMMARY: passed=35, failed=0 ===
+```
+
+Observed facts (not inference):
+- SELF wrote only the declaring-class instance; both subclass instances kept their pre-redefine value,
+  both for the annotation-only redefine (1→7) and for the structural redefine (7→9).
+- The newly added field (`added = 5`) was still patched on parent **and** subclass instances in the
+  same structural redefine — SELF narrows the old field's targets without disabling added-field patching.
+- JBR rewrote the probe's static `Class` field to an old-version shadow Class
+  (`shadowOccurred=true`); `ClassIdentity.canonicalize(shadow) == canonical`, and `scopeMatches(shadow, …)`
+  still selects exactly the declaring-class instance. `LibTool.getInstances(shadow)` returns all 3
+  live instances after canonicalization (0 without it — see `shadowClassProbe`).
+- A `scope` element on a static field produced exactly one `[REINIT-SCOPE]` warn and the static field
+  was still reinitialized (scope ignored).
+
+---
+
+## 3. Mutation check — RED then GREEN
+
+Goal: prove the SELF assertions actually depend on the exact-class filter
+(`instance.getClass() == canonical`), not on some unrelated signal.
+
+Mutation applied to `core/src/remold/ref/InitFix.java` (`InitFix.scopeMatchesCanonical`), nothing else:
+
+```diff
+-		if (scope == RemoldReinit.Scope.SELF) return instance.getClass() == canonicalHost;
++		if (scope == RemoldReinit.Scope.SELF) return canonicalHost.isInstance(instance); // MUTATION: exact-class filter removed
+```
+
+(The mutated branch lives in `InitFix.scopeMatchesCanonical`; the public `InitFix.scopeMatches`
+delegates to it, so both the driver path and the probe's shadow-host assertions are affected.)
+
+Pre-mutation `sha256(InitFix.java) = af8df0d2e2425343a0975165c7591c7b3921f0e26a637d6ffef3d402131f0c82`
+(file restored byte-identically afterwards; hash re-checked, and `grep -c MUTATION` = 0).
+
+`./gradlew :tests:scopeReinitProbe` under the mutation: **exit code 1**, `passed=29, failed=6`:
+
+```
+   [FAIL] SELF: direct subclass instance must stay at its old value (1), was 7
+   [FAIL] SELF: second subclass instance must stay at its old value (1), was 7
+   [FAIL] baseline (before structural redefine): SELF state is p=7, a=1, b=1
+   [FAIL] SELF after structural redefine: subclass instance value untouched (1), was 9
+   [FAIL] SELF after structural redefine: second subclass instance value untouched (1), was 9
+   [FAIL] SELF via the shadow host still excludes both subclass instances
+=== SUMMARY: passed=29, failed=6 ===
+```
+
+All six failures are exactly "subclass instance was overwritten with the parent initializer", i.e.
+removing the exact-class filter turns the probe red for the intended reason. After restoring the
+implementation the same command is GREEN again (`passed=35, failed=0`, exit 0, run #2 above).
+
+Negative/control coverage in the probe itself:
+- `baseline (before redefine)` assertions confirm the old value was observable **before** the redefine
+  (no "already 7" false positive).
+- Scenario 2 (`INCLUDE_SUBCLASSES`) stays green under the mutation — it is the positive control that
+  subclass instances *can* be written when the scope asks for it (so scenario 1's green is not
+  "subclass instances are simply never enumerated").
+- Scenario 3's added-field assertions stay green under the mutation, isolating the failure to the
+  old-field exact-class filter.
+
+---
+
+## 4. Scope of this evidence
+
+- Observed: the above probe/JUnit runs on JBR 25.0.2 DCEVM (Windows, Git Bash) with the current
+  worktree bytes; mutation check recorded above.
+- Inferred / not covered here: other JBR versions (17/21) and other DCEVM distributions are not
+  exercised by this evidence file; the mechanism is JVM-agnostic (`getClass()` identity + JVMTI
+  enumeration) but the shadow-Class rewrite is a JBR behaviour verified separately by
+  `:tests:classIdentityProbe` / `:tests:shadowClassProbe`.
+- No Minecraft/Fabric/Forge end-to-end run was performed for this item; item 4 is a plain-JVM
+  contract and its probe is the acceptance surface.

@@ -1,0 +1,124 @@
+ITEM 5 EVIDENCE - sourceBytecodeCache real-path matrix + LayoutGate reject -> recover E2E
+====================================================================================================
+
+Branch:  agent/cache-and-layout-recovery (based on main @ 3aa774b)
+Scope:   probe 5A (cache matrix), probe 5B (layout reject -> next-round recover), product bug fix,
+         docs/acceptance manual checklist, probeAll wiring.
+Runtime: DCEVM: JBR-21.0.9+1-1163.86-jcef at C:/Users/ASUS/.jdks/JBR-21
+         build JDK: JBR-25.0.2+1-329.72-nomod (gradle 9.7.1)
+Rule:    every probe below is a pure-JVM JavaExec / JUnit run. No Minecraft/Fabric/Forge server,
+         no 120s polling. Each probe process finishes in a few seconds (see the Gradle BUILD lines).
+
+HOW TO REPRODUCE
+  ./gradlew :tests:cacheSourceMatrixProbe    -Pp05.jbr=C:/Users/ASUS/.jdks/JBR-21
+  ./gradlew :tests:layoutRejectRecoverProbe  -Pp05.jbr=C:/Users/ASUS/.jdks/JBR-21
+  ./gradlew :tests:test --tests SourceBytecodeCacheMatrixTest --tests remold.HotswapSkipSummaryTest
+
+====================================================================================================
+PART A - sourceBytecodeCache real-path matrix  (probe: tests/src/CacheSourceMatrixProbe.java)
+====================================================================================================
+
+Path exercised: the real agent installs AnnotationTransformer (premain) and the probe drives real
+Instrumentation.redefineClasses. Fixtures are compiled in memory; a registered, then removed,
+BytecodeTransformerBridge plays the Mixin weave role (adds a synthetic field).
+
+--- probe output (green) ---
+   [PASS] P0 instrumentation is available (must run with -javaagent remold-agent.jar)
+   [PASS] P0 enhanced class redefinition is enabled (weave step adds a field; use JBR/DCEVM)
+   [PASS] M1 precondition: the fixture runs v1
+   [PASS] M1 first load writes the source bytes into sourceBytecodeCache
+   [PASS] M1 read API returns the recorded source bytes
+   [PASS] M1 first load also seeds the runtime baseline with the same bytes (nothing woven yet)
+   [PASS] M2 precondition: the v2 bytes differ from v1
+   [PASS] M2 redefine took effect (business end: the live instance runs the v2 body)
+   [PASS] M2 ordinary redefine updates sourceBytecodeCache to the NEW bytes
+   [PASS] M2 read API returns the new source bytes
+   [PASS] M2 runtime baseline equals the new bytes while no weaver is registered
+   [PASS] M3 woven redefine took effect (business end: the live instance runs the v3 body)
+   [PASS] M3 sourceBytecodeCache keeps the ORIGINAL (pre-weave) new bytes
+   [PASS] M3 runtime baseline differs from the source bytes (the bridge did weave)
+   [PASS] M3 the woven field exists only in the runtime baseline, never in the source baseline
+   [PASS] M3 getSourceBytecode reads the pre-weave bytes
+   [PASS] M3 getRuntimeBytecode reads the woven bytes
+   [PASS] M3 MixinHotSwap.readOriginalBytes falls back to the pre-weave source bytes (in-memory class: no disk/resource copy exists)
+   [PASS] M4 precondition: the two loaders carry different bytes for the same binary name
+   [PASS] M4 precondition: each loader really runs its own version
+   [PASS] M4 the second loader's first load does NOT overwrite the source bytes recorded for the first loader
+   [PASS] M4 the runtime baseline also keeps the first loader's bytes (putIfAbsent)
+   [OBS] cache key is the dot class name only: getSourceBytecode("csmcache.Multi") returns loader-A bytes even when asked about loader-B's class. This probe asserts only that there is no cross-loader OVERWRITE; the name-keyed read side is a documented limitation (see PendingAlignedMultiLoaderProbe).
+   [PASS] M4 the read API stays on the first recorded bytes (name-keyed contract, no overwrite)
+
+=== SUMMARY: passed=23, failed=0 ===
+
+--- JUnit half (runs in :tests:test WITHOUT a JBR) ---
+tests/src/SourceBytecodeCacheMatrixTest.java - drives the same AnnotationTransformer#transform
+first-load / external-redefine / weave / multi-loader branches without a JVM redefine.
+Result: BUILD SUCCESSFUL — SourceBytecodeCacheMatrixTest tests=1/skipped=0/failures=0;
+        HotswapSkipSummaryTest tests=10/skipped=0/failures=0 (tests/build/test-results/test).
+
+--- contract matrix ---
+M1 first class load writes source bytes ......................... PASS
+M2 ordinary redefine updates source bytes + read API ........... PASS
+M3 weave keeps ORIGINAL pre-weave source bytes ................. PASS (runtime baseline = woven)
+M4 multi-ClassLoader same-name no cross-loader overwrite ....... PASS (putIfAbsent; name-keyed read limitation recorded as [OBS])
+
+PART A MUTATION CHECKS (red -> revert -> green)
+
+A1: remove the first-load source write
+  mutation (git diff):
+    diff --git a/core/src/remold/AnnotationTransformer.java b/core/src/remold/AnnotationTransformer.java
+    index 006a42f..3e695fc 100644
+    --- a/core/src/remold/AnnotationTransformer.java
+    +++ b/core/src/remold/AnnotationTransformer.java
+    @@ -283,7 +283,8 @@ public class AnnotationTransformer implements ClassFileTransformer {
+     				RemoldAgent.sourceBytecodeCache.put(dotClassName, classfileBuffer);
+     			} else {
+     				bytecodeCache.putIfAbsent(dotClassName, resultBytes);
+    -				RemoldAgent.sourceBytecodeCache.putIfAbsent(dotClassName, classfileBuffer);
+    +				// MUTATION A1: first-load source write removed
+    +				// RemoldAgent.sourceBytecodeCache.putIfAbsent(dotClassName, classfileBuffer);
+     			}
+     		}
+     		return modified ? bytes : null;
+  probe result: exit 1, === SUMMARY: passed=19, failed=4 ===
+       [FAIL] M1 first load writes the source bytes into sourceBytecodeCache
+       [FAIL] M1 read API returns the recorded source bytes
+       [FAIL] M4 the second loader's first load does NOT overwrite the source bytes recorded for the first loader
+       [FAIL] M4 the read API stays on the first recorded bytes (name-keyed contract, no overwrite)
+  JUnit result: exit 1 -> 1 test completed, 1 failed
+    SourceBytecodeCacheMatrixTest > sourceCacheMatrix() FAILED
+    > Task :tests:test FAILED
+    BUILD FAILED in 4s
+  revert  -> cacheSourceMatrixProbe green again (23/0).
+
+A2: loader isolation removed (sourceBytecodeCache.putIfAbsent -> put)
+  mutation (git diff):
+    diff --git a/core/src/remold/AnnotationTransformer.java b/core/src/remold/AnnotationTransformer.java
+    index 006a42f..48400f2 100644
+    --- a/core/src/remold/AnnotationTransformer.java
+    +++ b/core/src/remold/AnnotationTransformer.java
+    @@ -283,7 +283,8 @@ public class AnnotationTransformer implements ClassFileTransformer {
+     				RemoldAgent.sourceBytecodeCache.put(dotClassName, classfileBuffer);
+     			} else {
+     				bytecodeCache.putIfAbsent(dotClassName, resultBytes);
+    -				RemoldAgent.sourceBytecodeCache.putIfAbsent(dotClassName, classfileBuffer);
+    +				// MUTATION A2: loader isolation removed (putIfAbsent -> put)
+    +				RemoldAgent.sourceBytecodeCache.put(dotClassName, classfileBuffer);
+     			}
+     		}
+     		return modified ? bytes : null;
+  probe result: exit 1, === SUMMARY: passed=21, failed=2 ===
+       [FAIL] M4 the second loader's first load does NOT overwrite the source bytes recorded for the first loader
+       [FAIL] M4 the read API stays on the first recorded bytes (name-keyed contract, no overwrite)
+  JUnit result: exit 1 -> 1 test completed, 1 failed
+  revert  -> cacheSourceMatrixProbe green again (23/0).
+
+====================================================================================================
+EVIDENCE INDEX / ARTIFACTS
+====================================================================================================
+
+tests/src/CacheSourceMatrixProbe.java                   probe 5A (real agent + real redefine)
+tests/src/SourceBytecodeCacheMatrixTest.java            JUnit half of 5A (check-safe, no JBR)
+tests/build.gradle                                      task cacheSourceMatrixProbe; added to probeAll, NOT to check
+tests/fabric-mixin-probe/evidence/cache-layout-recovery.txt this file
+

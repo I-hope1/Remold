@@ -144,6 +144,26 @@ wait_log() { # <fixed string> <seconds> <what>
   return 1
 }
 
+wait_attribution() { # <log byte offset> <seconds> <mixin>
+  # The template reload is handled by a worker thread: its verdict line ("re-woven ... redefined",
+  # "Failed to reload Mixin ...", "re-weaving failed") can land AFTER the probe has already measured
+  # the stage. Wait for a post-offset verdict line before moving on, otherwise the attribution
+  # window closes too early and a successful stage degrades to "unknown".
+  local offset="$1" seconds="$2" mixin="$3" i=0
+  while [ "$i" -lt "$seconds" ]; do
+    local tail_text
+    tail_text="$(tail -c +"$offset" "$SERVER_LOG" 2>/dev/null)"
+    if grep -qF "Target class ciprobe.ClassInfoTarget re-woven with the updated Mixin and redefined" <<<"$tail_text"        || grep -qF "Mixin re-weaving failed; falling back to source bytecode: ciprobe.ClassInfoTarget" <<<"$tail_text"        || grep -qF "Failed to reload Mixin $mixin;" <<<"$tail_text"        || grep -qF "Unable to read original bytecode for ciprobe.ClassInfoTarget;" <<<"$tail_text"; then
+      return 0
+    fi
+    if ! kill -0 "$GRADLE_PID" 2>/dev/null; then break; fi
+    sleep 1
+    i=$((i + 1))
+  done
+  log "WARN no reload attribution for $mixin after ${i}s (stage may be measured before the bridge reported)"
+  return 1
+}
+
 wait_log "[CI] NEXT stage1" 480 "server start + baseline weave" || fail "probe never reached stage 1; see $SERVER_LOG" 3
 log "baseline woven; stage 1 = new @Inject handler"
 
@@ -161,14 +181,18 @@ stage_template() { # <template-class-name> <stage-source-file> <stage>
 }
 
 # stage 1: the target's first template gains a NEW @Inject handler method
+OFF_STAGE1="$(wc -c < "$SERVER_LOG")"
 stage_template ClassInfoTargetMixin ClassInfoTargetMixin.v2.java stage1
 wait_log "[CI] STAGE1 d1=" 300 "stage 1 measurement" || fail "stage 1 measurement never completed" 5
+wait_attribution "$OFF_STAGE1" 180 ciprobe.mixin.ClassInfoTargetMixin || true
 log "stage 2 = new @Unique field on the second template"
 
 # stage 2: a second template on the same target gains a NEW @Unique field (separate template, so
 # the bridge's once-per-template failure report can attribute each stage on its own)
+OFF_STAGE2="$(wc -c < "$SERVER_LOG")"
 stage_template ClassInfoTargetSecondMixin ClassInfoTargetSecondMixin.v2.java stage2
 wait_log "[CI] STAGE2 d1=" 300 "stage 2 measurement" || fail "stage 2 measurement never completed" 6
+wait_attribution "$OFF_STAGE2" 180 ciprobe.mixin.ClassInfoTargetSecondMixin || true
 
 wait_log "[CI] RESULT-PROBE-DONE" 120 "probe completion" || true
 for _ in $(seq 1 90); do kill -0 "$GRADLE_PID" 2>/dev/null || break; sleep 1; done
@@ -209,8 +233,8 @@ classify() { # <template dotted name>; the stage segment arrives on stdin
   fi
 }
 
-STAGE1_RELOAD="$(segment "[CI] NEXT stage1" "[CI] STAGE1 d1=" | classify ciprobe.mixin.ClassInfoTargetMixin)"
-STAGE2_RELOAD="$(segment "[CI] NEXT stage2" "[CI] STAGE2 d1=" | classify ciprobe.mixin.ClassInfoTargetSecondMixin)"
+STAGE1_RELOAD="$(segment "[CI] NEXT stage1" "[CI] NEXT stage2" | classify ciprobe.mixin.ClassInfoTargetMixin)"
+STAGE2_RELOAD="$(segment "[CI] NEXT stage2" "RESULT-PROBE-DONE" | classify ciprobe.mixin.ClassInfoTargetSecondMixin)"
 log "reload attribution: stage1=$STAGE1_RELOAD stage2=$STAGE2_RELOAD"
 
 # -------------------------------------------------------------- evidence -----

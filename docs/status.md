@@ -7,9 +7,9 @@
 
 | 审计元数据项 | 内容与规格说明 |
 |:---|:---|
-| **基准提交 (Baseline Commit)** | `a16fdc0` (分支: `main`，含 ClassInfo 成员同步、SSOT 收敛、Forge 1.21.1 与 NeoForge 21.1 红→绿证据合流；`v0.2.4` 发布提交见 git log) |
-| **发布说明** | [`releases/v0.2.4.md`](releases/v0.2.4.md) |
-| **最后更新时间** | 2026-11-07 |
+| **基准提交 (Baseline Commit)** | `d2f6446` (分支: `main`，`v0.2.5` 发布前基线；发布提交见 git log) |
+| **发布说明** | [`releases/v0.2.5.md`](releases/v0.2.5.md) |
+| **最后更新时间** | 2026-11-07（v0.2.5 封板） |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |
 | **更新触发条件** | 任何合入包含特性落地、架构偏离、安全门调整、测试基线变更或发现已知缺陷/残余风险的 PR/commit 时，必须同步原子化更新本文件。提交时由作者/维护者更新基准哈希。 |
 | **管辖范围与边界声明** | 本状态表权威管辖：<br>1. **匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)**（[`docs/topology/`](topology/)）<br>2. **存量初始化修复器 (InitFix / Legacy Instance & Static Reinitialization)**（[`docs/initfix/`](initfix/)）<br>3. **物理内存偏移稳定性与第三方缓存驱逐 (Physical Memory Offset Stability & Reflection Cache Eviction)**（[`docs/offset/`](offset/)）<br>*边界与后续治理声明*：同属字节码重映射体系的 `LambdaAligner`（Lambda 表达式对齐器）以及 Mindustry UI 胶水层（`CellPropertyRef` / 动态参数表达式指纹），其实现状态当前由各自单元测试覆盖（`CellHelperTest` 6 场景持续全绿、`LambdaAlignerTest` 等）；它们的详细状态审计矩阵尚未并入本总表，计划在下一轮治理中统一建立验收标准并纳入。 |
@@ -92,13 +92,14 @@
 | NeoForge 端到端 | 🔶 | 与 Forge 共用 `ModLauncherMixinBridge` / `ForgeMixinHotSwap` / `ForgeClassInfoSync` | **未验证**：本轮只有 Forge 1.21.1 真机证据，NeoForge 无运行期证据（候选清单「NeoForge Mixin 端到端验证」仍开放） |
 
 
-## 0.4 v0.2.5 收敛与 NeoForge 实证（2026-11-07，未发布）
+## 0.4 v0.2.5 ClassInfo 同步收敛与三端实证（2026-11-07）
 
 | 修复 / 变更 | 状态 | 代码位置 | 验收证据 |
 |:---|:---:|:---|:---|
 | ClassInfo 成员同步的**双实现**（Fabric `MixinClassInfoSync` / Forge `ForgeClassInfoSync` 各自一套算法）收敛为单一引擎；两侧只留薄适配 | ✅ | `core/src/remold/reflect/ClassInfoMemberSync.java`（引擎）；`plugin-mixin/src/remold/mixin/MixinClassInfoSync.java`、`plugin-forge/src/remold/forge/ForgeClassInfoSync.java`（薄适配） | 引擎契约 `ClassInfoMemberSyncTest` 5/5（含**新增**「半程失败回滚」用例——旧 Fabric 实现在该用例下会残留已补入成员）；Fabric 适配器降级 `MixinClassInfoSyncTest` 2/2；Forge 跨 ClassLoader 接线 `ForgeClassInfoSyncTest` 4/4；全量 JUnit 469 项 0 skipped；变异检查：反向应用实现 diff → 用例变红（`mut-20261107143729-7c17`，已恢复）；**真实 Forge 1.21.1 回归**：重构后同一 E2E `VERDICT GREEN`（`tests/fabric-mixin-probe/forge-classinfo/evidence/forge-1.21.1-after-ssot-refactor.txt`） |
 | NeoForge 21.1（ModLauncher 11.0.5 + sponge-mixin 0.16.4）Mixin 模板热更：新增 `@Inject` handler / 新增 `@Unique` 字段，**走加载器原生 `[[mixins]]` 注册** | ✅ | `plugin-forge` 现有 `ForgeMixinHotSwap` / `ForgeClassInfoSync`（薄适配）；探针 `tests/neoforge-mixin-probe/` | NeoForge **21.1.265**（MC 1.21.1，ModDevGradle 2.0.148，Gradle 8.12，JBR 21）：红基线（禁用同步的 plugin jar）`VERDICT RED`——stage1 reload 被拒 `Conform error ... ClassInfo$Method.isUnique() ... "method" is null`，stage2 `re-weaving failed`；修复后 `VERDICT GREEN`——日志正向出现 `Mixin class-info sync: ... addedMethods=1`（stage1）与 `addedFields=1`（stage2），业务终局：新 handler 每调用 +1、新 `@Unique` 读到初值 456、既有成员保持；`mixin_registration=neoForge-native META-INF/neoforge.mods.toml [[mixins]]`，全程无 `MixinEnvironment::addConfiguration` 手动注册；判定器 6 个合成 fixture（含 degraded / manual-registration 违规样本）自证判定力，验收 `verify-evidence.cmd` exit 0；变异检查：回退 `Verdict` 判定逻辑 → 验收 exit 1（`mut-20261107151319-f69e`）。证据 `tests/neoforge-mixin-probe/evidence/neoforge-21.1-{baseline-red,after-fix}.txt` |
 | NeoForge 深反射的 JPMS 边界 | 🔶 | 产品侧诊断：`ClassInfoMemberSync` / `ModLauncherMixinBridge` 在访问被拒时打印精确 `--add-opens` 参数 | **已观测**：NeoForge 21.1 dev 运行时（`ModDevGradle runServer`）全程无 `InaccessibleObjectException`，`add_opens=0` 也能完成深反射（sponge-mixin 在 legacy classpath，不在 `-p` 模块路径）。**未验证**：生产 installer 启动路径（`unix_args.txt`）、NeoForge 26.x（FML 10+，无 ModLauncher）——那两处的模块归属必须重测，`--add-opens` 要求不得从 dev 运行外推 |
+| Fabric 1.21.1（KnotServer）SSOT 重构后回归 | ✅ | `plugin-mixin` `MixinClassInfoSync`（薄适配）+ core 引擎 | 既有 `@Inject` 自演化探针**原样重跑**（未改探针）：`RESULT PASS failures=[]`；A2 取消标志演化、B2 handler 换目标方法、C2 **新增 `@Inject` handler**、C3 再移除该 handler 全部 PASS；日志出现 `[Mixin] Mixin class-info sync: ...EvoBMixin addedMethods=1` 与 `...EvoCMixin addedMethods=1`，无 `Conform error`；证据 `tests/fabric-mixin-probe/evidence/inject-evolution-after-ssot.txt`（agent sha256 `f6225c68…`、plugin sha256 `956b5a10…`） |
 | NeoForge 26.x / FML 10 代际（无 ModLauncher） | ⬜ | — | 产物级已确认断裂（`neoforge-26.1.2.126` 库清单 `cpw.mods:*` 为 0、main class `net.neoforged.fml.startup.Client`）；当前跨 ClassLoader 桥按 ModLauncher 语义实现，**未适配、未验证**；候选清单已登记 |
 
 
@@ -264,6 +265,8 @@
 | ~~**NeoForge Mixin 端到端验证（MDK 探针）**~~ | 已完成（限 21.1 dev） | `tests/neoforge-mixin-probe/`；详见 §0.4 | NeoForge 21.1.265 dev `runServer` 红→绿（原生 `[[mixins]]`）；**生产 installer 启动路径与 26.x 代际仍开放**（见下两行） |
 | **NeoForge 26.x / FML 10 代际适配** | P1 | `plugin-forge` `ModLauncherMixinBridge` / `ForgeMixinHotSwap`；FML 11.x 源码与 `net.neoforged.fml.startup.*` 入口 | NeoForge 26.x 已移除 ModLauncher（库清单无 `cpw.mods:*`，入口 `net.neoforged.fml.startup.Client`），现有跨 ClassLoader 定位逻辑不适用。验收：26.x dev `runServer` 上定位 Mixin 织入器、重织入、模板热更、`[[mixins]]` 注册各一条真机证据 |
 | **NeoForge 生产 installer 启动路径验证** | P2 | 探针 | dev 运行（ModDevGradle 目录 classpath）已证；生产 installer（`unix_args.txt`、模块层/named module 归属可能不同）未证——JPMS `--add-opens` 需求必须在生产路径重测 |
+
+> **架构指引（v0.2.5 发版备忘，仅文档）**：后续若在命名模块层（如 `MC-BOOTSTRAP`）真的触发模块封装限制，**优先**由 Agent 自身在运行期用 `Instrumentation.redefineModule(ClassInfo.class.getModule(), extraOpens, …)` 补 opens，把命令行 `--add-opens` 诊断降级为兜底手段；不要把它当作首要修复。落地前需要两个前提证据：(1) 目标 JVM（JBR 21/25）上 `redefineModule` 对该模块确实生效（本仓库已有的「运行期破壁」先例是 `PackageUnsealer` 经 `IMPL_LOOKUP`/VarHandle 解除 Package 密封，可作为同类手段的可行性参照，但不是 `redefineModule` 本身的证据）；(2) `redefineModule` 生效后 `ClassInfo` 深反射与 `reload` 全链路在真机上红→绿（不能只断言 `isOpen` 返回 true）。
 
 ### 4.2 技术债与死代码消除清单 (Tech Debt & Code Cleanup)
 

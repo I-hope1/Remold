@@ -5,40 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.5] - 2026-11-07
 
 ### Added
-- Single Mixin `ClassInfo` member-sync engine `core/src/remold/reflect/ClassInfoMemberSync.java`:
-  both plugin-mixin (Fabric) and plugin-forge (Forge/NeoForge) are now thin adapters. The engine builds
-  its rollback handle before mutating the member sets, so a half-way failure rolls back on both sides
-  (the Fabric adapter previously leaked the members it had already added).
-- `tests/neoforge-mixin-probe/`: real NeoForge 21.1 dedicated-server E2E (`ModDevGradle runServer`,
-  MC 1.21.1) whose Mixin config is registered by the loader itself via the native
-  `META-INF/neoforge.mods.toml` `[[mixins]]` path - no manual `MixinEnvironment.addConfiguration`.
+- Forge/NeoForge: newly declared `@Mixin` members (an `@Inject` handler method, a `@Unique` field)
+  now hot-swap instead of demanding a restart. `plugin-forge` adds them to the `ClassInfo` that
+  `MixinInfo.reloadMixin` reuses **before** `IMixinTransformer.reload` and rolls them back when the
+  reload is rejected; every member lookup is resolved against the host ClassLoader's own
+  `FieldNode`/`MethodNode` types, so a stale agent-side ASM copy cannot be matched.
+- `core` `remold.reflect.ClassInfoMemberSync`: one shared member-sync engine. `plugin-mixin`
+  (Fabric) and `plugin-forge` (Forge/NeoForge) are now thin adapters (type erasure + log prefix);
+  the engine builds its rollback handle before mutating the member sets, so a half-way failure rolls
+  back on **both** sides.
+- Real-container E2E probes for the above: `tests/fabric-mixin-probe/forge-classinfo/` (Forge
+  1.21.1) and `tests/neoforge-mixin-probe/` (NeoForge 21.1, Mixin config registered through the
+  loader's native `META-INF/neoforge.mods.toml` `[[mixins]]` path). Both use a witness-based
+  `Verdict` whose discriminating power is pinned by synthetic fixtures (red / green / not-attempted /
+  self-contradictory / degraded / manual-registration).
 - JPMS diagnostics: when the host ships Mixin as a named module without an opens edge, the sync path
-  and the re-weave bridge now report the exact `--add-opens org.spongepowered.mixin/...=ALL-UNNAMED`
+  and the re-weave bridge report the exact `--add-opens org.spongepowered.mixin/...=ALL-UNNAMED`
   argument instead of a bare reflective failure.
+
+### Changed
+- `plugin-mixin` `MixinClassInfoSync` and `plugin-forge` `ForgeClassInfoSync` are thin adapters over
+  the shared engine (previously two independent implementations of the same algorithm).
 
 ### Fixed
 - Fabric `MixinClassInfoSync`: a failure between the field phase and the method phase leaked the
-  already-added members (the rollback handle was built only after both phases succeeded). The shared
-  engine now rolls back what was already added; covered by `ClassInfoMemberSyncTest`.
-- `plugin-forge` `ForgeClassInfoSync`: Mixin `ClassInfo` member sync across ModLauncher's
-  ClassLoader boundary. Newly declared `@Mixin` fields/methods are added to the same `ClassInfo`
-  instance **before** `IMixinTransformer.reload` and rolled back when reload is rejected; every
-  member lookup is resolved against the host ClassLoader's own `FieldNode`/`MethodNode` types, so a
-  stale agent-side ASM copy cannot be matched.
-- `tests/fabric-mixin-probe/forge-classinfo/`: real Forge 1.21.1 dedicated-server E2E for the above
-  (stage 1 adds an `@Inject` handler method, stage 2 adds a `@Unique` field), with a witness-based
-  `Verdict` whose discriminating power is pinned by red / green / not-attempted / self-contradictory
-  fixtures (`verify-evidence.sh`).
+  already-added members (the rollback handle was built only after both phases succeeded). Covered by
+  `ClassInfoMemberSyncTest#halfWayFailureRollsBackWhatWasAlreadyAdded`.
+- Forge/NeoForge: adding an `@Inject` handler or a `@Unique` field to an existing `@Mixin` was
+  rejected at reload (`Conform error ... please restart client`, then a
+  `ClassInfo$Method.isUnique()` NPE) because the new members were invisible to the conform check.
 
-### Fixed
-- Forge/NeoForge: adding an `@Inject` handler method or a `@Unique` field to an existing `@Mixin`
-  template was rejected at reload (`Conform error ... please restart client`, followed by a
-  `ClassInfo$Method.isUnique()` NPE) because `MixinInfo.reloadMixin` reuses the **pre-reload**
-  `ClassInfo` and the new members were invisible to its conform check. Forge/NeoForge now hot-swap
-  those changes instead of demanding a restart; Fabric parity with `MixinClassInfoSync`.
+### Notes
+- Verified end to end on Forge 1.21.1 and NeoForge **21.1.265** (ModLauncher 11.0.5,
+  sponge-mixin 0.16.4) plus the Fabric 1.21.1 probe. **NeoForge 26.x / FML 10+** (ModLauncher
+  removed) and the NeoForge **production installer** launch path are explicitly unverified; a
+  `--add-opens` requirement may apply there and must be re-tested (see `docs/status.md` §0.4 and
+  `docs/neoforge/01-loader-and-classinfo-boundary-audit.md`).
 
 ## [0.2.4] - 2026-11-07
 

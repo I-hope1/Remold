@@ -1,0 +1,67 @@
+=== @Inject SELF-evolution, Fabric 1.21.1 end-to-end — AFTER the ClassInfo SSOT convergence ===
+date: 2026-11-07T23:43:25+08:00
+git_head: d2f64464337775ff948f9e425747aa4161d82c4a (main, ClassInfoMemberSync shared engine)
+purpose: re-run the existing Fabric probe unchanged after plugin-mixin/MixinClassInfoSync became a thin
+         adapter over core remold.reflect.ClassInfoMemberSync, so Fabric is backed by fresh real-container
+         evidence (Forge 1.21.1 and NeoForge 21.1 were re-run in the same cycle).
+agent_jar: remold-agent.jar sha256=f6225c68decb38258fa7048777473b030c8535190d20eba70e081edfb841ddf5
+plugin_jar: remold-plugin-mixin-0.2.4.jar sha256=956b5a10b8cc3010b2589ce6f69e5c89ebeb65469060c8559bd06d9e881b8bbe
+gradle_script_plugin: mavenLocal io.github.i-hope1.remold 0.2.4 (built from this repo's gradle-plugin sources)
+minecraft: 1.21.1  loader: Fabric 0.16.9  mixin: sponge-mixin 0.15.4+mixin.0.8.7 Service=Knot/Fabric Env=SERVER
+jvm: JBR 21.0.9 (DCEVM, -XX:+AllowEnhancedClassRedefinition)
+launcher: real net.fabricmc.loader.impl.launch.knot.KnotServer --nogui with -javaagent
+stages: A2 cancellable evolution | B2 target-method switch | C2 add @Inject handler | C3 remove it
+scenario of interest: C2/C3 = newly added/removed @Inject handler on an existing @Mixin (ClassInfo member sync)
+--- evo/summary-normal.txt (extract) ---
+[EVO] WAIT-STAGE1
+[EVO] PASS A2 A returns CANCELLED (generated conditional return active)
+[EVO] PASS A2 v2 hook fires exactly once
+[EVO] PASS A2 old v1 hook no longer fires
+[EVO] applied stageA2-A: len=1655 sha256=0512e31adbae92129f4963335d9d897f613ce29f81f483140706e3b2ea08f2ef
+[EVO] PASS A2 applied bytes contain the CANCELLED constant
+[EVO] PASS A2 applied bytes contain the isCancelled conditional-return call
+[EVO] PASS A2 applied bytes drop the stale v1 hook
+[EVO] PASS A2 unrelated input: B still v1 on methodOne
+[EVO] PASS A2 unrelated input: C still only hookOne
+[EVO] PASS A2 no LAYOUT-REJECT
+[EVO] STAGE-A2-DONE
+[EVO] PASS B2 methodOne returns ONE (original body restored)
+[EVO] PASS B2 methodOne hook fully removed (no [EVO-B] one)
+[EVO] PASS B2 methodTwo returns TWO
+[EVO] PASS B2 methodTwo hook fires exactly once
+[EVO] applied stageB2-B: len=1410 sha256=ced23aefd2276f842ae276c8b27051b81e5a1d2a469a7b816aa7094ccd903876
+[EVO] PASS B2 applied bytes contain the methodTwo hook
+[EVO] PASS B2 applied bytes carry no stale methodOne hook
+[EVO] PASS B2 unrelated input: A still returns CANCELLED
+[EVO] PASS B2 no LAYOUT-REJECT
+[EVO] STAGE-B2-DONE
+[EVO] PASS C2 C returns LIVE
+[EVO] PASS C2 added hookTwo fires exactly once
+[EVO] PASS C2 original hookOne still fires exactly once
+[EVO] applied stageC2-C: len=1531 sha256=323fce5b010532d2324ad5334757da3af62a6a9ac055bdd2f7ac66571d8b0ad0
+[EVO] PASS C2 applied bytes carry hookTwo
+[EVO] PASS C2 applied bytes carry hookOne
+[EVO] PASS C2 no LAYOUT-REJECT
+[EVO] STAGE-C2-DONE
+[EVO] PASS C3 C returns LIVE
+[EVO] PASS C3 original hookOne still fires exactly once
+[EVO] PASS C3 removed hookTwo no longer fires
+[EVO] applied stageC3-C: len=1348 sha256=7fb085ae6b7fb80d58e2f09e4538cf9727c6fc0a96c192185df771e9a6699f99
+[EVO] PASS C3 applied bytes drop hookTwo
+[EVO] PASS C3 applied bytes keep hookOne
+[EVO] PASS C3 no LAYOUT-REJECT
+[EVO] STAGE-C3-DONE
+[EVO] RESULT PASS failures=[]
+--- key sync/reload lines from run/evo.log ---
+[Remold] [Mixin] com.example.evo.mixin.EvoAMixin reloaded; affected target(s): [com.example.evo.EvoTarget]
+[Remold] [Mixin] Target class com.example.evo.EvoTarget re-woven with updated mixin and redefined
+[Remold] [Mixin] Mixin class-info sync: com.example.evo.mixin.EvoBMixin addedFields=0, addedMethods=1
+[Remold] [Mixin] com.example.evo.mixin.EvoBMixin reloaded; affected target(s): [com.example.evo.EvoSwitchTarget]
+[Remold] [Mixin] Target class com.example.evo.EvoSwitchTarget re-woven with updated mixin and redefined
+[Remold] [Mixin] Mixin class-info sync: com.example.evo.mixin.EvoCMixin addedFields=0, addedMethods=1
+[Remold] [Mixin] com.example.evo.mixin.EvoCMixin reloaded; affected target(s): [com.example.evo.EvoLifecycleTarget]
+[Remold] [Mixin] Target class com.example.evo.EvoLifecycleTarget re-woven with updated mixin and redefined
+[Remold] [Mixin] com.example.evo.mixin.EvoCMixin reloaded; affected target(s): [com.example.evo.EvoLifecycleTarget]
+[Remold] [Mixin] Target class com.example.evo.EvoLifecycleTarget re-woven with updated mixin and redefined
+--- verdict ---
+[EVO] RESULT PASS failures=[]

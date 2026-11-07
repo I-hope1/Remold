@@ -278,6 +278,48 @@ driver compiles each stage with plain `javac` against the classpath printed by
 `./gradlew -q printCompileCp` (a second Gradle build would block on the run task's lock), and
 keeps stdin open because `--nogui` stops the server on EOF.
 
+## Item 2.6: `@Inject` SELF-evolution (`evo/EvoProbe.java` + `evo/run-evo.sh`)
+
+Three scenarios on a real Fabric 1.21.1 `KnotServer` with the real Remold agent/plugins. Each
+stage is a real `./gradlew compileJava` (only the Mixin class file changes) followed by the
+real file watcher → `MixinHotSwap.reload` → `MixinReWeaver` re-weave → JBR structural
+redefine of the target class. The probe runs as a second `main` entrypoint gated by
+`-Dremold.probe.evo=true`, tees `System.out`, and asserts on business end states: actual
+method return values, per-call handler counts, and the bytes actually handed to
+`redefineClasses` (`RemoldAgent.bytecodeCache`).
+
+| Stage | Real edit | Assertion |
+|:--|:--|:--|
+| 1 | v1 baseline | A returns `ORIGINAL`, applied bytes carry the v1 hook and no cancellation code; B hooks only `methodOne`; C has only `hookOne` |
+| A2 | `EvoAMixin`: `@Inject` gains `cancellable = true` + `cir.setReturnValue("CANCELLED")` | A returns `CANCELLED`; applied bytes contain `CANCELLED` and the generated `isCancelled` conditional-return call; stale v1 hook gone; B/C untouched (unrelated-input control) |
+| B2 | `EvoBMixin`: the hook moves from `methodOne` to `methodTwo` | `methodOne` back to its original body (`ONE`) with no `[EVO-B] one`; `methodTwo` returns `TWO` with the new hook exactly once; applied bytes contain `two v2` only |
+| C2 | `EvoCMixin`: a second `@Inject` handler method is added to the Mixin class | both `hookOne` and `hookTwo` fire exactly once; applied bytes carry both |
+| C3 | `EvoCMixin`: the added handler is removed again | `hookOne` still fires exactly once, `hookTwo` no longer fires; applied bytes drop `hookTwo` |
+
+Mutation control: `EVO_MUTATION=cancellable bash evo/run-evo.sh` installs the same v2 edit with
+`cancellable` reverted (no forced return). Scenario-A assertions must go red — they do
+(`RESULT FAIL`; the driver returns 0 only in mutation mode when it observes that failure),
+which proves the assertions measure the cancellable evolution rather than "some hot swap
+happened".
+
+Product defect found and fixed on this branch: before the fix, B2/C2 failed with
+`[Mixin] Failed to reload ... Conform error ... please restart client` —
+`MixinInfo.reloadMixin` validates the new `@Inject` handlers against the **reused** (stale)
+`ClassInfo`, while `MixinClassInfoSync.sync` ran only *after* `reload`. The fix syncs the new
+members **before** `reload` and rolls them back if reload is rejected; the fixture then goes
+green. The fix-reverted control reproduces the red `Conform error` again.
+
+To reproduce: set up the Loom probe project as in "Setup", copy `evo/EvoProbe.java` to
+`src/main/java/com/example/probe/`, copy `evo/Evo*.java` targets to
+`src/main/java/com/example/evo/` and `evo/Evo*Mixin.java` to
+`src/main/java/com/example/evo/mixin/`, add `evo.mixins.json` to `fabric.mod.json` `mixins`,
+add `com.example.probe.EvoProbe` to `entrypoints.main`, and put `evo/run-evo.sh` +
+`evo/stages/` next to the project. The driver regenerates `evo/server.args` from
+`build/remold/remold.args` (worktree agent/plugins), switches the entry point to
+`KnotServer --nogui`, adds `-Dfabric.development=true`, and asserts `[EVO] RESULT PASS`.
+
+Raw evidence: [`evidence/inject-evolution.txt`](evidence/inject-evolution.txt).
+
 ## Evidence
 
 `evidence/` contains the raw stdout/stderr of the runs referenced in the analysis doc:
@@ -300,6 +342,7 @@ keeps stdin open because `--nogui` stops the server on EOF.
 | `c1c2-mutation-check.txt` | reverting each fix turns exactly one regression test red |
 | `c4-q4-baseline.md` | Q4 baseline table: fallback order, bytes, real-redefine vs no-op vs fail-closed |
 | `c5-forge-e2e.txt` | Forge 1.21.1 ModLauncher: classloader identity, Q1/Q2, method+field hot-swap, `RESULT PASS`, zero INIT-DRIFT |
+| `inject-evolution.txt` | item 2.6 `@Inject` SELF-evolution on a real KnotServer: before-fix `Conform error` (B/C red), after-fix `RESULT PASS` for all 5 stages, cancellable mutation kill, fix-reverted control |
 
 Cross-run SHA-256 values are not comparable: Mixin embeds a random
 `@MixinMerged(sessionId=...)` in every process. Use the hashes inside one log file.

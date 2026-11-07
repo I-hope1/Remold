@@ -36,10 +36,15 @@ import remold.RemoldAgent;
  *       也会一并织入）。任务在 Remold 批次锁之外执行，不会插进批次中间改缓存。</li>
  * </ol>
  *
- * <p><b>边界</b>：Mixin 的结构契约（目标类 / 接口 / 内部类 / 优先级）改动会被 Mixin 以
- * {@code MixinReloadException} 拒绝，此时明确提示需要重启。Mixin 新增字段/方法时，Mixin 内部
- * {@code ClassInfo} 的成员同步不在本类的职责内（Fabric 侧由 {@code MixinClassInfoSync} 处理），
- * 因此这类改动不保证热更生效。</p>
+ * <p><b>新增字段/方法的元数据同步</b>：{@code reload} 的校验阶段会拿新字节码里新增的
+ * {@code @Inject} handler 去查 Mixin 内部的 {@code ClassInfo}，而 {@code Reloaded} 状态复用的是
+ * reload <b>之前</b>的旧 {@code ClassInfo}。因此本类在调用 {@code reload} 之前先经
+ * {@link ForgeClassInfoSync} 把新字节码里多出来的字段/方法补进同一份元数据；{@code reload} 被拒绝
+ * 时再把本次补入项撤销（详见该类 Javadoc）。</p>
+ *
+ * <p><b>边界</b>：Mixin 的结构契约（目标类 / 接口 / 内部类 / 优先级）改动仍会被 Mixin 以
+ * {@code MixinReloadException} 拒绝，此时明确提示需要重启；元数据同步只覆盖「成员增删」这一类
+ * 结构变化，不放宽这条契约。</p>
  */
 final class ForgeMixinHotSwap {
 
@@ -102,7 +107,7 @@ final class ForgeMixinHotSwap {
 	 * {@code reload} 方法签名引用的是那个 ClassLoader 里的 {@code ClassNode}，用 Agent 侧的
 	 * ASM 类型会在反射调用时直接抛 {@code IllegalArgumentException}。</p>
 	 */
-	private static List<String> reload(Object transformer, String dotClassName, byte[] bytes) throws Exception {
+	private static List<String> reload(Object transformer, String dotClassName, byte[] bytes) throws Throwable {
 		ClassLoader mixinLoader = transformer.getClass().getClassLoader();
 		Class<?> classReaderType = Class.forName("org.objectweb.asm.ClassReader", true, mixinLoader);
 		Class<?> classVisitorType = Class.forName("org.objectweb.asm.ClassVisitor", true, mixinLoader);
@@ -117,10 +122,33 @@ final class ForgeMixinHotSwap {
 			throw new NoSuchMethodException("reload(String, ClassNode) on " + transformer.getClass().getName());
 		}
 		reload.setAccessible(true);
+		// reload 的校验阶段（MixinInfo.State.validate -> MixinPreProcessorStandard.conform）会拿新字节码
+		// 里的 @Inject handler 去查 Mixin 的 ClassInfo，而 Reloaded 状态复用的是 reload 之前的旧
+		// ClassInfo。新增/改名的 handler 与新增 @Unique 字段必须先补进元数据再 reload，否则 reload
+		// 直接抛 "Conform error ... please restart client"（字段侧随后是 attachFields 的 NPE）。
+		ForgeClassInfoSync.SyncToken syncToken = ForgeClassInfoSync.sync(transformer, dotClassName, node);
+		List<String> targets;
+		try {
+			targets = invokeReload(reload, transformer, dotClassName, node);
+		} catch (Throwable t) {
+			// reload 被拒绝时撤销 reload 前补入的成员，让旧元数据保持可用。
+			ForgeClassInfoSync.rollback(syncToken);
+			throw t;
+		}
+		return targets;
+	}
+
+	/**
+	 * 调用 {@code IMixinTransformer.reload(String, ClassNode)}，返回归一化后的目标类名。
+	 *
+	 * <p>部分 Mixin 版本的 {@code MixinInfo} 以内部名登记，点分类名匹配不到、返回空列表时再按
+	 * 内部名试一次。</p>
+	 */
+	private static List<String> invokeReload(Method reload, Object transformer, String dotClassName, Object node)
+		throws Exception {
 		Object raw = reload.invoke(transformer, dotClassName, node);
 		List<?> list = raw instanceof List ? (List<?>) raw : Collections.emptyList();
 		if (list.isEmpty()) {
-			// 部分 Mixin 版本的 MixinInfo 以内部名登记，点分类名匹配不到时再试一次。
 			raw = reload.invoke(transformer, dotClassName.replace('.', '/'), node);
 			list = raw instanceof List ? (List<?>) raw : Collections.emptyList();
 		}

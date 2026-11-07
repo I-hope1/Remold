@@ -239,6 +239,9 @@
 
 | `probeAll` 聚合任务（Gradle 内置 JVM 探针，不进 `check`） | ✅ | `tests/build.gradle` | 显式 `./gradlew probeAll` 全绿：e2eProbe + DCEVM 套件（除 alignBaselineProbe，见任务说明）+ entity/shadow/class-identity/double-brace/retry/inject-conflict/fingerprint/redefineDynamic/pending-multi-loader/retransform-baseline/addField/initFix-fallback/initDrift-noise+perf 全部 PASS；`doLast` 列出外部容器探针脚本（Fabric C3/C5/mm、Forge C5/mm）及证据路径；外部脚本不在 probeAll 内启动。 |
 
+| **Forge/NeoForge `ClassInfo` 成员同步（Mixin 新增字段/方法热更）** | P1 | `plugin-forge` `ForgeMixinHotSwap` / `ModLauncherMixinBridge`；可复用 `plugin-mixin` `MixinClassInfoSync` 的成员同步 + 回滚逻辑 | Forge 下 `plugin-mixin` 拿不到 active transformer，`ForgeMixinHotSwap` 只做 `IMixinTransformer.reload` + 级联重织入，未把新字节码新增的字段/方法补进 `ClassInfo`；后果是给已有 Mixin 新增 `@Inject` handler/字段可能在 reload 的 conform 校验被拒（与 Fabric `2444a89` 修复前同类），结构性变更需重启。验收：Forge + NeoForge 各一个“Mixin 新增 @Inject 方法/字段后热更成功”的 E2E；同步失败可回滚；不改变 `reload` 前同步时序；`docs/releases/v0.2.4.md` 已知限制相应收窄。 |
+| **NeoForge Mixin 端到端验证（MDK 探针）** | P1 | `plugin-forge` `NeoForgeHotswapPlugin` / `ModLauncherMixinBridge`；新探针 `tests/neoforge-mixin-probe` | 当前只有 Forge 1.21.1 MDK 证据（C5 + mm-forge），NeoForge 无任何运行期证据。验收：NeoForge 21.1.x MDK 真实 `runServer` + `-javaagent`；`NeoForgeHotswapPlugin` 加载、跨 ClassLoader 定位 `IMixinTransformer`、Mixin 目标重织入、Mixin 模板自身热更、`@Unique`/`@Inject` 保留、Mixin 配置注册路径（manifest vs 手动 `addConfiguration`）、多 Mixin 同目标（复用 `mm-forge` 夹具）；若暴露 loader 差异再修产品代码。 |
+
 ### 4.2 技术债与死代码消除清单 (Tech Debt & Code Cleanup)
 
 | 债务 / 清理项 | 优先级 | 影响位置 | 现状分析与消除方案 |

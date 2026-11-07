@@ -752,15 +752,10 @@ public class OffsetStabilityProbe {
 		if (valViaCachedField == 100 && currentS1 == 888) {
 			System.out.println("   [Finding] Cached Field object accessor auto-updated across class redefinition!");
 			check(true, "Cached Field object accessor automatically updated to new offset");
-		} else if (valViaCachedField == 100 && currentS1 == 100) {
-			// JBR may keep the cached Field's offset stale across redefinition. That is an observed
-			// accessor-cache behaviour, not an offset-corruption failure: the live instance is intact
-			// and the cached write simply landed on the old slot. Record it as a finding so the probe
-			// is deterministic under probeAll batch load.
-			System.out.println("   [Finding] Cached Field object accessor held stale offset (observed, no live corruption)");
-			check(true, "Cached Field object accessor held stale offset (finding: JBR accessor cache not refreshed; live state intact)");
 		} else {
-			check(false, "Cached Field object write produced unexpected state (val=" + valViaCachedField + ", currentS1=" + currentS1 + ")");
+			// JBR's DirectMethodHandle accessor updates deterministically; if it did not, the cached
+			// write landed on the old slot (which holds s2=200L) and this is a real failure.
+			check(false, "Cached Field object held stale offset (val=" + valViaCachedField + ", currentS1=" + currentS1 + ")");
 		}
 	}
 
@@ -1044,11 +1039,18 @@ public class OffsetStabilityProbe {
 
 		Object targetObj = targetClass.getConstructor().newInstance();
 
-		// Warm up CallerD.readVal to ensure it is compiled by C2
-		for (int i = 0; i < 5; i++) {
+		// Warm up CallerD.readVal to ensure it is compiled by C2. Under probeAll batch load the C2
+		// compiler queue can delay Tier 4, so poll compilation.log (max 30 rounds) instead of a
+		// fixed 5 iterations.
+		int warmupRoundsD = 0;
+		boolean tier4D = false;
+		for (; warmupRoundsD < 30; warmupRoundsD++) {
 			callerClass.getMethod("loop", targetClass, int.class).invoke(null, targetObj, 20_000);
 			Thread.sleep(20);
+			tier4D = hasTier4Compile(readLog("compilation.log"), "CallerD::loop");
+			if (tier4D) break;
 		}
+		System.out.println("   [warmup] CallerD.loop tier4=" + tier4D + " after " + warmupRoundsD + " rounds");
 		int initialVal = (int) callerClass.getMethod("readVal", targetClass).invoke(null, targetObj);
 		checkEq(12345, initialVal, "Baseline: CallerD reads initial TargetD.val=12345");
 
@@ -1161,11 +1163,18 @@ public class OffsetStabilityProbe {
 
 		Object targetObj = targetClass.getConstructor().newInstance();
 
-		// Warm up CallerOuterD2.loop to ensure C2 compiles callOuter AND inlines CallerInnerD2.readVal
-		for (int i = 0; i < 5; i++) {
+		// Warm up CallerOuterD2.loop to ensure C2 compiles callOuter AND inlines CallerInnerD2.readVal.
+		// Poll compilation.log (max 30 rounds): under probeAll batch load the fixed 5x100ms warmup
+		// could race the C2 queue and read the mutated heap value before the nmethod was compiled.
+		int warmupRoundsD2 = 0;
+		boolean tier4D2 = false;
+		for (; warmupRoundsD2 < 30; warmupRoundsD2++) {
 			outerClass.getMethod("loop", targetClass, int.class).invoke(null, targetObj, 20_000);
 			Thread.sleep(20);
+			tier4D2 = hasTier4Compile(readLog("compilation.log"), "CallerOuterD2::callOuter");
+			if (tier4D2) break;
 		}
+		System.out.println("   [warmup] CallerOuterD2.callOuter tier4=" + tier4D2 + " after " + warmupRoundsD2 + " rounds");
 		int initialVal = (int) outerClass.getMethod("callOuter", targetClass).invoke(null, targetObj);
 		checkEq(11111, initialVal, "Baseline: CallerOuterD2 reads initial TargetD2.val=11111");
 
@@ -1207,6 +1216,17 @@ public class OffsetStabilityProbe {
 	// =========================================================================
 	// Compilation and Helper Utilities
 	// =========================================================================
+
+	private static boolean hasTier4Compile(String log, String method) {
+		for (String line : log.split("\n")) {
+			if (!line.contains(method)) continue;
+			if (line.contains("%")) continue; // OSR compilation, not the steady-state nmethod
+			for (String token : line.trim().split("\s+")) {
+				if ("4".equals(token)) return true;
+			}
+		}
+		return false;
+	}
 
 	private static String readLog(String name) {
 		String logDir = System.getProperty("p05.logdir");

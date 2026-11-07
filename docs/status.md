@@ -62,10 +62,18 @@
 | 重试台账 / 注入冲突 / 源码基线回滚 / 原始字节指纹 | ✅ | `RemoldAgent`（A 批次 P3） | `RetryBookkeepingProbe` 15/0、`InjectConflictProbe` 8/0、`FingerprintDiskHashProbe` 18/0 |
 | L0 存量字段初值变更检测（含实例门、继承措辞、聚合、诊断） | ✅ | `remold.ref.InitializerDrift` | `InitializerDriftTest` + `DoubleBraceProbe` L0 断言（80/0） |
 | 偏移漂移：继承字段检测、遮蔽去重、点分类名归一 | ✅ | `LayoutPredictor` / `SuperclassDriftGate` 绑定索引 | `LayoutPredictorTest` + `bdf245b` 用例 |
-| 多 Mixin 同目标冲突（Fabric，两个独立 mixin config） | ✅ | `tests/fabric-mixin-probe/mm/` | 目标类 `MultiTarget` + `multi_a`(priority 900)/`multi_b`(1100) 两个 config 各带 `@Unique` + `@Inject`；5 阶段 `RESULT PASS`：baseline 双 handler 各一次且顺序 A,B；仅热更 MixinA 后 B 仍存活一次、顺序不变、`@Unique` 值保留、无 `LAYOUT-REJECT`；目标类热更后三者同时生效；同批次热更两个 Mixin 均生效；同名 `@Unique` 字段稳定为 `[uniqueA, sharedNameTag, uniqueB, fdbb776f$example_mod$sharedNameTag$0]`、无重复字段。证据 `evidence/multi-mixin-fabric.txt`。**Forge 端未跑** |
+| 多 Mixin 同目标冲突（Fabric + Forge，两个独立 mixin config） | ✅ | `tests/fabric-mixin-probe/mm/`、`tests/fabric-mixin-probe/mm-forge/` | 目标类 `MultiTarget` + `multi_a`(priority 900)/`multi_b`(1100) 两个 config 各带 `@Unique` + `@Inject`。**Fabric** 5 阶段 `RESULT PASS`：baseline 双 handler 各一次且顺序 A,B；仅热更 MixinA 后 B 仍存活一次、顺序不变、`@Unique` 值保留、无 `LAYOUT-REJECT`；目标类热更后三者同时生效；同批次热更两个 Mixin 均生效；同名 `@Unique` 字段稳定为 `[uniqueA, sharedNameTag, uniqueB, fdbb776f$example_mod$sharedNameTag$0]`、无重复字段（Fabric sponge-mixin 以 `sessionId$modId$name$0` 形态消歧）。**Forge** 同构探针 5 阶段 `RESULT PASS`：FIELDS 在 baseline 与 2/3/4/5 恒为 `[uniqueA, sharedNameTag, uniqueB]`（上游 Mixin 0.8.5 合并同名 `@Unique`，不拆分、不重复）、`uniqueA=111`/`uniqueB=222` 全程保留、双 handler 各一次且顺序 A,B、无 `LAYOUT-REJECT`；仅热更 MixinA 后 A 升 v2 且 B 仍 v1；目标类热更后 T1 + A v2 + B v1；同批热更两 Mixin 后 A v3 + B v2。证据 `evidence/multi-mixin-fabric.txt`、`evidence/multi-mixin-forge.txt`（含变异检查与去触发对照） |
 | 真实 Fabric 1.21.1 主路径（含 Mixin 类自身热更） | ✅ | 探针：`tests/fabric-mixin-probe/C3Probe.java` | `RESULT PASS`、零 `INIT-DRIFT`（`evidence/c3-server-e2e.txt`） |
-| Forge 1.21.1（ModLauncher）Mixin 热更重织入 | 🔶 | 探针：`tests/fabric-mixin-probe/c5/` | 最小 MDK 探针（服务端 dev run、official mappings、Mixin 配置经 `MixinEnvironment.addConfiguration` 手动注册）下 `RESULT PASS`：`@Unique` 非初值 999 保留、`@Inject` 存活、InitFix 补字段成功（`evidence/c5-forge-e2e.txt`）。**未验证**：`mods.toml`/manifest 声明路径、真实模组/客户端、生产 refmap；实体探针的共享状态/影子 Class 问题已修复（Forge 稳态 `counter=1`，见风险 19） |
+| Forge 1.21.1（ModLauncher）Mixin 热更重织入 | 🔶 | 探针：`tests/fabric-mixin-probe/c5/`、`tests/fabric-mixin-probe/mm-forge/` | 最小 MDK 探针（服务端 dev run、official mappings、Mixin 配置经 `MixinEnvironment.addConfiguration` 手动注册）下 `RESULT PASS`：`@Unique` 非初值 999 保留、`@Inject` 存活、InitFix 补字段成功（`evidence/c5-forge-e2e.txt`）。`plugin-forge` `ForgeMixinHotSwap` 补上 Mixin 类自身热更：反射调用 `IMixinTransformer.reload` 刷新运行期状态并级联重织入目标类（此前 Mixin 模板会被误当新类 `defineClass`，目标类 handler 不更新）；多 Mixin 同目标探针 5 阶段 `RESULT PASS`（`evidence/multi-mixin-forge.txt`）。**未验证**：`mods.toml`/manifest 声明路径、真实模组/客户端、生产 refmap；Mixin 新增字段/方法的 `ClassInfo` 成员同步在 Forge 侧未实现（Fabric 由 `MixinClassInfoSync` 承担）；实体探针的共享状态/影子 Class 问题已修复（Forge 稳态 `counter=1`，见风险 19） |
 | 用户人工验收（模板场景 1–8，真实 Fabric 1.21.1 客户端） | ⬜ | — | 下一轮登记；Forge 列保持“未验证” |
+
+> **上游 Mixin 同名 `@Unique` 行为差异（已实测）**：Forge 1.21.1 自带上游 SpongePowered Mixin
+> 0.8.7（`Env=SERVER Service=ModLauncher`）时，两个独立 mixin config 对同一目标声明**同名**
+> `@Unique` 字段会被合并为**一个**目标字段——应用后 FIELDS 恒为 `[uniqueA, sharedNameTag, uniqueB]`，
+> 两个 handler 读到同一个共享槽位。Fabric 侧的 sponge-mixin 分支则把同名 `@Unique` 消歧为
+> `<sessionId>$<modId>$<name>$0`（Fabric 实测 FIELDS 含
+> `fdbb776f$example_mod$sharedNameTag$0`）。两个探针的断言因此按加载器分别设计：Forge 断言
+> "字段集合跨阶段恒等 + 不拆分 + 不重复 + 无 `LAYOUT-REJECT`"，不断言 Fabric 的 per-mixin 值隔离。
 
 ---
 
@@ -481,7 +489,7 @@
 | 不可热更资源提示 | ✅ | `ArcAssetReloader.classify` | 模组/未知着色器、content JSON/HJSON、图集、普通数据文件不再静默忽略，统一输出“需要重启”的 warn；`AssetReloaderTest` 覆盖分类路由 |
 | Mixin 重织入（普通类） | ✅ | `plugin-mixin` `MixinReWeaver` | 重定义前把源码级字节码交回 Mixin 织入，非目标类按数组同一性跳过拷贝；真实 Fabric 1.21.1 客户端已验收（新增/删除 `@Unique` 字段、后续 target 编辑）；`MixinRawSourcePriorityTest` 守住原始字节来源；CI 无自动 Fabric 客户端 E2E |
 | Mixin 类自身变更 → 目标级联重织入 | ✅ | `plugin-mixin` `MixinHotSwap` + `MixinClassInfoSync` | `reload` 后同步新增字段/方法的 `ClassInfo`，再对已加载目标类走 `redefineDynamic`；真实 Fabric 1.21.1 客户端已验收（新增/删除字段、`TitleScreen` 重织入）；`MixinClassInfoSyncTest` / `DynamicLayoutWaiverTest`；`@Mixin` 模板类不再进入 `loadedClassesMap`（`NonLoadableClassTest`） |
-| Forge / NeoForge 跨 ClassLoader Mixin 重织入 | 🔶 | `plugin-forge` `ModLauncherMixinBridge` | 通过 `BytecodeTransformerBridge` 穿透 ModLauncher / NeoForge 类加载器反射定位 `IMixinTransformer` 织入重定义字节码；解决 Forge 与 Agent 间 ClassLoader 隔离；端到端需真实 Forge / NeoForge 客户端验证 |
+| Forge / NeoForge 跨 ClassLoader Mixin 重织入 | 🔶 | `plugin-forge` `ModLauncherMixinBridge`、`ForgeMixinHotSwap` | 通过 `BytecodeTransformerBridge` 穿透 ModLauncher / NeoForge 类加载器反射定位 `IMixinTransformer` 织入重定义字节码；`ForgeMixinHotSwap` 处理 Mixin 模板类自身热更（`IMixinTransformer.reload` 刷新状态 + 级联重织入目标类），解决 Forge 与 Agent 间 ClassLoader 隔离；端到端需真实 Forge / NeoForge 客户端验证 |
 | Forge / NeoForge EventBus 监听器刷新 | 🔶 | `plugin-forge` `ForgeEventBusRefresher` | 监听批次完成事件，识别新增/移除的 `@SubscribeEvent` / `@EventBusSubscriber` 并自动在 `EVENT_BUS` 注销与重新登记；端到端需真实 Forge / NeoForge 客户端验证 |
 | 标准 JVM 能力探测与降级 | ✅ | `RemoldAgent.probeEnhancedHotswap` / `mustSkipForMissingEnhancedRedefinition` / `degradeForMissingEnhancedRedefinition` | 厂商身份 + flag 文本双条件判定；结构变化类在无增强能力时摘批；`FORCE_STATIC_LAMBDA` 强制降级、`INIT_FIX` 刻意不降级；`EnhancedHotswapGateTest` 9 用例含变异检查 |
 

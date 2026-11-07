@@ -60,6 +60,7 @@ public final class ModLauncherMixinBridge implements BytecodeTransformerBridge {
 			return woven != null ? woven : bytecode;
 		} catch (Throwable t) {
 			reportOnce(dotClassName, "[Forge/NeoForge] Mixin re-weaving failed; falling back to source bytecode", t);
+			reportOpensHintOnce(t);
 			return bytecode;
 		}
 	}
@@ -129,6 +130,34 @@ public final class ModLauncherMixinBridge implements BytecodeTransformerBridge {
 				}
 			}
 			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * 命名模块宿主（NeoForge 21.1+ 的 sponge-mixin 是 JPMS 模块）缺 opens 时给出可执行的补救提示。
+	 *
+	 * <p>sponge-mixin 的 {@code module-info} 只把 {@code org.spongepowered.asm.mixin.transformer}
+	 * opens 给 gson；本桥通过反射调用该包里的实现类时，若 JVM 拒绝访问会抛
+	 * {@code InaccessibleObjectException} / {@code IllegalAccessException}。这不是 Remold 的缺陷，
+	 * 需要启动参数补救。</p>
+	 */
+	private static void reportOpensHintOnce(Throwable t) {
+		if (!isReflectiveAccessDenied(t)) {
+			return;
+		}
+		reportOnce("<add-opens>", "[Forge/NeoForge] Mixin classes are not reflectively accessible on this host"
+			+ " (JPMS module without an opens edge); add the JVM argument"
+			+ " --add-opens org.spongepowered.mixin/org.spongepowered.asm.mixin.transformer=ALL-UNNAMED", t);
+	}
+
+	private static boolean isReflectiveAccessDenied(Throwable t) {
+		java.util.Set<Throwable> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+		for (Throwable cur = t; cur != null && seen.add(cur); cur = cur.getCause()) {
+			if ("java.lang.reflect.InaccessibleObjectException".equals(cur.getClass().getName())
+				|| cur instanceof IllegalAccessException) {
+				return true;
+			}
 		}
 		return false;
 	}

@@ -1070,3 +1070,52 @@ tasks.register("classIdentityProbe", JavaExec) {
 		if (nativeLibPath != null) jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
 	}
 }
+
+// ------------------------------------------------------------------------------------------------
+// Item 3: probeAll — all Gradle-hosted JVM probes in one explicit run. NOT wired into `check`
+// (daily check stays fast). External container probes (Fabric/Forge real-server scripts) are
+// listed by the task's doLast summary but are NOT launched here; run them from their scripts:
+//   tests/fabric-mixin-probe/c3/run-c3.sh      (Fabric C3)
+//   tests/fabric-mixin-probe/c5/run-c5.sh      (Forge C5)
+//   tests/fabric-mixin-probe/mm/run-mm.sh      (Fabric multi-mixin)
+//   tests/fabric-mixin-probe/mm-forge/run-mm.sh (Forge multi-mixin)
+// ------------------------------------------------------------------------------------------------
+tasks.register("probeAll") {
+	group = "verification"
+	description = "全部 Gradle 内置 JVM 探针一次跑完（不含 check 的 JUnit/文本门禁；不含外部容器脚本探针）"
+	dependsOn "e2eProbe"
+	dependsOn "liveDcevmTest"
+	dependsOn "p05Probe"
+	dependsOn "twoPhaseProbe"
+	dependsOn "offsetStabilityProbe"
+	dependsOn "lambdaBridgeProbe"
+	dependsOn "readerScanProbe"
+	dependsOn "cacheWarmingProbe"
+	dependsOn "entityProbeToggleProbe"
+	dependsOn "shadowClassProbe"
+	dependsOn "classIdentityProbe"
+	dependsOn "doubleBraceProbe"
+	dependsOn "retryBookkeepingProbe"
+	dependsOn "injectConflictProbe"
+	dependsOn "fingerprintDiskHashProbe"
+	dependsOn "redefineDynamicNoBaselineProbe"
+	dependsOn "pendingAlignedMultiLoaderProbe"
+	dependsOn "retransformBaselineProbe"
+	dependsOn "addFieldProbe"
+	dependsOn "initFixFallbackProbe"
+	dependsOn "initDriftNoiseProbe"
+	dependsOn "initDriftPerfProbe"
+	doLast {
+		println "=== probeAll: Gradle-hosted JVM probes completed ==="
+		println "external container probes (NOT launched by probeAll; run their scripts):"
+		println "  Fabric C3        tests/fabric-mixin-probe/c3/run-c3.sh"
+		println "  Forge C5         tests/fabric-mixin-probe/c5/run-c5.sh"
+		println "  Fabric multi-mixin tests/fabric-mixin-probe/mm/run-mm.sh"
+		println "  Forge multi-mixin  tests/fabric-mixin-probe/mm-forge/run-mm.sh"
+		println "latest evidence: tests/fabric-mixin-probe/evidence/ (c3-server-e2e.txt, c5-forge-e2e.txt, multi-mixin-fabric.txt, multi-mixin-forge.txt)"
+		println "NOTE: alignBaselineProbe is intentionally NOT part of probeAll: in the tests runtime"
+		println "      classpath the agent auto-loads plugin-arc from the app loader and hits"
+		println "      IllegalAccessError (remold.Injector vs bootstrap RemoldAgent.inst). Run it"
+		println "      standalone with its own classpath; tracked as a known environment gap."
+	}
+}

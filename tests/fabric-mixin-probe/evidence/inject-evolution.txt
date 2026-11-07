@@ -1,0 +1,326 @@
+# Item 2.6 — @Inject SELF-evolution on real Fabric 1.21.1 (3 scenarios)
+
+Date: 2026-11-07 (Asia/Singapore)
+Branch: agent/inject-evolution-probe (base commit a2c29f6)
+Driver: fabric-probe/evo/run-evo.sh   Probe: fabric-probe/src/main/java/com/example/probe/EvoProbe.java
+Fixture mirror (committed): tests/fabric-mixin-probe/evo/
+
+## Environment
+
+- JVM: JBR 21.0.9 (DCEVM), `-XX:+AllowEnhancedClassRedefinition` (from the Remold Gradle plugin args)
+- Fabric Loader 0.16.9, Minecraft 1.21.1, SpongePowered Mixin 0.8.7 (`sponge-mixin-0.15.4+mixin.0.8.7`)
+- Real `net.fabricmc.loader.impl.launch.knot.KnotServer --nogui`, real `-javaagent` Remold agent
+- remold-agent.jar sha256 `7b60f713d2fb3c6ccb78662726db304ef0f52b005a171962ab90c4f24587b57e`
+- fixed remold-plugin-mixin-0.2.3.jar sha256 `c58e6f9bd5f806adbce89efcbf6a74f407b1c915e122d9fbb5cbe1fc0b8ff139`
+  (runs 1 and 2 below; the fix-reverted control in run 3 was rebuilt from the pre-fix ordering and is
+  identified by its reverted source change, not by an archived jar hash)
+
+## Method
+
+Every stage is a real `./gradlew --offline processResources compileJava` that changes only the Mixin
+class source, followed by the real file watcher → `MixinHotSwap.reload` → `MixinReWeaver` re-weave →
+`RemoldAgent.redefineDynamic` (JBR structural redefine of the target class). The probe asserts on
+business end states: the target method's actual return value, per-invocation handler output counts,
+and the class bytes actually handed to `redefineClasses` (`RemoldAgent.bytecodeCache`).
+
+## Verdict
+
+| Check | Expected | Observed |
+|:--|:--|:--|
+| A — cancellable evolution (non-cancellable HEAD -> `cancellable=true` + `setReturnValue("CANCELLED")`) | before: ORIGINAL, no cancellation code; after: CANCELLED + `isCancelled` conditional-return call | PASS (run 1) |
+| B — target-method switching (`methodOne` -> `methodTwo`) | `methodOne` fully restored (`ONE`, no hook, no stale handler bytes); `methodTwo` returns `TWO` with the new hook exactly once | PASS (run 1) |
+| C — add/remove `@Inject` handler method in the Mixin class | add: both hooks fire exactly once; remove: only the original hook fires | PASS (run 1) |
+| Mutation control: revert `cancellable` (same v2 edit, no forced return) | scenario-A assertions must go red | KILLED — `RESULT FAIL` (run 2) |
+| Product-fix control: revert `MixinClassInfoSync`-before-`reload` ordering | scenarios B/C must go red with `Conform error` | RED — `RESULT FAIL` (run 3) |
+
+Run order: run 1 green (12:28, first green after the fix), run 2 mutation (12:34), run 3 fix-reverted
+control (12:42), then the fix was restored and run 4 (12:56) re-ran green as the final recorded run.
+Run 4 is the "GREEN RUN" reproduced verbatim in section 1; the driver resets all stage sources to v1 at
+the start of every invocation, so no mutation/control residue survives into the next run.
+
+---
+
+## 1. GREEN RUN (fix applied) — final run 4, 2026-11-07T12:56:00+08:00
+
+```text
+=== @Inject SELF-evolution, Fabric 1.21.1 end-to-end (item 2.6) ===
+mode: normal
+date: 2026-11-07T12:56:00+08:00
+agent: javaagent:E:\Users\ASUS\Desktop\Mods\nipx-hotswap\build\wt-inject-evolution\fabric-probe\.gradle\remold\remold-agent.jar
+[Remold] [Mixin] Re-weaving bridge registered (plugin-mixin)
+[EVO] targets loaded: com.example.evo.EvoTarget, com.example.evo.EvoSwitchTarget, com.example.evo.EvoLifecycleTarget
+[EVO] agent bytecodeCache reachable=true
+[EVO] PASS stage1 A returns original value
+[EVO] PASS stage1 A v1 hook fires exactly once
+[EVO] applied stage1-A: len=1296 sha256=a9eb64d3b87feb71d1e3f7e1e0ea9cda25a57d75e873f1f4419ba1a593383f75
+[EVO] PASS stage1 A applied bytes carry the v1 hook
+[EVO] PASS stage1 A applied bytes carry no cancellation code
+[EVO] PASS stage1 B methodOne returns ONE
+[EVO] PASS stage1 B methodTwo returns TWO
+[EVO] PASS stage1 B methodOne hook fires exactly once
+[EVO] PASS stage1 B methodTwo has no hook
+[EVO] applied stage1-B: len=1410 sha256=fd79e4bd72a6d1fd3a9f7baac5bf16e3a441b9d166674f321201df39561934ed
+[EVO] PASS stage1 B applied bytes carry the methodOne hook
+[EVO] PASS stage1 B applied bytes carry no methodTwo hook
+[EVO] PASS stage1 C returns LIVE
+[EVO] PASS stage1 C hookOne fires exactly once
+[EVO] PASS stage1 C has no hookTwo
+[EVO] applied stage1-C: len=1348 sha256=73f42ee2bb73197d595c759c40ed9f6cddcb1da4f18943aa5901ff2d9b956323
+[EVO] PASS stage1 C applied bytes carry hookOne
+[EVO] PASS stage1 C applied bytes carry no hookTwo
+[EVO] WAIT-STAGE1
+[Remold] [Mixin] com.example.evo.mixin.EvoAMixin reloaded; affected target(s): [com.example.evo.EvoTarget]
+[EVO] PASS A2 A returns CANCELLED (generated conditional return active)
+[EVO] PASS A2 v2 hook fires exactly once
+[EVO] PASS A2 old v1 hook no longer fires
+[EVO] applied stageA2-A: len=1655 sha256=84794184d7f9d175c2383ad8a441e972e05e3005830ca49ac1f10eb73a1a1e01
+[EVO] PASS A2 applied bytes contain the CANCELLED constant
+[EVO] PASS A2 applied bytes contain the isCancelled conditional-return call
+[EVO] PASS A2 applied bytes drop the stale v1 hook
+[EVO] PASS A2 unrelated input: B still v1 on methodOne
+[EVO] PASS A2 unrelated input: C still only hookOne
+[Remold] [Mixin] Target class com.example.evo.EvoTarget re-woven with updated mixin and redefined
+[EVO] PASS A2 no LAYOUT-REJECT
+[EVO] STAGE-A2-DONE
+[Remold] [Mixin] com.example.evo.mixin.EvoBMixin reloaded; affected target(s): [com.example.evo.EvoSwitchTarget]
+[Remold] [Mixin] Target class com.example.evo.EvoSwitchTarget re-woven with updated mixin and redefined
+[EVO] PASS B2 methodOne returns ONE (original body restored)
+[EVO] PASS B2 methodOne hook fully removed (no [EVO-B] one)
+[EVO] PASS B2 methodTwo returns TWO
+[EVO] PASS B2 methodTwo hook fires exactly once
+[EVO] applied stageB2-B: len=1410 sha256=e4c62ce7a48d70448c3f4c10758b78e458df52f899a132486da91a6b2b2ebba0
+[EVO] PASS B2 applied bytes contain the methodTwo hook
+[EVO] PASS B2 applied bytes carry no stale methodOne hook
+[EVO] PASS B2 unrelated input: A still returns CANCELLED
+[EVO] PASS B2 no LAYOUT-REJECT
+[EVO] STAGE-B2-DONE
+[Remold] [Mixin] com.example.evo.mixin.EvoCMixin reloaded; affected target(s): [com.example.evo.EvoLifecycleTarget]
+[Remold] [Mixin] Target class com.example.evo.EvoLifecycleTarget re-woven with updated mixin and redefined
+[EVO] PASS C2 C returns LIVE
+[EVO] PASS C2 added hookTwo fires exactly once
+[EVO] PASS C2 original hookOne still fires exactly once
+[EVO] applied stageC2-C: len=1531 sha256=e4137e53d787b685433a43a6467a85ac88b90eefb8f4c77e0986cb3f53a61e55
+[EVO] PASS C2 applied bytes carry hookTwo
+[EVO] PASS C2 applied bytes carry hookOne
+[EVO] PASS C2 no LAYOUT-REJECT
+[EVO] STAGE-C2-DONE
+[Remold] [Mixin] com.example.evo.mixin.EvoCMixin reloaded; affected target(s): [com.example.evo.EvoLifecycleTarget]
+[Remold] [Mixin] Target class com.example.evo.EvoLifecycleTarget re-woven with updated mixin and redefined
+[EVO] PASS C3 C returns LIVE
+[EVO] PASS C3 original hookOne still fires exactly once
+[EVO] PASS C3 removed hookTwo no longer fires
+[EVO] applied stageC3-C: len=1348 sha256=5dc744ef9e43647e5cc0b41e6ba13273cdfe04257f333a2ea08e7025ac509917
+[EVO] PASS C3 applied bytes drop hookTwo
+[EVO] PASS C3 applied bytes keep hookOne
+[EVO] PASS C3 no LAYOUT-REJECT
+[EVO] STAGE-C3-DONE
+[EVO] RESULT PASS failures=[]
+```
+
+`[EVO] RESULT PASS failures=[]`, driver exit code 0.
+
+---
+
+## 2. MUTATION CHECK — `EVO_MUTATION=cancellable`, 2026-11-07T12:34
+Stage A2 installs the same v2 edit with `cancellable` reverted (no `setReturnValue`). The scenario-A
+assertions must fail; the driver exits 0 in mutation mode only when it observes `RESULT FAIL`.
+
+```text
+=== @Inject SELF-evolution, Fabric 1.21.1 end-to-end (item 2.6) ===
+mode: mutation-cancellable
+date: 2026-11-07T12:34:40+08:00
+agent: javaagent:E:\Users\ASUS\Desktop\Mods\nipx-hotswap\build\wt-inject-evolution\fabric-probe\.gradle\remold\remold-agent.jar
+[Remold] [Mixin] Re-weaving bridge registered (plugin-mixin)
+[EVO] targets loaded: com.example.evo.EvoTarget, com.example.evo.EvoSwitchTarget, com.example.evo.EvoLifecycleTarget
+[EVO] agent bytecodeCache reachable=true
+[EVO] PASS stage1 A returns original value
+[EVO] PASS stage1 A v1 hook fires exactly once
+[EVO] applied stage1-A: len=1296 sha256=7ad567387b3c8375279a61590ce93a8b3b093a407addcbe7293f2831270a098a
+[EVO] PASS stage1 A applied bytes carry the v1 hook
+[EVO] PASS stage1 A applied bytes carry no cancellation code
+[EVO] PASS stage1 B methodOne returns ONE
+[EVO] PASS stage1 B methodTwo returns TWO
+[EVO] PASS stage1 B methodOne hook fires exactly once
+[EVO] PASS stage1 B methodTwo has no hook
+[EVO] applied stage1-B: len=1410 sha256=13a5e2d7ca4de08173aef68a73851c38d06121345749ac42ddf1d1225fb23972
+[EVO] PASS stage1 B applied bytes carry the methodOne hook
+[EVO] PASS stage1 B applied bytes carry no methodTwo hook
+[EVO] PASS stage1 C returns LIVE
+[EVO] PASS stage1 C hookOne fires exactly once
+[EVO] PASS stage1 C has no hookTwo
+[EVO] applied stage1-C: len=1348 sha256=19cd1fcaf62c9557986ac6b25f7e71c88b8b491d569151499d63528a62ef245d
+[EVO] PASS stage1 C applied bytes carry hookOne
+[EVO] PASS stage1 C applied bytes carry no hookTwo
+[EVO] WAIT-STAGE1
+[Remold] [Mixin] com.example.evo.mixin.EvoAMixin reloaded; affected target(s): [com.example.evo.EvoTarget]
+[Remold] [Mixin] Target class com.example.evo.EvoTarget re-woven with updated mixin and redefined
+[EVO] FAIL timeout waiting for A cancellable return after hot swap
+[EVO] FAIL A2 A returns CANCELLED (generated conditional return active) [actual=ORIGINAL]
+[EVO] PASS A2 v2 hook fires exactly once
+[EVO] PASS A2 old v1 hook no longer fires
+[EVO] applied stageA2-A: len=1329 sha256=f7ebebd33475d4ea041349fb63c2c3153aff2570ec289b9f226dd90b29af45d1
+[EVO] FAIL A2 applied bytes contain the CANCELLED constant [applied len=1329 sha=f7ebebd33475d4ea]
+[EVO] FAIL A2 applied bytes contain the isCancelled conditional-return call [applied len=1329 sha=f7ebebd33475d4ea]
+[EVO] PASS A2 applied bytes drop the stale v1 hook
+[EVO] PASS A2 unrelated input: B still v1 on methodOne
+[EVO] PASS A2 unrelated input: C still only hookOne
+[EVO] PASS A2 no LAYOUT-REJECT
+[EVO] STAGE-A2-DONE
+[Remold] [Mixin] com.example.evo.mixin.EvoBMixin reloaded; affected target(s): [com.example.evo.EvoSwitchTarget]
+[EVO] PASS B2 methodOne returns ONE (original body restored)
+[EVO] PASS B2 methodOne hook fully removed (no [EVO-B] one)
+[EVO] PASS B2 methodTwo returns TWO
+[EVO] PASS B2 methodTwo hook fires exactly once
+[Remold] [Mixin] Target class com.example.evo.EvoSwitchTarget re-woven with updated mixin and redefined
+[EVO] applied stageB2-B: len=1410 sha256=01fdf0da9e106ed471c958a9e0502d8a7ea71320026ab68aa0af0427d77e9a99
+[EVO] PASS B2 applied bytes contain the methodTwo hook
+[EVO] PASS B2 applied bytes carry no stale methodOne hook
+[EVO] FAIL B2 unrelated input: A still returns CANCELLED [actual=ORIGINAL]
+[EVO] PASS B2 no LAYOUT-REJECT
+[EVO] STAGE-B2-DONE
+[Remold] [Mixin] com.example.evo.mixin.EvoCMixin reloaded; affected target(s): [com.example.evo.EvoLifecycleTarget]
+[EVO] PASS C2 C returns LIVE
+[EVO] PASS C2 added hookTwo fires exactly once
+[EVO] PASS C2 original hookOne still fires exactly once
+[Remold] [Mixin] Target class com.example.evo.EvoLifecycleTarget re-woven with updated mixin and redefined
+[EVO] applied stageC2-C: len=1531 sha256=f5087a72271d4ab3bca0d39f934bc95f53ac6baa1d70fef7aa81e2f69c5fda41
+[EVO] PASS C2 applied bytes carry hookTwo
+[EVO] PASS C2 applied bytes carry hookOne
+[EVO] PASS C2 no LAYOUT-REJECT
+[EVO] STAGE-C2-DONE
+[Remold] [Mixin] com.example.evo.mixin.EvoCMixin reloaded; affected target(s): [com.example.evo.EvoLifecycleTarget]
+[EVO] PASS C3 C returns LIVE
+[Remold] [Mixin] Target class com.example.evo.EvoLifecycleTarget re-woven with updated mixin and redefined
+[EVO] PASS C3 original hookOne still fires exactly once
+[EVO] PASS C3 removed hookTwo no longer fires
+[EVO] applied stageC3-C: len=1348 sha256=05bceacded5fd1d198b21181b10ab5755e2d286cf112b3b080305fc72c28607e
+[EVO] PASS C3 applied bytes drop hookTwo
+[EVO] PASS C3 applied bytes keep hookOne
+[EVO] PASS C3 no LAYOUT-REJECT
+[EVO] STAGE-C3-DONE
+[EVO] RESULT FAIL failures=[timeout waiting for A cancellable return after hot swap, A2 A returns CANCELLED (generated conditional return active), A2 applied bytes contain the CANCELLED constant, A2 applied bytes contain the isCancelled conditional-return call, B2 unrelated input: A still returns CANCELLED]
+```
+
+Observed failures: `timeout waiting for A cancellable return`, `A2 A returns CANCELLED`,
+`A2 applied bytes contain the CANCELLED constant`, `A2 applied bytes contain the isCancelled
+conditional-return call`, and the unrelated-input control `B2 unrelated input: A still returns
+CANCELLED`. Scenarios B/C still pass (the product fix is in effect in this run), which is the
+specificity control: only the mutated assertion family goes red.
+
+---
+
+## 3. PRODUCT-FIX CONTROL — fix reverted (sync after reload), 2026-11-07T12:42
+This reproduces the product defect with a retained full log. Warn lines:
+`[Mixin] Failed to reload ... EvoBMixin ... Conform error ... [Conform injector evoB$two(...)]` and
+the same for `EvoCMixin` / `evoCHookTwo`. The target classes are never re-woven: `methodOne` keeps
+the v1 hook and `methodTwo` never gets `two v2`; `hookTwo` never appears. `RESULT FAIL`; driver exit 9.
+
+```text
+=== @Inject SELF-evolution, Fabric 1.21.1 end-to-end (item 2.6) ===
+mode: normal
+date: 2026-11-07T12:42:36+08:00
+agent: javaagent:E:\Users\ASUS\Desktop\Mods\nipx-hotswap\build\wt-inject-evolution\fabric-probe\.gradle\remold\remold-agent.jar
+[Remold] [Mixin] Re-weaving bridge registered (plugin-mixin)
+[EVO] targets loaded: com.example.evo.EvoTarget, com.example.evo.EvoSwitchTarget, com.example.evo.EvoLifecycleTarget
+[EVO] agent bytecodeCache reachable=true
+[EVO] PASS stage1 A returns original value
+[EVO] PASS stage1 A v1 hook fires exactly once
+[EVO] applied stage1-A: len=1296 sha256=5877ba0f9cd7bfa73b638e3a0f62e963c1c2047c21a24209ff7590790d8bf3d8
+[EVO] PASS stage1 A applied bytes carry the v1 hook
+[EVO] PASS stage1 A applied bytes carry no cancellation code
+[EVO] PASS stage1 B methodOne returns ONE
+[EVO] PASS stage1 B methodTwo returns TWO
+[EVO] PASS stage1 B methodOne hook fires exactly once
+[EVO] PASS stage1 B methodTwo has no hook
+[EVO] applied stage1-B: len=1410 sha256=3ab15764353a9ed78e5257312e6015874327c6c188c74460bf3948c8b4cdb535
+[EVO] PASS stage1 B applied bytes carry the methodOne hook
+[EVO] PASS stage1 B applied bytes carry no methodTwo hook
+[EVO] PASS stage1 C returns LIVE
+[EVO] PASS stage1 C hookOne fires exactly once
+[EVO] PASS stage1 C has no hookTwo
+[EVO] applied stage1-C: len=1348 sha256=188a488175944f2abf764456f0f3cfe0bc159081c250803116f9d05d9791d993
+[EVO] PASS stage1 C applied bytes carry hookOne
+[EVO] PASS stage1 C applied bytes carry no hookTwo
+[EVO] WAIT-STAGE1
+[Remold] [Mixin] com.example.evo.mixin.EvoAMixin reloaded; affected target(s): [com.example.evo.EvoTarget]
+[Remold] [Mixin] Target class com.example.evo.EvoTarget re-woven with updated mixin and redefined
+[EVO] PASS A2 A returns CANCELLED (generated conditional return active)
+[EVO] PASS A2 v2 hook fires exactly once
+[EVO] PASS A2 old v1 hook no longer fires
+[EVO] applied stageA2-A: len=1655 sha256=2f26cc92843f7fb4c21b1c8c162e53737360b18546839d6384f0b03acfabaa43
+[EVO] PASS A2 applied bytes contain the CANCELLED constant
+[EVO] PASS A2 applied bytes contain the isCancelled conditional-return call
+[EVO] PASS A2 applied bytes drop the stale v1 hook
+[EVO] PASS A2 unrelated input: B still v1 on methodOne
+[EVO] PASS A2 unrelated input: C still only hookOne
+[EVO] PASS A2 no LAYOUT-REJECT
+[EVO] STAGE-A2-DONE
+[Remold] [WARN] [Mixin] Failed to reload com.example.evo.mixin.EvoBMixin, please restart client: Conform error for evo.mixins.json:EvoBMixin from mod example_mod during activity: [Conform injector evoB$two(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfoReturnable;)V]
+[EVO] FAIL timeout waiting for B target-method switch after hot swap
+[EVO] PASS B2 methodOne returns ONE (original body restored)
+[EVO] FAIL B2 methodOne hook fully removed (no [EVO-B] one) [count=1]
+[EVO] PASS B2 methodTwo returns TWO
+[EVO] FAIL B2 methodTwo hook fires exactly once [count=0]
+[EVO] applied stageB2-B: len=1410 sha256=3ab15764353a9ed78e5257312e6015874327c6c188c74460bf3948c8b4cdb535
+[EVO] FAIL B2 applied bytes contain the methodTwo hook [applied len=1410 sha=3ab15764353a9ed7]
+[EVO] FAIL B2 applied bytes carry no stale methodOne hook [applied len=1410 sha=3ab15764353a9ed7]
+[EVO] PASS B2 unrelated input: A still returns CANCELLED
+[EVO] PASS B2 no LAYOUT-REJECT
+[EVO] STAGE-B2-DONE
+[Remold] [WARN] [Mixin] Failed to reload com.example.evo.mixin.EvoCMixin, please restart client: Conform error for evo.mixins.json:EvoCMixin from mod example_mod during activity: [Conform injector evoCHookTwo(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfoReturnable;)V]
+[EVO] FAIL timeout waiting for C added @Inject method applied after hot swap
+[EVO] PASS C2 C returns LIVE
+[EVO] FAIL C2 added hookTwo fires exactly once [count=0]
+[EVO] PASS C2 original hookOne still fires exactly once
+[EVO] applied stageC2-C: len=1348 sha256=188a488175944f2abf764456f0f3cfe0bc159081c250803116f9d05d9791d993
+[EVO] FAIL C2 applied bytes carry hookTwo [applied len=1348 sha=188a488175944f2a]
+[EVO] PASS C2 applied bytes carry hookOne
+[EVO] PASS C2 no LAYOUT-REJECT
+[EVO] STAGE-C2-DONE
+[EVO] PASS C3 C returns LIVE
+[EVO] PASS C3 original hookOne still fires exactly once
+[EVO] PASS C3 removed hookTwo no longer fires
+[EVO] applied stageC3-C: len=1348 sha256=188a488175944f2abf764456f0f3cfe0bc159081c250803116f9d05d9791d993
+[EVO] PASS C3 applied bytes drop hookTwo
+[EVO] PASS C3 applied bytes keep hookOne
+[EVO] PASS C3 no LAYOUT-REJECT
+[EVO] STAGE-C3-DONE
+[EVO] RESULT FAIL failures=[timeout waiting for B target-method switch after hot swap, B2 methodOne hook fully removed (no [EVO-B] one), B2 methodTwo hook fires exactly once, B2 applied bytes contain the methodTwo hook, B2 applied bytes carry no stale methodOne hook, timeout waiting for C added @Inject method applied after hot swap, C2 added hookTwo fires exactly once, C2 applied bytes carry hookTwo]
+```
+
+---
+
+## 4. BEFORE-FIX OBSERVATION (original red run, 2026-11-07T12:16:49+08:00)
+
+Excerpt captured from the first run on the unfixed product, before any code change. Its full log was
+overwritten by later runs on the same scratch project; run 3 above reproduces the identical outcome
+with a retained full log. Note the vacuous C3 "pass": because reload of EvoCMixin never succeeded,
+`hookTwo` never existed, so "removed hookTwo no longer fires" passed trivially.
+
+```text
+[Remold] [WARN] [Mixin] Failed to reload com.example.evo.mixin.EvoBMixin, please restart client: Conform error for evo.mixins.json:EvoBMixin from mod example_mod during activity: [Conform injector evoB$two(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfoReturnable;)V]
+[EVO] FAIL timeout waiting for B target-method switch after hot swap
+[EVO] FAIL B2 methodOne hook fully removed (no [EVO-B] one) [count=1]
+[EVO] FAIL B2 methodTwo hook fires exactly once [count=0]
+[EVO] FAIL B2 applied bytes contain the methodTwo hook [applied len=1410 sha=40c82df4f3494fc2]
+[EVO] FAIL B2 applied bytes carry no stale methodOne hook [applied len=1410 sha=40c82df4f3494fc2]
+[Remold] [WARN] [Mixin] Failed to reload com.example.evo.mixin.EvoCMixin, please restart client: Conform error for evo.mixins.json:EvoCMixin from mod example_mod during activity: [Conform injector evoCHookTwo(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfoReturnable;)V]
+[EVO] FAIL timeout waiting for C added @Inject method applied after hot swap
+[EVO] FAIL C2 added hookTwo fires exactly once [count=0]
+[EVO] FAIL C2 applied bytes carry hookTwo [applied len=1348 sha=e9bca30e3a9372308]
+[EVO] RESULT FAIL failures=[timeout waiting for B target-method switch after hot swap, B2 methodOne hook fully removed (no [EVO-B] one), B2 methodTwo hook fires exactly once, B2 applied bytes contain the methodTwo hook, B2 applied bytes carry no stale methodOne hook, B2 no LAYOUT-REJECT, timeout waiting for C added @Inject method applied after hot swap, C2 added hookTwo fires exactly once, C2 applied bytes carry hookTwo, C2 no LAYOUT-REJECT, C3 no LAYOUT-REJECT]
+```
+
+(The two `no LAYOUT-REJECT` failures in that run were a probe bookkeeping bug — the probe's own PASS
+line contained the literal lookup string. The final probe skips its own `[EVO]` lines; runs 1-3 do not
+show this false positive.)
+
+---
+
+## 5. Regression coverage added for the product fix
+
+- E2E: this fixture (`tests/fabric-mixin-probe/evo/`) — fix reverted → B/C red (section 3), fix applied
+  → all three scenarios green (section 1).
+- Unit: `tests/src/MixinClassInfoSyncTest` now has 3 cases (stale `ClassInfo` learns a new field; learns
+  a new/renamed injector method; rollback removes exactly the members added for a rejected reload while
+  keeping pre-existing members). Result: `tests="3" skipped="0" failures="0" errors="0"`.

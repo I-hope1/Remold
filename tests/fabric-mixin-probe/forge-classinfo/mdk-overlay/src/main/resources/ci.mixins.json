@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "ciprobe.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "ClassInfoTargetMixin",
+    "ClassInfoTargetSecondMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

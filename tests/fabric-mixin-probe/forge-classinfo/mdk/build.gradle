@@ -1,0 +1,80 @@
+// Minimal ForgeGradle 7 workspace for the Forge ClassInfo member-sync probe.
+// Materialised into <repo>/build/forge-classinfo/mdk by run-forge-classinfo.sh; the probe
+// sources come from tests/fabric-mixin-probe/forge-classinfo/mdk-overlay.
+plugins {
+    id 'java'
+    id 'net.minecraftforge.gradle' version '7.0.40'
+}
+
+version = '1.0.0'
+group = 'ciprobe'
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+minecraft {
+    mappings channel: 'official', version: '1.21.1'
+
+    runs {
+        configureEach {
+            workingDir = layout.projectDirectory.dir('run')
+        }
+
+        register('server') {
+            args '--nogui'
+        }
+    }
+}
+
+repositories {
+    minecraft.mavenizer(it)
+    maven fg.forgeMaven
+    maven fg.minecraftLibsMaven
+    mavenLocal()
+    mavenCentral()
+}
+
+dependencies {
+    implementation minecraft.dependency('net.minecraftforge:forge:1.21.1-52.1.21')
+    compileOnly 'org.spongepowered:mixin:0.8.7'
+}
+
+jar {
+    manifest {
+        attributes 'MixinConfigs': 'ci.mixins.json'
+    }
+}
+
+// The driver javacs the stage sources against this classpath while runServer holds the project
+// lock (a second Gradle build cannot run concurrently).
+tasks.register('printCompileCp') {
+    def cp = sourceSets.main.compileClasspath
+    doLast { println cp.asPath }
+}
+
+tasks.configureEach {
+    if (name == 'runServer') {
+        def ciAgent = project.findProperty('ciAgentJar')
+        def ciPlugin = project.findProperty('ciPluginJar')
+        def ciControl = project.findProperty('ciControlDir')
+        def watched = "${projectDir}/build/sourceSets/main".replace('\\', '/')
+        jvmArgs(
+            "-javaagent:${ciAgent}=" + watched,
+            "-XX:+IgnoreUnrecognizedVMOptions",
+            "-XX:+AllowEnhancedClassRedefinition",
+            "-Dremold.build_mode=auto",
+            "-Dremold.plugins=forge",
+            "-Dremold.plugin.jars=${ciPlugin}",
+            "-Dremold.agent.file_shake_ms=500",
+            "-Dremold.probe.classinfo=true",
+            "-Dremold.probe.classinfo.control=" + ciControl,
+            "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED",
+            "--add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED",
+            "--add-exports=java.base/jdk.internal.loader=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED"
+        )
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}

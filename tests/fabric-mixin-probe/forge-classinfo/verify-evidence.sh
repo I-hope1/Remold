@@ -15,8 +15,22 @@
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-JBR="${CI_JBR:-C:/Users/ASUS/.jdks/JBR-21}"
-[ -x "$JBR/bin/java" ] || { echo "[verify] FAILED: JDK 21 not found at $JBR (set CI_JBR)" >&2; exit 2; }
+
+# JDK 21 resolution: the same script may run under Git Bash (POSIX drive paths) or a shell where
+# only Windows drive paths resolve, so try both forms plus JAVA_HOME.
+resolve_jbr() {
+  local candidate
+  for candidate in "${CI_JBR:-}" "/c/Users/ASUS/.jdks/JBR-21" "C:/Users/ASUS/.jdks/JBR-21" "${JAVA_HOME:-}"; do
+    [ -n "$candidate" ] || continue
+    if [ -x "$candidate/bin/java" ] || [ -x "$candidate/bin/java.exe" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+JBR="$(resolve_jbr)" || { echo "[verify] FAILED: JDK 21 not found (set CI_JBR to a JDK 21 home)" >&2; exit 2; }
 
 FAILURES=0
 pass() { printf '[verify] PASS %s\n' "$*"; }

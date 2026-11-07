@@ -26,10 +26,25 @@ BUILD="$PROJ/build/forge-classinfo"
 MDK="$BUILD/mdk"
 CTRL="$BUILD/control"
 SERVER_LOG="$BUILD/server.log"
-JBR="${CI_JBR:-C:/Users/ASUS/.jdks/JBR-21}"
 
 log() { printf '[driver] %s\n' "$*"; }
 fail() { printf '[driver] FAILED: %s\n' "$*" >&2; exit "${2:-2}"; }
+
+# JDK 21 resolution: the same script may run under Git Bash (POSIX drive paths) or a shell where
+# only Windows drive paths resolve, so try both forms plus JAVA_HOME.
+resolve_jbr() {
+  local candidate
+  for candidate in "${CI_JBR:-}" "/c/Users/ASUS/.jdks/JBR-21" "C:/Users/ASUS/.jdks/JBR-21" "${JAVA_HOME:-}"; do
+    [ -n "$candidate" ] || continue
+    if [ -x "$candidate/bin/java" ] || [ -x "$candidate/bin/java.exe" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+JBR="$(resolve_jbr)" || fail "JDK 21 not found (set CI_JBR to a JDK 21 home)"
 
 [ -x "$JBR/bin/java" ] || fail "JDK 21 not found at $JBR (set CI_JBR)"
 

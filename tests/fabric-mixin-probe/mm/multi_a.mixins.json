@@ -1,0 +1,9 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.example.mixin.a",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": ["MixinA"],
+  "injectors": {"defaultRequire": 1},
+  "priority": 900
+}

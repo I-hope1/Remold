@@ -50,14 +50,11 @@ JBR="$(resolve_jbr)" || fail "JDK 21 not found (set CI_JBR to a JDK 21 home)"
 
 # ---------------------------------------------------------------- jars -----
 AGENT="$PROJ/core/build/libs/remold-agent.jar"
-plugin_jar() { ls "$PROJ"/plugin-forge/build/libs/remold-plugin-forge-*.jar 2>/dev/null | head -1; }
-
-if [ "${CI_SKIP_BUILD:-0}" != "1" ] || [ ! -f "$AGENT" ] || [ -z "$(plugin_jar)" ]; then
-  log "building remold-agent.jar + plugin-forge jar"
-  ( cd "$PROJ" && JAVA_HOME="$JBR" ./gradlew --offline -q :core:shadowJar :plugin-forge:jar ) \
-    || fail "gradle build of agent/plugin jars failed"
-fi
-[ -f "$AGENT" ] || fail "missing $AGENT"
+# Newest plugin jar, not the alphabetically first one: the build directory keeps jars from
+# earlier versions, and 0.2.0 sorts before 0.2.4 (an old jar would silently be exercised).
+plugin_jar() {
+  ls -t "$PROJ"/plugin-forge/build/libs/remold-plugin-forge-*.jar 2>/dev/null | grep -v -- '-sources.jar$' | head -1
+}
 PLUGIN="$(plugin_jar)"
 [ -n "$PLUGIN" ] || fail "missing plugin-forge jar"
 log "agent=$(basename "$AGENT") plugin=$(basename "$PLUGIN")"
@@ -226,6 +223,10 @@ if [ -z "$LABEL" ]; then
   fi
 fi
 EVIDENCE="$HERE/evidence/$LABEL.txt"
+# Never overwrite recorded evidence: an unattributable rerun must not destroy the baseline record.
+if [ -f "$EVIDENCE" ]; then
+  EVIDENCE="$HERE/evidence/${LABEL}-$(date +%H%M%S).txt"
+fi
 PROBE_TREE_SHA="$( cd "$HERE" && find . -type f \( -name '*.java' -o -name '*.gradle' -o -name '*.json' -o -name '*.toml' -o -name '*.sh' \) \
   -not -path './evidence/*' -not -path './fixtures/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1 )"
 

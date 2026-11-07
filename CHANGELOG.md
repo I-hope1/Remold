@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-11-07
+
+### Added
+- `@RemoldReinit` `scope` (`SELF` / `INCLUDE_SUBCLASSES`, default preserves current behaviour):
+  `SELF` reinitializes only exact declaring-class instances, with canonical host `Class`
+  normalization so JBR shadow-`Class` rewriting cannot corrupt the filter after a structural
+  redefine; static-field scope is ignored with a `[REINIT-SCOPE]` warn.
+- `plugin-forge` `ForgeMixinHotSwap`: reflectively reload changed `@Mixin` templates and cascade
+  re-weaving + `redefineDynamic` to loaded targets (Forge/ModLauncher).
+- Seconds-scale verification probes: multi-mixin same-target (Fabric + Forge), `@Inject`
+  self-evolution (cancellable / target-method switch / add-remove handler), `sourceBytecodeCache`
+  real-path matrix, `LayoutGate` reject -> next-round recover E2E, scope-reinit, shadow-Class
+  identity; `probeAll` aggregate task (not wired into `check`).
+
+### Fixed
+- `plugin-mixin`: added/renamed `@Inject` handler methods were rejected by `reloadMixin`'s conform
+  check because `MixinClassInfoSync` ran after reload; sync now runs before reload with rollback
+  when reload is rejected.
+- `plugin-forge`: changed Mixin templates were `defineClass`'d while `MixinInfo` stayed stale, so
+  target `@Inject` bodies never updated.
+- `core` profiler: shared mutable transformer state caused reentrant `classReader` clobbering
+  (`NullPointerException` / intermittent `ClassFormatError`); `transform` now uses per-call locals.
+- `core` profiler/LibTool: stale static-field `Class` references (JBR shadow `Class`) are
+  canonicalized at API boundaries; `toggleEntityProbe` catches `Throwable` and rolls back.
+- `core` layout: type-change reject summaries no longer claim the reader scan failed.
+- `plugin-arc`: `Injector` used the package-private `RemoldAgent.inst` across loaders; now uses
+  public `RemoldAgent.getInst()`.
+
 ## [0.2.3] - 2026-11-06
 
 ### Fixed

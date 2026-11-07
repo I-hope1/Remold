@@ -18,7 +18,7 @@ val modVersion = prop("mod_version")
 val modGroup = prop("mod_group")
 
 // Remold 版本：脚本 / agent / api 三者必须同版本
-val remoldVersion = providers.gradleProperty("remold.version").getOrElse("0.2.3")
+val remoldVersion = providers.gradleProperty("remold.version").getOrElse("0.2.4")
 
 version = modVersion
 group = modGroup

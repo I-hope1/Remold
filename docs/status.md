@@ -233,6 +233,8 @@
 | **槽位预留与侧表免漂移 (S2)** | P2 | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §3.3 | 基类字节码注入器 | 针对游戏高频基类预留 slot 或引入 `$extras` 侧表虚拟字段，实现基类新增字段物理布局完全零漂移 |
 | **持有者内存原地覆写与使用方 C2 逆优化 (S3)** | P3 | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §3.4 | `OffsetBindingIndex.getReaders` | 利用 `staticFieldBase/Offset` 原地更新 static final 常量，并对 direct reader 执行 `retransformClasses` 触发 C2 evol_method 依赖链逆优化 |
 
+| `probeAll` 聚合任务（Gradle 内置 JVM 探针，不进 `check`） | ✅ | `tests/build.gradle` | 显式 `./gradlew probeAll` 全绿：e2eProbe + DCEVM 套件（除 alignBaselineProbe，见任务说明）+ entity/shadow/class-identity/double-brace/retry/inject-conflict/fingerprint/redefineDynamic/pending-multi-loader/retransform-baseline/addField/initFix-fallback/initDrift-noise+perf 全部 PASS；`doLast` 列出外部容器探针脚本（Fabric C3/C5/mm、Forge C5/mm）及证据路径；外部脚本不在 probeAll 内启动。 |
+
 ### 4.2 技术债与死代码消除清单 (Tech Debt & Code Cleanup)
 
 | 债务 / 清理项 | 优先级 | 影响位置 | 现状分析与消除方案 |

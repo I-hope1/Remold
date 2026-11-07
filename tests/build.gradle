@@ -866,6 +866,9 @@ def remoldAgentDcevmProbe = { String taskName, String mainClassName, String desc
 remoldAgentDcevmProbe("cacheSourceMatrixProbe", "CacheSourceMatrixProbe",
 	"sourceBytecodeCache real-path matrix: first load / ordinary redefine / weave keeps pre-weave bytes / multi-loader no overwrite")
 
+remoldAgentDcevmProbe("layoutRejectRecoverProbe", "LayoutRejectRecoverProbe",
+	"LayoutGate reject -> next-round recover E2E: reject keeps live state/caches intact, no pending poison, next legal round applies")
+
 tasks.register("doubleBraceProbe", JavaExec) {
 	group = "verification"
 	description = "双括号匿名类 A~E / B2 调查探针"
@@ -1147,6 +1150,7 @@ tasks.register("probeAll") {
 	dependsOn "pendingAlignedMultiLoaderProbe"
 	dependsOn "retransformBaselineProbe"
 	dependsOn "cacheSourceMatrixProbe"
+	dependsOn "layoutRejectRecoverProbe"
 	dependsOn "addFieldProbe"
 	dependsOn "initFixFallbackProbe"
 	dependsOn "initDriftNoiseProbe"

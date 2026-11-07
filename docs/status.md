@@ -63,7 +63,7 @@
 | L0 存量字段初值变更检测（含实例门、继承措辞、聚合、诊断） | ✅ | `remold.ref.InitializerDrift` | `InitializerDriftTest` + `DoubleBraceProbe` L0 断言（80/0） |
 | 偏移漂移：继承字段检测、遮蔽去重、点分类名归一 | ✅ | `LayoutPredictor` / `SuperclassDriftGate` 绑定索引 | `LayoutPredictorTest` + `bdf245b` 用例 |
 | 真实 Fabric 1.21.1 主路径（含 Mixin 类自身热更） | ✅ | 探针：`tests/fabric-mixin-probe/C3Probe.java` | `RESULT PASS`、零 `INIT-DRIFT`（`evidence/c3-server-e2e.txt`） |
-| Forge 1.21.1（ModLauncher）Mixin 热更重织入 | 🔶 | 探针：`tests/fabric-mixin-probe/c5/` | 最小 MDK 探针（服务端 dev run、official mappings、Mixin 配置经 `MixinEnvironment.addConfiguration` 手动注册）下 `RESULT PASS`：`@Unique` 非初值 999 保留、`@Inject` 存活、InitFix 补字段成功（`evidence/c5-forge-e2e.txt`）。**未验证**：`mods.toml`/manifest 声明路径、真实模组/客户端、生产 refmap；实体探针在织入后的目标类上抛 `ClassFormatError`（见风险 19） |
+| Forge 1.21.1（ModLauncher）Mixin 热更重织入 | 🔶 | 探针：`tests/fabric-mixin-probe/c5/` | 最小 MDK 探针（服务端 dev run、official mappings、Mixin 配置经 `MixinEnvironment.addConfiguration` 手动注册）下 `RESULT PASS`：`@Unique` 非初值 999 保留、`@Inject` 存活、InitFix 补字段成功（`evidence/c5-forge-e2e.txt`）。**未验证**：`mods.toml`/manifest 声明路径、真实模组/客户端、生产 refmap；实体探针的共享状态/影子 Class 问题已修复（Forge 稳态 `counter=1`，见风险 19） |
 | 用户人工验收（模板场景 1–8，真实 Fabric 1.21.1 客户端） | ⬜ | — | 下一轮登记；Forge 列保持“未验证” |
 
 ---

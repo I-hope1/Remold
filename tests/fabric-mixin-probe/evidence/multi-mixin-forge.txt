@@ -1,6 +1,6 @@
 Multi-Mixin Forge end-to-end (item 2.5 Forge half) - stages 2-5
 =================================================================
-date: 2026-11-07T13:2x+08:00 (final green run started 13:19 +08:00, driver exit 0)
+date: 2026-11-07T13:20:01+08:00 (final green run summary timestamp; driver exit 0)
 branch: agent/mm-forge-complete
 base commit: 4a6b053 (main)
 product fix commit: b6e7854 "fix(plugin-forge): refresh Mixin templates and cascade target re-weaving"

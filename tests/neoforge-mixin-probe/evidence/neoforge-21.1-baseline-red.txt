@@ -1,0 +1,66 @@
+=== NeoForge native-[[mixins]] Mixin reload E2E evidence ===
+label=neoforge-21.1-baseline-red
+date=2026-11-07T23:09:30+08:00
+git_head=5fc1f403414d0ba2ca1b8d89787d150338115ff6
+neoforge=21.1.265 mc=1.21.1 moddevgradle=2.0.148 gradle=8.12 jbr=openjdk version "21.0.9" 2025-10-21
+launcher=ModDevGradle runServer --offline=1 (dev dedicated server) mixin_jar=sponge-mixin-0.16.4+mixin.0.8.7.jar
+mixin_registration=neoForge-native META-INF/neoforge.mods.toml [[mixins]] config="neprobe.mixins.json"
+add_opens=0
+agent_jar=remold-agent.jar sha256=f6225c68decb38258fa7048777473b030c8535190d20eba70e081edfb841ddf5
+plugin_jar=remold-plugin-forge-nosync.jar sha256=242d7f4bd6f1dff73ac6a27a51c8dba396f0d45920e65b0bf36997633f071d83
+probe_tree_sha256=3303402cc928a96c3745c0b01b37a1280824c5674c1824cd4aa8b372feda0095
+gradle_exit=0
+--- server log (Remold + probe markers) ---
+[Remold] [Plugin] Appended plugin JAR to system search: E:\Users\ASUS\Desktop\Mods\nipx-hotswap\build\neoforge-probe\remold-plugin-forge-nosync.jar
+[Remold] [Forge] Forge & NeoForge hot-reload integration initialized (via plugin: forge)
+[Remold] [Plugin] Automatically loaded and registered plugin: forge (remold.forge.ForgeHotswapPlugin)
+[Remold] DEBUG: false
+[Remold] Redefine Mode: inject
+[Remold] Injection Blacklist: 
+[Remold] InitFix: true
+[Remold] Force Static Lambda: false
+[Remold] HotSwap Event: false
+[Remold] Force Reinit: true
+[Remold] Lambda Align: true
+[Remold] Lambda Alignment ENABLED. Warning: This may cause logical shifts if lambdas are reordered.
+[Remold] File Shake MS: 500
+[Remold] UI Hook: false
+[Remold] Cell Property Ref: false
+[Remold] Anon Align: true (strict=false, debug=false, maxPerHost=128, timeoutMs=2000, layoutGate=reject, redefineLayoutGate=reject, localClassGuard=reject)
+[Remold] Anonymous Class Alignment ENABLED. Ambiguity is resolved conservatively (never by class name).
+[Remold] Structural HotSwap Supported: true
+[Remold] [Lib] Loaded libtool from: F:\windowTmp\remold_natives\tool64.dll
+[Remold] Watch paths updated across sources:
+[Remold] Scanning files...
+[23:06:03] [main/INFO] [mixin/]: SpongePowered MIXIN Subsystem Version=0.8.7 Source=union:/D:/data/.gradle/caches/modules-2/files-2.1/net.fabricmc/sponge-mixin/0.16.4+mixin.0.8.7/26d01f0567ab46e9ca0d2ed89d0ecc11aadbd433/sponge-mixin-0.16.4+mixin.0.8.7.jar%2394!/ Service=ModLauncher Env=SERVER
+		Remold NeoForge mixin probe 1.0.0 (neprobe)
+[23:06:04] [main/INFO] [mixin/]: Compatibility level set to JAVA_21
+[23:06:06] [main/INFO] [MixinExtras|Service/]: Initializing MixinExtras via com.llamalad7.mixinextras.service.MixinExtrasServiceImpl(version=0.5.5).
+[NP] PROBE-VERSION=neoforge-mixin-probe/1 control=E:\Users\ASUS\Desktop\Mods\nipx-hotswap\build\neoforge-probe\control
+[NP] PROBE-START
+[NP] BASELINE d1=1 d2=0 d3=1 seen1=123 seen3=-1 ret=T0 err=none
+[NP] CHECK NP-BASE PASS d1=1 d2=0 d3=1 seen1=123 seen3=-1 ret=T0 err=none
+[NP] NEXT stage1
+[Remold] [Forge/NeoForge] Successfully acquired Mixin transformer across ClassLoader: org.spongepowered.asm.mixin.transformer.MixinTransformer
+[Remold] [WARN] [Forge/NeoForge] Failed to reload Mixin neprobe.mixin.ProbeTargetMixin; restart the game to apply this change: java.lang.reflect.InvocationTargetException
+  Caused by: org.spongepowered.asm.mixin.transformer.throwables.MixinPreProcessorException: Conform error for neprobe.mixins.json:ProbeTargetMixin from mod neprobe during activity: [Conform injector npInject2(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfoReturnable;)V]
+  Caused by: java.lang.NullPointerException: Cannot invoke "org.spongepowered.asm.mixin.transformer.ClassInfo$Method.isUnique()" because "method" is null
+[NP] STAGE1 d1=1 d2=0 d3=1 seen1=123 seen3=-1 ret=T0 err=none
+[NP] CHECK NP-M1 FAIL new-handler-per-call-delta=0 err=
+[NP] CHECK NP-PRESERVE-1 PASS baseline-handler-per-call-delta=1 seen1=123 err=
+[NP] NEXT stage2
+[Remold] [Forge/NeoForge] Mixin neprobe.mixin.ProbeTargetSecondMixin reloaded; affected target(s): [neprobe.ProbeTarget]
+[Remold] [WARN] [Forge/NeoForge] Mixin re-weaving failed; falling back to source bytecode: neprobe.ProbeTarget (java.lang.reflect.InvocationTargetException)
+[Remold] [LAYOUT-READERS] scanned 5 class(es) for removed members of 1 class(es) in 86ms; dangling=0, abstract-gaps=0, dispatch-shifts=0
+[Remold] [WARN] [LAYOUT-WAIVE] Dynamic class neprobe.ProbeTarget: member(s) removed (field(s) removed: [uniqueA]) and no out-of-batch reader still needs them; redefining.
+[Remold] [DYNAMIC-REDEFINE] Successfully redefined neprobe.ProbeTarget
+[Remold] [Forge/NeoForge] Target class neprobe.ProbeTarget re-woven with the updated Mixin and redefined
+[NP] STAGE2 d1=0 d2=0 d3=0 seen1=123 seen3=-1 ret=T0 err=none
+[NP] CHECK NP-M2 FAIL new-unique-field-value=-1 err=
+[NP] CHECK NP-PRESERVE-2 FAIL template1-handler-delta=0 template2-handler-delta=0 seen1=123 err=
+[NP] RESULT-PROBE-DONE
+[NP] HALT rc=0
+--- driver facts ---
+[NP-DRIVER] phase=stage1 reload=rejected
+[NP-DRIVER] phase=stage2 reload=weave-failed
+[NP] VERDICT RED reasons=NP-M1,NP-M2,NP-PRESERVE-2 reload={stage1=rejected, stage2=weave-failed}

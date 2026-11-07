@@ -179,6 +179,26 @@ class HotswapSkipSummaryTest {
 	}
 
 	@Test
+	void layoutRejectLineForTypeChangeDoesNotClaimTheReaderScanFailed() {
+		// A field-type rejection carries a reason about surviving instances, not about the reader
+		// scan. The summary must not append "(reader scan could not complete)" there: the reader
+		// scan is not what rejected the change (AGENTS.md §8.1 — a log line must not assert an
+		// unexecuted / irrelevant path). Observed in LayoutRejectRecoverProbe round 1.
+		RemoldAgent.LayoutDecision d = new RemoldAgent.LayoutDecision(
+			RemoldAgent.LayoutAction.REJECT,
+			LayoutGate.checkChangedFields(List.of("- keep", "+ keep")),
+			"lr.Host", Set.of("lr.Host"),
+			"field type changed: [keep] with surviving instances");
+
+		String line = RemoldAgent.skipVerdictForLayout(d, RemoldAgent.RemovedMemberScan.NOT_SCANNED);
+
+		assertFalse(line.contains("reader scan could not complete"),
+			"a type-change summary must not claim the reader scan failed, actual: " + line);
+		assertTrue(line.contains("field type changed"),
+			"the summary still names the change kind, actual: " + line);
+	}
+
+	@Test
 	void verdictOmitsEmptyParts() {
 		// 不是每个判决都有细节可填（例如 BLACKLIST 之外的一些路径）。缺的部分不能留下
 		// 空的 "CODE:  — " 残骸。

@@ -273,7 +273,12 @@ final class LayoutDecisionEngine {
 		String note = null;
 		if (d.reason() != null) {
 			// 扫描没完成本身就是拒绝理由，必须说出来：否则"只是删了个字段"看起来像能放行。
-			note = "(reader scan could not complete)";
+			// 但只有"删成员"那一档的 reason 与读者扫描有关；字段改类型 / 物理漂移的 reason
+			// 讲的是存活实例或偏移漂移，在这里补"reader scan could not complete"会断言一条
+			// 与本次拒绝无关、甚至根本没执行的路径（AGENTS.md §8.1）。故按 verdict 收窄。
+			boolean removedMembers = d.layout() != null
+				&& d.layout().verdict() == LayoutGate.Verdict.REMOVED_FIELD;
+			if (removedMembers) note = "(reader scan could not complete)";
 		} else if (scan != null && scan.hasFindings()) {
 			note = "(" + describeFindings(scan) + ")";
 		}

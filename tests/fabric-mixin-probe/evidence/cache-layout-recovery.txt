@@ -1,0 +1,279 @@
+ITEM 5 EVIDENCE - sourceBytecodeCache real-path matrix + LayoutGate reject -> recover E2E
+====================================================================================================
+
+Branch:  agent/cache-and-layout-recovery (based on main @ 3aa774b)
+Scope:   probe 5A (cache matrix), probe 5B (layout reject -> next-round recover), product bug fix,
+         docs/acceptance manual checklist, probeAll wiring.
+Runtime: DCEVM: JBR-21.0.9+1-1163.86-jcef at C:/Users/ASUS/.jdks/JBR-21
+         build JDK: JBR-25.0.2+1-329.72-nomod (gradle 9.7.1)
+Rule:    every probe below is a pure-JVM JavaExec / JUnit run. No Minecraft/Fabric/Forge server,
+         no 120s polling. Each probe process finishes in a few seconds (see the Gradle BUILD lines).
+
+HOW TO REPRODUCE
+  ./gradlew :tests:cacheSourceMatrixProbe    -Pp05.jbr=C:/Users/ASUS/.jdks/JBR-21
+  ./gradlew :tests:layoutRejectRecoverProbe  -Pp05.jbr=C:/Users/ASUS/.jdks/JBR-21
+  ./gradlew :tests:test --tests SourceBytecodeCacheMatrixTest --tests remold.HotswapSkipSummaryTest
+
+====================================================================================================
+PART A - sourceBytecodeCache real-path matrix  (probe: tests/src/CacheSourceMatrixProbe.java)
+====================================================================================================
+
+Path exercised: the real agent installs AnnotationTransformer (premain) and the probe drives real
+Instrumentation.redefineClasses. Fixtures are compiled in memory; a registered, then removed,
+BytecodeTransformerBridge plays the Mixin weave role (adds a synthetic field).
+
+--- probe output (green) ---
+   [PASS] P0 instrumentation is available (must run with -javaagent remold-agent.jar)
+   [PASS] P0 enhanced class redefinition is enabled (weave step adds a field; use JBR/DCEVM)
+   [PASS] M1 precondition: the fixture runs v1
+   [PASS] M1 first load writes the source bytes into sourceBytecodeCache
+   [PASS] M1 read API returns the recorded source bytes
+   [PASS] M1 first load also seeds the runtime baseline with the same bytes (nothing woven yet)
+   [PASS] M2 precondition: the v2 bytes differ from v1
+   [PASS] M2 redefine took effect (business end: the live instance runs the v2 body)
+   [PASS] M2 ordinary redefine updates sourceBytecodeCache to the NEW bytes
+   [PASS] M2 read API returns the new source bytes
+   [PASS] M2 runtime baseline equals the new bytes while no weaver is registered
+   [PASS] M3 woven redefine took effect (business end: the live instance runs the v3 body)
+   [PASS] M3 sourceBytecodeCache keeps the ORIGINAL (pre-weave) new bytes
+   [PASS] M3 runtime baseline differs from the source bytes (the bridge did weave)
+   [PASS] M3 the woven field exists only in the runtime baseline, never in the source baseline
+   [PASS] M3 getSourceBytecode reads the pre-weave bytes
+   [PASS] M3 getRuntimeBytecode reads the woven bytes
+   [PASS] M3 MixinHotSwap.readOriginalBytes falls back to the pre-weave source bytes (in-memory class: no disk/resource copy exists)
+   [PASS] M4 precondition: the two loaders carry different bytes for the same binary name
+   [PASS] M4 precondition: each loader really runs its own version
+   [PASS] M4 the second loader's first load does NOT overwrite the source bytes recorded for the first loader
+   [PASS] M4 the runtime baseline also keeps the first loader's bytes (putIfAbsent)
+   [OBS] cache key is the dot class name only: getSourceBytecode("csmcache.Multi") returns loader-A bytes even when asked about loader-B's class. This probe asserts only that there is no cross-loader OVERWRITE; the name-keyed read side is a documented limitation (see PendingAlignedMultiLoaderProbe).
+   [PASS] M4 the read API stays on the first recorded bytes (name-keyed contract, no overwrite)
+
+=== SUMMARY: passed=23, failed=0 ===
+
+--- JUnit half (runs in :tests:test WITHOUT a JBR) ---
+tests/src/SourceBytecodeCacheMatrixTest.java - drives the same AnnotationTransformer#transform
+first-load / external-redefine / weave / multi-loader branches without a JVM redefine.
+Result: BUILD SUCCESSFUL — SourceBytecodeCacheMatrixTest tests=1/skipped=0/failures=0;
+        HotswapSkipSummaryTest tests=10/skipped=0/failures=0 (tests/build/test-results/test).
+
+--- contract matrix ---
+M1 first class load writes source bytes ......................... PASS
+M2 ordinary redefine updates source bytes + read API ........... PASS
+M3 weave keeps ORIGINAL pre-weave source bytes ................. PASS (runtime baseline = woven)
+M4 multi-ClassLoader same-name no cross-loader overwrite ....... PASS (putIfAbsent; name-keyed read limitation recorded as [OBS])
+
+PART A MUTATION CHECKS (red -> revert -> green)
+
+A1: remove the first-load source write
+  mutation (git diff):
+    diff --git a/core/src/remold/AnnotationTransformer.java b/core/src/remold/AnnotationTransformer.java
+    index 006a42f..3e695fc 100644
+    --- a/core/src/remold/AnnotationTransformer.java
+    +++ b/core/src/remold/AnnotationTransformer.java
+    @@ -283,7 +283,8 @@ public class AnnotationTransformer implements ClassFileTransformer {
+     				RemoldAgent.sourceBytecodeCache.put(dotClassName, classfileBuffer);
+     			} else {
+     				bytecodeCache.putIfAbsent(dotClassName, resultBytes);
+    -				RemoldAgent.sourceBytecodeCache.putIfAbsent(dotClassName, classfileBuffer);
+    +				// MUTATION A1: first-load source write removed
+    +				// RemoldAgent.sourceBytecodeCache.putIfAbsent(dotClassName, classfileBuffer);
+     			}
+     		}
+     		return modified ? bytes : null;
+  probe result: exit 1, === SUMMARY: passed=19, failed=4 ===
+       [FAIL] M1 first load writes the source bytes into sourceBytecodeCache
+       [FAIL] M1 read API returns the recorded source bytes
+       [FAIL] M4 the second loader's first load does NOT overwrite the source bytes recorded for the first loader
+       [FAIL] M4 the read API stays on the first recorded bytes (name-keyed contract, no overwrite)
+  JUnit result: exit 1 -> 1 test completed, 1 failed
+    SourceBytecodeCacheMatrixTest > sourceCacheMatrix() FAILED
+    > Task :tests:test FAILED
+    BUILD FAILED in 4s
+  revert  -> cacheSourceMatrixProbe green again (23/0).
+
+A2: loader isolation removed (sourceBytecodeCache.putIfAbsent -> put)
+  mutation (git diff):
+    diff --git a/core/src/remold/AnnotationTransformer.java b/core/src/remold/AnnotationTransformer.java
+    index 006a42f..48400f2 100644
+    --- a/core/src/remold/AnnotationTransformer.java
+    +++ b/core/src/remold/AnnotationTransformer.java
+    @@ -283,7 +283,8 @@ public class AnnotationTransformer implements ClassFileTransformer {
+     				RemoldAgent.sourceBytecodeCache.put(dotClassName, classfileBuffer);
+     			} else {
+     				bytecodeCache.putIfAbsent(dotClassName, resultBytes);
+    -				RemoldAgent.sourceBytecodeCache.putIfAbsent(dotClassName, classfileBuffer);
+    +				// MUTATION A2: loader isolation removed (putIfAbsent -> put)
+    +				RemoldAgent.sourceBytecodeCache.put(dotClassName, classfileBuffer);
+     			}
+     		}
+     		return modified ? bytes : null;
+  probe result: exit 1, === SUMMARY: passed=21, failed=2 ===
+       [FAIL] M4 the second loader's first load does NOT overwrite the source bytes recorded for the first loader
+       [FAIL] M4 the read API stays on the first recorded bytes (name-keyed contract, no overwrite)
+  JUnit result: exit 1 -> 1 test completed, 1 failed
+  revert  -> cacheSourceMatrixProbe green again (23/0).
+
+====================================================================================================
+PART B - LayoutGate reject -> next-round recover E2E  (probe: tests/src/LayoutRejectRecoverProbe.java)
+====================================================================================================
+
+Driver: the same private RemoldAgent.processChanges(Set<Path>, Class[]) the watcher calls, on a
+temp dir holding compiled fixture .class files. Rounds:
+  R0   method-body-only change                       -> must redefine (pipeline baseline)
+  R1   int -> long field-type change, live instance  -> must be REFUSED, live state + caches intact
+  CTL  the SAME type change, zero live instances     -> must be WAIVED (control: liveness is the cause)
+  R2   add field + body change immediately after R1   -> must redefine, new field patched by InitFix
+
+--- probe output (green) ---
+   [PASS] P0 instrumentation is available (must run with -javaagent remold-agent.jar)
+   [PASS] P0 enhanced class redefinition is enabled (round 2 adds a field; use JBR/DCEVM)
+   [PASS] R0 precondition: the fixture runs v1
+   [PASS] R0 precondition: first load captured the v1 source baseline
+   [PASS] R0 precondition: first load captured the v1 runtime baseline
+   [PASS] R0 precondition: lr.Host.keep is int
+   [PASS] R0: the live instance runs the new body (v1b)
+   [PASS] R0: the batch really redefined (HotSwap successful)
+   [PASS] R0: the runtime baseline advanced to v1b
+   [PASS] R0: the source baseline advanced to v1b
+   [PASS] R1: the batch logged [LAYOUT-REJECT] lr.Host
+   [PASS] R1: the rejection names the change kind (field type changed)
+   [PASS] R1: nothing was redefined this round (no HotSwap successful line)
+   [PASS] R1: the LAYOUT_GATE_REJECTED counter advanced by exactly one (actual delta=1)
+   [PASS] R1: the live instance still runs the OLD body (v1b) — reject did not half-apply
+   [PASS] R1: the live instance keeps its field value (7)
+   [PASS] R1: the class definition is intact (lr.Host.keep is still int)
+   [PASS] R1: bytecodeCache still holds the applied v1b baseline (no poisoned runtime baseline)
+   [PASS] R1: sourceBytecodeCache rolled back to the applied v1b baseline
+   [PASS] R1: no alignment/pending class entry was left behind
+   [PASS] R1: no InitFix pending patch was left behind
+   [PASS] R1: the FieldLedger for lr.Host is empty
+   [PASS] R1: the rejection was recorded once (same reason count = 1, no stuck loop yet)
+   [PASS] R1: no [LAYOUT-STUCK] warning on the first rejection
+   [PASS] CTL: no live instance ⇒ the same type change is WAIVED, not rejected (the reject in R1 is caused by the live instance)
+   [PASS] CTL: lr.Ctl was NOT rejected
+   [PASS] CTL: the waived class really redefined
+   [PASS] CTL: the runtime baseline advanced to the type-changed version
+   [PASS] CTL: the redefined class runs ctl2 (new code is live)
+   [PASS] R2: the next round is not blocked by the reject
+   [PASS] R2: the legal change redefined (HotSwap successful)
+   [PASS] R2: the surviving instance runs the new body AND the added field was initialized by InitFix to 99 (actual=v3:7:42:99)
+   [PASS] R2: the surviving instance's added field reads 99 through the class's own method
+   [PASS] R2: the pre-existing field value was preserved (7)
+   [PASS] R2: a newly created instance also initializes correctly (constructor path)
+   [PASS] R2: the runtime baseline advanced to v3
+   [PASS] R2: the source baseline advanced to v3
+   [PASS] R2: no pending InitFix patch remains after a successful apply
+   [PASS] R2: the FieldLedger stays empty (the added field was patched)
+   [PASS] R2: the reject record was cleared on success (no dirty lock)
+   [PASS] R2: the reject counter did not advance (this round passed the gate)
+
+=== SUMMARY: passed=41, failed=0 ===
+
+--- key production log lines captured during the run ---
+AGENT [INFO] HotSwap successful: 1 classes redefined.
+   [PASS] R0: the batch really redefined (HotSwap successful)
+AGENT [WARN] [LAYOUT-REJECT] lr.Host: REFUSED redefine — field type changed: [keep] with surviving instances (可在该字段上添加 @RemoldReinit 后再次编译保存，即可在不重启的情况下完成类型切换并重置初值). Host lr.Host and its anonymous classes are skipped this round; existing instances keep running the OLD code, so this edit will NOT take effect for them. TO PROCEED: 可在该字段上添加 @RemoldReinit 后再次编译保存，即可在不重启的情况下完成类型切换并重置初值；或 recreate/restart so the classes load fresh, or set -Dremold.agent.layout_gate=warn to force the redefine and accept the consequences.
+AGENT [WARN] [HOTSWAP-SKIPPED] 1 class(es) were skipped this round and did NOT take effect — the running code is still the previous version:
+AGENT [WARN] [HOTSWAP-SKIPPED]   lr.Host  <- LAYOUT-REJECT: field type changed: keep — annotate field(s) with @RemoldReinit, or revert the field change, or restart to continue
+   [PASS] R1: the batch logged [LAYOUT-REJECT] lr.Host
+   [PASS] R1: nothing was redefined this round (no HotSwap successful line)
+AGENT [WARN] [LAYOUT-WAIVE] lr.Ctl: incompatible field layout (field type changed: [keep]) but no live instances; redefining anyway — new instances go through the new constructor and initialize correctly.
+AGENT [INFO] HotSwap successful: 1 classes redefined.
+AGENT [LOG] [LAYOUT-ALLOW] lr.Host: added field(s) only (InitFix initializes surviving instances): [added]
+AGENT [INFO] HotSwap successful: 1 classes redefined.
+AGENT [INFO] Applying instance field init patch to lr.Host, count=1, fields=1
+AGENT [INFO] Instance field init patch for lr.Host done: fields=1, failedFields=[], skippedFields=[], elapsed=13ms
+   [PASS] R2: the legal change redefined (HotSwap successful)
+
+--- reject/recover state assertions (summary) ---
+R1 reject: LAYOUT-REJECT logged, counter +1, no "HotSwap successful", live instance still runs v1b,
+           keep field still int, bytecodeCache/sourceBytecodeCache still v1b, no pending patch,
+           empty FieldLedger, reject record count = 1, no LAYOUT-STUCK.
+R2 recover: next round not blocked, HotSwap successful, live instance reports v3:7:42:99,
+           addedValue() = 99, pre-existing keep = 7 preserved, new instance also correct,
+           baselines advanced to v3, reject record cleared, reject counter unchanged.
+Control:   identical field-type change on lr.Ctl (loaded, zero instances) -> LAYOUT-WAIVE +
+           redefine; the R1 reject is caused by the surviving instance, not by the type change.
+
+PART B MUTATION CHECK (red -> revert -> green)
+  mutation: lose the live-instance rejection (REJECT -> PASS in the CHANGED_FIELD_TYPE branch)
+    diff --git a/core/src/remold/LayoutDecisionEngine.java b/core/src/remold/LayoutDecisionEngine.java
+    index 3b87434..4714ee4 100644
+    --- a/core/src/remold/LayoutDecisionEngine.java
+    +++ b/core/src/remold/LayoutDecisionEngine.java
+    @@ -213,8 +213,8 @@ final class LayoutDecisionEngine {
+     			}
+     			// 情况 C：堆上有存活实例且未标 @RemoldReinit → 维持 LAYOUT-REJECT，优化提示文案
+     			String typeChangeHint = "可在该字段上添加 @RemoldReinit 后再次编译保存，即可在不重启的情况下完成类型切换并重置初值";
+    -			return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
+    -				"field type changed: " + typeChanged + " with surviving instances (" + typeChangeHint + ")");
+    +			// MUTATION B1: lost the live-instance rejection (REJECT -> PASS)
+    +			return new LayoutDecision(LayoutAction.PASS, res, host, Set.of());
+     		}
+     
+     		// 删除字段（实例或静态）但读者扫描未完成 → 只能拒绝。
+  probe result: exit 1, === SUMMARY: passed=11, failed=5 ===
+       [FAIL] R1: the batch logged [LAYOUT-REJECT] lr.Host
+       [FAIL] R1: nothing was redefined this round (no HotSwap successful line)
+       [FAIL] R1: the LAYOUT_GATE_REJECTED counter advanced by exactly one (actual delta=0)
+       [FAIL] R1: the live instance still runs the OLD body (v1b) — reject did not half-apply
+       [FAIL] probe aborted: java.lang.ClassCastException: class java.lang.Long cannot be cast to class java.lang.Integer (java.lang.Long and java.lang.Integer are in module java.base of loader 'bootstrap')
+  revert  -> layoutRejectRecoverProbe green again (41/0).
+
+====================================================================================================
+PRODUCT BUG FOUND AND FIXED ON THIS BRANCH
+====================================================================================================
+
+Symptom (observed in R1 above, before the fix): the round summary claimed the reader scan had not
+completed, although the reader scan had run and the rejection was about surviving instances:
+   LAYOUT-REJECT: field type changed: keep (reader scan could not complete) -- annotate ...
+   (the same round logged: [LAYOUT-READERS] scanned 2 class(es) ... dangling=0 ...)
+Cause: LayoutDecisionEngine.skipVerdictForLayout appended "(reader scan could not complete)" for any
+non-null decision reason. CHANGED_FIELD_TYPE / drift rejections carry a reason that has nothing to do
+with the reader scan. A log line must not assert a path that is irrelevant or never executed
+(AGENTS.md section 8.1).
+
+Fix (core/src/remold/LayoutDecisionEngine.java, skipVerdictForLayout): append the note only for
+REMOVED_FIELD rejections (the only verdict whose reason is about the reader scan).
+    diff --git a/core/src/remold/LayoutDecisionEngine.java b/core/src/remold/LayoutDecisionEngine.java
+    index 3b87434..8fece6b 100644
+    --- a/core/src/remold/LayoutDecisionEngine.java
+    +++ b/core/src/remold/LayoutDecisionEngine.java
+    @@ -273,7 +273,12 @@ final class LayoutDecisionEngine {
+     		String note = null;
+     		if (d.reason() != null) {
+     			// 扫描没完成本身就是拒绝理由，必须说出来：否则"只是删了个字段"看起来像能放行。
+    -			note = "(reader scan could not complete)";
+    +			// 但只有"删成员"那一档的 reason 与读者扫描有关；字段改类型 / 物理漂移的 reason
+    +			// 讲的是存活实例或偏移漂移，在这里补"reader scan could not complete"会断言一条
+    +			// 与本次拒绝无关、甚至根本没执行的路径（AGENTS.md §8.1）。故按 verdict 收窄。
+    +			boolean removedMembers = d.layout() != null
+    +				&& d.layout().verdict() == LayoutGate.Verdict.REMOVED_FIELD;
+    +			if (removedMembers) note = "(reader scan could not complete)";
+     		} else if (scan != null && scan.hasFindings()) {
+     			note = "(" + describeFindings(scan) + ")";
+     		}
+
+Regression test: tests/src/remold/HotswapSkipSummaryTest#layoutRejectLineForTypeChangeDoesNotClaimTheReaderScanFailed
+  before fix: exit 1
+    > Task :tests:test FAILED
+    HotswapSkipSummaryTest > layoutRejectLineForTypeChangeDoesNotClaimTheReaderScanFailed() FAILED
+  after fix : BUILD SUCCESSFUL
+  post-fix R1 summary line now reads:
+    [HOTSWAP-SKIPPED] lr.Host <- LAYOUT-REJECT: field type changed: keep -- annotate field(s) with @RemoldReinit, ...
+
+====================================================================================================
+EVIDENCE INDEX / ARTIFACTS
+====================================================================================================
+
+tests/src/CacheSourceMatrixProbe.java                   probe 5A (real agent + real redefine)
+tests/src/SourceBytecodeCacheMatrixTest.java            JUnit half of 5A (check-safe, no JBR)
+tests/build.gradle                                      task cacheSourceMatrixProbe; added to probeAll, NOT to check
+tests/fabric-mixin-probe/evidence/cache-layout-recovery.txt this file
+tests/src/LayoutRejectRecoverProbe.java                 probe 5B (agent + DCEVM, reject -> recover)
+tests/build.gradle                                      task layoutRejectRecoverProbe; added to probeAll, NOT to check
+core/src/remold/LayoutDecisionEngine.java               reject-summary wording fix (skipVerdictForLayout)
+tests/src/remold/HotswapSkipSummaryTest.java            regression test for the fixed wording
+docs/acceptance/01-manual-checklist.md                  manual acceptance template (scenarios 1-8, build column empty)
+docs/status.md                                          link to the checklist + item-5 probe evidence rows
+

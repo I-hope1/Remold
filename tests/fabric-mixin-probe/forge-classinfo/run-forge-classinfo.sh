@@ -210,7 +210,7 @@ if [ -z "$LABEL" ]; then
     LABEL="forge-1.21.1-baseline"
   fi
 fi
-EVIDENCE="$HERE/evidence/$LABEL.log"
+EVIDENCE="$HERE/evidence/$LABEL.txt"
 PROBE_TREE_SHA="$( cd "$HERE" && find . -type f \( -name '*.java' -o -name '*.gradle' -o -name '*.json' -o -name '*.toml' -o -name '*.sh' \) \
   -not -path './evidence/*' -not -path './fixtures/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1 )"
 

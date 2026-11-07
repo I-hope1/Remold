@@ -73,10 +73,10 @@ MDK 工作区每次由 `mdk/` + `mdk-overlay/` 重新物化到 `<repo>/build/for
 
 | 文件 | 含义 |
 |:--|:--|
-| [`evidence/forge-1.21.1-baseline.log`](evidence/forge-1.21.1-baseline.log) | 当前实现（Forge 侧**没有** ClassInfo 成员同步）的真实运行：`RED`，阶段 1 被 Mixin 的 conform 校验拒绝，阶段 2 的重织入失败后回退源码字节码、把已织入的成员一起丢掉（`CI-PRESERVE-2` 变红）。这是本战役要修的缺陷的真实形态。 |
+| [`evidence/forge-1.21.1-baseline.txt`](evidence/forge-1.21.1-baseline.txt) | 当前实现（Forge 侧**没有** ClassInfo 成员同步）的真实运行：`RED`，阶段 1 被 Mixin 的 conform 校验拒绝，阶段 2 的重织入失败后回退源码字节码、把已织入的成员一起丢掉（`CI-PRESERVE-2` 变红）。这是本战役要修的缺陷的真实形态。 |
 
 绿腿（`*-after-fix*`）需要 `plugin-forge` 侧补上 ClassInfo 成员同步（战役批次 B）；同一份脚本在
-修复后复跑会自动落到 `forge-1.21.1-after-fix.log` 并被本目录验收命令复核。
+修复后复跑会自动落到 `forge-1.21.1-after-fix.txt` 并被本目录验收命令复核。
 
 ## 6. 明确的边界（不要读成“Forge 端到端全绿”）
 

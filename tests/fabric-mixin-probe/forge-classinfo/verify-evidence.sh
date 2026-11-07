@@ -88,7 +88,7 @@ FOUND_RED=0
 FOUND_GREEN=0
 
 # Re-evaluate every recorded evidence file against its own name contract.
-for ev in "$HERE"/evidence/*.log; do
+for ev in "$HERE"/evidence/*.txt; do
   [ -f "$ev" ] || continue
   case "$(basename "$ev")" in
     *-baseline*)

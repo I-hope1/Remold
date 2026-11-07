@@ -1,0 +1,9 @@
+modLoader="javafml"
+loaderVersion="[1,)"
+license="All Rights Reserved"
+
+[[mods]]
+modId="ciprobe"
+version="1.0.0"
+displayName="Remold Forge ClassInfo probe"
+description='''Fixture mod for the Forge-side Mixin ClassInfo member-sync E2E probe.'''

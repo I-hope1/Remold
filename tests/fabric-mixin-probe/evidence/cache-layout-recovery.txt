@@ -221,6 +221,48 @@ PART B MUTATION CHECK (red -> revert -> green)
   revert  -> layoutRejectRecoverProbe green again (41/0).
 
 ====================================================================================================
+PRODUCT BUG FOUND AND FIXED ON THIS BRANCH
+====================================================================================================
+
+Symptom (observed in R1 above, before the fix): the round summary claimed the reader scan had not
+completed, although the reader scan had run and the rejection was about surviving instances:
+   LAYOUT-REJECT: field type changed: keep (reader scan could not complete) -- annotate ...
+   (the same round logged: [LAYOUT-READERS] scanned 2 class(es) ... dangling=0 ...)
+Cause: LayoutDecisionEngine.skipVerdictForLayout appended "(reader scan could not complete)" for any
+non-null decision reason. CHANGED_FIELD_TYPE / drift rejections carry a reason that has nothing to do
+with the reader scan. A log line must not assert a path that is irrelevant or never executed
+(AGENTS.md section 8.1).
+
+Fix (core/src/remold/LayoutDecisionEngine.java, skipVerdictForLayout): append the note only for
+REMOVED_FIELD rejections (the only verdict whose reason is about the reader scan).
+    diff --git a/core/src/remold/LayoutDecisionEngine.java b/core/src/remold/LayoutDecisionEngine.java
+    index 3b87434..8fece6b 100644
+    --- a/core/src/remold/LayoutDecisionEngine.java
+    +++ b/core/src/remold/LayoutDecisionEngine.java
+    @@ -273,7 +273,12 @@ final class LayoutDecisionEngine {
+     		String note = null;
+     		if (d.reason() != null) {
+     			// 扫描没完成本身就是拒绝理由，必须说出来：否则"只是删了个字段"看起来像能放行。
+    -			note = "(reader scan could not complete)";
+    +			// 但只有"删成员"那一档的 reason 与读者扫描有关；字段改类型 / 物理漂移的 reason
+    +			// 讲的是存活实例或偏移漂移，在这里补"reader scan could not complete"会断言一条
+    +			// 与本次拒绝无关、甚至根本没执行的路径（AGENTS.md §8.1）。故按 verdict 收窄。
+    +			boolean removedMembers = d.layout() != null
+    +				&& d.layout().verdict() == LayoutGate.Verdict.REMOVED_FIELD;
+    +			if (removedMembers) note = "(reader scan could not complete)";
+     		} else if (scan != null && scan.hasFindings()) {
+     			note = "(" + describeFindings(scan) + ")";
+     		}
+
+Regression test: tests/src/remold/HotswapSkipSummaryTest#layoutRejectLineForTypeChangeDoesNotClaimTheReaderScanFailed
+  before fix: exit 1
+    > Task :tests:test FAILED
+    HotswapSkipSummaryTest > layoutRejectLineForTypeChangeDoesNotClaimTheReaderScanFailed() FAILED
+  after fix : BUILD SUCCESSFUL
+  post-fix R1 summary line now reads:
+    [HOTSWAP-SKIPPED] lr.Host <- LAYOUT-REJECT: field type changed: keep -- annotate field(s) with @RemoldReinit, ...
+
+====================================================================================================
 EVIDENCE INDEX / ARTIFACTS
 ====================================================================================================
 
@@ -230,4 +272,8 @@ tests/build.gradle                                      task cacheSourceMatrixPr
 tests/fabric-mixin-probe/evidence/cache-layout-recovery.txt this file
 tests/src/LayoutRejectRecoverProbe.java                 probe 5B (agent + DCEVM, reject -> recover)
 tests/build.gradle                                      task layoutRejectRecoverProbe; added to probeAll, NOT to check
+core/src/remold/LayoutDecisionEngine.java               reject-summary wording fix (skipVerdictForLayout)
+tests/src/remold/HotswapSkipSummaryTest.java            regression test for the fixed wording
+docs/acceptance/01-manual-checklist.md                  manual acceptance template (scenarios 1-8, build column empty)
+docs/status.md                                          link to the checklist + item-5 probe evidence rows
 

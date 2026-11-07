@@ -73,17 +73,24 @@ public class AlignBaselineProbe {
 	/** 覆盖 live/T.class 并等到 align 真的用这份新字节跑过一轮。 */
 	static void runRound(Path live, byte[] newBytes) throws Exception {
 		long expect = Arrays.hashCode(newBytes);
-		long before = remold.LambdaAligner.LAST_RESULT.newHash;
+		// LAST_RESULT is null until the agent's first alignment pass publishes a result; the
+		// initial directory scan may not run align for an unchanged file, so treat null as "no
+		// previous round" instead of dereferencing it.
+		long before = remold.LambdaAligner.LAST_RESULT == null
+			? Long.MIN_VALUE
+			: remold.LambdaAligner.LAST_RESULT.newHash;
 		Files.copy(newBytes.length > 0 ? writeTemp(live, newBytes) : null,
 			live.resolve("T.class"), StandardCopyOption.REPLACE_EXISTING);
 		long deadline = System.currentTimeMillis() + TIMEOUT_MS;
 		while (System.currentTimeMillis() < deadline) {
-			long now = remold.LambdaAligner.LAST_RESULT.newHash;
+			long now = remold.LambdaAligner.LAST_RESULT == null
+				? Long.MIN_VALUE
+				: remold.LambdaAligner.LAST_RESULT.newHash;
 			if (now == expect && now != before) return;
 			Thread.sleep(100L);
 		}
 		throw new IllegalStateException("等不到 align 处理新字节（expect=" + expect + " last="
-			+ remold.LambdaAligner.LAST_RESULT.newHash + "）");
+			+ (remold.LambdaAligner.LAST_RESULT == null ? "null" : remold.LambdaAligner.LAST_RESULT.newHash) + "）");
 	}
 
 	static Path writeTemp(Path live, byte[] bytes) throws Exception {

@@ -1169,6 +1169,7 @@ tasks.register("probeAll") {
 	dependsOn "lambdaBridgeProbe"
 	dependsOn "readerScanProbe"
 	dependsOn "cacheWarmingProbe"
+	dependsOn "alignBaselineProbe"
 	dependsOn "entityProbeToggleProbe"
 	dependsOn "shadowClassProbe"
 	dependsOn "scopeReinitProbe"
@@ -1194,9 +1195,7 @@ tasks.register("probeAll") {
 		println "  Fabric multi-mixin tests/fabric-mixin-probe/mm/run-mm.sh"
 		println "  Forge multi-mixin  tests/fabric-mixin-probe/mm-forge/run-mm.sh"
 		println "latest evidence: tests/fabric-mixin-probe/evidence/ (c3-server-e2e.txt, c5-forge-e2e.txt, multi-mixin-fabric.txt, multi-mixin-forge.txt)"
-		println "NOTE: alignBaselineProbe is intentionally NOT part of probeAll: in the tests runtime"
-		println "      classpath the agent auto-loads plugin-arc from the app loader and hits"
-		println "      IllegalAccessError (remold.Injector vs bootstrap RemoldAgent.inst). Run it"
-		println "      standalone with its own classpath; tracked as a known environment gap."
+		println "alignBaselineProbe is included (plugin-arc Injector now uses the public"
+		println "RemoldAgent.getInst() accessor instead of the package-private field)."
 	}
 }

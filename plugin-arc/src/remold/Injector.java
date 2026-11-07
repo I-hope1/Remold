@@ -24,7 +24,7 @@ public class Injector {
 	public static void redefineOneClass(Class<?> theClass, byte[] bytes) {
 		RemoldAgent.enterInternalRedefine(Collections.singleton(theClass.getName()));
 		try {
-			inst.redefineClasses(new ClassDefinition(theClass, bytes));
+			RemoldAgent.getInst().redefineClasses(new ClassDefinition(theClass, bytes));
 		} catch (Exception e) {
 			throw new RuntimeException(e);
 		} finally {
@@ -59,7 +59,7 @@ public class Injector {
 		}
 		RemoldAgent.enterInternalRedefine(targetNames);
 		try {
-			inst.redefineClasses(tasks.toArray(new ClassDefinition[0]));
+			RemoldAgent.getInst().redefineClasses(tasks.toArray(new ClassDefinition[0]));
 		} catch (ClassNotFoundException | UnmodifiableClassException e) {
 			throw new RuntimeException(e);
 		} finally {

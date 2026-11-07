@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Single Mixin `ClassInfo` member-sync engine `core/src/remold/reflect/ClassInfoMemberSync.java`:
+  both plugin-mixin (Fabric) and plugin-forge (Forge/NeoForge) are now thin adapters. The engine builds
+  its rollback handle before mutating the member sets, so a half-way failure rolls back on both sides
+  (the Fabric adapter previously leaked the members it had already added).
+- `tests/neoforge-mixin-probe/`: real NeoForge 21.1 dedicated-server E2E (`ModDevGradle runServer`,
+  MC 1.21.1) whose Mixin config is registered by the loader itself via the native
+  `META-INF/neoforge.mods.toml` `[[mixins]]` path - no manual `MixinEnvironment.addConfiguration`.
+- JPMS diagnostics: when the host ships Mixin as a named module without an opens edge, the sync path
+  and the re-weave bridge now report the exact `--add-opens org.spongepowered.mixin/...=ALL-UNNAMED`
+  argument instead of a bare reflective failure.
+
+### Fixed
+- Fabric `MixinClassInfoSync`: a failure between the field phase and the method phase leaked the
+  already-added members (the rollback handle was built only after both phases succeeded). The shared
+  engine now rolls back what was already added; covered by `ClassInfoMemberSyncTest`.
 - `plugin-forge` `ForgeClassInfoSync`: Mixin `ClassInfo` member sync across ModLauncher's
   ClassLoader boundary. Newly declared `@Mixin` fields/methods are added to the same `ClassInfo`
   instance **before** `IMixinTransformer.reload` and rolled back when reload is rejected; every

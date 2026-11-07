@@ -40,8 +40,13 @@ public final class ModLauncherMixinBridge implements BytecodeTransformerBridge {
 		if (looksLikeMixin(bytecode)) {
 			// Mixin 模板类是织入源，不是可加载类：登记为不可加载，并刷新 Mixin 运行期状态、
 			// 级联重织入它的目标类。全部通过反射穿透 ModLauncher 的 ClassLoader 隔离。
-			ForgeMixinHotSwap.handleIfMixin(inst::getAllLoadedClasses, resolveTransformer(loader),
-				dotClassName, bytecode);
+			// Test/no-agent path: without Instrumentation or a resolved transformer this is a
+			// pure pass-through (the bridge must stay safe when constructed with null).
+			Object mixinTransformer = resolveTransformer(loader);
+			if (inst != null && mixinTransformer != null) {
+				ForgeMixinHotSwap.handleIfMixin(inst::getAllLoadedClasses, mixinTransformer,
+					dotClassName, bytecode);
+			}
 			return bytecode;
 		}
 

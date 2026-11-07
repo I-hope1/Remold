@@ -1,9 +1,5 @@
-Multi-Mixin Fabric 1.21.1 end-to-end (item 2.5)
-date: 2026-11-07T11:11:54+08:00
-env: real Fabric KnotServer, real Remold -javaagent (fixed agent), two independent mixin configs:
-  multi_a.mixins.json -> MixinA (priority 900), multi_b.mixins.json -> MixinB (priority 1100), both @Mixin(MultiTarget.class)
-stages: baseline / MixinA-only update / MultiTarget update / both mixins in one batch / same-name @Unique
-
+Multi-Mixin Fabric 1.21.1 end-to-end (item 2.5, with same-name @Unique value isolation)
+date: 2026-11-07T11:27:16+08:00
 [MM] PASS stage1 return T0
 [MM] PASS stage1 A handler exactly once
 [MM] PASS stage1 B handler exactly once
@@ -11,14 +7,18 @@ stages: baseline / MixinA-only update / MultiTarget update / both mixins in one 
 [MM] PASS stage1 uniqueA/uniqueB visible
 [MM] PASS stage1 unique fields writable
 [MM] PASS stage1 two same-name @Unique fields merged
-[MM] FIELDS baseline=[uniqueA, sharedNameTag, uniqueB, fdbb776f$example_mod$sharedNameTag$0]
+[MM] PASS stage1 A shared value isolated
+[MM] PASS stage1 B shared value isolated
+[MM] FIELDS baseline=[uniqueA, sharedNameTag, uniqueB, fdb0a970$example_mod$sharedNameTag$0]
 [MM] PASS baseline no duplicate applied field names
 [MM] WAIT-STAGE1
 [MM] PASS stage2 A updated
 [MM] PASS stage2 B still alive exactly once
 [MM] PASS stage2 order unchanged
 [MM] PASS stage2 uniqueA/uniqueB preserved
-[MM] FIELDS stage2=[uniqueA, sharedNameTag, uniqueB, fdbb776f$example_mod$sharedNameTag$0]
+[MM] PASS stage2 A shared value isolated
+[MM] PASS stage2 B shared value isolated
+[MM] FIELDS stage2=[uniqueA, sharedNameTag, uniqueB, fdb0a970$example_mod$sharedNameTag$0]
 [MM] PASS stage2 no duplicate applied field names
 [MM] PASS stage2 no LAYOUT-REJECT
 [MM] STAGE2-DONE
@@ -27,18 +27,24 @@ stages: baseline / MixinA-only update / MultiTarget update / both mixins in one 
 [MM] PASS stage3 A once
 [MM] PASS stage3 B once
 [MM] PASS stage3 order unchanged
-[MM] FIELDS stage3=[uniqueA, sharedNameTag, uniqueB, fdbb776f$example_mod$sharedNameTag$0]
+[MM] PASS stage3 A shared value isolated
+[MM] PASS stage3 B shared value isolated
+[MM] FIELDS stage3=[uniqueA, sharedNameTag, uniqueB, fdb0a970$example_mod$sharedNameTag$0]
 [MM] PASS stage3 no duplicate applied field names
 [MM] STAGE3-DONE
 [MM] PASS stage4 A updated
 [MM] PASS stage4 B updated
 [MM] PASS stage4 order unchanged
 [MM] PASS stage4 uniqueA/uniqueB preserved
-[MM] FIELDS stage4=[uniqueA, sharedNameTag, uniqueB, fdbb776f$example_mod$sharedNameTag$0]
+[MM] PASS stage4 A shared value isolated
+[MM] PASS stage4 B shared value isolated
+[MM] FIELDS stage4=[uniqueA, sharedNameTag, uniqueB, fdb0a970$example_mod$sharedNameTag$0]
 [MM] PASS stage4 no duplicate applied field names
 [MM] STAGE4-DONE
-[MM] FIELDS final=[uniqueA, sharedNameTag, uniqueB, fdbb776f$example_mod$sharedNameTag$0]
+[MM] FIELDS final=[uniqueA, sharedNameTag, uniqueB, fdb0a970$example_mod$sharedNameTag$0]
 [MM] PASS stage5 no duplicate field names
 [MM] PASS stage5 two sharedNameTag fields survive
+[MM] PASS stage5 A shared value isolated
+[MM] PASS stage5 B shared value isolated
 [MM] STAGE5-DONE
 [MM] RESULT PASS failures=[]

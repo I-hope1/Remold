@@ -1,0 +1,36 @@
+Multi-Mixin Forge baseline (item 2.5) — FINDING: same-name @Unique fields collapse
+date: 2026-11-07T11:27:16+08:00
+Forge 1.21.1 / MDK runServer, two configs registered via MixinEnvironment.addConfiguration
+
+[MM-A] v1 uniqueA=111 shared=2222
+[MM-B] v1 uniqueB=222 shared=2222
+[MM-A] v1 uniqueA=111 shared=2222
+[MM-B] v1 uniqueB=222 shared=2222
+[MM-A] v1 uniqueA=111 shared=2222
+[MM-B] v1 uniqueB=222 shared=2222
+[MM-A] v1 uniqueA=111 shared=2222
+[MM-B] v1 uniqueB=222 shared=2222
+[MM-A] v1 uniqueA=111 shared=2222
+[MM-B] v1 uniqueB=222 shared=2222
+[MM-A] v1 uniqueA=111 shared=2222
+[MM-B] v1 uniqueB=222 shared=2222
+[MM-A] v1 uniqueA=111 shared=2222
+[MM-B] v1 uniqueB=222 shared=2222
+[MM-A] v1 uniqueA=111 shared=2222
+[MM-B] v1 uniqueB=222 shared=2222
+[MM-A] v1 uniqueA=111 shared=2222
+[MM-B] v1 uniqueB=222 shared=2222
+[MM-A] v1 uniqueA=111 shared=2222
+[MM-B] v1 uniqueB=222 shared=2222
+[MM-A] v1 uniqueA=111 shared=2222
+[MM-B] v1 uniqueB=222 shared=2222
+[MM-A] v1 uniqueA=111 shared=2222
+[MM-B] v1 uniqueB=222 shared=2222
+[MM-A] v1 uniqueA=111 shared=2222
+[MM-B] v1 uniqueB=222 shared=2222
+[MM-A] v1 uniqueA=111 shared=2222
+[MM-B] v1 uniqueB=222 shared=2222
+[MM-A] v1 uniqueA=111 shared=2222
+[MM-B] v1 uniqueB=222 shared=2222
+
+Note: stages 2-5 not run yet (probe trigger path mismatch in driver: server cwd is run/, driver touched run/mm-stage*.trigger).

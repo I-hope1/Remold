@@ -1,0 +1,208 @@
+Multi-Mixin Forge end-to-end (item 2.5 Forge half) - stages 2-5
+=================================================================
+date: 2026-11-07T13:2x+08:00 (final green run started 13:19 +08:00, driver exit 0)
+branch: agent/mm-forge-complete
+base commit: 4a6b053 (main)
+product fix commit: b6e7854 "fix(plugin-forge): refresh Mixin templates and cascade target re-weaving"
+fixture: tests/fabric-mixin-probe/mm-forge/{MultiMixinProbe.java,run-mm.sh,stages/*}
+
+Environment
+-----------
+  Forge            1.21.1-52.1.21 (ForgeGradle 7 dev runServer, official mappings, dedicated server)
+  Mixin            upstream SpongePowered Mixin 0.8.7 (Env=SERVER Service=ModLauncher)
+  JVM              JBR-21.0.9+1-1163.86 (C:/Users/ASUS/.jdks/JBR-21), -XX:+AllowEnhancedClassRedefinition
+  agent            build/wt-mm-forge/core/build/libs/remold-agent.jar
+                   sha256 7b60f713d2fb3c6ccb78662726db304ef0f52b005a171962ab90c4f24587b57e
+  plugin           build/wt-mm-forge/plugin-forge/build/libs/remold-plugin-forge-0.2.3.jar
+                   sha256 73793e554c8b37cdb9e29e98a2275e20574bba392af910cdf86839fff5c57a36
+  JVM args         -javaagent:<agent>=<forge-probe>/build/sourceSets/main -Dremold.plugins=forge
+                   -Dremold.probe.mm=true -Dremold.agent.file_shake_ms=500
+
+Fixture
+-------
+  target MultiTarget.fire() returns T0 (v1) -> T1 (v2)
+  two independent mixin configs registered programmatically via MixinEnvironment.addConfiguration:
+    multi_a.mixins.json (priority 900)  -> MixinA: @Unique uniqueA=10, @Unique sharedNameTag=100, @Inject HEAD
+    multi_b.mixins.json (priority 1100) -> MixinB: @Unique uniqueB=20, @Unique sharedNameTag=200, @Inject HEAD
+  stages: 1 baseline | 2 MixinA v2 only | 3 MultiTarget v2 | 4 MixinA v3 + MixinB v2 in one batch |
+          5 final same-name @Unique field layout observation
+
+Driver fixes carried by this fixture (the previous baseline could not reach stages 2-5)
+---------------------------------------------------------------------------------------
+  * Forge server cwd is run/: the probe's relative "run" resolved to run/run/. The driver now touches
+    BOTH run/<stage>.trigger and run/run/<stage>.trigger (mkdir -p run/run) and the probe accepts both
+    paths.
+  * The probe now reads the server log via candidates (mm.log when cwd=run/, run/mm.log from the
+    project root). Before this fix the LAYOUT-REJECT check silently read a nonexistent file and could
+    never fail; the probe now asserts at baseline that it can read the log
+    ("PASS stage1 probe can read the server log"), so the rejection check is demonstrably live.
+  * Every javac_stage is followed by a javap marker assertion on the compiled .class (driver exits 2 on
+    mismatch). One earlier iteration launched the server with stale UP-TO-DATE mixin classes and made a
+    later stage look green for the wrong reason; the guard turns that into a hard driver failure.
+
+Expected upstream-Mixin (Forge) layout semantics
+------------------------------------------------
+  Forge runs original SpongePowered Mixin 0.8.5/0.8.7, which MERGES two cross-mixin same-name @Unique
+  fields into ONE target field. Expected applied layout at baseline and after every stage: exactly
+  [uniqueA, sharedNameTag, uniqueB] -- no split into <sessionId>$<modId>$<name>$0, no duplicates, no
+  LAYOUT-REJECT. The merged sharedNameTag is one storage slot, so both handlers read the SAME value;
+  per-mixin value isolation is Fabric-only (sponge-mixin disambiguates).
+
+GREEN RUN - final (product fix b6e7854 applied; driver exit 0)
+==============================================================
+--- all [MM] / pipeline lines (extracted from run/mm.log) ---
+[MM] MIXIN-CONFIGS registered programmatically
+[MM] PASS stage1 return T0
+[MM] PASS stage1 A handler exactly once
+[MM] PASS stage1 B handler exactly once
+[MM] ORDER baseline=A,B
+[MM] PASS stage1 order A,B
+[MM] PASS stage1 probe can read the server log
+[MM] PASS stage1 uniqueA/uniqueB visible
+[MM] PASS stage1 unique fields writable
+[MM] FIELDS baseline=[uniqueA, sharedNameTag, uniqueB]
+[MM] PASS baseline FIELDS exactly [uniqueA, sharedNameTag, uniqueB]
+[MM] PASS baseline no duplicate field names
+[MM] PASS baseline same-name @Unique merged into one field
+[MM] PASS baseline no layout rejection
+[MM] PASS stage1 A handler reads uniqueA=111
+[MM] PASS stage1 B handler reads uniqueB=222
+[MM] PASS stage1 both handlers read the same merged sharedNameTag
+[MM] WAIT-STAGE1
+> [Remold] [Forge/NeoForge] Successfully acquired Mixin transformer across ClassLoader: org.spongepowered.asm.mixin.transformer.MixinTransformer
+[Remold] [Forge/NeoForge] Mixin com.example.examplemod.mixin.a.MixinA reloaded; affected target(s): [com.example.examplemod.multi.MultiTarget]
+> [Remold] [DYNAMIC-REDEFINE] Successfully redefined com.example.examplemod.multi.MultiTarget
+[Remold] [Forge/NeoForge] Target class com.example.examplemod.multi.MultiTarget re-woven with the updated Mixin and redefined
+[MM] PASS stage2 A updated
+[MM] PASS stage2 B still alive exactly once
+[MM] PASS stage2 order unchanged
+[MM] PASS stage2 uniqueA/uniqueB preserved
+[MM] FIELDS stage2=[uniqueA, sharedNameTag, uniqueB]
+[MM] PASS stage2 FIELDS exactly [uniqueA, sharedNameTag, uniqueB]
+[MM] PASS stage2 no duplicate field names
+[MM] PASS stage2 same-name @Unique merged into one field
+[MM] PASS stage2 no layout rejection
+[MM] PASS stage2 A handler reads uniqueA=111
+[MM] PASS stage2 B handler reads uniqueB=222
+[MM] PASS stage2 both handlers read the same merged sharedNameTag
+[MM] STAGE2-DONE
+> [Remold] [DIFF] com.example.examplemod.multi.MultiTarget:
+[Remold] HotSwap successful: 1 classes redefined.
+[MM] PASS stage3 target updated
+[MM] PASS stage3 A once
+[MM] PASS stage3 B once
+[MM] PASS stage3 order unchanged
+[MM] PASS stage3 uniqueA/uniqueB preserved
+[MM] FIELDS stage3=[uniqueA, sharedNameTag, uniqueB]
+[MM] PASS stage3 FIELDS exactly [uniqueA, sharedNameTag, uniqueB]
+[MM] PASS stage3 no duplicate field names
+[MM] PASS stage3 same-name @Unique merged into one field
+[MM] PASS stage3 no layout rejection
+[MM] PASS stage3 A handler reads uniqueA=111
+[MM] PASS stage3 B handler reads uniqueB=222
+[MM] PASS stage3 both handlers read the same merged sharedNameTag
+[MM] STAGE3-DONE
+[Remold] [Forge/NeoForge] Mixin com.example.examplemod.mixin.a.MixinA reloaded; affected target(s): [com.example.examplemod.multi.MultiTarget]
+[Remold] [Forge/NeoForge] Mixin com.example.examplemod.mixin.b.MixinB reloaded; affected target(s): [com.example.examplemod.multi.MultiTarget]
+[Remold] [DYNAMIC-REDEFINE] Successfully redefined com.example.examplemod.multi.MultiTarget
+[Remold] [Forge/NeoForge] Target class com.example.examplemod.multi.MultiTarget re-woven with the updated Mixin and redefined
+[Remold] [DYNAMIC-REDEFINE] no-op: com.example.examplemod.multi.MultiTarget runtime bytecode equals the baseline; no redefine performed (nothing to change).
+[Remold] [Forge/NeoForge] Target class com.example.examplemod.multi.MultiTarget re-woven with the updated Mixin and redefined
+[MM] PASS stage4 A updated
+[MM] PASS stage4 B updated
+[MM] PASS stage4 order unchanged
+[MM] PASS stage4 uniqueA/uniqueB preserved
+[MM] FIELDS stage4=[uniqueA, sharedNameTag, uniqueB]
+[MM] PASS stage4 FIELDS exactly [uniqueA, sharedNameTag, uniqueB]
+[MM] PASS stage4 no duplicate field names
+[MM] PASS stage4 same-name @Unique merged into one field
+[MM] PASS stage4 no layout rejection
+[MM] PASS stage4 A handler reads uniqueA=111
+[MM] PASS stage4 B handler reads uniqueB=222
+[MM] PASS stage4 both handlers read the same merged sharedNameTag
+[MM] STAGE4-DONE
+[MM] FIELDS stage5=[uniqueA, sharedNameTag, uniqueB]
+[MM] PASS stage5 FIELDS exactly [uniqueA, sharedNameTag, uniqueB]
+[MM] PASS stage5 no duplicate field names
+[MM] PASS stage5 same-name @Unique merged into one field
+[MM] PASS stage5 no layout rejection
+[MM] PASS stage5 uniqueA/uniqueB preserved
+[MM] PASS stage5 A handler reads uniqueA=111
+[MM] PASS stage5 B handler reads uniqueB=222
+[MM] PASS stage5 both handlers read the same merged sharedNameTag
+[MM] STAGE5-DONE
+[MM] RESULT PASS failures=[]
+
+Results table (final green run)
+-------------------------------
+ stage | expectation                                                                 | observed
+ 1     | T0; A once, B once; order A,B; uniqueA/uniqueB writable; layout exactly    | PASS (all)
+       | [uniqueA, sharedNameTag, uniqueB]; merged same-name field; no rejection    |
+ 2     | MixinA v2 effective; B v1 still exactly once; order A,B; uniqueA=111 /     | PASS (all)
+       | uniqueB=222 preserved; layout unchanged; no rejection                      |
+ 3     | MultiTarget v2 -> T1; A v2 once + B v1 once; order/values/layout unchanged | PASS (all)
+ 4     | MixinA v3 + MixinB v2 in one redefine batch; order/values/layout unchanged | PASS (all)
+ 5     | final layout exactly [uniqueA, sharedNameTag, uniqueB]; no duplicates;     | PASS (all)
+       | uniqueA/uniqueB preserved; no rejection                                    |
+ RESULT PASS failures=[]
+
+Pipeline observations (green run)
+---------------------------------
+  stage2: [Forge/NeoForge] Mixin ...MixinA reloaded; affected target(s): [MultiTarget]
+          [DYNAMIC-REDEFINE] Successfully redefined ...MultiTarget
+          [Forge/NeoForge] Target class ...MultiTarget re-woven with the updated Mixin and redefined
+          next fire(): [MM-A] v2 ... / [MM-B] v1 ...
+  stage3: target source change -> [DIFF] com.example.examplemod.multi.MultiTarget: *Modified: [fire()]
+          HotSwap successful: 1 classes redefined. (T1 + A v2 + B v1)
+  stage4: MixinA + MixinB reloaded, target redefined again (second queued flush is a no-op:
+          "[DYNAMIC-REDEFINE] no-op: ... runtime bytecode equals the baseline")
+  No [LAYOUT-REJECT] / [INIT-DRIFT] lines in the whole run.
+
+MUTATION CHECK - second mixin config registration disabled
+==========================================================
+  mutation: in the forge-probe copy of MultiMixinProbe.registerMixinConfigs(), the
+            addConfiguration(env, "multi_b.mixins.json") call was commented out (no multi_b config
+            -> MixinB is never applied). The probe source was restored afterwards (diff empty).
+--- key lines from the mutated run ---
+[MM] FAIL stage1 B handler exactly once
+[MM] FAIL stage1 order A,B
+[MM] FAIL baseline FIELDS exactly [uniqueA, sharedNameTag, uniqueB]
+[MM] RESULT FAIL failures=[stage1 B handler exactly once, stage1 order A,B, stage1 uniqueA/uniqueB visible, setUnique failed: java.lang.NoSuchFieldException: uniqueB, stage1 unique fields writable, baseline FIELDS exactly [uniqueA, sharedNameTag, uniqueB], stage1 B handler reads uniqueB=222, stage1 both handlers read the same merged sharedNameTag, timeout waiting for stage2 mixinA v2 + mixinB v1, stage2 B still alive exactly once, stage2 uniqueA/uniqueB preserved, stage2 FIELDS exactly [uniqueA, sharedNameTag, uniqueB], stage2 B handler reads uniqueB=222, stage2 both handlers read the same merged sharedNameTag, timeout waiting for stage3 target v2 + both mixins, stage3 B once, stage3 uniqueA/uniqueB preserved, stage3 FIELDS exactly [uniqueA, sharedNameTag, uniqueB], stage3 B handler reads uniqueB=222, stage3 both handlers read the same merged sharedNameTag, timeout waiting for stage4 both mixins updated in one batch, stage4 B updated, stage4 uniqueA/uniqueB preserved, stage4 FIELDS exactly [uniqueA, sharedNameTag, uniqueB], stage4 B handler reads uniqueB=222, stage4 both handlers read the same merged sharedNameTag, timeout waiting for stage5 final call, stage5 FIELDS exactly [uniqueA, sharedNameTag, uniqueB], stage5 uniqueA/uniqueB preserved, stage5 B handler reads uniqueB=222, stage5 both handlers read the same merged sharedNameTag]
+> Process 'command 'F:\files\java\jdks\JBR-21\bin\java.exe'' finished with non-zero exit value 3
+
+  outcome: RESULT FAIL (stage1 B handler exactly once, stage1 order A,B, baseline FIELDS, plus all
+  downstream B/value/layout checks). The probe calls System.exit(3) on failure and the Forge server
+  JVM exits with code 3, which Gradle reports as:
+    > Process 'command '<JBR>/bin/java.exe'' finished with non-zero exit value 3
+  => the fixture is sensitive to removing one of the two configs (both the FAIL result and the
+     nonzero probe exit code are observable).
+
+CAUSAL CONTROL - product fix reverted (去触发 control)
+=====================================================
+  control: the two new lines in ModLauncherMixinBridge.transform (ForgeMixinHotSwap.handleIfMixin)
+           were commented out and plugin-forge rebuilt (jar sha256 changed 73793e55... ->
+           4a5e3012...); the run was repeated; product code + jar were then restored (jar sha256 back
+           to 73793e55...).
+--- key lines from the control run ---
+> [Remold] [INJECTED] Successfully defined new class: com.example.examplemod.mixin.a.MixinA into TransformingClassLoader[TRANSFORMER]@345132865
+[MM] FAIL stage2 A updated
+[Remold] [INJECTED] Successfully defined new class: com.example.examplemod.mixin.b.MixinB into TransformingClassLoader[TRANSFORMER]@345132865
+[MM] FAIL stage4 A updated
+[MM] FAIL stage4 B updated
+[MM] RESULT FAIL failures=[timeout waiting for stage2 mixinA v2 + mixinB v1, stage2 A updated, timeout waiting for stage3 target v2 + both mixins, stage3 A once, timeout waiting for stage4 both mixins updated in one batch, stage4 A updated, stage4 B updated, timeout waiting for stage5 final call]
+
+  outcome: RESULT FAIL - stage2 A stayed v1 ("timeout waiting for stage2 mixinA v2 + mixinB v1",
+  "stage2 A updated"), stage4 A/B never updated, and the changed Mixin classes were wrongly
+  [INJECTED] as new classes into TransformingClassLoader (pre-fix behavior). Restoring the handler and
+  rebuilding the identical jar reproduced the green run above (jar sha256 73793e55...), so the green
+  result is attributable to this product change.
+
+Artifacts / reproducibility
+---------------------------
+  driver:        forge-probe/mm/run-mm.sh      (copied from tests/fabric-mixin-probe/mm-forge/run-mm.sh)
+  probe source:  forge-probe/src/main/java/com/example/examplemod/probe/MultiMixinProbe.java
+                 (copied from tests/fabric-mixin-probe/mm-forge/MultiMixinProbe.java)
+  full raw logs kept outside git (build output): forge-probe/mm/mm-final-green.log,
+                 mm-mm-mutation.log, mm-mm-control-red.log
+  build:         E:/Users/ASUS/Desktop/Mods/nipx-hotswap/build/wt-mm-forge
+                 ./gradlew :core:shadowJar :plugin-forge:jar -q

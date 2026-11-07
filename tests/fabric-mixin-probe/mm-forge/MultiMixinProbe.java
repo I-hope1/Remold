@@ -19,17 +19,25 @@ import java.util.Map;
 import java.util.function.BooleanSupplier;
 
 /**
- * Item 2.5: two independent mixin configs (multi_a priority 900, multi_b priority 1100) on the
- * same target class. Stages (user numbering):
- *   stage 1 baseline (both handlers + @Unique state + priority order + same-name @Unique fields)
- *   stage 2 MixinA-only hot update (MixinB must survive, run once, order unchanged)
+ * Item 2.5 Forge half: two independent mixin configs (multi_a priority 900, multi_b priority 1100) on
+ * the same target class. Stages (user numbering):
+ *   stage 1 baseline (both handlers + @Unique state + priority order + same-name @Unique layout)
+ *   stage 2 MixinA hot update (MixinB must survive, run once, order unchanged)
  *   stage 3 MultiTarget hot update (target + both mixins effective)
  *   stage 4 both mixins updated in one redefine batch
- *   stage 5 same-name @Unique field drift observation (applied bytecode field names)
+ *   stage 5 final same-name @Unique field layout observation
+ *
+ * Forge runs upstream SpongePowered Mixin 0.8.5 (not the Fabric sponge-mixin fork), which merges two
+ * cross-mixin @Unique fields that share a name into ONE target field. The expected stable layout is
+ * exactly [uniqueA, sharedNameTag, uniqueB] at every stage: no split into an extra
+ * {@code <sessionId>$...$sharedNameTag$0} field, no duplicates, no LAYOUT-REJECT. The merged
+ * sharedNameTag is a single storage slot, so both handlers must observe the same value; per-mixin
+ * value isolation is NOT expected on Forge (it is on Fabric).
  */
 public final class MultiMixinProbe {
 	static final String TARGET = "com.example.examplemod.multi.MultiTarget";
-	static final Path RUN = Path.of("run");
+	/** Forge 0.8.5 merge semantics: cross-mixin same-name @Unique collapses into one field. */
+	static final List<String> FORGE_FIELDS = List.of("uniqueA", "sharedNameTag", "uniqueB");
 	static final List<String> CAPTURED = Collections.synchronizedList(new ArrayList<>());
 	static final List<String> FAILURES = Collections.synchronizedList(new ArrayList<>());
 
@@ -78,17 +86,15 @@ public final class MultiMixinProbe {
 			check("stage1 B handler exactly once", count("[MM-B]") == 1);
 			baselineOrder = order();
 			out("ORDER baseline=" + baselineOrder);
+			check("stage1 order A,B", "A,B".equals(baselineOrder));
+			check("stage1 probe can read the server log", logContains("MIXIN-CONFIGS registered programmatically"));
 			int[] before = readUnique();
 			check("stage1 uniqueA/uniqueB visible", before[0] >= 0 && before[1] >= 0);
 			setUnique(111, 222);
 			check("stage1 unique fields writable", readUnique()[0] == 111 && readUnique()[1] == 222);
-			List<String> shared = sharedFieldNames();
-			check("stage1 two same-name @Unique fields merged", shared.size() == 2);
-			setSharedIsolation(shared);
+			expectForgeLayout("baseline");
 			call();
-			check("stage1 A shared value isolated", hasLine("[MM-A]", "shared=1111"));
-			check("stage1 B shared value isolated", hasLine("[MM-B]", "shared=2222"));
-			dumpAppliedFields("baseline");
+			checkHandlerValues("stage1");
 			out("WAIT-STAGE1");
 
 			// ---------------- stage 2: MixinA hot update only ----------------
@@ -98,11 +104,9 @@ public final class MultiMixinProbe {
 			check("stage2 B still alive exactly once", count("[MM-B] v1") == 1);
 			check("stage2 order unchanged", baselineOrder.equals(order()));
 			check("stage2 uniqueA/uniqueB preserved", readUnique()[0] == 111 && readUnique()[1] == 222);
+			expectForgeLayout("stage2");
 			call();
-			check("stage2 A shared value isolated", hasLine("[MM-A]", "shared=1111"));
-			check("stage2 B shared value isolated", hasLine("[MM-B]", "shared=2222"));
-			dumpAppliedFields("stage2");
-			check("stage2 no LAYOUT-REJECT", !logContains("LAYOUT-REJECT"));
+			checkHandlerValues("stage2");
 			out("STAGE2-DONE");
 
 			// ---------------- stage 3: MultiTarget hot update ----------------
@@ -113,10 +117,10 @@ public final class MultiMixinProbe {
 			check("stage3 A once", count("[MM-A] v2") == 1);
 			check("stage3 B once", count("[MM-B] v1") == 1);
 			check("stage3 order unchanged", baselineOrder.equals(order()));
+			check("stage3 uniqueA/uniqueB preserved", readUnique()[0] == 111 && readUnique()[1] == 222);
+			expectForgeLayout("stage3");
 			call();
-			check("stage3 A shared value isolated", hasLine("[MM-A]", "shared=1111"));
-			check("stage3 B shared value isolated", hasLine("[MM-B]", "shared=2222"));
-			dumpAppliedFields("stage3");
+			checkHandlerValues("stage3");
 			out("STAGE3-DONE");
 
 			// ---------------- stage 4: both mixins in one batch ----------------
@@ -127,22 +131,18 @@ public final class MultiMixinProbe {
 			check("stage4 B updated", count("[MM-B] v2") == 1);
 			check("stage4 order unchanged", baselineOrder.equals(order()));
 			check("stage4 uniqueA/uniqueB preserved", readUnique()[0] == 111 && readUnique()[1] == 222);
+			expectForgeLayout("stage4");
 			call();
-			check("stage4 A shared value isolated", hasLine("[MM-A]", "shared=1111"));
-			check("stage4 B shared value isolated", hasLine("[MM-B]", "shared=2222"));
-			dumpAppliedFields("stage4");
+			checkHandlerValues("stage4");
 			out("STAGE4-DONE");
 
-			// ---------------- stage 5: same-name @Unique drift ----------------
+			// ---------------- stage 5: final layout observation ----------------
 			awaitTrigger("mm-stage5.trigger");
 			pollUntil(() -> count("[MM-A] v3") == 1 && count("[MM-B] v2") == 1, 30_000, "stage5 final call");
-			List<String> fields = appliedFieldNames();
-			out("FIELDS final=" + fields);
-			check("stage5 no duplicate field names", fields.size() == new HashSet<>(fields).size());
-			check("stage5 two sharedNameTag fields survive", countFieldsContaining("sharedNameTag") == 2);
+			expectForgeLayout("stage5");
+			check("stage5 uniqueA/uniqueB preserved", readUnique()[0] == 111 && readUnique()[1] == 222);
 			call();
-			check("stage5 A shared value isolated", hasLine("[MM-A]", "shared=1111"));
-			check("stage5 B shared value isolated", hasLine("[MM-B]", "shared=2222"));
+			checkHandlerValues("stage5");
 			out("STAGE5-DONE");
 		} catch (Throwable t) {
 			out("PROBE-ERROR " + t);
@@ -198,6 +198,37 @@ public final class MultiMixinProbe {
 		CAPTURED.clear();
 	}
 
+	/** Integer printed by a mixin handler line, e.g. "[MM-A] v1 uniqueA=111 shared=2222". */
+	static int handlerInt(String prefix, String key) {
+		String needle = key + "=";
+		synchronized (CAPTURED) {
+			for (String s : CAPTURED) {
+				if (!s.contains(prefix)) continue;
+				int i = s.indexOf(needle);
+				if (i < 0) continue;
+				int j = i + needle.length();
+				int k = j;
+				while (k < s.length() && Character.isDigit(s.charAt(k))) k++;
+				if (k > j) return Integer.parseInt(s.substring(j, k));
+			}
+		}
+		return Integer.MIN_VALUE;
+	}
+
+	/**
+	 * End-to-end read-back through each mixin's own injected handler (the observable business result),
+	 * not through reflection: uniqueA=111 / uniqueB=222 must survive every hot update, and both
+	 * handlers must observe the SAME merged sharedNameTag value on Forge 0.8.5.
+	 */
+	static void checkHandlerValues(String phase) {
+		check(phase + " A handler reads uniqueA=111", handlerInt("[MM-A]", "uniqueA") == 111);
+		check(phase + " B handler reads uniqueB=222", handlerInt("[MM-B]", "uniqueB") == 222);
+		int sharedA = handlerInt("[MM-A]", "shared");
+		int sharedB = handlerInt("[MM-B]", "shared");
+		check(phase + " both handlers read the same merged sharedNameTag",
+			sharedA != Integer.MIN_VALUE && sharedA == sharedB);
+	}
+
 	static int[] readUnique() {
 		try {
 			return new int[]{readInt("uniqueA"), readInt("uniqueB")};
@@ -225,38 +256,24 @@ public final class MultiMixinProbe {
 		}
 	}
 
-	static List<String> sharedFieldNames() {
-		List<String> names = new ArrayList<>();
-		for (String f : appliedFieldNames()) if (f.contains("sharedNameTag")) names.add(f);
-		return names;
-	}
-
-	/** A's field initializer is 100, B's is 200; write distinct sentinels through each name. */
-	static void setSharedIsolation(List<String> names) {
-		try {
-			for (String n : names) {
-				Field f = target.getDeclaredField(n);
-				f.setAccessible(true);
-				int v = f.getInt(instance);
-				if (v == 100) f.setInt(instance, 1111);
-				else if (v == 200) f.setInt(instance, 2222);
-			}
-		} catch (Throwable t) {
-			fail("setSharedIsolation failed: " + t);
-		}
-	}
-
-	static boolean hasLine(String prefix, String needle) {
-		synchronized (CAPTURED) {
-			for (String s : CAPTURED) if (s.contains(prefix) && s.contains(needle)) return true;
-		}
-		return false;
-	}
-
 	static int countFieldsContaining(String part) {
 		int n = 0;
 		for (String f : appliedFieldNames()) if (f.contains(part)) n++;
 		return n;
+	}
+
+	/**
+	 * Forge upstream Mixin 0.8.5 layout invariant: exactly [uniqueA, sharedNameTag, uniqueB] after
+	 * every stage. A split (extra {@code $sharedNameTag$0} entry), a duplicate, or any layout
+	 * rejection fails the probe.
+	 */
+	static void expectForgeLayout(String phase) {
+		List<String> names = appliedFieldNames();
+		out("FIELDS " + phase + "=" + names);
+		check(phase + " FIELDS exactly " + FORGE_FIELDS, names.equals(FORGE_FIELDS));
+		check(phase + " no duplicate field names", names.size() == new HashSet<>(names).size());
+		check(phase + " same-name @Unique merged into one field", countFieldsContaining("sharedNameTag") == 1);
+		check(phase + " no layout rejection", !logContainsLayoutReject());
 	}
 
 	static List<String> appliedFieldNames() {
@@ -278,27 +295,39 @@ public final class MultiMixinProbe {
 		return names;
 	}
 
-	static void dumpAppliedFields(String phase) {
-		List<String> names = appliedFieldNames();
-		out("FIELDS " + phase + "=" + names);
-		check(phase + " no duplicate applied field names",
-			names.size() == new HashSet<>(names).size());
-	}
-
+	/**
+	 * The Forge server's working directory is {@code run/}, so the driver's {@code run/mm.log} is
+	 * just {@code mm.log} from the probe's point of view; Fabric probes run from the project root and
+	 * see {@code run/mm.log}. Read whichever exists (both if present) so the LAYOUT-REJECT check is
+	 * live instead of silently reading a missing file.
+	 */
 	static boolean logContains(String needle) {
-		try {
-			String log = Files.readString(RUN.resolve("mm.log"));
-			return log.contains(needle);
-		} catch (Throwable t) {
-			return false;
+		for (Path p : new Path[]{Path.of("mm.log"), Path.of("run", "mm.log")}) {
+			try {
+				if (Files.exists(p) && Files.readString(p).contains(needle)) return true;
+			} catch (Throwable ignored) {
+			}
 		}
+		return false;
 	}
 
+	/**
+	 * Real rejection markers only: {@code [LAYOUT-REJECT] class: ...} or the {@code [HOTSWAP-SKIPPED]}
+	 * summary line {@code ... <- LAYOUT-REJECT: ...}. Searching for the bare token would match the
+	 * probe's own "[MM] PASS ... no layout rejection" lines once they are in the log.
+	 */
+	static boolean logContainsLayoutReject() {
+		return logContains("[LAYOUT-REJECT]") || logContains("LAYOUT-REJECT:")
+			|| logContains("LAYOUT-REJECT ");
+	}
+
+	/** Trigger files: driver writes both run/&lt;name&gt; and run/run/&lt;name&gt; (Forge cwd is run/). */
 	static void awaitTrigger(String name) throws InterruptedException {
-		Path p = RUN.resolve(name);
+		Path a = Path.of("run", name);
+		Path b = Path.of(name);
 		long deadline = System.currentTimeMillis() + 120_000;
 		while (System.currentTimeMillis() < deadline) {
-			if (Files.exists(p)) return;
+			if (Files.exists(a) || Files.exists(b)) return;
 			Thread.sleep(250);
 		}
 		fail("timeout waiting for trigger " + name);

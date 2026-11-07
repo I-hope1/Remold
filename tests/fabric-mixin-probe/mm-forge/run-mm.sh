@@ -11,10 +11,33 @@ B="src/main/java/com/example/examplemod/mixin/b/MixinB.java"
 T="src/main/java/com/example/examplemod/multi/MultiTarget.java"
 CLASSES="build/sourceSets/main"
 
-mkdir -p run mm "$CLASSES"
-rm -f run/mm-stage*.trigger
+mkdir -p run run/run mm "$CLASSES"
+rm -f run/mm-stage*.trigger run/run/mm-stage*.trigger
+rm -f run/run/mm.log
 
 log() { printf '[driver:mm] %s\n' "$*"; }
+
+# Forge runServer's working directory is run/, so the probe's relative "run/<name>" resolves to
+# run/run/<name> while a project-root-relative driver writes run/<name>. Touch both locations so the
+# probe can see the trigger under either reading convention.
+trigger() {
+  local name="$1"
+  touch "run/$name" "run/run/$name"
+}
+
+# Verify the class file the JVM will load actually contains the expected version marker.
+# A stale/UP-TO-DATE Gradle compile silently feeds the previous stage's mixin bodies into the
+# server, which makes a later stage look green for the wrong reason (observed once in this probe).
+expect_marker() {
+  local class="$1" marker="$2"
+  local out
+  # JBR-21 ships javac but no javap; use the JDK on PATH (reads any class file version).
+  out="$(javap -v -p -cp "$CLASSES" "$class" 2>/dev/null)"
+  if ! printf '%s' "$out" | grep -qF "$marker"; then
+    log "STALE-COMPILE: $class does not contain marker '$marker'; refusing to launch"
+    exit 2
+  fi
+}
 
 javac_stage() {
   local tag="$1"; shift
@@ -43,6 +66,10 @@ JAVA_HOME="$JBR" ./gradlew compileJava -q > mm/compile-reset.log 2>&1 || {
   log "compileJava (reset) failed"; tail -20 mm/compile-reset.log; exit 2; }
 JAVA_HOME="$JBR" ./gradlew -q printCompileCp 2>/dev/null | tail -1 > mm/cp.txt || {
   log "printCompileCp failed"; exit 2; }
+expect_marker com.example.examplemod.mixin.a.MixinA "v1 uniqueA="
+expect_marker com.example.examplemod.mixin.b.MixinB "v1 uniqueB="
+expect_marker com.example.examplemod.multi.MultiTarget "String T0"
+log "reset compile verified: MixinA v1, MixinB v1, MultiTarget T0"
 
 log "launching Forge runServer with -javaagent"
 rm -f "$LOG"
@@ -60,24 +87,28 @@ wait_log "[MM] WAIT-STAGE1" 300 || { cleanup; exit 3; }
 log "stage2: MixinA v2 only"
 cp mm/stages/MixinA.v2.java "$A"
 javac_stage s2 "$A"
-touch run/mm-stage2.trigger
+expect_marker com.example.examplemod.mixin.a.MixinA "v2 uniqueA="
+trigger mm-stage2.trigger
 wait_log "[MM] STAGE2-DONE" 180 || { cleanup; exit 4; }
 
 log "stage3: MultiTarget v2"
 cp mm/stages/MultiTarget.v2.java "$T"
 javac_stage s3 "$T"
-touch run/mm-stage3.trigger
+expect_marker com.example.examplemod.multi.MultiTarget "String T1"
+trigger mm-stage3.trigger
 wait_log "[MM] STAGE3-DONE" 180 || { cleanup; exit 5; }
 
 log "stage4: MixinA v3 + MixinB v2 in one batch"
 cp mm/stages/MixinA.v3.java "$A"
 cp mm/stages/MixinB.v2.java "$B"
 javac_stage s4 "$A" "$B"
-touch run/mm-stage4.trigger
+expect_marker com.example.examplemod.mixin.a.MixinA "v3 uniqueA="
+expect_marker com.example.examplemod.mixin.b.MixinB "v2 uniqueB="
+trigger mm-stage4.trigger
 wait_log "[MM] STAGE4-DONE" 180 || { cleanup; exit 6; }
 
 log "stage5: same-name @Unique final observation"
-touch run/mm-stage5.trigger
+trigger mm-stage5.trigger
 wait_log "[MM] STAGE5-DONE" 120 || { cleanup; exit 7; }
 wait_log "[MM] RESULT" 60 || true
 sleep 2
@@ -87,6 +118,6 @@ trap - EXIT
 {
   echo "=== Multi-Mixin Forge end-to-end ==="
   echo "date: $(date -Iseconds)"
-  grep -aE "\[MM\]|MixinReload|LAYOUT-REJECT|INIT-DRIFT|HotSwap successful|RESULT" "$LOG" | tail -140
+  grep -aE "\[MM\]|MixinReload|LAYOUT-REJECT|INIT-DRIFT|HotSwap successful|RESULT" "$LOG" | tail -200
 } | tee mm/summary.txt
 log done

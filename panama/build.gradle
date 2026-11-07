@@ -20,6 +20,25 @@ publishing {
 				}
 			}
 		}
+		// 本地联调兼容：与 api / core / plugin-* 一致，把 JitPack 约定的 GitHub 坐标
+		// (com.github.I-hope1.Remold:panama:v<ver>) 同步发布到 mavenLocal，避免下游按该坐标
+		// 取运行时库时只能在远程 JitPack 命中。
+		jitpack(MavenPublication) {
+			groupId = 'com.github.I-hope1.Remold'
+			artifactId = 'panama'
+			version = "v${version}"
+			from components.java
+			pom {
+				name = 'remold-panama'
+				description = 'Panama (FFM API) and JNI support for Remold (JitPack compatible)'
+				licenses {
+					license {
+						name = 'The Apache License, Version 2.0'
+						url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+					}
+				}
+			}
+		}
 	}
 }
 

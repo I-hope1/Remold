@@ -6,7 +6,10 @@ pluginManagement {
     resolutionStrategy {
         eachPlugin {
             if (requested.id.id == "io.github.i-hope1.remold") {
-                useModule("com.github.I-hope1.Remold:gradle-plugin:${requested.version ?: remoldVersion}")
+                // JitPack 坐标统一带 v 前缀（与 api / core / plugin-* 的 jitpack publication 以及
+                // 仓库根的 remold.gradle(.kts) shim 一致）；用户写不写前缀都能命中。
+                val requestedPluginVersion = (requested.version ?: remoldVersion).toString().removePrefix("v")
+                useModule("com.github.I-hope1.Remold:gradle-plugin:v$requestedPluginVersion")
             }
         }
     }

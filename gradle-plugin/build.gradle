@@ -54,6 +54,9 @@ publishing {
 			from components.java
 			groupId = 'com.github.I-hope1.Remold'
 			artifactId = 'gradle-plugin'
+			// 与其余模块一致：JitPack 坐标用带 v 前缀的版本（`v0.2.5`）。漏掉这一行会让本地/离线
+			// 解析 `com.github.I-hope1.Remold:gradle-plugin:v<ver>` 悬空（模板 pluginManagement 正是这么要的）。
+			version = "v${version}"
 			pom {
 				name = 'remold-gradle-plugin'
 				description = 'Gradle plugin for Remold hot reload (JitPack publication)'

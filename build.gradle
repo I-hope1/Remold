@@ -74,3 +74,40 @@ tasks.register('packageFabricTemplate', Zip) {
 }
 
 assemble.dependsOn('packageModTemplate', 'packageFabricTemplate')
+
+// 发版自检：mavenLocal 必须同时具备两套发布坐标族（各模块 publishing 里的 `maven` 与 `jitpack`）。
+// 下游模板的 pluginManagement 用 `useModule("com.github.I-hope1.Remold:gradle-plugin:v<ver>")`，
+// 依赖用 `com.github.I-hope1.Remold:api:v<ver>`；任何一侧漏配/漏版本前缀都会让离线解析悬空
+// ——v0.2.5 发版时 `gradle-plugin` 的 jitpack 发布漏了 `version = "v${version}"` 就是这样暴露的。
+def remoldPublishableModules = [':api', ':core', ':gradle-plugin', ':panama',
+                                ':plugin-arc', ':plugin-fabric', ':plugin-forge', ':plugin-mixin']
+tasks.register('verifyReleaseCoordinates') {
+	group = 'verification'
+	description = '断言 mavenLocal 中 io.github.i-hope1.remold:*:<ver> 与 com.github.I-Hope1.Remold:*:v<ver> 两套坐标齐全'
+	remoldPublishableModules.each { dependsOn "${it}:publishToMavenLocal" }
+	doLast {
+		def ver = project.version.toString()
+		def home = System.getProperty('maven.repo.local') ?: new File(System.getProperty('user.home'), '.m2/repository').path
+		def rootDir = new File(home)
+		def missing = []
+		def rows = []
+		remoldPublishableModules.each { modulePath ->
+			def name = modulePath.substring(1)
+			def ioPom = new File(rootDir, "io/github/i-hope1/remold/${name}/${ver}/${name}-${ver}.pom")
+			def jitpackPom = new File(rootDir, "com/github/I-hope1/Remold/${name}/v${ver}/${name}-v${ver}.pom")
+			def ioOk = ioPom.isFile()
+			def jitpackOk = jitpackPom.isFile()
+			rows << String.format('[release]   %-14s io.github.i-hope1.remold = %-5s  com.github.I-hope1.Remold:v%s = %-5s',
+					name, ioOk, ver, jitpackOk)
+			if (!ioOk) missing << ioPom.toString()
+			if (!jitpackOk) missing << jitpackPom.toString()
+		}
+		logger.lifecycle('[release] mavenLocal 坐标自检（版本 ' + ver + '）:')
+		rows.each { logger.lifecycle(it) }
+		if (!missing.isEmpty()) {
+			throw new GradleException('[release] mavenLocal missing coordinates (templates would dangle): '
+					+ missing.join(' | '))
+		}
+		logger.lifecycle('[release] verifyReleaseCoordinates: 两套坐标族齐全')
+	}
+}

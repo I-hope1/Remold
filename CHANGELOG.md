@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Release tooling: the Gradle plugin's JitPack publication published the bare version (`0.2.5`),
+  while the packaged `remold.gradle(.kts)` shims and both project templates request
+  `com.github.I-hope1.Remold:gradle-plugin:v<version>` - so offline / `mavenLocal` resolution of the
+  plugin dangled. The publication now uses the `v`-prefixed version like every other module;
+  `panama` gained the JitPack publication it was missing; and all consumer coordinates were
+  canonicalized to the real repository account casing (`com.github.I-hope1.Remold`), which also
+  removes a Gradle module-metadata group-case mismatch that only appears when a `.module` file is
+  present.
+- New `verifyReleaseCoordinates` task (`./gradlew publishToMavenLocal verifyReleaseCoordinates`):
+  asserts that every publishable module has both coordinate families
+  (`io.github.i-hope1.remold:*:<ver>` and `com.github.I-Hope1.Remold:*:v<ver>`) under
+  `~/.m2/repository`, so a missing/mismatched publication fails the release instead of silently
+  dangling in the templates.
+
 ## [0.2.5] - 2026-11-07
 
 ### Added

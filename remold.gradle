@@ -7,7 +7,7 @@
 //
 // 插件来源（从高到低）：
 //   1. -Premold.pluginJar=<本地插件 jar> 或环境变量 REMOLD_PLUGIN_JAR（离线 / 本地开发用）
-//   2. JitPack 坐标 com.github.I-Hope1.Remold:gradle-plugin:v<version>，
+//   2. JitPack 坐标 com.github.I-hope1.Remold:gradle-plugin:v<version>，
 //      version 取 -Premold.version / gradle.properties 的 remoldVersion，缺省用下面的内联版本
 //
 // 注意：务必用 tag 地址引入本脚本（.../v<version>/remold.gradle），不要用 main ——
@@ -33,7 +33,7 @@ buildscript {
 			gradlePluginPortal()
 		}
 		dependencies {
-			classpath "com.github.I-Hope1.Remold:gradle-plugin:v${version}"
+			classpath "com.github.I-hope1.Remold:gradle-plugin:v${version}"
 		}
 	}
 }

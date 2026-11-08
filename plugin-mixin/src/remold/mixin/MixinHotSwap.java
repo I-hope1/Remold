@@ -162,7 +162,12 @@ public final class MixinHotSwap {
 		recordMixinReport(dotClassName, node);
 
 		if (targets.isEmpty()) {
-			RemoldAgent.info("[Mixin] " + dotClassName + " reloaded (no active targets to re-weave)");
+			// MixinConfig.reloadMixin 只在启动时解析出的 mixin 列表里查找；返回空说明该类
+			// 不在任何已注册配置的 mixin 列表中——即运行期新增的 Mixin 类。Mixin 的配置
+			// 列表不会随文件改动重读，因此新增 Mixin 无法热加；已有 Mixin 的修改不受影响。
+			RemoldAgent.warn("[Mixin] " + dotClassName + " is not registered in the startup Mixin config:"
+				+ " a brand-new Mixin class cannot be hot-added. Restart once so the config picks it up"
+				+ " (editing an existing Mixin stays hot-swappable).");
 			return true;
 		}
 		RemoldAgent.info("[Mixin] " + dotClassName + " reloaded; affected target(s): " + targets);

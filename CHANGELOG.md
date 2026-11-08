@@ -73,6 +73,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   right-click chat message) and its own Gradle build; the Toast client package is removed there.
 
 ### Fixed
+- `core` `remold.reflect.mixin`: extracted the Mixin config-diff / new-Mixin registration logic into a
+  loader-neutral, reflection-only engine (`MixinConfigDiffer`, `NewMixinRegistrar`, `LoadedTargetSuppressor`,
+  `MixinConfigContext`). No Mixin/ModLauncher compile-time dependency in core; `plugin-mixin` (Fabric) and
+  `plugin-forge` (Forge/NeoForge) are thin adapters.
+- Forge/NeoForge: `ModLauncherClassTrackerSpoof` temporarily removes target names from
+  `ModLauncherClassTracker.loadedClasses` inside the `prepare()` window, restores them in `finally`, and
+  fails closed when the tracker shape is unknown; `ForgeMixinConfigDiff` wires `onAssetsChanged` to the
+  shared engine and `ForgeMixinHotSwap.scheduleTargets` re-weaves the affected targets.
+- Real E2E: Forge 1.21.1 and NeoForge 21.1 dedicated servers now remove a Mixin name from
+  `*.mixins.json` (hook stops), re-add it together with a brand-new Mixin (both hooks fire); evidence
+  `tests/fabric-mixin-probe/forge-classinfo/evidence/forge-1.21.1-configdiff-after-fix.txt` and
+  `tests/neoforge-mixin-probe/evidence/neoforge-21.1-configdiff-after-fix.txt`.
 - `RemoldAgent`: split the single file debounce into two independent trailing-edge streams.
   Every `.class`/`.jar` event resets the **Class** quiet window (default lowered to **800 ms**);
   resource/config events use their own **250 ms** window and never postpone a Class batch.

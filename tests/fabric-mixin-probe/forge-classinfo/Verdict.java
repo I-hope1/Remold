@@ -3,6 +3,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -101,8 +102,20 @@ public final class Verdict {
             }
         }
 
-        Set<String> failing = new LinkedHashSet<>();
+        // Config-diff checks are optional for legacy fixtures, but a run that emits them must
+        // pass them: the probe only emits CI-CFG-* after the new config stages execute.
+        boolean configDiffObserved = checks.keySet().stream().anyMatch(id -> id.startsWith("CI-CFG-"));
+        List<String> requiredChecks = new ArrayList<>();
         for (String id : MEMBER_CHECKS) {
+            requiredChecks.add(id);
+        }
+        if (configDiffObserved) {
+            requiredChecks.add("CI-CFG-REMOVE");
+            requiredChecks.add("CI-CFG-READD");
+        }
+
+        Set<String> failing = new LinkedHashSet<>();
+        for (String id : requiredChecks) {
             Boolean value = checks.get(id);
             if (value == null) {
                 failing.add(id + "(missing)");

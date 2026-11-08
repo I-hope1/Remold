@@ -190,6 +190,24 @@ stage_template ClassInfoTargetSecondMixin ClassInfoTargetSecondMixin.v2.java sta
 wait_log "[CI] STAGE2 d1=" 300 "stage 2 measurement" || fail "stage 2 measurement never completed" 6
 wait_attribution "$OFF_STAGE2" 180 ciprobe.mixin.ClassInfoTargetSecondMixin || true
 
+# ------------------------------------------------ config diff: remove / re-add ----
+# The driver owns the watched config file; the probe only signals when to observe. Removal must
+# make the baseline handler disappear from the live target; re-adding it plus a brand-new Mixin
+# (ConfigNewMixin is compiled at startup but absent from the initial JSON) must bring both back.
+CFG="$MDK/build/sourceSets/main/ci.mixins.json"
+CFG_ORIGINAL="$BUILD/ci.mixins.original.json"
+cp "$HERE/mdk-overlay/src/main/resources/ci.mixins.json" "$CFG_ORIGINAL"
+
+log "config-diff stage: remove ClassInfoTargetMixin from ci.mixins.json"
+grep -v '"ClassInfoTargetMixin"' "$CFG_ORIGINAL" > "$CFG"
+touch "$CTRL/config-remove.go"
+wait_log "[CI] CONFIG-REMOVE " 180 "config removal measurement" || fail "config removal measurement never completed" 7
+
+log "config-diff stage: re-add ClassInfoTargetMixin and add ConfigNewMixin"
+awk '{ print } /"ClassInfoTargetSecondMixin"/ { print "    \"ConfigNewMixin\"," }' "$CFG_ORIGINAL" > "$CFG"
+touch "$CTRL/config-readd.go"
+wait_log "[CI] CONFIG-READD " 180 "config readd measurement" || fail "config readd measurement never completed" 8
+
 wait_log "[CI] RESULT-PROBE-DONE" 120 "probe completion" || true
 for _ in $(seq 1 90); do kill -0 "$GRADLE_PID" 2>/dev/null || break; sleep 1; done
 if kill -0 "$GRADLE_PID" 2>/dev/null; then

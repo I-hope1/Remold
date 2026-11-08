@@ -1,0 +1,86 @@
+=== NeoForge native-[[mixins]] Mixin reload E2E evidence ===
+label=neoforge-configdiff2
+date=2026-11-08T22:21:41+08:00
+git_head=e334bf2e6fb257c9cfd8b0af47d207d60f2a6e24
+neoforge=21.1.265 mc=1.21.1 moddevgradle=2.0.148 gradle=8.12 jbr=openjdk version "21.0.9" 2025-10-21
+launcher=ModDevGradle runServer --offline=1 (dev dedicated server) mixin_jar=sponge-mixin-0.16.4+mixin.0.8.7.jar
+mixin_registration=neoForge-native META-INF/neoforge.mods.toml [[mixins]] config="neprobe.mixins.json"
+add_opens=1
+agent_jar=remold-agent.jar sha256=0532d3cec88ceb24f98f0ef32e373e7336d95da60cff5651ee9b6d81f7080cfd
+plugin_jar=remold-plugin-forge-0.2.5.jar sha256=f5c04882ec153fbd0ee8296b003beab247b89ff06eaa04d16ab503fb7322a5da
+probe_tree_sha256=d8dabbb27ff2a5875f52f67f4fa93620e53c27c14ecb0ce47f8681e947a8630c
+gradle_exit=0
+--- server log (Remold + probe markers) ---
+WARNING: Unknown module: org.spongepowered.mixin specified to --add-opens
+WARNING: Unknown module: org.spongepowered.mixin specified to --add-opens
+[Remold] [Plugin] Appended plugin JAR to system search: E:\Users\ASUS\Desktop\Mods\nipx-hotswap\plugin-forge\build\libs\remold-plugin-forge-0.2.5.jar
+[Remold] [Forge] Forge & NeoForge hot-reload integration initialized (via plugin: forge)
+[Remold] [Plugin] Automatically loaded and registered plugin: forge (remold.forge.ForgeHotswapPlugin)
+[Remold] DEBUG: false
+[Remold] Redefine Mode: inject
+[Remold] Injection Blacklist: 
+[Remold] InitFix: true
+[Remold] Force Static Lambda: false
+[Remold] HotSwap Event: false
+[Remold] Force Reinit: true
+[Remold] Lambda Align: true
+[Remold] Lambda Alignment ENABLED. Warning: This may cause logical shifts if lambdas are reordered.
+[Remold] File Shake MS: 500
+[Remold] Asset Shake MS: 250
+[Remold] UI Hook: false
+[Remold] Cell Property Ref: false
+[Remold] Anon Align: true (strict=false, debug=false, maxPerHost=128, timeoutMs=2000, layoutGate=reject, redefineLayoutGate=reject, localClassGuard=reject)
+[Remold] Anonymous Class Alignment ENABLED. Ambiguity is resolved conservatively (never by class name).
+[Remold] Structural HotSwap Supported: true
+[Remold] [Lib] Loaded libtool from: F:\windowTmp\remold_natives\tool64.dll
+[Remold] Watch paths updated across sources:
+[Remold] Scanning files...
+[22:20:59] [main/INFO] [mixin/]: SpongePowered MIXIN Subsystem Version=0.8.7 Source=union:/D:/data/.gradle/caches/modules-2/files-2.1/net.fabricmc/sponge-mixin/0.16.4+mixin.0.8.7/26d01f0567ab46e9ca0d2ed89d0ecc11aadbd433/sponge-mixin-0.16.4+mixin.0.8.7.jar%2394!/ Service=ModLauncher Env=SERVER
+		Remold NeoForge mixin probe 1.0.0 (neprobe)
+[22:21:01] [main/INFO] [mixin/]: Compatibility level set to JAVA_21
+[22:21:03] [main/INFO] [MixinExtras|Service/]: Initializing MixinExtras via com.llamalad7.mixinextras.service.MixinExtrasServiceImpl(version=0.5.5).
+[NP] PROBE-VERSION=neoforge-mixin-probe/1 control=E:\Users\ASUS\Desktop\Mods\nipx-hotswap\build\neoforge-probe\control
+[NP] PROBE-START
+[NP] BASELINE d1=1 d2=0 d3=1 seen1=123 seen3=-1 d4=0 ret=T0 err=none
+[NP] CHECK NP-BASE PASS d1=1 d2=0 d3=1 seen1=123 seen3=-1 d4=0 ret=T0 err=none
+[NP] NEXT stage1
+[Remold] [Forge/NeoForge] Successfully acquired Mixin transformer across ClassLoader: org.spongepowered.asm.mixin.transformer.MixinTransformer
+[Remold] [Forge/NeoForge] Mixin class-info sync: neprobe.mixin.ProbeTargetMixin addedFields=0, addedMethods=1
+[Remold] [Forge/NeoForge] Mixin neprobe.mixin.ProbeTargetMixin reloaded; affected target(s): [neprobe.ProbeTarget]
+[NP] STAGE1 d1=1 d2=1 d3=1 seen1=123 seen3=-1 d4=0 ret=T0 err=none
+[NP] CHECK NP-M1 PASS new-handler-per-call-delta=1 err=
+[Remold] [DYNAMIC-REDEFINE] Successfully redefined neprobe.ProbeTarget
+[Remold] [Forge/NeoForge] Target class neprobe.ProbeTarget re-woven with the updated Mixin and redefined
+[NP] CHECK NP-PRESERVE-1 PASS baseline-handler-per-call-delta=1 seen1=123 err=
+[NP] NEXT stage2
+[Remold] [Forge/NeoForge] Mixin class-info sync: neprobe.mixin.ProbeTargetSecondMixin addedFields=1, addedMethods=0
+[Remold] [Forge/NeoForge] Mixin neprobe.mixin.ProbeTargetSecondMixin reloaded; affected target(s): [neprobe.ProbeTarget]
+[Remold] Applying instance field init patch to neprobe.ProbeTarget, count=1, fields=1
+[Remold] Instance field init patch for neprobe.ProbeTarget done: fields=1, failedFields=[], skippedFields=[], elapsed=14ms
+[Remold] [DYNAMIC-REDEFINE] Successfully redefined neprobe.ProbeTarget
+[Remold] [Forge/NeoForge] Target class neprobe.ProbeTarget re-woven with the updated Mixin and redefined
+[NP] STAGE2 d1=1 d2=1 d3=1 seen1=123 seen3=456 d4=0 ret=T0 err=none
+[NP] CHECK NP-M2 PASS new-unique-field-value=456 err=
+[NP] CHECK NP-PRESERVE-2 PASS template1-handler-delta=1 template2-handler-delta=1 seen1=123 err=
+[NP] NEXT config-remove
+[Remold] [Mixin] Config diff neprobe.mixins.json: removed=[ProbeTargetMixin] added=[] affected=[neprobe.ProbeTarget]
+[Remold] [LAYOUT-READERS] scanned 6 class(es) for removed members of 1 class(es) in 183ms; dangling=0, abstract-gaps=0, dispatch-shifts=0
+[Remold] [WARN] [LAYOUT-WAIVE] Dynamic class neprobe.ProbeTarget: member(s) removed (field(s) removed: [uniqueA]) and no out-of-batch reader still needs them; redefining.
+[NP] CONFIG-REMOVE d1=0 d2=0 d3=1 seen1=123 seen3=456 d4=0 ret=T0 err=none
+[Remold] [DYNAMIC-REDEFINE] Successfully redefined neprobe.ProbeTarget
+[Remold] [Forge/NeoForge] Target class neprobe.ProbeTarget re-woven with the updated Mixin and redefined
+[NP] CHECK NP-CFG-REMOVE PASS baseline-handler-delta=0 err=
+[NP] NEXT config-readd
+[Remold] [Mixin] New mixin neprobe.mixin.ProbeTargetMixin registered into config neprobe.mixins.json (targets=[neprobe/ProbeTarget])
+[Remold] [Mixin] New mixin neprobe.mixin.ConfigNewMixin registered into config neprobe.mixins.json (targets=[neprobe/ProbeTarget])
+[Remold] [Mixin] Config diff neprobe.mixins.json: removed=[] added=[ProbeTargetMixin, ConfigNewMixin] affected=[neprobe.ProbeTarget, neprobe.ProbeTarget]
+[NP] CONFIG-READD d1=1 d2=1 d3=1 seen1=0 seen3=456 d4=1 ret=T0 err=none
+[NP] CHECK NP-CFG-READD PASS baseline-handler-delta=1 new-mixin-handler-delta=1 err=
+[NP] RESULT-PROBE-DONE
+[NP] HALT rc=0
+[Remold] Applying instance field init patch to neprobe.ProbeTarget, count=1, fields=1
+[Remold] Instance field init patch for neprobe.ProbeTarget done: fields=1, failedFields=[], skippedFields=[], elapsed=1ms
+--- driver facts ---
+[NP-DRIVER] phase=stage1 reload=success
+[NP-DRIVER] phase=stage2 reload=success
+[NP] VERDICT GREEN reload={stage1=success, stage2=success}

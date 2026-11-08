@@ -105,6 +105,27 @@ public final class NeoProbe {
                         + " seen1=" + last.seen1 + " err=" + last.err);
             }
 
+            // ---- config diff: remove an existing mixin -----------------------------------
+            out("NEXT config-remove");
+            if (!awaitTrigger(control, "config-remove", 600)) {
+                check("NP-CFG-REMOVE", false, "trigger-missing");
+            } else {
+                Call last = settle(target, settleSeconds, c -> c.d1 == 0);
+                out("CONFIG-REMOVE " + last);
+                check("NP-CFG-REMOVE", last.d1 == 0, "baseline-handler-delta=" + last.d1 + " err=" + last.err);
+            }
+
+            // ---- config diff: re-add the removed mixin and a brand-new one --------------
+            out("NEXT config-readd");
+            if (!awaitTrigger(control, "config-readd", 600)) {
+                check("NP-CFG-READD", false, "trigger-missing");
+            } else {
+                Call last = settle(target, settleSeconds, c -> c.d1 > 0 && c.d4 > 0);
+                out("CONFIG-READD " + last);
+                check("NP-CFG-READD", last.d1 > 0 && last.d4 > 0,
+                    "baseline-handler-delta=" + last.d1 + " new-mixin-handler-delta=" + last.d4 + " err=" + last.err);
+            }
+
             out("RESULT-PROBE-DONE");
             done(0);
         } catch (Throwable t) {
@@ -121,13 +142,14 @@ public final class NeoProbe {
         int d3;
         int seen1 = -1;
         int seen3 = -1;
+        int d4;
         String ret = "";
         String err = "";
 
         @Override
         public String toString() {
             return "d1=" + d1 + " d2=" + d2 + " d3=" + d3 + " seen1=" + seen1 + " seen3=" + seen3
-                + " ret=" + (ret.isEmpty() ? "none" : ret) + " err=" + (err.isEmpty() ? "none" : err);
+                + " d4=" + d4 + " ret=" + (ret.isEmpty() ? "none" : ret) + " err=" + (err.isEmpty() ? "none" : err);
         }
     }
 
@@ -155,6 +177,7 @@ public final class NeoProbe {
         int h1 = ProbeTarget.hits1;
         int h2 = ProbeTarget.hits2;
         int h3 = ProbeTarget.hits3;
+        int h4 = ProbeTarget.hits4;
         Call call = new Call();
         try {
             call.ret = target.onReload();
@@ -164,6 +187,7 @@ public final class NeoProbe {
         call.d1 = ProbeTarget.hits1 - h1;
         call.d2 = ProbeTarget.hits2 - h2;
         call.d3 = ProbeTarget.hits3 - h3;
+        call.d4 = ProbeTarget.hits4 - h4;
         call.seen1 = ProbeTarget.seen1;
         call.seen3 = ProbeTarget.seen3;
         return call;

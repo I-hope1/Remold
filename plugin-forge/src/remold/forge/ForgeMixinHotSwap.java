@@ -185,6 +185,17 @@ final class ForgeMixinHotSwap {
 	}
 
 	/** 逐个把受影响的目标类重织入并重定义。串行执行，天然与 Remold 的批次锁互斥。 */
+	/** 配置差异（新增/删除 Mixin）后调度目标类重织入。 */
+	static void scheduleTargets(java.util.Collection<String> targets, InstrumentationHolder inst) {
+		if (targets == null || targets.isEmpty() || inst == null) {
+			return;
+		}
+		synchronized (PENDING_LOCK) {
+			PENDING.addAll(targets);
+		}
+		WORKER.execute(() -> flushPendingTargets(inst));
+	}
+
 	private static void flushPendingTargets(InstrumentationHolder inst) {
 		List<String> batch;
 		synchronized (PENDING_LOCK) {

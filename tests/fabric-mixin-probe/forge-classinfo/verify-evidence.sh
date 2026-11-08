@@ -117,7 +117,7 @@ for ev in "$HERE"/evidence/*.txt; do
       grep -qF "[CI] RESULT-PROBE-DONE" "$ev" \
         || bad "$(basename "$ev"): probe did not run to completion"
       ;;
-    *-after-fix*)
+    *-after-fix*|*-after-ssot-refactor*)
       FOUND_GREEN=1
       expect_verdict "$ev" "GREEN"
       grep -qF "[CI-DRIVER] phase=stage1 reload=success" "$ev" \

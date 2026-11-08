@@ -45,7 +45,8 @@ tasks.configureEach {
         def npControl = project.findProperty('npControlDir')
         // Only the compiled classes carry the Mixin templates: the file watcher has to see the
         // stage javac land here, exactly like a dev-mode classpath mod.
-        def watched = "${projectDir}/build/classes/java/main".replace('\\', '/')
+        def watched = ("${projectDir}/build/classes/java/main" + File.pathSeparator
+            + "${projectDir}/build/resources/main").replace('\\', '/')
         jvmArguments.addAll(
             "-javaagent:${npAgent}=" + watched,
             "-XX:+IgnoreUnrecognizedVMOptions",

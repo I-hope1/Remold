@@ -32,6 +32,11 @@ public final class ModLauncherMixinBridge implements BytecodeTransformerBridge {
 		this.inst = inst;
 	}
 
+	/** 当前已解析的 Mixin 织入器；尚未解析时返回 null。 */
+	public Object activeTransformer() {
+		return resolveTransformer(null);
+	}
+
 	@Override
 	public byte[] transform(ClassLoader loader, String dotClassName, Class<?> targetClass, byte[] bytecode) {
 		if (dotClassName == null || bytecode == null) {

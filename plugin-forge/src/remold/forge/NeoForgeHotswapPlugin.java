@@ -1,6 +1,8 @@
 package remold.forge;
 
 import java.lang.instrument.Instrumentation;
+import java.nio.file.Path;
+import java.util.Set;
 
 import remold.HotswapPlugin;
 
@@ -17,5 +19,12 @@ public class NeoForgeHotswapPlugin implements HotswapPlugin {
 	@Override
 	public void onAgentInit(Instrumentation inst) {
 		ForgeHotswapPlugin.initShared(inst, getName());
+	}
+
+	@Override
+	public void onAssetsChanged(Set<Path> changedAssets) {
+		ForgeMixinConfigDiff.onAssetsChanged(changedAssets,
+			ForgeHotswapPlugin.activeTransformer(),
+			ForgeHotswapPlugin.instrumentation());
 	}
 }

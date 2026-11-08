@@ -1,6 +1,8 @@
 package remold.forge;
 
 import java.lang.instrument.Instrumentation;
+import java.util.Set;
+import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import remold.HotswapPlugin;
@@ -19,6 +21,8 @@ import remold.RemoldAgent;
 public class ForgeHotswapPlugin implements HotswapPlugin {
 
 	private static final AtomicBoolean INITIALIZED = new AtomicBoolean(false);
+	private static volatile Instrumentation instrumentation;
+	private static volatile ModLauncherMixinBridge mixinBridge;
 
 	@Override
 	public String getName() {
@@ -30,10 +34,28 @@ public class ForgeHotswapPlugin implements HotswapPlugin {
 		initShared(inst, getName());
 	}
 
+	@Override
+	public void onAssetsChanged(Set<Path> changedAssets) {
+		ForgeMixinConfigDiff.onAssetsChanged(changedAssets,
+			mixinBridge == null ? null : mixinBridge.activeTransformer(),
+			instrumentation == null ? null : instrumentation::getAllLoadedClasses);
+	}
+
+	static Object activeTransformer() {
+		return mixinBridge == null ? null : mixinBridge.activeTransformer();
+	}
+
+	static ForgeMixinHotSwap.InstrumentationHolder instrumentation() {
+		return instrumentation == null ? null : instrumentation::getAllLoadedClasses;
+	}
+
 	static void initShared(Instrumentation inst, String pluginName) {
 		if (INITIALIZED.compareAndSet(false, true)) {
 			try {
-				RemoldAgent.addTransformerBridge(new ModLauncherMixinBridge(inst));
+				instrumentation = inst;
+				ModLauncherMixinBridge bridge = new ModLauncherMixinBridge(inst);
+				mixinBridge = bridge;
+				RemoldAgent.addTransformerBridge(bridge);
 				RemoldAgent.addBatchListener(new ForgeEventBusRefresher(inst));
 				RemoldAgent.info("[Forge] Forge & NeoForge hot-reload integration initialized (via plugin: " + pluginName + ")");
 			} catch (Throwable t) {

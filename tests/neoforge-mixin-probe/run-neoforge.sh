@@ -319,6 +319,21 @@ expect_marker neprobe.mixin.ProbeTargetSecondMixin "ciAdded"
 wait_log "[NP] STAGE2 d1=" 300 "stage 2 measurement" || fail "stage 2 measurement never completed" 6
 wait_attribution "$OFF_STAGE2" 180 neprobe.mixin.ProbeTargetSecondMixin || true
 
+# ------------------------------------------------ config diff: remove / re-add ----
+CFG="$MDK/build/resources/main/neprobe.mixins.json"
+CFG_ORIGINAL="$BUILD/neprobe.mixins.original.json"
+cp "$HERE/mdk-overlay/src/main/resources/neprobe.mixins.json" "$CFG_ORIGINAL"
+
+log "config-diff stage: remove ProbeTargetMixin from neprobe.mixins.json"
+grep -v '"ProbeTargetMixin"' "$CFG_ORIGINAL" > "$CFG"
+touch "$CTRL/config-remove.go"
+wait_log "[NP] CONFIG-REMOVE " 240 "config removal measurement" || fail "config removal measurement never completed" 7
+
+log "config-diff stage: re-add ProbeTargetMixin and add ConfigNewMixin"
+awk '{ print } /"ProbeTargetSecondMixin"/ { print "    \"ConfigNewMixin\"," }' "$CFG_ORIGINAL" > "$CFG"
+touch "$CTRL/config-readd.go"
+wait_log "[NP] CONFIG-READD " 240 "config readd measurement" || fail "config readd measurement never completed" 8
+
 wait_log "[NP] RESULT-PROBE-DONE" 120 "probe completion" || true
 for _ in $(seq 1 90); do kill -0 "$GRADLE_PID" 2>/dev/null || break; sleep 1; done
 if kill -0 "$GRADLE_PID" 2>/dev/null; then

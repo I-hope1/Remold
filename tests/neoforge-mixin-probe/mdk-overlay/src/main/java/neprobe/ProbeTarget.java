@@ -22,6 +22,8 @@ public class ProbeTarget {
     public static volatile int seen1 = -1;
     /** Value of the {@code @Unique ciAdded} field added by the stage 2 template (456). */
     public static volatile int seen3 = -1;
+    /** Invocations of the handler added at runtime by the config-diff probe. */
+    public static volatile int hits4;
 
     public ProbeTarget() {
     }

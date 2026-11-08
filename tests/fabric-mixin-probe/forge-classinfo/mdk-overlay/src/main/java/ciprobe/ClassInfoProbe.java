@@ -102,6 +102,27 @@ public final class ClassInfoProbe {
                         + " uniqueSeen1=" + last.uniqueSeen1);
             }
 
+            // ---- config diff: remove an existing mixin -----------------------------------
+            out("NEXT config-remove");
+            if (!awaitTrigger(control, "config-remove", 300)) {
+                check("CI-CFG-REMOVE", false, "trigger-missing");
+            } else {
+                Call last = settle(onReload, instance, target, settleSeconds, c -> c.d1 == 0);
+                out("CONFIG-REMOVE " + last);
+                check("CI-CFG-REMOVE", last.d1 == 0, "baseline-handler-delta=" + last.d1 + " err=" + last.err);
+            }
+
+            // ---- config diff: re-add the removed mixin and a brand-new one --------------
+            out("NEXT config-readd");
+            if (!awaitTrigger(control, "config-readd", 300)) {
+                check("CI-CFG-READD", false, "trigger-missing");
+            } else {
+                Call last = settle(onReload, instance, target, settleSeconds, c -> c.d1 > 0 && c.d4 > 0);
+                out("CONFIG-READD " + last);
+                check("CI-CFG-READD", last.d1 > 0 && last.d4 > 0,
+                    "baseline-handler-delta=" + last.d1 + " new-mixin-handler-delta=" + last.d4 + " err=" + last.err);
+            }
+
             out("RESULT-PROBE-DONE");
             done(0);
         } catch (Throwable t) {
@@ -130,13 +151,14 @@ public final class ClassInfoProbe {
         int d3;
         int uniqueSeen1 = -1;
         int uniqueSeen3 = -1;
+        int d4;
         String err = "";
 
         @Override
         public String toString() {
             return "d1=" + d1 + " d2=" + d2 + " d3=" + d3
                 + " uniqueSeen1=" + uniqueSeen1 + " uniqueSeen3=" + uniqueSeen3
-                + " err=" + (err.isEmpty() ? "none" : err);
+                + " d4=" + d4 + " err=" + (err.isEmpty() ? "none" : err);
         }
     }
 
@@ -165,11 +187,13 @@ public final class ClassInfoProbe {
         int h1 = stat(target, "hits1");
         int h2 = stat(target, "hits2");
         int h3 = stat(target, "hits3");
+        int h4 = stat(target, "hits4");
         String err = callOnce(onReload, instance);
         Call call = new Call();
         call.d1 = stat(target, "hits1") - h1;
         call.d2 = stat(target, "hits2") - h2;
         call.d3 = stat(target, "hits3") - h3;
+        call.d4 = stat(target, "hits4") - h4;
         call.uniqueSeen1 = stat(target, "uniqueSeen1");
         call.uniqueSeen3 = stat(target, "uniqueSeen3");
         call.err = err;

@@ -20,6 +20,8 @@ public class ClassInfoTarget {
     public static volatile int uniqueSeen1 = -1;
     /** Value of the {@code @Unique} field added by the stage 2 template (456). */
     public static volatile int uniqueSeen3 = -1;
+    /** Invocations of the handler added at runtime by the config-diff probe. */
+    public static volatile int hits4;
 
     public ClassInfoTarget() {
     }

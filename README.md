@@ -104,7 +104,8 @@ git clone https://github.com/I-hope1/Remold && cd Remold
 ```
 
 - Mindustry 模组模板：[`mindustry-mod-template/`](mindustry-mod-template/README.md)（内置 PNG 贴图热更新演示）
-- Minecraft Fabric 模组模板：[`minecraft-fabric-template/`](minecraft-fabric-template/README.md)（内置 Mixin 重织入演示 + MC 1.21.4 客户端 gametest）
+- Minecraft Fabric 模组模板：[`minecraft-fabric-template/`](minecraft-fabric-template/README.md)（**MC 1.21.1 基准**，内置 Mixin 重织入 + 客户端 HotSwap Toast 演示）
+- 1.21.4 Fabric 客户端 gametest 探针：[`tests/fabric-gametest-1.21.4/`](tests/fabric-gametest-1.21.4/README.md)（1.21.1 的 fabric-api 不含 `fabric-client-gametest-api-v1`，该能力独立保存，不随模板发布）
 
 ## 想看原理？
 

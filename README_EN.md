@@ -101,7 +101,8 @@ git clone https://github.com/I-hope1/Remold && cd Remold
 ```
 
 - Mindustry mod template: [`mindustry-mod-template/`](mindustry-mod-template/README.md) (includes a PNG texture hot-reload demo)
-- Minecraft Fabric mod template: [`minecraft-fabric-template/`](minecraft-fabric-template/README.md) (includes a Mixin re-weaving demo)
+- Minecraft Fabric mod template: [`minecraft-fabric-template/`](minecraft-fabric-template/README.md) (**MC 1.21.1 baseline**; Mixin re-weaving + client HotSwap toast demo)
+- 1.21.4 Fabric client gametest probe: [`tests/fabric-gametest-1.21.4/`](tests/fabric-gametest-1.21.4/README.md) (1.21.1's fabric-api has no `fabric-client-gametest-api-v1`, so that capability is kept standalone and is not shipped with the template)
 
 ## Want the internals?
 

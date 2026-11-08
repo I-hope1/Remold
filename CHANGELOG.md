@@ -8,12 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `minecraft-fabric-template`: Minecraft **1.21.4** baseline (yarn 1.21.4+build.8,
-  loader 0.16.14, fabric-api 0.119.4+1.21.4) with Fabric client gametests
-  (`fabric-client-gametest-api-v1`): `./gradlew runClientGameTest`, `src/gametest` source set,
-  1.21.4 item-definition/model assets, and the `ActionResult` / `Item.Settings.registryKey`
-  API migrations. The gametest verifies item registration, the hotbar model screenshot and the
-  real right-click chat message.
+- `minecraft-fabric-template`: client-side **HotSwap result toast** (`com.example.client.*`) shown
+  after each hot-swap batch. It renders through 1.21.1's `Toast.draw(DrawContext, ToastManager, long)`
+  (1.21.1 has no `Toast.update`), reads the structured batch report when the agent provides it
+  (elapsed time / Mixin member deltas / InitFix stats), and degrades to an explicit "legacy agent"
+  card on the published 0.2.5 agent instead of fabricating zeros. `HotSwapToastModelTest` covers the
+  model formatting rules (unknown values, delta-known=false, three-line cap).
+
+### Changed
+- `minecraft-fabric-template`: the template baseline moves back from 1.21.4 to Minecraft **1.21.1**
+  (yarn 1.21.1+build.3, loader 0.16.9, fabric-api 0.105.0+1.21.1); 1.21.4 had no compatibility
+  advantage for 1.21.1 mod authors. The `ActionResult` / `Item.Settings.registryKey` migrations and
+  the 1.21.4 item-definition assets are gone with it.
+- The Fabric **client gametest** (`fabric-client-gametest-api-v1`, available from 1.21.4 only) is
+  preserved as the standalone probe `tests/fabric-gametest-1.21.4/` instead of pinning the template
+  to 1.21.4. It keeps the real-client assertions (item registration, hotbar model screenshot, real
+  right-click chat message) and its own Gradle build; the Toast client package is removed there.
 
 ### Fixed
 - Gradle plugin: the Remold agent JVM arguments were injected only into the loader `client` run

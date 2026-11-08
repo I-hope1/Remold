@@ -92,13 +92,7 @@ final class NewMixinRegistrar {
 			if (declaredTargets.isEmpty()) {
 				return Collections.emptyList();
 			}
-			String alreadyLoaded = firstLoadedTarget(declaredTargets);
-			if (alreadyLoaded != null) {
-				RemoldAgent.warn("[Mixin] New mixin " + dotClassName + " targets already-loaded class "
-					+ alreadyLoaded + "; a Mixin can only be added before its target class is loaded."
-					+ " Restart once to apply it (editing an existing Mixin stays hot-swappable).");
-				return Collections.emptyList();
-			}
+			List<String> loadedTargets = loadedTargets(declaredTargets);
 
 			// 已经登记过的类不在这里处理：正常的 reload 路径会返回非空目标列表。
 			if (findMixinInfo(config, dotClassName) != null) {
@@ -120,6 +114,17 @@ final class NewMixinRegistrar {
 				return Collections.emptyList();
 			}
 
+			// MixinInfo 构造器在目标已加载时会拒绝；Fabric 上用极窄窗口的 launcher 代理把
+			// 本次目标临时报告为“未加载”，构造完成后立刻恢复。别的加载器拿不到代理时 fail-closed。
+			Object launcherToken = FabricLauncherSpoof.suppress(loadedTargets);
+			if (!loadedTargets.isEmpty() && launcherToken == null) {
+				removeMixinClass(mixinClasses, simpleName);
+				RemoldAgent.warn("[Mixin] New mixin " + dotClassName + " targets already-loaded class "
+					+ loadedTargets + ", and this loader does not expose Fabric's class tracker to"
+					+ " suppress the check. Restart once to apply it (editing an existing Mixin stays"
+					+ " hot-swappable).");
+				return Collections.emptyList();
+			}
 			try {
 				// prepare 只在首次解析配置时执行；强制置回未准备状态，让新增的 simpleName 被解析。
 				Field prepared = findField(config.getClass(), "prepared");
@@ -133,6 +138,8 @@ final class NewMixinRegistrar {
 				removeMixinClass(mixinClasses, simpleName);
 				rollback(config, dotClassName);
 				throw t;
+			} finally {
+				FabricLauncherSpoof.restore(launcherToken);
 			}
 
 			Object info = findMixinInfo(config, dotClassName);
@@ -158,6 +165,14 @@ final class NewMixinRegistrar {
 				removeMixinClass(mixinClasses, simpleName);
 				rollback(config, dotClassName);
 				throw t;
+			}
+
+			if (RemoldAgent.DEBUG) {
+				Object mapping = readField(config, "mixinMapping");
+				RemoldAgent.log("[Mixin] new-mixin debug: className=" + invoke(info, "getClassName")
+					+ " mappingKeys=" + (mapping instanceof java.util.Map<?, ?> map ? map.keySet() : "?")
+					+ " mixinCount=" + (((List<?>) readField(config, "mixins")) == null
+						? "?" : ((List<?>) readField(config, "mixins")).size()));
 			}
 
 			Object rawTargets = invoke(info, "getTargetClasses");
@@ -313,27 +328,27 @@ final class NewMixinRegistrar {
 		}
 	}
 
-	/** 返回第一个已加载目标（点分类名），全部未加载时返回 {@code null}。 */
-	private static String firstLoadedTarget(List<String> targets) {
+	/** 返回已加载的目标类（点分类名）；拿不到 Mixin 服务时返回空列表。 */
+	private static List<String> loadedTargets(List<String> targets) {
+		List<String> loaded = new ArrayList<>();
 		try {
 			Class<?> serviceClass = Class.forName("org.spongepowered.asm.service.MixinService");
 			Object service = serviceClass.getMethod("getService").invoke(null);
 			Object tracker = service.getClass().getMethod("getClassTracker").invoke(service);
 			if (tracker == null) {
-				return null;
+				return loaded;
 			}
 			Method isLoaded = tracker.getClass().getMethod("isClassLoaded", String.class);
 			for (String target : targets) {
 				String dotted = target.replace('/', '.');
-				Object result = isLoaded.invoke(tracker, dotted);
-				if (Boolean.TRUE.equals(result)) {
-					return dotted;
+				if (Boolean.TRUE.equals(isLoaded.invoke(tracker, dotted))) {
+					loaded.add(dotted);
 				}
 			}
 		} catch (Throwable ignored) {
 			// 拿不到 Mixin 服务时让真实的 MixinInfo 构造器做最终判定。
 		}
-		return null;
+		return loaded;
 	}
 
 	private static void reportUnsupported(Throwable t) {

@@ -160,11 +160,11 @@ Mixin 类不会被 JVM 当普通类加载，它只是被读成字节码模板。
 | **新增** `@Inject` / 新增 handler 方法 | ❌ 目标类结构变化被拒 | ✅ `[DCEVM] Structure change detected` |
 | 改 `@At` 导致目标类方法增删 | ❌ | ✅ |
 | `@Accessor` / `@Invoker`（只加方法） | ❌ | ✅ |
-| **新增整个 Mixin 类**（启动时不在 config 的 `mixins` 列表里） | ❌ 目标类结构变化被拒 | ✅ 仅目标类尚未加载时（运行期登记，实验性） |
+| **新增整个 Mixin 类**（启动时不在 config 的 `mixins` 列表里） | ❌ 目标类结构变化被拒 | ✅ 运行期登记（实验性；Fabric 上目标已加载也可） |
 | 新增接口 / 改父类 | ❌ | ❌ Remold 的继承体系门直接拒（`hierarchyChanged`），DCEVM 也救不了 |
 | 改 `targets =` / `@Mixin` 的接口、内部类、优先级 | ❌ | ❌ Mixin 的 reload 校验拒绝，需重启 |
 
-> **新增 Mixin 类的运行期登记（实验性）**：`MixinConfig` 在启动时把 JSON 里的 mixin 列表解析成 `MixinInfo`，`IMixinTransformer.reload` 对不在该列表中的类返回空目标。`plugin-mixin` 现在会尝试用反射把新类补进已注册配置（`MixinConfig.prepare` + `MixinInfo.validate()`），**前提是它的目标类尚未被 JVM 加载**——Mixin 的设计不允许对已加载目标追加新 Mixin，此时会明确拒绝并提示重启，不会假装成功。目标未加载时，新 Mixin 会在目标类首次加载时正常织入；校验失败会回滚登记。该路径依赖 Mixin 0.8.7 的内部字段，升级 Mixin 后可能自动退化为“需重启一次”。
+> **新增 Mixin 类的运行期登记（实验性）**：`MixinConfig` 在启动时把 JSON 里的 mixin 列表解析成 `MixinInfo`，`IMixinTransformer.reload` 对不在该列表中的类返回空目标。`plugin-mixin` 现在会反射把新类补进已注册配置（`MixinConfig.prepare` + `MixinInfo.validate()`），再对目标类走常规重织入；Fabric 上用极窄窗口的 launcher 代理绕过 `MixinInfo` 对“目标已加载”的构造期拒绝，窗口结束立即恢复。校验失败会回滚登记；非 Fabric/内部字段不匹配时 fail-closed，提示重启一次。该路径依赖 Mixin 0.8.7 的内部字段，升级 Mixin 后可能退化为“需重启一次”；真实客户端尚未验证（服务端已实测）。
 
 也就是说：**用了 DCEVM 的 JBR 之后，只剩下两类真限制** —— Mixin 自己的结构契约（目标类列表 / 接口 / 内部类 / 优先级），以及 Remold 的继承体系门。方法层面的增删都不再是障碍。
 

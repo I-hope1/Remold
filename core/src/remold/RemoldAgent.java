@@ -3048,17 +3048,13 @@ public class RemoldAgent {
 	}
 
 	/**
-	 * 某类被删<b>实例字段</b>在<b>批次外</b>的读者判定
-	 * （判据见 {@code docs/initfix/07-p05-probe-results.md} §13.6）。
+	 * 一轮"被删成员的批次外读者"扫描结果（判据见 {@code docs/initfix/07-p05-probe-results.md} §13.6）。
 	 *
 	 * <p>{@code scanned == false} 表示本轮没有做这项判定（本批没有删除、或扫描前置条件不满足）。
-	 * 这种情况必须退回原来的存活实例判据，<b>不能</b>当成"没有读者"。</p>
-	 */
-	/**
-	 * 一轮"被删成员的批次外读者"扫描结果。
+	 * 这种情况调用方<b>必须拒绝</b>，<b>不能</b>当成"没有读者"。</p>
 	 *
-	 * @param scanned         本轮扫描是否完成。{@code false} 时调用方<b>必须</b>退回原判据——
-	 *                        把"没扫成"读成"没读者"是这个判据最危险的失败模式
+	 * @param scanned         本轮扫描是否完成。{@code false} 时调用方<b>必须</b>拒绝——删除的影响
+	 *                        与当前是否有存活实例正交，退回 liveness 会把"没扫成"读成"没读者"
 	 * @param readers         会悬空（{@code NoSuchFieldError} / {@code NoSuchMethodError}）或抛
 	 *                        {@code AbstractMethodError} 的引用所在的类
 	 * @param dispatchShifted 分派目标静默改变的引用所在的类（不抛错，但行为变了）

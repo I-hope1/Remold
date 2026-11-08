@@ -135,23 +135,23 @@ Remold 作为一个 Java Agent 运行。为了获得类结构变更高性能热�
 
 > [!IMPORTANT]
 > **脚本插件也必须锁定版本。** `apply(from = ...)` 没有 `plugins { id(...) version ... }` 那样的版本坐标，
-> 因此**务必用 tag 地址**（`.../v0.2.1/remold.gradle.kts`）而不是 `.../main/...`；
+> 因此**务必用 tag 地址**（`.../v0.2.5/remold.gradle.kts`）而不是 `.../main/...`；
 > 壳里的默认插件版本与 `agent`/`api` 必须同版本，否则按新接口拼参数、agent 还是旧版本，问题只会在运行期才暴露。
 >
-> **首次配置需要能解析到插件**（脚本按 `v<version>` 从 JitPack 取 `com.github.I-Hope1.Remold:gradle-plugin`）。
+> **首次配置需要能解析到插件**（脚本按 `v<version>` 从 JitPack 取 `com.github.I-hope1.Remold:gradle-plugin:v<version>`）。
 > 离线或内网环境用 `-Premold.pluginJar=<path/to/remold-gradle-plugin.jar>`（或环境变量 `REMOLD_PLUGIN_JAR`）
 > 直接指定本地插件 jar；`-Premold.version=<版本>` 可覆盖脚本内联的默认版本。
 
 #### Groovy DSL (`build.gradle`):
 ```groovy
 // 引入脚本插件（tag 锁版本；本地开发可换成 rootProject.file('remold.gradle')）
-def remoldRef = (findProperty('remold.version') ?: '0.2.1')
+def remoldRef = (findProperty('remold.version') ?: '0.2.5')
 apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remold.gradle"
 
 remold {
     // 可选：指定 Remold 版本（默认读取 gradle.properties 中的 remoldVersion）
     // 插件将自动从仓库解析或从 Releases 下载对应版本的 agent jar 并缓存至本地，开发者无需手动下载
-    // version = '0.2.1'
+    // version = '0.2.5'
 
     // 可选：显式指定本地 remold-agent.jar 路径（若不指定，将优先使用本地 libs/remold-agent.jar，不存在时自动下载缓存）
     // agentJar = "libs/remold-agent.jar"
@@ -181,14 +181,14 @@ remold {
 #### Kotlin DSL (`build.gradle.kts`):
 ```kotlin
 // 引入脚本插件（tag 锁版本；本地开发可换成 file("../remold.gradle.kts")）
-val remoldRef = (findProperty("remold.version") as String?) ?: "0.2.1"
+val remoldRef = (findProperty("remold.version") as String?) ?: "0.2.5"
 apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/v$remoldRef/remold.gradle.kts")
 
 // 注意：Kotlin DSL 下 `remold { }` 不可用——扩展类型 RemoldExtension 定义在脚本里，
 // IDE 无法为脚本类生成类型安全访问器（Groovy DSL 是动态语言，不受影响）。
 // 配置改走 gradle.properties 或 extra，等价写法如下：
 extra["remold.mainClass"] = "your.package.Main"
-// extra["remold.version"] = "0.2.1"
+// extra["remold.version"] = "0.2.5"
 // extra["remold.agentJar"] = "libs/remold-agent.jar"
 // extra["remold.jbr"] = "/path/to/jbr"
 // extra["remold.debug"] = true
@@ -204,7 +204,7 @@ extra["remold.mainClass"] = "your.package.Main"
 ```kotlin
 // 本地源码树里开发 Remold 时用上一层的脚本（改了立即生效），否则按 tag 拉取对应版本
 apply(from = file("../remold.gradle.kts").takeIf { it.isFile }
-    ?: "https://raw.githubusercontent.com/I-Hope1/Remold/v${findProperty("remold.version") ?: "0.2.1"}/remold.gradle.kts")
+    ?: "https://raw.githubusercontent.com/I-hope1/Remold/v${findProperty("remold.version") ?: "0.2.5"}/remold.gradle.kts")
 ```
 
 - 仓库内开发：`../remold.gradle.kts` 存在 → 直接用本地脚本，改完立即生效、不联网；
@@ -217,7 +217,7 @@ apply(from = file("../remold.gradle.kts").takeIf { it.isFile }
 ```kotlin
 buildscript {
     repositories { maven("https://jitpack.io") }
-    dependencies { classpath("com.github.I-Hope1.Remold:gradle-plugin:v0.2.1") }   // 版本 = Git tag
+    dependencies { classpath("com.github.I-hope1.Remold:gradle-plugin:v0.2.5") }   // 版本 = Git tag
 }
 apply(plugin = "io.github.i-hope1.remold")
 ```
@@ -232,9 +232,9 @@ apply(plugin = "io.github.i-hope1.remold")
 > （随分支变化，不适合长期锁定）。
 
 > [!NOTE]
-> 想写成 `plugins { id("io.github.i-hope1.remold") version "v0.2.1" }` 也可以，但 JitPack 不托管「插件标记」
+> 想写成 `plugins { id("io.github.i-hope1.remold") version "v0.2.5" }` 也可以，但 JitPack 不托管「插件标记」
 > （`<插件id>:<插件id>.gradle.plugin`），需要在 `settings.gradle.kts` 的 `pluginManagement.resolutionStrategy.eachPlugin`
-> 里 `useModule("com.github.I-Hope1.Remold:gradle-plugin:${requested.version}")` 映射一次。发到 Gradle Plugin Portal
+> 里 `useModule("com.github.I-hope1.Remold:gradle-plugin:v${requested.version.removePrefix("v")}")` 映射一次。发到 Gradle Plugin Portal
 > 才能省掉这段。
 
 二进制插件自身的参考资料（坐标、DSL 选项、任务清单、环境要求）见
@@ -388,11 +388,11 @@ repositories {
 }
 
 dependencies {
-    compileOnly 'com.github.I-hope1.Remold:api:v0.2.1'
+    compileOnly 'com.github.I-hope1.Remold:api:v0.2.5'
 }
 ```
 
-Maven Central 预留坐标：`io.github.i-hope1.remold:api:0.2.1`。
+Maven Central 预留坐标：`io.github.i-hope1.remold:api:0.2.5`。
 
 ---
 
@@ -436,31 +436,40 @@ Maven Central 预留坐标：`io.github.i-hope1.remold:api:0.2.1`。
 flowchart TD
     API[":api<br/>(纯 Java API 与注解，0 外部依赖)"]
     CORE[":core<br/>(纯 JVM Agent 核心引擎，ASM 内部重定位)"]
-    NATIVE[":native<br/>(JVMTI 原生堆扫描与 Panama/JNI 桥接)"]
+    PANAMA[":panama<br/>(JVMTI 原生堆扫描与 Panama/JNI 桥接)"]
     PLUGIN_ARC[":plugin-arc<br/>(Arc / Mindustry 框架参考插件)"]
     PLUGIN_MIXIN[":plugin-mixin<br/>(SpongePowered Mixin 重织入插件)"]
-    TESTS[":tests<br/>(206 JUnit + 318 Oracle + 32 MixinProbe + E2E)"]
+    PLUGIN_FORGE[":plugin-forge<br/>(Forge / NeoForge 自适应插件)"]
+    PLUGIN_FABRIC[":plugin-fabric<br/>(Fabric / Quilt 运行期集成插件)"]
+    GRADLE_PLUGIN[":gradle-plugin<br/>(Gradle 二进制插件 io.github.i-hope1.remold)"]
+    TESTS[":tests<br/>(469 JUnit + InitFix Oracle + probe suites + E2E)"]
 
     API --> CORE
-    NATIVE -.-> CORE
+    PANAMA -.-> CORE
     API --> PLUGIN_ARC
     API --> PLUGIN_MIXIN
     CORE -.-> PLUGIN_ARC
     CORE -.-> PLUGIN_MIXIN
+    CORE -.-> PLUGIN_FORGE
+    CORE -.-> PLUGIN_FABRIC
     CORE --> TESTS
     API --> TESTS
-    NATIVE --> TESTS
+    PANAMA --> TESTS
     PLUGIN_ARC --> TESTS
+    PLUGIN_FORGE --> TESTS
+    PLUGIN_FABRIC --> TESTS
 ```
 
 - **`:api`**：对外公开发行的轻量级 API 包（包含 `@RemoldReinit`、`@OnReload`、`@Profile` 注解以及 `HotswapPlugin`、`OrphanBreakerPredicate`、`BytecodeTransformerBridge` 等扩展 SPI）。
 - **`:core`**：核心 Java Agent 引擎。**ASM 9.11.1 100% Shade 且重定位至 `remold.internal.asm.*`**，杜绝与任何应用层框架（如 Mixin、ByteBuddy、Spring）发生 ASM 版本与 ClassLoader 冲突。
-- **`:native`**：JVMTI 原生加速与 Panama/JNI 后端，提供亚毫秒级全堆实例检索能力，支持 Windows (x64)、Linux (x64)、macOS (x64/arm64) 全平台。
+- **`:panama`**：Panama（FFM）与 JNI/JVMTI 绑定层；JVMTI 原生加速库（C++ 源码与 `libtool` 预编译产物）随 `:core` 打包，二者共同提供亚毫秒级全堆实例检索能力，支持 Windows (x64)、Linux (x64)、macOS (x64/arm64) 全平台。
 - **`:plugin-arc`**：官方参考插件，展示如何通过 SPI 无缝扩展 UI 布局树比对与框架级轮询事件熔断。
 - **`:plugin-mixin`**：SpongePowered Mixin 生态插件。热重定义前把源码级字节码重新交给 Mixin 织入（保住 `@Inject` / `@Unique` / `@Shadow` 产物），并在 Mixin 类自身被修改时刷新 Mixin 运行时状态、级联重织入其目标类。Fabric Loom 工程由 Gradle 脚本自动挂载。
 - **`:plugin-forge`**：Minecraft Forge 与 NeoForge 统一自适应插件。穿透 ModLauncher / NeoForge 类加载器隔离执行 Mixin 增量重织入，并在 `@SubscribeEvent` / `@EventBusSubscriber` 增删时自动刷新与重挂载事件总线。ForgeGradle 与 ModDevGradle 工程由 Gradle 脚本自动挂载。
+- **`:plugin-fabric`**：Fabric / Quilt 开发运行期集成插件。负责注入 `fabric.classPathGroups`（缺失会导致热更静默不生效）、排除 `mods` 目录监听，并把 `run/mods` 里与本工程同 modId 的残留构建 JAR 就地隔离；Fabric Loom 工程由 Gradle 脚本自动挂载。
+- **`:gradle-plugin`**：Gradle 二进制插件（坐标 `io.github.i-hope1.remold`），提供 `remold { ... }` 类型安全 DSL、`runRemold` / `startRemold` / `generateRemoldScript` 等任务与 IDEA 运行配置生成；仓库根 `remold.gradle(.kts)` 只是它的薄壳。
 - **`:example`**：极简演示应用，开箱即用体验 Agent 监听、存量实例字段初始化与 `@OnReload` 生命周期回调。
-- **`:tests`**：完备的回归与兼容性测试套件，包含 206 项多版本编译矩阵拓扑 JUnit 测试、318 项 InitFix Oracle 正负向断言，以及 32 项 Mixin 与 JDWP 端到端兼容性断言。
+- **`:tests`**：完备的回归与兼容性测试套件，包含 469 项 JUnit 测试（跨 javac 8/11/17/21/25 现编夹具矩阵，含拓扑对齐、布局预测与 Native 堆扫描）、51 个场景 / 350 项 InitFix Oracle 正负向断言，以及 `mixinProbe` 等 Mixin 与 JDWP 端到端兼容性探针。
 
 ---
 
@@ -552,9 +561,9 @@ public class PlayerService {
 ```
 
 验证流程将严格执行：
-1. **206 项 JUnit 拓扑对齐与 Native 堆扫描测试**（跨 javac 8/11/17/21/25 现编夹具矩阵，断言 0 skipped 0 failure）；
-2. **318 项 InitFix Oracle 差分断言**（涵盖 Java 与真实 Kotlin 编译产物，正向状态回溯与负向安全阻断）；
-3. **32 项 Mixin & JDWP 重定义端到端实测**；
+1. **469 项 JUnit 测试**（跨 javac 8/11/17/21/25 现编夹具矩阵，含拓扑对齐、布局预测与 Native 堆扫描，断言 0 skipped 0 failure）；
+2. **51 个场景 / 350 项 InitFix Oracle 差分断言**（涵盖 Java 与真实 Kotlin 编译产物，正向状态回溯与负向安全阻断）；
+3. **`mixinProbe` 等 Mixin & JDWP 重定义端到端实测**；
 4. **LayoutGate 规则表、GhostProbe 栈探测、并发加固多线程实测、指纹延后落账 E2E 断言**；
 5. **规范文档与源码状态标记纯净度扫描 (`verifyDocStatusMarkers`)**。
 

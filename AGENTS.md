@@ -7,7 +7,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 
 - 只处理本次 Redefine **新增声明的字段**（存量实例 + 静态）。
 - 禁止实现：修改已有字段初值、删除字段、修改方法签名、动态修改字段描述符类型。
-  - 删除字段：具名类走重定义层，匿名类合成字段走 `LayoutGate.check`（判 `COMPATIBLE`）。两层判据都是"**批次外读者为空**"（批次内扫新字节码、批次外扫当前字节码），已实现并接线（`RemovedMemberReaders` + `decideLayout`），做法见 `docs/initfix/07-p05-probe-results.md` §13.6。不能简化成"有删除就拒"——删 private 字段与正常连带重编的批次都是安全的。有存活实例时若无读者也放行（`WAIVE_NO_READERS`）；扫描未完成则退回存活实例判据，因为那条理由对删除不成立（`docs/status.md` 风险 12）。实测后果见 §13：字节码语义下实例迁移保全未删字段值、废弃槽位不复用，字节码读者失败形态是抛 `NoSuchFieldError`（`LinkageError`）；底层物理偏移紧缩（`OffsetStabilityProbe` A4-2），有缓存物理偏移者会错读相邻字段。
+  - 删除字段：具名类走重定义层，匿名类合成字段走 `LayoutGate.check`（判 `COMPATIBLE`）。两层判据都是"**批次外读者为空**"（批次内扫新字节码、批次外扫当前字节码），判据实现为 `RemovedMemberReaders` + `decideLayout`（接线状态见 `docs/status.md` 风险 12，做法见 `docs/initfix/07-p05-probe-results.md` §13.6）。不能简化成"有删除就拒"——删 private 字段与正常连带重编的批次都是安全的。有存活实例时若无读者也放行（`WAIVE_NO_READERS`）；**扫描未完成时一律拒绝，不退回存活实例判据**。实测后果见 §13：字节码语义下实例迁移保全未删字段值、废弃槽位不复用，字节码读者失败形态是抛 `NoSuchFieldError`（`LinkageError`）；底层物理偏移紧缩（`OffsetStabilityProbe` A4-2），有缓存物理偏移者会错读相邻字段。
     - **静态字段**走同一判据，但**没有 liveness 兜底**：静态值不随实例存在，扫描未完成时只能拒绝。失败形态实测三种（§16.2）：`NoSuchFieldError`、被父类/父接口同名字段**接住**、落到父类实例字段上抛 `IncompatibleClassChangeError`。
     - **只拦"会抛错"的**：`hits`（`NoSuchFieldError`/`NoSuchMethodError`）、`abstractMissing`（`AbstractMethodError`）、**静态性翻转**（ICCE）。**合法回退不算读者**——删掉子类 Override 方法或遮蔽字段后回退到父类实现 / **同静态性**的父类字段，零异常、读者源码不用改、全量重编后字节码仍对得上，只记日志（§16.4）。
     - **编译期常量**（`ConstantValue`，JLS §13.4.9，基本类型与 `String` 的 `static final`）**放行**：内联的读者运行期根本不解析该字段（零异常），未内联的读者常量池里仍有 `Fieldref`，会被 `hits` 正常抓到。边界不在 `final` 而在 `ConstantValue`：运行期初始化的 `static final` 与引用类型照常走 `Fieldref`（§16.1）。
@@ -54,7 +54,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 - `.sources/` 只读：不修改、不提交、不作为构建输入。
 
 **状态管理规则**
-- 状态信息唯一真相源：详细状态见 `docs/status.md`，高层高价值概括见本文件第 5 节。
+- 状态信息唯一真相源：`docs/status.md`。本文件只承载规则、不变量、代码地图与测试要求，不登记任何实现状态、测试计数或验收证据。
 - **严禁在 Javadoc、代码注释以及各 `docs/` 设计文档中重新混入实现状态信息**（如 `✅`、`[已实现]` 等易腐标记）。设计文档与 Javadoc 仅负责定义客观的设计规格、原理与交互契约；直接重复处一律转为链接。
 
 **数据汇报铁律**
@@ -107,31 +107,11 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 偏移量稳定性与漂移探针 | `tests/src/OffsetStabilityProbe.java`（`./gradlew :tests:offsetStabilityProbe -Pp05.jbr=<dcevm-jdk>`，实测单类稳定性、父类漂移、Updater 破坏与 C2 逆优化） |
 | Gradle 插件坐标 | `gradle-plugin/`（`java-gradle-plugin`，坐标 `io.github.i-hope1.remold`；二进制插件实现 `RemoldPlugin` + `RemoldExtension` 类型安全 DSL + 配置缓存，同时将仓库根 `remold.gradle(.kts)` 打包进 jar 作为脚本资源） |
 
-## 5. 实现状态概要（详细参见 `docs/status.md`）
+## 5. 实现状态
 
-详细逐项状态表、落地位置与验收证据参见 [`docs/status.md`](docs/status.md)。本表仅提供核心机制的高价值概括：
-
-| 机制 / 领域 | 状态 | 关键说明 |
-|:--|:-:|:--|
-| 五条核心不变量 | ✅ | 全面守护，零破坏 |
-| 匿名类拓扑对齐 (Tier 1~4) | 🔶 | 彻底废除 Tier 5；未匹配保留孤儿/新名；具名局部类内嵌套匿名类存在原名直通盲区 |
-| 实例布局门与局部类止血门 | ✅ | `LayoutGate` 阻断字段变化；`LocalClassGuard` 阻断局部类位移 |
-| InitFix 离线元数据 (`ClassHierarchyOracle`) | ✅ | 全程不触发类加载 |
-| InitFix 待补台账 (`FieldLedger`) | ✅ | 六种异常与超时场景全覆盖 |
-| T0 零值等价 / T3 显式拒绝 | ✅ | 零值零开销放行；危险切片安全门拒绝并在 `transform` 发 warn |
-| T1 常量 / T2 纯计算切片 / 效应掩码 | 🔶 | 静态 `ConstantValue` 走专用通道；P0 效应黑白名单 + Kotlin `trim` 窄例外 |
-| 参数回溯不可变证明 / 多根构造器共识 | ✅ | 条件 A（final）与条件 B（NestView 单写证明）；全根构造器指纹 100% 一致 |
-| 伴生补丁类 / 逐实例驱动与失败配额 | ✅ | 独立静态方法隔离；按实例隔离；单字段失败配额封顶 8 次 |
-| 条件 CAS 写入与跳过报告 | 🔶 | 默认条件 CAS；float/double 走 raw bits（JDK 8 raw bits 缺自动化 CI 差异验证）；跳过计数汇总报告 |
-| `@RemoldReinit` 存量覆写 | ✅ | 豁免 T0 与后续加工检查；不豁免切片安全门 |
-| Native JVMTI 堆遍历 (`LibTool`) | ✅ | C++ 底座；Tag 隔离与全局互斥；`InstanceTracker` 字节码回退 |
-| 两阶段重定义 / 构造器插桩 / 跨类拓扑 | ⬜ | 路线图设计（见 `docs/initfix/04-target-design.md`） |
-| 真实 kotlinc 产物验证 | 🔶 | `object` 单例与 `trim` 家族已验证；其它 Kotlin 行为仅经仿真验证 |
-| 物理偏移漂移安全门与布局预测器 | ✅ | 抛弃式加载器事前预测物理布局；`SuperclassDriftGate` 结合堆存活阻断漂移；预注入祖先链防御包级私有隔离 |
-| 反射与序列化实例缓存驱逐 | ✅ | Arc Json、Jackson、Gson 实例级清空 SPI，重定义成功后自动触发 |
-| Arc 资源热更新（贴图/字体/语言包/音频/着色器） | 🔶 | 贴图同尺寸原位直刷；尺寸变化与运行期新增贴图各有已知边界；语言包重载会同步回写内容缓存字段；字体按文件路由到对应槽位；音效与音乐原位重载；内置着色器按文件映射原位重编，模组着色器/content JSON/图集明确提示需重启 |
-| Mixin 生态插件 | 🔶 | 重织入与目标级联已落地；端到端仍需真实 Fabric 客户端验证 |
-| Forge / NeoForge 生态插件 | 🔶 | ModLauncher 跨 ClassLoader Mixin 重织入与 EventBus 监听器注销重挂已落地；端到端待真实客户端验证 |
+本文件**不登记任何实现状态**（完成度、测试计数、验收证据、残余风险等）。
+逐项状态、落地位置、验收证据、已知风险与技术债统一见 [`docs/status.md`](docs/status.md)；
+设计规格见 [`docs/topology/`](docs/topology/)、[`docs/initfix/`](docs/initfix/)、[`docs/offset/`](docs/offset/)。
 
 ## 6. 测试要求
 
@@ -150,7 +130,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 没有自然的特异性对照，必须在用例注释里写明原因（例如"该断言只记录观测结果，不具备归因能力"），
 不允许用形式化的对照凑数。
 
-- 回归任务：`:tests:initFixOracle`（挂在 `check`，当前 48 场景 / 318 断言，以实际输出为准）。纯 JVM 运行环境，0 额外框架依赖。
+- 回归任务：`:tests:initFixOracle`（挂在 `check`；场景数与断言数以任务实际输出为准，当前快照登记在 `docs/status.md`）。纯 JVM 运行环境，0 额外框架依赖。
 - 必须通过 `./gradlew initFixOracle`（或 `./gradlew :tests:initFixOracle`）运行，不要直接 `java -cp`：Kotlin 夹具由 Gradle 先编译，输出目录经 `-Dremold.ktfix.v1/v2` 传入。
 - Kotlin 夹具的 v1/v2 输出目录**绝不能**进入任何 classpath（同名类会静默只命中其一，造成假绿）。
 - 迭代期间只跑 `./gradlew initFixOracle`，收尾时才跑一次 `./gradlew check`。
@@ -164,7 +144,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 - 偏移量稳定性与漂移实测：`./gradlew :tests:offsetStabilityProbe -Pp05.jbr=<DCEVM JDK 目录>`（同样不挂 `check`），实测单类稳定性（空洞填补、类型重排）、父类字段漂移步长、Updater 错位破坏与 C2 常量折叠使用方逆优化。
 - 耗时类探针固定报 **min / median / max** 三个数；结论必须同时对 min 与 median 成立，只对其中一个成立时标注「口径敏感」，不得只报有利的那个。统计量不得在看到数据之后才选。
 - 探针日志默认带 `-Xlog:safepoint`（`uptimenanos` 装饰符）、`-Xlog:gc*`、`-Xlog:jit+compilation=debug`，落在 `build/p05/`。断言里引用日志时间戳时，基准必须取 safepoint 窗口的**开始**（`时间戳 − Total`）——日志行是在 safepoint 结束时打印的；unified logging 有缓冲，日志分析要放在运行结束后做。
-- `test` 的测试数下限由 `tests/build.gradle` 的 `hstestMinTests` 守卫（当前 405，以实际输出为准；`verifyTestCount` 读 XML 断言总数 ≥ 基线且 `skipped == 0`）：删除/禁用/跳过测试会让 `check` 变红，上调基线要有意识地改这一行。
+- `test` 的测试数下限由 `tests/build.gradle` 的 `hstestMinTests` 守卫（基线值见该文件；当前实测计数登记在 `docs/status.md`；`verifyTestCount` 读 XML 断言总数 ≥ 基线且 `skipped == 0`）：删除/禁用/跳过测试会让 `check` 变红，上调基线要有意识地改这一行。
 - CI：`.github/workflows/ci.yml`（`setup-java` 装 8/11/17/21 + runner JDK 25，`hstest.requireJdks=true`；以及 `test-dcevm` 任务在真实 JBR 21 DCEVM 下执行 `liveDcevmTest`）。首次 Linux 跑，Windows 假设（路径分隔符、GBK）可能暴露，按原因分类再处理。
 - 新增或放宽安全门：必须有负向阻断断言。
 - 修复缺陷：必须有先红后绿的回归断言。

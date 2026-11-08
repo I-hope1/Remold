@@ -130,21 +130,21 @@ The lightweight script plugin resolves your class output paths, assembles the JV
 
 > [!IMPORTANT]
 > **The script plugin must be version-pinned too.** `apply(from = ...)` has no `plugins { id(...) version ... }`
-> coordinate, so always use a **tag** URL (`.../v0.2.1/remold.gradle.kts`) instead of `.../main/...`.
+> coordinate, so always use a **tag** URL (`.../v0.2.5/remold.gradle.kts`) instead of `.../main/...`.
 > The script and the `agent`/`api` must stay on the same version, otherwise the script builds arguments for a
 > newer agent while the old agent runs — and it only blows up at runtime.
 
 #### Groovy DSL (`build.gradle`):
 ```groovy
 // Apply the script plugin (tag-pinned; for local development use rootProject.file('remold.gradle'))
-def remoldRef = (findProperty('remold.version') ?: '0.2.1')
+def remoldRef = (findProperty('remold.version') ?: '0.2.5')
 apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remold.gradle"
 
 remold {
     // Optional: pin the Remold version (defaults to remoldVersion in gradle.properties)
     // The plugin resolves the matching agent jar from the repository or Releases and caches it
     // locally, so you never download it by hand.
-    // version = '0.2.1'
+    // version = '0.2.5'
 
     // Optional: point at a local remold-agent.jar. Otherwise libs/remold-agent.jar is preferred,
     // and the plugin downloads and caches one if it is missing.
@@ -176,14 +176,14 @@ remold {
 #### Kotlin DSL (`build.gradle.kts`):
 ```kotlin
 // Apply the script plugin (tag-pinned; for local development use file("../remold.gradle.kts"))
-val remoldRef = (findProperty("remold.version") as String?) ?: "0.2.1"
+val remoldRef = (findProperty("remold.version") as String?) ?: "0.2.5"
 apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/v$remoldRef/remold.gradle.kts")
 
 // Note: `remold { }` does NOT work from Kotlin DSL — the extension type lives inside the script plugin,
 // so the IDE cannot generate a type-safe accessor for it (Groovy is dynamic and unaffected).
 // Configure through gradle.properties or extra instead:
 extra["remold.mainClass"] = "your.package.Main"
-// extra["remold.version"] = "0.2.1"
+// extra["remold.version"] = "0.2.5"
 // extra["remold.agentJar"] = "libs/remold-agent.jar"
 // extra["remold.jbr"] = "/path/to/jbr"
 // extra["remold.debug"] = true
@@ -199,7 +199,7 @@ Loading a script plugin only has one real decision: **where to take it from**. T
 ```kotlin
 // inside the Remold source tree, use the parent script (edits apply immediately); otherwise fetch the tag
 apply(from = file("../remold.gradle.kts").takeIf { it.isFile }
-    ?: "https://raw.githubusercontent.com/I-Hope1/Remold/v${findProperty("remold.version") ?: "0.2.1"}/remold.gradle.kts")
+    ?: "https://raw.githubusercontent.com/I-hope1/Remold/v${findProperty("remold.version") ?: "0.2.5"}/remold.gradle.kts")
 ```
 
 - In the repo: `../remold.gradle.kts` exists → the local script is used, edits take effect immediately, no network;
@@ -213,7 +213,7 @@ offline mode:
 ```kotlin
 buildscript {
     repositories { maven("https://jitpack.io") }
-    dependencies { classpath("com.github.I-Hope1.Remold:gradle-plugin:v0.2.1") }   // version = Git tag
+    dependencies { classpath("com.github.I-hope1.Remold:gradle-plugin:v0.2.5") }   // version = Git tag
 }
 apply(plugin = "io.github.i-hope1.remold")
 ```
@@ -227,9 +227,9 @@ routes behave identically. Configuration is the same as Option 1 (`gradle.proper
 > `master-SNAPSHOT` works for a quick look (moves with the branch, not suitable for pinning).
 
 > [!NOTE]
-> You may also write `plugins { id("io.github.i-hope1.remold") version "v0.2.1" }`, but JitPack does not host plugin
+> You may also write `plugins { id("io.github.i-hope1.remold") version "v0.2.5" }`, but JitPack does not host plugin
 > markers (`<plugin-id>:<plugin-id>.gradle.plugin`), so you must map it once via
-> `pluginManagement.resolutionStrategy.eachPlugin { useModule("com.github.I-Hope1.Remold:gradle-plugin:${requested.version}") }`
+> `pluginManagement.resolutionStrategy.eachPlugin { useModule("com.github.I-hope1.Remold:gradle-plugin:v${requested.version.removePrefix("v")}") }`
 > in `settings.gradle.kts`. Publishing to the Gradle Plugin Portal is what removes that block.
 
 A standalone reference for the binary plugin (coordinates, DSL options, task list, requirements) lives in
@@ -359,7 +359,7 @@ tasks.register("runWithRemold", JavaExec) {
 
 ### 1.5 Option 4: Command line
 
-Download the latest `remold-agent.jar` from [Releases](https://github.com/I-hope1/Remold/releases) (ASM 9.11 and the native acceleration library are shaded and relocated inside it):
+Download the latest `remold-agent.jar` from [Releases](https://github.com/I-hope1/Remold/releases) (ASM 9.11.1 and the native acceleration library are shaded and relocated inside it):
 
 ```bash
 java -XX:+AllowEnhancedClassRedefinition \
@@ -383,11 +383,11 @@ repositories {
 }
 
 dependencies {
-    compileOnly 'com.github.I-hope1.Remold:api:v0.2.1'
+    compileOnly 'com.github.I-hope1.Remold:api:v0.2.5'
 }
 ```
 
-Maven Central coordinates are reserved: `io.github.i-hope1.remold:api:0.2.1`.
+Maven Central coordinates are reserved: `io.github.i-hope1.remold:api:0.2.5`.
 
 ---
 
@@ -433,31 +433,40 @@ The repository is fully decoupled into modules:
 flowchart TD
     API[":api<br/>(Pure Java API and annotations, zero dependencies)"]
     CORE[":core<br/>(Pure JVM agent core, ASM internally relocated)"]
-    NATIVE[":native<br/>(JVMTI heap scanning, Panama/JNI bridge)"]
+    PANAMA[":panama<br/>(JVMTI heap scanning, Panama/JNI bridge)"]
     PLUGIN_ARC[":plugin-arc<br/>(Arc / Mindustry reference plugin)"]
     PLUGIN_MIXIN[":plugin-mixin<br/>(SpongePowered Mixin re-weaving plugin)"]
-    TESTS[":tests<br/>(206 JUnit + 318 Oracle + 32 MixinProbe + E2E)"]
+    PLUGIN_FORGE[":plugin-forge<br/>(Forge / NeoForge adaptive plugin)"]
+    PLUGIN_FABRIC[":plugin-fabric<br/>(Fabric / Quilt dev-runtime integration plugin)"]
+    GRADLE_PLUGIN[":gradle-plugin<br/>(Gradle binary plugin io.github.i-hope1.remold)"]
+    TESTS[":tests<br/>(469 JUnit + InitFix Oracle + probe suites + E2E)"]
 
     API --> CORE
-    NATIVE -.-> CORE
+    PANAMA -.-> CORE
     API --> PLUGIN_ARC
     API --> PLUGIN_MIXIN
     CORE -.-> PLUGIN_ARC
     CORE -.-> PLUGIN_MIXIN
+    CORE -.-> PLUGIN_FORGE
+    CORE -.-> PLUGIN_FABRIC
     CORE --> TESTS
     API --> TESTS
-    NATIVE --> TESTS
+    PANAMA --> TESTS
     PLUGIN_ARC --> TESTS
+    PLUGIN_FORGE --> TESTS
+    PLUGIN_FABRIC --> TESTS
 ```
 
 - **`:api`**: the lightweight public API (`@RemoldReinit`, `@OnReload`, `@Profile` plus the `HotswapPlugin`, `OrphanBreakerPredicate`, and `BytecodeTransformerBridge` extension SPIs).
 - **`:core`**: the agent engine. **ASM 9.11.1 is shaded and relocated to `remold.internal.asm.*`**, so there is never an ASM version or class loader clash with application-level frameworks (Mixin, ByteBuddy, Spring).
-- **`:native`**: JVMTI acceleration with Panama/JNI backends, providing sub-millisecond whole-heap instance lookup on Windows (x64), Linux (x64), and macOS (x64/arm64).
+- **`:panama`**: the Panama (FFM) and JNI/JVMTI bindings layer; the JVMTI native acceleration library (C++ sources plus prebuilt `libtool` binaries) ships inside `:core`, and together they provide sub-millisecond whole-heap instance lookup on Windows (x64), Linux (x64), and macOS (x64/arm64).
 - **`:plugin-arc`**: the reference plugin, showing how to extend UI layout-tree comparison and framework-level polling circuit breaks through the SPI.
 - **`:plugin-mixin`**: the SpongePowered Mixin ecosystem plugin. It hands the source-level bytecode back to Mixin before redefinition (preserving `@Inject` / `@Unique` / `@Shadow` output), and when a Mixin class itself changes it refreshes the Mixin runtime state and re-weaves the affected target classes. Fabric Loom projects mount it automatically through the Gradle script.
 - **`:plugin-forge`**: the adaptive Minecraft Forge & NeoForge plugin. It punches through ModLauncher / NeoForge classloader isolation for Mixin re-weaving and automatically refreshes and re-registers the event bus upon `@SubscribeEvent` / `@EventBusSubscriber` changes. ForgeGradle and ModDevGradle projects mount it automatically through the Gradle script.
+- **`:plugin-fabric`**: the Fabric / Quilt dev-runtime integration plugin. It injects `fabric.classPathGroups` (without it hot reload silently does nothing), excludes the `mods` directory from watching, and quarantines a stale build JAR in `run/mods` that carries the same mod id; Fabric Loom projects mount it automatically through the Gradle script.
+- **`:gradle-plugin`**: the Gradle binary plugin (coordinate `io.github.i-hope1.remold`) exposing the typesafe `remold { ... }` DSL, the `runRemold` / `startRemold` / `generateRemoldScript` tasks and IDEA run-configuration generation; the repository-root `remold.gradle(.kts)` is only a thin shim over it.
 - **`:example`**: a minimal demo app for agent watching, live-instance field initialization, and the `@OnReload` lifecycle callback.
-- **`:tests`**: the regression and compatibility suite — 206 multi-version JUnit topology tests, 318 InitFix Oracle positive/negative assertions, and 32 Mixin and JDWP end-to-end assertions.
+- **`:tests`**: the regression and compatibility suite — 469 JUnit tests (fixtures compiled on the fly across javac 8/11/17/21/25, covering topology alignment, layout prediction and native heap scanning), 51 scenarios / 350 InitFix Oracle positive/negative assertions, and the Mixin/JDWP end-to-end probes such as `mixinProbe`.
 
 ---
 
@@ -481,6 +490,7 @@ Remold can load extension plugins declaratively through system properties or Gra
 
 - **Mixin ecosystems (Fabric / Quilt and friends) need no declaration**: `remold.gradle(.kts)` detects the `fabric-loom` plugin or `net.fabricmc` / `org.spongepowered` dependencies and mounts the `mixin` plugin automatically. Disable it with `-Premold.autoMixin=false`. When developing the plugin itself, point at a local build with `remold { pluginJar("../<remold repo>/plugin-mixin/build/libs/remold-plugin-mixin-<ver>.jar") }`.
 - **Forge / NeoForge ecosystems need no declaration**: `remold.gradle(.kts)` detects ForgeGradle or ModDevGradle and mounts the `forge` plugin automatically. Disable it with `-Premold.autoForge=false`.
+- **Fabric / Quilt dev-runtime integration needs no declaration**: `remold.gradle(.kts)` detects the `fabric-loom` / `dev.architectury.loom` / `org.quiltmc.loom` / `loom` extension or `net.fabricmc` / `org.quiltmc` dependencies and mounts the `fabric` plugin automatically — it injects `fabric.classPathGroups` (missing it makes hot reload silently do nothing), excludes the `mods` directory from watching, and quarantines a stale build JAR in `run/mods` that shares this project's mod id (renamed to `.remold-disabled`, disable with `-Dremold.agent.mods_quarantine=false`); disable the plugin with `-Premold.autoFabric=false`.
 
 #### Option 2: explicit registration in code
 To write and register a custom plugin from application code:
@@ -553,9 +563,9 @@ The project builds with Gradle and requires JDK 21+.
 ```
 
 The pipeline enforces:
-1. **206 JUnit topology-alignment and native heap-scan tests** (fixtures compiled on the fly across javac 8/11/17/21/25; asserts 0 skipped, 0 failures);
-2. **318 InitFix Oracle differential assertions** (covering Java and real Kotlin compiler output, both positive state tracing and negative safety blocking);
-3. **32 Mixin and JDWP redefinition end-to-end checks**;
+1. **469 JUnit tests** (fixtures compiled on the fly across javac 8/11/17/21/25, covering topology alignment, layout prediction and native heap scanning; asserts 0 skipped, 0 failures);
+2. **51 scenarios / 350 InitFix Oracle differential assertions** (covering Java and real Kotlin compiler output, both positive state tracing and negative safety blocking);
+3. **Mixin and JDWP redefinition end-to-end checks such as `mixinProbe`**;
 4. **The LayoutGate rule table, GhostProbe stack probing, concurrency hardening tests, and deferred-fingerprint E2E assertions**;
 5. **A purity scan of status markers in docs and source (`verifyDocStatusMarkers`)**.
 

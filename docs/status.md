@@ -7,9 +7,9 @@
 
 | 审计元数据项 | 内容与规格说明 |
 |:---|:---|
-| **基准提交 (Baseline Commit)** | `4d459ff` (分支: `main`，`v0.2.5` 已发布；含 Gradle 插件 server/gametest 注入与 Fabric 模板 1.21.4 gametest) |
+| **基准提交 (Baseline Commit)** | `2c50563` (分支: `main`，`v0.2.5` 已发布；含 L1 存量初值重放 + A 档 Kotlin apply、批次结构化报告与 HotSwap Toast、Fabric 模板回到 1.21.1 + 1.21.4 gametest 独立探针) |
 | **发布说明** | [`releases/v0.2.5.md`](releases/v0.2.5.md) |
-| **最后更新时间** | 2026-11-08（v0.2.5 已发布；JitPack 坐标对齐；L1 存量初值重放第一版 + A 档 Kotlin apply 静态持有者重放落地） |
+| **最后更新时间** | 2026-11-08（v0.2.5 已发布；JitPack 坐标对齐；L1 + A 档落地；Fabric 主模板切回 1.21.1 并加入客户端 HotSwap Toast；1.21.4 客户端 gametest 移至 `tests/fabric-gametest-1.21.4/`） |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |
 | **更新触发条件** | 任何合入包含特性落地、架构偏离、安全门调整、测试基线变更或发现已知缺陷/残余风险的 PR/commit 时，必须同步原子化更新本文件。提交时由作者/维护者更新基准哈希。 |
 | **管辖范围与边界声明** | 本状态表权威管辖：<br>1. **匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)**（[`docs/topology/`](topology/)）<br>2. **存量初始化修复器 (InitFix / Legacy Instance & Static Reinitialization)**（[`docs/initfix/`](initfix/)）<br>3. **物理内存偏移稳定性与第三方缓存驱逐 (Physical Memory Offset Stability & Reflection Cache Eviction)**（[`docs/offset/`](offset/)）<br>*边界与后续治理声明*：同属字节码重映射体系的 `LambdaAligner`（Lambda 表达式对齐器）以及 Mindustry UI 胶水层（`CellPropertyRef` / 动态参数表达式指纹），其实现状态当前由各自单元测试覆盖（`CellHelperTest` 35 个用例持续全绿、`LambdaAlignerTest` 等）；它们的详细状态审计矩阵尚未并入本总表，计划在下一轮治理中统一建立验收标准并纳入。 |

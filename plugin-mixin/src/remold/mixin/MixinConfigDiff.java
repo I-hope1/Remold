@@ -47,15 +47,41 @@ final class MixinConfigDiff {
 
 	private static final Pattern QUOTED = Pattern.compile("\"([^\"]+)\"");
 
-	/** 被配置文件显式删除、尚未重新加入的 Mixin（点分类名）。 */
-	private static final Set<String> REMOVED_FROM_CONFIG = java.util.concurrent.ConcurrentHashMap.newKeySet();
+	/** 被配置文件显式删除的 Mixin（点分类名 -> 当时解析的配置路径），用于跨 class 重写保持删除状态。 */
+	private static final Map<String, Path> REMOVED_FROM_CONFIG = new java.util.concurrent.ConcurrentHashMap<>();
 
 	private MixinConfigDiff() {
 	}
 
-	/** 该 Mixin 是否被配置显式删除且尚未重新加入。 */
+	/**
+	 * 该 Mixin 是否仍被配置显式删除。
+	 *
+	 * <p>删除后如果用户重新把名字写回配置，但资源回调因为 IDE/构建的事件顺序没来得及处理，
+	 * 下一次 class 重写会在这里自愈：重新读当时记录的配置路径，发现名字已回来就放行登记。</p>
+	 */
 	static boolean isRemovedFromConfig(String dotClassName) {
-		return dotClassName != null && REMOVED_FROM_CONFIG.contains(dotClassName);
+		if (dotClassName == null) {
+			return false;
+		}
+		Path configPath = REMOVED_FROM_CONFIG.get(dotClassName);
+		if (configPath == null) {
+			return false;
+		}
+		try {
+			String json = Files.readString(configPath, StandardCharsets.UTF_8);
+			Set<String> names = declaredMixinNames(json);
+			int dot = dotClassName.lastIndexOf('.');
+			String simpleName = dot < 0 ? dotClassName : dotClassName.substring(dot + 1);
+			if (names != null && names.contains(simpleName)) {
+				REMOVED_FROM_CONFIG.remove(dotClassName);
+				RemoldAgent.info("[Mixin] " + dotClassName + " is listed in " + configPath.getFileName()
+					+ " again; allowing runtime registration");
+				return false;
+			}
+		} catch (Throwable ignored) {
+			// 读不到/解析失败时保持删除状态，宁可漏登记也不误重加。
+		}
+		return true;
 	}
 
 	/** 配置重新加入后再允许按“新增 Mixin”路径登记。 */
@@ -141,7 +167,7 @@ final class MixinConfigDiff {
 				removedNames.add(entry.getKey());
 				collectTargets(entry.getValue(), affected);
 				remove(config, entry.getKey(), entry.getValue());
-				REMOVED_FROM_CONFIG.add(mixinPackage + entry.getKey());
+				REMOVED_FROM_CONFIG.put(mixinPackage + entry.getKey(), asset.toAbsolutePath());
 			}
 		}
 		for (String simpleName : expected) {

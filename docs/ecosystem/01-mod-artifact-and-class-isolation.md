@@ -129,7 +129,7 @@ flowchart TD
   ```
 - 若检测到原有配置包含 `deployArtifact`、`:classes` 或 `classes`，替换为原生 `Make`，杜绝启动前误触发打包任务。
 - **Gradle 风格（`GradleRunConfiguration`）不适用上述清洗**：它通过 `taskNames` 自行调度任务，替换 `method` 会破坏运行语义；JVM 参数位于 `vmOptions` 选项，只在该选项存在时原位合并 `-javaagent` 与 `-Dremold.*`。
-- 运行期注入覆盖 client 与 server 两类 run 环境：Fabric Loom / ForgeGradle / NeoForge ModDevGradle 的 `server` 运行容器与 `client` 一样接收同一组 JVM 参数。
+- 运行期注入覆盖 client、server 与 gametest 三类 run 环境：Fabric Loom / ForgeGradle / NeoForge ModDevGradle 的 `server` 运行容器、以及 Fabric 的 `clientGameTest` / `gameTest` 运行配置，与 `client` 一样接收同一组 JVM 参数。
 
 ### 4.4 运行时残留制品隔离契约 (`plugin-fabric`)
 为了防止开发者曾经手动运行过 `jar` 任务或从旧配置残留了 JAR：

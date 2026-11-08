@@ -1,6 +1,6 @@
 # 现代 Minecraft Fabric 模组模板 (集成 Remold 零重启热重载)
 
-本模板基于官方 **Fabric Example Mod**（Minecraft 1.21.1 + Java 21 + Fabric Loom 1.17），并已深度预集成 **Remold 热重载自动化引擎**。
+本模板基于官方 **Fabric Example Mod**（Minecraft 1.21.4 + Java 21 + Fabric Loom 1.17），并已深度预集成 **Remold 热重载自动化引擎** 与 **fabric-client-gametest-api-v1 客户端 gametest**。
 
 让 Minecraft 模组开发者彻底告别“改一行代码就得重启客户端、忍受 1~2 分钟漫长黑屏加载”的折磨，实现 **`Ctrl + Shift + F9` 秒级原位热更**！
 
@@ -44,6 +44,28 @@
 4. 按快捷键 **`Ctrl + Shift + F9`**（重新编译当前类）；
 5. 切换回游戏窗口，再次右键魔法棒——**新逻辑和新增字段立刻生效！** 控制台里的 `mixin hook alive` 计数会继续递增，说明热更后 Mixin 钩子没有被抹掉。
 6. **再试一次改 Mixin 本身**：打开 [`src/main/java/com/example/mixin/RemoldWandItemMixin.java`](src/main/java/com/example/mixin/RemoldWandItemMixin.java)，把 `println` 的文案改掉，再按 `Ctrl + Shift + F9`。控制台会依次出现 `[Mixin] ... reloaded; affected target(s): [...]` 和 `[Mixin] Target class ... re-woven with updated mixin and redefined`，下次右键就是新文案——这一步走的是「改 Mixin 类 → 重织入目标类」链路。
+
+---
+
+## 客户端 gametest（MC 1.21.4+，`fabric-client-gametest-api-v1`）
+
+模板已接入 Fabric API 的客户端 gametest 框架：真客户端里创建测试世界、模拟键鼠、截图比对，
+用来验证「注册 / 渲染 / 右键行为」这类纯 JVM 单测覆盖不到的链路。
+
+```bash
+./gradlew runClientGameTest
+```
+
+- 测试源码：`src/gametest/java/com/example/gametest/RemoldWandClientGameTest.java`
+- 测试模组声明：`src/gametest/resources/fabric.mod.json`（入口点 `fabric-client-gametest`）
+- 截图模板：`src/gametest/resources/templates/wand_hotbar.png`
+- 覆盖：物品注册 → 创造模式放入热栏 → 截图与模板比对 → 真实右键 → 断言聊天栏出现 `[Remold]` 消息
+
+`build.gradle.kts` 通过 `configure<FabricApiExtension> { configureTests { ... } }` 生成 `gametest`
+源集与 `clientGameTest` 运行配置，并自动接受测试运行目录的 EULA。Remold 插件会直接向
+`clientGameTest` 运行配置注入 `-javaagent` 与 DCEVM 参数（而不是依赖对 `client` 的继承），
+因此 `runClientGameTest` 启动的就是带 Agent 的客户端。
+1.21.1 的 fabric-api 不含该模块，因此本模板基准版本为 **1.21.4**。
 
 ---
 

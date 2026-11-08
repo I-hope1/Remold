@@ -217,11 +217,13 @@ class RemoldPluginTest {
     }
 
     @Test
-    void injectsAgentIntoClientAndDedicatedServerRuns() throws Exception {
+    void injectsAgentIntoClientServerAndGameTestRuns() throws Exception {
         Project project = ProjectBuilder.builder().withProjectDir(tempDir).build();
         FakeLoaderRuns.Runs runs = new FakeLoaderRuns.Runs()
                 .add("client", new FakeLoaderRuns.VmArgRun())
-                .add("server", new FakeLoaderRuns.VmArgRun());
+                .add("server", new FakeLoaderRuns.VmArgRun())
+                .add("clientGameTest", new FakeLoaderRuns.VmArgRun())
+                .add("gameTest", new FakeLoaderRuns.VmArgRun());
         RemoldResolvedConfig conf = resolvedConfig(project,
                 Collections.singletonList("-javaagent:/opt/remold-agent.jar=build/classes"));
 
@@ -229,9 +231,14 @@ class RemoldPluginTest {
 
         FakeLoaderRuns.VmArgRun client = (FakeLoaderRuns.VmArgRun) runs.findByName("client");
         FakeLoaderRuns.VmArgRun server = (FakeLoaderRuns.VmArgRun) runs.findByName("server");
+        FakeLoaderRuns.VmArgRun clientGameTest = (FakeLoaderRuns.VmArgRun) runs.findByName("clientGameTest");
+        FakeLoaderRuns.VmArgRun gameTest = (FakeLoaderRuns.VmArgRun) runs.findByName("gameTest");
         Assertions.assertEquals(1, client.args.size(), "client run should get the agent");
         Assertions.assertEquals(1, server.args.size(), "dedicated-server run must get the agent too");
+        Assertions.assertEquals(1, clientGameTest.args.size(), "client gametest run must get the agent too");
+        Assertions.assertEquals(1, gameTest.args.size(), "server gametest run must get the agent too");
         Assertions.assertTrue(server.args.get(0).startsWith("-javaagent:"), "server run got a non-agent JVM argument");
+        Assertions.assertTrue(clientGameTest.args.get(0).startsWith("-javaagent:"), "gametest run got a non-agent JVM argument");
     }
 
     @Test

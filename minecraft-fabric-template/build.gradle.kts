@@ -77,6 +77,19 @@ tasks.processResources {
     }
 }
 
+// ── Fabric 客户端 gametest（MC 1.21.4+；1.21.1 的 fabric-api 不含该模块）──
+// 生成 `gametest` 源集（src/gametest/{java,resources}）与 `clientGameTest` 运行配置，
+// 对应任务 ./gradlew runClientGameTest；跑真客户端，可截图对比 + 模拟键鼠。
+configure<net.fabricmc.loom.api.fabricapi.FabricApiExtension> {
+    configureTests {
+        createSourceSet.set(true)
+        modId.set("example_mod_gametest")
+        enableGameTests.set(false)
+        enableClientGameTests.set(true)
+        eula.set(true)
+    }
+}
+
 tasks.withType<JavaCompile>().configureEach {
     options.encoding = "UTF-8"
     options.release = 21

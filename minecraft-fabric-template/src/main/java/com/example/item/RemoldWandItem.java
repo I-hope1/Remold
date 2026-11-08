@@ -3,12 +3,11 @@ package com.example.item;
 import com.example.mixin.RemoldWandItemMixin;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.Item;
-import net.minecraft.item.ItemStack;
 import net.minecraft.text.ClickEvent;
 import net.minecraft.text.ClickEvent.Action;
 import net.minecraft.text.Text;
+import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
-import net.minecraft.util.TypedActionResult;
 import net.minecraft.world.World;
 import remold.annotation.OnReload;
 import remold.annotation.RemoldReinit;
@@ -79,7 +78,7 @@ public class RemoldWandItem extends Item {
      * {@link #onReload()}</p>
      */
     @Override
-    public TypedActionResult<ItemStack> use(World world, PlayerEntity user, Hand hand) {
+    public ActionResult use(World world, PlayerEntity user, Hand hand) {
         if (!world.isClient()) {
             // 方法体首尾各一行标记，用来观察 Mixin 注入点的实际位置：
             // @At("HEAD") 时钩子打印在 begin 之前；@At("TAIL") 时打印在 end 之后。
@@ -90,7 +89,7 @@ public class RemoldWandItem extends Item {
                     Action.OPEN_URL, "https://github.com/I-hope1/Remold"))), false);
             System.out.println("[src] use() end");
         }
-        return TypedActionResult.success(user.getStackInHand(hand));
+        return ActionResult.SUCCESS;
     }
 
     /**

@@ -341,12 +341,13 @@ public final class RemoldPlugin implements Plugin<Project> {
 
     /**
      * Injects the Remold agent JVM arguments into every run environment the loader exposes
-     * (client and dedicated server), so {@code ./gradlew runServer} gets the same agent as
+     * (client, dedicated server and Fabric client/server gametest runs), so
+     * {@code ./gradlew runServer} / {@code runClientGameTest} get the same agent as
      * {@code runClient}. Run environments the loader did not register are silently skipped.
      */
     static void injectIntoLoaderRuns(Project project, RemoldResolvedConfig conf, Object runs, String label) {
         if (runs == null || conf == null) return;
-        for (String env : new String[]{"client", "server"}) {
+        for (String env : new String[]{"client", "server", "clientGameTest", "gameTest"}) {
             Object run;
             try {
                 run = runs.getClass().getMethod("findByName", String.class).invoke(runs, env);

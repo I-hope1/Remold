@@ -7,11 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `minecraft-fabric-template`: Minecraft **1.21.4** baseline (yarn 1.21.4+build.8,
+  loader 0.16.14, fabric-api 0.119.4+1.21.4) with Fabric client gametests
+  (`fabric-client-gametest-api-v1`): `./gradlew runClientGameTest`, `src/gametest` source set,
+  1.21.4 item-definition/model assets, and the `ActionResult` / `Item.Settings.registryKey`
+  API migrations. The gametest verifies item registration, the hotbar model screenshot and the
+  real right-click chat message.
+
 ### Fixed
 - Gradle plugin: the Remold agent JVM arguments were injected only into the loader `client` run
   container, so `./gradlew runServer` (Fabric Loom / ForgeGradle / NeoForge ModDevGradle) started
-  without `-javaagent`. Both `client` and `server` runs now receive the same arguments; auto-deploy
-  also wires `runServer`, and the IDEA Loom sync covers `Minecraft_Server.xml` as well as
+  without `-javaagent`, and Fabric gametest runs (`clientGameTest` / `gameTest`) also missed it.
+  Client, dedicated-server and gametest runs now receive the same arguments; auto-deploy also
+  wires `runServer`, and the IDEA Loom sync covers `Minecraft_Server.xml` as well as
   `Minecraft_Client.xml` (Application-style `VM_PARAMETERS` and Gradle-style `vmOptions`).
 - Release tooling: the Gradle plugin's JitPack publication published the bare version (`0.2.5`),
   while the packaged `remold.gradle(.kts)` shims and both project templates request

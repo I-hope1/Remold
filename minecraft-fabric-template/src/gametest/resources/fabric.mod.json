@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "example_mod_gametest",
+  "name": "Example Mod Client Game Tests",
+  "version": "1.0.0",
+  "environment": "*",
+  "entrypoints": {
+    "fabric-client-gametest": [
+      "com.example.gametest.RemoldWandClientGameTest"
+    ]
+  }
+}

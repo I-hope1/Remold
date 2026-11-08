@@ -3,9 +3,8 @@ package com.example.mixin;
 import com.example.item.RemoldWandItem;
 
 import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.item.ItemStack;
+import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
-import net.minecraft.util.TypedActionResult;
 import net.minecraft.world.World;
 
 import org.spongepowered.asm.mixin.Mixin;
@@ -53,7 +52,7 @@ public abstract class RemoldWandItemMixin {
      */
     @Inject(method = "use", at = @At("HEAD"))
     private void remold$countUse(World world, PlayerEntity user, Hand hand,
-                                 CallbackInfoReturnable<TypedActionResult<ItemStack>> cir) {
+                                 CallbackInfoReturnable<ActionResult> cir) {
         // 单机里 use() 会被调用两次：客户端本地预测一次 + 集成服务端一次。
         // 物品是注册表里的单例，两侧共用同一个 RemoldWandItem 实例，
         // 所以字段若无条件自增就会变成「一次右键 +2」。这里只在服务端计数。

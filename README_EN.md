@@ -275,7 +275,7 @@ If you prefer clicking "Run / Debug" in IDEA, the script plugin prepares everyth
 
 > [!NOTE]
 > **Fabric Loom Run Configuration Auto-Sync**:
-> In Minecraft Fabric development, Loom's `Minecraft Client` / `Minecraft Server` run configurations do not automatically update their VM parameters once generated. During `classes` or config generation the Remold script inspects and updates both `Minecraft_Client.xml` and `Minecraft_Server.xml` (Application-style `VM_PARAMETERS` and Gradle-style `vmOptions` are both supported), injecting `-javaagent`, `-Dremold.plugins=mixin` and the plugin jar. The Fabric Loom / ForgeGradle / NeoForge ModDevGradle **`server` run container receives the same JVM arguments as the client**, so `./gradlew runServer` and IDEA's `Minecraft Server` launch with the agent attached — no manual VM-options editing.
+> In Minecraft Fabric development, Loom's `Minecraft Client` / `Minecraft Server` run configurations do not automatically update their VM parameters once generated. During `classes` or config generation the Remold script inspects and updates both `Minecraft_Client.xml` and `Minecraft_Server.xml` (Application-style `VM_PARAMETERS` and Gradle-style `vmOptions` are both supported), injecting `-javaagent`, `-Dremold.plugins=mixin` and the plugin jar. The Fabric Loom / ForgeGradle / NeoForge ModDevGradle **`server` run container, and Fabric's `clientGameTest` / `gameTest` gametest runs, receive the same JVM arguments as the client**, so `./gradlew runServer`, `./gradlew runClientGameTest` and IDEA's `Minecraft Server` launch with the agent attached — no manual VM-options editing.
 
 To configure it by hand instead:
 

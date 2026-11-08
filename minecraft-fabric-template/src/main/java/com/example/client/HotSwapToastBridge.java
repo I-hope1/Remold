@@ -39,8 +39,10 @@ public final class HotSwapToastBridge {
 			return;
 		}
 		try {
-			Class<?> listenerType = Class.forName("remold.HotswapBatchListener");
-			Class<?> agentType = Class.forName("remold.RemoldAgent");
+			// Agent 的类由 system loader 加载；Fabric 的 Knot loader 不一定把 remold.*
+			// 委托给 system，因此显式优先用 system loader 解析，找不到再回退默认加载器。
+			Class<?> listenerType = loadAgentClass("remold.HotswapBatchListener");
+			Class<?> agentType = loadAgentClass("remold.RemoldAgent");
 			boolean reportSupported = hasMethod(listenerType, "afterInternalBatchReport");
 
 			InvocationHandler handler = (proxy, method, args) -> {
@@ -173,6 +175,22 @@ public final class HotSwapToastBridge {
 			// 客户端正在关闭 / 线程池已拒绝：热更本身已经成功，不要影响主链路。
 			ExampleMod.LOGGER.warn("[HotSwapToast] Failed to schedule toast: {}", t.toString());
 		}
+	}
+
+	/**
+	 * 优先用 system loader 解析 Agent 侧类（agent jar 由 system loader 加载），
+	 * 避免 Fabric Knot 的自定义 loader 看不到 {@code remold.*}。
+	 */
+	private static Class<?> loadAgentClass(String name) throws ClassNotFoundException {
+		ClassLoader system = ClassLoader.getSystemClassLoader();
+		if (system != null) {
+			try {
+				return Class.forName(name, false, system);
+			} catch (ClassNotFoundException ignored) {
+				// 回退到调用方 loader（例如非 Fabric 宿主把 agent 挂在同一 loader）。
+			}
+		}
+		return Class.forName(name);
 	}
 
 	private static boolean hasMethod(Class<?> type, String name) {

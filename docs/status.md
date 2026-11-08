@@ -7,7 +7,7 @@
 
 | 审计元数据项 | 内容与规格说明 |
 |:---|:---|
-| **基准提交 (Baseline Commit)** | `ae24c17` (分支: `main`，`v0.2.5` 已发布；该提交为发版后的 JitPack 坐标对齐) |
+| **基准提交 (Baseline Commit)** | `62aadf4` (分支: `main`，`v0.2.5` 已发布；含 Gradle 插件 server run 注入修复) |
 | **发布说明** | [`releases/v0.2.5.md`](releases/v0.2.5.md) |
 | **最后更新时间** | 2026-11-08（v0.2.5 已发布；JitPack 坐标对齐） |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |

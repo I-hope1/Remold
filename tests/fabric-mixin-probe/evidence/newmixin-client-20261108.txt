@@ -1,0 +1,37 @@
+# New Mixin / config diff — real Fabric 1.21.1 client, 2026-11-08
+
+Observed in the user's IDE-run client (KnotClient, JBR 21.0.9, Remold plugin with
+NewMixinRegistrar + MixinConfigDiff + removed-config guard).
+
+## Excerpt
+
+    21:49:14 Config diff example_mod.mixins.json: removed=[CreepMixin] added=[] affected=[net.minecraft.entity.mob.CreeperEntity]
+    21:49:14 LAYOUT-READERS scanned 1 class(es) for removed members of 1 class(es) in 9ms; dangling=0, abstract-gaps=0, dispatch-shifts=0
+    21:49:15 Successfully redefined net.minecraft.entity.mob.CreeperEntity
+    21:49:15 Target class net.minecraft.entity.mob.CreeperEntity re-woven with updated mixin and redefined
+
+    21:49:28 New mixin com.example.mixin.CreepMixin registered into config example_mod.mixins.json (targets=[net/minecraft/entity/mob/CreeperEntity])
+    21:49:28 Config diff example_mod.mixins.json: removed=[] added=[CreepMixin] affected=[net.minecraft.entity.mob.CreeperEntity]
+    21:49:29 Successfully redefined net.minecraft.entity.mob.CreeperEntity
+    21:49:29 Target class net.minecraft.entity.mob.CreeperEntity re-woven with updated mixin and redefined
+
+    21:49:36 Hello World!
+    21:49:36 爆炸前的 CreeperEntity: CreeperEntity['苦力怕'/9, ...]
+
+    21:49:48 Config diff example_mod.mixins.json: removed=[CreepMixin] added=[] affected=[...]
+    21:49:50 Target class net.minecraft.entity.mob.CreeperEntity re-woven with updated mixin and redefined
+
+    21:50:05 New mixin com.example.mixin.CreepMixin registered into config example_mod.mixins.json ...
+    21:50:05 Config diff example_mod.mixins.json: removed=[] added=[CreepMixin] affected=[...]
+    21:50:06 Target class net.minecraft.entity.mob.CreeperEntity re-woven with updated mixin and redefined
+
+    21:50:09 Hello World!
+    21:50:09 爆炸前的 CreeperEntity: CreeperEntity['苦力怕'/13, ...]
+
+## Verdict
+
+Client path observed: config removal re-weaves CreeperEntity and drops the hook; re-adding
+the name re-registers it and the hook prints again (two full remove/add cycles). This is a
+real client log, not a synthesized probe. It does not by itself prove that no hook fires
+between removal and re-add (no creeper explosion occurred in that window); the KnotServer
+probe covers that assertion with hook counters.

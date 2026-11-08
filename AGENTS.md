@@ -13,6 +13,19 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
     - **编译期常量**（`ConstantValue`，JLS §13.4.9，基本类型与 `String` 的 `static final`）**放行**：内联的读者运行期根本不解析该字段（零异常），未内联的读者常量池里仍有 `Fieldref`，会被 `hits` 正常抓到。边界不在 `final` 而在 `ConstantValue`：运行期初始化的 `static final` 与引用类型照常走 `Fieldref`（§16.1）。
   - 删除方法：**与字段不是同一套查找规则**。字段只有向上解析（JVMS 5.4.3.2）；实例方法还有向下分派（JVMS 5.4.6），因此引用 owner 可以是 `A` 的**任何祖先**（`InterfaceMethodref I.m` / `Methodref Super.m`），只按 `declaring == A` 归属会整类漏掉。失败形态有三种：`NoSuchMethodError`（整条链都没有同签名方法）、`AbstractMethodError`（只有接口声明、没有实现）、**回退到祖先实现**（连 `Methodref A.m` 本身都不抛错）。前两种拒绝，**第三种放行**——那是删掉 Override 的本意（§16.4）。判据与字段共用"批次外读者为空"，但**扫描未完成时只能拒绝**：方法删除没有存活实例判据可以退，它的影响与"当前有没有实例"正交。实测与判据见 `docs/initfix/07-p05-probe-results.md` §15。
 - 唯一例外：字段标 `@RemoldReinit(mode = OVERWRITE)` 时，才允许覆写存量值。
+- **L1 存量初值重放**（`docs/initfix/12-L1-existing-initializer-replay.md`）：默认关闭；仅当
+  `-Dremold.agent.init_drift.parents=<父类名,...>` 显式开启、且宿主是白名单父类的**匿名子类**、字段是
+  **非 final 基本类型**、旧/新初值都是编译期常量时，才按"旧初值条件 CAS"重放。该通道只写**匿名类自身
+  枚举到的**存量实例，不覆盖运行期改过的值（当前值 ≠ 旧初值即跳过），不写 `FieldLedger`，
+  `@RemoldReinit` 优先；具名类与引用类型字段不在第一版范围。
+- **A 档 Kotlin `apply {}` 静态持有者初值重放**（`docs/initfix/13-kotlin-apply-replay.md`）：默认关闭；仅当
+  `-Dremold.agent.init_drift.apply_holders=<持有者类 fqcn,...>` 显式开启、且持有者是白名单内的
+  `object` / 顶层 `val` 类时，才处理其 `<clinit>` 中 `T().apply { field = 编译期常量 }` 的形态。写入协议是
+  `GETSTATIC holder.dest` 取回 `<clinit>` 唯一存储的那一个存量对象，再按**旧初值条件 CAS** 写目标类型 `T` 的
+  字段；运行期改过的值跳过，`dest` 为 null/类型不符 warn 跳过。只接受直线 `<clinit>`、唯一 `NEW` 站点且对象
+  无其它逃逸、`dest` 声明在持有者自身且描述符精确为 `LT;`、目标字段基本类型/非 final/非 synthetic/非
+  `@RemoldReinit`、旧/新值均为编译期常量且不同；Kotlin `var` setter（`invokevirtual`）、具名类属性
+  （`<init>`，B 档）、方法体/局部（C 档）、引用类型字段不在范围。不写 `FieldLedger`、不改变 `patchGenerated`。
 - Android ART 与 `$extras` 扩展槽属于独立子项目（Engine II），不在此处理。
 - 运行时前提：
   - JBR 17/21+：`Lookup.defineHiddenClass`（NESTMATE）+ `jdk.internal.misc.Unsafe`
@@ -68,6 +81,8 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 |:--|:--|
 | 入口与主流程 | `InitFix.transform` / `buildPatch` / `applyPatch` |
 | 提取与安全门 | `extractFieldInits`、`checkSafe`、`effectReason`、`blacklistedCallReason`、`builderMutatorReason` |
+| L1 存量初值重放（白名单父类匿名子类 + 常量旧值） | `core/src/remold/ref/InitializerReplay.java`（纯函数候选/声明类解析）；`HotswapBridge.KIND_CONDITIONAL_EXPECTED`（旧初值 CAS） |
+| A 档 Kotlin `apply {}` 静态持有者重放（白名单持有者 `<clinit>` + 唯一 provenance） | `core/src/remold/ref/ApplyInitializerReplay.java`（纯分析：`<clinit>` 直线抽象解释、局部变量副本溯源、唯一 `NEW`/唯一 `PUTSTATIC dest`、目标字段安全门）；`InitFix`（`PatchPlan.applyFields` + `applyReplay$N` 补丁方法 + `PatchReport.applyReplayFields`）；`HotswapBridge.KIND_CONDITIONAL_EXPECTED` 的链接期字段复核 |
 | 参数回溯 | `scanParamFields`、`sourceFieldNotImmutableReason`、`InitFix.NestView` |
 | 离线层级 | `ClassHierarchyOracle` / `HierarchyTreeOracle`，底层 `AnnotationTransformer.HierarchyTree` |
 | 台账 | `InitFix.LEDGER`、`getUnpatchedFields` |
@@ -89,6 +104,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 测试夹具（Kotlin） | `tests/ktfix/v1/`、`v2/` 下的 `.kt`，由 `ktfixV1`/`ktfixV2` source set 编译 |
 | P0.5 前置验证探针 | `tests/src/P05Probe.java`（配套最小 agent `P05Agent.java`，`./gradlew :tests:p05Probe -Pp05.jbr=<dcevm-jdk>`） |
 | 两阶段编排探针 | `tests/src/TwoPhaseProbe.java`（`./gradlew :tests:twoPhaseProbe -Pp05.jbr=<dcevm-jdk>`，串起 A → B → C） |
+| A 档 Kotlin apply 重放探针 | `tests/src/KotlinApplyProbe.java`（`./gradlew :tests:kotlinApplyProbe -Pp05.jbr=<dcevm-jdk>`，真实 `processChanges` + redefine；Java 等价夹具，Kotlin 真实字节证据见 `docs/initfix/13-kotlin-apply-replay.md` §2） |
 | 测试判定力审计记录 | `docs/initfix/08-test-audit.md`（变异检查证据；审计产生的缺口与结论，一次性证据不放状态表） |
 | lambda 对齐压力测试 | `tests/src/LambdaAlignTortureTest.java`（旧 callsite 名字 → body 归属的自动断言；JDK 8/17/21 × 前插/删除/重排，覆盖 `lambda$static$N`/`lambda$new$N`；含判定力自检） |
 | 捕获桥（删除 + 可证明的新增：常量 / final 字段 / 可折叠算式 / 构造器参数经 final 字段 / 运行时常量） | `LambdaAligner.stepCaptureBridge` / `getBridgeDelegate` / `onBridgeInvoked`；接收者归一在 `captureNamesOf`（槽号结构优先，名字 `null`/`this`/`this$0` 只兜底回溯失败），`readLambdaParamNames` 只报告 LVT 原文；规格见 `docs/topology/09-lambda-capture-bridge.md` |
@@ -135,6 +151,12 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 - Kotlin 夹具的 v1/v2 输出目录**绝不能**进入任何 classpath（同名类会静默只命中其一，造成假绿）。
 - 迭代期间只跑 `./gradlew initFixOracle`，收尾时才跑一次 `./gradlew check`。
 - 匿名类/对齐主题套件为标准 JUnit 测试：`./gradlew test`（或 `./gradlew :tests:test`，挂在 `check`）。入口用 `-Dhstest.javac8/11/17/21/25` 现编夹具，不再有 `expected-count.txt` 基线。
+- L1 存量初值重放：`./gradlew :tests:initFixOracle` + `InitializerReplayTest`（走 `:tests:test`）+ `./gradlew :tests:doubleBraceProbe`（L1 场景需要 DCEVM 与 `-XX:+AllowEnhancedClassRedefinition`，不挂 `check`）。改动 `InitializerReplay` 的候选/安全门、或 `HotswapBridge.KIND_CONDITIONAL_EXPECTED` 后，必须跑 `doubleBraceProbe` 并做变异检查：白名单判定放宽必须让非白名单用例变红，条件写改成 FORCE 必须让"运行期改过的值"用例变红。
+- A 档 Kotlin apply 静态持有者重放：`./gradlew :tests:test --tests ApplyInitializerReplayTest` +
+  `./gradlew :tests:kotlinApplyProbe -Pp05.jbr=<DCEVM JDK 目录>`（不挂 `check`）+ L1 的 `doubleBraceProbe` 保持 104/0。
+  改动 `ApplyInitializerReplay` 的候选/安全门、`InitFix` 的 `applyFields` 计划/发射、或
+  `HotswapBridge.KIND_CONDITIONAL_EXPECTED` 后必须跑它并做变异检查：白名单判定放宽必须让非白名单用例变红，
+  条件写改成 FORCE 必须让"运行期改过的值"用例变红。
 - P0.5 前置验证：`./gradlew :tests:p05Probe -Pp05.jbr=<DCEVM JDK 目录>`（或设 `JBR_HOME`）。**不挂 `check`**，因为需要 JBR 17/21 的 `-XX:+AllowEnhancedClassRedefinition`；CI 由 `p05-probe` 的 JBR 17/21 矩阵承担。探针刻意用最小 agent（`P05Agent`）而非 `remold-agent.jar`，避免 `LayoutGate`/`InitFix` 介入被测重定义。
 - 缓存填充验证：`./gradlew :tests:cacheWarmingProbe`（只需 `-javaagent`）。改动 transformer 注册顺序或`canRetransform` 标志后必须跑它：它实测"`canRetransform=false` 组整组先于 `true` 组执行"这条规则，并断言 `bytecodeCache` 里存的是对齐/织入**之后**的字节。
 - Forge ClassInfo 成员同步 E2E：`tests/fabric-mixin-probe/forge-classinfo/`（真实 Forge 1.21.1 `runServer`，红基线 + 修复后绿跑；`bash run-forge-classinfo.sh` 复跑，Windows 下用 `verify-evidence.cmd` 做验收；同样不挂 `check`）。改动 `ForgeClassInfoSync` / `ForgeMixinHotSwap.reload` 时序前必须先跑它。
@@ -162,6 +184,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 补丁驱动、写入协议、`@RemoldReinit` | `docs/initfix/03-runtime-driver.md` |
 | 两阶段、基线指纹、构造器插桩、目标设计路线图 | `docs/initfix/04-target-design.md` |
 | P0.5 前置验证的实测方法与原始数据 | `docs/initfix/07-p05-probe-results.md` |
+| Kotlin `apply {}` 静态持有者初值重放（A 档）的候选判据、写入协议与 Kotlin 字节码事实 | `docs/initfix/13-kotlin-apply-replay.md` |
 | JVMTI 堆遍历 | `docs/initfix/05-jvmti-heap.md` |
 | 为什么这么设计、历史缺陷 | `docs/initfix/06-decisions.md` |
 

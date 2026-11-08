@@ -118,6 +118,8 @@ import static remold.RemoldAgent.log;
 public class InitFix {
 	private static final String STATIC_PATCH_PREFIX   = "initStatic$";
 	private static final String INSTANCE_PATCH_PREFIX = "init$";
+	/** A 档 apply 重放的静态方法前缀；按 applyFields 插入顺序编号（驱动侧复用同一顺序）。 */
+	private static final String APPLY_REPLAY_PREFIX    = "applyReplay$";
 	private static final String PATCH_SUFFIX          = "$$HotswapPatch";
 
 	private static final long PENDING_TTL_NANOS     = TimeUnit.MINUTES.toNanos(5);
@@ -416,6 +418,25 @@ public class InitFix {
 	 + ")Ljava/lang/invoke/CallSite;",
 	 false);
 
+	/**
+	 * L1 存量初值重放的 bootstrap：在 {@link #BRIDGE_BSM} 的 bsmArgs 后追加旧初值常量。
+	 * <p>bsmArgs 布局：{@code [int kind, int opcode, Class owner, Class host, Object expected]}。</p>
+	 */
+	private static final Handle BRIDGE_BSM_EXPECTED = new Handle(
+	 Opcodes.H_INVOKESTATIC,
+	 Type.getInternalName(HotswapBridge.class),
+	 "bootstrapExpected",
+	 "(Ljava/lang/invoke/MethodHandles$Lookup;"
+	 + "Ljava/lang/String;"
+	 + "Ljava/lang/invoke/MethodType;"
+	 + "I"
+	 + "I"
+	 + "Ljava/lang/Class;"
+	 + "Ljava/lang/Class;"
+	 + "Ljava/lang/Object;"
+	 + ")Ljava/lang/invoke/CallSite;",
+	 false);
+
 	private record BuiltPatch(byte[] bytes, PatchPlan plan, PatchReport report) {
 		boolean hasPatch() { return bytes != null; }
 	}
@@ -431,7 +452,7 @@ public class InitFix {
 	 */
 	public record FieldPatchTask(
 	 String methodName, String fieldName, boolean isStatic, Set<String> dependencies,
-	 boolean selfOnly) {
+	 boolean selfOnly, boolean replay) {
 
 		public FieldPatchTask {
 			dependencies = dependencies == null ? Set.of() : Set.copyOf(dependencies);
@@ -440,7 +461,13 @@ public class InitFix {
 		/** 默认作用域（{@code INCLUDE_SUBCLASSES}）的任务：子类实例同样要补。 */
 		public FieldPatchTask(String methodName, String fieldName, boolean isStatic,
 		                      Set<String> dependencies) {
-			this(methodName, fieldName, isStatic, dependencies, false);
+			this(methodName, fieldName, isStatic, dependencies, false, false);
+		}
+
+		/** 默认作用域 + 非重放任务。 */
+		public FieldPatchTask(String methodName, String fieldName, boolean isStatic,
+		                      Set<String> dependencies, boolean selfOnly) {
+			this(methodName, fieldName, isStatic, dependencies, selfOnly, false);
 		}
 	}
 
@@ -452,12 +479,18 @@ public class InitFix {
 	 *                     （{@code OVERWRITE}/{@code CONDITIONAL}），按注解声明顺序保序。
 	 *                     只收"注解确实兑现了"的字段：被安全门拒绝的不会出现在这里。
 	 *                     用途见 {@link InitFix#reinitHint}（{@code docs/initfix/03-runtime-driver.md} §4）。
+	 * @param applyFields  A 档 Kotlin apply 重放：候选键 -> 重放描述
+	 *                     （{@code docs/initfix/13-kotlin-apply-replay.md}）。与普通静态字段任务分开，
+	 *                     因为写入目标是<b>另一个类</b>（apply 对象类型）的字段；保序副本决定补丁方法名
+	 *                     （{@code applyReplay$i}）与驱动顺序。
 	 */
 	public record PatchPlan(
 	 List<FieldPatchTask> instanceTasks, List<FieldPatchTask> staticTasks,
-	 Map<String, String> reinitFields) {
+	 Map<String, String> reinitFields,
+	 Map<String, ApplyInitializerReplay.ReplayField> applyFields) {
 
-		public static final PatchPlan EMPTY = new PatchPlan(List.of(), List.of(), Map.of());
+		public static final PatchPlan EMPTY =
+		 new PatchPlan(List.of(), List.of(), Map.of(), Map.of());
 
 		public PatchPlan {
 			instanceTasks = instanceTasks == null ? List.of() : List.copyOf(instanceTasks);
@@ -466,16 +499,28 @@ public class InitFix {
 			reinitFields = reinitFields == null || reinitFields.isEmpty()
 			 ? Map.of()
 			 : Collections.unmodifiableMap(new LinkedHashMap<>(reinitFields));
+			applyFields = applyFields == null || applyFields.isEmpty()
+			 ? Map.of()
+			 : Collections.unmodifiableMap(new LinkedHashMap<>(applyFields));
+		}
+
+		/** 兼容不带 apply 重放的构造。 */
+		public PatchPlan(List<FieldPatchTask> instanceTasks, List<FieldPatchTask> staticTasks,
+		                 Map<String, String> reinitFields) {
+			this(instanceTasks, staticTasks, reinitFields, Map.of());
 		}
 
 		/** 兼容不带注解信息的构造：本轮没有 {@code @RemoldReinit} 参与时用它。 */
 		public PatchPlan(List<FieldPatchTask> instanceTasks, List<FieldPatchTask> staticTasks) {
-			this(instanceTasks, staticTasks, Map.of());
+			this(instanceTasks, staticTasks, Map.of(), Map.of());
 		}
 
-		public boolean isEmpty() { return instanceTasks.isEmpty() && staticTasks.isEmpty(); }
+		public boolean isEmpty() {
+			return instanceTasks.isEmpty() && staticTasks.isEmpty() && applyFields.isEmpty();
+		}
 
-		public boolean hasStatic() { return !staticTasks.isEmpty(); }
+		/** apply 重放同样是"只跑一次"的静态任务：没有实例可枚举时也必须执行。 */
+		public boolean hasStatic() { return !staticTasks.isEmpty() || !applyFields.isEmpty(); }
 		public boolean hasInstance() { return !instanceTasks.isEmpty(); }
 
 		public List<FieldPatchTask> allTasks() {
@@ -586,12 +631,61 @@ public class InitFix {
 	/**
 	 * 一次 transform 的完整报告。
 	 * <p>不持有宿主类引用，避免与 {@link #REPORTS} 的弱键形成强引用循环。</p>
+	 *
+	 * @param replayFields L1 存量初值重放字段 -> 结果（{@code replayed} 或 {@code rejected: 原因}）。
+	 *                     独立于 {@link #instanceFields}：L1 不参与 {@code patchGenerated} 语义，
+	 *                     也不写 {@code FieldLedger}（{@code docs/initfix/12-L1-existing-initializer-replay.md}）。
+	 * @param applyReplayFields A 档 Kotlin apply 重放：{@code dest -> 目标类.字段} -> 结果。
+	 *                     与 {@link #replayFields} 分开：写入目标是 apply 对象类型的字段，不是宿主的字段，
+	 *                     台账与告警口径也不同（{@code docs/initfix/13-kotlin-apply-replay.md}）。
 	 */
 	public record PatchReport(
 	 Map<String, FieldDecision> instanceFields,
 	 Map<String, FieldDecision> staticFields,
-	 boolean patchGenerated
-	) { }
+	 boolean patchGenerated,
+	 Map<String, String> replayFields,
+	 Map<String, String> applyReplayFields
+	) {
+		public PatchReport {
+			replayFields = replayFields == null || replayFields.isEmpty()
+			 ? Map.of()
+			 : Collections.unmodifiableMap(new LinkedHashMap<>(replayFields));
+			applyReplayFields = applyReplayFields == null || applyReplayFields.isEmpty()
+			 ? Map.of()
+			 : Collections.unmodifiableMap(new LinkedHashMap<>(applyReplayFields));
+		}
+
+		/** 兼容不带 apply 重放诊断的构造。 */
+		public PatchReport(Map<String, FieldDecision> instanceFields,
+		                   Map<String, FieldDecision> staticFields,
+		                   boolean patchGenerated,
+		                   Map<String, String> replayFields) {
+			this(instanceFields, staticFields, patchGenerated, replayFields, Map.of());
+		}
+
+		/** 兼容不带重放诊断的构造：默认路径（L1/A 档关闭）不会产生 replay 字段。 */
+		public PatchReport(Map<String, FieldDecision> instanceFields,
+		                   Map<String, FieldDecision> staticFields,
+		                   boolean patchGenerated) {
+			this(instanceFields, staticFields, patchGenerated, Map.of(), Map.of());
+		}
+
+		/** L1 是否真的生成了至少一个重放补丁。 */
+		public boolean replayGenerated() {
+			for (String result : replayFields.values()) {
+				if ("replayed".equals(result)) return true;
+			}
+			return false;
+		}
+
+		/** A 档 apply 重放是否真的生成了至少一个补丁。 */
+		public boolean applyReplayGenerated() {
+			for (String result : applyReplayFields.values()) {
+				if ("replayed".equals(result)) return true;
+			}
+			return false;
+		}
+	}
 
 	public static PatchReport getLastReport(Class<?> host) {
 		if (host == null) return null;
@@ -619,12 +713,38 @@ public class InitFix {
 			}
 		}
 
+		// L1（docs/initfix/12-L1-existing-initializer-replay.md）：默认关闭的存量初值重放。
+		// 只对白名单父类的匿名子类、且旧/新初值都是编译期常量时生成补丁；检测失败只告警。
+		InitializerReplay.Plan replayPlan = InitializerReplay.plan(host, diff);
+		Map<String, InitializerReplay.ReplayField> replayFields = replayPlan.fields();
+		if (!replayPlan.notices().isEmpty() && diff != null && diff.newClass != null) {
+			String displayName = diff.newClass.name.replace('/', '.');
+			for (String notice : replayPlan.notices()) {
+				RemoldAgent.warn("[INIT-REPLAY] " + displayName + ": " + notice);
+			}
+		}
+
+		// A 档（docs/initfix/13-kotlin-apply-replay.md）：Kotlin object / 顶层 val 的
+		// `T().apply { field = const }`。默认关闭；只处理白名单持有者 <clinit> 的直线形态。
+		ApplyInitializerReplay.Plan applyPlan = ApplyInitializerReplay.plan(host, diff);
+		Map<String, ApplyInitializerReplay.ReplayField> applyFields = applyPlan.fields();
+		if (!applyPlan.notices().isEmpty() && diff != null && diff.newClass != null) {
+			String displayName = diff.newClass.name.replace('/', '.');
+			for (String notice : applyPlan.notices()) {
+				RemoldAgent.warn("[INIT-APPLY-REPLAY] " + displayName + ": " + notice);
+			}
+		}
+		logApplyReplayDecisions(diff == null || diff.newClass == null
+		 ? "?" : diff.newClass.name.replace('/', '.'), applyPlan.decisions());
+
 		Set<String> addedStaticFields   = diff.addedStaticFields;
 		Set<String> addedInstanceFields = diff.addedInstanceFields;
 
 		Map<String, String> pending = ledgerSnapshot(host);
 		if (addedStaticFields.isEmpty() && addedInstanceFields.isEmpty()
-		    && !hasReinitAnnotation(newBytes) && pending.isEmpty()) {
+		    && !hasReinitAnnotation(newBytes) && pending.isEmpty()
+		    && replayFields.isEmpty() && applyFields.isEmpty()
+		    && applyPlan.decisions().isEmpty()) {
 			REPORTS.put(host, new PatchReport(Map.of(), Map.of(), false));
 			return;
 		}
@@ -637,7 +757,8 @@ public class InitFix {
 		warnHashSemanticDependencies(newBytes, addedInstanceFields);
 		try {
 			BuiltPatch built = buildPatch(host, newBytes, className,
-			 addedStaticFields, addedInstanceFields, pending);
+			 addedStaticFields, addedInstanceFields, pending, replayFields, applyFields,
+			 applyPlan.decisions());
 			// if (built == null) return;
 
 			REPORTS.put(host, built.report());
@@ -649,6 +770,8 @@ public class InitFix {
 			// 默认环境下这些真正的 REJECTED 对用户完全静默。这里按原因聚合统一发 warn，
 			// 各阶段不必再各自关心日志级别。
 			warnRejectedFields(className, built.report());
+			logReplayResult(className, built.report(), replayFields);
+			logApplyReplayResult(className, built.report(), applyFields);
 
 			if (!built.hasPatch()) return;
 
@@ -699,6 +822,8 @@ public class InitFix {
 					// redefine 推进后这些字段再也不会出现在 Diff 里 —— docs/initfix/02-closure-and-ledger.md §2 的遗忘场景。
 					List<String> fields = new ArrayList<>();
 					for (FieldPatchTask task : e.getValue().plan().allTasks()) {
+						// L1 重放不是"本应补"的欠账，不写台账。
+						if (task.replay()) continue;
 						fields.add(task.fieldName());
 					}
 					stale.add(new StalePatch(new WeakReference<>(k), fields,
@@ -729,7 +854,10 @@ public class InitFix {
 	private static BuiltPatch buildPatch(
 	 Class<?> host, byte[] newBytes, String className,
 	 Set<String> addedStaticFields, Set<String> addedInstanceFields,
-	 Map<String, String> pendingLedger) {
+	 Map<String, String> pendingLedger,
+	 Map<String, InitializerReplay.ReplayField> replayFields,
+	 Map<String, ApplyInitializerReplay.ReplayField> applyFields,
+	 Map<String, String> applyDecisions) {
 
 		ClassNode newClass = new ClassNode();
 		new ClassReader(newBytes).accept(newClass, 0);
@@ -806,6 +934,14 @@ public class InitFix {
 		if (!reinitFields.isEmpty()) {
 			log("@RemoldReinit expanded candidate set for " + className
 			    + ": instance=" + targetInstanceFields + ", static=" + targetStaticFields);
+		}
+
+		// L1 存量初值重放：继承字段不在本类字段表里，必须补一份合成的 FieldNode 元数据，
+		// 否则后续安全门（后续加工检查）会因为 fieldNode == null 而整段跳过。
+		for (InitializerReplay.ReplayField replay : replayFields.values()) {
+			targetInstanceFields.add(replay.name());
+			fieldNodes.putIfAbsent(replay.name(),
+			 new FieldNode(replay.access(), replay.name(), replay.desc(), null, null));
 		}
 
 		// docs/initfix/02-closure-and-ledger.md §2 台账并集：候选字段集合 = 本轮 Diff 新增字段 ∪ 台账内未决字段（∪ 注解字段）。
@@ -894,6 +1030,24 @@ public class InitFix {
 		List<MethodNode> staticScanMethods = new ArrayList<>(initMethods);
 		if (clinitMethod != null) staticScanMethods.add(clinitMethod);
 
+		// ==================== L1：存量初值重放的补丁前校验 ====================
+		// 计划阶段只确认"旧/新初值都是常量"；这里再让正式提取器过一遍，确认写入切片确实
+		// 是自包含的常量表达式、且每个根构造器都覆盖。失败的不进补丁、也不写台账（L1 是尽力重放）。
+		Map<String, String> replayDecisions = new LinkedHashMap<>();
+		Set<String>         acceptedReplay  = new LinkedHashSet<>();
+		for (InitializerReplay.ReplayField replay : replayFields.values()) {
+			String reason = replayExtractReason(
+			 instanceExtracts.get(replay.name()), rootCtorCount, className, replay);
+			if (reason != null) {
+				replayDecisions.put(replay.name(), "rejected: " + reason);
+				instanceExtracts.remove(replay.name());
+				instanceReasons.putIfAbsent(replay.name(), reason);
+			} else {
+				replayDecisions.put(replay.name(), "replayed");
+				acceptedReplay.add(replay.name());
+			}
+		}
+
 		// ==================== 阶段 0.4：@RemoldReinit 初值指纹（docs/initfix/03-runtime-driver.md §4） ====================
 		// 只对"封闭表达式"建指纹：它的值完全由自身字节码决定，字节码没变就等于值没变。
 		// 开放表达式（跨类调用、他类静态字段……）这里拿不到 key —— 它们的值可能被外部改动带走，
@@ -915,6 +1069,9 @@ public class InitFix {
 		for (String f : targetInstanceFields) {
 			if (selfAssignedFields.contains(f)) continue;
 			if (reinitFields.containsKey(f)) continue;   // docs/initfix/03-runtime-driver.md §4：显式重置请求不受 T0 影响
+			// L1 重放字段的"零值等价"不成立：存量值可能是旧初值（非零），新初值为 0 时也必须
+			// 条件写回，不能按 T0 当作"已经是对的"跳过。
+			if (acceptedReplay.contains(f)) continue;
 			if (isZeroEquivalentField(nest, newClass, fieldNodes.get(f), false, instanceExtracts)) {
 				zeroInstanceFields.add(f);
 			}
@@ -1209,6 +1366,13 @@ public class InitFix {
 		List<FieldPatchTask> instanceTasks   = new ArrayList<>();
 		List<FieldPatchTask> staticTasks     = new ArrayList<>();
 
+		// L1 重放字段 -> 旧初值常量（ASM bootstrap 常量）。只有通过补丁前校验的字段才携带。
+		Map<String, Object> replayArguments = new LinkedHashMap<>();
+		for (String fieldName : acceptedReplay) {
+			InitializerReplay.ReplayField replay = replayFields.get(fieldName);
+			if (replay != null) replayArguments.put(fieldName, replay.bootstrapArgument());
+		}
+
 		for (String fieldName : orderedInstance) {
 			FieldExtract chosen = null;
 			for (FieldExtract fe : instanceExtracts.get(fieldName)) {
@@ -1222,7 +1386,7 @@ public class InitFix {
 			String method = uniqueMethodName(INSTANCE_PATCH_PREFIX, fieldName, usedMethodNames);
 			List<AbstractInsnNode> body = rewriteFieldSlice(
 			 hostInternal, className, new ArrayList<>(chosen.instructions()),
-			 chosen.protectedAccesses(), conditionalFields, forceWriteFields);
+			 chosen.protectedAccesses(), conditionalFields, forceWriteFields, replayArguments);
 			patch.methods.add(straightLineMethod(method, "(L" + className + ";)", body));
 			// 依赖闭包必须同时统计实例侧与<b>静态侧</b>的读取。
 			// 只传 acceptedInstance 会把切片里的 GETSTATIC 整个漏掉：静态字段补失败后，
@@ -1234,8 +1398,9 @@ public class InitFix {
 			 dependencyOf(fieldName, instanceExtracts, className, acceptedInstance));
 			instanceDeps.addAll(
 			 dependencyOf(fieldName, instanceExtracts, className, acceptedStatic));
+			boolean replayTask = acceptedReplay.contains(fieldName);
 			instanceTasks.add(new FieldPatchTask(method, fieldName, false, instanceDeps,
-			 selfOnlyFields.contains(fieldName)));
+			 replayTask || selfOnlyFields.contains(fieldName), replayTask));
 		}
 
 		for (String fieldName : orderedStatic) {
@@ -1243,10 +1408,23 @@ public class InitFix {
 			String       method = uniqueMethodName(STATIC_PATCH_PREFIX, fieldName, usedMethodNames);
 			List<AbstractInsnNode> body = rewriteFieldSlice(
 			 hostInternal, className, new ArrayList<>(fe.instructions()),
-			 fe.protectedAccesses(), conditionalFields, forceWriteFields);
+			 fe.protectedAccesses(), conditionalFields, forceWriteFields, Map.of());
 			patch.methods.add(straightLineMethod(method, "()", body));
 			staticTasks.add(new FieldPatchTask(method, fieldName, true,
 			 dependencyOf(fieldName, staticExtracts, className, acceptedStatic)));
+		}
+
+		// A 档 apply 重放（docs/initfix/13-kotlin-apply-replay.md §4 写入协议）：
+		// 每个候选一个 `()V` 静态方法 = GETSTATIC holder.dest; <新常量>; indy(KIND_CONDITIONAL_EXPECTED)。
+		// apply 任务名按 applyFields 的插入顺序编号（驱动侧用同一顺序解析句柄，不做名字重算）。
+		// 目标字段属于 apply 对象类型 T，不属于宿主；expected 是旧初值常量，只有运行期值仍等于它才写。
+		int applyIndex = 0;
+		for (ApplyInitializerReplay.ReplayField replay : applyFields.values()) {
+			String method = APPLY_REPLAY_PREFIX + applyIndex++;
+			List<AbstractInsnNode> body = applyReplayBody(className, replay);
+			patch.methods.add(straightLineMethod(method, "()", body));
+			log("Emitting apply replay patch: " + className.replace('/', '.') + " -> "
+			    + replay.key() + " (" + replay.oldText() + " -> " + replay.newText() + ")");
 		}
 
 		// 注解字段里"真的兑现了"的那些：只有进了有序任务表才算数（被安全门拒绝的字段不该被点名）。
@@ -1259,7 +1437,7 @@ public class InitFix {
 			reinitApplied.put(f, e.getValue().overwrite() ? "OVERWRITE" : "CONDITIONAL");
 		}
 
-		PatchPlan plan = new PatchPlan(instanceTasks, staticTasks, reinitApplied);
+		PatchPlan plan = new PatchPlan(instanceTasks, staticTasks, reinitApplied, applyFields);
 
 		// 记录本轮"应用了哪个初值表达式"（docs/initfix/03-runtime-driver.md §4）：下一轮据此判断是否还需要重置。
 		// 只记真正进了补丁的字段；运行期失败/跳过由 applyPatch 撤回，redefine 失败/待补过期由对应路径整类作废。
@@ -1268,10 +1446,8 @@ public class InitFix {
 			if (key != null) reinitAppliedPut(host, f, key);
 		}
 
-		PatchReport report = new PatchReport(
-		 Collections.unmodifiableMap(instanceDecisions),
-		 Collections.unmodifiableMap(staticDecisions),
-		 !plan.isEmpty());
+		PatchReport report = makeReport(plan, instanceDecisions, staticDecisions, replayFields, replayDecisions,
+		 applyDecisions);
 
 		if (plan.isEmpty()) {
 			return new BuiltPatch(null, PatchPlan.EMPTY, report);
@@ -1282,15 +1458,233 @@ public class InitFix {
 		return new BuiltPatch(cw.toByteArray(), plan, report);
 	}
 
+	/**
+	 * 组装 {@link PatchReport}：L1/A 档重放字段不进 {@link #instanceFields}（否则会被台账/告警当成
+	 * "本应补但没补"），也不改变"默认补丁是否生成"的语义。
+	 */
+	private static PatchReport makeReport(
+	 PatchPlan plan,
+	 Map<String, FieldDecision> instanceDecisions,
+	 Map<String, FieldDecision> staticDecisions,
+	 Map<String, InitializerReplay.ReplayField> replayFields,
+	 Map<String, String> replayDecisions,
+	 Map<String, String> applyDecisions) {
+
+		for (String field : replayFields.keySet()) instanceDecisions.remove(field);
+
+		boolean onlyReplay = !plan.isEmpty();
+		for (FieldPatchTask task : plan.allTasks()) {
+			if (!task.replay()) {
+				onlyReplay = false;
+				break;
+			}
+		}
+		return new PatchReport(
+		 Collections.unmodifiableMap(instanceDecisions),
+		 Collections.unmodifiableMap(staticDecisions),
+		 !plan.isEmpty() && !onlyReplay,
+		 replayDecisions,
+		 applyDecisions);
+	}
+
+	/**
+	 * A 档 apply 重放的补丁体（{@code docs/initfix/13-kotlin-apply-replay.md} §4）：
+	 * <pre>
+	 *   GETSTATIC holder.dest : LT;
+	 *   &lt;new constant&gt;
+	 *   INVOKEDYNAMIC field (LT;I)V  bootstrapExpected(KIND_CONDITIONAL_EXPECTED, PUTFIELD,
+	 *                                                 T.class, holder.class, old constant)
+	 * </pre>
+	 * {@code GETSTATIC} 是从 {@code <clinit>} 里唯一存储该对象的静态字段取回那<b>一个</b>存量对象
+	 * （唯一 provenance，不枚举堆）；条件 CAS 由 {@link HotswapBridge#bootstrapExpected} 完成。
+	 */
+	private static List<AbstractInsnNode> applyReplayBody(
+	 String holderInternal, ApplyInitializerReplay.ReplayField replay) {
+
+		List<AbstractInsnNode> body = new ArrayList<>(4);
+		body.add(new FieldInsnNode(Opcodes.GETSTATIC, holderInternal,
+		 replay.dest(), replay.destDesc()));
+		body.add(applyReplayConstant(replay.newRaw(), replay.fieldDesc()));
+		body.add(new InvokeDynamicInsnNode(
+		 replay.fieldName(),
+		 "(" + replay.destDesc() + replay.fieldDesc() + ")V",
+		 BRIDGE_BSM_EXPECTED,
+		 new Object[]{
+		  HotswapBridge.KIND_CONDITIONAL_EXPECTED,
+		  Opcodes.PUTFIELD,
+		  Type.getObjectType(replay.targetClass()),
+		  Type.getObjectType(holderInternal),
+		  replay.bootstrapArgument()
+		 }));
+		return body;
+	}
+
+	/** 把新初值常量压栈的指令；常量类别由目标字段描述符决定（B/C/S/Z 均以 int 压栈）。 */
+	private static AbstractInsnNode applyReplayConstant(Object raw, String fieldDesc) {
+		if (!(raw instanceof Number number)) {
+			throw new IllegalArgumentException("apply replay constant must be numeric, got " + raw);
+		}
+		char kind = fieldDesc.charAt(0);
+		if (kind == 'J') {
+			long value = number.longValue();
+			if (value == 0L) return new InsnNode(Opcodes.LCONST_0);
+			if (value == 1L) return new InsnNode(Opcodes.LCONST_1);
+			return new LdcInsnNode(value);
+		}
+		if (kind == 'F') {
+			float value = number.floatValue();
+			if (value == 0.0f && Float.floatToRawIntBits(value) == 0) return new InsnNode(Opcodes.FCONST_0);
+			if (value == 1.0f) return new InsnNode(Opcodes.FCONST_1);
+			if (value == 2.0f) return new InsnNode(Opcodes.FCONST_2);
+			return new LdcInsnNode(value);
+		}
+		if (kind == 'D') {
+			double value = number.doubleValue();
+			if (value == 0.0d && Double.doubleToRawLongBits(value) == 0L) return new InsnNode(Opcodes.DCONST_0);
+			if (value == 1.0d) return new InsnNode(Opcodes.DCONST_1);
+			return new LdcInsnNode(value);
+		}
+		int value = number.intValue();
+		if (value >= -1 && value <= 5) return new InsnNode(Opcodes.ICONST_0 + value);
+		if (value >= Byte.MIN_VALUE && value <= Byte.MAX_VALUE) return new IntInsnNode(Opcodes.BIPUSH, value);
+		if (value >= Short.MIN_VALUE && value <= Short.MAX_VALUE) return new IntInsnNode(Opcodes.SIPUSH, value);
+		return new LdcInsnNode(value);
+	}
+
+	/**
+	 * L1 补丁前校验：重放切片必须是"接收者 this + 自包含常量 + 唯一写指令"。
+	 * 提取器允许的其它形态（读字段、调用、装箱等）一律拒绝——重放的是初值表达式，不是构造器。
+	 */
+	private static String replayExtractReason(
+	 List<FieldExtract> extracts, int rootCtorCount, String className,
+	 InitializerReplay.ReplayField replay) {
+
+		if (extracts == null || extracts.isEmpty()) {
+			return "no safe initialization expression found in constructors";
+		}
+		if (extracts.size() != 1) {
+			return "field is written in " + extracts.size() + " constructors";
+		}
+		if (rootCtorCount > 1) {
+			return "class has " + rootCtorCount + " root constructors";
+		}
+		FieldExtract extract = extracts.get(0);
+		if (!extract.fromRootCtor()) return "field is only initialized in delegating constructors";
+
+		List<AbstractInsnNode> body = extract.instructions();
+		if (body.isEmpty()) return "empty write slice";
+
+		AbstractInsnNode last = body.get(body.size() - 1);
+		if (!(last instanceof FieldInsnNode put)
+		    || put.getOpcode() != Opcodes.PUTFIELD
+		    || !put.owner.equals(className)
+		    || !put.name.equals(replay.name())
+		    || !put.desc.equals(replay.desc())) {
+			return "unexpected write instruction shape";
+		}
+		if (!(body.get(0) instanceof VarInsnNode receiver)
+		    || receiver.getOpcode() != Opcodes.ALOAD
+		    || receiver.var != 0) {
+			return "receiver is not this";
+		}
+		for (int i = 1; i < body.size() - 1; i++) {
+			if (!isReplayValueInsn(body.get(i))) {
+				return "new initializer expression is not a self-contained constant";
+			}
+		}
+		return null;
+	}
+
+	/** 重放切片里允许出现的"纯值"指令：常量与数值转换（javac 已把常量算术折叠掉）。 */
+	private static boolean isReplayValueInsn(AbstractInsnNode insn) {
+		int op = insn.getOpcode();
+		if (op >= Opcodes.ICONST_M1 && op <= Opcodes.ICONST_5) return true;
+		if (op == Opcodes.BIPUSH || op == Opcodes.SIPUSH) return true;
+		if (op == Opcodes.LCONST_0 || op == Opcodes.LCONST_1) return true;
+		if (op == Opcodes.FCONST_0 || op == Opcodes.FCONST_1 || op == Opcodes.FCONST_2) return true;
+		if (op == Opcodes.DCONST_0 || op == Opcodes.DCONST_1) return true;
+		if (insn instanceof LdcInsnNode ldc) {
+			Object cst = ldc.cst;
+			return cst instanceof Integer || cst instanceof Long
+			       || cst instanceof Float || cst instanceof Double;
+		}
+		return switch (op) {
+			case Opcodes.I2L, Opcodes.I2F, Opcodes.I2D,
+			     Opcodes.L2I, Opcodes.L2F, Opcodes.L2D,
+			     Opcodes.F2I, Opcodes.F2L, Opcodes.F2D,
+			     Opcodes.D2I, Opcodes.D2L, Opcodes.D2F,
+			     Opcodes.I2B, Opcodes.I2C, Opcodes.I2S -> true;
+			default -> false;
+		};
+	}
+
+	/** L1 结果日志：成功走 info（点名新值/旧值），失败走 warn（配置了白名单却重放不了）。 */
+	private static void logReplayResult(
+	 String className, PatchReport report,
+	 Map<String, InitializerReplay.ReplayField> replayFields) {
+
+		if (report == null || report.replayFields().isEmpty()) return;
+		String display = className.replace('/', '.');
+		for (Map.Entry<String, String> entry : report.replayFields().entrySet()) {
+			InitializerReplay.ReplayField replay = replayFields.get(entry.getKey());
+			String result = entry.getValue();
+			if ("replayed".equals(result)) {
+				RemoldAgent.info("[INIT-REPLAY] " + display + "." + entry.getKey()
+				                 + " <- " + (replay == null ? "?" : replay.newText())
+				                 + " (conditional on old initializer "
+				                 + (replay == null ? "?" : replay.oldText())
+				                 + "; only live instances of this anonymous class)");
+			} else if (result != null && result.startsWith("rejected: ")) {
+				RemoldAgent.warn("[INIT-REPLAY] " + display + "." + entry.getKey()
+				                 + " NOT replayed: " + result.substring("rejected: ".length()));
+			}
+		}
+	}
+
+	/**
+	 * A 档 apply 重放的拒绝告警出口：本轮计划里所有 {@code rejected: } 决策逐条 warn。
+	 * 与 L1 一样，拒绝必须可见（{@code AGENTS.md} §3）；成功明细由
+	 * {@link #logApplyReplayResult} 在补丁装配后输出。
+	 */
+	private static void logApplyReplayDecisions(String display, Map<String, String> decisions) {
+		if (decisions == null || decisions.isEmpty()) return;
+		for (Map.Entry<String, String> entry : decisions.entrySet()) {
+			String result = entry.getValue();
+			if (result != null && result.startsWith("rejected: ")) {
+				RemoldAgent.warn("[INIT-APPLY-REPLAY] " + display + ": " + entry.getKey()
+				                 + " NOT replayed: " + result.substring("rejected: ".length()));
+			}
+		}
+	}
+
+	/** A 档 apply 重放的成功明细（每个候选一行 info；拒绝已由 {@link #logApplyReplayDecisions} 报过）。 */
+	private static void logApplyReplayResult(
+	 String className, PatchReport report,
+	 Map<String, ApplyInitializerReplay.ReplayField> applyFields) {
+
+		if (report == null || report.applyReplayFields().isEmpty()) return;
+		String display = className.replace('/', '.');
+		for (Map.Entry<String, String> entry : report.applyReplayFields().entrySet()) {
+			if (!"replayed".equals(entry.getValue())) continue;
+			ApplyInitializerReplay.ReplayField replay = applyFields.get(entry.getKey());
+			if (replay == null) continue;
+			RemoldAgent.info("[INIT-APPLY-REPLAY] " + display + ": " + entry.getKey()
+			                 + " <- " + replay.newText()
+			                 + " (conditional on old initializer " + replay.oldText()
+			                 + "; single live object read back through GETSTATIC " + replay.dest() + ")");
+		}
+	}
+
 	/** 一个字段的完整补丁体：protected 桥接 → 私有调用改写 → 写入协议改写。 */
 	private static List<AbstractInsnNode> rewriteFieldSlice(
 	 String hostInternal, String className, List<AbstractInsnNode> insns,
 	 Map<AbstractInsnNode, ProtectedAccess> protectedAccesses,
-	 Set<String> conditionalFields, Set<String> forceFields) {
+	 Set<String> conditionalFields, Set<String> forceFields,
+	 Map<String, Object> replayArguments) {
 
 		insns = rewriteProtectedAccesses(hostInternal, insns, protectedAccesses);
 		insns = rewritePrivateInvokes(className, insns);
-		insns = rewriteFieldPuts(className, insns, conditionalFields, forceFields);
+		insns = rewriteFieldPuts(className, insns, conditionalFields, forceFields, replayArguments);
 		return insns;
 	}
 
@@ -2983,15 +3377,21 @@ public class InitFix {
 	 * 把补丁片段里对目标字段的 {@code PUTFIELD}/{@code PUTSTATIC} 改写为
 	 * {@code invokedynamic}，由 {@link HotswapBridge} 在链接期算好 Unsafe offset 后写入：
 	 * {@link HotswapBridge#KIND_CONDITIONAL} 条件 CAS（仅当字段仍是类型默认值），
-	 * {@link HotswapBridge#KIND_FORCE} 无条件写（{@code @RemoldReinit(mode = OVERWRITE)}）。
+	 * {@link HotswapBridge#KIND_FORCE} 无条件写（{@code @RemoldReinit(mode = OVERWRITE)}），
+	 * {@link HotswapBridge#KIND_CONDITIONAL_EXPECTED} 对旧初值常量的条件写（L1 存量重放）。
 	 * <p>final 与非 final 走同一条路径，语义统一。</p>
 	 * @param conditionalFields 走条件 CAS 的字段
 	 * @param forceFields       走强制写的字段（两者不相交；force 优先）
+	 * @param replayArguments   L1 重放字段 -> 旧初值常量（ASM bootstrap 常量）
 	 */
 	private static List<AbstractInsnNode> rewriteFieldPuts(
 	 String className, List<AbstractInsnNode> insns,
-	 Set<String> conditionalFields, Set<String> forceFields) {
-		if (insns.isEmpty() || (conditionalFields.isEmpty() && forceFields.isEmpty())) return insns;
+	 Set<String> conditionalFields, Set<String> forceFields,
+	 Map<String, Object> replayArguments) {
+		if (insns.isEmpty()
+		    || (conditionalFields.isEmpty() && forceFields.isEmpty() && replayArguments.isEmpty())) {
+			return insns;
+		}
 
 		List<AbstractInsnNode> rewritten = new ArrayList<>(insns.size());
 		for (AbstractInsnNode insn : insns) {
@@ -3001,6 +3401,25 @@ public class InitFix {
 				rewritten.add(insn);
 				continue;
 			}
+
+			Object replayExpected = replayArguments.get(f.name);
+			if (replayExpected != null) {
+				boolean isStatic = f.getOpcode() == Opcodes.PUTSTATIC;
+				String  indyDesc = (isStatic ? "(" : "(L" + className + ";") + f.desc + ")V";
+				Type    hostType = Type.getObjectType(className);
+				Object[] bsmArgs = new Object[]{
+				 HotswapBridge.KIND_CONDITIONAL_EXPECTED,
+				 f.getOpcode(),
+				 hostType,
+				 hostType,
+				 replayExpected
+				};
+				rewritten.add(new InvokeDynamicInsnNode(f.name, indyDesc, BRIDGE_BSM_EXPECTED, bsmArgs));
+				log("Rewriting field write via indy(replay-expected): "
+				    + className + "." + f.name + " " + f.desc + ", expected=" + replayExpected);
+				continue;
+			}
+
 			boolean forced = forceFields.contains(f.name);
 			if (!forced && !conditionalFields.contains(f.name)) {
 				rewritten.add(insn);
@@ -3038,8 +3457,15 @@ public class InitFix {
 		if (patch == null) return;
 
 		// 验证字段是否已在 JVM 中就绪（若未就绪说明 redefine 被 JVM 拒绝）
-		if (!patch.plan().allTasks().isEmpty()) {
-			FieldPatchTask sampleTask = patch.plan().allTasks().get(0);
+		// L1 重放字段是继承字段，getDeclaredField 必然找不到，只取非重放任务做样本。
+		FieldPatchTask sampleTask = null;
+		for (FieldPatchTask task : patch.plan().allTasks()) {
+			if (!task.replay()) {
+				sampleTask = task;
+				break;
+			}
+		}
+		if (sampleTask != null) {
 			try {
 				clazz.getDeclaredField(sampleTask.fieldName());
 			} catch (NoSuchFieldException e) {
@@ -3064,6 +3490,7 @@ public class InitFix {
 			// 只能保守地把整个计划记入台账 —— 下一轮条件 CAS 会跳过已写入的值，
 			// OVERWRITE 字段重写同一个值也是幂等的。
 			for (FieldPatchTask task : patch.plan().allTasks()) {
+				if (task.replay()) continue; // L1 重放不写台账
 				ledgerPut(clazz, task.fieldName(), "patch aborted: " + e);
 			}
 			RemoldAgent.error("Field init patch failed: " + e.getMessage(), e);
@@ -3079,6 +3506,8 @@ public class InitFix {
 			// docs/initfix/02-closure-and-ledger.md §2 的核心场景：redefine 失败，但补丁计划已经生成、类结构随时可能推进；
 			// 这些字段一个都没补，必须记账，否则它们再也不会出现在 Diff 里。
 			for (FieldPatchTask task : dropped.plan().allTasks()) {
+				// L1 重放字段不写台账（docs/initfix/12-L1-existing-initializer-replay.md §3）。
+				if (task.replay()) continue;
 				ledgerPut(clazz, task.fieldName(), "redefine failed; patch never applied");
 			}
 			log("Dropped pending field init patch for " + clazz.getName()
@@ -3097,6 +3526,41 @@ public class InitFix {
 	 * <p>{@code LinkageError} 仍然上抛熔断（AGENTS.md 不变量 4）：它意味着类元数据假设已被
 	 * JVM 打破，继续修补没有意义。</p>
 	 */
+	/**
+	 * A 档 apply 重放的安全前置检查（{@code docs/initfix/13-kotlin-apply-replay.md} §5）：
+	 * 把 {@code GETSTATIC holder.dest} 会取回的对象先读一遍，确认非 null 且运行时类型确实是
+	 * 目标类型 T。缺失的检查会让 Unsafe 把 T 的字段偏移套到不匹配的对象上（内存安全问题），
+	 * 因此这里是硬门，读不到/读失败一律视为不可重放。
+	 *
+	 * <p>只在补丁执行前做一次（不是逐实例），不参与分析期判定；返回 {@code null} 表示可写。</p>
+	 */
+	private static String applyDestinationSkipReason(
+	 Class<?> host, ApplyInitializerReplay.ReplayField replay) {
+
+		Object value;
+		try {
+			java.lang.reflect.Field dest = host.getDeclaredField(replay.dest());
+			dest.setAccessible(true);
+			value = dest.get(null);
+		} catch (Throwable t) {
+			return "cannot read the holder's static field " + replay.dest() + ": " + t;
+		}
+		if (value == null) {
+			return "the holder's static field " + replay.dest() + " is null";
+		}
+		try {
+			Class<?> target = Class.forName(replay.targetClass().replace('/', '.'), false,
+			 host.getClassLoader());
+			if (!target.isInstance(value)) {
+				return "the holder's static field " + replay.dest() + " holds "
+				       + value.getClass().getName() + ", not " + target.getName();
+			}
+		} catch (Throwable t) {
+			return "cannot resolve the apply object type " + replay.targetClass() + ": " + t;
+		}
+		return null;
+	}
+
 	private static void applyPatch(Class<?> host, PendingPatch patch) throws Throwable {
 		// 影子 Class 归一（docs/initfix/03-runtime-driver.md §4 的 SELF 作用域判定前提）：
 		// JBR 结构性 redefine 会把静态字段里持有的 Class 引用改写成旧版本影子对象
@@ -3113,6 +3577,7 @@ public class InitFix {
 		// 条件 CAS 统计是"本轮"的：先清掉可能残留的计数，避免上一轮的数据混进本轮告警。
 		// 正常路径下每轮结束都会 drain；这里兜住异常路径留下的残留。
 		HotswapBridge.drainConditionalStats();
+		HotswapBridge.drainReplayStats();
 
 		if (!isInitialized(host)) {
 			log("Skip field init patch, class not initialized (or initializing/failed): "
@@ -3121,6 +3586,10 @@ public class InitFix {
 		}
 
 		PatchPlan    plan  = patch.plan();
+		Set<String>  replayTaskFields = new LinkedHashSet<>();
+		for (FieldPatchTask task : plan.allTasks()) {
+			if (task.replay()) replayTaskFields.add(task.fieldName());
+		}
 		List<Object> alive = null;
 		if (plan.hasInstance()) {
 			alive = collectInstancesForPatch(host);
@@ -3168,6 +3637,15 @@ public class InitFix {
 			 h.findStatic(pc, task.methodName(), MethodType.methodType(void.class)));
 		}
 
+		// A 档 apply 重放：补丁方法名按 applyFields 插入顺序编号（装配与驱动同序，不重算名字）。
+		List<Map.Entry<String, ApplyInitializerReplay.ReplayField>> applyEntries =
+		 new ArrayList<>(plan.applyFields().entrySet());
+		MethodHandle[] applyHandles = new MethodHandle[applyEntries.size()];
+		for (int i = 0; i < applyEntries.size(); i++) {
+			applyHandles[i] = h.findStatic(pc, APPLY_REPLAY_PREFIX + i,
+			 MethodType.methodType(void.class));
+		}
+
 		Set<String>         failedFields   = new LinkedHashSet<>();
 		Set<String>         skippedFields  = new LinkedHashSet<>();
 		Map<String, String> failureReasons = new LinkedHashMap<>();
@@ -3182,6 +3660,48 @@ public class InitFix {
 			long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 			RemoldAgent.info("Static field init patch for " + host.getName()
 			                  + " done in " + elapsedMs + "ms");
+		}
+
+		// ---- A 档 apply 重放：静态持有者 <clinit> 里的 T().apply{...} ----
+		// 每个候选只写"GETSTATIC holder.dest 取回的那一个对象"；运期改过的值由 expected-CAS 跳过。
+		// 失败/跳过<b>不写 FieldLedger</b>（与 L1 同口径：显式开启的尽力重放，不是欠账），
+		// 单独记在 applyFailed/applySkipped 里，供下面的 [INIT-APPLY-REPLAY] 汇总。
+		Set<String>         applyFailed  = new LinkedHashSet<>();
+		Set<String>         applySkipped = new LinkedHashSet<>();
+		Map<String, String> applyReasons = new LinkedHashMap<>();
+		if (!applyEntries.isEmpty()) {
+			RemoldAgent.info("Applying static holder apply replay to " + host.getName()
+			                 + ", targets=" + applyEntries.size());
+			long start = System.nanoTime();
+			for (int i = 0; i < applyEntries.size(); i++) {
+				String key = applyEntries.get(i).getKey();
+				ApplyInitializerReplay.ReplayField replay = applyEntries.get(i).getValue();
+				String skip = applyDestinationSkipReason(host, replay);
+				if (skip != null) {
+					applySkipped.add(key);
+					applyReasons.put(key, skip);
+					RemoldAgent.warn("[INIT-APPLY-REPLAY] " + host.getName() + ": " + key
+					                 + " NOT replayed: " + skip);
+					continue;
+				}
+				try {
+					applyHandles[i].invokeExact();
+				} catch (LinkageError le) {
+					if (!isolatableLinkFailure(le)) throw le;
+					applyFailed.add(key);
+					applyReasons.put(key, String.valueOf(le));
+					RemoldAgent.warn("[INIT-APPLY-REPLAY] " + host.getName() + ": " + key
+					                 + " replay failed: " + le);
+				} catch (Throwable t) {
+					applyFailed.add(key);
+					applyReasons.put(key, String.valueOf(t));
+					RemoldAgent.warn("[INIT-APPLY-REPLAY] " + host.getName() + ": " + key
+					                 + " replay failed: " + t);
+				}
+			}
+			long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+			RemoldAgent.info("Static holder apply replay for " + host.getName()
+			                 + " done in " + elapsedMs + "ms");
 		}
 
 		// 静态侧失败必须在实例阶段开始前冻结一份快照：它全局唯一，对每个实例都生效；
@@ -3233,22 +3753,47 @@ public class InitFix {
 		 failedFields, skippedFields, alive == null ? 0 : alive.size(), selfOnlyTargets);
 		if (reinitLine != null) RemoldAgent.info(reinitLine);
 
+		// L1 重放：本轮真正跑过的字段记入"已处理"，供 L0 跳过"初值变了但不会重放"的告警；
+		// 失败/跳过的字段不记（让 L0 继续提示），也不写 FieldLedger（L1 是尽力重放，不是欠账）。
+		for (String f : replayTaskFields) {
+			if (failedFields.contains(f) || skippedFields.contains(f)) continue;
+			InitializerReplay.recordApplied(host.getName(), f);
+		}
+		if (!replayTaskFields.isEmpty()) {
+			Set<String> replayFailed = new LinkedHashSet<>(failedFields);
+			replayFailed.retainAll(replayTaskFields);
+			Set<String> replaySkipped = new LinkedHashSet<>(skippedFields);
+			replaySkipped.retainAll(replayTaskFields);
+			if (!replayFailed.isEmpty() || !replaySkipped.isEmpty()) {
+				RemoldAgent.warn("[INIT-REPLAY] " + host.getName() + ": replay failed=" + replayFailed
+				                 + ", skipped=" + replaySkipped + " (not recorded in FieldLedger)");
+			}
+		}
+
 		if (!failedFields.isEmpty() || !skippedFields.isEmpty()) {
 			// docs/initfix/02-closure-and-ledger.md §2 待补台账：本轮没补上的字段记入，下一轮候选集自动并回来。
 			// 先写 failed，再写 skipped —— 熔断字段同时属于两者（它确实失败过，
 			// 又被"放弃"），而 skipped 的原因更具体（"达到失败上限后放弃"），
 			// 因此必须后写、覆盖掉笼统的 runtime failure。
 			for (String f : failedFields) {
+				if (replayTaskFields.contains(f)) continue; // L1 重放不写台账
 				ledgerPut(host, f, "runtime failure: "
 				                   + failureReasons.getOrDefault(f, "patch execution failed"));
 			}
 			for (String f : skippedFields) {
+				if (replayTaskFields.contains(f)) continue;
 				ledgerPut(host, f, "skipped: "
 				                   + failureReasons.getOrDefault(f, "a dependency field failed to patch"));
 			}
-			RemoldAgent.warn("Field init patch incomplete for " + host.getName()
-			                  + ": failed=" + failedFields + ", skipped=" + skippedFields
-			                  + " (recorded in FieldLedger; will be reconsidered in next hotswap cycle)");
+			Set<String> failedForLedger = new LinkedHashSet<>(failedFields);
+			failedForLedger.removeAll(replayTaskFields);
+			Set<String> skippedForLedger = new LinkedHashSet<>(skippedFields);
+			skippedForLedger.removeAll(replayTaskFields);
+			if (!failedForLedger.isEmpty() || !skippedForLedger.isEmpty()) {
+				RemoldAgent.warn("Field init patch incomplete for " + host.getName()
+				                  + ": failed=" + failedForLedger + ", skipped=" + skippedForLedger
+				                  + " (recorded in FieldLedger; will be reconsidered in next hotswap cycle)");
+			}
 		}
 
 		// 条件 CAS 跳过汇总：字段在补丁执行前已被别的线程赋过非默认值 → CAS 失败 → 补丁未生效。
@@ -3278,6 +3823,65 @@ public class InitFix {
 					// 重试轮：这些跳过多半来自上一轮已成功补过的实例，属预期
 					RemoldAgent.info(msg + " (retry pass, typically instance already patched in prior round)");
 				}
+			}
+		}
+
+		// 重放统计按 owner 拆分：L1 的 owner 是锚点类自身，apply 的 owner 是 apply 对象类型 T。
+		// 混在一条 [INIT-REPLAY] 里会把"另一个类的字段被写了"说成"宿主的实例字段被写了"。
+		Map<String, long[]> replayStats = HotswapBridge.drainReplayStats();
+		String               hostPrefix  = host.getName() + "#";
+		Map<String, long[]>  l1Stats      = new LinkedHashMap<>();
+		Map<String, long[]>  applyStats   = new LinkedHashMap<>();
+		for (Map.Entry<String, long[]> e : replayStats.entrySet()) {
+			(e.getKey().startsWith(hostPrefix) ? l1Stats : applyStats).put(e.getKey(), e.getValue());
+		}
+		// L1 重放统计：写入/跳过数分别来自校验通过字段的 expected-CAS 结果。
+		// 跳过意味着该实例的当前值已不等于旧初值（运行期改过），按设计保守放弃写入。
+		if (!l1Stats.isEmpty()) {
+			long         totalWritten = 0;
+			long         totalSkipped = 0;
+			List<String> skippedNames = new ArrayList<>();
+			for (Map.Entry<String, long[]> e : l1Stats.entrySet()) {
+				totalWritten += e.getValue()[0];
+				long skipped = e.getValue()[1];
+				totalSkipped += skipped;
+				if (skipped > 0) skippedNames.add(e.getKey() + " x" + skipped);
+			}
+			RemoldAgent.info("[INIT-REPLAY] " + host.getName() + ": wrote " + totalWritten
+			                 + " instance field(s)"
+			                 + (totalSkipped > 0
+			                    ? ", skipped " + totalSkipped
+			                      + " whose current value no longer equals the old initializer: " + skippedNames
+			                    : ""));
+		}
+		// A 档 apply 重放统计：owner 是目标类型 T；dest 为 null/类型不符的候选已在执行前跳过，
+		// 这里的 skipped 只表示"运行期值已不等于旧初值"（条件 CAS 按设计保守放弃）。
+		if (!applyStats.isEmpty() || !applyFailed.isEmpty() || !applySkipped.isEmpty()) {
+			long         written = 0;
+			long         skipped = 0;
+			List<String> skippedNames = new ArrayList<>();
+			for (Map.Entry<String, long[]> e : applyStats.entrySet()) {
+				written += e.getValue()[0];
+				long s = e.getValue()[1];
+				skipped += s;
+				if (s > 0) skippedNames.add(e.getKey() + " x" + s);
+			}
+			RemoldAgent.info("[INIT-APPLY-REPLAY] " + host.getName() + ": wrote " + written
+			                 + " apply-object field(s)"
+			                 + (skipped > 0
+			                    ? ", skipped " + skipped
+			                      + " whose current value no longer equals the old initializer: " + skippedNames
+			                    : ""));
+			if (!applyFailed.isEmpty() || !applySkipped.isEmpty()) {
+				StringBuilder why = new StringBuilder();
+				for (Map.Entry<String, String> e : applyReasons.entrySet()) {
+					if (why.length() > 0) why.append("; ");
+					why.append(e.getKey()).append(" -> ").append(e.getValue());
+				}
+				RemoldAgent.warn("[INIT-APPLY-REPLAY] " + host.getName() + ": replay incomplete"
+				                 + " (failed=" + applyFailed + ", skipped=" + applySkipped + ")"
+				                 + (why.length() > 0 ? " (" + why + ")" : "")
+				                 + "; not recorded in FieldLedger");
 			}
 		}
 	}

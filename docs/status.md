@@ -9,7 +9,7 @@
 |:---|:---|
 | **基准提交 (Baseline Commit)** | `4d459ff` (分支: `main`，`v0.2.5` 已发布；含 Gradle 插件 server/gametest 注入与 Fabric 模板 1.21.4 gametest) |
 | **发布说明** | [`releases/v0.2.5.md`](releases/v0.2.5.md) |
-| **最后更新时间** | 2026-11-08（v0.2.5 已发布；JitPack 坐标对齐） |
+| **最后更新时间** | 2026-11-08（v0.2.5 已发布；JitPack 坐标对齐；L1 存量初值重放第一版 + A 档 Kotlin apply 静态持有者重放落地） |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |
 | **更新触发条件** | 任何合入包含特性落地、架构偏离、安全门调整、测试基线变更或发现已知缺陷/残余风险的 PR/commit 时，必须同步原子化更新本文件。提交时由作者/维护者更新基准哈希。 |
 | **管辖范围与边界声明** | 本状态表权威管辖：<br>1. **匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)**（[`docs/topology/`](topology/)）<br>2. **存量初始化修复器 (InitFix / Legacy Instance & Static Reinitialization)**（[`docs/initfix/`](initfix/)）<br>3. **物理内存偏移稳定性与第三方缓存驱逐 (Physical Memory Offset Stability & Reflection Cache Eviction)**（[`docs/offset/`](offset/)）<br>*边界与后续治理声明*：同属字节码重映射体系的 `LambdaAligner`（Lambda 表达式对齐器）以及 Mindustry UI 胶水层（`CellPropertyRef` / 动态参数表达式指纹），其实现状态当前由各自单元测试覆盖（`CellHelperTest` 35 个用例持续全绿、`LambdaAlignerTest` 等）；它们的详细状态审计矩阵尚未并入本总表，计划在下一轮治理中统一建立验收标准并纳入。 |
@@ -23,7 +23,7 @@
 1. **唯一真相源隔离**：`docs/status.md` 作为全模块实现状态的唯一受权载体，彻底解除规范文档与代码注释维护实现进度的负担。
 2. **双重验收验证机制**：
    - **自动化机器扫描 (`verifyDocStatusMarkers`)**：纳入主构建验证流程（`./gradlew check` 强制依赖），递归扫描 `docs/initfix/`、`docs/topology/`、`docs/offset/`、`docs/ecosystem/`、`core/src/`、`api/src/`、`plugin-arc/src/`、`plugin-mixin/src/`、`plugin-forge/src/`、`panama/src/`，严格拦截标记 `/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/`。当前状态：**100% 达标全绿**。
-   - **规范性内容抽检审计**：禁止规范正文出现“目前已支持”、“当前版本尚未实现”等时态陈述，时态陈述一律归入 `status.md`。首轮治理覆盖 15 篇客观设计文档（`docs/topology/` 8 篇、`docs/initfix/` 6 篇、`docs/offset/` 1 篇），人工抽检合格率 100%；此后新增篇目（当前 `docs/topology/` 9 篇、`docs/initfix/` 12 篇、`docs/offset/` 2 篇）沿用同一客观化规则，并由 `verifyDocStatusMarkers` 持续守卫。
+   - **规范性内容抽检审计**：禁止规范正文出现“目前已支持”、“当前版本尚未实现”等时态陈述，时态陈述一律归入 `status.md`。首轮治理覆盖 15 篇客观设计文档（`docs/topology/` 8 篇、`docs/initfix/` 6 篇、`docs/offset/` 1 篇），人工抽检合格率 100%；此后新增篇目（当前 `docs/topology/` 9 篇、`docs/initfix/` 13 篇、`docs/offset/` 2 篇）沿用同一客观化规则，并由 `verifyDocStatusMarkers` 持续守卫。
 3. **设计规范文档客观化清理清单（首轮治理）**：
    - [`docs/topology/01-invariants-and-remapping.md`](topology/01-invariants-and-remapping.md) ～ [`08-decisions.md`](topology/08-decisions.md)（共 8 篇）：全部重构为纯架构规格、约束契约与客观原理，易腐进度全部剥离，头部统一指引至 `status.md`。
    - [`docs/initfix/01-safety-gate.md`](initfix/01-safety-gate.md) ～ [`06-decisions.md`](initfix/06-decisions.md)（共 6 篇）：全部完成规格客观化改造，彻底消除进度标记。
@@ -103,6 +103,22 @@
 | 发版工具链：JitPack 坐标族与模板解析自洽 | ✅ | `gradle-plugin/build.gradle`（jitpack 发布补 `version = "v${version}"`）、`panama/build.gradle`（补 jitpack 发布）、两份模板 `settings.gradle.kts` 与 `remold.gradle(.kts)` shim（坐标统一为 `com.github.I-hope1.Remold:*:v<ver>`）、根 `build.gradle` 的 `verifyReleaseCoordinates` | v0.2.5 发版时暴露：`gradle-plugin` 的 jitpack 发布只有裸版本 `0.2.5`，而 shim/模板要 `v0.2.5`；同时发布侧组名大小写（`I-hope1`）与消费侧（`I-Hope1`）不一致，在 Gradle module metadata 校验下直接报 `bad group`。修复后 `publishToMavenLocal verifyReleaseCoordinates` 8/8 模块两套坐标齐全；两份模板 `--offline compileJava` PASS（Fabric 1m05s、Mindustry 3s）；`./gradlew check` 469 项 0 skipped。远端不受影响：JitPack 对 `0.2.5` 与 `v0.2.5` 均返回 200（已实测），已发布的 v0.2.5 资产无需重传 |
 | NeoForge 26.x / FML 10 代际（无 ModLauncher） | ⬜ | — | 产物级已确认断裂（`neoforge-26.1.2.126` 库清单 `cpw.mods:*` 为 0、main class `net.neoforged.fml.startup.Client`）；当前跨 ClassLoader 桥按 ModLauncher 语义实现，**未适配、未验证**；候选清单已登记 |
 
+
+---
+
+## 0.5 未发布：L1 存量初值重放第一版（2026-11-08）
+
+| 能力 | 状态 | 代码位置 | 验收证据 |
+|:---|:---:|:---|:---|
+| L1 存量初值重放（匿名类 `{{ }}` 写继承字段；默认关 + 父类白名单 + 常量旧值 + 基本类型） | ✅ | `remold.ref.InitializerReplay`（候选/旧值/声明类解析）；`InitFix.buildPatch/applyPatch`；`HotswapBridge.KIND_CONDITIONAL_EXPECTED`（旧初值 CAS） | 默认关（白名单空）时 B/B2n 维持旧值不变；开启后 `DoubleBraceProbe` L1 断言：old 90→100、运行期改过（42）的实例跳过、非白名单/非恒定旧值/引用类型各一条负向、零 `FieldLedger`、不改 `patchGenerated`、重放后 L0 不重复告警；`InitializerReplayTest` 11/0；全量 JUnit 480/0 skipped；`DoubleBraceProbe` 104/0。变异检查：白名单判定改为恒真 → `L1n` 变红（`old.health` 100≠90）；expected-CAS 改为 FORCE → `L1` 条件跳过错杀（42→100）变红；均已恢复。**已知边界**：具名类已有字段、引用类型、非编译期常量旧值、`final` 字段不在第一版；按匿名类计的堆枚举性能数据未测。 |
+
+---
+
+## 0.6 未发布：A 档 Kotlin `apply {}` 静态持有者初值重放（2026-11-08）
+
+| 能力 | 状态 | 代码位置 | 验收证据 |
+|:---|:---:|:---|:---|
+| A 档：`object` / 顶层 `val` 持有者 `<clinit>` 里 `T().apply { field = 编译期常量 }` 的存量对象重放（默认关 + 持有者白名单） | ✅ | `remold.ref.ApplyInitializerReplay`（纯分析：白名单、`<clinit>` 直线抽象解释、局部变量副本溯源、唯一 `NEW`/唯一 `PUTSTATIC dest`、目标字段安全门）；`InitFix.transform/buildPatch/applyPatch`（`PatchPlan.applyFields`、`applyReplay$N` 补丁方法、`PatchReport.applyReplayFields`、运行期 dest 前置检查）；`HotswapBridge.KIND_CONDITIONAL_EXPECTED`（旧初值 CAS + 链接期 static/final 复核）；`AnnotationTransformer` 外部通道触发 | 默认关（白名单空）时存量对象保持旧值、零 A 档日志；开启后 `KotlinApplyProbe` 34/0（JBR 21 真实 `processChanges` + redefine）：存量对象 90→100 且对象身份不变（`GETSTATIC dest` 取回的那一个）、运行期改过（42）的字段保持 42、初值相同的字段不重放也不进报告、非白名单去触发对照保持 90、byte/short/char 目标字段（子字 CAS 路径）7→9 / 300→400 / 'A'→'B'、null dest warn 跳过且 detached 旧对象不被写、`FieldLedger` 为空、`patchGenerated=false`、L0 零 `[INIT-DRIFT]`；`ApplyInitializerReplayTest` 13/0（白名单命中/关闭/非白名单/常量相同/四种基本类型/旧值非常量/新值非常量/引用类型/`final`/dest 描述符不匹配/一对象多 dest/Kotlin var setter 逃逸/普通持有者）；全量 JUnit **493/0 skipped**；`DoubleBraceProbe` **104/0**；`:tests:initFixOracle` `ALL ASSERTIONS PASSED`。**Kotlin 2.3.0 真实字节证据**：四形态 javap（`object`/顶层 val 在 `<clinit>`、`class` 属性在 `<init>`、函数在方法体、Kotlin `var` 走 `invokevirtual` setter、`apply` 内联不产生合成类）、与 javac 等价形态的对照、`InitializerDrift.detect` 对两种静态持有者实测返回空；记录于 `docs/initfix/13-kotlin-apply-replay.md` §2。**前置探针**：隐藏补丁类作为持有者 nestmate 可 `GETSTATIC` 私有 `static final dest`；`findField(T,...)+KIND_CONDITIONAL_EXPECTED` 正常写 90→100、错误 expected 不写。变异检查：白名单判定恒真（整段判定去掉）→ `nonWhitelistedHolderIsIgnored`/`emptyWhitelistMeansChannelOff` 2 单测失败 + 探针 AP2 变红（31/3）；expected-CAS 改为 `KIND_FORCE` → AP1「运行期改值 42」被写成 100 变红（32/2）；均已恢复并全绿。**已知边界**：Kotlin `var` setter（`invokevirtual`）、具名类属性（B 档）、方法体/局部（C 档）、引用类型字段、`final` 字段、非编译期常量、多静态字段共享同一 apply 对象不在范围；外部重定义通道（IDE/外部 agent）与 L1 一样没有独立的“redefine 是否被 JVM 接受”信号，若外部 redefine 被拒仍可能执行 A 档写入（主路径只对成功的类调用 `afterRedefine`，无此窗口）。 |
 
 ---
 
@@ -254,7 +270,6 @@
 | **Analyzer 独立库化** | P2 | [`04-target-design.md`](initfix/04-target-design.md) §3 | ASM 工具链解耦 | 分析器作为纯函数独立，支持在 Gradle 构建端或 PC 端离线分析，减小运行期探针开销与内存占用 |
 | **增强重定义模式四个未覆盖盲区验证与防护** | P2 | [`08-decisions.md`](topology/08-decisions.md) 附录 A | 专用探针套件建设 | 覆盖 JIT 编译后内联代码对新布局的观察、`volatile`/`final` 复杂修饰符、继承体系跨层遮蔽、JBR 25 重复验证 |
 | **JBR 运行时重塑与自重启引导器 (`Remold` / `remold-launcher`)** | P2 | 运行环境引导与启动规范 | `RemoldAgent.isEnhancedHotswapEnabled()` 探针 | 应用以普通 Java 启动时，由 Remold 探测 JVM 环境；若缺少增强重定义能力，自动下载/就绪 JBR 运行时，并通过 ProcessBuilder 蹦床机制带增强参数与热更核心重启宿主，实现开箱即用运行时重塑 |
-| **匿名类 `{{ ... }}` / 存量字段初值重放（L1 第一版）** | P2 | [`12-L1-existing-initializer-replay.md`](initfix/12-L1-existing-initializer-replay.md) §2、[`10-initializer-change-detection.md`](initfix/10-initializer-change-detection.md) §2.3 | L1 解冻决策；入口候选集扩展（匿名类 `<init>` 隐式 reinit 字段）；`fieldNodes` 沿 `HierarchyTreeOracle` 查父类字段；`HotswapBridge` 已支持沿父类链定位字段，需接 `KIND_FORCE`；与 L0 `INIT-DRIFT` 告警协同 | 打通 Mindustry `new ItemTurret("duo") {{ health = 250; reload = 20f; }}`：`{{}}` 里改/加赋值后，存量实例按新表达式重放，未改字段按 `REINIT_APPLIED` 指纹零开销跳过。当前入口只处理新增字段/台账/`@RemoldReinit`，继承字段赋值在入口直接 return，L0 只告警不重放。实测 javac 11/17/21/25 匿名类 `<init>` 的 `PUTFIELD` owner 是匿名类自身（如 `T$1.health`），`extractFieldInits` 的 `owner==className` 不会漏掉该形态；真正门槛是入口候选集、`fieldNodes`、force 写入。补丁实例集合必须用 `LibTool.getInstances(匿名类)` 而非父类（否则复现 B2 批量误伤）。另需对齐 L1 设计的两条硬约束：默认关闭、`final` 字段只走 `@RemoldReinit(OVERWRITE)`。 |
 | **ECJ 编译器矩阵支持** | P3 | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §4 | ECJ 构建环境夹具 | 针对 Eclipse 编译器的 switch table 实现（内部 `$SWITCH_TABLE$` 方法）与 EnclosingMethod 结构差异建立对齐与防护 |
 | **新 javac 加旧 -target 交叉编译矩阵支持** | P3 | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §3 | CI 交叉编译任务配置 | 验证新版 javac 携带 `-target 8/11` 等产物的命名与属性表现 |
 | **未知 class major 显式拒绝** | P3 | [`06-runtime-and-perf.md`](topology/06-runtime-and-perf.md) §1 | 无 | 遇到高于当前 JVM 支持的 class major 版本时显式拒绝而非尝试解析，防止 ASM Crash |
@@ -265,6 +280,8 @@
 
 | 条目 | 状态 | 优先级 | 落地位置 | 说明 |
 |:---|:---:|:---:|:---|:---|
+| ~~**匿名类 `{{ ... }}` / 存量字段初值重放（L1 第一版）**~~ | ✅ | — | `remold.ref.InitializerReplay` + `InitFix` + `HotswapBridge.KIND_CONDITIONAL_EXPECTED`；设计见 [`12-L1-existing-initializer-replay.md`](initfix/12-L1-existing-initializer-replay.md) | 默认关（`-Dremold.agent.init_drift.parents` 为空）；白名单父类匿名子类、非 final 基本类型、旧/新初值均为编译期常量时，按**旧初值条件 CAS** 写匿名类自身实例；运行期改过的值跳过；不写 `FieldLedger`；`@RemoldReinit` 优先。验收与变异检查见 §0.5。未覆盖：具名类已有字段、引用类型、非常量旧值、`final`，以及按匿名类计的堆枚举性能数据。 |
+| ~~**Kotlin `apply {}` 静态持有者初值重放（A 档）**~~ | ✅ | — | `remold.ref.ApplyInitializerReplay` + `InitFix`（`applyFields`/`applyReplay$N`）+ `HotswapBridge.KIND_CONDITIONAL_EXPECTED`；设计见 [`13-kotlin-apply-replay.md`](initfix/13-kotlin-apply-replay.md) | 默认关（`-Dremold.agent.init_drift.apply_holders` 为空）；白名单持有者 `<clinit>` 直线形态、唯一 `NEW`/唯一 `PUTSTATIC dest`、目标字段基本类型/非 final/非 synthetic/非 `@RemoldReinit`、旧/新值均为编译期常量时，`GETSTATIC dest` 取回那一个对象后按**旧初值条件 CAS** 写；运行期改过的值跳过，dest null/类型不符 warn 跳过；不写 `FieldLedger`、不改 `patchGenerated`。验收与变异检查见 §0.6。未覆盖：Kotlin `var` setter、B 档（`<init>`）、C 档（方法体/局部）、引用类型、`final`、非常量、多静态字段共享同一对象。 |
 | `probeAll` 聚合任务（Gradle 内置 JVM 探针，不进 `check`） | ✅ | — | `tests/build.gradle` | 显式 `./gradlew probeAll` 全绿：e2eProbe + DCEVM 套件（除 alignBaselineProbe，见任务说明）+ entity/shadow/class-identity/double-brace/retry/inject-conflict/fingerprint/redefineDynamic/pending-multi-loader/retransform-baseline/addField/initFix-fallback/initDrift-noise+perf 全部 PASS；`doLast` 列出外部容器探针脚本（Fabric C3/C5/mm、Forge C5/mm）及证据路径；外部脚本不在 probeAll 内启动。 |
 | ~~**Forge/NeoForge `ClassInfo` 成员同步**~~ | ✅ | — | `plugin-forge` `ForgeClassInfoSync`；详见 §0.3 | 2026-11-07 完成 Forge 侧实现与真机 E2E；NeoForge 21.1 亦已红→绿（见下两行的已完成项与 §0.4） |
 | ~~**NeoForge Mixin 端到端验证（MDK 探针）**~~ | ✅ | — | `tests/neoforge-mixin-probe/`；详见 §0.4 | NeoForge 21.1.265 dev `runServer` 红→绿（原生 `[[mixins]]`）；**生产 installer 启动路径与 26.x 代际仍开放**（见下两行） |

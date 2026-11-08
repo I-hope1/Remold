@@ -198,7 +198,7 @@ public class AnnotationTransformer implements ClassFileTransformer {
 				}
 
 				// 3. InitFix 补丁构建
-				if (INIT_FIX && (!diff.addedInstanceFields.isEmpty() || !diff.addedStaticFields.isEmpty() || !diff.reinitFields.isEmpty() || !diff.typeChangedFields.isEmpty())) {
+				if (INIT_FIX && (!diff.addedInstanceFields.isEmpty() || !diff.addedStaticFields.isEmpty() || !diff.reinitFields.isEmpty() || !diff.typeChangedFields.isEmpty() || remold.ref.InitializerReplay.mightReplay(diff) || remold.ref.ApplyInitializerReplay.mightReplay(diff))) {
 					InitFix.transform(classBeingRedefined, bytes, diff);
 				}
 			}

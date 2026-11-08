@@ -90,6 +90,10 @@ public class DoubleBraceProbe {
 		scenarioE3();
 		scenarioE4();
 		scenarioL0LambdaRenumber();
+		scenarioL1ReplayAndConditionalSkip();
+		scenarioL1NonWhitelisted();
+		scenarioL1RefusesNonConstant();
+		scenarioL1RefusesReferenceField();
 
 		System.out.println("\n=== DOUBLE-BRACE PROBE SUMMARY: passed=" + passed + ", failed=" + failed + " ===");
 		if (failed > 0) System.exit(1);
@@ -1050,6 +1054,234 @@ public class DoubleBraceProbe {
 	}
 
 	// ------------------------------------------------------------------------------------------------
+	// L1: whitelisted parent + changed constant initializer on an EXISTING inherited field.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioL1ReplayAndConditionalSkip() throws Exception {
+		System.out.println("\n--- L1: whitelisted inherited-field replay is conditional on the old value ---");
+		String pkg = "dbl1";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Block", """
+				package dbl1;
+				public class Block { public int health; }
+				""",
+			pkg + ".Host", """
+				package dbl1;
+				public class Host {
+				    public Block make() { return new Block() {{ health = 90; }}; }
+				}
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Block", """
+				package dbl1;
+				public class Block { public int health; }
+				""",
+			pkg + ".Host", """
+				package dbl1;
+				public class Host {
+				    public Block make() { return new Block() {{ health = 100; }}; }
+				}
+				""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		Object oldA = call0(host, "make");
+		Object oldB = call0(host, "make");
+		Class<?> anon = oldA.getClass();
+		Class<?> block = Class.forName(pkg + ".Block", true, f.loader);
+		checkEq(90, getInt(oldA, block, "health"), "L1 precondition oldA.health=90");
+		checkEq(90, getInt(oldB, block, "health"), "L1 precondition oldB.health=90");
+		setInt(oldB, block, "health", 42);
+
+		long driftBefore = WARNINGS.stream().filter(w -> w.contains("[INIT-DRIFT]")).count();
+		System.setProperty(remold.ref.InitializerReplay.PARENTS_PROPERTY, pkg + ".Block");
+		try {
+			f.hotswapAll();
+		} finally {
+			System.clearProperty(remold.ref.InitializerReplay.PARENTS_PROPERTY);
+		}
+		Object fresh = call0(host, "make");
+		InitFix.PatchReport report = InitFix.getLastReport(anon);
+		System.out.println("   [OBS] L1 oldA.health=" + getInt(oldA, block, "health")
+			+ ", oldB.health=" + getInt(oldB, block, "health")
+			+ ", new.health=" + getInt(fresh, block, "health")
+			+ ", replay=" + (report == null ? null : report.replayFields())
+			+ ", patch=" + (report != null && report.patchGenerated())
+			+ ", ledger=" + InitFix.getUnpatchedFields(anon));
+		checkEq(100, getInt(oldA, block, "health"), "L1 oldA is replayed 90 -> 100");
+		checkEq(42, getInt(oldB, block, "health"),
+			"L1 oldB is skipped because its live value (42) differs from the old initializer 90");
+		checkEq(100, getInt(fresh, block, "health"), "L1 fresh instance gets the new initializer");
+		check(report != null && report.replayGenerated(), "L1 replay patch is generated (report=" + report + ")");
+		check(report != null && !report.patchGenerated(),
+			"L1 must not flip the ordinary patchGenerated flag (report=" + report + ")");
+		check(report != null && "replayed".equals(report.replayFields().get("health")),
+			"L1 report names health as replayed (report=" + report + ")");
+		check(InitFix.getUnpatchedFields(anon).isEmpty(),
+			"L1 does not write FieldLedger (actual=" + InitFix.getUnpatchedFields(anon) + ")");
+		check(WARNINGS.stream().filter(w -> w.contains("[INIT-DRIFT]")).count() == driftBefore,
+			"L1 suppresses INIT-DRIFT for a field it actually replayed (before=" + driftBefore
+			+ ", after=" + WARNINGS.stream().filter(w -> w.contains("[INIT-DRIFT]")).count() + ")");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// L1: same fixture, but the parent is not whitelisted -> old instances keep the old value.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioL1NonWhitelisted() throws Exception {
+		System.out.println("\n--- L1: non-whitelisted parent keeps the pre-hotswap value ---");
+		String pkg = "dbl2";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Block", """
+				package dbl2;
+				public class Block { public int health; }
+				""",
+			pkg + ".Host", """
+				package dbl2;
+				public class Host {
+				    public Block make() { return new Block() {{ health = 90; }}; }
+				}
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Block", """
+				package dbl2;
+				public class Block { public int health; }
+				""",
+			pkg + ".Host", """
+				package dbl2;
+				public class Host {
+				    public Block make() { return new Block() {{ health = 100; }}; }
+				}
+				""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		Object old = call0(host, "make");
+		Class<?> anon = old.getClass();
+		Class<?> block = Class.forName(pkg + ".Block", true, f.loader);
+		System.setProperty(remold.ref.InitializerReplay.PARENTS_PROPERTY, "other.Parent");
+		long driftBefore = WARNINGS.stream().filter(w -> w.contains("[INIT-DRIFT]")).count();
+		try {
+			f.hotswapAll();
+		} finally {
+			System.clearProperty(remold.ref.InitializerReplay.PARENTS_PROPERTY);
+		}
+		Object fresh = call0(host, "make");
+		InitFix.PatchReport report = InitFix.getLastReport(anon);
+		long driftAfter = WARNINGS.stream().filter(w -> w.contains("[INIT-DRIFT]")).count();
+		System.out.println("   [OBS] L1n old.health=" + getInt(old, block, "health")
+			+ ", new.health=" + getInt(fresh, block, "health")
+			+ ", report=" + report + ", driftBefore=" + driftBefore + ", driftAfter=" + driftAfter);
+		checkEq(90, getInt(old, block, "health"), "L1n old instance keeps 90 without a whitelist match");
+		checkEq(100, getInt(fresh, block, "health"), "L1n fresh instance gets 100");
+		check(report == null || !report.replayGenerated(), "L1n no replay patch (report=" + report + ")");
+		check(driftAfter > driftBefore && WARNINGS.stream().anyMatch(
+			w -> w.contains("[INIT-DRIFT]") && w.contains("health")),
+			"L1n L0 still warns that the inherited initializer was not replayed");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// L1: whitelisted but the old expression is not a compile-time constant -> refused with a notice.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioL1RefusesNonConstant() throws Exception {
+		System.out.println("\n--- L1: non-constant old initializer is refused with an INIT-REPLAY notice ---");
+		String pkg = "dbl3";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Block", """
+				package dbl3;
+				public class Block { public int base = 5; public int health; }
+				""",
+			pkg + ".Host", """
+				package dbl3;
+				public class Host {
+				    public Block make() { return new Block() {{ health = base + 10; }}; }
+				}
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Block", """
+				package dbl3;
+				public class Block { public int base = 5; public int health; }
+				""",
+			pkg + ".Host", """
+				package dbl3;
+				public class Host {
+				    public Block make() { return new Block() {{ health = base + 20; }}; }
+				}
+				""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		Object old = call0(host, "make");
+		Class<?> anon = old.getClass();
+		Class<?> block = Class.forName(pkg + ".Block", true, f.loader);
+		checkEq(15, getInt(old, block, "health"), "L1c precondition old.health=15");
+		System.setProperty(remold.ref.InitializerReplay.PARENTS_PROPERTY, pkg + ".Block");
+		try {
+			f.hotswapAll();
+		} finally {
+			System.clearProperty(remold.ref.InitializerReplay.PARENTS_PROPERTY);
+		}
+		Object fresh = call0(host, "make");
+		InitFix.PatchReport report = InitFix.getLastReport(anon);
+		System.out.println("   [OBS] L1c old.health=" + getInt(old, block, "health")
+			+ ", new.health=" + getInt(fresh, block, "health")
+			+ ", notices=" + WARNINGS.stream().filter(w -> w.contains("[INIT-REPLAY]")).toList());
+		checkEq(15, getInt(old, block, "health"), "L1c old instance stays at 15");
+		checkEq(25, getInt(fresh, block, "health"), "L1c fresh instance gets base+20=25");
+		check(report == null || !report.replayGenerated(), "L1c no replay patch (report=" + report + ")");
+		check(WARNINGS.stream().anyMatch(w -> w.contains("[INIT-REPLAY]")
+			&& w.contains("not a compile-time constant")),
+			"L1c refusal is explained as a non-constant old initializer");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// L1: whitelisted but the inherited field is reference-typed -> refused in v1 with a notice.
+	// ------------------------------------------------------------------------------------------------
+	static void scenarioL1RefusesReferenceField() throws Exception {
+		System.out.println("\n--- L1: reference-typed inherited field is refused in v1 ---");
+		String pkg = "dbl4";
+		Map<String, String> v1 = Map.of(
+			pkg + ".Block", """
+				package dbl4;
+				public class Block { public String name; }
+				""",
+			pkg + ".Host", """
+				package dbl4;
+				public class Host {
+				    public Block make() { return new Block() {{ name = "a"; }}; }
+				}
+				""");
+		Map<String, String> v2 = Map.of(
+			pkg + ".Block", """
+				package dbl4;
+				public class Block { public String name; }
+				""",
+			pkg + ".Host", """
+				package dbl4;
+				public class Host {
+				    public Block make() { return new Block() {{ name = "b"; }}; }
+				}
+				""");
+		Fixture f = fixture(v1, v2);
+		Object host = f.newHost();
+		Object old = call0(host, "make");
+		Class<?> anon = old.getClass();
+		Class<?> block = Class.forName(pkg + ".Block", true, f.loader);
+		checkEq("a", getObject(old, block, "name"), "L1r precondition old.name=a");
+		System.setProperty(remold.ref.InitializerReplay.PARENTS_PROPERTY, pkg + ".Block");
+		try {
+			f.hotswapAll();
+		} finally {
+			System.clearProperty(remold.ref.InitializerReplay.PARENTS_PROPERTY);
+		}
+		Object fresh = call0(host, "make");
+		InitFix.PatchReport report = InitFix.getLastReport(anon);
+		System.out.println("   [OBS] L1r old.name=" + getObject(old, block, "name")
+			+ ", new.name=" + getObject(fresh, block, "name"));
+		checkEq("a", getObject(old, block, "name"), "L1r old instance keeps 'a'");
+		checkEq("b", getObject(fresh, block, "name"), "L1r fresh instance gets 'b'");
+		check(report == null || !report.replayGenerated(), "L1r no replay patch (report=" + report + ")");
+		check(WARNINGS.stream().anyMatch(w -> w.contains("[INIT-REPLAY]")
+			&& w.contains("reference-typed")),
+			"L1r refusal is explained as a reference-typed field");
+	}
+
+	// ------------------------------------------------------------------------------------------------
 	// Fixture helpers
 	// ------------------------------------------------------------------------------------------------
 
@@ -1137,5 +1369,17 @@ public class DoubleBraceProbe {
 		Field f = declaring.getDeclaredField(name);
 		f.setAccessible(true);
 		return f.getInt(target);
+	}
+
+	static Object getObject(Object target, Class<?> declaring, String name) throws Exception {
+		Field f = declaring.getDeclaredField(name);
+		f.setAccessible(true);
+		return f.get(target);
+	}
+
+	static void setInt(Object target, Class<?> declaring, String name, int value) throws Exception {
+		Field f = declaring.getDeclaredField(name);
+		f.setAccessible(true);
+		f.setInt(target, value);
 	}
 }

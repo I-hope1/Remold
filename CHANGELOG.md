@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **L1 存量初值重放第一版（匿名类 `{{ ... }}` 写继承字段，默认关闭）**：`new XXX() {{ health = 250; }}`
+  这类双括号初始化块改值时，存量匿名类实例按新**常量**初值重放。显式开启
+  `-Dremold.agent.init_drift.parents=<父类名,...>`（白名单，空 = 关闭），且只处理
+  非 final 基本类型、旧/新初值均为编译期常量、`PUTFIELD` owner 为匿名类自身的形态。
+  写入走新增的 `HotswapBridge.KIND_CONDITIONAL_EXPECTED`：仅当实例当前值仍等于**旧初值**时
+  才写，运行期改过的值（例如已受损单位的血量）不会被覆盖；实例集合按匿名类自身枚举，
+  不会像父类 `@RemoldReinit` 那样批量重置所有子类实例；不写 `FieldLedger`、不改变
+  `patchGenerated` 语义，重放成功的字段不再产生误导性的 `[INIT-DRIFT]` 告警。
+  验收：`InitializerReplayTest` 11/0、`DoubleBraceProbe` 104/0（含条件跳过/非白名单/
+  非恒定旧值/引用类型负向）、全量 JUnit 480/0 skipped；变异检查（白名单恒真、
+  expected-CAS 改 FORCE）均按预期变红。设计见 `docs/initfix/12-L1-existing-initializer-replay.md`。
+- **A 档 Kotlin `apply {}` 静态持有者初值重放（默认关闭）**：`object Blocks { val duo = Turret("duo").apply { health = 250 } }`
+  这类 `object` / 顶层 `val` 持有者的内联 `apply` 写 Java `public` 字段，改常量时存量对象按新常量重放。
+  显式开启 `-Dremold.agent.init_drift.apply_holders=<持有者类 fqcn,...>`（空 = 关闭）。分析只接受
+  持有者 `<clinit>` 的直线形态：`NEW T; ...; ALOAD; <编译期常量>; PUTFIELD T.field; ...; ALOAD; PUTSTATIC holder.dest`，
+  用局部变量副本溯源证明 `PUTFIELD` 的接收者来自唯一 `NEW` 站点、对象只存入唯一静态字段 `dest`（无其它逃逸）。
+  写入协议：重定义生效后用 `GETSTATIC holder.dest` 取回那一个存量对象，再以新增的
+  `KIND_CONDITIONAL_EXPECTED` 按旧初值条件 CAS 写目标类型 `T` 的字段——运行期改过的值跳过，
+  `dest` 为 null/类型不符 warn 跳过，目标字段必须基本类型/非 final/非 synthetic/非 `@RemoldReinit`。
+  不写 `FieldLedger`、不改变 `patchGenerated` 语义，独立报告 `PatchReport.applyReplayFields` 与
+  `[INIT-APPLY-REPLAY]` 日志。Kotlin `var` setter（`invokevirtual`）、具名类属性（`<init>`，B 档）、
+  方法体/局部（C 档）、引用类型字段不在范围。设计见 `docs/initfix/13-kotlin-apply-replay.md`。
 - `minecraft-fabric-template`: Minecraft **1.21.4** baseline (yarn 1.21.4+build.8,
   loader 0.16.14, fabric-api 0.119.4+1.21.4) with Fabric client gametests
   (`fabric-client-gametest-api-v1`): `./gradlew runClientGameTest`, `src/gametest` source set,

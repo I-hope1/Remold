@@ -1919,14 +1919,6 @@ public class RemoldAgent {
 		// 注入的新类不在 loadedBefore 中，保持新源码；成功类保持新源码。
 		rollbackSourceCache(sourceBefore, redefinedOk, loadedBefore);
 
-		// L0 only sees classes that actually reached the JVM: gate-rejected/skipped
-		// classes must produce zero INIT-DRIFT and no instance enumeration.
-		Map<String, byte[]> appliedForDrift = new LinkedHashMap<>();
-		for (String key : newBatchBytes.keySet()) {
-			if (redefinedOk.contains(key)) appliedForDrift.put(key, newBatchBytes.get(key));
-		}
-		remold.ref.InitializerDrift.report(appliedForDrift, driftOldBytes);
-
 		// ---- 指纹落账 + 失败回队 ----
 		//
 		// 指纹只对"确实生效"的类记录。未生效的类不落账，因此下次触发不会被
@@ -2000,6 +1992,17 @@ public class RemoldAgent {
 		processAnnotations(successfulDefinitions);
 		if (DEBUG) log("[POST] post-processing done for " + successfulDefinitions.size() + " class(es)");
 		notifyBatchListeners(successfulDefinitions);
+
+		// L0/L1 必须在 InitFix 后处理（afterRedefine）之后运行：
+		// 一是 L1 的"已重放"记录在 applyPatch 里写入，L0 需要据此抑制误导性告警；
+		// 二是补丁只能作用于真正重定义成功的类。门拒绝/跳过的类必须零 INIT-DRIFT、零实例枚举。
+		Map<String, byte[]> appliedForDrift = new LinkedHashMap<>();
+		for (String key : newBatchBytes.keySet()) {
+			if (redefinedOk.contains(key)) appliedForDrift.put(key, newBatchBytes.get(key));
+		}
+		// Drain even when no replay ran: a stale record must not leak into the next round.
+		Map<String, Set<String>> replayedForDrift = remold.ref.InitializerReplay.drainApplied();
+		remold.ref.InitializerDrift.report(appliedForDrift, driftOldBytes, replayedForDrift);
 
 		Set<Class<?>> successfulClasses = new HashSet<>();
 		for (ClassDefinition def : successfulDefinitions) {

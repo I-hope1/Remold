@@ -73,6 +73,22 @@ public final class HierarchyTreeOracle implements ClassHierarchyOracle {
 		return findField(className, className, fieldName, desc, new HashSet<>()).map(member -> member.access);
 	}
 
+	/**
+	 * Resolve an inherited field down to its declaration and return the full {@link FieldNode}
+	 * (needed for annotations such as {@code @RemoldReinit}). Returns empty when the field cannot
+	 * be resolved or is not visible from {@code lookupType}.
+	 */
+	public Optional<FieldNode> findFieldNode(String lookupType, String name, String desc) {
+		Optional<MemberRef> ref = findField(lookupType, lookupType, name, desc, new HashSet<>());
+		if (!ref.isPresent()) return Optional.empty();
+		ClassNode declaring = resolve(ref.get().declaringClass);
+		if (declaring == null || declaring.fields == null) return Optional.empty();
+		for (FieldNode field : declaring.fields) {
+			if (field.name.equals(name) && field.desc.equals(desc)) return Optional.of(field);
+		}
+		return Optional.empty();
+	}
+
 	@Override
 	public Optional<Integer> getMethodModifiers(String className, String methodName, String desc) {
 		return resolveMember(className, methodName, desc, false).map(member -> member.access);

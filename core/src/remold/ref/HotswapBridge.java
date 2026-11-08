@@ -80,6 +80,12 @@ public final class HotswapBridge {
 	 */
 	public static final int KIND_FORCE = 2;
 
+	/**
+	 * L1 存量初值重放的条件 CAS 写：仅当字段当前值仍等于<b>旧初值常量</b>时写入
+	 * （与 {@link #KIND_CONDITIONAL} 不同，expected 不是类型零值而是调用点携带的常量）。
+	 */
+	public static final int KIND_CONDITIONAL_EXPECTED = 3;
+
 	private static final Unsafe UNSAFE      = Reflect.UNSAFE;
 	private static final Lookup IMPL_LOOKUP = Reflect.IMPL_LOOKUP;
 
@@ -188,6 +194,50 @@ public final class HotswapBridge {
 		return out;
 	}
 
+	// ==================== L1 存量初值重放的条件 CAS 统计 ====================
+
+	/**
+	 * {@code "owner#field"} -> {@code [written, skipped]} for {@link #KIND_CONDITIONAL_EXPECTED}.
+	 * Kept separate from {@link #CONDITIONAL_STATS}: the skip reason is different
+	 * ("value no longer equals the old initializer" vs "value is not the type default").
+	 */
+	private static final ConcurrentHashMap<String, LongAdder[]> REPLAY_STATS = new ConcurrentHashMap<>();
+
+	private static final MethodHandle RECORD_REPLAY;
+
+	static {
+		try {
+			RECORD_REPLAY = MethodHandles.lookup().findStatic(
+			 HotswapBridge.class, "recordReplay",
+			 MethodType.methodType(void.class, LongAdder[].class, boolean.class));
+		} catch (Throwable t) {
+			throw new ExceptionInInitializerError(t);
+		}
+	}
+
+	private static void recordReplay(LongAdder[] counters, boolean written) {
+		counters[written ? 0 : 1].increment();
+	}
+
+	private static LongAdder[] replayCountersFor(Class<?> owner, String fieldName) {
+		return REPLAY_STATS.computeIfAbsent(owner.getName() + "#" + fieldName,
+		 k -> new LongAdder[]{new LongAdder(), new LongAdder()});
+	}
+
+	/** Drain replay-write statistics ({@code "owner#field"} -> {@code [written, skipped]}). */
+	public static Map<String, long[]> drainReplayStats() {
+		Map<String, long[]> out = new LinkedHashMap<>();
+		for (Map.Entry<String, LongAdder[]> e : REPLAY_STATS.entrySet()) {
+			LongAdder[] c = REPLAY_STATS.remove(e.getKey());
+			if (c == null) continue;
+			long written = c[0].sum();
+			long skipped = c[1].sum();
+			if (written == 0 && skipped == 0) continue;
+			out.put(e.getKey(), new long[]{written, skipped});
+		}
+		return out;
+	}
+
 	/**
 	 * valueClass -> MethodHandle {@code (Object, long, V)boolean}。
 	 * <p>键：引用类型统一用 {@link Object Object.class}；基本类型用各自的 {@code Class}。</p>
@@ -283,6 +333,86 @@ public final class HotswapBridge {
 			throw new ExceptionInInitializerError(t);
 		}
 		CONDITIONAL_PUTTERS = Collections.unmodifiableMap(m);
+	}
+
+	/**
+	 * valueClass -> MethodHandle {@code (Object, long, V, V)boolean}：expected 作为参数传入的
+	 * 条件 CAS，供 {@link #KIND_CONDITIONAL_EXPECTED} 使用（L1 存量初值重放）。
+	 *
+	 * <p>与 {@link #CONDITIONAL_PUTTERS} 的区别只有一处：expected 不再在模板期固定为零值，
+	 * 而是链接期由调用点常量绑定。子字类型在 JDK 8 / Android 上复用同一套整字 CAS 模拟。</p>
+	 */
+	private static final Map<Class<?>, MethodHandle> EXPECTED_PUTTERS;
+
+	static {
+		Map<Class<?>, MethodHandle> m = new HashMap<>(16);
+		try {
+			m.put(boolean.class, expectedSubWordPutter("casBoolean", boolean.class));
+			m.put(byte.class, expectedSubWordPutter("casByte", byte.class));
+			m.put(char.class, expectedSubWordPutter("casChar", char.class));
+			m.put(short.class, expectedSubWordPutter("casShort", short.class));
+			m.put(int.class, expectedCasPutter("Int", int.class));
+			m.put(long.class, expectedCasPutter("Long", long.class));
+			m.put(float.class, rawBitsExpectedPutter(float.class));
+			m.put(double.class, rawBitsExpectedPutter(double.class));
+		} catch (Throwable t) {
+			throw new ExceptionInInitializerError(t);
+		}
+		EXPECTED_PUTTERS = Collections.unmodifiableMap(m);
+	}
+
+	/** {@code (Object, long, int|long, V)boolean}：expected 由调用点绑定。 */
+	private static MethodHandle expectedCasPutter(String suffix, Class<?> valueClass)
+	 throws NoSuchMethodException {
+		MethodType type = MethodType.methodType(
+		 boolean.class, Object.class, long.class, valueClass, valueClass);
+		MethodHandle cas = tryFind("compareAndSet" + suffix, type);
+		if (cas == null) cas = tryFind("compareAndSwap" + suffix, type);
+		if (cas == null) {
+			throw new NoSuchMethodException("no conditional CAS for " + valueClass.getName());
+		}
+		return cas;
+	}
+
+	/** 子字类型：复用 {@code casBoolean/byte/char/short(Object,long,V,V)} 模拟（expected 不预绑定）。 */
+	private static MethodHandle expectedSubWordPutter(String method, Class<?> valueClass)
+	 throws NoSuchMethodException, IllegalAccessException {
+		return MethodHandles.lookup().findStatic(
+		 HotswapBridge.class, method,
+		 MethodType.methodType(boolean.class, Object.class, long.class, valueClass, valueClass));
+	}
+
+	/** float/double 的 expected-CAS：在 raw bits 上比较，参数与 expected 都先转位模式。 */
+	private static MethodHandle rawBitsExpectedPutter(Class<?> valueClass) throws Throwable {
+		boolean  isFloat   = valueClass == float.class;
+		Class<?> bitsClass = isFloat ? int.class : long.class;
+		MethodHandle cas = expectedCasPutter(isFloat ? "Int" : "Long", bitsClass);
+		MethodHandle toBits = MethodHandles.lookup().findStatic(
+		 isFloat ? Float.class : Double.class,
+		 isFloat ? "floatToRawIntBits" : "doubleToRawLongBits",
+		 MethodType.methodType(bitsClass, valueClass));
+		return MethodHandles.filterArguments(cas, 2, toBits, toBits);
+	}
+
+	/**
+	 * 把 bootstrap 常量解码成字段类型的自然装箱值。BSM 常量只允许 Integer/Long/Float/Double，
+	 * 因此 Z/B/C/S/I 统一以 Integer 传输。
+	 */
+	private static Object coerceExpected(Object raw, Class<?> valueClass) {
+		if (raw == null) throw new IllegalArgumentException("missing expected value");
+		if (!(raw instanceof Number number)) {
+			throw new IllegalArgumentException("expected value must be numeric, got "
+			                                   + raw.getClass().getName());
+		}
+		if (valueClass == boolean.class) return number.intValue() != 0;
+		if (valueClass == byte.class) return (byte) number.intValue();
+		if (valueClass == char.class) return (char) number.intValue();
+		if (valueClass == short.class) return (short) number.intValue();
+		if (valueClass == int.class) return number.intValue();
+		if (valueClass == long.class) return number.longValue();
+		if (valueClass == float.class) return number.floatValue();
+		if (valueClass == double.class) return number.doubleValue();
+		throw new IllegalArgumentException("unsupported expected-CAS field type: " + valueClass);
 	}
 
 	/**
@@ -464,6 +594,94 @@ public final class HotswapBridge {
 			throw new BootstrapMethodError(
 			 "Cannot link bridge for " + owner.getName() + "." + name
 			 + " (kind=" + kind + ", opcode=" + opcode + ")", t);
+		}
+	}
+
+	/**
+	 * {@link #KIND_CONDITIONAL_EXPECTED} 的 bootstrap：expected 是调用点携带的<b>旧初值常量</b>，
+	 * 只有字段当前值仍等于它才写入。用于 L1 存量初值重放（{@link remold.ref.InitializerReplay}）。
+	 *
+	 * <p>bsmArgs 布局：{@code [int kind, int opcode, Class owner, Class host, Object expected]}；
+	 * expected 只允许 ASM 支持的常量类型（Integer/Long/Float/Double）。</p>
+	 */
+	public static CallSite bootstrapExpected(
+	 Lookup caller,
+	 String name,
+	 MethodType callSiteType,
+	 int kind,
+	 int opcode,
+	 Class<?> owner,
+	 Class<?> host,
+	 Object expected
+	) {
+		try {
+			if (kind != KIND_CONDITIONAL_EXPECTED) {
+				throw new IllegalArgumentException("unexpected kind for expected-CAS bootstrap: " + kind);
+			}
+			return conditionalExpectedCallSite(caller, name, callSiteType, opcode, owner, expected);
+		} catch (BootstrapMethodError bme) {
+			throw bme;
+		} catch (Throwable t) {
+			throw new BootstrapMethodError(
+			 "Cannot link replay bridge for " + owner.getName() + "." + name
+			 + " (opcode=" + opcode + ", expected=" + expected + ")", t);
+		}
+	}
+
+	private static CallSite conditionalExpectedCallSite(
+	 Lookup caller, String fieldName, MethodType callSiteType, int opcode,
+	 Class<?> owner, Object expected
+	) throws Throwable {
+		boolean isStatic = opcode == Opcodes.PUTSTATIC;
+
+		Class<?> valType = callSiteType.parameterType(isStatic ? 0 : 1);
+		Class<?> key     = valType.isPrimitive() ? valType : Object.class;
+
+		MethodHandle template = EXPECTED_PUTTERS.get(key);
+		if (template == null) {
+			throw new IllegalStateException("no expected-CAS putter for " + valType);
+		}
+
+		Object coerced = coerceExpected(expected, valType);
+		MethodHandle writer = MethodHandles.insertArguments(template, 2, coerced);
+
+		Field field = findField(owner, fieldName, Type.getDescriptor(valType));
+		// 运行期复核调用点的静态性/可写性：分析期用的是 redefine 之前的字节码，
+		// 若字段在这场热更里被改成 static/final，按旧元数据写会破坏字段语义（final 写尤其危险）。
+		// 重放通道（L1 / A 档 apply）都只写非 final 字段，因此这里对两者统一 fail-closed。
+		checkReplayFieldWritable(field, isStatic);
+		long offset = isStatic
+		 ? UNSAFE.staticFieldOffset(field)
+		 : UNSAFE.objectFieldOffset(field);
+		Object base = isStatic ? UNSAFE.staticFieldBase(field) : null;
+
+		writer = MethodHandles.insertArguments(writer, 1, offset);
+		if (isStatic) {
+			writer = MethodHandles.insertArguments(writer, 0, base);
+		}
+
+		LongAdder[] counters = replayCountersFor(owner, fieldName);
+		writer = MethodHandles.filterReturnValue(writer,
+		 MethodHandles.insertArguments(RECORD_REPLAY, 0, (Object) counters));
+
+		return new ConstantCallSite(writer.asType(callSiteType));
+	}
+
+	/**
+	 * 重放通道（{@link #KIND_CONDITIONAL_EXPECTED}）的运行期字段复核：静态性必须与调用点一致，
+	 * 且字段不得是 final。分析期基于 redefine 之前的字节码，若字段在本轮被改成 final/static，
+	 * Unsafe 写入会得到一个与字段声明矛盾的终局，因此这里直接让 indy 链接失败（单字段隔离）。
+	 */
+	private static void checkReplayFieldWritable(Field field, boolean expectedStatic)
+	 throws NoSuchFieldException {
+		int modifiers = field.getModifiers();
+		if (expectedStatic != java.lang.reflect.Modifier.isStatic(modifiers)) {
+			throw new NoSuchFieldException("field " + field + " static-ness differs from the"
+			                               + " replay call site (expected static=" + expectedStatic + ")");
+		}
+		if (java.lang.reflect.Modifier.isFinal(modifiers)) {
+			throw new NoSuchFieldException("field " + field + " is final; replay channels may not"
+			                               + " rewrite final fields");
 		}
 	}
 

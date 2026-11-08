@@ -57,7 +57,18 @@ public final class InitializerDrift {
 	}
 
 	public static void report(Map<String, byte[]> newBatchBytes, Map<String, byte[]> oldBytesByClass) {
+		report(newBatchBytes, oldBytesByClass, Map.of());
+	}
+
+	/**
+	 * @param replayedFields fields that the L1 replay path already handled this round
+	 *                       ({@code dot class name -> field names}); those must not be reported
+	 *                       as "changed but NOT replayed".
+	 */
+	public static void report(Map<String, byte[]> newBatchBytes, Map<String, byte[]> oldBytesByClass,
+	                          Map<String, Set<String>> replayedFields) {
 		if (newBatchBytes == null || newBatchBytes.isEmpty()) return;
+		Set<String> suppressed = flattenReplayed(replayedFields);
 		Set<String> reinitFields = new HashSet<>();
 		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
 			ClassNode node = read(e.getValue());
@@ -80,6 +91,7 @@ public final class InitializerDrift {
 			} catch (Throwable t) {
 				continue;
 			}
+			if (!suppressed.isEmpty()) drift = suppress(drift, className, newBytes, suppressed);
 			if (drift.changed().isEmpty() && drift.inherited().isEmpty()
 				&& drift.inheritedReinit().isEmpty()) continue;
 
@@ -259,7 +271,7 @@ public final class InitializerDrift {
 	}
 
 	/** Collect the write expression from the previous statement boundary to the PUTFIELD. */
-	private static String slice(List<AbstractInsnNode> insns, int putIndex) {
+	static String slice(List<AbstractInsnNode> insns, int putIndex) {
 		int start = putIndex;
 		while (start > 0) {
 			AbstractInsnNode prev = insns.get(start - 1);
@@ -285,7 +297,60 @@ public final class InitializerDrift {
 		return sb.toString();
 	}
 
-	private static String normalize(AbstractInsnNode insn) {
+	/** Normalized text of one constructor's field-write expression (used by L1 drift detection). */
+	static String writeSliceSignature(MethodNode method, AbstractInsnNode put) {
+		if (method == null || method.instructions == null || put == null) return "";
+		List<AbstractInsnNode> insns = new ArrayList<>();
+		for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+			insns.add(insn);
+		}
+		int index = insns.indexOf(put);
+		if (index < 0) return "";
+		return slice(insns, index);
+	}
+
+	/** Flatten {@code class -> fields} into {@code class.field} keys used for suppression. */
+	private static Set<String> flattenReplayed(Map<String, Set<String>> replayedFields) {
+		if (replayedFields == null || replayedFields.isEmpty()) return Set.of();
+		Set<String> out = new HashSet<>();
+		for (Map.Entry<String, Set<String>> e : replayedFields.entrySet()) {
+			if (e.getKey() == null || e.getValue() == null) continue;
+			for (String field : e.getValue()) {
+				if (field != null) out.add(e.getKey() + "." + field);
+			}
+		}
+		return out;
+	}
+
+	/** Drop fields that the L1 replay path already handled from the drift lists. */
+	private static Drift suppress(Drift drift, String className, byte[] newBytes, Set<String> suppressed) {
+		String internal = className.replace('.', '/');
+		try {
+			internal = new ClassReader(newBytes).getClassName();
+		} catch (Throwable ignored) {
+			// fall back to the key form
+		}
+		return new Drift(
+		 suppress(drift.changed(), className, internal, suppressed),
+		 suppress(drift.inherited(), className, internal, suppressed),
+		 suppress(drift.inheritedReinit(), className, internal, suppressed));
+	}
+
+	private static List<String> suppress(List<String> fields, String dotName, String internalName,
+	                                     Set<String> suppressed) {
+		if (fields.isEmpty()) return fields;
+		List<String> out = new ArrayList<>(fields.size());
+		for (String field : fields) {
+			if (suppressed.contains(dotName + "." + field)
+			    || suppressed.contains(internalName + "." + field)) {
+				continue;
+			}
+			out.add(field);
+		}
+		return out;
+	}
+
+	static String normalize(AbstractInsnNode insn) {
 		int op = insn.getOpcode();
 		if (insn instanceof FieldInsnNode f) return op + ":" + f.owner + "." + f.name + ":" + f.desc;
 		if (insn instanceof MethodInsnNode m) return op + ":" + m.owner + "." + m.name + m.desc;

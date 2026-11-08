@@ -69,6 +69,47 @@
 
 ---
 
+## HotSwap 结果 Toast（右上角卡片）
+
+客户端入口 `com.example.client.ExampleModClient` 会在客户端初始化时注册一个 Remold 批次监听器；
+每轮热更结束后，右上角弹出（或刷新）一张卡片：
+
+```text
+[HotSwap] 38 ms
+1 个类已热更：RemoldWandItem
+Mixin RemoldWandItemMixin：+1 @Unique / +1 @Inject
+InitFix：15 个实例 / 1 字段（shield）
+```
+
+- **耗时**：来自结构化批次报告；旧版 Agent 没有该数据时显示「耗时未知」，不会填 0。
+- **Mixin 增量**：`@Unique` 字段与 `@Inject` handler 的成员级差分。运行时没有可比较的上一版
+  （例如启动后第一次改该 Mixin）时显示「增量未知（当前 N @Unique / M @Inject）」，不伪造 `+0`。
+- **InitFix**：本轮真正跑完补丁的实例位点数与字段名；失败/被放弃的字段单独标「未完成」。
+- **视觉**：深色卡片 + 青色强调条，标题/摘要用 Minecraft 默认字体与颜色区分，不依赖 emoji 字形。
+- **刷新而非叠加**：连续热更复用同一张卡片并重置展示计时（默认 4 秒，遵循「通知显示时长」选项）。
+- **兼容旧 Agent**：模板只 `compileOnly` 依赖已发布 api，监听器接口用 `Proxy` 反射实现；
+  运行时没有 `afterInternalBatchReport` 时退化为 `afterInternalBatch`，卡片明确写
+  「旧版 Agent：耗时 / Mixin / InitFix 数据不可用」。
+
+数据链路（Agent 侧）见 `remold.HotswapBatchReport` 与 `HotswapBatchListener#afterInternalBatchReport`。
+具体改动清单与验证限制见本次提交说明。
+
+### 手动验证
+
+> 模板默认解析已发布的 `0.2.5` agent；该版本没有结构化报告，只会显示「旧版 Agent」降级卡片。
+> 要验证耗时 / Mixin / InitFix 维度，需把 `runClient` 的 agent 指向本分支构建的
+> `core/build/libs/remold-agent.jar`（并让 `plugin-mixin` 使用本分支的 jar）。
+
+1. 用带 DCEVM 的 JBR 21 执行 `./gradlew runClient`（可通过 `-Premold.agentJar=...` 指向本地 agent），进入单人世界；
+2. 保持客户端运行，修改 `src/main/java/com/example/item/RemoldWandItem.java` 里的一行文案；
+3. 执行 `./gradlew compileJava`（或 IDEA 的 `Ctrl + Shift + F9`）；
+4. 观察右上角是否出现 `[HotSwap] <耗时> ms` 卡片；改 Mixin 类再试一次，应看到 Mixin 行；
+   新增一个字段再试，应看到 InitFix 行。
+
+纯逻辑（不启动 Minecraft）测试：`./gradlew test`。
+
+---
+
 ## 核心技术优势（相比普通 IDEA 热更）
 
 | 场景 | 普通 JDWP 热更 (IDEA 默认) | Remold 增强热重载 |

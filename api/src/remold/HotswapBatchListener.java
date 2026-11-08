@@ -30,6 +30,25 @@ public interface HotswapBatchListener {
 	default void afterInternalBatch(List<ClassDefinition> redefinedClasses) {}
 
 	/**
+	 * 内部批次的<b>结构化报告</b>回调。
+	 *
+	 * <p>与 {@link #afterInternalBatch(List)} 并列发布，不是它的替代：既有监听器继续收到后者，
+	 * 行为不变。本方法额外提供批次耗时、Mixin 模板增量与 InitFix 修补规模，
+	 * 便于 UI / 日志做一次性汇总，而不必自己拼装。</p>
+	 *
+	 * <p><b>触发条件</b>：批次产生了可观测活动（成功重定义了类，或只改了 Mixin 模板，
+	 * 或 InitFix 修补了存量实例）。仅“扫描到文件但没有类生效”的空批次不会触发。
+	 * 该回调可能在没有 {@code ClassDefinition} 的批次上触发，因此不能用
+	 * {@link #afterInternalBatch(List)} 的“列表非空”作替代判据。</p>
+	 *
+	 * <p><b>兼容性</b>：新增的是 {@code default} 方法，已在旧版本编译的监听器实现无需修改；
+	 * 旧 Agent 不认识本方法，自然也不会调用它。</p>
+	 *
+	 * @param report 本批的可观测结果快照，非 {@code null}
+	 */
+	default void afterInternalBatchReport(HotswapBatchReport report) {}
+
+	/**
 	 * 外部（IDE JDWP / 第三方 Agent）重定义生效检测回调。
 	 * 由于 JVM JDWP 不提供完成通知，本回调由异步验证调度器在复核类已生效后触发。
 	 *

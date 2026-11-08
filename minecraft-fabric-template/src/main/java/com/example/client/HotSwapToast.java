@@ -11,15 +11,15 @@ import net.minecraft.util.Util;
 /**
  * 右上角的 HotSwap 结果卡片：深色底、左侧强调条、标题 + 最多 3 行摘要。
  *
- * <p>实现的是 Minecraft 原生的 {@link Toast}，由 {@link ToastManager} 负责排队、定位与滑入/滑出动画；
- * 卡片自身只使用本地坐标（原点在卡片左上角）。</p>
+ * <p><b>1.21.1 适配版</b>：1.21.1 的 {@link Toast#draw} 形参是 {@code (DrawContext, ToastManager, long)}，
+ * 且接口没有 {@code update} 方法；展示计时因此在 {@link #draw} 内完成，返回
+ * {@link Visibility#HIDE} 让 {@link ToastManager} 收起卡片。</p>
  *
  * <p><b>刷新而不是叠加</b>：连续热更时复用同一个实例（见
  * {@link HotSwapToastBridge}），{@link #refresh} 会重置展示计时，因此不会出现十张卡片排队。</p>
  *
- * <p><b>渲染线程</b>：{@link ToastManager} 只在客户端渲染线程调用 {@link #draw} /
- * {@link #update}；{@link #refresh} 也必须由客户端线程调用（桥接层用
- * {@code MinecraftClient.execute} 保证）。</p>
+ * <p><b>渲染线程</b>：{@link ToastManager} 只在客户端渲染线程调用 {@link #draw}；
+ * {@link #refresh} 也必须由客户端线程调用（桥接层用 {@code MinecraftClient.execute} 保证）。</p>
  */
 public final class HotSwapToast implements Toast {
 
@@ -42,7 +42,6 @@ public final class HotSwapToast implements Toast {
 	private volatile HotSwapToastModel model;
 	private volatile long shownAtMillis;
 	private volatile boolean timerStarted;
-	private volatile Visibility visibility = Visibility.SHOW;
 
 	public HotSwapToast(HotSwapToastModel model) {
 		this.model = model;
@@ -55,16 +54,11 @@ public final class HotSwapToast implements Toast {
 		}
 		this.model = newModel;
 		this.timerStarted = false;
-		this.visibility = Visibility.SHOW;
 	}
 
 	@Override
-	public Visibility getVisibility() {
-		return visibility;
-	}
-
-	@Override
-	public void update(ToastManager manager, long time) {
+	public Visibility draw(DrawContext context, ToastManager manager, long startTime) {
+		TextRenderer textRenderer = manager.getClient().textRenderer;
 		long now = Util.getMeasuringTimeMs();
 		if (!timerStarted) {
 			// 从真正开始展示时计时，而不是从入队时计时：排队期间不应消耗展示时长。
@@ -79,12 +73,9 @@ public final class HotSwapToast implements Toast {
 			// 保持默认值。
 		}
 		if (now - shownAtMillis >= displayMs) {
-			visibility = Visibility.HIDE;
+			return Visibility.HIDE;
 		}
-	}
 
-	@Override
-	public void draw(DrawContext context, TextRenderer textRenderer, long startTime) {
 		HotSwapToastModel current = model;
 		context.fill(0, 0, WIDTH, HEIGHT, COLOR_BACKGROUND);
 		context.drawBorder(0, 0, WIDTH, HEIGHT, COLOR_BORDER);
@@ -99,6 +90,7 @@ public final class HotSwapToast implements Toast {
 			context.drawText(textRenderer, trim(textRenderer, line, WIDTH - 20),
 				12, 24 + i * 12, colorFor(line), false);
 		}
+		return Visibility.SHOW;
 	}
 
 	@Override

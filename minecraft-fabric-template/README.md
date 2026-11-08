@@ -1,6 +1,6 @@
 # 现代 Minecraft Fabric 模组模板 (集成 Remold 零重启热重载)
 
-本模板基于官方 **Fabric Example Mod**（Minecraft 1.21.4 + Java 21 + Fabric Loom 1.17），并已深度预集成 **Remold 热重载自动化引擎** 与 **fabric-client-gametest-api-v1 客户端 gametest**。
+本模板基于官方 **Fabric Example Mod**（Minecraft 1.21.1 + Java 21 + Fabric Loom 1.17），并已深度预集成 **Remold 热重载自动化引擎** 与 **客户端 HotSwap 结果 Toast**。
 
 让 Minecraft 模组开发者彻底告别“改一行代码就得重启客户端、忍受 1~2 分钟漫长黑屏加载”的折磨，实现 **`Ctrl + Shift + F9` 秒级原位热更**！
 
@@ -47,29 +47,7 @@
 
 ---
 
-## 客户端 gametest（MC 1.21.4+，`fabric-client-gametest-api-v1`）
-
-模板已接入 Fabric API 的客户端 gametest 框架：真客户端里创建测试世界、模拟键鼠、截图比对，
-用来验证「注册 / 渲染 / 右键行为」这类纯 JVM 单测覆盖不到的链路。
-
-```bash
-./gradlew runClientGameTest
-```
-
-- 测试源码：`src/gametest/java/com/example/gametest/RemoldWandClientGameTest.java`
-- 测试模组声明：`src/gametest/resources/fabric.mod.json`（入口点 `fabric-client-gametest`）
-- 截图模板：`src/gametest/resources/templates/wand_hotbar.png`
-- 覆盖：物品注册 → 创造模式放入热栏 → 截图与模板比对 → 真实右键 → 断言聊天栏出现 `[Remold]` 消息
-
-`build.gradle.kts` 通过 `configure<FabricApiExtension> { configureTests { ... } }` 生成 `gametest`
-源集与 `clientGameTest` 运行配置，并自动接受测试运行目录的 EULA。Remold 插件会直接向
-`clientGameTest` 运行配置注入 `-javaagent` 与 DCEVM 参数（而不是依赖对 `client` 的继承），
-因此 `runClientGameTest` 启动的就是带 Agent 的客户端。
-1.21.1 的 fabric-api 不含该模块，因此本模板基准版本为 **1.21.4**。
-
----
-
-## HotSwap 结果 Toast（右上角卡片）
+## HotSwap 结果 Toast（MC 1.21.1，右上角卡片）
 
 客户端入口 `com.example.client.ExampleModClient` 会在客户端初始化时注册一个 Remold 批次监听器；
 每轮热更结束后，右上角弹出（或刷新）一张卡片：
@@ -91,8 +69,20 @@ InitFix：15 个实例 / 1 字段（shield）
   运行时没有 `afterInternalBatchReport` 时退化为 `afterInternalBatch`，卡片明确写
   「旧版 Agent：耗时 / Mixin / InitFix 数据不可用」。
 
+### 1.21.1 适配说明
+
+1.21.1 的 `Toast` 接口与 1.21.4 不同（已按 1.21.1 的 yarn 映射实测）：
+
+| API | 1.21.1 | 1.21.4 |
+|:--|:--|:--|
+| `Toast.draw` | `draw(DrawContext, ToastManager, long)` | `draw(DrawContext, TextRenderer, long)` |
+| `Toast.update` | **不存在** | 存在 |
+
+因此 `HotSwapToast` 在 `draw` 内自己计时并返回 `Visibility.HIDE` 收起卡片，`TextRenderer` 从
+`manager.getClient().textRenderer` 取；`HotSwapToastModel` 是不依赖 Minecraft 的纯逻辑，
+由 `src/test/java/com/example/client/HotSwapToastModelTest.java` 覆盖（`./gradlew test`）。
+
 数据链路（Agent 侧）见 `remold.HotswapBatchReport` 与 `HotswapBatchListener#afterInternalBatchReport`。
-具体改动清单与验证限制见本次提交说明。
 
 ### 手动验证
 
@@ -100,13 +90,27 @@ InitFix：15 个实例 / 1 字段（shield）
 > 要验证耗时 / Mixin / InitFix 维度，需把 `runClient` 的 agent 指向本分支构建的
 > `core/build/libs/remold-agent.jar`（并让 `plugin-mixin` 使用本分支的 jar）。
 
-1. 用带 DCEVM 的 JBR 21 执行 `./gradlew runClient`（可通过 `-Premold.agentJar=...` 指向本地 agent），进入单人世界；
-2. 保持客户端运行，修改 `src/main/java/com/example/item/RemoldWandItem.java` 里的一行文案；
-3. 执行 `./gradlew compileJava`（或 IDEA 的 `Ctrl + Shift + F9`）；
-4. 观察右上角是否出现 `[HotSwap] <耗时> ms` 卡片；改 Mixin 类再试一次，应看到 Mixin 行；
+1. 用带 DCEVM 的 **JBR 21** 执行 `./gradlew runClient`（可通过 `-Premold.agentJar=...` 指向本地 agent），进入单人世界；
+2. 日志确认客户端入口已加载：
+   ```text
+   [HotSwapToast] client entrypoint initialized
+   [HotSwapToast] Remold batch listener registered (structured report: false)
+   ```
+3. 保持客户端运行，修改 `src/main/java/com/example/item/RemoldWandItem.java` 里的一行文案；
+4. 执行 `./gradlew compileJava`（或 IDEA 的 `Ctrl + Shift + F9`）；
+5. 观察右上角是否出现 `[HotSwap] ...` 卡片；改 Mixin 类再试一次，应看到 Mixin 行；
    新增一个字段再试，应看到 InitFix 行。
 
-纯逻辑（不启动 Minecraft）测试：`./gradlew test`。
+> 本环境为无显示环境，卡片**实际渲染**未在本机验证；上述「已加载 / 已注册」日志与
+> `HotSwapToastModelTest` 的文案断言是可复跑的，视觉部分需在带图形会话的客户端确认。
+
+### 客户端 gametest：1.21.1 没有该能力
+
+`fabric-client-gametest-api-v1` 从 1.21.4 才进入 fabric-api，1.21.1 的 fabric-api **不含**该模块，
+因此主模板不再内置 `runClientGameTest`。1.21.4 时期的客户端 gametest（真客户端建测试世界 →
+热栏截图比对 → 真实右键断言聊天栏）保留在独立探针
+[`tests/fabric-gametest-1.21.4/`](../tests/fabric-gametest-1.21.4/README.md)，
+只有需要验证该链路时才单独运行，不随模板发布。
 
 ---
 

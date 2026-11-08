@@ -372,13 +372,32 @@ public class RemoldAgent {
 		}
 	}
 
-	private static void notifyBatchListeners(List<ClassDefinition> definitions) {
-		if (definitions == null || definitions.isEmpty()) return;
+	/**
+	 * 发布批次结果。
+	 *
+	 * <p>旧回调 {@link HotswapBatchListener#afterInternalBatch} 的触发条件保持原样
+	 * （仅当本批有成功重定义的类）；新回调 {@link HotswapBatchListener#afterInternalBatchReport}
+	 * 额外覆盖“只改了 Mixin 模板 / 只做了 InitFix 修补”的批次。两个回调各自独立捕获异常，
+	 * 新回调的实现出错不会影响旧监听器。</p>
+	 */
+	private static void notifyBatchListeners(List<ClassDefinition> definitions, HotswapBatchReport report) {
+		boolean hasDefinitions = definitions != null && !definitions.isEmpty();
+		boolean hasReport = report != null && report.hasObservableActivity();
+		if (!hasDefinitions && !hasReport) return;
 		for (HotswapBatchListener listener : batchListeners) {
-			try {
-				listener.afterInternalBatch(definitions);
-			} catch (Throwable t) {
-				error("[HotswapBatchListener] Error notifying batch listener: " + listener.getClass().getName(), t);
+			if (hasDefinitions) {
+				try {
+					listener.afterInternalBatch(definitions);
+				} catch (Throwable t) {
+					error("[HotswapBatchListener] Error notifying batch listener: " + listener.getClass().getName(), t);
+				}
+			}
+			if (hasReport) {
+				try {
+					listener.afterInternalBatchReport(report);
+				} catch (Throwable t) {
+					error("[HotswapBatchListener] Error notifying batch report listener: " + listener.getClass().getName(), t);
+				}
 			}
 		}
 	}
@@ -1421,6 +1440,9 @@ public class RemoldAgent {
 	 * 处理文件变化的核心逻辑
 	 */
 	private static void processChanges(Set<Path> changedFiles, Class<?>[] classes) {
+		// 批次可观测数据的起点：从读盘、对齐、织入、布局门、redefine 到 InitFix 全部计入。
+		// 收集器挂在当前线程上；即使没有任何监听器，这里也只多一次小对象分配，不改变批次行为。
+		BatchReportScope.begin();
 		refreshPackageLoaders(classes);
 
 		// 获取当前所有已加载类的快照
@@ -1991,7 +2013,13 @@ public class RemoldAgent {
 		// 严禁在补丁就绪前触发，否则回调读到未初始化的零值（时序反转）。
 		processAnnotations(successfulDefinitions);
 		if (DEBUG) log("[POST] post-processing done for " + successfulDefinitions.size() + " class(es)");
-		notifyBatchListeners(successfulDefinitions);
+		List<String> redefinedNames = new ArrayList<>(successfulDefinitions.size());
+		for (ClassDefinition def : successfulDefinitions) {
+			redefinedNames.add(def.getDefinitionClass().getName());
+		}
+		// finish 会清掉当前线程的批次状态；即使本批没有类成功，也要发布
+		// “Mixin 模板已 reload / InitFix 已修补”这类可观测活动（见 notifyBatchListeners）。
+		notifyBatchListeners(successfulDefinitions, BatchReportScope.finish(redefinedNames));
 
 		// L0/L1 必须在 InitFix 后处理（afterRedefine）之后运行：
 		// 一是 L1 的"已重放"记录在 applyPatch 里写入，L0 需要据此抑制误导性告警；
@@ -3624,6 +3652,10 @@ public class RemoldAgent {
 			error("[HOTSWAP] Hot-swap pipeline aborted: redefine and post-processing are not atomic,"
 			      + " so classes may have been redefined WITHOUT InitFix patches or @OnReload callbacks."
 			      + " The next save re-runs from the current baseline; if it keeps failing, restart.", t);
+		} finally {
+			// 异常路径不会走到 processChanges 末尾的 finish；这里兜底清掉 ThreadLocal，
+			// 防止下一轮批次把上一轮的半截统计混进来。
+			BatchReportScope.discard();
 		}
 	}
 
@@ -3690,6 +3722,9 @@ public class RemoldAgent {
 
 		HOTSWAP_LOCK.lock();
 		try {
+			// 动态重定义同样是一个可观测批次：耗时从桥接/布局门之前开始算，
+			// 到 InitFix 与回调完成结束。
+			BatchReportScope.begin();
 			String className = targetClass.getName();
 			byte[] sourceBytes = newBytecode;
 			byte[] runtimeBytes = applyTransformerBridges(targetClass.getClassLoader(), className, targetClass, newBytecode);
@@ -3759,7 +3794,8 @@ public class RemoldAgent {
 					InitFix.afterRedefineFailed(targetClass);
 				}
 				processAnnotations(Collections.singletonList(new ClassDefinition(targetClass, runtimeBytes)));
-				notifyBatchListeners(Collections.singletonList(new ClassDefinition(targetClass, runtimeBytes)));
+				notifyBatchListeners(Collections.singletonList(new ClassDefinition(targetClass, runtimeBytes)),
+					BatchReportScope.finish(Collections.singletonList(className)));
 				info("[DYNAMIC-REDEFINE] Successfully redefined " + className);
 				return true;
 			} finally {
@@ -3770,6 +3806,7 @@ public class RemoldAgent {
 			InitFix.afterRedefineFailed(targetClass);
 			return false;
 		} finally {
+			BatchReportScope.discard();
 			HOTSWAP_LOCK.unlock();
 		}
 	}

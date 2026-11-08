@@ -3884,6 +3884,20 @@ public class InitFix {
 				                 + "; not recorded in FieldLedger");
 			}
 		}
+
+		// 批次报告：只统计真正跑完的补丁。字段名与实例数都是本轮实测值，
+		// 失败/被放弃的字段单独计数（不把"尝试过"说成"已修补"）。
+		Set<String> patchedFieldNames = new LinkedHashSet<>();
+		for (FieldPatchTask task : plan.allTasks()) {
+			patchedFieldNames.add(task.fieldName());
+		}
+		if (!patchedFieldNames.isEmpty()) {
+			Set<String> incomplete = new LinkedHashSet<>(failedFields);
+			incomplete.addAll(skippedFields);
+			remold.BatchReportScope.recordInitFix(host.getName(),
+				alive == null ? 0 : alive.size(),
+				new ArrayList<>(patchedFieldNames), incomplete.size());
+		}
 	}
 
 	/**

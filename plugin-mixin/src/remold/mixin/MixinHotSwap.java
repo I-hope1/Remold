@@ -16,12 +16,17 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.tree.AnnotationNode;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldNode;
+import org.objectweb.asm.tree.MethodNode;
 import org.spongepowered.asm.mixin.MixinEnvironment;
 import org.spongepowered.asm.mixin.extensibility.IMixinConfig;
 import org.spongepowered.asm.mixin.transformer.Config;
 import org.spongepowered.asm.mixin.transformer.IMixinTransformer;
 
+import remold.BatchReportScope;
+import remold.HotswapBatchReport;
 import remold.RemoldAgent;
 
 /**
@@ -49,6 +54,15 @@ public final class MixinHotSwap {
 
 	/** {@code @Mixin} 注解描述符。它出现在常量池里就说明这个类可能是 Mixin。 */
 	private static final byte[] MIXIN_DESC = "Lorg/spongepowered/asm/mixin/Mixin;".getBytes(StandardCharsets.UTF_8);
+
+	/** {@code @Unique} 字段注解描述符。 */
+	private static final String UNIQUE_DESC = "Lorg/spongepowered/asm/mixin/Unique;";
+
+	/** {@code @Inject} handler 注解描述符。 */
+	private static final String INJECT_DESC = "Lorg/spongepowered/asm/mixin/injection/Inject;";
+
+	/** 上一次成功 reload 时的成员快照。只用于计算“相对上一次”的可证明增量。 */
+	private static final Map<String, MixinSnapshot> SNAPSHOTS = new java.util.concurrent.ConcurrentHashMap<>();
 
 	private static final Object PENDING_LOCK = new Object();
 
@@ -122,9 +136,9 @@ public final class MixinHotSwap {
 
 		List<String> targets = Collections.emptyList();
 		MixinClassInfoSync.SyncToken syncToken = MixinClassInfoSync.SyncToken.EMPTY;
+		ClassNode node = new ClassNode();
 		try {
 			// 必须完整解析：@Inject 的 handler 方法体要从这里搬进目标类，跳过 code 会织出空方法。
-			ClassNode node = new ClassNode();
 			new ClassReader(newMixinBytes).accept(node, 0);
 			// reload 的校验阶段（MixinInfo.State.validate → MixinPreProcessorStandard.conform）
 			// 会拿新字节码里的 @Inject handler 去查 Mixin 的 ClassInfo；而 Reloaded 状态复用的是
@@ -142,6 +156,10 @@ public final class MixinHotSwap {
 			reportReloadFailure(dotClassName, t);
 			return true;
 		}
+
+		// reload 成功后再记录批次报告：失败/被拒绝的模板不能进“变更列表”，
+		// 也不能推进快照（否则下一次重试会拿错误基线算增量）。
+		recordMixinReport(dotClassName, node);
 
 		if (targets.isEmpty()) {
 			RemoldAgent.info("[Mixin] " + dotClassName + " reloaded (no active targets to re-weave)");
@@ -419,6 +437,97 @@ public final class MixinHotSwap {
 			return true;
 		}
 		return false;
+	}
+
+	/**
+	 * 把本次成功 reload 的 Mixin 成员增量写进当前批次的报告。
+	 *
+	 * <p><b>增量口径</b>：与本进程上一次成功 reload 的同一 Mixin 比较。首次热更（没有旧快照）时
+	 * {@code deltaKnown=false}，增量恒为 0，只上报新版本的总量；调用方必须按“增量未知”展示，
+	 * 不能把 0 读成“没有新增”。</p>
+	 *
+	 * <p>这里是纯观测：任何异常都不得影响热更主链路，因此整段吞掉。</p>
+	 */
+	private static void recordMixinReport(String dotClassName, ClassNode node) {
+		try {
+			MixinSnapshot current = MixinSnapshot.of(node);
+			MixinSnapshot previous = SNAPSHOTS.put(dotClassName, current);
+			boolean deltaKnown = previous != null;
+
+			List<String> addedUnique = deltaKnown
+				? difference(current.uniqueFields, previous.uniqueFields) : Collections.emptyList();
+			List<String> removedUnique = deltaKnown
+				? difference(previous.uniqueFields, current.uniqueFields) : Collections.emptyList();
+			List<String> addedInject = deltaKnown
+				? difference(current.injectHandlers, previous.injectHandlers) : Collections.emptyList();
+			List<String> removedInject = deltaKnown
+				? difference(previous.injectHandlers, current.injectHandlers) : Collections.emptyList();
+
+			BatchReportScope.recordMixinChange(new HotswapBatchReport.MixinChange(
+				dotClassName, deltaKnown,
+				addedUnique.size(), removedUnique.size(),
+				addedInject.size(), removedInject.size(),
+				current.uniqueFields.size(), current.injectHandlers.size(),
+				addedUnique, addedInject));
+		} catch (Throwable ignored) {
+			// 观测失败不影响 reload 结果。
+		}
+	}
+
+	/** {@code from} 中有、{@code other} 中没有的成员，保持声明顺序。 */
+	private static List<String> difference(Set<String> from, Set<String> other) {
+		List<String> out = new ArrayList<>();
+		for (String name : from) {
+			if (!other.contains(name)) {
+				out.add(name);
+			}
+		}
+		return out;
+	}
+
+	/** 一次版本里的 {@code @Unique} 字段与 {@code @Inject} handler 名字集合。 */
+	private static final class MixinSnapshot {
+		final Set<String> uniqueFields;
+		final Set<String> injectHandlers;
+
+		private MixinSnapshot(Set<String> uniqueFields, Set<String> injectHandlers) {
+			this.uniqueFields = uniqueFields;
+			this.injectHandlers = injectHandlers;
+		}
+
+		static MixinSnapshot of(ClassNode node) {
+			Set<String> fields = new LinkedHashSet<>();
+			Set<String> handlers = new LinkedHashSet<>();
+			if (node.fields != null) {
+				for (FieldNode field : node.fields) {
+					if (hasAnnotation(field.visibleAnnotations, UNIQUE_DESC)
+						|| hasAnnotation(field.invisibleAnnotations, UNIQUE_DESC)) {
+						fields.add(field.name);
+					}
+				}
+			}
+			if (node.methods != null) {
+				for (MethodNode method : node.methods) {
+					if (hasAnnotation(method.visibleAnnotations, INJECT_DESC)
+						|| hasAnnotation(method.invisibleAnnotations, INJECT_DESC)) {
+						handlers.add(method.name);
+					}
+				}
+			}
+			return new MixinSnapshot(fields, handlers);
+		}
+
+		private static boolean hasAnnotation(List<AnnotationNode> annotations, String desc) {
+			if (annotations == null) {
+				return false;
+			}
+			for (AnnotationNode annotation : annotations) {
+				if (desc.equals(annotation.desc)) {
+					return true;
+				}
+			}
+			return false;
+		}
 	}
 
 	/** Mixin 拒绝重载时给出「需重启」的明确提示，而不是一句泛化的异常。 */

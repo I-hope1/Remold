@@ -47,6 +47,14 @@ dependencies {
 
     // Remold 注解与 API 依赖：提供 @RemoldReinit, @OnReload 等热重载控制注解
     compileOnly("com.github.I-hope1.Remold:api:v$remoldVersion")
+
+    // 纯逻辑单测（HotSwapToastModel）：不加载 Minecraft，只跑普通 JUnit。
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
 
 
@@ -74,19 +82,6 @@ tasks.processResources {
 
     filesMatching("fabric.mod.json") {
         expand(resourceTargets)
-    }
-}
-
-// ── Fabric 客户端 gametest（MC 1.21.4+；1.21.1 的 fabric-api 不含该模块）──
-// 生成 `gametest` 源集（src/gametest/{java,resources}）与 `clientGameTest` 运行配置，
-// 对应任务 ./gradlew runClientGameTest；跑真客户端，可截图对比 + 模拟键鼠。
-configure<net.fabricmc.loom.api.fabricapi.FabricApiExtension> {
-    configureTests {
-        createSourceSet.set(true)
-        modId.set("example_mod_gametest")
-        enableGameTests.set(false)
-        enableClientGameTests.set(true)
-        eula.set(true)
     }
 }
 

@@ -115,7 +115,9 @@ swaps the new bytecode into the running JVM.
   `Minecraft_Client.xml`.
 
 - Downstream templates: [`mindustry-mod-template`](https://github.com/I-hope1/Remold/tree/main/mindustry-mod-template)
-  and [`minecraft-fabric-template`](https://github.com/I-hope1/Remold/tree/main/minecraft-fabric-template).
+  and [`minecraft-fabric-template`](https://github.com/I-hope1/Remold/tree/main/minecraft-fabric-template)
+  (MC 1.21.1 baseline). Fabric client gametests need MC 1.21.4, so the `runClientGameTest` demo lives in the
+  standalone probe [`tests/fabric-gametest-1.21.4/`](https://github.com/I-hope1/Remold/tree/main/tests/fabric-gametest-1.21.4).
 - License: Apache-2.0.
 
 ## Building from source

@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.example.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "TitleScreenMixin",
+    "RemoldWandItemMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

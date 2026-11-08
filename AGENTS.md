@@ -114,7 +114,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 常驻 javac（测试提速） | `tests/src/JavacDaemon.java`（客户端）+ `tests/javacdaemon/JavacDaemonServer.java`（服务端，`--release 8`，任务 `javacDaemonServer`）；每个 JDK 一个进程、复用 `JavaCompiler`/`FileManager`，失败自动回退外部 javac；`-Phstest.noJavacDaemon` 可强制回退 |
 | `@HotswapInit` 设计契约 | `docs/initfix/09-hotswapinit-design.md`（T4 逃生口的豁免边界、签名与调用基数、重复触发、异常边界、用例清单） |
 | 外部引擎源码索引 | `.sources/`（如 `.sources/mindustry/` 指向本地 Mindustry/Arc 真实源码；只读参考，已 gitignore） |
-| Mixin 生态扩展插件 | `plugin-mixin/`（`remold.mixin.MixinHotswapPlugin`、`MixinReWeaver`、`MixinHotSwap`）；`NewMixinRegistrar` 负责运行期新增 Mixin 类的登记（仅目标类未加载时可用，已加载目标 fail-closed） |
+| Mixin 生态扩展插件 | `plugin-mixin/`（`remold.mixin.MixinHotswapPlugin`、`MixinReWeaver`、`MixinHotSwap`）；`NewMixinRegistrar` 负责运行期新增 Mixin 类的登记（目标未加载时直接登记；Fabric 上目标已加载时用 launcher 代理绕过构造期拒绝，非 Fabric fail-closed） |
 | Forge 与 NeoForge 扩展插件 | `plugin-forge/`（`remold.forge.ForgeHotswapPlugin`、`NeoForgeHotswapPlugin`、`ModLauncherMixinBridge`、`ForgeEventBusRefresher`、`ForgeMixinHotSwap`（Mixin 模板热更 + 目标级联）、`ForgeClassInfoSync`（薄适配，委托 core 引擎）） |
 | ClassInfo 成员同步单一引擎 | `core/src/remold/reflect/ClassInfoMemberSync.java`（反射-only，跨 ClassLoader 按宿主类型解析；Fabric `MixinClassInfoSync` 与 Forge/NeoForge `ForgeClassInfoSync` 都只是类型擦除 + 日志前缀的薄适配） |
 | 偏移量与访问器扫描器 | `OffsetScanner`（`core/src/remold/offset/`，常量池预过滤 + 多轮过程间数据流分析，识别 `objectFieldOffset`/`newUpdater`/`findVarHandle` 产生源） |

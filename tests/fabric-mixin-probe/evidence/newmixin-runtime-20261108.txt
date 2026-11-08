@@ -1,30 +1,34 @@
-# New Mixin runtime registration — Fabric 1.21.1 KnotServer, 2026-11-08
+# New Mixin / config diff runtime — Fabric 1.21.1 KnotServer, 2026-11-08
 
 ## Setup
 - Scratch template copy: MC 1.21.1 / yarn 1.21.1+build.3 / loader 0.16.9 / fabric-api 0.105.0+1.21.1
-- Agent: main-branch core/build/libs/remold-agent.jar; plugin: plugin-mixin/build/libs/remold-plugin-mixin-0.2.5.jar with NewMixinRegistrar
-- Probe: com.example.probe.NewMixinProbe; two new mixins compiled but NOT listed in example_mod.mixins.json:
-  - NewMixin targets ProbeTarget (target class NOT loaded before registration)
-  - LoadedMixin targets LoadedTarget (target class loaded before registration)
+- Agent: main-branch core/build/libs/remold-agent.jar; plugin: plugin-mixin/build/libs/remold-plugin-mixin-0.2.5.jar
+- Probe: com.example.probe.NewMixinProbe; new mixins compiled but NOT listed in the startup config; RemovableMixin listed at startup
 - Launch: JBR 21.0.9, `-Dremold.probe.newmixin=true`, `./gradlew runServer --offline`
 
 ## Observed log (excerpt)
+[Remold] [Mixin] Config change applied for example_mod.mixins.json; re-weaving targets=[com.example.probe.RemovableTarget]
+[Remold] [Mixin] Target class com.example.probe.RemovableTarget re-woven with updated mixin and redefined
+[NEWMIX-PROBE] RemovableTarget methods=fire
+[NEWMIX-PROBE] config-removal=true before=1 after=1
+[Remold] [Mixin] New mixin com.example.mixin.RemovableMixin registered into config example_mod.mixins.json (targets=[com/example/probe/RemovableTarget])
+[Remold] [Mixin] Config change applied for example_mod.mixins.json; re-weaving targets=[com.example.probe.RemovableTarget]
+[Remold] [Mixin] Target class com.example.probe.RemovableTarget re-woven with updated mixin and redefined
+[NEWMIX-PROBE] config-readd=true before=1 after=2
 [Remold] [Mixin] New mixin com.example.mixin.LoadedMixin registered into config example_mod.mixins.json (targets=[com/example/probe/LoadedTarget])
 [Remold] [Mixin] Target class com.example.probe.LoadedTarget re-woven with updated mixin and redefined
 [NEWMIX-PROBE] loaded-target-control=true handled=true result=ORIGINAL hooks=1
-[NEWMIX-PROBE] LoadedTarget methods=fire,handler$zje000$example_mod$onFire
-[NEWMIX-PROBE] cache com.example.probe.LoadedTarget bytes=1197 hasHookRef=true hasMixinName=true hasOnFire=true
+[NEWMIX-PROBE] LoadedTarget methods=fire,handler$zjf001$example_mod$onFire
 [NEWMIX-PROBE] target not loaded yet
 [Remold] [Mixin] New mixin com.example.mixin.NewMixin registered into config example_mod.mixins.json (targets=[com/example/probe/ProbeTarget])
-[NEWMIX-PROBE] handleIfMixin=true bytes=1765
 [NEWMIX] hook fired count=1
-[NEWMIX-PROBE] after=ORIGINAL hookCount=1
 [NEWMIX-PROBE] RESULT PASS
-Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.7.1/userguide/configuration_cache_enabling.html
 
 ## Verdict
-PASS — both paths were exercised:
-- unloaded target: registered, applied on first class load (hookCount=1, return ORIGINAL unchanged);
-- already-loaded target: registered via the Fabric launcher spoof window, re-woven + redefined, hook method present (handler$...), hookCount=1, return ORIGINAL unchanged.
+PASS — all four paths were exercised on a real KnotServer:
+1. config removal: RemovableMixin removed from example_mod.mixins.json → target re-woven, handler method gone, hook stops;
+2. config re-add: mixin re-listed → registered again, target re-woven, hook fires;
+3. new mixin, target not loaded: registered and applied on first class load;
+4. new mixin, target already loaded: registered via the Fabric launcher spoof window, re-woven + redefined, hook fires.
 
-This is a real Fabric 1.21.1 KnotServer run (not a mock); the client side is still unverified.
+Client side and non-Fabric loaders remain unverified.

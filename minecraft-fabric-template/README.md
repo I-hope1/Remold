@@ -161,9 +161,12 @@ Mixin 类不会被 JVM 当普通类加载，它只是被读成字节码模板。
 | 改 `@At` 导致目标类方法增删 | ❌ | ✅ |
 | `@Accessor` / `@Invoker`（只加方法） | ❌ | ✅ |
 | **新增整个 Mixin 类**（启动时不在 config 的 `mixins` 列表里） | ❌ 目标类结构变化被拒 | ✅ 运行期登记（实验性；Fabric 上目标已加载也可） |
+| **从 `*.mixins.json` 删除/重新加入** Mixin 名 | ❌ | ✅ 运行期配置差异（资源回调 → 移除登记 + 目标重织入） |
 | 新增接口 / 改父类 | ❌ | ❌ Remold 的继承体系门直接拒（`hierarchyChanged`），DCEVM 也救不了 |
 | 改 `targets =` / `@Mixin` 的接口、内部类、优先级 | ❌ | ❌ Mixin 的 reload 校验拒绝，需重启 |
 
+> **Mixin 配置差异（实验性）**：编辑 `*.mixins.json` 的 `mixins` / `client` / `server` 列表后，Remold 的资源回调会对比当前侧声明，删除项会从已解析的 `MixinConfig` 移除并重织入目标类（去掉旧注入），新加入项若类字节可读则走同一登记路径。真实 Fabric 1.21.1 KnotServer 已验证删除后 handler 方法消失、hook 停止；重新加入后 hook 恢复。
+>
 > **新增 Mixin 类的运行期登记（实验性）**：`MixinConfig` 在启动时把 JSON 里的 mixin 列表解析成 `MixinInfo`，`IMixinTransformer.reload` 对不在该列表中的类返回空目标。`plugin-mixin` 现在会反射把新类补进已注册配置（`MixinConfig.prepare` + `MixinInfo.validate()`），再对目标类走常规重织入；Fabric 上用极窄窗口的 launcher 代理绕过 `MixinInfo` 对“目标已加载”的构造期拒绝，窗口结束立即恢复。校验失败会回滚登记；非 Fabric/内部字段不匹配时 fail-closed，提示重启一次。该路径依赖 Mixin 0.8.7 的内部字段，升级 Mixin 后可能退化为“需重启一次”；真实客户端尚未验证（服务端已实测）。
 
 也就是说：**用了 DCEVM 的 JBR 之后，只剩下两类真限制** —— Mixin 自己的结构契约（目标类列表 / 接口 / 内部类 / 优先级），以及 Remold 的继承体系门。方法层面的增删都不再是障碍。

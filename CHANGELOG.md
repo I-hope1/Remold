@@ -38,6 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model formatting rules (unknown values, delta-known=false, three-line cap).
 
 ### Changed
+- `plugin-mixin`: apply **Mixin config file diffs** at runtime. When a watched `*.mixins.json`
+  loses (or re-adds) a mixin name, `onAssetsChanged` → `MixinConfigDiff` removes/registers the
+  corresponding `MixinInfo` from the live `MixinConfig` and re-weaves the affected target classes,
+  so deleting a mixin from the config drops its injected handler without a restart. Verified on a
+  real Fabric 1.21.1 KnotServer: after removal the target class no longer has the handler method
+  and the hook stops; re-adding the name restores it. Evidence:
+  `tests/fabric-mixin-probe/evidence/newmixin-runtime-20261108.txt`. Client and non-Fabric
+  loaders remain unverified.
 - `plugin-mixin`: experimental runtime registration for a **brand-new Mixin class** that was
   not in the startup config's `mixins` list. When `IMixinTransformer.reload` returns no targets,
   `NewMixinRegistrar` reflectively appends the class to the owning `MixinConfig`, runs

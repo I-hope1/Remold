@@ -1,6 +1,8 @@
 package remold.mixin;
 
 import java.lang.instrument.Instrumentation;
+import java.nio.file.Path;
+import java.util.Set;
 
 import remold.HotswapPlugin;
 import remold.RemoldAgent;
@@ -20,6 +22,11 @@ public class MixinHotswapPlugin implements HotswapPlugin {
 	@Override
 	public String getName() {
 		return "mixin";
+	}
+
+	@Override
+	public void onAssetsChanged(Set<Path> changedAssets) {
+		MixinConfigDiff.onAssetsChanged(changedAssets);
 	}
 
 	@Override

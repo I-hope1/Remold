@@ -182,6 +182,17 @@ public final class MixinHotSwap {
 		return true;
 	}
 
+	/** 把一组目标类排入重织入队列（供配置差异等外部入口复用）。 */
+	static void scheduleTargets(List<String> targets) {
+		if (targets == null || targets.isEmpty()) {
+			return;
+		}
+		synchronized (PENDING_LOCK) {
+			PENDING.addAll(targets);
+		}
+		WORKER.execute(MixinHotSwap::flushPendingTargets);
+	}
+
 	/**
 	 * 检查类名是否位于已注册的 Mixin 配置所管辖的包下。
 	 */

@@ -88,6 +88,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 台账 | `InitFix.LEDGER`、`getUnpatchedFields` |
 | 逐实例驱动 | `runDependentInstanceTasks` / `runIndependentInstanceTasks`、`InstanceFailureBudget` |
 | Agent 协作模块（`core/src/remold/`） | `EnvironmentProbe`（增强重定义能力探测与降级）、`LayoutDecisionEngine`（布局门纯判决）、`RemovedMemberScanner`（被删成员的批次外读者扫描）、`JarExtractor`（jar 解压与临时挂载映射）、`WatchPathRegistry`（监控路径分槽与聚合）、`FileWatcherService`（WatchService 监听线程）；编排与流水线仍在 `RemoldAgent` |
+| 文件热更防抖状态机 | `core/src/remold/DebounceWindow.java`（纯状态机：Class/jar 与资源流各自 trailing-edge 静默窗口；无队列、无调度、无真实时钟，供 `RemoldAgent` 与单测共用） |
 | 加载器集成插件（`plugin-fabric/`） | `FabricHotswapPlugin` 实现 `HotswapPlugin` 的三个通用窗口：`onPremain`（`FabricClassPathGroups`，必须在插件加载后、`init` 前执行）、`onWatchPathsChanged`（`ModJarInspector` 巡检 `run/mods` 残留制品）、`isWatchPathIgnored`（`DevWatchExclusions` 排除 `mods` 目录）；Gradle 侧 `autoFabric` 自动挂载。core 不出现任何加载器专属目录或属性约定 |
 | 写入桥 | `HotswapBridge`（`KIND_CONDITIONAL` / `KIND_FORCE`） |
 | 构造器尾部插桩 | `ConstructorTailInjector`（`core/src/remold/ref/`，纯函数：根构造器 `RETURN` 前注入字段切片） |

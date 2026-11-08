@@ -154,8 +154,10 @@ remold {
     // Optional: JBR path (defaults to the JBR_HOME env var or the jbr.home system property)
     // jbrPath = "/path/to/jbr"
 
-    // Optional: file-change debounce window in milliseconds (default 1200)
-    // fileShakeMs = 1200
+    // Optional: class/jar debounce window in milliseconds (default 800; every .class event resets it)
+    // fileShakeMs = 800
+    // Optional: asset/config debounce window in milliseconds (default 250; never delays class batches)
+    // assetShakeMs = 250
 
     // Optional: enable local JDWP debugging (default false, bound to loopback 127.0.0.1:5005)
     // debug = true

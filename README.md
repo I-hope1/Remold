@@ -160,8 +160,10 @@ remold {
     // 可选：指定 JBR 路径（默认自动读取环境变量 JBR_HOME 或系统属性 jbr.home）
     // jbrPath = "/path/to/jbr"
 
-    // 可选：文件变动防抖窗口（毫秒，默认 1200）
-    // fileShakeMs = 1200
+    // 可选：Class/jar 变动防抖窗口（毫秒，默认 800；每次 .class 变化都会重置）
+    // fileShakeMs = 800
+    // 可选：资源/配置变动独立防抖窗口（毫秒，默认 250；不会推迟 Class 批次）
+    // assetShakeMs = 250
 
     // 可选：开启本机 JDWP 远程调试（默认 false，监听安全回环 127.0.0.1:5005）
     // debug = true

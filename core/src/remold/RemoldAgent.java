@@ -110,12 +110,17 @@ public class RemoldAgent {
 	public static boolean      DEBUG              = Boolean.parseBoolean(System.getenv("remold.agent.debug"));
 	public static boolean      UCP_APPEND         = Boolean.parseBoolean(System.getProperty("remold.agent.ucp_append", "true"));
 	/**
-	 * 文件监控防抖时间窗口（毫秒）。
+	 * Class/jar 文件监控防抖时间窗口（毫秒）。
+	 * 每来一个 .class/jar 事件都会重置；连续该窗口没有 Class 事件才处理这一批。
 	 * 支持通过 System Property ({@code -Dremold.agent.file_shake_ms=...} 或 {@code -Dremold.fileShakeMs=...})、
-	 * 环境变量 {@code REMOLD_AGENT_FILE_SHAKE_MS}、agentArgs ({@code file_shake_ms=...}) 或
-	 * {@link #setFileShakeMs(int)} 动态配置。默认 1200ms。
+	 * 环境变量 {@code REMOLD_AGENT_FILE_SHAKE_MS} 或 {@link #setFileShakeMs(int)} 动态配置。默认 800ms。
 	 */
-	public static volatile int FILE_SHAKE_MS      = intProp("remold.agent.file_shake_ms", "remold.fileShakeMs", 1200);
+	public static volatile int FILE_SHAKE_MS      = intProp("remold.agent.file_shake_ms", "remold.fileShakeMs", 800);
+	/**
+	 * 资源/配置文件的独立静默窗口（毫秒），默认 250ms。
+	 * 只在资源流上重置；资源到期只 drain 资源队列，不会提前带出 Class/jar 批次。
+	 */
+	public static volatile int ASSET_SHAKE_MS     = intPropAsset("remold.agent.asset_shake_ms", "remold.assetShakeMs", 250);
 	public static RedefineMode REDEFINE_MODE;
 	public static String[]     HOTSWAP_BLACKLIST  = new String[0];
 	public static boolean      RETRANSFORM_LOADED = Boolean.parseBoolean(System.getProperty("remold.agent.retransform_loaded", "false"));
@@ -715,6 +720,7 @@ public class RemoldAgent {
 		return t;
 	});
 	private static       ScheduledFuture<?>       scheduledTask;
+	private static final DebounceWindow           DEBOUNCE = new DebounceWindow(FILE_SHAKE_MS, ASSET_SHAKE_MS);
 
 	/**
 	 * 全局热更独占锁：保证 {@code processChanges} 全流程串行。
@@ -762,11 +768,25 @@ public class RemoldAgent {
 		return CONCURRENT_HOTSWAP_PEAK.get();
 	}
 
-	/** 动态设置文件防抖等待窗口（毫秒）。负数将被忽略。 */
+	/** 动态设置 Class/jar 防抖等待窗口（毫秒）。负数将被忽略。 */
 	public static void setFileShakeMs(int fileShakeMs) {
 		if (fileShakeMs >= 0) {
 			FILE_SHAKE_MS = fileShakeMs;
+			DEBOUNCE.setWindows(FILE_SHAKE_MS, ASSET_SHAKE_MS);
 		}
+	}
+
+	/** 动态设置资源/配置防抖等待窗口（毫秒）。负数将被忽略。 */
+	public static void setAssetShakeMs(int assetShakeMs) {
+		if (assetShakeMs >= 0) {
+			ASSET_SHAKE_MS = assetShakeMs;
+			DEBOUNCE.setWindows(FILE_SHAKE_MS, ASSET_SHAKE_MS);
+		}
+	}
+
+	/** 获取当前资源/配置防抖等待窗口（毫秒）。 */
+	public static int getAssetShakeMs() {
+		return ASSET_SHAKE_MS;
 	}
 
 	/** 获取当前文件防抖等待窗口（毫秒）。 */
@@ -1135,6 +1155,29 @@ public class RemoldAgent {
 		}
 	}
 
+	private static int intPropAsset(String primary, String alias, int def) {
+		String v = System.getProperty(primary);
+		if (v == null && alias != null) {
+			v = System.getProperty(alias);
+		}
+		if (v == null) {
+			String envKey = primary.replace('.', '_').toUpperCase();
+			v = System.getenv(envKey);
+			if (v == null && alias != null) {
+				v = System.getenv(alias.replace('.', '_').toUpperCase());
+			}
+		}
+		if (v == null || v.trim().isEmpty()) {
+			return def;
+		}
+		try {
+			int val = Integer.parseInt(v.trim());
+			return val >= 0 ? val : def;
+		} catch (NumberFormatException e) {
+			return def;
+		}
+	}
+
 	public static void initConfig() {
 		info("DEBUG: " + DEBUG);
 		REDEFINE_MODE = RedefineMode.valueOfFail(System.getProperty("remold.agent.redefine_mode", "inject"), RedefineMode.inject);
@@ -1159,7 +1202,10 @@ public class RemoldAgent {
 			info("Lambda Alignment ENABLED. Warning: This may cause logical shifts if lambdas are reordered.");
 		}
 		FILE_SHAKE_MS = intProp("remold.agent.file_shake_ms", "remold.fileShakeMs", FILE_SHAKE_MS);
+		ASSET_SHAKE_MS = intPropAsset("remold.agent.asset_shake_ms", "remold.assetShakeMs", ASSET_SHAKE_MS);
+		DEBOUNCE.setWindows(FILE_SHAKE_MS, ASSET_SHAKE_MS);
 		info("File Shake MS: " + FILE_SHAKE_MS);
+		info("Asset Shake MS: " + ASSET_SHAKE_MS);
 		UI_HOOK = Boolean.parseBoolean(System.getProperty("remold.agent.ui_hook", "false"));
 		info("UI Hook: " + UI_HOOK);
 		boolean cellPropertyRef = Boolean.parseBoolean(System.getProperty("remold.agent.cell_property_ref", "false"));
@@ -3578,35 +3624,126 @@ public class RemoldAgent {
 		if (DEBUG) log("[ASSET] Queued asset change: " + changedAsset);
 		synchronized (pendingChanges) {
 			pendingAssetChanges.add(changedAsset);
-			if (scheduledTask != null && !scheduledTask.isDone()) {
-				scheduledTask.cancel(false);
-			}
-			scheduledTask = scheduler.schedule(RemoldAgent::triggerHotswap, FILE_SHAKE_MS, TimeUnit.MILLISECONDS);
+			DEBOUNCE.onAsset(System.nanoTime());
 		}
+		rescheduleDebounce();
 	}
 
 	static void handleFileChange(Path changedFile) {
 		synchronized (pendingChanges) {
 			pendingChanges.add(changedFile);
-			if (scheduledTask != null && !scheduledTask.isDone()) {
-				scheduledTask.cancel(false);
-			}
-			scheduledTask = scheduler.schedule(RemoldAgent::triggerHotswap, FILE_SHAKE_MS, TimeUnit.MILLISECONDS);
+			DEBOUNCE.onClass(System.nanoTime());
 		}
+		rescheduleDebounce();
 	}
 
 	/**
-	 * 处理 jar/zip 变化：仅入队，与 .class 共用防抖，防止读到写了一半的 jar。
-	 * 真正的解压在防抖结束后由 triggerHotswapWith → {@link JarExtractor#extract} 完成。
+	 * 处理 jar/zip 变化：与 .class 共用 Class 流的静默窗口，防止读到写了一半的 jar。
+	 * 真正的解压在 Class 批次到期后由 {@link JarExtractor#extract} 完成。
 	 */
 	static void handleJarChange(Path jarPath) {
 		if (DEBUG) log("[JAR] Queued for extraction: " + jarPath);
 		synchronized (pendingChanges) {
 			pendingJars.add(jarPath.toAbsolutePath());
-			if (scheduledTask != null && !scheduledTask.isDone()) {
-				scheduledTask.cancel(false);
+			DEBOUNCE.onClass(System.nanoTime());
+		}
+		rescheduleDebounce();
+	}
+
+	/** 按 {@link DebounceWindow} 的最早 deadline 重新挂调度。 */
+	private static void rescheduleDebounce() {
+		synchronized (pendingChanges) {
+			rescheduleDebounceLocked();
+		}
+	}
+
+	private static void rescheduleDebounceLocked() {
+		long delay = DEBOUNCE.nextDelayNanos(System.nanoTime());
+		if (scheduledTask != null && !scheduledTask.isDone()) {
+			scheduledTask.cancel(false);
+		}
+		if (delay < 0) {
+			scheduledTask = null;
+			return;
+		}
+		scheduledTask = scheduler.schedule(RemoldAgent::triggerDueHotswap, delay, TimeUnit.NANOSECONDS);
+	}
+
+	/**
+	 * 防抖到期入口：只处理已经静默到期的流。资源流到期时绝不提前 drain 尚未静默的
+	 * Class/jar 队列；Class 流到期时也只在同一个批次里处理 Class + jar。
+	 */
+	private static void triggerDueHotswap() {
+		if (inst == null) {
+			return;
+		}
+		HOTSWAP_LOCK.lock();
+		try {
+			Set<Path> assets = null;
+			Set<Path> jars = null;
+			boolean classDue;
+			boolean assetDue;
+			synchronized (pendingChanges) {
+				long now = System.nanoTime();
+				classDue = DEBOUNCE.isClassDue(now)
+					&& (!pendingChanges.isEmpty() || !pendingJars.isEmpty());
+				assetDue = DEBOUNCE.isAssetDue(now) && !pendingAssetChanges.isEmpty();
+				if (assetDue) {
+					assets = new HashSet<>(pendingAssetChanges);
+					pendingAssetChanges.clear();
+					DEBOUNCE.clearAsset();
+				}
+				if (classDue) {
+					jars = new HashSet<>(pendingJars);
+					pendingJars.clear();
+					// 先不清 Class pending：jar 解压可能向 pendingChanges 追加类文件，
+					// 这些也是本批的一部分；最终 drain 放在解压之后。
+				}
 			}
-			scheduledTask = scheduler.schedule(RemoldAgent::triggerHotswap, FILE_SHAKE_MS, TimeUnit.MILLISECONDS);
+			if (assets != null) {
+				notifyAssetChanges(assets);
+			}
+			if (!classDue) {
+				rescheduleDebounce();
+			}
+			if (classDue) {
+				if (jars != null) {
+					try {
+						jars.forEach(JarExtractor::extract);
+					} catch (Throwable t) {
+						error("[HOTSWAP] Jar extraction failed; the current class batch will still be processed: " + t);
+					}
+				}
+				Set<Path> changes;
+				synchronized (pendingChanges) {
+					changes = new HashSet<>(pendingChanges);
+					pendingChanges.clear();
+					// 解压期间若又有新的 jar 事件，留给下一批，不要把 Class 流标记为已处理。
+					if (pendingJars.isEmpty()) {
+						DEBOUNCE.clearClass();
+					}
+					rescheduleDebounceLocked();
+				}
+				runClassBatch(changes);
+			}
+		} finally {
+			HOTSWAP_LOCK.unlock();
+		}
+	}
+
+	/** 执行一批已经静默的 Class 变更；错误边界与手动触发保持一致。 */
+	private static void runClassBatch(Set<Path> changes) {
+		try {
+			resetLiveInstanceCache();
+			if (!changes.isEmpty()) {
+				processChanges(changes, inst.getAllLoadedClasses());
+			}
+		} catch (Throwable t) {
+			error("[HOTSWAP] Hot-swap pipeline aborted: redefine and post-processing are not atomic,"
+			      + " so classes may have been redefined WITHOUT InitFix patches or @OnReload callbacks."
+			      + " The next save re-runs from the current baseline; if it keeps failing, restart.", t);
+		} finally {
+			BatchReportScope.discard();
 		}
 	}
 
@@ -3636,7 +3773,7 @@ public class RemoldAgent {
 	/**
 	 * 一轮热更的统一错误边界。
 	 *
-	 * <p><b>为什么必须有</b>：本方法由防抖调度器以 {@code scheduler.schedule(RemoldAgent::triggerHotswap, ...)}
+	 * <p><b>为什么必须有</b>：本方法由防抖调度器以 {@code scheduler.schedule(RemoldAgent::triggerDueHotswap, ...)}
 	 * 调用，抛出的一切都会被 {@link java.util.concurrent.Future} 静默吞掉——没有任何线程的
 	 * uncaught handler 会看到它。而 {@code processChanges} 的后处理（InitFix 补丁、{@code @OnReload}
 	 * 回调、缓存驱逐）排在 {@code redefineClasses} 成功之后：那里一旦抛异常，用户看到的就是
@@ -3660,6 +3797,14 @@ public class RemoldAgent {
 	}
 
 	private static void triggerHotswapWith0Unchecked(Class<?>[] classes) {
+		// 手动/强制入口：取消挂起的防抖调度并清空两条流的状态，立即处理全部队列。
+		synchronized (pendingChanges) {
+			if (scheduledTask != null && !scheduledTask.isDone()) {
+				scheduledTask.cancel(false);
+			}
+			scheduledTask = null;
+			DEBOUNCE.clearAll();
+		}
 		// 实例存活状况每轮都可能变（对象被创建/回收），缓存必须按轮清空
 		resetLiveInstanceCache();
 		// 先把所有待处理的 jar 解压（防抖已结束，文件写入完毕）

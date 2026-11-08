@@ -73,7 +73,8 @@ remold {
     // agentJar   = "libs/remold-agent.jar"   // use a local agent jar instead of downloading one
     // jbrPath    = "/path/to/jbr"            // JBR home (default: JBR_HOME env / jbr.home system property)
     // mainClass  = "your.package.Main"       // inferred when the application plugin is applied
-    // fileShakeMs = 1200                     // file-change debounce window
+    // fileShakeMs = 800                      // class/jar quiet window; every class event resets it
+    // assetShakeMs = 250                     // asset/config quiet window; independent from class batches
     // debug      = true                      // JDWP on 127.0.0.1:5005 (loopback only)
     // debugPort  = 5005
 

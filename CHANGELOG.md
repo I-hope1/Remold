@@ -72,6 +72,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   right-click chat message) and its own Gradle build; the Toast client package is removed there.
 
 ### Fixed
+- `RemoldAgent`: split the single file debounce into two independent trailing-edge streams.
+  Every `.class`/`.jar` event resets the **Class** quiet window (default lowered to **800 ms**);
+  resource/config events use their own **250 ms** window and never postpone a Class batch.
+  A pure `DebounceWindow` state machine (tested without sleeping) decides which stream is due;
+  the scheduler only drains the due stream, and the manual `triggerHotswap()` entry still cancels
+  the pending timer, clears both deadlines and force-drains all queues. Gradle DSL gained
+  `assetShakeMs`; `README`/`README_EN` defaults updated.
 - Gradle plugin: the Remold agent JVM arguments were injected only into the loader `client` run
   container, so `./gradlew runServer` (Fabric Loom / ForgeGradle / NeoForge ModDevGradle) started
   without `-javaagent`, and Fabric gametest runs (`clientGameTest` / `gameTest`) also missed it.

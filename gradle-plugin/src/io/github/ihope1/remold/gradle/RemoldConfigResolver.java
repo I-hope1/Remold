@@ -263,6 +263,9 @@ public final class RemoldConfigResolver {
         if (ext.getFileShakeMs() != null) {
             jvmArgs.add("-Dremold.agent.file_shake_ms=" + ext.getFileShakeMs());
         }
+        if (ext.getAssetShakeMs() != null) {
+            jvmArgs.add("-Dremold.agent.asset_shake_ms=" + ext.getAssetShakeMs());
+        }
 
         if (project.getPlugins().hasPlugin("fabric-loom") || project.getExtensions().findByName("loom") != null || usesMixinEcosystem(project)) {
             File ideaClasses = new File(project.getProjectDir(), "out/production/classes");

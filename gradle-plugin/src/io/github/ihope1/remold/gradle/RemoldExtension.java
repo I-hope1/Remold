@@ -34,6 +34,7 @@ public class RemoldExtension {
     private final List<File> watchDirs = new ArrayList<>();
     private final List<String> extraJvmArgs = new ArrayList<>();
     private Integer fileShakeMs;
+    private Integer assetShakeMs;
     private final List<Object> dependsOn = new ArrayList<>();
     private Object deployDir;
     private Object modsDir;
@@ -162,6 +163,14 @@ public class RemoldExtension {
 
     public void setFileShakeMs(Integer fileShakeMs) {
         this.fileShakeMs = fileShakeMs;
+    }
+
+    public Integer getAssetShakeMs() {
+        return assetShakeMs;
+    }
+
+    public void setAssetShakeMs(Integer assetShakeMs) {
+        this.assetShakeMs = assetShakeMs;
     }
 
     public List<Object> getDependsOn() {

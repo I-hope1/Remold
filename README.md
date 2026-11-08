@@ -280,7 +280,7 @@ apply(plugin = "io.github.i-hope1.remold")
 
 > [!NOTE]
 > **Fabric Loom 项目运行配置自动同步**：
-> 在 Minecraft Fabric 模组开发中，Loom 生成的 `Minecraft Client` 运行配置在首次生成后不会自动刷新 VM 参数。Remold 脚本在 `classes` 或生成配置阶段会**自动检测并补全 `Minecraft_Client.xml`**，自动将 `-Dremold.plugins=mixin` 与对应插件 Jar 同步进去，确保无论通过 `Run with Remold` 还是 `Minecraft Client` 启动，Mixin 重织入桥均能 100% 自动加载，彻底避免存量 Mixin 字段被误洗。
+> 在 Minecraft Fabric 模组开发中，Loom 生成的 `Minecraft Client` / `Minecraft Server` 运行配置在首次生成后不会自动刷新 VM 参数。Remold 脚本在 `classes` 或生成配置阶段会**自动检测并补全 `Minecraft_Client.xml` 与 `Minecraft_Server.xml`**（Application 风格的 `VM_PARAMETERS` 与 Gradle 风格的 `vmOptions` 均支持），自动将 `-javaagent`、`-Dremold.plugins=mixin` 与对应插件 Jar 同步进去。同时，Fabric Loom / ForgeGradle / NeoForge ModDevGradle 的 **`server` 运行容器也会注入同一套 JVM 参数**，因此 `./gradlew runServer` 与 IDEA 的 `Minecraft Server` 启动同样自带 Agent，无需手动改 VM options。
 
 若需纯手动在 IDEA 运行对话框中配置，步骤如下：
 

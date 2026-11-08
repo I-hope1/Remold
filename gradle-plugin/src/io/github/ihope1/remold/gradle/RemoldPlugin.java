@@ -11,7 +11,6 @@ import java.util.Arrays;
 import java.util.List;
 
 import org.gradle.api.GradleException;
-import org.gradle.api.NamedDomainObjectContainer;
 import org.gradle.api.Plugin;
 import org.gradle.api.Project;
 import org.gradle.api.Task;
@@ -275,9 +274,11 @@ public final class RemoldPlugin implements Plugin<Project> {
                 }
 
                 if (shouldAutoDeploy) {
-                    Task runClient = project.getTasks().findByName("runClient");
-                    if (runClient != null) {
-                        runClient.dependsOn("deployArtifact");
+                    for (String runTaskName : new String[]{"runClient", "runServer"}) {
+                        Task runTask = project.getTasks().findByName(runTaskName);
+                        if (runTask != null) {
+                            runTask.dependsOn("deployArtifact");
+                        }
                     }
                 }
 
@@ -301,80 +302,93 @@ public final class RemoldPlugin implements Plugin<Project> {
                     }
                 }
 
-                // Fabric Loom auto injection
+                // Fabric Loom auto injection (client + dedicated server)
                 if (project.getPlugins().hasPlugin("fabric-loom") || project.getExtensions().findByName("loom") != null) {
                     try {
                         Object loom = project.getExtensions().findByName("loom");
                         if (loom != null) {
                             Method getRuns = loom.getClass().getMethod("getRuns");
-                            NamedDomainObjectContainer<?> runs = (NamedDomainObjectContainer<?>) getRuns.invoke(loom);
-                            Object client = runs != null ? runs.findByName("client") : null;
-                            if (client != null) {
-                                RemoldResolvedConfig conf = resolver.resolve(project, ext);
-                                Method vmArgMethod = client.getClass().getMethod("vmArg", String.class);
-                                for (String arg : conf.getJvmArgs()) {
-                                    vmArgMethod.invoke(client, arg);
-                                }
-                                project.getLogger().lifecycle("[Remold] Injected hot-reload agent parameters into Fabric Loom runClient!");
-                            }
+                            injectIntoLoaderRuns(project, resolver.resolve(project, ext), getRuns.invoke(loom), "Fabric Loom");
                         }
                     } catch (Throwable ignored) {
                     }
                 }
 
-                // NeoForge ModDevGradle auto injection
+                // NeoForge ModDevGradle auto injection (client + dedicated server)
                 try {
                     Object runsExt = project.getExtensions().findByName("runs");
                     if (runsExt == null && project.getExtensions().findByName("neoForge") instanceof ExtensionAware) {
                         runsExt = ((ExtensionAware) project.getExtensions().findByName("neoForge")).getExtensions().findByName("runs");
                     }
                     if (runsExt != null) {
-                        Method getByName = runsExt.getClass().getMethod("findByName", String.class);
-                        Object clientRun = getByName.invoke(runsExt, "client");
-                        if (clientRun != null) {
-                            RemoldResolvedConfig conf = resolver.resolve(project, ext);
-                            try {
-                                Object jvmArgsProp = clientRun.getClass().getMethod("getJvmArguments").invoke(clientRun);
-                                if (jvmArgsProp instanceof ListProperty) {
-                                    @SuppressWarnings("unchecked")
-                                    ListProperty<String> listProp = (ListProperty<String>) jvmArgsProp;
-                                    listProp.addAll(conf.getJvmArgs());
-                                    project.getLogger().lifecycle("[Remold] Injected hot-reload agent parameters into NeoForge ModDevGradle runClient!");
-                                }
-                            } catch (Throwable t) {
-                                try {
-                                    Method jvmArgMethod = clientRun.getClass().getMethod("jvmArg", String.class);
-                                    for (String arg : conf.getJvmArgs()) {
-                                        jvmArgMethod.invoke(clientRun, arg);
-                                    }
-                                    project.getLogger().lifecycle("[Remold] Injected hot-reload agent parameters into NeoForge runClient!");
-                                } catch (Throwable ignored) {
-                                }
-                            }
-                        }
+                        injectIntoLoaderRuns(project, resolver.resolve(project, ext), runsExt, "NeoForge ModDevGradle");
                     }
                 } catch (Throwable ignored) {
                 }
 
-                // ForgeGradle auto injection
+                // ForgeGradle auto injection (client + dedicated server)
                 try {
                     Object mcExt = project.getExtensions().findByName("minecraft");
                     if (mcExt != null) {
                         Method getRuns = mcExt.getClass().getMethod("getRuns");
-                        NamedDomainObjectContainer<?> runs = (NamedDomainObjectContainer<?>) getRuns.invoke(mcExt);
-                        Object client = runs != null ? runs.findByName("client") : null;
-                        if (client != null) {
-                            RemoldResolvedConfig conf = resolver.resolve(project, ext);
-                            Method jvmArgMethod = client.getClass().getMethod("jvmArg", String.class);
-                            for (String arg : conf.getJvmArgs()) {
-                                jvmArgMethod.invoke(client, arg);
-                            }
-                            project.getLogger().lifecycle("[Remold] Injected hot-reload agent parameters into ForgeGradle runClient!");
-                        }
+                        injectIntoLoaderRuns(project, resolver.resolve(project, ext), getRuns.invoke(mcExt), "ForgeGradle");
                     }
                 } catch (Throwable ignored) {
                 }
             });
         });
+    }
+
+    /**
+     * Injects the Remold agent JVM arguments into every run environment the loader exposes
+     * (client and dedicated server), so {@code ./gradlew runServer} gets the same agent as
+     * {@code runClient}. Run environments the loader did not register are silently skipped.
+     */
+    static void injectIntoLoaderRuns(Project project, RemoldResolvedConfig conf, Object runs, String label) {
+        if (runs == null || conf == null) return;
+        for (String env : new String[]{"client", "server"}) {
+            Object run;
+            try {
+                run = runs.getClass().getMethod("findByName", String.class).invoke(runs, env);
+            } catch (Throwable ignored) {
+                continue;
+            }
+            if (run == null) continue;
+            if (injectRunJvmArgs(run, conf.getJvmArgs())) {
+                project.getLogger().lifecycle("[Remold] Injected hot-reload agent parameters into " + label
+                        + " run" + Character.toUpperCase(env.charAt(0)) + env.substring(1) + "!");
+            }
+        }
+    }
+
+    /**
+     * Adds JVM arguments through whichever run-config API the loader exposes
+     * ({@code getJvmArguments()} list property, {@code vmArg(String)} or {@code jvmArg(String)}).
+     *
+     * @return {@code true} when an injection API was found and used
+     */
+    static boolean injectRunJvmArgs(Object run, List<String> jvmArgs) {
+        if (run == null || jvmArgs == null || jvmArgs.isEmpty()) return false;
+        try {
+            Object property = run.getClass().getMethod("getJvmArguments").invoke(run);
+            if (property instanceof ListProperty) {
+                @SuppressWarnings("unchecked")
+                ListProperty<String> list = (ListProperty<String>) property;
+                list.addAll(jvmArgs);
+                return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        for (String methodName : new String[]{"vmArg", "jvmArg"}) {
+            try {
+                Method method = run.getClass().getMethod(methodName, String.class);
+                for (String arg : jvmArgs) {
+                    method.invoke(run, arg);
+                }
+                return true;
+            } catch (Throwable ignored) {
+            }
+        }
+        return false;
     }
 }

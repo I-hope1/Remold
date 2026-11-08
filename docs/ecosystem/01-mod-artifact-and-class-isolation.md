@@ -121,13 +121,15 @@ flowchart TD
 - **文件系统生态**：若配置了 `deployDir` / `modsDir`，`shouldAutoDeploy` 默认解析为 `true`。
 
 ### 4.3 IDEA 运行配置清洗契约 (`IdeaRunConfigGenerator`)
-- 针对 Loom 生成的 `Minecraft_Client.xml` 与 `Minecraft_Server.xml`，其 `<method v="2">` 中的启动前任务必须清洗为：
+- 针对 Loom 生成的 **Application 风格** `Minecraft_Client.xml` 与 `Minecraft_Server.xml`，其 `<method v="2">` 中的启动前任务必须清洗为：
   ```xml
   <method v="2">
     <option name="Make" enabled="true" />
   </method>
   ```
-- 若检测到原有配置包含 `deployArtifact`、`:classes` 或 `classes`，无条件替换为原生 `Make`，杜绝启动前误触发打包任务。
+- 若检测到原有配置包含 `deployArtifact`、`:classes` 或 `classes`，替换为原生 `Make`，杜绝启动前误触发打包任务。
+- **Gradle 风格（`GradleRunConfiguration`）不适用上述清洗**：它通过 `taskNames` 自行调度任务，替换 `method` 会破坏运行语义；JVM 参数位于 `vmOptions` 选项，只在该选项存在时原位合并 `-javaagent` 与 `-Dremold.*`。
+- 运行期注入覆盖 client 与 server 两类 run 环境：Fabric Loom / ForgeGradle / NeoForge ModDevGradle 的 `server` 运行容器与 `client` 一样接收同一组 JVM 参数。
 
 ### 4.4 运行时残留制品隔离契约 (`plugin-fabric`)
 为了防止开发者曾经手动运行过 `jar` 任务或从旧配置残留了 JAR：

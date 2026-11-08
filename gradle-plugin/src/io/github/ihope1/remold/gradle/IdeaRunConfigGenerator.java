@@ -128,72 +128,48 @@ public final class IdeaRunConfigGenerator {
     public static void syncLoomRunConfigs(Project project, RemoldResolvedConfig conf, File ideaRunDir) {
         String[] loomRunConfigs = new String[]{"Minecraft_Client.xml", "Minecraft_Server.xml"};
         Pattern vmParamPattern = Pattern.compile("<option name=\"VM_PARAMETERS\" value=\"([^\"]*)\"\\s*/>");
-        Pattern agentRegex = Pattern.compile("(?:^|\\s)-javaagent:[^\\s=]+remold-agent\\.jar[^\\s]*");
+        Pattern vmOptionsPattern = Pattern.compile("<option name=\"vmOptions\" value=\"([^\"]*)\"\\s*/>");
         Pattern methodRegex = Pattern.compile("(?s)<method v=\"2\">.*?</method>|<method v=\"2\"\\s*/>");
-        String beforeRunBlock = "    <method v=\"2\">\n      <option name=\"Gradle.BeforeRunTask\" enabled=\"true\" tasks=\"deployArtifact\" externalProjectPath=\"$PROJECT_DIR$\" vmOptions=\"\" scriptParameters=\"\" />\n    </method>";
+        String expectedBeforeRunBlock = "    <method v=\"2\">\n      <option name=\"Make\" enabled=\"true\" />\n    </method>";
 
         for (String configName : loomRunConfigs) {
-            File clientXml = new File(ideaRunDir, configName);
-            if (!clientXml.isFile()) continue;
+            File configFile = new File(ideaRunDir, configName);
+            if (!configFile.isFile()) continue;
 
             try {
-                String content = new String(Files.readAllBytes(clientXml.toPath()), StandardCharsets.UTF_8);
+                String content = new String(Files.readAllBytes(configFile.toPath()), StandardCharsets.UTF_8);
                 boolean modified = false;
 
+                // Loom writes Application-style configs (VM_PARAMETERS) and newer Gradle-style
+                // configs (vmOptions inside ExternalSystemSettings); support both.
                 Matcher match = vmParamPattern.matcher(content);
-                if (match.find()) {
-                    String existing = match.group(1);
-                    String updated = existing;
-                    for (String arg : conf.getJvmArgs()) {
-                        String portableArg = makePortable(arg, project.getRootDir());
-                        if (arg.startsWith("-javaagent:") && arg.contains("remold-agent.jar")) {
-                            Matcher am = agentRegex.matcher(updated);
-                            if (am.find()) {
-                                updated = am.replaceAll(Matcher.quoteReplacement(" " + portableArg)).trim();
-                            } else if (!updated.contains(portableArg)) {
-                                updated = !updated.trim().isEmpty() ? updated + " " + portableArg : portableArg;
-                            }
-                        } else if (arg.startsWith("-Dremold.plugin.jars=")) {
-                            Pattern p = Pattern.compile("(?:^|\\s)-Dremold\\.plugin\\.jars=[^\\s]*");
-                            Matcher m = p.matcher(updated);
-                            if (m.find()) {
-                                updated = m.replaceAll("").trim();
-                            }
-                            updated = !updated.trim().isEmpty() ? updated + " " + portableArg : portableArg;
-                        } else if (arg.startsWith("-Dremold.plugins=")) {
-                            Pattern p = Pattern.compile("(?:^|\\s)-Dremold\\.plugins=[^\\s]*");
-                            Matcher m = p.matcher(updated);
-                            if (m.find()) {
-                                updated = m.replaceAll("").trim();
-                            }
-                            updated = !updated.trim().isEmpty() ? updated + " " + portableArg : portableArg;
-                        } else if (arg.startsWith("-Dremold.build_mode=")) {
-                            Pattern p = Pattern.compile("(?:^|\\s)-Dremold\\.build_mode=[^\\s]*");
-                            Matcher m = p.matcher(updated);
-                            if (m.find()) {
-                                updated = m.replaceAll("").trim();
-                            }
-                            updated = !updated.trim().isEmpty() ? updated + " " + portableArg : portableArg;
-                        } else if (arg.startsWith("-Dfabric.classPathGroups=")) {
-                            Pattern p = Pattern.compile("(?:^|\\s)-Dfabric\\.classPathGroups=[^\\s]*");
-                            Matcher m = p.matcher(updated);
-                            if (m.find()) {
-                                updated = m.replaceAll("").trim();
-                            }
-                            updated = !updated.trim().isEmpty() ? updated + " " + portableArg : portableArg;
-                        } else if (!updated.contains(portableArg) && !updated.contains(arg)) {
-                            updated = !updated.trim().isEmpty() ? updated + " " + portableArg : portableArg;
-                        }
+                boolean isVmParameters = match.find();
+                String optionName = "VM_PARAMETERS";
+                if (!isVmParameters) {
+                    match = vmOptionsPattern.matcher(content);
+                    if (!match.find()) {
+                        match = null;
+                    } else {
+                        optionName = "vmOptions";
                     }
+                }
+
+                if (match != null) {
+                    String existing = match.group(1);
+                    String updated = mergeJvmArgs(project, conf, existing);
                     if (!updated.equals(existing)) {
-                        content = content.replace(match.group(0), "<option name=\"VM_PARAMETERS\" value=\"" + xmlEscape(updated) + "\"/>");
+                        content = content.replace(match.group(0),
+                                "<option name=\"" + optionName + "\" value=\"" + xmlEscape(updated) + "\"/>");
                         modified = true;
                     }
                 }
 
-                String expectedBeforeRunBlock = "    <method v=\"2\">\n      <option name=\"Make\" enabled=\"true\" />\n    </method>";
-
-                if (content.contains("tasks=\"deployArtifact\"") || content.contains("tasks=\":classes\"") || content.contains("tasks=\"classes\"") || !content.contains("<option name=\"Make\" enabled=\"true\" />")) {
+                // Only Application-style Loom configs carry a Make before-run step; Gradle-style
+                // configs own their task list and must not be converted into Make.
+                if (content.contains("type=\"Application\"")
+                        && (content.contains("tasks=\"deployArtifact\"") || content.contains("tasks=\":classes\"")
+                            || content.contains("tasks=\"classes\"")
+                            || !content.contains("<option name=\"Make\" enabled=\"true\" />"))) {
                     Matcher mm = methodRegex.matcher(content);
                     if (mm.find()) {
                         content = mm.replaceFirst(Matcher.quoteReplacement(expectedBeforeRunBlock));
@@ -202,12 +178,46 @@ public final class IdeaRunConfigGenerator {
                 }
 
                 if (modified) {
-                    Files.write(clientXml.toPath(), content.getBytes(StandardCharsets.UTF_8));
+                    Files.write(configFile.toPath(), content.getBytes(StandardCharsets.UTF_8));
                     project.getLogger().lifecycle("[Remold] Automatically synchronized Remold parameters into " + configName);
                 }
             } catch (Throwable ignored) {
             }
         }
+    }
+
+    /** Merge the Remold JVM arguments into an IDE VM-options string, staying duplicate-free. */
+    private static String mergeJvmArgs(Project project, RemoldResolvedConfig conf, String existing) {
+        Pattern agentRegex = Pattern.compile("(?:^|\\s)-javaagent:[^\\s=]+remold-agent\\.jar[^\\s]*");
+        String updated = existing;
+        for (String arg : conf.getJvmArgs()) {
+            String portableArg = makePortable(arg, project.getRootDir());
+            if (arg.startsWith("-javaagent:") && arg.contains("remold-agent.jar")) {
+                Matcher am = agentRegex.matcher(updated);
+                if (am.find()) {
+                    updated = am.replaceAll(Matcher.quoteReplacement(" " + portableArg)).trim();
+                } else if (!updated.contains(portableArg)) {
+                    updated = !updated.trim().isEmpty() ? updated + " " + portableArg : portableArg;
+                }
+            } else if (arg.startsWith("-Dremold.plugin.jars=")) {
+                updated = replaceOption(updated, "-Dremold\\.plugin\\.jars=[^\\s]*", portableArg);
+            } else if (arg.startsWith("-Dremold.plugins=")) {
+                updated = replaceOption(updated, "-Dremold\\.plugins=[^\\s]*", portableArg);
+            } else if (arg.startsWith("-Dremold.build_mode=")) {
+                updated = replaceOption(updated, "-Dremold\\.build_mode=[^\\s]*", portableArg);
+            } else if (arg.startsWith("-Dfabric.classPathGroups=")) {
+                updated = replaceOption(updated, "-Dfabric\\.classPathGroups=[^\\s]*", portableArg);
+            } else if (!updated.contains(portableArg) && !updated.contains(arg)) {
+                updated = !updated.trim().isEmpty() ? updated + " " + portableArg : portableArg;
+            }
+        }
+        return updated;
+    }
+
+    private static String replaceOption(String current, String optionRegex, String value) {
+        Matcher matcher = Pattern.compile("(?:^|\\s)" + optionRegex).matcher(current);
+        String updated = matcher.find() ? matcher.replaceAll("").trim() : current;
+        return !updated.trim().isEmpty() ? updated + " " + value : value;
     }
 
     public static String xmlEscape(String s) {

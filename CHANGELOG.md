@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Gradle plugin: the Remold agent JVM arguments were injected only into the loader `client` run
+  container, so `./gradlew runServer` (Fabric Loom / ForgeGradle / NeoForge ModDevGradle) started
+  without `-javaagent`. Both `client` and `server` runs now receive the same arguments; auto-deploy
+  also wires `runServer`, and the IDEA Loom sync covers `Minecraft_Server.xml` as well as
+  `Minecraft_Client.xml` (Application-style `VM_PARAMETERS` and Gradle-style `vmOptions`).
 - Release tooling: the Gradle plugin's JitPack publication published the bare version (`0.2.5`),
   while the packaged `remold.gradle(.kts)` shims and both project templates request
   `com.github.I-hope1.Remold:gradle-plugin:v<version>` - so offline / `mavenLocal` resolution of the

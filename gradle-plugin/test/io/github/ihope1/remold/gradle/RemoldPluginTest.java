@@ -5,8 +5,10 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 
 import org.gradle.api.Project;
+import org.gradle.api.provider.ListProperty;
 import org.gradle.api.tasks.compile.JavaCompile;
 import org.gradle.testfixtures.ProjectBuilder;
 import org.junit.jupiter.api.Assertions;
@@ -212,5 +214,127 @@ class RemoldPluginTest {
             Assertions.assertTrue(gBytes.length > 1000, "remold.gradle should be a non-trivial script");
             Assertions.assertTrue(kBytes.length > 1000, "remold.gradle.kts should be a non-trivial script");
         }
+    }
+
+    @Test
+    void injectsAgentIntoClientAndDedicatedServerRuns() throws Exception {
+        Project project = ProjectBuilder.builder().withProjectDir(tempDir).build();
+        FakeLoaderRuns.Runs runs = new FakeLoaderRuns.Runs()
+                .add("client", new FakeLoaderRuns.VmArgRun())
+                .add("server", new FakeLoaderRuns.VmArgRun());
+        RemoldResolvedConfig conf = resolvedConfig(project,
+                Collections.singletonList("-javaagent:/opt/remold-agent.jar=build/classes"));
+
+        RemoldPlugin.injectIntoLoaderRuns(project, conf, runs, "TestLoader");
+
+        FakeLoaderRuns.VmArgRun client = (FakeLoaderRuns.VmArgRun) runs.findByName("client");
+        FakeLoaderRuns.VmArgRun server = (FakeLoaderRuns.VmArgRun) runs.findByName("server");
+        Assertions.assertEquals(1, client.args.size(), "client run should get the agent");
+        Assertions.assertEquals(1, server.args.size(), "dedicated-server run must get the agent too");
+        Assertions.assertTrue(server.args.get(0).startsWith("-javaagent:"), "server run got a non-agent JVM argument");
+    }
+
+    @Test
+    void injectRunJvmArgsSupportsAllLoaderApis() {
+        Project project = ProjectBuilder.builder().withProjectDir(tempDir).build();
+
+        FakeLoaderRuns.JvmArgRun forge = new FakeLoaderRuns.JvmArgRun();
+        Assertions.assertTrue(RemoldPlugin.injectRunJvmArgs(forge,
+                Collections.singletonList("-javaagent:/x/remold-agent.jar")));
+        Assertions.assertEquals(1, forge.args.size(), "ForgeGradle jvmArg(String) should receive the argument");
+
+        ListProperty<String> list = project.getObjects().listProperty(String.class);
+        FakeLoaderRuns.JvmListRun neoForge = new FakeLoaderRuns.JvmListRun(list);
+        Assertions.assertTrue(RemoldPlugin.injectRunJvmArgs(neoForge,
+                Collections.singletonList("-Dremold.plugins=mixin")));
+        Assertions.assertEquals(Collections.singletonList("-Dremold.plugins=mixin"), list.get(),
+                "NeoForge getJvmArguments() list property should receive the argument");
+
+        Assertions.assertFalse(RemoldPlugin.injectRunJvmArgs(new Object(),
+                Collections.singletonList("-javaagent:/x")), "unknown run API must not report a successful injection");
+    }
+
+    @Test
+    void syncLoomRunConfigsInjectsAgentIntoMinecraftServer() throws Exception {
+        Project project = ProjectBuilder.builder().withProjectDir(tempDir).build();
+        File ideaRunDir = new File(tempDir, ".idea/runConfigurations");
+        Files.createDirectories(ideaRunDir.toPath());
+        File serverXml = new File(ideaRunDir, "Minecraft_Server.xml");
+        Files.writeString(serverXml.toPath(), "<component name=\"ProjectRunConfigurationManager\">\n"
+                + "  <configuration default=\"false\" factoryName=\"Application\" name=\"Minecraft Server\" type=\"Application\">\n"
+                + "    <option name=\"VM_PARAMETERS\" value=\"-Dfabric.dli.env=server\"/>\n"
+                + "    <method v=\"2\">\n"
+                + "      <option enabled=\"true\" externalProjectPath=\"$PROJECT_DIR$\" name=\"Gradle.BeforeRunTask\" scriptParameters=\"\" tasks=\"deployArtifact\" vmOptions=\"\"/>\n"
+                + "    </method>\n"
+                + "  </configuration>\n"
+                + "</component>\n");
+
+        File agent = new File(tempDir, "remold-agent.jar");
+        Files.write(agent.toPath(), new byte[2048]);
+        RemoldResolvedConfig conf = resolvedConfig(agent, project, Arrays.asList(
+                "-javaagent:" + agent.getAbsolutePath() + "=" + tempDir.getAbsolutePath(),
+                "-Dremold.plugins=mixin",
+                "-Dremold.build_mode=gradle"));
+
+        IdeaRunConfigGenerator.syncLoomRunConfigs(project, conf, ideaRunDir);
+
+        String synced = Files.readString(serverXml.toPath());
+        Assertions.assertTrue(synced.contains("remold-agent.jar"), "server config must carry the javaagent");
+        Assertions.assertTrue(synced.contains("-Dremold.plugins=mixin"), "server config must carry the plugin selection");
+        Assertions.assertFalse(synced.contains("tasks=\"deployArtifact\""), "server config must use the Make before-run step");
+        Assertions.assertTrue(synced.contains("<option name=\"Make\" enabled=\"true\" />"));
+    }
+
+    @Test
+    void syncLoomRunConfigsUpdatesGradleStyleServerVmOptions() throws Exception {
+        Project project = ProjectBuilder.builder().withProjectDir(tempDir).build();
+        File ideaRunDir = new File(tempDir, ".idea/runConfigurations");
+        Files.createDirectories(ideaRunDir.toPath());
+        File serverXml = new File(ideaRunDir, "Minecraft_Server.xml");
+        Files.writeString(serverXml.toPath(), "<component name=\"ProjectRunConfigurationManager\">\n"
+                + "  <configuration default=\"false\" name=\"Minecraft Server\" type=\"GradleRunConfiguration\" factoryName=\"Gradle\">\n"
+                + "    <ExternalSystemSettings>\n"
+                + "      <option name=\"vmOptions\" value=\"-Dfabric.dli.env=server\" />\n"
+                + "      <option name=\"taskNames\"><list><option value=\"runServer\" /></list></option>\n"
+                + "    </ExternalSystemSettings>\n"
+                + "    <method v=\"2\" />\n"
+                + "  </configuration>\n"
+                + "</component>\n");
+
+        File agent = new File(tempDir, "remold-agent.jar");
+        Files.write(agent.toPath(), new byte[2048]);
+        RemoldResolvedConfig conf = resolvedConfig(agent, project, Arrays.asList(
+                "-javaagent:" + agent.getAbsolutePath() + "=" + tempDir.getAbsolutePath(),
+                "-Dremold.plugins=mixin"));
+
+        IdeaRunConfigGenerator.syncLoomRunConfigs(project, conf, ideaRunDir);
+
+        String synced = Files.readString(serverXml.toPath());
+        Assertions.assertTrue(synced.contains("remold-agent.jar"), "Gradle-style server config vmOptions must carry the agent");
+        Assertions.assertTrue(synced.contains("vmOptions"), "the vmOptions option must be preserved");
+        Assertions.assertFalse(synced.contains("<option name=\"Make\" enabled=\"true\" />"),
+                "Gradle-style configs must not be converted into Make before-run configs");
+    }
+
+    private RemoldResolvedConfig resolvedConfig(Project project, List<String> jvmArgs) throws Exception {
+        File agent = new File(tempDir, "remold-agent.jar");
+        Files.write(agent.toPath(), new byte[2048]);
+        return resolvedConfig(agent, project, jvmArgs);
+    }
+
+    private RemoldResolvedConfig resolvedConfig(File agent, Project project, List<String> jvmArgs) {
+        return new RemoldResolvedConfig(
+                "net.fabricmc.devlaunchinjector.Main",
+                "java",
+                "java",
+                agent,
+                Collections.emptyList(),
+                "",
+                jvmArgs,
+                Collections.emptyList(),
+                project.files(),
+                null,
+                "gradle"
+        );
     }
 }

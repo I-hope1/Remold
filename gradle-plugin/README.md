@@ -109,6 +109,10 @@ swaps the new bytecode into the running JVM.
 
 - The plugin never ships a second implementation of Remold: it bundles the repository-root `remold.gradle(.kts)`
   shims and applies the same `RemoldPlugin` class either way.
+- Loader run injection covers both environments: Fabric Loom / ForgeGradle / NeoForge ModDevGradle
+  `server` runs get the same agent JVM arguments as `client` runs, and the IDEA sync updates
+  `Minecraft_Server.xml` as well as `Minecraft_Client.xml`.
+
 - Downstream templates: [`mindustry-mod-template`](https://github.com/I-hope1/Remold/tree/main/mindustry-mod-template)
   and [`minecraft-fabric-template`](https://github.com/I-hope1/Remold/tree/main/minecraft-fabric-template).
 - License: Apache-2.0.

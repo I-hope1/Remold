@@ -11,6 +11,8 @@
 [Remold] [Mixin] Target class com.example.probe.RemovableTarget re-woven with updated mixin and redefined
 [NEWMIX-PROBE] RemovableTarget methods=fire
 [NEWMIX-PROBE] config-removal=true before=1 after=1
+[Remold] [Mixin] com.example.mixin.RemovableMixin was removed from the mixin config; ignoring its class change (re-add it to the config to enable it again)
+[NEWMIX-PROBE] removed-class-change-blocked=true before=1 after=1
 [Remold] [Mixin] New mixin com.example.mixin.RemovableMixin registered into config example_mod.mixins.json (targets=[com/example/probe/RemovableTarget])
 [Remold] [Mixin] Config change applied for example_mod.mixins.json; re-weaving targets=[com.example.probe.RemovableTarget]
 [Remold] [Mixin] Target class com.example.probe.RemovableTarget re-woven with updated mixin and redefined
@@ -18,17 +20,18 @@
 [Remold] [Mixin] New mixin com.example.mixin.LoadedMixin registered into config example_mod.mixins.json (targets=[com/example/probe/LoadedTarget])
 [Remold] [Mixin] Target class com.example.probe.LoadedTarget re-woven with updated mixin and redefined
 [NEWMIX-PROBE] loaded-target-control=true handled=true result=ORIGINAL hooks=1
-[NEWMIX-PROBE] LoadedTarget methods=fire,handler$zjf001$example_mod$onFire
+[NEWMIX-PROBE] LoadedTarget methods=handler$zjf001$example_mod$onFire,fire
 [NEWMIX-PROBE] target not loaded yet
 [Remold] [Mixin] New mixin com.example.mixin.NewMixin registered into config example_mod.mixins.json (targets=[com/example/probe/ProbeTarget])
 [NEWMIX] hook fired count=1
 [NEWMIX-PROBE] RESULT PASS
 
 ## Verdict
-PASS — all four paths were exercised on a real KnotServer:
-1. config removal: RemovableMixin removed from example_mod.mixins.json → target re-woven, handler method gone, hook stops;
-2. config re-add: mixin re-listed → registered again, target re-woven, hook fires;
-3. new mixin, target not loaded: registered and applied on first class load;
-4. new mixin, target already loaded: registered via the Fabric launcher spoof window, re-woven + redefined, hook fires.
+PASS — all five paths were exercised on a real KnotServer:
+1. config removal: handler gone and hook stops;
+2. class-file rewrite after removal: ignored, hook still stopped (no silent re-registration);
+3. config re-add: hook restored;
+4. new mixin, target not loaded: applied on first load;
+5. new mixin, target already loaded: re-woven + redefined, hook fires.
 
 Client side and non-Fabric loaders remain unverified.

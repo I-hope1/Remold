@@ -34,6 +34,7 @@ public class MixinHotswapPlugin implements HotswapPlugin {
 		try {
 			RemoldAgent.addTransformerBridge(new MixinBytecodeBridge());
 			RemoldAgent.info("[Mixin] Re-weaving bridge registered (plugin-mixin)");
+			RemoldAgent.info("[Mixin] Config-diff support active (new Mixin classes and mixins.json removal/readd)");
 		} catch (Throwable t) {
 			RemoldAgent.warn("[Mixin] Failed to register re-weaving bridge; proceeding without Mixin support: " + t);
 		}

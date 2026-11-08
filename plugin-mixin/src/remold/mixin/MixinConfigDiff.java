@@ -47,7 +47,22 @@ final class MixinConfigDiff {
 
 	private static final Pattern QUOTED = Pattern.compile("\"([^\"]+)\"");
 
+	/** 被配置文件显式删除、尚未重新加入的 Mixin（点分类名）。 */
+	private static final Set<String> REMOVED_FROM_CONFIG = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
 	private MixinConfigDiff() {
+	}
+
+	/** 该 Mixin 是否被配置显式删除且尚未重新加入。 */
+	static boolean isRemovedFromConfig(String dotClassName) {
+		return dotClassName != null && REMOVED_FROM_CONFIG.contains(dotClassName);
+	}
+
+	/** 配置重新加入后再允许按“新增 Mixin”路径登记。 */
+	static void markReaddedToConfig(String dotClassName) {
+		if (dotClassName != null) {
+			REMOVED_FROM_CONFIG.remove(dotClassName);
+		}
 	}
 
 	/** 资源回调入口。 */
@@ -78,12 +93,18 @@ final class MixinConfigDiff {
 					if (!fileName.endsWith(".mixins.json") || !handled.add(fileName)) {
 						continue;
 					}
+					boolean matched = false;
 					for (Object config : configs) {
 						Object configName = invoke(config, "getName");
 						if (!fileName.equals(configName)) {
 							continue;
 						}
+						matched = true;
 						apply(transformer, config, asset);
+					}
+					if (!matched) {
+						RemoldAgent.info("[Mixin] Ignoring mixin config " + asset
+							+ ": no live MixinConfig with that file name is registered");
 					}
 				}
 			}
@@ -112,11 +133,15 @@ final class MixinConfigDiff {
 		}
 		Map<String, Object> current = currentMixins(config, mixinPackage);
 
+		List<String> removedNames = new ArrayList<>();
+		List<String> addedNames = new ArrayList<>();
 		List<String> affected = new ArrayList<>();
 		for (Map.Entry<String, Object> entry : current.entrySet()) {
 			if (!expected.contains(entry.getKey())) {
+				removedNames.add(entry.getKey());
 				collectTargets(entry.getValue(), affected);
 				remove(config, entry.getKey(), entry.getValue());
+				REMOVED_FROM_CONFIG.add(mixinPackage + entry.getKey());
 			}
 		}
 		for (String simpleName : expected) {
@@ -124,6 +149,8 @@ final class MixinConfigDiff {
 				continue;
 			}
 			String dotClassName = mixinPackage + simpleName;
+			addedNames.add(simpleName);
+			markReaddedToConfig(dotClassName);
 			ClassNode node = loadClassNode(dotClassName);
 			if (node == null) {
 				RemoldAgent.warn("[Mixin] Cannot read bytecode for newly listed mixin " + dotClassName
@@ -138,10 +165,10 @@ final class MixinConfigDiff {
 				RemoldAgent.warn("[Mixin] Failed to register newly listed mixin " + dotClassName + ": " + t);
 			}
 		}
+		RemoldAgent.info("[Mixin] Config diff " + asset.getFileName() + ": removed=" + removedNames
+			+ " added=" + addedNames + " affected=" + affected);
 		if (!affected.isEmpty()) {
 			MixinHotSwap.scheduleTargets(affected);
-			RemoldAgent.info("[Mixin] Config change applied for " + asset.getFileName()
-				+ "; re-weaving targets=" + affected);
 		}
 	}
 

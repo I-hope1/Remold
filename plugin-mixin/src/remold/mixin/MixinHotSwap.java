@@ -158,6 +158,13 @@ public final class MixinHotSwap {
 		}
 
 		if (targets.isEmpty()) {
+			// 配置里已经显式删除的 Mixin：即使它的 .class 又因为全量编译被写了一次，
+			// 也不能走“新增 Mixin”路径把它重新登记回来。
+			if (MixinConfigDiff.isRemovedFromConfig(dotClassName)) {
+				RemoldAgent.info("[Mixin] " + dotClassName + " was removed from the mixin config;"
+					+ " ignoring its class change (re-add it to the config to enable it again)");
+				return true;
+			}
 			// MixinConfig.reloadMixin 只在启动时解析出的 mixin 列表里查找；返回空说明该类
 			// 不在任何已注册配置的 mixin 列表中——即运行期新增的 Mixin 类。优先尝试把新类
 			// 补登记进配置；内部结构不匹配时退化为明确提示重启，而不是谎报成功。

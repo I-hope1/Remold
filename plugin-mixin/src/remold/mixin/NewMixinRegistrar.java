@@ -49,6 +49,9 @@ final class NewMixinRegistrar {
 	 * @return 目标类的内部名列表；登记失败或该 Mixin 已存在时返回空列表
 	 */
 	static List<String> tryRegister(IMixinTransformer transformer, String dotClassName, ClassNode node) {
+		if (MixinConfigDiff.isRemovedFromConfig(dotClassName)) {
+			return Collections.emptyList();
+		}
 		try {
 			return tryRegister0(transformer, dotClassName, node);
 		} catch (Throwable t) {

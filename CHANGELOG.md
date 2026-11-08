@@ -38,6 +38,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model formatting rules (unknown values, delta-known=false, three-line cap).
 
 ### Changed
+- `plugin-mixin`: experimental runtime registration for a **brand-new Mixin class** that was
+  not in the startup config's `mixins` list. When `IMixinTransformer.reload` returns no targets,
+  `NewMixinRegistrar` reflectively appends the class to the owning `MixinConfig`, runs
+  `prepare` + `MixinInfo.validate()`, then re-weaves the declared targets through the existing
+  `redefineDynamic` path; validation failure rolls the registration back and tells the user to
+  restart. It only works while the target class is **not yet loaded**: Mixin's `MixinInfo`
+  constructor rejects an already-loaded target (`MixinTargetAlreadyLoadedException`), so the
+  registrar detects that case first and refuses with an explicit restart hint instead of
+  pretending success. Unit coverage: `NewMixinRegistrarTest` 6/6 (package match, idempotent
+  registration, full rollback, missing-processor degradation, Mixin internals contract).
+  Real Fabric 1.21.1 KnotServer E2E: an unloaded target picked up the new Mixin on first load
+  (hook count 1, return value preserved); an already-loaded target was refused with hook count 0
+  (control). Evidence: `tests/fabric-mixin-probe/evidence/newmixin-runtime-20261108.txt`.
+
 - `minecraft-fabric-template`: the template baseline moves back from 1.21.4 to Minecraft **1.21.1**
   (yarn 1.21.1+build.3, loader 0.16.9, fabric-api 0.105.0+1.21.1); 1.21.4 had no compatibility
   advantage for 1.21.1 mod authors. The `ActionResult` / `Item.Settings.registryKey` migrations and

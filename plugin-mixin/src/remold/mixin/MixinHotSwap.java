@@ -157,19 +157,23 @@ public final class MixinHotSwap {
 			return true;
 		}
 
-		// reload 成功后再记录批次报告：失败/被拒绝的模板不能进“变更列表”，
-		// 也不能推进快照（否则下一次重试会拿错误基线算增量）。
-		recordMixinReport(dotClassName, node);
-
 		if (targets.isEmpty()) {
 			// MixinConfig.reloadMixin 只在启动时解析出的 mixin 列表里查找；返回空说明该类
-			// 不在任何已注册配置的 mixin 列表中——即运行期新增的 Mixin 类。Mixin 的配置
-			// 列表不会随文件改动重读，因此新增 Mixin 无法热加；已有 Mixin 的修改不受影响。
-			RemoldAgent.warn("[Mixin] " + dotClassName + " is not registered in the startup Mixin config:"
-				+ " a brand-new Mixin class cannot be hot-added. Restart once so the config picks it up"
-				+ " (editing an existing Mixin stays hot-swappable).");
-			return true;
+			// 不在任何已注册配置的 mixin 列表中——即运行期新增的 Mixin 类。优先尝试把新类
+			// 补登记进配置；内部结构不匹配时退化为明确提示重启，而不是谎报成功。
+			List<String> registered = NewMixinRegistrar.tryRegister(transformer, dotClassName, node);
+			if (registered.isEmpty()) {
+				RemoldAgent.warn("[Mixin] " + dotClassName + " is not registered in the startup Mixin config"
+					+ " and runtime registration failed. Restart once so the config picks it up"
+					+ " (editing an existing Mixin stays hot-swappable).");
+				return true;
+			}
+			targets = normalize(registered);
 		}
+
+		// reload/登记成功后再记录批次报告：失败/被拒绝的模板不能进“变更列表”，
+		// 也不能推进快照（否则下一次重试会拿错误基线算增量）。
+		recordMixinReport(dotClassName, node);
 		RemoldAgent.info("[Mixin] " + dotClassName + " reloaded; affected target(s): " + targets);
 		synchronized (PENDING_LOCK) {
 			PENDING.addAll(targets);

@@ -7,9 +7,9 @@
 
 | 审计元数据项 | 内容与规格说明 |
 |:---|:---|
-| **基准提交 (Baseline Commit)** | `57d381c` (分支: `main`，含 Mixin 匿名/内部类热更闭环 + 抑制器 SPI 函数化，见 §0.7；上一基准 `a02c13e`，`v0.2.5` 已发布；含 L1 存量初值重放 + A 档 Kotlin apply、批次结构化报告与 HotSwap Toast、Fabric 模板回到 1.21.1 + 1.21.4 gametest 独立探针、新增 Mixin 类运行期登记、Mixin 配置删除/重新加入、Class/资源防抖分离、Mixin 共享反射引擎接入 Forge/NeoForge) |
-| **发布说明** | [`releases/v0.2.5.md`](releases/v0.2.5.md) |
-| **最后更新时间** | 2026-11-09（Mixin 匿名/内部类热更闭环 + 抑制器 SPI 函数化，见 §0.7；2026-11-08：v0.2.5 已发布；JitPack 坐标对齐；L1 + A 档落地；Fabric 主模板切回 1.21.1 并加入客户端 HotSwap Toast；1.21.4 客户端 gametest 移至 `tests/fabric-gametest-1.21.4/`；新增 Mixin 类运行期登记；Mixin 配置删除/重新加入；Class/资源防抖分离） |
+| **基准提交 (Baseline Commit)** | `71fb261` (分支: `main`，`v0.2.6` 发布前基线（发布提交见 git log）；上一基准 `57d381c`，`v0.2.5` 已发布)。v0.2.6 内容：两阶段 Schema-First 读穿保护、L1 存量初值重放 + A 档 Kotlin `apply {}` 重放、Mixin 匿名/内部类热更闭环、同形匿名类歧义消解 + 持有者点名、启动期门闩 + 批次看门狗、Class/资源防抖分离（逐项见 §0.5～§0.10） |
+| **发布说明** | [`releases/v0.2.6.md`](releases/v0.2.6.md) |
+| **最后更新时间** | 2026-11-09（v0.2.6 封板：两阶段 Schema-First 读穿保护、L1/A 档存量初值重放、Mixin 匿名/内部类热更闭环、同形匿名类歧义消解 + 持有者点名、启动期门闩 + 批次看门狗、Class/资源防抖分离；2026-11-08：v0.2.5 已发布；JitPack 坐标对齐；Fabric 主模板切回 1.21.1 并加入客户端 HotSwap Toast；1.21.4 客户端 gametest 移至 `tests/fabric-gametest-1.21.4/`；新增 Mixin 类运行期登记；Mixin 配置删除/重新加入；Class/资源防抖分离） |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |
 | **更新触发条件** | 任何合入包含特性落地、架构偏离、安全门调整、测试基线变更或发现已知缺陷/残余风险的 PR/commit 时，必须同步原子化更新本文件。提交时由作者/维护者更新基准哈希。 |
 | **管辖范围与边界声明** | 本状态表权威管辖：<br>1. **匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)**（[`docs/topology/`](topology/)）<br>2. **存量初始化修复器 (InitFix / Legacy Instance & Static Reinitialization)**（[`docs/initfix/`](initfix/)）<br>3. **物理内存偏移稳定性与第三方缓存驱逐 (Physical Memory Offset Stability & Reflection Cache Eviction)**（[`docs/offset/`](offset/)）<br>*边界与后续治理声明*：同属字节码重映射体系的 `LambdaAligner`（Lambda 表达式对齐器）以及 Mindustry UI 胶水层（`CellPropertyRef` / 动态参数表达式指纹），其实现状态当前由各自单元测试覆盖（`CellHelperTest` 35 个用例持续全绿、`LambdaAlignerTest` 等）；它们的详细状态审计矩阵尚未并入本总表，计划在下一轮治理中统一建立验收标准并纳入。 |
@@ -22,7 +22,7 @@
 
 1. **唯一真相源隔离**：`docs/status.md` 作为全模块实现状态的唯一受权载体，彻底解除规范文档与代码注释维护实现进度的负担。
 2. **双重验收验证机制**：
-   - **自动化机器扫描 (`verifyDocStatusMarkers`)**：纳入主构建验证流程（`./gradlew check` 强制依赖），递归扫描 `docs/initfix/`、`docs/topology/`、`docs/offset/`、`docs/ecosystem/`、`core/src/`、`api/src/`、`plugin-arc/src/`、`plugin-mixin/src/`、`plugin-forge/src/`、`panama/src/`，严格拦截标记 `/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/`。当前状态：**100% 达标全绿**。
+   - **自动化机器扫描 (`verifyDocStatusMarkers`)**：纳入主构建验证流程（`./gradlew check` 强制依赖），递归扫描 `docs/initfix/`、`docs/topology/`、`docs/offset/`、`docs/ecosystem/`、`core/src/`、`api/src/`、`plugin-arc/src/`、`plugin-mixin/src/`、`plugin-forge/src/`、`panama/src/`，严格拦截标记 `/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/`。当前状态：**100% 达标全绿**（v0.2.6 发版验证：`verifyDocStatusMarkers` 全绿）。
    - **规范性内容抽检审计**：禁止规范正文出现“目前已支持”、“当前版本尚未实现”等时态陈述，时态陈述一律归入 `status.md`。首轮治理覆盖 15 篇客观设计文档（`docs/topology/` 8 篇、`docs/initfix/` 6 篇、`docs/offset/` 1 篇），人工抽检合格率 100%；此后新增篇目（当前 `docs/topology/` 9 篇、`docs/initfix/` 13 篇、`docs/offset/` 2 篇）沿用同一客观化规则，并由 `verifyDocStatusMarkers` 持续守卫。
 3. **设计规范文档客观化清理清单（首轮治理）**：
    - [`docs/topology/01-invariants-and-remapping.md`](topology/01-invariants-and-remapping.md) ～ [`08-decisions.md`](topology/08-decisions.md)（共 8 篇）：全部重构为纯架构规格、约束契约与客观原理，易腐进度全部剥离，头部统一指引至 `status.md`。
@@ -32,7 +32,7 @@
 
 ---
 
-## 0.1 v0.2.2 修复记录 (2026-11-05)
+## 0.1 v0.2.2 修复记录（已发布，2026-11-05）
 
 本轮针对“动手试试 6”在真实 Fabric 1.21.1 客户端暴露的 Mixin 热更链路缺陷完成修复。以下条目为**已观测**证据：
 真实客户端日志 + 自动化回归；未能自动化的端到端部分在“验收证据”中单独标注。
@@ -49,7 +49,7 @@
 
 ---
 
-## 0.2 v0.2.3 修复记录 (2026-11-06)
+## 0.2 v0.2.3 修复记录（已发布，2026-11-06）
 
 本轮由批次 A（P3 / L0）、B（真实 Fabric Mixin 探针）、C（Mixin 主路径修复 / 实体探针 / C4 / C5）
 合并而来；`main` 与已测集成分支 `integration/abc` 同一提交。以下条目均以自动化回归 + 真实环境
@@ -92,7 +92,7 @@
 | NeoForge 端到端 | ✅ | 与 Forge 共用 `ModLauncherMixinBridge` / `ForgeMixinHotSwap` / `ForgeClassInfoSync` | **已观测**：NeoForge 21.1.265 dev `runServer`（ModDevGradle，原生 `META-INF/neoforge.mods.toml [[mixins]]` 注册）红基线 `VERDICT RED` → 修复后 `VERDICT GREEN`，业务终局为新 handler 每调用 +1、新 `@Unique` 读到初值 456；详见 §0.4 与 `tests/neoforge-mixin-probe/evidence/`。**未验证**：生产 installer 启动路径与 NeoForge 26.x（FML 10+）代际，见 §4.1 候选清单 |
 
 
-## 0.4 v0.2.5 ClassInfo 同步收敛与三端实证（2026-11-07 ~ 2026-11-08）
+## 0.4 v0.2.5 ClassInfo 同步收敛与三端实证（已发布，2026-11-07 ~ 2026-11-08）
 
 | 修复 / 变更 | 状态 | 代码位置 | 验收证据 |
 |:---|:---:|:---|:---|
@@ -106,7 +106,7 @@
 
 ---
 
-## 0.5 未发布：L1 存量初值重放第一版（2026-11-08）
+## 0.5 v0.2.6：L1 存量初值重放第一版（v0.2.6 封板 2026-11-09；本轮 2026-11-08）
 
 | 能力 | 状态 | 代码位置 | 验收证据 |
 |:---|:---:|:---|:---|
@@ -114,7 +114,7 @@
 
 ---
 
-## 0.6 未发布：A 档 Kotlin `apply {}` 静态持有者初值重放（2026-11-08）
+## 0.6 v0.2.6：A 档 Kotlin `apply {}` 静态持有者初值重放（v0.2.6 封板 2026-11-09；本轮 2026-11-08）
 
 | 能力 | 状态 | 代码位置 | 验收证据 |
 |:---|:---:|:---|:---|
@@ -122,11 +122,61 @@
 
 ---
 
-## 0.7 未发布：两阶段 Schema-First 读穿保护（2026-11-09）
+## 0.7 v0.2.6：两阶段 Schema-First 读穿保护（v0.2.6 封板，2026-11-09）
 
 | 能力 | 状态 | 代码位置 | 验收证据 |
 |:---|:---:|:---|:---|
-| 两阶段重定义（内部批次路径）：本批存在「新增/类型变更字段」进入补丁计划时，先提交阶段 A（新结构 + 旧方法体，**构造器/`<clinit>` 保留新体**），补丁完成后再提交阶段 C 的新方法体；纯方法体热更仍走单次重定义快路径。默认开启，`-Dremold.agent.two_phase=false` 可回到旧行为。 | ✅ | `RemoldAgent.applyTwoPhase` / `redefineStageA`（阶段编排与整组回滚）；`InitFix.requiresTwoPhase`（只认真正会写的零值暴露字段）；`StageASkeleton.buildWithLiveConstructors`（构造器保留新体，替代 `ConstructorTailInjector` 插桩） | 真实 `processChanges` 端到端 `TwoPhaseProbe` **72/0**（JBR 21）：`two-phase ON` 时并发读线程在 50k 存量实例把阶段 B 窗口拉宽的情况下零 NPE，且依次看到旧结果与新结果；`two-phase OFF` 对照在同一夹具上稳定观测到 `NullPointerException`（红基线），证明读穿窗口真实存在且被两阶段关闭；`TwoPhaseGuardTest` 5/0（新增实例字段/新增静态字段 → true；纯方法体/`@RemoldReinit`/零值等价 → false）；`StageASkeletonTest` 11/0（含窗口实例由新构造器初始化、旧体不回退到新字段的正反例）；全量 JUnit **527/0 skipped**；`:tests:initFixOracle` `ALL ASSERTIONS PASSED`；`layoutRejectRecoverProbe` 41/0、`doubleBraceProbe` 104/0。**残余边界**：外部 IDE/JDWP 重定义通道与 `redefineDynamic` 单类通道仍走单阶段（读穿窗口仍在，见风险 9）；被安全门拒绝、根本没生成补丁的字段两阶段无法代偿（保持“重启”语义）；阶段 B 完成前，新构造器读取本类新增**静态**字段或同批其它类未补齐字段仍是残余窗口；两次 redefine 会带来双倍 JIT 逆优化（`docs/initfix/07-p05-probe-results.md` §11）。 |
+| 两阶段重定义（内部批次路径）：本批存在「新增/类型变更字段」进入补丁计划时，先提交阶段 A（新结构 + 旧方法体，**构造器/`<clinit>` 保留新体**），补丁完成后再提交阶段 C 的新方法体；纯方法体热更仍走单次重定义快路径。默认开启，`-Dremold.agent.two_phase=false` 可回到旧行为。 | ✅ | `RemoldAgent.applyTwoPhase` / `redefineStageA`（阶段编排与整组回滚）；`InitFix.requiresTwoPhase`（只认真正会写的零值暴露字段）；`StageASkeleton.buildWithLiveConstructors`（构造器保留新体，替代 `ConstructorTailInjector` 插桩） | 真实 `processChanges` 端到端 `TwoPhaseProbe` **72/0**（JBR 21）：`two-phase ON` 时并发读线程在 50k 存量实例把阶段 B 窗口拉宽的情况下零 NPE，且依次看到旧结果与新结果；`two-phase OFF` 对照在同一夹具上稳定观测到 `NullPointerException`（红基线），证明读穿窗口真实存在且被两阶段关闭；`TwoPhaseGuardTest` 5/0（新增实例字段/新增静态字段 → true；纯方法体/`@RemoldReinit`/零值等价 → false）；`StageASkeletonTest` 11/0（含窗口实例由新构造器初始化、旧体不回退到新字段的正反例）；全量 JUnit **597/0 skipped**（v0.2.6 发版验证，`./gradlew check`）；`:tests:initFixOracle` `ALL ASSERTIONS PASSED`；`layoutRejectRecoverProbe` 41/0、`doubleBraceProbe` 104/0。**残余边界**：外部 IDE/JDWP 重定义通道与 `redefineDynamic` 单类通道仍走单阶段（读穿窗口仍在，见风险 9）；被安全门拒绝、根本没生成补丁的字段两阶段无法代偿（保持“重启”语义）；阶段 B 完成前，新构造器读取本类新增**静态**字段或同批其它类未补齐字段仍是残余窗口；两次 redefine 会带来双倍 JIT 逆优化（`docs/initfix/07-p05-probe-results.md` §11）。 |
+
+---
+
+## 0.8 v0.2.6：Mixin 匿名/内部类热更闭环（v0.2.6 封板，2026-11-09）
+
+真实 Fabric 1.21.1 客户端用「普通类 vs Mixin 内」的匿名类 + Lambda 对照试验（R1~R5）暴露三段断层。本节按**已观测**口径登记；仍未闭环或未验证的项已并入 §0.10 的 v0.2.6 统一残余风险清单，不在此重复。
+
+| 修复 / 变更 | 状态 | 代码位置 | 验收证据 |
+|:---|:---:|:---|:---|
+| 热更管线自身组件在类链接期抛 `NoClassDefFoundError`（客户端原文 `[Mixin] Mixin hot-swap handler unavailable: NoClassDefFoundError: LoadedTargetSuppressor`），使 Mixin handler 的成功与失败分支同时失效 | ✅ | `core/src/remold/reflect/mixin/MixinConfigContext`（抑制器改为 `Function<Collection<String>,Object>` + `Consumer<Object>`；删除 `LoadedTargetSuppressor`）；`plugin-mixin` `MixinConfigDiff`/`NewMixinRegistrar`、`plugin-forge` `ForgeMixinConfigDiff`/`ModLauncherClassTrackerSpoof` 只传方法引用 | **已观测**：`MixinPluginClassLinkageTest` 机械扫描已编译插件类常量池，断言零引用已废除的 core 类型且不 `implements`/`extends` 任何 core mixin 类型（正向对照 + 变异：恢复硬链接 → 精确点名 `plugin-mixin/remold/mixin/MixinConfigDiff.class` 变红）；`NewMixinRegistrarFailClosedTest` 覆盖「抑制器缺失/返回 null/抛异常 → 放弃登记并输出定向诊断、异常不外泄」。**已知残余**：plugin/core 版本错位仍会退化为 `NoSuchMethodError`（`MixinConfigContext` 构造签名不匹配），该路径由 `RemoldAgent.notifyAssetChanges` 的逐插件 `catch` 兜住并记 error；两侧必须同版本发布 |
+| Mixin 注入方法内**首次**新增匿名类 → reload 崩溃：`Error loading class: Outer$1 (ClassNotFoundException)` 随后 `Cannot invoke "ClassInfo.isProbablyStatic()" because "innerClass" is null` | ✅ | `plugin-mixin` `MixinBytecodeOverlay`（安装 `IMixinService` 代理，只对显式登记的内部名提供字节，其余回落宿主 provider）、`MixinHotSwap.handleIfMixin`（reload 前登记内部类字节并驱逐上游 `ClassInfo.cache` 负缓存） | **已观测（单测/字节码级）**：`MixinInnerClassHotSwapTest` 7 用例（归属判定、嵌套名推导、`lookup` 点分/内部名归一、负缓存驱逐按 `containsKey` 计数）；3 个人工变异（去掉 schema 门 / 去掉 passthrough 过滤 / 去掉名字归一）全部击杀并恢复复绿（`ev-20261109021245-983c`、`ev-20261109021305-bf93`、`ev-20261109021322-f20e`）。**上游机制依据**（sponge-mixin 0.15.5+mixin.0.8.7 源码包）：`ClassInfo.forName` 走 `MixinService.getService().getBytecodeProvider()`，失败把 `null` 写进 `ClassInfo.cache` 且永不重试。**真实 Fabric 1.21.1 KnotServer E2E**（`tests/fabric-mixin-probe/anon/`，mod 走 `run/mods` jar 加载、Gradle 输出不在运行期 classpath）：修复前 S1 `poke` 停在 `hook-s0`，日志为 `Error loading class: ...AnonTargetMixin$1 (ClassNotFoundException)` + `innerClass is null`（RED）；修复后 S1 `poke=anon-v1`、`RESULT: GREEN`（证据 `evidence/anon-r3r5-{red,green}.txt`） |
+| 只改已加载匿名类体 → 目标类重织入静默 `[DYNAMIC-REDEFINE] no-op`、匿名类仍跑旧版 | ✅ | `plugin-mixin` `MixinInnerClassSupport`（内部类归属/嵌套名纯函数）、`MixinInnerClassHotSwap`（按 `InnerClassGenerator` 稳定唯一名重新生成合成内部类并 `redefineClasses`）、`MixinHotSwap.handleInnerClassChange`（只改 `Outer$N` 时回到外层 Mixin 重跑） | **已观测（单测/字节码级）**：成员 schema 判定区分「只改方法体」与「增删字段/方法/构造器」，后者给出点名成员的指向性诊断并拒绝重定义（不借 DCEVM 绕过布局门）；`handleInnerClassChange` 在只改 `Outer$N` 时把字节登记进覆盖层并回到外层 Mixin。**上游机制依据**：`InnerClassGenerator.getUniqueReference` 把 `Outer$1` 映射为 `Target$Anonymous$<uuid>`，`isLoaded()` = `loadCounter>0`，已加载的合成内部类不会被重新生成。**真实 E2E**：修复前 S2 外层字节 sha256 前后相同、仅 `$1` 变体，`poke` 仍 `anon-v1` 且日志为 `[DYNAMIC-REDEFINE] no-op`（RED）；修复后 S2 `poke=anon-v2`（GREEN），S3 去触发对照无重定义、值稳定 |
+
+> **本轮观测存档（仍开放项已并入 §0.10 统一清单，不在此重复）**：①「批次落在启动期挂死」同族——探针在 MC 启动期（`Done (` 之前）落批次时曾出现 JVM 挂死（probe 线程无 tick）；本轮把「合成内部类重定义」从桥接线程移到批次之后的 worker 线程，消除了同一族挂死（桥接线程内 `redefineClasses` 会让 KnotServer 线程停摆，实测：S1b 之后 tick 全停）。启动期窗口本身未单独隔离，探针改为等 `Done (` 后再触发；窗口保护见 §0.9/§0.10 的启动门闩与批次看门狗。② 同一批次里模板本身与它的内部类都会被问一次，模板第一次 reload 后按字节相等跳过第二次（`alreadyReloaded`），因此内部类热更只做一次；若两者字节都变，仍会按「重新登记内部类 + 一次 reload」处理（良性幂等）。
+>
+> 仍开放的残余（plugin/core 版本错位、覆盖层登记项生存期、匿名类成员结构变化需重启、真实客户端复跑）见 §0.10 统一清单第 6～9 条。
+
+## 0.9 v0.2.6：ANON_ALIGN 同形歧义 / 合成类元数据 / 启动期门闩（v0.2.6 封板，2026-11-09）
+
+真实 Fabric 1.21.1 KnotServer 探针（`tests/fabric-mixin-probe/anon/`）扩展到 S0~S7 后暴露的 3 个深水区问题。按**已观测**口径登记；本轮五条残余风险中 1/2/3/5 已在 §0.10 收口，第 4 条并入 §0.10 统一清单（编号台账见 §0.10 开头）。
+
+| 修复 / 变更 | 状态 | 代码位置 | 验收证据 |
+|:---|:---:|:---|:---|
+| ANON_ALIGN 同形匿名类 N-to-1 歧义：同一方法内两个同接口同结构的匿名类让 Tier 3/4 双向唯一失效，编辑被迫孤儿化（客户端 R2b：`topology-equal candidates 2 -> 2, topology-decided 0`），字段持有的存活实例继续跑旧码 | ✅ | `core/src/remold/AnonClassAligner.java`（Tier 3.5 体相似度、Tier 4.5 liveness 兜底、点名诊断、`findHoldingFields`） | **单测**：`AnonClassAmbiguityTest` 7/7（重编号哈希不变、体相似度口径、2×2 歧义兜底、存活阻断、字段持有者点名）；**变异**：三道人工变异全部击杀并复绿（`ev-20261109091139-5582` liveness 兜底、`ev-20261109091203-8593` 身份语义、`ev-20261109091253-d347` 字面量入 token）；**真实 KnotServer**：S6 `s6a=s6-v1 → s6b=s6-v2` GREEN（重编号的同形匿名类被配对并原地重定义，字段持有的存活实例同步更新），S4 `held-v1 → held-v2` GREEN。**按裁决刻意保留的分支**：两侧都只改字面量（体相似度打平）+ 旧类有存活实例 → 4.5 拒不动手，孤儿化并输出点名诊断（旧类名 + `live=1` + 可能持有字段 + `@RemoldReinit` 逃生舱），由 `liveInstancesBlockTheFallback` 守住。strict 模式语义未动 |
+| Mixin 生成合成类 `Target$Anonymous$<uuid>` 的元数据不可达：`HierarchyTreeOracle.readClassBytes` 只查 `bytecodeCache` 与 classpath 资源，两者皆空 → `Nest scan incomplete`（Nest 判定降级）且 `InitFix` 构造器 protected 可见性判定返回 null → `Field init patch refused ... cannot determine protected status of constructor` | ✅ | `core/src/remold/BytecodeSources.java`（新，登记口）；`HierarchyTreeOracle.readClassBytes`（接线）；`InitFix`（三处拒绝 + Nest 告警的归因文案）；`plugin-mixin` `MixinInnerClassHotSwap`（生成成功后回灌） | **已观测（单测/字节码级）**：`NestBytecodeSourcesTest` 10/0（登记前 `nest member metadata unavailable` → 登记后成功；unregister 回落；两种构造器可见性判定；plugin 回灌路径）；**变异**：去掉 `BytecodeSources.lookup` 接线 killed（4 条行为性断言红）、去掉 plugin 回灌 killed（回灌用例红）；真实探针里 `Nest scan incomplete` 与 `Field init patch refused` 两条告警**已带上归因文案**（点名"织入期生成的合成内部类，需要 `BytecodeSources` 回灌"）。**后续收口**：S7 的 RED 已由 §0.10 的 `refeedForTarget`（提前生成 + 回灌）关闭，S7 `null → s7-v1`；`BytecodeSources` 常驻内存无上限仍在 §0.10 统一清单 |
+| MC 启动期落批次导致 JVM 挂死（`Done (` 之前类加载 + Mixin 转换高频并发） | 🔶 | `core/src/remold/StartupGate.java`、`core/src/remold/BatchWatchdog.java`、`core/src/remold/RemoldAgent.triggerDueHotswap` 漏斗接线、`api/src/remold/HotswapPlugin.isHostReady()` | **已观测（单测）**：`remold.startup.*` 19 例（该轮读数；收口后为 30 例、见 §0.10；门闩状态机、未就绪不落批次、就绪后触发一次、看门狗超阈值才 dump 且同批次只一次、`isHostReady` 默认 true 时行为不变）；**变异**：反打 `RemoldAgent` 修复 diff killed（5 条 wiring 断言红），另两次外科变异（门闩恒真 → 4 红、看门狗去 once → 1 红）均已恢复。**后续进展**：`plugin-fabric` 已实现 `HostReadinessProbe`（见 §0.10，真机未验证）；`plugin-forge` 侧仍未实现，实际游戏里门闩仍可能"首次触发即放开"；**精确挂死线程栈仍未抓到**——看门狗即为下一次复发的取证器 |
+| 探针仪器扩展（S4 长生命周期字段持有 / S5 `@Unique private` 访问 / S6 1→2 重编号 / S7 字段初始化器构造器可见性） | ✅ | `tests/fabric-mixin-probe/anon/`（`run-anon.sh` + 6 个新 stage + `ANON_EXPECT` 模式 + 独立证据文件） | 真实 KnotServer 读数（基线代码）：S4 GREEN、S5 GREEN、S6 RED、S7 RED；合入 E 后 **S6 转 GREEN**；S3 去触发对照全程稳定。**实证回答**：`Nest scan incomplete` 期间 `@Unique private` 字段/方法访问**仍然正确**（S5 终局值一致）——说明该元数据缺失只影响 Remold 自身的安全门视图，不影响 JVM 侧 nest 访问控制。**结局**：S7 的红基线由 §0.10 的 `refeedForTarget` 关闭，S0~S7 现全绿（`run-anon.sh` exit 0 / `EXT_GREEN=1`） |
+
+## 0.10 v0.2.6：收口轮 · S0~S7 全绿 / 持有者点名 / 门闩接线（v0.2.6 封板，2026-11-09）
+
+§0.9 的五条残余风险（1 S7 时序缺口、2 看门狗覆盖范围、3 门闩未接宿主、4 `BytecodeSources` 常驻内存无上限、5 字段持有者点名边界）中，1/2/3/5 在本轮收口；4 并入下方统一清单。§0.8 的覆盖层登记项生存期、plugin/core 版本错位、匿名类结构变化限制与真实客户端复跑同样并入该清单。
+
+| 修复 / 变更 | 状态 | 代码位置 | 验收证据 |
+|:---|:---:|:---|:---|
+| **S7 时序缺口**（§0.9 残余风险 1）：`InitFix` 在目标类本次 redefine 内部就要读 `<Target>$Anonymous$<hash>.<init>` 的 protected 状态，而 Mixin 只在织入期登记、字节要等首次加载才生成 → 字段初始化 patch 被 fail-closed 拒绝 | ✅ | `plugin-mixin` `MixinInnerClassHotSwap.refeedForTarget`（目标织入后按 `InnerClassGenerator` 的稳定唯一名**提前生成**该目标的全部合成内部类并回灌 `BytecodeSources`）+ `MixinReWeaver.reweave` 接线 | **真实 KnotServer 全绿**：`run-anon.sh` **exit 0 / `EXT_GREEN=1`**，S7 `s7=null → s7=s7-v1`（S7c 对照稳定），S0~S6 全部保持；**变异**：回退 `MixinReWeaver` 接线 → 基线 exit 0 → 变异 exit 3（`mut-20261109101806-d693`），恢复 OK。**未放宽任何安全门**：字节仍不可得时照旧 fail-closed；生成后把 `InnerClassInfo.loadCounter` 还原，避免"假已加载"让平台跳过真正的 defineClass |
+| **字段持有者点名补全**（§0.9 残余风险 5）：精确描述符只能命中合成字段（`this$0`/`val$o`），宿主用户字段必然声明为父类型/接口（`Supplier HELD6`）→ 告警误报"无宿主字段持有" | ✅ | `core/src/remold/AnonClassAligner.java` `findHoldingFields` 三层退化：精确描述符(proven) → 赋值流 `NEW <anon>→<init>→PUTFIELD/PUTSTATIC`(proven，`putfield this$0/val$*` 不误报) → 直接父类型/接口描述符(candidate)；新增 4 参重载返回 `HoldingFields{proven, candidates}`，旧 `List<String>` 契约保持不变 | **单测**：`AnonClassAmbiguityTest` 13 例（接口类型持有必被点名、赋值流 proven、合成字段仍命中、无关系字段不得乱点名）；**变异 5/5 killed**（去候选兜底、去赋值流、去精确层、置空解析器、放宽为"任意引用字段"各自打中对应用例）；告警文案区分 `proven by assignment flow` 与 `candidate (supertype/interface)` |
+| **看门狗入口覆盖**（§0.9 残余风险 2）：此前只包住防抖 Class 批次 | ✅ | `core/src/remold/BatchWatchdog.java`（新增 `enter/exit/current` 作用域 API：ThreadLocal + 深度计数，嵌套复用同一实例；`armedWatchdogs()` 守"一个批次最多一个 armed"）+ `RemoldAgent.processChanges` 的 `try/finally`；`retransformLoaded` 自挂作用域；`runClassBatch` 旧包裹移除 | `remold.startup.*` 30 例 0 失败；**变异 4/4 killed**（去 processChanges 挂点 → 4 红；`runClassBatch` 再独立 arm → 2 红；UNKNOWN→false → 3 红；`ticks>0` 恒 READY → 1 红） |
+| **`plugin-fabric` 就绪门闩**（§0.9 残余风险 3） | 🔶 | `plugin-fabric` `HostReadinessProbe` + `FabricHotswapPlugin.isHostReady()`：服务端 `MinecraftServer.getServer()` + tick 计数、客户端 `getInstance` + `world/level` 非空 → READY；探测不到一律 UNKNOWN → **返回 true 并按已就绪处理**（只打一条 info），就绪单向缓存 | 单测用替身覆盖三种判定（`FabricHostReadinessTest`）；**未验证**：真实 KnotServer/客户端的访问器名（`getTicks`/`getTickCount`、`world`/`level`）无法在 `.sources/`（仅镜像 Mindustry/Arc）核验，真机未跑 |
+
+**v0.2.6 统一残余风险清单（已观测 / 未验证分列）**
+
+1. **`redefineDynamic`（单类 API 入口）仍未挂看门狗**：三条主路径（防抖/手动/`retransformLoaded`）已覆盖，该单类入口卡死仍无栈。
+2. **就绪探测未经真机验证**：`plugin-fabric` 的 `HostReadinessProbe` 仅有单测替身（`FabricHostReadinessTest`），真实 KnotServer/客户端的访问器名（`getTicks`/`getTickCount`、`world`/`level`）无法在 `.sources/`（仅镜像 Mindustry/Arc）核验，真机未跑；`plugin-forge` 侧尚未实现 `isHostReady()`。fail-open 把杀伤面限制在"保护窗口可能比预期窄"（服务端实例构造前即 UNKNOWN→放行），不会饿死批次。
+3. **`BytecodeSources` 常驻内存无上限**（沿用 §0.9 残余 4）：键集合不随 reload 增长（唯一名跨 reload 稳定），但无驱逐策略；回灌发生在 schema 复核之前，即"读得到"不等于"已生效"。
+4. **持有者点名边界**（收口轮补全后的残余）：只扫 old/new 宿主节点的字段表与方法体；跨方法经参数传递不猜（宁可漏点名）；宿主继承字段若 javac 以父类为 owner 发射 `putfield` 不会命中；候选只看直接父类型，不递归层级。父类型/接口持有已由三层退化点名（`Supplier HELD6` 形态），但"任意引用字段"不点名为 proven。
+5. **热更管线自身的证据仪器存在"假 PASS / 假击杀"风险**（本轮 worker 实测）：退出码 127（命令不存在）被记为 killed、cmd banner-only 输出被记为 PASS、Gradle UP-TO-DATE 的重复 stdout 哈希被当作新证据。当前由人工复核兜住，工具侧修法见战役台账；在这些修复前，本表所有"PASS/killed"均以**原始日志已人工复核**为前提。
+6. **覆盖层登记项的生存期**：成功 reload 后内部类字节保持在覆盖层里（目标织入期间还需要它），后续同类变化会覆盖同名项；Mixin 模板内部类不会被 JVM 当普通类加载，因此长期驻留不会遮蔽真实类。
+7. **plugin/core 版本错位**：抑制器已无 core 类型硬链接，但 `MixinConfigContext` 构造签名不匹配时仍会抛 `NoSuchMethodError`（由 `RemoldAgent.notifyAssetChanges` 的逐插件 catch 兜住并记 error），两侧必须同版本发布。
+8. **匿名类成员结构变化（新增字段/方法）仍只能拒绝并提示重启**：未做结构化热更；`ForgeMixinHotSwap` 未接本轮内部类闭环。
+9. **未验证**：真实客户端（IDE + KnotClient）复跑本轮匿名类闭环；启动门闩的真实 tick 语义（同第 2 条）。
 
 ---
 
@@ -149,63 +199,6 @@
 
 ---
 
-## 0.7 未发布：Mixin 匿名/内部类热更闭环（2026-11-09）
-
-真实 Fabric 1.21.1 客户端用「普通类 vs Mixin 内」的匿名类 + Lambda 对照试验（R1~R5）暴露三段断层。本节按**已观测**口径登记；未观测项单独标注。
-
-| 修复 / 变更 | 状态 | 代码位置 | 验收证据 |
-|:---|:---:|:---|:---|
-| 热更管线自身组件在类链接期抛 `NoClassDefFoundError`（客户端原文 `[Mixin] Mixin hot-swap handler unavailable: NoClassDefFoundError: LoadedTargetSuppressor`），使 Mixin handler 的成功与失败分支同时失效 | ✅ | `core/src/remold/reflect/mixin/MixinConfigContext`（抑制器改为 `Function<Collection<String>,Object>` + `Consumer<Object>`；删除 `LoadedTargetSuppressor`）；`plugin-mixin` `MixinConfigDiff`/`NewMixinRegistrar`、`plugin-forge` `ForgeMixinConfigDiff`/`ModLauncherClassTrackerSpoof` 只传方法引用 | **已观测**：`MixinPluginClassLinkageTest` 机械扫描已编译插件类常量池，断言零引用已废除的 core 类型且不 `implements`/`extends` 任何 core mixin 类型（正向对照 + 变异：恢复硬链接 → 精确点名 `plugin-mixin/remold/mixin/MixinConfigDiff.class` 变红）；`NewMixinRegistrarFailClosedTest` 覆盖「抑制器缺失/返回 null/抛异常 → 放弃登记并输出定向诊断、异常不外泄」。**已知残余**：plugin/core 版本错位仍会退化为 `NoSuchMethodError`（`MixinConfigContext` 构造签名不匹配），该路径由 `RemoldAgent.notifyAssetChanges` 的逐插件 `catch` 兜住并记 error；两侧必须同版本发布 |
-| Mixin 注入方法内**首次**新增匿名类 → reload 崩溃：`Error loading class: Outer$1 (ClassNotFoundException)` 随后 `Cannot invoke "ClassInfo.isProbablyStatic()" because "innerClass" is null` | 见下 | `plugin-mixin` `MixinBytecodeOverlay`（安装 `IMixinService` 代理，只对显式登记的内部名提供字节，其余回落宿主 provider）、`MixinHotSwap.handleIfMixin`（reload 前登记内部类字节并驱逐上游 `ClassInfo.cache` 负缓存） | **已观测（单测/字节码级）**：`MixinInnerClassHotSwapTest` 7 用例（归属判定、嵌套名推导、`lookup` 点分/内部名归一、负缓存驱逐按 `containsKey` 计数）；3 个人工变异（去掉 schema 门 / 去掉 passthrough 过滤 / 去掉名字归一）全部击杀并恢复复绿（`ev-20261109021245-983c`、`ev-20261109021305-bf93`、`ev-20261109021322-f20e`）。**上游机制依据**（sponge-mixin 0.15.5+mixin.0.8.7 源码包）：`ClassInfo.forName` 走 `MixinService.getService().getBytecodeProvider()`，失败把 `null` 写进 `ClassInfo.cache` 且永不重试。**真实 Fabric 1.21.1 KnotServer E2E**（`tests/fabric-mixin-probe/anon/`，mod 走 `run/mods` jar 加载、Gradle 输出不在运行期 classpath）：修复前 S1 `poke` 停在 `hook-s0`，日志为 `Error loading class: ...AnonTargetMixin$1 (ClassNotFoundException)` + `innerClass is null`（RED）；修复后 S1 `poke=anon-v1`、`RESULT: GREEN`（证据 `evidence/anon-r3r5-{red,green}.txt`） |
-| 只改已加载匿名类体 → 目标类重织入静默 `[DYNAMIC-REDEFINE] no-op`、匿名类仍跑旧版 | ✅ | `plugin-mixin` `MixinInnerClassSupport`（内部类归属/嵌套名纯函数）、`MixinInnerClassHotSwap`（按 `InnerClassGenerator` 稳定唯一名重新生成合成内部类并 `redefineClasses`）、`MixinHotSwap.handleInnerClassChange`（只改 `Outer$N` 时回到外层 Mixin 重跑） | **已观测（单测/字节码级）**：成员 schema 判定区分「只改方法体」与「增删字段/方法/构造器」，后者给出点名成员的指向性诊断并拒绝重定义（不借 DCEVM 绕过布局门）；`handleInnerClassChange` 在只改 `Outer$N` 时把字节登记进覆盖层并回到外层 Mixin。**上游机制依据**：`InnerClassGenerator.getUniqueReference` 把 `Outer$1` 映射为 `Target$Anonymous$<uuid>`，`isLoaded()` = `loadCounter>0`，已加载的合成内部类不会被重新生成。**真实 E2E**：修复前 S2 外层字节 sha256 前后相同、仅 `$1` 变体，`poke` 仍 `anon-v1` 且日志为 `[DYNAMIC-REDEFINE] no-op`（RED）；修复后 S2 `poke=anon-v2`（GREEN），S3 去触发对照无重定义、值稳定 |
-
-**残余风险（已观测）**
-
-1. **批次落在启动期的挂死**：探针在 MC 启动期（`Done (` 之前）落批次时曾出现 JVM 挂死（probe 线程无 tick）。本轮把「合成内部类重定义」从桥接线程移到批次之后的 worker 线程，消除了同一族挂死（桥接线程内 `redefineClasses` 会让 KnotServer 线程停摆，实测：S1b 之后 tick 全停）。启动期窗口本身未单独隔离，探针改为等 `Done (` 后再触发。
-2. **同一批次多一次 reload**：一个批次里模板本身与它的内部类都会被问一次，模板第一次 reload 后按字节相等跳过第二次（`alreadyReloaded`），因此内部类热更只做一次；若两者字节都变，仍会按「重新登记内部类 + 一次 reload」处理。
-3. **plugin/core 版本错位**：抑制器已无 core 类型硬链接，但 `MixinConfigContext` 构造签名不匹配时仍会抛 `NoSuchMethodError`（由 `RemoldAgent.notifyAssetChanges` 的逐插件 catch 兜住并记 error），两侧必须同版本发布。
-4. **覆盖层登记项的生存期**：成功 reload 后内部类字节保持在覆盖层里（目标织入期间还需要它），后续同类变化会覆盖同名项；Mixin 模板内部类不会被 JVM 当普通类加载，因此长期驻留不会遮蔽真实类。
-
-**未验证**：真实客户端（IDE + KnotClient）复跑；Forge/NeoForge 侧的匿名类热更（`ForgeMixinHotSwap` 未接本轮内部类闭环）；匿名类成员结构变化（新增字段/方法）只能被拒绝并提示重启，未做结构化热更。
-
-## 0.8 未发布：ANON_ALIGN 同形歧义 / 合成类元数据 / 启动期门闩（2026-11-09）
-
-真实 Fabric 1.21.1 KnotServer 探针（`tests/fabric-mixin-probe/anon/`）扩展到 S0~S7 后暴露的 3 个深水区问题。按**已观测**口径登记，未观测项单列。
-
-| 修复 / 变更 | 状态 | 代码位置 | 验收证据 |
-|:---|:---:|:---|:---|
-| ANON_ALIGN 同形匿名类 N-to-1 歧义：同一方法内两个同接口同结构的匿名类让 Tier 3/4 双向唯一失效，编辑被迫孤儿化（客户端 R2b：`topology-equal candidates 2 -> 2, topology-decided 0`），字段持有的存活实例继续跑旧码 | ✅ | `core/src/remold/AnonClassAligner.java`（Tier 3.5 体相似度、Tier 4.5 liveness 兜底、点名诊断、`findHoldingFields`） | **单测**：`AnonClassAmbiguityTest` 7/7（重编号哈希不变、体相似度口径、2×2 歧义兜底、存活阻断、字段持有者点名）；**变异**：三道人工变异全部击杀并复绿（`ev-20261109091139-5582` liveness 兜底、`ev-20261109091203-8593` 身份语义、`ev-20261109091253-d347` 字面量入 token）；**真实 KnotServer**：S6 `s6a=s6-v1 → s6b=s6-v2` GREEN（重编号的同形匿名类被配对并原地重定义，字段持有的存活实例同步更新），S4 `held-v1 → held-v2` GREEN。**按裁决刻意保留的分支**：两侧都只改字面量（体相似度打平）+ 旧类有存活实例 → 4.5 拒不动手，孤儿化并输出点名诊断（旧类名 + `live=1` + 可能持有字段 + `@RemoldReinit` 逃生舱），由 `liveInstancesBlockTheFallback` 守住。strict 模式语义未动 |
-| Mixin 生成合成类 `Target$Anonymous$<uuid>` 的元数据不可达：`HierarchyTreeOracle.readClassBytes` 只查 `bytecodeCache` 与 classpath 资源，两者皆空 → `Nest scan incomplete`（Nest 判定降级）且 `InitFix` 构造器 protected 可见性判定返回 null → `Field init patch refused ... cannot determine protected status of constructor` | 🔶 | `core/src/remold/BytecodeSources.java`（新，登记口）；`HierarchyTreeOracle.readClassBytes`（接线）；`InitFix`（三处拒绝 + Nest 告警的归因文案）；`plugin-mixin` `MixinInnerClassHotSwap`（生成成功后回灌） | **已观测（单测/字节码级）**：`NestBytecodeSourcesTest` 10/0（登记前 `nest member metadata unavailable` → 登记后成功；unregister 回落；两种构造器可见性判定；plugin 回灌路径）；**变异**：去掉 `BytecodeSources.lookup` 接线 killed（4 条行为性断言红）、去掉 plugin 回灌 killed（回灌用例红）；真实探针里 `Nest scan incomplete` 与 `Field init patch refused` 两条告警**已带上归因文案**（点名"织入期生成的合成内部类，需要 `BytecodeSources` 回灌"）。**未闭环**：S7 仍 RED（见下方残余风险 1） |
-| MC 启动期落批次导致 JVM 挂死（`Done (` 之前类加载 + Mixin 转换高频并发） | 🔶 | `core/src/remold/StartupGate.java`、`core/src/remold/BatchWatchdog.java`、`core/src/remold/RemoldAgent.triggerDueHotswap` 漏斗接线、`api/src/remold/HotswapPlugin.isHostReady()` | **已观测（单测）**：`remold.startup.*` 19 例（门闩状态机、未就绪不落批次、就绪后触发一次、看门狗超阈值才 dump 且同批次只一次、`isHostReady` 默认 true 时行为不变）；**变异**：反打 `RemoldAgent` 修复 diff killed（5 条 wiring 断言红），另两次外科变异（门闩恒真 → 4 红、看门狗去 once → 1 红）均已恢复。**未验证**：宿主插件尚未实现 `isHostReady()`，实际游戏里门闩"首次触发即放开"；**精确挂死线程栈仍未抓到**——看门狗即为下一次复发的取证器 |
-| 探针仪器扩展（S4 长生命周期字段持有 / S5 `@Unique private` 访问 / S6 1→2 重编号 / S7 字段初始化器构造器可见性） | ✅ | `tests/fabric-mixin-probe/anon/`（`run-anon.sh` + 6 个新 stage + `ANON_EXPECT` 模式 + 独立证据文件） | 真实 KnotServer 读数（基线代码）：S4 GREEN、S5 GREEN、S6 RED、S7 RED；合入 E 后 **S6 转 GREEN**；S3 去触发对照全程稳定。**实证回答**：`Nest scan incomplete` 期间 `@Unique private` 字段/方法访问**仍然正确**（S5 终局值一致）——说明该元数据缺失只影响 Remold 自身的安全门视图，不影响 JVM 侧 nest 访问控制 |
-
-**残余风险（已观测）**
-
-1. **S7 时序缺口（新批次 F2 候选）**：`InitFix` 在**目标类自己这次 redefine 的内部**就需要 `Target$Anonymous$<uuid>.<init>` 的元数据，而该合成类是在**同一次织入**里才被 `InnerClassGenerator.registerInnerClass` 登记、并由合成类注册表在该类首次实例化时才真正生成 —— 当前的 `BytecodeSources` 回灌只覆盖"已经生成过字节"的合成类，因此 S7 场景仍读到 null 并 fail-closed。修法方向：在目标类重织入**之前**主动驱动 `registerInnerClass` + `generate` 并回灌（或让 `InitFix` 对"本次织入新生成"的合成类延后到 patch 生成之后复核），需要单开批次并配探针 S7 红→绿。
-2. **看门狗覆盖范围**：仅防抖 Class 批次路径（手动 `triggerHotswap` / `retransformLoaded` 未覆盖）。
-3. **门闩未接宿主**：`plugin-fabric` / `plugin-forge` 尚未实现 `isHostReady()`，启动期保护在实际游戏中尚未生效。
-4. **`BytecodeSources` 常驻内存无上限**：键集合不随 reload 增长（唯一名跨 reload 稳定），但无驱逐策略；回灌发生在 schema 复核之前，即"读得到"不等于"已生效"。
-5. **字段持有者点名的边界**：`findHoldingFields` 按**字段描述符**匹配匿名类类型；若字段以父类型（如 `Supplier`）持有实例，告警会写"无宿主字段持有"——真实探针的 S6 就是这种形态（`AnonTarget.HELD6` 声明为 `Supplier`）。
-
-## 0.9 未发布：收口轮 · S0~S7 全绿 / 持有者点名 / 门闩接线（2026-11-09）
-
-§0.8 的五条残余风险里，1/2/3/5 在本轮收口；4 保留。
-
-| 修复 / 变更 | 状态 | 代码位置 | 验收证据 |
-|:---|:---:|:---|:---|
-| **S7 时序缺口**（§0.8 残余风险 1）：`InitFix` 在目标类本次 redefine 内部就要读 `<Target>$Anonymous$<hash>.<init>` 的 protected 状态，而 Mixin 只在织入期登记、字节要等首次加载才生成 → 字段初始化 patch 被 fail-closed 拒绝 | ✅ | `plugin-mixin` `MixinInnerClassHotSwap.refeedForTarget`（目标织入后按 `InnerClassGenerator` 的稳定唯一名**提前生成**该目标的全部合成内部类并回灌 `BytecodeSources`）+ `MixinReWeaver.reweave` 接线 | **真实 KnotServer 全绿**：`run-anon.sh` **exit 0 / `EXT_GREEN=1`**，S7 `s7=null → s7=s7-v1`（S7c 对照稳定），S0~S6 全部保持；**变异**：回退 `MixinReWeaver` 接线 → 基线 exit 0 → 变异 exit 3（`mut-20261109101806-d693`），恢复 OK。**未放宽任何安全门**：字节仍不可得时照旧 fail-closed；生成后把 `InnerClassInfo.loadCounter` 还原，避免"假已加载"让平台跳过真正的 defineClass |
-| **字段持有者点名补全**（§0.8 残余风险 5）：精确描述符只能命中合成字段（`this$0`/`val$o`），宿主用户字段必然声明为父类型/接口（`Supplier HELD6`）→ 告警误报"无宿主字段持有" | ✅ | `core/src/remold/AnonClassAligner.java` `findHoldingFields` 三层退化：精确描述符(proven) → 赋值流 `NEW <anon>→<init>→PUTFIELD/PUTSTATIC`(proven，`putfield this$0/val$*` 不误报) → 直接父类型/接口描述符(candidate)；新增 4 参重载返回 `HoldingFields{proven, candidates}`，旧 `List<String>` 契约保持不变 | **单测**：`AnonClassAmbiguityTest` 13 例（接口类型持有必被点名、赋值流 proven、合成字段仍命中、无关系字段不得乱点名）；**变异 5/5 killed**（去候选兜底、去赋值流、去精确层、置空解析器、放宽为"任意引用字段"各自打中对应用例）；告警文案区分 `proven by assignment flow` 与 `candidate (supertype/interface)` |
-| **看门狗入口覆盖**（§0.8 残余风险 2）：此前只包住防抖 Class 批次 | ✅ | `core/src/remold/BatchWatchdog.java`（新增 `enter/exit/current` 作用域 API：ThreadLocal + 深度计数，嵌套复用同一实例；`armedWatchdogs()` 守"一个批次最多一个 armed"）+ `RemoldAgent.processChanges` 的 `try/finally`；`retransformLoaded` 自挂作用域；`runClassBatch` 旧包裹移除 | `remold.startup.*` 30 例 0 失败；**变异 4/4 killed**（去 processChanges 挂点 → 4 红；`runClassBatch` 再独立 arm → 2 红；UNKNOWN→false → 3 红；`ticks>0` 恒 READY → 1 红） |
-| **`plugin-fabric` 就绪门闩**（§0.8 残余风险 3） | 🔶 | `plugin-fabric` `HostReadinessProbe` + `FabricHotswapPlugin.isHostReady()`：服务端 `MinecraftServer.getServer()` + tick 计数、客户端 `getInstance` + `world/level` 非空 → READY；探测不到一律 UNKNOWN → **返回 true 并按已就绪处理**（只打一条 info），就绪单向缓存 | 单测用替身覆盖三种判定（`FabricHostReadinessTest`）；**未验证**：真实 KnotServer/客户端的访问器名（`getTicks`/`getTickCount`、`world`/`level`）无法在 `.sources/`（仅镜像 Mindustry/Arc）核验，真机未跑 |
-
-**残余风险（收口后）**
-
-1. **`redefineDynamic`（单类 API 入口）仍未挂看门狗**：三条主路径（防抖/手动/`retransformLoaded`）已覆盖，该单类入口卡死仍无栈。
-2. **就绪探测未经真机验证**：见上表；fail-open 把杀伤面限制在"保护窗口可能比预期窄"（服务端实例构造前即 UNKNOWN→放行），不会饿死批次。
-3. **`BytecodeSources` 常驻内存无上限**（沿用 §0.8 残余 4）：键集合不随 reload 增长，但无驱逐；回灌发生在 schema 复核之前，"读得到"不等于"已生效"。
-4. **持有者点名边界**：只扫 old/new 宿主节点的字段表与方法体；跨方法经参数传递不猜（宁可漏点名）；宿主继承字段若 javac 以父类为 owner 发射 `putfield` 不会命中；候选只看直接父类型，不递归层级。
-5. **热更管线自身的证据仪器存在"假 PASS / 假击杀"风险**（本轮 worker 实测）：退出码 127（命令不存在）被记为 killed、cmd banner-only 输出被记为 PASS、Gradle UP-TO-DATE 的重复 stdout 哈希被当作新证据。当前由人工复核兜住，工具侧修法见战役台账；在这些修复前，本表所有"PASS/killed"均以**原始日志已人工复核**为前提。
-
 ## 1. 匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)
 
 设计规格文档：[`docs/topology/`](topology/) 系列文档  
@@ -223,7 +216,7 @@
 | 字节码摘要与恒等映射短路 | ✅ | [`01-invariants-and-remapping.md`](topology/01-invariants-and-remapping.md) §2.3 | `RemoldAgent.processChanges` | 新旧字节码相同直接跳过；`renameMap` 全恒等映射直接返回原字节码 |
 | 全局独占锁互斥 | ✅ | [`06-runtime-and-perf.md`](topology/06-runtime-and-perf.md) §2 | `RemoldAgent.HOTSWAP_LOCK` | 热更新调度入口与事务处理覆盖全局锁，杜绝重入与并发竞态 |
 | Tier 1: 内容哈希 + 宿主方法精确匹配 | ✅ | [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §1 | `AnonClassHasher` + `AnonClassAligner` | 双方哈希完全一致且同宿主方法，置信度最高 (0.99) |
-| Tier 1.5: 内容相似度 | ⬜ | [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §1 | 待实现于 `AnonClassAligner` | 路线图规划；规划计算指令哈希交集率与字符串 Jaccard；用于根治拓扑无信息同构候选平局 |
+| Tier 1.5: 内容相似度 | ⬜ | [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §1 | 待实现于 `AnonClassAligner` | 路线图规划；规划计算指令哈希交集率与字符串 Jaccard；用于根治拓扑无信息同构候选平局。**关联落地**：同形匿名类 N-to-1 歧义已由 Tier 3.5 体相似度 + Tier 4.5 liveness 兜底在 v0.2.6 消解（见 §0.9）；本行 Tier 1.5 的规划定位不变 |
 | Tier 2: 全局唯一内容哈希匹配 | ✅ | [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §1 | `AnonClassAligner` | 仅全类唯一孤本采纳，严禁跨方法 minDiff |
 | Tier 3: 结构签名 + 拓扑相等过滤 | ✅ | [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §2 | `AnonClassAligner.topologyEqual` | minDiff 已被拓扑相等过滤取代以杜绝前插错配；夹具 M（拓扑无信息）与夹具 L（2×2 同构）的保守拒绝属于客观设计意图（杜绝静默错配的必要代价，见 [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §2.3），非未完成功能；其边界收敛计划归入 §4.1“子类引用多重集独立正交维度” |
 | 夹具 L KNOWN 保守代价收敛 | ⬜ | [`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §2.3 | `AnonClassReproTest.known` | 夹具 L 当前作为 KNOWN 保护保守拒绝行为；未来需引入正交维度以在安全前提下恢复配对 |
@@ -274,10 +267,10 @@
 | 参数回溯不可变证明 | ✅ | [`01-safety-gate.md`](initfix/01-safety-gate.md) §3 | `InitFix.scanParamFields` / `InitFix.NestView` | 条件 A（final/val 字段）与条件 B（private + Nest 全单写证明）；`sourceFieldNotImmutableReason` 守卫 |
 | 多根构造器共识 | ✅ | [`01-safety-gate.md`](initfix/01-safety-gate.md) §4 | `InitFix.extractFieldInits` | 要求所有根构造器覆盖完整且参数替换后指令指纹 100% 一致；多构造器歧义安全拒绝 |
 | 依赖闭包与 Tarjan SCC 成环检测 | ✅ | [`02-closure-and-ledger.md`](initfix/02-closure-and-ledger.md) §1 | `InitFix.buildPatch` | 成环检测并入闭包不动点计算，只拒绝环成员；出口后置 `depInstance ∪ depStatic` 闭合校验兜底 |
-| 失败策略矩阵 | 🔶 | [`02-closure-and-ledger.md`](initfix/02-closure-and-ledger.md) §3 | `InitFix.runIndependentInstanceTasks` / `InstanceFailureBudget` | 已支持单字段失败跳过、依赖跳过、`LinkageError` 熔断；“放弃提交阶段 C”依赖两阶段协议 |
+| 失败策略矩阵 | 🔶 | [`02-closure-and-ledger.md`](initfix/02-closure-and-ledger.md) §3 | `InitFix.runIndependentInstanceTasks` / `InstanceFailureBudget` | 已支持单字段失败跳过、依赖跳过、`LinkageError` 熔断；“放弃提交阶段 C”已随两阶段协议落地（`RemoldAgent.applyTwoPhase` / `redefineStageA`，见 §0.7） |
 | 伴生补丁类装配 | ✅ | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §1 | `InitFix.generatePatchClass` / `Lookup.defineHiddenClass` | 每字段生成独立静态直线方法；宿主 hidden nestmate 隔离异常与加载死锁 |
-| 构造器尾部插桩器 | 🔶 | [`04-target-design.md`](initfix/04-target-design.md) §4 | `core/src/remold/ref/ConstructorTailInjector` | 纯函数字节码改写：在每个根构造器的每个 `RETURN` 前插入 `ALOAD 0; <切片>; PUTFIELD`；跳过 `this(...)` 委托构造器（避免沿委托链重复执行）与体内已自行赋值目标字段的构造器（构造器逻辑优先）；只插直线代码、写入侧仅 `COMPUTE_MAXS` 不重算栈帧。`ConstructorTailInjectorTest` 8 用例覆盖多根构造器、多返回路径、`this` 读取切片与覆盖保护，并做过变异检查。**缺口**：尚未接入阶段 A 驱动，`InitFix` 还未把改写后的切片交给它 |
-| 阶段 A 骨架合成器 | 🔶 | [`04-target-design.md`](initfix/04-target-design.md) §1 | `core/src/remold/ref/StageASkeleton` | 以新类为骨架、把旧方法的执行体整体搬回（不深拷贝、不重映射 label，栈帧天然有效），实现「行为不变、只让新结构就位」；成员按**旧 ∪ 新**处理，新版本删掉但旧体仍在调用的方法必须留着休眠。`StageASkeletonTest` 9 用例，其中 `everyPreexistingMethodKeepsItsOldBodyVerbatim` 做**指令指纹级**结构等价断言（中止回滚依赖阶段 A 行为完全惰性），另覆盖旧 `<clinit>`、被删方法保留、新字段声明、新方法预注入、与构造器插桩组合；变异检查：把 `adoptBody` 短路（等价于「只保留新方法体」）会让 5 条用例变红。**缺口**：尚未接入驱动，没有阶段 A → B → C 的编排与中止回滚 |
+| 构造器尾部插桩器 | 🔶 | [`04-target-design.md`](initfix/04-target-design.md) §4 | `core/src/remold/ref/ConstructorTailInjector` | 纯函数字节码改写：在每个根构造器的每个 `RETURN` 前插入 `ALOAD 0; <切片>; PUTFIELD`；跳过 `this(...)` 委托构造器（避免沿委托链重复执行）与体内已自行赋值目标字段的构造器（构造器逻辑优先）；只插直线代码、写入侧仅 `COMPUTE_MAXS` 不重算栈帧。`ConstructorTailInjectorTest` 8 用例覆盖多根构造器、多返回路径、`this` 读取切片与覆盖保护，并做过变异检查。**接线状态**：两阶段契约下阶段 A 保留新构造器/`<clinit>`，窗口内新建实例由新构造器直接初始化，因此本组件**有意不接线**（单测保留，见 §4.1）；仅当将来要求阶段 A 的构造器也回退旧体时才重新需要 |
+| 阶段 A 骨架合成器 | ✅ | [`04-target-design.md`](initfix/04-target-design.md) §1 | `core/src/remold/ref/StageASkeleton` | 以新类为骨架、把旧方法的执行体整体搬回（不深拷贝、不重映射 label，栈帧天然有效），实现「行为不变、只让新结构就位」；成员按**旧 ∪ 新**处理，新版本删掉但旧体仍在调用的方法必须留着休眠。`StageASkeletonTest` 11/0，其中 `everyPreexistingMethodKeepsItsOldBodyVerbatim` 做**指令指纹级**结构等价断言（中止回滚依赖阶段 A 行为完全惰性），另覆盖旧 `<clinit>`、被删方法保留、新字段声明、新方法预注入、与构造器插桩组合、窗口实例由新构造器初始化、旧体不回退到新字段的正反例；变异检查：把 `adoptBody` 短路（等价于「只保留新方法体」）会让 5 条用例变红。**接线**：已接入 `RemoldAgent.applyTwoPhase` / `redefineStageA`（阶段 A → B → C 编排 + 整组回滚），见 §0.7 |
 | 逐实例补丁驱动与失败配额 | ✅ | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §2 | `InitFix.runDependentInstanceTasks` / `InstanceFailureBudget` | 依赖失败按实例隔离；单字段每轮实例失败配额封顶 8 次（`MAX_INSTANCE_FAILURES_PER_FIELD`） |
 | 存活实例枚举时机 | ✅ | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §2 | `InitFix.applyPatch` / `collectInstancesForPatch` | 枚举推迟到重定义生效之后，不再预拍快照：此后不可能再产生旧布局实例，枚举天然完备；枚举期间新建的实例由新构造器初始化，条件 CAS 对它们是无害空操作。`InitFixSnapshotTimingTest` 先红后绿守卫（旧实现在此用例上确实为红） |
 | 写入协议 (`HotswapBridge`) | 🔶 | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §3 | `HotswapBridge` (`KIND_CONDITIONAL` / `KIND_FORCE`) | 默认条件 CAS；float/double raw bits CAS；跳过计数汇总汇报；`KIND_FORCE` 强制写；**缺自动化 CI 差异验证**（当前 CI 为 Temurin 25，无法区分 raw-bits 与旧实现；JDK 8 raw-bits CAS 为手工验证，非持续自动化覆盖，见 §4.2「JDK 8 raw-bits CAS 自动化 CI 差异验证缺失」） |
@@ -326,7 +319,7 @@
 | 规划条目 | 优先级 | 规范章节 | 前置依赖 | 目标价值与关联问题 |
 |:---|:---:|:---|:---|:---|
 | **构造器尾部插桩** | P3 | [`04-target-design.md`](initfix/04-target-design.md) §4 | `InitFix` 离线切片提取与直线字节码生成器 (`AliasInterpreter`) | **当前契约下不再需要**：阶段 A 保留新构造器/`<clinit>`，窗口内新建的实例由新构造器直接完成初始化，不需要从切片反推「取值指令」。仅当将来要求阶段 A 的构造器也回退旧体（换取更强的中止语义）时才重新需要；`ConstructorTailInjector` 单测保留、不接线。 |
-| **两阶段 Schema-First 重定义** | ✅（内部批次路径） | [`04-target-design.md`](initfix/04-target-design.md) §1 | 已接线：`RemoldAgent.applyTwoPhase` / `redefineStageA` + `InitFix.requiresTwoPhase` + `StageASkeleton.buildWithLiveConstructors` | 读穿窗口（风险 9）在内部批次路径上关闭，且**只在本批存在零值暴露字段时**触发，纯方法体热更不付第二次 redefine 的代价。代价仍然真实：两次 redefine 会带来连续两次全局 JIT 逆优化（`07-p05-probe-results.md` §11 的对照组）；残余通道见风险 9。验收：`TwoPhaseProbe` 72/0（含 50k 实例下的并发读线程红/绿对照）、`TwoPhaseGuardTest` 5/0、全量 JUnit 527/0 skipped。 |
+| **两阶段 Schema-First 重定义** | ✅（内部批次路径） | [`04-target-design.md`](initfix/04-target-design.md) §1 | 已接线：`RemoldAgent.applyTwoPhase` / `redefineStageA` + `InitFix.requiresTwoPhase` + `StageASkeleton.buildWithLiveConstructors` | 读穿窗口（风险 9）在内部批次路径上关闭，且**只在本批存在零值暴露字段时**触发，纯方法体热更不付第二次 redefine 的代价。代价仍然真实：两次 redefine 会带来连续两次全局 JIT 逆优化（`07-p05-probe-results.md` §11 的对照组）；残余通道见风险 9。验收：`TwoPhaseProbe` 72/0（含 50k 实例下的并发读线程红/绿对照）、`TwoPhaseGuardTest` 5/0、全量 JUnit 597/0 skipped（v0.2.6 发版验证，`./gradlew check`）。 |
 | **PatchPlan 基线指纹校验** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §2 | 离线分析器导出协议 | 校验 Target 当前内存字节码哈希与构建期基线一致性，防止类漂移热更造成严重字节码损坏 |
 | **`@HotswapInit` T4 逃生口** | P1 | [`09-hotswapinit-design.md`](initfix/09-hotswapinit-design.md) §2～§4 | `InitFix.buildPatch` 候选集段；复用现有写入协议 | 让 T3 拒绝的初始化式（Kotlin `?.`/`?:`、读配置、跨类依赖）由用户提供值，不再永久停在类型默认值；只换值的来源，不换作用域与写入协议（与 `@RemoldReinit`、`@OnReload` 不重叠）。契约已定，实现未开始（§2 T4 行为 ⬜） |
 | **非方法上下文显式三态作用域规范化** | P2 | [`03-cascading-pipeline.md`](topology/03-cascading-pipeline.md) §2 | ASM EnclosingMethod 属性增强解析 | 引入 `<initializer>`/`<clinit>`/`<init>` 显式三态标签，解决当前非方法作用域主要依靠 `orderIndex` 兜底导致的作用域偶发空指针错配（收敛风险 2） |
@@ -381,7 +374,7 @@
   1. 重定义全程持有 `HOTSWAP_LOCK` 全局互斥锁；
   2. 游戏通常在主循环安全点或调试暂停期触发热更；
   3. 若类已存在已知存活实例，直接进入 InitFix 逐实例补丁队列，不依赖“零实例豁免”。
-- **根治与关闭条件**：落地路线图 §4.1“两阶段重定义与构造器尾部插桩”；或在 HotSwap 期间通过 JVM TI 暂停全部应用线程（代价过高，目前维持极窄竞态记录）。
+- **根治与关闭条件**：落地两阶段重定义（内部批次路径已落地，见 §0.7）；构造器尾部插桩在当前两阶段契约下不再需要（见 §4.1）；或在 HotSwap 期间通过 JVM TI 暂停全部应用线程（代价过高，目前维持极窄竞态记录）。
 - **关联设计规范**：[`docs/topology/07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1.3。
 - **关联架构决策**：无（属并发系统已知 TOCTOU 折衷）。
 
@@ -432,8 +425,8 @@
 - **风险描述与底层机制**：存活实例的枚举若发生在重定义**之前**，「枚举完成 → 重定义生效」之间新建的实例就不在集合里；重定义后这些实例的新增字段停在类型默认值，且因为它们不再出现在后续 Diff 中，永远不会被补。
 - **触发条件**：热更新期间应用线程仍在分配对象（游戏主循环的常态）。
 - **当前缓解措施**：**枚举已后置到重定义生效之后**（`InitFix.applyPatch` → `collectInstancesForPatch`，见 [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §2）。此后不可能再产生旧布局实例，枚举天然完备；枚举期间新建的实例由新构造器初始化，条件 CAS 对它们是无害的空操作。回归断言 `InitFixSnapshotTimingTest`（先红后绿）。
-- **残余边界**：两阶段重定义路径下，阶段 A 到阶段 C 之间由**旧构造器**创建的实例仍会停在默认值——那段缝隙要等构造器尾部插桩接入阶段 A 驱动才关闭。
-- **根治与关闭条件**：两阶段路径落地构造器尾部插桩（[`04-target-design.md`](initfix/04-target-design.md) §4）。
+- **残余边界（已关闭）**：两阶段路径下阶段 A 保留新构造器/`<clinit>`（`StageASkeleton.buildWithLiveConstructors`），阶段 A 到阶段 C 之间新建的实例由新构造器直接完成初始化，不再停在默认值；`StageASkeletonTest` 的窗口实例用例（新构造器初始化、旧体不回退到新字段）守卫该点。构造器尾部插桩在当前契约下不再需要（见 §4.1）。
+- **根治与关闭条件**：已由两阶段路径的「构造器保留新体」达成（[`04-target-design.md`](initfix/04-target-design.md) §1；原 §4 构造器尾部插桩方案在当前契约下不接线）；外部 IDE/JDWP 与 `redefineDynamic` 通道的同类窗口见风险 9。
 - **关联设计规范**：[`docs/initfix/03-runtime-driver.md`](initfix/03-runtime-driver.md) §2、[`docs/initfix/04-target-design.md`](initfix/04-target-design.md) §4。
 - **关联架构决策**：无。
 
@@ -622,11 +615,11 @@
 |:---|:---:|:---|:---|
 | 独立仓库与远程 CI 矩阵 | ✅ | `.github/workflows/ci.yml` | 4 个 job：`test`（`setup-java` 装 Temurin 8/11/17/21 + runner 25，`-Dhstest.requireJdks=true` 与 `auto-download=false` 强制五套工具链真实存在，跑 `./gradlew fullCheck` = `check` + `e2eProbe`）、`test-dcevm`（JetBrains Runtime 21 真实 DCEVM 下跑 `:tests:liveDcevmTest`）、`p05-probe`（JBR 17/21 矩阵跑 `:tests:p05Probe`）、`build-native`（g++ 编 Linux x86_64 `.so` 与 Android arm64-v8a `.so` 并上传制品） |
 | 模组生态隔离与构建产物防御 | ✅ | `docs/ecosystem/01-mod-artifact-and-class-isolation.md`、`gradle-plugin/.../RemoldConfigResolver.java`、`core/.../RemoldAgent.java` | 3D 环境探测（Loom / Forge / NeoForge / Quilt / Essential）阻断 `autoDeploy` 并警告；IDEA BeforeRunTask 收敛为 `Make`；Agent 启动根据元数据比对 ModID 极速巡检 `run/mods/*.jar` 并在控制台黄色高亮警告；文件监听忽略 `mods/` 下的 `.jar` 变更；单元测试全绿 |
-| JitPack 对外分发 | ✅ | `jitpack.yml` + tag `v0.1.0`~`v0.2.5` | 对外坐标 `com.github.I-hope1.Remold:<module>:<tag>`（tag 形如 `v0.2.5`，即 `v<version>`；由 JitPack 按仓库名推导，与项目 `group` 是两个命名空间）；`jitpack.yml` 固定 `openjdk25` 并执行 `publishToMavenLocal -x test`；`README.md` §1.6、两个模组模板、`remold.gradle(.kts)` 薄壳的插件解析均消费该坐标；agent 解析在 `:gradle-plugin` 内完成 |
+| JitPack 对外分发 | ✅ | `jitpack.yml` + tag `v0.1.0`~`v0.2.6` | 对外坐标 `com.github.I-hope1.Remold:<module>:<tag>`（tag 形如 `v0.2.6`，即 `v<version>`；由 JitPack 按仓库名推导，与项目 `group` 是两个命名空间）；`jitpack.yml` 固定 `openjdk25` 并执行 `publishToMavenLocal -x test`；`README.md` §1.6、两个模组模板、`remold.gradle(.kts)` 薄壳的插件解析均消费该坐标；agent 解析在 `:gradle-plugin` 内完成 |
 | Gradle 二进制插件 (`gradle-plugin`) | 🔶 | `gradle-plugin/`、`gradle-plugin/build.gradle`、`gradle-plugin/README.md` | 提供 `io.github.i-hope1.remold` 二进制插件，支持 Kotlin DSL 与 Groovy DSL 类型安全配置 `remold { ... }`、配置缓存与惰性解析；`RemoldPluginTest` 11/11、`RemoldScriptShimTest` 单元测试通过；JVM 参数注入覆盖 `client`、`server` 与 gametest 运行容器（Fabric Loom / ForgeGradle / NeoForge ModDevGradle，`./gradlew runServer`、`runClientGameTest` 同拿 `-javaagent`），IDEA Loom 同步覆盖 `Minecraft_Server.xml`（Application 风格 `VM_PARAMETERS` 与 Gradle 风格 `vmOptions`）；仓库根 `remold.gradle(.kts)` 已瘦身为薄壳（仅按 Class 应用本插件，实现在本模块），jar 内附带一份副本供离线取用。**Gradle Plugin Portal 尚未上线**：`publishPlugins` 已执行并进入人工审核，审核以「lacks documentation in English」退回、该次提交已被取消（官方邮件明确可复用同一版本号）；据此已补英文插件文档 `gradle-plugin/README.md`、把 `website` 指到该英文文档、并在 `README.md` 顶部加英文摘要，待重新 `publishPlugins` 后由审核结果定论。另：门户已对未声明 Gradle 特性兼容性（`compatibility { features { configurationCache } }`，需 plugin-publish ≥ 2.1.0）的发布告警并计划改为拒绝，当前仍是 1.3.1 |
 | GitHub Release 发布物 | ✅ | `.github/workflows/release.yml` | Tag `v*` 触发全量前置验证矩阵（javac 8/11/17/21/25 测试、DCEVM 测试、P0.5 探针与 Linux/Android 原生库编译），全绿后自动打包 17 项 Release 资产并发布到 GitHub Releases，消除资产早于构建事故；支持 `workflow_dispatch` 手动触发与 `--clobber` 覆写更新 |
 | Class / 资源防抖分离 | ✅ | `core/src/remold/DebounceWindow.java`（纯状态机）、`RemoldAgent.handleFileChange/handleJarChange/handleAssetChange`、`gradle-plugin` 的 `assetShakeMs` | Class/jar 事件每次重置独立静默窗口（默认 800ms）；资源/配置流独立窗口（默认 250ms），到期只 drain 资源队列，不提前带出 Class 批次；手动 `triggerHotswap()` 取消挂起调度、清空两条流并强制 drain 全部。`DebounceWindowTest` 6/6（无 sleep：事件重置、双流互不影响、nextDelay、clear）、`AssetShakeConfigTest` 1/1；全量 `check` 514/0 skipped。**未验证**：真实 FileWatcher 的 OS 事件节奏（单测只覆盖状态机，未测 Windows 文件系统时延分布） |
-| 模组模板基线（1.21.1 主模板 + 客户端 HotSwap Toast） | ✅ | `minecraft-fabric-template/`（MC 1.21.1 / yarn 1.21.1+build.3 / loader 0.16.9 / fabric-api 0.105.0+1.21.1 / Loom 1.17.21；客户端入口 `com.example.client.ExampleModClient`） | JBR 21（`jbrsdk_jcef-21.0.9`）`./gradlew build --offline` **exit 0**：`HotSwapToastModelTest` **10 tests / 0 skipped / 0 failures**；产物 `build/libs/example_mod-1.0.0.jar` 内含 `com/example/client/*` 且 jar 内 `fabric.mod.json` 含 `client` 入口；Toast 按 1.21.1 的 `Toast.draw(DrawContext, ToastManager, long)` 适配（1.21.1 无 `Toast.update`，展示计时在 `draw` 内完成），结构化报告依赖新 Agent、已发布 0.2.5 显示明确的降级卡片；**未验证**：卡片实际渲染（本环境无显示会话，仅观测到入口/监听器注册日志路径与模型单测），手动步骤见模板 README |
+| 模组模板基线（1.21.1 主模板 + 客户端 HotSwap Toast） | ✅ | `minecraft-fabric-template/`（MC 1.21.1 / yarn 1.21.1+build.3 / loader 0.16.9 / fabric-api 0.105.0+1.21.1 / Loom 1.17.21；客户端入口 `com.example.client.ExampleModClient`） | JBR 21（`jbrsdk_jcef-21.0.9`）`./gradlew build --offline` **exit 0**：`HotSwapToastModelTest` **10 tests / 0 skipped / 0 failures**；产物 `build/libs/example_mod-1.0.0.jar` 内含 `com/example/client/*` 且 jar 内 `fabric.mod.json` 含 `client` 入口；Toast 按 1.21.1 的 `Toast.draw(DrawContext, ToastManager, long)` 适配（1.21.1 无 `Toast.update`，展示计时在 `draw` 内完成），结构化报告依赖新版 Agent；v0.2.6 封板并带结构化批次报告，旧版 Agent 仍显示明确的降级卡片；**未验证**：卡片实际渲染（本环境无显示会话，仅观测到入口/监听器注册日志路径与模型单测），手动步骤见模板 README |
 | 1.21.4 客户端 gametest 探针 | 🔶 | `tests/fabric-gametest-1.21.4/`（独立 Gradle 工程：MC 1.21.4 / yarn 1.21.4+build.8 / loader 0.16.14 / fabric-api 0.119.4+1.21.4 / Loom 1.17.21） | 由 1.21.4 模板的 tracked 文件裁剪而来（删除 Toast 的 `src/main/java/com/example/client/`、`src/test/` 与 `client` 入口点；保留 wand/Mixin/`src/gametest/` 与截图模板）；JBR 21 `./gradlew compileJava --offline` 与 `./gradlew compileGametestJava --offline` 均 **exit 0**；日志确认真实注入：`[Remold] Injected hot-reload agent parameters into Fabric Loom runClientGameTest!`；`configure<FabricApiExtension>{configureTests{...}}` 生成 `gametest` 源集 + `clientGameTest` 运行配置。**端到端 `runClientGameTest` 证据沿用 1.21.4 模板时期（`4d459ff`：真客户端建世界 → 热栏截图断言 → 真实右键聊天栏 `[Remold]`）；本次移动后未重跑**（无显示环境），不计为新增验证 |
 | Maven Central 分发 | ⬜ | `build.gradle` 的 `group = 'io.github.i-hope1.remold'` | 仅 `README.md` 标注为「预留坐标」，未实际发布；走通需 Central Portal + GPG 签名 + `io.github.<user>` 命名空间验证。当前 `publishToMavenLocal` 落盘该 group 仅供本机联调兜底（`remold.gradle(.kts)` 的 m2 候选路径按文件探测，文件不存在即跳过） |
 | mod-tools 消费侧切换与内部副本清理 | ⬜ | 本仓库之外（mod-tools 仓库） | 依赖坐标切换与仓内 core 副本删除均发生在 mod-tools 仓库，本仓库无法提供验收证据；其前置条件（JitPack 坐标可用）已满足 |

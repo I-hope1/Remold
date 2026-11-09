@@ -1472,30 +1472,43 @@ public class RemoldAgent {
 		}
 	}
 
+	/**
+	 * 全量重传已加载类（UI 按钮 B 与启动期基线捕获共用）。
+	 *
+	 * <p><b>看门狗</b>：本方法同样是一个批次（持有 {@code HOTSWAP_LOCK}、跑真实
+	 * {@code retransformClasses}），但它<b>不</b>经过 {@code processChanges}，所以必须自己
+	 * 登记 {@link BatchWatchdog}——否则这条路径卡死时日志里不会留下任何线程栈。
+	 * 它与 {@code processChanges} 串行（都在同一把锁下），不会嵌套成同一批次。</p>
+	 */
 	private static void retransformLoaded(Class<?>[] classes) {
-		info("Force retransform all loaded classes...");
-		List<Class<?>> candidates = new ArrayList<>();
-		for (Class<?> loadedClass : classes) {
-			if (!inst.isModifiableClass(loadedClass)) continue;
-			if (isBlacklisted(loadedClass.getName())) continue;
-			if (bytecodeCache.containsKey(loadedClass.getName())) continue;
-
-			candidates.add(loadedClass);
-		}
-		if (candidates.isEmpty()) return;
-		info("Found " + candidates.size() + " classes loaded before Agent start. Retransforming...");
+		BatchWatchdog.enter(BATCH_STALL_MS, "retransform-loaded(" + classes.length + " loaded class(es))");
 		try {
-			enterBaselineCapture();
-			try {
-				inst.retransformClasses(candidates.toArray(new Class[0]));
-			} finally {
-				exitInternalRedefine();
+			info("Force retransform all loaded classes...");
+			List<Class<?>> candidates = new ArrayList<>();
+			for (Class<?> loadedClass : classes) {
+				if (!inst.isModifiableClass(loadedClass)) continue;
+				if (isBlacklisted(loadedClass.getName())) continue;
+				if (bytecodeCache.containsKey(loadedClass.getName())) continue;
+
+				candidates.add(loadedClass);
 			}
-			info("Retransform complete.");
-		} catch (UnmodifiableClassException e) {
-			error("Failed to retransform some classes", e);
-		} catch (Throwable t) {
-			error("Critical error during retransform", t);
+			if (candidates.isEmpty()) return;
+			info("Found " + candidates.size() + " classes loaded before Agent start. Retransforming...");
+			try {
+				enterBaselineCapture();
+				try {
+					inst.retransformClasses(candidates.toArray(new Class[0]));
+				} finally {
+					exitInternalRedefine();
+				}
+				info("Retransform complete.");
+			} catch (UnmodifiableClassException e) {
+				error("Failed to retransform some classes", e);
+			} catch (Throwable t) {
+				error("Critical error during retransform", t);
+			}
+		} finally {
+			BatchWatchdog.exit();
 		}
 	}
 	//endregion
@@ -1543,9 +1556,31 @@ public class RemoldAgent {
 	}
 
 	/**
-	 * 处理文件变化的核心逻辑
+	 * 批次入口：把 {@link BatchWatchdog} 挂到<b>真正执行批次的这个方法</b>上。
+	 *
+	 * <p><b>为什么挂在这里而不是某个入口的包装</b>：本方法是唯一真正执行批次的路径，
+	 * 防抖批次（{@code runClassBatch}）、手动 {@link #triggerHotswap()} 都经过它。
+	 * 之前看门狗只包住防抖批次，手动入口卡死时日志里什么都不会留下——而"没有任何输出"
+	 * 与"挂死"在真机上长得一模一样，事后无法归因。</p>
+	 *
+	 * <p><b>同一批次只 dump 一次</b>：{@link BatchWatchdog#enter} 在批次内可重入，
+	 * 嵌套进入复用同一个看门狗，只有最外层 {@link BatchWatchdog#exit()} 才注销；
+	 * 因此把看门狗从 {@code runClassBatch} 上移到这里不会造成同一批次两条
+	 * {@link BatchWatchdog#PREFIX}。异常路径由 {@code finally} 保证注销。</p>
 	 */
 	private static void processChanges(Set<Path> changedFiles, Class<?>[] classes) {
+		BatchWatchdog.enter(BATCH_STALL_MS, "class-batch(" + changedFiles.size() + " file(s))");
+		try {
+			processChangesBatch(changedFiles, classes);
+		} finally {
+			BatchWatchdog.exit();
+		}
+	}
+
+	/**
+	 * 处理文件变化的核心逻辑（批次主体；看门狗由 {@link #processChanges} 负责登记/注销）。
+	 */
+	private static void processChangesBatch(Set<Path> changedFiles, Class<?>[] classes) {
 		// 批次可观测数据的起点：从读盘、对齐、织入、布局门、redefine 到 InitFix 全部计入。
 		// 收集器挂在当前线程上；即使没有任何监听器，这里也只多一次小对象分配，不改变批次行为。
 		BatchReportScope.begin();
@@ -4141,14 +4176,12 @@ public class RemoldAgent {
 	/**
 	 * 执行一批已经静默的 Class 变更；错误边界与手动触发保持一致。
 	 *
-	 * <p>批次期间由 {@link BatchWatchdog} 守着：超过 {@code -Dremold.agent.batch_stall_ms}
-	 * 仍未结束时留下全线程栈（含锁持有信息），同一批次只 dump 一次。正常批次只多挂一个
-	 * 一次性延迟任务，批内结束即注销，没有轮询开销。</p>
+	 * <p><b>看门狗不在这里</b>：{@link BatchWatchdog} 挂在 {@link #processChanges} 上，
+	 * 这样手动 {@link #triggerHotswap()} 等入口也能覆盖。本方法<b>不得</b>再独立
+	 * {@code arm} 一个看门狗——那会让同一批次出现两条 {@code [HOTSWAP-STALL]}
+	 * （一次批次两次 dump = 前缀被训练成噪声）。这里只保留错误边界与批次统计的清理。</p>
 	 */
 	private static void runClassBatch(Set<Path> changes) {
-		BatchWatchdog watchdog = new BatchWatchdog(BATCH_STALL_MS);
-		watchdog.arm(System.nanoTime(), "class-batch(" + changes.size() + " file(s), threshold "
-		                               + watchdog.getStallMillis() + " ms)");
 		try {
 			resetLiveInstanceCache();
 			if (!changes.isEmpty()) {
@@ -4159,7 +4192,6 @@ public class RemoldAgent {
 			      + " so classes may have been redefined WITHOUT InitFix patches or @OnReload callbacks."
 			      + " The next save re-runs from the current baseline; if it keeps failing, restart.", t);
 		} finally {
-			watchdog.disarm();
 			BatchReportScope.discard();
 		}
 	}

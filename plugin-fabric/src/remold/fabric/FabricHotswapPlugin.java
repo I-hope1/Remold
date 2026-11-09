@@ -3,6 +3,7 @@ package remold.fabric;
 import java.lang.instrument.Instrumentation;
 import java.nio.file.Path;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import remold.HotswapPlugin;
 import remold.RemoldAgent;
@@ -20,16 +21,42 @@ import remold.RemoldAgent;
  *   <li>{@link #isWatchPathIgnored} —— 把 {@code mods} 目录排除出监听，避免监听风暴。</li>
  * </ol>
  *
- * <p><b>为什么放在插件而不是 core</b>：三件事都建立在具体加载器的目录与属性约定上。引擎只提供
- * 通用窗口（premain / 路径变更 / 排除投票），加载器知识随插件发布与下线；Mindustry / Arc 等
- * 文件系统驱动生态不会因为"引擎里写死了 Minecraft 的目录规则"而受影响。</p>
+ * <p>另有 {@link #isHostReady()}：把 Minecraft 的生命周期就绪信号（主循环是否已进入首个
+ * tick）翻译成引擎的启动期门闩投票。判据与失败语义见 {@link HostReadinessProbe}——
+ * <b>取不到信号时必须回退到"已就绪"</b>，否则映射对不上就等于热更永久不工作。</p>
+ *
+ * <p><b>为什么放在插件而不是 core</b>：上述四件事都建立在具体加载器/游戏的生命周期、目录与
+ * 属性约定上。引擎只提供通用窗口（premain / 路径变更 / 排除投票 / 就绪投票），加载器知识随
+ * 插件发布与下线；Mindustry / Arc 等文件系统驱动生态不会因为"引擎里写死了 Minecraft 的
+ * 目录规则或就绪判据"而受影响。</p>
  *
  * <p><b>零配置性</b>：Gradle 侧检测到 Loom 系插件时会自动挂载本插件
  * （{@code -Premold.autoFabric=false} 可关闭），因此"开箱即用"与"分层干净"不冲突。
  * 直接用 {@code -javaagent} 启动且未配置 {@code remold.plugin.jars} 时不会加载本插件，
- * 此时不注入 class path group、也不做 {@code mods} 目录排除。</p>
+ * 此时不注入 class path group、也不做 {@code mods} 目录排除与就绪投票。</p>
  */
 public final class FabricHotswapPlugin implements HotswapPlugin {
+
+	private final HostReadinessProbe readinessProbe;
+
+	/** 就绪单向：首次判定就绪后不再探测（也不回退），避免每 tick 打日志与重复反射。 */
+	private volatile boolean hostReady;
+
+	/** "就绪/回退"各只打一条日志的守卫。 */
+	private final AtomicBoolean readinessLogged = new AtomicBoolean(false);
+
+	/** 生产构造：按反射探测真实 Minecraft 宿主（不引入任何编译期 MC 依赖）。 */
+	public FabricHotswapPlugin() {
+		this(new HostReadinessProbe());
+	}
+
+	/**
+	 * @param readinessProbe 就绪探测；{@code null} 等价于生产默认。测试/嵌入方可注入替身，
+	 *                       不需要真实 Minecraft 就能验证门闩语义。
+	 */
+	public FabricHotswapPlugin(HostReadinessProbe readinessProbe) {
+		this.readinessProbe = readinessProbe == null ? new HostReadinessProbe() : readinessProbe;
+	}
 
 	@Override
 	public String getName() {
@@ -54,5 +81,45 @@ public final class FabricHotswapPlugin implements HotswapPlugin {
 	@Override
 	public boolean isWatchPathIgnored(Path path) {
 		return DevWatchExclusions.isIgnored(path);
+	}
+
+	/**
+	 * 宿主是否已过启动期（主循环已跑起来）。
+	 *
+	 * <p><b>语义</b>：{@code false} 只由<b>明确的</b>未就绪信号产生（例如服务端实例已建但
+	 * tick 计数仍为 {@code 0}）；取不到信号（{@link HostReadinessProbe.Verdict#UNKNOWN}）
+	 * 一律回退到 {@code true} 并打一条 info，绝不因为"探测不到"把批次永久押住。</p>
+	 *
+	 * <p><b>单向</b>：一旦判定就绪就缓存下来，之后恒返回 {@code true}——启动期是一次性窗口，
+	 * 运行期回退会让门闩变成随机噪声；日志也只在首次判定那次输出，不按重查节奏刷屏。</p>
+	 */
+	@Override
+	public boolean isHostReady() {
+		if (hostReady) return true;
+
+		HostReadinessProbe.Verdict verdict;
+		try {
+			verdict = readinessProbe.probe();
+		} catch (Throwable t) {
+			// 探测抛异常等同于"取不到信号"：门闩会把异常当未就绪（fail-closed），
+			// 那会让热更永久停摆，所以这里必须自己吞掉并回退。
+			verdict = HostReadinessProbe.Verdict.UNKNOWN;
+		}
+		if (verdict == HostReadinessProbe.Verdict.NOT_READY) return false;
+
+		hostReady = true;
+		logReadinessOnce(verdict);
+		return true;
+	}
+
+	private void logReadinessOnce(HostReadinessProbe.Verdict verdict) {
+		if (!readinessLogged.compareAndSet(false, true)) return;
+		if (verdict == HostReadinessProbe.Verdict.READY) {
+			RemoldAgent.info("[Fabric] host reported ready (Minecraft main loop has ticked);"
+			                 + " hot-swap batches are enabled");
+		} else {
+			RemoldAgent.info("[Fabric] 未取得就绪信号，按已就绪处理（启动期门闩保持放行；"
+			                 + "批次可能落在启动风暴里）");
+		}
 	}
 }

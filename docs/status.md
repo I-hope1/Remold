@@ -122,6 +122,14 @@
 
 ---
 
+## 0.7 未发布：两阶段 Schema-First 读穿保护（2026-11-09）
+
+| 能力 | 状态 | 代码位置 | 验收证据 |
+|:---|:---:|:---|:---|
+| 两阶段重定义（内部批次路径）：本批存在「新增/类型变更字段」进入补丁计划时，先提交阶段 A（新结构 + 旧方法体，**构造器/`<clinit>` 保留新体**），补丁完成后再提交阶段 C 的新方法体；纯方法体热更仍走单次重定义快路径。默认开启，`-Dremold.agent.two_phase=false` 可回到旧行为。 | ✅ | `RemoldAgent.applyTwoPhase` / `redefineStageA`（阶段编排与整组回滚）；`InitFix.requiresTwoPhase`（只认真正会写的零值暴露字段）；`StageASkeleton.buildWithLiveConstructors`（构造器保留新体，替代 `ConstructorTailInjector` 插桩） | 真实 `processChanges` 端到端 `TwoPhaseProbe` **72/0**（JBR 21）：`two-phase ON` 时并发读线程在 50k 存量实例把阶段 B 窗口拉宽的情况下零 NPE，且依次看到旧结果与新结果；`two-phase OFF` 对照在同一夹具上稳定观测到 `NullPointerException`（红基线），证明读穿窗口真实存在且被两阶段关闭；`TwoPhaseGuardTest` 5/0（新增实例字段/新增静态字段 → true；纯方法体/`@RemoldReinit`/零值等价 → false）；`StageASkeletonTest` 11/0（含窗口实例由新构造器初始化、旧体不回退到新字段的正反例）；全量 JUnit **527/0 skipped**；`:tests:initFixOracle` `ALL ASSERTIONS PASSED`；`layoutRejectRecoverProbe` 41/0、`doubleBraceProbe` 104/0。**残余边界**：外部 IDE/JDWP 重定义通道与 `redefineDynamic` 单类通道仍走单阶段（读穿窗口仍在，见风险 9）；被安全门拒绝、根本没生成补丁的字段两阶段无法代偿（保持“重启”语义）；阶段 B 完成前，新构造器读取本类新增**静态**字段或同批其它类未补齐字段仍是残余窗口；两次 redefine 会带来双倍 JIT 逆优化（`docs/initfix/07-p05-probe-results.md` §11）。 |
+
+---
+
 ## 状态图例与判定准则 (Legend & Criteria)
 
 | 图例 | 状态定义            | 判定准则与要求                                                                                                                                |
@@ -260,8 +268,8 @@
 
 | 规划条目 | 优先级 | 规范章节 | 前置依赖 | 目标价值与关联问题 |
 |:---|:---:|:---|:---|:---|
-| **构造器尾部插桩** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §4 | `InitFix` 离线切片提取与直线字节码生成器 (`AliasInterpreter`) | 在阶段 A 构造器尾部注入切片，消除两阶段路径下「阶段 A → 阶段 C」之间由**旧构造器**创建的实例漏补（单次重定义路径的同类缝隙已由枚举后置关闭，见风险 6） |
-| **两阶段 Schema-First 重定义** | P2 | [`04-target-design.md`](initfix/04-target-design.md) §1 | 组件已备：`StageASkeleton` / `ConstructorTailInjector` 单测覆盖后**原地冻结** | **暂缓接线**：漏补已由「枚举后置」单独关闭，两阶段仅剩读穿窗口收益，不值得让默认路径每次多付一次 redefine（墙钟 16~76 ms）。**另有一条此前未计入的代价**：`07-p05-probe-results.md` §11 的对照组证实，`redefineClasses` 会让**无关类**的已编译代码一并 `made not entrant`（无论只改方法体还是新增字段）。两阶段是「阶段 A 结构性 + 阶段 C 仅改方法体」两次 redefine，因此一次用户热更会造成**连续两次全局 JIT 逆优化**，预热回落加倍。此外还需引入跨阶段中止回滚与多类批次的状态机复杂度（单次 redefine 天然原子）。 |
+| **构造器尾部插桩** | P3 | [`04-target-design.md`](initfix/04-target-design.md) §4 | `InitFix` 离线切片提取与直线字节码生成器 (`AliasInterpreter`) | **当前契约下不再需要**：阶段 A 保留新构造器/`<clinit>`，窗口内新建的实例由新构造器直接完成初始化，不需要从切片反推「取值指令」。仅当将来要求阶段 A 的构造器也回退旧体（换取更强的中止语义）时才重新需要；`ConstructorTailInjector` 单测保留、不接线。 |
+| **两阶段 Schema-First 重定义** | ✅（内部批次路径） | [`04-target-design.md`](initfix/04-target-design.md) §1 | 已接线：`RemoldAgent.applyTwoPhase` / `redefineStageA` + `InitFix.requiresTwoPhase` + `StageASkeleton.buildWithLiveConstructors` | 读穿窗口（风险 9）在内部批次路径上关闭，且**只在本批存在零值暴露字段时**触发，纯方法体热更不付第二次 redefine 的代价。代价仍然真实：两次 redefine 会带来连续两次全局 JIT 逆优化（`07-p05-probe-results.md` §11 的对照组）；残余通道见风险 9。验收：`TwoPhaseProbe` 72/0（含 50k 实例下的并发读线程红/绿对照）、`TwoPhaseGuardTest` 5/0、全量 JUnit 527/0 skipped。 |
 | **PatchPlan 基线指纹校验** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §2 | 离线分析器导出协议 | 校验 Target 当前内存字节码哈希与构建期基线一致性，防止类漂移热更造成严重字节码损坏 |
 | **`@HotswapInit` T4 逃生口** | P1 | [`09-hotswapinit-design.md`](initfix/09-hotswapinit-design.md) §2～§4 | `InitFix.buildPatch` 候选集段；复用现有写入协议 | 让 T3 拒绝的初始化式（Kotlin `?.`/`?:`、读配置、跨类依赖）由用户提供值，不再永久停在类型默认值；只换值的来源，不换作用域与写入协议（与 `@RemoldReinit`、`@OnReload` 不重叠）。契约已定，实现未开始（§2 T4 行为 ⬜） |
 | **非方法上下文显式三态作用域规范化** | P2 | [`03-cascading-pipeline.md`](topology/03-cascading-pipeline.md) §2 | ASM EnclosingMethod 属性增强解析 | 引入 `<initializer>`/`<clinit>`/`<init>` 显式三态标签，解决当前非方法作用域主要依靠 `orderIndex` 兜底导致的作用域偶发空指针错配（收敛风险 2） |
@@ -395,20 +403,22 @@
 - **关联架构决策**：[`docs/topology/08-decisions.md`](topology/08-decisions.md) 附录 A。
 
 ### 风险 9：重定义生效到补丁完成之间的读穿窗口
-- **风险描述与底层机制**：**消除目标已登记在路线图 §4.1「两阶段 Schema-First 重定义」，此处不重复描述机制**；本条只记录在两阶段接入驱动之前，这段窗口是**敞开的**，以及它当前的实际影响面。
-- **当前敞开的程度**：读取新增字段的代码在窗口内拿到类型默认值（引用类型 `null`、数值类型 `0`），不抛异常也不打日志。窗口 = 枚举 + 弱引用往返 + 条件 CAS，实测拆分见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10：
+- **风险描述与底层机制**：`redefineClasses` 返回后新方法体即可执行，而新增字段要等 `InitFix.applyPatch` 枚举完堆才写入。窗口内的读取拿到类型默认值（引用类型 `null`、数值类型 `0`），不抛异常也不打日志；引用类型的下游解引用直接 NPE（真实渲染/逻辑线程在第 4 行日志级别即可观察到）。
+- **已关闭的路径**：内部批次路径（文件监听 → `processChanges`）已由两阶段 Schema-First 重定义关闭（见 §0.7、路线图 §4.1）。当本批存在真正会写的「新增/类型变更字段」时：阶段 A 提交新结构 + 旧方法体（构造器/`<clinit>` 保留新体），旧方法体在编译期不引用新增字段，因而窗口内不可能读穿；阶段 B 完成补丁后再提交阶段 C 的新方法体。只在本批存在零值暴露字段时触发，纯方法体热更不付出第二次 redefine 的代价。证据：`TwoPhaseProbe` 72/0 的 50k 实例并发读线程红/绿对照（关两阶段稳定 NPE，开两阶段零 NPE）已实测。
+- **仍敞开的路径（残余）**：
+  - **外部 IDE/JDWP 重定义通道**：JVM 先按新字节码完成重定义，Remold 只能在 `afterRedefineExternal` 里补，窗口仍在；
+  - **`redefineDynamic` 单类通道**：同样先提交完整新字节码再补；
+  - **补丁被安全门拒绝的字段**：没有补丁就没有可等待的值，两阶段无法代偿，语义仍是「重启」；
+  - **阶段 B 完成前的残余读取**：新构造器若读取本类新增**静态**字段、或读取同批其它类尚未补齐的字段，仍可能拿到默认值（跨类拓扑排序尚未接线，见路线图）。
+- **窗口量级**（仅对仍敞开的路径有参考意义；实测拆分见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10）：
   - 枚举成本 = **无关对象约 8 ns/个**（全堆遍历固定项）+ **匹配实例约 0.3~1 µs/个**（打 tag 与物化数组）；
   - 极端场景（目标类自身 100 万实例）：`applyPatch` 约 1551 ms，其中 CAS 仅 83 ms、弱引用往返 389 ms；
   - 现实场景（堆里几百万对象、目标类只有几百个实例）：实测 100 个目标 + 100 万无关对象仅 8 ms，窗口在**几十毫秒**量级；
-  - **随批次线性放大的项**：`getInstances` 按类调用，批次里 N 个待补类 = N 次全堆遍历。
+  - **随批次线性放大的项**：`getInstances` 按类调用，批次里 N 个待补类 = N 次全堆遍历；
   - **暴露时间要扣掉 STW 段**：实测（M6）每次 `getInstances` 是一次 safepoint，1M 匹配实例时 `HeapIterateOperation` 单次 216~242 ms；停世界期间业务线程读不到未补字段。心跳吞吐只有自由速率的 67%，是「一段 STW + 其余阶段并发」的混合，不是全程争抢。
 - **触发条件**：窗口内有线程执行读取新增字段的代码——本类新方法体、同批重定义的其它类、反射/序列化路径、任意业务线程。
-- **当前缓解措施**：
-  1. 热更通常在主循环安全点或调试暂停期触发，窗口内几乎没有业务读；
-  2. `HOTSWAP_LOCK` 只互斥热更调度与事务处理，**不阻塞应用线程读**，因此不构成防护；
-  3. T0 零值等价字段不受影响（默认值即正确值），只有真正需要写入的字段暴露在窗口里；
-  4. `PatchReport` 与条件 CAS 跳过计数可在事后定位"这次写了哪些字段"，但无法预防窗口内的读。
-- **根治与关闭条件**：两阶段重定义接入驱动后关闭——该路线图条目已降为 P2、暂缓接线（见 §4.1），因此本条窗口在当前主线中**保持敞开**，属已知残余风险。`TwoPhaseProbe` 已在 JBR 21 上实测该路径：阶段 B 期间旧方法体仍返回旧值（`v1:1`），窗口内无读穿。
+- **缓解措施**：两阶段路径已由编排消除；残余路径上 `HOTSWAP_LOCK` 只互斥热更调度与事务处理、**不阻塞应用线程读**，因此不构成防护；T0 零值等价字段不受影响（默认值即正确值）；`PatchReport` 与条件 CAS 跳过计数可在事后定位“这次写了哪些字段”，但无法预防窗口内的读。
+- **根治与关闭条件**：把两阶段编排接到外部重定义通道与 `redefineDynamic`（两者都受 JVM 先完成后置回调的约束，需要在 transformer 里先把新字节改为阶段 A 骨架、再在补丁完成后主动触发阶段 C），并补齐跨类批次拓扑排序。当前这两条属已知残余。
 - **关联设计规范**：[`docs/initfix/04-target-design.md`](initfix/04-target-design.md) §1、[`docs/initfix/03-runtime-driver.md`](initfix/03-runtime-driver.md) §2。
 - **关联架构决策**：无。
 
@@ -571,7 +581,7 @@
 | 条目 | 状态 | 落地位置 | 验收证据与已知边界 |
 |:---|:---:|:---|:---|
 | P0.5 前置微验证（连续 Schema Redefine / 阶段 A 链接 / 堆遍历规模） | 🔶 | `tests/src/P05Probe.java`、`tests/src/P05Agent.java`、`tests/build.gradle`（任务 `p05Probe`）、`.github/workflows/ci.yml`（任务 `p05-probe`，JBR 17/21 矩阵） | JBR 21.0.9 本机 **63/63 断言通过**（M1~M9）：连续两次 schema 变化均被接受（阶段 A p50 30.9 ms、阶段 C p50 27.3 ms；schema 变更平均触发 1 次 GC ≈ 5 ms，纯方法体变更 0 次）；阶段 A 预注入的私有实例方法、私有静态方法与新 lambda 可被 nestmate 伴生类链接，并带「阶段 A 之前必抛 `NoSuchMethodError`」的负向对照；1M 实例堆遍历 0.87 s、结果数组 4 MiB；M7 分离实验（具名类删字段）见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §13；M8（方法删除：向上解析 vs 向下分派，三种失败形态）见 §15；M9（静态字段删除的三种形态 + 编译期常量内联 + `getfield`/`getstatic` 双向 ICCE）见 §16。**缺口**：JBR 17 腿（CI，JBR 17.0.14）已回填，**63/63 通过**，与 21 同结论；但 17 上没有 `deoptimization` 日志 tag（写进 `-Xlog` 会让 JVM 直接拒绝启动），M6 的 deopt 一路交叉验证证据在该运行时上不可得，由探针打印 `EVIDENCE-MISSING` 显式声明（是证据缺失，不是断言失败）。「1M 实例枚举」断言（M4；此前状态表误记为 M3）曾在 CI 上稳定失败，根因不是内存压力而是探针自身跨轮持有强引用：上一轮的 10 万实例被同一栈帧里的 `keep`/`got` 数组钉住，patch 驱动实测打出 `count=1100000`；已改为单轮独立栈帧 + 置空后 `gc`，并补「堆里无残留」前置断言（故断言数 61→63）。单机单次采样，未做 Linux 对照与 JIT 预热隔离。方法与原始数据见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) |
-| 两阶段编排端到端验证 | 🔶 | `tests/src/TwoPhaseProbe.java`、`tests/build.gradle`（任务 `twoPhaseProbe`） | JBR 21 本机与 JBR 17（CI）均 **42/42 断言通过**（此前记为 39/39 是陈旧计数）：`阶段 A → redefine → 阶段 B 补丁 → 阶段 C redefine` 全链路跑通（阶段 A 17~37 ms、阶段 B 7 ms/1 实例、阶段 C 31~35 ms）；对照组证明不插桩时「枚举之后、阶段 C 之前」新建的实例永久停在 `v2:1,0`；另含 **JIT 预热分配点**场景（对象写进静态数组保证逃逸、按 cid 对齐 safepoint 窗口）：行为正确，但**对照组证伪了因果**——redefine 无关类同样会让该 cid 失效，故此场景只记录"未观测到损坏"，**不作为机制已验证的证据**（见 `07-p05-probe-results.md` §11）。另含 **在途旧构造器帧**场景（线程阻塞在旧 `<init>` 中途时 redefine，两条防空转断言先证明帧确实在途、且新旧构造器写入可区分的值）：在途对象 `b=1`（旧字节码）、`c` 完好、新对象 `b=2`/`d=42`，证明 DCEVM 在重定义内部正确处理了在途帧的字段偏移（§12）。**缺口**：未覆盖中止回滚、多类批次与真实多线程分配竞争；探针在主流程之外，驱动尚未接入；safepoint 日志行的字段集合随版本变（17 没有 `Cleanup`/`Leaving`），窗口解析已按字段可用性降级（`At+Leaving` → `Total−Reaching`），两侧结论一致。见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §9、§11、§12 |
+| 两阶段编排端到端验证 | 🔶 | `tests/src/TwoPhaseProbe.java`、`tests/build.gradle`（任务 `twoPhaseProbe`） | JBR 21 本机 **72/72 断言通过**：除原有的纯编排场景（`阶段 A → redefine → 阶段 B 补丁 → 阶段 C redefine`；不插桩窗口实例永久停在默认值的对照组；JIT 预热分配点与在途旧构造器帧，见 §9/§11/§12）外，新增 **生产接线场景**——真实 `RemoldAgent.processChanges` + 50k 存量实例 + 并发读线程：两阶段 ON 时读线程零 NPE 且依次看到旧/新结果，`-Dremold.agent.two_phase=false` 对照稳定观测到 `NullPointerException`（红基线），证明读穿窗口真实存在并被关闭。**缺口**：JBR 17 腿尚未重跑新增场景；未覆盖阶段 A 中止回滚后的重试、多类批次真实多线程分配竞争；safepoint 日志行的字段集合随版本变（17 没有 `Cleanup`/`Leaving`），窗口解析已按字段可用性降级（`At+Leaving` → `Total−Reaching`），两侧结论一致。见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §9、§11、§12 |
 | 物理偏移稳定性与漂移探针 (OffsetStabilityProbe) | ✅ | `tests/src/OffsetStabilityProbe.java`、`tests/build.gradle`（任务 `offsetStabilityProbe`） | JBR 21.0.9 本机 **47/47 断言通过**（A1~A4 单类布局规律/空洞填补/类型重排、B1~B3 继承体系漂移步长、C1~C2 VarHandle 错位破坏、D1~D2 使用方 C2 逆优化与重编译恢复、E1~E2 Field 与 MethodHandle 访问器自愈边界）；与 `LayoutPredictor` 及 `SuperclassDriftGate` 形成事前预测阻断闭环 |
 
 

@@ -91,7 +91,8 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 文件热更防抖状态机 | `core/src/remold/DebounceWindow.java`（纯状态机：Class/jar 与资源流各自 trailing-edge 静默窗口；无队列、无调度、无真实时钟，供 `RemoldAgent` 与单测共用） |
 | 加载器集成插件（`plugin-fabric/`） | `FabricHotswapPlugin` 实现 `HotswapPlugin` 的三个通用窗口：`onPremain`（`FabricClassPathGroups`，必须在插件加载后、`init` 前执行）、`onWatchPathsChanged`（`ModJarInspector` 巡检 `run/mods` 残留制品）、`isWatchPathIgnored`（`DevWatchExclusions` 排除 `mods` 目录）；Gradle 侧 `autoFabric` 自动挂载。core 不出现任何加载器专属目录或属性约定 |
 | 写入桥 | `HotswapBridge`（`KIND_CONDITIONAL` / `KIND_FORCE`） |
-| 构造器尾部插桩 | `ConstructorTailInjector`（`core/src/remold/ref/`，纯函数：根构造器 `RETURN` 前注入字段切片） |
+| 构造器尾部插桩 | `ConstructorTailInjector`（`core/src/remold/ref/`，纯函数：根构造器 `RETURN` 前注入字段切片；当前两阶段契约下不接线） |
+| 两阶段读穿保护（内部批次路径） | `RemoldAgent.applyTwoPhase` / `redefineStageA`（A→B→C 编排、整组回滚、`isInitialized` 二次检查）；`StageASkeleton.buildWithLiveConstructors`（阶段 A 保留新构造器）；`InitFix.requiresTwoPhase`（只有真正会写的零值暴露字段才触发）；开关 `-Dremold.agent.two_phase=false` |
 | 哈希语义门控 | `HashSemantics`（`core/src/remold/ref/`，本类内调用图扫 `hashCode`/`equals`/`compareTo` 及其可达方法是否读新增实例字段，只告警不拒绝） |
 | 删除成员的读者分析 | `RemovedMemberReaders`（`core/src/remold/ref/`，纯函数：字段按 JVMS 5.4.3.2、方法按 5.4.3.3 + **5.4.6 向下分派**判"改动后引用会怎样"，输出悬空 / 抽象方法缺失 / 分派转移 / 判不了 / 字段改指向五档） |
 | 读者扫描成本探针 | `tests/src/ReaderScanProbe.java`（`./gradlew :tests:readerScanProbe`，不需要 DCEVM）：常量池扫描 vs 方法体精扫、三档扫描范围的真实成本 |
@@ -164,7 +165,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 - Forge ClassInfo 成员同步 E2E：`tests/fabric-mixin-probe/forge-classinfo/`（真实 Forge 1.21.1 `runServer`，红基线 + 修复后绿跑；`bash run-forge-classinfo.sh` 复跑，Windows 下用 `verify-evidence.cmd` 做验收；同样不挂 `check`）。改动 `ForgeClassInfoSync` / `ForgeMixinHotSwap.reload` 时序前必须先跑它。
 - NeoForge Mixin 热更 E2E：`tests/neoforge-mixin-probe/`（真实 NeoForge 21.1 dev `runServer`，Mixin 配置走加载器原生 `META-INF/neoforge.mods.toml` `[[mixins]]`；红基线=禁用同步的 plugin jar，绿跑=当前实现；Windows 用 `verify-evidence.cmd` 验收；不挂 `check`）。改动 `ClassInfoMemberSync` / `ForgeMixinHotSwap.reload` 时序或 NeoForge 识别逻辑前必须先跑它。
 - 读者扫描成本验证：`./gradlew :tests:readerScanProbe`（只需 `-javaagent` 提供 Instrumentation，不需要 DCEVM）。改动 `RemovedMemberReaders.refs` 后必须先跑它：其中一条断言要求"常量池扫描是方法体精扫的超集"。
-- 两阶段编排验证：`./gradlew :tests:twoPhaseProbe -Pp05.jbr=<DCEVM JDK 目录>`，把 `StageASkeleton` / `ConstructorTailInjector` / `InitFix` 串成 `A → redefine → B → C → redefine` 跑一遍（同样不挂 `check`）。改动两阶段相关代码后必须先跑它，再考虑动 `RemoldAgent`。
+- 两阶段编排验证：`./gradlew :tests:twoPhaseProbe -Pp05.jbr=<DCEVM JDK 目录>`，把 `StageASkeleton.buildWithLiveConstructors` / `InitFix` 串成 `A → redefine → B → C → redefine` 跑一遍，并驱动真实 `processChanges`：50k 存量实例 + 并发读线程下，开两阶段零 NPE、关两阶段（`-Dremold.agent.two_phase=false`）稳定 NPE（红基线）（同样不挂 `check`）。改动两阶段相关代码（`applyTwoPhase` / `redefineStageA` / `requiresTwoPhase` / `buildWithLiveConstructors`）后必须先跑它，再考虑动 `RemoldAgent`。
 - 偏移量稳定性与漂移实测：`./gradlew :tests:offsetStabilityProbe -Pp05.jbr=<DCEVM JDK 目录>`（同样不挂 `check`），实测单类稳定性（空洞填补、类型重排）、父类字段漂移步长、Updater 错位破坏与 C2 常量折叠使用方逆优化。
 - 耗时类探针固定报 **min / median / max** 三个数；结论必须同时对 min 与 median 成立，只对其中一个成立时标注「口径敏感」，不得只报有利的那个。统计量不得在看到数据之后才选。
 - 探针日志默认带 `-Xlog:safepoint`（`uptimenanos` 装饰符）、`-Xlog:gc*`、`-Xlog:jit+compilation=debug`，落在 `build/p05/`。断言里引用日志时间戳时，基准必须取 safepoint 窗口的**开始**（`时间戳 − Total`）——日志行是在 safepoint 结束时打印的；unified logging 有缓冲，日志分析要放在运行结束后做。

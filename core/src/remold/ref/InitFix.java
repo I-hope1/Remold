@@ -558,7 +558,8 @@ public class InitFix {
 	private record PendingPatch(
 	 PatchPlan plan,
 	 byte[] bytes,
-	 long createdNanos) {
+	 long createdNanos,
+	 boolean twoPhase) {
 	}
 
 	private record ProtectedAccess(int opcode, String owner, String name, String desc) { }
@@ -692,6 +693,38 @@ public class InitFix {
 		return REPORTS.get(host);
 	}
 
+	/**
+	 * 本轮补丁是否要求"重定义生效 → 补丁完成"之间不能有新方法体上线（两阶段读穿保护，
+	 * {@code docs/initfix/04-target-design.md} §1）。
+	 *
+	 * <p>判据刻意只认<b>真正会写存量实例/静态环境</b>且属于<b>新增字段或类型变更字段</b>的任务：
+	 * 只有这些字段在补丁前处于类型默认值（{@code null}/{@code 0}），新方法体读到才会 NPE 或静默读零。
+	 * {@code @RemoldReinit} 重写、L1/A 档重放作用于本来就存在的字段，默认值是旧值而不是零值，
+	 * 不构成读穿，跟随单阶段路径即可。</p>
+	 */
+	public static boolean requiresTwoPhase(Class<?> host) {
+		if (host == null) return false;
+		PendingPatch patch = PENDING.get(host);
+		return patch != null && patch.twoPhase();
+	}
+
+	/** 见 {@link #requiresTwoPhase(Class)}：在补丁计划里找"零值暴露字段"的写入任务。 */
+	private static boolean requiresReadThroughGuard(PatchPlan plan, ClassDiff diff) {
+		if (plan == null || diff == null || plan.isEmpty()) return false;
+		Set<String> exposed = new HashSet<>();
+		if (diff.addedInstanceFields != null) exposed.addAll(diff.addedInstanceFields);
+		if (diff.addedStaticFields != null) exposed.addAll(diff.addedStaticFields);
+		if (diff.typeChangedFields != null) exposed.addAll(diff.typeChangedFields);
+		if (exposed.isEmpty()) return false;
+		for (FieldPatchTask task : plan.instanceTasks()) {
+			if (!task.replay() && exposed.contains(task.fieldName())) return true;
+		}
+		for (FieldPatchTask task : plan.staticTasks()) {
+			if (!task.replay() && exposed.contains(task.fieldName())) return true;
+		}
+		return false;
+	}
+
 	public static void transform(Class<?> host, byte[] newBytes, ClassDiff diff) {
 		if (!RemoldAgent.INIT_FIX) return;
 
@@ -777,9 +810,15 @@ public class InitFix {
 
 			// 存活实例不在这里枚举：重定义还没生效，此刻拍下的快照会漏掉「快照之后、生效之前」
 			// 新建的实例。枚举推迟到 applyPatch（重定义之后），见 PendingPatch 的说明。
+			boolean twoPhase = requiresReadThroughGuard(built.plan(), diff);
 			PendingPatch patch = new PendingPatch(
-			 built.plan(), built.bytes(), System.nanoTime());
+			 built.plan(), built.bytes(), System.nanoTime(), twoPhase);
 			PENDING.put(host, patch);
+			if (twoPhase) {
+				log("Two-phase guard required for " + className
+				    + ": a newly added/type-changed field is actually patched, so new bodies must not"
+				    + " go live before the patch (docs/initfix/04-target-design.md)");
+			}
 		} catch (Throwable e) {
 			RemoldAgent.error("Field init patch generation failed for " + className
 			                   + ": " + e.getMessage(), e);
@@ -4248,7 +4287,11 @@ public class InitFix {
 		return refs;
 	}
 
-	private static boolean isInitialized(Class<?> clazz) {
+	/**
+	 * 类是否已完成初始化。两阶段驱动在阶段 A 之后用它对每个类做二次检查
+	 * （{@code docs/initfix/04-target-design.md} §1「isInitialized 二次检查」）。
+	 */
+	public static boolean isInitialized(Class<?> clazz) {
 		return !UNSAFE.shouldBeInitialized(clazz);
 	}
 

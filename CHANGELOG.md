@@ -73,6 +73,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   right-click chat message) and its own Gradle build; the Toast client package is removed there.
 
 ### Fixed
+- **读穿 NPE（`redefineClasses` 返回后、`InitFix` 补丁完成前，新增字段仍是 `null`/`0`）**：内部批次路径
+  （文件监听 → `processChanges`）改为两阶段 Schema-First 重定义。当本批确实要补「新增/类型变更字段」时，
+  先提交**阶段 A**（新结构 + 旧方法体，构造器/`<clinit>` 保留新体），随后对存量实例执行 InitFix 补丁，
+  最后提交**阶段 C** 的新方法体；窗口内的旧方法体在编译期不认识新增字段，读线程不会 NPE，阶段 A→C 之间
+  新建的实例由新构造器直接初始化。纯方法体热更不触发两阶段（零额外 redefine）。默认开启，
+  `-Dremold.agent.two_phase=false` 可回到旧行为；外部 IDE/JDWP 重定义与 `redefineDynamic` 通道仍未接线
+  （见 `docs/status.md` 风险 9）。验收：`TwoPhaseProbe` 72/0（真实 `processChanges` + 50k 实例 + 并发读线程：
+  关两阶段稳定 NPE、开两阶段零 NPE）、`TwoPhaseGuardTest` 5/0、全量 JUnit 527/0 skipped。
 - `core` `remold.reflect.mixin`: extracted the Mixin config-diff / new-Mixin registration logic into a
   loader-neutral, reflection-only engine (`MixinConfigDiffer`, `NewMixinRegistrar`, `LoadedTargetSuppressor`,
   `MixinConfigContext`). No Mixin/ModLauncher compile-time dependency in core; `plugin-mixin` (Fabric) and

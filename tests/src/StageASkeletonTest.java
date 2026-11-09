@@ -282,6 +282,58 @@ class StageASkeletonTest {
 			"the pre-injected method must carry its new body");
 	}
 
+	@Test
+	void liveConstructorVariantInitialisesInstancesCreatedInTheWindow() throws Exception {
+		byte[] v1 = compile("stage.K", """
+			package stage;
+			public class K {
+			    public int a = 1;
+			    public String hi() { return "v1:" + a; }
+			}
+			""");
+		byte[] v2 = compile("stage.K", """
+			package stage;
+			public class K {
+			    public int a = 1;
+			    public int b = 42;
+			    public String hi() { return "v2:" + a + "," + b; }
+			}
+			""");
+
+		Class<?> live = load(StageASkeleton.buildWithLiveConstructors(v1, v2), "stage.K");
+		assertEquals(42, readInt(live, "b"),
+			"the window variant must keep the NEW constructor, so instances created between stage A"
+			+ " and stage C are fully initialised without tail injection");
+		assertEquals("v1:1", call(live, "hi"),
+			"non-constructor bodies still run the old bytecode: they cannot read the new field at all,");
+
+		Class<?> inert = load(StageASkeleton.build(v1, v2), "stage.K");
+		assertEquals(0, readInt(inert, "b"),
+			"control: the inert stage A (old constructor) leaves window-created instances at the default");
+	}
+
+	@Test
+	void liveConstructorVariantKeepsNewStaticInitializer() throws Exception {
+		byte[] v1 = compile("stage.L", """
+			package stage;
+			public class L {
+			    public static int s = 1;
+			}
+			""");
+		byte[] v2 = compile("stage.L", """
+			package stage;
+			public class L {
+			    public static int s = 7;
+			}
+			""");
+
+		byte[] stageA = StageASkeleton.buildWithLiveConstructors(v1, v2);
+		Class<?> type = load(stageA, "stage.L");
+		assertEquals(7, type.getField("s").getInt(null),
+			"<clinit> is also kept from the new version: an uninitialised class must run the new initializer"
+			+ " (already-initialised classes never run it again)");
+	}
+
 	// ------------------------------------------------------------------------------------------------
 	// fixtures
 	// ------------------------------------------------------------------------------------------------

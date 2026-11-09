@@ -80,7 +80,7 @@ import static remold.MountManager.*;
  *       执行事务预登记（{@code tx.preRegister()}），随后调用 {@link Instrumentation#redefineClasses(ClassDefinition...)}。
  *       若发生批量失败，自动尝试单类降级重定义，并在事务一致性校验失败时原子回滚（{@code tx.rollback()}）。</li>
  *   <li><b>存量实例初始化驱动（InitFix.applyPatch）</b>：
- *       重定义生效后，调用 {@link InitFix#applyPatch}，通过 Native JVMTI 堆遍历
+ *       重定义生效后，调用 {@code InitFix.applyPatch}，通过 Native JVMTI 堆遍历
  *       （{@link LibTool#getInstances(Class)}，参见 {@code docs/initfix/05-jvmti-heap.md}）
  *       或 {@link InstanceTracker} 检索存活实例，执行条件 CAS 写入（{@link HotswapBridge}），
  *       并将未解决字段记入台账（{@code FieldLedger}）。</li>
@@ -128,6 +128,13 @@ public class RemoldAgent {
 	public static boolean      FORCE_REINIT;
 	public static boolean      LAMBDA_ALIGN;
 	public static boolean      INIT_FIX           = boolProp("remold.agent.init_fix", "remold.initFix", true);
+	/**
+	 * 两阶段 Schema-First 重定义总开关（{@code docs/initfix/04-target-design.md} §1）。默认开启。
+	 *
+	 * <p>只在"本批确实要补新增/类型变更字段"时启用；纯方法体热更仍走单次重定义的快路径。
+	 * 关闭后退化为旧行为：新方法体在补丁完成前即上线，存在读穿窗口（{@code docs/status.md} 风险 9）。</p>
+	 */
+	public static boolean      TWO_PHASE          = boolProp("remold.agent.two_phase", "remold.twoPhase", true);
 	public static boolean      FORCE_STATIC_LAMBDA = boolProp("remold.agent.force_static_lambda", "remold.agent.force_static_lambdas", false);
 	public static boolean      UI_HOOK;
 	/**
@@ -1186,11 +1193,13 @@ public class RemoldAgent {
 		HOTSWAP_BLACKLIST = bl.isEmpty() ? new String[0] : bl.split(",");
 		info("Injection Blacklist: " + String.join(",", HOTSWAP_BLACKLIST));
 		INIT_FIX = boolProp("remold.agent.init_fix", "remold.initFix", true);
+		TWO_PHASE = boolProp("remold.agent.two_phase", "remold.twoPhase", true);
 		FORCE_STATIC_LAMBDA = boolProp("remold.agent.force_static_lambda", "remold.agent.force_static_lambdas", false);
 		for (String degradedSwitch : degradeForMissingEnhancedRedefinition(isEnhancedHotswapEnabled())) {
 			warn("DEGRADED: " + degradedSwitch + " forced OFF. " + degradationReason(degradedSwitch));
 		}
 		info("InitFix: " + INIT_FIX);
+		info("Two-phase redefine: " + TWO_PHASE);
 		info("Force Static Lambda: " + FORCE_STATIC_LAMBDA);
 		ENABLE_HOTSWAP_EVENT = Boolean.parseBoolean(System.getProperty("remold.agent.hotswap_event", "false"));
 		info("HotSwap Event: " + ENABLE_HOTSWAP_EVENT);
@@ -1498,6 +1507,9 @@ public class RemoldAgent {
 		// List<Class<?>>        unloadedClasses  = new ArrayList<>();
 		int skippedCount  = 0;
 		int injectedCount = 0;
+		// 两阶段需要"补丁分析使用的阶段 C 字节"与"JVM 当前生效的旧字节"两份输入。
+		Map<String, byte[]> oldEffectiveBytes = new HashMap<>();
+		boolean             needsTwoPhase     = false;
 
 		Map<String, byte[]> newBatchBytes = new LinkedHashMap<>(changedFiles.size());
 		Map<String, Path>   classToPath   = new HashMap<>(changedFiles.size());
@@ -1924,9 +1936,11 @@ public class RemoldAgent {
 							log("[DCEVM] Structure change detected, proceeding with enhanced redefinition.");
 						}
 						InitFix.transform(targetClass, newBytecode, diff);
+						if (InitFix.requiresTwoPhase(targetClass)) needsTwoPhase = true;
 					} else {
 						log("[WARN] Cannot diff " + className + " (missing old bytecode). Proceeding with redefine.");
 					}
+					if (oldBytecode != null) oldEffectiveBytes.put(className, oldBytecode);
 
 					definitions.add(new ClassDefinition(targetClass, newBytecode));
 					// 登记为"待重定义"：成败由 applyRedefinitions 决定。
@@ -1977,8 +1991,15 @@ public class RemoldAgent {
 			}
 		}
 
-		// 批量执行重定义（针对已加载类）
-		RedefineOutcome outcome     = applyRedefinitions(definitions, transactions.values(), skips);
+		// 批量执行重定义（针对已加载类）。
+		// 两阶段：当本批确实要补"新增/类型变更字段"时，先提交阶段 A（新结构 + 旧方法体，构造器保持新体），
+		// 让存量实例在旧行为下被补齐，再提交阶段 C 的新方法体；否则沿用单次重定义的快路径。
+		RedefineOutcome outcome;
+		if (needsTwoPhase && TWO_PHASE) {
+			outcome = applyTwoPhase(definitions, oldEffectiveBytes, transactions.values(), skips);
+		} else {
+			outcome = applyRedefinitions(definitions, transactions.values(), skips);
+		}
 		Set<String>     redefinedOk = outcome.successful();
 		Set<String>     rolledBack  = outcome.rolledBack();
 
@@ -3311,6 +3332,222 @@ public class RemoldAgent {
 			if (prev == null) sourceBytecodeCache.remove(key);
 			else sourceBytecodeCache.put(key, prev);
 		}
+	}
+
+	/**
+	 * 两阶段 Schema-First 重定义的生产接线（{@code docs/initfix/04-target-design.md} §1）。
+	 *
+	 * <p><b>为什么需要它</b>：{@code redefineClasses} 返回后新方法体立刻可执行，而新增字段要等
+	 * {@link InitFix#applyPatch} 枚举完堆才写入。重定义那一帧里如果业务线程（渲染/逻辑）先跑了
+	 * 新方法体，读到的就是 {@code null}/{@code 0}——引用类型直接 NPE。两阶段把「结构上线」与
+	 * 「新方法体上线」拆成两次重定义，中间夹一次补丁；窗口内的旧方法体在编译期就不知道新增字段，
+	 * 不可能读穿。</p>
+	 *
+	 * <p><b>与设计稿的差异</b>：阶段 A 的构造器保留<b>新</b>执行体
+	 * （{@code StageASkeleton.buildWithLiveConstructors}），因此阶段 A→C 之间新建的实例由新构造器
+	 * 直接完成初始化，不需要 {@code ConstructorTailInjector} 反向推导取值切片。除构造器/静态初始化器
+	 * 之外的既有方法仍整体回退旧体：旧字节码不引用新增字段，所以窗口内不会读穿。</p>
+	 *
+	 * <p><b>不启用条件</b>：本批没有任何「新增/类型变更字段」进入补丁计划（纯方法体热更）时，调用方
+	 * 不会走这里；{@code -Dremold.agent.two_phase=false} 可强制回到单阶段快路径。</p>
+	 */
+	private static RedefineOutcome applyTwoPhase(List<ClassDefinition> definitions,
+	                                             Map<String, byte[]> oldEffectiveBytes,
+	                                             Collection<AlignmentTransaction> transactions,
+	                                             RoundSkips skips) {
+		long startedNanos = System.nanoTime();
+		if (definitions.isEmpty()) {
+			for (AlignmentTransaction tx : transactions) tx.commit();
+			skips.report();
+			return new RedefineOutcome(Set.of(), Set.of());
+		}
+
+		// ---- 阶段 A：新结构 + 旧方法体（构造器保持新体） ----
+		List<ClassDefinition> stageADefinitions = new ArrayList<>(definitions.size());
+		Map<String, byte[]>   stageABytes       = new HashMap<>(definitions.size());
+		for (ClassDefinition def : definitions) {
+			Class<?> clazz  = def.getDefinitionClass();
+			String   name   = clazz.getName();
+			byte[]   target = def.getDefinitionClassFile();
+			byte[]   old    = oldEffectiveBytes.get(name);
+			byte[]   skeleton;
+			if (old == null) {
+				// 没有可信旧字节就合成不出「旧方法体」；该类退化为直接提交目标字节（带告警）。
+				warn("[HOTSWAP-2P] No old bytecode for " + name
+				     + "; stage A falls back to the target bytes for this class.");
+				skeleton = target;
+			} else {
+				try {
+					skeleton = remold.ref.StageASkeleton.buildWithLiveConstructors(old, target);
+				} catch (Throwable t) {
+					error("[HOTSWAP-2P] Cannot synthesise stage A for " + name
+					      + "; falling back to the target bytes for this class.", t);
+					skeleton = target;
+				}
+			}
+			stageADefinitions.add(new ClassDefinition(clazz, skeleton));
+			stageABytes.put(name, skeleton);
+		}
+
+		Set<String> stageAAbandoned = new HashSet<>();
+		Set<String> stageAOk        = redefineStageA(stageADefinitions, stageABytes, transactions, skips,
+		                                              stageAAbandoned);
+		if (stageAOk.isEmpty()) {
+			warn("[HOTSWAP-2P] Stage A did not apply any class; the two-phase transaction is abandoned.");
+			skips.report();
+			return new RedefineOutcome(Set.of(), Set.of());
+		}
+		info("[HOTSWAP-2P] Stage A applied for " + stageAOk.size()
+		     + " class(es): new shape with old method bodies; patching live instances before stage C.");
+
+		// isInitialized 二次检查（docs/initfix/04-target-design.md §1）：阶段 A 已生效后，若类的 <clinit>
+		// 仍在别的线程里执行，补丁会被 InitFix 的未初始化守卫跳过；此时不能再提交阶段 C 的新方法体，
+		// 否则新体读到的是默认值。把这类类留在阶段 A（旧体）并提示重启。
+		Set<String> initialising = new HashSet<>();
+		for (ClassDefinition def : stageADefinitions) {
+			Class<?> clazz = def.getDefinitionClass();
+			if (!stageAOk.contains(clazz.getName())) continue;
+			if (!InitFix.isInitialized(clazz)) {
+				error("[HOTSWAP-2P] " + clazz.getName() + " is being initialized by another thread"
+				      + " (<clinit> in flight); stage C is withheld for it, so it stays on the old bodies."
+				      + " RESTART is required for this class.");
+				initialising.add(clazz.getName());
+			}
+		}
+		if (!initialising.isEmpty()) {
+			for (String name : initialising) {
+				skips.add(name, RoundSkips.verdict("INITIALISING-AT-STAGE-A",
+					"<clinit> in flight; stage C withheld", "restart required"));
+			}
+			// 这些类已经提交了阶段 A，重试基线不再等同于磁盘旧版本：不做自动回队，提示重启。
+			stageAAbandoned.addAll(initialising);
+			stageAOk.removeAll(initialising);
+		}
+
+		// ---- 阶段 B：真实 InitFix 驱动补丁（必须在阶段 C 之前全部完成） ----
+		long patchStart = System.nanoTime();
+		for (ClassDefinition def : stageADefinitions) {
+			Class<?> clazz = def.getDefinitionClass();
+			if (!stageAOk.contains(clazz.getName())) continue;
+			try {
+				InitFix.afterRedefine(clazz);
+			} catch (Throwable t) {
+				// afterRedefine 自己已兜住 LinkageError 等致命异常并记账；这里只防御它自身抛错。
+				error("[HOTSWAP-2P] Stage B patch failed for " + clazz.getName()
+				      + "; stage C will still be applied, so unpatched fields stay at defaults.", t);
+			}
+		}
+		long patchMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - patchStart);
+
+		// ---- 阶段 C：只对阶段 A 成功的类提交完整新字节码 ----
+		List<ClassDefinition> stageCDefinitions = new ArrayList<>(stageAOk.size());
+		for (ClassDefinition def : definitions) {
+			if (stageAOk.contains(def.getDefinitionClass().getName())) stageCDefinitions.add(def);
+		}
+		List<AlignmentTransaction> activeTransactions = new ArrayList<>(transactions.size());
+		for (AlignmentTransaction tx : transactions) {
+			if (stageAOk.contains(tx.hostName)) activeTransactions.add(tx);
+		}
+		RedefineOutcome stageCOutcome = applyRedefinitions(stageCDefinitions, activeTransactions, skips);
+		Set<String>     rolledBack    = new HashSet<>(stageCOutcome.rolledBack());
+		rolledBack.addAll(stageAAbandoned);
+		RedefineOutcome outcome = new RedefineOutcome(stageCOutcome.successful(), rolledBack);
+		info("[HOTSWAP-2P] Two-phase transaction finished: A=" + stageAOk.size()
+		     + " class(es), patch=" + patchMs + "ms, C=" + outcome.successful().size()
+		     + " class(es), total=" + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos) + "ms"
+		     + (outcome.successful().size() < stageAOk.size()
+		        ? "; " + (stageAOk.size() - outcome.successful().size())
+		          + " class(es) stayed at stage A (old behavior) — RESTART is required for those."
+		        : ".")
+		     );
+		return outcome;
+	}
+
+	/**
+	 * 只提交阶段 A 字节码：成功集合、缓存与事务登记都不算「本轮生效」，要等阶段 C 才落账。
+	 *
+	 * <p>失败的类立即丢弃其暂存补丁并记入台账（与单阶段 {@link #applyRedefinitions} 的失败语义一致）；
+	 * 宿主与匿名类必须整组成功，否则回滚事务并整组移出阶段 C（重试基线已不一致，提示重启）。</p>
+	 */
+	private static Set<String> redefineStageA(List<ClassDefinition> definitions,
+	                                          Map<String, byte[]> stageABytes,
+	                                          Collection<AlignmentTransaction> transactions,
+	                                          RoundSkips skips,
+	                                          Set<String> abandonedOut) {
+		for (AlignmentTransaction tx : transactions) tx.preRegister();
+
+		// 与单阶段一致：被引用的匿名类先提交，宿主最后提交，降低半生效风险。
+		definitions.sort((d1, d2) -> {
+			boolean a1 = d1.getDefinitionClass().getName().contains("$");
+			boolean a2 = d2.getDefinitionClass().getName().contains("$");
+			if (a1 && !a2) return -1;
+			if (!a1 && a2) return 1;
+			return 0;
+		});
+
+		Set<String> targetNames = new HashSet<>();
+		for (ClassDefinition def : definitions) targetNames.add(def.getDefinitionClass().getName());
+		Set<String> ok = new HashSet<>();
+		enterInternalRedefine(targetNames);
+		try {
+			try {
+				inst.redefineClasses(definitions.toArray(new ClassDefinition[0]));
+				for (ClassDefinition def : definitions) ok.add(def.getDefinitionClass().getName());
+			} catch (Throwable t) {
+				error("[HOTSWAP-2P] Stage A bulk redefine failed, switching to individual mode...", t);
+				for (ClassDefinition def : definitions) {
+					String className = def.getDefinitionClass().getName();
+					try {
+						inst.redefineClasses(def);
+						ok.add(className);
+					} catch (Throwable e) {
+						error("[FAIL] stage A redefinition of " + className, e);
+						skips.add(className, RoundSkips.verdict("STAGE-A-FAILED",
+						 e.getClass().getSimpleName(),
+						 "see the stack trace above; the file is requeued"));
+						InitFix.afterRedefineFailed(def.getDefinitionClass());
+					}
+				}
+			}
+		} finally {
+			exitInternalRedefine();
+		}
+
+		// JVM 现在生效的是骨架字节码；缓存必须反映当前真实状态，供阶段 B 的层级/元数据查询使用。
+		for (String name : ok) {
+			byte[] bytes = stageABytes.get(name);
+			if (bytes != null) bytecodeCache.put(name, bytes);
+		}
+
+		// 宿主与匿名类必须同批生效；否则阶段 C 的基线已不一致，整组移出。
+		Set<String> abandoned = new HashSet<>();
+		for (AlignmentTransaction tx : transactions) {
+			boolean hostOk     = ok.contains(tx.hostName);
+			boolean allAnonsOk = true;
+			for (String target : tx.targetClasses) {
+				if (loadedClassesMap.containsKey(target) && !ok.contains(target)) allAnonsOk = false;
+			}
+			if (hostOk && allAnonsOk) continue;
+			error("[HOTSWAP-PARTIAL] Stage A: host " + tx.hostName
+			      + " and its anonymous classes were not redefined consistently;"
+			      + " rolling back pending injections and excluding the group from stage C."
+			      + " RESTART is required for those classes.");
+			tx.rollback(true);
+			abandoned.add(tx.hostName);
+			abandoned.addAll(tx.targetClasses);
+			skips.add(tx.hostName, RoundSkips.verdict("ROLLED-BACK-A",
+				"stage A host/anonymous mismatch", "restart required"));
+		}
+		if (!abandoned.isEmpty()) {
+			for (String name : abandoned) {
+				if (!ok.contains(name)) continue;
+				Class<?> clazz = loadedClassesMap.get(name);
+				if (clazz != null) InitFix.afterRedefineFailed(clazz);
+			}
+			abandonedOut.addAll(abandoned);
+			ok.removeAll(abandoned);
+		}
+		return ok;
 	}
 
 	private static RedefineOutcome applyRedefinitions(List<ClassDefinition> definitions,

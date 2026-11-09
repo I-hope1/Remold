@@ -48,6 +48,34 @@ public final class StageASkeleton {
 	 * @return 阶段 A 字节码
 	 */
 	public static byte[] build(byte[] oldBytes, byte[] newBytes) {
+		return build(oldBytes, newBytes, false);
+	}
+
+	/**
+	 * 两阶段驱动实际使用的阶段 A：与 {@link #build(byte[], byte[])} 相同，但<b>构造器与静态初始化器
+	 * 保留新执行体</b>（其余既有方法仍然回退到旧体）。
+	 *
+	 * <p><b>为什么构造器不能回退</b>：阶段 A → 阶段 C 之间新建的实例不能再被阶段 B 的堆快照补到
+	 * （快照之后、阶段 C 之前没有第二次枚举）。如果阶段 A 的 {@code <init>} 是旧体，这些实例的
+	 * 新增字段会永久停在类型默认值；保留新 {@code <init>} 后，它们由新构造器直接完成初始化，
+	 * 与 {@code ConstructorTailInjector} 的插桩目标等价，但不需要从切片里反推"取值指令"。</p>
+	 *
+	 * <p><b>为什么不产生读穿</b>：旧方法体的字节码在编译期根本不知道新增字段，不可能读它们；
+	 * 新增方法在阶段 A 已经就位、但旧代码没有调用点，处于休眠状态。因此阶段 A 期间唯一会读新字段的
+	 * 代码是"新构造器 + 它调用的新方法"，而这正是需要让新实例立即拿到真实初值的那条路径。</p>
+	 *
+	 * <p>残余边界（阶段 B 完成前）：新构造器如果读取本类新增的<b>静态</b>字段、或读取同批次其它类
+	 * 尚未补齐的字段，仍可能读到默认值。这类形态由 {@code InitFix} 的依赖顺序与安全门处理；
+	 * 当前版本不为其提供额外的中止保护。</p>
+	 *
+	 * <p>{@code <clinit>} 同样保留新体：已初始化的类不会再执行它，未初始化的类由
+	 * {@code InitFix} 的不变量 1 跳过补丁、等首次初始化时用新 {@code <clinit>} 正确赋值。</p>
+	 */
+	public static byte[] buildWithLiveConstructors(byte[] oldBytes, byte[] newBytes) {
+		return build(oldBytes, newBytes, true);
+	}
+
+	private static byte[] build(byte[] oldBytes, byte[] newBytes, boolean keepNewInitializers) {
 		Objects.requireNonNull(oldBytes, "oldBytes");
 		Objects.requireNonNull(newBytes, "newBytes");
 
@@ -64,6 +92,7 @@ public final class StageASkeleton {
 		for (MethodNode mn : newCn.methods) {
 			MethodNode old = oldByKey.get(methodKey(mn));
 			if (old == null) continue;              // 新增方法：休眠体原样保留
+			if (keepNewInitializers && isInitializer(mn)) continue; // 构造器/clinit 保留新体
 			if (!bodyCompatible(old, mn)) continue; // 静态性/抽象性变了，旧体对新签名非法
 			adoptBody(mn, old);
 		}
@@ -120,6 +149,11 @@ public final class StageASkeleton {
 
 	private static String methodKey(MethodNode mn) {
 		return mn.name + mn.desc;
+	}
+
+	/** 实例初始化器 / 类初始化器：{@code <init>*} / {@code <clinit>*}。 */
+	private static boolean isInitializer(MethodNode mn) {
+		return mn.name.startsWith("<init") || mn.name.startsWith("<clinit");
 	}
 
 	private static ClassNode read(byte[] bytes) {

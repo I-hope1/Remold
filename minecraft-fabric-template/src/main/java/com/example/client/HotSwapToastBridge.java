@@ -13,10 +13,11 @@ import net.minecraft.client.MinecraftClient;
 /**
  * 把 Remold 的批次回调接到 {@link HotSwapToast} 上。
  *
- * <p><b>为什么全反射</b>：模板只 {@code compileOnly} 依赖已发布的 api v0.2.5，
- * 它没有 {@code HotswapBatchReport} / {@code afterInternalBatchReport}。如果直接编译期引用新类型，
- * 模板在旧 Agent 上会 {@link NoClassDefFoundError}。这里用 {@link Proxy} 实现运行时的
- * {@code remold.HotswapBatchListener}：</p>
+ * <p><b>为什么全反射</b>：模板 {@code compileOnly} 依赖的 api 已包含
+ * {@code HotswapBatchReport} / {@code afterInternalBatchReport}，但这两个符号由运行期 Agent 提供；
+ * 目标环境可能挂着更旧的 Agent（没有这些类型 / 方法），直接静态引用会让模板在旧 Agent 上抛
+ * {@link NoClassDefFoundError} / {@link NoSuchMethodError}。因此这里用 {@link Proxy} 实现运行期的
+ * {@code remold.HotswapBatchListener}，只按运行期接口的实际形态分流：</p>
  * <ul>
  *   <li>运行时接口<b>有</b> {@code afterInternalBatchReport} → 使用结构化报告（耗时 / Mixin / InitFix）；</li>
  *   <li>运行时接口<b>没有</b>（旧 Agent）→ 退化到 {@code afterInternalBatch}，只展示类名，

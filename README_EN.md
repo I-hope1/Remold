@@ -131,21 +131,21 @@ The lightweight script plugin resolves your class output paths, assembles the JV
 
 > [!IMPORTANT]
 > **The script plugin must be version-pinned too.** `apply(from = ...)` has no `plugins { id(...) version ... }`
-> coordinate, so always use a **tag** URL (`.../v0.2.5/remold.gradle.kts`) instead of `.../main/...`.
+> coordinate, so always use a **tag** URL (`.../v0.2.6/remold.gradle.kts`) instead of `.../main/...`.
 > The script and the `agent`/`api` must stay on the same version, otherwise the script builds arguments for a
 > newer agent while the old agent runs — and it only blows up at runtime.
 
 #### Groovy DSL (`build.gradle`):
 ```groovy
 // Apply the script plugin (tag-pinned; for local development use rootProject.file('remold.gradle'))
-def remoldRef = (findProperty('remold.version') ?: '0.2.5')
+def remoldRef = (findProperty('remold.version') ?: '0.2.6')
 apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remold.gradle"
 
 remold {
     // Optional: pin the Remold version (defaults to remoldVersion in gradle.properties)
     // The plugin resolves the matching agent jar from the repository or Releases and caches it
     // locally, so you never download it by hand.
-    // version = '0.2.5'
+    // version = '0.2.6'
 
     // Optional: point at a local remold-agent.jar. Otherwise libs/remold-agent.jar is preferred,
     // and the plugin downloads and caches one if it is missing.
@@ -179,14 +179,14 @@ remold {
 #### Kotlin DSL (`build.gradle.kts`):
 ```kotlin
 // Apply the script plugin (tag-pinned; for local development use file("../remold.gradle.kts"))
-val remoldRef = (findProperty("remold.version") as String?) ?: "0.2.5"
+val remoldRef = (findProperty("remold.version") as String?) ?: "0.2.6"
 apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/v$remoldRef/remold.gradle.kts")
 
 // Note: `remold { }` does NOT work from Kotlin DSL — the extension type lives inside the script plugin,
 // so the IDE cannot generate a type-safe accessor for it (Groovy is dynamic and unaffected).
 // Configure through gradle.properties or extra instead:
 extra["remold.mainClass"] = "your.package.Main"
-// extra["remold.version"] = "0.2.5"
+// extra["remold.version"] = "0.2.6"
 // extra["remold.agentJar"] = "libs/remold-agent.jar"
 // extra["remold.jbr"] = "/path/to/jbr"
 // extra["remold.debug"] = true
@@ -202,7 +202,7 @@ Loading a script plugin only has one real decision: **where to take it from**. T
 ```kotlin
 // inside the Remold source tree, use the parent script (edits apply immediately); otherwise fetch the tag
 apply(from = file("../remold.gradle.kts").takeIf { it.isFile }
-    ?: "https://raw.githubusercontent.com/I-hope1/Remold/v${findProperty("remold.version") ?: "0.2.5"}/remold.gradle.kts")
+    ?: "https://raw.githubusercontent.com/I-hope1/Remold/v${findProperty("remold.version") ?: "0.2.6"}/remold.gradle.kts")
 ```
 
 - In the repo: `../remold.gradle.kts` exists → the local script is used, edits take effect immediately, no network;
@@ -216,7 +216,7 @@ offline mode:
 ```kotlin
 buildscript {
     repositories { maven("https://jitpack.io") }
-    dependencies { classpath("com.github.I-hope1.Remold:gradle-plugin:v0.2.5") }   // version = Git tag
+    dependencies { classpath("com.github.I-hope1.Remold:gradle-plugin:v0.2.6") }   // version = Git tag
 }
 apply(plugin = "io.github.i-hope1.remold")
 ```
@@ -230,7 +230,7 @@ routes behave identically. Configuration is the same as Option 1 (`gradle.proper
 > `master-SNAPSHOT` works for a quick look (moves with the branch, not suitable for pinning).
 
 > [!NOTE]
-> You may also write `plugins { id("io.github.i-hope1.remold") version "v0.2.5" }`, but JitPack does not host plugin
+> You may also write `plugins { id("io.github.i-hope1.remold") version "v0.2.6" }`, but JitPack does not host plugin
 > markers (`<plugin-id>:<plugin-id>.gradle.plugin`), so you must map it once via
 > `pluginManagement.resolutionStrategy.eachPlugin { useModule("com.github.I-hope1.Remold:gradle-plugin:v${requested.version.removePrefix("v")}") }`
 > in `settings.gradle.kts`. Publishing to the Gradle Plugin Portal is what removes that block.
@@ -386,11 +386,11 @@ repositories {
 }
 
 dependencies {
-    compileOnly 'com.github.I-hope1.Remold:api:v0.2.5'
+    compileOnly 'com.github.I-hope1.Remold:api:v0.2.6'
 }
 ```
 
-Maven Central coordinates are reserved: `io.github.i-hope1.remold:api:0.2.5`.
+Maven Central coordinates are reserved: `io.github.i-hope1.remold:api:0.2.6`.
 
 ---
 

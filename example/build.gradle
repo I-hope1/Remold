@@ -7,14 +7,14 @@ application {
 }
 
 dependencies {
-    // 编译期注解支持（如 @RemoldReinit, @OnReload）；外部独立工程可直接使用: compileOnly "com.github.I-hope1.Remold:api:v0.2.5"
+    // 编译期注解支持（如 @RemoldReinit, @OnReload）；外部独立工程可直接使用: compileOnly "com.github.I-hope1.Remold:api:v0.2.6"
     compileOnly project(':api')
 }
 
 // remold.gradle 只是薄壳：实现全在 :gradle-plugin。仓库内优先用刚构建出的本地插件 jar（离线可用）。
 // 干净检出（CI / 首次 clone）时本地 jar 还不存在；为保持构建的离线确定性，这里不主动解析 JitPack
 // 坐标（即使对应版本已发布），而是“没有本地 jar 就跳过 remold 集成”，example 仍可正常编译。
-def remoldPluginJar = rootProject.file("gradle-plugin/build/libs/remold-gradle-plugin-${rootProject.findProperty('remoldVersion') ?: '0.2.5'}.jar")
+def remoldPluginJar = rootProject.file("gradle-plugin/build/libs/remold-gradle-plugin-${rootProject.findProperty('remoldVersion') ?: '0.2.6'}.jar")
 def configuredPluginJar = findProperty('remold.pluginJar')
 if (configuredPluginJar == null && remoldPluginJar.isFile()) {
     ext.set('remold.pluginJar', remoldPluginJar.absolutePath)

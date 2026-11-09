@@ -86,15 +86,16 @@ InitFix：15 个实例 / 1 字段（shield）
 
 ### 手动验证
 
-> 模板默认解析已发布的 `0.2.5` agent；该版本没有结构化报告，只会显示「旧版 Agent」降级卡片。
-> 要验证耗时 / Mixin / InitFix 维度，需把 `runClient` 的 agent 指向本分支构建的
+> 模板默认解析已发布的 `0.2.6` agent；该版本提供结构化批次报告，卡片默认显示耗时 / Mixin / InitFix 维度。
+> 若运行期挂的是更旧的 Agent（接口没有 `afterInternalBatchReport`），卡片会明确降级为「旧版 Agent」。
+> 要验证本分支尚未发布的改动，可把 `runClient` 的 agent 指向本分支构建的
 > `core/build/libs/remold-agent.jar`（并让 `plugin-mixin` 使用本分支的 jar）。
 
 1. 用带 DCEVM 的 **JBR 21** 执行 `./gradlew runClient`（可通过 `-Premold.agentJar=...` 指向本地 agent），进入单人世界；
 2. 日志确认客户端入口已加载：
    ```text
    [HotSwapToast] client entrypoint initialized
-   [HotSwapToast] Remold batch listener registered (structured report: false)
+   [HotSwapToast] Remold batch listener registered (structured report: true)
    ```
 3. 保持客户端运行，修改 `src/main/java/com/example/item/RemoldWandItem.java` 里的一行文案；
 4. 执行 `./gradlew compileJava`（或 IDEA 的 `Ctrl + Shift + F9`）；

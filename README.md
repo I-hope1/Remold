@@ -136,7 +136,7 @@ Remold 作为一个 Java Agent 运行。为了获得类结构变更高性能热�
 
 > [!IMPORTANT]
 > **脚本插件也必须锁定版本。** `apply(from = ...)` 没有 `plugins { id(...) version ... }` 那样的版本坐标，
-> 因此**务必用 tag 地址**（`.../v0.2.5/remold.gradle.kts`）而不是 `.../main/...`；
+> 因此**务必用 tag 地址**（`.../v0.2.6/remold.gradle.kts`）而不是 `.../main/...`；
 > 壳里的默认插件版本与 `agent`/`api` 必须同版本，否则按新接口拼参数、agent 还是旧版本，问题只会在运行期才暴露。
 >
 > **首次配置需要能解析到插件**（脚本按 `v<version>` 从 JitPack 取 `com.github.I-hope1.Remold:gradle-plugin:v<version>`）。
@@ -146,13 +146,13 @@ Remold 作为一个 Java Agent 运行。为了获得类结构变更高性能热�
 #### Groovy DSL (`build.gradle`):
 ```groovy
 // 引入脚本插件（tag 锁版本；本地开发可换成 rootProject.file('remold.gradle')）
-def remoldRef = (findProperty('remold.version') ?: '0.2.5')
+def remoldRef = (findProperty('remold.version') ?: '0.2.6')
 apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remold.gradle"
 
 remold {
     // 可选：指定 Remold 版本（默认读取 gradle.properties 中的 remoldVersion）
     // 插件将自动从仓库解析或从 Releases 下载对应版本的 agent jar 并缓存至本地，开发者无需手动下载
-    // version = '0.2.5'
+    // version = '0.2.6'
 
     // 可选：显式指定本地 remold-agent.jar 路径（若不指定，将优先使用本地 libs/remold-agent.jar，不存在时自动下载缓存）
     // agentJar = "libs/remold-agent.jar"
@@ -184,14 +184,14 @@ remold {
 #### Kotlin DSL (`build.gradle.kts`):
 ```kotlin
 // 引入脚本插件（tag 锁版本；本地开发可换成 file("../remold.gradle.kts")）
-val remoldRef = (findProperty("remold.version") as String?) ?: "0.2.5"
+val remoldRef = (findProperty("remold.version") as String?) ?: "0.2.6"
 apply(from = "https://raw.githubusercontent.com/I-hope1/Remold/v$remoldRef/remold.gradle.kts")
 
 // 注意：Kotlin DSL 下 `remold { }` 不可用——扩展类型 RemoldExtension 定义在脚本里，
 // IDE 无法为脚本类生成类型安全访问器（Groovy DSL 是动态语言，不受影响）。
 // 配置改走 gradle.properties 或 extra，等价写法如下：
 extra["remold.mainClass"] = "your.package.Main"
-// extra["remold.version"] = "0.2.5"
+// extra["remold.version"] = "0.2.6"
 // extra["remold.agentJar"] = "libs/remold-agent.jar"
 // extra["remold.jbr"] = "/path/to/jbr"
 // extra["remold.debug"] = true
@@ -207,7 +207,7 @@ extra["remold.mainClass"] = "your.package.Main"
 ```kotlin
 // 本地源码树里开发 Remold 时用上一层的脚本（改了立即生效），否则按 tag 拉取对应版本
 apply(from = file("../remold.gradle.kts").takeIf { it.isFile }
-    ?: "https://raw.githubusercontent.com/I-hope1/Remold/v${findProperty("remold.version") ?: "0.2.5"}/remold.gradle.kts")
+    ?: "https://raw.githubusercontent.com/I-hope1/Remold/v${findProperty("remold.version") ?: "0.2.6"}/remold.gradle.kts")
 ```
 
 - 仓库内开发：`../remold.gradle.kts` 存在 → 直接用本地脚本，改完立即生效、不联网；
@@ -220,7 +220,7 @@ apply(from = file("../remold.gradle.kts").takeIf { it.isFile }
 ```kotlin
 buildscript {
     repositories { maven("https://jitpack.io") }
-    dependencies { classpath("com.github.I-hope1.Remold:gradle-plugin:v0.2.5") }   // 版本 = Git tag
+    dependencies { classpath("com.github.I-hope1.Remold:gradle-plugin:v0.2.6") }   // 版本 = Git tag
 }
 apply(plugin = "io.github.i-hope1.remold")
 ```
@@ -235,7 +235,7 @@ apply(plugin = "io.github.i-hope1.remold")
 > （随分支变化，不适合长期锁定）。
 
 > [!NOTE]
-> 想写成 `plugins { id("io.github.i-hope1.remold") version "v0.2.5" }` 也可以，但 JitPack 不托管「插件标记」
+> 想写成 `plugins { id("io.github.i-hope1.remold") version "v0.2.6" }` 也可以，但 JitPack 不托管「插件标记」
 > （`<插件id>:<插件id>.gradle.plugin`），需要在 `settings.gradle.kts` 的 `pluginManagement.resolutionStrategy.eachPlugin`
 > 里 `useModule("com.github.I-hope1.Remold:gradle-plugin:v${requested.version.removePrefix("v")}")` 映射一次。发到 Gradle Plugin Portal
 > 才能省掉这段。
@@ -391,11 +391,11 @@ repositories {
 }
 
 dependencies {
-    compileOnly 'com.github.I-hope1.Remold:api:v0.2.5'
+    compileOnly 'com.github.I-hope1.Remold:api:v0.2.6'
 }
 ```
 
-Maven Central 预留坐标：`io.github.i-hope1.remold:api:0.2.5`。
+Maven Central 预留坐标：`io.github.i-hope1.remold:api:0.2.6`。
 
 ---
 

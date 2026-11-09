@@ -2484,7 +2484,8 @@ public class InitFix {
 	 * 的"该字段在任何地方都没被写过"判定。</p>
 	 *
 	 * <p><b>只读字节码，绝不 {@code Class.forName}</b>：优先取
-	 * {@link RemoldAgent#bytecodeCache}（内存里当前生效的新版本），退化为 ClassLoader
+	 * {@link RemoldAgent#bytecodeCache}（内存里当前生效的新版本），其次取
+	 * {@link remold.BytecodeSources} 登记口（织入期生成的合成类），退化为 ClassLoader
 	 * 资源流。任一成员读不到时 {@link #complete()} 为 false，调用方必须按"无法证明"处理
 	 * （拒绝），而不是当作"没有第二处写入"。</p>
 	 */
@@ -2507,7 +2508,9 @@ public class InitFix {
 				oracle.getNestMembers(hostClass.name);
 				return new NestView(oracle.getNestFieldWrites(hostClass.name), true);
 			} catch (IllegalStateException unavailable) {
-				RemoldAgent.warn("Nest scan incomplete for " + hostClass.name + ": " + unavailable.getMessage());
+				RemoldAgent.warn("Nest scan incomplete for " + hostClass.name + ": "
+					+ unavailable.getMessage()
+					+ missingBytecodeHint(unresolvedClassOf(unavailable.getMessage())));
 				return new NestView(List.of(), false);
 			}
 		}
@@ -4746,7 +4749,7 @@ public class InitFix {
 				Boolean prot = isProtectedCrossPackageAccess(oracle, host, m.owner, m.name, m.desc, false);
 				if (prot == null) {
 					return "cannot determine protected status of constructor "
-					       + m.owner + "." + m.name + m.desc;
+					       + m.owner + "." + m.name + m.desc + missingBytecodeHint(m.owner);
 				}
 				if (prot) {
 					return "protected constructor across packages not bridgeable";
@@ -4776,7 +4779,7 @@ public class InitFix {
 				Boolean prot = isProtectedCrossPackageAccess(oracle, host, f.owner, f.name, f.desc, true);
 				if (prot == null) {
 					return "cannot determine protected status of field access "
-					       + f.owner + "." + f.name + ":" + f.desc;
+					       + f.owner + "." + f.name + ":" + f.desc + missingBytecodeHint(f.owner);
 				}
 				if (prot) {
 					outProtectedAccesses.put(n,
@@ -4787,7 +4790,7 @@ public class InitFix {
 				Boolean prot = isProtectedCrossPackageAccess(oracle, host, m.owner, m.name, m.desc, false);
 				if (prot == null) {
 					return "cannot determine protected status of method access "
-					       + m.owner + "." + m.name + m.desc;
+					       + m.owner + "." + m.name + m.desc + missingBytecodeHint(m.owner);
 				}
 				if (prot) {
 					outProtectedAccesses.put(n,
@@ -4879,6 +4882,44 @@ public class InitFix {
 	private static String packageName(String internalName) {
 		int separator = internalName.lastIndexOf('/');
 		return separator < 0 ? "" : internalName.substring(0, separator);
+	}
+
+	/**
+	 * 从"&lt;原因&gt;: &lt;类名&gt;"形态的诊断文案里取出类名（取不到返回 {@code null}）。
+	 */
+	private static String unresolvedClassOf(String diagnostic) {
+		if (diagnostic == null) return null;
+		int separator = diagnostic.lastIndexOf(": ");
+		return separator < 0 ? null : diagnostic.substring(separator + 2).trim();
+	}
+
+	/**
+	 * 诊断归因：读不到字节的对象若是「织入期生成的合成内部类」，点名并给出唯一的补救路径。
+	 *
+	 * <p>Mixin 的 {@code InnerClassGenerator} 在织入期按 {@code Target$Anonymous$<hex>} 生成合成内部类，
+	 * 并把名字登记进目标类的 {@code nestMembers}。这类字节磁盘上没有、也不经过 Remold 的
+	 * {@code ClassFileTransformer}，于是 Nest 扫描只能判 {@code incomplete}、成员可见性只能判
+	 * "无法确定"，两条路径都 fail-closed。不把归因写进日志，读者会去找一个根本不存在的
+	 * {@code .class}，而真正的补救动作是让织入方把字节回灌到 {@link remold.BytecodeSources}。</p>
+	 *
+	 * @param className 类名（内部名或点分名）
+	 * @return 归因后缀；无提示时返回空串
+	 */
+	private static String missingBytecodeHint(String className) {
+		if (className == null || className.isEmpty()) return "";
+		int separator = Math.max(className.lastIndexOf('/'), className.lastIndexOf('.'));
+		String simple = className.substring(separator + 1);
+		if (simple.contains("$Anonymous$")) {
+			return " — " + simple + " is a synthetic inner class generated at weaving time"
+				+ " (Mixin InnerClassGenerator): it has no .class on the classpath and never passes"
+				+ " Remold's ClassFileTransformer. Its bytes must be registered with"
+				+ " remold.BytecodeSources (key = internal name) by the weaving plugin; without that"
+				+ " bytecode re-feed the metadata stays unresolvable and this decision stays"
+				+ " fail-closed.";
+		}
+		return " — if this member is a synthetic inner class produced by a weaving framework"
+			+ " (Mixin/Forge/NeoForge), its bytecode exists only in memory and must be re-fed to"
+			+ " remold.BytecodeSources; otherwise this stays fail-closed by design.";
 	}
 
 	private static boolean isStackBalanced(Frame<SourceValue>[] frames,

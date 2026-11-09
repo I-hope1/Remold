@@ -74,9 +74,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `core` `remold.reflect.mixin`: extracted the Mixin config-diff / new-Mixin registration logic into a
-  loader-neutral, reflection-only engine (`MixinConfigDiffer`, `NewMixinRegistrar`, `LoadedTargetSuppressor`,
-  `MixinConfigContext`). No Mixin/ModLauncher compile-time dependency in core; `plugin-mixin` (Fabric) and
+  loader-neutral, reflection-only engine (`MixinConfigDiffer`, `NewMixinRegistrar`, `MixinConfigContext`).
+  No Mixin/ModLauncher compile-time dependency in core; `plugin-mixin` (Fabric) and
   `plugin-forge` (Forge/NeoForge) are thin adapters.
+- Mixin hot-swap no longer dies with `NoClassDefFoundError: LoadedTargetSuppressor`: the "target already
+  loaded" suppressor now crosses the core boundary as plain JDK functions (`Function`/`Consumer`) instead of
+  a core interface implemented by plugin classes, so a plugin/core version skew degrades to a diagnosable
+  "suppression unavailable" path instead of a linkage error that kills both the success and failure branch.
+- Mixin hot-swap now covers Mixin inner classes: a newly introduced anonymous class inside an `@Inject`
+  handler no longer fails with `ClassNotFoundException` + `innerClass is null` (Remold feeds the new bytes
+  into Mixin's bytecode provider and evicts the upstream negative `ClassInfo` entries), and editing only an
+  already-loaded anonymous class body now redefines the generated `Target$Anonymous$<uuid>` class instead of
+  ending in a silent `[DYNAMIC-REDEFINE] no-op`.
 - Forge/NeoForge: `ModLauncherClassTrackerSpoof` temporarily removes target names from
   `ModLauncherClassTracker.loadedClasses` inside the `prepare()` window, restores them in `finally`, and
   fails closed when the tracker shape is unknown; `ForgeMixinConfigDiff` wires `onAssetsChanged` to the

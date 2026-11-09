@@ -24,13 +24,26 @@ import net.fabricmc.api.ModInitializer;
  * if the Mixin hot reload failed, the old woven handler keeps answering; if only
  * the anonymous class body changed but the generated (conformed) inner class was
  * never regenerated, the old anonymous body keeps answering.</p>
+ *
+ * <p><b>Long-lived instance (stages S5/S7).</b> Labels starting with {@code s5} or
+ * {@code s7} poke one {@link AnonTarget} instance that was created before the first
+ * hot swap. Fields that a hot update adds can only be observed on such an instance:
+ * a {@code new AnonTarget()} runs the new constructor, so it would show the new
+ * field even when the existing instances were never patched. For those labels the
+ * probe also prints {@code [ANON] <label>-fresh poke=<value>} from a brand new
+ * instance, which is the control separating "the whole stage is broken" from "only
+ * the live instance was left unpatched".</p>
  */
 public class AnonProbe implements ModInitializer {
 
     private static final long TICK_MS = 2000L;
 
+    /** Created once, before any hot swap; the observation point for added fields. */
+    private static AnonTarget longLived;
+
     @Override
     public void onInitialize() {
+        longLived = new AnonTarget();
         String dir = System.getProperty("anon.dir", "run");
         Thread thread = new Thread(() -> loop(Paths.get(dir)), "anon-probe");
         thread.setDaemon(true);
@@ -45,8 +58,12 @@ public class AnonProbe implements ModInitializer {
             try {
                 for (Path trigger : triggers(dir)) {
                     String label = trigger.getFileName().toString().replace(".trigger", "");
-                    String value = new AnonTarget().poke();
-                    System.out.println("[ANON] " + label + " poke=" + value);
+                    boolean liveInstanceState = label.startsWith("s5") || label.startsWith("s7");
+                    AnonTarget target = liveInstanceState ? longLived : new AnonTarget();
+                    System.out.println("[ANON] " + label + " poke=" + target.poke());
+                    if (liveInstanceState) {
+                        System.out.println("[ANON] " + label + "-fresh poke=" + new AnonTarget().poke());
+                    }
                     Files.deleteIfExists(trigger);
                     System.out.println("[ANON] " + label + "-DONE");
                 }

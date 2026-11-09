@@ -102,8 +102,13 @@ build_jars() {
       || { tail -30 "$WORK/build-jars.log"; die "repo gradle build failed"; }
   fi
   AGENT="$REPO/core/build/libs/remold-agent.jar"
-  PLUGIN_MIXIN="$REPO/plugin-mixin/build/libs/remold-plugin-mixin-0.2.5.jar"
-  PLUGIN_FABRIC="$REPO/plugin-fabric/build/libs/remold-plugin-fabric-0.2.5.jar"
+  # Version comes from gradle.properties (single source of truth): hardcoding it
+  # breaks the probe after every release because the plugin jar names carry it.
+  local remold_ver
+  remold_ver="$(sed -n 's/^remoldVersion=//p' "$REPO/gradle.properties" | head -n 1)"
+  [ -n "$remold_ver" ] || die "cannot read remoldVersion from gradle.properties"
+  PLUGIN_MIXIN="$REPO/plugin-mixin/build/libs/remold-plugin-mixin-$remold_ver.jar"
+  PLUGIN_FABRIC="$REPO/plugin-fabric/build/libs/remold-plugin-fabric-$remold_ver.jar"
   for f in "$AGENT" "$PLUGIN_MIXIN" "$PLUGIN_FABRIC"; do
     [ -f "$f" ] || die "missing jar: $f"
   done

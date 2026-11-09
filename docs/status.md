@@ -7,9 +7,9 @@
 
 | 审计元数据项 | 内容与规格说明 |
 |:---|:---|
-| **基准提交 (Baseline Commit)** | `71fb261` (分支: `main`，`v0.2.6` 发布前基线（发布提交见 git log）；上一基准 `57d381c`，`v0.2.5` 已发布)。v0.2.6 内容：两阶段 Schema-First 读穿保护、L1 存量初值重放 + A 档 Kotlin `apply {}` 重放、Mixin 匿名/内部类热更闭环、同形匿名类歧义消解 + 持有者点名、启动期门闩 + 批次看门狗、Class/资源防抖分离（逐项见 §0.5～§0.10） |
+| **基准提交 (Baseline Commit)** | `71fb261` (分支: `main`，`v0.2.6` 代码基线；`v0.2.6` 已发布，tag `2159d21`；上一基准 `57d381c`，`v0.2.5` 已发布)。v0.2.6 内容：两阶段 Schema-First 读穿保护、L1 存量初值重放 + A 档 Kotlin `apply {}` 重放、Mixin 匿名/内部类热更闭环、同形匿名类歧义消解 + 持有者点名、启动期门闩 + 批次看门狗、Class/资源防抖分离（逐项见 §0.5～§0.10） |
 | **发布说明** | [`releases/v0.2.6.md`](releases/v0.2.6.md) |
-| **最后更新时间** | 2026-11-09（v0.2.6 封板：两阶段 Schema-First 读穿保护、L1/A 档存量初值重放、Mixin 匿名/内部类热更闭环、同形匿名类歧义消解 + 持有者点名、启动期门闩 + 批次看门狗、Class/资源防抖分离；2026-11-08：v0.2.5 已发布；JitPack 坐标对齐；Fabric 主模板切回 1.21.1 并加入客户端 HotSwap Toast；1.21.4 客户端 gametest 移至 `tests/fabric-gametest-1.21.4/`；新增 Mixin 类运行期登记；Mixin 配置删除/重新加入；Class/资源防抖分离） |
+| **最后更新时间** | 2026-11-09（v0.2.6 已发布：两阶段 Schema-First 读穿保护、L1/A 档存量初值重放、Mixin 匿名/内部类热更闭环、同形匿名类歧义消解 + 持有者点名、启动期门闩 + 批次看门狗、Class/资源防抖分离；2026-11-08：v0.2.5 已发布；JitPack 坐标对齐；Fabric 主模板切回 1.21.1 并加入客户端 HotSwap Toast；1.21.4 客户端 gametest 移至 `tests/fabric-gametest-1.21.4/`；新增 Mixin 类运行期登记；Mixin 配置删除/重新加入；Class/资源防抖分离） |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |
 | **更新触发条件** | 任何合入包含特性落地、架构偏离、安全门调整、测试基线变更或发现已知缺陷/残余风险的 PR/commit 时，必须同步原子化更新本文件。提交时由作者/维护者更新基准哈希。 |
 | **管辖范围与边界声明** | 本状态表权威管辖：<br>1. **匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)**（[`docs/topology/`](topology/)）<br>2. **存量初始化修复器 (InitFix / Legacy Instance & Static Reinitialization)**（[`docs/initfix/`](initfix/)）<br>3. **物理内存偏移稳定性与第三方缓存驱逐 (Physical Memory Offset Stability & Reflection Cache Eviction)**（[`docs/offset/`](offset/)）<br>*边界与后续治理声明*：同属字节码重映射体系的 `LambdaAligner`（Lambda 表达式对齐器）以及 Mindustry UI 胶水层（`CellPropertyRef` / 动态参数表达式指纹），其实现状态当前由各自单元测试覆盖（`CellHelperTest` 35 个用例持续全绿、`LambdaAlignerTest` 等）；它们的详细状态审计矩阵尚未并入本总表，计划在下一轮治理中统一建立验收标准并纳入。 |
@@ -106,7 +106,7 @@
 
 ---
 
-## 0.5 v0.2.6：L1 存量初值重放第一版（v0.2.6 封板 2026-11-09；本轮 2026-11-08）
+## 0.5 v0.2.6：L1 存量初值重放第一版（v0.2.6 已发布 2026-11-09；本轮 2026-11-08）
 
 | 能力 | 状态 | 代码位置 | 验收证据 |
 |:---|:---:|:---|:---|
@@ -114,7 +114,7 @@
 
 ---
 
-## 0.6 v0.2.6：A 档 Kotlin `apply {}` 静态持有者初值重放（v0.2.6 封板 2026-11-09；本轮 2026-11-08）
+## 0.6 v0.2.6：A 档 Kotlin `apply {}` 静态持有者初值重放（v0.2.6 已发布 2026-11-09；本轮 2026-11-08）
 
 | 能力 | 状态 | 代码位置 | 验收证据 |
 |:---|:---:|:---|:---|
@@ -122,7 +122,7 @@
 
 ---
 
-## 0.7 v0.2.6：两阶段 Schema-First 读穿保护（v0.2.6 封板，2026-11-09）
+## 0.7 v0.2.6：两阶段 Schema-First 读穿保护（v0.2.6 已发布，2026-11-09）
 
 | 能力 | 状态 | 代码位置 | 验收证据 |
 |:---|:---:|:---|:---|
@@ -130,7 +130,7 @@
 
 ---
 
-## 0.8 v0.2.6：Mixin 匿名/内部类热更闭环（v0.2.6 封板，2026-11-09）
+## 0.8 v0.2.6：Mixin 匿名/内部类热更闭环（v0.2.6 已发布，2026-11-09）
 
 真实 Fabric 1.21.1 客户端用「普通类 vs Mixin 内」的匿名类 + Lambda 对照试验（R1~R5）暴露三段断层。本节按**已观测**口径登记；仍未闭环或未验证的项已并入 §0.10 的 v0.2.6 统一残余风险清单，不在此重复。
 
@@ -144,7 +144,7 @@
 >
 > 仍开放的残余（plugin/core 版本错位、覆盖层登记项生存期、匿名类成员结构变化需重启、真实客户端复跑）见 §0.10 统一清单第 6～9 条。
 
-## 0.9 v0.2.6：ANON_ALIGN 同形歧义 / 合成类元数据 / 启动期门闩（v0.2.6 封板，2026-11-09）
+## 0.9 v0.2.6：ANON_ALIGN 同形歧义 / 合成类元数据 / 启动期门闩（v0.2.6 已发布，2026-11-09）
 
 真实 Fabric 1.21.1 KnotServer 探针（`tests/fabric-mixin-probe/anon/`）扩展到 S0~S7 后暴露的 3 个深水区问题。按**已观测**口径登记；本轮五条残余风险中 1/2/3/5 已在 §0.10 收口，第 4 条并入 §0.10 统一清单（编号台账见 §0.10 开头）。
 
@@ -155,7 +155,7 @@
 | MC 启动期落批次导致 JVM 挂死（`Done (` 之前类加载 + Mixin 转换高频并发） | 🔶 | `core/src/remold/StartupGate.java`、`core/src/remold/BatchWatchdog.java`、`core/src/remold/RemoldAgent.triggerDueHotswap` 漏斗接线、`api/src/remold/HotswapPlugin.isHostReady()` | **已观测（单测）**：`remold.startup.*` 19 例（该轮读数；收口后为 30 例、见 §0.10；门闩状态机、未就绪不落批次、就绪后触发一次、看门狗超阈值才 dump 且同批次只一次、`isHostReady` 默认 true 时行为不变）；**变异**：反打 `RemoldAgent` 修复 diff killed（5 条 wiring 断言红），另两次外科变异（门闩恒真 → 4 红、看门狗去 once → 1 红）均已恢复。**后续进展**：`plugin-fabric` 已实现 `HostReadinessProbe`（见 §0.10，真机未验证）；`plugin-forge` 侧仍未实现，实际游戏里门闩仍可能"首次触发即放开"；**精确挂死线程栈仍未抓到**——看门狗即为下一次复发的取证器 |
 | 探针仪器扩展（S4 长生命周期字段持有 / S5 `@Unique private` 访问 / S6 1→2 重编号 / S7 字段初始化器构造器可见性） | ✅ | `tests/fabric-mixin-probe/anon/`（`run-anon.sh` + 6 个新 stage + `ANON_EXPECT` 模式 + 独立证据文件） | 真实 KnotServer 读数（基线代码）：S4 GREEN、S5 GREEN、S6 RED、S7 RED；合入 E 后 **S6 转 GREEN**；S3 去触发对照全程稳定。**实证回答**：`Nest scan incomplete` 期间 `@Unique private` 字段/方法访问**仍然正确**（S5 终局值一致）——说明该元数据缺失只影响 Remold 自身的安全门视图，不影响 JVM 侧 nest 访问控制。**结局**：S7 的红基线由 §0.10 的 `refeedForTarget` 关闭，S0~S7 现全绿（`run-anon.sh` exit 0 / `EXT_GREEN=1`） |
 
-## 0.10 v0.2.6：收口轮 · S0~S7 全绿 / 持有者点名 / 门闩接线（v0.2.6 封板，2026-11-09）
+## 0.10 v0.2.6：收口轮 · S0~S7 全绿 / 持有者点名 / 门闩接线（v0.2.6 已发布，2026-11-09）
 
 §0.9 的五条残余风险（1 S7 时序缺口、2 看门狗覆盖范围、3 门闩未接宿主、4 `BytecodeSources` 常驻内存无上限、5 字段持有者点名边界）中，1/2/3/5 在本轮收口；4 并入下方统一清单。§0.8 的覆盖层登记项生存期、plugin/core 版本错位、匿名类结构变化限制与真实客户端复跑同样并入该清单。
 
@@ -619,7 +619,7 @@
 | Gradle 二进制插件 (`gradle-plugin`) | 🔶 | `gradle-plugin/`、`gradle-plugin/build.gradle`、`gradle-plugin/README.md` | 提供 `io.github.i-hope1.remold` 二进制插件，支持 Kotlin DSL 与 Groovy DSL 类型安全配置 `remold { ... }`、配置缓存与惰性解析；`RemoldPluginTest` 11/11、`RemoldScriptShimTest` 单元测试通过；JVM 参数注入覆盖 `client`、`server` 与 gametest 运行容器（Fabric Loom / ForgeGradle / NeoForge ModDevGradle，`./gradlew runServer`、`runClientGameTest` 同拿 `-javaagent`），IDEA Loom 同步覆盖 `Minecraft_Server.xml`（Application 风格 `VM_PARAMETERS` 与 Gradle 风格 `vmOptions`）；仓库根 `remold.gradle(.kts)` 已瘦身为薄壳（仅按 Class 应用本插件，实现在本模块），jar 内附带一份副本供离线取用。**Gradle Plugin Portal 尚未上线**：`publishPlugins` 已执行并进入人工审核，审核以「lacks documentation in English」退回、该次提交已被取消（官方邮件明确可复用同一版本号）；据此已补英文插件文档 `gradle-plugin/README.md`、把 `website` 指到该英文文档、并在 `README.md` 顶部加英文摘要，待重新 `publishPlugins` 后由审核结果定论。另：门户已对未声明 Gradle 特性兼容性（`compatibility { features { configurationCache } }`，需 plugin-publish ≥ 2.1.0）的发布告警并计划改为拒绝，当前仍是 1.3.1 |
 | GitHub Release 发布物 | ✅ | `.github/workflows/release.yml` | Tag `v*` 触发全量前置验证矩阵（javac 8/11/17/21/25 测试、DCEVM 测试、P0.5 探针与 Linux/Android 原生库编译），全绿后自动打包 17 项 Release 资产并发布到 GitHub Releases，消除资产早于构建事故；支持 `workflow_dispatch` 手动触发与 `--clobber` 覆写更新 |
 | Class / 资源防抖分离 | ✅ | `core/src/remold/DebounceWindow.java`（纯状态机）、`RemoldAgent.handleFileChange/handleJarChange/handleAssetChange`、`gradle-plugin` 的 `assetShakeMs` | Class/jar 事件每次重置独立静默窗口（默认 800ms）；资源/配置流独立窗口（默认 250ms），到期只 drain 资源队列，不提前带出 Class 批次；手动 `triggerHotswap()` 取消挂起调度、清空两条流并强制 drain 全部。`DebounceWindowTest` 6/6（无 sleep：事件重置、双流互不影响、nextDelay、clear）、`AssetShakeConfigTest` 1/1；全量 `check` 514/0 skipped。**未验证**：真实 FileWatcher 的 OS 事件节奏（单测只覆盖状态机，未测 Windows 文件系统时延分布） |
-| 模组模板基线（1.21.1 主模板 + 客户端 HotSwap Toast） | ✅ | `minecraft-fabric-template/`（MC 1.21.1 / yarn 1.21.1+build.3 / loader 0.16.9 / fabric-api 0.105.0+1.21.1 / Loom 1.17.21；客户端入口 `com.example.client.ExampleModClient`） | JBR 21（`jbrsdk_jcef-21.0.9`）`./gradlew build --offline` **exit 0**：`HotSwapToastModelTest` **10 tests / 0 skipped / 0 failures**；产物 `build/libs/example_mod-1.0.0.jar` 内含 `com/example/client/*` 且 jar 内 `fabric.mod.json` 含 `client` 入口；Toast 按 1.21.1 的 `Toast.draw(DrawContext, ToastManager, long)` 适配（1.21.1 无 `Toast.update`，展示计时在 `draw` 内完成），结构化报告依赖新版 Agent；v0.2.6 封板并带结构化批次报告，旧版 Agent 仍显示明确的降级卡片；**未验证**：卡片实际渲染（本环境无显示会话，仅观测到入口/监听器注册日志路径与模型单测），手动步骤见模板 README |
+| 模组模板基线（1.21.1 主模板 + 客户端 HotSwap Toast） | ✅ | `minecraft-fabric-template/`（MC 1.21.1 / yarn 1.21.1+build.3 / loader 0.16.9 / fabric-api 0.105.0+1.21.1 / Loom 1.17.21；客户端入口 `com.example.client.ExampleModClient`） | JBR 21（`jbrsdk_jcef-21.0.9`）`./gradlew build --offline` **exit 0**：`HotSwapToastModelTest` **10 tests / 0 skipped / 0 failures**；产物 `build/libs/example_mod-1.0.0.jar` 内含 `com/example/client/*` 且 jar 内 `fabric.mod.json` 含 `client` 入口；Toast 按 1.21.1 的 `Toast.draw(DrawContext, ToastManager, long)` 适配（1.21.1 无 `Toast.update`，展示计时在 `draw` 内完成），结构化报告依赖新版 Agent；v0.2.6 已发布并带结构化批次报告，旧版 Agent 仍显示明确的降级卡片；**未验证**：卡片实际渲染（本环境无显示会话，仅观测到入口/监听器注册日志路径与模型单测），手动步骤见模板 README |
 | 1.21.4 客户端 gametest 探针 | 🔶 | `tests/fabric-gametest-1.21.4/`（独立 Gradle 工程：MC 1.21.4 / yarn 1.21.4+build.8 / loader 0.16.14 / fabric-api 0.119.4+1.21.4 / Loom 1.17.21） | 由 1.21.4 模板的 tracked 文件裁剪而来（删除 Toast 的 `src/main/java/com/example/client/`、`src/test/` 与 `client` 入口点；保留 wand/Mixin/`src/gametest/` 与截图模板）；JBR 21 `./gradlew compileJava --offline` 与 `./gradlew compileGametestJava --offline` 均 **exit 0**；日志确认真实注入：`[Remold] Injected hot-reload agent parameters into Fabric Loom runClientGameTest!`；`configure<FabricApiExtension>{configureTests{...}}` 生成 `gametest` 源集 + `clientGameTest` 运行配置。**端到端 `runClientGameTest` 证据沿用 1.21.4 模板时期（`4d459ff`：真客户端建世界 → 热栏截图断言 → 真实右键聊天栏 `[Remold]`）；本次移动后未重跑**（无显示环境），不计为新增验证 |
 | Maven Central 分发 | ⬜ | `build.gradle` 的 `group = 'io.github.i-hope1.remold'` | 仅 `README.md` 标注为「预留坐标」，未实际发布；走通需 Central Portal + GPG 签名 + `io.github.<user>` 命名空间验证。当前 `publishToMavenLocal` 落盘该 group 仅供本机联调兜底（`remold.gradle(.kts)` 的 m2 候选路径按文件探测，文件不存在即跳过） |
 | mod-tools 消费侧切换与内部副本清理 | ⬜ | 本仓库之外（mod-tools 仓库） | 依赖坐标切换与仓内 core 副本删除均发生在 mod-tools 仓库，本仓库无法提供验收证据；其前置条件（JitPack 坐标可用）已满足 |

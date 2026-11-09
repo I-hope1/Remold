@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "anon_probe",
+  "version": "1.0.0",
+  "name": "Remold anonymous-mixin probe",
+  "description": "Reproduction fixture for Mixin$N (anonymous class) hot-swap on a real Fabric KnotServer.",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["com.example.probe.AnonProbe"]
+  },
+  "mixins": ["anon_probe.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~1.21.1"
+  }
+}

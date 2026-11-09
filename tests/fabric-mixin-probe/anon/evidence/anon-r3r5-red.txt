@@ -1,0 +1,43 @@
+# Anonymous-class (Mixin$N) hot-swap probe — RED baseline
+date: 2026-11-09T10:48:47+08:00
+git HEAD: 0e40158a996eac4cd2dfcf763c7eb451c4792ef0
+agent jar sha256: faac81f23da05643b3f6432a784cbdc09cd219fdcf58a065d693040cc023170d
+plugin-mixin sha256: 6b9e16a71399bc93e36844a3b71bb701be2318ede18d4a8dc0beec763e7df692
+plugin-fabric sha256: 526adc190156d3286360c5413c93e25a4a0cd123ed60012db8f318ffeaf09942
+mod jar (run/mods) sha256: c0df79e5760ecea682a06892aecfb4a2bf36f2466b9cd9b33c257c18eea1eb8b
+jbr: C:/Users/ASUS/.jdks/JBR-21
+mixer: sponge-mixin 0.8.7 (Fabric KnotServer), minecraft 1.21.1
+launch: E:/Users/ASUS/Desktop/Mods/nipx-hotswap/.battle/worktrees/20261109020010-169d/c/tests/fabric-mixin-probe/anon/build/proj/build/anon/server.args (mod loaded from run/mods, Gradle output off the runtime classpath)
+S2 preconditions: outer s1b=b43e20a40d81410e s2=b43e20a40d81410e | anon s1=c91e96a547332b0d s2=d455c30e1d4b985f
+
+=== stage verdicts (end result = AnonTarget.poke() returned by the live class) ===
+S0 BASELINE  poke=hook-s0  -> PASS (Mixin woven; no anonymous class yet)
+S1 R3        poke=hook-s0  -> RED HIT (new AnonTargetMixin$1.class is invisible to the Mixin bytecode provider; reload aborts)
+S1b R3b      poke=anon-v1  -> PASS (anonymous class on the real classpath; reload + target re-weave succeed)
+S2 R5        poke=anon-v1  -> RED HIT (only the anonymous body changed; the live body is still v1)
+S3 CONTROL   poke=anon-v1/anon-v1  -> PASS (no change => no redefine, value stable)
+
+=== S1 excerpt (R3 failure) ===
+[10:48:14] [HotSwap-Scheduler/WARN]: Error loading class: com/example/anon/AnonTargetMixin$1 (java.lang.ClassNotFoundException: com/example/anon/AnonTargetMixin$1)
+[10:48:14] [HotSwap-Scheduler/INFO]: [STDOUT]: [Remold] [WARN] [Mixin] Failed to reload com.example.anon.AnonTargetMixin, please restart client: Cannot invoke "org.spongepowered.asm.mixin.transformer.ClassInfo.isProbablyStatic()" because "innerClass" is null
+
+=== S1b excerpt (workaround) ===
+[10:48:25] [HotSwap-Scheduler/INFO]: [STDOUT]: [Remold] [Mixin] com.example.anon.AnonTargetMixin reloaded; affected target(s): [com.example.game.AnonTarget]
+[10:48:26] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [DYNAMIC-REDEFINE] Successfully redefined com.example.game.AnonTarget
+[10:48:26] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [Mixin] Target class com.example.game.AnonTarget re-woven with updated mixin and redefined
+
+=== S2 excerpt (R5 decision lines) ===
+[10:48:34] [HotSwap-Scheduler/INFO]: [STDOUT]: [Remold] [Mixin] com.example.anon.AnonTargetMixin reloaded; affected target(s): [com.example.game.AnonTarget]
+[10:48:34] [HotSwap-Scheduler/INFO]: [STDOUT]: [Remold] [WARN] [Mixin] com.example.anon.AnonTargetMixin$1 is not registered in the startup Mixin config and runtime registration failed. Restart once so the config picks it up (editing an existing Mixin stays hot-swappable).
+[10:48:34] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [DYNAMIC-REDEFINE] no-op: com.example.game.AnonTarget runtime bytecode equals the baseline; no redefine performed (nothing to change).
+[10:48:34] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [Mixin] Target class com.example.game.AnonTarget re-woven with updated mixin and redefined
+
+=== S3 excerpt (must be empty) ===
+<none>
+
+=== S0 startup excerpt ===
+[Remold] [Mixin] Re-weaving bridge registered (plugin-mixin)
+[Remold] [Fabric] Dev-runtime integration active (class path groups + mods guard)
+[Remold] Watch paths updated across sources:
+[10:47:58] [main/INFO]: Loading 5 mods:
+	- anon_probe 1.0.0

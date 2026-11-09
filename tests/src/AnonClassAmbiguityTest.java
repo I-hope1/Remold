@@ -66,6 +66,70 @@ class AnonClassAmbiguityTest {
 		+ "  }\n"
 		+ "}\n";
 
+	/** v1，但宿主**没有**任何字段：对照用，日志不得凭空点名“持有者字段”。 */
+	private static final String V1_PAIR_NO_HOLDER =
+		"package amb;\n"
+		+ "public class Host {\n"
+		+ "  public String localValue() {\n"
+		+ "    java.util.function.Supplier<String> a = new java.util.function.Supplier<String>() {\n"
+		+ "      public String get() { return \"a1\"; }\n"
+		+ "    };\n"
+		+ "    java.util.function.Supplier<String> b = new java.util.function.Supplier<String>() {\n"
+		+ "      public String get() { return \"b1\"; }\n"
+		+ "    };\n"
+		+ "    return a.get() + b.get();\n"
+		+ "  }\n"
+		+ "}\n";
+
+	/** v2 的对应版本：两个匿名类都只改字面量。 */
+	private static final String V2_PAIR_NO_HOLDER =
+		"package amb;\n"
+		+ "public class Host {\n"
+		+ "  public String localValue() {\n"
+		+ "    java.util.function.Supplier<String> a = new java.util.function.Supplier<String>() {\n"
+		+ "      public String get() { return \"a2\"; }\n"
+		+ "    };\n"
+		+ "    java.util.function.Supplier<String> b = new java.util.function.Supplier<String>() {\n"
+		+ "      public String get() { return \"b2\"; }\n"
+		+ "    };\n"
+		+ "    return a.get() + b.get();\n"
+		+ "  }\n"
+		+ "}\n";
+
+	/**
+	 * v1：两个同形匿名类都被**赋值流**直接写进宿主字段（{@code NEW <anon> -> <init> -> PUTFIELD}），
+	 * 因此持有者字段是 proven 强度，而不是“父类型/接口候选”。
+	 */
+	private static final String V1_PAIR_DIRECT_HELD =
+		"package amb;\n"
+		+ "public class Host {\n"
+		+ "  public java.util.function.Supplier<String> a;\n"
+		+ "  public java.util.function.Supplier<String> b;\n"
+		+ "  public void install() {\n"
+		+ "    this.a = new java.util.function.Supplier<String>() {\n"
+		+ "      public String get() { return \"a1\"; }\n"
+		+ "    };\n"
+		+ "    this.b = new java.util.function.Supplier<String>() {\n"
+		+ "      public String get() { return \"b1\"; }\n"
+		+ "    };\n"
+		+ "  }\n"
+		+ "}\n";
+
+	private static final String V2_PAIR_DIRECT_HELD =
+		"package amb;\n"
+		+ "public class Host {\n"
+		+ "  public java.util.function.Supplier<String> a;\n"
+		+ "  public java.util.function.Supplier<String> b;\n"
+		+ "  public void install() {\n"
+		+ "    this.a = new java.util.function.Supplier<String>() {\n"
+		+ "      public String get() { return \"a2\"; }\n"
+		+ "    };\n"
+		+ "    this.b = new java.util.function.Supplier<String>() {\n"
+		+ "      public String get() { return \"b2\"; }\n"
+		+ "    };\n"
+		+ "  }\n"
+		+ "}\n";
+
 	/**
 	 * 持有者点名夹具：字段声明为匿名类**所实现的接口**（真实客户端形态），赋值经局部变量中转，
 	 * 因此赋值流必须放弃、只能给出"父类型/接口候选"。
@@ -168,7 +232,7 @@ class AnonClassAmbiguityTest {
 	// ---------------------------------------------------------------- 3. 全组零存活确定性兜底
 
 	@Test
-	void zeroLiveInstancesAllowDeterministicDeadPair() {
+	void zeroScanVisibleInstancesAllowDeterministicPair() {
 		Map<String, byte[]> v1 = LayoutGateAssert.compile(Map.of(HOST_DOT, V1_PAIR));
 		Map<String, byte[]> v2 = LayoutGateAssert.compile(Map.of(HOST_DOT, V2_PAIR));
 
@@ -177,13 +241,13 @@ class AnonClassAmbiguityTest {
 
 		AnonClassAligner.Result r = align(v1, v2, name -> false);
 
-		assertTrue(r.stats.deterministicDeadPairs >= 2,
-			"both ambiguous old classes have zero live instances, so the approved fallback must pair them; state="
+		assertTrue(r.stats.deterministicZeroScanPairs >= 2,
+			"both ambiguous old classes have zero scan-visible live instances, so the fallback must pair them; state="
 				+ r.stats + " orphans=" + r.orphanOldClasses);
 		assertEquals(0, r.stats.ambiguousPairs,
 			"a fallback-resolved group must not be reported as ambiguous any more; state=" + r.stats);
 		assertTrue(r.orphanOldClasses.isEmpty(),
-			"the dead-pair fallback must leave no orphan at all; orphans=" + r.orphanOldClasses);
+			"the scan-zero fallback must leave no orphan at all; orphans=" + r.orphanOldClasses);
 	}
 
 	@Test
@@ -194,14 +258,116 @@ class AnonClassAmbiguityTest {
 		String liveDotted = anonNames(v1).get(0);
 		AnonClassAligner.Result r = align(v1, v2, name -> name.equals(liveDotted));
 
-		assertEquals(0, r.stats.deterministicDeadPairs,
+		assertEquals(0, r.stats.deterministicZeroScanPairs,
 			"guardrail: one live candidate disables the liveness fallback for the whole group; state=" + r.stats);
 		assertTrue(r.stats.ambiguousPairs >= 1,
 			"the ambiguity must still be counted when the fallback is blocked; state=" + r.stats);
 		assertFalse(r.orphanOldClasses.isEmpty(),
 			"with live instances the old classes must stay orphans (live objects keep running old code)");
-		assertTrue(r.stats.ambiguousDetail.stream().anyMatch(x -> x.contains("live=1")),
+		assertTrue(r.stats.ambiguousDetail.stream().anyMatch(x -> x.contains("scanVisibleLive=1")),
 			"the diagnostic must record live-instance counts: " + r.stats.ambiguousDetail);
+	}
+
+	// ---------------------------------------------------------------- 3b. Tier 4.5 文案：扫描可见 ≠ 实例已死
+
+	/**
+	 * The client report: the Tier 4.5 line said {@code deterministic-dead-pair (0 live instances)}
+	 * while a field-held instance of the paired class was demonstrably alive and executing
+	 * ({@code fieldAnon v2/v3} printed right after). The liveness predicate only measures what the
+	 * heap scan could see, so the line must say exactly that and must not be readable as a safety
+	 * guarantee ("the instances are dead").
+	 */
+	@Test
+	void zeroScanPairLogStatesScanVisibilityNotDeath() {
+		Map<String, byte[]> v1 = LayoutGateAssert.compile(Map.of(HOST_DOT, V1_PAIR));
+		Map<String, byte[]> v2 = LayoutGateAssert.compile(Map.of(HOST_DOT, V2_PAIR));
+
+		List<String> infos = new ArrayList<>();
+		List<String> warns = new ArrayList<>();
+		AnonClassAligner.Result r = alignCapturing(v1, v2, name -> false, infos, warns);
+
+		assertTrue(r.stats.deterministicZeroScanPairs >= 2,
+			"precondition: the scan-zero fallback must pair the group; state=" + r.stats);
+		String line = firstLine(infos, "[ANON_ALIGN] deterministic-zero-scan-pair");
+		assertNotNull(line, "the fallback must still leave an explicit audit line; infos=" + infos + " warns=" + warns);
+		assertTrue(line.contains("(scan-visible live instances: 0)"),
+			"the line must state what was actually measured (scan visibility): " + line);
+		assertTrue(line.contains("扫描可见的活实例为 0"),
+			"the requested Chinese wording must be present: " + line);
+		assertFalse(line.contains("deterministic-dead-pair") || line.contains("(0 live instances)"),
+			"the old wording claimed the instances are dead; it must be gone: " + line);
+		assertTrue(line.contains("不是“实例已死”的证明"),
+			"the line must explicitly deny that 0 visible instances proves death: " + line);
+		assertTrue(line.contains("审计线索"),
+			"the line must tell the reader to use it as an audit trail: " + line);
+	}
+
+	/**
+	 * The client's shape: the host field is typed as the interface the anonymous class implements
+	 * ({@code fieldAnon} holds the live instance). The same line must name it, at candidate strength.
+	 */
+	@Test
+	void zeroScanPairLogNamesCandidateHolderField() {
+		Map<String, byte[]> v1 = LayoutGateAssert.compile(Map.of(HOST_DOT, V1_PAIR));
+		Map<String, byte[]> v2 = LayoutGateAssert.compile(Map.of(HOST_DOT, V2_PAIR));
+
+		List<String> infos = new ArrayList<>();
+		List<String> warns = new ArrayList<>();
+		alignCapturing(v1, v2, name -> false, infos, warns);
+
+		String line = firstLine(infos, "[ANON_ALIGN] deterministic-zero-scan-pair");
+		assertNotNull(line, "the fallback line must be emitted; infos=" + infos);
+		assertTrue(line.contains("Candidate holder field(s)"),
+			"the interface-typed host field must be reported as a candidate holder: " + line);
+		assertTrue(line.contains("amb/Host.held"),
+			"the candidate must name host + field: " + line);
+		assertTrue(line.contains("the scan's 0 is not proof either"),
+			"candidate-strength evidence must come with the same no-proof caveat: " + line);
+	}
+
+	/** Negative control: no host field references the classes, so the line must not invent a holder. */
+	@Test
+	void zeroScanPairLogStaysSilentAboutHoldersWhenNoneExists() {
+		Map<String, byte[]> v1 = LayoutGateAssert.compile(Map.of(HOST_DOT, V1_PAIR_NO_HOLDER));
+		Map<String, byte[]> v2 = LayoutGateAssert.compile(Map.of(HOST_DOT, V2_PAIR_NO_HOLDER));
+
+		List<String> infos = new ArrayList<>();
+		List<String> warns = new ArrayList<>();
+		AnonClassAligner.Result r = alignCapturing(v1, v2, name -> false, infos, warns);
+
+		assertTrue(r.stats.deterministicZeroScanPairs >= 2,
+			"precondition: the fixture must reach the scan-zero fallback; state=" + r.stats);
+		String line = firstLine(infos, "[ANON_ALIGN] deterministic-zero-scan-pair");
+		assertNotNull(line, "the fallback line must be emitted; infos=" + infos);
+		assertFalse(line.contains("Holder field(s)") || line.contains("Candidate holder field(s)"),
+			"no host field references these classes, so no holder may be named: " + line);
+	}
+
+	/**
+	 * A *proven* holder (assignment flow) is the strongest static evidence that the host keeps such an
+	 * instance. It directly contradicts "0 scan-visible", so the same line must be escalated to warn
+	 * and must list the field.
+	 */
+	@Test
+	void provenHolderEscalatesZeroScanPairToWarn() {
+		Map<String, byte[]> v1 = LayoutGateAssert.compile(Map.of(HOST_DOT, V1_PAIR_DIRECT_HELD));
+		Map<String, byte[]> v2 = LayoutGateAssert.compile(Map.of(HOST_DOT, V2_PAIR_DIRECT_HELD));
+
+		List<String> infos = new ArrayList<>();
+		List<String> warns = new ArrayList<>();
+		AnonClassAligner.Result r = alignCapturing(v1, v2, name -> false, infos, warns);
+
+		assertTrue(r.stats.deterministicZeroScanPairs >= 2,
+			"precondition: the fixture must reach the scan-zero fallback; state=" + r.stats);
+		String line = firstLine(warns, "[ANON_ALIGN] deterministic-zero-scan-pair");
+		assertNotNull(line,
+			"a proven holder must escalate the line to warn; infos=" + infos + " warns=" + warns);
+		assertTrue(line.contains("Holder field(s) that receive this class"),
+			"the proven holder must be named: " + line);
+		assertTrue(line.contains("amb/Host.a") || line.contains("amb/Host.b"),
+			"the proven holder must name host + field: " + line);
+		assertTrue(line.contains("scan-visible live instances: 0"),
+			"the escalated line must keep the measured wording: " + line);
 	}
 
 	// ---------------------------------------------------------------- 4. 字段持有者点名
@@ -372,6 +538,33 @@ class AnonClassAmbiguityTest {
 	}
 
 	// ---------------------------------------------------------------- helpers
+
+	/** Same as {@link #align} but with a logger that records info/warn lines for wording assertions. */
+	private static AnonClassAligner.Result alignCapturing(Map<String, byte[]> oldClasses,
+	                                                      Map<String, byte[]> newClasses,
+	                                                      Predicate<String> live,
+	                                                      List<String> infos, List<String> warns) {
+		RemoldAgent.Logger saved = RemoldAgent.logger;
+		RemoldAgent.logger = new RemoldAgent.Logger() {
+			@Override public void log(String msg) { }
+			@Override public void info(String msg) { infos.add(msg); }
+			@Override public void warn(String msg) { warns.add(msg); }
+			@Override public void error(String msg) { warns.add("ERROR " + msg); }
+			@Override public void error(String msg, Throwable t) { warns.add("ERROR " + msg); }
+		};
+		try {
+			return align(oldClasses, newClasses, live);
+		} finally {
+			RemoldAgent.logger = saved;
+		}
+	}
+
+	private static String firstLine(List<String> lines, String needle) {
+		for (String line : lines) {
+			if (line != null && line.contains(needle)) return line;
+		}
+		return null;
+	}
 
 	private static AnonClassAligner.Result align(Map<String, byte[]> oldClasses, Map<String, byte[]> newClasses,
 	                                            Predicate<String> live) {

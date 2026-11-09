@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- `[ANON_ALIGN]` 的 Tier 4.5 日志不再把“扫描可见的活实例为 0”表述成“实例已死”，也不再把
+  “实例数为 0”当作配对安全性的依据。此前该行写作 `deterministic-dead-pair (0 live instances)`，
+  而真实客户端里字段持有的实例仍然存活并继续执行（`fieldAnon v2/v3`），文案与事实不符。现在该行
+  改为 `deterministic-zero-scan-pair (scan-visible live instances: 0)`，并显式说明：
+  ① 判据只是“本轮 JVMTI 堆扫描对这些旧候选没有可见的存活实例”，扫描结果不能反证不可见实例不存在；
+  ② 放行的另外一条依据是配对双方布局完全兼容；③ 这既不是结构唯一匹配，也不是语义安全结论，
+  只能当作审计线索。宿主字段可能持有时，日志会点名 `proven`（精确描述符/赋值流）与 `candidate`
+  （父类型/接口）两种强度的持有者字段，其中 `proven` 持有者会把该行升级为 `warn`；`AlignmentStats`
+  的计数字段 `deterministicDeadPairs` 更名为 `deterministicZeroScanPairs`（旧名字段保留为
+  `@Deprecated` 同步别名，维持 0.2.6 下游二进制兼容）。同一份
+  liveness 判据派生的 `[ANON-LAYOUT]` / `[LAYOUT-WAIVE]` 放行文案与歧义诊断（`scanVisibleLive=`/
+  `scanVisibleLiveOld=`）同步改用“扫描可见”措辞，`RemoldAgent.hasLiveInstances` 的 Javadoc 补上
+  “false = 本轮扫描没看见，不是实例不存在的证明”的语义边界。Tier 4.5 的判定逻辑与行为不变（仍是全组扫描可见零存活 + 布局 100% 兼容）；
+  没有把“存在持有者字段”并入 liveness 判据——那会把 0.2.6 已消解的字段持有场景重新推回孤儿化，
+  而正确做法是让日志把“扫描可见”与“字段可能持有”两个事实同时摆出来。
+  验证：`AnonClassAmbiguityTest` 17/0（新增 4 个文案/持有者用例，含“无持有字段不得凭空点名”的负向对照；
+  变异检查：把日志文案改回旧词后 4 条断言变红，恢复后复绿）。
+
 ## [0.2.6] - 2026-11-09
 
 ### Added

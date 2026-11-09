@@ -9,7 +9,7 @@
 |:---|:---|
 | **基准提交 (Baseline Commit)** | `71fb261` (分支: `main`，`v0.2.6` 代码基线；`v0.2.6` 已发布，tag `2159d21`；上一基准 `57d381c`，`v0.2.5` 已发布)。v0.2.6 内容：两阶段 Schema-First 读穿保护、L1 存量初值重放 + A 档 Kotlin `apply {}` 重放、Mixin 匿名/内部类热更闭环、同形匿名类歧义消解 + 持有者点名、启动期门闩 + 批次看门狗、Class/资源防抖分离（逐项见 §0.5～§0.10） |
 | **发布说明** | [`releases/v0.2.6.md`](releases/v0.2.6.md) |
-| **最后更新时间** | 2026-11-09（v0.2.6 已发布：两阶段 Schema-First 读穿保护、L1/A 档存量初值重放、Mixin 匿名/内部类热更闭环、同形匿名类歧义消解 + 持有者点名、启动期门闩 + 批次看门狗、Class/资源防抖分离；2026-11-08：v0.2.5 已发布；JitPack 坐标对齐；Fabric 主模板切回 1.21.1 并加入客户端 HotSwap Toast；1.21.4 客户端 gametest 移至 `tests/fabric-gametest-1.21.4/`；新增 Mixin 类运行期登记；Mixin 配置删除/重新加入；Class/资源防抖分离） |
+| **最后更新时间** | 2026-11-09（下一版本未发布：ANON_ALIGN Tier 4.5 日志文案纠偏 —— “扫描可见的活实例为 0”不再表述为“实例已死/安全”，并点名 proven/candidate 持有者字段，见 §0.11；同一日：v0.2.6 已发布：两阶段 Schema-First 读穿保护、L1/A 档存量初值重放、Mixin 匿名/内部类热更闭环、同形匿名类歧义消解 + 持有者点名、启动期门闩 + 批次看门狗、Class/资源防抖分离；2026-11-08：v0.2.5 已发布；JitPack 坐标对齐；Fabric 主模板切回 1.21.1 并加入客户端 HotSwap Toast；1.21.4 客户端 gametest 移至 `tests/fabric-gametest-1.21.4/`；新增 Mixin 类运行期登记；Mixin 配置删除/重新加入；Class/资源防抖分离） |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |
 | **更新触发条件** | 任何合入包含特性落地、架构偏离、安全门调整、测试基线变更或发现已知缺陷/残余风险的 PR/commit 时，必须同步原子化更新本文件。提交时由作者/维护者更新基准哈希。 |
 | **管辖范围与边界声明** | 本状态表权威管辖：<br>1. **匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)**（[`docs/topology/`](topology/)）<br>2. **存量初始化修复器 (InitFix / Legacy Instance & Static Reinitialization)**（[`docs/initfix/`](initfix/)）<br>3. **物理内存偏移稳定性与第三方缓存驱逐 (Physical Memory Offset Stability & Reflection Cache Eviction)**（[`docs/offset/`](offset/)）<br>*边界与后续治理声明*：同属字节码重映射体系的 `LambdaAligner`（Lambda 表达式对齐器）以及 Mindustry UI 胶水层（`CellPropertyRef` / 动态参数表达式指纹），其实现状态当前由各自单元测试覆盖（`CellHelperTest` 35 个用例持续全绿、`LambdaAlignerTest` 等）；它们的详细状态审计矩阵尚未并入本总表，计划在下一轮治理中统一建立验收标准并纳入。 |
@@ -150,7 +150,7 @@
 
 | 修复 / 变更 | 状态 | 代码位置 | 验收证据 |
 |:---|:---:|:---|:---|
-| ANON_ALIGN 同形匿名类 N-to-1 歧义：同一方法内两个同接口同结构的匿名类让 Tier 3/4 双向唯一失效，编辑被迫孤儿化（客户端 R2b：`topology-equal candidates 2 -> 2, topology-decided 0`），字段持有的存活实例继续跑旧码 | ✅ | `core/src/remold/AnonClassAligner.java`（Tier 3.5 体相似度、Tier 4.5 liveness 兜底、点名诊断、`findHoldingFields`） | **单测**：`AnonClassAmbiguityTest` 7/7（重编号哈希不变、体相似度口径、2×2 歧义兜底、存活阻断、字段持有者点名）；**变异**：三道人工变异全部击杀并复绿（`ev-20261109091139-5582` liveness 兜底、`ev-20261109091203-8593` 身份语义、`ev-20261109091253-d347` 字面量入 token）；**真实 KnotServer**：S6 `s6a=s6-v1 → s6b=s6-v2` GREEN（重编号的同形匿名类被配对并原地重定义，字段持有的存活实例同步更新），S4 `held-v1 → held-v2` GREEN。**按裁决刻意保留的分支**：两侧都只改字面量（体相似度打平）+ 旧类有存活实例 → 4.5 拒不动手，孤儿化并输出点名诊断（旧类名 + `live=1` + 可能持有字段 + `@RemoldReinit` 逃生舱），由 `liveInstancesBlockTheFallback` 守住。strict 模式语义未动 |
+| ANON_ALIGN 同形匿名类 N-to-1 歧义：同一方法内两个同接口同结构的匿名类让 Tier 3/4 双向唯一失效，编辑被迫孤儿化（客户端 R2b：`topology-equal candidates 2 -> 2, topology-decided 0`），字段持有的存活实例继续跑旧码 | ✅ | `core/src/remold/AnonClassAligner.java`（Tier 3.5 体相似度、Tier 4.5 liveness 兜底、点名诊断、`findHoldingFields`） | **单测**：`AnonClassAmbiguityTest` 17/17（重编号哈希不变、体相似度口径、2×2 歧义兜底、存活阻断、字段持有者点名；配对数按 `scanVisibleLive=` 口径诊断；§0.11 新增 4 例文案/持有者审计用例）；**变异**：三道人工变异全部击杀并复绿（`ev-20261109091139-5582` liveness 兜底、`ev-20261109091203-8593` 身份语义、`ev-20261109091253-d347` 字面量入 token）；**真实 KnotServer**：S6 `s6a=s6-v1 → s6b=s6-v2` GREEN（重编号的同形匿名类被配对并原地重定义，字段持有的存活实例同步更新），S4 `held-v1 → held-v2` GREEN。**按裁决刻意保留的分支**：两侧都只改字面量（体相似度打平）+ 旧类有存活实例 → 4.5 拒不动手，孤儿化并输出点名诊断（旧类名 + `scanVisibleLive=1` + 可能持有字段 + `@RemoldReinit` 逃生舱），由 `liveInstancesBlockTheFallback` 守住。strict 模式语义未动 |
 | Mixin 生成合成类 `Target$Anonymous$<uuid>` 的元数据不可达：`HierarchyTreeOracle.readClassBytes` 只查 `bytecodeCache` 与 classpath 资源，两者皆空 → `Nest scan incomplete`（Nest 判定降级）且 `InitFix` 构造器 protected 可见性判定返回 null → `Field init patch refused ... cannot determine protected status of constructor` | ✅ | `core/src/remold/BytecodeSources.java`（新，登记口）；`HierarchyTreeOracle.readClassBytes`（接线）；`InitFix`（三处拒绝 + Nest 告警的归因文案）；`plugin-mixin` `MixinInnerClassHotSwap`（生成成功后回灌） | **已观测（单测/字节码级）**：`NestBytecodeSourcesTest` 10/0（登记前 `nest member metadata unavailable` → 登记后成功；unregister 回落；两种构造器可见性判定；plugin 回灌路径）；**变异**：去掉 `BytecodeSources.lookup` 接线 killed（4 条行为性断言红）、去掉 plugin 回灌 killed（回灌用例红）；真实探针里 `Nest scan incomplete` 与 `Field init patch refused` 两条告警**已带上归因文案**（点名"织入期生成的合成内部类，需要 `BytecodeSources` 回灌"）。**后续收口**：S7 的 RED 已由 §0.10 的 `refeedForTarget`（提前生成 + 回灌）关闭，S7 `null → s7-v1`；`BytecodeSources` 常驻内存无上限仍在 §0.10 统一清单 |
 | MC 启动期落批次导致 JVM 挂死（`Done (` 之前类加载 + Mixin 转换高频并发） | 🔶 | `core/src/remold/StartupGate.java`、`core/src/remold/BatchWatchdog.java`、`core/src/remold/RemoldAgent.triggerDueHotswap` 漏斗接线、`api/src/remold/HotswapPlugin.isHostReady()` | **已观测（单测）**：`remold.startup.*` 19 例（该轮读数；收口后为 30 例、见 §0.10；门闩状态机、未就绪不落批次、就绪后触发一次、看门狗超阈值才 dump 且同批次只一次、`isHostReady` 默认 true 时行为不变）；**变异**：反打 `RemoldAgent` 修复 diff killed（5 条 wiring 断言红），另两次外科变异（门闩恒真 → 4 红、看门狗去 once → 1 红）均已恢复。**后续进展**：`plugin-fabric` 已实现 `HostReadinessProbe`（见 §0.10，真机未验证）；`plugin-forge` 侧仍未实现，实际游戏里门闩仍可能"首次触发即放开"；**精确挂死线程栈仍未抓到**——看门狗即为下一次复发的取证器 |
 | 探针仪器扩展（S4 长生命周期字段持有 / S5 `@Unique private` 访问 / S6 1→2 重编号 / S7 字段初始化器构造器可见性） | ✅ | `tests/fabric-mixin-probe/anon/`（`run-anon.sh` + 6 个新 stage + `ANON_EXPECT` 模式 + 独立证据文件） | 真实 KnotServer 读数（基线代码）：S4 GREEN、S5 GREEN、S6 RED、S7 RED；合入 E 后 **S6 转 GREEN**；S3 去触发对照全程稳定。**实证回答**：`Nest scan incomplete` 期间 `@Unique private` 字段/方法访问**仍然正确**（S5 终局值一致）——说明该元数据缺失只影响 Remold 自身的安全门视图，不影响 JVM 侧 nest 访问控制。**结局**：S7 的红基线由 §0.10 的 `refeedForTarget` 关闭，S0~S7 现全绿（`run-anon.sh` exit 0 / `EXT_GREEN=1`） |
@@ -177,6 +177,21 @@
 7. **plugin/core 版本错位**：抑制器已无 core 类型硬链接，但 `MixinConfigContext` 构造签名不匹配时仍会抛 `NoSuchMethodError`（由 `RemoldAgent.notifyAssetChanges` 的逐插件 catch 兜住并记 error），两侧必须同版本发布。
 8. **匿名类成员结构变化（新增字段/方法）仍只能拒绝并提示重启**：未做结构化热更；`ForgeMixinHotSwap` 未接本轮内部类闭环。
 9. **未验证**：真实客户端（IDE + KnotClient）复跑本轮匿名类闭环；启动门闩的真实 tick 语义（同第 2 条）。
+
+---
+
+## 0.11 下一版本（未发布）：ANON_ALIGN Tier 4.5 文案纠偏 · “扫描可见”≠“实例已死”
+
+真实客户端复跑 v0.2.6 时发现：`[ANON_ALIGN] deterministic-dead-pair (0 live instances)` 之后紧跟着
+`fieldAnon v2/v3` 的输出 —— 字段持有的实例明明存活并在执行，文案却把“实例数为 0”写成配对安全性的
+依据。本轮只修可观测文案与证据说明，**不改判定与接线行为**（Tier 4.5 仍是“全组扫描可见零存活 +
+布局 100% 兼容”）。把“存在持有者字段”并入 liveness 判据不是本轮的修法：那会把 0.2.6 已消解的
+字段持有场景重新推回孤儿化；正确做法是让日志同时摆出“扫描可见 0”与“字段可能持有”两个事实。
+
+| 修复 | 状态 | 代码位置 | 验收证据 |
+|:---|:---:|:---|:---|
+| Tier 4.5 把“扫描可见的活实例为 0”表述成“实例已死 / 0 live instances”，并把“实例数为 0”当作配对安全依据 → 用户误以为安全来自实例已死（客户端实测 `fieldAnon v2/v3` 紧随其后，字段持有实例仍在执行） | ✅ | `core/src/remold/AnonClassAligner.java`：日志改为 `deterministic-zero-scan-pair (scan-visible live instances: 0)`，并显式声明“扫描只能回答它看见了什么，不是实例已死/语义安全的证明，只能当审计线索”；`AlignmentStats.deterministicDeadPairs` → `deterministicZeroScanPairs`（`toString` 同步 `zeroScanPair=`；旧名保留为 `@Deprecated` 同步别名）；`matchDeadPairsByLiveness` → `matchZeroScanPairs`；日志按 `findHoldingFields` 点名 proven/candidate 持有者字段，proven 持有者把该行升级为 `warn`；同源 `[ANON-LAYOUT]` 放行文案与歧义诊断改用 `scanVisibleLive=` / `scanVisibleLiveOld=`；`RemoldAgent.hasLiveInstances` 的 Javadoc 补“false = 本轮扫描没看见”的语义边界，`[LAYOUT-WAIVE]` 两处文案同步改口径 | **单测**：`AnonClassAmbiguityTest` 17/0（新增 4 例：旧文案不得复现 + “扫描可见的活实例为 0”必现、接口类型持有者字段必点名、无持有字段不得凭空点名、proven 持有者升级 warn）；**变异**：把日志文案改回 `deterministic-dead-pair (0 live instances)` → 新增 4 例全部变红，恢复后复绿（原 `zeroScanVisibleInstancesAllowDeterministicPair` / `liveInstancesBlockTheFallback` 保持绿）；**未在真实客户端复跑**（本轮只改文案，判定行为未变） |
+| 设计规范未定义 Tier 3.5 / Tier 4.5 及其日志证据契约 | ✅ | `docs/topology/04-tiers-and-rejection.md`（§1 梯队表新增两行、新增 §2.4 日志与证据契约）；`CHANGELOG.md` `[Unreleased]` | 规范正文不含实现状态标记（`verifyDocStatusMarkers` 守卫） |
 
 ---
 

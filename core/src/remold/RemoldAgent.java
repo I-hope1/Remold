@@ -2213,6 +2213,11 @@ public class RemoldAgent {
 	 *       而同一批里可能有多个类命中。</li>
 	 * </ol>
 	 *
+	 * <p><b>语义边界</b>：返回值 {@code false} 只表示<b>本轮 JVMTI 堆扫描没有看见</b>该类的实例，
+	 * 不能反证“实例不存在”（扫描不可用/异常时走保守分支返回 {@code true}；扫描本身也看不到
+	 * 它没覆盖到的对象）。因此派生的日志不得把 {@code false} 写成“实例已死”或安全结论，
+	 * 只能表述为“扫描可见的活实例为 0”。</p>
+	 *
 	 * <p>仅用于布局不兼容的类，因此调用频率很低。</p>
 	 */
 	static boolean hasLiveInstances(Class<?> c) {
@@ -3156,8 +3161,9 @@ public class RemoldAgent {
 				LAYOUT_GATE_WAIVED.incrementAndGet();
 				clearRejected(className);
 				warn("[LAYOUT-WAIVE] " + className + ": incompatible field layout ("
-				     + d.layout().detail() + ") but no live instances; redefining anyway — new"
-				     + " instances go through the new constructor and initialize correctly.");
+				     + d.layout().detail() + ") but no scan-visible live instances; redefining anyway — new"
+				     + " instances go through the new constructor and initialize correctly. This is what the"
+				     + " heap scan saw, not proof that no instance exists.");
 				continue;
 			}
 
@@ -4358,8 +4364,9 @@ public class RemoldAgent {
 					break;
 				case WAIVE:
 					warn("[LAYOUT-WAIVE] Dynamic class " + className + ": incompatible field layout ("
-					     + why + ") but no live instances; redefining anyway — new instances go"
-					     + " through the new constructor and initialize correctly.");
+					     + why + ") but no scan-visible live instances; redefining anyway — new instances go"
+					     + " through the new constructor and initialize correctly. This is what the heap scan"
+					     + " saw, not proof that no instance exists.");
 					break;
 				case WAIVE_REINIT:
 					info("[LAYOUT-REINIT] Dynamic class " + className

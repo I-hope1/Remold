@@ -129,9 +129,9 @@ git clone https://github.com/I-hope1/Remold && cd Remold
 - **Start-up readiness gate + batch watchdog.** `HotswapPlugin.isHostReady()` lets a host defer batches until it is
   ready; `BatchWatchdog` dumps all thread stacks once with `[HOTSWAP-STALL]` when a batch exceeds
   `batch_stall_ms` (15 s by default).
-- **Same-shape anonymous-class ambiguity + holder naming.** A body-similarity tier, then a zero-live-instance
-  liveness fallback; orphan warnings name the real holder fields (assignment-flow proven / supertype candidates) and
-  the `@RemoldReinit` escape hatch.
+- **Same-shape anonymous-class ambiguity + holder naming.** A body-similarity tier, then a scan-visible-zero-live-instance
+  fallback (zero *visible* to the heap scan, which is not proof that instances are dead); orphan warnings name the real
+  holder fields (assignment-flow proven / supertype candidates) and the `@RemoldReinit` escape hatch.
 - **Class and asset debounce split.** `.class`/jar and resource/config events use independent trailing-edge quiet
   windows (800 ms / 250 ms by default), so an asset edit no longer postpones a class batch.
 

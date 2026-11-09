@@ -120,7 +120,7 @@ git clone https://github.com/I-hope1/Remold && cd Remold
 - **Mixin 匿名/内部类热更闭环**：`@Inject` 方法里第一次新增匿名类不再崩溃；只改已加载匿名类体时原地重定义 `Target$Anonymous$<uuid>`；织入期生成的合成类字节接入 `BytecodeSources`，`InitFix` 能读到构造器可见性。
 - **结构化批次报告 + 客户端 Toast**：`api` 新增 `HotswapBatchReport` 与 `HotswapBatchListener.afterInternalBatchReport()`（耗时 / 重定义类 / Mixin 成员增量 / InitFix 统计）；Fabric 模板的客户端 Toast 直接展示这些数据。
 - **启动就绪门闩 + 批次看门狗**：`HotswapPlugin.isHostReady()` 让宿主自己决定批次何时可以开始；批次超过 `batch_stall_ms`（默认 15s）打印一次全线程栈，用于定位挂死。
-- **同形匿名类歧义消解 + 持有者点名**：体相似度分层 + 零存活实例兜底，孤儿告警点名真实持有字段（赋值流证明 / 父类型候选）与 `@RemoldReinit` 逃生舱。
+- **同形匿名类歧义消解 + 持有者点名**：体相似度分层 + 扫描可见零存活兜底（“扫描可见”不等于“实例已死”，日志只作审计线索），孤儿告警点名真实持有字段（赋值流证明 / 父类型候选）与 `@RemoldReinit` 逃生舱。
 - **Class / 资源防抖分离**：`.class`/jar 与资源/配置各自一条 trailing-edge 静默窗口（默认 800ms / 250ms），资源改动不再推迟 Class 批次。
 
 完整变更与已知边界见 [v0.2.6 Release Notes](docs/releases/v0.2.6.md)。

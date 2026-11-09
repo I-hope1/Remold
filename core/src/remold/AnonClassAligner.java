@@ -138,11 +138,11 @@ public final class AnonClassAligner {
 		 */
 		public int  layoutGateRejected;
 		/**
-		 * 布局门放行的配对数（{@code warn} 模式，或布局不兼容但<b>无存活实例</b>）。
+		 * 布局门放行的配对数（{@code warn} 模式，或布局不兼容但<b>本轮扫描未见存活实例</b>）。
 		 *
 		 * <p>{@code warn} 模式下照旧配对并原地重定义，只打告警；此计数让用户看到
-		 * "本来会被拒绝的有几次"。无存活实例时放行是安全的 ——
-		 * 新建实例会走新构造器，初始化正常（真机对照实验结论）。</p>
+		 * "本来会被拒绝的有几次"。扫描未见存活实例时放行 —— 新建实例会走新构造器，初始化正常
+		 * （真机对照实验结论）；但“扫描没看见”不是“实例已死”的证明，见 Tier 4.5 的同一约定。</p>
 		 */
 		public int  layoutGateWaived;
 		/** 布局门扫描存活实例的总耗时（毫秒），用于观察全堆遍历的开销。 */
@@ -181,13 +181,20 @@ public final class AnonClassAligner {
 		 */
 		public int  bodySimilarityMatches;
 		/**
-		 * Tier 4.5「全组零存活实例」确定性兜底配对数。
+		 * Tier 4.5「扫描可见零存活」确定性兜底配对数。
 		 *
-		 * <p>每一对都必须在日志里带 {@code deterministic-dead-pair (0 live instances)} 留痕，
-		 * 严禁与普通结构唯一匹配混为一谈。</p>
+		 * <p>每一对都必须在日志里带 {@code deterministic-zero-scan-pair (scan-visible live instances: 0)}
+		 * 留痕，严禁与普通结构唯一匹配混为一谈；文案不得表述为“实例已死”或“安全”
+		 * （{@code docs/topology/04-tiers-and-rejection.md} §2.4）。</p>
 		 */
+		public int  deterministicZeroScanPairs;
+		/**
+		 * @deprecated 0.2.6 的旧字段名，仅为下游二进制兼容保留；值与
+		 * {@link #deterministicZeroScanPairs} 同步，勿在新代码里读取。
+		 */
+		@Deprecated
 		public int  deterministicDeadPairs;
-		/** 歧义组的可读诊断（点名新旧类名与各自存活实例数），供宿主级告警原文引用。 */
+		/** 歧义组的可读诊断（点名新旧类名与各自**扫描可见**存活实例数），供宿主级告警原文引用。 */
 		public java.util.List<String> ambiguousDetail = new java.util.ArrayList<>();
 
 		@Override
@@ -200,7 +207,7 @@ public final class AnonClassAligner {
 			       ", topoCandBefore=" + topologyCandidatesBefore +
 			       ", topoCandAfter=" + topologyCandidatesAfter +
 			       ", new=" + newClasses + ", orphans=" + orphanClasses +
-		       ", bodySim=" + bodySimilarityMatches + ", deadPair=" + deterministicDeadPairs + "]";
+		       ", bodySim=" + bodySimilarityMatches + ", zeroScanPair=" + deterministicZeroScanPairs + "]";
 		}
 	}
 
@@ -456,6 +463,10 @@ public final class AnonClassAligner {
 
 			AlignmentStats stats = new AlignmentStats();
 
+			// 旧匿名类内部名 → 自身 ClassNode（只取父类/接口，供"持有者字段"点名使用）。
+			// 按需解析：调用方只在点名或 Tier 4.5 审计时才会真正 parse，纯函数不变。
+			Function<String, ClassNode> anonNodeResolver = name -> anonNodeForHolding(oldInfos, name);
+
 			// 按层级（depth of '$'）组织类信息
 			Map<Integer, List<AnonInfo>> oldByLevel = new TreeMap<>();
 			Map<Integer, List<AnonInfo>> newByLevel = new TreeMap<>();
@@ -508,7 +519,8 @@ public final class AnonClassAligner {
 
 				if (level == 1) {
 					// Level 1: 宿主直接子匿名类 (如 Foo$1, Foo$2)
-					Map<AnonInfo, AnonInfo> l1Matches = matchHierarchical(oldLevelInfos, newLevelInfos, stats, hostSlash, startNanos);
+					Map<AnonInfo, AnonInfo> l1Matches = matchHierarchical(oldLevelInfos, newLevelInfos, stats,
+					 hostSlash, startNanos, oldHostNode, newHostNode, anonNodeResolver);
 					for (Map.Entry<AnonInfo, AnonInfo> entry : l1Matches.entrySet()) {
 						matchedNewToOld.put(entry.getKey(), entry.getValue());
 						renameMap.put(entry.getKey().name, entry.getValue().name);
@@ -549,7 +561,8 @@ public final class AnonClassAligner {
 						dbg("  level " + level + " scope " + newParent + " -> " + targetParent + " (new=" + newChildren.size() + ")");
 
 						List<AnonInfo>          oldCandidateChildren = oldByParent.getOrDefault(targetParent, Collections.emptyList());
-						Map<AnonInfo, AnonInfo> childMatches         = matchHierarchical(oldCandidateChildren, newChildren, stats, hostSlash, startNanos);
+						Map<AnonInfo, AnonInfo> childMatches         = matchHierarchical(oldCandidateChildren, newChildren, stats,
+						 hostSlash, startNanos, oldHostNode, newHostNode, anonNodeResolver);
 						for (Map.Entry<AnonInfo, AnonInfo> m : childMatches.entrySet()) {
 							matchedNewToOld.put(m.getKey(), m.getValue());
 							renameMap.put(m.getKey().name, m.getValue().name);
@@ -594,9 +607,6 @@ public final class AnonClassAligner {
 			// 三种判据逐层退化：精确描述符 → 赋值流（NEW <anon> → <init> → PUTFIELD/PUTSTATIC）
 			// → 父类型/接口描述符候选。匿名类的 superName/interfaces 只能从它自己的字节码拿到，
 			// 所以这里按需解析（只在孤儿集非空、且前两层都没命中时才会被调用）。
-			Function<String, ClassNode> anonNodeResolver = orphanOldClasses.isEmpty()
-			 ? null
-			 : name -> anonNodeForHolding(oldInfos, name);
 			HoldingFields holdingFields = findHoldingFields(oldHostNode, newHostNode, orphanOldClasses,
 			 anonNodeResolver);
 
@@ -623,7 +633,7 @@ public final class AnonClassAligner {
 				// 会误以为已生效（曾评估的夹具 L：两个同构匿名类原地改体，两条编辑都不作用于存活实例）。
 				//
 				// 文案要求（docs/topology/04-tiers-and-rejection.md §4）：
-				//   ① 点名宿主 + 冲突的旧匿名类（各自存活实例数）；
+				//   ① 点名宿主 + 冲突的旧匿名类（各自扫描可见存活实例数）；
 				//   ② 点名可能持有这些实例的字段（"方法内每帧 new" 与 "字段长期持有" 处置完全不同）；
 				//   ③ 在 RESTART 旁给出免重启逃生舱 @RemoldReinit。
 				List<String> liveOrphans = new ArrayList<>();
@@ -650,7 +660,7 @@ public final class AnonClassAligner {
 				                  + " -> " + stats.topologyCandidatesAfter + ", topology-decided " + stats.topologyMatches + ")."
 				                  + " Orphan old anonymous classes: " + orphanOldClasses
 				                  + (liveOrphans.isEmpty()
-				                     ? " (no live instances on record)"
+				                     ? " (no scan-visible live instances on record)"
 				                     : " (with LIVE instances: " + liveOrphans + ")")
 				                  + (holdingFields.isEmpty()
 				                     ? " No host field holds them — the orphaned instances may only be `new`ed inside"
@@ -1312,7 +1322,9 @@ public final class AnonClassAligner {
 
 	private static Map<AnonInfo, AnonInfo> matchHierarchical(
 	 List<AnonInfo> oldList, List<AnonInfo> newList, AlignmentStats stats,
-	 String hostSlash, long startNanos) {
+	 String hostSlash, long startNanos,
+	 ClassNode oldHostNode, ClassNode newHostNode,
+	 Function<String, ClassNode> anonNodeResolver) {
 		Map<AnonInfo, AnonInfo> matchedNewToOld = new LinkedHashMap<>();
 		List<AnonInfo>          oldToUse        = new ArrayList<>(oldList);
 		List<AnonInfo>          newToUse        = new ArrayList<>(newList);
@@ -1382,9 +1394,11 @@ public final class AnonClassAligner {
 				boolean hasLive = hotswapAlignerHasLiveInstances.test(o.name.replace('/', '.'));
 				if (!hasLive) {
 					stats.layoutGateWaived++;
+					// 同一条 liveness 判据：只能表述为“扫描可见的活实例为 0”，不得表述成“实例已死”。
 					RemoldAgent.warn("[ANON-LAYOUT] " + n.name + " -> " + o.name
-					                  + ": incompatible layout but no live instances; pairing anyway (new instances"
-					                  + " initialize correctly). Reason: " + res.detail());
+					                  + ": incompatible layout but no scan-visible live instances; pairing anyway"
+					                  + " (new instances initialize correctly). This is what the heap scan saw, not"
+					                  + " proof that no instance exists. Reason: " + res.detail());
 					return true;
 				}
 				if (LayoutGate.MODE_WARN.equals(RemoldAgent.ANON_LAYOUT_GATE)) {
@@ -1427,18 +1441,23 @@ public final class AnonClassAligner {
 			 tier4Predicate, hostSlash, startNanos);
 		}
 
-		// ---- Tier 4.5：全组零存活实例的确定性兜底（主指挥官有条件批准）----
+		// ---- Tier 4.5：扫描可见零存活的确定性兜底 ----
 		//
 		// 三道护栏缺一不可：
 		//   ① 严格置后：只有 Tier 3.5 仍无法消歧才进入这里；
-		//   ② 全组零存活 + 布局 100% 兼容：歧义组内**每一个**旧候选都必须 liveness==0，
-		//      且配对双方的父类/接口/字段表/方法签名完全一致、LayoutGate 判兼容；
-		//   ③ 可观测：日志显式打 `deterministic-dead-pair (0 live instances)`，不伪装成结构唯一匹配。
-		// 语义安全性：旧的匿名类实例数为 0 时，旧类被重命名/弃用不会让任何存活对象继续跑旧代码，
-		// 因此确定性配对不改变任何可观测行为（不像有存活实例时那样会静默读旧码）。
+		//   ② 全组扫描可见零存活 + 布局 100% 兼容：歧义组内**每一个**旧候选在**本轮堆扫描**下
+		//      都没有可见存活实例，且配对双方的父类/接口/字段表/方法签名完全一致、LayoutGate 判兼容；
+		//   ③ 可观测：日志显式打 `deterministic-zero-scan-pair (scan-visible live instances: 0)`，
+		//      不伪装成结构唯一匹配，也不把“扫描没看见”表述成“实例已死”
+		//      （{@code docs/topology/04-tiers-and-rejection.md} §2.4）。
+		//
+		// 证据强度（别把它读强）：liveness 判定的语义是“本轮 JVMTI 堆扫描对这些旧类**没有可见实例**”，
+		// 它**不是**“这些实例已经死亡”的证明 —— 扫描只能回答它看见了什么，不能反证不可见实例不存在；
+		// 宿主字段也可能继续持有（或在扫描之后创建）这些类的实例。因此本层只能当作“确定性配对的可审计
+		// 线索”，不是语义安全证明；日志文案必须照此表述，且被字段持有者必须点名。
 		if (!RemoldAgent.ANON_STRICT && !remainingNew.isEmpty() && !remainingOld.isEmpty()) {
-			matchDeadPairsByLiveness(remainingNew, remainingOld, matchedNewToOld, stats,
-			 tier4Predicate, hostSlash, startNanos);
+			matchZeroScanPairs(remainingNew, remainingOld, matchedNewToOld, stats,
+			 tier4Predicate, hostSlash, startNanos, oldHostNode, newHostNode, anonNodeResolver);
 		}
 
 		// 四层全部走完后，在**最终剩余集**上用最宽谓词（Tier 4）统计一次"缺乏唯一证据"的候选对。
@@ -1458,7 +1477,7 @@ public final class AnonClassAligner {
 				}
 			}
 			stats.ambiguousPairs += countAmbiguous(remainingNew, remainingOld, n2o, o2n);
-			// 同时留下可读明细：点名每个仍被歧义缠住的旧类、它的新候选、以及它是否还有存活实例。
+			// 同时留下可读明细：点名每个仍被歧义缠住的旧类、它的新候选、以及本轮扫描是否看见存活实例。
 			// 只记一次（与 ambiguousPairs 同口径），供宿主级告警原文引用。
 			if (stats.ambiguousPairs > 0) {
 				for (AnonInfo o : remainingOld) {
@@ -1467,7 +1486,7 @@ public final class AnonClassAligner {
 					boolean live = hotswapAlignerHasLiveInstances.test(o.name.replace('/', '.'));
 					List<String> names = new ArrayList<>(suitors.size());
 					for (AnonInfo s : suitors) names.add(s.name);
-					stats.ambiguousDetail.add(o.name + " (live=" + (live ? 1 : 0) + ", candidatesNew=" + names + ")");
+					stats.ambiguousDetail.add(o.name + " (scanVisibleLive=" + (live ? 1 : 0) + ", candidatesNew=" + names + ")");
 				}
 			}
 		}
@@ -1857,20 +1876,26 @@ public final class AnonClassAligner {
 		return (2.0 * prev[m]) / (n + m);
 	}
 
-	// ---------------------------------------------------------------- Tier 4.5：全组零存活兜底
+	// ---------------------------------------------------------------- Tier 4.5：扫描可见零存活兜底
 
 	/**
-	 * Tier 4.5：当歧义组内每一个旧候选类都没有存活实例、且所有候选对的父类/接口/字段表/
-	 * 方法签名完全一致并通过 {@link LayoutGate} 时，按 minDiff 做确定性配对。
+	 * Tier 4.5：当歧义组内每一个旧候选类在**本轮堆扫描**下都没有可见存活实例、且所有候选对的
+	 * 父类/接口/字段表/方法签名完全一致并通过 {@link LayoutGate} 时，按 minDiff 做确定性配对。
 	 *
-	 * <p>语义安全性来自「全组零存活」：旧类被重命名或弃用不会让任何存活对象继续跑旧代码，
-	 * 因此该配对不改变任何可观测行为。反过来，只要组内有任何一个旧候选仍被实例持有，
-	 * 本层就完全不介入（把决定权交回孤儿化 + 告警）。</p>
+	 * <p><b>证据强度（文案与注释都必须照此表述）</b>：这里的“零存活”是
+	 * <b>“扫描可见的活实例为 0”</b>，不是“这些实例已经死亡”。扫描只能回答它看见了什么，
+	 * 不能反证不可见实例不存在；宿主字段也可能继续持有（或在扫描之后创建）这些类的实例。
+	 * 因此本层是“确定性配对的可审计线索”，不是语义安全证明；只要组内有任何一个旧候选被扫描
+	 * 判定为有可见实例，本层就完全不介入（把决定权交回孤儿化 + 告警）。
+	 * 日志必须显式打出 {@code deterministic-zero-scan-pair (scan-visible live instances: 0)}，
+	 * 并在宿主字段可能持有时点名字段（{@code docs/topology/04-tiers-and-rejection.md} §2.4）。</p>
 	 */
-	private static void matchDeadPairsByLiveness(
+	private static void matchZeroScanPairs(
 	 Set<AnonInfo> remainingNew, Set<AnonInfo> remainingOld,
 	 Map<AnonInfo, AnonInfo> matchedNewToOld, AlignmentStats stats,
-	 MatchPredicate shape, String hostSlash, long startNanos) {
+	 MatchPredicate shape, String hostSlash, long startNanos,
+	 ClassNode oldHostNode, ClassNode newHostNode,
+	 Function<String, ClassNode> anonNodeResolver) {
 
 		// 身份语义（IdentityHashMap / identity set）是**必须**的：AnonInfo.equals 按类名比较，
 		// 而新旧两侧的同名匿名类（Host$1 对 Host$1）在很多批次里同名 —— 用 LinkedHashMap
@@ -1915,7 +1940,9 @@ public final class AnonClassAligner {
 			if (olds.isEmpty() || news.isEmpty()) continue;
 			if (olds.size() == 1 && news.size() == 1) continue;
 
-			// 护栏 ②-a：歧义组内每一个旧候选都必须零存活实例
+			// 护栏 ②-a：歧义组内每一个旧候选在**本轮堆扫描**下都不得有可见存活实例。
+			// 判定的语义是“扫描可见的活实例为 0”，不是“实例已死”：只要扫描看见任何一个，本层就不介入
+			// （保守方向；扫描看不见的实例是否真实存在，不由本判据回答）。
 			List<String> liveOlds = new ArrayList<>();
 			for (AnonInfo o : olds) {
 				if (hotswapAlignerHasLiveInstances.test(o.name.replace('/', '.'))) liveOlds.add(o.name);
@@ -1923,7 +1950,7 @@ public final class AnonClassAligner {
 			if (!liveOlds.isEmpty()) {
 				if (stats != null) {
 					stats.ambiguousDetail.add("old=" + namesOf(olds) + " new=" + namesOf(news)
-					 + " liveOld=" + liveOlds);
+					 + " scanVisibleLiveOld=" + liveOlds);
 				}
 				continue;
 			}
@@ -1966,13 +1993,52 @@ public final class AnonClassAligner {
 				matchedNewToOld.put(p.n, p.o);
 				remainingNew.remove(p.n);
 				remainingOld.remove(p.o);
-				if (stats != null) stats.deterministicDeadPairs++;
-				RemoldAgent.info("[ANON_ALIGN] deterministic-dead-pair (0 live instances): "
+				if (stats != null) {
+					stats.deterministicZeroScanPairs++;
+					stats.deterministicDeadPairs = stats.deterministicZeroScanPairs;   // 0.2.6 兼容别名
+				}
+				// 被配对旧类的持有者字段审计：字段持有的实例不会因为“扫描没看见”而消失。
+				// 文案要求（docs/topology/04-tiers-and-rejection.md §2.4）：
+				//   ① 写“扫描可见的活实例为 0”，不得写成“实例已死/安全”；
+				//   ② 宿主字段可能持有时必须点名（proven 与 candidate 两种强度分开，不混说）。
+				HoldingFields holders = findHoldingFields(oldHostNode, newHostNode,
+				 Collections.singleton(p.o.name), anonNodeResolver);
+				String line = "[ANON_ALIGN] deterministic-zero-scan-pair (scan-visible live instances: 0): "
 				 + p.n.name + " -> " + p.o.name + " (minDiff=" + p.diff + ")"
-				 + " — 放行依据是歧义组内所有旧候选存活实例为 0 且布局完全兼容，"
-				 + "不是结构唯一匹配；若该匿名类日后被字段长期持有，请把这条日志当作审计线索。");
+				 + " — 放行依据只有「本轮堆扫描对这些旧候选没有可见的存活实例"
+				 + "（扫描可见的活实例为 0）+ 配对双方布局完全兼容」；扫描看不见的实例不被这条日志否证，"
+				 + "所以这不是“实例已死”的证明，也不是结构唯一匹配或语义安全结论。"
+				 + "若该匿名类被字段长期持有，请把这条日志当作审计线索。"
+				 + zeroScanPairHolderNote(holders);
+				// proven 持有者（精确描述符 / 赋值流）与“扫描零可见”直接冲突，升级为 warn 让人看见。
+				if (holders.proven.isEmpty()) RemoldAgent.info(line);
+				else RemoldAgent.warn(line);
 			}
 		}
+	}
+
+	/**
+	 * Tier 4.5 日志里“宿主字段可能持有被配对旧类”的补充说明。
+	 *
+	 * <p>字段持有不会因为“扫描没看见实例”而消失：proven（精确描述符 / 赋值流）与
+	 * candidate（父类型/接口）两种证据强度分开列，且不把任一强度说成“字段里现在一定有实例”。</p>
+	 */
+	private static String zeroScanPairHolderNote(HoldingFields holders) {
+		if (holders == null || holders.isEmpty()) return "";
+		StringBuilder sb = new StringBuilder();
+		if (!holders.proven.isEmpty()) {
+			sb.append(" Holder field(s) that receive this class (exact descriptor, or NEW -> <init> ->")
+			  .append(" PUTFIELD/PUTSTATIC): ").append(holders.proven)
+			  .append(" — such a field can keep an instance alive even when this scan reports none;")
+			  .append(" verify it before treating the pairing as safe.");
+		}
+		if (!holders.candidates.isEmpty()) {
+			sb.append(" Candidate holder field(s) (declared as its supertype/interface): ")
+			  .append(holders.candidates)
+			  .append(" — candidate strength only (the field may hold another implementation);")
+			  .append(" a candidate is not proof of a live instance, and the scan's 0 is not proof either.");
+		}
+		return sb.toString();
 	}
 
 	/** Tier 3 的结构签名口径（父类/接口/字段表/方法签名全等）。 */

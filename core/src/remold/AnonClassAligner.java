@@ -169,6 +169,22 @@ public final class AnonClassAligner {
 		public int  topologyCandidatesAfter;
 		public int  newClasses;
 		public int  orphanClasses;
+		/**
+		 * Tier 3.5「捕获签名 + 方法体结构相似度」采纳的配对数。
+		 *
+		 * <p>与 {@link #tier3Matches} 刻意分开：结构签名相等是<em>可证明</em>的同构，
+		 * 而相似度是<em>带 margin 的证据</em>。混在一起会让"这一对到底靠什么配上的"不可审计。</p>
+		 */
+		public int  bodySimilarityMatches;
+		/**
+		 * Tier 4.5「全组零存活实例」确定性兜底配对数。
+		 *
+		 * <p>每一对都必须在日志里带 {@code deterministic-dead-pair (0 live instances)} 留痕，
+		 * 严禁与普通结构唯一匹配混为一谈。</p>
+		 */
+		public int  deterministicDeadPairs;
+		/** 歧义组的可读诊断（点名新旧类名与各自存活实例数），供宿主级告警原文引用。 */
+		public java.util.List<String> ambiguousDetail = new java.util.ArrayList<>();
 
 		@Override
 		public String toString() {
@@ -179,7 +195,8 @@ public final class AnonClassAligner {
 			       ", topology=" + topologyMatches +
 			       ", topoCandBefore=" + topologyCandidatesBefore +
 			       ", topoCandAfter=" + topologyCandidatesAfter +
-			       ", new=" + newClasses + ", orphans=" + orphanClasses + "]";
+			       ", new=" + newClasses + ", orphans=" + orphanClasses +
+		       ", bodySim=" + bodySimilarityMatches + ", deadPair=" + deterministicDeadPairs + "]";
 		}
 	}
 
@@ -567,6 +584,11 @@ public final class AnonClassAligner {
 			stats.orphanClasses = orphanOldClasses.size();
 			dbg("level pass done: " + stats + ", orphans=" + orphanOldClasses);
 
+			// 字段持有风险：扫宿主字段表，点名可能长期持有这些被孤儿化的匿名类实例的字段。
+			// 告警里必须出现它，否则"需要重启"这句话无法变成可执行的处置动作
+			// （字段持有 → 挂 @RemoldReinit；方法内每帧 new → 无需处置）。
+			List<String> holdingFields = findHoldingFields(oldHostNode, newHostNode, orphanOldClasses);
+
 			// docs/topology/04-tiers-and-rejection.md §4 严格模式：只要本轮存在**未被唯一证据证成**的候选配对，就熔断整个宿主组。
 			//
 			// 两个计数的含义（合起来才是"无法唯一证明"的完整集合）：
@@ -588,12 +610,45 @@ public final class AnonClassAligner {
 				// ⚠️ 保守性损失必须**可见**：非严格模式下不仲裁意味着相关的旧匿名类保持为孤儿、
 				// 其**存活实例继续跑旧逻辑**。若这里不打日志，用户看到热更"成功"却没有任何效果，
 				// 会误以为已生效（曾评估的夹具 L：两个同构匿名类原地改体，两条编辑都不作用于存活实例）。
+				//
+				// 文案要求（docs/topology/04-tiers-and-rejection.md §4）：
+				//   ① 点名宿主 + 冲突的旧匿名类（各自存活实例数）；
+				//   ② 点名可能持有这些实例的字段（"方法内每帧 new" 与 "字段长期持有" 处置完全不同）；
+				//   ③ 在 RESTART 旁给出免重启逃生舱 @RemoldReinit。
+				List<String> liveOrphans = new ArrayList<>();
+				for (String orphan : orphanOldClasses) {
+					if (hotswapAlignerHasLiveInstances.test(orphan.replace('/', '.'))) {
+						liveOrphans.add(orphan);
+					}
+				}
+				StringBuilder detail = new StringBuilder();
+				if (!stats.ambiguousDetail.isEmpty()) {
+					int limit = Math.min(stats.ambiguousDetail.size(), 6);
+					detail.append(" Ambiguity detail: ");
+					for (int i = 0; i < limit; i++) {
+						if (i > 0) detail.append(" | ");
+						detail.append(stats.ambiguousDetail.get(i));
+					}
+					if (stats.ambiguousDetail.size() > limit) {
+						detail.append(" | ... (").append(stats.ambiguousDetail.size() - limit).append(" more)");
+					}
+				}
 				RemoldAgent.warn("[ANON_ALIGN] Host " + hostSlash + ": " + stats.ambiguousPairs
 				                  + " candidate pair(s) lack unique evidence; refused to guess"
 				                  + " (topology-equal candidates " + stats.topologyCandidatesBefore
 				                  + " -> " + stats.topologyCandidatesAfter + ", topology-decided " + stats.topologyMatches + ")."
-				                  + " Affected old anonymous classes are kept as orphans, so their LIVE instances keep running"
-				                  + " the OLD code — RESTART is required for those edits to affect existing instances.");
+				                  + " Orphan old anonymous classes: " + orphanOldClasses
+				                  + (liveOrphans.isEmpty()
+				                     ? " (no live instances on record)"
+				                     : " (with LIVE instances: " + liveOrphans + ")")
+				                  + (holdingFields.isEmpty()
+				                     ? " No host field holds them — method-local instantiations are recreated on the"
+				                       + " next call, so the edit still takes effect there."
+				                     : " Possible holder field(s): " + holdingFields + ".")
+				                  + " Their LIVE instances keep running the OLD code — RESTART is required for those edits"
+				                  + " to affect existing instances, OR add @RemoldReinit to the holding field (and tweak its"
+				                  + " initializer) to rebuild the instance without restarting."
+				                  + detail);
 			}
 
 			// 后置严格校验 (Validation Invariants)：单射/前缀 + 改名后字段布局
@@ -1341,6 +1396,34 @@ public final class AnonClassAligner {
 		// 注意：坚决移除旧版 Tier 5（按物理类名盲配）。若前 4 层均未匹配，
 		// 表明该类为新增类或旧类已删除，严格作为孤儿类保留或新类生成新编号，杜绝内存篡夺。
 
+		// ---- Tier 3.5：结构同形但方法体不同的"带证据消歧" ----
+		//
+		// Tier 3 只比字段表/方法签名，两个同接口同结构的匿名类会互相成为对方的候选，
+		// 双向唯一因此失效（真实客户端 R2b：`topology-equal candidates 2 -> 2, topology-decided 0`）。
+		// 这里在**方法体结构**上补一层证据：屏蔽匿名类编号后比较指令流相似度，
+		// 只在"最优候选显著优于次优（严格 margin）且双向一致"时采纳 —— 不做距离最近式的盲猜。
+		//
+		// strict 模式刻意不参与：strict 的定位是"没有唯一证据就整组拒绝"，
+		// 相似度对它是"证据不足"而不是"唯一证据"，保持原有拒绝语义（不变量：不放松既有安全门）。
+		if (!RemoldAgent.ANON_STRICT && !remainingNew.isEmpty() && !remainingOld.isEmpty()) {
+			matchByBodySimilarity(remainingNew, remainingOld, matchedNewToOld, stats,
+			 tier4Predicate, hostSlash, startNanos);
+		}
+
+		// ---- Tier 4.5：全组零存活实例的确定性兜底（主指挥官有条件批准）----
+		//
+		// 三道护栏缺一不可：
+		//   ① 严格置后：只有 Tier 3.5 仍无法消歧才进入这里；
+		//   ② 全组零存活 + 布局 100% 兼容：歧义组内**每一个**旧候选都必须 liveness==0，
+		//      且配对双方的父类/接口/字段表/方法签名完全一致、LayoutGate 判兼容；
+		//   ③ 可观测：日志显式打 `deterministic-dead-pair (0 live instances)`，不伪装成结构唯一匹配。
+		// 语义安全性：旧的匿名类实例数为 0 时，旧类被重命名/弃用不会让任何存活对象继续跑旧代码，
+		// 因此确定性配对不改变任何可观测行为（不像有存活实例时那样会静默读旧码）。
+		if (!RemoldAgent.ANON_STRICT && !remainingNew.isEmpty() && !remainingOld.isEmpty()) {
+			matchDeadPairsByLiveness(remainingNew, remainingOld, matchedNewToOld, stats,
+			 tier4Predicate, hostSlash, startNanos);
+		}
+
 		// 四层全部走完后，在**最终剩余集**上用最宽谓词（Tier 4）统计一次"缺乏唯一证据"的候选对。
 		//
 		// 只数一次是刻意的：Tier 2/3/4 的剩余集是同一批对象，逐层各数一次会把同一批候选
@@ -1358,6 +1441,18 @@ public final class AnonClassAligner {
 				}
 			}
 			stats.ambiguousPairs += countAmbiguous(remainingNew, remainingOld, n2o, o2n);
+			// 同时留下可读明细：点名每个仍被歧义缠住的旧类、它的新候选、以及它是否还有存活实例。
+			// 只记一次（与 ambiguousPairs 同口径），供宿主级告警原文引用。
+			if (stats.ambiguousPairs > 0) {
+				for (AnonInfo o : remainingOld) {
+					List<AnonInfo> suitors = o2n.get(o);
+					if (suitors == null || suitors.size() < 2) continue;
+					boolean live = hotswapAlignerHasLiveInstances.test(o.name.replace('/', '.'));
+					List<String> names = new ArrayList<>(suitors.size());
+					for (AnonInfo s : suitors) names.add(s.name);
+					stats.ambiguousDetail.add(o.name + " (live=" + (live ? 1 : 0) + ", candidatesNew=" + names + ")");
+				}
+			}
 		}
 
 		return matchedNewToOld;
@@ -1508,6 +1603,407 @@ public final class AnonClassAligner {
 				RemoldAgent.info("[ANON_MATCH] Tier " + tier + " fallback paired (diff=" + pair.diff + "): " + pair.n.name + " -> " + pair.o.name);
 			}
 		}
+	}
+
+	// ---------------------------------------------------------------- Tier 3.5：带证据的体相似度消歧
+
+	/** Tier 3.5 采纳下限：最优候选的方法体结构相似度必须达到该值。 */
+	private static final double BODY_MIN_SCORE = 0.80;
+
+	/** Tier 3.5 严格 margin：最优与次优的相似度差必须达到该值，否则视为证据不足。 */
+	private static final double BODY_MARGIN = 0.15;
+
+	/** 指令数超过该阈值时用多重集重叠率替代 LCS，避免病理输入上的二次方开销。 */
+	private static final int BODY_LCS_MAX_INSNS = 2000;
+
+	/**
+	 * Tier 3.5：在结构同形的候选集里，用方法体结构相似度做带 margin 的消歧。
+	 *
+	 * <p>为什么需要这一层：Tier 3 的结构签名（宿主方法 / 父类 / 接口 / 字段表 / 方法签名）
+	 * 对「同接口同结构的两个匿名类」没有任何区分力，双向唯一因此失效，编辑被迫孤儿化
+	 * （真实客户端 R2b 实测 {@code topology-equal candidates 2 -> 2, topology-decided 0}）。</p>
+	 *
+	 * <p>纪律：只采纳「最优显著优于次优且双向一致」的配对，绝不做距离最近式盲猜；
+	 * 常量池字面量不进入 token（只改字符串时相似度接近 1），匿名类编号在 owner/desc 上
+	 * 统一屏蔽（重编号不影响相似度）。strict 模式不参与本层：strict 的定位是「没有唯一证据
+	 * 就整组拒绝」，相似度对它是「证据不足」而非「唯一证据」。</p>
+	 */
+	private static void matchByBodySimilarity(
+	 Set<AnonInfo> remainingNew, Set<AnonInfo> remainingOld,
+	 Map<AnonInfo, AnonInfo> matchedNewToOld, AlignmentStats stats,
+	 MatchPredicate shape, String hostSlash, long startNanos) {
+
+		Map<AnonInfo, Map<AnonInfo, Double>> scores = new LinkedHashMap<>();
+		for (AnonInfo n : remainingNew) {
+			checkTimeout(hostSlash, startNanos);
+			Map<AnonInfo, Double> row = new LinkedHashMap<>();
+			for (AnonInfo o : remainingOld) {
+				if (!shape.test(n, o)) continue;
+				row.put(o, bodySimilarity(o, n, hostSlash));
+			}
+			if (!row.isEmpty()) scores.put(n, row);
+		}
+		if (scores.isEmpty()) return;
+
+		Map<AnonInfo, AnonInfo> bestOld   = new LinkedHashMap<>();
+		Map<AnonInfo, Double>  bestVal   = new LinkedHashMap<>();
+		Map<AnonInfo, Double>  secondVal = new LinkedHashMap<>();
+		for (Map.Entry<AnonInfo, Map<AnonInfo, Double>> e : scores.entrySet()) {
+			AnonInfo bo = null;
+			double   b  = -1, s2 = -1;
+			for (Map.Entry<AnonInfo, Double> c : e.getValue().entrySet()) {
+				double sc = c.getValue();
+				if (sc > b) {
+					s2 = b;
+					b = sc;
+					bo = c.getKey();
+				} else if (sc > s2) {
+					s2 = sc;
+				}
+			}
+			bestOld.put(e.getKey(), bo);
+			bestVal.put(e.getKey(), b);
+			secondVal.put(e.getKey(), s2);
+		}
+
+		for (Map.Entry<AnonInfo, AnonInfo> e : new LinkedHashMap<>(bestOld).entrySet()) {
+			AnonInfo n = e.getKey();
+			AnonInfo o = e.getValue();
+			if (n == null || o == null) continue;
+			if (!remainingNew.contains(n) || !remainingOld.contains(o)) continue;
+			double b  = bestVal.get(n);
+			double s2 = secondVal.get(n);
+			if (b < BODY_MIN_SCORE) continue;
+			if (s2 >= 0 && b - s2 < BODY_MARGIN) continue;
+
+			// 反向一致：该旧类的最优新类必须是 n，且同样带 margin
+			AnonInfo back = null;
+			double   bb = -1, bs2 = -1;
+			for (Map.Entry<AnonInfo, Map<AnonInfo, Double>> row : scores.entrySet()) {
+				Double sc = row.getValue().get(o);
+				if (sc == null) continue;
+				if (sc > bb) {
+					bs2 = bb;
+					bb = sc;
+					back = row.getKey();
+				} else if (sc > bs2) {
+					bs2 = sc;
+				}
+			}
+			if (back != n) continue;
+			if (bb < BODY_MIN_SCORE) continue;
+			if (bs2 >= 0 && bb - bs2 < BODY_MARGIN) continue;
+
+			matchedNewToOld.put(n, o);
+			remainingNew.remove(n);
+			remainingOld.remove(o);
+			stats.bodySimilarityMatches++;
+			RemoldAgent.info("[ANON_MATCH] Tier 3.5 body-similarity paired: " + n.name + " -> " + o.name
+			 + " (score=" + fmtScore(b) + ", margin=" + fmtScore(s2 < 0 ? 1.0 : b - s2) + ")");
+		}
+	}
+
+	private static String fmtScore(double v) {
+		return String.format(java.util.Locale.ROOT, "%.3f", v);
+	}
+
+	/**
+	 * 两个匿名类的方法体结构相似度（0..1）。
+	 *
+	 * <p>口径：按「方法名 + 屏蔽后的描述符」对齐方法；每个方法比较屏蔽后的指令流 token，
+	 * 用 LCS 比（超长退化为多重集重叠率）；只在一侧出现的方法以 0 贡献计入分母，
+	 * 因此新增/删除方法会实质降低相似度。字面量常量不入 token。</p>
+	 */
+	static double bodySimilarity(AnonInfo a, AnonInfo b, String hostSlash) {
+		if (a == null || b == null) return 0.0;
+		return bodySimilarity(a.bytecode, b.bytecode, hostSlash);
+	}
+
+	/**
+	 * 字节码级入口：直接比较两份匿名类字节的方法体结构相似度。
+	 *
+	 * <p>与 Tier 3.5 内部使用同一实现，供判定力测试在**不依赖 javac 编号**的前提下
+	 * 钉住"只改字面量 ≈ 1.0 / 结构不同 &lt; 0.8"的口径。</p>
+	 */
+	public static double bodySimilarity(byte[] aBytes, byte[] bBytes, String hostSlash) {
+		ClassNode ca = parseBytes(aBytes);
+		ClassNode cb = parseBytes(bBytes);
+		if (ca == null || cb == null) return 0.0;
+		Map<String, List<String>> ma = methodTokens(ca, hostSlash);
+		Map<String, List<String>> mb = methodTokens(cb, hostSlash);
+		if (ma.isEmpty() && mb.isEmpty()) return 1.0;
+
+		double matchedWeight = 0.0;
+		double totalWeight   = 0.0;
+		for (Map.Entry<String, List<String>> e : ma.entrySet()) {
+			List<String> ta = e.getValue();
+			double w = Math.max(1, ta.size());
+			totalWeight += w;
+			List<String> tb = mb.get(e.getKey());
+			if (tb == null) continue;
+			matchedWeight += w * lcsRatio(ta, tb);
+		}
+		for (Map.Entry<String, List<String>> e : mb.entrySet()) {
+			if (ma.containsKey(e.getKey())) continue;
+			totalWeight += Math.max(1, e.getValue().size());
+		}
+		return totalWeight == 0 ? 1.0 : Math.max(0.0, Math.min(1.0, matchedWeight / totalWeight));
+	}
+
+	private static ClassNode parseBytes(byte[] bytes) {
+		if (bytes == null || bytes.length == 0) return null;
+		try {
+			ClassNode cn = new ClassNode();
+			new ClassReader(bytes).accept(cn, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+			return cn;
+		} catch (Throwable t) {
+			return null;
+		}
+	}
+
+	/** 方法键（名字 + 屏蔽描述符）到屏蔽后指令 token 序列的映射。 */
+	private static Map<String, List<String>> methodTokens(ClassNode cn, String hostSlash) {
+		Map<String, List<String>> out = new LinkedHashMap<>();
+		if (cn == null || cn.methods == null) return out;
+		MethodFingerprinter masker = new MethodFingerprinter();
+		masker.setContext(hostSlash);
+		for (MethodNode mn : cn.methods) {
+			if (mn.instructions == null) continue;
+			List<String> tokens = new ArrayList<>();
+			for (org.objectweb.asm.tree.AbstractInsnNode insn = mn.instructions.getFirst();
+			     insn != null; insn = insn.getNext()) {
+				tokens.add(bodyToken(insn, masker, hostSlash));
+			}
+			if (tokens.isEmpty()) continue;
+			out.put(mn.name + ":" + masker.maskDescriptor(mn.desc), tokens);
+		}
+		return out;
+	}
+
+	/**
+	 * 单个指令的 token。
+	 *
+	 * <p>只保留结构：操作码 + 被屏蔽的 owner/name/描述符；不把常量池字面量
+	 * （{@code LDC} 的值、{@code BIPUSH} 的数值）纳入 token —— 否则「只改一个字符串」
+	 * 会让相似度崩到 0，而那正是本层要识别的场景。</p>
+	 */
+	private static String bodyToken(org.objectweb.asm.tree.AbstractInsnNode insn,
+	                                MethodFingerprinter masker, String hostSlash) {
+		int op = insn.getOpcode();
+		if (insn instanceof org.objectweb.asm.tree.MethodInsnNode m) {
+			return "M" + op + ":" + maskAnonRef(m.owner, hostSlash) + "." + m.name
+			 + ":" + masker.maskDescriptor(m.desc);
+		}
+		if (insn instanceof org.objectweb.asm.tree.FieldInsnNode f) {
+			return "F" + op + ":" + maskAnonRef(f.owner, hostSlash) + "." + f.name
+			 + ":" + masker.maskDescriptor(f.desc);
+		}
+		if (insn instanceof org.objectweb.asm.tree.TypeInsnNode t) {
+			return "T" + op + ":" + maskAnonRef(t.desc, hostSlash);
+		}
+		if (insn instanceof org.objectweb.asm.tree.InvokeDynamicInsnNode indy) {
+			return "I:" + indy.name + ":" + masker.maskDescriptor(indy.desc);
+		}
+		return "O" + op;
+	}
+
+	private static double lcsRatio(List<String> a, List<String> b) {
+		int n = a.size(), m = b.size();
+		if (n == 0 && m == 0) return 1.0;
+		if (n == 0 || m == 0) return 0.0;
+		if (n > BODY_LCS_MAX_INSNS || m > BODY_LCS_MAX_INSNS) {
+			java.util.Map<String, Integer> counts = new java.util.HashMap<>();
+			for (String t : a) counts.merge(t, 1, Integer::sum);
+			int overlap = 0;
+			for (String t : b) {
+				Integer c = counts.get(t);
+				if (c != null && c > 0) {
+					overlap++;
+					counts.put(t, c - 1);
+				}
+			}
+			return (2.0 * overlap) / (n + m);
+		}
+		int[] prev = new int[m + 1];
+		int[] cur  = new int[m + 1];
+		for (int i = 1; i <= n; i++) {
+			for (int j = 1; j <= m; j++) {
+				cur[j] = a.get(i - 1).equals(b.get(j - 1))
+				 ? prev[j - 1] + 1
+				 : Math.max(prev[j], cur[j - 1]);
+			}
+			int[] tmp = prev;
+			prev = cur;
+			cur = tmp;
+			java.util.Arrays.fill(cur, 0);
+		}
+		return (2.0 * prev[m]) / (n + m);
+	}
+
+	// ---------------------------------------------------------------- Tier 4.5：全组零存活兜底
+
+	/**
+	 * Tier 4.5：当歧义组内每一个旧候选类都没有存活实例、且所有候选对的父类/接口/字段表/
+	 * 方法签名完全一致并通过 {@link LayoutGate} 时，按 minDiff 做确定性配对。
+	 *
+	 * <p>语义安全性来自「全组零存活」：旧类被重命名或弃用不会让任何存活对象继续跑旧代码，
+	 * 因此该配对不改变任何可观测行为。反过来，只要组内有任何一个旧候选仍被实例持有，
+	 * 本层就完全不介入（把决定权交回孤儿化 + 告警）。</p>
+	 */
+	private static void matchDeadPairsByLiveness(
+	 Set<AnonInfo> remainingNew, Set<AnonInfo> remainingOld,
+	 Map<AnonInfo, AnonInfo> matchedNewToOld, AlignmentStats stats,
+	 MatchPredicate shape, String hostSlash, long startNanos) {
+
+		// 身份语义（IdentityHashMap / identity set）是**必须**的：AnonInfo.equals 按类名比较，
+		// 而新旧两侧的同名匿名类（Host$1 对 Host$1）在很多批次里同名 —— 用 LinkedHashMap
+		// 会把两侧节点合并成一个，连通分量随即错乱（旧的被当成新的，组件恒为 1-1 而被跳过）。
+		Map<AnonInfo, Set<AnonInfo>> adj = new java.util.IdentityHashMap<>();
+		Set<AnonInfo> newSide = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+		Set<AnonInfo> oldSide = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+		newSide.addAll(remainingNew);
+		oldSide.addAll(remainingOld);
+		for (AnonInfo n : remainingNew) {
+			checkTimeout(hostSlash, startNanos);
+			for (AnonInfo o : remainingOld) {
+				if (!shape.test(n, o)) continue;
+				adj.computeIfAbsent(n, k -> new LinkedHashSet<>()).add(o);
+				adj.computeIfAbsent(o, k -> new LinkedHashSet<>()).add(n);
+			}
+		}
+		if (adj.isEmpty()) return;
+
+		Set<AnonInfo> visited = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+		List<AnonInfo> seeds = new ArrayList<>(remainingNew);
+		seeds.addAll(remainingOld);
+		for (AnonInfo seed : seeds) {
+			if (!adj.containsKey(seed) || !visited.add(seed)) continue;
+			List<AnonInfo> comp = new ArrayList<>();
+			java.util.Deque<AnonInfo> queue = new java.util.ArrayDeque<>();
+			queue.add(seed);
+			while (!queue.isEmpty()) {
+				AnonInfo cur = queue.poll();
+				comp.add(cur);
+				for (AnonInfo next : adj.getOrDefault(cur, Collections.emptySet())) {
+					if (visited.add(next)) queue.add(next);
+				}
+			}
+			List<AnonInfo> olds = new ArrayList<>();
+			List<AnonInfo> news = new ArrayList<>();
+			for (AnonInfo c : comp) {
+				// 侧别判定必须走身份集合，不能走 remainingOld/remainingNew 的 contains（同名类会串侧）。
+				if (oldSide.contains(c)) olds.add(c);
+				else if (newSide.contains(c)) news.add(c);
+			}
+			if (olds.isEmpty() || news.isEmpty()) continue;
+			if (olds.size() == 1 && news.size() == 1) continue;
+
+			// 护栏 ②-a：歧义组内每一个旧候选都必须零存活实例
+			List<String> liveOlds = new ArrayList<>();
+			for (AnonInfo o : olds) {
+				if (hotswapAlignerHasLiveInstances.test(o.name.replace('/', '.'))) liveOlds.add(o.name);
+			}
+			if (!liveOlds.isEmpty()) {
+				if (stats != null) {
+					stats.ambiguousDetail.add("old=" + namesOf(olds) + " new=" + namesOf(news)
+					 + " liveOld=" + liveOlds);
+				}
+				continue;
+			}
+
+			// 护栏 ②-b：所有候选对必须布局 100% 兼容（父类/接口/字段表/方法签名 + LayoutGate）
+			boolean layoutOk = true;
+			for (AnonInfo n : news) {
+				for (AnonInfo o : olds) {
+					if (!shape.test(n, o)) continue;
+					if (!strictShapeEquals(n, o)
+					    || !LayoutGate.check(o.fieldInfos, n.fieldInfos).compatible()) {
+						layoutOk = false;
+						break;
+					}
+				}
+				if (!layoutOk) break;
+			}
+			if (!layoutOk) {
+				if (stats != null) {
+					stats.ambiguousDetail.add("old=" + namesOf(olds) + " new=" + namesOf(news)
+					 + " layout-incompatible");
+				}
+				continue;
+			}
+
+			// 护栏 ③：确定性配对 + 显式留痕
+			List<CandidatePair> pairs = new ArrayList<>();
+			for (AnonInfo n : news) {
+				for (AnonInfo o : olds) {
+					if (shape.test(n, o)) pairs.add(new CandidatePair(n, o));
+				}
+			}
+			pairs.sort(PAIR_COMPARATOR);
+			Set<AnonInfo> usedNew = new HashSet<>();
+			Set<AnonInfo> usedOld = new HashSet<>();
+			for (CandidatePair p : pairs) {
+				if (usedNew.contains(p.n) || usedOld.contains(p.o)) continue;
+				usedNew.add(p.n);
+				usedOld.add(p.o);
+				matchedNewToOld.put(p.n, p.o);
+				remainingNew.remove(p.n);
+				remainingOld.remove(p.o);
+				if (stats != null) stats.deterministicDeadPairs++;
+				RemoldAgent.info("[ANON_ALIGN] deterministic-dead-pair (0 live instances): "
+				 + p.n.name + " -> " + p.o.name + " (minDiff=" + p.diff + ")"
+				 + " — 放行依据是歧义组内所有旧候选存活实例为 0 且布局完全兼容，"
+				 + "不是结构唯一匹配；若该匿名类日后被字段长期持有，请把这条日志当作审计线索。");
+			}
+		}
+	}
+
+	/** Tier 3 的结构签名口径（父类/接口/字段表/方法签名全等）。 */
+	private static boolean strictShapeEquals(AnonInfo n, AnonInfo o) {
+		return Objects.equals(n.superName, o.superName)
+		 && Objects.equals(n.interfaces, o.interfaces)
+		 && Objects.equals(n.fields, o.fields)
+		 && Objects.equals(n.methods, o.methods);
+	}
+
+	private static String namesOf(List<AnonInfo> infos) {
+		List<String> names = new ArrayList<>(infos.size());
+		for (AnonInfo i : infos) names.add(i.name);
+		return names.toString();
+	}
+
+	/**
+	 * 扫宿主/目标类字段表，点名"描述符里引用了这些被孤儿化匿名类"的字段。
+	 *
+	 * <p>判据只看字段描述符里的 {@code L<anon>;} 片段：这正好覆盖 {@code Foo$1 fieldName;}
+	 * 这种"字段长期持有匿名类实例"的形态。它决定了处置方式完全不同 —— 字段持有需要
+	 * {@code @RemoldReinit}（或重启），方法内每帧 {@code new} 的实例调用即重建、无需处置。</p>
+	 */
+	public static List<String> findHoldingFields(ClassNode oldHostNode, ClassNode newHostNode,
+	                                     Collection<String> anonInternalNames) {
+		List<String> out = new ArrayList<>();
+		if (anonInternalNames == null || anonInternalNames.isEmpty()) {
+			return out;
+		}
+		Set<String> needles = new LinkedHashSet<>();
+		for (String name : anonInternalNames) {
+			if (name == null) continue;
+			needles.add("L" + name.replace('.', '/') + ";");
+		}
+		for (ClassNode node : new ClassNode[]{oldHostNode, newHostNode}) {
+			if (node == null || node.fields == null) continue;
+			for (org.objectweb.asm.tree.FieldNode field : node.fields) {
+				if (field.desc == null) continue;
+				for (String needle : needles) {
+					if (field.desc.contains(needle)) {
+						String entry = node.name + "." + field.name + ":" + field.desc;
+						if (!out.contains(entry)) out.add(entry);
+						break;
+					}
+				}
+			}
+		}
+		return out;
 	}
 
 	/**

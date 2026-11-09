@@ -230,6 +230,96 @@ final class MixinInnerClassHotSwap {
 		return GENERATED.get(MixinInnerClassSupport.internalName(className));
 	}
 
+	/**
+	 * 把「目标类本次织入新登记的合成内部类」的字节提前生成出来并回灌。
+	 *
+	 * <p><b>为什么必须有这一步（S7 时序缺口）</b>：Mixin 织入目标类时只执行
+	 * {@code InnerClassGenerator.registerInnerClass}（分配稳定唯一名），真正生成字节要等到
+	 * 该合成类首次被加载。而 {@code InitFix} 在**同一次目标类 redefine 的内部**就要读
+	 * {@code <Target>$Anonymous$<hash>.<init>} 的 protected 状态，才能判断新建实例的字段初始化
+	 * 表达式是否可用 —— 此时字节还不存在，于是 fail-closed 拒绝（真实 KnotServer S7 红）。
+	 * 把生成提前到「目标类织入完成之后、InitFix 扫描之前」，元数据视图即可见，
+	 * 且**不放宽任何安全门**（读不到时仍照旧拒绝）。</p>
+	 *
+	 * <p><b>为什么不产生 UUID/哈希分裂</b>：唯一名来自 {@code registerInnerClass} 的坐标缓存
+	 * （跨 reload 稳定），生成是对模板字节的确定性重映射；这里生成的字节与合成类首次加载时
+	 * 由 {@code InnerClassGenerator} 生成的字节同源同参。为避免副作用，生成后会把
+	 * {@code InnerClassInfo.loadCounter} 还原成生成前的值 —— 否则该合成类会被误判为"已加载"，
+	 * 可能让平台侧跳过真正的 defineClass。</p>
+	 *
+	 * @param transformer   当前生效的 Mixin 织入器
+	 * @param targetDotName 刚织入完成的目标类点分名
+	 * @return 本次新回灌的合成类个数（0 表示该目标没有合成内部类，或没有新增项）
+	 */
+	static int refeedForTarget(Object transformer, String targetDotName) {
+		if (transformer == null || targetDotName == null) {
+			return 0;
+		}
+		String targetInternal = MixinInnerClassSupport.internalName(targetDotName);
+		int registered = 0;
+		try {
+			Object generator = findInnerClassGenerator(transformer);
+			if (generator == null) {
+				return 0;
+			}
+			java.lang.reflect.Field innerClassesField = findField(generator.getClass(), "innerClasses");
+			Object raw = innerClassesField == null ? null : innerClassesField.get(generator);
+			if (!(raw instanceof Map)) {
+				return 0;
+			}
+			Method generate = findMethod(generator.getClass(), "generate", String.class, ClassNode.class);
+			if (generate == null) {
+				return 0;
+			}
+			Map<?, ?> innerClasses = (Map<?, ?>) raw;
+			List<Object> snapshot;
+			synchronized (innerClasses) {
+				snapshot = new ArrayList<>(innerClasses.values());
+			}
+			for (Object info : snapshot) {
+				String targetName = (String) invoke(info, "getTargetName");
+				if (targetName == null || !targetName.equals(targetInternal)) {
+					continue;
+				}
+				String conformedDotted = (String) invoke(info, "getClassName");
+				if (conformedDotted == null || generatedBytes(conformedDotted) != null) {
+					continue;   // 已回灌：不重复生成（保持字节与首次回灌一致）
+				}
+				java.lang.reflect.Field counter = findField(info.getClass(), "loadCounter");
+				int loadCounterBefore = counter == null ? 0 : counter.getInt(info);
+				ClassNode fresh = new ClassNode();
+				boolean generated;
+				try {
+					generated = Boolean.TRUE.equals(generate.invoke(generator, conformedDotted, fresh));
+				} finally {
+					// 还原"未加载"语义：只有在合成类真正被 defineClass 时才应该递增。
+					if (counter != null) {
+						try {
+							counter.setInt(info, loadCounterBefore);
+						} catch (Throwable ignored) {
+							// 老版本无该字段：忽略，最多退化成本次批次里 isLoaded() 偏真。
+						}
+					}
+				}
+				if (!generated) {
+					continue;
+				}
+				registerGenerated(conformedDotted, serialize(fresh));
+				registered++;
+			}
+		} catch (Throwable t) {
+			RemoldAgent.warn("[Mixin] unable to pre-generate synthetic inner classes for " + targetDotName
+				+ "; InitFix metadata may stay unresolved for this batch (fail-closed preserved): "
+				+ rootMessage(t));
+			return registered;
+		}
+		if (registered > 0) {
+			RemoldAgent.info("[Mixin] pre-generated " + registered + " synthetic inner class(es) for "
+				+ targetDotName + " before the InitFix metadata scan");
+		}
+		return registered;
+	}
+
 	// ---------------------------------------------------------------- 结构契约
 
 	/**

@@ -1,0 +1,75 @@
+# Anonymous-class (Mixin$N) hot-swap probe — extension stages (deep-water instrument)
+# result: GREEN (exit 0), ANON_EXPECT=auto
+date: 2026-11-09T18:13:58+08:00
+git HEAD: 19a5caf19504ada19c5530bef621f9a1222b2586
+agent jar sha256: 81e868d95797efeda63d0deef523423addc233e8cd4a5ac39857bd2127074e1b
+plugin-mixin sha256: b687e65bf31aff6e9bc0594c59622827d6bae528d9a8f5b1f08c08bd492b740e
+plugin-fabric sha256: 526adc190156d3286360c5413c93e25a4a0cd123ed60012db8f318ffeaf09942
+mod jar (run/mods) sha256: dce05c08dc0c5d2a492047c0af68bf02daf76f3dfaa09edc73c547c83d77e733
+jbr: C:/Users/ASUS/.jdks/JBR-21
+mixer: sponge-mixin 0.8.7 (Fabric KnotServer), minecraft 1.21.1
+launch: E:/Users/ASUS/Desktop/Mods/nipx-hotswap/.battle/worktrees/20261109100449-fa16/f2/tests/fabric-mixin-probe/anon/build/proj/build/anon/server.args (mod loaded from run/mods, Gradle output off the runtime classpath)
+S2 preconditions: outer s1b=b43e20a40d81410e s2=b43e20a40d81410e | anon s1=c91e96a547332b0d s2=d455c30e1d4b985f
+S4 preconditions: outer s4a=0c56e22b98521371 s4b=0c56e22b98521371 | anon s4a=8b83338ead9e4bb1 s4b=94bead02a4f59912
+S6 preconditions: baseline $1=9e5b99a14b9a7d63 | renumber $1=ff287508b1cb9000 $2=4624af25582a7505
+
+=== stage verdicts (end result = AnonTarget.poke() returned by the live class) ===
+S0 BASELINE  poke=hook-s0  -> PASS (Mixin woven; no anonymous class yet)
+S1 R3        poke=anon-v1  -> GREEN (anonymous class hot-swap works)
+S1b R3b      poke=anon-v1  -> PASS (anonymous class on the real classpath; reload + target re-weave succeed)
+S2 R5        poke=anon-v2  -> GREEN (anonymous body change reached the live class)
+S3 CONTROL   poke=anon-v2/anon-v2  -> PASS (no change => no redefine, value stable)
+
+=== extension stage verdicts ===
+S4 HELD-FIELD  s4a=held-v1 s4b=held-v2 -> GREEN (the live instance held by AnonTarget.HELD4 was redefined in place: body-only change reached it)
+S7 FIELD-INIT  poke=s7=s7-v1 fresh=s7=s7-v1 -> GREEN (the field added with an anonymous-class initializer was initialized on the LIVE instance)
+S6 RENUMBER    s6a=s6-v1 s6b=s6-v2 -> GREEN (renumbered same-shape anonymous class paired and redefined in place)
+S5 UNIQUE-ACCESS  poke=s5:uq-tag:uq-m|anon:s5:uq-tag:uq-m fresh=s5:uq-tag:uq-m|anon:s5:uq-tag:uq-m -> GREEN (@Unique private field+method readable both same-class and through the anonymous class; the added field was patched on the live instance)
+
+CONTROLS      s4c=held-v2 s7c=s7=s7-v1 s6c=s6-v2 s5c=s5:uq-tag:uq-m|anon:s5:uq-tag:uq-m -> PASS (no change => value stable, no redefine/reload activity)
+
+=== overall ===
+old stages: R3 red=0 green=1 | R5 red=0 green=1
+extension : S4_ok=1 S5_ok=1 S7_ok=1 S7_red=0 S6_green=1 S6_red=0 ctrl_ok=1
+expectation: ANON_EXPECT=auto (S6 must be green=1 red=1)
+profiles  : EXT_GREEN=1 EXT_RED=0 OLD_GREEN=1 OLD_RED=0
+
+=== S1 excerpt (R3 failure) ===
+<none>
+
+=== S1b excerpt (workaround) ===
+[18:11:36] [HotSwap-Scheduler/INFO]: [STDOUT]: [Remold] [Mixin] com.example.anon.AnonTargetMixin reloaded; affected target(s): [com.example.game.AnonTarget]
+[18:11:37] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [DYNAMIC-REDEFINE] Successfully redefined com.example.game.AnonTarget
+[18:11:37] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [Mixin] Target class com.example.game.AnonTarget re-woven with updated mixin and redefined
+
+=== S2 excerpt (R5 decision lines) ===
+[18:11:45] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [Mixin] inner class hot update applied: com.example.game.AnonTarget$Anonymous$d6c4636497ec4aafafc96fed117629b4 redefined in place. A following [DYNAMIC-REDEFINE] "no-op" line for the target class is expected here: the target's own bytecode did not change — the behaviour change lives in the anonymous class(es) listed above.
+[18:11:45] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [Mixin] inner class hot update applied: com.example.game.AnonTarget$Anonymous$d6c4636497ec4aafafc96fed117629b4 redefined in place. A following [DYNAMIC-REDEFINE] "no-op" line for the target class is expected here: the target's own bytecode did not change — the behaviour change lives in the anonymous class(es) listed above.
+
+=== S3 excerpt (must be empty) ===
+<none>
+
+=== S4 excerpt (held-instance body-only change) ===
+[18:12:16] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [Mixin] inner class hot update applied: com.example.game.AnonTarget$Anonymous$d6c4636497ec4aafafc96fed117629b4 redefined in place. A following [DYNAMIC-REDEFINE] "no-op" line for the target class is expected here: the target's own bytecode did not change — the behaviour change lives in the anonymous class(es) listed above.
+[18:12:17] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [Mixin] inner class hot update applied: com.example.game.AnonTarget$Anonymous$d6c4636497ec4aafafc96fed117629b4 redefined in place. A following [DYNAMIC-REDEFINE] "no-op" line for the target class is expected here: the target's own bytecode did not change — the behaviour change lives in the anonymous class(es) listed above.
+
+=== S6 excerpt (1->2 same-shape renumbering) ===
+[18:13:17] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [Mixin] inner class hot update applied: com.example.game.AnonTarget$Anonymous$d6c4636497ec4aafafc96fed117629b4 redefined in place. A following [DYNAMIC-REDEFINE] "no-op" line for the target class is expected here: the target's own bytecode did not change — the behaviour change lives in the anonymous class(es) listed above.
+[18:13:18] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [Mixin] inner class hot update applied: com.example.game.AnonTarget$Anonymous$d6c4636497ec4aafafc96fed117629b4 redefined in place. A following [DYNAMIC-REDEFINE] "no-op" line for the target class is expected here: the target's own bytecode did not change — the behaviour change lives in the anonymous class(es) listed above.
+
+=== S7 excerpt (field initializer / constructor visibility) ===
+[18:12:37] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] Applying instance field init patch to com.example.game.AnonTarget, count=1, fields=1
+[18:12:37] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] Instance field init patch for com.example.game.AnonTarget done: fields=1, failedFields=[], skippedFields=[], elapsed=19ms
+
+=== S5 excerpt (@Unique private access / nest scan) ===
+[18:13:37] [HotSwap-Scheduler/INFO]: [STDOUT]: [Remold] [WARN] [ANON_ALIGN] Host com/example/anon/AnonTargetMixin: 1 candidate pair(s) lack unique evidence; refused to guess (topology-equal candidates 0 -> 0, topology-decided 0). Orphan old anonymous classes: [com/example/anon/AnonTargetMixin$1, com/example/anon/AnonTargetMixin$2, com/example/anon/AnonTargetMixin$3] (no live instances on record) No host field holds them — method-local instantiations are recreated on the next call, so the edit still takes effect there. Their LIVE instances keep running the OLD code — RESTART is required for those edits to affect existing instances, OR add @RemoldReinit to the holding field (and tweak its initializer) to rebuild the instance without restarting. Ambiguity detail: old=[com/example/anon/AnonTargetMixin$1, com/example/anon/AnonTargetMixin$3] new=[com/example/anon/AnonTargetMixin$1] layout-incompatible
+[18:13:40] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] Applying instance field init patch to com.example.game.AnonTarget, count=37, fields=1
+[18:13:40] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] Instance field init patch for com.example.game.AnonTarget done: fields=1, failedFields=[], skippedFields=[], elapsed=1ms
+
+
+=== S0 startup excerpt ===
+[Remold] [Mixin] Re-weaving bridge registered (plugin-mixin)
+[Remold] [Fabric] Dev-runtime integration active (class path groups + mods guard)
+[Remold] Watch paths updated across sources:
+[18:11:01] [main/INFO]: Loading 5 mods:
+	- anon_probe 1.0.0

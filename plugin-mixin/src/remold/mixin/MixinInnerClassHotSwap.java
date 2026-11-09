@@ -93,7 +93,10 @@ final class MixinInnerClassHotSwap {
 				result.failures.add("InnerClassGenerator not found on this Mixin version");
 				return result;
 			}
-			Object raw = findField(generator.getClass(), "innerClasses");
+			// 注意：findField 返回 Field 句柄，必须显式取值；这里曾经把句柄当值用，
+			// 于是每个版本都报 "innerClasses is unavailable"（真实 KnotServer 探针抓到的）。
+			java.lang.reflect.Field innerClassesField = findField(generator.getClass(), "innerClasses");
+			Object raw = innerClassesField == null ? null : innerClassesField.get(generator);
 			innerClasses = raw instanceof Map ? (Map<?, ?>) raw : null;
 			if (innerClasses == null) {
 				result.failures.add("InnerClassGenerator.innerClasses is unavailable on this Mixin version");

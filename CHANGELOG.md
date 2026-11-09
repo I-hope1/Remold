@@ -89,6 +89,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loaded" suppressor now crosses the core boundary as plain JDK functions (`Function`/`Consumer`) instead of
   a core interface implemented by plugin classes, so a plugin/core version skew degrades to a diagnosable
   "suppression unavailable" path instead of a linkage error that kills both the success and failure branch.
+- Anonymous-class alignment no longer orphans an edit just because a sibling anonymous class shares its shape: a body-structure similarity tier (anonymous-class references masked, literals excluded, strict margin, both-way unique) decides the R2b case, and only after that fails does an approved liveness fallback pair a whole ambiguity group whose old candidates all have zero live instances (logged as `deterministic-dead-pair (0 live instances)`). The orphan warning now names the old classes with their live-instance counts, the holder fields, and the `@RemoldReinit` escape hatch.
+- A start-up readiness gate (`HotswapPlugin.isHostReady()`) defers batches until the host says it is ready, and a batch watchdog dumps all thread stacks once with `[HOTSWAP-STALL]` when a batch exceeds the stall threshold.
+- Weaving-generated synthetic classes can now feed their bytes into `remold.BytecodeSources`, so Nest scanning and `InitFix`'s constructor-visibility check can resolve them instead of failing closed with an unattributed warning.
 - Mixin hot-swap now covers Mixin inner classes: a newly introduced anonymous class inside an `@Inject`
   handler no longer fails with `ClassNotFoundException` + `innerClass is null` (Remold feeds the new bytes
   into Mixin's bytecode provider and evicts the upstream negative `ClassInfo` entries), and editing only an

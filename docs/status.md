@@ -168,6 +168,25 @@
 
 **未验证**：真实客户端（IDE + KnotClient）复跑；Forge/NeoForge 侧的匿名类热更（`ForgeMixinHotSwap` 未接本轮内部类闭环）；匿名类成员结构变化（新增字段/方法）只能被拒绝并提示重启，未做结构化热更。
 
+## 0.8 未发布：ANON_ALIGN 同形歧义 / 合成类元数据 / 启动期门闩（2026-11-09）
+
+真实 Fabric 1.21.1 KnotServer 探针（`tests/fabric-mixin-probe/anon/`）扩展到 S0~S7 后暴露的 3 个深水区问题。按**已观测**口径登记，未观测项单列。
+
+| 修复 / 变更 | 状态 | 代码位置 | 验收证据 |
+|:---|:---:|:---|:---|
+| ANON_ALIGN 同形匿名类 N-to-1 歧义：同一方法内两个同接口同结构的匿名类让 Tier 3/4 双向唯一失效，编辑被迫孤儿化（客户端 R2b：`topology-equal candidates 2 -> 2, topology-decided 0`），字段持有的存活实例继续跑旧码 | ✅ | `core/src/remold/AnonClassAligner.java`（Tier 3.5 体相似度、Tier 4.5 liveness 兜底、点名诊断、`findHoldingFields`） | **单测**：`AnonClassAmbiguityTest` 7/7（重编号哈希不变、体相似度口径、2×2 歧义兜底、存活阻断、字段持有者点名）；**变异**：三道人工变异全部击杀并复绿（`ev-20261109091139-5582` liveness 兜底、`ev-20261109091203-8593` 身份语义、`ev-20261109091253-d347` 字面量入 token）；**真实 KnotServer**：S6 `s6a=s6-v1 → s6b=s6-v2` GREEN（重编号的同形匿名类被配对并原地重定义，字段持有的存活实例同步更新），S4 `held-v1 → held-v2` GREEN。**按裁决刻意保留的分支**：两侧都只改字面量（体相似度打平）+ 旧类有存活实例 → 4.5 拒不动手，孤儿化并输出点名诊断（旧类名 + `live=1` + 可能持有字段 + `@RemoldReinit` 逃生舱），由 `liveInstancesBlockTheFallback` 守住。strict 模式语义未动 |
+| Mixin 生成合成类 `Target$Anonymous$<uuid>` 的元数据不可达：`HierarchyTreeOracle.readClassBytes` 只查 `bytecodeCache` 与 classpath 资源，两者皆空 → `Nest scan incomplete`（Nest 判定降级）且 `InitFix` 构造器 protected 可见性判定返回 null → `Field init patch refused ... cannot determine protected status of constructor` | 🔶 | `core/src/remold/BytecodeSources.java`（新，登记口）；`HierarchyTreeOracle.readClassBytes`（接线）；`InitFix`（三处拒绝 + Nest 告警的归因文案）；`plugin-mixin` `MixinInnerClassHotSwap`（生成成功后回灌） | **已观测（单测/字节码级）**：`NestBytecodeSourcesTest` 10/0（登记前 `nest member metadata unavailable` → 登记后成功；unregister 回落；两种构造器可见性判定；plugin 回灌路径）；**变异**：去掉 `BytecodeSources.lookup` 接线 killed（4 条行为性断言红）、去掉 plugin 回灌 killed（回灌用例红）；真实探针里 `Nest scan incomplete` 与 `Field init patch refused` 两条告警**已带上归因文案**（点名"织入期生成的合成内部类，需要 `BytecodeSources` 回灌"）。**未闭环**：S7 仍 RED（见下方残余风险 1） |
+| MC 启动期落批次导致 JVM 挂死（`Done (` 之前类加载 + Mixin 转换高频并发） | 🔶 | `core/src/remold/StartupGate.java`、`core/src/remold/BatchWatchdog.java`、`core/src/remold/RemoldAgent.triggerDueHotswap` 漏斗接线、`api/src/remold/HotswapPlugin.isHostReady()` | **已观测（单测）**：`remold.startup.*` 19 例（门闩状态机、未就绪不落批次、就绪后触发一次、看门狗超阈值才 dump 且同批次只一次、`isHostReady` 默认 true 时行为不变）；**变异**：反打 `RemoldAgent` 修复 diff killed（5 条 wiring 断言红），另两次外科变异（门闩恒真 → 4 红、看门狗去 once → 1 红）均已恢复。**未验证**：宿主插件尚未实现 `isHostReady()`，实际游戏里门闩"首次触发即放开"；**精确挂死线程栈仍未抓到**——看门狗即为下一次复发的取证器 |
+| 探针仪器扩展（S4 长生命周期字段持有 / S5 `@Unique private` 访问 / S6 1→2 重编号 / S7 字段初始化器构造器可见性） | ✅ | `tests/fabric-mixin-probe/anon/`（`run-anon.sh` + 6 个新 stage + `ANON_EXPECT` 模式 + 独立证据文件） | 真实 KnotServer 读数（基线代码）：S4 GREEN、S5 GREEN、S6 RED、S7 RED；合入 E 后 **S6 转 GREEN**；S3 去触发对照全程稳定。**实证回答**：`Nest scan incomplete` 期间 `@Unique private` 字段/方法访问**仍然正确**（S5 终局值一致）——说明该元数据缺失只影响 Remold 自身的安全门视图，不影响 JVM 侧 nest 访问控制 |
+
+**残余风险（已观测）**
+
+1. **S7 时序缺口（新批次 F2 候选）**：`InitFix` 在**目标类自己这次 redefine 的内部**就需要 `Target$Anonymous$<uuid>.<init>` 的元数据，而该合成类是在**同一次织入**里才被 `InnerClassGenerator.registerInnerClass` 登记、并由合成类注册表在该类首次实例化时才真正生成 —— 当前的 `BytecodeSources` 回灌只覆盖"已经生成过字节"的合成类，因此 S7 场景仍读到 null 并 fail-closed。修法方向：在目标类重织入**之前**主动驱动 `registerInnerClass` + `generate` 并回灌（或让 `InitFix` 对"本次织入新生成"的合成类延后到 patch 生成之后复核），需要单开批次并配探针 S7 红→绿。
+2. **看门狗覆盖范围**：仅防抖 Class 批次路径（手动 `triggerHotswap` / `retransformLoaded` 未覆盖）。
+3. **门闩未接宿主**：`plugin-fabric` / `plugin-forge` 尚未实现 `isHostReady()`，启动期保护在实际游戏中尚未生效。
+4. **`BytecodeSources` 常驻内存无上限**：键集合不随 reload 增长（唯一名跨 reload 稳定），但无驱逐策略；回灌发生在 schema 复核之前，即"读得到"不等于"已生效"。
+5. **字段持有者点名的边界**：`findHoldingFields` 按**字段描述符**匹配匿名类类型；若字段以父类型（如 `Supplier`）持有实例，告警会写"无宿主字段持有"——真实探针的 S6 就是这种形态（`AnonTarget.HELD6` 声明为 `Supplier`）。
+
 ## 1. 匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)
 
 设计规格文档：[`docs/topology/`](topology/) 系列文档  

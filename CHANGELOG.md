@@ -5,10 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.6] - 2026-11-09
 
 ### Added
-- **L1 存量初值重放第一版（匿名类 `{{ ... }}` 写继承字段，默认关闭）**：`new XXX() {{ health = 250; }}`
+- **L1 存量初值重放第一版（匿名类 `{{ ... }}` 双括号 / double-brace 初值写继承字段，默认关闭）**：`new XXX() {{ health = 250; }}`
   这类双括号初始化块改值时，存量匿名类实例按新**常量**初值重放。显式开启
   `-Dremold.agent.init_drift.parents=<父类名,...>`（白名单，空 = 关闭），且只处理
   非 final 基本类型、旧/新初值均为编译期常量、`PUTFIELD` owner 为匿名类自身的形态。
@@ -30,12 +30,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   不写 `FieldLedger`、不改变 `patchGenerated` 语义，独立报告 `PatchReport.applyReplayFields` 与
   `[INIT-APPLY-REPLAY]` 日志。Kotlin `var` setter（`invokevirtual`）、具名类属性（`<init>`，B 档）、
   方法体/局部（C 档）、引用类型字段不在范围。设计见 `docs/initfix/13-kotlin-apply-replay.md`。
+- `api`: structured batch report — immutable `HotswapBatchReport` (batch elapsed time, the classes
+  redefined in the batch, per-Mixin member deltas, InitFix patch scale) plus
+  `HotswapBatchListener.afterInternalBatchReport()`. It is published alongside the existing
+  `afterInternalBatch(List)` as a `default` method, so already-compiled listeners need no change.
+  A `MixinChange` whose delta cannot be proven says so (`deltaKnown=false`) and the caller must not
+  read its `0` as "nothing added"; `InitFixStats` only counts patches that actually completed.
+  The data is collected per batch by the new `core` `BatchReportScope` and published only when the
+  batch produced observable activity. `api` also gains `HotswapPlugin.isHostReady()` (default
+  `true`) so a host can defer batches until it is ready.
 - `minecraft-fabric-template`: client-side **HotSwap result toast** (`com.example.client.*`) shown
   after each hot-swap batch. It renders through 1.21.1's `Toast.draw(DrawContext, ToastManager, long)`
   (1.21.1 has no `Toast.update`), reads the structured batch report when the agent provides it
   (elapsed time / Mixin member deltas / InitFix stats), and degrades to an explicit "legacy agent"
   card on the published 0.2.5 agent instead of fabricating zeros. `HotSwapToastModelTest` covers the
   model formatting rules (unknown values, delta-known=false, three-line cap).
+- Real Fabric 1.21.1 KnotServer anonymous-class probe extension
+  (`tests/fabric-mixin-probe/anon/`): new S4 (long-lived field holder), S5 (`@Unique private` access),
+  S6 (1→2 same-shape renumbering) and S7 (field-initializer constructor visibility) stages, an
+  `ANON_EXPECT` mode and a de-trigger control per stage, each with its own evidence file. Recorded
+  readings: S0~S7 all green, `EXT_GREEN=1`, exit 0
+  (`anon/evidence/anon-ext-green.txt`, `anon-f2e2-all-green.txt`, `anon-final-all-green.md.txt`).
 
 ### Changed
 - `plugin-mixin`: apply **Mixin config file diffs** at runtime. When a watched `*.mixins.json`
@@ -44,7 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so deleting a mixin from the config drops its injected handler without a restart. Verified on a
   real Fabric 1.21.1 KnotServer: after removal the target class no longer has the handler method
   and the hook stops; a later class-file rewrite of the removed mixin is ignored instead of
-  silently re-registering it; re-adding the name restores it. Evidence:
+  silently re-registering it; re-adding the name restores it (a re-add whose asset event was missed
+  is re-checked on the next class rewrite, because the removed entry keeps its config path). Evidence:
   `tests/fabric-mixin-probe/evidence/newmixin-runtime-20261108.txt`. Client and non-Fabric
   loaders remain unverified.
 - `plugin-mixin`: experimental runtime registration for a **brand-new Mixin class** that was
@@ -92,13 +108,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Anonymous-class alignment no longer orphans an edit just because a sibling anonymous class shares its shape: a body-structure similarity tier (anonymous-class references masked, literals excluded, strict margin, both-way unique) decides the R2b case, and only after that fails does an approved liveness fallback pair a whole ambiguity group whose old candidates all have zero live instances (logged as `deterministic-dead-pair (0 live instances)`). The orphan warning now names the old classes with their live-instance counts, the holder fields, and the `@RemoldReinit` escape hatch.
 - A field whose initializer allocates a Mixin-generated anonymous class is now initialized on hot reload: the plugin pre-generates the synthetic inner classes of a freshly woven target (before InitFix's metadata scan) and feeds them into `BytecodeSources`, so `InitFix` can decide the constructor's protected status instead of refusing the patch. `loadCounter` is restored afterwards so the class is still treated as not-yet-loaded for the real defineClass.
 - The orphan warning now names the real holder fields: proven by the assignment flow (`NEW <anon> -> <init> -> PUTFIELD`), or listed as candidates when the field is declared as the anonymous class's supertype/interface (a `Supplier` field holding a `Supplier` anonymous class used to be reported as "no host field holds them").
-- A start-up readiness gate (`HotswapPlugin.isHostReady()`) defers batches until the host says it is ready, and a batch watchdog dumps all thread stacks once with `[HOTSWAP-STALL]` when a batch exceeds the stall threshold.
+- A start-up readiness gate (`api` `HotswapPlugin.isHostReady()`, default `true`;
+  `core` `StartupGate`, `-Dremold.agent.ready_timeout_ms`, default `0` = never release on time)
+  defers batches until the host says it is ready, and `core` `BatchWatchdog` dumps all thread
+  stacks **once per batch** with `[HOTSWAP-STALL]` when a batch exceeds
+  `-Dremold.agent.batch_stall_ms` (default `15000`, floor `5000`). The watchdog now covers the
+  debounce Class batch, the manual `triggerHotswap()` entry and `retransformLoaded`, through an
+  `enter`/`exit` scoped API that allows at most one armed watchdog per batch.
 - Weaving-generated synthetic classes can now feed their bytes into `remold.BytecodeSources`, so Nest scanning and `InitFix`'s constructor-visibility check can resolve them instead of failing closed with an unattributed warning.
 - Mixin hot-swap now covers Mixin inner classes: a newly introduced anonymous class inside an `@Inject`
-  handler no longer fails with `ClassNotFoundException` + `innerClass is null` (Remold feeds the new bytes
-  into Mixin's bytecode provider and evicts the upstream negative `ClassInfo` entries), and editing only an
-  already-loaded anonymous class body now redefines the generated `Target$Anonymous$<uuid>` class instead of
-  ending in a silent `[DYNAMIC-REDEFINE] no-op`.
+  handler no longer fails with `ClassNotFoundException` + `innerClass is null`, and editing only an
+  already-loaded anonymous class body now redefines the generated `Target$Anonymous$<uuid>` class instead
+  of ending in a silent `[DYNAMIC-REDEFINE] no-op`. `MixinBytecodeOverlay` installs an `IMixinService`
+  proxy that serves bytes only for explicitly registered internal names (everything else falls through to
+  the host provider) and evicts the upstream negative `ClassInfo` cache entries; `MixinInnerClassSupport`
+  holds the attribution / nested-name pure functions; `MixinInnerClassHotSwap` regenerates the synthetic
+  inner class by `InnerClassGenerator`'s stable unique name and redefines it (member-schema changes are
+  rejected with a directed diagnostic instead of going around the layout gate); `handleInnerClassChange`
+  routes an `Outer$N`-only edit back through the outer Mixin.
 - Forge/NeoForge: `ModLauncherClassTrackerSpoof` temporarily removes target names from
   `ModLauncherClassTracker.loadedClasses` inside the `prepare()` window, restores them in `finally`, and
   fails closed when the tracker shape is unknown; `ForgeMixinConfigDiff` wires `onAssetsChanged` to the
@@ -133,6 +160,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`io.github.i-hope1.remold:*:<ver>` and `com.github.I-Hope1.Remold:*:v<ver>`) under
   `~/.m2/repository`, so a missing/mismatched publication fails the release instead of silently
   dangling in the templates.
+
+### Notes
+- Release-window verification: `./gradlew check` → BUILD SUCCESSFUL, **JUnit 597 tests,
+  0 skipped, 0 failures**, including `verifyTestCount` and `verifyDocStatusMarkers`. The per-feature
+  bullets above quote the full-suite snapshot recorded when each feature landed (480 → 527); 597 is
+  the release-window figure and is not mixed with those snapshots.
+- The evidence harness itself has known false-PASS / false-kill modes (exit code 127 recorded as
+  "killed", cmd banner-only output recorded as PASS, Gradle `UP-TO-DATE` duplicate stdout hashes
+  treated as new evidence). Every "PASS"/"killed" claim in this release presumes human review of the
+  raw log; the tool-side fixes are tracked in `docs/status.md` §0.10.
 
 ## [0.2.5] - 2026-11-07
 

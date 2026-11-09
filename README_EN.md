@@ -15,6 +15,8 @@ English | [简体中文](README.md)
 
 Remold is a Java Agent: it watches your compiled output directory and swaps the new bytecode into the live JVM in place.
 Two ready-to-run templates are included, one for Mindustry mods and one for Minecraft (Fabric) mods.
+0.2.6 adds a two-phase schema-first redefine (read-through protection), opt-in initializer replay for live objects,
+and Mixin anonymous/inner-class hot-swap.
 
 ## Stuck in this loop?
 
@@ -31,6 +33,10 @@ Two ready-to-run templates are included, one for Mindustry mods and one for Mine
 | New fields read as zero on existing objects | Backfills initial values into live instances after the swap; only zero values are touched, your manually changed state is never overwritten |
 | Anonymous classes / lambdas land in the wrong slot | Aligns old and new anonymous classes by structural fingerprint instead of class names and indices that drift on every compile |
 | Mixin hooks get washed out | Re-weaves the source-level bytecode through Mixin before redefining, keeping `@Inject` / `@Unique` / `@Shadow` intact |
+| New code reads a not-yet-patched field right after the swap (sees `0` / NPE) | The internal batch path uses a two-phase redefine: commit the new structure with the old method bodies, patch live instances, then commit the new bodies (on by default in 0.2.6) |
+| The first anonymous class inside a Mixin `@Inject` method, or a body-only edit of an already-loaded anonymous class | New bytes feed Mixin's bytecode provider and the generated `Target$Anonymous$<uuid>` is redefined in place — no more `ClassNotFoundException` / silent no-op |
+| An initializer changed but you do not want to rebuild the objects | Opt-in double-brace / Kotlin `apply {}` static-holder replay writes the new constant only where the instance still holds the old constant (allowlist-gated, off by default) |
+| A batch landing during start-up hangs the JVM | Start-up readiness gate + batch stall watchdog: one full thread dump with `[HOTSWAP-STALL]` when the threshold is crossed |
 | Hot-swapping after deleting a field or changing its type crashes | Refuses the redefinition outright while live instances still exist, instead of corrupting memory |
 
 ## Demos
@@ -104,6 +110,33 @@ git clone https://github.com/I-hope1/Remold && cd Remold
 - Minecraft Fabric mod template: [`minecraft-fabric-template/`](minecraft-fabric-template/README.md) (**MC 1.21.1 baseline**; Mixin re-weaving + client HotSwap toast demo)
 - 1.21.4 Fabric client gametest probe: [`tests/fabric-gametest-1.21.4/`](tests/fabric-gametest-1.21.4/README.md) (1.21.1's fabric-api has no `fabric-client-gametest-api-v1`, so that capability is kept standalone and is not shipped with the template)
 
+## What's new in v0.2.6
+
+- **Two-phase schema-first redefine (on by default).** Commit stage A — the new class structure with the **old**
+  method bodies (constructors / `<clinit>` keep the new bodies) — patch live instances, then commit stage C (the new
+  bodies). This closes the read-through window between `redefineClasses` returning and InitFix finishing; pure
+  method-body edits keep the single-redefine fast path. `-Dremold.agent.two_phase=false` restores the old behaviour.
+- **Initializer replay for live objects (L1 / A-track, off by default).** Double-brace initializers that write an
+  inherited field, and Kotlin `object` / top-level `val` holders whose `<clinit>` runs `T().apply { field = ... }`,
+  replay the new compile-time constant through a **conditional on the old constant**, so runtime-modified values are
+  never overwritten.
+- **Mixin anonymous/inner-class hot-swap.** The first anonymous class inside an `@Inject` handler no longer kills the
+  reload; body-only edits of an already-loaded generated inner class redefine `Target$Anonymous$<uuid>` in place;
+  weaving-generated synthetic bytes feed `BytecodeSources` so InitFix can read the constructor's visibility.
+- **Structured batch report + client toast.** `api` gained `HotswapBatchReport` and
+  `HotswapBatchListener.afterInternalBatchReport()` (elapsed time / redefined classes / Mixin member deltas / InitFix
+  stats); the Fabric template's client toast renders it directly.
+- **Start-up readiness gate + batch watchdog.** `HotswapPlugin.isHostReady()` lets a host defer batches until it is
+  ready; `BatchWatchdog` dumps all thread stacks once with `[HOTSWAP-STALL]` when a batch exceeds
+  `batch_stall_ms` (15 s by default).
+- **Same-shape anonymous-class ambiguity + holder naming.** A body-similarity tier, then a zero-live-instance
+  liveness fallback; orphan warnings name the real holder fields (assignment-flow proven / supertype candidates) and
+  the `@RemoldReinit` escape hatch.
+- **Class and asset debounce split.** `.class`/jar and resource/config events use independent trailing-edge quiet
+  windows (800 ms / 250 ms by default), so an asset edit no longer postpones a class batch.
+
+Full changes and known limits: [v0.2.6 Release Notes](docs/releases/v0.2.6.md).
+
 ## Want the internals?
 
 Behind those capabilities sits a full stack: anonymous class topological alignment, confidence tiers and safety gates, bytecode slicing with effect analysis, and a patch driver for live instances.
@@ -120,6 +153,9 @@ Remold runs as a Java Agent. For high-performance hot reloading of class structu
 ### 1.1 Runtime and version baseline
 
 - **Recommended runtime**: **JetBrains Runtime (JBR 17/21/25+)**, launched with `-XX:+AllowEnhancedClassRedefinition`.
+- **Behaviour switches**: the two-phase redefine is on by default (`-Dremold.agent.two_phase=false` restores the
+  single-phase path); L1 / A-track initializer replay is off by default and needs an allowlist; gate/watchdog
+  thresholds and both debounce windows are listed in §1.7.
 - **Panama module note**: `remold-panama` targets the finalized Foreign Function & Memory (FFM) API from JDK 22+. On JBR 17/21, prefer the JNI native acceleration library (`LibTool`) bundled in `remold-agent`.
 - **Java 24+ native access**: newer JDKs need `--enable-native-access=ALL-UNNAMED`.
 
@@ -394,6 +430,26 @@ Maven Central coordinates are reserved: `io.github.i-hope1.remold:api:0.2.6`.
 
 ---
 
+### 1.7 Behaviour switches
+
+These system properties can be passed to the application JVM (the Gradle plugin forwards the agent arguments for
+you; the Gradle DSL equivalent is shown in parentheses):
+
+| System property | Default | Effect |
+|:--|:--|:--|
+| `-Dremold.agent.two_phase` | `true` | Two-phase schema-first redefine (closes the read-through window); `false` restores the single-phase fast path |
+| `-Dremold.agent.init_drift.parents` | empty (off) | Parent-class allowlist for L1 double-brace initializer replay (comma separated) |
+| `-Dremold.agent.init_drift.apply_holders` | empty (off) | Holder allowlist for A-track Kotlin `object` / top-level `val` replay (comma separated) |
+| `-Dremold.agent.ready_timeout_ms` | `0` | Start-up readiness gate timeout; `0` means never release early (better to stay deferred than to land a batch before the host is ready) |
+| `-Dremold.agent.batch_stall_ms` | `15000` | Batch stall watchdog threshold (floor `5000`); crossing it prints one `[HOTSWAP-STALL]` full thread dump |
+| `-Dremold.agent.file_shake_ms` | `800` | Class/jar debounce window (Gradle DSL: `fileShakeMs`) |
+| `-Dremold.agent.asset_shake_ms` | `250` | Resource/config debounce window, independent of the class window (Gradle DSL: `assetShakeMs`) |
+
+The remaining safety-gate switches (`remold.agent.layout_gate`, `anon_align`, `anon_strict`, `local_class_guard`,
+`offset_strict`, …) are documented in [`AGENTS.md`](AGENTS.md) and [`docs/status.md`](docs/status.md).
+
+---
+
 ## 2. What is Solved vs Known Limitations
 
 Facts first — the capability boundary is stated explicitly.
@@ -403,15 +459,19 @@ Facts first — the capability boundary is stated explicitly.
 1. **Anonymous class hijacking and misalignment caused by source changes**:
    - `AnonClassAligner` uses confidence tiers 1–4 (exact fingerprint, topological isomorphism, self hash, call-chain tracing) to align anonymous classes across compilations, removing the unreliable name-based pass-through entirely.
 2. **New fields on live instances reading as zero after a class grows**:
-   - `InitFix` combines constructor parameter tracing, the NestView single-write proof, and reverse bytecode slicing to inject initial values into live heap instances and static state with conditional CAS, so nothing silently reads zero.
+   - `InitFix` combines constructor parameter tracing, the NestView single-write proof, and reverse bytecode slicing to inject initial values into live heap instances and static state with conditional CAS, so nothing silently reads zero. An opt-in double-brace / Kotlin `apply {}` static-holder replay (L1 / A-track, allowlist-gated) additionally rewrites live values only while they still hold the old constant.
 3. **Mixin / AOP slices being washed out by redefinition**:
-   - `BytecodeTransformerBridge` plus the dual-baseline scheme (source baseline vs effective baseline) re-weaves Mixin-injected hooks and fields on every hot swap, keeping the AOP chain intact.
+   - `BytecodeTransformerBridge` plus the dual-baseline scheme (source baseline vs effective baseline) re-weaves Mixin-injected hooks and fields on every hot swap, keeping the AOP chain intact. Newly declared Mixin members, config removal/re-add, brand-new Mixin classes, and anonymous/inner classes introduced or edited inside a Mixin handler all go through the same shared reflection engine and inner-class hot-swap loop.
 4. **Destructive field changes breaking live objects**:
    - `LayoutGate` and `LocalClassGuard` refuse the redefinition while live instances exist for a deleted or retyped field, protecting memory safety.
 5. **Transparent takeover of redefinitions issued by IDEs / JDWP**:
    - A `ThreadLocal` marker distinguishes the caller, so clicking "Reload Changed Classes" in the IDE still triggers Mixin re-weaving and the safety-gate review.
 6. **JVMTI native whole-heap instance lookup with concurrency isolation**:
    - The C++ library scans the whole heap in sub-millisecond time behind a global mutex and dynamic tag isolation; the entire hot-swap pipeline is serialized by the `HOTSWAP_LOCK` reentrant lock.
+7. **The read-through window between redefinition and patch completion**:
+   - Closed on the internal batch path (file watch → `processChanges`) by the two-phase schema-first redefine; the external IDE/JDWP and `redefineDynamic` single-class channels remain single-phase (see §2.2).
+8. **Start-up batches and hot-swap observability**:
+   - `StartupGate` + `HotswapPlugin.isHostReady()` defer batches at start-up, `BatchWatchdog` prints one `[HOTSWAP-STALL]` full thread dump when a batch crosses the threshold, and `HotswapBatchReport` reports per-batch elapsed time / redefined classes / Mixin deltas / InitFix stats.
 
 ### 2.2 Known limitations
 
@@ -425,6 +485,14 @@ Facts first — the capability boundary is stated explicitly.
    - Between the JVMTI heap snapshot and the patch taking effect, objects created by concurrent threads fall into a small timing window.
 5. **Complex control-flow slices**:
    - Slices containing branches (if/switch), loops, try-catch, or external mutable builders are firmly rejected by the safety gate and recorded in the `FieldLedger` instead of being written silently.
+6. **The external redefine channels remain single-phase**:
+   - IDE/JDWP redefinitions and the `redefineDynamic` single-class channel commit the full new bytecode before patching, so the read-through window is still open there; fields rejected by the safety gates are not compensated by two-phase either (restart semantics).
+7. **NeoForge 26.x / FML 10+ and the production installer launch path are unsupported / unverified**:
+   - NeoForge 26.x removed ModLauncher (entry point `net.neoforged.fml.startup.Client`); the cross-ClassLoader bridge is written against ModLauncher semantics, so the 21.1 evidence must not be extrapolated. The production installer (`unix_args.txt`) module ownership and `--add-opens` requirement need a separate test.
+8. **plugin and core must ship in lockstep; anonymous-class member changes still need a restart**:
+   - Version skew degrades to `NoSuchMethodError` (caught per plugin with a directed log, but unsupported). Adding/removing fields or methods on a Mixin-generated anonymous class is rejected with a directed diagnostic, and `ForgeMixinHotSwap` is not wired into the inner-class loop.
+9. **Real-client GUI acceptance is still manual**:
+   - Container probes cover dedicated servers (Fabric KnotServer / Forge `runServer`); the client-side result columns of template scenarios 1–8 in [`docs/acceptance/01-manual-checklist.md`](docs/acceptance/01-manual-checklist.md) await manual confirmation.
 
 ---
 
@@ -442,7 +510,7 @@ flowchart TD
     PLUGIN_FORGE[":plugin-forge<br/>(Forge / NeoForge adaptive plugin)"]
     PLUGIN_FABRIC[":plugin-fabric<br/>(Fabric / Quilt dev-runtime integration plugin)"]
     GRADLE_PLUGIN[":gradle-plugin<br/>(Gradle binary plugin io.github.i-hope1.remold)"]
-    TESTS[":tests<br/>(469 JUnit + InitFix Oracle + probe suites + E2E)"]
+    TESTS[":tests<br/>(597 JUnit + InitFix Oracle + probe suites + E2E)"]
 
     API --> CORE
     PANAMA -.-> CORE
@@ -460,8 +528,8 @@ flowchart TD
     PLUGIN_FABRIC --> TESTS
 ```
 
-- **`:api`**: the lightweight public API (`@RemoldReinit`, `@OnReload`, `@Profile` plus the `HotswapPlugin`, `OrphanBreakerPredicate`, and `BytecodeTransformerBridge` extension SPIs).
-- **`:core`**: the agent engine. **ASM 9.11.1 is shaded and relocated to `remold.internal.asm.*`**, so there is never an ASM version or class loader clash with application-level frameworks (Mixin, ByteBuddy, Spring).
+- **`:api`**: the lightweight public API (`@RemoldReinit`, `@OnReload`, `@Profile` plus the `HotswapPlugin`, `OrphanBreakerPredicate`, and `BytecodeTransformerBridge` extension SPIs, the `HotswapBatchReport` / `HotswapBatchListener.afterInternalBatchReport()` structured batch report, and the `HotswapPlugin.isHostReady()` readiness vote).
+- **`:core`**: the agent engine. **ASM 9.11.1 is shaded and relocated to `remold.internal.asm.*`**, so there is never an ASM version or class loader clash with application-level frameworks (Mixin, ByteBuddy, Spring). Internally it also hosts the two-phase redefine orchestration (`applyTwoPhase`), the `StartupGate` readiness latch, the `BatchWatchdog`, the `DebounceWindow` class/asset state machine, the `BytecodeSources` port for weaving-generated class bytes, the offset-drift gates, and the shared `remold.reflect.mixin` reflection engine.
 - **`:panama`**: the Panama (FFM) and JNI/JVMTI bindings layer; the JVMTI native acceleration library (C++ sources plus prebuilt `libtool` binaries) ships inside `:core`, and together they provide sub-millisecond whole-heap instance lookup on Windows (x64), Linux (x64), and macOS (x64/arm64).
 - **`:plugin-arc`**: the reference plugin, showing how to extend UI layout-tree comparison and framework-level polling circuit breaks through the SPI.
 - **`:plugin-mixin`**: the SpongePowered Mixin ecosystem plugin. It hands the source-level bytecode back to Mixin before redefinition (preserving `@Inject` / `@Unique` / `@Shadow` output), and when a Mixin class itself changes it refreshes the Mixin runtime state and re-weaves the affected target classes. Fabric Loom projects mount it automatically through the Gradle script.
@@ -469,7 +537,7 @@ flowchart TD
 - **`:plugin-fabric`**: the Fabric / Quilt dev-runtime integration plugin. It injects `fabric.classPathGroups` (without it hot reload silently does nothing), excludes the `mods` directory from watching, and quarantines a stale build JAR in `run/mods` that carries the same mod id; Fabric Loom projects mount it automatically through the Gradle script.
 - **`:gradle-plugin`**: the Gradle binary plugin (coordinate `io.github.i-hope1.remold`) exposing the typesafe `remold { ... }` DSL, the `runRemold` / `startRemold` / `generateRemoldScript` tasks and IDEA run-configuration generation; the repository-root `remold.gradle(.kts)` is only a thin shim over it.
 - **`:example`**: a minimal demo app for agent watching, live-instance field initialization, and the `@OnReload` lifecycle callback.
-- **`:tests`**: the regression and compatibility suite — 469 JUnit tests (fixtures compiled on the fly across javac 8/11/17/21/25, covering topology alignment, layout prediction and native heap scanning), 51 scenarios / 350 InitFix Oracle positive/negative assertions, and the Mixin/JDWP end-to-end probes such as `mixinProbe`.
+- **`:tests`**: the regression and compatibility suite — 597 JUnit tests (fixtures compiled on the fly across javac 8/11/17/21/25, covering topology alignment, layout prediction and native heap scanning), 51 scenarios / 350 InitFix Oracle positive/negative assertions, the Mixin/JDWP end-to-end probes such as `mixinProbe`, and the real KnotServer anonymous-class S0–S7 probe.
 
 ---
 
@@ -554,6 +622,38 @@ public class PlayerService {
 > unchanged, so it **still resets on every reload**: one redundant write beats silently keeping a stale value.
 > See the `RemoldReinit` Javadoc for the full contract.
 
+### 4.3 Batch report
+
+When a batch finishes, the agent publishes an immutable structured report (elapsed time, redefined classes,
+Mixin member deltas, InitFix stats) next to the existing `afterInternalBatch(List)` callback — as a supplement,
+not a replacement:
+
+```java
+import remold.HotswapBatchListener;
+import remold.HotswapBatchReport;
+import remold.RemoldAgent;
+
+RemoldAgent.addBatchListener(new HotswapBatchListener() {
+    @Override
+    public void afterInternalBatchReport(HotswapBatchReport report) {
+        System.out.println("batch elapsed=" + report.getElapsedMillis() + "ms"
+            + " redefined=" + report.getRedefinedClasses().size()
+            + " initFix=" + report.getInitFixStats());
+        for (HotswapBatchReport.MixinChange change : report.getMixinChanges()) {
+            // deltaKnown=false means there is no comparable previous version; the delta fields are 0
+            // and must NOT be read as "nothing added". Totals stay valid.
+            System.out.println(change.getMixinClass() + " deltaKnown=" + change.isDeltaKnown()
+                + " handlers=" + change.getInjectHandlerCount()
+                + " uniqueFields=" + change.getUniqueFieldCount());
+        }
+    }
+});
+```
+
+- `getElapsedMillis()` returns `HotswapBatchReport.UNKNOWN_ELAPSED` (`-1`) when no start time was available — do not treat it as 0.
+- The callback only fires for batches with observable activity, and it may fire on a batch with **no `ClassDefinition`** (for example a Mixin-template-only edit), so "the `afterInternalBatch` list is non-empty" is not an equivalent predicate.
+- Host/loader integrations can also implement `HotswapPlugin.isHostReady()` (default `true`) so the agent defers start-up batches instead of trying to land them.
+
 ---
 
 ## 5. Building & Verification
@@ -562,15 +662,16 @@ The project builds with Gradle and requires JDK 21+.
 
 ### Run the full verification matrix
 ```bash
-./gradlew check
+./gradlew fullCheck   # = check + e2eProbe (use this before a release / in CI)
+./gradlew check       # day-to-day: JUnit + doc-marker scan + test-count floor
 ```
 
 The pipeline enforces:
-1. **469 JUnit tests** (fixtures compiled on the fly across javac 8/11/17/21/25, covering topology alignment, layout prediction and native heap scanning; asserts 0 skipped, 0 failures);
+1. **597 JUnit tests** (fixtures compiled on the fly across javac 8/11/17/21/25, covering topology alignment, layout prediction and native heap scanning; asserts 0 skipped, 0 failures);
 2. **51 scenarios / 350 InitFix Oracle differential assertions** (covering Java and real Kotlin compiler output, both positive state tracing and negative safety blocking);
 3. **Mixin and JDWP redefinition end-to-end checks such as `mixinProbe`**;
 4. **The LayoutGate rule table, GhostProbe stack probing, concurrency hardening tests, and deferred-fingerprint E2E assertions**;
-5. **A purity scan of status markers in docs and source (`verifyDocStatusMarkers`)**.
+5. **A purity scan of status markers in docs and source (`verifyDocStatusMarkers`)** and the test-count guard (`verifyTestCount`).
 
 ---
 

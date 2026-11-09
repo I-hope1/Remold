@@ -15,8 +15,10 @@
 
 > **English summary** — Remold is a JVM hot-reload agent. It watches your compiled output and swaps new bytecode
 > into the running JVM in place, backfills newly added fields on live instances (InitFix), realigns anonymous
-> classes and lambdas by structural fingerprint, and re-weaves Mixin hooks before redefining. The bundled Gradle
-> plugin (`io.github.i-hope1.remold`) wires the agent, the JBR/DCEVM arguments and the `runRemold` task for you.
+> classes and lambdas by structural fingerprint, and re-weaves Mixin hooks before redefining. 0.2.6 adds a
+> two-phase schema-first redefine (read-through protection), opt-in initializer replay for live objects, and
+> Mixin anonymous/inner-class hot-swap. The bundled Gradle plugin (`io.github.i-hope1.remold`) wires the agent,
+> the JBR/DCEVM arguments and the `runRemold` task for you.
 > Full English documentation: [README_EN.md](README_EN.md) · [Gradle plugin reference](gradle-plugin/README.md).
 
 Remold 是一个 Java Agent：它盯着你的编译输出目录，文件一变就把新字节码原地换进正在运行的 JVM。
@@ -37,6 +39,10 @@ Remold 是一个 Java Agent：它盯着你的编译输出目录，文件一变�
 | 新增字段在存量对象里是零值 | 热更后给已存在的对象补初值；只补零值，绝不覆盖你手动改过的状态 |
 | 匿名类 / Lambda 热更后串位 | 按结构指纹把新旧匿名类对齐，不依赖会随编译漂移的类名与编号 |
 | Mixin 钩子被冲掉 | 重定义前先把源码级字节码重新交给 Mixin 织入，保住 `@Inject` / `@Unique` / `@Shadow` |
+| 热更瞬间新代码读到还没补上的新增字段（读到 `0` / NPE） | 内部批次路径走两阶段重定义：先上「新结构 + 旧方法体」，补完存量实例再上新方法体（0.2.6 默认开启） |
+| Mixin 注入方法里第一次新增匿名类，或只改已加载匿名类的逻辑 | 新字节喂给 Mixin 的字节码通道、生成的 `Target$Anonymous$<uuid>` 原地重定义，不再 `ClassNotFoundException` / 静默 no-op |
+| 存量对象的初值改了，但对象不想重建 | 可选的双括号 / Kotlin `apply {}` 静态持有者初值重放：仅当实例仍是旧常量时按条件 CAS 写入（默认关闭，白名单开启） |
+| 启动期落批次把 JVM 拖死 | 启动就绪门闩 + 批次卡死看门狗，超阈值时输出一次带 `[HOTSWAP-STALL]` 的全线程栈 |
 | 删字段、改类型后热更崩 | 堆里还有存活实例时坚决拒绝这次重定义，而不是把内存改坏 |
 
 ## 演示
@@ -107,6 +113,18 @@ git clone https://github.com/I-hope1/Remold && cd Remold
 - Minecraft Fabric 模组模板：[`minecraft-fabric-template/`](minecraft-fabric-template/README.md)（**MC 1.21.1 基准**，内置 Mixin 重织入 + 客户端 HotSwap Toast 演示）
 - 1.21.4 Fabric 客户端 gametest 探针：[`tests/fabric-gametest-1.21.4/`](tests/fabric-gametest-1.21.4/README.md)（1.21.1 的 fabric-api 不含 `fabric-client-gametest-api-v1`，该能力独立保存，不随模板发布）
 
+## v0.2.6 更新亮点
+
+- **两阶段 Schema-First 重定义（默认开启）**：先提交「新结构 + 旧方法体」（构造器/`<clinit>` 保留新体），补完存量实例后再提交新方法体，关闭 `redefineClasses` 返回后、`InitFix` 完成前的读穿窗口；纯方法体热更仍走单次重定义快路径。`-Dremold.agent.two_phase=false` 可回退。
+- **存量对象初值重放（L1 / A 档，默认关闭）**：双括号初始化写继承字段、Kotlin `object` / 顶层 `val` 的 `apply {}` 静态持有者，按**旧常量条件 CAS** 重放新初值，运行期改过的值不会被覆盖。
+- **Mixin 匿名/内部类热更闭环**：`@Inject` 方法里第一次新增匿名类不再崩溃；只改已加载匿名类体时原地重定义 `Target$Anonymous$<uuid>`；织入期生成的合成类字节接入 `BytecodeSources`，`InitFix` 能读到构造器可见性。
+- **结构化批次报告 + 客户端 Toast**：`api` 新增 `HotswapBatchReport` 与 `HotswapBatchListener.afterInternalBatchReport()`（耗时 / 重定义类 / Mixin 成员增量 / InitFix 统计）；Fabric 模板的客户端 Toast 直接展示这些数据。
+- **启动就绪门闩 + 批次看门狗**：`HotswapPlugin.isHostReady()` 让宿主自己决定批次何时可以开始；批次超过 `batch_stall_ms`（默认 15s）打印一次全线程栈，用于定位挂死。
+- **同形匿名类歧义消解 + 持有者点名**：体相似度分层 + 零存活实例兜底，孤儿告警点名真实持有字段（赋值流证明 / 父类型候选）与 `@RemoldReinit` 逃生舱。
+- **Class / 资源防抖分离**：`.class`/jar 与资源/配置各自一条 trailing-edge 静默窗口（默认 800ms / 250ms），资源改动不再推迟 Class 批次。
+
+完整变更与已知边界见 [v0.2.6 Release Notes](docs/releases/v0.2.6.md)。
+
 ## 想看原理？
 
 上面这些能力背后是匿名类拓扑对齐、置信梯队与安全门、字节码切片与效应检查、存量实例补丁驱动等一整套机制。
@@ -123,6 +141,7 @@ Remold 作为一个 Java Agent 运行。为了获得类结构变更高性能热�
 ### 1.1 运行环境与版本基线
 
 - **推荐运行时**：**JetBrains Runtime (JBR 17/21/25+)**，需附带 `-XX:+AllowEnhancedClassRedefinition` 启动参数。
+- **热更新行为开关**：两阶段重定义默认开启（`-Dremold.agent.two_phase=false` 回退单阶段）；L1 / A 档初值重放默认关闭、需白名单开启；启动门闩与看门狗阈值、两条防抖窗口等见 §1.7。
 - **Panama 模块版本注意**：`remold-panama` 依赖 JDK 22+ 的 Foreign Function & Memory (FFM) API 定稿标准。若运行在 JBR 17/21 环境，建议优先使用 `remold-agent` 内置的 JNI Native 加速库 (`LibTool`)。
 - **Java 24+ 原生访问**：高版本 JDK 需附带 `--enable-native-access=ALL-UNNAMED`。
 
@@ -399,6 +418,24 @@ Maven Central 预留坐标：`io.github.i-hope1.remold:api:0.2.6`。
 
 ---
 
+### 1.7 热更新行为开关 (Behaviour switches)
+
+以下系统属性可直接传给应用 JVM（Gradle 插件已自动透传所需的 agent 参数；括号内为 Gradle DSL 等价项）：
+
+| 系统属性 | 默认值 | 作用 |
+|:--|:--|:--|
+| `-Dremold.agent.two_phase` | `true` | 两阶段 Schema-First 重定义（关闭读穿窗口）；`false` 回退单阶段快路径 |
+| `-Dremold.agent.init_drift.parents` | 空（关闭） | L1 双括号初值重放的父类白名单（逗号分隔） |
+| `-Dremold.agent.init_drift.apply_holders` | 空（关闭） | A 档 Kotlin `object` / 顶层 `val` 持有者白名单（逗号分隔） |
+| `-Dremold.agent.ready_timeout_ms` | `0` | 启动就绪门闩的超时自动放行；`0` = 不自动放行（宁可不生效，也不在没就绪时落批次） |
+| `-Dremold.agent.batch_stall_ms` | `15000` | 批次卡死看门狗阈值（下限 `5000`）；超阈值输出一次带 `[HOTSWAP-STALL]` 的全线程栈 |
+| `-Dremold.agent.file_shake_ms` | `800` | Class/jar 变动防抖窗口（Gradle DSL：`fileShakeMs`） |
+| `-Dremold.agent.asset_shake_ms` | `250` | 资源/配置变动防抖窗口，独立于 Class 窗口（Gradle DSL：`assetShakeMs`） |
+
+其余安全门开关（`remold.agent.layout_gate`、`anon_align`、`anon_strict`、`local_class_guard`、`offset_strict` 等）见 [`AGENTS.md`](AGENTS.md) 与 [`docs/status.md`](docs/status.md)。
+
+---
+
 ## 2. 解决什么、没解决什么 (What is Solved vs Known Limitations)
 
 坚持工程事实第一，明确界定能力边界：
@@ -407,15 +444,19 @@ Maven Central 预留坐标：`io.github.i-hope1.remold:api:0.2.6`。
 1. **源码变动导致的匿名类拓扑篡夺与错位**：
    - 通过 `AnonClassAligner` 的 Tier 1~4 置信梯队（精确指纹、拓扑同构、Self Hash、调用链追溯），跨编译版本稳定对齐匿名类，彻底废除不可靠的类名直通。
 2. **扩容后存量实例新增字段丢失初值**：
-   - 通过 `InitFix` 结合构造器参数回溯、NestView 单写证明与字节码反向切片，以条件 CAS 安全注入存量活体堆实例与静态环境，杜绝静默读零。
+   - 通过 `InitFix` 结合构造器参数回溯、NestView 单写证明与字节码反向切片，以条件 CAS 安全注入存量活体堆实例与静态环境，杜绝静默读零；另有可选的双括号 / Kotlin `apply {}` 静态持有者初值重放（L1 / A 档，白名单开启、只在实例仍等于旧常量时重放）。
 3. **Mixin / AOP 增强切片在热更重定义时被冲刷 (Washout)**：
-   - 通过 `BytecodeTransformerBridge` 与双基线体系（源码基线 vs 生效基线），在类热更时自动重新织入 Mixin 注入的钩子与字段，保持 AOP 链完整。
+   - 通过 `BytecodeTransformerBridge` 与双基线体系（源码基线 vs 生效基线），在类热更时自动重新织入 Mixin 注入的钩子与字段，保持 AOP 链完整；Mixin 模板自身新增成员、配置删除/重新加入、新增 Mixin 类，以及 Mixin 注入方法里新增/编辑匿名类与内部类，都走同一套共享反射引擎与内部类热更闭环。
 4. **破坏性字段变更破坏存活对象**：
    - 通过 `LayoutGate` 与 `LocalClassGuard`，在字段被删除或改类型且堆中存在存活实例时坚决熔断阻断重定义，保护内存安全。
 5. **外部 IDE / JDWP 直接重定义的无感接管**：
    - 通过 `ThreadLocal` 状态标记精准区分调用来源，在开发者直接于 IDE 点击 "Reload Changed Classes" 时自动补齐 Mixin 重新织入并执行安全门复核。
 6. **JVMTI 原生全堆实例检索与并发安全隔离**：
    - 底层 C++ 原生动态库通过全局互斥锁与动态 Tag 隔离实现亚毫秒级全堆实例精确扫描，热更全流程严格由 `HOTSWAP_LOCK` 重入锁串行化保护。
+7. **重定义到补丁完成之间的读穿窗口**：
+   - 内部批次路径（文件监听 → `processChanges`）由两阶段 Schema-First 重定义关闭；外部 IDE/JDWP 与 `redefineDynamic` 单类通道仍为单阶段（见 §2.2）。
+8. **启动期批次与热更链路的可观测性**：
+   - `StartupGate` + `HotswapPlugin.isHostReady()` 押住启动期批次，`BatchWatchdog` 在批次超阈值时输出一次 `[HOTSWAP-STALL]` 全线程栈，`HotswapBatchReport` 提供每批耗时 / 重定义类 / Mixin 增量 / InitFix 统计。
 
 ### 2.2 客观承认的已知限制 (Known Limitations)
 1. **孤儿 Lambda 的调用栈逃逸**：
@@ -428,6 +469,14 @@ Maven Central 预留坐标：`io.github.i-hope1.remold:api:0.2.6`。
    - JVMTI 堆遍历快照到补丁生效之间，并发线程新建的对象存在微小时钟窗口。
 5. **复杂控制流切片**：
    - 含分支（if/switch）、循环、try-catch、外部可变 Builder 的复杂切片会被安全门坚决拒绝，记入 `FieldLedger` 台账而不静默写入。
+6. **外部重定义通道仍是单阶段**：
+   - 外部 IDE/JDWP 重定义与 `redefineDynamic` 单类通道先提交完整新字节码再补丁，读穿窗口仍在；被安全门拒绝、根本没生成补丁的字段两阶段也无法代偿（保持"重启"语义）。
+7. **NeoForge 26.x / FML 10+ 与生产 installer 启动路径未适配/未验证**：
+   - NeoForge 26.x 已移除 ModLauncher（入口 `net.neoforged.fml.startup.Client`），现有跨 ClassLoader 桥按 ModLauncher 语义实现，21.1 的证据不可外推；生产 installer（`unix_args.txt`）的模块归属与 `--add-opens` 需求需另测。
+8. **plugin 与 core 必须同版本发布；Mixin 匿名类成员结构变化仍需重启**：
+   - 插件/内核版本错位会退化为 `NoSuchMethodError`（有逐插件 catch 与定向日志，但不受支持）；Mixin 生成的匿名类新增/删除字段或方法会被拒绝并点名诊断，`ForgeMixinHotSwap` 也未接入内部类热更闭环。
+9. **真实客户端 GUI 验收仍为手动**：
+   - 容器探针覆盖专用服务端（Fabric KnotServer / Forge `runServer`）；模板场景 1–8 的客户端结果列见 [`docs/acceptance/01-manual-checklist.md`](docs/acceptance/01-manual-checklist.md)，待人工确认。
 
 ---
 
@@ -445,7 +494,7 @@ flowchart TD
     PLUGIN_FORGE[":plugin-forge<br/>(Forge / NeoForge 自适应插件)"]
     PLUGIN_FABRIC[":plugin-fabric<br/>(Fabric / Quilt 运行期集成插件)"]
     GRADLE_PLUGIN[":gradle-plugin<br/>(Gradle 二进制插件 io.github.i-hope1.remold)"]
-    TESTS[":tests<br/>(469 JUnit + InitFix Oracle + probe suites + E2E)"]
+    TESTS[":tests<br/>(597 JUnit + InitFix Oracle + probe suites + E2E)"]
 
     API --> CORE
     PANAMA -.-> CORE
@@ -463,8 +512,8 @@ flowchart TD
     PLUGIN_FABRIC --> TESTS
 ```
 
-- **`:api`**：对外公开发行的轻量级 API 包（包含 `@RemoldReinit`、`@OnReload`、`@Profile` 注解以及 `HotswapPlugin`、`OrphanBreakerPredicate`、`BytecodeTransformerBridge` 等扩展 SPI）。
-- **`:core`**：核心 Java Agent 引擎。**ASM 9.11.1 100% Shade 且重定位至 `remold.internal.asm.*`**，杜绝与任何应用层框架（如 Mixin、ByteBuddy、Spring）发生 ASM 版本与 ClassLoader 冲突。
+- **`:api`**：对外公开发行的轻量级 API 包（包含 `@RemoldReinit`、`@OnReload`、`@Profile` 注解，`HotswapPlugin`、`OrphanBreakerPredicate`、`BytecodeTransformerBridge` 等扩展 SPI，以及 `HotswapBatchReport` / `HotswapBatchListener.afterInternalBatchReport()` 结构化批次报告与 `HotswapPlugin.isHostReady()` 就绪投票）。
+- **`:core`**：核心 Java Agent 引擎。**ASM 9.11.1 100% Shade 且重定位至 `remold.internal.asm.*`**，杜绝与任何应用层框架（如 Mixin、ByteBuddy、Spring）发生 ASM 版本与 ClassLoader 冲突。引擎内部还包含两阶段重定义编排（`applyTwoPhase`）、启动就绪门闩 `StartupGate`、批次看门狗 `BatchWatchdog`、Class/资源双流防抖 `DebounceWindow`、织入生成类字节登记口 `BytecodeSources`、偏移漂移安全门与 `remold.reflect.mixin` 共享反射引擎。
 - **`:panama`**：Panama（FFM）与 JNI/JVMTI 绑定层；JVMTI 原生加速库（C++ 源码与 `libtool` 预编译产物）随 `:core` 打包，二者共同提供亚毫秒级全堆实例检索能力，支持 Windows (x64)、Linux (x64)、macOS (x64/arm64) 全平台。
 - **`:plugin-arc`**：官方参考插件，展示如何通过 SPI 无缝扩展 UI 布局树比对与框架级轮询事件熔断。
 - **`:plugin-mixin`**：SpongePowered Mixin 生态插件。热重定义前把源码级字节码重新交给 Mixin 织入（保住 `@Inject` / `@Unique` / `@Shadow` 产物），并在 Mixin 类自身被修改时刷新 Mixin 运行时状态、级联重织入其目标类。Fabric Loom 工程由 Gradle 脚本自动挂载。
@@ -472,7 +521,7 @@ flowchart TD
 - **`:plugin-fabric`**：Fabric / Quilt 开发运行期集成插件。负责注入 `fabric.classPathGroups`（缺失会导致热更静默不生效）、排除 `mods` 目录监听，并把 `run/mods` 里与本工程同 modId 的残留构建 JAR 就地隔离；Fabric Loom 工程由 Gradle 脚本自动挂载。
 - **`:gradle-plugin`**：Gradle 二进制插件（坐标 `io.github.i-hope1.remold`），提供 `remold { ... }` 类型安全 DSL、`runRemold` / `startRemold` / `generateRemoldScript` 等任务与 IDEA 运行配置生成；仓库根 `remold.gradle(.kts)` 只是它的薄壳。
 - **`:example`**：极简演示应用，开箱即用体验 Agent 监听、存量实例字段初始化与 `@OnReload` 生命周期回调。
-- **`:tests`**：完备的回归与兼容性测试套件，包含 469 项 JUnit 测试（跨 javac 8/11/17/21/25 现编夹具矩阵，含拓扑对齐、布局预测与 Native 堆扫描）、51 个场景 / 350 项 InitFix Oracle 正负向断言，以及 `mixinProbe` 等 Mixin 与 JDWP 端到端兼容性探针。
+- **`:tests`**：完备的回归与兼容性测试套件，包含 597 项 JUnit 测试（跨 javac 8/11/17/21/25 现编夹具矩阵，含拓扑对齐、布局预测与 Native 堆扫描）、51 个场景 / 350 项 InitFix Oracle 正负向断言，以及 `mixinProbe` 等 Mixin 与 JDWP 端到端兼容性探针、匿名类 S0~S7 真实 KnotServer 探针。
 
 ---
 
@@ -552,6 +601,35 @@ public class PlayerService {
 > 而被调用方恰在这一轮改了返回值；这种情况无法证明"值没变"，因此**照常每轮重置**。
 > 宁可多写一次，也不静默留下过期值。完整契约见 `RemoldReinit` 的 Javadoc。
 
+### 4.3 批次结构化报告 (Batch report)
+
+热更批次结束后，Agent 会向监听器发布一份不可变的结构化报告（耗时 / 本批成功重定义的类 / Mixin 成员增量 / InitFix 统计），与既有的 `afterInternalBatch(List)` 并列发布、不替代它：
+
+```java
+import remold.HotswapBatchListener;
+import remold.HotswapBatchReport;
+import remold.RemoldAgent;
+
+RemoldAgent.addBatchListener(new HotswapBatchListener() {
+    @Override
+    public void afterInternalBatchReport(HotswapBatchReport report) {
+        System.out.println("batch elapsed=" + report.getElapsedMillis() + "ms"
+            + " redefined=" + report.getRedefinedClasses().size()
+            + " initFix=" + report.getInitFixStats());
+        for (HotswapBatchReport.MixinChange change : report.getMixinChanges()) {
+            // deltaKnown=false 表示没有可比较的上一版，增量字段恒为 0，不能读成"没有新增"
+            System.out.println(change.getMixinClass() + " deltaKnown=" + change.isDeltaKnown()
+                + " handlers=" + change.getInjectHandlerCount()
+                + " uniqueFields=" + change.getUniqueFieldCount());
+        }
+    }
+});
+```
+
+- `getElapsedMillis()` 在数据源没有起始时间时返回 `HotswapBatchReport.UNKNOWN_ELAPSED`（`-1`），不要当成 0。
+- 该回调只在批次产生可观测活动时触发，可能发生在**没有 `ClassDefinition`** 的批次（例如只改了 Mixin 模板），因此不能拿 `afterInternalBatch` 的"列表非空"作替代判据。
+- 若是宿主/加载器集成方，可另外实现 `HotswapPlugin.isHostReady()`（默认返回 `true`）把"宿主是否已进入主循环"告诉 Agent，启动期批次会被押后而不是直接落盘。
+
 ---
 
 ## 5. 构建与测试 (Building & Verification)
@@ -560,15 +638,16 @@ public class PlayerService {
 
 ### 运行全量验证测试矩阵
 ```bash
-./gradlew check
+./gradlew fullCheck   # = check + e2eProbe（发布前 / CI 用这个）
+./gradlew check       # 日常快检：JUnit + 文档标记扫描 + 测试数基线
 ```
 
 验证流程将严格执行：
-1. **469 项 JUnit 测试**（跨 javac 8/11/17/21/25 现编夹具矩阵，含拓扑对齐、布局预测与 Native 堆扫描，断言 0 skipped 0 failure）；
+1. **597 项 JUnit 测试**（跨 javac 8/11/17/21/25 现编夹具矩阵，含拓扑对齐、布局预测与 Native 堆扫描，断言 0 skipped 0 failure）；
 2. **51 个场景 / 350 项 InitFix Oracle 差分断言**（涵盖 Java 与真实 Kotlin 编译产物，正向状态回溯与负向安全阻断）；
 3. **`mixinProbe` 等 Mixin & JDWP 重定义端到端实测**；
 4. **LayoutGate 规则表、GhostProbe 栈探测、并发加固多线程实测、指纹延后落账 E2E 断言**；
-5. **规范文档与源码状态标记纯净度扫描 (`verifyDocStatusMarkers`)**。
+5. **规范文档与源码状态标记纯净度扫描 (`verifyDocStatusMarkers`)** 与测试数守卫 (`verifyTestCount`)。
 
 ---
 

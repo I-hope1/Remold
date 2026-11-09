@@ -1,15 +1,15 @@
 # Anonymous-class (Mixin$N) hot-swap probe — GREEN (same script, fixed jars)
 # NOTE: run-anon.sh writes to the fixed filename anon-r3r5-red.txt; this file is that
 # run's output copied here so the red/green pair stays side by side.
-date: 2026-11-09T11:01:34+08:00
-git HEAD: 10ee00433cdebebaa36e6b454e889cdd450912a9
-agent jar sha256: 136ddab0862eea1d26a7a579ad076b123453f04ea9f1e5624575bdcc042bc218
+date: 2026-11-09T12:52:57+08:00
+git HEAD: ab5370b49091564e8798b0253b75a40510d55595
+agent jar sha256: 50906f43027e63384a6d904eae252bf3b80ce0c472502be5664cc9c5ff3b9096
 plugin-mixin sha256: 5d3a378adb73b468c0e743f6b7469f67f5321ba7776e04b151fb44a0f95735c7
 plugin-fabric sha256: 526adc190156d3286360c5413c93e25a4a0cd123ed60012db8f318ffeaf09942
 mod jar (run/mods) sha256: c0df79e5760ecea682a06892aecfb4a2bf36f2466b9cd9b33c257c18eea1eb8b
 jbr: C:/Users/ASUS/.jdks/JBR-21
 mixer: sponge-mixin 0.8.7 (Fabric KnotServer), minecraft 1.21.1
-launch: E:/Users/ASUS/Desktop/Mods/nipx-hotswap/.battle/worktrees/20261109020010-169d/int/tests/fabric-mixin-probe/anon/build/proj/build/anon/server.args (mod loaded from run/mods, Gradle output off the runtime classpath)
+launch: E:/Users/ASUS/Desktop/Mods/nipx-hotswap/tests/fabric-mixin-probe/anon/build/proj/build/anon/server.args (mod loaded from run/mods, Gradle output off the runtime classpath)
 S2 preconditions: outer s1b=b43e20a40d81410e s2=b43e20a40d81410e | anon s1=c91e96a547332b0d s2=d455c30e1d4b985f
 
 === stage verdicts (end result = AnonTarget.poke() returned by the live class) ===
@@ -23,13 +23,13 @@ S3 CONTROL   poke=anon-v2/anon-v2  -> PASS (no change => no redefine, value stab
 <none>
 
 === S1b excerpt (workaround) ===
-[11:01:11] [HotSwap-Scheduler/INFO]: [STDOUT]: [Remold] [Mixin] com.example.anon.AnonTargetMixin reloaded; affected target(s): [com.example.game.AnonTarget]
-[11:01:11] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [DYNAMIC-REDEFINE] Successfully redefined com.example.game.AnonTarget
-[11:01:11] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [Mixin] Target class com.example.game.AnonTarget re-woven with updated mixin and redefined
+[12:52:35] [HotSwap-Scheduler/INFO]: [STDOUT]: [Remold] [Mixin] com.example.anon.AnonTargetMixin reloaded; affected target(s): [com.example.game.AnonTarget]
+[12:52:35] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [DYNAMIC-REDEFINE] Successfully redefined com.example.game.AnonTarget
+[12:52:35] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [Mixin] Target class com.example.game.AnonTarget re-woven with updated mixin and redefined
 
 === S2 excerpt (R5 decision lines) ===
-[11:01:21] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [Mixin] inner class hot update applied: com.example.game.AnonTarget$Anonymous$cf910c5f71794540aabeeac8e5830280 redefined in place. A following [DYNAMIC-REDEFINE] "no-op" line for the target class is expected here: the target's own bytecode did not change — the behaviour change lives in the anonymous class(es) listed above.
-[11:01:22] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [Mixin] inner class hot update applied: com.example.game.AnonTarget$Anonymous$cf910c5f71794540aabeeac8e5830280 redefined in place. A following [DYNAMIC-REDEFINE] "no-op" line for the target class is expected here: the target's own bytecode did not change — the behaviour change lives in the anonymous class(es) listed above.
+[12:52:44] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [Mixin] inner class hot update applied: com.example.game.AnonTarget$Anonymous$c8ccc13474e445658ee994657cb68b06 redefined in place. A following [DYNAMIC-REDEFINE] "no-op" line for the target class is expected here: the target's own bytecode did not change — the behaviour change lives in the anonymous class(es) listed above.
+[12:52:44] [remold-mixin-hotswap/INFO]: [STDOUT]: [Remold] [Mixin] inner class hot update applied: com.example.game.AnonTarget$Anonymous$c8ccc13474e445658ee994657cb68b06 redefined in place. A following [DYNAMIC-REDEFINE] "no-op" line for the target class is expected here: the target's own bytecode did not change — the behaviour change lives in the anonymous class(es) listed above.
 
 === S3 excerpt (must be empty) ===
 <none>
@@ -38,5 +38,5 @@ S3 CONTROL   poke=anon-v2/anon-v2  -> PASS (no change => no redefine, value stab
 [Remold] [Mixin] Re-weaving bridge registered (plugin-mixin)
 [Remold] [Fabric] Dev-runtime integration active (class path groups + mods guard)
 [Remold] Watch paths updated across sources:
-[11:00:42] [main/INFO]: Loading 5 mods:
+[12:51:59] [main/INFO]: Loading 5 mods:
 	- anon_probe 1.0.0

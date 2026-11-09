@@ -110,8 +110,21 @@ public final class MixinHotSwap {
 		} catch (Throwable t) {
 			// 连 Mixin 相关类都解析不了（例如宿主把 Mixin 放在另一个 ClassLoader）时，
 			// 交回普通重织入路径，避免整条桥因单个类失败而中断。
+			//
+			// 但「交回普通路径」不能把 Mixin 模板当成可加载类：模板一旦被 defineClass 进宿主
+			// ClassLoader，就成了同名的假类，之后连重启前的状态都会被污染。异常分支上先按
+			// 纯字节特征把模板登记为不可加载（不依赖任何 Mixin 类），再放弃处理。
+			try {
+				if (newMixinBytes != null && looksLikeMixin(newMixinBytes)) {
+					RemoldAgent.markNonLoadableClass(dotClassName);
+				}
+			} catch (Throwable ignored) {
+				// 连字节扫描都失败时不改变行为，只是无法再加这道保险。
+			}
 			if (REPORTED.add("<handler>")) {
-				RemoldAgent.warn("[Mixin] Mixin hot-swap handler unavailable: " + t);
+				RemoldAgent.warn("[Mixin] Mixin hot-swap handler unavailable: " + t
+					+ " (the class was left untouched; a Mixin template that could not be identified is"
+					+ " never defined as a loadable class)");
 			}
 			return false;
 		}

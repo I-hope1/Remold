@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -68,6 +69,25 @@ public final class MixinHotSwap {
 
 	/** 等待重织入的目标类（点分隔类名），按发现顺序去重。 */
 	private static final Set<String> PENDING = new LinkedHashSet<>();
+
+	/**
+	 * 等待内部类热更的 Mixin：点分类名 → 需要重定义模板内部类的内部名集合。
+	 *
+	 * <p>内部类重定义**不在桥接线程上做**：桥接发生在批次中间（持有 HOTSWAP_LOCK，且批次尚未
+	 * redefine 完），在那里对 Mixin 生成的合成类调 {@code redefineClasses} 会把服务器线程冻住
+	 * （真实 KnotServer 探针实测：S1b 之后 tick 心跳全停）。改到与目标类重织入同一个 worker 线程、
+	 * 批次之后执行。</p>
+	 */
+	private static final Map<String, Set<String>> PENDING_INNER = new LinkedHashMap<>();
+
+	/** 上一次成功 reload 时该 Mixin 的源码级字节，用来跳过「同一份字节的重复 reload」。 */
+	private static final Map<String, byte[]> LAST_RELOADED_BYTES = new java.util.concurrent.ConcurrentHashMap<>();
+
+	/** 同一份 Mixin 字节在一个批次里会被问两次（模板本身 + 它的内部类），reload 只需一次。 */
+	private static boolean alreadyReloaded(String dotClassName, byte[] newMixinBytes) {
+		byte[] last = LAST_RELOADED_BYTES.get(dotClassName);
+		return last != null && java.util.Arrays.equals(last, newMixinBytes);
+	}
 
 	private static final Set<String> REPORTED = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
@@ -174,6 +194,13 @@ public final class MixinHotSwap {
 		registerInnerClassBytes(dotClassName, innerNames);
 		MixinBytecodeOverlay.evictClassInfoCache(innerNames);
 
+		if (alreadyReloaded(dotClassName, newMixinBytes)) {
+			// 模板字节没变（本轮只有它的内部类变了）：Mixin 状态无需 refresh，
+			// 但内部类热更仍要按新的模板字节重做一次。
+			scheduleInnerClassHotUpdate(dotClassName, innerNames);
+			return true;
+		}
+
 		List<String> targets = Collections.emptyList();
 		MixinClassInfoSync.SyncToken syncToken = MixinClassInfoSync.SyncToken.EMPTY;
 		try {
@@ -220,8 +247,9 @@ public final class MixinHotSwap {
 		// reload/登记成功后再记录批次报告：失败/被拒绝的模板不能进“变更列表”，
 		// 也不能推进快照（否则下一次重试会拿错误基线算增量）。
 		recordMixinReport(dotClassName, node);
+		LAST_RELOADED_BYTES.put(dotClassName, newMixinBytes.clone());
 		RemoldAgent.info("[Mixin] " + dotClassName + " reloaded; affected target(s): " + targets);
-		reportInnerClassHotUpdate(transformer, dotClassName, innerNames);
+		scheduleInnerClassHotUpdate(dotClassName, innerNames);
 		synchronized (PENDING_LOCK) {
 			PENDING.addAll(targets);
 		}
@@ -316,6 +344,16 @@ public final class MixinHotSwap {
 	 * no-op。这里必须显式说明「变更已落在哪个内部类上」，否则日志里就只剩一句
 	 * {@code [DYNAMIC-REDEFINE] no-op}，把「已经生效」读成「什么都没发生」。</p>
 	 */
+	private static void scheduleInnerClassHotUpdate(String mixinDotName, List<String> innerNames) {
+		if (innerNames == null || innerNames.isEmpty()) {
+			return;
+		}
+		synchronized (PENDING_LOCK) {
+			PENDING_INNER.computeIfAbsent(mixinDotName, key -> new LinkedHashSet<>()).addAll(innerNames);
+		}
+		WORKER.execute(MixinHotSwap::flushPendingTargets);
+	}
+
 	private static void reportInnerClassHotUpdate(IMixinTransformer transformer, String mixinDotName,
 			List<String> innerNames) {
 		if (innerNames == null || innerNames.isEmpty()) {
@@ -513,12 +551,18 @@ public final class MixinHotSwap {
 	/** 逐个把受影响的目标类重织入并重定义。串行执行，天然与 Remold 的批次锁互斥。 */
 	private static void flushPendingTargets() {
 		List<String> batch;
+		Map<String, List<String>> innerBatch;
 		synchronized (PENDING_LOCK) {
-			if (PENDING.isEmpty()) {
+			if (PENDING.isEmpty() && PENDING_INNER.isEmpty()) {
 				return;
 			}
 			batch = new ArrayList<>(PENDING);
 			PENDING.clear();
+			innerBatch = new LinkedHashMap<>();
+			for (Map.Entry<String, Set<String>> entry : PENDING_INNER.entrySet()) {
+				innerBatch.put(entry.getKey(), new ArrayList<>(entry.getValue()));
+			}
+			PENDING_INNER.clear();
 		}
 
 		Instrumentation inst = RemoldAgent.getInstrumentation();
@@ -560,6 +604,13 @@ public final class MixinHotSwap {
 				RemoldAgent.warn("[Mixin] Target class " + name + " could not be redefined after re-weaving:"
 					+ " structural changes require JBR with DCEVM, or restart the client");
 			}
+		}
+
+		// 目标类重织入之后再处理内部类：此时首次引入的内部类已经随目标织入完成登记，
+		// 已加载的合成内部类则可以按新的模板字节重新生成并重定义。
+		IMixinTransformer transformer = MixinReWeaver.activeTransformer();
+		for (Map.Entry<String, List<String>> entry : innerBatch.entrySet()) {
+			reportInnerClassHotUpdate(transformer, entry.getKey(), entry.getValue());
 		}
 	}
 

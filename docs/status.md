@@ -187,6 +187,25 @@
 4. **`BytecodeSources` 常驻内存无上限**：键集合不随 reload 增长（唯一名跨 reload 稳定），但无驱逐策略；回灌发生在 schema 复核之前，即"读得到"不等于"已生效"。
 5. **字段持有者点名的边界**：`findHoldingFields` 按**字段描述符**匹配匿名类类型；若字段以父类型（如 `Supplier`）持有实例，告警会写"无宿主字段持有"——真实探针的 S6 就是这种形态（`AnonTarget.HELD6` 声明为 `Supplier`）。
 
+## 0.9 未发布：收口轮 · S0~S7 全绿 / 持有者点名 / 门闩接线（2026-11-09）
+
+§0.8 的五条残余风险里，1/2/3/5 在本轮收口；4 保留。
+
+| 修复 / 变更 | 状态 | 代码位置 | 验收证据 |
+|:---|:---:|:---|:---|
+| **S7 时序缺口**（§0.8 残余风险 1）：`InitFix` 在目标类本次 redefine 内部就要读 `<Target>$Anonymous$<hash>.<init>` 的 protected 状态，而 Mixin 只在织入期登记、字节要等首次加载才生成 → 字段初始化 patch 被 fail-closed 拒绝 | ✅ | `plugin-mixin` `MixinInnerClassHotSwap.refeedForTarget`（目标织入后按 `InnerClassGenerator` 的稳定唯一名**提前生成**该目标的全部合成内部类并回灌 `BytecodeSources`）+ `MixinReWeaver.reweave` 接线 | **真实 KnotServer 全绿**：`run-anon.sh` **exit 0 / `EXT_GREEN=1`**，S7 `s7=null → s7=s7-v1`（S7c 对照稳定），S0~S6 全部保持；**变异**：回退 `MixinReWeaver` 接线 → 基线 exit 0 → 变异 exit 3（`mut-20261109101806-d693`），恢复 OK。**未放宽任何安全门**：字节仍不可得时照旧 fail-closed；生成后把 `InnerClassInfo.loadCounter` 还原，避免"假已加载"让平台跳过真正的 defineClass |
+| **字段持有者点名补全**（§0.8 残余风险 5）：精确描述符只能命中合成字段（`this$0`/`val$o`），宿主用户字段必然声明为父类型/接口（`Supplier HELD6`）→ 告警误报"无宿主字段持有" | ✅ | `core/src/remold/AnonClassAligner.java` `findHoldingFields` 三层退化：精确描述符(proven) → 赋值流 `NEW <anon>→<init>→PUTFIELD/PUTSTATIC`(proven，`putfield this$0/val$*` 不误报) → 直接父类型/接口描述符(candidate)；新增 4 参重载返回 `HoldingFields{proven, candidates}`，旧 `List<String>` 契约保持不变 | **单测**：`AnonClassAmbiguityTest` 13 例（接口类型持有必被点名、赋值流 proven、合成字段仍命中、无关系字段不得乱点名）；**变异 5/5 killed**（去候选兜底、去赋值流、去精确层、置空解析器、放宽为"任意引用字段"各自打中对应用例）；告警文案区分 `proven by assignment flow` 与 `candidate (supertype/interface)` |
+| **看门狗入口覆盖**（§0.8 残余风险 2）：此前只包住防抖 Class 批次 | ✅ | `core/src/remold/BatchWatchdog.java`（新增 `enter/exit/current` 作用域 API：ThreadLocal + 深度计数，嵌套复用同一实例；`armedWatchdogs()` 守"一个批次最多一个 armed"）+ `RemoldAgent.processChanges` 的 `try/finally`；`retransformLoaded` 自挂作用域；`runClassBatch` 旧包裹移除 | `remold.startup.*` 30 例 0 失败；**变异 4/4 killed**（去 processChanges 挂点 → 4 红；`runClassBatch` 再独立 arm → 2 红；UNKNOWN→false → 3 红；`ticks>0` 恒 READY → 1 红） |
+| **`plugin-fabric` 就绪门闩**（§0.8 残余风险 3） | 🔶 | `plugin-fabric` `HostReadinessProbe` + `FabricHotswapPlugin.isHostReady()`：服务端 `MinecraftServer.getServer()` + tick 计数、客户端 `getInstance` + `world/level` 非空 → READY；探测不到一律 UNKNOWN → **返回 true 并按已就绪处理**（只打一条 info），就绪单向缓存 | 单测用替身覆盖三种判定（`FabricHostReadinessTest`）；**未验证**：真实 KnotServer/客户端的访问器名（`getTicks`/`getTickCount`、`world`/`level`）无法在 `.sources/`（仅镜像 Mindustry/Arc）核验，真机未跑 |
+
+**残余风险（收口后）**
+
+1. **`redefineDynamic`（单类 API 入口）仍未挂看门狗**：三条主路径（防抖/手动/`retransformLoaded`）已覆盖，该单类入口卡死仍无栈。
+2. **就绪探测未经真机验证**：见上表；fail-open 把杀伤面限制在"保护窗口可能比预期窄"（服务端实例构造前即 UNKNOWN→放行），不会饿死批次。
+3. **`BytecodeSources` 常驻内存无上限**（沿用 §0.8 残余 4）：键集合不随 reload 增长，但无驱逐；回灌发生在 schema 复核之前，"读得到"不等于"已生效"。
+4. **持有者点名边界**：只扫 old/new 宿主节点的字段表与方法体；跨方法经参数传递不猜（宁可漏点名）；宿主继承字段若 javac 以父类为 owner 发射 `putfield` 不会命中；候选只看直接父类型，不递归层级。
+5. **热更管线自身的证据仪器存在"假 PASS / 假击杀"风险**（本轮 worker 实测）：退出码 127（命令不存在）被记为 killed、cmd banner-only 输出被记为 PASS、Gradle UP-TO-DATE 的重复 stdout 哈希被当作新证据。当前由人工复核兜住，工具侧修法见战役台账；在这些修复前，本表所有"PASS/killed"均以**原始日志已人工复核**为前提。
+
 ## 1. 匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)
 
 设计规格文档：[`docs/topology/`](topology/) 系列文档  

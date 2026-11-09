@@ -218,6 +218,10 @@ trigger_read() {  # label
     if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
     sleep 0.2; i=$((i+1))
   done
+  # A missing answer means the probe thread stopped calling the target; dump the
+  # tail so the failure is diagnosable instead of a bare timeout.
+  log "no [ANON] $label poke= line within 30s; last server lines:"
+  tail -12 "$LOG"
   return 1
 }
 
@@ -241,6 +245,11 @@ wait_for_pattern "[ANON] tick poke=hook-s0" "$START_TIMEOUT" "S0 baseline (poke=
 S0_VALUE="$(grep -F '[ANON] tick poke=' "$LOG" | tail -1 | sed 's/.*poke=//')"
 log "S0 poke=$S0_VALUE"
 [ "$S0_VALUE" = "hook-s0" ] || die "S0 baseline value unexpected: $S0_VALUE"
+# Do not start hot-swapping while Minecraft is still loading: a batch that runs
+# during startup can race the class-loading locks and hang the probe thread
+# (observed once: no ticks after S1). Wait for the server to be ready.
+wait_for_pattern "Done (" "$START_TIMEOUT" "server ready (Done (...))"   || die "server never finished starting"
+sleep 2
 
 # ---------------------------------------------------------------------- S1
 M1="$(mark)"

@@ -764,6 +764,57 @@ public class RemoldAgent {
 	static final AtomicInteger CONCURRENT_HOTSWAP      = new AtomicInteger();
 	static final AtomicInteger CONCURRENT_HOTSWAP_PEAK = new AtomicInteger();
 
+	//region 启动就绪门闩与批次看门狗
+
+	/**
+	 * 启动就绪门闩（见 {@link StartupGate}）。{@code PENDING} 期间一个批次都不落：
+	 * 启动期（类加载器 + Mixin 转换器高频并发加载）落入热更批次会让 JVM 挂死。
+	 *
+	 * <p>就绪判定来源是插件投票（{@link HotswapPlugin#isHostReady()}）：core 不出现任何
+	 * 加载器/游戏专属判断。首个"全部插件就绪"的观测点把门闩翻到 READY，此后不再回退
+	 * —— 启动期是一次性窗口，运行期抖动不该让热更整体停摆。</p>
+	 */
+	private static volatile StartupGate STARTUP_GATE =
+	 new StartupGate(StartupGate.resolveTimeoutMillis(System.getProperty(StartupGate.PROP_READY_TIMEOUT_MS)));
+
+	/**
+	 * 批次卡死阈值（毫秒，{@code -Dremold.agent.batch_stall_ms}，默认 15000，下限 5000）。
+	 * 由 {@link BatchWatchdog} 在批次开始时读取。
+	 */
+	public static volatile long BATCH_STALL_MS =
+	 BatchWatchdog.resolveStallMillis(System.getProperty(BatchWatchdog.PROP_STALL_MS));
+
+	/** 门闩未就绪时的重查间隔下限：绝不能按"防抖已到期"的 0 延迟自旋。 */
+	private static final long GATE_RETRY_MIN_MS = 100L;
+
+	/** 门闩阻断日志去重（同一批变更只打一条，避免按重查节奏刷屏）。 */
+	private static volatile boolean gateBlockLogged;
+	/** 就绪状态变迁日志去重（每次 PENDING → READY 只打一条）。 */
+	private static volatile boolean gateReadyLogged;
+
+	/** 当前门闩（诊断/单测用）。 */
+	public static StartupGate startupGate() {
+		return STARTUP_GATE;
+	}
+
+	/**
+	 * 复位门闩（单测/诊断用；生产路径不应调用）。
+	 *
+	 * <p>复位是必要的：门闩一旦翻到 READY 就不再回退，单测需要从"未就绪"起点重新验证阻断行为。</p>
+	 */
+	public static void resetStartupGate() {
+		STARTUP_GATE = new StartupGate(
+		 StartupGate.resolveTimeoutMillis(System.getProperty(StartupGate.PROP_READY_TIMEOUT_MS)));
+		gateBlockLogged = false;
+		gateReadyLogged = false;
+	}
+
+	/** 当前生效的批次卡死阈值（毫秒）。 */
+	public static long getBatchStallMs() {
+		return BATCH_STALL_MS;
+	}
+	//endregion
+
 	/** 测试用：复位并发探针。 */
 	public static void resetConcurrencyProbe() {
 		CONCURRENT_HOTSWAP.set(0);
@@ -3907,8 +3958,123 @@ public class RemoldAgent {
 	}
 
 	/**
+	 * 启动就绪门闩判定：{@code true} = 允许本批进入批次执行。
+	 *
+	 * <p><b>就绪来源</b>（core 不认识任何加载器/游戏专属概念）：</p>
+	 * <ul>
+	 *   <li>插件投票：{@link HotswapPlugin#isHostReady()} 任一返回 {@code false} 即未就绪；</li>
+	 *   <li>{@link StartupGate} 的 PENDING → READY 一次性变迁（全部插件就绪的首个观测点）；</li>
+	 *   <li>可选超时放行：{@code -Dremold.agent.ready_timeout_ms}（默认 {@code 0} = 不放行），
+	 *       只用于"宿主插件永远不报就绪"这种死等，且日志必须标明是超时放行。</li>
+	 * </ul>
+	 *
+	 * <p>调用方必须持有 {@code HOTSWAP_LOCK}；本方法内部只进 {@code synchronized(pendingChanges)}
+	 * （锁序正确：先全局锁、后队列锁）。</p>
+	 */
+	private static boolean startupGateAllowsBatch() {
+		StartupGate gate = STARTUP_GATE;
+		long       now   = System.nanoTime();
+		String     blocker = firstPluginNotReady();
+
+		if (blocker != null) {
+			// 插件明确说未就绪（宿主仍在启动期）：门闩保持 PENDING，一个批次都不落。
+			// 唯一的出口是显式配置的超时放行——默认 0 表示宁可押着，也不要在启动风暴里落批次。
+			// 注意：门闩此前已经 READY（启动期已过）时 isReadyAt 也返回 true，但那种情况
+			// **不是**超时放行，插件的否票仍然生效（fail-closed），否则运行期插件回退就失去意义。
+			boolean gateOpen = gate.isReadyAt(now);
+			if (gateOpen && gate.isTimedOutRelease()) {
+				logGateReadyOnce(true, blocker, gate);
+				return true;
+			}
+			int classPending;
+			int assetPending;
+			synchronized (pendingChanges) {
+				classPending = pendingChanges.size() + pendingJars.size();
+				assetPending = pendingAssetChanges.size();
+			}
+			if (classPending == 0 && assetPending == 0) {
+				// 没有待处理变更：没什么可推迟的，不挂重查（下一次入队会重新挂防抖）。
+				return false;
+			}
+			if (!gateBlockLogged) {
+				gateBlockLogged = true;
+				warn("[READY-GATE] hot-swap batches deferred: plugin '" + blocker + "' reports isHostReady()=false; "
+				     + classPending + " class/jar change(s) and " + assetPending + " asset change(s) stay queued"
+				     + (gate.getTimeoutMillis() > 0
+				         ? " (ready_timeout_ms=" + gate.getTimeoutMillis() + ")"
+				         : " (ready_timeout_ms=0: no timeout release)")
+				     + (gateOpen ? " [startup gate already READY; the plugin veto is honored]" : "")
+				     + ". Further deferrals of this same batch are not logged again.");
+			}
+			rescheduleStartupGateRetry();
+			return false;
+		}
+
+		// 全部插件就绪：首个观测点把门闩翻到 READY，此后不再回退（启动期是一次性窗口）。
+		if (gate.markReady()) {
+			logGateReadyOnce(false, null, gate);
+		}
+		if (!gate.isReady()) {
+			// 防御：门闩没开就不放行。
+			rescheduleStartupGateRetry();
+			return false;
+		}
+		return true;
+	}
+
+	/** 返回第一个明确报告未就绪的插件名；全部就绪返回 {@code null}。 */
+	private static String firstPluginNotReady() {
+		for (HotswapPlugin plugin : plugins) {
+			try {
+				if (!plugin.isHostReady()) return plugin.getName();
+			} catch (Throwable t) {
+				// fail-closed：判定不了就按未就绪处理。细节走 DEBUG 门控（避免按重查节奏刷屏），
+				// 阻断日志（warn）已经点名是哪个插件，信息不丢。
+				log("[READY-GATE] plugin " + plugin.getName()
+				    + " threw from isHostReady(); treating it as not ready: " + t);
+				return plugin.getName();
+			}
+		}
+		return null;
+	}
+
+	/** 就绪状态变化只打一条：{@code PENDING → READY} 或超时放行各一次。 */
+	private static void logGateReadyOnce(boolean byTimeout, String blocker, StartupGate gate) {
+		if (gateReadyLogged) return;
+		gateReadyLogged = true;
+		// 新的一次就绪允许下一段阻断重新打点，否则运行期再次未就绪时会静默。
+		gateBlockLogged = false;
+		if (byTimeout) {
+			warn("[READY-GATE] ready_timeout_ms=" + gate.getTimeoutMillis()
+			     + " elapsed while plugin '" + blocker + "' still reports isHostReady()=false — "
+			     + "releasing the startup gate by timeout; batches resume even though the host may still be booting.");
+		} else {
+			info("[READY-GATE] host reported ready (all plugins return isHostReady()=true) —"
+			     + " class/asset batches are enabled");
+		}
+	}
+
+	/**
+	 * 门闩未放行时的重查挂载：固定间隔（不小于 {@link #GATE_RETRY_MIN_MS}），
+	 * 绝不复用 {@link #rescheduleDebounce()}——防抖已到期时它的延迟是 0，会变成锁内自旋。
+	 */
+	private static void rescheduleStartupGateRetry() {
+		long retryMillis = Math.max(GATE_RETRY_MIN_MS, FILE_SHAKE_MS);
+		synchronized (pendingChanges) {
+			if (scheduledTask != null && !scheduledTask.isDone()) {
+				scheduledTask.cancel(false);
+			}
+			scheduledTask = scheduler.schedule(RemoldAgent::triggerDueHotswap, retryMillis, TimeUnit.MILLISECONDS);
+		}
+	}
+
+	/**
 	 * 防抖到期入口：只处理已经静默到期的流。资源流到期时绝不提前 drain 尚未静默的
 	 * Class/jar 队列；Class 流到期时也只在同一个批次里处理 Class + jar。
+	 *
+	 * <p><b>唯一批次入口</b>：启动就绪门闩在这里生效——宿主未就绪时<b>只</b>把变更留在
+	 * {@code pendingChanges} / {@code pendingAssetChanges} 里，绝不进入 {@link #runClassBatch}
+	 * 或 {@link #processChanges}（后者硬性要求持有 {@code HOTSWAP_LOCK}）。</p>
 	 */
 	private static void triggerDueHotswap() {
 		if (inst == null) {
@@ -3916,6 +4082,10 @@ public class RemoldAgent {
 		}
 		HOTSWAP_LOCK.lock();
 		try {
+			// 门闩在 drain 之前：未就绪时一条变更都不许被取走，否则"留在队列里"是空话。
+			if (!startupGateAllowsBatch()) {
+				return;
+			}
 			Set<Path> assets = null;
 			Set<Path> jars = null;
 			boolean classDue;
@@ -3968,8 +4138,17 @@ public class RemoldAgent {
 		}
 	}
 
-	/** 执行一批已经静默的 Class 变更；错误边界与手动触发保持一致。 */
+	/**
+	 * 执行一批已经静默的 Class 变更；错误边界与手动触发保持一致。
+	 *
+	 * <p>批次期间由 {@link BatchWatchdog} 守着：超过 {@code -Dremold.agent.batch_stall_ms}
+	 * 仍未结束时留下全线程栈（含锁持有信息），同一批次只 dump 一次。正常批次只多挂一个
+	 * 一次性延迟任务，批内结束即注销，没有轮询开销。</p>
+	 */
 	private static void runClassBatch(Set<Path> changes) {
+		BatchWatchdog watchdog = new BatchWatchdog(BATCH_STALL_MS);
+		watchdog.arm(System.nanoTime(), "class-batch(" + changes.size() + " file(s), threshold "
+		                               + watchdog.getStallMillis() + " ms)");
 		try {
 			resetLiveInstanceCache();
 			if (!changes.isEmpty()) {
@@ -3980,6 +4159,7 @@ public class RemoldAgent {
 			      + " so classes may have been redefined WITHOUT InitFix patches or @OnReload callbacks."
 			      + " The next save re-runs from the current baseline; if it keeps failing, restart.", t);
 		} finally {
+			watchdog.disarm();
 			BatchReportScope.discard();
 		}
 	}

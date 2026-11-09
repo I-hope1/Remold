@@ -33,7 +33,12 @@ public class AnonTargetMixin {
         Supplier<String> extra = new Supplier<String>() {
             @Override
             public String get() {
-                return "s6-new";
+                // Structurally different body: the frontline R2b shape. A literal-only
+                // sibling is indistinguishable by body structure on purpose, and stays
+                // orphaned by design when a live instance holds the old class.
+                StringBuilder sb = new StringBuilder();
+                sb.append("s6").append('-').append("new");
+                return sb.toString();
             }
         };
         if (AnonTarget.HELD6 == null) {

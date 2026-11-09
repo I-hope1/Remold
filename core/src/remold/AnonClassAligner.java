@@ -5,9 +5,13 @@ import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.commons.ClassRemapper;
 import org.objectweb.asm.commons.SimpleRemapper;
+import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.FieldNode;
+import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TypeInsnNode;
 
 import java.util.*;
 import java.util.function.Function;
@@ -587,7 +591,14 @@ public final class AnonClassAligner {
 			// 字段持有风险：扫宿主字段表，点名可能长期持有这些被孤儿化的匿名类实例的字段。
 			// 告警里必须出现它，否则"需要重启"这句话无法变成可执行的处置动作
 			// （字段持有 → 挂 @RemoldReinit；方法内每帧 new → 无需处置）。
-			List<String> holdingFields = findHoldingFields(oldHostNode, newHostNode, orphanOldClasses);
+			// 三种判据逐层退化：精确描述符 → 赋值流（NEW <anon> → <init> → PUTFIELD/PUTSTATIC）
+			// → 父类型/接口描述符候选。匿名类的 superName/interfaces 只能从它自己的字节码拿到，
+			// 所以这里按需解析（只在孤儿集非空、且前两层都没命中时才会被调用）。
+			Function<String, ClassNode> anonNodeResolver = orphanOldClasses.isEmpty()
+			 ? null
+			 : name -> anonNodeForHolding(oldInfos, name);
+			HoldingFields holdingFields = findHoldingFields(oldHostNode, newHostNode, orphanOldClasses,
+			 anonNodeResolver);
 
 			// docs/topology/04-tiers-and-rejection.md §4 严格模式：只要本轮存在**未被唯一证据证成**的候选配对，就熔断整个宿主组。
 			//
@@ -642,9 +653,15 @@ public final class AnonClassAligner {
 				                     ? " (no live instances on record)"
 				                     : " (with LIVE instances: " + liveOrphans + ")")
 				                  + (holdingFields.isEmpty()
-				                     ? " No host field holds them — method-local instantiations are recreated on the"
-				                       + " next call, so the edit still takes effect there."
-				                     : " Possible holder field(s): " + holdingFields + ".")
+				                     ? " No host field holds them — the orphaned instances may only be `new`ed inside"
+				                       + " methods, so the next call recreates them and the edit still takes effect there."
+				                     : (holdingFields.proven.isEmpty()
+				                        ? ""
+				                        : " Holder field(s) (proven by assignment flow): " + holdingFields.proven + ".")
+				                       + (holdingFields.candidates.isEmpty()
+				                          ? ""
+				                          : " Candidate holder field(s) (declared as the supertype/interface): "
+				                            + holdingFields.candidates + "."))
 				                  + " Their LIVE instances keep running the OLD code — RESTART is required for those edits"
 				                  + " to affect existing instances, OR add @RemoldReinit to the holding field (and tweak its"
 				                  + " initializer) to rebuild the instance without restarting."
@@ -1973,37 +1990,288 @@ public final class AnonClassAligner {
 	}
 
 	/**
-	 * 扫宿主/目标类字段表，点名"描述符里引用了这些被孤儿化匿名类"的字段。
+	 * 匿名类实例的宿主字段点名结果：**两种证据强度必须分开**（{@code docs/topology/04-tiers-and-rejection.md} §4 文案要求 ②），
+	 * 因为处置动作不同 —— 已证实者挂 {@code @RemoldReinit} 后实例会被重建；候选只是"该字段的静态类型正好是
+	 * 这个匿名类的父类型/接口"，同一个字段里也可能装着别的实现，点名是为了让人去核对，不构成结论。
+	 */
+	public static final class HoldingFields {
+
+		/**
+		 * 已证实的宿主字段，形如 {@code Host.field:Ldesc;}。两种来源：
+		 * <ol>
+		 *   <li>宿主方法体里的赋值流（{@code NEW <anon> → <init> → PUTFIELD/PUTSTATIC}）；</li>
+		 *   <li>字段静态类型**精确等于**该匿名类（这种字段里除了它装不下别的类型，比"父类型候选"强一档，
+		 *       同时也是上一版"精确描述符匹配"的保留路径）。</li>
+		 * </ol>
+		 */
+		public final List<String> proven;
+
+		/** 父类型/接口描述符候选：字段静态类型等于该匿名类的直接父类或所实现接口（全部列出，不挑一个）。 */
+		public final List<String> candidates;
+
+		HoldingFields(List<String> proven, List<String> candidates) {
+			this.proven     = Collections.unmodifiableList(new ArrayList<>(proven));
+			this.candidates = Collections.unmodifiableList(new ArrayList<>(candidates));
+		}
+
+		/** 两种强度都为空 —— 只有这时才允许对用户说"没有宿主字段持有它们"。 */
+		public boolean isEmpty() {
+			return proven.isEmpty() && candidates.isEmpty();
+		}
+
+		/** 两种强度合并（兼容既有 {@code List<String>} 契约的调用方）。 */
+		public List<String> all() {
+			List<String> out = new ArrayList<>(proven);
+			for (String c : candidates) addOnce(out, c);
+			return out;
+		}
+
+		@Override public String toString() {
+			return "proven=" + proven + ", candidates=" + candidates;
+		}
+	}
+
+	/**
+	 * 扫宿主/目标类字段表，点名"描述符里引用了这些被孤儿化匿名类"的字段（上一版语义，保持向后兼容）。
 	 *
 	 * <p>判据只看字段描述符里的 {@code L<anon>;} 片段：这正好覆盖 {@code Foo$1 fieldName;}
 	 * 这种"字段长期持有匿名类实例"的形态。它决定了处置方式完全不同 —— 字段持有需要
 	 * {@code @RemoldReinit}（或重启），方法内每帧 {@code new} 的实例调用即重建、无需处置。</p>
+	 *
+	 * <p>没有匿名类自身的字节码，就给不出"父类型/接口候选"；需要两种强度请用
+	 * {@link #findHoldingFields(ClassNode, ClassNode, Collection, Function)}。</p>
 	 */
 	public static List<String> findHoldingFields(ClassNode oldHostNode, ClassNode newHostNode,
 	                                     Collection<String> anonInternalNames) {
-		List<String> out = new ArrayList<>();
+		return findHoldingFields(oldHostNode, newHostNode, anonInternalNames, null).all();
+	}
+
+	/**
+	 * 点名可能长期持有被孤儿化匿名类实例的宿主字段，并区分两种证据强度。
+	 *
+	 * <p>三层判据，逐层退化（任一层命中就**不再**往下一层退，避免把已证实的事说成候选）：</p>
+	 * <ol>
+	 *   <li><b>精确描述符（proven）</b>：字段静态类型就是该匿名类；</li>
+	 *   <li><b>赋值流（proven）</b>：类方法体里 {@code NEW <anon>} → {@code INVOKESPECIAL <anon>.<init>}
+	 *       之后，这个实例被直接写进某个宿主字段（{@code PUTFIELD}/{@code PUTSTATIC}）。
+	 *       赋值目标必须真在宿主字段表里、且 owner 是宿主 —— 匿名类构造器里的
+	 *       {@code putfield this$0}（owner 是匿名类自身）因此不会被误报成宿主赋值。
+	 *       <b>局部变量中转不猜</b>：窗口内一旦出现 {@code ASTORE}/{@code ALOAD}、第二个 {@code NEW}
+	 *       或跳转，该实例点直接放弃（宁可漏点名，也不把"可能被赋过值"说成已证实）；</li>
+	 *   <li><b>父类型/接口候选（candidates）</b>：前两层都没命中时，用宿主字段的静态描述符去匹配该匿名类的
+	 *       直接父类或所实现接口（例如 {@code Supplier<String> held} 之于实现 {@code Supplier} 的匿名类）。
+	 *       合成的父类型不递归展开（只看直接父类型），多个候选全部列出。超类型为
+	 *       {@code java/lang/Object} 时不算候选（否则任何 {@code Object} 字段都会命中）。</li>
+	 * </ol>
+	 *
+	 * <p>判据是纯函数：只读入参 ClassNode 的字段表与方法体，不依赖反射 / {@code Class.forName} / 全局状态。</p>
+	 *
+	 * @param anonResolver 匿名类内部名（也接受点分名）→ 该匿名类自身的 ClassNode；这里只用到
+	 *                     {@code superName}/{@code interfaces}。传 {@code null} 时没有候选层。
+	 */
+	public static HoldingFields findHoldingFields(ClassNode oldHostNode, ClassNode newHostNode,
+	                                     Collection<String> anonInternalNames,
+	                                     Function<String, ClassNode> anonResolver) {
+		List<String> proven     = new ArrayList<>();
+		List<String> candidates = new ArrayList<>();
 		if (anonInternalNames == null || anonInternalNames.isEmpty()) {
-			return out;
+			return new HoldingFields(proven, candidates);
 		}
-		Set<String> needles = new LinkedHashSet<>();
-		for (String name : anonInternalNames) {
-			if (name == null) continue;
-			needles.add("L" + name.replace('.', '/') + ";");
+		List<ClassNode> hosts = new ArrayList<>(2);
+		for (ClassNode n : new ClassNode[]{oldHostNode, newHostNode}) {
+			if (n != null && !hosts.contains(n)) hosts.add(n);
 		}
-		for (ClassNode node : new ClassNode[]{oldHostNode, newHostNode}) {
-			if (node == null || node.fields == null) continue;
-			for (org.objectweb.asm.tree.FieldNode field : node.fields) {
-				if (field.desc == null) continue;
-				for (String needle : needles) {
-					if (field.desc.contains(needle)) {
-						String entry = node.name + "." + field.name + ":" + field.desc;
-						if (!out.contains(entry)) out.add(entry);
-						break;
-					}
+		// 宿主字段名册：赋值流只认"宿主自己声明过的字段"，否则匿名类自身的合成字段（this$0/val$*）
+		// 与宿主同名字段会互相串味。
+		Map<String, String> hostFieldEntries = new LinkedHashMap<>();
+		Set<String>         hostNames        = new LinkedHashSet<>();
+		for (ClassNode host : hosts) {
+			if (host.name != null) hostNames.add(host.name);
+			if (host.fields == null) continue;
+			for (FieldNode f : host.fields) {
+				if (f.name == null || f.desc == null) continue;
+				String key = f.name + ":" + f.desc;
+				if (!hostFieldEntries.containsKey(key)) hostFieldEntries.put(key, entryOf(host.name, f));
+			}
+		}
+
+		for (String raw : anonInternalNames) {
+			if (raw == null) continue;
+			String anon = raw.replace('.', '/');
+
+			List<String> hits = descriptorExactFields(hosts, "L" + anon + ";");
+			for (String hit : assignedHolderFields(hosts, anon, hostNames, hostFieldEntries)) addOnce(hits, hit);
+			if (!hits.isEmpty()) {
+				for (String hit : hits) addOnce(proven, hit);
+				continue;
+			}
+
+			for (String hit : supertypeCandidateFields(anonNodeOf(anonResolver, anon), hosts)) {
+				addOnce(candidates, hit);
+			}
+		}
+		return new HoldingFields(proven, candidates);
+	}
+
+	/** 字段点名条目的统一格式：{@code Host.field:Ldesc;}。 */
+	private static String entryOf(String owner, FieldNode field) {
+		return owner + "." + field.name + ":" + field.desc;
+	}
+
+	private static void addOnce(List<String> out, String entry) {
+		if (entry != null && !out.contains(entry)) out.add(entry);
+	}
+
+	/** 第 1 层：宿主字段的静态描述符里出现 {@code L<anon>;}（精确等于该匿名类的类型）。 */
+	private static List<String> descriptorExactFields(List<ClassNode> hosts, String needle) {
+		List<String> out = new ArrayList<>();
+		for (ClassNode host : hosts) {
+			if (host.fields == null) continue;
+			for (FieldNode f : host.fields) {
+				if (f.desc != null && f.desc.contains(needle)) addOnce(out, entryOf(host.name, f));
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * 第 2 层：赋值流。扫宿主类全部方法体，找 {@code NEW <anon>} → {@code INVOKESPECIAL <anon>.<init>}
+	 * → 紧随其后的宿主 {@code PUTFIELD}/{@code PUTSTATIC}，返回被赋值字段的条目。
+	 */
+	private static List<String> assignedHolderFields(List<ClassNode> hosts, String anon,
+	                                                Set<String> hostNames,
+	                                                Map<String, String> hostFieldEntries) {
+		List<String> out = new ArrayList<>();
+		for (ClassNode host : hosts) {
+			if (host.methods == null) continue;
+			for (MethodNode m : host.methods) {
+				if (m.instructions == null) continue;
+				for (AbstractInsnNode insn = m.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+					if (insn.getOpcode() != Opcodes.NEW || !(insn instanceof TypeInsnNode)) continue;
+					if (!anon.equals(((TypeInsnNode) insn).desc)) continue;
+					addOnce(out, assignmentTargetOf(insn, anon, hostNames, hostFieldEntries));
 				}
 			}
 		}
 		return out;
+	}
+
+	/**
+	 * 从一个 {@code NEW <anon>} 指令出发，判定它是否"立刻被写进宿主字段"。
+	 *
+	 * <p>窗口内允许的指令是 javac 发射的常规形态：{@code DUP}、构造器参数装载、{@code CHECKCAST}、
+	 * 伪指令（Label/LineNumber/Frame）。{@code <init>} 之后只接受一条 {@code PUTFIELD}/{@code PUTSTATIC}，
+	 * 且其 owner 必须是宿主、字段必须声明在宿主字段表里 —— 这两条把匿名类构造器里的
+	 * {@code putfield this$0}（owner 是匿名类自身）排除在外。其余情形（{@code ASTORE}、再次
+	 * {@code NEW}、跳转、别的方法调用）一律返回 {@code null}：那是局部变量或跨块中转，不猜。</p>
+	 */
+	private static String assignmentTargetOf(AbstractInsnNode newInsn, String anon,
+	                                         Set<String> hostNames,
+	                                         Map<String, String> hostFieldEntries) {
+		boolean initSeen = false;
+		int     budget   = 64;   // 指令预算：病态输入下不至于无界前行
+		for (AbstractInsnNode p = newInsn.getNext(); p != null && budget-- > 0; p = p.getNext()) {
+			int op = p.getOpcode();
+			if (op < 0) continue;   // Label / LineNumber / FrameNode 等伪指令
+			if (!initSeen) {
+				if (op == Opcodes.INVOKESPECIAL && p instanceof MethodInsnNode) {
+					MethodInsnNode mi = (MethodInsnNode) p;
+					if (anon.equals(mi.owner) && "<init>".equals(mi.name)) {
+						initSeen = true;
+						continue;
+					}
+					return null;   // 别的方法调用 → 这个 NEW 不是"直接赋值"的那个实例点
+				}
+				if (isCtorOperandLoading(op)) continue;
+				return null;
+			}
+			if (op == Opcodes.PUTFIELD || op == Opcodes.PUTSTATIC) {
+				if (!(p instanceof FieldInsnNode)) return null;
+				FieldInsnNode fi = (FieldInsnNode) p;
+				if (fi.owner == null || !hostNames.contains(fi.owner)) return null;
+				return hostFieldEntries.get(fi.name + ":" + fi.desc);
+			}
+			if (op == Opcodes.DUP || op == Opcodes.CHECKCAST || op == Opcodes.NOP) continue;
+			return null;   // ASTORE/ALOAD/再次 NEW/跳转 → 局部变量或跨块中转，不猜
+		}
+		return null;
+	}
+
+	/** {@code <init>} 之前允许出现的操作数装载指令（构造器参数、接收者副本、常量）。 */
+	private static boolean isCtorOperandLoading(int op) {
+		switch (op) {
+			case Opcodes.DUP: case Opcodes.DUP_X1: case Opcodes.DUP_X2:
+			case Opcodes.NOP: case Opcodes.CHECKCAST: case Opcodes.ACONST_NULL:
+			case Opcodes.ALOAD: case Opcodes.ILOAD: case Opcodes.LLOAD: case Opcodes.FLOAD: case Opcodes.DLOAD:
+			case Opcodes.GETSTATIC: case Opcodes.GETFIELD: case Opcodes.LDC:
+			case Opcodes.BIPUSH: case Opcodes.SIPUSH:
+				return true;
+			default:
+				return op >= Opcodes.ICONST_M1 && op <= Opcodes.DCONST_1;
+		}
+	}
+
+	/**
+	 * 第 3 层：父类型/接口描述符候选。只看**直接**父类与**直接**实现接口（不递归展开层级，
+	 * 也不展开父类的父类），{@code java/lang/Object} 不算候选（否则任何 {@code Object} 字段都会命中），
+	 * 合成字段不算候选（挂不了 {@code @RemoldReinit}）。
+	 */
+	private static List<String> supertypeCandidateFields(ClassNode anonNode, List<ClassNode> hosts) {
+		List<String> out = new ArrayList<>();
+		if (anonNode == null) return out;
+		Set<String> supertypes = new LinkedHashSet<>();
+		if (anonNode.superName != null && !"java/lang/Object".equals(anonNode.superName)) {
+			supertypes.add(anonNode.superName);
+		}
+		if (anonNode.interfaces != null) {
+			for (String itf : anonNode.interfaces) {
+				if (itf != null) supertypes.add(itf);
+			}
+		}
+		if (supertypes.isEmpty()) return out;
+		for (ClassNode host : hosts) {
+			if (host.fields == null) continue;
+			for (FieldNode f : host.fields) {
+				if (f.desc == null || f.desc.length() < 3) continue;
+				if (f.desc.charAt(0) != 'L' || f.desc.charAt(f.desc.length() - 1) != ';') continue;
+				if ((f.access & Opcodes.ACC_SYNTHETIC) != 0) continue;
+				if (supertypes.contains(f.desc.substring(1, f.desc.length() - 1))) addOnce(out, entryOf(host.name, f));
+			}
+		}
+		return out;
+	}
+
+	/** 用调用方给的解析器取匿名类自身节点（内部名优先，点分名兜底）；取不到就只是没有候选层。 */
+	private static ClassNode anonNodeOf(Function<String, ClassNode> resolver, String anon) {
+		if (resolver == null) return null;
+		try {
+			ClassNode node = resolver.apply(anon);
+			if (node == null) node = resolver.apply(anon.replace('/', '.'));
+			return node;
+		} catch (Throwable t) {
+			return null;   // 解析失败只影响"候选"这一层，绝不因此少点名已证实者
+		}
+	}
+
+	/**
+	 * 从已解析的旧匿名类信息里取该匿名类自身的 ClassNode（只读 {@code superName}/{@code interfaces}，
+	 * 因此丢弃代码与调试信息即可）。对齐器在宿主级流程里没有保留匿名类的 ClassNode，孤儿集非空时按需重建。
+	 */
+	private static ClassNode anonNodeForHolding(List<AnonInfo> infos, String name) {
+		if (infos == null || name == null) return null;
+		String slash = name.replace('.', '/');
+		for (AnonInfo info : infos) {
+			if (info == null || !slash.equals(info.name) || info.bytecode == null || info.bytecode.length == 0) continue;
+			try {
+				ClassNode cn = new ClassNode();
+				new ClassReader(info.bytecode).accept(cn,
+				 ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+				return cn;
+			} catch (Throwable t) {
+				return null;
+			}
+		}
+		return null;
 	}
 
 	/**

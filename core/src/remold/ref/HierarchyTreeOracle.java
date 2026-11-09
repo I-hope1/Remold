@@ -1,6 +1,7 @@
 package remold.ref;
 
 import remold.AnnotationTransformer;
+import remold.BytecodeSources;
 import remold.RemoldAgent;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
@@ -19,8 +20,9 @@ import java.util.*;
  * 基于纯字节码元数据与 Agent 缓存实现的 {@link ClassHierarchyOracle}。
  *
  * <p>底层依赖 {@link AnnotationTransformer.HierarchyTree} 维护的轻量继承图（仅保留 {@code superName}、
- * {@code interfaces} 与 {@code access}），并优先从 {@link RemoldAgent#bytecodeCache}
- * 与 ClassLoader 资源流中读取字节码。在整个查询过程中绝不触发类加载。</p>
+ * {@code interfaces} 与 {@code access}），并优先从 {@link RemoldAgent#bytecodeCache}、
+ * {@link BytecodeSources} 登记口（织入期生成的合成类）与 ClassLoader 资源流中读取字节码。
+ * 在整个查询过程中绝不触发类加载。</p>
  *
  * <p>单次分析实例中通过局部 Map 缓存解析的 {@link ClassNode}，并在 Nest 成员证明中
  * 采用流式 ASM Visitor 提取 {@code PUTFIELD}/{@code PUTSTATIC} 指令，实现高效的不可变性证明。</p>
@@ -286,6 +288,10 @@ public final class HierarchyTreeOracle implements ClassHierarchyOracle {
 	private byte[] readClassBytes(String internalName) {
 		byte[] cached = RemoldAgent.bytecodeCache.get(internalName.replace('/', '.'));
 		if (cached != null) return cached;
+		// 织入期生成的合成类（Mixin 的 Target$Anonymous$<uuid>）磁盘上没有 .class、也不经过
+		// Remold 的 transformer，只能由生成方回灌到登记口。
+		byte[] supplied = BytecodeSources.lookup(internalName);
+		if (supplied != null) return supplied;
 		ClassLoader targetLoader = loader.get();
 		ClassLoader sourceLoader = targetLoader == null ? ClassLoader.getSystemClassLoader() : targetLoader;
 		if (sourceLoader == null) return null;

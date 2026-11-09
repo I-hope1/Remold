@@ -11,6 +11,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
 
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
@@ -19,6 +22,7 @@ import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.MethodNode;
 
+import remold.BytecodeSources;
 import remold.RemoldAgent;
 
 /**
@@ -38,8 +42,32 @@ import remold.RemoldAgent;
  * <p><b>安全门</b>：只接受「成员 schema 未变」的重定义（等价于 JVM 自身对 redefine 的结构约束）。
  * 匿名类新增字段/方法属于结构变化，由 JVM 重定义规则或本类的 schema 检查拦下，并输出指向性
  * 诊断——不用 DCEVM 的结构化能力去绕过 Remold 的布局门。</p>
+ *
+ * <p><b>字节码回灌</b>：{@code Target$Anonymous$<uuid>} 这类合成内部类磁盘上没有 {@code .class}，
+ * 也不经过 Remold 的 {@code ClassFileTransformer}，所以 Remold 自己的两条字节来源都读不到它——
+ * Nest 成员扫描因此 {@code incomplete}、构造器/成员可见性判定只能给出"无法确定"，两者都
+ * fail-closed（字段初始化 patch 被拒）。本类在成功生成合成类字节时把它登记进
+ * {@link remold.BytecodeSources}（键 = 内部名），让 core 的离线元数据视图看得见这些类。</p>
  */
 final class MixinInnerClassHotSwap {
+
+	/**
+	 * 本轮运行期重新生成的合成内部类字节（内部名 → 字节）。
+	 *
+	 * <p>登记发生在 {@code generate(...)} 成功之后、重定义之前：即使随后的 schema 检查或
+	 * {@code redefineClasses} 失败，元数据也可用（那正是最需要诊断的时刻）。因此本表只承诺
+	 * "读得到字节"，<b>不</b>作为"该字节已在 JVM 里生效"的凭证。</p>
+	 *
+	 * <p>键集合不会随 reload 次数增长：合成类的唯一名由 {@code InnerClassGenerator} 按坐标
+	 * 缓存、跨 reload 稳定，同一 Mixin 内部类反复热更只会覆盖同一键。</p>
+	 */
+	private static final Map<String, byte[]> GENERATED = new ConcurrentHashMap<>();
+
+	/** 登记口只装一次：来源函数恒定，内容由 {@link #GENERATED} 演进。 */
+	private static final AtomicBoolean SOURCE_REGISTERED = new AtomicBoolean();
+
+	/** 回灌给 core 的字节码来源；内部名与点分名都接受（core 两种形态都会问）。 */
+	private static final Function<String, byte[]> SOURCE = MixinInnerClassHotSwap::generatedBytes;
 
 	private MixinInnerClassHotSwap() {
 	}
@@ -146,6 +174,9 @@ final class MixinInnerClassHotSwap {
 					continue;
 				}
 				byte[] bytes = serialize(fresh);
+				// 回灌：合成内部类磁盘上没有 .class、也不经过 Remold 的 transformer，不回灌则
+				// Nest 扫描 incomplete、构造器可见性判定失败（InitFix 的字段初始化 patch 被拒）。
+				registerGenerated(conformedDotted, bytes);
 				// 标成 Remold 自己发起的重定义：否则 AnnotationTransformer 会把这次 redefine 当成
 				// 外部热更，在已经织入过的合成类上再跑一遍桥接。
 				RemoldAgent.enterInternalRedefine(java.util.Collections.singleton(conformedDotted));
@@ -164,6 +195,39 @@ final class MixinInnerClassHotSwap {
 				+ String.join(", ", result.notLoaded));
 		}
 		return result;
+	}
+
+	// ---------------------------------------------------------------- 字节码回灌
+
+	/**
+	 * 把本轮生成的合成内部类字节登记进 Remold 的字节来源登记口。
+	 *
+	 * <p>幂等：来源函数只登记一次，之后每次热更只是覆盖 {@link #GENERATED} 里的同一键。
+	 * 永不抛异常（登记口自身也不会），失败最多让 core 侧继续 fail-closed，不会更坏。</p>
+	 *
+	 * @param dotClassName 合成类名（点分名或内部名均可）
+	 * @param bytes        本轮生成的字节码
+	 */
+	static void registerGenerated(String dotClassName, byte[] bytes) {
+		if (dotClassName == null || bytes == null || bytes.length == 0) {
+			return;
+		}
+		if (SOURCE_REGISTERED.compareAndSet(false, true)) {
+			BytecodeSources.register(SOURCE);
+		}
+		GENERATED.put(MixinInnerClassSupport.internalName(dotClassName), bytes);
+	}
+
+	/** 当前回灌的合成类内部名（诊断用）。 */
+	static Set<String> generatedInternalNames() {
+		return new LinkedHashSet<>(GENERATED.keySet());
+	}
+
+	private static byte[] generatedBytes(String className) {
+		if (className == null) {
+			return null;
+		}
+		return GENERATED.get(MixinInnerClassSupport.internalName(className));
 	}
 
 	// ---------------------------------------------------------------- 结构契约

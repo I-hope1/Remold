@@ -7,7 +7,7 @@
 
 | 审计元数据项 | 内容与规格说明 |
 |:---|:---|
-| **基准提交 (Baseline Commit)** | `a02c13e` (分支: `main`，`v0.2.5` 已发布；含 L1 存量初值重放 + A 档 Kotlin apply、批次结构化报告与 HotSwap Toast、Fabric 模板回到 1.21.1 + 1.21.4 gametest 独立探针、新增 Mixin 类运行期登记、Mixin 配置删除/重新加入、Class/资源防抖分离、Mixin 共享反射引擎接入 Forge/NeoForge) |
+| **基准提交 (Baseline Commit)** | `57d381c` (分支: `main`，含 Mixin 匿名/内部类热更闭环 + 抑制器 SPI 函数化，见 §0.7；上一基准 `a02c13e`，`v0.2.5` 已发布；含 L1 存量初值重放 + A 档 Kotlin apply、批次结构化报告与 HotSwap Toast、Fabric 模板回到 1.21.1 + 1.21.4 gametest 独立探针、新增 Mixin 类运行期登记、Mixin 配置删除/重新加入、Class/资源防抖分离、Mixin 共享反射引擎接入 Forge/NeoForge) |
 | **发布说明** | [`releases/v0.2.5.md`](releases/v0.2.5.md) |
 | **最后更新时间** | 2026-11-09（Mixin 匿名/内部类热更闭环 + 抑制器 SPI 函数化，见 §0.7；2026-11-08：v0.2.5 已发布；JitPack 坐标对齐；L1 + A 档落地；Fabric 主模板切回 1.21.1 并加入客户端 HotSwap Toast；1.21.4 客户端 gametest 移至 `tests/fabric-gametest-1.21.4/`；新增 Mixin 类运行期登记；Mixin 配置删除/重新加入；Class/资源防抖分离） |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |

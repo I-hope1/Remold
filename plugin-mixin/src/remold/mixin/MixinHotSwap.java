@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -69,6 +70,25 @@ public final class MixinHotSwap {
 	/** 等待重织入的目标类（点分隔类名），按发现顺序去重。 */
 	private static final Set<String> PENDING = new LinkedHashSet<>();
 
+	/**
+	 * 等待内部类热更的 Mixin：点分类名 → 需要重定义模板内部类的内部名集合。
+	 *
+	 * <p>内部类重定义**不在桥接线程上做**：桥接发生在批次中间（持有 HOTSWAP_LOCK，且批次尚未
+	 * redefine 完），在那里对 Mixin 生成的合成类调 {@code redefineClasses} 会把服务器线程冻住
+	 * （真实 KnotServer 探针实测：S1b 之后 tick 心跳全停）。改到与目标类重织入同一个 worker 线程、
+	 * 批次之后执行。</p>
+	 */
+	private static final Map<String, Set<String>> PENDING_INNER = new LinkedHashMap<>();
+
+	/** 上一次成功 reload 时该 Mixin 的源码级字节，用来跳过「同一份字节的重复 reload」。 */
+	private static final Map<String, byte[]> LAST_RELOADED_BYTES = new java.util.concurrent.ConcurrentHashMap<>();
+
+	/** 同一份 Mixin 字节在一个批次里会被问两次（模板本身 + 它的内部类），reload 只需一次。 */
+	private static boolean alreadyReloaded(String dotClassName, byte[] newMixinBytes) {
+		byte[] last = LAST_RELOADED_BYTES.get(dotClassName);
+		return last != null && java.util.Arrays.equals(last, newMixinBytes);
+	}
+
 	private static final Set<String> REPORTED = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
 	private static final ExecutorService WORKER = Executors.newSingleThreadExecutor(task -> {
@@ -110,8 +130,21 @@ public final class MixinHotSwap {
 		} catch (Throwable t) {
 			// 连 Mixin 相关类都解析不了（例如宿主把 Mixin 放在另一个 ClassLoader）时，
 			// 交回普通重织入路径，避免整条桥因单个类失败而中断。
+			//
+			// 但「交回普通路径」不能把 Mixin 模板当成可加载类：模板一旦被 defineClass 进宿主
+			// ClassLoader，就成了同名的假类，之后连重启前的状态都会被污染。异常分支上先按
+			// 纯字节特征把模板登记为不可加载（不依赖任何 Mixin 类），再放弃处理。
+			try {
+				if (newMixinBytes != null && looksLikeMixin(newMixinBytes)) {
+					RemoldAgent.markNonLoadableClass(dotClassName);
+				}
+			} catch (Throwable ignored) {
+				// 连字节扫描都失败时不改变行为，只是无法再加这道保险。
+			}
 			if (REPORTED.add("<handler>")) {
-				RemoldAgent.warn("[Mixin] Mixin hot-swap handler unavailable: " + t);
+				RemoldAgent.warn("[Mixin] Mixin hot-swap handler unavailable: " + t
+					+ " (the class was left untouched; a Mixin template that could not be identified is"
+					+ " never defined as a loadable class)");
 			}
 			return false;
 		}
@@ -124,6 +157,24 @@ public final class MixinHotSwap {
 		if (!isMixin(dotClassName, newMixinBytes)) {
 			return false;
 		}
+
+		ClassNode node = new ClassNode();
+		try {
+			// 必须完整解析：@Inject 的 handler 方法体要从这里搬进目标类，跳过 code 会织出空方法。
+			new ClassReader(newMixinBytes).accept(node, 0);
+		} catch (Throwable t) {
+			RemoldAgent.warn("[Mixin] " + dotClassName + " has unreadable bytecode; it cannot be hot-swapped: " + t);
+			return false;
+		}
+
+		// Mixin 的内部类（Outer$N）不是独立模板：它不在任何 mixin 配置里，也没有自己的目标类，
+		// 按模板去 reload 只会拿到空目标并把真正的新字节丢掉。必须把字节交给 Mixin 的字节码
+		// 提供方，再由外层 Mixin 重新 reload + 重织入（见 handleInnerClassChange）。
+		if (MixinInnerClassSupport.isNestedClassName(MixinInnerClassSupport.internalName(dotClassName))
+			&& !looksLikeMixin(newMixinBytes)) {
+			return handleInnerClassChange(dotClassName, newMixinBytes);
+		}
+
 		// Mixin 只是织入模板，不是可加载类：登记后核心会跳过 defineClass / redefine，
 		// 读者扫描也不会把它当成外部读者。
 		RemoldAgent.markNonLoadableClass(dotClassName);
@@ -132,14 +183,27 @@ public final class MixinHotSwap {
 			return true;
 		}
 
+		MixinBytecodeOverlay.install();
 		ensureConfigsSelected(transformer);
+
+		// 本模板自己的内部类（含本轮首次出现的匿名类）：先把新字节接进 Mixin 的字节码提供方，
+		// 并清掉 ClassInfo 的负缓存。否则 reload 的校验阶段会拿
+		// ClassNotFoundException 之后的 null 去调 isProbablyStatic()，直接崩成一句裸 NPE。
+		List<String> innerNames =
+			MixinInnerClassSupport.ownInnerClassNames(MixinInnerClassSupport.internalName(dotClassName), node);
+		registerInnerClassBytes(dotClassName, innerNames);
+		MixinBytecodeOverlay.evictClassInfoCache(innerNames);
+
+		if (alreadyReloaded(dotClassName, newMixinBytes)) {
+			// 模板字节没变（本轮只有它的内部类变了）：Mixin 状态无需 refresh，
+			// 但内部类热更仍要按新的模板字节重做一次。
+			scheduleInnerClassHotUpdate(dotClassName, innerNames);
+			return true;
+		}
 
 		List<String> targets = Collections.emptyList();
 		MixinClassInfoSync.SyncToken syncToken = MixinClassInfoSync.SyncToken.EMPTY;
-		ClassNode node = new ClassNode();
 		try {
-			// 必须完整解析：@Inject 的 handler 方法体要从这里搬进目标类，跳过 code 会织出空方法。
-			new ClassReader(newMixinBytes).accept(node, 0);
 			// reload 的校验阶段（MixinInfo.State.validate → MixinPreProcessorStandard.conform）
 			// 会拿新字节码里的 @Inject handler 去查 Mixin 的 ClassInfo；而 Reloaded 状态复用的是
 			// reload 之前的旧 ClassInfo。新增/改名的 handler 必须先补进元数据再 reload，
@@ -151,8 +215,10 @@ public final class MixinHotSwap {
 			}
 			targets = normalize(raw);
 		} catch (Throwable t) {
-			// reload 被拒绝时撤销 reload 前补入的成员，让旧元数据保持可用。
+			// reload 被拒绝时撤销 reload 前补入的成员，让旧元数据保持可用；
+			// 同时收回覆盖层里的新字节，避免一份没被接受的模板长期遮蔽旧版本。
 			MixinClassInfoSync.rollback(syncToken);
+			MixinBytecodeOverlay.clear(innerNames);
 			reportReloadFailure(dotClassName, t);
 			return true;
 		}
@@ -181,12 +247,130 @@ public final class MixinHotSwap {
 		// reload/登记成功后再记录批次报告：失败/被拒绝的模板不能进“变更列表”，
 		// 也不能推进快照（否则下一次重试会拿错误基线算增量）。
 		recordMixinReport(dotClassName, node);
+		LAST_RELOADED_BYTES.put(dotClassName, newMixinBytes.clone());
 		RemoldAgent.info("[Mixin] " + dotClassName + " reloaded; affected target(s): " + targets);
+		scheduleInnerClassHotUpdate(dotClassName, innerNames);
 		synchronized (PENDING_LOCK) {
 			PENDING.addAll(targets);
 		}
 		WORKER.execute(MixinHotSwap::flushPendingTargets);
 		return true;
+	}
+
+	/**
+	 * 只改了 Mixin 内部类（{@code Outer$N}）时的入口：登记字节 + 让外层 Mixin 重跑一遍。
+	 *
+	 * <p>这条路径是 R5 的触发点：外层 Mixin 的字节一个都没变，批次里只有 {@code Outer$N.class}
+	 * 变了。若不显式回到外层 Mixin，整轮热更会因为「宿主 target 字节没变」被静默判 no-op，
+	 * 匿名类继续跑旧逻辑。</p>
+	 */
+	private static boolean handleInnerClassChange(String dotClassName, byte[] newMixinBytes) {
+		RemoldAgent.markNonLoadableClass(dotClassName);
+		MixinBytecodeOverlay.install();
+		MixinBytecodeOverlay.register(dotClassName, newMixinBytes);
+		String internal = MixinInnerClassSupport.internalName(dotClassName);
+		MixinBytecodeOverlay.evictClassInfoCache(Collections.singletonList(internal));
+
+		String outerInternal = MixinInnerClassSupport.outerInternalName(internal);
+		if (outerInternal == null) {
+			RemoldAgent.warn("[Mixin] " + dotClassName + " looks like an inner class but its enclosing type"
+				+ " cannot be derived from the name; its new bytecode is registered but no Mixin reload was"
+				+ " scheduled (restart the client if the change does not show up)");
+			return true;
+		}
+		String outerDot = MixinInnerClassSupport.dotName(outerInternal);
+		byte[] outerBytes = RemoldAgent.sourceBytecodeCache.get(outerDot);
+		if (outerBytes == null) {
+			outerBytes = RemoldAgent.findClassBytesOnDisk(outerDot);
+		}
+		if (outerBytes == null) {
+			RemoldAgent.warn("[Mixin] " + dotClassName + " changed, but the enclosing Mixin " + outerDot
+				+ " has no readable bytecode (neither the batch cache nor the watch directories have it)."
+				+ " The anonymous class body cannot be re-generated until " + outerDot
+				+ " is compiled again — touch that file or restart the client");
+			return true;
+		}
+		if (!isMixin(outerDot, outerBytes)) {
+			RemoldAgent.warn("[Mixin] " + dotClassName + " changed, but its enclosing type " + outerDot
+				+ " is not a Mixin template; an inner class outside a Mixin is handled by the normal"
+				+ " class-redefine path, not by the Mixin hot-swap");
+			return true;
+		}
+		RemoldAgent.info("[Mixin] inner class " + dotClassName + " changed; re-running the enclosing Mixin "
+			+ outerDot + " so the new anonymous-class body is re-generated");
+		return handleIfMixin0(outerDot, outerBytes);
+	}
+
+	/**
+	 * 把本模板内部类的最新字节登记到 Mixin 字节码提供方的覆盖层。
+	 *
+	 * <p>字节来源优先级：本轮批次的源码级字节（{@code sourceBytecodeCache}）→ 监控目录里的最新
+	 * {@code .class}。前者在桥接阶段之前就已写入，因此与批次内类的处理顺序无关。</p>
+	 */
+	private static void registerInnerClassBytes(String mixinDotName, List<String> innerNames) {
+		if (innerNames == null || innerNames.isEmpty()) {
+			return;
+		}
+		List<String> registered = new ArrayList<>();
+		List<String> missing = new ArrayList<>();
+		for (String internal : innerNames) {
+			String dot = MixinInnerClassSupport.dotName(internal);
+			byte[] bytes = RemoldAgent.sourceBytecodeCache.get(dot);
+			if (bytes == null) {
+				bytes = RemoldAgent.findClassBytesOnDisk(dot);
+			}
+			if (bytes == null) {
+				missing.add(dot);
+				continue;
+			}
+			MixinBytecodeOverlay.register(dot, bytes);
+			registered.add(dot);
+		}
+		if (!registered.isEmpty()) {
+			RemoldAgent.info("[Mixin] " + mixinDotName + ": inner class bytecode registered with the"
+				+ " Mixin bytecode provider: " + registered);
+		}
+		if (!missing.isEmpty()) {
+			RemoldAgent.warn("[Mixin] " + mixinDotName + ": inner class bytecode is unavailable for "
+				+ missing + "; if this class is newly declared in the Mixin, a reload of it will fail with"
+				+ " ClassNotFoundException until it is compiled into a watched output directory");
+		}
+	}
+
+	/**
+	 * reload 成功后把内部类的变化落到运行期合成类上，并如实报告结果。
+	 *
+	 * <p>目标类的织入产物不含匿名类方法体，所以「只改匿名类」时目标类的 redefine 必然是
+	 * no-op。这里必须显式说明「变更已落在哪个内部类上」，否则日志里就只剩一句
+	 * {@code [DYNAMIC-REDEFINE] no-op}，把「已经生效」读成「什么都没发生」。</p>
+	 */
+	private static void scheduleInnerClassHotUpdate(String mixinDotName, List<String> innerNames) {
+		if (innerNames == null || innerNames.isEmpty()) {
+			return;
+		}
+		synchronized (PENDING_LOCK) {
+			PENDING_INNER.computeIfAbsent(mixinDotName, key -> new LinkedHashSet<>()).addAll(innerNames);
+		}
+		WORKER.execute(MixinHotSwap::flushPendingTargets);
+	}
+
+	private static void reportInnerClassHotUpdate(IMixinTransformer transformer, String mixinDotName,
+			List<String> innerNames) {
+		if (innerNames == null || innerNames.isEmpty()) {
+			return;
+		}
+		MixinInnerClassHotSwap.Result result =
+			MixinInnerClassHotSwap.apply(transformer, mixinDotName, innerNames);
+		if (result.changed()) {
+			RemoldAgent.info("[Mixin] inner class hot update applied: " + result.describeConformed()
+				+ " redefined in place. A following [DYNAMIC-REDEFINE] \"no-op\" line for the target class is"
+				+ " expected here: the target's own bytecode did not change — the behaviour change lives in the"
+				+ " anonymous class(es) listed above.");
+		}
+		if (result.hasFailure()) {
+			RemoldAgent.warn("[Mixin] inner class hot update incomplete for " + mixinDotName + ": "
+				+ result.describeFailures());
+		}
 	}
 
 	/** 把一组目标类排入重织入队列（供配置差异等外部入口复用）。 */
@@ -367,12 +551,18 @@ public final class MixinHotSwap {
 	/** 逐个把受影响的目标类重织入并重定义。串行执行，天然与 Remold 的批次锁互斥。 */
 	private static void flushPendingTargets() {
 		List<String> batch;
+		Map<String, List<String>> innerBatch;
 		synchronized (PENDING_LOCK) {
-			if (PENDING.isEmpty()) {
+			if (PENDING.isEmpty() && PENDING_INNER.isEmpty()) {
 				return;
 			}
 			batch = new ArrayList<>(PENDING);
 			PENDING.clear();
+			innerBatch = new LinkedHashMap<>();
+			for (Map.Entry<String, Set<String>> entry : PENDING_INNER.entrySet()) {
+				innerBatch.put(entry.getKey(), new ArrayList<>(entry.getValue()));
+			}
+			PENDING_INNER.clear();
 		}
 
 		Instrumentation inst = RemoldAgent.getInstrumentation();
@@ -414,6 +604,13 @@ public final class MixinHotSwap {
 				RemoldAgent.warn("[Mixin] Target class " + name + " could not be redefined after re-weaving:"
 					+ " structural changes require JBR with DCEVM, or restart the client");
 			}
+		}
+
+		// 目标类重织入之后再处理内部类：此时首次引入的内部类已经随目标织入完成登记，
+		// 已加载的合成内部类则可以按新的模板字节重新生成并重定义。
+		IMixinTransformer transformer = MixinReWeaver.activeTransformer();
+		for (Map.Entry<String, List<String>> entry : innerBatch.entrySet()) {
+			reportInnerClassHotUpdate(transformer, entry.getKey(), entry.getValue());
 		}
 	}
 

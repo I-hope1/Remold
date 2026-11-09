@@ -2,7 +2,6 @@ package remold.mixin;
 
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
@@ -13,15 +12,21 @@ import org.spongepowered.asm.mixin.MixinEnvironment;
 import org.spongepowered.asm.service.MixinService;
 import org.spongepowered.asm.mixin.transformer.IMixinTransformer;
 
-import remold.reflect.mixin.LoadedTargetSuppressor;
 import remold.reflect.mixin.MixinConfigContext;
 import remold.reflect.mixin.MixinConfigDiffer;
 
 /**
  * Fabric 侧的薄适配：把织入器、ClassNode 解析、{@link FabricLauncherSpoof} 与目标重织入回调
  * 交给 {@link MixinConfigDiffer}。Mixin 内部结构访问全部下沉到 core 的反射引擎。
+ *
+ * <p>抑制器只以方法引用（{@code Function} / {@code Consumer}）传入，本类不 {@code implements}
+ * 任何 core 类型：core jar 版本错位时最坏退化为“抑制不可用”的可诊断降级，而不是类链接期的
+ * {@code NoClassDefFoundError}。</p>
  */
 final class MixinConfigDiff {
+
+	/** 诊断用：本加载器的“目标类已加载”检查点。 */
+	static final String LOADER_HOOK = "Fabric FabricLauncherBase.launcher.isClassLoaded";
 
 	private MixinConfigDiff() {
 	}
@@ -45,7 +50,9 @@ final class MixinConfigDiff {
 			transformer,
 			side,
 			MixinConfigDiff::loadClassNode,
-			FabricSuppressor.INSTANCE,
+			FabricLauncherSpoof::suppress,
+			FabricLauncherSpoof::restore,
+			LOADER_HOOK,
 			MixinHotSwap::scheduleTargets));
 	}
 
@@ -76,19 +83,5 @@ final class MixinConfigDiff {
 		MixinEnvironment environment = MixinEnvironment.getCurrentEnvironment();
 		String side = environment == null ? null : environment.getSide().name();
 		return MixinConfigDiffer.declaredMixinNames(json, side);
-	}
-
-	private enum FabricSuppressor implements LoadedTargetSuppressor {
-		INSTANCE;
-
-		@Override
-		public Object suppress(Collection<String> dottedTargets) {
-			return FabricLauncherSpoof.suppress(dottedTargets);
-		}
-
-		@Override
-		public void restore(Object token) {
-			FabricLauncherSpoof.restore(token);
-		}
 	}
 }

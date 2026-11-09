@@ -92,7 +92,10 @@ class MixinConfigDifferTest {
 			transformer,
 			"CLIENT",
 			dot -> mixinNode(),
-			new NoopSuppressor(),
+			targets -> new Object(),
+			token -> {
+			},
+			"Mixin test class tracker",
 			scheduled::addAll);
 	}
 
@@ -105,17 +108,6 @@ class MixinConfigDifferTest {
 		node.invisibleAnnotations = new ArrayList<>();
 		node.invisibleAnnotations.add(mixin);
 		return node;
-	}
-
-	private static final class NoopSuppressor implements LoadedTargetSuppressor {
-		@Override
-		public Object suppress(java.util.Collection<String> dottedTargets) {
-			return new Object();
-		}
-
-		@Override
-		public void restore(Object token) {
-		}
 	}
 
 	private static final class FakeTransformer {

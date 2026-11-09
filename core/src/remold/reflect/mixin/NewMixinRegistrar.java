@@ -9,6 +9,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
 import remold.RemoldAgent;
 
@@ -29,27 +31,36 @@ public final class NewMixinRegistrar {
 	/**
 	 * 尝试把 {@code dotClassName} 登记到其所属的已注册 Mixin 配置。
 	 *
-	 * @param transformer 当前生效的 Mixin 织入器
+	 * @param transformer  当前生效的 Mixin 织入器
 	 * @param dotClassName 新 Mixin 的点分类名
-	 * @param classNode   宿主的 ASM ClassNode（不透明对象）
-	 * @param suppressor  目标已加载检查抑制器
+	 * @param classNode    宿主的 ASM ClassNode（不透明对象）
+	 * @param suppress     “目标类已加载”检查抑制函数（{@code null} = 本加载器不提供）
+	 * @param restore      抑制令牌恢复函数（{@code null} = 本加载器不提供）
+	 * @param loaderHook   诊断用：加载器检查点描述，可为 {@code null}
 	 * @return 目标类内部名列表；登记失败、已存在或已从配置删除时返回空列表
 	 */
 	public static List<String> tryRegister(Object transformer, String dotClassName, Object classNode,
-			LoadedTargetSuppressor suppressor) {
+			Function<Collection<String>, Object> suppress, Consumer<Object> restore, String loaderHook) {
 		if (MixinConfigDiffer.isRemovedFromConfig(dotClassName)) {
 			return Collections.emptyList();
 		}
 		try {
-			return tryRegister0(transformer, dotClassName, classNode, suppressor);
+			return tryRegister0(transformer, dotClassName, classNode, suppress, restore, loaderHook);
 		} catch (Throwable t) {
 			reportUnsupported(t);
 			return Collections.emptyList();
 		}
 	}
 
+	/** 不需要诊断文案的简写。 */
+	public static List<String> tryRegister(Object transformer, String dotClassName, Object classNode,
+			Function<Collection<String>, Object> suppress, Consumer<Object> restore) {
+		return tryRegister(transformer, dotClassName, classNode, suppress, restore, null);
+	}
+
 	private static List<String> tryRegister0(Object transformer, String dotClassName, Object classNode,
-			LoadedTargetSuppressor suppressor) throws Exception {
+			Function<Collection<String>, Object> suppress, Consumer<Object> restore, String loaderHook)
+			throws Exception {
 		Object processor = MixinReflection.readField(transformer, "processor");
 		if (processor == null) {
 			reportUnsupported(new IllegalStateException("MixinTransformer.processor not found"));
@@ -107,18 +118,29 @@ public final class NewMixinRegistrar {
 			boolean suppressed = false;
 			try {
 				if (!loadedTargets.isEmpty()) {
+					// 抑制器是宿主插件的可选能力：缺失、返回 null 或抛异常都等于“本次无法抑制”，
+					// 一律 fail-closed（放弃登记 + 指向性诊断），绝不让 prepare() 在真实已加载目标上继续。
+					if (suppress == null || restore == null) {
+						removeMixinClass(mixinClasses, simpleName);
+						rollback(config, dotClassName);
+						RemoldAgent.warn(suppressionUnavailableMessage(dotClassName, loadedTargets, loaderHook,
+							"no usable suppression hook is wired on this loader"));
+						return Collections.emptyList();
+					}
 					try {
-						launcherToken = suppressor == null ? null : suppressor.suppress(loadedTargets);
+						launcherToken = suppress.apply(loadedTargets);
 					} catch (Throwable suppressFailure) {
 						removeMixinClass(mixinClasses, simpleName);
 						rollback(config, dotClassName);
-						throw suppressFailure;
+						RemoldAgent.warn(suppressionUnavailableMessage(dotClassName, loadedTargets, loaderHook,
+							"suppressing it failed: " + MixinReflection.describe(suppressFailure)));
+						return Collections.emptyList();
 					}
 					if (launcherToken == null) {
 						removeMixinClass(mixinClasses, simpleName);
-						RemoldAgent.warn("[Mixin] New mixin " + dotClassName + " targets already-loaded class "
-							+ loadedTargets + ", and this loader's class tracker could not be suppressed."
-							+ " Restart once to apply it (editing an existing Mixin stays hot-swappable).");
+						rollback(config, dotClassName);
+						RemoldAgent.warn(suppressionUnavailableMessage(dotClassName, loadedTargets, loaderHook,
+							"the suppression hook returned no token"));
 						return Collections.emptyList();
 					}
 					suppressed = true;
@@ -133,9 +155,9 @@ public final class NewMixinRegistrar {
 				rollback(config, dotClassName);
 				throw t;
 			} finally {
-				if (suppressed && suppressor != null) {
+				if (suppressed && restore != null) {
 					try {
-						suppressor.restore(launcherToken);
+						restore.accept(launcherToken);
 					} catch (Throwable restoreFailure) {
 						RemoldAgent.warn("[Mixin] Failed to restore the loader's class tracker after"
 							+ " registering " + dotClassName + ": " + MixinReflection.describe(restoreFailure));
@@ -348,6 +370,20 @@ public final class NewMixinRegistrar {
 			// 拿不到服务时让真实的 MixinInfo 构造器做最终判定。
 		}
 		return loaded;
+	}
+
+	/**
+	 * 无法抑制“目标类已加载”检查时的指向性诊断：说清哪个新 Mixin、哪些目标已经加载、卡在哪个
+	 * 加载器检查点、以及唯一可行的动作。调用方必须同时放弃本次登记（fail-closed）。
+	 */
+	private static String suppressionUnavailableMessage(String dotClassName, List<String> loadedTargets,
+			String loaderHook, String reason) {
+		String hook = loaderHook == null || loaderHook.isEmpty() ? "unknown loader hook" : loaderHook;
+		return "[Mixin] Cannot register the new mixin " + dotClassName + " now: its target(s) "
+			+ loadedTargets + " are already loaded, and the already-loaded check at " + hook
+			+ " could not be suppressed (" + reason + ")."
+			+ " The mixin was NOT registered; restart the game once to apply it"
+			+ " (editing an already registered Mixin stays hot-swappable).";
 	}
 
 	private static void reportUnsupported(Throwable t) {

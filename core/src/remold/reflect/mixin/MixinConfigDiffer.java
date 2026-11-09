@@ -166,7 +166,8 @@ public final class MixinConfigDiffer {
 			}
 			try {
 				for (String target : NewMixinRegistrar.tryRegister(
-						ctx.transformer(), dotClassName, node, ctx.loadedTargetSuppressor())) {
+						ctx.transformer(), dotClassName, node,
+						ctx.suppress(), ctx.restore(), ctx.loaderHook())) {
 					affected.add(target.replace('/', '.'));
 				}
 			} catch (Throwable t) {

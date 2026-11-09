@@ -9,7 +9,6 @@ import java.util.List;
 import java.util.Set;
 
 import remold.RemoldAgent;
-import remold.reflect.mixin.LoadedTargetSuppressor;
 
 /**
  * ModLauncher / NeoForge 的“目标类已加载”检查抑制器。
@@ -24,8 +23,13 @@ import remold.reflect.mixin.LoadedTargetSuppressor;
  *
  * <p><b>失败策略</b>：字段不存在、类型不符或服务不可达时返回 {@code null}，调用方必须
  * fail-closed（提示重启），不得让 {@code prepare()} 在真实已加载目标上继续。</p>
+ *
+ * <p><b>为什么不是接口实现</b>：本类只把 {@link #suppress} / {@link #restore} 作为方法引用交给
+ * core 的 {@code Function} / {@code Consumer} 参数，不 {@code implements} 任何 core 类型。插件 jar
+ * 与 core jar 版本错位时，硬链接可选 core 类型会在类链接期抛 {@code NoClassDefFoundError}；
+ * 类型擦除后同一场景只退化为“抑制不可用”，由 core 输出指向性诊断。</p>
  */
-final class ModLauncherClassTrackerSpoof implements LoadedTargetSuppressor {
+final class ModLauncherClassTrackerSpoof {
 
 	private final Object transformer;
 	private final Object trackerOverride;
@@ -40,7 +44,6 @@ final class ModLauncherClassTrackerSpoof implements LoadedTargetSuppressor {
 		this.trackerOverride = trackerOverride;
 	}
 
-	@Override
 	public Object suppress(Collection<String> dottedTargets) {
 		if (dottedTargets == null || dottedTargets.isEmpty()) {
 			return Token.EMPTY;
@@ -77,7 +80,6 @@ final class ModLauncherClassTrackerSpoof implements LoadedTargetSuppressor {
 		}
 	}
 
-	@Override
 	public void restore(Object token) {
 		if (!(token instanceof Token state) || state.loadedClasses == null) {
 			return;

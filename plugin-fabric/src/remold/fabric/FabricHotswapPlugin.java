@@ -99,7 +99,7 @@ public final class FabricHotswapPlugin implements HotswapPlugin {
 						"net.fabricmc.loader.impl.transformer.FabricTransformer", false, cl);
 					java.lang.reflect.Method transform = transformerClass.getMethod("transform",
 						boolean.class, envTypeClass, String.class, byte[].class);
-					boolean development = Boolean.parseBoolean(System.getProperty("fabric.development", "false"));
+					boolean development = isDevelopmentEnvironment();
 					Object out = transform.invoke(null, development, envType, name, bytes);
 					return out instanceof byte[] && ((byte[]) out).length > 0 ? (byte[]) out : bytes;
 				} catch (Throwable t) {
@@ -109,6 +109,23 @@ public final class FabricHotswapPlugin implements HotswapPlugin {
 		} catch (Throwable t) {
 			RemoldAgent.warn("[Fabric] Source-transform replay unavailable; access alignment remains the guard: " + t);
 		}
+	}
+
+	/**
+	 * 是否开发环境。优先问 FabricLoader 本身（与 KnotClassLoader 传给 FabricTransformer 的语义一致），
+	 * 取不到时回退 {@code fabric.development} 系统属性。错误的 dev 判定会让 {@code PackageAccessFixer}
+	 * 不生效，重织入产物重新带回 protected 成员。
+	 */
+	private static boolean isDevelopmentEnvironment() {
+		try {
+			Class<?> loaderClass = Class.forName("net.fabricmc.loader.api.FabricLoader");
+			Object instance = loaderClass.getMethod("getInstance").invoke(null);
+			Object dev = loaderClass.getMethod("isDevelopmentEnvironment").invoke(instance);
+			if (dev instanceof Boolean) return (Boolean) dev;
+		} catch (Throwable ignored) {
+			// fall through to the system property
+		}
+		return Boolean.parseBoolean(System.getProperty("fabric.development", "false"));
 	}
 
 	/** 当前环境类型（CLIENT/SERVER）；取不到时回退 CLIENT（dev 客户端是主要场景）。 */

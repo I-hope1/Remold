@@ -19,6 +19,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `VerifyError: Bad access to protected data in invokevirtual` → `JVMTI_ERROR_INTERNAL`。
   验证：`AccessAlignTest` 5/0（含真实 JVM 跨包 `VerifyError` 红基线 + 对齐后绿）；变异检查关闭对齐逻辑后
   3/5 变红、恢复后复绿。
+- Mixin 生成成员名/顺序基线对齐：`core/src/remold/ref/MixinMemberAlign.java` 把
+  `handler$/redirect$/wrapOperation$/localvar$` 等 Mixin 合成成员按 `(前缀, $z<id>$ 之后的尾名, 描述符)`
+  映射回已加载基线名，并按基线顺序重排方法/字段（ASM `ClassRemapper` 同步改写调用点与
+  `InvokeDynamicInsnNode.bsmArgs` 中的 `Handle`）。真机采样证明同一 Mixin 会话内 unique id 稳定，
+  该层在本次场景为防御性 no-op；`MixinMemberAlignTest` 6/0（含真实捕获字节回归），变异关闭改名/排序后
+  分别 2/2 变红。
+- 同名类多副本选择：`MixinHotSwap` 发现同一 dot 名在多个 ClassLoader 各定义一份时，优先选择宿主加载器
+  （Knot/ModLauncher）的副本，而不是 Agent/System 加载器可能提前定义的裸副本；并在日志里点名全部副本
+  加载器。真机实测这是 `LivingEntity` 重定义失败的真正根因：此前两轮选中的是 `AppClassLoader` 的裸副本
+  （无 Mixin 织入、无 `PackageAccessFixer`），JBR 报 `added interface HonkaiEntityAccess` 并最终
+  `VerifyError: Bad access to protected data in invokevirtual` → 裸 `InternalError`。
+- 内部重定义期间对“受影响的子类”原样放行：`AnnotationTransformer` 在 `INTERNAL_CONTEXT` 下收到非本次目标
+  的 ClassFileLoadHook 时直接返回 `null`，不再二次走 Mixin 桥/布局门（`-Dremold.agent.internal_passthrough`
+  可关闭用于取证）。
+- JBR 裸 `InternalError` 透视：`RemoldAgent` 捕获 `InternalError`/`VerifyError` 后经 DiagnosticCommand
+  `vmInfo` 抓取 HotSpot `Internal exceptions (N events)` 缓冲最后 160 行写入日志（`[VM-INFO]`）。
+- 真机闭环（patch 后模板工程实测）：`LivingEntityErosionMixin` 连续两次热更均
+  `[DYNAMIC-REDEFINE] Successfully redefined net.minecraft.entity.LivingEntity`；无 `[VM-REDEFINE-POISON]`、
+  无 `VerifyError`/`InternalError`、之后持续运行（tick 增长、60fps）无 C1 崩溃。日志明确：
+  `Multiple loaded copies ... KnotClassLoader@42f93a98 vs AppClassLoader@3fee733d; using KnotClassLoader`。
 
 ### Fixed
 - `[ANON_ALIGN]` 的 Tier 4.5 日志不再把“扫描可见的活实例为 0”表述成“实例已死”，也不再把

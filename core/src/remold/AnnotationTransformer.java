@@ -130,6 +130,16 @@ public class AnnotationTransformer implements ClassFileTransformer {
 		boolean isInternal = (internalCtx != null && internalCtx.isTarget(dotClassName));
 		boolean modified = false;
 
+		if (RemoldAgent.INTERNAL_AFFECTED_PASSTHROUGH
+		    && internalCtx != null && classBeingRedefined != null && !isInternal
+		    && !internalCtx.suppressesPostRedefine()) {
+			// JBR 增强重定义会把"受影响的子类"一并拉进事务，并为每个子类回调 ClassFileLoadHook
+			// 取它当前的字节。那些类不是本次热更目标：任何再织入/布局门都会被 JVM 当成它们的
+			// 新版本，把已织入的字节二次织入 → link/verify 失败（裸 InternalError）。
+			// 原样放行：null 表示"不修改"，JVM 使用它自己提供的当前字节。
+			return null;
+		}
+
 		// 加载期拦截：若属于已对齐但尚未加载的类，优先使用对齐后的字节码
 		byte[] pending = null;
 		if (classBeingRedefined == null) {

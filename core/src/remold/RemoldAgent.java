@@ -135,6 +135,19 @@ public class RemoldAgent {
 	 * 关闭后退化为旧行为：新方法体在补丁完成前即上线，存在读穿窗口（{@code docs/status.md} 风险 9）。</p>
 	 */
 	public static boolean      TWO_PHASE          = boolProp("remold.agent.two_phase", "remold.twoPhase", true);
+	/**
+	 * Mixin 生成成员名/顺序基线对齐开关（默认开启）。关闭时重织入产物保持 Mixin 新一轮 unique 名，
+	 * 仅用于复现 JBR 内部的 {@code InternalError} 真相；正常运行必须开启。
+	 */
+	public static boolean      MIXIN_MEMBER_ALIGN = boolProp("remold.agent.mixin_member_align", "remold.mixinMemberAlign", true);
+	/**
+	 * JBR 增强重定义期间，对"受影响的子类"（非本次目标）的 ClassFileLoadHook 是否原样放行。
+	 *
+	 * <p>JBR 会把子类一并拉进重定义事务，并为每个子类回调 ClassFileLoadHook 取当前字节。这些
+	 * 字节已经是运行期状态；Remold 若在此再走一次 Mixin 桥/布局门，JBR 拿到的就是二次织入的
+	 * 新版本，link/verify 失败 → 裸 {@code InternalError}。关闭该开关仅用于复现/取证。</p>
+	 */
+	public static boolean      INTERNAL_AFFECTED_PASSTHROUGH = boolProp("remold.agent.internal_passthrough", "remold.internalPassthrough", true);
 	public static boolean      FORCE_STATIC_LAMBDA = boolProp("remold.agent.force_static_lambda", "remold.agent.force_static_lambdas", false);
 	public static boolean      UI_HOOK;
 	/**
@@ -421,6 +434,7 @@ public class RemoldAgent {
 	private static void markVmLevelFailure(String className, Throwable t) {
 		VM_POISONED_CLASSES.add(className);
 		LAST_REDEFINE_VM_LEVEL_FAILURE = true;
+		dumpVmInternalExceptions(className + " (" + t.getClass().getSimpleName() + ")");
 		error("[VM-REDEFINE-POISON] JVM-level redefine failure for " + className
 		      + " (" + t.getClass().getSimpleName() + "). The JVM metadata may already be inconsistent;"
 		      + " this class is blacklisted for the rest of this session and further hot-swaps of it will be refused."
@@ -457,6 +471,71 @@ public class RemoldAgent {
 			error("[ACCESS-GATE] Refused to redefine " + className + ": access alignment failed ("
 			      + t + "). Refusing to send unverified access flags to the JVM.", t);
 			return null;
+		}
+	}
+
+	/**
+	 * 把重织入产物的 Mixin 生成成员名与成员顺序对齐回已加载基线（第二缺陷）。
+	 *
+	 * <p>只改 Mixin 方法体时，Mixin 会重新生成全部 {@code handler$z*}/{@code redirect$z*}/
+	 * {@code wrapOperation$z*}/{@code localvar$z*} 名字，unique 前缀整体漂移；JBR 眼里就是
+	 * "删掉一批方法 + 新增一批方法"。对齐后纯方法体热更退化为 0 新增/0 删除。</p>
+	 *
+	 * <p>失败时宽松降级（返回候选原样）——随后 {@link #alignAccessMonotonicity} 的自检门仍会
+	 * 决定是否允许进入 JVM。</p>
+	 */
+	static byte[] alignMixinGeneratedMembers(String className, Class<?> targetClass, byte[] candidate) {
+		if (candidate == null || !MIXIN_MEMBER_ALIGN) return candidate;
+		byte[] baseline = bytecodeCache.get(className);
+		if (baseline == null) baseline = sourceBytecodeCache.get(className);
+		if (baseline == null) return candidate;
+		try {
+			remold.ref.MixinMemberAlign.Result result =
+				remold.ref.MixinMemberAlign.align(candidate, baseline);
+			if (result.changed()) {
+				info("[MIXIN-ALIGN] " + className + ": mapped " + result.renamed
+				     + " Mixin-generated member name(s) back to the loaded baseline"
+				     + (result.reordered ? " and restored the baseline member order" : "") + ".");
+			}
+			if (!result.missingFromCandidate.isEmpty()) {
+				warn("[MIXIN-ALIGN] " + className + ": " + result.missingFromCandidate.size()
+				     + " baseline Mixin-generated member(s) are still absent after re-weave ("
+				     + result.missingFromCandidate + "); JBR may still treat this as a structural change.");
+			}
+			return result.bytes;
+		} catch (Throwable t) {
+			warn("[MIXIN-ALIGN] " + className + ": member alignment skipped (" + t + ").");
+			return candidate;
+		}
+	}
+
+	/**
+	 * 透视 JBR 裸 {@code InternalError} 的真因：HotSpot 在 {@code CLEAR_PENDING_EXCEPTION} 前
+	 * 已把内部异常写入 {@code Internal exceptions (N events)} 环形缓冲区，直接经 DiagnosticCommand
+	 * {@code vmInfo} 取回最后若干行打进日志。
+	 */
+	private static void dumpVmInternalExceptions(String context) {
+		try {
+			javax.management.ObjectName name =
+				new javax.management.ObjectName("com.sun.management:type=DiagnosticCommand");
+			Object out = java.lang.management.ManagementFactory.getPlatformMBeanServer().invoke(
+				name, "vmInfo", new Object[]{null}, new String[]{String[].class.getName()});
+			String text = String.valueOf(out);
+			int idx = text.lastIndexOf("Internal exceptions");
+			if (idx < 0) idx = text.lastIndexOf("Events (");
+			if (idx < 0) {
+				warn("[VM-INFO] " + context + ": no internal-exception section found in vmInfo output.");
+				return;
+			}
+			String[] lines = text.substring(idx).split("\\R");
+			StringBuilder sb = new StringBuilder();
+			for (int i = 0; i < lines.length && i < 160; i++) {
+				sb.append(lines[i]).append('\n');
+			}
+			error("[VM-INFO] " + context + " — JVM internal exception buffer:\n" + sb);
+		} catch (Throwable t) {
+			warn("[VM-INFO] DiagnosticCommand vmInfo unavailable (" + t + "); "
+			     + "use -Xlog:exceptions=info as a fallback.");
 		}
 	}
 
@@ -1360,6 +1439,8 @@ public class RemoldAgent {
 		info("Injection Blacklist: " + String.join(",", HOTSWAP_BLACKLIST));
 		INIT_FIX = boolProp("remold.agent.init_fix", "remold.initFix", true);
 		TWO_PHASE = boolProp("remold.agent.two_phase", "remold.twoPhase", true);
+		MIXIN_MEMBER_ALIGN = boolProp("remold.agent.mixin_member_align", "remold.mixinMemberAlign", true);
+		INTERNAL_AFFECTED_PASSTHROUGH = boolProp("remold.agent.internal_passthrough", "remold.internalPassthrough", true);
 		FORCE_STATIC_LAMBDA = boolProp("remold.agent.force_static_lambda", "remold.agent.force_static_lambdas", false);
 		for (String degradedSwitch : degradeForMissingEnhancedRedefinition(isEnhancedHotswapEnabled())) {
 			warn("DEGRADED: " + degradedSwitch + " forced OFF. " + degradationReason(degradedSwitch));
@@ -1926,6 +2007,7 @@ public class RemoldAgent {
 				Class<?> targetClass = loadedClassesMap.get(className);
 				ClassLoader cl = targetClass != null ? targetClass.getClassLoader() : findTargetClassLoader(className, classToPath.get(className));
 				byte[] weaved = applyTransformerBridges(cl, className, targetClass, rawBytes);
+				weaved = alignMixinGeneratedMembers(className, targetClass, weaved);
 				if (weaved != null && weaved != rawBytes) {
 					newBatchBytes.put(className, weaved);
 					for (AlignmentTransaction tx : transactions.values()) {
@@ -4536,6 +4618,8 @@ public class RemoldAgent {
 			String className = targetClass.getName();
 			byte[] sourceBytes = newBytecode;
 			byte[] runtimeBytes = applyTransformerBridges(targetClass.getClassLoader(), className, targetClass, newBytecode);
+			// 第二缺陷：Mixin 生成成员名/顺序先对齐回基线，让纯方法体热更退化为 0 新增/0 删除。
+			runtimeBytes = alignMixinGeneratedMembers(className, targetClass, runtimeBytes);
 			// 第一层：按已加载基线做访问权限单调对齐；自检门拒绝时绝不调用 redefineClasses。
 			runtimeBytes = alignAccessMonotonicity(className, targetClass, runtimeBytes);
 			if (runtimeBytes == null) {

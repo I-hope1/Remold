@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- 重定义访问权限防线（四层）：`core/src/remold/ref/AccessAlign.java` 以 JVM 已加载运行时字节码为基线，
+  对重织入产物做**访问权限单调对齐**（public 不得退化、protected 不得退化、基线已剥离的 `ACC_FINAL`
+  必须同步剥离），并在送入 `redefineClasses` 前做 fail-closed 自检门；Fabric 侧新增 Mixin 前置变换重放
+  （`FabricTransformer` 的 `PackageAccessFixer` / `AccessWidener`，`plugin-fabric` +
+  `plugin-mixin readOriginalBytes`）；`RemoldAgent` 对 `InternalError`/`VerifyError` 记入本会话黑名单，
+  `[Mixin]` 日志不再把 JVM 级失败误归因为 LayoutGate。
+  动机：Mixin 目标从原始 jar 重织入时丢失加载器在 Mixin 之前做的权限提升，112 个可访问成员退回
+  `protected`，JBR 增强重定义连带 link/verify 子类时触发
+  `VerifyError: Bad access to protected data in invokevirtual` → `JVMTI_ERROR_INTERNAL`。
+  验证：`AccessAlignTest` 5/0（含真实 JVM 跨包 `VerifyError` 红基线 + 对齐后绿）；变异检查关闭对齐逻辑后
+  3/5 变红、恢复后复绿。
+
 ### Fixed
 - `[ANON_ALIGN]` 的 Tier 4.5 日志不再把“扫描可见的活实例为 0”表述成“实例已死”，也不再把
   “实例数为 0”当作配对安全性的依据。此前该行写作 `deterministic-dead-pair (0 live instances)`，

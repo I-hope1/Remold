@@ -71,6 +71,59 @@ public final class FabricHotswapPlugin implements HotswapPlugin {
 	@Override
 	public void onAgentInit(Instrumentation inst) {
 		RemoldAgent.info("[Fabric] Dev-runtime integration active (class path groups + mods guard)");
+		registerSourceTransformReplay();
+	}
+
+	/**
+	 * 第二层（源头补齐）：把 Fabric Loader 在 Mixin 之前做的运行时变换原样重放一遍。
+	 *
+	 * <p>Fabric 正常加载时会经由 {@code FabricTransformer} 应用 AccessWidener，并在 dev
+	 * （Yarn named）下应用 {@code PackageAccessFixer}——把 Minecraft 类的非 private 成员提升为
+	 * public。Remold 对已加载 Mixin 目标是从原始 jar/磁盘字节重新织入的，不重放这层变换就会以
+	 * <b>更窄的访问权限</b>送回 JVM：JBR 增强重定义会把子类一并 link/verify，跨包 protected 访问
+	 * 当场 {@code VerifyError} -> {@code InternalError}。</p>
+	 *
+	 * <p>只用反射调用 Loader 自己的实现，避免 plugin-fabric 编译期依赖 loader 内部类；任何失败都
+	 * 保持原字节并交给第一层的访问权限单调对齐兜底。</p>
+	 */
+	private static void registerSourceTransformReplay() {
+		try {
+			RemoldAgent.registerSourceTransform((name, bytes) -> {
+				if (bytes == null) return null;
+				try {
+					ClassLoader cl = FabricHotswapPlugin.class.getClassLoader();
+					Class<?> envTypeClass = Class.forName("net.fabricmc.api.EnvType", false, cl);
+					Object envType = currentEnvironmentType(envTypeClass);
+					if (envType == null) return bytes;
+					Class<?> transformerClass = Class.forName(
+						"net.fabricmc.loader.impl.transformer.FabricTransformer", false, cl);
+					java.lang.reflect.Method transform = transformerClass.getMethod("transform",
+						boolean.class, envTypeClass, String.class, byte[].class);
+					boolean development = Boolean.parseBoolean(System.getProperty("fabric.development", "false"));
+					Object out = transform.invoke(null, development, envType, name, bytes);
+					return out instanceof byte[] && ((byte[]) out).length > 0 ? (byte[]) out : bytes;
+				} catch (Throwable t) {
+					return bytes;
+				}
+			});
+		} catch (Throwable t) {
+			RemoldAgent.warn("[Fabric] Source-transform replay unavailable; access alignment remains the guard: " + t);
+		}
+	}
+
+	/** 当前环境类型（CLIENT/SERVER）；取不到时回退 CLIENT（dev 客户端是主要场景）。 */
+	private static Object currentEnvironmentType(Class<?> envTypeClass) {
+		try {
+			Class<?> loaderClass = Class.forName("net.fabricmc.loader.api.FabricLoader");
+			Object instance = loaderClass.getMethod("getInstance").invoke(null);
+			return loaderClass.getMethod("getEnvironmentType").invoke(instance);
+		} catch (Throwable t) {
+			try {
+				return envTypeClass.getField("CLIENT").get(null);
+			} catch (Throwable ignored) {
+				return null;
+			}
+		}
 	}
 
 	@Override

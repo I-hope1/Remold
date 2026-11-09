@@ -593,6 +593,12 @@ public final class MixinHotSwap {
 			}
 			if (RemoldAgent.redefineDynamic(targetClass, originalBytes)) {
 				RemoldAgent.info("[Mixin] Target class " + name + " re-woven with updated mixin and redefined");
+			} else if (RemoldAgent.lastRedefineFailedAtVmLevel() || RemoldAgent.isVmRedefinitionPoisoned(name)) {
+				// 归因纠偏：JVM 级失败（InternalError/VerifyError）与布局拒绝是两码事，
+				// 把它引向 LayoutGate 会让用户去改字段，而真正该做的是立刻重启。
+				RemoldAgent.warn("[Mixin] Target class " + name + " was re-woven but the redefine failed at JVM level"
+					+ " (InternalError/VerifyError): JVM metadata may already be inconsistent — do NOT keep"
+					+ " hot-swapping; RESTART the client. This is NOT a LayoutGate rejection.");
 			} else if (RemoldAgent.isEnhancedHotswapEnabled()) {
 				// 结构化热更已经开启：拒绝来自 Remold 的安全门或 JVM 本身，不是 JDK 能力不足。
 				// 继续提示"换 DCEVM 的 JBR"会把用户引向错误方向。
@@ -635,17 +641,21 @@ public final class MixinHotSwap {
 	private static byte[] readOriginalBytes(Class<?> type) {
 		if (type == null) return null;
 		String name = type.getName();
-		byte[] disk = RemoldAgent.findClassBytesOnDisk(type);
-		if (disk != null) {
-			return disk;
+		byte[] chosen = RemoldAgent.findClassBytesOnDisk(type);
+		if (chosen == null) {
+			String resource = "/" + name.replace('.', '/') + ".class";
+			try (InputStream in = type.getResourceAsStream(resource)) {
+				if (in != null) chosen = in.readAllBytes();
+			} catch (Throwable ignored) {
+				// 落到 source cache 兜底
+			}
 		}
-		String resource = "/" + name.replace('.', '/') + ".class";
-		try (InputStream in = type.getResourceAsStream(resource)) {
-			if (in != null) return in.readAllBytes();
-		} catch (Throwable ignored) {
-			// 落到 source cache 兜底
-		}
-		return RemoldAgent.getSourceBytecode(name);
+		if (chosen == null) chosen = RemoldAgent.getSourceBytecode(name);
+		if (chosen == null) return null;
+		// 第二层（源头补齐）：重放加载器在 Mixin 之前做的访问变换（Fabric dev 的
+		// PackageAccessFixer、AccessWidener 等）。不重放就会以更窄的访问权限送回 JVM，
+		// 让 JBR 增强重定义在 link/verify 子类时抛 VerifyError -> InternalError。
+		return RemoldAgent.applySourceTransforms(name, chosen);
 	}
 
 	/** 常量池里是否含 {@code @Mixin} 描述符。便宜的前置过滤，避免给每个类都做一次 ASM 解析。 */

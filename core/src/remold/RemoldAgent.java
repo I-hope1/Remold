@@ -347,6 +347,121 @@ public class RemoldAgent {
 		return current;
 	}
 
+	//region 访问权限单调对齐 / 平台预变换重放 / JVM 级失败熔断
+
+	/**
+	 * 平台 pre-Mixin 变换重放钩子：把原始字节先过一遍宿主加载器在 Mixin 之前做的变换。
+	 *
+	 * <p>例：Fabric dev 的 {@code PackageAccessFixer}（Yarn named 下非 private 成员全 public）、
+	 * Fabric {@code AccessWidener}、Forge/NeoForge {@code AccessTransformer}。这些变换在正常加载时
+	 * 由加载器完成，但 Mixin 目标重织入是从原始 jar/磁盘字节重新织的，必须在此重放，否则产物会以
+	 * 更窄的访问权限送回 JVM（JBR 增强重定义会把子类一并 link/verify，跨包 protected 访问当场
+	 * {@code VerifyError} -> {@code InternalError}）。</p>
+	 *
+	 * <p>钩子由 loader 集成插件注册；未注册或抛异常时原样返回，属可选双保险——第一层
+	 * {@link #alignAccessMonotonicity} 的单调对齐不依赖它。</p>
+	 */
+	private static final List<java.util.function.BiFunction<String, byte[], byte[]>> SOURCE_TRANSFORMS =
+		new CopyOnWriteArrayList<>();
+
+	/** 注册一个平台 pre-Mixin 变换重放钩子（按注册顺序链式执行）。 */
+	public static void registerSourceTransform(java.util.function.BiFunction<String, byte[], byte[]> transform) {
+		if (transform != null && !SOURCE_TRANSFORMS.contains(transform)) {
+			SOURCE_TRANSFORMS.add(transform);
+		}
+	}
+
+	/** 依次执行已注册的 pre-Mixin 变换；单钩子失败只记一条 warn 并保持原字节，不影响主链路。 */
+	public static byte[] applySourceTransforms(String dotClassName, byte[] sourceBytes) {
+		if (sourceBytes == null || SOURCE_TRANSFORMS.isEmpty()) return sourceBytes;
+		byte[] current = sourceBytes;
+		for (java.util.function.BiFunction<String, byte[], byte[]> transform : SOURCE_TRANSFORMS) {
+			try {
+				byte[] transformed = transform.apply(dotClassName, current);
+				if (transformed != null && transformed.length > 0) {
+					current = transformed;
+				}
+			} catch (Throwable t) {
+				warn("[SOURCE-TRANSFORM] Error replaying loader transform for " + dotClassName
+				     + " with " + transform.getClass().getName() + "; keeping the untransformed bytes: " + t);
+			}
+		}
+		return current;
+	}
+
+	/** 本会话内已发生 JVM 级重定义失败（InternalError/VerifyError）的类：拒绝再次重织入。 */
+	private static final Set<String> VM_POISONED_CLASSES = ConcurrentHashMap.newKeySet();
+
+	/** 最近一次重定义是否以 JVM 级失败告终（插件据此把用户引向重启，而不是误报 LayoutGate）。 */
+	private static volatile boolean LAST_REDEFINE_VM_LEVEL_FAILURE;
+
+	/** 该类是否已被本会话的 JVM 级重定义失败拉黑。 */
+	public static boolean isVmRedefinitionPoisoned(String dotClassName) {
+		return dotClassName != null && VM_POISONED_CLASSES.contains(dotClassName);
+	}
+
+	/** 最近一次重定义是否以 InternalError/VerifyError 这类 JVM 级失败告终。 */
+	public static boolean lastRedefineFailedAtVmLevel() {
+		return LAST_REDEFINE_VM_LEVEL_FAILURE;
+	}
+
+	private static boolean isVmLevelRedefineFailure(Throwable t) {
+		if (t == null) return false;
+		if (t instanceof InternalError || t instanceof VerifyError) return true;
+		String n = t.getClass().getName();
+		return "java.lang.InternalError".equals(n) || "java.lang.VerifyError".equals(n);
+	}
+
+	/**
+	 * JVM 级重定义失败熔断：把目标类拉入本会话黑名单并醒目告警。
+	 *
+	 * <p>这类失败意味着 JVM 元数据/编译队列可能已不一致（实测可在数秒后引发 C1 崩溃），
+	 * 继续对同一类重织入只会扩大污染面，必须要求重启。</p>
+	 */
+	private static void markVmLevelFailure(String className, Throwable t) {
+		VM_POISONED_CLASSES.add(className);
+		LAST_REDEFINE_VM_LEVEL_FAILURE = true;
+		error("[VM-REDEFINE-POISON] JVM-level redefine failure for " + className
+		      + " (" + t.getClass().getSimpleName() + "). The JVM metadata may already be inconsistent;"
+		      + " this class is blacklisted for the rest of this session and further hot-swaps of it will be refused."
+		      + " RESTART the client now — do not continue hot-reloading.", t);
+	}
+
+	/**
+	 * 用 JVM 已加载的运行时字节码作基线，对候选重织入字节做<b>访问权限单调对齐</b>。
+	 *
+	 * <p>返回 {@code null} 表示自检门拒绝：要么对齐后仍有收窄（fail-closed），要么基线/候选
+	 * 不可解析。调用方不得把 {@code null} 送入 {@code redefineClasses}。</p>
+	 */
+	static byte[] alignAccessMonotonicity(String className, Class<?> targetClass, byte[] candidate) {
+		if (candidate == null) return null;
+		byte[] baseline = bytecodeCache.get(className);
+		if (baseline == null) baseline = sourceBytecodeCache.get(className);
+		if (baseline == null) return candidate;   // 首次加载的新类：没有可对齐的基线
+		try {
+			remold.ref.AccessAlign.Result result = remold.ref.AccessAlign.align(candidate, baseline);
+			if (!result.narrowed.isEmpty()) {
+				error("[ACCESS-GATE] Refused to redefine " + className
+				      + ": member access narrowed after re-weave (" + result.narrowed + ")."
+				      + " The re-woven bytes lost a loader-time access transform"
+				      + " (Fabric PackageAccessFixer / AccessWidener / Forge AccessTransformer)."
+				      + " Refusing to send downgraded access flags to the JVM.");
+				return null;
+			}
+			if (result.changed()) {
+				info("[ACCESS-ALIGN] " + className + ": restored " + result.adjusted
+				     + " class/member access flag(s) from the loaded baseline before redefine.");
+			}
+			return result.bytes;
+		} catch (Throwable t) {
+			error("[ACCESS-GATE] Refused to redefine " + className + ": access alignment failed ("
+			      + t + "). Refusing to send unverified access flags to the JVM.", t);
+			return null;
+		}
+	}
+
+	//endregion
+
 	//region Dispatcher & SPI Lifecycle
 	private static volatile MainThreadDispatcher mainThreadDispatcher = Runnable::run;
 	private static final List<HotswapBatchListener> batchListeners = new CopyOnWriteArrayList<>();
@@ -1824,6 +1939,27 @@ public class RemoldAgent {
 					}
 				}
 			}
+		}
+
+		// ---- 访问权限单调对齐（Access Monotonicity Alignment）----
+		// 桥接产物可能来自原始 jar/磁盘字节，丢掉宿主加载器在 Mixin 之前做的访问变换；
+		// 一旦以更窄权限送回 JVM，JBR 增强重定义会把子类一并 link/verify，跨包 protected 访问
+		// 会当场 VerifyError -> InternalError。这里按已加载运行时字节码单调对齐，并在自检门拒绝失败项。
+		for (String className : new ArrayList<>(newBatchBytes.keySet())) {
+			byte[] rawBytes = newBatchBytes.get(className);
+			if (rawBytes == null) continue;
+			Class<?> targetClass = loadedClassesMap.get(className);
+			byte[] aligned = alignAccessMonotonicity(className, targetClass, rawBytes);
+			if (aligned != null) {
+				if (aligned != rawBytes) newBatchBytes.put(className, aligned);
+				continue;
+			}
+			newBatchBytes.remove(className);
+			classToPath.remove(className);
+			skips.add(className, RoundSkips.verdict("ACCESS-GATE-REFUSED",
+				"member access narrowed after re-weave",
+				"refused before redefineClasses; see [ACCESS-GATE]"));
+			if (targetClass != null) InitFix.afterRedefineFailed(targetClass);
 		}
 
 		// 插件在桥接阶段会把 Mixin 等模板类登记为"不可加载"。它们不能进入本批：
@@ -3568,6 +3704,35 @@ public class RemoldAgent {
 	                                          Set<String> abandonedOut) {
 		for (AlignmentTransaction tx : transactions) tx.preRegister();
 
+		// 阶段 A 同样可能收到"重织入产物"，必须过同一道访问权限单调对齐 + 自检门。
+		List<ClassDefinition> aligned = new ArrayList<>(definitions.size());
+		for (ClassDefinition def : definitions) {
+			String name = def.getDefinitionClass().getName();
+			if (VM_POISONED_CLASSES.contains(name)) {
+				warn("[VM-REDEFINE-POISON] Skipping stage A redefinition of " + name
+				     + ": poisoned by an earlier JVM-level redefine failure; RESTART required.");
+				skips.add(name, RoundSkips.verdict("VM-POISONED",
+					"InternalError/VerifyError earlier this session", "restart required"));
+				InitFix.afterRedefineFailed(def.getDefinitionClass());
+				continue;
+			}
+			byte[] rawBytes = def.getDefinitionClassFile();
+			byte[] alignedBytes = alignAccessMonotonicity(name, def.getDefinitionClass(), rawBytes);
+			if (alignedBytes == null) {
+				skips.add(name, RoundSkips.verdict("ACCESS-GATE-REFUSED",
+					"member access narrowed after re-weave",
+					"stage A refused; see [ACCESS-GATE]"));
+				InitFix.afterRedefineFailed(def.getDefinitionClass());
+				continue;
+			}
+			if (alignedBytes != rawBytes) {
+				stageABytes.put(name, alignedBytes);
+				def = new ClassDefinition(def.getDefinitionClass(), alignedBytes);
+			}
+			aligned.add(def);
+		}
+		definitions = aligned;
+
 		// 与单阶段一致：被引用的匿名类先提交，宿主最后提交，降低半生效风险。
 		definitions.sort((d1, d2) -> {
 			boolean a1 = d1.getDefinitionClass().getName().contains("$");
@@ -3593,7 +3758,11 @@ public class RemoldAgent {
 						inst.redefineClasses(def);
 						ok.add(className);
 					} catch (Throwable e) {
-						error("[FAIL] stage A redefinition of " + className, e);
+						if (isVmLevelRedefineFailure(e)) {
+							markVmLevelFailure(className, e);
+						} else {
+							error("[FAIL] stage A redefinition of " + className, e);
+						}
 						skips.add(className, RoundSkips.verdict("STAGE-A-FAILED",
 						 e.getClass().getSimpleName(),
 						 "see the stack trace above; the file is requeued"));
@@ -3647,6 +3816,25 @@ public class RemoldAgent {
 	                                                  RoundSkips skips) {
 		Set<String> successfulClasses = new HashSet<>();
 		Set<String> rolledBackClasses = new HashSet<>();
+		LAST_REDEFINE_VM_LEVEL_FAILURE = false;
+
+		// 第四层：JVM 级失败后的不可恢复熔断——本会话内不再尝试重定义这些类。
+		List<ClassDefinition> filtered = new ArrayList<>(definitions.size());
+		for (ClassDefinition def : definitions) {
+			String name = def.getDefinitionClass().getName();
+			if (VM_POISONED_CLASSES.contains(name)) {
+				warn("[VM-REDEFINE-POISON] Skipping " + name
+				     + ": poisoned by an earlier JVM-level redefine failure (InternalError/VerifyError) in this session;"
+				     + " RESTART the client before hot-swapping it again.");
+				skips.add(name, RoundSkips.verdict("VM-POISONED",
+					"InternalError/VerifyError earlier this session", "restart required"));
+				InitFix.afterRedefineFailed(def.getDefinitionClass());
+				continue;
+			}
+			filtered.add(def);
+		}
+		definitions = filtered;
+
 		if (definitions.isEmpty()) {
 			for (AlignmentTransaction tx : transactions) {
 				tx.commit();
@@ -3697,7 +3885,14 @@ public class RemoldAgent {
 				tx.commit();
 			}
 		} catch (Throwable t) {
-			error("Bulk Redefine failed, switching to individual mode...", t);
+			LAST_REDEFINE_VM_LEVEL_FAILURE = isVmLevelRedefineFailure(t);
+			if (LAST_REDEFINE_VM_LEVEL_FAILURE) {
+				// 批量失败无法归因到具体类；先记录标志，逐类重试时再精确拉黑。
+				error("[VM-REDEFINE-POISON] Bulk redefine failed at JVM level ("
+				      + t.getClass().getSimpleName() + "); falling back to per-class mode to attribute it.", t);
+			} else {
+				error("Bulk Redefine failed, switching to individual mode...", t);
+			}
 			// redefineClasses 对一批类是原子的：批量失败意味着没有任何类生效。
 			// 因此 PENDING 补丁必须保留，留给下面的逐类重试；只有逐类重试也失败时才丢弃。
 			for (ClassDefinition def : definitions) {
@@ -3707,7 +3902,11 @@ public class RemoldAgent {
 					inst.redefineClasses(def);
 					redefined = true;
 				} catch (Throwable e) {
-					error("[FAIL] " + className, e);
+					if (isVmLevelRedefineFailure(e)) {
+						markVmLevelFailure(className, e);
+					} else {
+						error("[FAIL] " + className, e);
+					}
 					skips.add(className, RoundSkips.verdict("REDEFINE-FAILED",
 						e.getClass().getSimpleName(), "see the stack trace above; the file is requeued"));
 					InitFix.afterRedefineFailed(def.getDefinitionClass());
@@ -4320,14 +4519,28 @@ public class RemoldAgent {
 			return false;
 		}
 
+		if (VM_POISONED_CLASSES.contains(targetClass.getName())) {
+			LAST_REDEFINE_VM_LEVEL_FAILURE = true;
+			warn("[DYNAMIC-REDEFINE] Refusing to redefine " + targetClass.getName()
+			     + ": an earlier JVM-level redefine failure (InternalError/VerifyError) already poisoned"
+			     + " this class in the current session. RESTART the client before further hot-swaps.");
+			return false;
+		}
+
 		HOTSWAP_LOCK.lock();
 		try {
 			// 动态重定义同样是一个可观测批次：耗时从桥接/布局门之前开始算，
 			// 到 InitFix 与回调完成结束。
 			BatchReportScope.begin();
+			LAST_REDEFINE_VM_LEVEL_FAILURE = false;
 			String className = targetClass.getName();
 			byte[] sourceBytes = newBytecode;
 			byte[] runtimeBytes = applyTransformerBridges(targetClass.getClassLoader(), className, targetClass, newBytecode);
+			// 第一层：按已加载基线做访问权限单调对齐；自检门拒绝时绝不调用 redefineClasses。
+			runtimeBytes = alignAccessMonotonicity(className, targetClass, runtimeBytes);
+			if (runtimeBytes == null) {
+				return false;
+			}
 
 			byte[] oldBytes = bytecodeCache.get(className);
 			if (oldBytes == null) oldBytes = fetchOriginalBytecode(targetClass);
@@ -4403,7 +4616,12 @@ public class RemoldAgent {
 				exitInternalRedefine();
 			}
 		} catch (Throwable t) {
-			error("[DYNAMIC-REDEFINE] Failed to redefine " + targetClass.getName(), t);
+			LAST_REDEFINE_VM_LEVEL_FAILURE = isVmLevelRedefineFailure(t);
+			if (LAST_REDEFINE_VM_LEVEL_FAILURE) {
+				markVmLevelFailure(targetClass.getName(), t);
+			} else {
+				error("[DYNAMIC-REDEFINE] Failed to redefine " + targetClass.getName(), t);
+			}
 			InitFix.afterRedefineFailed(targetClass);
 			return false;
 		} finally {

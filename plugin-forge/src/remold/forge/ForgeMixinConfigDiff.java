@@ -13,8 +13,15 @@ import remold.reflect.mixin.MixinConfigDiffer;
 /**
  * Forge / NeoForge 侧的 Mixin 配置差异适配器：把跨 ClassLoader 的织入器、ASM ClassNode、
  * ModLauncher 类跟踪器抑制器与目标重织入回调交给 core 的反射引擎。
+ *
+ * <p>抑制器只以方法引用（{@code Function} / {@code Consumer}）传入，本类不 {@code implements}
+ * 任何 core 类型：core jar 版本错位时退化为“抑制不可用”的可诊断降级，而不是类链接期的
+ * {@code NoClassDefFoundError}。</p>
  */
 final class ForgeMixinConfigDiff {
+
+	/** 诊断用：本加载器的“目标类已加载”检查点。 */
+	static final String LOADER_HOOK = "ModLauncher MixinServiceModLauncher ModLauncherClassTracker.loadedClasses";
 
 	private ForgeMixinConfigDiff() {
 	}
@@ -25,11 +32,14 @@ final class ForgeMixinConfigDiff {
 			return;
 		}
 		try {
+			ModLauncherClassTrackerSpoof spoof = new ModLauncherClassTrackerSpoof(transformer);
 			MixinConfigDiffer.onAssetsChanged(changedAssets, new MixinConfigContext(
 				transformer,
 				currentSide(transformer),
 				dotClassName -> loadClassNode(transformer, dotClassName),
-				new ModLauncherClassTrackerSpoof(transformer),
+				spoof::suppress,
+				spoof::restore,
+				LOADER_HOOK,
 				targets -> scheduleTargets(targets, inst)));
 		} catch (Throwable t) {
 			RemoldAgent.warn("[Forge/NeoForge] Failed to apply mixin config change: " + t);

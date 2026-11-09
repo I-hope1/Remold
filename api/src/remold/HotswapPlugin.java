@@ -65,4 +65,22 @@ public interface HotswapPlugin {
 	 * @return {@code true} 表示忽略该路径
 	 */
 	default boolean isWatchPathIgnored(Path path) { return false; }
+
+	/**
+	 * 宿主是否已经进入"可以安全热更"的就绪态。
+	 *
+	 * <p>用于表达<b>加载器/游戏专有</b>的启动期约束：例如 Minecraft 启动期
+	 * {@code KnotClassLoader} 与 Mixin 转换器正在高频并发加载类，此时落一个热更批次会让
+	 * JVM 挂死。引擎核心不认识任何具体加载器，只按插件投票——<b>任一插件返回 {@code false}
+	 * 即整批推迟</b>，变更留在队列里等下一次重查。</p>
+	 *
+	 * <p><b>默认 {@code true}</b>：既有插件（以及没有实现该回调的宿主）行为完全不变，
+	 * 二进制兼容——这是刻意选择，门闩不能因为"某个第三方插件没跟上"就把热更整体关掉。
+	 * 代价是"宿主不实现它就等于没有启动期保护"（见 docs/status.md 风险登记）。</p>
+	 *
+	 * <p>实现必须廉价且无副作用：防抖到期后每次重查都会调用它。</p>
+	 *
+	 * @return {@code true} 表示宿主已就绪；{@code false} 表示本批必须推迟
+	 */
+	default boolean isHostReady() { return true; }
 }

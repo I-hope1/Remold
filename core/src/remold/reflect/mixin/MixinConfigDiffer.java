@@ -12,6 +12,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -30,9 +33,55 @@ public final class MixinConfigDiffer {
 	private static final Pattern QUOTED = Pattern.compile("\"([^\"]+)\"");
 
 	/** 被配置显式删除的 Mixin（点分类名 -> 当时解析的配置路径）。 */
-	private static final Map<String, Path> REMOVED_FROM_CONFIG = new java.util.concurrent.ConcurrentHashMap<>();
+	private static final Map<String, Path> REMOVED_FROM_CONFIG = new ConcurrentHashMap<>();
+
+	/**
+	 * 「配置里已列出、但字节码还没编译出来」的新 Mixin（点分类名 -> 待决记录）。
+	 *
+	 * <p><b>为什么需要</b>：IDE 里常见先保存 {@code mixins.json}（触发资源事件）再完成编译。
+	 * 资源事件此刻拿不到 {@code .class}，但这不是错误，也不该要求用户重启或再存一次配置——
+	 * 字节随后落到任一监控路径时，类批次会再次经过这里，待决集合据此自动接力登记。</p>
+	 */
+	private static final Map<String, Pending> PENDING_UNRESOLVED = new ConcurrentHashMap<>();
+
+	/** 待决项的最长等待时间：超过后放弃并明确提示（不做无限重试）。 */
+	static final long PENDING_TTL_NANOS = TimeUnit.MINUTES.toNanos(10);
+
+	/** 待决项的最大重试次数（资源事件可能反复触发，必须有上限）。 */
+	static final int PENDING_MAX_ATTEMPTS = 40;
 
 	private MixinConfigDiffer() {
+	}
+
+	/** 一个待决的新 Mixin：它来自哪份配置、从什么时候开始等、重试过几次。 */
+	private static final class Pending {
+		private final Path config;
+		private final long recordedNanos;
+		private final AtomicInteger attempts = new AtomicInteger();
+
+		private Pending(Path config) {
+			this.config = config;
+			this.recordedNanos = System.nanoTime();
+		}
+
+		private boolean expired() {
+			return this.attempts.get() >= PENDING_MAX_ATTEMPTS
+				|| System.nanoTime() - this.recordedNanos > PENDING_TTL_NANOS;
+		}
+	}
+
+	/**
+	 * 尚未拿到字节码的新列出 Mixin（诊断与测试用）。
+	 *
+	 * @return 点分类名集合的不可变快照
+	 */
+	public static Set<String> pendingUnresolvedMixins() {
+		return Set.copyOf(PENDING_UNRESOLVED.keySet());
+	}
+
+	/** 清空待决集合（测试用；生产路径不应调用）。 */
+	static void clearPendingUnresolvedMixins() {
+		PENDING_UNRESOLVED.clear();
 	}
 
 	/** 该 Mixin 是否仍被配置显式删除；若配置已重新列出它，则自愈并返回 false。 */
@@ -148,7 +197,9 @@ public final class MixinConfigDiffer {
 				removedNames.add(entry.getKey());
 				collectTargets(entry.getValue(), affected);
 				remove(config, entry.getKey(), entry.getValue());
-				REMOVED_FROM_CONFIG.put(mixinPackage + entry.getKey(), asset.toAbsolutePath());
+				String removedDot = mixinPackage + entry.getKey();
+				REMOVED_FROM_CONFIG.put(removedDot, asset.toAbsolutePath());
+				PENDING_UNRESOLVED.remove(removedDot);
 			}
 		}
 		for (String simpleName : expected) {
@@ -160,24 +211,115 @@ public final class MixinConfigDiffer {
 			markReaddedToConfig(dotClassName);
 			Object node = ctx.classNodeLoader() == null ? null : ctx.classNodeLoader().apply(dotClassName);
 			if (node == null) {
-				RemoldAgent.warn("[Mixin] Cannot read bytecode for newly listed mixin " + dotClassName
-					+ "; add the class (or compile) once, then the config diff can register it");
+				// 时序解耦：配置先到、字节后到是 IDE 的正常节奏，不是失败。
+				// 记入待决集，字节落地后由 retryPending(...) 自动接力登记。
+				PENDING_UNRESOLVED.computeIfAbsent(dotClassName, key -> new Pending(asset.toAbsolutePath()));
+				RemoldAgent.info("[Mixin] Bytecode for newly listed mixin " + dotClassName
+					+ " is not compiled yet; it will be registered automatically once the .class lands"
+					+ " in a watched output directory (no restart, no need to re-save the config)");
 				continue;
 			}
-			try {
-				for (String target : NewMixinRegistrar.tryRegister(
-						ctx.transformer(), dotClassName, node,
-						ctx.suppress(), ctx.restore(), ctx.loaderHook())) {
-					affected.add(target.replace('/', '.'));
-				}
-			} catch (Throwable t) {
-				RemoldAgent.warn("[Mixin] Failed to register newly listed mixin " + dotClassName + ": " + t);
-			}
+			PENDING_UNRESOLVED.remove(dotClassName);
+			registerAddedMixin(ctx, dotClassName, node, affected);
 		}
 		RemoldAgent.info("[Mixin] Config diff " + asset.getFileName() + ": removed=" + removedNames
 			+ " added=" + addedNames + " affected=" + affected);
 		if (!affected.isEmpty() && ctx.targetScheduler() != null) {
 			ctx.targetScheduler().accept(affected);
+		}
+	}
+
+	/**
+	 * 接力登记待决的新 Mixin：字节码一旦可读就立即完成运行期登记与目标重织入。
+	 *
+	 * <p>由宿主插件在「有类变更进入热更流程」时调用（{@code plugin-mixin} 在 Mixin 类处理
+	 * 收尾处触发）。不在资源监听线程里轮询：只在真实的类变更事件上顺带尝试一次，成本 O(待决数)。</p>
+	 *
+	 * <p><b>放弃语义</b>：超过 {@link #PENDING_MAX_ATTEMPTS} 次或 {@link #PENDING_TTL_NANOS} 仍未拿到
+	 * 字节，或配置已不再列出该名字，就把该项从待决集移除并明确 warn——绝不无限重试、也绝不静默。</p>
+	 *
+	 * @param ctx 与资源差异相同的上下文（字节来源 / 抑制器 / 目标调度）
+	 */
+	public static void retryPending(MixinConfigContext ctx) {
+		if (ctx == null || ctx.transformer() == null || PENDING_UNRESOLVED.isEmpty()) {
+			return;
+		}
+		try {
+			Object processor = MixinReflection.readField(ctx.transformer(), "processor");
+			if (processor == null) {
+				return;
+			}
+			synchronized (processor) {
+				Object configsObject = MixinReflection.readField(processor, "configs");
+				if (!(configsObject instanceof List<?> configs)) {
+					return;
+				}
+				for (String dotClassName : new ArrayList<>(PENDING_UNRESOLVED.keySet())) {
+					Pending pending = PENDING_UNRESOLVED.get(dotClassName);
+					if (pending == null) {
+						continue;
+					}
+					if (pending.expired()) {
+						PENDING_UNRESOLVED.remove(dotClassName);
+						RemoldAgent.warn("[Mixin] Gave up waiting for the bytecode of the newly listed mixin "
+							+ dotClassName + " after " + pending.attempts.get() + " attempt(s);"
+							+ " compile it into a watched output directory, or restart once.");
+						continue;
+					}
+					Object config = NewMixinRegistrar.findOwningConfig(configs, dotClassName);
+					if (config == null || !stillListedInConfig(pending.config, ctx, dotClassName)) {
+						PENDING_UNRESOLVED.remove(dotClassName);
+						continue;
+					}
+					Object node = ctx.classNodeLoader() == null ? null : ctx.classNodeLoader().apply(dotClassName);
+					pending.attempts.incrementAndGet();
+					if (node == null) {
+						continue;
+					}
+					List<String> affected = new ArrayList<>();
+					registerAddedMixin(ctx, dotClassName, node, affected);
+					PENDING_UNRESOLVED.remove(dotClassName);
+					RemoldAgent.info("[Mixin] Deferred mixin " + dotClassName
+						+ " is now registered; affected target(s): " + affected);
+					if (!affected.isEmpty() && ctx.targetScheduler() != null) {
+						ctx.targetScheduler().accept(affected);
+					}
+				}
+			}
+		} catch (Throwable t) {
+			RemoldAgent.warn("[Mixin] Failed to retry deferred mixin registrations: " + t);
+		}
+	}
+
+	/** 登记一个新列出的 Mixin，把命中的目标类（点分名）累加进 {@code affected}。 */
+	private static void registerAddedMixin(MixinConfigContext ctx, String dotClassName, Object node,
+			List<String> affected) {
+		try {
+			for (String target : NewMixinRegistrar.tryRegister(
+					ctx.transformer(), dotClassName, node,
+					ctx.suppress(), ctx.restore(), ctx.loaderHook())) {
+				affected.add(target.replace('/', '.'));
+			}
+		} catch (Throwable t) {
+			RemoldAgent.warn("[Mixin] Failed to register newly listed mixin " + dotClassName + ": " + t);
+		}
+	}
+
+	/** 配置里是否仍列出该 Mixin；读不到配置时保守地返回 {@code true}（交给重试上限兜底）。 */
+	private static boolean stillListedInConfig(Path configPath, MixinConfigContext ctx, String dotClassName) {
+		if (configPath == null) {
+			return true;
+		}
+		try {
+			String json = Files.readString(configPath, StandardCharsets.UTF_8);
+			Set<String> names = declaredMixinNames(json, ctx.side());
+			if (names == null) {
+				return true;
+			}
+			return names.stream().anyMatch(name -> dotClassName.equals(name)
+				|| dotClassName.endsWith("." + name) || dotClassName.endsWith("$" + name));
+		} catch (Throwable ignored) {
+			return true;
 		}
 	}
 

@@ -40,20 +40,48 @@ final class MixinConfigDiff {
 	}
 
 	static void onAssetsChanged(Set<java.nio.file.Path> changedAssets) {
+		MixinConfigContext context = context();
+		if (context == null) {
+			return;
+		}
+		MixinConfigDiffer.onAssetsChanged(changedAssets, context);
+	}
+
+	/**
+	 * 接力登记「配置先到、字节后到」的新 Mixin。
+	 *
+	 * <p>IDE 里先保存 {@code mixins.json}、几秒后才编译出 {@code .class} 是常态。资源事件那一刻
+	 * 读不到字节的条目被记进待决集；每次有 Mixin 类变更进入热更流程时顺带重试一次，字节一落地
+	 * 就自动完成登记与目标重织入——不需要用户重启，也不需要再存一次配置。</p>
+	 */
+	static void retryPendingMixins() {
+		MixinConfigContext context = context();
+		if (context == null) {
+			return;
+		}
+		MixinConfigDiffer.retryPending(context);
+	}
+
+	/** 尚未拿到字节码的新列出 Mixin（诊断与测试用）。 */
+	static Set<String> pendingUnresolvedMixins() {
+		return MixinConfigDiffer.pendingUnresolvedMixins();
+	}
+
+	private static MixinConfigContext context() {
 		IMixinTransformer transformer = MixinReWeaver.activeTransformer();
 		if (transformer == null) {
-			return;
+			return null;
 		}
 		MixinEnvironment environment = MixinEnvironment.getCurrentEnvironment();
 		String side = environment == null ? null : environment.getSide().name();
-		MixinConfigDiffer.onAssetsChanged(changedAssets, new MixinConfigContext(
+		return new MixinConfigContext(
 			transformer,
 			side,
 			MixinConfigDiff::loadClassNode,
 			FabricLauncherSpoof::suppress,
 			FabricLauncherSpoof::restore,
 			LOADER_HOOK,
-			MixinHotSwap::scheduleTargets));
+			MixinHotSwap::scheduleTargets);
 	}
 
 	private static Object loadClassNode(String dotClassName) {

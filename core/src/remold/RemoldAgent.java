@@ -2279,8 +2279,13 @@ public class RemoldAgent {
 					if (oldBytecode != null) {
 						ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytecode, newBytecode);
 						ClassDiffUtil.logDiff(className, diff);
-						if (diff.hierarchyChanged) {
-							error("REJECTED: Class hierarchy change detected for " + className + ". JBR/DCEVM does not support changing superclass/interfaces reliably. Please RESTART application.");
+						if (ClassDiffUtil.mustRejectHierarchyChange(diff, isEnhancedHotswapEnabled())) {
+							error("REJECTED: Class hierarchy change detected for " + className + " ("
+								+ ClassDiffUtil.describeHierarchyChange(diff) + ")."
+								+ (diff.superChanged
+									? " Changing the superclass is not supported by any redefinition mode. Please RESTART application."
+									: " Interface changes require enhanced class redefinition (JBR/DCEVM with"
+										+ " -XX:+AllowEnhancedClassRedefinition); this JVM has none. Please RESTART application."));
 							AlignmentTransaction tx = transactions.get(className);
 							if (tx != null) {
 								tx.rollback(true);
@@ -4728,8 +4733,12 @@ public class RemoldAgent {
 				return true;
 			}
 			ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, runtimeBytes);
-			if (diff.hierarchyChanged) {
-				error("REJECTED: Class hierarchy change detected for dynamic class " + className);
+			if (ClassDiffUtil.mustRejectHierarchyChange(diff, isEnhancedHotswapEnabled())) {
+				error("REJECTED: Class hierarchy change detected for dynamic class " + className + " ("
+					+ ClassDiffUtil.describeHierarchyChange(diff) + ")."
+					+ (diff.superChanged
+						? " Changing the superclass is not supported by any redefinition mode; RESTART required."
+						: " Interface changes require enhanced class redefinition (JBR/DCEVM); RESTART required on this JVM."));
 				return false;
 			}
 			LayoutDecision decision = decideDynamicLayout(targetClass, className, diff, runtimeBytes);

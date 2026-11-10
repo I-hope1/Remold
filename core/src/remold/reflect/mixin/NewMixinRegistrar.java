@@ -208,7 +208,8 @@ public final class NewMixinRegistrar {
 		}
 	}
 
-	private static Object findOwningConfig(List<?> configs, String dotClassName) {
+	/** 供同包策略层（reload 前置/目标重挂）复用的配置定位。 */
+	static Object findOwningConfig(List<?> configs, String dotClassName) {
 		Object best = null;
 		int bestLength = -1;
 		for (Object config : configs) {
@@ -232,7 +233,8 @@ public final class NewMixinRegistrar {
 		return best;
 	}
 
-	private static Object findMixinInfo(Object config, String dotClassName) {
+	/** 供同包策略层复用的 MixinInfo 定位。 */
+	static Object findMixinInfo(Object config, String dotClassName) {
 		Object mixinsObject = MixinReflection.readField(config, "mixins");
 		if (!(mixinsObject instanceof List<?> mixins)) {
 			return null;

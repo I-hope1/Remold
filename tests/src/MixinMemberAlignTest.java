@@ -291,6 +291,151 @@ public class MixinMemberAlignTest {
 		assertEquals(baseOrder, existing, "captured regression: member order must match the baseline");
 	}
 
+	// ------------------------------------------------------------------------------------------
+	// Tombstone stub retention (fault A: in-flight stack frames calling a physically removed handler)
+	// ------------------------------------------------------------------------------------------
+
+	private static final String TOMB = "fixture/TombstoneTarget";
+	private static final String T_HANDLER = "handler$zjf000$cfg$anonRoundTrip";
+	private static final String T_MODIFY = "modify$zjf000$cfg$stack";
+	private static final String T_REDIRECT = "redirect$zjf000$cfg$value";
+	private static final String CB_DESC = "(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V";
+
+	/** Baseline: the live class already carries the Mixin-generated members (handler/modify/redirect). */
+	private static byte[] tombstoneBaseline() {
+		return tombstoneClass(true, true);
+	}
+
+	/** Re-weave after the Mixin was retargeted away: the generated members are gone from the output. */
+	private static byte[] tombstoneCandidate() {
+		return tombstoneClass(false, true);
+	}
+
+	/**
+	 * @param withGenerated keep the Mixin-generated members (baseline) or drop them (candidate)
+	 * @param keepBusiness  keep the ordinary business method {@code helper()V}
+	 */
+	private static byte[] tombstoneClass(boolean withGenerated, boolean keepBusiness) {
+		ClassWriter cw = new ClassWriter(0);
+		cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC, TOMB, null, "java/lang/Object", null);
+
+		MethodVisitor ctor = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+		ctor.visitCode();
+		ctor.visitVarInsn(Opcodes.ALOAD, 0);
+		ctor.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+		ctor.visitInsn(Opcodes.RETURN);
+		ctor.visitMaxs(1, 1);
+		ctor.visitEnd();
+
+		if (keepBusiness) {
+			MethodVisitor helper = cw.visitMethod(Opcodes.ACC_PUBLIC, "helper", "()V", null, null);
+			helper.visitCode();
+			helper.visitInsn(Opcodes.RETURN);
+			helper.visitMaxs(0, 1);
+			helper.visitEnd();
+		}
+
+		// call(): the OLD tick() bytecode still invokes the generated handler. After a retarget the
+		// re-weave produces a call() without that call site, but an in-flight old frame keeps this one.
+		MethodVisitor call = cw.visitMethod(Opcodes.ACC_PUBLIC, "call", "()V", null, null);
+		call.visitCode();
+		if (withGenerated) {
+			call.visitVarInsn(Opcodes.ALOAD, 0);
+			call.visitInsn(Opcodes.ACONST_NULL);
+			call.visitMethodInsn(Opcodes.INVOKESPECIAL, TOMB, T_HANDLER, CB_DESC, false);
+		}
+		call.visitInsn(Opcodes.RETURN);
+		call.visitMaxs(2, 1);
+		call.visitEnd();
+
+		if (withGenerated) {
+			MethodVisitor handler = cw.visitMethod(Opcodes.ACC_PRIVATE | Opcodes.ACC_SYNTHETIC,
+				T_HANDLER, CB_DESC, null, null);
+			handler.visitCode();
+			handler.visitInsn(Opcodes.RETURN);
+			handler.visitMaxs(0, 2);
+			handler.visitEnd();
+
+			MethodVisitor modify = cw.visitMethod(Opcodes.ACC_PRIVATE | Opcodes.ACC_SYNTHETIC,
+				T_MODIFY, "(Ljava/lang/Object;)Ljava/lang/Object;", null, null);
+			modify.visitCode();
+			modify.visitVarInsn(Opcodes.ALOAD, 1);
+			modify.visitInsn(Opcodes.ARETURN);
+			modify.visitMaxs(1, 2);
+			modify.visitEnd();
+
+			MethodVisitor redirect = cw.visitMethod(Opcodes.ACC_PRIVATE | Opcodes.ACC_SYNTHETIC,
+				T_REDIRECT, "(I)I", null, null);
+			redirect.visitCode();
+			redirect.visitVarInsn(Opcodes.ILOAD, 1);
+			redirect.visitInsn(Opcodes.IRETURN);
+			redirect.visitMaxs(1, 2);
+			redirect.visitEnd();
+		}
+		cw.visitEnd();
+		return cw.toByteArray();
+	}
+
+	private static final class ByteLoader extends ClassLoader {
+		Class<?> define(String name, byte[] bytes) {
+			return defineClass(name, bytes, 0, bytes.length);
+		}
+	}
+
+	@Test
+	public void removedGeneratedMethodsAreRetainedAsTombstones() throws Exception {
+		byte[] baseline = tombstoneBaseline();
+		byte[] candidate = tombstoneCandidate();
+		MixinMemberAlign.Result result = MixinMemberAlign.align(candidate, baseline);
+
+		assertTrue(result.tombstoned.contains(T_HANDLER + CB_DESC),
+			"the removed @Inject handler must be retained as a tombstone: " + result.tombstoned);
+		assertTrue(result.tombstoned.contains(T_MODIFY + "(Ljava/lang/Object;)Ljava/lang/Object;"),
+			"the removed @ModifyVariable handler must be retained: " + result.tombstoned);
+		assertTrue(result.missingFromCandidate.isEmpty(),
+			"nothing may be reported missing once the tombstones are in place: " + result.missingFromCandidate);
+
+		MethodNode baseHandler = method(baseline, T_HANDLER);
+		MethodNode keptHandler = method(result.bytes, T_HANDLER);
+		assertEquals(baseHandler.desc, keptHandler.desc);
+		assertEquals(baseHandler.access, keptHandler.access,
+			"the tombstone must keep the baseline access flags (same method-table identity)");
+
+		// method table order: the tombstone sits where the baseline had it
+		List<String> baseOrder = methodOrder(baseline);
+		List<String> alignedOrder = methodOrder(result.bytes);
+		assertEquals(baseOrder.indexOf(T_HANDLER + CB_DESC), alignedOrder.indexOf(T_HANDLER + CB_DESC),
+			"the tombstone must keep the baseline method-table position: " + alignedOrder);
+		assertEquals(baseOrder.indexOf(T_REDIRECT + "(I)I"), alignedOrder.indexOf(T_REDIRECT + "(I)I"));
+
+		// terminal assertion: an old in-flight frame calling the removed handler keeps linking
+		ByteLoader loader = new ByteLoader();
+		Class<?> live = loader.define("fixture.TombstoneTarget", result.bytes);
+		Object instance = live.getDeclaredConstructor().newInstance();
+		live.getMethod("call").invoke(instance);   // must not throw NoSuchMethodError
+		java.lang.reflect.Method modify = live.getDeclaredMethod(T_MODIFY, Object.class);
+		modify.setAccessible(true);
+		Object token = new Object();
+		assertTrue(modify.invoke(instance, token) == token,
+			"a @ModifyVariable-shaped tombstone must pass the argument through");
+		java.lang.reflect.Method redirect = live.getDeclaredMethod(T_REDIRECT, int.class);
+		redirect.setAccessible(true);
+		assertEquals(7, redirect.invoke(instance, 7),
+			"a redirect-shaped tombstone must return the incoming value unchanged");
+	}
+
+	@Test
+	public void businessMethodsAreNotResurrectedAsTombstones() {
+		byte[] baseline = tombstoneBaseline();
+		byte[] candidate = tombstoneClass(true, false);   // helper() removed on purpose
+		MixinMemberAlign.Result result = MixinMemberAlign.align(candidate, baseline);
+
+		assertTrue(result.tombstoned.isEmpty(),
+			"only Mixin-generated members may be tombstoned, never business methods: " + result.tombstoned);
+		assertTrue(method(result.bytes, "helper") == null,
+			"a deliberately removed business method must stay removed (fail-closed)");
+	}
+
 	private static String firstMethodInsnOwnerName(MethodNode node) {
 		for (org.objectweb.asm.tree.AbstractInsnNode insn : node.instructions) {
 			if (insn instanceof org.objectweb.asm.tree.MethodInsnNode) {

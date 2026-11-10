@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -41,11 +42,141 @@ import org.junit.jupiter.api.Test;
  * {@link Instrumentation} is a recording proxy — this suite asserts the gate decisions and the
  * calls that reach the exit, not the JVM's own structural acceptance of those calls. Real
  * {@code redefineClasses} against a DCEVM/JBR host (and the resulting instance migration) is
- * covered by the {@code p05Probe} / {@code twoPhaseProbe} / {@code offsetStabilityProbe} tasks,
+ * covered by {@code p05Probe} / {@code twoPhaseProbe} / {@code offsetStabilityProbe} tasks,
  * which are registered outside {@code check} for exactly that reason and are not duplicated
  * here.</p>
+ *
+ * <p><b>Case ledger (read this before quoting a case count)</b>: the suite holds
+ * {@value #GATE_CASE_COUNT} {@code @Test} methods, not 8. The two numbers that show up in
+ * reports count different things:</p>
+ * <table border="1">
+ *   <caption>Ledger</caption>
+ *   <tr><th>case</th><th>gate</th><th>kind</th><th>in-method control</th></tr>
+ *   <tr><td>{@code passingCandidateIsRedefinedExactlyOnceThroughTheSingleExit}</td>
+ *       <td>single exit (all four gates pass)</td><td>pass</td><td>no</td></tr>
+ *   <tr><td>{@code rejectsEveryCandidateOnceTheHostBatchIsBlocked}</td>
+ *       <td>1 — host batch BLOCKED</td><td>reject</td><td>yes (clear the flag)</td></tr>
+ *   <tr><td>{@code rejectsCandidateThatDropsAnAlreadyLoadedConstructor}</td>
+ *       <td>2 — loaded {@code <init>} subset</td><td>reject</td><td>yes (keep the ctors)</td></tr>
+ *   <tr><td>{@code rejectsCandidateThatWouldShrinkTheFieldTable}</td>
+ *       <td>3 — field table must not shrink</td><td>reject</td><td>yes (keep the field)</td></tr>
+ *   <tr><td>{@code rejectsCandidateWhenNoBaselineBytesExist}</td>
+ *       <td>4 — baseline bytes required</td><td>reject</td><td>yes (seed the baseline)</td></tr>
+ *   <tr><td>{@code shrinkingTableNeverReachesTheJvmSoLiveInstancesKeepTheirState}</td>
+ *       <td>3 — half-migrated instance semantics</td><td>half</td><td>yes (keep the field)</td></tr>
+ * </table>
+ * <p>So the three numbers in circulation count different things, and only the first is a case
+ * count:</p>
+ * <ul>
+ *   <li><b>{@value #GATE_CASE_COUNT}</b> {@code @Test} methods = {@code 1 pass + 4 rejections +
+ *       1 half-migrated};</li>
+ *   <li><b>{@value #GATE_GROUP_COUNT}</b> gate-scoped assertion groups = {@code 4 gates ×
+ *       (rejection + its control)} — the figure reported as "8", which counts each gate's control
+ *       as if it were a case of its own;</li>
+ *   <li><b>{@value #CONTROL_COUNT}</b> in-method controls = the 4 gate controls plus the file
+ *       half-migrated case's restore-field control.</li>
+ * </ul>
+ * <p>The controls are deliberately <b>inside</b> their rejection method instead of being separate
+ * {@code @Test}s: a control only carries causal weight when it re-runs the identical name, host
+ * and bytes after clearing exactly one condition, and a standalone control case goes green on its
+ * own while proving nothing about the rejection it belongs to.
+ * {@link #caseLedgerMatchesTheSuite()} pins the ledger mechanically (name set, per-gate coverage
+ * and the 6-vs-8 arithmetic), so no report can drift away from the code.</p>
+ *
+ * <p><b>JVM-level evidence</b>: the half-migrated semantics above run here against a recording
+ * proxy. {@code MixinSyntheticGateProbe} replays the same gate decisions on a real
+ * {@link Instrumentation} (real {@code redefineClasses}), and counts a host without enhanced
+ * redefinition as {@code SKIP(non-jbr)} separately instead of folding it into a pass.</p>
  */
 class MixinSyntheticGateTest {
+
+	/**
+	 * @Test methods in this suite. Changing this number means editing the Javadoc ledger too —
+	 * {@link #caseLedgerMatchesTheSuite()} fails otherwise.
+	 */
+	static final int GATE_CASE_COUNT = 6;
+
+	/** Rejections that must each own exactly one in-method control. */
+	static final int REJECTION_CASE_COUNT = 4;
+
+	/** Gate-scoped assertion groups = {@code REJECTION_CASE_COUNT × 2}; this is the reported "8". */
+	static final int GATE_GROUP_COUNT = 8;
+
+	/** In-method controls: one per rejection, plus the half-migrated case's restore-field control. */
+	static final int CONTROL_COUNT = 5;
+
+	/** {@code name, gate, kind} for every {@code @Test} method; {@code kind} is pass/control-driven. */
+	private record Case(String method, String gate, String kind, boolean control) {
+	}
+
+	private static final Case[] LEDGER = {
+		new Case("passingCandidateIsRedefinedExactlyOnceThroughTheSingleExit", "single-exit", "pass", false),
+		new Case("rejectsEveryCandidateOnceTheHostBatchIsBlocked", "gate1", "reject", true),
+		new Case("rejectsCandidateThatDropsAnAlreadyLoadedConstructor", "gate2", "reject", true),
+		new Case("rejectsCandidateThatWouldShrinkTheFieldTable", "gate3", "reject", true),
+		new Case("rejectsCandidateWhenNoBaselineBytesExist", "gate4", "reject", true),
+		new Case("shrinkingTableNeverReachesTheJvmSoLiveInstancesKeepTheirState", "gate3-half", "half", true),
+	};
+
+	/**
+	 * Pins the case ledger to the code: the documented {@value #GATE_CASE_COUNT} {@code @Test}
+	 * methods, no orphan cases, one rejection per gate, and a control behind every rejection.
+	 */
+	@BeforeAll
+	static void caseLedgerMatchesTheSuite() {
+		java.util.Set<String> annotated = new java.util.TreeSet<>();
+		for (Method method : MixinSyntheticGateTest.class.getDeclaredMethods()) {
+			if (method.isAnnotationPresent(Test.class)) {
+				annotated.add(method.getName());
+			}
+		}
+		java.util.Set<String> documented = new java.util.TreeSet<>();
+		for (Case entry : LEDGER) {
+			assertTrue(documented.add(entry.method()), "the ledger must not list a case twice: " + entry.method());
+		}
+		assertEquals(documented, annotated,
+			"every @Test method must be in the ledger and every ledger row must name a real case");
+
+		assertEquals(GATE_CASE_COUNT, LEDGER.length,
+			"the ledger (and the Javadoc table) must describe exactly " + GATE_CASE_COUNT + " cases");
+		assertEquals(GATE_CASE_COUNT, annotated.size(),
+			"a case was added or removed without updating the ledger");
+
+		int pass = 0;
+		int rejections = 0;
+		int half = 0;
+		int controls = 0;
+		java.util.Set<String> gatedGates = new java.util.TreeSet<>();
+		for (Case entry : LEDGER) {
+			switch (entry.kind()) {
+				case "pass" -> pass++;
+				case "reject" -> rejections++;
+				case "half" -> half++;
+				default -> assertEquals("pass|reject|half", entry.kind(),
+					"unknown ledger kind for " + entry.method());
+			}
+			if (entry.control()) {
+				controls++;
+			}
+			if (!"pass".equals(entry.kind())) {
+				gatedGates.add(entry.gate());
+			}
+		}
+		assertEquals(1, pass, "exactly one passing case: the single exit must be exercised once");
+		assertEquals(REJECTION_CASE_COUNT, rejections, "every gate owns exactly one rejection case");
+		assertEquals(1, half, "the half-migrated-instance semantics is one dedicated case");
+		assertEquals(CONTROL_COUNT, controls,
+			"every rejection and the half-migrated case must carry an in-method control");
+		assertEquals(REJECTION_CASE_COUNT + 1, controls,
+			"controls are the 4 gate controls plus the half-migrated case's restore-field control");
+		assertEquals(GATE_GROUP_COUNT, REJECTION_CASE_COUNT * 2,
+			"the '8' in reports is 4 gates x (rejection + control) = gate-scoped assertion groups,"
+				+ " not 8 @Test methods");
+		assertEquals(GATE_CASE_COUNT, pass + rejections + half,
+			"the case count is pass + rejections + half; it must not include the controls");
+		assertTrue(gatedGates.containsAll(List.of("gate1", "gate2", "gate3", "gate4")),
+			"each of the four gates needs a rejection case, found only: " + gatedGates);
+	}
 
 	private static final AtomicInteger SEQ = new AtomicInteger();
 

@@ -59,6 +59,41 @@ final class MixinSyntheticGateFixtures {
 		}
 	}
 
+	/**
+	 * Real carrier for the JVM-level half-migration probe ({@code MixinSyntheticGateProbe}).
+	 *
+	 * <p>Declaration order is the point: {@code spare} sits <b>between</b> the two fields the body
+	 * reads, so dropping it is a structurally valid shrink (no reader of {@code spare} exists) that
+	 * nevertheless moves {@code payload} to a different physical offset. That is the shape in which
+	 * a half-migrated instance would silently read the wrong slot, so the probe can tell "the JVM
+	 * migrated the objects and kept every undeleted value" from "the object layout and the values
+	 * disagree".</p>
+	 */
+	static final class Drifting {
+		int value;
+		Object spare;
+		Object payload;
+
+		Drifting() {
+			this(0, null, null);
+		}
+
+		Drifting(int value, Object spare, Object payload) {
+			this.value = value;
+			this.spare = spare;
+			this.payload = payload;
+		}
+
+		String describe() {
+			return "v1:" + this.value + ":" + this.payload;
+		}
+
+		@Override
+		public String toString() {
+			return describe();
+		}
+	}
+
 	/** Exact class-file bytes of a loaded fixture class. */
 	static byte[] bytesOf(Class<?> type) {
 		String resource = "/" + type.getName().replace('.', '/') + ".class";
@@ -170,6 +205,38 @@ final class MixinSyntheticGateFixtures {
 		}
 		node.fields.remove(target);
 		return serialize(node);
+	}
+
+	/**
+	 * Fixture bytes with one same-length ASCII constant replaced: models a <b>body-only</b> hot
+	 * update that keeps the whole member table intact, so it is redefinable on any JVM (not just an
+	 * enhanced one). The physical layout of the constant pool is untouched, so the result stays a
+	 * valid class file without re-serialising anything.
+	 */
+	static byte[] renamedConstant(Class<?> type, String from, String to) {
+		byte[] needle = from.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+		byte[] patch = to.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+		if (needle.length != patch.length) {
+			throw new IllegalStateException("the replacement must keep the constant-pool layout stable: "
+				+ from + " -> " + to);
+		}
+		byte[] out = bytesOf(type).clone();
+		int hits = 0;
+		outer:
+		for (int i = 0; i + needle.length <= out.length; i++) {
+			for (int j = 0; j < needle.length; j++) {
+				if (out[i + j] != needle[j]) {
+					continue outer;
+				}
+			}
+			System.arraycopy(patch, 0, out, i, patch.length);
+			hits++;
+			i += needle.length - 1;
+		}
+		if (hits == 0) {
+			throw new IllegalStateException("fixture " + type.getName() + " carries no constant " + from);
+		}
+		return out;
 	}
 
 	static ClassNode nodeOf(Class<?> type) {

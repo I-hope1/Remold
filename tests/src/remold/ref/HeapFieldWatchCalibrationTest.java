@@ -44,6 +44,33 @@ import static org.junit.jupiter.api.Assertions.fail;
  * {@code -javaagent} 启动，并带 {@code -XX:+AllowEnhancedClassRedefinition}：测的是要上真机的那个仪器，
  * 不是测试里的复刻品。运行时是否真的具备增强重定义由子 JVM 自己报告（{@code RESULT capability}），
  * 因此"没做迁移"绝不会被当成"迁移通过"。</p>
+ *
+ * <h3>校准通道声明（不变量 C1）</h3>
+ * <p>{@code total=12/nullCount=5} 这类读数走的是<b>产品通道</b>：{@code HeapFieldWatch.scan} →
+ * {@code remold.util.LibTool#getInstances(Class)}（JVMTI 堆遍历，真机上打点的是同一条枚举路径），
+ * <b>不是</b>夹具自己的 {@code LIVE} 注册表。三条一起看的证据：</p>
+ * <ul>
+ *   <li>子 JVM 日志行 {@code [HEAPWATCH] ... loader=loadedClasses/…} 表明目标类由
+ *       {@code Instrumentation.getAllLoadedClasses()} 解析（产品路径的第一档），{@code [Lib] Loaded libtool}
+ *       表明枚举由 JVMTI 原生库完成；</li>
+ *   <li>{@link #readingsComeFromTheProductHeapWalkNotFromTheTestRegistry()} 在注册表之外再放 7 个实例
+ *       （其中 3 个字段为 null）：堆遍历必须报 {@code total=19 nullCount=3}，而注册表视角只有 12 个实例、
+ *       0 个 null——注册表实现给不出前一组数；</li>
+ *   <li>{@code RESULT channel kind=libtool-getInstances libtool=yes} 由子 JVM 自报原生库状态，
+ *       加载失败时它会报 {@code no}，该用例随之变红。</li>
+ * </ul>
+ *
+ * <h3>真机现象复刻（{@link HeapWatchPredicateFixture}）</h3>
+ * <p>真机：JBR-21 DCEVM 对「含匿名类的 Mixin」做结构热更时，230/244 个
+ * {@code LootContextPredicate} 实例的 {@code combinedCondition}（静态类型 {@code Predicate}）被置 null。
+ * 夹具把四个变量拆成独立场景，每项单独报 {@code total / newlyNull / agree / conflict}：
+ * ①同一类里具名实现 vs 匿名实现两组字段；②④ 见下；③真机同款 G1 与 {@code -Xmx4020m}。任一项
+ * {@code newlyNull > 0} 即以 {@code [REPRODUCED]} 失败并带上"重定义前持有的具体实现类"分桶（停损）。</p>
+ *
+ * <p>子 JVM 的 JDK 由 {@link #javaExecutable()} 决定：优先 {@code -Dremold.heapwatch.childJava(Home)}、
+ * 其次 {@code JBR_HOME}/{@code JAVA_HOME_DCEVM}/{@code JAVA_HOME_21_X64}、最后退回本测试 JVM。
+ * 构建 JVM 可以是任何 JDK（{@code tests} 源集按 release 8 编译），校准运行时由子 JVM 自报
+ * （{@code RESULT childvm ... enhanced=yes|no}）；不具备增强重定义的运行时只走 cold 分支，不会假绿。</p>
  */
 class HeapFieldWatchCalibrationTest {
 
@@ -51,6 +78,9 @@ class HeapFieldWatchCalibrationTest {
 	private static final String CONTROL_CLASS = HeapWatchCalibrationFixture.Control.class.getName();
 	private static final String MIXED_CLASS = HeapWatchCalibrationFixture.Mixed.class.getName();
 	private static final String ECHO_CLASS = HeapWatchCalibrationFixture.Echo.class.getName();
+	private static final String PAIR_CLASS = HeapWatchPredicateFixture.PredicatePair.class.getName();
+	/** 每组实例数（与夹具常量一致；写死是为了让断言读起来就是已知答案）。 */
+	private static final String GROUP_SIZE = String.valueOf(HeapWatchPredicateFixture.GROUP_SIZE);
 
 	@Test
 	void reportsExactlyKNullsAcrossRedefine() throws Exception {
@@ -314,6 +344,259 @@ class HeapFieldWatchCalibrationTest {
 			"the added field must be observable, not reported absent, after the migration");
 	}
 
+	/**
+	 * 校准通道证明：读数是 JVMTI 堆遍历（产品通道），不是夹具注册表。
+	 *
+	 * <p>做法是最小反例：注册表里放 12 个实例、字段全非 null；另外 7 个实例只挂在 {@code SIDECAR} 上
+	 * （任何注册表/强引用列表都看不见它们），其中 3 个字段为 null。堆遍历必须报 {@code total=19 nullCount=3}，
+	 * 而"照着注册表数"只能给出 {@code 12 / 0}——两者不可能同时成立，因此这个断言能区分两条通道。</p>
+	 */
+	@Test
+	void readingsComeFromTheProductHeapWalkNotFromTheTestRegistry() throws Exception {
+		List<String> extra = new ArrayList<String>();
+		extra.add("-Dremold.probe.heapwatch=true");
+		extra.add("-Dremold.probe.heapwatch.class=" + PAIR_CLASS);
+		extra.add("-Dremold.probe.heapwatch.field=namedCondition");
+		Child child = spawn(HeapWatchPredicateFixture.class, "channel-heapwalk", extra);
+		child.assertExitZero();
+
+		assertEquals("yes", child.result("channel", "libtool", null),
+			"the readings must come from the product channel (LibTool.getInstances, JVMTI heap walk);"
+				+ " a failed native load would turn every count into a fabrication; output was:\n" + child.output);
+		assertEquals("12", child.result("channel", "registry", null), "the fixture registry holds 12 instances");
+		assertEquals("7", child.result("channel", "sidecar", null),
+			"7 more instances are reachable only through the sidecar holder");
+		assertEquals("0", child.result("truth", "registryNulls", "before-redefine"),
+			"precondition: every registered instance has a non-null field, so a registry-based reader would report 0");
+		assertEquals("3", child.result("truth", "sidecarNulls", "before-redefine"),
+			"precondition: exactly 3 unregistered instances hold null");
+		assertEquals("19", child.result("item-named", "total", "before"),
+			"the heap walk must enumerate registry + sidecar (12 + 7); a registry-based count would stop at 12;"
+				+ " output was:\n" + child.output);
+		assertEquals("3", child.result("item-named", "nullCount", "before"),
+			"the heap walk must see the 3 nulls that live outside the fixture registry");
+		assertEquals("19", child.result("item-named", "agree", "before"),
+			"the second channel must resolve on the unregistered instances as well");
+		assertTrue(child.outputContains("loader=loadedClasses/"),
+			"the product path resolves the class through Instrumentation.getAllLoadedClasses();"
+				+ " output was:\n" + child.output);
+	}
+
+	/**
+	 * 复刻变量①：具名实现 vs 匿名实现两组 {@code Predicate} 字段，在同一次结构重定义切面上的读数。
+	 *
+	 * <p>两组共用同一次 redefine、同一个类、同样非 null：唯一差别是字段值是不是匿名类实例。因此
+	 * "只有含匿名引用的一组被置 null"可以直接归因到匿名引用；"两组都不变"则排除它。</p>
+	 */
+	@Test
+	void predicateFieldGroupsStayNonNullAcrossSchemaRedefineRegardlessOfAnonymousValues() throws Exception {
+		Child child = spawn(HeapWatchPredicateFixture.class, "predicate-groups", new ArrayList<String>());
+		child.assertExitZero();
+
+		// 前置基线：两组各 120 个实例、字段全非 null（排除"原本就是空"的假阳性）。
+		assertGroupReadings(child, "named", GROUP_SIZE);
+		assertGroupReadings(child, "anon", GROUP_SIZE);
+		assertEquals("0", child.result("truth", "namedNulls", "before-redefine"),
+			"precondition: every namedCondition field is non-null before the redefine");
+		assertEquals("0", child.result("truth", "anonNulls", "before-redefine"),
+			"precondition: every anonCondition field is non-null before the redefine");
+
+		if (!enhanced(child)) {
+			// 没有增强重定义的运行时不允许字段表变化：子 JVM 必须自报 cold（不把"没做迁移"读成"迁移通过"）。
+			assertEquals("unchanged", child.result("truth", "schema", "after-redefine"),
+				"a runtime without enhanced redefinition must report the schema redefine as unchanged;"
+					+ " output was:\n" + child.output);
+			return;
+		}
+		assertEquals("changed", child.result("truth", "schema", "after-redefine"),
+			"the field table must really change (addedProbe): " + child.output);
+		assertEquals(GROUP_SIZE + "/" + GROUP_SIZE, child.result("truth", "usable", "after-redefine"),
+			"every migrated instance must still answer through both predicates (a null field would NPE here)");
+		assertNoFieldWipe(child, "named", "namedCondition");
+		assertNoFieldWipe(child, "anon", "anonCondition");
+
+		// 对照：故意置空 1 个存活实例后，跨切面分组必须报 newlyNull=1，且分桶必须点名"重定义前持有的实现类"。
+		assertEquals("1", child.result("item-named", "newlyNull", "control"),
+			"the grouping must flag the instance that was deliberately wiped: " + child.output);
+		assertEquals("1", child.result("item-anon", "newlyNull", "control"),
+			"the grouping must flag the deliberately wiped anonymous-condition instance: " + child.output);
+		String namedType = child.result("control", "type", "named");
+		String anonType = child.result("control", "type", "anon");
+		assertTrue(namedType.contains("NamedCondition"),
+			"the named bucket must name the concrete pre-redefine implementation class, got " + namedType);
+		assertTrue(anonType.indexOf('$') >= 0,
+			"the anonymous bucket must name a synthetic anonymous class, got " + anonType);
+		assertEquals("1", child.resultMatching("bucket", "count",
+				"phase", "control", "field", "namedCondition", "type", namedType),
+			"the pre-redefine implementation class of the wiped field must be recoverable per bucket (invariant C1)");
+		assertEquals("1", child.resultMatching("bucket", "count",
+				"phase", "control", "field", "anonCondition", "type", anonType),
+			"the anonymous pre-redefine implementation class must be recoverable per bucket (invariant C1)");
+	}
+
+	/**
+	 * 复刻变量②：≥3 个同时存活的匿名类实例，各自被旁观实例引用；结构重定义它们的外层类后必须全部还在。
+	 */
+	@Test
+	void multipleLiveAnonymousClassInstancesSurviveStructuralRedefineOfTheirEnclosers() throws Exception {
+		Child child = spawn(HeapWatchPredicateFixture.class, "predicate-anon", new ArrayList<String>());
+		child.assertExitZero();
+
+		assertEquals("4", child.result("anon", "instances", null),
+			"at least 3 anonymous class instances must be alive at the same time");
+		assertEquals("4", child.result("anon", "distinctClasses", null),
+			"the live anonymous instances must come from distinct anonymous classes");
+		assertEquals("4", child.result("item-anonRef", "total", "before"),
+			"the 4 bystanders must be enumerated before the redefine");
+		assertEquals("0", child.result("item-anonRef", "nullCount", "before"),
+			"precondition: every bystander really references an anonymous instance");
+		assertEquals("4", child.result("item-anonRef", "agree", "before"),
+			"the second channel must resolve on the anonymous references");
+		if (!enhanced(child)) {
+			assertEquals("unchanged", child.result("schema", "all", null),
+				"a runtime without enhanced redefinition must report the schema redefines as unchanged;"
+					+ " output was:\n" + child.output);
+			return;
+		}
+		assertEquals("changed", child.result("schema", "all", null),
+			"all four enclosing classes must be structurally redefined: " + child.output);
+		assertNoFieldWipe(child, "anonRef", "anonRef");
+		assertEquals("4/4", child.result("anonAlive", "alive", null),
+			"every live anonymous instance must survive the structural redefine of its enclosing class");
+		assertEquals("4/4", child.result("anonAlive", "viaBystanders", null),
+			"every bystander must still reference a usable anonymous instance after the redefine");
+	}
+
+	/**
+	 * 复刻变量③：真机同款 G1 与 {@code -Xmx4020m}（不缩小）。读数必须与默认堆那轮完全一致——
+	 * 收集器/堆大小不得改变仪器看到的东西。
+	 */
+	@Test
+	void realG1HeapWithMachineSizeKeepsReadingsExact() throws Exception {
+		List<String> extra = new ArrayList<String>();
+		extra.add("-XX:+UseG1GC");
+		extra.add("-Xmx4020m");
+		Child child = spawn(HeapWatchPredicateFixture.class, "predicate-g1", extra);
+		child.assertExitZero();
+
+		assertEquals("yes", child.result("heap", "g1arg", "g1"),
+			"the child JVM must be started with -XX:+UseG1GC (real-machine GC)");
+		assertEquals("yes", child.result("heap", "g1", "g1"),
+			"the child must actually run on the G1 collector, not silently fall back; output was:\n" + child.output);
+		assertEquals("4215275520", child.result("heap", "max", "g1"),
+			"-Xmx4020m must be in effect (real machine log: 4020m; deliberately not scaled down here)");
+		// 与 predicate-groups 同体：读数（含 newlyNull=0）必须一致。
+		assertGroupReadings(child, "named", GROUP_SIZE);
+		assertGroupReadings(child, "anon", GROUP_SIZE);
+	}
+
+	/**
+	 * 复刻变量④：重定义期间持续分配 + 穿过字段读 {@code Predicate}。读空就是 NPE，计数落在
+	 * {@code npe=}/{@code nullReads=} 上——不是靠"日志里没有"推断。
+	 */
+	@Test
+	void concurrentAllocationAndReadDuringRedefineSeeNoNull() throws Exception {
+		Child child = spawn(HeapWatchPredicateFixture.class, "predicate-concurrent", new ArrayList<String>());
+		child.assertExitZero();
+
+		assertTrue(Long.parseLong(child.result("concurrent", "reads", null)) > 0,
+			"the reader threads must really have run; output was:\n" + child.output);
+		assertTrue(Long.parseLong(child.result("concurrent", "allocations", null)) > 0,
+			"the worker threads must really have allocated new instances; output was:\n" + child.output);
+		assertTrue(Long.parseLong(child.result("concurrent", "readsAcrossRedefine", null)) > 0,
+			"reads must overlap the redefine window, otherwise this case proves nothing");
+		assertEquals("0", child.result("concurrent", "errors", null),
+			"no non-NPE failure may be thrown by the readers; output was:\n" + child.output);
+		if (!"0".equals(child.result("concurrent", "nullReads", null))) {
+			fail("[REPRODUCED] a concurrent read observed a null Predicate field during the redefine: "
+				+ child.result("concurrent", "nullReads", null) + " null read(s), "
+				+ child.result("concurrent", "npe", null) + " NPE(s); stop-loss: report this reading instead of"
+				+ " continuing; pre-redefine implementation classes: " + bucketText(child, "namedCondition")
+				+ " / " + bucketText(child, "anonCondition") + "; output was:\n" + child.output);
+		}
+		assertEquals("0", child.result("concurrent", "npe", null),
+			"a concurrent read must not throw NullPointerException; output was:\n" + child.output);
+
+		// 重定义之后的存量读数：分母含并发线程新建并保留的实例，因此只钉计数关系，不钉固定分母。
+		assertEquals("0", child.result("item-named", "nullCount", "after"),
+			"no surviving instance may have a null namedCondition after the concurrent redefine");
+		assertEquals("0", child.result("item-anon", "nullCount", "after"),
+			"no surviving instance may have a null anonCondition after the concurrent redefine");
+		assertEquals("0", child.result("item-named", "conflict", "after"),
+			"the second channel must still agree after concurrent churn");
+		assertEquals("ok", child.result("item-named", "identities", "after"),
+			"the grouping identities must hold across the concurrent redefine");
+		assertNoFieldWipe(child, "named", "namedCondition");
+		assertNoFieldWipe(child, "anon", "anonCondition");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// 复刻场景的共用断言
+	// ------------------------------------------------------------------------------------------------
+
+	private static boolean enhanced(Child child) {
+		return "yes".equals(child.resultRaw("childvm", "enhanced", null));
+	}
+
+	/** 一组字段的 known-answer 读数：分母、null 数、第二通道、分组恒等式。 */
+	private static void assertGroupReadings(Child child, String group, String total) {
+		assertEquals(total, child.result("item-" + group, "total", "before"),
+			group + ": denominator before the redefine (ground truth for the heap walk)");
+		assertEquals("0", child.result("item-" + group, "nullCount", "before"),
+			group + ": precondition — no field may be null before the redefine");
+		assertEquals("0", child.result("item-" + group, "absent", "before"),
+			group + ": the field must be observable on every instance");
+		assertEquals(total, child.result("item-" + group, "agree", "before"),
+			group + ": the second channel must agree on every instance before the redefine");
+		assertEquals("0", child.result("item-" + group, "conflict", "before"),
+			group + ": no channel conflict before the redefine");
+		assertEquals(total, child.result("item-" + group, "total", "after"),
+			group + ": denominator after the redefine");
+		assertEquals(total, child.result("item-" + group, "afterTotal", "after"),
+			group + ": the grouping line must be computed on the same denominator");
+		assertEquals("ok", child.result("item-" + group, "identities", "after"),
+			group + ": the three grouping identities must hold across the redefine");
+		assertNoFieldWipe(child, group, "namedCondition".equals(fieldOf(group)) ? "namedCondition" : "anonCondition");
+		assertEquals("0", child.result("item-" + group, "nullCount", "after"),
+			group + ": the structural redefine must not change the watched field's null count");
+		assertEquals(total, child.result("item-" + group, "agree", "after"),
+			group + ": the second channel must still agree on every migrated instance");
+		assertEquals("0", child.result("item-" + group, "conflict", "after"),
+			group + ": no channel conflict may appear after the redefine");
+	}
+
+	private static String fieldOf(String group) {
+		return "named".equals(group) ? "namedCondition" : "anonCondition";
+	}
+
+	/** 停损：跨切面 "非空 → null" 必须为 0；不为 0 就以 {@code [REPRODUCED]} 失败并带上实现类分桶。 */
+	private static void assertNoFieldWipe(Child child, String group, String field) {
+		String newlyNull = child.result("item-" + group, "newlyNull", "after");
+		if (!"0".equals(newlyNull)) {
+			fail("[REPRODUCED] " + newlyNull + " instance(s) of " + field + " went non-null -> null across the"
+				+ " structural redefine; stop-loss: report this reading instead of continuing."
+				+ " Pre-redefine implementation classes (buckets): " + bucketText(child, field)
+				+ "; output was:\n" + child.output);
+		}
+	}
+
+	private static String bucketText(Child child, String field) {
+		StringBuilder sb = new StringBuilder();
+		for (String line : child.output.split("\n")) {
+			String trimmed = line.trim();
+			if (!trimmed.startsWith("RESULT bucket")) {
+				continue;
+			}
+			if (trimmed.contains("field=" + field)) {
+				if (sb.length() > 0) {
+					sb.append(' ');
+				}
+				sb.append(trimmed.substring("RESULT bucket ".length()));
+			}
+		}
+		return sb.length() == 0 ? "none" : sb.toString();
+	}
+
 	// ------------------------------------------------------------------------------------------------
 	// 子 JVM 驱动
 	// ------------------------------------------------------------------------------------------------
@@ -323,6 +606,23 @@ class HeapFieldWatchCalibrationTest {
 
 	private static Child run(String scenario, String className, String fieldName, String getterName)
 		throws Exception {
+		List<String> extra = new ArrayList<String>();
+		extra.add("-Dremold.probe.heapwatch=true");
+		extra.add("-Dremold.probe.heapwatch.class=" + className);
+		extra.add("-Dremold.probe.heapwatch.field=" + fieldName);
+		if (getterName != null) {
+			extra.add("-Dremold.probe.heapwatch.getter=" + getterName);
+		}
+		return spawn(HeapWatchCalibrationFixture.class, scenario, extra);
+	}
+
+	/**
+	 * 起一个子 JVM 跑指定夹具场景。
+	 *
+	 * <p>子 JVM 与真机同形：{@code -javaagent} + 增强重定义开关 + 产品通道的原生库路径；
+	 * {@code extraJvmArgs} 用来叠加场景专属参数（堆哨兵开关、G1/堆上限）。</p>
+	 */
+	private static Child spawn(Class<?> fixture, String scenario, List<String> extraJvmArgs) throws Exception {
 		File java = javaExecutable();
 		File agentJar = agentJar();
 		assertNotNull(agentJar, "the agent jar must be built before this test runs (:tests:test depends on"
@@ -330,12 +630,7 @@ class HeapFieldWatchCalibrationTest {
 		List<String> command = new ArrayList<String>();
 		command.add(java.getAbsolutePath());
 		command.add("-javaagent:" + agentJar.getAbsolutePath());
-		command.add("-Dremold.probe.heapwatch=true");
-		command.add("-Dremold.probe.heapwatch.class=" + className);
-		command.add("-Dremold.probe.heapwatch.field=" + fieldName);
-		if (getterName != null) {
-			command.add("-Dremold.probe.heapwatch.getter=" + getterName);
-		}
+		command.addAll(extraJvmArgs);
 		// 增强重定义开关：字段表变化的 redefine（实例迁移）需要它。标准 HotSpot 会忽略这两个参数，
 		// 子 JVM 自己报告 capability，测试据此区分"迁移真的发生了"与"这个运行时做不了 schema 变化"。
 		command.add("-XX:+IgnoreUnrecognizedVMOptions");
@@ -350,7 +645,7 @@ class HeapFieldWatchCalibrationTest {
 		}
 		command.add("-cp");
 		command.add(System.getProperty("java.class.path"));
-		command.add(HeapWatchCalibrationFixture.class.getName());
+		command.add(fixture.getName());
 		command.add(scenario);
 
 		ProcessBuilder builder = new ProcessBuilder(command);
@@ -362,9 +657,9 @@ class HeapFieldWatchCalibrationTest {
 		while ((line = reader.readLine()) != null) {
 			output.append(line).append('\n');
 		}
-		if (!process.waitFor(180, TimeUnit.SECONDS)) {
+		if (!process.waitFor(300, TimeUnit.SECONDS)) {
 			process.destroyForcibly();
-			fail("calibration child JVM did not finish within 180s; output was:\n" + output);
+			fail("calibration child JVM did not finish within 300s; output was:\n" + output);
 		}
 		dumpChildOutput(scenario, output.toString());
 		return new Child(scenario, process.exitValue(), output.toString());
@@ -402,10 +697,42 @@ class HeapFieldWatchCalibrationTest {
 		}
 	}
 
+	/**
+	 * 子 JVM 的 {@code java}。
+	 *
+	 * <p>构建 JVM 与校准运行时不是一回事：{@code test} 任务跑在构建 JDK 上（本仓库是 JDK 25，panama 源集需要
+	 * 非 preview 的 {@code MemorySegment}），而校准必须在 JBR-21 DCEVM 上跑。因此这里按项目既有约定解析
+	 * 校准运行时：{@code -Dremold.heapwatch.childJava(Home)} → {@code JBR_HOME} → {@code JAVA_HOME_DCEVM}
+	 * → {@code JAVA_HOME_21_X64} → 本测试 JVM 的 {@code java.home}（与 {@code tests/build.gradle} 里
+	 * DCEVM 探针的解析顺序一致）。子 JVM 自报 {@code RESULT childvm ... enhanced=}，所以"跑错运行时"
+	 * 不会被伪装成"迁移通过"。</p>
+	 */
 	private static File javaExecutable() {
-		String home = System.getProperty("java.home");
 		String exe = System.getProperty("os.name", "").toLowerCase().contains("win") ? "java.exe" : "java";
-		return new File(new File(home, "bin"), exe);
+		String explicit = System.getProperty("remold.heapwatch.childJava");
+		if (explicit != null && !explicit.trim().isEmpty()) {
+			File file = new File(explicit.trim());
+			if (file.isFile()) {
+				return file;
+			}
+		}
+		String home = System.getProperty("remold.heapwatch.childJavaHome");
+		if (isJavaHome(home, exe)) {
+			return new File(new File(home.trim(), "bin"), exe);
+		}
+		String[] envHomes = {"JBR_HOME", "JAVA_HOME_DCEVM", "JAVA_HOME_21_X64"};
+		for (String name : envHomes) {
+			String value = System.getenv(name);
+			if (isJavaHome(value, exe)) {
+				return new File(new File(value.trim(), "bin"), exe);
+			}
+		}
+		return new File(new File(System.getProperty("java.home"), "bin"), exe);
+	}
+
+	private static boolean isJavaHome(String home, String exe) {
+		return home != null && !home.trim().isEmpty()
+			&& new File(new File(home.trim(), "bin"), exe).isFile();
 	}
 
 	private static int majorJavaVersion() {
@@ -537,6 +864,35 @@ class HeapFieldWatchCalibrationTest {
 				}
 			}
 			return String.valueOf(sum);
+		}
+
+		/**
+		 * 取同时满足若干 {@code key=value} 条件的 {@code RESULT <kind>} 行的某个字段。
+		 *
+		 * <p>用于同一 kind 出现多行、只靠 {@code phase} 分不开的输出（例如分桶行
+		 * {@code RESULT bucket phase=… field=… type=… count=…}）。条件按 {@code key, value, key, value}
+		 * 成对传入；全部命中才取该行。没有命中返回 null。</p>
+		 */
+		String resultMatching(String kind, String field, String... conditions) {
+			String prefix = "RESULT " + kind;
+			for (String line : output.split("\n")) {
+				String trimmed = line.trim();
+				if (!trimmed.startsWith(prefix)) {
+					continue;
+				}
+				Map<String, String> fields = parse(trimmed.substring(prefix.length()).trim());
+				boolean matched = true;
+				for (int i = 0; i + 1 < conditions.length; i += 2) {
+					if (!conditions[i + 1].equals(fields.get(conditions[i]))) {
+						matched = false;
+						break;
+					}
+				}
+				if (matched && fields.containsKey(field)) {
+					return fields.get(field);
+				}
+			}
+			return null;
 		}
 
 		/** 取 {@code RESULT <kind> ... <field>=<value>} 的原始字符串。 */		String result(String kind, String field, String phase) {

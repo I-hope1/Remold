@@ -80,6 +80,9 @@ final class MixinInnerClassHotSwap {
 	private static final java.util.concurrent.atomic.AtomicInteger FIELD_CHANGED = new java.util.concurrent.atomic.AtomicInteger();
 	private static final java.util.concurrent.atomic.AtomicInteger GATE_REJECTED = new java.util.concurrent.atomic.AtomicInteger();
 
+	/** 已就 legacy 点分名缓存回退告警过的类名（只为不刷屏：每个类名一条）。 */
+	private static final java.util.Set<String> LEGACY_FALLBACK_WARNED = ConcurrentHashMap.newKeySet();
+
 	/** 本轮分母（战报口径）。 */
 	static String metricsSummary() {
 		return "executed=" + EXECUTED.get() + " fieldTableChanged=" + FIELD_CHANGED.get()
@@ -568,11 +571,14 @@ final class MixinInnerClassHotSwap {
 	 * 闸 4 判据：该 (加载器, 类名) 是否有可用的基线字节。
 	 *
 	 * <p><b>为什么按 (加载器, 类名) 判</b>：{@link RemoldAgent#bytecodeCache} 只有点分名一条索引，
-	 * 同名不同加载器的两份类会互相冒充；用它满足这个闸等于静默降级（不变量 C2 明确禁止）。
-	 * 本闸只认两个来源：</p>
+	 * 同名不同加载器的两份类会互相冒充，所以它不是本闸的判定来源。本闸按强度依次认三个来源：</p>
 	 * <ol>
 	 *   <li>premain 录口 {@link MixinClassBaseline}：键 = 加载器实例身份 + 类名，值是 JVM 最终定义字节；</li>
-	 *   <li>本源 {@link #LOADED}：本进程里已成功 redefine 过的字节，确实在 JVM 里生效过。</li>
+	 *   <li>本源 {@link #LOADED}：本进程里已成功 redefine 过的字节，确实在 JVM 里生效过；</li>
+	 *   <li>legacy 点分名缓存 {@link RemoldAgent#bytecodeCache}：<b>显式、非静默</b>的兼容回退
+	 *       （每个类名告警一次）。它同样只在 agent 注册之后才有内容（Remold 的
+	 *       {@code CacheWarmingTransformer} 与热更路径都在注册之后写），因此不会"复活"注册前
+	 *       就加载的类；代价是丢了加载器维度，只在实参 loader 与录口都对不上时兜底。</li>
 	 * </ol>
 	 *
 	 * @param loader  定义该类的加载器（合成类通常来自 Knot 的加载器）
@@ -587,6 +593,14 @@ final class MixinInnerClassHotSwap {
 			return null;
 		}
 		if (MixinClassBaseline.baselineOf(loader, dotName) != null) {
+			return null;
+		}
+		if (RemoldAgent.bytecodeCache.get(dotName) != null) {
+			if (LEGACY_FALLBACK_WARNED.add(dotName)) {
+				RemoldAgent.warn("[Mixin] synthetic inner class " + dotName + ": baseline resolved from the"
+					+ " legacy dot-name bytecode cache (no premain (loader, name) capture); the loader"
+					+ " dimension is unverified for this class");
+			}
 			return null;
 		}
 		return "no baseline bytes (class loaded before the agent registered); baseline "

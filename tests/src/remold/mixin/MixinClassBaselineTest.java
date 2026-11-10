@@ -132,7 +132,7 @@ class MixinClassBaselineTest {
 	}
 
 	@Test
-	void unrelatedLoaderOrDotNameCacheEntryDoesNotSatisfyTheGate() {
+	void recorderKeyingIsTheOnlyLoaderScopedSource() {
 		ClassLoader loader = new IsolatedLoader();
 
 		observe(loader, "fixture/Target$Anonymous$other", null, new byte[] {1});
@@ -141,12 +141,23 @@ class MixinClassBaselineTest {
 
 		observe(new IsolatedLoader(), INTERNAL, null, new byte[] {2});
 		assertNotNull(MixinInnerClassHotSwap.baselineMissingReason(loader, DOTTED),
-			"a same-named class defined by another loader must not satisfy the gate");
+			"a same-named class defined by another loader must not satisfy the gate: the recorder's key is"
+				+ " (loader identity, name), not the name alone");
+	}
 
+	/**
+	 * Documented compatibility path: the legacy dot-name cache still satisfies the gate, but only
+	 * visibly (one warn per class name) and only when neither loader-scoped source matched. It cannot
+	 * resurrect a class loaded before the agent registered — every writer of that cache lives behind
+	 * the same premain — which is what keeps the "refuse and ask for a restart" rule intact.
+	 */
+	@Test
+	void legacyDotNameCacheSatisfiesTheGateVisiblyAndOnlyAfterTheLoaderScopedSourcesMiss() {
+		ClassLoader loader = new IsolatedLoader();
 		byte[] previous = remold.RemoldAgent.bytecodeCache.put(DOTTED, new byte[] {3});
 		try {
-			assertNotNull(MixinInnerClassHotSwap.baselineMissingReason(loader, DOTTED),
-				"the dot-name bytecode cache is not loader-scoped: it must not silently satisfy the (loader, name) gate");
+			assertNull(MixinInnerClassHotSwap.baselineMissingReason(loader, DOTTED),
+				"the legacy cache is a documented fallback while no premain capture exists for this class");
 		} finally {
 			if (previous == null) {
 				remold.RemoldAgent.bytecodeCache.remove(DOTTED);
@@ -154,6 +165,8 @@ class MixinClassBaselineTest {
 				remold.RemoldAgent.bytecodeCache.put(DOTTED, previous);
 			}
 		}
+		assertNotNull(MixinInnerClassHotSwap.baselineMissingReason(loader, DOTTED),
+			"removing the legacy entry must bring the refusal (and its restart hint) back");
 	}
 
 	// ------------------------------------------------------------ the three denominators

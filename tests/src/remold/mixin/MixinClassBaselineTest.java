@@ -146,10 +146,35 @@ class MixinClassBaselineTest {
 	}
 
 	/**
-	 * The legacy dot-name cache must not launder another loader's class into this loader: once the
-	 * recorder knows the name belongs to a different loader, the coarse-key entry is untrustworthy.
-	 * (This is exactly the shape a JVM-level probe caught: Remold's own first-load path mirrors
-	 * classes into the dot-name cache, so without this guard the fallback would cross loaders.)
+	 * Gate-4 source rule (invariant C2): the legacy dot-name cache is <b>not</b> a baseline source,
+	 * not even when it holds bytes for exactly this name.
+	 *
+	 * <p>{@link remold.RemoldAgent#bytecodeCache} is keyed by dot name alone, so two loaders defining
+	 * the same synthetic name collapse onto one entry. Serving that entry as a baseline launders one
+	 * loader's bytes into another loader's class — the class then gets "redefined" against a shape the
+	 * JVM never loaded. The premain recorder — keyed by (loader identity, name) — is the only source
+	 * that can prove ownership, so a cache-only entry must keep the refusal (and its restart hint)
+	 * instead of degrading into a silent pass.</p>
+	 */
+	@Test
+	void legacyDotNameCacheIsNeverABaselineSource() {
+		ClassLoader loader = new IsolatedLoader();
+		byte[] previous = remold.RemoldAgent.bytecodeCache.put(DOTTED, new byte[] {3});
+		try {
+			String reason = MixinInnerClassHotSwap.baselineMissingReason(loader, DOTTED);
+			assertNotNull(reason,
+				"a dot-name cache entry must not satisfy gate 4: it proves nothing about which loader loaded it");
+			assertTrue(reason.contains("restart"), "the refusal must still ask for a restart: " + reason);
+		} finally {
+			restoreLegacyEntry(previous);
+		}
+	}
+
+	/**
+	 * The cross-loader shape the JVM-level probe caught: Remold's own first-load path mirrors classes
+	 * into the dot-name cache, so a coarse-key fallback would lend loader A's bytes to loader B. With
+	 * the fallback gone this is refused for the same reason as a cache-only entry — and the recorder's
+	 * own entry for loader A must not help loader B either (its key includes the loader).
 	 */
 	@Test
 	void legacyEntryCannotLaunderAnotherLoadersClass() {
@@ -161,53 +186,64 @@ class MixinClassBaselineTest {
 			assertNotNull(reason, "the legacy entry must not satisfy a loader that the recorder did not record");
 			assertTrue(reason.contains("restart"), "the refusal must still ask for a restart: " + reason);
 		} finally {
-			if (previous == null) {
-				remold.RemoldAgent.bytecodeCache.remove(DOTTED);
-			} else {
-				remold.RemoldAgent.bytecodeCache.put(DOTTED, previous);
-			}
+			restoreLegacyEntry(previous);
 		}
 	}
 
-	/**
-	 * Documented compatibility path: the legacy dot-name cache still satisfies the gate, but only
-	 * visibly (one warn per class name) and only when neither loader-scoped source matched. It cannot
-	 * resurrect a class loaded before the agent registered — every writer of that cache lives behind
-	 * the same premain — which is what keeps the "refuse and ask for a restart" rule intact.
-	 */
-	@Test
-	void legacyDotNameCacheSatisfiesTheGateVisiblyAndOnlyAfterTheLoaderScopedSourcesMiss() {
-		ClassLoader loader = new IsolatedLoader();
-		byte[] previous = remold.RemoldAgent.bytecodeCache.put(DOTTED, new byte[] {3});
-		try {
-			assertNull(MixinInnerClassHotSwap.baselineMissingReason(loader, DOTTED),
-				"the legacy cache is a documented fallback while no premain capture exists for this class");
-		} finally {
-			if (previous == null) {
-				remold.RemoldAgent.bytecodeCache.remove(DOTTED);
-			} else {
-				remold.RemoldAgent.bytecodeCache.put(DOTTED, previous);
-			}
+	/** Puts the dot-name cache back the way the case found it (the suite shares one static cache). */
+	private static void restoreLegacyEntry(byte[] previous) {
+		if (previous == null) {
+			remold.RemoldAgent.bytecodeCache.remove(DOTTED);
+		} else {
+			remold.RemoldAgent.bytecodeCache.put(DOTTED, previous);
 		}
-		assertNotNull(MixinInnerClassHotSwap.baselineMissingReason(loader, DOTTED),
-			"removing the legacy entry must bring the refusal (and its restart hint) back");
 	}
 
 	// ------------------------------------------------------------ the three denominators
 
+	/**
+	 * The three denominators are counted on three different events, so they must not be derived from
+	 * each other; this case names each one and pins its increment rule.
+	 *
+	 * <p>Concretely (and this is the part that is easy to report wrongly in a battle summary):</p>
+	 * <ul>
+	 *   <li>{@code seen} = every defineClass offer the recorder could key, <b>including</b> names the
+	 *       candidate filter later drops (no {@code '$'}); bootstrap/hidden/agent-self offers are
+	 *       excluded before the counter, because the table can never key them;</li>
+	 *   <li>{@code recorded} = stored (loader, name) keys = candidate names only, so
+	 *       {@code seen - recorded} is exactly "offers filtered out as non-candidates";</li>
+	 *   <li>{@code missed} = baseline lookups that found nothing, so one refused gate call adds
+	 *       exactly <b>one</b> — independent of how many classes were recorded.</li>
+	 * </ul>
+	 */
 	@Test
-	void metricsCarryTheThreeDenominators() {
+	void denominatorsAreIndependentAndOneRefusedGateCallAddsExactlyOneMiss() {
 		ClassLoader loader = new IsolatedLoader();
 		observe(loader, "fixture/A$1", null, new byte[] {1});
 		observe(loader, "fixture/A$2", null, new byte[] {2});
-		observe(loader, "fixture/Plain", null, new byte[] {3});   // filtered candidate
-		assertNull(MixinClassBaseline.baselineOf(loader, "fixture.A$Never"), "miss lookup");
+		observe(loader, "fixture/Plain", null, new byte[] {3});          // filtered: no '$' -> seen, not recorded
+		observe(loader, "remold/Internal$1", null, new byte[] {4});      // excluded before seen (agent's own)
+		observe(null, "fixture/B$1", null, new byte[] {5});              // excluded before seen (bootstrap)
 
-		MixinClassBaseline.Metrics metrics = MixinClassBaseline.metrics();
+		MixinClassBaseline.Metrics before = MixinClassBaseline.metrics();
 
-		assertEquals(3, metrics.seen, "seen: defineClass offers the recorder observed");
-		assertEquals(2, metrics.recorded, "recorded: (loader, name) keys actually stored");
-		assertEquals(1, metrics.missed, "missed: baseline lookups that found nothing (gate refusals)");
+		assertEquals(3, before.seen,
+			"seen counts every keyable defineClass offer, filtered ones (no '$') included");
+		assertEquals(2, before.recorded, "recorded counts stored (loader, name) keys: candidate names only");
+		assertEquals(1, before.seen - before.recorded,
+			"seen - recorded is the number of filtered offers, not a failure count and not a loader count");
+		assertEquals(0, before.missed, "no gate lookup happened yet, so missed must still be 0");
+
+		String reason = MixinInnerClassHotSwap.baselineMissingReason(loader, "fixture.A$Never");
+		assertNotNull(reason, "the lookup below is a gate refusal (that is what missed counts)");
+		assertTrue(reason.contains("missed=1"),
+			"the refusal must carry the denominators it was decided with: " + reason);
+
+		MixinClassBaseline.Metrics after = MixinClassBaseline.metrics();
+
+		assertEquals(1, after.missed, "missed counts lookups that found nothing: exactly ONE per refused gate call");
+		assertEquals(before.seen, after.seen, "a lookup is not a defineClass offer: seen must not move");
+		assertEquals(before.recorded, after.recorded, "a lookup stores nothing: recorded must not move");
 		assertTrue(MixinClassBaseline.metricsSummary().contains("missed=1"),
 			"the summary logged into the battle report must carry all three denominators: "
 				+ MixinClassBaseline.metricsSummary());

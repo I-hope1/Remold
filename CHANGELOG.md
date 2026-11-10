@@ -39,6 +39,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[DYNAMIC-REDEFINE] Successfully redefined net.minecraft.entity.LivingEntity`；无 `[VM-REDEFINE-POISON]`、
   无 `VerifyError`/`InternalError`、之后持续运行（tick 增长、60fps）无 C1 崩溃。日志明确：
   `Multiple loaded copies ... KnotClassLoader@42f93a98 vs AppClassLoader@3fee733d; using KnotClassLoader`。
+- 同名类副本仲裁全仓收口：新增 `core/src/remold/ClassCopySelector.java`（bootstrap/System-Agent/宿主
+  三级 rank + 子加载器关系 + 拒绝抛弃式预测副本），统一替换 `RemoldAgent.loadClassSnap`、
+  `MixinHotSwap`、`MixinInnerClassHotSwap`、`MountManager` 包映射、`DynamicProfilerAPI` 的候选选择。
+- 基线缓存防裸副本覆盖：`AnnotationTransformer` 的首载写入改走 `RemoldAgent.updateInitialBaseline`，
+  按加载器 rank 仲裁（低权威副本拒绝、高权威可替换、manifest 对齐产物强制、ephemeral 永不入缓存），
+  并在发现同名二次定义时打印带 40 帧调用栈的 `[DUP-LOAD]`。
+- 源头切断（真机 `[DUP-LOAD]` 40 帧栈定位）：`HostReadinessProbe` 的默认类查找口不再使用
+  `Class.forName(..., getSystemClassLoader())`，改为只从 `RemoldAgent.loadedClassesMap`（宿主快照）取；
+  此前 `staticInstance -> getDeclaredMethod` 会把 `MinecraftServer`/`MinecraftClient` 及其签名类型
+  （`LivingEntity`、`Attackable` 等）全部定义为 `AppClassLoader` 裸副本。
+- `[VM-INFO]` 改为输出完整 `Internal exceptions` 区块（直到下一个区块头），不再被后续
+  `InternalError` 事件顶出窗口。
+- 真机终验（最终代码、最终 jar）：连续两次 `LivingEntity` 热更成功，`[DUP-LOAD]` = 0，
+  无 `[VM-REDEFINE-POISON]`/`VerifyError`/`InternalError`/`Rolling back`，游戏持续运行无 C1 崩溃。
+  单测：`ClassCopySelector`/缓存仲裁/就绪快照/成员对齐/受影响的子类放行全部绿；变异检查全部 killed。
 
 ### Fixed
 - `[ANON_ALIGN]` 的 Tier 4.5 日志不再把“扫描可见的活实例为 0”表述成“实例已死”，也不再把

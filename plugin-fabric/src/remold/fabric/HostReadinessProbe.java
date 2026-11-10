@@ -48,7 +48,13 @@ public final class HostReadinessProbe {
 		UNKNOWN
 	}
 
-	/** 类查找口：生产按系统类加载器查找；测试可注入替身，不需要真实 Minecraft。 */
+	/**
+	 * 类查找口。生产默认从 {@code RemoldAgent.loadedClassesMap}（宿主加载器已加载类快照）查找，
+	 * <b>绝不回退到系统类加载器</b>：system loader 的 classpath 里也有 Minecraft jar，
+	 * {@code Class.forName(..., getSystemClassLoader())} 会静默定义一份裸副本
+	 * （无 Mixin 织入 / 无 PackageAccessFixer），后续热更若选中或缓存它就会触发
+	 * {@code VerifyError: Bad access to protected data}。测试可注入替身，不需要真实 Minecraft。
+	 */
 	public interface ClassLocator {
 		Class<?> find(String className);
 	}
@@ -64,16 +70,32 @@ public final class HostReadinessProbe {
 
 	private final ClassLocator locator;
 
-	/** 生产构造：按系统类加载器探测真实宿主。 */
+	/** 生产构造：只从 Remold 的宿主类快照探测，绝不使用系统类加载器（避免裸副本）。 */
 	public HostReadinessProbe() {
-		this(HostReadinessProbe::systemClass);
+		this(HostReadinessProbe::hostLoadedClass);
+	}
+
+	/**
+	 * 宿主权威副本查找：只认 {@code loadedClassesMap}（由 {@code ClassCopySelector} 仲裁后的快照）。
+	 *
+	 * <p>旧实现用 {@code Class.forName(className, false, getSystemClassLoader())}，在 Fabric dev
+	 * 里会给 {@code MinecraftServer}/{@code MinecraftClient} 及其方法签名涉及的游戏类各定义一份
+	 * {@code AppClassLoader} 裸副本——真机 {@code [DUP-LOAD]} 栈已定位到
+	 * {@code HostReadinessProbe.staticInstance -> Class.getDeclaredMethod}。</p>
+	 */
+	private static Class<?> hostLoadedClass(String className) {
+		Class<?> loaded = remold.RemoldAgent.loadedClassesMap.get(className);
+		if (loaded != null) {
+			return loaded;
+		}
+		return null;   // 取不到就 UNKNOWN（fail-open 放行），绝不制造裸副本
 	}
 
 	/**
 	 * @param locator 类查找口；{@code null} 等价于生产默认（系统类加载器）
 	 */
 	public HostReadinessProbe(ClassLocator locator) {
-		this.locator = locator == null ? HostReadinessProbe::systemClass : locator;
+		this.locator = locator == null ? HostReadinessProbe::hostLoadedClass : locator;
 	}
 
 	/**
@@ -139,14 +161,6 @@ public final class HostReadinessProbe {
 		}
 	}
 
-	private static Class<?> systemClass(String className) {
-		try {
-			// initialize=false：探测绝不能触发 Minecraft 类的初始化。
-			return Class.forName(className, false, ClassLoader.getSystemClassLoader());
-		} catch (Throwable ignored) {
-			return null;
-		}
-	}
 
 	/** 读静态实例：先按静态方法（{@code getServer}/{@code getInstance}），再按静态字段。 */
 	private static Object staticInstance(Class<?> owner, String... accessorNames) {

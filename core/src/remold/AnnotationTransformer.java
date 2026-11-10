@@ -288,13 +288,8 @@ public class AnnotationTransformer implements ClassFileTransformer {
 
 		byte[] resultBytes = modified ? bytes : classfileBuffer;
 		if (classBeingRedefined == null) {
-			if (pending != null) {
-				bytecodeCache.put(dotClassName, resultBytes);
-				RemoldAgent.sourceBytecodeCache.put(dotClassName, classfileBuffer);
-			} else {
-				bytecodeCache.putIfAbsent(dotClassName, resultBytes);
-				RemoldAgent.sourceBytecodeCache.putIfAbsent(dotClassName, classfileBuffer);
-			}
+			// 按加载器权威性写入基线：拒绝 AppClassLoader/预测加载器裸副本覆盖宿主权威副本
+			RemoldAgent.updateInitialBaseline(dotClassName, resultBytes, classfileBuffer, loader, pending != null);
 		}
 		return modified ? bytes : null;
 	}

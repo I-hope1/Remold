@@ -529,8 +529,15 @@ public class RemoldAgent {
 			}
 			String[] lines = text.substring(idx).split("\\R");
 			StringBuilder sb = new StringBuilder();
-			for (int i = 0; i < lines.length && i < 160; i++) {
-				sb.append(lines[i]).append('\n');
+			for (int i = 0; i < lines.length; i++) {
+				String line = lines[i];
+				if (i > 0 && (line.startsWith("Events (") || line.startsWith("VM Arguments:")
+				    || line.startsWith("Dynamic libraries:") || line.startsWith("OS:")
+				    || line.startsWith("Java Threads:"))) {
+					break;   // 输出完整的 Internal exceptions 区块，到下一个区块头为止
+				}
+				sb.append(line).append('\n');
+				if (i > 400) break;
 			}
 			error("[VM-INFO] " + context + " — JVM internal exception buffer:\n" + sb);
 		} catch (Throwable t) {
@@ -1712,6 +1719,82 @@ public class RemoldAgent {
 	//region HotSwap Core Logic
 	public static volatile ConcurrentHashMap<String, Class<?>> loadedClassesMap = new ConcurrentHashMap<>();
 
+	/** 每个 dot 名当前缓存字节的来源加载器 rank（0 bootstrap / 1 System-Agent / 2 宿主）与描述。 */
+	private static final Map<String, Integer> CACHE_LOADER_RANK = new ConcurrentHashMap<>();
+	private static final Map<String, String>  CACHE_LOADER_NAME = new ConcurrentHashMap<>();
+	private static final Set<String>         DUPLICATE_LOAD_LOGGED = ConcurrentHashMap.newKeySet();
+
+	/** 重定义成功后，把缓存字节的来源加载器也登记下来，供后续同名副本仲裁使用。 */
+	public static void recordCacheLoader(String dotClassName, ClassLoader loader) {
+		if (dotClassName == null) return;
+		CACHE_LOADER_RANK.put(dotClassName, ClassCopySelector.loaderRank(loader));
+		CACHE_LOADER_NAME.put(dotClassName, String.valueOf(loader));
+	}
+
+	/**
+	 * 首次加载的基线缓存写入：按加载器权威性仲裁，<b>拒绝裸副本覆盖权威副本</b>。
+	 *
+	 * <p>真机事故的直接机制之一：同一个 dot 名先被宿主加载器（Knot）加载并缓存已织入字节，
+	 * 之后 AppClassLoader 因某处 {@code Class.forName} 兜底又定义了一份裸副本；旧实现用
+	 * {@code putIfAbsent} 虽然不会覆盖，但若裸副本先到，权威副本反而进不来。这里改为按 rank 仲裁：
+	 * 只有 rank 更高（或本批对齐产物=authoritative）才允许写入；并打印一份带调用栈的
+	 * {@code [DUP-LOAD]}，用于定位是谁定义了裸副本。</p>
+	 *
+	 * @return 本次写入是否生效
+	 */
+	static boolean updateInitialBaseline(String dotClassName, byte[] runtimeBytes, byte[] sourceBytes,
+	                                     ClassLoader loader, boolean authoritative) {
+		if (dotClassName == null || runtimeBytes == null) return false;
+		if (remold.offset.LayoutPredictor.isEphemeralLoader(loader)) {
+			// 抛弃式预测加载器定义的副本没有实例、不会初始化，绝不能进入基线缓存
+			return false;
+		}
+		int newRank = ClassCopySelector.loaderRank(loader);
+		Integer oldRank = CACHE_LOADER_RANK.get(dotClassName);
+		String oldLoader = CACHE_LOADER_NAME.get(dotClassName);
+		boolean exists = bytecodeCache.containsKey(dotClassName);
+		if (exists && oldLoader != null && !oldLoader.equals(String.valueOf(loader))) {
+			String key = dotClassName + "|" + loader;
+			if (DUPLICATE_LOAD_LOGGED.add(key)) {
+				warn("[DUP-LOAD] " + dotClassName + " was defined again by " + loader
+				     + " (existing cache from " + oldLoader + ", rank " + oldRank + " -> " + newRank + ")."
+				     + " A bare AppClassLoader copy has no Mixin weaving / access transforms and must never"
+				     + " become the redefine baseline. Definition stack:\n" + stackTrace(40));
+			}
+		}
+		boolean accept;
+		if (!exists) {
+			accept = true;
+		} else if (authoritative) {
+			accept = true;
+		} else if (oldRank != null && newRank < oldRank) {
+			accept = false;
+		} else if (oldRank != null && newRank == oldRank) {
+			accept = false;   // 同 rank 保持先到者，等价于旧的 putIfAbsent
+		} else {
+			accept = true;
+		}
+		if (accept) {
+			bytecodeCache.put(dotClassName, runtimeBytes);
+			sourceBytecodeCache.put(dotClassName, sourceBytes);
+			CACHE_LOADER_RANK.put(dotClassName, Math.max(newRank, authoritative ? 2 : newRank));
+			CACHE_LOADER_NAME.put(dotClassName, String.valueOf(loader));
+		}
+		return accept;
+	}
+
+	private static String stackTrace(int frames) {
+		StackTraceElement[] trace = new Throwable().getStackTrace();
+		StringBuilder sb = new StringBuilder();
+		int shown = 0;
+		for (StackTraceElement e : trace) {
+			// 输出完整帧（含 remold 内部帧），用于定位是谁定义了裸副本
+			sb.append("    at ").append(e).append('\n');
+			if (++shown >= frames) break;
+		}
+		return sb.toString();
+	}
+
 
 	/**
 	 * 同名类存在多个副本时的取舍：优先"活"的那个。
@@ -1726,12 +1809,7 @@ public class RemoldAgent {
 	 * <p>所以预测副本永远不参与仲裁：它既不能取代活类，也不能顶掉已选中的活类。</p>
 	 */
 	public static boolean isBetterLoadedClassCandidate(Class<?> candidate, Class<?> existing) {
-		if (candidate == null) return false;
-		ClassLoader candidateLoader = candidate.getClassLoader();
-		if (LayoutPredictor.isEphemeralLoader(candidateLoader)) return false;
-		if (existing == null) return true;
-		if (LayoutPredictor.isEphemeralLoader(existing.getClassLoader())) return true;
-		return isChildClassLoader(candidateLoader, existing.getClassLoader());
+		return ClassCopySelector.isBetter(candidate, existing);
 	}
 
 	private static void loadClassSnap(Class<?>[] classes) {
@@ -3859,7 +3937,11 @@ public class RemoldAgent {
 		// JVM 现在生效的是骨架字节码；缓存必须反映当前真实状态，供阶段 B 的层级/元数据查询使用。
 		for (String name : ok) {
 			byte[] bytes = stageABytes.get(name);
-			if (bytes != null) bytecodeCache.put(name, bytes);
+			if (bytes != null) {
+				bytecodeCache.put(name, bytes);
+				Class<?> c = loadedClassesMap.get(name);
+				recordCacheLoader(name, c == null ? null : c.getClassLoader());
+			}
 		}
 
 		// 宿主与匿名类必须同批生效；否则阶段 C 的基线已不一致，整组移出。
@@ -3960,6 +4042,7 @@ public class RemoldAgent {
 			        + " class(es) were skipped this round — listed below."));
 			for (ClassDefinition def : definitions) {
 				bytecodeCache.put(def.getDefinitionClass().getName(), def.getDefinitionClassFile());
+				recordCacheLoader(def.getDefinitionClass().getName(), def.getDefinitionClass().getClassLoader());
 				commitInvented(def.getDefinitionClass().getName());
 				successfulClasses.add(def.getDefinitionClass().getName());
 			}
@@ -3999,6 +4082,7 @@ public class RemoldAgent {
 				// 跳过 afterRedefine，结果是类已生效但存量实例保持类型默认值。
 				try {
 					bytecodeCache.put(className, def.getDefinitionClassFile());
+					recordCacheLoader(className, def.getDefinitionClass().getClassLoader());
 					commitInvented(className);
 				} catch (Throwable be) {
 					error("[BOOKKEEPING] " + className + " was redefined, but recording the new baseline failed."
@@ -4685,6 +4769,7 @@ public class RemoldAgent {
 				inst.redefineClasses(new ClassDefinition(targetClass, runtimeBytes));
 				bytecodeCache.put(className, runtimeBytes);
 				sourceBytecodeCache.put(className, sourceBytes);
+				recordCacheLoader(className, targetClass.getClassLoader());
 				try {
 					InitFix.afterRedefine(targetClass);
 				} catch (Throwable t) {

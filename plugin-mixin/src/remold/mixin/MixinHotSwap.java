@@ -585,7 +585,7 @@ public final class MixinHotSwap {
 				}).add(candidate);
 				// 取决于遍历顺序，后出现的未必是游戏真正加载的那份：优先选加载器层级更"外层"的副本
 				// （Fabric/Knot/ModLauncher 等宿主加载器），而不是 Agent/System 加载器可能提前定义的裸副本。
-				loaded.put(candidate.getName(), preferGameClass(previous, candidate));
+				loaded.put(candidate.getName(), remold.ClassCopySelector.prefer(previous, candidate));
 			}
 		}
 		for (Map.Entry<String, List<Class<?>>> e : duplicates.entrySet()) {
@@ -634,28 +634,6 @@ public final class MixinHotSwap {
 		for (Map.Entry<String, List<String>> entry : innerBatch.entrySet()) {
 			reportInnerClassHotUpdate(transformer, entry.getKey(), entry.getValue());
 		}
-	}
-
-	/**
-	 * 同名类被多个 ClassLoader 各定义一份时，选择游戏实际使用的那份。
-	 *
-	 * <p>Agent/System 加载器可能在宿主加载器之前把 MC 类从 classpath 裸定义一份（不含 Mixin 织入、
-	 * 不含加载器访问变换）；把那份拿去 redefine，旧版本缺少 {@code HonkaiEntityAccess} 接口、
-	 * 成员仍是 protected，JBR 在 link/verify 受影响子类时必然失败。宿主加载器（Knot/ModLauncher）
-	 * 的副本才是权威版本，优先选择。</p>
-	 */
-	static Class<?> preferGameClass(Class<?> a, Class<?> b) {
-		int ra = loaderRank(a);
-		int rb = loaderRank(b);
-		return ra >= rb ? a : b;
-	}
-
-	static int loaderRank(Class<?> c) {
-		ClassLoader cl = c.getClassLoader();
-		if (cl == null) return 0;
-		if (cl == ClassLoader.getSystemClassLoader()) return 1;      // 裸副本
-		if (cl == RemoldAgent.class.getClassLoader()) return 1;      // Agent 自带加载器上的副本
-		return 2;                                                    // 宿主加载器（Knot/ModLauncher/...）
 	}
 
 	/**

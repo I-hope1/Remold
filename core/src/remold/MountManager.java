@@ -336,8 +336,17 @@ public class MountManager {
 			ClassLoader cl = clazz.getClassLoader();
 			// 抛弃式预测加载器定义的副本不是"活"的那份，它的包映射会把后续类加载指到死加载器上
 			if (cl != null && !remold.offset.LayoutPredictor.isEphemeralLoader(cl) && clazz.getPackage() != null) {
-				// 简单策略：记录该包最后一次出现的 ClassLoader
-				packageLoaders.put(clazz.getPackage().getName(), new WeakReference<>(cl));
+				String pkg = clazz.getPackage().getName();
+				WeakReference<ClassLoader> existingRef = packageLoaders.get(pkg);
+				ClassLoader existing = existingRef == null ? null : existingRef.get();
+				// 同名多副本仲裁：宿主加载器（Knot/ModLauncher）优先，绝不让 AppClassLoader 裸副本
+				// 覆盖包映射，否则后续 NoClassDefFoundError 的兜底加载会继续制造裸副本。
+				if (existing == null
+				    || ClassCopySelector.loaderRank(cl) > ClassCopySelector.loaderRank(existing)
+				    || (ClassCopySelector.loaderRank(cl) == ClassCopySelector.loaderRank(existing)
+				        && isChildClassLoader(cl, existing))) {
+					packageLoaders.put(pkg, new WeakReference<>(cl));
+				}
 			}
 		}
 	}

@@ -433,12 +433,8 @@ final class MixinInnerClassHotSwap {
 	}
 
 	private static Class<?> findLoadedClass(Instrumentation inst, String dotClassName) {
-		for (Class<?> candidate : inst.getAllLoadedClasses()) {
-			if (candidate != null && dotClassName.equals(candidate.getName())) {
-				return candidate;
-			}
-		}
-		return null;
+		// 同名多副本时选宿主加载器权威副本，拒绝 AppClassLoader 裸副本（见 ClassCopySelector）
+		return remold.ClassCopySelector.pickNamed(inst.getAllLoadedClasses(), dotClassName);
 	}
 
 	private static Object readField(Object target, String name) throws Exception {

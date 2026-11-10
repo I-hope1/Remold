@@ -143,12 +143,13 @@ public class DynamicProfilerAPI {
 	 throws Exception {
 		baseClass = ClassIdentity.canonicalize(baseClass);
 		// 获取所有已加载的子类并重转换
-		List<Class<?>> toRetransform = new ArrayList<>();
+		Map<String, Class<?>> byName = new java.util.LinkedHashMap<>();
 		for (Class<?> clazz : inst.getAllLoadedClasses()) {
-			if (baseClass.isAssignableFrom(clazz) && !clazz.isInterface() && inst.isModifiableClass(clazz)) {
-				toRetransform.add(clazz);
-			}
+			if (!baseClass.isAssignableFrom(clazz) || clazz.isInterface() || !inst.isModifiableClass(clazz)) continue;
+			Class<?> previous = byName.get(clazz.getName());
+			byName.put(clazz.getName(), remold.ClassCopySelector.prefer(previous, clazz));
 		}
+		List<Class<?>> toRetransform = new ArrayList<>(byName.values());
 		if (toRetransform.isEmpty()) {
 			RemoldAgent.info("No loaded subclasses to retransform for " + methodName);
 			return;

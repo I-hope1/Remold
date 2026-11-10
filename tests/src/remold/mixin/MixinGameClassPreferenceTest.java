@@ -1,6 +1,7 @@
 package remold.mixin;
 
 import org.junit.jupiter.api.Test;
+import remold.ClassCopySelector;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Opcodes;
 
@@ -43,18 +44,18 @@ public class MixinGameClassPreferenceTest {
     public void hostLoaderCopyWinsRegardlessOfIterationOrder() {
         Class<?> host = hostCopy();
         Class<?> system = MixinGameClassPreferenceTest.class; // loaded by the system/application loader
-        assertSame(host, MixinHotSwap.preferGameClass(system, host),
+        assertSame(host, ClassCopySelector.prefer(system, host),
             "host-loader (Knot/ModLauncher) copy must win over the system-loader copy");
-        assertSame(host, MixinHotSwap.preferGameClass(host, system),
+        assertSame(host, ClassCopySelector.prefer(host, system),
             "preference must be stable regardless of the getAllLoadedClasses() iteration order");
     }
 
     @Test
     public void loaderRanksReflectAuthority() {
-        assertEquals(0, MixinHotSwap.loaderRank(String.class), "bootstrap classes have no loader");
-        assertEquals(1, MixinHotSwap.loaderRank(MixinGameClassPreferenceTest.class),
+        assertEquals(0, ClassCopySelector.loaderRank(String.class), "bootstrap classes have no loader");
+        assertEquals(1, ClassCopySelector.loaderRank(MixinGameClassPreferenceTest.class),
             "system/application loader copy is a bare copy");
-        assertEquals(2, MixinHotSwap.loaderRank(hostCopy()),
+        assertEquals(2, ClassCopySelector.loaderRank(hostCopy()),
             "host loader (Knot/ModLauncher/...) copy is authoritative");
     }
 }

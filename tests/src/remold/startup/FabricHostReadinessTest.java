@@ -205,5 +205,31 @@ class FabricHostReadinessTest {
 		@Override public void error(String msg) { record("ERROR", msg); }
 		@Override public void error(String msg, Throwable t) { record("ERROR", msg); }
 	}
+	@Test
+	void defaultLocatorUsesHostSnapshotNotSystemClassLoader() {
+		// 默认 locator 必须只认宿主类快照。若退回 system loader 去加载 MinecraftServer，
+		// 会在 Fabric dev 里定义 AppClassLoader 裸副本（真机 [DUP-LOAD] 栈已定位到
+		// HostReadinessProbe.staticInstance -> Class.getDeclaredMethod）。
+		FakeServer.ticks = 5;
+		FakeServer.instance = new FakeServer();
+		RemoldAgent.loadedClassesMap.put(SERVER_CLASS, FakeServer.class);
+		try {
+			assertEquals(HostReadinessProbe.Verdict.READY, new HostReadinessProbe().probe(),
+				"default probe must resolve the host class from loadedClassesMap (host snapshot)");
+		} finally {
+			RemoldAgent.loadedClassesMap.remove(SERVER_CLASS);
+			FakeServer.reset();
+		}
+	}
+
+	@Test
+	void defaultLocatorDoesNotFallBackToSystemLoader() {
+		FakeServer.reset();
+		RemoldAgent.loadedClassesMap.remove(SERVER_CLASS);
+		RemoldAgent.loadedClassesMap.remove(CLIENT_CLASS);
+		assertEquals(HostReadinessProbe.Verdict.UNKNOWN, new HostReadinessProbe().probe(),
+			"with no host snapshot the probe must report UNKNOWN (fail-open), never load a bare copy");
+	}
+
 	// endregion
 }

@@ -83,8 +83,11 @@ public final class NewMixinRegistrar {
 			if (mixinPackage == null || !dotClassName.startsWith(mixinPackage)) {
 				return Collections.emptyList();
 			}
-			String simpleName = dotClassName.substring(mixinPackage.length());
-			if (simpleName.isEmpty() || simpleName.indexOf('.') >= 0) {
+			String relativeName = dotClassName.substring(mixinPackage.length());
+			if (!isValidRelativeMixinName(relativeName)) {
+				RemoldAgent.warn("[Mixin] Refusing to register " + dotClassName + ": \"" + relativeName
+					+ "\" is not a valid mixin name relative to package " + mixinPackage
+					+ " (it must be non-empty, without a leading/trailing dot or an empty segment)");
 				return Collections.emptyList();
 			}
 
@@ -104,12 +107,12 @@ public final class NewMixinRegistrar {
 				reportUnsupported(new IllegalStateException("MixinConfig.mixinClasses not found"));
 				return Collections.emptyList();
 			}
-			mixinClasses.add(simpleName);
+			mixinClasses.add(relativeName);
 
 			Object extensions = MixinReflection.readField(processor, "extensions");
 			Method prepare = MixinReflection.findMethod(config.getClass(), "prepare", 1);
 			if (extensions == null || prepare == null) {
-				removeMixinClass(mixinClasses, simpleName);
+				removeMixinClass(mixinClasses, relativeName);
 				reportUnsupported(new IllegalStateException("MixinConfig.prepare(Extensions) not found"));
 				return Collections.emptyList();
 			}
@@ -121,7 +124,7 @@ public final class NewMixinRegistrar {
 					// 抑制器是宿主插件的可选能力：缺失、返回 null 或抛异常都等于“本次无法抑制”，
 					// 一律 fail-closed（放弃登记 + 指向性诊断），绝不让 prepare() 在真实已加载目标上继续。
 					if (suppress == null || restore == null) {
-						removeMixinClass(mixinClasses, simpleName);
+						removeMixinClass(mixinClasses, relativeName);
 						rollback(config, dotClassName);
 						RemoldAgent.warn(suppressionUnavailableMessage(dotClassName, loadedTargets, loaderHook,
 							"no usable suppression hook is wired on this loader"));
@@ -130,14 +133,14 @@ public final class NewMixinRegistrar {
 					try {
 						launcherToken = suppress.apply(loadedTargets);
 					} catch (Throwable suppressFailure) {
-						removeMixinClass(mixinClasses, simpleName);
+						removeMixinClass(mixinClasses, relativeName);
 						rollback(config, dotClassName);
 						RemoldAgent.warn(suppressionUnavailableMessage(dotClassName, loadedTargets, loaderHook,
 							"suppressing it failed: " + MixinReflection.describe(suppressFailure)));
 						return Collections.emptyList();
 					}
 					if (launcherToken == null) {
-						removeMixinClass(mixinClasses, simpleName);
+						removeMixinClass(mixinClasses, relativeName);
 						rollback(config, dotClassName);
 						RemoldAgent.warn(suppressionUnavailableMessage(dotClassName, loadedTargets, loaderHook,
 							"the suppression hook returned no token"));
@@ -146,12 +149,12 @@ public final class NewMixinRegistrar {
 					suppressed = true;
 				}
 
-				// prepare 只在首次解析配置时执行；强制置回未准备状态，让新增的 simpleName 被解析。
+				// prepare 只在首次解析配置时执行；强制置回未准备状态，让新增的相对名被解析。
 				MixinReflection.writeBoolean(config, "prepared", false);
 				prepare.setAccessible(true);
 				prepare.invoke(config, extensions);
 			} catch (Throwable t) {
-				removeMixinClass(mixinClasses, simpleName);
+				removeMixinClass(mixinClasses, relativeName);
 				rollback(config, dotClassName);
 				throw t;
 			} finally {
@@ -167,14 +170,14 @@ public final class NewMixinRegistrar {
 
 			Object info = findMixinInfo(config, dotClassName);
 			if (info == null) {
-				removeMixinClass(mixinClasses, simpleName);
+				removeMixinClass(mixinClasses, relativeName);
 				rollback(config, dotClassName);
 				return Collections.emptyList();
 			}
 
 			Method validate = MixinReflection.findMethod(info.getClass(), "validate");
 			if (validate == null) {
-				removeMixinClass(mixinClasses, simpleName);
+				removeMixinClass(mixinClasses, relativeName);
 				rollback(config, dotClassName);
 				reportUnsupported(new IllegalStateException("MixinInfo.validate() not found"));
 				return Collections.emptyList();
@@ -183,14 +186,14 @@ public final class NewMixinRegistrar {
 				validate.setAccessible(true);
 				validate.invoke(info);
 			} catch (Throwable t) {
-				removeMixinClass(mixinClasses, simpleName);
+				removeMixinClass(mixinClasses, relativeName);
 				rollback(config, dotClassName);
 				throw t;
 			}
 
 			Object rawTargets = MixinReflection.invoke(info, "getTargetClasses");
 			if (!(rawTargets instanceof List<?> list) || list.isEmpty()) {
-				removeMixinClass(mixinClasses, simpleName);
+				removeMixinClass(mixinClasses, relativeName);
 				rollback(config, dotClassName);
 				RemoldAgent.warn("[Mixin] New mixin " + dotClassName
 					+ " was parsed but declares no resolvable target class; restart required if this persists");
@@ -290,8 +293,27 @@ public final class NewMixinRegistrar {
 		}
 	}
 
-	private static void removeMixinClass(List<String> mixinClasses, String simpleName) {
-		mixinClasses.remove(simpleName);
+	private static void removeMixinClass(List<String> mixinClasses, String relativeName) {
+		mixinClasses.remove(relativeName);
+	}
+
+	/**
+	 * 相对名（相对 Mixin 包）是否合法。
+	 *
+	 * <p>{@code MixinConfig.mixinClasses} 存的是<b>相对名</b>，且允许多层子包：
+	 * {@code "honkai.ProbeSubHotcMixin"} 对应 {@code com.example.mixin.honkai.ProbeSubHotcMixin}，
+	 * {@code "client.hud.YyyMixin"} 对应 {@code com.example.mixin.client.hud.YyyMixin}。
+	 * 因此这里只拒绝"不是合法名"的形态——空串、首尾点、连续点（空段）；
+	 * <b>不得</b>再按"单段简单名"拒绝点号，那会把子包里的合法 Mixin 全部挡在登记之外。</p>
+	 */
+	public static boolean isValidRelativeMixinName(String relativeName) {
+		if (relativeName == null || relativeName.isEmpty()) {
+			return false;
+		}
+		if (relativeName.startsWith(".") || relativeName.endsWith(".")) {
+			return false;
+		}
+		return !relativeName.contains("..");
 	}
 
 	/**

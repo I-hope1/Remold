@@ -322,6 +322,10 @@ public final class MixinConfigDiffer {
 		} catch (Throwable t) {
 			RemoldAgent.warn("[Mixin] Failed to register newly listed mixin " + dotClassName + ": " + t);
 		}
+		// 登记成功后必须把 MixinInfo.getClassInfo() 锚回 ClassInfo.cache：否则后续织入经
+		// ClassInfo.forName 懒加载出的普通 ClassInfo（isMixin=false）会让 Mixin->Target 描述符重映射
+		// 被跳过（匿名内部类 this$0 的构造器签名停留在 Mixin 类上）。
+		MixinClassInfoRegistry.reassert(ctx.transformer());
 	}
 
 	/** 配置里是否仍列出该 Mixin；读不到配置时保守地返回 {@code true}（交给重试上限兜底）。 */

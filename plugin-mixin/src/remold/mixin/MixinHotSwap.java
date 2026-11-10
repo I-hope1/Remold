@@ -217,23 +217,25 @@ public final class MixinHotSwap {
 		// interfaces 在增强重定义宿主上可改写接口表。命中即在这里接管，未命中才回落原生 reload。
 		MixinReloadPolicy.Plan plan = MixinReloadPolicy.prepare(transformer, dotClassName, node,
 			RemoldAgent.isEnhancedHotswapEnabled());
+		MixinRetarget.Result retarget = null;
 		if (plan.usable() && plan.targetsChanged()) {
-			List<String> affected = retargetMixin(transformer, dotClassName, newMixinBytes, node);
-			if (affected != null) {
-				recordMixinReport(dotClassName, node);
-				LAST_RELOADED_BYTES.put(dotClassName, newMixinBytes.clone());
-				RemoldAgent.info("[Mixin] " + dotClassName + " retargeted (" + plan.describe()
-					+ "); re-weaving " + affected);
-				scheduleInnerClassHotUpdate(dotClassName, innerNames);
-				synchronized (PENDING_LOCK) {
-					PENDING.addAll(affected);
-				}
-				WORKER.execute(MixinHotSwap::flushPendingTargets);
-				return true;
+			// 目标迁移必须在 reload 之前完成：Reloaded 的 targets 判据与 MixinConfig 的
+			// mixinMapping 都按旧目标建好，只 reload 会被直接拒绝（Cannot change target classes）。
+			// 迁移后 reload 会重建状态并返回新目标列表；失败时用快照原样回滚。
+			MixinBytecodeOverlay.install();
+			MixinBytecodeOverlay.register(dotClassName, newMixinBytes);
+			MixinBytecodeOverlay.evictClassInfoCache(
+				Collections.singletonList(MixinInnerClassSupport.internalName(dotClassName)));
+			retarget = MixinRetarget.apply(transformer, dotClassName, node,
+				FabricLauncherSpoof::suppress, FabricLauncherSpoof::restore, MixinConfigDiff.LOADER_HOOK);
+			if (retarget == null) {
+				RemoldAgent.warn("[Mixin] " + dotClassName + ": @Mixin target change detected but the"
+					+ " target migration failed; falling back to the native reload path,"
+					+ " which will report that a restart is required");
+			} else {
+				RemoldAgent.info("[Mixin] " + dotClassName + " target mapping migrated ("
+					+ retarget.describe() + "); reloading the mixin state");
 			}
-			RemoldAgent.warn("[Mixin] " + dotClassName + ": @Mixin target change detected but the"
-				+ " unload/re-mount pipeline failed; falling back to the native reload path,"
-				+ " which will report that a restart is required");
 		}
 		if (plan.usable() && plan.interfacesChanged()) {
 			if (!RemoldAgent.isEnhancedHotswapEnabled()) {
@@ -274,9 +276,9 @@ public final class MixinHotSwap {
 			// reload 之前的旧 ClassInfo。新增/改名的 handler 必须先补进元数据再 reload，
 			// 否则 reload 直接抛 "Conform error ... please restart client"，热更被迫降级为重启。
 			syncToken = MixinClassInfoSync.sync(transformer, dotClassName, node);
-			List<String> raw = transformer.reload(dotClassName, node);
+			List<String> raw = reloadWithRetry(transformer, dotClassName, node);
 			if (raw == null || raw.isEmpty()) {
-				raw = transformer.reload(dotClassName.replace('.', '/'), node);
+				raw = reloadWithRetry(transformer, dotClassName.replace('.', '/'), node);
 			}
 			targets = normalize(raw);
 		} catch (Throwable t) {
@@ -287,6 +289,7 @@ public final class MixinHotSwap {
 			// 前置策略可能已经把 priority 字段 / 接口表对齐到新值；reload 失败必须原样撤回，
 			// 否则旧 state 会声称“已经是新结构”，后续每次 reload 的比较基线都错位。
 			MixinReloadPolicy.rollback(transformer, dotClassName, plan);
+			MixinRetarget.rollback(transformer, dotClassName, retarget);
 			reportReloadFailure(dotClassName, t);
 			return true;
 		}
@@ -318,6 +321,15 @@ public final class MixinHotSwap {
 				return true;
 			}
 			targets = normalize(registered);
+		}
+
+		if (retarget != null) {
+			// 旧目标必须重织入一次才能把注入产物摘掉；新目标由 reload 返回。
+			Set<String> affected = new LinkedHashSet<>(targets);
+			affected.addAll(retarget.affected());
+			targets = new ArrayList<>(affected);
+			RemoldAgent.info("[Mixin] " + dotClassName + " retargeted (" + retarget.describe()
+				+ "); re-weaving " + targets);
 		}
 
 		// reload/登记成功后再记录批次报告：失败/被拒绝的模板不能进“变更列表”，
@@ -378,35 +390,56 @@ public final class MixinHotSwap {
 	}
 
 	/**
-	 * {@code @Mixin(targets=...)} 变更的差集卸载 + 重新挂载。
-	 *
-	 * <p>重新登记会让 {@code MixinConfig.prepare()} 依据<b>新字节码</b>重建 {@code MixinInfo}，
-	 * 因此必须先把新模板字节接进 Mixin 的字节码提供方，并驱逐该 Mixin 的 {@code ClassInfo}
-	 * 缓存——否则新 {@code MixinInfo} 读到的仍是旧字节/旧元数据。失败时收回覆盖层登记，
-	 * 让调用方回落原生 reload（那里会给出“需重启”的诊断）。</p>
-	 *
-	 * @return 需要重织入的目标类（旧 ∪ 新）；失败返回 {@code null}
-	 */
-	private static List<String> retargetMixin(IMixinTransformer transformer, String dotClassName,
-			byte[] newMixinBytes, ClassNode node) {
-		MixinBytecodeOverlay.install();
-		MixinBytecodeOverlay.register(dotClassName, newMixinBytes);
-		MixinBytecodeOverlay.evictClassInfoCache(
-			Collections.singletonList(MixinInnerClassSupport.internalName(dotClassName)));
-		List<String> affected = MixinRetarget.apply(transformer, dotClassName, node,
-			FabricLauncherSpoof::suppress, FabricLauncherSpoof::restore, MixinConfigDiff.LOADER_HOOK);
-		if (affected == null) {
-			MixinBytecodeOverlay.clear(Collections.singletonList(dotClassName));
-		}
-		return affected;
-	}
-
-	/**
 	 * 把本模板内部类的最新字节登记到 Mixin 字节码提供方的覆盖层。
 	 *
 	 * <p>字节来源优先级：本轮批次的源码级字节（{@code sourceBytecodeCache}）→ 监控目录里的最新
 	 * {@code .class}。前者在桥接阶段之前就已写入，因此与批次内类的处理顺序无关。</p>
 	 */
+	/**
+	 * 调 {@code IMixinTransformer.reload}，并对「Mixin 正忙于另一次织入」这一瞬态做有界重试。
+	 *
+	 * <p>上游 {@code MixinProcessor.reload} 在 {@code ActivityStack} 处于活动状态时直接抛
+	 * {@code Cannot reload mixin if re-entrant lock entered}：这是<b>并发</b>信号（别的线程正在
+	 * 织入某个类，例如启动期的大量类加载），不是结构契约拒绝。热更发生在文件保存后的任意时刻，
+	 * 因此这里按 120ms 递增退避重试几次；仍失败才按真实失败上报。重试是幂等的：
+	 * {@code MixinInfo.validate()} 的 {@code finally} 会清掉 pendingState。</p>
+	 */
+	private static List<String> reloadWithRetry(IMixinTransformer transformer, String mixinClass,
+			ClassNode node) throws Throwable {
+		Throwable last = null;
+		for (int attempt = 0; attempt < 4; attempt++) {
+			try {
+				return transformer.reload(mixinClass, node);
+			} catch (Throwable t) {
+				last = t;
+				if (!isMixinBusy(t)) {
+					throw t;
+				}
+				try {
+					Thread.sleep(120L * (attempt + 1));
+				} catch (InterruptedException interrupted) {
+					Thread.currentThread().interrupt();
+					throw t;
+				}
+			}
+		}
+		throw last;
+	}
+
+	/** 上游“Mixin 正在织入别的类”的瞬态信号（按消息判定，避免硬链接上游异常类型）。 */
+	private static boolean isMixinBusy(Throwable t) {
+		for (Throwable cur = t; cur != null; cur = cur.getCause()) {
+			String message = cur.getMessage();
+			if (message != null && message.contains("re-entrant lock")) {
+				return true;
+			}
+			if (cur.getCause() == cur) {
+				break;
+			}
+		}
+		return false;
+	}
+
 	private static void registerInnerClassBytes(String mixinDotName, List<String> innerNames) {
 		if (innerNames == null || innerNames.isEmpty()) {
 			return;

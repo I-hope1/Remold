@@ -1,5 +1,7 @@
 package remold.reflect.mixin;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
@@ -14,47 +16,106 @@ import java.util.function.Function;
 /**
  * 「{@code @Mixin(targets=...)} 变更」的差集卸载 + 重新挂载（纯反射）。
  *
- * <p><b>为什么不能走 reload</b>：上游 {@code MixinInfo.Reloaded} 直接抛
- * {@code Cannot change target classes}。即使绕过该判据，{@code MixinInfo.targetClasses} /
- * {@code targetClassNames} 也是构造期写入的 {@code final} 结构，{@code mixinMapping}、
- * {@code unhandledTargets}、{@code globalMixinList} 与目标 {@code ClassInfo.mixins} 四处元数据
- * 同样停留在旧目标上——单靠一次 reload 无法把 Mixin 从旧目标迁到新目标。</p>
+ * <p><b>为什么不能只靠 reload</b>：上游 {@code MixinInfo.Reloaded} 直接抛
+ * {@code Cannot change target classes}。但这里<b>不能</b>走“摘除 + 重新登记”的路线：
+ * {@code MixinInfo} 构造器会通过 {@code MixinConfig} 启动时捕获的 {@code IMixinService}
+ * 重新读一次字节码（<b>不是</b> Remold 的覆盖层），读到的仍是磁盘上的旧模板；旧模板声明的旧目标
+ * 早已加载，于是直接抛 {@code MixinTargetAlreadyLoadedException}（真机实测，见
+ * {@code docs/status.md} 的 Mixin 热更边界）。</p>
  *
- * <p><b>做法</b>：把旧 {@code MixinInfo} 从配置的全部索引里摘除（等价于“配置里删掉这个 Mixin”），
- * 再用 {@link NewMixinRegistrar} 按新字节码重新登记——新 {@code MixinInfo} 会依据新的
- * {@code @Mixin} 注解重建目标集合与映射，于是差集自然成立：</p>
+ * <p><b>做法</b>：在调用 {@code reload} <b>之前</b>把 {@code MixinInfo} 的目标元数据与配置索引
+ * 迁到新目标，使 {@code Reloaded.validateChanges} 的
+ * {@code readTargetClasses(...).equals(this.targetClasses)} 判据自然成立；随后照常 reload，
+ * 由 Mixin 自己重建状态并返回目标列表。</p>
+ *
  * <ul>
- *   <li>旧目标 − 新目标：映射已摘除，宿主重织入时不再命中该 Mixin → 注入产物随重织入消失；</li>
- *   <li>新目标 − 旧目标：新登记已把 {@code MixinInfo} 挂进目标映射 → 重织入时注入生效；</li>
- *   <li>交集：仍按新字节码重织入。</li>
+ *   <li>{@code MixinInfo.targetClasses / targetClassNames / declaredTargets}：内容替换为新目标；</li>
+ *   <li>{@code config.mixinMapping / unhandledTargets}：旧目标摘除、新目标挂入；</li>
+ *   <li>旧目标 {@code ClassInfo.mixins}：移除该 {@code MixinInfo}（新目标的条目由 reload 的
+ *       {@code readTargetClasses} 自行补入）。</li>
  * </ul>
  *
- * <p><b>失败回滚</b>：重新登记失败时把旧 {@code MixinInfo} 原样放回它被摘除的每个索引位置
- * （列表尾、映射列表、未处理目标、全局集合、目标 {@code ClassInfo.mixins}），调用方据此回落原生
- * reload 路径，得到既有的「需重启」诊断。绝不留下“已从配置摘除但没登记回来”的半状态。</p>
- *
- * <p><b>登记前提</b>：新字节码必须已经能被 Mixin 的字节码提供方读到（调用方负责把新字节登记进
- * 覆盖层并驱逐 {@code ClassInfo} 缓存），否则 {@code prepare()} 会读到旧字节或抛
- * {@code ClassNotFoundException}。</p>
+ * <p><b>回滚</b>：{@link #apply} 返回的快照必须在 reload 失败时交给 {@link #rollback} 还原，
+ * 否则配置索引会停留在“已迁到新目标、但状态仍是旧目标”的半更新状态。</p>
  */
 public final class MixinRetarget {
 
 	private MixinRetarget() {
 	}
 
+	/** 一次目标迁移的快照：{@code affected} 需要重织入（旧目标 ∪ 新目标）。 */
+	public static final class Result {
+
+		private final List<String> affected;
+		private final List<String> oldTargets;
+		private final List<String> newTargets;
+		private final Object config;
+		private final Object info;
+		private final List<Object> oldTargetClasses;
+		private final List<Object> oldTargetClassNames;
+		private final List<Object> oldDeclaredTargets;
+		private final Map<String, List<Object>> removedMapping;
+		private final Set<String> removedUnhandled;
+		private final Map<Object, Set<Object>> removedClassInfoMixins;
+
+		private Result(List<String> affected, List<String> oldTargets, List<String> newTargets,
+				Object config, Object info, List<Object> oldTargetClasses, List<Object> oldTargetClassNames,
+				List<Object> oldDeclaredTargets, Map<String, List<Object>> removedMapping,
+				Set<String> removedUnhandled, Map<Object, Set<Object>> removedClassInfoMixins) {
+			this.affected = affected;
+			this.oldTargets = oldTargets;
+			this.newTargets = newTargets;
+			this.config = config;
+			this.info = info;
+			this.oldTargetClasses = oldTargetClasses;
+			this.oldTargetClassNames = oldTargetClassNames;
+			this.oldDeclaredTargets = oldDeclaredTargets;
+			this.removedMapping = removedMapping;
+			this.removedUnhandled = removedUnhandled;
+			this.removedClassInfoMixins = removedClassInfoMixins;
+		}
+
+		/** 需要重织入的目标类（点分名，旧 ∪ 新）。 */
+		public List<String> affected() {
+			return this.affected;
+		}
+
+		public List<String> oldTargets() {
+			return this.oldTargets;
+		}
+
+		public List<String> newTargets() {
+			return this.newTargets;
+		}
+
+		public String describe() {
+			return this.oldTargets + " -> " + this.newTargets;
+		}
+	}
+
 	/**
-	 * 按新字节码重建该 Mixin 的目标映射。
+	 * 把该 Mixin 的目标元数据与配置索引迁到新目标。
 	 *
-	 * @param transformer  当前生效的 Mixin 织入器
-	 * @param dotClassName 被热更的 Mixin 点分类名
-	 * @param classNode    新字节码的 ASM ClassNode（不透明对象）
-	 * @param suppress     “目标类已加载”检查抑制函数（{@code null} = 本加载器不提供）
-	 * @param restore      抑制令牌恢复函数（{@code null} = 本加载器不提供）
-	 * @param loaderHook   诊断用：加载器检查点描述，可为 {@code null}
-	 * @return 需要重织入的目标类点分名（旧目标 ∪ 新目标）；重建失败返回 {@code null}
+	 * <p>调用方必须在返回非 {@code null} 后立即执行 {@code transformer.reload(dotClassName, node)}：
+	 * reload 会重建状态并把新目标写回 {@code mixinMapping}。reload 失败时必须调用
+	 * {@link #rollback}。</p>
+	 *
+	 * @return 迁移结果（含需要重织入的目标）；无法迁移（未登记、新目标解析不到、目标集合未变）返回 {@code null}
 	 */
-	public static List<String> apply(Object transformer, String dotClassName, Object classNode,
+	public static Result apply(Object transformer, String dotClassName, Object classNode,
 			Function<Collection<String>, Object> suppress, Consumer<Object> restore, String loaderHook) {
+		return apply(transformer, dotClassName, classNode, suppress, restore, loaderHook, null);
+	}
+
+	/**
+	 * 同上，但允许注入 {@code ClassInfo} 解析器（单测用：真实 {@code ClassInfo.forName} 需要
+	 * Mixin 服务与目标字节，普通 JUnit 里拿不到）。
+	 *
+	 * @param classInfoResolver 接收内部名、返回 {@code ClassInfo}（或 {@code null}）；{@code null} 表示走真实反射
+	 */
+	static Result apply(Object transformer, String dotClassName, Object classNode,
+			Function<Collection<String>, Object> suppress, Consumer<Object> restore, String loaderHook,
+			Function<String, Object> classInfoResolver) {
 		if (transformer == null || dotClassName == null || classNode == null) {
 			return null;
 		}
@@ -74,163 +135,54 @@ public final class MixinRetarget {
 		if (info == null) {
 			return null;
 		}
-
-		Detached detached = detach(config, info, dotClassName);
-		if (detached == null) {
-			return null;
-		}
-		List<String> registered;
 		try {
-			registered = NewMixinRegistrar.tryRegister(transformer, dotClassName, classNode,
-				suppress, restore, loaderHook);
-		} catch (Throwable t) {
-			detached.restore();
-			return null;
-		}
-		if (registered == null || registered.isEmpty()) {
-			detached.restore();
-			return null;
-		}
-		Set<String> affected = new LinkedHashSet<>(detached.oldTargets);
-		for (String target : registered) {
-			if (target != null) {
-				affected.add(target.replace('/', '.'));
-			}
-		}
-		return new ArrayList<>(affected);
-	}
-
-	// ------------------------------------------------------------------ 摘除
-
-	/** 摘除时的原始位置快照，用于失败回滚。 */
-	private static final class Detached {
-
-		private final Object config;
-		private final Object info;
-		private final String dotClassName;
-		private final String simpleName;
-		private final List<String> oldTargets;
-		private final Map<String, List<Object>> mappingLists = new LinkedHashMap<>();
-		private final Set<String> unhandled = new LinkedHashSet<>();
-		private final Map<Object, Set<Object>> classInfoMixins = new LinkedHashMap<>();
-		private final boolean preparedBefore;
-		private final boolean globalListed;
-
-		private Detached(Object config, Object info, String dotClassName, String simpleName,
-				List<String> oldTargets, boolean preparedBefore, boolean globalListed) {
-			this.config = config;
-			this.info = info;
-			this.dotClassName = dotClassName;
-			this.simpleName = simpleName;
-			this.oldTargets = oldTargets;
-			this.preparedBefore = preparedBefore;
-			this.globalListed = globalListed;
-		}
-
-		/** 把旧 {@code MixinInfo} 放回被摘除的每个索引位置（尽力而为，失败只影响诊断）。 */
-		@SuppressWarnings("unchecked")
-		private void restore() {
-			try {
-				Object mixinsObject = MixinReflection.readField(this.config, "mixins");
-				if (mixinsObject instanceof List<?> mixins) {
-					((List<Object>) mixins).add(this.info);
-				}
-				Object classes = MixinReflection.readField(this.config, "mixinClasses");
-				if (classes instanceof List<?> mixinClasses) {
-					((List<Object>) mixinClasses).add(this.simpleName);
-				}
-				Object mapping = MixinReflection.readField(this.config, "mixinMapping");
-				if (mapping instanceof Map<?, ?> map) {
-					Map<Object, Object> target = (Map<Object, Object>) map;
-					for (Map.Entry<String, List<Object>> entry : this.mappingLists.entrySet()) {
-						Object existing = target.get(entry.getKey());
-						List<Object> list;
-						if (existing instanceof List<?> existingList) {
-							list = (List<Object>) existingList;
-						} else {
-							list = new ArrayList<>();
-							target.put(entry.getKey(), list);
-						}
-						for (Object value : entry.getValue()) {
-							if (!list.contains(value)) {
-								list.add(value);
-							}
-						}
-					}
-				}
-				Object unhandledObject = MixinReflection.readField(this.config, "unhandledTargets");
-				if (unhandledObject instanceof Set<?> set) {
-					((Set<Object>) set).addAll(this.unhandled);
-				}
-				if (this.globalListed) {
-					Object global = MixinReflection.readField(this.config, "globalMixinList");
-					if (global instanceof Set<?> set) {
-						((Set<Object>) set).add(this.dotClassName);
-					}
-				}
-				for (Map.Entry<Object, Set<Object>> entry : this.classInfoMixins.entrySet()) {
-					Object mixins = MixinReflection.readField(entry.getKey(), "mixins");
-					if (mixins instanceof Set<?> set) {
-						((Set<Object>) set).addAll(entry.getValue());
-					}
-				}
-				MixinReflection.writeBoolean(this.config, "prepared", this.preparedBefore);
-			} catch (Throwable ignored) {
-				// 回滚是尽力而为；调用方仍会回落原生 reload，并得到“需重启”的诊断。
-			}
-		}
-	}
-
-	@SuppressWarnings("unchecked")
-	private static Detached detach(Object config, Object info, String dotClassName) {
-		try {
-			String mixinPackage = (String) MixinReflection.invoke(config, "getMixinPackage");
-			if (mixinPackage == null || !dotClassName.startsWith(mixinPackage)) {
+			List<String> oldTargets = dotted(MixinReflection.invoke(info, "getTargetClasses"));
+			List<String> newTargets = dotted(NewMixinRegistrar.declaredTargets(classNode));
+			if (newTargets.isEmpty() || new LinkedHashSet<>(oldTargets).equals(new LinkedHashSet<>(newTargets))) {
 				return null;
 			}
-			String simpleName = dotClassName.substring(mixinPackage.length());
-			List<String> oldTargets = new ArrayList<>();
-			Object rawTargets = MixinReflection.invoke(info, "getTargetClasses");
-			if (rawTargets instanceof List<?> list) {
-				for (Object target : list) {
-					if (target != null) {
-						oldTargets.add(String.valueOf(target).replace('/', '.'));
-					}
+			List<Object> newTargetClasses = new ArrayList<>(newTargets.size());
+			for (String target : newTargets) {
+				Object classInfo = resolveClassInfo(info, classInfoResolver, target.replace('.', '/'));
+				if (classInfo == null) {
+					// 新目标解析不到（拼错 / 字节不可读）：交给原生 reload 给出明确拒绝。
+					return null;
 				}
+				newTargetClasses.add(classInfo);
 			}
-			if (oldTargets.isEmpty()) {
-				return null;
-			}
-			Object global = MixinReflection.readField(config, "globalMixinList");
-			boolean globalListed = global instanceof Set<?> set && set.contains(dotClassName);
-			Object prepared = MixinReflection.readField(config, "prepared");
-			boolean preparedBefore = Boolean.TRUE.equals(prepared);
 
-			Detached detached = new Detached(config, info, dotClassName, simpleName, oldTargets,
-				preparedBefore, globalListed);
+			List<Object> oldTargetClasses = snapshot(info, "targetClasses");
+			List<Object> oldTargetClassNames = snapshot(info, "targetClassNames");
+			List<Object> oldDeclaredTargets = snapshot(info, "declaredTargets");
 
-			Object mixinsObject = MixinReflection.readField(config, "mixins");
-			if (mixinsObject instanceof List<?> mixins) {
-				((List<Object>) mixins).remove(info);
+			Map<String, List<Object>> removedMapping = new LinkedHashMap<>();
+			Set<String> removedUnhandled = new LinkedHashSet<>();
+			Map<Object, Set<Object>> removedClassInfoMixins = new LinkedHashMap<>();
+
+			// 1) MixinInfo 的目标元数据：内容替换（字段是 final 容器，只能改内容）
+			replace(info, "targetClasses", newTargetClasses);
+			List<Object> internalNames = new ArrayList<>(newTargets.size());
+			for (String target : newTargets) {
+				internalNames.add(target.replace('.', '/'));
 			}
-			Object classes = MixinReflection.readField(config, "mixinClasses");
-			if (classes instanceof List<?> mixinClasses) {
-				((List<Object>) mixinClasses).remove(simpleName);
-			}
+			replace(info, "targetClassNames", internalNames);
+			replaceDeclaredTargets(info, newTargets);
+
+			// 2) 配置索引：旧目标摘除
 			Object mapping = MixinReflection.readField(config, "mixinMapping");
 			if (mapping instanceof Map<?, ?> map) {
-				Map<Object, Object> target = (Map<Object, Object>) map;
-				Iterator<? extends Map.Entry<?, ?>> entries = target.entrySet().iterator();
+				Iterator<? extends Map.Entry<?, ?>> entries = map.entrySet().iterator();
 				while (entries.hasNext()) {
 					Map.Entry<?, ?> entry = entries.next();
 					if (!(entry.getValue() instanceof List<?> list)) {
 						continue;
 					}
+					@SuppressWarnings("unchecked")
 					List<Object> values = (List<Object>) list;
 					if (!values.contains(info)) {
 						continue;
 					}
-					detached.mappingLists.put(String.valueOf(entry.getKey()), new ArrayList<>(values));
+					removedMapping.put(String.valueOf(entry.getKey()), new ArrayList<>(values));
 					values.remove(info);
 					if (values.isEmpty()) {
 						entries.remove();
@@ -239,37 +191,197 @@ public final class MixinRetarget {
 			}
 			Object unhandledObject = MixinReflection.readField(config, "unhandledTargets");
 			if (unhandledObject instanceof Set<?> set) {
+				@SuppressWarnings("unchecked")
 				Set<Object> unhandled = (Set<Object>) set;
 				for (String target : oldTargets) {
 					if (unhandled.remove(target)) {
-						detached.unhandled.add(target);
+						removedUnhandled.add(target);
 					}
 				}
 			}
 			for (String target : oldTargets) {
-				Object classInfo = classInfoFor(info, target.replace('.', '/'));
+				Object classInfo = resolveClassInfo(info, classInfoResolver, target.replace('.', '/'));
 				if (classInfo == null) {
 					continue;
 				}
 				Object mixins = MixinReflection.readField(classInfo, "mixins");
-				if (mixins instanceof Set<?> set && ((Set<Object>) set).contains(info)) {
-					((Set<Object>) set).remove(info);
-					detached.classInfoMixins.put(classInfo, Set.of(info));
+				if (mixins instanceof Set<?> set && ((Set<?>) set).contains(info)) {
+					@SuppressWarnings("unchecked")
+					Set<Object> mixinSet = (Set<Object>) set;
+					mixinSet.remove(info);
+					removedClassInfoMixins.put(classInfo, Set.of(info));
 				}
 			}
-			if (globalListed) {
-				Object globalSet = MixinReflection.readField(config, "globalMixinList");
-				if (globalSet instanceof Set<?> set) {
-					((Set<Object>) set).remove(dotClassName);
+
+			// 3) 配置索引：新目标挂入（reload 的 readTargetClasses 只补 ClassInfo.mixins）
+			for (String target : newTargets) {
+				List<Object> list = null;
+				if (mapping instanceof Map<?, ?> map) {
+					Object existing = map.get(target);
+					if (existing instanceof List<?> existingList) {
+						@SuppressWarnings("unchecked")
+						List<Object> typed = (List<Object>) existingList;
+						list = typed;
+					} else {
+						list = new ArrayList<>();
+						@SuppressWarnings("unchecked")
+						Map<Object, Object> raw = (Map<Object, Object>) map;
+						raw.put(target, list);
+					}
+				}
+				if (list != null && !list.contains(info)) {
+					list.add(info);
+				}
+				if (unhandledObject instanceof Set<?> set) {
+					@SuppressWarnings("unchecked")
+					Set<Object> unhandled = (Set<Object>) set;
+					unhandled.add(target);
 				}
 			}
-			return detached;
+
+			Set<String> affected = new LinkedHashSet<>(oldTargets);
+			affected.addAll(newTargets);
+			return new Result(new ArrayList<>(affected), oldTargets, newTargets, config, info,
+				oldTargetClasses, oldTargetClassNames, oldDeclaredTargets, removedMapping,
+				removedUnhandled, removedClassInfoMixins);
 		} catch (Throwable t) {
 			return null;
 		}
 	}
 
-	/** 按内部名取上游 {@code ClassInfo}；取不到返回 {@code null}（不阻断摘除）。 */
+	/** reload 失败时把目标元数据与配置索引还原到迁移前。 */
+	public static void rollback(Object transformer, String dotClassName, Result result) {
+		if (result == null) {
+			return;
+		}
+		try {
+			replace(result.info, "targetClasses", result.oldTargetClasses);
+			replace(result.info, "targetClassNames", result.oldTargetClassNames);
+			replace(result.info, "declaredTargets", result.oldDeclaredTargets);
+
+			Object mapping = MixinReflection.readField(result.config, "mixinMapping");
+			if (mapping instanceof Map<?, ?> map) {
+				@SuppressWarnings("unchecked")
+				Map<Object, Object> raw = (Map<Object, Object>) map;
+				for (String newTarget : result.newTargets) {
+					Object existing = raw.get(newTarget);
+					if (existing instanceof List<?> list) {
+						@SuppressWarnings("unchecked")
+						List<Object> values = (List<Object>) list;
+						values.remove(result.info);
+						if (values.isEmpty()) {
+							raw.remove(newTarget);
+						}
+					}
+				}
+				for (Map.Entry<String, List<Object>> entry : result.removedMapping.entrySet()) {
+					Object existing = raw.get(entry.getKey());
+					List<Object> list;
+					if (existing instanceof List<?> existingList) {
+						@SuppressWarnings("unchecked")
+						List<Object> typed = (List<Object>) existingList;
+						list = typed;
+					} else {
+						list = new ArrayList<>();
+						raw.put(entry.getKey(), list);
+					}
+					for (Object value : entry.getValue()) {
+						if (!list.contains(value)) {
+							list.add(value);
+						}
+					}
+				}
+			}
+			Object unhandledObject = MixinReflection.readField(result.config, "unhandledTargets");
+			if (unhandledObject instanceof Set<?> set) {
+				@SuppressWarnings("unchecked")
+				Set<Object> unhandled = (Set<Object>) set;
+				for (String newTarget : result.newTargets) {
+					unhandled.remove(newTarget);
+				}
+				unhandled.addAll(result.removedUnhandled);
+			}
+			for (Map.Entry<Object, Set<Object>> entry : result.removedClassInfoMixins.entrySet()) {
+				Object mixins = MixinReflection.readField(entry.getKey(), "mixins");
+				if (mixins instanceof Set<?> set) {
+					@SuppressWarnings("unchecked")
+					Set<Object> mixinSet = (Set<Object>) set;
+					mixinSet.addAll(entry.getValue());
+				}
+			}
+		} catch (Throwable ignored) {
+			// 回滚是尽力而为；调用方已经给出“需重启”的诊断。
+		}
+	}
+
+	// ------------------------------------------------------------------ 工具
+
+	private static List<String> dotted(Object rawTargets) {
+		if (!(rawTargets instanceof List<?> list)) {
+			return List.of();
+		}
+		List<String> out = new ArrayList<>(list.size());
+		for (Object target : list) {
+			if (target == null) {
+				continue;
+			}
+			String dotted = String.valueOf(target).replace('/', '.');
+			if (!out.contains(dotted)) {
+				out.add(dotted);
+			}
+		}
+		return out;
+	}
+
+	private static List<Object> snapshot(Object target, String fieldName) {
+		Object value = MixinReflection.readField(target, fieldName);
+		if (value instanceof List<?> list) {
+			return new ArrayList<>(list);
+		}
+		return new ArrayList<>();
+	}
+
+	@SuppressWarnings("unchecked")
+	private static void replace(Object target, String fieldName, Collection<?> values) {
+		Object value = MixinReflection.readField(target, fieldName);
+		if (!(value instanceof List<?> list)) {
+			return;
+		}
+		List<Object> typed = (List<Object>) list;
+		typed.clear();
+		typed.addAll(values);
+	}
+
+	/** 把 {@code MixinInfo.declaredTargets}（{@code List<DeclaredTarget>}）替换成新目标。 */
+	private static void replaceDeclaredTargets(Object info, List<String> newTargets) throws Exception {
+		Field field = MixinReflection.findField(info.getClass(), "declaredTargets");
+		if (field == null) {
+			return;
+		}
+		Object value = field.get(info);
+		if (!(value instanceof List<?> list)) {
+			return;
+		}
+		Class<?> declaredTargetType = Class.forName(
+			"org.spongepowered.asm.mixin.transformer.MixinInfo$DeclaredTarget", true,
+			info.getClass().getClassLoader());
+		Constructor<?> constructor = declaredTargetType.getDeclaredConstructor(String.class, boolean.class);
+		constructor.setAccessible(true);
+		List<Object> rebuilt = new ArrayList<>(newTargets.size());
+		for (String target : newTargets) {
+			rebuilt.add(constructor.newInstance(target, Boolean.FALSE));
+		}
+		@SuppressWarnings("unchecked")
+		List<Object> typed = (List<Object>) list;
+		typed.clear();
+		typed.addAll(rebuilt);
+	}
+
+	private static Object resolveClassInfo(Object info, Function<String, Object> resolver, String internalName) {
+		return resolver != null ? resolver.apply(internalName) : classInfoFor(info, internalName);
+	}
+
+	/** 按内部名取上游 {@code ClassInfo}；取不到返回 {@code null}（不阻断迁移）。 */
 	private static Object classInfoFor(Object info, String internalName) {
 		try {
 			ClassLoader loader = info.getClass().getClassLoader();

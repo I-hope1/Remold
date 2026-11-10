@@ -269,9 +269,10 @@ class HeapFieldWatchCalibrationTest {
 			String coldReason = child.resultRaw("schema", "reason", null);
 			assertTrue(coldReason != null && !coldReason.isEmpty(),
 				"the cold branch must say why the migration could not run; output was:\n" + child.output);
-			assertEquals("12", child.snapshot("after-redefine", "total"),
+			// snapshot(field, phase)：两个参数顺序不能颠倒，否则冷分支永远在找 phase=total 的行。
+			assertEquals("12", child.snapshot("total", "after-redefine"),
 				"cold branch: the denominator must still be calibrated on the method-only redefine");
-			assertEquals("5", child.snapshot("after-redefine", "nullCount"),
+			assertEquals("5", child.snapshot("nullCount", "after-redefine"),
 				"cold branch: the known answer must still hold on the method-only redefine");
 			assertEquals("ok", child.result("identity", "value", "after-redefine"),
 				"cold branch: the grouping identities must still hold");

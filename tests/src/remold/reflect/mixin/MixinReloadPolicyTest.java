@@ -266,7 +266,9 @@ class MixinReloadPolicyTest {
 	}
 
 	private static final class FakeInfo {
-		private int priority;
+		// 与上游 MixinInfo 一致：priority 是 final int，写入必须走 Unsafe 分支。
+		// 非 final 的 fake 会让 writePriority 走普通反射分支，测不到真实路径。
+		private final int priority;
 		private final List<String> targets;
 		private final FakeState state;
 		private final FakeClassInfo info;

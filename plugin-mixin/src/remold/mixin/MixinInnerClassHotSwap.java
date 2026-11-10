@@ -80,9 +80,6 @@ final class MixinInnerClassHotSwap {
 	private static final java.util.concurrent.atomic.AtomicInteger FIELD_CHANGED = new java.util.concurrent.atomic.AtomicInteger();
 	private static final java.util.concurrent.atomic.AtomicInteger GATE_REJECTED = new java.util.concurrent.atomic.AtomicInteger();
 
-	/** 已就 legacy 点分名缓存回退告警过的类名（只为不刷屏：每个类名一条）。 */
-	private static final java.util.Set<String> LEGACY_FALLBACK_WARNED = ConcurrentHashMap.newKeySet();
-
 	/** 本轮分母（战报口径）。 */
 	static String metricsSummary() {
 		return "executed=" + EXECUTED.get() + " fieldTableChanged=" + FIELD_CHANGED.get()
@@ -570,16 +567,19 @@ final class MixinInnerClassHotSwap {
 	/**
 	 * 闸 4 判据：该 (加载器, 类名) 是否有可用的基线字节。
 	 *
-	 * <p><b>为什么按 (加载器, 类名) 判</b>：{@link RemoldAgent#bytecodeCache} 只有点分名一条索引，
-	 * 同名不同加载器的两份类会互相冒充，所以它不是本闸的判定来源。本闸按强度依次认三个来源：</p>
+	 * <p><b>基线 = JVM 实际加载的那份（不变量 C2）</b>。判定只认两个来源，顺序即基线链：</p>
 	 * <ol>
-	 *   <li>premain 录口 {@link MixinClassBaseline}：键 = 加载器实例身份 + 类名，值是 JVM 最终定义字节；</li>
-	 *   <li>本源 {@link #LOADED}：本进程里已成功 redefine 过的字节，确实在 JVM 里生效过；</li>
-	 *   <li>legacy 点分名缓存 {@link RemoldAgent#bytecodeCache}：<b>显式、非静默</b>的兼容回退
-	 *       （每个类名告警一次）。它同样只在 agent 注册之后才有内容（Remold 的
-	 *       {@code CacheWarmingTransformer} 与热更路径都在注册之后写），因此不会"复活"注册前
-	 *       就加载的类；代价是丢了加载器维度，只在实参 loader 与录口都对不上时兜底。</li>
+	 *   <li>本源 {@link #LOADED}：本进程里<b>已成功</b> redefine 过的字节（失败的重定义不落账，
+	 *       见 {@link #redefineSyntheticSafely} 的落账点），它确实在 JVM 里生效过——所以是基线链
+	 *       R0→R1→R2 上成功那一步的产物；</li>
+	 *   <li>premain 录口 {@link MixinClassBaseline}：键 = 加载器实例身份 + 类名，值是 JVM 最终定义字节
+	 *       （R0）。这是唯一能证明"基线属于这个加载器"的来源。</li>
 	 * </ol>
+	 *
+	 * <p><b>legacy 点分名缓存不参与判定</b>：{@link RemoldAgent#bytecodeCache} 只有点分名一条索引，
+	 * 同名不同加载器的两份类会互相冒充。把它当基线来源，等于给"同名互相冒充"留一条静默后门，
+	 * 而且它无法保证"这份字节是本加载器 JVM 实际加载的那份"。它只保留在 {@link #isUnchanged}
+	 * 的"无实质变更短路"里当启发式（宁可多一次 redefine，也不拿它证明身份）。</p>
 	 *
 	 * @param loader  定义该类的加载器（合成类通常来自 Knot 的加载器）
 	 * @param dotName 合成类点分名
@@ -589,25 +589,33 @@ final class MixinInnerClassHotSwap {
 		if (dotName == null) {
 			return "no baseline bytes (unknown class name); restart required";
 		}
-		if (LOADED.containsKey(dotName)) {
-			return null;
-		}
-		if (MixinClassBaseline.baselineOf(loader, dotName) != null) {
-			return null;
-		}
-		// legacy 回退只在"录口根本没这个类名"时可用：一旦录口已经证明该名字属于别的加载器，
-		// 点分名缓存里那条同名字节就不能给当前加载器放行（否则就是同名互相冒充）。
-		if (RemoldAgent.bytecodeCache.get(dotName) != null
-				&& !MixinClassBaseline.recordedUnderOtherLoader(loader, dotName)) {
-			if (LEGACY_FALLBACK_WARNED.add(dotName)) {
-				RemoldAgent.warn("[Mixin] synthetic inner class " + dotName + ": baseline resolved from the"
-					+ " legacy dot-name bytecode cache (no premain (loader, name) capture); the loader"
-					+ " dimension is unverified for this class");
-			}
+		if (baselineBytes(loader, dotName) != null) {
 			return null;
 		}
 		return "no baseline bytes (class loaded before the agent registered); baseline "
 			+ MixinClassBaseline.metricsSummary() + "; restart required";
+	}
+
+	/**
+	 * 闸 4 的唯一基线解析口：{@link #LOADED}（已成功 redefine、确实在 JVM 里生效过的字节）优先，
+	 * 其次 premain 录口（(加载器, 类名) 键的 defineClass 最终字节）。
+	 *
+	 * <p>顺序有意义：成功 redefine 之后 JVM 里的那份是 {@code LOADED}，录口里仍是 R0——基线链
+	 * R0→R1→R2 必须取"成功后的字节"，否则第二次热更会拿自己的第一版字节当基线。</p>
+	 *
+	 * <p>未命中时 {@link MixinClassBaseline#baselineOf} 会计一次 {@code missed}（一次拒绝计一次）。</p>
+	 *
+	 * @return 基线字节（内部副本，调用方不得修改）；{@code null} = 没有基线
+	 */
+	static byte[] baselineBytes(ClassLoader loader, String dotName) {
+		if (dotName == null) {
+			return null;
+		}
+		byte[] loaded = LOADED.get(dotName);
+		if (loaded != null) {
+			return loaded;
+		}
+		return MixinClassBaseline.baselineOf(loader, dotName);
 	}
 
 	private static void blockHost(String hostDotName, String syntheticName, String why) {

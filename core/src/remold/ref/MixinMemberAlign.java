@@ -72,20 +72,22 @@ public final class MixinMemberAlign {
 		public final List<String> missingFromCandidate;   // 基线有、候选重映射后仍没有的生成成员（墓碑桩补上后为空）
 		public final List<String> addedInCandidate;       // 候选新增（基线没有）的生成成员
 		public final List<String> tombstoned;             // 本次保活为最小空操作桩的基线生成方法
+		public final List<String> tombstonedFields;       // 本次保活为墓碑字段的基线字段
 
 		Result(byte[] bytes, int renamed, boolean reordered,
 		       List<String> missingFromCandidate, List<String> addedInCandidate,
-		       List<String> tombstoned) {
+		       List<String> tombstoned, List<String> tombstonedFields) {
 			this.bytes                = bytes;
 			this.renamed              = renamed;
 			this.reordered            = reordered;
 			this.missingFromCandidate = Collections.unmodifiableList(missingFromCandidate);
 			this.addedInCandidate     = Collections.unmodifiableList(addedInCandidate);
 			this.tombstoned           = Collections.unmodifiableList(tombstoned);
+			this.tombstonedFields     = Collections.unmodifiableList(tombstonedFields);
 		}
 
 		public boolean changed() {
-			return renamed > 0 || reordered || !tombstoned.isEmpty();
+			return renamed > 0 || reordered || !tombstoned.isEmpty() || !tombstonedFields.isEmpty();
 		}
 	}
 
@@ -119,8 +121,15 @@ public final class MixinMemberAlign {
 		// 之后会继续执行旧版字节码，并调用旧字节码里的 handler$*/redirect$* —— 方法被删掉就是
 		// NoSuchMethodError。保留一个同名/同描述符/同访问标志的最小空操作桩即可无害返回。
 		List<String> tombstoned = tombstoneMissing(aligned, base);
+		// 基线字段墓碑保留（Tombstone Field Retention）：Mixin 注入的 @Unique 字段在 retarget 移走时
+		// 会从重织入产物里消失；若物理删除，JBR/DCEVM 会对该类的全部实例做 ModifyInstances 缩容，
+		// 随后 retarget 迁回时又把它当"新字段"扩容 + 执行字段初始化补丁 —— 两次堆伸缩正是真机
+		// LootContextPredicate.combinedCondition 被置 null 的肇事窗口。保留墓碑字段后实例内存布局
+		// 在 R1~R4 全程恒定，两次伸缩都不会发生。
+		List<String> tombstonedFields = tombstoneMissingFields(aligned, base);
 		boolean reordered = orderMembers(base, aligned);
-		byte[] out = (reordered || !tombstoned.isEmpty()) ? write(aligned) : remapped;
+		byte[] out = (reordered || !tombstoned.isEmpty() || !tombstonedFields.isEmpty())
+			? write(aligned) : remapped;
 
 		List<String> missing = new ArrayList<>();
 		List<String> added   = new ArrayList<>();
@@ -139,7 +148,31 @@ public final class MixinMemberAlign {
 				added.add(m.name + m.desc);
 			}
 		}
-		return new Result(out, renamed, reordered, missing, added, tombstoned);
+		return new Result(out, renamed, reordered, missing, added, tombstoned, tombstonedFields);
+	}
+
+	/**
+	 * 为基线中已消失的字段补墓碑（同名/同描述符/同访问标志，字段表顺序由 {@link #orderMembers} 复原）。
+	 *
+	 * <p>只处理「基线有、候选无」的<b>字段</b>（Mixin 的 {@code @Unique} 字段是典型来源）。保留字段
+	 * 意味着实例内存布局不变：retarget 移走 Mixin 时字段不消失（不缩容），迁回时也不新增（不扩容、
+	 * 不再触发 {@code Applying instance field init patch}）。字段值语义上属于"注入已移除"，但墓碑字段
+	 * 本身没有读者（重织入产物里不再引用它），保留不会改变业务行为。</p>
+	 *
+	 * <p>构造器（{@code <init>}）与 {@code <clinit>} 不在此列——它们不是字段。</p>
+	 */
+	private static List<String> tombstoneMissingFields(ClassNode cand, ClassNode base) {
+		Set<String> present = new HashSet<>();
+		for (FieldNode f : cand.fields) present.add(f.name + f.desc);
+		List<String> stubbed = new ArrayList<>();
+		for (FieldNode f : base.fields) {
+			String key = f.name + f.desc;
+			if (present.contains(key)) continue;
+			cand.fields.add(new FieldNode(f.access, f.name, f.desc, f.signature, f.value));
+			present.add(key);
+			stubbed.add(key);
+		}
+		return stubbed;
 	}
 
 	/**

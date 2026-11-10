@@ -104,6 +104,49 @@ class NewMixinRegistrarTest {
 		assertTrue(config.mixins.isEmpty());
 	}
 
+	/**
+	 * 子包里的 Mixin 必须能登记：{@code MixinConfig.mixinClasses} 存的是<b>相对名</b>，
+	 * 允许多层子包（真实工程里 {@code honkai.ProbeSubHotcMixin} / {@code client.hud.YyyMixin}）。
+	 * 旧实现按"单段简单名"拒绝点号，会把子包里的合法 Mixin 全部挡在登记之外。
+	 */
+	@Test
+	void registersMixinDeclaredInASubPackage() {
+		FakeTransformer transformer = new FakeTransformer();
+		FakeConfig config = new FakeConfig();
+		transformer.processor = new FakeProcessor(Collections.singletonList(config));
+
+		List<String> targets = NewMixinRegistrar.tryRegister(transformer,
+			"com.example.mixin.honkai.ProbeSubHotcMixin", mixinNode());
+
+		assertEquals(List.of("net/minecraft/entity/mob/CreeperEntity"), targets,
+			"a sub-package mixin must be registered like any other");
+		assertTrue(config.mixinClasses.contains("honkai.ProbeSubHotcMixin"),
+			"mixinClasses must receive the dotted relative name: " + config.mixinClasses);
+		assertNotNull(config.find("com.example.mixin.honkai.ProbeSubHotcMixin"),
+			"the MixinInfo must be keyed by the full dotted class name");
+		assertTrue(FakeConfig.globalMixinList.contains("com.example.mixin.honkai.ProbeSubHotcMixin"),
+			"globalMixinList must carry the full dotted class name");
+	}
+
+	/** 对照：真正非法的相对名（空段）仍然必须被拒绝，不得因为放宽点号而一并放行。 */
+	@Test
+	void malformedRelativeNameIsRejectedInsteadOfRegistered() {
+		FakeTransformer transformer = new FakeTransformer();
+		FakeConfig config = new FakeConfig();
+		transformer.processor = new FakeProcessor(Collections.singletonList(config));
+
+		List<String> targets = NewMixinRegistrar.tryRegister(transformer,
+			"com.example.mixin..Bad", mixinNode());
+
+		assertTrue(targets.isEmpty(), "an empty path segment is not a valid mixin name");
+		assertTrue(config.mixinClasses.isEmpty(), "a malformed name must not reach mixinClasses");
+		assertTrue(config.mixins.isEmpty());
+		assertFalse(remold.reflect.mixin.NewMixinRegistrar.isValidRelativeMixinName(""), "empty name is invalid");
+		assertFalse(remold.reflect.mixin.NewMixinRegistrar.isValidRelativeMixinName(".leading"), "leading dot is invalid");
+		assertFalse(remold.reflect.mixin.NewMixinRegistrar.isValidRelativeMixinName("trailing."), "trailing dot is invalid");
+		assertTrue(remold.reflect.mixin.NewMixinRegistrar.isValidRelativeMixinName("client.hud.YyyMixin"), "nested relative name");
+	}
+
 	@Test
 	void mixinInternalsStillMatchTheReflectionContract() throws Exception {
 		Class<?> config = Class.forName("org.spongepowered.asm.mixin.transformer.MixinConfig", false,

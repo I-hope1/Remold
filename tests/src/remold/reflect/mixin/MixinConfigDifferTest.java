@@ -108,13 +108,15 @@ class MixinConfigDifferTest {
 		assertFalse(config.mixinClasses.contains("honkai.SubMixin"), "the nested mixin must be removed");
 		assertTrue(MixinConfigDiffer.isRemovedFromConfig(subMixinDot), "the tombstone must be recorded");
 
-		// 重新列出 → 自愈必须命中（相对名 = 全名的点分后缀）。
+		// 重新列出 → 自愈判定必须命中（相对名 = 全名的点分后缀）。
+		// 这里刻意<b>不</b>先触发 onAssetsChanged：它的新增分支会调 markReaddedToConfig 无条件清墓碑，
+		// 那样就测不到 isRemovedFromConfig 自己的自愈判定（真实路径：类批次里的登记器直接问这一句）。
 		Files.writeString(configFile, "{\"mixins\": [\"honkai.SubMixin\"]}", StandardCharsets.UTF_8);
-		scheduled.clear();
-		MixinConfigDiffer.onAssetsChanged(Set.of(configFile), context(config, scheduled));
-
 		assertFalse(MixinConfigDiffer.isRemovedFromConfig(subMixinDot),
 			"a re-listed nested mixin must heal its tombstone instead of staying blocked");
+
+		scheduled.clear();
+		MixinConfigDiffer.onAssetsChanged(Set.of(configFile), context(config, scheduled));
 		assertTrue(config.mixinClasses.contains("honkai.SubMixin"), "the nested mixin must be registered again");
 		assertNotNull(config.find(subMixinDot));
 		assertEquals(List.of("com.example.target.RemovableTarget"), scheduled);

@@ -1069,6 +1069,18 @@ public class RemoldAgent {
 	//region Agent Initialization
 	static AnnotationTransformer transformer;
 
+	/**
+	 * 加载后观测器（只记录、不改字节的 transformer），按登记顺序。
+	 *
+	 * <p>见 {@link #addTrailingLoadObserver(java.lang.instrument.ClassFileTransformer)}：它们必须挂在
+	 * 所有会改字节的 transformer 之后，才能看到 JVM 最终定义的那份字节。</p>
+	 */
+	private static final java.util.Set<java.lang.instrument.ClassFileTransformer> TRAILING_OBSERVERS =
+		java.util.Collections.synchronizedSet(new java.util.LinkedHashSet<>());
+
+	/** {@code initTransformer} 已经把登记在册的观测器全部挂上 JVM 之后置 true。 */
+	private static volatile boolean TRAILING_OBSERVERS_ARMED;
+
 	private static final java.util.concurrent.atomic.AtomicBoolean BOOTSTRAP_APPENDED =
 		new java.util.concurrent.atomic.AtomicBoolean();
 
@@ -1290,6 +1302,51 @@ public class RemoldAgent {
 			} else {
 				info("Skipped dynamic profiler injector because structural hotswap is unsupported.");
 			}
+			// 观测器最后挂（含 profiler 注入之后）：它们拿到的就是 JVM 最终定义的字节。
+			synchronized (TRAILING_OBSERVERS) {
+				for (java.lang.instrument.ClassFileTransformer observer : TRAILING_OBSERVERS) {
+					registerTrailingObserver(observer);
+				}
+				TRAILING_OBSERVERS_ARMED = true;
+			}
+		}
+	}
+
+	/**
+	 * 登记一个"加载后观测器"：只读加载期字节、不改任何字节的 transformer。
+	 *
+	 * <p><b>为什么需要延迟注册</b>：JVM 先整组跑 {@code canRetransform=false} 的 transformer，
+	 * 再按注册顺序跑 {@code canRetransform=true} 的那组。观测器若在 {@link #initTransformer()} 之前
+	 * 挂上（插件 {@code onPremain} 正是这么早的窗口），拿到的是对齐/织入<b>之前</b>的字节；
+	 * 因此本方法只登记，真正的 {@code addTransformer} 落在 {@code initTransformer} 末尾。
+	 * {@code initTransformer} 之后再登记则立即挂上（幂等：同一实例只挂一次）。</p>
+	 *
+	 * <p><b>边界</b>：观测器只覆盖 Remold 自身与 profiler 之后注册的 transformer；此后别的插件
+	 * 若再挂 rewriter，它对字节的改写不在观测视野内。</p>
+	 *
+	 * @param observer 观测器；{@code null} 忽略
+	 */
+	public static void addTrailingLoadObserver(java.lang.instrument.ClassFileTransformer observer) {
+		if (observer == null) {
+			return;
+		}
+		synchronized (TRAILING_OBSERVERS) {
+			if (!TRAILING_OBSERVERS.add(observer)) {
+				return;
+			}
+			if (!TRAILING_OBSERVERS_ARMED || inst == null) {
+				return;   // 精确落点：initTransformer 末尾统一挂
+			}
+			registerTrailingObserver(observer);
+		}
+	}
+
+	private static void registerTrailingObserver(java.lang.instrument.ClassFileTransformer observer) {
+		try {
+			inst.addTransformer(observer, true);
+		} catch (Throwable t) {
+			warn("[Agent] Failed to register a trailing load observer; its view of the defined bytes is"
+				+ " lost (callers must fail-closed instead of degrading silently): " + t);
 		}
 	}
 

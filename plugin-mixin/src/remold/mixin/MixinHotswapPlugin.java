@@ -29,12 +29,27 @@ public class MixinHotswapPlugin implements HotswapPlugin {
 		MixinConfigDiff.onAssetsChanged(changedAssets);
 	}
 
+	/**
+	 * premain 极早期窗口：把 defineClass 基线录口交出去（不变量 C2）。
+	 *
+	 * <p>必须早于宿主加载任何游戏类，否则合成内部类的基线永远抓不到，那条路径只剩
+	 * "拒绝并要求重启"。真正的 {@code addTransformer} 由 core 延迟到所有 rewriter 之后执行，
+	 * 因此录到的是 JVM 最终定义的那份字节。</p>
+	 */
+	@Override
+	public void onPremain(String agentArgs) {
+		MixinClassBaseline.install();
+	}
+
 	@Override
 	public void onAgentInit(Instrumentation inst) {
+		// agentmain（运行期 attach）路径没有 onPremain 窗口：同样幂等安装一次。
+		MixinClassBaseline.install();
 		try {
 			RemoldAgent.addTransformerBridge(new MixinBytecodeBridge());
 			RemoldAgent.info("[Mixin] Re-weaving bridge registered (plugin-mixin)");
 			RemoldAgent.info("[Mixin] Config-diff support active (new Mixin classes and mixins.json removal/readd)");
+			RemoldAgent.info("[Mixin] premain defineClass baseline recorder: " + MixinClassBaseline.metricsSummary());
 		} catch (Throwable t) {
 			RemoldAgent.warn("[Mixin] Failed to register re-weaving bridge; proceeding without Mixin support: " + t);
 		}

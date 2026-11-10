@@ -149,6 +149,14 @@ public final class MixinHotSwap {
 					+ " never defined as a loadable class)");
 			}
 			return false;
+		} finally {
+			// 接力登记：任何一次 Mixin 类变更都顺带重试「配置已列出、字节刚落地」的待决条目。
+			// 放在 finally 里是因为注册失败也应当让别的待决项继续有机会；成本 O(待决数)。
+			try {
+				MixinConfigDiff.retryPendingMixins();
+			} catch (Throwable ignored) {
+				// 接力失败不影响本轮结果；retryPending 内部已按上限给出诊断。
+			}
 		}
 	}
 
@@ -294,6 +302,14 @@ public final class MixinHotSwap {
 			// MixinConfig.reloadMixin 只在启动时解析出的 mixin 列表里查找；返回空说明该类
 			// 不在任何已注册配置的 mixin 列表中——即运行期新增的 Mixin 类。优先尝试把新类
 			// 补登记进配置；内部结构不匹配时退化为明确提示重启，而不是谎报成功。
+			//
+			// 迟到的 .class 必须能自愈：上一次登记尝试若因为「读不到字节」把 null 写进了上游
+			// ClassInfo 缓存（负缓存永不重试），这一次即使字节已落地也会继续失败。所以先把本模板
+			// 自己的新字节接进 Mixin 的字节码提供方并驱逐该类的 ClassInfo，再登记。
+			MixinBytecodeOverlay.install();
+			MixinBytecodeOverlay.register(dotClassName, newMixinBytes);
+			MixinBytecodeOverlay.evictClassInfoCache(
+				Collections.singletonList(MixinInnerClassSupport.internalName(dotClassName)));
 			List<String> registered = NewMixinRegistrar.tryRegister(transformer, dotClassName, node);
 			if (registered.isEmpty()) {
 				RemoldAgent.warn("[Mixin] " + dotClassName + " is not registered in the startup Mixin config"

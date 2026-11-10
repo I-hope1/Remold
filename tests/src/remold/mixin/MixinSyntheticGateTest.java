@@ -94,7 +94,8 @@ class MixinSyntheticGateTest {
 	 * @Test methods in this suite. Changing this number means editing the Javadoc ledger too —
 	 * {@link #caseLedgerMatchesTheSuite()} fails otherwise.
 	 */
-	static final int GATE_CASE_COUNT = 6;
+	// A2 合入后新增「失败 redefine 不改基线 + R0→R1→R2 链」用例（kind=pass）。
+	static final int GATE_CASE_COUNT = 7;
 
 	/** Rejections that must each own exactly one in-method control. */
 	static final int REJECTION_CASE_COUNT = 4;
@@ -111,6 +112,7 @@ class MixinSyntheticGateTest {
 
 	private static final Case[] LEDGER = {
 		new Case("passingCandidateIsRedefinedExactlyOnceThroughTheSingleExit", "single-exit", "pass", false),
+		new Case("failedRedefineNeverMovesTheBaselineAndTheChainKeepsOnlyAcceptedBytes", "baseline-chain", "pass", false),
 		new Case("rejectsEveryCandidateOnceTheHostBatchIsBlocked", "gate1", "reject", true),
 		new Case("rejectsCandidateThatDropsAnAlreadyLoadedConstructor", "gate2", "reject", true),
 		new Case("rejectsCandidateThatWouldShrinkTheFieldTable", "gate3", "reject", true),
@@ -162,7 +164,7 @@ class MixinSyntheticGateTest {
 				gatedGates.add(entry.gate());
 			}
 		}
-		assertEquals(1, pass, "exactly one passing case: the single exit must be exercised once");
+		assertEquals(2, pass, "two passing cases: the single exit once + the accepted-bytes baseline chain");
 		assertEquals(REJECTION_CASE_COUNT, rejections, "every gate owns exactly one rejection case");
 		assertEquals(1, half, "the half-migrated-instance semantics is one dedicated case");
 		assertEquals(CONTROL_COUNT, controls,

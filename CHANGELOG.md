@@ -107,6 +107,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   JBR/DCEVM 在 safepoint 重定义后，**已在调用栈上的旧栈帧**继续执行旧字节码并调用旧 `handler$*`，
   墓碑桩让其无害返回，物理根除 `NoSuchMethodError: handler$*`（retarget 卸载旧目标时高发）。
   业务方法不复活（只处理合成成员）。
+- **基线字段墓碑保留（Tombstone Field Retention）**：`MixinMemberAlign` 对「基线存在、重织入产物已消失」
+  的字段保留同名/同描述符/同访问标志与基线槽位。Mixin `@Unique` 字段在 `retarget` 移走时不再从目标类
+  字段表消失、迁回时也不再当新字段加回，**实例内存布局 R1~R4 全程恒定**，消除 JBR/DCEVM 的
+  `ModifyInstances` 缩容/扩容与重复 `Applying instance field init patch`（真机 `LootContextPredicate.combinedCondition`
+  被置 null 的肇事窗口）。
+- **重定义三切面堆实例哨兵**：`remold.ref.HeapFieldWatch`（`-Dremold.probe.heapwatch=true`，
+  `-Dremold.probe.heapwatch.class=...`、`-Dremold.probe.heapwatch.field=...`）在 `redefineClasses` 前、
+  返回后、字段初始化补丁完成后枚举目标类实例并报告 `nullCount` 与首例身份；只读、默认关闭。
 - **合成匿名类无实质变更短路（参考 `AnonClassAligner` 的 no-op 语义）**：`MixinInnerClassHotSwap` 记账
   已成功重定义的合成类字节，重新生成的字节与运行期已加载字节完全一致时跳过 `redefineClasses`
   （预重定义与兜底重定义两条路径都短路），避免 JBR/DCEVM 无谓的堆实例重写窗口。

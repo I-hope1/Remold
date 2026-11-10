@@ -75,6 +75,17 @@ final class MixinInnerClassHotSwap {
 	/** 规则 3（事务一致性）：本轮因合成类无法安全重定义而必须中止的宿主目标类。 */
 	private static final java.util.Set<String> BLOCKED = ConcurrentHashMap.newKeySet();
 
+	/** 分母计数（战报必须带）：实际执行的 redefine、其中字段表变化的次数、被闸拒绝的次数。 */
+	private static final java.util.concurrent.atomic.AtomicInteger EXECUTED = new java.util.concurrent.atomic.AtomicInteger();
+	private static final java.util.concurrent.atomic.AtomicInteger FIELD_CHANGED = new java.util.concurrent.atomic.AtomicInteger();
+	private static final java.util.concurrent.atomic.AtomicInteger GATE_REJECTED = new java.util.concurrent.atomic.AtomicInteger();
+
+	/** 本轮分母（战报口径）。 */
+	static String metricsSummary() {
+		return "executed=" + EXECUTED.get() + " fieldTableChanged=" + FIELD_CHANGED.get()
+			+ " gateRejected=" + GATE_REJECTED.get();
+	}
+
 	/** 宿主目标类本轮是否必须中止重定义（合成类无法安全落地时不允许半残状态）。 */
 	static boolean isBlocked(String targetDotName) {
 		return targetDotName != null && BLOCKED.contains(targetDotName);
@@ -230,15 +241,10 @@ final class MixinInnerClassHotSwap {
 				registerGenerated(conformedDotted, bytes);
 				// 标成 Remold 自己发起的重定义：否则 AnnotationTransformer 会把这次 redefine 当成
 				// 外部热更，在已经织入过的合成类上再跑一遍桥接。
-				remold.ref.HeapFieldWatch.snapshot("before-synthetic-redefine", conformedDotted);
-				RemoldAgent.enterInternalRedefine(java.util.Collections.singleton(conformedDotted));
-				try {
-					inst.redefineClasses(new ClassDefinition(live, bytes));
-				} finally {
-					RemoldAgent.exitInternalRedefine();
+				if (!redefineSyntheticSafely(inst, live, conformedDotted, bytes, mixinDotName)) {
+					result.failures.add(conformedDotted + " (rejected by the single-exit gate)");
+					continue;
 				}
-				remold.ref.HeapFieldWatch.snapshot("after-synthetic-redefine", conformedDotted);
-				recordLoaded(conformedDotted, bytes);
 				result.redefined.add(conformedDotted);
 			} catch (Throwable t) {
 				result.failures.add(info + " (" + rootMessage(t) + ")");
@@ -465,7 +471,7 @@ final class MixinInnerClassHotSwap {
 							boolean bytesChanged = previous == null || !java.util.Arrays.equals(previous, bytes);
 							boolean staleSchema = describeSchemaChange(live, fresh) != null;
 							if (bytesChanged || staleSchema) {
-								redefineSyntheticBeforeTarget(inst, live, conformedDotted, bytes);
+								redefineSyntheticBeforeTarget(inst, live, conformedDotted, bytes, targetDotName);
 							}
 						}
 					}
@@ -485,29 +491,98 @@ final class MixinInnerClassHotSwap {
 	}
 
 	/**
+	 * **唯一**的合成类 redefine 出口：所有路径只经这里，闸与计数都在出口内，避免下一条路径漏网。
+	 *
+	 * <p>前置闸（全部只靠反射/字节解析，不需要旧字节）：</p>
+	 * <ol>
+	 *   <li>宿主已被标 BLOCKED → 直接拒绝（规则 3）；</li>
+	 *   <li>已加载构造器描述符集合必须是新字节 `<init>` 集合的子集（否则旧调用点必 NSME）；</li>
+	 *   <li>已加载字段表必须是新字节字段表的子集（否则触发实例迁移）；</li>
+	 *   <li>没有基线字节（类在 agent 注册前就已加载）→ 拒绝并**要求重启**，不静默降级。</li>
+	 * </ol>
+	 *
+	 * @return true = 已执行 redefine；false = 被闸拒绝（调用方必须中止宿主）
+	 */
+	static boolean redefineSyntheticSafely(Instrumentation inst, Class<?> live, String name, byte[] bytes,
+			String hostDotName) {
+		if (inst == null || live == null || bytes == null) {
+			return false;
+		}
+		if (hostDotName != null && BLOCKED.contains(hostDotName)) {
+			GATE_REJECTED.incrementAndGet();
+			return false;
+		}
+		ClassNode fresh = new ClassNode();
+		new org.objectweb.asm.ClassReader(bytes).accept(fresh, 0);
+		java.util.Set<String> freshCtors = new java.util.HashSet<>();
+		for (org.objectweb.asm.tree.MethodNode m : fresh.methods) {
+			if ("<init>".equals(m.name)) {
+				freshCtors.add(m.desc);
+			}
+		}
+		for (java.lang.reflect.Constructor<?> c : live.getDeclaredConstructors()) {
+			if (!freshCtors.contains(Type.getConstructorDescriptor(c))) {
+				GATE_REJECTED.incrementAndGet();
+				blockHost(hostDotName, name, "missing loaded <init>" + Type.getConstructorDescriptor(c));
+				return false;
+			}
+		}
+		java.util.List<String> loadedFields = MixinSyntheticSchema.loadedFields(live);
+		java.util.List<String> freshFields = MixinSyntheticSchema.nodeFields(fresh);
+		for (String field : loadedFields) {
+			if (!freshFields.contains(field)) {
+				GATE_REJECTED.incrementAndGet();
+				blockHost(hostDotName, name, "field table would shrink: " + field);
+				return false;
+			}
+		}
+		if (!LOADED.containsKey(name) && RemoldAgent.bytecodeCache.get(name) == null) {
+			GATE_REJECTED.incrementAndGet();
+			blockHost(hostDotName, name, "no baseline bytes (class loaded before the agent registered)");
+			return false;
+		}
+		if (!loadedFields.equals(freshFields)) {
+			FIELD_CHANGED.incrementAndGet();
+		}
+		remold.ref.HeapFieldWatch.snapshot("before-synthetic-redefine", name);
+		RemoldAgent.enterInternalRedefine(java.util.Collections.singleton(name));
+		try {
+			inst.redefineClasses(new ClassDefinition(live, bytes));
+		} catch (Throwable t) {
+			GATE_REJECTED.incrementAndGet();
+			blockHost(hostDotName, name, "redefineClasses failed: " + t);
+			return false;
+		} finally {
+			RemoldAgent.exitInternalRedefine();
+		}
+		remold.ref.HeapFieldWatch.snapshot("after-synthetic-redefine", name);
+		recordLoaded(name, bytes);
+		EXECUTED.incrementAndGet();
+		return true;
+	}
+
+	private static void blockHost(String hostDotName, String syntheticName, String why) {
+		if (hostDotName != null) {
+			BLOCKED.add(hostDotName);
+		}
+		RemoldAgent.warn("[Mixin] synthetic inner class " + syntheticName + ": " + why
+			+ "; refusing the redefine and aborting the host target redefine"
+			+ " (restart required if the class was loaded before the agent registered).");
+	}
+
+	/**
 	 * 在目标类重定义**之前**把已加载的合成内部类重定义到新形态，关闭「目标已换新 <init> 描述符、
 	 * 合成类还是旧构造器」的窗口。
 	 *
 	 * <p>失败只 warn、不抛：目标类的重定义照常进行，随后 {@link #apply} 还会再试一次；最坏情况是
 	 * 这一轮仍然存在窗口，必须由调用方看到明确诊断（不能静默）。</p>
 	 */
-	private static void redefineSyntheticBeforeTarget(Instrumentation inst, Class<?> live, String name, byte[] bytes) {
-		try {
-			remold.ref.HeapFieldWatch.snapshot("before-synthetic-redefine", name);
-			RemoldAgent.enterInternalRedefine(java.util.Collections.singleton(name));
-			try {
-				inst.redefineClasses(new ClassDefinition(live, bytes));
-			} finally {
-				RemoldAgent.exitInternalRedefine();
-			}
-			remold.ref.HeapFieldWatch.snapshot("after-synthetic-redefine", name);
-			recordLoaded(name, bytes);
+	private static void redefineSyntheticBeforeTarget(Instrumentation inst, Class<?> live, String name, byte[] bytes,
+			String hostDotName) {
+		if (redefineSyntheticSafely(inst, live, name, bytes, hostDotName)) {
 			RemoldAgent.info("[Mixin] synthetic inner class " + name
-				+ " redefined BEFORE its target redefine (structural window closed)");
-		} catch (Throwable t) {
-			RemoldAgent.warn("[Mixin] unable to redefine synthetic inner class " + name
-				+ " before its target redefine (" + rootMessage(t) + "); the target may still call the old"
-				+ " constructor until the follow-up inner-class hot update runs");
+				+ " redefined BEFORE its target redefine (structural window closed); metrics: "
+				+ metricsSummary());
 		}
 	}
 

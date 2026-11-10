@@ -47,13 +47,16 @@ import org.junit.jupiter.api.Test;
  * here.</p>
  *
  * <p><b>Case ledger (read this before quoting a case count)</b>: the suite holds
- * {@value #GATE_CASE_COUNT} {@code @Test} methods, not 8. The two numbers that show up in
- * reports count different things:</p>
+ * {@value #GATE_CASE_COUNT} {@code @Test} methods. The numbers that show up in reports count
+ * different things, and two of them now coincide numerically — that is a coincidence, not a
+ * synonym:</p>
  * <table border="1">
  *   <caption>Ledger</caption>
  *   <tr><th>case</th><th>gate</th><th>kind</th><th>in-method control</th></tr>
  *   <tr><td>{@code passingCandidateIsRedefinedExactlyOnceThroughTheSingleExit}</td>
  *       <td>single exit (all four gates pass)</td><td>pass</td><td>no</td></tr>
+ *   <tr><td>{@code failedRedefineNeverMovesTheBaselineAndTheChainKeepsOnlyAcceptedBytes}</td>
+ *       <td>baseline chain</td><td>pass</td><td>no</td></tr>
  *   <tr><td>{@code rejectsEveryCandidateOnceTheHostBatchIsBlocked}</td>
  *       <td>1 — host batch BLOCKED</td><td>reject</td><td>yes (clear the flag)</td></tr>
  *   <tr><td>{@code rejectsCandidateThatDropsAnAlreadyLoadedConstructor}</td>
@@ -63,29 +66,32 @@ import org.junit.jupiter.api.Test;
  *   <tr><td>{@code rejectsCandidateWhenNoBaselineBytesExist}</td>
  *       <td>4 — baseline bytes required</td><td>reject</td><td>yes (seed the baseline)</td></tr>
  *   <tr><td>{@code shrinkingTableNeverReachesTheJvmSoLiveInstancesKeepTheirState}</td>
- *       <td>3 — half-migrated instance semantics</td><td>half</td><td>yes (keep the field)</td></tr>
+ *       <td>3 — half-migrated instance, shrink direction</td><td>half</td><td>yes (keep the field)</td></tr>
+ *   <tr><td>{@code expandedTableKeepsTheOldConstructorAndLeavesTheNewReferenceFieldNull}</td>
+ *       <td>3 — half-migrated instance, expansion direction</td><td>half</td><td>yes (grown ctor)</td></tr>
  * </table>
- * <p>So the three numbers in circulation count different things, and only the first is a case
- * count:</p>
+ * <p>So the three numbers in circulation count different things:</p>
  * <ul>
- *   <li><b>{@value #GATE_CASE_COUNT}</b> {@code @Test} methods = {@code 1 pass + 4 rejections +
- *       1 half-migrated};</li>
+ *   <li><b>{@value #GATE_CASE_COUNT}</b> {@code @Test} methods = {@code 2 pass + 4 rejections +
+ *       2 half-migrated};</li>
  *   <li><b>{@value #GATE_GROUP_COUNT}</b> gate-scoped assertion groups = {@code 4 gates ×
- *       (rejection + its control)} — the figure reported as "8", which counts each gate's control
- *       as if it were a case of its own;</li>
- *   <li><b>{@value #CONTROL_COUNT}</b> in-method controls = the 4 gate controls plus the file
- *       half-migrated case's restore-field control.</li>
+ *       (rejection + its control)} — a different thing that happens to be the same integer now
+ *       that the suite has both half-migrated directions;</li>
+ *   <li><b>{@value #CONTROL_COUNT}</b> in-method controls = the 4 gate controls plus the two
+ *       half-migrated cases' respective restore-field / grown-constructor controls.</li>
  * </ul>
  * <p>The controls are deliberately <b>inside</b> their rejection method instead of being separate
  * {@code @Test}s: a control only carries causal weight when it re-runs the identical name, host
  * and bytes after clearing exactly one condition, and a standalone control case goes green on its
  * own while proving nothing about the rejection it belongs to.
  * {@link #caseLedgerMatchesTheSuite()} pins the ledger mechanically (name set, per-gate coverage
- * and the 6-vs-8 arithmetic), so no report can drift away from the code.</p>
+ * and the pass/reject/half arithmetic), so no report can drift away from the code.</p>
  *
  * <p><b>JVM-level evidence</b>: the half-migrated semantics above run here against a recording
- * proxy. {@code MixinSyntheticGateProbe} replays the same gate decisions on a real
- * {@link Instrumentation} (real {@code redefineClasses}), and counts a host without enhanced
+ * proxy for the redefine itself, and against a real {@code defineClass} of the identical candidate
+ * bytes for the instance semantics. {@code MixinSyntheticGateProbe} additionally replays the same
+ * gate decisions on a real {@link Instrumentation} (real {@code redefineClasses}, including the
+ * expansion direction with a live pre-existing instance), and counts a host without enhanced
  * redefinition as {@code SKIP(non-jbr)} separately instead of folding it into a pass.</p>
  */
 class MixinSyntheticGateTest {
@@ -95,16 +101,17 @@ class MixinSyntheticGateTest {
 	 * {@link #caseLedgerMatchesTheSuite()} fails otherwise.
 	 */
 	// A2 合入后新增「失败 redefine 不改基线 + R0→R1→R2 链」用例（kind=pass）。
-	static final int GATE_CASE_COUNT = 7;
+	// C3 新增「扩容 + 保留旧 <init> 的半残实例」用例（kind=half），与缩容方向并列。
+	static final int GATE_CASE_COUNT = 8;
 
 	/** Rejections that must each own exactly one in-method control. */
 	static final int REJECTION_CASE_COUNT = 4;
 
-	/** Gate-scoped assertion groups = {@code REJECTION_CASE_COUNT × 2}; this is the reported "8". */
+	/** Gate-scoped assertion groups = {@code REJECTION_CASE_COUNT × 2} (distinct from the case count). */
 	static final int GATE_GROUP_COUNT = 8;
 
-	/** In-method controls: one per rejection, plus the half-migrated case's restore-field control. */
-	static final int CONTROL_COUNT = 5;
+	/** In-method controls: one per rejection, plus one for each half-migrated direction. */
+	static final int CONTROL_COUNT = 6;
 
 	/** {@code name, gate, kind} for every {@code @Test} method; {@code kind} is pass/control-driven. */
 	private record Case(String method, String gate, String kind, boolean control) {
@@ -117,7 +124,9 @@ class MixinSyntheticGateTest {
 		new Case("rejectsCandidateThatDropsAnAlreadyLoadedConstructor", "gate2", "reject", true),
 		new Case("rejectsCandidateThatWouldShrinkTheFieldTable", "gate3", "reject", true),
 		new Case("rejectsCandidateWhenNoBaselineBytesExist", "gate4", "reject", true),
-		new Case("shrinkingTableNeverReachesTheJvmSoLiveInstancesKeepTheirState", "gate3-half", "half", true),
+		new Case("shrinkingTableNeverReachesTheJvmSoLiveInstancesKeepTheirState", "gate3-half-shrink", "half", true),
+		new Case("expandedTableKeepsTheOldConstructorAndLeavesTheNewReferenceFieldNull", "gate3-half-expand", "half",
+			true),
 	};
 
 	/**
@@ -166,14 +175,15 @@ class MixinSyntheticGateTest {
 		}
 		assertEquals(2, pass, "two passing cases: the single exit once + the accepted-bytes baseline chain");
 		assertEquals(REJECTION_CASE_COUNT, rejections, "every gate owns exactly one rejection case");
-		assertEquals(1, half, "the half-migrated-instance semantics is one dedicated case");
+		assertEquals(2, half, "the half-migrated semantics needs both directions: shrink (blocked by gate 3)"
+			+ " and expansion (accepted, old <init> retained)");
 		assertEquals(CONTROL_COUNT, controls,
-			"every rejection and the half-migrated case must carry an in-method control");
-		assertEquals(REJECTION_CASE_COUNT + 1, controls,
-			"controls are the 4 gate controls plus the half-migrated case's restore-field control");
+			"every rejection and both half-migrated cases must carry an in-method control");
+		assertEquals(REJECTION_CASE_COUNT + 2, controls,
+			"controls are the 4 gate controls plus the two half-migrated cases' controls");
 		assertEquals(GATE_GROUP_COUNT, REJECTION_CASE_COUNT * 2,
-			"the '8' in reports is 4 gates x (rejection + control) = gate-scoped assertion groups,"
-				+ " not 8 @Test methods");
+			"gate-scoped assertion groups are 4 gates x (rejection + control); they are NOT the case count"
+				+ " even when the two integers happen to be equal");
 		assertEquals(GATE_CASE_COUNT, pass + rejections + half,
 			"the case count is pass + rejections + half; it must not include the controls");
 		assertTrue(gatedGates.containsAll(List.of("gate1", "gate2", "gate3", "gate4")),
@@ -446,6 +456,124 @@ class MixinSyntheticGateTest {
 			GateOutcome control = attempt(recorder, MixinSyntheticGateFixtures.Capturing.class, name, padded, host);
 			assertTrue(control.executed, "the field-table-preserving candidate must reach the exit");
 			assertEquals("v1:7:payload", live.describe(), "the control must not disturb the live instance either");
+		} finally {
+			cleanup(name, host);
+		}
+	}
+
+	// ------------------------------------------------------------ half-migrated instance (expansion)
+
+	/**
+	 * Expansion direction of the half-migrated-instance semantics (invariant C3).
+	 *
+	 * <p>The capture list grows from two members to four ({@code + val$b:Object},
+	 * {@code + val$c:int}) and the loaded 2-arg {@code <init>} survives because
+	 * {@link MixinSyntheticSchema#retainConstructors} copies it out of the loaded bytes. That
+	 * candidate is <b>accepted</b> by all four gates — nothing shrinks and the loaded constructor
+	 * set stays a subset — so the question this case answers is not "does the gate refuse it" but
+	 * "what does an instance built by the kept old constructor do afterwards".</p>
+	 *
+	 * <p>Measured, in two mechanical halves:</p>
+	 * <ol>
+	 *   <li>the retained constructor <b>is the old body</b>: its {@code PUTFIELD} set is exactly
+	 *       {@code this$0, val$a}, so the new {@code val$b} stays {@code null} and {@code val$c}
+	 *       stays {@code 0};</li>
+	 *   <li>calling the <b>new</b> body on such an instance throws {@link NullPointerException} at
+	 *       {@code test()} (the read of {@code val$b}), with the full stack asserted, not merely
+	 *       "some exception".</li>
+	 * </ol>
+	 *
+	 * <p><b>Why the shrink case is not a substitute</b>: {@link
+	 * #shrinkingTableNeverReachesTheJvmSoLiveInstancesKeepTheirState} proves gate 3 keeps a
+	 * shrinking table away from the JVM. That is the opposite direction; it never exercises the
+	 * expansion that a growing capture list produces, and it cannot show the NPE.</p>
+	 *
+	 * <p><b>Scope</b>: the unit-test JVM has no agent, so the redefine itself is the recording
+	 * proxy. The instance semantics therefore runs the identical candidate bytes through a real
+	 * {@code defineClass} in a private loader under the loaded name. The real
+	 * {@code redefineClasses} variant (a JVM-migrated pre-existing instance included) runs in
+	 * {@code MixinSyntheticGateProbe} on a JBR/DCEVM host; a host without enhanced redefinition is
+	 * counted there as {@code SKIP(non-jbr)}, never as a pass.</p>
+	 */
+	@Test
+	void expandedTableKeepsTheOldConstructorAndLeavesTheNewReferenceFieldNull() {
+		assertEquals(java.util.Set.of("this$0:Ljava/lang/Object;", "val$a:Ljava/lang/Object;"),
+			new java.util.LinkedHashSet<>(MixinSyntheticSchema.loadedFields(HalfInitOld.class)),
+			"precondition: the loaded class must be the 2-field shape, otherwise this is not an expansion");
+		Object outer = new Object();
+		assertEquals("v1:a", new HalfInitOld(outer, "a").test(),
+			"precondition: the 2-field body reads its captured field before any change");
+
+		MixinSyntheticHalfInitFixtures.Candidate candidate = MixinSyntheticHalfInitFixtures.expandedCandidate();
+		assertEquals(java.util.Set.of("this$0:Ljava/lang/Object;", "val$a:Ljava/lang/Object;",
+			"val$b:Ljava/lang/Object;", "val$c:I"), new java.util.LinkedHashSet<>(candidate.fields()),
+			"the candidate must be a strict expansion: the two captured fields plus a NEW REFERENCE field"
+				+ " and a primitive one");
+		assertEquals(4, candidate.fields().size(), "the growth case adds exactly two fields, no padding");
+		assertEquals(List.of(MixinSyntheticHalfInitFixtures.GROWN_CTOR_DESC, MixinSyntheticHalfInitFixtures.OLD_CTOR_DESC),
+			candidate.constructors(),
+			"the tombstone union must keep BOTH constructors: the grown capture list and the loaded 2-arg one");
+		assertEquals(List.of(MixinSyntheticHalfInitFixtures.OLD_CTOR_DESC), candidate.retained(),
+			"the 2-arg <init> exists in the candidate only because it was retained from the loaded bytes");
+		assertEquals(List.of("this$0", "val$a"), candidate.writesOfRetainedConstructor(),
+			"the retained <init> is the OLD body copied verbatim: it writes only the two old fields, so it cannot"
+				+ " initialise val$b / val$c");
+
+		RecordingInstrumentation recorder = new RecordingInstrumentation();
+		String name = uniqueName("expand");
+		String host = uniqueHost("expand");
+		MixinSyntheticGateFixtures.seedBaseline(definingLoader(), name, MixinSyntheticHalfInitFixtures.oldShapeBytes());
+		try {
+			assertArrayEquals(MixinSyntheticHalfInitFixtures.oldShapeBytes(),
+				MixinInnerClassHotSwap.baselineBytes(definingLoader(), name),
+				"precondition: the baseline is the bytes the JVM actually loaded, i.e. the 2-field shape");
+
+			GateOutcome outcome = attempt(recorder, HalfInitOld.class, name, candidate.bytes(), host);
+
+			assertTrue(outcome.executed, "an expansion must pass all four gates: no field shrinks and the retained"
+				+ " <init> keeps the loaded constructor set a subset");
+			assertEquals(0, outcome.gateRejectedDelta, "no gate may reject the expansion");
+			assertEquals(1, outcome.fieldChangedDelta, "an expanded field table must be counted as a field-table"
+				+ " change — that is the signal that the JVM re-lays out instances");
+			assertEquals(1, outcome.redefinitions.size(), "exactly one redefine call may leave the single exit");
+			assertArrayEquals(candidate.bytes(), outcome.redefinitions.get(0).getDefinitionClassFile(),
+				"the bytes handed to redefineClasses must be the retained-constructor candidate, so the semantics"
+					+ " measured below is the semantics the JVM would install");
+
+			// The identical bytes, defined under the loaded name in a private loader: same shape as after a
+			// real redefine, minus the redefine machinery the unit-test JVM cannot drive.
+			Class<?> expanded = MixinSyntheticHalfInitFixtures.loadInFreshLoader(candidate.bytes());
+			Object half = MixinSyntheticHalfInitFixtures.newInstance(expanded,
+				new Class<?>[]{Object.class, Object.class}, outer, "a");
+
+			Throwable npe = MixinSyntheticHalfInitFixtures.failureOf(half, MixinSyntheticHalfInitFixtures.BODY);
+			assertTrue(npe instanceof NullPointerException, "the NEW body reads the new reference field, and the"
+				+ " retained OLD constructor never assigned it: expected a NullPointerException, got " + npe
+				+ (npe == null ? "" : "\nfull stack:\n" + MixinSyntheticHalfInitFixtures.stackOf(npe)));
+			StackTraceElement top = npe.getStackTrace()[0];
+			assertEquals(MixinSyntheticHalfInitFixtures.BODY, top.getMethodName(),
+				"the NPE must be thrown by the new body's read, not by the constructor:\n"
+					+ MixinSyntheticHalfInitFixtures.stackOf(npe));
+			assertEquals(MixinSyntheticHalfInitFixtures.OLD_DOTTED, top.getClassName(),
+				"the failing frame must be the expanded class itself:\n" + MixinSyntheticHalfInitFixtures.stackOf(npe));
+			assertTrue(npe.getMessage() != null && npe.getMessage().contains("val$b"),
+				"the NPE must name the new reference field, otherwise the observation does not pin WHICH field"
+					+ " stayed null; message=" + npe.getMessage());
+
+			assertEquals(0, ((Integer) MixinSyntheticHalfInitFixtures.call(half,
+				MixinSyntheticHalfInitFixtures.COUNT)).intValue(),
+				"the retained <init> never writes val$c either, so the new primitive keeps the JVM default 0");
+
+			// Control: the ONLY difference is which constructor built the instance. The grown constructor
+			// does assign the new fields, so the identical new body returns normally.
+			Object fresh = MixinSyntheticHalfInitFixtures.newInstance(expanded,
+				new Class<?>[]{Object.class, Object.class, Object.class, int.class}, outer, "a", "b", 7);
+			assertEquals("v2:b:7", MixinSyntheticHalfInitFixtures.call(fresh, MixinSyntheticHalfInitFixtures.BODY),
+				"control: with the new fields initialised the same body returns normally, so the NPE above is"
+					+ " caused by the retained constructor, not by the new body");
+			assertEquals(7, ((Integer) MixinSyntheticHalfInitFixtures.call(fresh,
+				MixinSyntheticHalfInitFixtures.COUNT)).intValue(),
+				"control: the primitive capture is readable when the grown constructor wrote it");
 		} finally {
 			cleanup(name, host);
 		}

@@ -498,7 +498,9 @@ final class MixinInnerClassHotSwap {
 	 *   <li>宿主已被标 BLOCKED → 直接拒绝（规则 3）；</li>
 	 *   <li>已加载构造器描述符集合必须是新字节 `<init>` 集合的子集（否则旧调用点必 NSME）；</li>
 	 *   <li>已加载字段表必须是新字节字段表的子集（否则触发实例迁移）；</li>
-	 *   <li>没有基线字节（类在 agent 注册前就已加载）→ 拒绝并**要求重启**，不静默降级。</li>
+	 *   <li>没有基线字节（类在 agent 注册前就已加载）→ 拒绝并**要求重启**，不静默降级。
+	 *       判据见 {@link #baselineMissingReason(ClassLoader, String)}：只认 premain 录口
+	 *       （键 = 加载器标识 + 类名，见 {@link MixinClassBaseline}）与本源已成功 redefine 过的字节。</li>
 	 * </ol>
 	 *
 	 * @return true = 已执行 redefine；false = 被闸拒绝（调用方必须中止宿主）
@@ -536,9 +538,10 @@ final class MixinInnerClassHotSwap {
 				return false;
 			}
 		}
-		if (!LOADED.containsKey(name) && RemoldAgent.bytecodeCache.get(name) == null) {
+		String baselineMissing = baselineMissingReason(live.getClassLoader(), name);
+		if (baselineMissing != null) {
 			GATE_REJECTED.incrementAndGet();
-			blockHost(hostDotName, name, "no baseline bytes (class loaded before the agent registered)");
+			blockHost(hostDotName, name, baselineMissing);
 			return false;
 		}
 		if (!loadedFields.equals(freshFields)) {
@@ -559,6 +562,35 @@ final class MixinInnerClassHotSwap {
 		recordLoaded(name, bytes);
 		EXECUTED.incrementAndGet();
 		return true;
+	}
+
+	/**
+	 * 闸 4 判据：该 (加载器, 类名) 是否有可用的基线字节。
+	 *
+	 * <p><b>为什么按 (加载器, 类名) 判</b>：{@link RemoldAgent#bytecodeCache} 只有点分名一条索引，
+	 * 同名不同加载器的两份类会互相冒充；用它满足这个闸等于静默降级（不变量 C2 明确禁止）。
+	 * 本闸只认两个来源：</p>
+	 * <ol>
+	 *   <li>premain 录口 {@link MixinClassBaseline}：键 = 加载器实例身份 + 类名，值是 JVM 最终定义字节；</li>
+	 *   <li>本源 {@link #LOADED}：本进程里已成功 redefine 过的字节，确实在 JVM 里生效过。</li>
+	 * </ol>
+	 *
+	 * @param loader  定义该类的加载器（合成类通常来自 Knot 的加载器）
+	 * @param dotName 合成类点分名
+	 * @return {@code null} = 基线可用；否则为拒绝原因（含 restart 要求）
+	 */
+	static String baselineMissingReason(ClassLoader loader, String dotName) {
+		if (dotName == null) {
+			return "no baseline bytes (unknown class name); restart required";
+		}
+		if (LOADED.containsKey(dotName)) {
+			return null;
+		}
+		if (MixinClassBaseline.baselineOf(loader, dotName) != null) {
+			return null;
+		}
+		return "no baseline bytes (class loaded before the agent registered); baseline "
+			+ MixinClassBaseline.metricsSummary() + "; restart required";
 	}
 
 	private static void blockHost(String hostDotName, String syntheticName, String why) {

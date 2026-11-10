@@ -74,6 +74,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   验证：`AnonClassAmbiguityTest` 17/0（新增 4 个文案/持有者用例，含“无持有字段不得凭空点名”的负向对照；
   变异检查：把日志文案改回旧词后 4 条断言变红，恢复后复绿）。
 
+## [0.2.7] - 2026-11-10
+
+### Added
+- **新 Mixin 运行期登记字节通道**：`MixinClassByteSources`（已登记内存字节 → 全部 watch 目录最新磁盘字节 →
+  上次批次源码缓存）+ `MixinNewMixinBytes`（在 `MixinConfig.prepare()` **之前**把 Mixin 与 `$N` 内部类字节
+  灌进 `IClassBytecodeProvider` 覆盖层与 core `BytecodeSources`，并驱逐上游 `ClassInfo` 负缓存）；
+  `MixinBytecodeOverlay.applyToConfigs()` 把每个 `MixinConfig` 启动期捕获的 `IMixinService` 也换成服务代理
+  ——纯 IDEA 编译（只落 `out/production/classes`）的新 Mixin 不再需要双写输出目录或重启。
+- **子包相对名支持**：`honkai.XxxMixin` / `client.hud.YyyMixin` 这类多层相对名可登记、可墓碑自愈。
+- **配置先到 / 字节后到的待决接力**：`MixinConfigDiffer.pendingUnresolvedMixins` + `retryPending`，先保存
+  `mixins.json` 只记待决，随后 `.class` 落地即自动完成登记与目标重织入（TTL + 重试上限，名字被删即放弃）。
+- **`ReloadMixinInfo` 结构契约突破**：`MixinReloadPolicy` 对齐 `priority`（final 字段）与 `interfaces`
+  比较基线并支持失败回滚；`MixinRetarget` 在 `reload` 前就地迁移 `targets` 元数据与四处索引（失败快照回滚）；
+  `MixinHotSwap` 对 `re-entrant lock` 瞬态做有界退避重试；`ClassDiffUtil.mustRejectHierarchyChange`
+  把「父类变更」与「接口增删」分开判决（仅后者在 JBR/DCEVM 放行）。
+
+### Fixed
+- **`ClassInfo.cache` 锚回**：`MixinClassInfoRegistry.reassert` 在每次登记/重载成功后把
+  `MixinInfo.getClassInfo()` 写回缓存，修复 `priority → interfaces → targets A→B→A` 往返后
+  `MixinTargetContext.transformSingleDescriptor` 跳过 Mixin→Target 重映射、匿名内部类 `this$0`
+  构造器签名停留在 Mixin 类上导致的 `NoSuchMethodError: <init>(SomeMixin, Target)`。
+
+### Verification
+- 单测：`MixinClassByteSourcesTest` 7、`MixinConfigDiffLoadTest` 2、`MixinNewMixinBytesTest` 3、
+  `NewMixinRegistrarTest` 8、`MixinConfigDifferTest` 4、`MixinReloadPolicyTest` 8、`MixinRetargetTest` 5、
+  `MixinConfigDifferPendingTest` 4、`ClassDiffHierarchyTest` 5、`MixinClassInfoRegistryTest` 4。
+- 变异：新 Mixin 字节通道 7/7 + revert killed；priority/targets/interfaces 3/3 killed；待决接力 3/3 killed；
+  ClassInfo 锚定 1/1 killed。
+- 真机（Fabric dedicated server + JBR 21.0.9 DCEVM，agent/plugin 由本版本构建）：B3（`.class` 只在监控目录）+
+  B5（子包相对名）登记成功；`priority` 1000→1500 生效；`implements` 标记接口在目标实例生效；
+  `targets [A]→[B]→[A]` 双向迁移成功；含匿名内部类的 Mixin 在整条往返序列后不再抛 `NoSuchMethodError`。
+
+### Known boundaries
+- 接口**移除**无本地实证：只在 JBR/DCEVM 上放行并 warn，`ClassInfo` 接口表只增不删。
+- Forge/NeoForge 无 `IClassBytecodeProvider` 覆盖层：带 `$N` 内部类的新 Mixin 仍可能需要一次重启。
+- Mixin 升级导致上游内部字段改名时自动退化为「需重启」的 fail-closed 诊断。
+
 ## [0.2.6] - 2026-11-09
 
 ### Added

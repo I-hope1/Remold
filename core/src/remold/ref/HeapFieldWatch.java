@@ -239,6 +239,10 @@ public final class HeapFieldWatch {
 	/**
 	 * 把两次读数的差异按实例身份分组，解释 {@code total} 与 {@code nullCount} 的变化从哪来。
 	 *
+	 * <p>身份键是 {@code System.identityHashCode}（多重集计数）：不持有实例引用，也不受业务
+	 * {@code equals}/{@code hashCode} 影响。身份哈希碰撞时按多重集保守归入 {@code same}，
+	 * 因此 {@code created}/{@code collected} 只可能偏小、不会凭空造出"跨切面置空"。</p>
+	 *
 	 * @return 形如 {@code [HEAPWATCH-DIFF] before=A after=B total{...} null{...}} 的一行
 	 */
 	public static String diffLine(Snapshot before, Snapshot after) {

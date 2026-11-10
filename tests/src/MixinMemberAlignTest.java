@@ -424,6 +424,78 @@ public class MixinMemberAlignTest {
 			"a redirect-shaped tombstone must return the incoming value unchanged");
 	}
 
+	// ------------------------------------------------------------------------------------------
+	// Tombstone field retention (fault B: @Unique field removal/re-add shrinks+expands the heap)
+	// ------------------------------------------------------------------------------------------
+
+	private static final String T_UNIQUE_FIELD = "honkai$anonState";
+
+	private static byte[] fieldBaseline() {
+		return fieldClass(true);
+	}
+
+	private static byte[] fieldCandidate() {
+		return fieldClass(false);
+	}
+
+	/** Baseline carries the Mixin @Unique field; the retargeted re-weave drops it. */
+	private static byte[] fieldClass(boolean withUniqueField) {
+		ClassWriter cw = new ClassWriter(0);
+		cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC, "fixture/FieldTombstone", null, "java/lang/Object", null);
+		if (withUniqueField) {
+			cw.visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_SYNTHETIC, T_UNIQUE_FIELD, "I", null, null).visitEnd();
+		}
+		cw.visitField(Opcodes.ACC_PRIVATE, "payload", "I", null, null).visitEnd();
+
+		MethodVisitor ctor = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+		ctor.visitCode();
+		ctor.visitVarInsn(Opcodes.ALOAD, 0);
+		ctor.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+		ctor.visitInsn(Opcodes.RETURN);
+		ctor.visitMaxs(1, 1);
+		ctor.visitEnd();
+		cw.visitEnd();
+		return cw.toByteArray();
+	}
+
+	@Test
+	public void removedUniqueFieldIsRetainedAsTombstone() {
+		byte[] baseline = fieldBaseline();
+		byte[] candidate = fieldCandidate();
+		MixinMemberAlign.Result result = MixinMemberAlign.align(candidate, baseline);
+
+		assertTrue(result.tombstonedFields.contains(T_UNIQUE_FIELD + "I"),
+			"the dropped @Unique field must be retained as a tombstone: " + result.tombstonedFields);
+		assertEquals(fieldNames(baseline), fieldNames(result.bytes),
+			"the field table must be identical to the baseline (no shrink => no DCEVM ModifyInstances)");
+		assertEquals(fieldIndex(baseline, T_UNIQUE_FIELD), fieldIndex(result.bytes, T_UNIQUE_FIELD),
+			"the tombstone field must keep its baseline slot position");
+
+		// terminal assertion: the retained field is readable and zero (no reader in the new bytecode)
+		ClassNode node = new ClassNode();
+		new ClassReader(result.bytes).accept(node, 0);
+		assertTrue(node.fields.stream().anyMatch(f -> f.name.equals(T_UNIQUE_FIELD) && f.desc.equals("I")));
+	}
+
+	@Test
+	public void fieldTableStaysConstantWhenNothingWasDropped() {
+		byte[] baseline = fieldBaseline();
+		MixinMemberAlign.Result result = MixinMemberAlign.align(fieldBaseline(), baseline);
+
+		assertTrue(result.tombstonedFields.isEmpty(), "no tombstone may be invented when nothing is missing");
+		assertEquals(fieldNames(baseline), fieldNames(result.bytes));
+	}
+
+	private static List<String> fieldNames(byte[] bytes) {
+		ClassNode node = new ClassNode();
+		new ClassReader(bytes).accept(node, 0);
+		return node.fields.stream().map(f -> f.name + ":" + f.desc).collect(Collectors.toList());
+	}
+
+	private static int fieldIndex(byte[] bytes, String name) {
+		return fieldNames(bytes).indexOf(name + ":I");
+	}
+
 	@Test
 	public void businessMethodsAreNotResurrectedAsTombstones() {
 		byte[] baseline = tombstoneBaseline();

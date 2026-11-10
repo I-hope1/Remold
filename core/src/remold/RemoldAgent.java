@@ -497,6 +497,12 @@ public class RemoldAgent {
 				     + " Mixin-generated member name(s) back to the loaded baseline"
 				     + (result.reordered ? " and restored the baseline member order" : "") + ".");
 			}
+			if (!result.tombstonedFields.isEmpty()) {
+				info("[MIXIN-ALIGN] " + className + ": retained " + result.tombstonedFields.size()
+				     + " tombstone field(s) for baseline field(s) removed by the re-weave ("
+				     + result.tombstonedFields + "); the instance layout stays constant so JBR/DCEVM"
+				     + " does not shrink/expand the heap for this class.");
+			}
 			if (!result.tombstoned.isEmpty()) {
 				info("[MIXIN-ALIGN] " + className + ": retained " + result.tombstoned.size()
 				     + " tombstone stub(s) for baseline Mixin-generated member(s) removed by the re-weave ("
@@ -4779,9 +4785,13 @@ public class RemoldAgent {
 			}
 			InitFix.transform(targetClass, runtimeBytes, diff);
 
+			// 堆实例哨兵三切面（默认关闭，-Dremold.probe.heapwatch=true 开启）：
+			// 用于定位「某类字段在 redefine / 字段初始化补丁窗口内被置 null」这类跨类污染。
+			remold.ref.HeapFieldWatch.snapshot("before-redefine", className);
 			enterInternalRedefine(Collections.singleton(className));
 			try {
 				inst.redefineClasses(new ClassDefinition(targetClass, runtimeBytes));
+				remold.ref.HeapFieldWatch.snapshot("after-redefine", className);
 				bytecodeCache.put(className, runtimeBytes);
 				sourceBytecodeCache.put(className, sourceBytes);
 				recordCacheLoader(className, targetClass.getClassLoader());
@@ -4791,6 +4801,7 @@ public class RemoldAgent {
 					error("Failed to run InitFix after redefine for " + className, t);
 					InitFix.afterRedefineFailed(targetClass);
 				}
+				remold.ref.HeapFieldWatch.snapshot("after-field-patch", className);
 				processAnnotations(Collections.singletonList(new ClassDefinition(targetClass, runtimeBytes)));
 				notifyBatchListeners(Collections.singletonList(new ClassDefinition(targetClass, runtimeBytes)),
 					BatchReportScope.finish(Collections.singletonList(className)));

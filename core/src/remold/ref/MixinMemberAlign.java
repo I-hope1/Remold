@@ -6,9 +6,13 @@ import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.commons.ClassRemapper;
 import org.objectweb.asm.commons.Remapper;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
+import org.objectweb.asm.tree.InsnList;
+import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.VarInsnNode;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -65,20 +69,23 @@ public final class MixinMemberAlign {
 		public final byte[]       bytes;
 		public final int          renamed;
 		public final boolean      reordered;
-		public final List<String> missingFromCandidate;   // 基线有、候选重映射后仍没有的生成成员
+		public final List<String> missingFromCandidate;   // 基线有、候选重映射后仍没有的生成成员（墓碑桩补上后为空）
 		public final List<String> addedInCandidate;       // 候选新增（基线没有）的生成成员
+		public final List<String> tombstoned;             // 本次保活为最小空操作桩的基线生成方法
 
 		Result(byte[] bytes, int renamed, boolean reordered,
-		       List<String> missingFromCandidate, List<String> addedInCandidate) {
+		       List<String> missingFromCandidate, List<String> addedInCandidate,
+		       List<String> tombstoned) {
 			this.bytes                = bytes;
 			this.renamed              = renamed;
 			this.reordered            = reordered;
 			this.missingFromCandidate = Collections.unmodifiableList(missingFromCandidate);
 			this.addedInCandidate     = Collections.unmodifiableList(addedInCandidate);
+			this.tombstoned           = Collections.unmodifiableList(tombstoned);
 		}
 
 		public boolean changed() {
-			return renamed > 0 || reordered;
+			return renamed > 0 || reordered || !tombstoned.isEmpty();
 		}
 	}
 
@@ -107,8 +114,13 @@ public final class MixinMemberAlign {
 			: remapReferences(candidate, cand.name, methodRemap, fieldRemap);
 
 		ClassNode aligned = read(remapped);
+		// 墓碑桩保留（Tombstone Stub Retention）：基线里存在、重织入产物里已消失的 Mixin 生成方法
+		// 不得物理删除。JBR/DCEVM 的重定义发生在 safepoint，但**已在调用栈上的旧栈帧**在 safepoint
+		// 之后会继续执行旧版字节码，并调用旧字节码里的 handler$*/redirect$* —— 方法被删掉就是
+		// NoSuchMethodError。保留一个同名/同描述符/同访问标志的最小空操作桩即可无害返回。
+		List<String> tombstoned = tombstoneMissing(aligned, base);
 		boolean reordered = orderMembers(base, aligned);
-		byte[] out = reordered ? write(aligned) : remapped;
+		byte[] out = (reordered || !tombstoned.isEmpty()) ? write(aligned) : remapped;
 
 		List<String> missing = new ArrayList<>();
 		List<String> added   = new ArrayList<>();
@@ -127,7 +139,105 @@ public final class MixinMemberAlign {
 				added.add(m.name + m.desc);
 			}
 		}
-		return new Result(out, renamed, reordered, missing, added);
+		return new Result(out, renamed, reordered, missing, added, tombstoned);
+	}
+
+	/**
+	 * 为基线中已消失的 Mixin 生成方法补最小空操作桩（墓碑），并保证方法表只增不减。
+	 *
+	 * <p>桩体规则（与 {@code LambdaAligner} 的孤儿方法策略一致）：</p>
+	 * <ul>
+	 *   <li>{@code void} 返回：单条 {@code RETURN}；</li>
+	 *   <li>返回类型与某个入参类型相同（{@code @ModifyVariable}/{@code @ModifyArg}/{@code @Redirect}
+	 *       的典型形态）：加载该入参并原样返回——把"注入被移除"退化成恒等传递；</li>
+	 *   <li>其余返回类型：零值（{@code 0}/{@code 0L}/{@code 0.0f}/{@code 0.0d}/{@code null}）。</li>
+	 * </ul>
+	 *
+	 * <p>只处理 {@link #isGenerated} 命中的合成成员；普通业务方法/构造器/静态初始化块一律不补，
+	 * 避免把"确实删掉的方法"伪装成还存在。</p>
+	 */
+	private static List<String> tombstoneMissing(ClassNode cand, ClassNode base) {
+		Set<String> present = new HashSet<>();
+		for (MethodNode m : cand.methods) present.add(m.name + m.desc);
+		List<String> stubbed = new ArrayList<>();
+		for (MethodNode m : base.methods) {
+			if (!isGenerated(m.name)) continue;
+			String key = m.name + m.desc;
+			if (present.contains(key)) continue;
+			cand.methods.add(tombstone(m));
+			present.add(key);
+			stubbed.add(key);
+		}
+		return stubbed;
+	}
+
+	private static MethodNode tombstone(MethodNode base) {
+		int access = base.access & ~(Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE);
+		String[] exceptions = base.exceptions == null ? null
+			: base.exceptions.toArray(new String[0]);
+		MethodNode stub = new MethodNode(access, base.name, base.desc, base.signature, exceptions);
+		Type ret = Type.getReturnType(base.desc);
+		InsnList code = new InsnList();
+		if (ret.getSort() == Type.VOID) {
+			code.add(new InsnNode(Opcodes.RETURN));
+		} else {
+			Type[] args = Type.getArgumentTypes(base.desc);
+			int slot = (access & Opcodes.ACC_STATIC) != 0 ? 0 : 1;
+			Type sameTypeArg = null;
+			int sameTypeSlot = -1;
+			int locals = slot;
+			for (Type arg : args) {
+				if (sameTypeArg == null && arg.equals(ret)) {
+					sameTypeArg = arg;
+					sameTypeSlot = slot;
+				}
+				slot += arg.getSize();
+			}
+			locals = slot;
+			if (sameTypeArg != null) {
+				code.add(new VarInsnNode(sameTypeArg.getOpcode(Opcodes.ILOAD), sameTypeSlot));
+			} else {
+				code.add(zeroOf(ret));
+			}
+			code.add(new InsnNode(ret.getOpcode(Opcodes.IRETURN)));
+			stub.maxStack = Math.max(ret.getSize(), 1);
+			stub.maxLocals = Math.max(locals, 1);
+		}
+		if (ret.getSort() == Type.VOID) {
+			stub.maxStack = 0;
+			stub.maxLocals = Math.max(argumentSlots(base.desc, (access & Opcodes.ACC_STATIC) != 0), 1);
+		}
+		stub.instructions = code;
+		stub.localVariables = null;
+		stub.tryCatchBlocks = null;
+		stub.visibleAnnotations = null;
+		stub.invisibleAnnotations = null;
+		return stub;
+	}
+
+	private static int argumentSlots(String desc, boolean isStatic) {
+		int slots = isStatic ? 0 : 1;
+		for (Type arg : Type.getArgumentTypes(desc)) slots += arg.getSize();
+		return slots;
+	}
+
+	private static InsnNode zeroOf(Type type) {
+		switch (type.getSort()) {
+			case Type.BOOLEAN:
+			case Type.BYTE:
+			case Type.CHAR:
+			case Type.SHORT:
+			case Type.INT:
+				return new InsnNode(Opcodes.ICONST_0);
+			case Type.LONG:
+				return new InsnNode(Opcodes.LCONST_0);
+			case Type.FLOAT:
+				return new InsnNode(Opcodes.FCONST_0);
+			case Type.DOUBLE:
+				return new InsnNode(Opcodes.DCONST_0);
+			default:
+				return new InsnNode(Opcodes.ACONST_NULL);
+		}
 	}
 
 	/** 生成 {@code 候选名 -> 基线名} 映射。 */

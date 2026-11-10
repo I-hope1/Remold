@@ -497,6 +497,12 @@ public class RemoldAgent {
 				     + " Mixin-generated member name(s) back to the loaded baseline"
 				     + (result.reordered ? " and restored the baseline member order" : "") + ".");
 			}
+			if (!result.tombstoned.isEmpty()) {
+				info("[MIXIN-ALIGN] " + className + ": retained " + result.tombstoned.size()
+				     + " tombstone stub(s) for baseline Mixin-generated member(s) removed by the re-weave ("
+				     + result.tombstoned + "); in-flight stack frames keep linking instead of"
+				     + " NoSuchMethodError.");
+			}
 			if (!result.missingFromCandidate.isEmpty()) {
 				warn("[MIXIN-ALIGN] " + className + ": " + result.missingFromCandidate.size()
 				     + " baseline Mixin-generated member(s) are still absent after re-weave ("

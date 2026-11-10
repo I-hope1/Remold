@@ -270,6 +270,16 @@ final class MixinClassBaseline {
 		}
 	}
 
+	/**
+	 * 最近一次未命中的点名（类全称 + 加载器标签 + 原因）：闸 4 把它带进拒绝原因，
+	 * 这样真机日志不必等探针就能点名"是哪个类的哪份基线没抓到"。
+	 */
+	static String lastMissSummary() {
+		synchronized (MISS_DETAILS) {
+			return MISS_DETAILS.isEmpty() ? "<none>" : MISS_DETAILS.peekLast();
+		}
+	}
+
 	/** 过滤口径摘要：规则 + 计数 + 示例（示例是内部名原文，便于对照规则自证）。 */
 	static String filterSummary() {
 		List<String> examples;

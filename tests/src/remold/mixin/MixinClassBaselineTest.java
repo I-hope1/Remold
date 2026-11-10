@@ -266,8 +266,9 @@ class MixinClassBaselineTest {
 		ClassLoader stranger = new IsolatedLoader();
 		observe(owner, INTERNAL, null, new byte[] {7});
 
-		assertNull(MixinClassBaseline.baselineOf(stranger, DOTTED),
-			"the stranger loader never defined this class, so the lookup must miss");
+		// The gate path (what a real host log goes through), not just the raw lookup.
+		String gateReason = MixinInnerClassHotSwap.baselineMissingReason(stranger, DOTTED);
+		assertNotNull(gateReason, "the stranger loader never defined this class, so the gate must refuse");
 
 		assertEquals(1, MixinClassBaseline.missedCount(), "one refused lookup adds exactly one miss");
 		String details = MixinClassBaseline.missDetailsSummary();
@@ -278,6 +279,8 @@ class MixinClassBaselineTest {
 			"the reason must point at the other loader that owns the baseline: " + details);
 		assertFalse(details.contains(MixinClassBaseline.loaderLabel(owner)),
 			"the loader that DID record the class is not the miss and must not be blamed: " + details);
+		assertTrue(gateReason.contains("last miss: " + DOTTED),
+			"the refusal a real run logs must carry the named miss, not only the counters: " + gateReason);
 
 		// Control: same code path, a name no loader ever defined -> different reason.
 		assertNull(MixinClassBaseline.baselineOf(stranger, "fixture.Target$Anonymous$nobodyDefined"));

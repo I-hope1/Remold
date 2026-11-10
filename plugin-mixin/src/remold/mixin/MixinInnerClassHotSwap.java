@@ -614,7 +614,8 @@ final class MixinInnerClassHotSwap {
 			return null;
 		}
 		return "no baseline bytes (class loaded before the agent registered); baseline "
-			+ MixinClassBaseline.metricsSummary() + "; restart required";
+			+ MixinClassBaseline.metricsSummary() + "; last miss: " + MixinClassBaseline.lastMissSummary()
+			+ "; restart required";
 	}
 
 	/**

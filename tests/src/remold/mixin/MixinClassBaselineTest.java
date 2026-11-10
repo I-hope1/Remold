@@ -2,6 +2,7 @@ package remold.mixin;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -247,5 +248,102 @@ class MixinClassBaselineTest {
 		assertTrue(MixinClassBaseline.metricsSummary().contains("missed=1"),
 			"the summary logged into the battle report must carry all three denominators: "
 				+ MixinClassBaseline.metricsSummary());
+	}
+
+	// ------------------------------------------------------------ naming the two denominators (C2)
+
+	/**
+	 * A bare {@code missed=1} is not evidence anyone can audit: the battle report has to name the
+	 * class, the loader and the reason. The reason is mechanical — either another loader's baseline
+	 * exists for that name, or no loader ever defined it.
+	 *
+	 * <p>Control: the second half repeats the lookup with a name nobody defined, which must flip the
+	 * reason text. Without that control a hard-coded reason string could pass this case.</p>
+	 */
+	@Test
+	void missedLookupNamesTheClassTheLoaderAndTheReason() {
+		ClassLoader owner = new IsolatedLoader();
+		ClassLoader stranger = new IsolatedLoader();
+		observe(owner, INTERNAL, null, new byte[] {7});
+
+		// The gate path (what a real host log goes through), not just the raw lookup.
+		String gateReason = MixinInnerClassHotSwap.baselineMissingReason(stranger, DOTTED);
+		assertNotNull(gateReason, "the stranger loader never defined this class, so the gate must refuse");
+
+		assertEquals(1, MixinClassBaseline.missedCount(), "one refused lookup adds exactly one miss");
+		String details = MixinClassBaseline.missDetailsSummary();
+		assertTrue(details.contains(DOTTED), "the missed lookup must name the class in full: " + details);
+		assertTrue(details.contains(MixinClassBaseline.loaderLabel(stranger)),
+			"the missed lookup must name the loader identity: " + details);
+		assertTrue(details.contains("recorded under 1 other loader"),
+			"the reason must point at the other loader that owns the baseline: " + details);
+		assertFalse(details.contains(MixinClassBaseline.loaderLabel(owner)),
+			"the loader that DID record the class is not the miss and must not be blamed: " + details);
+		assertTrue(gateReason.contains("last miss: " + DOTTED),
+			"the refusal a real run logs must carry the named miss, not only the counters: " + gateReason);
+
+		// Control: same code path, a name no loader ever defined -> different reason.
+		assertNull(MixinClassBaseline.baselineOf(stranger, "fixture.Target$Anonymous$nobodyDefined"));
+		String second = MixinClassBaseline.missDetailsSummary();
+		assertTrue(second.contains("no defineClass submission for this name on any loader"),
+			"with no baseline anywhere the reason must change instead of reusing the previous one: " + second);
+	}
+
+	/**
+	 * {@code seen - recorded} must be explainable by a rule, not by a failure story: the recorder only
+	 * keys candidates (names containing {@code '$'}), and every filtered offer is counted with a real
+	 * example name. The identity {@code seen == filtered + attempts} pins the split.
+	 */
+	@Test
+	void filteredOffersAreCountedWithTheRuleAndExamples() {
+		ClassLoader loader = new IsolatedLoader();
+		observe(loader, "fixture/PlainOne", null, new byte[] {1});
+		observe(loader, "fixture/PlainTwo", null, new byte[] {2});
+		observe(loader, "fixture/Target$1", null, new byte[] {3});
+
+		assertEquals(2, MixinClassBaseline.filteredCount(), "two offers carry no '$' and must be filtered");
+		assertEquals(1, MixinClassBaseline.recordAttempts(),
+			"one offer is a candidate and must be counted as an attempt");
+		assertEquals(MixinClassBaseline.metrics().seen,
+			MixinClassBaseline.filteredCount() + MixinClassBaseline.recordAttempts(),
+			"seen must split exactly into filtered offers + candidate attempts");
+		assertEquals(java.util.List.of("fixture/PlainOne", "fixture/PlainTwo"),
+			MixinClassBaseline.filteredExamples(),
+			"the filter must keep the first example names so the rule can be checked against real input");
+		for (String example : MixinClassBaseline.filteredExamples()) {
+			assertFalse(example.contains("$"), "a filtered example must really lack '$': " + example);
+		}
+		assertTrue(MixinClassBaseline.filterRule().contains("'$'"),
+			"the rule must name the actual candidate test: " + MixinClassBaseline.filterRule());
+		assertTrue(MixinClassBaseline.filterSummary().contains("filtered=2"),
+			"the summary must report the filtered count: " + MixinClassBaseline.filterSummary());
+	}
+
+	/**
+	 * Invariant C2: the post-redefine bytes must be keyed by <b>(loader identity, name)</b>, exactly like
+	 * the premain capture. A dot-name-only table lets two loaders overwrite each other's baseline, and
+	 * gate 4 would then reason about a shape this loader never loaded.
+	 */
+	@Test
+	void appliedBytesAreScopedPerLoaderIdentity() {
+		ClassLoader first = new IsolatedLoader();
+		ClassLoader second = new IsolatedLoader();
+
+		MixinClassBaseline.recordApplied(first, DOTTED, new byte[] {1});
+		MixinClassBaseline.recordApplied(second, DOTTED, new byte[] {2});
+
+		assertArrayEquals(new byte[] {1}, MixinClassBaseline.appliedOf(first, DOTTED),
+			"each loader must keep its own post-redefine bytes for the same class name");
+		assertArrayEquals(new byte[] {2}, MixinClassBaseline.appliedOf(second, DOTTED),
+			"the second loader must not overwrite the first loader's applied bytes");
+		assertNull(MixinClassBaseline.appliedOf(new IsolatedLoader(), DOTTED),
+			"a loader that never redefined the class must not inherit anybody's applied bytes");
+
+		// Gate-4 resolution goes through the same loader-scoped slot: own slot wins, no cross-loader leak.
+		observe(first, INTERNAL, null, new byte[] {9});
+		assertArrayEquals(new byte[] {1}, MixinInnerClassHotSwap.baselineBytes(first, DOTTED),
+			"the applied slot (R1) must outrank the premain capture (R0) for the loader that owns it");
+		assertNotNull(MixinInnerClassHotSwap.baselineMissingReason(new IsolatedLoader(), DOTTED),
+			"a third loader still has no baseline, so gate 4 must refuse it instead of borrowing one");
 	}
 }

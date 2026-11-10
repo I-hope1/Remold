@@ -237,4 +237,48 @@ final class MixinSyntheticSchema {
 			return "unknown";
 		}
 	}
+
+	/**
+	 * 候选字节里相对已加载字段表<b>新增</b>的字段签名（{@code fresh - loaded}）。
+	 *
+	 * <p>必须在 {@link #padFields} 之前调用：补齐会给候选追加墓碑字段，之后就分不清"新增"与
+	 * "基线槽位补墓碑"。</p>
+	 */
+	static List<String> appendedFields(ClassNode fresh, List<String> loaded) {
+		List<String> out = new ArrayList<>();
+		List<String> baseline = loaded == null ? java.util.List.of() : loaded;
+		for (String key : nodeFields(fresh)) {
+			if (!baseline.contains(key)) {
+				out.add(key);
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * 一次合成类重定义相对上一版（已加载）的字段表变化分类（战报的"逐次拆分"口径）。
+	 *
+	 * <p>四类：{@code TYPE_CHANGE}（同名异型字段被重命名追加）&gt; {@code WOULD_SHRINK}
+	 * （基线字段靠墓碑补齐，否则会缩容）&gt; {@code APPEND_ONLY}（只追加新字段）&gt;
+	 * {@code UNCHANGED}（字段表无变化）。优先级只影响"同时命中多类"时的单值标签，计数三项都在
+	 * 括号里给出，可据此复核。</p>
+	 */
+	static String describeFieldTableChange(List<String> appended, java.util.Map<String, String> renamed,
+			List<String> padded) {
+		int appendedCount = appended == null ? 0 : appended.size();
+		int renamedCount = renamed == null ? 0 : renamed.size();
+		int paddedCount = padded == null ? 0 : padded.size();
+		String kind;
+		if (renamedCount > 0) {
+			kind = "TYPE_CHANGE";
+		} else if (paddedCount > 0) {
+			kind = "WOULD_SHRINK";
+		} else if (appendedCount > 0) {
+			kind = "APPEND_ONLY";
+		} else {
+			kind = "UNCHANGED";
+		}
+		return kind + "(appended=" + appendedCount + ", renamed=" + renamedCount
+			+ ", tombstone=" + paddedCount + ")";
+	}
 }

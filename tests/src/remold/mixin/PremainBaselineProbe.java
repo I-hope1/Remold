@@ -38,8 +38,10 @@ import remold.RemoldAgent;
  * "tests/build/classes/java/main;plugin-mixin/build/classes/java/main;core/build/libs/remold-agent.jar;&lt;asm-core,tree,commons,analysis,util jars&gt;"
  * remold.mixin.PremainBaselineProbe}。</p>
  *
- * <p>三个分母（{@code seen}/{@code recorded}/{@code missed}）由最后一行 PASS 输出；其中 {@code missed}
- * 的 1 来自本探针自己的负向对照（换无关加载器查不到基线）。</p>
+ * <p>三个分母（{@code seen}/{@code recorded}/{@code missed}）由最后一行 PASS 输出；探针同时断言
+ * 两个口径都能<b>点名</b>（不变量 C2）：{@code missed} 的 1 来自本探针自己的负向对照（换无关加载器
+ * 查同一夹具 → 该加载器从未 defineClass，基线属于另一个加载器），必须打印类全称 + 加载器标签 + 原因；
+ * {@code seen - recorded} 必须等于"内部名不含 {@code '$'} 的 defineClass 提交数"，规则与示例一并打印。</p>
  */
 public final class PremainBaselineProbe {
 
@@ -85,9 +87,43 @@ public final class PremainBaselineProbe {
 		// 终局断言 3：闸按键放行 / 拒绝（换无关加载器作对照）。
 		require(MixinInnerClassHotSwap.baselineMissingReason(loader, FIXTURE_DOTTED) == null,
 			"the gate must accept a class whose premain baseline was captured");
-		String refused = MixinInnerClassHotSwap.baselineMissingReason(new IsolatedLoader(), FIXTURE_DOTTED);
+		IsolatedLoader unrelated = new IsolatedLoader();
+		String refused = MixinInnerClassHotSwap.baselineMissingReason(unrelated, FIXTURE_DOTTED);
 		require(refused != null, "a loader without a baseline must be refused (negative control)");
 		require(refused.contains("restart"), "the refusal must ask for a restart: " + refused);
+
+		// 终局断言 4（C2）：missed=1 必须点名——类全称 + 加载器标签 + 原因，而不只是一个数字。
+		System.out.println("[BASELINE] metrics: " + MixinClassBaseline.metricsSummary());
+		System.out.println("[BASELINE] filter: " + MixinClassBaseline.filterSummary());
+		System.out.println("[BASELINE] missed lookups: " + MixinClassBaseline.missDetailsSummary());
+		MixinClassBaseline.Metrics metrics = MixinClassBaseline.metrics();
+		require(metrics.missed == 1,
+			"expected exactly one missed lookup (this probe's own negative control), got " + metrics);
+		String miss = MixinClassBaseline.missDetailsSummary();
+		require(miss.contains(FIXTURE_DOTTED),
+			"the missed lookup must name the class in full (" + FIXTURE_DOTTED + "): " + miss);
+		require(miss.contains(MixinClassBaseline.loaderLabel(unrelated)),
+			"the missed lookup must name the loader identity ("
+				+ MixinClassBaseline.loaderLabel(unrelated) + "): " + miss);
+		require(miss.contains("recorded under 1 other loader"),
+			"the reason must say the captured baseline belongs to another loader: " + miss);
+
+		// 终局断言 5（C2）：seen - recorded 的口径 = 被候选过滤的提交，规则与示例必须可核对。
+		int filtered = MixinClassBaseline.filteredCount();
+		int attempts = MixinClassBaseline.recordAttempts();
+		require(filtered > 0, "this JVM must submit non-candidate defineClass events: "
+			+ MixinClassBaseline.filterSummary());
+		require(metrics.seen == filtered + attempts,
+			"seen must split exactly into filtered + recorded attempts: seen=" + metrics.seen
+				+ " filtered=" + filtered + " attempts=" + attempts);
+		require(MixinClassBaseline.filterRule().contains("'$'"),
+			"the filter rule must name the '$' candidate test: " + MixinClassBaseline.filterRule());
+		java.util.List<String> examples = MixinClassBaseline.filteredExamples();
+		require(!examples.isEmpty(), "at least one filtered class name must be kept as an example");
+		for (String example : examples) {
+			require(example.indexOf('$') < 0,
+				"a filtered example must really lack '$' (else the counter and the rule disagree): " + example);
+		}
 
 		System.out.println("PASS premain baseline recorder (JVM level): " + MixinClassBaseline.metricsSummary());
 	}

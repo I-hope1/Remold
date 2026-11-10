@@ -333,6 +333,15 @@ public final class MixinHotSwap {
 				+ "); re-weaving " + targets);
 		}
 
+		// 重载/登记成功后必须把 MixinInfo.getClassInfo() 锚回 ClassInfo.cache：reload 的 Reloaded 状态
+		// 复用旧 ClassInfo，而登记/迁移前我们驱逐过缓存条目；不锚回去，下一次织入会经
+		// ClassInfo.forName 懒加载出普通 ClassInfo（isMixin=false），Mixin->Target 描述符重映射被跳过，
+		// 匿名内部类 this$0 的构造器签名停留在 Mixin 类上 → 运行期 NoSuchMethodError。
+		int reanchored = remold.reflect.mixin.MixinClassInfoRegistry.reassert(transformer);
+		if (reanchored > 0 && RemoldAgent.DEBUG) {
+			RemoldAgent.log("[Mixin] Re-anchored " + reanchored + " registered mixin ClassInfo entr(ies)");
+		}
+
 		// reload/登记成功后再记录批次报告：失败/被拒绝的模板不能进“变更列表”，
 		// 也不能推进快照（否则下一次重试会拿错误基线算增量）。
 		recordMixinReport(dotClassName, node);

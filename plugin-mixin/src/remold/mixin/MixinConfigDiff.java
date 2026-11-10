@@ -12,6 +12,8 @@ import org.spongepowered.asm.mixin.MixinEnvironment;
 import org.spongepowered.asm.service.MixinService;
 import org.spongepowered.asm.mixin.transformer.IMixinTransformer;
 
+import remold.RemoldAgent;
+import remold.reflect.mixin.MixinClassByteSources;
 import remold.reflect.mixin.MixinConfigContext;
 import remold.reflect.mixin.MixinConfigDiffer;
 
@@ -56,7 +58,46 @@ final class MixinConfigDiff {
 			MixinHotSwap::scheduleTargets));
 	}
 
-	private static Object loadClassNode(String dotClassName) {
+	/**
+	 * 读新列出的 Mixin 的 {@code ClassNode}。
+	 *
+	 * <p>字节来源两档：{@link MixinClassByteSources}（Remold 监控通道，覆盖"资源回调先于 class 批次"
+	 * 的时序断层与 IDE 多输出目录的路径断层）→ {@link MixinService} 资源流（jar 内类兜底）。
+	 * 两档都没有才返回 {@code null}，由 core 侧 fail-closed 并给出指向性诊断。</p>
+	 *
+	 * <p>解析出节点后立即把它与 {@code $N} 内部类的字节预登记进 Mixin 的字节码提供方
+	 * （见 {@link MixinNewMixinBytes}），否则 {@code prepare()} 构造 {@code MixinInfo} 时读内部类会拿到
+	 * 上游 {@code ClassInfo} 的负缓存。</p>
+	 *
+	 * <p>包内可见：测试直接调用本方法验证回退链。</p>
+	 */
+	static Object loadClassNode(String dotClassName) {
+		if (dotClassName == null || dotClassName.isEmpty()) {
+			return null;
+		}
+		byte[] bytes = MixinClassByteSources.lookup(dotClassName);
+		if (bytes == null) {
+			bytes = readServiceBytes(dotClassName);
+		}
+		if (bytes == null) {
+			return null;
+		}
+		ClassNode node;
+		try {
+			node = new ClassNode();
+			new ClassReader(bytes).accept(node, 0);
+		} catch (Throwable t) {
+			RemoldAgent.warn("[Mixin] Found " + bytes.length + " bytes for the newly listed mixin "
+				+ dotClassName + " but they are not a readable class file (" + t
+				+ "); the mixin is not registered until the class compiles again");
+			return null;
+		}
+		MixinNewMixinBytes.register(dotClassName, bytes, node);
+		return node;
+	}
+
+	/** Mixin 自己的资源流：jar 内的 Mixin 走这一档（监控目录里没有它的 .class 文件）。 */
+	private static byte[] readServiceBytes(String dotClassName) {
 		try {
 			InputStream in = MixinService.getService().getResourceAsStream(
 				dotClassName.replace('.', '/') + ".class");
@@ -64,9 +105,7 @@ final class MixinConfigDiff {
 				return null;
 			}
 			try (InputStream resource = in) {
-				ClassNode node = new ClassNode();
-				new ClassReader(resource).accept(node, 0);
-				return node;
+				return resource.readAllBytes();
 			}
 		} catch (Throwable t) {
 			return null;

@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Set;
 
 import remold.RemoldAgent;
+import remold.reflect.mixin.MixinClassByteSources;
 import remold.reflect.mixin.MixinConfigContext;
 import remold.reflect.mixin.MixinConfigDiffer;
 
@@ -69,16 +70,32 @@ final class ForgeMixinConfigDiff {
 	/**
 	 * 用 Transformer 所在 ClassLoader 的 ASM 读取 ClassNode，避免把 Agent 侧的 ASM 类型
 	 * 传给另一个 ClassLoader 里的 Mixin。
+	 *
+	 * <p>字节来源两档：{@link MixinClassByteSources}（Remold 监控通道，覆盖"资源回调先于 class 批次"
+	 * 的时序断层与 IDE 多输出目录的路径断层）→ Mixin 自己的资源流（jar 内类兜底）。
+	 * 两档都没有才返回 {@code null}，由 core 侧 fail-closed 并给出指向性诊断。</p>
+	 *
+	 * <p><b>已知边界（不假装覆盖）</b>：Forge / NeoForge 侧没有 {@code MixinBytecodeOverlay} 那层
+	 * {@code IClassBytecodeProvider} 覆盖（ModLauncher 的 Mixin 服务实例在另一个 ClassLoader 里，
+	 * 代理替换需要按加载器分别安装，且插件 jar 与那边的 Mixin 服务类型不可硬链接），因此这里
+	 * <b>只做</b> {@link MixinClassByteSources#register} 的 core 侧登记：core 的 Nest 扫描与成员
+	 * 可见性判定能看到新类，但 Mixin 自己的 {@code ClassInfo}/{@code InnerClassGenerator} 仍看不到
+	 * 新增的 {@code $N} 内部类。带内部类的新 Mixin 在 Forge 上因此可能仍需一次重启；
+	 * 失败形态由 core 侧登记失败诊断点名，不会静默。</p>
 	 */
 	private static Object loadClassNode(Object transformer, String dotClassName) {
 		if (transformer == null || dotClassName == null) {
 			return null;
 		}
-		try (InputStream resource = openResource(transformer, dotClassName.replace('.', '/') + ".class")) {
-			if (resource == null) {
+		try {
+			byte[] bytes = MixinClassByteSources.lookup(dotClassName);
+			if (bytes == null) {
+				bytes = readServiceBytes(transformer, dotClassName.replace('.', '/') + ".class");
+			}
+			if (bytes == null) {
 				return null;
 			}
-			byte[] bytes = resource.readAllBytes();
+			MixinClassByteSources.register(dotClassName, bytes);
 			ClassLoader loader = transformer.getClass().getClassLoader();
 			Class<?> readerType = Class.forName("org.objectweb.asm.ClassReader", true, loader);
 			Class<?> visitorType = Class.forName("org.objectweb.asm.ClassVisitor", true, loader);
@@ -90,6 +107,12 @@ final class ForgeMixinConfigDiff {
 		} catch (Throwable t) {
 			RemoldAgent.warn("[Forge/NeoForge] Unable to read ClassNode for " + dotClassName + ": " + t);
 			return null;
+		}
+	}
+
+	private static byte[] readServiceBytes(Object transformer, String resource) throws Exception {
+		try (InputStream stream = openResource(transformer, resource)) {
+			return stream == null ? null : stream.readAllBytes();
 		}
 	}
 

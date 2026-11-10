@@ -85,6 +85,43 @@ class MixinConfigDifferTest {
 		assertTrue(scheduled.isEmpty());
 	}
 
+	/**
+	 * 子包 Mixin 的删除墓碑与自愈：配置项是<b>相对名</b> {@code honkai.SubMixin}，
+	 * 全名是 {@code com.example.mixin.honkai.SubMixin}。墓碑按全名记账，自愈判定必须能
+	 * 用相对名对上（只比最后一段会在子包上永久卡住，重新列出也不再登记）。
+	 */
+	@Test
+	void subPackageTombstoneHealsWhenTheRelativeNameIsListedAgain(@TempDir Path tempDir) throws Exception {
+		Path configFile = tempDir.resolve("example_mod.mixins.json");
+		String subMixinDot = MIXIN_PACKAGE + "honkai.SubMixin";
+		Files.writeString(configFile, "{\"mixins\": [\"honkai.SubMixin\"]}", StandardCharsets.UTF_8);
+		FakeConfig config = new FakeConfig();
+		config.add("honkai.SubMixin");
+		List<String> scheduled = new ArrayList<>();
+
+		// 基线：子包 Mixin 已在配置里（当前状态有它），先确认它真的被解析成相对名。
+		assertTrue(config.mixinClasses.contains("honkai.SubMixin"), "baseline: the nested mixin exists");
+
+		// 从配置删除 → 墓碑按全名记账。
+		Files.writeString(configFile, "{\"mixins\": []}", StandardCharsets.UTF_8);
+		MixinConfigDiffer.onAssetsChanged(Set.of(configFile), context(config, scheduled));
+		assertFalse(config.mixinClasses.contains("honkai.SubMixin"), "the nested mixin must be removed");
+		assertTrue(MixinConfigDiffer.isRemovedFromConfig(subMixinDot), "the tombstone must be recorded");
+
+		// 重新列出 → 自愈判定必须命中（相对名 = 全名的点分后缀）。
+		// 这里刻意<b>不</b>先触发 onAssetsChanged：它的新增分支会调 markReaddedToConfig 无条件清墓碑，
+		// 那样就测不到 isRemovedFromConfig 自己的自愈判定（真实路径：类批次里的登记器直接问这一句）。
+		Files.writeString(configFile, "{\"mixins\": [\"honkai.SubMixin\"]}", StandardCharsets.UTF_8);
+		assertFalse(MixinConfigDiffer.isRemovedFromConfig(subMixinDot),
+			"a re-listed nested mixin must heal its tombstone instead of staying blocked");
+
+		scheduled.clear();
+		MixinConfigDiffer.onAssetsChanged(Set.of(configFile), context(config, scheduled));
+		assertTrue(config.mixinClasses.contains("honkai.SubMixin"), "the nested mixin must be registered again");
+		assertNotNull(config.find(subMixinDot));
+		assertEquals(List.of("com.example.target.RemovableTarget"), scheduled);
+	}
+
 	private static MixinConfigContext context(FakeConfig config, List<String> scheduled) {
 		FakeTransformer transformer = new FakeTransformer();
 		transformer.processor = new FakeProcessor(Collections.singletonList(config));

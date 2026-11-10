@@ -57,7 +57,7 @@ public final class MixinConfigDiffer {
 			}
 			int dot = dotClassName.lastIndexOf('.');
 			String simpleName = dot < 0 ? dotClassName : dotClassName.substring(dot + 1);
-			if (names != null && names.contains(simpleName)) {
+			if (names != null && (names.contains(simpleName) || matchesRelativeName(dotClassName, names))) {
 				REMOVED_FROM_CONFIG.remove(dotClassName);
 				RemoldAgent.info("[Mixin] " + dotClassName + " is listed in " + configPath.getFileName()
 					+ " again; allowing runtime registration");
@@ -74,6 +74,22 @@ public final class MixinConfigDiffer {
 		if (dotClassName != null) {
 			REMOVED_FROM_CONFIG.remove(dotClassName);
 		}
+	}
+
+	/**
+	 * 配置里的名字是<b>相对名</b>，允许多层子包（{@code honkai.ProbeSubHotcMixin}），
+	 * 因此自愈判定不能只比最后一段简单名：只要配置项是 {@code dotClassName} 的点分后缀就算已重新列出。
+	 */
+	private static boolean matchesRelativeName(String dotClassName, Set<String> names) {
+		for (String name : names) {
+			if (name == null || name.isEmpty()) {
+				continue;
+			}
+			if (dotClassName.endsWith("." + name)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** 资源回调入口。 */
@@ -160,8 +176,11 @@ public final class MixinConfigDiffer {
 			markReaddedToConfig(dotClassName);
 			Object node = ctx.classNodeLoader() == null ? null : ctx.classNodeLoader().apply(dotClassName);
 			if (node == null) {
-				RemoldAgent.warn("[Mixin] Cannot read bytecode for newly listed mixin " + dotClassName
-					+ "; add the class (or compile) once, then the config diff can register it");
+				RemoldAgent.warn("[Mixin] Cannot register the newly listed mixin " + dotClassName
+					+ ": none of the bytecode channels returned its bytes ("
+					+ MixinClassByteSources.CHANNELS + " -> the loader's Mixin service resource stream)."
+					+ " The mixin stays unregistered until its .class file is on a watched output directory"
+					+ " or inside a classpath resource; no output directory has to be configured twice.");
 				continue;
 			}
 			try {

@@ -103,6 +103,33 @@ final class MixinClassBaseline {
 		return null;
 	}
 
+	/**
+	 * 该 dotName 是否已经被<b>另一个</b>加载器录过基线。
+	 *
+	 * <p>用途：闸 4 的 legacy 点分名缓存回退必须对"同名不同加载器"失效——一旦录口已经证明这个
+	 * 类名属于别的加载器，点分名缓存里那条同名字节就不能拿来给当前加载器放行（那正是"同名互相
+	 * 冒充"）。录口完全没有这个类名时（例如 agent 注册前就加载的类、或测试里只播种了缓存）才允许
+	 * 回退，并必须告警。</p>
+	 */
+	static boolean recordedUnderOtherLoader(ClassLoader loader, String dotName) {
+		String dot = dotName == null ? null : dotName.replace('/', '.');
+		if (dot == null) {
+			return false;
+		}
+		synchronized (BASELINES) {
+			for (Map.Entry<ClassLoader, Map<String, byte[]>> entry : BASELINES.entrySet()) {
+				ClassLoader owner = entry.getKey();
+				if (owner == loader) {
+					continue;
+				}
+				if (entry.getValue().containsKey(dot)) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
 	/** 当前三个分母的快照。 */
 	static Metrics metrics() {
 		int recorded = 0;

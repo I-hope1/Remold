@@ -146,6 +146,30 @@ class MixinClassBaselineTest {
 	}
 
 	/**
+	 * The legacy dot-name cache must not launder another loader's class into this loader: once the
+	 * recorder knows the name belongs to a different loader, the coarse-key entry is untrustworthy.
+	 * (This is exactly the shape a JVM-level probe caught: Remold's own first-load path mirrors
+	 * classes into the dot-name cache, so without this guard the fallback would cross loaders.)
+	 */
+	@Test
+	void legacyEntryCannotLaunderAnotherLoadersClass() {
+		ClassLoader loader = new IsolatedLoader();
+		observe(new IsolatedLoader(), INTERNAL, null, new byte[] {4});
+		byte[] previous = remold.RemoldAgent.bytecodeCache.put(DOTTED, new byte[] {3});
+		try {
+			String reason = MixinInnerClassHotSwap.baselineMissingReason(loader, DOTTED);
+			assertNotNull(reason, "the legacy entry must not satisfy a loader that the recorder did not record");
+			assertTrue(reason.contains("restart"), "the refusal must still ask for a restart: " + reason);
+		} finally {
+			if (previous == null) {
+				remold.RemoldAgent.bytecodeCache.remove(DOTTED);
+			} else {
+				remold.RemoldAgent.bytecodeCache.put(DOTTED, previous);
+			}
+		}
+	}
+
+	/**
 	 * Documented compatibility path: the legacy dot-name cache still satisfies the gate, but only
 	 * visibly (one warn per class name) and only when neither loader-scoped source matched. It cannot
 	 * resurrect a class loaded before the agent registered — every writer of that cache lives behind

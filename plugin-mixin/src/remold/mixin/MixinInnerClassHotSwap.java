@@ -595,7 +595,10 @@ final class MixinInnerClassHotSwap {
 		if (MixinClassBaseline.baselineOf(loader, dotName) != null) {
 			return null;
 		}
-		if (RemoldAgent.bytecodeCache.get(dotName) != null) {
+		// legacy 回退只在"录口根本没这个类名"时可用：一旦录口已经证明该名字属于别的加载器，
+		// 点分名缓存里那条同名字节就不能给当前加载器放行（否则就是同名互相冒充）。
+		if (RemoldAgent.bytecodeCache.get(dotName) != null
+				&& !MixinClassBaseline.recordedUnderOtherLoader(loader, dotName)) {
 			if (LEGACY_FALLBACK_WARNED.add(dotName)) {
 				RemoldAgent.warn("[Mixin] synthetic inner class " + dotName + ": baseline resolved from the"
 					+ " legacy dot-name bytecode cache (no premain (loader, name) capture); the loader"

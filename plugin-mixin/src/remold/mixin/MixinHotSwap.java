@@ -29,6 +29,8 @@ import org.spongepowered.asm.mixin.transformer.IMixinTransformer;
 import remold.BatchReportScope;
 import remold.HotswapBatchReport;
 import remold.RemoldAgent;
+import remold.reflect.mixin.MixinReloadPolicy;
+import remold.reflect.mixin.MixinRetarget;
 
 /**
  * Mixin 类自身被修改时的热更支持：让目标类用新的注入逻辑重新织一遍，再重定义目标类。
@@ -201,6 +203,61 @@ public final class MixinHotSwap {
 			return true;
 		}
 
+		// ---- ReloadMixinInfo 前置策略（priority / targets / interfaces）----
+		// 上游 Reloaded 状态只机械比对元数据并抛 MixinReloadException。三类变更在 Remold 的重织入
+		// 管线下各自有安全通道：priority 只影响织入排序、targets 走差集卸载+重挂、
+		// interfaces 在增强重定义宿主上可改写接口表。命中即在这里接管，未命中才回落原生 reload。
+		MixinReloadPolicy.Plan plan = MixinReloadPolicy.prepare(transformer, dotClassName, node,
+			RemoldAgent.isEnhancedHotswapEnabled());
+		if (plan.usable() && plan.targetsChanged()) {
+			List<String> affected = retargetMixin(transformer, dotClassName, newMixinBytes, node);
+			if (affected != null) {
+				recordMixinReport(dotClassName, node);
+				LAST_RELOADED_BYTES.put(dotClassName, newMixinBytes.clone());
+				RemoldAgent.info("[Mixin] " + dotClassName + " retargeted (" + plan.describe()
+					+ "); re-weaving " + affected);
+				scheduleInnerClassHotUpdate(dotClassName, innerNames);
+				synchronized (PENDING_LOCK) {
+					PENDING.addAll(affected);
+				}
+				WORKER.execute(MixinHotSwap::flushPendingTargets);
+				return true;
+			}
+			RemoldAgent.warn("[Mixin] " + dotClassName + ": @Mixin target change detected but the"
+				+ " unload/re-mount pipeline failed; falling back to the native reload path,"
+				+ " which will report that a restart is required");
+		}
+		if (plan.usable() && plan.interfacesChanged()) {
+			if (!RemoldAgent.isEnhancedHotswapEnabled()) {
+				RemoldAgent.warn("[Mixin] " + dotClassName + " changes its implemented interface(s) ("
+					+ plan.describe() + "); interface changes need enhanced class redefinition"
+					+ " (JBR/DCEVM with -XX:+AllowEnhancedClassRedefinition). RESTART the client to apply it"
+					+ " (editing the mixin's members stays hot-swappable).");
+				return true;
+			}
+			if (!plan.interfacePreAligned()) {
+				RemoldAgent.warn("[Mixin] " + dotClassName + " changes its implemented interface(s) but the"
+					+ " MixinInfo/ClassInfo interface tables could not be aligned (" + plan.describe()
+					+ "); falling back to the native reload path (a restart may be required)");
+			} else {
+				RemoldAgent.info("[Mixin] " + dotClassName + " interface table updated on this DCEVM ("
+					+ plan.describe() + "); reloading so the target re-weave picks it up");
+				if (!plan.removedInterfaces().isEmpty()) {
+					// 移除接口没有本地实证：JBR 的增强重定义支持改写接口表，但目标的 ClassInfo
+					// 只增不删（上游没有 removeInterface），陈旧条目可能影响后续成员解析。
+					RemoldAgent.warn("[Mixin] " + dotClassName + " removes implemented interface(s) "
+						+ plan.removedInterfaces() + "; removing an interface has no local evidence on this"
+						+ " JVM build. If the target keeps answering for it (stale ClassInfo entry) or the"
+						+ " redefine is refused, restart the client. This is a known boundary, not a silent skip.");
+				}
+			}
+		}
+		if (plan.usable() && plan.priorityChanged()) {
+			RemoldAgent.info("[Mixin] " + dotClassName + " priority updated (" + plan.oldPriority()
+				+ " -> " + plan.newPriority() + "); reloading and re-weaving targets so the new"
+				+ " ordering takes effect");
+		}
+
 		List<String> targets = Collections.emptyList();
 		MixinClassInfoSync.SyncToken syncToken = MixinClassInfoSync.SyncToken.EMPTY;
 		try {
@@ -219,6 +276,9 @@ public final class MixinHotSwap {
 			// 同时收回覆盖层里的新字节，避免一份没被接受的模板长期遮蔽旧版本。
 			MixinClassInfoSync.rollback(syncToken);
 			MixinBytecodeOverlay.clear(innerNames);
+			// 前置策略可能已经把 priority 字段 / 接口表对齐到新值；reload 失败必须原样撤回，
+			// 否则旧 state 会声称“已经是新结构”，后续每次 reload 的比较基线都错位。
+			MixinReloadPolicy.rollback(transformer, dotClassName, plan);
 			reportReloadFailure(dotClassName, t);
 			return true;
 		}
@@ -299,6 +359,30 @@ public final class MixinHotSwap {
 		RemoldAgent.info("[Mixin] inner class " + dotClassName + " changed; re-running the enclosing Mixin "
 			+ outerDot + " so the new anonymous-class body is re-generated");
 		return handleIfMixin0(outerDot, outerBytes);
+	}
+
+	/**
+	 * {@code @Mixin(targets=...)} 变更的差集卸载 + 重新挂载。
+	 *
+	 * <p>重新登记会让 {@code MixinConfig.prepare()} 依据<b>新字节码</b>重建 {@code MixinInfo}，
+	 * 因此必须先把新模板字节接进 Mixin 的字节码提供方，并驱逐该 Mixin 的 {@code ClassInfo}
+	 * 缓存——否则新 {@code MixinInfo} 读到的仍是旧字节/旧元数据。失败时收回覆盖层登记，
+	 * 让调用方回落原生 reload（那里会给出“需重启”的诊断）。</p>
+	 *
+	 * @return 需要重织入的目标类（旧 ∪ 新）；失败返回 {@code null}
+	 */
+	private static List<String> retargetMixin(IMixinTransformer transformer, String dotClassName,
+			byte[] newMixinBytes, ClassNode node) {
+		MixinBytecodeOverlay.install();
+		MixinBytecodeOverlay.register(dotClassName, newMixinBytes);
+		MixinBytecodeOverlay.evictClassInfoCache(
+			Collections.singletonList(MixinInnerClassSupport.internalName(dotClassName)));
+		List<String> affected = MixinRetarget.apply(transformer, dotClassName, node,
+			FabricLauncherSpoof::suppress, FabricLauncherSpoof::restore, MixinConfigDiff.LOADER_HOOK);
+		if (affected == null) {
+			MixinBytecodeOverlay.clear(Collections.singletonList(dotClassName));
+		}
+		return affected;
 	}
 
 	/**

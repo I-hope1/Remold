@@ -75,6 +75,60 @@ public final class ClassDiffUtil {
 	}
 
 	/**
+	 * 层次变更是否必须拒绝（纯判决，供批量路径与动态路径共用）。
+	 *
+	 * <p>判决表：</p>
+	 * <ul>
+	 *   <li><b>父类变化</b>：一律拒绝。增强重定义对 superclass 的支持没有本地实证，
+	 *       放行只会把失败推迟到 link/verify 阶段（失败形态是 {@code InternalError}/{@code VerifyError}，
+	 *       会污染后续所有重定义）。</li>
+	 *   <li><b>仅接口增删</b>：标准 HotSpot 拒绝（JVM 的 {@code redefineClasses} 不允许改接口表）；
+	 *       增强重定义（JBR/DCEVM，{@code -XX:+AllowEnhancedClassRedefinition} 生效）放行——
+	 *       接口表是类元数据的一部分，DCEVM 支持改写它；Mixin Duck 接口热更依赖这条。</li>
+	 *   <li><b>无层次变更</b>：放行。</li>
+	 * </ul>
+	 *
+	 * @param diff     类差异
+	 * @param enhanced 当前 JVM 是否具备增强重定义能力（{@code EnvironmentProbe}）
+	 * @return {@code true} 表示必须拒绝该类的重定义
+	 */
+	public static boolean mustRejectHierarchyChange(ClassDiff diff, boolean enhanced) {
+		if (diff == null || !diff.hierarchyChanged) {
+			return false;
+		}
+		if (diff.superChanged) {
+			return true;
+		}
+		// 走到这里只可能是接口增删（diff() 只在这两种情况下置 hierarchyChanged）。
+		return !enhanced;
+	}
+
+	/**
+	 * 层次变更的可读描述（日志用）。
+	 *
+	 * @param diff 类差异
+	 * @return 例如 {@code "superclass A -> B; interfaces +[x/Y] -[z/W]"}
+	 */
+	public static String describeHierarchyChange(ClassDiff diff) {
+		if (diff == null || !diff.hierarchyChanged) {
+			return "none";
+		}
+		StringBuilder sb = new StringBuilder();
+		if (diff.superChanged) {
+			sb.append("superclass ").append(diff.oldClass == null ? "?" : diff.oldClass.superName)
+				.append(" -> ").append(diff.newClass == null ? "?" : diff.newClass.superName);
+		}
+		if (!diff.addedInterfaces.isEmpty() || !diff.removedInterfaces.isEmpty()) {
+			if (sb.length() > 0) {
+				sb.append("; ");
+			}
+			sb.append("interfaces +").append(diff.addedInterfaces)
+				.append(" -").append(diff.removedInterfaces);
+		}
+		return sb.length() == 0 ? "unknown hierarchy change" : sb.toString();
+	}
+
+	/**
 	 * 解析字节码为ASM树节点
 	 * <pre>
 	 * 性能优化说明：
@@ -125,6 +179,12 @@ public final class ClassDiffUtil {
 
 		/** 继承层次是否发生变化（父类或接口变更） */
 		public       boolean      hierarchyChanged = false;
+		/** 父类是否变化（JBR/DCEVM 也不放行，必须重启） */
+		public       boolean      superChanged     = false;
+		/** 新增的接口内部名（父类未变时，接口增删是可判定的子集） */
+		public final List<String> addedInterfaces  = new ArrayList<>();
+		/** 删除的接口内部名 */
+		public final List<String> removedInterfaces = new ArrayList<>();
 		/** 错误信息列表：记录严重的不兼容变更 */
 		public final List<String> errors           = new ArrayList<>();
 
@@ -142,7 +202,19 @@ public final class ClassDiffUtil {
 			typeChangedFields.clear();
 			reinitFields.clear();
 			hierarchyChanged = false;
+			superChanged = false;
+			addedInterfaces.clear();
+			removedInterfaces.clear();
 			errors.clear();
+		}
+
+		/**
+		 * 是否只有接口表变化（父类未变）。
+		 *
+		 * @return {@code true} 表示层次变更全部来自接口增删
+		 */
+		public boolean interfaceChanged() {
+			return !this.superChanged && (!this.addedInterfaces.isEmpty() || !this.removedInterfaces.isEmpty());
 		}
 
 		/**
@@ -192,6 +264,7 @@ public final class ClassDiffUtil {
 		// 检查父类是否变更
 		if (!Objects.equals(oldC.superName, newC.superName)) {
 			d.hierarchyChanged = true;
+			d.superChanged = true;
 			d.errors.add("! CRITICAL: Superclass changed: " + oldC.superName + " -> " + newC.superName);
 		}
 
@@ -211,12 +284,14 @@ public final class ClassDiffUtil {
 				// 如果在旧接口中找不到，则是新增接口
 				if (oldInterfacesMap.remove(Utils.hash(itf)) == null) {
 					d.errors.add("+ " + itf);
+					d.addedInterfaces.add(itf);
 					d.hierarchyChanged = true;
 				}
 			}
 			// 剩余的旧接口就是被删除的
 			oldInterfacesMap.forEachValue(itf -> {
 				d.errors.add("- " + itf);
+				d.removedInterfaces.add(itf);
 				d.hierarchyChanged = true;
 			});
 		}

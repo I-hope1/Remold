@@ -2,8 +2,11 @@ package remold.mixin;
 
 import java.lang.instrument.ClassFileTransformer;
 import java.security.ProtectionDomain;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -30,6 +33,11 @@ import remold.RemoldAgent;
  * <p><b>只留候选</b>：只抄名字里带 {@code '$'} 的类（合成/匿名/内部类——唯一会被
  * {@code redefineSyntheticSafely} 问到的形态）。全量抄写会把整个客户端依赖树的字节都留在内存里，
  * 而本录口的用途只需要覆盖候选。</p>
+ *
+ * <p><b>两个分母必须可点名</b>（不变量 C2）：{@code missed} 不能只是一个数字——每次未命中都记
+ * 类全称 + 加载器标签 + 原因（{@link #missDetailsSummary()}）；{@code seen - recorded} 也不能只当
+ * "失败数"——被过滤的提交单独计数并留示例（{@link #filterSummary()}，规则见 {@link #filterRule()}）。
+ * 两者都只存字符串，不持 {@code ClassLoader} 强引用。</p>
  */
 final class MixinClassBaseline {
 
@@ -38,12 +46,44 @@ final class MixinClassBaseline {
 	private static final AtomicInteger MISSED = new AtomicInteger();
 
 	/**
+	 * 口径拆解：{@code SEEN} 的每一次提交只走两条路之一——被候选过滤（内部名不含 {@code '$'}）或进入抄字节分支。
+	 *
+	 * <p>{@code seen - recorded} 因此 <b>不是</b>"录口失败数"：它是被候选过滤掉的提交数，加上
+	 * 同名重复定义带来的重复提交数（{@code ATTEMPTS - recorded}）。两个分量各自计数，避免战报把
+	 * 口径读串。</p>
+	 */
+	private static final AtomicInteger FILTERED = new AtomicInteger();
+	private static final AtomicInteger ATTEMPTS = new AtomicInteger();
+
+	/** 被过滤提交的示例类名（内部名原文，上限 {@value #FILTERED_EXAMPLE_CAP} 个）：只用于让人核对规则。 */
+	private static final int FILTERED_EXAMPLE_CAP = 3;
+	private static final List<String> FILTERED_EXAMPLES = new ArrayList<>();
+
+	/**
+	 * 未命中查找的点名清单（类全称 + 加载器标签 + 原因），上限 {@value #MISS_DETAIL_CAP} 条。
+	 *
+	 * <p>只存字符串，不持 {@code ClassLoader}：点名是给日志/战报读的，不能反过来延长加载器寿命。</p>
+	 */
+	private static final int MISS_DETAIL_CAP = 8;
+	private static final ArrayDeque<String> MISS_DETAILS = new ArrayDeque<>();
+
+	/**
 	 * (加载器 → (点分类名 → 定义字节))。
 	 *
 	 * <p>弱键：以类加载器为键的内部表不得延长加载器生命周期（与项目对 Class 键表的纪律一致）；
 	 * 加载器被回收后它名下的基线也一起消失——那正是"这份基线不再有意义"的时刻。</p>
 	 */
 	private static final Map<ClassLoader, Map<String, byte[]>> BASELINES =
+		Collections.synchronizedMap(new WeakHashMap<ClassLoader, Map<String, byte[]>>());
+
+	/**
+	 * 已生效字节（基线链 R1 及以后）：(加载器身份 → (点分类名 → 字节))。
+	 *
+	 * <p>与 {@link #BASELINES} 共用同一套加载器身份语义：<b>键是加载器实例（弱引用）</b>，
+	 * 同名合成类被两个加载器各定义一份时不会互相冒充。值里不出现 {@code Class}，
+	 * 与项目"以 Class 为键的表用弱引用、值不反向持 Class"的纪律一致。</p>
+	 */
+	private static final Map<ClassLoader, Map<String, byte[]>> APPLIED =
 		Collections.synchronizedMap(new WeakHashMap<ClassLoader, Map<String, byte[]>>());
 
 	/** 安装幂等（premain 与 agentmain 两条注册路径都会调用）。 */
@@ -102,8 +142,81 @@ final class MixinClassBaseline {
 				}
 			}
 		}
+		recordMiss(loader, dot);
 		MISSED.incrementAndGet();
 		return null;
+	}
+
+	/**
+	 * 点名一条未命中：<b>类全称 + 加载器标签 + 原因</b>。
+	 *
+	 * <p>原因只有两种，都是可核对的机械判据：这个名字在<b>别的加载器</b>名下录到过（说明 R0 属于
+	 * 另一个加载器，本加载器从未 defineClass 过它），还是<b>任何加载器</b>都没录到过（类在 agent
+	 * 注册前就已定义，或录口未安装）。只存字符串，不持加载器引用。</p>
+	 */
+	private static void recordMiss(ClassLoader loader, String dot) {
+		String name = dot == null ? "<null>" : dot;
+		int otherLoaders = 0;
+		synchronized (BASELINES) {
+			for (Map.Entry<ClassLoader, Map<String, byte[]>> entry : BASELINES.entrySet()) {
+				if (entry.getKey() != loader && entry.getValue().containsKey(name)) {
+					otherLoaders++;
+				}
+			}
+		}
+		String reason = otherLoaders == 0
+			? "no defineClass submission for this name on any loader"
+			: "recorded under " + otherLoaders + " other loader(s); this loader never defined it";
+		String detail = name + " loader=" + loaderLabel(loader) + " reason=" + reason;
+		synchronized (MISS_DETAILS) {
+			MISS_DETAILS.addLast(detail);
+			while (MISS_DETAILS.size() > MISS_DETAIL_CAP) {
+				MISS_DETAILS.removeFirst();
+			}
+		}
+	}
+
+	/**
+	 * 加载器标签：类名 + 实例身份哈希。
+	 *
+	 * <p>身份哈希是<b>弱身份</b>：不与 {@code equals} 混用，也不延长加载器寿命，只用来让人/日志
+	 * 区分两个同类名加载器。与 {@link #BASELINES}/{@link #APPLIED} 的弱键身份语义同源。</p>
+	 */
+	static String loaderLabel(ClassLoader loader) {
+		return loader == null
+			? "bootstrap"
+			: loader.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(loader));
+	}
+
+	/**
+	 * 登记"已在 JVM 里生效"的合成类字节（基线链 R1 及以后）。
+	 *
+	 * <p>只在 {@code redefineClasses} <b>成功</b>之后调用；失败的重定义不落账。{@code loader == null}
+	 * （bootstrap）不登记：闸 4 对 bootstrap 永远视为无基线，这里替它存一份只会制造假基线。</p>
+	 */
+	static void recordApplied(ClassLoader loader, String dottedName, byte[] bytes) {
+		if (loader == null || dottedName == null || bytes == null) {
+			return;
+		}
+		synchronized (APPLIED) {
+			Map<String, byte[]> byName = APPLIED.get(loader);
+			if (byName == null) {
+				byName = new HashMap<>();
+				APPLIED.put(loader, byName);
+			}
+			byName.put(dottedName, bytes.clone());
+		}
+	}
+
+	/** 取该 (加载器, 点分名) 名下已生效的字节；{@code null} = 本加载器还没成功 redefine 过它。 */
+	static byte[] appliedOf(ClassLoader loader, String dottedName) {
+		if (loader == null || dottedName == null) {
+			return null;
+		}
+		synchronized (APPLIED) {
+			Map<String, byte[]> byName = APPLIED.get(loader);
+			return byName == null ? null : byName.get(dottedName);
+		}
 	}
 
 	/** 当前三个分母的快照。 */
@@ -123,13 +236,68 @@ final class MixinClassBaseline {
 		return "seen=" + m.seen + " recorded=" + m.recorded + " missed=" + m.missed;
 	}
 
+	/** 候选过滤规则原文：只有内部名带 {@code '$'} 的提交会落账。 */
+	static String filterRule() {
+		return "defineClass submission whose internal name has no '$' is not a synthetic/inner candidate";
+	}
+
+	/** 被候选过滤的提交数（{@code seen - recorded} 的分量之一）。 */
+	static int filteredCount() {
+		return FILTERED.get();
+	}
+
+	/** 被过滤提交的示例内部名（上限 {@value #FILTERED_EXAMPLE_CAP} 个）：规则自证用。 */
+	static List<String> filteredExamples() {
+		synchronized (FILTERED_EXAMPLES) {
+			return new ArrayList<>(FILTERED_EXAMPLES);
+		}
+	}
+
+	/** 进入抄字节分支的提交数（{@code attempts - recorded} = 同名重复提交数）。 */
+	static int recordAttempts() {
+		return ATTEMPTS.get();
+	}
+
+	/** 未命中查找数（与 {@link #missDetailsSummary()} 的点名条数同口径）。 */
+	static int missedCount() {
+		return MISSED.get();
+	}
+
+	/** 最近未命中查找的点名清单：类全称 + 加载器标签 + 原因。 */
+	static String missDetailsSummary() {
+		synchronized (MISS_DETAILS) {
+			return MISS_DETAILS.isEmpty() ? "<none>" : String.join(" | ", MISS_DETAILS);
+		}
+	}
+
+	/** 过滤口径摘要：规则 + 计数 + 示例（示例是内部名原文，便于对照规则自证）。 */
+	static String filterSummary() {
+		List<String> examples;
+		synchronized (FILTERED_EXAMPLES) {
+			examples = new ArrayList<>(FILTERED_EXAMPLES);
+		}
+		return "filtered=" + FILTERED.get() + " rule=\"" + filterRule() + "\" examples=" + examples
+			+ " attempts=" + ATTEMPTS.get() + " recorded=" + metrics().recorded;
+	}
+
 	/** 单测隔离：清空台账与计数器（不动安装状态：安装是进程级一次性动作）。 */
 	static void clearForTest() {
 		synchronized (BASELINES) {
 			BASELINES.clear();
 		}
+		synchronized (APPLIED) {
+			APPLIED.clear();
+		}
+		synchronized (FILTERED_EXAMPLES) {
+			FILTERED_EXAMPLES.clear();
+		}
+		synchronized (MISS_DETAILS) {
+			MISS_DETAILS.clear();
+		}
 		SEEN.set(0);
 		MISSED.set(0);
+		FILTERED.set(0);
+		ATTEMPTS.set(0);
 	}
 
 	/**
@@ -163,7 +331,8 @@ final class MixinClassBaseline {
 	 *       （bootstrap {@code loader == null}、hidden class、agent 自身 {@code remold/}）。
 	 *       被候选过滤拒掉的名字（不含 {@code '$'}）<b>仍然计入</b>；</li>
 	 *   <li>{@code recorded}：真正落账的 (加载器, 类名) 键数——只留候选，所以
-	 *       {@code seen - recorded} 就是<b>被候选过滤掉</b>的提交数，不是"录口失败数"；</li>
+	 *       {@code seen - recorded} = 被候选过滤的提交数（{@link #filteredCount()}）+ 同名重复提交数
+	 *       （{@link #recordAttempts()} - {@code recorded}），不是"录口失败数"；</li>
 	 *   <li>{@code missed}：基线<b>查找</b>未命中数——闸 4 每拒绝一次计一次，与加载器数、
 	 *       类数、{@code recorded} 都无关。</li>
 	 * </ul>
@@ -208,10 +377,22 @@ final class MixinClassBaseline {
 			SEEN.incrementAndGet();
 			// 只留候选：合成/匿名/内部类的名字一定带 '$'（见类注释的"只留候选"）。
 			if (className.indexOf('$') < 0) {
+				FILTERED.incrementAndGet();
+				noteFiltered(className);
 				return null;
 			}
+			ATTEMPTS.incrementAndGet();
 			record(loader, className.replace('/', '.'), classfileBuffer);
 			return null;   // 只记录，绝不改字节
+		}
+	}
+
+	/** 记下前若干个被过滤提交的内部名（规则自证用；只存名字，不存字节）。 */
+	private static void noteFiltered(String internalName) {
+		synchronized (FILTERED_EXAMPLES) {
+			if (FILTERED_EXAMPLES.size() < FILTERED_EXAMPLE_CAP && !FILTERED_EXAMPLES.contains(internalName)) {
+				FILTERED_EXAMPLES.add(internalName);
+			}
 		}
 	}
 

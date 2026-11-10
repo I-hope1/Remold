@@ -57,7 +57,7 @@ class MixinSyntheticGateTest {
 		String name = uniqueName("pass");
 		String host = uniqueHost("pass");
 		byte[] candidate = MixinSyntheticGateFixtures.candidateBytes(MixinSyntheticGateFixtures.Capturing.class);
-		remold.RemoldAgent.bytecodeCache.put(name, candidate);
+		MixinSyntheticGateFixtures.seedBaseline(definingLoader(), name, candidate);
 		try {
 			GateOutcome outcome = attempt(recorder, MixinSyntheticGateFixtures.Capturing.class, name, candidate, host);
 
@@ -87,7 +87,7 @@ class MixinSyntheticGateTest {
 		byte[] shrinking = MixinSyntheticGateFixtures.withoutField(
 			MixinSyntheticGateFixtures.Capturing.class, "payload");
 		byte[] valid = MixinSyntheticGateFixtures.candidateBytes(MixinSyntheticGateFixtures.Capturing.class);
-		remold.RemoldAgent.bytecodeCache.put(victim, valid);
+		MixinSyntheticGateFixtures.seedBaseline(definingLoader(), victim, valid);
 		try {
 			// Baseline: a sibling synthetic class under the same host is rejected for a shrinking
 			// field table, which blocks the whole host batch (transactional consistency).
@@ -123,8 +123,8 @@ class MixinSyntheticGateTest {
 		byte[] dropping = MixinSyntheticGateFixtures.withoutConstructors(MixinSyntheticGateFixtures.Capturing.class);
 		// Baseline seeded on purpose: with it the baseline gate cannot fire, so the constructor gate is
 		// the only reason this candidate can be refused (keeps the gate-to-case attribution one-to-one).
-		remold.RemoldAgent.bytecodeCache.put(
-			name, MixinSyntheticGateFixtures.candidateBytes(MixinSyntheticGateFixtures.Capturing.class));
+		MixinSyntheticGateFixtures.seedBaseline(definingLoader(), name,
+			MixinSyntheticGateFixtures.candidateBytes(MixinSyntheticGateFixtures.Capturing.class));
 		try {
 			GateOutcome rejected = attempt(recorder, MixinSyntheticGateFixtures.Capturing.class, name, dropping, host);
 
@@ -157,8 +157,8 @@ class MixinSyntheticGateTest {
 		byte[] shrinking = MixinSyntheticGateFixtures.withoutField(
 			MixinSyntheticGateFixtures.Capturing.class, "payload");
 		// Baseline seeded on purpose: the field-table gate must be the only reason this is refused.
-		remold.RemoldAgent.bytecodeCache.put(
-			name, MixinSyntheticGateFixtures.candidateBytes(MixinSyntheticGateFixtures.Capturing.class));
+		MixinSyntheticGateFixtures.seedBaseline(definingLoader(), name,
+			MixinSyntheticGateFixtures.candidateBytes(MixinSyntheticGateFixtures.Capturing.class));
 		try {
 			GateOutcome rejected = attempt(recorder, MixinSyntheticGateFixtures.Capturing.class, name, shrinking, host);
 
@@ -200,11 +200,79 @@ class MixinSyntheticGateTest {
 
 			// Control: seeding a baseline snapshot is the only difference -> the candidate passes.
 			MixinInnerClassHotSwap.clearBlocked(host);
-			remold.RemoldAgent.bytecodeCache.put(name, candidate);
+			MixinSyntheticGateFixtures.seedBaseline(definingLoader(), name, candidate);
 			GateOutcome control = attempt(recorder, MixinSyntheticGateFixtures.Capturing.class, name, candidate, host);
 			assertTrue(control.executed, "with a baseline snapshot present the same candidate must be redefined");
 			assertEquals(1, control.executedDelta, "the control must reach the exit exactly once");
 			assertEquals(0, control.gateRejectedDelta, "the control must not be rejected by any gate");
+		} finally {
+			cleanup(name, host);
+		}
+	}
+
+	// ------------------------------------------------------------ baseline chain (invariant C2)
+
+	/**
+	 * The baseline is "the bytes the JVM actually loaded", so the chain only advances on a redefine
+	 * the JVM accepted: {@code R0} (premain capture) -> {@code R1} (first accepted redefine) ->
+	 * {@code R2} (second accepted redefine).
+	 *
+	 * <p>Both halves sit in one case on purpose, because a chain can break in two opposite ways:</p>
+	 * <ul>
+	 *   <li>a <b>rejected</b> redefine must not become the baseline — otherwise the next batch would
+	 *       treat never-loaded bytes as the live shape (the exact silent degradation C2 forbids);</li>
+	 *   <li>an <b>accepted</b> redefine must move the baseline — otherwise the chain freezes at the
+	 *       premain capture {@code R0} and every later batch is reasoned about against stale bytes.</li>
+	 * </ul>
+	 *
+	 * <p>All three generations keep the same member schema ({@code SourceFile} differs only), so the
+	 * constructor/field gates cannot be the reason a step is refused: the only difference between the
+	 * refused and the accepted attempt is the JVM's own verdict.</p>
+	 */
+	@Test
+	void failedRedefineNeverMovesTheBaselineAndTheChainKeepsOnlyAcceptedBytes() {
+		RecordingInstrumentation recorder = new RecordingInstrumentation();
+		ClassLoader loader = definingLoader();
+		String name = uniqueName("chain");
+		String host = uniqueHost("chain");
+		byte[] r0 = MixinSyntheticGateFixtures.candidateBytes(MixinSyntheticGateFixtures.Capturing.class);
+		byte[] r1 = MixinSyntheticGateFixtures.tagged(MixinSyntheticGateFixtures.Capturing.class, "R1");
+		byte[] r2 = MixinSyntheticGateFixtures.tagged(MixinSyntheticGateFixtures.Capturing.class, "R2");
+		MixinSyntheticGateFixtures.seedBaseline(loader, name, r0);
+		try {
+			assertArrayEquals(r0, MixinInnerClassHotSwap.baselineBytes(loader, name),
+				"precondition: R0 is the premain-captured baseline for this loader");
+
+			// Step R1: the JVM rejects the redefine. The gate must report the refusal and leave R0.
+			recorder.rejectNextRedefine = true;
+			GateOutcome refusedR1 = attempt(recorder, MixinSyntheticGateFixtures.Capturing.class, name, r1, host);
+			assertFalse(refusedR1.executed, "a redefine the JVM rejects must not be reported as executed");
+			assertEquals(1, refusedR1.redefinitions.size(),
+				"the refused attempt must have reached redefineClasses (otherwise the baseline gate, not the JVM,"
+					+ " refused it and this case would be vacuous)");
+			assertArrayEquals(r0, MixinInnerClassHotSwap.baselineBytes(loader, name),
+				"a REFUSED redefine must never become the baseline: the baseline stays R0");
+
+			// Step R1 again, accepted: the only changed condition is the JVM verdict.
+			MixinInnerClassHotSwap.clearBlocked(host);
+			GateOutcome acceptedR1 = attempt(recorder, MixinSyntheticGateFixtures.Capturing.class, name, r1, host);
+			assertTrue(acceptedR1.executed, "with the block cleared the identical candidate must be accepted");
+			assertArrayEquals(r1, MixinInnerClassHotSwap.baselineBytes(loader, name),
+				"the chain takes the bytes that actually went live: R0 -> R1");
+
+			// Step R2 refused: R1 must survive.
+			recorder.rejectNextRedefine = true;
+			GateOutcome refusedR2 = attempt(recorder, MixinSyntheticGateFixtures.Capturing.class, name, r2, host);
+			assertFalse(refusedR2.executed, "a refused R2 must not be reported as executed");
+			assertArrayEquals(r1, MixinInnerClassHotSwap.baselineBytes(loader, name),
+				"a refused R2 must leave R1 as the baseline");
+
+			// Step R2 accepted: the chain advances to R2.
+			MixinInnerClassHotSwap.clearBlocked(host);
+			GateOutcome acceptedR2 = attempt(recorder, MixinSyntheticGateFixtures.Capturing.class, name, r2, host);
+			assertTrue(acceptedR2.executed, "the R2 candidate satisfies every gate and must be accepted");
+			assertArrayEquals(r2, MixinInnerClassHotSwap.baselineBytes(loader, name),
+				"the chain ends on R2: neither the premain capture R0 nor R1 may be served as the baseline");
 		} finally {
 			cleanup(name, host);
 		}
@@ -226,8 +294,8 @@ class MixinSyntheticGateTest {
 		byte[] shrinking = MixinSyntheticGateFixtures.withoutField(
 			MixinSyntheticGateFixtures.Capturing.class, "payload");
 		// Baseline seeded on purpose: only the field-table gate may refuse this candidate.
-		remold.RemoldAgent.bytecodeCache.put(
-			name, MixinSyntheticGateFixtures.candidateBytes(MixinSyntheticGateFixtures.Capturing.class));
+		MixinSyntheticGateFixtures.seedBaseline(definingLoader(), name,
+			MixinSyntheticGateFixtures.candidateBytes(MixinSyntheticGateFixtures.Capturing.class));
 		try {
 			GateOutcome rejected = attempt(recorder, MixinSyntheticGateFixtures.Capturing.class, name, shrinking, host);
 
@@ -241,7 +309,7 @@ class MixinSyntheticGateTest {
 			// Control: only the shrinking field is restored, so the execute branch is reachable.
 			MixinInnerClassHotSwap.clearBlocked(host);
 			byte[] padded = MixinSyntheticGateFixtures.candidateBytes(MixinSyntheticGateFixtures.Capturing.class);
-			remold.RemoldAgent.bytecodeCache.put(name, padded);
+			MixinSyntheticGateFixtures.seedBaseline(definingLoader(), name, padded);
 			GateOutcome control = attempt(recorder, MixinSyntheticGateFixtures.Capturing.class, name, padded, host);
 			assertTrue(control.executed, "the field-table-preserving candidate must reach the exit");
 			assertEquals("v1:7:payload", live.describe(), "the control must not disturb the live instance either");
@@ -293,16 +361,29 @@ class MixinSyntheticGateTest {
 		return out;
 	}
 
+	/**
+	 * Loader that actually defined the fixture class: the recorder keys baselines by loader
+	 * identity, so every seeded baseline must use exactly this one.
+	 */
+	private static ClassLoader definingLoader() {
+		return MixinSyntheticGateFixtures.Capturing.class.getClassLoader();
+	}
+
+	/**
+	 * Unique synthetic-class name per case. Deliberately outside the {@code remold.} package: the
+	 * premain recorder drops {@code remold/} names (its own classes), so a {@code remold.} name would
+	 * never be recorded and the seeding helper would fail loudly instead of testing the gate.
+	 */
 	private static String uniqueName(String tag) {
-		return "remold.synthetic.GateFixture$Anonymous$" + tag + "-" + SEQ.incrementAndGet();
+		return "gatefix.GateFixture$Anonymous$" + tag + "-" + SEQ.incrementAndGet();
 	}
 
 	private static String uniqueHost(String tag) {
-		return "remold.synthetic.GateFixture$Host" + tag + "-" + SEQ.incrementAndGet();
+		return "gatefix.GateFixture$Host" + tag + "-" + SEQ.incrementAndGet();
 	}
 
 	private static void cleanup(String name, String host) {
-		remold.RemoldAgent.bytecodeCache.remove(name);
+		MixinSyntheticGateFixtures.forgetBaseline(definingLoader(), name);
 		MixinInnerClassHotSwap.clearBlocked(host);
 	}
 
@@ -321,6 +402,8 @@ class MixinSyntheticGateTest {
 	 */
 	private static final class RecordingInstrumentation implements InvocationHandler {
 		final List<ClassDefinition> redefinitions = new ArrayList<>();
+		/** One-shot failure injection: the JVM-side rejection of a redefineClasses call. */
+		boolean rejectNextRedefine;
 		final Instrumentation proxy;
 
 		RecordingInstrumentation() {
@@ -335,6 +418,12 @@ class MixinSyntheticGateTest {
 				ClassDefinition[] definitions = (ClassDefinition[]) args[0];
 				for (ClassDefinition definition : definitions) {
 					this.redefinitions.add(definition);
+				}
+				if (this.rejectNextRedefine) {
+					// The call is recorded first on purpose: "reached redefineClasses" and "the JVM
+					// accepted it" are two different facts, and the chain case must assert both.
+					this.rejectNextRedefine = false;
+					throw new UnsupportedOperationException("simulated JVM rejection of the redefine");
 				}
 				return null;
 			}

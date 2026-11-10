@@ -79,8 +79,11 @@ final class MixinClassBaseline {
 	/**
 	 * 取 (加载器, 类名) 对应的定义字节。
 	 *
-	 * <p>未命中时计入 {@code missed}（这是闸 4 的分母）。返回的数组是录口内部副本，
-	 * <b>调用方不得修改</b>。</p>
+	 * <p>这是<b>唯一</b>能证明"基线属于这个加载器"的来源：闸 4 只认它，不再回退到点分名的
+	 * {@link RemoldAgent#bytecodeCache}（那条索引没有加载器维度，同名不同加载器会互相冒充）。</p>
+	 *
+	 * <p>未命中时计入 {@code missed}：<b>一次查找计一次</b>，与"拒绝了一个类"一一对应
+	 * （闸 4 每次拒绝只查一次）。</p>
 	 *
 	 * @param loader     定义该类的加载器；{@code null}（bootstrap）永远视为未命中
 	 * @param className  点分名或内部名皆可
@@ -101,33 +104,6 @@ final class MixinClassBaseline {
 		}
 		MISSED.incrementAndGet();
 		return null;
-	}
-
-	/**
-	 * 该 dotName 是否已经被<b>另一个</b>加载器录过基线。
-	 *
-	 * <p>用途：闸 4 的 legacy 点分名缓存回退必须对"同名不同加载器"失效——一旦录口已经证明这个
-	 * 类名属于别的加载器，点分名缓存里那条同名字节就不能拿来给当前加载器放行（那正是"同名互相
-	 * 冒充"）。录口完全没有这个类名时（例如 agent 注册前就加载的类、或测试里只播种了缓存）才允许
-	 * 回退，并必须告警。</p>
-	 */
-	static boolean recordedUnderOtherLoader(ClassLoader loader, String dotName) {
-		String dot = dotName == null ? null : dotName.replace('/', '.');
-		if (dot == null) {
-			return false;
-		}
-		synchronized (BASELINES) {
-			for (Map.Entry<ClassLoader, Map<String, byte[]>> entry : BASELINES.entrySet()) {
-				ClassLoader owner = entry.getKey();
-				if (owner == loader) {
-					continue;
-				}
-				if (entry.getValue().containsKey(dot)) {
-					return true;
-				}
-			}
-		}
-		return false;
 	}
 
 	/** 当前三个分母的快照。 */
@@ -156,13 +132,48 @@ final class MixinClassBaseline {
 		MISSED.set(0);
 	}
 
-	/** 三个分母的不可变快照。 */
+	/**
+	 * 单测隔离：只摘掉一个 (加载器, 类名) 键（计数器不动）。
+	 *
+	 * <p>用例各自用唯一类名播种，收尾只清理自己那一份，避免 {@link #clearForTest()} 把同类里
+	 * 其他用例的播种一起抹掉。</p>
+	 */
+	static void forgetForTest(ClassLoader loader, String className) {
+		String dot = className == null ? null : className.replace('/', '.');
+		if (dot == null) {
+			return;
+		}
+		synchronized (BASELINES) {
+			Map<String, byte[]> byName = BASELINES.get(loader);
+			if (byName != null) {
+				byName.remove(dot);
+				if (byName.isEmpty()) {
+					BASELINES.remove(loader);
+				}
+			}
+		}
+	}
+
+	/**
+	 * 三个分母的不可变快照。
+	 *
+	 * <p><b>三个数各算一套口径，互不可由彼此推出</b>（战报只看这三个数，容易读串）：</p>
+	 * <ul>
+	 *   <li>{@code seen}：录口<b>看到</b>的 defineClass 提交数——只排除"根本不可能落账"的三类
+	 *       （bootstrap {@code loader == null}、hidden class、agent 自身 {@code remold/}）。
+	 *       被候选过滤拒掉的名字（不含 {@code '$'}）<b>仍然计入</b>；</li>
+	 *   <li>{@code recorded}：真正落账的 (加载器, 类名) 键数——只留候选，所以
+	 *       {@code seen - recorded} 就是<b>被候选过滤掉</b>的提交数，不是"录口失败数"；</li>
+	 *   <li>{@code missed}：基线<b>查找</b>未命中数——闸 4 每拒绝一次计一次，与加载器数、
+	 *       类数、{@code recorded} 都无关。</li>
+	 * </ul>
+	 */
 	static final class Metrics {
-		/** 录口看到的 defineClass 提交数。 */
+		/** 录口看到的 defineClass 提交数（含被候选过滤的名字）。 */
 		final int seen;
-		/** 实际落账的 (加载器, 类名) 键数。 */
+		/** 实际落账的 (加载器, 类名) 键数（只含候选名）。 */
 		final int recorded;
-		/** 查询未命中数 = 因"没有基线"被闸拒绝的次数。 */
+		/** 基线查找未命中数 = 因"没有基线"被闸拒绝的次数。 */
 		final int missed;
 
 		Metrics(int seen, int recorded, int missed) {

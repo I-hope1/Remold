@@ -84,6 +84,55 @@ final class MixinSyntheticGateFixtures {
 	}
 
 	/**
+	 * Fixture bytes with the same member set but a different {@code SourceFile} attribute.
+	 *
+	 * <p>用于基线链用例（R0→R1→R2）：每一代的字节必须可区分，但成员表（构造器 + 字段）必须完全
+	 * 一致，否则闸 2/闸 3 会先拒绝、链就测不到了。{@code SourceFile} 是唯一只改常量池、不改成员
+	 * schema 的属性，JVM 也允许它在 redefine 时变化。</p>
+	 */
+	static byte[] tagged(Class<?> type, String tag) {
+		ClassNode node = nodeOf(type);
+		node.sourceFile = "v1" + tag;
+		byte[] bytes = serialize(node);
+		if (java.util.Arrays.equals(bytes, bytesOf(type))) {
+			throw new IllegalStateException("tagging must change the bytes, otherwise the chain case is vacuous: " + tag);
+		}
+		return bytes;
+	}
+
+	/**
+	 * 播种一条 premain 基线：走 {@link MixinClassBaseline#recorder()} 本身，即闸 4 认的<b>唯一</b>
+	 * 加载器维度来源。
+	 *
+	 * <p>不要用 {@code RemoldAgent.bytecodeCache.put(...)} 代替：那条点分名索引不是闸 4 的判定来源
+	 * （同名不同加载器会互相冒充），用它播种会用"闸本该拒绝"的路径把用例喂成绿的。</p>
+	 */
+	static void seedBaseline(ClassLoader loader, String dottedName, byte[] bytes) {
+		if (loader == null) {
+			throw new IllegalArgumentException("the recorder never keys bootstrap definitions: pass the defining loader");
+		}
+		byte[] rewritten;
+		try {
+			rewritten = MixinClassBaseline.recorder().transform(
+				loader, dottedName.replace('.', '/'), null, null, bytes);
+		} catch (java.lang.instrument.IllegalClassFormatException e) {
+			throw new AssertionError("the baseline recorder must never reject a class format", e);
+		}
+		if (rewritten != null) {
+			throw new AssertionError("the baseline recorder must return null: it observes bytes, it never changes them");
+		}
+		if (MixinClassBaseline.baselineOf(loader, dottedName) == null) {
+			throw new AssertionError("seeding failed: the recorder did not store " + dottedName
+				+ " (only '$' candidate names are keyed, and agent-self/hidden names are dropped)");
+		}
+	}
+
+	/** 收尾：只摘掉本用例播种的那一个键（计数器不动）。 */
+	static void forgetBaseline(ClassLoader loader, String dottedName) {
+		MixinClassBaseline.forgetForTest(loader, dottedName);
+	}
+
+	/**
 	 * Fixture bytes with every {@code <init>} removed: models a re-weave that dropped an overload
 	 * the already-loaded class still owns (old call sites would hit {@code NoSuchMethodError}).
 	 */

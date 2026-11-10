@@ -178,6 +178,17 @@ final class MixinInnerClassHotSwap {
 					result.failures.add(conformedDotted + " (InnerClassGenerator.generate returned false)");
 					continue;
 				}
+				java.util.List<String> loadedFields = MixinSyntheticSchema.loadedFields(live);
+				java.util.List<String> padded = MixinSyntheticSchema.padFields(fresh, loadedFields);
+				if (!MixinSyntheticSchema.canRedefineWithoutInstanceRewrite(fresh, loadedFields)) {
+					result.failures.add(conformedDotted + " (field-type drift; refusing ModifyInstances)");
+					continue;
+				}
+				if (!padded.isEmpty()) {
+					RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted
+						+ ": retained " + padded.size() + " tombstone field(s) " + padded
+						+ " (field table kept identical).");
+				}
 				byte[] bytes = serialize(fresh);
 				if (isUnchanged(conformedDotted, bytes)) {
 					result.unchanged.add(conformedDotted);
@@ -199,12 +210,14 @@ final class MixinInnerClassHotSwap {
 				registerGenerated(conformedDotted, bytes);
 				// 标成 Remold 自己发起的重定义：否则 AnnotationTransformer 会把这次 redefine 当成
 				// 外部热更，在已经织入过的合成类上再跑一遍桥接。
+				remold.ref.HeapFieldWatch.snapshot("before-synthetic-redefine", conformedDotted);
 				RemoldAgent.enterInternalRedefine(java.util.Collections.singleton(conformedDotted));
 				try {
 					inst.redefineClasses(new ClassDefinition(live, bytes));
 				} finally {
 					RemoldAgent.exitInternalRedefine();
 				}
+				remold.ref.HeapFieldWatch.snapshot("after-synthetic-redefine", conformedDotted);
 				recordLoaded(conformedDotted, bytes);
 				result.redefined.add(conformedDotted);
 			} catch (Throwable t) {
@@ -356,6 +369,24 @@ final class MixinInnerClassHotSwap {
 				if (!generated) {
 					continue;
 				}
+				// Schema 锚定：已加载合成类的字段表为准补齐墓碑字段（禁止字段缩容 → 不触发
+				// DCEVM ModifyInstances）。类型漂移无法用墓碑表达 → fail-closed 拒绝重定义。
+				Class<?> live = inst == null ? null : findLoadedClass(inst, conformedDotted);
+				java.util.List<String> loadedFields = live == null ? java.util.List.of()
+					: MixinSyntheticSchema.loadedFields(live);
+				java.util.List<String> padded = MixinSyntheticSchema.padFields(fresh, loadedFields);
+				if (live != null && !MixinSyntheticSchema.canRedefineWithoutInstanceRewrite(fresh, loadedFields)) {
+					RemoldAgent.warn("[Mixin] synthetic inner class " + conformedDotted
+						+ " has a field-type drift against the loaded class (schemaHash="
+						+ MixinSyntheticSchema.schemaHash(fresh) + "); refusing the redefine instead of"
+						+ " triggering a DCEVM ModifyInstances heap rewrite.");
+					continue;
+				}
+				if (!padded.isEmpty()) {
+					RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted
+						+ ": retained " + padded.size() + " tombstone field(s) " + padded
+						+ " so the field table stays identical (no ModifyInstances).");
+				}
 				byte[] bytes = serialize(fresh);
 				byte[] previous = generatedBytes(conformedDotted);
 				registerGenerated(conformedDotted, bytes);
@@ -365,7 +396,6 @@ final class MixinInnerClassHotSwap {
 				// redefine 之前**先把已加载的合成类重定义到新形态（redefineDynamic 的桥接阶段在
 				// redefineClasses 之前，因此顺序天然正确）。
 				if (inst != null) {
-					Class<?> live = findLoadedClass(inst, conformedDotted);
 					if (live != null) {
 						// 无实质变更短路（对齐 AnonClassAligner 的 no-op 语义）：运行期已加载字节与本次
 						// 重生成字节完全一致时直接跳过，不做无谓 redefine（避免额外的堆重写窗口）。
@@ -409,12 +439,14 @@ final class MixinInnerClassHotSwap {
 	 */
 	private static void redefineSyntheticBeforeTarget(Instrumentation inst, Class<?> live, String name, byte[] bytes) {
 		try {
+			remold.ref.HeapFieldWatch.snapshot("before-synthetic-redefine", name);
 			RemoldAgent.enterInternalRedefine(java.util.Collections.singleton(name));
 			try {
 				inst.redefineClasses(new ClassDefinition(live, bytes));
 			} finally {
 				RemoldAgent.exitInternalRedefine();
 			}
+			remold.ref.HeapFieldWatch.snapshot("after-synthetic-redefine", name);
 			recordLoaded(name, bytes);
 			RemoldAgent.info("[Mixin] synthetic inner class " + name
 				+ " redefined BEFORE its target redefine (structural window closed)");

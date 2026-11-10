@@ -112,6 +112,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   字段表消失、迁回时也不再当新字段加回，**实例内存布局 R1~R4 全程恒定**，消除 JBR/DCEVM 的
   `ModifyInstances` 缩容/扩容与重复 `Applying instance field init patch`（真机 `LootContextPredicate.combinedCondition`
   被置 null 的肇事窗口）。
+- **合成匿名类字段 Schema 锚定（禁止字段缩容）**：`plugin-mixin` `MixinSyntheticSchema` 以**已加载**合成类的
+  字段表为锚，重生成产物缺哪个捕获字段就按原槽位补同名/同描述符墓碑字段（`ACC_SYNTHETIC`，无读者）；
+  类型漂移（同名不同描述符）fail-closed 拒绝重定义。字段表恒等 → JBR/DCEVM 只做方法体替换
+  （`ModifyMethodBodies`），**不触发 `ModifyInstances` 全堆重排**（真机 `combinedCondition` 被冲 null 的根因）。
+  `MixinInnerClassHotSwap` 两条重定义路径（目标类前预重定义 / 兜底重定义）都接入该守门，并新增
+  `[HEAPWATCH] before-synthetic-redefine` / `after-synthetic-redefine` 切面。
 - **重定义三切面堆实例哨兵**：`remold.ref.HeapFieldWatch`（`-Dremold.probe.heapwatch=true`，
   `-Dremold.probe.heapwatch.class=...`、`-Dremold.probe.heapwatch.field=...`）在 `redefineClasses` 前、
   返回后、字段初始化补丁完成后枚举目标类实例并报告 `nullCount` 与首例身份；只读、默认关闭。

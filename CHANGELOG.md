@@ -74,6 +74,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   验证：`AnonClassAmbiguityTest` 17/0（新增 4 个文案/持有者用例，含“无持有字段不得凭空点名”的负向对照；
   变异检查：把日志文案改回旧词后 4 条断言变红，恢复后复绿）。
 
+## [0.2.8] - 2026-11-10
+
+### Fixed
+- **合成匿名类重建/重定义顺序**：`MixinInnerClassHotSwap.refeedForTarget` 不再「已回灌就跳过」，
+  每次都按**当前** Mixin 模板重新生成合成内部类字节；若已加载类的字节或成员 schema 与新生成为一致，
+  在**目标类 redefine 之前**就地重定义（`redefineDynamic` 的桥接阶段在 `redefineClasses` 之前），
+  关闭「目标已换新 `<init>` 描述符、合成匿名类还是旧构造器」的窗口（真机 `NoSuchMethodError:
+  <Target>$Anonymous$<hash>.<init>(...)`）。
+- **合成类 schema 变更放行**：`apply` 的成员 schema 门在 JBR/DCEVM 上放行（构造器描述符随
+  Mixin→Target 映射变化是结构热更的正常形态）；标准 HotSpot 保持 fail-closed 拒绝并点名。
+- **内部类新字节优先**：`registerInnerClassBytes` 优先使用本轮覆盖层里显式登记的新字节，
+  不再被磁盘/源码缓存里的旧版本覆盖（真机复现：改了匿名类体却仍是旧 schema）。
+
+### Verification
+- 真机（Fabric dedicated server + JBR 21.0.9 DCEVM，本版本构建）：注入体内含匿名类的 Mixin 走
+  `priority → implements → targets A→B→A` 全往返，期间两条并发锤线程持续调用注入方法，
+  `hammer-failure=null` / `window-failure=null` / `anon-ctor-roundtrip ok=true` → `RESULT PASS`。
+- 单测：`MixinInnerClassHotSwapTest` 等 mixin 契约全绿；变异 1/1 killed（新增方法不计入 schema 差异）。
+
+### Known boundaries
+- 合成内部类的 schema 变更在**标准 HotSpot** 上仍无法 redefine（JVM 限制），只能重启；
+  JBR/DCEVM 上依赖增强重定义。
+- 接口移除仍无本地实证（仅 DCEVM 放行 + warn）；Forge/NeoForge 无 provider 覆盖层。
+
 ## [0.2.7] - 2026-11-10
 
 ### Added

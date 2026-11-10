@@ -1,7 +1,9 @@
 package remold.ref;
 
 import java.lang.reflect.Field;
+import java.lang.instrument.Instrumentation;
 
+import remold.ClassCopySelector;
 import remold.RemoldAgent;
 import remold.util.LibTool;
 
@@ -37,6 +39,9 @@ public final class HeapFieldWatch {
 	private static volatile boolean warned;
 	private static volatile int totalSnapshots;
 	private static volatile int nullHits;
+	/** 解析结果缓存（类身份在进程内稳定；同名多副本由 {@link ClassCopySelector} 选宿主权威副本）。 */
+	private static volatile Class<?> resolved;
+	private static volatile String resolvedVia;
 
 	private HeapFieldWatch() {
 	}
@@ -58,7 +63,10 @@ public final class HeapFieldWatch {
 		}
 		totalSnapshots++;
 		try {
-			Class<?> target = Class.forName(CLASS_NAME, false, ClassLoader.getSystemClassLoader());
+			Class<?> target = resolveTarget();
+			if (target == null) {
+				return;   // resolveTarget 已经 warn 过一次
+			}
 			Object[] instances = LibTool.getInstances(target);
 			int total = 0;
 			int nulls = 0;
@@ -80,7 +88,7 @@ public final class HeapFieldWatch {
 			}
 			nullHits += nulls;
 			RemoldAgent.info("[HEAPWATCH] phase=" + phase + " redefining=" + redefiningClass
-				+ " class=" + CLASS_NAME + " field=" + FIELD_NAME
+				+ " class=" + CLASS_NAME + " loader=" + resolvedVia + " field=" + FIELD_NAME
 				+ " total=" + total + " nullCount=" + nulls
 				+ (firstNull == null ? "" : " firstNull{" + firstNull + "}"));
 		} catch (Throwable t) {
@@ -94,6 +102,89 @@ public final class HeapFieldWatch {
 	/** 累计统计（进程结束时打印一次即可）。 */
 	public static String summary() {
 		return "[HEAPWATCH] snapshots=" + totalSnapshots + " cumulativeNullCount=" + nullHits;
+	}
+
+	/**
+	 * 解析目标类——**不能用 system classloader**：Knot / ModLauncher 等宿主把游戏类装在自己的
+	 * 类加载器里，{@code ClassLoader.getSystemClassLoader()} 根本看不见（表现为 probe 静默失效）。
+	 *
+	 * <p>解析顺序：</p>
+	 * <ol>
+	 *   <li>{@code Instrumentation.getAllLoadedClasses()} + {@link ClassCopySelector#pickNamed}
+	 *       —— loader 无关，同名多副本时选宿主权威副本；</li>
+	 *   <li>线程上下文类加载器（宿主通常会把 TCCL 设为 Knot 的加载器）；</li>
+	 *   <li>Agent 自身类加载器（兜底，至少能解析 agent 自己的类）。</li>
+	 * </ol>
+	 *
+	 * <p>全部失败时只 warn 一次并点名已尝试的途径；后续切面直接跳过（不刷屏）。</p>
+	 */
+	private static Class<?> resolveTarget() {
+		Class<?> cached = resolved;
+		if (cached != null) {
+			return cached;
+		}
+		synchronized (HeapFieldWatch.class) {
+			if (resolved != null) {
+				return resolved;
+			}
+			Instrumentation inst = RemoldAgent.getInstrumentation();
+			if (inst != null) {
+				try {
+					Class<?> picked = ClassCopySelector.pickNamed(inst.getAllLoadedClasses(), CLASS_NAME);
+					if (picked != null) {
+						resolved = picked;
+						resolvedVia = "loadedClasses/" + loaderName(picked);
+						return picked;
+					}
+				} catch (Throwable t) {
+					// 继续尝试 TCCL
+				}
+			}
+			ClassLoader tccl = Thread.currentThread().getContextClassLoader();
+			Class<?> viaTccl = tryLoad(tccl);
+			if (viaTccl != null) {
+				resolved = viaTccl;
+				resolvedVia = "tccl/" + loaderName(viaTccl);
+				return viaTccl;
+			}
+			Class<?> viaAgent = tryLoad(HeapFieldWatch.class.getClassLoader());
+			if (viaAgent != null) {
+				resolved = viaAgent;
+				resolvedVia = "agent/" + loaderName(viaAgent);
+				return viaAgent;
+			}
+			if (!warned) {
+				warned = true;
+				RemoldAgent.warn("[HEAPWATCH] cannot resolve " + CLASS_NAME + " through loadedClasses /"
+					+ " tccl(" + loaderName(tccl) + ") / agent loader; probe stays idle."
+					+ " (system classloader deliberately not used: host loaders such as Knot cannot see"
+					+ " game classes there)");
+			}
+			return null;
+		}
+	}
+
+	private static Class<?> tryLoad(ClassLoader loader) {
+		if (loader == null) {
+			return null;
+		}
+		try {
+			return Class.forName(CLASS_NAME, false, loader);
+		} catch (Throwable t) {
+			return null;
+		}
+	}
+
+	private static String loaderName(Class<?> type) {
+		return type == null ? "null" : loaderName(type.getClassLoader());
+	}
+
+	private static String loaderName(ClassLoader loader) {
+		if (loader == null) {
+			return "bootstrap";
+		}
+		String name = loader.getClass().getName();
+		return name.isEmpty() ? "unnamed" : name;
 	}
 
 	private static Object readField(Object instance, String name) {

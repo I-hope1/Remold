@@ -32,6 +32,16 @@
 | 接口表双向 | R2 出现 `interface table updated ... +[ProbeDuck]`，R4 出现 `-[ProbeDuck]` |
 | 无连带 NPE | 无 `NullPointerException: ... combinedCondition is null`（`LootContextPredicate`） |
 
+## 3.1 堆实例哨兵（`-Dremold.probe.heapwatch=true`）
+
+- `-Dremold.probe.heapwatch.class=<点分类名>`、`-Dremold.probe.heapwatch.field=<字段名>`。
+- 目标类**按已加载类表解析**（`Instrumentation.getAllLoadedClasses` + 宿主权威副本选择），
+  **不使用 system classloader**——Knot / ModLauncher 把游戏类装在自己的加载器里，system 加载器看不见。
+  日志会打印 `loader=loadedClasses/net.fabricmc.loader.impl.launch.knot.KnotClassLoader` 之类的解析途径，
+  若解析失败只 warn 一次并点名已尝试的途径。
+- 三个切面：`before-redefine` / `after-redefine` / `after-field-patch`，每个切面输出
+  `total=N nullCount=M firstNull{identity=… conditions=…}`。
+
 ## 4. 本仓库内的等价回归（不需要客户端）
 
 `.battle/newmixin-probe`（Fabric dedicated server + JBR 21 DCEVM）内置同一 R1~R4 序列，可在同一 JVM

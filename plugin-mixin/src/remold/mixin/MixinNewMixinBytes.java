@@ -78,6 +78,8 @@ final class MixinNewMixinBytes {
 			// 先装覆盖层（幂等；装不上由它自己发一条指向性 warn 并降级），再登记字节：
 			// 登记表与安装状态解耦——本次装不上时，下一次 reload 重试安装后这批字节立刻可用。
 			MixinBytecodeOverlay.install();
+			// MixinConfig 捕获的服务引用也要走代理，否则 MixinInfo 构造器仍读不到“只在监控目录”的字节。
+			MixinBytecodeOverlay.applyToConfigs();
 			MixinBytecodeOverlay.register(dotClassName, bytes);
 			Set<String> overlayNames = new LinkedHashSet<>();
 			overlayNames.add(mixinInternalName);

@@ -8,6 +8,7 @@ import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -52,6 +53,9 @@ final class MixinBytecodeOverlay {
 	private static final AtomicBoolean INSTALLED = new AtomicBoolean();
 
 	private static final AtomicBoolean REPORTED_UNAVAILABLE = new AtomicBoolean();
+
+	/** 已安装的服务代理；{@link #applyToConfigs()} 用它替换各 MixinConfig 捕获的服务引用。 */
+	private static volatile Object SERVICE_PROXY;
 
 	private MixinBytecodeOverlay() {
 	}
@@ -176,6 +180,7 @@ final class MixinBytecodeOverlay {
 					reportUnavailable("cannot replace the IMixinService field (unknown Mixin version)");
 					return false;
 				}
+				SERVICE_PROXY = serviceProxy;
 				INSTALLED.set(true);
 				RemoldAgent.info("[Mixin] Bytecode provider overlay installed: new class bytes are visible to"
 					+ " ClassInfo / InnerClassGenerator (service="
@@ -185,6 +190,68 @@ final class MixinBytecodeOverlay {
 				reportUnavailable(t.toString());
 				return false;
 			}
+		}
+	}
+
+	/**
+	 * 把各 {@code MixinConfig} 启动期捕获的 {@code IMixinService} 引用也换成服务代理。
+	 *
+	 * <p><b>为什么静态替换不够</b>：{@link #install()} 只换了 {@code MixinService.instance}，
+	 * 而 {@code MixinInfo} 构造器读 Mixin 字节走的是 {@code this.service}（{@code MixinConfig}
+	 * 创建时捕获的<b>原始</b>服务实例）。于是“只存在于监控目录、类路径上不存在”的新 Mixin
+	 * 在 {@code prepare()} 阶段仍然抛 {@code ClassNotFoundException: The specified mixin ... was not
+	 * found}（真机 B3 实测）。这里把该 final 字段改写成服务代理，让捕获引用也走覆盖层。</p>
+	 *
+	 * @return 至少改写了一处配置时返回 {@code true}
+	 */
+	static boolean applyToConfigs() {
+		Object proxy = SERVICE_PROXY;
+		if (proxy == null) {
+			return false;
+		}
+		try {
+			Object transformer = MixinReWeaver.activeTransformer();
+			Object processor = readField(transformer, "processor");
+			Object configsObject = readField(processor, "configs");
+			if (!(configsObject instanceof List)) {
+				return false;
+			}
+			List<?> configs = (List<?>) configsObject;
+			boolean patched = false;
+			for (Object config : configs) {
+				Field field = findField(config.getClass(), "service");
+				if (field == null) {
+					continue;
+				}
+				if (readField(config, "service") == proxy) {
+					continue;
+				}
+				try {
+					// 上游 MixinConfig.service 是非 final 字段（0.8.5 / 0.8.7 同构），直接写即可。
+					field.set(config, proxy);
+					patched = true;
+				} catch (Throwable ignored) {
+					// 单个配置改不动不影响其它配置；调用方会看到 patched=false 并保留既有诊断。
+				}
+			}
+			return patched;
+		} catch (Throwable t) {
+			return false;
+		}
+	}
+
+	private static Object readField(Object target, String name) {
+		if (target == null) {
+			return null;
+		}
+		Field field = findField(target.getClass(), name);
+		if (field == null) {
+			return null;
+		}
+		try {
+			return field.get(target);
+		} catch (Throwable ignored) {
+			return null;
 		}
 	}
 

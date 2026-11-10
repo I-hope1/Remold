@@ -194,6 +194,7 @@ public final class MixinHotSwap {
 		}
 
 		MixinBytecodeOverlay.install();
+		MixinBytecodeOverlay.applyToConfigs();
 		ensureConfigsSelected(transformer);
 
 		// 本模板自己的内部类（含本轮首次出现的匿名类）：先把新字节接进 Mixin 的字节码提供方，

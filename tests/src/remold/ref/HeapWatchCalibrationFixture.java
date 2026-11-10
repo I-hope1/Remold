@@ -56,6 +56,20 @@ public final class HeapWatchCalibrationFixture {
 		String version() {
 			return "v1";
 		}
+
+		/**
+		 * 故意让全部实例共享同一个业务 {@code hashCode}：真机上的类（Mixin/Lombok/record）经常覆盖
+		 * {@code equals}/{@code hashCode}，跨切面分组必须按**对象身份**做，不能落到业务 hashCode 上。
+		 */
+		@Override
+		public int hashCode() {
+			return 42;
+		}
+
+		@Override
+		public boolean equals(Object other) {
+			return this == other;
+		}
 	}
 
 	/** 对照类：字段同名、同样可空，但一个都不置 null。 */

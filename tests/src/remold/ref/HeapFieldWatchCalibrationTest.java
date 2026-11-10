@@ -228,11 +228,28 @@ class HeapFieldWatchCalibrationTest {
 	void schemaChangingRedefineMigratesInstancesAndKeepsGroupingKeys() throws Exception {
 		Child child = run("migrate", TARGET_CLASS, "probeField");
 		child.assertExitZero();
-		assertEquals("yes", child.resultRaw("capability", "enhanced", null),
-			"the schema-changing calibration needs an enhanced-redefinition runtime (JBR/DCEVM with"
-				+ " -XX:+AllowEnhancedClassRedefinition); without it the migration window cannot be exercised."
-				+ " Output was:\n" + child.output);
-		assertEquals("ok", child.resultRaw("schema", "value", null),
+		String schema = child.resultRaw("schema", "value", null);
+		if (!"yes".equals(child.resultRaw("capability", "enhanced", null))) {
+			// 标准 HotSpot 不允许字段表变化：迁移窗口在这台机器上根本不存在。纪律是**明确瘦身**——
+			// 断言子 JVM 自报 cold 并给出原因，然后只校准"只改方法体"的 redefine 切面，
+			// 绝不把"没做迁移"读成"迁移通过"。
+			assertEquals("cold", schema,
+				"a runtime without enhanced redefinition must report the schema redefine as cold,"
+					+ " not silently pretend the field table changed; output was:\n" + child.output);
+			String coldReason = child.resultRaw("schema", "reason", null);
+			assertTrue(coldReason != null && !coldReason.isEmpty(),
+				"the cold branch must say why the migration could not run; output was:\n" + child.output);
+			assertEquals("12", child.snapshot("after-redefine", "total"),
+				"cold branch: the denominator must still be calibrated on the method-only redefine");
+			assertEquals("5", child.snapshot("after-redefine", "nullCount"),
+				"cold branch: the known answer must still hold on the method-only redefine");
+			assertEquals("ok", child.result("identity", "value", "after-redefine"),
+				"cold branch: the grouping identities must still hold");
+			assertEquals("12", child.result("identity", "same", "after-redefine"),
+				"cold branch: the same 12 instances must still be matched across the redefine");
+			return;
+		}
+		assertEquals("ok", schema,
 			"the field table must really change (addedProbe): " + child.resultRaw("schema", "reason", null));
 
 		// 前置基线：迁移前 12 个实例、5 个 null；否则后面的"迁移后仍是 5"没有分母可谈。

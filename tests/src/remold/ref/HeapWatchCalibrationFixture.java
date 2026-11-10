@@ -3,13 +3,18 @@ package remold.ref;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.lang.instrument.Instrumentation;
+import java.lang.management.ManagementFactory;
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
 
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.FieldVisitor;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
@@ -32,6 +37,13 @@ import remold.RemoldAgent;
  *   <li>{@code calibration}：12 个实例置 5 个 null → 跨 redefine 前后读数必须是 5；中途回收 3 个（其中 1 个为 null）
  *       并新建 2 个，验证分母差被分成 created/collected，且 {@code newlyNull=0}；最后人为置空 1 个存活实例，
  *       验证 {@code newlyNull=1} 这条告警不是摆设。</li>
+ *   <li>{@code migrate}：**改字段表的 redefine**（新增字段 {@code addedProbe}）。存量实例被真实迁移：
+ *       老字段值原样保留、对象身份键（{@code identityHashCode}）在迁移后存活、新字段在迁移后的实例上可读。</li>
+ *   <li>{@code histogram}：同一个 {@code Object} 字段里装 4 种运行期类型的值 + null → 验证值类型直方图。
+ *       用 {@code Object} 字段是因为 {@code String} 字段的直方图只可能有 {@code null}/{@code String} 两个桶，
+ *       区分不出"按类型计数"与"数非 null 个数"。</li>
+ *   <li>{@code channel-conflict}：getter 通道被故意写成返回 {@code value + "!"} → 分歧数必须等于非 null 实例数，
+ *       否则"一致数"只是恒定常数、测不到任何东西。</li>
  *   <li>{@code control}：同名字段的对照类、一个 null 都没有 → 必须报 0。</li>
  *   <li>{@code absent}：字段名写错 → 必须报 {@code absent=N} 并告警，不得静默报 {@code nullCount=0}。</li>
  * </ul>
@@ -53,6 +65,11 @@ public final class HeapWatchCalibrationFixture {
 			return probeField == null;
 		}
 
+		/** 业务终局读法：实例自己报告字段原值（不经过反射），用于验证迁移后老值没丢。 */
+		String probeFieldValue() {
+			return probeField;
+		}
+
 		String version() {
 			return "v1";
 		}
@@ -69,6 +86,33 @@ public final class HeapWatchCalibrationFixture {
 		@Override
 		public boolean equals(Object other) {
 			return this == other;
+		}
+	}
+
+	/** 直方图场景：{@code Object} 字段装多种运行期类型。 */
+	public static final class Mixed {
+		final int id;
+		Object probeField;
+
+		Mixed(int id, Object probeField) {
+			this.id = id;
+			this.probeField = probeField;
+		}
+	}
+
+	/** 通道分歧场景：getter 返回的值与字段故意不同（非 null 时多一个 {@code !}）。 */
+	public static final class Echo {
+		final int id;
+		String probeField;
+
+		Echo(int id, String probeField) {
+			this.id = id;
+			this.probeField = probeField;
+		}
+
+		/** 被 {@code -Dremold.probe.heapwatch.getter=probeFieldEcho} 选中的第二通道（getter）。 */
+		String probeFieldEcho() {
+			return probeField == null ? null : probeField + "!";
 		}
 	}
 
@@ -93,6 +137,7 @@ public final class HeapWatchCalibrationFixture {
 		String scenario = args.length > 0 ? args[0] : "calibration";
 		Instrumentation inst = RemoldAgent.getInstrumentation();
 		System.out.println("RESULT agent state=" + (inst == null ? "absent" : "attached"));
+		System.out.println("RESULT capability enhanced=" + (enhancedRuntime() ? "yes" : "no"));
 		if (inst == null) {
 			System.out.println("RESULT fatal reason=no-instrumentation");
 			return;
@@ -101,9 +146,116 @@ public final class HeapWatchCalibrationFixture {
 			runControl();
 		} else if ("absent".equals(scenario)) {
 			runAbsent();
+		} else if ("migrate".equals(scenario)) {
+			runMigrate(inst);
+		} else if ("histogram".equals(scenario)) {
+			runHistogram();
+		} else if ("channel-conflict".equals(scenario)) {
+			runChannelConflict();
 		} else {
 			runCalibration(inst);
 		}
+	}
+
+	/**
+	 * 改字段表的 redefine：新增一个可空字段 {@code addedProbe}。存量实例会被 JVM 迁移到新布局，
+	 * 这是"哨兵在迁移窗口上读数"的唯一真实切面。
+	 *
+	 * <p>只有增强重定义运行时（JBR/DCEVM + {@code -XX:+AllowEnhancedClassRedefinition}）才允许 schema 变化；
+	 * 标准 HotSpot 会抛错，此时退回"只改方法体"的 redefine 并**明确打印 {@code value=cold}**，
+	 * 绝不把"没做迁移"伪装成做过。</p>
+	 */
+	private static void runMigrate(Instrumentation inst) throws Exception {
+		int[] nullIndexes = {0, 2, 4, 6, 8};
+		List<String> expected = new ArrayList<String>();
+		List<Integer> identitiesBefore = new ArrayList<Integer>();
+		for (int i = 0; i < 12; i++) {
+			String value = isNullIndex(nullIndexes, i) ? null : "cond-" + i;
+			Target target = new Target(i, value);
+			LIVE.add(target);
+			expected.add(value);
+			identitiesBefore.add(Integer.valueOf(System.identityHashCode(target)));
+		}
+		System.out.println("RESULT truth phase=before-redefine nulls=" + businessNullCount() + " live=" + LIVE.size());
+		HeapFieldWatch.snapshot("before-redefine", Target.class.getName());
+		printSnapshot("before-redefine");
+
+		boolean schemaChanged = redefineSchema(inst);
+		System.out.println("RESULT truth phase=after-redefine nulls=" + businessNullCount()
+			+ " live=" + LIVE.size());
+		HeapFieldWatch.snapshot("after-redefine", Target.class.getName());
+		printSnapshot("after-redefine");
+
+		// 迁移终局（不经哨兵）：老字段值原样在、对象身份键存活、新字段在迁移后的实例上可读。
+		int intact = 0;
+		int survived = 0;
+		for (int i = 0; i < LIVE.size(); i++) {
+			Target target = (Target) LIVE.get(i);
+			if (Objects.equals(target.probeFieldValue(), expected.get(i))) {
+				intact++;
+			}
+			if (System.identityHashCode(target) == identitiesBefore.get(i).intValue()) {
+				survived++;
+			}
+		}
+		Field added = null;
+		try {
+			added = Target.class.getDeclaredField("addedProbe");
+			added.setAccessible(true);
+		} catch (NoSuchFieldException ignored) {
+			// 标准 HotSpot 分支：schema 没变，字段当然不存在。
+		}
+		int addedNulls = 0;
+		if (added != null) {
+			for (Object instance : LIVE) {
+				if (added.get(instance) == null) {
+					addedNulls++;
+				}
+			}
+		}
+		System.out.println("RESULT migration schema=" + (schemaChanged ? "changed" : "unchanged")
+			+ " field=" + (added != null)
+			+ " oldValuesIntact=" + intact + "/" + LIVE.size()
+			+ " identityKeysSurvived=" + survived + "/" + LIVE.size()
+			+ " addedFieldNulls=" + addedNulls);
+		if (added != null) {
+			// 新字段用同一条仪器通道再读一遍：字段存在、取值是默认值 → 迁移补齐后的语义由仪器自己确认。
+			HeapFieldWatch.Snapshot addedField =
+				HeapFieldWatch.scan("after-migration-added-field", Target.class, "addedProbe");
+			System.out.println("RESULT addedfield total=" + addedField.total
+				+ " nullCount=" + addedField.nullCount
+				+ " absent=" + addedField.absent
+				+ " unreadable=" + addedField.unreadable
+				+ " " + addedField.histogramText() + " " + addedField.channelText());
+		}
+	}
+
+	/** 直方图场景：{@code Object} 字段里 3 个 null + 4 个 String + 2 个 Integer + 2 个 Long + 1 个 ArrayList。 */
+	private static void runHistogram() {
+		Object[] values = {
+			null, null, null,
+			"s1", "s2", "s3", "s4",
+			Integer.valueOf(7), Integer.valueOf(8),
+			Long.valueOf(9L), Long.valueOf(10L),
+			new ArrayList<String>()
+		};
+		for (int i = 0; i < values.length; i++) {
+			LIVE.add(new Mixed(i, values[i]));
+		}
+		HeapFieldWatch.snapshot("before-redefine", Mixed.class.getName());
+		printSnapshot("before-redefine");
+		System.out.println("RESULT truth phase=before-redefine nulls=" + businessNullCount() + " live=" + LIVE.size());
+	}
+
+	/** 通道分歧场景：getter 通道读到的值恒与反射不同（非 null 时多一个 {@code !}）。 */
+	private static void runChannelConflict() {
+		int[] nullIndexes = {0, 2, 4, 6, 8};
+		for (int i = 0; i < 12; i++) {
+			LIVE.add(new Echo(i, isNullIndex(nullIndexes, i) ? null : "cond-" + i));
+		}
+		HeapFieldWatch.snapshot("before-redefine", Echo.class.getName());
+		printSnapshot("before-redefine");
+		System.out.println("RESULT truth phase=before-redefine nulls=" + businessNullCount() + " live=" + LIVE.size());
 	}
 
 	private static void runCalibration(Instrumentation inst) throws Exception {
@@ -168,7 +320,24 @@ public final class HeapWatchCalibrationFixture {
 			+ " total=" + s.total
 			+ " nullCount=" + s.nullCount
 			+ " absent=" + s.absent
-			+ " unreadable=" + s.unreadable);
+			+ " unreadable=" + s.unreadable
+			+ " " + s.histogramText()
+			+ " " + s.channelText());
+		HeapFieldWatch.Grouping grouping = HeapFieldWatch.lastGrouping();
+		if (grouping != null) {
+			System.out.println("RESULT identity phase=" + phase
+				+ " value=" + (grouping.identitiesHold() ? "ok" : "broken")
+				+ " same=" + grouping.same
+				+ " created=" + grouping.created
+				+ " collected=" + grouping.collected
+				+ " beforeTotal=" + grouping.beforeTotal
+				+ " afterTotal=" + grouping.afterTotal
+				+ " persisted=" + grouping.persisted
+				+ " vanished=" + grouping.vanished
+				+ " newlyNull=" + grouping.newlyNull
+				+ " beforeNull=" + grouping.beforeNull
+				+ " afterNull=" + grouping.afterNull);
+		}
 		String diff = HeapFieldWatch.lastDiff();
 		if (diff.isEmpty()) {
 			System.out.println("RESULT diff phase=" + phase + " value=none");
@@ -185,6 +354,10 @@ public final class HeapWatchCalibrationFixture {
 			if (instance instanceof Target && ((Target) instance).probeFieldIsNull()) {
 				nulls++;
 			} else if (instance instanceof Control && ((Control) instance).probeField == null) {
+				nulls++;
+			} else if (instance instanceof Mixed && ((Mixed) instance).probeField == null) {
+				nulls++;
+			} else if (instance instanceof Echo && ((Echo) instance).probeField == null) {
 				nulls++;
 			}
 		}
@@ -241,6 +414,61 @@ public final class HeapWatchCalibrationFixture {
 		byte[] patched = patchVersionConstant(original);
 		inst.redefineClasses(new java.lang.instrument.ClassDefinition(Target.class, patched));
 		System.out.println("RESULT redefine value=ok bytes=" + original.length + "->" + patched.length);
+	}
+
+	/**
+	 * 改字段表的 redefine：给 {@code Target} 新增可空字段 {@code addedProbe}。
+	 *
+	 * @return true 表示 schema 真的变了（存量实例已被迁移）；false 表示运行时不允许 schema 变化，
+	 *         已退回"只改方法体"的 redefine，并在 {@code RESULT schema} 行里说明原因
+	 */
+	private static boolean redefineSchema(Instrumentation inst) throws Exception {
+		byte[] original = readClassBytes(Target.class);
+		byte[] patched = withAddedProbeField(original);
+		try {
+			inst.redefineClasses(new java.lang.instrument.ClassDefinition(Target.class, patched));
+		} catch (Throwable t) {
+			System.out.println("RESULT schema value=cold reason=" + t.getClass().getName()
+				+ ": " + String.valueOf(t.getMessage()).replace('\n', ' '));
+			redefineTarget(inst);
+			return false;
+		}
+		System.out.println("RESULT schema value=ok bytes=" + original.length + "->" + patched.length
+			+ " addedField=addedProbe");
+		return true;
+	}
+
+	/** 在类末尾追加 {@code public String addedProbe;}（字段表变化，方法表不动）。 */
+	private static byte[] withAddedProbeField(byte[] bytes) {
+		ClassReader reader = new ClassReader(bytes);
+		ClassWriter writer = new ClassWriter(reader, 0);
+		reader.accept(new ClassVisitor(Opcodes.ASM9, writer) {
+			@Override
+			public void visitEnd() {
+				FieldVisitor field = super.visitField(Opcodes.ACC_PUBLIC, "addedProbe", "Ljava/lang/String;",
+					null, null);
+				if (field != null) {
+					field.visitEnd();
+				}
+				super.visitEnd();
+			}
+		}, 0);
+		return writer.toByteArray();
+	}
+
+	/**
+	 * 当前运行时是否真的有增强重定义能力（新增字段/方法）。判据与 {@code remold.EnvironmentProbe} 同口径：
+	 * 厂商标识必须属于 DCEVM 系构建，且 {@code -XX:+AllowEnhancedClassRedefinition} 必须真的出现在
+	 * 启动参数里（标准 HotSpot 靠 {@code -XX:+IgnoreUnrecognizedVMOptions} 会回显该字符串）。
+	 */
+	private static boolean enhancedRuntime() {
+		String identity = (System.getProperty("java.vm.vendor", "") + ' '
+			+ System.getProperty("java.vm.name", "") + ' '
+			+ System.getProperty("java.runtime.version", "")).toLowerCase(Locale.ROOT);
+		boolean looksEnhanced = identity.contains("jetbrains") || identity.contains("dcevm")
+			|| identity.contains("trava");
+		return looksEnhanced && ManagementFactory.getRuntimeMXBean().getInputArguments()
+			.contains("-XX:+AllowEnhancedClassRedefinition");
 	}
 
 	private static byte[] readClassBytes(Class<?> type) throws Exception {

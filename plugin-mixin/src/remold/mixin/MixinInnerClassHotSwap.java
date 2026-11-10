@@ -169,9 +169,15 @@ final class MixinInnerClassHotSwap {
 					continue;
 				}
 				String schemaDiff = describeSchemaChange(live, fresh);
-				if (schemaDiff != null) {
+				if (schemaDiff != null && !RemoldAgent.isEnhancedHotswapEnabled()) {
 					result.failures.add(conformedDotted + " (" + schemaDiff + ")");
 					continue;
+				}
+				if (schemaDiff != null) {
+					// 增强重定义（JBR/DCEVM）允许改成员表：合成内部类的构造器描述符会随
+					// Mixin→Target 映射变化，这正是结构热更需要放行的形态。
+					RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted
+						+ " changes member schema on a JBR/DCEVM host (" + schemaDiff + "); redefining it.");
 				}
 				byte[] bytes = serialize(fresh);
 				// 回灌：合成内部类磁盘上没有 .class、也不经过 Remold 的 transformer，不回灌则
@@ -276,15 +282,19 @@ final class MixinInnerClassHotSwap {
 			synchronized (innerClasses) {
 				snapshot = new ArrayList<>(innerClasses.values());
 			}
+			Instrumentation inst = RemoldAgent.getInstrumentation();
 			for (Object info : snapshot) {
 				String targetName = (String) invoke(info, "getTargetName");
 				if (targetName == null || !targetName.equals(targetInternal)) {
 					continue;
 				}
 				String conformedDotted = (String) invoke(info, "getClassName");
-				if (conformedDotted == null || generatedBytes(conformedDotted) != null) {
-					continue;   // 已回灌：不重复生成（保持字节与首次回灌一致）
+				if (conformedDotted == null) {
+					continue;
 				}
+				// 每次都按**当前**模板重新生成：早先的 "已回灌就跳过" 会让上一次（可能是在
+				// ClassInfo 失配窗口里生成的）旧字节一直遮蔽新映射，retarget 往返后合成类的
+				// 构造器描述符便停留在旧形态（真机 NoSuchMethodError）。生成是确定性的。
 				java.lang.reflect.Field counter = findField(info.getClass(), "loadCounter");
 				int loadCounterBefore = counter == null ? 0 : counter.getInt(info);
 				ClassNode fresh = new ClassNode();
@@ -304,8 +314,27 @@ final class MixinInnerClassHotSwap {
 				if (!generated) {
 					continue;
 				}
-				registerGenerated(conformedDotted, serialize(fresh));
+				byte[] bytes = serialize(fresh);
+				byte[] previous = generatedBytes(conformedDotted);
+				registerGenerated(conformedDotted, bytes);
 				registered++;
+				// 结构变更窗口：目标类即将被重定义成「调用新 <init> 描述符」的版本，而合成类若
+				// 仍是旧形态，两者之间的窗口内任何一次调用都会 NoSuchMethodError。这里在**目标类
+				// redefine 之前**先把已加载的合成类重定义到新形态（redefineDynamic 的桥接阶段在
+				// redefineClasses 之前，因此顺序天然正确）。
+				if (inst != null) {
+					Class<?> live = findLoadedClass(inst, conformedDotted);
+					if (live != null) {
+						// 不仅要看覆盖层字节是否变化，还要看**运行期已加载类**的成员 schema：
+						// 上一次失败的重定义可能让覆盖层已是最新、而 JVM 里仍是旧构造器（陈旧 schema），
+						// 这种情形下 overlay 比较会漏判。
+						boolean bytesChanged = previous == null || !java.util.Arrays.equals(previous, bytes);
+						boolean staleSchema = describeSchemaChange(live, fresh) != null;
+						if (bytesChanged || staleSchema) {
+							redefineSyntheticBeforeTarget(inst, live, conformedDotted, bytes);
+						}
+					}
+				}
 			}
 		} catch (Throwable t) {
 			RemoldAgent.warn("[Mixin] unable to pre-generate synthetic inner classes for " + targetDotName
@@ -318,6 +347,30 @@ final class MixinInnerClassHotSwap {
 				+ targetDotName + " before the InitFix metadata scan");
 		}
 		return registered;
+	}
+
+	/**
+	 * 在目标类重定义**之前**把已加载的合成内部类重定义到新形态，关闭「目标已换新 <init> 描述符、
+	 * 合成类还是旧构造器」的窗口。
+	 *
+	 * <p>失败只 warn、不抛：目标类的重定义照常进行，随后 {@link #apply} 还会再试一次；最坏情况是
+	 * 这一轮仍然存在窗口，必须由调用方看到明确诊断（不能静默）。</p>
+	 */
+	private static void redefineSyntheticBeforeTarget(Instrumentation inst, Class<?> live, String name, byte[] bytes) {
+		try {
+			RemoldAgent.enterInternalRedefine(java.util.Collections.singleton(name));
+			try {
+				inst.redefineClasses(new ClassDefinition(live, bytes));
+			} finally {
+				RemoldAgent.exitInternalRedefine();
+			}
+			RemoldAgent.info("[Mixin] synthetic inner class " + name
+				+ " redefined BEFORE its target redefine (structural window closed)");
+		} catch (Throwable t) {
+			RemoldAgent.warn("[Mixin] unable to redefine synthetic inner class " + name
+				+ " before its target redefine (" + rootMessage(t) + "); the target may still call the old"
+				+ " constructor until the follow-up inner-class hot update runs");
+		}
 	}
 
 	// ---------------------------------------------------------------- 结构契约

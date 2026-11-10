@@ -458,7 +458,13 @@ public final class MixinHotSwap {
 		List<String> missing = new ArrayList<>();
 		for (String internal : innerNames) {
 			String dot = MixinInnerClassSupport.dotName(internal);
-			byte[] bytes = RemoldAgent.sourceBytecodeCache.get(dot);
+			// 本轮显式登记的字节优先：handleInnerClassChange 已经把“刚改过的内部类”新字节
+			// 放进覆盖层，这里若先读磁盘/源码缓存会把那份新字节覆盖回旧版本（真机复现：
+			// 改了匿名类体却仍是旧 schema）。
+			byte[] bytes = MixinBytecodeOverlay.lookup(dot);
+			if (bytes == null) {
+				bytes = RemoldAgent.sourceBytecodeCache.get(dot);
+			}
 			if (bytes == null) {
 				bytes = RemoldAgent.findClassBytesOnDisk(dot);
 			}

@@ -30,6 +30,38 @@ import org.objectweb.asm.tree.InnerClassNode;
  */
 class MixinInnerClassHotSwapTest {
 
+	// ------------------------------------------------------------ 无实质变更短路
+
+	@Test
+	void syntheticRedefineIsSkippedWhenBytesAreIdentical() {
+		String name = "fixture.Target$Anonymous$deadbeef";
+		byte[] loaded = new byte[] {1, 2, 3, 4};
+		byte[] previous = remold.RemoldAgent.bytecodeCache.put(name, loaded);
+		try {
+			assertTrue(MixinInnerClassHotSwap.isUnchanged(name, loaded.clone()),
+				"byte-identical regeneration must be short-circuited (no redundant redefine)");
+			assertFalse(MixinInnerClassHotSwap.isUnchanged(name, new byte[] {1, 2, 3, 5}),
+				"a single changed byte must still be redefined");
+		} finally {
+			restoreCache(name, previous);
+		}
+	}
+
+	@Test
+	void unknownSyntheticClassIsNeverShortCircuited() {
+		String name = "fixture.Target$Anonymous$unknown";
+		assertFalse(MixinInnerClassHotSwap.isUnchanged(name, new byte[] {9}),
+			"without a known loaded snapshot the redefine must proceed (fail-open to redefinition)");
+	}
+
+	private static void restoreCache(String name, byte[] previous) {
+		if (previous == null) {
+			remold.RemoldAgent.bytecodeCache.remove(name);
+		} else {
+			remold.RemoldAgent.bytecodeCache.put(name, previous);
+		}
+	}
+
 	// ------------------------------------------------------------ 内部类归属
 
 	@Test

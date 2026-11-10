@@ -112,6 +112,25 @@ class MixinReloadPolicyTest {
 	}
 
 	@Test
+	void interfaceRemovalIsAlignedOnAnEnhancedHost() {
+		// +OldDuck -> -OldDuck：移除接口时旧 ClassInfo 的接口表必须精确还原，不能"只增不删"。
+		Fixture fixture = new Fixture(0, List.of("com/example/Target"), Set.of("com/example/OldDuck"));
+		ClassNode node = mixinNode(0, "com/example/Target", List.of());
+
+		MixinReloadPolicy.Plan plan = MixinReloadPolicy.prepare(fixture.transformer, MIXIN, node, true);
+
+		assertTrue(plan.usable(), plan.failure());
+		assertTrue(plan.interfacesChanged());
+		assertTrue(plan.interfacePreAligned());
+		assertEquals(Set.of(), fixture.state.interfaces,
+			"the Reloaded comparison baseline must drop the removed interface");
+		assertEquals(Set.of(), fixture.classInfo.interfaces,
+			"the reused ClassInfo interface table must drop the removed interface (no +I residual)");
+		assertTrue(plan.removedInterfaces().contains("com/example/OldDuck"));
+		assertTrue(plan.addedInterfaces().isEmpty());
+	}
+
+	@Test
 	void rollbackRestoresPriorityAndInterfacesAfterARejectedReload() {
 		Fixture fixture = new Fixture(7, List.of("com/example/Target"), Set.of("com/example/OldDuck"));
 		ClassNode node = mixinNode(99, "com/example/Target", List.of("com/example/NewDuck"));

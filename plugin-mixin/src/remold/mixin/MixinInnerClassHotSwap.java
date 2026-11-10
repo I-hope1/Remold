@@ -63,6 +63,15 @@ final class MixinInnerClassHotSwap {
 	 */
 	private static final Map<String, byte[]> GENERATED = new ConcurrentHashMap<>();
 
+	/**
+	 * 已成功重定义的合成内部类字节（点分名 → 字节）。
+	 *
+	 * <p>用于「无实质变更短路」：R4 还原等场景下重新生成的合成类字节与运行期已加载的完全一致时，
+	 * 不得再次调用 {@code redefineClasses} —— JBR/DCEVM 的增强重定义会做堆实例重写（{@code ModifyInstances}），
+	 * 无谓的重复 redefine 会制造额外的 safepoint/重写窗口，真实观测到过无关类字段瞬时为 null 的连带崩溃。</p>
+	 */
+	private static final Map<String, byte[]> LOADED = new ConcurrentHashMap<>();
+
 	/** 登记口只装一次：来源函数恒定，内容由 {@link #GENERATED} 演进。 */
 	private static final AtomicBoolean SOURCE_REGISTERED = new AtomicBoolean();
 
@@ -76,6 +85,7 @@ final class MixinInnerClassHotSwap {
 	static final class Result {
 		final List<String> redefined = new ArrayList<>();
 		final List<String> notLoaded = new ArrayList<>();
+		final List<String> unchanged = new ArrayList<>();
 		final List<String> failures = new ArrayList<>();
 
 		boolean changed() {
@@ -168,6 +178,11 @@ final class MixinInnerClassHotSwap {
 					result.failures.add(conformedDotted + " (InnerClassGenerator.generate returned false)");
 					continue;
 				}
+				byte[] bytes = serialize(fresh);
+				if (isUnchanged(conformedDotted, bytes)) {
+					result.unchanged.add(conformedDotted);
+					continue;
+				}
 				String schemaDiff = describeSchemaChange(live, fresh);
 				if (schemaDiff != null && !RemoldAgent.isEnhancedHotswapEnabled()) {
 					result.failures.add(conformedDotted + " (" + schemaDiff + ")");
@@ -179,7 +194,6 @@ final class MixinInnerClassHotSwap {
 					RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted
 						+ " changes member schema on a JBR/DCEVM host (" + schemaDiff + "); redefining it.");
 				}
-				byte[] bytes = serialize(fresh);
 				// 回灌：合成内部类磁盘上没有 .class、也不经过 Remold 的 transformer，不回灌则
 				// Nest 扫描 incomplete、构造器可见性判定失败（InitFix 的字段初始化 patch 被拒）。
 				registerGenerated(conformedDotted, bytes);
@@ -191,6 +205,7 @@ final class MixinInnerClassHotSwap {
 				} finally {
 					RemoldAgent.exitInternalRedefine();
 				}
+				recordLoaded(conformedDotted, bytes);
 				result.redefined.add(conformedDotted);
 			} catch (Throwable t) {
 				result.failures.add(info + " (" + rootMessage(t) + ")");
@@ -201,6 +216,33 @@ final class MixinInnerClassHotSwap {
 				+ String.join(", ", result.notLoaded));
 		}
 		return result;
+	}
+
+	/**
+	 * 判断「重新生成的合成类字节」与运行期已加载字节是否完全一致（无实质变更）。
+	 *
+	 * <p>先查本类自己记账的 {@link #LOADED}（我们重定义成功后落账），再回落到
+	 * {@link RemoldAgent#bytecodeCache}（其他路径重定义过的字节）。两者都没有 → 视为有变更（必须重定义，
+	 * 宁可多一次 redefine 也不能漏掉真实变更）。</p>
+	 */
+	static boolean isUnchanged(String dottedName, byte[] fresh) {
+		if (dottedName == null || fresh == null) {
+			return true;
+		}
+		byte[] current = LOADED.get(dottedName);
+		if (current == null) {
+			current = RemoldAgent.bytecodeCache.get(dottedName);
+		}
+		if (current == null) {
+			return false;
+		}
+		return java.util.Arrays.equals(current, fresh);
+	}
+
+	private static void recordLoaded(String dottedName, byte[] bytes) {
+		if (dottedName != null && bytes != null) {
+			LOADED.put(dottedName, bytes);
+		}
 	}
 
 	// ---------------------------------------------------------------- 字节码回灌
@@ -325,13 +367,22 @@ final class MixinInnerClassHotSwap {
 				if (inst != null) {
 					Class<?> live = findLoadedClass(inst, conformedDotted);
 					if (live != null) {
-						// 不仅要看覆盖层字节是否变化，还要看**运行期已加载类**的成员 schema：
-						// 上一次失败的重定义可能让覆盖层已是最新、而 JVM 里仍是旧构造器（陈旧 schema），
-						// 这种情形下 overlay 比较会漏判。
-						boolean bytesChanged = previous == null || !java.util.Arrays.equals(previous, bytes);
-						boolean staleSchema = describeSchemaChange(live, fresh) != null;
-						if (bytesChanged || staleSchema) {
-							redefineSyntheticBeforeTarget(inst, live, conformedDotted, bytes);
+						// 无实质变更短路（对齐 AnonClassAligner 的 no-op 语义）：运行期已加载字节与本次
+						// 重生成字节完全一致时直接跳过，不做无谓 redefine（避免额外的堆重写窗口）。
+						if (isUnchanged(conformedDotted, bytes)) {
+							if (RemoldAgent.DEBUG) {
+								RemoldAgent.log("[Mixin] synthetic inner class " + conformedDotted
+									+ " is byte-identical to the loaded class; skipping redefine");
+							}
+						} else {
+							// 不仅要看覆盖层字节是否变化，还要看**运行期已加载类**的成员 schema：
+							// 上一次失败的重定义可能让覆盖层已是最新、而 JVM 里仍是旧构造器（陈旧 schema），
+							// 这种情形下 overlay 比较会漏判。
+							boolean bytesChanged = previous == null || !java.util.Arrays.equals(previous, bytes);
+							boolean staleSchema = describeSchemaChange(live, fresh) != null;
+							if (bytesChanged || staleSchema) {
+								redefineSyntheticBeforeTarget(inst, live, conformedDotted, bytes);
+							}
 						}
 					}
 				}
@@ -364,6 +415,7 @@ final class MixinInnerClassHotSwap {
 			} finally {
 				RemoldAgent.exitInternalRedefine();
 			}
+			recordLoaded(name, bytes);
 			RemoldAgent.info("[Mixin] synthetic inner class " + name
 				+ " redefined BEFORE its target redefine (structural window closed)");
 		} catch (Throwable t) {

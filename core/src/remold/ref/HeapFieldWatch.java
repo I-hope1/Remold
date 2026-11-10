@@ -252,7 +252,6 @@ public final class HeapFieldWatch {
 			int inAfter = e.getValue();
 			same += Math.min(inBefore, inAfter);
 			created += Math.max(0, inAfter - inBefore);
-			collected += Math.max(0, inBefore - inAfter);
 		}
 		for (Map.Entry<Integer, Integer> e : beforeIds.entrySet()) {
 			int inAfter = value(afterIds, e.getKey());

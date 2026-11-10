@@ -64,13 +64,19 @@ final class MixinInnerClassHotSwap {
 	private static final Map<String, byte[]> GENERATED = new ConcurrentHashMap<>();
 
 	/**
-	 * 已成功重定义的合成内部类字节（点分名 → 字节）。
+	 * 已成功重定义的合成内部类字节：<b>键 = (加载器身份, 点分名)</b>，由
+	 * {@link MixinClassBaseline#recordApplied}/{@link MixinClassBaseline#appliedOf} 持有。
 	 *
-	 * <p>用于「无实质变更短路」：R4 还原等场景下重新生成的合成类字节与运行期已加载的完全一致时，
-	 * 不得再次调用 {@code redefineClasses} —— JBR/DCEVM 的增强重定义会做堆实例重写（{@code ModifyInstances}），
-	 * 无谓的重复 redefine 会制造额外的 safepoint/重写窗口，真实观测到过无关类字段瞬时为 null 的连带崩溃。</p>
+	 * <p><b>为什么必须带加载器身份</b>（不变量 C2）：点分名一条索引无法区分"同名类被两个加载器各定义
+	 * 一份"——那会让 A 加载器的成功字节被当成 B 加载器的基线（互相冒充），而闸 4 的判据正是
+	 * "基线 = 本加载器实际加载的那份"。加载器键复用 premain 录口的弱键身份语义（同一套
+	 * {@code ClassLoader} 实例身份，弱引用、不延长加载器寿命），两个来源因此同源可比。</p>
+	 *
+	 * <p>用途不变：缓存"已在 JVM 里生效"的字节（基线链 R1+），供「无实质变更短路」与闸 4 使用。
+	 * R4 还原等场景下重新生成的合成类字节与运行期已加载的完全一致时不得再次 redefine ——
+	 * JBR/DCEVM 的增强重定义会做堆实例重写（{@code ModifyInstances}），无谓的重复 redefine 会制造
+	 * 额外的 safepoint/重写窗口，真实观测到过无关类字段瞬时为 null 的连带崩溃。</p>
 	 */
-	private static final Map<String, byte[]> LOADED = new ConcurrentHashMap<>();
 
 	/** 规则 3（事务一致性）：本轮因合成类无法安全重定义而必须中止的宿主目标类。 */
 	private static final java.util.Set<String> BLOCKED = ConcurrentHashMap.newKeySet();
@@ -206,6 +212,8 @@ final class MixinInnerClassHotSwap {
 				java.util.List<String> loadedFields = MixinSyntheticSchema.loadedFields(live);
 				byte[] loadedBytes = generatedBytes(conformedDotted);
 				java.util.Map<String, String> renamed = MixinSyntheticSchema.renameCollisions(fresh, loadedFields);
+				// 新增字段必须在 padFields 之前取：补齐会给候选追加墓碑字段，之后就分不清两者。
+				java.util.List<String> appended = MixinSyntheticSchema.appendedFields(fresh, loadedFields);
 				java.util.List<String> padded = MixinSyntheticSchema.padFields(fresh, loadedFields);
 				java.util.List<String> retainedCtors = MixinSyntheticSchema.retainConstructors(fresh, loadedBytes);
 				if (!renamed.isEmpty()) {
@@ -220,8 +228,13 @@ final class MixinInnerClassHotSwap {
 					RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted
 						+ ": retained " + retainedCtors.size() + " baseline <init> overload(s) " + retainedCtors + ".");
 				}
+				// 逐次可分类（战报口径）：每次合成类重定义的字段表变化必须自报，否则只能从
+				// retained/renamed 行反推，无法区分"追加"与"不变"。
+				RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted + " field table vs loaded: "
+					+ MixinSyntheticSchema.describeFieldTableChange(appended, renamed, padded)
+					+ " (schemaHash=" + MixinSyntheticSchema.schemaHash(fresh) + ").");
 				byte[] bytes = serialize(fresh);
-				if (isUnchanged(conformedDotted, bytes)) {
+				if (isUnchanged(live.getClassLoader(), conformedDotted, bytes)) {
 					result.unchanged.add(conformedDotted);
 					continue;
 				}
@@ -260,15 +273,16 @@ final class MixinInnerClassHotSwap {
 	/**
 	 * 判断「重新生成的合成类字节」与运行期已加载字节是否完全一致（无实质变更）。
 	 *
-	 * <p>先查本类自己记账的 {@link #LOADED}（我们重定义成功后落账），再回落到
-	 * {@link RemoldAgent#bytecodeCache}（其他路径重定义过的字节）。两者都没有 → 视为有变更（必须重定义，
+	 * <p>先查本加载器名下已生效的字节（{@link MixinClassBaseline#appliedOf}，键含加载器身份），
+	 * 再回落到 {@link RemoldAgent#bytecodeCache}（点名索引、无加载器维度——只作<b>启发式</b>兜底：
+	 * 它只能让"疑似未变"更保守地短路，不能证明基线身份）。两者都没有 → 视为有变更（必须重定义，
 	 * 宁可多一次 redefine 也不能漏掉真实变更）。</p>
 	 */
-	static boolean isUnchanged(String dottedName, byte[] fresh) {
+	static boolean isUnchanged(ClassLoader loader, String dottedName, byte[] fresh) {
 		if (dottedName == null || fresh == null) {
 			return true;
 		}
-		byte[] current = LOADED.get(dottedName);
+		byte[] current = MixinClassBaseline.appliedOf(loader, dottedName);
 		if (current == null) {
 			current = RemoldAgent.bytecodeCache.get(dottedName);
 		}
@@ -278,9 +292,10 @@ final class MixinInnerClassHotSwap {
 		return java.util.Arrays.equals(current, fresh);
 	}
 
-	private static void recordLoaded(String dottedName, byte[] bytes) {
-		if (dottedName != null && bytes != null) {
-			LOADED.put(dottedName, bytes);
+	/** 成功 redefine 之后落账"已在 JVM 里生效"的字节；键含加载器身份（见 {@link #isUnchanged}）。 */
+	private static void recordLoaded(Class<?> live, String dottedName, byte[] bytes) {
+		if (live != null && dottedName != null && bytes != null) {
+			MixinClassBaseline.recordApplied(live.getClassLoader(), dottedName, bytes);
 		}
 	}
 
@@ -403,6 +418,8 @@ final class MixinInnerClassHotSwap {
 				byte[] loadedBytes = generatedBytes(conformedDotted);
 				// 规则 1：同名异型捕获字段重命名追加（不覆盖基线槽位）
 				java.util.Map<String, String> renamed = MixinSyntheticSchema.renameCollisions(fresh, loadedFields);
+				// 新增字段必须在 padFields 之前取（补齐会给候选追加墓碑字段）。
+				java.util.List<String> appended = MixinSyntheticSchema.appendedFields(fresh, loadedFields);
 				// 基线槽位补齐（禁止缩容）
 				java.util.List<String> padded = MixinSyntheticSchema.padFields(fresh, loadedFields);
 				// 规则 2：<init> 重载墓碑并集（新旧构造器同时存在）
@@ -422,6 +439,10 @@ final class MixinInnerClassHotSwap {
 						+ ": retained " + retainedCtors.size() + " baseline <init> overload(s) " + retainedCtors
 						+ " so old call sites keep linking.");
 				}
+				// 逐次可分类（战报口径）：字段表变化自报，避免只能从 retained/renamed 行反推。
+				RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted + " field table vs loaded: "
+					+ MixinSyntheticSchema.describeFieldTableChange(appended, renamed, padded)
+					+ " (schemaHash=" + MixinSyntheticSchema.schemaHash(fresh) + ").");
 				// 规则 3：已加载的构造器签名必须全部仍在候选里（旧调用点才可能命中）；否则中止宿主重定义。
 				if (live != null) {
 					java.util.List<String> missingCtors = new ArrayList<>();
@@ -459,7 +480,7 @@ final class MixinInnerClassHotSwap {
 					if (live != null) {
 						// 无实质变更短路（对齐 AnonClassAligner 的 no-op 语义）：运行期已加载字节与本次
 						// 重生成字节完全一致时直接跳过，不做无谓 redefine（避免额外的堆重写窗口）。
-						if (isUnchanged(conformedDotted, bytes)) {
+						if (isUnchanged(live.getClassLoader(), conformedDotted, bytes)) {
 							if (RemoldAgent.DEBUG) {
 								RemoldAgent.log("[Mixin] synthetic inner class " + conformedDotted
 									+ " is byte-identical to the loaded class; skipping redefine");
@@ -559,7 +580,7 @@ final class MixinInnerClassHotSwap {
 			RemoldAgent.exitInternalRedefine();
 		}
 		remold.ref.HeapFieldWatch.snapshot("after-synthetic-redefine", name);
-		recordLoaded(name, bytes);
+		recordLoaded(live, name, bytes);
 		EXECUTED.incrementAndGet();
 		return true;
 	}
@@ -569,9 +590,9 @@ final class MixinInnerClassHotSwap {
 	 *
 	 * <p><b>基线 = JVM 实际加载的那份（不变量 C2）</b>。判定只认两个来源，顺序即基线链：</p>
 	 * <ol>
-	 *   <li>本源 {@link #LOADED}：本进程里<b>已成功</b> redefine 过的字节（失败的重定义不落账，
-	 *       见 {@link #redefineSyntheticSafely} 的落账点），它确实在 JVM 里生效过——所以是基线链
-	 *       R0→R1→R2 上成功那一步的产物；</li>
+	 *   <li>本源已生效字节 {@link MixinClassBaseline#appliedOf}：本加载器名下<b>已成功</b> redefine
+	 *       过的字节（失败的重定义不落账，见 {@link #redefineSyntheticSafely} 的落账点），它确实在
+	 *       JVM 里生效过——所以是基线链 R0→R1→R2 上成功那一步的产物；键 = (加载器身份, 点分名)；</li>
 	 *   <li>premain 录口 {@link MixinClassBaseline}：键 = 加载器实例身份 + 类名，值是 JVM 最终定义字节
 	 *       （R0）。这是唯一能证明"基线属于这个加载器"的来源。</li>
 	 * </ol>
@@ -597,13 +618,17 @@ final class MixinInnerClassHotSwap {
 	}
 
 	/**
-	 * 闸 4 的唯一基线解析口：{@link #LOADED}（已成功 redefine、确实在 JVM 里生效过的字节）优先，
-	 * 其次 premain 录口（(加载器, 类名) 键的 defineClass 最终字节）。
+	 * 闸 4 的唯一基线解析口：本加载器名下<b>已生效</b>的字节（{@link MixinClassBaseline#appliedOf}，
+	 * 已成功 redefine、确实在 JVM 里生效过）优先，其次 premain 录口（(加载器, 类名) 键的 defineClass 最终字节）。
 	 *
-	 * <p>顺序有意义：成功 redefine 之后 JVM 里的那份是 {@code LOADED}，录口里仍是 R0——基线链
+	 * <p>顺序有意义：成功 redefine 之后 JVM 里的那份是 R1+，录口里仍是 R0——基线链
 	 * R0→R1→R2 必须取"成功后的字节"，否则第二次热更会拿自己的第一版字节当基线。</p>
 	 *
-	 * <p>未命中时 {@link MixinClassBaseline#baselineOf} 会计一次 {@code missed}（一次拒绝计一次）。</p>
+	 * <p>两个来源都以<b>加载器实例身份</b>为键（同一套弱键语义）：同名类在两个加载器下各有一份基线，
+	 * 互不冒充。</p>
+	 *
+	 * <p>未命中时 {@link MixinClassBaseline#baselineOf} 会计一次 {@code missed}（一次拒绝计一次），
+	 * 并把类全称 + 加载器标签 + 原因记进点名清单。</p>
 	 *
 	 * @return 基线字节（内部副本，调用方不得修改）；{@code null} = 没有基线
 	 */
@@ -611,7 +636,7 @@ final class MixinInnerClassHotSwap {
 		if (dotName == null) {
 			return null;
 		}
-		byte[] loaded = LOADED.get(dotName);
+		byte[] loaded = MixinClassBaseline.appliedOf(loader, dotName);
 		if (loaded != null) {
 			return loaded;
 		}

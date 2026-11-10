@@ -35,12 +35,13 @@ class MixinInnerClassHotSwapTest {
 	@Test
 	void syntheticRedefineIsSkippedWhenBytesAreIdentical() {
 		String name = "fixture.Target$Anonymous$deadbeef";
+		ClassLoader loader = new ClassLoader() { };
 		byte[] loaded = new byte[] {1, 2, 3, 4};
 		byte[] previous = remold.RemoldAgent.bytecodeCache.put(name, loaded);
 		try {
-			assertTrue(MixinInnerClassHotSwap.isUnchanged(name, loaded.clone()),
+			assertTrue(MixinInnerClassHotSwap.isUnchanged(loader, name, loaded.clone()),
 				"byte-identical regeneration must be short-circuited (no redundant redefine)");
-			assertFalse(MixinInnerClassHotSwap.isUnchanged(name, new byte[] {1, 2, 3, 5}),
+			assertFalse(MixinInnerClassHotSwap.isUnchanged(loader, name, new byte[] {1, 2, 3, 5}),
 				"a single changed byte must still be redefined");
 		} finally {
 			restoreCache(name, previous);
@@ -50,7 +51,7 @@ class MixinInnerClassHotSwapTest {
 	@Test
 	void unknownSyntheticClassIsNeverShortCircuited() {
 		String name = "fixture.Target$Anonymous$unknown";
-		assertFalse(MixinInnerClassHotSwap.isUnchanged(name, new byte[] {9}),
+		assertFalse(MixinInnerClassHotSwap.isUnchanged(new ClassLoader() { }, name, new byte[] {9}),
 			"without a known loaded snapshot the redefine must proceed (fail-open to redefinition)");
 	}
 

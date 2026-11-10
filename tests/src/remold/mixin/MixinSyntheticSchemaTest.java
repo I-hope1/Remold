@@ -55,13 +55,65 @@ class MixinSyntheticSchemaTest {
 	}
 
 	@Test
-	void fieldTypeDriftIsRefusedInsteadOfTriggeringHeapRewrite() {
-		// 同名不同描述符：墓碑字段无法表达类型漂移 → 必须 fail-closed
-		ClassNode fresh = synthetic("val$count:J");
-		List<String> loaded = List.of("val$count:I");
+	void sameNameDifferentDescriptorIsRenamedAndAppended() {
+		// R0: val$self: LTarget; → R1: val$self: LEntity;（同名异型）
+		ClassNode fresh = synthetic("this$0:Lfixture/Target;", "val$helper:I", "val$self:Lnet/minecraft/entity/Entity;");
+		fresh.methods.add(new org.objectweb.asm.tree.MethodNode(Opcodes.ACC_PUBLIC, "run", "()V", null, null));
+		org.objectweb.asm.tree.MethodNode run = fresh.methods.get(1);
+		run.instructions = new org.objectweb.asm.tree.InsnList();
+		run.instructions.add(new org.objectweb.asm.tree.FieldInsnNode(Opcodes.GETFIELD,
+			"fixture/Target$Anonymous$abc", "val$self", "Lnet/minecraft/entity/Entity;"));
+		run.instructions.add(new org.objectweb.asm.tree.InsnNode(Opcodes.RETURN));
+		List<String> loaded = List.of("this$0:Lfixture/Target;", "val$self:Lfixture/Target;");
 
-		assertFalse(MixinSyntheticSchema.canRedefineWithoutInstanceRewrite(fresh, loaded),
-			"a field type drift must be refused (no ModifyInstances)");
+		java.util.Map<String, String> renamed = MixinSyntheticSchema.renameCollisions(fresh, loaded);
+
+		assertEquals(1, renamed.size(), "the same-name field with a different descriptor must be renamed");
+		String newName = renamed.get("val$self");
+		assertTrue(newName.startsWith("val$self$remold$"), "deterministic schema-qualified name: " + newName);
+		assertTrue(MixinSyntheticSchema.nodeFields(fresh).contains(newName + ":Lnet/minecraft/entity/Entity;"));
+		// 访问点必须一起改写
+		org.objectweb.asm.tree.FieldInsnNode access =
+			(org.objectweb.asm.tree.FieldInsnNode) run.instructions.getFirst();
+		assertEquals(newName, access.name, "GETFIELD must follow the rename");
+
+		// 基线槽位原封不动（墓碑），新字段追加在末尾
+		List<String> padded = MixinSyntheticSchema.padFields(fresh, loaded);
+		assertEquals(List.of("val$self:Lfixture/Target;"), padded);
+		List<String> table = MixinSyntheticSchema.nodeFields(fresh);
+		assertEquals("this$0:Lfixture/Target;", table.get(0), "baseline slot 0 must not move");
+		assertEquals("val$self:Lfixture/Target;", table.get(1), "baseline slot 1 must not move");
+		assertTrue(table.contains("val$helper:I"));
+		assertTrue(table.contains(newName + ":Lnet/minecraft/entity/Entity;"));
+	}
+
+	@Test
+	void baselineConstructorOverloadIsRetainedAlongsideTheNewOne() {
+		byte[] r0 = classBytes(synthetic("this$0:Lfixture/Target;", "val$self:Lfixture/Target;"),
+			"(Lfixture/Target;Lfixture/Target;)V");
+		ClassNode r1 = synthetic("this$0:Lfixture/Target;", "val$helper:I",
+			"val$self:Lnet/minecraft/entity/Entity;");
+		r1.methods.clear();
+		r1.methods.add(new org.objectweb.asm.tree.MethodNode(Opcodes.ACC_PUBLIC, "<init>",
+			"(Lfixture/Target;ILnet/minecraft/entity/Entity;)V", null, null));
+
+		List<String> retained = MixinSyntheticSchema.retainConstructors(r1, r0);
+
+		assertEquals(List.of("(Lfixture/Target;Lfixture/Target;)V"), retained,
+			"the baseline <init> must be retained as an overload");
+		assertEquals(2, r1.methods.size(), "old and new <init> must coexist");
+	}
+
+	private static byte[] classBytes(ClassNode node, String ctorDesc) {
+		node.methods.clear();
+		org.objectweb.asm.tree.MethodNode ctor =
+			new org.objectweb.asm.tree.MethodNode(Opcodes.ACC_PUBLIC, "<init>", ctorDesc, null, null);
+		ctor.instructions = new org.objectweb.asm.tree.InsnList();
+		ctor.instructions.add(new org.objectweb.asm.tree.InsnNode(Opcodes.RETURN));
+		node.methods.add(ctor);
+		org.objectweb.asm.ClassWriter writer = new org.objectweb.asm.ClassWriter(0);
+		node.accept(writer);
+		return writer.toByteArray();
 	}
 
 	@Test

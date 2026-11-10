@@ -118,6 +118,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   （`ModifyMethodBodies`），**不触发 `ModifyInstances` 全堆重排**（真机 `combinedCondition` 被冲 null 的根因）。
   `MixinInnerClassHotSwap` 两条重定义路径（目标类前预重定义 / 兜底重定义）都接入该守门，并新增
   `[HEAPWATCH] before-synthetic-redefine` / `after-synthetic-redefine` 切面。
+- **合成匿名类单调并集（同名异型字段重命名追加 + `<init>` 重载墓碑 + 事务一致性）**：
+  `MixinSyntheticSchema.renameCollisions` 对同名异型的捕获字段按 `name$remold$<descHash>` 确定性重命名并
+  改写类内 `GETFIELD/PUTFIELD`（基线槽位原封不动、新字段追加）；`retainConstructors` 从 `LOADED` 旧字节
+  复制基线 `<init>`，新旧构造器重载并存；`MixinReWeaver` 在合成类无法安全落地时**中止宿主目标重定义**
+  （规则 3，不产生"被调方拒绝、宿主已重定义"的分裂状态）。字段表因此只增不减、且永不缩容/漂移。
 - **重定义三切面堆实例哨兵**：`remold.ref.HeapFieldWatch`（`-Dremold.probe.heapwatch=true`，
   `-Dremold.probe.heapwatch.class=...`、`-Dremold.probe.heapwatch.field=...`）在 `redefineClasses` 前、
   返回后、字段初始化补丁完成后枚举目标类实例并报告 `nullCount` 与首例身份；只读、默认关闭。

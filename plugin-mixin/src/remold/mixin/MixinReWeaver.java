@@ -40,6 +40,13 @@ public final class MixinReWeaver {
 		if (dotClassName == null || sourceBytecode == null) {
 			return sourceBytecode;
 		}
+		if (MixinInnerClassHotSwap.isBlocked(dotClassName)) {
+			RemoldAgent.warn("[Mixin] " + dotClassName + ": re-weave aborted because a synthetic inner class"
+				+ " could not be redefined safely this round (transactional consistency); the target keeps"
+				+ " its previous bytes and the next batch retries.");
+			MixinInnerClassHotSwap.clearBlocked(dotClassName);
+			return sourceBytecode;
+		}
 		if (MixinHotSwap.isMixin(dotClassName, sourceBytecode)) {
 			if (RemoldAgent.DEBUG) {
 				RemoldAgent.log("[Mixin] bridge in: " + dotClassName

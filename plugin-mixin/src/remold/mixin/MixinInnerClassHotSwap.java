@@ -72,6 +72,20 @@ final class MixinInnerClassHotSwap {
 	 */
 	private static final Map<String, byte[]> LOADED = new ConcurrentHashMap<>();
 
+	/** 规则 3（事务一致性）：本轮因合成类无法安全重定义而必须中止的宿主目标类。 */
+	private static final java.util.Set<String> BLOCKED = ConcurrentHashMap.newKeySet();
+
+	/** 宿主目标类本轮是否必须中止重定义（合成类无法安全落地时不允许半残状态）。 */
+	static boolean isBlocked(String targetDotName) {
+		return targetDotName != null && BLOCKED.contains(targetDotName);
+	}
+
+	static void clearBlocked(String targetDotName) {
+		if (targetDotName != null) {
+			BLOCKED.remove(targetDotName);
+		}
+	}
+
 	/** 登记口只装一次：来源函数恒定，内容由 {@link #GENERATED} 演进。 */
 	private static final AtomicBoolean SOURCE_REGISTERED = new AtomicBoolean();
 
@@ -179,15 +193,21 @@ final class MixinInnerClassHotSwap {
 					continue;
 				}
 				java.util.List<String> loadedFields = MixinSyntheticSchema.loadedFields(live);
+				byte[] loadedBytes = generatedBytes(conformedDotted);
+				java.util.Map<String, String> renamed = MixinSyntheticSchema.renameCollisions(fresh, loadedFields);
 				java.util.List<String> padded = MixinSyntheticSchema.padFields(fresh, loadedFields);
-				if (!MixinSyntheticSchema.canRedefineWithoutInstanceRewrite(fresh, loadedFields)) {
-					result.failures.add(conformedDotted + " (field-type drift; refusing ModifyInstances)");
-					continue;
+				java.util.List<String> retainedCtors = MixinSyntheticSchema.retainConstructors(fresh, loadedBytes);
+				if (!renamed.isEmpty()) {
+					RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted
+						+ ": renamed " + renamed.size() + " same-name field(s) " + renamed + " (append-only).");
 				}
 				if (!padded.isEmpty()) {
 					RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted
-						+ ": retained " + padded.size() + " tombstone field(s) " + padded
-						+ " (field table kept identical).");
+						+ ": retained " + padded.size() + " tombstone field(s) " + padded + ".");
+				}
+				if (!retainedCtors.isEmpty()) {
+					RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted
+						+ ": retained " + retainedCtors.size() + " baseline <init> overload(s) " + retainedCtors + ".");
 				}
 				byte[] bytes = serialize(fresh);
 				if (isUnchanged(conformedDotted, bytes)) {
@@ -374,18 +394,52 @@ final class MixinInnerClassHotSwap {
 				Class<?> live = inst == null ? null : findLoadedClass(inst, conformedDotted);
 				java.util.List<String> loadedFields = live == null ? java.util.List.of()
 					: MixinSyntheticSchema.loadedFields(live);
+				byte[] loadedBytes = generatedBytes(conformedDotted);
+				// 规则 1：同名异型捕获字段重命名追加（不覆盖基线槽位）
+				java.util.Map<String, String> renamed = MixinSyntheticSchema.renameCollisions(fresh, loadedFields);
+				// 基线槽位补齐（禁止缩容）
 				java.util.List<String> padded = MixinSyntheticSchema.padFields(fresh, loadedFields);
-				if (live != null && !MixinSyntheticSchema.canRedefineWithoutInstanceRewrite(fresh, loadedFields)) {
-					RemoldAgent.warn("[Mixin] synthetic inner class " + conformedDotted
-						+ " has a field-type drift against the loaded class (schemaHash="
-						+ MixinSyntheticSchema.schemaHash(fresh) + "); refusing the redefine instead of"
-						+ " triggering a DCEVM ModifyInstances heap rewrite.");
-					continue;
+				// 规则 2：<init> 重载墓碑并集（新旧构造器同时存在）
+				java.util.List<String> retainedCtors = MixinSyntheticSchema.retainConstructors(fresh, loadedBytes);
+				if (!renamed.isEmpty()) {
+					RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted
+						+ ": renamed " + renamed.size() + " same-name field(s) with a different descriptor "
+						+ renamed + " (baseline slots untouched).");
 				}
 				if (!padded.isEmpty()) {
 					RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted
 						+ ": retained " + padded.size() + " tombstone field(s) " + padded
-						+ " so the field table stays identical (no ModifyInstances).");
+						+ " so the field table only grows (no ModifyInstances shrink).");
+				}
+				if (!retainedCtors.isEmpty()) {
+					RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted
+						+ ": retained " + retainedCtors.size() + " baseline <init> overload(s) " + retainedCtors
+						+ " so old call sites keep linking.");
+				}
+				// 规则 3：已加载的构造器签名必须全部仍在候选里（旧调用点才可能命中）；否则中止宿主重定义。
+				if (live != null) {
+					java.util.List<String> missingCtors = new ArrayList<>();
+					for (java.lang.reflect.Constructor<?> c : live.getDeclaredConstructors()) {
+						String desc = Type.getConstructorDescriptor(c);
+						boolean present = false;
+						for (org.objectweb.asm.tree.MethodNode m : fresh.methods) {
+							if ("<init>".equals(m.name) && desc.equals(m.desc)) {
+								present = true;
+								break;
+							}
+						}
+						if (!present) {
+							missingCtors.add(desc);
+						}
+					}
+					if (!missingCtors.isEmpty()) {
+						BLOCKED.add(MixinInnerClassSupport.dotName(targetInternal));
+						RemoldAgent.warn("[Mixin] synthetic inner class " + conformedDotted
+							+ " cannot keep loaded constructor(s) " + missingCtors
+							+ " (no baseline bytes to retain); aborting the host target redefine to avoid a"
+							+ " split state (rule: transactional consistency).");
+						continue;
+					}
 				}
 				byte[] bytes = serialize(fresh);
 				byte[] previous = generatedBytes(conformedDotted);

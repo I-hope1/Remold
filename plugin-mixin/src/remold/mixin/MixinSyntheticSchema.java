@@ -119,6 +119,103 @@ final class MixinSyntheticSchema {
 		return true;
 	}
 
+	/**
+	 * 规则 1：同名异型合成字段的「重命名追加」。
+	 *
+	 * <p>候选里 {@code (name, candDesc)} 与加载基线 {@code (name, baseDesc)} 同名异型时：基线槽位原封不动
+	 * （由 {@link #padFields} 补墓碑），候选字段确定性地重命名为 {@code name$remold$<descHash>}，并改写候选
+	 * 类内所有对该字段的 {@code GETFIELD}/{@code PUTFIELD}。这样字段表只增不减，且新旧两套捕获变量并存。</p>
+	 *
+	 * @return 重命名映射（旧名 → 新名），供日志/诊断
+	 */
+	static java.util.Map<String, String> renameCollisions(ClassNode fresh, List<String> loaded) {
+		java.util.Map<String, String> loadedDesc = new java.util.LinkedHashMap<>();
+		for (String key : loaded) {
+			int colon = key.indexOf(':');
+			if (colon > 0) {
+				loadedDesc.putIfAbsent(key.substring(0, colon), key.substring(colon + 1));
+			}
+		}
+		java.util.Map<String, String> rename = new java.util.LinkedHashMap<>();
+		for (FieldNode f : fresh.fields) {
+			String baseDesc = loadedDesc.get(f.name);
+			if (baseDesc == null || baseDesc.equals(f.desc)) {
+				continue;
+			}
+			String renamed = f.name + "$remold$" + shortHash(f.desc);
+			rename.put(f.name, renamed);
+			f.name = renamed;
+		}
+		if (!rename.isEmpty()) {
+			rewriteFieldAccess(fresh, rename);
+		}
+		return rename;
+	}
+
+	/** 把候选类内对已重命名字段的 {@code GETFIELD}/{@code PUTFIELD} 指向新名。 */
+	static void rewriteFieldAccess(ClassNode fresh, java.util.Map<String, String> rename) {
+		for (org.objectweb.asm.tree.MethodNode m : fresh.methods) {
+			if (m.instructions == null) {
+				continue;
+			}
+			for (org.objectweb.asm.tree.AbstractInsnNode insn = m.instructions.getFirst(); insn != null;
+				insn = insn.getNext()) {
+				if (insn instanceof org.objectweb.asm.tree.FieldInsnNode field) {
+					if (fresh.name != null && fresh.name.equals(field.owner) && rename.containsKey(field.name)) {
+						field.name = rename.get(field.name);
+					}
+				}
+			}
+		}
+	}
+
+	/**
+	 * 规则 2：{@code <init>} 重载墓碑并集。
+	 *
+	 * <p>候选的 {@code <init>(candDesc)} 与基线 {@code <init>(baseDesc)} 不同时，把基线构造器原样保留
+	 * （优先从 {@code LOADED} 的旧字节里复制原始构造体；没有旧字节且父类是 {@code java/lang/Object} 时
+	 * 合成最小合法构造体）。这样新旧两个构造器同时存在，任何调用点（含在途旧栈帧）都不会
+	 * {@code NoSuchMethodError}。</p>
+	 *
+	 * @return 保留的构造器描述符列表；无法保留时返回 {@code null}（调用方必须 fail-closed 并中止宿主重定义）
+	 */
+	static List<String> retainConstructors(ClassNode fresh, byte[] loadedBytes) {
+		java.util.Set<String> present = new java.util.HashSet<>();
+		for (org.objectweb.asm.tree.MethodNode m : fresh.methods) {
+			if ("<init>".equals(m.name)) {
+				present.add(m.desc);
+			}
+		}
+		List<String> retained = new ArrayList<>();
+		if (loadedBytes != null) {
+			ClassNode loaded = new ClassNode();
+			new org.objectweb.asm.ClassReader(loadedBytes).accept(loaded, 0);
+			for (org.objectweb.asm.tree.MethodNode m : loaded.methods) {
+				if ("<init>".equals(m.name) && !present.contains(m.desc)) {
+					fresh.methods.add(m);
+					present.add(m.desc);
+					retained.add(m.desc);
+				}
+			}
+			return retained;
+		}
+		return retained;   // 没有旧字节：没有可保留的基线构造器（首次加载路径）
+	}
+
+	private static String shortHash(String text) {
+		try {
+			java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+			byte[] hash = digest.digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+			StringBuilder sb = new StringBuilder();
+			for (int i = 0; i < 4; i++) {
+				sb.append(String.format("%02x", hash[i]));
+			}
+			return sb.toString();
+		} catch (Throwable t) {
+			return "h" + Integer.toHexString(text.hashCode());
+		}
+	}
+
 	/** 字段表 + 构造器描述符的 Schema 指纹（诊断/日志用；未来可用于命名哈希）。 */
 	static String schemaHash(ClassNode node) {
 		List<String> parts = new ArrayList<>(nodeFields(node));

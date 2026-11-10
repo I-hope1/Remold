@@ -128,4 +128,40 @@ class MixinSyntheticSchemaTest {
 		assertEquals(twoFields, sameTwoFields, "the same capture schema must hash identically");
 		assertNotEquals(twoFields, threeFields, "a changed capture schema must hash differently");
 	}
+
+	// ---------------------------------------------------------------- 逐次字段表变化分类（战报拆分口径）
+
+	/**
+	 * Every synthetic redefine must be classifiable <b>from its own log line</b>: without it a battle
+	 * report can only say "no tombstone and no rename line", which cannot tell APPEND_ONLY from
+	 * UNCHANGED (the 24-snapshot real-host run had exactly that gap).
+	 */
+	@Test
+	void fieldTableChangeIsClassifiedPerRedefine() {
+		List<String> loaded = List.of("this$0:Lfixture/Target;", "val$self:Lfixture/Target;");
+
+		ClassNode unchanged = synthetic("this$0:Lfixture/Target;", "val$self:Lfixture/Target;");
+		assertEquals("UNCHANGED(appended=0, renamed=0, tombstone=0)",
+			MixinSyntheticSchema.describeFieldTableChange(
+				MixinSyntheticSchema.appendedFields(unchanged, loaded), java.util.Map.of(), List.of()),
+			"an identical field table must be reported as UNCHANGED, not as an append");
+
+		ClassNode appended = synthetic("this$0:Lfixture/Target;", "val$self:Lfixture/Target;", "val$extra:I");
+		List<String> appendedFields = MixinSyntheticSchema.appendedFields(appended, loaded);
+		assertEquals(List.of("val$extra:I"), appendedFields,
+			"only a field the loaded class does not have may be reported as appended");
+		assertEquals("APPEND_ONLY(appended=1, renamed=0, tombstone=0)",
+			MixinSyntheticSchema.describeFieldTableChange(appendedFields, java.util.Map.of(), List.of()));
+
+		ClassNode shrunk = synthetic("this$0:Lfixture/Target;");
+		List<String> padded = MixinSyntheticSchema.padFields(shrunk, loaded);
+		assertEquals("WOULD_SHRINK(appended=0, renamed=0, tombstone=1)",
+			MixinSyntheticSchema.describeFieldTableChange(List.of(), java.util.Map.of(), padded),
+			"a field that only survives as a tombstone must be reported as WOULD_SHRINK");
+
+		assertEquals("TYPE_CHANGE(appended=0, renamed=1, tombstone=0)",
+			MixinSyntheticSchema.describeFieldTableChange(List.of(),
+				java.util.Map.of("val$self", "val$self$remold$1"), List.of()),
+			"a renamed same-name field is a type change and must outrank the other labels");
+	}
 }

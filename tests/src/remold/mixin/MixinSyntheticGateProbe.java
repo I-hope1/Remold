@@ -38,14 +38,30 @@ import remold.RemoldAgent;
  *       {@code spare}). On a host without enhanced redefinition the JVM refuses the schema change
  *       before it can be observed; that case is counted as {@code SKIP(non-jbr)} <b>separately</b>
  *       so "did not run" can never be read as "passed".</li>
+ *   <li><b>P4 the expansion direction</b> (invariant C3, enhanced host only): the capture list
+ *       grows from 2 to 4 members and the loaded 2-arg {@code <init>} is retained from the old
+ *       bytes. The gate <b>accepts</b> this (nothing shrinks; the retained constructor completes
+ *       the loaded constructor set), so the JVM really installs a class whose kept constructor
+ *       never assigns the new fields. The probe then builds an instance through that kept
+ *       constructor, calls the NEW body, and asserts the observed
+ *       {@link NullPointerException} — the half-initialised instance C3 is about. It also records
+ *       the pre-existing (pre-redefine) instance, which the enhanced JVM migrates. A host without
+ *       enhanced redefinition refuses an added field, and that is counted as
+ *       {@code SKIP(non-jbr)} <b>separately</b> as well.</li>
  * </ol>
  *
  * <p><b>Fixtures stay in the repo</b>: the bytes come from the committed
- * {@link MixinSyntheticGateFixtures} on the test runtime classpath — the very classes the unit
- * suite uses. Nothing is generated at run time, so no scratch/tmp fixture can silently diverge from
- * what was committed. The fixture lives under {@code remold/}, a namespace the premain recorder
- * intentionally skips, so gate 4 is satisfied through its documented legacy source (a seeded
- * bytecode cache) and the probe asserts that precondition explicitly — leave it out and a
+ * {@link MixinSyntheticGateFixtures} / {@link MixinSyntheticHalfInitFixtures} on the test runtime
+ * classpath — the very classes the unit suite uses. Nothing is generated at run time, so no
+ * scratch/tmp fixture can silently diverge from what was committed.</p>
+ *
+ * <p><b>Baseline (gate 4) is seeded through the recorder, not the bytecode cache</b>: gate 4 only
+ * accepts {@code LOADED} (this source's own <em>successful</em> redefine) or the premain recorder
+ * keyed by {@code (loader identity, class name)} — {@code RemoldAgent.bytecodeCache} is
+ * deliberately not a baseline source (one dotted-name index would let same-name classes from
+ * different loaders impersonate each other). The fixtures therefore seed the recorder directly
+ * under a key name that the recorder accepts (contains {@code $}, does not start with
+ * {@code remold/}), and the probe asserts that precondition explicitly — leave it out and a
  * gate-3 refusal would be indistinguishable from a gate-4 refusal.</p>
  *
  * <p><b>Run</b> (needs a real agent for {@link RemoldAgent#getInstrumentation()}; {@code ASM} jars
@@ -63,13 +79,15 @@ import remold.RemoldAgent;
 public final class MixinSyntheticGateProbe {
 
 	/**
-	 * Committed fixture under test. It lives under {@code remold/}, so the premain recorder
-	 * deliberately skips it (that namespace belongs to the agent); gate 4 is therefore satisfied the
-	 * same way the unit suite satisfies it — an explicitly seeded bytecode cache, the gate's
-	 * documented legacy source — so the field-table gate stays the only possible reason for the
-	 * refusal in P2.
+	 * Baseline key of the shrink fixture. It is only an identifier: the live class is passed
+	 * separately, and the recorder is keyed by {@code (loader identity, this name)}. It deliberately
+	 * contains {@code $} and does not start with {@code remold/}, otherwise the recorder would drop
+	 * it and gate 4 would be the (wrong) reason a candidate is refused.
 	 */
-	private static final String FIXTURE = "remold.mixin.MixinSyntheticGateFixtures$Drifting";
+	private static final String FIXTURE = "gatefix.GateFixture$Drifting";
+
+	/** Baseline key of the expansion fixture; same requirements as {@link #FIXTURE}. */
+	private static final String HALF_FIXTURE = "gatefix.GateFixture$HalfInit";
 
 	private static final String HOST = "remold.synthetic.GateProbe$Host";
 
@@ -95,8 +113,8 @@ public final class MixinSyntheticGateProbe {
 			"precondition: the fixture must declare the droppable field, otherwise the shrink models nothing: "
 				+ MixinSyntheticSchema.loadedFields(live0));
 
-		// Gate 4 pre-satisfied through its documented legacy source, so P2 isolates gate 3.
-		remold.RemoldAgent.bytecodeCache.put(FIXTURE, committed);
+		// Gate 4 pre-satisfied through the ONLY sources it accepts, so P2 isolates gate 3.
+		MixinSyntheticGateFixtures.seedBaseline(live0.getClassLoader(), FIXTURE, committed);
 		require(MixinInnerClassHotSwap.baselineMissingReason(live0.getClassLoader(), FIXTURE) == null,
 			"precondition: the baseline must be resolvable, else the refusal could come from gate 4");
 
@@ -167,6 +185,14 @@ public final class MixinSyntheticGateProbe {
 			}
 		}
 
+		// ---------------- P4: expansion + retained old <init> (invariant C3, JBR/DCEVM only)
+		if (!RemoldAgent.isEnhancedHotswapEnabled()) {
+			skipNonJbr("expansion with a retained old <init> (P4): host has no enhanced redefinition, so the JVM"
+				+ " refuses an added field before the half-initialised instance can be observed");
+		} else {
+			expansionCase(inst);
+		}
+
 		// ---------------------------------------------------------------- artifact identity
 		// The agent jar is appended to the bootstrap search, so its loaded classes carry no
 		// CodeSource; the jars are therefore pinned explicitly instead of guessed.
@@ -191,6 +217,87 @@ public final class MixinSyntheticGateProbe {
 	}
 
 	// ---------------------------------------------------------------- helpers
+
+	/**
+	 * P4: the capture list grows (2 → 4 fields) and the loaded 2-arg {@code <init>} is retained from
+	 * the old bytes; then an instance built through that kept constructor calls the new body.
+	 *
+	 * <p>This is the case C3 defines: not a shrink the gate refuses, but the expansion the gate
+	 * <b>accepts</b>. What it measures is the consequence — the retained constructor's body is the
+	 * old body, so the new reference capture stays {@code null} and the new primitive stays
+	 * {@code 0}, and the new body's read of the reference capture throws
+	 * {@link NullPointerException}.</p>
+	 */
+	private static void expansionCase(Instrumentation inst) {
+		Class<?> narrow = HalfInitOld.class;
+		MixinSyntheticHalfInitFixtures.Candidate candidate = MixinSyntheticHalfInitFixtures.expandedCandidate();
+		require(MixinSyntheticSchema.loadedFields(narrow).size() == 2,
+			"precondition: the probe must start from the 2-field shape, got "
+				+ MixinSyntheticSchema.loadedFields(narrow));
+		MixinSyntheticGateFixtures.seedBaseline(narrow.getClassLoader(), HALF_FIXTURE,
+			MixinSyntheticHalfInitFixtures.oldShapeBytes());
+		require(MixinInnerClassHotSwap.baselineMissingReason(narrow.getClassLoader(), HALF_FIXTURE) == null,
+			"precondition: gate 4 must be satisfied, else the expansion could be refused for the wrong reason");
+
+		HalfInitOld preExisting = new HalfInitOld(new Object(), "a");
+		require("v1:a".equals(preExisting.test()),
+			"precondition: the 2-field instance reads its captured field before the redefine");
+
+		int[] before = metrics();
+		boolean expanded = MixinInnerClassHotSwap.redefineSyntheticSafely(inst, narrow, HALF_FIXTURE,
+			candidate.bytes(), HOST);
+		int[] after = metrics();
+		require(expanded, "the single exit must ACCEPT the expansion: no field shrinks, the retained <init>"
+			+ " completes the loaded constructor set and the baseline is seeded");
+		require(after[1] - before[1] == 1, "the expansion must be reported as a field-table change, got "
+			+ (after[1] - before[1]));
+
+		// The kept constructor exists on the redefined class and its body is the OLD body.
+		HalfInitOld fromOldCtor = new HalfInitOld(new Object(), "a");
+		Throwable oldCtorBody = null;
+		try {
+			fromOldCtor.test();
+		} catch (Throwable t) {
+			oldCtorBody = t;
+		}
+		require(oldCtorBody instanceof NullPointerException,
+			"an instance built by the retained old <init> after the expansion must throw NPE when the new body"
+				+ " reads the new reference capture, got " + oldCtorBody);
+		require("test".equals(oldCtorBody.getStackTrace()[0].getMethodName()),
+			"the NPE must be thrown by the new body, not by the constructor: "
+				+ MixinSyntheticHalfInitFixtures.stackOf(oldCtorBody));
+		// The new primitive capture is not visible at compile time on the old shape, hence the
+		// reflective call: after the redefine the re-woven body method exists on the same class.
+		int countDefault;
+		try {
+			countDefault = ((Integer) MixinSyntheticHalfInitFixtures.call(fromOldCtor,
+				MixinSyntheticHalfInitFixtures.COUNT)).intValue();
+		} catch (Throwable t) {
+			throw new IllegalStateException("the retained <init> must still leave the new primitive capture"
+				+ " readable at its default, but capturedCount() failed: " + t, t);
+		}
+		require(countDefault == 0,
+			"the retained old <init> never writes the new primitive capture, so it must read 0, got " + countDefault);
+
+		// Same mechanism, different creation point: an instance allocated before the redefine is
+		// migrated by the enhanced redefine and sees the same null new reference field.
+		Throwable migrated = null;
+		try {
+			preExisting.test();
+		} catch (Throwable t) {
+			migrated = t;
+		}
+		require(migrated instanceof NullPointerException,
+			"a pre-existing instance migrated by the enhanced redefine must also read the new reference capture"
+				+ " as null, got " + migrated);
+
+		passed++;
+		notes.put("p4-expansion-retained-old-ctor",
+			"npe=" + brief(oldCtorBody) + " | new-primitive=" + countDefault + " | pre-existing="
+				+ brief(migrated) + " | retained=" + candidate.retained());
+		notes.put("p4-old-ctor-stack",
+			MixinSyntheticHalfInitFixtures.stackOf(oldCtorBody).replace('\n', ' ').trim());
+	}
 
 	private static void skipNonJbr(String why) {
 		skippedNonJbr++;

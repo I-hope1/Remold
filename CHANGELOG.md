@@ -100,6 +100,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Mixin→Target 映射变化是结构热更的正常形态）；标准 HotSpot 保持 fail-closed 拒绝并点名。
 - **内部类新字节优先**：`registerInnerClassBytes` 优先使用本轮覆盖层里显式登记的新字节，
   不再被磁盘/源码缓存里的旧版本覆盖（真机复现：改了匿名类体却仍是旧 schema）。
+- **生成方法墓碑桩保留（参考 `LambdaAligner` 的孤儿方法策略）**：`MixinMemberAlign` 在把生成成员名/顺序
+  对齐回基线后，对「基线存在、重织入产物已消失」的 Mixin 生成方法（`handler$*`/`redirect$*`/
+  `wrapOperation$*`/`modify$*`/`localvar$*`/`args$*`/`md$*`）补最小合法空操作桩（void→`RETURN`；
+  返回类型与某入参相同→原样返回该入参；其余→零值），保持同名/同描述符/同访问标志/同方法表位置。
+  JBR/DCEVM 在 safepoint 重定义后，**已在调用栈上的旧栈帧**继续执行旧字节码并调用旧 `handler$*`，
+  墓碑桩让其无害返回，物理根除 `NoSuchMethodError: handler$*`（retarget 卸载旧目标时高发）。
+  业务方法不复活（只处理合成成员）。
+- **合成匿名类无实质变更短路（参考 `AnonClassAligner` 的 no-op 语义）**：`MixinInnerClassHotSwap` 记账
+  已成功重定义的合成类字节，重新生成的字节与运行期已加载字节完全一致时跳过 `redefineClasses`
+  （预重定义与兜底重定义两条路径都短路），避免 JBR/DCEVM 无谓的堆实例重写窗口。
 - **`ClassInfo.cache` 锚回**：`MixinClassInfoRegistry.reassert` 在每次登记/重载成功后把
   `MixinInfo.getClassInfo()` 写回缓存，修复 `priority → interfaces → targets A→B→A` 往返后
   `MixinTargetContext.transformSingleDescriptor` 跳过 Mixin→Target 重映射、匿名内部类 `this$0`
@@ -116,6 +126,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `targets [A]→[B]→[A]` 双向迁移成功；含匿名内部类的 Mixin 在整条往返序列后不再抛 `NoSuchMethodError`。
 - 真机（同构建，注入体内含匿名类 + 两条并发锤线程）：`priority → implements → targets A→B→A` 全往返期间
   持续调用注入方法，`hammer-failure=null` / `window-failure=null` / `anon-ctor-roundtrip ok=true` → `RESULT PASS`。
+- 真机连续 4 轮（同一 JVM 不重启）：每轮 `priority → implements → targets A→B→A` 全程并发锤击，4/4 轮
+  `hammer-failure=null` / `window-failure=null` / `anon-ctor-roundtrip ok=true`，每轮日志均出现
+  `[MIXIN-ALIGN] retained N tombstone stub(s)`；0 次 `NoSuchMethodError`、0 次 `combinedCondition` NPE。
 
 ### Known boundaries
 - 接口**移除**无本地实证：只在 JBR/DCEVM 上放行并 warn，`ClassInfo` 接口表只增不删。

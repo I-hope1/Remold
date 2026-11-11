@@ -1,5 +1,5 @@
 pluginManagement {
-    val remoldVersion = providers.gradleProperty("remold.version").getOrElse("0.2.6")
+    val remoldVersion = providers.gradleProperty("remold.version").getOrElse("0.2.7")
     plugins {
         id("io.github.i-hope1.remold") version remoldVersion
     }

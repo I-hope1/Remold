@@ -12,10 +12,10 @@ import java.util.List;
  * <p>Example usage in {@code build.gradle.kts}:
  * <pre>{@code
  * plugins {
- *     id("io.github.i-hope1.remold") version "0.2.1"
+ *     id("io.github.i-hope1.remold") version "0.2.7"
  * }
  * remold {
- *     version = "0.2.1"
+ *     version = "0.2.7"
  *     plugins("arc", "mixin")
  *     debug = true
  * }

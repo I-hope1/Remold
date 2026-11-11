@@ -24,6 +24,9 @@ public final class MixinBytecodeBridge implements BytecodeTransformerBridge {
 				return sourceBytecode;
 			}
 			return MixinReWeaver.reweave(dotClassName, sourceBytecode);
+		} catch (remold.BytecodeTransformerBridge.Abort abort) {
+			// 事务中止不是"Mixin 不可用"：必须原样上抛，让 RemoldAgent 放弃本次 redefineClasses。
+			throw abort;
 		} catch (Throwable t) {
 			// Mixin 不在当前 ClassLoader（例如宿主未启用 Mixin）时，整条桥退化为不重织入。
 			if (REPORTED.compareAndSet(false, true)) {

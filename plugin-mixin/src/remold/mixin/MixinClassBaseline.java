@@ -123,13 +123,24 @@ final class MixinClassBaseline {
 	 * {@link RemoldAgent#bytecodeCache}（那条索引没有加载器维度，同名不同加载器会互相冒充）。</p>
 	 *
 	 * <p>未命中时计入 {@code missed}：<b>一次查找计一次</b>，与"拒绝了一个类"一一对应
-	 * （闸 4 每次拒绝只查一次）。</p>
+	 * （闸 4 每次拒绝只查一次）。非闸判据的读取点（例如"拿基线去保留旧 {@code <init>}"）必须用
+	 * {@link #baselineOf(ClassLoader, String, boolean)} 关掉计数，否则同一次拒绝会被记两遍。</p>
 	 *
 	 * @param loader     定义该类的加载器；{@code null}（bootstrap）永远视为未命中
 	 * @param className  点分名或内部名皆可
 	 * @return 基线字节，或 {@code null} = 没抓到
 	 */
 	static byte[] baselineOf(ClassLoader loader, String className) {
+		return baselineOf(loader, className, true);
+	}
+
+	/**
+	 * 取 (加载器, 类名) 对应的定义字节，可选择是否把未命中记进 {@code missed} 分母。
+	 *
+	 * @param countMiss {@code true} = 未命中计一次 {@code missed} 并点名（闸 4 的唯一口径）；
+	 *                  {@code false} = 纯读取（不影响任何分母）
+	 */
+	static byte[] baselineOf(ClassLoader loader, String className, boolean countMiss) {
 		String dot = className == null ? null : className.replace('/', '.');
 		if (dot != null) {
 			synchronized (BASELINES) {
@@ -141,6 +152,9 @@ final class MixinClassBaseline {
 					}
 				}
 			}
+		}
+		if (!countMiss) {
+			return null;
 		}
 		recordMiss(loader, dot);
 		MISSED.incrementAndGet();
@@ -330,6 +344,20 @@ final class MixinClassBaseline {
 				}
 			}
 		}
+	}
+
+	/**
+	 * 单测播种：直接写入一条 (加载器, 类名) 基线，<b>绕过录口的候选过滤</b>。
+	 *
+	 * <p>生产上只有 premain 录口写这张表，而录口刻意丢弃 {@code remold/} 前缀（agent 自身）。用例要
+	 * 证明"基线只来自 premain 录口、覆盖层为空时热更仍成立"，就必须能按 {@code (loader, name)}
+	 * 精确播种，否则只能用非本模块的类名，测的就不再是被测路径。键与生产同源（加载器实例身份）。</p>
+	 */
+	static void recordForTest(ClassLoader loader, String dottedName, byte[] bytes) {
+		if (loader == null || dottedName == null || bytes == null) {
+			return;
+		}
+		record(loader, dottedName.replace('/', '.'), bytes);
 	}
 
 	/**

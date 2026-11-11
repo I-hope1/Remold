@@ -32,20 +32,29 @@ public final class MixinReWeaver {
 	/**
 	 * 对源码级字节码执行 Mixin 重织入。
 	 *
+	 * <p><b>事务一致性（不变量 C2）</b>：本类的产物和它引用的合成内部类是一个事务。只要宿主目标类
+	 * 被标成 {@code BLOCKED}（有合成内部类这一轮无法安全落地），本方法<b>必须抛出
+	 * {@link remold.BytecodeTransformerBridge.Abort}</b>，而不是"降级返回入参"：返回未织入的原始
+	 * 字节会让 {@code redefineDynamic} 把宿主重定义成没有 Mixin 钩子的版本（washout），返回新织入
+	 * 的字节则会让宿主调用一个 JVM 里并不存在的新 {@code <init>}（{@code NoSuchMethodError} 崩服）。
+	 * 唯一正确的动作是让本次 {@code redefineClasses} 不发生。</p>
+	 *
+	 * <p>{@code BLOCKED} 由调用方（{@code MixinHotSwap.flushPendingTargets}）在每轮开始/结束时清除，
+	 * 本方法只负责"看到就中止"，不负责清标记——否则同一轮里第二次询问会静默放行。</p>
+	 *
 	 * @param dotClassName   点分隔类名（如 {@code com.example.item.RemoldWandItem}）
 	 * @param sourceBytecode 尚未织入的源码级字节码
 	 * @return 重织入后的字节码；无 Mixin 命中或织入失败时返回入参本身
+	 * @throws remold.BytecodeTransformerBridge.Abort 本类本轮必须整体放弃重定义（事务一致性）
 	 */
 	public static byte[] reweave(String dotClassName, byte[] sourceBytecode) {
 		if (dotClassName == null || sourceBytecode == null) {
 			return sourceBytecode;
 		}
 		if (MixinInnerClassHotSwap.isBlocked(dotClassName)) {
-			RemoldAgent.warn("[Mixin] " + dotClassName + ": re-weave aborted because a synthetic inner class"
-				+ " could not be redefined safely this round (transactional consistency); the target keeps"
-				+ " its previous bytes and the next batch retries.");
-			MixinInnerClassHotSwap.clearBlocked(dotClassName);
-			return sourceBytecode;
+			throw new remold.BytecodeTransformerBridge.Abort(dotClassName
+				+ ": a synthetic inner class could not be redefined safely in this round (transactional"
+				+ " consistency); the target keeps its previous bytes and the next batch retries");
 		}
 		if (MixinHotSwap.isMixin(dotClassName, sourceBytecode)) {
 			if (RemoldAgent.DEBUG) {
@@ -80,12 +89,22 @@ public final class MixinReWeaver {
 				// 因此必须在这里把字节提前生成并回灌（S7 时序缺口）。
 				MixinInnerClassHotSwap.refeedForTarget(weaver, dotClassName);
 			}
+			// 同轮中止：refeedForTarget 刚刚可能判定某个合成内部类无法安全落地，并把宿主标成
+			// BLOCKED。此时织入产物已经带着"调用新 <init>"的调用点，绝不能交给 redefineDynamic。
+			if (MixinInnerClassHotSwap.isBlocked(dotClassName)) {
+				throw new remold.BytecodeTransformerBridge.Abort(dotClassName
+					+ ": a synthetic inner class was refused by the single-exit gate after re-weaving"
+					+ " (transactional consistency); the woven bytes are discarded and nothing is redefined");
+			}
 			if (RemoldAgent.DEBUG) {
 				RemoldAgent.log("[Mixin] bridge out: " + dotClassName
 					+ ", wovenBytes=" + woven.length
 					+ (unchanged ? " (unchanged from source; no mixin applied or already woven)" : " (rewritten)"));
 			}
 			return unchanged ? sourceBytecode : woven;
+		} catch (remold.BytecodeTransformerBridge.Abort abort) {
+			// 事务中止信号必须穿过本方法的兜底 catch：它不是"织入失败"，不能被降级成原始字节。
+			throw abort;
 		} catch (Throwable t) {
 			if (isIllegalClassLoadError(t)) {
 				RemoldAgent.info("[Mixin] Skipping bytecode re-weaving for mixin package class: " + dotClassName);

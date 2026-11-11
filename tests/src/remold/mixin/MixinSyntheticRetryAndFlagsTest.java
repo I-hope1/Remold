@@ -92,7 +92,8 @@ class MixinSyntheticRetryAndFlagsTest {
 			int[] afterRetry = metrics();
 			assertFalse(okRetry, "the identical candidate must be suppressed");
 			assertEquals(0, afterRetry[0] - beforeRetry[0], "the retry must not redefine");
-			assertEquals(1, afterRetry[2] - beforeRetry[2], "the retry is still one rejection");
+			assertEquals(0, afterRetry[2] - beforeRetry[2], "the identical candidate must not be counted twice"
+				+ " (one candidate = one rejection; the real machine saw +3 per round before this dedupe)");
 			assertTrue(MixinInnerClassHotSwap.isBlocked(host), "the retry must block the host again");
 			assertEquals(0, recorder.redefinitions.size(), "nothing may have reached redefineClasses");
 
@@ -118,6 +119,53 @@ class MixinSyntheticRetryAndFlagsTest {
 			assertEquals(0, afterR4[2] - beforeR4[2], "R4: no gate may reject it");
 			assertEquals(1, recorder.redefinitions.size(), "R4: exactly one redefineClasses call");
 			assertEquals(0, SyntheticAbortLedger.size(), "R4: an accepted candidate must clear its stale record");
+		} finally {
+			RemoldAgent.swapInstrumentationForTest(previous);
+			MixinClassBaseline.forgetForTest(live.getClassLoader(), synthetic);
+			MixinInnerClassHotSwap.clearBlocked(host);
+		}
+	}
+
+
+	/**
+	 * Gate order: a capture-list change moves <b>both</b> the field table and the {@code <init>} set, so the
+	 * schema gate must be evaluated first and must count {@code fieldTableChanged}. Before this order was
+	 * fixed the {@code missing loaded <init>} gate returned first, the counter stayed 0 and the real machine
+	 * read {@code fieldTableChanged=0} on every refused capture change. The identical candidate asked twice
+	 * must count once.
+	 */
+	@Test
+	void aCaptureListChangeCountsAsAFieldTableChangeEvenWhenTheConstructorSetAlsoChanges() {
+		byte[] oldShape = MixinSyntheticHalfInitFixtures.oldShapeBytes();
+		Class<?> live = MixinSyntheticHalfInitFixtures.loadInFreshLoader(oldShape);
+		String synthetic = MixinSyntheticHalfInitFixtures.OLD_DOTTED;
+		String host = "retryfix.Target$HostOrder";
+		MixinClassBaseline.recordForTest(live.getClassLoader(), synthetic, oldShape);
+		SyntheticAbortLedger.clearForTest();
+		// No retained <init>: the loaded 2-arg constructor is gone AND the field table grew.
+		byte[] candidate = MixinSyntheticHalfInitFixtures.grownCandidateBytes();
+
+		RecordingInstrumentation recorder = new RecordingInstrumentation(new Class<?>[]{live});
+		Instrumentation previous = RemoldAgent.swapInstrumentationForTest(recorder.proxy);
+		MixinInnerClassHotSwap.setInstanceProbeForTest(type -> new Object[0]);
+		try {
+			int[] before = metrics();
+			boolean first = MixinInnerClassHotSwap.redefineSyntheticSafely(recorder.proxy, live, synthetic, candidate, host);
+			int[] after = metrics();
+			assertFalse(first, "the candidate must be refused");
+			assertEquals(1, after[1] - before[1],
+				"the schema gate must count the field-table change even though <init> also changed");
+			assertEquals(1, after[2] - before[2], "one candidate = one rejection");
+			assertEquals(0, after[0] - before[0], "nothing may be redefined");
+			assertTrue(recorder.redefinitions.isEmpty(), "it must not reach redefineClasses");
+
+			// Same bytes again (another entry point in the same round) -> no second accounting.
+			int[] beforeDup = metrics();
+			boolean dup = MixinInnerClassHotSwap.redefineSyntheticSafely(recorder.proxy, live, synthetic, candidate, host);
+			int[] afterDup = metrics();
+			assertFalse(dup, "the duplicate must stay refused");
+			assertEquals(0, afterDup[1] - beforeDup[1], "a duplicate candidate must not be counted again");
+			assertEquals(0, afterDup[2] - beforeDup[2], "a duplicate candidate must not be counted again");
 		} finally {
 			RemoldAgent.swapInstrumentationForTest(previous);
 			MixinClassBaseline.forgetForTest(live.getClassLoader(), synthetic);

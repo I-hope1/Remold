@@ -62,6 +62,14 @@ import remold.RemoldAgent;
  */
 class MixinHotSwapWiringTest {
 
+	@org.junit.jupiter.api.BeforeEach
+	void clearOverlayAndLedger() {
+		// Both the overlay (GENERATED) and the abort ledger are process-wide and keyed by the synthetic
+		// class name; the cases below share one fixture name, so they must not see each other's state.
+		MixinInnerClassHotSwap.clearGeneratedForTest(MixinSyntheticHalfInitFixtures.OLD_DOTTED);
+		SyntheticAbortLedger.clearForTest();
+	}
+
 	/**
 	 * Case 1 — {@code premain} recorder → {@code retainConstructors}.
 	 *
@@ -184,6 +192,76 @@ class MixinHotSwapWiringTest {
 			RemoldAgent.swapInstrumentationForTest(previous);
 			MixinClassBaseline.forgetForTest(loader, synthetic);
 			MixinInnerClassHotSwap.clearBlocked(host);
+		}
+	}
+
+
+	/**
+	 * The inner-class phase ({@code apply()}, i.e. "only the anonymous class body changed") must be
+	 * accounted by the same single exit: {@code executed} increments and the {@code metrics:} line is
+	 * emitted. On the real machine B2~B5 went through this path, the body took effect, but
+	 * {@code executed} stayed at the value the pre-target path left behind and no {@code metrics:} line
+	 * was printed — the reading looked stuck at 1.
+	 */
+	@Test
+	void theInnerClassPhaseCountsExecutedThroughTheSameExit() {
+		byte[] oldShape = MixinSyntheticHalfInitFixtures.oldShapeBytes();
+		Class<?> live = MixinSyntheticHalfInitFixtures.loadInFreshLoader(oldShape);
+		ClassLoader loader = live.getClassLoader();
+		String dotted = MixinSyntheticHalfInitFixtures.OLD_DOTTED;
+		MixinClassBaseline.recordForTest(loader, dotted, oldShape);
+		RecordingInstrumentation recorder = new RecordingInstrumentation(new Class<?>[]{live});
+		Instrumentation previous = RemoldAgent.swapInstrumentationForTest(recorder.proxy);
+		MixinInnerClassHotSwap.setInstanceProbeForTest(type -> new Object[0]);
+		java.util.List<String> logged = new java.util.ArrayList<>();
+		remold.RemoldAgent.Logger previousLogger = RemoldAgent.logger;
+		RemoldAgent.logger = new remold.RemoldAgent.Logger() {
+			@Override
+			public void log(String msg) {
+				logged.add(msg);
+			}
+
+			@Override
+			public void info(String msg) {
+				logged.add(msg);
+			}
+
+			@Override
+			public void warn(String msg) {
+				logged.add(msg);
+			}
+
+			@Override
+			public void error(String msg) {
+				logged.add(msg);
+			}
+
+			@Override
+			public void error(String msg, Throwable t) {
+				logged.add(msg);
+			}
+		};
+		try {
+			int[] before = metrics();
+			FakeTransformer transformer = FakeTransformer.serving(dotted, "wiringfix.Target$HostApply", true);
+
+			MixinInnerClassHotSwap.Result result = MixinInnerClassHotSwap.apply(transformer,
+				"wiringfix.BodyOnlyMixin", java.util.List.of("remold/mixin/HalfInitNext"));
+
+			int[] after = metrics();
+			assertTrue(result.changed(), "the body-only update must be applied, got " + result.describeFailures());
+			assertEquals(1, after[0] - before[0], "the inner-class phase must increment executed");
+			assertEquals(0, after[1] - before[1], "a body-only update is not a field-table change");
+			assertEquals(0, after[2] - before[2], "no gate may reject it");
+			assertEquals(1, recorder.redefinitions.size(), "exactly one redefineClasses call");
+			assertTrue(logged.stream().anyMatch(line -> line.contains("redefined in place; metrics: executed=")),
+				"the inner-class phase must emit the metrics line the front line reads, got " + logged);
+		} finally {
+			RemoldAgent.logger = previousLogger;
+			MixinInnerClassHotSwap.setInstanceProbeForTest(null);
+			RemoldAgent.swapInstrumentationForTest(previous);
+			MixinClassBaseline.forgetForTest(loader, dotted);
+			MixinInnerClassHotSwap.clearBlocked("wiringfix.Target$HostApply");
 		}
 	}
 
@@ -358,7 +436,12 @@ class MixinHotSwapWiringTest {
 		}
 
 		static FakeTransformer serving(String syntheticDotted, String hostDotted) {
+			return serving(syntheticDotted, hostDotted, false);
+		}
+
+		static FakeTransformer serving(String syntheticDotted, String hostDotted, boolean bodyOnly) {
 			InnerClassGenerator generator = new InnerClassGenerator();
+			generator.bodyOnly = bodyOnly;
 			InnerClassInfo info = new InnerClassInfo(syntheticDotted, hostDotted.replace('.', '/'));
 			generator.innerClasses.put(info.className, info);
 			return new FakeTransformer(new Processor(new Extensions(generator)));
@@ -393,8 +476,11 @@ class MixinHotSwapWiringTest {
 	static final class InnerClassGenerator {
 		final java.util.Map<String, InnerClassInfo> innerClasses = new java.util.LinkedHashMap<>();
 
+		boolean bodyOnly;
+
 		boolean generate(String className, ClassNode out) {
-			ClassNode source = MixinSyntheticHalfInitFixtures.grownShapeNode();
+			ClassNode source = this.bodyOnly ? MixinSyntheticHalfInitFixtures.bodyOnlyShapeNode()
+				: MixinSyntheticHalfInitFixtures.grownShapeNode();
 			source.accept(out);
 			return true;
 		}

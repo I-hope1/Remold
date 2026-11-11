@@ -18,6 +18,7 @@ import java.util.Set;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.MethodNode;
@@ -56,6 +57,13 @@ import remold.RemoldAgent;
  * number, not that the number means what the gate assumes.</p>
  */
 class MixinSyntheticLivenessTest {
+
+	@BeforeEach
+	void clearLedgerBeforeEach() {
+		// The abort ledger is process-wide and keyed by synthetic class name; two cases using the same
+		// fixture would otherwise see each other's "already refused" record and skip counting.
+		SyntheticAbortLedger.clearForTest();
+	}
 
 	@AfterEach
 	void restoreProductProbe() {
@@ -121,7 +129,9 @@ class MixinSyntheticLivenessTest {
 			assertFalse(controlExecuted, "with zero live instances the same member-schema change must still be"
 				+ " refused (the verdict does not depend on the heap)");
 			assertEquals(0, afterControl[0] - beforeControl[0], "the control must not redefine anything");
-			assertEquals(1, afterControl[2] - beforeControl[2], "the control must be rejected by the schema gate");
+			assertEquals(0, afterControl[2] - beforeControl[2],
+				"the identical candidate must NOT be counted again: the first refusal already recorded it"
+					+ " (dedupe by candidate signature; the real machine saw gateRejected +3 per round before this)");
 		} finally {
 			RemoldAgent.removeTransformerBridge(bridge);
 			RemoldAgent.swapInstrumentationForTest(previous);

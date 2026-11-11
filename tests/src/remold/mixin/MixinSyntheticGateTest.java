@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -133,6 +134,13 @@ class MixinSyntheticGateTest {
 	 * Pins the case ledger to the code: the documented {@value #GATE_CASE_COUNT} {@code @Test}
 	 * methods, no orphan cases, one rejection per gate, and a control behind every rejection.
 	 */
+	@BeforeEach
+	void clearLedgerBeforeEach() {
+		// The abort ledger is process-wide and keyed by synthetic class name; two cases using the same
+		// fixture would otherwise see each other's "already refused" record and skip counting.
+		SyntheticAbortLedger.clearForTest();
+	}
+
 	@BeforeAll
 	static void caseLedgerMatchesTheSuite() {
 		java.util.Set<String> annotated = new java.util.TreeSet<>();

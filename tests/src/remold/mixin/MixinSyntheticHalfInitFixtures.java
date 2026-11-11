@@ -137,6 +137,11 @@ final class MixinSyntheticHalfInitFixtures {
 		return node;
 	}
 
+	/** Bytes of the grown candidate <b>without</b> the retained old {@code <init>}. */
+	static byte[] grownCandidateBytes() {
+		return serialize(grownShapeNode());
+	}
+
 	/** Bytes of the body-only candidate (already renamed to the loaded name). */
 	static byte[] bodyOnlyCandidateBytes() {
 		return serialize(bodyOnlyShapeNode());

@@ -361,6 +361,13 @@ final class MixinInnerClassHotSwap {
 		return GENERATED.get(MixinInnerClassSupport.internalName(className));
 	}
 
+	/** 单测隔离：清掉某个合成类的回灌字节（覆盖层是进程级的，用例之间会互相污染）。 */
+	static void clearGeneratedForTest(String className) {
+		if (className != null) {
+			GENERATED.remove(MixinInnerClassSupport.internalName(className));
+		}
+	}
+
 	/** 单测读数：本进程回灌给 core 的合成类字节（{@code null} = 这一轮没生成过）。 */
 	static byte[] generatedBytesForTest(String className) {
 		return generatedBytes(className);
@@ -464,8 +471,7 @@ final class MixinInnerClassHotSwap {
 				if (!generated) {
 					continue;
 				}
-				// Schema 锚定：已加载合成类的字段表为准补齐墓碑字段（禁止字段缩容 → 不触发
-				// DCEVM ModifyInstances）。类型漂移无法用墓碑表达 → fail-closed 拒绝重定义。
+				// 已加载合成类的实时反射字段表（不变量 A 的唯一锚点）。
 				Class<?> live = inst == null ? null : findLoadedClass(inst, conformedDotted);
 				java.util.List<String> loadedFields = live == null ? java.util.List.of()
 					: MixinSyntheticSchema.loadedFields(live);
@@ -541,12 +547,60 @@ final class MixinInnerClassHotSwap {
 		if (inst == null || live == null || bytes == null) {
 			return false;
 		}
+		long candidateSignature = java.util.Arrays.hashCode(bytes) & 0xffffffffL;
 		if (hostDotName != null && BLOCKED.contains(hostDotName)) {
-			GATE_REJECTED.incrementAndGet();
+			// 宿主本轮已被判中止。**同一份候选**在一轮里会被多条入口问一次（预重定义 / 内部类相位 /
+			// 批量重试），所以只有"另一个候选"才算一次新的拒绝：同一签名已在账上就不再累加分母
+			// （真机 A1~A5 每轮 gateRejected +3 的成因）。
+			if (!SyntheticAbortLedger.isSameCandidateAborted(name, candidateSignature)) {
+				GATE_REJECTED.incrementAndGet();
+				SyntheticAbortLedger.record(name, candidateSignature);
+			}
 			return false;
 		}
 		ClassNode fresh = new ClassNode();
 		new org.objectweb.asm.ClassReader(bytes).accept(fresh, 0);
+		java.util.List<String> loadedFields = MixinSyntheticSchema.loadedFields(live);
+		java.util.List<String> freshFields = MixinSyntheticSchema.nodeFields(fresh);
+		// ---- 闸 1（最前）：成员 schema 变化。必须排在 <init>/缩容/基线之前——改捕获列表会**同时**改
+		// 字段表与 <init> 描述符，若先撞 <init> 闸，FIELD_CHANGED 就永远不会计数，真机只能看到
+		// gateRejected 而看不到 fieldTableChanged（A1~A5 全报 0 的成因）。
+		boolean fieldTableChanged = !loadedFields.equals(freshFields)
+			|| !MixinSyntheticSchema.loadedFieldSignatures(live)
+				.equals(MixinSyntheticSchema.nodeFieldSignatures(fresh));
+		if (fieldTableChanged) {
+			// 同一份候选（同一签名）在一个会话里只记一次账：抑制命中时既不累加 gateRejected 也不累加
+			// fieldTableChanged，只把宿主继续按住（真机 A1~A5 每轮 +3 的成因）。
+			if (SyntheticAbortLedger.isSameCandidateAborted(name, candidateSignature)) {
+				blockHost(hostDotName, name, "stays aborted: the identical candidate bytes (signature="
+					+ candidateSignature + ") were already refused in this session; not retrying them — change the"
+					+ " capture list or the anonymous-class source to start a new candidate");
+				return false;
+			}
+			FIELD_CHANGED.incrementAndGet();
+			GATE_REJECTED.incrementAndGet();
+			SyntheticAbortLedger.record(name, candidateSignature);
+			int liveCount = syntheticLive(live);
+			RemoldAgent.info("[Mixin] synthetic inner class " + name + " live{raw="
+				+ (liveCount < 0 ? "unavailable" : String.valueOf(liveCount)) + "} fieldTableChanged=true loaded="
+				+ loadedFields + " fresh=" + freshFields + " loadedFlags="
+				+ MixinSyntheticSchema.loadedFieldSignatures(live) + " freshFlags="
+				+ MixinSyntheticSchema.nodeFieldSignatures(fresh) + ".");
+			blockHost(hostDotName, name, "field table changed (" + loadedFields + " -> " + freshFields + "; flags "
+				+ MixinSyntheticSchema.loadedFieldSignatures(live) + " -> "
+				+ MixinSyntheticSchema.nodeFieldSignatures(fresh) + ") with live{raw="
+				+ (liveCount < 0 ? "unavailable" : String.valueOf(liveCount)) + "}: a member-schema change on a"
+				+ " loaded synthetic class makes JBR/DCEVM rewrite unrelated heaps (real machine: newlyNull=230 even"
+				+ " with zero instances), so it is refused regardless of the instance count — restart, or keep the"
+				+ " capture list stable (@RemoldReinit / lambda)");
+			return false;
+		}
+		// 放行候选：清掉该合成类名下任何陈旧记录（"被拒 → 改回一致 → 放行"必须在同一会话内自愈）。
+		SyntheticAbortLedger.clear(name);
+		RemoldAgent.info("[Mixin] synthetic inner class " + name + " live{raw="
+			+ (syntheticLive(live) < 0 ? "unavailable" : String.valueOf(syntheticLive(live)))
+			+ "} fieldTableChanged=false loaded=" + loadedFields + " fresh=" + freshFields + ".");
+		// ---- 闸 2：已加载的构造器必须都还在候选里（旧调用点才可能命中）。
 		java.util.Set<String> freshCtors = new java.util.HashSet<>();
 		for (org.objectweb.asm.tree.MethodNode m : fresh.methods) {
 			if ("<init>".equals(m.name)) {
@@ -560,8 +614,7 @@ final class MixinInnerClassHotSwap {
 				return false;
 			}
 		}
-		java.util.List<String> loadedFields = MixinSyntheticSchema.loadedFields(live);
-		java.util.List<String> freshFields = MixinSyntheticSchema.nodeFields(fresh);
+		// ---- 闸 3：字段表不得缩容。
 		for (String field : loadedFields) {
 			if (!freshFields.contains(field)) {
 				GATE_REJECTED.incrementAndGet();
@@ -569,54 +622,13 @@ final class MixinInnerClassHotSwap {
 				return false;
 			}
 		}
+		// ---- 闸 4：必须存在基线字节（premain 录口 / 已生效字节）。
 		String baselineMissing = baselineMissingReason(live.getClassLoader(), name);
 		if (baselineMissing != null) {
 			GATE_REJECTED.incrementAndGet();
 			blockHost(hostDotName, name, baselineMissing);
 			return false;
 		}
-		// 结构闸门（真机已裁定，不变量 C4）：只要**字段表相对已加载版本发生变化**就一律拒绝，与堆上有
-		// 多少实例无关——
-		//   • fieldTableChanged == false：只改方法体，存量与新建实例都原地生效 → 放行；
-		//   • fieldTableChanged == true：一律拒绝 + 中止宿主。真机两分支实测（HEAD ac20e60b）已闭合
-		//     事实③：即便 `raw=0 reachable=0`（堆上 0 个实例），对合成匿名类调用 redefineClasses 仍必现
-		//     `newlyNull=230`（230 个具名 Record `LootCondition` 引用被抹）。即 JBR-21 DCEVM 的
-		//     ModifyInstances 污染与实例数**无关**，只与"成员 schema 与已加载版本不一致"有关。
-		//   • 旧的「变化 + 无存活实例 → 放行」分支已删除；`live{raw,reachable}` 仅保留为诊断读数。
-		// 口径：flags 也参与比较（isStatic / isSynthetic），同名同描述符但 static 翻转同样算变化。
-		boolean fieldTableChanged = !loadedFields.equals(freshFields)
-			|| !MixinSyntheticSchema.loadedFieldSignatures(live)
-				.equals(MixinSyntheticSchema.nodeFieldSignatures(fresh));
-		int liveCount = syntheticLive(live);
-		RemoldAgent.info("[Mixin] synthetic inner class " + name + " live{raw="
-			+ (liveCount < 0 ? "unavailable" : String.valueOf(liveCount)) + "} fieldTableChanged="
-			+ fieldTableChanged + " loaded=" + loadedFields + " fresh=" + freshFields
-			+ " loadedFlags=" + MixinSyntheticSchema.loadedFieldSignatures(live)
-			+ " freshFlags=" + MixinSyntheticSchema.nodeFieldSignatures(fresh) + ".");
-		// 候选签名的锚点 = **这次要送进 JVM 的候选字节**（不可变、随源码变化），不是宿主目标类的
-		// originalBytes（它恒定不变，会把"用户已改回一致捕获列表"也误判成同一份被拒候选而永久锁死）。
-		long candidateSignature = java.util.Arrays.hashCode(bytes) & 0xffffffffL;
-		if (fieldTableChanged) {
-			FIELD_CHANGED.incrementAndGet();
-			GATE_REJECTED.incrementAndGet();
-			if (SyntheticAbortLedger.isSameCandidateAborted(name, candidateSignature)) {
-				blockHost(hostDotName, name, "stays aborted: the identical candidate bytes (signature="
-					+ candidateSignature + ") were already refused in this session; not retrying them — change the"
-					+ " capture list or the anonymous-class source to start a new candidate");
-				return false;
-			}
-			SyntheticAbortLedger.record(name, candidateSignature);
-			blockHost(hostDotName, name, "field table changed (" + loadedFields + " -> " + freshFields + "; flags "
-				+ MixinSyntheticSchema.loadedFieldSignatures(live) + " -> "
-				+ MixinSyntheticSchema.nodeFieldSignatures(fresh) + ") with live{raw="
-				+ (liveCount < 0 ? "unavailable" : String.valueOf(liveCount)) + "}: a member-schema change on a"
-				+ " loaded synthetic class makes JBR/DCEVM rewrite unrelated heaps (real machine: newlyNull=230 even"
-				+ " with zero instances), so it is refused regardless of the instance count — restart, or keep the"
-				+ " capture list stable (@RemoldReinit / lambda)");
-			return false;
-		}
-		// 放行路径：清掉该合成类名下任何陈旧记录（"被拒 → 改回一致 → 放行"必须在同一会话内自愈）。
-		SyntheticAbortLedger.clear(name);
 		remold.ref.HeapFieldWatch.snapshot("before-synthetic-redefine", name);
 		RemoldAgent.enterInternalRedefine(java.util.Collections.singleton(name));
 		try {
@@ -631,6 +643,10 @@ final class MixinInnerClassHotSwap {
 		remold.ref.HeapFieldWatch.snapshot("after-synthetic-redefine", name);
 		recordLoaded(live, name, bytes);
 		EXECUTED.incrementAndGet();
+		// 单出口统一记账：无论走 refeedForTarget 预重定义还是内部类相位 apply()，成功都在这里 +1 并打
+		// metrics 行（真机 B2~B5 走 apply() 时不涨 executed、也没有 metrics 行，就是漏在这里）。
+		RemoldAgent.info("[Mixin] synthetic inner class " + name
+			+ " redefined in place; metrics: " + metricsSummary());
 		return true;
 	}
 
@@ -723,8 +739,7 @@ final class MixinInnerClassHotSwap {
 			String hostDotName) {
 		if (redefineSyntheticSafely(inst, live, name, bytes, hostDotName)) {
 			RemoldAgent.info("[Mixin] synthetic inner class " + name
-				+ " redefined BEFORE its target redefine (structural window closed); metrics: "
-				+ metricsSummary());
+				+ " redefined BEFORE its target redefine (structural window closed).");
 		}
 	}
 

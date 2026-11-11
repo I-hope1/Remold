@@ -98,41 +98,64 @@ public class LambdaAlignTortureTest {
 	}
 
 	/**
-	 * 已知缺口：删掉 A2 的**同时**追加一个同描述符的新 lambda，A9 会顶掉 A2 之后的槽位，
-	 * 老 A2 的 callsite 静默跑进别人的 body，且不产生幽灵桩。
+	 * L5 的第二形态：删掉 {@code A2} 的同时追加一个同描述符的 {@code A9}。
 	 *
-	 * <p>成因：Pass A / Pass B 只校验签名、子树形状与子归属，**不校验指纹**（这是兜底对齐的
-	 * 设计前提）。删一个、加一个之后，新方法在旧组里按位置找到了形状相同的旧方法，
-	 * 于是"名字没变"被当成"原地更新"，`warnPositionalMismatch` 也不会响——它的判据是
-	 * {@code ni.name != bestOld.name}，这里恰好同名。</p>
+	 * <p><b>红基线（修复前）</b>：Pass A/B 只校验签名、子树形状与子归属，<b>不校验方法体</b>；
+	 * 删一个、加一个之后，{@code A9} 在旧组里按位置找到了形状相同的 {@code A2}，
+	 * "名字没变"被当成"原地更新"，{@code warnPositionalMismatch} 也不响。终局是 A2 的槽位
+	 * 被 A9 静默顶替、没有幽灵桩——老 CallSite 跑进别人的 body。</p>
 	 *
-	 * <p>本用例钉住的是**当前实际行为**，不是期望行为。修好之后这里必须变红并改成正确断言。
-	 * 缺口登记见 {@code docs/initfix/08-test-audit.md} §8。</p>
+	 * <p><b>修复后（fail-closed）</b>：两条证据都不成立——方法体不等价（常量值从
+	 * {@code "A2:v1"} 变成 {@code "A9:v1"}），骨架在全类范围内不唯一（A1/A2/A3 同为
+	 * "返回常量"），且该候选与 Step 1 已定案的锚点（A1/A3/A4/A5 指纹配对）<b>顺序交叉</b>
+	 * （A2 在旧序列里排第 2，A9 在新序列里排第 5）。判据拒绝配对并打 {@code BODY_MISMATCH}：
+	 * A2 的槽位留幽灵桩，A9 拿自造名。</p>
+	 *
+	 * <p><b>与"纯粹原地改常量"的区别</b>：{@code "A2:v1"→"A2:v2"} 两侧同名、同宿主，
+	 * 走"名字锚定"那档证据直接放行（见 {@code alteredConstantsKeepSlotsWithoutWarn}）；
+	 * 这里名字换了主人，才必须拒绝。</p>
 	 */
 	@Test
-	@Tag("known-limitation")
-	void deletedSlotCanBeReusedByNewLambda(@TempDir Path tmp) throws Exception {
+	void deletedSlotLeavesGhostInsteadOfBeingReused(@TempDir Path tmp) throws Exception {
 		String javac = HstestFixtures.javac(21);
 		byte[] base = Files.readAllBytes(
 			compile(javac, tmp, "lim/v1", stressSrc("v1", "BASE")).resolve("Stress.class"));
 		ClassNode oldCn = parse(base);
-		ClassNode aligned = parse(LambdaAligner.align(base, bytesOf(javac, tmp, "lim/rsa", "RSA")));
+		byte[] next = bytesOf(javac, tmp, "lim/rsa", "RSA");
+		ClassNode nextCn = parse(next);
 
 		MethodNode a2 = byKey(oldCn, "lambda$g1$1", "()Ljava/lang/String;");
 		MethodNode a3 = byKey(oldCn, "lambda$g1$2", "()Ljava/lang/String;");
 		assertNotNull(a2, "夹具前提：v1 里 A2 占 lambda$g1$1");
 		assertNotNull(a3, "夹具前提：v1 里 A3 占 lambda$g1$2");
-
 		assertEquals("A2", identity(oldCn, a2, 0));
 		assertEquals("A3", identity(oldCn, a3, 0));
 
-		// 现状（缺口）：A2 的槽位没有留下幽灵桩，而是被别的 lambda 顶替了。
+		LambdaAligner.TEST_EVENTS.clear();
+		ClassNode aligned = parse(LambdaAligner.align(base, next));
+
+		// 1) A2 的槽位必须留幽灵桩（老 CallSite 响亮熔断），而不是被 A9 顶替。
 		MethodNode slot1 = byKey(aligned, "lambda$g1$1", "()Ljava/lang/String;");
 		assertNotNull(slot1, "老 A2 的槽位整个消失了（更糟的形态）：" + table(aligned));
-		assertFalse(isGhost(slot1),
-			"现状：删掉的 A2 没有留下幽灵桩，老 callsite 会静默跑进别人的 body（方法表 " + table(aligned) + "）");
-		assertNotEquals("A2", identity(aligned, slot1, 0),
-			"现状：老 A2 的槽位被别的 lambda 顶替（方法表 " + table(aligned) + "）");
+		assertTrue(isGhost(slot1),
+			"删掉的 A2 必须留幽灵桩，不能被别的 lambda 静默顶替（" + table(aligned) + "）");
+
+		// 2) 必须留痕：BODY_MISMATCH 告警点名 A2 ← A9。
+		boolean warned = false;
+		for (LambdaAligner.AlignmentEvent e : LambdaAligner.TEST_EVENTS) {
+			if ("BODY_MISMATCH".equals(e.kind) && "lambda$g1$1".equals(e.oldName)) warned = true;
+		}
+		assertTrue(warned, "拒绝配对必须打 BODY_MISMATCH 告警（事件: "
+			+ LambdaAligner.TEST_EVENTS.size() + " 条）");
+
+		// 3) A9 活着、拿到自造名；A1/A3 的身份不变（只有"多余那一对"被拒绝）。
+		assertTrue(allIds(aligned).containsAll(Set.of("A1", "A3", "A4", "A5", "A9")),
+			"身份集合缺项（" + table(aligned) + "）");
+		assertEquals(Set.of("A1", "A3", "A4", "A5", "A9", "B1", "B2", "B2in", "C1", "C2", "C3", "D1"),
+			allIds(aligned), "产物身份集合必须与新类一致（" + table(aligned) + "）");
+		assertFalse(LambdaAligner.LAST_RESULT.inventedNames.isEmpty(),
+			"A9 必须拿自造槽位（否则它占了某个旧名）");
+		assertNoDanglingIndy("lim", aligned);
 	}
 
 	/** 同一对 (旧类, 新类) 反复对齐必须逐字节一致——不能依赖 HashMap 迭代顺序。 */
@@ -265,30 +288,28 @@ public class LambdaAlignTortureTest {
 	}
 
 	/**
-	 * 把一段逻辑包进新 lambda（sh_c）：旧槽位被新 inner 拿走——**这是选错了，不是类型系统逼的**。
+	 * L5：体内**新增**内层 lambda（把叶子包进新容器）——旧槽位不许被静默顶替。
 	 *
-	 * <p>javap 核对过：旧 P0 是 {@code lambda$build$0()String}，V2 的两个方法<b>都是</b>
-	 * {@code ()String}（outer 体是 {@code return "P0:v2:" + c.get()}，返回 String）。所以旧槽位
-	 * <b>可以</b>承载新 outer，理想结果 {@code P0:v2:P0c:v2} 物理可行。</p>
+	 * <p><b>红基线（修复前的实测形态）</b>：旧 {@code P0 = lambda$build$0()String}，V2 里
+	 * javac 后序编号让新 inner 恰好也叫 {@code lambda$build$0}；Pass B 放宽深度但保留 shape，
+	 * 新 outer 的 shape {@code (())} 与旧 P0 的 {@code ()} 不等被淘汰，新 inner 的 shape 相等
+	 * 于是顶替了旧槽位。<b>一条告警都没有</b>：{@code warnPositionalMismatch} 的判据是
+	 * "名字变了"，这里恰好同名。老 CallSite 于是静默跑 {@code P0c} 的体。</p>
 	 *
-	 * <p>选错的机制：Pass B 放宽深度但保留 shape——新 outer 的 shape 是 {@code (())}，与旧 P0 的
-	 * {@code ()} 不等，被淘汰；新 inner 的 shape 是 {@code ()}，相等，于是被选中。而本来有一个
-	 * 现成的区分信号被丢掉了：旧 P0 与新 outer 的 hostKey 都是 {@code M:build(...)}（同一个宿主方法），
-	 * 新 inner 的 hostKey 是 {@code L:<outer 指纹>:...}（宿主是 lambda）。</p>
-	 *
-	 * <p>另外一条告警都没有：javac 后序编号让新 inner 恰好也叫 {@code lambda$build$0}，与旧 P0 同名，
-	 * {@code warnPositionalMismatch} 的 {@code ni.name != bestOld.name} 不成立。</p>
+	 * <p><b>修复后的契约（fail-closed）</b>：方法体不逐条等价，且宿主形态从
+	 * {@code M:build(...)} 翻成了 {@code L:<outer 指纹>}——这是"该 lambda 换了嵌套层次"的
+	 * 直接证据。判据拒绝配对并打 {@code BODY_MISMATCH} WARN：旧槽位幽灵化（老 CallSite 熔断、
+	 * 跑 {@code onOrphanInvoked} 并返回 null），V2 的两个 lambda 各自活下来。</p>
 	 */
 	@Test
-	@Tag("known-limitation")
-	void wrappingLeafInNewContainerHandsOldSlotToInner(@TempDir Path tmp) throws Exception {
+	void l5AddingInnerLambdaRefusesToRebindOldSlot(@TempDir Path tmp) throws Exception {
 		String javac = HstestFixtures.javac(21);
 		byte[] base = Files.readAllBytes(
 			compile(javac, tmp, "shc/v1", wrapSrc(false)).resolve("Wrap.class"));
 		byte[] next = Files.readAllBytes(
 			compile(javac, tmp, "shc/v2", wrapSrc(true)).resolve("Wrap.class"));
 
-		// 前提：V2 的 outer 与旧 P0 描述符相同 —— 旧槽位本可以承载它。
+		// 前提：V2 的 outer 与旧 P0 描述符相同 —— 旧槽位本可以承载它（这不是类型系统逼的降级）。
 		ClassNode nextCn = parse(next);
 		int sameDesc = 0;
 		for (MethodNode mn : nextCn.methods) {
@@ -305,23 +326,27 @@ public class LambdaAlignTortureTest {
 			if (mn.name.startsWith("lambda$") && "P0".equals(identity(oldCn, mn, 0))) oldName = mn.name;
 		}
 		assertNotNull(oldName, "夹具前提：v1 里必须能找到 P0（" + table(oldCn) + "）");
+		assertEquals("P0", identity(oldCn, byKey(oldCn, oldName, "()Ljava/lang/String;"), 0),
+			"夹具前提：旧槽位必须承载 P0（" + table(oldCn) + "）");
 
+		// 1) 终局：旧槽位被幽灵化 —— 老 CallSite 响亮熔断，而不是静默执行 P0c 的体。
 		MethodNode slot = byKey(aligned, oldName, "()Ljava/lang/String;");
 		assertNotNull(slot, "旧 P0 的槽位消失了（" + table(aligned) + "）");
-		assertFalse(isGhost(slot), "旧 P0 的槽位不该被幽灵化（" + table(aligned) + "）");
+		assertTrue(isGhost(slot), "L5：旧 P0 的槽位必须幽灵化（拒绝配对），实际 " + table(aligned));
+		assertNull(identity(aligned, slot, 0),
+			"幽灵桩不该承载任何业务 body（" + table(aligned) + "）");
 
-		// 现状（缺口）：旧槽位承载的是新 inner 的 body，而不是完整的新 P0 逻辑。
-		assertEquals("P0c", identity(aligned, slot, 0),
-			"现状：旧槽位被新 inner 拿走（理想值是承载新 outer → P0:v2:P0c:v2），实际 " + table(aligned));
-
-		// 而且没有留痕：同名配对绕过了 POS_MISMATCH。
+		// 2) 必须留痕：BODY_MISMATCH 告警点名"旧 P0 ← 新 inner"。
 		boolean warned = false;
 		for (LambdaAligner.AlignmentEvent e : LambdaAligner.TEST_EVENTS) {
-			if ("POS_MISMATCH".equals(e.kind)) warned = true;
+			if ("BODY_MISMATCH".equals(e.kind) && oldName.equals(e.oldName)) warned = true;
 		}
-		assertFalse(warned, "现状：同名配对绕过了 POS_MISMATCH 告警（事件: "
-			+ LambdaAligner.TEST_EVENTS.size() + " 条）。若这里变红，说明告警已补上，请改成正向断言");
+		assertTrue(warned, "L5：拒绝配对必须打 BODY_MISMATCH 告警（事件: "
+			+ LambdaAligner.TEST_EVENTS.size() + " 条）");
 
+		// 3) fail-closed 不等于丢功能：V2 的两个 lambda 都还在，且身份各自正确。
+		assertEquals(Set.of("P0", "P0c"), allIds(aligned),
+			"V2 的两个 lambda 必须都活着且身份正确（" + table(aligned) + "）");
 		assertNoDanglingIndy("sh_c", aligned);
 	}
 
@@ -340,6 +365,341 @@ public class LambdaAlignTortureTest {
 		sb.append("  }\n");
 		sb.append("}\n");
 		return sb.toString();
+	}
+
+	/**
+	 * L5b 回归：**删掉**内层 lambda —— <b>既有</b>告警形态（幽灵桩 + 运行期 {@code warn}/null）不得变化。
+	 *
+	 * <p>与 L5（体内新增内层 lambda）互为镜像，但两者的正确处置不同：删内层时外层自己还在，
+	 * 只是 shape 变了、认领不上，于是旧名走幽灵桩（老 CallSite 调用时
+	 * {@code onOrphanInvoked} 打 warn 并返回 null）。这条路径在修复前就<b>已经</b>是响亮的，
+	 * 本用例把它钉住：新判据不许把它升级成别的形态，也不许在它上面误报 {@code BODY_MISMATCH}。</p>
+	 */
+	@Test
+	void l5bDeletingInnerLambdaKeepsGhostBehaviour(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] base = Files.readAllBytes(
+			compile(javac, tmp, "l5b/v1", depthSrc(true)).resolve("Depth.class"));
+		byte[] next = Files.readAllBytes(
+			compile(javac, tmp, "l5b/v2", depthSrc(false)).resolve("Depth.class"));
+
+		ClassNode oldCn = parse(base);
+		String innerName = null, middleName = null, outerName = null;
+		String middleDesc = null, outerDesc = null;
+		for (MethodNode mn : oldCn.methods) {
+			if (!mn.name.startsWith("lambda$")) continue;
+			String id = identity(oldCn, mn, 0);
+			if ("P2ii".equals(id)) innerName = mn.name;
+			else if ("via:P2ii".equals(id)) { middleName = mn.name; middleDesc = mn.desc; }
+			else if ("P2".equals(id)) { outerName = mn.name; outerDesc = mn.desc; }
+		}
+		assertNotNull(innerName, "夹具前提：v1 里必须能找到最内层 P2ii（" + table(oldCn) + "）");
+		assertNotNull(middleName, "夹具前提：v1 里必须能找到中间层（" + table(oldCn) + "）");
+		assertNotNull(outerName, "夹具前提：v1 里必须能找到外层 P2（" + table(oldCn) + "）");
+
+		LambdaAligner.TEST_EVENTS.clear();
+		ClassNode aligned = parse(LambdaAligner.align(base, next));
+
+		// 1) 最内层保住槽位（名字 + 身份都不变）——删除内层不该让幸存者失去身份。
+		MethodNode inner = byKey(aligned, innerName, "()Ljava/lang/String;");
+		assertNotNull(inner, "最内层的槽位消失了（" + table(aligned) + "）");
+		assertFalse(isGhost(inner), "最内层不该被幽灵化（" + table(aligned) + "）");
+		assertEquals("P2ii", identity(aligned, inner, 0), "最内层必须仍承载自己的 body（" + table(aligned) + "）");
+
+		// 2) 被删的中间层与外层各留一个幽灵桩：老 CallSite 走 onOrphanInvoked（warn + null）。
+		MethodNode middleStub = byKey(aligned, middleName, middleDesc);
+		MethodNode outerStub = byKey(aligned, outerName, outerDesc);
+		assertNotNull(middleStub, "中间层的原始键没有留桩（" + table(aligned) + "）");
+		assertNotNull(outerStub, "外层的原始键没有留桩（" + table(aligned) + "）");
+		assertTrue(isGhost(middleStub), "中间层必须是幽灵桩（" + table(aligned) + "）");
+		assertTrue(isGhost(outerStub), "外层必须是幽灵桩（" + table(aligned) + "）");
+
+		Set<String> ghosted = new LinkedHashSet<>();
+		boolean bodyMismatch = false;
+		for (LambdaAligner.AlignmentEvent e : LambdaAligner.TEST_EVENTS) {
+			if ("GHOST".equals(e.kind)) ghosted.add(e.oldName);
+			if ("BODY_MISMATCH".equals(e.kind)) bodyMismatch = true;
+		}
+		assertTrue(ghosted.containsAll(Set.of(middleName, outerName)),
+			"幽灵化必须留 GHOST 事件（实际 " + ghosted + "）");
+		assertFalse(bodyMismatch, "删内层 lambda 这条路径不该触发 BODY_MISMATCH（既有行为不得变化）");
+		assertNoDanglingIndy("l5b", aligned);
+	}
+
+	/**
+	 * 正向对照：<b>原地改常量</b>（名字、宿主都不变）必须继续保住槽位，且不打 BODY_MISMATCH。
+	 *
+	 * <p>这是最常见的开发动作（同一方法里把几个字面量改一遍）。它与 L5 的区别只在
+	 * "名字是否换了主人"：这里合成方法名由 javac 原地保留，因此"名字 + 宿主形态"那档
+	 * 身份证据成立，不需要方法体逐条等价。</p>
+	 */
+	@Test
+	void alteredConstantsKeepSlotsWithoutWarn(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "ac/v1", stressSrc("v1", "BASE")).resolve("Stress.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "ac/v2", stressSrc("v2", "BASE")).resolve("Stress.class"));
+
+		ClassNode oldCn = parse(v1);
+		LambdaAligner.TEST_EVENTS.clear();
+		ClassNode aligned = parse(LambdaAligner.align(v1, v2));
+
+		int checked = 0;
+		for (MethodNode mn : oldCn.methods) {
+			String id = identity(oldCn, mn, 0);
+			if (id == null) continue;
+			MethodNode hit = byKey(aligned, mn.name, mn.desc);
+			assertNotNull(hit, "旧槽位 " + key(mn) + " 消失了（" + table(aligned) + "）");
+			assertFalse(isGhost(hit), "旧槽位 " + key(mn) + "（" + id + "）不该被幽灵化（" + table(aligned) + "）");
+			assertEquals(id, identity(aligned, hit, 0),
+				"旧槽位 " + key(mn) + " 必须仍承载 " + id + "（" + table(aligned) + "）");
+			checked++;
+		}
+		assertTrue(checked >= 8, "夹具前提：可判身份的旧 lambda 太少（" + checked + "）");
+		assertEquals(0, bodyMismatchRefusals(),
+			"原地改常量不该触发任何 BODY_MISMATCH 拒绝（" + LambdaAligner.LAST_RESULT.stats + "）");
+	}
+
+	/** 纯语句顺序调整（数据依赖不变）：单 lambda 宿主里改完仍是同一个槽位，且无告警。 */
+	@Test
+	void fpStatementReorderWithoutNameShiftKeepsSlot(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "fpa/v1", reorderSrc(false)).resolve("Reo.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "fpa/v2", reorderSrc(true)).resolve("Reo.class"));
+
+		ClassNode oldCn = parse(v1);
+		ClassNode nextCn = parse(v2);
+		String oldName = null;
+		for (MethodNode mn : oldCn.methods) if (mn.name.startsWith("lambda$")) oldName = mn.name;
+		assertNotNull(oldName, "夹具前提：v1 应有 lambda（" + table(oldCn) + "）");
+
+		LambdaAligner.TEST_EVENTS.clear();
+		ClassNode aligned = parse(LambdaAligner.align(v1, v2));
+		MethodNode hit = byKey(aligned, oldName, "()Ljava/lang/String;");
+		assertNotNull(hit, "旧槽位 " + oldName + " 消失了（" + table(aligned) + "）");
+		assertFalse(isGhost(hit), "纯语句重排不该把旧槽位幽灵化（" + table(aligned) + "）");
+		assertEquals("PA", identity(aligned, hit, 0), "旧槽位必须仍承载自己的 body（" + table(aligned) + "）");
+		assertEquals(0, bodyMismatchRefusals(),
+			"纯语句重排（名字未变）不该触发 BODY_MISMATCH（" + LambdaAligner.LAST_RESULT.stats + "）");
+		assertEquals(allIds(nextCn), allIds(aligned), "产物身份集合必须与新类一致（" + table(aligned) + "）");
+	}
+
+	/**
+	 * 误报实测（第 1 类：纯语句顺序调整）：<b>语句重排 + 前插新 lambda</b>（名字整体位移）。
+	 *
+	 * <p>方法体指令序变了、javac 名字也变了，但两侧仍有可用的<b>顺序一致性</b>证据：
+	 * 位置信息仍指向同一个 lambda（旧序列里 PA 之后没有别人，新序列里它后面是新来的 Z）。
+	 * 判据因此放行、<b>不产生</b> {@code BODY_MISMATCH}：这条是"不该误报"的正面证据，
+	 * 与 {@link #l5AddingInnerLambdaRefusesToRebindOldSlot}（该拒的必须拒）互为对照。</p>
+	 */
+	@Test
+	void fpStatementReorderWithNameShiftKeepsSlot(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "fpb/v1", reorderPlusInsertSrc(false)).resolve("Reo2.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "fpb/v2", reorderPlusInsertSrc(true)).resolve("Reo2.class"));
+
+		ClassNode oldCn = parse(v1);
+		ClassNode nextCn = parse(v2);
+		String oldName = null;
+		for (MethodNode mn : oldCn.methods) {
+			if (mn.name.startsWith("lambda$") && "PA".equals(identity(oldCn, mn, 0))) oldName = mn.name;
+		}
+		assertNotNull(oldName, "夹具前提：v1 里必须能找到 PA（" + table(oldCn) + "）");
+		String newPaName = null;
+		for (MethodNode mn : nextCn.methods) {
+			if (mn.name.startsWith("lambda$") && "PA".equals(identity(nextCn, mn, 0))) newPaName = mn.name;
+		}
+		assertNotEquals(oldName, newPaName,
+			"夹具前提：前插之后 PA 的 javac 名字应当位移（old=" + oldName + ", new=" + newPaName + "）");
+
+		LambdaAligner.TEST_EVENTS.clear();
+		ClassNode aligned = parse(LambdaAligner.align(v1, v2));
+		MethodNode hit = byKey(aligned, oldName, "()Ljava/lang/String;");
+		assertNotNull(hit, "旧槽位 " + oldName + " 消失了（" + table(aligned) + "）");
+		assertFalse(isGhost(hit), "顺序证据成立时不该幽灵化旧槽位（" + table(aligned) + "）");
+		assertEquals("PA", identity(aligned, hit, 0),
+			"旧槽位必须仍承载 PA（" + table(aligned) + "）");
+		assertEquals(0, bodyMismatchRefusals(),
+			"语句重排 + 名字位移（无交叉）不该触发 BODY_MISMATCH（" + LambdaAligner.LAST_RESULT.stats + "）");
+		assertEquals(allIds(nextCn), allIds(aligned), "产物身份集合必须与新类一致（" + table(aligned) + "）");
+	}
+
+	/** 纯语句重排（数据依赖不变）的夹具：声明顺序对调，结果不变。 */
+	static String reorderSrc(boolean reordered) {
+		StringBuilder sb = new StringBuilder();
+		sb.append("import java.util.*;\n");
+		sb.append("import java.util.function.*;\n\n");
+		sb.append("public class Reo {\n");
+		sb.append("  public void build(Map<String, Supplier<String>> m) {\n");
+		if (reordered) {
+			sb.append("    m.put(\"PA\", () -> { int b = 20; int a = 10; return \"PA:\" + (a * b); });\n");
+		} else {
+			sb.append("    m.put(\"PA\", () -> { int a = 10; int b = 20; return \"PA:\" + (a * b); });\n");
+		}
+		sb.append("  }\n");
+		sb.append("}\n");
+		return sb.toString();
+	}
+
+	/** 上一条 + 前插一个新 lambda，让 javac 编号整体位移。 */
+	static String reorderPlusInsertSrc(boolean next) {
+		StringBuilder sb = new StringBuilder();
+		sb.append("import java.util.*;\n");
+		sb.append("import java.util.function.*;\n\n");
+		sb.append("public class Reo2 {\n");
+		sb.append("  public void build(Map<String, Supplier<String>> m) {\n");
+		if (next) sb.append("    m.put(\"Z\", () -> \"Z:v2\");\n");
+		if (next) {
+			sb.append("    m.put(\"PA\", () -> { int b = 20; int a = 10; return \"PA:\" + (a * b); });\n");
+		} else {
+			sb.append("    m.put(\"PA\", () -> { int a = 10; int b = 20; return \"PA:\" + (a * b); });\n");
+		}
+		sb.append("  }\n");
+		sb.append("}\n");
+		return sb.toString();
+	}
+
+	/**
+	 * 归一化证据（局部槽位）：把字节码里业务方法的局部变量槽整体平移 +3。
+	 *
+	 * <p>指令序列、常量值、引用目标都没变，只是槽号换了一套编号（不同编译器 / 不同局部变量
+	 * 分配策略的等价产物）。体指纹按"首次出现顺序"重编号，因此这类差异<b>不能</b>
+	 * 被当成"方法体变了"：必须仍旧配对、且不产生 {@code BODY_MISMATCH}。</p>
+	 */
+	@Test
+	void fpLocalSlotRenumberingIsNormalizedAway(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "fpc/v1", slotSrc()).resolve("Slot.class"));
+		byte[] v2 = shiftLocalSlots(v1, 3);
+
+		assertFalse(java.util.Arrays.equals(v1, v2), "夹具前提：槽位重编号必须真的改变了字节码");
+
+		ClassNode oldCn = parse(v1);
+		LambdaAligner.TEST_EVENTS.clear();
+		ClassNode aligned = parse(LambdaAligner.align(v1, v2));
+
+		int checked = 0;
+		for (MethodNode mn : oldCn.methods) {
+			String id = identity(oldCn, mn, 0);
+			if (id == null) continue;
+			MethodNode hit = byKey(aligned, mn.name, mn.desc);
+			assertNotNull(hit, "旧槽位 " + key(mn) + " 消失了（" + table(aligned) + "）");
+			assertFalse(isGhost(hit), "槽位重编号不该让旧槽位幽灵化（" + table(aligned) + "）");
+			assertEquals(id, identity(aligned, hit, 0),
+				"旧槽位 " + key(mn) + " 必须仍承载 " + id + "（" + table(aligned) + "）");
+			checked++;
+		}
+		assertEquals(2, checked, "夹具前提：应有 2 个可判身份的 lambda（" + table(oldCn) + "）");
+		assertEquals(0, bodyMismatchRefusals(),
+			"仅槽号位移必须被归一化掉，不得算作方法体不等价（" + LambdaAligner.LAST_RESULT.stats + "）");
+	}
+
+	/** 夹具：两个 lambda，体内都有局部变量（槽位平移才有素材）。 */
+	static String slotSrc() {
+		StringBuilder sb = new StringBuilder();
+		sb.append("import java.util.*;\n");
+		sb.append("import java.util.function.*;\n\n");
+		sb.append("public class Slot {\n");
+		sb.append("  public void build(Map<String, Supplier<String>> m) {\n");
+		sb.append("    m.put(\"S1\", () -> { String s = \"s1\"; int n = s.length(); return \"S1:\" + (n + 1); });\n");
+		sb.append("    m.put(\"S2\", () -> { String s = \"s2\"; int n = s.length(); return \"S2:\" + (n + 2); });\n");
+		sb.append("  }\n");
+		sb.append("}\n");
+		return sb.toString();
+	}
+
+	/** 把业务方法的局部变量槽整体平移（{@code VarInsn} / {@code IincInsn} / LVT / maxLocals）。 */
+	static byte[] shiftLocalSlots(byte[] bytes, int delta) {
+		ClassNode cn = parse(bytes);
+		for (MethodNode mn : cn.methods) {
+			if (mn.instructions == null) continue;
+			for (AbstractInsnNode insn : mn.instructions) {
+				if (insn instanceof VarInsnNode v) v.var += delta;
+				else if (insn instanceof IincInsnNode i) i.var += delta;
+			}
+			if (mn.localVariables != null) {
+				for (LocalVariableNode lv : mn.localVariables) lv.index += delta;
+			}
+			if (mn.maxLocals > 0) mn.maxLocals += delta;
+		}
+		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+		cn.accept(cw);
+		return cw.toByteArray();
+	}
+
+	/**
+	 * 归一化证据（常量）：同一常量用不同指令形态表示 + 可折叠算式改写。
+	 *
+	 * <p>{@code BIPUSH 6} 改写成 {@code LDC 2; LDC 3; IMUL}：常量池索引不同、指令条数不同、
+	 * 字面量形态不同，但值是同一个 6。体指纹按<b>值</b>编码常量并做折叠，因此这同样
+	 * <b>不能</b>被当成"方法体变了"。</p>
+	 */
+	@Test
+	void fpFoldedConstantsAreNormalizedAway(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "fpd/v1", constSrc()).resolve("Const.class"));
+		byte[] v2 = foldConstantRewrite(v1);
+
+		assertFalse(java.util.Arrays.equals(v1, v2), "夹具前提：常量改写必须真的改变了字节码");
+
+		ClassNode oldCn = parse(v1);
+		LambdaAligner.TEST_EVENTS.clear();
+		ClassNode aligned = parse(LambdaAligner.align(v1, v2));
+
+		int checked = 0;
+		for (MethodNode mn : oldCn.methods) {
+			String id = identity(oldCn, mn, 0);
+			if (id == null) continue;
+			MethodNode hit = byKey(aligned, mn.name, mn.desc);
+			assertNotNull(hit, "旧槽位 " + key(mn) + " 消失了（" + table(aligned) + "）");
+			assertFalse(isGhost(hit), "等价常量改写不该让旧槽位幽灵化（" + table(aligned) + "）");
+			assertEquals(id, identity(aligned, hit, 0),
+				"旧槽位 " + key(mn) + " 必须仍承载 " + id + "（" + table(aligned) + "）");
+			checked++;
+		}
+		assertEquals(2, checked, "夹具前提：应有 2 个可判身份的 lambda（" + table(oldCn) + "）");
+		assertEquals(0, bodyMismatchRefusals(),
+			"等价常量改写必须被归一化掉，不得算作方法体不等价（" + LambdaAligner.LAST_RESULT.stats + "）");
+	}
+
+	/** 夹具：两个分别返回 / 拼接常量的 lambda。 */
+	static String constSrc() {
+		StringBuilder sb = new StringBuilder();
+		sb.append("import java.util.*;\n");
+		sb.append("import java.util.function.*;\n\n");
+		sb.append("public class Const {\n");
+		sb.append("  public void build(Map<String, Supplier<String>> m) {\n");
+		sb.append("    m.put(\"C1\", () -> { int[] a = new int[6]; return \"C1:\" + a.length; });\n");
+		sb.append("    m.put(\"C2\", () -> { int[] a = new int[6]; return \"C2:\" + a.length; });\n");
+		sb.append("  }\n");
+		sb.append("}\n");
+		return sb.toString();
+	}
+
+	/** 把 {@code BIPUSH 6} 改写成 {@code LDC 2; LDC 3; IMUL}（值等价、形态不同）。 */
+	static byte[] foldConstantRewrite(byte[] bytes) {
+		ClassNode cn = parse(bytes);
+		boolean rewrote = false;
+		for (MethodNode mn : cn.methods) {
+			if (!mn.name.startsWith("lambda$") || mn.instructions == null) continue;
+			InsnList list = mn.instructions;
+			for (AbstractInsnNode insn = list.getFirst(); insn != null; insn = insn.getNext()) {
+				if (!(insn instanceof IntInsnNode ii) || ii.getOpcode() != org.objectweb.asm.Opcodes.BIPUSH) continue;
+				if (ii.operand != 6) continue;
+				InsnList replace = new InsnList();
+				replace.add(new LdcInsnNode(2));
+				replace.add(new LdcInsnNode(3));
+				replace.add(new InsnNode(org.objectweb.asm.Opcodes.IMUL));
+				list.insert(ii, replace);
+				list.remove(ii);
+				rewrote = true;
+				break;
+			}
+			if (rewrote) break;
+		}
+		if (!rewrote) throw new IllegalStateException("夹具里找不到 BIPUSH 6，改写失败");
+		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+		cn.accept(cw);
+		return cw.toByteArray();
 	}
 
 	/**
@@ -1306,6 +1666,15 @@ public class LambdaAlignTortureTest {
 		sb.append("  void g5() { }\n");
 		sb.append("}\n");
 		return sb.toString();
+	}
+
+	/** 本轮对齐里"方法体不等价 ⇒ 拒绝配对"的告警条数（按事件计数，不依赖 stats 字段）。 */
+	static int bodyMismatchRefusals() {
+		int n = 0;
+		for (LambdaAligner.AlignmentEvent e : LambdaAligner.TEST_EVENTS) {
+			if ("BODY_MISMATCH".equals(e.kind)) n++;
+		}
+		return n;
 	}
 
 }

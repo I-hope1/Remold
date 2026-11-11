@@ -28,7 +28,7 @@ Full English guide, demos and safety model: **[README_EN.md](https://github.com/
 
 ```kotlin
 plugins {
-    id("io.github.i-hope1.remold") version "0.2.1"
+    id("io.github.i-hope1.remold") version "0.2.7"
 }
 ```
 
@@ -62,14 +62,14 @@ The repository ships `remold.gradle` / `remold.gradle.kts` as thin shims that ap
 They are also bundled inside the plugin jar under `remold/`, so offline users can extract them.
 
 ```groovy
-apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v0.2.1/remold.gradle"
+apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v0.2.7/remold.gradle"
 ```
 
 ## Configuring
 
 ```groovy
 remold {
-    version = "0.2.1"            // agent version to resolve (or gradle.properties: remold.version)
+    version = "0.2.7"            // agent version to resolve (or gradle.properties: remold.version)
     // agentJar   = "libs/remold-agent.jar"   // use a local agent jar instead of downloading one
     // jbrPath    = "/path/to/jbr"            // JBR home (default: JBR_HOME env / jbr.home system property)
     // mainClass  = "your.package.Main"       // inferred when the application plugin is applied
@@ -85,7 +85,7 @@ remold {
     // deployDir  = "mods"                    // implies autoDeploy (modsDir is an alias)
 
     // plugins("arc", "mixin")                // Remold ecosystem plugins to attach
-    // extraJvmArgs("--enable-native-access=ALL-UNNAMED")
+    // extraJvmArgs("-Dremold.agent.batch_stall_ms=30000")
     // dependsOn("jar")
 }
 ```

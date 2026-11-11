@@ -7,9 +7,9 @@
 
 | 审计元数据项 | 内容与规格说明 |
 |:---|:---|
-| **基准提交 (Baseline Commit)** | `9bcfa14` (分支: `main`，下一版本（未发布）工作基线，内容见 §0.11；`v0.2.6` 已发布，tag `2159d21`，其代码基线 `71fb261`；上一发布 `57d381c`，`v0.2.5` 已发布)。v0.2.6 内容：两阶段 Schema-First 读穿保护、L1 存量初值重放 + A 档 Kotlin `apply {}` 重放、Mixin 匿名/内部类热更闭环、同形匿名类歧义消解 + 持有者点名、启动期门闩 + 批次看门狗、Class/资源防抖分离（逐项见 §0.5～§0.10） |
-| **发布说明** | [`releases/v0.2.6.md`](releases/v0.2.6.md) |
-| **最后更新时间** | 2026-11-09（下一版本未发布：ANON_ALIGN Tier 4.5 日志文案纠偏 —— “扫描可见的活实例为 0”不再表述为“实例已死/安全”，并点名 proven/candidate 持有者字段，见 §0.11；同一日：v0.2.6 已发布：两阶段 Schema-First 读穿保护、L1/A 档存量初值重放、Mixin 匿名/内部类热更闭环、同形匿名类歧义消解 + 持有者点名、启动期门闩 + 批次看门狗、Class/资源防抖分离；2026-11-08：v0.2.5 已发布；JitPack 坐标对齐；Fabric 主模板切回 1.21.1 并加入客户端 HotSwap Toast；1.21.4 客户端 gametest 移至 `tests/fabric-gametest-1.21.4/`；新增 Mixin 类运行期登记；Mixin 配置删除/重新加入；Class/资源防抖分离） |
+| **基准提交 (Baseline Commit)** | `main` @ `886b39a`（`v0.2.7` 已发布，tag `0852506`，其代码基线 `db65bf0`；上一发布 `v0.2.6` tag `2159d21`）。v0.2.7 内容：Mixin 合成匿名类成员 schema 闸门 + 事务共退 + 自愈账本、`ReloadMixinInfo` 三大结构契约、新 Mixin 运行期准入、访问权限单调对齐、JDK 内部包自举（免 `--add-exports`/`--add-opens`）、`docs/mixin/01..08` 专题文档（逐项见 §0.11～§0.14） |
+| **发布说明** | [`releases/v0.2.7`](https://github.com/I-hope1/Remold/releases/tag/v0.2.7)（正文随 release 发布；历史档见 `releases/`） |
+| **最后更新时间** | 2026-11-11（v0.2.7 封版：合成类 schema 闸门/事务共退/自愈账本；模块打开改为 agent 自举；夹具恢复全量 `-g`；`docs/mixin/01..08` 落地并完成工程日志剥离） |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |
 | **更新触发条件** | 任何合入包含特性落地、架构偏离、安全门调整、测试基线变更或发现已知缺陷/残余风险的 PR/commit 时，必须同步原子化更新本文件。提交时由作者/维护者更新基准哈希。 |
 | **管辖范围与边界声明** | 本状态表权威管辖：<br>1. **匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)**（[`docs/topology/`](topology/)）<br>2. **存量初始化修复器 (InitFix / Legacy Instance & Static Reinitialization)**（[`docs/initfix/`](initfix/)）<br>3. **物理内存偏移稳定性与第三方缓存驱逐 (Physical Memory Offset Stability & Reflection Cache Eviction)**（[`docs/offset/`](offset/)）<br>*边界与后续治理声明*：同属字节码重映射体系的 `LambdaAligner`（Lambda 表达式对齐器）以及 Mindustry UI 胶水层（`CellPropertyRef` / 动态参数表达式指纹），其实现状态当前由各自单元测试覆盖（`CellHelperTest` 35 个用例持续全绿、`LambdaAlignerTest` 等）；它们的详细状态审计矩阵尚未并入本总表，计划在下一轮治理中统一建立验收标准并纳入。 |
@@ -34,6 +34,27 @@
 
 > 原先零散的 `mixin/aligner-convergence-verification.md` 与 `mixin/synthetic-redefine-observability.md`
 > 已并入上述编号文档（内容按主题拆入 03 / 05 / 08），不再单独维护。
+
+## §0.13 JDK 内部包自举（免 `--add-exports` / `--add-opens`）
+
+| 项 | 内容 |
+|:--|:--|
+| 机制 | `core/src/remold/ModuleOpener.openForAgent(inst)`：premain/agentmain 第一行 + `RemoldAgent.triggerPluginInit` 各调一次。① `Instrumentation.redefineModule` 把 `java.base` 的 9 个包 export+open 给当前可达的 unnamed module；② `Reflect.IMPL_LOOKUP` 调包私有 `Module.implAddExports/implAddOpens`，目标 `Module.EVERYONE_MODULE`，覆盖之后才创建的加载器 |
+| 必须两条路的理由 | `redefineModule` 的 `extraOpens` 只接受"调用时已存在"的模块集合；Knot / ModLauncher / 插件加载器都在 premain 之后创建 |
+| 对照实验（JBR-21，均不带 `--add-exports`） | 无 agent：`InaccessibleObjectException`；仅 `redefineModule`：系统加载器 ok、premain 后新建加载器 FAIL；+ `EVERYONE_MODULE`：两者均 ok |
+| 未覆盖 | `--enable-native-access=ALL-UNNAMED`（Java 24+ 受限本地方法授权）仍需保留，`redefineModule` 无法替代；Gradle 插件只注入这一条 |
+| 降级 | 任一步失败只 warn，用户仍可手写 `--add-exports`/`--add-opens` |
+
+## §0.14 夹具与探针的 `-g`（`LocalVariableTable`）档位
+
+| 编译对象 | 档位 | 备注 |
+|:--|:--|:--|
+| `:tests` SemAssert 夹具（`hstestFx_*`，`tests/build.gradle`） | `source,lines,vars`（全量 `-g`） | 与用户工程 Gradle 默认一致；收窄会丢掉 LVT，使 lambda 捕获身份不可判定 |
+| 其它模块 / 两个模板 | Gradle 默认（全量 `-g`） | 未显式设置 |
+| 内存/守护 javac 夹具（`InitFixOracle`、`LambdaBridgeAlignTest`、`LambdaForceBaselineTest` 等） | 显式 `-g` | 见各用例 |
+| `PremainBaselineProbe` | `-g:none`（刻意） | 只关心字节内容，不可用于验证捕获顺序 |
+
+判定力前提与语义见 [`mixin/08-decisions-and-empirical-ledger.md`](mixin/08-decisions-and-empirical-ledger.md) §3.5。
 
 ## §0.12 v0.2.7 封版终验读数（前线真机，同一会话未重启）
 

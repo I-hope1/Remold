@@ -31,8 +31,9 @@ JVM 允许同一个点分名在多个加载器下各定义一份。Remold 的一
 - **ephemeral 不入账**：一次性/临时加载器（`LayoutPredictor` 的抛弃式加载器、`InitFix` 的探测加载器）
   产生的定义**不写基线**——它们不是"JVM 里生效的那份"。
 
-> `[观测]` 反例形态：真机上 `LivingEntity` 曾被 `AppClassLoader` 裸副本抢占基线，导致后续重织入产物以更窄
-> 访问权限回送，JBR 报 `VerifyError: Bad access to protected data` → `InternalError`。见 §3。
+**违反后的失败形态**：裸副本抢占基线 → 后续重织入产物以更窄访问权限回送 → JBR 链接/验证期抛
+`VerifyError: Bad access to protected data`，最终表现为 `InternalError`。落地与验证记录见
+[`docs/status.md`](../status.md)。
 
 ## 3. 不变量 M3：访问权限单调不降级
 

@@ -73,17 +73,14 @@ Lambda 捕获顺序的判定有一条**编译配置前提**，不写清就会被
 端到端后果：v2 把 g 改成 `b+"/"+a+"!"` 后，有 `-g` 时旧 g 实例跟随新体，无 `-g` 时旧实例停在旧值且无 WARN
 （旧 g 的 `CallSite` 指向的共享方法名，在新类里对应的是 f 的体）。
 
-**本仓库的配置事实**（`[观测]`，`tests/build.gradle`）：
-
-- `:tests` 的 SemAssert 夹具（`hstestFx_*`）曾显式收窄为 `-g:source,lines` → **缺 `vars`**，即整批夹具跑在
-  "无调试信息"档，与真实用户工程（Gradle 默认 `source,lines,vars`）不一致；
-- 现已改为全量 `source,lines,vars`，理由与上面这张表一致；
-- 其它模块与两个模板从未显式设置 → Gradle 默认即全量 `-g`；
-- 例外：`PremainBaselineProbe` 刻意用 `-g:none`（只关心字节内容），**不可用于验证捕获顺序**。
+**判据适用前提**：本节的判定力以 `LocalVariableTable` 存在为前提。夹具与用户工程的编译档位必须一致
+（Gradle 默认 `source,lines,vars`）；刻意用 `-g:none` 编译的探针（如只关心字节内容的基线录口探针）
+不能用于验证捕获顺序。各模块当前的编译档位与例外登记在 [`docs/status.md`](../status.md)。
 
 ## 4. 未闭合与待办
 
-- **事实③**（`db74eec` 中 3 参 `<init>` 存在却 `NoSuchMethodError`）：**不再追查、未闭合**。
+- **事实③**（3 参 `<init>` 存在却抛 `NoSuchMethodError`）：**不再追查、未闭合**。记录见
+  [`docs/status.md`](../status.md)。
 - **P2 `[假设]`**：`schemaHash` 命名新合成类——schema 变化时用 `defineClass` 加载**新类名**，宿主只做
   body-only redefine。预注册判据：新名类加载 + 宿主 body-only redefine 下 `newlyNull=0`。未实现、未验证。
 - **F6 四类拆分**（追加/缩容/改类型/不变）：旧版日志缺字段表行，仅 `executed=12/12`、`跳过未观测`、

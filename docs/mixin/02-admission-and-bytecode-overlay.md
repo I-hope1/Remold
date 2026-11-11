@@ -48,8 +48,9 @@
 
 `retryPending()` 在每次批次末尾推进一次；命中即完成登记与目标重织入，超预算则点名放弃。
 
-> `[观测]` 真机：只落 `out/production/classes` 的新 Mixin 在修复前稳定 `ClassNotFoundException`；
-> 四级查找链 + config service 替换 + 待决集接入后，保存 `.class` 即生效，无需双写输出目录、无需重启。
+**缺少任一环的失败形态**：只落 `out/production/classes` 的新 Mixin → `Error loading class: … (ClassNotFoundException)`，
+随后 `innerClass is null`；`mixins.json` 与 `.class` 到达顺序倒挂 → 该 Mixin 永久不可见（上游 `ClassInfo` 的
+`null` 负缓存不会重试）。落地与验证记录见 [`docs/status.md`](../status.md)。
 
 ## 5. 判据清单
 

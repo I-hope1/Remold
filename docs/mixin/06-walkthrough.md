@@ -1,6 +1,7 @@
 # 06 · 端到端典型场景走查
 
-> 四个真实闭环场景：字节流、状态转移与可核对的日志读数。所有读数均为真机 `[观测]`。
+> 四个典型闭环场景：字节流、状态转移与可核对的日志读数。读数的来源与验收状态见
+> [`docs/status.md`](../status.md)。
 
 ## 场景 1 · 原版大类 `LivingEntity` 方法体热更
 
@@ -12,8 +13,8 @@
   → AccessAlign（112 个成员权限对齐 + 自检门）
   → LayoutGate PASS → InitFix → redefineClasses
 ```
-日志：`[DYNAMIC-REDEFINE] Successfully redefined net.minecraft.entity.LivingEntity`。
-失败形态（修复前）：`VerifyError: Bad access to protected data` → `InternalError`。
+成功标志：`[DYNAMIC-REDEFINE] Successfully redefined net.minecraft.entity.LivingEntity`。
+失败形态：权限未对齐时 `VerifyError: Bad access to protected data` → `InternalError`。
 
 ## 场景 2 · 先存 `mixins.json`、后 IDEA 编译子包新 Mixin
 
@@ -26,7 +27,7 @@ Ctrl+F9 只落 out/production/classes → 批次扫到新 .class
   → MixinBytecodeOverlay.applyToConfigs() 替换启动期缓存的 service
   → 目标重织入 + $N 合成类登记
 ```
-修复前：`Error loading class: …Mixin$1 (ClassNotFoundException)` + `innerClass is null`。
+失败形态：`Error loading class: …Mixin$1 (ClassNotFoundException)` 之后 `innerClass is null`。
 
 ## 场景 3 · `priority` + `Duck 接口` + `targets A→B→A` 往返
 
@@ -36,8 +37,8 @@ R2 加 Duck 接口     → ClassInfo.interfaces + 产物 implements 双向对齐
 R3 targets A→B      → MixinRetarget 就地迁移四处索引（快照回滚）
 R4 targets B→A      → 反向迁移；合成类按新模板重新生成并重定义
 ```
-期间两条锤线程持续调用注入方法：`hammer-failure=null` / `window-failure=null` /
-`anon-ctor-roundtrip ok=true`。修复前 R4 抛 `NoSuchMethodError: <Target>$Anonymous$<hash>.<init>(…)`。
+验收口径：注入方法由持续调用线程反复触发，期间不得出现 `NoSuchMethodError`；R4 的失败形态是
+`NoSuchMethodError: <Target>$Anonymous$<hash>.<init>(…)`（合成类模板与宿主调用点不同源）。
 
 ## 场景 4 · 同会话：改捕获字段被拒 → 还原后自愈放行
 
@@ -53,6 +54,6 @@ B1~B5：把捕获字段还原到与已加载类一致，只改匿名类方法体
 
 ## 判据清单（走查即验收）
 
-1. 每个场景都必须有"修复前红 / 修复后绿"的同序列对照；
+1. 每个场景都要能给出"机制生效 / 机制失效"两种形态的对照（同一序列、同一口径）；
 2. 读数必须落在业务终局（运行态返回值 / `newlyNull` / 双通道一致数），不得用"日志看起来对了"代替；
 3. 场景 4 的两段必须在**同一会话、不重启**下完成。

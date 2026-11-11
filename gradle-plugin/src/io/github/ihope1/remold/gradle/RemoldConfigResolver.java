@@ -247,9 +247,10 @@ public final class RemoldConfigResolver {
         jvmArgs.add("-XX:+IgnoreUnrecognizedVMOptions");
         jvmArgs.add("-XX:+AllowEnhancedClassRedefinition");
         jvmArgs.add("-javaagent:" + safeAgent.getAbsolutePath() + "=" + watchPath);
-        jvmArgs.add("--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED");
-        jvmArgs.add("--add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED");
-        jvmArgs.add("--add-exports=java.base/jdk.internal.loader=ALL-UNNAMED");
+        // 不再注入 --add-exports / --add-opens：agent 在 premain 与插件初始化时用
+        // Instrumentation.redefineModule（+ EVERYONE_MODULE 兜底）自举打开 java.base 的 9 个内部包，
+        // 见 core/src/remold/ModuleOpener。这里只保留 Java 24+ 对受限本地方法（JVMTI 原生库）的授权，
+        // 旧 JDK 会以 -XX:+IgnoreUnrecognizedVMOptions 忽略它。
         jvmArgs.add("--enable-native-access=ALL-UNNAMED");
 
         if (ext.isDebug() || "true".equalsIgnoreCase(System.getProperty("remold.debug"))) {

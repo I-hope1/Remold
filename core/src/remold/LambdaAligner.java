@@ -74,12 +74,25 @@ import java.util.function.Supplier;
  * 目标方法查找与 Handle 门禁不绑定特定调用指令或 Handle tag（兼容 JDK 8 时代的 {@code INVOKESPECIAL}/{@code REF_invokeSpecial} 与 JDK 11+ JEP 181 时代的 {@code INVOKEVIRTUAL}/{@code REF_invokeVirtual} 私有调用）。
  * 其他带有额外业务逻辑的转换或纯删除的回调仍然严格降级为空壳默认值（0 / null / false）。</p>
  *
+ * <p><b>兜底配对是 fail-closed 的（信息不足就拒绝配对，不按位置猜）。</b>
+ * Step 1 的指纹/锚点证据用尽之后，骨架趟、Pass A、Pass B 只剩 (签名, 深度, shape, 子归属)
+ * 这些<b>与内容无关</b>的结构信息。删一个加一个、或者把叶子包进新容器时，位置信息会把
+ * <b>别人的名字</b>交给一个语义不同的方法体：老 {@code CallSite} 不抛异常、静默跑错。
+ * 因此这三趟在配对前都要过 {@link #fallbackPairingAllowed}：只有"方法体逐条等价
+ * （{@link #bodyFingerprint}，常量池索引/局部槽位/可折叠算式已归一）"、"同名 + 同宿主形态"、
+ * "消费端在宿主内有区分度"、"骨架全类唯一"、"子身份已定案"、"与已定案配对顺序一致"之一成立才放行；
+ * 都不成立就 {@code BODY_MISMATCH} WARN + 拒绝配对：旧名走幽灵桩（老 {@code CallSite} 熔断、
+ * 响亮失败），新方法去阶段二拿避障名。</p>
+ *
  * <p><b>已知限制：改变嵌套拓扑的编辑会丢失身份。</b>
  * {@link #sameNestingLevel} 在 Step 1/2 全程是<b>硬否决</b>：形状不等的候选永远不配对。
  * 因此<b>任何改变嵌套拓扑的编辑</b>——在现有 lambda 体内新增或删除一层内层 lambda——
  * 都会让该 lambda 的 shape 变化，从而失去身份：旧名被幽灵化、新方法去阶段二拿新名。
  * 这是"安全优先于召回"的自觉取舍（形状混淆会让父子错配、语义静默对调，代价更大），
- * 但这类编辑在日常开发中很常见，因此明确记录在此。</p>
+ * 但这类编辑在日常开发中很常见，因此明确记录在此。体内<b>新增</b>内层 lambda 时，
+ * 旧叶子的槽位还可能被新内层按位置顶替（javac 后序编号让两者同名）——这条由
+ * {@link #fallbackPairingAllowed} 拦下并要求"宿主形态翻转 ⇒ 必须有方法体证据"，
+ * 实测见 {@code LambdaAlignTortureTest#l5AddingInnerLambdaRefusesToRebindOldSlot}。</p>
  *
  * <p><b>已知限制：过度归一化下的匿名类碰撞与位移错配。</b>
  * 当多个同签名的 Lambda 表达式各自实例化不同的匿名内部类（例如分别实现 {@code Runnable} 处理保存与删除），
@@ -138,7 +151,7 @@ public class LambdaAligner {
 
 	/** 测试用显式事件记录条目（用于按方法名精确归因，避免同轮搭便车误判）。 */
 	public static final class AlignmentEvent {
-		public final String kind;       // "POS_MISMATCH", "CONSUMER_MISMATCH", "ANON_COLLISION", "HOMOMORPHIC_PRUNING", "GHOST"
+		public final String kind;       // "POS_MISMATCH", "CONSUMER_MISMATCH", "ANON_COLLISION", "HOMOMORPHIC_PRUNING", "GHOST", "BODY_MISMATCH"
 		public final String oldName;
 		public final String newName;
 		public final String detail;
@@ -187,6 +200,8 @@ public class LambdaAligner {
 		public final int consumerMismatchDebugPairs;
 		/** 触发同构缩减告警的数量。 */
 		public final int prunedPairs;
+		/** 因"方法体不等价且无独立身份证据"被拒绝配对的次数（{@link #bodyMismatchRefusals} 的对外读数）。 */
+		public final int bodyMismatchRefusals;
 
 		public AlignmentStats(int step1Pairs, int passAPairs, int passBPairs) {
 			this(step1Pairs, passAPairs, passBPairs, 0, 0, 0, 0, 0, 0);
@@ -207,6 +222,14 @@ public class LambdaAligner {
 
 		public AlignmentStats(int step1Pairs, int passAPairs, int passBPairs, int anchorPairs, int hashMismatchPairs,
 		                      int consumerMismatchPairs, int consumerMismatchWarnPairs, int consumerMismatchDebugPairs, int prunedPairs) {
+			this(step1Pairs, passAPairs, passBPairs, anchorPairs, hashMismatchPairs,
+			     consumerMismatchPairs, consumerMismatchWarnPairs, consumerMismatchDebugPairs, prunedPairs, 0);
+		}
+
+		public AlignmentStats(int step1Pairs, int passAPairs, int passBPairs, int anchorPairs, int hashMismatchPairs,
+		                      int consumerMismatchPairs, int consumerMismatchWarnPairs, int consumerMismatchDebugPairs,
+		                      int prunedPairs, int bodyMismatchRefusals) {
+			this.bodyMismatchRefusals = bodyMismatchRefusals;
 			this.step1Pairs = step1Pairs;
 			this.passAPairs = passAPairs;
 			this.passBPairs = passBPairs;
@@ -225,7 +248,8 @@ public class LambdaAligner {
 			       + (hashMismatchPairs > 0 ? ", hashMismatch=" + hashMismatchPairs : "")
 			       + (consumerMismatchPairs > 0 ? ", consumerMismatch=" + consumerMismatchPairs
 			          + " (warn=" + consumerMismatchWarnPairs + ", debug=" + consumerMismatchDebugPairs + ")" : "")
-			       + (prunedPairs > 0 ? ", pruned=" + prunedPairs : "") + "}";
+			       + (prunedPairs > 0 ? ", pruned=" + prunedPairs : "")
+			       + (bodyMismatchRefusals > 0 ? ", bodyMismatchRefused=" + bodyMismatchRefusals : "") + "}";
 		}
 	}
 
@@ -566,6 +590,8 @@ public class LambdaAligner {
 		int consumerMismatchWarnPairs;
 		int consumerMismatchDebugPairs;
 		int prunedPairs;
+		/** 兜底趟因"方法体不等价且无独立身份证据"拒绝配对的次数。 */
+		int bodyMismatchRefusals;
 
 		/**
 		 * 重置上下文状态，为下一次匹配做准备。
@@ -604,6 +630,7 @@ public class LambdaAligner {
 			consumerMismatchWarnPairs = 0;
 			consumerMismatchDebugPairs = 0;
 			prunedPairs = 0;
+			bodyMismatchRefusals = 0;
 		}
 	}
 	//endregion
@@ -820,7 +847,7 @@ public class LambdaAligner {
 			                                         ctx.step1AnchorPairs, ctx.hashMismatchPairs,
 			                                         ctx.consumerMismatchPairs,
 			                                         ctx.consumerMismatchWarnPairs, ctx.consumerMismatchDebugPairs,
-			                                         ctx.prunedPairs);
+			                                         ctx.prunedPairs, ctx.bodyMismatchRefusals);
 
 			Map<String, String> methodMapping = new HashMap<>();
 			for (int idx = newGroups.nextEntry(-1); idx != -1; idx = newGroups.nextEntry(idx)) {
@@ -1568,6 +1595,7 @@ public class LambdaAligner {
 				if (!sameNestingLevel(ni, oi)) continue;  // 形状必须相等
 				if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
 				if (!calleesPairTo(ni, oi)) continue;     // 必须满足结构证据（后代修改时的关键防护）
+				if (!fallbackPairingAllowed(ctx, ni, oi)) continue;
 				if (isSameNameEvidence(ctx, oi, ni)) {
 					bestOld = oi;
 					break;
@@ -1629,6 +1657,7 @@ public class LambdaAligner {
 				if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
 				if (!sameNestingLevel(ni, oi)) continue;
 				if (!calleesPairTo(ni, oi)) continue;
+				if (!fallbackPairingAllowed(ctx, ni, oi)) continue;
 				if (isSameNameEvidence(ctx, oi, ni)) {
 					bestOld = oi;
 					break;
@@ -1644,6 +1673,7 @@ public class LambdaAligner {
 					if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
 					if (!sameNestingLevel(ni, oi)) continue;
 					if (!calleesPairTo(ni, oi)) continue;
+					if (!fallbackPairingAllowed(ctx, ni, oi)) continue;
 					bestOld = oi;
 					break;
 				}
@@ -1898,6 +1928,204 @@ public class LambdaAligner {
 	/** 测试辅助：获取当前已触发的去重警告总数。 */
 	public static int getWarningCount() {
 		return WARNED_REALIGNMENTS.size();
+	}
+
+	/**
+	 * 兜底趟的<b>配对准入判决</b>（fail-closed）：信息不足时拒绝配对，而不是按顺序猜。
+	 *
+	 * <p>骨架趟 / Pass A / Pass B 都只按 (签名, 深度, shape, 子归属) 收窄候选，<b>不看方法体</b>。
+	 * 一旦同组里出现"删一个、加一个"，或者把叶子包进新容器，位置信息就会把<b>别人的名字</b>
+	 * 交给一个语义不同的方法体：老 CallSite 不抛异常、静默跑错。此前只在"名字变了"时告警，
+	 * 同名错绑完全无声。</p>
+	 *
+	 * <p>判据按证据强度分六档，任何一档成立才放行；<b>宿主形态翻转一票否决</b>（没有方法体证据时）；
+	 * 都没有就 WARN + 拒绝配对，让旧名走幽灵桩（老 CallSite 熔断、响亮失败），新方法去阶段二拿避障名：</p>
+	 *
+	 * <ol>
+	 *   <li><b>逐条等价</b>：递归语义指纹相同，或 {@link #bodyFingerprint} 相同
+	 *       （常量池索引 / 局部槽位 / 可折叠算式已归一）。这是<b>证明</b>，与名字、位置无关；</li>
+	 *   <li><b>身份锚定</b>：同名 + 同宿主形态（{@code M:}/{@code L:}）。javac 的合成方法名在同一
+	 *       宿主方法内就是"槽位身份"，宿主形态不变意味着这个名字没被搬到别人的嵌套层级下——
+	 *       此时方法体怎么改都还是<b>原地更新</b>，老 CallSite 拿到的仍是它自己那只 lambda；</li>
+	 *   <li><b>消费端有区分度</b>：两侧 consumer 相同，且该宿主方法里的 lambda 消费端<b>不止一种</b>
+	 *       （{@code btnSave} / {@code btnDelete} 这种）。消费端在宿主内唯一时没有区分度
+	 *       （一堆 lambda 都交给同一个 {@code reg(...)}），不能当证据；</li>
+	 *   <li><b>骨架全类唯一</b>：{@link #skeletonHash} 相同且各自类里只有一个 lambda 拥有该骨架
+	 *       （见 {@link #isSkeletonGloballyUnique}）。{@code () -> "常量"} 这类骨架会重复，不算证据；</li>
+	 *   <li><b>子身份已定案</b>：容器 lambda 的身份由"它包着谁"决定（见
+	 *       {@link #isChildIdentityEstablished}）——容器体本身会随内层名字变化，没有区分度；</li>
+	 *   <li><b>顺序一致</b>：与同一宿主序列里已定案的配对保持同序（见 {@link #isOrderConsistent}）。
+	 *       它把"插入/删除让编号整体位移"（安全）与"两个回调相对次序被换/跨宿主搬家"（危险）分开。</li>
+	 * </ol>
+	 *
+	 * <p><b>残余边界（诚实登记）</b>：删掉一个 lambda、同一次保存里又加一个"javac 恰好给它同一个
+	 * 编号（同宿主、同名）"的 lambda，与真正的原地更新在字节码层<b>完全同形</b>，没有规则能区分。
+	 * 该形态仍然会被配对，属于信息论边界；能区分的形态（换名、宿主形态翻转、消费端可区分）已全部拦下。</p>
+	 */
+	private static boolean fallbackPairingAllowed(MatchContext ctx, SyntheticInfo ni, SyntheticInfo oi) {
+		if (sameSemantics(ni, oi)) return true;
+		if (ni.bodyHash != 0L && ni.bodyHash == oi.bodyHash) return true;
+
+		// 宿主形态翻转（普通方法 ↔ lambda）是"这个 lambda 换了嵌套层次"的直接证据：
+		// 把叶子包进新容器时（体内新增内层 lambda），外层的子孙会把旧叶子的名字顶掉，
+		// 而两者宿主前缀必然一 M 一 L。没有方法体证据时一律拒绝（L5）。
+		if (!hostKind(ni).equals(hostKind(oi))) {
+			warnBodyMismatch(ctx, oi, ni);
+			return false;
+		}
+		if (ni.name.equals(oi.name)) return true;
+		if (hasDiscriminatingConsumer(ctx, ni, oi)) return true;
+		if (isSkeletonGloballyUnique(ctx, ni, oi)) return true;
+		if (isChildIdentityEstablished(ni, oi)) return true;
+		if (isOrderConsistent(ctx, ni, oi)) return true;
+
+		warnBodyMismatch(ctx, oi, ni);
+		return false;
+	}
+
+	/**
+	 * <b>骨架在全类范围内唯一</b>证据：两侧方法体"只差字面量"（{@link #skeletonHash} 相等），
+	 * 且该骨架在各自类里都<b>只有一个</b> lambda 拥有。
+	 *
+	 * <p>唯一性是关键：{@code () -> "常量"} 这种骨架在任何"一堆返回常量的 lambda"里都会重复，
+	 * 那时骨架相等不指向任何具体身份（"删掉 A2、再加一个 A9"正是这种形态）。
+	 * 而"容器 lambda"、"循环 lambda"这类结构骨架往往全类唯一，此时骨架相等就是强证据。</p>
+	 */
+	private static boolean isSkeletonGloballyUnique(MatchContext ctx, SyntheticInfo ni, SyntheticInfo oi) {
+		if (ni.skeletonHash == 0L || ni.skeletonHash != oi.skeletonHash) return false;
+		return skeletonCount(ctx.newGroups, ni.skeletonHash) == 1
+		       && skeletonCount(ctx.oldGroups, oi.skeletonHash) == 1;
+	}
+
+	/** 某一侧"拥有该骨架的 lambda 数"（匹配与否都算，幽灵与不可改名者不算）。 */
+	private static int skeletonCount(LongObjectMap<List<SyntheticInfo>> groups, long skeleton) {
+		int count = 0;
+		for (int idx = groups.nextEntry(-1); idx != -1; idx = groups.nextEntry(idx)) {
+			List<SyntheticInfo> g = groups.valueAt(idx);
+			if (g == null) continue;
+			for (SyntheticInfo info : g) {
+				if (!info.renameable || info.ghost) continue;
+				if (info.skeletonHash == skeleton) count++;
+			}
+		}
+		return count;
+	}
+
+	/**
+	 * <b>子身份建立</b>证据：容器 lambda 的身份由它包着谁决定。
+	 *
+	 * <p>容器自身的方法体随内层 lambda 的 javac 名字变化而变化（indy 的 implMethod 句柄名参与
+	 * {@link #skeletonHash}），因此"容器体改了吗"几乎恒为真、没有区分度。真正稳的是
+	 * <b>子已经落定到哪个旧方法</b>：若新容器的每个子都配到了旧容器的子，则两个容器描述的是
+	 * 同一段嵌套结构（{@link #calleesPairTo} 已保证子未落定时不作限制，这里把它升级为证据）。</p>
+	 */
+	private static boolean isChildIdentityEstablished(SyntheticInfo ni, SyntheticInfo oi) {
+		if (ni.children.isEmpty() || oi.children.isEmpty()) return false;
+		if (ni.children.size() != oi.children.size()) return false;
+		for (SyntheticInfo ci : ni.childInfos) {
+			if (ci == null || ci.matchedWith == null) return false;
+			if (!oi.children.contains(ci.matchedWith.name)) return false;
+		}
+		return true;
+	}
+
+	/**
+	 * <b>顺序一致性</b>证据：本候选与同一宿主调用序列里<b>已定案</b>的配对保持同序。
+	 *
+	 * <p>这是位置兜底唯一站得住的前提。javac 按源序发射合成方法，"插入/删除一个 lambda"只会让
+	 * 后续编号整体位移，<b>不打乱相对次序</b>。因此"旧序列里排在 A 与 B 之间的 lambda，在新序列里
+	 * 也必须排在 A、B 的对应物之间"。反过来，一旦出现<b>交叉</b>（旧两侧相对次序相反），位置信息
+	 * 就不再指向同一个 lambda —— 那是"删一个、加一个"的形态，必须拒绝。</p>
+	 *
+	 * <p>两侧宿主不是同一个序列（{@code hostKey} 不等，例如普通方法 → lambda）时同样没有顺序证据，
+	 * 一律拒绝：那种情形就是"把叶子包进新容器"，它的 javac 编号可能恰好与旧叶子撞名。</p>
+	 *
+	 * <p>判定只与<b>已定案</b>的配对比较（Step 1 的指纹配对先跑完，因此锚点已在位），
+	 * 且要求两侧 {@code hostOrdinal} 都有值；取不到序号的候选没有这份证据。</p>
+	 */
+	private static boolean isOrderConsistent(MatchContext ctx, SyntheticInfo ni, SyntheticInfo oi) {
+		if (ni.hostKey == null || oi.hostKey == null) return false;
+		if (!ni.hostKey.equals(oi.hostKey)) return false;
+		if (ni.hostOrdinal < 0 || oi.hostOrdinal < 0) return false;
+
+		LongObjectMap<List<SyntheticInfo>> groups = ctx.newGroups;
+		for (int idx = groups.nextEntry(-1); idx != -1; idx = groups.nextEntry(idx)) {
+			List<SyntheticInfo> group = groups.valueAt(idx);
+			if (group == null) continue;
+			for (SyntheticInfo other : group) {
+				SyntheticInfo otherOld = other.matchedWith;
+				if (otherOld == null || other == ni) continue;
+				if (other.hostOrdinal < 0 || otherOld.hostOrdinal < 0) continue;
+				if (!ni.hostKey.equals(other.hostKey) || !ni.hostKey.equals(otherOld.hostKey)) continue;
+				int dNew = Integer.compare(ni.hostOrdinal, other.hostOrdinal);
+				int dOld = Integer.compare(oi.hostOrdinal, otherOld.hostOrdinal);
+				if (dNew != 0 && dOld != 0 && (dNew > 0) != (dOld > 0)) return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * 宿主形态：{@code M}（普通方法宿主）或 {@code L}（lambda 宿主）。
+	 *
+	 * <p>把叶子包进新容器时，新叶子的宿主从"普通方法"变成了"外层 lambda"，前缀翻转是
+	 * "这个 lambda 换了嵌套位置"最廉价也最可靠的信号（见 {@code docs/initfix/08-test-audit.md} §8.5）。
+	 * 取不到宿主时返回 {@code ?}，两侧都是 {@code ?} 才算同形态。</p>
+	 */
+	private static String hostKind(SyntheticInfo info) {
+		String key = info.hostKey;
+		if (key == null) return "?";
+		if (key.startsWith("M:")) return "M";
+		if (key.startsWith("L:")) return "L";
+		return "?";
+	}
+
+	/**
+	 * 消费端是否提供了<b>有区分度</b>的身份证据。
+	 *
+	 * <p>两侧 consumer 相同还不够：同一个宿主方法里所有 lambda 都交给 {@code reg(...)} 时，
+	 * "消费端相同"对每个候选都成立，等于没有信息。只有当该宿主的 lambda 出现<b>≥2 种</b>消费端时，
+	 * 等值才真的指向"同一个调用点"。</p>
+	 */
+	private static boolean hasDiscriminatingConsumer(MatchContext ctx, SyntheticInfo ni, SyntheticInfo oi) {
+		if (!hasSameExplicitConsumer(ni, oi)) return false;
+		List<SyntheticInfo> host = oi.hostKey == null ? null : ctx.oldHostSeq.get(oi.hostKey);
+		if (host == null) return false;
+		String first = null;
+		for (SyntheticInfo info : host) {
+			String c = info.consumer;
+			if (c == null || c.isEmpty()) continue;
+			if (first == null) first = c;
+			else if (!first.equals(c)) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * "信息不足却要换主人"的留痕：拒绝配对时打一条 WARN。
+	 *
+	 * <p>与 {@link #warnPositionalMismatch} 的分工：那条只覆盖"名字变了"，同名错绑（把叶子包进
+	 * 新容器时 javac 后序编号恰好撞名）它抓不到。本条按"方法体不等价且没有独立身份证据"触发，
+	 * 覆盖名字变与名字不变两种形态。</p>
+	 *
+	 * <p>去重键为 {@code 类名 + #BODY# + 新方法名 + <- + 旧方法名}，同一处错绑只打印一次。</p>
+	 */
+	private static void warnBodyMismatch(MatchContext ctx, SyntheticInfo oi, SyntheticInfo ni) {
+		ctx.bodyMismatchRefusals++;
+		String key = ctx.currentClass + "#BODY#" + ni.name + "<-" + oi.name;
+		if (!WARNED_REALIGNMENTS.add(key)) return;
+
+		TEST_EVENTS.add(new AlignmentEvent("BODY_MISMATCH", oi.name, ni.name,
+			ctx.currentClass + "#" + ni.name + ni.desc + "<-" + oi.name + oi.desc
+			+ " host " + oi.hostKey + "->" + ni.hostKey));
+		RemoldAgent.warn("[LambdaAligner] Refused to pair bodies that are not provably equivalent in "
+		                  + ctx.currentClass + ": old " + oi.name + oi.desc + " (host " + oi.hostKey
+		                  + ", body " + Long.toHexString(oi.bodyHash) + ") <- new " + ni.name + ni.desc
+		                  + " (host " + ni.hostKey + ", body " + Long.toHexString(ni.bodyHash) + "). "
+		                  + "The old name is not provably the same lambda: names differ (or the host kind flipped) and the method bodies differ beyond "
+		                  + "constant-pool indices, local slot indices or foldable arithmetic. The pairing is skipped: the old name is ghosted "
+		                  + "(loud fuse) and the new lambda takes a fresh slot. Consider placing each lambda in a distinct private method "
+		                  + "to bind identity structurally rather than positionally.");
 	}
 
 	/**
@@ -2546,6 +2774,7 @@ public class LambdaAligner {
 			// 否则第一轮的成果会在第二轮被自己抹掉（见 stepCaptureBridge）。
 			info.bridge = isBridgeMethod(mn);
 			info.skeletonHash = skeletonHash(mn);
+			info.bodyHash = bodyFingerprint(mn, cn.name);
 			// 桥不是 lambda 体：它体内那条 INVOKESTATIC 指向目标方法，若照常登记成"子 lambda"，
 			// 目标就会平白多出一个（永远配不上对的）父，把 hasUnmatchedChild 卡死。
 			info.children = info.bridge ? Collections.emptyList() : collectChildLambdaNames(mn, cn.name);
@@ -5269,6 +5498,433 @@ public class LambdaAligner {
 	}
 
 	/**
+	 * 方法体"逐条等价"指纹：{@link #fallbackPairingAllowed} 的<b>等价证明</b>判据。
+	 *
+	 * <p>兜底趟（骨架 / Pass A / Pass B）没有指纹证据，只能靠位置猜。猜之前必须回答
+	 * "这两个方法体是不是同一个逻辑体，只被净化/改写掉了表示差异"。本方法给出这个回答：
+	 * 三处归一化，缺任何一处都会把<b>同一个方法体</b>误判成不同，进而制造假拒绝：</p>
+	 *
+	 * <ol>
+	 *   <li><b>常量池索引</b>：常量只按值编码（{@code ldc 1000} / {@code sipush 1000} /
+	 *       {@code iconst_*} 是同一个常量）。常量池编号本身不参与 —— 它随同批其它字面量增删
+	 *       而整体位移。</li>
+	 *   <li><b>局部变量槽位</b>：按"首次出现顺序"重编号。捕获表增删会让槽号整体位移，
+	 *       原样比对会把"同一个体、槽号平移"判成不同。</li>
+	 *   <li><b>可折叠算式</b>：{@code 2 * 3} 与 {@code 6} 折叠成同一个常量（{@code int} /
+	 *       {@code long} 的四则、位运算、{@code i2l}/{@code l2i}、取负）。</li>
+	 * </ol>
+	 *
+	 * <p><b>与 {@link #skeletonHash} 的分工</b>：骨架把字面量<b>值</b>也抹掉，因此"只改常量"
+	 * 的两个方法骨架相同 —— 骨架只回答"指令结构是否同形"。本方法保留常量值，因此
+	 * {@code "A2:v1"} 与 {@code "A9:v1"} <b>不同</b>：值变了就是行为变了，不能当等价证明。</p>
+	 *
+	 * <p><b>已知边界（实测见 {@code LambdaAlignTortureTest}）</b>：槽位按首次出现顺序归一化，
+	 * 因此两个"访问顺序相反但取值不同"的方法体可能被归一成同一串 token（例如
+	 * {@code {load a; load b}} 与 {@code {load b; load a}} 都编成 {@code 1,2}）。
+	 * 这条边界与 {@code -g:none} 下槽号不可信同源，属于自觉取舍：宁可把"结构同形"放宽，
+	 * 也不把"只是槽号位移"的原地编辑误判成重绑。</p>
+	 */
+	private static long bodyFingerprint(MethodNode mn, String owner) {
+		if (mn == null || mn.instructions == null) return 0L;
+
+		List<BodyTok>                toks     = new ArrayList<>(mn.instructions.size() + 8);
+		Map<LabelNode, Integer>      labelIds = new IdentityHashMap<>();
+		Map<Integer, Integer>        slotIds  = new HashMap<>();
+		Map<String, Integer>         anonIds  = new HashMap<>();
+
+		// 异常表先编码（与 MethodFingerprinter 的 visitTryCatchBlock 先行一致，纯结构信息）
+		if (mn.tryCatchBlocks != null) {
+			for (TryCatchBlockNode tb : mn.tryCatchBlocks) {
+				long h = mix64(0x7F000014L);
+				h = mix64(h ^ labelId(tb.start, labelIds));
+				h = mix64(h ^ labelId(tb.end, labelIds));
+				h = mix64(h ^ labelId(tb.handler, labelIds));
+				h = mix64(h ^ hashName(maskName(tb.type, owner, anonIds)));
+				toks.add(BodyTok.other(OpcodeConst.TRY_CATCH, h));
+			}
+		}
+
+		for (AbstractInsnNode insn : mn.instructions) {
+			int op = insn.getOpcode();
+			if (op < 0) continue;                       // Label / LineNumber / Frame
+
+			// —— 常量：只按值编码（常量池索引不参与）——
+			if (insn instanceof InsnNode) {
+				BodyTok c = smallConst(op);
+				if (c != null) {
+					toks.add(c);
+					continue;
+				}
+			}
+			if (insn instanceof IntInsnNode ii && (op == Opcodes.BIPUSH || op == Opcodes.SIPUSH)) {
+				toks.add(BodyTok.constant(BodyTok.K_INT, ii.operand));
+				continue;
+			}
+			if (insn instanceof LdcInsnNode ldc) {
+				BodyTok c = ldcConst(ldc.cst);
+				if (c != null) {
+					toks.add(c);
+					continue;
+				}
+				toks.add(BodyTok.other(op, mix64(0x7F000010L)
+				                         ^ mix64(hashCst(ldc.cst, owner, anonIds))));
+				continue;
+			}
+
+			// —— 变量槽位：按首次出现顺序重编号 ——
+			if (insn instanceof VarInsnNode v) {
+				toks.add(BodyTok.other(op, slotId(v.var, slotIds)));
+				continue;
+			}
+			if (insn instanceof IincInsnNode inc) {
+				toks.add(BodyTok.other(OpcodeConst.IINC,
+				                       mix64(slotId(inc.var, slotIds) ^ mix64(inc.incr))));
+				continue;
+			}
+
+			if (insn instanceof MethodInsnNode m) {
+				long h = mix64(hashName(maskName(m.owner, owner, anonIds)));
+				h = mix64(h ^ hashName(maskDesc(m.desc, owner, anonIds)));
+				h = mix64(h ^ (MethodFingerprinter.isSyntheticName(m.name) ? hashName("#SYNTHETIC_METHOD#") : hashName(m.name)));
+				h = mix64(h ^ (m.itf ? 1 : 0));
+				toks.add(BodyTok.other(op, h));
+				continue;
+			}
+			if (insn instanceof FieldInsnNode f) {
+				// final 字段与普通字段同样处理：读的**是同一个字段**（owner+name+desc 逐字符相同）
+				// 才等价。JLS §17.5.3 保证 final 字段的观测值稳定，所以"同字段读取"本身
+				// 不构成体差异，无需再区分修饰符。
+				long h = mix64(hashName(maskName(f.owner, owner, anonIds)));
+				h = mix64(h ^ hashName(f.name));
+				h = mix64(h ^ hashName(maskDesc(f.desc, owner, anonIds)));
+				toks.add(BodyTok.other(op, h));
+				continue;
+			}
+			if (insn instanceof TypeInsnNode t) {
+				toks.add(BodyTok.other(op, hashName(maskDesc(t.desc, owner, anonIds))));
+				continue;
+			}
+			if (insn instanceof InvokeDynamicInsnNode indy) {
+				long h = mix64(hashName(indy.name));
+				h = mix64(h ^ hashName(maskDesc(indy.desc, owner, anonIds)));
+				if (indy.bsm != null) {
+					h = mix64(h ^ hashName(indy.bsm.getOwner()));
+					h = mix64(h ^ hashName(indy.bsm.getName()));
+					h = mix64(h ^ hashName(indy.bsm.getDesc()));
+				}
+				if (indy.bsmArgs != null) {
+					for (Object arg : indy.bsmArgs) {
+						h = mix64(h ^ hashCst(arg, owner, anonIds));
+					}
+				}
+				toks.add(BodyTok.other(OpcodeConst.INDY, h));
+				continue;
+			}
+			if (insn instanceof JumpInsnNode j) {
+				toks.add(BodyTok.other(op, labelId(j.label, labelIds)));
+				continue;
+			}
+			if (insn instanceof TableSwitchInsnNode ts) {
+				long h = mix64(labelId(ts.dflt, labelIds));
+				h = mix64(h ^ ts.min);
+				h = mix64(h ^ ts.max);
+				for (LabelNode l : ts.labels) h = mix64(h ^ labelId(l, labelIds));
+				toks.add(BodyTok.other(OpcodeConst.TABLESWITCH, h));
+				continue;
+			}
+			if (insn instanceof LookupSwitchInsnNode ls) {
+				long h = mix64(labelId(ls.dflt, labelIds));
+				for (int i = 0; i < ls.keys.size(); i++) {
+					h = mix64(h ^ ls.keys.get(i));
+					h = mix64(h ^ labelId(ls.labels.get(i), labelIds));
+				}
+				toks.add(BodyTok.other(OpcodeConst.LOOKUPSWITCH, h));
+				continue;
+			}
+			if (insn instanceof MultiANewArrayInsnNode ma) {
+				toks.add(BodyTok.other(op, mix64(hashName(maskDesc(ma.desc, owner, anonIds)) ^ mix64(ma.dims))));
+				continue;
+			}
+			toks.add(BodyTok.other(op, 0L));
+		}
+
+		foldConstants(toks);
+
+		long h = 0x9E3779B97F4A7C15L;
+		for (BodyTok t : toks) {
+			h = mix64(h ^ t.kind);
+			h = mix64(h ^ t.opcode);
+			h = mix64(h ^ t.a);
+			h = mix64(h ^ t.b);
+		}
+		return h == 0L ? 1L : h;                        // 0 保留为"未知"哨兵
+	}
+
+	/** 常量折叠：把"常量, 常量, 可折叠算子"三元组折叠成单个常量，直到不再变化。 */
+	private static void foldConstants(List<BodyTok> toks) {
+		boolean changed = true;
+		while (changed) {
+			changed = false;
+			for (int i = 0; i + 1 < toks.size(); i++) {
+				BodyTok x = toks.get(i);
+				if (!x.isConstant()) continue;
+				BodyTok y = toks.get(i + 1);
+				// 一元
+				if (!y.isConstant() && y.opcode == Opcodes.I2L && x.kind == BodyTok.K_INT) {
+					toks.set(i, BodyTok.constant(BodyTok.K_LONG, (int) x.a));
+					toks.remove(i + 1);
+					changed = true;
+					break;
+				}
+				if (!y.isConstant() && y.opcode == Opcodes.L2I && x.kind == BodyTok.K_LONG) {
+					toks.set(i, BodyTok.constant(BodyTok.K_INT, (int) x.a));
+					toks.remove(i + 1);
+					changed = true;
+					break;
+				}
+				if (!y.isConstant() && y.opcode == Opcodes.INEG && x.kind == BodyTok.K_INT) {
+					toks.set(i, BodyTok.constant(BodyTok.K_INT, -(int) x.a));
+					toks.remove(i + 1);
+					changed = true;
+					break;
+				}
+				if (!y.isConstant() && y.opcode == Opcodes.LNEG && x.kind == BodyTok.K_LONG) {
+					toks.set(i, BodyTok.constant(BodyTok.K_LONG, -x.a));
+					toks.remove(i + 1);
+					changed = true;
+					break;
+				}
+				// 二元
+				if (i + 2 >= toks.size()) continue;
+				BodyTok z = toks.get(i + 2);
+				if (z.isConstant()) continue;
+				BodyTok folded = foldBinary(x, y, z.opcode);
+				if (folded == null) continue;
+				toks.set(i, folded);
+				toks.remove(i + 2);
+				toks.remove(i + 1);
+				changed = true;
+				break;
+			}
+		}
+	}
+
+	/** 对两个同类型常量执行可折叠二元运算；不可折叠返回 {@code null}。 */
+	private static BodyTok foldBinary(BodyTok a, BodyTok b, int op) {
+		boolean isInt = a.kind == BodyTok.K_INT && b.kind == BodyTok.K_INT;
+		boolean isLong = a.kind == BodyTok.K_LONG && b.kind == BodyTok.K_LONG;
+		if (!isInt && !isLong) return null;
+		if (isInt) {
+			int x = (int) a.a, y = (int) b.a;
+			return switch (op) {
+				case Opcodes.IADD -> BodyTok.constant(BodyTok.K_INT, x + y);
+				case Opcodes.ISUB -> BodyTok.constant(BodyTok.K_INT, x - y);
+				case Opcodes.IMUL -> BodyTok.constant(BodyTok.K_INT, x * y);
+				case Opcodes.IXOR -> BodyTok.constant(BodyTok.K_INT, x ^ y);
+				case Opcodes.IAND -> BodyTok.constant(BodyTok.K_INT, x & y);
+				case Opcodes.IOR  -> BodyTok.constant(BodyTok.K_INT, x | y);
+				case Opcodes.ISHL -> BodyTok.constant(BodyTok.K_INT, x << y);
+				case Opcodes.ISHR -> BodyTok.constant(BodyTok.K_INT, x >> y);
+				case Opcodes.IUSHR -> BodyTok.constant(BodyTok.K_INT, x >>> y);
+				default -> null;
+			};
+		}
+		long x = a.a, y = b.a;
+		return switch (op) {
+			case Opcodes.LADD -> BodyTok.constant(BodyTok.K_LONG, x + y);
+			case Opcodes.LSUB -> BodyTok.constant(BodyTok.K_LONG, x - y);
+			case Opcodes.LMUL -> BodyTok.constant(BodyTok.K_LONG, x * y);
+			case Opcodes.LXOR -> BodyTok.constant(BodyTok.K_LONG, x ^ y);
+			case Opcodes.LAND -> BodyTok.constant(BodyTok.K_LONG, x & y);
+			case Opcodes.LOR  -> BodyTok.constant(BodyTok.K_LONG, x | y);
+			case Opcodes.LSHL -> BodyTok.constant(BodyTok.K_LONG, x << y);
+			case Opcodes.LSHR -> BodyTok.constant(BodyTok.K_LONG, x >> y);
+			case Opcodes.LUSHR -> BodyTok.constant(BodyTok.K_LONG, x >>> y);
+			default -> null;
+		};
+	}
+
+	/** {@code iconst_*} / {@code lconst_*} / {@code fconst_*} / {@code dconst_*} 归一成常量 token。 */
+	private static BodyTok smallConst(int op) {
+		if (op >= Opcodes.ICONST_M1 && op <= Opcodes.ICONST_5) {
+			return BodyTok.constant(BodyTok.K_INT, op - Opcodes.ICONST_0);
+		}
+		if (op == Opcodes.LCONST_0) return BodyTok.constant(BodyTok.K_LONG, 0L);
+		if (op == Opcodes.LCONST_1) return BodyTok.constant(BodyTok.K_LONG, 1L);
+		if (op == Opcodes.FCONST_0) return BodyTok.constant(BodyTok.K_FLOAT, Float.floatToRawIntBits(0f));
+		if (op == Opcodes.FCONST_1) return BodyTok.constant(BodyTok.K_FLOAT, Float.floatToRawIntBits(1f));
+		if (op == Opcodes.FCONST_2) return BodyTok.constant(BodyTok.K_FLOAT, Float.floatToRawIntBits(2f));
+		if (op == Opcodes.DCONST_0) return BodyTok.constant(BodyTok.K_DOUBLE, Double.doubleToRawLongBits(0d));
+		if (op == Opcodes.DCONST_1) return BodyTok.constant(BodyTok.K_DOUBLE, Double.doubleToRawLongBits(1d));
+		return null;
+	}
+
+	/** {@code ldc} 常量归一：数字/字符串按值，其余（Type/Handle/ConstantDynamic）返回 {@code null} 走普通 token。 */
+	private static BodyTok ldcConst(Object cst) {
+		return switch (cst) {
+			case Integer i -> BodyTok.constant(BodyTok.K_INT, i);
+			case Long l -> BodyTok.constant(BodyTok.K_LONG, l);
+			case Float f -> BodyTok.constant(BodyTok.K_FLOAT, Float.floatToRawIntBits(f));
+			case Double d -> BodyTok.constant(BodyTok.K_DOUBLE, Double.doubleToRawLongBits(d));
+			case String s -> BodyTok.constant(BodyTok.K_STRING, hashName(s));
+			default -> null;
+		};
+	}
+
+	/** 常量/操作数的值哈希（Type/Handle/ConstantDynamic 也按值编码）。 */
+	private static long hashCst(Object cst, String owner, Map<String, Integer> anonIds) {
+		if (cst == null) return 0L;
+		if (cst instanceof Integer i) return mix64(i);
+		if (cst instanceof Long l) return mix64(l);
+		if (cst instanceof Float f) return mix64(Float.floatToRawIntBits(f));
+		if (cst instanceof Double d) return mix64(Double.doubleToRawLongBits(d));
+		if (cst instanceof String s) return hashName(s);
+		if (cst instanceof Type t) return hashName(maskDesc(t.getDescriptor(), owner, anonIds));
+		if (cst instanceof Handle hd) {
+			long h = hashName(maskName(hd.getOwner(), owner, anonIds));
+			h = mix64(h ^ hashName(hd.getName()));
+			h = mix64(h ^ hashName(maskDesc(hd.getDesc(), owner, anonIds)));
+			return mix64(h ^ hd.getTag());
+		}
+		if (cst instanceof ConstantDynamic cd) {
+			long h = hashName(cd.getName());
+			h = mix64(h ^ hashName(maskDesc(cd.getDescriptor(), owner, anonIds)));
+			h = mix64(h ^ hashCst(cd.getBootstrapMethod(), owner, anonIds));
+			for (int i = 0; i < cd.getBootstrapMethodArgumentCount(); i++) {
+				h = mix64(h ^ hashCst(cd.getBootstrapMethodArgument(i), owner, anonIds));
+			}
+			return h;
+		}
+		return hashName(String.valueOf(cst));
+	}
+
+	/** 槽位归一：按首次出现顺序重编号（捕获表增删造成的整体位移不参与指纹）。 */
+	private static long slotId(int var, Map<Integer, Integer> slotIds) {
+		Integer id = slotIds.get(var);
+		if (id == null) {
+			id = slotIds.size();
+			slotIds.put(var, id);
+		}
+		return mix64(0x7F000018L ^ id);
+	}
+
+	/** 跳转目标归一：按首次引用顺序重编号（与 {@link MethodFingerprinter} 的 Label 记账同构）。 */
+	private static long labelId(LabelNode label, Map<LabelNode, Integer> labelIds) {
+		if (label == null) return -1L;
+		Integer id = labelIds.get(label);
+		if (id == null) {
+			id = labelIds.size();
+			labelIds.put(label, id);
+		}
+		return mix64(0x7F000017L ^ id);
+	}
+
+	/** 把本类的匿名/局部类序号归一成方法内相对 ID（{@code Owner$1} → {@code #ANON_0#}）。 */
+	private static String maskName(String name, String owner, Map<String, Integer> anonIds) {
+		if (name == null || owner == null) return name;
+		if (name.startsWith("[")) {
+			int dims = 0;
+			while (dims < name.length() && name.charAt(dims) == '[') dims++;
+			if (dims < name.length() && name.charAt(dims) == 'L' && name.endsWith(";")) {
+				String inner = name.substring(dims + 1, name.length() - 1);
+				String masked = maskName(inner, owner, anonIds);
+				return masked.equals(inner) ? name : name.substring(0, dims) + "L" + masked + ";";
+			}
+			return name;
+		}
+		String prefix = owner + "$";
+		if (!name.startsWith(prefix)) return name;
+		String suffix = name.substring(prefix.length());
+		if (!MethodFingerprinter.isUnstableNestedSuffix(suffix)) return name;
+		Integer id = anonIds.get(name);
+		if (id == null) {
+			id = anonIds.size();
+			anonIds.put(name, id);
+		}
+		return prefix + "#ANON_" + id + "#";
+	}
+
+	/** 描述符里的匿名类序号归一（只改本类不稳定后缀，普通类型原样保留）。 */
+	private static String maskDesc(String desc, String owner, Map<String, Integer> anonIds) {
+		if (desc == null || owner == null || desc.indexOf('$') < 0) return desc;
+		String marker = "L" + owner + "$";
+		if (!desc.contains(marker)) return desc;
+		StringBuilder sb = new StringBuilder(desc.length() + 8);
+		int pos = 0;
+		while (true) {
+			int idx = desc.indexOf(marker, pos);
+			if (idx < 0) { sb.append(desc, pos, desc.length()); break; }
+			int end = desc.indexOf(';', idx);
+			if (end < 0) { sb.append(desc, pos, desc.length()); break; }
+			sb.append(desc, pos, idx);
+			sb.append('L').append(maskName(desc.substring(idx + 1, end), owner, anonIds)).append(';');
+			pos = end + 1;
+		}
+		return sb.toString();
+	}
+
+	/** 64 位混洗（体指纹内部使用，不参与任何跨版本稳定性约定）。 */
+	private static long mix64(long v) {
+		v ^= v >>> 33;
+		v *= 0xFF51AFD7ED558CCDL;
+		v ^= v >>> 33;
+		v *= 0xC4CEB9FE1A85EC53L;
+		v ^= v >>> 33;
+		return v;
+	}
+
+	/** 字符串值哈希（长度前缀，避免拼接歧义）。 */
+	private static long hashName(String s) {
+		if (s == null) return -1L;
+		long h = 0x9E3779B97F4A7C15L ^ s.length();
+		for (int i = 0; i < s.length(); i++) h = mix64(h ^ s.charAt(i));
+		return h;
+	}
+
+	/** 体指纹 token。 */
+	private static final class BodyTok {
+		static final int K_OTHER  = 0;
+		static final int K_INT    = 1;
+		static final int K_LONG   = 2;
+		static final int K_FLOAT  = 3;
+		static final int K_DOUBLE = 4;
+		static final int K_STRING = 5;
+
+		final int  kind;
+		final int  opcode;
+		final long a;
+		final long b;
+
+		private BodyTok(int kind, int opcode, long a, long b) {
+			this.kind = kind;
+			this.opcode = opcode;
+			this.a = a;
+			this.b = b;
+		}
+
+		static BodyTok other(int opcode, long operandHash) {
+			return new BodyTok(K_OTHER, opcode, operandHash, 0L);
+		}
+
+		static BodyTok constant(int kind, long bits) {
+			return new BodyTok(kind, -1, bits, 0L);
+		}
+
+		boolean isConstant() {
+			return kind != K_OTHER;
+		}
+	}
+
+	/** 非标准操作码占位（异常表 / invokedynamic / switch），避免与真实 JVM 操作码撞值。 */
+	private static final class OpcodeConst {
+		static final int TRY_CATCH   = 0x7F000014;
+		static final int INDY        = 0x7F000015;
+		static final int TABLESWITCH = 0x7F000012;
+		static final int LOOKUPSWITCH = 0x7F000013;
+		static final int IINC        = 0x7F000011;
+	}
+
+	/**
 	 * 忽略字面量常量的"指令骨架"指纹。
 	 *
 	 * <p>与 {@link MethodFingerprinter} 的区别只有一条：**字面量只记类型、不记值**。
@@ -5376,6 +6032,10 @@ public class LambdaAligner {
 				if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
 				if (!sameNestingLevel(ni, oi)) continue;
 				if (!calleesPairTo(ni, oi)) continue;
+				// 骨架相同只说明"指令结构同形、字面量可以不同"——那是**结构**证据，不是身份证据。
+				// "删掉 A2、再加一个同骨架的 A9"与"把 A2 的字面量改了"在骨架层完全同形，
+				// 只有当三档证据之一成立时才能把这门婚事定下来（见 fallbackPairingAllowed）。
+				if (!fallbackPairingAllowed(ctx, ni, oi)) continue;
 				pair(ctx, ni, oi, "SKELETON");
 				progressed = true;
 				break;
@@ -5695,6 +6355,18 @@ public class LambdaAligner {
 		 * 于是 {@code 50 行循环 + "v2"} 与 {@code 2 行 + "v2"} 依然可区分。</p>
 		 */
 		long skeletonHash;
+
+		/**
+		 * 方法体<b>逐条等价</b>指纹（常量池索引无关、局部槽位归一、常量可折叠）。
+		 *
+		 * <p>兜底趟（骨架 / Pass A / Pass B）在把旧名字交给一个候选之前，必须能<b>证明</b>
+		 * 两侧是同一个逻辑体，否则就是"名字换了主人"——老 CallSite 静默执行别人的方法体。
+		 * 本指纹提供这份证明（见 {@link #bodyFingerprint}）：等值 ⇒ 可以配对；
+		 * 不等值 ⇒ 只有"名字 + 宿主形态"这类独立身份证据才能兜住，否则 WARN + 拒绝配对。</p>
+		 *
+		 * <p>{@code 0} 表示未知（方法体缺失）。</p>
+		 */
+		long bodyHash;
 
 		/**
 		 * 该方法体里<b>直接引用</b>的本类 lambda 系方法名集合（内层 lambda）。

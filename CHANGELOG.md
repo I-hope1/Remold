@@ -85,7 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   与 B1~B5（自愈放行，`executed` 1→5、25 切面 `newlyNull=0`、双通道 `agree=6100/conflict=0`）全项达标。
 
 ### Fixed
-- **合成类成员 schema 变化一律拒绝（真机终局裁定）**：真机两分支实测闭合——`fieldTableChanged=true` 时
+- **合成类成员 schema 变化一律拒绝（真机终局裁定）**：`[观测]` 真机两分支实测——`fieldTableChanged=true` 时
   即便 `live{raw=0 reachable=0}`（堆上 0 实例），JBR-21 DCEVM 的 `redefineClasses` 仍必现
   `newlyNull=230`（抹掉 230 个具名 Record `LootCondition` 引用）。故删除「变化 + 无存活实例 → 放行」
   分支：只要字段表（含 `isStatic`/`isSynthetic`）相对已加载版本变化，一律 `gateRejected=1` +

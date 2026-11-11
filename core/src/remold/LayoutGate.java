@@ -92,6 +92,14 @@ public final class LayoutGate {
 		 */
 		LAYOUT_DRIFT,
 		/**
+		 * 枚举常量声明顺序发生变动（重排或前插使已有常量 ordinal 漂移）。
+		 *
+		 * <p>存量枚举实例的 {@code ordinal()} 在运行期不可变；若常量重排，
+		 * {@code switch-on-enum}（依赖 {@code $SwitchMap}）与 {@code EnumMap}
+		 * 将静默走错分支（实测见 R6b）。必须坚决拒绝重定义。</p>
+		 */
+		CHANGED_ENUM_ORDER,
+		/**
 		 * 基类新增实例字段导致已加载的子孙类字段物理内存偏移漂移，且检测到存在偏移量缓存持有者。
 		 * 见 {@code remold.offset.SuperclassDriftGate}。
 		 */
@@ -252,6 +260,7 @@ public final class LayoutGate {
 		}
 		Map<String, Boolean> added   = new LinkedHashMap<>();
 		Map<String, Boolean> removed = new LinkedHashMap<>();
+		List<String> enumOrderChanged = new ArrayList<>();
 		for (String raw : changedFields) {
 			if (raw == null || raw.length() < 2) continue;
 			char   sign   = raw.charAt(0);
@@ -260,6 +269,12 @@ public final class LayoutGate {
 			String  name   = statik ? body.substring(1) : body;
 			if (sign == '+')      added.put(name, statik);
 			else if (sign == '-') removed.put(name, statik);
+			else if (sign == '~' && name.startsWith("enum constant order changed:")) {
+				enumOrderChanged.add(name.substring("enum constant order changed:".length()).trim());
+			}
+		}
+		if (!enumOrderChanged.isEmpty()) {
+			return new Result(Verdict.CHANGED_ENUM_ORDER, "enum constant order changed: " + enumOrderChanged);
 		}
 		if (removed.isEmpty()) {
 			return new Result(Verdict.COMPATIBLE,

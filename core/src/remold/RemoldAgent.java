@@ -3048,6 +3048,84 @@ public class RemoldAgent {
 	}
 
 	/**
+	 * 级联阻断：当某个枚举因常量顺序变动被拒绝时，批次中任何持有该枚举 SwitchMap 或对其进行 switch 的调用类也必须移出。
+	 * 避免调用方带着期望新 ordinal 的新 switch 代码被载入，导致与存量枚举实例的旧 ordinal 发生静默错位（R6b 守卫）。
+	 */
+	static void dropEnumSwitchDependents(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,
+	                                     String enumDotName, RoundSkips skips) {
+		String enumSlash = enumDotName.replace('.', '/');
+		String switchMapKey = "$SwitchMap$" + enumSlash.replace('/', '$');
+		String switchTableMethod = "$SWITCH_TABLE$" + enumSlash.replace('/', '$');
+		List<String> dependents = new ArrayList<>();
+
+		for (Map.Entry<String, byte[]> entry : newBatchBytes.entrySet()) {
+			byte[] b = entry.getValue();
+			if (b == null) continue;
+			String clsName = entry.getKey();
+			if (clsName.equals(enumDotName) || clsName.equals(enumSlash)) continue;
+
+			try {
+				org.objectweb.asm.ClassReader cr = new org.objectweb.asm.ClassReader(b);
+				org.objectweb.asm.tree.ClassNode cn = new org.objectweb.asm.tree.ClassNode();
+				cr.accept(cn, org.objectweb.asm.ClassReader.SKIP_DEBUG | org.objectweb.asm.ClassReader.SKIP_FRAMES);
+
+				boolean hasSwitch = false;
+				for (org.objectweb.asm.tree.FieldNode fn : cn.fields) {
+					if (fn.name.contains(switchMapKey)) {
+						hasSwitch = true;
+						break;
+					}
+				}
+				if (!hasSwitch) {
+					for (org.objectweb.asm.tree.MethodNode mn : cn.methods) {
+						if (mn.name.contains(switchTableMethod)) {
+							hasSwitch = true;
+							break;
+						}
+					}
+				}
+				if (!hasSwitch) {
+					for (org.objectweb.asm.tree.MethodNode mn : cn.methods) {
+						for (org.objectweb.asm.tree.AbstractInsnNode insn = mn.instructions.getFirst();
+						     insn != null; insn = insn.getNext()) {
+							if (insn instanceof org.objectweb.asm.tree.FieldInsnNode) {
+								org.objectweb.asm.tree.FieldInsnNode fin = (org.objectweb.asm.tree.FieldInsnNode) insn;
+								if (fin.name.contains(switchMapKey)) {
+									hasSwitch = true;
+									break;
+								}
+							} else if (insn instanceof org.objectweb.asm.tree.MethodInsnNode) {
+								org.objectweb.asm.tree.MethodInsnNode min = (org.objectweb.asm.tree.MethodInsnNode) insn;
+								if (min.name.contains(switchTableMethod)) {
+									hasSwitch = true;
+									break;
+								}
+							}
+						}
+						if (hasSwitch) break;
+					}
+				}
+
+				if (hasSwitch) {
+					dependents.add(clsName);
+				}
+			} catch (Throwable ignored) {
+			}
+		}
+
+		for (String dep : dependents) {
+			dropFromBatch(newBatchBytes, classToPath, dep);
+			if (skips != null) {
+				skips.add(dep, RoundSkips.verdict("LAYOUT-REJECT",
+					"depends on enum " + enumDotName + " whose constant order changed",
+					"revert the enum constant order or restart to continue"));
+			}
+			warn("[LAYOUT-REJECT] " + dep + ": REFUSED redefine — depends on enum " + enumDotName
+			     + " whose constant order changed; dropped to prevent silent switch-on-enum misrouting.");
+		}
+	}
+
+	/**
 	 * 一轮热更里"改了但没生效"的类：类名 → 判决码。
 	 *
 	 * <p>存在的唯一理由是<b>摘要行</b>。{@code HotSwap successful: N classes redefined} 只报了成功的
@@ -3089,6 +3167,10 @@ public class RemoldAgent {
 		}
 
 		boolean isEmpty() { return byClass.isEmpty(); }
+
+		boolean contains(String className) { return byClass.containsKey(className); }
+
+		String get(String className) { return byClass.get(className); }
 
 		/** 被跳过的类数（用于成功行上的"还有几个没进来"）。 */
 		int size() { return byClass.size(); }
@@ -3607,6 +3689,9 @@ public class RemoldAgent {
 				AlignmentTransaction tx = transactions.remove(d.hostName());
 				if (tx != null) tx.rollback(false);
 				rejectedHosts.add(d.hostName());
+				if (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.CHANGED_ENUM_ORDER) {
+					dropEnumSwitchDependents(newBatchBytes, classToPath, className, skips);
+				}
 				continue;
 			}
 

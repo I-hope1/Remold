@@ -176,6 +176,10 @@ public final class ClassDiffUtil {
 		public final Set<String> typeChangedFields   = new HashSet<>();
 		/** 标注了 @RemoldReinit 的字段名集合 */
 		public final Set<String> reinitFields        = new HashSet<>();
+		/** 枚举常量的声明顺序/ordinal是否发生变化（R6b 守卫） */
+		public       boolean     enumOrderChanged    = false;
+		/** 发生顺序漂移的枚举常量明细（用于日志与拒绝提示） */
+		public final List<String> shiftedEnumConstants = new ArrayList<>();
 
 		/** 继承层次是否发生变化（父类或接口变更） */
 		public       boolean      hierarchyChanged = false;
@@ -201,6 +205,8 @@ public final class ClassDiffUtil {
 			addedStaticFields.clear();
 			typeChangedFields.clear();
 			reinitFields.clear();
+			enumOrderChanged = false;
+			shiftedEnumConstants.clear();
 			hierarchyChanged = false;
 			superChanged = false;
 			addedInterfaces.clear();
@@ -343,6 +349,37 @@ public final class ClassDiffUtil {
 		oldFieldsMap.forEachValue(removedFieldName -> {
 			d.changedFields.add("- " + removedFieldName);
 		});
+
+		// 枚举常量声明顺序/ordinal 检查（R6b 守卫）
+		boolean isEnum = (newC.access & Opcodes.ACC_ENUM) != 0 || "java/lang/Enum".equals(newC.superName)
+			|| (oldC.access & Opcodes.ACC_ENUM) != 0 || "java/lang/Enum".equals(oldC.superName);
+		if (isEnum) {
+			List<String> oldConstants = new ArrayList<>();
+			for (FieldNode f : oldC.fields) {
+				if ((f.access & Opcodes.ACC_ENUM) != 0 || ((f.access & Opcodes.ACC_STATIC) != 0 && f.desc.equals("L" + oldC.name + ";") && !f.name.startsWith("$"))) {
+					oldConstants.add(f.name);
+				}
+			}
+			List<String> newConstants = new ArrayList<>();
+			for (FieldNode f : newC.fields) {
+				if ((f.access & Opcodes.ACC_ENUM) != 0 || ((f.access & Opcodes.ACC_STATIC) != 0 && f.desc.equals("L" + newC.name + ";") && !f.name.startsWith("$"))) {
+					newConstants.add(f.name);
+				}
+			}
+			for (String c : oldConstants) {
+				if (newConstants.contains(c)) {
+					int oldIdx = oldConstants.indexOf(c);
+					int newIdx = newConstants.indexOf(c);
+					if (oldIdx != newIdx) {
+						d.shiftedEnumConstants.add(c + "(" + oldIdx + "->" + newIdx + ")");
+					}
+				}
+			}
+			if (!d.shiftedEnumConstants.isEmpty()) {
+				d.enumOrderChanged = true;
+				d.changedFields.add("~ *enum constant order changed: " + d.shiftedEnumConstants);
+			}
+		}
 
 		// 方法对比逻辑：同样采用映射销毁法
 		var oldMethods = ctx.methodMap;

@@ -196,6 +196,14 @@ final class LayoutDecisionEngine {
 
 		boolean staticChange = LayoutGate.hasStaticFieldChange(changedFields);
 
+		// 枚举常量顺序变更（CHANGED_ENUM_ORDER）安全门控（R6b）：
+		if (res.verdict() == LayoutGate.Verdict.CHANGED_ENUM_ORDER) {
+			return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
+				"enum constant order changed (" + res.detail() + ") — existing enum instances retain their"
+				+ " original ordinals; reordering causes switch-on-enum and EnumMap to silently misroute"
+				+ " (revert the enum constant order or restart to continue)");
+		}
+
 		// 字段类型变更（CHANGED_FIELD_TYPE）安全门控：
 		if (res.verdict() == LayoutGate.Verdict.CHANGED_FIELD_TYPE) {
 			List<String> typeChanged = LayoutGate.typeChangedFields(changedFields);
@@ -260,6 +268,9 @@ final class LayoutDecisionEngine {
 	 */
 	static String skipVerdictForLayout(LayoutDecision d, RemovedMemberScan scan) {
 		String detail = d.layout() == null ? null : d.layout().detail();
+		if (scan != null && scan.removedMethods() && "compatible".equals(detail)) {
+			detail = "method(s) removed";
+		}
 		if (detail != null) {
 			detail = detail.replace("[", "").replace("]", "").trim();
 			// "field(s) removed: COST" → "field removed: COST"：只有一个字段时用单数，
@@ -288,9 +299,13 @@ final class LayoutDecisionEngine {
 		 ? "restore the removed field(s) or restart to continue"
 		 : (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.CHANGED_FIELD_TYPE
 		    ? "annotate field(s) with @RemoldReinit, or revert the field change, or restart to continue"
-		    : (d.layout() != null && (d.layout().verdict() == LayoutGate.Verdict.SUPERCLASS_FIELD_DRIFT || d.layout().verdict() == LayoutGate.Verdict.LAYOUT_DRIFT)
-		       ? "avoid adding instance field(s) to superclass or restart to continue"
-		       : "revert the field change or restart to continue"));
+		    : (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.CHANGED_ENUM_ORDER
+		       ? "revert the enum constant order or restart to continue"
+		       : (d.layout() != null && (d.layout().verdict() == LayoutGate.Verdict.SUPERCLASS_FIELD_DRIFT || d.layout().verdict() == LayoutGate.Verdict.LAYOUT_DRIFT)
+		          ? "avoid adding instance field(s) to superclass or restart to continue"
+		          : (scan != null && scan.removedMethods()
+		             ? "restore the removed method(s) or restart to continue"
+		             : "revert the field change or restart to continue"))));
 		return RoundSkips.verdict("LAYOUT-REJECT", detail, action);
 	}
 

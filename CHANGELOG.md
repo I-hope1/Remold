@@ -76,6 +76,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.7] - 2026-11-10
 
+### Fixed
+- **合成类基线读取源（假接线 ①）**：`MixinInnerClassHotSwap` 的 `retainConstructors` 原先读
+  `GENERATED`（本进程生成过的覆盖层）当基线，而 R0 启动期加载的合成类在 R1 首次热更时该覆盖层为空，
+  于是旧 `<init>` 一个都保留不下来，闸 2 反而把这次重定义拒掉（真机 `executed=0, gateRejected=1`，
+  随后 `NoSuchMethodError: <Target>$Anonymous$<hash>.<init>` 崩服）。改为 `baselineBytesForLoaded`：
+  本加载器已生效字节 → premain 录口 `(loader 身份, 点分名)` → 最后才退回覆盖层；该读取不计 `missed`
+  （分母口径是"闸 4 一次拒绝计一次"）。
+- **宿主事务原子中止（假接线 ②）**：`BLOCKED` 原先只打日志——`reweave` 仍把已织入新 `<init>` 调用点的
+  字节返回给 `redefineDynamic`，宿主照样被重定义成半残状态。新增 `BytecodeTransformerBridge.Abort`
+  作为「本轮放弃本类重定义」的唯一信号：`applyTransformerBridges` 原样上抛、`redefineDynamic` 捕获后
+  **不调** `redefineClasses`、批量入口把该类移出本批；`MixinReWeaver` 在入口与织入后各拦一次；
+  `MixinHotSwap.flushPendingTargets` 每轮清理/重试并给出「宿主保持旧字节」的专属日志（不再误引向
+  LayoutGate）。顺带修正 `BLOCKED` 的键：`apply()` 路径原先用 Mixin 模板名，现取
+  `InnerClassInfo.getTargetName()`。
+  验证：`MixinHotSwapWiringTest` 2/0 + `BridgeAbortTransactionTest` 2/0；变异 3/3 击杀
+  （基线读回覆盖层 / 关掉 `BLOCKED` 拦截 / 吞掉 Abort 照常重定义）。
+
 ### Added
 - **新 Mixin 运行期登记字节通道**：`MixinClassByteSources`（已登记内存字节 → 全部 watch 目录最新磁盘字节 →
   上次批次源码缓存）+ `MixinNewMixinBytes`（在 `MixinConfig.prepare()` **之前**把 Mixin 与 `$N` 内部类字节

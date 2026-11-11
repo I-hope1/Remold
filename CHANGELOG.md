@@ -77,6 +77,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.7] - 2026-11-10
 
 ### Fixed
+- **合成类存量实例（liveness）三档闸门**：真机 P0 复跑证明「字段表只增不减」不足以避开 JBR
+  `ModifyInstances`——`fieldTableChanged=1` 的原地 redefine 仍把无关类 `LootContextPredicate`
+  的 `combinedCondition` 冲成 `null`（230/244）。补上缺失维度：`MixinInnerClassHotSwap.syntheticLive`
+  在每次合成类重定义前数堆上存量实例（`raw` = `LibTool.getInstances` 堆遍历，含不可达但未被 GC
+  物理回收的临时实例；字段表变化且 `raw>0` 时一次 `System.gc()` 后再取 `reachable`），并打点
+  `live{raw=… reachable=…} fieldTableChanged=… loaded=[…] fresh=[…]`。闸门分三档：字段表未变
+  → 一律放行；字段表变化 + 有存活实例 → 拒绝并 `blockHost`（旧实例必成半残 0/null 且迁移污染无关堆）；
+  字段表变化 + 无存活实例 → 放行（真机待裁定）；探针不可用 → 拒绝（fail-closed）。
+  验证：`MixinSyntheticLivenessTest` 4/4（含产品探针真堆对照：强引用 `reachable≥1`、丢引用 + GC 后
+  `reachable==0`）；变异 3/3 击杀（反转 liveness 判据 / 去掉宿主 Abort / 关掉整条闸门）。
 - **合成类基线读取源（假接线 ①）**：`MixinInnerClassHotSwap` 的 `retainConstructors` 原先读
   `GENERATED`（本进程生成过的覆盖层）当基线，而 R0 启动期加载的合成类在 R1 首次热更时该覆盖层为空，
   于是旧 `<init>` 一个都保留不下来，闸 2 反而把这次重定义拒掉（真机 `executed=0, gateRejected=1`，

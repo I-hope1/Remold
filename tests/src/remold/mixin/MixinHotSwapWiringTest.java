@@ -213,6 +213,34 @@ class MixinHotSwapWiringTest {
 		RecordingInstrumentation recorder = new RecordingInstrumentation(new Class<?>[]{live});
 		Instrumentation previous = RemoldAgent.swapInstrumentationForTest(recorder.proxy);
 		MixinInnerClassHotSwap.setInstanceProbeForTest(type -> new Object[0]);
+		java.util.List<String> logged = new java.util.ArrayList<>();
+		remold.RemoldAgent.Logger previousLogger = RemoldAgent.logger;
+		RemoldAgent.logger = new remold.RemoldAgent.Logger() {
+			@Override
+			public void log(String msg) {
+				logged.add(msg);
+			}
+
+			@Override
+			public void info(String msg) {
+				logged.add(msg);
+			}
+
+			@Override
+			public void warn(String msg) {
+				logged.add(msg);
+			}
+
+			@Override
+			public void error(String msg) {
+				logged.add(msg);
+			}
+
+			@Override
+			public void error(String msg, Throwable t) {
+				logged.add(msg);
+			}
+		};
 		try {
 			int[] before = metrics();
 			FakeTransformer transformer = FakeTransformer.serving(dotted, "wiringfix.Target$HostApply", true);
@@ -226,7 +254,10 @@ class MixinHotSwapWiringTest {
 			assertEquals(0, after[1] - before[1], "a body-only update is not a field-table change");
 			assertEquals(0, after[2] - before[2], "no gate may reject it");
 			assertEquals(1, recorder.redefinitions.size(), "exactly one redefineClasses call");
+			assertTrue(logged.stream().anyMatch(line -> line.contains("redefined in place; metrics: executed=")),
+				"the inner-class phase must emit the metrics line the front line reads, got " + logged);
 		} finally {
+			RemoldAgent.logger = previousLogger;
 			MixinInnerClassHotSwap.setInstanceProbeForTest(null);
 			RemoldAgent.swapInstrumentationForTest(previous);
 			MixinClassBaseline.forgetForTest(loader, dotted);

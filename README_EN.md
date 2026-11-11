@@ -38,7 +38,13 @@ git clone https://github.com/I-hope1/Remold && cd Remold
 
 ### Wiring it into your own project
 
-Apply the script plugin in `build.gradle` (pin the URL to a concrete version tag — never `main` — so the build plugin and the agent stay on the same version):
+The plugin is published to the **Gradle Plugin Portal**, so no extra repository is needed (JitPack included):
+
+```groovy
+plugins { id 'io.github.i-hope1.remold' version '0.2.7' }
+```
+
+Alternatively apply the script plugin in `build.gradle` (pin the URL to a concrete version tag — never `main` — so the build plugin and the agent stay on the same version):
 
 ```groovy
 def remoldRef = (findProperty('remold.version') ?: '0.2.7')

@@ -38,7 +38,13 @@ git clone https://github.com/I-hope1/Remold && cd Remold
 
 ### 接入自己的项目
 
-在 `build.gradle` 中引入脚本插件（注意 URL 必须锁具体版本的 tag，不要写 `main`，保证构建插件与 agent 版本一致）：
+插件已发布到 **Gradle Plugin Portal**，不需要任何额外仓库（也不需要 JitPack）：
+
+```groovy
+plugins { id 'io.github.i-hope1.remold' version '0.2.7' }
+```
+
+或者引入脚本插件（注意 URL 必须锁具体版本的 tag，不要写 `main`，保证构建插件与 agent 版本一致）：
 
 ```groovy
 def remoldRef = (findProperty('remold.version') ?: '0.2.7')

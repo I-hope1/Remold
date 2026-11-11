@@ -89,6 +89,30 @@ final class MixinSyntheticHalfInitFixtures {
 		return node;
 	}
 
+	/**
+	 * The <b>body-only</b> candidate: identical field table and identical 2-arg {@code <init>} as the
+	 * loaded shape, only {@code test()} returns {@code v2:...} instead of {@code v1:...}.
+	 *
+	 * <p>This is the {@code fieldTableChanged == false} direction: whatever the heap looks like, the
+	 * gate must let it through and a live instance must observe the new body.</p>
+	 */
+	static ClassNode bodyOnlyShapeNode() {
+		ClassNode node = MixinSyntheticGateFixtures.nodeOf(HalfInitBody.class);
+		String from = "remold/mixin/HalfInitBody";
+		node.name = OLD_INTERNAL;
+		int leftovers = renameOwners(node, from, OLD_INTERNAL);
+		if (leftovers != 0) {
+			throw new IllegalStateException("the renamed body-only shape still references " + from + " in "
+				+ leftovers + " instruction(s)");
+		}
+		return node;
+	}
+
+	/** Bytes of the body-only candidate (already renamed to the loaded name). */
+	static byte[] bodyOnlyCandidateBytes() {
+		return serialize(bodyOnlyShapeNode());
+	}
+
 	/** One redefinition candidate plus the structural facts the cases assert. */
 	record Candidate(byte[] bytes, List<String> fields, List<String> constructors, List<String> retained,
 		List<String> writesOfRetainedConstructor) {
@@ -305,5 +329,27 @@ class HalfInitNext {
 
 	int capturedCount() {
 		return this.val$c;
+	}
+}
+
+/**
+ * Body-only counterpart of {@link HalfInitOld}: same two capture fields, same 2-arg
+ * {@code <init>}, only {@code test()} returns {@code v2:...}.
+ *
+ * <p>Used for the {@code fieldTableChanged == false} direction: the JVM can swap the body of a
+ * loaded class in place, so a live instance must start returning the new value while keeping its
+ * field values — the only case that is safe regardless of how many instances are alive.</p>
+ */
+class HalfInitBody {
+	Object this$0;
+	Object val$a;
+
+	HalfInitBody(Object this$0, Object val$a) {
+		this.this$0 = this$0;
+		this.val$a = val$a;
+	}
+
+	String test() {
+		return "v2:" + this.val$a;
 	}
 }

@@ -92,6 +92,91 @@ final class MixinInnerClassHotSwap {
 			+ " gateRejected=" + GATE_REJECTED.get();
 	}
 
+	// ---------------------------------------------------------------- 存量实例（liveness）
+
+	/**
+	 * 存量实例探针：返回该类的堆上实例（产品实现 = {@link remold.util.LibTool#getInstances} 的 JVMTI
+	 * 堆遍历，单测可替换）。
+	 */
+	interface InstanceProbe {
+		Object[] instancesOf(Class<?> type);
+	}
+
+	private static final InstanceProbe LIBTOOL_PROBE = remold.util.LibTool::getInstances;
+
+	/** 当前探针（默认产品通道）。 */
+	private static volatile InstanceProbe INSTANCE_PROBE = LIBTOOL_PROBE;
+
+	/** 单测替换探针；传 {@code null} 恢复产品通道。 */
+	static void setInstanceProbeForTest(InstanceProbe probe) {
+		INSTANCE_PROBE = probe == null ? LIBTOOL_PROBE : probe;
+	}
+
+	/**
+	 * 一次 liveness 读数。
+	 *
+	 * <p>{@code raw} = 堆上该类的全部实例（<b>含不可达但尚未被 GC 物理回收</b>的对象——{@code LibTool}
+	 * 的堆遍历语义如此，Eden 区里刚产生又没人引用的临时实例也在内）。{@code reachable} = 一次
+	 * {@code System.gc()} 之后再数的结果，用来回答"热更瞬间堆上到底还有没有活着的旧实例"。
+	 * {@code -1} = 探针不可用（拿不到读数，调用方必须 fail-closed）。</p>
+	 */
+	static final class LiveCount {
+		final int raw;
+		final int reachable;
+
+		LiveCount(int raw, int reachable) {
+			this.raw = raw;
+			this.reachable = reachable;
+		}
+
+		boolean measured() {
+			return this.reachable >= 0;
+		}
+
+		String reachableText() {
+			return this.reachable < 0 ? "unavailable" : String.valueOf(this.reachable);
+		}
+	}
+
+	/**
+	 * 数一次该合成类在堆上的存量实例。
+	 *
+	 * <p><b>为什么只在字段表变化且 raw &gt; 0 时做 GC</b>：{@code System.gc()} 是整堆停顿，只有"字段表
+	 * 变化 + 堆上确实有实例"这一种情形需要区分"真存活"与"不可达临时实例"；其余情形（只改方法体）无论
+	 * 有没有实例都放行，做 GC 只会白付代价。</p>
+	 *
+	 * <p><b>GC 是提示不是保证</b>：{@code -XX:+DisableExplicitGC} 下 GC 不会发生，此时 {@code reachable}
+	 * 仍等于 {@code raw}，判据落到"有实例 → 拒绝"一侧（安全方向），不会误放行。</p>
+	 */
+	static LiveCount syntheticLive(Class<?> live, boolean fieldTableChanged) {
+		if (live == null) {
+			return new LiveCount(-1, -1);
+		}
+		int raw = probeInstanceCount(live);
+		if (raw < 0) {
+			return new LiveCount(-1, -1);
+		}
+		if (!fieldTableChanged || raw == 0) {
+			// 只改方法体：不关心 reachable；raw == 0：本来就是 0。
+			return new LiveCount(raw, raw);
+		}
+		System.gc();
+		int reachable = probeInstanceCount(live);
+		return new LiveCount(raw, reachable);
+	}
+
+	/** 探针调用；任何失败都返回 {@code -1}（= 读数不可用），绝不抛出打断闸门。 */
+	private static int probeInstanceCount(Class<?> live) {
+		try {
+			Object[] instances = INSTANCE_PROBE.instancesOf(live);
+			return instances == null ? 0 : instances.length;
+		} catch (Throwable t) {
+			RemoldAgent.warn("[Mixin] live-instance probe failed for " + live.getName()
+				+ "; structural synthetic redefines will be refused until it works (fail-closed): " + t);
+			return -1;
+		}
+	}
+
 	/** 宿主目标类本轮是否必须中止重定义（合成类无法安全落地时不允许半残状态）。 */
 	static boolean isBlocked(String targetDotName) {
 		return targetDotName != null && BLOCKED.contains(targetDotName);
@@ -624,8 +709,39 @@ final class MixinInnerClassHotSwap {
 			blockHost(hostDotName, name, baselineMissing);
 			return false;
 		}
-		if (!loadedFields.equals(freshFields)) {
+		// 分级闸门（与 AnonClassAligner 布局门同构，不变量 C4）：字段表变化是否可放行，取决于该合成类
+		// 在堆上**还有没有存活实例**——
+		//   • fieldTableChanged == false：只改方法体，存量与新建实例都原地生效，一律放行；
+		//   • fieldTableChanged == true + 有存活实例：旧实例没有新捕获字段的初值，JBR 迁移后必为
+		//     0/null（半残实例，C3 已实测 NPE），且 ModifyInstances 会污染无关类堆 → 一律拒绝；
+		//   • fieldTableChanged == true + 无存活实例：没有旧实例可半残，放行（真机待验）；
+		//   • 探针不可用（拿不到实例数）：按安全优先拒绝——无法证明"没有旧实例"就不能赌。
+		boolean fieldTableChanged = !loadedFields.equals(freshFields);
+		if (fieldTableChanged) {
+			// 口径说明：本计数表示"字段表相对已加载版本发生变化"，与是否放行无关——
+			// 拒绝时也要报出来，否则真机只能看到 gateRejected=1 而不知道是不是 schema 变化触发。
 			FIELD_CHANGED.incrementAndGet();
+		}
+		LiveCount liveness = syntheticLive(live, fieldTableChanged);
+		RemoldAgent.info("[Mixin] synthetic inner class " + name + " live{raw=" + liveness.raw + " reachable="
+			+ liveness.reachableText() + "} fieldTableChanged=" + fieldTableChanged
+			+ " loaded=" + loadedFields + " fresh=" + freshFields + ".");
+		if (fieldTableChanged) {
+			if (!liveness.measured()) {
+				GATE_REJECTED.incrementAndGet();
+				blockHost(hostDotName, name, "field table changed (" + loadedFields + " -> " + freshFields
+					+ ") but the live-instance probe is unavailable, so 'no old instance would be left"
+					+ " half-migrated' cannot be proven");
+				return false;
+			}
+			if (liveness.reachable > 0) {
+				GATE_REJECTED.incrementAndGet();
+				blockHost(hostDotName, name, "field table changed (" + loadedFields + " -> " + freshFields + ") while "
+					+ liveness.reachable + " live instance(s) remain (raw=" + liveness.raw + "): old instances would"
+					+ " keep 0/null in the new captures (half-migrated) and the instance migration rewrites unrelated"
+					+ " heaps; refusing — restart, or keep the capture list stable (@RemoldReinit / lambda)");
+				return false;
+			}
 		}
 		remold.ref.HeapFieldWatch.snapshot("before-synthetic-redefine", name);
 		RemoldAgent.enterInternalRedefine(java.util.Collections.singleton(name));

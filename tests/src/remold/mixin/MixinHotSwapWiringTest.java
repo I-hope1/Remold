@@ -87,6 +87,9 @@ class MixinHotSwapWiringTest {
 
 		RecordingInstrumentation recorder = new RecordingInstrumentation(new Class<?>[]{live});
 		Instrumentation previous = RemoldAgent.swapInstrumentationForTest(recorder.proxy);
+		// No instance exists in this case; pin the liveness probe so the case cannot depend on whether
+		// the native heap walk is loadable here (that dimension has its own suite).
+		MixinInnerClassHotSwap.setInstanceProbeForTest(type -> new Object[0]);
 		try {
 			int[] before = metrics();
 			FakeTransformer transformer = FakeTransformer.serving(dotted, host);
@@ -112,6 +115,7 @@ class MixinHotSwapWiringTest {
 			assertFalse(MixinInnerClassHotSwap.isBlocked(host),
 				"a successful synthetic redefine must not block its host");
 		} finally {
+			MixinInnerClassHotSwap.setInstanceProbeForTest(null);
 			RemoldAgent.swapInstrumentationForTest(previous);
 			MixinClassBaseline.forgetForTest(loader, dotted);
 			MixinInnerClassHotSwap.clearBlocked(host);

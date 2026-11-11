@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_（暂无；下一个版本的内容写在这里）_
+
+## [0.2.7] - 2026-11-11
+
 ### Added
+
 - 重定义访问权限防线（四层）：`core/src/remold/ref/AccessAlign.java` 以 JVM 已加载运行时字节码为基线，
   对重织入产物做**访问权限单调对齐**（public 不得退化、protected 不得退化、基线已剥离的 `ACC_FINAL`
   必须同步剥离），并在送入 `redefineClasses` 前做 fail-closed 自检门；Fabric 侧新增 Mixin 前置变换重放
@@ -55,7 +60,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   无 `[VM-REDEFINE-POISON]`/`VerifyError`/`InternalError`/`Rolling back`，游戏持续运行无 C1 崩溃。
   单测：`ClassCopySelector`/缓存仲裁/就绪快照/成员对齐/受影响的子类放行全部绿；变异检查全部 killed。
 
+- **新 Mixin 运行期登记字节通道**：`MixinClassByteSources`（已登记内存字节 → 全部 watch 目录最新磁盘字节 →
+  上次批次源码缓存）+ `MixinNewMixinBytes`（在 `MixinConfig.prepare()` **之前**把 Mixin 与 `$N` 内部类字节
+  灌进 `IClassBytecodeProvider` 覆盖层与 core `BytecodeSources`，并驱逐上游 `ClassInfo` 负缓存）；
+  `MixinBytecodeOverlay.applyToConfigs()` 把每个 `MixinConfig` 启动期捕获的 `IMixinService` 也换成服务代理
+  ——纯 IDEA 编译（只落 `out/production/classes`）的新 Mixin 不再需要双写输出目录或重启。
+- **子包相对名支持**：`honkai.XxxMixin` / `client.hud.YyyMixin` 这类多层相对名可登记、可墓碑自愈。
+- **配置先到 / 字节后到的待决接力**：`MixinConfigDiffer.pendingUnresolvedMixins` + `retryPending`，先保存
+  `mixins.json` 只记待决，随后 `.class` 落地即自动完成登记与目标重织入（TTL + 重试上限，名字被删即放弃）。
+- **`ReloadMixinInfo` 结构契约突破**：`MixinReloadPolicy` 对齐 `priority`（final 字段）与 `interfaces`
+  比较基线并支持失败回滚；`MixinRetarget` 在 `reload` 前就地迁移 `targets` 元数据与四处索引（失败快照回滚）；
+  `MixinHotSwap` 对 `re-entrant lock` 瞬态做有界退避重试；`ClassDiffUtil.mustRejectHierarchyChange`
+  把「父类变更」与「接口增删」分开判决（仅后者在 JBR/DCEVM 放行）。
+
 ### Fixed
+
 - `[ANON_ALIGN]` 的 Tier 4.5 日志不再把“扫描可见的活实例为 0”表述成“实例已死”，也不再把
   “实例数为 0”当作配对安全性的依据。此前该行写作 `deterministic-dead-pair (0 live instances)`，
   而真实客户端里字段持有的实例仍然存活并继续执行（`fieldAnon v2/v3`），文案与事实不符。现在该行
@@ -74,17 +93,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   验证：`AnonClassAmbiguityTest` 17/0（新增 4 个文案/持有者用例，含“无持有字段不得凭空点名”的负向对照；
   变异检查：把日志文案改回旧词后 4 条断言变红，恢复后复绿）。
 
-## [0.2.7] - 2026-11-11
-
-### Docs
-- **Mixin 热更子系统专题文档体系**：新增 `docs/mixin/01..08`（不变量与类加载器权威、准入与覆盖层、
-  重织入与成员对齐、结构契约突破、合成类单出口闸门与事务共退、端到端走查、运行期与诊断、决策与实证台账），
-  并把原先零散的 `aligner-convergence-verification.md` / `synthetic-redefine-observability.md` 并入；
-  `docs/topology/04/07/08` 同步增补 Tier 3.5 / Tier 4.5 / `findHoldingFields` 与"实例数不参与判决"的真机结论。
-- **v0.2.7 封版**：真机同一会话 A1~A5（拒绝，`fieldTableChanged`/`gateRejected` 每轮 +1、`newlyNull=0`）
-  与 B1~B5（自愈放行，`executed` 1→5、25 切面 `newlyNull=0`、双通道 `agree=6100/conflict=0`）全项达标。
-
-### Fixed
 - **合成类成员 schema 变化一律拒绝（真机终局裁定）**：`[观测]` 真机两分支实测——`fieldTableChanged=true` 时
   即便 `live{raw=0 reachable=0}`（堆上 0 实例），JBR-21 DCEVM 的 `redefineClasses` 仍必现
   `newlyNull=230`（抹掉 230 个具名 Record `LootCondition` 引用）。故删除「变化 + 无存活实例 → 放行」
@@ -122,21 +130,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   验证：`MixinHotSwapWiringTest` 2/0 + `BridgeAbortTransactionTest` 2/0；变异 3/3 击杀
   （基线读回覆盖层 / 关掉 `BLOCKED` 拦截 / 吞掉 Abort 照常重定义）。
 
-### Added
-- **新 Mixin 运行期登记字节通道**：`MixinClassByteSources`（已登记内存字节 → 全部 watch 目录最新磁盘字节 →
-  上次批次源码缓存）+ `MixinNewMixinBytes`（在 `MixinConfig.prepare()` **之前**把 Mixin 与 `$N` 内部类字节
-  灌进 `IClassBytecodeProvider` 覆盖层与 core `BytecodeSources`，并驱逐上游 `ClassInfo` 负缓存）；
-  `MixinBytecodeOverlay.applyToConfigs()` 把每个 `MixinConfig` 启动期捕获的 `IMixinService` 也换成服务代理
-  ——纯 IDEA 编译（只落 `out/production/classes`）的新 Mixin 不再需要双写输出目录或重启。
-- **子包相对名支持**：`honkai.XxxMixin` / `client.hud.YyyMixin` 这类多层相对名可登记、可墓碑自愈。
-- **配置先到 / 字节后到的待决接力**：`MixinConfigDiffer.pendingUnresolvedMixins` + `retryPending`，先保存
-  `mixins.json` 只记待决，随后 `.class` 落地即自动完成登记与目标重织入（TTL + 重试上限，名字被删即放弃）。
-- **`ReloadMixinInfo` 结构契约突破**：`MixinReloadPolicy` 对齐 `priority`（final 字段）与 `interfaces`
-  比较基线并支持失败回滚；`MixinRetarget` 在 `reload` 前就地迁移 `targets` 元数据与四处索引（失败快照回滚）；
-  `MixinHotSwap` 对 `re-entrant lock` 瞬态做有界退避重试；`ClassDiffUtil.mustRejectHierarchyChange`
-  把「父类变更」与「接口增删」分开判决（仅后者在 JBR/DCEVM 放行）。
-
-### Fixed
 - **合成匿名类重建/重定义顺序**：`MixinInnerClassHotSwap.refeedForTarget` 不再「已回灌就跳过」，
   每次都按**当前** Mixin 模板重新生成合成内部类字节；若已加载类的字节或成员 schema 与新生成为不一致，
   在**目标类 redefine 之前**就地重定义（`redefineDynamic` 的桥接阶段在 `redefineClasses` 之前），
@@ -181,6 +174,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   构造器签名停留在 Mixin 类上导致的 `NoSuchMethodError: <init>(SomeMixin, Target)`。
 
 ### Verification
+
 - 单测：`MixinClassByteSourcesTest` 7、`MixinConfigDiffLoadTest` 2、`MixinNewMixinBytesTest` 3、
   `NewMixinRegistrarTest` 8、`MixinConfigDifferTest` 4、`MixinReloadPolicyTest` 8、`MixinRetargetTest` 5、
   `MixinConfigDifferPendingTest` 4、`ClassDiffHierarchyTest` 5、`MixinClassInfoRegistryTest` 4。
@@ -195,7 +189,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hammer-failure=null` / `window-failure=null` / `anon-ctor-roundtrip ok=true`，每轮日志均出现
   `[MIXIN-ALIGN] retained N tombstone stub(s)`；0 次 `NoSuchMethodError`、0 次 `combinedCondition` NPE。
 
+### Docs
+
+- **Mixin 热更子系统专题文档体系**：新增 `docs/mixin/01..08`（不变量与类加载器权威、准入与覆盖层、
+  重织入与成员对齐、结构契约突破、合成类单出口闸门与事务共退、端到端走查、运行期与诊断、决策与实证台账），
+  并把原先零散的 `aligner-convergence-verification.md` / `synthetic-redefine-observability.md` 并入；
+  `docs/topology/04/07/08` 同步增补 Tier 3.5 / Tier 4.5 / `findHoldingFields` 与"实例数不参与判决"的真机结论。
+- **v0.2.7 封版**：真机同一会话 A1~A5（拒绝，`fieldTableChanged`/`gateRejected` 每轮 +1、`newlyNull=0`）
+  与 B1~B5（自愈放行，`executed` 1→5、25 切面 `newlyNull=0`、双通道 `agree=6100/conflict=0`）全项达标。
+
 ### Known boundaries
+
 - 接口**移除**无本地实证：只在 JBR/DCEVM 上放行并 warn，`ClassInfo` 接口表只增不删。
 - Forge/NeoForge 无 `IClassBytecodeProvider` 覆盖层：带 `$N` 内部类的新 Mixin 仍可能需要一次重启。
 - Mixin 升级导致上游内部字段改名时自动退化为「需重启」的 fail-closed 诊断。

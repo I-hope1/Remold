@@ -176,7 +176,7 @@ jobs:
             -Dorg.gradle.java.installations.auto-download=false
 
   build-native:
-    name: Build Native Libraries (Linux x64 & Android arm64)
+    name: Build Native Libraries (Linux x64, Linux aarch64 & Android arm64)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -208,6 +208,25 @@ jobs:
             -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
             core/cpp/tool.cpp -o core/libs/libtoolarm64.so
           ls -la core/libs/libtoolarm64.so
+
+      - name: Compile Linux aarch64 (.so, glibc 2.17)
+        # 与 Android arm64 分开命名：Android 产物 NEEDED 的是 bionic 的 libc.so，在 glibc 的
+        # ld-linux-aarch64.so.1 下无法装载（UnsatisfiedLinkError）。用 zig 固定 glibc 2.17 目标，
+        # 避免 ubuntu-24.04 的交叉 g++ 把最低 glibc 抬到 2.38+。
+        run: |
+          curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz -o /tmp/zig.tar.xz
+          tar -xJf /tmp/zig.tar.xz -C /tmp
+          /tmp/zig-x86_64-linux-0.16.0/zig c++ -shared -target aarch64-linux-gnu.2.17 -Wl,--strip-all \
+            -std=c++23 -O3 -g0 -fno-exceptions -fno-rtti -fdeclspec -w \
+            -Icore/cpp/jni_posix -I"$JAVA_HOME/include" \
+            core/cpp/tool.cpp -o core/libs/libtoolaarch64.so
+          ls -la core/libs/libtoolaarch64.so
+
+      - name: Verify native ABIs
+        # 守住两条：Linux aarch64 产物必须依赖 glibc（libc.so.6），Android 产物必须依赖 bionic（libc.so）。
+        run: |
+          readelf -d core/libs/libtoolaarch64.so | grep -F 'libc.so.6'
+          readelf -d core/libs/libtoolarm64.so | grep -F '[libc.so]'
 
       - name: Upload Native Artifacts
         uses: actions/upload-artifact@v7

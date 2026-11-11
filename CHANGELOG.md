@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_（暂无；下一个版本的内容写在这里）_
+### Fixed
+
+- **Linux aarch64 原生库缺失导致 `UnsatisfiedLinkError`**：`tool.cpp` 的构建目标此前只有
+  Linux x86_64 / macOS / Windows / Android arm64；Linux aarch64 会被解析到 Android NDK 产出的
+  `libtoolarm64.so`（bionic ABI，`NEEDED libc.so`），在 glibc 的 `ld-linux-aarch64.so.1` 下必然装载失败。
+  现在 `core/src/remold/util/NativeLibraryName` 按平台/ABI 解析文件名：Linux aarch64 走新增的
+  glibc 2.17 构建 `libtoolaarch64.so`（zig `aarch64-linux-gnu.2.17`），Android arm64 保留 NDK 产物；
+  `compile.bat`、CI/Release 的 `build-native` 同步产出该制品并校验 `NEEDED`（glibc vs bionic），
+  `NativeLibraryNameTest` 锁住平台矩阵（变异检查：把映射改回 Android 产物即 2 个用例变红）。
 
 ## [0.2.7] - 2026-11-11
 

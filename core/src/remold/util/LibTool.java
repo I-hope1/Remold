@@ -57,31 +57,34 @@ public class LibTool {
 		}
 
 		// 3. 从 Jar 资源或本地工程目录解包加载
-		File resolved = resolveNativeLibrary();
+		String os = System.getProperty("os.name", "unknown");
+		String arch = System.getProperty("os.arch", "unknown");
+		boolean android = isAndroid();
+		String libName = NativeLibraryName.resolve(os, arch, android);
+		File resolved = resolveNativeLibrary(libName);
 		if (resolved != null && resolved.exists()) {
 			System.load(resolved.getAbsolutePath());
 			initialized = true;
-			RemoldAgent.info("[Lib] Loaded libtool from: " + resolved.getAbsolutePath());
+			RemoldAgent.info("[Lib] Loaded " + libName + " from: " + resolved.getAbsolutePath());
 			return;
 		}
 
-		throw new UnsatisfiedLinkError("Cannot locate or load tool64 native library (tried remold.path.libtool, java.library.path, and embedded resources)");
+		throw new UnsatisfiedLinkError("Cannot locate or load native JVMTI library '" + libName
+			+ "' for " + os + "/" + arch + (android ? " (Android)" : "")
+			+ " (tried remold.path.libtool, java.library.path, and embedded resources)");
 	}
 
-	private static File resolveNativeLibrary() {
-		String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
-		String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
-		String libName;
-		if (os.contains("win")) {
-			libName = "tool64.dll";
-		} else if (os.contains("mac") || os.contains("darwin")) {
-			libName = "libtool64.dylib";
-		} else if (arch.contains("aarch64") || arch.contains("arm")) {
-			libName = "libtoolarm64.so";
-		} else {
-			libName = "libtool64.so";
+	/** Android/ART 下 {@code os.name} 同样是 {@code Linux}，只能靠该平台独有的类区分。 */
+	private static boolean isAndroid() {
+		try {
+			Class.forName("android.os.Build", false, LibTool.class.getClassLoader());
+			return true;
+		} catch (Throwable ignored) {
+			return false;
 		}
+	}
 
+	private static File resolveNativeLibrary(String libName) {
 		// 3.1 尝试从 classpath / jar 内部解包
 		String resourcePath = "/libs/" + libName;
 		try (InputStream in = LibTool.class.getResourceAsStream(resourcePath)) {

@@ -34,7 +34,7 @@
     - 开关控制：`remold.agent.anon_layout_gate`（`reject` / `warn` / `off`，默认 `reject`）。
 2. **重定义层全局门（逐类重定义前）**：
     - 接入点：`RemoldAgent.applyRedefineLayoutGate`；
-    - 判决函数：`LayoutGate.checkRedefine(diff.changedFields)`；
+    - 判决函数：`LayoutGate.`decideLayout`（原 `checkRedefine` 已不存在）(diff.changedFields)`；
     - 职责：拦截 **具名类及匿名类中用户声明的非合成字段**的删除、类型变更或静态性变更；
     - 判决三态：`COMPATIBLE` 放行、`WAIVED`（warn 模式放行但记录）、`REJECTED` 拒绝；
     - **静态字段强拒绝**：静态字段为类级共享状态，类只要加载就可能已有有效状态。因此静态字段变更命中时，即便存活堆实例判定为零，依然坚决拒绝（不可
@@ -135,3 +135,14 @@
 * **switch 表差异**：ECJ 不生成 `Foo$N` 形式的枚举 switch 映射类，而是生成宿主类内部的 `$SWITCH_TABLE$` 方法。因此 switch
   类的对齐与排除对 ECJ 不适用。
 * **嵌套类 EnclosingMethod 表现**：ECJ 在多层嵌套匿名类下的 `EnclosingMethod` 属性结构与 javac 存在差异，需持续进行样本特征跟踪。
+
+## 附：布局门与"实例数"的关系（本战役真机结论）
+
+布局门的两档判据仍然是"批次外读者为空"（删成员）与"字段表变化"（改类型/改静态性/新增合成）。
+`liveness` 只作为**兜底豁免**（`WAIVE` / `WAIVE_NO_READERS`），且必须写明"这是扫描所见，不是实例已死的证明"。
+
+`[观测]` 对**已加载的 Mixin 合成匿名类**，真机证明"字段表变化"的污染与实例数无关：`raw=0/reachable=0`
+时 `redefineClasses` 仍造成无关类 `newlyNull=230`。因此合成类侧不再使用 liveness 豁免，改为
+**成员 schema 变化一律拒绝**（见 [`docs/mixin/05-synthetic-inner-gate-and-abort.md`](../mixin/05-synthetic-inner-gate-and-abort.md)）。
+具名类侧的布局门判据不受此影响。
+

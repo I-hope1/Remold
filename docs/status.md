@@ -16,6 +16,37 @@
 
 ---
 
+
+## §0.11 Mixin 热更子系统专题文档索引
+
+本战役把 Mixin 热更与对齐子系统的机制、不变量与实证台账体系化为 `docs/mixin/01..08`（对标 `docs/topology/`）：
+
+| # | 文档 | 内容 |
+|:--|:--|:--|
+| 01 | [`mixin/01-invariants-and-classloader-authority.md`](mixin/01-invariants-and-classloader-authority.md) | 类加载器权威仲裁 / 基线防覆盖 / 访问权限单调不降级 / `ClassInfo.cache` 锚回 |
+| 02 | [`mixin/02-admission-and-bytecode-overlay.md`](mixin/02-admission-and-bytecode-overlay.md) | 新 Mixin 准入、四级字节来源、覆盖层与 `config.service` 替换、待决接力 |
+| 03 | [`mixin/03-reweave-and-member-alignment.md`](mixin/03-reweave-and-member-alignment.md) | 级联重织入管线、`refeedForTarget`、成员名/顺序回映、方法桩与字段墓碑保留 |
+| 04 | [`mixin/04-structural-reload-and-retarget.md`](mixin/04-structural-reload-and-retarget.md) | `priority` / `targets` / `interfaces` 三大结构契约的突破与回滚 |
+| 05 | [`mixin/05-synthetic-inner-gate-and-abort.md`](mixin/05-synthetic-inner-gate-and-abort.md) | 合成类单出口闸门、事务共退、自愈账本 |
+| 06 | [`mixin/06-walkthrough.md`](mixin/06-walkthrough.md) | 四个真实闭环场景的字节流与读数 |
+| 07 | [`mixin/07-runtime-and-diagnostics.md`](mixin/07-runtime-and-diagnostics.md) | 启动门闩、批次看门狗、`[VM-INFO]`、双通道堆哨兵 |
+| 08 | [`mixin/08-decisions-and-empirical-ledger.md`](mixin/08-decisions-and-empirical-ledger.md) | Lambda vs 匿名类、放弃原地扩容的实证链、未闭合项与 P2 |
+
+> 原先零散的 `mixin/aligner-convergence-verification.md` 与 `mixin/synthetic-redefine-observability.md`
+> 已并入上述编号文档（内容按主题拆入 03 / 05 / 08），不再单独维护。
+
+## §0.12 v0.2.7 封版终验读数（前线真机，同一会话未重启）
+
+`[观测]` 制品：agent `7778f4ae0ad4b06de886d22e36315985` / plugin-mixin `51b965ea3dfd50bf8392e4043c304a2a`（HEAD `db65bf0`）。
+
+| 路径 | 轮次 | 读数 |
+|:--|:--|:--|
+| 拒绝 | A1~A5 | `fieldTableChanged` `1→2→3→4→5`（每轮 +1）、`gateRejected` `1→2→3→4→5`（每轮 +1）、`executed=0`、宿主均 `was NOT redefined`（带 `metrics:`）、`newlyNull=0` |
+| 拒绝去重 | Adup | 同字节重发增量 `0/0`（不重复记账、不重复执行） |
+| 自愈放行 | B1~B5 | 每轮 `redefined in place; metrics:`，`executed` `1→2→3→4→5`（每轮 +1），`fieldTableChanged`/`gateRejected` 增量 0；`v1-restored`…`v5-restored` 全部运行态生效；25 切面 `nullCount=0 / newlyNull=0`，双通道 `agree=6100 / conflict=0 / unavailable=0`，0 崩溃 |
+
+熔断未触发 → **发布冻结解除，封版 0.2.7**。
+
 ## 0. 状态治理与规范文档清理进度 (Status Governance & Documentation Cleansing)
 
 为根治文档易腐性与状态漂移，本项目推行“规范规格与实现状态物理分离”治理方针。当前治理基线如下：

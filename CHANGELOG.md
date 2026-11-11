@@ -74,7 +74,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   验证：`AnonClassAmbiguityTest` 17/0（新增 4 个文案/持有者用例，含“无持有字段不得凭空点名”的负向对照；
   变异检查：把日志文案改回旧词后 4 条断言变红，恢复后复绿）。
 
-## [0.2.7] - 2026-11-10
+## [0.2.7] - 2026-11-11
+
+### Docs
+- **Mixin 热更子系统专题文档体系**：新增 `docs/mixin/01..08`（不变量与类加载器权威、准入与覆盖层、
+  重织入与成员对齐、结构契约突破、合成类单出口闸门与事务共退、端到端走查、运行期与诊断、决策与实证台账），
+  并把原先零散的 `aligner-convergence-verification.md` / `synthetic-redefine-observability.md` 并入；
+  `docs/topology/04/07/08` 同步增补 Tier 3.5 / Tier 4.5 / `findHoldingFields` 与"实例数不参与判决"的真机结论。
+- **v0.2.7 封版**：真机同一会话 A1~A5（拒绝，`fieldTableChanged`/`gateRejected` 每轮 +1、`newlyNull=0`）
+  与 B1~B5（自愈放行，`executed` 1→5、25 切面 `newlyNull=0`、双通道 `agree=6100/conflict=0`）全项达标。
 
 ### Fixed
 - **合成类成员 schema 变化一律拒绝（真机终局裁定）**：真机两分支实测闭合——`fieldTableChanged=true` 时

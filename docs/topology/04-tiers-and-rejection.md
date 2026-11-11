@@ -121,3 +121,32 @@ private static final Comparator<CandidatePair> PAIR_COMPARATOR = (p1, p2) -> {
     3. 控制台输出显式告警提示：  
        `[HOTSWAP-REJECT] Structural ambiguity detected in Foo. Redefine skipped safely. Please hot-swap again or restart.`
     4. 其它未受影响的宿主类继续正常推进热更新，杜绝单类故障导致整轮热更静默失效。
+
+## 附：Tier 3.5 与 Tier 4.5（本战役新增）
+
+两档都是"结构同形、无法靠字段表唯一证成"时的**带证据消歧**，都只改变"能不能配对"，不改变布局门判据。
+
+### Tier 3.5 · 方法体 token 相似度消歧
+
+结构（父类/接口/字段表）完全同形、但方法体不同的多个旧候选，按**方法体 token 集合的相似度**打分：
+唯一最高分才配对，并列即视为歧义（进入严格模式熔断）。实现在 `AnonClassAligner`（`Tier 3.5` 段，
+计数 `ambiguousMatches` 之外的 `tier3_5` 采纳数）。`[推断]` "token 相似度能代表行为同源"是启发式前提，
+未做真机穷举；因此它**只在结构完全同形**时启用，且从不单独决定布局兼容性。
+
+### Tier 4.5 · 全组零存活确定性配对
+
+严格置后：只有 Tier 3.5 仍无法消歧才进入。判据是**本轮堆扫描对这些旧候选没有可见存活实例（扫描可见为 0）**
++ 配对双方布局完全兼容。放行时打
+`[ANON_ALIGN] deterministic-zero-scan-pair (scan-visible live instances: 0): new -> old`。
+同一约定与布局门一致：**"扫描没看见"不是"实例已死"的证明**，日志必须写明这一点。
+
+### `findHoldingFields`：三层持有字段点名
+
+拒绝/告警时点名"是谁还持有这个实例"，三层依次尝试：
+
+1. **精确描述符**：字段描述符精确等于旧匿名类；
+2. **赋值流**：`NEW … PUTFIELD/PUTSTATIC` 赋值流可证该字段被写入过该类型实例；
+3. **父类型/接口候选**：字段类型是旧类的父类型或接口，可能持有它（只能点名，不能证明）。
+
+三层都命中不了时，提示 `@RemoldReinit` 逃生舱（显式声明该字段可在重定义后重放初值）。
+

@@ -3582,10 +3582,14 @@ public class RemoldAgent {
 
 			List<String> changed;
 			Set<String> reinitFields = Set.of();
+			Map<String, String> unextractableReinit = Map.of();
 			try {
 				ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, newBytes);
 				changed = diff.changedFields;
 				reinitFields = diff.reinitFields;
+				if (!reinitFields.isEmpty() && diff.newClass != null) {
+					unextractableReinit = remold.ref.InitFix.unextractableReinitFields(targetClass, diff.newClass, reinitFields);
+				}
 			} catch (Throwable t) {
 				warn("[LAYOUT-SKIP] " + className + ": layout gate skipped — cannot diff ("
 				     + t.getClass().getSimpleName() + "). Redefining without a field-layout check.");
@@ -3605,7 +3609,8 @@ public class RemoldAgent {
 			                                newBatchBytes.keySet(),
 			                                readersByClass.getOrDefault(className, RemovedMemberScan.NOT_SCANNED),
 			                                drift,
-			                                reinitFields);
+			                                reinitFields,
+			                                unextractableReinit);
 
 			// 显式出口：取不到基线 / 无法 diff 就不是"放行"，而是"没法判"。
 			// 静默放行会重演"整轮静默失效"那类难排查的问题，所以必须说出来。
@@ -3869,6 +3874,16 @@ public class RemoldAgent {
 	                                          SuperclassDriftGate.DriftDecision drift,
 	                                          Set<String> reinitFields) {
 		return LayoutDecisionEngine.decide(className, changedFields, mode, liveness, batchNames, scan, drift, reinitFields);
+	}
+
+	/** @see LayoutDecisionEngine#decide(String, List, String, Liveness, Set, RemovedMemberScan, SuperclassDriftGate.DriftDecision, Set, Map) */
+	public static LayoutDecision decideLayout(String className, List<String> changedFields,
+	                                          String mode, Liveness liveness, Set<String> batchNames,
+	                                          RemovedMemberScan scan,
+	                                          SuperclassDriftGate.DriftDecision drift,
+	                                          Set<String> reinitFields,
+	                                          Map<String, String> unextractableReinitFields) {
+		return LayoutDecisionEngine.decide(className, changedFields, mode, liveness, batchNames, scan, drift, reinitFields, unextractableReinitFields);
 	}
 
 	/** @see LayoutDecisionEngine#skipVerdictForLayout(LayoutDecision, RemovedMemberScan) */

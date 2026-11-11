@@ -197,8 +197,13 @@ public class AnnotationTransformer implements ClassFileTransformer {
 					if (layoutRes.verdict() == LayoutGate.Verdict.CHANGED_FIELD_TYPE) {
 						List<String> typeChanged = LayoutGate.typeChangedFields(diff.changedFields);
 						if (!LayoutGate.hasStaticFieldChange(diff.changedFields) && diff.reinitFields != null && !typeChanged.isEmpty() && diff.reinitFields.containsAll(typeChanged)) {
-							waiveReinit = true;
-							RemoldAgent.info("[LAYOUT-REINIT] " + dotClassName + ": 经 @RemoldReinit 授权放行字段类型变更 (" + layoutRes.detail() + ")");
+							Map<String, String> unextractable = remold.ref.InitFix.unextractableReinitFields(classBeingRedefined, diff.newClass, diff.reinitFields);
+							if (unextractable.isEmpty()) {
+								waiveReinit = true;
+								RemoldAgent.info("[LAYOUT-REINIT] " + dotClassName + ": 经 @RemoldReinit 授权放行字段类型变更 (" + layoutRes.detail() + ")");
+							} else {
+								RemoldAgent.warn("[LAYOUT-REINIT] " + dotClassName + ": @RemoldReinit 无法提取初值切片 (" + unextractable + ")，拒绝放行");
+							}
 						}
 					}
 					if (!waiveReinit && (RemoldAgent.hasLiveInstances(classBeingRedefined) || LayoutGate.hasStaticFieldChange(diff.changedFields))) {

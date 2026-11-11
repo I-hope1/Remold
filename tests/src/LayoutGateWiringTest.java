@@ -42,7 +42,7 @@ class LayoutGateWiringTest {
 	private static byte[] addedField()   { return cls(HOST, "package lg;\npublic class Host { int a; int b; }\n"); }
 	private static byte[] retypedField() { return cls(HOST, "package lg;\npublic class Host { long a; }\n"); }
 	private static byte[] retypedWithReinit() {
-		return cls(HOST, "package lg;\nimport remold.annotation.RemoldReinit;\npublic class Host { @RemoldReinit public long a; }\n");
+		return cls(HOST, "package lg;\nimport remold.annotation.RemoldReinit;\npublic class Host { @RemoldReinit public long a = 1L; }\n");
 	}
 	private static byte[] staticRetypedWithReinit() {
 		return cls(HOST, "package lg;\nimport remold.annotation.RemoldReinit;\npublic class Host { @RemoldReinit public static long s; }\n");

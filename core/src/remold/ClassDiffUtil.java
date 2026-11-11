@@ -180,6 +180,10 @@ public final class ClassDiffUtil {
 		public       boolean     enumOrderChanged    = false;
 		/** 发生顺序漂移的枚举常量明细（用于日志与拒绝提示） */
 		public final List<String> shiftedEnumConstants = new ArrayList<>();
+		/** Record 类是否新增了组件/实例字段（R1 守卫） */
+		public       boolean     recordComponentAdded = false;
+		/** 新增的 Record 组件字段名列表 */
+		public final List<String> addedRecordComponents = new ArrayList<>();
 
 		/** 继承层次是否发生变化（父类或接口变更） */
 		public       boolean      hierarchyChanged = false;
@@ -207,6 +211,8 @@ public final class ClassDiffUtil {
 			reinitFields.clear();
 			enumOrderChanged = false;
 			shiftedEnumConstants.clear();
+			recordComponentAdded = false;
+			addedRecordComponents.clear();
 			hierarchyChanged = false;
 			superChanged = false;
 			addedInterfaces.clear();
@@ -379,6 +385,17 @@ public final class ClassDiffUtil {
 				d.enumOrderChanged = true;
 				d.changedFields.add("~ *enum constant order changed: " + d.shiftedEnumConstants);
 			}
+		}
+
+		// Record 类新增组件检查（R1 守卫）
+		boolean isRecord = (newC.access & Opcodes.ACC_RECORD) != 0 || "java/lang/Record".equals(newC.superName)
+			|| (oldC.access & Opcodes.ACC_RECORD) != 0 || "java/lang/Record".equals(oldC.superName);
+		Set<String> pureAddedRecordComponents = new LinkedHashSet<>(d.addedInstanceFields);
+		pureAddedRecordComponents.removeAll(d.typeChangedFields);
+		if (isRecord && !pureAddedRecordComponents.isEmpty()) {
+			d.recordComponentAdded = true;
+			d.addedRecordComponents.addAll(pureAddedRecordComponents);
+			d.changedFields.add("~ *record component added: " + d.addedRecordComponents);
 		}
 
 		// 方法对比逻辑：同样采用映射销毁法

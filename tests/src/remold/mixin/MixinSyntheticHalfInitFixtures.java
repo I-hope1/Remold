@@ -55,6 +55,35 @@ final class MixinSyntheticHalfInitFixtures {
 	private MixinSyntheticHalfInitFixtures() {
 	}
 
+
+	/**
+	 * Test-only copy of the old {@code <init>} union: the production path no longer retains constructors
+	 * (a member-schema change is refused outright), but the C3 candidate still has to be built the way a
+	 * union <b>would</b> have built it, so the half-migrated semantics can be measured on its bytes.
+	 */
+	static List<String> retainConstructors(ClassNode fresh, byte[] loadedBytes) {
+		java.util.Set<String> present = new java.util.HashSet<>();
+		for (MethodNode m : fresh.methods) {
+			if ("<init>".equals(m.name)) {
+				present.add(m.desc);
+			}
+		}
+		List<String> retained = new ArrayList<>();
+		if (loadedBytes == null) {
+			return retained;
+		}
+		ClassNode loaded = new ClassNode();
+		new org.objectweb.asm.ClassReader(loadedBytes).accept(loaded, 0);
+		for (MethodNode m : loaded.methods) {
+			if ("<init>".equals(m.name) && !present.contains(m.desc)) {
+				fresh.methods.add(m);
+				present.add(m.desc);
+				retained.add(m.desc);
+			}
+		}
+		return retained;
+	}
+
 	/** Bytes the JVM loaded for the old shape (what the baseline/premain recorder would hold). */
 	static byte[] oldShapeBytes() {
 		return MixinSyntheticGateFixtures.bytesOf(HalfInitOld.class);
@@ -64,7 +93,7 @@ final class MixinSyntheticHalfInitFixtures {
 	static Candidate expandedCandidate() {
 		byte[] old = oldShapeBytes();
 		ClassNode node = grownShapeNode();
-		List<String> retained = MixinSyntheticSchema.retainConstructors(node, old);
+		List<String> retained = retainConstructors(node, old);
 		return new Candidate(serialize(node), MixinSyntheticSchema.nodeFields(node), constructorsOf(node),
 			retained, fieldWritesOf(node, "<init>", OLD_CTOR_DESC));
 	}

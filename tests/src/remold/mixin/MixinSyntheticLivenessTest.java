@@ -154,13 +154,11 @@ class MixinSyntheticLivenessTest {
 		int[] calls = {0};
 		MixinInnerClassHotSwap.setInstanceProbeForTest(type -> {
 			calls[0]++;
-			return calls[0] == 1 ? new Object[2] : new Object[0];
+			return new Object[2];
 		});
 		try {
-			MixinInnerClassHotSwap.LiveCount reading = MixinInnerClassHotSwap.syntheticLive(live, true);
-			assertEquals(2, reading.raw, "raw must count what the heap walk reports before the GC");
-			assertEquals(0, reading.reachable, "reachable must be the post-GC count, not the raw one");
-			assertTrue(reading.measured(), "a successful probe must be reported as measured");
+			assertEquals(2, MixinInnerClassHotSwap.syntheticLive(live),
+				"the diagnostic counter must report what the heap walk sees (no GC is performed any more)");
 
 			calls[0] = 0;
 			int[] before = metrics();
@@ -248,26 +246,22 @@ class MixinSyntheticLivenessTest {
 	void theProductProbeDistinguishesHeldInstancesFromCollectedOnes() {
 		Class<?> live = MixinSyntheticHalfInitFixtures.loadInFreshLoader(
 			MixinSyntheticHalfInitFixtures.oldShapeBytes());
-		MixinInnerClassHotSwap.LiveCount availability = MixinInnerClassHotSwap.syntheticLive(live, false);
-		Assumptions.assumeTrue(availability.measured(),
+		Assumptions.assumeTrue(MixinInnerClassHotSwap.syntheticLive(live) >= 0,
 			"the product live-instance probe (LibTool.getInstances) is unavailable in this JVM");
 
 		Object[] holder = {MixinSyntheticHalfInitFixtures.newInstance(live,
 			new Class<?>[]{Object.class, Object.class}, "host", "captured")};
-		MixinInnerClassHotSwap.LiveCount held = MixinInnerClassHotSwap.syntheticLive(live, true);
-		assertTrue(held.raw >= 1, "a strongly held instance must be visible on the heap, raw=" + held.raw);
-		assertTrue(held.reachable >= 1,
-			"a strongly held instance must survive the GC, reachable=" + held.reachable);
+		int heldRaw = MixinInnerClassHotSwap.syntheticLive(live);
+		assertTrue(heldRaw >= 1, "a strongly held instance must be visible on the heap, raw=" + heldRaw);
 
 		holder[0] = null;
-		int reachable = held.reachable;
-		for (int attempt = 0; attempt < 8 && reachable > 0; attempt++) {
+		int collected = heldRaw;
+		for (int attempt = 0; attempt < 8 && collected > 0; attempt++) {
 			System.gc();
-			reachable = MixinInnerClassHotSwap.syntheticLive(live, true).reachable;
+			collected = MixinInnerClassHotSwap.syntheticLive(live);
 		}
-		assertEquals(0, reachable,
-			"after dropping the last reference and collecting, the probe must report zero reachable instances"
-				+ " (otherwise the gate would refuse a class nobody holds)");
+		assertEquals(0, collected,
+			"after dropping the last reference and collecting, the diagnostic count must be zero");
 	}
 
 	// ------------------------------------------------------------ harness

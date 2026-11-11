@@ -15,4 +15,8 @@ zig c++ -shared -target x86_64-macos -Wl,-dead_strip %COMMON% -o ../libs/libtool
 zig c++ -shared -target x86_64-linux-gnu.2.17 -Wl,--strip-all %COMMON% -o ../libs/libtool64.so tool.cpp
 REM Linux aarch64: put the posix jni_md.h before %COMMON%. The win32 one (__declspec/__int64)
 REM is Windows semantics and must not be used for an ELF artifact.
+REM NOTE: the link phase of "zig c++" builds zig's bundled libc++ from source; that internal build
+REM ignores -w and may print -Wnullability-completeness warnings from libc++ headers. They are
+REM third-party header noise, not from tool.cpp. CI does not rebuild this artifact (it is committed
+REM like the macOS/Windows binaries); see .github/workflows/ci.yml "Verify native ABIs".
 zig c++ -shared -target aarch64-linux-gnu.2.17 -Wl,--strip-all -I"%~dp0jni_posix" %COMMON% -o ../libs/libtoolaarch64.so tool.cpp

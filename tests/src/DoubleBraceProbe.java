@@ -26,6 +26,7 @@ import java.util.Set;
  *
  * <p>Run via {@code ./gradlew :tests:doubleBraceProbe}.</p>
  */
+@SuppressWarnings({"deprecation", "removal"})
 public class DoubleBraceProbe {
 
 	static int passed = 0;

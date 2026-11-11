@@ -14,8 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `libtoolarm64.so`（bionic ABI，`NEEDED libc.so`），在 glibc 的 `ld-linux-aarch64.so.1` 下必然装载失败。
   现在 `core/src/remold/util/NativeLibraryName` 按平台/ABI 解析文件名：Linux aarch64 走新增的
   glibc 2.17 构建 `libtoolaarch64.so`（zig `aarch64-linux-gnu.2.17`），Android arm64 保留 NDK 产物；
-  `compile.bat`、CI/Release 的 `build-native` 同步产出该制品并校验 `NEEDED`（glibc vs bionic），
+  `compile.bat` 产出该制品（与 Windows/macOS 产物一样随仓库分发），CI/Release 的 `build-native`
+  校验其 ABI（`AArch64`、`libc.so.6`+`libpthread.so.0`、glibc 基线 2.17、非 bionic）并上传，
   `NativeLibraryNameTest` 锁住平台矩阵（变异检查：把映射改回 Android 产物即 2 个用例变红）。
+- **CI 原生库构建不再引入第三方 `-Wnullability-completeness` 注解**：上一版把 Linux aarch64
+  构建放进 `build-native` 后，zig 的 `c++` 链接阶段会从源码构建它内置的 libc++，该内部构建不受
+  `-w` 控制，会刷出数千条 libc++ 头文件告警并被 GitHub 解析成注解。现在 aarch64 产物沿用
+  Windows/macOS 的"随仓库分发 + CI 只校验"模式，构建仍由 `compile.bat` 完成；同时
+  `AddFieldReloadProbe` / `DoubleBraceProbe` 补 `@SuppressWarnings({"deprecation", "removal"})`
+  （探针刻意调用 JDK 标记为 removal 的 `Unsafe` 入口，JDK 8/11 仍需这些 API）。
 
 ## [0.2.7] - 2026-11-11
 

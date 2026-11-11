@@ -22,6 +22,7 @@ import java.nio.file.Paths;
  *
  * <p>跑法：{@code ./gradlew :tests:addFieldProbe -Pp05.jbr=<DCEVM JDK>}。</p>
  */
+@SuppressWarnings({"deprecation", "removal"})
 public class AddFieldReloadProbe {
 
 	private static final String CLASS_NAME = "probe.probe_Case";

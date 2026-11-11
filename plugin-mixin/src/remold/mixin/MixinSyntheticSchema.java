@@ -49,6 +49,37 @@ final class MixinSyntheticSchema {
 	}
 
 	/**
+	 * 已加载字段表的**带标志位**签名（{@code name:desc:static:synthetic}，顺序与 class 文件一致）。
+	 *
+	 * <p>{@link #loadedFields} / {@link #nodeFields} 只比 {@code name:desc}，看不见"同名同描述符但
+	 * {@code static} 翻转"或"{@code ACC_SYNTHETIC} 被摘掉"这类结构变化。闸门必须把两者都比一遍：
+	 * 前者用于墓碑补齐/重命名的身份判据，后者用于"这一版到底算不算改了成员 schema"。</p>
+	 *
+	 * <p>标志位口径与 {@code AnonClassAligner} 的 Tier 4 布局门一致（它也把 {@code isStatic} /
+	 * {@code isSynthetic} 纳入判据），避免同一件事在两层给出不同答案。</p>
+	 */
+	static List<String> loadedFieldSignatures(Class<?> loaded) {
+		List<String> out = new ArrayList<>();
+		for (Field f : loaded.getDeclaredFields()) {
+			out.add(f.getName() + ":" + Type.getDescriptor(f.getType())
+				+ ":" + Modifier.isStatic(f.getModifiers())
+				+ ":" + f.isSynthetic());
+		}
+		return out;
+	}
+
+	/** 候选字段表的带标志位签名（与 {@link #loadedFieldSignatures} 同口径）。 */
+	static List<String> nodeFieldSignatures(ClassNode node) {
+		List<String> out = new ArrayList<>();
+		for (FieldNode f : node.fields) {
+			out.add(f.name + ":" + f.desc
+				+ ":" + ((f.access & org.objectweb.asm.Opcodes.ACC_STATIC) != 0)
+				+ ":" + ((f.access & org.objectweb.asm.Opcodes.ACC_SYNTHETIC) != 0));
+		}
+		return out;
+	}
+
+	/**
 	 * 用已加载字段表补齐候选：缺失的字段以墓碑字段追加（同名/同描述符，{@code ACC_SYNTHETIC}）。
 	 *
 	 * @return 追加的字段签名列表（空表示字段表已经恒等）

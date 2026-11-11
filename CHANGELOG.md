@@ -77,6 +77,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.7] - 2026-11-10
 
 ### Fixed
+- **合成类成员 schema 变化一律拒绝（真机终局裁定）**：真机两分支实测闭合——`fieldTableChanged=true` 时
+  即便 `live{raw=0 reachable=0}`（堆上 0 实例），JBR-21 DCEVM 的 `redefineClasses` 仍必现
+  `newlyNull=230`（抹掉 230 个具名 Record `LootCondition` 引用）。故删除「变化 + 无存活实例 → 放行」
+  分支：只要字段表（含 `isStatic`/`isSynthetic`）相对已加载版本变化，一律 `gateRejected=1` +
+  `BytecodeTransformerBridge.Abort` 宿主原子共退；`live{raw,reachable}` 保留为诊断读数。
+- **禁止同批自动重试**：新增 `SyntheticAbortLedger`（宿主 → 被拒候选签名），`flushPendingTargets` 在
+  `redefineDynamic` 之前按候选字节签名跳过同一份候选；候选字节变化（重编译）才清 `BLOCKED` 重新评估，
+  成功落地即清账。修掉真机情况 1 的漏洞（同轮重试读到不同堆读数后放行 → 崩服）。
+- **字段标志位纳入 schema 比较**：`MixinSyntheticSchema.loadedFieldSignatures` / `nodeFieldSignatures`
+  把 `isStatic` / `isSynthetic` 一并比较，防同名同描述符但 static 翻转漏检（与 `AnonClassAligner` Tier 4
+  门同口径）。
 - **合成类存量实例（liveness）三档闸门**：真机 P0 复跑证明「字段表只增不减」不足以避开 JBR
   `ModifyInstances`——`fieldTableChanged=1` 的原地 redefine 仍把无关类 `LootContextPredicate`
   的 `combinedCondition` 冲成 `null`（230/244）。补上缺失维度：`MixinInnerClassHotSwap.syntheticLive`

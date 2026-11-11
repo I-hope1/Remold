@@ -1,9 +1,15 @@
 # Remold
 
-[![Release](https://img.shields.io/github/v/release/I-hope1/Remold?color=007ec6&logo=github&label=version)](https://github.com/I-hope1/Remold/releases)
-[![JitPack](https://jitpack.io/v/I-hope1/Remold.svg)](https://jitpack.io/#I-hope1/Remold)
-[![CI](https://img.shields.io/github/actions/workflow/status/I-hope1/Remold/ci.yml?branch=main&label=CI)](https://github.com/I-hope1/Remold/actions)
-[![License](https://img.shields.io/badge/license-Apache--2.0-orange.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/I-hope1/Remold/releases"><img alt="version" src="https://img.shields.io/github/v/release/I-hope1/Remold?color=007ec6&logo=github&label=version"></a>
+  <a href="https://jitpack.io/#I-hope1/Remold"><img alt="jitpack" src="https://jitpack.io/v/I-hope1/Remold.svg"></a>
+  <a href="https://github.com/I-hope1/Remold/releases"><img alt="downloads" src="https://img.shields.io/github/downloads/I-hope1/Remold/total?color=brightgreen&label=downloads"></a>
+  <a href="https://github.com/I-hope1/Remold/releases/latest"><img alt="downloads@latest" src="https://img.shields.io/github/downloads/I-hope1/Remold/latest/total?color=green&label=downloads%40latest"></a>
+  <a href="https://github.com/I-hope1/Remold/issues"><img alt="issues" src="https://img.shields.io/github/issues/I-hope1/Remold?color=yellow&label=issues"></a>
+  <a href="https://github.com/I-hope1/Remold/graphs/contributors"><img alt="contributors" src="https://img.shields.io/github/contributors/I-hope1/Remold?label=contributors"></a>
+  <a href="https://github.com/I-hope1/Remold/actions"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/I-hope1/Remold/ci.yml?branch=main&label=CI"></a>
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-orange.svg"></a>
+</p>
 
 简体中文 | [English](README_EN.md) · [Gradle 插件文档](gradle-plugin/README.md) · [实现状态与边界 (status.md)](docs/status.md) · [Mixin 子系统文档](docs/mixin/01-invariants-and-classloader-authority.md)
 

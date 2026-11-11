@@ -113,56 +113,17 @@ final class MixinInnerClassHotSwap {
 	}
 
 	/**
-	 * 一次 liveness 读数。
+	 * 该合成类在堆上的存量实例数（纯诊断读数，<b>不参与判决</b>）。
 	 *
-	 * <p>{@code raw} = 堆上该类的全部实例（<b>含不可达但尚未被 GC 物理回收</b>的对象——{@code LibTool}
-	 * 的堆遍历语义如此，Eden 区里刚产生又没人引用的临时实例也在内）。{@code reachable} = 一次
-	 * {@code System.gc()} 之后再数的结果，用来回答"热更瞬间堆上到底还有没有活着的旧实例"。
-	 * {@code -1} = 探针不可用（拿不到读数，调用方必须 fail-closed）。</p>
+	 * <p>{@code -1} = 探针不可用。语义是 {@code LibTool.getInstances} 的堆遍历口径：<b>含不可达但尚未被
+	 * GC 物理回收</b>的对象。真机已裁定成员 schema 变化的污染与实例数无关（`raw=0` 时仍 `newlyNull=230`），
+	 * 因此这里<b>不做 {@code System.gc()}</b>：既不需要"可达实例数"，也不该在游戏进程里制造一次 STW。</p>
 	 */
-	static final class LiveCount {
-		final int raw;
-		final int reachable;
-
-		LiveCount(int raw, int reachable) {
-			this.raw = raw;
-			this.reachable = reachable;
-		}
-
-		boolean measured() {
-			return this.reachable >= 0;
-		}
-
-		String reachableText() {
-			return this.reachable < 0 ? "unavailable" : String.valueOf(this.reachable);
-		}
-	}
-
-	/**
-	 * 数一次该合成类在堆上的存量实例。
-	 *
-	 * <p><b>为什么只在字段表变化且 raw &gt; 0 时做 GC</b>：{@code System.gc()} 是整堆停顿，只有"字段表
-	 * 变化 + 堆上确实有实例"这一种情形需要区分"真存活"与"不可达临时实例"；其余情形（只改方法体）无论
-	 * 有没有实例都放行，做 GC 只会白付代价。</p>
-	 *
-	 * <p><b>GC 是提示不是保证</b>：{@code -XX:+DisableExplicitGC} 下 GC 不会发生，此时 {@code reachable}
-	 * 仍等于 {@code raw}，判据落到"有实例 → 拒绝"一侧（安全方向），不会误放行。</p>
-	 */
-	static LiveCount syntheticLive(Class<?> live, boolean fieldTableChanged) {
+	static int syntheticLive(Class<?> live) {
 		if (live == null) {
-			return new LiveCount(-1, -1);
+			return -1;
 		}
-		int raw = probeInstanceCount(live);
-		if (raw < 0) {
-			return new LiveCount(-1, -1);
-		}
-		if (!fieldTableChanged || raw == 0) {
-			// 只改方法体：不关心 reachable；raw == 0：本来就是 0。
-			return new LiveCount(raw, raw);
-		}
-		System.gc();
-		int reachable = probeInstanceCount(live);
-		return new LiveCount(raw, reachable);
+		return probeInstanceCount(live);
 	}
 
 	/** 探针调用；任何失败都返回 {@code -1}（= 读数不可用），绝不抛出打断闸门。 */
@@ -295,28 +256,9 @@ final class MixinInnerClassHotSwap {
 					continue;
 				}
 				java.util.List<String> loadedFields = MixinSyntheticSchema.loadedFields(live);
-				byte[] loadedBytes = baselineBytesForLoaded(live, conformedDotted);
-				java.util.Map<String, String> renamed = MixinSyntheticSchema.renameCollisions(fresh, loadedFields);
-				// 新增字段必须在 padFields 之前取：补齐会给候选追加墓碑字段，之后就分不清两者。
-				java.util.List<String> appended = MixinSyntheticSchema.appendedFields(fresh, loadedFields);
-				java.util.List<String> padded = MixinSyntheticSchema.padFields(fresh, loadedFields);
-				java.util.List<String> retainedCtors = MixinSyntheticSchema.retainConstructors(fresh, loadedBytes);
-				if (!renamed.isEmpty()) {
-					RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted
-						+ ": renamed " + renamed.size() + " same-name field(s) " + renamed + " (append-only).");
-				}
-				if (!padded.isEmpty()) {
-					RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted
-						+ ": retained " + padded.size() + " tombstone field(s) " + padded + ".");
-				}
-				if (!retainedCtors.isEmpty()) {
-					RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted
-						+ ": retained " + retainedCtors.size() + " baseline <init> overload(s) " + retainedCtors + ".");
-				}
-				// 逐次可分类（战报口径）：每次合成类重定义的字段表变化必须自报，否则只能从
-				// retained/renamed 行反推，无法区分"追加"与"不变"。
-				RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted + " field table vs loaded: "
-					+ MixinSyntheticSchema.describeFieldTableChange(appended, renamed, padded)
+				// 字段表相对**已加载类实时反射表**（不变量 A）的差异：只做诊断，判决在单一出口里。
+				RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted + " field table vs loaded: loaded="
+					+ loadedFields + " fresh=" + MixinSyntheticSchema.nodeFields(fresh)
 					+ " (schemaHash=" + MixinSyntheticSchema.schemaHash(fresh) + ").");
 				byte[] bytes = serialize(fresh);
 				if (isUnchanged(live.getClassLoader(), conformedDotted, bytes)) {
@@ -425,37 +367,6 @@ final class MixinInnerClassHotSwap {
 	}
 
 	/**
-	 * 已加载合成类的<b>基线字节</b>（不变量 C1）：JVM 里实际加载的那一份。
-	 *
-	 * <p><b>为什么不能读 {@link #GENERATED}</b>：那是"本进程生成过什么"的覆盖层，不是"JVM 里现在是
-	 * 什么"。R0（客户端启动）加载的合成类在 R1 首次热更时覆盖层<b>必然为空</b>——覆盖层只在成功
-	 * 生成/回灌后才写入。用它当基线，{@code retainConstructors} 拿到 {@code null}，于是旧
-	 * {@code <init>} 一个都留不下来，闸 2 反过来把这次重定义拒掉（真机表现为
-	 * {@code executed=0, gateRejected=1} 随后 {@code NoSuchMethodError} 崩服）。</p>
-	 *
-	 * <p>基线链（与闸 4 同源，顺序有意义）：本加载器已生效字节
-	 * {@link MixinClassBaseline#appliedOf}（R1+，成功 redefine 后的那份）→ premain 录口
-	 * {@link MixinClassBaseline#baselineOf}（R0，{@code (加载器身份, 类名)} 键）→ 最后才退回覆盖层。
-	 * 前两者带加载器身份，同名类被两个加载器各定义一份时不会互相冒充。</p>
-	 *
-	 * <p>本条路径<b>不计</b> {@code missed}：分母口径是"闸 4 每拒绝一次计一次"，基线在这里被正常
-	 * 读到/读不到都不该改变拒绝计数（否则同一次拒绝会记两次）。</p>
-	 *
-	 * @param live       已加载的合成类（{@code null} = 尚未加载，退回覆盖层）
-	 * @param dottedName 合成类点分名
-	 * @return 基线字节；{@code null} = 既无录口也无覆盖层（调用方必须 fail-closed）
-	 */
-	private static byte[] baselineBytesForLoaded(Class<?> live, String dottedName) {
-		if (live != null) {
-			byte[] baseline = baselineBytes(live.getClassLoader(), dottedName, false);
-			if (baseline != null) {
-				return baseline;
-			}
-		}
-		return generatedBytes(dottedName);
-	}
-
-	/**
 	 * 合成类所属的<b>宿主目标类</b>点分名：{@code BLOCKED} 的键，也是 {@code MixinReWeaver} 询问
 	 * "宿主本轮要不要中止"时用的名字。
 	 *
@@ -561,60 +472,10 @@ final class MixinInnerClassHotSwap {
 				// 基线字节 = 本加载器 JVM 实际加载的那份（premain 录口 / 已生效字节），
 				// 不是本进程上一轮生成到覆盖层里的字节：R0 启动期加载的合成类在 R1 首次热更时
 				// 覆盖层是空的，读覆盖层会让 retainConstructors 拿不到任何旧 <init>。
-				byte[] loadedBytes = baselineBytesForLoaded(live, conformedDotted);
-				// 规则 1：同名异型捕获字段重命名追加（不覆盖基线槽位）
-				java.util.Map<String, String> renamed = MixinSyntheticSchema.renameCollisions(fresh, loadedFields);
-				// 新增字段必须在 padFields 之前取（补齐会给候选追加墓碑字段）。
-				java.util.List<String> appended = MixinSyntheticSchema.appendedFields(fresh, loadedFields);
-				// 基线槽位补齐（禁止缩容）
-				java.util.List<String> padded = MixinSyntheticSchema.padFields(fresh, loadedFields);
-				// 规则 2：<init> 重载墓碑并集（新旧构造器同时存在）
-				java.util.List<String> retainedCtors = MixinSyntheticSchema.retainConstructors(fresh, loadedBytes);
-				if (!renamed.isEmpty()) {
-					RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted
-						+ ": renamed " + renamed.size() + " same-name field(s) with a different descriptor "
-						+ renamed + " (baseline slots untouched).");
-				}
-				if (!padded.isEmpty()) {
-					RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted
-						+ ": retained " + padded.size() + " tombstone field(s) " + padded
-						+ " so the field table only grows (no ModifyInstances shrink).");
-				}
-				if (!retainedCtors.isEmpty()) {
-					RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted
-						+ ": retained " + retainedCtors.size() + " baseline <init> overload(s) " + retainedCtors
-						+ " so old call sites keep linking.");
-				}
-				// 逐次可分类（战报口径）：字段表变化自报，避免只能从 retained/renamed 行反推。
-				RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted + " field table vs loaded: "
-					+ MixinSyntheticSchema.describeFieldTableChange(appended, renamed, padded)
+				// 字段表相对**已加载类实时反射表**（不变量 A）的差异：只做诊断，判决在单一出口里。
+				RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted + " field table vs loaded: loaded="
+					+ loadedFields + " fresh=" + MixinSyntheticSchema.nodeFields(fresh)
 					+ " (schemaHash=" + MixinSyntheticSchema.schemaHash(fresh) + ").");
-				// 规则 3：已加载的构造器签名必须全部仍在候选里（旧调用点才可能命中）；否则中止宿主重定义。
-				if (live != null) {
-					java.util.List<String> missingCtors = new ArrayList<>();
-					for (java.lang.reflect.Constructor<?> c : live.getDeclaredConstructors()) {
-						String desc = Type.getConstructorDescriptor(c);
-						boolean present = false;
-						for (org.objectweb.asm.tree.MethodNode m : fresh.methods) {
-							if ("<init>".equals(m.name) && desc.equals(m.desc)) {
-								present = true;
-								break;
-							}
-						}
-						if (!present) {
-							missingCtors.add(desc);
-						}
-					}
-					if (!missingCtors.isEmpty()) {
-						BLOCKED.add(MixinInnerClassSupport.dotName(targetInternal));
-						RemoldAgent.warn("[Mixin] synthetic inner class " + conformedDotted
-							+ " cannot keep loaded constructor(s) " + missingCtors
-							+ " (baseline bytes " + (loadedBytes == null ? "MISSING" : "present(" + loadedBytes.length + "B)")
-							+ ", retained=" + retainedCtors + "); aborting the host target redefine to avoid a"
-							+ " split state (rule: transactional consistency).");
-						continue;
-					}
-				}
 				byte[] bytes = serialize(fresh);
 				// 这里刻意读**覆盖层**（上一轮生成了什么），不是基线（JVM 里是什么）：它只用来判断
 				// "本次生成的字节相对上一次生成有没有变"，从而决定是否值得多一次 redefine。
@@ -726,27 +587,36 @@ final class MixinInnerClassHotSwap {
 		boolean fieldTableChanged = !loadedFields.equals(freshFields)
 			|| !MixinSyntheticSchema.loadedFieldSignatures(live)
 				.equals(MixinSyntheticSchema.nodeFieldSignatures(fresh));
-		if (fieldTableChanged) {
-			// 口径说明：本计数表示"字段表相对已加载版本发生变化"，与是否放行无关——
-			// 拒绝时也要报出来，否则真机只能看到 gateRejected=1 而不知道是不是 schema 变化触发。
-			FIELD_CHANGED.incrementAndGet();
-		}
-		LiveCount liveness = syntheticLive(live, fieldTableChanged);
-		RemoldAgent.info("[Mixin] synthetic inner class " + name + " live{raw=" + liveness.raw + " reachable="
-			+ liveness.reachableText() + "} fieldTableChanged=" + fieldTableChanged
-			+ " loaded=" + loadedFields + " fresh=" + freshFields
+		int liveCount = syntheticLive(live);
+		RemoldAgent.info("[Mixin] synthetic inner class " + name + " live{raw="
+			+ (liveCount < 0 ? "unavailable" : String.valueOf(liveCount)) + "} fieldTableChanged="
+			+ fieldTableChanged + " loaded=" + loadedFields + " fresh=" + freshFields
 			+ " loadedFlags=" + MixinSyntheticSchema.loadedFieldSignatures(live)
 			+ " freshFlags=" + MixinSyntheticSchema.nodeFieldSignatures(fresh) + ".");
+		// 候选签名的锚点 = **这次要送进 JVM 的候选字节**（不可变、随源码变化），不是宿主目标类的
+		// originalBytes（它恒定不变，会把"用户已改回一致捕获列表"也误判成同一份被拒候选而永久锁死）。
+		long candidateSignature = java.util.Arrays.hashCode(bytes) & 0xffffffffL;
 		if (fieldTableChanged) {
+			FIELD_CHANGED.incrementAndGet();
 			GATE_REJECTED.incrementAndGet();
+			if (SyntheticAbortLedger.isSameCandidateAborted(name, candidateSignature)) {
+				blockHost(hostDotName, name, "stays aborted: the identical candidate bytes (signature="
+					+ candidateSignature + ") were already refused in this session; not retrying them — change the"
+					+ " capture list or the anonymous-class source to start a new candidate");
+				return false;
+			}
+			SyntheticAbortLedger.record(name, candidateSignature);
 			blockHost(hostDotName, name, "field table changed (" + loadedFields + " -> " + freshFields + "; flags "
 				+ MixinSyntheticSchema.loadedFieldSignatures(live) + " -> "
-				+ MixinSyntheticSchema.nodeFieldSignatures(fresh) + ") with live{raw=" + liveness.raw + " reachable="
-				+ liveness.reachableText() + "}: a member-schema change on a loaded synthetic class makes JBR/DCEVM"
-				+ " rewrite unrelated heaps (real machine: newlyNull=230 even with zero instances), so it is refused"
-				+ " regardless of the instance count — restart, or keep the capture list stable (@RemoldReinit / lambda)");
+				+ MixinSyntheticSchema.nodeFieldSignatures(fresh) + ") with live{raw="
+				+ (liveCount < 0 ? "unavailable" : String.valueOf(liveCount)) + "}: a member-schema change on a"
+				+ " loaded synthetic class makes JBR/DCEVM rewrite unrelated heaps (real machine: newlyNull=230 even"
+				+ " with zero instances), so it is refused regardless of the instance count — restart, or keep the"
+				+ " capture list stable (@RemoldReinit / lambda)");
 			return false;
 		}
+		// 放行路径：清掉该合成类名下任何陈旧记录（"被拒 → 改回一致 → 放行"必须在同一会话内自愈）。
+		SyntheticAbortLedger.clear(name);
 		remold.ref.HeapFieldWatch.snapshot("before-synthetic-redefine", name);
 		RemoldAgent.enterInternalRedefine(java.util.Collections.singleton(name));
 		try {
@@ -820,8 +690,7 @@ final class MixinInnerClassHotSwap {
 	 * 基线解析口（可关闭未命中计数）。
 	 *
 	 * @param countMiss 是否把未命中记进 {@code missed} 分母。<b>只有闸 4 该计</b>：分母口径是
-	 *                  "一次拒绝计一次"，其它调用点（例如 {@link #baselineBytesForLoaded} 读基线去
-	 *                  保留旧 {@code <init>}）读到/读不到都不改变拒绝计数，计数会让同一次拒绝记两遍。
+	 *                  "一次拒绝计一次"，非闸判据的读取点读到/读不到都不改变拒绝计数。
 	 */
 	static byte[] baselineBytes(ClassLoader loader, String dotName, boolean countMiss) {
 		if (dotName == null) {

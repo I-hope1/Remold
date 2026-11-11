@@ -244,10 +244,8 @@ public final class MixinSyntheticGateProbe {
 			"precondition: the 2-field instance reads its captured field before the redefine");
 
 		// ---- P4a: the growth is REFUSED while an instance is still alive (liveness gate).
-		MixinInnerClassHotSwap.LiveCount held = MixinInnerClassHotSwap.syntheticLive(narrow, true);
-		require(held.measured() && held.reachable > 0,
-			"precondition: a live instance must be visible to the product probe, got raw=" + held.raw
-				+ " reachable=" + held.reachableText());
+		int heldRaw = MixinInnerClassHotSwap.syntheticLive(narrow);
+		require(heldRaw > 0, "precondition: a live instance must be visible to the product probe, got raw=" + heldRaw);
 		int[] before = metrics();
 		boolean expanded = MixinInnerClassHotSwap.redefineSyntheticSafely(inst, narrow, HALF_FIXTURE,
 			candidate.bytes(), HOST);
@@ -264,12 +262,11 @@ public final class MixinSyntheticGateProbe {
 		// the real-machine P0 run decides: if a real redefine still pollutes unrelated heaps with zero
 		// instances, this branch has to be folded into the refusal.
 		preExisting = null;
-		int reachable = held.reachable;
-		for (int attempt = 0; attempt < 8 && reachable > 0; attempt++) {
+		for (int attempt = 0; attempt < 8 && MixinInnerClassHotSwap.syntheticLive(narrow) > 0; attempt++) {
 			System.gc();
-			reachable = MixinInnerClassHotSwap.syntheticLive(narrow, true).reachable;
 		}
-		require(reachable == 0, "the probe must report zero reachable instances after the GC, got " + reachable);
+		int freeRaw = MixinInnerClassHotSwap.syntheticLive(narrow);
+		require(freeRaw == 0, "the probe must report zero instances after the GC, got " + freeRaw);
 		MixinInnerClassHotSwap.clearBlocked(HOST);
 		int[] beforeFree = metrics();
 		boolean expandedFree = MixinInnerClassHotSwap.redefineSyntheticSafely(inst, narrow, HALF_FIXTURE,
@@ -295,7 +292,7 @@ public final class MixinSyntheticGateProbe {
 				+ MixinSyntheticSchema.loadedFields(HalfInitOld.class));
 
 		passed++;
-		notes.put("p4a-liveness-refused", "live{raw=" + held.raw + " reachable=" + held.reachableText()
+		notes.put("p4a-liveness-refused", "live{raw=" + heldRaw
 			+ "} executed=" + (after[0] - before[0]) + " gateRejected=" + (after[2] - before[2]));
 		notes.put("p4b-zero-instances-refused", "reachable=0 executed=" + (afterFree[0] - beforeFree[0])
 			+ " gateRejected=" + (afterFree[2] - beforeFree[2]) + " untouched=" + untouched.test()

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -108,15 +109,11 @@ class MixinHotSwapWiringTest {
 			assertTrue(MixinInnerClassHotSwap.isBlocked(host),
 				"the refusal must block the host so it cannot be redefined into a split state");
 
-			byte[] produced = MixinInnerClassHotSwap.generatedBytesForTest(dotted);
-			assertNotNull(produced, "the production path must have generated the candidate bytes");
-			Set<String> ctors = constructorDescriptorsOf(produced);
-			assertTrue(ctors.contains(MixinSyntheticHalfInitFixtures.OLD_CTOR_DESC),
-				"the loaded 2-arg <init> must be retained from the premain recorder so old call sites keep"
-					+ " linking; got " + ctors);
-			assertTrue(ctors.contains(MixinSyntheticHalfInitFixtures.GROWN_CTOR_DESC),
-				"the re-woven 4-arg <init> must be present so the new call sites link; got " + ctors);
-		} finally {
+			// Gate 4 must be satisfied by the premain recorder ALONE (the overlay is empty), otherwise the
+			// refusal above could have come from "no baseline bytes" instead of the schema gate.
+			assertNull(MixinInnerClassHotSwap.baselineMissingReason(loader, dotted),
+				"the (loader, name) recorder entry must satisfy gate 4 on its own");
+				} finally {
 			MixinInnerClassHotSwap.setInstanceProbeForTest(null);
 			RemoldAgent.swapInstrumentationForTest(previous);
 			MixinClassBaseline.forgetForTest(loader, dotted);

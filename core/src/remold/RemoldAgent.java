@@ -126,7 +126,8 @@ public class RemoldAgent {
 	public static boolean      RETRANSFORM_LOADED = Boolean.parseBoolean(System.getProperty("remold.agent.retransform_loaded", "false"));
 	public static boolean      ENABLE_HOTSWAP_EVENT;
 	public static boolean      FORCE_REINIT;
-	public static boolean      LAMBDA_ALIGN;
+	public static boolean      LAMBDA_ALIGN       = boolProp("remold.agent.lambda_align", "remold.lambdaAlign.enabled", true);
+	public static boolean      LAMBDA_STRICT      = boolProp("remold.agent.lambda_strict", "remold.lambdaAlign.strict", false);
 	public static boolean      INIT_FIX           = boolProp("remold.agent.init_fix", "remold.initFix", true);
 	/**
 	 * 两阶段 Schema-First 重定义总开关（{@code docs/initfix/04-target-design.md} §1）。默认开启。
@@ -1554,10 +1555,11 @@ public class RemoldAgent {
 		info("HotSwap Event: " + ENABLE_HOTSWAP_EVENT);
 		FORCE_REINIT = Boolean.parseBoolean(System.getProperty("remold.agent.force_reinit", "true"));
 		info("Force Reinit: " + FORCE_REINIT);
-		LAMBDA_ALIGN = Boolean.parseBoolean(System.getProperty("remold.agent.lambda_align", "true"));
-		info("Lambda Align: " + LAMBDA_ALIGN);
+		LAMBDA_ALIGN = boolProp("remold.agent.lambda_align", "remold.lambdaAlign.enabled", true);
+		LAMBDA_STRICT = boolProp("remold.agent.lambda_strict", "remold.lambdaAlign.strict", false);
+		info("Lambda Align: " + LAMBDA_ALIGN + " (strict=" + LAMBDA_STRICT + ")");
 		if (LAMBDA_ALIGN) {
-			info("Lambda Alignment ENABLED. Warning: This may cause logical shifts if lambdas are reordered.");
+			info("Lambda Alignment ENABLED. Recompilation with '-g' (LocalVariableTable) is required for reliable lambda capture reordering detection.");
 		}
 		FILE_SHAKE_MS = intProp("remold.agent.file_shake_ms", "remold.fileShakeMs", FILE_SHAKE_MS);
 		ASSET_SHAKE_MS = intPropAsset("remold.agent.asset_shake_ms", "remold.assetShakeMs", ASSET_SHAKE_MS);
@@ -2374,14 +2376,27 @@ public class RemoldAgent {
 									+ " while the loaded class differs — alignment had nothing to align"
 									+ " (stale source cache?). Old callsites will bind by raw javac numbering this round.");
 							}
-							newBytecode = LambdaAligner.align(alignOld, newBytecode, oldResolver, newResolver,
-							 inventedSlots.getOrDefault(className, java.util.Set.of()));
-							// 本轮算出的"自造名"先挂起，等 redefine 成功再落账（失败就丢弃，
-							// 因为旧基线没前进，下一轮仍然是同一份旧字节）。
-							// 从本轮快照里取，避免读到别的轮次（失败时快照的集合是空的，不是 null）。
-							LambdaAligner.AlignmentResult aligned = LambdaAligner.LAST_RESULT;
-							pendingInvented.put(className,
-							 aligned == null ? java.util.Set.of() : aligned.inventedNames);
+							try {
+								newBytecode = LambdaAligner.align(alignOld, newBytecode, oldResolver, newResolver,
+								 inventedSlots.getOrDefault(className, java.util.Set.of()));
+								// 本轮算出的"自造名"先挂起，等 redefine 成功再落账（失败就丢弃，
+								// 因为旧基线没前进，下一轮仍然是同一份旧字节）。
+								// 从本轮快照里取，避免读到别的轮次（失败时快照的集合是空的，不是 null）。
+								LambdaAligner.AlignmentResult aligned = LambdaAligner.LAST_RESULT;
+								pendingInvented.put(className,
+								 aligned == null ? java.util.Set.of() : aligned.inventedNames);
+							} catch (LambdaAligner.LambdaAlignmentStrictException e) {
+								error("REJECTED: " + e.getMessage() + ". Please recompile with '-g' or restart.");
+								AlignmentTransaction tx = transactions.get(className);
+								if (tx != null) {
+									tx.rollback(true);
+									transactions.remove(className);
+								}
+								skips.add(className, RoundSkips.verdict("LAMBDA-STRICT-REJECT",
+									"captured lambda missing LocalVariableTable (compiled without -g)",
+									"recompile with '-g' or restart"));
+								continue;
+							}
 						}
 					}
 					if (oldBytecode != null) {

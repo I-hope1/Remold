@@ -81,6 +81,15 @@ java.base: jdk.internal.misc, jdk.internal.reflect, jdk.internal.loader, jdk.int
   `IllegalArgumentException: sun.misc not in module` 整体失败；Remold 走 `jdk.internal.misc.Unsafe`，
   不需要它。
 - **失败即降级**：任一步失败只 warn，用户仍可按老办法传 `--add-exports` / `--add-opens`。
+- **必须开两次**：premain 时宿主加载器（Knot / ModLauncher）的 unnamed module 通常还不存在，插件类又在
+  宿主加载器里；因此 `RemoldAgent.triggerPluginInit` 在调用 `plugin.onAgentInit` 之前会**再开一次**
+  （此刻 TCCL / 插件自身 module 就是宿主那一份）。只开 premain 那一次，插件代码读 `jdk.internal.*`
+  仍会 `IllegalAccessError`。
+- **为什么不用"`implAddOpens` + `EVERYONE_MODULE`"这类黑魔法**：`_libs/compiler.jar` 的
+  `HopeReflect.openModule()` 走的是 `IMPL_LOOKUP.findVirtual(Module,"implAddOpens")` 再对
+  `Module.EVERYONE_MODULE` 调用（反编译可见），它在**没有 Instrumentation** 的编译期工具里是唯一选择；
+  agent 手里已经有官方 API，用内部字段只会引入 `IMPL_LOOKUP`/`Unsafe` 自举与 JDK 后续版本弃用
+  （`Unsafe.staticFieldOffset` 在 24+ 已标记待删）两类额外风险，换不来任何能力。
 - **`--enable-native-access` 无法替代**：那是 JVM 对"允许调用受限本地方法"的独立授权，Java 24+ 上
   调用 JVMTI 原生库仍需要它。
 

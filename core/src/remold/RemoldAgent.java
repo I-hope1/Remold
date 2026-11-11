@@ -719,6 +719,10 @@ public class RemoldAgent {
 			if (!initializedPlugins.add(plugin)) return;
 		}
 		try {
+			// 插件类由宿主加载器（Knot / ModLauncher）加载，它们的 unnamed module 在 premain 时通常还不存在，
+			// 所以这里**再开一次**模块：此刻 TCCL / 插件自身的 module 就是宿主那一份，redefineModule 才能把它
+			// 纳入目标集合。否则插件代码读 jdk.internal.* 仍会 IllegalAccessError，用户还是得写 --add-exports。
+			ModuleOpener.openForAgent(inst);
 			plugin.onAgentInit(inst);
 		} catch (Throwable t) {
 			error("[HotswapPlugin] Error initializing plugin: " + plugin.getName(), t);

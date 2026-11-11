@@ -243,16 +243,45 @@ public final class MixinSyntheticGateProbe {
 		require("v1:a".equals(preExisting.test()),
 			"precondition: the 2-field instance reads its captured field before the redefine");
 
+		// ---- P4a: the growth is REFUSED while an instance is still alive (liveness gate).
+		MixinInnerClassHotSwap.LiveCount held = MixinInnerClassHotSwap.syntheticLive(narrow, true);
+		require(held.measured() && held.reachable > 0,
+			"precondition: a live instance must be visible to the product probe, got raw=" + held.raw
+				+ " reachable=" + held.reachableText());
 		int[] before = metrics();
 		boolean expanded = MixinInnerClassHotSwap.redefineSyntheticSafely(inst, narrow, HALF_FIXTURE,
 			candidate.bytes(), HOST);
 		int[] after = metrics();
-		require(expanded, "the single exit must ACCEPT the expansion: no field shrinks, the retained <init>"
-			+ " completes the loaded constructor set and the baseline is seeded");
-		require(after[1] - before[1] == 1, "the expansion must be reported as a field-table change, got "
-			+ (after[1] - before[1]));
+		require(!expanded, "the single exit must REFUSE a growing capture list while an instance is alive");
+		require(after[0] - before[0] == 0, "no redefine may execute while an instance is alive");
+		require(after[2] - before[2] == 1, "the liveness gate must count exactly one rejection");
+		require(after[1] - before[1] == 1, "the field-table change must still be reported");
+		require("v1:a".equals(preExisting.test()),
+			"the refused redefine must leave the live instance on the OLD class (no half-migration)");
+		require(MixinInnerClassHotSwap.isBlocked(HOST), "the refusal must block the host target");
 
-		// The kept constructor exists on the redefined class and its body is the OLD body.
+		// ---- P4b: with no reachable instance the SAME candidate must be accepted. This is the branch
+		// the real-machine P0 run decides: if a real redefine still pollutes unrelated heaps with zero
+		// instances, this branch has to be folded into the refusal.
+		preExisting = null;
+		int reachable = held.reachable;
+		for (int attempt = 0; attempt < 8 && reachable > 0; attempt++) {
+			System.gc();
+			reachable = MixinInnerClassHotSwap.syntheticLive(narrow, true).reachable;
+		}
+		require(reachable == 0, "the probe must report zero reachable instances after the GC, got " + reachable);
+		MixinInnerClassHotSwap.clearBlocked(HOST);
+		int[] beforeFree = metrics();
+		boolean expandedFree = MixinInnerClassHotSwap.redefineSyntheticSafely(inst, narrow, HALF_FIXTURE,
+			candidate.bytes(), HOST);
+		int[] afterFree = metrics();
+		require(expandedFree, "with no reachable instance the same expansion must be accepted (liveness==0 branch)");
+		require(afterFree[0] - beforeFree[0] == 1, "the accepted branch must redefine exactly once");
+		require(afterFree[2] - beforeFree[2] == 0, "the accepted branch must not be rejected");
+
+		// The kept constructor exists on the redefined class and its body is the OLD body: an instance
+		// built through it after the expansion never writes the new captures, so the new body reads them
+		// at their defaults (the half-migrated semantics of invariant C3).
 		HalfInitOld fromOldCtor = new HalfInitOld(new Object(), "a");
 		Throwable oldCtorBody = null;
 		try {
@@ -266,8 +295,6 @@ public final class MixinSyntheticGateProbe {
 		require("test".equals(oldCtorBody.getStackTrace()[0].getMethodName()),
 			"the NPE must be thrown by the new body, not by the constructor: "
 				+ MixinSyntheticHalfInitFixtures.stackOf(oldCtorBody));
-		// The new primitive capture is not visible at compile time on the old shape, hence the
-		// reflective call: after the redefine the re-woven body method exists on the same class.
 		int countDefault;
 		try {
 			countDefault = ((Integer) MixinSyntheticHalfInitFixtures.call(fromOldCtor,
@@ -279,22 +306,12 @@ public final class MixinSyntheticGateProbe {
 		require(countDefault == 0,
 			"the retained old <init> never writes the new primitive capture, so it must read 0, got " + countDefault);
 
-		// Same mechanism, different creation point: an instance allocated before the redefine is
-		// migrated by the enhanced redefine and sees the same null new reference field.
-		Throwable migrated = null;
-		try {
-			preExisting.test();
-		} catch (Throwable t) {
-			migrated = t;
-		}
-		require(migrated instanceof NullPointerException,
-			"a pre-existing instance migrated by the enhanced redefine must also read the new reference capture"
-				+ " as null, got " + migrated);
-
 		passed++;
-		notes.put("p4-expansion-retained-old-ctor",
-			"npe=" + brief(oldCtorBody) + " | new-primitive=" + countDefault + " | pre-existing="
-				+ brief(migrated) + " | retained=" + candidate.retained());
+		notes.put("p4a-liveness-refused", "live{raw=" + held.raw + " reachable=" + held.reachableText()
+			+ "} executed=" + (after[0] - before[0]) + " gateRejected=" + (after[2] - before[2]));
+		notes.put("p4b-liveness-free-accepted",
+			"reachable=0 executed=" + (afterFree[0] - beforeFree[0]) + " npe=" + brief(oldCtorBody)
+				+ " new-primitive=" + countDefault + " retained=" + candidate.retained());
 		notes.put("p4-old-ctor-stack",
 			MixinSyntheticHalfInitFixtures.stackOf(oldCtorBody).replace('\n', ' ').trim());
 	}

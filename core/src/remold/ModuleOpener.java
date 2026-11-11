@@ -102,6 +102,13 @@ public final class ModuleOpener {
 				redefineModule.invoke(inst, module, Collections.emptySet(), targets, targets,
 					Collections.emptySet(), Collections.emptyMap());
 				opened += entry.getValue().length;
+				// 官方 API 只能开给"此刻已存在的" unnamed module；premain 之后才创建的加载器（Knot /
+				// ModLauncher / 插件加载器）各有一份新的 unnamed module，仍会 InaccessibleObjectException。
+				// 因此再用 Remold 已有的全特权 Lookup 调一次包私有的 implAddExports/implAddOpens，目标写
+				// Module.EVERYONE_MODULE（= 对所有人，含将来才出现的 unnamed module）。这是
+				// `_libs/compiler.jar` 里 HopeReflect.openModule() 的同一招，但 Remold 的 IMPL_LOOKUP
+				// 自举路径与它无关（Reflect.IMPL_LOOKUP，多策略兜底），不需要任何新魔法。
+				openToEveryone(module, entry.getValue());
 			} catch (Throwable t) {
 				RemoldAgent.warn("[Agent] could not export/open " + entry.getKey() + " packages ("
 					+ String.join(", ", entry.getValue()) + ") through Instrumentation.redefineModule;"
@@ -114,6 +121,50 @@ public final class ModuleOpener {
 				+ " via Instrumentation.redefineModule; --add-exports/--add-opens are no longer required");
 		}
 		return opened;
+	}
+
+	/**
+	 * 把若干包对 <b>{@code Module.EVERYONE_MODULE}</b>（"所有人"，含将来才创建的 unnamed module）
+	 * export + open。走 {@code Module.implAddExports/implAddOpens} 这两个包私有方法，用
+	 * {@link remold.Reflect#IMPL_LOOKUP} 全特权 Lookup 调用。
+	 *
+	 * <p><b>为什么需要它</b>：{@code Instrumentation.redefineModule} 的 {@code extraExports}/{@code extraOpens}
+	 * 只能指定"调用时已存在"的模块集合。宿主加载器（Fabric Knot、Forge ModLauncher）与插件加载器都在
+	 * premain 之后才创建，它们各自的 unnamed module 不在那个集合里 —— 实测（JBR-21）：
+	 * 只调 {@code redefineModule} 时，系统加载器里的类可以反射 {@code jdk.internal.misc.Unsafe}，
+	 * 而 premain 之后新建的加载器里的类仍然抛 {@code InaccessibleObjectException}。
+	 * {@code EVERYONE_MODULE} 是 JDK 内部用来表示 {@code =ALL-UNNAMED} 的哨兵模块，一次写入即覆盖未来模块。</p>
+	 *
+	 * <p><b>失败只 warn</b>：这条是兜底路径，拿不到内部字段（未来 JDK 改名）也不影响
+	 * {@code redefineModule} 已经打开的那部分，用户仍可按老办法传 {@code --add-opens}。</p>
+	 */
+	private static void openToEveryone(Object module, String[] packages) {
+		try {
+			Class<?> moduleClass = Class.forName("java.lang.Module");
+			java.lang.invoke.MethodHandles.Lookup lookup = remold.Reflect.IMPL_LOOKUP;
+			Object everyone = lookup.findStaticGetter(moduleClass, "EVERYONE_MODULE", moduleClass).invoke();
+			java.lang.invoke.MethodHandle addExports = lookup.findVirtual(moduleClass, "implAddExports",
+				java.lang.invoke.MethodType.methodType(void.class, String.class, moduleClass));
+			java.lang.invoke.MethodHandle addOpens = lookup.findVirtual(moduleClass, "implAddOpens",
+				java.lang.invoke.MethodType.methodType(void.class, String.class, moduleClass));
+			for (String pkg : packages) {
+				try {
+					addExports.invokeWithArguments(module, pkg, everyone);
+				} catch (Throwable ignored) {
+					// 个别包可能已被其它 agent 打开或不允许导出：不影响 open
+				}
+				try {
+					addOpens.invokeWithArguments(module, pkg, everyone);
+				} catch (Throwable t) {
+					RemoldAgent.warn("[Agent] could not open " + pkg + " to EVERYONE_MODULE ("
+						+ rootMessage(t) + "); classes loaded by class loaders created later may still need"
+						+ " --add-opens on the command line");
+				}
+			}
+		} catch (Throwable t) {
+			RemoldAgent.warn("[Agent] EVERYONE_MODULE fallback unavailable (" + rootMessage(t)
+				+ "); only modules existing at agent start are opened");
+		}
 	}
 
 	/**

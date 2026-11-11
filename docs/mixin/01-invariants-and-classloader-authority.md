@@ -85,11 +85,13 @@ java.base: jdk.internal.misc, jdk.internal.reflect, jdk.internal.loader, jdk.int
   宿主加载器里；因此 `RemoldAgent.triggerPluginInit` 在调用 `plugin.onAgentInit` 之前会**再开一次**
   （此刻 TCCL / 插件自身 module 就是宿主那一份）。只开 premain 那一次，插件代码读 `jdk.internal.*`
   仍会 `IllegalAccessError`。
-- **为什么不用"`implAddOpens` + `EVERYONE_MODULE`"这类黑魔法**：`_libs/compiler.jar` 的
-  `HopeReflect.openModule()` 走的是 `IMPL_LOOKUP.findVirtual(Module,"implAddOpens")` 再对
-  `Module.EVERYONE_MODULE` 调用（反编译可见），它在**没有 Instrumentation** 的编译期工具里是唯一选择；
-  agent 手里已经有官方 API，用内部字段只会引入 `IMPL_LOOKUP`/`Unsafe` 自举与 JDK 后续版本弃用
-  （`Unsafe.staticFieldOffset` 在 24+ 已标记待删）两类额外风险，换不来任何能力。
+- **两条路都要走**（官方 + `EVERYONE_MODULE`）：`redefineModule` 只能开给"调用时已存在的" unnamed
+  module，而 Knot / ModLauncher / 插件加载器都在 premain 之后才创建、各自有一份新的 unnamed module。
+  因此 `ModuleOpener` 在 `redefineModule` 之后再用 `Reflect.IMPL_LOOKUP` 调一次包私有的
+  `Module.implAddExports/implAddOpens`，目标写 `Module.EVERYONE_MODULE`（JDK 内部表示 `=ALL-UNNAMED`
+  的哨兵，覆盖将来才出现的模块）。这与 `_libs/compiler.jar` 的 `HopeReflect.openModule()` 是同一招，
+  但用的是 Remold 自己的 `Reflect.IMPL_LOOKUP` 自举路径（多策略兜底），不需要任何新魔法。
+  失败只 warn，`redefineModule` 已打开的那部分不受影响。
 - **`--enable-native-access` 无法替代**：那是 JVM 对"允许调用受限本地方法"的独立授权，Java 24+ 上
   调用 JVMTI 原生库仍需要它。
 
@@ -98,7 +100,8 @@ java.base: jdk.internal.misc, jdk.internal.reflect, jdk.internal.loader, jdk.int
 | 条件 | 结果 |
 |:--|:--|
 | 无 `-javaagent` | `InaccessibleObjectException: module java.base does not "exports jdk.internal.misc"` |
-| 有 `-javaagent:remold-agent.jar` | `[Agent] opened 9 JDK-internal package(s) of java.base …`，`Unsafe.getUnsafe()` 反射成功 |
+| 有 `-javaagent:remold-agent.jar`（仅 `redefineModule`） | 系统加载器里的类成功；**premain 之后新建加载器里的类仍 `InaccessibleObjectException`** |
+| 有 `-javaagent` + `EVERYONE_MODULE` 兜底（当前实现） | 两者都成功（`PARENT ok=true` / `CHILD ok=true named=false`） |
 
 ## 6. 判据清单（可机械核对）
 

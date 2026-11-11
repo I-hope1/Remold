@@ -296,6 +296,27 @@ jobs:
           echo "Release assets ready:"
           ls -lh release-assets/
 
+      - name: Publish Gradle plugin to the Plugin Portal
+        # 幂等：Portal 上已有该版本就跳过（重复 publish 会被 Portal 以 409 拒绝，不该让发版变红）。
+        # 需要仓库 secret：GRADLE_PUBLISH_KEY / GRADLE_PUBLISH_SECRET（Portal 个人凭据）。
+        # 未配置 secret 时本步自动跳过，发版仍按 JitPack + GitHub Release 资产进行。
+        env:
+          GRADLE_PUBLISH_KEY: ${{ secrets.GRADLE_PUBLISH_KEY }}
+          GRADLE_PUBLISH_SECRET: ${{ secrets.GRADLE_PUBLISH_SECRET }}
+        run: |
+          if [ -z "$GRADLE_PUBLISH_KEY" ] || [ -z "$GRADLE_PUBLISH_SECRET" ]; then
+            echo "::notice::GRADLE_PUBLISH_KEY/SECRET not configured; skipping Plugin Portal publish"
+            exit 0
+          fi
+          export JAVA_HOME="$JAVA_HOME_25_X64"
+          VERSION="$(grep -E '^remoldVersion=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')"
+          URL="https://plugins.gradle.org/m2/io/github/i-hope1/remold/gradle-plugin/${VERSION}/gradle-plugin-${VERSION}.jar"
+          if curl -fsSL -o /dev/null "$URL"; then
+            echo "::notice::gradle-plugin ${VERSION} is already on the Plugin Portal; skipping"
+            exit 0
+          fi
+          ./gradlew :gradle-plugin:publishPlugins             -Pgradle.publish.key="$GRADLE_PUBLISH_KEY"             -Pgradle.publish.secret="$GRADLE_PUBLISH_SECRET"
+
       - name: Create or Update GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

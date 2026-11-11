@@ -130,3 +130,12 @@ swaps the new bytecode into the running JVM.
 ./gradlew :gradle-plugin:jar        # build/libs/remold-gradle-plugin-<version>.jar
 ./gradlew :gradle-plugin:publishPlugins   # requires GRADLE_PUBLISH_KEY / GRADLE_PUBLISH_SECRET
 ```
+
+### Publishing (maintainers)
+
+Tag pushes (`v*`) run `.github/workflows/release.yml`, whose `publish` job publishes this plugin to the
+Plugin Portal **idempotently**: if
+`plugins.gradle.org/m2/io/github/i-hope1/remold/gradle-plugin/<version>/…jar` already exists the step is
+skipped, otherwise it runs `./gradlew :gradle-plugin:publishPlugins`. The job needs the repository secrets
+`GRADLE_PUBLISH_KEY` / `GRADLE_PUBLISH_SECRET`; without them the step is skipped and the release still
+ships the GitHub Release assets and JitPack coordinates.

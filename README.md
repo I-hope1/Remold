@@ -67,16 +67,21 @@ remold {
 2. 在 IDEA 的 *Settings -> Build, Execution, Deployment -> Build Tools -> Gradle* 中，把 **`Build and run using`** 和 **`Run tests using`** 改为 **`IntelliJ IDEA`**。
 3. 用 `Run with Remold`（或 `Minecraft Client`）启动游戏；改完代码直接按 **`Ctrl + Shift + F9`**（macOS 为 `Cmd + Shift + F9`），IDEA 内置 `javac` 约 0.1~0.2 秒写出单个 `.class`，等防抖窗口过后直接生效。
 
-如果不通过 Gradle 插件、想手动在 IDEA 或 CLI 里配 VM 参数，核心参数如下（如需开 JDWP 远程调试，地址务必绑在 `127.0.0.1:5005`，不要绑 `0.0.0.0`）：
+如果不通过 Gradle 插件、想手动在 IDEA 或 CLI 里配 VM 参数，核心参数只有两个（如需开 JDWP 远程调试，地址务必绑在 `127.0.0.1:5005`，不要绑 `0.0.0.0`）：
 
 ```text
 -XX:+AllowEnhancedClassRedefinition
 -javaagent:/path/to/remold-agent.jar=build/classes/java/main;build/classes/kotlin/main
---add-exports=java.base/jdk.internal.misc=ALL-UNNAMED
---add-exports=java.base/jdk.internal.reflect=ALL-UNNAMED
---add-exports=java.base/jdk.internal.loader=ALL-UNNAMED
---enable-native-access=ALL-UNNAMED
 ```
+
+> **不再需要 `--add-exports` / `--add-opens`。** agent 在 `premain` 的第一行就调用
+> `Instrumentation.redefineModule`，把 `jdk.internal.misc` / `jdk.internal.reflect` /
+> `jdk.internal.loader` / `jdk.internal.access` / `jdk.internal.vm` / `java.lang{,.invoke,.reflect}` /
+> `sun.nio.ch` 这 9 个包对**所有 unnamed module**（agent 自身、系统加载器、线程上下文加载器）一次性
+> export + open，效果等价于手写一串 `--add-exports …=ALL-UNNAMED` 与 `--add-opens …=ALL-UNNAMED`；
+> 启动日志会打一行 `[Agent] opened 9 JDK-internal package(s) …`。旧参数继续传也不会冲突。
+> Java 24+ 上如果启用了受限本地方法（JVMTI 原生库），仍需 `--enable-native-access=ALL-UNNAMED`
+> ——这是 JVM 对"允许调用受限本地方法"的独立授权，`redefineModule` 无法替代。
 
 ### 系统属性开关
 

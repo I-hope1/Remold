@@ -13,6 +13,14 @@ _（暂无；下一个版本的内容写在这里）_
 
 ### Added
 
+- **JDK 内部包的可见性改为 agent 自举**：`core/src/remold/ModuleOpener` 在 `premain`/`agentmain` 第一行
+  调用 `Instrumentation.redefineModule`，把 `jdk.internal.misc` / `jdk.internal.reflect` /
+  `jdk.internal.loader` / `jdk.internal.access` / `jdk.internal.vm` / `java.lang{,.invoke,.reflect}` /
+  `sun.nio.ch` 这 9 个包对**所有 unnamed module** 一次性 export + open，因此用户**不再需要**
+  `--add-exports java.base/…=ALL-UNNAMED` 与 `--add-opens …=ALL-UNNAMED`（旧参数继续传不冲突）。
+  对照实验（JBR-21，同一份探针、均不带 `--add-exports`）：无 agent → `InaccessibleObjectException`；
+  有 agent → `[Agent] opened 9 JDK-internal package(s)` 且反射取 `Unsafe` 成功。
+  `--enable-native-access=ALL-UNNAMED`（Java 24+）仍需保留——那是受限本地方法的独立授权。
 - 重定义访问权限防线（四层）：`core/src/remold/ref/AccessAlign.java` 以 JVM 已加载运行时字节码为基线，
   对重织入产物做**访问权限单调对齐**（public 不得退化、protected 不得退化、基线已剥离的 `ACC_FINAL`
   必须同步剥离），并在送入 `redefineClasses` 前做 fail-closed 自检门；Fabric 侧新增 Mixin 前置变换重放

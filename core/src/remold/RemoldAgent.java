@@ -1110,6 +1110,10 @@ public class RemoldAgent {
 	}
 	public static void premain(String agentArgs, Instrumentation inst) {
 		RemoldAgent.inst = inst;
+		// 第一件事：用 Instrumentation.redefineModule 把 jdk.internal.* 对 ALL-UNNAMED 打开/导出，
+		// 之后任何 Remold 类再去碰这些包都不会抛 IllegalAccessError / InaccessibleObjectException，
+		// 用户也就不必再传 --add-exports / --add-opens（见 core/src/remold/ModuleOpener.java）。
+		ModuleOpener.openForAgent(inst);
 		appendSelfToBootstrapSearch(inst);
 		bootstrapPlugins(agentArgs);
 		try {
@@ -1126,6 +1130,7 @@ public class RemoldAgent {
 
 	public static void agentmain(String agentArgs, Instrumentation inst) {
 		RemoldAgent.inst = inst;
+		ModuleOpener.openForAgent(inst);
 		appendSelfToBootstrapSearch(inst);
 		bootstrapPlugins(agentArgs);
 		try {

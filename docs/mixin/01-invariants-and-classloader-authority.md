@@ -59,9 +59,43 @@ JVM 允许同一个点分名在多个加载器下各定义一份。Remold 的一
 
 > `[观测]` 该异常在真实 KnotServer 上稳定复现，锚回后消失。
 
-## 5. 判据清单（可机械核对）
+## 5. 不变量 M5：JDK 内部包的可见性由 agent 自举，不依赖启动参数
+
+`core/src/remold/ModuleOpener.openForAgent(inst)` 在 `premain` / `agentmain` 的**第一行**调用
+`Instrumentation.redefineModule`，把 9 个包对**所有 unnamed module**（agent 自身、系统加载器、线程上下文
+加载器）同时 **export + open**：
+
+```
+java.base: jdk.internal.misc, jdk.internal.reflect, jdk.internal.loader, jdk.internal.access,
+           jdk.internal.vm, java.lang, java.lang.invoke, java.lang.reflect, sun.nio.ch
+```
+
+- **必须 export 且 open**：`--add-exports` 管链接期可见性（读到非导出包的 public 类型抛
+  `IllegalAccessError`），`--add-opens` 管深反射（`setAccessible` 抛 `InaccessibleObjectException`）。
+- **必须在最前**：任一 Remold 类先触碰 `jdk.internal.*`（取 `Unsafe`、`ReflectionFactory`、
+  `ClassLoader` 内部查找）就已经类解析失败，之后再打开模块无效。
+- **目标集合不能为空**：`redefineModule` 对空目标集合抛
+  `IllegalArgumentException: set of targets is empty`，所以显式列出可达的 unnamed module（等价于
+  `=ALL-UNNAMED`）。
+- **`sun.misc` 不在 `java.base`**：它属于 `jdk.unsupported`，混在同一次调用里会以
+  `IllegalArgumentException: sun.misc not in module` 整体失败；Remold 走 `jdk.internal.misc.Unsafe`，
+  不需要它。
+- **失败即降级**：任一步失败只 warn，用户仍可按老办法传 `--add-exports` / `--add-opens`。
+- **`--enable-native-access` 无法替代**：那是 JVM 对"允许调用受限本地方法"的独立授权，Java 24+ 上
+  调用 JVMTI 原生库仍需要它。
+
+`[观测]` 对照实验（JBR-21，同一份 `ModuleProof`，均**不带**任何 `--add-exports`）：
+
+| 条件 | 结果 |
+|:--|:--|
+| 无 `-javaagent` | `InaccessibleObjectException: module java.base does not "exports jdk.internal.misc"` |
+| 有 `-javaagent:remold-agent.jar` | `[Agent] opened 9 JDK-internal package(s) of java.base …`，`Unsafe.getUnsafe()` 反射成功 |
+
+## 6. 判据清单（可机械核对）
 
 1. 任何"按名字找类"的路径都不得回退到 `SystemClassLoader`；
 2. 基线写入必须带加载器权威度判断，低权威只记 `[DUP-LOAD]`；
 3. 重织入产物在 `redefineClasses` 前必须过访问权限自检门；
-4. reload / 登记成功之后必须 `reassert` 一次 `ClassInfo.cache`。
+4. reload / 登记成功之后必须 `reassert` 一次 `ClassInfo.cache`；
+5. JDK 内部包的可见性必须由 agent 在 premain 第一行自举（`ModuleOpener`），不得把
+   `--add-exports` / `--add-opens` 当作使用前提。

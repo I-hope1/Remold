@@ -343,7 +343,14 @@ public class RemoldAgent {
 		return dotClassName != null && NON_LOADABLE_CLASSES.contains(dotClassName);
 	}
 
-	/** 执行所有已注册的字节码重织入桥 */
+	/**
+	 * 执行所有已注册的字节码重织入桥。
+	 *
+	 * <p><b>{@link remold.BytecodeTransformerBridge.Abort} 必须原样向上抛</b>：它是"本轮放弃本类重定义"
+	 * 的唯一信号（见该异常的类型注释）。把它和普通桥接失败一起吞掉，调用方会拿到"未织入的原始字节"
+	 * 并照样送进 {@code redefineClasses}——那正是宿主被织入新调用点、配套合成类却没落地的分裂现场。
+	 * 其余 {@code Throwable} 仍按原样记一条 {@code [BRIDGE-ERROR]} 并沿用上一个字节。</p>
+	 */
 	public static byte[] applyTransformerBridges(ClassLoader loader, String dotClassName, Class<?> targetClass, byte[] bytecode) {
 		if (transformerBridges.isEmpty() || bytecode == null) return bytecode;
 		byte[] current = bytecode;
@@ -353,6 +360,8 @@ public class RemoldAgent {
 				if (transformed != null && transformed.length > 0) {
 					current = transformed;
 				}
+			} catch (remold.BytecodeTransformerBridge.Abort abort) {
+				throw abort;
 			} catch (Throwable t) {
 				error("[BRIDGE-ERROR] Error transforming " + dotClassName + " with " + bridge.getClass().getName(), t);
 			}
@@ -1133,6 +1142,23 @@ public class RemoldAgent {
 
 	public static Instrumentation getInstrumentation() {
 		return inst;
+	}
+
+	/**
+	 * <b>仅供单测</b>：临时替换 {@link Instrumentation} 句柄，返回原句柄。
+	 *
+	 * <p>没有 {@code -javaagent} 的测试 JVM 里 {@code inst} 恒为 {@code null}，于是所有"到底有没有
+	 * 调用 {@code redefineClasses}"的端到端断言都只能落在 {@code inst == null} 的早退分支上——那种
+	 * 断言没有判定力（它证明的是"没接 agent"，不是"机制拒绝了重定义"）。用它把录制代理注进去，
+	 * 断言才能落在真正的调用计数上。</p>
+	 *
+	 * <p>调用方<b>必须</b>在 {@code finally} 里用返回值还原：{@code inst} 非空会让其它代码以为 agent
+	 * 已挂载。</p>
+	 */
+	public static Instrumentation swapInstrumentationForTest(Instrumentation replacement) {
+		Instrumentation previous = inst;
+		inst = replacement;
+		return previous;
 	}
 
 	public static void init(String agentArgs, boolean reinit) {
@@ -2153,7 +2179,20 @@ public class RemoldAgent {
 				if (rawBytes == null) continue;
 				Class<?> targetClass = loadedClassesMap.get(className);
 				ClassLoader cl = targetClass != null ? targetClass.getClassLoader() : findTargetClassLoader(className, classToPath.get(className));
-				byte[] weaved = applyTransformerBridges(cl, className, targetClass, rawBytes);
+				byte[] weaved;
+				try {
+					weaved = applyTransformerBridges(cl, className, targetClass, rawBytes);
+				} catch (remold.BytecodeTransformerBridge.Abort abort) {
+					// 事务一致性（单类粒度）：该类本轮整体移出批次，既不 redefine 织入后的新字节，
+					// 也不退回未织入的原始字节。宿主与它关联的类一起保持已加载旧版。
+					newBatchBytes.remove(className);
+					classToPath.remove(className);
+					skips.add(className, RoundSkips.verdict("BRIDGE-TRANSACTION-ABORT",
+						"bytecode bridge refused this class for the whole round: " + abort.getMessage(),
+						"nothing was redefined for this class; the next batch retries"));
+					if (targetClass != null) InitFix.afterRedefineFailed(targetClass);
+					continue;
+				}
 				weaved = alignMixinGeneratedMembers(className, targetClass, weaved);
 				if (weaved != null && weaved != rawBytes) {
 					newBatchBytes.put(className, weaved);
@@ -4775,7 +4814,17 @@ public class RemoldAgent {
 			LAST_REDEFINE_VM_LEVEL_FAILURE = false;
 			String className = targetClass.getName();
 			byte[] sourceBytes = newBytecode;
-			byte[] runtimeBytes = applyTransformerBridges(targetClass.getClassLoader(), className, targetClass, newBytecode);
+			byte[] runtimeBytes;
+			try {
+				runtimeBytes = applyTransformerBridges(targetClass.getClassLoader(), className, targetClass, newBytecode);
+			} catch (remold.BytecodeTransformerBridge.Abort abort) {
+				// 事务一致性：桥接器判定本轮不能落地（例如目标类的合成内部类被闸拒绝）。
+				// 此时既不能送织入后的新字节（会与旧合成类组成 NoSuchMethodError 分裂状态），
+				// 也不能送未织入的原始字节（会抹掉 Mixin 钩子）——唯一正确动作是不 redefineClasses。
+				warn("[DYNAMIC-REDEFINE] " + className + ": aborted by the bytecode bridge before redefineClasses ("
+				     + abort.getMessage() + "). The class keeps its previously loaded bytes; nothing was redefined.");
+				return false;
+			}
 			// 第二缺陷：Mixin 生成成员名/顺序先对齐回基线，让纯方法体热更退化为 0 新增/0 删除。
 			runtimeBytes = alignMixinGeneratedMembers(className, targetClass, runtimeBytes);
 			// 第一层：按已加载基线做访问权限单调对齐；自检门拒绝时绝不调用 redefineClasses。

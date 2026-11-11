@@ -210,7 +210,7 @@ final class MixinInnerClassHotSwap {
 					continue;
 				}
 				java.util.List<String> loadedFields = MixinSyntheticSchema.loadedFields(live);
-				byte[] loadedBytes = generatedBytes(conformedDotted);
+				byte[] loadedBytes = baselineBytesForLoaded(live, conformedDotted);
 				java.util.Map<String, String> renamed = MixinSyntheticSchema.renameCollisions(fresh, loadedFields);
 				// 新增字段必须在 padFields 之前取：补齐会给候选追加墓碑字段，之后就分不清两者。
 				java.util.List<String> appended = MixinSyntheticSchema.appendedFields(fresh, loadedFields);
@@ -254,7 +254,9 @@ final class MixinInnerClassHotSwap {
 				registerGenerated(conformedDotted, bytes);
 				// 标成 Remold 自己发起的重定义：否则 AnnotationTransformer 会把这次 redefine 当成
 				// 外部热更，在已经织入过的合成类上再跑一遍桥接。
-				if (!redefineSyntheticSafely(inst, live, conformedDotted, bytes, mixinDotName)) {
+				// BLOCKED 的键必须是**宿主目标类**（与 reweave/isBlocked 同源），不能是 Mixin 模板名：
+				// 用模板名会让"中止宿主重定义"永远命中不到宿主，等于假接线。
+				if (!redefineSyntheticSafely(inst, live, conformedDotted, bytes, hostDotNameOf(info, mixinDotName))) {
 					result.failures.add(conformedDotted + " (rejected by the single-exit gate)");
 					continue;
 				}
@@ -330,6 +332,57 @@ final class MixinInnerClassHotSwap {
 			return null;
 		}
 		return GENERATED.get(MixinInnerClassSupport.internalName(className));
+	}
+
+	/**
+	 * 已加载合成类的<b>基线字节</b>（不变量 C1）：JVM 里实际加载的那一份。
+	 *
+	 * <p><b>为什么不能读 {@link #GENERATED}</b>：那是"本进程生成过什么"的覆盖层，不是"JVM 里现在是
+	 * 什么"。R0（客户端启动）加载的合成类在 R1 首次热更时覆盖层<b>必然为空</b>——覆盖层只在成功
+	 * 生成/回灌后才写入。用它当基线，{@code retainConstructors} 拿到 {@code null}，于是旧
+	 * {@code <init>} 一个都留不下来，闸 2 反过来把这次重定义拒掉（真机表现为
+	 * {@code executed=0, gateRejected=1} 随后 {@code NoSuchMethodError} 崩服）。</p>
+	 *
+	 * <p>基线链（与闸 4 同源，顺序有意义）：本加载器已生效字节
+	 * {@link MixinClassBaseline#appliedOf}（R1+，成功 redefine 后的那份）→ premain 录口
+	 * {@link MixinClassBaseline#baselineOf}（R0，{@code (加载器身份, 类名)} 键）→ 最后才退回覆盖层。
+	 * 前两者带加载器身份，同名类被两个加载器各定义一份时不会互相冒充。</p>
+	 *
+	 * <p>本条路径<b>不计</b> {@code missed}：分母口径是"闸 4 每拒绝一次计一次"，基线在这里被正常
+	 * 读到/读不到都不该改变拒绝计数（否则同一次拒绝会记两次）。</p>
+	 *
+	 * @param live       已加载的合成类（{@code null} = 尚未加载，退回覆盖层）
+	 * @param dottedName 合成类点分名
+	 * @return 基线字节；{@code null} = 既无录口也无覆盖层（调用方必须 fail-closed）
+	 */
+	private static byte[] baselineBytesForLoaded(Class<?> live, String dottedName) {
+		if (live != null) {
+			byte[] baseline = baselineBytes(live.getClassLoader(), dottedName, false);
+			if (baseline != null) {
+				return baseline;
+			}
+		}
+		return generatedBytes(dottedName);
+	}
+
+	/**
+	 * 合成类所属的<b>宿主目标类</b>点分名：{@code BLOCKED} 的键，也是 {@code MixinReWeaver} 询问
+	 * "宿主本轮要不要中止"时用的名字。
+	 *
+	 * <p>必须取 {@code InnerClassInfo.getTargetName()}（内部名 → 点分名），不能直接用调用方传进来的
+	 * Mixin 模板名：模板名与目标名是两个不同的类，用模板名标记会让 {@code isBlocked(target)} 永远为假，
+	 * 事务中止就退化成一条日志。</p>
+	 */
+	private static String hostDotNameOf(Object info, String fallback) {
+		try {
+			Object targetInternal = invoke(info, "getTargetName");
+			if (targetInternal instanceof String name && !name.isEmpty()) {
+				return MixinInnerClassSupport.dotName(name);
+			}
+		} catch (Throwable ignored) {
+			// 老版本没有 getTargetName：退回调用方给的名字（只影响 BLOCKED 的键与日志，不影响闸判据）。
+		}
+		return fallback;
 	}
 
 	/**
@@ -415,7 +468,10 @@ final class MixinInnerClassHotSwap {
 				Class<?> live = inst == null ? null : findLoadedClass(inst, conformedDotted);
 				java.util.List<String> loadedFields = live == null ? java.util.List.of()
 					: MixinSyntheticSchema.loadedFields(live);
-				byte[] loadedBytes = generatedBytes(conformedDotted);
+				// 基线字节 = 本加载器 JVM 实际加载的那份（premain 录口 / 已生效字节），
+				// 不是本进程上一轮生成到覆盖层里的字节：R0 启动期加载的合成类在 R1 首次热更时
+				// 覆盖层是空的，读覆盖层会让 retainConstructors 拿不到任何旧 <init>。
+				byte[] loadedBytes = baselineBytesForLoaded(live, conformedDotted);
 				// 规则 1：同名异型捕获字段重命名追加（不覆盖基线槽位）
 				java.util.Map<String, String> renamed = MixinSyntheticSchema.renameCollisions(fresh, loadedFields);
 				// 新增字段必须在 padFields 之前取（补齐会给候选追加墓碑字段）。
@@ -463,12 +519,15 @@ final class MixinInnerClassHotSwap {
 						BLOCKED.add(MixinInnerClassSupport.dotName(targetInternal));
 						RemoldAgent.warn("[Mixin] synthetic inner class " + conformedDotted
 							+ " cannot keep loaded constructor(s) " + missingCtors
-							+ " (no baseline bytes to retain); aborting the host target redefine to avoid a"
+							+ " (baseline bytes " + (loadedBytes == null ? "MISSING" : "present(" + loadedBytes.length + "B)")
+							+ ", retained=" + retainedCtors + "); aborting the host target redefine to avoid a"
 							+ " split state (rule: transactional consistency).");
 						continue;
 					}
 				}
 				byte[] bytes = serialize(fresh);
+				// 这里刻意读**覆盖层**（上一轮生成了什么），不是基线（JVM 里是什么）：它只用来判断
+				// "本次生成的字节相对上一次生成有没有变"，从而决定是否值得多一次 redefine。
 				byte[] previous = generatedBytes(conformedDotted);
 				registerGenerated(conformedDotted, bytes);
 				registered++;
@@ -634,6 +693,17 @@ final class MixinInnerClassHotSwap {
 	 * @return 基线字节（内部副本，调用方不得修改）；{@code null} = 没有基线
 	 */
 	static byte[] baselineBytes(ClassLoader loader, String dotName) {
+		return baselineBytes(loader, dotName, true);
+	}
+
+	/**
+	 * 基线解析口（可关闭未命中计数）。
+	 *
+	 * @param countMiss 是否把未命中记进 {@code missed} 分母。<b>只有闸 4 该计</b>：分母口径是
+	 *                  "一次拒绝计一次"，其它调用点（例如 {@link #baselineBytesForLoaded} 读基线去
+	 *                  保留旧 {@code <init>}）读到/读不到都不改变拒绝计数，计数会让同一次拒绝记两遍。
+	 */
+	static byte[] baselineBytes(ClassLoader loader, String dotName, boolean countMiss) {
 		if (dotName == null) {
 			return null;
 		}
@@ -641,7 +711,7 @@ final class MixinInnerClassHotSwap {
 		if (loaded != null) {
 			return loaded;
 		}
-		return MixinClassBaseline.baselineOf(loader, dotName);
+		return MixinClassBaseline.baselineOf(loader, dotName, countMiss);
 	}
 
 	private static void blockHost(String hostDotName, String syntheticName, String why) {

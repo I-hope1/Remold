@@ -63,6 +63,21 @@ final class MixinSyntheticHalfInitFixtures {
 	/** The redefine candidate: grown shape, renamed to the loaded name, old {@code <init>} retained. */
 	static Candidate expandedCandidate() {
 		byte[] old = oldShapeBytes();
+		ClassNode node = grownShapeNode();
+		List<String> retained = MixinSyntheticSchema.retainConstructors(node, old);
+		return new Candidate(serialize(node), MixinSyntheticSchema.nodeFields(node), constructorsOf(node),
+			retained, fieldWritesOf(node, "<init>", OLD_CTOR_DESC));
+	}
+
+	/**
+	 * The re-woven shape as a node, renamed to the loaded name and <b>without</b> the old
+	 * constructor: exactly what {@code InnerClassGenerator.generate} hands the production path.
+	 *
+	 * <p>Keeping the retention out of this helper is what makes the wiring suite meaningful: the
+	 * retained {@code <init>} must be appended by {@code MixinInnerClassHotSwap} reading the
+	 * baseline, not by the fixture.</p>
+	 */
+	static ClassNode grownShapeNode() {
 		ClassNode node = MixinSyntheticGateFixtures.nodeOf(HalfInitNext.class);
 		String from = "remold/mixin/HalfInitNext";
 		node.name = OLD_INTERNAL;
@@ -71,9 +86,7 @@ final class MixinSyntheticHalfInitFixtures {
 			throw new IllegalStateException("the renamed shape still references " + from + " in " + leftovers
 				+ " instruction(s); a redefine cannot carry a self reference to a class that will not exist");
 		}
-		List<String> retained = MixinSyntheticSchema.retainConstructors(node, old);
-		return new Candidate(serialize(node), MixinSyntheticSchema.nodeFields(node), constructorsOf(node),
-			retained, fieldWritesOf(node, "<init>", OLD_CTOR_DESC));
+		return node;
 	}
 
 	/** One redefinition candidate plus the structural facts the cases assert. */

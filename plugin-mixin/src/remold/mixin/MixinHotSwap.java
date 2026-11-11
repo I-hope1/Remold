@@ -751,6 +751,14 @@ public final class MixinHotSwap {
 				RemoldAgent.info("[Mixin] Target class " + name + " is not yet loaded; new mixin will apply upon initial load");
 				continue;
 			}
+			// 事务一致性（不变量 C2）：上一轮被合成类闸拒的宿主，本轮先清标记再重试；
+			// 若同一次调用里被标上（见 MixinReWeaver 的同轮中止），下面按"已中止"分支处理。
+			if (MixinInnerClassHotSwap.isBlocked(name)) {
+				RemoldAgent.warn("[Mixin] Target class " + name + " is still blocked from a previous round"
+					+ " (a synthetic inner class could not be redefined safely); keeping its previous bytes"
+					+ " and retrying this round.");
+				MixinInnerClassHotSwap.clearBlocked(name);
+			}
 			byte[] originalBytes = readOriginalBytes(targetClass);
 			if (originalBytes == null) {
 				RemoldAgent.warn("[Mixin] Unable to read original bytecode for " + name + "; skipping re-weaving (runtime-generated classes not supported)");
@@ -758,6 +766,15 @@ public final class MixinHotSwap {
 			}
 			if (RemoldAgent.redefineDynamic(targetClass, originalBytes)) {
 				RemoldAgent.info("[Mixin] Target class " + name + " re-woven with updated mixin and redefined");
+			} else if (MixinInnerClassHotSwap.isBlocked(name)) {
+				// 真原子中止：合成类这一轮无法安全落地，宿主的 redefineClasses 一次都没有发生。
+				// 宿主与合成类一起停在已加载旧版，下一批次重试——绝不能落到下面"被 LayoutGate 拒绝"
+				// 的分支去误导用户改字段。
+				RemoldAgent.warn("[Mixin] Target class " + name + " was NOT redefined: a synthetic inner class"
+					+ " could not be redefined safely this round (transactional consistency). Both the target"
+					+ " and the synthetic class keep their previously loaded bytes; nothing was half-applied."
+					+ " The next batch retries.");
+				MixinInnerClassHotSwap.clearBlocked(name);
 			} else if (RemoldAgent.lastRedefineFailedAtVmLevel() || RemoldAgent.isVmRedefinitionPoisoned(name)) {
 				// 归因纠偏：JVM 级失败（InternalError/VerifyError）与布局拒绝是两码事，
 				// 把它引向 LayoutGate 会让用户去改字段，而真正该做的是立刻重启。

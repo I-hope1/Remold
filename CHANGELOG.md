@@ -83,6 +83,11 @@ _（暂无；下一个版本的内容写在这里）_
 
 ### Fixed
 
+- **测试夹具的调试信息档位**：`:tests` 的 SemAssert 夹具（`hstestFx_*`）曾显式把 `debugLevel` 收窄成
+  `-g:source,lines`，缺 `LocalVariableTable` → lambda 捕获身份只能靠槽号猜，整批夹具跑在"无调试信息"档，
+  与真实用户工程（Gradle 默认 `source,lines,vars`）不一致。现改为全量 `-g`，并把「`-g` 与捕获顺序判定」
+  的前提写进 `docs/mixin/08-decisions-and-empirical-ledger.md` §3.5（含 javac 在 `-g:none` 下把
+  语义不同的两个 lambda 去重合并的实证）。
 - `[ANON_ALIGN]` 的 Tier 4.5 日志不再把“扫描可见的活实例为 0”表述成“实例已死”，也不再把
   “实例数为 0”当作配对安全性的依据。此前该行写作 `deterministic-dead-pair (0 live instances)`，
   而真实客户端里字段持有的实例仍然存活并继续执行（`fieldAnon v2/v3`），文案与事实不符。现在该行

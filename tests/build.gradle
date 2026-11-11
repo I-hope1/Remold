@@ -77,7 +77,11 @@ def hstestFixtureTasks = hstestFixtureSpecs.collect { g, v, helper ->
 		options.encoding = "UTF-8"
 		options.warnings = false
 		options.debug = true
-		options.debugOptions.debugLevel = "source,lines"
+		// 必须是全量 `-g`（含 vars）：这些夹具是"用户工程"的替身，而用户工程默认带 LocalVariableTable。
+		// 收窄成 `source,lines` 会丢掉 LVT，于是 lambda 捕获身份只能靠槽号猜——`isPermutedPair` 在
+		// "无 LVT + 捕获来自局部变量"时无法区分"声明顺序变了"与"lambda 语义变了"，只能静默按旧行为配对，
+		// 让整批 SemAssert 用例跑在"无调试信息"档，与真实工程的行为不一致（详见 docs/mixin/08）。
+		options.debugOptions.debugLevel = "source,lines,vars"
 		sourceCompatibility = "${hstestFixtureJdk}"
 		targetCompatibility = "${hstestFixtureJdk}"
 	}

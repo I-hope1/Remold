@@ -24,7 +24,7 @@ Full English guide, demos and safety model: **[README_EN.md](https://github.com/
 
 ## Applying the plugin
 
-### From the Gradle Plugin Portal (once published)
+### From the Gradle Plugin Portal (recommended)
 
 ```kotlin
 plugins {
@@ -32,7 +32,9 @@ plugins {
 }
 ```
 
-### From JitPack today
+No extra repository is needed — the plugin resolves from `plugins.gradle.org`, JitPack included.
+
+### From JitPack (alternative)
 
 The Portal hosts a plugin marker artifact; JitPack does not, so map the plugin id to the module once:
 

@@ -275,45 +275,31 @@ public final class MixinSyntheticGateProbe {
 		boolean expandedFree = MixinInnerClassHotSwap.redefineSyntheticSafely(inst, narrow, HALF_FIXTURE,
 			candidate.bytes(), HOST);
 		int[] afterFree = metrics();
-		require(expandedFree, "with no reachable instance the same expansion must be accepted (liveness==0 branch)");
-		require(afterFree[0] - beforeFree[0] == 1, "the accepted branch must redefine exactly once");
-		require(afterFree[2] - beforeFree[2] == 0, "the accepted branch must not be rejected");
+		require(!expandedFree, "with ZERO reachable instances the same expansion must still be refused: the"
+			+ " real machine measured newlyNull=230 at raw=0/reachable=0, so the verdict cannot depend on the heap");
+		require(afterFree[0] - beforeFree[0] == 0, "no redefine may execute for a member-schema change");
+		require(afterFree[2] - beforeFree[2] == 1, "the schema gate must reject it exactly once");
+		require(afterFree[1] - beforeFree[1] == 1, "the field-table change must still be reported");
+		require(MixinInnerClassHotSwap.isBlocked(HOST), "the second refusal must block the host as well");
 
-		// The kept constructor exists on the redefined class and its body is the OLD body: an instance
-		// built through it after the expansion never writes the new captures, so the new body reads them
-		// at their defaults (the half-migrated semantics of invariant C3).
-		HalfInitOld fromOldCtor = new HalfInitOld(new Object(), "a");
-		Throwable oldCtorBody = null;
-		try {
-			fromOldCtor.test();
-		} catch (Throwable t) {
-			oldCtorBody = t;
-		}
-		require(oldCtorBody instanceof NullPointerException,
-			"an instance built by the retained old <init> after the expansion must throw NPE when the new body"
-				+ " reads the new reference capture, got " + oldCtorBody);
-		require("test".equals(oldCtorBody.getStackTrace()[0].getMethodName()),
-			"the NPE must be thrown by the new body, not by the constructor: "
-				+ MixinSyntheticHalfInitFixtures.stackOf(oldCtorBody));
-		int countDefault;
-		try {
-			countDefault = ((Integer) MixinSyntheticHalfInitFixtures.call(fromOldCtor,
-				MixinSyntheticHalfInitFixtures.COUNT)).intValue();
-		} catch (Throwable t) {
-			throw new IllegalStateException("the retained <init> must still leave the new primitive capture"
-				+ " readable at its default, but capturedCount() failed: " + t, t);
-		}
-		require(countDefault == 0,
-			"the retained old <init> never writes the new primitive capture, so it must read 0, got " + countDefault);
+		// The class must be untouched by both refusals: the 2-field shape still answers with the old body
+		// and still declares exactly two capture fields. (The half-migrated-instance semantics of invariant
+		// C3 — a retained old <init> leaving the new captures at their defaults — is measured by
+		// MixinSyntheticGateTest on the identical candidate bytes, because after this verdict a real
+		// redefine is never performed for it.)
+		HalfInitOld untouched = new HalfInitOld(new Object(), "a");
+		require("v1:a".equals(untouched.test()),
+			"a refused expansion must leave the loaded class on the OLD body, got " + untouched.test());
+		require(MixinSyntheticSchema.loadedFields(HalfInitOld.class).size() == 2,
+			"a refused expansion must leave the field table untouched, got "
+				+ MixinSyntheticSchema.loadedFields(HalfInitOld.class));
 
 		passed++;
 		notes.put("p4a-liveness-refused", "live{raw=" + held.raw + " reachable=" + held.reachableText()
 			+ "} executed=" + (after[0] - before[0]) + " gateRejected=" + (after[2] - before[2]));
-		notes.put("p4b-liveness-free-accepted",
-			"reachable=0 executed=" + (afterFree[0] - beforeFree[0]) + " npe=" + brief(oldCtorBody)
-				+ " new-primitive=" + countDefault + " retained=" + candidate.retained());
-		notes.put("p4-old-ctor-stack",
-			MixinSyntheticHalfInitFixtures.stackOf(oldCtorBody).replace('\n', ' ').trim());
+		notes.put("p4b-zero-instances-refused", "reachable=0 executed=" + (afterFree[0] - beforeFree[0])
+			+ " gateRejected=" + (afterFree[2] - beforeFree[2]) + " untouched=" + untouched.test()
+			+ " retained=" + candidate.retained());
 	}
 
 	private static void skipNonJbr(String why) {

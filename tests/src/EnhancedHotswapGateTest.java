@@ -27,6 +27,40 @@ class EnhancedHotswapGateTest {
 	}
 
 	@Test
+	void flagEnabledFollowsLastOccurrence() {
+		// 无参数
+		assertFalse(RemoldAgent.isFlagEnabled(java.util.List.of(), "AllowEnhancedClassRedefinition"));
+		assertFalse(RemoldAgent.isFlagEnabled(null, "AllowEnhancedClassRedefinition"));
+
+		// 只有 +
+		assertTrue(RemoldAgent.isFlagEnabled(java.util.List.of("-XX:+AllowEnhancedClassRedefinition"), "AllowEnhancedClassRedefinition"));
+
+		// 只有 -
+		assertFalse(RemoldAgent.isFlagEnabled(java.util.List.of("-XX:-AllowEnhancedClassRedefinition"), "AllowEnhancedClassRedefinition"));
+
+		// + 在前，- 在后（后置覆盖，关闭）
+		assertFalse(RemoldAgent.isFlagEnabled(java.util.List.of(
+			"-XX:+AllowEnhancedClassRedefinition",
+			"-XX:-AllowEnhancedClassRedefinition"
+		), "AllowEnhancedClassRedefinition"));
+
+		// - 在前，+ 在后（后置启用，开启）
+		assertTrue(RemoldAgent.isFlagEnabled(java.util.List.of(
+			"-XX:-AllowEnhancedClassRedefinition",
+			"-XX:+AllowEnhancedClassRedefinition"
+		), "AllowEnhancedClassRedefinition"));
+
+		// 夹杂其它参数
+		assertFalse(RemoldAgent.isFlagEnabled(java.util.List.of(
+			"-Xmx512m",
+			"-XX:+AllowEnhancedClassRedefinition",
+			"-Dfoo=bar",
+			"-XX:-AllowEnhancedClassRedefinition",
+			"-ea"
+		), "AllowEnhancedClassRedefinition"));
+	}
+
+	@Test
 	void structuralChangeWithEnhancedCapabilityProceeds() {
 		assertFalse(RemoldAgent.mustSkipForMissingEnhancedRedefinition(true, true),
 			"JBR/DCEVM handles schema changes natively; the class must stay in the batch");

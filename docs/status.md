@@ -195,6 +195,20 @@
 
 ---
 
+## 0.12 下一版本（未发布）：热更边界实测（v6）高危漏洞与边界治理
+
+本轮针对用户在 Linux aarch64 + JBR 21.0.8 + Remold 0.2.6 环境下实测发现的《热更新边界实测（v6）》报告中 §10.1 危险等级清单开展先红后绿的闭环治理，完成全链路漏洞修复与对照组变异击杀：
+
+| 修复 / 能力 | 状态 | 代码位置 | 验收证据 |
+|:---|:---:|:---|:---|
+| **R6b 枚举常量声明顺序安全门与 Switch 级联阻断（🔴最危险）**：枚举常量重排/前插导致 ordinal 漂移，现有存量实例保留原 ordinal 致使 switch-on-enum 和 EnumMap 静默走错分支 | ✅ | `ClassDiffUtil.diff` 记录 `shiftedEnumConstants` 与 `CHANGED_ENUM_ORDER`；`LayoutDecisionEngine.decide` 拦截拒绝并提示 revert/restart；`RemoldAgent` 级联阻断同批次依赖该枚举 SwitchMap 的调用类 | **单测**：`EnumSwitchReorderGateTest`（5/5，前插常量拒绝、重排常量拒绝、末尾追加放行、调用类 SwitchMap 级联阻断、同批重编放行）；**变异**：注释掉枚举顺序检查后测试精准变红（2 failed） |
+| **B4 & R1 & R2 Record 组件变更与 `@RemoldReinit` 初值可行性安全门（🟠高危）**：Record 类新增不可变组件导致存量实例恒为 0/null 破坏不变式与等价性；Record 改类型或无初值构造器字段标注 `@RemoldReinit` 导致 DCEVM 重定义后槽位被静默置 null/0 发生数据丢失 | ✅ | `ClassDiffUtil.diff` 识别 Record 新增组件（`RECORD_COMPONENT_ADDED`）；`InitFix.unextractableReinitFields` 纯函数前置核验切片提取可行性；`LayoutDecisionEngine.decide` 对有存活实例的 Record 新增组件以及不可提取的 `@RemoldReinit` 字段坚决拒绝（`LAYOUT-REJECT`），合法初值普通类保持 `WAIVE_REINIT` 放行 | **单测**：`RecordAndReinitExtractabilityGateTest`（5/5，R1 存活拒绝、R1 无实例放行、B4 Record 改类型标注 reinit 拒绝、B4 变体构造器自赋值标注 reinit 拒绝、B3 对照组普通类合法初值放行）；**变异**：注释掉 `unextractableReinitFields` 校验后 B4 测试精准变红（2 failed） |
+| **S5c / S5d 方法与字段静态性翻转（static ↔ instance）读者拦截（🟡中危）**：方法或字段 staticness 翻转时因同名同 desc 被误判为普通代码变动，批外调用方执行旧调用指令（`invokevirtual` 对应 static 方法，或 `invokestatic` 对应实例方法）运行期抛 `IncompatibleClassChangeError`（ICCE） | ✅ | `ClassDiffUtil.diff` 识别静态性翻转，旧方法进 `removedMethods`，新方法进 `addedMethods`；`RemovedMemberScanner` survivor 集合带静态性标记；`RemovedMemberReaders.find` 建立两级漏斗精扫（`hasMatchingStaleInstruction`），常量池初筛后对方法体指令精扫，捕获旧静态性指令并记入 `incompatibleAccess`，`LayoutDecisionEngine` 判 `LAYOUT-REJECT`；同批重编读者（S5e）与类自身调用精准放行 | **单测**：`MemberStaticnessAndConstructorScanTest`（7/7 覆盖 S5c/S5d 拦截、S5e 同批重编放行、字段双向静态性翻转拦截、V5-C1 删构造器拦截与无调用放行）；**变异**：在 `ClassDiffUtil` 中注释掉方法静态性翻转判断后 S5c/S5d 测试精准变红（2 failed） |
+| **V5-C1 删构造器未拦截批外 `new` 读者（🟡中危）**：删掉无参构造器后重定义成功，批外调用方每次 `new Hot()` 运行期抛 `NoSuchMethodError: <init>()V not found` | ✅ | `RemovedMemberScanner.removedMembers` 不再跳过 `<init>`；`RemovedMemberReaders.resolveMethod` 针对 `<init>` 严格遵循 JVMS 5.4.3.3 不沿继承链向上查父类；批外存在 `Methodref Hot.<init>()` 读者时记入 `hits`，`LayoutDecisionEngine` 判 `LAYOUT-REJECT`；无批外读者放行 | **单测**：`MemberStaticnessAndConstructorScanTest.removedNoArgConstructorWithStaleCallerIsRejected` / `removedNoArgConstructorWithoutCallerPasses`；**变异**：跳过 `<init>` 则测试精准变红 |
+| **缺陷 1 `EnvironmentProbe` 命令行参数后置覆盖误判（🟡中危）**：JBR 参数同时包含 `+` 和 `-` 时，原实现仅用 `contains("+Allow...")` 导致被后置 `-Allow...` 覆盖时发生误判 | ✅ | `EnvironmentProbe.isFlagEnabled` 纯函数，以命令行参数列表中最后一次出现的 flag 为准，并由 `RemoldAgent.isFlagEnabled` 暴露门面 | **单测**：`EnhancedHotswapGateTest.flagEnabledFollowsLastOccurrence`（覆盖无参数、只有+、只有-、先+后-、先-后+）；**变异**：将 `lastPlus > lastMinus` 改为 `lastPlus >= 0` 后测试精准变红（1 failed） |
+
+---
+
 ## 状态图例与判定准则 (Legend & Criteria)
 
 | 图例 | 状态定义            | 判定准则与要求                                                                                                                                |

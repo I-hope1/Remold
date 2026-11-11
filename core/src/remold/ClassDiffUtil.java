@@ -413,9 +413,18 @@ public final class ClassDiffUtil {
 			if (oldM == null) {
 				// 新增方法：记录方法名+描述符
 				d.addedMethods.add(newM.name + newM.desc);
-			} else if (isCodeChanged(oldM, newM)) {
-				// 方法存在但代码发生了变化
-				d.modifiedBodyMethods.add(newM.name + newM.desc);
+			} else {
+				boolean oldIsStatic = (oldM.access & Opcodes.ACC_STATIC) != 0;
+				boolean newIsStatic = (newM.access & Opcodes.ACC_STATIC) != 0;
+				if (oldIsStatic != newIsStatic) {
+					// 静态性发生翻转（S5c/S5d）：旧调用指令（invokevirtual vs invokestatic）将失效抛 ICCE
+					// 判定为：旧方法删除，新方法新增
+					d.removedMethods.add(oldM.name + oldM.desc);
+					d.addedMethods.add(newM.name + newM.desc);
+				} else if (isCodeChanged(oldM, newM)) {
+					// 方法存在且静态性未变，但代码发生了变化
+					d.modifiedBodyMethods.add(newM.name + newM.desc);
+				}
 			}
 		}
 		// 映射表中剩余的就是被删除的方法

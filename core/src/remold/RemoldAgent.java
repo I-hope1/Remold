@@ -5145,6 +5145,11 @@ public class RemoldAgent {
 		return EnvironmentProbe.looksLikeEnhancedRuntime(runtimeIdentity);
 	}
 
+	/** @see EnvironmentProbe#isFlagEnabled(java.util.List, String) */
+	public static boolean isFlagEnabled(java.util.List<String> inputArgs, String flagName) {
+		return EnvironmentProbe.isFlagEnabled(inputArgs, flagName);
+	}
+
 	/** @see EnvironmentProbe#isEnhancedHotswapEnabled() */
 	public static boolean isEnhancedHotswapEnabled() {
 		return EnvironmentProbe.isEnhancedHotswapEnabled();

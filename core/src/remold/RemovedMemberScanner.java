@@ -241,29 +241,37 @@ final class RemovedMemberScanner {
 		new ClassReader(newBytes).accept(newClass, ClassReader.SKIP_CODE);
 
 		Set<String> fieldSurvivors = new HashSet<>();
-		for (FieldNode f : newClass.fields) fieldSurvivors.add(f.name + ":" + f.desc);
+		for (FieldNode f : newClass.fields) {
+			boolean isStatic = (f.access & Opcodes.ACC_STATIC) != 0;
+			fieldSurvivors.add((isStatic ? "static " : "") + f.name + ":" + f.desc);
+		}
 
 		List<RemovedMemberReaders.RemovedMember> out = new ArrayList<>();
 		for (FieldNode f : oldClass.fields) {
 			if ((f.access & Opcodes.ACC_SYNTHETIC) != 0 || f.name.startsWith("$remold$")) continue;
-			if (fieldSurvivors.contains(f.name + ":" + f.desc)) continue;
+			boolean isStatic = (f.access & Opcodes.ACC_STATIC) != 0;
+			if (fieldSurvivors.contains((isStatic ? "static " : "") + f.name + ":" + f.desc)) continue;
 			out.add(new RemovedMemberReaders.RemovedMember(oldClass.name, f.name, f.desc, true,
 				(f.access & Opcodes.ACC_PRIVATE) != 0,
-				(f.access & Opcodes.ACC_STATIC) != 0,
+				isStatic,
 				// ASM 把 ConstantValue 属性解析成 FieldNode.value。非 null 就是编译期常量，
 				// javac 会把它内联进读者的 ldc/bipush——读者常量池里没有 Fieldref，扫描无从下手。
 				f.value != null));
 		}
 
 		Set<String> methodSurvivors = new HashSet<>();
-		for (MethodNode m : newClass.methods) methodSurvivors.add(m.name + ":" + m.desc);
+		for (MethodNode m : newClass.methods) {
+			boolean isStatic = (m.access & Opcodes.ACC_STATIC) != 0;
+			methodSurvivors.add((isStatic ? "static " : "") + m.name + ":" + m.desc);
+		}
 		for (MethodNode m : oldClass.methods) {
-			if ("<init>".equals(m.name) || "<clinit>".equals(m.name)) continue;
+			if ("<clinit>".equals(m.name)) continue;
 			if (m.name.startsWith("$remold$")) continue;
-			if (methodSurvivors.contains(m.name + ":" + m.desc)) continue;
+			boolean isStatic = (m.access & Opcodes.ACC_STATIC) != 0;
+			if (methodSurvivors.contains((isStatic ? "static " : "") + m.name + ":" + m.desc)) continue;
 			out.add(new RemovedMemberReaders.RemovedMember(oldClass.name, m.name, m.desc, false,
 			                                               (m.access & Opcodes.ACC_PRIVATE) != 0,
-			                                               (m.access & Opcodes.ACC_STATIC) != 0));
+			                                               isStatic));
 		}
 		return out;
 	}

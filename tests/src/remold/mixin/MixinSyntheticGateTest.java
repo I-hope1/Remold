@@ -530,15 +530,16 @@ class MixinSyntheticGateTest {
 
 			GateOutcome outcome = attempt(recorder, HalfInitOld.class, name, candidate.bytes(), host);
 
-			assertTrue(outcome.executed, "an expansion must pass all four gates: no field shrinks and the retained"
-				+ " <init> keeps the loaded constructor set a subset");
-			assertEquals(0, outcome.gateRejectedDelta, "no gate may reject the expansion");
+			assertFalse(outcome.executed, "an expansion must be REFUSED: a member-schema change on a loaded"
+				+ " synthetic class makes the JVM re-lay out instances and rewrite unrelated heaps (real machine:"
+				+ " newlyNull=230 even with zero instances of the class)");
+			assertEquals(0, outcome.executedDelta, "no redefine may execute for a member-schema change");
+			assertEquals(1, outcome.gateRejectedDelta, "the schema gate must reject the expansion");
 			assertEquals(1, outcome.fieldChangedDelta, "an expanded field table must be counted as a field-table"
 				+ " change — that is the signal that the JVM re-lays out instances");
-			assertEquals(1, outcome.redefinitions.size(), "exactly one redefine call may leave the single exit");
-			assertArrayEquals(candidate.bytes(), outcome.redefinitions.get(0).getDefinitionClassFile(),
-				"the bytes handed to redefineClasses must be the retained-constructor candidate, so the semantics"
-					+ " measured below is the semantics the JVM would install");
+			assertTrue(outcome.redefinitions.isEmpty(), "an expansion must never reach redefineClasses");
+			assertTrue(MixinInnerClassHotSwap.isBlocked(host), "the refusal must block the host target so it cannot"
+				+ " be redefined into a split state");
 
 			// The identical bytes, defined under the loaded name in a private loader: same shape as after a
 			// real redefine, minus the redefine machinery the unit-test JVM cannot drive.

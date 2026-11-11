@@ -108,17 +108,20 @@ class MixinSyntheticLivenessTest {
 			assertTrue(recorder.redefinitions.isEmpty(),
 				"total redefineClasses calls (synthetic + host) must be 0");
 
-			// Control: drop the only strong reference, run the identical call -> it executes. The only
-			// removed condition is liveness, so the refusal above cannot be explained by the candidate.
+			// Control (new contract): drop the only strong reference and run the identical call -> it is
+			// STILL refused. Liveness is no longer an input to the verdict (the real machine showed the
+			// pollution happens with zero instances too), so the refusal must be reproducible with a probe
+			// that reports nothing at all. A regression that re-introduces "no instance -> allow" goes red.
 			holder[0] = null;
 			MixinInnerClassHotSwap.clearBlocked(host);
 			int[] beforeControl = metrics();
 			boolean controlExecuted = MixinInnerClassHotSwap.redefineSyntheticSafely(
 				recorder.proxy, live, MixinSyntheticHalfInitFixtures.OLD_DOTTED, candidate, host);
 			int[] afterControl = metrics();
-			assertTrue(controlExecuted, "with no live instance the same candidate must be accepted");
-			assertEquals(1, afterControl[0] - beforeControl[0], "the control must reach the exit exactly once");
-			assertEquals(0, afterControl[2] - beforeControl[2], "the control must not be rejected by any gate");
+			assertFalse(controlExecuted, "with zero live instances the same member-schema change must still be"
+				+ " refused (the verdict does not depend on the heap)");
+			assertEquals(0, afterControl[0] - beforeControl[0], "the control must not redefine anything");
+			assertEquals(1, afterControl[2] - beforeControl[2], "the control must be rejected by the schema gate");
 		} finally {
 			RemoldAgent.removeTransformerBridge(bridge);
 			RemoldAgent.swapInstrumentationForTest(previous);
@@ -128,14 +131,16 @@ class MixinSyntheticLivenessTest {
 	}
 
 	/**
-	 * Case B — field table grows with <b>no</b> live instance: allowed, and the produced bytes carry
-	 * both the retained baseline {@code <init>} and the grown one.
+	 * Case B — field table grows with <b>zero reachable instances</b>: still refused.
 	 *
-	 * <p>Also pins the probe protocol: {@code raw} counts heap instances including unreachable ones,
-	 * and {@code reachable} is the number after a GC — the gate must look at {@code reachable}.</p>
+	 * <p>This is the branch the real machine decided (HEAD {@code ac20e60b}): with
+	 * {@code live{raw=0 reachable=0}} a real {@code redefineClasses} of a schema-changed synthetic
+	 * class still wiped 230 named {@code LootCondition} references ({@code newlyNull=230}). The
+	 * pollution depends on "member schema differs", not on the instance count, so this branch is
+	 * refused too; the two numbers stay in the log as diagnostics only.</p>
 	 */
 	@Test
-	void aGrowingFieldTableIsAllowedWhenNoInstanceSurvivesTheGc() {
+	void aGrowingFieldTableIsRefusedEvenWhenNoInstanceSurvivesTheGc() {
 		Class<?> live = MixinSyntheticHalfInitFixtures.loadInFreshLoader(
 			MixinSyntheticHalfInitFixtures.oldShapeBytes());
 		byte[] candidate = MixinSyntheticHalfInitFixtures.expandedCandidate().bytes();
@@ -163,17 +168,14 @@ class MixinSyntheticLivenessTest {
 				recorder.proxy, live, MixinSyntheticHalfInitFixtures.OLD_DOTTED, candidate, host);
 			int[] after = metrics();
 
-			assertTrue(executed, "with no reachable instance the growth must be accepted");
-			assertEquals(1, after[0] - before[0], "the synthetic class must be redefined exactly once");
-			assertEquals(1, after[1] - before[1], "the field-table change must be counted");
-			assertEquals(0, after[2] - before[2], "no gate may reject it");
-			assertEquals(1, recorder.redefinitions.size(), "exactly one redefineClasses call may leave the gate");
-			Set<String> ctors = constructorDescriptorsOf(recorder.redefinitions.get(0).getDefinitionClassFile());
-			assertTrue(ctors.contains(MixinSyntheticHalfInitFixtures.OLD_CTOR_DESC),
-				"the loaded 2-arg <init> must still be retained; got " + ctors);
-			assertTrue(ctors.contains(MixinSyntheticHalfInitFixtures.GROWN_CTOR_DESC),
-				"the grown <init> must be present; got " + ctors);
-			assertFalse(MixinInnerClassHotSwap.isBlocked(host), "an accepted redefine must not block the host");
+			assertFalse(executed, "a member-schema change must be refused even with zero reachable instances"
+				+ " (real machine: newlyNull=230 at raw=0/reachable=0)");
+			assertEquals(0, after[0] - before[0], "no redefine may execute");
+			assertEquals(1, after[1] - before[1], "the field-table change must still be reported");
+			assertEquals(1, after[2] - before[2], "the schema gate must count exactly one rejection");
+			assertTrue(recorder.redefinitions.isEmpty(), "the synthetic class must not reach redefineClasses");
+			assertTrue(MixinInnerClassHotSwap.isBlocked(host),
+				"the refusal must block the host so it cannot be redefined into a split state");
 		} finally {
 			RemoldAgent.swapInstrumentationForTest(previous);
 			MixinClassBaseline.forgetForTest(live.getClassLoader(), MixinSyntheticHalfInitFixtures.OLD_DOTTED);

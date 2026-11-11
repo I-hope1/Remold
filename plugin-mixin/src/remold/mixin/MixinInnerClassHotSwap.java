@@ -419,6 +419,11 @@ final class MixinInnerClassHotSwap {
 		return GENERATED.get(MixinInnerClassSupport.internalName(className));
 	}
 
+	/** 单测读数：本进程回灌给 core 的合成类字节（{@code null} = 这一轮没生成过）。 */
+	static byte[] generatedBytesForTest(String className) {
+		return generatedBytes(className);
+	}
+
 	/**
 	 * 已加载合成类的<b>基线字节</b>（不变量 C1）：JVM 里实际加载的那一份。
 	 *
@@ -709,14 +714,18 @@ final class MixinInnerClassHotSwap {
 			blockHost(hostDotName, name, baselineMissing);
 			return false;
 		}
-		// 分级闸门（与 AnonClassAligner 布局门同构，不变量 C4）：字段表变化是否可放行，取决于该合成类
-		// 在堆上**还有没有存活实例**——
-		//   • fieldTableChanged == false：只改方法体，存量与新建实例都原地生效，一律放行；
-		//   • fieldTableChanged == true + 有存活实例：旧实例没有新捕获字段的初值，JBR 迁移后必为
-		//     0/null（半残实例，C3 已实测 NPE），且 ModifyInstances 会污染无关类堆 → 一律拒绝；
-		//   • fieldTableChanged == true + 无存活实例：没有旧实例可半残，放行（真机待验）；
-		//   • 探针不可用（拿不到实例数）：按安全优先拒绝——无法证明"没有旧实例"就不能赌。
-		boolean fieldTableChanged = !loadedFields.equals(freshFields);
+		// 结构闸门（真机已裁定，不变量 C4）：只要**字段表相对已加载版本发生变化**就一律拒绝，与堆上有
+		// 多少实例无关——
+		//   • fieldTableChanged == false：只改方法体，存量与新建实例都原地生效 → 放行；
+		//   • fieldTableChanged == true：一律拒绝 + 中止宿主。真机两分支实测（HEAD ac20e60b）已闭合
+		//     事实③：即便 `raw=0 reachable=0`（堆上 0 个实例），对合成匿名类调用 redefineClasses 仍必现
+		//     `newlyNull=230`（230 个具名 Record `LootCondition` 引用被抹）。即 JBR-21 DCEVM 的
+		//     ModifyInstances 污染与实例数**无关**，只与"成员 schema 与已加载版本不一致"有关。
+		//   • 旧的「变化 + 无存活实例 → 放行」分支已删除；`live{raw,reachable}` 仅保留为诊断读数。
+		// 口径：flags 也参与比较（isStatic / isSynthetic），同名同描述符但 static 翻转同样算变化。
+		boolean fieldTableChanged = !loadedFields.equals(freshFields)
+			|| !MixinSyntheticSchema.loadedFieldSignatures(live)
+				.equals(MixinSyntheticSchema.nodeFieldSignatures(fresh));
 		if (fieldTableChanged) {
 			// 口径说明：本计数表示"字段表相对已加载版本发生变化"，与是否放行无关——
 			// 拒绝时也要报出来，否则真机只能看到 gateRejected=1 而不知道是不是 schema 变化触发。
@@ -725,23 +734,18 @@ final class MixinInnerClassHotSwap {
 		LiveCount liveness = syntheticLive(live, fieldTableChanged);
 		RemoldAgent.info("[Mixin] synthetic inner class " + name + " live{raw=" + liveness.raw + " reachable="
 			+ liveness.reachableText() + "} fieldTableChanged=" + fieldTableChanged
-			+ " loaded=" + loadedFields + " fresh=" + freshFields + ".");
+			+ " loaded=" + loadedFields + " fresh=" + freshFields
+			+ " loadedFlags=" + MixinSyntheticSchema.loadedFieldSignatures(live)
+			+ " freshFlags=" + MixinSyntheticSchema.nodeFieldSignatures(fresh) + ".");
 		if (fieldTableChanged) {
-			if (!liveness.measured()) {
-				GATE_REJECTED.incrementAndGet();
-				blockHost(hostDotName, name, "field table changed (" + loadedFields + " -> " + freshFields
-					+ ") but the live-instance probe is unavailable, so 'no old instance would be left"
-					+ " half-migrated' cannot be proven");
-				return false;
-			}
-			if (liveness.reachable > 0) {
-				GATE_REJECTED.incrementAndGet();
-				blockHost(hostDotName, name, "field table changed (" + loadedFields + " -> " + freshFields + ") while "
-					+ liveness.reachable + " live instance(s) remain (raw=" + liveness.raw + "): old instances would"
-					+ " keep 0/null in the new captures (half-migrated) and the instance migration rewrites unrelated"
-					+ " heaps; refusing — restart, or keep the capture list stable (@RemoldReinit / lambda)");
-				return false;
-			}
+			GATE_REJECTED.incrementAndGet();
+			blockHost(hostDotName, name, "field table changed (" + loadedFields + " -> " + freshFields + "; flags "
+				+ MixinSyntheticSchema.loadedFieldSignatures(live) + " -> "
+				+ MixinSyntheticSchema.nodeFieldSignatures(fresh) + ") with live{raw=" + liveness.raw + " reachable="
+				+ liveness.reachableText() + "}: a member-schema change on a loaded synthetic class makes JBR/DCEVM"
+				+ " rewrite unrelated heaps (real machine: newlyNull=230 even with zero instances), so it is refused"
+				+ " regardless of the instance count — restart, or keep the capture list stable (@RemoldReinit / lambda)");
+			return false;
 		}
 		remold.ref.HeapFieldWatch.snapshot("before-synthetic-redefine", name);
 		RemoldAgent.enterInternalRedefine(java.util.Collections.singleton(name));

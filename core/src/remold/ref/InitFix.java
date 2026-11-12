@@ -1367,10 +1367,11 @@ public class InitFix {
 		for (String f : unchangedInstance) instanceExtracts.remove(f);
 		for (String f : unchangedStatic) staticExtracts.remove(f);
 		if (!reinitTriggerReasons.isEmpty()) {
-			RemoldAgent.info("[REINIT] @RemoldReinit trigger on " + className + ": " + reinitTriggerReasons);
+			RemoldAgent.info("[REINIT] @RemoldReinit trigger on " + className.replace('/', '.') + ": "
+				+ reinitTriggerReasons);
 		}
 		if (!unchangedInstance.isEmpty() || !unchangedStatic.isEmpty()) {
-			RemoldAgent.info("[REINIT] @RemoldReinit kept as-is on " + className
+			RemoldAgent.info("[REINIT] @RemoldReinit kept as-is on " + className.replace('/', '.')
 				+ " (initializer expression has not changed since last applied and is fully determined by bytecode; not rewriting): "
 				+ "instance=" + unchangedInstance + ", static=" + unchangedStatic);
 		}
@@ -3978,7 +3979,7 @@ public class InitFix {
 		// ---- 实例字段：逐实例、逐字段 ----
 		if (plan.hasInstance() && alive != null && !alive.isEmpty()) {
 			RemoldAgent.info("Applying instance field init patch to " + host.getName()
-			                  + ", count=" + alive.size()
+			                  + ", enumerated=" + alive.size()
 			                  + (hasSelfOnlyTasks ? ", selfScopeTargets=" + selfOnlyTargets : "")
 			                  + ", fields=" + plan.instanceTasks().size());
 

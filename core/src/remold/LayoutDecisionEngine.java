@@ -333,7 +333,7 @@ final class LayoutDecisionEngine {
 		// 否则会落进下面通用的 "revert the field change" 文案里，看起来像普通字段变更。
 		if (d.reason() != null && d.reason().startsWith("unsafe @RemoldReinit scope")) {
 			return RoundSkips.verdict("LAYOUT-REJECT", "unsafe @RemoldReinit scope on inherited field(s)",
-				"move @RemoldReinit to where the value is initialized, use scope = SELF, or restart");
+				"move @RemoldReinit to where the value is initialized, use scope = SELF, or use @OnReload");
 		}
 		String detail = d.layout() == null ? null : d.layout().detail();
 		if (scan != null && scan.removedMethods() && "compatible".equals(detail)) {

@@ -959,6 +959,23 @@ tasks.register("readerScanProbe", JavaExec) {
 	}
 }
 
+// 参数注解 / 泛型签名漂移探针（批次 K，可复用入口供批次 J 使用）：
+// 属性变化（annotations / Signature）在标准 HotSpot 上能否 redefine、旧 Method 句柄读到什么，
+// 全部由探针实测，不预设结论。只需要 Instrumentation，不需要 DCEVM。
+tasks.register("parameterAnnotationDriftProbe", JavaExec) {
+	group = "verification"
+	description = "参数注解/泛型签名漂移探针 (ParameterAnnotationDriftProbe)：旧句柄/重取/首次解析三组真实读数"
+	dependsOn classes
+	dependsOn p05AgentJar
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "ParameterAnnotationDriftProbe"
+	maxHeapSize = "1g"
+	doFirst {
+		jvmArgs "-javaagent:${p05AgentJar.get().archiveFile.get().asFile.absolutePath}",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+	}
+}
+
 // 缓存填充探针：验证 transformer 的分组执行顺序，以及缓存里存的是对齐/织入之后的字节。
 tasks.register("cacheWarmingProbe", JavaExec) {
 	group = "verification"

@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   不重跑 transformer 桥接或 `InitFix.transform`。阶段 C 失败按 VM 级/非 VM 级分流（VM 级标记毒化并
   停在阶段 A 提示重启；非 VM 级尝试回滚基线字节并返回 `false`）。纯方法体热更仍走单次重定义。
   单测 `DynamicTwoPhaseRedefineTest` 2/2（两次 redefine 的顺序与字节；补丁日志夹在两次之间；
-  纯方法体仍单次），变异：强制 `twoPhase=false` → 用例红。
+  纯方法体仍单次），变异：强制 `twoPhase=false` → 用例红；真机（JBR 21 DCEVM）
+  `redefineDynamicNoBaselineProbe` 13/0，日志 `two-phase: A -> patch -> C`、存量实例 `b=42`，
+  批次监听器只触发一次。
 
 - **`remold-agent.jar` 版本对账（gradle-plugin）**：`remold-agent.jar` 的 manifest 现在写入
   `Remold-Version` / `Implementation-Version`（值来自 `gradle.properties` 的 `remoldVersion`）。

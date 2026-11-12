@@ -726,18 +726,18 @@
 
 | 项 | 状态 | 证据等级 |
 |:--|:--|:--|
-| L5 静默错绑（体内加内层 lambda → 旧实例跑成内层逻辑、无 WARN）已转为 `BODY_MISMATCH` WARN + 拒绝配对 + 旧名幽灵化 + 新名避障 | 已拦截 | 实测：先红基线 `ev-…160603` → 修复后三绿 `ev-…160650`；变异 2/2 killed（`mut-…160659`/`mut-…160822`） |
+| L5 静默错绑（体内加内层 lambda → 旧实例跑成内层逻辑、无 WARN）已转为 `BODY_MISMATCH` WARN + 拒绝配对 + 旧名幽灵化 + 新名避障 | 已拦截 | 覆盖用例：`PassBTest`（语料 N=37 与嵌套 lambda 阳性对照）、`LineNumberDifferentialTest`（幽灵归因契约） |
 | 方法体指纹归一化：常量按值、引用按 `owner+name+desc`、局部槽按首现序、标签按首引用序、可折叠算式 | 已实现 | 实测：语料 N=37 中 31 个类触发兜底门禁，评估 107 次、107 次进入 `bodyHash` 比对且均相等放行、拒绝 0 次，同源变换误报 0/107；另有人造重排 4 类各 n=1 |
 | 信息论边界：删一个 lambda 并在同一次保存里新增一个 javac 恰好复用同编号、且宿主同名的 lambda，与原地更新在字节码层不可区分 | 未解决 | 由代码分析可知；缓解只有名字/编号漂移这类间接信号 |
 | Pass B 覆盖面收窄：纯搬迁先被 Step 1 吃掉，Pass B 只覆盖"体等价但票不同" | 已登记 | 实测 |
 | `stats.bodyMismatchRefusals` 是**逐趟计数**，不是拒绝次数 | 已登记 | 实测 |
 | 槽位平移幽灵：`-g:none` + 槽位整体平移，语料 N=37 中 9 类出现幽灵、共 23 桩（= 8/30、22 桩 + `plugin-forge` 的 `ForgeMixinHotSwap` 1 类 1 桩） | 已结案：`gate=on/off` 两趟 37 行逐字节相同，机制为语料上 107 次门禁评估均放行（0 拒绝），关掉门禁同样放行，故输出相同 | 实测；成因"票据指纹计入 `var` 下标"为 由代码分析可知，未做隔离实验 |
-| `允许幽灵参与匹配的变异体`（允许幽灵参与匹配）在门禁开启后不可被击杀 → 转门禁屏蔽集 + `D==0` 哨兵；哨兵与具名用例是**报警不是防线**，Pass B 两处仅靠门禁 | 已登记 | 由代码分析可知 |
+| 允许幽灵参与匹配的变异体在门禁开启后不可被击杀 → 转门禁屏蔽集 + `D==0` 哨兵；哨兵与具名用例是**报警不是防线**，Pass B 两处仅靠门禁 | 已登记 | 由代码分析可知 |
 | 语料范围 | N=37：`core/src`+`api/src`（30/258，合并编译）、`plugin-fabric/src`（3/7）、`plugin-mixin/src`（2/23）、`plugin-forge/src`（2/12） | 实测 |
 | 语料缺口 | `plugin-arc/src`（Mindustry 编译期制品非纯 class 包，缺注解处理器，javac 解析即失败）、`tests/`、`gradle-plugin/` | 实测 |
 
-- 合流点 `680029f`；权威全量读数 实测记录（HEAD `b0679c8`，`--rerun-tasks`，35 tasks executed，166.2 s）：**732 tests / 0 failures / 0 errors / 0 skipped**。
-- 结案记录：门禁评估次数已量化（`eval=107 / fpCmp=107 / fpAllow=107 / refused=0 / classes=31`）；`嵌套 lambda 对照种子` 阳性对照 `eval=18 fpCmp=18 hostKindRefused=18 classes=1`（指纹不等后由宿主形态翻转拒绝）。
+- 合流点 `680029f`；权威全量读数（HEAD `b0679c8`，`--rerun-tasks`，35 tasks executed，166.2 s）：**732 tests / 0 failures / 0 errors / 0 skipped**。
+- 结案记录：门禁评估次数已量化（`eval=107 / fpCmp=107 / fpAllow=107 / refused=0 / classes=31`）；嵌套 lambda 对照种子的阳性对照 `eval=18 fpCmp=18 hostKindRefused=18 classes=1`（指纹不等后由宿主形态翻转拒绝）。
 - 候选 I2（槽位平移幽灵的隔离实验，验证 `var` 下标成因）**只登记不排期**，会动生产代码，须单开批次。
 - **跨轮次告警去重问题**：去重键 `类名#BODY#新名<-旧名` 不含重定义轮次/类版本（由代码分析可知，代码阅读）；生产侧 `core/` 下 `clearLoggedWarnings()` 调用点为 0、`TEST_EVENTS` 生产消费者为 0（实测，grep 读数）；配对拒绝本身不受去重影响（由代码分析可知）。未修，单开批次。
 

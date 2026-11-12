@@ -53,6 +53,24 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 public class LineNumberDifferentialTest {
 
+	/**
+	 * 契约要求"全种子 100% 击杀"的<b>活动变异体</b>。
+	 *
+	 * <p>旧契约是 {@code {A, B, D}}；D 经证据（{@code ev-cf3a} 关门禁 5/5、{@code ev-1a5e} 开门禁 0/12）
+	 * 判定为<b>门禁屏蔽变异体</b>后移入 {@link #GATE_MASKED_MUTANTS}，阈值与种子集<b>未</b>改动。</p>
+	 */
+	static final Set<String> ACTIVE_MUTANTS_FULL_KILL = Set.of("A", "B");
+
+	/**
+	 * <b>门禁屏蔽集（gate-masked mutants）</b>：被 {@code bodyFingerprint} 门禁短路、门禁开启下不可击杀的
+	 * 变异体。必须<b>恰为</b> {@code {D}}——它是对"后人再塞一个杀不掉的变异体进屏蔽集"的结构性哨兵，
+	 * 不是"允许 0 击杀"的免罪符（见 {@link #mutationKillRateRegressionTest} 的行为哨兵）。
+	 */
+	static final Set<String> GATE_MASKED_MUTANTS = Set.of("D");
+
+	/** 只打印读数、不参与判定力的观测项（旧契约亦未对其设断言，本轮不新增也不下调）。 */
+	static final Set<String> OBSERVED_ONLY_MUTANTS = Set.of("1", "4", "C");
+
 	@BeforeEach
 	@AfterEach
 	void resetState() {
@@ -476,6 +494,37 @@ public class LineNumberDifferentialTest {
 		}
 	}
 
+	/**
+	 * 系统化变异击杀率（<b>契约（批次 I 第二轮之后）：活动集 100%，门禁屏蔽集为 {@code {D}} + 哨兵</b>）。
+	 *
+	 * <p><b>为什么 D 不再要求 100%</b>：{@code D} 是"允许幽灵参与后续匹配"的变异
+	 * （{@code LambdaAligner} 里的 {@code !isMutationActive("D") && oi.ghost}）。批次 I 把兜底配对改成
+	 * fail-closed（{@link LambdaAligner#fallbackPairingAllowed}）之后，Pass B 在配对<b>之前</b>就拒绝
+	 * 方法体不可证明等价的一对，{@code D} 想触发的"幽灵被错误认领"永远走不到。实测：门禁关闭
+	 * （{@code ev-cf3a}，两处 Pass B 调用点短路）时 {@code D} 立刻回到 5/5 击杀，说明它<b>不是语义等价</b>；
+	 * 门禁开启时 5 种子 {@code 0/5}（{@code ev-ba57}）、扩到 12 种子仍 {@code 0/12}（{@code ev-1a5e}）。
+	 * 因此它是<b>门禁屏蔽变异体（gate-masked mutant）</b>，不是"不可达/等价变异体"。
+	 * </p>
+	 *
+	 * <p>本用例对此给出<b>两侧契约</b>，任何一侧变化都会变红：</p>
+	 * <ol>
+	 *   <li><b>活动集 100%</b>：{@link #ACTIVE_MUTANTS_FULL_KILL}（{@code A}、{@code B}）必须在<b>全部种子</b>
+	 *       下被击杀。种子集与阈值均未改动（5 种子 × 4 轮，旧契约就是这 5 个种子）。</li>
+	 *   <li><b>屏蔽集恰为 {@code {D}}</b>：{@link #GATE_MASKED_MUTANTS} 必须与字面量 {@code {D}} 相等，
+	 *       且与活动集不相交。后人要往屏蔽集里"偷偷加一个杀不掉的变异体"，这里直接红。</li>
+	 *   <li><b>行为哨兵</b>：{@code D} 仍在门禁开启下<b>实跑</b>，击杀数必须 {@code == 0}。
+	 *       失败信息写明"D 已可被击杀，说明门禁已变化，请将 D 移回击杀集"——
+	 *       这不是把 {@code 0/N} 当合格，而是"门禁形态变了"的第二道报警。</li>
+	 * </ol>
+	 *
+	 * <p><b>恢复条件</b>：只要 {@code BODY_MISMATCH} 门禁被移除 / 放宽 / 改回"按位置配对"
+	 * （任何让 {@code fallbackPairingAllowed} 不再拒绝"体不可证明等价"的改动），哨兵立刻变红 ——
+	 * 此时把 {@code "D"} 从 {@link #GATE_MASKED_MUTANTS} 移回 {@link #ACTIVE_MUTANTS_FULL_KILL}，
+	 * 并删掉下面那条 {@code == 0} 断言即可恢复旧契约。</p>
+	 *
+	 * <p>观测项（{@code 1}、{@code 4}、{@code C}）保持旧契约的判定力不变：它们此前也没有 100% 断言，
+	 * 只打印读数，本轮不新增也不下调。</p>
+	 */
 	@Test
 	void mutationKillRateRegressionTest(@TempDir Path tmp) throws Exception {
 		String javac = javac21();
@@ -508,15 +557,37 @@ public class LineNumberDifferentialTest {
 		System.out.println("[MutationReport] 变异击杀率（" + testSeeds.length + " 种子测试）:\n"
 			+ "  Mutation A (屏蔽 alignByHostSequence): " + killCounts.get("A") + "/" + testSeeds.length + "\n"
 			+ "  Mutation B (去掉 canPair 消费者否决): " + killCounts.get("B") + "/" + testSeeds.length + "\n"
-			+ "  Mutation D (允许幽灵参与后续匹配): " + killCounts.get("D") + "/" + testSeeds.length + "\n"
-			+ "  Mutation 1 (hostKey 剔除消费者特征): " + killCounts.get("1") + "/" + testSeeds.length + "\n"
-			+ "  Mutation 4 (findConsumers 恒空): " + killCounts.get("4") + "/" + testSeeds.length + "\n"
-			+ "  Mutation C (决胜键改回 methodIndex): " + killCounts.get("C") + "/" + testSeeds.length);
+			+ "  Mutation D (允许幽灵参与后续匹配) [门禁屏蔽集，期望 0]: " + killCounts.get("D") + "/" + testSeeds.length + "\n"
+			+ "  Mutation 1 (hostKey 剔除消费者特征): " + killCounts.get("1") + "/" + testSeeds.length + " [观测项]\n"
+			+ "  Mutation 4 (findConsumers 恒空): " + killCounts.get("4") + "/" + testSeeds.length + " [观测项]\n"
+			+ "  Mutation C (决胜键改回 methodIndex): " + killCounts.get("C") + "/" + testSeeds.length + " [观测项]");
 
-		// 核心机制断言：在包含确定性场景注入调度下，A、B、D 变异击杀率必须达到 100%
-		assertEquals(testSeeds.length, (int) killCounts.get("A"), "Mutation A 必须在所有测试种子下被击杀！");
-		assertEquals(testSeeds.length, (int) killCounts.get("B"), "Mutation B 必须在所有测试种子下被击杀！");
-		assertEquals(testSeeds.length, (int) killCounts.get("D"), "Mutation D 必须在所有测试种子下被击杀！");
+		// 1) 活动集：全种子 100%（阈值与种子集均未改动）。
+		for (String m : ACTIVE_MUTANTS_FULL_KILL) {
+			assertTrue(killCounts.containsKey(m), "活动变异体 " + m + " 必须真的被跑过（不允许静默跳过）");
+			assertEquals(testSeeds.length, (int) killCounts.get(m),
+				"Mutation " + m + " 必须在所有测试种子下被击杀！");
+		}
+
+		// 2) 结构哨兵：屏蔽集恰为 {D}，且与活动集不相交、每个变异体都被显式分类。
+		assertEquals(Set.of("D"), GATE_MASKED_MUTANTS,
+			"门禁屏蔽集必须恰为 {D}：只有 D 被 bodyFingerprint 门禁证明为门禁屏蔽变异体。"
+				+ "往里加新成员需要先给出'关禁可击杀 / 开禁 0/N'两条证据。");
+		assertTrue(Collections.disjoint(GATE_MASKED_MUTANTS, ACTIVE_MUTANTS_FULL_KILL),
+			"同一变异体不能既在活动集又在屏蔽集: masked=" + GATE_MASKED_MUTANTS
+				+ ", active=" + ACTIVE_MUTANTS_FULL_KILL);
+		Set<String> classified = new HashSet<>(ACTIVE_MUTANTS_FULL_KILL);
+		classified.addAll(GATE_MASKED_MUTANTS);
+		classified.addAll(OBSERVED_ONLY_MUTANTS);
+		assertEquals(new HashSet<>(Arrays.asList(mutations)), classified,
+			"每个变异体都必须被显式分类（活动集 / 屏蔽集 / 观测项），不允许漏判: "
+				+ "classified=" + classified + ", mutations=" + Arrays.toString(mutations));
+
+		// 3) 行为哨兵：D 在门禁开启下继续实跑，击杀数必须 == 0（门禁形态变了就报警，不是默默接受 0/N）。
+		int dKills = killCounts.get("D");
+		assertEquals(0, dKills,
+			"D 已可被击杀，说明门禁已变化，请将 D 移回击杀集（实际击杀 " + dKills + "/" + testSeeds.length
+				+ "；证据见 ev-cf3a 关门禁 5/5、ev-1a5e 开门禁 0/12）");
 	}
 
 	private static int findFirstStmtIndex(List<StmtSpec> list, StmtKind kind) {

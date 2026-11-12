@@ -5,9 +5,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Handle;
+import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.InsnList;
+import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.LineNumberNode;
 import org.objectweb.asm.tree.MethodInsnNode;
@@ -589,6 +593,153 @@ public class LineNumberDifferentialTest {
 			"D 已可被击杀，说明门禁已变化，请将 D 移回击杀集（实际击杀 " + dKills + "/" + testSeeds.length
 				+ "；证据见 ev-cf3a 关门禁 5/5、ev-1a5e 开门禁 0/12）");
 	}
+
+	//region 门禁精确防线：旧侧 hostKey == null（hostKind "?"）一票否决
+
+	/**
+	 * <b>门禁的宿主形态一票否决（精确防线）</b>：旧侧 lambda 取不到宿主
+	 * （{@code hostKey == null} ⇒ {@code hostKind} 返回 {@code "?"}）时，<b>"同名"不得成为放行证据</b>。
+	 *
+	 * <p><b>形态</b>（合成夹具，专为钉住这条防线）：v1 里 {@code lambda$execute$0} 的方法体是
+	 * {@code act1()}，但把宿主方法 {@code execute()} 的方法体清空后，它的 callsite
+	 * （{@code invokedynamic}）就不在了 ⇒ 它成了"无任何引用"的孤立合成方法，扫描器不会给它
+	 * 分配宿主 ⇒ {@code hostKey == null}。v2 里<b>同名</b>的 {@code lambda$execute$0} 挂在普通方法
+	 * {@code execute()} 下（{@code hostKey = "M:execute()V"}），方法体是 {@code act2()}。
+	 * 名字相同、嵌套层级相同、方法体不等价。</p>
+	 *
+	 * <p><b>契约</b>：宿主形态一变（{@code ?} vs {@code M}）就必须在"同名放行"之前一票否决——
+	 * 记 {@code BODY_MISMATCH}、旧名幽灵化（老 callsite 熔断）、绝不让 {@code act2} 的体顶替旧名。</p>
+	 *
+	 * <p><b>为什么需要这条用例</b>：门禁里"同名 ⇒ 放行"（{@code ni.name.equals(oi.name)}）是刻意保留的
+	 * 原地更新捷径，它会把"取不到宿主"的候选一并放行，除非宿主形态检查先否决。变异"只在旧侧
+	 * {@code hostKey} 非 null 时才否决"（即只拿掉这条一票否决）在既有全量用例下<b>存活</b>
+	 * （观测 {@code ev-5c1c}：60 次 null-host 命中全落在属性测试里，断言区分不出），故补此具名用例。</p>
+	 */
+	@Test
+	void nullOldHostVetoedBeforeSameNameShortCircuit(@TempDir Path tmp) throws Exception {
+		String javac = javac21();
+		String head = "package test;\npublic class NullHostCase {\n"
+			+ "    static void consumeA(Runnable r) { if (r != null) r.run(); }\n"
+			+ "    static void act1() { }\n"
+			+ "    static void act2() { }\n";
+		String v1 = head + "    public void execute() { consumeA(() -> act1()); }\n}\n";
+		String v2 = head + "    public void execute() { consumeA(() -> act2()); }\n}\n";
+
+		byte[] v1Bytes = compileSource(tmp, javac, "nh_v1", v1);
+		byte[] v2Bytes = compileSource(tmp, javac, "nh_v2", v2);
+
+		// 夹具前提 1：v1 有 lambda$execute$0，且体内调 act1。
+		ClassNode cnV1 = readClass(v1Bytes);
+		MethodNode oldLambda = findMethod(cnV1, "lambda$execute$0");
+		assertNotNull(oldLambda, "夹具前提：v1 必须有合成方法 lambda$execute$0（实际方法表: " + names(cnV1) + "）");
+		assertTrue(callsMethod(oldLambda, "act1"), "夹具前提 1：v1 的旧 lambda 体必须调 act1");
+
+		// 夹具前提 2：抹掉 callsite 后，旧 lambda 仍是孤立合成方法（类内无人引用它 ⇒ 无宿主）。
+		byte[] oldBytes = stripMethodBody(v1Bytes, "execute");
+		ClassNode cnOld = readClass(oldBytes);
+		assertTrue(callsMethod(findMethod(cnOld, "lambda$execute$0"), "act1"),
+			"夹具前提 2：抹 callsite 不得连带删掉旧 lambda 本体");
+		assertFalse(hasAnyReferenceTo(cnOld, "lambda$execute$0"),
+			"夹具前提 2：旧 lambda 必须成为'无任何引用'的孤立方法（否则 hostKey 不会是 null，本用例就测不到这条防线）");
+
+		// 夹具前提 3：v2 的同名 lambda 体调 act2（与旧体不同）。
+		ClassNode cnV2 = readClass(v2Bytes);
+		MethodNode newLambda = findMethod(cnV2, "lambda$execute$0");
+		assertNotNull(newLambda, "夹具前提 3：v2 必须有同名合成方法 lambda$execute$0（实际方法表: " + names(cnV2) + "）");
+		assertTrue(callsMethod(newLambda, "act2"), "夹具前提 3：v2 的同名 lambda 体必须调 act2（体确实不同）");
+
+		LambdaAligner.LAST_RESULT = null;
+		LambdaAligner.TEST_EVENTS.clear();
+		LambdaAligner.clearLoggedWarnings();
+		byte[] product = LambdaAligner.align(oldBytes, v2Bytes);
+		assertNotNull(product, "对齐产物非空");
+		ClassNode out = readClass(product);
+
+		// 1) 终局：旧名必须幽灵化（老 callsite 熔断），而不是被 act2 的体认领。
+		MethodNode slot = findMethod(out, "lambda$execute$0");
+		assertNotNull(slot, "旧名 lambda$execute$0 必须留在产物里（活跃或幽灵，实际方法表: " + names(out) + "）");
+		assertTrue(callsMethod(slot, "onOrphanInvoked"),
+			"旧侧 hostKey==null 且方法体不等价时必须一票否决：旧名要幽灵化，实际 " + describe(slot));
+		assertFalse(callsMethod(slot, "act2"),
+			"绝不能让 act2 的方法体顶替旧名（同名短路必须被宿主形态否决拦住）");
+
+		// 2) 留痕：必须点名旧名打 BODY_MISMATCH。
+		List<String> mismatched = new ArrayList<>();
+		for (AlignmentEvent ev : LambdaAligner.TEST_EVENTS) {
+			if ("BODY_MISMATCH".equals(ev.kind)) mismatched.add(ev.oldName + "<-" + ev.newName);
+		}
+		assertTrue(mismatched.contains("lambda$execute$0<-lambda$execute$0"),
+			"拒绝配对必须点名 lambda$execute$0（实际 BODY_MISMATCH: " + mismatched + "）");
+		assertTrue(LambdaAligner.LAST_RESULT.stats.bodyMismatchRefusals > 0,
+			"拒绝必须计数到 bodyMismatchRefusals: " + LambdaAligner.LAST_RESULT.stats);
+
+		// 3) 本形态不该从 Pass A "按位置"漏过去（旧侧无宿主 ⇒ 深度未知）。
+		assertEquals(0, LambdaAligner.LAST_RESULT.stats.passAPairs,
+			"本形态不该走 Pass A: " + LambdaAligner.LAST_RESULT.stats);
+	}
+
+	/** 写单源文件、编到独立输出目录，返回 {@code test/NullHostCase.class} 字节。 */
+	private static byte[] compileSource(Path tmp, String javac, String tag, String src) throws Exception {
+		Path srcDir = Files.createDirectories(tmp.resolve("src_" + tag));
+		Path outDir = Files.createDirectories(tmp.resolve("out_" + tag));
+		Path srcFile = srcDir.resolve("NullHostCase.java");
+		Files.writeString(srcFile, src, StandardCharsets.UTF_8);
+		runCmd(javac, "-g", "-nowarn", "-encoding", "UTF-8", "-d", outDir.toString(), srcFile.toString());
+		return Files.readAllBytes(outDir.resolve("test/NullHostCase.class"));
+	}
+
+	/** 把指定方法的方法体替换成单条 {@code RETURN}（连带清空 frames / LVT），其余方法原样保留。 */
+	private static byte[] stripMethodBody(byte[] bytes, String methodName) {
+		ClassNode cn = readClass(bytes);
+		boolean found = false;
+		for (MethodNode mn : cn.methods) {
+			if (!mn.name.equals(methodName)) continue;
+			InsnList body = new InsnList();
+			body.add(new InsnNode(Opcodes.RETURN));
+			mn.instructions = body;
+			mn.tryCatchBlocks = new ArrayList<>();
+			mn.localVariables = null;
+			mn.maxStack = 0;
+			mn.maxLocals = 1;
+			found = true;
+		}
+		assertTrue(found, "夹具前提：" + methodName + " 必须存在于夹具类里");
+		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+		cn.accept(cw);
+		return cw.toByteArray();
+	}
+
+	/** 类内是否还有任何指令（{@code MethodInsn} / {@code invokedynamic} 的 implMethod 句柄）引用该方法名。 */
+	private static boolean hasAnyReferenceTo(ClassNode cn, String methodName) {
+		for (MethodNode mn : cn.methods) {
+			if (mn.instructions == null) continue;
+			for (AbstractInsnNode insn : mn.instructions) {
+				if (insn instanceof MethodInsnNode m && m.name.equals(methodName)) return true;
+				if (insn instanceof InvokeDynamicInsnNode indy && indy.bsmArgs != null) {
+					for (Object arg : indy.bsmArgs) {
+						if (arg instanceof Handle h && h.getName().equals(methodName)) return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
+	private static String names(ClassNode cn) {
+		StringBuilder sb = new StringBuilder("[");
+		for (MethodNode mn : cn.methods) sb.append(mn.name).append(mn.desc).append(' ');
+		return sb.append(']').toString();
+	}
+
+	private static String describe(MethodNode mn) {
+		StringBuilder sb = new StringBuilder(mn.name + mn.desc + " ops=[");
+		for (AbstractInsnNode insn : mn.instructions) {
+			int op = insn.getOpcode();
+			if (op >= 0) sb.append(org.objectweb.asm.util.Printer.OPCODES[op]).append(' ');
+		}
+		return sb.append(']').toString();
+	}
+	//endregion
 
 	private static int findFirstStmtIndex(List<StmtSpec> list, StmtKind kind) {
 		for (int i = 0; i < list.size(); i++) {

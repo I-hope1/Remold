@@ -16,7 +16,7 @@ import org.gradle.api.Project
 buildscript {
     // Constants must live inside the buildscript block: its receiver is ScriptHandler, and a
     // reference to a script-level val does not resolve from inside it (same limitation as Groovy).
-    val shimVersion = "0.2.7"
+    val shimVersion = "0.2.8"
     val explicitJar = (project.findProperty("remold.pluginJar") ?: System.getenv("REMOLD_PLUGIN_JAR"))?.toString()
     val version = (project.findProperty("remold.version")
         ?: project.findProperty("remoldVersion")

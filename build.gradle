@@ -83,7 +83,7 @@ def remoldPublishableModules = [':api', ':core', ':gradle-plugin', ':panama',
                                 ':plugin-arc', ':plugin-fabric', ':plugin-forge', ':plugin-mixin']
 tasks.register('verifyReleaseCoordinates') {
 	group = 'verification'
-	description = '断言 mavenLocal 中 io.github.i-hope1.remold:*:<ver> 与 com.github.I-Hope1.Remold:*:v<ver> 两套坐标齐全'
+	description = '断言 mavenLocal 中 io.github.i-hope1.remold:*:<ver> 与 com.github.I-hope1.Remold:*:v<ver> 两套坐标齐全'
 	remoldPublishableModules.each { dependsOn "${it}:publishToMavenLocal" }
 	doLast {
 		def ver = project.version.toString()
@@ -91,16 +91,37 @@ tasks.register('verifyReleaseCoordinates') {
 		def rootDir = new File(home)
 		def missing = []
 		def rows = []
+		// POM 自检：目录大小写不敏感的文件系统（Windows/macOS）上"文件存在"不足以证明坐标可用——
+		// 发布 groupId 的大小写若与模板/文档请求不一致，mavenLocal 解析会报 bad group。这里按
+		// 大小写敏感的字面量核对 <groupId>/<artifactId>/<version>，让 Linux CI 也能拦住这类漂移。
+		def pomField = { File pom, String field ->
+			if (!pom.isFile()) return null
+			def m = pom.getText('UTF-8') =~ /<${field}>([^<]*)<\/${field}>/
+			return m.find() ? m.group(1) : null
+		}
+		def expected = [
+				io      : [group: 'io.github.i-hope1.remold', version: ver, file: { String n -> "io/github/i-hope1/remold/${n}/${ver}/${n}-${ver}.pom" }],
+				jitpack : [group: 'com.github.I-hope1.Remold', version: "v${ver}", file: { String n -> "com/github/I-hope1/Remold/${n}/v${ver}/${n}-v${ver}.pom" }]
+		]
 		remoldPublishableModules.each { modulePath ->
 			def name = modulePath.substring(1)
-			def ioPom = new File(rootDir, "io/github/i-hope1/remold/${name}/${ver}/${name}-${ver}.pom")
-			def jitpackPom = new File(rootDir, "com/github/I-hope1/Remold/${name}/v${ver}/${name}-v${ver}.pom")
-			def ioOk = ioPom.isFile()
-			def jitpackOk = jitpackPom.isFile()
-			rows << String.format('[release]   %-14s io.github.i-hope1.remold = %-5s  com.github.I-hope1.Remold:v%s = %-5s',
-					name, ioOk, ver, jitpackOk)
-			if (!ioOk) missing << ioPom.toString()
-			if (!jitpackOk) missing << jitpackPom.toString()
+			def flags = []
+			expected.each { family, spec ->
+				def pom = new File(rootDir, spec.file(name))
+				boolean ok = pom.isFile()
+				flags << "${family}=${ok}"
+				if (!ok) {
+					missing << pom.toString()
+					return
+				}
+				[['groupId', spec.group], ['artifactId', name], ['version', spec.version]].each { field, want ->
+					def actual = pomField(pom, field)
+					if (actual != want) {
+						missing << "${pom} ${field}='${actual}' expected '${want}' (case-sensitive)"
+					}
+				}
+			}
+			rows << String.format('[release] %-14s %s', name, flags.join('  '))
 		}
 		logger.lifecycle('[release] mavenLocal 坐标自检（版本 ' + ver + '）:')
 		rows.each { logger.lifecycle(it) }

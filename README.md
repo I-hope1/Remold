@@ -47,13 +47,13 @@ git clone https://github.com/I-hope1/Remold && cd Remold
 插件已发布到 **Gradle Plugin Portal**，不需要任何额外仓库（也不需要 JitPack）：
 
 ```groovy
-plugins { id 'io.github.i-hope1.remold' version '0.2.7' }
+plugins { id 'io.github.i-hope1.remold' version '0.2.8' }
 ```
 
 或者引入脚本插件（注意 URL 必须锁具体版本的 tag，不要写 `main`，保证构建插件与 agent 版本一致）：
 
 ```groovy
-def remoldRef = (findProperty('remold.version') ?: '0.2.7')
+def remoldRef = (findProperty('remold.version') ?: '0.2.8')
 apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remold.gradle"
 
 remold {
@@ -155,7 +155,7 @@ remold {
 
 ```groovy
 repositories { maven { url 'https://jitpack.io' } }
-dependencies { compileOnly 'com.github.I-hope1.Remold:api:v0.2.7' }
+dependencies { compileOnly 'com.github.I-hope1.Remold:api:v0.2.8' }
 ```
 
 ```java

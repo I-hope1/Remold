@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-11-12
+
+### Highlights
+
+本版五块核心更新：
+
+1. **前线 P0 安全门收口**：枚举顺序门不再被 Mixin 成员对齐器抢跑（`$VALUES` 等 JVM 合成字段不再
+   触发基线恢复）；读者扫描不再被 JDK 无关常量池引用污染而全量误杀；`@RemoldReinit` 的死配置
+   `force_reinit` 接成真实逃生口，并新增逐字段触发点名、继承作用域门与"全部不可提取字段"拒绝文案。
+2. **运行期日志与用户可见字符串全部英文化**：主源码 17 处中文文案译为英文，新增
+   `:tests:verifyLogLanguage` 守卫（挂 `check`），GBK 控制台/日志采集端不再乱码。
+3. **Gradle 插件可靠性**：`remold-agent.jar` manifest 写入 `Remold-Version`，插件按配置版本对账、
+   不匹配则重新解析并覆盖旧 jar；新增项目级 `cleanRemoldCache`（默认不删跨项目共享缓存）。
+4. **枚举常量集合变更的拒绝原因改为实测阻断清单**：`ENUM_CONSTANT_SET_CHANGED` 现在点名
+   JIT 常量表、`$SwitchMap$`/`$SWITCH_TABLE$`、存量 `EnumMap`/`EnumSet` 三处运行期阻断，
+   附 `tests/enum-append-probe/` 真机复现（30 次独立 JVM）与决策 `D-ENUM-1`。
+5. **孤儿 lambda 保留旧体 + `redefineDynamic` 接入两阶段**：非 `void` 孤儿默认保留上一轮方法体
+   （存活判据 + log-once），避免链式调用 NPE；动态单类入口在调用内部同步跑 A→补丁→C，
+   关闭 Mixin 新增 `@Unique` 字段被并发 tick 读到零值的窗口。
+
 ### Added
 
 - **`redefineDynamic` 接入两阶段（动态单类入口的读穿窗口关闭）**：Mixin 热更给目标类新增
@@ -101,6 +121,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   owner 对非 platform 成员且仅限字段/static/private 的向上解析。实例虚方法仍保留
   resolve→inconclusive（platform 接口可以是分派祖先，前缀证明不成立），fail-closed 语义不变。
   `LayoutDecisionEngine.describeFindings` 在拒绝日志点名前 3 个 reader 类，便于前线定位。
+- **发版坐标自检改为大小写敏感（JitPack 坐标拼写漂移）**：`verifyReleaseCoordinates` 之前只断言
+  POM 文件存在——在大小写不敏感的文件系统（Windows/macOS）上，发布 groupId 写成
+  `com.github.I-Hope1.Remold` 而模板请求 `com.github.I-hope1.Remold`（GitHub 账号真实大小写，
+  `git remote` 为 `I-hope1`）时，"文件存在"照样为真，但 mavenLocal 解析报
+  `inconsistent module metadata / bad group`，模板插件解析随之失败。现在 gate 按大小写敏感字面量
+  校验两套坐标的 `<groupId>`/`<artifactId>`/`<version>`，并把 8 个模块的 JitPack publication 与
+  模板/文档统一回到真实账号大小写 `com.github.I-hope1.Remold`；`gradle-plugin/README.md` 的
+  `I-Hope1` 漂移同步修正。验证：mavenLocal 8 模块 × 2 坐标族 **16/16 可解析**、两套模板
+  `./gradlew help --offline` 均从 mavenLocal 解析到 `gradle-plugin:v0.2.8` 成功。
 - **`@RemoldReinit` 用户契约收口**：
   - `-Dremold.agent.force_reinit` 之前只解析、只打 `Force Reinit: true`、无任何读取点（死配置）。
     现在接成真实逃生口（默认 `false`）：打开后忽略初值指纹、本轮一律重放声明类初值切片；
@@ -122,6 +151,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   全部译为英文，语义不变——GBK 控制台/日志采集端不再出现乱码。新增
   `./gradlew :tests:verifyLogLanguage`（挂 `check`）扫描主源码字符串字面量，命中 CJK/全角标点即失败；
   规则写入 `AGENTS.md` §3「日志语言（强制）」。断言旧中文文案的 3 个测试文件同步改为英文断言。
+
+### Docs
+
+- **设计文档与状态分离**：`docs/initfix/04-target-design.md` 不再登记"落地状态/路线图状态列"，
+  只保留设计规格；路线图、优先级与残余边界统一收敛到 `docs/status.md` §4.1/§4.2 与风险 9，
+  并补上 `@HotswapInit` 的"目标设计、未落地"标注与阶段 A 字段并集说明。
+- **枚举追加不可运行期修复**：新增 `docs/topology/10-enum-constant-append-infeasibility.md`
+  （实测读数、候选方案否决、复现探针）与决策 `D-ENUM-1`。
+- **孤儿 lambda 保留旧体**：新增 `docs/topology/11-orphan-lambda-body-retention.md`
+  （void/非 void 语义、存活判据、幽灵身份、log-once、多轮搬运与验收口径）。
+- **`AGENTS.md`**：新增日志语言强制规则、代码地图补孤儿 lambda 保留与两阶段动态入口、
+  按需文档索引补 topology/10 与 topology/11。
 
 ## [0.2.7] - 2026-11-11
 
@@ -484,7 +525,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   present.
 - New `verifyReleaseCoordinates` task (`./gradlew publishToMavenLocal verifyReleaseCoordinates`):
   asserts that every publishable module has both coordinate families
-  (`io.github.i-hope1.remold:*:<ver>` and `com.github.I-Hope1.Remold:*:v<ver>`) under
+  (`io.github.i-hope1.remold:*:<ver>` and `com.github.I-hope1.Remold:*:v<ver>`) under
   `~/.m2/repository`, so a missing/mismatched publication fails the release instead of silently
   dangling in the templates.
 

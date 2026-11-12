@@ -28,10 +28,10 @@ import org.gradle.api.tasks.compile.JavaCompile;
  * <p>Usage in {@code build.gradle.kts}:
  * <pre>{@code
  * plugins {
- *     id("io.github.i-hope1.remold") version "0.2.7"
+ *     id("io.github.i-hope1.remold") version "0.2.8"
  * }
  * remold {
- *     version = "0.2.7"
+ *     version = "0.2.8"
  * }
  * }</pre>
  */

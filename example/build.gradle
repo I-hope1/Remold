@@ -7,7 +7,7 @@ application {
 }
 
 dependencies {
-    // 编译期注解支持（如 @RemoldReinit, @OnReload）；外部独立工程可直接使用: compileOnly "com.github.I-hope1.Remold:api:v0.2.7"
+    // 编译期注解支持（如 @RemoldReinit, @OnReload）；外部独立工程可直接使用: compileOnly "com.github.I-hope1.Remold:api:v0.2.8"
     compileOnly project(':api')
 }
 

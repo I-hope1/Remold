@@ -47,13 +47,13 @@ git clone https://github.com/I-hope1/Remold && cd Remold
 The plugin is published to the **Gradle Plugin Portal**, so no extra repository is needed (JitPack included):
 
 ```groovy
-plugins { id 'io.github.i-hope1.remold' version '0.2.7' }
+plugins { id 'io.github.i-hope1.remold' version '0.2.8' }
 ```
 
 Alternatively apply the script plugin in `build.gradle` (pin the URL to a concrete version tag — never `main` — so the build plugin and the agent stay on the same version):
 
 ```groovy
-def remoldRef = (findProperty('remold.version') ?: '0.2.7')
+def remoldRef = (findProperty('remold.version') ?: '0.2.8')
 apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remold.gradle"
 
 remold {
@@ -158,7 +158,7 @@ With automatic hot reload alone, business code needs no Remold dependency at all
 
 ```groovy
 repositories { maven { url 'https://jitpack.io' } }
-dependencies { compileOnly 'com.github.I-hope1.Remold:api:v0.2.7' }
+dependencies { compileOnly 'com.github.I-hope1.Remold:api:v0.2.8' }
 ```
 
 ```java

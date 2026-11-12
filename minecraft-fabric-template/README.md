@@ -86,7 +86,7 @@ InitFix：15 个实例 / 1 字段（shield）
 
 ### 手动验证
 
-> 模板默认解析已发布的 `0.2.7` agent；该版本提供结构化批次报告，卡片默认显示耗时 / Mixin / InitFix 维度。
+> 模板默认解析已发布的 `0.2.8` agent；该版本提供结构化批次报告，卡片默认显示耗时 / Mixin / InitFix 维度。
 > 若运行期挂的是更旧的 Agent（接口没有 `afterInternalBatchReport`），卡片会明确降级为「旧版 Agent」。
 > 要验证本分支尚未发布的改动，可把 `runClient` 的 agent 指向本分支构建的
 > `core/build/libs/remold-agent.jar`（并让 `plugin-mixin` 使用本分支的 jar）。

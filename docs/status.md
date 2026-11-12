@@ -721,3 +721,21 @@
 > “这些实例由 `KnotClassLoader` 加载”“`Util.allOf` 单元素分支”为 `[推断]`。
 > **P2 `[假设]`（未实现）**：`schemaHash` 命名新合成类——schema 变化时用 `defineClass` 加载**新类名**，
 > 宿主只做 body-only redefine；预注册判据：新名类加载 + 宿主 body-only redefine 下 `newlyNull=0`。
+
+## §0.15 v0.2.7 后：lambda 兜底配对改 fail-closed（批次 I，已合流）
+
+| 项 | 状态 | 证据等级 |
+|:--|:--|:--|
+| L5 静默错绑（体内加内层 lambda → 旧实例跑成内层逻辑、无 WARN）已转为 `BODY_MISMATCH` WARN + 拒绝配对 + 旧名幽灵化 + 新名避障 | 已拦截 | `[观测]`：先红基线（旧槽位被 inner 顶替且无 WARN）→ 修复后三绿；变异 2/2 killed |
+| 方法体指纹归一化：常量按值、引用按 `owner+name+desc`、局部槽按首现序、标签按首引用序、可折叠算式 | 已实现 | `[观测]`：语料 N=37，`BODY_MISMATCH=0` |
+| 信息论边界：删一个 lambda 并在同一次保存里新增一个 javac 恰好复用同编号、且宿主同名的 lambda，与原地更新在字节码层不可区分 | **未解决** | `[推断]`；缓解只有名字/编号漂移这类间接信号 |
+| Pass B 覆盖面收窄：纯搬迁先被 Step 1 吃掉，Pass B 只覆盖"体等价但票不同" | 已登记 | `[观测]` |
+| `stats.bodyMismatchRefusals` 是**逐趟计数**，不是拒绝次数 | 已登记 | `[观测]` |
+| 槽位平移幽灵：`-g:none` + 槽位整体平移，语料 N=30 中 8 类出现幽灵、共 22 桩 | **条件性**：归因对照实验待补，不得读作既有行为的定论 | `[观测]`（有条件）；成因"票据指纹计入 `var` 下标"为 `[推断]`，未做隔离实验 |
+| `Mutation D`（允许幽灵参与匹配）在门禁开启后不可被击杀 → 转门禁屏蔽集 + `D==0` 哨兵；哨兵与具名用例是**报警不是防线**，Pass B 两处仅靠门禁 | 已登记 | `[推断]` |
+| 语料范围 | N=37：`core/src`+`api/src`（30/258，合并编译）、`plugin-fabric/src`（3/7）、`plugin-mixin/src`（2/23）、`plugin-forge/src`（2/12） | `[观测]` |
+| 语料缺口 | `plugin-arc/src`（Mindustry 编译期制品非纯 class 包，缺注解处理器，javac 解析即失败）、`tests/`、`gradle-plugin/` | `[观测]` |
+
+- 合流点 `680029f`；权威全量读数 `ev-20261112055947-6f9b`（HEAD `b0679c8`，`--rerun-tasks`，35 tasks executed，166.2 s）：**732 tests / 0 failures / 0 errors / 0 skipped**。
+- 开放项：门禁开关在**语料 harness** 中的阳性对照（关门禁静默错绑 / 开门禁出 `BODY_MISMATCH` + `[GATE-STATE]` 日志）；结案条件 = 开关生效则归因升级为无条件 `[观测]`、§10 去掉前提；未生效则修 harness 重跑归因 31 行，若开门禁幽灵数多于关门禁则停手待指挥部判定。
+- 候选 I2（槽位平移幽灵的隔离实验，验证 `var` 下标成因）**只登记不排期**，会动生产代码，须单开批次。

@@ -993,6 +993,38 @@ tasks.register("parameterAnnotationDriftProbe", JavaExec) {
 	}
 }
 
+// 接线探针：证明"参数注解漂移"在真实 processChanges 流水线里确实发出 [SIG-DRIFT] WARN。
+// 断言失败即 exit 1，因此可直接作为变异检查的 test_cmd（接线被短路 → 探针变红）。
+tasks.register("metadataDriftWarnProbe", JavaExec) {
+	group = "verification"
+	description = "参数元数据漂移 WARN 接线探针 (ParameterMetadataDriftWarnProbe)：真实批次 + 告警点名断言"
+	dependsOn classes
+	dependsOn project(":core").tasks.named("shadowJar")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "ParameterMetadataDriftWarnProbe"
+	maxHeapSize = "1g"
+	def jbrHome = (project.findProperty("p05.jbr") as String)
+		?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+	if (jbrHome != null) {
+		def javaBin = new File(jbrHome, probeIsWindows ? "bin/java.exe" : "bin/java")
+		if (javaBin.exists()) {
+			executable = javaBin.absolutePath
+			javaLauncher.set((JavaLauncher) null)
+		}
+	}
+	doFirst {
+		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		        "-XX:+IgnoreUnrecognizedVMOptions", "-XX:+AllowEnhancedClassRedefinition",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+		if (nativeLibPath != null) {
+			jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+		}
+	}
+}
+
 // 缓存填充探针：验证 transformer 的分组执行顺序，以及缓存里存的是对齐/织入之后的字节。
 tasks.register("cacheWarmingProbe", JavaExec) {
 	group = "verification"

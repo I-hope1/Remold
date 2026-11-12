@@ -745,8 +745,8 @@
 
 | 项 | 状态 | 验证与说明 |
 |:--|:--|:--|
-| 参数注解值/类型/删除变化、字段与方法泛型签名变化 → 成员级 `[SIG-DRIFT]` WARN 点名 | 已实现 | 实测：740 用例绿+ 检测三处变异 3/3 killed |
-| **类级泛型签名（`getGenericSuperclass`）不在检测范围**；对应运行时② 的"重新调用 `getDeclaredMethods()` 读取"仍读到旧值 → 合起来是"静默按旧值走" | 未检测，登记 类级泛型签名未检测 | 读数表显示类级泛型签名在两列仍读旧值 |
+| 参数注解值/类型/删除变化、字段与方法签名泛型变化 → 成员级 `[SIG-DRIFT]` 告警点名 | 已实现 | 覆盖用例：`remold.evict.ParameterAnnotationDriftTest`（漂移点名与去触发对照） |
+| **类级泛型签名（`getGenericSuperclass`）不在检测范围**；标准 HotSpot 下"重新调用 `getDeclaredMethods()` 读取"仍读到旧值 → 合起来是"静默按旧值走" | 未检测，登记 类级泛型签名未检测 | 读数表显示类级泛型签名在两列仍读旧值 |
 | 接线：`processChanges` 里的 `reportMemberMetadataDrift` 调用由 `:tests:metadataDriftWarnProbe` 把关（已接进 `:tests:check`） | 已接线 | 覆盖任务：`:tests:metadataDriftWarnProbe`（挂在 `:tests:check`，真实 `processChanges` 路径发出 `[SIG-DRIFT]` 告警） |
 | 接线在 `:tests:test` 口径下**无分辨力**（该用例直接调用 `reportMemberMetadataDrift`，不覆盖调用点） | 已登记 | 该接线在 `:tests:test` 口径下不可分辨，由上述探针任务把关 |
 | WARN 文案：只含类/成员名 + 变化种类 + "旧句柄读数不可靠、请勿继续使用" + "自持句柄不会被修复" | 已收敛 | 文案形态与断言位置见 `ParameterAnnotationDriftTest`（禁用标签全集断言）；源码 Javadoc 中两处否定句（`ReflectionCacheManager:134`、`RemoldAgent:2626`）为允许清单 |

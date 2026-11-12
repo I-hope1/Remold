@@ -28,7 +28,11 @@ import java.util.function.Supplier;
  *       <ul>
  *         <li>若直接调用者匹配注册的孤儿熔断器（{@link OrphanBreakerPredicate}，如 UI / 定时轮询 / 事件监听）：主动抛出 {@link NoSuchMethodError}，
  *             驱动调用方执行精准局部熔断（如注销回调），彻底根除高频刷屏空转；</li>
- *         <li>若由普通业务代码发起（未受熔断保护）：静默降级返回类型默认值（0 / null / false），绝不引发程序崩溃。</li>
+ *         <li>若由普通业务代码发起（未受熔断保护）：<b>非 {@code void}</b> 孤儿默认保留上一轮方法体
+ *             （本类成员引用存活判据通过时），避免调用方拿到 {@code null}/0 后 NPE / 除零 / 数组越界；
+ *             判据不通过则回退返回类型默认值。{@code void} 孤儿默认 no-op（删掉的副作用不再执行），
+ *             可用 {@code -Dremold.agent.orphan_retain_void=true} 打开。契约见
+ *             {@code docs/topology/11-orphan-lambda-body-retention.md}。</li>
  *       </ul>
  *   </li>
  * </ol>
@@ -439,8 +443,11 @@ public class LambdaAligner {
 		 * <ul>
 		 *   <li>若由注册的孤儿熔断器（{@link OrphanBreakerPredicate}）发起（UI / 定时轮询 / 事件回调）：抛出 {@link NoSuchMethodError}，
 		 *       触发精准局部熔断，彻底切断高频空转与死循环刷屏；</li>
-		 *   <li>若由普通业务代码发起（未受熔断保护）：经 {@link RemoldAgent#warn} 打印警告并返回默认值（0 / null / false），
-		 *       <b>不抛出异常</b>（指幽灵自身不抛；返回的 null / 0 在下游仍可能触发 NPE，需调用方自行判空）。</li>
+		 *   <li>若由普通业务代码发起（未受熔断保护）：经 {@link RemoldAgent#warn} 打印首次执行告警；
+		 *       非 {@code void} 孤儿在成员引用存活判据通过时<b>执行上一轮方法体</b>（三参
+		 *       {@link #onOrphanInvoked(String, boolean, boolean)} 标记），否则返回默认值
+		 *       （0 / null / false）；{@code void} 孤儿默认 no-op。见
+		 *       {@code docs/topology/11-orphan-lambda-body-retention.md}。</li>
 		 * </ul>
 		 */
 		SMART_ADAPTIVE,
@@ -464,12 +471,61 @@ public class LambdaAligner {
 		return orphanPolicy;
 	}
 
+	//region 孤儿 Lambda 方法体保留（docs/topology/11-orphan-lambda-body-retention.md）
+
+	/**
+	 * 非 {@code void} 孤儿 lambda 是否保留上一轮方法体（默认<b>开启</b>）。
+	 *
+	 * <p>默认值是安全取向的：{@code Supplier.get()} / {@code Function.apply()} 返回
+	 * {@code null}/0 会被调用方直接链式调用或拆箱，故障从"热更没生效"升级为 NPE / 除零 /
+	 * 数组越界。保留旧体至少维持合法返回值；但旧体引用的本类成员若已删除，则由
+	 * {@link OrphanBodyRetention} 判据拒绝并回退默认值桩。</p>
+	 *
+	 * <p>系统属性：{@code -Dremold.agent.orphan_retain_body=false} 可整体关闭。</p>
+	 */
+	private static volatile boolean retainOrphanBody = initRetainFlag("remold.agent.orphan_retain_body", true);
+
+	/**
+	 * {@code void} 孤儿 lambda 是否保留上一轮方法体（默认<b>关闭</b>）。
+	 *
+	 * <p>{@code void} 的默认语义是"用户在源码里删掉的副作用不应继续在后台执行"，
+	 * 所以默认维持 {@code no-op} 空壳。确实需要"删掉回调但仍要跑旧逻辑"的场景，可用
+	 * {@code -Dremold.agent.orphan_retain_void=true} 打开。</p>
+	 */
+	private static volatile boolean retainOrphanBodyVoid = initRetainFlag("remold.agent.orphan_retain_void", false);
+
+	private static boolean initRetainFlag(String property, boolean fallback) {
+		String p = System.getProperty(property);
+		if (p == null) {
+			p = System.getenv(property.replace('.', '_').replace('-', '_').toUpperCase(Locale.ROOT));
+		}
+		if (p == null) return fallback;
+		p = p.trim();
+		return p.isEmpty() ? fallback : Boolean.parseBoolean(p);
+	}
+
+	/** 测试/嵌入方覆盖开关；不改系统属性，回到默认值请再调用一次传 {@code true/false}。 */
+	public static void setOrphanBodyRetention(boolean nonVoidEnabled, boolean voidEnabled) {
+		retainOrphanBody = nonVoidEnabled;
+		retainOrphanBodyVoid = voidEnabled;
+	}
+
+	public static boolean isOrphanBodyRetainedForNonVoid() {
+		return retainOrphanBody;
+	}
+
+	public static boolean isOrphanBodyRetainedForVoid() {
+		return retainOrphanBodyVoid;
+	}
+	//endregion
+
 	/**
 	 * 清空已记录的孤儿 Lambda 日志去重缓存。
 	 */
 	public static void clearLoggedOrphans() {
 		LOGGED_ORPHANS.clear();
 		LOGGED_FORWARDS.clear();
+		LOGGED_RETAINED.clear();
 	}
 
 	public static int getLoggedOrphanCount() {
@@ -925,7 +981,7 @@ public class LambdaAligner {
 			}
 
 			// 传入 oldCn（已解析过一次）—— 避免 resurrectOrphanedLambdas 二次读 oldBytes
-			byte[] result = resurrectOrphanedLambdas(oldCn, alignedBytes, presentKeys, oldMethodRefs, newMethodRefs, ctx);
+			byte[] result = resurrectOrphanedLambdas(oldCn, oldBytes, alignedBytes, presentKeys, oldMethodRefs, newMethodRefs, ctx);
 			// 自造名必须从**最终产物**统计：复活阶段会往类里加回幽灵方法，
 			// 只在 alignedCn 上扫会漏掉它们（幽灵仍占着那个名字，下一轮照样会被误当 javac 原名）。
 			Set<String> invented = collectInventedNames(result, ctx);
@@ -5068,7 +5124,9 @@ public class LambdaAligner {
 	 * {@code signature} / {@code exceptions} 这些方法头字段——它们不受
 	 * {@code SKIP_*} 影响。方法体（Code 属性）由 {@link #injectDummyBody}
 	 * 重新生成，不会拷贝 {@code oldCn} 中的原始指令。</p>
-	 * @param oldCn         已解析的旧类节点（由 {@code align} 中的 {@code scan} 提供）
+	 * @param oldCn         已解析的旧类节点（由 {@code align} 中的 {@code scan} 提供；{@code SKIP_FRAMES}）
+	 * @param oldBytes      上一轮实际生效的字节码。仅在"保留旧方法体"候选存在时用
+	 *                      {@code EXPAND_FRAMES} 重新解析一次，取方法体（含 StackMapTable）。
 	 * @param newBytes      经过重命名处理后的新版本字节码
 	 * @param presentKeys   新版本里实际存在的所有方法键（{@code name + desc}）
 	 * @param oldMethodRefs 旧版本中所有 indy 句柄引用的目标方法出现频次
@@ -5076,7 +5134,7 @@ public class LambdaAligner {
 	 * @param ctx           当前匹配上下文
 	 * @return 注入幽灵方法后的最终字节码；若无孤儿则原样返回 {@code newBytes}
 	 */
-	private static byte[] resurrectOrphanedLambdas(ClassNode oldCn, byte[] newBytes,
+	private static byte[] resurrectOrphanedLambdas(ClassNode oldCn, byte[] oldBytes, byte[] newBytes,
 	                                               Set<String> presentKeys,
 	                                               Map<String, Integer> oldMethodRefs,
 	                                               Map<String, Integer> newMethodRefs,
@@ -5139,6 +5197,37 @@ public class LambdaAligner {
 			}
 		}
 
+		// 2.5 保留旧方法体（docs/topology/11-orphan-lambda-body-retention.md）：
+		//     非 void 孤儿默认把上一轮的真实方法体（含 StackMapTable）搬进幽灵方法，
+		//     避免调用方拿到 null/0 后 NPE / 除零 / 数组越界。只在需要时用 EXPAND_FRAMES
+		//     重新解析一次旧字节码（oldCn 是 SKIP_FRAMES 的），并解析新类结构做成员存活判定。
+		boolean retentionOn = retainOrphanBody || retainOrphanBodyVoid;
+		Map<String, MethodNode> oldBodies = java.util.Collections.emptyMap();
+		ClassNode  oldBodyCn  = null;
+		ClassNode  newStruct  = null;
+		Set<String> plannedKeys = new HashSet<>();
+		for (MethodNode mn : toInject) plannedKeys.add(mn.name + mn.desc);
+		if (retentionOn) {
+			try {
+				oldBodyCn = readWithFrames(oldBytes);
+				newStruct = readStructure(newBytes);
+				Map<String, MethodNode> bodies = new HashMap<>();
+				for (MethodNode m : oldBodyCn.methods) bodies.put(m.name + m.desc, m);
+				oldBodies = bodies;
+			} catch (Throwable t) {
+				RemoldAgent.warn("[LambdaAligner] " + oldCn.name + ": cannot read the previous method bodies ("
+				                 + t + "); orphan lambdas fall back to default-value stubs");
+				retentionOn = false;
+				oldBodies = java.util.Collections.emptyMap();
+			}
+		}
+		final boolean                 retentionActive    = retentionOn;
+		final Map<String, MethodNode> prevBodies         = oldBodies;
+		final ClassNode               prevClassNode      = oldBodyCn;
+		final ClassNode               nextClassNode      = newStruct;
+		final int[]                   retainedBodies     = {0};
+		final List<String>            retentionFallbacks = new ArrayList<>();
+
 		ClassVisitor cv = new ClassVisitor(Opcodes.ASM9, cw) {
 			@Override
 			public void visitEnd() {
@@ -5149,6 +5238,17 @@ public class LambdaAligner {
 					 access, mn.name, mn.desc, mn.signature,
 					 mn.exceptions == null ? null : mn.exceptions.toArray(new String[0]));
 					if (dummy != null) {
+						String     key     = mn.name + mn.desc;
+						MethodNode oldBody = prevBodies.get(key);
+						// 上一轮已经是"保留体"幽灵：原样搬运（它的 3 参标记与旧体一起走），
+						// 不做第二次判定，保证多轮产物稳定、旧实例拿到的一直是同一份旧逻辑。
+						if (retentionActive && oldBody != null && hasRetainedBodyMarker(oldBody)) {
+							injectWholeBody(dummy, access, mn, oldBody);
+							retainedBodies[0]++;
+							TEST_EVENTS.add(new AlignmentEvent("GHOST_KEEP_BODY", mn.name, null,
+							 className + "#" + key + " (carried over)"));
+							continue;
+						}
 						// 捕获桥优先：这个老键不是"死了"，只是参数表缩水，转发给新方法即可。
 						BridgeSpec bridge = ctx.bridges.get(mn.name + mn.desc);
 						if (bridge != null) {
@@ -5168,22 +5268,167 @@ public class LambdaAligner {
 							// 若为首次退役为孤儿，则必须满足新版本对该方法引用的句柄数量净增（newCount > oldCount）。
 							canForward = delegate.wasForwarding ? (newCount > 0) : (newCount > oldCount);
 						}
-						TEST_EVENTS.add(new AlignmentEvent("GHOST", mn.name, null, className + "#" + mn.name + mn.desc));
-						injectDummyBody(dummy, className, mn.name, mn.desc, canForward ? delegate : null,
-						 ghostHashByKey.getOrDefault(mn.name + mn.desc, 0L));
+						long originalHash = ghostHashByKey.getOrDefault(key, 0L);
+						boolean keepPrevious = false;
+						if (!canForward && !isGhostMethod(mn)) {
+							if (retentionActive && oldBody != null) {
+								boolean isVoid = Type.getReturnType(mn.desc).getSort() == Type.VOID;
+								boolean want   = isVoid ? retainOrphanBodyVoid : retainOrphanBody;
+								if (want) {
+									String why = OrphanBodyRetention.rejectionReason(
+									 prevClassNode, nextClassNode, oldBody, plannedKeys);
+									keepPrevious = why == null;
+									if (why != null) retentionFallbacks.add(key + ": " + why);
+								} else {
+									retentionFallbacks.add(key + ": " + (isVoid
+									 ? "void orphan (remold.agent.orphan_retain_void=false)"
+									 : "non-void orphan (remold.agent.orphan_retain_body=false)"));
+								}
+							} else if (retentionActive) {
+								retentionFallbacks.add(key + ": the previous body is unavailable");
+							}
+						}
+						if (keepPrevious) {
+							injectRetainedBody(dummy, access, mn, className, oldBody, originalHash);
+							retainedBodies[0]++;
+							// 仍发 GHOST 事件：既有计数/哨兵按"这个老名字被幽灵化"记账；
+							// GHOST_KEEP_BODY 是新增的可观测性明细（是否保留旧体）。
+							TEST_EVENTS.add(new AlignmentEvent("GHOST", mn.name, null, className + "#" + key));
+							TEST_EVENTS.add(new AlignmentEvent("GHOST_KEEP_BODY", mn.name, null,
+							 className + "#" + key + " (previous body retained)"));
+						} else {
+							TEST_EVENTS.add(new AlignmentEvent("GHOST", mn.name, null, className + "#" + key));
+							injectDummyBody(dummy, className, mn.name, mn.desc, canForward ? delegate : null,
+							 originalHash);
+						}
 					}
 				}
 				super.visitEnd();
 			}
 		};
 		cr.accept(cv, 0);
+		if (retainedBodies[0] > 0) {
+			RemoldAgent.info("[LambdaAligner] " + oldCn.name + " kept the previous body for "
+			                 + retainedBodies[0] + " orphan lambda(s)"
+			                 + " (existing CallSites keep a legal return value instead of null/0)");
+		}
+		if (!retentionFallbacks.isEmpty()) {
+			RemoldAgent.warn("[LambdaAligner] " + oldCn.name + ": " + retentionFallbacks.size()
+			                 + " orphan lambda(s) fell back to the default-value stub: "
+			                 + describeFirst(retentionFallbacks, 3));
+		}
 		return cw.toByteArray();
+	}
+
+	/** 只列前 {@code n} 条，其余用 {@code +K more} 交代，保证一行可读。 */
+	private static String describeFirst(List<String> items, int n) {
+		StringBuilder sb = new StringBuilder();
+		int limit = Math.min(n, items.size());
+		for (int i = 0; i < limit; i++) {
+			if (i > 0) sb.append("; ");
+			sb.append(items.get(i));
+		}
+		if (items.size() > limit) sb.append("; +").append(items.size() - limit).append(" more");
+		return sb.toString();
+	}
+
+	/** 用 {@code EXPAND_FRAMES} 读入：保留 StackMapTable（{@link FrameNode}）与标签，供方法体搬运。 */
+	private static ClassNode readWithFrames(byte[] bytes) {
+		ClassNode cn = new ClassNode();
+		new ClassReader(bytes).accept(cn, ClassReader.EXPAND_FRAMES);
+		return cn;
+	}
+
+	/** 只读结构（成员表/修饰符），不读方法体。 */
+	private static ClassNode readStructure(byte[] bytes) {
+		ClassNode cn = new ClassNode();
+		new ClassReader(bytes).accept(cn,
+		 ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+		return cn;
+	}
+
+	private static final String RETAINED_MARKER_DESC = "(Ljava/lang/String;ZZ)V";
+
+	/**
+	 * 上一轮注入的"保留体"幽灵：桩体里有 3 参
+	 * {@code onOrphanInvoked(String, boolean, boolean)} 调用。
+	 * <p>与默认值桩（2 参调用）区分，用于多轮搬运时保持旧体不被重新判定/覆盖。</p>
+	 */
+	private static boolean hasRetainedBodyMarker(MethodNode mn) {
+		for (AbstractInsnNode n : mn.instructions) {
+			if (n instanceof MethodInsnNode m
+			    && m.owner.equals(Type.getInternalName(LambdaAligner.class))
+			    && m.name.equals("onOrphanInvoked")
+			    && m.desc.equals(RETAINED_MARKER_DESC)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * 注入"保留上一轮方法体"的幽灵：前缀（指纹标记 + 3 参 onOrphanInvoked）+ 旧方法体（含帧）。
+	 * <p>前缀不改变局部变量与栈，因此旧 StackMapTable 仍然有效；写入侧仍是 {@code COMPUTE_MAXS}。</p>
+	 */
+	private static void injectRetainedBody(MethodVisitor mv, int access, MethodNode header,
+	                                       String className, MethodNode srcBody, long originalHash) {
+		MethodNode out = new MethodNode(Opcodes.ASM9, access, header.name, header.desc,
+		 header.signature, header.exceptions == null ? null : header.exceptions.toArray(new String[0]));
+		if (originalHash != 0L) {
+			out.instructions.add(new LdcInsnNode(originalHash));
+			out.instructions.add(new InsnNode(Opcodes.POP2));
+		}
+		out.instructions.add(new LdcInsnNode(locationOf(className, header.name, header.desc)));
+		out.instructions.add(new InsnNode(Opcodes.ICONST_0));   // willForward = false
+		out.instructions.add(new InsnNode(Opcodes.ICONST_1));   // willRunPreviousBody = true
+		out.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,
+		 Type.getInternalName(LambdaAligner.class), "onOrphanInvoked", RETAINED_MARKER_DESC, false));
+		copyBody(srcBody, out);
+		out.accept(mv);
+	}
+
+	/** 原样搬运上一轮的幽灵方法体（保留体或旧格式桩），不改一个字节。 */
+	private static void injectWholeBody(MethodVisitor mv, int access, MethodNode header, MethodNode srcBody) {
+		MethodNode out = new MethodNode(Opcodes.ASM9, access, header.name, header.desc,
+		 header.signature, header.exceptions == null ? null : header.exceptions.toArray(new String[0]));
+		copyBody(srcBody, out);
+		out.accept(mv);
+	}
+
+	/**
+	 * 搬运方法体：指令、标签、StackMapTable 帧、异常表一起克隆。
+	 * <p>标签必须重建并映射，否则帧/异常表会指向旧 MethodNode 的标签对象，写入器算出的偏移会错。</p>
+	 */
+	private static void copyBody(MethodNode src, MethodNode dst) {
+		Map<LabelNode, LabelNode> labels = new HashMap<>();
+		for (AbstractInsnNode n : src.instructions) {
+			if (n instanceof LabelNode l) labels.put(l, new LabelNode());
+		}
+		if (src.tryCatchBlocks != null) {
+			for (TryCatchBlockNode t : src.tryCatchBlocks) {
+				labels.computeIfAbsent(t.start, k -> new LabelNode());
+				labels.computeIfAbsent(t.end, k -> new LabelNode());
+				labels.computeIfAbsent(t.handler, k -> new LabelNode());
+			}
+		}
+		for (AbstractInsnNode n : src.instructions) {
+			dst.instructions.add(n instanceof LabelNode l ? labels.get(l) : n.clone(labels));
+		}
+		if (src.tryCatchBlocks != null) {
+			for (TryCatchBlockNode t : src.tryCatchBlocks) {
+				dst.tryCatchBlocks.add(new TryCatchBlockNode(
+				 labels.get(t.start), labels.get(t.end), labels.get(t.handler), t.type));
+			}
+		}
 	}
 
 	/**
 	 * 生成空壳 Lambda 方法体或方法引用转发桩的指令流。
 	 * <p>
-	 * <b>关键设计（100% 线性无跳转分支，彻底杜绝 VerifyError）</b>：<br>
+	 * <b>关键设计（默认值桩 100% 线性无跳转分支，彻底杜绝 VerifyError）</b>：<br>
+	 * <p>注意：{@link #injectRetainedBody} 走的是另一条路径——它会搬运旧方法体（含
+	 * {@code StackMapTable} 帧与异常表），因此不再是"无分支"形态；见
+	 * {@code docs/topology/11-orphan-lambda-body-retention.md} §3.1。</p>
 	 * 字节码中完全不使用任何 {@code IFEQ} / {@code GOTO} 等分支跳转指令和 {@link Label}。
 	 * 所有的策略判定、孤儿熔断栈探测、异常抛出与日志去重均下沉到纯 Java 静态方法
 	 * {@link #onOrphanInvoked(String, boolean)} 中执行。<br>
@@ -5300,6 +5545,9 @@ public class LambdaAligner {
 	 Collections.newSetFromMap(new ConcurrentHashMap<>());
 	private static final Set<String> LOGGED_FORWARDS =
 	 Collections.newSetFromMap(new ConcurrentHashMap<>());
+	/** 保留旧方法体的幽灵：首次被旧实例调用时告警一次（避免每帧刷屏）。 */
+	private static final Set<String> LOGGED_RETAINED =
+	 Collections.newSetFromMap(new ConcurrentHashMap<>());
 
 	/** 日志去重。{@code add} 返回 true 表示本次是首次，才打印。 */
 	private static void logOrphanOnce(String location) {
@@ -5317,11 +5565,27 @@ public class LambdaAligner {
 	}
 
 	/**
+	 * 保留旧方法体的幽灵首次被调用：按 location 去重告警。
+	 *
+	 * <p>为什么在这里而不是对齐期：对齐期不知道有没有存活实例在调它，给每个孤儿都发 WARN
+	 * 只会制造噪音；运行期第一次真正走到这里时告警，既说明"哪个类哪个 lambda 在跑旧逻辑"，
+	 * 又对没有存活实例的死孤儿保持安静。</p>
+	 */
+	private static void logRetainedOnce(String location) {
+		if (LOGGED_RETAINED.add(location)) {
+			RemoldAgent.warn("[LambdaAligner] orphaned lambda executed on existing instances: " + location
+			                  + " - running the previous method body instead of returning a default value;"
+			                  + " recreate the holder instance or restart to apply the new logic"
+			                  + " (subsequent invocations will be muted)");
+		}
+	}
+
+	/**
 	 * 当热重载中被删除/孤立的空壳 Lambda 方法被调用时由生成的字节码调用。
 	 * @param location 形如 {@code com.example.Foo#lambda$build$0()V} 的常量
 	 */
 	public static void onOrphanInvoked(String location) {
-		onOrphanInvoked(location, false);
+		onOrphanInvoked(location, false, false);
 	}
 
 	/**
@@ -5330,6 +5594,19 @@ public class LambdaAligner {
 	 * @param willForward 是否将继续执行转发到方法引用的逻辑
 	 */
 	public static void onOrphanInvoked(String location, boolean willForward) {
+		onOrphanInvoked(location, willForward, false);
+	}
+
+	/**
+	 * 当热重载中被删除/孤立的 Lambda 方法被调用时由生成的字节码调用
+	 * （保留旧方法体的幽灵走这个三参入口）。
+	 *
+	 * @param location            形如 {@code com.example.Foo#lambda$build$0()V} 的常量
+	 * @param willForward         是否将继续执行转发到方法引用的逻辑
+	 * @param willRunPreviousBody 桩体随后会执行<b>上一轮的真实方法体</b>（保留体），
+	 *                            而不是返回类型默认值 {@code 0/null/false}
+	 */
+	public static void onOrphanInvoked(String location, boolean willForward, boolean willRunPreviousBody) {
 		OrphanPolicy policy = orphanPolicy;
 
 		if (policy == OrphanPolicy.SMART_ADAPTIVE) {
@@ -5337,11 +5614,7 @@ public class LambdaAligner {
 				throw new NoSuchMethodError("Lambda removed by hot swap: " + location);
 			}
 			// 普通业务调用：去重后打印日志
-			if (willForward) {
-				logForwardOnce(location);
-			} else {
-				logOrphanOnce(location);
-			}
+			logOrphanDispatch(location, willForward, willRunPreviousBody);
 			return;
 		}
 
@@ -5354,15 +5627,21 @@ public class LambdaAligner {
 		}
 
 		if (policy == OrphanPolicy.LOG_AND_RETURN_DEFAULT) {
-			if (willForward) {
-				logForwardOnce(location);
-			} else {
-				logOrphanOnce(location);
-			}
+			logOrphanDispatch(location, willForward, willRunPreviousBody);
 			return;
 		}
 
 		// OrphanPolicy.SILENT: 静默返回
+	}
+
+	private static void logOrphanDispatch(String location, boolean willForward, boolean willRunPreviousBody) {
+		if (willForward) {
+			logForwardOnce(location);
+		} else if (willRunPreviousBody) {
+			logRetainedOnce(location);
+		} else {
+			logOrphanOnce(location);
+		}
 	}
 
 	/**
@@ -5561,9 +5840,13 @@ public class LambdaAligner {
 	 * 偶然出现的 long 常量误当成标记。返回 0 表示没有标记（旧版本注入的桩、或转发桩）。</p>
 	 */
 	private static long readGhostOriginalHash(MethodNode mn) {
-		int steps = 0;
-		for (AbstractInsnNode n = mn.instructions.getFirst(); n != null && steps < 3; n = n.getNext(), steps++) {
-			if (n instanceof LdcInsnNode ldc && ldc.cst instanceof Long v) return v;
+		AbstractInsnNode first = mn.instructions.getFirst();
+		if (first instanceof LdcInsnNode ldc && ldc.cst instanceof Long v) {
+			AbstractInsnNode next = first.getNext();
+			// 必须紧跟 POP2：这是本对齐器写标记的固定形态。
+			// 旧实现只看"前 3 条指令里有没有 long 常量"，保留旧方法体后方法体自身开头的
+			// long 常量（LDC 123L）会被误读成生前指纹，导致 stepGhostRevive 拿错票据。
+			if (next != null && next.getOpcode() == Opcodes.POP2) return v;
 		}
 		return 0L;
 	}

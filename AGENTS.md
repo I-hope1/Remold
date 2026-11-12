@@ -118,6 +118,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | A 档 Kotlin apply 重放探针 | `tests/src/KotlinApplyProbe.java`（`./gradlew :tests:kotlinApplyProbe -Pp05.jbr=<dcevm-jdk>`，真实 `processChanges` + redefine；Java 等价夹具，Kotlin 真实字节证据见 `docs/initfix/13-kotlin-apply-replay.md` §2） |
 | 测试判定力审计记录 | `docs/initfix/08-test-audit.md`（变异检查证据；审计产生的缺口与结论，一次性证据不放状态表） |
 | lambda 对齐压力测试 | `tests/src/LambdaAlignTortureTest.java`（旧 callsite 名字 → body 归属的自动断言；JDK 8/17/21 × 前插/删除/重排，覆盖 `lambda$static$N`/`lambda$new$N`；含判定力自检） |
+| 孤儿 lambda 方法体保留（非 void 默认保留旧体、本类成员存活性判据、幽灵身份与体形态解耦） | `LambdaAligner.injectRetainedBody` / `OrphanBodyRetention`（`core/src/remold/`，纯函数）；规格见 `docs/topology/11-orphan-lambda-body-retention.md`，测试 `tests/src/OrphanBodyRetentionTest.java` |
 | 捕获桥（删除 + 可证明的新增：常量 / final 字段 / 可折叠算式 / 构造器参数经 final 字段 / 运行时常量） | `LambdaAligner.stepCaptureBridge` / `getBridgeDelegate` / `onBridgeInvoked`；接收者归一在 `captureNamesOf`（槽号结构优先，名字 `null`/`this`/`this$0` 只兜底回溯失败），`readLambdaParamNames` 只报告 LVT 原文；规格见 `docs/topology/09-lambda-capture-bridge.md` |
 | 运行时常量访问器登记表 | `remold.RuntimeConstants`（core 只提供登记口；`plugin-arc` 的 `ArcHotswapPlugin.onAgentInit` 登记 Arc 专属的 `Scl.scl()`）；被 `InitFix` 效应审查与捕获桥常量合成共用 |
 | 捕获桥判定力 | `tests/src/LambdaBridgeAlignTest.java`（对齐期，无需 DCEVM）；`tests/src/LambdaBridgeProbe.java`（`./gradlew :tests:lambdaBridgeProbe -Pp05.jbr=<dcevm-jdk>`，实测运行时失败形态） |
@@ -211,6 +212,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | JBR-21/DCEVM 能力与限制、事务乐观预登记、数量与超时闸门、开关配置 | `docs/topology/06-runtime-and-perf.md` |
 | 实例状态布局安全门（LayoutGate）、局部类编号漂移止血门（LocalClassGuard）、蜕变测试 | `docs/topology/07-layout-gate-and-risks.md` |
 | 枚举常量集合变更为什么不做运行期修复（实测读数、候选方案否决、复现探针） | `docs/topology/10-enum-constant-append-infeasibility.md`、`tests/enum-append-probe/README.md` |
+| 孤儿 lambda 桩的默认值 / 保留旧体语义、存活判据与 log-once 告警 | `docs/topology/11-orphan-lambda-body-retention.md` |
 | 架构决策记录、偏离原因、JBR 8 组真机数据 | `docs/topology/08-decisions.md` |
 
 ### 物理内存偏移与第三方缓存驱逐 (P0 / P1)

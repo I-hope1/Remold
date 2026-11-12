@@ -43,9 +43,22 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 public class MethodRefForwardTest {
 
+	/**
+	 * 本类只测"方法引用委托识别门"。孤儿默认保留旧方法体会让"拒绝转发"后的兜底
+	 * 也跑起旧 lambda 体（例如构造器引用真的 new 出对象），掩盖门禁本身的判定——
+	 * 所以这里显式关闭保留，让失败分支严格是"默认值桩"。
+	 * 恢复在 {@link #restoreDefaults()}，避免把全局开关泄漏给其它测试类。
+	 */
 	@BeforeEach
-	@AfterEach
 	void resetState() {
+		LambdaAligner.clearLoggedOrphans();
+		LambdaAligner.setOrphanPolicy(LambdaAligner.OrphanPolicy.SMART_ADAPTIVE);
+		LambdaAligner.setOrphanBodyRetention(false, false);
+	}
+
+	@AfterEach
+	void restoreDefaults() {
+		LambdaAligner.setOrphanBodyRetention(true, false);
 		LambdaAligner.clearLoggedOrphans();
 		LambdaAligner.setOrphanPolicy(LambdaAligner.OrphanPolicy.SMART_ADAPTIVE);
 	}

@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   刻意**不**挂到 `clean`：共享缓存被清会迫使所有项目重新下载；改 `remoldVersion` 后或怀疑缓存损坏时手动执行。
   单测 `CleanRemoldCacheTaskTest`（注册但不挂 clean、默认不删全局且无关文件保留、`--global` 才删全局、
   项目属性开关、重复执行 no-op）。
+- **孤儿 lambda 保留上一轮方法体（非 `void` 默认开启）**：删除 lambda 后幽灵桩原本返回类型默认值
+  （`null` / `0` / `false`），调用方链式调用或拆箱会立刻 NPE / 除零 / 数组越界。现在非 `void` 孤儿在
+  **本类成员引用存活判据**通过时保留上一轮方法体（连 `StackMapTable` 与异常表一起搬运），老 `CallSite`
+  继续拿到合法返回值；判据不通过（旧体引用了本轮已删的本类字段/方法、静态性翻转）则回退默认值桩并
+  输出英文原因。`void` 孤儿默认仍为 no-op（删掉的副作用不再执行），可用
+  `-Dremold.agent.orphan_retain_void=true` 打开。保留体用三参
+  `onOrphanInvoked(String, boolean, boolean)` 标记，首次被存量实例真正调用时输出一次点名 WARN；
+  身份判定仍只看桩体的 `onOrphanInvoked` 调用（与"空方法/短方法"形态解耦），多轮热更原样搬运不退化。
+  规格见 `docs/topology/11-orphan-lambda-body-retention.md`；单测 `OrphanBodyRetentionTest` 6/6，
+  变异检查（关闭保留 → 3 红；关闭存活判据 → 1 红）。
 
 ### Changed
 

@@ -17,15 +17,17 @@ import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * 批次 K：参数注解 / 泛型签名漂移的成员级点名与驱逐范围扩展。
+ * 批次 K：参数注解 / 泛型签名漂移的成员级点名。
  *
  * <p>覆盖两层，缺一不可：</p>
  * <ol>
  *   <li><b>字节级比对</b>：只有成员元数据（{@code Signature} 属性 / 参数注解）变了才点名；
  *       纯方法体变化与无关成员不得误报（对照组）。</li>
- *   <li><b>接线终局</b>：告警真的经 {@link RemoldAgent#logger} 输出，点出成员名，并显式登记
- *       "重定义不刷新已解析的反射句柄、驱逐只覆盖已注册缓存"这条能力边界（不变量 C4）；
- *       （驱逐范围扩展已整体移到 {@code parked/k-eviction-scope} 分支；主干只保留检测 + WARN 点名。）</li>
+ *   <li><b>函数级告警</b>：{@link RemoldAgent#reportMemberMetadataDrift} 经
+ *       {@link RemoldAgent#logger} 点名成员，并登记"已解析的反射句柄读数不可靠、驱逐只覆盖已注册缓存"
+ *       这条能力边界。<b>本类不覆盖</b> {@code RemoldAgent.processChanges} 里的调用点——
+ *       把该调用点短路后本类用例仍然是绿的；调用点由 {@code :tests:metadataDriftWarnProbe} 把关
+ *       （它驱动真实批次，已挂进 {@code check}）。</li>
  * </ol>
  *
  * <p>夹具用 ASM 直接构造字节码而不是 javac：被测对象就是"两个版本的类文件"，构造字节能精确
@@ -232,10 +234,10 @@ public class ParameterAnnotationDriftTest {
 
 	//endregion
 
-	//region 接线终局（告警 + 能力边界登记）
+	//region 函数级告警（不覆盖 processChanges 调用点）
 
 	@Test
-	@DisplayName("接线终局：WARN 经 RemoldAgent.logger 点名成员并登记旧句柄不安全（C4）")
+	@DisplayName("函数级：WARN 经 RemoldAgent.logger 点名成员并登记旧句柄不安全（不覆盖 processChanges 调用点）")
 	public void testWarnNamesMemberAndRegistersUnsafeHandleBoundary() {
 		byte[][] pair = annotationTypeChangedPair();
 
@@ -259,7 +261,8 @@ public class ParameterAnnotationDriftTest {
 		assertTrue(all.toUpperCase(Locale.ROOT).contains("UNSAFE"),
 			"Warning must register that old reflection handles are unsafe: " + all);
 		assertTrue(all.toUpperCase(Locale.ROOT).contains("REGISTERED CACHES"),
-			"Warning must state that eviction only covers registered caches (C4, not 'solved'): " + all);
+			"Warning must state the capability boundary: eviction only covers registered caches"
+				+ " (this is a boundary, not a fix): " + all);
 	}
 
 	@Test

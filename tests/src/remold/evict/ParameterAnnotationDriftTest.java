@@ -191,6 +191,52 @@ public class ParameterAnnotationDriftTest {
 			"No baseline => no warning lines");
 	}
 
+	@Test
+	@DisplayName("真实 javac 字节：参数注解值变化被点名（属性布局与运行时一致）")
+	public void testRealJavacParameterAnnotationDrift() throws Exception {
+		byte[] before = compileReal("alpha");
+		byte[] after = compileReal("beta");
+
+		List<String> drift = ReflectionCacheManager.detectMemberMetadataDrift(before, after);
+		assertEquals(1, drift.size(), "Real javac output must be judged too, got: " + drift);
+		assertTrue(drift.get(0).contains("resolve(java.lang.String)"), "Member must be named: " + drift);
+		assertTrue(drift.get(0).contains("parameter annotations"), "Kind must be named: " + drift);
+	}
+
+	/**
+	 * 用真实 javac 编一个带参数注解的类（注解为 {@code RUNTIME} 保留，落在
+	 * {@code RuntimeVisibleParameterAnnotations} 属性里），返回类文件字节。
+	 *
+	 * <p>存在的意义：ASM 夹具证明的是"比对逻辑"，这里证明"javac 真实写出的属性布局"
+	 * 也能被同一逻辑读出来（槽位对齐、属性存在性），避免只有自造字节能过。</p>
+	 */
+	private static byte[] compileReal(String kind) throws Exception {
+		java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("sigdrift");
+		java.nio.file.Path src = dir.resolve("sample").resolve("Target.java");
+		java.nio.file.Files.createDirectories(src.getParent());
+		java.nio.file.Files.writeString(src,
+			"package sample;\n"
+			+ "public class Target {\n"
+			+ "    public void resolve(@Doc(kind = \"" + kind + "\") String name) {}\n"
+			+ "}\n");
+		java.nio.file.Path ann = dir.resolve("sample").resolve("Doc.java");
+		java.nio.file.Files.writeString(ann,
+			"package sample;\n"
+			+ "import java.lang.annotation.ElementType;\n"
+			+ "import java.lang.annotation.Retention;\n"
+			+ "import java.lang.annotation.RetentionPolicy;\n"
+			+ "import java.lang.annotation.Target;\n"
+			+ "@Retention(RetentionPolicy.RUNTIME)\n"
+			+ "@Target(ElementType.PARAMETER)\n"
+			+ "public @interface Doc { String kind(); }\n");
+		javax.tools.JavaCompiler javac = javax.tools.ToolProvider.getSystemJavaCompiler();
+		assertNotNull(javac, "A JDK compiler is required for this fixture");
+		java.nio.file.Path out = dir.resolve("out");
+		int rc = javac.run(null, null, null, "-d", out.toString(), src.toString(), ann.toString());
+		assertEquals(0, rc, "javac must compile the fixture");
+		return java.nio.file.Files.readAllBytes(out.resolve("sample").resolve("Target.class"));
+	}
+
 	//endregion
 
 	//region 接线终局（告警 + 能力边界登记）

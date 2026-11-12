@@ -92,3 +92,102 @@ Lambda 捕获顺序的判定有一条**编译配置前提**，不写清就会被
 2. 判决只依赖不可变输入（成员 schema、候选字节），不依赖可变堆状态；
 3. 桥接器拒绝必须走显式中止信号，不得用返回字节表达；
 4. 未闭合项必须显式登记，不得被后续战报当成已解决。
+
+## 6. 注解默认值（`AnnotationDefault`）漂移：实证读数与判决
+
+> 探针：`tests/src/AnnotationDefaultProbe.java`（复用批次 K 冻结框架的读数口径与三格矩阵：
+> 旧句柄 warm/cold · 重定义后 `getDeclaredMethods()` · 重定义后首次解析 · 消费者终局）。
+> 夹具：内存 `javac` 现编注解类型 `probe.dflt.Mark`（`String value() default "v1"`）+ 消费者
+> `probe.fix.Consumer`（类与方法各一个 `@Mark`，不显式写成员值 → 只能取默认值）。
+> 跑法：`<jdk>/bin/java [-XX:+AllowEnhancedClassRedefinition] -javaagent:tests/build/p05/p05-agent.jar
+> -cp "tests/build/classes/java/main;core/build/libs/remold-agent.jar;<asm jars>" AnnotationDefaultProbe`。
+> 三格身份由探针自己打印的 `structuralRedefine` 读数判定（不靠参数名推断）。
+
+### 6.1 环境（每格 `java -version` 全文见证据日志）
+
+| 格 | 运行时 | 启动参数 | 能力读数 |
+|:--|:--|:--|:--|
+| ① | JBR 25.0.2+1-b329.72（`jbrsdk_jcef-25.0.2`） | 仅 `-javaagent:p05-agent.jar` | `structuralRedefine=NO(field-added-rejected:UnsupportedOperationException)` |
+| ② | JBR 21.0.9（`JBR-21`） | 仅 `-javaagent:p05-agent.jar` | `structuralRedefine=NO(...)` |
+| ③ | JBR 21.0.9（`JBR-21`） | `-XX:+AllowEnhancedClassRedefinition` + `-javaagent` | `structuralRedefine=YES(field-added-accepted)` |
+
+### 6.2 分格影响范围（必须分开读，不能合并成一个结论）
+
+- **格① / 格②（标准 HotSpot）＝ 全应用级旧值**：默认值改掉后，**所有**注解实例读数都还是旧值——
+  包括重定义**之后才加载**的新消费者类（C5）与"加载在重定义前但从未读过注解"的类（C6）。
+  即旧默认值黏在注解类型上，新代码也拿不到新值。
+- **格③（JBR 21 + `-XX:+AllowEnhancedClassRedefinition`）＝ 仅已解析过的旧类**：C5/C6 读到**新值**，
+  只有重定义前已经解析过注解的旧类（C1~C4）继续返回旧值。
+  （此读数窄于先前的推断"首次解析也读旧值"，属**部分不符**；指挥部已追认缺陷在三格都成立。）
+
+### 6.3 场景 × 三组读数（格①/②/③）
+
+默认值变化 `default-value-change`（`"v1"` → `"v2"`）：
+
+| 格 | R1 旧句柄 warm / cold | R2 重新 `getDeclaredMethods()` | R3 首次解析 | C1 旧实例 / C2 新解析类注解 / C3 新解析方法注解 / C4 旧实例方法 | C5 重定义后新类 / C6 加载于前未读 |
+|:--|:--|:--|:--|:--|:--|
+| ① | v1 / v1 | **v2** | **v2** | v1 / v1 / v1 / v1 | v1 / v1 |
+| ② | v1 / v1 | **v2** | **v2** | v1 / v1 / v1 / v1 | v1 / v1 |
+| ③ | **v2 / v2** | **v2** | **v2** | v1 / v1 / v1 / v1 | **v2 / v2** |
+
+默认值移除 `default-removed`（`"v1"` → 无默认值）：
+
+| 格 | R1 warm / cold | R2 | R3 | C1~C4 | C5 / C6 |
+|:--|:--|:--|:--|:--|:--|
+| ① | v1 / v1 | null | null | 全 v1（静默） | v1 / v1 |
+| ② | v1 / v1 | null | null | 全 v1（静默） | v1 / v1 |
+| ③ | **`"Mark.java"` / `"Mark.java"`** | null | null | 全 v1 | `IncompleteAnnotationException` / 同 |
+
+> 格③ 的 `"Mark.java"` 是旧 `Method` 句柄的 `getDefaultValue()` 读到了**别的属性**的常量
+> （`SourceFile`），3/3 复现，同机同参数；R2/R3（重定义后重新取句柄）读到 `null`（正确）。
+
+默认值新增 `default-added`（无默认值 → `default "v1"`，指挥部裁定默认拒绝，标 `[推断]`）：
+消费者在两侧都必须显式赋值才能编过，因此 C1~C4/C6 读显式值 `explicit`（对照）；
+真正有区分力的读数是 C5（重定义之后才编译并加载的**裸 `@Mark`** 消费者）。
+
+| 格 | R1 warm / cold | R2 | R3 | C5（裸 `@Mark`，重定义后加载） | 含义 |
+|:--|:--|:--|:--|:--|:--|
+| ① | null / null | **v1** | **v1** | `IncompleteAnnotationException` | 新代码也拿不到新默认值 → **有害** |
+| ② | null / null | **v1** | **v1** | `IncompleteAnnotationException` | 同 ①，**有害** |
+| ③ | null / null | **v1** | **v1** | **v1** | 新代码可用；旧类本就无法省略该成员 → 未见有害 |
+
+对照组（去触发 / 灵敏度）：
+
+- `control-identical-default`（只重定义、不改默认值）：三格全部读 v1，**没有**任何 v2 泄漏（去触发对照成立）；
+- `sensitivity-explicit-value-change`（改消费者里**显式写死**的值）：三格 class-level 都读到 v2，
+  证明读数链路能看见注解值变化（仅灵敏度对照，不构成默认值复现证据）；method-level 仍 v1
+  （旧 `Method` 句柄缓存的注解读数，属另一形态，未纳入本批判定）。
+
+### 6.4 判决与实现位置
+
+- 默认值**变化 / 移除 / 新增**一律 fail-closed（默认拒绝）：`ClassDiffUtil.describeAnnotationDefaultChange`
+  比对两侧同签名注解成员的 `AnnotationDefault`（基本类型/String/`Type`/enum/数组/嵌套注解深比较；
+  两侧都不是注解类型则不判定；解析失败返回"不可判定"→ 调用方拒绝）；
+  `RemoldAgent.annotationDefaultGate` 是两条路径共用的唯一判决入口；
+  批量路径经 `handleAnnotationDefaultChangeInBatch` 拒绝并**整轮共退**（回滚对齐事务、清空本批待重定义
+  集合/旧字节映射/重试候选、留 `ANNOTATION-DEFAULT-CHANGED` 判决并要求重启），
+  动态路径在 `redefineDynamic` 前拒绝且不调用 `redefineClasses`。
+- 降级通道 `-Dremold.agent.annotation_default_change=allow`（默认关闭）：放行时**必打**
+  `[ANNOTATION-DEFAULT]` 警告并点名类与成员——不得静默。
+  `[推断]`：即使显式放行，已加载的消费者类仍读旧默认值（批次 J 探针 gate 模式读数：
+  `consumerBefore=v1 consumerAfter=v1`）。
+- `default added` 为什么也拒绝：格①② 的 C5 抛 `IncompleteAnnotationException`（新代码依赖新默认值会炸），
+  格③ 未见有害。`[推断]`：按最严格格（①②）定性更安全；是否对格③放宽由指挥部裁定。
+
+### 6.5 复跑命令与证据
+
+- 三格：见 6 开头跑法（`ev-20261112065151-6ca8` 格① / `ev-20261112065208-c5bb` 格② /
+  `ev-20261112065225-cfcb` 格③，均含 `java -version` 全文与启动参数）。
+- 门禁端到端（真 `remold-agent.jar` + `redefineDynamic`）：`AnnotationDefaultProbe gate`
+  —— 默认拒绝 `ev-...`、显式放行 `ev-...`（见战报）。
+- 单测：`./gradlew :tests:test --offline --tests=ClassDiffUtilTest --tests=AnnotationDefaultGateTest`
+  （16 条；先红基线 `ev-20261112064258-0660` 10 条断言失败 / 0 编译错误 → 恢复后
+  `ev-20261112064355-5f86` 16/16 绿）。
+
+### 6.6 未闭合
+
+- 真机（Fabric/Knot 客户端）未跑：本节全部读数来自 JVM 级探针，混合 Mixin 重织入后的注解类型变化未验。
+- 格③ `getDefaultValue()` 读到 `SourceFile` 常量的成因未定位（只登记 3/3 复现，同机同参数）。
+- 批量"整轮共退"的端到端（真实 `processChanges` 多类批次）未跑，当前由单测
+  `AnnotationDefaultGateTest#batchRefusalRollsBackTheWholeBatchAndLeavesAVerdict` 覆盖接线，
+  端到端仅有动态单类路径（`redefineDynamic`）。

@@ -535,11 +535,14 @@ Step 1 那处（S5）还有 `sameSemantics` 兜底，**Pass B 那两处（S7）�
 ## §10 槽位平移下的幽灵桩（既有行为，与兜底门禁无关）
 
 `-g:none` 编译 + 槽位整体平移时，部分类的 lambda 会被判为"身份丢失"而生成幽灵桩替身：
-`[观测]` 语料 N=30 中 **8 类出现幽灵、共 22 个桩**（`AnonClassAligner` 6、`ref/InitFix` 5、`LambdaAligner` 4、
-`RemoldAgent` 3，另 4 类各 1；其余 22 类为 0）。同一语料、同一变换下把兜底门禁关闭再跑，读数**逐字节相同**
-（31 行机器比对零差异、两趟 `totalRefusals=0`），因此**这不是兜底门禁引入的行为**，属既有路径。
+`[观测]` 语料 N=30（范围见下）中 **8 类出现幽灵、共 22 个桩**（`AnonClassAligner` 6、`ref/InitFix` 5、`LambdaAligner` 4、
+`RemoldAgent` 3，另 4 类各 1；其余 22 类为 0）。同一语料、同一变换下把兜底门禁关闭再跑，读数**逐字节相同**（31 行机器比对零差异、两趟 `totalRefusals=0`）；
+因此结论**在"语料 harness 的门禁开关确实生效"这一前提下成立**——该前提的阳性对照（关门禁时 L5 种子静默错绑、
+开门禁时出 `BODY_MISMATCH`）**待补**，`[观测]` 有条件，不得读作无条件定论。
 
 成因：`[推断]` 票据指纹计入 `var` 下标，`-g:none` 后失去调试信息、槽位平移即认不出；**未做隔离实验**。
+语料范围（逐目录，N=37）：`core/src` + `api/src`（合并编译，30 个含 lambda 类）、`plugin-fabric/src`（3）、`plugin-mixin/src`（2）、`plugin-forge/src`（2）；缺口 `plugin-arc/src`（Mindustry 编译期制品非纯 class 包，缺注解处理器，javac 解析即失败）、`tests/`、`gradle-plugin/`。
+
 这是用户可感知的可用性回退（lambda 失效），登记为已知限制；隔离实验列为候选批次 I2（会动生产代码，单开批次）。
 
 ## §9.6 门禁屏蔽变异体的哨兵是报警，不是防线

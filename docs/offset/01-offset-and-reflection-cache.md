@@ -206,8 +206,10 @@ flowchart LR
 
 - 格③ 的 `param-annotation-removed` 在**同一台机器、同一组启动参数（JBR 21.0.9 + `-XX:+AllowEnhancedClassRedefinition`）、同一探针提交**下连跑 3 次均复现（**3/3 复现，同机同参数**；n=3 不足以支撑更强结论）。
 - **第 2 组读数（重新 `getDeclaredMethods()`）的恢复效果，分粒度、分格限定 `[观测]`**：
-  - **成员级**（参数注解 / 方法泛型签名 / 字段泛型签名）：三格共 24 行全部读到**新状态**
-    （`value=v2-a-much-longer-value`、`{}`、`@Deprecated`、`List<java.lang.Integer>`、`t=Integer`），且无异常；
+  - **成员级**（参数注解 / 方法泛型签名 / 字段泛型签名 / 注解位置移动）：三格共 **21 行全部读到新状态**
+    （`value=v2-a-much-longer-value`、`{}`、`@Deprecated`、`List<java.lang.Integer>`、`t=Integer`、
+    注解移到 `#1` 槽位），且 **R2 无任何异常**；
+  - **对照场景**（`control-identical`，字节未变）：3 行读到与重定义前相同的值（本就不该变化）；
   - **类级泛型签名**（`getGenericSuperclass`）：**格① 与格② 仍读到旧值 `ArrayList<java.lang.String>`**，
     只有格③（JBR 21 + DCEVM）刷新为 `ArrayList<java.lang.Integer>`。
   因此"句柄读数的恢复"在三格**不成立**（类级不成立），该结论只写在本节，**不进运行时 WARN**。

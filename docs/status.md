@@ -7,8 +7,8 @@
 
 | 审计元数据项 | 内容与规格说明 |
 |:---|:---|
-| **基准提交 (Baseline Commit)** | `main` @ `4521803`（`v0.2.8` 发布准备已提交，**tag 待打**；上一发布 `v0.2.7` tag `0852506`，其代码基线 `db65bf0`；再上一发布 `v0.2.6` tag `2159d21`）。v0.2.8 内容：前线 P0 安全门收口（枚举顺序门被 Mixin 对齐器抢跑、枚举常量集合变更假成功、读者扫描被无关常量池污染、`@RemoldReinit` 契约）、运行期日志英文化 + `verifyLogLanguage`、gradle-plugin agent 版本对账 + `cleanRemoldCache`、孤儿 lambda 保留旧体、`redefineDynamic` 接入两阶段、Linux aarch64 原生库、发版坐标自检大小写敏感（逐项见 §0.12） |
-| **发布说明** | `v0.2.8`：[`releases/v0.2.8.md`](releases/v0.2.8.md)（prepared，**GitHub release 待 tag 后发布**）；上一发布 [`releases/v0.2.7`](https://github.com/I-hope1/Remold/releases/tag/v0.2.7)（历史档见 `releases/`） |
+| **基准提交 (Baseline Commit)** | `v0.2.8` tag `f18851e`（annotated → commit `43fc583`，`main` @ `43fc583`）；上一发布 `v0.2.7` tag `0852506`，其代码基线 `db65bf0`；再上一发布 `v0.2.6` tag `2159d21`。v0.2.8 内容：前线 P0 安全门收口（枚举顺序门被 Mixin 对齐器抢跑、枚举常量集合变更假成功、读者扫描被无关常量池污染、`@RemoldReinit` 契约）、运行期日志英文化 + `verifyLogLanguage`、gradle-plugin agent 版本对账 + `cleanRemoldCache`、孤儿 lambda 保留旧体、`redefineDynamic` 接入两阶段、Linux aarch64 原生库、发版坐标自检大小写敏感（逐项见 §0.12） |
+| **发布说明** | `v0.2.8`：[`releases/v0.2.8.md`](releases/v0.2.8.md)（GitHub release 由 `v0.2.8` tag 触发 `release.yml` 发布）；上一发布 [`releases/v0.2.7`](https://github.com/I-hope1/Remold/releases/tag/v0.2.7)（历史档见 `releases/`） |
 | **最后更新时间** | 2026-11-12（v0.2.8 发布准备：版本常量/CHANGELOG/Release Notes 递增、发版坐标大小写统一与 `verifyReleaseCoordinates` 强化、mavenLocal 16/16 坐标解析验证；此前 v0.2.7 后收口前线 P0 安全门、日志英文化、gradle-plugin 版本对账、孤儿 lambda 保留旧体、`redefineDynamic` 两阶段；详见 §0.12） |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |
 | **更新触发条件** | 任何合入包含特性落地、架构偏离、安全门调整、测试基线变更或发现已知缺陷/残余风险的 PR/commit 时，必须同步原子化更新本文件。提交时由作者/维护者更新基准哈希。 |

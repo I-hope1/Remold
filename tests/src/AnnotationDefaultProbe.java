@@ -27,7 +27,7 @@ import remold.ClassDiffUtil;
 import remold.RemoldAgent;
 
 /**
- * 注解<b>默认值</b>（{@code AnnotationDefault}）变化探针（批次 J）。
+ * 注解<b>默认值</b>（{@code AnnotationDefault}）变化探针。
  *
  * <p><b>它回答什么</b>：把注解类型的 {@code AnnotationDefault} 改掉（{@code default "v1"} →
  * {@code default "v2"}）再 {@code redefineClasses} 之后，运行期<b>实际读到</b>什么。三组读数按
@@ -37,13 +37,13 @@ import remold.RemoldAgent;
  * 重定义后新解析的方法注解"三档。</p>
  *
  * <p><b>结论纪律</b>：本探针只打印读数与真实 {@code Throwable} 类名，不做任何"应该会抛"、
- * "应该读到旧值"的预设；批次 J 的机制描述在探针读数出来之前一律是 {@code [推断]}。</p>
+ * "应该读到旧值"的预设；机制描述在探针读数出来之前只作为待验证推断。</p>
  *
  * <p><b>灵敏度（阳性）对照</b>：{@code sensitivity-explicit-value-change} 改的是消费者注解里
  * <b>显式写死</b>的成员值（不是默认值），读数必须跟着变——它只证明"这条读数链路能看见注解值
  * 变化"，<b>不</b>构成默认值复现证据。</p>
  *
- * <p><b>跑法</b>（三格矩阵，见 {@code docs} 里的批次 J 报告）：
+ * <p><b>跑法</b>（按运行时分行，见 {@code docs/mixin/08} 的对应章节）：
  * {@code java -javaagent:tests/build/p05/p05-agent.jar -cp tests/build/classes/java/main
  * AnnotationDefaultProbe}，用不同的 {@code java} 与是否附加
  * {@code -XX:+AllowEnhancedClassRedefinition} 区分格①/②/③；格子身份由本探针自己打印的
@@ -430,7 +430,7 @@ public final class AnnotationDefaultProbe {
 	/**
 	 * 场景 {@code default added}（成员原本<b>没有</b>默认值，变更后有了默认值）。
 	 *
-	 * <p>指挥部裁定：默认拒绝（与 changed/removed 一致，fail-closed），机制描述标 {@code [推断]}，
+	 * <p>默认拒绝（与 changed/removed 一致，fail-closed），机制描述在实测前只作为待验证推断，
 	 * 放行与否等三格读数出来再议。消费者在两侧都必须显式赋值才能编过，所以"消费者终局"读的是
 	 * 显式值（对照）；真正的默认值读数来自元数据路径，以及"重定义之后才编译并加载的裸 {@code @Mark}
 	 * 消费者"（只有新注解类型下才编得过，它读到什么就是新默认值对外部世界的可见形态）。</p>

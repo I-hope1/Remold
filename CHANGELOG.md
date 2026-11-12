@@ -9,160 +9,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.8] - 2026-11-12
 
-### Highlights
+### Summary
 
-本版五块核心更新：
+普通开发者关心的变化（细节见下方分类，不重复）：
 
-1. **前线 P0 安全门收口**：枚举顺序门不再被 Mixin 成员对齐器抢跑（`$VALUES` 等 JVM 合成字段不再
-   触发基线恢复）；读者扫描不再被 JDK 无关常量池引用污染而全量误杀；`@RemoldReinit` 的死配置
-   `force_reinit` 接成真实逃生口，并新增逐字段触发点名、继承作用域门与"全部不可提取字段"拒绝文案。
-2. **运行期日志与用户可见字符串全部英文化**：主源码 17 处中文文案译为英文，新增
-   `:tests:verifyLogLanguage` 守卫（挂 `check`），GBK 控制台/日志采集端不再乱码。
-3. **Gradle 插件可靠性**：`remold-agent.jar` manifest 写入 `Remold-Version`，插件按配置版本对账、
-   不匹配则重新解析并覆盖旧 jar；新增项目级 `cleanRemoldCache`（默认不删跨项目共享缓存）。
-4. **枚举常量集合变更的拒绝原因改为实测阻断清单**：`ENUM_CONSTANT_SET_CHANGED` 现在点名
-   JIT 常量表、`$SwitchMap$`/`$SWITCH_TABLE$`、存量 `EnumMap`/`EnumSet` 三处运行期阻断，
-   附 `tests/enum-append-probe/` 真机复现（30 次独立 JVM）与决策 `D-ENUM-1`。
-5. **孤儿 lambda 保留旧体 + `redefineDynamic` 接入两阶段**：非 `void` 孤儿默认保留上一轮方法体
-   （存活判据 + log-once），避免链式调用 NPE；动态单类入口在调用内部同步跑 A→补丁→C，
-   关闭 Mixin 新增 `@Unique` 字段被并发 tick 读到零值的窗口。
+- **热更不再"先读到 0 再报错"**：新增字段/改字段类型的类，在热更瞬间被并发线程读到默认值的窗口，
+  现在也覆盖到单类动态热更（Mixin 新增 `@Unique` 字段并在 `@Inject` 里立即读取的常见路径）。
+- **不兼容改动在热更前就被挡下**：枚举顺序变化、枚举常量增删、删除仍有外部引用的成员，会得到
+  点名到具体成员的拒绝原因（并说明"为什么运行期补不回来"），而不是假成功后在游戏里崩。
+- **删掉的 lambda 不再是定时炸弹**：被删除 lambda 的旧调用点拿到的是上一轮的真实返回值，
+  不再是 `null`/`0`，链式调用与拆箱不再 NPE/除零。
+- **日志可以直接贴给老外/采集端**：运行期日志与用户可见提示全部英文，GBK 控制台不再乱码。
+- **Gradle 插件更省心**：agent jar 自带版本号，插件按项目配置版本对账并自动替换过期的本地 jar；
+  新增 `cleanRemoldCache` 清理项目级缓存，改版本号后不用手工删目录。
+- **本版定位**：0.2.8 是稳定化版本，新特性只有两条（孤儿 lambda 保留旧体、动态单类两阶段），
+  其余是安全门、日志、构建与发版质量；真正的功能增量在 0.2.7（Mixin 子系统）。
 
 ### Added
 
-- **`redefineDynamic` 接入两阶段（动态单类入口的读穿窗口关闭）**：Mixin 热更给目标类新增
-  `@Unique` 字段并在 `@Inject` 中立即读取时走的是 `redefineDynamic`；此前单次提交会让并发 tick
-  线程在补丁落盘前读到字段零值（`null`/0）。现在该入口消费 `InitFix.requiresTwoPhase`：用
-  `StageASkeleton.buildWithLiveConstructors(oldBytes, runtimeBytes)` 合成阶段 A → 首次
-  `redefineClasses` → `InitFix.afterRedefine` 补存量实例 → 第二次 `redefineClasses(runtimeBytes)`，
-  全部在**调用返回前**完成（不暴露阶段 A 中间态、公开返回语义不变）；阶段 C 复用现成的终态字节，
-  不重跑 transformer 桥接或 `InitFix.transform`。阶段 C 失败按 VM 级/非 VM 级分流（VM 级标记毒化并
-  停在阶段 A 提示重启；非 VM 级尝试回滚基线字节并返回 `false`）。纯方法体热更仍走单次重定义。
-  单测 `DynamicTwoPhaseRedefineTest` 2/2（两次 redefine 的顺序与字节；补丁日志夹在两次之间；
-  纯方法体仍单次），变异：强制 `twoPhase=false` → 用例红；真机（JBR 21 DCEVM）
-  `redefineDynamicNoBaselineProbe` 13/0，日志 `two-phase: A -> patch -> C`、存量实例 `b=42`，
-  批次监听器只触发一次。
-
-- **`remold-agent.jar` 版本对账（gradle-plugin）**：`remold-agent.jar` 的 manifest 现在写入
-  `Remold-Version` / `Implementation-Version`（值来自 `gradle.properties` 的 `remoldVersion`）。
-  插件在解析本地 agent 时读取该版本并与 `remold.version` / `remold { version }` 比较：
-  - 自动发现的本地 jar 版本**不匹配** → 不启动它，按配置版本重新解析（JitPack / Maven 缓存 / GitHub release）
-    并同步覆盖 `.gradle/remold/remold-agent.jar`，生命周期日志点名被忽略的旧文件；
-  - 版本匹配 → 直接使用（离线快路径）；未配置版本但本地 jar 带版本 → 采用 jar 版本解析生态插件；
-  - 显式 `remold { agentJar }` 是用户显式选择，只告警不覆盖；解析到的版本若仍不匹配则 fail-closed 拒绝；
-  - 无版本元数据的老 jar 报 info 提示（无法校验，需重构建）。
-  内置插件自身的版本无法在运行期改变（buildscript classpath 已固定），需与 `remoldVersion` 一起升级。
-  单测 `RemoldAgentVersionTest`（manifest 读取、`v` 前缀比较、refresh 判定）；变异：`shouldRefreshAgent`
-  恒 false → 对应用例红。
-- **`cleanRemoldCache` 任务（gradle-plugin）**：**项目级**清理——默认只删项目 `.gradle/remold`
-  （解析后的 agent 副本与生态插件副本）和 `build/remold`（生成的启动脚本与 args），并打印全局缓存路径提示；
-  Gradle 用户目录的共享下载缓存 `caches/remold`（`remold-agent-<ver>.jar` + `remold-plugin-<module>-<ver>.jar`，
-  跨项目共享、按版本可重建）**默认不删**，仅 `--global` / `-Premold.cleanGlobalCache=true` 时删除。
-  刻意**不**挂到 `clean`：共享缓存被清会迫使所有项目重新下载；改 `remoldVersion` 后或怀疑缓存损坏时手动执行。
-  单测 `CleanRemoldCacheTaskTest`（注册但不挂 clean、默认不删全局且无关文件保留、`--global` 才删全局、
-  项目属性开关、重复执行 no-op）。
-- **孤儿 lambda 保留上一轮方法体（非 `void` 默认开启）**：删除 lambda 后幽灵桩原本返回类型默认值
-  （`null` / `0` / `false`），调用方链式调用或拆箱会立刻 NPE / 除零 / 数组越界。现在非 `void` 孤儿在
-  **本类成员引用存活判据**通过时保留上一轮方法体（连 `StackMapTable` 与异常表一起搬运），老 `CallSite`
-  继续拿到合法返回值；判据不通过（旧体引用了本轮已删的本类字段/方法、静态性翻转）则回退默认值桩并
-  输出英文原因。`void` 孤儿默认仍为 no-op（删掉的副作用不再执行），可用
-  `-Dremold.agent.orphan_retain_void=true` 打开。保留体用三参
-  `onOrphanInvoked(String, boolean, boolean)` 标记，首次被存量实例真正调用时输出一次点名 WARN；
-  身份判定仍只看桩体的 `onOrphanInvoked` 调用（与"空方法/短方法"形态解耦），多轮热更原样搬运不退化。
-  规格见 `docs/topology/11-orphan-lambda-body-retention.md`；单测 `OrphanBodyRetentionTest` 6/6，
+- **动态单类热更接入两阶段（关闭 `redefineDynamic` 的读穿窗口）**：`redefineDynamic` 现在消费
+  `InitFix.requiresTwoPhase`，在**调用内部同步**完成 阶段 A（新结构 + 旧方法体）→ 补存量实例 →
+  阶段 C（现成的 `runtimeBytes`），返回时已是终态，公开返回语义不变，不重跑 transformer 桥接或
+  `InitFix.transform`。阶段 C 失败按 VM 级/非 VM 级分流（VM 级毒化并停在阶段 A 提示重启；非 VM 级
+  回滚基线并返回 `false`）。纯方法体热更仍单次重定义。
+  验证：`DynamicTwoPhaseRedefineTest` 2/2（录制 `Instrumentation` 断言两次 redefine 的顺序与字节）、
+  真机 JBR 21 DCEVM `redefineDynamicNoBaselineProbe` 13/0（日志 `two-phase: A -> patch -> C`，
+  存量实例 `b=42`）；变异：强制 `twoPhase=false` → 用例红。
+- **孤儿 lambda 保留上一轮方法体（非 `void` 默认开启）**：删除 lambda 后幽灵桩不再返回类型默认值，
+  而是保留上一轮方法体（帧与异常表一并搬运）；旧体引用了本轮已删的本类成员或静态性翻转时回退默认值桩
+  并输出英文原因。`void` 孤儿默认仍 no-op，`-Dremold.agent.orphan_retain_void=true` 可打开；
+  保留体首次被真正调用时输出一次点名 WARN，多轮热更原样搬运。
+  规格 `docs/topology/11-orphan-lambda-body-retention.md`；`OrphanBodyRetentionTest` 6/6，
   变异检查（关闭保留 → 3 红；关闭存活判据 → 1 红）。
+- **Gradle 插件：agent 版本对账 + `cleanRemoldCache`**：`remold-agent.jar` manifest 写入
+  `Remold-Version`，插件发现本地 jar 与配置版本不一致时重新解析并覆盖（日志点名被忽略的旧文件），
+  版本匹配走离线快路径；显式 `agentJar` 只告警不覆盖。`cleanRemoldCache` 默认只清项目
+  `.gradle/remold` 与 `build/remold`，跨项目共享缓存需 `--global`，刻意不挂 `clean`。
+  单测 `RemoldAgentVersionTest`、`CleanRemoldCacheTaskTest`。
 
 ### Changed
 
-- **枚举常量集合变更的拒绝原因改为"实测阻断清单"**：`ENUM_CONSTANT_SET_CHANGED` 不再只说"`<clinit>`
-  不重跑"，而是点名"重写 `$VALUES` + 清 `Class` 枚举缓存也不够"——已 JIT 编译的读者在 deopt 前仍读旧
-  常量表、已初始化的 `$SwitchMap$`/`$SWITCH_TABLE$` 持有类补不出新 case（扩容只消除 AIOOBE、新 case
-  静默落 `default`）、存量 `EnumMap`/`EnumSet` 无法扩容。依据是 JBR 21 真机探针（30 次独立 JVM，
-  javac 21 与真 javac 8 两种字节码形态）：新增 `tests/enum-append-probe/`（不挂 `check`）。
-  设计记录见 `docs/topology/10-enum-constant-append-infeasibility.md`、决策
-  [`D-ENUM-1`](docs/topology/08-decisions.md#d-enum-1)；`EnumSwitchReorderGateTest` 新增用例锁住
-  这四项诊断（9/9）。
+- **枚举安全门收口**（合并三处同类问题）：
+  - **顺序变化不再被对齐器吞掉**：`MixinMemberAlign.hasMixinGeneratedMembers` 曾把 `$VALUES` 等 JVM
+    合成字段当成 Mixin 生成成员，在 `ClassDiffUtil` 之前恢复基线顺序，导致 `CHANGED_ENUM_ORDER`
+    看不到重排/前插；现在判据排除 `$VALUES` / `this$N` / `$assertionsDisabled` / `$SwitchMap$*` /
+    `$EnumMap$*` 等合成形态，枚举类不做字段表重排、被删常量不复活成墓碑字段。
+  - **常量增删不再假成功**：`ClassDiffUtil` 产出 `addedEnumConstants` / `removedEnumConstants`，
+    布局门以 `ENUM_CONSTANT_SET_CHANGED` 拒绝并提示重启，同批直接引用变更常量的调用方一并移出。
+  - **拒绝原因改为实测阻断清单**：不再只说"`<clinit>` 不重跑"，而是点名 JIT 编译后的旧常量表、
+    `$SwitchMap$`/`$SWITCH_TABLE$` 补不出新 case、存量 `EnumMap`/`EnumSet` 无法扩容三处阻断
+    （依据 JBR 21 真机探针 30 次独立 JVM、javac 21 与真 javac 8 两种字节码；
+    `tests/enum-append-probe/`、`docs/topology/10-enum-constant-append-infeasibility.md`、决策 `D-ENUM-1`）。
+  测试：`EnumAlignmentGateWiringTest`（先红后绿，变异击杀宽判据与字段保护）、
+  `EnumSwitchReorderGateTest` 9/9。
+- **删除成员的读者扫描不再被 JDK 无关引用误杀**：同 `name:desc` 的 `ArrayList.<init>(I)V` 等
+  JDK 引用此前因类型世界缺失被判 `UNKNOWN`，整轮 fail-closed 误杀同批重编的调用方；现只跳过
+  **可证明无关**的引用（构造器 owner 不等；platform 前缀 owner 对非 platform 成员且仅限字段/
+  static/private）。实例虚方法仍 fail-closed；拒绝日志点名前 3 个 reader 类。
+- **`@RemoldReinit` 用户契约收口**：`-Dremold.agent.force_reinit` 从死配置接成真实逃生口（默认 false）；
+  新增 `[REINIT] @RemoldReinit trigger on <类>` 逐字段点名触发原因；新增继承作用域安全门
+  （`INCLUDE_SUBCLASSES` + 已登记子类在 `<init>` 写同一继承字段时拒绝并点名子类，`scope = SELF` 不拦）；
+  Javadoc 补齐"Does not do"清单与 `CONDITIONAL` 语义表；B4 拒绝文案列出**全部**不可提取字段及出路。
+- **运行期日志与用户可见字符串全部英文**：主源码 17 处中文文案（6 个文件）译为英文，新增
+  `./gradlew :tests:verifyLogLanguage`（挂 `check`）扫描主源码字符串字面量，命中 CJK/全角标点即失败；
+  规则写入 `AGENTS.md` §3。
+- **发版坐标自检大小写敏感**：`verifyReleaseCoordinates` 不再只断言 POM 存在（大小写不敏感文件系统会
+  掩盖拼写错误），改为按字面量校验两套坐标的 `<groupId>/<artifactId>/<version>`；8 个模块与模板/
+  文档统一回 GitHub 账号真实大小写 `com.github.I-hope1.Remold`。验证：mavenLocal 16/16 坐标可解析，
+  两套模板 `help --offline` 均解析到 `gradle-plugin:v0.2.8`。
 
 ### Fixed
 
-- **Linux aarch64 原生库缺失导致 `UnsatisfiedLinkError`**：`tool.cpp` 的构建目标此前只有
-  Linux x86_64 / macOS / Windows / Android arm64；Linux aarch64 会被解析到 Android NDK 产出的
-  `libtoolarm64.so`（bionic ABI，`NEEDED libc.so`），在 glibc 的 `ld-linux-aarch64.so.1` 下必然装载失败。
-  现在 `core/src/remold/util/NativeLibraryName` 按平台/ABI 解析文件名：Linux aarch64 走新增的
-  glibc 2.17 构建 `libtoolaarch64.so`（zig `aarch64-linux-gnu.2.17`），Android arm64 保留 NDK 产物；
-  `compile.bat` 产出该制品（与 Windows/macOS 产物一样随仓库分发），CI/Release 的 `build-native`
-  校验其 ABI（`AArch64`、`libc.so.6`+`libpthread.so.0`、glibc 基线 2.17、非 bionic）并上传，
-  `NativeLibraryNameTest` 锁住平台矩阵（变异检查：把映射改回 Android 产物即 2 个用例变红）。
-- **CI 原生库构建不再引入第三方 `-Wnullability-completeness` 注解**：上一版把 Linux aarch64
-  构建放进 `build-native` 后，zig 的 `c++` 链接阶段会从源码构建它内置的 libc++，该内部构建不受
-  `-w` 控制，会刷出数千条 libc++ 头文件告警并被 GitHub 解析成注解。现在 aarch64 产物沿用
-  Windows/macOS 的"随仓库分发 + CI 只校验"模式，构建仍由 `compile.bat` 完成；同时
-  `AddFieldReloadProbe` / `DoubleBraceProbe` 补 `@SuppressWarnings({"deprecation", "removal"})`
-  （探针刻意调用 JDK 标记为 removal 的 `Unsafe` 入口，JDK 8/11 仍需这些 API）。
-- **枚举顺序门被 Mixin 成员对齐器抢跑（前线 P0-2）**：`MixinMemberAlign.hasMixinGeneratedMembers`
-  把普通枚举的合成字段 `$VALUES` 当成 Mixin 生成成员，对齐器在 `ClassDiffUtil` 之前把字段表恢复成
-  基线顺序，`CHANGED_ENUM_ORDER` 永远看不到重排/前插（真机日志只有
-  `[MIXIN-ALIGN] restored the baseline member order`，运行态仍钉在旧顺序）。现在判据排除
-  `$VALUES` / `this$N` / `$assertionsDisabled` / `$SwitchMap$*` / `$EnumMap$*` 等 JVM/javac 合成形态；
-  枚举类不做字段表重排、被删常量不复活成墓碑字段（方法表照常对齐）。`EnumAlignmentGateWiringTest`
-  先红后绿（重排/前插/追加/删除/纯方法体/`$VALUES` 判据/Mixin 织入枚举），变异检查分别击杀
-  宽判据恢复与枚举字段保护删除。
-- **枚举常量集合变化（追加/删除）不再假成功**：追加常量不改变已有 ordinal，原先 `LayoutGate`
-  判 `COMPATIBLE` 放行；但热更不重跑 `<clinit>`，新常量运行期恒 `null`、`$VALUES` 不扩容，
-  `values()`/`valueOf()`/`EnumMap` 与源码不一致；删除常量则留在旧 `$VALUES` 实例数组里。
-  `ClassDiffUtil` 现在产出 `addedEnumConstants` / `removedEnumConstants` 与
-  `~ *enum constant set changed:` 标记，布局门以 `ENUM_CONSTANT_SET_CHANGED` 拒绝并提示重启；
-  `RemoldAgent.dropEnumConstantDependents` 把同批直接引用变更常量的调用方一并移出，避免被拒枚举
-  保持旧版后调用方在运行期解析到不存在的字段。InitFix 无法补建（`$VALUES` 被合成字段过滤、
-  枚举常量无 `ConstantValue`）。
-- **读者扫描被无关常量池引用污染（前线 P0-3c）**：删除工程构造器/方法时，同 `name:desc` 的
-  `java/util/ArrayList.<init>(I)V` 等 JDK 引用因类型世界缺失被判 `UNKNOWN`，整轮扫描被当成
-  "不完整"→ 全量 fail-closed 误杀（同批重编的调用方也被拒）。`RemovedMemberReaders.provablyUnrelated`
-  在解析前只跳过**可证明无关**的引用：构造器 owner 不等（JVMS 5.4.3.3 不继承）；platform 前缀
-  owner 对非 platform 成员且仅限字段/static/private 的向上解析。实例虚方法仍保留
-  resolve→inconclusive（platform 接口可以是分派祖先，前缀证明不成立），fail-closed 语义不变。
-  `LayoutDecisionEngine.describeFindings` 在拒绝日志点名前 3 个 reader 类，便于前线定位。
-- **发版坐标自检改为大小写敏感（JitPack 坐标拼写漂移）**：`verifyReleaseCoordinates` 之前只断言
-  POM 文件存在——在大小写不敏感的文件系统（Windows/macOS）上，发布 groupId 写成
-  `com.github.I-Hope1.Remold` 而模板请求 `com.github.I-hope1.Remold`（GitHub 账号真实大小写，
-  `git remote` 为 `I-hope1`）时，"文件存在"照样为真，但 mavenLocal 解析报
-  `inconsistent module metadata / bad group`，模板插件解析随之失败。现在 gate 按大小写敏感字面量
-  校验两套坐标的 `<groupId>`/`<artifactId>`/`<version>`，并把 8 个模块的 JitPack publication 与
-  模板/文档统一回到真实账号大小写 `com.github.I-hope1.Remold`；`gradle-plugin/README.md` 的
-  `I-Hope1` 漂移同步修正。验证：mavenLocal 8 模块 × 2 坐标族 **16/16 可解析**、两套模板
-  `./gradlew help --offline` 均从 mavenLocal 解析到 `gradle-plugin:v0.2.8` 成功。
-- **`@RemoldReinit` 用户契约收口**：
-  - `-Dremold.agent.force_reinit` 之前只解析、只打 `Force Reinit: true`、无任何读取点（死配置）。
-    现在接成真实逃生口（默认 `false`）：打开后忽略初值指纹、本轮一律重放声明类初值切片；
-    启动日志只在开启时明确说明语义。
-  - 新增 `[REINIT] @RemoldReinit trigger on <类>` 行，逐字段点名触发原因
-    （`new-field` / `first-time` / `initializer-changed` / `open-expression` /
-    `unchanged-initializer (skipped)` / `forced`），解决"只改方法体为什么没重置 / 改了个无关类为什么被重置"。
-  - 新增继承作用域安全门：`INCLUDE_SUBCLASSES` + 已登记子类在 `<init>` 里写同一继承字段时，
-    布局门 `[REINIT-SCOPE]` 拒绝并点名子类（`InitFix.unsafeInheritedReinitFields` + 纯函数
-    `ReinitScopeGate` + `HierarchyTree.knownSubtypes`，批量/动态两条路径接线）；显式 `scope = SELF`
-    不拦；子类字节读不到按 fail-closed 拒绝。"父类初值覆盖子类自己的值"不再靠用户记得改 scope。
-  - `@RemoldReinit` Javadoc 补齐"Does not do"清单（`static final` 编译期常量对批外读者无效、
-    Record 组件、final 字段的 JMM 边界、多字段非原子与构造器派生状态、按实例运行时类取值未实现）
-    与 `CONDITIONAL` 的精确语义表（null/0/false、`-0.0`/`NaN` 按 raw bits、long、非默认值跳过）。
-  - B4 拒绝文案改为列出**全部**不可提取字段及原因，并给出"移除注解 / 回退类型变更 / 重启"三条出路
-    （之前只报第一条，用户改掉后下次仍会被另一条挡住）。
-- **运行期日志与用户可见字符串全部改为英文**：主源码原有 17 个含中文的字符串字面量（`[LAYOUT-REINIT]`、
-  `[ANON_ALIGN]` 审计行、`[INIT-DRIFT]`、`[LAYOUT-REJECT]` 提示、`[Fabric]` 就绪回退等，分布 6 个文件）
-  全部译为英文，语义不变——GBK 控制台/日志采集端不再出现乱码。新增
-  `./gradlew :tests:verifyLogLanguage`（挂 `check`）扫描主源码字符串字面量，命中 CJK/全角标点即失败；
-  规则写入 `AGENTS.md` §3「日志语言（强制）」。断言旧中文文案的 3 个测试文件同步改为英文断言。
+- **Linux aarch64 原生库缺失（`UnsatisfiedLinkError`）**：此前映射到 Android NDK 产物（bionic ABI），
+  在 glibc 下必然装载失败；`NativeLibraryName` 现按平台/ABI 选择新增的 glibc 2.17
+  `libtoolaarch64.so`（随仓库分发，CI 校验 ABI、不再现场编译），`NativeLibraryNameTest` 锁住矩阵
+  （变异：映射改回 Android 产物 → 2 用例红）。
+- **CI 原生构建噪声**：aarch64 不再在 CI 现场构建（zig 内部 libc++ 构建绕过 `-w`，产生数千条注解）；
+  探针 `AddFieldReloadProbe` / `DoubleBraceProbe` 补 `@SuppressWarnings`（刻意调用 JDK removal API）。
 
 ### Docs
 
-- **设计文档与状态分离**：`docs/initfix/04-target-design.md` 不再登记"落地状态/路线图状态列"，
-  只保留设计规格；路线图、优先级与残余边界统一收敛到 `docs/status.md` §4.1/§4.2 与风险 9，
-  并补上 `@HotswapInit` 的"目标设计、未落地"标注与阶段 A 字段并集说明。
-- **枚举追加不可运行期修复**：新增 `docs/topology/10-enum-constant-append-infeasibility.md`
-  （实测读数、候选方案否决、复现探针）与决策 `D-ENUM-1`。
-- **孤儿 lambda 保留旧体**：新增 `docs/topology/11-orphan-lambda-body-retention.md`
-  （void/非 void 语义、存活判据、幽灵身份、log-once、多轮搬运与验收口径）。
+- **设计文档只留设计**：`docs/initfix/04-target-design.md` 移除"落地状态/路线图状态列"，路线图与残余
+  边界统一收敛到 `docs/status.md` §4.1/§4.2 与风险 9；`@HotswapInit` 标注为"目标设计、未落地"。
+- **新增专题**：`docs/topology/10`（枚举追加不可运行期修复）、`docs/topology/11`（孤儿 lambda
+  保留旧体）、`docs/releases/v0.2.8.md`（本版发布说明）。
 - **`AGENTS.md`**：新增日志语言强制规则、代码地图补孤儿 lambda 保留与两阶段动态入口、
   按需文档索引补 topology/10 与 topology/11。
+
+### Verification
+
+- `./gradlew check`：820 JUnit 用例 / 0 失败 / 0 skipped；`verifyLogLanguage`、`verifyDocStatusMarkers`、
+  `:gradle-plugin:validatePlugins` 全绿。
+- 真实 DCEVM（JBR 21.0.9）：`liveDcevmTest` 44/0；`redefineDynamicNoBaselineProbe` 13/0
+  （含 `two-phase: A -> patch -> C` 与存量实例 `b=42`）。
+- 发版门：`publishToMavenLocal` + `verifyReleaseCoordinates` 8 模块 × 2 坐标族全 true；
+  mavenLocal scratch 消费者 16/16 坐标可解析；两套模板 `help --offline` 通过。
 
 ## [0.2.7] - 2026-11-11
 

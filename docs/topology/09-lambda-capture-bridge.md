@@ -477,16 +477,16 @@ lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
 
 | # | 消费点 | 作用 | 防线性质 |
 |:--|:--|:--|:--|
-| S1 | `scan`：`info.ghost` 的方法**不当宿主** | 幽灵体内的 indy 不产出宿主序列（宿主 `hostKey` 保持 `null`） | 独立（无前提）；但由它产生的 `null` 宿主**交给 G1 否决**，这条链只在门禁里 |
-| S2 | `scan`：幽灵**不作为 indy 目标**（`target.renameable && !target.ghost`） | 幽灵名不能被认领 | 独立（无前提） |
-| S3 | `scan`：语义指纹不折入幽灵子（"幽灵无语义"） | 幽灵不污染父指纹 | 独立（无前提） |
-| S4 | `putNameIndex`：活方法压过幽灵/桥 | 同名索引取到真体而不是桩 | 独立（无前提） |
+| S1 | `scan`：`info.ghost` 的方法**不当宿主** | 幽灵体内的 indy 不产出宿主序列（宿主 `hostKey` 保持 `null`） | 独立；但由它产生的 `null` 宿主**交给 G1 否决**，这条链只在门禁里 |
+| S2 | `scan`：幽灵**不作为 indy 目标**（`target.renameable && !target.ghost`） | 幽灵名不能被认领 | 独立（`[推断]`，代码阅读） |
+| S3 | `scan`：语义指纹不折入幽灵子（"幽灵无语义"） | 幽灵不污染父指纹 | 独立 |
+| S4 | `putNameIndex`：活方法压过幽灵/桥 | 同名索引取到真体而不是桩 | 独立 |
 | S5 | Step 1 `acceptCandidate` | 幽灵不参与指纹配对（`D` 可放开） | `D` 之外有独立防线：`sameSemantics` 仍要求指纹一致，而幽灵体是熔断桩、指纹与真实体不同 |
-| S6 | Pass A `step2PassA` | 幽灵不参与 A 趟 | 独立：这一处**恒跳过**，`D` 也不放开 |
+| S6 | Pass A `step2PassA` | 幽灵不参与 A 趟 | 独立：在该路径下跳过，`D` 不放开（`[推断]`，代码阅读） |
 | S7 | **Pass B 两条循环** | 幽灵不参与 B 趟（`D` 可放开） | **仅靠门禁**：`D` 放开后唯一拦得住的是 `fallbackPairingAllowed` |
-| S8 | `isSkeletonGloballyUnique` / `skeletonEligibleOld` | 幽灵不算骨架候选 | 独立（无前提） |
-| S9 | `hasMultipleHashCandidates` / `checkAndWarnHomomorphicPruning` | 只数活方法 | 独立（无前提） |
-| S10 | 深度/形状/引用者计算 | 幽灵按"无子空壳"处理 | 独立（无前提） |
+| S8 | `isSkeletonGloballyUnique` / `skeletonEligibleOld` | 幽灵不算骨架候选 | 独立 |
+| S9 | `hasMultipleHashCandidates` / `checkAndWarnHomomorphicPruning` | 只数活方法 | 独立 |
+| S10 | 深度/形状/引用者计算 | 幽灵按"无子空壳"处理 | 独立 |
 | S11 | `stepGhostRevive`（`-Dremold.agent.ghost_revive=true`，默认关） | 按**生前指纹**复活幽灵 | 独立通道：复活要求 `ghostOriginalHash == 新体指纹`，且**不经过**本门禁 |
 | G1 | `fallbackPairingAllowed` 的宿主形态否决（`hostKind` 一侧 `?`） | 取不到宿主 ⇒ 形态判不了 ⇒ **一票否决**，优先于"同名放行" | 独立防线（门禁自身的一层，不是"靠别的层兜"） |
 | G2 | `isOrderConsistent` 的 `hostKey == null` 早退 | 没有序号就没有顺序证据 | 独立（返回 `false` 即"不给证据"，不是放行） |
@@ -546,9 +546,25 @@ Step 1 那处（S5）还有 `sameSemantics` 兜底，**Pass B 那两处（S7）�
 `OffsetBindingIndex` / `ProfilerTransformer` / `HierarchyTreeOracle` / `HotswapBridge` /
 `plugin-forge: remold/forge/ForgeMixinHotSwap` 各 1；其余 28 类为 0）。
 
-**与兜底配对门禁无关**：同一语料、同一变换下把门禁关闭再跑，逐字节比对两趟的 37 行
+**在本语料与变换下门禁未产生拒绝，因此这 23 桩不由门禁造成**：同一语料、同一变换下把门禁关闭再跑，逐字节比对两趟的 37 行
 `[GHOSTATTR]` 读数 —— 行数相同、`diff` 退出码 0、差异行 0，两趟均为
 `classesWithGhosts=9 totalGhosts=23 totalRefusals=0`。该零差异的前提由阳性对照证成：
+
+**口径与实测读数**（`tests/tools/gate-counter.patch`，测试工具补丁，不进产品代码）：语料 31 个类触发兜底门禁，
+`eval=107 / fpCmp=107 / fpAllow=107 / hostKindRefused=0 / fallbackRefused=0`，即 107 次评估均进入 `bodyHash`
+比对并因指纹相等放行，同源变换误报 **0/107**。`GateCtrl` 阳性对照：`eval=18 / fpCmp=18 / fpAllow=0 /
+hostKindRefused=18`（指纹不等后由宿主形态翻转拒绝），证明计数器对"指纹不等"形态有分辨力。
+`gate=on/off` 两趟幽灵数逐字节相同的机制即：语料上 0 次拒绝，关掉门禁同样放行。误报率外推仍限 4 类人造重排各 n=1。
+
+**护栏与其局限**：语料用例与 L5 对照都断言 `[GATE-STATE]` 为开（`callSites>0`），门禁被关时显式红
+（关态实测 `exit 1`，三个用例同时红）。该护栏只能发现"门禁调用被移除"这一形态；把 `fallbackPairingAllowed`
+改成恒返回 true 时 `callSites` 仍为 4、护栏仍绿 —— 这一形态由 L5 对照的行为断言兜底（`mut-…062308-2578`：
+恒 true 变异下 `gatePositiveControlOnL5Seed` 与 `passBRefusesRebindWhenBodyDiffers` 同时红）。
+
+**已知口径（I3）**：`BODY_MISMATCH` 的 WARN 与 `TEST_EVENTS` 按 `类名#BODY#新名<-旧名` 去重，键里没有
+重定义轮次或类版本（`[推断]`，代码阅读）；`bodyMismatchRefusals` 的自增在该去重之前，配对拒绝与幽灵化
+不受其影响（`[推断]`）。生产侧 `core/` 下 `clearLoggedWarnings()` 调用点为 0、`TEST_EVENTS` 生产消费者为 0
+（`[观测]`，grep 读数）。长驻 agent 内同一处错绑在后续轮次重复出现时 WARN 只打一次，登记为 **I3**，未修。
 
 - `[GATE-STATE]` 读的是**实际被加载的** `LambdaAligner` 字节（数 `fallbackPairingAllowed` 调用点并打
   `alignerSha256`），两趟分别 `bodyFingerprint=on callSites=4 sha256=858dd0ff…` 与

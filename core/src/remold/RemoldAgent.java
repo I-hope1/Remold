@@ -1983,6 +1983,8 @@ public class RemoldAgent {
 		Map<String, String> targetToRawName = new HashMap<>(changedFiles.size());
 		// 本轮"改了但没生效"的台账：摘要行据此点名跳过了谁（见 RoundSkips）。
 		RoundSkips skips = new RoundSkips();
+		// 本轮因注解默认值变化而整体作废的类（非 null = 事务共退：本批一个类都不重定义）。
+		String annotationDefaultAbort = null;
 		for (Path p : changedFiles) {
 			try {
 				byte[] bc = Files.readAllBytes(p);
@@ -2396,6 +2398,13 @@ public class RemoldAgent {
 					if (oldBytecode != null) {
 						ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytecode, newBytecode);
 						ClassDiffUtil.logDiff(className, diff);
+						String annotationDefaultAbortClass =
+							handleAnnotationDefaultChangeInBatch(className, oldBytecode, newBytecode,
+								transactions, definitions, oldEffectiveBytes, retryCandidates, skips);
+						if (annotationDefaultAbortClass != null) {
+							annotationDefaultAbort = annotationDefaultAbortClass;
+							continue;
+						}
 						if (ClassDiffUtil.mustRejectHierarchyChange(diff, isEnhancedHotswapEnabled())) {
 							error("REJECTED: Class hierarchy change detected for " + className + " ("
 								+ ClassDiffUtil.describeHierarchyChange(diff) + ")."
@@ -2493,6 +2502,16 @@ public class RemoldAgent {
 			} catch (Throwable e) {
 				error("Failed to process " + path, e);
 			}
+		}
+
+		// 注解默认值变化的**事务共退**：本轮整体作废（连坐），避免"注解类型换上了新默认值、
+		// 已加载的消费者仍读旧默认值"这种半套状态。记账动作在
+		// {@link #abortRoundForAnnotationDefault} 里（同一入口被单测覆盖），这里只补一条可见的总结。
+		// 下游的 sourceBytecodeCache 回滚 / 指纹不落账 / 不回队逻辑照常执行（outcome 为空）。
+		if (annotationDefaultAbort != null) {
+			error("[HOTSWAP] Round aborted: annotation default value changed in " + annotationDefaultAbort
+				+ "; no class of this batch was redefined (transaction co-rollback)."
+				+ " RESTART required for the new default to take effect.");
 		}
 
 		// 批量执行重定义（针对已加载类）。
@@ -4895,6 +4914,16 @@ public class RemoldAgent {
 				return true;
 			}
 			ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, runtimeBytes);
+			String annotationDefaultChange = annotationDefaultGate(className, oldBytes, runtimeBytes);
+			if (annotationDefaultChange != null) {
+				// 探针读数：注解默认值变化后已加载的消费者类仍读旧默认值（JBR 21/25，含 DCEVM 格）。
+				// 单类入口没有"同批连坐"的对象，拒绝本类即等于整体不重定义（宿主保持旧版）。
+				error("[DYNAMIC-REDEFINE] " + className + ": annotation default value changed ("
+					+ annotationDefaultChange + "); refusing the redefine because classes that are already"
+					+ " loaded keep the OLD default value — RESTART required."
+					+ " Explicit override: -Dremold.agent.annotation_default_change=allow.");
+				return false;
+			}
 			if (ClassDiffUtil.mustRejectHierarchyChange(diff, isEnhancedHotswapEnabled())) {
 				error("REJECTED: Class hierarchy change detected for dynamic class " + className + " ("
 					+ ClassDiffUtil.describeHierarchyChange(diff) + ")."
@@ -5092,6 +5121,111 @@ public class RemoldAgent {
 	/** @see EnvironmentProbe#isEnhancedHotswapEnabled() */
 	public static boolean isEnhancedHotswapEnabled() {
 		return EnvironmentProbe.isEnhancedHotswapEnabled();
+	}
+
+	/**
+	 * 注解默认值（{@code AnnotationDefault}）变化的降级通道：<b>默认关闭</b>。
+	 *
+	 * <p>默认行为是 fail-closed：检测到注解默认值变化就拒绝该类的重定义，批量路径还把整轮
+	 * 一起作废（事务共退），并要求重启。只有显式写
+	 * {@code -Dremold.agent.annotation_default_change=allow} 时才放行，且每次都会打
+	 * {@code [ANNOTATION-DEFAULT]} 告警说明"已加载的消费者仍会读到旧默认值"。</p>
+	 *
+	 * <p>之所以要求显式：JVM 探针读数（JBR 21 / JBR 25，标准 HotSpot 与
+	 * {@code -XX:+AllowEnhancedClassRedefinition}）显示 {@code redefineClasses} 会成功，
+	 * 但已加载的消费者类继续读到旧默认值——放过去就是"静默按旧行为走"。</p>
+	 */
+	public static boolean annotationDefaultChangeAllowed() {
+		String value = System.getProperty("remold.agent.annotation_default_change");
+		return value != null && "allow".equalsIgnoreCase(value.trim());
+	}
+
+	/**
+	 * 注解默认值门禁的统一判决（批量路径与动态路径共用这一个入口，单测直接覆盖它）。
+	 *
+	 * <p>判决顺序：比对出默认值变化 → 若降级通道关闭则返回拒绝原因；若显式开启则打
+	 * {@code [ANNOTATION-DEFAULT]} 警告（<b>指名类与具体成员</b>，不允许静默放行）并返回 {@code null}。</p>
+	 *
+	 * @param className 点分类名（日志与拒绝原因都要指名）
+	 * @param oldBytes  已加载基线字节（{@code null} = 无基线，不判定）
+	 * @param newBytes  候选字节
+	 * @return {@code null} = 放行（可能已打警告）；否则为拒绝原因（含具体成员与值变化）
+	 */
+	static String annotationDefaultGate(String className, byte[] oldBytes, byte[] newBytes) {
+		String change = ClassDiffUtil.describeAnnotationDefaultChange(oldBytes, newBytes);
+		if (change == null) {
+			return null;
+		}
+		if (annotationDefaultChangeAllowed()) {
+			warn("[ANNOTATION-DEFAULT] " + className + ": " + change
+				+ " — allowed by -Dremold.agent.annotation_default_change=allow; classes that are"
+				+ " already loaded will keep the old default value.");
+			return null;
+		}
+		return change;
+	}
+
+	/**
+	 * 批量路径的注解默认值处置（判定 + 拒绝日志 + 整轮共退，抽成可单测入口）。
+	 *
+	 * <p>调用方拿到非 {@code null} 后需要 {@code continue}（跳过本类），并记住本轮已作废。</p>
+	 *
+	 * @return 触发共退的类名；{@code null} = 本类放行（可能已因显式降级通道打过 WARN）
+	 */
+	static String handleAnnotationDefaultChangeInBatch(String className, byte[] oldBytes, byte[] newBytes,
+			Map<String, AlignmentTransaction> transactions, List<ClassDefinition> definitions,
+			Map<String, byte[]> oldEffectiveBytes, Map<String, Path> retryCandidates, RoundSkips skips) {
+		String change = annotationDefaultGate(className, oldBytes, newBytes);
+		if (change == null) {
+			return null;
+		}
+		// 探针读数（JBR 21/25，标准 HotSpot 与 -XX:+AllowEnhancedClassRedefinition）：
+		// 改掉注解类型的默认值后 redefineClasses 会成功，但已加载的消费者类继续读到旧默认值
+		// （标准格连重定义之后才加载的消费者也读到旧值）。只重定义注解类型修不好这一点，
+		// 所以本轮整体作废（事务共退），要求重启。
+		error("REJECTED: annotation default value changed for " + className + " (" + change
+			+ "); classes that are already loaded keep the OLD default value, so redefining the annotation"
+			+ " type cannot take effect. This batch is aborted as a whole (transaction co-rollback, nothing"
+			+ " was redefined) — RESTART required. Explicit override:"
+			+ " -Dremold.agent.annotation_default_change=allow (already-loaded classes will still keep the"
+			+ " old default).");
+		abortRoundForAnnotationDefault(className, change, transactions, definitions, oldEffectiveBytes,
+			retryCandidates, skips);
+		return className;
+	}
+
+	/**
+	 * 注解默认值变化的<b>整轮共退</b>记账（批量路径专用，抽成可单测入口）。
+	 *
+	 * <p>语义：本批一个类都不重定义（连坐）。动作：回滚本类对齐事务并移出事务表 →
+	 * 清空本批待重定义集合与旧字节映射 → 清空重试候选（重试改不了已加载类的旧默认值）→
+	 * 在 {@link RoundSkips} 里留下点名判决。调用方随后也需要跳过本类（{@code continue}）。</p>
+	 *
+	 * @return 本次被作废的重定义条目数（{@code 0} = 本轮本来就没有待重定义类）
+	 */
+	static int abortRoundForAnnotationDefault(String className, String change,
+			Map<String, AlignmentTransaction> transactions, List<ClassDefinition> definitions,
+			Map<String, byte[]> oldEffectiveBytes, Map<String, Path> retryCandidates, RoundSkips skips) {
+		int dropped = definitions == null ? 0 : definitions.size();
+		if (transactions != null) {
+			AlignmentTransaction own = className == null ? null : transactions.get(className);
+			if (own != null) {
+				own.rollback(true);
+				transactions.remove(className);
+			}
+			for (AlignmentTransaction tx : new ArrayList<>(transactions.values())) {
+				tx.rollback(true);
+			}
+			transactions.clear();
+		}
+		if (definitions != null) definitions.clear();
+		if (oldEffectiveBytes != null) oldEffectiveBytes.clear();
+		if (retryCandidates != null) retryCandidates.clear();
+		if (skips != null && className != null) {
+			skips.add(className, RoundSkips.verdict("ANNOTATION-DEFAULT-CHANGED", change,
+				"restart required — already-loaded classes keep serving the old default"));
+		}
+		return dropped;
 	}
 
 	/** @see EnvironmentProbe#mustSkipForMissingEnhancedRedefinition(boolean, boolean) */

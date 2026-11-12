@@ -129,6 +129,156 @@ public final class ClassDiffUtil {
 	}
 
 	/**
+	 * 注解默认值（{@code AnnotationDefault} 属性）变化的比对（纯函数，<b>fail-closed</b>）。
+	 *
+	 * <p><b>为什么需要单独比对</b>：{@link ClassDiff} 只描述结构（字段/方法/层次），注解成员默认值
+	 * 变化不会出现在任何差异集合里；而 JVM 探针读数（JBR 21 / JBR 25，标准 HotSpot 与
+	 * {@code -XX:+AllowEnhancedClassRedefinition}）显示：改掉注解类型的默认值后
+	 * {@code redefineClasses} 会成功，但<b>已经加载</b>的消费者类仍读到<b>旧默认值</b>
+	 * （{@code getAnnotation(...).value()} 全档一致），且标准 HotSpot 上连重定义之后才加载的
+	 * 消费者也读到旧值。因此这类变化一旦放过去，就是"静默按旧行为走"。</p>
+	 *
+	 * <p><b>判据边界</b>：只比较<b>两侧都存在</b>的注解成员（{@code name + desc} 相同）的
+	 * {@code AnnotationDefault}。成员的增删属于结构变化，由层次门与 JVM 自身的能力判据负责，
+	 * 不在这里重复判定。</p>
+	 *
+	 * <p><b>fail-closed</b>：字节码解析失败时返回不可判定原因（调用方据此拒绝），
+	 * 而不是当作"没有变化"放行。</p>
+	 *
+	 * @param oldBytes 已加载的基线字节（可为 {@code null} = 无基线，返回 {@code null} 不判定）
+	 * @param newBytes 候选字节
+	 * @return {@code null} = 没有注解默认值变化（或不是注解类型）；否则为可读的变化描述
+	 */
+	public static String describeAnnotationDefaultChange(byte[] oldBytes, byte[] newBytes) {
+		if (oldBytes == null || newBytes == null) {
+			return null;
+		}
+		ClassNode oldNode;
+		ClassNode newNode;
+		try {
+			oldNode = parse(oldBytes);
+			newNode = parse(newBytes);
+		} catch (Throwable t) {
+			return "cannot verify AnnotationDefault (unparseable class bytes: "
+				+ t.getClass().getSimpleName() + ")";
+		}
+		boolean oldAnnotation = (oldNode.access & Opcodes.ACC_ANNOTATION) != 0;
+		boolean newAnnotation = (newNode.access & Opcodes.ACC_ANNOTATION) != 0;
+		if (!oldAnnotation && !newAnnotation) {
+			return null;
+		}
+		if (oldNode.methods == null || newNode.methods == null) {
+			return null;
+		}
+		Map<String, MethodNode> oldMembers = new HashMap<>();
+		for (MethodNode method : oldNode.methods) {
+			if (method.name == null || method.name.startsWith("<")) continue;
+			oldMembers.put(method.name + method.desc, method);
+		}
+		List<String> changes = new ArrayList<>();
+		for (MethodNode method : newNode.methods) {
+			if (method.name == null || method.name.startsWith("<")) continue;
+			MethodNode previous = oldMembers.get(method.name + method.desc);
+			if (previous == null) continue;   // 成员新增：结构门负责
+			if (!sameAnnotationDefault(previous.annotationDefault, method.annotationDefault)) {
+				changes.add(method.name + "() " + renderAnnotationDefault(previous.annotationDefault)
+					+ " -> " + renderAnnotationDefault(method.annotationDefault));
+			}
+		}
+		if (changes.isEmpty()) {
+			return null;
+		}
+		return String.join("; ", changes);
+	}
+
+	/** 默认值深比较：支持基本类型/包装、{@code String}、{@code Type}、枚举、嵌套注解与数组。 */
+	private static boolean sameAnnotationDefault(Object left, Object right) {
+		if (left == null || right == null) {
+			return left == right;
+		}
+		if (left instanceof AnnotationNode || right instanceof AnnotationNode) {
+			return bothAnnotationsEqual(left, right);
+		}
+		// ASM 把 class literal 表示成 Type（没有值等价性），枚举表示成 {Type/String desc, 常量名} 数组：
+		// 两者按内容比较，否则同一份字节会被判成"变过"（误拒正常热更）。
+		if (left instanceof Type || right instanceof Type) {
+			return left instanceof Type && right instanceof Type
+				&& ((Type) left).getDescriptor().equals(((Type) right).getDescriptor());
+		}
+		if (left instanceof Object[] || right instanceof Object[]) {
+			if (!(left instanceof Object[]) || !(right instanceof Object[])) return false;
+			Object[] a = (Object[]) left;
+			Object[] b = (Object[]) right;
+			if (a.length != b.length) return false;
+			for (int i = 0; i < a.length; i++) {
+				if (!sameAnnotationDefault(a[i], b[i])) return false;
+			}
+			return true;
+		}
+		if (left instanceof List || right instanceof List) {
+			if (!(left instanceof List) || !(right instanceof List)) return false;
+			List<?> a = (List<?>) left;
+			List<?> b = (List<?>) right;
+			if (a.size() != b.size()) return false;
+			for (int i = 0; i < a.size(); i++) {
+				if (!sameAnnotationDefault(a.get(i), b.get(i))) return false;
+			}
+			return true;
+		}
+		return Objects.equals(left, right);
+	}
+
+	private static boolean bothAnnotationsEqual(Object left, Object right) {
+		if (!(left instanceof AnnotationNode) || !(right instanceof AnnotationNode)) {
+			return false;
+		}
+		AnnotationNode a = (AnnotationNode) left;
+		AnnotationNode b = (AnnotationNode) right;
+		if (!Objects.equals(a.desc, b.desc)) return false;
+		List<Object> av = a.values == null ? Collections.emptyList() : a.values;
+		List<Object> bv = b.values == null ? Collections.emptyList() : b.values;
+		if (av.size() != bv.size()) return false;
+		for (int i = 0; i + 1 < av.size(); i += 2) {
+			if (!Objects.equals(av.get(i), bv.get(i))) return false;
+			if (!sameAnnotationDefault(av.get(i + 1), bv.get(i + 1))) return false;
+		}
+		return true;
+	}
+
+	/** 默认值的可读形态（日志用）：{@code <none>} 表示该成员没有默认值。 */
+	private static String renderArray(Object[] elements) {
+		StringBuilder sb = new StringBuilder("[");
+		for (int i = 0; i < elements.length; i++) {
+			if (i > 0) sb.append(",");
+			sb.append(renderAnnotationDefault(elements[i]));
+		}
+		return sb.append("]").toString();
+	}
+
+	private static String renderAnnotationDefault(Object value) {
+		if (value == null) {
+			return "<none>";
+		}
+		if (value instanceof String) {
+			return "\"" + value + "\"";
+		}
+		if (value instanceof Type) {
+			return ((Type) value).getDescriptor();
+		}
+		if (value instanceof AnnotationNode) {
+			AnnotationNode node = (AnnotationNode) value;
+			return "@" + node.desc;
+		}
+		if (value instanceof List) {
+			return renderArray(((List<?>) value).toArray());
+		}
+		if (value instanceof Object[]) {
+			return renderArray((Object[]) value);
+		}
+		return String.valueOf(value);
+	}
+
+	/**
 	 * 解析字节码为ASM树节点
 	 * <pre>
 	 * 性能优化说明：

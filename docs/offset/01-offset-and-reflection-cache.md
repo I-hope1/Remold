@@ -144,3 +144,87 @@ flowchart LR
 4. **双通道获取策略**：
    * **原生堆遍历通道**：若 Native 探针 `LibTool` 可用，通过 `LibTool.getInstances(targetClass)` 自动发现堆中所有存活解析器实例，实现免注册无感清理；
    * **显式注册通道**：使用弱引用集合持有实例，作为无 native 时的确定性通道。各框架的注册入口归属其实现所在层：`RemoldAgent.registerObjectMapper` / `registerGson`（core）与 `ArcJsonEvictor.register`（plugin-arc）。
+
+## 5. 分 JVM 实测读数（批次 K，`tests/src/ParameterAnnotationDriftProbe.java`）
+
+探针入口 `./gradlew :tests:parameterAnnotationDriftProbe`，可加 `-Pkprobe.javaHome=<jdk>` 与 `-Pkprobe.dcevm`
+切换运行时；入参是"变更前后两份 class 字节"，与变更类型无关。
+读数分四档：**旧句柄**（重定义前取得的 `Method`）、**重新 `getDeclaredMethods()`**、**首次解析**（按签名现取），
+另加"重定义期间并发读"与"GC + 常量池争用后重读"。每格都记录 `java.version` 与完整 `inputArguments`，
+并用"加一个实例字段再 redefine"的真实结果区分 DCEVM 格与标准 HotSpot 格（不靠参数名或 JVM 名字推断）。
+
+### 5.1 三格环境
+
+| 格 | java.version / vm | 结构重定义能力实测 | 备注 |
+|:--|:--|:--|:--|
+| ① JBR 25 标准 HotSpot | `25.0.2+1-b329.72`（`OpenJDK 64-Bit Server VM`） | `THROWN:java.lang.UnsupportedOperationException`（`attempted to change the schema (add/remove fields)`） | 无 DCEVM 参数 |
+| ② JBR 21 标准 HotSpot | `21.0.9+1-b1163.86`（同上） | 同上 `UnsupportedOperationException` | 无 DCEVM 参数 |
+| ③ JBR 21 + DCEVM | 同② | `OK`（字段增加后 redefine 成功） | `inputArguments` 含 `-XX:+AllowEnhancedClassRedefinition` |
+
+### 5.2 三格 × 九场景 × 三组读数
+
+| 场景 | 读数 API | 格 | 旧句柄 | 重新 getDeclaredMethods() | 首次解析 |
+|:--|:--|:--|:--|:--|:--|
+| control-identical | getParameterAnnotations | ① JBR 25 标准 | `value=v1 type=java.lang.Object` | `value=v1 type=java.lang.Object` | `value=v1 type=java.lang.Object` |
+| control-identical | getParameterAnnotations | ② JBR 21 标准 | `value=v1 type=java.lang.Object` | `value=v1 type=java.lang.Object` | `value=v1 type=java.lang.Object` |
+| control-identical | getParameterAnnotations | ③ JBR 21+DCEVM | `value=v1 type=java.lang.Object` | `value=v1 type=java.lang.Object` | `value=v1 type=java.lang.Object` |
+| param-annotation-value-change | getParameterAnnotations | ① JBR 25 标准 | `value=v1 type=java.lang.Object` | `value=v2-a-much-longer-value type=java.lang.Object` | `value=v2-a-much-longer-value type=java.lang.Object` |
+| param-annotation-value-change | getParameterAnnotations | ② JBR 21 标准 | `value=v1 type=java.lang.Object` | `value=v2-a-much-longer-value type=java.lang.Object` | `value=v2-a-much-longer-value type=java.lang.Object` |
+| param-annotation-value-change | getParameterAnnotations | ③ JBR 21+DCEVM | `value=v2-a-much-longer-value type=java.lang.Object` | `value=v2-a-much-longer-value type=java.lang.Object` | `value=v2-a-much-longer-value type=java.lang.Object` |
+| param-annotation-removed | getParameterAnnotations | ① JBR 25 标准 | `value=v1 type=java.lang.Object` | `[#0={}]` | `[#0={}]` |
+| param-annotation-removed | getParameterAnnotations | ② JBR 21 标准 | `value=v1 type=java.lang.Object` | `[#0={}]` | `[#0={}]` |
+| param-annotation-removed | getParameterAnnotations | ③ JBR 21+DCEVM | `THROWN java.lang.reflect.GenericSignatureFormatError` | `[#0={}]` | `[#0={}]` |
+| generic-signature-change | getGenericParameterTypes | ① JBR 25 标准 | `[java.util.List<java.lang.String>]` | `[java.util.List<java.lang.Integer>]` | `[java.util.List<java.lang.Integer>]` |
+| generic-signature-change | getGenericParameterTypes | ② JBR 21 标准 | `[java.util.List<java.lang.String>]` | `[java.util.List<java.lang.Integer>]` | `[java.util.List<java.lang.Integer>]` |
+| generic-signature-change | getGenericParameterTypes | ③ JBR 21+DCEVM | `[java.util.List<java.lang.String>]` | `[java.util.List<java.lang.Integer>]` | `[java.util.List<java.lang.Integer>]` |
+| annotation-and-signature-change | getParameterAnnotations | ① JBR 25 标准 | `value=v1 type=java.lang.Object` | `value=v2 type=java.lang.Object` | `value=v2 type=java.lang.Object` |
+| annotation-and-signature-change | getParameterAnnotations | ② JBR 21 标准 | `value=v1 type=java.lang.Object` | `value=v2 type=java.lang.Object` | `value=v2 type=java.lang.Object` |
+| annotation-and-signature-change | getParameterAnnotations | ③ JBR 21+DCEVM | `value=v2 type=java.lang.Object` | `value=v2 type=java.lang.Object` | `value=v2 type=java.lang.Object` |
+| param-annotation-moved-between-parameters | getParameterAnnotations | ① JBR 25 标准 | `value=v1 type=java.lang.Object` | `value=v1 type=java.lang.Object` | `value=v1 type=java.lang.Object` |
+| param-annotation-moved-between-parameters | getParameterAnnotations | ② JBR 21 标准 | `value=v1 type=java.lang.Object` | `value=v1 type=java.lang.Object` | `value=v1 type=java.lang.Object` |
+| param-annotation-moved-between-parameters | getParameterAnnotations | ③ JBR 21+DCEVM | `value=v1 type=java.lang.Object` | `value=v1 type=java.lang.Object` | `value=v1 type=java.lang.Object` |
+| param-annotation-type-changed | getParameterAnnotations | ① JBR 25 标准 | `value=v1 type=java.lang.Object` | `[#0={@java.lang.Deprecated(since=,forRemoval=false)}]` | `[#0={@java.lang.Deprecated(since=,forRemoval=false)}]` |
+| param-annotation-type-changed | getParameterAnnotations | ② JBR 21 标准 | `value=v1 type=java.lang.Object` | `[#0={@java.lang.Deprecated(since=,forRemoval=false)}]` | `[#0={@java.lang.Deprecated(since=,forRemoval=false)}]` |
+| param-annotation-type-changed | getParameterAnnotations | ③ JBR 21+DCEVM | `[#0={@java.lang.Deprecated(since=,forRemoval=false)}]` | `[#0={@java.lang.Deprecated(since=,forRemoval=false)}]` | `[#0={@java.lang.Deprecated(since=,forRemoval=false)}]` |
+| class-generic-signature-change | getGenericSuperclass | ① JBR 25 标准 | `java.util.ArrayList<java.lang.String>` | `java.util.ArrayList<java.lang.String>` | `java.util.ArrayList<java.lang.String>` |
+| class-generic-signature-change | getGenericSuperclass | ② JBR 21 标准 | `java.util.ArrayList<java.lang.String>` | `java.util.ArrayList<java.lang.String>` | `java.util.ArrayList<java.lang.String>` |
+| class-generic-signature-change | getGenericSuperclass | ③ JBR 21+DCEVM | `java.util.ArrayList<java.lang.String>` | `java.util.ArrayList<java.lang.Integer>` | `java.util.ArrayList<java.lang.Integer>` |
+| annotation-class-literal-value-change | getParameterAnnotations | ① JBR 25 标准 | `value=v1 type=java.lang.String` | `value=v1 type=java.lang.Integer` | `value=v1 type=java.lang.Integer` |
+| annotation-class-literal-value-change | getParameterAnnotations | ② JBR 21 标准 | `value=v1 type=java.lang.String` | `value=v1 type=java.lang.Integer` | `value=v1 type=java.lang.Integer` |
+| annotation-class-literal-value-change | getParameterAnnotations | ③ JBR 21+DCEVM | `value=v1 type=java.lang.String` | `value=v1 type=java.lang.Integer` | `value=v1 type=java.lang.Integer` |
+
+### 5.3 读数摘要（逐字取自上表，不写机制标签）
+
+- **格① / 格②（标准 HotSpot）**：`param-annotation-value-change` 的旧句柄读数为 `value=v1`，同一场景
+  "重新 `getDeclaredMethods()`" 与"首次解析"读数为 `value=v2-a-much-longer-value`；`generic-signature-change`
+  的旧句柄为 `List<java.lang.String>`、其余两组为 `List<java.lang.Integer>`。九场景**均未抛出 `Error` 级失败**
+  （`escapedError=none`）。即：同一批读数的三组之间**不一致**，且不一致处**没有异常**。
+- **格③（JBR 21 + DCEVM）**：`param-annotation-removed` 的**旧句柄** `getParameterAnnotations()` 抛出
+  `java.lang.reflect.GenericSignatureFormatError: Signature Parse error: Expected Field Type Signature`
+  （连跑 3 次同场景同阶段同异常，确定性复现）；同一格另有 `param-annotation-value-change`、
+  `annotation-and-signature-change` 的旧句柄**直接读到新值**，`class-generic-signature-change` 的
+  `getGenericSuperclass()` 也在重定义后从 `ArrayList<java.lang.String>` 变为 `ArrayList<java.lang.Integer>`。
+- **跨格不一致**：同一场景的旧句柄读数在①②与③之间不同（①②为旧值、③为新值或抛 `Error`）；
+  类级 `getGenericSuperclass()` 只在③刷新。**因此本主题任何"旧句柄行为"的表述都必须分 JVM 写，
+  不得跨格归纳。**
+
+### 5.4 灵敏度对照（证明读数链路能看见 `Error`，不构成缺陷证据）
+
+| 对照 | API | 真实 `Throwable` |
+|:--|:--|:--|
+| `param-annotation-count-mismatch`（属性 `num_parameters` 与实际参数数不符） | `getParameterAnnotations` | `java.lang.annotation.AnnotationFormatError: Unexpected end of parameter annotations.` |
+| `malformed-generic-signature`（方法 `Signature` 语法非法） | `getGenericParameterTypes` | `java.lang.reflect.GenericSignatureFormatError: Signature Parse error: expected ')'` |
+| `param-annotation-type-is-not-an-annotation` | `getParameterAnnotations` | 无异常（JDK 静默忽略） |
+| `duplicate-annotation-member` | `getParameterAnnotations` | 无异常（JDK 静默忽略） |
+
+两份"属性被故意损坏"的字节由 ASM 直接生成，异常全部由 JVM / 反射库解析器抛出；探针内没有任何
+`throw` 语句。该对照只验证读数链路，**不能替代复现证据**。
+
+### 5.5 与缓存驱逐的关系（能力边界）
+
+本文读数只覆盖"反射句柄读什么"。`ReflectionCacheManager` 的驱逐只作用于**已注册**的框架缓存
+（Gson / Jackson / 插件注册的 `ReflectionCacheEvictor`），它无法改变用户自持句柄的读数：
+cherry-pick 后的实现落在树上时，格③ 的 `param-annotation-removed` 旧句柄**仍然**抛
+`GenericSignatureFormatError`（同一探针、同一阶段）。本批次**没有**取得"已注册缓存路径：驱逐前读到错误值、
+驱逐后读到正确值"这组前后对照读数，因此驱逐范围扩展（`EvictionScope.WITH_DESCENDANTS`）**不作为**
+本主题已验证的能力登记；它保持显式缺口。

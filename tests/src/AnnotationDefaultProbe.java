@@ -31,7 +31,7 @@ import remold.RemoldAgent;
  *
  * <p><b>它回答什么</b>：把注解类型的 {@code AnnotationDefault} 改掉（{@code default "v1"} →
  * {@code default "v2"}）再 {@code redefineClasses} 之后，运行期<b>实际读到</b>什么。三组读数按
- * 指挥部口径分开记：① 重定义前拿到的旧 {@code Method} 句柄（另分 warm/cold）；② 重定义后
+ * 读数分两类记：① 重定义前拿到的旧 {@code Method} 句柄（另分 warm/cold）；② 重定义后
  * 重新 {@code getDeclaredMethods()}；③ 重定义后首次解析。另加消费者侧终局读数：注解实例的
  * 成员值（{@code @Mark} 未显式赋值 → 只能取默认值），分"旧实例 / 重定义后新解析的类注解 /
  * 重定义后新解析的方法注解"三档。</p>

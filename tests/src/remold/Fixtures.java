@@ -22,7 +22,7 @@ import javax.tools.StandardJavaFileManager;
 import javax.tools.ToolProvider;
 
 /**
- * 内存 javac 夹具编译器（批次 J 的注解默认值测试共用）。
+ * 内存 javac 夹具编译器（注解默认值相关测试共用）。
  *
  * <p>测试必须拿真实 {@code javac} 产出的类字节：注解默认值写在 {@code AnnotationDefault}
  * 方法属性里，手写 ASM 结点会绕过这条路径，测不到真正要比对的东西。</p>

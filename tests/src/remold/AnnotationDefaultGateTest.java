@@ -20,7 +20,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * 注解默认值门禁的接线测试（批次 J，不变量 C5）。
+ * 注解默认值门禁的接线测试（fail-closed 拒绝 + 降级放行两条路径）。
  *
  * <p>覆盖四件事，都是"静默按旧行为走"的失效面：</p>
  * <ol>

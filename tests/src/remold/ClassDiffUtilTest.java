@@ -11,7 +11,7 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
- * {@link ClassDiffUtil#describeAnnotationDefaultChange} 的判定力测试（批次 J）。
+ * {@link ClassDiffUtil#describeAnnotationDefaultChange} 的判定力测试。
  *
  * <p>该函数是注解默认值门禁的唯一判定点：它必须看见 {@code AnnotationDefault} 的真实变化，
  * 又必须对"常量池位移但值没变""成员声明顺序变化""非注解类"保持沉默——否则正常热更会被误拒；

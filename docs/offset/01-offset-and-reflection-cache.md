@@ -205,7 +205,12 @@ flowchart LR
 | 类级 `Signature`（`getGenericSuperclass`） | 重定义前后均为 `ArrayList<java.lang.String>` | 重定义后为 `ArrayList<java.lang.Integer>`（刷新） |
 
 - 格③ 的 `param-annotation-removed` 在**同一台机器、同一组启动参数（JBR 21.0.9 + `-XX:+AllowEnhancedClassRedefinition`）、同一探针提交**下连跑 3 次均复现（**3/3 复现，同机同参数**；n=3 不足以支撑更强结论）。
-- 格③ **第 2 组读数（重新 `getDeclaredMethods()`）**：九场景全部读到新状态（`value=v2-a-much-longer-value` / `{}` / `List<java.lang.Integer>` / `@Deprecated` / `ArrayList<java.lang.Integer>`），且**无任何异常**。这是"请重新解析句柄"这条建议的唯一依据。
+- **第 2 组读数（重新 `getDeclaredMethods()`）的恢复效果，分粒度、分格限定 `[观测]`**：
+  - **成员级**（参数注解 / 方法泛型签名 / 字段泛型签名）：三格共 24 行全部读到**新状态**
+    （`value=v2-a-much-longer-value`、`{}`、`@Deprecated`、`List<java.lang.Integer>`、`t=Integer`），且无异常；
+  - **类级泛型签名**（`getGenericSuperclass`）：**格① 与格② 仍读到旧值 `ArrayList<java.lang.String>`**，
+    只有格③（JBR 21 + DCEVM）刷新为 `ArrayList<java.lang.Integer>`。
+  因此"句柄读数的恢复"在三格**不成立**（类级不成立），该结论只写在本节，**不进运行时 WARN**。
 - 格①② 的旧句柄在全部 9 场景均**无异常**，读数为旧值；三组读数之间不一致。
 - **跨格不一致**：同一场景的旧句柄读数在①②与③之间不同（①②旧值、③新值或抛 `Error`），类级 `getGenericSuperclass()` 只在③刷新。**本主题任何"旧句柄行为"的表述都必须分 JVM 写，不得跨格归纳。**
 
@@ -236,11 +241,29 @@ flowchart LR
 - 能力边界（C4）：驱逐只作用于**已注册**的框架缓存；用户自持的 `Method` 句柄不在其覆盖范围。
   格③ 的复现**在检测 + WARN 落到主干之后依旧存在**（同一探针、同一阶段，
   `param-annotation-removed` 旧句柄仍抛 `GenericSignatureFormatError`）——本主题不改变这一点。
-- WARN 文案按分 JVM 读数写：同时列出"标准 HotSpot 静默返回旧值"与"JBR 21 + DCEVM 抛
-  `GenericSignatureFormatError` 或返回新值"两种已观测形态，**不写"会抛异常"，也不写"会读到旧值"**；
-  "请重新解析句柄"建议以格③第 2 组读数为依据。
+- WARN 文案**不含任何恢复效果陈述**：只写 类名/成员名 + 变化种类 + "旧反射句柄读数不可靠、请勿继续使用"
+  + C4 能力边界（只覆盖已注册缓存）。运行时日志装不下分格限定，故两种已观测形态（标准 HotSpot 静默旧值 /
+  JBR 21 + DCEVM 抛 `GenericSignatureFormatError` 或返回新值）只写在 §5.3 的表里，不进日志。
 
-### 5.6 未测项
+### 5.6 检测覆盖范围：**不含类级泛型签名**（登记 K2）
+
+`collectMemberMetadataDrift` 只比较**两版都存在且 `name + descriptor` 相同的字段与成员**
+（`ClassNode.fields` / `ClassNode.methods` 的 `Signature` 与参数注解属性）；
+**类级 `ClassNode.signature`（`getGenericSuperclass()` 那一类）不在比较范围内**，因此：
+类级泛型签名变化**未被检测、也不会产生 WARN**。§5.2 表里 `class-generic-signature-change` 一行的
+读数只记录运行时刷新差异，**不对应任何检测能力**。该项登记为 **K2 待办**，不得读成"类级已覆盖"。
+
+### 5.7 复现所需的固定输入（N=37 语料可复现）
+
+- 探针与夹具：`tests/src/ParameterAnnotationDriftProbe.java`（提交 `f6420c8`），9 场景 × 9 读数档。
+- Mixin 相关语料版本（本主题文档所引 Mixin 生态上下文）：`plugin-mixin` 与 `plugin-forge` 的
+  编译期依赖固定为 **`org.spongepowered:mixin:0.8.5`（`compileOnly`）**；
+  `tests` 侧对应 `implementation "org.spongepowered:mixin:0.8.5"`。N=37 语料按此版本复现。
+- 运行时：JBR 21.0.9（`jbrsdk_jcef-21.0.9`）与 JBR 25.0.2（`jbrsdk_jcef-25.0.2`），
+  格③ 额外 `-XX:+AllowEnhancedClassRedefinition`；三格的 `java -version` 全文与完整 `inputArguments`
+  见 §5.1 与探针日志（`PROBE-ENV` 行）。
+
+### 5.8 未测项
 
 - 运行时：JBR **8 / 11 / 17** 未测（本轮只有 JBR 21 与 JBR 25）。
 - 框架缓存：**Gson / Jackson 真实缓存路径未测**（因此没有 §5.5 所说的前后对照读数）。

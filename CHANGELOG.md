@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`redefineDynamic` 接入两阶段（动态单类入口的读穿窗口关闭）**：Mixin 热更给目标类新增
+  `@Unique` 字段并在 `@Inject` 中立即读取时走的是 `redefineDynamic`；此前单次提交会让并发 tick
+  线程在补丁落盘前读到字段零值（`null`/0）。现在该入口消费 `InitFix.requiresTwoPhase`：用
+  `StageASkeleton.buildWithLiveConstructors(oldBytes, runtimeBytes)` 合成阶段 A → 首次
+  `redefineClasses` → `InitFix.afterRedefine` 补存量实例 → 第二次 `redefineClasses(runtimeBytes)`，
+  全部在**调用返回前**完成（不暴露阶段 A 中间态、公开返回语义不变）；阶段 C 复用现成的终态字节，
+  不重跑 transformer 桥接或 `InitFix.transform`。阶段 C 失败按 VM 级/非 VM 级分流（VM 级标记毒化并
+  停在阶段 A 提示重启；非 VM 级尝试回滚基线字节并返回 `false`）。纯方法体热更仍走单次重定义。
+  单测 `DynamicTwoPhaseRedefineTest` 2/2（两次 redefine 的顺序与字节；补丁日志夹在两次之间；
+  纯方法体仍单次），变异：强制 `twoPhase=false` → 用例红。
+
 - **`remold-agent.jar` 版本对账（gradle-plugin）**：`remold-agent.jar` 的 manifest 现在写入
   `Remold-Version` / `Implementation-Version`（值来自 `gradle.properties` 的 `remoldVersion`）。
   插件在解析本地 agent 时读取该版本并与 `remold.version` / `remold { version }` 比较：

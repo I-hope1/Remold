@@ -178,7 +178,7 @@
 
 | 能力 | 状态 | 代码位置 | 验收证据 |
 |:---|:---:|:---|:---|
-| 两阶段重定义（内部批次路径）：本批存在「新增/类型变更字段」进入补丁计划时，先提交阶段 A（新结构 + 旧方法体，**构造器/`<clinit>` 保留新体**），补丁完成后再提交阶段 C 的新方法体；纯方法体热更仍走单次重定义快路径。默认开启，`-Dremold.agent.two_phase=false` 可回到旧行为。 | ✅ | `RemoldAgent.applyTwoPhase` / `redefineStageA`（阶段编排与整组回滚）；`InitFix.requiresTwoPhase`（只认真正会写的零值暴露字段）；`StageASkeleton.buildWithLiveConstructors`（构造器保留新体，替代 `ConstructorTailInjector` 插桩） | 真实 `processChanges` 端到端 `TwoPhaseProbe` **72/0**（JBR 21）：`two-phase ON` 时并发读线程在 50k 存量实例把阶段 B 窗口拉宽的情况下零 NPE，且依次看到旧结果与新结果；`two-phase OFF` 对照在同一夹具上稳定观测到 `NullPointerException`（红基线），证明读穿窗口真实存在且被两阶段关闭；`TwoPhaseGuardTest` 5/0（新增实例字段/新增静态字段 → true；纯方法体/`@RemoldReinit`/零值等价 → false）；`StageASkeletonTest` 11/0（含窗口实例由新构造器初始化、旧体不回退到新字段的正反例）；全量 JUnit **597/0 skipped**（v0.2.6 发版验证，`./gradlew check`）；`:tests:initFixOracle` `ALL ASSERTIONS PASSED`；`layoutRejectRecoverProbe` 41/0、`doubleBraceProbe` 104/0。**残余边界**：外部 IDE/JDWP 重定义通道与 `redefineDynamic` 单类通道仍走单阶段（读穿窗口仍在；未接入两阶段的原因与返回语义见风险 9）；被安全门拒绝、根本没生成补丁的字段两阶段无法代偿（保持“重启”语义）；阶段 B 完成前，新构造器读取本类新增**静态**字段或同批其它类未补齐字段仍是残余窗口；两次 redefine 会带来双倍 JIT 逆优化（`docs/initfix/07-p05-probe-results.md` §11）。 |
+| 两阶段重定义（内部批次路径）：本批存在「新增/类型变更字段」进入补丁计划时，先提交阶段 A（新结构 + 旧方法体，**构造器/`<clinit>` 保留新体**），补丁完成后再提交阶段 C 的新方法体；纯方法体热更仍走单次重定义快路径。默认开启，`-Dremold.agent.two_phase=false` 可回到旧行为。 | ✅ | `RemoldAgent.applyTwoPhase` / `redefineStageA`（阶段编排与整组回滚）；`InitFix.requiresTwoPhase`（只认真正会写的零值暴露字段）；`StageASkeleton.buildWithLiveConstructors`（构造器保留新体，替代 `ConstructorTailInjector` 插桩） | 真实 `processChanges` 端到端 `TwoPhaseProbe` **72/0**（JBR 21）：`two-phase ON` 时并发读线程在 50k 存量实例把阶段 B 窗口拉宽的情况下零 NPE，且依次看到旧结果与新结果；`two-phase OFF` 对照在同一夹具上稳定观测到 `NullPointerException`（红基线），证明读穿窗口真实存在且被两阶段关闭；`TwoPhaseGuardTest` 5/0（新增实例字段/新增静态字段 → true；纯方法体/`@RemoldReinit`/零值等价 → false）；`StageASkeletonTest` 11/0（含窗口实例由新构造器初始化、旧体不回退到新字段的正反例）；全量 JUnit **597/0 skipped**（v0.2.6 发版验证，`./gradlew check`）；`:tests:initFixOracle` `ALL ASSERTIONS PASSED`；`layoutRejectRecoverProbe` 41/0、`doubleBraceProbe` 104/0。**动态单类入口（`redefineDynamic`）已接入**：`DynamicTwoPhaseRedefineTest` 2/2——新增带初值字段时两次 `redefineClasses`（Stage A 旧体 / Stage C 新体），补丁日志夹在两次调用之间；纯方法体变化仍单次；变异：强制 `twoPhase=false` → 用例红。**残余边界**：外部 IDE/JDWP 重定义通道仍走单阶段（读穿窗口仍在，见风险 9）；被安全门拒绝、根本没生成补丁的字段两阶段无法代偿（保持“重启”语义）；阶段 B 完成前，新构造器读取本类新增**静态**字段或同批其它类未补齐字段仍是残余窗口；两次 redefine 会带来双倍 JIT 逆优化（`docs/initfix/07-p05-probe-results.md` §11）。 |
 
 ---
 
@@ -265,6 +265,7 @@
 | **缺 `-g` 时捕获 Lambda 换序不可判定告警与 Strict 模式拦截**：类未带 `-g`（缺少 `LocalVariableTable`）编译时，`captureIdentity` 无法获取形参变量名退回 null，导致 `isPermutedPair` 失效、旧实例静默沿用旧行为；javac 亦会将同类中捕获顺序相反、方法体相同的 lambda 彻底合并为同一个合成方法造成编译期信息丢失 | ✅ | `LambdaAligner.hasCapturedLambdaWithoutLvt` 结合 `hasCapturedVariables` 与 `getReceiverOffset` 精准判定捕获 lambda 是否缺失 LVT；`align` 入口输出明确 WARN 提示带 `-g` 重编，并在 `LAST_RESULT` 中登记 `missingLvtLambdas`；开启 strict 模式（`LAMBDA_STRICT`，支持 `-Dremold.agent.lambda_strict=true` / `-Dremold.lambdaAlign.strict=true`）时抛出 `LambdaAlignmentStrictException`；`RemoldAgent` 捕获后记录 `[HOTSWAP-REJECT]` / `skips` 并回滚事务摘除该类，安全保留旧版本运行；启动日志明确提示重编需 `-g`（替代笼统警告）；无捕获 lambda 与仅捕获 `this` 实例 lambda 精准放行 | **单测**：`LambdaLvtStrictGateTest`（6/6，覆盖基线确认、非 strict 模式记录与告警、strict 模式异常拦截、对照组带 `-g` 放行、对照组无捕获 lambda 放行、对照组仅捕获 `this` 放行）；**变异**：注释掉 `LAMBDA_STRICT` 抛出分支后测试精准变红（1 failed） |
 | **`EnvironmentProbe` 命令行参数后置覆盖误判修复**：JBR 参数同时包含 `+` 和 `-` 时，原实现仅用 `contains("+Allow...")` 导致被后置 `-Allow...` 覆盖时发生误判 | ✅ | `EnvironmentProbe.isFlagEnabled` 纯函数，以命令行参数列表中最后一次出现的 flag 为准，并由 `RemoldAgent.isFlagEnabled` 暴露门面 | **单测**：`EnhancedHotswapGateTest.flagEnabledFollowsLastOccurrence`（覆盖无参数、只有+、只有-、先+后-、先-后+）；**变异**：将 `lastPlus > lastMinus` 改为 `lastPlus >= 0` 后测试精准变红（1 failed） |
 | **孤儿 lambda 方法体保留（非 void 默认开启）**：删除 lambda 后幽灵桩返回类型默认值（`null/0`），调用方链式调用或拆箱直接 NPE / 除零 / 数组越界；一概跑旧逻辑又会让 `void` 孤儿继续执行用户删掉的副作用 | ✅ | `LambdaAligner.injectRetainedBody` + 三参 `onOrphanInvoked(String,boolean,boolean)`（保留体标记、log-once 告警）；纯判据 `core/src/remold/OrphanBodyRetention.java` 扫旧体指向**本类**的字段/方法/indy 句柄，成员已删或静态性翻转则拒绝并回退默认值桩；旧体用 `EXPAND_FRAMES` 重读、连 `StackMapTable`/异常表一起搬运（写入仍 `COMPUTE_MAXS`）；上一轮已是保留体时原样搬运（多轮不退化）；`readGhostOriginalHash` 收紧为"首指令 LDC(long)+紧跟 POP2"；开关 `-Dremold.agent.orphan_retain_body`（默认 true）/`-Dremold.agent.orphan_retain_void`（默认 false） | **单测**：`OrphanBodyRetentionTest` 6/6（非 void 保留体反射执行返回旧值；引用已删私有方法 → 回退默认值桩；void 默认 no-op、开关打开后副作用真实执行；多轮搬运仍保留；保留体仍被识别为幽灵且不进配对映射；开关关闭对照组）；**变异**：`keepPrevious=false` → 3 红、存活判据直接放行 → 1 红；既有 `LambdaAlignTortureTest`/`MethodRefForwardTest` 按新契约更新（`allIds` 排除幽灵、L5 幽灵保留旧体、方法引用门测试显式关闭保留以隔离被测门禁） |
+| **`redefineDynamic` 接入两阶段（动态单类入口的读穿窗口关闭）**：Mixin 热更给目标类新增 `@Unique` 字段并在 `@Inject` 里立刻读取时走 `redefineDynamic`，此前单次提交会让并发 tick 线程在补丁落盘前读到 null/0 | ✅ | `RemoldAgent.redefineDynamic` 消费 `InitFix.requiresTwoPhase`：阶段 A 由 `StageASkeleton.buildWithLiveConstructors(oldBytes, runtimeBytes)` 合成 → 首次 `redefineClasses` → `InitFix.afterRedefine` 补存量实例 → 第二次 `redefineClasses(runtimeBytes)`；缓存随 A→C 推进；阶段 C 失败按 VM 级/非 VM 级分流（VM 级毒化+重启；非 VM 级回滚基线并返回 false）；阶段 A 合成失败降级单阶段并 WARN | **单测**：`DynamicTwoPhaseRedefineTest` 2/2（新增带初值字段 → 两次 redefine，Stage A 旧体/Stage C 新体、补丁日志夹在两次之间；纯方法体 → 单次）；**变异**：强制 `twoPhase=false` → 两阶段用例红 |
 
 ---
 
@@ -410,7 +411,7 @@
 |:---|:---:|:---|:---|:---|
 | **构造器尾部插桩** | P3 | [`04-target-design.md`](initfix/04-target-design.md) §4 | `InitFix` 离线切片提取与直线字节码生成器 (`AliasInterpreter`) | **当前契约下不再需要**：阶段 A 保留新构造器/`<clinit>`，窗口内新建的实例由新构造器直接完成初始化，不需要从切片反推「取值指令」。仅当将来要求阶段 A 的构造器也回退旧体（换取更强的中止语义）时才重新需要；`ConstructorTailInjector` 单测保留、不接线。 |
 | **两阶段 Schema-First 重定义** | ✅（内部批次路径） | [`04-target-design.md`](initfix/04-target-design.md) §1 | 已接线：`RemoldAgent.applyTwoPhase` / `redefineStageA` + `InitFix.requiresTwoPhase` + `StageASkeleton.buildWithLiveConstructors` | 读穿窗口（风险 9）在内部批次路径上关闭，且**只在本批存在零值暴露字段时**触发，纯方法体热更不付第二次 redefine 的代价。代价仍然真实：两次 redefine 会带来连续两次全局 JIT 逆优化（`07-p05-probe-results.md` §11 的对照组）；残余通道见风险 9。验收：`TwoPhaseProbe` 72/0（含 50k 实例下的并发读线程红/绿对照）、`TwoPhaseGuardTest` 5/0、全量 JUnit 597/0 skipped（v0.2.6 发版验证，`./gradlew check`）。 |
-| **两阶段编排扩展到 `redefineDynamic` / 外部 IDE-JDWP 通道** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §1、本节风险 9 | 从批次编排抽出可复用的 Stage A→B→C 驱动；先定义公开 API 的"停在阶段 A"返回语义 | 关闭残余读穿窗口。`redefineDynamic` 是**同步单类 API**，插件调用方在返回 `true` 后立即做后续处理（目标刷新 / `ClassInfo` 同步 / 批次回调），阶段 A 的中间态会暴露给它们；还需要旧基线、事务登记（阶段 A 不落缓存/不算生效）、`isInitialized` 二次检查与二次 transformer 桥幂等性。外部 IDE/JDWP 通道另受"JVM 先完成后置回调"约束：要关窗口必须让 transformer 首次返回阶段 A、再主动触发第二次 redefine，而 JDWP 没有该触发点 | 
+| **外部 IDE-JDWP 通道接入两阶段** | P2 | [`04-target-design.md`](initfix/04-target-design.md) §1、本节风险 9 | 需要 JDWP 之外的第二次 redefine 触发源 | 关闭最后一条残余读穿窗口。JVM 先按新字节码完成重定义、再回调 Remold（`afterRedefineExternal`），要关窗口必须让 transformer 首次返回阶段 A 骨架、再在补丁完成后主动触发阶段 C；JDWP 协议没有该触发点。`redefineDynamic` 单类入口已接入（调用内部同步 A→补丁→C，见 §0.7） |
 | **伴生类 CAS 迁移到 `VarHandle.compareAndSet`（JDK 21+ / JEP 471）** | P3 | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §3 | JDK 21+ 运行时下限 | 用标准 API 取代 `jdk.internal.misc.Unsafe` 反射取偏移，降低 JDK 升级断裂面；`float`/`double` 的 raw-bits 语义与现有跳过计数保持不变 |
 | **PatchPlan 基线指纹校验** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §2 | 离线分析器导出协议 | 校验 Target 当前内存字节码哈希与构建期基线一致性，防止类漂移热更造成严重字节码损坏 |
 | **`@HotswapInit` T4 逃生口** | P1 | [`09-hotswapinit-design.md`](initfix/09-hotswapinit-design.md) §2～§4 | `InitFix.buildPatch` 候选集段；复用现有写入协议 | 让 T3 拒绝的初始化式（Kotlin `?.`/`?:`、读配置、跨类依赖）由用户提供值，不再永久停在类型默认值；只换值的来源，不换作用域与写入协议（与 `@RemoldReinit`、`@OnReload` 不重叠）。契约已定，实现未开始（§2 T4 行为 ⬜） |
@@ -519,7 +520,7 @@
 - **触发条件**：热更新期间应用线程仍在分配对象（游戏主循环的常态）。
 - **当前缓解措施**：**枚举已后置到重定义生效之后**（`InitFix.applyPatch` → `collectInstancesForPatch`，见 [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §2）。此后不可能再产生旧布局实例，枚举天然完备；枚举期间新建的实例由新构造器初始化，条件 CAS 对它们是无害的空操作。回归断言 `InitFixSnapshotTimingTest`（先红后绿）。
 - **残余边界（已关闭）**：两阶段路径下阶段 A 保留新构造器/`<clinit>`（`StageASkeleton.buildWithLiveConstructors`），阶段 A 到阶段 C 之间新建的实例由新构造器直接完成初始化，不再停在默认值；`StageASkeletonTest` 的窗口实例用例（新构造器初始化、旧体不回退到新字段）守卫该点。构造器尾部插桩在当前契约下不再需要（见 §4.1）。
-- **根治与关闭条件**：已由两阶段路径的「构造器保留新体」达成（[`04-target-design.md`](initfix/04-target-design.md) §1；原 §4 构造器尾部插桩方案在当前契约下不接线）；外部 IDE/JDWP 与 `redefineDynamic` 通道的同类窗口见风险 9。
+- **根治与关闭条件**：已由两阶段路径的「构造器保留新体」达成（[`04-target-design.md`](initfix/04-target-design.md) §1；原 §4 构造器尾部插桩方案在当前契约下不接线）；外部 IDE/JDWP 通道的同类窗口见风险 9。
 - **关联设计规范**：[`docs/initfix/03-runtime-driver.md`](initfix/03-runtime-driver.md) §2、[`docs/initfix/04-target-design.md`](initfix/04-target-design.md) §4。
 - **关联架构决策**：无。
 
@@ -548,22 +549,11 @@
 ### 风险 9：重定义生效到补丁完成之间的读穿窗口
 - **风险描述与底层机制**：`redefineClasses` 返回后新方法体即可执行，而新增字段要等 `InitFix.applyPatch` 枚举完堆才写入。窗口内的读取拿到类型默认值（引用类型 `null`、数值类型 `0`），不抛异常也不打日志；引用类型的下游解引用直接 NPE（真实渲染/逻辑线程在第 4 行日志级别即可观察到）。
 - **已关闭的路径**：内部批次路径（文件监听 → `processChanges`）已由两阶段 Schema-First 重定义关闭（见 §0.7、路线图 §4.1）。当本批存在真正会写的「新增/类型变更字段」时：阶段 A 提交新结构 + 旧方法体（构造器/`<clinit>` 保留新体），旧方法体在编译期不引用新增字段，因而窗口内不可能读穿；阶段 B 完成补丁后再提交阶段 C 的新方法体。只在本批存在零值暴露字段时触发，纯方法体热更不付出第二次 redefine 的代价。证据：`TwoPhaseProbe` 72/0 的 50k 实例并发读线程红/绿对照（关两阶段稳定 NPE，开两阶段零 NPE）已实测。
+- **已关闭的路径（动态单类入口）**：`redefineDynamic` 消费 `InitFix.requiresTwoPhase`，在**调用内部同步**完成 A → 补丁 → C（阶段 C 直接提交现成的 `runtimeBytes`，不重跑 transformer 桥接/`InitFix.transform`），返回时 JVM 已是终态——公开 API 的返回语义不变，插件调用方在返回后看不到阶段 A 中间态。阶段 C 失败时按 VM 级/非 VM 级分流：VM 级标记毒化并停在阶段 A 提示重启；非 VM 级尝试回滚到基线字节并返回 `false`。证据：`DynamicTwoPhaseRedefineTest` 2/2（两次 redefine 的顺序与字节：Stage A 旧体 + 新字段、Stage C 新体；纯方法体仍单次），变异：强制 `twoPhase=false` → 用例红。
 - **仍敞开的路径（残余）**：
   - **外部 IDE/JDWP 重定义通道**：JVM 先按新字节码完成重定义，Remold 只能在 `afterRedefineExternal`
     里补，窗口仍在。要关窗口必须让 transformer 首次返回阶段 A 骨架、再在补丁完成后主动触发第二次
     redefine；JDWP 协议不提供这个触发点，该通道实际不可达（除非另起触发源）。
-  - **`redefineDynamic` 单类通道**：同样先提交完整新字节码再补。未接入两阶段的三个具体原因
-    （代码分析）：
-    ① 它是**同步单类 API**，`MixinHotSwap` / `ForgeMixinHotSwap` 等调用方在返回 `true` 后立即做后续
-    处理（目标刷新 / `ClassInfo` 同步 / 批次回调）；阶段 A 的"骨架中间态"会把这些处理暴露在半成品
-    状态上，需先定义"停在阶段 A 时 `redefineDynamic` 返回什么"这一公开语义；
-    ② 批次路径的两阶段依赖旧基线、按类事务登记（阶段 A **不**落 `bytecodeCache`、不算生效）、整组
-    回滚与 `isInitialized` 二次检查；`redefineDynamic` 目前只有"单次 `redefineClasses` +
-    `InitFix.afterRedefine` + 回调"，直接接入等于把 `applyTwoPhase` 的编排再实现一遍；
-    ③ 阶段 C 的第二次 redefine 需要重新跑 transformer 桥（Mixin 重织入 / 访问权限对齐）与
-    `InitFix.transform`，当前实现假定单次提交，需要先做幂等性设计。旁证：`InitFix` 已在
-    `PendingPatch` 上算出 `twoPhase` 标志，但其唯一消费者 `InitFix.requiresTwoPhase` 只在批次路径
-    被调用——动态路径上该标志是**无消费者的死状态**；
   - **补丁被安全门拒绝的字段**：没有补丁就没有可等待的值，两阶段无法代偿，语义仍是「重启」；
   - **阶段 B 完成前的残余读取**：新构造器若读取本类新增**静态**字段、或读取同批其它类尚未补齐的字段，仍可能拿到默认值（跨类拓扑排序尚未接线，见路线图）。
 - **窗口量级**（仅对仍敞开的路径有参考意义；实测拆分见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10）：
@@ -574,7 +564,7 @@
   - **暴露时间要扣掉 STW 段**：实测（M6）每次 `getInstances` 是一次 safepoint，1M 匹配实例时 `HeapIterateOperation` 单次 216~242 ms；停世界期间业务线程读不到未补字段。心跳吞吐只有自由速率的 67%，是「一段 STW + 其余阶段并发」的混合，不是全程争抢。
 - **触发条件**：窗口内有线程执行读取新增字段的代码——本类新方法体、同批重定义的其它类、反射/序列化路径、任意业务线程。
 - **缓解措施**：两阶段路径已由编排消除；残余路径上 `HOTSWAP_LOCK` 只互斥热更调度与事务处理、**不阻塞应用线程读**，因此不构成防护；T0 零值等价字段不受影响（默认值即正确值）；`PatchReport` 与条件 CAS 跳过计数可在事后定位“这次写了哪些字段”，但无法预防窗口内的读。
-- **根治与关闭条件**：把两阶段编排接到外部重定义通道与 `redefineDynamic`（两者都受 JVM 先完成后置回调的约束，需要在 transformer 里先把新字节改为阶段 A 骨架、再在补丁完成后主动触发阶段 C），并补齐跨类批次拓扑排序。当前这两条属已知残余。
+- **根治与关闭条件**：只剩**外部 IDE/JDWP 重定义通道**——它受"JVM 先完成后置回调"约束，需要在 transformer 里先把新字节改为阶段 A 骨架、再在补丁完成后主动触发阶段 C（JDWP 无该触发点，需另起触发源）。另一条独立残余是跨类批次拓扑排序（阶段 B 完成前新构造器读同批其它类的新字段）。
 - **关联设计规范**：[`docs/initfix/04-target-design.md`](initfix/04-target-design.md) §1、[`docs/initfix/03-runtime-driver.md`](initfix/03-runtime-driver.md) §2。
 - **关联架构决策**：无。
 

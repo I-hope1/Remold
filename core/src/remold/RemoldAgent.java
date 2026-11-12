@@ -5173,27 +5173,96 @@ public class RemoldAgent {
 			}
 			InitFix.transform(targetClass, runtimeBytes, diff);
 
+			// 动态单类入口也接两阶段（docs/initfix/04-target-design.md §1）：调用方
+			// （MixinHotSwap / ForgeMixinHotSwap 等）在返回后立即做后续处理，所以
+			// A → 补丁 → C 必须在本方法内部同步跑完——返回时 JVM 已是终态，不暴露阶段 A 中间态，
+			// 公开 API 的返回语义不变。twoPhase 标志由 InitFix.transform 写进 PendingPatch，
+			// 这里只消费 InitFix.requiresTwoPhase；不额外跑堆扫描（批次路径才有堆 liveness 旁路优化）。
+			boolean twoPhase = InitFix.requiresTwoPhase(targetClass);
+			byte[]  stageABytes = null;
+			if (twoPhase) {
+				try {
+					stageABytes = remold.ref.StageASkeleton.buildWithLiveConstructors(oldBytes, runtimeBytes);
+				} catch (Throwable t) {
+					warn("[DYNAMIC-REDEFINE] " + className + ": cannot synthesise stage A (" + t
+					     + "); falling back to a single redefine — the read-through window stays open.");
+					twoPhase = false;
+				}
+			}
+
 			// 堆实例哨兵三切面（默认关闭，-Dremold.probe.heapwatch=true 开启）：
 			// 用于定位「某类字段在 redefine / 字段初始化补丁窗口内被置 null」这类跨类污染。
 			remold.ref.HeapFieldWatch.snapshot("before-redefine", className);
 			enterInternalRedefine(Collections.singleton(className));
 			try {
-				inst.redefineClasses(new ClassDefinition(targetClass, runtimeBytes));
-				remold.ref.HeapFieldWatch.snapshot("after-redefine", className);
+				if (twoPhase) {
+					// ---- 阶段 A：新结构 + 旧方法体（构造器/<clinit> 保留新体） ----
+					inst.redefineClasses(new ClassDefinition(targetClass, stageABytes));
+					remold.ref.HeapFieldWatch.snapshot("after-stage-a", className);
+					// 阶段 A 已生效：分析期 oracle 看的"新结构"仍是 C，但 JVM 当前真实形态是 A，
+					// 缓存先指向 A（与批次两阶段同口径）；C 成功后再推进。
+					bytecodeCache.put(className, stageABytes);
+					info("[DYNAMIC-REDEFINE] " + className + ": stage A applied (new shape with old method"
+					     + " bodies); patching live instances before stage C.");
+					try {
+						InitFix.afterRedefine(targetClass);
+					} catch (Throwable t) {
+						// 与批次路径一致：补丁失败不阻止阶段 C；未补字段停在默认值并记账。
+						error("[DYNAMIC-REDEFINE] " + className + ": stage B patch failed (" + t + ");"
+						      + " stage C will still be applied, so unpatched fields stay at defaults.", t);
+					}
+					remold.ref.HeapFieldWatch.snapshot("after-field-patch", className);
+
+					// ---- 阶段 C：提交现成的 runtimeBytes（桥接与 InitFix.transform 已做过，不重跑） ----
+					try {
+						inst.redefineClasses(new ClassDefinition(targetClass, runtimeBytes));
+					} catch (Throwable stageCFailure) {
+						LAST_REDEFINE_VM_LEVEL_FAILURE = isVmLevelRedefineFailure(stageCFailure);
+						if (LAST_REDEFINE_VM_LEVEL_FAILURE) {
+							// VM 级失败（InternalError/VerifyError）：不再对同一类做第二次 redefine。
+							markVmLevelFailure(className, stageCFailure);
+							error("[DYNAMIC-REDEFINE] " + className + ": stage C redefine failed at the VM level ("
+							      + stageCFailure + "); the class stays at stage A (old bodies). RESTART required.",
+								stageCFailure);
+							return false;
+						}
+						boolean rolledBack = false;
+						try {
+							inst.redefineClasses(new ClassDefinition(targetClass, oldBytes));
+							bytecodeCache.put(className, oldBytes);
+							rolledBack = true;
+						} catch (Throwable rollbackFailure) {
+							bytecodeCache.put(className, stageABytes);
+							warn("[DYNAMIC-REDEFINE] " + className + ": stage C failed and rollback to the baseline"
+							     + " also failed (" + rollbackFailure + "); the class stays at stage A (old bodies,"
+							     + " patched fields). RESTART required.");
+						}
+						error("[DYNAMIC-REDEFINE] " + className + ": stage C redefine failed (" + stageCFailure + "); "
+						      + (rolledBack ? "rolled back to the baseline bytes (best effort)."
+						                    : "no rollback was possible — RESTART required."), stageCFailure);
+						return false;
+					}
+					remold.ref.HeapFieldWatch.snapshot("after-stage-c", className);
+				} else {
+					inst.redefineClasses(new ClassDefinition(targetClass, runtimeBytes));
+					remold.ref.HeapFieldWatch.snapshot("after-redefine", className);
+					bytecodeCache.put(className, runtimeBytes);
+					try {
+						InitFix.afterRedefine(targetClass);
+					} catch (Throwable t) {
+						error("Failed to run InitFix after redefine for " + className, t);
+						InitFix.afterRedefineFailed(targetClass);
+					}
+					remold.ref.HeapFieldWatch.snapshot("after-field-patch", className);
+				}
 				bytecodeCache.put(className, runtimeBytes);
 				sourceBytecodeCache.put(className, sourceBytes);
 				recordCacheLoader(className, targetClass.getClassLoader());
-				try {
-					InitFix.afterRedefine(targetClass);
-				} catch (Throwable t) {
-					error("Failed to run InitFix after redefine for " + className, t);
-					InitFix.afterRedefineFailed(targetClass);
-				}
-				remold.ref.HeapFieldWatch.snapshot("after-field-patch", className);
 				processAnnotations(Collections.singletonList(new ClassDefinition(targetClass, runtimeBytes)));
 				notifyBatchListeners(Collections.singletonList(new ClassDefinition(targetClass, runtimeBytes)),
 					BatchReportScope.finish(Collections.singletonList(className)));
-				info("[DYNAMIC-REDEFINE] Successfully redefined " + className);
+				info("[DYNAMIC-REDEFINE] Successfully redefined " + className
+				     + (twoPhase ? " (two-phase: A -> patch -> C)" : ""));
 				return true;
 			} finally {
 				exitInternalRedefine();

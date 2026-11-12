@@ -101,7 +101,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 加载器集成插件（`plugin-fabric/`） | `FabricHotswapPlugin` 实现 `HotswapPlugin` 的三个通用窗口：`onPremain`（`FabricClassPathGroups`，必须在插件加载后、`init` 前执行）、`onWatchPathsChanged`（`ModJarInspector` 巡检 `run/mods` 残留制品）、`isWatchPathIgnored`（`DevWatchExclusions` 排除 `mods` 目录）；Gradle 侧 `autoFabric` 自动挂载。core 不出现任何加载器专属目录或属性约定 |
 | 写入桥 | `HotswapBridge`（`KIND_CONDITIONAL` / `KIND_FORCE`） |
 | 构造器尾部插桩 | `ConstructorTailInjector`（`core/src/remold/ref/`，纯函数：根构造器 `RETURN` 前注入字段切片；当前两阶段契约下不接线） |
-| 两阶段读穿保护（内部批次路径） | `RemoldAgent.applyTwoPhase` / `redefineStageA`（A→B→C 编排、整组回滚、`isInitialized` 二次检查）；`StageASkeleton.buildWithLiveConstructors`（阶段 A 保留新构造器）；`InitFix.requiresTwoPhase`（只有真正会写的零值暴露字段才触发）；开关 `-Dremold.agent.two_phase=false` |
+| 两阶段读穿保护（内部批次路径 + 动态单类入口） | `RemoldAgent.applyTwoPhase` / `redefineStageA`（A→B→C 编排、整组回滚、`isInitialized` 二次检查）；`RemoldAgent.redefineDynamic` 消费 `InitFix.requiresTwoPhase`，在调用内部同步跑 A→补丁→C（阶段 C 复用现成 `runtimeBytes`，失败按 VM 级/非 VM 级分流）；`StageASkeleton.buildWithLiveConstructors`（阶段 A 保留新构造器）；`InitFix.requiresTwoPhase`（只有真正会写的零值暴露字段才触发）；开关 `-Dremold.agent.two_phase=false` |
 | 哈希语义门控 | `HashSemantics`（`core/src/remold/ref/`，本类内调用图扫 `hashCode`/`equals`/`compareTo` 及其可达方法是否读新增实例字段，只告警不拒绝） |
 | 删除成员的读者分析 | `RemovedMemberReaders`（`core/src/remold/ref/`，纯函数：字段按 JVMS 5.4.3.2、方法按 5.4.3.3 + **5.4.6 向下分派**判"改动后引用会怎样"，输出悬空 / 抽象方法缺失 / 分派转移 / 判不了 / 字段改指向五档） |
 | 读者扫描成本探针 | `tests/src/ReaderScanProbe.java`（`./gradlew :tests:readerScanProbe`，不需要 DCEVM）：常量池扫描 vs 方法体精扫、三档扫描范围的真实成本 |

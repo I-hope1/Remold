@@ -576,7 +576,7 @@ hostKindRefused=18`（指纹不等后由宿主形态翻转拒绝），证明计�
 | on | 9 | 1 | 幽灵化（`oldSlotGhost=true`，`oldSlotInnerPayload=false`） |
 | off | 0 | 0 | 内层体静默顶替（`oldSlotInnerPayload=true`，即错绑形态） |
 
-- 另一条独立证据：门禁**开着**时语料 `totalRefusals=0`，说明门禁在该语料上根本没有触发，
+- 另一条独立证据：门禁**开着**时语料 `totalRefusals=0`，说明门禁在该语料上未产生拒绝（107 次评估均放行），
   与上面"两趟幽灵数相同"互为独立佐证。
 
 成因：由代码分析可知，票据指纹计入 `var` 下标，`-g:none` 后失去调试信息、槽位平移即认不出；**未做隔离实验**。

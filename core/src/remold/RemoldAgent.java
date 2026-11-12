@@ -1983,6 +1983,8 @@ public class RemoldAgent {
 		Map<String, String> targetToRawName = new HashMap<>(changedFiles.size());
 		// 本轮"改了但没生效"的台账：摘要行据此点名跳过了谁（见 RoundSkips）。
 		RoundSkips skips = new RoundSkips();
+		// 本轮因注解默认值变化而整体作废的类（非 null = 事务共退：本批一个类都不重定义）。
+		String annotationDefaultAbort = null;
 		for (Path p : changedFiles) {
 			try {
 				byte[] bc = Files.readAllBytes(p);
@@ -2396,6 +2398,36 @@ public class RemoldAgent {
 					if (oldBytecode != null) {
 						ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytecode, newBytecode);
 						ClassDiffUtil.logDiff(className, diff);
+						String annotationDefaultChange =
+							ClassDiffUtil.describeAnnotationDefaultChange(oldBytecode, newBytecode);
+						if (annotationDefaultChange != null && !annotationDefaultChangeAllowed()) {
+							// 探针读数（JBR 21/25，标准 HotSpot 与 -XX:+AllowEnhancedClassRedefinition）：
+							// 改掉注解类型的默认值后 redefineClasses 会成功，但已加载的消费者类继续读到
+							// 旧默认值，标准 HotSpot 上连之后才加载的消费者也读到旧值。只重定义注解类型
+							// 修不好这一点，所以本轮整体作废（事务共退），要求重启。
+							error("REJECTED: annotation default value changed for " + className + " ("
+								+ annotationDefaultChange + "); classes that are already loaded keep the OLD"
+								+ " default value, so redefining the annotation type cannot take effect."
+								+ " This batch is aborted as a whole (transaction co-rollback, nothing was"
+								+ " redefined) — RESTART required. Explicit override:"
+								+ " -Dremold.agent.annotation_default_change=allow (already-loaded classes"
+								+ " will still keep the old default).");
+							AlignmentTransaction tx = transactions.get(className);
+							if (tx != null) {
+								tx.rollback(true);
+								transactions.remove(className);
+							}
+							skips.add(className, RoundSkips.verdict("ANNOTATION-DEFAULT-CHANGED",
+								annotationDefaultChange,
+								"restart required — already-loaded classes keep serving the old default"));
+							annotationDefaultAbort = className;
+							continue;
+						}
+						if (annotationDefaultChange != null) {
+							warn("[ANNOTATION-DEFAULT] " + className + ": " + annotationDefaultChange
+								+ " — allowed by -Dremold.agent.annotation_default_change=allow; classes that are"
+								+ " already loaded will keep the old default value.");
+						}
 						if (ClassDiffUtil.mustRejectHierarchyChange(diff, isEnhancedHotswapEnabled())) {
 							error("REJECTED: Class hierarchy change detected for " + className + " ("
 								+ ClassDiffUtil.describeHierarchyChange(diff) + ")."
@@ -2493,6 +2525,22 @@ public class RemoldAgent {
 			} catch (Throwable e) {
 				error("Failed to process " + path, e);
 			}
+		}
+
+		// 注解默认值变化的**事务共退**：本轮整体作废（连坐），避免"注解类型换上了新默认值、
+		// 已加载的消费者仍读旧默认值"这种半套状态。这里只清待重定义集合与对齐事务，
+		// 下游的 sourceBytecodeCache 回滚 / 指纹不落账 / 不回队逻辑照常执行（outcome 为空）。
+		if (annotationDefaultAbort != null) {
+			for (AlignmentTransaction tx : new ArrayList<>(transactions.values())) {
+				tx.rollback(true);
+			}
+			transactions.clear();
+			definitions.clear();
+			oldEffectiveBytes.clear();
+			retryCandidates.clear();   // 重试不可能改变已加载类的旧默认值：只提示重启
+			error("[HOTSWAP] Round aborted: annotation default value changed in " + annotationDefaultAbort
+				+ "; no class of this batch was redefined (transaction co-rollback)."
+				+ " RESTART required for the new default to take effect.");
 		}
 
 		// 批量执行重定义（针对已加载类）。
@@ -4895,6 +4943,22 @@ public class RemoldAgent {
 				return true;
 			}
 			ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, runtimeBytes);
+			String annotationDefaultChange =
+				ClassDiffUtil.describeAnnotationDefaultChange(oldBytes, runtimeBytes);
+			if (annotationDefaultChange != null && !annotationDefaultChangeAllowed()) {
+				// 探针读数：注解默认值变化后已加载的消费者类仍读旧默认值（JBR 21/25，含 DCEVM 格）。
+				// 单类入口没有"同批连坐"的对象，拒绝本类即等于整体不重定义（宿主保持旧版）。
+				error("[DYNAMIC-REDEFINE] " + className + ": annotation default value changed ("
+					+ annotationDefaultChange + "); refusing the redefine because classes that are already"
+					+ " loaded keep the OLD default value — RESTART required."
+					+ " Explicit override: -Dremold.agent.annotation_default_change=allow.");
+				return false;
+			}
+			if (annotationDefaultChange != null) {
+				warn("[ANNOTATION-DEFAULT] " + className + ": " + annotationDefaultChange
+					+ " — allowed by -Dremold.agent.annotation_default_change=allow; classes that are"
+					+ " already loaded will keep the old default value.");
+			}
 			if (ClassDiffUtil.mustRejectHierarchyChange(diff, isEnhancedHotswapEnabled())) {
 				error("REJECTED: Class hierarchy change detected for dynamic class " + className + " ("
 					+ ClassDiffUtil.describeHierarchyChange(diff) + ")."
@@ -5092,6 +5156,23 @@ public class RemoldAgent {
 	/** @see EnvironmentProbe#isEnhancedHotswapEnabled() */
 	public static boolean isEnhancedHotswapEnabled() {
 		return EnvironmentProbe.isEnhancedHotswapEnabled();
+	}
+
+	/**
+	 * 注解默认值（{@code AnnotationDefault}）变化的降级通道：<b>默认关闭</b>。
+	 *
+	 * <p>默认行为是 fail-closed：检测到注解默认值变化就拒绝该类的重定义，批量路径还把整轮
+	 * 一起作废（事务共退），并要求重启。只有显式写
+	 * {@code -Dremold.agent.annotation_default_change=allow} 时才放行，且每次都会打
+	 * {@code [ANNOTATION-DEFAULT]} 告警说明"已加载的消费者仍会读到旧默认值"。</p>
+	 *
+	 * <p>之所以必须显式：JVM 探针读数（JBR 21 / JBR 25，标准 HotSpot 与
+	 * {@code -XX:+AllowEnhancedClassRedefinition}）显示 {@code redefineClasses} 会成功，
+	 * 但已加载的消费者类继续读到旧默认值——放过去就是"静默按旧行为走"。</p>
+	 */
+	public static boolean annotationDefaultChangeAllowed() {
+		String value = System.getProperty("remold.agent.annotation_default_change");
+		return value != null && "allow".equalsIgnoreCase(value.trim());
 	}
 
 	/** @see EnvironmentProbe#mustSkipForMissingEnhancedRedefinition(boolean, boolean) */

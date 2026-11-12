@@ -206,14 +206,14 @@ flowchart LR
 
 - JBR 21 DCEVM 的 `param-annotation-removed` 在**同一台机器、同一组启动参数（JBR 21.0.9 + `-XX:+AllowEnhancedClassRedefinition`）、同一探针提交**下连跑 3 次均复现（**3/3 复现，同机同参数**；n=3 不足以支撑更强结论）。
 - **第 2 组读数（重新 `getDeclaredMethods()`）的恢复效果，分粒度、按运行时限定**：
-  - **成员级**（参数注解 / 方法泛型签名 / 字段泛型签名 / 注解位置移动）：三种运行时共 **21 行全部读到新状态**
+  - **成员级**（参数注解 / 方法泛型签名 / 字段泛型签名 / 注解位置移动）：三种运行时共 **21 行均读到新状态**
     （`value=v2-a-much-longer-value`、`{}`、`@Deprecated`、`List<java.lang.Integer>`、`t=Integer`、
     注解移到 `#1` 槽位），且 **R2 无任何异常**；
   - **对照场景**（`control-identical`，字节未变）：3 行读到与重定义前相同的值（本就不该变化）；
   - **类级泛型签名**（`getGenericSuperclass`）：**JBR 25 标准 HotSpot 与 JBR 21 标准 HotSpot 仍读到旧值 `ArrayList<java.lang.String>`**，
     只有 JBR 21 DCEVM刷新为 `ArrayList<java.lang.Integer>`。
   因此"句柄读数的恢复"在三种运行时**不成立**（类级不成立），该结论只写在本节，**不进运行时 WARN**。
-- JBR 25 与 JBR 21 标准 HotSpot 的旧句柄在全部 9 场景均**无异常**，读数为旧值；三组读数之间不一致。
+- JBR 25 与 JBR 21 标准 HotSpot 的旧句柄在 9 个测试场景均**未触发异常**，读数为旧值；三组读数之间不一致。
 - **跨格不一致**：同一场景的旧句柄读数在①②与③之间不同（①②旧值、③新值或抛 `Error`），类级 `getGenericSuperclass()` 只在③刷新。**本主题任何"旧句柄行为"的表述都必须分 JVM 写，不得跨格归纳。**
 
 ### 5.4 灵敏度对照（证明读数链路能看见 `Error`，同时暴露其边界）
@@ -226,7 +226,7 @@ flowchart LR
 | `duplicate-annotation-member` | `getParameterAnnotations` | 无异常（JDK 静默忽略） |
 
 **边界**：四种损坏形态中只有 **2 种**能被本探针捕获，另 2 种被 JDK 静默忽略。因此
-"JBR 25 与 JBR 21 标准 HotSpot 零 `Error`"**只对已测的 9 个场景成立**，不能读成"不存在任何 `Error` 级失败形态"；
+"JBR 25 与 JBR 21 标准 HotSpot 未触发 `Error`"**只对已测的 9 个场景成立**，不能读成"不存在其他 `Error` 级失败形态"；
 探针灵敏度有边界，未覆盖的损坏形态不在此结论范围内。
 两份损坏字节由 ASM 直接生成，异常全部由 JVM / 反射库解析器抛出；探针内没有任何 `throw` 语句，
 该对照**不构成**复现证据。
@@ -244,11 +244,11 @@ flowchart LR
   （含 3 条"驱逐器实际收到哪些类"的用例），**不在**本主题的合流候选里。缺的读数是
   **"已注册缓存（Gson/Jackson/插件）驱逐前读到错误值、驱逐后读到正确值"的前后对照**；
   在该对照取得之前，本主题不主张驱逐范围扩展的任何效果。
-- 能力边界（C4）：驱逐只作用于**已注册**的框架缓存；用户自持的 `Method` 句柄不在其覆盖范围。
+- 缓存驱逐能力边界：驱逐只作用于**已注册**的框架缓存；用户自持的 `Method` 句柄不在其覆盖范围。
   JBR 21 DCEVM 的复现**在检测 + WARN 落到主干之后依旧存在**（同一探针、同一阶段，
   `param-annotation-removed` 旧句柄仍抛 `GenericSignatureFormatError`）——本主题不改变这一点。
 - WARN 文案**不含任何恢复效果陈述**：只写 类名/成员名 + 变化种类 + "旧反射句柄读数不可靠、请勿继续使用"
-  + C4 能力边界（只覆盖已注册缓存）。运行时日志装不下按运行时限定，故两种已观测形态（标准 HotSpot 静默旧值 /
+  + 缓存驱逐能力边界（仅覆盖已注册缓存）。运行时日志装不下按运行时限定，故两种已观测形态（标准 HotSpot 静默旧值 /
   JBR 21 + DCEVM 抛 `GenericSignatureFormatError` 或返回新值）只写在 §5.3 的表里，不进日志。
 
 ### 5.6 检测覆盖范围：**不含类级泛型签名**（未纳入检测范围）
@@ -257,7 +257,7 @@ flowchart LR
 （`ClassNode.fields` / `ClassNode.methods` 的 `Signature` 与参数注解属性）；
 **类级 `ClassNode.signature`（`getGenericSuperclass()` 那一类）不在比较范围内**，因此：
 类级泛型签名变化**未被检测、也不会产生 WARN**。§5.2 表里 `class-generic-signature-change` 一行的
-读数只记录运行时刷新差异，**不对应任何检测能力**。该项登记为 **类级泛型签名未检测 待办**，不得读成"类级已覆盖"。
+读数只记录运行时刷新差异，**不对应检测能力**。该项作为已知未覆盖项留待后续处理，不得读成"类级已覆盖"。
 
 ### 5.7 复现所需的固定输入（N=37 语料可复现）
 

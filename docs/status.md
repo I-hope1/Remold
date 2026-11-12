@@ -58,7 +58,7 @@
 
 ## §0.12 v0.2.7 封版终验读数（前线真机，同一会话未重启）
 
-实测 制品：agent `7778f4ae0ad4b06de886d22e36315985` / plugin-mixin `51b965ea3dfd50bf8392e4043c304a2a`（HEAD `db65bf0`）。
+制品：agent `7778f4ae0ad4b06de886d22e36315985` / plugin-mixin `51b965ea3dfd50bf8392e4043c304a2a`（HEAD `db65bf0`）。
 
 | 路径 | 轮次 | 读数 |
 |:--|:--|:--|
@@ -140,7 +140,7 @@
 
 | 修复 | 状态 | 代码位置 | 验收证据 |
 |:---|:---:|:---|:---|
-| Forge/NeoForge：给已有 `@Mixin` 模板新增 `@Inject` handler 方法 / 新增 `@Unique` 字段时，`reloadMixin` 校验失败（`Conform error ... please restart client`，随后 `ClassInfo$Method.isUnique()` NPE），结构性改动被迫降级为重启 | ✅ | `plugin-forge` `ForgeClassInfoSync`（跨 ClassLoader 反射成员同步 + 回滚）；`ForgeMixinHotSwap.reload`（reload 前同步，拒绝时回滚） | 单测 `ForgeClassInfoSyncTest` 4/4：reload 调用当时新成员已可解析、拒绝后成员集合回到基线、Agent 侧 `ClassNode` 签名错配时零改动降级、缺 `MixinInfo` 不阻断 reload；变异检查：反向应用实现 diff → 用例变红（`.battle` 证据 变异检查记录，已恢复）。真实 Forge 1.21.1 E2E：红基线 `VERDICT RED`（stage1 reload 被拒：`Conform error ... isUnique() ... method is null`；新 handler 从不执行、新 `@Unique` 字段不可见）→ 修复后 `VERDICT GREEN`（新增 handler 每调用 +1、新增 `@Unique` 读到初值 456、既有 handler/`@Unique` 保持）；证据 `tests/fabric-mixin-probe/forge-classinfo/evidence/forge-1.21.1-{baseline,after-fix}.txt`，判定器自证 `verify-evidence.sh`（4 个合成样本区分 RED / GREEN / INVALID） |
+| Forge/NeoForge：给已有 `@Mixin` 模板新增 `@Inject` handler 方法 / 新增 `@Unique` 字段时，`reloadMixin` 校验失败（`Conform error ... please restart client`，随后 `ClassInfo$Method.isUnique()` NPE），结构性改动被迫降级为重启 | ✅ | `plugin-forge` `ForgeClassInfoSync`（跨 ClassLoader 反射成员同步 + 回滚）；`ForgeMixinHotSwap.reload`（reload 前同步，拒绝时回滚） | 单测 `ForgeClassInfoSyncTest` 4/4：reload 调用当时新成员已可解析、拒绝后成员集合回到基线、Agent 侧 `ClassNode` 签名错配时零改动降级、缺 `MixinInfo` 不阻断 reload；变异检查：反向应用实现 diff → 用例变红（实现回退后用例变红，已恢复）。真实 Forge 1.21.1 E2E：红基线 `VERDICT RED`（stage1 reload 被拒：`Conform error ... isUnique() ... method is null`；新 handler 从不执行、新 `@Unique` 字段不可见）→ 修复后 `VERDICT GREEN`（新增 handler 每调用 +1、新增 `@Unique` 读到初值 456、既有 handler/`@Unique` 保持）；证据 `tests/fabric-mixin-probe/forge-classinfo/evidence/forge-1.21.1-{baseline,after-fix}.txt`，判定器自证 `verify-evidence.sh`（4 个合成样本区分 RED / GREEN / INVALID） |
 | NeoForge 端到端 | ✅ | 与 Forge 共用 `ModLauncherMixinBridge` / `ForgeMixinHotSwap` / `ForgeClassInfoSync` | **已观测**：NeoForge 21.1.265 dev `runServer`（ModDevGradle，原生 `META-INF/neoforge.mods.toml [[mixins]]` 注册）红基线 `VERDICT RED` → 修复后 `VERDICT GREEN`，业务终局为新 handler 每调用 +1、新 `@Unique` 读到初值 456；详见 §0.4 与 `tests/neoforge-mixin-probe/evidence/`。**未验证**：生产 installer 启动路径与 NeoForge 26.x（FML 10+）代际，见 §4.1 候选清单 |
 
 
@@ -148,8 +148,8 @@
 
 | 修复 / 变更 | 状态 | 代码位置 | 验收证据 |
 |:---|:---:|:---|:---|
-| ClassInfo 成员同步的**双实现**（Fabric `MixinClassInfoSync` / Forge `ForgeClassInfoSync` 各自一套算法）收敛为单一引擎；两侧只留薄适配 | ✅ | `core/src/remold/reflect/ClassInfoMemberSync.java`（引擎）；`plugin-mixin/src/remold/mixin/MixinClassInfoSync.java`、`plugin-forge/src/remold/forge/ForgeClassInfoSync.java`（薄适配） | 引擎契约 `ClassInfoMemberSyncTest` 5/5（含**新增**「半程失败回滚」用例——旧 Fabric 实现在该用例下会残留已补入成员）；Fabric 适配器降级 `MixinClassInfoSyncTest` 2/2；Forge 跨 ClassLoader 接线 `ForgeClassInfoSyncTest` 4/4；全量 JUnit 469 项 0 skipped；变异检查：反向应用实现 diff → 用例变红（变异检查记录，已恢复）；**真实 Forge 1.21.1 回归**：重构后同一 E2E `VERDICT GREEN`（`tests/fabric-mixin-probe/forge-classinfo/evidence/forge-1.21.1-after-ssot-refactor.txt`） |
-| NeoForge 21.1（ModLauncher 11.0.5 + sponge-mixin 0.16.4）Mixin 模板热更：新增 `@Inject` handler / 新增 `@Unique` 字段，**走加载器原生 `[[mixins]]` 注册** | ✅ | `plugin-forge` 现有 `ForgeMixinHotSwap` / `ForgeClassInfoSync`（薄适配）；探针 `tests/neoforge-mixin-probe/` | NeoForge **21.1.265**（MC 1.21.1，ModDevGradle 2.0.148，Gradle 8.12，JBR 21）：红基线（禁用同步的 plugin jar）`VERDICT RED`——stage1 reload 被拒 `Conform error ... ClassInfo$Method.isUnique() ... "method" is null`，stage2 `re-weaving failed`；修复后 `VERDICT GREEN`——日志正向出现 `Mixin class-info sync: ... addedMethods=1`（stage1）与 `addedFields=1`（stage2），业务终局：新 handler 每调用 +1、新 `@Unique` 读到初值 456、既有成员保持；`mixin_registration=neoForge-native META-INF/neoforge.mods.toml [[mixins]]`，全程无 `MixinEnvironment::addConfiguration` 手动注册；判定器 6 个合成 fixture（含 degraded / manual-registration 违规样本）自证判定力，验收 `verify-evidence.cmd` exit 0；变异检查：回退 `Verdict` 判定逻辑 → 验收 exit 1（变异检查记录）。证据 `tests/neoforge-mixin-probe/evidence/neoforge-21.1-{baseline-red,after-fix}.txt` |
+| ClassInfo 成员同步的**双实现**（Fabric `MixinClassInfoSync` / Forge `ForgeClassInfoSync` 各自一套算法）收敛为单一引擎；两侧只留薄适配 | ✅ | `core/src/remold/reflect/ClassInfoMemberSync.java`（引擎）；`plugin-mixin/src/remold/mixin/MixinClassInfoSync.java`、`plugin-forge/src/remold/forge/ForgeClassInfoSync.java`（薄适配） | 引擎契约 `ClassInfoMemberSyncTest` 5/5（含**新增**「半程失败回滚」用例——旧 Fabric 实现在该用例下会残留已补入成员）；Fabric 适配器降级 `MixinClassInfoSyncTest` 2/2；Forge 跨 ClassLoader 接线 `ForgeClassInfoSyncTest` 4/4；全量 JUnit 469 项 0 skipped；变异检查：反向应用实现 diff → 用例变红（实现回退后用例变红，已恢复）；**真实 Forge 1.21.1 回归**：重构后同一 E2E `VERDICT GREEN`（`tests/fabric-mixin-probe/forge-classinfo/evidence/forge-1.21.1-after-ssot-refactor.txt`） |
+| NeoForge 21.1（ModLauncher 11.0.5 + sponge-mixin 0.16.4）Mixin 模板热更：新增 `@Inject` handler / 新增 `@Unique` 字段，**走加载器原生 `[[mixins]]` 注册** | ✅ | `plugin-forge` 现有 `ForgeMixinHotSwap` / `ForgeClassInfoSync`（薄适配）；探针 `tests/neoforge-mixin-probe/` | NeoForge **21.1.265**（MC 1.21.1，ModDevGradle 2.0.148，Gradle 8.12，JBR 21）：红基线（禁用同步的 plugin jar）`VERDICT RED`——stage1 reload 被拒 `Conform error ... ClassInfo$Method.isUnique() ... "method" is null`，stage2 `re-weaving failed`；修复后 `VERDICT GREEN`——日志正向出现 `Mixin class-info sync: ... addedMethods=1`（stage1）与 `addedFields=1`（stage2），业务终局：新 handler 每调用 +1、新 `@Unique` 读到初值 456、既有成员保持；`mixin_registration=neoForge-native META-INF/neoforge.mods.toml [[mixins]]`，全程无 `MixinEnvironment::addConfiguration` 手动注册；判定器 6 个合成 fixture（含 degraded / manual-registration 违规样本）自证判定力，验收 `verify-evidence.cmd` exit 0；变异检查：回退 `Verdict` 判定逻辑 → 验收 exit 1。证据 `tests/neoforge-mixin-probe/evidence/neoforge-21.1-{baseline-red,after-fix}.txt` |
 | NeoForge 深反射的 JPMS 边界 | 🔶 | 产品侧诊断：`ClassInfoMemberSync` / `ModLauncherMixinBridge` 在访问被拒时打印精确 `--add-opens` 参数 | **已观测**：NeoForge 21.1 dev 运行时（`ModDevGradle runServer`）全程无 `InaccessibleObjectException`，`add_opens=0` 也能完成深反射（sponge-mixin 在 legacy classpath，不在 `-p` 模块路径）。**未验证**：生产 installer 启动路径（`unix_args.txt`）、NeoForge 26.x（FML 10+，无 ModLauncher）——那两处的模块归属必须重测，`--add-opens` 要求不得从 dev 运行外推 |
 | Fabric 1.21.1（KnotServer）SSOT 重构后回归 | ✅ | `plugin-mixin` `MixinClassInfoSync`（薄适配）+ core 引擎 | 既有 `@Inject` 自演化探针**原样重跑**（未改探针）：`RESULT PASS failures=[]`；A2 取消标志演化、B2 handler 换目标方法、C2 **新增 `@Inject` handler**、C3 再移除该 handler 全部 PASS；日志出现 `[Mixin] Mixin class-info sync: ...EvoBMixin addedMethods=1` 与 `...EvoCMixin addedMethods=1`，无 `Conform error`；证据 `tests/fabric-mixin-probe/evidence/inject-evolution-after-ssot.txt`（agent sha256 `f6225c68…`、plugin sha256 `956b5a10…`） |
 | 发版工具链：JitPack 坐标族与模板解析自洽 | ✅ | `gradle-plugin/build.gradle`（jitpack 发布补 `version = "v${version}"`）、`panama/build.gradle`（补 jitpack 发布）、两份模板 `settings.gradle.kts` 与 `remold.gradle(.kts)` shim（坐标统一为 `com.github.I-hope1.Remold:*:v<ver>`）、根 `build.gradle` 的 `verifyReleaseCoordinates` | v0.2.5 发版时暴露：`gradle-plugin` 的 jitpack 发布只有裸版本 `0.2.5`，而 shim/模板要 `v0.2.5`；同时发布侧组名大小写（`I-hope1`）与消费侧（`I-Hope1`）不一致，在 Gradle module metadata 校验下直接报 `bad group`。修复后 `publishToMavenLocal verifyReleaseCoordinates` 8/8 模块两套坐标齐全；两份模板 `--offline compileJava` PASS（Fabric 1m05s、Mindustry 3s）；`./gradlew check` 469 项 0 skipped。远端不受影响：JitPack 对 `0.2.5` 与 `v0.2.5` 均返回 200（已实测），已发布的 v0.2.5 资产无需重传 |
@@ -189,7 +189,7 @@
 | 修复 / 变更 | 状态 | 代码位置 | 验收证据 |
 |:---|:---:|:---|:---|
 | 热更管线自身组件在类链接期抛 `NoClassDefFoundError`（客户端原文 `[Mixin] Mixin hot-swap handler unavailable: NoClassDefFoundError: LoadedTargetSuppressor`），使 Mixin handler 的成功与失败分支同时失效 | ✅ | `core/src/remold/reflect/mixin/MixinConfigContext`（抑制器改为 `Function<Collection<String>,Object>` + `Consumer<Object>`；删除 `LoadedTargetSuppressor`）；`plugin-mixin` `MixinConfigDiff`/`NewMixinRegistrar`、`plugin-forge` `ForgeMixinConfigDiff`/`ModLauncherClassTrackerSpoof` 只传方法引用 | **已观测**：`MixinPluginClassLinkageTest` 机械扫描已编译插件类常量池，断言零引用已废除的 core 类型且不 `implements`/`extends` 任何 core mixin 类型（正向对照 + 变异：恢复硬链接 → 精确点名 `plugin-mixin/remold/mixin/MixinConfigDiff.class` 变红）；`NewMixinRegistrarFailClosedTest` 覆盖「抑制器缺失/返回 null/抛异常 → 放弃登记并输出定向诊断、异常不外泄」。**已知残余**：plugin/core 版本错位仍会退化为 `NoSuchMethodError`（`MixinConfigContext` 构造签名不匹配），该路径由 `RemoldAgent.notifyAssetChanges` 的逐插件 `catch` 兜住并记 error；两侧必须同版本发布 |
-| Mixin 注入方法内**首次**新增匿名类 → reload 崩溃：`Error loading class: Outer$1 (ClassNotFoundException)` 随后 `Cannot invoke "ClassInfo.isProbablyStatic()" because "innerClass" is null` | ✅ | `plugin-mixin` `MixinBytecodeOverlay`（安装 `IMixinService` 代理，只对显式登记的内部名提供字节，其余回落宿主 provider）、`MixinHotSwap.handleIfMixin`（reload 前登记内部类字节并驱逐上游 `ClassInfo.cache` 负缓存） | **已观测（单测/字节码级）**：`MixinInnerClassHotSwapTest` 7 用例（归属判定、嵌套名推导、`lookup` 点分/内部名归一、负缓存驱逐按 `containsKey` 计数）；3 个人工变异（去掉 schema 门 / 去掉 passthrough 过滤 / 去掉名字归一）全部击杀并恢复复绿（实测记录、实测记录、实测记录）。**上游机制依据**（sponge-mixin 0.15.5+mixin.0.8.7 源码包）：`ClassInfo.forName` 走 `MixinService.getService().getBytecodeProvider()`，失败把 `null` 写进 `ClassInfo.cache` 且永不重试。**真实 Fabric 1.21.1 KnotServer E2E**（`tests/fabric-mixin-probe/anon/`，mod 走 `run/mods` jar 加载、Gradle 输出不在运行期 classpath）：修复前 S1 `poke` 停在 `hook-s0`，日志为 `Error loading class: ...AnonTargetMixin$1 (ClassNotFoundException)` + `innerClass is null`（RED）；修复后 S1 `poke=anon-v1`、`RESULT: GREEN`（证据 `evidence/anon-r3r5-{red,green}.txt`） |
+| Mixin 注入方法内**首次**新增匿名类 → reload 崩溃：`Error loading class: Outer$1 (ClassNotFoundException)` 随后 `Cannot invoke "ClassInfo.isProbablyStatic()" because "innerClass" is null` | ✅ | `plugin-mixin` `MixinBytecodeOverlay`（安装 `IMixinService` 代理，只对显式登记的内部名提供字节，其余回落宿主 provider）、`MixinHotSwap.handleIfMixin`（reload 前登记内部类字节并驱逐上游 `ClassInfo.cache` 负缓存） | **已观测（单测/字节码级）**：`MixinInnerClassHotSwapTest` 7 用例（归属判定、嵌套名推导、`lookup` 点分/内部名归一、负缓存驱逐按 `containsKey` 计数）；3 个人工变异（去掉 schema 门 / 去掉 passthrough 过滤 / 去掉名字归一）全部击杀并恢复复绿。**上游机制依据**（sponge-mixin 0.15.5+mixin.0.8.7 源码包）：`ClassInfo.forName` 走 `MixinService.getService().getBytecodeProvider()`，失败把 `null` 写进 `ClassInfo.cache` 且永不重试。**真实 Fabric 1.21.1 KnotServer E2E**（`tests/fabric-mixin-probe/anon/`，mod 走 `run/mods` jar 加载、Gradle 输出不在运行期 classpath）：修复前 S1 `poke` 停在 `hook-s0`，日志为 `Error loading class: ...AnonTargetMixin$1 (ClassNotFoundException)` + `innerClass is null`（RED）；修复后 S1 `poke=anon-v1`、`RESULT: GREEN`（证据 `evidence/anon-r3r5-{red,green}.txt`） |
 | 只改已加载匿名类体 → 目标类重织入静默 `[DYNAMIC-REDEFINE] no-op`、匿名类仍跑旧版 | ✅ | `plugin-mixin` `MixinInnerClassSupport`（内部类归属/嵌套名纯函数）、`MixinInnerClassHotSwap`（按 `InnerClassGenerator` 稳定唯一名重新生成合成内部类并 `redefineClasses`）、`MixinHotSwap.handleInnerClassChange`（只改 `Outer$N` 时回到外层 Mixin 重跑） | **已观测（单测/字节码级）**：成员 schema 判定区分「只改方法体」与「增删字段/方法/构造器」，后者给出点名成员的指向性诊断并拒绝重定义（不借 DCEVM 绕过布局门）；`handleInnerClassChange` 在只改 `Outer$N` 时把字节登记进覆盖层并回到外层 Mixin。**上游机制依据**：`InnerClassGenerator.getUniqueReference` 把 `Outer$1` 映射为 `Target$Anonymous$<uuid>`，`isLoaded()` = `loadCounter>0`，已加载的合成内部类不会被重新生成。**真实 E2E**：修复前 S2 外层字节 sha256 前后相同、仅 `$1` 变体，`poke` 仍 `anon-v1` 且日志为 `[DYNAMIC-REDEFINE] no-op`（RED）；修复后 S2 `poke=anon-v2`（GREEN），S3 去触发对照无重定义、值稳定 |
 
 > **本轮观测存档（仍开放项已并入 §0.10 统一清单，不在此重复）**：①「批次落在启动期挂死」同族——探针在 MC 启动期（`Done (` 之前）落批次时曾出现 JVM 挂死（probe 线程无 tick）；本轮把「合成内部类重定义」从桥接线程移到批次之后的 worker 线程，消除了同一族挂死（桥接线程内 `redefineClasses` 会让 KnotServer 线程停摆，实测：S1b 之后 tick 全停）。启动期窗口本身未单独隔离，探针改为等 `Done (` 后再触发；窗口保护见 §0.9/§0.10 的启动门闩与批次看门狗。② 同一批次里模板本身与它的内部类都会被问一次，模板第一次 reload 后按字节相等跳过第二次（`alreadyReloaded`），因此内部类热更只做一次；若两者字节都变，仍会按「重新登记内部类 + 一次 reload」处理（良性幂等）。
@@ -202,7 +202,7 @@
 
 | 修复 / 变更 | 状态 | 代码位置 | 验收证据 |
 |:---|:---:|:---|:---|
-| ANON_ALIGN 同形匿名类 N-to-1 歧义：同一方法内两个同接口同结构的匿名类让 Tier 3/4 双向唯一失效，编辑被迫孤儿化（客户端 R2b：`topology-equal candidates 2 -> 2, topology-decided 0`），字段持有的存活实例继续跑旧码 | ✅ | `core/src/remold/AnonClassAligner.java`（Tier 3.5 体相似度、Tier 4.5 liveness 兜底、点名诊断、`findHoldingFields`） | **单测**：`AnonClassAmbiguityTest` 17/17（重编号哈希不变、体相似度口径、2×2 歧义兜底、存活阻断、字段持有者点名；配对数按 `scanVisibleLive=` 口径诊断；§0.11 新增 4 例文案/持有者审计用例）；**变异**：三道人工变异全部击杀并复绿（实测记录 liveness 兜底、实测记录 身份语义、实测记录 字面量入 token）；**真实 KnotServer**：S6 `s6a=s6-v1 → s6b=s6-v2` GREEN（重编号的同形匿名类被配对并原地重定义，字段持有的存活实例同步更新），S4 `held-v1 → held-v2` GREEN。**按裁决刻意保留的分支**：两侧都只改字面量（体相似度打平）+ 旧类有存活实例 → 4.5 拒不动手，孤儿化并输出点名诊断（旧类名 + `scanVisibleLive=1` + 可能持有字段 + `@RemoldReinit` 逃生舱），由 `liveInstancesBlockTheFallback` 守住。strict 模式语义未动 |
+| ANON_ALIGN 同形匿名类 N-to-1 歧义：同一方法内两个同接口同结构的匿名类让 Tier 3/4 双向唯一失效，编辑被迫孤儿化（客户端 R2b：`topology-equal candidates 2 -> 2, topology-decided 0`），字段持有的存活实例继续跑旧码 | ✅ | `core/src/remold/AnonClassAligner.java`（Tier 3.5 体相似度、Tier 4.5 liveness 兜底、点名诊断、`findHoldingFields`） | **单测**：`AnonClassAmbiguityTest` 17/17（重编号哈希不变、体相似度口径、2×2 歧义兜底、存活阻断、字段持有者点名；配对数按 `scanVisibleLive=` 口径诊断；§0.11 新增 4 例文案/持有者审计用例）；**变异**：三道人工变异全部击杀并复绿（liveness 兜底、身份语义、字面量入 token 三处变异）；**真实 KnotServer**：S6 `s6a=s6-v1 → s6b=s6-v2` GREEN（重编号的同形匿名类被配对并原地重定义，字段持有的存活实例同步更新），S4 `held-v1 → held-v2` GREEN。**按裁决刻意保留的分支**：两侧都只改字面量（体相似度打平）+ 旧类有存活实例 → 4.5 拒不动手，孤儿化并输出点名诊断（旧类名 + `scanVisibleLive=1` + 可能持有字段 + `@RemoldReinit` 逃生舱），由 `liveInstancesBlockTheFallback` 守住。strict 模式语义未动 |
 | Mixin 生成合成类 `Target$Anonymous$<uuid>` 的元数据不可达：`HierarchyTreeOracle.readClassBytes` 只查 `bytecodeCache` 与 classpath 资源，两者皆空 → `Nest scan incomplete`（Nest 判定降级）且 `InitFix` 构造器 protected 可见性判定返回 null → `Field init patch refused ... cannot determine protected status of constructor` | ✅ | `core/src/remold/BytecodeSources.java`（新，登记口）；`HierarchyTreeOracle.readClassBytes`（接线）；`InitFix`（三处拒绝 + Nest 告警的归因文案）；`plugin-mixin` `MixinInnerClassHotSwap`（生成成功后回灌） | **已观测（单测/字节码级）**：`NestBytecodeSourcesTest` 10/0（登记前 `nest member metadata unavailable` → 登记后成功；unregister 回落；两种构造器可见性判定；plugin 回灌路径）；**变异**：去掉 `BytecodeSources.lookup` 接线 killed（4 条行为性断言红）、去掉 plugin 回灌 killed（回灌用例红）；真实探针里 `Nest scan incomplete` 与 `Field init patch refused` 两条告警**已带上归因文案**（点名"织入期生成的合成内部类，需要 `BytecodeSources` 回灌"）。**后续收口**：S7 的 RED 已由 §0.10 的 `refeedForTarget`（提前生成 + 回灌）关闭，S7 `null → s7-v1`；`BytecodeSources` 常驻内存无上限仍在 §0.10 统一清单 |
 | MC 启动期落批次导致 JVM 挂死（`Done (` 之前类加载 + Mixin 转换高频并发） | 🔶 | `core/src/remold/StartupGate.java`、`core/src/remold/BatchWatchdog.java`、`core/src/remold/RemoldAgent.triggerDueHotswap` 漏斗接线、`api/src/remold/HotswapPlugin.isHostReady()` | **已观测（单测）**：`remold.startup.*` 19 例（该轮读数；收口后为 30 例、见 §0.10；门闩状态机、未就绪不落批次、就绪后触发一次、看门狗超阈值才 dump 且同批次只一次、`isHostReady` 默认 true 时行为不变）；**变异**：反打 `RemoldAgent` 修复 diff killed（5 条 wiring 断言红），另两次外科变异（门闩恒真 → 4 红、看门狗去 once → 1 红）均已恢复。**后续进展**：`plugin-fabric` 已实现 `HostReadinessProbe`（见 §0.10，真机未验证）；`plugin-forge` 侧仍未实现，实际游戏里门闩仍可能"首次触发即放开"；**精确挂死线程栈仍未抓到**——看门狗即为下一次复发的取证器 |
 | 探针仪器扩展（S4 长生命周期字段持有 / S5 `@Unique private` 访问 / S6 1→2 重编号 / S7 字段初始化器构造器可见性） | ✅ | `tests/fabric-mixin-probe/anon/`（`run-anon.sh` + 6 个新 stage + `ANON_EXPECT` 模式 + 独立证据文件） | 真实 KnotServer 读数（基线代码）：S4 GREEN、S5 GREEN、S6 RED、S7 RED；合入 E 后 **S6 转 GREEN**；S3 去触发对照全程稳定。**实证回答**：`Nest scan incomplete` 期间 `@Unique private` 字段/方法访问**仍然正确**（S5 终局值一致）——说明该元数据缺失只影响 Remold 自身的安全门视图，不影响 JVM 侧 nest 访问控制。**结局**：S7 的红基线由 §0.10 的 `refeedForTarget` 关闭，S0~S7 现全绿（`run-anon.sh` exit 0 / `EXT_GREEN=1`） |
@@ -213,7 +213,7 @@
 
 | 修复 / 变更 | 状态 | 代码位置 | 验收证据 |
 |:---|:---:|:---|:---|
-| **S7 时序缺口**（§0.9 残余风险 1）：`InitFix` 在目标类本次 redefine 内部就要读 `<Target>$Anonymous$<hash>.<init>` 的 protected 状态，而 Mixin 只在织入期登记、字节要等首次加载才生成 → 字段初始化 patch 被 fail-closed 拒绝 | ✅ | `plugin-mixin` `MixinInnerClassHotSwap.refeedForTarget`（目标织入后按 `InnerClassGenerator` 的稳定唯一名**提前生成**该目标的全部合成内部类并回灌 `BytecodeSources`）+ `MixinReWeaver.reweave` 接线 | **真实 KnotServer 全绿**：`run-anon.sh` **exit 0 / `EXT_GREEN=1`**，S7 `s7=null → s7=s7-v1`（S7c 对照稳定），S0~S6 全部保持；**变异**：回退 `MixinReWeaver` 接线 → 基线 exit 0 → 变异 exit 3（变异检查记录），恢复 OK。**未放宽任何安全门**：字节仍不可得时照旧 fail-closed；生成后把 `InnerClassInfo.loadCounter` 还原，避免"假已加载"让平台跳过真正的 defineClass |
+| **S7 时序缺口**（§0.9 残余风险 1）：`InitFix` 在目标类本次 redefine 内部就要读 `<Target>$Anonymous$<hash>.<init>` 的 protected 状态，而 Mixin 只在织入期登记、字节要等首次加载才生成 → 字段初始化 patch 被 fail-closed 拒绝 | ✅ | `plugin-mixin` `MixinInnerClassHotSwap.refeedForTarget`（目标织入后按 `InnerClassGenerator` 的稳定唯一名**提前生成**该目标的全部合成内部类并回灌 `BytecodeSources`）+ `MixinReWeaver.reweave` 接线 | **真实 KnotServer 全绿**：`run-anon.sh` **exit 0 / `EXT_GREEN=1`**，S7 `s7=null → s7=s7-v1`（S7c 对照稳定），S0~S6 全部保持；**变异**：回退 `MixinReWeaver` 接线 → 基线 exit 0 → 变异 exit 3，恢复 OK。**未放宽任何安全门**：字节仍不可得时照旧 fail-closed；生成后把 `InnerClassInfo.loadCounter` 还原，避免"假已加载"让平台跳过真正的 defineClass |
 | **字段持有者点名补全**（§0.9 残余风险 5）：精确描述符只能命中合成字段（`this$0`/`val$o`），宿主用户字段必然声明为父类型/接口（`Supplier HELD6`）→ 告警误报"无宿主字段持有" | ✅ | `core/src/remold/AnonClassAligner.java` `findHoldingFields` 三层退化：精确描述符(proven) → 赋值流 `NEW <anon>→<init>→PUTFIELD/PUTSTATIC`(proven，`putfield this$0/val$*` 不误报) → 直接父类型/接口描述符(candidate)；新增 4 参重载返回 `HoldingFields{proven, candidates}`，旧 `List<String>` 契约保持不变 | **单测**：`AnonClassAmbiguityTest` 13 例（接口类型持有必被点名、赋值流 proven、合成字段仍命中、无关系字段不得乱点名）；**变异 5/5 killed**（去候选兜底、去赋值流、去精确层、置空解析器、放宽为"任意引用字段"各自打中对应用例）；告警文案区分 `proven by assignment flow` 与 `candidate (supertype/interface)` |
 | **看门狗入口覆盖**（§0.9 残余风险 2）：此前只包住防抖 Class 批次 | ✅ | `core/src/remold/BatchWatchdog.java`（新增 `enter/exit/current` 作用域 API：ThreadLocal + 深度计数，嵌套复用同一实例；`armedWatchdogs()` 守"一个批次最多一个 armed"）+ `RemoldAgent.processChanges` 的 `try/finally`；`retransformLoaded` 自挂作用域；`runClassBatch` 旧包裹移除 | `remold.startup.*` 30 例 0 失败；**变异 4/4 killed**（去 processChanges 挂点 → 4 红；`runClassBatch` 再独立 arm → 2 红；UNKNOWN→false → 3 红；`ticks>0` 恒 READY → 1 红） |
 | **`plugin-fabric` 就绪门闩**（§0.9 残余风险 3） | 🔶 | `plugin-fabric` `HostReadinessProbe` + `FabricHotswapPlugin.isHostReady()`：服务端 `MinecraftServer.getServer()` + tick 计数、客户端 `getInstance` + `world/level` 非空 → READY；探测不到一律 UNKNOWN → **返回 true 并按已就绪处理**（只打一条 info），就绪单向缓存 | 单测用替身覆盖三种判定（`FabricHostReadinessTest`）；**未验证**：真实 KnotServer/客户端的访问器名（`getTicks`/`getTickCount`、`world`/`level`）无法在 `.sources/`（仅镜像 Mindustry/Arc）核验，真机未跑 |
@@ -714,27 +714,27 @@
 | 物理偏移稳定性与漂移探针 (OffsetStabilityProbe) | ✅ | `tests/src/OffsetStabilityProbe.java`、`tests/build.gradle`（任务 `offsetStabilityProbe`） | JBR 21.0.9 本机 **47/47 断言通过**（A1~A4 单类布局规律/空洞填补/类型重排、B1~B3 继承体系漂移步长、C1~C2 VarHandle 错位破坏、D1~D2 使用方 C2 逆优化与重编译恢复、E1~E2 Field 与 MethodHandle 访问器自愈边界）；与 `LayoutPredictor` 及 `SuperclassDriftGate` 形成事前预测阻断闭环 |
 
 > **事实③（`db74eec` 中 3 参 `<init>` 存在却 `NoSuchMethodError`）**：**不再追查、未闭合**。
-> **`newlyNull=230` 的口径**：实测 在该客户端、该类、该序列下，对已加载合成类做字段表变化的 `redefine`，
+> **`newlyNull=230` 的口径**：在该客户端实测、该类、该序列下，对已加载合成类做字段表变化的 `redefine`，
 > 至少 3 次独立运行重复出现 `newlyNull=230`（双通道 `agree=1220 / conflict=0`）；底层 `ModifyInstances`
-> 机理为 由代码分析可知（未直接观测）。
+> 机理系由代码分析得出（未直接观测）。
 > **值类型直方图归因**：`230 个具名 Record 类值变 null、14 个隐藏类 Lambda 值幸存` 为 实测；
 > “这些实例由 `KnotClassLoader` 加载”“`Util.allOf` 单元素分支”为 由代码分析可知。
-> **P2 待验证假设（未实现）**：`schemaHash` 命名新合成类——schema 变化时用 `defineClass` 加载**新类名**，
+> **待验证方向（未实现）**：`schemaHash` 命名新合成类——schema 变化时用 `defineClass` 加载**新类名**，
 > 宿主只做 body-only redefine；预注册判据：新名类加载 + 宿主 body-only redefine 下 `newlyNull=0`。
 
 ## §0.15 lambda 兜底配对改 fail-closed
 
-| 项 | 状态 | 证据等级 |
+| 项 | 状态 | 验证与说明 |
 |:--|:--|:--|
-| L5 静默错绑（体内加内层 lambda → 旧实例跑成内层逻辑、无 WARN）已转为 `BODY_MISMATCH` WARN + 拒绝配对 + 旧名幽灵化 + 新名避障 | 已拦截 | 覆盖用例：`PassBTest`（语料 N=37 与嵌套 lambda 阳性对照）、`LineNumberDifferentialTest`（幽灵归因契约） |
-| 方法体指纹归一化：常量按值、引用按 `owner+name+desc`、局部槽按首现序、标签按首引用序、可折叠算式 | 已实现 | 实测：语料 N=37 中 31 个类触发兜底门禁，评估 107 次、107 次进入 `bodyHash` 比对且均相等放行、拒绝 0 次，同源变换误报 0/107；另有人造重排 4 类各 n=1 |
-| 信息论边界：删一个 lambda 并在同一次保存里新增一个 javac 恰好复用同编号、且宿主同名的 lambda，与原地更新在字节码层不可区分 | 未解决 | 由代码分析可知；缓解只有名字/编号漂移这类间接信号 |
-| Pass B 覆盖面收窄：纯搬迁先被 Step 1 吃掉，Pass B 只覆盖"体等价但票不同" | 已登记 | 实测 |
-| `stats.bodyMismatchRefusals` 是**逐趟计数**，不是拒绝次数 | 已登记 | 实测 |
-| 槽位平移幽灵：`-g:none` + 槽位整体平移，语料 N=37 中 9 类出现幽灵、共 23 桩（= 8/30、22 桩 + `plugin-forge` 的 `ForgeMixinHotSwap` 1 类 1 桩） | 已结案：`gate=on/off` 两趟 37 行逐字节相同，机制为语料上 107 次门禁评估均放行（0 拒绝），关掉门禁同样放行，故输出相同 | 实测；成因"票据指纹计入 `var` 下标"为 由代码分析可知，未做隔离实验 |
-| 允许幽灵参与匹配的变异体在门禁开启后不可被击杀 → 转门禁屏蔽集 + `D==0` 哨兵；哨兵与具名用例是**报警不是防线**，Pass B 两处仅靠门禁 | 已登记 | 由代码分析可知 |
-| 语料范围 | N=37：`core/src`+`api/src`（30/258，合并编译）、`plugin-fabric/src`（3/7）、`plugin-mixin/src`（2/23）、`plugin-forge/src`（2/12） | 实测 |
-| 语料缺口 | `plugin-arc/src`（Mindustry 编译期制品非纯 class 包，缺注解处理器，javac 解析即失败）、`tests/`、`gradle-plugin/` | 实测 |
+| 体内新增嵌套 lambda 导致的静默错绑（旧实例跑成内层逻辑、无 WARN）已转为 `BODY_MISMATCH` WARN + 拒绝配对 + 旧名幽灵化 + 新名避障 | 已拦截 | 覆盖用例：`PassBTest`（语料 N=37 与嵌套 lambda 阳性对照）、`LineNumberDifferentialTest`（幽灵归因契约） |
+| 方法体指纹归一化：常量按值、引用按 `owner+name+desc`、局部槽按首现序、标签按首引用序、可折叠算式 | 已实现 | 语料 N=37 中 31 个类触发兜底门禁，评估 107 次、107 次进入 `bodyHash` 比对且均相等放行、拒绝 0 次，同源变换误报 0/107；另有人造重排 4 类各 n=1 |
+| 信息论边界：删一个 lambda 并在同一次保存里新增一个 javac 恰好复用同编号、且宿主同名的 lambda，与原地更新在字节码层不可区分 | 未解决 | 代码分析结论：缓解只有名字/编号漂移这类间接信号 |
+| Pass B 覆盖面收窄：纯搬迁先被 Step 1 吃掉，Pass B 只覆盖"体等价但票不同" | 已登记 | 由配对统计观察得出 |
+| `stats.bodyMismatchRefusals` 是**逐趟计数**，不是拒绝次数 | 已登记 | 由计数实现观察得出 |
+| 槽位平移幽灵：`-g:none` + 槽位整体平移，语料 N=37 中 9 类出现幽灵、共 23 桩（= 8/30、22 桩 + `plugin-forge` 的 `ForgeMixinHotSwap` 1 类 1 桩） | 已结案：`gate=on/off` 两趟 37 行逐字节相同，机制为语料上 107 次门禁评估均放行（0 拒绝），关掉门禁同样放行，故输出相同 | 成因"票据指纹计入 `var` 下标"系代码分析结论，未做隔离实验 |
+| 允许幽灵参与匹配的变异体在门禁开启后不可被击杀 → 转门禁屏蔽集 + "幽灵跳过限制放开次数为 0" 的哨兵；哨兵与具名用例是**报警不是防线**，Pass B 两处仅靠门禁 | 已登记 | 代码分析结论 |
+| 语料范围 | N=37：`core/src`+`api/src`（30/258，合并编译）、`plugin-fabric/src`（3/7）、`plugin-mixin/src`（2/23）、`plugin-forge/src`（2/12） | 语料统计 |
+| 语料缺口 | `plugin-arc/src`（Mindustry 编译期制品非纯 class 包，缺注解处理器，javac 解析即失败）、`tests/`、`gradle-plugin/` | 语料统计 |
 
 - 合流点 `680029f`；权威全量读数（HEAD `b0679c8`，`--rerun-tasks`，35 tasks executed，166.2 s）：**732 tests / 0 failures / 0 errors / 0 skipped**。
 - 结案记录：门禁评估次数已量化（`eval=107 / fpCmp=107 / fpAllow=107 / refused=0 / classes=31`）；嵌套 lambda 对照种子的阳性对照 `eval=18 fpCmp=18 hostKindRefused=18 classes=1`（指纹不等后由宿主形态翻转拒绝）。
@@ -743,9 +743,9 @@
 
 ## §0.16 参数注解 / 泛型签名漂移的告警点名
 
-| 项 | 状态 | 证据等级 |
+| 项 | 状态 | 验证与说明 |
 |:--|:--|:--|
-| 参数注解值/类型/删除变化、字段与方法泛型签名变化 → 成员级 `[SIG-DRIFT]` WARN 点名 | 已实现 | 实测：740 用例绿（实测记录）+ 检测三处变异 3/3 killed（变异检查记录） |
+| 参数注解值/类型/删除变化、字段与方法泛型签名变化 → 成员级 `[SIG-DRIFT]` WARN 点名 | 已实现 | 实测：740 用例绿+ 检测三处变异 3/3 killed |
 | **类级泛型签名（`getGenericSuperclass`）不在检测范围**；对应运行时② 的"重新调用 `getDeclaredMethods()` 读取"仍读到旧值 → 合起来是"静默按旧值走" | 未检测，登记 类级泛型签名未检测 | 读数表显示类级泛型签名在两列仍读旧值 |
 | 接线：`processChanges` 里的 `reportMemberMetadataDrift` 调用由 `:tests:metadataDriftWarnProbe` 把关（已接进 `:tests:check`） | 已接线 | 覆盖任务：`:tests:metadataDriftWarnProbe`（挂在 `:tests:check`，真实 `processChanges` 路径发出 `[SIG-DRIFT]` 告警） |
 | 接线在 `:tests:test` 口径下**无分辨力**（该用例直接调用 `reportMemberMetadataDrift`，不覆盖调用点） | 已登记 | 该接线在 `:tests:test` 口径下不可分辨，由上述探针任务把关 |
@@ -755,7 +755,7 @@
 
 ## §0.17 注解默认值（`AnnotationDefault`）漂移：fail-closed 拒绝
 
-| 项 | 状态 | 说明 |
+| 项 | 状态 | 验证与说明 |
 |:--|:--|:--|
 | 注解默认值变化 / 移除 / 新增 → 默认拒绝（批量整轮共退、动态路径拒绝） | 已实现 | 判定入口 `ClassDiffUtil.describeAnnotationDefaultChange` + `RemoldAgent.annotationDefaultGate`；覆盖用例 `ClassDiffUtilTest`（10 条）、`AnnotationDefaultGateTest`（6 条） |
 | 降级开关 `-Dremold.agent.annotation_default_change=allow` | 已实现 | 降级时输出指名告警（类名 + 成员名），不静默 |

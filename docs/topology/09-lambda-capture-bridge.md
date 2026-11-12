@@ -481,9 +481,9 @@ lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
 | 消费点 2 | `scan`：幽灵**不作为 indy 目标**（`target.renameable && !target.ghost`） | 幽灵名不能被认领 | 独立（由代码分析可知） |
 | 消费点 3 | `scan`：语义指纹不折入幽灵子（"幽灵无语义"） | 幽灵不污染父指纹 | 独立 |
 | 消费点 4 | `putNameIndex`：活方法压过幽灵/桥 | 同名索引取到真体而不是桩 | 独立 |
-| 消费点 5 | Step 1 `acceptCandidate` | 幽灵不参与指纹配对（`D` 可放开） | `D` 之外有独立防线：`sameSemantics` 仍要求指纹一致，而幽灵体是熔断桩、指纹与真实体不同 |
-| 消费点 6 | Pass A `step2PassA` | 幽灵不参与 A 趟 | 独立：在该路径下跳过，`D` 不放开（由代码分析可知） |
-| 消费点 7 | Pass B 两条循环 | 幽灵不参与 B 趟（`D` 可放开） | **仅靠门禁**：`D` 放开后拦得住它的只有是 `fallbackPairingAllowed` |
+| 消费点 5 | Step 1 `acceptCandidate` | 幽灵不参与指纹配对（放开幽灵跳过限制后可放开） | 放开幽灵跳过限制后，此处仍有独立防线：`sameSemantics` 仍要求指纹一致，而幽灵体是熔断桩、指纹与真实体不同 |
+| 消费点 6 | Pass A `step2PassA` | 幽灵不参与 A 趟 | 独立：在该路径下跳过，即使放开幽灵跳过限制也不放开（由代码分析可知） |
+| 消费点 7 | Pass B 两条循环 | 幽灵不参与 B 趟（放开幽灵跳过限制后可放开） | **仅靠门禁**：放开幽灵跳过限制后，拦得住它的只有 `fallbackPairingAllowed` |
 | 消费点 8 | `isSkeletonGloballyUnique` / `skeletonEligibleOld` | 幽灵不算骨架候选 | 独立 |
 | 消费点 9 | `hasMultipleHashCandidates` / `checkAndWarnHomomorphicPruning` | 只数活方法 | 独立 |
 | 消费点 10 | 深度/形状/引用者计算 | 幽灵按"无子空壳"处理 | 独立 |
@@ -492,16 +492,16 @@ lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
 | 门禁层 2 | `isOrderConsistent` 的 `hostKey == null` 早退 | 没有序号就没有顺序证据 | 独立（返回 `false` 即"不给证据"，不是放行） |
 
 
-表中"独立"指**该消费点不依赖兜底门禁**。证据等级：由代码分析可知（代码阅读）；其中 S2 由 `D==0` 哨兵与
+表中"独立"指**该消费点不依赖兜底门禁**。证据等级：由代码分析可知（代码阅读）；其中 S2 由 "幽灵跳过限制放开次数为 0" 的哨兵与
 `nullOldHost…` 具名用例覆盖、S7 明确**仅靠门禁**（纵深少一层），这两行另有 实测 支撑（`ev-cf3a`/`ev-1a5e`、
 `mut-b42f`、`mut-6ba7`）。
-**残余风险（必须登记，不能只说"被短路"）**：`D`（"允许幽灵参与后续匹配"）覆盖的三处里，
+**残余风险（必须登记，不能只说"被短路"）**："允许幽灵参与后续匹配"这一放宽开关覆盖的三处里，
 Step 1 那处（S5）还有 `sameSemantics` 兜底，**Pass B 那两处（S7）只由门禁兜底**。
-门禁把这两处短路之后，`D` 在门禁开启下不再可被击杀（门禁屏蔽变异体）——
+门禁把这两处短路之后，该放宽开关在门禁开启下不再可被击杀（门禁屏蔽变异体）——
 **纵深防御少了一层**：一旦门禁被放宽或移除，S7 就没有第二道防线。
 缓解手段不是"再补一层代码"，而是把它变成**响亮的报警**：
-`LineNumberDifferentialTest` 的 `mutationKillRateRegressionTest` 对 `D` 断言击杀数 `== 0`
-（失败信息直接要求"把 D 移回击杀集"），外加 `nullOldHostVetoedBeforeSameNameShortCircuit`
+`LineNumberDifferentialTest` 的 `mutationKillRateRegressionTest` 对该放宽开关断言击杀数 `== 0`
+（失败信息直接要求"把它移回击杀集"），外加 `nullOldHostVetoedBeforeSameNameShortCircuit`
 钉住 G1。两者都在门禁放宽时立刻变红（见 §9.7 的观测口径）。
 
 ### 9.6 语料范围与口径（禁止外推成全仓结论）
@@ -586,6 +586,6 @@ hostKindRefused=18`（指纹不等后由宿主形态翻转拒绝），证明计�
 
 ## §9.6 门禁屏蔽变异体的哨兵是报警，不是防线
 
-`Mutation D`（允许幽灵参与后续匹配）在门禁开启后无法被任何种子击杀，故转入屏蔽集并配 `D==0` 哨兵。
+"允许幽灵参与后续匹配"这一放宽开关在门禁开启后无法被任何种子击杀，故转入屏蔽集并配 "幽灵跳过限制放开次数为 0" 的哨兵。
 必须明确：**哨兵与 `nullOldHost…` 具名用例是"报警"，不是"防线"**——它们的作用是在门禁被放宽时立刻发出信号，
 而不是补回被门禁短路掉的那层纵深防御。Pass B 的两处兜底目前仅由门禁兜底，纵深少一层这一事实不因哨兵而消除。

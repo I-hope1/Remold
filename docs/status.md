@@ -739,3 +739,15 @@
 - 合流点 `680029f`；权威全量读数 `ev-20261112055947-6f9b`（HEAD `b0679c8`，`--rerun-tasks`，35 tasks executed，166.2 s）：**732 tests / 0 failures / 0 errors / 0 skipped**。
 - 开放项（待核）：门禁开关在语料 harness 中的阳性对照已跑完并留证，**等指挥部采信后结案**；采信前 §10 的归因结论按"范围已写明、前提已由对照实验证成、待核"表述。
 - 候选 I2（槽位平移幽灵的隔离实验，验证 `var` 下标成因）**只登记不排期**，会动生产代码，须单开批次。
+
+## §0.16 批次 K：参数注解 / 泛型签名漂移的 WARN 点名
+
+| 项 | 状态 | 证据等级 |
+|:--|:--|:--|
+| 参数注解值/类型/删除变化、字段与方法泛型签名变化 → 成员级 `[SIG-DRIFT]` WARN 点名 | 已实现 | `[观测]`：740 用例绿（`ev-20261112073324-7229`）+ 检测三处变异 3/3 killed（`mut-20261112070749-83d2`） |
+| **类级泛型签名（`getGenericSuperclass`）不在检测范围**；格①② 的"重新调用 `getDeclaredMethods()` 读取"仍读到旧值 → 合起来是"静默按旧值走" | **未检测**，登记 K2 | `[观测]`（27 行读数表：类级 2 旧 1 新） |
+| 接线：`processChanges` 里的 `reportMemberMetadataDrift` 调用由 `:tests:metadataDriftWarnProbe` 把关（已接进 `:tests:check`） | 已接线 | `[观测]`：`ev-20261112073324-7229`（探针 executed、38 tasks、148.6 s、740 tests）；接线短路变异在 `:tests:check` 口径下 KILLED |
+| 接线在 `:tests:test` 口径下**无分辨力**（该用例直接调用 `reportMemberMetadataDrift`，不覆盖调用点） | 已登记 | `[观测]`：同一变异在 JUnit 口径下 survived |
+| WARN 文案：只含类/成员名 + 变化种类 + "旧句柄读数不可靠、请勿继续使用" + "自持句柄不会被修复" | 已收敛 | `[观测]`：捕获原文（`ev-20261112073324-7229` L169/170）+ 接缝断言禁用标签全集 + 灵敏度验证（塞 `重新获取` → `ParameterAnnotationDriftTest:274` 红）；增量 grep 源码 Javadoc 允许清单 2 处否定句（`ReflectionCacheManager:134`、`RemoldAgent:2626`） |
+| 驱逐范围扩展（`EvictionScope.WITH_DESCENDANTS`）未交付，停 `parked/k-eviction-scope`；缺"已注册缓存驱逐前后对照读数" | 停放 | `[观测]`：`grep` 仅剩 `RemoldAgent:2611` 注释（已改为指向 K2） |
+| 未测 | JBR 8/11/17；Gson/Jackson 真实缓存路径 | — |

@@ -503,7 +503,250 @@ public final class ParameterAnnotationDriftProbe {
 		return type == null ? "null" : type.getTypeName();
 	}
 
-	// ---------------------------------------------------------------- 夹具
+	// ---------------------------------------------------------------- 环境 / 灵敏度 / 能力
+
+	/** 记录本格的 JVM 身份与完整启动参数：三格对照必须能逐字区分。 */
+	private static void reportEnvironment() {
+		System.out.println("PROBE-ENV java.version=" + System.getProperty("java.version")
+			+ " java.vm.name=" + System.getProperty("java.vm.name")
+			+ " java.vm.version=" + System.getProperty("java.vm.version")
+			+ " java.home=" + System.getProperty("java.home"));
+		Instrumentation instrumentation = P05Agent.instrumentation();
+		System.out.println("PROBE-ENV inputArguments="
+			+ java.lang.management.ManagementFactory.getRuntimeMXBean().getInputArguments());
+		System.out.println("PROBE-ENV instrumentation=" + (instrumentation == null ? "ABSENT" : "present")
+			+ " canRedefineClasses="
+			+ (instrumentation != null && instrumentation.isRedefineClassesSupported()));
+	}
+
+	/**
+	 * 灵敏度对照（<b>不是复现证据</b>）：加载两份"属性被故意损坏"的类，让 JVM 自己的解析器
+	 * 抛出真实异常，从而证明读数链路能看见并记录 {@code Error} 级 {@code Throwable} 的类名。
+	 *
+	 * <p>损坏形态：①参数注解的属性类型指向一个<b>不是注解类型</b>的类（{@code java.lang.String}）；
+	 * ②方法 {@code Signature} 属性写成语法非法的字符串。两份字节都由 ASM 直接生成，
+	 * 不经过 javac，也不含任何 {@code throw} 语句——异常全部由 JVM 解析器抛出。</p>
+	 */
+	private static void sensitivityControl() {
+		System.out.println("--- SENSITIVITY-CONTROL (deliberately corrupted attributes; core purpose = does the"
+			+ " read harness observe JVM-thrown Errors at all. This is NOT evidence of the defect.) ---");
+		byte[] annotationTarget = asmClass("probe.bad.AnnotationTarget", "Ljava/lang/String;", null);
+		runSensitivity("param-annotation-type-is-not-an-annotation", "probe.bad.AnnotationTarget",
+			Map.of(), annotationTarget, "getParameterAnnotations");
+		byte[] signatureTarget = asmClass("probe.bad.SignatureTarget", null, "(<");
+		runSensitivity("malformed-generic-signature", "probe.bad.SignatureTarget",
+			Map.of(), signatureTarget, "getGenericParameterTypes");
+
+		// 第三种：结构合法但元素值重复（同一个注解成员被写两次）。JDK 的注解解析器对此有明确检查，
+		// 是"注解路径能不能看见 Error"最直接的对照。
+		Map<String, byte[]> support = compile(Map.of("probe.bad.Real",
+			"package probe.bad;\npublic @interface Real { String value(); }\n"));
+		runSensitivity("duplicate-annotation-member", "probe.bad.DuplicateTarget",
+			support, asmDuplicateMemberClass(), "getParameterAnnotations");
+
+		// 第四种：参数注解属性的 num_parameters 与实际参数个数不符（结构级损坏）。
+		// 这一类最能代表"旧快照对着新常量池"的错位形态，因此必须证明它能被观测到。
+		byte[] valid = compile(Map.of(
+			"probe.bad.Counted",
+			"package probe.bad;\n"
+				+ "public class Counted { public void m(@Deprecated String s) { } }\n")).get("probe.bad.Counted");
+		byte[] miscounted = patchParameterAnnotationCount(valid, 5);
+		runSensitivity("param-annotation-count-mismatch", "probe.bad.Counted",
+			Map.of(), miscounted, "getParameterAnnotations");
+	}
+
+	/**
+	 * 把 {@code RuntimeVisibleParameterAnnotations} 属性的 {@code num_parameters} 改成 {@code newCount}。
+	 *
+	 * <p>只改一个字节：属性名索引与长度保持不变，因此类文件结构自洽，损坏只体现在属性内容里。
+	 * 找到属性的办法是先定位常量池里该属性名的索引，再在字节里找 {@code [idx_hi idx_lo len..]}
+	 * 这个唯一序列。</p>
+	 */
+	private static byte[] patchParameterAnnotationCount(byte[] classBytes, int newCount) {
+		byte[] name = "RuntimeVisibleParameterAnnotations".getBytes(StandardCharsets.UTF_8);
+		int nameIndex = findConstantPoolUtf8Index(classBytes, name);
+		if (nameIndex < 0) {
+			throw new IllegalStateException("attribute name not found in constant pool");
+		}
+		for (int i = 0; i + 6 < classBytes.length; i++) {
+			if ((classBytes[i] & 0xFF) != ((nameIndex >> 8) & 0xFF)
+				|| (classBytes[i + 1] & 0xFF) != (nameIndex & 0xFF)) {
+				continue;
+			}
+			int length = ((classBytes[i + 2] & 0xFF) << 24) | ((classBytes[i + 3] & 0xFF) << 16)
+				| ((classBytes[i + 4] & 0xFF) << 8) | (classBytes[i + 5] & 0xFF);
+			if (length <= 0 || length > 64) {
+				continue;
+			}
+			byte[] patched = classBytes.clone();
+			patched[i + 6] = (byte) newCount;
+			return patched;
+		}
+		throw new IllegalStateException("parameter-annotation attribute not found");
+	}
+
+	/** 在常量池里找 UTF8 常量，返回其索引；找不到返回 -1。 */
+	private static int findConstantPoolUtf8Index(byte[] classBytes, byte[] name) {
+		int count = ((classBytes[8] & 0xFF) << 8) | (classBytes[9] & 0xFF);
+		int offset = 10;
+		for (int index = 1; index < count; index++) {
+			int tag = classBytes[offset] & 0xFF;
+			switch (tag) {
+				case 1 -> {
+					int length = ((classBytes[offset + 1] & 0xFF) << 8) | (classBytes[offset + 2] & 0xFF);
+					boolean match = length == name.length;
+					for (int k = 0; match && k < length; k++) {
+						match = classBytes[offset + 3 + k] == name[k];
+					}
+					if (match) {
+						return index;
+					}
+					offset += 3 + length;
+				}
+				case 7, 8, 16, 19, 20 -> offset += 3;
+				case 15 -> offset += 4;
+				case 3, 4, 9, 10, 11, 12, 17, 18 -> offset += 5;
+				case 5, 6 -> {
+					offset += 9;
+					index++;
+				}
+				default -> throw new IllegalStateException("unknown constant pool tag " + tag + " at " + index);
+			}
+		}
+		return -1;
+	}
+
+	private static void runSensitivity(String label, String binaryName, Map<String, byte[]> supportClasses,
+			byte[] bytes, String api) {
+		IsolatedLoader loader = new IsolatedLoader(
+			ParameterAnnotationDriftProbe.class.getClassLoader(), supportClasses);
+		Class<?> target;
+		try {
+			target = loader.define(binaryName, bytes);
+		} catch (Throwable t) {
+			System.out.println("SENSITIVITY-CONTROL label=" + label + " stage=define"
+				+ " throwable=" + t.getClass().getName()
+				+ " message=" + String.valueOf(t.getMessage()));
+			return;
+		}
+		Method method = target.getDeclaredMethods()[0];
+		try {
+			if ("getParameterAnnotations".equals(api)) {
+				method.getParameterAnnotations();
+			} else {
+				method.getGenericParameterTypes();
+			}
+			System.out.println("SENSITIVITY-CONTROL label=" + label + " api=" + api
+				+ " throwable=NONE (the harness cannot see this class of failure)");
+		} catch (Throwable t) {
+			System.out.println("SENSITIVITY-CONTROL label=" + label + " api=" + api
+				+ " throwable=" + t.getClass().getName()
+				+ " errorLevel=" + (t instanceof Error)
+				+ " message=" + String.valueOf(t.getMessage()));
+		}
+	}
+
+	/**
+	 * 结构重定义能力实测：加一个实例字段再 redefine。
+	 *
+	 * <p>只用于区分"③ DCEVM 格"与"② 标准 HotSpot 格"——不靠 JVM 名字或启动参数推断，
+	 * 靠这次 redefine 的真实结果（{@code OK} vs {@code THROWN:...}）说话。</p>
+	 */
+	private static void reportStructuralCapability() {
+		Instrumentation instrumentation = P05Agent.instrumentation();
+		if (instrumentation == null) {
+			System.out.println("PROBE-ENV structuralRedefine=NO-INSTRUMENTATION");
+			return;
+		}
+		byte[] one = asmStructuralClass(false);
+		byte[] two = asmStructuralClass(true);
+		IsolatedLoader loader = new IsolatedLoader(
+			ParameterAnnotationDriftProbe.class.getClassLoader(), Map.of());
+		try {
+			Class<?> cls = loader.define("probe.cap.Structural", one);
+			instrumentation.redefineClasses(new ClassDefinition(cls, two));
+			System.out.println("PROBE-ENV structuralRedefine=OK (field added; enhanced redefinition is active)");
+		} catch (Throwable t) {
+			System.out.println("PROBE-ENV structuralRedefine=THROWN:" + t.getClass().getName()
+				+ " message=" + String.valueOf(t.getMessage()));
+		}
+	}
+
+	/** 生成带一个（或两个）实例字段的类：第二个字段是"结构变化"。 */
+	private static byte[] asmStructuralClass(boolean withSecondField) {
+		org.objectweb.asm.ClassWriter writer = new org.objectweb.asm.ClassWriter(0);
+		String internal = "probe/cap/Structural";
+		writer.visit(org.objectweb.asm.Opcodes.V1_8,
+			org.objectweb.asm.Opcodes.ACC_PUBLIC | org.objectweb.asm.Opcodes.ACC_SUPER,
+			internal, null, "java/lang/Object", null);
+		writer.visitField(org.objectweb.asm.Opcodes.ACC_PUBLIC, "a", "I", null, null).visitEnd();
+		if (withSecondField) {
+			writer.visitField(org.objectweb.asm.Opcodes.ACC_PUBLIC, "b", "I", null, null).visitEnd();
+		}
+		org.objectweb.asm.MethodVisitor init = writer.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC,
+			"<init>", "()V", null, null);
+		init.visitCode();
+		init.visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0);
+		init.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>",
+			"()V", false);
+		init.visitInsn(org.objectweb.asm.Opcodes.RETURN);
+		init.visitMaxs(1, 1);
+		init.visitEnd();
+		writer.visitEnd();
+		return writer.toByteArray();
+	}
+
+	/**
+	 * 生成"属性被故意损坏"的类：{@code annotationDescriptor} 非空则把参数注解指向该类型；
+	 * {@code signature} 非空则把方法写成该（可能是非法）泛型签名。
+	 */
+	private static byte[] asmClass(String binaryName, String annotationDescriptor, String signature) {
+		// COMPUTE_MAXS：这份字节的目的只是承载"损坏的属性"，栈帧算错会把失败提前到 defineClass 的
+		// 校验阶段（ClassFormatError: Arguments can't fit into locals），那就测不到属性解析路径了。
+		org.objectweb.asm.ClassWriter writer =
+			new org.objectweb.asm.ClassWriter(org.objectweb.asm.ClassWriter.COMPUTE_MAXS);
+		String internal = binaryName.replace('.', '/');
+		writer.visit(org.objectweb.asm.Opcodes.V1_8,
+			org.objectweb.asm.Opcodes.ACC_PUBLIC | org.objectweb.asm.Opcodes.ACC_SUPER,
+			internal, null, "java/lang/Object", null);
+		org.objectweb.asm.MethodVisitor method = writer.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC,
+			"m", "(Ljava/lang/String;)V", signature, null);
+		if (annotationDescriptor != null) {
+			org.objectweb.asm.AnnotationVisitor annotation =
+				method.visitParameterAnnotation(0, annotationDescriptor, true);
+			annotation.visitEnd();
+		}
+		method.visitCode();
+		method.visitInsn(org.objectweb.asm.Opcodes.RETURN);
+		method.visitMaxs(0, 0);
+		method.visitEnd();
+		writer.visitEnd();
+		return writer.toByteArray();
+	}
+
+
+	/** 参数注解里把同一个成员写两次：结构合法，内容非法（JDK 解析器对此有明确检查）。 */
+	private static byte[] asmDuplicateMemberClass() {
+		org.objectweb.asm.ClassWriter writer =
+			new org.objectweb.asm.ClassWriter(org.objectweb.asm.ClassWriter.COMPUTE_MAXS);
+		String internal = "probe/bad/DuplicateTarget";
+		writer.visit(org.objectweb.asm.Opcodes.V1_8,
+			org.objectweb.asm.Opcodes.ACC_PUBLIC | org.objectweb.asm.Opcodes.ACC_SUPER,
+			internal, null, "java/lang/Object", null);
+		org.objectweb.asm.MethodVisitor method = writer.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC,
+			"m", "(Ljava/lang/String;)V", null, null);
+		org.objectweb.asm.AnnotationVisitor annotation =
+			method.visitParameterAnnotation(0, "Lprobe/bad/Real;", true);
+		annotation.visit("value", "first");
+		annotation.visit("value", "second");
+		annotation.visitEnd();
+		method.visitCode();
+		method.visitInsn(org.objectweb.asm.Opcodes.RETURN);
+		method.visitMaxs(0, 0);
+		method.visitEnd();
+		writer.visitEnd();
+		return writer.toByteArray();
+	}
 
 	private static byte[] churnBytes(String internalName) {
 		org.objectweb.asm.ClassWriter writer = new org.objectweb.asm.ClassWriter(0);
@@ -633,11 +876,9 @@ public final class ParameterAnnotationDriftProbe {
 
 	public static void main(String[] args) throws Exception {
 		System.out.println("=== parameter annotation / generic signature drift probe ===");
-		System.out.println("   java.version = " + System.getProperty("java.version"));
-		System.out.println("   java.vm.name = " + System.getProperty("java.vm.name"));
-		Instrumentation instrumentation = P05Agent.instrumentation();
-		System.out.println("   instrumentation = " + (instrumentation == null ? "ABSENT" : "present")
-			+ (instrumentation == null ? "" : ", canRedefineClasses=" + instrumentation.isRedefineClassesSupported()));
+		reportEnvironment();
+		sensitivityControl();
+		reportStructuralCapability();
 
 		Map<String, byte[]> base = compile(Map.of(
 			ANNOTATION_CLASS, annotationSource(),

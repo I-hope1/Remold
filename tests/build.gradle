@@ -970,9 +970,26 @@ tasks.register("parameterAnnotationDriftProbe", JavaExec) {
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "ParameterAnnotationDriftProbe"
 	maxHeapSize = "1g"
+	// 分 JVM 复跑：-Pkprobe.javaHome=<jdk> 选运行时；-Pkprobe.dcevm 追加 -XX:+AllowEnhancedClassRedefinition。
+	// 是否真的生效不靠这两个开关声明，由探针自己打印的 structuralRedefine 读数判定。
+	def kProbeJavaHome = (project.findProperty("kprobe.javaHome") as String)
+	def kProbeDcevm = project.hasProperty("kprobe.dcevm")
+	if (kProbeJavaHome != null) {
+		def javaBinary = java.io.File.newInstance(new File(kProbeJavaHome, "bin"),
+			probeIsWindows ? "java.exe" : "java")
+		if (!javaBinary.exists()) {
+			throw new GradleException("kprobe.javaHome 下找不到 java 可执行文件: " + javaBinary)
+		}
+		executable = javaBinary.absolutePath
+		javaLauncher.set((JavaLauncher) null)
+	}
 	doFirst {
 		jvmArgs "-javaagent:${p05AgentJar.get().archiveFile.get().asFile.absolutePath}",
 		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+		if (kProbeDcevm) {
+			jvmArgs "-XX:+AllowEnhancedClassRedefinition"
+		}
+		logger.lifecycle("kprobe java=" + (kProbeJavaHome ?: "default") + " dcevm=" + kProbeDcevm)
 	}
 }
 

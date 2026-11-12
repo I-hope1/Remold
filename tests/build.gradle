@@ -1102,6 +1102,9 @@ tasks.register("alignBaselineProbe", JavaExec) {
 // 第 1 档（日常）：纯 JUnit + 纯文本扫描，不冷启动额外 JVM、不触发 Kotlin 编译器。
 check.dependsOn test
 check.dependsOn verifyTestCount
+// 接线终局（C4）必须进默认门：仅靠 JUnit 无法证明"流水线真的调用了检测函数"——把接线短路成 false 后
+// remold.evict.* 仍然是绿的；能被击杀的唯一读数是真实 processChanges 探针，故挂进 check。
+check.dependsOn "metadataDriftWarnProbe"
 check.dependsOn verifyDocStatusMarkers
 
 // 第 2 档：需要独立 JVM / -javaagent / Kotlin 夹具编译的断言。./gradlew e2eProbe

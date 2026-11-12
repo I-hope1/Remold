@@ -2625,8 +2625,11 @@ public class RemoldAgent {
 	 * 无法修复用户代码或未注册框架里已经解析好的句柄。缺了它，读到日志的人会把
 	 * "驱逐过缓存"误读成"已解决"。</p>
 	 *
-	 * <p>刻意保持 {@code public static}：单测用 {@link #logger} 捕获告警做终局断言，
-	 * 而不是复制一份比对逻辑（复制出来的那份不会随实现漂移）。</p>
+	 * <p><b>仅限内部用途（internal use only）</b>：本方法是 Agent 内部接线点，不是公开 API；
+	 * 保持 {@code public static} 只因调用方（{@code tests/src/remold/evict} 包）与
+	 * {@link RemoldAgent} 不同包——同包可见性改不了。语义/签名随批次演进不承诺兼容。</p>
+	 *
+	 * <p>单测用 {@link #logger} 捕获告警做终局断言，而不是复制一份比对逻辑（复制出来的那份不会随实现漂移）。</p>
 	 *
 	 * @param newBytes 本轮生效字节（键为目标类名）
 	 * @param oldBytes 重定义前的有效字节（键同上；缺键表示没有基线，不判定，也不当作"没变"）

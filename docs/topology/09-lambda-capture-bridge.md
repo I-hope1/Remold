@@ -558,8 +558,8 @@ hostKindRefused=18`（指纹不等后由宿主形态翻转拒绝），证明计�
 
 **护栏与其局限**：语料用例与嵌套 lambda 阳性对照都断言 `[GATE-STATE]` 为开（`callSites>0`），门禁被关时显式红
 （关态实测 `exit 1`，三个用例同时红）。该护栏只能发现"门禁调用被移除"这一形态；把 `fallbackPairingAllowed`
-改成恒返回 true 时 `callSites` 仍为 4、护栏仍绿 —— 这一形态由嵌套 lambda 阳性对照的行为断言兜底（
-恒 true 变异下，`PassBTest` 的嵌套 lambda 阳性对照与「体不等必须拒绝」两条用例同时失败）。
+改成固定返回 true 时 `callSites` 仍为 4、护栏仍绿 —— 这一形态由嵌套 lambda 阳性对照的行为断言兜底（
+固定返回 true 的变异下，`PassBTest` 的嵌套 lambda 阳性对照与「体不等时拒绝」两条用例同时失败）。
 
 **已知口径（I3）**：`BODY_MISMATCH` 的 WARN 与 `TEST_EVENTS` 按 `类名#BODY#新名<-旧名` 去重，键里没有
 重定义轮次或类版本（由代码分析可知）；`bodyMismatchRefusals` 的自增在该去重之前，配对拒绝与幽灵化

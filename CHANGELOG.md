@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`remold-agent.jar` 版本对账（gradle-plugin）**：`remold-agent.jar` 的 manifest 现在写入
+  `Remold-Version` / `Implementation-Version`（值来自 `gradle.properties` 的 `remoldVersion`）。
+  插件在解析本地 agent 时读取该版本并与 `remold.version` / `remold { version }` 比较：
+  - 自动发现的本地 jar 版本**不匹配** → 不启动它，按配置版本重新解析（JitPack / Maven 缓存 / GitHub release）
+    并同步覆盖 `.gradle/remold/remold-agent.jar`，生命周期日志点名被忽略的旧文件；
+  - 版本匹配 → 直接使用（离线快路径）；未配置版本但本地 jar 带版本 → 采用 jar 版本解析生态插件；
+  - 显式 `remold { agentJar }` 是用户显式选择，只告警不覆盖；解析到的版本若仍不匹配则 fail-closed 拒绝；
+  - 无版本元数据的老 jar 报 info 提示（无法校验，需重构建）。
+  内置插件自身的版本无法在运行期改变（buildscript classpath 已固定），需与 `remoldVersion` 一起升级。
+  单测 `RemoldAgentVersionTest`（manifest 读取、`v` 前缀比较、refresh 判定）；变异：`shouldRefreshAgent`
+  恒 false → 对应用例红。
+- **`cleanRemoldCache` 任务（gradle-plugin）**：**项目级**清理——默认只删项目 `.gradle/remold`
+  （解析后的 agent 副本与生态插件副本）和 `build/remold`（生成的启动脚本与 args），并打印全局缓存路径提示；
+  Gradle 用户目录的共享下载缓存 `caches/remold`（`remold-agent-<ver>.jar` + `remold-plugin-<module>-<ver>.jar`，
+  跨项目共享、按版本可重建）**默认不删**，仅 `--global` / `-Premold.cleanGlobalCache=true` 时删除。
+  刻意**不**挂到 `clean`：共享缓存被清会迫使所有项目重新下载；改 `remoldVersion` 后或怀疑缓存损坏时手动执行。
+  单测 `CleanRemoldCacheTaskTest`（注册但不挂 clean、默认不删全局且无关文件保留、`--global` 才删全局、
+  项目属性开关、重复执行 no-op）。
+
 ### Fixed
 
 - **Linux aarch64 原生库缺失导致 `UnsatisfiedLinkError`**：`tool.cpp` 的构建目标此前只有

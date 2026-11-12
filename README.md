@@ -58,6 +58,8 @@ apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remo
 
 remold {
     // 默认读取 gradle.properties 中的 remold.version，自动下载并缓存对应版本的 remold-agent.jar
+    // 本地 remold-agent.jar 的 manifest 版本与 remold.version 不一致时，插件以配置版本为准重新解析/
+    // 下载并覆盖 .gradle/remold/remold-agent.jar（显式 agentJar 只告警、不覆盖）
     // jbrPath = "/path/to/jbr" // 默认从环境变量 JBR_HOME 或系统属性 jbr.home 读取
     // fileShakeMs = 800        // .class 变动防抖窗口（毫秒，默认 800）
     // assetShakeMs = 250       // 资源/配置独立防抖窗口（毫秒，默认 250）

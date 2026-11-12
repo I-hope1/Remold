@@ -107,6 +107,7 @@ public final class RemoldConfigResolver {
         if (ver == null && project.getRootProject().hasProperty("remoldVersion")) {
             ver = String.valueOf(project.getRootProject().property("remoldVersion"));
         }
+        final boolean versionConfigured = ver != null;
 
         File agentFile = null;
         String explicitAgent = ext.getAgentJar();
@@ -116,6 +117,7 @@ public final class RemoldConfigResolver {
         if (explicitAgent != null) {
             agentFile = new File(explicitAgent);
         }
+        final boolean explicitAgentConfigured = explicitAgent != null;
 
         if (agentFile == null || !agentFile.exists()) {
             List<File> candidates = Arrays.asList(
@@ -133,10 +135,35 @@ public final class RemoldConfigResolver {
             }
         }
 
-        if (agentFile == null || !agentFile.exists()) {
-            if (ver == null) {
-                throw new GradleException("[Remold] Remold version is not configured! Please specify via remold { version = \"...\" } or gradle.properties (remold.version=...).");
+        // 3b. The configured version (gradle.properties / remold { version }) is the source of truth.
+        // If an auto-discovered local agent jar declares a different version, do not run it: clear it
+        // and let the resolution below fetch/cache the configured release, then sync that file over
+        // .gradle/remold/remold-agent.jar. An explicitly configured remold { agentJar } is the user's
+        // explicit choice and is never replaced — only warned about.
+        String localAgentVersion = readAgentVersion(agentFile);
+        if (versionConfigured && localAgentVersion == null && agentFile != null && agentFile.exists()) {
+            project.getLogger().info("[Remold] " + agentFile.getName() + " carries no version metadata;"
+                    + " cannot verify it against remold.version=" + ver + " (rebuild the agent to embed it).");
+        }
+        if (shouldRefreshAgent(versionConfigured, ver, localAgentVersion)) {
+            if (explicitAgentConfigured) {
+                project.getLogger().warn("[Remold] remold { agentJar } declares version " + localAgentVersion
+                        + " but remold.version=" + ver + "; using the explicit jar as requested. Align"
+                        + " remoldVersion or pass a matching agentJar to avoid runtime version skew.");
+            } else {
+                project.getLogger().lifecycle("[Remold] Local agent jar " + agentFile.getAbsolutePath()
+                        + " declares version " + localAgentVersion + " but remold.version=" + ver
+                        + "; refreshing to the configured version. (Replace or delete the stale local copy"
+                        + " to silence this.)");
+                agentFile = null;
             }
+        }
+
+        if (agentFile == null && !versionConfigured) {
+            throw new GradleException("[Remold] Remold version is not configured! Please specify via remold { version = \"...\" } or gradle.properties (remold.version=...).");
+        }
+
+        if (agentFile == null || !agentFile.exists()) {
             File cacheDir = new File(project.getGradle().getGradleUserHomeDir(), "caches/remold");
             File cachedJar = new File(cacheDir, "remold-agent-" + ver + ".jar");
 
@@ -171,6 +198,26 @@ public final class RemoldConfigResolver {
                     "Please check your network connection or specify a valid version in remold { version = \"...\" },\n" +
                     "or specify a local file explicitly in remold { agentJar = \"/path/to/remold-agent.jar\" }."
             );
+        }
+
+        // 3c. Post-resolution verification: whatever the resolver picked (cache / JitPack / release
+        // download) must actually be the configured release. Skipped for an explicit agentJar, which
+        // was already warned about above (user intent wins). Unknown metadata (pre-versioning jars)
+        // cannot be checked and is left to the loud mismatch warning above.
+        String resolvedAgentVersion = readAgentVersion(agentFile);
+        if (versionConfigured && !explicitAgentConfigured && resolvedAgentVersion != null
+                && !sameVersion(ver, resolvedAgentVersion)) {
+            throw new GradleException("[Remold] Resolved agent jar " + agentFile.getAbsolutePath()
+                    + " declares version " + resolvedAgentVersion + " but remold.version=" + ver
+                    + ". Refusing to launch a mismatched agent. Delete the cache/repository copy"
+                    + " (or align remoldVersion) and retry.");
+        }
+        if (!versionConfigured && resolvedAgentVersion != null) {
+            ver = resolvedAgentVersion;
+            project.getLogger().lifecycle("[Remold] Agent version " + resolvedAgentVersion + " read from "
+                    + agentFile.getName() + " (remold.version not configured; using it for plugin resolution)");
+        } else if (versionConfigured && resolvedAgentVersion != null) {
+            project.getLogger().info("[Remold] Agent version confirmed: " + resolvedAgentVersion);
         }
 
         File safeAgent = syncIntoLocalRemold(agentFile, new File(localRemoldDir, "remold-agent.jar"));
@@ -775,5 +822,55 @@ public final class RemoldConfigResolver {
             if (s.equalsIgnoreCase(target)) return true;
         }
         return false;
+    }
+
+    /**
+     * Reads the Remold release version embedded in an agent jar's manifest.
+     *
+     * <p>Prefers the dedicated {@code Remold-Version} attribute (written by this repository's
+     * {@code shadowJar} manifest), falls back to the standard {@code Implementation-Version}.
+     * Returns {@code null} when the jar is unreadable or carries neither attribute — callers must
+     * treat that as "unknown", never as "matches".</p>
+     */
+    public static String readAgentVersion(File agentJar) {
+        if (agentJar == null || !agentJar.isFile()) return null;
+        try (JarFile jar = new JarFile(agentJar)) {
+            if (jar.getManifest() == null || jar.getManifest().getMainAttributes() == null) return null;
+            String version = jar.getManifest().getMainAttributes().getValue("Remold-Version");
+            if (version == null || version.trim().isEmpty()) {
+                version = jar.getManifest().getMainAttributes().getValue("Implementation-Version");
+            }
+            if (version == null) return null;
+            version = version.trim();
+            return version.isEmpty() ? null : version;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    /** Equality of version labels, tolerant of the {@code v} prefix used by JitPack tags. */
+    static boolean sameVersion(String a, String b) {
+        String na = normalizeVersion(a);
+        String nb = normalizeVersion(b);
+        return !na.isEmpty() && na.equals(nb);
+    }
+
+    /**
+     * Whether an auto-discovered local agent jar must be replaced by the configured release.
+     *
+     * <p>Only a <b>known mismatch</b> triggers a refresh: if either side is unknown (no configured
+     * version, or a pre-versioning jar without manifest metadata) there is nothing to prove, so the
+     * local jar is kept and the caller only emits a notice.</p>
+     */
+    static boolean shouldRefreshAgent(boolean versionConfigured, String configuredVersion, String agentVersion) {
+        if (!versionConfigured || configuredVersion == null || agentVersion == null) return false;
+        return !sameVersion(configuredVersion, agentVersion);
+    }
+
+    private static String normalizeVersion(String version) {
+        if (version == null) return "";
+        String v = version.trim();
+        if (v.startsWith("v") || v.startsWith("V")) v = v.substring(1);
+        return v;
     }
 }

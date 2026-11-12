@@ -67,7 +67,12 @@ shadowJar {
 				'Premain-Class': 'remold.RemoldAgent',
 				'Boot-Class-Path': 'remold-agent.jar',
 				'Can-Retransform-Classes': true,
-				'Can-Redefine-Classes': true
+				'Can-Redefine-Classes': true,
+				// 版本元数据：gradle-plugin 在解析本地 agent jar 时读取它（无 remold.version 时回填，
+				// 有配置时校验一致性）。没有它，"只替换 deploy 的 agent jar"会与插件版本静默错配。
+				'Implementation-Title': 'remold-agent',
+				'Implementation-Version': project.version.toString(),
+				'Remold-Version': project.version.toString()
 		)
 	}
 	from('libs') {

@@ -42,6 +42,25 @@ public final class RemoldPlugin implements Plugin<Project> {
         RemoldExtension ext = project.getExtensions().create("remold", RemoldExtension.class);
         RemoldConfigResolver resolver = new RemoldConfigResolver();
 
+        // Cache cleanup for Remold artifacts — the analogue of `clean` for `build/`.
+        // Project-scoped by default: a project task must not silently wipe the machine-wide download
+        // cache, so `<gradleUserHome>/caches/remold` is only deleted with --global (or the property).
+        // Deliberately NOT wired into `clean`: wiping the shared agent cache would force a re-download
+        // on every clean. Users run it explicitly after changing remoldVersion or after a corrupt cache.
+        project.getTasks().register("cleanRemoldCache", CleanRemoldCacheTask.class, task -> {
+            task.setGroup("remold");
+            task.setDescription("Deletes project-local Remold caches (.gradle/remold, build/remold);"
+                    + " pass --global to also delete the shared <gradleUserHome>/caches/remold cache (agent + plugin jars)");
+            task.setProjectCacheDir(new File(project.getRootDir(), ".gradle/remold"));
+            task.setGlobalCacheDir(new File(project.getGradle().getGradleUserHomeDir(), "caches/remold"));
+            task.setBuildCacheDir(project.getLayout().getBuildDirectory().dir("remold").get().getAsFile());
+            Object cleanGlobal = project.findProperty("remold.cleanGlobalCache");
+            if (cleanGlobal == null) cleanGlobal = project.findProperty("remold.cleanGlobal");
+            if (cleanGlobal != null) {
+                task.setIncludeGlobalCache(Boolean.parseBoolean(String.valueOf(cleanGlobal).trim()));
+            }
+        });
+
         project.getPlugins().withId("java", javaPlugin -> {
             // Ensure full debugging symbols (source, lines, vars) for InitFix parameter tracking & lambda alignment
             project.getTasks().withType(JavaCompile.class).configureEach(compile -> {

@@ -57,7 +57,9 @@ def remoldRef = (findProperty('remold.version') ?: '0.2.7')
 apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remold.gradle"
 
 remold {
-    // Reads remold.version from gradle.properties by default; downloads and caches the matching remold-agent.jar
+    // Reads remold.version from gradle.properties by default; downloads and caches the matching remold-agent.jar.
+    // If a local remold-agent.jar manifest version differs from remold.version, the configured release is
+    // re-resolved and synced over .gradle/remold/remold-agent.jar (an explicit agentJar is only warned about).
     // jbrPath = "/path/to/jbr" // defaults to the JBR_HOME env var or the jbr.home system property
     // fileShakeMs = 800        // .class debounce window in ms (default 800)
     // assetShakeMs = 250       // resource/config debounce window in ms (default 250)

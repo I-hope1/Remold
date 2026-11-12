@@ -104,9 +104,31 @@ Every option also has a `remold.<name>` project property / `extra` entry (`remol
 | `generateRemoldScript` | Writes `build/run-remold.bat` / `build/run-remold.sh` so the app can start without Gradle. |
 | `generateIdeaRunConfig` | Writes `.idea/runConfigurations/Run_with_Remold.xml` with portable paths. |
 | `deployArtifact`, `deployMod` | Copy the built artifact (remapping Loom jars when present) into the deploy directory. |
+| `cleanRemoldCache` | Deletes **project-level** Remold caches: `<root>/.gradle/remold` and `build/remold`. The shared download cache `<gradle-user-home>/caches/remold` (agent + ecosystem plugin jars, one file per version/module) is only deleted with `--global` (or `-Premold.cleanGlobalCache=true`) — it is machine-wide state, so it is not part of a project-level default. Not wired into `clean` (re-downloads); run it explicitly after changing `remold.version` or after a stale project cache. |
 
 Typical loop: `./gradlew runRemold`, then edit a file and let the compile task / IDE recompile it — the agent
 swaps the new bytecode into the running JVM.
+
+### Agent version reconciliation
+
+`remold.version` (or `remold { version = "..." }`, or `remoldVersion` in `gradle.properties`) is the single
+source of truth. The shipped `remold-agent.jar` carries `Remold-Version` / `Implementation-Version` in its
+manifest, and the plugin reconciles the two at resolution time:
+
+1. **Auto-discovered local jar matches the configured version** → used as-is (fast path, works offline).
+2. **Auto-discovered local jar declares a different version** → it is **not** launched. The plugin resolves
+   (JitPack / Maven cache / GitHub release) the configured release, then syncs it over
+   `.gradle/remold/remold-agent.jar` and runs that copy. The stale file is left untouched, with a lifecycle
+   log naming it — replace or delete it to silence the notice.
+3. **Explicitly configured `agentJar`** → honored as the user's explicit choice; a version mismatch is a
+   warning, not an override.
+4. **No version configured but the local jar carries one** → the jar's version is adopted (also used to
+   resolve matching ecosystem plugin jars).
+5. **Unknown metadata** (pre-versioning jars) → cannot be verified: kept with an info notice; rebuild the agent
+   to embed the metadata.
+
+The applied Gradle plugin's own version cannot change at runtime (it is fixed on the buildscript classpath
+before the plugin runs); bump the `gradle-plugin` release together with `remoldVersion` to upgrade both.
 
 ## Notes
 

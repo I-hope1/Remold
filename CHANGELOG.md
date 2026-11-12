@@ -11,71 +11,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Summary
 
-普通开发者关心的变化（细节见下方分类，不重复）：
+面向使用者的变化（细节见分类，不重复）：
 
-- **热更不再"先读到 0 再报错"**：新增字段/改字段类型的类，在热更瞬间被并发线程读到默认值的窗口，
-  现在也覆盖到单类动态热更（Mixin 新增 `@Unique` 字段并在 `@Inject` 里立即读取的常见路径）。
-- **不兼容改动在热更前就被挡下**：枚举顺序变化、枚举常量增删、删除仍有外部引用的成员，会得到
-  点名到具体成员的拒绝原因（并说明"为什么运行期补不回来"），而不是假成功后在游戏里崩。
-- **删掉的 lambda 不再是定时炸弹**：被删除 lambda 的旧调用点拿到的是上一轮的真实返回值，
-  不再是 `null`/`0`，链式调用与拆箱不再 NPE/除零。
-- **日志可以直接贴给老外/采集端**：运行期日志与用户可见提示全部英文，GBK 控制台不再乱码。
-- **Gradle 插件更省心**：agent jar 自带版本号，插件按项目配置版本对账并自动替换过期的本地 jar；
-  新增 `cleanRemoldCache` 清理项目级缓存，改版本号后不用手工删目录。
-- **本版定位**：0.2.8 是稳定化版本，新特性只有两条（孤儿 lambda 保留旧体、动态单类两阶段），
-  其余是安全门、日志、构建与发版质量；真正的功能增量在 0.2.7（Mixin 子系统）。
+- **更多"不兼容改动"在热更前被挡下**：注解默认值变化、Record 新增组件、方法与字段静态性翻转、
+  删除构造器、枚举顺序/常量增删、删除仍有外部读者的成员，都会得到点名到成员的原因；不再出现
+  "重定义成功、运行期才崩"。
+- **lambda 相关三处静默错误被收口**：删除 lambda 后旧调用点不再拿到 `null/0`（非 void 保留上一轮
+  返回值）；兜底配对不再静默错绑旧体（改为 WARN + 拒绝）；缺 `-g`（无 `LocalVariableTable`）时
+  捕获 lambda 换序不可判定，现在明确告警并可用 strict 模式直接拒绝。
+- **热更闪断窗口继续收窄**：新增字段/改字段类型导致的"并发线程先读到 0/null"窗口，现在也覆盖
+  单类动态热更（Mixin 新增 `@Unique` 字段并在 `@Inject` 里立即读取的路径）。
+- **签名漂移不再无声**：参数注解、泛型签名变化现在有成员级 `[SIG-DRIFT]` 告警点名。
+- **日志可直接贴给老外/采集端**：运行期日志与用户可见提示全部英文，GBK 控制台不再乱码。
+- **Gradle 插件更省心**：agent jar 自带版本号并对账替换过期本地 jar；新增 `cleanRemoldCache`。
+- **本版构成**：0.2.8 是"安全门 + 稳定性"大版本，包含 v0.2.7 tag 之后合入的一整批兼容性门禁
+  （注解默认值/Record/静态性/构造器/枚举/签名漂移/lambda 三类）与两条热更可靠性特性
+  （孤儿 lambda 保留旧体、动态单类两阶段）。
 
 ### Added
 
-- **动态单类热更接入两阶段（关闭 `redefineDynamic` 的读穿窗口）**：`redefineDynamic` 现在消费
+- **动态单类热更接入两阶段（关闭 `redefineDynamic` 的读穿窗口）**：消费
   `InitFix.requiresTwoPhase`，在**调用内部同步**完成 阶段 A（新结构 + 旧方法体）→ 补存量实例 →
   阶段 C（现成的 `runtimeBytes`），返回时已是终态，公开返回语义不变，不重跑 transformer 桥接或
-  `InitFix.transform`。阶段 C 失败按 VM 级/非 VM 级分流（VM 级毒化并停在阶段 A 提示重启；非 VM 级
-  回滚基线并返回 `false`）。纯方法体热更仍单次重定义。
-  验证：`DynamicTwoPhaseRedefineTest` 2/2（录制 `Instrumentation` 断言两次 redefine 的顺序与字节）、
-  真机 JBR 21 DCEVM `redefineDynamicNoBaselineProbe` 13/0（日志 `two-phase: A -> patch -> C`，
-  存量实例 `b=42`）；变异：强制 `twoPhase=false` → 用例红。
-- **孤儿 lambda 保留上一轮方法体（非 `void` 默认开启）**：删除 lambda 后幽灵桩不再返回类型默认值，
-  而是保留上一轮方法体（帧与异常表一并搬运）；旧体引用了本轮已删的本类成员或静态性翻转时回退默认值桩
-  并输出英文原因。`void` 孤儿默认仍 no-op，`-Dremold.agent.orphan_retain_void=true` 可打开；
-  保留体首次被真正调用时输出一次点名 WARN，多轮热更原样搬运。
-  规格 `docs/topology/11-orphan-lambda-body-retention.md`；`OrphanBodyRetentionTest` 6/6，
-  变异检查（关闭保留 → 3 红；关闭存活判据 → 1 红）。
+  `InitFix.transform`；阶段 C 失败按 VM 级/非 VM 级分流（VM 级毒化并停在阶段 A 提示重启；非 VM 级
+  回滚基线并返回 `false`）；纯方法体热更仍单次重定义。
+  验证：`DynamicTwoPhaseRedefineTest` 2/2（录制 `Instrumentation` 断言两次 redefine 的顺序与字节，
+  变异 `twoPhase=false` 变红）；真机 JBR 21 DCEVM `redefineDynamicNoBaselineProbe` 13/0
+  （日志 `two-phase: A -> patch -> C`，存量实例 `b=42`）。
+- **孤儿 lambda 保留上一轮方法体（非 `void` 默认开启）**：幽灵桩不再返回类型默认值，而是保留上一轮
+  方法体（帧与异常表一并搬运）；旧体引用本轮已删的本类成员或静态性翻转时回退默认值桩并输出英文原因。
+  `void` 孤儿默认仍 no-op（`-Dremold.agent.orphan_retain_void=true` 可开）；首次真正调用输出一次
+  点名 WARN，多轮热更原样搬运。规格 `docs/topology/11-orphan-lambda-body-retention.md`；
+  `OrphanBodyRetentionTest` 6/6（变异：关闭保留 → 3 红，关闭存活判据 → 1 红）。
 - **Gradle 插件：agent 版本对账 + `cleanRemoldCache`**：`remold-agent.jar` manifest 写入
-  `Remold-Version`，插件发现本地 jar 与配置版本不一致时重新解析并覆盖（日志点名被忽略的旧文件），
-  版本匹配走离线快路径；显式 `agentJar` 只告警不覆盖。`cleanRemoldCache` 默认只清项目
-  `.gradle/remold` 与 `build/remold`，跨项目共享缓存需 `--global`，刻意不挂 `clean`。
-  单测 `RemoldAgentVersionTest`、`CleanRemoldCacheTaskTest`。
+  `Remold-Version`，本地 jar 与配置版本不一致时重新解析并覆盖（日志点名被忽略的旧文件），版本匹配走
+  离线快路径；显式 `agentJar` 只告警不覆盖。`cleanRemoldCache` 默认只清项目 `.gradle/remold` 与
+  `build/remold`，共享缓存需 `--global`，刻意不挂 `clean`。单测 `RemoldAgentVersionTest`、
+  `CleanRemoldCacheTaskTest`。
+- **agent 自举打开 JDK 内部包**：`ModuleOpener` 在 `premain`/`agentmain` 第一行
+  用 `Instrumentation.redefineModule` 把 9 个 JDK 内部包对所有 unnamed module 一次性 export + open，
+  用户不再需要 `--add-exports`/`--add-opens`；补 `EVERYONE_MODULE` 兜底（覆盖 premain 后才创建的
+  加载器）与插件初始化时再开一次（宿主加载器的 unnamed module premain 时还不存在）。
 
 ### Changed
 
-- **枚举安全门收口**（合并三处同类问题）：
-  - **顺序变化不再被对齐器吞掉**：`MixinMemberAlign.hasMixinGeneratedMembers` 曾把 `$VALUES` 等 JVM
-    合成字段当成 Mixin 生成成员，在 `ClassDiffUtil` 之前恢复基线顺序，导致 `CHANGED_ENUM_ORDER`
-    看不到重排/前插；现在判据排除 `$VALUES` / `this$N` / `$assertionsDisabled` / `$SwitchMap$*` /
-    `$EnumMap$*` 等合成形态，枚举类不做字段表重排、被删常量不复活成墓碑字段。
-  - **常量增删不再假成功**：`ClassDiffUtil` 产出 `addedEnumConstants` / `removedEnumConstants`，
-    布局门以 `ENUM_CONSTANT_SET_CHANGED` 拒绝并提示重启，同批直接引用变更常量的调用方一并移出。
-  - **拒绝原因改为实测阻断清单**：不再只说"`<clinit>` 不重跑"，而是点名 JIT 编译后的旧常量表、
-    `$SwitchMap$`/`$SWITCH_TABLE$` 补不出新 case、存量 `EnumMap`/`EnumSet` 无法扩容三处阻断
-    （依据 JBR 21 真机探针 30 次独立 JVM、javac 21 与真 javac 8 两种字节码；
-    `tests/enum-append-probe/`、`docs/topology/10-enum-constant-append-infeasibility.md`、决策 `D-ENUM-1`）。
-  测试：`EnumAlignmentGateWiringTest`（先红后绿，变异击杀宽判据与字段保护）、
-  `EnumSwitchReorderGateTest` 9/9。
-- **删除成员的读者扫描不再被 JDK 无关引用误杀**：同 `name:desc` 的 `ArrayList.<init>(I)V` 等
-  JDK 引用此前因类型世界缺失被判 `UNKNOWN`，整轮 fail-closed 误杀同批重编的调用方；现只跳过
-  **可证明无关**的引用（构造器 owner 不等；platform 前缀 owner 对非 platform 成员且仅限字段/
-  static/private）。实例虚方法仍 fail-closed；拒绝日志点名前 3 个 reader 类。
+- **枚举安全门收口**（顺序 + 常量集合 + 对齐器抢跑 + 拒绝诊断）：
+  - 新增 `CHANGED_ENUM_ORDER` 与 switch 级联阻断：枚举声明顺序变化会让旧 `ordinal` 读者错位；
+  - `ClassDiffUtil` 产出 `addedEnumConstants`/`removedEnumConstants`，布局门以
+    `ENUM_CONSTANT_SET_CHANGED` 拒绝并提示重启，同批直接引用变更常量的调用方一并移出；
+  - 拒绝原因改为实测阻断清单：JIT 编译后的旧常量表、`$SwitchMap$`/`$SWITCH_TABLE$` 补不出新 case、
+    存量 `EnumMap`/`EnumSet` 无法扩容（JBR 21 真机 30 次独立 JVM、javac 21 与真 javac 8 两种字节码；
+    `tests/enum-append-probe/`、`docs/topology/10-enum-constant-append-infeasibility.md`、`D-ENUM-1`）；
+  - `MixinMemberAlign` 不再把 `$VALUES` 等 JVM/javac 合成字段当 Mixin 成员而抢跑恢复基线顺序，
+    枚举类不做字段表重排、被删常量不复活成墓碑字段。
+- **注解默认值漂移 fail-closed**：注解成员默认值变化/移除/新增时默认拒绝——已加载的
+  消费者类仍读旧默认值，热更无法回填；批量路径整轮共退、动态路径拒绝并点名，显式降级通道
+  `-Dremold.agent.annotation_default_change=allow` 才放行且必须打 WARN。
+  覆盖：`ClassDiffUtilTest` 10 条、`AnnotationDefaultGateTest` 6 条、`AnnotationDefaultProbe`。
+- **lambda 兜底配对改 fail-closed**：旧 callsite 找不到确定归属时不再静默错绑到某个新 body，
+  改为 WARN + 拒绝配对；补充门禁状态自报、永久护栏、大样本语料（N=37）与误报评估。
+  覆盖：`LambdaAlignTortureTest`（错绑与幽灵场景）、`LambdaBridgeAlignTest`。
+- **无 `-g` 捕获 lambda 的严格模式**：类缺少 `LocalVariableTable` 时捕获形参名不可得、
+  换序判定失效，旧实例会静默沿用旧行为；现在 `align` 输出明确 WARN 并登记
+  `missingLvtLambdas`，`-Dremold.agent.lambda_strict=true` 时抛
+  `LambdaAlignmentStrictException`（`[HOTSWAP-REJECT]` + 回滚该类）。
+  `LambdaLvtStrictGateTest` 6/6（变异：注释 strict 抛错分支 → 精准变红）。
+- **参数注解/泛型签名漂移成员级告警**：参数注解值/类型/删除变化、字段与方法签名泛型变化
+  输出 `[SIG-DRIFT]` 点名（含派生类驱逐范围扩展）；类级泛型签名仍为已知未覆盖边界。
+  覆盖：`ParameterAnnotationDriftTest`、`:tests:metadataDriftWarnProbe`（挂在 `:tests:check`）。
+- **静态性翻转/构造器删除/环境开关覆盖检测**：方法与字段 static↔instance 翻转按 ICCE 拦截
+  （旧调用指令写入 `incompatibleAccess`，布局门拒绝）；删除构造器按批次外读者拦截；`-D` 环境开关
+  覆盖检测纳入同一门禁。覆盖：`MemberStaticnessAndConstructorScanTest` 7/7、8/8（变异：
+  注释静态性翻转判断 → 2 红）。
+- **Record 组件与 `@RemoldReinit` 初值可行性门**：Record 新增组件（有存活实例）拒绝；
+  `@RemoldReinit` 授权前先核验切片可提取性（Record 组件/构造器参数自赋值/无合法初值表达式 →
+  `LAYOUT-REJECT`），避免授权放行后存量实例被静默清零。`RecordAndReinitExtractabilityGateTest` 5/5。
 - **`@RemoldReinit` 用户契约收口**：`-Dremold.agent.force_reinit` 从死配置接成真实逃生口（默认 false）；
-  新增 `[REINIT] @RemoldReinit trigger on <类>` 逐字段点名触发原因；新增继承作用域安全门
-  （`INCLUDE_SUBCLASSES` + 已登记子类在 `<init>` 写同一继承字段时拒绝并点名子类，`scope = SELF` 不拦）；
-  Javadoc 补齐"Does not do"清单与 `CONDITIONAL` 语义表；B4 拒绝文案列出**全部**不可提取字段及出路。
+  新增 `[REINIT] @RemoldReinit trigger on <类>` 逐字段点名触发原因；新增继承作用域门
+  （`INCLUDE_SUBCLASSES` + 已登记子类写同一继承字段时拒绝点名子类）；Javadoc 补齐"Does not do"
+  清单与 `CONDITIONAL` 语义表；拒绝文案列出**全部**不可提取字段及出路。
+- **删除成员的读者扫描不再被 JDK 无关引用误杀**：只跳过**可证明无关**的引用（构造器 owner 不等；
+  platform 前缀 owner 对非 platform 成员且仅限字段/static/private），实例虚方法仍 fail-closed；
+  拒绝日志点名前 3 个 reader 类。覆盖：`UnrelatedRefReaderScanTest` 9/9。
+- **普通类字段误重排修复 + 两阶段门控优化**：修正非 Mixin 普通类被成员对齐器误重排的问题；
+  两阶段触发判据只看真正会写的零值暴露字段。
 - **运行期日志与用户可见字符串全部英文**：主源码 17 处中文文案（6 个文件）译为英文，新增
-  `./gradlew :tests:verifyLogLanguage`（挂 `check`）扫描主源码字符串字面量，命中 CJK/全角标点即失败；
-  规则写入 `AGENTS.md` §3。
-- **发版坐标自检大小写敏感**：`verifyReleaseCoordinates` 不再只断言 POM 存在（大小写不敏感文件系统会
-  掩盖拼写错误），改为按字面量校验两套坐标的 `<groupId>/<artifactId>/<version>`；8 个模块与模板/
-  文档统一回 GitHub 账号真实大小写 `com.github.I-hope1.Remold`。验证：mavenLocal 16/16 坐标可解析，
+  `./gradlew :tests:verifyLogLanguage`（挂 `check`）扫描主源码字符串字面量；规则写入 `AGENTS.md` §3。
+- **发版坐标自检大小写敏感**：`verifyReleaseCoordinates` 不再只断言 POM 存在（大小写不敏感文件系统
+  会掩盖拼写错误），按字面量校验两套坐标的 `<groupId>/<artifactId>/<version>`；8 个模块与模板/文档
+  统一回 GitHub 账号真实大小写 `com.github.I-hope1.Remold`。验证：mavenLocal 16/16 坐标可解析，
   两套模板 `help --offline` 均解析到 `gradle-plugin:v0.2.8`。
 
 ### Fixed
@@ -86,6 +110,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   （变异：映射改回 Android 产物 → 2 用例红）。
 - **CI 原生构建噪声**：aarch64 不再在 CI 现场构建（zig 内部 libc++ 构建绕过 `-w`，产生数千条注解）；
   探针 `AddFieldReloadProbe` / `DoubleBraceProbe` 补 `@SuppressWarnings`（刻意调用 JDK removal API）。
+- **测试夹具调试信息档位**：`:tests` 的 SemAssert 夹具 `debugLevel` 从收窄档位
+  改回全量 `-g`（`source,lines,vars`），与用户工程 Gradle 默认一致；收窄会丢 `LocalVariableTable`，
+  使 lambda 捕获身份不可判定。
 
 ### Docs
 
@@ -95,6 +122,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   保留旧体）、`docs/releases/v0.2.8.md`（本版发布说明）。
 - **`AGENTS.md`**：新增日志语言强制规则、代码地图补孤儿 lambda 保留与两阶段动态入口、
   按需文档索引补 topology/10 与 topology/11。
+- **文档去内部代号**：清理状态/拓扑/Mixin 文档中的战役代号、批次编号与证据流水号，改为机制直述
+  （约 40 个 docs 提交，不改行为）。
 
 ### Verification
 
@@ -108,61 +137,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.7] - 2026-11-11
 
 ### Added
-
-- **JDK 内部包的可见性改为 agent 自举**：`core/src/remold/ModuleOpener` 在 `premain`/`agentmain` 第一行
-  调用 `Instrumentation.redefineModule`，把 `jdk.internal.misc` / `jdk.internal.reflect` /
-  `jdk.internal.loader` / `jdk.internal.access` / `jdk.internal.vm` / `java.lang{,.invoke,.reflect}` /
-  `sun.nio.ch` 这 9 个包对**所有 unnamed module** 一次性 export + open，因此用户**不再需要**
-  `--add-exports java.base/…=ALL-UNNAMED` 与 `--add-opens …=ALL-UNNAMED`（旧参数继续传不冲突）。
-  对照实验（JBR-21，同一份探针、均不带 `--add-exports`）：无 agent → `InaccessibleObjectException`；
-  有 agent → `[Agent] opened 9 JDK-internal package(s)` 且反射取 `Unsafe` 成功。
-  `--enable-native-access=ALL-UNNAMED`（Java 24+）仍需保留——那是受限本地方法的独立授权。
-- 重定义访问权限防线（四层）：`core/src/remold/ref/AccessAlign.java` 以 JVM 已加载运行时字节码为基线，
-  对重织入产物做**访问权限单调对齐**（public 不得退化、protected 不得退化、基线已剥离的 `ACC_FINAL`
-  必须同步剥离），并在送入 `redefineClasses` 前做 fail-closed 自检门；Fabric 侧新增 Mixin 前置变换重放
-  （`FabricTransformer` 的 `PackageAccessFixer` / `AccessWidener`，`plugin-fabric` +
-  `plugin-mixin readOriginalBytes`）；`RemoldAgent` 对 `InternalError`/`VerifyError` 记入本会话黑名单，
-  `[Mixin]` 日志不再把 JVM 级失败误归因为 LayoutGate。
-  动机：Mixin 目标从原始 jar 重织入时丢失加载器在 Mixin 之前做的权限提升，112 个可访问成员退回
-  `protected`，JBR 增强重定义连带 link/verify 子类时触发
-  `VerifyError: Bad access to protected data in invokevirtual` → `JVMTI_ERROR_INTERNAL`。
-  验证：`AccessAlignTest` 5/0（含真实 JVM 跨包 `VerifyError` 红基线 + 对齐后绿）；变异检查关闭对齐逻辑后
-  3/5 变红、恢复后复绿。
-- Mixin 生成成员名/顺序基线对齐：`core/src/remold/ref/MixinMemberAlign.java` 把
-  `handler$/redirect$/wrapOperation$/localvar$` 等 Mixin 合成成员按 `(前缀, $z<id>$ 之后的尾名, 描述符)`
-  映射回已加载基线名，并按基线顺序重排方法/字段（ASM `ClassRemapper` 同步改写调用点与
-  `InvokeDynamicInsnNode.bsmArgs` 中的 `Handle`）。真机采样证明同一 Mixin 会话内 unique id 稳定，
-  该层在本次场景为防御性 no-op；`MixinMemberAlignTest` 6/0（含真实捕获字节回归），变异关闭改名/排序后
-  分别 2/2 变红。
-- 同名类多副本选择：`MixinHotSwap` 发现同一 dot 名在多个 ClassLoader 各定义一份时，优先选择宿主加载器
-  （Knot/ModLauncher）的副本，而不是 Agent/System 加载器可能提前定义的裸副本；并在日志里点名全部副本
-  加载器。真机实测这是 `LivingEntity` 重定义失败的真正根因：此前两轮选中的是 `AppClassLoader` 的裸副本
-  （无 Mixin 织入、无 `PackageAccessFixer`），JBR 报 `added interface HonkaiEntityAccess` 并最终
-  `VerifyError: Bad access to protected data in invokevirtual` → 裸 `InternalError`。
-- 内部重定义期间对“受影响的子类”原样放行：`AnnotationTransformer` 在 `INTERNAL_CONTEXT` 下收到非本次目标
-  的 ClassFileLoadHook 时直接返回 `null`，不再二次走 Mixin 桥/布局门（`-Dremold.agent.internal_passthrough`
-  可关闭用于取证）。
-- JBR 裸 `InternalError` 透视：`RemoldAgent` 捕获 `InternalError`/`VerifyError` 后经 DiagnosticCommand
-  `vmInfo` 抓取 HotSpot `Internal exceptions (N events)` 缓冲最后 160 行写入日志（`[VM-INFO]`）。
-- 真机闭环（patch 后模板工程实测）：`LivingEntityErosionMixin` 连续两次热更均
-  `[DYNAMIC-REDEFINE] Successfully redefined net.minecraft.entity.LivingEntity`；无 `[VM-REDEFINE-POISON]`、
-  无 `VerifyError`/`InternalError`、之后持续运行（tick 增长、60fps）无 C1 崩溃。日志明确：
-  `Multiple loaded copies ... KnotClassLoader@42f93a98 vs AppClassLoader@3fee733d; using KnotClassLoader`。
-- 同名类副本仲裁全仓收口：新增 `core/src/remold/ClassCopySelector.java`（bootstrap/System-Agent/宿主
-  三级 rank + 子加载器关系 + 拒绝抛弃式预测副本），统一替换 `RemoldAgent.loadClassSnap`、
-  `MixinHotSwap`、`MixinInnerClassHotSwap`、`MountManager` 包映射、`DynamicProfilerAPI` 的候选选择。
-- 基线缓存防裸副本覆盖：`AnnotationTransformer` 的首载写入改走 `RemoldAgent.updateInitialBaseline`，
-  按加载器 rank 仲裁（低权威副本拒绝、高权威可替换、manifest 对齐产物强制、ephemeral 永不入缓存），
-  并在发现同名二次定义时打印带 40 帧调用栈的 `[DUP-LOAD]`。
-- 源头切断（真机 `[DUP-LOAD]` 40 帧栈定位）：`HostReadinessProbe` 的默认类查找口不再使用
-  `Class.forName(..., getSystemClassLoader())`，改为只从 `RemoldAgent.loadedClassesMap`（宿主快照）取；
-  此前 `staticInstance -> getDeclaredMethod` 会把 `MinecraftServer`/`MinecraftClient` 及其签名类型
-  （`LivingEntity`、`Attackable` 等）全部定义为 `AppClassLoader` 裸副本。
-- `[VM-INFO]` 改为输出完整 `Internal exceptions` 区块（直到下一个区块头），不再被后续
-  `InternalError` 事件顶出窗口。
-- 真机终验（最终代码、最终 jar）：连续两次 `LivingEntity` 热更成功，`[DUP-LOAD]` = 0，
-  无 `[VM-REDEFINE-POISON]`/`VerifyError`/`InternalError`/`Rolling back`，游戏持续运行无 C1 崩溃。
-  单测：`ClassCopySelector`/缓存仲裁/就绪快照/成员对齐/受影响的子类放行全部绿；变异检查全部 killed。
 
 - **新 Mixin 运行期登记字节通道**：`MixinClassByteSources`（已登记内存字节 → 全部 watch 目录最新磁盘字节 →
   上次批次源码缓存）+ `MixinNewMixinBytes`（在 `MixinConfig.prepare()` **之前**把 Mixin 与 `$N` 内部类字节
@@ -178,29 +152,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   把「父类变更」与「接口增删」分开判决（仅后者在 JBR/DCEVM 放行）。
 
 ### Fixed
-
-- **测试夹具的调试信息档位**：`:tests` 的 SemAssert 夹具（`hstestFx_*`）曾显式把 `debugLevel` 收窄成
-  `-g:source,lines`，缺 `LocalVariableTable` → lambda 捕获身份只能靠槽号猜，整批夹具跑在"无调试信息"档，
-  与真实用户工程（Gradle 默认 `source,lines,vars`）不一致。现改为全量 `-g`，并把「`-g` 与捕获顺序判定」
-  的前提写进 `docs/mixin/08-decisions-and-empirical-ledger.md` §3.5（含 javac 在 `-g:none` 下把
-  语义不同的两个 lambda 去重合并的实证）。
-- `[ANON_ALIGN]` 的 Tier 4.5 日志不再把“扫描可见的活实例为 0”表述成“实例已死”，也不再把
-  “实例数为 0”当作配对安全性的依据。此前该行写作 `deterministic-dead-pair (0 live instances)`，
-  而真实客户端里字段持有的实例仍然存活并继续执行（`fieldAnon v2/v3`），文案与事实不符。现在该行
-  改为 `deterministic-zero-scan-pair (scan-visible live instances: 0)`，并显式说明：
-  ① 判据只是“本轮 JVMTI 堆扫描对这些旧候选没有可见的存活实例”，扫描结果不能反证不可见实例不存在；
-  ② 放行的另外一条依据是配对双方布局完全兼容；③ 这既不是结构唯一匹配，也不是语义安全结论，
-  只能当作审计线索。宿主字段可能持有时，日志会点名 `proven`（精确描述符/赋值流）与 `candidate`
-  （父类型/接口）两种强度的持有者字段，其中 `proven` 持有者会把该行升级为 `warn`；`AlignmentStats`
-  的计数字段 `deterministicDeadPairs` 更名为 `deterministicZeroScanPairs`（旧名字段保留为
-  `@Deprecated` 同步别名，维持 0.2.6 下游二进制兼容）。同一份
-  liveness 判据派生的 `[ANON-LAYOUT]` / `[LAYOUT-WAIVE]` 放行文案与歧义诊断（`scanVisibleLive=`/
-  `scanVisibleLiveOld=`）同步改用“扫描可见”措辞，`RemoldAgent.hasLiveInstances` 的 Javadoc 补上
-  “false = 本轮扫描没看见，不是实例不存在的证明”的语义边界。Tier 4.5 的判定逻辑与行为不变（仍是全组扫描可见零存活 + 布局 100% 兼容）；
-  没有把“存在持有者字段”并入 liveness 判据——那会把 0.2.6 已消解的字段持有场景重新推回孤儿化，
-  而正确做法是让日志把“扫描可见”与“字段可能持有”两个事实同时摆出来。
-  验证：`AnonClassAmbiguityTest` 17/0（新增 4 个文案/持有者用例，含“无持有字段不得凭空点名”的负向对照；
-  变异检查：把日志文案改回旧词后 4 条断言变红，恢复后复绿）。
 
 - **合成类成员 schema 变化一律拒绝（真机终局裁定）**：`[观测]` 真机两分支实测——`fieldTableChanged=true` 时
   即便 `live{raw=0 reachable=0}`（堆上 0 实例），JBR-21 DCEVM 的 `redefineClasses` 仍必现

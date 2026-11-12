@@ -236,6 +236,10 @@ flowchart LR
 - 本主题**交付**的是"检测 + 成员级 WARN 点名"：`ReflectionCacheManager.detectMemberMetadataDrift` /
   `describeMemberMetadataDrift` 与 `RemoldAgent.reportMemberMetadataDrift` 接线；
   真实流水线确实发出 WARN，由接线探针 `:tests:metadataDriftWarnProbe` 断言（驱动真实 `processChanges`）。
+- **把关口径（重要）**：`:tests:test` 对接线短路**没有分辨力**——把 `processChanges` 里的调用点短路后
+  `remold.evict.*` 仍然全绿（实测 `mut-4da1` survived）。接线仅由 `:tests:metadataDriftWarnProbe`
+  **单点把关**（它驱动真实批次并断言 WARN 点名），合流门禁为 **`:tests:check`**（该任务已 `dependsOn`
+  到探针；`:tests:check --dry-run` 的任务图里可见它）。
 - **未交付**：`EvictionScope.WITH_DESCENDANTS` 驱逐范围扩展整体停在 `parked/k-eviction-scope` 分支
   （含 3 条"驱逐器实际收到哪些类"的用例），**不在**本主题的合流候选里。缺的读数是
   **"已注册缓存（Gson/Jackson/插件）驱逐前读到错误值、驱逐后读到正确值"的前后对照**；
@@ -261,6 +265,10 @@ flowchart LR
 - Mixin 相关语料版本（本主题文档所引 Mixin 生态上下文）：`plugin-mixin` 与 `plugin-forge` 的
   编译期依赖固定为 **`org.spongepowered:mixin:0.8.5`（`compileOnly`）**；
   `tests` 侧对应 `implementation "org.spongepowered:mixin:0.8.5"`。N=37 语料按此版本复现。
+- 探针的 JVM 选择与回退：优先 `-Pp05.jbr=<jdk>`，其次环境变量 `JBR_HOME` / `JAVA_HOME_DCEVM` /
+  `JAVA_HOME_21_X64`；**四者都缺时用默认 JVM 继续跑（不 skip、不静默跳过）**——属性级 redefine 在
+  标准 HotSpot 上同样生效，因此缺 DCEVM 只会让"格③"那一档变成标准 HotSpot 读数，日志里
+  `PROBE-ENV` 行会明确写出实际 `java.version` 与 `inputArguments`。
 - 运行时：JBR 21.0.9（`jbrsdk_jcef-21.0.9`）与 JBR 25.0.2（`jbrsdk_jcef-25.0.2`），
   格③ 额外 `-XX:+AllowEnhancedClassRedefinition`；三格的 `java -version` 全文与完整 `inputArguments`
   见 §5.1 与探针日志（`PROBE-ENV` 行）。

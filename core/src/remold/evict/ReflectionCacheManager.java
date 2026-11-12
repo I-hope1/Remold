@@ -144,10 +144,9 @@ public final class ReflectionCacheManager {
 				+ ": " + String.join(" + ", e.getValue()) + " changed.");
 		}
 		lines.add("[SIG-DRIFT] " + (className == null ? "?" : className)
-			+ ": reflection handles (Method/Constructor/Field) resolved BEFORE this redefine are UNSAFE —"
+			+ ": reflection handles resolved BEFORE this redefine are UNSAFE —"
 			+ " treat their readings as unreliable and do not keep using them."
-			+ " Cache eviction only covers REGISTERED caches (Gson/Jackson/plugins); it cannot repair"
-			+ " handles held by user code.");
+			+ " Handles held by user code are not repaired.");
 		return lines;
 	}
 

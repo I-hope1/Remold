@@ -39,6 +39,12 @@ public class ParameterAnnotationDriftTest {
 	private static final String ANN_A = "Lsample/AnnA;";
 	private static final String ANN_B = "Lsample/AnnB;";
 
+	/** 运行时 WARN 的禁止标签全集：出现任一即说明文案暗示了单一结果或宣称了恢复效果。 */
+	private static final String[] BANNED_WARN_LABELS = {
+		"假更新", "旧元数据", "已解决", "已缓解", "确定性",
+		"会抛异常", "会读到旧值", "重新解析", "重新获取", "every measured"
+	};
+
 
 	//region 夹具构造
 
@@ -253,16 +259,21 @@ public class ParameterAnnotationDriftTest {
 		}
 
 		assertTrue(drift, "Drift must be reported to the caller (the pipeline uses the boolean to decide"
-			+ " whether to report at all; the scope-expansion consumer is parked, see parked/k-eviction-scope)");
+			+ " whether to report at all)");
 		assertFalse(captured.warnings.isEmpty(), "WARN must be emitted through RemoldAgent.logger");
 		String all = String.join("\n", captured.warnings);
 		assertTrue(all.contains("SIG-DRIFT"), "Warning must carry a searchable tag: " + all);
+		// 断言落在"实际捕获到的输出字符串"上，而不只是间接信号：
+		// ① 必须点名真实类名与成员名；
+		assertTrue(all.contains("sample.Target"), "Warning must name the changed class: " + all);
 		assertTrue(all.contains("resolve(java.lang.String, int)"), "Warning must name the member: " + all);
 		assertTrue(all.toUpperCase(Locale.ROOT).contains("UNSAFE"),
 			"Warning must register that old reflection handles are unsafe: " + all);
-		assertTrue(all.toUpperCase(Locale.ROOT).contains("REGISTERED CACHES"),
-			"Warning must state the capability boundary: eviction only covers registered caches"
-				+ " (this is a boundary, not a fix): " + all);
+		// ② 不得出现禁止标签全集（这些词会暗示单一结果，或宣称恢复效果）。
+		for (String banned : BANNED_WARN_LABELS) {
+			assertFalse(all.toLowerCase(Locale.ROOT).contains(banned.toLowerCase(Locale.ROOT)),
+				"Warning must not carry the banned label '" + banned + "': " + all);
+		}
 	}
 
 	@Test

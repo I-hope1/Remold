@@ -2608,8 +2608,7 @@ public class RemoldAgent {
 			successfulClasses.add(def.getDefinitionClass());
 		}
 		// 参数注解 / 泛型签名漂移：成员级 WARN 点名（显式登记"用户自持旧句柄不安全"）。
-		// 驱逐范围扩展（WITH_DESCENDANTS）未交付：缺"已注册缓存驱逐前后"对照读数，
-		// 该扩展整体停在 parked/k-eviction-scope 分支，这里保持原有驱逐范围不变。
+		// 未检测项（类级泛型签名等）见 K2 条目；本行只做成员级点名，不改驱逐范围。
 		reportMemberMetadataDrift(appliedForDrift, driftOldBytes);
 		remold.evict.ReflectionCacheManager.evictAll(successfulClasses);
 

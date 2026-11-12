@@ -95,7 +95,7 @@ Lambda 捕获顺序的判定有一条**编译配置前提**，不写清就会被
 
 ## 6. 注解默认值（`AnnotationDefault`）漂移：实证读数与判决
 
-> 探针：`tests/src/AnnotationDefaultProbe.java`（复用批次 K 冻结框架的读数口径与三格矩阵：
+> 探针：`tests/src/AnnotationDefaultProbe.java`（复用已冻结的探针框架与同一套运行时矩阵：
 > 旧句柄 warm/cold · 重定义后 `getDeclaredMethods()` · 重定义后首次解析 · 消费者终局）。
 > 夹具：内存 `javac` 现编注解类型 `probe.dflt.Mark`（`String value() default "v1"`）+ 消费者
 > `probe.fix.Consumer`（类与方法各一个 `@Mark`，不显式写成员值 → 只能取默认值）。
@@ -186,7 +186,7 @@ Lambda 捕获顺序的判定有一条**编译配置前提**，不写清就会被
 ### 6.6 未闭合
 
 - 真机（Fabric/Knot 客户端）未跑：本节全部读数来自 JVM 级探针，混合 Mixin 重织入后的注解类型变化未验。
-- 格③ `getDefaultValue()` 读到 `SourceFile` 常量的成因未定位（只登记 3/3 复现，同机同参数）。
+- JBR 21 DCEVM 下 `getDefaultValue()` 读到 `SourceFile` 常量的成因未定位（3 次独立进程各 3/3 复现，同机同参数）。
 - 批量"整轮共退"的端到端（真实 `processChanges` 多类批次）未跑，当前由单测
   `AnnotationDefaultGateTest#batchRefusalRollsBackTheWholeBatchAndLeavesAVerdict` 覆盖接线，
   端到端仅有动态单类路径（`redefineDynamic`）。

@@ -46,7 +46,7 @@ import remold.RemoldAgent;
  * <p><b>跑法</b>（按运行时分行，见 {@code docs/mixin/08} 的对应章节）：
  * {@code java -javaagent:tests/build/p05/p05-agent.jar -cp tests/build/classes/java/main
  * AnnotationDefaultProbe}，用不同的 {@code java} 与是否附加
- * {@code -XX:+AllowEnhancedClassRedefinition} 区分格①/②/③；格子身份由本探针自己打印的
+ * {@code -XX:+AllowEnhancedClassRedefinition} 区分三种运行时；运行时身份由本探针自己打印的
  * {@code structuralRedefine} 读数判定，不靠参数名推断。</p>
  */
 public final class AnnotationDefaultProbe {

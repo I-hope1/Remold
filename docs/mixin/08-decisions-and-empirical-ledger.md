@@ -169,20 +169,19 @@ Lambda 捕获顺序的判定有一条**编译配置前提**，不写清就会被
   动态路径在 `redefineDynamic` 前拒绝且不调用 `redefineClasses`。
 - 降级通道 `-Dremold.agent.annotation_default_change=allow`（默认关闭）：放行时**必打**
   `[ANNOTATION-DEFAULT]` 警告并点名类与成员——不得静默。
-  `[推断]`：即使显式放行，已加载的消费者类仍读旧默认值（批次 J 探针 gate 模式读数：
+  由代码分析可知：即使显式放行，已加载的消费者类仍读旧默认值（`AnnotationDefaultProbe gate` 模式读数：
   `consumerBefore=v1 consumerAfter=v1`）。
-- `default added` 为什么也拒绝：格①② 的 C5 抛 `IncompleteAnnotationException`（新代码依赖新默认值会炸），
-  格③ 未见有害。`[推断]`：按最严格格（①②）定性更安全；是否对格③放宽由指挥部裁定。
+- `default added` 为什么也拒绝：标准 HotSpot 下重定义后加载的裸 `@Mark` 消费者抛 `IncompleteAnnotationException`（新代码依赖新默认值会失败），
+  DCEVM 下未见有害。按最严格运行时（标准 HotSpot）定性更安全；是否对 DCEVM 放宽另行评估。
 
 ### 6.5 复跑命令与证据
 
-- 三格：见 6 开头跑法（`ev-20261112065151-6ca8` 格① / `ev-20261112065208-c5bb` 格② /
-  `ev-20261112065225-cfcb` 格③，均含 `java -version` 全文与启动参数）。
-- 门禁端到端（真 `remold-agent.jar` + `redefineDynamic`）：`AnnotationDefaultProbe gate`
-  —— 默认拒绝 `ev-...`、显式放行 `ev-...`（见战报）。
+- 三种运行时：见 §6 开头的跑法（`AnnotationDefaultProbe grid`，每个运行时各跑一趟，
+  日志含 `java -version` 全文与启动参数）。
+- 门禁端到端（真 `remold-agent.jar` + `redefineDynamic`）：`AnnotationDefaultProbe gate`——
+  默认拒绝与显式放行两条路径各一趟。
 - 单测：`./gradlew :tests:test --offline --tests=ClassDiffUtilTest --tests=AnnotationDefaultGateTest`
-  （16 条；先红基线 `ev-20261112064258-0660` 10 条断言失败 / 0 编译错误 → 恢复后
-  `ev-20261112064355-5f86` 16/16 绿）。
+  （16 条；把比较器临时改回恒 `null` 时 10 条断言失败、0 编译错误；恢复后 16/16 通过）。
 
 ### 6.6 未闭合
 

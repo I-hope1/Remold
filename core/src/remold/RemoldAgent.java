@@ -2607,11 +2607,48 @@ public class RemoldAgent {
 		for (ClassDefinition def : successfulDefinitions) {
 			successfulClasses.add(def.getDefinitionClass());
 		}
-		remold.evict.ReflectionCacheManager.evictAll(successfulClasses);
+		// 参数注解 / 泛型签名漂移：这类变化不改类名、不改成员描述符，重定义会成功且不抛任何
+		// LinkageError；但已解析的反射句柄与框架按成员派生出的元数据仍按旧签名解释。
+		// 处理 = 成员级 WARN 点名（显式登记"用户自持旧句柄不安全"）+ 把驱逐范围扩到派生类
+		// （子类键下缓存的"继承成员元数据"同样过期）。
+		boolean memberMetadataDrift = reportMemberMetadataDrift(appliedForDrift, driftOldBytes);
+		remold.evict.ReflectionCacheManager.evictAll(successfulClasses,
+			memberMetadataDrift ? remold.evict.ReflectionCacheManager.EvictionScope.WITH_DESCENDANTS
+			                    : remold.evict.ReflectionCacheManager.EvictionScope.DECLARED,
+			classes);
 
 		// 与上面的 [HOTSWAP-SKIPPED] 区分：这里是"磁盘哈希没变，本来就没改"，不是被门拦下。
 		if (skippedCount > 0) info("Unchanged: " + skippedCount + " class(es) had identical bytes on disk.");
 		if (injectedCount > 0) info("Injected " + injectedCount + " new classes.");
+	}
+
+	/**
+	 * 参数注解 / 泛型签名漂移的接线点：逐类比对重定义前的有效字节与本轮生效字节，成员级点名并 {@code warn}。
+	 *
+	 * <p>这条告警是"用户自持旧 {@code Method} 句柄不安全"的唯一登记入口：缓存驱逐只覆盖已注册驱逐器，
+	 * 无法修复用户代码或未注册框架里已经解析好的句柄。缺了它，读到日志的人会把
+	 * "驱逐过缓存"误读成"已解决"。</p>
+	 *
+	 * <p>刻意保持 {@code public static}：单测用 {@link #logger} 捕获告警做终局断言，
+	 * 而不是复制一份比对逻辑（复制出来的那份不会随实现漂移）。</p>
+	 *
+	 * @param newBytes 本轮生效字节（键为目标类名）
+	 * @param oldBytes 重定义前的有效字节（键同上；缺键表示没有基线，不判定，也不当作"没变"）
+	 * @return 是否发现至少一处漂移（调用方据此把缓存驱逐范围扩到派生类）
+	 */
+	public static boolean reportMemberMetadataDrift(Map<String, byte[]> newBytes, Map<String, byte[]> oldBytes) {
+		if (newBytes == null || newBytes.isEmpty()) return false;
+		boolean drift = false;
+		for (Map.Entry<String, byte[]> e : newBytes.entrySet()) {
+			byte[] before = oldBytes == null ? null : oldBytes.get(e.getKey());
+			if (before == null) continue;
+			List<String> lines = remold.evict.ReflectionCacheManager
+				.describeMemberMetadataDrift(e.getKey(), before, e.getValue());
+			if (lines.isEmpty()) continue;
+			drift = true;
+			for (String line : lines) warn(line);
+		}
+		return drift;
 	}
 
 

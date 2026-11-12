@@ -1,5 +1,11 @@
 package remold.evict;
 
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.Type;
+import org.objectweb.asm.tree.AnnotationNode;
+import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldNode;
+import org.objectweb.asm.tree.MethodNode;
 import remold.RemoldAgent;
 import remold.util.LibTool;
 
@@ -61,19 +67,65 @@ public final class ReflectionCacheManager {
 	}
 
 	/**
+	 * 驱逐范围。
+	 */
+	public enum EvictionScope {
+		/** 只驱逐被重定义的类本身（默认，与旧行为一致）。 */
+		DECLARED,
+		/**
+		 * 额外包含"已加载的派生类闭包"（子类 + 子接口的实现者）。
+		 *
+		 * <p>参数注解 / 泛型签名变化只改<b>声明类</b>的成员元数据，但框架为子类建立的描述符
+		 * （如 Jackson 的 {@code BeanDescription}）会把继承来的成员元数据一起缓存到<b>子类键</b>上。
+		 * 只驱逐声明类，会留下"子类键 + 旧签名元数据"的过期条目；因此漂移场景必须扩到派生类。</p>
+		 */
+		WITH_DESCENDANTS
+	}
+
+	/** 派生类闭包上限：只防失控；触顶时显式告警，不静默截断。 */
+	private static final int MAX_SCOPE_CLASSES   = 4096;
+	/** 层级遍历深度上限（防御性，正常继承链远达不到）。 */
+	private static final int MAX_HIERARCHY_DEPTH = 32;
+
+	/**
 	 * 对指定的重定义类集合执行所有已注册框架的缓存驱逐。
 	 *
 	 * @param redefinedClasses 重定义成功的类集合
 	 * @return 总驱逐条目/实例数
 	 */
 	public static int evictAll(Set<Class<?>> redefinedClasses) {
+		return evictAll(redefinedClasses, EvictionScope.DECLARED, null);
+	}
+
+	/**
+	 * 对指定的重定义类集合执行所有已注册框架的缓存驱逐，可扩展驱逐范围。
+	 *
+	 * <p><b>能力边界（不得表述为"已解决"）</b>：本方法只覆盖<b>已注册的</b>框架缓存
+	 * （Gson / Jackson / 插件注册的驱逐器）。用户代码或未注册框架自持的
+	 * {@code Method} / {@code Constructor} 句柄在重定义后仍持有旧元数据，本方法无法修复它们；
+	 * 该边界由 {@link #describeMemberMetadataDrift} 的告警显式登记。</p>
+	 *
+	 * @param redefinedClasses 重定义成功的类集合
+	 * @param scope            驱逐范围，{@code null} 视为 {@link EvictionScope#DECLARED}
+	 * @param loadedClasses    已加载类快照（仅 {@link EvictionScope#WITH_DESCENDANTS} 使用；
+	 *                         为 {@code null} 时退化为 {@link EvictionScope#DECLARED} 的结果）
+	 * @return 总驱逐条目/实例数
+	 */
+	public static int evictAll(Set<Class<?>> redefinedClasses, EvictionScope scope, Class<?>[] loadedClasses) {
 		if (redefinedClasses == null || redefinedClasses.isEmpty()) {
 			return 0;
+		}
+		Set<Class<?>> targets = scope == EvictionScope.WITH_DESCENDANTS
+			? withDescendants(redefinedClasses, loadedClasses)
+			: redefinedClasses;
+		if (RemoldAgent.DEBUG && targets.size() != redefinedClasses.size()) {
+			RemoldAgent.log("[CacheEvict] scope expanded: " + redefinedClasses.size() + " declared -> "
+				+ targets.size() + " class(es) (descendants included).");
 		}
 		int totalEvicted = 0;
 		for (ReflectionCacheEvictor evictor : evictors) {
 			try {
-				int count = evictor.evict(redefinedClasses);
+				int count = evictor.evict(targets);
 				totalEvicted += count;
 				if (count > 0 && RemoldAgent.DEBUG) {
 					RemoldAgent.log("[CacheEvict] " + evictor.getName() + " evicted " + count + " item(s).");
@@ -84,6 +136,247 @@ public final class ReflectionCacheManager {
 		}
 		return totalEvicted;
 	}
+
+	/**
+	 * 计算"声明类 ∪ 已加载派生类"的驱逐目标集合。
+	 *
+	 * <p>派生关系按 JVM 的成员解析方向取：沿 {@code getSuperclass()} 上行 + 沿 {@code getInterfaces()}
+	 * 递归下行（多实现/接口继承）。{@code loadedClasses} 为空时不扩（调用方没有快照可依据，不猜测）。</p>
+	 */
+	static Set<Class<?>> withDescendants(Set<Class<?>> roots, Class<?>[] loadedClasses) {
+		Set<Class<?>> targets = new LinkedHashSet<>();
+		Set<Class<?>> rootSet = new HashSet<>();
+		for (Class<?> root : roots) {
+			if (root == null) continue;
+			targets.add(root);
+			rootSet.add(root);
+		}
+		if (rootSet.isEmpty() || loadedClasses == null || loadedClasses.length == 0) return targets;
+
+		int added = 0;
+		for (Class<?> c : loadedClasses) {
+			if (c == null || rootSet.contains(c) || targets.contains(c)) continue;
+			if (c.isPrimitive() || c.isArray()) continue;
+			if (!derivedFrom(c, rootSet, 0)) continue;
+			targets.add(c);
+			if (++added >= MAX_SCOPE_CLASSES) {
+				RemoldAgent.warn("[CacheEvict] Descendant eviction scope truncated at " + MAX_SCOPE_CLASSES
+					+ " class(es); descendants beyond the cap may keep stale member metadata caches.");
+				break;
+			}
+		}
+		return targets;
+	}
+
+	/** {@code c}（不含自身）的祖先链/接口图中是否含有 {@code roots} 的任一元素。 */
+	private static boolean derivedFrom(Class<?> c, Set<Class<?>> roots, int depth) {
+		if (c == null || depth > MAX_HIERARCHY_DEPTH) return false;
+		Class<?> sup = c.getSuperclass();
+		if (sup != null && (roots.contains(sup) || derivedFrom(sup, roots, depth + 1))) return true;
+		for (Class<?> itf : c.getInterfaces()) {
+			if (itf != null && (roots.contains(itf) || derivedFrom(itf, roots, depth + 1))) return true;
+		}
+		return false;
+	}
+
+	//region 参数注解 / 泛型签名漂移点名
+
+	/**
+	 * 比较两个版本的类字节码，点名"参数注解或泛型签名发生变化"的成员。
+	 *
+	 * <p>为什么单独判这一类变化：字段/方法的<b>增删</b>有各自的安全门，而参数注解与泛型签名
+	 * 变化既不改变成员的 JVM 描述符、也不改变类名 —— 重定义会成功，但已经解析过的反射句柄
+	 * 与框架缓存里派生出的元数据仍按<b>旧签名</b>解释，且不会抛任何 {@code LinkageError}。
+	 * 因此这类变化必须至少被点出成员名，不能静默按旧行为走。</p>
+	 *
+	 * <p><b>比较口径</b>（只比较两版都存在、且 {@code name + descriptor} 相同的成员）：</p>
+	 * <ul>
+	 *   <li>{@code Signature} 属性：字段的泛型类型、方法/构造器的泛型参数、返回类型与 throws；</li>
+	 *   <li>参数注解：{@code RuntimeVisibleParameterAnnotations} 与
+	 *       {@code RuntimeInvisibleParameterAnnotations}（按参数槽位 + 注解描述符 + 元素值比较；
+	 *       同槽位的注解顺序不参与比较，缺失属性与空数组视为等价，避免误报）。</li>
+	 * </ul>
+	 *
+	 * <p><b>不覆盖</b>：方法级注解、{@code AnnotationDefault}、{@code MethodParameters} 名字、
+	 * 注解在类内其它成员上的重排。这些属于各自的批次。</p>
+	 *
+	 * @param oldBytes 重定义前的有效字节码（{@code null} 表示没有基线，直接返回空）
+	 * @param newBytes 本次要生效的字节码
+	 * @return 每个漂移成员一条描述（成员名 + 漂移的元数据种类）；无漂移返回空列表
+	 */
+	public static List<String> detectMemberMetadataDrift(byte[] oldBytes, byte[] newBytes) {
+		List<String> result = new ArrayList<>();
+		Map<String, List<String>> drift = collectMemberMetadataDrift(oldBytes, newBytes);
+		if (drift.isEmpty()) return result;
+		for (Map.Entry<String, List<String>> e : drift.entrySet()) {
+			result.add(e.getKey() + " [" + String.join(", ", e.getValue()) + "]");
+		}
+		return result;
+	}
+
+	/**
+	 * 生成"参数注解 / 泛型签名漂移"的告警文案（供接线处逐行 {@code warn}）。
+	 *
+	 * <p>最后一行固定登记能力边界：重定义<b>不会</b>刷新已经解析过的反射句柄，
+	 * 缓存驱逐也只覆盖已注册缓存。这句必须保留 —— 缺了它，读到日志的人会误以为
+	 * "已驱逐 = 已解决"，而用户自持的旧 {@code Method} 句柄仍然不安全。</p>
+	 *
+	 * @return 0 行表示无漂移；否则每成员一行 + 一行边界登记
+	 */
+	public static List<String> describeMemberMetadataDrift(String className, byte[] oldBytes, byte[] newBytes) {
+		Map<String, List<String>> drift = collectMemberMetadataDrift(oldBytes, newBytes);
+		if (drift.isEmpty()) return Collections.emptyList();
+		List<String> lines = new ArrayList<>(drift.size() + 1);
+		for (Map.Entry<String, List<String>> e : drift.entrySet()) {
+			lines.add("[SIG-DRIFT] " + (className == null ? "?" : className) + "." + e.getKey()
+				+ ": " + String.join(" + ", e.getValue()) + " changed.");
+		}
+		lines.add("[SIG-DRIFT] " + (className == null ? "?" : className)
+			+ ": reflection handles (Method/Constructor/Field) resolved BEFORE this redefine keep the OLD"
+			+ " parameter annotations / generic signature — class redefinition does NOT refresh them, so they are"
+			+ " UNSAFE; re-resolve them. Cache eviction only covers REGISTERED caches (Gson/Jackson/plugins),"
+			+ " it cannot repair user-held handles.");
+		return lines;
+	}
+
+	/** 成员显示名 -> 漂移种类（有序：声明顺序）。解析失败时返回空（不让诊断路径打断热更）。 */
+	private static Map<String, List<String>> collectMemberMetadataDrift(byte[] oldBytes, byte[] newBytes) {
+		if (oldBytes == null || newBytes == null || oldBytes.length == 0 || newBytes.length == 0) {
+			return Collections.emptyMap();
+		}
+		Map<String, List<String>> drift = new LinkedHashMap<>();
+		try {
+			ClassNode oldNode = parse(oldBytes);
+			ClassNode newNode = parse(newBytes);
+
+			Map<String, FieldNode> oldFields = new LinkedHashMap<>();
+			if (oldNode.fields != null) {
+				for (FieldNode f : oldNode.fields) oldFields.put(f.name + ":" + f.desc, f);
+			}
+			if (newNode.fields != null) {
+				for (FieldNode f : newNode.fields) {
+					FieldNode of = oldFields.get(f.name + ":" + f.desc);
+					if (of == null) continue;
+					if (!Objects.equals(of.signature, f.signature)) {
+						addDrift(drift, fieldLabel(f), "generic signature");
+					}
+				}
+			}
+
+			Map<String, MethodNode> oldMethods = new LinkedHashMap<>();
+			if (oldNode.methods != null) {
+				for (MethodNode m : oldNode.methods) oldMethods.put(m.name + ":" + m.desc, m);
+			}
+			if (newNode.methods != null) {
+				for (MethodNode m : newNode.methods) {
+					MethodNode om = oldMethods.get(m.name + ":" + m.desc);
+					if (om == null) continue;
+					if (!Objects.equals(om.signature, m.signature)) {
+						addDrift(drift, methodLabel(m), "generic signature");
+					}
+					if (!renderParameterAnnotations(om).equals(renderParameterAnnotations(m))) {
+						addDrift(drift, methodLabel(m), "parameter annotations");
+					}
+				}
+			}
+		} catch (Throwable t) {
+			// 诊断只有告警价值：解析失败不能把热更链路带崩，也不能伪装成"没有漂移"以外的结论。
+			if (RemoldAgent.DEBUG) RemoldAgent.log("[SIG-DRIFT] Cannot compare member metadata: " + t);
+			return Collections.emptyMap();
+		}
+		return drift;
+	}
+
+	private static void addDrift(Map<String, List<String>> drift, String member, String aspect) {
+		List<String> aspects = drift.computeIfAbsent(member, k -> new ArrayList<>(2));
+		if (!aspects.contains(aspect)) aspects.add(aspect);
+	}
+
+	private static ClassNode parse(byte[] bytes) {
+		ClassNode node = new ClassNode();
+		new ClassReader(bytes).accept(node,
+			ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+		return node;
+	}
+
+	private static String fieldLabel(FieldNode f) {
+		return f.name + ": " + Type.getType(f.desc).getClassName();
+	}
+
+	/** {@code bar(java.lang.String, int)}：点名必须可读，形参描述符对人没有信息量。 */
+	private static String methodLabel(MethodNode m) {
+		Type[] args = Type.getMethodType(m.desc).getArgumentTypes();
+		StringBuilder sb = new StringBuilder(m.name).append('(');
+		for (int i = 0; i < args.length; i++) {
+			if (i > 0) sb.append(", ");
+			sb.append(args[i].getClassName());
+		}
+		return sb.append(')').toString();
+	}
+
+	/** 参数注解的可比较渲染（槽位 + 注解描述符 + 元素值；同槽位顺序归一化）。 */
+	private static String renderParameterAnnotations(MethodNode mn) {
+		if (isEmptyAnnotationArray(mn.visibleParameterAnnotations)
+			&& isEmptyAnnotationArray(mn.invisibleParameterAnnotations)) {
+			return "";
+		}
+		StringBuilder sb = new StringBuilder();
+		appendAnnotatedParameters(sb, 'V', mn.visibleParameterAnnotations);
+		appendAnnotatedParameters(sb, 'I', mn.invisibleParameterAnnotations);
+		return sb.toString();
+	}
+
+	private static boolean isEmptyAnnotationArray(List<AnnotationNode>[] anns) {
+		if (anns == null) return true;
+		for (List<AnnotationNode> l : anns) {
+			if (l != null && !l.isEmpty()) return false;
+		}
+		return true;
+	}
+
+	private static void appendAnnotatedParameters(StringBuilder sb, char kind, List<AnnotationNode>[] anns) {
+		if (anns == null) return;
+		for (int i = 0; i < anns.length; i++) {
+			List<AnnotationNode> list = anns[i];
+			if (list == null || list.isEmpty()) continue;
+			List<String> rendered = new ArrayList<>(list.size());
+			for (AnnotationNode an : list) rendered.add(renderAnnotation(an));
+			Collections.sort(rendered); // 注解声明顺序不参与语义
+			sb.append(kind).append(i).append('=').append(rendered).append(';');
+		}
+	}
+
+	private static String renderAnnotation(AnnotationNode an) {
+		StringBuilder sb = new StringBuilder("@").append(an.desc);
+		if (an.values != null && !an.values.isEmpty()) {
+			List<String> pairs = new ArrayList<>(an.values.size() / 2);
+			for (int i = 0; i + 1 < an.values.size(); i += 2) {
+				pairs.add(an.values.get(i) + "=" + renderAnnotationValue(an.values.get(i + 1)));
+			}
+			Collections.sort(pairs);
+			sb.append('(').append(String.join(",", pairs)).append(')');
+		}
+		return sb.toString();
+	}
+
+	private static String renderAnnotationValue(Object v) {
+		if (v instanceof AnnotationNode) return renderAnnotation((AnnotationNode) v);
+		if (v instanceof List<?>) {
+			List<String> items = new ArrayList<>();
+			for (Object o : (List<?>) v) items.add(renderAnnotationValue(o));
+			return "[" + String.join(",", items) + "]"; // 数组元素顺序有意义，不排序
+		}
+		if (v instanceof byte[]) return Arrays.toString((byte[]) v);
+		if (v instanceof boolean[]) return Arrays.toString((boolean[]) v);
+		if (v instanceof short[]) return Arrays.toString((short[]) v);
+		if (v instanceof char[]) return Arrays.toString((char[]) v);
+		if (v instanceof int[]) return Arrays.toString((int[]) v);
+		if (v instanceof long[]) return Arrays.toString((long[]) v);
+		if (v instanceof float[]) return Arrays.toString((float[]) v);
+		if (v instanceof double[]) return Arrays.toString((double[]) v);
+		return String.valueOf(v);
+	}
+	//endregion
 
 	private static Field findField(Class<?> c, String name) {
 		for (Class<?> curr = c; curr != null && curr != Object.class; curr = curr.getSuperclass()) {

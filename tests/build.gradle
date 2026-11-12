@@ -959,6 +959,72 @@ tasks.register("readerScanProbe", JavaExec) {
 	}
 }
 
+// 参数注解 / 泛型签名漂移探针（批次 K，可复用入口供批次 J 使用）：
+// 属性变化（annotations / Signature）在标准 HotSpot 上能否 redefine、旧 Method 句柄读到什么，
+// 全部由探针实测，不预设结论。只需要 Instrumentation，不需要 DCEVM。
+tasks.register("parameterAnnotationDriftProbe", JavaExec) {
+	group = "verification"
+	description = "参数注解/泛型签名漂移探针 (ParameterAnnotationDriftProbe)：旧句柄/重取/首次解析三组真实读数"
+	dependsOn classes
+	dependsOn p05AgentJar
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "ParameterAnnotationDriftProbe"
+	maxHeapSize = "1g"
+	// 分 JVM 复跑：-Pkprobe.javaHome=<jdk> 选运行时；-Pkprobe.dcevm 追加 -XX:+AllowEnhancedClassRedefinition。
+	// 是否真的生效不靠这两个开关声明，由探针自己打印的 structuralRedefine 读数判定。
+	def kProbeJavaHome = (project.findProperty("kprobe.javaHome") as String)
+	def kProbeDcevm = project.hasProperty("kprobe.dcevm")
+	if (kProbeJavaHome != null) {
+		def javaBinary = java.io.File.newInstance(new File(kProbeJavaHome, "bin"),
+			probeIsWindows ? "java.exe" : "java")
+		if (!javaBinary.exists()) {
+			throw new GradleException("kprobe.javaHome 下找不到 java 可执行文件: " + javaBinary)
+		}
+		executable = javaBinary.absolutePath
+		javaLauncher.set((JavaLauncher) null)
+	}
+	doFirst {
+		jvmArgs "-javaagent:${p05AgentJar.get().archiveFile.get().asFile.absolutePath}",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+		if (kProbeDcevm) {
+			jvmArgs "-XX:+AllowEnhancedClassRedefinition"
+		}
+		logger.lifecycle("kprobe java=" + (kProbeJavaHome ?: "default") + " dcevm=" + kProbeDcevm)
+	}
+}
+
+// 接线探针：证明"参数注解漂移"在真实 processChanges 流水线里确实发出 [SIG-DRIFT] WARN。
+// 断言失败即 exit 1，因此可直接作为变异检查的 test_cmd（接线被短路 → 探针变红）。
+tasks.register("metadataDriftWarnProbe", JavaExec) {
+	group = "verification"
+	description = "参数元数据漂移 WARN 接线探针 (ParameterMetadataDriftWarnProbe)：真实批次 + 告警点名断言"
+	dependsOn classes
+	dependsOn project(":core").tasks.named("shadowJar")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "ParameterMetadataDriftWarnProbe"
+	maxHeapSize = "1g"
+	def jbrHome = (project.findProperty("p05.jbr") as String)
+		?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+	if (jbrHome != null) {
+		def javaBin = new File(jbrHome, probeIsWindows ? "bin/java.exe" : "bin/java")
+		if (javaBin.exists()) {
+			executable = javaBin.absolutePath
+			javaLauncher.set((JavaLauncher) null)
+		}
+	}
+	doFirst {
+		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		        "-XX:+IgnoreUnrecognizedVMOptions", "-XX:+AllowEnhancedClassRedefinition",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+		if (nativeLibPath != null) {
+			jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+		}
+	}
+}
+
 // 缓存填充探针：验证 transformer 的分组执行顺序，以及缓存里存的是对齐/织入之后的字节。
 tasks.register("cacheWarmingProbe", JavaExec) {
 	group = "verification"
@@ -1036,6 +1102,9 @@ tasks.register("alignBaselineProbe", JavaExec) {
 // 第 1 档（日常）：纯 JUnit + 纯文本扫描，不冷启动额外 JVM、不触发 Kotlin 编译器。
 check.dependsOn test
 check.dependsOn verifyTestCount
+// 接线终局（C4）必须进默认门：仅靠 JUnit 无法证明"流水线真的调用了检测函数"——把接线短路成 false 后
+// remold.evict.* 仍然是绿的；能被击杀的唯一读数是真实 processChanges 探针，故挂进 check。
+check.dependsOn "metadataDriftWarnProbe"
 check.dependsOn verifyDocStatusMarkers
 
 // 第 2 档：需要独立 JVM / -javaagent / Kotlin 夹具编译的断言。./gradlew e2eProbe

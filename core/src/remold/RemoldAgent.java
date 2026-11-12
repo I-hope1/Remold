@@ -2607,11 +2607,46 @@ public class RemoldAgent {
 		for (ClassDefinition def : successfulDefinitions) {
 			successfulClasses.add(def.getDefinitionClass());
 		}
+		// 参数注解 / 泛型签名漂移：成员级 WARN 点名（显式登记"用户自持旧句柄不安全"）。
+		// 未检测项（类级泛型签名等）见 K2 条目；本行只做成员级点名，不改驱逐范围。
+		reportMemberMetadataDrift(appliedForDrift, driftOldBytes);
 		remold.evict.ReflectionCacheManager.evictAll(successfulClasses);
 
 		// 与上面的 [HOTSWAP-SKIPPED] 区分：这里是"磁盘哈希没变，本来就没改"，不是被门拦下。
 		if (skippedCount > 0) info("Unchanged: " + skippedCount + " class(es) had identical bytes on disk.");
 		if (injectedCount > 0) info("Injected " + injectedCount + " new classes.");
+	}
+
+	/**
+	 * 参数注解 / 泛型签名漂移的接线点：逐类比对重定义前的有效字节与本轮生效字节，成员级点名并 {@code warn}。
+	 *
+	 * <p>这条告警是"用户自持旧 {@code Method} 句柄不安全"的唯一登记入口：缓存驱逐只覆盖已注册驱逐器，
+	 * 无法修复用户代码或未注册框架里已经解析好的句柄。缺了它，读到日志的人会把
+	 * "驱逐过缓存"误读成"已解决"。</p>
+	 *
+	 * <p><b>仅限内部用途（internal use only）</b>：本方法是 Agent 内部接线点，不是公开 API；
+	 * 保持 {@code public static} 只因调用方（{@code tests/src/remold/evict} 包）与
+	 * {@link RemoldAgent} 不同包——同包可见性改不了。语义/签名随批次演进不承诺兼容。</p>
+	 *
+	 * <p>单测用 {@link #logger} 捕获告警做终局断言，而不是复制一份比对逻辑（复制出来的那份不会随实现漂移）。</p>
+	 *
+	 * @param newBytes 本轮生效字节（键为目标类名）
+	 * @param oldBytes 重定义前的有效字节（键同上；缺键表示没有基线，不判定，也不当作"没变"）
+	 * @return 是否发现至少一处漂移（调用方据此把缓存驱逐范围扩到派生类）
+	 */
+	public static boolean reportMemberMetadataDrift(Map<String, byte[]> newBytes, Map<String, byte[]> oldBytes) {
+		if (newBytes == null || newBytes.isEmpty()) return false;
+		boolean drift = false;
+		for (Map.Entry<String, byte[]> e : newBytes.entrySet()) {
+			byte[] before = oldBytes == null ? null : oldBytes.get(e.getKey());
+			if (before == null) continue;
+			List<String> lines = remold.evict.ReflectionCacheManager
+				.describeMemberMetadataDrift(e.getKey(), before, e.getValue());
+			if (lines.isEmpty()) continue;
+			drift = true;
+			for (String line : lines) warn(line);
+		}
+		return drift;
 	}
 
 

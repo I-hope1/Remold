@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   单测 `CleanRemoldCacheTaskTest`（注册但不挂 clean、默认不删全局且无关文件保留、`--global` 才删全局、
   项目属性开关、重复执行 no-op）。
 
+### Changed
+
+- **枚举常量集合变更的拒绝原因改为"实测阻断清单"**：`ENUM_CONSTANT_SET_CHANGED` 不再只说"`<clinit>`
+  不重跑"，而是点名"重写 `$VALUES` + 清 `Class` 枚举缓存也不够"——已 JIT 编译的读者在 deopt 前仍读旧
+  常量表、已初始化的 `$SwitchMap$`/`$SWITCH_TABLE$` 持有类补不出新 case（扩容只消除 AIOOBE、新 case
+  静默落 `default`）、存量 `EnumMap`/`EnumSet` 无法扩容。依据是 JBR 21 真机探针（30 次独立 JVM，
+  javac 21 与真 javac 8 两种字节码形态）：新增 `tests/enum-append-probe/`（不挂 `check`）。
+  设计记录见 `docs/topology/10-enum-constant-append-infeasibility.md`、决策
+  [`D-ENUM-1`](docs/topology/08-decisions.md#d-enum-1)；`EnumSwitchReorderGateTest` 新增用例锁住
+  这四项诊断（9/9）。
+
 ### Fixed
 
 - **Linux aarch64 原生库缺失导致 `UnsatisfiedLinkError`**：`tool.cpp` 的构建目标此前只有

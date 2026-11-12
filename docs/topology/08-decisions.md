@@ -107,6 +107,27 @@
 
 ---
 
+<a id="d-enum-1"></a>
+## D-ENUM-1. 枚举常量集合变更不做运行期修复，维持拒绝 + 重启
+
+- **候选方案**：追加/删除常量后在运行期补写新增常量字段、重建 `$VALUES`、清空 `java.lang.Class` 的
+  `enumConstants` 与 `enumConstantDirectory`，让 `values()`/`valueOf`/`EnumMap`/`EnumSet` 看到新常量。
+- **决策**：**不实现**。`ENUM_CONSTANT_SET_CHANGED` 继续拒绝，并在拒绝原因里点名阻断项；只有重启能让
+  常量集合变化真正生效。
+- **理由（实测，JBR 21）**：冷路径确实能修好（新建集合、反序列化都正确），两个缓存也必须都清；
+  但三类已经存在的消费方修不回来——已 JIT 编译的读者在 deopt 前仍持有旧常量表、已初始化的
+  `$SwitchMap$`/`$SWITCH_TABLE$` 持有类无法补 case（扩容只消除 AIOOBE，新 case 静默落 `default`）、
+  存量 `EnumMap`/`EnumSet` 实例无法原地扩容（AIOOBE / 迭代陈旧）。此外 `Class` 影子副本携带旧宇宙、
+  懒加载的旧代码无法穷举。放行只会把"热更没生效"换成"静默走错分支或延迟 AIOOBE"。
+- **重新评估的条件**：`$SwitchMap$` 重建（解析新 `<clinit>` 的常量→label 映射）、deopt 机制、
+  存量集合的显式判定三项同时具备，且真实场景收益足够高。完整清单见
+  [`10-enum-constant-append-infeasibility.md`](10-enum-constant-append-infeasibility.md) §6。
+- **关联代码**：`ClassDiffUtil`（`addedEnumConstants` / `removedEnumConstants`）、
+  `LayoutGate.ENUM_CONSTANT_SET_CHANGED`、`LayoutDecisionEngine.decide`、
+  `RemoldAgent.dropEnumSwitchDependents` / `dropEnumConstantDependents`。
+
+---
+
 ## 附录 A. JBR 21 增强类重定义模式下 8 组字段布局实测数据
 
 探针来源：`scratch/layoutprobe/`（每个测试用例运行在独立 JVM 环境下）。  

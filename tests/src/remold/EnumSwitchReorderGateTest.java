@@ -148,6 +148,33 @@ class EnumSwitchReorderGateTest {
 	}
 
 	@Test
+	void appendedEnumConstantRejectionNamesTheMeasuredBlockers() {
+		// 追加常量不是"补个 $VALUES 就完事"：真机实测（JBR 21，两种 javac 字节码形态，见
+		// docs/topology/10-enum-constant-append-infeasibility.md）证明运行期重写 $VALUES 并清空
+		// java.lang.Class 的两个枚举缓存之后，仍有 JIT 折叠、已初始化的 $SwitchMap$ 无法补 case、
+		// 存量 EnumMap/EnumSet 无法扩容三类不可修复残留。拒绝原因必须把这三种阻断讲清楚，
+		// 否则用户只会被"请重启"打发，以为值得去写运行期补丁。
+		byte[] v1 = compileOne(ENUM_HOST, COLOR_V1);
+		byte[] v2 = compileOne(ENUM_HOST, COLOR_APPENDED);
+
+		LayoutDecision d = RemoldAgent.decideLayout(ENUM_HOST, v1, v2, "reject", Liveness.LIVE,
+			Set.of(ENUM_HOST));
+		assertEquals(LayoutAction.REJECT, d.action(), "追加常量必须拒绝");
+		String reason = d.reason();
+		assertNotNull(reason, "拒绝必须带原因");
+		assertTrue(reason.contains("$VALUES"),
+			"必须点名 $VALUES（否则读者会以为补个数组就行）：" + reason);
+		assertTrue(reason.contains("$SwitchMap$"),
+			"必须点名 $SwitchMap$ 持有类无法补 case：" + reason);
+		assertTrue(reason.contains("EnumMap"),
+			"必须点名存量 EnumMap/EnumSet 无法扩容：" + reason);
+		assertTrue(reason.contains("JIT") || reason.contains("deoptimized"),
+			"必须点名 JIT 已编译读者在 deopt 前看不到新常量：" + reason);
+		assertTrue(reason.contains("restart"),
+			"必须给出可执行出路（重启）：" + reason);
+	}
+
+	@Test
 	void removedEnumConstantIsRejectedEvenWhenScanCompleted() {
 		// 删除常量：旧 $VALUES 仍持有该实例，values()/valueOf() 仍能见到它。即使读者扫描完成且
 		// 批外无读者（旧逻辑会 WAIVE_NO_READERS 放行），也必须拒绝——放行是"删了但还在"的假成功。

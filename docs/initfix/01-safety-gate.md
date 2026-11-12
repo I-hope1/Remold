@@ -83,6 +83,19 @@
 - 任一 Nest 成员读不到，按"无法证明"拒绝。
 - 拒绝原因带真实根因进入 `PatchReport`，例如 `private but written again at oracle/CaseC.setTag(...)`。
 
+### 3.1 枚举类构造器的参数形态
+
+源码级"无参"枚举构造器在字节码里**不是** `()V`：javac 把 `name`/`ordinal` 两个合成参数插在最前，
+`enum E { A; E() {} }` 的构造器描述符是 `<init>(Ljava/lang/String;I)V`，`E(int x)` 是
+`<init>(Ljava/lang/String;II)V`（`javap -p -s` 实测，见
+[`docs/topology/10-enum-constant-append-infeasibility.md`](../topology/10-enum-constant-append-infeasibility.md) §5）。
+
+本节判据**不按元数**判断"无参"：切片提取、参数回溯、根构造器共识都按实际调用描述符工作，所以枚举的
+`(String,int)` 构造器不会被误当成"依赖外部入参"。唯一相关但不是元数误判的形态是旧 javac 的
+`<clinit>` 内联构造 `$VALUES`：它在常量字段的写入切片之外再 `getstatic` 一次该字段，
+`subsequentProcessingReason` 按"切片外读点"拒绝——这属于枚举常量**追加**路径（布局门直接拒绝，
+不走 InitFix），不是构造器形状问题。
+
 ## 4. 多根构造器共识
 
 多根构造器场景下，所有根构造器都包含目标字段赋值切片，且**参数替换后的最终指令指纹 100% 一致**，才放行。覆盖不全或指纹不一致一律 `REJECTED`。

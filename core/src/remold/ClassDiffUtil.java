@@ -191,13 +191,29 @@ public final class ClassDiffUtil {
 		return String.join("; ", changes);
 	}
 
-	/** 默认值深比较：支持基本类型/包装、{@code String}、{@code Type}、嵌套注解与数组。 */
+	/** 默认值深比较：支持基本类型/包装、{@code String}、{@code Type}、枚举、嵌套注解与数组。 */
 	private static boolean sameAnnotationDefault(Object left, Object right) {
 		if (left == null || right == null) {
 			return left == right;
 		}
 		if (left instanceof AnnotationNode || right instanceof AnnotationNode) {
 			return bothAnnotationsEqual(left, right);
+		}
+		// ASM 把 class literal 表示成 Type（没有值等价性），枚举表示成 {Type/String desc, 常量名} 数组：
+		// 两者都必须按内容比较，否则同一份字节会被判成"变过"（误拒正常热更）。
+		if (left instanceof Type || right instanceof Type) {
+			return left instanceof Type && right instanceof Type
+				&& ((Type) left).getDescriptor().equals(((Type) right).getDescriptor());
+		}
+		if (left instanceof Object[] || right instanceof Object[]) {
+			if (!(left instanceof Object[]) || !(right instanceof Object[])) return false;
+			Object[] a = (Object[]) left;
+			Object[] b = (Object[]) right;
+			if (a.length != b.length) return false;
+			for (int i = 0; i < a.length; i++) {
+				if (!sameAnnotationDefault(a[i], b[i])) return false;
+			}
+			return true;
 		}
 		if (left instanceof List || right instanceof List) {
 			if (!(left instanceof List) || !(right instanceof List)) return false;
@@ -230,6 +246,15 @@ public final class ClassDiffUtil {
 	}
 
 	/** 默认值的可读形态（日志用）：{@code <none>} 表示该成员没有默认值。 */
+	private static String renderArray(Object[] elements) {
+		StringBuilder sb = new StringBuilder("[");
+		for (int i = 0; i < elements.length; i++) {
+			if (i > 0) sb.append(",");
+			sb.append(renderAnnotationDefault(elements[i]));
+		}
+		return sb.append("]").toString();
+	}
+
 	private static String renderAnnotationDefault(Object value) {
 		if (value == null) {
 			return "<none>";
@@ -245,14 +270,10 @@ public final class ClassDiffUtil {
 			return "@" + node.desc;
 		}
 		if (value instanceof List) {
-			StringBuilder sb = new StringBuilder("[");
-			boolean first = true;
-			for (Object element : (List<?>) value) {
-				if (!first) sb.append(",");
-				sb.append(renderAnnotationDefault(element));
-				first = false;
-			}
-			return sb.append("]").toString();
+			return renderArray(((List<?>) value).toArray());
+		}
+		if (value instanceof Object[]) {
+			return renderArray((Object[]) value);
 		}
 		return String.valueOf(value);
 	}

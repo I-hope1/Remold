@@ -67,65 +67,19 @@ public final class ReflectionCacheManager {
 	}
 
 	/**
-	 * 驱逐范围。
-	 */
-	public enum EvictionScope {
-		/** 只驱逐被重定义的类本身（默认，与旧行为一致）。 */
-		DECLARED,
-		/**
-		 * 额外包含"已加载的派生类闭包"（子类 + 子接口的实现者）。
-		 *
-		 * <p>参数注解 / 泛型签名变化只改<b>声明类</b>的成员元数据，但框架为子类建立的描述符
-		 * （如 Jackson 的 {@code BeanDescription}）会把继承来的成员元数据一起缓存到<b>子类键</b>上。
-		 * 只驱逐声明类，会留下"子类键 + 旧签名元数据"的过期条目；因此漂移场景必须扩到派生类。</p>
-		 */
-		WITH_DESCENDANTS
-	}
-
-	/** 派生类闭包上限：只防失控；触顶时显式告警，不静默截断。 */
-	private static final int MAX_SCOPE_CLASSES   = 4096;
-	/** 层级遍历深度上限（防御性，正常继承链远达不到）。 */
-	private static final int MAX_HIERARCHY_DEPTH = 32;
-
-	/**
 	 * 对指定的重定义类集合执行所有已注册框架的缓存驱逐。
 	 *
 	 * @param redefinedClasses 重定义成功的类集合
 	 * @return 总驱逐条目/实例数
 	 */
 	public static int evictAll(Set<Class<?>> redefinedClasses) {
-		return evictAll(redefinedClasses, EvictionScope.DECLARED, null);
-	}
-
-	/**
-	 * 对指定的重定义类集合执行所有已注册框架的缓存驱逐，可扩展驱逐范围。
-	 *
-	 * <p><b>能力边界（不得表述为"已解决"）</b>：本方法只覆盖<b>已注册的</b>框架缓存
-	 * （Gson / Jackson / 插件注册的驱逐器）。用户代码或未注册框架自持的
-	 * {@code Method} / {@code Constructor} 句柄在重定义后仍持有旧元数据，本方法无法修复它们；
-	 * 该边界由 {@link #describeMemberMetadataDrift} 的告警显式登记。</p>
-	 *
-	 * @param redefinedClasses 重定义成功的类集合
-	 * @param scope            驱逐范围，{@code null} 视为 {@link EvictionScope#DECLARED}
-	 * @param loadedClasses    已加载类快照（仅 {@link EvictionScope#WITH_DESCENDANTS} 使用；
-	 *                         为 {@code null} 时退化为 {@link EvictionScope#DECLARED} 的结果）
-	 * @return 总驱逐条目/实例数
-	 */
-	public static int evictAll(Set<Class<?>> redefinedClasses, EvictionScope scope, Class<?>[] loadedClasses) {
 		if (redefinedClasses == null || redefinedClasses.isEmpty()) {
 			return 0;
-		}
-		Set<Class<?>> targets = scope == EvictionScope.WITH_DESCENDANTS
-			? withDescendants(redefinedClasses, loadedClasses)
-			: redefinedClasses;
-		if (RemoldAgent.DEBUG && targets.size() != redefinedClasses.size()) {
-			RemoldAgent.log("[CacheEvict] scope expanded: " + redefinedClasses.size() + " declared -> "
-				+ targets.size() + " class(es) (descendants included).");
 		}
 		int totalEvicted = 0;
 		for (ReflectionCacheEvictor evictor : evictors) {
 			try {
-				int count = evictor.evict(targets);
+				int count = evictor.evict(redefinedClasses);
 				totalEvicted += count;
 				if (count > 0 && RemoldAgent.DEBUG) {
 					RemoldAgent.log("[CacheEvict] " + evictor.getName() + " evicted " + count + " item(s).");
@@ -135,48 +89,6 @@ public final class ReflectionCacheManager {
 			}
 		}
 		return totalEvicted;
-	}
-
-	/**
-	 * 计算"声明类 ∪ 已加载派生类"的驱逐目标集合。
-	 *
-	 * <p>派生关系按 JVM 的成员解析方向取：沿 {@code getSuperclass()} 上行 + 沿 {@code getInterfaces()}
-	 * 递归下行（多实现/接口继承）。{@code loadedClasses} 为空时不扩（调用方没有快照可依据，不猜测）。</p>
-	 */
-	static Set<Class<?>> withDescendants(Set<Class<?>> roots, Class<?>[] loadedClasses) {
-		Set<Class<?>> targets = new LinkedHashSet<>();
-		Set<Class<?>> rootSet = new HashSet<>();
-		for (Class<?> root : roots) {
-			if (root == null) continue;
-			targets.add(root);
-			rootSet.add(root);
-		}
-		if (rootSet.isEmpty() || loadedClasses == null || loadedClasses.length == 0) return targets;
-
-		int added = 0;
-		for (Class<?> c : loadedClasses) {
-			if (c == null || rootSet.contains(c) || targets.contains(c)) continue;
-			if (c.isPrimitive() || c.isArray()) continue;
-			if (!derivedFrom(c, rootSet, 0)) continue;
-			targets.add(c);
-			if (++added >= MAX_SCOPE_CLASSES) {
-				RemoldAgent.warn("[CacheEvict] Descendant eviction scope truncated at " + MAX_SCOPE_CLASSES
-					+ " class(es); descendants beyond the cap may keep stale member metadata caches.");
-				break;
-			}
-		}
-		return targets;
-	}
-
-	/** {@code c}（不含自身）的祖先链/接口图中是否含有 {@code roots} 的任一元素。 */
-	private static boolean derivedFrom(Class<?> c, Set<Class<?>> roots, int depth) {
-		if (c == null || depth > MAX_HIERARCHY_DEPTH) return false;
-		Class<?> sup = c.getSuperclass();
-		if (sup != null && (roots.contains(sup) || derivedFrom(sup, roots, depth + 1))) return true;
-		for (Class<?> itf : c.getInterfaces()) {
-			if (itf != null && (roots.contains(itf) || derivedFrom(itf, roots, depth + 1))) return true;
-		}
-		return false;
 	}
 
 	//region 参数注解 / 泛型签名漂移点名

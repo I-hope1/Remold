@@ -2607,15 +2607,11 @@ public class RemoldAgent {
 		for (ClassDefinition def : successfulDefinitions) {
 			successfulClasses.add(def.getDefinitionClass());
 		}
-		// 参数注解 / 泛型签名漂移：这类变化不改类名、不改成员描述符，重定义会成功且不抛任何
-		// LinkageError；但已解析的反射句柄与框架按成员派生出的元数据仍按旧签名解释。
-		// 处理 = 成员级 WARN 点名（显式登记"用户自持旧句柄不安全"）+ 把驱逐范围扩到派生类
-		// （子类键下缓存的"继承成员元数据"同样过期）。
-		boolean memberMetadataDrift = reportMemberMetadataDrift(appliedForDrift, driftOldBytes);
-		remold.evict.ReflectionCacheManager.evictAll(successfulClasses,
-			memberMetadataDrift ? remold.evict.ReflectionCacheManager.EvictionScope.WITH_DESCENDANTS
-			                    : remold.evict.ReflectionCacheManager.EvictionScope.DECLARED,
-			classes);
+		// 参数注解 / 泛型签名漂移：成员级 WARN 点名（显式登记"用户自持旧句柄不安全"）。
+		// 驱逐范围扩展（WITH_DESCENDANTS）未交付：缺"已注册缓存驱逐前后"对照读数，
+		// 该扩展整体停在 parked/k-eviction-scope 分支，这里保持原有驱逐范围不变。
+		reportMemberMetadataDrift(appliedForDrift, driftOldBytes);
+		remold.evict.ReflectionCacheManager.evictAll(successfulClasses);
 
 		// 与上面的 [HOTSWAP-SKIPPED] 区分：这里是"磁盘哈希没变，本来就没改"，不是被门拦下。
 		if (skippedCount > 0) info("Unchanged: " + skippedCount + " class(es) had identical bytes on disk.");

@@ -37,13 +37,6 @@ public class ParameterAnnotationDriftTest {
 	private static final String ANN_A = "Lsample/AnnA;";
 	private static final String ANN_B = "Lsample/AnnB;";
 
-	/** 驱逐范围夹具层级：Root <- Mid <- Leaf；Api <- ApiImpl；Unrelated 与两者无关。 */
-	static class Root {}
-	static class Mid extends Root {}
-	static class Leaf extends Mid {}
-	interface Api {}
-	static class ApiImpl implements Api {}
-	static class Unrelated {}
 
 	//region 夹具构造
 
@@ -294,83 +287,7 @@ public class ParameterAnnotationDriftTest {
 
 	//endregion
 
-	//region 驱逐范围扩展
-
-	@Test
-	@DisplayName("驱逐范围：漂移时纳入已加载派生类，无关类不得进入")
-	public void testEvictionScopeExpandsToLoadedDescendants() {
-		ScopeRecorder recorder = new ScopeRecorder();
-		Class<?>[] loaded = {Root.class, Mid.class, Leaf.class, Api.class, ApiImpl.class, Unrelated.class};
-		ReflectionCacheManager.registerEvictor(recorder);
-		try {
-			// 对照组（去触发）：DECLARED 只给声明类，与旧行为一致
-			recorder.received.clear();
-			ReflectionCacheManager.evictAll(Set.of(Root.class),
-				ReflectionCacheManager.EvictionScope.DECLARED, loaded);
-			assertEquals(Set.of(Root.class), recorder.received,
-				"DECLARED scope must only pass the declared class");
-
-			// 触发：WITH_DESCENDANTS 必须包含全部已加载后代（含传递子类）
-			recorder.received.clear();
-			ReflectionCacheManager.evictAll(Set.of(Root.class),
-				ReflectionCacheManager.EvictionScope.WITH_DESCENDANTS, loaded);
-			assertEquals(Set.of(Root.class, Mid.class, Leaf.class), recorder.received,
-				"WITH_DESCENDANTS must include loaded descendants: " + recorder.received);
-			assertFalse(recorder.received.contains(Unrelated.class),
-				"Unrelated classes must never enter the eviction scope");
-		} finally {
-			ReflectionCacheManager.unregisterEvictor(recorder);
-		}
-	}
-
-	@Test
-	@DisplayName("驱逐范围：接口作为声明类时纳入其已加载实现者")
-	public void testEvictionScopeCoversInterfaceImplementors() {
-		ScopeRecorder recorder = new ScopeRecorder();
-		Class<?>[] loaded = {Root.class, Api.class, ApiImpl.class, Unrelated.class};
-		ReflectionCacheManager.registerEvictor(recorder);
-		try {
-			ReflectionCacheManager.evictAll(Set.of(Api.class),
-				ReflectionCacheManager.EvictionScope.WITH_DESCENDANTS, loaded);
-			assertEquals(Set.of(Api.class, ApiImpl.class), recorder.received,
-				"Implementors of the changed interface must be evicted too: " + recorder.received);
-		} finally {
-			ReflectionCacheManager.unregisterEvictor(recorder);
-		}
-	}
-
-	@Test
-	@DisplayName("驱逐范围：没有已加载快照时不猜测，退化为声明类")
-	public void testEvictionScopeWithoutSnapshotFallsBackToDeclared() {
-		ScopeRecorder recorder = new ScopeRecorder();
-		ReflectionCacheManager.registerEvictor(recorder);
-		try {
-			ReflectionCacheManager.evictAll(Set.of(Root.class),
-				ReflectionCacheManager.EvictionScope.WITH_DESCENDANTS, null);
-			assertEquals(Set.of(Root.class), recorder.received,
-				"Without a loaded-class snapshot the scope must not be guessed");
-		} finally {
-			ReflectionCacheManager.unregisterEvictor(recorder);
-		}
-	}
-
-	//endregion
-
 	//region 辅助
-
-	private static final class ScopeRecorder implements ReflectionCacheEvictor {
-		final Set<Class<?>> received = new LinkedHashSet<>();
-
-		@Override
-		public String getName() { return "ScopeRecorder"; }
-
-		@Override
-		public int evict(Set<Class<?>> redefinedClasses) {
-			received.clear();
-			received.addAll(redefinedClasses);
-			return redefinedClasses.size();
-		}
-	}
 
 	private static final class CapturingLogger implements RemoldAgent.Logger {
 		final List<String> warnings = new ArrayList<>();

@@ -2,37 +2,55 @@ import remold.LambdaAligner;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.tree.*;
 
 import java.io.*;
 import java.nio.file.*;
 import java.util.*;
+import java.util.stream.*;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Pass B 兜底对齐断言（JUnit 化）。
  *
- * <p>场景：v1 的叶子 {@code () -> act1()} 在 v2 里被新 lambda 包裹一层并改成
- * {@code () -> act2()}，于是它的 upDepth 从 0 变成 1。Pass A 要求深度相等，会跳过它；
- * Pass B 放宽条件，把这个新叶子兜底配回旧叶子的槽位。</p>
+ * <p><b>契约（批次 I 之后）</b>：Pass B 只为"<b>方法体可证明等价</b>、但深度/形状变了"的新叶子
+ * 兜底配对，<b>不再</b>按位置把旧名字交给一个方法体不同的新叶子。判据见
+ * {@code LambdaAligner#fallbackPairingAllowed}：{@code bodyFingerprint} 相等（常量池索引 /
+ * 局部槽位 / 可折叠算式已归一）即为等价证明；证明不了就走 fail-closed——旧名幽灵化（老
+ * {@code CallSite} 响亮熔断）、新 lambda 拿避障名、记一次 {@code BODY_MISMATCH}。</p>
+ *
+ * <p>因此本类按两个方向分别钉住契约，外加一条大样本误报断言：</p>
+ * <ul>
+ *   <li>{@link #passBRefusesRebindWhenBodyDiffers}——<b>该拒的必须拒</b>：v1 叶子 {@code () -> act1()}，
+ *       v2 把新叶子 {@code () -> act2()} 包进新容器。旧夹具下这是一次静默改绑（老 callsite 跑
+ *       act2 却不报错），现在是 {@code BODY_MISMATCH} + 幽灵桩 + {@code passB == 0}。</li>
+ *   <li>{@link #passBPairsRelocatedLeafWithProvablyEqualBody}——<b>Pass B 仍可达</b>：叶子体等价、
+ *       只是被搬进了一层新容器。为了让证据真的落到 Pass B（而不是被 Step 1 的票据指纹先吃掉），
+ *       v2 的常量用等价改写（{@code BIPUSH 6} → {@code LDC 2; LDC 3; IMUL}）表示——票据指纹不同、
+ *       体指纹相同，这正是 {@code bodyFingerprint} 归一化的目标形态。</li>
+ *   <li>{@link #bodyFingerprintNeverRefusesSlotShiftedRepoLambdas}——<b>大样本误报</b>：仓库内全部
+ *       含 lambda 的类，同源 {@code -g} / {@code -g:none} 编译，并把新版本的局部槽位整体平移
+ *       （票号变、体指纹应不变），断言 {@code BODY_MISMATCH == 0}。</li>
+ * </ul>
  *
  * <p><b>判据分两层</b>：{@code AlignmentResult.stats} 只能说明"走了哪条路"，产物字节码才说明
- * "配对结果对不对"。所以除了计数器，还必须断言终局形态——老 callsite 的名字仍在、
- * 仍是活方法、且执行的是新语义。</p>
- *
- * <p><b>已知限制（务必别误读覆盖范围）</b>：javac 的 lambda 编号是后序的（容器先被包住、
- * 叶子最后编号），所以 v2 的新叶子本来就落在旧叶子的槽位 {@code lambda$build$0} 上。
- * 实测本夹具的对齐产物与 v2 <b>逐字节相同</b>，Pass B 记到的是一次"同名 → 同名"的恒等配对
- * （{@code passBPairs++}，但 renameMap 为空）。因此下面的终局断言只能钉住"终局形态正确"
- * （错误改名会红），<b>不能</b>证明"Pass B 真的完成了一次改名"——要覆盖后者，需要另建
- * "新叶子落在不同槽位"的夹具。</p>
+ * "配对结果对不对"。所以除了计数器，还必须断言终局形态。</p>
  */
 public class PassBTest {
 
+	/**
+	 * (a) 拒绝用例：旧叶子 {@code () -> act1()}、新叶子 {@code () -> act2()} 被包进新容器。
+	 *
+	 * <p>两者名字撞车（javac 后序编号让新叶子也落在 {@code lambda$build$0}）、深度不同、方法体不同。
+	 * 旧契约按位置把它们配成一对，老 callsite 静默执行 act2；新契约必须拒绝：旧名幽灵化
+	 * （老 callsite 熔断）、新叶子拿避障名、{@code passA/passB == 0}。</p>
+	 */
 	@Test
-	void passBCounterIsReachable(@TempDir Path tmp) throws Exception {
+	void passBRefusesRebindWhenBodyDiffers(@TempDir Path tmp) throws Exception {
 		String javac = javac21();
 		Path outV1 = Files.createDirectories(tmp.resolve("v1"));
 		Path outV2 = Files.createDirectories(tmp.resolve("v2"));
@@ -47,47 +65,422 @@ public class PassBTest {
 		byte[] v2 = Files.readAllBytes(outV2.resolve("testPassB/PassBCase.class"));
 
 		LambdaAligner.LAST_RESULT = null;
+		LambdaAligner.TEST_EVENTS.clear();
 		byte[] aligned = LambdaAligner.align(v1, v2);
 
 		assertNotNull(aligned, "aligned 产物非空");
 		assertNotNull(LambdaAligner.LAST_RESULT, "对齐结果已记录");
-		assertTrue(LambdaAligner.LAST_RESULT.stats.passBPairs > 0,
-			"passB 计数器成功记录到非零配对: " + LambdaAligner.LAST_RESULT.stats);
+
+		// 1. 计数器：这条路径必须被拒绝，且不得从 A/B 趟漏过去。
+		assertTrue(LambdaAligner.LAST_RESULT.stats.bodyMismatchRefusals > 0,
+			"方法体不等价且无独立身份证据时必须拒绝配对（记 BODY_MISMATCH）: " + LambdaAligner.LAST_RESULT.stats);
+		assertEquals(0, LambdaAligner.LAST_RESULT.stats.passBPairs,
+			"passB 不得把旧名字交给方法体不同的新叶子: " + LambdaAligner.LAST_RESULT.stats);
 		assertEquals(0, LambdaAligner.LAST_RESULT.stats.passAPairs,
 			"passA 跳过深度不匹配候选 (passA == 0): " + LambdaAligner.LAST_RESULT.stats);
+
+		// 2. 留痕：拒绝必须响亮（事件按旧/新名字精确归因，供宿主侧熔断与人工排查）。
+		boolean bodyMismatchEvent = LambdaAligner.TEST_EVENTS.stream()
+			.anyMatch(ev -> "BODY_MISMATCH".equals(ev.kind)
+			                && "lambda$build$0".equals(ev.oldName) && "lambda$build$0".equals(ev.newName));
+		assertTrue(bodyMismatchEvent,
+			"必须记录一条针对 lambda$build$0 的 BODY_MISMATCH 事件（实际事件: " + LambdaAligner.TEST_EVENTS + "）");
 
 		// —— 以下才是终局断言：计数器只说明走了哪条路，产物字节码才说明配得对不对 ——
 		ClassNode out = parse(aligned);
 
-		// 1. 老 callsite 的名字必须仍然对应一个活方法：既没消失（NoSuchMethodError），
-		//    也没被降级成 onOrphanInvoked 熔断桩（老代码一调用就炸）。
-		MethodNode oldLeafSlot = method(out, "lambda$build$0", "()V");
-		assertNotNull(oldLeafSlot,
-			"老 callsite lambda$build$0()V 必须存在于产物中（实际方法表: " + table(out) + "）");
-		assertFalse(calls(oldLeafSlot, "onOrphanInvoked"),
-			"lambda$build$0()V 必须保持活方法，不能退化成孤儿熔断桩");
+		// 3. 旧槽位必须是幽灵桩：老 callsite 一调用就响亮熔断，绝不静默跑错语义。
+		MethodNode oldSlot = method(out, "lambda$build$0", "()V");
+		assertNotNull(oldSlot, "旧槽位 lambda$build$0()V 必须留在产物里（实际方法表: " + table(out) + "）");
+		assertTrue(calls(oldSlot, "onOrphanInvoked"),
+			"旧槽位必须是幽灵桩（老 callsite 响亮熔断），不能退化成任何一个活语义（实际方法表: " + table(out) + "）");
+		assertFalse(calls(oldSlot, "act2"),
+			"旧槽位绝不能静默改绑到新叶子语义 act2()（实际方法表: " + table(out) + "）");
 
-		// 2. 老 callsite 现在执行的必须是新语义 act2()，而不是旧的 act1()：
-		//    名字保住但方法体停在旧版本，等于热更静默失效。
-		assertTrue(calls(oldLeafSlot, "act2"),
-			"老 callsite 必须执行新叶子语义 act2()（实际方法表: " + table(out) + "）");
-		assertFalse(calls(oldLeafSlot, "act1"),
-			"老 callsite 不得仍绑在已删除的 act1() 上");
-
-		// 3. 新链完整可达：build() -> 容器 -> 叶子。容器若成了幽灵，新代码一跑就熔断。
-		MethodNode container = method(out, firstIndyTarget(out, "build"), "()V");
-		assertNotNull(container,
-			"build() 的 indy 目标必须在产物中存在（实际方法表: " + table(out) + "）");
+		// 4. 新链完整可达：build() -> 容器 -> 新叶子，且新叶子拿的是避障名（不再顶替旧槽位）。
+		String containerName = firstIndyTarget(out, "build");
+		MethodNode container = method0(out, containerName);
+		assertNotNull(container, "build() 的 indy 目标必须在产物中存在（实际方法表: " + table(out) + "）");
 		assertFalse(calls(container, "onOrphanInvoked"), "build() 指向的容器不能是孤儿熔断桩");
-		assertEquals("lambda$build$0", firstIndyTarget(out, container.name),
-			"容器必须仍指向叶子 lambda$build$0（实际: " + firstIndyTarget(out, container.name) + "）");
+		String leafName = firstIndyTarget(out, containerName);
+		assertNotEquals("lambda$build$0", leafName,
+			"新叶子不得复用被幽灵化的旧槽位名（实际: " + leafName + "）");
+		MethodNode newLeaf = method0(out, leafName);
+		assertNotNull(newLeaf, "新叶子必须存在（实际方法表: " + table(out) + "）");
+		assertTrue(calls(newLeaf, "act2"), "新叶子必须执行新语义 act2()（实际方法表: " + table(out) + "）");
 
-		// 4. 没有方法被静默丢弃：本轮所有旧方法都有归宿，不该产生幽灵。
-		assertEquals(0, ghostCount(out), "本轮不该产生幽灵（实际方法表: " + table(out) + "）");
+		// 5. 只有一个幽灵（旧槽位），没有额外方法被静默丢弃。
+		assertEquals(1, ghostCount(out), "本轮只应产生旧槽位这一个幽灵（实际方法表: " + table(out) + "）");
 
-		// 5. 产物自洽：不得出现重复的 name+desc（否则同名两版里必有一个是死的）。
+		// 6. 产物自洽：不得出现重复的 name+desc（否则同名两版里必有一个是死的）。
 		assertEquals(keySet(out).size(), out.methods.size(),
 			"产物方法名+描述符必须唯一（实际方法表: " + table(out) + "）");
+	}
+
+	/**
+	 * (b) 可达用例：Pass B 仍能为"体可证明等价"的搬迁叶子兜底。
+	 *
+	 * <p>v1 的叶子 {@code () -> { int[] a = new int[6]; return "k:" + a.length; }} 在 v2 里被搬进一层
+	 * 新容器，深度从 0 变 1（Pass A 要求深度相等，会跳过它）。为了让 Pass B 真的可达，v2 的常量用
+	 * <b>等价改写</b>表示（{@code BIPUSH 6} → {@code LDC 2; LDC 3; IMUL}）：票据指纹因此不同
+	 * （Step 1 不会先吃掉这对），而 {@code bodyFingerprint} 按值编码 + 折叠算式后两侧相同——
+	 * 这正是"等价证明"该放行的形态。</p>
+	 *
+	 * <p>断言 {@code passBPairs > 0}、{@code passAPairs == 0}、<b>无</b> {@code BODY_MISMATCH}，
+	 * 且产物里旧槽位仍是活方法（无幽灵）、新链完整。</p>
+	 */
+	@Test
+	void passBPairsRelocatedLeafWithProvablyEqualBody(@TempDir Path tmp) throws Exception {
+		String javac = javac21();
+		Path outV1 = Files.createDirectories(tmp.resolve("mv1"));
+		Path outV2 = Files.createDirectories(tmp.resolve("mv2"));
+
+		File src1 = findFile("passB/move2/v1/testPassBMove2/PassBMove2Case.java");
+		File src2 = findFile("passB/move2/v2/testPassBMove2/PassBMove2Case.java");
+
+		runCmd(javac, "-nowarn", "-encoding", "UTF-8", "-d", outV1.toString(), src1.getAbsolutePath());
+		runCmd(javac, "-nowarn", "-encoding", "UTF-8", "-d", outV2.toString(), src2.getAbsolutePath());
+
+		byte[] v1 = Files.readAllBytes(outV1.resolve("testPassBMove2/PassBMove2Case.class"));
+		byte[] v2raw = Files.readAllBytes(outV2.resolve("testPassBMove2/PassBMove2Case.class"));
+
+		byte[] v2 = foldConstantRewrite(v2raw);
+		assertFalse(Arrays.equals(v2raw, v2), "夹具前提：常量等价改写必须真的改变了字节码");
+		ClassNode nextCn = parse(v2);
+		String newLeafName = null;
+		for (MethodNode mn : nextCn.methods) {
+			if (mn.name.startsWith("lambda$") && "()Ljava/lang/String;".equals(mn.desc)) newLeafName = mn.name;
+		}
+		assertNotNull(newLeafName, "夹具前提：v2 里应有一个 Supplier<String> 叶子（" + table(nextCn) + "）");
+		String oldLeafName = null;
+		ClassNode oldCn = parse(v1);
+		for (MethodNode mn : oldCn.methods) {
+			if (mn.name.startsWith("lambda$") && "()Ljava/lang/String;".equals(mn.desc)) oldLeafName = mn.name;
+		}
+		assertNotNull(oldLeafName, "夹具前提：v1 里应有一个 Supplier<String> 叶子（" + table(oldCn) + "）");
+		assertEquals(oldLeafName, newLeafName,
+			"夹具前提：javac 后序编号让新叶子仍叫旧名字（" + oldLeafName + " vs " + newLeafName + "）");
+
+		LambdaAligner.LAST_RESULT = null;
+		LambdaAligner.TEST_EVENTS.clear();
+		byte[] aligned = LambdaAligner.align(v1, v2);
+
+		assertNotNull(aligned, "aligned 产物非空");
+		assertNotNull(LambdaAligner.LAST_RESULT, "对齐结果已记录");
+
+		// 1. 走的是 Pass B（A 趟被深度差挡住），且没有把等价体误判成"不等价"。
+		assertTrue(LambdaAligner.LAST_RESULT.stats.passBPairs > 0,
+			"passB 必须记录到非零配对（体等价搬迁可达）: " + LambdaAligner.LAST_RESULT.stats);
+		assertEquals(0, LambdaAligner.LAST_RESULT.stats.passAPairs,
+			"passA 跳过深度不匹配候选 (passA == 0): " + LambdaAligner.LAST_RESULT.stats);
+		assertEquals(0, LambdaAligner.LAST_RESULT.stats.bodyMismatchRefusals,
+			"体可证明等价的搬迁不得触发任何 BODY_MISMATCH: " + LambdaAligner.LAST_RESULT.stats);
+		assertTrue(LambdaAligner.TEST_EVENTS.stream().noneMatch(ev -> "BODY_MISMATCH".equals(ev.kind)),
+			"不得记录 BODY_MISMATCH 事件（实际: " + LambdaAligner.TEST_EVENTS + "）");
+
+		// —— 终局断言：产物里旧槽位仍活着，且承载的就是新叶子的载荷 ——
+		ClassNode out = parse(aligned);
+
+		MethodNode oldSlot = method(out, oldLeafName, "()Ljava/lang/String;");
+		assertNotNull(oldSlot, "旧槽位 " + oldLeafName + " 必须留在产物里（实际方法表: " + table(out) + "）");
+		assertFalse(calls(oldSlot, "onOrphanInvoked"),
+			"体等价搬迁不该把旧槽位幽灵化（实际方法表: " + table(out) + "）");
+
+		// 载荷断言：叶子必须仍是"int[6].length 拼进字符串"那一段——等价常量改写后
+		// 形态可能是 BIPUSH 6，也可能是折叠后的 LDC 2 / LDC 3 / IMUL；两者都接受，但必须真的在。
+		assertTrue(newArrayPayloadKept(oldSlot),
+			"旧槽位必须承载新叶子载荷（int[6] + \"k:\" 拼接）：" + describe(oldSlot));
+
+		// 新链完整：build() -> 容器 -> 叶子。容器若成了幽灵，新代码一跑就熔断。
+		String containerName = firstIndyTarget(out, "build");
+		MethodNode container = method0(out, containerName);
+		assertNotNull(container, "build() 的 indy 目标必须在产物中存在（实际方法表: " + table(out) + "）");
+		assertFalse(calls(container, "onOrphanInvoked"), "build() 指向的容器不能是孤儿熔断桩");
+		assertEquals(oldLeafName, firstIndyTarget(out, containerName),
+			"容器必须仍指向叶子 " + oldLeafName + "（实际: " + firstIndyTarget(out, containerName) + "）");
+
+		// 没有任何方法被静默丢弃，且产物自洽。
+		assertEquals(0, ghostCount(out), "体等价搬迁不该产生幽灵（实际方法表: " + table(out) + "）");
+		assertEquals(keySet(out).size(), out.methods.size(),
+			"产物方法名+描述符必须唯一（实际方法表: " + table(out) + "）");
+	}
+
+	/**
+	 * (c) 大样本误报：仓库内所有含 lambda 的类，同源 {@code -g} / {@code -g:none} 编译，再把新版本
+	 * 的局部变量槽位整体平移。
+	 *
+	 * <p>两次编译的<b>源码相同</b>，等价性没有争议；槽位平移是捕获表增删带来的同形变化。
+	 * 票据指纹（{@code MethodFingerprinter} 计入 {@code var} 下标）会变，因此配对确实要经过
+	 * {@code fallbackPairingAllowed} 的体指纹判据——若归一化漏掉槽位，这里就会冒出
+	 * {@code BODY_MISMATCH}。断言 <b>0 次</b>，并报告样本数 N。</p>
+	 *
+	 * <p><b>语料范围（批次 I 第二轮扩到 {@code plugin-*}）</b>：{@code core/src} + {@code api/src} 一次编译
+	 * （互相依赖），{@code plugin-fabric}/{@code plugin-mixin}/{@code plugin-forge} 各自单独编译。
+	 * 插件的外部第三方依赖（{@code org.spongepowered:mixin}）从本地 Gradle 缓存按坐标发现；
+	 * 缓存里没有就<b>不静默跳过</b>，而是把它记进 {@link Corpus#gaps} 并打印
+	 * {@code [BodyFingerprintFP-GAP]} 行（缺口在 {@code docs/topology/09-lambda-capture-bridge.md}
+	 * 有显式条目）。{@code plugin-arc} 无论缓存有没有都编不动，原因见该方法末尾登记的缺口。</p>
+	 */
+	@Test
+	void bodyFingerprintNeverRefusesSlotShiftedRepoLambdas(@TempDir Path tmp) throws Exception {
+		String javac = javac21();
+		String classpath = System.getProperty("java.class.path");
+		File repoRoot = new File("..");
+
+		Corpus corpus = new Corpus();
+
+		// ---- 语料 1：core/src + api/src（同一 javac 调用，互相依赖） ----
+		List<File> coreApi = javaSources(repoRoot.toPath().resolve("core/src"));
+		coreApi.addAll(javaSources(repoRoot.toPath().resolve("api/src")));
+		assertTrue(coreApi.size() >= 40, "夹具前提：可编译的源文件太少（" + coreApi.size() + "）");
+		Path outG = Files.createDirectories(tmp.resolve("g"));
+		Path outNone = Files.createDirectories(tmp.resolve("none"));
+		compile(javac, classpath, "-g", outG, coreApi);
+		compile(javac, classpath, "-g:none", outNone, coreApi);
+		measureCorpus(outG, outNone, "core+api", corpus);
+
+		// ---- 语料 2：plugin-*（各自独立编译；外部依赖从本地 Gradle 缓存按坐标发现） ----
+		File mixinJar = pluginDependencyJar("org.spongepowered", "mixin", "0.8.5");
+		for (String module : new String[]{"plugin-fabric/src", "plugin-mixin/src", "plugin-forge/src"}) {
+			Path root = repoRoot.toPath().resolve(module);
+			if (!Files.isDirectory(root)) {
+				corpus.gaps.add(module + ": 目录不存在");
+				continue;
+			}
+			List<File> sources = javaSources(root);
+			if (sources.isEmpty()) {
+				corpus.gaps.add(module + ": 没有 .java 源文件");
+				continue;
+			}
+			boolean needsMixin = module.startsWith("plugin-mixin") || module.startsWith("plugin-forge");
+			if (needsMixin && mixinJar == null) {
+				corpus.gaps.add(module + ": 需要 org.spongepowered:mixin:0.8.5，本地 Gradle 缓存未命中，"
+					+ "离线无法编译（缓存根: " + gradleCacheRoot() + "）");
+				continue;
+			}
+			String cp = mixinJar == null ? classpath : classpath + File.pathSeparator + mixinJar.getAbsolutePath();
+			String tag = module.replace('/', '_');
+			Path g = Files.createDirectories(tmp.resolve("g_" + tag));
+			Path n = Files.createDirectories(tmp.resolve("none_" + tag));
+			compile(javac, cp, "-g", g, sources);
+			compile(javac, cp, "-g:none", n, sources);
+			measureCorpus(g, n, module, corpus);
+		}
+
+		// plugin-arc 的显式缺口（与缓存是否命中无关：障碍在 Mindustry 制品本身）。
+		corpus.gaps.add("plugin-arc/src: Mindustry 的编译期制品不是纯 class 包"
+			+ "（Anuken:Mindustry:v160.5 内含 1264 个未编译的生成 .java，如 mindustry/io/TypeIO.java 依赖"
+			+ " @TypeIOHandler 生成的类型）；javac 会把 arc/mindustry 引用解析到这些源文件，"
+			+ "随即以'找不到 mindustry.annotations.Annotations'/'找不到 TypeIOHandler'失败，"
+			+ "而补齐它们需要 Mindustry 自带的注解处理器（离线缓存里没有该制品）。"
+			+ "该缺口在 docs/topology/09-lambda-capture-bridge.md 显式登记。");
+
+		int withLambdas = corpus.withLambdas;
+		assertTrue(withLambdas >= 20,
+			"样本前提：仓库内含 lambda 的类应 ≥20（实际 N=" + withLambdas + "，分模块: " + corpus.perModule + "）");
+		assertTrue(corpus.withLambdasByModule.getOrDefault("core+api", 0) >= 20,
+			"样本前提：core+api 语料不得因重构而塌缩（实际 " + corpus.withLambdasByModule + "）");
+		assertTrue(corpus.withLambdasByModule.getOrDefault("plugin-fabric/src", 0) > 0
+				|| corpus.gaps.stream().anyMatch(g -> g.startsWith("plugin-fabric")),
+			"plugin-fabric 无外部依赖，必须真的进语料（实际 " + corpus.withLambdasByModule + "）");
+		assertEquals(withLambdas, corpus.aligned, "每个含 lambda 的类都必须对齐成功");
+		assertTrue(corpus.refusals.isEmpty(),
+			"同源 -g / -g:none + 槽位平移不得产生任何 BODY_MISMATCH（N=" + withLambdas + "）："
+				+ String.join(" | ", corpus.refusals));
+
+		System.out.println("[BodyFingerprintFP] N=" + withLambdas + " classes, BODY_MISMATCH=0"
+			+ ", perModule=" + corpus.perModule);
+		for (String gap : corpus.gaps) System.out.println("[BodyFingerprintFP-GAP] " + gap);
+	}
+
+	/** 语料统计（跨模块累加）。 */
+	static class Corpus {
+		int withLambdas;
+		int aligned;
+		final List<String> refusals = new ArrayList<>();
+		final List<String> gaps = new ArrayList<>();
+		final Map<String, Integer> withLambdasByModule = new LinkedHashMap<>();
+		final Map<String, Integer> classesScannedByModule = new LinkedHashMap<>();
+		String perModule = "";
+	}
+
+	/** 跑一个已编译语料目录：逐类对齐、统计含 lambda 的样本数与 BODY_MISMATCH 次数。 */
+	static void measureCorpus(Path outG, Path outNone, String tag, Corpus corpus) throws Exception {
+		int scanned = 0, withLambdas = 0, aligned = 0;
+		List<Path> classes;
+		try (Stream<Path> st = Files.walk(outG)) {
+			classes = st.filter(p -> p.toString().endsWith(".class")).collect(Collectors.toList());
+		}
+		for (Path p : classes) {
+			Path q = outNone.resolve(outG.relativize(p).toString());
+			if (!Files.exists(q)) continue;
+			scanned++;
+			byte[] oldBytes = Files.readAllBytes(p);
+			ClassNode cn = parse(oldBytes);
+			int lambdas = 0;
+			for (MethodNode mn : cn.methods) if (mn.name.startsWith("lambda$")) lambdas++;
+			if (lambdas == 0) continue;                       // 不含 lambda 的类不构成本组样本
+			withLambdas++;
+
+			// 新版本 = 同源 -g:none 编译 + 槽位整体平移（等价性由源码相同保证，与体指纹无关）。
+			byte[] newBytes = shiftLocalSlots(Files.readAllBytes(q), 3);
+			LambdaAligner.LAST_RESULT = null;
+			LambdaAligner.TEST_EVENTS.clear();
+			byte[] product = LambdaAligner.align(oldBytes, newBytes);
+			assertNotNull(product, "对齐产物非空: " + p);
+			aligned++;
+			if (LambdaAligner.LAST_RESULT.stats.bodyMismatchRefusals > 0) {
+				corpus.refusals.add(tag + "/" + outG.relativize(p) + " lambdas=" + lambdas + " "
+					+ LambdaAligner.LAST_RESULT.stats);
+			}
+		}
+		corpus.withLambdas += withLambdas;
+		corpus.aligned += aligned;
+		corpus.withLambdasByModule.put(tag, withLambdas);
+		corpus.classesScannedByModule.put(tag, scanned);
+		StringBuilder sb = new StringBuilder(corpus.perModule);
+		if (sb.length() > 0) sb.append(", ");
+		sb.append(tag).append('=').append(withLambdas).append('/').append(scanned);
+		corpus.perModule = sb.toString();
+	}
+
+	/** 递归收集目录下的 {@code .java} 源文件。 */
+	static List<File> javaSources(Path root) throws Exception {
+		List<File> out = new ArrayList<>();
+		if (!Files.isDirectory(root)) return out;
+		try (Stream<Path> st = Files.walk(root)) {
+			st.filter(p -> p.toString().endsWith(".java")).forEach(p -> out.add(p.toFile()));
+		}
+		out.sort(java.util.Comparator.comparing(File::getAbsolutePath));
+		return out;
+	}
+
+	/** 本地 Gradle 缓存的 {@code modules-2/files-2.1} 根；取不到返回 {@code null}。 */
+	static File gradleCacheRoot() {
+		List<File> candidates = new ArrayList<>();
+		String guh = System.getenv("GRADLE_USER_HOME");
+		if (guh != null && !guh.isEmpty()) candidates.add(new File(guh));
+		String home = System.getProperty("user.home");
+		if (home != null && !home.isEmpty()) candidates.add(new File(home, ".gradle"));
+		for (File g : candidates) {
+			File c = new File(g, "caches/modules-2/files-2.1");
+			if (c.isDirectory()) return c;
+		}
+		return null;
+	}
+
+	/**
+	 * 按 Maven 坐标从本地 Gradle 缓存里找一个<b>非 sources</b> jar。
+	 *
+	 * <p>只用于给 {@code plugin-*} 语料补第三方 {@code compileOnly} 依赖；缓存未命中就返回
+	 * {@code null}，由调用方登记显式缺口（不静默降低覆盖面）。</p>
+	 */
+	static File pluginDependencyJar(String group, String artifact, String version) {
+		File cache = gradleCacheRoot();
+		if (cache == null) return null;
+		File moduleDir = new File(new File(cache, group), artifact);
+		File versionDir = new File(moduleDir, version);
+		if (!versionDir.isDirectory()) return null;
+		File[] hashes = versionDir.listFiles(File::isDirectory);
+		if (hashes == null) return null;
+		java.util.Arrays.sort(hashes, java.util.Comparator.comparing(File::getName));
+		for (File hash : hashes) {
+			File[] jars = hash.listFiles(f -> f.isFile() && f.getName().endsWith(".jar")
+				&& !f.getName().endsWith("-sources.jar") && !f.getName().endsWith("-javadoc.jar"));
+			if (jars == null || jars.length == 0) continue;
+			java.util.Arrays.sort(jars, java.util.Comparator.comparing(File::getName));
+			return jars[0];
+		}
+		return null;
+	}
+
+
+	//region 夹具：等价常量改写（BIPUSH 6 → LDC 2; LDC 3; IMUL）
+	/** 把叶子里的 {@code BIPUSH 6} 改写成 {@code LDC 2; LDC 3; IMUL}（值等价、指令形态不同）。 */
+	static byte[] foldConstantRewrite(byte[] bytes) {
+		ClassNode cn = parse(bytes);
+		boolean rewrote = false;
+		for (MethodNode mn : cn.methods) {
+			if (!mn.name.startsWith("lambda$") || mn.instructions == null) continue;
+			for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+				if (!(insn instanceof IntInsnNode ii) || ii.getOpcode() != Opcodes.BIPUSH || ii.operand != 6) continue;
+				InsnList replace = new InsnList();
+				replace.add(new LdcInsnNode(2));
+				replace.add(new LdcInsnNode(3));
+				replace.add(new InsnNode(Opcodes.IMUL));
+				mn.instructions.insert(ii, replace);
+				mn.instructions.remove(ii);
+				rewrote = true;
+				break;
+			}
+			if (rewrote) break;
+		}
+		if (!rewrote) throw new IllegalStateException("夹具里找不到 BIPUSH 6，改写失败");
+		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+		cn.accept(cw);
+		return cw.toByteArray();
+	}
+	//endregion
+
+	//region 夹具：局部变量槽位整体平移
+	/** 把局部变量槽整体平移（{@code VarInsn} / {@code IincInsn} / LVT / maxLocals）。 */
+	static byte[] shiftLocalSlots(byte[] bytes, int delta) {
+		ClassNode cn = parse(bytes);
+		for (MethodNode mn : cn.methods) {
+			if (mn.instructions == null) continue;
+			for (AbstractInsnNode insn : mn.instructions) {
+				if (insn instanceof VarInsnNode v) v.var += delta;
+				else if (insn instanceof IincInsnNode i) i.var += delta;
+			}
+			if (mn.localVariables != null) for (LocalVariableNode lv : mn.localVariables) lv.index += delta;
+			if (mn.maxLocals > 0) mn.maxLocals += delta;
+		}
+		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+		cn.accept(cw);
+		return cw.toByteArray();
+	}
+	//endregion
+
+	/** 满仓编译一批源文件（关掉注解处理，内部 API 走 add-exports）。 */
+	static void compile(String javac, String classpath, String debug, Path out, List<File> sources) throws Exception {
+		List<String> cmd = new ArrayList<>(Arrays.asList(javac, "-nowarn", "-proc:none", "-encoding", "UTF-8", debug,
+			"--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+			"--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
+			"--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED",
+			"-cp", classpath, "-d", out.toString()));
+		for (File f : sources) cmd.add(f.getAbsolutePath());
+		Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+		StringBuilder log = new StringBuilder();
+		try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+			String line;
+			while ((line = r.readLine()) != null) log.append(line).append('\n');
+		}
+		int rc = p.waitFor();
+		if (rc != 0) throw new IllegalStateException("javac " + debug + " 失败（rc=" + rc + "）：\n"
+			+ log.substring(0, Math.min(4000, log.length())));
+	}
+
+	/** 叶子载荷是否还在：既接受 {@code BIPUSH 6}，也接受折叠后的 {@code LDC 2 / LDC 3 / IMUL}。 */
+	static boolean newArrayPayloadKept(MethodNode mn) {
+		boolean newArray = false, concat = false;
+		for (AbstractInsnNode insn : mn.instructions) {
+			if (insn.getOpcode() == Opcodes.NEWARRAY) newArray = true;
+			if (insn instanceof InvokeDynamicInsnNode indy && indy.bsmArgs != null) {
+				for (Object arg : indy.bsmArgs) {
+					if (arg instanceof String s && s.startsWith("k:")) concat = true;
+				}
+			}
+		}
+		return newArray && concat;
+	}
+
+	static String describe(MethodNode mn) {
+		StringBuilder sb = new StringBuilder(mn.name + mn.desc + " ops=[");
+		for (AbstractInsnNode insn : mn.instructions) {
+			int op = insn.getOpcode();
+			if (op >= 0) sb.append(org.objectweb.asm.util.Printer.OPCODES[op]).append(' ');
+		}
+		return sb.append(']').toString();
 	}
 
 	static ClassNode parse(byte[] bytes) {
@@ -103,6 +496,14 @@ public class PassBTest {
 		return null;
 	}
 
+	static MethodNode method0(ClassNode cn, String name) {
+		if (name == null) return null;
+		for (MethodNode mn : cn.methods) {
+			if (mn.name.equals(name)) return mn;
+		}
+		return null;
+	}
+
 	/** 方法体内是否调用了同名方法（幽灵判定沿用本项目的 onOrphanInvoked 约定）。 */
 	static boolean calls(MethodNode mn, String name) {
 		if (mn == null || mn.instructions == null) return false;
@@ -114,6 +515,7 @@ public class PassBTest {
 
 	/** 指定方法里第一个指向本类合成方法的 invokedynamic 目标名。 */
 	static String firstIndyTarget(ClassNode cn, String methodName) {
+		if (methodName == null) return null;
 		for (MethodNode mn : cn.methods) {
 			if (!mn.name.equals(methodName)) continue;
 			for (AbstractInsnNode insn : mn.instructions) {

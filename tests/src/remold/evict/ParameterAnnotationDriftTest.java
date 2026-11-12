@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.*;
  *       纯方法体变化与无关成员不得误报（对照组）。</li>
  *   <li><b>接线终局</b>：告警真的经 {@link RemoldAgent#logger} 输出，点出成员名，并显式登记
  *       "重定义不刷新已解析的反射句柄、驱逐只覆盖已注册缓存"这条能力边界（不变量 C4）；
- *       漂移时驱逐范围必须从声明类扩到<b>已加载派生类</b>，无关类不得进入（对照组）。</li>
+ *       （驱逐范围扩展已整体移到 {@code parked/k-eviction-scope} 分支；主干只保留检测 + WARN 点名。）</li>
  * </ol>
  *
  * <p>夹具用 ASM 直接构造字节码而不是 javac：被测对象就是"两个版本的类文件"，构造字节能精确
@@ -250,7 +250,8 @@ public class ParameterAnnotationDriftTest {
 			RemoldAgent.logger = previous;
 		}
 
-		assertTrue(drift, "Drift must be reported to the caller (it drives the eviction-scope expansion)");
+		assertTrue(drift, "Drift must be reported to the caller (the pipeline uses the boolean to decide"
+			+ " whether to report at all; the scope-expansion consumer is parked, see parked/k-eviction-scope)");
 		assertFalse(captured.warnings.isEmpty(), "WARN must be emitted through RemoldAgent.logger");
 		String all = String.join("\n", captured.warnings);
 		assertTrue(all.contains("SIG-DRIFT"), "Warning must carry a searchable tag: " + all);

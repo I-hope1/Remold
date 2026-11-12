@@ -144,10 +144,14 @@ public final class ReflectionCacheManager {
 				+ ": " + String.join(" + ", e.getValue()) + " changed.");
 		}
 		lines.add("[SIG-DRIFT] " + (className == null ? "?" : className)
-			+ ": reflection handles (Method/Constructor/Field) resolved BEFORE this redefine keep the OLD"
-			+ " parameter annotations / generic signature — class redefinition does NOT refresh them, so they are"
-			+ " UNSAFE; re-resolve them. Cache eviction only covers REGISTERED caches (Gson/Jackson/plugins),"
-			+ " it cannot repair user-held handles.");
+			+ ": reflection handles (Method/Constructor/Field) resolved BEFORE this redefine are UNSAFE —"
+			+ " their reads are not guaranteed to match the new class. Measured readings differ by runtime:"
+			+ " on a standard HotSpot the stale handle returned the OLD parameter annotations / generic"
+			+ " signature without any exception, while on JBR 21 with -XX:+AllowEnhancedClassRedefinition the"
+			+ " same read either threw java.lang.reflect.GenericSignatureFormatError or returned the NEW value."
+			+ " Re-resolve handles instead of reusing them (re-resolving read the new state in every measured"
+			+ " scenario). Cache eviction only covers REGISTERED caches (Gson/Jackson/plugins); it cannot"
+			+ " repair handles held by user code.");
 		return lines;
 	}
 

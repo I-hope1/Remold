@@ -536,9 +536,20 @@ Step 1 那处（S5）还有 `sameSemantics` 兜底，**Pass B 那两处（S7）�
 
 `-g:none` 编译 + 槽位整体平移时，部分类的 lambda 会被判为"身份丢失"而生成幽灵桩替身：
 `[观测]` 语料 N=30（范围见下）中 **8 类出现幽灵、共 22 个桩**（`AnonClassAligner` 6、`ref/InitFix` 5、`LambdaAligner` 4、
-`RemoldAgent` 3，另 4 类各 1；其余 22 类为 0）。同一语料、同一变换下把兜底门禁关闭再跑，读数**逐字节相同**（31 行机器比对零差异、两趟 `totalRefusals=0`）；
-因此结论**在"语料 harness 的门禁开关确实生效"这一前提下成立**——该前提的阳性对照（关门禁时 L5 种子静默错绑、
-开门禁时出 `BODY_MISMATCH`）**待补**，`[观测]` 有条件，不得读作无条件定论。
+`RemoldAgent` 3，另 4 类各 1；其余 22 类为 0）。同一语料、同一变换下把兜底门禁关闭再跑，读数**逐字节相同**（两趟 `classesWithGhosts=9`、`totalGhosts=23`、
+`totalRefusals=0`，语料 N=37）。
+
+该零差异的**前提已由阳性对照证成**：`[GATE-STATE]` 行读的是**实际被加载的** `LambdaAligner` 字节
+（数 `fallbackPairingAllowed` 调用点并打 `alignerSha256`），两趟分别得到
+`bodyFingerprint=on callSites=4 sha256=858dd0ff…` 与 `bodyFingerprint=off callSites=0 sha256=653c92bb…`
+（sha 不同 ⇒ 第二趟确实换了实现）。同一 L5 种子在两条路径上的读数：
+
+| 门禁 | `refusals` | `bodyMismatchEvents` | 旧槽位形态 |
+|:--|--:|--:|:--|
+| on | 9 | 1 | 幽灵化（`oldSlotGhost=true`，`oldSlotInnerPayload=false`） |
+| off | 0 | 0 | 内层体静默顶替（`oldSlotInnerPayload=true`，即错绑形态） |
+
+即：开关确实改变被测实现，因此"两趟幽灵数相同"**无条件**说明槽位平移幽灵与该门禁无关，`[观测]`。
 
 成因：`[推断]` 票据指纹计入 `var` 下标，`-g:none` 后失去调试信息、槽位平移即认不出；**未做隔离实验**。
 语料范围（逐目录，N=37）：`core/src` + `api/src`（合并编译，30 个含 lambda 类）、`plugin-fabric/src`（3）、`plugin-mixin/src`（2）、`plugin-forge/src`（2）；缺口 `plugin-arc/src`（Mindustry 编译期制品非纯 class 包，缺注解处理器，javac 解析即失败）、`tests/`、`gradle-plugin/`。

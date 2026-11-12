@@ -7,9 +7,9 @@
 
 | 审计元数据项 | 内容与规格说明 |
 |:---|:---|
-| **基准提交 (Baseline Commit)** | `main` @ `886b39a`（`v0.2.7` 已发布，tag `0852506`，其代码基线 `db65bf0`；上一发布 `v0.2.6` tag `2159d21`）。v0.2.7 内容：Mixin 合成匿名类成员 schema 闸门 + 事务共退 + 自愈账本、`ReloadMixinInfo` 三大结构契约、新 Mixin 运行期准入、访问权限单调对齐、JDK 内部包自举（免 `--add-exports`/`--add-opens`）、`docs/mixin/01..08` 专题文档（逐项见 §0.11～§0.14） |
-| **发布说明** | [`releases/v0.2.7`](https://github.com/I-hope1/Remold/releases/tag/v0.2.7)（正文随 release 发布；历史档见 `releases/`） |
-| **最后更新时间** | 2026-11-12（前线 P0 闭环：枚举顺序门被 Mixin 成员对齐器抢跑、枚举常量集合变化的假成功、读者扫描被无关常量池引用污染、`@RemoldReinit` 用户契约收口（force 开关/触发原因/继承作用域门/不支持清单）、运行期日志去中文并加 `verifyLogLanguage` 守卫、gradle-plugin agent 版本对账；详见 §0.12 与 `.battle/reports/frontline-p0-*.md`） |
+| **基准提交 (Baseline Commit)** | `main` @ `4521803`（`v0.2.8` 发布准备已提交，**tag 待打**；上一发布 `v0.2.7` tag `0852506`，其代码基线 `db65bf0`；再上一发布 `v0.2.6` tag `2159d21`）。v0.2.8 内容：前线 P0 安全门收口（枚举顺序门被 Mixin 对齐器抢跑、枚举常量集合变更假成功、读者扫描被无关常量池污染、`@RemoldReinit` 契约）、运行期日志英文化 + `verifyLogLanguage`、gradle-plugin agent 版本对账 + `cleanRemoldCache`、孤儿 lambda 保留旧体、`redefineDynamic` 接入两阶段、Linux aarch64 原生库、发版坐标自检大小写敏感（逐项见 §0.12） |
+| **发布说明** | `v0.2.8`：[`releases/v0.2.8.md`](releases/v0.2.8.md)（prepared，**GitHub release 待 tag 后发布**）；上一发布 [`releases/v0.2.7`](https://github.com/I-hope1/Remold/releases/tag/v0.2.7)（历史档见 `releases/`） |
+| **最后更新时间** | 2026-11-12（v0.2.8 发布准备：版本常量/CHANGELOG/Release Notes 递增、发版坐标大小写统一与 `verifyReleaseCoordinates` 强化、mavenLocal 16/16 坐标解析验证；此前 v0.2.7 后收口前线 P0 安全门、日志英文化、gradle-plugin 版本对账、孤儿 lambda 保留旧体、`redefineDynamic` 两阶段；详见 §0.12） |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |
 | **更新触发条件** | 任何合入包含特性落地、架构偏离、安全门调整、测试基线变更或发现已知缺陷/残余风险的 PR/commit 时，必须同步原子化更新本文件。提交时由作者/维护者更新基准哈希。 |
 | **管辖范围与边界声明** | 本状态表权威管辖：<br>1. **匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)**（[`docs/topology/`](topology/)）<br>2. **存量初始化修复器 (InitFix / Legacy Instance & Static Reinitialization)**（[`docs/initfix/`](initfix/)）<br>3. **物理内存偏移稳定性与第三方缓存驱逐 (Physical Memory Offset Stability & Reflection Cache Eviction)**（[`docs/offset/`](offset/)）<br>*边界与后续治理声明*：同属字节码重映射体系的 `LambdaAligner`（Lambda 表达式对齐器）以及 Mindustry UI 胶水层（`CellPropertyRef` / 动态参数表达式指纹），其实现状态当前由各自单元测试覆盖（`CellHelperTest` 35 个用例持续全绿、`LambdaAlignerTest` 等）；它们的详细状态审计矩阵尚未并入本总表，计划在下一轮治理中统一建立验收标准并纳入。 |

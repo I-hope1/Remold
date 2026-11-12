@@ -447,12 +447,12 @@ lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
 ### 9.2 能拦的 / 拦不了的
 
 - **能拦的**：方法体在**抹掉上述四类位置信息之后**仍然不同，且六档证据都不成立 ⇒
-  `BODY_MISMATCH` WARN + 拒绝配对。典型形态：删一个 lambda 又加一个**不同体**的（L5：把叶子
+  `BODY_MISMATCH` WARN + 拒绝配对。典型形态：删一个 lambda 又加一个**不同体**的（体内新增内层 lambda 的形态：把叶子
   包进新内层）；体不同且换了消费者；体不同且宿主形态翻转。
-- **拦不了的（信息论边界，`[推断]`）**：删掉一个 lambda、**同一次保存里又加一个**、且 javac 恰好
+- **拦不了的（信息论边界，由代码分析可知）**：删掉一个 lambda、**同一次保存里又加一个**、且 javac 恰好
   给它**同一个编号**（同宿主、同名）—— 这与"原地更新"在字节码层**完全同形**，没有任何规则能区分。
   该形态仍会被配对。此结论的依据是判据本身的形状（不存在区分二者的可观测量），
-  不是实测反例；把它列为 `[推断]` 而非 `[观测]`。
+  不是实测反例；把它列为 由代码分析可知 而非 实测。
 - 另一层边界：`bodyFingerprint` 只能证明"体等价"，**不能证明"体属于同一个 lambda"**——体等价的
   两个 lambda 互换身份时它看不见。这类互换由"名字/宿主/顺序"三档证据兜，不是体指纹的职责。
 
@@ -477,23 +477,23 @@ lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
 
 | # | 消费点 | 作用 | 防线性质 |
 |:--|:--|:--|:--|
-| S1 | `scan`：`info.ghost` 的方法**不当宿主** | 幽灵体内的 indy 不产出宿主序列（宿主 `hostKey` 保持 `null`） | 独立；但由它产生的 `null` 宿主**交给 G1 否决**，这条链只在门禁里 |
-| S2 | `scan`：幽灵**不作为 indy 目标**（`target.renameable && !target.ghost`） | 幽灵名不能被认领 | 独立（`[推断]`，代码阅读） |
-| S3 | `scan`：语义指纹不折入幽灵子（"幽灵无语义"） | 幽灵不污染父指纹 | 独立 |
-| S4 | `putNameIndex`：活方法压过幽灵/桥 | 同名索引取到真体而不是桩 | 独立 |
-| S5 | Step 1 `acceptCandidate` | 幽灵不参与指纹配对（`D` 可放开） | `D` 之外有独立防线：`sameSemantics` 仍要求指纹一致，而幽灵体是熔断桩、指纹与真实体不同 |
-| S6 | Pass A `step2PassA` | 幽灵不参与 A 趟 | 独立：在该路径下跳过，`D` 不放开（`[推断]`，代码阅读） |
-| S7 | **Pass B 两条循环** | 幽灵不参与 B 趟（`D` 可放开） | **仅靠门禁**：`D` 放开后唯一拦得住的是 `fallbackPairingAllowed` |
-| S8 | `isSkeletonGloballyUnique` / `skeletonEligibleOld` | 幽灵不算骨架候选 | 独立 |
-| S9 | `hasMultipleHashCandidates` / `checkAndWarnHomomorphicPruning` | 只数活方法 | 独立 |
-| S10 | 深度/形状/引用者计算 | 幽灵按"无子空壳"处理 | 独立 |
-| S11 | `stepGhostRevive`（`-Dremold.agent.ghost_revive=true`，默认关） | 按**生前指纹**复活幽灵 | 独立通道：复活要求 `ghostOriginalHash == 新体指纹`，且**不经过**本门禁 |
-| G1 | `fallbackPairingAllowed` 的宿主形态否决（`hostKind` 一侧 `?`） | 取不到宿主 ⇒ 形态判不了 ⇒ **一票否决**，优先于"同名放行" | 独立防线（门禁自身的一层，不是"靠别的层兜"） |
-| G2 | `isOrderConsistent` 的 `hostKey == null` 早退 | 没有序号就没有顺序证据 | 独立（返回 `false` 即"不给证据"，不是放行） |
+| 消费点 1 | `scan`：`info.ghost` 的方法**不当宿主** | 幽灵体内的 indy 不产出宿主序列（宿主 `hostKey` 保持 `null`） | 独立；但由它产生的 `null` 宿主**交给 G1 否决**，这条链只在门禁里 |
+| 消费点 2 | `scan`：幽灵**不作为 indy 目标**（`target.renameable && !target.ghost`） | 幽灵名不能被认领 | 独立（由代码分析可知，代码阅读） |
+| 消费点 3 | `scan`：语义指纹不折入幽灵子（"幽灵无语义"） | 幽灵不污染父指纹 | 独立 |
+| 消费点 4 | `putNameIndex`：活方法压过幽灵/桥 | 同名索引取到真体而不是桩 | 独立 |
+| 消费点 5 | Step 1 `acceptCandidate` | 幽灵不参与指纹配对（`D` 可放开） | `D` 之外有独立防线：`sameSemantics` 仍要求指纹一致，而幽灵体是熔断桩、指纹与真实体不同 |
+| 消费点 6 | Pass A `step2PassA` | 幽灵不参与 A 趟 | 独立：在该路径下跳过，`D` 不放开（由代码分析可知，代码阅读） |
+| 消费点 7 | **Pass B 两条循环** | 幽灵不参与 B 趟（`D` 可放开） | **仅靠门禁**：`D` 放开后唯一拦得住的是 `fallbackPairingAllowed` |
+| 消费点 8 | `isSkeletonGloballyUnique` / `skeletonEligibleOld` | 幽灵不算骨架候选 | 独立 |
+| 消费点 9 | `hasMultipleHashCandidates` / `checkAndWarnHomomorphicPruning` | 只数活方法 | 独立 |
+| 消费点 10 | 深度/形状/引用者计算 | 幽灵按"无子空壳"处理 | 独立 |
+| 消费点 11 | `stepGhostRevive`（`-Dremold.agent.ghost_revive=true`，默认关） | 按**生前指纹**复活幽灵 | 独立通道：复活要求 `ghostOriginalHash == 新体指纹`，且**不经过**本门禁 |
+| 门禁层 1 | `fallbackPairingAllowed` 的宿主形态否决（`hostKind` 一侧 `?`） | 取不到宿主 ⇒ 形态判不了 ⇒ **一票否决**，优先于"同名放行" | 独立防线（门禁自身的一层，不是"靠别的层兜"） |
+| 门禁层 2 | `isOrderConsistent` 的 `hostKey == null` 早退 | 没有序号就没有顺序证据 | 独立（返回 `false` 即"不给证据"，不是放行） |
 
 
-表中"独立"指**该消费点不依赖兜底门禁**。证据等级：`[推断]`（代码阅读）；其中 S2 由 `D==0` 哨兵与
-`nullOldHost…` 具名用例覆盖、S7 明确**仅靠门禁**（纵深少一层），这两行另有 `[观测]` 支撑（`ev-cf3a`/`ev-1a5e`、
+表中"独立"指**该消费点不依赖兜底门禁**。证据等级：由代码分析可知（代码阅读）；其中 S2 由 `D==0` 哨兵与
+`nullOldHost…` 具名用例覆盖、S7 明确**仅靠门禁**（纵深少一层），这两行另有 实测 支撑（`ev-cf3a`/`ev-1a5e`、
 `mut-b42f`、`mut-6ba7`）。
 **残余风险（必须登记，不能只说"被短路"）**：`D`（"允许幽灵参与后续匹配"）覆盖的三处里，
 Step 1 那处（S5）还有 `sameSemantics` 兜底，**Pass B 那两处（S7）只由门禁兜底**。
@@ -523,15 +523,15 @@ Step 1 那处（S5）还有 `sameSemantics` 兜底，**Pass B 那两处（S7）�
   **不得**写成全仓结论，也不得当成 `plugin-arc` 无害的证明。缓存缺失时探针会打印
   `[BodyFingerprintFP-GAP]` 行而不是静默缩小样本面。
 
-### 9.7 幽灵归因：槽位平移下的身份丢失（`[观测]`）
+### 9.7 幽灵归因：槽位平移下的身份丢失（实测）
 
 同一语料（`core/src` + `api/src`，N=30 个含 lambda 的类）、同一变换（`-g` / `-g:none` + 槽位平移 3），
 分别跑**门禁关闭**（`fallbackPairingAllowed` 四处调用点短路）与**门禁开启**，逐类统计产物里的
 幽灵桩数：**两趟完全相同**（30 个类 + 汇总共 31 行机器读数逐字节一致，差异 0 行），
 其中 8/30 个类出现了幽灵（合计 22 个幽灵桩），门禁拒绝次数两趟都是 0。
 
-结论（`[观测]`）：这批幽灵**不是门禁造成的**，属**既有行为**——"槽位平移导致身份丢失"。
-成因的**推断**（`[推断]`，尚未单独做实验隔离）：票据指纹计入局部变量 `var` 下标，`-g:none` +
+结论（实测）：这批幽灵**不是门禁造成的**，属**既有行为**——"槽位平移导致身份丢失"。
+成因的**推断**（由代码分析可知，尚未单独做实验隔离）：票据指纹计入局部变量 `var` 下标，`-g:none` +
 槽位平移后既不同名也不撞指纹，更早的名字/序号对齐路径认不出来，旧名字于是退役为幽灵桩。
 这条记录的含义只有一条：**它在门禁之前就存在，所以不构成本门禁的误报**；
 它本身仍是身份召回能力的一个已知缺口。
@@ -539,7 +539,7 @@ Step 1 那处（S5）还有 `sameSemantics` 兜底，**Pass B 那两处（S7）�
 ## §10 槽位平移下的幽灵桩
 
 `-g:none` 编译 + 槽位整体平移时，部分类的 lambda 会被判为"身份丢失"而生成幽灵桩替身。
-`[观测]` 在**下列范围**内：语料 N=37（`core/src`+`api/src` 合并编译 30 个含 lambda 类、
+实测 在**下列范围**内：语料 N=37（`core/src`+`api/src` 合并编译 30 个含 lambda 类、
 `plugin-fabric/src` 3、`plugin-mixin/src` 2、`plugin-forge/src` 2）、JDK 21 编译、变换为
 "新侧 `-g:none` + 槽位整体平移"、单次对照实验 —— 其中 **9 类出现幽灵、共 23 个桩**
 （`AnonClassAligner` 6、`ref/InitFix` 5、`LambdaAligner` 4、`RemoldAgent` 3，
@@ -552,24 +552,24 @@ Step 1 那处（S5）还有 `sameSemantics` 兜底，**Pass B 那两处（S7）�
 
 **口径与实测读数**（`tests/tools/gate-counter.patch`，测试工具补丁，不进产品代码）：语料 31 个类触发兜底门禁，
 `eval=107 / fpCmp=107 / fpAllow=107 / hostKindRefused=0 / fallbackRefused=0`，即 107 次评估均进入 `bodyHash`
-比对并因指纹相等放行，同源变换误报 **0/107**。`GateCtrl` 阳性对照：`eval=18 / fpCmp=18 / fpAllow=0 /
+比对并因指纹相等放行，同源变换误报 **0/107**。`嵌套 lambda 对照种子` 阳性对照：`eval=18 / fpCmp=18 / fpAllow=0 /
 hostKindRefused=18`（指纹不等后由宿主形态翻转拒绝），证明计数器对"指纹不等"形态有分辨力。
 `gate=on/off` 两趟幽灵数逐字节相同的机制即：语料上 0 次拒绝，关掉门禁同样放行。误报率外推仍限 4 类人造重排各 n=1。
 
-**护栏与其局限**：语料用例与 L5 对照都断言 `[GATE-STATE]` 为开（`callSites>0`），门禁被关时显式红
+**护栏与其局限**：语料用例与 体内新增内层 lambda 的形态 对照都断言 `[GATE-STATE]` 为开（`callSites>0`），门禁被关时显式红
 （关态实测 `exit 1`，三个用例同时红）。该护栏只能发现"门禁调用被移除"这一形态；把 `fallbackPairingAllowed`
-改成恒返回 true 时 `callSites` 仍为 4、护栏仍绿 —— 这一形态由 L5 对照的行为断言兜底（`mut-…062308-2578`：
-恒 true 变异下 `gatePositiveControlOnL5Seed` 与 `passBRefusesRebindWhenBodyDiffers` 同时红）。
+改成恒返回 true 时 `callSites` 仍为 4、护栏仍绿 —— 这一形态由 体内新增内层 lambda 的形态 对照的行为断言兜底（：
+恒 true 变异下 `gatePositiveControlOn体内新增内层 lambda 的形态Seed` 与 `passBRefusesRebindWhenBodyDiffers` 同时红）。
 
 **已知口径（I3）**：`BODY_MISMATCH` 的 WARN 与 `TEST_EVENTS` 按 `类名#BODY#新名<-旧名` 去重，键里没有
-重定义轮次或类版本（`[推断]`，代码阅读）；`bodyMismatchRefusals` 的自增在该去重之前，配对拒绝与幽灵化
-不受其影响（`[推断]`）。生产侧 `core/` 下 `clearLoggedWarnings()` 调用点为 0、`TEST_EVENTS` 生产消费者为 0
-（`[观测]`，grep 读数）。长驻 agent 内同一处错绑在后续轮次重复出现时 WARN 只打一次，登记为 **I3**，未修。
+重定义轮次或类版本（由代码分析可知，代码阅读）；`bodyMismatchRefusals` 的自增在该去重之前，配对拒绝与幽灵化
+不受其影响（由代码分析可知）。生产侧 `core/` 下 `clearLoggedWarnings()` 调用点为 0、`TEST_EVENTS` 生产消费者为 0
+（实测，grep 读数）。长驻 agent 内同一处错绑在后续轮次重复出现时 WARN 只打一次，登记为 跨轮次告警去重问题，未修。
 
 - `[GATE-STATE]` 读的是**实际被加载的** `LambdaAligner` 字节（数 `fallbackPairingAllowed` 调用点并打
   `alignerSha256`），两趟分别 `bodyFingerprint=on callSites=4 sha256=858dd0ff…` 与
   `bodyFingerprint=off callSites=0 sha256=653c92bb…`（sha 不同 ⇒ 第二趟确实换了实现）；
-- 同一 L5 种子在两趟上的读数：
+- 同一 体内新增内层 lambda 的形态 种子在两趟上的读数：
 
 | 门禁 | `refusals` | `bodyMismatchEvents` | 旧槽位形态 |
 |:--|--:|--:|:--|
@@ -579,7 +579,7 @@ hostKindRefused=18`（指纹不等后由宿主形态翻转拒绝），证明计�
 - 另一条独立证据：门禁**开着**时语料 `totalRefusals=0`，说明门禁在该语料上根本没有触发，
   与上面"两趟幽灵数相同"互为独立佐证。
 
-成因：`[推断]` 票据指纹计入 `var` 下标，`-g:none` 后失去调试信息、槽位平移即认不出；**未做隔离实验**。
+成因：由代码分析可知 票据指纹计入 `var` 下标，`-g:none` 后失去调试信息、槽位平移即认不出；**未做隔离实验**。
 这是用户可感知的可用性回退（lambda 失效），登记为已知限制；隔离实验列为候选批次（会动生产代码，单开批次）。
 缺口（未纳入语料）：`plugin-arc/src`（Mindustry 编译期制品非纯 class 包，缺注解处理器，javac 解析即失败）、
 `tests/`、`gradle-plugin/`。

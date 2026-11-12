@@ -59,6 +59,9 @@ public final class AnnotationDefaultProbe {
 
 	public static void main(String[] args) throws Exception {
 		System.out.println("=== annotation default (AnnotationDefault) drift probe — batch J ===");
+		// 运行标识：同一探针在不同轮次/不同提交上的输出必须可区分（避免"同哈希"被读成缓存命中）。
+		System.out.println("PROBE-RUN tag=" + (args.length > 1 ? args[1] : "<none>")
+			+ " proot=" + System.getProperty("user.dir"));
 		if (args.length > 0 && "gate".equals(args[0])) {
 			// 门禁模式：跑真实 RemoldAgent（-javaagent:core/build/libs/remold-agent.jar），
 			// 验证"默认值变化→拒绝"与"无关变更→照常重定义"两条门禁行为。
@@ -74,6 +77,7 @@ public final class AnnotationDefaultProbe {
 		scenarios.add(runDefaultScenario("control-identical-default", "v1", "v1"));
 		scenarios.add(runDefaultScenario("default-value-change", "v1", "v2"));
 		scenarios.add(runDefaultScenario("default-removed", "v1", null));
+		scenarios.add(runDefaultAddedScenario());
 
 		for (Scenario scenario : scenarios) {
 			System.out.println("--- scenario: " + scenario.label);
@@ -420,6 +424,123 @@ public final class AnnotationDefaultProbe {
 		// C6：加载在重定义之前、但注解**一次都没读过**的消费者类（首次解析在重定义之后）：
 		// 它若读到 v2，说明旧值只黏在"重定义前解析过注解的类"上；若读到 v1，说明加载期就绑定了。
 		readMemberValue(scenario, "C6-loaded-before-never-read", "class-level", lateConsumer.getAnnotation(annotationClass));
+		return scenario;
+	}
+
+	/**
+	 * 场景 {@code default added}（成员原本<b>没有</b>默认值，变更后有了默认值）。
+	 *
+	 * <p>指挥部裁定：默认拒绝（与 changed/removed 一致，fail-closed），机制描述标 {@code [推断]}，
+	 * 放行与否等三格读数出来再议。消费者在两侧都必须显式赋值才能编过，所以"消费者终局"读的是
+	 * 显式值（对照）；真正的默认值读数来自元数据路径，以及"重定义之后才编译并加载的裸 {@code @Mark}
+	 * 消费者"（只有新注解类型下才编得过，它读到什么就是新默认值对外部世界的可见形态）。</p>
+	 */
+	private static Scenario runDefaultAddedScenario() {
+		Scenario scenario = new Scenario("default-added(<no default>->v1)");
+		Instrumentation instrumentation = P05Agent.instrumentation();
+		if (instrumentation == null) {
+			scenario.redefineOutcome = "NO-INSTRUMENTATION";
+			return scenario;
+		}
+		Map<String, byte[]> before = compile(Map.of(
+			ANNOTATION_CLASS, annotationSource(null),
+			"probe.fix.Consumer", consumerSource("Consumer", "(\"explicit\")"),
+			"probe.fix.Reader", consumerSource("Reader", "(\"explicit\")"),
+			"probe.fix.Late", consumerSource("Late", "(\"explicit\")")));
+		Map<String, byte[]> after = compile(Map.of(
+			ANNOTATION_CLASS, annotationSource("v1"),
+			"probe.fix.Bare", consumerSource("Bare", "")));
+		byte[] beforeAnnotation = before.get(ANNOTATION_CLASS);
+		byte[] afterAnnotation = after.get(ANNOTATION_CLASS);
+		ProbeLoader loader = new ProbeLoader(AnnotationDefaultProbe.class.getClassLoader(), Map.of());
+
+		Class<?> annotationType;
+		Class<?> consumer;
+		Class<?> lateConsumer;
+		try {
+			annotationType = loader.define(ANNOTATION_CLASS, beforeAnnotation);
+			consumer = loader.define(CONSUMER_CLASS, before.get(CONSUMER_CLASS));
+			lateConsumer = loader.define("probe.fix.Late", before.get("probe.fix.Late"));
+		} catch (Throwable t) {
+			scenario.redefineOutcome = "LOAD-FAILED:" + t.getClass().getName();
+			record(scenario, "load", "defineClass", CONSUMER_CLASS, t);
+			return scenario;
+		}
+		System.out.println("PROBE-FIXTURE scenario=" + scenario.label
+			+ " annotationBytes=" + beforeAnnotation.length + "->" + afterAnnotation.length
+			+ " consumerBytes=" + before.get(CONSUMER_CLASS).length + "(unchanged)");
+
+		Method warmDefaultHandle;
+		Method coldDefaultHandle;
+		Annotation oldClassAnnotation;
+		Annotation oldMethodAnnotation;
+		Method tagged;
+		try {
+			warmDefaultHandle = annotationType.getDeclaredMethod("value");
+			coldDefaultHandle = null;
+			for (Method candidate : annotationType.getDeclaredMethods()) {
+				if ("value".equals(candidate.getName())) {
+					coldDefaultHandle = candidate;
+				}
+			}
+			if (coldDefaultHandle == null) {
+				throw new IllegalStateException("cold handle: annotation type has no value() member");
+			}
+			readDefaultValue(scenario, "pre-warm", "value", warmDefaultHandle);
+			tagged = consumer.getDeclaredMethod("tagged");
+			oldClassAnnotation = consumer.getAnnotation(annotationClassOf(loader, ANNOTATION_CLASS));
+			oldMethodAnnotation = tagged.getAnnotation(annotationClassOf(loader, ANNOTATION_CLASS));
+			readMemberValue(scenario, "pre-warm", "class-level", oldClassAnnotation);
+			readMemberValue(scenario, "pre-warm", "method-level", oldMethodAnnotation);
+		} catch (Throwable t) {
+			record(scenario, "pre-warm", "getDeclaredMethod", "value/tagged", t);
+			return scenario;
+		}
+
+		try {
+			instrumentation.redefineClasses(new ClassDefinition(annotationType, afterAnnotation));
+			scenario.redefineOutcome = "OK";
+		} catch (Throwable t) {
+			scenario.redefineOutcome = "THROWN:" + t.getClass().getName()
+				+ (t.getMessage() == null ? "" : ": " + t.getMessage());
+			record(scenario, "redefine", "redefineClasses", ANNOTATION_CLASS, t);
+			return scenario;
+		}
+
+		readDefaultValue(scenario, "R1-stale-warm", "value", warmDefaultHandle);
+		readDefaultValue(scenario, "R1-stale-cold", "value", coldDefaultHandle);
+		try {
+			for (Method method : annotationType.getDeclaredMethods()) {
+				if ("value".equals(method.getName())) {
+					readDefaultValue(scenario, "R2-fresh-array", "value", method);
+				}
+			}
+		} catch (Throwable t) {
+			record(scenario, "R2-fresh-array", "getDeclaredMethods", ANNOTATION_CLASS, t);
+		}
+		try {
+			readDefaultValue(scenario, "R3-first-resolve", "value",
+				annotationType.getDeclaredMethod("value"));
+		} catch (Throwable t) {
+			record(scenario, "R3-first-resolve", "getDeclaredMethod", "value", t);
+		}
+
+		Class<? extends Annotation> annotationClass = annotationClassOf(loader, ANNOTATION_CLASS);
+		readMemberValue(scenario, "C1-old-instance", "class-level", oldClassAnnotation);
+		readMemberValue(scenario, "C2-fresh-class-annotation", "class-level", consumer.getAnnotation(annotationClass));
+		readMemberValue(scenario, "C3-fresh-method-annotation", "method-level", tagged.getAnnotation(annotationClass));
+		readMemberValue(scenario, "C4-fresh-old-instance-method", "method-level", oldMethodAnnotation);
+		// C5：重定义之后才定义、且用"裸 @Mark"（不写成员值）——这条是 default added 的真实用法。
+		try {
+			Class<?> bare = loader.define("probe.fix.Bare", after.get("probe.fix.Bare"));
+			readMemberValue(scenario, "C5-post-redefine-bare-consumer", "class-level",
+				bare.getAnnotation(annotationClass));
+		} catch (Throwable t) {
+			record(scenario, "C5-post-redefine-bare-consumer", "defineClass", "probe.fix.Bare", t);
+		}
+		// C6：重定义前加载、但注解一次都没读过（显式值，作对照）。
+		readMemberValue(scenario, "C6-loaded-before-never-read", "class-level",
+			lateConsumer.getAnnotation(annotationClass));
 		return scenario;
 	}
 

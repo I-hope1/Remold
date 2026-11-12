@@ -672,6 +672,32 @@ public class LambdaAligner {
 	 *
 	 * @param inventedOldNames 上一轮由对齐器自造、且仍在旧类里的 lambda 方法名；可为 null
 	 */
+	public static boolean hasPotentialLambdas(byte[] bytes) {
+		if (bytes == null || bytes.length < 8) return false;
+		int len = bytes.length;
+		for (int i = 0; i <= len - 7; i++) {
+			byte b = bytes[i];
+			if (b == 'l') { // "lambda$"
+				if (bytes[i + 1] == 'a' && bytes[i + 2] == 'm' && bytes[i + 3] == 'b'
+				    && bytes[i + 4] == 'd' && bytes[i + 5] == 'a' && bytes[i + 6] == '$') {
+					return true;
+				}
+			} else if (b == '$') { // "$lambda" or "$anonfun$"
+				if (bytes[i + 1] == 'l' && bytes[i + 2] == 'a' && bytes[i + 3] == 'm'
+				    && bytes[i + 4] == 'b' && bytes[i + 5] == 'd' && bytes[i + 6] == 'a') {
+					return true;
+				}
+				if (i <= len - 9
+				    && bytes[i + 1] == 'a' && bytes[i + 2] == 'n' && bytes[i + 3] == 'o'
+				    && bytes[i + 4] == 'n' && bytes[i + 5] == 'f' && bytes[i + 6] == 'u'
+				    && bytes[i + 7] == 'n' && bytes[i + 8] == '$') {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
 	public static byte[] align(byte[] oldBytes, byte[] newBytes,
 	                           java.util.function.Function<String, byte[]> oldBytecodeResolver,
 	                           java.util.function.Function<String, byte[]> newBytecodeResolver,

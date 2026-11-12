@@ -609,6 +609,9 @@ dcevmProbe("offsetStabilityProbe", "OffsetStabilityProbe",
 dcevmProbe("lambdaBridgeProbe", "LambdaBridgeProbe",
 	"删除捕获变量后的老 callsite 行为探针 (LambdaBridgeProbe)：同名异描述符 / 改名 / 加捕获 / 仅改方法体")
 
+dcevmProbe("metaspaceGrowthProbe", "MetaspaceGrowthProbe",
+	"Metaspace 增长与泄漏实测探针 (MetaspaceGrowthProbe)：实测 Plain JBR vs Remold 连续热更的 Metaspace 消耗与 5x 根因剖析")
+
 // InitFix 批量失败 -> 逐类兜底的生命周期回归：批量失败是原子的，补丁必须留到逐类重试成功后再应用。
 tasks.register("initFixFallbackProbe", JavaExec) {
 	group = "verification"

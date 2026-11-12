@@ -499,6 +499,10 @@ public class RemoldAgent {
 		byte[] baseline = bytecodeCache.get(className);
 		if (baseline == null) baseline = sourceBytecodeCache.get(className);
 		if (baseline == null) return candidate;
+		if (!remold.ref.MixinMemberAlign.hasMixinGeneratedMembers(baseline)
+		    && !remold.ref.MixinMemberAlign.hasMixinGeneratedMembers(candidate)) {
+			return candidate;
+		}
 		try {
 			remold.ref.MixinMemberAlign.Result result =
 				remold.ref.MixinMemberAlign.align(candidate, baseline);
@@ -1955,6 +1959,7 @@ public class RemoldAgent {
 		// 批次可观测数据的起点：从读盘、对齐、织入、布局门、redefine 到 InitFix 全部计入。
 		// 收集器挂在当前线程上；即使没有任何监听器，这里也只多一次小对象分配，不改变批次行为。
 		BatchReportScope.begin();
+		resetLiveInstanceCache();
 		refreshPackageLoaders(classes);
 
 		// 获取当前所有已加载类的快照
@@ -2330,72 +2335,79 @@ public class RemoldAgent {
 					// 执行 ASM Diff
 					if (oldBytecode != null) {
 						if (LAMBDA_ALIGN) {
-							// 【基线一致性】oldBytecode 来自 bytecodeCache，是"上一次 transform 之后
-							// JVM 里实际生效"的形态（若开了 FORCE_STATIC_LAMBDA，则其中的 lambda 已被
-							// forceStaticLambdas 转成"静态 + this 显式首参数"）。而 newBytecode 是刚
-							// 从磁盘读到的原始编译产物，还是"实例 lambda"。两者形态不一致时，
-							// LambdaAligner 会把同一个 lambda 判成"删除 + 新增"，生成
-							// lambda$build$21 这类避障名，随后 redefine 触发的 transform 又会把新类
-							// 强制成静态，于是 JVM 里仍持有老 CallSite 的 UI 监听器直接
-							// NoSuchMethodError。这里让 newBytecode 先过一遍同样的归一化，
-							// 保证比对双方是同一种形态。该方法幂等，即便随后的 transform 再跑一次
-							// 也不会二次前置 this。
-							final ClassLoader alignLoader = targetClass.getClassLoader();
-							final String alignSlash = className.replace('.', '/');
-							if (FORCE_STATIC_LAMBDA) {
-								newBytecode = AnnotationTransformer.forceStaticLambdas(
-								 newBytecode, alignSlash, alignLoader);
-							}
-							// 【两侧基线必须同形态】newBytecode 上面刚归一化过，旧侧也必须归一化。
-							// sourceBytecodeCache 在批量路径上存的是**磁盘原始字节码**（实例 lambda），
-							// 而 JVM 里实际生效的 bytecodeCache 才是归一化后的形态。若旧侧直接用
-							// sourceBytecodeCache，LambdaAligner 会因 desc 不同把同一个 lambda 判成
-							// "删除 + 新增"：复活出的幽灵空壳沿用未归一化的签名（例如
-							// lambda$buildTitle$5(ImageButton)V），而老 CallSite 持有的是归一化后的
-							// 签名（lambda$buildTitle$5(Window, ImageButton)V）——redefine 之后直接
-							// NoSuchMethodError。原 lambda 还会被重复幽灵化出一份同名异型的空壳。
-							java.util.function.Function<String, byte[]> oldResolver =
-							 normalizeAlignResolver(name -> {
-								byte[] src = prevSourceBytes.get(name.replace('/', '.'));
-								if (src == null) src = sourceBytecodeCache.get(name.replace('/', '.'));
-								return src != null ? src : bytecodeCache.get(name.replace('/', '.'));
-							 }, alignLoader);
-							java.util.function.Function<String, byte[]> newResolver =
-							 normalizeAlignResolver(name -> newBatchBytes.get(name.replace('/', '.')), alignLoader);
-							byte[] oldSrc = prevSourceBytes.get(className);
-							// 基线优先用 JVM 里**实际生效**的那份（bytecodeCache，含上一轮注入的孤儿桩）：
-							// 源码基线不含桩，多轮序列下会与运行期真实形态脱节（rs_revive 实测：
-							// 删 A2 再加回，第二轮 A2 槽位串到 A3、A3 直接 NoSuchMethodError）。
-							byte[] alignOld = normalizeAlignBaseline(
-							 oldBytecode != null ? oldBytecode : oldSrc, alignSlash, alignLoader);
-							// 只在"运行期基线确实变了、但选出来的对齐基线却等于新字节"时才告警：
-							// IDE 重复构建、字节码没变时 oldBytecode 也等于 newBytecode，那属于正常情况。
-							if (java.util.Arrays.equals(alignOld, newBytecode)
-								&& oldBytecode != null && !java.util.Arrays.equals(oldBytecode, newBytecode)) {
-								warn("[LambdaAligner] baseline == new bytes for " + className
-									+ " while the loaded class differs — alignment had nothing to align"
-									+ " (stale source cache?). Old callsites will bind by raw javac numbering this round.");
-							}
-							try {
-								newBytecode = LambdaAligner.align(alignOld, newBytecode, oldResolver, newResolver,
-								 inventedSlots.getOrDefault(className, java.util.Set.of()));
-								// 本轮算出的"自造名"先挂起，等 redefine 成功再落账（失败就丢弃，
-								// 因为旧基线没前进，下一轮仍然是同一份旧字节）。
-								// 从本轮快照里取，避免读到别的轮次（失败时快照的集合是空的，不是 null）。
-								LambdaAligner.AlignmentResult aligned = LambdaAligner.LAST_RESULT;
-								pendingInvented.put(className,
-								 aligned == null ? java.util.Set.of() : aligned.inventedNames);
-							} catch (LambdaAligner.LambdaAlignmentStrictException e) {
-								error("REJECTED: " + e.getMessage() + ". Please recompile with '-g' or restart.");
-								AlignmentTransaction tx = transactions.get(className);
-								if (tx != null) {
-									tx.rollback(true);
-									transactions.remove(className);
+							boolean hasOldLambdas = LambdaAligner.hasPotentialLambdas(oldBytecode)
+								|| LambdaAligner.hasPotentialLambdas(prevSourceBytes.get(className));
+							boolean hasNewLambdas = LambdaAligner.hasPotentialLambdas(newBytecode);
+							boolean hasInvented = inventedSlots.containsKey(className)
+								&& !inventedSlots.get(className).isEmpty();
+							if (hasOldLambdas || hasNewLambdas || hasInvented) {
+								// 【基线一致性】oldBytecode 来自 bytecodeCache，是"上一次 transform 之后
+								// JVM 里实际生效"的形态（若开了 FORCE_STATIC_LAMBDA，则其中的 lambda 已被
+								// forceStaticLambdas 转成"静态 + this 显式首参数"）。而 newBytecode 是刚
+								// 从磁盘读到的原始编译产物，还是"实例 lambda"。两者形态不一致时，
+								// LambdaAligner 会把同一个 lambda 判成"删除 + 新增"，生成
+								// lambda$build$21 这类避障名，随后 redefine 触发的 transform 又会把新类
+								// 强制成静态，于是 JVM 里仍持有老 CallSite 的 UI 监听器直接
+								// NoSuchMethodError。这里让 newBytecode 先过一遍同样的归一化，
+								// 保证比对双方是同一种形态。该方法幂等，即便随后的 transform 再跑一次
+								// 也不会二次前置 this。
+								final ClassLoader alignLoader = targetClass.getClassLoader();
+								final String alignSlash = className.replace('.', '/');
+								if (FORCE_STATIC_LAMBDA) {
+									newBytecode = AnnotationTransformer.forceStaticLambdas(
+									 newBytecode, alignSlash, alignLoader);
 								}
-								skips.add(className, RoundSkips.verdict("LAMBDA-STRICT-REJECT",
-									"captured lambda missing LocalVariableTable (compiled without -g)",
-									"recompile with '-g' or restart"));
-								continue;
+								// 【两侧基线必须同形态】newBytecode 上面刚归一化过，旧侧也必须归一化。
+								// sourceBytecodeCache 在批量路径上存的是**磁盘原始字节码**（实例 lambda），
+								// 而 JVM 里实际生效的 bytecodeCache 才是归一化后的形态。若旧侧直接用
+								// sourceBytecodeCache，LambdaAligner 会因 desc 不同把同一个 lambda 判成
+								// "删除 + 新增"：复活出的幽灵空壳沿用未归一化的签名（例如
+								// lambda$buildTitle$5(ImageButton)V），而老 CallSite 持有的是归一化后的
+								// 签名（lambda$buildTitle$5(Window, ImageButton)V）——redefine 之后直接
+								// NoSuchMethodError。原 lambda 还会被重复幽灵化出一份同名异型的空壳。
+								java.util.function.Function<String, byte[]> oldResolver =
+								 normalizeAlignResolver(name -> {
+									byte[] src = prevSourceBytes.get(name.replace('/', '.'));
+									if (src == null) src = sourceBytecodeCache.get(name.replace('/', '.'));
+									return src != null ? src : bytecodeCache.get(name.replace('/', '.'));
+								 }, alignLoader);
+								java.util.function.Function<String, byte[]> newResolver =
+								 normalizeAlignResolver(name -> newBatchBytes.get(name.replace('/', '.')), alignLoader);
+								byte[] oldSrc = prevSourceBytes.get(className);
+								// 基线优先用 JVM 里**实际生效**的那份（bytecodeCache，含上一轮注入的孤儿桩）：
+								// 源码基线不含桩，多轮序列下会与运行期真实形态脱节（rs_revive 实测：
+								// 删 A2 再加回，第二轮 A2 槽位串到 A3、A3 直接 NoSuchMethodError）。
+								byte[] alignOld = normalizeAlignBaseline(
+								 oldBytecode != null ? oldBytecode : oldSrc, alignSlash, alignLoader);
+								// 只在"运行期基线确实变了、但选出来的对齐基线却等于新字节"时才告警：
+								// IDE 重复构建、字节码没变时 oldBytecode 也等于 newBytecode，那属于正常情况。
+								if (java.util.Arrays.equals(alignOld, newBytecode)
+									&& oldBytecode != null && !java.util.Arrays.equals(oldBytecode, newBytecode)) {
+									warn("[LambdaAligner] baseline == new bytes for " + className
+										+ " while the loaded class differs — alignment had nothing to align"
+										+ " (stale source cache?). Old callsites will bind by raw javac numbering this round.");
+								}
+								try {
+									newBytecode = LambdaAligner.align(alignOld, newBytecode, oldResolver, newResolver,
+									 inventedSlots.getOrDefault(className, java.util.Set.of()));
+									// 本轮算出的"自造名"先挂起，等 redefine 成功再落账（失败就丢弃，
+									// 因为旧基线没前进，下一轮仍然是同一份旧字节）。
+									// 从本轮快照里取，避免读到别的轮次（失败时快照的集合是空的，不是 null）。
+									LambdaAligner.AlignmentResult aligned = LambdaAligner.LAST_RESULT;
+									pendingInvented.put(className,
+									 aligned == null ? java.util.Set.of() : aligned.inventedNames);
+								} catch (LambdaAligner.LambdaAlignmentStrictException e) {
+									error("REJECTED: " + e.getMessage() + ". Please recompile with '-g' or restart.");
+									AlignmentTransaction tx = transactions.get(className);
+									if (tx != null) {
+										tx.rollback(true);
+										transactions.remove(className);
+									}
+									skips.add(className, RoundSkips.verdict("LAMBDA-STRICT-REJECT",
+										"captured lambda missing LocalVariableTable (compiled without -g)",
+										"recompile with '-g' or restart"));
+									continue;
+								}
 							}
 						}
 					}
@@ -2446,7 +2458,7 @@ public class RemoldAgent {
 							log("[DCEVM] Structure change detected, proceeding with enhanced redefinition.");
 						}
 						InitFix.transform(targetClass, newBytecode, diff);
-						if (InitFix.requiresTwoPhase(targetClass)) needsTwoPhase = true;
+						if (InitFix.requiresTwoPhase(targetClass, hasLiveInstances(targetClass))) needsTwoPhase = true;
 					} else {
 						log("[WARN] Cannot diff " + className + " (missing old bytecode). Proceeding with redefine.");
 					}
@@ -3991,6 +4003,10 @@ public class RemoldAgent {
 				// 没有可信旧字节就合成不出「旧方法体」；该类退化为直接提交目标字节（带告警）。
 				warn("[HOTSWAP-2P] No old bytecode for " + name
 				     + "; stage A falls back to the target bytes for this class.");
+				skeleton = target;
+			} else if (!InitFix.requiresTwoPhase(clazz, hasLiveInstances(clazz))) {
+				// 该类本身无需两阶段保护（如无存量实例且无静态字段，或纯方法体修改）：阶段 A 直接使用目标字节
+				if (DEBUG) log("[HOTSWAP-2P] Stage A uses target bytes directly for " + name + " (no live instances / no read-through hazard)");
 				skeleton = target;
 			} else {
 				try {

@@ -703,9 +703,23 @@ public class InitFix {
 	 * 不构成读穿，跟随单阶段路径即可。</p>
 	 */
 	public static boolean requiresTwoPhase(Class<?> host) {
+		return requiresTwoPhase(host, true);
+	}
+
+	/**
+	 * 判断目标类是否需要两阶段重定义（阶段 A 骨架提交以防御零值读穿）。
+	 *
+	 * <p>精细化门控：若补丁计划中只有实例字段任务（无静态字段任务），且堆中经过实例探测
+	 * 确认没有任何存活实例，则不存在任何并发读穿窗口，可安全旁路阶段 A，避免无谓的双重 Redefine 元数据分配。</p>
+	 */
+	public static boolean requiresTwoPhase(Class<?> host, boolean hasLiveInstances) {
 		if (host == null) return false;
 		PendingPatch patch = PENDING.get(host);
-		return patch != null && patch.twoPhase();
+		if (patch == null || !patch.twoPhase()) return false;
+		if (!patch.plan().hasStatic() && patch.plan().hasInstance() && !hasLiveInstances) {
+			return false;
+		}
+		return true;
 	}
 
 	/** 见 {@link #requiresTwoPhase(Class)}：在补丁计划里找"零值暴露字段"的写入任务。 */

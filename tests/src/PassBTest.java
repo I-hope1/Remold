@@ -223,6 +223,7 @@ public class PassBTest {
 	 */
 	@Test
 	void bodyFingerprintNeverRefusesSlotShiftedRepoLambdas(@TempDir Path tmp) throws Exception {
+		printGateState();
 		String javac = javac21();
 		String classpath = System.getProperty("java.class.path");
 		File repoRoot = new File("..");
@@ -288,15 +289,222 @@ public class PassBTest {
 			"同源 -g / -g:none + 槽位平移不得产生任何 BODY_MISMATCH（N=" + withLambdas + "）："
 				+ String.join(" | ", corpus.refusals));
 
+		System.out.println("[GHOSTATTR] SUMMARY gate=" + GATE_MODE + " N=" + withLambdas
+			+ " classesWithGhosts=" + corpus.classesWithGhosts + " totalGhosts=" + corpus.totalGhosts
+			+ " totalRefusals=" + corpus.totalRefusals);
 		System.out.println("[BodyFingerprintFP] N=" + withLambdas + " classes, BODY_MISMATCH=0"
 			+ ", perModule=" + corpus.perModule);
 		for (String gap : corpus.gaps) System.out.println("[BodyFingerprintFP-GAP] " + gap);
+	}
+
+	/**
+	 * 兜底门禁开关的<b>阳性对照</b>：在<b>同一条语料 harness 调用路径</b>（{@code LambdaAligner.align}
+	 * + {@code stats} + 产物形态断言）上喂一个 L5 种子，门禁开/关必须给出<b>不同读数</b>。
+	 *
+	 * <p>动机：§9.7 的幽灵归因依据是"关门禁与开门禁两趟读数逐字节零差异"。零差异只有在
+	 * "开关确实改变了被测实现"时才携带信息；若开关没生效，两趟跑的是同一配置，零差异什么都不说明。
+	 * 本用例就是那条前提的对照：门禁<b>开</b>时 L5 种子必须被拒绝（{@code BODY_MISMATCH} + 旧槽位
+	 * 幽灵化），门禁<b>关</b>时同一对必须静默错绑（无告警、{@code refusals == 0}、旧槽位被内层体顶替）。
+	 *
+	 * <p>{@code [GATE-STATE]} 行由 {@link #printGateState()} 打印：它读的是<b>实际被加载的</b>
+	 * {@code LambdaAligner.class} 字节（数 {@code fallbackPairingAllowed} 调用点），不是源码或开关
+	 * 变量的推测值，所以"开关改了但被测类没重编"这类情形会被当场照出来——两趟 {@code alignerSha256}
+	 * 相同即证明第二趟没有换实现。
+	 *
+	 * <p>两种种子形态都跑：L5 原样（两侧 {@code -g}）与套上语料变换的形态（新侧 {@code -g:none} +
+	 * 槽位平移 3，即 §9.6/§9.7 语料用的同形改造）。后者用来确认"语料变换本身不把 L5 形态消解掉"。
+	 */
+	@Test
+	void gatePositiveControlOnL5Seed(@TempDir Path tmp) throws Exception {
+		boolean gateOn = printGateState();
+		String javac = javac21();
+		String classpath = System.getProperty("java.class.path");
+
+		Reading plain = runL5Control(tmp.resolve("l5plain"), javac, classpath, false);
+		Reading shifted = runL5Control(tmp.resolve("l5shift"), javac, classpath, true);
+		String mode = gateOn ? "on" : "off";
+		System.out.println("[GATE-CTRL] seed=L5 gate=" + mode + " plain=" + plain + " corpusTransform=" + shifted);
+
+		if (gateOn) {
+			assertTrue(plain.refusals > 0, "门禁开：L5 种子必须被拒绝（记 BODY_MISMATCH）: " + plain);
+			assertTrue(plain.ghost, "门禁开：旧槽位必须幽灵化（老 CallSite 响亮熔断）: " + plain);
+			assertFalse(plain.innerPayload, "门禁开：旧槽位绝不能承载内层体: " + plain);
+			assertTrue(plain.events > 0, "门禁开：必须留一条 BODY_MISMATCH 事件: " + plain);
+			assertTrue(shifted.refusals > 0, "门禁开：语料变换后的 L5 种子同样必须被拒绝: " + shifted);
+			assertTrue(shifted.ghost, "门禁开：语料变换后旧槽位仍必须幽灵化: " + shifted);
+			assertTrue(shifted.events > 0, "门禁开：语料变换后仍必须留 BODY_MISMATCH 事件: " + shifted);
+		} else {
+			assertEquals(0, plain.refusals,
+				"门禁关：L5 种子仍被拒绝 —— 门禁开关在语料 harness 里没有生效（两趟其实是同一配置）: " + plain);
+			assertFalse(plain.ghost, "门禁关：旧槽位不该幽灵化（应为静默错绑）: " + plain);
+			assertTrue(plain.innerPayload, "门禁关：旧槽位必须被内层体静默顶替（这就是错绑形态）: " + plain);
+			assertEquals(0, plain.events, "门禁关：不得留 BODY_MISMATCH 事件: " + plain);
+		}
+		LambdaAligner.clearLoggedWarnings();   // 不把本用例的去重键留给后续用例
+	}
+
+	/** L5 阳性对照的一趟读数：计数器 + 旧槽位的终局形态。 */
+	static final class Reading {
+		final int refusals, passA, passB, events;
+		final boolean ghost, innerPayload;
+
+		Reading(int refusals, int passA, int passB, int events, boolean ghost, boolean innerPayload) {
+			this.refusals = refusals;
+			this.passA = passA;
+			this.passB = passB;
+			this.events = events;
+			this.ghost = ghost;
+			this.innerPayload = innerPayload;
+		}
+
+		@Override
+		public String toString() {
+			return "{refusals=" + refusals + " passA=" + passA + " passB=" + passB
+				+ " bodyMismatchEvents=" + events + " oldSlotGhost=" + ghost
+				+ " oldSlotInnerPayload=" + innerPayload + "}";
+		}
+	}
+
+	/**
+	 * 跑一趟 L5 对照：V1 叶子 {@code () -> "P0:v1"}，V2 把 {@code () -> "P0c:v2"} 包进一层新容器
+	 * （javac 后序编号让新内层恰好也叫 {@code lambda$build$0}）。{@code corpusTransform} 为真时
+	 * 新侧按语料口径压成 {@code -g:none} 并把局部槽位整体平移 3。
+	 */
+	static Reading runL5Control(Path dir, String javac, String classpath, boolean corpusTransform) throws Exception {
+		Path srcV1 = Files.createDirectories(dir.resolve("src/v1"));
+		Path srcV2 = Files.createDirectories(dir.resolve("src/v2"));
+		File v1 = writeJava(srcV1.resolve("GateCtrl.java"), l5WrapSource(false));
+		File v2 = writeJava(srcV2.resolve("GateCtrl.java"), l5WrapSource(true));
+		Path outV1 = Files.createDirectories(dir.resolve("v1"));
+		Path outV2 = Files.createDirectories(dir.resolve("v2"));
+		compile(javac, classpath, "-g", outV1, List.of(v1));
+		compile(javac, classpath, corpusTransform ? "-g:none" : "-g", outV2, List.of(v2));
+
+		byte[] oldBytes = Files.readAllBytes(outV1.resolve("GateCtrl.class"));
+		byte[] newBytes = Files.readAllBytes(outV2.resolve("GateCtrl.class"));
+		if (corpusTransform) newBytes = shiftLocalSlots(newBytes, 3);
+
+		String oldName = null;
+		for (MethodNode mn : parse(oldBytes).methods) {
+			if (mn.name.startsWith("lambda$") && "()Ljava/lang/String;".equals(mn.desc)) oldName = mn.name;
+		}
+		assertNotNull(oldName, "夹具前提：V1 里必须有一个 ()String 叶子");
+
+		LambdaAligner.LAST_RESULT = null;
+		LambdaAligner.clearLoggedWarnings();   // 去重缓存是进程级的：每条腿重新计事件
+		byte[] aligned = LambdaAligner.align(oldBytes, newBytes);
+		assertNotNull(aligned, "对齐产物非空");
+		ClassNode out = parse(aligned);
+		MethodNode slot = method(out, oldName, "()Ljava/lang/String;");
+		assertNotNull(slot, "旧槽位 " + oldName + " 必须留在产物里（" + table(out) + "）");
+
+		int events = 0;
+		for (LambdaAligner.AlignmentEvent ev : LambdaAligner.TEST_EVENTS) {
+			if ("BODY_MISMATCH".equals(ev.kind)) events++;
+		}
+		return new Reading(LambdaAligner.LAST_RESULT.stats.bodyMismatchRefusals,
+			LambdaAligner.LAST_RESULT.stats.passAPairs,
+			LambdaAligner.LAST_RESULT.stats.passBPairs,
+			events,
+			calls(slot, "onOrphanInvoked"),
+			hasStringPayload(slot, "P0c:v2"));
+	}
+
+	/**
+	 * L5 种子源码（与 {@code LambdaAlignTortureTest} 的 {@code wrapSrc} 同形，但<b>类名独立</b>）。
+	 *
+	 * <p>类名必须与 torture 套件的 {@code Wrap} 不同：{@code LambdaAligner} 的告警去重键是
+	 * {@code 类名#BODY#新<-旧}，同名同方法名会让后跑用例的 {@code BODY_MISMATCH} 事件被去重吞掉
+	 * （实测：本用例沿用 {@code Wrap} 时，
+	 * {@code LambdaAlignTortureTest#l5AddingInnerLambdaRefusesToRebindOldSlot} 在整套跑里转红）。
+	 * 每条腿之前还会 {@link LambdaAligner#clearLoggedWarnings()}，让事件读数完整。</p>
+	 */
+	static String l5WrapSource(boolean wrapped) {
+		StringBuilder sb = new StringBuilder();
+		sb.append("import java.util.*;\n");
+		sb.append("import java.util.function.*;\n\n");
+		sb.append("public class GateCtrl {\n");
+		sb.append("  public void build(Map<String, Supplier<?>> m) {\n");
+		if (wrapped) {
+			sb.append("    m.put(\"P0\", (Supplier<String>) () -> { Supplier<String> c = () -> \"P0c:v2\";")
+				.append(" return \"P0:v2:\" + c.get(); });\n");
+		} else {
+			sb.append("    m.put(\"P0\", (Supplier<String>) () -> \"P0:v1\");\n");
+		}
+		sb.append("  }\n");
+		sb.append("}\n");
+		return sb.toString();
+	}
+
+	static File writeJava(Path target, String source) throws Exception {
+		Files.createDirectories(target.getParent());
+		Files.write(target, source.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+		return target.toFile();
+	}
+
+	/** 方法体里是否出现含 {@code needle} 的字符串常量（用来判定旧槽位跑了谁的逻辑）。 */
+	static boolean hasStringPayload(MethodNode mn, String needle) {
+		if (mn == null || mn.instructions == null) return false;
+		for (AbstractInsnNode insn : mn.instructions) {
+			if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof String s && s.contains(needle)) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * 打印<b>实际生效</b>的兜底门禁状态：解析被加载的 {@code LambdaAligner.class}，数
+	 * {@code fallbackPairingAllowed} 的调用点。0 个即"门禁关"（调用点被短路/移除），≥1 即"门禁开"。
+	 *
+	 * <p>附带类字节长度与 SHA-256：两趟对照若 SHA 相同，就证明第二趟没有换实现，读数零差异不可用。
+	 */
+	static boolean printGateState() throws Exception {
+		byte[] bytes = loadedAlignerBytes();
+		ClassNode cn = parse(bytes);
+		int sites = 0;
+		for (MethodNode mn : cn.methods) {
+			if (mn.instructions == null) continue;
+			for (AbstractInsnNode insn : mn.instructions) {
+				if (insn instanceof MethodInsnNode mi && "fallbackPairingAllowed".equals(mi.name)) sites++;
+			}
+		}
+		boolean on = sites > 0;
+		GATE_MODE = on ? "on" : "off";
+		System.out.println("[GATE-STATE] bodyFingerprint=" + GATE_MODE
+			+ " callSites=" + sites + " alignerBytes=" + bytes.length + " alignerSha256=" + sha256(bytes));
+		return on;
+	}
+
+	/** 本次进程里实际生效的门禁状态（由 {@link #printGateState()} 从被测类字节解析后写入）。 */
+	static String GATE_MODE = "unknown";
+
+	/** 读被测类的实际字节（从类自身所在资源取，不受源码/开关变量推测影响）。 */
+	static byte[] loadedAlignerBytes() throws Exception {
+		try (InputStream in = LambdaAligner.class.getResourceAsStream("LambdaAligner.class")) {
+			assertNotNull(in, "必须能读到被测的 LambdaAligner.class 资源");
+			java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+			byte[] buf = new byte[8192];
+			int n;
+			while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+			return bos.toByteArray();
+		}
+	}
+
+	static String sha256(byte[] bytes) throws Exception {
+		byte[] d = java.security.MessageDigest.getInstance("SHA-256").digest(bytes);
+		StringBuilder sb = new StringBuilder();
+		for (byte b : d) {
+			sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+		}
+		return sb.toString();
 	}
 
 	/** 语料统计（跨模块累加）。 */
 	static class Corpus {
 		int withLambdas;
 		int aligned;
+		int totalGhosts;
+		int classesWithGhosts;
+		int totalRefusals;
 		final List<String> refusals = new ArrayList<>();
 		final List<String> gaps = new ArrayList<>();
 		final Map<String, Integer> withLambdasByModule = new LinkedHashMap<>();
@@ -329,7 +537,23 @@ public class PassBTest {
 			byte[] product = LambdaAligner.align(oldBytes, newBytes);
 			assertNotNull(product, "对齐产物非空: " + p);
 			aligned++;
-			if (LambdaAligner.LAST_RESULT.stats.bodyMismatchRefusals > 0) {
+			// 逐类机器读数（含门禁状态）：幽灵归因的对照就跑在这些行上——两趟若行内 gate 字段不同、
+			// 其余字段逐字节相同，才说明"这批幽灵与门禁无关"；若两趟 gate 相同，则零差异不携带信息。
+			int lambdasNew = 0;
+			for (MethodNode mn : parse(newBytes).methods) if (mn.name.startsWith("lambda$")) lambdasNew++;
+			int ghosts = ghostCount(parse(product));
+			int refusals = LambdaAligner.LAST_RESULT.stats.bodyMismatchRefusals;
+			System.out.println("[GHOSTATTR] gate=" + GATE_MODE + " tag=" + tag
+				+ " class=" + outG.relativize(p).toString().replace('\\', '/')
+				+ " lambdasOld=" + lambdas + " lambdasNew=" + lambdasNew + " ghosts=" + ghosts
+				+ " refusals=" + refusals
+				+ " step1=" + LambdaAligner.LAST_RESULT.stats.step1Pairs
+				+ " passA=" + LambdaAligner.LAST_RESULT.stats.passAPairs
+				+ " passB=" + LambdaAligner.LAST_RESULT.stats.passBPairs);
+			corpus.totalGhosts += ghosts;
+			corpus.totalRefusals += refusals;
+			if (ghosts > 0) corpus.classesWithGhosts++;
+			if (refusals > 0) {
 				corpus.refusals.add(tag + "/" + outG.relativize(p) + " lambdas=" + lambdas + " "
 					+ LambdaAligner.LAST_RESULT.stats);
 			}

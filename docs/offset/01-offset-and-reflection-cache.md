@@ -197,7 +197,7 @@ flowchart LR
 
 **两种形态的现状（同一格内不同形态结果不同，不能合并成一句话）：**
 
-| 形态 | JBR 25 标准 HotSpot / JBR 21 标准 HotSpot（标准 HotSpot） | JBR 21 DCEVM（JBR 21 + DCEVM） |
+| 形态 | 标准 HotSpot（JBR 25 / JBR 21） | JBR 21 DCEVM（JBR 21 + DCEVM） |
 |:--|:--|:--|
 | 参数注解被删除（`param-annotation-removed`） | 旧句柄读到 `value=v1`（无异常） | 旧句柄 `getParameterAnnotations()` **抛出** `java.lang.reflect.GenericSignatureFormatError: Signature Parse error: Expected Field Type Signature` |
 | 参数注解值变化（`param-annotation-value-change`） | 旧句柄读到 `value=v1`（无异常） | 旧句柄读到 `value=v2-a-much-longer-value`（无异常） |
@@ -205,15 +205,15 @@ flowchart LR
 | 类级 `Signature`（`getGenericSuperclass`） | 重定义前后均为 `ArrayList<java.lang.String>` | 重定义后为 `ArrayList<java.lang.Integer>`（刷新） |
 
 - JBR 21 DCEVM 的 `param-annotation-removed` 在**同一台机器、同一组启动参数（JBR 21.0.9 + `-XX:+AllowEnhancedClassRedefinition`）、同一探针提交**下连跑 3 次均复现（**3/3 复现，同机同参数**；n=3 不足以支撑更强结论）。
-- **第 2 组读数（重新 `getDeclaredMethods()`）的恢复效果，分粒度、按运行时限定 实测**：
+- **第 2 组读数（重新 `getDeclaredMethods()`）的恢复效果，分粒度、按运行时限定**：
   - **成员级**（参数注解 / 方法泛型签名 / 字段泛型签名 / 注解位置移动）：三种运行时共 **21 行全部读到新状态**
     （`value=v2-a-much-longer-value`、`{}`、`@Deprecated`、`List<java.lang.Integer>`、`t=Integer`、
     注解移到 `#1` 槽位），且 **R2 无任何异常**；
   - **对照场景**（`control-identical`，字节未变）：3 行读到与重定义前相同的值（本就不该变化）；
-  - **类级泛型签名**（`getGenericSuperclass`）：**JBR 25 标准 HotSpot 与JBR 21 标准 HotSpot 仍读到旧值 `ArrayList<java.lang.String>`**，
-    只有JBR 21 DCEVM（JBR 21 + DCEVM）刷新为 `ArrayList<java.lang.Integer>`。
+  - **类级泛型签名**（`getGenericSuperclass`）：**JBR 25 标准 HotSpot 与 JBR 21 标准 HotSpot 仍读到旧值 `ArrayList<java.lang.String>`**，
+    只有 JBR 21 DCEVM刷新为 `ArrayList<java.lang.Integer>`。
   因此"句柄读数的恢复"在三种运行时**不成立**（类级不成立），该结论只写在本节，**不进运行时 WARN**。
-- JBR 25 标准 HotSpot② 的旧句柄在全部 9 场景均**无异常**，读数为旧值；三组读数之间不一致。
+- JBR 25 与 JBR 21 标准 HotSpot 的旧句柄在全部 9 场景均**无异常**，读数为旧值；三组读数之间不一致。
 - **跨格不一致**：同一场景的旧句柄读数在①②与③之间不同（①②旧值、③新值或抛 `Error`），类级 `getGenericSuperclass()` 只在③刷新。**本主题任何"旧句柄行为"的表述都必须分 JVM 写，不得跨格归纳。**
 
 ### 5.4 灵敏度对照（证明读数链路能看见 `Error`，同时暴露其边界）
@@ -226,7 +226,7 @@ flowchart LR
 | `duplicate-annotation-member` | `getParameterAnnotations` | 无异常（JDK 静默忽略） |
 
 **边界**：四种损坏形态中只有 **2 种**能被本探针捕获，另 2 种被 JDK 静默忽略。因此
-"JBR 25 标准 HotSpot② 零 `Error`"**只对已测的 9 个场景成立**，不能读成"不存在任何 `Error` 级失败形态"；
+"JBR 25 与 JBR 21 标准 HotSpot 零 `Error`"**只对已测的 9 个场景成立**，不能读成"不存在任何 `Error` 级失败形态"；
 探针灵敏度有边界，未覆盖的损坏形态不在此结论范围内。
 两份损坏字节由 ASM 直接生成，异常全部由 JVM / 反射库解析器抛出；探针内没有任何 `throw` 语句，
 该对照**不构成**复现证据。
@@ -251,7 +251,7 @@ flowchart LR
   + C4 能力边界（只覆盖已注册缓存）。运行时日志装不下按运行时限定，故两种已观测形态（标准 HotSpot 静默旧值 /
   JBR 21 + DCEVM 抛 `GenericSignatureFormatError` 或返回新值）只写在 §5.3 的表里，不进日志。
 
-### 5.6 检测覆盖范围：**不含类级泛型签名**（登记 类级泛型签名未检测）
+### 5.6 检测覆盖范围：**不含类级泛型签名**（未纳入检测范围）
 
 `collectMemberMetadataDrift` 只比较**两版都存在且 `name + descriptor` 相同的字段与成员**
 （`ClassNode.fields` / `ClassNode.methods` 的 `Signature` 与参数注解属性）；

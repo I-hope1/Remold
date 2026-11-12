@@ -452,7 +452,7 @@ lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
 - **拦不了的（信息论边界，由代码分析可知）**：删掉一个 lambda、**同一次保存里又加一个**、且 javac 恰好
   给它**同一个编号**（同宿主、同名）—— 这与"原地更新"在字节码层**完全同形**，没有任何规则能区分。
   该形态仍会被配对。此结论的依据是判据本身的形状（不存在区分二者的可观测量），
-  不是实测反例；把它列为 由代码分析可知 而非 实测。
+  不是实测反例；把它列为推断而非实测。
 - 另一层边界：`bodyFingerprint` 只能证明"体等价"，**不能证明"体属于同一个 lambda"**——体等价的
   两个 lambda 互换身份时它看不见。这类互换由"名字/宿主/顺序"三档证据兜，不是体指纹的职责。
 
@@ -478,12 +478,12 @@ lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
 | # | 消费点 | 作用 | 防线性质 |
 |:--|:--|:--|:--|
 | 消费点 1 | `scan`：`info.ghost` 的方法**不当宿主** | 幽灵体内的 indy 不产出宿主序列（宿主 `hostKey` 保持 `null`） | 独立；但由它产生的 `null` 宿主**交给 G1 否决**，这条链只在门禁里 |
-| 消费点 2 | `scan`：幽灵**不作为 indy 目标**（`target.renameable && !target.ghost`） | 幽灵名不能被认领 | 独立（由代码分析可知，代码阅读） |
+| 消费点 2 | `scan`：幽灵**不作为 indy 目标**（`target.renameable && !target.ghost`） | 幽灵名不能被认领 | 独立（由代码分析可知） |
 | 消费点 3 | `scan`：语义指纹不折入幽灵子（"幽灵无语义"） | 幽灵不污染父指纹 | 独立 |
 | 消费点 4 | `putNameIndex`：活方法压过幽灵/桥 | 同名索引取到真体而不是桩 | 独立 |
 | 消费点 5 | Step 1 `acceptCandidate` | 幽灵不参与指纹配对（`D` 可放开） | `D` 之外有独立防线：`sameSemantics` 仍要求指纹一致，而幽灵体是熔断桩、指纹与真实体不同 |
-| 消费点 6 | Pass A `step2PassA` | 幽灵不参与 A 趟 | 独立：在该路径下跳过，`D` 不放开（由代码分析可知，代码阅读） |
-| 消费点 7 | **Pass B 两条循环** | 幽灵不参与 B 趟（`D` 可放开） | **仅靠门禁**：`D` 放开后唯一拦得住的是 `fallbackPairingAllowed` |
+| 消费点 6 | Pass A `step2PassA` | 幽灵不参与 A 趟 | 独立：在该路径下跳过，`D` 不放开（由代码分析可知） |
+| 消费点 7 | Pass B 两条循环 | 幽灵不参与 B 趟（`D` 可放开） | **仅靠门禁**：`D` 放开后拦得住它的只有是 `fallbackPairingAllowed` |
 | 消费点 8 | `isSkeletonGloballyUnique` / `skeletonEligibleOld` | 幽灵不算骨架候选 | 独立 |
 | 消费点 9 | `hasMultipleHashCandidates` / `checkAndWarnHomomorphicPruning` | 只数活方法 | 独立 |
 | 消费点 10 | 深度/形状/引用者计算 | 幽灵按"无子空壳"处理 | 独立 |
@@ -562,7 +562,7 @@ hostKindRefused=18`（指纹不等后由宿主形态翻转拒绝），证明计�
 恒 true 变异下 `gatePositiveControlOn体内新增内层 lambda 的形态Seed` 与 `passBRefusesRebindWhenBodyDiffers` 同时红）。
 
 **已知口径（I3）**：`BODY_MISMATCH` 的 WARN 与 `TEST_EVENTS` 按 `类名#BODY#新名<-旧名` 去重，键里没有
-重定义轮次或类版本（由代码分析可知，代码阅读）；`bodyMismatchRefusals` 的自增在该去重之前，配对拒绝与幽灵化
+重定义轮次或类版本（由代码分析可知）；`bodyMismatchRefusals` 的自增在该去重之前，配对拒绝与幽灵化
 不受其影响（由代码分析可知）。生产侧 `core/` 下 `clearLoggedWarnings()` 调用点为 0、`TEST_EVENTS` 生产消费者为 0
 （实测，grep 读数）。长驻 agent 内同一处错绑在后续轮次重复出现时 WARN 只打一次，登记为 跨轮次告警去重问题，未修。
 

@@ -200,7 +200,7 @@ public final class ClassDiffUtil {
 			return bothAnnotationsEqual(left, right);
 		}
 		// ASM 把 class literal 表示成 Type（没有值等价性），枚举表示成 {Type/String desc, 常量名} 数组：
-		// 两者都必须按内容比较，否则同一份字节会被判成"变过"（误拒正常热更）。
+		// 两者按内容比较，否则同一份字节会被判成"变过"（误拒正常热更）。
 		if (left instanceof Type || right instanceof Type) {
 			return left instanceof Type && right instanceof Type
 				&& ((Type) left).getDescriptor().equals(((Type) right).getDescriptor());

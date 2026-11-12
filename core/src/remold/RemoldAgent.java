@@ -2505,7 +2505,7 @@ public class RemoldAgent {
 		}
 
 		// 注解默认值变化的**事务共退**：本轮整体作废（连坐），避免"注解类型换上了新默认值、
-		// 已加载的消费者仍读旧默认值"这种半套状态。记账动作全部在
+		// 已加载的消费者仍读旧默认值"这种半套状态。记账动作在
 		// {@link #abortRoundForAnnotationDefault} 里（同一入口被单测覆盖），这里只补一条可见的总结。
 		// 下游的 sourceBytecodeCache 回滚 / 指纹不落账 / 不回队逻辑照常执行（outcome 为空）。
 		if (annotationDefaultAbort != null) {
@@ -5131,7 +5131,7 @@ public class RemoldAgent {
 	 * {@code -Dremold.agent.annotation_default_change=allow} 时才放行，且每次都会打
 	 * {@code [ANNOTATION-DEFAULT]} 告警说明"已加载的消费者仍会读到旧默认值"。</p>
 	 *
-	 * <p>之所以必须显式：JVM 探针读数（JBR 21 / JBR 25，标准 HotSpot 与
+	 * <p>之所以要求显式：JVM 探针读数（JBR 21 / JBR 25，标准 HotSpot 与
 	 * {@code -XX:+AllowEnhancedClassRedefinition}）显示 {@code redefineClasses} 会成功，
 	 * 但已加载的消费者类继续读到旧默认值——放过去就是"静默按旧行为走"。</p>
 	 */
@@ -5168,7 +5168,7 @@ public class RemoldAgent {
 	/**
 	 * 批量路径的注解默认值处置（判定 + 拒绝日志 + 整轮共退，抽成可单测入口）。
 	 *
-	 * <p>调用方拿到非 {@code null} 后必须 {@code continue}（跳过本类），并记住本轮已作废。</p>
+	 * <p>调用方拿到非 {@code null} 后需要 {@code continue}（跳过本类），并记住本轮已作废。</p>
 	 *
 	 * @return 触发共退的类名；{@code null} = 本类放行（可能已因显式降级通道打过 WARN）
 	 */
@@ -5199,7 +5199,7 @@ public class RemoldAgent {
 	 *
 	 * <p>语义：本批一个类都不重定义（连坐）。动作：回滚本类对齐事务并移出事务表 →
 	 * 清空本批待重定义集合与旧字节映射 → 清空重试候选（重试改不了已加载类的旧默认值）→
-	 * 在 {@link RoundSkips} 里留下点名判决。调用方随后还必须跳过本类（{@code continue}）。</p>
+	 * 在 {@link RoundSkips} 里留下点名判决。调用方随后也需要跳过本类（{@code continue}）。</p>
 	 *
 	 * @return 本次被作废的重定义条目数（{@code 0} = 本轮本来就没有待重定义类）
 	 */

@@ -498,7 +498,7 @@ lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
 **残余风险（必须登记，不能只说"被短路"）**："允许幽灵参与后续匹配"这一放宽开关覆盖的三处里，
 Step 1 那处还有 `sameSemantics` 兜底，**Pass B 那两处只由门禁兜底**。
 门禁把这两处短路之后，该放宽开关在门禁开启下不再可被击杀（门禁屏蔽变异体）——
-**纵深防御少了一层**：一旦门禁被放宽或移除，S7 就没有第二道防线。
+**纵深防御少了一层**：一旦门禁被放宽或移除，Pass B 的两条循环就没有第二道防线。
 缓解手段不是"再补一层代码"，而是把它变成**响亮的报警**：
 `LineNumberDifferentialTest` 的 `mutationKillRateRegressionTest` 对该放宽开关断言击杀数 `== 0`
 （失败信息直接要求"把它移回击杀集"），外加 `nullOldHostVetoedBeforeSameNameShortCircuit`

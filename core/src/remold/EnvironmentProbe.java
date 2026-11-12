@@ -44,8 +44,26 @@ final class EnvironmentProbe {
 		 + ' ' + System.getProperty("java.vm.name", "")
 		 + ' ' + System.getProperty("java.runtime.version", "");
 		if (!looksLikeEnhancedRuntime(runtime)) return false;
-		return ManagementFactory.getRuntimeMXBean().getInputArguments()
-		 .contains("-XX:+AllowEnhancedClassRedefinition");
+		return isFlagEnabled(ManagementFactory.getRuntimeMXBean().getInputArguments(), "AllowEnhancedClassRedefinition");
+	}
+
+	/**
+	 * 解析 JVM 参数列表中某个布尔开关（{@code -XX:+Flag} / {@code -XX:-Flag}）的最终状态。
+	 *
+	 * <p>以命令行中<b>最后一次出现</b>的设置为准。若命令行中未指定，返回 {@code false}。</p>
+	 */
+	static boolean isFlagEnabled(java.util.List<String> inputArgs, String flagName) {
+		if (inputArgs == null || flagName == null) return false;
+		String plus = "-XX:+" + flagName;
+		String minus = "-XX:-" + flagName;
+		int lastPlus = -1;
+		int lastMinus = -1;
+		for (int i = 0; i < inputArgs.size(); i++) {
+			String arg = inputArgs.get(i);
+			if (arg.equals(plus)) lastPlus = i;
+			else if (arg.equals(minus)) lastMinus = i;
+		}
+		return lastPlus > lastMinus;
 	}
 
 	/**

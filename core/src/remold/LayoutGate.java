@@ -92,6 +92,21 @@ public final class LayoutGate {
 		 */
 		LAYOUT_DRIFT,
 		/**
+		 * 枚举常量声明顺序发生变动（重排或前插使已有常量 ordinal 漂移）。
+		 *
+		 * <p>存量枚举实例的 {@code ordinal()} 在运行期不可变；若常量重排，
+		 * {@code switch-on-enum}（依赖 {@code $SwitchMap}）与 {@code EnumMap}
+		 * 将静默走错分支（实测见 R6b）。必须坚决拒绝重定义。</p>
+		 */
+		CHANGED_ENUM_ORDER,
+		/**
+		 * Record 类新增了组件/实例字段。
+		 *
+		 * <p>Java 语言规范中 Record 类禁止声明实例变量，所有实例字段均为组件且由规范构造器参数赋值，
+		 * InitFix 无法提取初值切片。若堆上存在存活实例，其新增组件恒为 0/null，破坏 Record 不变式与等价性（实测见 R1）。</p>
+		 */
+		RECORD_COMPONENT_ADDED,
+		/**
 		 * 基类新增实例字段导致已加载的子孙类字段物理内存偏移漂移，且检测到存在偏移量缓存持有者。
 		 * 见 {@code remold.offset.SuperclassDriftGate}。
 		 */
@@ -252,6 +267,8 @@ public final class LayoutGate {
 		}
 		Map<String, Boolean> added   = new LinkedHashMap<>();
 		Map<String, Boolean> removed = new LinkedHashMap<>();
+		List<String> enumOrderChanged = new ArrayList<>();
+		List<String> recordComponentAdded = new ArrayList<>();
 		for (String raw : changedFields) {
 			if (raw == null || raw.length() < 2) continue;
 			char   sign   = raw.charAt(0);
@@ -260,6 +277,18 @@ public final class LayoutGate {
 			String  name   = statik ? body.substring(1) : body;
 			if (sign == '+')      added.put(name, statik);
 			else if (sign == '-') removed.put(name, statik);
+			else if (sign == '~' && name.startsWith("enum constant order changed:")) {
+				enumOrderChanged.add(name.substring("enum constant order changed:".length()).trim());
+			}
+			else if (sign == '~' && name.startsWith("record component added:")) {
+				recordComponentAdded.add(name.substring("record component added:".length()).trim());
+			}
+		}
+		if (!enumOrderChanged.isEmpty()) {
+			return new Result(Verdict.CHANGED_ENUM_ORDER, "enum constant order changed: " + enumOrderChanged);
+		}
+		if (!recordComponentAdded.isEmpty()) {
+			return new Result(Verdict.RECORD_COMPONENT_ADDED, "record component added: " + recordComponentAdded);
 		}
 		if (removed.isEmpty()) {
 			return new Result(Verdict.COMPATIBLE,

@@ -284,6 +284,8 @@ public class LambdaAligner {
 		public final String alignedClass;
 		/** 本轮生成的捕获桥数量。 */
 		public final int bridgeCount;
+		/** 包含捕获但缺失 LocalVariableTable 的合成 lambda 方法集合；无缺失时为空集合。 */
+		public final Set<String> missingLvtLambdas;
 
 		private AlignmentResult(Builder b) {
 			this.stats = b.stats;
@@ -297,6 +299,7 @@ public class LambdaAligner {
 			this.methodMapping = b.methodMapping;
 			this.alignedClass = b.alignedClass;
 			this.bridgeCount = b.bridgeCount;
+			this.missingLvtLambdas = b.missingLvtLambdas == null ? Set.of() : Set.copyOf(b.missingLvtLambdas);
 		}
 
 		public static Builder builder() {
@@ -322,6 +325,7 @@ public class LambdaAligner {
 			private Map<String, String> methodMapping;
 			private String alignedClass;
 			private int bridgeCount;
+			private Set<String> missingLvtLambdas;
 
 			public Builder stats(AlignmentStats v)            { this.stats = v; return this; }
 			public Builder inventedNames(Set<String> v)       { this.inventedNames = v; return this; }
@@ -334,6 +338,7 @@ public class LambdaAligner {
 			public Builder methodMapping(Map<String, String> v) { this.methodMapping = v; return this; }
 			public Builder alignedClass(String v)               { this.alignedClass = v; return this; }
 			public Builder bridgeCount(int v)                   { this.bridgeCount = v; return this; }
+			public Builder missingLvtLambdas(Set<String> v)     { this.missingLvtLambdas = v; return this; }
 
 			public AlignmentResult build() { return new AlignmentResult(this); }
 		}
@@ -344,7 +349,23 @@ public class LambdaAligner {
 			       + ", old=" + oldLen + "B/" + Long.toHexString(oldHash)
 			       + ", new=" + newLen + "B/" + Long.toHexString(newHash)
 			       + ", bridges=" + bridgeCount
+			       + ", missingLvt=" + missingLvtLambdas.size()
 			       + ", stats=" + stats + "}";
+		}
+	}
+
+	/**
+	 * 当开启 {@code LAMBDA_STRICT} 时，若检测到含捕获 lambda 的类缺少 {@code LocalVariableTable}，
+	 * 抛出此异常，由 Agent 层捕获并拦截该类的重定义（回滚当前事务并跳过），防止未定义行为。
+	 */
+	public static class LambdaAlignmentStrictException extends IllegalStateException {
+		public final String className;
+		public final String reason;
+
+		public LambdaAlignmentStrictException(String className, String reason) {
+			super("[LAMBDA-STRICT-REJECT] " + className + ": " + reason);
+			this.className = className;
+			this.reason = reason;
 		}
 	}
 
@@ -678,6 +699,32 @@ public class LambdaAligner {
 	 *
 	 * @param inventedOldNames 上一轮由对齐器自造、且仍在旧类里的 lambda 方法名；可为 null
 	 */
+	public static boolean hasPotentialLambdas(byte[] bytes) {
+		if (bytes == null || bytes.length < 8) return false;
+		int len = bytes.length;
+		for (int i = 0; i <= len - 7; i++) {
+			byte b = bytes[i];
+			if (b == 'l') { // "lambda$"
+				if (bytes[i + 1] == 'a' && bytes[i + 2] == 'm' && bytes[i + 3] == 'b'
+				    && bytes[i + 4] == 'd' && bytes[i + 5] == 'a' && bytes[i + 6] == '$') {
+					return true;
+				}
+			} else if (b == '$') { // "$lambda" or "$anonfun$"
+				if (bytes[i + 1] == 'l' && bytes[i + 2] == 'a' && bytes[i + 3] == 'm'
+				    && bytes[i + 4] == 'b' && bytes[i + 5] == 'd' && bytes[i + 6] == 'a') {
+					return true;
+				}
+				if (i <= len - 9
+				    && bytes[i + 1] == 'a' && bytes[i + 2] == 'n' && bytes[i + 3] == 'o'
+				    && bytes[i + 4] == 'n' && bytes[i + 5] == 'f' && bytes[i + 6] == 'u'
+				    && bytes[i + 7] == 'n' && bytes[i + 8] == '$') {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
 	public static byte[] align(byte[] oldBytes, byte[] newBytes,
 	                           java.util.function.Function<String, byte[]> oldBytecodeResolver,
 	                           java.util.function.Function<String, byte[]> newBytecodeResolver,
@@ -710,6 +757,21 @@ public class LambdaAligner {
 				 "New class name does not match old class name: " + newCn.name + " != " + oldCn.name);
 			}
 			ctx.currentClass = oldCn.name;
+
+			List<String> missingLvtNew = findCapturedLambdasWithoutLvt(ctx.newGroups, newCn.name);
+			List<String> missingLvtOld = findCapturedLambdasWithoutLvt(ctx.oldGroups, oldCn.name);
+			Set<String> affectedLvt = new LinkedHashSet<>(missingLvtNew);
+			affectedLvt.addAll(missingLvtOld);
+			if (!affectedLvt.isEmpty()) {
+				RemoldAgent.warn("[LambdaAligner] Class '" + oldCn.name.replace('/', '.')
+					+ "' contains captured lambda(s) compiled without debug information (LocalVariableTable missing): "
+					+ affectedLvt + ". Recompilation with '-g' is strongly recommended; without '-g', capture reordering"
+					+ " cannot be reliably detected and javac may merge inverse lambdas into a single synthetic method.");
+				if (RemoldAgent.LAMBDA_STRICT) {
+					throw new LambdaAlignmentStrictException(oldCn.name.replace('/', '.'),
+						"contains captured lambda(s) missing LocalVariableTable: " + affectedLvt);
+				}
+			}
 
 			LongObjectMap<List<SyntheticInfo>> newGroups = ctx.newGroups;
 
@@ -878,9 +940,13 @@ public class LambdaAligner {
 			                             .methodMapping(methodMapping)
 			                             .alignedClass(oldCn.name)
 			                             .bridgeCount(ctx.bridges.size())
+			                             .missingLvtLambdas(affectedLvt)
 			                             .build();
 			return result;
 		} catch (Exception | LinkageError | StackOverflowError e) {
+			if (e instanceof LambdaAlignmentStrictException) {
+				throw (LambdaAlignmentStrictException) e;
+			}
 			// 失败也发布：否则调用方会读到上一轮的旧快照，把两轮结果拼在一起。
 			LAST_RESULT = AlignmentResult.empty(oldLen, newLen, oldHash, newHash);
 			// 降级：不崩溃，返回原始字节码。捕获 Exception 与 LinkageError、StackOverflowError 等。
@@ -3318,6 +3384,51 @@ public class LambdaAligner {
 	/** 该描述符是不是"当前类自己的引用"（{@code forceStaticLambdas} 前置 receiver 的形态）。 */
 	private static boolean isReceiverType(String desc, String owner) {
 		return owner != null && desc != null && desc.equals("L" + owner + ";");
+	}
+
+	private static int getReceiverOffset(SyntheticInfo info, String owner) {
+		if (info == null) return 0;
+		if (!info.isStatic()) return 1;
+		if (info.captureNames != null && !info.captureNames.isEmpty() && isReceiverName(info.captureNames.get(0))) {
+			return 1;
+		}
+		if (info.captured != null && !info.captured.isEmpty() && isReceiverType(info.captured.get(0), owner)
+		    && info.captureSlots != null && !info.captureSlots.isEmpty() && info.captureSlots.get(0) == 0) {
+			return 1;
+		}
+		return 0;
+	}
+
+	static boolean hasCapturedVariables(SyntheticInfo info, String owner) {
+		if (info == null || info.captured == null || info.captured.isEmpty()) return false;
+		int receiverOffset = getReceiverOffset(info, owner);
+		return info.captured.size() > receiverOffset;
+	}
+
+	static boolean hasCapturedLambdaWithoutLvt(SyntheticInfo info, String owner) {
+		if (info == null || info.ghost || info.bridge || !info.renameable) return false;
+		if (!hasCapturedVariables(info, owner)) return false;
+		if (info.captureNames == null) return true;
+		int receiverOffset = getReceiverOffset(info, owner);
+		for (int i = receiverOffset; i < info.captureNames.size(); i++) {
+			if (info.captureNames.get(i) == null) return true;
+		}
+		return false;
+	}
+
+	static List<String> findCapturedLambdasWithoutLvt(LongObjectMap<List<SyntheticInfo>> groups, String owner) {
+		List<String> list = new ArrayList<>();
+		if (groups == null) return list;
+		for (int idx : groupOrder(groups)) {
+			List<SyntheticInfo> g = groups.valueAt(idx);
+			if (g == null) continue;
+			for (SyntheticInfo ni : g) {
+				if (hasCapturedLambdaWithoutLvt(ni, owner)) {
+					list.add(ni.name + ni.desc);
+				}
+			}
+		}
+		return list;
 	}
 
 	/**

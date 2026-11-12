@@ -424,6 +424,12 @@ public final class RemovedMemberReaders {
 
 	/** JVMS 5.4.3.3 / 5.4.3.4 方法解析：自身 → 父类链 → 父接口（递归）。 */
 	public static Resolved resolveMethod(Map<String, TypeInfo> world, String start, String name, String desc) {
+		if ("<init>".equals(name) || "<clinit>".equals(name)) {
+			// JVMS 5.4.3.3: 构造器 <init> 不继承，必须直接由目标类声明，不能沿继承链向上解析
+			TypeInfo t = typeOf(world, start);
+			if (t == null) return Resolved.UNKNOWN;
+			return t.methods().contains(name + ":" + desc) ? Resolved.found(start) : Resolved.NOT_FOUND;
+		}
 		String key = name + ":" + desc;
 		Set<String> visited = new HashSet<>();
 		List<String> roots = new ArrayList<>();
@@ -630,11 +636,39 @@ public final class RemovedMemberReaders {
 
 					if (m.isPrivate()) {
 						// private 成员的引用 owner 恒为声明类（JLS §6.6 + 强转），不需要解析。
-						if (ref.owner().equals(m.owner())) hits.add(new Hit(m, reader, ref.owner(), ref.kind()));
+						if (ref.owner().equals(m.owner())) {
+							TypeInfo t = typeOf(postWorld, m.owner());
+							if (t == null) {
+								inconclusive.add(where + " (post)");
+							} else {
+								String key = m.name() + ":" + m.desc();
+								boolean exists = m.isField() ? t.fields().contains(key) : t.methods().contains(key);
+								if (!exists) {
+									hits.add(new Hit(m, reader, ref.owner(), ref.kind()));
+								} else if (isAccessKindMismatch(postWorld, m.owner(), m)) {
+									if (hasMatchingStaleInstruction(e.getValue(), ref, m.isField(), m.isStatic())) {
+										incompatibleAccess.add(new Hit(m, reader, ref.owner(), ref.kind(),
+											describeAccessMismatch(postWorld, m.owner(), m)));
+									}
+								}
+							}
+						}
 						continue;
 					}
 
 					if (m.participatesInVirtualDispatch()) {
+						// JVMS 5.4.3.3: 方法解析如果在目标类上找到 static 方法，直接抛 IncompatibleClassChangeError
+						Resolved directAfter = resolve(postWorld, ref, false);
+						if (directAfter.state() == State.FOUND && isAccessKindMismatch(postWorld, directAfter.declaring(), m)) {
+							// 两级漏斗精扫：仅当读者方法体指令中确实使用了陈旧的实例调用指令（invokevirtual等）时才拦截
+							if (hasMatchingStaleInstruction(e.getValue(), ref, false, m.isStatic())) {
+								Hit hit = new Hit(m, reader, ref.owner(), ref.kind(),
+									describeAccessMismatch(postWorld, directAfter.declaring(), m));
+								incompatibleAccess.add(hit);
+							}
+							// 无论陈旧与否，该方法引用都已经解析为 static 方法，不参与实例虚分派，直接结束该引用的检查
+							continue;
+						}
 						classifyDispatch(preWorld, postWorld, ref, m, reader, where,
 						                 descendantsByOwner.computeIfAbsent(m.owner(),
 						                     k -> descendantsOf(preWorld, k)),
@@ -656,16 +690,19 @@ public final class RemovedMemberReaders {
 						case NOT_FOUND -> hits.add(new Hit(m, reader, ref.owner(), ref.kind()));
 						case UNKNOWN   -> inconclusive.add(where + " (post)");
 						case FOUND     -> {
-							if (!after.declaring().equals(m.owner())) {
+							// 静态性翻转（无论在自身还是父类）均会抛出 ICCE，必须记录为 incompatibleAccess
+							if (isAccessKindMismatch(postWorld, after.declaring(), m)) {
+								// 两级漏斗精扫：仅当读者方法体中确实使用了与旧静态性匹配的旧指令时才拦截
+								if (hasMatchingStaleInstruction(e.getValue(), ref, m.isField(), m.isStatic())) {
+									Hit hit = new Hit(m, reader, ref.owner(), ref.kind(),
+										describeAccessMismatch(postWorld, after.declaring(), m));
+									incompatibleAccess.add(hit);
+								}
+							} else if (!after.declaring().equals(m.owner())) {
+								// 同静态性只是"回退到父类的同名字段/方法"，旧字节码本来就能正确解析，属于合法回退
 								Hit hit = new Hit(m, reader, ref.owner(), ref.kind(),
 									describeFieldRetarget(postWorld, after.declaring(), m));
-								// 静态性翻转会抛 ICCE，是真错误；同静态性只是"回退到父类的同名字段"，
-								// 旧字节码本来就能正确解析（全量重编也一样），属于合法回退。
-								if (isAccessKindMismatch(postWorld, after.declaring(), m)) {
-									incompatibleAccess.add(hit);
-								} else {
-									retargeted.add(hit);
-								}
+								retargeted.add(hit);
 							}
 						}
 					}
@@ -767,29 +804,38 @@ public final class RemovedMemberReaders {
 	 * 但报告给用户的原因不同。
 	 */
 	/**
-	 * 目标字段的静态性是否与被删字段<b>相反</b>。
+	 * 目标成员（字段或方法）的静态性是否与被删/被改成员<b>相反</b>。
 	 *
-	 * <p>引用的访问方式必然与被删字段一致（否则改动前就编译不过），所以用 {@code m.isStatic()}
+	 * <p>引用的访问方式必然与被删成员一致（否则改动前就编译不过），所以用 {@code m.isStatic()}
 	 * 代表访问方式。两者不匹配时 JVM 抛 {@code IncompatibleClassChangeError}——
-	 * {@code linkResolver.cpp} 里就是 {@code if (is_static != fd.is_static())}，两个方向都查。</p>
+	 * {@code linkResolver.cpp} 里就是 {@code if (is_static != fd.is_static())}，字段与方法两个方向都查。</p>
 	 */
 	private static boolean isAccessKindMismatch(Map<String, TypeInfo> world, String declaring,
 	                                            RemovedMember m) {
 		TypeInfo t = world.get(declaring);
-		boolean targetIsStatic = t != null && t.staticFields().contains(m.name() + ":" + m.desc());
+		if (t == null) return false;
+		String key = m.name() + ":" + m.desc();
+		boolean targetIsStatic = m.isField() ? t.staticFields().contains(key) : t.staticMethods().contains(key);
 		return targetIsStatic != m.isStatic();
+	}
+
+	private static String describeAccessMismatch(Map<String, TypeInfo> world, String declaring,
+	                                             RemovedMember m) {
+		TypeInfo t = world.get(declaring);
+		String key = m.name() + ":" + m.desc();
+		boolean targetIsStatic = t != null && (m.isField() ? t.staticFields().contains(key) : t.staticMethods().contains(key));
+		String target = dotted(declaring) + "." + m.name();
+		return target + " is now " + (targetIsStatic ? "static" : "instance")
+		     + " (was " + (m.isStatic() ? "static" : "instance") + ") — IncompatibleClassChangeError";
 	}
 
 	private static String describeFieldRetarget(Map<String, TypeInfo> world, String declaring,
 	                                            RemovedMember m) {
 		String target = dotted(declaring) + "." + m.name();
 		if (isAccessKindMismatch(world, declaring, m)) {
-			TypeInfo t = world.get(declaring);
-			boolean targetIsStatic = t != null && t.staticFields().contains(m.name() + ":" + m.desc());
-			return "now resolves to " + target + (targetIsStatic ? " (static)" : " (INSTANCE)")
-			     + " — IncompatibleClassChangeError";
+			return describeAccessMismatch(world, declaring, m);
 		}
-		return "now resolves to " + target + " — falls back to a same-kind field in a supertype";
+		return "now resolves to " + target + " — falls back to a same-kind member in a supertype";
 	}
 
 	private static String dotted(String internalName) {
@@ -800,5 +846,42 @@ public final class RemovedMemberReaders {
 		return isField
 		 ? resolveField(world, ref.owner(), ref.name(), ref.desc())
 		 : resolveMethod(world, ref.owner(), ref.name(), ref.desc());
+	}
+
+	/**
+	 * 两级漏斗精扫：针对常量池初步命中静态性翻转的类，核验其方法体指令中是否真正持有了与旧静态性匹配的操作码。
+	 *
+	 * <p>常量池中的 {@code Fieldref} (tag 9) / {@code Methodref} (tag 10) 本身不携带操作码，
+	 * 无法区分是 {@code invokestatic} 还是 {@code invokevirtual}，也无法区分是 {@code getstatic} 还是 {@code getfield}。
+	 * 本方法通过快速指令扫码，杜绝同批次重编类或类自身合法访问引发的假阳性误报。</p>
+	 */
+	private static boolean hasMatchingStaleInstruction(byte[] readerBytes, Ref ref, boolean isField, boolean expectStatic) {
+		if (readerBytes == null) return true; // fail-closed
+		ClassNode cn = new ClassNode();
+		new ClassReader(readerBytes).accept(cn, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+		for (MethodNode mn : cn.methods) {
+			if (mn.instructions == null) continue;
+			for (org.objectweb.asm.tree.AbstractInsnNode insn : mn.instructions) {
+				int opcode = insn.getOpcode();
+				if (isField) {
+					if (insn instanceof org.objectweb.asm.tree.FieldInsnNode fn) {
+						if (fn.name.equals(ref.name()) && fn.desc.equals(ref.desc())
+						    && (fn.owner.equals(ref.owner()) || ref.owner().endsWith(fn.owner))) {
+							boolean insnIsStatic = (opcode == Opcodes.GETSTATIC || opcode == Opcodes.PUTSTATIC);
+							if (insnIsStatic == expectStatic) return true;
+						}
+					}
+				} else {
+					if (insn instanceof org.objectweb.asm.tree.MethodInsnNode mnInsn) {
+						if (mnInsn.name.equals(ref.name()) && mnInsn.desc.equals(ref.desc())
+						    && (mnInsn.owner.equals(ref.owner()) || ref.owner().endsWith(mnInsn.owner))) {
+							boolean insnIsStatic = (opcode == Opcodes.INVOKESTATIC);
+							if (insnIsStatic == expectStatic) return true;
+						}
+					}
+				}
+			}
+		}
+		return false;
 	}
 }

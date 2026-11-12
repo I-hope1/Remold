@@ -91,6 +91,22 @@ public final class MixinMemberAlign {
 		}
 	}
 
+	public static boolean hasMixinGeneratedMembers(byte[] bytecode) {
+		if (bytecode == null) return false;
+		try {
+			ClassNode node = read(bytecode);
+			for (MethodNode m : node.methods) {
+				if (isGenerated(m.name)) return true;
+			}
+			for (FieldNode f : node.fields) {
+				if (isGenerated(f.name) || (f.name != null && f.name.contains("$") && (f.access & Opcodes.ACC_SYNTHETIC) != 0)) {
+					return true;
+				}
+			}
+		} catch (Throwable ignored) { }
+		return false;
+	}
+
 	/**
 	 * 把 {@code candidate}（重织入产物）的 Mixin 生成成员名与成员顺序对齐到 {@code baseline}（已加载字节码）。
 	 *

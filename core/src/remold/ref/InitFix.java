@@ -703,9 +703,23 @@ public class InitFix {
 	 * 不构成读穿，跟随单阶段路径即可。</p>
 	 */
 	public static boolean requiresTwoPhase(Class<?> host) {
+		return requiresTwoPhase(host, true);
+	}
+
+	/**
+	 * 判断目标类是否需要两阶段重定义（阶段 A 骨架提交以防御零值读穿）。
+	 *
+	 * <p>精细化门控：若补丁计划中只有实例字段任务（无静态字段任务），且堆中经过实例探测
+	 * 确认没有任何存活实例，则不存在任何并发读穿窗口，可安全旁路阶段 A，避免无谓的双重 Redefine 元数据分配。</p>
+	 */
+	public static boolean requiresTwoPhase(Class<?> host, boolean hasLiveInstances) {
 		if (host == null) return false;
 		PendingPatch patch = PENDING.get(host);
-		return patch != null && patch.twoPhase();
+		if (patch == null || !patch.twoPhase()) return false;
+		if (!patch.plan().hasStatic() && patch.plan().hasInstance() && !hasLiveInstances) {
+			return false;
+		}
+		return true;
 	}
 
 	/** 见 {@link #requiresTwoPhase(Class)}：在补丁计划里找"零值暴露字段"的写入任务。 */
@@ -723,6 +737,153 @@ public class InitFix {
 			if (!task.replay() && exposed.contains(task.fieldName())) return true;
 		}
 		return false;
+	}
+
+	/**
+	 * 检查目标字段在给定类中是否具备可提取的初值切片（用于布局门 WAIVE_REINIT 前置核验，防 B4 静默丢值）。
+	 *
+	 * @param host        已加载的目标类引用（若类尚未加载可为 {@code null}）
+	 * @param classNode   目标类新字节码的 ClassNode
+	 * @param targetFields 待核验的字段名集合（通常为标有 @RemoldReinit 的变更字段）
+	 * @return 无法提取初值的字段名及其原因映射；若所有字段皆可提取，则返回空 Map
+	 */
+	public static Map<String, String> unextractableReinitFields(
+	 Class<?> host, ClassNode classNode, Set<String> targetFields) {
+		if (classNode == null || targetFields == null || targetFields.isEmpty()) {
+			return Map.of();
+		}
+
+		boolean isRecord = (classNode.access & Opcodes.ACC_RECORD) != 0
+			|| (classNode.superName != null && "java/lang/Record".equals(classNode.superName));
+		if (isRecord) {
+			Map<String, String> reasons = new LinkedHashMap<>();
+			for (String f : targetFields) {
+				reasons.put(f, "record component has no field initializer (assigned from constructor parameter)");
+			}
+			return reasons;
+		}
+
+		HierarchyTreeOracle oracle = new HierarchyTreeOracle(host == null ? null : host.getClassLoader(), classNode);
+		NestView nest = NestView.of(host, classNode, oracle);
+
+		Map<String, FieldNode> fieldNodes = new HashMap<>();
+		for (FieldNode fn : classNode.fields) {
+			fieldNodes.put(fn.name, fn);
+		}
+
+		Set<String> instanceFields = new LinkedHashSet<>();
+		Set<String> staticFields = new LinkedHashSet<>();
+		for (String f : targetFields) {
+			FieldNode fn = fieldNodes.get(f);
+			if (fn != null && (fn.access & Opcodes.ACC_STATIC) != 0) {
+				staticFields.add(f);
+			} else {
+				instanceFields.add(f);
+			}
+		}
+
+		Map<String, String> unextractable = new LinkedHashMap<>();
+
+		// 检查实例字段
+		if (!instanceFields.isEmpty()) {
+			List<MethodNode> initMethods = new ArrayList<>();
+			for (MethodNode m : classNode.methods) {
+				if ("<init>".equals(m.name)) initMethods.add(m);
+			}
+			if (initMethods.isEmpty()) {
+				for (String f : instanceFields) {
+					unextractable.put(f, "no <init> constructor found in class");
+				}
+			} else {
+				Map<MethodNode, Boolean> rootCtorCache = new IdentityHashMap<>();
+				int rootCtorCount = 0;
+				for (MethodNode init : initMethods) {
+					if (isRootConstructor(classNode, init, rootCtorCache)) rootCtorCount++;
+				}
+				if (rootCtorCount == 0) {
+					for (String f : instanceFields) {
+						unextractable.put(f, "no root constructor calling super() found");
+					}
+				} else {
+					Set<String> privateMethods = new HashSet<>();
+					for (MethodNode mn : classNode.methods) {
+						if ((mn.access & Opcodes.ACC_PRIVATE) != 0) {
+							privateMethods.add(mn.name + mn.desc);
+						}
+					}
+					Map<String, List<FieldExtract>> instanceExtracts = new LinkedHashMap<>();
+					Set<String> selfAssignedFields = new HashSet<>();
+					Map<String, String> instanceReasons = new LinkedHashMap<>();
+
+					for (MethodNode init : initMethods) {
+						boolean fromRoot = isRootConstructor(classNode, init, rootCtorCache);
+						ParamScan scan = scanParamFields(host, classNode, init, nest);
+						Map<Integer, ParamField> paramFields = scan.accepted();
+						Map<String, FieldExtract> perField = extractFieldInits(
+							host, classNode.name, init, instanceFields, false, privateMethods,
+							paramFields, scan.rejected(), fromRoot, selfAssignedFields, instanceReasons, oracle);
+						for (Map.Entry<String, FieldExtract> fe : perField.entrySet()) {
+							instanceExtracts.computeIfAbsent(fe.getKey(), x -> new ArrayList<>()).add(fe.getValue());
+						}
+					}
+
+					for (String f : instanceFields) {
+						if (selfAssignedFields.contains(f)) {
+							unextractable.put(f, "self-assignment from constructor parameter (patch would be a no-op)");
+							continue;
+						}
+						List<FieldExtract> extracts = instanceExtracts.get(f);
+						if (extracts == null || extracts.isEmpty()) {
+							unextractable.put(f, instanceReasons.getOrDefault(f, "no safe initialization expression found in constructors"));
+							continue;
+						}
+						int fromRootCount = 0;
+						for (FieldExtract fe : extracts) {
+							if (fe.fromRootCtor()) fromRootCount++;
+						}
+						if (fromRootCount == 0) {
+							unextractable.put(f, "field is only initialized in delegating constructors");
+						} else if (rootCtorCount > 1 && fromRootCount < rootCtorCount) {
+							unextractable.put(f, "field is only initialized in " + fromRootCount + " of " + rootCtorCount + " root constructors");
+						}
+					}
+				}
+			}
+		}
+
+		// 检查静态字段
+		if (!staticFields.isEmpty()) {
+			MethodNode clinit = null;
+			for (MethodNode m : classNode.methods) {
+				if ("<clinit>".equals(m.name)) {
+					clinit = m;
+					break;
+				}
+			}
+			if (clinit == null) {
+				for (String f : staticFields) {
+					unextractable.put(f, "no <clinit> found in class");
+				}
+			} else {
+				Set<String> privateMethods = new HashSet<>();
+				for (MethodNode mn : classNode.methods) {
+					if ((mn.access & Opcodes.ACC_PRIVATE) != 0) {
+						privateMethods.add(mn.name + mn.desc);
+					}
+				}
+				Map<String, String> staticReasons = new LinkedHashMap<>();
+				Map<String, FieldExtract> perField = extractFieldInits(
+					host, classNode.name, clinit, staticFields, true, privateMethods,
+					Map.of(), Map.of(), true, null, staticReasons, oracle);
+				for (String f : staticFields) {
+					if (!perField.containsKey(f)) {
+						unextractable.put(f, staticReasons.getOrDefault(f, "no safe initialization expression found in <clinit>"));
+					}
+				}
+			}
+		}
+
+		return unextractable;
 	}
 
 	public static void transform(Class<?> host, byte[] newBytes, ClassDiff diff) {
@@ -4746,7 +4907,7 @@ public class InitFix {
 			if (n instanceof MethodInsnNode m
 			    && m.getOpcode() == Opcodes.INVOKESPECIAL
 			    && "<init>".equals(m.name)) {
-				Boolean prot = isProtectedCrossPackageAccess(oracle, host, m.owner, m.name, m.desc, false);
+				Boolean prot = isProtectedCrossPackageAccess(oracle, host, className, m.owner, m.name, m.desc, false);
 				if (prot == null) {
 					return "cannot determine protected status of constructor "
 					       + m.owner + "." + m.name + m.desc + missingBytecodeHint(m.owner);
@@ -4776,7 +4937,7 @@ public class InitFix {
 			}
 
 			if (n instanceof FieldInsnNode f && isFieldAccessOpcode(f.getOpcode())) {
-				Boolean prot = isProtectedCrossPackageAccess(oracle, host, f.owner, f.name, f.desc, true);
+				Boolean prot = isProtectedCrossPackageAccess(oracle, host, className, f.owner, f.name, f.desc, true);
 				if (prot == null) {
 					return "cannot determine protected status of field access "
 					       + f.owner + "." + f.name + ":" + f.desc + missingBytecodeHint(f.owner);
@@ -4787,7 +4948,7 @@ public class InitFix {
 				}
 			}
 			if (n instanceof MethodInsnNode m && !m.owner.startsWith("[")) {
-				Boolean prot = isProtectedCrossPackageAccess(oracle, host, m.owner, m.name, m.desc, false);
+				Boolean prot = isProtectedCrossPackageAccess(oracle, host, className, m.owner, m.name, m.desc, false);
 				if (prot == null) {
 					return "cannot determine protected status of method access "
 					       + m.owner + "." + m.name + m.desc + missingBytecodeHint(m.owner);
@@ -4865,7 +5026,7 @@ public class InitFix {
 	}
 
 	private static Boolean isProtectedCrossPackageAccess(
-	 ClassHierarchyOracle oracle, Class<?> host, String ownerInternal,
+	 ClassHierarchyOracle oracle, Class<?> host, String hostName, String ownerInternal,
 	 String name, String desc, boolean isField) {
 
 		if (ownerInternal.isEmpty() || ownerInternal.charAt(0) == '[') return Boolean.FALSE;
@@ -4874,7 +5035,8 @@ public class InitFix {
 		 oracle.resolveMember(ownerInternal, name, desc, isField);
 		if (member.isEmpty()) return null;
 
-		String hostInternal = host.getName().replace('.', '/');
+		String hostInternal = host != null ? host.getName().replace('.', '/') : hostName;
+		if (hostInternal == null) return null;
 		return Modifier.isProtected(member.get().access)
 		       && !packageName(member.get().declaringClass).equals(packageName(hostInternal));
 	}

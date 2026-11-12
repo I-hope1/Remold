@@ -326,6 +326,14 @@ public final class ClassDiffUtil {
 		public final Set<String> typeChangedFields   = new HashSet<>();
 		/** 标注了 @RemoldReinit 的字段名集合 */
 		public final Set<String> reinitFields        = new HashSet<>();
+		/** 枚举常量的声明顺序/ordinal是否发生变化（R6b 守卫） */
+		public       boolean     enumOrderChanged    = false;
+		/** 发生顺序漂移的枚举常量明细（用于日志与拒绝提示） */
+		public final List<String> shiftedEnumConstants = new ArrayList<>();
+		/** Record 类是否新增了组件/实例字段（R1 守卫） */
+		public       boolean     recordComponentAdded = false;
+		/** 新增的 Record 组件字段名列表 */
+		public final List<String> addedRecordComponents = new ArrayList<>();
 
 		/** 继承层次是否发生变化（父类或接口变更） */
 		public       boolean      hierarchyChanged = false;
@@ -351,6 +359,10 @@ public final class ClassDiffUtil {
 			addedStaticFields.clear();
 			typeChangedFields.clear();
 			reinitFields.clear();
+			enumOrderChanged = false;
+			shiftedEnumConstants.clear();
+			recordComponentAdded = false;
+			addedRecordComponents.clear();
 			hierarchyChanged = false;
 			superChanged = false;
 			addedInterfaces.clear();
@@ -494,6 +506,48 @@ public final class ClassDiffUtil {
 			d.changedFields.add("- " + removedFieldName);
 		});
 
+		// 枚举常量声明顺序/ordinal 检查（R6b 守卫）
+		boolean isEnum = (newC.access & Opcodes.ACC_ENUM) != 0 || "java/lang/Enum".equals(newC.superName)
+			|| (oldC.access & Opcodes.ACC_ENUM) != 0 || "java/lang/Enum".equals(oldC.superName);
+		if (isEnum) {
+			List<String> oldConstants = new ArrayList<>();
+			for (FieldNode f : oldC.fields) {
+				if ((f.access & Opcodes.ACC_ENUM) != 0 || ((f.access & Opcodes.ACC_STATIC) != 0 && f.desc.equals("L" + oldC.name + ";") && !f.name.startsWith("$"))) {
+					oldConstants.add(f.name);
+				}
+			}
+			List<String> newConstants = new ArrayList<>();
+			for (FieldNode f : newC.fields) {
+				if ((f.access & Opcodes.ACC_ENUM) != 0 || ((f.access & Opcodes.ACC_STATIC) != 0 && f.desc.equals("L" + newC.name + ";") && !f.name.startsWith("$"))) {
+					newConstants.add(f.name);
+				}
+			}
+			for (String c : oldConstants) {
+				if (newConstants.contains(c)) {
+					int oldIdx = oldConstants.indexOf(c);
+					int newIdx = newConstants.indexOf(c);
+					if (oldIdx != newIdx) {
+						d.shiftedEnumConstants.add(c + "(" + oldIdx + "->" + newIdx + ")");
+					}
+				}
+			}
+			if (!d.shiftedEnumConstants.isEmpty()) {
+				d.enumOrderChanged = true;
+				d.changedFields.add("~ *enum constant order changed: " + d.shiftedEnumConstants);
+			}
+		}
+
+		// Record 类新增组件检查（R1 守卫）
+		boolean isRecord = (newC.access & Opcodes.ACC_RECORD) != 0 || "java/lang/Record".equals(newC.superName)
+			|| (oldC.access & Opcodes.ACC_RECORD) != 0 || "java/lang/Record".equals(oldC.superName);
+		Set<String> pureAddedRecordComponents = new LinkedHashSet<>(d.addedInstanceFields);
+		pureAddedRecordComponents.removeAll(d.typeChangedFields);
+		if (isRecord && !pureAddedRecordComponents.isEmpty()) {
+			d.recordComponentAdded = true;
+			d.addedRecordComponents.addAll(pureAddedRecordComponents);
+			d.changedFields.add("~ *record component added: " + d.addedRecordComponents);
+		}
+
 		// 方法对比逻辑：同样采用映射销毁法
 		var oldMethods = ctx.methodMap;
 		// 将旧版本所有方法放入映射表，key为方法名和描述符的复合哈希
@@ -509,9 +563,18 @@ public final class ClassDiffUtil {
 			if (oldM == null) {
 				// 新增方法：记录方法名+描述符
 				d.addedMethods.add(newM.name + newM.desc);
-			} else if (isCodeChanged(oldM, newM)) {
-				// 方法存在但代码发生了变化
-				d.modifiedBodyMethods.add(newM.name + newM.desc);
+			} else {
+				boolean oldIsStatic = (oldM.access & Opcodes.ACC_STATIC) != 0;
+				boolean newIsStatic = (newM.access & Opcodes.ACC_STATIC) != 0;
+				if (oldIsStatic != newIsStatic) {
+					// 静态性发生翻转（S5c/S5d）：旧调用指令（invokevirtual vs invokestatic）将失效抛 ICCE
+					// 判定为：旧方法删除，新方法新增
+					d.removedMethods.add(oldM.name + oldM.desc);
+					d.addedMethods.add(newM.name + newM.desc);
+				} else if (isCodeChanged(oldM, newM)) {
+					// 方法存在且静态性未变，但代码发生了变化
+					d.modifiedBodyMethods.add(newM.name + newM.desc);
+				}
 			}
 		}
 		// 映射表中剩余的就是被删除的方法

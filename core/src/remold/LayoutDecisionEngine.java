@@ -2,6 +2,7 @@ package remold;
 
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import remold.RemoldAgent.LayoutAction;
@@ -66,14 +67,18 @@ final class LayoutDecisionEngine {
 		}
 		List<String> changed;
 		Set<String> reinitFields = Set.of();
+		Map<String, String> unextractableReinit = Map.of();
 		try {
 			ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, newBytes);
 			changed = diff.changedFields;
 			reinitFields = diff.reinitFields;
+			if (!reinitFields.isEmpty() && diff.newClass != null) {
+				unextractableReinit = remold.ref.InitFix.unextractableReinitFields(null, diff.newClass, reinitFields);
+			}
 		} catch (Throwable t) {
 			return new LayoutDecision(LayoutAction.SKIP, null, hostNameOf(className), Set.of());
 		}
-		return decide(className, changed, mode, liveness, batchNames, removedFieldReaders, drift, reinitFields);
+		return decide(className, changed, mode, liveness, batchNames, removedFieldReaders, drift, reinitFields, unextractableReinit);
 	}
 
 	/**
@@ -137,6 +142,18 @@ final class LayoutDecisionEngine {
 	                             RemovedMemberScan scan,
 	                             SuperclassDriftGate.DriftDecision drift,
 	                             Set<String> reinitFields) {
+		return decide(className, changedFields, mode, liveness, batchNames, scan, drift, reinitFields, Map.of());
+	}
+
+	/**
+	 * 带"初值提取可行性核验"的完整版本（防 B4 授权放行后丢值）。
+	 */
+	static LayoutDecision decide(String className, List<String> changedFields,
+	                             String mode, Liveness liveness, Set<String> batchNames,
+	                             RemovedMemberScan scan,
+	                             SuperclassDriftGate.DriftDecision drift,
+	                             Set<String> reinitFields,
+	                             Map<String, String> unextractableReinitFields) {
 		String host = hostNameOf(className);
 		if (LayoutGate.MODE_OFF.equals(mode)) {
 			return new LayoutDecision(LayoutAction.PASS, null, host, Set.of());
@@ -196,6 +213,26 @@ final class LayoutDecisionEngine {
 
 		boolean staticChange = LayoutGate.hasStaticFieldChange(changedFields);
 
+		// 枚举常量顺序变更（CHANGED_ENUM_ORDER）安全门控（R6b）：
+		if (res.verdict() == LayoutGate.Verdict.CHANGED_ENUM_ORDER) {
+			return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
+				"enum constant order changed (" + res.detail() + ") — existing enum instances retain their"
+				+ " original ordinals; reordering causes switch-on-enum and EnumMap to silently misroute"
+				+ " (revert the enum constant order or restart to continue)");
+		}
+
+		// Record 类新增组件（RECORD_COMPONENT_ADDED）安全门控（R1）：
+		if (res.verdict() == LayoutGate.Verdict.RECORD_COMPONENT_ADDED) {
+			// 情况 A：堆上无存活实例 → 安全放行，新实例正常通过规范构造器初始化
+			if (liveness == Liveness.NONE) {
+				return new LayoutDecision(LayoutAction.WAIVE, res, host, Set.of());
+			}
+			// 情况 B：堆上有存活实例 → 坚决拒绝，Record 组件无初值表达式且不可变，存量实例将恒为 0/null 破坏不变式
+			return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
+				"record component added (" + res.detail() + ") with surviving instances — records cannot"
+				+ " have field initializers and existing instances cannot be initialized (restart to continue)");
+		}
+
 		// 字段类型变更（CHANGED_FIELD_TYPE）安全门控：
 		if (res.verdict() == LayoutGate.Verdict.CHANGED_FIELD_TYPE) {
 			List<String> typeChanged = LayoutGate.typeChangedFields(changedFields);
@@ -207,8 +244,22 @@ final class LayoutDecisionEngine {
 			if (liveness == Liveness.NONE && !staticChange) {
 				return new LayoutDecision(LayoutAction.WAIVE, res, host, Set.of());
 			}
-			// 情况 B：堆上有存活实例（liveInstances > 0），且新字节码中该字段标有 @RemoldReinit → 直接放行
+			// 情况 B：堆上有存活实例（liveInstances > 0），且新字节码中该字段标有 @RemoldReinit
 			if (!staticChange && reinitFields != null && !typeChanged.isEmpty() && reinitFields.containsAll(typeChanged)) {
+				// 核心防护（B4）：校验 @RemoldReinit 标注的字段是否具备可提取的初值切片。
+				// 若为 Record 组件或构造器参数自赋值字段，InitFix 无法提取初值，DCEVM 重定义后存量实例将被置为默认值（null/0）发生静默丢值。
+				// 此时必须拒绝重定义，保持旧版本继续运行。
+				if (unextractableReinitFields != null && !unextractableReinitFields.isEmpty()) {
+					for (String f : typeChanged) {
+						String unextractableReason = unextractableReinitFields.get(f);
+						if (unextractableReason != null) {
+							return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
+								"field type changed: " + typeChanged + " with surviving instances — @RemoldReinit"
+								+ " cannot reinitialize field '" + f + "' (" + unextractableReason
+								+ "; restart to continue)");
+						}
+					}
+				}
 				return new LayoutDecision(LayoutAction.WAIVE_REINIT, res, host, Set.of());
 			}
 			// 情况 C：堆上有存活实例且未标 @RemoldReinit → 维持 LAYOUT-REJECT，优化提示文案
@@ -260,6 +311,9 @@ final class LayoutDecisionEngine {
 	 */
 	static String skipVerdictForLayout(LayoutDecision d, RemovedMemberScan scan) {
 		String detail = d.layout() == null ? null : d.layout().detail();
+		if (scan != null && scan.removedMethods() && "compatible".equals(detail)) {
+			detail = "method(s) removed";
+		}
 		if (detail != null) {
 			detail = detail.replace("[", "").replace("]", "").trim();
 			// "field(s) removed: COST" → "field removed: COST"：只有一个字段时用单数，
@@ -286,11 +340,19 @@ final class LayoutDecisionEngine {
 
 		String action = d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.REMOVED_FIELD
 		 ? "restore the removed field(s) or restart to continue"
-		 : (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.CHANGED_FIELD_TYPE
-		    ? "annotate field(s) with @RemoldReinit, or revert the field change, or restart to continue"
-		    : (d.layout() != null && (d.layout().verdict() == LayoutGate.Verdict.SUPERCLASS_FIELD_DRIFT || d.layout().verdict() == LayoutGate.Verdict.LAYOUT_DRIFT)
-		       ? "avoid adding instance field(s) to superclass or restart to continue"
-		       : "revert the field change or restart to continue"));
+		 : (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.RECORD_COMPONENT_ADDED
+		    ? "revert the added record component(s) or restart to continue"
+		    : (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.CHANGED_FIELD_TYPE
+		       ? (d.reason() != null && d.reason().contains("@RemoldReinit cannot reinitialize")
+		          ? "revert the field type change or restart to continue (initializer unextractable)"
+		          : "annotate field(s) with @RemoldReinit, or revert the field change, or restart to continue")
+		       : (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.CHANGED_ENUM_ORDER
+		          ? "revert the enum constant order or restart to continue"
+		       : (d.layout() != null && (d.layout().verdict() == LayoutGate.Verdict.SUPERCLASS_FIELD_DRIFT || d.layout().verdict() == LayoutGate.Verdict.LAYOUT_DRIFT)
+		          ? "avoid adding instance field(s) to superclass or restart to continue"
+		          : (scan != null && scan.removedMethods()
+		             ? "restore the removed method(s) or restart to continue"
+		             : "revert the field change or restart to continue")))));
 		return RoundSkips.verdict("LAYOUT-REJECT", detail, action);
 	}
 

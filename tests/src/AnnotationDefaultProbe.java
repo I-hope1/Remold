@@ -60,7 +60,7 @@ public final class AnnotationDefaultProbe {
 	public static void main(String[] args) throws Exception {
 		System.out.println("=== annotation default (AnnotationDefault) drift probe — batch J ===");
 		// 运行标识：同一探针在不同轮次/不同提交上的输出必须可区分（避免"同哈希"被读成缓存命中）。
-		System.out.println("PROBE-RUN tag=" + (args.length > 1 ? args[1] : "<none>")
+		System.out.println("PROBE-RUN tag=" + (args.length == 0 ? "<none>" : args[args.length - 1])
 			+ " proot=" + System.getProperty("user.dir"));
 		if (args.length > 0 && "gate".equals(args[0])) {
 			// 门禁模式：跑真实 RemoldAgent（-javaagent:core/build/libs/remold-agent.jar），

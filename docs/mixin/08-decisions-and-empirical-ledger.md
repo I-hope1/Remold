@@ -101,7 +101,7 @@ Lambda 捕获顺序的判定有一条**编译配置前提**，不写清就会被
 > `probe.fix.Consumer`（类与方法各一个 `@Mark`，不显式写成员值 → 只能取默认值）。
 > 跑法：`<jdk>/bin/java [-XX:+AllowEnhancedClassRedefinition] -javaagent:tests/build/p05/p05-agent.jar
 > -cp "tests/build/classes/java/main;core/build/libs/remold-agent.jar;<asm jars>" AnnotationDefaultProbe`。
-> 三格身份由探针自己打印的 `structuralRedefine` 读数判定（不靠参数名推断）。
+> 三种运行时身份由探针自己打印的 `structuralRedefine` 读数判定（不靠参数名推断）。
 
 ### 6.1 环境（每格 `java -version` 全文见证据日志）
 
@@ -111,11 +111,11 @@ Lambda 捕获顺序的判定有一条**编译配置前提**，不写清就会被
 | JBR 21 标准 HotSpot | JBR 21.0.9 | 仅 `-javaagent:p05-agent.jar` | `structuralRedefine=NO(...)` |
 | JBR 21 DCEVM | JBR 21.0.9 | `-XX:+AllowEnhancedClassRedefinition` + `-javaagent` | `structuralRedefine=YES(field-added-accepted)` |
 
-### 6.2 分格影响范围（必须分开读，不能合并成一个结论）
+### 6.2 不同运行时的影响范围（按运行时区分，不能合并成一个结论）
 
-- **标准 HotSpot（JBR 25 / JBR 21）＝ 全应用级旧值**：默认值改掉后，**所有**注解实例读数都还是旧值——
+- **标准 HotSpot（JBR 25 / JBR 21）＝ 全应用级旧值**：默认值改掉后，注解实例读数普遍还是旧值——
   包括重定义**之后才加载**的新消费者类（重定义后加载的裸 `@Mark` 消费者）与"加载在重定义前但从未读过注解"的类（加载于重定义前但从未读过注解的类）。
-  即旧默认值黏在注解类型上，新代码也拿不到新值。
+  即旧默认值附着在注解类型上，新代码同样拿不到新值。
 - **JBR 21 DCEVM（JBR 21 + `-XX:+AllowEnhancedClassRedefinition`）＝ 仅已解析过的旧类**：重定义后新类与加载于前未读的类 读到**新值**，
   只有重定义前已经解析过注解的旧类（旧实例与其已解析注解）继续返回旧值。
   （实测窄于先前的推断"首次解析也读旧值"；该缺陷在三种运行时下均成立。）
@@ -142,7 +142,7 @@ Lambda 捕获顺序的判定有一条**编译配置前提**，不写清就会被
 > （`SourceFile`），三次独立进程均复现，同机同参数；重定义后重新取句柄的两列读到 `null`（正确）。
 
 默认值新增 `default-added`（无默认值 → `default "v1"`，按 fail-closed 策略默认拒绝（依据见下表；未在真实加载器上复跑））：
-消费者在两侧都必须显式赋值才能编过，因此除下表最后一列外，其余读数都只能取显式值 `explicit`（对照）；
+消费者在两侧都需要显式赋值才能编过，因此除下表最后一列外，其余读数都只能取显式值 `explicit`（对照）；
 真正有区分力的是"重定义之后才编译并加载的**裸 `@Mark`** 消费者"。
 
 | 运行时 | 旧句柄 warm / cold | 重新取句柄 | 首次解析 | 重定义后加载的裸 `@Mark` 消费者 | 含义 |
@@ -160,10 +160,10 @@ Lambda 捕获顺序的判定有一条**编译配置前提**，不写清就会被
 
 ### 6.4 判决与实现位置
 
-- 默认值**变化 / 移除 / 新增**一律 fail-closed（默认拒绝）：`ClassDiffUtil.describeAnnotationDefaultChange`
+- 默认值**变化 / 移除 / 新增**默认 fail-closed（默认拒绝）：`ClassDiffUtil.describeAnnotationDefaultChange`
   比对两侧同签名注解成员的 `AnnotationDefault`（基本类型/String/`Type`/enum/数组/嵌套注解深比较；
   两侧都不是注解类型则不判定；解析失败返回"不可判定"→ 调用方拒绝）；
-  `RemoldAgent.annotationDefaultGate` 是两条路径共用的唯一判决入口；
+  `RemoldAgent.annotationDefaultGate` 是两条路径共用的判决入口；
   批量路径经 `handleAnnotationDefaultChangeInBatch` 拒绝并**整轮共退**（回滚对齐事务、清空本批待重定义
   集合/旧字节映射/重试候选、留 `ANNOTATION-DEFAULT-CHANGED` 判决并要求重启），
   动态路径在 `redefineDynamic` 前拒绝且不调用 `redefineClasses`。
@@ -185,7 +185,7 @@ Lambda 捕获顺序的判定有一条**编译配置前提**，不写清就会被
 
 ### 6.6 未闭合
 
-- 真机（Fabric/Knot 客户端）未跑：本节全部读数来自 JVM 级探针，混合 Mixin 重织入后的注解类型变化未验。
+- 真机（Fabric/Knot 客户端）未跑：本节读数均来自 JVM 级探针，混合 Mixin 重织入后的注解类型变化未验。
 - JBR 21 DCEVM 下 `getDefaultValue()` 读到 `SourceFile` 常量的成因未定位（3 次独立进程各 3/3 复现，同机同参数）。
 - 批量"整轮共退"的端到端（真实 `processChanges` 多类批次）未跑，当前由单测
   `AnnotationDefaultGateTest#batchRefusalRollsBackTheWholeBatchAndLeavesAVerdict` 覆盖接线，

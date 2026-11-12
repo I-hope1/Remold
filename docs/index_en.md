@@ -67,7 +67,7 @@ Resolves the issue where newly added fields in existing live heap objects defaul
 | [`01-safety-gate.md`](initfix/01-safety-gate.md) | T0~T3 decision tiers, minimal effect safety gate, parameter backtracking immutability proof, and multi-root consensus |
 | [`02-closure-and-ledger.md`](initfix/02-closure-and-ledger.md) | Dependency closure calculation, Tarjan SCC cycle detection, and unpatched field ledger (`FieldLedger`) |
 | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) | Companion patch class synthesis, per-instance driver, conditional CAS writing protocol, and `@RemoldReinit` |
-| [`04-target-design.md`](initfix/04-target-design.md) | Roadmap target architecture: Two-Phase Redefine and classload-time constructor instrumentation |
+| [`04-target-design.md`](initfix/04-target-design.md) | Target architecture: Two-Phase Redefine and classload-time constructor instrumentation (roadmap & status live in [`status.md`](status.md) §4.1/§4.2) |
 | [`05-jvmti-heap.md`](initfix/05-jvmti-heap.md) | JVMTI full heap instance scanning engine (`LibTool`), tag isolation, and re-entrant concurrency safety |
 | [`06-decisions.md`](initfix/06-decisions.md) | InitFix ADRs, historical defect post-mortems, and mutation testing requirements for gate exemptions |
 | [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) | P0.5 pre-flight measurements: back-to-back schema redefinitions, stage-A companion linkage, million-instance heap scan |

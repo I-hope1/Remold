@@ -67,7 +67,7 @@ flowchart TD
 | [`01-safety-gate.md`](initfix/01-safety-gate.md) | T0~T3 判决分层、最小效应安全门、参数回溯不可变证明与多根构造器共识 |
 | [`02-closure-and-ledger.md`](initfix/02-closure-and-ledger.md) | 跨字段依赖闭包计算、Tarjan 强连通分量成环检测与待补字段台账（`FieldLedger`） |
 | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) | 伴生补丁类生成、逐实例补丁驱动、条件 CAS 写入协议与 `@RemoldReinit` 存量覆写 |
-| [`04-target-design.md`](initfix/04-target-design.md) | 目标架构路线图：两阶段重定义（Two-Phase Redefine）与类加载期构造器插桩设计 |
+| [`04-target-design.md`](initfix/04-target-design.md) | 目标架构设计：两阶段重定义（Two-Phase Redefine）与类加载期构造器插桩（路线图与落地状态见 [`status.md`](status.md) §4.1/§4.2） |
 | [`05-jvmti-heap.md`](initfix/05-jvmti-heap.md) | JVMTI 全堆实例标记检索底座（`LibTool`）、Tag 隔离与并发重入保护 |
 | [`06-decisions.md`](initfix/06-decisions.md) | InitFix 架构决策记录（ADR）、历史缺陷复盘与例外放宽变异检查要求 |
 | [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) | P0.5 前置验证的实测方法与原始数据（连续 Schema Redefine、阶段 A 伴生类链接、百万级堆遍历） |

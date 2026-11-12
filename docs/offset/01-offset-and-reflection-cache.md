@@ -211,7 +211,7 @@ flowchart LR
     注解移到 `#1` 槽位），且 **R2 无任何异常**；
   - **对照场景**（`control-identical`，字节未变）：3 行读到与重定义前相同的值（本就不该变化）；
   - **类级泛型签名**（`getGenericSuperclass`）：**JBR 25 标准 HotSpot 与 JBR 21 标准 HotSpot 仍读到旧值 `ArrayList<java.lang.String>`**，
-    只有 JBR 21 DCEVM刷新为 `ArrayList<java.lang.Integer>`。
+    只有 JBR 21 DCEVM 刷新为 `ArrayList<java.lang.Integer>`。
   因此"句柄读数的恢复"在三种运行时**不成立**（类级不成立），该结论只写在本节，**不进运行时 WARN**。
 - JBR 25 与 JBR 21 标准 HotSpot 的旧句柄在 9 个测试场景均**未触发异常**，读数为旧值；三组读数之间不一致。
 - **跨格不一致**：同一场景的旧句柄读数在①②与③之间不同（①②旧值、③新值或抛 `Error`），类级 `getGenericSuperclass()` 只在③刷新。**本主题任何"旧句柄行为"的表述都必须分 JVM 写，不得跨格归纳。**
@@ -279,4 +279,4 @@ flowchart LR
 - 框架缓存：**Gson / Jackson 真实缓存路径未测**（因此没有 §5.5 所说的前后对照读数）。
 - 探针灵敏度只对 §5.4 的 4 种损坏形态做过对照。
 - 分 JVM 读数来自探针提交 `f6420c8`；拆分（`db578d2`）与 WARN 文案改写（`2524569`）只影响检测/告警，
-  不改变探针读数；JBR 21 DCEVM 的负面读数已在拆分后重跑（）。
+  不改变探针读数；JBR 21 DCEVM 的负面读数已在拆分后重跑。

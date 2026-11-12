@@ -532,29 +532,37 @@ Step 1 那处（S5）还有 `sameSemantics` 兜底，**Pass B 那两处（S7）�
 这条记录的含义只有一条：**它在门禁之前就存在，所以不构成本门禁的误报**；
 它本身仍是身份召回能力的一个已知缺口。
 
-## §10 槽位平移下的幽灵桩（既有行为，与兜底门禁无关）
+## §10 槽位平移下的幽灵桩
 
-`-g:none` 编译 + 槽位整体平移时，部分类的 lambda 会被判为"身份丢失"而生成幽灵桩替身：
-`[观测]` 语料 N=30（范围见下）中 **8 类出现幽灵、共 22 个桩**（`AnonClassAligner` 6、`ref/InitFix` 5、`LambdaAligner` 4、
-`RemoldAgent` 3，另 4 类各 1；其余 22 类为 0）。同一语料、同一变换下把兜底门禁关闭再跑，读数**逐字节相同**（两趟 `classesWithGhosts=9`、`totalGhosts=23`、
-`totalRefusals=0`，语料 N=37）。
+`-g:none` 编译 + 槽位整体平移时，部分类的 lambda 会被判为"身份丢失"而生成幽灵桩替身。
+`[观测]` 在**下列范围**内：语料 N=37（`core/src`+`api/src` 合并编译 30 个含 lambda 类、
+`plugin-fabric/src` 3、`plugin-mixin/src` 2、`plugin-forge/src` 2）、JDK 21 编译、变换为
+"新侧 `-g:none` + 槽位整体平移"、单次对照实验 —— 其中 **9 类出现幽灵、共 23 个桩**
+（`AnonClassAligner` 6、`ref/InitFix` 5、`LambdaAligner` 4、`RemoldAgent` 3，
+`OffsetBindingIndex` / `ProfilerTransformer` / `HierarchyTreeOracle` / `HotswapBridge` /
+`plugin-forge: remold/forge/ForgeMixinHotSwap` 各 1；其余 28 类为 0）。
 
-该零差异的**前提已由阳性对照证成**：`[GATE-STATE]` 行读的是**实际被加载的** `LambdaAligner` 字节
-（数 `fallbackPairingAllowed` 调用点并打 `alignerSha256`），两趟分别得到
-`bodyFingerprint=on callSites=4 sha256=858dd0ff…` 与 `bodyFingerprint=off callSites=0 sha256=653c92bb…`
-（sha 不同 ⇒ 第二趟确实换了实现）。同一 L5 种子在两条路径上的读数：
+**与兜底配对门禁无关**：同一语料、同一变换下把门禁关闭再跑，逐字节比对两趟的 37 行
+`[GHOSTATTR]` 读数 —— 行数相同、`diff` 退出码 0、差异行 0，两趟均为
+`classesWithGhosts=9 totalGhosts=23 totalRefusals=0`。该零差异的前提由阳性对照证成：
+
+- `[GATE-STATE]` 读的是**实际被加载的** `LambdaAligner` 字节（数 `fallbackPairingAllowed` 调用点并打
+  `alignerSha256`），两趟分别 `bodyFingerprint=on callSites=4 sha256=858dd0ff…` 与
+  `bodyFingerprint=off callSites=0 sha256=653c92bb…`（sha 不同 ⇒ 第二趟确实换了实现）；
+- 同一 L5 种子在两趟上的读数：
 
 | 门禁 | `refusals` | `bodyMismatchEvents` | 旧槽位形态 |
 |:--|--:|--:|:--|
 | on | 9 | 1 | 幽灵化（`oldSlotGhost=true`，`oldSlotInnerPayload=false`） |
 | off | 0 | 0 | 内层体静默顶替（`oldSlotInnerPayload=true`，即错绑形态） |
 
-即：开关确实改变被测实现，因此"两趟幽灵数相同"**无条件**说明槽位平移幽灵与该门禁无关，`[观测]`。
+- 另一条独立证据：门禁**开着**时语料 `totalRefusals=0`，说明门禁在该语料上根本没有触发，
+  与上面"两趟幽灵数相同"互为独立佐证。
 
 成因：`[推断]` 票据指纹计入 `var` 下标，`-g:none` 后失去调试信息、槽位平移即认不出；**未做隔离实验**。
-语料范围（逐目录，N=37）：`core/src` + `api/src`（合并编译，30 个含 lambda 类）、`plugin-fabric/src`（3）、`plugin-mixin/src`（2）、`plugin-forge/src`（2）；缺口 `plugin-arc/src`（Mindustry 编译期制品非纯 class 包，缺注解处理器，javac 解析即失败）、`tests/`、`gradle-plugin/`。
-
-这是用户可感知的可用性回退（lambda 失效），登记为已知限制；隔离实验列为候选批次 I2（会动生产代码，单开批次）。
+这是用户可感知的可用性回退（lambda 失效），登记为已知限制；隔离实验列为候选批次（会动生产代码，单开批次）。
+缺口（未纳入语料）：`plugin-arc/src`（Mindustry 编译期制品非纯 class 包，缺注解处理器，javac 解析即失败）、
+`tests/`、`gradle-plugin/`。
 
 ## §9.6 门禁屏蔽变异体的哨兵是报警，不是防线
 

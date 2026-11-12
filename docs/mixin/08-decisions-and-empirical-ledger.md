@@ -105,11 +105,11 @@ Lambda 捕获顺序的判定有一条**编译配置前提**，不写清就会被
 
 ### 6.1 环境（每格 `java -version` 全文见证据日志）
 
-| 运行时 | 运行时 | 启动参数 | 能力读数 |
+| 编号 | JDK | 启动参数 | 能力读数 |
 |:--|:--|:--|:--|
-| ① | JBR 25.0.2+1-b329.72（`jbrsdk_jcef-25.0.2`） | 仅 `-javaagent:p05-agent.jar` | `structuralRedefine=NO(field-added-rejected:UnsupportedOperationException)` |
-| ② | JBR 21.0.9（`JBR-21`） | 仅 `-javaagent:p05-agent.jar` | `structuralRedefine=NO(...)` |
-| ③ | JBR 21.0.9（`JBR-21`） | `-XX:+AllowEnhancedClassRedefinition` + `-javaagent` | `structuralRedefine=YES(field-added-accepted)` |
+| JBR 25 标准 HotSpot | JBR 25.0.2+1-b329.72（`jbrsdk_jcef-25.0.2`） | 仅 `-javaagent:p05-agent.jar` | `structuralRedefine=NO(field-added-rejected:UnsupportedOperationException)` |
+| JBR 21 标准 HotSpot | JBR 21.0.9 | 仅 `-javaagent:p05-agent.jar` | `structuralRedefine=NO(...)` |
+| JBR 21 DCEVM | JBR 21.0.9 | `-XX:+AllowEnhancedClassRedefinition` + `-javaagent` | `structuralRedefine=YES(field-added-accepted)` |
 
 ### 6.2 分格影响范围（必须分开读，不能合并成一个结论）
 
@@ -118,43 +118,43 @@ Lambda 捕获顺序的判定有一条**编译配置前提**，不写清就会被
   即旧默认值黏在注解类型上，新代码也拿不到新值。
 - **JBR 21 DCEVM（JBR 21 + `-XX:+AllowEnhancedClassRedefinition`）＝ 仅已解析过的旧类**：重定义后新类与加载于前未读的类 读到**新值**，
   只有重定义前已经解析过注解的旧类（旧实例与其已解析注解）继续返回旧值。
-  （此读数窄于先前的推断"首次解析也读旧值"，与先前推断不一致（实测窄于推断）；该缺陷在三种运行时下均成立。）
+  （实测窄于先前的推断"首次解析也读旧值"；该缺陷在三种运行时下均成立。）
 
-### 6.3 场景 × 三组读数（JBR 25 标准 HotSpot/②/③）
+### 6.3 场景 × 三组读数（按运行时分行）
 
 默认值变化 `default-value-change`（`"v1"` → `"v2"`）：
 
-| 运行时 | 旧句柄 warm / cold | 重新 `getDeclaredMethods()` | 首次解析 | 旧实例 / 新解析的类注解 / 新解析的方法注解 / 旧实例上的方法注解 | 重定义后加载的裸 `@Mark` 消费者 重定义后新类 / 加载于重定义前但从未读过注解的类 加载于前未读 |
+| 运行时 | 旧句柄 warm / cold | 重新 `getDeclaredMethods()` | 首次解析 | 旧实例 / 新解析的类注解 / 新解析的方法注解 / 旧实例上的方法注解 | 重定义后加载的裸 `@Mark` 消费者 / 加载于重定义前但从未读过注解的类 |
 |:--|:--|:--|:--|:--|:--|
-| ① | v1 / v1 | **v2** | **v2** | v1 / v1 / v1 / v1 | v1 / v1 |
-| ② | v1 / v1 | **v2** | **v2** | v1 / v1 / v1 / v1 | v1 / v1 |
-| ③ | **v2 / v2** | **v2** | **v2** | v1 / v1 / v1 / v1 | **v2 / v2** |
+| JBR 25 标准 HotSpot | v1 / v1 | **v2** | **v2** | v1 / v1 / v1 / v1 | v1 / v1 |
+| JBR 21 标准 HotSpot | v1 / v1 | **v2** | **v2** | v1 / v1 / v1 / v1 | v1 / v1 |
+| JBR 21 DCEVM | **v2 / v2** | **v2** | **v2** | v1 / v1 / v1 / v1 | **v2 / v2** |
 
 默认值移除 `default-removed`（`"v1"` → 无默认值）：
 
 | 运行时 | 旧句柄 warm / cold | 重新取句柄 | 首次解析 | 旧实例与其已解析注解 | 重定义后加载的裸 `@Mark` 消费者 / 加载于重定义前但从未读过注解的类 |
 |:--|:--|:--|:--|:--|:--|
-| ① | v1 / v1 | null | null | 全 v1（静默） | v1 / v1 |
-| ② | v1 / v1 | null | null | 全 v1（静默） | v1 / v1 |
-| ③ | **`"Mark.java"` / `"Mark.java"`** | null | null | 全 v1 | `IncompleteAnnotationException` / 同 |
+| JBR 25 标准 HotSpot | v1 / v1 | null | null | 全 v1（静默） | v1 / v1 |
+| JBR 21 标准 HotSpot | v1 / v1 | null | null | 全 v1（静默） | v1 / v1 |
+| JBR 21 DCEVM | **`"Mark.java"` / `"Mark.java"`** | null | null | 全 v1 | `IncompleteAnnotationException` / 同 |
 
 > JBR 21 DCEVM 的 `"Mark.java"` 是旧 `Method` 句柄的 `getDefaultValue()` 读到了**别的属性**的常量
-> （`SourceFile`），3/3 复现，同机同参数；重定义后重新取句柄的两列读到 `null`（正确）。
+> （`SourceFile`），三次独立进程均复现，同机同参数；重定义后重新取句柄的两列读到 `null`（正确）。
 
-默认值新增 `default-added`（无默认值 → `default "v1"`，按 fail-closed 策略默认拒绝（依据为下表读数，未在真实加载器上复跑））：
-消费者在两侧都必须显式赋值才能编过，因此 旧实例与其已解析注解/加载于重定义前但从未读过注解的类 读显式值 `explicit`（对照）；
-真正有区分力的读数是 重定义后加载的裸 `@Mark` 消费者（重定义之后才编译并加载的**裸 `@Mark`** 消费者）。
+默认值新增 `default-added`（无默认值 → `default "v1"`，按 fail-closed 策略默认拒绝（依据见下表；未在真实加载器上复跑））：
+消费者在两侧都必须显式赋值才能编过，因此除下表最后一列外，其余读数都只能取显式值 `explicit`（对照）；
+真正有区分力的是"重定义之后才编译并加载的**裸 `@Mark`** 消费者"。
 
-| 运行时 | 旧句柄 warm / cold | 重新取句柄 | 首次解析 | 重定义后加载的裸 `@Mark` 消费者（裸 `@Mark`，重定义后加载） | 含义 |
+| 运行时 | 旧句柄 warm / cold | 重新取句柄 | 首次解析 | 重定义后加载的裸 `@Mark` 消费者 | 含义 |
 |:--|:--|:--|:--|:--|:--|
-| ① | null / null | **v1** | **v1** | `IncompleteAnnotationException` | 新代码也拿不到新默认值 → **有害** |
-| ② | null / null | **v1** | **v1** | `IncompleteAnnotationException` | 同 ①，**有害** |
-| ③ | null / null | **v1** | **v1** | **v1** | 新代码可用；旧类本就无法省略该成员 → 未见有害 |
+| JBR 25 标准 HotSpot | null / null | **v1** | **v1** | `IncompleteAnnotationException` | 新代码也拿不到新默认值 → **有害** |
+| JBR 21 标准 HotSpot | null / null | **v1** | **v1** | `IncompleteAnnotationException` | 同 ①，**有害** |
+| JBR 21 DCEVM | null / null | **v1** | **v1** | **v1** | 新代码可用；旧类本就无法省略该成员 → 未见有害 |
 
 对照组（去触发 / 灵敏度）：
 
-- `control-identical-default`（只重定义、不改默认值）：三格全部读 v1，**没有**任何 v2 泄漏（去触发对照成立）；
-- `sensitivity-explicit-value-change`（改消费者里**显式写死**的值）：三格 class-level 都读到 v2，
+- `control-identical-default`（只重定义、不改默认值）：三种运行时都读 v1，**没有**任何 v2 泄漏（去触发对照成立）；
+- `sensitivity-explicit-value-change`（改消费者里**显式写死**的值）：三种运行时的类级读数都变为 v2，
   证明读数链路能看见注解值变化（仅用于证明读数链路可见，不构成默认值复现证据）；method-level 仍 v1
   （旧 `Method` 句柄缓存的注解读数，属另一形态，未纳入本次判定）。
 

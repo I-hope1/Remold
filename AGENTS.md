@@ -49,6 +49,13 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 - 新增拒绝路径时，必须经 `InitFix.transform` 的统一出口发 `warn`。不要只调用 `log(...)`，它受 `DEBUG` 门控，默认不输出。
 - 台账（`FieldLedger`）只负责"不遗忘"，不负责"放行"。台账字段回流后仍走同一套安全门。
 
+**日志语言（强制）**
+- 运行期日志、拒绝/告警提示与用户可见字符串**一律英文**（含多行拼接的每一段）；不得出现中文或中文标点。
+  原因：GBK 控制台/日志采集端会把中文打成乱码，跨平台日志扫描与用户排障依赖 ASCII。
+- 中文只允许出现在注释、Javadoc 与 `docs/` 设计文档中；`tests/src` 的断言消息不受此限（仍建议英文）。
+- 守卫：`./gradlew :tests:verifyLogLanguage`（已挂 `check`）扫描主源码字符串字面量，CJK/全角标点即失败。
+  新增日志时先跑它，不要靠肉眼检查。
+
 **写入**
 - 默认用条件 CAS（`KIND_CONDITIONAL`）。仅 `OVERWRITE` 使用 `KIND_FORCE`。
 - `float`/`double` 一律走 raw bits（`compareAndSetInt/Long`），不要按名字探测 `compareAndSetFloat/Double`。

@@ -101,16 +101,19 @@ public final class InitializerDrift {
 					.append(String.join(", ", drift.inheritedReinit()))
 					.append(". Parent @RemoldReinit resets ALL subclass instances to the PARENT initializer;")
 					.append(" it does NOT replay this class's initializer value. Do not use @RemoldReinit on inherited fields")
-					.append(" when the anonymous subclass sets its own value; 不会重放，请手动处理（或把值放到子类自己声明的字段上）。");
+					.append(" when the anonymous subclass sets its own value; it will NOT be replayed — handle it"
+					      + " manually (or declare the value on the subclass's own field).");
 			} else if (!drift.inherited().isEmpty()) {
 				text.append("inherited field initializer changed but will NOT be replayed: ")
 					.append(String.join(", ", drift.inherited()))
-					.append(" (default InitFix only patches added fields; 不会重放，请手动处理（或把值放到子类自己声明的字段上）。")
+					.append(" (default InitFix only patches added fields; it will NOT be replayed — handle it"
+					      + " manually, or declare the value on the subclass's own field.)")
 					.append(" Do NOT use parent @RemoldReinit: it resets all subclass instances to the parent initializer.)");
 			} else {
 				text.append("existing field initializer changed but will NOT be replayed: ")
 					.append(String.join(", ", drift.changed()))
-					.append(" (default InitFix only patches added fields; 不会重放，请手动处理（如需重置，标 @RemoldReinit）)");
+					.append(" (default InitFix only patches added fields; it will NOT be replayed — handle it"
+					      + " manually, or annotate @RemoldReinit if a reset is intended.)");
 			}
 			entries.add(new DriftEntry(className, text.toString()));
 		}
@@ -119,7 +122,7 @@ public final class InitializerDrift {
 			// 而"这一轮有 N 个类初值变化了"本身就是可行动的信号，不值得为此扫堆。
 			StringBuilder summary = new StringBuilder("[INIT-DRIFT] ")
 				.append(entries.size()).append(" classes have initializer drift this round")
-				.append(" (aggregated; 实例数未统计, instance enumeration skipped): ");
+				.append(" (aggregated; instance counts not collected, instance enumeration skipped): ");
 			for (int i = 0; i < entries.size(); i++) {
 				if (i > 0) summary.append("; ");
 				summary.append(entries.get(i).text());

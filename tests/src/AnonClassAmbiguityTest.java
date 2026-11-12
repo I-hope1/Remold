@@ -292,13 +292,13 @@ class AnonClassAmbiguityTest {
 		assertNotNull(line, "the fallback must still leave an explicit audit line; infos=" + infos + " warns=" + warns);
 		assertTrue(line.contains("(scan-visible live instances: 0)"),
 			"the line must state what was actually measured (scan visibility): " + line);
-		assertTrue(line.contains("扫描可见的活实例为 0"),
-			"the requested Chinese wording must be present: " + line);
+		assertTrue(line.contains("scan-visible live instances = 0"),
+			"the line must state what was actually measured (scan visibility): " + line);
 		assertFalse(line.contains("deterministic-dead-pair") || line.contains("(0 live instances)"),
 			"the old wording claimed the instances are dead; it must be gone: " + line);
-		assertTrue(line.contains("不是“实例已死”的证明"),
+		assertTrue(line.contains("neither proof that the instances are dead"),
 			"the line must explicitly deny that 0 visible instances proves death: " + line);
-		assertTrue(line.contains("审计线索"),
+		assertTrue(line.contains("audit lead"),
 			"the line must tell the reader to use it as an audit trail: " + line);
 	}
 

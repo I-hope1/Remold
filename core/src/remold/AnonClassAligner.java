@@ -2005,10 +2005,11 @@ public final class AnonClassAligner {
 				 Collections.singleton(p.o.name), anonNodeResolver);
 				String line = "[ANON_ALIGN] deterministic-zero-scan-pair (scan-visible live instances: 0): "
 				 + p.n.name + " -> " + p.o.name + " (minDiff=" + p.diff + ")"
-				 + " — 放行依据只有「本轮堆扫描对这些旧候选没有可见的存活实例"
-				 + "（扫描可见的活实例为 0）+ 配对双方布局完全兼容」；扫描看不见的实例不被这条日志否证，"
-				 + "所以这不是“实例已死”的证明，也不是结构唯一匹配或语义安全结论。"
-				 + "若该匿名类被字段长期持有，请把这条日志当作审计线索。"
+				 + " — the ONLY basis for this pass is: the heap scan saw no live instances for these old"
+				 + " candidates (scan-visible live instances = 0), and both sides' layouts are fully compatible."
+				 + " Instances the scan could not see are NOT disproven by this line, so this is neither proof"
+				 + " that the instances are dead, nor a unique-structural-match or semantic-safety conclusion."
+				 + " If a field holds this anonymous class long-term, treat this line as an audit lead."
 				 + zeroScanPairHolderNote(holders);
 				// proven 持有者（精确描述符 / 赋值流）与“扫描零可见”直接冲突，升级为 warn 让人看见。
 				if (holders.proven.isEmpty()) RemoldAgent.info(line);

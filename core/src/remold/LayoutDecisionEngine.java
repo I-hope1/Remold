@@ -281,7 +281,8 @@ final class LayoutDecisionEngine {
 				return new LayoutDecision(LayoutAction.WAIVE_REINIT, res, host, Set.of());
 			}
 			// 情况 C：堆上有存活实例且未标 @RemoldReinit → 维持 LAYOUT-REJECT，优化提示文案
-			String typeChangeHint = "可在该字段上添加 @RemoldReinit 后再次编译保存，即可在不重启的情况下完成类型切换并重置初值";
+			String typeChangeHint = "annotate the field with @RemoldReinit and save again to switch its type"
+				+ " and reset the value without a restart";
 			return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
 				"field type changed: " + typeChanged + " with surviving instances (" + typeChangeHint + ")");
 		}

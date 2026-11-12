@@ -62,6 +62,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     与 `CONDITIONAL` 的精确语义表（null/0/false、`-0.0`/`NaN` 按 raw bits、long、非默认值跳过）。
   - B4 拒绝文案改为列出**全部**不可提取字段及原因，并给出"移除注解 / 回退类型变更 / 重启"三条出路
     （之前只报第一条，用户改掉后下次仍会被另一条挡住）。
+- **运行期日志与用户可见字符串全部改为英文**：主源码原有 17 个含中文的字符串字面量（`[LAYOUT-REINIT]`、
+  `[ANON_ALIGN]` 审计行、`[INIT-DRIFT]`、`[LAYOUT-REJECT]` 提示、`[Fabric]` 就绪回退等，分布 6 个文件）
+  全部译为英文，语义不变——GBK 控制台/日志采集端不再出现乱码。新增
+  `./gradlew :tests:verifyLogLanguage`（挂 `check`）扫描主源码字符串字面量，命中 CJK/全角标点即失败；
+  规则写入 `AGENTS.md` §3「日志语言（强制）」。断言旧中文文案的 3 个测试文件同步改为英文断言。
 
 ## [0.2.7] - 2026-11-11
 

@@ -393,7 +393,7 @@ public class InitializerDriftTest {
 		assertEquals(1, warns.size(), warns.toString());
 		assertTrue(warns.get(0).contains("inherited field initializer"), warns.get(0));
 		assertFalse(warns.get(0).contains("use @RemoldReinit"), warns.get(0));
-		assertTrue(warns.get(0).contains("不会重放，请手动处理"), warns.get(0));
+		assertTrue(warns.get(0).contains("it will NOT be replayed"), warns.get(0));
 	}
 
 	@Test
@@ -460,7 +460,7 @@ public class InitializerDriftTest {
 		assertEquals(3, all.size(), "expected one warn per drift variant, actual=" + all);
 		for (String w : all) {
 			assertFalse(w.contains("@OnReload"), "warn must not recommend @OnReload: " + w);
-			assertTrue(w.contains("不会重放，请手动处理"), "warn must say the value is not replayed: " + w);
+			assertTrue(w.contains("it will NOT be replayed"), "warn must say the value is not replayed: " + w);
 		}
 	}
 
@@ -584,7 +584,7 @@ public class InitializerDriftTest {
 			+ (enumerationsAfter - enumerationsBefore) + ")");
 		assertEquals(1, warns.size(), "six classes must aggregate into one warn: " + warns);
 		assertTrue(warns.get(0).contains("6 classes"), warns.get(0));
-		assertTrue(warns.get(0).contains("实例数未统计"),
+		assertTrue(warns.get(0).contains("instance counts not collected"),
 			"aggregated warn must state that instance counts were not collected: " + warns.get(0));
 	}
 }

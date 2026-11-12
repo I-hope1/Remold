@@ -3802,7 +3802,7 @@ public class RemoldAgent {
 			if (d.action() == LayoutAction.WAIVE_REINIT) {
 				LAYOUT_GATE_WAIVED.incrementAndGet();
 				clearRejected(className);
-				info("[LAYOUT-REINIT] " + className + ": 经 @RemoldReinit 授权放行字段类型变更 ("
+				info("[LAYOUT-REINIT] " + className + ": field type change authorized by @RemoldReinit ("
 				     + (d.layout() == null ? "?" : d.layout().detail()) + ")");
 				continue;
 			}
@@ -3825,7 +3825,8 @@ public class RemoldAgent {
 				int repeats = noteRejected(className, why);
 				String hint = "";
 				if (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.CHANGED_FIELD_TYPE) {
-					hint = "可在该字段上添加 @RemoldReinit 后再次编译保存，即可在不重启的情况下完成类型切换并重置初值；或 ";
+					hint = "annotate the field with @RemoldReinit and save again to switch its type and reset the"
+					     + " value without a restart; or ";
 				}
 				warn("[LAYOUT-REJECT] " + className + ": REFUSED redefine — " + why + ". Host "
 				     + d.hostName() + " and its anonymous classes are"
@@ -5159,7 +5160,7 @@ public class RemoldAgent {
 					break;
 				case WAIVE_REINIT:
 					info("[LAYOUT-REINIT] Dynamic class " + className
-					     + ": 经 @RemoldReinit 授权放行字段类型变更 (" + why + ")");
+					     + ": field type change authorized by @RemoldReinit (" + why + ")");
 					break;
 				case SKIP:
 					warn("[LAYOUT-SKIP] Dynamic class " + className + ": layout gate skipped — no"

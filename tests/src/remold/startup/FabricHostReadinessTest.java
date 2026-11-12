@@ -60,12 +60,12 @@ class FabricHostReadinessTest {
 		assertTrue(plugin.isHostReady(),
 		 "an unresolvable host must be treated as ready — the gate has no timeout release by default,"
 		 + " so a veto here would starve hot swap forever");
-		assertEquals(1, logger.count("[Fabric] 未取得就绪信号"),
+		assertEquals(1, logger.count("[Fabric] no readiness signal observed"),
 		 "the fallback must be reported exactly once, saying it is treated as ready");
 
 		// 就绪单向：再问一次不再打第二条日志。
 		assertTrue(plugin.isHostReady());
-		assertEquals(1, logger.count("[Fabric] 未取得就绪信号"),
+		assertEquals(1, logger.count("[Fabric] no readiness signal observed"),
 		 "re-probing after the fallback must not log again");
 		assertEquals(0, logger.count("[Fabric] host reported ready"),
 		 "the fallback must not pretend the host really reported ready");
@@ -115,7 +115,7 @@ class FabricHostReadinessTest {
 
 		assertTrue(plugin.isHostReady(),
 		 "a client parked at the main menu may never join a world; vetoing it would starve hot swap forever");
-		assertEquals(1, logger.count("[Fabric] 未取得就绪信号"),
+		assertEquals(1, logger.count("[Fabric] no readiness signal observed"),
 		 "no world means 'no signal', and 'no signal' must be reported as the ready fallback");
 	}
 
@@ -129,7 +129,7 @@ class FabricHostReadinessTest {
 		assertTrue(plugin.isHostReady(),
 		 "a broken probe must not be turned into a veto: the gate would treat the throw as not-ready"
 		 + " and starve hot swap");
-		assertEquals(1, logger.count("[Fabric] 未取得就绪信号"));
+		assertEquals(1, logger.count("[Fabric] no readiness signal observed"));
 	}
 
 	private static HostReadinessProbe probeFinding(String className, Class<?> found) {

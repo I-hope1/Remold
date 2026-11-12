@@ -200,9 +200,9 @@ public class AnnotationTransformer implements ClassFileTransformer {
 							Map<String, String> unextractable = remold.ref.InitFix.unextractableReinitFields(classBeingRedefined, diff.newClass, diff.reinitFields);
 							if (unextractable.isEmpty()) {
 								waiveReinit = true;
-								RemoldAgent.info("[LAYOUT-REINIT] " + dotClassName + ": 经 @RemoldReinit 授权放行字段类型变更 (" + layoutRes.detail() + ")");
+								RemoldAgent.info("[LAYOUT-REINIT] " + dotClassName + ": field type change authorized by @RemoldReinit (" + layoutRes.detail() + ")");
 							} else {
-								RemoldAgent.warn("[LAYOUT-REINIT] " + dotClassName + ": @RemoldReinit 无法提取初值切片 (" + unextractable + ")，拒绝放行");
+								RemoldAgent.warn("[LAYOUT-REINIT] " + dotClassName + ": @RemoldReinit cannot extract an initializer slice (" + unextractable + "); refusing to waive");
 							}
 						}
 					}

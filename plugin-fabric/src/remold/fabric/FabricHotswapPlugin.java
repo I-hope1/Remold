@@ -188,8 +188,8 @@ public final class FabricHotswapPlugin implements HotswapPlugin {
 			RemoldAgent.info("[Fabric] host reported ready (Minecraft main loop has ticked);"
 			                 + " hot-swap batches are enabled");
 		} else {
-			RemoldAgent.info("[Fabric] 未取得就绪信号，按已就绪处理（启动期门闩保持放行；"
-			                 + "批次可能落在启动风暴里）");
+			RemoldAgent.info("[Fabric] no readiness signal observed; treating the host as ready"
+			                 + " (startup gate stays open; batches may land in the startup storm)");
 		}
 	}
 }

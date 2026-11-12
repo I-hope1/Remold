@@ -492,11 +492,11 @@ lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
 | 门禁层 2 | `isOrderConsistent` 的 `hostKey == null` 早退 | 没有序号就没有顺序证据 | 独立（返回 `false` 即"不给证据"，不是放行） |
 
 
-表中"独立"指**该消费点不依赖兜底门禁**。证据等级：由代码分析可知（代码阅读）；其中 S2 由 "幽灵跳过限制放开次数为 0" 的哨兵与
-`nullOldHost…` 具名用例覆盖、S7 明确**仅靠门禁**（纵深少一层），这两行另有 实测 支撑（`ev-cf3a`/`ev-1a5e`、
-`mut-b42f`、`mut-6ba7`）。
+表中"独立"指**该消费点不依赖兜底门禁**。证据等级：由代码分析可知（代码阅读）；其中「幽灵不作为 indy 目标」一行由"放开次数为 0"的哨兵与
+`nullOldHost…` 具名用例覆盖、Pass B 两条循环明确**仅靠门禁**（纵深少一层），这两行另有实测支撑（、
+）。
 **残余风险（必须登记，不能只说"被短路"）**："允许幽灵参与后续匹配"这一放宽开关覆盖的三处里，
-Step 1 那处（S5）还有 `sameSemantics` 兜底，**Pass B 那两处（S7）只由门禁兜底**。
+Step 1 那处还有 `sameSemantics` 兜底，**Pass B 那两处只由门禁兜底**。
 门禁把这两处短路之后，该放宽开关在门禁开启下不再可被击杀（门禁屏蔽变异体）——
 **纵深防御少了一层**：一旦门禁被放宽或移除，S7 就没有第二道防线。
 缓解手段不是"再补一层代码"，而是把它变成**响亮的报警**：
@@ -539,7 +539,7 @@ Step 1 那处（S5）还有 `sameSemantics` 兜底，**Pass B 那两处（S7）�
 ## §10 槽位平移下的幽灵桩
 
 `-g:none` 编译 + 槽位整体平移时，部分类的 lambda 会被判为"身份丢失"而生成幽灵桩替身。
-实测 在**下列范围**内：语料 N=37（`core/src`+`api/src` 合并编译 30 个含 lambda 类、
+在**下列范围**内实测：语料 N=37（`core/src`+`api/src` 合并编译 30 个含 lambda 类、
 `plugin-fabric/src` 3、`plugin-mixin/src` 2、`plugin-forge/src` 2）、JDK 21 编译、变换为
 "新侧 `-g:none` + 槽位整体平移"、单次对照实验 —— 其中 **9 类出现幽灵、共 23 个桩**
 （`AnonClassAligner` 6、`ref/InitFix` 5、`LambdaAligner` 4、`RemoldAgent` 3，
@@ -556,10 +556,10 @@ Step 1 那处（S5）还有 `sameSemantics` 兜底，**Pass B 那两处（S7）�
 hostKindRefused=18`（指纹不等后由宿主形态翻转拒绝），证明计数器对"指纹不等"形态有分辨力。
 `gate=on/off` 两趟幽灵数逐字节相同的机制即：语料上 0 次拒绝，关掉门禁同样放行。误报率外推仍限 4 类人造重排各 n=1。
 
-**护栏与其局限**：语料用例与 体内新增内层 lambda 的形态 对照都断言 `[GATE-STATE]` 为开（`callSites>0`），门禁被关时显式红
+**护栏与其局限**：语料用例与嵌套 lambda 阳性对照都断言 `[GATE-STATE]` 为开（`callSites>0`），门禁被关时显式红
 （关态实测 `exit 1`，三个用例同时红）。该护栏只能发现"门禁调用被移除"这一形态；把 `fallbackPairingAllowed`
-改成恒返回 true 时 `callSites` 仍为 4、护栏仍绿 —— 这一形态由 体内新增内层 lambda 的形态 对照的行为断言兜底（：
-恒 true 变异下 `gatePositiveControlOn体内新增内层 lambda 的形态Seed` 与 `passBRefusesRebindWhenBodyDiffers` 同时红）。
+改成恒返回 true 时 `callSites` 仍为 4、护栏仍绿 —— 这一形态由嵌套 lambda 阳性对照的行为断言兜底（
+恒 true 变异下，`PassBTest` 的嵌套 lambda 阳性对照与「体不等必须拒绝」两条用例同时失败）。
 
 **已知口径（I3）**：`BODY_MISMATCH` 的 WARN 与 `TEST_EVENTS` 按 `类名#BODY#新名<-旧名` 去重，键里没有
 重定义轮次或类版本（由代码分析可知）；`bodyMismatchRefusals` 的自增在该去重之前，配对拒绝与幽灵化
@@ -569,7 +569,7 @@ hostKindRefused=18`（指纹不等后由宿主形态翻转拒绝），证明计�
 - `[GATE-STATE]` 读的是**实际被加载的** `LambdaAligner` 字节（数 `fallbackPairingAllowed` 调用点并打
   `alignerSha256`），两趟分别 `bodyFingerprint=on callSites=4 sha256=858dd0ff…` 与
   `bodyFingerprint=off callSites=0 sha256=653c92bb…`（sha 不同 ⇒ 第二趟确实换了实现）；
-- 同一 体内新增内层 lambda 的形态 种子在两趟上的读数：
+- 同一嵌套 lambda 种子在两趟上的读数：
 
 | 门禁 | `refusals` | `bodyMismatchEvents` | 旧槽位形态 |
 |:--|--:|--:|:--|
@@ -579,7 +579,7 @@ hostKindRefused=18`（指纹不等后由宿主形态翻转拒绝），证明计�
 - 另一条独立证据：门禁**开着**时语料 `totalRefusals=0`，说明门禁在该语料上根本没有触发，
   与上面"两趟幽灵数相同"互为独立佐证。
 
-成因：由代码分析可知 票据指纹计入 `var` 下标，`-g:none` 后失去调试信息、槽位平移即认不出；**未做隔离实验**。
+成因：由代码分析可知，票据指纹计入 `var` 下标，`-g:none` 后失去调试信息、槽位平移即认不出；**未做隔离实验**。
 这是用户可感知的可用性回退（lambda 失效），登记为已知限制；隔离实验列为候选批次（会动生产代码，单开批次）。
 缺口（未纳入语料）：`plugin-arc/src`（Mindustry 编译期制品非纯 class 包，缺注解处理器，javac 解析即失败）、
 `tests/`、`gradle-plugin/`。

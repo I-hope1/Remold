@@ -22,7 +22,10 @@ import static org.junit.jupiter.api.Assertions.*;
  * <p>【因果链与对照组要求】
  * 1. 前置基线：枚举常量顺序翻转/前插移位时，必须被 ClassDiff 与 LayoutGate 捕捉并判定为 CHANGED_ENUM_ORDER；
  * 2. 终局断言：decideLayout 必须判定为 REJECT，阻止静默重定义导致的 switch 错位；
- * 3. 对照组：末尾追加常量（旧常量 ordinal 不变）或仅修改枚举方法体时，不得误伤，必须放行（PASS）。
+ * 3. 常量集合变化（末尾追加 / 删除）不改变已有常量的相对序号，顺序门看不到；但热更不重跑
+ *    {@code <clinit>}，新增常量恒为 null、删除的常量仍留在旧 {@code $VALUES} 数组里——必须由
+ *    ENUM_CONSTANT_SET_CHANGED 拒绝并提示重启（"热更成功但没生效"是不可接受的假成功）。
+ * 4. 对照组：只给枚举加普通字段（非常量）或仅修改方法体时必须放行，不得误伤。
  */
 class EnumSwitchReorderGateTest {
 
@@ -117,17 +120,109 @@ class EnumSwitchReorderGateTest {
 	}
 
 	@Test
-	void appendedEnumConstantAllowed() {
-		// 对照组：末尾追加常量不改变存量常量的 ordinal 映射，InitFix 会处理新增静态字段，不应当触发 CHANGED_ENUM_ORDER
+	void appendedEnumConstantIsRejected() {
+		// 末尾追加常量不改变存量常量的 ordinal 映射，但热更不会重跑 <clinit>：新常量不会被构造、
+		// $VALUES 不会扩容，运行期 values()/valueOf() 里仍没有 PURPLE。放行就是"成功但没生效"。
 		byte[] v1 = compileOne(ENUM_HOST, COLOR_V1);
 		byte[] v2 = compileOne(ENUM_HOST, COLOR_APPENDED);
 
 		ClassDiff diff = ClassDiffUtil.diff(v1, v2);
 		assertFalse(diff.enumOrderChanged, "末尾追加常量未改变已有常量的相对序号，不得标记 enumOrderChanged");
+		assertEquals(List.of("PURPLE"), diff.addedEnumConstants,
+			"新增常量必须被识别出来：" + diff.addedEnumConstants);
+		assertTrue(diff.removedEnumConstants.isEmpty());
 
 		LayoutGate.Result res = LayoutGate.checkChangedFields(diff.changedFields);
-		assertNotEquals(Verdict.CHANGED_ENUM_ORDER, res.verdict(), "末尾追加不得判定为 CHANGED_ENUM_ORDER");
-		assertTrue(res.compatible(), "纯新增字段应兼容放行交给 InitFix");
+		assertEquals(Verdict.ENUM_CONSTANT_SET_CHANGED, res.verdict(),
+			"追加常量必须判定为 ENUM_CONSTANT_SET_CHANGED");
+		assertFalse(res.compatible(), "ENUM_CONSTANT_SET_CHANGED 绝不可兼容放行");
+		assertTrue(res.detail().contains("PURPLE"), "判决明细必须点名新增常量：" + res.detail());
+
+		LayoutDecision d = RemoldAgent.decideLayout(ENUM_HOST, v1, v2, "reject", Liveness.LIVE,
+			Set.of(ENUM_HOST));
+		assertEquals(LayoutAction.REJECT, d.action(),
+			"<clinit> 不重跑，追加常量在运行期恒为 null，必须拒绝");
+		assertTrue(d.reason() != null && d.reason().contains("enum constant set changed"), d.reason());
+		assertTrue(d.reason().contains("<clinit>"),
+			"拒绝原因必须说明机制（<clinit> 不重跑）：" + d.reason());
+	}
+
+	@Test
+	void removedEnumConstantIsRejectedEvenWhenScanCompleted() {
+		// 删除常量：旧 $VALUES 仍持有该实例，values()/valueOf() 仍能见到它。即使读者扫描完成且
+		// 批外无读者（旧逻辑会 WAIVE_NO_READERS 放行），也必须拒绝——放行是"删了但还在"的假成功。
+		byte[] v1 = compileOne(ENUM_HOST, COLOR_V1);
+		byte[] v2 = compileOne(ENUM_HOST,
+			"package test;\n"
+			+ "public enum Color {\n"
+			+ "    RED, GREEN;\n"
+			+ "    public String tag() { return \"v2\"; }\n"
+			+ "}\n");
+
+		ClassDiff diff = ClassDiffUtil.diff(v1, v2);
+		assertFalse(diff.enumOrderChanged, "删除末尾常量不改变存量常量的相对序号");
+		assertEquals(List.of("BLUE"), diff.removedEnumConstants, "删除的常量必须被识别：" + diff.removedEnumConstants);
+
+		LayoutGate.Result res = LayoutGate.checkChangedFields(diff.changedFields);
+		assertEquals(Verdict.ENUM_CONSTANT_SET_CHANGED, res.verdict());
+
+		RemoldAgent.RemovedMemberScan nobodyReads =
+			new RemoldAgent.RemovedMemberScan(true, List.of(), List.of(), false, false, List.of());
+		LayoutDecision d = RemoldAgent.decideLayout(ENUM_HOST, diff.changedFields, "reject", Liveness.LIVE,
+			Set.of(ENUM_HOST), nobodyReads);
+		assertEquals(LayoutAction.REJECT, d.action(),
+			"删除常量不能被 WAIVE_NO_READERS 放行：旧 $VALUES 仍持有该实例");
+		assertTrue(d.reason() != null && d.reason().contains("enum constant set changed"),
+			"必须以常量集合门拒绝并说明原因（而不是落到通用布局拒绝）：" + d.reason());
+		assertTrue(d.reason().contains("<clinit>"),
+			"拒绝原因必须说明 <clinit> 不重跑的机制：" + d.reason());
+	}
+
+	@Test
+	void enumAddingRegularFieldStillPasses() {
+		// 对照组：枚举新增非常量字段（普通实例字段）不属于常量集变化，仍交给 InitFix / 布局门常规路径。
+		byte[] v1 = compileOne(ENUM_HOST, COLOR_V1);
+		byte[] v2 = compileOne(ENUM_HOST,
+			"package test;\n"
+			+ "public enum Color {\n"
+			+ "    RED, GREEN, BLUE;\n"
+			+ "    public int counter;\n"
+			+ "    public String tag() { return \"v2\"; }\n"
+			+ "}\n");
+
+		ClassDiff diff = ClassDiffUtil.diff(v1, v2);
+		assertTrue(diff.addedEnumConstants.isEmpty(), "counter 不是枚举常量");
+		assertTrue(diff.removedEnumConstants.isEmpty());
+		LayoutGate.Result res = LayoutGate.checkChangedFields(diff.changedFields);
+		assertNotEquals(Verdict.ENUM_CONSTANT_SET_CHANGED, res.verdict(),
+			"普通字段新增不得误判为常量集合变化：" + res.detail());
+		assertEquals(LayoutAction.PASS,
+			RemoldAgent.decideLayout(ENUM_HOST, v1, v2, "reject", Liveness.LIVE, Set.of(ENUM_HOST)).action());
+	}
+
+	@Test
+	void batchClassesReferencingChangedConstantAreDropped() {
+		// 级联阻断：批次里按新 enum 编译、直接引用 PURPLE 的调用方必须随枚举一起移出，
+		// 否则枚举保持旧版加载后，它会在运行期解析到不存在的字段（NoSuchFieldError）。
+		Map<String, byte[]> compiled = compile(Map.of(
+			ENUM_HOST, COLOR_APPENDED,
+			"test.UsesPurple", "package test; public class UsesPurple {"
+				+ " public static Color c() { return Color.PURPLE; } }",
+			"test.UsesRed", "package test; public class UsesRed {"
+				+ " public static Color c() { return Color.RED; } }"
+		));
+
+		Map<String, byte[]> batch = new LinkedHashMap<>(compiled);
+		assertTrue(batch.containsKey("test.UsesPurple") && batch.containsKey("test.UsesRed"));
+		RemoldAgent.RoundSkips skips = new RemoldAgent.RoundSkips();
+		Map<String, java.nio.file.Path> paths = new HashMap<>();
+		for (String k : batch.keySet()) paths.put(k, java.nio.file.Path.of(k + ".class"));
+
+		RemoldAgent.dropEnumConstantDependents(batch, paths, ENUM_HOST, List.of("PURPLE"), skips);
+
+		assertFalse(batch.containsKey("test.UsesPurple"), "引用新增常量的调用方必须被移出批次");
+		assertTrue(batch.containsKey("test.UsesRed"), "引用未变常量的类不得被误移出");
+		assertTrue(skips.contains("test.UsesPurple"));
 	}
 
 	@Test

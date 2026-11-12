@@ -125,6 +125,14 @@ public class RemoldAgent {
 	public static String[]     HOTSWAP_BLACKLIST  = new String[0];
 	public static boolean      RETRANSFORM_LOADED = Boolean.parseBoolean(System.getProperty("remold.agent.retransform_loaded", "false"));
 	public static boolean      ENABLE_HOTSWAP_EVENT;
+	/**
+	 * {@code @RemoldReinit} 的强制重放逃生口（{@code -Dremold.agent.force_reinit=true}，默认关闭）。
+	 *
+	 * <p>正常语义下，封闭表达式的初值指纹未变时<b>跳过</b>重置（只改方法体的热更不该动数据）。
+	 * 打开本开关后忽略指纹、本轮一律重放声明类初值切片——用于"初值表达式没改，但存量值被运行期
+	 * 改脏了、需要手工打回初值"的场景。它<b>不</b>改变取值来源：值仍来自声明类（不是运行时子类）的
+	 * 初值切片；按实例运行时类取值是另一条未实现的设计（{@code docs/initfix/03-runtime-driver.md} §4）。</p>
+	 */
 	public static boolean      FORCE_REINIT;
 	public static boolean      LAMBDA_ALIGN       = boolProp("remold.agent.lambda_align", "remold.lambdaAlign.enabled", true);
 	public static boolean      LAMBDA_STRICT      = boolProp("remold.agent.lambda_strict", "remold.lambdaAlign.strict", false);
@@ -1566,8 +1574,11 @@ public class RemoldAgent {
 		info("Force Static Lambda: " + FORCE_STATIC_LAMBDA);
 		ENABLE_HOTSWAP_EVENT = Boolean.parseBoolean(System.getProperty("remold.agent.hotswap_event", "false"));
 		info("HotSwap Event: " + ENABLE_HOTSWAP_EVENT);
-		FORCE_REINIT = Boolean.parseBoolean(System.getProperty("remold.agent.force_reinit", "true"));
-		info("Force Reinit: " + FORCE_REINIT);
+		FORCE_REINIT = Boolean.parseBoolean(System.getProperty("remold.agent.force_reinit", "false"));
+		if (FORCE_REINIT) {
+			info("Force Reinit: ON — @RemoldReinit will ignore the initializer fingerprint and replay"
+			     + " the declaring class's initializer slice this session.");
+		}
 		LAMBDA_ALIGN = boolProp("remold.agent.lambda_align", "remold.lambdaAlign.enabled", true);
 		LAMBDA_STRICT = boolProp("remold.agent.lambda_strict", "remold.lambdaAlign.strict", false);
 		info("Lambda Align: " + LAMBDA_ALIGN + " (strict=" + LAMBDA_STRICT + ")");
@@ -3216,6 +3227,50 @@ public class RemoldAgent {
 	}
 
 	/**
+	 * 级联阻断：枚举<b>常量集合</b>（新增/删除）被拒时，批次中直接引用这些常量的类也必须移出。
+	 *
+	 * <p>与 {@link #dropEnumSwitchDependents} 并列但判据不同：那里找 switch 映射持有者，这里找
+	 * {@code GETSTATIC/PUTSTATIC Enum.PURPLE} 一类常量引用。被拒的枚举保持旧版加载，若引用新增常量
+	 * 的调用方随批次重定义，会在运行期解析到不存在的字段（{@code NoSuchFieldError}，推迟到热更事务
+	 * 之外）；引用被删常量的旧读者则由读者扫描单独拦截。两类依赖都移出，本轮保持整批一致。</p>
+	 */
+	static void dropEnumConstantDependents(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,
+	                                       String enumDotName, List<String> changedConstants, RoundSkips skips) {
+		if (changedConstants == null || changedConstants.isEmpty()) return;
+		String enumSlash = enumDotName.replace('.', '/');
+		java.util.Set<String> names = new java.util.HashSet<>(changedConstants);
+		List<String> dependents = new ArrayList<>();
+		for (Map.Entry<String, byte[]> entry : newBatchBytes.entrySet()) {
+			String clsName = entry.getKey();
+			if (clsName.equals(enumDotName)) continue;
+			byte[] b = entry.getValue();
+			if (b == null) continue;
+			try {
+				for (remold.ref.RemovedMemberReaders.Ref ref : remold.ref.RemovedMemberReaders.refs(b)) {
+					if (enumSlash.equals(ref.owner()) && names.contains(ref.name())) {
+						dependents.add(clsName);
+						break;
+					}
+				}
+			} catch (Throwable ignored) {
+				// 解析不了常量池的类不能证明"没引用"：保守移出本批（宁可本轮不更新，也不分裂状态）。
+				dependents.add(clsName);
+			}
+		}
+		for (String dep : dependents) {
+			dropFromBatch(newBatchBytes, classToPath, dep);
+			if (skips != null) {
+				skips.add(dep, RoundSkips.verdict("LAYOUT-REJECT",
+					"references a changed constant of enum " + enumDotName,
+					"revert the enum constant add/remove or restart to continue"));
+			}
+			warn("[LAYOUT-REJECT] " + dep + ": REFUSED redefine — references a changed constant of enum "
+			     + enumDotName + " whose constant set changed; dropped together with the enum to prevent"
+			     + " a delayed NoSuchFieldError.");
+		}
+	}
+
+	/**
 	 * 一轮热更里"改了但没生效"的类：类名 → 判决码。
 	 *
 	 * <p>存在的唯一理由是<b>摘要行</b>。{@code HotSwap successful: N classes redefined} 只报了成功的
@@ -3673,12 +3728,16 @@ public class RemoldAgent {
 			List<String> changed;
 			Set<String> reinitFields = Set.of();
 			Map<String, String> unextractableReinit = Map.of();
+			Map<String, String> unsafeReinitScope = Map.of();
 			try {
 				ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, newBytes);
 				changed = diff.changedFields;
 				reinitFields = diff.reinitFields;
 				if (!reinitFields.isEmpty() && diff.newClass != null) {
 					unextractableReinit = remold.ref.InitFix.unextractableReinitFields(targetClass, diff.newClass, reinitFields);
+					// 继承字段 + 子类初始化器写同字段：INCLUDE_SUBCLASSES 会把声明类初值写进子类实例，
+					// 覆盖子类自己的初值且不重放子类赋值（docs/initfix/03-runtime-driver.md §4）。
+					unsafeReinitScope = remold.ref.InitFix.unsafeInheritedReinitFields(targetClass, diff.newClass, reinitFields);
 				}
 			} catch (Throwable t) {
 				warn("[LAYOUT-SKIP] " + className + ": layout gate skipped — cannot diff ("
@@ -3701,6 +3760,11 @@ public class RemoldAgent {
 			                                drift,
 			                                reinitFields,
 			                                unextractableReinit);
+			// Reinit 作用域安全门独立于 changedFields：即使布局门判 COMPATIBLE 也必须拒绝。
+			if (!unsafeReinitScope.isEmpty() && !LayoutGate.MODE_WARN.equals(LAYOUT_GATE)) {
+				d = LayoutDecisionEngine.rejectUnsafeReinitScope(className, Set.copyOf(newBatchBytes.keySet()),
+					unsafeReinitScope);
+			}
 
 			// 显式出口：取不到基线 / 无法 diff 就不是"放行"，而是"没法判"。
 			// 静默放行会重演"整轮静默失效"那类难排查的问题，所以必须说出来。
@@ -3786,6 +3850,19 @@ public class RemoldAgent {
 				rejectedHosts.add(d.hostName());
 				if (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.CHANGED_ENUM_ORDER) {
 					dropEnumSwitchDependents(newBatchBytes, classToPath, className, skips);
+				} else if (d.layout() != null
+				           && d.layout().verdict() == LayoutGate.Verdict.ENUM_CONSTANT_SET_CHANGED) {
+					// 常量集合变化：switch 映射与直接常量引用都会与新 enum 语义不一致，两类都移出。
+					dropEnumSwitchDependents(newBatchBytes, classToPath, className, skips);
+					try {
+						ClassDiffUtil.ClassDiff cd = ClassDiffUtil.diff(oldBytes, newBytes);
+						List<String> changedConstants = new ArrayList<>(cd.addedEnumConstants);
+						changedConstants.addAll(cd.removedEnumConstants);
+						dropEnumConstantDependents(newBatchBytes, classToPath, className, changedConstants, skips);
+					} catch (Throwable t) {
+						warn("[LAYOUT-REJECT] " + className + ": cannot re-diff to cascade enum constant"
+						     + " dependents (" + t + "); the enum itself is dropped this round.");
+					}
 				}
 				continue;
 			}
@@ -5146,6 +5223,16 @@ public class RemoldAgent {
 	                                                   ClassDiffUtil.ClassDiff diff, byte[] runtimeBytes) {
 		if (LayoutGate.MODE_OFF.equals(LAYOUT_GATE)) {
 			return new LayoutDecision(LayoutAction.PASS, null, className, Set.of());
+		}
+		// 与批量路径同源的继承作用域门：命中即拒绝（warn 模式仍按既有语义强制放行）。
+		if (!LayoutGate.MODE_WARN.equals(LAYOUT_GATE) && diff.newClass != null
+		    && !diff.reinitFields.isEmpty()) {
+			Map<String, String> unsafeReinitScope =
+				remold.ref.InitFix.unsafeInheritedReinitFields(targetClass, diff.newClass, diff.reinitFields);
+			if (!unsafeReinitScope.isEmpty()) {
+				return LayoutDecisionEngine.rejectUnsafeReinitScope(
+					className, Set.of(className), unsafeReinitScope);
+			}
 		}
 		LayoutGate.Result layoutRes = LayoutGate.checkChangedFields(diff.changedFields);
 		Liveness liveness = layoutRes.compatible()

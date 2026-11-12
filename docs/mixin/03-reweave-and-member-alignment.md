@@ -39,6 +39,17 @@ Mixin 每次织入都会给合成成员重新编号（`handler$zci000$…`），
 调用点与 `InvokeDynamicInsnNode.bsmArgs` 里的 `Handle`。前缀覆盖
 `handler$ / redirect$ / wrapOperation$ / modify$ / localvar$ / args$ / md$`。
 
+**判据与范围边界（顺序即契约）**：
+
+- 只有 **Mixin 生成/注入**的成员才构成进入对齐的条件。`javac` / JVM 自己生成的合成字段
+  （枚举 `$VALUES`、内部类外部引用 `this$N`、`$assertionsDisabled`、switch-on-enum 的
+  `$SwitchMap$*` / `$EnumMap$*`）不是 Mixin 标记；把它们当标记会让对齐器对普通类执行。
+- **枚举类的字段表顺序不得被回映**：常量相对位置是 `ClassDiffUtil` 计算 ordinal 漂移的输入，
+  在 `CHANGED_ENUM_ORDER` 判定之前把字段表恢复成基线顺序，等于让该安全门永远看不到变更。
+  枚举类的方法表仍按基线顺序回映（Mixin 目标可能本身就是枚举）。
+- **被删除的枚举常量不得复活成墓碑字段**：复活会让"删常量"对布局门不可见。
+  方法墓碑与 `@Unique` 字段墓碑只适用于 Mixin 合成成员，不适用于 ordinal 语义的一部分。
+
 > `[观测]` 真机采样：同一 Mixin 会话内 `$z<id>$` 的 id 稳定，因此该层在多数场景是防御性 no-op；
 > 一旦 id 漂移，它就是唯一的修复点。
 
@@ -62,4 +73,6 @@ Mixin 每次织入都会给合成成员重新编号（`handler$zci000$…`），
 1. 原始字节必须来自"未经 transformer"的来源，且必须重放平台预变换；
 2. `refeedForTarget` 必须在 `InitFix` 扫描之前、且还原 `loadCounter`；
 3. 基线合成方法消失时只能补桩，不能删除；
-4. 基线 `@Unique` 字段消失时只能保留，不能删除。
+4. 基线 `@Unique` 字段消失时只能保留，不能删除；
+5. 对齐器只能改 Mixin 生成成员的名字/顺序；JVM/javac 合成字段不得作为对齐判据；
+6. 枚举类的常量字段表顺序必须原样保留到布局门，且被删常量不得被墓碑复活。

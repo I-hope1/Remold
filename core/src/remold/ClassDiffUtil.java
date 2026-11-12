@@ -330,6 +330,16 @@ public final class ClassDiffUtil {
 		public       boolean     enumOrderChanged    = false;
 		/** 发生顺序漂移的枚举常量明细（用于日志与拒绝提示） */
 		public final List<String> shiftedEnumConstants = new ArrayList<>();
+		/**
+		 * 新增的枚举常量（相对旧版）。
+		 *
+		 * <p>热更新不会重跑已初始化类的 {@code <clinit>}，`new 常量(...)` / `$VALUES` 数组构建都不会执行，
+		 * 新增常量在运行期恒为 {@code null}，{@code values()} 里也不存在——"热更成功但没生效"。
+		 * 必须由布局门拒绝并提示重启。</p>
+		 */
+		public final List<String> addedEnumConstants   = new ArrayList<>();
+		/** 删除的枚举常量：旧 {@code $VALUES} 仍持有该实例，{@code values()}/{@code valueOf()} 仍能见到它。 */
+		public final List<String> removedEnumConstants = new ArrayList<>();
 		/** Record 类是否新增了组件/实例字段（R1 守卫） */
 		public       boolean     recordComponentAdded = false;
 		/** 新增的 Record 组件字段名列表 */
@@ -361,6 +371,8 @@ public final class ClassDiffUtil {
 			reinitFields.clear();
 			enumOrderChanged = false;
 			shiftedEnumConstants.clear();
+			addedEnumConstants.clear();
+			removedEnumConstants.clear();
 			recordComponentAdded = false;
 			addedRecordComponents.clear();
 			hierarchyChanged = false;
@@ -534,6 +546,18 @@ public final class ClassDiffUtil {
 			if (!d.shiftedEnumConstants.isEmpty()) {
 				d.enumOrderChanged = true;
 				d.changedFields.add("~ *enum constant order changed: " + d.shiftedEnumConstants);
+			}
+			// 常量集合变化（新增/删除）也是 ordinal 语义的一部分：<clinit> 不重跑时新增常量无法
+			// 真正生效、删除常量也会留在旧 $VALUES 里。顺序门管不到这两种形态，必须单独标记。
+			for (String c : newConstants) {
+				if (!oldConstants.contains(c)) d.addedEnumConstants.add(c);
+			}
+			for (String c : oldConstants) {
+				if (!newConstants.contains(c)) d.removedEnumConstants.add(c);
+			}
+			if (!d.addedEnumConstants.isEmpty() || !d.removedEnumConstants.isEmpty()) {
+				d.changedFields.add("~ *enum constant set changed: +" + d.addedEnumConstants
+					+ " -" + d.removedEnumConstants);
 			}
 		}
 

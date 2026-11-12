@@ -23,6 +23,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Windows/macOS 的"随仓库分发 + CI 只校验"模式，构建仍由 `compile.bat` 完成；同时
   `AddFieldReloadProbe` / `DoubleBraceProbe` 补 `@SuppressWarnings({"deprecation", "removal"})`
   （探针刻意调用 JDK 标记为 removal 的 `Unsafe` 入口，JDK 8/11 仍需这些 API）。
+- **枚举顺序门被 Mixin 成员对齐器抢跑（前线 P0-2）**：`MixinMemberAlign.hasMixinGeneratedMembers`
+  把普通枚举的合成字段 `$VALUES` 当成 Mixin 生成成员，对齐器在 `ClassDiffUtil` 之前把字段表恢复成
+  基线顺序，`CHANGED_ENUM_ORDER` 永远看不到重排/前插（真机日志只有
+  `[MIXIN-ALIGN] restored the baseline member order`，运行态仍钉在旧顺序）。现在判据排除
+  `$VALUES` / `this$N` / `$assertionsDisabled` / `$SwitchMap$*` / `$EnumMap$*` 等 JVM/javac 合成形态；
+  枚举类不做字段表重排、被删常量不复活成墓碑字段（方法表照常对齐）。`EnumAlignmentGateWiringTest`
+  先红后绿（重排/前插/追加/删除/纯方法体/`$VALUES` 判据/Mixin 织入枚举），变异检查分别击杀
+  宽判据恢复与枚举字段保护删除。
+- **枚举常量集合变化（追加/删除）不再假成功**：追加常量不改变已有 ordinal，原先 `LayoutGate`
+  判 `COMPATIBLE` 放行；但热更不重跑 `<clinit>`，新常量运行期恒 `null`、`$VALUES` 不扩容，
+  `values()`/`valueOf()`/`EnumMap` 与源码不一致；删除常量则留在旧 `$VALUES` 实例数组里。
+  `ClassDiffUtil` 现在产出 `addedEnumConstants` / `removedEnumConstants` 与
+  `~ *enum constant set changed:` 标记，布局门以 `ENUM_CONSTANT_SET_CHANGED` 拒绝并提示重启；
+  `RemoldAgent.dropEnumConstantDependents` 把同批直接引用变更常量的调用方一并移出，避免被拒枚举
+  保持旧版后调用方在运行期解析到不存在的字段。InitFix 无法补建（`$VALUES` 被合成字段过滤、
+  枚举常量无 `ConstantValue`）。
+- **读者扫描被无关常量池引用污染（前线 P0-3c）**：删除工程构造器/方法时，同 `name:desc` 的
+  `java/util/ArrayList.<init>(I)V` 等 JDK 引用因类型世界缺失被判 `UNKNOWN`，整轮扫描被当成
+  "不完整"→ 全量 fail-closed 误杀（同批重编的调用方也被拒）。`RemovedMemberReaders.provablyUnrelated`
+  在解析前只跳过**可证明无关**的引用：构造器 owner 不等（JVMS 5.4.3.3 不继承）；platform 前缀
+  owner 对非 platform 成员且仅限字段/static/private 的向上解析。实例虚方法仍保留
+  resolve→inconclusive（platform 接口可以是分派祖先，前缀证明不成立），fail-closed 语义不变。
+  `LayoutDecisionEngine.describeFindings` 在拒绝日志点名前 3 个 reader 类，便于前线定位。
+- **`@RemoldReinit` 用户契约收口**：
+  - `-Dremold.agent.force_reinit` 之前只解析、只打 `Force Reinit: true`、无任何读取点（死配置）。
+    现在接成真实逃生口（默认 `false`）：打开后忽略初值指纹、本轮一律重放声明类初值切片；
+    启动日志只在开启时明确说明语义。
+  - 新增 `[REINIT] @RemoldReinit trigger on <类>` 行，逐字段点名触发原因
+    （`new-field` / `first-time` / `initializer-changed` / `open-expression` /
+    `unchanged-initializer (skipped)` / `forced`），解决"只改方法体为什么没重置 / 改了个无关类为什么被重置"。
+  - 新增继承作用域安全门：`INCLUDE_SUBCLASSES` + 已登记子类在 `<init>` 里写同一继承字段时，
+    布局门 `[REINIT-SCOPE]` 拒绝并点名子类（`InitFix.unsafeInheritedReinitFields` + 纯函数
+    `ReinitScopeGate` + `HierarchyTree.knownSubtypes`，批量/动态两条路径接线）；显式 `scope = SELF`
+    不拦；子类字节读不到按 fail-closed 拒绝。"父类初值覆盖子类自己的值"不再靠用户记得改 scope。
+  - `@RemoldReinit` Javadoc 补齐"Does not do"清单（`static final` 编译期常量对批外读者无效、
+    Record 组件、final 字段的 JMM 边界、多字段非原子与构造器派生状态、按实例运行时类取值未实现）
+    与 `CONDITIONAL` 的精确语义表（null/0/false、`-0.0`/`NaN` 按 raw bits、long、非默认值跳过）。
+  - B4 拒绝文案改为列出**全部**不可提取字段及原因，并给出"移除注解 / 回退类型变更 / 重启"三条出路
+    （之前只报第一条，用户改掉后下次仍会被另一条挡住）。
 
 ## [0.2.7] - 2026-11-11
 

@@ -870,6 +870,24 @@ public class AnnotationTransformer implements ClassFileTransformer {
 		}
 
 		/**
+		 * 已登记的 {@code superType} 的全部子类型（内部名，含间接子类与实现类，不含自身）。
+		 *
+		 * <p><b>完备性边界</b>：只覆盖已登记进本继承图的类型。但"有存活实例的子类"必然已被加载，
+		 * 而本图的登记发生在每次 {@code transform}（{@link #register(byte[])}）与卸载/替换路径上，
+		 * 因此对"存量重置作用域"这类需要枚举"可能存在的子类实例"的判据，本集合就是完备的：
+		 * <b>没有登记 ⇒ 没有实例</b>。不要用它回答"某个类是否存在"之类与实例无关的问题。</p>
+		 */
+		public static Set<String> knownSubtypes(String superType, ClassLoader loader) {
+			Set<String> out = new LinkedHashSet<>();
+			if (superType == null) return out;
+			for (String candidate : tree.keySet()) {
+				if (candidate.equals(superType)) continue;
+				if (isAssignableFrom(superType, candidate, loader)) out.add(candidate);
+			}
+			return out;
+		}
+
+		/**
 		 * 获取类节点，如果缓存中没有，尝试从目标 ClassLoader 以资源流的方式读取，
 		 * 坚决不使用 Class.forName！
 		 */

@@ -56,6 +56,12 @@ import java.util.Set;
  * <p>本类只分析传进来的字节码，不做任何 IO。"能发现多少读者"完全取决于喂了哪些类：只喂已加载类会
  * 漏掉尚未加载的陈旧读者。档位与代价见 {@code docs/initfix/07-p05-probe-results.md} §13.6.4。</p>
  *
+ * <h2>解析前的无关性预过滤</h2>
+ * <p>归属只按 {@code name:desc} 匹配，同描述符的 JDK 构造器 / 方法引用会先进入候选。解析之前
+ * <b>能证明</b>无关的直接跳过（构造器 owner 不同；platform 前缀 owner 对工程成员，判据见
+ * {@code provablyUnrelated}）；<b>证不了一律不跳</b>，保持原来的 {@code UNKNOWN} → inconclusive，
+ * 不把"判不了"读成"没有"。</p>
+ *
  * <h2>不做的事</h2>
  * <ul>
  *   <li><b>不折算 pre-11 的合成访问器</b>：删 private 字段会让 {@code access$NNN} 桥消失或<b>改指向</b>
@@ -225,6 +231,22 @@ public final class RemovedMemberReaders {
 	private static final String KIND_FIELD = "field";
 	private static final String KIND_METHOD = "method";
 	private static final String KIND_INTERFACE_METHOD = "interfaceMethod";
+
+	/**
+	 * 只能由 bootstrap / platform loader 定义的类型前缀（内部名形态）。
+	 *
+	 * <p>这些包里的类型（含其祖先链与接口链）永远不可能落在工程类成员上：JVMS 5.3 规定
+	 * {@code java.*} 只能由 bootstrap loader 定义，其余前缀同属 platform 可见的内建库。
+	 * 因此当引用 owner 命中这些前缀、而被删成员 owner <b>不</b>命中时，
+	 * 这条引用在解析之前就可以证明与被删成员无关——不必用读者字符串里的 JDK owner 去解析
+	 * 类型世界，否则必然得到 {@code UNKNOWN}，把一条无关引用误报成"判不了"。</p>
+	 *
+	 * <p>与 {@code RemovedMemberScanner.NON_PROJECT_PREFIXES} 保持同一组前缀：那边用它把 JDK /
+	 * 标准库类排除在读者范围外，这边用它把指向它们的引用排除在归属之外，判据必须同源。</p>
+	 */
+	private static final String[] PLATFORM_OWNER_PREFIXES = {
+		"java/", "javax/", "jdk/", "sun/", "com/sun/", "org/w3c/", "org/xml/", "kotlin/"
+	};
 
 	/**
 	 * {@code java.lang.Object} 的字段集恒为空、方法集固定，调用方不必提供。缺失时按"已知但无声明"处理，
@@ -632,6 +654,11 @@ public final class RemovedMemberReaders {
 				boolean refIsField = KIND_FIELD.equals(ref.kind());
 				for (RemovedMember m : candidates) {
 					if (m.isField() != refIsField) continue;
+					// 解析之前就能证明无关的引用直接跳过：否则会用一个不属于工程世界的 owner 去解析，
+					// 得到 UNKNOWN，把无关引用当成"判不了"（前线 P0-3c：ArrayList.<init>(I)V 撞上
+					// 被删的 Hot.<init>(I)V，同 name+desc 使整轮扫描 inconclusive → 全量 fail-closed 拒绝）。
+					// 证明不了无关时一律保持原来的 resolve → UNKNOWN → inconclusive 路径。
+					if (provablyUnrelated(ref, m)) continue;
 					String where = reader + " -> " + ref.owner() + "." + ref.name() + ref.desc();
 
 					if (m.isPrivate()) {
@@ -711,6 +738,54 @@ public final class RemovedMemberReaders {
 		}
 		return new Result(hits, new ArrayList<>(inconclusive), retargeted,
 		                  abstractMissing, dispatchShifted, incompatibleAccess);
+	}
+
+	/**
+	 * 能否在<b>解析之前</b>就证明"这条引用与被删成员无关"。只接受可证明的情形，
+	 * 证明不了就返回 {@code false}，交回原来的 resolve → {@code UNKNOWN} → inconclusive 的 fail-closed 路径。
+	 *
+	 * <ol>
+	 *   <li><b>构造器</b>（{@code <init>} / {@code <clinit>}，JVMS 5.4.3.3）：构造器<b>不被继承</b>，
+	 *       方法解析只能落在 {@code ref.owner} 自身。所以 {@code ref.owner != member.owner} 就足以
+	 *       证明这条引用永远指不到被删构造器——也正是同 name+desc 的
+	 *       {@code java/util/ArrayList.<init>(I)V} 会被误归属到工程类 {@code <init>(I)V} 的场景。
+	 *       owner 相等时<b>不</b>跳过：那正是真正的陈旧读者。</li>
+	 *   <li><b>platform 前缀 owner</b>：见 {@link #PLATFORM_OWNER_PREFIXES}。仅当被删成员 owner
+	 *       也<b>不</b>在这些前缀下时才成立；两边都在前缀下时无法据此区分，必须继续解析。
+	 *       <b>只适用于"向上解析"的成员</b>（字段 / static / private 方法）：platform 类的祖先链
+	 *       不可能落到工程类成员上。实例方法不适用——见下条。</li>
+	 * </ol>
+	 *
+	 * <p><b>实例虚方法不能走前缀证明</b>：它们解析之后还有 JVMS 5.4.6 向下分派，{@code ref.owner}
+	 * 可以是受体的<b>任何祖先</b>，包括 {@code java/util/List}、{@code java/lang/Runnable} 这类
+	 * platform 接口。工程类删掉自己的 Override 后，批外读者持有的正是
+	 * {@code InterfaceMethodref Runnable.run}——前缀只证明"解析落不到工程成员"，证明不了
+	 * "分派落不到"，跳过会把 {@code AbstractMethodError} 当成"没有读者"。</p>
+	 */
+	private static boolean provablyUnrelated(Ref ref, RemovedMember m) {
+		String owner = ref.owner();
+		if (!m.isField() && (isInitializer(m.name()))) {
+			// JVMS 5.4.3.3: 构造器不继承 → 解析只能落在 ref.owner 自身，owner 不同即无关。
+			return !owner.equals(m.owner());
+		}
+		if (m.participatesInVirtualDispatch()) {
+			// JVMS 5.4.6：ref.owner 可以是受体的任何祖先（含 platform 接口），前缀证明不成立。
+			return false;
+		}
+		// bootstrap / platform 定义的 owner 永远落不到工程类成员上；反过来则证明不了。
+		return isPlatformOwner(owner) && !isPlatformOwner(m.owner());
+	}
+
+	private static boolean isInitializer(String name) {
+		return "<init>".equals(name) || "<clinit>".equals(name);
+	}
+
+	private static boolean isPlatformOwner(String internalName) {
+		if (internalName == null) return false;
+		for (String prefix : PLATFORM_OWNER_PREFIXES) {
+			if (internalName.startsWith(prefix)) return true;
+		}
+		return false;
 	}
 
 	/**

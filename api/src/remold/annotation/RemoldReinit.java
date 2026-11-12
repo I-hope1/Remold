@@ -64,6 +64,53 @@ import java.lang.annotation.*;
  *       避免"父类初值被写进全部子类实例"。静态字段只有一个槽位，作用域对它没有意义：
  *       显式写 {@code scope} 会被忽略并打一条 warn（见 {@code docs/initfix/03-runtime-driver.md} §4）。</li>
  * </ul>
+ *
+ * <h2>继承字段的安全门（{@code INCLUDE_SUBCLASSES} 的默认组合不再危险）</h2>
+ * <p>{@code scope = INCLUDE_SUBCLASSES} + 字段声明在父类 + 某个子类在 {@code <init>} 里给它写了
+ * 自己的值，是本注解最危险的组合：值来自<b>父类</b>初值切片，却会覆盖子类实例上<b>子类自己</b>
+ * 写的值，且子类 {@code <init>} 的赋值不会被重放。布局门会在重定义前枚举<b>已登记</b>的子类型
+ * （有实例的子类必已加载并登记），若发现子类初始化器写同一字段，直接拒绝本轮重定义并点名
+ * 子类（{@code [REINIT-SCOPE]}），不会静默覆盖。显式 {@code scope = SELF} 时该门不适用。</p>
+ *
+ * <h2>强制重放（{@code -Dremold.agent.force_reinit=true}，默认关闭）</h2>
+ * <p>正常语义是"初值表达式变了才重置"（封闭表达式的指纹未变则跳过）。该开关忽略指纹、本轮一律
+ * 重放声明类的初值切片，用于"初值没改、但存量值被运行期改脏了"的应急回置。它<b>不</b>改变取值
+ * 来源——值仍来自声明类，而不是实例运行时子类的初值；按实例运行时类取初值是另一条尚未实现的
+ * 设计（{@code docs/initfix/03-runtime-driver.md} §4）。</p>
+ *
+ * <h2>不支持的场景（Does not do）</h2>
+ * <table>
+ *   <tr><th>场景</th><th>实际行为 / 原因</th></tr>
+ *   <tr><td>{@code static final} 编译期常量（基本类型 / {@code String}，带 {@code ConstantValue}）</td>
+ *       <td><b>对批外读者无效</b>：javac 已把值内联进 {@code ldc}/{@code bipush}，{@code OVERWRITE}
+ *           只改字段槽位，读者仍读旧常量。需全量重编才能看到新值（JLS §13.4.9 的既有语义）。</td></tr>
+ *   <tr><td>Record 组件</td>
+ *       <td>组件由规范构造器参数赋值，没有字段初始化表达式；类型变更 + 注解会在布局门前置核验时
+ *           被拒绝（{@code unextractableReinitFields}），不是"跳过该字段"。</td></tr>
+ *   <tr><td>{@code final} 实例字段</td>
+ *       <td>{@code OVERWRITE} 走 {@code Unsafe} volatile 写，绕过 JMM final 冻结语义；多数场景可运行，
+ *           但不作为规范内承诺（补丁是宿主 nestmate，普通 {@code putfield} 在链接期即被拒绝）。</td></tr>
+ *   <tr><td>多字段原子性 / 构造器派生状态</td>
+ *       <td>逐字段 volatile 写，字段之间没有事务，并发读者可能看到"半新半旧"；构造器里由该字段
+ *           派生的其它字段不会被重算。本注解只是"重写若干字段槽位"，不是"把对象恢复到初始状态"。</td></tr>
+ *   <tr><td>按实例运行时类取初值（父类字段 + 各子类不同初值）</td>
+ *       <td>未实现：值来源固定为声明类初值切片。该形态用 {@code scope = SELF}、把字段/值放到子类
+ *           自己声明，或用 {@link OnReload}。</td></tr>
+ * </table>
+ *
+ * <h2>{@link Mode#CONDITIONAL} 的精确语义</h2>
+ * <table>
+ *   <tr><th>字段当前值</th><th>是否写入</th><th>说明</th></tr>
+ *   <tr><td>引用类型为 {@code null}；数值为 {@code 0}；{@code boolean} 为 {@code false}；
+ *           {@code char} 为 {@code '\u0000'}</td><td>写</td><td>与新增字段相同的条件 CAS，一次原子读-比较-写。</td></tr>
+ *   <tr><td>{@code float}/{@code double} 的 <b>{@code -0.0}</b> / {@code NaN}</td><td>不写</td>
+ *       <td>按 <b>raw bits</b> 判零：位模式非零即视为"已有值"（{@code NaN} 永远不会被条件写）。</td></tr>
+ *   <tr><td>任何非默认值（含"运行期被改过"的旧初值）</td><td>不写</td>
+ *       <td>只有被清成默认值的实例才会被写；想让已有非默认值也回到初值，用 {@link Mode#OVERWRITE}。</td></tr>
+ *   <tr><td>{@code long}</td><td>写</td>
+ *       <td>走 {@code Unsafe} CAS；JDK 8 的 {@code sun.misc.Unsafe} 无 {@code compareAndSwapLong} 以外
+ *           的子字 CAS，布尔/字节/字符/短整型在该版本降级为 volatile 写（仍只在默认值时写）。</td></tr>
+ * </table>
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.FIELD)

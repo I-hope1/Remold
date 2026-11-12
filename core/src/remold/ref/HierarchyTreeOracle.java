@@ -301,4 +301,19 @@ public final class HierarchyTreeOracle implements ClassHierarchyOracle {
 			return null;
 		}
 	}
+
+	/**
+	 * 已登记的 {@code 继承图} 中 {@code internalName} 的全部子类型（内部名，不含自身）。
+	 *
+	 * <p>见 {@link AnnotationTransformer.HierarchyTree#knownSubtypes(String, ClassLoader)} 的完备性边界：
+	 * 有实例的子类必已登记，因此该集合可用于"作用域是否覆盖到会写该字段的子类实例"这类判定。</p>
+	 */
+	public Set<String> knownSubtypes(String internalName) {
+		return AnnotationTransformer.HierarchyTree.knownSubtypes(internalName, loader.get());
+	}
+
+	/** 与层级解析同源的字节读取口（缓存 → 生成类登记口 → 类加载器资源流），只读、不触发类加载。 */
+	public byte[] classBytes(String internalName) {
+		return readClassBytes(internalName);
+	}
 }

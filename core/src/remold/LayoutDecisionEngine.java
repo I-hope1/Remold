@@ -1,5 +1,6 @@
 package remold;
 
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -221,6 +222,17 @@ final class LayoutDecisionEngine {
 				+ " (revert the enum constant order or restart to continue)");
 		}
 
+		// 枚举常量集合变更（ENUM_CONSTANT_SET_CHANGED）安全门控：
+		// <clinit> 在热更时不重跑，新增常量不会被构造（恒 null、$VALUES 不扩容），删除的常量仍留在
+		// 旧 $VALUES 数组里。继续 redefine 只会得到"HotSwap successful 但源码变更没生效"的假成功。
+		if (res.verdict() == LayoutGate.Verdict.ENUM_CONSTANT_SET_CHANGED) {
+			return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
+				"enum constant set changed (" + res.detail() + ") — redefinition does not re-run <clinit>:"
+				+ " an added constant would stay null and a removed one stays in the old $VALUES array, so"
+				+ " values()/valueOf()/EnumMap/EnumSet and $SwitchMap would silently disagree with the source"
+				+ " (revert the enum constant change or restart to continue)");
+		}
+
 		// Record 类新增组件（RECORD_COMPONENT_ADDED）安全门控（R1）：
 		if (res.verdict() == LayoutGate.Verdict.RECORD_COMPONENT_ADDED) {
 			// 情况 A：堆上无存活实例 → 安全放行，新实例正常通过规范构造器初始化
@@ -250,14 +262,20 @@ final class LayoutDecisionEngine {
 				// 若为 Record 组件或构造器参数自赋值字段，InitFix 无法提取初值，DCEVM 重定义后存量实例将被置为默认值（null/0）发生静默丢值。
 				// 此时必须拒绝重定义，保持旧版本继续运行。
 				if (unextractableReinitFields != null && !unextractableReinitFields.isEmpty()) {
-					for (String f : typeChanged) {
-						String unextractableReason = unextractableReinitFields.get(f);
-						if (unextractableReason != null) {
-							return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
-								"field type changed: " + typeChanged + " with surviving instances — @RemoldReinit"
-								+ " cannot reinitialize field '" + f + "' (" + unextractableReason
-								+ "; restart to continue)");
+					// 列出**全部**不可提取字段及原因：只报第一条会让用户以为改掉它就够了，
+					// 实际下一次热更还会被另一条拒绝（同类所有改动都被挡住）。也给出两条明确出路。
+					List<String> blocked = new ArrayList<>();
+					for (Map.Entry<String, String> e : unextractableReinitFields.entrySet()) {
+						if (typeChanged.contains(e.getKey())) {
+							blocked.add(e.getKey() + ": " + e.getValue());
 						}
+					}
+					if (!blocked.isEmpty()) {
+						return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames),
+							"field type changed: " + typeChanged + " with surviving instances — @RemoldReinit"
+							+ " cannot reinitialize: " + blocked
+							+ " (remove @RemoldReinit from these field(s), or revert the type change, or"
+							+ " restart to continue)");
 					}
 				}
 				return new LayoutDecision(LayoutAction.WAIVE_REINIT, res, host, Set.of());
@@ -310,6 +328,12 @@ final class LayoutDecisionEngine {
 	 * 读者侧信息只在<b>确实扫出了东西</b>时追加；扫描没做（改类型 / 无存活实例）时不能凭空补一句。</p>
 	 */
 	static String skipVerdictForLayout(LayoutDecision d, RemovedMemberScan scan) {
+		// Reinit 作用域门是"与 changedFields 无关"的独立拒绝：summary 行必须自解释，
+		// 否则会落进下面通用的 "revert the field change" 文案里，看起来像普通字段变更。
+		if (d.reason() != null && d.reason().startsWith("unsafe @RemoldReinit scope")) {
+			return RoundSkips.verdict("LAYOUT-REJECT", "unsafe @RemoldReinit scope on inherited field(s)",
+				"move @RemoldReinit to where the value is initialized, use scope = SELF, or restart");
+		}
 		String detail = d.layout() == null ? null : d.layout().detail();
 		if (scan != null && scan.removedMethods() && "compatible".equals(detail)) {
 			detail = "method(s) removed";
@@ -348,11 +372,13 @@ final class LayoutDecisionEngine {
 		          : "annotate field(s) with @RemoldReinit, or revert the field change, or restart to continue")
 		       : (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.CHANGED_ENUM_ORDER
 		          ? "revert the enum constant order or restart to continue"
+		       : (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.ENUM_CONSTANT_SET_CHANGED
+		          ? "revert the enum constant add/remove or restart to continue"
 		       : (d.layout() != null && (d.layout().verdict() == LayoutGate.Verdict.SUPERCLASS_FIELD_DRIFT || d.layout().verdict() == LayoutGate.Verdict.LAYOUT_DRIFT)
 		          ? "avoid adding instance field(s) to superclass or restart to continue"
 		          : (scan != null && scan.removedMethods()
 		             ? "restore the removed method(s) or restart to continue"
-		             : "revert the field change or restart to continue")))));
+		             : "revert the field change or restart to continue"))))));
 		return RoundSkips.verdict("LAYOUT-REJECT", detail, action);
 	}
 
@@ -361,6 +387,9 @@ final class LayoutDecisionEngine {
 		StringBuilder sb = new StringBuilder();
 		if (!scan.readers().isEmpty()) {
 			sb.append(scan.readers().size()).append(" out-of-batch reader(s)");
+			// 名字直接进拒绝日志：只给数量时，用户还得自己去翻扫描明细才能知道改哪一侧。
+			// 最多列 3 个（保持一行可读），其余用 "+N more" 交代总数。
+			appendFirstNames(sb, scan.readers());
 		}
 		if (!scan.dispatchShifted().isEmpty()) {
 			if (sb.length() > 0) sb.append(" and ");
@@ -368,6 +397,22 @@ final class LayoutDecisionEngine {
 		}
 		return sb.length() == 0 ? "an unknown number of references" : sb.toString();
 	}
+
+	/** {@code (p.ReaderA, p.ReaderB, p.ReaderC, +2 more)}；最多列 {@code MAX_NAMED_READERS} 个。 */
+	private static void appendFirstNames(StringBuilder sb, List<String> names) {
+		int named = Math.min(MAX_NAMED_READERS, names.size());
+		sb.append(" (");
+		for (int i = 0; i < named; i++) {
+			if (i > 0) sb.append(", ");
+			sb.append(names.get(i));
+		}
+		int rest = names.size() - named;
+		if (rest > 0) sb.append(rest == 1 ? ", +1 more" : ", +" + rest + " more");
+		sb.append(')');
+	}
+
+	/** 拒绝日志里最多点名的 reader 数：再多就不再增加可读性，只留总数。 */
+	private static final int MAX_NAMED_READERS = 3;
 
 	/** 拒绝时要移出本批的类：宿主 + 其下属全部匿名类。 */
 	static Set<String> droppedOf(String host, Set<String> batchNames) {
@@ -379,5 +424,25 @@ final class LayoutDecisionEngine {
 			}
 		}
 		return dropped;
+	}
+
+	/**
+	 * {@code @RemoldReinit(scope = INCLUDE_SUBCLASSES)} 命中"子类初始化器写继承字段"时的拒绝判决。
+	 *
+	 * <p>与字段/类型门分开构造：拒绝理由来自 {@link remold.ref.InitFix#unsafeInheritedReinitFields}
+	 * 的静态分析（已登记子类 + 子类 {@code <init>} 写入），与 {@code changedFields} 无关，
+	 * 因此不能等布局门先判 {@code COMPATIBLE} 再放行。</p>
+	 */
+	static LayoutDecision rejectUnsafeReinitScope(String className, Set<String> batchNames,
+	                                              Map<String, String> reasons) {
+		String host = hostNameOf(className);
+		StringBuilder sb = new StringBuilder("unsafe @RemoldReinit scope on inherited field(s): ");
+		boolean first = true;
+		for (Map.Entry<String, String> e : reasons.entrySet()) {
+			if (!first) sb.append("; ");
+			first = false;
+			sb.append(e.getKey()).append(" — ").append(e.getValue());
+		}
+		return new LayoutDecision(LayoutAction.REJECT, null, host, droppedOf(host, batchNames), sb.toString());
 	}
 }

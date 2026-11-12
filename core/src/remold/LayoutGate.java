@@ -100,6 +100,15 @@ public final class LayoutGate {
 		 */
 		CHANGED_ENUM_ORDER,
 		/**
+		 * 枚举常量<b>集合</b>变化（新增或删除常量），但已有常量的相对顺序未变。
+		 *
+		 * <p>热更新不会重跑已初始化类的 {@code <clinit>}：新增常量不会被构造、{@code $VALUES}
+		 * 不会扩容，运行期读到 {@code null}；删除的常量仍留在旧 {@code $VALUES} 实例数组里。
+		 * 两种形态都会出现"HotSwap successful 但源码变更没有真正生效"，因此与顺序门一样拒绝
+		 * 并提示重启。`<clinit>` 语义见 {@code docs/topology/07-layout-gate-and-risks.md} §1。</p>
+		 */
+		ENUM_CONSTANT_SET_CHANGED,
+		/**
 		 * Record 类新增了组件/实例字段。
 		 *
 		 * <p>Java 语言规范中 Record 类禁止声明实例变量，所有实例字段均为组件且由规范构造器参数赋值，
@@ -268,6 +277,7 @@ public final class LayoutGate {
 		Map<String, Boolean> added   = new LinkedHashMap<>();
 		Map<String, Boolean> removed = new LinkedHashMap<>();
 		List<String> enumOrderChanged = new ArrayList<>();
+		List<String> enumConstantSetChanged = new ArrayList<>();
 		List<String> recordComponentAdded = new ArrayList<>();
 		for (String raw : changedFields) {
 			if (raw == null || raw.length() < 2) continue;
@@ -280,12 +290,19 @@ public final class LayoutGate {
 			else if (sign == '~' && name.startsWith("enum constant order changed:")) {
 				enumOrderChanged.add(name.substring("enum constant order changed:".length()).trim());
 			}
+			else if (sign == '~' && name.startsWith("enum constant set changed:")) {
+				enumConstantSetChanged.add(name.substring("enum constant set changed:".length()).trim());
+			}
 			else if (sign == '~' && name.startsWith("record component added:")) {
 				recordComponentAdded.add(name.substring("record component added:".length()).trim());
 			}
 		}
 		if (!enumOrderChanged.isEmpty()) {
 			return new Result(Verdict.CHANGED_ENUM_ORDER, "enum constant order changed: " + enumOrderChanged);
+		}
+		if (!enumConstantSetChanged.isEmpty()) {
+			return new Result(Verdict.ENUM_CONSTANT_SET_CHANGED,
+				"enum constant set changed: " + enumConstantSetChanged);
 		}
 		if (!recordComponentAdded.isEmpty()) {
 			return new Result(Verdict.RECORD_COMPONENT_ADDED, "record component added: " + recordComponentAdded);

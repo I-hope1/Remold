@@ -86,6 +86,13 @@
   `pruneReinitRecords` 一次；记录键里也带上模式，`OVERWRITE ↔ CONDITIONAL` 的切换同样会重新生效。
 - 日志：跳过时输出 `[REINIT] @RemoldReinit kept as-is on <类>（初值表达式自上次应用以来未变…）`；
   真正写入时输出 `[REINIT] @RemoldReinit applied to <类>: <字段> (<模式>, <static|instance>)`。
+  每个注解字段本轮"为什么写/为什么跳过"由 `[REINIT] @RemoldReinit trigger on <类>` 一行点名：
+  `new-field` / `first-time` / `initializer-changed` / `open-expression (cannot prove value unchanged)` /
+  `unchanged-initializer (skipped)` / `forced (remold.agent.force_reinit)`（纯函数
+  `InitFix.reinitTriggerReason`）。
+- **强制重放逃生口**：`-Dremold.agent.force_reinit=true`（默认 `false`）忽略初值指纹、
+  本轮一律重放声明类初值切片。用于"初值表达式没改，但存量值被运行期改脏、需要手工打回初值"。
+  它不改变取值来源（仍是声明类，不是实例运行时子类）；按运行时类取初值是未实现的设计（见下）。
 
 **实例作用域（`scope`）**
 - `Scope = {SELF, INCLUDE_SUBCLASSES}`，默认 `INCLUDE_SUBCLASSES`；新增元素带默认值，保持二进制兼容。
@@ -110,7 +117,18 @@
 
 **双括号初始化块不重放**：`new XXX() {{ property = ...; }}` 的实例初始化块编译进匿名类 `<init>`。若 `property` 是**已有字段**，它不会进入默认候选集（默认只处理新增字段），存量实例保持旧值；L0 会给出 `[INIT-DRIFT]` warn，但没有 `[REINIT]`、没有台账。**只有字段由宿主自己声明时**，标 `@RemoldReinit` 才是安全的重置手段；如果 `property` 是**继承字段**，不要用父类 `@RemoldReinit`——见下一段。匿名类**自身新增**的字段仍由 InitFix 正常补；双括号只是“写在 `<init>` 里”，不改变候选集规则。
 
-**继承字段不要用父类 `@RemoldReinit`（有害警告）**：注解标在父类字段上时，父类补丁通过 `LibTool.getInstances` 枚举**所有**子类/匿名子类实例，并统一写成**父类自己的初值**；它既不会重放匿名子类 `<init>` 里的 `health = 100`，也会把**没有改过初始化块的子类**一起重置（实测 B2：oldA 90→1、oldB 91→1、未修改的 oldC 50→1，而补丁后新建的实例仍是 100/101/50）。因此“父类字段 + 匿名子类自己的值”场景**不要**标父类 `@RemoldReinit`；应把字段/值放到匿名子类自己声明的字段上，或用 `@OnReload` 自行刷新。若确实需要按父类初值重置**父类自身实例**，用 `@RemoldReinit(scope = SELF)`：子类/匿名子类实例保持原值，这是该场景的显式安全入口。L0 对这种继承字段 + 父类注解会输出专门的 `[INIT-DRIFT]` warn，明确说明“按父类初值重置全部子类实例，不重放本类初始化块的值”。
+**继承字段：`INCLUDE_SUBCLASSES` 的安全门（`[REINIT-SCOPE]` LAYOUT-REJECT）**：注解标在父类字段上时，值来自**父类自己的**初值切片，却写给所有子类/匿名子类实例；它既不会重放子类 `<init>` 里的 `health = 100`，也会把**没有改过初始化块的子类**一起重置（实测 B2：oldA 90→1、oldB 91→1、未修改的 oldC 50→1，而补丁后新建的实例仍是 100/101/50）。因此布局门在重定义前做一道**继承作用域安全门**（`InitFix.unsafeInheritedReinitFields` → 纯函数 `ReinitScopeGate`，`docs/initfix/03-runtime-driver.md` 本节）：
+
+- 只检查实例字段、`scope = INCLUDE_SUBCLASSES`（显式 `SELF` 是逃生口，不拦）；静态字段的 scope 本来就被忽略；
+- 枚举**已登记**的子类型（`HierarchyTree.knownSubtypes`）并扫其 `<init>` 是否对同一 `name:desc` 有 `PUTFIELD`；
+  **完备性**：子类要产生存活实例必先被加载，加载必经 transformer 登记进继承图 ⇒ "已登记"覆盖"可能有实例"的集合；
+- 命中 → `LAYOUT-REJECT`，日志点名子类并提示三条出路：把注解移到真正初始化该值的类、用
+  `scope = SELF`（只写宿主自身实例）、或用 `@OnReload`；子类字节读不到时同样拒绝（fail-closed）；
+  判据按"已登记子类型"（可能包含已加载但当前无实例的子类，方向偏保守；确需放行时用 `scope = SELF` 或移除注解）；
+- 因此"父类字段 + 子类自己的值"不再靠用户记得改用 SELF：默认组合命中该门就会被拦下，
+  不会静默覆盖子类初值。
+
+**按实例运行时类取值（未实现）**：上述门只治"默认 scope 会污染子类"的错误形态，不解决"不同子类有不同正确初值"的取值语义——值来源仍固定为声明类切片。按实例运行时类沿其构造链取初值需要逐实例解析子类 `<init>` 切片，属于独立设计；当前用 `scope = SELF`、把字段/值放到子类自己声明，或 `@OnReload`。
 
 **合成捕获字段读当前值**：v1 已有 `val$x` / `this$0` 时，新增字段的补丁会读**热更线程执行时**的合成字段值，而不是实例构造时的快照；构造后外层对象/局部捕获状态变化会反映到补丁值。若 v1 没有、v2 才新增 `val$x` / `this$0`，`AnonClassAligner` 的合成捕获字段布局门会拒绝配对（日志 `[ANON-LAYOUT]`），旧类保留为孤儿、旧实例不生效；这不是 InitFix 的静默跳过。
 

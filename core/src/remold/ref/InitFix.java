@@ -350,6 +350,30 @@ public class InitFix {
 	}
 
 	/**
+	 * {@code @RemoldReinit} 本轮为什么写/为什么跳过（纯函数，供 {@code [REINIT] trigger} 日志与单测）。
+	 *
+	 * <p>用户对注解最常见的困惑是"我加了注解、只改方法体，为什么没重置"与"我改了个无关类，
+	 * 为什么存量值被重置了"。触发原因是公开契约的一部分，必须能直接从日志读出来。</p>
+	 *
+	 * @param added            本轮新增字段（没有"上次"，必写）
+	 * @param force            {@code -Dremold.agent.force_reinit=true}：忽略指纹强制重放
+	 * @param closedExpression 初值切片封闭（值只由自身字节码决定）；否则判不了、照常重置
+	 * @param appliedRecord    上次应用时记录的指纹；{@code null} 表示首轮/上次没写成
+	 * @param currentKey       本次切片的指纹；{@code null} 表示不封闭
+	 * @return 可直接进日志的短原因
+	 */
+	static String reinitTriggerReason(boolean added, boolean force, boolean closedExpression,
+	                                  String appliedRecord, String currentKey) {
+		if (added) return "new-field";
+		if (force) return "forced (remold.agent.force_reinit)";
+		if (!closedExpression || currentKey == null) return "open-expression (cannot prove value unchanged)";
+		if (appliedRecord == null) return "first-time";
+		return currentKey.equals(appliedRecord)
+		 ? "unchanged-initializer (skipped)"
+		 : "initializer-changed";
+	}
+
+	/**
 	 * 封闭表达式判定：切片是否只由常量、算术、类型转换、栈操作与最终的那条写指令构成。
 	 *
 	 * <p>只有封闭切片的"字节码不变 ⟹ 值不变"才是定理。任何一次外部读取都会破坏它：</p>
@@ -886,6 +910,32 @@ public class InitFix {
 		return unextractable;
 	}
 
+	/**
+	 * {@code @RemoldReinit(scope = INCLUDE_SUBCLASSES)} 的继承作用域安全门（{@code docs/initfix/03-runtime-driver.md} §4）。
+	 *
+	 * <p>值来自<b>声明类</b>的初值切片，却写给全部子类实例；若某个子类在 {@code <init>} 里给这个
+	 * 继承字段写了自己的值，重置会覆盖它且不重放子类赋值。这里枚举<b>已登记</b>的子类型（有实例
+	 * 的子类必已加载并登记，见 {@link AnnotationTransformer.HierarchyTree#knownSubtypes(String, ClassLoader)}），
+	 * 交给纯函数 {@link ReinitScopeGate} 判定。命中即返回字段名 → 拒绝原因，由布局门拒绝本轮重定义。</p>
+	 *
+	 * <p>字节来源与层级解析同源（{@link HierarchyTreeOracle}：bytecodeCache → {@code BytecodeSources}
+	 * → 类加载器资源流），全程不触发类加载。读不到子类字节码时按"无法证明"记录，仍是拒绝方向。</p>
+	 */
+	public static Map<String, String> unsafeInheritedReinitFields(
+	 Class<?> host, ClassNode classNode, Set<String> reinitFields) {
+		if (classNode == null || reinitFields == null || reinitFields.isEmpty()) return Map.of();
+		ClassLoader loader = host == null ? null : host.getClassLoader();
+		HierarchyTreeOracle oracle = new HierarchyTreeOracle(loader, classNode);
+		Set<String> subtypes = oracle.knownSubtypes(classNode.name);
+		if (subtypes.isEmpty()) return Map.of();
+		Map<String, byte[]> subtypeBytes = new LinkedHashMap<>();
+		for (String subtype : subtypes) {
+			byte[] bytes = oracle.classBytes(subtype);
+			if (bytes != null) subtypeBytes.put(subtype, bytes);
+		}
+		return ReinitScopeGate.unsafeInheritedFields(classNode, reinitFields, subtypes, subtypeBytes);
+	}
+
 	public static void transform(Class<?> host, byte[] newBytes, ClassDiff diff) {
 		if (!RemoldAgent.INIT_FIX) return;
 
@@ -1290,22 +1340,35 @@ public class InitFix {
 			    + ": instance=" + zeroInstanceFields + ", static=" + zeroStaticFields);
 		}
 
-		// ==================== 阶段 0.6：@RemoldReinit 初值未变则跳过（docs/initfix/03-runtime-driver.md §4） ====================
+		// ==================== 阶段 0.6：@RemoldReinit 触发判定（docs/initfix/03-runtime-driver.md §4） ====================
 		// 注解字段每轮都被拉进候选集（它永远不会再出现在 Diff 里）。若它的初值表达式一个字都没变，
 		// 且表达式封闭（值只由自身字节码决定），这一轮重置唯一的效果就是把运行期改过的值打回去 ——
 		// 只改了个方法体的热更不该动数据，跳过。
 		//
 		// 判不了的一律不跳过：开放表达式、新增字段（没有"上次"）、以及记录缺失（首轮/上次没写成）。
+		// -Dremold.agent.force_reinit=true 时忽略指纹、全部重放（逃生口，见 RemoldAgent.FORCE_REINIT）。
+		boolean forceReinit = RemoldAgent.FORCE_REINIT;
+		Map<String, String> reinitTriggerReasons = new LinkedHashMap<>();
 		Set<String> unchangedInstance = new LinkedHashSet<>();
 		Set<String> unchangedStatic   = new LinkedHashSet<>();
-		for (Map.Entry<String, String> e : reinitKeys.entrySet()) {
+		for (Map.Entry<String, ReinitField> e : reinitFields.entrySet()) {
 			String f = e.getKey();
-			if (addedInstanceFields.contains(f) || addedStaticFields.contains(f)) continue;
-			if (!e.getValue().equals(reinitAppliedGet(host, f))) continue;
-			(staticExtracts.containsKey(f) ? unchangedStatic : unchangedInstance).add(f);
+			List<FieldExtract> ex = instanceExtracts.containsKey(f)
+			 ? instanceExtracts.get(f) : staticExtracts.get(f);
+			String key = reinitRecordKey(e.getValue(), ex);
+			boolean added = addedInstanceFields.contains(f) || addedStaticFields.contains(f);
+			String applied = reinitAppliedGet(host, f);
+			String reason = reinitTriggerReason(added, forceReinit, key != null, applied, key);
+			reinitTriggerReasons.put(f, reason);
+			if ("unchanged-initializer (skipped)".equals(reason)) {
+				(staticExtracts.containsKey(f) ? unchangedStatic : unchangedInstance).add(f);
+			}
 		}
 		for (String f : unchangedInstance) instanceExtracts.remove(f);
 		for (String f : unchangedStatic) staticExtracts.remove(f);
+		if (!reinitTriggerReasons.isEmpty()) {
+			RemoldAgent.info("[REINIT] @RemoldReinit trigger on " + className + ": " + reinitTriggerReasons);
+		}
 		if (!unchangedInstance.isEmpty() || !unchangedStatic.isEmpty()) {
 			RemoldAgent.info("[REINIT] @RemoldReinit kept as-is on " + className
 				+ " (initializer expression has not changed since last applied and is fully determined by bytecode; not rewriting): "

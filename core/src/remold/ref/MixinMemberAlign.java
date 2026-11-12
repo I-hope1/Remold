@@ -91,6 +91,19 @@ public final class MixinMemberAlign {
 		}
 	}
 
+	/**
+	 * 该字节码里是否存在 <b>Mixin 生成/注入</b>的成员——决定要不要进入名称/顺序对齐。
+	 *
+	 * <p>判据必须是"Mixin 产物"而不是"任何带 {@code $} 的合成字段"：javac / JVM 自己也会生成
+	 * 同名形态的合成字段（枚举的 {@code $VALUES}、内部类的外部实例引用 {@code this$0}、
+	 * {@code $assertionsDisabled}、switch-on-enum 的 {@code $SwitchMap$*}），把它们当成 Mixin
+	 * 标记会让对齐器对普通类执行，{@code orderMembers} 在 {@code ClassDiffUtil} 之前把字段表
+	 * 恢复成基线顺序，从而<b>吞掉真实的字段/枚举顺序变更</b>（前线 P0-2：枚举顺序门被抢跑，
+	 * 运行期仍钉在旧顺序、追加常量静默丢失）。</p>
+	 *
+	 * <p>Mixin 的方法生成物有稳定前缀（{@link #GENERATED}）；{@code @Unique} 字段没有统一前缀，
+	 * 仍用"合成 + 名字含 {@code $}"兜底，但先扣掉已知的 JVM / javac 合成形态。</p>
+	 */
 	public static boolean hasMixinGeneratedMembers(byte[] bytecode) {
 		if (bytecode == null) return false;
 		try {
@@ -99,12 +112,39 @@ public final class MixinMemberAlign {
 				if (isGenerated(m.name)) return true;
 			}
 			for (FieldNode f : node.fields) {
-				if (isGenerated(f.name) || (f.name != null && f.name.contains("$") && (f.access & Opcodes.ACC_SYNTHETIC) != 0)) {
-					return true;
-				}
+				if (looksLikeMixinField(f)) return true;
 			}
 		} catch (Throwable ignored) { }
 		return false;
+	}
+
+	/** 字段层面的 Mixin 标记：生成成员名，或"合成 + {@code $}"且不属于 JVM/javac 的合成形态。 */
+	private static boolean looksLikeMixinField(FieldNode f) {
+		if (f.name == null) return false;
+		if (isGenerated(f.name)) return true;
+		if ((f.access & Opcodes.ACC_SYNTHETIC) == 0 || !f.name.contains("$")) return false;
+		return !isJvmSynthesizedFieldName(f.name);
+	}
+
+	/**
+	 * JVM / javac 自己生成的合成字段名（不是 Mixin 产物）。
+	 *
+	 * <p>只列会被热更管线遇到的形态；名字看起来像用户字段的一律不猜，保持原判据的保守方向
+	 * （宁可多对齐一次，也不要漏掉真正的 {@code @Unique} 字段墓碑）。</p>
+	 */
+	private static boolean isJvmSynthesizedFieldName(String name) {
+		if ("$VALUES".equals(name) || "$assertionsDisabled".equals(name)) return true;
+		// 非静态内部类的外部实例引用：this$0 / this$1 ...
+		if (name.startsWith("this$")) {
+			String suffix = name.substring("this$".length());
+			boolean digits = !suffix.isEmpty();
+			for (int i = 0; i < suffix.length(); i++) {
+				if (!Character.isDigit(suffix.charAt(i))) { digits = false; break; }
+			}
+			if (digits) return true;
+		}
+		// javac 为 switch-on-enum / EnumMap 生成的映射表 holder 字段。
+		return name.startsWith("$SwitchMap$") || name.startsWith("$EnumMap$");
 	}
 
 	/**
@@ -132,6 +172,10 @@ public final class MixinMemberAlign {
 			: remapReferences(candidate, cand.name, methodRemap, fieldRemap);
 
 		ClassNode aligned = read(remapped);
+		// 枚举的常量表顺序/集合本身就是安全门的判据（ClassDiffUtil 按字段表顺序数 ordinal）。
+		// 对齐器不能替用户"恢复"枚举字段顺序，也不能把被删的常量复活成墓碑字段：那会让
+		// CHANGED_ENUM_ORDER 在 diff 之前被抹平（前线 P0-2）。方法顺序仍可对齐（Mixin 目标可能是枚举）。
+		boolean enumClass = isEnum(base) || isEnum(cand);
 		// 墓碑桩保留（Tombstone Stub Retention）：基线里存在、重织入产物里已消失的 Mixin 生成方法
 		// 不得物理删除。JBR/DCEVM 的重定义发生在 safepoint，但**已在调用栈上的旧栈帧**在 safepoint
 		// 之后会继续执行旧版字节码，并调用旧字节码里的 handler$*/redirect$* —— 方法被删掉就是
@@ -142,8 +186,8 @@ public final class MixinMemberAlign {
 		// 随后 retarget 迁回时又把它当"新字段"扩容 + 执行字段初始化补丁 —— 两次堆伸缩正是真机
 		// LootContextPredicate.combinedCondition 被置 null 的肇事窗口。保留墓碑字段后实例内存布局
 		// 在 R1~R4 全程恒定，两次伸缩都不会发生。
-		List<String> tombstonedFields = tombstoneMissingFields(aligned, base);
-		boolean reordered = orderMembers(base, aligned);
+		List<String> tombstonedFields = tombstoneMissingFields(aligned, base, enumClass);
+		boolean reordered = orderMembers(base, aligned, enumClass);
 		byte[] out = (reordered || !tombstoned.isEmpty() || !tombstonedFields.isEmpty())
 			? write(aligned) : remapped;
 
@@ -175,20 +219,36 @@ public final class MixinMemberAlign {
 	 * 不再触发 {@code Applying instance field init patch}）。字段值语义上属于"注入已移除"，但墓碑字段
 	 * 本身没有读者（重织入产物里不再引用它），保留不会改变业务行为。</p>
 	 *
+	 * <p><b>枚举常量不复活</b>：{@code RED}/{@code GREEN}/… 也是"基线有、候选无"的字段，但它们的
+	 * 存在与顺序是 ordinal 语义的一部分，消费者可能是 switch-on-enum。复活会让删除/重排对
+	 * {@code ClassDiffUtil} 不可见——必须让布局门看到真实变更。</p>
+	 *
 	 * <p>构造器（{@code <init>}）与 {@code <clinit>} 不在此列——它们不是字段。</p>
 	 */
-	private static List<String> tombstoneMissingFields(ClassNode cand, ClassNode base) {
+	private static List<String> tombstoneMissingFields(ClassNode cand, ClassNode base, boolean enumClass) {
 		Set<String> present = new HashSet<>();
 		for (FieldNode f : cand.fields) present.add(f.name + f.desc);
 		List<String> stubbed = new ArrayList<>();
 		for (FieldNode f : base.fields) {
 			String key = f.name + f.desc;
 			if (present.contains(key)) continue;
+			if (enumClass && isEnumConstantField(f, base.name)) continue;
 			cand.fields.add(new FieldNode(f.access, f.name, f.desc, f.signature, f.value));
 			present.add(key);
 			stubbed.add(key);
 		}
 		return stubbed;
+	}
+
+	/** 枚举常量字段（javac 标 {@code ACC_ENUM}；兜底看 static + 自身类型的形态）。 */
+	private static boolean isEnumConstantField(FieldNode f, String classInternalName) {
+		if ((f.access & Opcodes.ACC_ENUM) != 0) return true;
+		return (f.access & Opcodes.ACC_STATIC) != 0
+			&& classInternalName != null && ("L" + classInternalName + ";").equals(f.desc);
+	}
+
+	private static boolean isEnum(ClassNode node) {
+		return (node.access & Opcodes.ACC_ENUM) != 0 || "java/lang/Enum".equals(node.superName);
 	}
 
 	/**
@@ -382,8 +442,13 @@ public final class MixinMemberAlign {
 		return writer.toByteArray();
 	}
 
-	/** 按基线顺序重排方法/字段；新成员追加在末尾。返回是否发生重排。 */
-	private static boolean orderMembers(ClassNode base, ClassNode cand) {
+	/**
+	 * 按基线顺序重排方法/字段；新成员追加在末尾。返回是否发生重排。
+	 *
+	 * <p><b>枚举类不动字段表</b>：常量顺序就是 ordinal 语义，恢复基线顺序会把"重排/前插"从
+	 * {@code ClassDiffUtil} 眼里抹掉，使 {@code CHANGED_ENUM_ORDER} 门失效。方法表照常对齐。</p>
+	 */
+	private static boolean orderMembers(ClassNode base, ClassNode cand, boolean enumClass) {
 		boolean changed = false;
 		Map<String, Integer> methodOrder = new LinkedHashMap<>();
 		int i = 0;
@@ -400,6 +465,11 @@ public final class MixinMemberAlign {
 		if (!sameOrder(cand.methods, methods)) {
 			cand.methods = methods;
 			changed = true;
+		}
+
+		if (enumClass) {
+			// 字段表保持候选（新源码）顺序：枚举常量的相对位置是安全门要读的信号。
+			return changed;
 		}
 
 		Map<String, Integer> fieldOrder = new LinkedHashMap<>();

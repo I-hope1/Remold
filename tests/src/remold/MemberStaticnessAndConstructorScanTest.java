@@ -167,11 +167,48 @@ class MemberStaticnessAndConstructorScanTest {
 
 		assertFalse(r.hasReaders(), "recompiled reader does not use stale invokevirtual; no linkage error");
 		assertTrue(r.incompatibleAccess().isEmpty());
+		assertTrue(r.inconclusive().isEmpty(),
+			"same-batch recompiled caller must leave the scan conclusive: " + r.inconclusive());
 
 		RemovedMemberScan scan = new RemovedMemberScan(true, List.of(), List.of(), true);
 		var decision = LayoutDecisionEngine.decide("p.Hot", List.of(), "reject", Liveness.LIVE, Set.of("p.Hot", "p.Reader"), scan);
 		assertEquals(LayoutAction.PASS, decision.action(),
 			"LayoutDecisionEngine must PASS when reader is recompiled in the same batch");
+	}
+
+	/**
+	 * S5e 对照组（反方向）: 静态方法翻转成实例方法，但调用方同批次一起重编，正常放行且扫描结论完整。
+	 */
+	@Test
+	void staticToInstanceFlipWithBatchRecompiledReaderPasses() throws Exception {
+		Worlds w = worlds(
+			Map.of(
+				"p/Hot", "package p; public class Hot { public static String tag() { return \"A\"; } }",
+				"p/Reader", "package p; public class Reader { public static String call() { return Hot.tag(); } }"
+			),
+			Map.of(
+				"p/Hot", "package p; public class Hot { public String tag() { return \"B\"; } }",
+				"p/Reader", "package p; public class Reader { public static String call(Hot h) { return h.tag(); } }"
+			)
+		);
+
+		RemovedMember m = new RemovedMember("p/Hot", "tag", "()Ljava/lang/String;", false, false, true);
+		Result r = RemovedMemberReaders.find(
+			RemovedMemberReaders.universe(w.pre()),
+			RemovedMemberReaders.universe(w.post()),
+			w.post(),
+			List.of(m)
+		);
+
+		assertFalse(r.hasReaders(), "recompiled reader uses invokevirtual against the new instance method; no ICCE");
+		assertTrue(r.incompatibleAccess().isEmpty());
+		assertTrue(r.inconclusive().isEmpty(),
+			"same-batch recompiled caller must leave the scan conclusive: " + r.inconclusive());
+
+		RemovedMemberScan scan = new RemovedMemberScan(true, List.of(), List.of(), true);
+		var decision = LayoutDecisionEngine.decide("p.Hot", List.of(), "reject", Liveness.LIVE, Set.of("p.Hot", "p.Reader"), scan);
+		assertEquals(LayoutAction.PASS, decision.action(),
+			"LayoutDecisionEngine must PASS when the reader is recompiled in the same batch");
 	}
 
 	/**

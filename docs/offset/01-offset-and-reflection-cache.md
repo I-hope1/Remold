@@ -195,20 +195,21 @@ flowchart LR
 
 ### 5.3 读数摘要（逐字取自上表，不写机制标签）
 
-- **格① / 格②（标准 HotSpot）**：`param-annotation-value-change` 的旧句柄读数为 `value=v1`，同一场景
-  "重新 `getDeclaredMethods()`" 与"首次解析"读数为 `value=v2-a-much-longer-value`；`generic-signature-change`
-  的旧句柄为 `List<java.lang.String>`、其余两组为 `List<java.lang.Integer>`。九场景**均未抛出 `Error` 级失败**
-  （`escapedError=none`）。即：同一批读数的三组之间**不一致**，且不一致处**没有异常**。
-- **格③（JBR 21 + DCEVM）**：`param-annotation-removed` 的**旧句柄** `getParameterAnnotations()` 抛出
-  `java.lang.reflect.GenericSignatureFormatError: Signature Parse error: Expected Field Type Signature`
-  （连跑 3 次同场景同阶段同异常，确定性复现）；同一格另有 `param-annotation-value-change`、
-  `annotation-and-signature-change` 的旧句柄**直接读到新值**，`class-generic-signature-change` 的
-  `getGenericSuperclass()` 也在重定义后从 `ArrayList<java.lang.String>` 变为 `ArrayList<java.lang.Integer>`。
-- **跨格不一致**：同一场景的旧句柄读数在①②与③之间不同（①②为旧值、③为新值或抛 `Error`）；
-  类级 `getGenericSuperclass()` 只在③刷新。**因此本主题任何"旧句柄行为"的表述都必须分 JVM 写，
-  不得跨格归纳。**
+**两种形态的现状（同一格内不同形态结果不同，不能合并成一句话）：**
 
-### 5.4 灵敏度对照（证明读数链路能看见 `Error`，不构成缺陷证据）
+| 形态 | 格① / 格②（标准 HotSpot） | 格③（JBR 21 + DCEVM） |
+|:--|:--|:--|
+| 参数注解被删除（`param-annotation-removed`） | 旧句柄读到 `value=v1`（无异常） | 旧句柄 `getParameterAnnotations()` **抛出** `java.lang.reflect.GenericSignatureFormatError: Signature Parse error: Expected Field Type Signature` |
+| 参数注解值变化（`param-annotation-value-change`） | 旧句柄读到 `value=v1`（无异常） | 旧句柄读到 `value=v2-a-much-longer-value`（无异常） |
+| 泛型签名变化（`generic-signature-change`） | 旧句柄读到 `List<java.lang.String>`（无异常） | 旧句柄同样读到 `List<java.lang.String>`（无异常） |
+| 类级 `Signature`（`getGenericSuperclass`） | 重定义前后均为 `ArrayList<java.lang.String>` | 重定义后为 `ArrayList<java.lang.Integer>`（刷新） |
+
+- 格③ 的 `param-annotation-removed` 在**同一台机器、同一组启动参数（JBR 21.0.9 + `-XX:+AllowEnhancedClassRedefinition`）、同一探针提交**下连跑 3 次均复现（**3/3 复现，同机同参数**；n=3 不足以支撑更强结论）。
+- 格③ **第 2 组读数（重新 `getDeclaredMethods()`）**：九场景全部读到新状态（`value=v2-a-much-longer-value` / `{}` / `List<java.lang.Integer>` / `@Deprecated` / `ArrayList<java.lang.Integer>`），且**无任何异常**。这是"请重新解析句柄"这条建议的唯一依据。
+- 格①② 的旧句柄在全部 9 场景均**无异常**，读数为旧值；三组读数之间不一致。
+- **跨格不一致**：同一场景的旧句柄读数在①②与③之间不同（①②旧值、③新值或抛 `Error`），类级 `getGenericSuperclass()` 只在③刷新。**本主题任何"旧句柄行为"的表述都必须分 JVM 写，不得跨格归纳。**
+
+### 5.4 灵敏度对照（证明读数链路能看见 `Error`，同时暴露其边界）
 
 | 对照 | API | 真实 `Throwable` |
 |:--|:--|:--|
@@ -217,14 +218,32 @@ flowchart LR
 | `param-annotation-type-is-not-an-annotation` | `getParameterAnnotations` | 无异常（JDK 静默忽略） |
 | `duplicate-annotation-member` | `getParameterAnnotations` | 无异常（JDK 静默忽略） |
 
-两份"属性被故意损坏"的字节由 ASM 直接生成，异常全部由 JVM / 反射库解析器抛出；探针内没有任何
-`throw` 语句。该对照只验证读数链路，**不能替代复现证据**。
+**边界**：四种损坏形态中只有 **2 种**能被本探针捕获，另 2 种被 JDK 静默忽略。因此
+"格①② 零 `Error`"**只对已测的 9 个场景成立**，不能读成"不存在任何 `Error` 级失败形态"；
+探针灵敏度有边界，未覆盖的损坏形态不在此结论范围内。
+两份损坏字节由 ASM 直接生成，异常全部由 JVM / 反射库解析器抛出；探针内没有任何 `throw` 语句，
+该对照**不构成**复现证据。
 
-### 5.5 与缓存驱逐的关系（能力边界）
+### 5.5 与缓存驱逐的关系（交付状态与缺口）
 
-本文读数只覆盖"反射句柄读什么"。`ReflectionCacheManager` 的驱逐只作用于**已注册**的框架缓存
-（Gson / Jackson / 插件注册的 `ReflectionCacheEvictor`），它无法改变用户自持句柄的读数：
-cherry-pick 后的实现落在树上时，格③ 的 `param-annotation-removed` 旧句柄**仍然**抛
-`GenericSignatureFormatError`（同一探针、同一阶段）。本批次**没有**取得"已注册缓存路径：驱逐前读到错误值、
-驱逐后读到正确值"这组前后对照读数，因此驱逐范围扩展（`EvictionScope.WITH_DESCENDANTS`）**不作为**
-本主题已验证的能力登记；它保持显式缺口。
+- 本主题**交付**的是"检测 + 成员级 WARN 点名"：`ReflectionCacheManager.detectMemberMetadataDrift` /
+  `describeMemberMetadataDrift` 与 `RemoldAgent.reportMemberMetadataDrift` 接线；
+  真实流水线确实发出 WARN，由接线探针 `:tests:metadataDriftWarnProbe` 断言（驱动真实 `processChanges`）。
+- **未交付**：`EvictionScope.WITH_DESCENDANTS` 驱逐范围扩展整体停在 `parked/k-eviction-scope` 分支
+  （含 3 条"驱逐器实际收到哪些类"的用例），**不在**本主题的合流候选里。缺的读数是
+  **"已注册缓存（Gson/Jackson/插件）驱逐前读到错误值、驱逐后读到正确值"的前后对照**；
+  在该对照取得之前，本主题不主张驱逐范围扩展的任何效果。
+- 能力边界（C4）：驱逐只作用于**已注册**的框架缓存；用户自持的 `Method` 句柄不在其覆盖范围。
+  格③ 的复现**在检测 + WARN 落到主干之后依旧存在**（同一探针、同一阶段，
+  `param-annotation-removed` 旧句柄仍抛 `GenericSignatureFormatError`）——本主题不改变这一点。
+- WARN 文案按分 JVM 读数写：同时列出"标准 HotSpot 静默返回旧值"与"JBR 21 + DCEVM 抛
+  `GenericSignatureFormatError` 或返回新值"两种已观测形态，**不写"会抛异常"，也不写"会读到旧值"**；
+  "请重新解析句柄"建议以格③第 2 组读数为依据。
+
+### 5.6 未测项
+
+- 运行时：JBR **8 / 11 / 17** 未测（本轮只有 JBR 21 与 JBR 25）。
+- 框架缓存：**Gson / Jackson 真实缓存路径未测**（因此没有 §5.5 所说的前后对照读数）。
+- 探针灵敏度只对 §5.4 的 4 种损坏形态做过对照。
+- 分 JVM 读数来自探针提交 `f6420c8`；拆分（`db578d2`）与 WARN 文案改写（`2524569`）只影响检测/告警，
+  不改变探针读数；格③ 的负面读数已在拆分后重跑（`ev-20261112054907-105c`）。

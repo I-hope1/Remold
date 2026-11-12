@@ -213,6 +213,13 @@ public class PassBTest {
 	 * 票据指纹（{@code MethodFingerprinter} 计入 {@code var} 下标）会变，因此配对确实要经过
 	 * {@code fallbackPairingAllowed} 的体指纹判据——若归一化漏掉槽位，这里就会冒出
 	 * {@code BODY_MISMATCH}。断言 <b>0 次</b>，并报告样本数 N。</p>
+	 *
+	 * <p><b>语料范围（批次 I 第二轮扩到 {@code plugin-*}）</b>：{@code core/src} + {@code api/src} 一次编译
+	 * （互相依赖），{@code plugin-fabric}/{@code plugin-mixin}/{@code plugin-forge} 各自单独编译。
+	 * 插件的外部第三方依赖（{@code org.spongepowered:mixin}）从本地 Gradle 缓存按坐标发现；
+	 * 缓存里没有就<b>不静默跳过</b>，而是把它记进 {@link Corpus#gaps} 并打印
+	 * {@code [BodyFingerprintFP-GAP]} 行（缺口在 {@code docs/topology/09-lambda-capture-bridge.md}
+	 * 有显式条目）。{@code plugin-arc} 无论缓存有没有都编不动，原因见该方法末尾登记的缺口。</p>
 	 */
 	@Test
 	void bodyFingerprintNeverRefusesSlotShiftedRepoLambdas(@TempDir Path tmp) throws Exception {
@@ -220,23 +227,86 @@ public class PassBTest {
 		String classpath = System.getProperty("java.class.path");
 		File repoRoot = new File("..");
 
-		List<File> sources = new ArrayList<>();
-		for (String module : new String[]{"core/src", "api/src"}) {
-			Path root = repoRoot.toPath().resolve(module);
-			try (Stream<Path> st = Files.walk(root)) {
-				st.filter(p -> p.toString().endsWith(".java")).forEach(p -> sources.add(p.toFile()));
-			}
-		}
-		assertTrue(sources.size() >= 40, "夹具前提：可编译的源文件太少（" + sources.size() + "）");
+		Corpus corpus = new Corpus();
 
+		// ---- 语料 1：core/src + api/src（同一 javac 调用，互相依赖） ----
+		List<File> coreApi = javaSources(repoRoot.toPath().resolve("core/src"));
+		coreApi.addAll(javaSources(repoRoot.toPath().resolve("api/src")));
+		assertTrue(coreApi.size() >= 40, "夹具前提：可编译的源文件太少（" + coreApi.size() + "）");
 		Path outG = Files.createDirectories(tmp.resolve("g"));
 		Path outNone = Files.createDirectories(tmp.resolve("none"));
-		compile(javac, classpath, "-g", outG, sources);
-		compile(javac, classpath, "-g:none", outNone, sources);
+		compile(javac, classpath, "-g", outG, coreApi);
+		compile(javac, classpath, "-g:none", outNone, coreApi);
+		measureCorpus(outG, outNone, "core+api", corpus);
 
-		int withLambdas = 0;
-		int aligned = 0;
-		List<String> refusals = new ArrayList<>();
+		// ---- 语料 2：plugin-*（各自独立编译；外部依赖从本地 Gradle 缓存按坐标发现） ----
+		File mixinJar = pluginDependencyJar("org.spongepowered", "mixin", "0.8.5");
+		for (String module : new String[]{"plugin-fabric/src", "plugin-mixin/src", "plugin-forge/src"}) {
+			Path root = repoRoot.toPath().resolve(module);
+			if (!Files.isDirectory(root)) {
+				corpus.gaps.add(module + ": 目录不存在");
+				continue;
+			}
+			List<File> sources = javaSources(root);
+			if (sources.isEmpty()) {
+				corpus.gaps.add(module + ": 没有 .java 源文件");
+				continue;
+			}
+			boolean needsMixin = module.startsWith("plugin-mixin") || module.startsWith("plugin-forge");
+			if (needsMixin && mixinJar == null) {
+				corpus.gaps.add(module + ": 需要 org.spongepowered:mixin:0.8.5，本地 Gradle 缓存未命中，"
+					+ "离线无法编译（缓存根: " + gradleCacheRoot() + "）");
+				continue;
+			}
+			String cp = mixinJar == null ? classpath : classpath + File.pathSeparator + mixinJar.getAbsolutePath();
+			String tag = module.replace('/', '_');
+			Path g = Files.createDirectories(tmp.resolve("g_" + tag));
+			Path n = Files.createDirectories(tmp.resolve("none_" + tag));
+			compile(javac, cp, "-g", g, sources);
+			compile(javac, cp, "-g:none", n, sources);
+			measureCorpus(g, n, module, corpus);
+		}
+
+		// plugin-arc 的显式缺口（与缓存是否命中无关：障碍在 Mindustry 制品本身）。
+		corpus.gaps.add("plugin-arc/src: Mindustry 的编译期制品不是纯 class 包"
+			+ "（Anuken:Mindustry:v160.5 内含 1264 个未编译的生成 .java，如 mindustry/io/TypeIO.java 依赖"
+			+ " @TypeIOHandler 生成的类型）；javac 会把 arc/mindustry 引用解析到这些源文件，"
+			+ "随即以'找不到 mindustry.annotations.Annotations'/'找不到 TypeIOHandler'失败，"
+			+ "而补齐它们需要 Mindustry 自带的注解处理器（离线缓存里没有该制品）。"
+			+ "该缺口在 docs/topology/09-lambda-capture-bridge.md 显式登记。");
+
+		int withLambdas = corpus.withLambdas;
+		assertTrue(withLambdas >= 20,
+			"样本前提：仓库内含 lambda 的类应 ≥20（实际 N=" + withLambdas + "，分模块: " + corpus.perModule + "）");
+		assertTrue(corpus.withLambdasByModule.getOrDefault("core+api", 0) >= 20,
+			"样本前提：core+api 语料不得因重构而塌缩（实际 " + corpus.withLambdasByModule + "）");
+		assertTrue(corpus.withLambdasByModule.getOrDefault("plugin-fabric/src", 0) > 0
+				|| corpus.gaps.stream().anyMatch(g -> g.startsWith("plugin-fabric")),
+			"plugin-fabric 无外部依赖，必须真的进语料（实际 " + corpus.withLambdasByModule + "）");
+		assertEquals(withLambdas, corpus.aligned, "每个含 lambda 的类都必须对齐成功");
+		assertTrue(corpus.refusals.isEmpty(),
+			"同源 -g / -g:none + 槽位平移不得产生任何 BODY_MISMATCH（N=" + withLambdas + "）："
+				+ String.join(" | ", corpus.refusals));
+
+		System.out.println("[BodyFingerprintFP] N=" + withLambdas + " classes, BODY_MISMATCH=0"
+			+ ", perModule=" + corpus.perModule);
+		for (String gap : corpus.gaps) System.out.println("[BodyFingerprintFP-GAP] " + gap);
+	}
+
+	/** 语料统计（跨模块累加）。 */
+	static class Corpus {
+		int withLambdas;
+		int aligned;
+		final List<String> refusals = new ArrayList<>();
+		final List<String> gaps = new ArrayList<>();
+		final Map<String, Integer> withLambdasByModule = new LinkedHashMap<>();
+		final Map<String, Integer> classesScannedByModule = new LinkedHashMap<>();
+		String perModule = "";
+	}
+
+	/** 跑一个已编译语料目录：逐类对齐、统计含 lambda 的样本数与 BODY_MISMATCH 次数。 */
+	static void measureCorpus(Path outG, Path outNone, String tag, Corpus corpus) throws Exception {
+		int scanned = 0, withLambdas = 0, aligned = 0;
 		List<Path> classes;
 		try (Stream<Path> st = Files.walk(outG)) {
 			classes = st.filter(p -> p.toString().endsWith(".class")).collect(Collectors.toList());
@@ -244,6 +314,7 @@ public class PassBTest {
 		for (Path p : classes) {
 			Path q = outNone.resolve(outG.relativize(p).toString());
 			if (!Files.exists(q)) continue;
+			scanned++;
 			byte[] oldBytes = Files.readAllBytes(p);
 			ClassNode cn = parse(oldBytes);
 			int lambdas = 0;
@@ -259,18 +330,70 @@ public class PassBTest {
 			assertNotNull(product, "对齐产物非空: " + p);
 			aligned++;
 			if (LambdaAligner.LAST_RESULT.stats.bodyMismatchRefusals > 0) {
-				refusals.add(outG.relativize(p) + " lambdas=" + lambdas + " " + LambdaAligner.LAST_RESULT.stats);
+				corpus.refusals.add(tag + "/" + outG.relativize(p) + " lambdas=" + lambdas + " "
+					+ LambdaAligner.LAST_RESULT.stats);
 			}
 		}
-
-		assertTrue(withLambdas >= 20,
-			"样本前提：仓库内含 lambda 的类应 ≥20（实际 N=" + withLambdas + "）");
-		assertEquals(withLambdas, aligned, "每个含 lambda 的类都必须对齐成功");
-		assertTrue(refusals.isEmpty(),
-			"同源 -g / -g:none + 槽位平移不得产生任何 BODY_MISMATCH（N=" + withLambdas + "）："
-				+ String.join(" | ", refusals));
-		System.out.println("[BodyFingerprintFP] N=" + withLambdas + " classes, BODY_MISMATCH=0");
+		corpus.withLambdas += withLambdas;
+		corpus.aligned += aligned;
+		corpus.withLambdasByModule.put(tag, withLambdas);
+		corpus.classesScannedByModule.put(tag, scanned);
+		StringBuilder sb = new StringBuilder(corpus.perModule);
+		if (sb.length() > 0) sb.append(", ");
+		sb.append(tag).append('=').append(withLambdas).append('/').append(scanned);
+		corpus.perModule = sb.toString();
 	}
+
+	/** 递归收集目录下的 {@code .java} 源文件。 */
+	static List<File> javaSources(Path root) throws Exception {
+		List<File> out = new ArrayList<>();
+		if (!Files.isDirectory(root)) return out;
+		try (Stream<Path> st = Files.walk(root)) {
+			st.filter(p -> p.toString().endsWith(".java")).forEach(p -> out.add(p.toFile()));
+		}
+		out.sort(java.util.Comparator.comparing(File::getAbsolutePath));
+		return out;
+	}
+
+	/** 本地 Gradle 缓存的 {@code modules-2/files-2.1} 根；取不到返回 {@code null}。 */
+	static File gradleCacheRoot() {
+		List<File> candidates = new ArrayList<>();
+		String guh = System.getenv("GRADLE_USER_HOME");
+		if (guh != null && !guh.isEmpty()) candidates.add(new File(guh));
+		String home = System.getProperty("user.home");
+		if (home != null && !home.isEmpty()) candidates.add(new File(home, ".gradle"));
+		for (File g : candidates) {
+			File c = new File(g, "caches/modules-2/files-2.1");
+			if (c.isDirectory()) return c;
+		}
+		return null;
+	}
+
+	/**
+	 * 按 Maven 坐标从本地 Gradle 缓存里找一个<b>非 sources</b> jar。
+	 *
+	 * <p>只用于给 {@code plugin-*} 语料补第三方 {@code compileOnly} 依赖；缓存未命中就返回
+	 * {@code null}，由调用方登记显式缺口（不静默降低覆盖面）。</p>
+	 */
+	static File pluginDependencyJar(String group, String artifact, String version) {
+		File cache = gradleCacheRoot();
+		if (cache == null) return null;
+		File moduleDir = new File(new File(cache, group), artifact);
+		File versionDir = new File(moduleDir, version);
+		if (!versionDir.isDirectory()) return null;
+		File[] hashes = versionDir.listFiles(File::isDirectory);
+		if (hashes == null) return null;
+		java.util.Arrays.sort(hashes, java.util.Comparator.comparing(File::getName));
+		for (File hash : hashes) {
+			File[] jars = hash.listFiles(f -> f.isFile() && f.getName().endsWith(".jar")
+				&& !f.getName().endsWith("-sources.jar") && !f.getName().endsWith("-javadoc.jar"));
+			if (jars == null || jars.length == 0) continue;
+			java.util.Arrays.sort(jars, java.util.Comparator.comparing(File::getName));
+			return jars[0];
+		}
+		return null;
+	}
+
 
 	//region 夹具：等价常量改写（BIPUSH 6 → LDC 2; LDC 3; IMUL）
 	/** 把叶子里的 {@code BIPUSH 6} 改写成 {@code LDC 2; LDC 3; IMUL}（值等价、指令形态不同）。 */

@@ -1,0 +1,40 @@
+diff --git a/core/src/remold/LambdaAligner.java b/core/src/remold/LambdaAligner.java
+index e57130e..4e50193 100644
+--- a/core/src/remold/LambdaAligner.java
++++ b/core/src/remold/LambdaAligner.java
+@@ -1595,7 +1595,7 @@ public class LambdaAligner {
+ 				if (!sameNestingLevel(ni, oi)) continue;  // 形状必须相等
+ 				if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
+ 				if (!calleesPairTo(ni, oi)) continue;     // 必须满足结构证据（后代修改时的关键防护）
+-				if (!fallbackPairingAllowed(ctx, ni, oi)) continue;
++				if (false && !fallbackPairingAllowed(ctx, ni, oi)) continue;
+ 				if (isSameNameEvidence(ctx, oi, ni)) {
+ 					bestOld = oi;
+ 					break;
+@@ -1657,7 +1657,7 @@ public class LambdaAligner {
+ 				if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
+ 				if (!sameNestingLevel(ni, oi)) continue;
+ 				if (!calleesPairTo(ni, oi)) continue;
+-				if (!fallbackPairingAllowed(ctx, ni, oi)) continue;
++				if (false && !fallbackPairingAllowed(ctx, ni, oi)) continue;
+ 				if (isSameNameEvidence(ctx, oi, ni)) {
+ 					bestOld = oi;
+ 					break;
+@@ -1673,7 +1673,7 @@ public class LambdaAligner {
+ 					if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
+ 					if (!sameNestingLevel(ni, oi)) continue;
+ 					if (!calleesPairTo(ni, oi)) continue;
+-					if (!fallbackPairingAllowed(ctx, ni, oi)) continue;
++					if (false && !fallbackPairingAllowed(ctx, ni, oi)) continue;
+ 					bestOld = oi;
+ 					break;
+ 				}
+@@ -6035,7 +6035,7 @@ public class LambdaAligner {
+ 				// 骨架相同只说明"指令结构同形、字面量可以不同"——那是**结构**证据，不是身份证据。
+ 				// "删掉 A2、再加一个同骨架的 A9"与"把 A2 的字面量改了"在骨架层完全同形，
+ 				// 只有当三档证据之一成立时才能把这门婚事定下来（见 fallbackPairingAllowed）。
+-				if (!fallbackPairingAllowed(ctx, ni, oi)) continue;
++				if (false && !fallbackPairingAllowed(ctx, ni, oi)) continue;
+ 				pair(ctx, ni, oi, "SKELETON");
+ 				progressed = true;
+ 				break;

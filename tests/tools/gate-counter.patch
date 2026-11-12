@@ -1,0 +1,112 @@
+diff --git a/core/src/remold/LambdaAligner.java b/core/src/remold/LambdaAligner.java
+index e57130e..06bb80f 100644
+--- a/core/src/remold/LambdaAligner.java
++++ b/core/src/remold/LambdaAligner.java
+@@ -1962,23 +1962,47 @@ public class LambdaAligner {
+ 	 * 编号（同宿主、同名）"的 lambda，与真正的原地更新在字节码层<b>完全同形</b>，没有规则能区分。
+ 	 * 该形态仍然会被配对，属于信息论边界；能区分的形态（换名、宿主形态翻转、消费端可区分）已全部拦下。</p>
+ 	 */
+-	private static boolean fallbackPairingAllowed(MatchContext ctx, SyntheticInfo ni, SyntheticInfo oi) {
+-		if (sameSemantics(ni, oi)) return true;
+-		if (ni.bodyHash != 0L && ni.bodyHash == oi.bodyHash) return true;
++	/** [TOOL-PATCH] 门禁分支计数器（仅测试工具补丁，不进产品代码）。 */
++	public static final java.util.concurrent.atomic.AtomicInteger GATE_EVAL = new java.util.concurrent.atomic.AtomicInteger();
++	public static final java.util.concurrent.atomic.AtomicInteger GATE_FPCMP = new java.util.concurrent.atomic.AtomicInteger();
++	public static final java.util.concurrent.atomic.AtomicInteger GATE_FPALLOW = new java.util.concurrent.atomic.AtomicInteger();
++	public static final java.util.concurrent.atomic.AtomicInteger GATE_HOSTKIND_REFUSED = new java.util.concurrent.atomic.AtomicInteger();
++	public static final java.util.concurrent.atomic.AtomicInteger GATE_FALLBACK_REFUSED = new java.util.concurrent.atomic.AtomicInteger();
++	public static final java.util.concurrent.atomic.AtomicInteger GATE_ALLOW = new java.util.concurrent.atomic.AtomicInteger();
++	public static final java.util.Set<String> GATE_CLASSES = java.util.concurrent.ConcurrentHashMap.newKeySet();
++	public static final java.util.List<String> GATE_REFUSALS = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
++
++	public static void resetGateCounters() {
++		GATE_EVAL.set(0); GATE_FPCMP.set(0); GATE_FPALLOW.set(0);
++		GATE_HOSTKIND_REFUSED.set(0); GATE_FALLBACK_REFUSED.set(0); GATE_ALLOW.set(0);
++		GATE_CLASSES.clear(); GATE_REFUSALS.clear();
++	}
+ 
+-		// 宿主形态翻转（普通方法 ↔ lambda）是"这个 lambda 换了嵌套层次"的直接证据：
+-		// 把叶子包进新容器时（体内新增内层 lambda），外层的子孙会把旧叶子的名字顶掉，
+-		// 而两者宿主前缀必然一 M 一 L。没有方法体证据时一律拒绝（L5）。
++	private static void gateNote(MatchContext ctx, SyntheticInfo ni, SyntheticInfo oi, String branch) {
++		GATE_REFUSALS.add((ctx == null ? "?" : ctx.currentClass) + " | " + ni.name + " -> " + oi.name
++			+ " | branch=" + branch + " | bodyHash=" + Long.toHexString(ni.bodyHash) + "/" + Long.toHexString(oi.bodyHash)
++			+ " | hostKind=" + hostKind(ni) + "/" + hostKind(oi));
++	}
++
++	private static boolean fallbackPairingAllowed(MatchContext ctx, SyntheticInfo ni, SyntheticInfo oi) {
++		GATE_EVAL.incrementAndGet();
++		if (ctx != null && ctx.currentClass != null) GATE_CLASSES.add(ctx.currentClass);
++		if (sameSemantics(ni, oi)) { GATE_ALLOW.incrementAndGet(); return true; }
++		GATE_FPCMP.incrementAndGet();
++		if (ni.bodyHash != 0L && ni.bodyHash == oi.bodyHash) { GATE_FPALLOW.incrementAndGet(); GATE_ALLOW.incrementAndGet(); return true; }
+ 		if (!hostKind(ni).equals(hostKind(oi))) {
++			GATE_HOSTKIND_REFUSED.incrementAndGet();
++			gateNote(ctx, ni, oi, "hostKind-mismatch");
+ 			warnBodyMismatch(ctx, oi, ni);
+ 			return false;
+ 		}
+-		if (ni.name.equals(oi.name)) return true;
+-		if (hasDiscriminatingConsumer(ctx, ni, oi)) return true;
+-		if (isSkeletonGloballyUnique(ctx, ni, oi)) return true;
+-		if (isChildIdentityEstablished(ni, oi)) return true;
+-		if (isOrderConsistent(ctx, ni, oi)) return true;
+-
++		if (ni.name.equals(oi.name)) { GATE_ALLOW.incrementAndGet(); return true; }
++		if (hasDiscriminatingConsumer(ctx, ni, oi)) { GATE_ALLOW.incrementAndGet(); return true; }
++		if (isSkeletonGloballyUnique(ctx, ni, oi)) { GATE_ALLOW.incrementAndGet(); return true; }
++		if (isChildIdentityEstablished(ni, oi)) { GATE_ALLOW.incrementAndGet(); return true; }
++		if (isOrderConsistent(ctx, ni, oi)) { GATE_ALLOW.incrementAndGet(); return true; }
++		GATE_FALLBACK_REFUSED.incrementAndGet();
++		gateNote(ctx, ni, oi, "fallback-exhausted");
+ 		warnBodyMismatch(ctx, oi, ni);
+ 		return false;
+ 	}
+diff --git a/tests/src/PassBTest.java b/tests/src/PassBTest.java
+index 8c7a328..07beac0 100644
+--- a/tests/src/PassBTest.java
++++ b/tests/src/PassBTest.java
+@@ -230,6 +230,7 @@ public class PassBTest {
+ 		String classpath = System.getProperty("java.class.path");
+ 		File repoRoot = new File("..");
+ 
++		LambdaAligner.resetGateCounters();
+ 		Corpus corpus = new Corpus();
+ 
+ 		// ---- 语料 1：core/src + api/src（同一 javac 调用，互相依赖） ----
+@@ -291,6 +292,12 @@ public class PassBTest {
+ 			"同源 -g / -g:none + 槽位平移不得产生任何 BODY_MISMATCH（N=" + withLambdas + "）："
+ 				+ String.join(" | ", corpus.refusals));
+ 
++		System.out.println("[GATE-COUNTER] eval=" + LambdaAligner.GATE_EVAL.get()
++			+ " fpCmp=" + LambdaAligner.GATE_FPCMP.get() + " fpAllow=" + LambdaAligner.GATE_FPALLOW.get()
++			+ " hostKindRefused=" + LambdaAligner.GATE_HOSTKIND_REFUSED.get()
++			+ " fallbackRefused=" + LambdaAligner.GATE_FALLBACK_REFUSED.get()
++			+ " allow=" + LambdaAligner.GATE_ALLOW.get() + " classes=" + LambdaAligner.GATE_CLASSES.size());
++		for (String r : LambdaAligner.GATE_REFUSALS) System.out.println("[GATE-REFUSAL] " + r);
+ 		System.out.println("[GHOSTATTR] SUMMARY gate=" + GATE_MODE + " N=" + withLambdas
+ 			+ " classesWithGhosts=" + corpus.classesWithGhosts + " totalGhosts=" + corpus.totalGhosts
+ 			+ " totalRefusals=" + corpus.totalRefusals);
+@@ -318,6 +325,7 @@ public class PassBTest {
+ 	 */
+ 	@Test
+ 	void gatePositiveControlOnL5Seed(@TempDir Path tmp) throws Exception {
++		LambdaAligner.resetGateCounters();
+ 		boolean gateOn = printGateState();
+ 		assertTrue(gateOn, "本用例的 on 侧断言只在门禁开启时成立；门禁被关闭时不得静默通过（关门禁趟应显式红）");
+ 		String javac = javac21();
+@@ -344,7 +352,13 @@ public class PassBTest {
+ 			assertEquals(0, plain.events, "门禁关：不得留 BODY_MISMATCH 事件: " + plain);
+ 		}
+ 		LambdaAligner.clearLoggedWarnings();   // 不把本用例的去重键留给后续用例
+-	}
++			System.out.println("[GATE-COUNTER] eval=" + LambdaAligner.GATE_EVAL.get()
++			+ " fpCmp=" + LambdaAligner.GATE_FPCMP.get() + " fpAllow=" + LambdaAligner.GATE_FPALLOW.get()
++			+ " hostKindRefused=" + LambdaAligner.GATE_HOSTKIND_REFUSED.get()
++			+ " fallbackRefused=" + LambdaAligner.GATE_FALLBACK_REFUSED.get()
++			+ " allow=" + LambdaAligner.GATE_ALLOW.get() + " classes=" + LambdaAligner.GATE_CLASSES.size());
++		for (String r : LambdaAligner.GATE_REFUSALS) System.out.println("[GATE-REFUSAL] " + r);
++}
+ 
+ 	/** L5 阳性对照的一趟读数：计数器 + 旧槽位的终局形态。 */
+ 	static final class Reading {

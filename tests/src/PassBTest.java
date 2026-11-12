@@ -223,7 +223,9 @@ public class PassBTest {
 	 */
 	@Test
 	void bodyFingerprintNeverRefusesSlotShiftedRepoLambdas(@TempDir Path tmp) throws Exception {
-		printGateState();
+		// 护栏：本用例的"零 BODY_MISMATCH"只有在门禁真的开着时才有意义。若 harness 悄悄跑成门禁关，
+		// 这条断言会立刻红，而不是让"零差异"静默变成无信息读数（上一轮踩过这个坑）。
+		assertTrue(printGateState(), "语料 harness 必须跑在门禁开启态（callSites>0）；否则本用例的零 BODY_MISMATCH 断言无意义");
 		String javac = javac21();
 		String classpath = System.getProperty("java.class.path");
 		File repoRoot = new File("..");
@@ -317,6 +319,7 @@ public class PassBTest {
 	@Test
 	void gatePositiveControlOnL5Seed(@TempDir Path tmp) throws Exception {
 		boolean gateOn = printGateState();
+		assertTrue(gateOn, "本用例的 on 侧断言只在门禁开启时成立；门禁被关闭时不得静默通过（关门禁趟应显式红）");
 		String javac = javac21();
 		String classpath = System.getProperty("java.class.path");
 

@@ -477,16 +477,16 @@ lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
 
 | # | 消费点 | 作用 | 防线性质 |
 |:--|:--|:--|:--|
-| S1 | `scan`：`info.ghost` 的方法**不当宿主** | 幽灵体内的 indy 不产出宿主序列（宿主 `hostKey` 保持 `null`） | 独立（无条件）；但由它产生的 `null` 宿主**交给 G1 否决**，这条链只在门禁里 |
-| S2 | `scan`：幽灵**不作为 indy 目标**（`target.renameable && !target.ghost`） | 幽灵名不能被认领 | 独立（无条件） |
-| S3 | `scan`：语义指纹不折入幽灵子（"幽灵无语义"） | 幽灵不污染父指纹 | 独立（无条件） |
-| S4 | `putNameIndex`：活方法压过幽灵/桥 | 同名索引取到真体而不是桩 | 独立（无条件） |
+| S1 | `scan`：`info.ghost` 的方法**不当宿主** | 幽灵体内的 indy 不产出宿主序列（宿主 `hostKey` 保持 `null`） | 独立（无前提）；但由它产生的 `null` 宿主**交给 G1 否决**，这条链只在门禁里 |
+| S2 | `scan`：幽灵**不作为 indy 目标**（`target.renameable && !target.ghost`） | 幽灵名不能被认领 | 独立（无前提） |
+| S3 | `scan`：语义指纹不折入幽灵子（"幽灵无语义"） | 幽灵不污染父指纹 | 独立（无前提） |
+| S4 | `putNameIndex`：活方法压过幽灵/桥 | 同名索引取到真体而不是桩 | 独立（无前提） |
 | S5 | Step 1 `acceptCandidate` | 幽灵不参与指纹配对（`D` 可放开） | `D` 之外有独立防线：`sameSemantics` 仍要求指纹一致，而幽灵体是熔断桩、指纹与真实体不同 |
-| S6 | Pass A `step2PassA` | 幽灵不参与 A 趟 | 独立：这一处**无条件**跳过，`D` 也不放开 |
+| S6 | Pass A `step2PassA` | 幽灵不参与 A 趟 | 独立：这一处**恒跳过**，`D` 也不放开 |
 | S7 | **Pass B 两条循环** | 幽灵不参与 B 趟（`D` 可放开） | **仅靠门禁**：`D` 放开后唯一拦得住的是 `fallbackPairingAllowed` |
-| S8 | `isSkeletonGloballyUnique` / `skeletonEligibleOld` | 幽灵不算骨架候选 | 独立（无条件） |
-| S9 | `hasMultipleHashCandidates` / `checkAndWarnHomomorphicPruning` | 只数活方法 | 独立（无条件） |
-| S10 | 深度/形状/引用者计算 | 幽灵按"无子空壳"处理 | 独立（无条件） |
+| S8 | `isSkeletonGloballyUnique` / `skeletonEligibleOld` | 幽灵不算骨架候选 | 独立（无前提） |
+| S9 | `hasMultipleHashCandidates` / `checkAndWarnHomomorphicPruning` | 只数活方法 | 独立（无前提） |
+| S10 | 深度/形状/引用者计算 | 幽灵按"无子空壳"处理 | 独立（无前提） |
 | S11 | `stepGhostRevive`（`-Dremold.agent.ghost_revive=true`，默认关） | 按**生前指纹**复活幽灵 | 独立通道：复活要求 `ghostOriginalHash == 新体指纹`，且**不经过**本门禁 |
 | G1 | `fallbackPairingAllowed` 的宿主形态否决（`hostKind` 一侧 `?`） | 取不到宿主 ⇒ 形态判不了 ⇒ **一票否决**，优先于"同名放行" | 独立防线（门禁自身的一层，不是"靠别的层兜"） |
 | G2 | `isOrderConsistent` 的 `hostKey == null` 早退 | 没有序号就没有顺序证据 | 独立（返回 `false` 即"不给证据"，不是放行） |

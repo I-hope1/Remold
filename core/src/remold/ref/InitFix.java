@@ -51,7 +51,9 @@ import static remold.RemoldAgent.log;
  *   <li><b>T1 编译期常量</b>（{@code docs/initfix/01-safety-gate.md} §1）：静态 {@code ConstantValue} 走专用通道。</li>
  *   <li><b>T2 纯计算切片</b>（{@code docs/initfix/01-safety-gate.md} §1）：经 {@link AliasInterpreter} 逆向数据流切片，并通过效应安全门。</li>
  *   <li><b>T3 复杂或不安全</b>（{@code docs/initfix/01-safety-gate.md} §1）：含分支、环境依赖、可变源字段，拒绝生成代码并输出诊断。</li>
- *   <li><b>T4 显式逃生口 {@code @HotswapInit}</b>（{@code docs/initfix/04-target-design.md} §3 与 {@code docs/initfix/01-safety-gate.md} §1）：伴生类直接调用该静态方法。</li>
+ *   <li><b>T4 显式逃生口 {@code @HotswapInit}（目标设计，未落地）</b>（{@code docs/initfix/09-hotswapinit-design.md} 与
+ *       {@code docs/initfix/01-safety-gate.md} §1）：规划中由伴生类直接调用该静态方法、免效应检查；
+ *       当前没有该注解与转发实现，可用逃生口只有字段级 {@link remold.annotation.RemoldReinit}。</li>
  * </ul>
  *
  * <h2>效应检查与例外（{@code docs/initfix/01-safety-gate.md} §2）</h2>
@@ -112,7 +114,8 @@ import static remold.RemoldAgent.log;
  *       可能因跨类加载顺序非确定性读到未就绪值。目标解法详见 {@code docs/initfix/04-target-design.md} §5「跨类批次拓扑排序」。</li>
  *   <li><b>复杂控制流与不可切片表达式</b>：
  *       含分支（if/switch）、循环、try-catch、局部变量依赖、Kotlin {@code ?.} / {@code ?:} / {@code let} / {@code apply} 等展开形态会被安全门坚决拒绝，记入待补台账。
- *       目标逃生口设计详见 {@code docs/initfix/04-target-design.md} §3 与 {@code docs/initfix/01-safety-gate.md} §1「T4 显式逃生口 @HotswapInit」。</li>
+ *       目标逃生口设计详见 {@code docs/initfix/09-hotswapinit-design.md} 与 {@code docs/initfix/01-safety-gate.md}
+ *       §1「T4 显式逃生口 @HotswapInit」（设计未落地；当前可用逃生口是 {@code @RemoldReinit}）。</li>
  * </ul>
  */
 public class InitFix {

@@ -2627,7 +2627,7 @@ public class RemoldAgent {
 			successfulClasses.add(def.getDefinitionClass());
 		}
 		// 参数注解 / 泛型签名漂移：成员级 WARN 点名（显式登记"用户自持旧句柄不安全"）。
-		// 未检测项（类级泛型签名等）见 K2 条目；本行只做成员级点名，不改驱逐范围。
+		// 成员级点名只覆盖字段/方法/构造器的 Signature 与参数注解；类级泛型签名（getGenericSuperclass）不在检测范围，本行也不改变缓存驱逐范围。
 		reportMemberMetadataDrift(appliedForDrift, driftOldBytes);
 		remold.evict.ReflectionCacheManager.evictAll(successfulClasses);
 
@@ -4916,7 +4916,7 @@ public class RemoldAgent {
 			ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, runtimeBytes);
 			String annotationDefaultChange = annotationDefaultGate(className, oldBytes, runtimeBytes);
 			if (annotationDefaultChange != null) {
-				// 探针读数：注解默认值变化后已加载的消费者类仍读旧默认值（JBR 21/25，含 DCEVM 格）。
+				// 探针读数：注解默认值变化后已加载的消费者类仍读旧默认值（JBR 21/25，含 DCEVM 运行时）。
 				// 单类入口没有"同批连坐"的对象，拒绝本类即等于整体不重定义（宿主保持旧版）。
 				error("[DYNAMIC-REDEFINE] " + className + ": annotation default value changed ("
 					+ annotationDefaultChange + "); refusing the redefine because classes that are already"
@@ -5181,7 +5181,7 @@ public class RemoldAgent {
 		}
 		// 探针读数（JBR 21/25，标准 HotSpot 与 -XX:+AllowEnhancedClassRedefinition）：
 		// 改掉注解类型的默认值后 redefineClasses 会成功，但已加载的消费者类继续读到旧默认值
-		// （标准格连重定义之后才加载的消费者也读到旧值）。只重定义注解类型修不好这一点，
+		// （标准 HotSpot 下连重定义之后才加载的消费者也读到旧值）。只重定义注解类型修不好这一点，
 		// 所以本轮整体作废（事务共退），要求重启。
 		error("REJECTED: annotation default value changed for " + className + " (" + change
 			+ "); classes that are already loaded keep the OLD default value, so redefining the annotation"

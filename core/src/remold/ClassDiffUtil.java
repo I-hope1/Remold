@@ -132,10 +132,10 @@ public final class ClassDiffUtil {
 	 * 注解默认值（{@code AnnotationDefault} 属性）变化的比对（纯函数，<b>fail-closed</b>）。
 	 *
 	 * <p><b>为什么需要单独比对</b>：{@link ClassDiff} 只描述结构（字段/方法/层次），注解成员默认值
-	 * 变化不会出现在任何差异集合里；而 JVM 探针读数（JBR 21 / JBR 25，标准 HotSpot 与
+	 * 变化不会出现在结构差异集合里；而 JVM 探针读数（JBR 21 / JBR 25，标准 HotSpot 与
 	 * {@code -XX:+AllowEnhancedClassRedefinition}）显示：改掉注解类型的默认值后
 	 * {@code redefineClasses} 会成功，但<b>已经加载</b>的消费者类仍读到<b>旧默认值</b>
-	 * （{@code getAnnotation(...).value()} 全档一致），且标准 HotSpot 上连重定义之后才加载的
+	 * （{@code getAnnotation(...).value()} 在三种运行时下一致），且标准 HotSpot 上连重定义之后才加载的
 	 * 消费者也读到旧值。因此这类变化一旦放过去，就是"静默按旧行为走"。</p>
 	 *
 	 * <p><b>判据边界</b>：只比较<b>两侧都存在</b>的注解成员（{@code name + desc} 相同）的

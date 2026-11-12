@@ -134,9 +134,9 @@ Lambda 捕获顺序的判定有一条**编译配置前提**，不写清就会被
 
 | 运行时 | 旧句柄 warm / cold | 重新取句柄 | 首次解析 | 旧实例与其已解析注解 | 重定义后加载的裸 `@Mark` 消费者 / 加载于重定义前但从未读过注解的类 |
 |:--|:--|:--|:--|:--|:--|
-| JBR 25 标准 HotSpot | v1 / v1 | null | null | 全 v1（静默） | v1 / v1 |
-| JBR 21 标准 HotSpot | v1 / v1 | null | null | 全 v1（静默） | v1 / v1 |
-| JBR 21 DCEVM | **`"Mark.java"` / `"Mark.java"`** | null | null | 全 v1 | `IncompleteAnnotationException` / 同 |
+| JBR 25 标准 HotSpot | v1 / v1 | null | null | 均为 v1（静默） | v1 / v1 |
+| JBR 21 标准 HotSpot | v1 / v1 | null | null | 均为 v1（静默） | v1 / v1 |
+| JBR 21 DCEVM | **`"Mark.java"` / `"Mark.java"`** | null | null | 均为 v1 | `IncompleteAnnotationException` / 同 |
 
 > JBR 21 DCEVM 的 `"Mark.java"` 是旧 `Method` 句柄的 `getDefaultValue()` 读到了**别的属性**的常量
 > （`SourceFile`），三次独立进程均复现，同机同参数；重定义后重新取句柄的两列读到 `null`（正确）。
@@ -153,7 +153,7 @@ Lambda 捕获顺序的判定有一条**编译配置前提**，不写清就会被
 
 对照组（去触发 / 灵敏度）：
 
-- `control-identical-default`（只重定义、不改默认值）：三种运行时都读 v1，**没有**任何 v2 泄漏（去触发对照成立）；
+- `control-identical-default`（只重定义、不改默认值）：三种运行时都读 v1，未出现 v2 泄漏（去触发对照成立）；
 - `sensitivity-explicit-value-change`（改消费者里**显式写死**的值）：三种运行时的类级读数都变为 v2，
   证明读数链路能看见注解值变化（仅用于证明读数链路可见，不构成默认值复现证据）；method-level 仍 v1
   （旧 `Method` 句柄缓存的注解读数，属另一形态，未纳入本次判定）。

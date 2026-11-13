@@ -152,6 +152,44 @@ class DynamicTwoPhaseRedefineTest {
 			"no field init patch should run when no field was added; events=" + events);
 	}
 
+	@Test
+	void existingStaticFieldReinitRunsStageAThenPatchThenStageC() throws Exception {
+		Map<String, byte[]> v1 = Fixtures.compile(Map.of(DOTTED,
+			"""
+			package probe.dyn;
+			public class Target {
+			    public static String s = "a";
+			    public static String tag() { return "v1"; }
+			}
+			"""));
+		Map<String, byte[]> v2 = Fixtures.compile(Map.of(DOTTED,
+			"""
+			package probe.dyn;
+			import remold.annotation.RemoldReinit;
+			public class Target {
+			    @RemoldReinit
+			    public static String s = "b";
+			    public static String tag() { return "v2"; }
+			}
+			"""));
+		Class<?> target = loadAndInitialize(v1.get(DOTTED));
+		assertEquals("a", target.getField("s").get(null));
+
+		assertTrue(RemoldAgent.redefineDynamic(target, v2.get(DOTTED)),
+			"a static-field reinit must be accepted and run through the two-phase path");
+
+		assertEquals(2, redefined.size(),
+			"rewriting an existing static field must run stage A then stage C (actual=" + redefined.size() + ")");
+		assertEquals("v1", tagBody(redefined.get(0)), "stage A must keep the old method body");
+		assertEquals("v2", tagBody(redefined.get(1)), "stage C must carry the new method body");
+		assertEquals("b", target.getField("s").get(null),
+			"the stage-B patch must have written the new static value before stage C");
+		int patch = events.indexOf("patch-phase");
+		int second = indexOfFrom(events, "redefine", 1);
+		assertTrue(patch >= 0 && second > patch,
+			"the static patch must run between stage A and stage C; events=" + events);
+	}
+
 	// ------------------------------------------------------------ 工具
 
 	private Class<?> loadAndInitialize(byte[] bytes) throws Exception {

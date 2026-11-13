@@ -114,6 +114,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 测试夹具（Java） | `tests/src/InitFixOracle.java`（内存 `javac`） |
 | 测试夹具（Kotlin） | `tests/ktfix/v1/`、`v2/` 下的 `.kt`，由 `ktfixV1`/`ktfixV2` source set 编译 |
 | P0.5 前置验证探针 | `tests/src/P05Probe.java`（配套最小 agent `P05Agent.java`，`./gradlew :tests:p05Probe -Pp05.jbr=<dcevm-jdk>`） |
+| 既有静态字段重写 A/B 探针 | `tests/static-rewrite-probe/`（单阶段 redefine→patch 的 stale 读者 vs 两阶段 Stage A→patch→Stage C 的刷新；`bash tests/static-rewrite-probe/build.sh && bash tests/static-rewrite-probe/run.sh`） |
 | 两阶段编排探针 | `tests/src/TwoPhaseProbe.java`（`./gradlew :tests:twoPhaseProbe -Pp05.jbr=<dcevm-jdk>`，串起 A → B → C） |
 | A 档 Kotlin apply 重放探针 | `tests/src/KotlinApplyProbe.java`（`./gradlew :tests:kotlinApplyProbe -Pp05.jbr=<dcevm-jdk>`，真实 `processChanges` + redefine；Java 等价夹具，Kotlin 真实字节证据见 `docs/initfix/13-kotlin-apply-replay.md` §2） |
 | 测试判定力审计记录 | `docs/initfix/08-test-audit.md`（变异检查证据；审计产生的缺口与结论，一次性证据不放状态表） |

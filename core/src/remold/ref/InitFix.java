@@ -724,10 +724,18 @@ public class InitFix {
 	 * 本轮补丁是否要求"重定义生效 → 补丁完成"之间不能有新方法体上线（两阶段读穿保护，
 	 * {@code docs/initfix/04-target-design.md} §1）。
 	 *
-	 * <p>判据刻意只认<b>真正会写存量实例/静态环境</b>且属于<b>新增字段或类型变更字段</b>的任务：
-	 * 只有这些字段在补丁前处于类型默认值（{@code null}/{@code 0}），新方法体读到才会 NPE 或静默读零。
-	 * {@code @RemoldReinit} 重写、L1/A 档重放作用于本来就存在的字段，默认值是旧值而不是零值，
-	 * 不构成读穿，跟随单阶段路径即可。</p>
+	 * <p>判据认两类任务：</p>
+	 * <ol>
+	 *   <li><b>新增/类型变更字段</b>：补丁前处于类型默认值（{@code null}/{@code 0}），新方法体读到会 NPE
+	 *       或静默读零；</li>
+	 *   <li><b>既有静态字段的重写</b>（{@code @RemoldReinit} / 重放写任务，且不是 {@code ConstantValue}
+	 *       编译期字面量常量）：补丁写内存不会通知 JIT，单阶段下窗口期内重编译的读者可能一直读旧值；
+	 *       阶段 C 的第二次 redefine 作为补丁后的 deopt 屏障。实测见
+	 *       {@code tests/static-rewrite-probe}。</li>
+	 * </ol>
+	 * <p>实例字段的既有值重写（{@code @RemoldReinit} 实例字段 / L1 实例重放）默认值是旧值而不是零值，
+	 * 不构成读穿，跟随单阶段路径即可；A 档 apply 重放写入的是<b>另一个类型</b>的字段，宿主阶段 C 的
+	 * deopt 覆盖不到那个类型，故不纳入本判据。</p>
 	 */
 	public static boolean requiresTwoPhase(Class<?> host) {
 		return requiresTwoPhase(host, true);
@@ -756,12 +764,44 @@ public class InitFix {
 		if (diff.addedInstanceFields != null) exposed.addAll(diff.addedInstanceFields);
 		if (diff.addedStaticFields != null) exposed.addAll(diff.addedStaticFields);
 		if (diff.typeChangedFields != null) exposed.addAll(diff.typeChangedFields);
-		if (exposed.isEmpty()) return false;
-		for (FieldPatchTask task : plan.instanceTasks()) {
-			if (!task.replay() && exposed.contains(task.fieldName())) return true;
+		if (!exposed.isEmpty()) {
+			for (FieldPatchTask task : plan.instanceTasks()) {
+				if (!task.replay() && exposed.contains(task.fieldName())) return true;
+			}
+			for (FieldPatchTask task : plan.staticTasks()) {
+				if (!task.replay() && exposed.contains(task.fieldName())) return true;
+			}
 		}
+		// 既有静态字段的重写没有"零值暴露"，但补丁后同样需要阶段 C 的 deopt 屏障。
 		for (FieldPatchTask task : plan.staticTasks()) {
-			if (!task.replay() && exposed.contains(task.fieldName())) return true;
+			if (rewritesExistingStaticField(task, diff)) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * 既有静态字段被改写（{@code @RemoldReinit} / 重放写任务）时是否需要"补丁后的 deopt 屏障"。
+	 *
+	 * <p>{@code Unsafe}/补丁写内存不会让已编译读者退优化：单阶段（redefine → patch）下，窗口期内
+	 * 重编译的读者可能把旧值提升进机器码，patch 之后一直读到旧值；两阶段的阶段 C 会再 redefine 一次
+	 * 把这类读者退优化（实测见 {@code tests/static-rewrite-probe} 的 single/two A/B 对照）。</p>
+	 *
+	 * <p>{@code ConstantValue} 编译期字面量常量除外：读者已把字面量内联进 class 文件，deopt 无法刷新，
+	 * 属于 {@code @RemoldReinit} Javadoc 明示的不支持范围。</p>
+	 */
+	private static boolean rewritesExistingStaticField(FieldPatchTask task, ClassDiff diff) {
+		if (task == null || !task.isStatic() || diff == null) return false;
+		String name = task.fieldName();
+		if (diff.addedStaticFields != null && diff.addedStaticFields.contains(name)) return false;
+		if (diff.typeChangedFields != null && diff.typeChangedFields.contains(name)) return false;
+		return !isCompileTimeConstant(diff, name);
+	}
+
+	/** 新字节码里该字段是否带 {@code ConstantValue}（编译期字面量常量；ASM 存在 {@code FieldNode.value}）。 */
+	private static boolean isCompileTimeConstant(ClassDiff diff, String fieldName) {
+		if (diff == null || diff.newClass == null || diff.newClass.fields == null) return false;
+		for (org.objectweb.asm.tree.FieldNode field : diff.newClass.fields) {
+			if (field.name.equals(fieldName)) return field.value != null;
 		}
 		return false;
 	}

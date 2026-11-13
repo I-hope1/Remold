@@ -127,6 +127,48 @@ public class TwoPhaseGuardTest {
 	}
 
 	@Test
+	void staticReinitOfExistingFieldRequiresTwoPhase() throws Exception {
+		Class<?> host = analyse("tp6.Holder",
+			"""
+			package tp6;
+			public class Holder {
+			    public static String s = "a";
+			}
+			""",
+			"""
+			package tp6;
+			import remold.annotation.RemoldReinit;
+			public class Holder {
+			    @RemoldReinit
+			    public static String s = "b";
+			}
+			""");
+		assertTrue(InitFix.requiresTwoPhase(host),
+			"rewriting an existing static field must keep stage C as the post-patch JIT deopt barrier");
+	}
+
+	@Test
+	void staticCompileTimeConstantReinitStaysSinglePhase() throws Exception {
+		Class<?> host = analyse("tp7.Holder",
+			"""
+			package tp7;
+			public class Holder {
+			    public static final String c = "a";
+			}
+			""",
+			"""
+			package tp7;
+			import remold.annotation.RemoldReinit;
+			public class Holder {
+			    @RemoldReinit
+			    public static final String c = "b";
+			}
+			""");
+		assertFalse(InitFix.requiresTwoPhase(host),
+			"readers of a ConstantValue literal inline it: a second redefine cannot refresh them, so do not pay for it");
+	}
+
+	@Test
 	void zeroEquivalentAddedFieldDoesNotRequireTwoPhase() throws Exception {
 		Class<?> host = analyse("tp5.Holder",
 			"""

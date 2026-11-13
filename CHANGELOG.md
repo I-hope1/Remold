@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **既有静态字段重写的 A/B 探针**（`tests/static-rewrite-probe/`）：同一份"运行时初始化的
+  `static final` 引用字段"在单阶段（redefine → Unsafe patch）下，patch 后已编译热读者仍读到旧值；
+  在模拟两阶段（Stage A → patch → Stage C）下，阶段 C 的第二次 redefine 把读者退优化，采样立即
+  读到新值。用于支撑两阶段触发判据的扩展与回归。
+
+### Changed
+
+- **两阶段触发判据扩展到既有静态字段重写**：`InitFix.requiresReadThroughGuard` 现在除了
+  "新增/类型变更字段"外，还会对**宿主的既有静态字段重写**（`@RemoldReinit` / 重放写任务）返回
+  true——补丁写内存不会通知 JIT，单阶段下窗口期内重编译的读者可能一直读旧值，阶段 C 的第二次
+  redefine 作为补丁后的 deopt 屏障。`ConstantValue` 编译期字面量常量（读者已内联字面量）除外；
+  A 档 apply 重放写入的是另一个类型的字段，宿主阶段 C 覆盖不到，不纳入。
+  单测：`TwoPhaseGuardTest` 新增"既有静态字段重写 → true / `ConstantValue` 常量重写 → false"；
+  `BatchTwoPhaseStaticRewriteTest`（批次驱动 Stage A → patch → Stage C，1/1）与
+  `DynamicTwoPhaseRedefineTest`（动态入口同顺序，3/3）验证两条路径。
+
 ## [0.2.8] - 2026-11-12
 
 ### Summary

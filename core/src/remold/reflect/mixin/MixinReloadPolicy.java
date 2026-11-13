@@ -346,8 +346,10 @@ public final class MixinReloadPolicy {
 			return false;
 		}
 		try {
-			field.setAccessible(true);
 			if (!Modifier.isFinal(field.getModifiers())) {
+				// 只有真走反射写入时才要求可访问性；final 分支只算 Unsafe 偏移，提前 setAccessible 会在
+				// JPMS 强封装模块下抛 InaccessibleObjectException，把本来可用的 Unsafe 路径一起拖黑。
+				field.setAccessible(true);
 				field.setInt(info, value);
 				return true;
 			}

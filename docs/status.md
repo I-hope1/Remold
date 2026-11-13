@@ -72,16 +72,18 @@
 
 | 文档类型 | 允许写什么 | 禁止写什么 |
 |:---|:---|:---|
-| **本文件 `docs/status.md`** | 实现状态、验证证据、风险、路线图 | —（唯一可写「交付状态」的载体） |
+| **本文件 `docs/status.md`** | 机制/能力状态、验证证据、风险、路线图 | 缺陷修复记录（现场形态、根因、复现步骤只进 `CHANGELOG.md`；设计契约进规格文档） |
 | **设计规格**（`docs/topology` · `initfix` · `offset` · `ecosystem` · `mixin`、`HOTSWAP.md`） | 客观规格、契约、判据、已知边界 | 交付状态散文（`已实现`/`未实现`/`待实现`/`已落地`/`已上线`/`待评审`/`已收口`/`未接线`…）与 `✅/⬜/🔶` 标记 |
 | **实测记录 / 审计记录**（`initfix/07`、`initfix/08`、`topology/10`、`neoforge/01`） | 一次性读数与证据（可腐化） | 当前实现状态断言；横幅必须点名本文件 |
 | **决策记录**（`topology/08`、`mixin/08`、`initfix/06`） | 决策、否决理由、历史结论 | 状态标记 |
-| `CHANGELOG.md` / `docs/releases/` / `docs/acceptance/` | 发布历史、验收清单结果 | 当前状态（以本文件为准） |
+| `CHANGELOG.md` / `docs/releases/` / `docs/acceptance/` | 发布历史、验收清单结果、缺陷修复明细 | 当前状态（以本文件为准） |
 | **代码 Javadoc / 注释** | 契约、边界、不变量、运行时语义 | 交付状态；写「不在当前范围」并指向本文件 |
 
 **守卫**：`./gradlew :tests:verifyStatusSingleSource`（挂 `check`）——文档类型横幅缺失、设计规格/独立子项目规格出现状态散文或状态标记、记录类文档横幅未点名本文件、主源码出现交付状态散文，全部直接失败。
 
-**历史归档边界**：§0.1～§0.17 为逐轮修复记录（历史归档），逐项明细以 [`CHANGELOG.md`](../CHANGELOG.md) 为准；本节不再接受新条目——新条目只登记在 §1～§7 状态表与 `CHANGELOG.md`。
+**§1～§7 登记边界**：只登记**机制/能力状态**（行 = 稳定的机制/能力，不是一次缺陷）；缺陷修复的现场形态、根因与复现步骤只进 `CHANGELOG.md`，设计契约进 `docs/` 规格，未闭环的残余写进 §5 风险或 §4.2 债务。
+
+**历史归档边界**：§0.1～§0.17 为逐轮修复记录（历史归档），逐项明细以 [`CHANGELOG.md`](../CHANGELOG.md) 为准；本节不再接受新条目。
 
 ## 0. 状态治理与规范文档清理进度 (Status Governance & Documentation Cleansing)
 
@@ -345,10 +347,6 @@
 | 同名局部类完整拓扑对齐 | ⬜ | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §2 | 待实现于 `LocalClassGuard` | 路线图规划；规划准入与保留简单名改号；当前由止血门安全拦截 |
 | 特性控制开关集合 | ✅ | [`06-runtime-and-perf.md`](topology/06-runtime-and-perf.md) §4 | `RemoldAgent` 配置表 | 覆盖 `anon_align`（false 为整组移出）、`anon_strict`、`anon_debug`、`anon_layout_gate`、`layout_gate`、`local_class_guard`、`force_reinit`（默认 false，`@RemoldReinit` 忽略指纹强制重放，见 [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §4） |
 | 蜕变测试准则 (Metamorphic Suite) | ✅ | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §3 | `AnonClassReproJUnitTest.s19_cascadingTreeAndMetamorphicSuite` | 验证标记置换不变性、幂等性、尾部追加不变性与故障注入零静默错配 |
-| **Lambda 捕获桥的尾部 SAM 实参转发**：`Function`/`Consumer`/`Stream` 这类带形参的 SAM，桥体必须把调用方传入的 SAM 实参原样压给目标；漏压时重定义路径不跑校验器，目标读到 null 或垃圾引用（真机崩溃点 `LinkResolver::resolve_invoke` / `Klass::method_at_vtable`，探针复现为 `EXCEPTION_ACCESS_VIOLATION` / `NullPointerException` / `IncompatibleClassChangeError`），且第二轮会把带尾部的 `sources` 当捕获表、让整座桥退化成幽灵 | ✅ | [`09-lambda-capture-bridge.md`](topology/09-lambda-capture-bridge.md) §4.1 | `LambdaAligner.injectBridgeBody`（按目标描述符反推尾部个数、按老槽位压栈）+ `samTailMatches`；`stepCaptureBridge` 第二轮把解析出的 `sources` 截断到捕获表长度 | **单测**：`LambdaBridgeAlignTest.parameterizedSamForwardsItsArguments`（定义对齐产物后按老描述符反射调用，断言业务返回值）与 `secondRoundKeepsTheParameterizedSamBridge`；**变异**：删除尾部压栈循环 → 1 红，恢复第二轮旧长度校验 → 1 红；**真机（JBR 21.0.9 DCEVM）**：`LambdaBridgeProbe` 新增 `bridge-end-to-end-function`、`-nested-streams`（S01 现场形态）、`-shape-flip`（S04 现场形态）；修复前 S04 触发 `EXCEPTION_ACCESS_VIOLATION`、S01 抛 `IncompatibleClassChangeError`，修复后 45/0 全绿 |
-| **捕获桥跨宿主错配（S14）**：`makeInstToStatic` 与 `makeStaticToInst` 交换 this 形状时，两个"仅字面量不同"的外层 lambda 拿到同一个 `L:<模板哈希>` 宿主键，内层 Supplier 被判"同宿主"而跨宿主桥接 → retained 实例跑另一宿主的新体（`s2i=noThis:y-v2`），无异常、静默错值 | ✅ | [`09-lambda-capture-bridge.md`](topology/09-lambda-capture-bridge.md) §4.2 | lambda 宿主键改为链式 `L:<hash>@<宿主链>`；`sameHost` 不再把"哈希相同"当同宿主证据，宿主序列锚点同步按链分组 | 单测 `LambdaBridgeAlignTest.thisShapeSwapAcrossHostsIsNotBridged`（断言无跨宿主 BRIDGE 事件）；**变异**：去掉宿主链 → 用例红；既有桥接/多轮/torture 套件保持绿 |
-| **保留体与新内层 lambda 混跑（S23）**：外层 varargs lambda 被删、内层 `AutoCloseable` lambda 被配对更新时，旧外层保留体调用到新内层体，输出既非 v1 也非 v2（`closed-v4-v3`）且无异常 | ✅ | [`11-orphan-lambda-body-retention.md`](topology/11-orphan-lambda-body-retention.md) §3.4 | `OrphanBodyRetention.handleReason`：旧体 indy 句柄指向的本类合成 lambda 若未进幽灵计划、却存在于新类 → 拒绝保留并点名（`its nested lambda ... was updated in place`）；`isSyntheticLambda` 刻意排除 `access$` | 单测 `LambdaBridgeAlignTest.retainedBodyIsRefusedWhenItsNestedLambdaWasUpdated`（断言回退 `onOrphanInvoked` 桩）；**变异**：关掉闸门 → 用例红；`OrphanBodyRetentionTest` 6/6 保持绿 |
-| **枚举常量体被当匿名类静默移出批次（S22）**：批次匿名路由只看类名 `$\d+`，把 `Op$1`（`ACC_ENUM`、独立类）塞进宿主 `Op` 的匿名组；对齐器按字节拒绝候选、不产出对齐字节，随后批次把未消费的匿名类移出本批——无日志、无跳过台账，`Op$1` 永远停在旧版本（懒加载后 V4 批次连 `[DIFF]` 都没有） | ✅ | [`02-admission-and-reserved-names.md`](topology/02-admission-and-reserved-names.md) §1.4 | `AnonClassAligner.isBatchAnonClass(className, bytes)`（名字前置筛选 + 字节准入，`ACC_ENUM` 排除）；`RemoldAgent.processChanges` 的宿主组/oldAnon/newAnon 三处改用字节判定，枚举体按普通类直接重定义；未消费匿名类移出时写 `ANON-NOT-ALIGNED` 跳过台账并发 warn | 单测 `EnumConstantBodyRoutingTest`（枚举体不得入组、真匿名类仍入组）；**变异**：路由退回名字-only → 用例红；`:tests:test` 全绿（830/0） |
 | **[偏离]** 保留内容哈希而不剥离子类引用 | 🟣 | [`08-decisions.md#d-anon-1`](topology/08-decisions.md#d-anon-1) | `AnonClassHasher` | 决策记录 [D-ANON-1](topology/08-decisions.md#d-anon-1)；剥离子类引用会导致同构无参 Runnable（Save/Delete）lambda 指纹相同，引发严重静默对调劫持 |
 | **[偏离]** 不引入 `#ANON_COARSE` 粗粒度签名 | 🟣 | [`08-decisions.md#d-anon-2`](topology/08-decisions.md#d-anon-2) | `AnonClassHasher` | 决策记录 [D-ANON-2](topology/08-decisions.md#d-anon-2)；粗粒度签名对同构 Runnable 逐字节相同，使宿主指令流丧失区分度，直接复发 Save/Delete 对调 |
 | **[偏离]** 不实现 SwitchMap 排除与原名直通 | 🟣 | [`08-decisions.md#d-anon-3`](topology/08-decisions.md#d-anon-3) | `AnonClassAligner` | 决策记录 [D-ANON-3](topology/08-decisions.md#d-anon-3)；验收证据 `SwitchMapAlignTest` (javac 21)；曾设计“将 SwitchMap 列入排除名录并原名直通”，但论证表明原名直通会在前插枚举时打开槽位篡夺漏洞，因而明确否决并推翻原排除直通设计；当前靠作用域差异与布局门安全拦截，残余机理见风险 2 |
@@ -523,6 +521,7 @@
 | **批次内按类重复全堆遍历** | P2（条件：槽位 ⑩） | `InitFix.collectInstancesForPatch` / `LibTool.getInstances` | 每个待补类各调用一次 `IterateOverInstancesOfClass`（1M 匹配实例实测 ~240ms/次，见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10.2）：批次里 N 个待补类 = N 次停世界。可用 `IterateThroughHeap` 一次走完、按类分发，把 N 次停顿压成 1 次；**但这是"N 次短停顿"换"1 次长停顿"**，做之前必须同时测总停顿与最大单次停顿，并先有真实 N。语义约束：`getInstances(P)` 含子类、`getInstances(C)` 不含父类（`remold.LibToolTest#heapScanIncludesSubclassesButNotSuperclasses`），单遍历按类分发必须复现这个**不对称** |
 | **每次 redefine 会大范围失效已编译代码** | P2（条件：槽位 ⑩） | 实测见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §11 | 对照组实测：redefine 一个**无关类**（无论只改方法体还是新增字段），另一个类的 C2 版本同样在窗口内被 `made not entrant` → 每次热更后进程可能大范围回退到解释/C1 执行、出现预热回落。归因未定（可能是 DCEVM 的全局失效策略），成本真实；需要真实场景测一次热更后的吞吐恢复曲线。该成本按 redefine **次数**计，两阶段的两次 redefine 会把回落代价翻倍 |
 | **真实批次规模 N 未知** | P1 · 观测包（槽位 ⑩） | `RemoldAgent`（`HotswapBatchListener` 已暴露批次边界）/ `InitFix.applyPatch`（已记 `count=N` 与 `elapsed`） | 「单遍历按类分发」是否值得，取决于真实批次类数 N 与每类实例数，目前只有合成数据。观测手段已具备，需要的是**几天真实热更样本**，不是再加代码 |
+| **保留旧体与子 lambda 更新的取舍** | P2（条件：出现"旧实例必须保留旧语义"的诉求） | `OrphanBodyRetention.handleReason` | 旧体 indy 引用的嵌套 lambda 一旦被配对更新，保留旧体会混跑（旧外层 + 新内层），当前判据取保守侧：拒绝保留、回退默认值桩。若改为"连带保留子体"，可保住旧语义，代价是该链路的子 lambda 不得参与本轮配对，需要新的配对-保留联合决策；规格 [`11-orphan-lambda-body-retention.md`](topology/11-orphan-lambda-body-retention.md) §3.4 |
 
 > 关于 `AnonClassHasher.MAX_DEPTH`：该类注释已明确其为**永不生效的历史遗留常量**（`hash` 不递归自调用，三处调用点全传 `depth = 0`，`DeepNestProbe` 实测 depth 8 仍能正确对齐）。保留它是为了不动公开签名 `hash(..., int depth)`，**不应再作为「嵌套深度上限」引用，也不应作为技术债重复登记**。
 
@@ -776,6 +775,17 @@
 - **关联架构决策**：[`D-ENUM-1`](topology/08-decisions.md#d-enum-1)。
 - **关联代码**：`ClassDiffUtil` / `LayoutGate.ENUM_CONSTANT_SET_CHANGED` / `LayoutDecisionEngine.decide` /
   `RemoldAgent.dropEnumSwitchDependents` / `dropEnumConstantDependents`；探针 `tests/enum-append-probe/`。
+
+### 风险 21：懒加载类的旧字节基线可能取到当前磁盘（真匿名类残余）
+
+- **现象与范围**：一个类若在**批次之间**才被 JVM 懒加载（典型：枚举常量体、`@OnReload` 期间首次触发的匿名子类），
+  它没有走过注入/重定义路径，`bytecodeCache` / `sourceBytecodeCache` 里都没有它的**旧**字节。批次预热时
+  `fetchOriginalBytecode(Class)` 通过资源读盘拿到的是**当前磁盘**字节，于是对齐器看到的 old==new，差异被吞掉。
+- **当前处置**：枚举常量体已按独立类直接重定义（字节路由，不依赖旧基线）；真匿名类若基线缺失，对齐不产出
+  结果，批次把它移出时写 `ANON-NOT-ALIGNED` 跳过台账并发 `warn` —— 失败响亮，但该类本轮不热更。
+- **修复方向**：加载期基线登记（`AnnotationTransformer` 对监控目录下新加载类登记 `(loader, 类名)` 与初始
+  字节），无一轮延迟；需处理"新类 vs 重定义"的判定与重入。
+- **关联设计规范**：[`02-admission-and-reserved-names.md`](topology/02-admission-and-reserved-names.md) §1.4。
 
 ## 6. 框架集成插件与资源热更新 (Framework Plugins & Asset Hot-Reload)
 

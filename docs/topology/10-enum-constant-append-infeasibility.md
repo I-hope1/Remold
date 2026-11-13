@@ -96,8 +96,26 @@ OBS jit.after.forcedDeopt.hotLen       = 3     # 再次 redefine（触发 deopt�
 ```
 
 `-Xint` 下同一读点是 3。即：`Unsafe`/反射写 `static final` 字段对**已编译**读取方不可靠可见，
-而热更恰恰总发生在真实运行的进程里。仓库既有登记（`InitFix` 的"static final 的 JIT 常量折叠与读穿
-限制"）与此一致。
+而热更恰恰总发生在真实运行的进程里。
+
+### 3.4.1 追加测量：`$VALUES` 不是常量折叠，且可直接 deopt 读者
+
+（探针新增场景 `deopt-*` / `jit-inline` / `jit-values-write` / `jit-spin-reader-deopt`；JBR 21.0.9）
+
+- **内联的是 `values()`，不是数组内容**：`-XX:+PrintInlining` 显示 `probe.Probe::hotLen` 内联了
+  `test.Color::values (10 bytes)`；`$VALUES` 是普通 `getstatic` 加载（不是 `ConstantValue`）。
+- **纯写字段、不 redefine**：预热后把 `$VALUES` 换成 4 元素数组，热读者仍读 3、直接调用
+  `Color.values().length` 也是 3；随后只对**读者类**做 `redefineClasses(Probe, 同字节)`，
+  `hotLen` 立即变 4。→ 旧读数来自已编译代码里被提升的字段加载，不是编译期常量折叠。
+- **直接 deopt 的公共 API 实测可用**：`redefineClasses(Reader, 同字节)` 与
+  `retransformClasses(Reader/Enum)` 都成功；后者实测 `OBS vdeopt.retransformColor = ok`。
+- **真机热更路径**：v1（2 常量）热读者/spinner 保持 2；只对读者类 deopt（不再 redefine 枚举）后
+  `hotLen=3`、spinner 观察到 `[2, 3]`（`OBS spj.after.readerDeopt.*`）。
+- **可写性**：`Unsafe.putObject(staticFieldBase/Offset)` 可写 `static final $VALUES`；
+  `Field.set` / `VarHandle.set` 均不可（后者抛 `UnsupportedOperationException`）。
+- **但这不等于"只差 deopt"**：`$SwitchMap$` 持有类与存量 `EnumMap`/`EnumSet`（§3.5/§3.6）不会
+  因读者 deopt 修复；且必须枚举**全部**已加载读者类逐个 deopt，遗漏任何一个就是静默旧值，与
+  fail-closed 策略冲突。结论（§4）不变。
 
 ### 3.5 已初始化的 `$SwitchMap$` 持有类无法补 case
 
@@ -208,7 +226,8 @@ InitFix 没实现，值得自己补"。
    `Class.enumConstants` 与 `enumConstantDirectory`（两者都要）。
 3. 已初始化消费类的 `$SwitchMap$`/`$SWITCH_TABLE$` 重建：解析新 `<clinit>` 的"常量 → label"映射，
    用当前 `values()` 重新填表；仅扩容不补 case 会静默落 `default`。
-4. 触发 deopt（再次 redefine 或等价手段）让已编译读者看到新常量。
+4. 触发 deopt 让已编译读者看到新常量：实测可行手段是读者类 `redefineClasses(同字节)` /
+   `retransformClasses`（见 §3.4.1）；但必须覆盖全部已加载读者，遗漏即静默旧值。
 5. 存量 `EnumMap`/`EnumSet` 的判定：无法修 → 只能拒绝或显式降级为"尽力而为"，并让用户看见。
 6. 影子 `Class` 与懒加载旧代码：当前无法闭环，必须写进"不支持"清单。
 

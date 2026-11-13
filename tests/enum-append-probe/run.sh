@@ -19,6 +19,7 @@ FLAGS=(
 )
 
 CP21="$B/probe$SEP$B/21/v1"
+CP21V2="$B/probe$SEP$B/21/v2"
 CP8="$B/probe$SEP$B/8/v1"
 V1BODY="$B/21/v1body/test/Color.class"
 V2_21="$B/21/v2/test/Color.class"
@@ -72,6 +73,16 @@ run "S5 jit-spin jdk8bytes #1"                      jit-spin       "$V2_8"  "$CP
 run "S5b jit-spin under -Xint"                      jit-spin       "$V2_21" "$CP21" -Xint
 run "S5c jit-spin, exclude probe.Probe::hotLen #1"   jit-spin       "$V2_21" "$CP21" -XX:CompileCommand=exclude,probe/Probe::hotLen
 run "S5c jit-spin, exclude probe.Probe::hotLen #2"   jit-spin       "$V2_21" "$CP21" -XX:CompileCommand=exclude,probe/Probe::hotLen
+run "S7 jit-spin, direct reader deopt (no 2nd redefine)" jit-spin-reader-deopt "$V2_21" "$CP21"
+
+# --- direct deopt / $VALUES folding (no enum redefine in these JVMs) ---
+run "S8a deopt control (Unsafe write only)"            deopt-unsafe-only      "$V2_21" "$CP21"
+run "S8b deopt reader via redefine same bytes"        deopt-redefine-reader  "$V2_21" "$CP21"
+run "S8c deopt reader via retransformClasses"         deopt-retransform-reader "$V2_21" "$CP21"
+run "S8d retransform enum only"                       deopt-retransform-enum "$V2_21" "$CP21"
+run "S8e redefine enum again (control)"               deopt-redefine-enum    "$V2_21" "$CP21"
+run "S8f pure \$VALUES rewrite + reader deopt (v2 baseline)" jit-values-write "$V2_21" "$CP21V2"
+run "S8g values() inlining (PrintInlining)"           jit-inline            "$V2_21" "$CP21" -XX:+UnlockDiagnosticVMOptions -XX:+PrintInlining
 run "S5d jit-cold (no warmup at all)"                jit-cold       "$V2_21" "$CP21"
 run "S5e jit-field (hot GETSTATIC BLUE) #1"           jit-field      "$V2_21" "$CP21"
 run "S5e jit-field (hot GETSTATIC BLUE) #2"           jit-field      "$V2_21" "$CP21"

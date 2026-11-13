@@ -54,6 +54,29 @@ grep -E 'OBS (repair|baseline|jit|switch|cache|hazard)' tests/enum-append-probe/
 `-Xint` 对照与 `-XX:CompileCommand=exclude,...` 对照在 `run.sh` 里显式列出，用来区分"缓存没清"与
 "JIT 折叠"——两者读数不同，不能用一个信号解释另一个。
 
+### 直接 deopt 与 `$VALUES` 内联（S5d / S6 场景）
+
+问题：`$VALUES` 会不会被 JIT 当成常量折叠？能不能直接改它、直接 deopt 读者让新常量可见？
+JBR 21.0.9 实测（`jit-inline` / `jit-values-write` / `deopt-*` / `jit-spin-reader-deopt`）：
+
+| 观测 | 读数 |
+|:--|:--|
+| `-XX:+PrintInlining` | `probe.Probe::hotLen` 内联 `test.Color::values (10 bytes) inline`——内联的是 `values()`；`$VALUES` 是普通 `getstatic` |
+| 预热后 Unsafe 把 `$VALUES` 换成 4 元素数组（不 deopt） | 热读者仍 3、`Color.values().length` 仍 3（`OBS vwrite.hotLen.sample*`） |
+| 仅对读者类 `redefineClasses(Probe, 同字节)` | 立刻变 4（`OBS vdeopt.hotLen.sample* = 4`）；`retransformClasses(Color)` 也 ok |
+| 真机热更：v1(2 常量) 热读者/spinner | 保持 2；只 deopt 读者类（不再 redefine 枚举）后 `hotLen=3`、spinner `[2,3]` |
+| 可写性 | Unsafe `staticFieldBase/Offset` 可写；`Field.set` 不可；`VarHandle.set` 抛 `UnsupportedOperationException` |
+
+结论：`$VALUES` **不是** ConstantValue 常量折叠，旧读数是已编译代码里被提升的 `getstatic` / 内联
+`values()`；直接 deopt 读者确实能刷新。但这不改变"追加常量仍拒绝"的结论——`$SwitchMap$` 持有类、
+存量 `EnumMap`/`EnumSet` 不随 deopt 修复，且必须覆盖全部已加载读者，遗漏即静默旧值。
+逐条读数与设计结论见 [`docs/topology/10-enum-constant-append-infeasibility.md`](../../docs/topology/10-enum-constant-append-infeasibility.md) §3.4.1。
+
+注：`deopt-*`（S8a~S8e）是**静默路径控制组**——在没有并发热读者的 JVM 里，redefine 本身已经把
+已编译读者 deopt 掉（读数直接为 3），因此它们不区分 deopt 手段；真正有区分力的读数是
+`jit-values-write`（纯写字段不 redefine：3 → 读者类 deopt 后 4）与 `jit-spin-reader-deopt`
+（真机热更：2 → 读者类 deopt 后 3）。
+
 ## 边界
 
 - 探针只覆盖 JBR 21.0.9 + C2；其他 JVM / Graal 未测。

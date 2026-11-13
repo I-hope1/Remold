@@ -7,6 +7,8 @@ import java.io.ObjectOutputStream;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.invoke.VarHandle;
+import java.lang.instrument.ClassDefinition;
 import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
@@ -96,6 +98,14 @@ public final class Probe {
                 case "jit-spin" -> jitSpin(v2);
                 case "jit-cold" -> jitCold(v2);
                 case "jit-field" -> jitField(v2);
+                case "deopt-unsafe-only" -> jitDeopt(v2, "unsafe-only");
+                case "deopt-redefine-reader" -> jitDeopt(v2, "redefine-reader");
+                case "deopt-retransform-reader" -> jitDeopt(v2, "retransform-reader");
+                case "deopt-retransform-enum" -> jitDeopt(v2, "retransform-enum");
+                case "deopt-redefine-enum" -> jitDeopt(v2, "redefine-enum");
+                case "jit-inline" -> jitInline(v2);
+                case "jit-values-write" -> jitValuesWrite(v2);
+                case "jit-spin-reader-deopt" -> jitSpinReaderDeopt(v2);
                 case "swv2-after" -> swv2After(v2);
                 case "swv2-before" -> swv2Before(v2);
                 case "ctor" -> ctorScenario(v2);
@@ -564,6 +574,241 @@ public final class Probe {
         SPIN_STOP.set(true);
         spinner.join(3000);
         out("jit.after.repair.hotSwitch(blue)", hotSwitchOf(blue));
+    }
+
+    /**
+     * Direct deopt experiments: after the repair, can already-compiled readers be forced to see the
+     * new {@code $VALUES} without redefining the enum class again? One mechanism per JVM.
+     */
+    static void jitDeopt(byte[] v2, String mode) throws Throwable {
+        preCache();
+        long sink = 0;
+        for (long i = 0; i < 1_000_000L; i++) {
+            sink += hotLen();
+        }
+        out("deopt.mode", mode);
+        out("deopt.warm.sink", sink);
+        out("deopt.warm.hotLen", hotLen());
+
+        redefine(v2);
+        final Color blue = newConstant("BLUE", 2);
+        unsafePutStatic("BLUE", blue);
+        rebuildValues(blue);
+        clearCaches(true, true);
+
+        out("deopt.after.repair.rawValuesLen", getRawValuesLen());
+        out("deopt.after.repair.hotLen", hotLen());
+        out("deopt.after.repair.valuesLen", Color.values().length);
+        out("deopt.after.repair.newlyCompiledLen", newlyCompiledLen());
+
+        switch (mode) {
+            case "unsafe-only" -> out("deopt.action", "none (Unsafe write only, no deopt requested)");
+            case "redefine-reader" -> {
+                byte[] bytes = classBytes(Probe.class);
+                ProbeAgent.INST.redefineClasses(new ClassDefinition(Probe.class, bytes));
+                out("deopt.action", "redefineClasses(Probe, sameBytes) size=" + bytes.length);
+            }
+            case "retransform-reader" -> {
+                try {
+                    ProbeAgent.INST.retransformClasses(Probe.class);
+                    out("deopt.action", "retransformClasses(Probe) ok");
+                } catch (Throwable t) {
+                    out("deopt.action", "retransformClasses(Probe) THREW " + describe(t));
+                }
+            }
+            case "retransform-enum" -> {
+                try {
+                    ProbeAgent.INST.retransformClasses(Color.class);
+                    out("deopt.action", "retransformClasses(Color) ok");
+                } catch (Throwable t) {
+                    out("deopt.action", "retransformClasses(Color) THREW " + describe(t));
+                }
+            }
+            case "redefine-enum" -> {
+                redefine(v2);
+                out("deopt.action", "redefineClasses(Color, v2) again");
+            }
+            default -> throw new IllegalArgumentException(mode);
+        }
+
+        for (int i = 0; i < 5; i++) {
+            final int n = i;
+            probe("deopt.after." + n + ".hotLen", () -> hotLen());
+            Thread.sleep(100);
+        }
+        out("deopt.after.hotLen.final", hotLen());
+        out("deopt.after.valuesLen", Color.values().length);
+        out("deopt.after.newlyCompiledLen", newlyCompiledLen());
+        probe("deopt.after.BlueReader.read", () -> readBlueReader("read"));
+    }
+
+    /**
+     * Does the JIT inline {@code Color.values()} (and thus the {@code $VALUES} load) into a hot reader?
+     * Run with {@code -XX:+UnlockDiagnosticVMOptions -XX:+PrintInlining} to capture the inline decision;
+     * the numeric readings compare warmed vs. newly-compiled readers after the repair.
+     */
+    static void jitInline(byte[] v2) throws Throwable {
+        preCache();
+        long sink = 0;
+        for (long i = 0; i < 1_000_000L; i++) {
+            sink += hotLen();
+        }
+        out("inline.warm.sink", sink);
+        out("inline.warm.hotLen", hotLen());
+
+        redefine(v2);
+        final Color blue = newConstant("BLUE", 2);
+        unsafePutStatic("BLUE", blue);
+        rebuildValues(blue);
+        clearCaches(true, true);
+
+        out("inline.after.repair.rawValuesLen", getRawValuesLen());
+        out("inline.after.repair.hotLen", hotLen());
+        out("inline.after.repair.newlyCompiledLen", newlyCompiledLen());
+        out("inline.after.repair.valuesLen", Color.values().length);
+
+        probe("inline.varHandle.$VALUES.write", () -> {
+            VarHandle vh = MethodHandles.privateLookupIn(Color.class, MethodHandles.lookup())
+                    .findStaticVarHandle(Color.class, "$VALUES", Color[].class);
+            vh.set(Color.values());
+            return "VarHandle.set accepted";
+        });
+        out("inline.after.varHandle.hotLen", hotLen());
+        out("inline.after.varHandle.valuesLen", Color.values().length);
+        out("inline.after.repair.newlyCompiledLen2", newlyCompiledLen());
+    }
+
+    /**
+     * Real hot-swap stale-reader case, but the refresh is a direct deopt of the *reader* class
+     * (redefineClasses with identical bytes) instead of redefining the enum class a second time.
+     */
+    static void jitSpinReaderDeopt(byte[] v2) throws Throwable {
+        preCache();
+        long sink = 0;
+        for (long i = 0; i < 1_000_000L; i++) {
+            sink += hotLen();
+            sink += hotSwitch();
+        }
+        out("spj.warm.sink", sink);
+        out("spj.warm.hotLen", hotLen());
+
+        Thread spinner = new Thread(() -> {
+            int last = -1;
+            long n = 0;
+            while (!SPIN_STOP.get()) {
+                int len = hotLen();
+                if (len != last) {
+                    SPIN_SEEN.add(len);
+                    last = len;
+                }
+                n++;
+            }
+            out("spj.spin.iterations", n);
+        }, "spinner");
+        spinner.setDaemon(true);
+        spinner.start();
+        Thread.sleep(400);
+
+        redefine(v2);
+        final Color blue = newConstant("BLUE", 2);
+        unsafePutStatic("BLUE", blue);
+        rebuildValues(blue);
+        clearCaches(true, true);
+        out("spj.after.repair.hotLen", hotLen());
+        out("spj.after.repair.spinnerSeen", SPIN_SEEN.toString());
+
+        byte[] bytes = classBytes(Probe.class);
+        ProbeAgent.INST.redefineClasses(new ClassDefinition(Probe.class, bytes));
+        out("spj.readerDeopt", "redefineClasses(Probe, sameBytes) size=" + bytes.length);
+        long deadline = System.currentTimeMillis() + 3000;
+        while (System.currentTimeMillis() < deadline && !SPIN_SEEN.contains(3)) {
+            Thread.sleep(10);
+        }
+        out("spj.after.readerDeopt.hotLen", hotLen());
+        out("spj.after.readerDeopt.spinnerSeen", SPIN_SEEN.toString());
+        out("spj.after.readerDeopt.spinnerObservedNewLen", SPIN_SEEN.contains(3) ? "YES" : "NO");
+        SPIN_STOP.set(true);
+        spinner.join(3000);
+    }
+
+    /**
+     * Isolates the JIT treatment of the {@code $VALUES} field itself (no enum redefine in this JVM):
+     * warm a reader against a 3-constant enum, then replace the static final array with a 4-element one
+     * through Unsafe. A stale reading means the compiled code hoisted/inlined the {@code getstatic};
+     * afterwards we force a deopt of just the reader class and see whether a fresh load happens.
+     * Run with {@code -cp probe:v2} (the classpath enum already has three constants).
+     */
+    static void jitValuesWrite(byte[] ignored) throws Throwable {
+        long sink = 0;
+        for (long i = 0; i < 1_000_000L; i++) {
+            sink += hotLen();
+        }
+        out("vwarm.sink", sink);
+        out("vwarm.hotLen", hotLen());
+        out("vwarm.valuesLen", Color.values().length);
+        out("vwarm.rawLen", getRawValuesLen());
+
+        Object old = unsafeStatic("$VALUES");
+        int n = Array.getLength(old);
+        Object bigger = Array.newInstance(Color.class, n + 1);
+        for (int i = 0; i < n; i++) {
+            Array.set(bigger, i, Array.get(old, i));
+        }
+        Array.set(bigger, n, Array.get(old, 0));
+        unsafePutStatic("$VALUES", bigger);
+        out("vwarm.afterWrite.rawLen", getRawValuesLen());
+        out("vwarm.afterWrite.oldArrayLen", n);
+
+        for (int i = 0; i < 5; i++) {
+            final int k = i;
+            probe("vwrite.hotLen.sample" + k, () -> hotLen());
+            Thread.sleep(100);
+        }
+        probe("vwrite.warmValuesLen", () -> Color.values().length);
+        out("vwrite.newlyCompiledLen", newlyCompiledLen());
+        probe("vwrite.VarHandle.write", () -> {
+            VarHandle vh = MethodHandles.privateLookupIn(Color.class, MethodHandles.lookup())
+                    .findStaticVarHandle(Color.class, "$VALUES", Color[].class);
+            vh.set(Color.values());
+            return "VarHandle.set accepted";
+        });
+
+        // Direct deopt of the reader class only: redefineClasses with identical bytes.
+        byte[] bytes = classBytes(Probe.class);
+        ProbeAgent.INST.redefineClasses(new ClassDefinition(Probe.class, bytes));
+        out("vdeopt.action", "redefineClasses(Probe, sameBytes) size=" + bytes.length);
+        for (int i = 0; i < 5; i++) {
+            final int k = i;
+            probe("vdeopt.hotLen.sample" + k, () -> hotLen());
+            Thread.sleep(100);
+        }
+        out("vdeopt.valuesLen", Color.values().length);
+        out("vdeopt.newlyCompiledLen", newlyCompiledLen());
+
+        // Retransform is the other public deopt switch; measure on the enum class itself.
+        try {
+            ProbeAgent.INST.retransformClasses(Color.class);
+            out("vdeopt.retransformColor", "ok");
+        } catch (Throwable t) {
+            out("vdeopt.retransformColor", "THREW " + describe(t));
+        }
+        out("vdeopt.afterRetransformColor.hotLen", hotLen());
+        out("vdeopt.afterRetransformColor.valuesLen", Color.values().length);
+    }
+
+    static byte[] classBytes(Class<?> type) throws Throwable {
+        String res = "/" + type.getName().replace('.', '/') + ".class";
+        try (java.io.InputStream in = type.getResourceAsStream(res)) {
+            if (in == null) {
+                throw new IllegalStateException("class bytes not found: " + res);
+            }
+            return in.readAllBytes();
+        }
+    }
+
+    /** First call to this method happens after the repair, so it is compiled after the new $VALUES. */
+    static int newlyCompiledLen() {
+        return Color.values().length;
     }
 
     /**

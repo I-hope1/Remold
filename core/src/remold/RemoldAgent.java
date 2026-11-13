@@ -2047,7 +2047,11 @@ public class RemoldAgent {
 				changedOnDisk = (oldHash == -1 || oldHash == LongLongMap.NOT_FOUND || oldHash != newHash);
 			}
 			if (changedOnDisk) {
-				String host = cn.replaceAll("\\$\\d+(\\$\\d+)*$", "");
+				// 只有**字节判定为真匿名**的类才把宿主拉进对齐组。枚举常量体 {@code Op$1} 名字
+				// 与匿名类同形，但带 ACC_ENUM、是独立类：按普通类直接参与本批重定义（S22）。
+				String host = AnonClassAligner.isBatchAnonClass(cn, entry.getValue())
+					? cn.replaceAll("\\$\\d+(\\$\\d+)*$", "")
+					: cn;
 				hostClassesToAlign.add(host);
 			}
 		}
@@ -2074,22 +2078,24 @@ public class RemoldAgent {
 				if (AnonClassAligner.isAnonymousClassName(hostSlash, cName)) {
 					if (!bytecodeCache.containsKey(cName)) {
 						byte[] bc = fetchOriginalBytecode(entry.getValue());
-						if (bc != null) bytecodeCache.put(cName, bc);
+						if (bc != null && AnonClassAligner.isBatchAnonClass(cName, bc)) bytecodeCache.put(cName, bc);
 					}
 				}
 			}
 
 			Map<String, byte[]> oldAnon = new HashMap<>();
 			for (Map.Entry<String, byte[]> entry : bytecodeCache.entrySet()) {
-				if (AnonClassAligner.isAnonymousClassName(hostSlash, entry.getKey())) {
-					byte[] src = sourceBytecodeCache.get(entry.getKey());
-					oldAnon.put(entry.getKey(), src != null ? src : entry.getValue());
+				if (!AnonClassAligner.isAnonymousClassName(hostSlash, entry.getKey())) continue;
+				byte[] src = sourceBytecodeCache.get(entry.getKey());
+				byte[] oldBytes = src != null ? src : entry.getValue();
+				if (AnonClassAligner.isBatchAnonClass(entry.getKey(), oldBytes)) {
+					oldAnon.put(entry.getKey(), oldBytes);
 				}
 			}
 
 			Map<String, byte[]> newAnon = new HashMap<>();
 			for (Map.Entry<String, byte[]> entry : newBatchBytes.entrySet()) {
-				if (AnonClassAligner.isAnonymousClassName(hostSlash, entry.getKey())) {
+				if (AnonClassAligner.isBatchAnonClass(entry.getKey(), entry.getValue())) {
 					newAnon.put(entry.getKey(), entry.getValue());
 				}
 			}
@@ -2157,9 +2163,21 @@ public class RemoldAgent {
 				allOrphanClasses.add(orphan.replace('/', '.'));
 			}
 
-			// 清理已被重命名位移的原编译类名（避免旧名字被当作新类重复处理）
+			// 真匿名类不得按原名重定义（编号位移会篡夺槽位），所以未对齐的一律移出本批；
+			// 但"移出"必须可观测：对齐器没消费的类要进跳过台账并点名 warn（S22 曾在此静默丢弃）。
 			for (String originalAnonName : newAnon.keySet()) {
+				String rawSlash = originalAnonName.replace('.', '/');
+				boolean consumed = res.renameMap.containsKey(rawSlash)
+					|| res.alignedAnonClasses.containsKey(rawSlash);
 				newBatchBytes.remove(originalAnonName);
+				if (!consumed) {
+					Path anonPath = classToPath.get(originalAnonName);
+					skips.add(anonPath == null ? originalAnonName : anonPath.toString(),
+						RoundSkips.verdict("ANON-NOT-ALIGNED",
+							"anonymous class was not consumed by host alignment", "recompile it and hot-swap again"));
+					warn("[ANON_ALIGN] " + originalAnonName + " was not aligned under host " + hostName
+						+ "; it is kept out of this batch");
+				}
 			}
 
 			// 将对齐重命名后的新匿名类注入批次并登记到事务

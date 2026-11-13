@@ -863,6 +863,35 @@ public final class AnonClassAligner {
 		return isAnonymousClassName(hostClassName, cn.name);
 	}
 
+	/** 字节版：解析失败一律按"不是匿名类"处理（解不开的字节也进不了对齐器，布局门仍会兜底）。 */
+	public static boolean isAnonymousClass(byte[] bytes, String hostClassName) {
+		if (bytes == null || hostClassName == null) return false;
+		try {
+			ClassNode cn = new ClassNode();
+			new ClassReader(bytes).accept(cn, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+			return isAnonymousClass(cn, hostClassName);
+		} catch (RuntimeException e) {
+			return false;
+		}
+	}
+
+	/**
+	 * 批次路由：某个磁盘类是否应作为「宿主类下属匿名类」进入宿主对齐组。
+	 *
+	 * <p>名字只做前置筛选，准入必须看字节。枚举常量体 {@code Op$1} 的名字与匿名类同形
+	 * （{@code $\d+} 结尾），但它带 {@code ACC_ENUM}、由 {@code Op.<clinit>} 构造，是<b>独立类</b>——
+	 * {@link #isAnonymousClass(ClassNode, String)} 明确排除。名字-only 判定会把它塞进宿主对齐组；
+	 * 对齐器拒绝 {@code ACC_ENUM} 候选、不产出任何重命名/对齐字节，随后批次把它当"已位移的旧名"
+	 * 丢掉，于是它**静默地不参与重定义**（S22：懒加载的枚举常量体停留在旧版本）。</p>
+	 */
+	public static boolean isBatchAnonClass(String className, byte[] bytes) {
+		if (className == null || bytes == null) return false;
+		String host = className.replaceAll("\\$\\d+(\\$\\d+)*$", "");
+		if (host.equals(className)) return false;
+		if (!isAnonymousClassName(host, className)) return false;
+		return isAnonymousClass(bytes, host);
+	}
+
 	/**
 	 * 判断一个类名是否属于宿主类的匿名内部类。
 	 */

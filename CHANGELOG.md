@@ -52,6 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `access$`（访问器是直接调用目标，不是 lambda impl）。回归：
   `LambdaBridgeAlignTest.retainedBodyIsRefusedWhenItsNestedLambdaWasUpdated`；变异：关掉闸门 → 用例红。
 
+- **枚举常量体被当匿名类静默移出批次（S22）**：批次的匿名类路由只按类名 `$\d+` 判定，把
+  `Op$1`（`ACC_ENUM`、独立类）塞进"宿主 `Op` 的匿名组"；对齐器按字节拒绝该候选、不产出对齐
+  字节，随后批次把未消费的匿名类移出本批——无日志、无跳过台账，`Op$1` 永远停在旧版本。
+  修复：路由改用 `AnonClassAligner.isBatchAnonClass(className, bytes)`（名字只做前置筛选、准入
+  以字节为准），枚举常量体按普通类直接重定义；未消费的匿名类移出时写 `ANON-NOT-ALIGNED`
+  跳过台账并发 warn。回归：`EnumConstantBodyRoutingTest`（枚举体不得入组 / 真匿名类仍入组）；
+  变异：路由退回名字-only → 用例红；`:tests:test` 全绿。
+
 ## [0.2.8] - 2026-11-12
 
 ### Summary

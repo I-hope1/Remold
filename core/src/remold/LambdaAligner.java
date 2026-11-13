@@ -1589,6 +1589,9 @@ public class LambdaAligner {
 		// scan 把 access$ / Kotlin $annotations 这类设为非 renameable，用意是不让它们参与改名；
 		// 若这里不查，一个空体新 lambda 仍可能认领空体旧 $annotations 的名字。
 		if (!oi.renameable) return false;
+		// 一个旧简单名只能被一个方法占用（renameBySimpleName 与避障都依赖这一约束）；
+		// step2PassA/step2/stepGhostRevive 都查了，Step 1 与宿主序列锚点也必须对称地查。
+		if (ctx.usedOldNames.contains(oi.name)) return false;
 		// 用递归语义指纹而非票据指纹：票据指纹屏蔽了子 lambda 的名字，
 		// 使"整棵树只差最深处叶子"的方法互相撞车（三层嵌套即如此）。
 		// 语义指纹一致 ⇔ 整棵子树等价，因此不会把两个不同的 lambda 配成一对。
@@ -4065,6 +4068,9 @@ public class LambdaAligner {
 				continue;                                          // 目标真没了
 			}
 			if (now.ghost || !now.renameable) continue;
+			// captured 只在 recordLambdaShape 遇到 indy 时赋值；目标若变成仅被直接调用/不可达，
+			// 这里会是 null。第一轮已判过，第二轮同样不能直接解引用，否则抛 NPE 拖垮整类对齐。
+			if (now.captured == null) continue;
 			if (presentKeys.contains(oldKey)) continue;
 			// 目标的静态位若与上一轮不同，上一轮那份"搬哪些实参"的记录就不再成立
 			// （比如它又用回了 this，目标从静态变回实例，而桥当时把接收者丢掉了）。
@@ -5320,13 +5326,20 @@ public class LambdaAligner {
 						String     key     = mn.name + mn.desc;
 						MethodNode oldBody = prevBodies.get(key);
 						// 上一轮已经是"保留体"幽灵：原样搬运（它的 3 参标记与旧体一起走），
-						// 不做第二次判定，保证多轮产物稳定、旧实例拿到的一直是同一份旧逻辑。
+						// 保证多轮产物稳定、旧实例拿到的一直是同一份旧逻辑——
+						// 但**必须每轮重做成员存活校验**：上一轮还活着的 helper()/x 可能这一轮被删，
+						// 直接搬运会保留调用已删成员的字节码，旧实例一执行就 NoSuchMethodError / NoSuchFieldError。
 						if (retentionActive && oldBody != null && hasRetainedBodyMarker(oldBody)) {
-							injectWholeBody(dummy, access, mn, oldBody);
-							retainedBodies[0]++;
-							TEST_EVENTS.add(new AlignmentEvent("GHOST_KEEP_BODY", mn.name, null,
-							 className + "#" + key + " (carried over)"));
-							continue;
+							String carriedWhy = OrphanBodyRetention.rejectionReason(
+							 prevClassNode, nextClassNode, oldBody, plannedKeys);
+							if (carriedWhy == null) {
+								injectWholeBody(dummy, access, mn, oldBody);
+								retainedBodies[0]++;
+								TEST_EVENTS.add(new AlignmentEvent("GHOST_KEEP_BODY", mn.name, null,
+								 className + "#" + key + " (carried over)"));
+								continue;
+							}
+							retentionFallbacks.add(key + ": carried-over body rejected (" + carriedWhy + ")");
 						}
 						// 捕获桥优先：这个老键不是"死了"，只是参数表缩水，转发给新方法即可。
 						BridgeSpec bridge = ctx.bridges.get(mn.name + mn.desc);
@@ -6196,6 +6209,18 @@ public class LambdaAligner {
 
 	/** 对两个同类型常量执行可折叠二元运算；不可折叠返回 {@code null}。 */
 	private static BodyTok foldBinary(BodyTok a, BodyTok b, int op) {
+		// long 移位的右操作数按 JLS 固定是 int（K_INT），不能要求两侧都是 K_LONG，
+		// 否则 LSHL/LSHR/LUSHR 三个分支永远不可达（1L << 3 折不成 8L）。
+		if (a.kind == BodyTok.K_LONG && b.kind == BodyTok.K_INT
+		    && (op == Opcodes.LSHL || op == Opcodes.LSHR || op == Opcodes.LUSHR)) {
+			long x = a.a;
+			int y = (int) b.a;
+			return switch (op) {
+				case Opcodes.LSHL  -> BodyTok.constant(BodyTok.K_LONG, x << y);
+				case Opcodes.LSHR  -> BodyTok.constant(BodyTok.K_LONG, x >> y);
+				default            -> BodyTok.constant(BodyTok.K_LONG, x >>> y);
+			};
+		}
 		boolean isInt = a.kind == BodyTok.K_INT && b.kind == BodyTok.K_INT;
 		boolean isLong = a.kind == BodyTok.K_LONG && b.kind == BodyTok.K_LONG;
 		if (!isInt && !isLong) return null;
@@ -6267,7 +6292,11 @@ public class LambdaAligner {
 		if (cst instanceof Type t) return hashName(maskDesc(t.getDescriptor(), owner, anonIds));
 		if (cst instanceof Handle hd) {
 			long h = hashName(maskName(hd.getOwner(), owner, anonIds));
-			h = mix64(h ^ hashName(hd.getName()));
+			// 与 MethodInsnNode 分支对齐：本类合成方法名要屏蔽。indy 句柄（内层 lambda 的 bsmArgs[1]）
+			// 若不屏蔽，类里别处增删 lambda 导致内层编号变化时，外层体一字未改却指纹不同，
+			// 等价证明失效 → 嵌套外层被假拒配。
+			h = mix64(h ^ (owner.equals(hd.getOwner()) && MethodFingerprinter.isSyntheticName(hd.getName())
+				? hashName("#SYNTHETIC_METHOD#") : hashName(hd.getName())));
 			h = mix64(h ^ hashName(maskDesc(hd.getDesc(), owner, anonIds)));
 			return mix64(h ^ hd.getTag());
 		}

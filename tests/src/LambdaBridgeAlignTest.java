@@ -278,6 +278,59 @@ public class LambdaBridgeAlignTest {
 		}
 	}
 
+	/** 多轮保留体：V2 里 lambda 被删、helper 仍在 → 保留旧体；V3 删掉 helper → 必须回退默认值桩。 */
+	static final String V1_RETAINED_HELPER = """
+		import java.util.function.Supplier;
+		public class RetainedHost {
+		    public static Supplier<String> s;
+		    static String helper() { return "h"; }
+		    static void make() { s = () -> "v1:" + helper(); }
+		}
+		""";
+
+	static final String V2_RETAINED_HELPER = """
+		import java.util.function.Supplier;
+		public class RetainedHost {
+		    public static Supplier<String> s;
+		    static String helper() { return "h"; }
+		    static void make() { s = null; }
+		}
+		""";
+
+	static final String V3_HELPER_DELETED = """
+		import java.util.function.Supplier;
+		public class RetainedHost {
+		    public static Supplier<String> s;
+		    static void make() { s = null; }
+		}
+		""";
+
+	/**
+	 * 多轮保留体：上一轮的保留体幽灵在本轮成员被删后必须重新过存活校验（否则旧实例执行时
+	 * NoSuchMethodError / NoSuchFieldError）。
+	 */
+	@Test
+	void carriedOverRetainedBodyIsRevalidatedWhenItsMembersAreDeleted(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "rh/v1", V1_RETAINED_HELPER).resolve("RetainedHost.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "rh/v2", V2_RETAINED_HELPER).resolve("RetainedHost.class"));
+		byte[] v3 = Files.readAllBytes(compile(javac, tmp, "rh/v3", V3_HELPER_DELETED).resolve("RetainedHost.class"));
+
+		// 第一轮：lambda 被删、helper 仍在 → 保留旧体（里面的 helper() 调用还在）。
+		byte[] aligned12 = LambdaAligner.align(v1, v2);
+		MethodNode kept = byKey(parse(aligned12), "lambda$make$0", "()Ljava/lang/String;");
+		assertNotNull(kept, "第一轮必须保留旧体幽灵");
+		assertTrue(containsCall(kept, "helper"), "第一轮保留体应仍引用 helper（前提校验）");
+
+		// 第二轮：helper 被删 → 搬运前必须重新校验，回退默认值桩，不得保留 helper() 调用。
+		byte[] aligned23 = LambdaAligner.align(aligned12, v3);
+		MethodNode carried = byKey(parse(aligned23), "lambda$make$0", "()Ljava/lang/String;");
+		assertNotNull(carried, "旧键必须仍在（要么保留体要么默认值桩）");
+		assertFalse(containsCall(carried, "helper"),
+			"helper 已删除：不得继续搬运调用 helper 的旧体（否则运行时 NoSuchMethodError）");
+		assertTrue(containsCall(carried, "onOrphanInvoked"), "应回退默认值桩并留痕");
+	}
+
 	/** S14 现场形态：两个宿主方法交换 this 形状时，旧键不得被跨宿主桥接/改名。 */
 	@Test
 	void thisShapeSwapAcrossHostsIsNotBridged(@TempDir Path tmp) throws Exception {

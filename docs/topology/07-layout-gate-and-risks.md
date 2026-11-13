@@ -1,5 +1,7 @@
 # 布局安全门、局部类防御与风险清单
 
+> **文档类型**：设计规格（只写规格/决策；实现状态以 [`docs/status.md`](../status.md) 为准）
+
 > **实现状态与审计**：本规范定义客观的架构与设计规格。当前实现状态、验收证据与详细审计参见 [docs/status.md](../status.md)
 > 与 [AGENTS.md](../../AGENTS.md)。
 
@@ -22,7 +24,7 @@
 * **枚举常量集合变动（追加/删除）**：末尾追加不改变已有常量的相对序号，顺序门看不到，但 `<clinit>` 不重跑意味着新常量不会被构造（恒 `null`、`$VALUES` 不扩容），删除的常量仍留在旧 `$VALUES` 实例数组里（`values()`/`valueOf()` 仍能见到）。两种形态都会产生"`HotSwap successful` 但源码变更没生效"的假成功，因此由 `ENUM_CONSTANT_SET_CHANGED` 同样拒绝并提示重启；级联阻断直接引用变更常量的同批调用方，避免被拒枚举保持旧版后调用方在运行期解析到不存在的字段（`NoSuchFieldError` 被推迟到热更事务之外）。**拒绝不是"InitFix 还没实现"**：JBR 21 真机实测（[`10-enum-constant-append-infeasibility.md`](10-enum-constant-append-infeasibility.md)，探针 [`tests/enum-append-probe/`](../../tests/enum-append-probe/README.md)）否定了"事后重写 `$VALUES` + 清空 `Class` 的两个枚举缓存"这条候选方案——冷路径能修好，但已 JIT 编译的读者在 deopt 前仍是旧常量表、已初始化的 `$SwitchMap$`/`$SWITCH_TABLE$` 持有类补不出新 case（扩容只消除 AIOOBE，新 case 静默落 `default`）、存量 `EnumMap`/`EnumSet` 实例无法原地扩容（AIOOBE / 迭代陈旧），另有 `Class` 影子副本与懒加载旧代码不可闭环；放行只会把"没生效"换成"静默错分支/延迟 `AIOOBE`"。决策记录见 [`08-decisions.md`](08-decisions.md#d-enum-1)；
 * **Record 类新增组件（R1）**：Java 语言规范中 Record 类严禁声明实例变量，所有实例字段均为组件且由规范构造器参数赋值，InitFix 无法提取初值表达式切片。若堆上存在存活实例，其新增组件恒为类型零值（0 或 `null`），且运行时合成的 `toString`/`equals`/`hashCode` 自动链接新组件导致等价性与散列破损。全局布局门通过 `RECORD_COMPONENT_ADDED` 坚决拒绝有存活实例的重定义；若堆上无存活实例则安全放行（`WAIVE`）；
 * **`@RemoldReinit` 初值提取可行性前置核验（B4）**：字段改类型时若标注 `@RemoldReinit`，布局门必须前置联动 InitFix 校验新字节码中该字段是否具备可提取的初值切片。若字段为 Record 组件、构造器参数自赋值（`this.f = f`）或无安全初值表达式，InitFix 无法生成补丁，DCEVM 重定义将把存量槽位清空为默认值导致静默数据丢失。布局门在此类场景下否决 `WAIVE_REINIT` 授权并维持 `LAYOUT-REJECT`，阻断重定义以保全旧数据；
-* **字段删除是另一类问题**：实测（`docs/initfix/07-p05-probe-results.md` §13）字节码层由 DCEVM 实例迁移保全未删字段值、废弃槽位不复用，字节码读者失败形态是**批次外读者抛确定性的 `NoSuchFieldError`**；底层物理内存布局实际紧缩，若有缓存物理偏移的读者会读写错位（见 `OffsetStabilityProbe` A4-2）。判据是"**批次外读者为空**"（批次内扫新字节码、批次外扫当前字节码），已实现并接线：命中 `Fieldref` 才拒，且 owner 是编译期静态类型而非声明类，须按 JVMS 5.4.3.2 判"解析是否真的落在被删字段上"——沿继承树展开、父类遮蔽与接口截胡都要排除，private 例外（JLS §6.6，owner 恒为声明类）。不能简化成"有删除就拒"，那会误杀删 private 字段与正常连带重编的批次（做法见 §13.6）。**两个入口判决不同**：匿名类合成字段删除由 `LayoutGate.check` 判 `COMPATIBLE` 放行（读者必为空，可证），具名类字段删除由 `checkChangedFields` 判 `REMOVED_FIELD` 后再按读者集判。完备性取决于扫描范围（只扫已加载类会漏掉未加载的陈旧读者），扫描未完成时退回存活实例判据（`docs/status.md` 风险 12）。
+* **字段删除是另一类问题**：实测（`docs/initfix/07-p05-probe-results.md` §13）字节码层由 DCEVM 实例迁移保全未删字段值、废弃槽位不复用，字节码读者失败形态是**批次外读者抛确定性的 `NoSuchFieldError`**；底层物理内存布局实际紧缩，若有缓存物理偏移的读者会读写错位（见 `OffsetStabilityProbe` A4-2）。判据是"**批次外读者为空**"（批次内扫新字节码、批次外扫当前字节码），两个入口共用该判据：命中 `Fieldref` 才拒，且 owner 是编译期静态类型而非声明类，须按 JVMS 5.4.3.2 判"解析是否真的落在被删字段上"——沿继承树展开、父类遮蔽与接口截胡都要排除，private 例外（JLS §6.6，owner 恒为声明类）。不能简化成"有删除就拒"，那会误杀删 private 字段与正常连带重编的批次（做法见 §13.6）。**两个入口判决不同**：匿名类合成字段删除由 `LayoutGate.check` 判 `COMPATIBLE` 放行（读者必为空，可证），具名类字段删除由 `checkChangedFields` 判 `REMOVED_FIELD` 后再按读者集判。完备性取决于扫描范围（只扫已加载类会漏掉未加载的陈旧读者），扫描未完成时退回存活实例判据（`docs/status.md` 风险 12）。
 * **方法删除另有机制**：实例方法在解析之后还有一层**向下分派**（JVMS 5.4.6），所以引用 owner 可以是 `A` 的**任何祖先**，失败形态有三种——`NoSuchMethodError`（整条链都没有）、`AbstractMethodError`（只有接口声明没有实现）、以及**静默分派转移**（祖先实现接住；实测连 `Methodref A.m` 本身都不抛错）。判据与字段共用"批次外读者为空"，但**扫描未完成时只能拒绝**——方法删除没有存活实例判据可以退。见 §15。
 * 匿名类的合成捕获字段（`val$*` / `this$0`）被 `ClassDiffUtil` 过滤，无法通过 InitFix 补丁覆盖。
 

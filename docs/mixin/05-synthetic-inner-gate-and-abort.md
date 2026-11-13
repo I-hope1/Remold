@@ -1,5 +1,7 @@
 # 05 · 合成匿名类：单出口闸门、事务共退与自愈账本
 
+> **文档类型**：设计规格（只写规格/决策；实现状态以 [`docs/status.md`](../status.md) 为准）
+
 > 作用对象：Mixin 织入生成的 `<Target>$Anonymous$<hash>` 合成内部类（磁盘上没有 `.class`，
 > 名字由 `InnerClassGenerator.getUniqueReference` 生成，跨 reload 稳定）。
 

@@ -1,5 +1,7 @@
 # 04 · 突破 `ReloadMixinInfo` 的三大结构契约
 
+> **文档类型**：设计规格（只写规格/决策；实现状态以 [`docs/status.md`](../status.md) 为准）
+
 > 上游 `MixinInfo.reloadMixin` 会调 `Reloaded.validateChanges`，对
 > `priority` / `targets` / `interfaces` 三处结构变化一律抛异常。本文记录**在允许它们变化**的前提下，
 > 如何让 Mixin 的内部索引保持一致、并在失败时原子回滚。

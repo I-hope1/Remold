@@ -398,6 +398,75 @@ tasks.register("verifyDocStatusMarkers") {
 	}
 }
 
+// 8a2. verifyStatusSingleSource
+// docs/status.md 是唯一状态真相源。本守卫强制三件事：
+//  (1) docs/** 下每个 .md（status.md / releases / acceptance 除外）前 10 行必须有「文档类型」横幅；
+//  (2) 设计规格与独立子项目规格不得出现交付状态散文（已实现/未实现/未接线…）与状态标记；
+//      决策记录允许历史结论但仍不得出现状态标记；实测/审计记录只能写读数，横幅必须点名 status.md；
+//  (3) 主源码注释/Javadoc 不得出现交付状态散文（边界与契约可以写，状态指向 docs/status.md）。
+tasks.register("verifyStatusSingleSource") {
+	group = "verification"
+	description = "Single source of truth guard: doc-type banners + status prose only in docs/status.md"
+	doLast {
+		def docsDir = file("${rootDir}/docs")
+		def typeRegex = ~/文档类型[*\s]*[:：]\s*(设计规格|实测记录|审计记录|决策记录|独立子项目规格|索引)/
+		def emojis = ["✅", "❌", "⬜", "🔶", "🟣"]
+		def statusVerbs = ~/(已实现|未实现|待实现|已落地|尚未落地|已上线|尚未上线|待评审|已收口|未收口|未接线|尚未接线|尚未实现)/
+		def violations = []
+		docsDir.eachFileRecurse { f ->
+			if (!f.isFile() || !f.name.endsWith(".md")) {
+				return
+			}
+			def p = f.path.replace(File.separator, "/")
+			if (p.endsWith("/status.md") || p.contains("/releases/") || p.contains("/acceptance/")) {
+				return
+			}
+			def text = f.getText("UTF-8")
+			def head = text.readLines().take(10)
+			def banner = head.find { it =~ typeRegex }
+			if (banner == null) {
+				violations << "${p}: missing doc-type banner (first 10 lines)"
+				return
+			}
+			def type = (banner =~ typeRegex)[0][1]
+			if ((type == "实测记录" || type == "审计记录") && !banner.contains("status.md")) {
+				violations << "${p}: record/audit banner must name docs/status.md"
+			}
+			if (type == "设计规格" || type == "独立子项目规格" || type == "决策记录") {
+				text.readLines().eachWithIndex { line, i ->
+					if (emojis.any { line.contains(it) }) {
+						violations << "${p}:${i + 1}: status marker is only allowed in docs/status.md"
+					} else if (type != "决策记录" && line =~ statusVerbs) {
+						violations << "${p}:${i + 1}: delivery-status prose is only allowed in docs/status.md: ${line.trim().take(90)}"
+					}
+				}
+			}
+		}
+		["core/src", "api/src", "plugin-arc/src", "plugin-mixin/src", "plugin-forge/src", "panama/src"].each { d ->
+			def dir = file("${rootDir}/$d")
+			if (!dir.exists()) {
+				return
+			}
+			dir.eachFileRecurse { f ->
+				if (!f.isFile() || !f.name.endsWith(".java")) {
+					return
+				}
+				def p = f.path.replace(File.separator, "/")
+				f.eachLine("UTF-8") { line, lineNum ->
+					if (line =~ statusVerbs) {
+						violations << "${p}:${lineNum}: delivery-status prose is only allowed in docs/status.md: ${line.trim().take(90)}"
+					}
+				}
+			}
+		}
+		if (!violations.isEmpty()) {
+			throw new GradleException("verifyStatusSingleSource failed:\n" + violations.take(40).join("\n")
+				+ (violations.size() > 40 ? "\n... and ${violations.size() - 40} more" : ""))
+		}
+		logger.lifecycle("verifyStatusSingleSource: doc-type banners present; status prose/markers only in docs/status.md")
+	}
+}
+
 // 8b. verifyLogLanguage
 // 运行期日志与用户可见字符串必须是英文：GBK 控制台/日志采集端会把中文打成乱码，且跨平台日志解析
 // 依赖 ASCII。这里扫描**主源码的字符串字面量**（跳过注释与字符字面量），CJK 字符一律判违规；
@@ -1190,6 +1259,7 @@ check.dependsOn verifyTestCount
 // remold.evict.* 仍然是绿的；能被击杀的唯一读数是真实 processChanges 探针，故挂进 check。
 check.dependsOn "metadataDriftWarnProbe"
 check.dependsOn verifyDocStatusMarkers
+check.dependsOn verifyStatusSingleSource
 check.dependsOn verifyLogLanguage
 
 // 第 2 档：需要独立 JVM / -javaagent / Kotlin 夹具编译的断言。./gradlew e2eProbe

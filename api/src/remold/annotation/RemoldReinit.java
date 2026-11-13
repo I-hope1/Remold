@@ -75,8 +75,8 @@ import java.lang.annotation.*;
  * <h2>强制重放（{@code -Dremold.agent.force_reinit=true}，默认关闭）</h2>
  * <p>正常语义是"初值表达式变了才重置"（封闭表达式的指纹未变则跳过）。该开关忽略指纹、本轮一律
  * 重放声明类的初值切片，用于"初值没改、但存量值被运行期改脏了"的应急回置。它<b>不</b>改变取值
- * 来源——值仍来自声明类，而不是实例运行时子类的初值；按实例运行时类取初值是另一条尚未实现的
- * 设计（{@code docs/initfix/03-runtime-driver.md} §4）。</p>
+ * 来源——值仍来自声明类，而不是实例运行时子类的初值；按实例运行时类取初值是另一条设计边界（不在当前范围，见
+ * {@code docs/status.md}；设计讨论见 {@code docs/initfix/03-runtime-driver.md} §4）。</p>
  *
  * <h2>不支持的场景（Does not do）</h2>
  * <table>
@@ -94,7 +94,7 @@ import java.lang.annotation.*;
  *       <td>逐字段 volatile 写，字段之间没有事务，并发读者可能看到"半新半旧"；构造器里由该字段
  *           派生的其它字段不会被重算。本注解只是"重写若干字段槽位"，不是"把对象恢复到初始状态"。</td></tr>
  *   <tr><td>按实例运行时类取初值（父类字段 + 各子类不同初值）</td>
- *       <td>未实现：值来源固定为声明类初值切片。该形态用 {@code scope = SELF}、把字段/值放到子类
+ *       <td>不支持：值来源固定为声明类初值切片。该形态用 {@code scope = SELF}、把字段/值放到子类
  *           自己声明，或用 {@link OnReload}。</td></tr>
  * </table>
  *

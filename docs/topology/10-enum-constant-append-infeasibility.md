@@ -1,5 +1,7 @@
 # 枚举常量集合变更：为什么不做运行期修复（实测记录）
 
+> **文档类型**：实测记录（一次性读数/证据；实现状态以 [`docs/status.md`](../status.md) 为准）
+
 > 本文件记录**测量方法与读数**，供布局门的拒绝策略与设计文档引用。实现与验收状态见
 > [`docs/status.md`](../status.md)；复现入口见 [`tests/enum-append-probe/`](../../tests/enum-append-probe/README.md)
 > （独立探针，不挂 `check`）。

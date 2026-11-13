@@ -1,5 +1,7 @@
 # 05 JVMTI 多态堆实例检索
 
+> **文档类型**：设计规格（只写规格/决策；实现状态以 [`docs/status.md`](../status.md) 为准）
+
 适用：修改 `LibTool.getInstances` 或相关 Native 代码时阅读。实现状态参见 `docs/status.md` 与 `AGENTS.md`。
 实现以代码为准，本文只记录必须保持的约束，不复制源码。
 

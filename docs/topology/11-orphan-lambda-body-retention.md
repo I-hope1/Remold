@@ -1,5 +1,7 @@
 # 孤儿 Lambda 的方法体保留（Ghost Body Retention）
 
+> **文档类型**：设计规格（只写规格/决策；实现状态以 [`docs/status.md`](../status.md) 为准）
+
 > 本文件是设计规格：定义"孤儿 lambda 桩"在什么条件下保留上一轮方法体、判据与不变量。
 > 当前实现状态与验收证据见 [`docs/status.md`](../status.md)；相关决策与历史缺口见
 > [`docs/initfix/08-test-audit.md`](../initfix/08-test-audit.md) §10.11。

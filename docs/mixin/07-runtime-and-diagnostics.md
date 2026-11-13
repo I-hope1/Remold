@@ -1,5 +1,7 @@
 # 07 · 运行期门闩、看门狗与双通道堆哨兵
 
+> **文档类型**：设计规格（只写规格/决策；实现状态以 [`docs/status.md`](../status.md) 为准）
+
 ## 1. 启动门闩：`StartupGate` + `HostReadinessProbe`
 
 - `core/src/remold/StartupGate.java`：纯状态机 `PENDING → READY`，`-Dremold.agent.ready_timeout_ms` 控制超时；

@@ -1,5 +1,7 @@
 # 模组生态分类与构建产物隔离规范
 
+> **文档类型**：设计规格（只写规格/决策；实现状态以 [`docs/status.md`](../status.md) 为准）
+
 本规范定义 Remold 在不同游戏模组引擎（Minecraft Fabric / Quilt / NeoForge / Forge 与 Mindustry / Arc）下的运行环境划分基准、构建产物（JAR）输出隔离协议、IDEA `BeforeRunTask` 调度契约以及运行时残留制品冲突防御机制。
 
 ---

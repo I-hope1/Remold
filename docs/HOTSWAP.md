@@ -1,5 +1,7 @@
 # Android 热重载架构设想（分层策略版）
 
+> **文档类型**：独立子项目规格（不含实现状态；状态以 [`docs/status.md`](status.md) 为准）
+
 *适用：Android Debug 构建 · Java 8 / Kotlin · 状态：设计草案，待 PoC 验证*
 
 本文汇总前几轮评审的结论。与上一版 RFC 相比，最大的变化来自一个新确认的事实： **ART 自 Android 11

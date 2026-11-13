@@ -2,6 +2,8 @@ English | [简体中文](index.md)
 
 # Remold Technical Documentation & Architecture Hub
 
+> **文档类型**：索引（链接导航；实现状态以 [`docs/status.md`](status.md) 为准）
+
 Welcome to the technical specifications and architectural documentation center for `Remold` (JVM Class Redefinition, Anonymous Class Topological Alignment, and Legacy State Reinitialization Engine).
 
 ---

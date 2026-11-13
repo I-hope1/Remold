@@ -308,7 +308,7 @@ public final class MixinHotSwap {
 			// 补登记进配置；内部结构不匹配时退化为明确提示重启，而不是谎报成功。
 			//
 			// 迟到的 .class 必须能自愈：上一次登记尝试若因为「读不到字节」把 null 写进了上游
-			// ClassInfo 缓存（负缓存永不重试），这一次即使字节已落地也会继续失败。所以先把本模板
+			// ClassInfo 缓存（负缓存永不重试），这一次即使字节已提交也会继续失败。所以先把本模板
 			// 自己的新字节接进 Mixin 的字节码提供方并驱逐该类的 ClassInfo，再登记。
 			MixinBytecodeOverlay.install();
 			MixinBytecodeOverlay.register(dotClassName, newMixinBytes);

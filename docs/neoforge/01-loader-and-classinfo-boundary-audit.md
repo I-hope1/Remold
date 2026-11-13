@@ -1,5 +1,7 @@
 # NeoForge 链路与 ClassInfo 同步边界审计（Batch A · 只读）
 
+> **文档类型**：审计记录（一次性读数/证据；实现状态以 [`docs/status.md`](../status.md) 为准）
+
 > 本文件是**审计事实记录**，不是设计规格：它回答「当前代码在两代 NeoForge 上分别成立到什么程度」，
 > 并给出可证伪的实验项。实现状态与验收证据统一登记在 [`docs/status.md`](../status.md)。
 

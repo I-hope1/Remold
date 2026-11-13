@@ -1,5 +1,7 @@
 # A 档：Kotlin `apply {}` 静态持有者初值重放（设计规格）
 
+> **文档类型**：设计规格（只写规格/决策；实现状态以 [`docs/status.md`](../status.md) 为准）
+
 本文定义 InitFix 的 **A 档**能力：Kotlin `object` / 顶层 `val` 静态持有者上的
 `val dest = T().apply { field = 常量 }` 初值变化，在可证明安全时重放到**存量对象**。
 

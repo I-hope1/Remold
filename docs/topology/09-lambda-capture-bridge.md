@@ -1,5 +1,7 @@
 # Lambda 捕获桥（单向）
 
+> **文档类型**：设计规格（只写规格/决策；实现状态以 [`docs/status.md`](../status.md) 为准）
+
 > **实现状态与验收证据**：本文件只定义规格与判据。当前落地情况、测试矩阵与已知边界见
 > [`docs/status.md`](../status.md) 的管辖范围声明与 `LambdaBridgeAlignTest` / `LambdaBridgeProbe`。
 

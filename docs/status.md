@@ -68,6 +68,21 @@
 
 熔断未触发 → **发布冻结解除，封版 0.2.7**。
 
+## 0.0 唯一真相源契约（文档类型 × 可写内容）
+
+| 文档类型 | 允许写什么 | 禁止写什么 |
+|:---|:---|:---|
+| **本文件 `docs/status.md`** | 实现状态、验证证据、风险、路线图 | —（唯一可写「交付状态」的载体） |
+| **设计规格**（`docs/topology` · `initfix` · `offset` · `ecosystem` · `mixin`、`HOTSWAP.md`） | 客观规格、契约、判据、已知边界 | 交付状态散文（`已实现`/`未实现`/`待实现`/`已落地`/`已上线`/`待评审`/`已收口`/`未接线`…）与 `✅/⬜/🔶` 标记 |
+| **实测记录 / 审计记录**（`initfix/07`、`initfix/08`、`topology/10`、`neoforge/01`） | 一次性读数与证据（可腐化） | 当前实现状态断言；横幅必须点名本文件 |
+| **决策记录**（`topology/08`、`mixin/08`、`initfix/06`） | 决策、否决理由、历史结论 | 状态标记 |
+| `CHANGELOG.md` / `docs/releases/` / `docs/acceptance/` | 发布历史、验收清单结果 | 当前状态（以本文件为准） |
+| **代码 Javadoc / 注释** | 契约、边界、不变量、运行时语义 | 交付状态；写「不在当前范围」并指向本文件 |
+
+**守卫**：`./gradlew :tests:verifyStatusSingleSource`（挂 `check`）——文档类型横幅缺失、设计规格/独立子项目规格出现状态散文或状态标记、记录类文档横幅未点名本文件、主源码出现交付状态散文，全部直接失败。
+
+**历史归档边界**：§0.1～§0.17 为逐轮修复记录（历史归档），逐项明细以 [`CHANGELOG.md`](../CHANGELOG.md) 为准；本节不再接受新条目——新条目只登记在 §1～§7 状态表与 `CHANGELOG.md`。
+
 ## 0. 状态治理与规范文档清理进度 (Status Governance & Documentation Cleansing)
 
 为根治文档易腐性与状态漂移，本项目推行“规范规格与实现状态物理分离”治理方针。当前治理基线如下：
@@ -76,6 +91,7 @@
 2. **双重验收验证机制**：
    - **自动化机器扫描 (`verifyDocStatusMarkers`)**：纳入主构建验证流程（`./gradlew check` 强制依赖），递归扫描 `docs/initfix/`、`docs/topology/`、`docs/offset/`、`docs/ecosystem/`、`core/src/`、`api/src/`、`plugin-arc/src/`、`plugin-mixin/src/`、`plugin-forge/src/`、`panama/src/`，严格拦截标记 `/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/`。当前状态：**100% 达标全绿**（v0.2.6 发版验证：`verifyDocStatusMarkers` 全绿）。
    - **规范性内容抽检审计**：禁止规范正文出现“目前已支持”、“当前版本尚未实现”等时态陈述，时态陈述一律归入 `status.md`。首轮治理覆盖 15 篇客观设计文档（`docs/topology/` 8 篇、`docs/initfix/` 6 篇、`docs/offset/` 1 篇），人工抽检合格率 100%；此后新增篇目（当前 `docs/topology/` 9 篇、`docs/initfix/` 13 篇、`docs/offset/` 2 篇）沿用同一客观化规则，并由 `verifyDocStatusMarkers` 持续守卫。
+   - **文档类型横幅 + 单一真相源守卫（2026-11-13）**：`docs/**` 全部 40 篇文档补齐 `文档类型` 横幅（设计规格 / 实测记录 / 审计记录 / 决策记录 / 索引），并把「唯一真相源」从人工约定升级为机器守卫 `verifyStatusSingleSource`（挂 `check`）：横幅缺失、设计规格出现状态散文/标记、记录类横幅未点名本文件、主源码出现交付状态散文，均直接失败。边界表见 §0.0。
 3. **设计规范文档客观化清理清单（首轮治理）**：
    - [`docs/topology/01-invariants-and-remapping.md`](topology/01-invariants-and-remapping.md) ～ [`08-decisions.md`](topology/08-decisions.md)（共 8 篇）：全部重构为纯架构规格、约束契约与客观原理，易腐进度全部剥离，头部统一指引至 `status.md`。
    - [`docs/initfix/01-safety-gate.md`](initfix/01-safety-gate.md) ～ [`06-decisions.md`](initfix/06-decisions.md)（共 6 篇）：全部完成规格客观化改造，彻底消除进度标记。

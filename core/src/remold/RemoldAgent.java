@@ -131,7 +131,8 @@ public class RemoldAgent {
 	 * <p>正常语义下，封闭表达式的初值指纹未变时<b>跳过</b>重置（只改方法体的热更不该动数据）。
 	 * 打开本开关后忽略指纹、本轮一律重放声明类初值切片——用于"初值表达式没改，但存量值被运行期
 	 * 改脏了、需要手工打回初值"的场景。它<b>不</b>改变取值来源：值仍来自声明类（不是运行时子类）的
-	 * 初值切片；按实例运行时类取值是另一条未实现的设计（{@code docs/initfix/03-runtime-driver.md} §4）。</p>
+	 * 初值切片；按实例运行时类取值是另一条设计边界（不在当前范围，见 {@code docs/status.md}；
+	 * 设计讨论见 {@code docs/initfix/03-runtime-driver.md} §4）。</p>
 	 */
 	public static boolean      FORCE_REINIT;
 	public static boolean      LAMBDA_ALIGN       = boolProp("remold.agent.lambda_align", "remold.lambdaAlign.enabled", true);

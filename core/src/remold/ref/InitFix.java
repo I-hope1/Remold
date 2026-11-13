@@ -110,7 +110,7 @@ import static remold.RemoldAgent.log;
  *       目标解法详见 {@code docs/initfix/04-target-design.md} §4「构造器尾部插桩」
  *       （Stage A 构造器尾部注入切片，物理封死新建对象缝隙）。</li>
  *   <li><b>跨类批次拓扑依赖限制</b>：
- *       当前拓扑排序局限于单个宿主类内部（已实现类内拓扑）。若类 X 的新增字段切片直接读取类 Y 的新增字段，
+ *       当前拓扑排序局限于单个宿主类内部（类内拓扑是既有契约）。若类 X 的新增字段切片直接读取类 Y 的新增字段，
  *       可能因跨类加载顺序非确定性读到未就绪值。目标解法详见 {@code docs/initfix/04-target-design.md} §5「跨类批次拓扑排序」。</li>
  *   <li><b>复杂控制流与不可切片表达式</b>：
  *       含分支（if/switch）、循环、try-catch、局部变量依赖、Kotlin {@code ?.} / {@code ?:} / {@code let} / {@code apply} 等展开形态会被安全门坚决拒绝，记入待补台账。

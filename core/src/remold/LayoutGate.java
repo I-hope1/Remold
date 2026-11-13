@@ -68,7 +68,8 @@ public final class LayoutGate {
 		 * （合成字段只被类自身读，而类本身在批次内被重编），在具名类里<b>本门没有做这个证明</b>：
 		 * 被删字段之前就存在，任何已加载的类都可能已经持有它的 {@code GETFIELD}。
 		 * 证明本身是<b>可做</b>的（枚举已加载类 + 扫常量池里的 {@code Fieldref}，见
-		 * {@code docs/initfix/07-p05-probe-results.md} §13.6），只是尚未实现。</p>
+		 * {@code docs/initfix/07-p05-probe-results.md} §13.6），该判据不在当前实现范围（见
+		 * {@code docs/status.md}）。</p>
 		 *
 		 * <p>实测（JBR 21，{@code docs/initfix/07-p05-probe-results.md} §13）表明失败形态是<b>确定</b>的：
 		 * 布局不压缩、其余字段偏移不变、废弃槽位不复用，批次外读者抛 {@code NoSuchFieldError}。

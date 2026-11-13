@@ -1,5 +1,7 @@
 # 08 · 架构决策、Lambda vs 匿名类本质对比与实证台账
 
+> **文档类型**：决策记录（只写规格/决策；实现状态以 [`docs/status.md`](../status.md) 为准）
+
 ## 1. 决策：Lambda 能做捕获桥，匿名类不能
 
 | 维度 | Lambda（隐藏类） | 匿名类（`Target$Anonymous$<hash>`） |
@@ -82,7 +84,7 @@ Lambda 捕获顺序的判定有一条**编译配置前提**，不写清就会被
 - **事实③**（3 参 `<init>` 存在却抛 `NoSuchMethodError`）：**不再追查、未闭合**。记录见
   [`docs/status.md`](../status.md)。
 - **P2 `[假设]`**：`schemaHash` 命名新合成类——schema 变化时用 `defineClass` 加载**新类名**，宿主只做
-  body-only redefine。预注册判据：新名类加载 + 宿主 body-only redefine 下 `newlyNull=0`。未实现、未验证。
+  body-only redefine。预注册判据：新名类加载 + 宿主 body-only redefine 下 `newlyNull=0`。实现与验证状态见 [`docs/status.md`](../status.md) §4.1。
 - **F6 四类拆分**（追加/缩容/改类型/不变）：旧版日志缺字段表行，仅 `executed=12/12`、`跳过未观测`、
   `拒绝=0` 可分类；新版已补 `loaded=/fresh=/flags` 行，待下一版真机四类拆分。
 

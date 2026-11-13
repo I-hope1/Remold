@@ -252,6 +252,32 @@ public class LambdaBridgeAlignTest {
 		assertFalse(containsCall(outer, "buildFn"), "不得转发到新方法（旧实例语义不同）");
 	}
 
+	/**
+	 * S45 现场形态：同宿主 2 条同形 lambda 同时丢捕获时，按宿主调用序列序号消歧（长度一致 ⇒ 无插入/删除），
+	 * 两个旧键各接一个目标，而不是因为"两个候选都通过 planBridge"就整体放弃。
+	 */
+	@Test
+	void ambiguousCaptureBridgesDisambiguateByHostOrdinal(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_AMBIGUOUS_DROP).resolve("SwitchHost.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_AMBIGUOUS_DROP).resolve("SwitchHost.class"));
+
+		LambdaAligner.TEST_EVENTS.clear();
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+
+		List<LambdaAligner.AlignmentEvent> bridges = new ArrayList<>();
+		for (LambdaAligner.AlignmentEvent e : LambdaAligner.TEST_EVENTS) {
+			if ("BRIDGE".equals(e.kind)) bridges.add(e);
+		}
+		assertEquals(2, bridges.size(),
+			"both old capture-dropped lambdas must get a bridge by host ordinal: " + bridges);
+		for (LambdaAligner.AlignmentEvent e : bridges) {
+			assertEquals(e.oldName.replace("$0", "$X").replace("$1", "$X"),
+				e.newName.replace("$0", "$X").replace("$1", "$X"),
+				"bridge must keep the same ordinal (old " + e.oldName + " -> new " + e.newName + "): " + bridges);
+		}
+	}
+
 	/** S14 现场形态：两个宿主方法交换 this 形状时，旧键不得被跨宿主桥接/改名。 */
 	@Test
 	void thisShapeSwapAcrossHostsIsNotBridged(@TempDir Path tmp) throws Exception {
@@ -2048,6 +2074,34 @@ public class LambdaBridgeAlignTest {
 		public class B {
 		    public static Function<String, String> f;
 		    public static void make(int k) { f = s -> k + "|" + s; }
+		}
+		""";
+
+	/** S45 现场形态 V1：同一宿主方法里的 2 条同形 Supplier lambda，各捕获一个 int。 */
+	static final String V1_AMBIGUOUS_DROP = """
+		import java.util.function.Supplier;
+		public class SwitchHost {
+		    public static Supplier<String>[] held = new Supplier[2];
+		    public static void make(int n) {
+		        Supplier<String> a = () -> "UP-" + n;
+		        Supplier<String> b = () -> "DN-" + n;
+		        held[0] = a;
+		        held[1] = b;
+		    }
+		}
+		""";
+
+	/** S45 现场形态 V2：两条 lambda 都丢掉 int 捕获，宿主不变（调用序列长度仍为 2）。 */
+	static final String V2_AMBIGUOUS_DROP = """
+		import java.util.function.Supplier;
+		public class SwitchHost {
+		    public static Supplier<String>[] held = new Supplier[2];
+		    public static void make(int n) {
+		        Supplier<String> a = () -> "UP";
+		        Supplier<String> b = () -> "DN";
+		        held[0] = a;
+		        held[1] = b;
+		    }
 		}
 		""";
 

@@ -3988,7 +3988,18 @@ public class LambdaAligner {
 				only = ni;
 				if (++hits > 1) break;
 			}
-			if (hits != 1) continue;                              // 零个或歧义：拒绝
+			if (hits != 1) {
+				// 多候选歧义：只在"同宿主新旧调用序列长度一致"时用序号消歧（长度一致 ⇒ 没有插入/删除）。
+				// 长度不一致（S40 的中间插入）一律不用位置配对，避免把旧调用点绑到错误语义。
+				final int candidates = hits;
+				SyntheticInfo byOrdinal = bridgeTargetByHostOrdinal(ctx, oi, unpairedNew, newCn);
+				if (byOrdinal == null) {
+					dbg(() -> "[LambdaAligner] capture bridge ambiguous for " + oi.name + oi.desc
+						+ " (" + candidates + " candidates); not bridging");
+					continue;
+				}
+				only = byOrdinal;
+			}
 			String oldKey = oi.name + oi.desc;
 			String newKey = only.name + only.desc;
 			claim.put(oldKey, only);
@@ -4110,6 +4121,26 @@ public class LambdaAligner {
 	 * <p>三级都必须满足"每个新形参恰好一个来源 + 整体内射"。内射是硬要求：两个新形参
 	 * 共用一个旧值意味着它们是<b>两个不同的变量</b>，值不一定相同，喂同一个值是静默错值。</p>
 	 */
+	/**
+	 * 多候选歧义时的位置消歧：只在**同宿主的新旧调用序列长度一致**时成立（长度一致 ⇒ 没有插入/删除，
+	 * 序号就是可靠证据）。长度不一致（S40 的"中间插入"）一律不使用位置配对，退回幽灵/保留旧体。
+	 *
+	 * <p>只接受普通方法宿主（{@code M:}）：lambda 宿主的键是链式 {@code L:hash@up}，哈希屏蔽字面量，
+	 * 跨宿主同形时并不可靠。</p>
+	 */
+	private static SyntheticInfo bridgeTargetByHostOrdinal(MatchContext ctx, SyntheticInfo oi,
+	                                                       List<SyntheticInfo> unpairedNew, ClassNode newCn) {
+		if (oi.hostKey == null || !oi.hostKey.startsWith("M:")) return null;
+		List<SyntheticInfo> oldSeq = ctx.oldHostSeq.get(oi.hostKey);
+		List<SyntheticInfo> newSeq = ctx.newHostSeq.get(oi.hostKey);
+		if (oldSeq == null || newSeq == null || oldSeq.size() != newSeq.size()) return null;
+		int idx = oldSeq.indexOf(oi);
+		if (idx < 0 || idx >= newSeq.size()) return null;
+		SyntheticInfo target = newSeq.get(idx);
+		if (target == null || !unpairedNew.contains(target)) return null;
+		return planBridge(oi, target, newCn) == null ? null : target;
+	}
+
 	private static ParamSource[] planBridge(SyntheticInfo oi, SyntheticInfo ni, ClassNode newCn) {
 		if (!bridgeGatesHold(oi, ni)) return null;
 		int[] legacy = legacyMapping(oi, ni);

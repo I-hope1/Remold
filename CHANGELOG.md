@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **同宿主多条同形 lambda 同时丢捕获时捕获桥被整体放弃（S45 形态）**：`stepCaptureBridge` 要求唯一目标
+  （`hits != 1` 即拒绝）；当宿主里两条同形 lambda 同时丢掉捕获（如 `buildSwitch` 的两条
+  `(I)String` → `()String`），`mappingByType` 在"新捕获为空"时对每个候选都返回空映射，两个候选都
+  通过 `planBridge`，于是 `hits = 2`、整组静默放弃，旧实例停在 V1。现增加受限消歧：**只有同宿主
+  新旧调用序列长度一致**（⇒ 没有插入/删除）时才按序号取对应目标；长度不一致（S40 的中间插入）仍拒绝
+  位置配对。回归：`LambdaBridgeAlignTest.ambiguousCaptureBridgesDisambiguateByHostOrdinal`
+  （两条旧键各接同序号目标，变异：关闭序号消歧 → 用例红）。
+
 - **未加载新注入组被阶段 A 一致性校验误回滚（S37 形态）**：此前未加载的 `Host + Host$1` 在 V2 以
   `[INJECTED]` 按新字节码定义后，阶段 A 的宿主/匿名一致性判据仍要求它们出现在 `redefineClasses`
   的成功集合里；它们既不在 `definitions` 也不会有成功记录，于是整组被误判"半生效"，打出

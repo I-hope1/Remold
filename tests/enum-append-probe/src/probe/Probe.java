@@ -106,6 +106,7 @@ public final class Probe {
                 case "jit-inline" -> jitInline(v2);
                 case "jit-values-write" -> jitValuesWrite(v2);
                 case "jit-spin-reader-deopt" -> jitSpinReaderDeopt(v2);
+                case "stagec-static" -> stagecStatic(v2);
                 case "swv2-after" -> swv2After(v2);
                 case "swv2-before" -> swv2Before(v2);
                 case "ctor" -> ctorScenario(v2);
@@ -794,6 +795,47 @@ public final class Probe {
         }
         out("vdeopt.afterRetransformColor.hotLen", hotLen());
         out("vdeopt.afterRetransformColor.valuesLen", Color.values().length);
+    }
+
+    /**
+     * Does Stage C (a second redefine of the host class, same schema) act as a deopt barrier for
+     * readers of a rewritten static final reference field?
+     * Warm a getstatic reader (Probe.hotBlue) and a separate direct reader class (BlueReader.read),
+     * swap Color.BLUE to Color.GREEN via Unsafe, then redefine Color again (Stage C analogue).
+     * Run with {@code -cp probe:v2}.
+     */
+    static void stagecStatic(byte[] v2) throws Throwable {
+        Color.values();
+        Object blueConst = unsafeStatic("BLUE");
+        out("sc.blueConstAtWarm", blueConst);
+        long same = 0;
+        for (long i = 0; i < 1_000_000L; i++) {
+            if (hotBlue() == blueConst) same++;
+            readBlueReader("read");
+        }
+        out("sc.warm.hotBlueIsBlue", same + "/1000000");
+        out("sc.warm.blueReader", readBlueReader("read"));
+
+        unsafePutStatic("BLUE", Color.GREEN);
+        out("sc.afterWrite.unsafeBLUE", unsafeStatic("BLUE"));
+        out("sc.afterWrite.hotBlue", hotBlue());
+        out("sc.afterWrite.blueReader", readBlueReader("read"));
+        for (int i = 0; i < 3; i++) {
+            out("sc.afterWrite.sample" + i, hotBlue() + " / " + readBlueReader("read"));
+            Thread.sleep(100);
+        }
+
+        // Stage C analogue: redefine the host class again (same schema, same methods).
+        redefine(v2);
+        out("sc.afterStageC.hotBlue", hotBlue());
+        out("sc.afterStageC.blueReader", readBlueReader("read"));
+        out("sc.afterStageC.blueReaderCompiled", readBlueReader("read"));
+
+        // Control: deopt the direct reader class itself.
+        ProbeAgent.INST.redefineClasses(new ClassDefinition(
+                Class.forName("probe.BlueReader"), classBytes(Class.forName("probe.BlueReader"))));
+        out("sc.afterReaderDeopt.blueReader", readBlueReader("read"));
+        out("sc.afterReaderDeopt.hotBlue", hotBlue());
     }
 
     static byte[] classBytes(Class<?> type) throws Throwable {

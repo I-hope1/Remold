@@ -117,6 +117,24 @@ OBS jit.after.forcedDeopt.hotLen       = 3     # 再次 redefine（触发 deopt�
   因读者 deopt 修复；且必须枚举**全部**已加载读者类逐个 deopt，遗漏任何一个就是静默旧值，与
   fail-closed 策略冲突。结论（§4）不变。
 
+### 3.4.2 阶段 C 作为写入后的 deopt 屏障（static final 引用写也成立）
+
+探针场景 `stagec-static`（classpath 已含 3 个常量）：
+
+- 预热 `BlueReader.read()`（直接 `GETSTATIC Color.BLUE`）与 `Probe.hotBlue()` 1e6 次；
+- 用 Unsafe 把 `BLUE` 换成 `GREEN`：热读者仍读 `BLUE`（直读与内联路径均 stale）；
+- 对宿主 `Color` 再做一次 `redefineClasses`（同 schema、同字节）：`hotBlue` 与 `BlueReader.read`
+  立刻读到 `GREEN`。
+
+即：**第二次 redefine 不只关闭"新方法体读未补字段"的窗口，也充当补丁写入后的 JIT deopt 屏障**。
+本场景里读者只直接读静态字段（没有内联宿主方法），宿主 redefine 仍把它带进 deopt；因此
+"跨类直接 `getstatic` 的读者不会跟着 deopt"这一担心在实测中不成立（至少对运行时初始化的
+`static final` 引用字段成立）。
+
+边界：`static final` **编译期常量**（`ConstantValue`，基本类型/String）的读者已把字面量内联进
+class 文件，deopt 不会改回——这正是 `@RemoldReinit` Javadoc"static final 编译期常量对批外读者无效"
+所标注的限制；deopt 只救运行时初始化的引用/非常量字段。
+
 ### 3.5 已初始化的 `$SwitchMap$` 持有类无法补 case
 
 `switch-on-enum` 走 `$SwitchMap$Color`（javac 把该字段放在合成类 `X$1` 里，`static final int[]`，

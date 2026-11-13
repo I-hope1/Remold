@@ -65,6 +65,7 @@ JBR 21.0.9 实测（`jit-inline` / `jit-values-write` / `deopt-*` / `jit-spin-re
 | 预热后 Unsafe 把 `$VALUES` 换成 4 元素数组（不 deopt） | 热读者仍 3、`Color.values().length` 仍 3（`OBS vwrite.hotLen.sample*`） |
 | 仅对读者类 `redefineClasses(Probe, 同字节)` | 立刻变 4（`OBS vdeopt.hotLen.sample* = 4`）；`retransformClasses(Color)` 也 ok |
 | 真机热更：v1(2 常量) 热读者/spinner | 保持 2；只 deopt 读者类（不再 redefine 枚举）后 `hotLen=3`、spinner `[2,3]` |
+| 改写 `static final` 引用字段（BLUE→GREEN）后对宿主类再 redefine 一次 | 热读者（含直接 `GETSTATIC` 的 `BlueReader.read`）由 stale 的 BLUE 立刻变 GREEN（`OBS sc.afterStageC.*`）——阶段 C 是写入后的 deopt 屏障 |
 | 可写性 | Unsafe `staticFieldBase/Offset` 可写；`Field.set` 不可；`VarHandle.set` 抛 `UnsupportedOperationException` |
 
 结论：`$VALUES` **不是** ConstantValue 常量折叠，旧读数是已编译代码里被提升的 `getstatic` / 内联

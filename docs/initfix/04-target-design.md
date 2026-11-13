@@ -54,6 +54,12 @@
 `FieldLedger`（见 `02-closure-and-ledger.md` §2）；下一轮 diff 的旧字节以 `bytecodeCache` 里的阶段 A
 为准。契约是"停在阶段 A + 提示重启"，不做自动回滚。
 
+**阶段 C 的第二重作用（JIT deopt 屏障）**：补丁写的是内存（实例字段、静态字段），不会通知 JIT
+退优化；在阶段 A 到阶段 B 之间抢跑重编译、把补丁前的零值/旧值提升进机器码的读者，由阶段 C 的第二次
+redefine 统一退优化，后续重编译读到补丁值。该屏障对运行时初始化的 `static final` 引用字段的读者同样
+成立（实测见 `docs/topology/10-enum-constant-append-infeasibility.md` §3.4.2）；`ConstantValue` 编译期
+常量除外（读者已内联字面量，deopt 无法改回）。
+
 ## 2. `PatchPlan` 基线指纹
 
 - `baseClassHash` 指向经 `AnnotationTransformer`（`forceStaticLambdas` 等）规范化、传给 JVM redefine 的字节码哈希，不是磁盘原始字节码。

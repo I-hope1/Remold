@@ -83,6 +83,7 @@ run "S8d retransform enum only"                       deopt-retransform-enum "$V
 run "S8e redefine enum again (control)"               deopt-redefine-enum    "$V2_21" "$CP21"
 run "S8f pure \$VALUES rewrite + reader deopt (v2 baseline)" jit-values-write "$V2_21" "$CP21V2"
 run "S8g values() inlining (PrintInlining)"           jit-inline            "$V2_21" "$CP21" -XX:+UnlockDiagnosticVMOptions -XX:+PrintInlining
+run "S8h Stage C deopt barrier for static final rewrite" stagec-static       "$V2_21" "$CP21V2"
 run "S5d jit-cold (no warmup at all)"                jit-cold       "$V2_21" "$CP21"
 run "S5e jit-field (hot GETSTATIC BLUE) #1"           jit-field      "$V2_21" "$CP21"
 run "S5e jit-field (hot GETSTATIC BLUE) #2"           jit-field      "$V2_21" "$CP21"

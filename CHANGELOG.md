@@ -27,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **未加载新注入组被阶段 A 一致性校验误回滚（S37 形态）**：此前未加载的 `Host + Host$1` 在 V2 以
+  `[INJECTED]` 按新字节码定义后，阶段 A 的宿主/匿名一致性判据仍要求它们出现在 `redefineClasses`
+  的成功集合里；它们既不在 `definitions` 也不会有成功记录，于是整组被误判"半生效"，打出
+  `[HOTSWAP-PARTIAL] Stage A ...` 与 `ROLLED-BACK-A`（并要求重启），而它们本来就已经按新字节码定义完毕。
+  修复：`RemoldAgent` 记录本轮 `injectNewClass` 成功的新类集合，一致性判据
+  `stageAConsistent` 对**新注入方**豁免（宿主注入视为成功；匿名类若也是新注入则不要求阶段 A 记录），
+  混合组只豁免注入方、已加载方仍校验。回归：`StageAConsistencyTest`（全注入组不回滚 / 已加载组漏一个
+  必须回滚 / 混合组只豁免注入方）；变异：去掉注入豁免 → 用例红。
+
 - **捕获桥在带形参的 SAM 上漏压尾部实参（JBR 21 真机崩溃）**：`LambdaAligner.injectBridgeBody`
   过去只按捕获表压值，`Function`/`Consumer`/`Stream` 这类 SAM 的尾部实参没有转发给目标。
   重定义路径不跑字节码校验器，旧 lambda 实例经桥调用时目标读到 `null` 或垃圾引用——探针实测

@@ -77,11 +77,11 @@ class BatchTwoPhaseStaticRewriteTest {
 		Instrumentation previous = RemoldAgent.swapInstrumentationForTest(recorder(redefinitions));
 		try {
 			Method applyTwoPhase = RemoldAgent.class.getDeclaredMethod("applyTwoPhase",
-				List.class, Map.class, java.util.Collection.class, RemoldAgent.RoundSkips.class);
+				List.class, Map.class, java.util.Collection.class, RemoldAgent.RoundSkips.class, java.util.Set.class);
 			applyTwoPhase.setAccessible(true);
 			Object outcome = applyTwoPhase.invoke(null,
 				List.of(new ClassDefinition(host, v2)), Map.of(NAME, v1), List.of(),
-				new RemoldAgent.RoundSkips());
+				new RemoldAgent.RoundSkips(), java.util.Set.of());
 
 			assertEquals(2, redefinitions.size(),
 				"the batch driver must call redefineClasses twice (stage A + stage C), actual=" + redefinitions.size());

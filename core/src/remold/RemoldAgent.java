@@ -1990,6 +1990,8 @@ public class RemoldAgent {
 		// List<Class<?>>        unloadedClasses  = new ArrayList<>();
 		int skippedCount  = 0;
 		int injectedCount = 0;
+		// 本轮"作为新类定义"的类名（此前未加载）：它们不参与 Stage A 重定义，也不得被一致性校验回滚。
+		Set<String> injectedClasses = new HashSet<>();
 		// 两阶段需要"补丁分析使用的阶段 C 字节"与"JVM 当前生效的旧字节"两份输入。
 		Map<String, byte[]> oldEffectiveBytes = new HashMap<>();
 		boolean             needsTwoPhase     = false;
@@ -2530,6 +2532,7 @@ public class RemoldAgent {
 						if (injectNewClass(className, clHintPath, bytecode)) {
 							bytecodeCache.put(className, bytecode);
 							injectedCount++;
+							injectedClasses.add(className);
 							// 注入成功即视为生效：指纹可立即落账（不经过 applyRedefinitions）。
 							// 失败时不落账，下次触发会重试。指纹同样只记磁盘原始字节。
 							String injectRawName = targetToRawName.getOrDefault(className, className);
@@ -2573,7 +2576,7 @@ public class RemoldAgent {
 		// 让存量实例在旧行为下被补齐，再提交阶段 C 的新方法体；否则沿用单次重定义的快路径。
 		RedefineOutcome outcome;
 		if (needsTwoPhase && TWO_PHASE) {
-			outcome = applyTwoPhase(definitions, oldEffectiveBytes, transactions.values(), skips);
+			outcome = applyTwoPhase(definitions, oldEffectiveBytes, transactions.values(), skips, injectedClasses);
 		} else {
 			outcome = applyRedefinitions(definitions, transactions.values(), skips);
 		}
@@ -4139,7 +4142,8 @@ public class RemoldAgent {
 	private static RedefineOutcome applyTwoPhase(List<ClassDefinition> definitions,
 	                                             Map<String, byte[]> oldEffectiveBytes,
 	                                             Collection<AlignmentTransaction> transactions,
-	                                             RoundSkips skips) {
+	                                             RoundSkips skips,
+	                                             Set<String> injectedClasses) {
 		long startedNanos = System.nanoTime();
 		if (definitions.isEmpty()) {
 			for (AlignmentTransaction tx : transactions) tx.commit();
@@ -4179,7 +4183,7 @@ public class RemoldAgent {
 		}
 
 		Set<String> stageAAbandoned = new HashSet<>();
-		Set<String> stageAOk        = redefineStageA(stageADefinitions, stageABytes, transactions, skips,
+		Set<String> stageAOk        = redefineStageA(stageADefinitions, stageABytes, transactions, skips, injectedClasses,
 		                                              stageAAbandoned);
 		if (stageAOk.isEmpty()) {
 			warn("[HOTSWAP-2P] Stage A did not apply any class; the two-phase transaction is abandoned.");
@@ -4258,10 +4262,32 @@ public class RemoldAgent {
 	 * <p>失败的类立即丢弃其暂存补丁并记入台账（与单阶段 {@link #applyRedefinitions} 的失败语义一致）；
 	 * 宿主与匿名类必须整组成功，否则回滚事务并整组移出阶段 C（重试基线已不一致，提示重启）。</p>
 	 */
+	/**
+	 * Stage A 宿主/匿名一致性判据。
+	 *
+	 * <p><b>新注入组不参与 Stage A 重定义</b>：此前未加载、本轮通过 {@code injectNewClass} 或
+	 * 待注入表定义的 {@code (host, anon)} 组，既不进 {@code definitions}，也不会有 {@code ok} 记录；
+	 * 把它们纳入一致性校验会让整组被误判"半生效"并回滚（{@code ROLLED-BACK-A} + 要求重启），
+	 * 而它们本来就已经按新字节码定义完毕。反过来，新注入的宿主配已加载的匿名类时，匿名类仍要校验。</p>
+	 */
+	public static boolean stageAConsistent(String hostName, Set<String> targets, Set<String> ok,
+	                                Set<String> injected, Set<String> loaded) {
+		if (hostName == null) return false;
+		boolean hostOk = ok.contains(hostName) || (injected != null && injected.contains(hostName));
+		if (!hostOk) return false;
+		if (targets == null) return true;
+		for (String target : targets) {
+			if (injected != null && injected.contains(target)) continue;
+			if (loaded != null && loaded.contains(target) && !ok.contains(target)) return false;
+		}
+		return true;
+	}
+
 	private static Set<String> redefineStageA(List<ClassDefinition> definitions,
 	                                          Map<String, byte[]> stageABytes,
 	                                          Collection<AlignmentTransaction> transactions,
 	                                          RoundSkips skips,
+	                                          Set<String> injectedClasses,
 	                                          Set<String> abandonedOut) {
 		for (AlignmentTransaction tx : transactions) tx.preRegister();
 
@@ -4348,12 +4374,9 @@ public class RemoldAgent {
 		// 宿主与匿名类必须同批生效；否则阶段 C 的基线已不一致，整组移出。
 		Set<String> abandoned = new HashSet<>();
 		for (AlignmentTransaction tx : transactions) {
-			boolean hostOk     = ok.contains(tx.hostName);
-			boolean allAnonsOk = true;
-			for (String target : tx.targetClasses) {
-				if (loadedClassesMap.containsKey(target) && !ok.contains(target)) allAnonsOk = false;
+			if (stageAConsistent(tx.hostName, tx.targetClasses, ok, injectedClasses, loadedClassesMap.keySet())) {
+				continue;
 			}
-			if (hostOk && allAnonsOk) continue;
 			error("[HOTSWAP-PARTIAL] Stage A: host " + tx.hostName
 			      + " and its anonymous classes were not redefined consistently;"
 			      + " rolling back pending injections and excluding the group from stage C."

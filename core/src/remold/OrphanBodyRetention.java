@@ -126,6 +126,16 @@ final class OrphanBodyRetention {
 
 	private static String handleReason(ClassNode oldClass, ClassNode newClass,
 	                                   Handle h, Set<String> plannedMethodKeys) {
+		// 嵌套 lambda：旧体通过 indy 句柄引用本类的合成方法。若这个目标本轮被配对成新方法
+		// （不在 plannedMethodKeys 里、却在新类中存在），保留旧体就会跑出"旧外层 + 新内层"
+		// 的混跑——静默错值（S23 现场形态：外层 varargs lambda 被删、内层 AutoCloseable
+		// lambda 被原位更新，输出 closed-v4-v3）。判据取保守侧：目标没进幽灵计划就拒绝保留。
+		if (isSyntheticLambda(h.getName()) && oldClass.name.equals(h.getOwner())
+		    && (plannedMethodKeys == null || !plannedMethodKeys.contains(h.getName() + h.getDesc()))
+		    && findMethod(newClass, h.getName(), h.getDesc()) != null) {
+			return "its nested lambda " + h.getName() + h.getDesc()
+			     + " was updated in place (the old body would mix old outer with new inner semantics)";
+		}
 		switch (h.getTag()) {
 			case Opcodes.H_GETFIELD:
 			case Opcodes.H_GETSTATIC:
@@ -143,6 +153,20 @@ final class OrphanBodyRetention {
 			default:
 				return null;                                          // 非成员句柄（不可能出现），保守放行
 		}
+	}
+
+	/** 合成 lambda 方法名（javac {@code lambda$...} 与 MethodFingerprinter 认可的自造名）。 */
+	/**
+	 * 合成 lambda 方法名：javac {@code lambda$...}、Kotlin {@code $lambda}、Scala {@code $anonfun$}。
+	 *
+	 * <p>刻意<b>不</b>复用 {@link MethodFingerprinter#isSyntheticName}：那条判据还含 {@code access$}
+	 * 访问器桩，而访问器是直接调用目标（方法引用也可能指到它），并不是 indy 的 lambda impl——
+	 * 把它算成"嵌套 lambda"会让本闸门误杀。</p>
+	 */
+	private static boolean isSyntheticLambda(String name) {
+		return name != null
+		     && !name.startsWith("access$")
+		     && (name.contains("lambda$") || name.contains("$lambda") || name.contains("$anonfun$"));
 	}
 
 	private static FieldNode findField(ClassNode cn, String name, String desc) {

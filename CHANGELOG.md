@@ -38,6 +38,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   调用"的终局断言），`LambdaBridgeProbe` 新增三个现场形态场景（S01 多层 Stream 嵌套、
   S04 体内拓扑翻转、`Function` 基本形态）。
 
+- **捕获桥跨宿主错配（S14 静默错值）**：`makeInstToStatic` 与 `makeStaticToInst` 交换 this
+  形状时，两个"仅字面量不同"的外层 lambda 拿到同一个 `L:<模板哈希>` 宿主键，内层 Supplier
+  被判成"同宿主"而跨宿主桥接——retained 实例跑另一宿主的新体（`s2i=noThis:y-v2`），不抛异常。
+  现在 lambda 宿主键改为链式 `L:<hash>@<宿主链>`，`sameHost` 不再接受"哈希相同"当同宿主证据。
+  回归：`LambdaBridgeAlignTest.thisShapeSwapAcrossHostsIsNotBridged`（断言无跨宿主 BRIDGE 事件）；
+  变异：去掉宿主链 → 用例红。
+
+- **保留体与新内层 lambda 混跑（S23 静默错值）**：外层 varargs lambda 被删、内层
+  `AutoCloseable` lambda 被配对更新时，旧外层保留体调用到新内层体，输出既非 v1 也非 v2
+  （`closed-v4-v3`）。`OrphanBodyRetention.handleReason` 现在拒绝"旧体 indy 句柄指向的本类
+  合成 lambda 未进幽灵计划、却存在于新类"的保留，回退默认值桩并点名原因；判据刻意排除
+  `access$`（访问器是直接调用目标，不是 lambda impl）。回归：
+  `LambdaBridgeAlignTest.retainedBodyIsRefusedWhenItsNestedLambdaWasUpdated`；变异：关掉闸门 → 用例红。
+
 ## [0.2.8] - 2026-11-12
 
 ### Summary

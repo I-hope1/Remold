@@ -166,6 +166,129 @@ public class LambdaBridgeAlignTest {
 			"第二轮也必须把尾部 SAM 实参转发给新方法体");
 	}
 
+	/** S23 现场形态 V3：外层 varargs lambda 捕获 [a, b, extra]，内层 AutoCloseable 捕获 sb。 */
+	static final String V3_MIXED_RUN = """
+		public class Pair {
+		    public interface VarFn { String join(String prefix, String... rest); }
+		    public static VarFn retained;
+		    private final String a = "rec";
+		    private final int b = 7;
+		    public static void init() { retained = new Pair().buildFn("ext"); }
+		    public VarFn buildFn(String extra) {
+		        return (prefix, rest) -> {
+		            final StringBuilder sb = new StringBuilder();
+		            try (AutoCloseable c = () -> sb.append(":closed-v3")) {
+		                sb.append(a).append(":").append(b).append(":").append(extra)
+		                  .append(":").append(prefix).append(":").append(String.join(",", rest));
+		            } catch (Exception e) {
+		                throw new RuntimeException(e);
+		            }
+		            return sb.append("-v3").toString();
+		        };
+		    }
+		}
+		""";
+
+	/** S23 现场形态 V4：外层去掉全部捕获（前插兄弟 Supplier），内层改成 closed-v4。 */
+	static final String V4_MIXED_RUN = """
+		import java.util.function.Supplier;
+		public class Pair {
+		    public interface VarFn { String join(String prefix, String... rest); }
+		    public static VarFn retained;
+		    private final String a = "rec";
+		    private final int b = 7;
+		    public static void init() { retained = new Pair().buildFn("ext"); }
+		    public VarFn buildFn(String extra) {
+		        Supplier<String> sib = () -> a + ":" + b + ":" + extra;
+		        if (sib.get().isEmpty()) return (p, r) -> "";
+		        return (prefix, rest) -> {
+		            final StringBuilder sb = new StringBuilder();
+		            try (AutoCloseable c = () -> sb.append(":closed-v4")) {
+		                sb.append("NO_CAP:").append(prefix).append(":").append(String.join(",", rest));
+		            } catch (Exception e) {
+		                throw new RuntimeException(e);
+		            }
+		            return sb.append("-v4").toString();
+		        };
+		    }
+		}
+		""";
+
+	/** S23 现场形态：外层旧体不得在内层已被更新时被保留（否则混跑旧外层+新内层）。 */
+	@Test
+	void retainedBodyIsRefusedWhenItsNestedLambdaWasUpdated(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v3 = Files.readAllBytes(compile(javac, tmp, "v3", V3_MIXED_RUN).resolve("Pair.class"));
+		byte[] v4 = Files.readAllBytes(compile(javac, tmp, "v4", V4_MIXED_RUN).resolve("Pair.class"));
+
+		LambdaAligner.TEST_EVENTS.clear();
+		ClassNode out = parse(LambdaAligner.align(v3, v4));
+
+		for (LambdaAligner.AlignmentEvent e : LambdaAligner.TEST_EVENTS) {
+			if ("GHOST_KEEP_BODY".equals(e.kind) && e.oldName != null && e.oldName.startsWith("lambda$buildFn$1")) {
+				fail("外层 varargs lambda 不得保留旧体：内层已被配对更新，旧体会跑出旧外层+新内层的混跑（静默错值）："
+					+ e);
+			}
+		}
+
+		MethodNode outer = null;
+		for (MethodNode mn : out.methods) {
+			if (mn.name.startsWith("lambda$buildFn$1")) outer = mn;
+		}
+		assertNotNull(outer, "旧外层必须仍留桩兜住老 callsite");
+		assertTrue(containsCall(outer, "onOrphanInvoked"),
+			"拒绝保留后必须回退默认值桩（显式告警），而不是混跑：实际指令数 " + real(outer).size());
+		assertFalse(containsCall(outer, "buildFn"), "不得转发到新方法（旧实例语义不同）");
+	}
+
+	/** S14 现场形态：两个宿主方法交换 this 形状时，旧键不得被跨宿主桥接/改名。 */
+	@Test
+	void thisShapeSwapAcrossHostsIsNotBridged(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_THIS_FLIP).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_THIS_FLIP).resolve("B.class"));
+
+		LambdaAligner.TEST_EVENTS.clear();
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+
+		StringBuilder diag = new StringBuilder("events:\n");
+		for (LambdaAligner.AlignmentEvent e : LambdaAligner.TEST_EVENTS) {
+			diag.append("  ").append(e).append('\n');
+		}
+		diag.append("table=").append(table(out));
+
+		// 桥的硬前提是 sameHost（bridgeGatesHold）；任何跨宿主的 BRIDGE 事件都是错配。
+		for (LambdaAligner.AlignmentEvent e : LambdaAligner.TEST_EVENTS) {
+			if (!"BRIDGE".equals(e.kind) && !"BRIDGE_REPOINT".equals(e.kind) && !"BRIDGE_SYNTH".equals(e.kind)) {
+				continue;
+			}
+			assertEquals(hostOf(e.oldName), hostOf(e.newName),
+				"跨宿主桥接是静默错值（S14）：旧键 " + e.oldName + " 不应接到 " + e.newName + "\n" + diag);
+		}
+
+		// 旧键必须仍存在（兜住老 callsite），且不能变成转发到另一宿主的桥。
+		for (String oldKey : new String[]{
+			"lambda$makeStaticToInst$2", "lambda$makeInstToStatic$0", "lambda$makeInstToStatic$1"}) {
+			MethodNode mn = byKey(out, oldKey, "(Ljava/lang/String;)Ljava/lang/String;");
+			if (mn == null) {
+				continue;                     // 该形态本就没有这个键
+			}
+			if (containsCall(mn, "onBridgeInvoked")) {
+				MethodInsnNode call = onlyCoreCall(mn);
+				assertEquals(hostOf(oldKey), hostOf(call.name),
+					"旧键 " + oldKey + " 的桥目标必须在同一宿主（实际 " + call.name + "）\n" + diag);
+			}
+		}
+	}
+
+	/** {@code lambda$makeInstToStatic$3} → {@code makeInstToStatic}；非合成名原样返回。 */
+	static String hostOf(String methodName) {
+		if (methodName == null) return "";
+		int first = methodName.indexOf('$');
+		int last = methodName.lastIndexOf('$');
+		return first < 0 || last <= first ? methodName : methodName.substring(first + 1, last);
+	}
+
 	@Test
 	void secondRoundKeepsTheBridgeAndRepointsIt(@TempDir Path tmp) throws Exception {
 		String javac = HstestFixtures.javac(21);
@@ -1914,6 +2037,48 @@ public class LambdaBridgeAlignTest {
 		public class B {
 		    public static Function<String, String> f;
 		    public static void make(int k) { f = s -> k + "|" + s; }
+		}
+		""";
+
+	/** S14 现场形态：同类两个宿主方法；V2 交换 this 形状（i2s 丢 this、s2i 加 this）。 */
+	static final String V1_THIS_FLIP = """
+		import java.util.function.Function;
+		import java.util.function.Supplier;
+		public class B {
+		    private final String instTag = "INST";
+		    private static final B HOLDER = new B();
+		    public static Function<String, String> i2s;
+		    public static Function<String, String> s2i;
+		    public static void init() { i2s = HOLDER.makeInstToStatic(); s2i = HOLDER.makeStaticToInst(); }
+		    private Function<String, String> makeInstToStatic() {
+		        return s -> ((Supplier<String>) () -> instTag + ":" + s + "-v1").get();
+		    }
+		    private Function<String, String> makeStaticToInst() {
+		        return s -> ((Supplier<String>) () -> "static:" + s + "-v1").get();
+		    }
+		}
+		""";
+
+	/** S14 V2：i2s 体不再读 this、s2i 体开始读 this；两侧各自前插一个兄弟 Supplier。 */
+	static final String V2_THIS_FLIP = """
+		import java.util.function.Function;
+		import java.util.function.Supplier;
+		public class B {
+		    private final String instTag = "INST";
+		    private static final B HOLDER = new B();
+		    public static Function<String, String> i2s;
+		    public static Function<String, String> s2i;
+		    public static void init() { i2s = HOLDER.makeInstToStatic(); s2i = HOLDER.makeStaticToInst(); }
+		    private Function<String, String> makeInstToStatic() {
+		        Supplier<String> sib = () -> "sib-i2s";
+		        if (sib.get().isEmpty()) return Function.identity();
+		        return s -> ((Supplier<String>) () -> "noThis:" + s + "-v2").get();
+		    }
+		    private Function<String, String> makeStaticToInst() {
+		        Supplier<String> sib = () -> "sib-s2i";
+		        if (sib.get().isEmpty()) return Function.identity();
+		        return s -> ((Supplier<String>) () -> instTag + ":" + s + "-v2").get();
+		    }
 		}
 		""";
 

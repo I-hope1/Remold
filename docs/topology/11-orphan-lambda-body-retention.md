@@ -76,6 +76,19 @@
 
 帧中出现的类型同样不做存在性检查，理由同上。
 
+### 3.4 嵌套 lambda 一致性：保留体不得混跑
+
+保留体里若通过 `invokedynamic` 句柄引用了**本类的合成 lambda 方法**，必须保证那个目标
+本轮没有被"配对成新方法"（即不在幽灵计划 `plannedMethodKeys` 里、却已经存在于新类）。
+否则旧实例会跑出"**旧外层体 + 新内层体**"的混跑：两层语义来自不同版本，输出既不是 v1
+也不是 v2，且不抛任何异常（S23 现场形态：外层 varargs lambda 被删、内层
+`AutoCloseable` lambda 被原位更新，输出 `closed-v4-v3`）。
+
+判据取保守侧：**目标没进幽灵计划就拒绝保留**，回退默认值桩并点 named 原因
+（`its nested lambda ... was updated in place`）。这里不复用
+`MethodFingerprinter.isSyntheticName`——它含 `access$` 访问器桩，而访问器是直接调用目标、
+不是 indy 的 lambda impl，算进来会误杀。
+
 ---
 
 ## 4. 身份识别：与"方法体形态"解耦

@@ -2963,7 +2963,15 @@ public class LambdaAligner {
 			if (isSynthetic || matchesPattern) {
 				SyntheticInfo info = nameIndex.get(mn.name);
 				if (info == null || !info.renameable || info.ghost) continue;
-				hostKey = "L:" + info.hash + (!isMutationActive("1") && info.consumer != null && !info.consumer.isEmpty() ? ":" + info.consumer : "");
+				// 链式宿主键：L:<本 lambda 的模板哈希>@<它自己的宿主链>。只放哈希不够——
+				// 模板哈希屏蔽字面量，两个**不同宿主**里"仅字面量不同"的 lambda 会得到同一个键，
+				// 于是它们的内层 lambda 在 sameHost() 里拿到"同宿主"证据、被跨宿主桥接（S14：
+				// i2s 与 s2i 交换 this 形状时，内层 supplier 被接到另一宿主的新体，静默错值）。
+				// 把宿主链并进键里，跨宿主的内层 lambda 就再也拿不到同宿主证据，只能 fail-closed
+				// 退回幽灵/保留旧体。
+				String up = info.hostKey;
+				hostKey = "L:" + info.hash + (up == null ? "" : "@" + up)
+					+ (!isMutationActive("1") && info.consumer != null && !info.consumer.isEmpty() ? ":" + info.consumer : "");
 			} else {
 				hostKey = "M:" + mn.name + mn.desc;
 			}

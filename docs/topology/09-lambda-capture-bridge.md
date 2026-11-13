@@ -327,6 +327,18 @@ lambda$make$0(Ljava/lang/String;ILjava/lang/String;)Ljava/lang/String;  ← 桥�
    `StringConcatHelper::stringOf` 等）。因此零形参 SAM 之外的桥必须带这项转发，且要有
    端到端用例（对齐产物定义后按老描述符调用，断言业务返回值）。
 
+### 4.2 `sameHost` 的证据必须带宿主链
+
+桥的第一道门是"同一宿主"。判定用的是 `hostKey`：普通宿主为 `M:name+desc`，lambda 宿主为
+`L:<模板哈希>`。**只放哈希不够**——模板哈希会屏蔽字面量，于是"两个不同宿主里仅字面量不同"的
+lambda 拿到同一个 `L:` 键，它们的内层 lambda 便被判成"同宿主"，跨宿主桥接成立（S14 现场形态：
+`makeInstToStatic` 与 `makeStaticToInst` 交换 this 形状，内层 Supplier 被接到另一宿主的新体，
+retained 输出 `s2i=noThis:y-v2`）。
+
+因此 lambda 宿主的键必须是**链式**的：`L:<模板哈希>@<它自己的宿主链>`（递归到 `M:` 为止）。
+键里带上宿主链后，跨宿主的内层 lambda 拿不到同宿主证据，只能 fail-closed 退回幽灵/保留旧体。
+宿主序列锚点也随之按链分组，不会跨宿主借顺序证据。
+
 无分支、无 `Label`，因此不需要 `StackMapTable`，与既有空壳桩的设计一致。
 
 ---

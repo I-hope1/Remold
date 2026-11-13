@@ -214,9 +214,9 @@ public class LambdaBridgeAlignTest {
 		}
 		""";
 
-	/** S23 现场形态：外层旧体不得在内层已被更新时被保留（否则混跑旧外层+新内层）。 */
+	/** S23 现场形态：内层被原位更新时，外层旧实例仍保留旧体（旧实例语义优先），混跑风险由 warn 点名。 */
 	@Test
-	void retainedBodyIsRefusedWhenItsNestedLambdaWasUpdated(@TempDir Path tmp) throws Exception {
+	void retainedBodyKeepsOldBodyEvenWhenNestedLambdaWasUpdated(@TempDir Path tmp) throws Exception {
 		String javac = HstestFixtures.javac(21);
 		byte[] v3 = Files.readAllBytes(compile(javac, tmp, "v3", V3_MIXED_RUN).resolve("Pair.class"));
 		byte[] v4 = Files.readAllBytes(compile(javac, tmp, "v4", V4_MIXED_RUN).resolve("Pair.class"));
@@ -224,20 +224,31 @@ public class LambdaBridgeAlignTest {
 		LambdaAligner.TEST_EVENTS.clear();
 		ClassNode out = parse(LambdaAligner.align(v3, v4));
 
+		boolean retained = false;
 		for (LambdaAligner.AlignmentEvent e : LambdaAligner.TEST_EVENTS) {
 			if ("GHOST_KEEP_BODY".equals(e.kind) && e.oldName != null && e.oldName.startsWith("lambda$buildFn$1")) {
-				fail("外层 varargs lambda 不得保留旧体：内层已被配对更新，旧体会跑出旧外层+新内层的混跑（静默错值）："
-					+ e);
+				retained = true;
 			}
 		}
+		assertTrue(retained, "旧实例语义优先：外层孤儿必须保留旧体（不得退回默认值桩）");
 
 		MethodNode outer = null;
 		for (MethodNode mn : out.methods) {
 			if (mn.name.startsWith("lambda$buildFn$1")) outer = mn;
 		}
 		assertNotNull(outer, "旧外层必须仍留桩兜住老 callsite");
-		assertTrue(containsCall(outer, "onOrphanInvoked"),
-			"拒绝保留后必须回退默认值桩（显式告警），而不是混跑：实际指令数 " + real(outer).size());
+		// 保留体与默认值桩都会调用 onOrphanInvoked；用描述符区分：
+		// 保留体走 (String,boolean,boolean) 的 retained 标记，默认值桩走 (String,boolean)（可能带委托）。
+		boolean retainedMarker = false;
+		boolean stubMarker = false;
+		for (AbstractInsnNode i : outer.instructions) {
+			if (i instanceof MethodInsnNode m && m.name.equals("onOrphanInvoked")) {
+				if ("(Ljava/lang/String;ZZ)V".equals(m.desc)) retainedMarker = true;
+				else stubMarker = true;
+			}
+		}
+		assertTrue(retainedMarker, "保留体必须带 retained 标记（旧实例语义优先）");
+		assertFalse(stubMarker, "不得退回默认值桩");
 		assertFalse(containsCall(outer, "buildFn"), "不得转发到新方法（旧实例语义不同）");
 	}
 

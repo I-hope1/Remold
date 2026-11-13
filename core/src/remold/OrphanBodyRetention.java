@@ -126,16 +126,6 @@ final class OrphanBodyRetention {
 
 	private static String handleReason(ClassNode oldClass, ClassNode newClass,
 	                                   Handle h, Set<String> plannedMethodKeys) {
-		// 嵌套 lambda：旧体通过 indy 句柄引用本类的合成方法。若这个目标本轮被配对成新方法
-		// （不在 plannedMethodKeys 里、却在新类中存在），保留旧体就会跑出"旧外层 + 新内层"
-		// 的混跑——静默错值（S23 现场形态：外层 varargs lambda 被删、内层 AutoCloseable
-		// lambda 被原位更新，输出 closed-v4-v3）。判据取保守侧：目标没进幽灵计划就拒绝保留。
-		if (isSyntheticLambda(h.getName()) && oldClass.name.equals(h.getOwner())
-		    && (plannedMethodKeys == null || !plannedMethodKeys.contains(h.getName() + h.getDesc()))
-		    && findMethod(newClass, h.getName(), h.getDesc()) != null) {
-			return "its nested lambda " + h.getName() + h.getDesc()
-			     + " was updated in place (the old body would mix old outer with new inner semantics)";
-		}
 		switch (h.getTag()) {
 			case Opcodes.H_GETFIELD:
 			case Opcodes.H_GETSTATIC:
@@ -167,6 +157,28 @@ final class OrphanBodyRetention {
 		return name != null
 		     && !name.startsWith("access$")
 		     && (name.contains("lambda$") || name.contains("$lambda") || name.contains("$anonfun$"));
+	}
+
+	/**
+	 * 保留体是否会跑到"已原位更新"的嵌套 lambda 上（S23 形态）。
+	 *
+	 * <p>保留旧体是<b>旧实例语义优先</b>的既定行为，这里不拒绝保留；只把"旧外层 + 新内层"的
+	 * 混跑风险暴露成返回值，供调用方 {@code warn} 点名（否则就是静默错值）。</p>
+	 */
+	static String updatedNestedLambda(ClassNode oldClass, ClassNode newClass, MethodNode body,
+	                                  Set<String> plannedMethodKeys) {
+		if (oldClass == null || newClass == null || body == null || body.instructions == null) return null;
+		for (org.objectweb.asm.tree.AbstractInsnNode n : body.instructions) {
+			if (!(n instanceof org.objectweb.asm.tree.InvokeDynamicInsnNode indy) || indy.bsmArgs == null) continue;
+			for (Object arg : indy.bsmArgs) {
+				if (!(arg instanceof Handle h) || !oldClass.name.equals(h.getOwner())) continue;
+				if (!isSyntheticLambda(h.getName())) continue;
+				if (plannedMethodKeys != null && plannedMethodKeys.contains(h.getName() + h.getDesc())) continue;
+				if (findMethod(newClass, h.getName(), h.getDesc()) == null) continue;
+				return h.getName() + h.getDesc();
+			}
+		}
+		return null;
 	}
 
 	private static FieldNode findField(ClassNode cn, String name, String desc) {

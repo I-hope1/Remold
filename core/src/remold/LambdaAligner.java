@@ -5323,7 +5323,19 @@ public class LambdaAligner {
 									String why = OrphanBodyRetention.rejectionReason(
 									 prevClassNode, nextClassNode, oldBody, plannedKeys);
 									keepPrevious = why == null;
-									if (why != null) retentionFallbacks.add(key + ": " + why);
+									if (why != null) {
+										retentionFallbacks.add(key + ": " + why);
+									} else {
+										// 旧实例语义优先：嵌套 lambda 被原位更新时仍保留旧体，
+										// 但混跑（旧外层 + 新内层）必须可观测，不能静默。
+										String mixed = OrphanBodyRetention.updatedNestedLambda(
+										 prevClassNode, nextClassNode, oldBody, plannedKeys);
+										if (mixed != null) {
+											RemoldAgent.warn("[LambdaAligner] " + className + "#" + key
+												+ ": retained body calls updated nested lambda " + mixed
+												+ "; old instances may mix old outer with new inner semantics");
+										}
+									}
 								} else {
 									retentionFallbacks.add(key + ": " + (isVoid
 									 ? "void orphan (remold.agent.orphan_retain_void=false)"

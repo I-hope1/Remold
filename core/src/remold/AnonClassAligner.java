@@ -886,10 +886,33 @@ public final class AnonClassAligner {
 	 */
 	public static boolean isBatchAnonClass(String className, byte[] bytes) {
 		if (className == null || bytes == null) return false;
-		String host = className.replaceAll("\\$\\d+(\\$\\d+)*$", "");
-		if (host.equals(className)) return false;
+		String host = batchAnonHost(className);
+		if (host == null || host.equals(className)) return false;
 		if (!isAnonymousClassName(host, className)) return false;
 		return isAnonymousClass(bytes, host);
+	}
+
+	/** 匿名类的直接宿主（去掉尾部 {@code $数字} 链）。调用方须先用 {@link #isBatchAnonClass} 确认它是真匿名类。 */
+	public static String batchAnonHost(String className) {
+		return className == null ? null : className.replaceAll("\\$\\d+(\\$\\d+)*$", "");
+	}
+
+	/**
+	 * 纯函数：批次匿名类按**类自身**归属分组（一个类只归一个宿主）。
+	 *
+	 * <p>批次路由必须用这张表，不能拿"宿主前缀"去过滤整个批次：前者保证每个类只属于一个宿主，
+	 * 后者会让某个宿主的对齐周期看到并移走别的宿主的类（跨宿主误归属 / 误移出）。</p>
+	 */
+	public static java.util.Map<String, java.util.Map<String, byte[]>> groupBatchAnons(
+		java.util.Map<String, byte[]> changedClasses) {
+		java.util.Map<String, java.util.Map<String, byte[]>> out = new java.util.LinkedHashMap<>();
+		if (changedClasses == null) return out;
+		for (java.util.Map.Entry<String, byte[]> e : changedClasses.entrySet()) {
+			if (!isBatchAnonClass(e.getKey(), e.getValue())) continue;
+			out.computeIfAbsent(batchAnonHost(e.getKey()), k -> new java.util.LinkedHashMap<>())
+				.put(e.getKey(), e.getValue());
+		}
+		return out;
 	}
 
 	/**

@@ -1,8 +1,11 @@
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 import org.junit.jupiter.api.Test;
 
@@ -48,5 +51,28 @@ class EnumConstantBodyRoutingTest {
 		assertNotNull(anon, "javac must emit H$1 for the anonymous inner class");
 		assertTrue(AnonClassAligner.isBatchAnonClass("H$1", anon),
 			"a real anonymous class must still be admitted into the host alignment group");
+	}
+
+	/**
+	 * 同批多宿主各带真匿名类时，分组必须按类自身归属隔离：一个类只能出现在一个宿主名下，
+	 * 否则某个宿主的对齐周期会把别的宿主的匿名类移出批次（跨宿主误归属 / 误移出）。
+	 */
+	@Test
+	void sameBatchHostsDoNotStealEachOthersAnons() {
+		Map<String, byte[]> classes = LayoutGateAssert.compile(Map.of(
+			"A", "public class A { public static Runnable r = new Runnable() { public void run() { } }; }",
+			"B", "public class B { public static Runnable r = new Runnable() { public void run() { } }; }"));
+
+		Map<String, Map<String, byte[]>> groups = AnonClassAligner.groupBatchAnons(classes);
+		assertEquals(Set.of("A", "B"), groups.keySet(), "each host must own its own group");
+		assertEquals(Set.of("A$1"), groups.get("A").keySet(), "A$1 must not leak into another host");
+		assertEquals(Set.of("B$1"), groups.get("B").keySet(), "B$1 must not leak into another host");
+
+		Set<String> seen = new HashSet<>();
+		for (Map.Entry<String, Map<String, byte[]>> g : groups.entrySet()) {
+			for (String name : g.getValue().keySet()) {
+				assertTrue(seen.add(name), name + " must belong to exactly one host, got duplicate in " + g.getKey());
+			}
+		}
 	}
 }

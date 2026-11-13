@@ -2035,7 +2035,11 @@ public class RemoldAgent {
 			} catch (Throwable ignored) { }
 		}
 
-		// 收集需要对齐匿名类的所有宿主类：仅当宿主自身或其内部类在磁盘上发生变化时才参与对齐
+		// 批次匿名类按**类自身**归属分组：一个类只归一个宿主。不能拿"宿主前缀"去过滤整个批次——
+		// 那会让某个宿主的对齐周期看到并移走别的宿主的类（跨宿主误归属 / 误移出）。
+		Map<String, Map<String, byte[]>> newAnonsByHost = AnonClassAligner.groupBatchAnons(newBatchBytes);
+
+		// 收集需要对齐匿名类的所有宿主类：宿主自身变了，或它的匿名类变了
 		Set<String> hostClassesToAlign = new LinkedHashSet<>();
 		for (Map.Entry<String, byte[]> entry : newBatchBytes.entrySet()) {
 			String cn = entry.getKey();
@@ -2046,13 +2050,12 @@ public class RemoldAgent {
 				long oldHash = fileDiskHashes.get(cnKey);
 				changedOnDisk = (oldHash == -1 || oldHash == LongLongMap.NOT_FOUND || oldHash != newHash);
 			}
-			if (changedOnDisk) {
-				// 只有**字节判定为真匿名**的类才把宿主拉进对齐组。枚举常量体 {@code Op$1} 名字
-				// 与匿名类同形，但带 ACC_ENUM、是独立类：按普通类直接参与本批重定义（S22）。
-				String host = AnonClassAligner.isBatchAnonClass(cn, entry.getValue())
-					? cn.replaceAll("\\$\\d+(\\$\\d+)*$", "")
-					: cn;
-				hostClassesToAlign.add(host);
+			if (!changedOnDisk) continue;
+			String host = AnonClassAligner.batchAnonHost(cn);
+			if (host != null && !host.equals(cn) && AnonClassAligner.isBatchAnonClass(cn, entry.getValue())) {
+				hostClassesToAlign.add(host);        // 匿名类变了：宿主跟着对齐
+			} else {
+				hostClassesToAlign.add(cn);          // 宿主自己变了：它的匿名类要跟着对齐
 			}
 		}
 
@@ -2075,30 +2078,24 @@ public class RemoldAgent {
 			// 预热并收集已加载但尚未缓存的旧匿名类字节码
 			for (Map.Entry<String, Class<?>> entry : loadedClassesMap.entrySet()) {
 				String cName = entry.getKey();
-				if (AnonClassAligner.isAnonymousClassName(hostSlash, cName)) {
-					if (!bytecodeCache.containsKey(cName)) {
-						byte[] bc = fetchOriginalBytecode(entry.getValue());
-						if (bc != null && AnonClassAligner.isBatchAnonClass(cName, bc)) bytecodeCache.put(cName, bc);
-					}
-				}
+				if (!AnonClassAligner.isAnonymousClassName(hostSlash, cName)) continue;
+				if (bytecodeCache.containsKey(cName)) continue;
+				byte[] bc = fetchOriginalBytecode(entry.getValue());
+				if (bc != null && AnonClassAligner.isBatchAnonClass(cName, bc)) bytecodeCache.put(cName, bc);
 			}
 
 			Map<String, byte[]> oldAnon = new HashMap<>();
 			for (Map.Entry<String, byte[]> entry : bytecodeCache.entrySet()) {
-				if (!AnonClassAligner.isAnonymousClassName(hostSlash, entry.getKey())) continue;
 				byte[] src = sourceBytecodeCache.get(entry.getKey());
 				byte[] oldBytes = src != null ? src : entry.getValue();
-				if (AnonClassAligner.isBatchAnonClass(entry.getKey(), oldBytes)) {
-					oldAnon.put(entry.getKey(), oldBytes);
-				}
+				if (!AnonClassAligner.isBatchAnonClass(entry.getKey(), oldBytes)) continue;
+				if (!hostName.equals(AnonClassAligner.batchAnonHost(entry.getKey()))) continue;
+				oldAnon.put(entry.getKey(), oldBytes);
 			}
 
-			Map<String, byte[]> newAnon = new HashMap<>();
-			for (Map.Entry<String, byte[]> entry : newBatchBytes.entrySet()) {
-				if (AnonClassAligner.isBatchAnonClass(entry.getKey(), entry.getValue())) {
-					newAnon.put(entry.getKey(), entry.getValue());
-				}
-			}
+			// 只取**本宿主**的匿名类（按类自身归属分组，绝不拿"本宿主前缀"去扫整批）
+			Map<String, byte[]> newAnon = new HashMap<>(
+				newAnonsByHost.getOrDefault(hostName, java.util.Collections.emptyMap()));
 
 			if (oldAnon.isEmpty() && newAnon.isEmpty()) {
 				continue;

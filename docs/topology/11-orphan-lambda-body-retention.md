@@ -76,18 +76,23 @@
 
 帧中出现的类型同样不做存在性检查，理由同上。
 
-### 3.4 嵌套 lambda 一致性：保留体不得混跑
+### 3.4 嵌套 lambda 引用：保留旧体优先，混跑风险必须点名
 
-保留体里若通过 `invokedynamic` 句柄引用了**本类的合成 lambda 方法**，必须保证那个目标
-本轮没有被"配对成新方法"（即不在幽灵计划 `plannedMethodKeys` 里、却已经存在于新类）。
-否则旧实例会跑出"**旧外层体 + 新内层体**"的混跑：两层语义来自不同版本，输出既不是 v1
-也不是 v2，且不抛任何异常（S23 现场形态：外层 varargs lambda 被删、内层
-`AutoCloseable` lambda 被原位更新，输出 `closed-v4-v3`）。
+保留体里若通过 `invokedynamic` 句柄引用了**本类的合成 lambda 方法**，而该目标本轮被"配对成
+新方法"（不在幽灵计划 `plannedMethodKeys` 里、却已存在于新类），旧实例就会跑出
+"**旧外层体 + 新内层体**"的混跑：两层语义来自不同版本（S23 现场形态：外层 varargs lambda
+被删、内层 `AutoCloseable` lambda 被原位更新，输出 `closed-v4-v3`）。
 
-判据取保守侧：**目标没进幽灵计划就拒绝保留**，回退默认值桩并点 named 原因
-（`its nested lambda ... was updated in place`）。这里不复用
-`MethodFingerprinter.isSyntheticName`——它含 `access$` 访问器桩，而访问器是直接调用目标、
-不是 indy 的 lambda impl，算进来会误杀。
+**取舍**：旧实例语义优先——**仍然保留旧体**，不做"拒绝保留 → 回退默认值桩"（那会把旧实例从
+"混跑"直接变成 `null`，回归更差）。混跑风险改为**可观测**：`OrphanBodyRetention.updatedNestedLambda`
+返回第一个被原位更新、且未进幽灵计划的嵌套目标，`LambdaAligner` 据此发 `warn`
+（`retained body calls updated nested lambda ...; old instances may mix old outer with new inner semantics`）。
+
+彻底消除混跑需要**连带保留子体**（把旧体引用到的子 lambda 也搬成幽灵、不参与本轮配对），
+属独立设计；当前只登记为技术债（`docs/status.md` §4.2），不实现。
+
+判据不复用 `MethodFingerprinter.isSyntheticName`——它含 `access$` 访问器桩，而访问器是直接
+调用目标、不是 indy 的 lambda impl，算进来会误判。
 
 ---
 

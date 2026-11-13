@@ -60,6 +60,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   跳过台账并发 warn。回归：`EnumConstantBodyRoutingTest`（枚举体不得入组 / 真匿名类仍入组）；
   变异：路由退回名字-only → 用例红；`:tests:test` 全绿。
 
+- **匿名类批次路由跨宿主误归属（S22 修复的回归）**：改字节准入时 `newAnon` 丢掉了宿主前缀，
+  每个宿主的对齐周期都拿到**整批**的匿名类，第一个宿主把其他宿主的 `$N` 类一并移出
+  `newBatchBytes` → 真机上 `$S17$1`、`AnonymousLambdaLab$1..5` 等被记到 `$S11_DeepNesting66$Wrap`
+  或 `NestedLambdaLimitLab` 名下跳过，JUnit `V2 S17` 停在 `box:m-v1`。修复：
+  `AnonClassAligner.groupBatchAnons` 按**类自身归属**一次性分组（一个类只归一个宿主），
+  宿主循环只处理自己组内的 `newAnon`；`oldAnon` 同样按宿主相等过滤。回归：
+  `EnumConstantBodyRoutingTest.sameBatchHostsDoNotStealEachOthersAnons`（变异：分组忽略宿主 → 红）。
+
+- **孤儿保留体在内层 lambda 被更新时退回默认值桩（V2 S01 / V2 S23 回归）**：上一版把
+  "嵌套 lambda 被原位更新"当成拒绝保留旧体的理由，外层嵌套孤儿因此退回 `default-value stub`
+  返回 `null`（`ret=null`）。改为**旧实例语义优先**：仍保留旧体，混跑（旧外层 + 新内层）风险由
+  `OrphanBodyRetention.updatedNestedLambda` 检出并发 `warn` 点名；彻底消除混跑需"连带保留子体"，
+  登记为技术债（`docs/status.md` §4.2）。回归：
+  `LambdaBridgeAlignTest.retainedBodyKeepsOldBodyEvenWhenNestedLambdaWasUpdated`。
+
 ## [0.2.8] - 2026-11-12
 
 ### Summary

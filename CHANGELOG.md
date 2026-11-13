@@ -25,6 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BatchTwoPhaseStaticRewriteTest`（批次驱动 Stage A → patch → Stage C，1/1）与
   `DynamicTwoPhaseRedefineTest`（动态入口同顺序，3/3）验证两条路径。
 
+### Fixed
+
+- **捕获桥在带形参的 SAM 上漏压尾部实参（JBR 21 真机崩溃）**：`LambdaAligner.injectBridgeBody`
+  过去只按捕获表压值，`Function`/`Consumer`/`Stream` 这类 SAM 的尾部实参没有转发给目标。
+  重定义路径不跑字节码校验器，旧 lambda 实例经桥调用时目标读到 `null` 或垃圾引用——探针实测
+  `NullPointerException`、`IncompatibleClassChangeError`，真机为 native
+  `EXCEPTION_ACCESS_VIOLATION`（崩溃点随实参用途落在 `LinkResolver::resolve_invoke` /
+  `Klass::method_at_vtable` / `StringConcatHelper::stringOf`）。现按目标描述符反推尾部个数，
+  从老槽位原样压栈，并逐个校验老/目标尾参类型；第二轮把解析出的 `sources` 截断到捕获表长度，
+  避免桥退化成幽灵。回归：`LambdaBridgeAlignTest` 新增两个用例（含"定义对齐产物后按老描述符
+  调用"的终局断言），`LambdaBridgeProbe` 新增三个现场形态场景（S01 多层 Stream 嵌套、
+  S04 体内拓扑翻转、`Function` 基本形态）。
+
 ## [0.2.8] - 2026-11-12
 
 ### Summary

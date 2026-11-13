@@ -85,6 +85,87 @@ public class LambdaBridgeAlignTest {
 		assertNotNull(byKey(out, "lambda$f$0", "(I)V"), "新方法本身必须原样保留（桥不改名）");
 	}
 
+	// ------------------------------------------------------------------------------------------------
+	// 带形参的 SAM（Function/Consumer 这类）：桥还必须转发尾部 SAM 实参
+	// ------------------------------------------------------------------------------------------------
+
+	/**
+	 * 捕获表缩水 + SAM 本身带形参时，桥体必须把尾部 SAM 实参一起转发。
+	 *
+	 * <p>失效形态：桥体只压捕获表、漏掉尾部 SAM 实参。重定义路径不跑字节码校验器，漏压不会
+	 * 变成 {@code VerifyError}；缺失的那个实参可能是 null（JBR 21 探针实测 NPE），也可能是
+	 * JIT 下的垃圾引用（真机报告形态 {@code EXCEPTION_ACCESS_VIOLATION}）。</p>
+	 *
+	 * <p>本用例不需要 DCEVM：对齐产物直接在独立 ClassLoader 里定义，按"老隐藏类"的调用形态
+	 * 调用旧键方法，断言落在业务终局（返回的字符串），而不是"桥建出来了"。</p>
+	 */
+	@Test
+	void parameterizedSamForwardsItsArguments(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_FUNCTION_SAM).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_FUNCTION_SAM_DROP_CAPTURE).resolve("B.class"));
+
+		// 前提：合成方法 = [捕获...] + [SAM 形参]，捕获按使用顺序排在前面。
+		assertNotNull(byKey(parse(v1), "lambda$make$0", "(Ljava/lang/String;ILjava/lang/String;)Ljava/lang/String;"),
+			"夹具前提：v1 的合成方法是 String 捕获 + int 捕获 + SAM 形参");
+		assertNotNull(byKey(parse(v2), "lambda$make$0", "(ILjava/lang/String;)Ljava/lang/String;"),
+			"夹具前提：v2 删掉 String 捕获后，尾部 SAM 形参仍在描述符里");
+
+		byte[] aligned = LambdaAligner.align(v1, v2);
+		ClassNode out = parse(aligned);
+		MethodNode bridge = byKey(out, "lambda$make$0", "(Ljava/lang/String;ILjava/lang/String;)Ljava/lang/String;");
+		assertNotNull(bridge, "旧键必须仍然存在（否则老实例会抛 NoSuchMethodError）：" + table(out));
+		assertFalse(containsCall(bridge, "onOrphanInvoked"),
+			"带形参的 SAM 也必须建桥：老实例的 apply 应当转发给新方法，而不是返回默认值");
+
+		// 桥体：先搬活下来的 int 捕获（槽 1），再压尾部 SAM 实参（槽 2）。顺序不能反。
+		List<AbstractInsnNode> pushes = valuePushes(bridge);
+		assertEquals(2, pushes.size(),
+			"桥体必须压两个实参（活下来的捕获 + 尾部 SAM 形参），实际压了 " + pushes.size());
+		assertLoad(pushes.get(0), Opcodes.ILOAD, 1, "第一个实参是活下来的 int 捕获（槽 1）");
+		assertLoad(pushes.get(1), Opcodes.ALOAD, 2, "第二个实参是尾部 SAM 形参（槽 2）：漏压它会栈欠载");
+
+		MethodInsnNode call = onlyCoreCall(bridge);
+		assertEquals("lambda$make$0", call.name, "桥必须转发给 v2 的合成方法");
+		assertEquals("(ILjava/lang/String;)Ljava/lang/String;", call.desc, "转发目标用的是 v2 的描述符");
+
+		// 终局：定义对齐产物，按老描述符调用旧键方法 → 必须拿到新方法体的返回值。
+		Class<?> b = define(aligned);
+		java.lang.reflect.Method old = b.getDeclaredMethod(
+			"lambda$make$0", String.class, int.class, String.class);
+		old.setAccessible(true);
+		assertEquals("7:x", (Object) old.invoke(null, "A", 7, "x"),
+			"桥必须把尾部 SAM 实参转发给新方法体；漏压时这里会 VerifyError 或直接崩 VM");
+	}
+
+	/** 第二轮：带形参 SAM 的桥必须仍被认出来并重新生成（不能退化成死幽灵）。 */
+	@Test
+	void secondRoundKeepsTheParameterizedSamBridge(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "v1", V1_FUNCTION_SAM).resolve("B.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "v2", V2_FUNCTION_SAM_DROP_CAPTURE).resolve("B.class"));
+		byte[] v3 = Files.readAllBytes(compile(javac, tmp, "v3", V3_FUNCTION_SAM_BODY_ONLY).resolve("B.class"));
+
+		byte[] r1 = LambdaAligner.align(v1, v2);
+		assertEquals(1, LambdaAligner.LAST_RESULT.bridgeCount, "第一轮必须建出桥");
+
+		byte[] aligned = LambdaAligner.align(r1, v3, null, null, LambdaAligner.LAST_RESULT.inventedNames);
+		ClassNode out = parse(aligned);
+		MethodNode bridge = byKey(out, "lambda$make$0", "(Ljava/lang/String;ILjava/lang/String;)Ljava/lang/String;");
+		assertNotNull(bridge, "第二轮桥不能消失（否则老实例退化成死幽灵）：" + table(out));
+		assertFalse(containsCall(bridge, "onOrphanInvoked"),
+			"第二轮桥必须仍是转发桩：把尾部 SAM 实参算进 sources 会让长度校验对不上，进而整座桥退化成幽灵");
+		MethodInsnNode call = onlyCoreCall(bridge);
+		assertEquals("(ILjava/lang/String;)Ljava/lang/String;", call.desc, "重生成之后目标描述符不变");
+
+		Class<?> b = define(aligned);
+		java.lang.reflect.Method old = b.getDeclaredMethod(
+			"lambda$make$0", String.class, int.class, String.class);
+		old.setAccessible(true);
+		assertEquals("7|x", (Object) old.invoke(null, "A", 7, "x"),
+			"第二轮也必须把尾部 SAM 实参转发给新方法体");
+	}
+
 	@Test
 	void secondRoundKeepsTheBridgeAndRepointsIt(@TempDir Path tmp) throws Exception {
 		String javac = HstestFixtures.javac(21);
@@ -1809,6 +1890,33 @@ public class LambdaBridgeAlignTest {
 		}
 		""";
 
+	/** 带形参的 SAM：{@code Function<String,String>}，捕获 [String a, int k] + 尾部 SAM 实参 String s。 */
+	static final String V1_FUNCTION_SAM = """
+		import java.util.function.Function;
+		public class B {
+		    public static Function<String, String> f;
+		    public static void make(String a, int k) { f = s -> a + k + ":" + s; }
+		}
+		""";
+
+	/** 删掉 String 捕获 → {@code lambda$make$0(ILjava/lang/String;)Ljava/lang/String;}。 */
+	static final String V2_FUNCTION_SAM_DROP_CAPTURE = """
+		import java.util.function.Function;
+		public class B {
+		    public static Function<String, String> f;
+		    public static void make(int k) { f = s -> k + ":" + s; }
+		}
+		""";
+
+	/** 第二轮：捕获表不动，只改方法体。 */
+	static final String V3_FUNCTION_SAM_BODY_ONLY = """
+		import java.util.function.Function;
+		public class B {
+		    public static Function<String, String> f;
+		    public static void make(int k) { f = s -> k + "|" + s; }
+		}
+		""";
+
 	// ------------------------------------------------------------------------------------------------
 	// 工具
 	// ------------------------------------------------------------------------------------------------
@@ -1981,6 +2089,15 @@ public class LambdaBridgeAlignTest {
 		}
 		assertEquals(1, n, "桥体应当恰好有一条转发调用");
 		return core;
+	}
+
+	/** 独立 ClassLoader 定义对齐产物：桥体里的 {@code onBridgeInvoked} 由父加载器提供。 */
+	static Class<?> define(byte[] bytes) {
+		return new ClassLoader(LambdaBridgeAlignTest.class.getClassLoader()) {
+			Class<?> defineOne() {
+				return defineClass(null, bytes, 0, bytes.length);
+			}
+		}.defineOne();
 	}
 
 	static String table(ClassNode cn) {

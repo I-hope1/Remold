@@ -300,6 +300,33 @@ lambda$f$0(Ljava/lang/String;I)V      ← 桥（老键，只捕获 s 与 k）
 所以解析旧桥体时要认得三种"压值"形态：形参加载、常量、`GETSTATIC`、以及
 `ALOAD 0; GETFIELD`（后者要与"接收者压栈"区分开——判据是 `ALOAD 0` 后面是否紧跟 `GETFIELD`）。
 
+### 4.1 尾部 SAM 实参：桥必须原样转发
+
+桥自己的描述符就是**老 lambda 方法**的描述符，形参序恒为
+`[老捕获…] + [SAM 形参…]`（实例方法再加槽 0 的接收者）。捕获按 `sources` 搬或现场重放；
+**SAM 形参是调用方传进来的实参**，不属于捕获表，必须按位置原样压给目标：
+
+```text
+lambda$make$0(Ljava/lang/String;ILjava/lang/String;)Ljava/lang/String;  ← 桥（老键：捕获 s、k + SAM 形参 x）
+    LDC loc; INVOKESTATIC onBridgeInvoked
+    ILOAD      1        ← 活下来的捕获 k（槽 1）
+    ALOAD      2        ← 尾部 SAM 实参 x（槽 2）
+    INVOKESTATIC Host.lambda$make$0(ILjava/lang/String;)Ljava/lang/String;
+    ARETURN
+```
+
+三条硬性约定：
+
+1. 尾部个数由目标描述符反推：`samArgs = targetArgs − (sources.length − newFirst)`，
+   并逐个比对老/目标描述符的尾部类型（必须相等，判据见 `samTailMatches`）。
+2. 多轮之间**不复用**尾部：第二轮从旧桥体解析出来的 `sources` 天然带着尾部（它同样是
+   "形参加载"），必须截断到捕获表长度再交给 `BridgeSpec`，由生成期按本轮描述符重新压。
+3. 漏压的失效形态不是 `VerifyError`：重定义路径不跑字节码校验器，目标会读到 `null`
+   （探针实测 NPE）或 JIT 下的垃圾引用（真机表现为 native
+   `EXCEPTION_ACCESS_VIOLATION`，崩溃点随实参用途落在 `LinkResolver` / `method_at_vtable` /
+   `StringConcatHelper::stringOf` 等）。因此零形参 SAM 之外的桥必须带这项转发，且要有
+   端到端用例（对齐产物定义后按老描述符调用，断言业务返回值）。
+
 无分支、无 `Label`，因此不需要 `StackMapTable`，与既有空壳桩的设计一致。
 
 ---

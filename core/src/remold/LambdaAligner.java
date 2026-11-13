@@ -4051,15 +4051,23 @@ public class LambdaAligner {
 				dbg(() -> "BRIDGE target staticness changed: " + oldKey);
 				continue;
 			}
-			// 上一轮记下的"每一位从哪来"必须正好覆盖本轮目标形参，否则重放会少压/多压实参。
-			if (bd.sources().length != now.captured.size()) {
+			// 上一轮记下的"每一位从哪来"只覆盖捕获表；解析出的 sources 还带着桥体尾部压的
+			// SAM 实参（它属于目标形参，不属于捕获表）。先按本轮目标描述符算出尾部个数，
+			// 校验总长与尾参类型，再把捕获那一段交给新一轮的 BridgeSpec —— 尾部由
+			// injectBridgeBody 按本轮描述符重新压，不能在轮次间复用。
+			int newFirst   = now.isStatic() ? 0 : 1;
+			int newCapArgs = now.captured.size() - newFirst;
+			int samArgs    = Type.getArgumentTypes(now.desc).length - newCapArgs;
+			if (samArgs < 0 || bd.sources().length != now.captured.size() + samArgs
+			    || !samTailMatches(oi.desc, now.desc, samArgs)) {
 				dbg(() -> "BRIDGE source plan size mismatch: " + oldKey
-					+ " plan=" + bd.sources().length + " want=" + now.captured.size());
+					+ " plan=" + bd.sources().length + " want=" + (now.captured.size() + samArgs));
 				continue;
 			}
 			String targetName = finalName(ctx, now);
 			String target = targetName + now.desc;
-			ctx.bridges.put(oldKey, new BridgeSpec(oi.desc, targetName, now.desc, bd.sources(),
+			ParamSource[] caps = java.util.Arrays.copyOf(bd.sources(), now.captured.size());
+			ctx.bridges.put(oldKey, new BridgeSpec(oi.desc, targetName, now.desc, caps,
 				oi.isStatic(), now.isStatic(),
 				locationOf(ctx.currentClass, oi.name, oi.desc) + " -> " + target));
 			TEST_EVENTS.add(new AlignmentEvent("BRIDGE_REPOINT", oi.name, now.name,
@@ -4898,11 +4906,40 @@ public class LambdaAligner {
 		// 写成 false 会得到一条指向 Methodref 的调用指令，校验/解析直接失败。
 		// 目标若是实例方法，只能走 INVOKESPECIAL：它一定是本类里的 private 合成方法，
 		// 而 INVOKEVIRTUAL 对 private 方法在 nestmate 之前是非法/不可解析的。
+		//
+		// 尾部 SAM 实参：桥自己就是老 lambda 方法，形参 = [老捕获...] + [SAM 形参...]。
+		// 老捕获按 sources 搬或现场重放即可，但 SAM 形参是<b>调用方传进来的实参</b>，
+		// 必须原样压给目标。漏压时重定义不跑字节码校验器，不会先抛 VerifyError：调用方
+		// 读到的缺失实参可能是 null（探针实测 NPE），也可能是 JIT 下的垃圾引用
+		// （真机报告形态 EXCEPTION_ACCESS_VIOLATION）。两者同根因，都按"桥体非法"处理。
+		Type[] newArgs    = Type.getArgumentTypes(spec.targetDesc);
+		int    newCapArgs = spec.sources.length - newFirst;   // 新捕获表里进描述符的那一段
+		int    samArgs    = newArgs.length - newCapArgs;
+		int    oldCapArgs = oldArgs.length - samArgs;
+		if (samArgs < 0 || oldCapArgs < 0 || !samTailMatches(spec.oldDesc, spec.targetDesc, samArgs)) {
+			throw new IllegalStateException("bridge SAM tail mismatch: old=" + spec.oldDesc
+				+ " target=" + spec.targetDesc + " sources=" + spec.sources.length);
+		}
+		for (int k = 0; k < samArgs; k++) {
+			Type oldT = oldArgs[oldCapArgs + k];
+			mv.visitVarInsn(oldT.getOpcode(Opcodes.ILOAD), slotOf[oldCapArgs + k]);
+		}
 		mv.visitMethodInsn(spec.targetStatic ? Opcodes.INVOKESTATIC : Opcodes.INVOKESPECIAL,
 		                   className, spec.targetName, spec.targetDesc, itf);
 		mv.visitInsn(Type.getReturnType(spec.targetDesc).getOpcode(Opcodes.IRETURN));
 		mv.visitMaxs(0, 0);
 		mv.visitEnd();
+	}
+
+	/** 老描述符与目标描述符的尾部 SAM 形参类型是否逐个相等。 */
+	private static boolean samTailMatches(String oldDesc, String newDesc, int samArgs) {
+		Type[] a = Type.getArgumentTypes(oldDesc);
+		Type[] b = Type.getArgumentTypes(newDesc);
+		if (samArgs < 0 || a.length < samArgs || b.length < samArgs) return false;
+		for (int k = 0; k < samArgs; k++) {
+			if (!a[a.length - samArgs + k].equals(b[b.length - samArgs + k])) return false;
+		}
+		return true;
 	}
 
 	/** 该方法的开头是不是桥体标记（{@code LDC loc; INVOKESTATIC onBridgeInvoked}）。 */

@@ -13,6 +13,7 @@ import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Function;
 
 /**
  * 「删除捕获变量」之后，<b>redefine 之前就已经存在的</b>那个 lambda 实例到底会怎样？
@@ -103,6 +104,15 @@ public class LambdaBridgeProbe {
 
 			// 6. 端到端（实例 lambda）：桥本身是实例方法，转发走 INVOKESPECIAL。
 			bridgeEndToEndInstance(inst, javac, tempDir);
+
+			// 7. 端到端（带形参的 SAM）：桥还必须把尾部 SAM 实参转发给新方法。
+			bridgeEndToEndFunction(inst, javac, tempDir);
+
+			// 8. 端到端（多层 Stream 嵌套，现场报障形态 S01）。
+			bridgeEndToEndNestedStreams(inst, javac, tempDir);
+
+			// 9. 端到端（lambda 体内拓扑翻转，现场报障形态 S04）。
+			bridgeEndToEndShapeFlip(inst, javac, tempDir);
 		} finally {
 			deleteRecursively(tempDir);
 		}
@@ -266,6 +276,129 @@ public class LambdaBridgeProbe {
 		}
 	}
 
+	/**
+	 * 端到端（带形参的 SAM）：{@code Function<String,String>} 的 SAM 有尾部实参，
+	 * 桥必须把它连同活下来的捕获一起转发给新方法。
+	 *
+	 * <p>崩溃形态（JBR 21 真机）：桥体漏压尾部 SAM 实参。重定义路径不跑字节码校验器，
+	 * 漏压不会先变成 {@code VerifyError}，而是让旧桥实例在解释器/JIT 里栈欠载，触发
+	 * native {@code EXCEPTION_ACCESS_VIOLATION}。</p>
+	 */
+	static void bridgeEndToEndFunction(Instrumentation inst, String javac, File base) throws Exception {
+		System.out.println("\n--- [bridge-end-to-end-function] 带形参的 SAM ---");
+		File work = new File(base, "e2e-fn");
+		File outV1 = compile(javac, work, "v1", V1_FUNCTION);
+		File outV2 = compile(javac, work, "v2", V2_FUNCTION_DROP_CAPTURE);
+		byte[] v1 = Files.readAllBytes(new File(outV1, "lam/Host.class").toPath());
+		byte[] v2 = Files.readAllBytes(new File(outV2, "lam/Host.class").toPath());
+
+		byte[] aligned = LambdaAligner.align(v1, v2);
+		System.out.println("   对齐器建桥数 = " + LambdaAligner.LAST_RESULT.bridgeCount);
+		check(LambdaAligner.LAST_RESULT.bridgeCount == 1, "前提：带形参的 SAM 也必须建桥");
+
+		URLClassLoader cl = new URLClassLoader(
+			new URL[]{outV1.toURI().toURL()}, LambdaBridgeProbe.class.getClassLoader());
+		try {
+			Class<?> host = Class.forName("lam.Host", true, cl);
+			callInstall(host, "A", 1);
+			Function<Object, Object> old = cachedFunction(host);
+			// 先跑一次：让老隐藏类的常量池真正解析到旧合成方法（旧描述符带 SAM 形参）。
+			check("A1:x".equals(apply(old, "x")), "前提：redefine 前老实例跑的是 v1 方法体");
+
+			inst.redefineClasses(new ClassDefinition(host, aligned));
+
+			String after = apply(old, "x");
+			String lastAfter = last(host);
+			System.out.println("   redefine 后同一实例 apply(\"x\") -> " + after + "（last=" + lastAfter + "）");
+			check("1:x".equals(after),
+			      "带形参 SAM：桥必须转发尾部实参并执行新方法体（实际 " + after + "）");
+			check("1:x".equals(lastAfter), "新方法体必须读到转发过来的 SAM 实参（last=" + lastAfter + "）");
+		} finally {
+			cl.close();
+		}
+	}
+
+	/**
+	 * 端到端（S01 现场形态）：多层 Stream 嵌套 {@code flatMap + filter + map + groupingBy}，
+	 * 捕获 {@code [min, prefix, factor]} + 尾部 SAM 实参 {@code List}；v2 去掉 {@code min} 捕获。
+	 *
+	 * <p>真机报障：redefine 后调用保留的 V1 实例，JVM 在毫秒级崩在
+	 * {@code LinkResolver::resolve_invoke}。这里用同一形状在 JBR 21 上复跑。</p>
+	 */
+	static void bridgeEndToEndNestedStreams(Instrumentation inst, String javac, File base) throws Exception {
+		System.out.println("\n--- [bridge-end-to-end-nested-streams] 多层 Stream 嵌套 ---");
+		File work = new File(base, "e2e-s01");
+		File outV1 = compile(javac, work, "v1", V1_STREAM_NESTED, true);
+		File outV2 = compile(javac, work, "v2", V2_STREAM_NESTED, true);
+		byte[] v1 = Files.readAllBytes(new File(outV1, "lam/Host.class").toPath());
+		byte[] v2 = Files.readAllBytes(new File(outV2, "lam/Host.class").toPath());
+
+		byte[] aligned = LambdaAligner.align(v1, v2);
+		System.out.println("   对齐器建桥数 = " + LambdaAligner.LAST_RESULT.bridgeCount);
+		check(LambdaAligner.LAST_RESULT.bridgeCount >= 1, "前提：这组编辑必须至少建一座捕获桥");
+
+		URLClassLoader cl = new URLClassLoader(
+			new URL[]{outV1.toURI().toURL()}, LambdaBridgeProbe.class.getClassLoader());
+		try {
+			Class<?> host = Class.forName("lam.Host", true, cl);
+			host.getDeclaredMethod("install").invoke(null);
+			Object old = cachedRaw(host);
+
+			List<List<Integer>> input = List.of(List.of(1, 3), List.of(2, 4));
+			String before = String.valueOf(applyRaw(old, input));
+			check(before.contains("v1:") && !before.contains("-v2"),
+			      "前提：redefine 前老实例跑的是 v1 方法体（结果=" + before + "）");
+
+			inst.redefineClasses(new ClassDefinition(host, aligned));
+
+			String after = String.valueOf(applyRaw(old, input));
+			System.out.println("   redefine 后同一实例 apply(rows) -> " + after);
+			check(after.contains("-v2"),
+			      "S01：桥必须转发 SAM 实参并执行 v2 方法体（结果=" + after + "）");
+		} finally {
+			cl.close();
+		}
+	}
+
+	/**
+	 * 端到端（S04 现场形态）：V2 在外层 lambda 内新增第 2 个内层 lambda，
+	 * 外层捕获 {@code [p]} + 尾部 SAM 实参 {@code String x}；v2 丢掉 {@code p} 捕获。
+	 *
+	 * <p>真机报障：同一次调用崩在 {@code Klass::method_at_vtable}。</p>
+	 */
+	static void bridgeEndToEndShapeFlip(Instrumentation inst, String javac, File base) throws Exception {
+		System.out.println("\n--- [bridge-end-to-end-shape-flip] lambda 体内拓扑翻转 ---");
+		File work = new File(base, "e2e-s04");
+		File outV1 = compile(javac, work, "v1", V1_SHAPE_FLIP, true);
+		File outV2 = compile(javac, work, "v2", V2_SHAPE_FLIP, true);
+		byte[] v1 = Files.readAllBytes(new File(outV1, "lam/Host.class").toPath());
+		byte[] v2 = Files.readAllBytes(new File(outV2, "lam/Host.class").toPath());
+
+		byte[] aligned = LambdaAligner.align(v1, v2);
+		System.out.println("   对齐器建桥数 = " + LambdaAligner.LAST_RESULT.bridgeCount);
+		check(LambdaAligner.LAST_RESULT.bridgeCount >= 1, "前提：外层 lambda 必须建出捕获桥");
+
+		URLClassLoader cl = new URLClassLoader(
+			new URL[]{outV1.toURI().toURL()}, LambdaBridgeProbe.class.getClassLoader());
+		try {
+			Class<?> host = Class.forName("lam.Host", true, cl);
+			host.getDeclaredMethod("install").invoke(null);
+			Object old = cachedRaw(host);
+
+			check("shape:k-v1".equals(applyRaw(old, "k")),
+			      "前提：redefine 前老实例跑的是 v1 方法体（结果=" + applyRaw(old, "k") + "）");
+
+			inst.redefineClasses(new ClassDefinition(host, aligned));
+
+			String after = String.valueOf(applyRaw(old, "k"));
+			System.out.println("   redefine 后同一实例 apply(\"k\") -> " + after);
+			check("shape:k-v2".equals(after),
+			      "S04：桥必须转发 SAM 实参并执行 v2 方法体（结果=" + after + "）");
+		} finally {
+			cl.close();
+		}
+	}
+
 	// ------------------------------------------------------------------------------------------------
 	// 夹具：捕获表变化 + 方法体变化
 	// ------------------------------------------------------------------------------------------------	/** v1：两个捕获（String, int）→ {@code lambda$install$0(Ljava/lang/String;I)V}。 */
@@ -316,6 +449,108 @@ public class LambdaBridgeProbe {
 		}
 		""";
 
+	/** 带形参的 SAM：{@code Function<String,String>}，捕获 [String a, int k] + 尾部 SAM 实参 String x。 */
+	static final String V1_FUNCTION = """
+		package lam;
+		import java.util.function.Function;
+		public class Host {
+		    public static Function<String, String> cached;
+		    public static String last = "";
+		    public static void install(String a, int k) {
+		        cached = x -> last = a + k + ":" + x;
+		    }
+		}
+		""";
+
+	/** 删掉 String 捕获 → {@code lambda$install$0(ILjava/lang/String;)Ljava/lang/String;}。 */
+	static final String V2_FUNCTION_DROP_CAPTURE = """
+		package lam;
+		import java.util.function.Function;
+		public class Host {
+		    public static Function<String, String> cached;
+		    public static String last = "";
+		    public static void install(int k) {
+		        cached = x -> last = k + ":" + x;
+		    }
+		}
+		""";
+
+	/** S01 现场形态：多层 Stream 嵌套，捕获 [min, prefix, factor] + 尾部 SAM 实参 List。 */
+	static final String V1_STREAM_NESTED = """
+		package lam;
+		import java.util.List;
+		import java.util.Map;
+		import java.util.function.Function;
+		import java.util.stream.Collectors;
+		public class Host {
+		    public static Function<List<List<Integer>>, Map<String, List<String>>> cached;
+		    public static void install() {
+		        int min = 2;
+		        int factor = 10;
+		        String prefix = "v1";
+		        cached = rows -> rows.stream()
+		            .flatMap(row -> row.stream()
+		                .filter(n -> n > min)
+		                .map(n -> prefix + ":" + (n * factor) + "-v1"))
+		            .collect(Collectors.groupingBy(s -> s.substring(0, 2)));
+		    }
+		}
+		""";
+
+	/** S01 v2：去掉 factor 捕获（内联 10），捕获表缩水 → 桥必须转发 SAM 实参。 */
+	static final String V2_STREAM_NESTED = """
+		package lam;
+		import java.util.List;
+		import java.util.Map;
+		import java.util.function.Function;
+		import java.util.stream.Collectors;
+		public class Host {
+		    public static Function<List<List<Integer>>, Map<String, List<String>>> cached;
+		    public static void install() {
+		        int min = 2;
+		        String prefix = "v1";
+		        cached = rows -> rows.stream()
+		            .flatMap(row -> row.stream()
+		                .filter(n -> n > min)
+		                .map(n -> prefix + ":" + (n * 10) + "-v2"))
+		            .collect(Collectors.groupingBy(s -> s.substring(0, 2)));
+		    }
+		}
+		""";
+
+	/** S04 现场形态：外层 lambda 捕获 [p] + 尾部 SAM 实参 x，体内再建内层 Supplier。 */
+	static final String V1_SHAPE_FLIP = """
+		package lam;
+		import java.util.function.Function;
+		import java.util.function.Supplier;
+		public class Host {
+		    public static Function<String, String> cached;
+		    public static void install() {
+		        String p = "shape";
+		        cached = x -> {
+		            Supplier<String> inner1 = () -> p + ":" + x + "-v1";
+		            return inner1.get();
+		        };
+		    }
+		}
+		""";
+
+	/** S04 v2：丢掉 p 捕获，内层 lambda 改成常量大头 → 外层捕获表缩水 → 桥。 */
+	static final String V2_SHAPE_FLIP = """
+		package lam;
+		import java.util.function.Function;
+		import java.util.function.Supplier;
+		public class Host {
+		    public static Function<String, String> cached;
+		    public static void install() {
+		        cached = x -> {
+		            Supplier<String> inner1 = () -> "shape:" + x + "-v2";
+		            return inner1.get();
+		        };
+		    }
+		}
+		""";
+
 	/** 实例 lambda：捕获表里带接收者，impl 是实例方法。 */
 	static final String V1_INSTANCE = """
 		package lam;
@@ -343,14 +578,25 @@ public class LambdaBridgeProbe {
 	// ------------------------------------------------------------------------------------------------
 
 	static File compile(String javac, File workDir, String variant, String src) throws Exception {
+		return compile(javac, workDir, variant, src, false);
+	}
+
+	/**
+	 * @param debug 是否带 {@code -g}（Gradle/ModDevGradle 的 JavaCompile 默认带调试信息；
+	 *              捕获桥的"按名字映射"依赖 {@code LocalVariableTable}）
+	 */
+	static File compile(String javac, File workDir, String variant, String src, boolean debug) throws Exception {
 		File srcDir = new File(workDir, variant + "/src");
 		File outDir = new File(workDir, variant + "/out");
 		srcDir.mkdirs();
 		outDir.mkdirs();
 		File f = new File(srcDir, "Host.java");
 		Files.writeString(f.toPath(), src);
-		Process p = new ProcessBuilder(ProbeJavac.command(javac, "-nowarn", "-encoding", "UTF-8",
-			"-cp", outDir.getAbsolutePath(), "-d", outDir.getAbsolutePath(), f.getAbsolutePath()))
+		List<String> args = new ArrayList<>(List.of("-nowarn", "-encoding", "UTF-8",
+			"-cp", outDir.getAbsolutePath(), "-d", outDir.getAbsolutePath()));
+		if (debug) args.add("-g");
+		args.add(f.getAbsolutePath());
+		Process p = new ProcessBuilder(ProbeJavac.command(javac, args.toArray(new String[0])))
 			.redirectErrorStream(true).start();
 		String out = new String(p.getInputStream().readAllBytes());
 		if (p.waitFor() != 0) throw new IllegalStateException("javac failed: " + out);
@@ -383,6 +629,39 @@ public class LambdaBridgeProbe {
 		Field f = host.getDeclaredField("cached");
 		f.setAccessible(true);
 		return (Runnable) f.get(null);
+	}
+
+	@SuppressWarnings("unchecked")
+	static Function<Object, Object> cachedFunction(Class<?> host) throws Exception {
+		Field f = host.getDeclaredField("cached");
+		f.setAccessible(true);
+		return (Function<Object, Object>) f.get(null);
+	}
+
+	/** 不关心 SAM 形状时直接取对象（S01 的 Function 实参是 List，用 {@link #applyRaw} 调）。 */
+	static Object cachedRaw(Class<?> host) throws Exception {
+		Field f = host.getDeclaredField("cached");
+		f.setAccessible(true);
+		return f.get(null);
+	}
+
+	/** 用反射调旧实例的 SAM，异常压成摘要（不带栈，探针输出要可扫）。 */
+	@SuppressWarnings("unchecked")
+	static Object applyRaw(Object fn, Object arg) {
+		try {
+			return ((Function<Object, Object>) fn).apply(arg);
+		} catch (Throwable t) {
+			return "THREW " + describe(t);
+		}
+	}
+
+	/** 调用旧实例的 SAM：返回业务结果，异常压成摘要（不带栈，探针输出要可扫）。 */
+	static String apply(Function<Object, Object> f, Object arg) {
+		try {
+			return String.valueOf(f.apply(arg));
+		} catch (Throwable t) {
+			return describe(t);
+		}
 	}
 
 	static String last(Class<?> host) throws Exception {

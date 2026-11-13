@@ -3994,11 +3994,11 @@ public class LambdaAligner {
 				final int candidates = hits;
 				SyntheticInfo byOrdinal = bridgeTargetByHostOrdinal(ctx, oi, unpairedNew, newCn);
 				if (byOrdinal == null) {
-					dbg(() -> "[LambdaAligner] CAPTURE-BRIDGE-SKIPPED " + ctx.currentClass + "#"
+					dbg(() -> "CAPTURE-BRIDGE-SKIPPED " + ctx.currentClass + "#"
 						+ oi.name + oi.desc + " matchCount=" + candidates + " host=" + oi.hostKey);
 					continue;
 				}
-				dbg(() -> "[LambdaAligner] capture bridge resolved by host ordinal: " + ctx.currentClass + "#"
+				dbg(() -> "capture bridge resolved by host ordinal: " + ctx.currentClass + "#"
 					+ oi.name + oi.desc + " -> " + byOrdinal.name + byOrdinal.desc
 					+ " matchCount=" + candidates + " host=" + oi.hostKey);
 				only = byOrdinal;

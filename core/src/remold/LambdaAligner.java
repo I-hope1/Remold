@@ -6022,6 +6022,19 @@ public class LambdaAligner {
 	 * 这条边界与 {@code -g:none} 下槽号不可信同源，属于自觉取舍：宁可把"结构同形"放宽，
 	 * 也不把"只是槽号位移"的原地编辑误判成重绑。</p>
 	 */
+	/**
+	 * 测试钩子：对给定类字节里 {@code name+desc} 的方法计算体指纹（取不到返回 0）。
+	 * 仅用于单测，生产代码不得引用。
+	 */
+	public static long bodyFingerprintForTest(byte[] classBytes, String name, String desc) {
+		ClassNode cn = new ClassNode();
+		new ClassReader(classBytes).accept(cn, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+		for (MethodNode mn : cn.methods) {
+			if (mn.name.equals(name) && mn.desc.equals(desc)) return bodyFingerprint(mn, cn.name);
+		}
+		return 0L;
+	}
+
 	private static long bodyFingerprint(MethodNode mn, String owner) {
 		if (mn == null || mn.instructions == null) return 0L;
 
@@ -6205,6 +6218,15 @@ public class LambdaAligner {
 				break;
 			}
 		}
+	}
+
+	/**
+	 * 测试钩子：把两个常量 token 交给 {@link #foldBinary}，返回折叠结果的位模式（K_INT 用低 32 位）；
+	 * 不可折叠返回 {@code null}。仅用于单测，生产代码不得引用。
+	 */
+	public static Long foldBinaryForTest(int aKind, long aBits, int bKind, long bBits, int op) {
+		BodyTok r = foldBinary(BodyTok.constant(aKind, aBits), BodyTok.constant(bKind, bBits), op);
+		return r == null ? null : r.a;
 	}
 
 	/** 对两个同类型常量执行可折叠二元运算；不可折叠返回 {@code null}。 */

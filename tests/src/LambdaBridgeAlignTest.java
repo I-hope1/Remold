@@ -331,7 +331,63 @@ public class LambdaBridgeAlignTest {
 		assertTrue(containsCall(carried, "onOrphanInvoked"), "应回退默认值桩并留痕");
 	}
 
-	/** S14 现场形态：两个宿主方法交换 this 形状时，旧键不得被跨宿主桥接/改名。 */
+	/** 嵌套外层指纹：V1 外层 lambda 体内建内层；V2 前插一个无关 lambda 让内层编号位移、外层体不变。 */
+	static final String V1_NESTED_FP = """
+		import java.util.function.Supplier;
+		public class NestHost {
+		    public static Supplier<Supplier<String>> outer;
+		    static void make() {
+		        outer = () -> { Supplier<String> i = () -> "x"; return i; };
+		    }
+		}
+		""";
+
+	static final String V2_NESTED_FP = """
+		import java.util.function.Supplier;
+		public class NestHost {
+		    public static Supplier<Supplier<String>> outer;
+		    static void make() {
+		        Supplier<String> extra = () -> "e";
+		        outer = () -> { Supplier<String> i = () -> "x"; return i; };
+		    }
+		}
+		""";
+
+	/** bodyFingerprint 必须屏蔽 indy 句柄里的内层合成名：内层编号变了，外层体仍应判等价。 */
+	@Test
+	void nestedOuterBodyStaysEquivalentWhenInnerNumberingShifts(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] v1 = Files.readAllBytes(compile(javac, tmp, "nf/v1", V1_NESTED_FP).resolve("NestHost.class"));
+		byte[] v2 = Files.readAllBytes(compile(javac, tmp, "nf/v2", V2_NESTED_FP).resolve("NestHost.class"));
+
+		// 旧类里"体内含 indy"的那条就是外层 lambda。
+		String outerKey = null;
+		String outerDesc = null;
+		for (MethodNode mn : parse(v1).methods) {
+			if (mn.name.startsWith("lambda$") && hasIndy(mn)) { outerKey = mn.name; outerDesc = mn.desc; break; }
+		}
+		assertNotNull(outerKey, "旧类里必须能找到外层 lambda（体内含 indy）");
+
+		// 直接对两侧体指纹求等：内层编号位移不应改变外层指纹（indy 句柄里的合成名必须被屏蔽）。
+		String newOuterKey = null;
+		String newOuterDesc = null;
+		for (MethodNode mn : parse(v2).methods) {
+			if (mn.name.startsWith("lambda$") && hasIndy(mn)) { newOuterKey = mn.name; newOuterDesc = mn.desc; break; }
+		}
+		assertNotNull(newOuterKey, "新类里必须能找到外层 lambda（体内含 indy）");
+		long fpOld = LambdaAligner.bodyFingerprintForTest(v1, outerKey, outerDesc);
+		long fpNew = LambdaAligner.bodyFingerprintForTest(v2, newOuterKey, newOuterDesc);
+		assertNotEquals(0L, fpOld, "旧外层指纹必须可计算");
+		assertNotEquals(0L, fpNew, "新外层指纹必须可计算");
+		assertEquals(fpOld, fpNew,
+			"外层体一字未改，仅内层编号位移；indy 句柄里的合成名必须被屏蔽，否则等价证明失效");
+
+		ClassNode out = parse(LambdaAligner.align(v1, v2));
+		MethodNode kept = byKey(out, outerKey, outerDesc);
+		assertNotNull(kept, "外层旧键必须留在产物里（" + outerKey + outerDesc + "）");
+	}
+
+	/** {@code S14} 现场形态：两个宿主方法交换 this 形状时，旧键不得被跨宿主桥接/改名。 */
 	@Test
 	void thisShapeSwapAcrossHostsIsNotBridged(@TempDir Path tmp) throws Exception {
 		String javac = HstestFixtures.javac(21);
@@ -2350,6 +2406,14 @@ public class LambdaBridgeAlignTest {
 		VarInsnNode v = (VarInsnNode) insn;
 		assertEquals(opcode, v.getOpcode(), msg + "（opcode）");
 		assertEquals(slot, v.var, msg + "（槽号）");
+	}
+
+	static boolean hasIndy(MethodNode mn) {
+		if (mn == null) return false;
+		for (AbstractInsnNode i : mn.instructions) {
+			if (i instanceof InvokeDynamicInsnNode) return true;
+		}
+		return false;
 	}
 
 	static boolean containsCall(MethodNode mn, String name) {

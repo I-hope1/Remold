@@ -34,18 +34,19 @@ import remold.LambdaAligner;
  */
 class SameNameReclaimTest {
 
-	private static final String SRC =
-		"import java.util.function.*;\n"
-		+ "public class SameNameHost {\n"
-		+ "  static void act1() {}\n"
-		+ "  static void act2(int i) {}\n"
-		+ "  static Runnable r1;\n"
-		+ "  static IntConsumer r2;\n"
-		+ "  static void make() {\n"
-		+ "    r1 = () -> act1();\n"
-		+ "    r2 = (i) -> act2(i);\n"
-		+ "  }\n"
-		+ "}\n";
+	private static final String SRC = """
+		import java.util.function.*;
+		public class SameNameHost {
+		    static void act1() {}
+		    static void act2(int i) {}
+		    static Runnable r1;
+		    static IntConsumer r2;
+		    static void make() {
+		        r1 = () -> act1();
+		        r2 = (i) -> act2(i);
+		    }
+		}
+		""";
 
 	/** 把类里的合成方法按 map 改名，并同步改写 indy 引导参数里的 Handle。 */
 	static byte[] renameLambdas(byte[] bytes, Map<String, String> renames) {

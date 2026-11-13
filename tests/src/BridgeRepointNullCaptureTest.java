@@ -27,19 +27,21 @@ import remold.LambdaAligner;
  */
 class BridgeRepointNullCaptureTest {
 
-	private static final String V1 =
-		"import java.util.function.Supplier;\n"
-		+ "public class BridgeHost {\n"
-		+ "  static Supplier<String> s;\n"
-		+ "  static void make() { int n = 1; s = () -> \"A\" + n; }\n"
-		+ "}\n";
+	private static final String V1 = """
+		import java.util.function.Supplier;
+		public class BridgeHost {
+		    static Supplier<String> s;
+		    static void make() { int n = 1; s = () -> "A" + n; }
+		}
+		""";
 
-	private static final String V2 =
-		"import java.util.function.Supplier;\n"
-		+ "public class BridgeHost {\n"
-		+ "  static Supplier<String> s;\n"
-		+ "  static void make() { s = () -> \"A\"; }\n"
-		+ "}\n";
+	private static final String V2 = """
+		import java.util.function.Supplier;
+		public class BridgeHost {
+		    static Supplier<String> s;
+		    static void make() { s = () -> "A"; }
+		}
+		""";
 
 	/** 把 make() 里的 indy 换成 ACONST_NULL（保留 lambda 合成方法本身，只断掉 indy 触达）。 */
 	static byte[] cutIndy(byte[] bytes) {

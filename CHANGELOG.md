@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **零捕获死分支错桥（S29 形态）**：`stepCaptureBridge` 在唯一候选是"零非接收者捕获"的目标时，
+  仅凭 `hits == 1` 建桥。同宿主同 SAM 的兄弟候选若因无 `-g` 捕获类型歧义无法通过 `planBridge`
+  映射，就会被漏计，旧实例被桥到 `n -> ""` 这类空捕获死分支。修复：零捕获唯一目标时统计
+  `bridgeGatesHold` 可过的候选（含未过映射的兄弟），≥2 时必须走宿主序号消歧；消歧失败放弃建桥、
+  保留旧方法体。回归：`S29ZeroCaptureBridgeTest`（红→绿，变异：关闭守卫 → 红）；S22/S24/S45/S47
+  合法 0 捕获缩减保持绿。
+
 - **同宿主多条同形 lambda 同时丢捕获时捕获桥被整体放弃（S45 形态）**：`stepCaptureBridge` 要求唯一目标
   （`hits != 1` 即拒绝）；当宿主里两条同形 lambda 同时丢掉捕获（如 `buildSwitch` 的两条
   `(I)String` → `()String`），`mappingByType` 在"新捕获为空"时对每个候选都返回空映射，两个候选都

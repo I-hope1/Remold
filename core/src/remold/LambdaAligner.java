@@ -3991,6 +3991,27 @@ public class LambdaAligner {
 				only = ni;
 				if (++hits > 1) break;
 			}
+			// S29：唯一命中的目标是"零非接收者捕获"（空映射，无任何搬参证明）时，不能仅凭
+			// hits == 1 建桥——同宿主同 SAM 可能还有因无 -g 捕获类型歧义而没通过 planBridge 的
+			// 兄弟候选（它的映射算不出来，但同样是"同一个 lambda"的候选）。此时先数一遍
+			// bridgeGatesHold 能过的候选：≥2 就必须交给宿主序号消歧，消歧不通过则放弃建桥、
+			// 安全退回保留旧方法体，绝不把旧实例绑到空捕获死分支（n -> ""）。
+			if (hits == 1 && only != null && !hasCapturedVariables(only, newCn.name)) {
+				int eligible = 0;
+				for (SyntheticInfo other : unpairedNew) {
+					if (bridgeGatesHold(oi, other)) eligible++;
+				}
+				if (eligible >= 2) {
+					final int eligibleCount = eligible;
+					SyntheticInfo byOrdinal = bridgeTargetByHostOrdinal(ctx, oi, unpairedNew, newCn);
+					if (byOrdinal == null) {
+						dbg(() -> "CAPTURE-BRIDGE-SKIPPED zero-capture ambiguous: " + oi.name + oi.desc
+							+ " eligible=" + eligibleCount);
+						continue;
+					}
+					only = byOrdinal;
+				}
+			}
 			if (hits != 1) {
 				// 多候选歧义：只在"同宿主新旧调用序列长度一致"时用序号消歧（长度一致 ⇒ 没有插入/删除）。
 				// 长度不一致（S40 的中间插入）一律不用位置配对，避免把旧调用点绑到错误语义。

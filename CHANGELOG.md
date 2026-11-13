@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `stageAConsistent` 对**新注入方**豁免（宿主注入视为成功；匿名类若也是新注入则不要求阶段 A 记录），
   混合组只豁免注入方、已加载方仍校验。回归：`StageAConsistencyTest`（全注入组不回滚 / 已加载组漏一个
   必须回滚 / 混合组只豁免注入方）；变异：去掉注入豁免 → 用例红。
+  **真机验收（2026-11-13，JBR 21.0.9）**：用重建后的 agent jar 重跑客户端回归，`PASS=55 / KNOWN-GAP=8 /
+  FAIL=0`；全日志无 `[HOTSWAP-PARTIAL]`、无 `ROLLED-BACK-A`；`S37` 与 `S37$1` 在 V2 直接 `[INJECTED]`
+  成功，本轮 42 类重定义、跳过的 4 类仅为刻意触发 `LOCAL-CLASS-REJECT` 的 S19 用例；V3 轮 `[DIFF]` 正常命中
+  两者，输出 `ret=lazy:v3:k|box=lbox:m-v3|fresh=lazy:v3:k`。
 
 - **捕获桥在带形参的 SAM 上漏压尾部实参（JBR 21 真机崩溃）**：`LambdaAligner.injectBridgeBody`
   过去只按捕获表压值，`Function`/`Consumer`/`Stream` 这类 SAM 的尾部实参没有转发给目标。
@@ -76,6 +80,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AnonClassAligner.groupBatchAnons` 按**类自身归属**一次性分组（一个类只归一个宿主），
   宿主循环只处理自己组内的 `newAnon`；`oldAnon` 同样按宿主相等过滤。回归：
   `EnumConstantBodyRoutingTest.sameBatchHostsDoNotStealEachOthersAnons`（变异：分组忽略宿主 → 红）。
+  **真机验收（2026-11-13，JBR 21.0.9，与 S37 同轮）**：`PASS=55 / KNOWN-GAP=8 / FAIL=0`；此前 3 条 FAIL
+  （V2 S01 / S17 / S23）全部转绿，V2 S17 匿名类不再被记到无关宿主名下。
 
 - **孤儿保留体在内层 lambda 被更新时退回默认值桩（V2 S01 / V2 S23 回归）**：上一版把
   "嵌套 lambda 被原位更新"当成拒绝保留旧体的理由，外层嵌套孤儿因此退回 `default-value stub`
@@ -83,6 +89,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OrphanBodyRetention.updatedNestedLambda` 检出并发 `warn` 点名；彻底消除混跑需"连带保留子体"，
   登记为技术债（`docs/status.md` §4.2）。回归：
   `LambdaBridgeAlignTest.retainedBodyKeepsOldBodyEvenWhenNestedLambdaWasUpdated`。
+  **真机验收（2026-11-13，JBR 21.0.9，与 S37 同轮）**：`PASS=55 / KNOWN-GAP=8 / FAIL=0`，V2 S01 / S23
+  不再返回 `null`（保留旧体）。
 
 ## [0.2.8] - 2026-11-12
 

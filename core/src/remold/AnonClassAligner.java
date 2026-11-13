@@ -903,13 +903,12 @@ public final class AnonClassAligner {
 	 * <p>批次路由必须用这张表，不能拿"宿主前缀"去过滤整个批次：前者保证每个类只属于一个宿主，
 	 * 后者会让某个宿主的对齐周期看到并移走别的宿主的类（跨宿主误归属 / 误移出）。</p>
 	 */
-	public static java.util.Map<String, java.util.Map<String, byte[]>> groupBatchAnons(
-		java.util.Map<String, byte[]> changedClasses) {
-		java.util.Map<String, java.util.Map<String, byte[]>> out = new java.util.LinkedHashMap<>();
+	public static Map<String, Map<String, byte[]>> groupBatchAnons(Map<String, byte[]> changedClasses) {
+		Map<String, Map<String, byte[]>> out = new LinkedHashMap<>();
 		if (changedClasses == null) return out;
-		for (java.util.Map.Entry<String, byte[]> e : changedClasses.entrySet()) {
+		for (Map.Entry<String, byte[]> e : changedClasses.entrySet()) {
 			if (!isBatchAnonClass(e.getKey(), e.getValue())) continue;
-			out.computeIfAbsent(batchAnonHost(e.getKey()), k -> new java.util.LinkedHashMap<>())
+			out.computeIfAbsent(batchAnonHost(e.getKey()), k -> new LinkedHashMap<>())
 				.put(e.getKey(), e.getValue());
 		}
 		return out;

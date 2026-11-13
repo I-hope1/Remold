@@ -14,9 +14,11 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -77,11 +79,11 @@ class BatchTwoPhaseStaticRewriteTest {
 		Instrumentation previous = RemoldAgent.swapInstrumentationForTest(recorder(redefinitions));
 		try {
 			Method applyTwoPhase = RemoldAgent.class.getDeclaredMethod("applyTwoPhase",
-				List.class, Map.class, java.util.Collection.class, RemoldAgent.RoundSkips.class, java.util.Set.class);
+				List.class, Map.class, Collection.class, RemoldAgent.RoundSkips.class, Set.class);
 			applyTwoPhase.setAccessible(true);
 			Object outcome = applyTwoPhase.invoke(null,
 				List.of(new ClassDefinition(host, v2)), Map.of(NAME, v1), List.of(),
-				new RemoldAgent.RoundSkips(), java.util.Set.of());
+				new RemoldAgent.RoundSkips(), Set.of());
 
 			assertEquals(2, redefinitions.size(),
 				"the batch driver must call redefineClasses twice (stage A + stage C), actual=" + redefinitions.size());

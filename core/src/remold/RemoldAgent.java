@@ -2097,7 +2097,7 @@ public class RemoldAgent {
 
 			// 只取**本宿主**的匿名类（按类自身归属分组，绝不拿"本宿主前缀"去扫整批）
 			Map<String, byte[]> newAnon = new HashMap<>(
-				newAnonsByHost.getOrDefault(hostName, java.util.Collections.emptyMap()));
+				newAnonsByHost.getOrDefault(hostName, Collections.emptyMap()));
 
 			if (oldAnon.isEmpty() && newAnon.isEmpty()) {
 				continue;

@@ -168,8 +168,8 @@ final class OrphanBodyRetention {
 	static String updatedNestedLambda(ClassNode oldClass, ClassNode newClass, MethodNode body,
 	                                  Set<String> plannedMethodKeys) {
 		if (oldClass == null || newClass == null || body == null || body.instructions == null) return null;
-		for (org.objectweb.asm.tree.AbstractInsnNode n : body.instructions) {
-			if (!(n instanceof org.objectweb.asm.tree.InvokeDynamicInsnNode indy) || indy.bsmArgs == null) continue;
+		for (AbstractInsnNode n : body.instructions) {
+			if (!(n instanceof InvokeDynamicInsnNode indy) || indy.bsmArgs == null) continue;
 			for (Object arg : indy.bsmArgs) {
 				if (!(arg instanceof Handle h) || !oldClass.name.equals(h.getOwner())) continue;
 				if (!isSyntheticLambda(h.getName())) continue;

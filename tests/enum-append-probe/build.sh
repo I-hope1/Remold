@@ -13,7 +13,7 @@ done
 [ -x "$J8/bin/javac$EXE" ] || { echo "missing $J8/bin/javac$EXE (set JDK8_HOME)" >&2; exit 1; }
 B=b
 rm -rf "$B"
-mkdir -p "$B/21/v1" "$B/21/v1body" "$B/21/v2" "$B/21/v2ctor" "$B/21/v2body" "$B/8/v1" "$B/8/v2" "$B/probe" "$B/logs"
+mkdir -p "$B/21/v1" "$B/21/v1body" "$B/21/v2" "$B/21/v2ctor" "$B/21/v2body" "$B/21/swv1v2/probe" "$B/8/v1" "$B/8/v2" "$B/probe" "$B/logs"
 
 EN=(-J-Duser.language=en -J-Duser.country=US)
 
@@ -30,6 +30,10 @@ echo "== javac8 (real JDK8 javac, inline \$VALUES build) =="
 
 echo "== probe sources referencing v2 members (BlueReader, SwV2) =="
 "$J21/bin/javac$EXE" "${EN[@]}" -cp "$B/21/v2" -d "$B/probe" src/probe/BlueReader.java src/probe/SwV2.java
+
+echo "== same-name consumer recompiled against v2 (SwitchMap rebuild fixture) =="
+"$J21/bin/javac$EXE" "${EN[@]}" -cp "$B/21/v2" -d "$B/21/swv1v2" src/swv1v2/probe/SwV1.java
+"$J21/bin/javap$EXE" -p -c "$B/21/swv1v2/probe/SwV1.class" | grep -E 'getstatic|SwitchMap|tableswitch|lookupswitch' | head -8
 
 echo "== probe sources referencing v1 members (Probe, SwV1, ProbeAgent) =="
 "$J21/bin/javac$EXE" "${EN[@]}" --add-exports java.base/jdk.internal.misc=ALL-UNNAMED \

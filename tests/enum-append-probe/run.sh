@@ -37,6 +37,13 @@ run() { # run <label> <scenario> <v2bytes> <cp> [extra jvm args...]
   echo "" | tee -a "$LOG"
 }
 
+run2() { # run2 <label> <scenario> <v2bytes> <aux> <cp>
+  local label="$1" scenario="$2" v2="$3" aux="$4" cp="$5"
+  echo "########## $label  (scenario=$scenario, cp=$cp) ##########" | tee -a "$LOG"
+  "$J21/bin/java$EXE" "${FLAGS[@]}" -cp "$cp" probe.Probe "$scenario" "$v2" "$aux" 2>&1 | tee -a "$LOG"
+  echo "" | tee -a "$LOG"
+}
+
 # --- shape / sanity ---
 run "S0 sanity (v1 only, javac21 bytes)"          sanity        "$V2_21" "$CP21"
 run "S0b sanity (v1 only, jdk8 bytes)"            sanity        "$V2_8"  "$CP8"
@@ -64,6 +71,13 @@ run "S3f race + clear directory only"     race-dir   "$V2_21" "$CP21"
 run "S4 repair + resize \$SwitchMap (javac21)"      repair-resize  "$V2_21" "$CP21"
 run "S4b switch consumer initialized after repair"  swv2-after     "$V2_21" "$CP21"
 run "S4c switch consumer initialized before repair" swv2-before    "$V2_21" "$CP21"
+
+# --- SwitchMap rebuild (Q1): redefined consumer + table rebuilt from the new mapping ---
+run2 "S4d SwitchMap rebuild, consumer redefined to v2 bytes" swmap-rebuild "$V2_21" "$B/21/swv1v2/probe/SwV1.class" "$CP21"
+run "S4e SwitchMap rebuild, hot (compiled) consumer"        swmap-rebuild-hot "$V2_21" "$CP21"
+
+# --- heap-walk repair of existing EnumMap/EnumSet (Q2) ---
+run "S9 heap-walk in-place repair of existing EnumMap/EnumSet" heap-repair "$V2_21" "$CP21"
 
 # --- JIT ---
 run "S5 jit-spin (warm 1e6 + spinner) #1"           jit-spin       "$V2_21" "$CP21"

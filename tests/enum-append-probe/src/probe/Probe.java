@@ -109,6 +109,9 @@ public final class Probe {
                 case "stagec-static" -> stagecStatic(v2);
                 case "swv2-after" -> swv2After(v2);
                 case "swv2-before" -> swv2Before(v2);
+                case "swmap-rebuild" -> switchMapRebuild(v2, aux);
+                case "swmap-rebuild-hot" -> switchMapRebuildHot(v2);
+                case "heap-repair" -> heapRepair(v2);
                 case "ctor" -> ctorScenario(v2);
                 case "body" -> bodyScenario(v2, aux);
                 default -> out("error", "unknown scenario " + scenario);
@@ -501,6 +504,177 @@ public final class Probe {
                 return "slot2=" + switchMapInfoRaw("probe.SwV1$1") + " sw(blue)=" + SwV1.sw(blue);
             });
         }
+    }
+
+    /**
+     * Q1: is an already-initialized consumer's {@code $SwitchMap$} repairable at all?
+     *
+     * <p>Steps: (1) the v1 consumer is initialized, so its holder {@code probe.SwV1$1} keeps the
+     * 2-slot table {@code [1, 2]}; (2) the enum is redefined to v2 and {@code $VALUES} is
+     * repaired; (3) the consumer is redefined with v2 bytes - same class name, so it still reads
+     * the same holder field, and it now carries {@code case BLUE}, but the holder's
+     * {@code <clinit>} (which fills the table) does not re-run; (4) the holder table is rebuilt
+     * from the mapping the new holder {@code <clinit>} would have written.
+     *
+     * <p>The mapping values are written by hand here. An engine would read them out of the new
+     * holder's {@code <clinit>} ({@code getstatic Color.BLUE; invokevirtual ordinal; iconst_3;
+     * iastore}), which is a bytecode-analysis step, not a runtime limitation.
+     */
+    static void switchMapRebuild(byte[] v2, byte[] consumerV2) throws Throwable {
+        preCache();
+        out("swrebuild.switchMap.before", switchMapInfo("probe.SwV1$1"));
+        probe("swrebuild.sw(RED).before", () -> SwV1.sw(Color.RED));
+
+        redefine(v2);
+        final Color blue = newConstant("BLUE", 2);
+        unsafePutStatic("BLUE", blue);
+        rebuildValues(blue);
+        clearCaches(true, true);
+
+        probe("swrebuild.control.staleTable.sw(blue)", () -> SwV1.sw(blue));
+
+        Class<?> consumer = Class.forName("probe.SwV1");
+        ProbeAgent.INST.redefineClasses(new ClassDefinition(consumer, consumerV2));
+        out("swrebuild.consumer.redefined", "v2 bytes accepted (case BLUE present, holder <clinit> not re-run)");
+        out("swrebuild.switchMap.afterConsumerRedefine", switchMapInfo("probe.SwV1$1"));
+        probe("swrebuild.control.redefinedStaleTable.sw(blue)", () -> SwV1.sw(blue));
+
+        writeSwitchMap("probe.SwV1$1", new int[] {1, 2, 3});
+        out("swrebuild.switchMap.rebuilt", switchMapInfo("probe.SwV1$1"));
+        probe("swrebuild.repaired.sw(RED)", () -> SwV1.sw(Color.RED));
+        probe("swrebuild.repaired.sw(GREEN)", () -> SwV1.sw(Color.GREEN));
+        probe("swrebuild.repaired.sw(blue)", () -> SwV1.sw(blue));
+    }
+
+    /**
+     * Q1, hot path: does a rebuilt {@code $SwitchMap$} reach an already-compiled consumer?
+     *
+     * <p>Warm the v1 consumer 1e6x, repair the enum, then swap the holder table to
+     * {@code [1, 2, 1]} (slot 2 mapped onto the RED branch - a deliberately wrong mapping that is
+     * nevertheless a discriminating signal: 1 means "the rebuilt array is what the compiled code
+     * dereferences", AIOOBE means "it still dereferences the old 2-slot array"). Then deopt the
+     * consumer with a same-bytes redefine and re-check.
+     */
+    static void switchMapRebuildHot(byte[] v2) throws Throwable {
+        preCache();
+        long sink = 0;
+        for (long i = 0; i < 1_000_000L; i++) {
+            sink += SwV1.sw(i % 2 == 0 ? Color.RED : Color.GREEN);
+        }
+        out("swrebuildhot.warm.sink", sink);
+        out("swrebuildhot.warm.sw(RED)", SwV1.sw(Color.RED));
+
+        redefine(v2);
+        final Color blue = newConstant("BLUE", 2);
+        unsafePutStatic("BLUE", blue);
+        rebuildValues(blue);
+        clearCaches(true, true);
+
+        writeSwitchMap("probe.SwV1$1", new int[] {1, 2, 1});
+        out("swrebuildhot.switchMap.rebuilt", switchMapInfo("probe.SwV1$1"));
+        for (int i = 0; i < 3; i++) {
+            probe("swrebuildhot.afterRebuild.sw(blue).sample" + i, () -> SwV1.sw(blue));
+        }
+
+        ProbeAgent.INST.redefineClasses(new ClassDefinition(SwV1.class, classBytes(SwV1.class)));
+        out("swrebuildhot.consumer.deopt", "redefineClasses(SwV1, sameBytes)");
+        for (int i = 0; i < 3; i++) {
+            probe("swrebuildhot.afterDeopt.sw(blue).sample" + i, () -> SwV1.sw(blue));
+        }
+    }
+
+    /**
+     * Q2: can the *existing* EnumMap/EnumSet instances be repaired by walking the heap and
+     * rewriting their internal universe arrays in place, instead of discarding and recreating
+     * them? A heap traversal ({@code JVMTI IterateOverInstancesOfClass}) would hand over every
+     * instance; this scenario performs the per-instance rewrite such a repair would do - reach the
+     * enum type via {@code keyType}/{@code elementType}, then swap {@code keyUniverse}/{@code vals}
+     * ({@code universe} for sets) for arrays sized for the new constant set - and measures the
+     * business-visible end state. The traversal itself is not exercised here.
+     */
+    static void heapRepair(byte[] v2) throws Throwable {
+        preCache();
+        // touch the lazily created views: applications usually have them cached already
+        out("heaprepair.pre.map.entrySet", EM0.entrySet().size());
+        out("heaprepair.pre.map.keySet", EM0.keySet().size());
+        out("heaprepair.pre.map.values", EM0.values().size());
+
+        redefine(v2);
+        final Color blue = newConstant("BLUE", 2);
+        unsafePutStatic("BLUE", blue);
+        rebuildValues(blue);
+        clearCaches(true, true);
+        out("heaprepair.values", valuesInfo());
+
+        out("heaprepair.map.class", EM0.getClass().getName() + " fields=" + fieldNames(EM0.getClass()));
+        out("heaprepair.set.class", ES0_ALL.getClass().getName() + " fields=" + fieldNames(ES0_ALL.getClass()));
+        out("heaprepair.map.state.before", enumMapState(EM0));
+        out("heaprepair.set.state.before", enumSetState(ES0_ALL));
+
+        // ---- in-JVM control: the very same instances are stale before the rewrite
+        probe("heaprepair.control.map.put(blue)", () -> {
+            EM0.put(blue, "b");
+            return "size=" + EM0.size();
+        });
+        probe("heaprepair.control.set.add(blue)", () -> {
+            boolean added = ES0_ALL.add(blue);
+            return "added=" + added + " size=" + ES0_ALL.size();
+        });
+        probe("heaprepair.control.set.iterate", () -> iterateCount(ES0_ALL));
+        probe("heaprepair.control.set.toArray", () -> ES0_ALL.toArray().length);
+        probe("heaprepair.control.set.complementOf", () -> EnumSet.complementOf(ES0_SOME).size());
+
+        // ---- what a heap-walk repair does per instance (enum type comes from keyType/elementType)
+        Color[] universe = Color.values();
+        patchEnumMapUniverse(EM0, universe);
+        patchEnumSetUniverse(ES0_ALL, universe);
+        patchEnumSetUniverse(ES0_SOME, universe);
+        out("heaprepair.map.state.after", enumMapState(EM0));
+        out("heaprepair.set.state.after", enumSetState(ES0_ALL));
+
+        // ---- business-visible end state
+        probe("heaprepair.map.put(blue)", () -> {
+            EM0.put(blue, "b");
+            return "size=" + EM0.size();
+        });
+        probe("heaprepair.map.get(blue)", () -> EM0.get(blue));
+        probe("heaprepair.map.get(RED)", () -> EM0.get(Color.RED));
+        probe("heaprepair.map.size", () -> EM0.size());
+        probe("heaprepair.map.containsKey(blue)", () -> EM0.containsKey(blue));
+        probe("heaprepair.map.entrySet.size", () -> EM0.entrySet().size());
+        probe("heaprepair.map.entrySet.iterate", () -> {
+            StringBuilder sb = new StringBuilder();
+            for (Map.Entry<Color, String> e : EM0.entrySet()) {
+                sb.append(e.getKey().name()).append('=').append(e.getValue()).append(';');
+            }
+            return sb.toString();
+        });
+        probe("heaprepair.map.keySet.contains(blue)", () -> EM0.keySet().contains(blue));
+        probe("heaprepair.map.values.size", () -> EM0.values().size());
+        probe("heaprepair.map.equals.fresh", () -> {
+            EnumMap<Color, String> fresh = new EnumMap<>(Color.class);
+            fresh.put(Color.RED, "r");
+            fresh.put(Color.GREEN, "g");
+            fresh.put(blue, "b");
+            return EM0.equals(fresh);
+        });
+        probe("heaprepair.map.serialize", () -> roundTripMap(EM0));
+        probe("heaprepair.set.contains(blue)", () -> ES0_ALL.contains(blue));
+        probe("heaprepair.set.iterate", () -> iterateCount(ES0_ALL));
+        probe("heaprepair.set.toArray", () -> ES0_ALL.toArray().length);
+        probe("heaprepair.set.complementOf", () -> EnumSet.complementOf(ES0_SOME).size());
+        probe("heaprepair.set.serialize", () -> roundTripSet(ES0_SOME));
+        probe("heaprepair.set.remove(blue)", () -> {
+            boolean removed = ES0_ALL.remove(blue);
+            return "removed=" + removed + " size=" + ES0_ALL.size();
+        });
+        probe("heaprepair.set.iterate.afterRemove", () -> iterateCount(ES0_ALL));
+        probe("heaprepair.fresh.map.put(blue)", () -> {
+            EnumMap<Color, String> mm = new EnumMap<>(Color.class);
+            mm.put(blue, "b");
+            return "size=" + mm.size();
+        });
+        probe("heaprepair.fresh.set.allOf", () -> iterateCount(EnumSet.allOf(Color.class)));
     }
 
     /** Warm values()/switch 1e6x, then redefine+repair while a hot spinner observes. */
@@ -1248,6 +1422,108 @@ public final class Probe {
         f.setAccessible(true);
         int[] arr = (int[]) f.get(null);
         arr[slot] = value;
+    }
+
+    // ---------------- heap-walk repair helpers (EnumMap / EnumSet) + SwitchMap rebuild ----------------
+
+    /** Field handle only - reads/writes go through Unsafe, so no module opening is required. */
+    static Field field(Class<?> type, String name) throws NoSuchFieldException {
+        return type.getDeclaredField(name);
+    }
+
+    /** Replaces the holder's {@code static final int[] $SwitchMap$...} (Unsafe can write final statics). */
+    static void writeSwitchMap(String holderName, int[] values) throws Throwable {
+        Class<?> h = Class.forName(holderName);
+        Field f = h.getDeclaredField("$SwitchMap$test$Color");
+        f.setAccessible(true);
+        U.putReference(U.staticFieldBase(f), U.staticFieldOffset(f), values);
+    }
+
+    static String fieldNames(Class<?> type) {
+        List<String> names = new ArrayList<>();
+        for (Class<?> k = type; k != null && k != Object.class; k = k.getSuperclass()) {
+            for (Field f : k.getDeclaredFields()) {
+                if (f.isSynthetic()) {
+                    continue;
+                }
+                names.add(k.getSimpleName() + "." + f.getName() + ":" + f.getType().getSimpleName());
+            }
+        }
+        return names.toString();
+    }
+
+    static String enumMapState(EnumMap<?, ?> map) throws Throwable {
+        Object[] universe = (Object[]) U.getReference(map, U.objectFieldOffset(field(EnumMap.class, "keyUniverse")));
+        Object[] vals = (Object[]) U.getReference(map, U.objectFieldOffset(field(EnumMap.class, "vals")));
+        int size = U.getInt(map, U.objectFieldOffset(field(EnumMap.class, "size")));
+        Class<?> keyType = (Class<?>) U.getReference(map, U.objectFieldOffset(field(EnumMap.class, "keyType")));
+        return "keyUniverse.len=" + universe.length
+                + " vals.len=" + vals.length
+                + " size=" + size
+                + " keyType=" + keyType.getName();
+    }
+
+    static String enumSetState(EnumSet<?> set) throws Throwable {
+        Object[] universe = (Object[]) U.getReference(set, U.objectFieldOffset(field(EnumSet.class, "universe")));
+        Class<?> elementType = (Class<?>) U.getReference(set, U.objectFieldOffset(field(EnumSet.class, "elementType")));
+        Field ef = field(set.getClass(), "elements");
+        Object elements;
+        if (ef.getType() == long.class) {
+            elements = U.getLong(set, U.objectFieldOffset(ef));
+        } else {
+            elements = U.getReference(set, U.objectFieldOffset(ef));
+        }
+        return "class=" + set.getClass().getSimpleName()
+                + " universe.len=" + universe.length
+                + " elementType=" + elementType.getName()
+                + " elements=" + render(elements);
+    }
+
+    /** Per-instance rewrite: keyUniverse <- new universe, vals <- old values copied into a wider array. */
+    static void patchEnumMapUniverse(EnumMap<?, ?> map, Object[] universe) throws Throwable {
+        Field keyUniverse = field(EnumMap.class, "keyUniverse");
+        Field vals = field(EnumMap.class, "vals");
+        Object[] oldVals = (Object[]) U.getReference(map, U.objectFieldOffset(vals));
+        Object[] newVals = new Object[universe.length];
+        System.arraycopy(oldVals, 0, newVals, 0, oldVals.length);
+        U.putReference(map, U.objectFieldOffset(keyUniverse), universe);
+        U.putReference(map, U.objectFieldOffset(vals), newVals);
+    }
+
+    /** Per-instance rewrite for EnumSet: only {@code universe} is stale; the bitmask already allows new bits. */
+    static void patchEnumSetUniverse(EnumSet<?> set, Object[] universe) throws Throwable {
+        Field u = field(EnumSet.class, "universe");
+        U.putReference(set, U.objectFieldOffset(u), universe);
+    }
+
+    static String iterateCount(EnumSet<Color> set) {
+        int n = 0;
+        for (Color c : set) {
+            n++;
+        }
+        return "iterated=" + n;
+    }
+
+    static Object roundTripMap(EnumMap<?, ?> map) throws Exception {
+        ByteArrayOutputStream bo = new ByteArrayOutputStream();
+        try (ObjectOutputStream oo = new ObjectOutputStream(bo)) {
+            oo.writeObject(map);
+        }
+        try (ObjectInputStream oi = new ObjectInputStream(new ByteArrayInputStream(bo.toByteArray()))) {
+            EnumMap<?, ?> back = (EnumMap<?, ?>) oi.readObject();
+            return "size=" + back.size() + " content=" + back;
+        }
+    }
+
+    static Object roundTripSet(EnumSet<?> set) throws Exception {
+        ByteArrayOutputStream bo = new ByteArrayOutputStream();
+        try (ObjectOutputStream oo = new ObjectOutputStream(bo)) {
+            oo.writeObject(set);
+        }
+        try (ObjectInputStream oi = new ObjectInputStream(new ByteArrayInputStream(bo.toByteArray()))) {
+            Set<?> back = (Set<?>) oi.readObject();
+            return "size=" + back.size() + " content=" + back;
+        }
     }
 
     static Unsafe unsafe() {

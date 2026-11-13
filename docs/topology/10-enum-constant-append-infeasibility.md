@@ -18,8 +18,10 @@
 3. 清空 `java.lang.Class` 上的 `enumConstants` 与 `enumConstantDirectory` 两个缓存，迫使
    `values()`/`valueOf()`/`EnumMap`/`EnumSet` 重新加载。
 
-本题要回答的是：**这个候选方案够不够**。测量结论是**必要但不充分**——冷路径能修好，但三类已存在的
-消费方修不回来，且第一类是静默的。
+本题要回答的是：**这个候选方案够不够**。测量结论是**必要但不充分**——冷路径能修好；三类已存在的消费方
+需要各自的补偿手段，其中两类经补测**可以修**（`$SwitchMap$` 重建映射表、存量 `EnumMap`/`EnumSet` 逐实例换
+内部数组，见 §3.5.1 / §3.6.1），但补偿手段都带覆盖与竞态前提；真正不可闭环的是已编译读者（§3.4）与影子
+`Class`（§3.7）。
 
 ---
 
@@ -153,6 +155,39 @@ OBS repair-resize.switch.sw(blue) = default       # 扩到 len=3 后不抛错，
 另外，修复前就让新消费类首次初始化会 NPE（`Color.BLUE` 为 null）→ `ExceptionInInitializerError`，
 该类此后永久 erroneous。
 
+### 3.5.1 追加测量：`$SwitchMap$` 能重建，但表必须由新字节码推导
+
+§3.5 的 `repair-resize` 只证明"扩容不补 case"。补测场景 `swmap-rebuild`（同一 v1→v2 序列，JBR 21）：
+
+```
+OBS swrebuild.switchMap.before                    = holder=probe.SwV1$1 fieldFlags=[static final] len=2 vals=[1, 2]
+OBS swrebuild.control.staleTable.sw(blue)         = THREW AIOOBE: Index 2 out of bounds for length 2
+OBS swrebuild.consumer.redefined                  = v2 bytes accepted (case BLUE present, holder <clinit> not re-run)
+OBS swrebuild.switchMap.afterConsumerRedefine     = holder=probe.SwV1$1 fieldFlags=[static final] len=2 vals=[1, 2]
+OBS swrebuild.control.redefinedStaleTable.sw(blue) = THREW AIOOBE: Index 2 out of bounds for length 2
+OBS swrebuild.switchMap.rebuilt                   = holder=probe.SwV1$1 fieldFlags=[static final] len=3 vals=[1, 2, 3]
+OBS swrebuild.repaired.sw(blue)                   = 3
+```
+
+三件事被分开：
+
+- **重定义消费者不会重建表**：消费类换成带 `case BLUE` 的 v2 字节（同类名、同一 holder
+  `probe.SwV1$1`）后，holder 的 `<clinit>` 不重跑，表仍是 `[1, 2]`，`switch(BLUE)` 继续 `AIOOBE`。
+- **表本身可写**：把 holder 的 `static final int[]` 换成按新映射填好的 `[1, 2, 3]`（`Unsafe` 写 final 静态
+  字段）后，已重定义的消费者立刻按新 case 分派（`sw(blue) = 3`）。
+- **缺的是"映射从哪来"**：新数组的值必须从**新 holder 的 `<clinit>`** 读出来
+  （`getstatic Color.BLUE; invokevirtual ordinal; iconst_3; iastore`），并覆盖**所有**持有该枚举表的类。
+  这不是运行期能力问题，而是字节码分析 + 枚举全部 holder 类的问题。
+
+> 证据强度注：§3.5 场景里的 `repair-resize.switch.sw(blue).afterResize.mapped3`（手工把槽 2 写成 3 后
+> `sw(blue)=0`）**不具备区分力**——旧消费者没有 `case BLUE`，槽 2 写 0 还是写 3 都落 `default`。
+> 判断"表写入是否可见"必须用 §3.5.1 的对照形态（同类名重定义 + 可区分分支值：读数 1 vs `AIOOBE`）。
+
+热路径补测（`swmap-rebuild-hot`）：消费者预热 1e6 次（`-XX:+PrintCompilation` 确认 `probe.SwV1::sw`
+进到 tier 4）后换表，单次调用即读到重建后的数组（表写成 `[1, 2, 1]`，读数 1 = 命中新表槽位）。
+本场景**未**覆盖"换表瞬间正在运行的已编译循环"（与 §3.4 的 spinner 同类），因此既不能据此声称热读者必然
+安全，也不能声称必然 stale；要下结论需要专门的 spinner 场景。
+
 ### 3.6 存量 `EnumMap` / `EnumSet` 实例无法扩容
 
 ```
@@ -165,7 +200,45 @@ OBS repair.hazard.preEnumSet.complementOf  = 1      # 期望 2（GREEN+BLUE）�
 ```
 
 `EnumMap` 的 `vals`/`keyUniverse` 按旧宇宙长度分配；`EnumSet` 的 bitmask 允许新位、但 `universe`
-数组不允许。两者都无法在原对象上"扩容成新宇宙"——只能丢弃重建，而引用在业务手里。
+数组不允许。两者都无法在原对象上"扩容成新宇宙"——逻辑上只能丢弃重建，而引用在业务手里；
+但"实例内数组换成新宇宙"是可行的，见 §3.6.1（代价是遍历堆 + 窗口防护）。
+
+### 3.6.1 追加测量：存量 `EnumMap`/`EnumSet` 的实例内数组可以换
+
+§3.6 只证明"无法在原对象上扩容"。补测场景 `heap-repair` 走的是"遍历堆 + 逐实例换内部数组"的候选方案：
+枚举类型从实例的 `keyType`/`elementType` 读，`EnumMap` 换 `keyUniverse` + `vals`（旧值复制进加宽数组），
+`EnumSet` 只换 `universe`（位图 `elements` 本来就允许新位）。同一个实例的前后读数：
+
+```
+OBS heaprepair.map.state.before         = keyUniverse.len=2 vals.len=2 size=2 keyType=test.Color
+OBS heaprepair.set.state.before         = class=RegularEnumSet universe.len=2 elementType=test.Color elements=3
+OBS heaprepair.control.map.put(blue)    = THREW AIOOBE: Index 2 out of bounds for length 2
+OBS heaprepair.control.set.add(blue)    = added=true size=3
+OBS heaprepair.control.set.iterate      = THREW AIOOBE: Index 2 out of bounds for length 2
+OBS heaprepair.control.set.complementOf = 1        # 期望 2：静默少算
+OBS heaprepair.map.state.after          = keyUniverse.len=3 vals.len=3 size=2 keyType=test.Color
+OBS heaprepair.set.state.after          = class=RegularEnumSet universe.len=3 elementType=test.Color elements=7
+OBS heaprepair.map.put(blue)            = size=3
+OBS heaprepair.map.get(blue)            = b
+OBS heaprepair.map.entrySet.iterate     = RED=r;GREEN=g;BLUE=b;
+OBS heaprepair.map.equals.fresh         = true
+OBS heaprepair.map.serialize            = size=3 content={RED=r, GREEN=g, BLUE=b}
+OBS heaprepair.set.iterate              = iterated=3
+OBS heaprepair.set.toArray              = 3
+OBS heaprepair.set.complementOf         = 2
+OBS heaprepair.set.remove(blue)         = removed=true size=2
+```
+
+即：**实例内状态可以原地换成新宇宙**，`EnumMap` 的 `put/get/entrySet/keySet/values/equals/序列化` 与
+`EnumSet` 的迭代/`toArray`/`complementOf`/`remove` 全部恢复正确（仍走同一实例，业务持有的引用不变）。
+
+但这条路径的代价与边界必须一起读：
+
+- 必须遍历堆覆盖**全部**实例（`JVMTI IterateOverInstancesOfClass` 天然覆盖子类，见
+  [`../initfix/05-jvmti-heap.md`](../initfix/05-jvmti-heap.md)），遗漏一个就是静默旧宇宙；
+- redefine→遍历窗口内新建的实例、以及换数组瞬间并发 `put` 的写者（写进旧 `vals` 会丢更新），本场景**未测**；
+- `EnumSet` 跨 64 常量边界（`RegularEnumSet` → `JumboEnumSet`）是**换类**，实例内换字段做不到；
+- 用户态按 ordinal 索引的数组（`new int[Color.values().length]`）、缓存的 `values()` 副本仍无解。
 
 ### 3.7 `Class` 影子副本携带旧宇宙
 
@@ -195,14 +268,16 @@ OBS mirror.newEnumMap(shadow).put(blue) = THREW ClassCastException: class test.C
 | 冷路径 `values()`/`valueOf`/新建集合/反序列化 | 可 | §3.2 |
 | 两个 `Class` 缓存 | 可（必须两个都清且时序在 `$VALUES` 之后） | §3.3 |
 | 已 JIT 编译的读者 | 只能靠 deopt（再次 redefine）；不稳定且代价高 | §3.4 |
-| 已初始化的 `$SwitchMap$` 持有类 | 只能重建映射表（要解析新 `<clinit>` 的常量→label 映射）；扩容不补 case | §3.5 |
-| 存量 `EnumMap`/`EnumSet` 实例 | 不可（无法原地扩容） | §3.6 |
+| 已初始化的 `$SwitchMap$` 持有类 | 可重建映射表（实测）；必须解析每个 holder 的新 `<clinit>`，且消费者本身要先重定义出新 case；仅扩容不补 case | §3.5 / §3.5.1 |
+| 存量 `EnumMap`/`EnumSet` 实例 | 实例内数组可换（实测）；需遍历堆全覆盖 + 窗口/并发防护，跨 64 常量边界不可 | §3.6 / §3.6.1 |
 | 影子 `Class` | 不可（无法穷举持有者） | §3.7 |
 | 已缓存的 `values()` 数组副本、懒加载的旧代码 | 不可（任何热更都存在的陈旧副本） | §3.6 / §3.7 同类 |
 
-只要有一项不可修，放行就不是"部分生效"，而是**把错误从"热更没生效"变成"静默走错分支或延迟
-AIOOBE"**。按"拿不准就拒绝"的判定准则，`ENUM_CONSTANT_SET_CHANGED` 维持拒绝，并在拒绝日志里点名
-三类主要阻断（`$VALUES`、`$SwitchMap$`、`EnumMap`/`EnumSet`）与 JIT/deopt，避免用户误以为"只是
+真正的**不可闭环**项是已 JIT 编译的读者（必须 deopt 全部读者，遗漏即静默旧值）、影子 `Class`（无法穷举
+持有者）与懒加载旧代码。`$SwitchMap$` 重建与存量集合换数组虽然实测可做，但都带前提：前者要解析每个 holder
+的新 `<clinit>`，后者要遍历堆覆盖全部实例并处理窗口竞态。任一遗漏都会把错误从"热更没生效"变成**"静默走错
+分支或延迟 AIOOBE"**。按"拿不准就拒绝"的判定准则，`ENUM_CONSTANT_SET_CHANGED` 维持拒绝，并在拒绝日志里
+点名三类主要阻断（`$VALUES`、`$SwitchMap$`、`EnumMap`/`EnumSet`）与 JIT/deopt，避免用户误以为"只是
 InitFix 没实现，值得自己补"。
 
 决策记录见 [`08-decisions.md`](08-decisions.md) 的 `D-ENUM-1`。
@@ -243,10 +318,13 @@ InitFix 没实现，值得自己补"。
 2. `$VALUES` 重建（有合成 `$values()` 时可反射调用；旧形态需手工拷贝 + 追加），并在之后清空
    `Class.enumConstants` 与 `enumConstantDirectory`（两者都要）。
 3. 已初始化消费类的 `$SwitchMap$`/`$SWITCH_TABLE$` 重建：解析新 `<clinit>` 的"常量 → label"映射，
-   用当前 `values()` 重新填表；仅扩容不补 case 会静默落 `default`。
+   用当前 `values()` 重新填表；仅扩容不补 case 会静默落 `default`。javac 形态已实测可行
+   （`swmap-rebuild`：换表后 `sw(BLUE)=3`），`$SWITCH_TABLE$`（ECJ 形态）**未测**，见 §3.5.1。
 4. 触发 deopt 让已编译读者看到新常量：实测可行手段是读者类 `redefineClasses(同字节)` /
    `retransformClasses`（见 §3.4.1）；但必须覆盖全部已加载读者，遗漏即静默旧值。
-5. 存量 `EnumMap`/`EnumSet` 的判定：无法修 → 只能拒绝或显式降级为"尽力而为"，并让用户看见。
+5. 存量 `EnumMap`/`EnumSet`：逐实例换 `keyUniverse`/`vals`/`universe` 实测可修（`heap-repair`：`put/get`、
+   迭代、`complementOf`、序列化全对），但必须遍历堆覆盖全部实例、处理 redefine→遍历窗口与并发写，且
+   `EnumSet` 跨 64 常量边界（`RegularEnumSet`→`JumboEnumSet`）无法换类；未覆盖即静默旧宇宙。
 6. 影子 `Class` 与懒加载旧代码：当前无法闭环，必须写进"不支持"清单。
 
 在 1~6 全部具备前，这条路径的收益（一个很少触发的枚举扩充场景）低于把错误变成静默错分支的风险。
@@ -261,4 +339,5 @@ bash tests/enum-append-probe/run.sh
 grep '^OBS' tests/enum-append-probe/b/logs/all.log
 ```
 
-环境变量、场景清单与关键读数见 [`tests/enum-append-probe/README.md`](../../tests/enum-append-probe/README.md)。
+环境变量、场景清单与关键读数见 [`tests/enum-append-probe/README.md`](../../tests/enum-append-probe/README.md)；
+§3.5.1 / §3.6.1 的补测场景为 `swmap-rebuild`、`swmap-rebuild-hot`、`heap-repair`。

@@ -29,7 +29,7 @@
 
 ```bash
 bash tests/enum-append-probe/build.sh   # 编 v1/v2 字节码（javac21 + javac8 两套）、probe、agent jar
-bash tests/enum-append-probe/run.sh     # 每个场景独立 JVM（redefine 不可回滚），共 30 次
+bash tests/enum-append-probe/run.sh     # 每个场景独立 JVM（redefine 不可回滚），共 42 次
 ```
 
 原始读数落在 `tests/enum-append-probe/b/logs/all.log`（`b/` 已 gitignore）。每次运行只输出
@@ -48,6 +48,8 @@ grep -E 'OBS (repair|baseline|jit|switch|cache|hazard)' tests/enum-append-probe/
 | `race`（redefine→补丁窗口内有消费者） | 只清一个缓存 | `valueOf` 仍 IAE、`getEnumConstants` 仍 2、`EnumMap` 抛 `AIOOBE` —— 两个缓存都必须清，且要在 `$VALUES` 重写之后 |
 | `jit-spin` | 预热 1e6 次后修复，读 `values().length` | 编译器内联的读者仍读到 2；`-Xint` 读到 3；再次 redefine 触发 deopt 后才变 3 |
 | `repair-resize` / `swv2-*` | 已初始化的 `$SwitchMap$Color` 持有类 | `switch(BLUE)` 抛 `AIOOBE: Index 2 out of bounds for length 2`；把数组扩到 3 后不抛但落 `default` |
+| `swmap-rebuild` / `swmap-rebuild-hot` | 重定义消费者 + 重建 `$SwitchMap$` 表 | 只重定义消费者（新 case 已在字节码里）仍 `AIOOBE`——holder `<clinit>` 不重跑；把 holder 的 `static final int[]` 换成新映射后 `sw(BLUE)=3`；已编译消费者换表后单次调用即读到新表 |
+| `heap-repair` | 存量 `EnumMap`/`EnumSet` 逐实例换内部数组 | 换前 `put(BLUE)` 与迭代抛 `AIOOBE`、`complementOf` 少 1；换后同一实例的 `put/get/entrySet/equals/序列化` 与 `EnumSet` 迭代/`toArray`/`complementOf`/`remove` 全部正确 |
 | `repair`（存量集合） | 追加前已存在的 `EnumMap` / `EnumSet` | `EnumMap.put/get(BLUE)` 抛 `AIOOBE`；`EnumSet` 的 `add/contains` 正常但迭代/`toArray` 抛 `AIOOBE`、`complementOf` 少算一个 |
 | `mirror` | 静态字段里持有的旧 `Class`（影子副本） | `valueOf(shadow,"BLUE")` IAE、`isInstance(blue)=false`、`new EnumMap(shadow).put(blue)` 抛 `CCE` |
 
@@ -77,6 +79,22 @@ JBR 21.0.9 实测（`jit-inline` / `jit-values-write` / `deopt-*` / `jit-spin-re
 已编译读者 deopt 掉（读数直接为 3），因此它们不区分 deopt 手段；真正有区分力的读数是
 `jit-values-write`（纯写字段不 redefine：3 → 读者类 deopt 后 4）与 `jit-spin-reader-deopt`
 （真机热更：2 → 读者类 deopt 后 3）。
+
+### `$SwitchMap$` 重建与存量集合（S4d / S4e / S9）
+
+`repair-resize` 只证明"扩容不补 case"。补测把两件事分开：
+
+| 观测 | 读数 |
+|:--|:--|
+| 消费者换成带 `case BLUE` 的 v2 字节（同类名、同一 holder） | 表仍是 `[1, 2]`，`switch(BLUE)` 继续 `AIOOBE`——holder `<clinit>` 不重跑 |
+| 把 holder 的 `static final int[]` 换成新映射 `[1, 2, 3]` | `sw(RED)=1`、`sw(GREEN)=2`、`sw(BLUE)=3`——表可写，缺的是从新 `<clinit>` 推导映射 |
+| 预热 1e6 次（tier 4 编译）后换表 | 单次调用即读到新表（表写成 `[1, 2, 1]`，读数 1）；换表瞬间正在运行的已编译循环**未测** |
+| 存量 `EnumMap`：换 `keyUniverse`+`vals` | 换前 `put(BLUE)` `AIOOBE`；换后 `put/get/entrySet/keySet/values/equals/序列化` 全对（同一实例） |
+| 存量 `EnumSet`：只换 `universe` | 换前 `add` 成功但迭代/`toArray` `AIOOBE`、`complementOf` 少 1；换后迭代/`toArray`/`complementOf`/`remove` 全对 |
+
+边界：遍历堆找实例本身（`JVMTI IterateOverInstancesOfClass`）不在本探针内；redefine→遍历窗口内新建的实例、
+换数组瞬间并发写、`EnumSet` 跨 64 常量边界（`RegularEnumSet`→`JumboEnumSet`）都未覆盖，不能据这些读数
+声称"枚举追加已可热修"。
 
 ## 边界
 

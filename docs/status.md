@@ -9,7 +9,7 @@
 |:---|:---|
 | **基准提交 (Baseline Commit)** | `v0.2.8` tag `f18851e`（annotated → commit `43fc583`，`main` @ `43fc583`）；上一发布 `v0.2.7` tag `0852506`，其代码基线 `db65bf0`；再上一发布 `v0.2.6` tag `2159d21`。v0.2.8 内容：前线 P0 安全门收口（枚举顺序门被 Mixin 对齐器抢跑、枚举常量集合变更假成功、读者扫描被无关常量池污染、`@RemoldReinit` 契约）、运行期日志英文化 + `verifyLogLanguage`、gradle-plugin agent 版本对账 + `cleanRemoldCache`、孤儿 lambda 保留旧体、`redefineDynamic` 接入两阶段、Linux aarch64 原生库、发版坐标自检大小写敏感（逐项见 §0.12） |
 | **发布说明** | `v0.2.8` **已发布 2026-11-12**：[GitHub release](https://github.com/I-hope1/Remold/releases/tag/v0.2.8)（正文 [`releases/v0.2.8.md`](releases/v0.2.8.md)；JitPack 与 Gradle Plugin Portal 均已验证可解析）；上一发布 [`releases/v0.2.7`](https://github.com/I-hope1/Remold/releases/tag/v0.2.7)（历史档见 `releases/`） |
-| **最后更新时间** | 2026-11-12（v0.2.8 发布准备：版本常量/CHANGELOG/Release Notes 递增、发版坐标大小写统一与 `verifyReleaseCoordinates` 强化、mavenLocal 16/16 坐标解析验证；此前 v0.2.7 后收口前线 P0 安全门、日志英文化、gradle-plugin 版本对账、孤儿 lambda 保留旧体、`redefineDynamic` 两阶段；详见 §0.12） |
+| **最后更新时间** | 2026-11-13（路线图重排：§4.1 合并"失效形态"排序、新增 §4.1.2 范围冻结与 §4.1.3 停车清单、§4.2 优先级重排、§7 门户口径纠偏、§5 风险 13/15/16/20 定级；此前 2026-11-12 为 v0.2.8 发布准备：版本常量/CHANGELOG/Release Notes 递增、发版坐标大小写统一与 `verifyReleaseCoordinates` 强化、mavenLocal 16/16 坐标解析验证；再此前 v0.2.7 后收口前线 P0 安全门、日志英文化、gradle-plugin 版本对账、孤儿 lambda 保留旧体、`redefineDynamic` 两阶段） |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |
 | **更新触发条件** | 任何合入包含特性落地、架构偏离、安全门调整、测试基线变更或发现已知缺陷/残余风险的 PR/commit 时，必须同步原子化更新本文件。提交时由作者/维护者更新基准哈希。 |
 | **管辖范围与边界声明** | 本状态表权威管辖：<br>1. **匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)**（[`docs/topology/`](topology/)）<br>2. **存量初始化修复器 (InitFix / Legacy Instance & Static Reinitialization)**（[`docs/initfix/`](initfix/)）<br>3. **物理内存偏移稳定性与第三方缓存驱逐 (Physical Memory Offset Stability & Reflection Cache Eviction)**（[`docs/offset/`](offset/)）<br>*边界与后续治理声明*：同属字节码重映射体系的 `LambdaAligner`（Lambda 表达式对齐器）以及 Mindustry UI 胶水层（`CellPropertyRef` / 动态参数表达式指纹），其实现状态当前由各自单元测试覆盖（`CellHelperTest` 35 个用例持续全绿、`LambdaAlignerTest` 等）；它们的详细状态审计矩阵尚未并入本总表，计划在下一轮治理中统一建立验收标准并纳入。 |
@@ -220,14 +220,14 @@
 
 **v0.2.6 统一残余风险清单（已观测 / 未验证分列）**
 
-1. **`redefineDynamic`（单类 API 入口）仍未挂看门狗**：三条主路径（防抖/手动/`retransformLoaded`）已覆盖，该单类入口卡死仍无栈。
-2. **就绪探测未经真机验证**：`plugin-fabric` 的 `HostReadinessProbe` 仅有单测替身（`FabricHostReadinessTest`），真实 KnotServer/客户端的访问器名（`getTicks`/`getTickCount`、`world`/`level`）无法在 `.sources/`（仅镜像 Mindustry/Arc）核验，真机未跑；`plugin-forge` 侧尚未实现 `isHostReady()`。fail-open 把杀伤面限制在"保护窗口可能比预期窄"（服务端实例构造前即 UNKNOWN→放行），不会饿死批次。
-3. **`BytecodeSources` 常驻内存无上限**（沿用 §0.9 残余 4）：键集合不随 reload 增长（唯一名跨 reload 稳定），但无驱逐策略；回灌发生在 schema 复核之前，即"读得到"不等于"已生效"。
+1. **`redefineDynamic`（单类 API 入口）仍未挂看门狗**：三条主路径（防抖/手动/`retransformLoaded`）已覆盖，该单类入口卡死仍无栈。（§4.1 v0.2.9 槽位 ④）
+2. **就绪探测未经真机验证**：`plugin-fabric` 的 `HostReadinessProbe` 仅有单测替身（`FabricHostReadinessTest`），真实 KnotServer/客户端的访问器名（`getTicks`/`getTickCount`、`world`/`level`）无法在 `.sources/`（仅镜像 Mindustry/Arc）核验，真机未跑；`plugin-forge` 侧尚未实现 `isHostReady()`。（§4.1 v0.2.9 槽位 ④）fail-open 把杀伤面限制在"保护窗口可能比预期窄"（服务端实例构造前即 UNKNOWN→放行），不会饿死批次。
+3. **`BytecodeSources` 常驻内存无上限**（沿用 §0.9 残余 4）：键集合不随 reload 增长（唯一名跨 reload 稳定），但无驱逐策略；回灌发生在 schema 复核之前，即"读得到"不等于"已生效"。（§4.1 P3 已登记）
 4. **持有者点名边界**（收口轮补全后的残余）：只扫 old/new 宿主节点的字段表与方法体；跨方法经参数传递不猜（宁可漏点名）；宿主继承字段若 javac 以父类为 owner 发射 `putfield` 不会命中；候选只看直接父类型，不递归层级。父类型/接口持有已由三层退化点名（`Supplier HELD6` 形态），但"任意引用字段"不点名为 proven。
 5. **热更管线自身的证据仪器存在"假 PASS / 假击杀"风险**（本轮 worker 实测）：退出码 127（命令不存在）被记为 killed、cmd banner-only 输出被记为 PASS、Gradle UP-TO-DATE 的重复 stdout 哈希被当作新证据。当前由人工复核兜住，工具侧修法见战役台账；在这些修复前，本表所有"PASS/killed"均以**原始日志已人工复核**为前提。
 6. **覆盖层登记项的生存期**：成功 reload 后内部类字节保持在覆盖层里（目标织入期间还需要它），后续同类变化会覆盖同名项；Mixin 模板内部类不会被 JVM 当普通类加载，因此长期驻留不会遮蔽真实类。
 7. **plugin/core 版本错位**：抑制器已无 core 类型硬链接，但 `MixinConfigContext` 构造签名不匹配时仍会抛 `NoSuchMethodError`（由 `RemoldAgent.notifyAssetChanges` 的逐插件 catch 兜住并记 error），两侧必须同版本发布。
-8. **匿名类成员结构变化（新增字段/方法）仍只能拒绝并提示重启**：未做结构化热更；`ForgeMixinHotSwap` 未接本轮内部类闭环。
+8. **匿名类成员结构变化（新增字段/方法）仍只能拒绝并提示重启**：未做结构化热更；`ForgeMixinHotSwap` 未接本轮内部类闭环。（§4.1 v0.3）
 9. **未验证**：真实客户端（IDE + KnotClient）复跑本轮匿名类闭环；启动门闩的真实 tick 语义（同第 2 条）。
 
 ---
@@ -253,7 +253,7 @@
 
 | 修复 / 能力 | 状态 | 代码位置 | 验收证据 |
 |:---|:---:|:---|:---|
-| **枚举常量声明顺序安全门与 Switch 级联阻断**：枚举常量重排/前插导致 ordinal 漂移，现有存量实例保留原 ordinal 致使 switch-on-enum 和 EnumMap 静默走错分支；末尾追加/删除常量虽不改已有 ordinal，但热更不重跑 `<clinit>`——新增常量运行期恒 `null`、删除的常量仍留在旧 `$VALUES` 实例数组里，属于"热更成功但没生效"的假成功 | ✅ | `ClassDiffUtil.diff` 记录 `shiftedEnumConstants` / `addedEnumConstants` / `removedEnumConstants`（`CHANGED_ENUM_ORDER` / `ENUM_CONSTANT_SET_CHANGED`）；`LayoutDecisionEngine.decide` 拦截拒绝并提示 revert/restart；`RemoldAgent` 级联阻断同批 SwitchMap 依赖与直接引用变更常量的类 | **单测**：`EnumSwitchReorderGateTest`（9/9：前插拒绝、重排拒绝、追加拒绝、删除拒绝、枚举新增普通字段放行、方法体放行、SwitchMap 级联、追加拒绝原因点名实测阻断项（`$VALUES`/`$SwitchMap$`/`EnumMap`/JIT-deopt/restart））；`EnumAlignmentGateWiringTest`（8/8：重排/前插在 Mixin 成员对齐之后仍可见、追加拒绝、删除常量不被墓碑复活、`$VALUES`/`this$N`/`$SwitchMap$` 判据、Mixin 织入枚举仍对齐方法表）；**变异**：分别恢复宽判据 / 删除枚举字段顺序保护 → 对应用例精准变红；**真机否决候选修复方案**：JBR 21 探针 `tests/enum-append-probe/`（30 次独立 JVM，javac21 与真 javac8 两种字节码形态）证明"事后重写 `$VALUES` + 清空 `Class` 两个枚举缓存"必要但不充分——已 JIT 编译的读者在 deopt 前仍读旧 `$VALUES`（`values()` 被内联、字段加载被提升；**非** `ConstantValue` 常量折叠，对读者类 `redefineClasses(同字节)`/`retransformClasses` 可刷新，但需覆盖全部读者）、已初始化的 `$SwitchMap$` 持有类无法自动补新 case（扩容只消除 AIOOBE、新 case 静默落 `default`；补测：按新 `<clinit>` 映射重建表可行，需重定义消费者 + 解析字节码）、存量 `EnumMap`/`EnumSet` 无法原地扩容（AIOOBE / 迭代陈旧；补测：逐实例换内部数组可行，但需遍历堆全覆盖 + 窗口/并发防护）；读数与结论见 [`topology/10`](topology/10-enum-constant-append-infeasibility.md)，决策见 [`D-ENUM-1`](topology/08-decisions.md#d-enum-1) |
+| **枚举常量声明顺序安全门与 Switch 级联阻断**：枚举常量重排/前插导致 ordinal 漂移，现有存量实例保留原 ordinal 致使 switch-on-enum 和 EnumMap 静默走错分支；末尾追加/删除常量虽不改已有 ordinal，但热更不重跑 `<clinit>`——新增常量运行期恒 `null`、删除的常量仍留在旧 `$VALUES` 实例数组里，属于"热更成功但没生效"的假成功 | ✅ | `ClassDiffUtil.diff` 记录 `shiftedEnumConstants` / `addedEnumConstants` / `removedEnumConstants`（`CHANGED_ENUM_ORDER` / `ENUM_CONSTANT_SET_CHANGED`）；`LayoutDecisionEngine.decide` 拦截拒绝并提示 revert/restart；`RemoldAgent` 级联阻断同批 SwitchMap 依赖与直接引用变更常量的类 | **单测**：`EnumSwitchReorderGateTest`（9/9：前插拒绝、重排拒绝、追加拒绝、删除拒绝、枚举新增普通字段放行、方法体放行、SwitchMap 级联、追加拒绝原因点名实测阻断项（`$VALUES`/`$SwitchMap$`/`EnumMap`/JIT-deopt/restart））；`EnumAlignmentGateWiringTest`（8/8：重排/前插在 Mixin 成员对齐之后仍可见、追加拒绝、删除常量不被墓碑复活、`$VALUES`/`this$N`/`$SwitchMap$` 判据、Mixin 织入枚举仍对齐方法表）；**变异**：分别恢复宽判据 / 删除枚举字段顺序保护 → 对应用例精准变红；**真机否决候选修复方案**：JBR 21 探针 `tests/enum-append-probe/`（42 个独立 JVM 场景，javac21 与真 javac8 两种字节码形态；含 `swmap-rebuild`/`heap-repair` 补测）证明"事后重写 `$VALUES` + 清空 `Class` 两个枚举缓存"必要但不充分——已 JIT 编译的读者在 deopt 前仍读旧 `$VALUES`（`values()` 被内联、字段加载被提升；**非** `ConstantValue` 常量折叠，对读者类 `redefineClasses(同字节)`/`retransformClasses` 可刷新，但需覆盖全部读者）、已初始化的 `$SwitchMap$` 持有类无法自动补新 case（扩容只消除 AIOOBE、新 case 静默落 `default`；补测：按新 `<clinit>` 映射重建表可行，需重定义消费者 + 解析字节码）、存量 `EnumMap`/`EnumSet` 无法原地扩容（AIOOBE / 迭代陈旧；补测：逐实例换内部数组可行，但需遍历堆全覆盖 + 窗口/并发防护）；读数与结论见 [`topology/10`](topology/10-enum-constant-append-infeasibility.md)，决策见 [`D-ENUM-1`](topology/08-decisions.md#d-enum-1) |
 | **枚举顺序门被 Mixin 成员对齐器抢跑（前线 P0-2）**：普通枚举的合成字段 `$VALUES` 被误判为 Mixin 生成成员，对齐器在 `ClassDiffUtil` 之前把字段表恢复成基线顺序，`CHANGED_ENUM_ORDER` 永远看不到重排/前插，真机日志只见 `[MIXIN-ALIGN] restored the baseline member order` | ✅ | `MixinMemberAlign.hasMixinGeneratedMembers` 排除 javac/JVM 合成字段（`$VALUES`/`this$N`/`$assertionsDisabled`/`$SwitchMap$*`/`$EnumMap$*`）；`align` 对枚举类不重排字段表、不把被删常量复活成墓碑字段（方法表照常对齐） | `EnumAlignmentGateWiringTest`（红测试先复现：3/8 失败）；变异：恢复 `$`+synthetic 宽判据 → 2 个判据用例变红；删除枚举字段顺序保护 → Mixin 枚举用例变红；契约登记于 `docs/mixin/03-reweave-and-member-alignment.md` §2 |
 | **读者扫描被无关常量池引用污染（前线 P0-3c）**：删除工程构造器/方法时，同 `name:desc` 的 `java/util/ArrayList.<init>(I)V` 等 JDK 引用因类型世界缺失被判 `UNKNOWN`，整轮扫描被视为不完整 → 全量 fail-closed 误杀（同批重编的调用方也被拒） | ✅ | `RemovedMemberReaders.provablyUnrelated` 在解析前只跳过**可证明无关**的引用（构造器 owner 不等；platform 前缀 owner 对非 platform 成员，且仅限字段/static/private 的向上解析）；实例虚方法仍保留 resolve→inconclusive（前缀不能证明分派落点）；`LayoutDecisionEngine.describeFindings` 在拒绝日志点名前 3 个 reader 类 | **单测**：`UnrelatedRefReaderScanTest`（9/9，含同批构造器删除、混合"无关引用+真实陈旧读者"、虚方法 fail-closed 边界、拒绝日志点名）；`MemberStaticnessAndConstructorScanTest` 8/8；红测试先复现 6/8 失败；变异：禁用预过滤 → 5 红、放宽构造器证明 → 2 红、platform 证明缺 member 侧条件 → 1 红 |
 | **`@RemoldReinit` 用户契约收口（死开关 / 继承作用域 / 触发原因 / 不支持清单）**：`-Dremold.agent.force_reinit` 只解析只打日志、无读取点（死配置）；默认 `INCLUDE_SUBCLASSES` + 父类字段 + 子类 `<init>` 写同字段会把父类初值覆盖到子类实例；触发规则只有隐式分支、日志不说明原因；Javadoc 未点名常量内联/Record/final/多字段非原子等不支持形态 | ✅ | `RemoldAgent.FORCE_REINIT` 接成真实逃生口（默认 `false`，忽略指纹强制重放）；`InitFix.reinitTriggerReason` + `[REINIT] trigger` 行点名 first/changed/open/forced；`InitFix.unsafeInheritedReinitFields` + 纯函数 `ReinitScopeGate` + `HierarchyTree.knownSubtypes`（已登记子类即"可能有实例"的完备集合）+ 布局门 `[REINIT-SCOPE]` 拒绝（`LayoutDecisionEngine.rejectUnsafeReinitScope`，批量与动态两条路径接线）；`LayoutDecisionEngine` 的不可提取拒绝改为列出全部字段与原因；`RemoldReinit` Javadoc 补继承门/force/CONDITIONAL 精确语义与"Does not do"表 | **单测**：`ReinitScopeGateTest`（5/5：子类初始化器写继承字段拒绝并点名、SELF 逃生、不写不误伤、读不到子类字节 fail-closed、静态字段忽略）、`remold.ref.ReinitContractTest`（4/4：new-field/forced/open/first/changed/unchanged）；变异：检测返回空 → 主用例红，scope 解析改为 INCLUDE → SELF 用例红，force 被忽略 → force 用例红；既有 `RecordAndReinitExtractabilityGateTest` / `InitFixOracle` 保持绿 |
@@ -402,30 +402,50 @@
 
 设计规格文档：[`docs/initfix/04-target-design.md`](initfix/04-target-design.md) 与各专题规范
 
-> **优先级定义**：  
-> - **P1 (High)**：下一个架构重构里程碑核心目标（阻断核心竞态、杜绝严重未就绪访问）；  
-> - **P2 (Medium)**：近期演进计划，具备明确设计规格但无阻断性前置依赖，按批次推进；  
-> - **P3 (Low / Long-term)**：长期探索与多编译器兼容矩阵扩展，视外部环境需求按需引入。
+> **优先级定义**：
+> - **P1 (High)**：v0.2.9 必须收口——对应失效形态为"静默错值 / 进程级崩溃 / 环境完全不可用 / 有声拒绝需重启"；
+> - **P2 (Medium)**：v0.3 及之后演进，具备明确设计规格或已可量化的工作量；
+> - **P3 (Low / Long-term)**：长尾兼容与渐进增强，视外部环境或用户诉求按需引入；
+> - **停车 / 关闭**：明确不做或条目作废，统一移入 §4.1.3，不再以 P2/P3 常驻误导维护者。
+>
+> **排序原则（2026-11-13 重排）**：
+> 1. 按**失效形态**排，不按架构优雅度：静默错值 > VM 级崩溃 > 环境断代完全不可用 > 有声拒绝需重启 > 性能回落 > 清理；
+> 2. 同档按**触发频率 × 用户群体**：Kotlin / Forge / NeoForge 主线用户优先；无用户证据的只做 spike，不做全量；
+> 3. **观测先于优化**：缺真实读数（批次规模 N、redefine 后吞吐恢复曲线、降级会话数）的性能与体验改造不得进 P1；
+> 4. **发布合规单独成门禁（G0）**：门户审核、坐标与文档口径不一致属发版阻断，不占功能槽位。
 
-| 规划条目 | 优先级 | 规范章节 | 前置依赖 | 目标价值与关联问题 |
-|:---|:---:|:---|:---|:---|
-| **构造器尾部插桩** | P3 | [`04-target-design.md`](initfix/04-target-design.md) §4 | `InitFix` 离线切片提取与直线字节码生成器 (`AliasInterpreter`) | **当前契约下不再需要**：阶段 A 保留新构造器/`<clinit>`，窗口内新建的实例由新构造器直接完成初始化，不需要从切片反推「取值指令」。仅当将来要求阶段 A 的构造器也回退旧体（换取更强的中止语义）时才重新需要；`ConstructorTailInjector` 单测保留、不接线。 |
-| **两阶段 Schema-First 重定义** | ✅（内部批次路径） | [`04-target-design.md`](initfix/04-target-design.md) §1 | 已接线：`RemoldAgent.applyTwoPhase` / `redefineStageA` + `InitFix.requiresTwoPhase` + `StageASkeleton.buildWithLiveConstructors` | 读穿窗口（风险 9）在内部批次路径上关闭；触发条件 = 本批存在零值暴露字段（新增/类型变更）**或既有静态字段重写**（`@RemoldReinit`/重放写任务，排除 `ConstantValue`；后者用阶段 C 作为补丁后的 JIT deopt 屏障），纯方法体热更不付第二次 redefine 的代价。代价仍然真实：两次 redefine 会带来连续两次全局 JIT 逆优化（`07-p05-probe-results.md` §11 的对照组）；残余通道见风险 9。验收：`TwoPhaseProbe` 72/0（含 50k 实例下的并发读线程红/绿对照）、`TwoPhaseGuardTest` 7/0、`tests/static-rewrite-probe/` A/B（单阶段 patch 后热读者 `OLD` vs 两阶段阶段 C 后 `NEW`）、`BatchTwoPhaseStaticRewriteTest` 1/1（批次驱动 A→patch→C）、`DynamicTwoPhaseRedefineTest` 3/3（动态入口同顺序）、全量 JUnit 824/0 skipped（`./gradlew check`）。 |
-| **外部 IDE-JDWP 通道接入两阶段** | P2 | [`04-target-design.md`](initfix/04-target-design.md) §1、本节风险 9 | 需要 JDWP 之外的第二次 redefine 触发源 | 关闭最后一条残余读穿窗口。JVM 先按新字节码完成重定义、再回调 Remold（`afterRedefineExternal`），要关窗口必须让 transformer 首次返回阶段 A 骨架、再在补丁完成后主动触发阶段 C；JDWP 协议没有该触发点。`redefineDynamic` 单类入口已接入（调用内部同步 A→补丁→C，见 §0.7） |
-| **伴生类 CAS 迁移到 `VarHandle.compareAndSet`（JDK 21+ / JEP 471）** | P3 | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §3 | JDK 21+ 运行时下限 | 用标准 API 取代 `jdk.internal.misc.Unsafe` 反射取偏移，降低 JDK 升级断裂面；`float`/`double` 的 raw-bits 语义与现有跳过计数保持不变 |
-| **PatchPlan 基线指纹校验** | P1 | [`04-target-design.md`](initfix/04-target-design.md) §2 | 离线分析器导出协议 | 校验 Target 当前内存字节码哈希与构建期基线一致性，防止类漂移热更造成严重字节码损坏 |
-| **`@HotswapInit` T4 逃生口** | P1 | [`09-hotswapinit-design.md`](initfix/09-hotswapinit-design.md) §2～§4 | `InitFix.buildPatch` 候选集段；复用现有写入协议 | 让 T3 拒绝的初始化式（Kotlin `?.`/`?:`、读配置、跨类依赖）由用户提供值，不再永久停在类型默认值；只换值的来源，不换作用域与写入协议（与 `@RemoldReinit`、`@OnReload` 不重叠）。契约已定，实现未开始（§2 T4 行为 ⬜） |
-| **非方法上下文显式三态作用域规范化** | P2 | [`03-cascading-pipeline.md`](topology/03-cascading-pipeline.md) §2 | ASM EnclosingMethod 属性增强解析 | 引入 `<initializer>`/`<clinit>`/`<init>` 显式三态标签，解决当前非方法作用域主要依靠 `orderIndex` 兜底导致的作用域偶发空指针错配（收敛风险 2） |
-| **跨类批次拓扑排序** | P2 | [`04-target-design.md`](initfix/04-target-design.md) §5 | 跨类字段依赖图构建器 | 解决类 X 新增字段依赖类 Y 新增字段时的跨类多事务批次协调（当前仅支持单类内部拓扑排序） |
-| **子类引用多重集独立正交维度** | P2 | [`08-decisions.md#d-anon-1`](topology/08-decisions.md#d-anon-1) | `AnonClassHasher` 哈希解耦 | 将子类引用建模为独立正交维度，解决 D-ANON-1 中子类改动对父类逐级向上传导的雪崩退化，收敛夹具 L/M 保守拒绝代价 |
-| **Analyzer 独立库化** | P2 | [`04-target-design.md`](initfix/04-target-design.md) §3 | ASM 工具链解耦 | 分析器作为纯函数独立，支持在 Gradle 构建端或 PC 端离线分析，减小运行期探针开销与内存占用 |
-| **增强重定义模式四个未覆盖盲区验证与防护** | P2 | [`08-decisions.md`](topology/08-decisions.md) 附录 A | 专用探针套件建设 | 覆盖 JIT 编译后内联代码对新布局的观察、`volatile`/`final` 复杂修饰符、继承体系跨层遮蔽、JBR 25 重复验证 |
-| **JBR 运行时重塑与自重启引导器 (`Remold` / `remold-launcher`)** | P2 | 运行环境引导与启动规范 | `RemoldAgent.isEnhancedHotswapEnabled()` 探针 | 应用以普通 Java 启动时，由 Remold 探测 JVM 环境；若缺少增强重定义能力，自动下载/就绪 JBR 运行时，并通过 ProcessBuilder 蹦床机制带增强参数与热更核心重启宿主，实现开箱即用运行时重塑 |
-| **ECJ 编译器矩阵支持** | P3 | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §4 | ECJ 构建环境夹具 | 针对 Eclipse 编译器的 switch table 实现（内部 `$SWITCH_TABLE$` 方法）与 EnclosingMethod 结构差异建立对齐与防护 |
-| **新 javac 加旧 -target 交叉编译矩阵支持** | P3 | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §3 | CI 交叉编译任务配置 | 验证新版 javac 携带 `-target 8/11` 等产物的命名与属性表现 |
-| **未知 class major 显式拒绝** | P3 | [`06-runtime-and-perf.md`](topology/06-runtime-and-perf.md) §1 | 无 | 遇到高于当前 JVM 支持的 class major 版本时显式拒绝而非尝试解析，防止 ASM Crash |
-| **槽位预留与侧表免漂移 (S2)** | P2 | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §3.3 | 基类字节码注入器 | 针对游戏高频基类预留 slot 或引入 `$extras` 侧表虚拟字段，实现基类新增字段物理布局完全零漂移 |
-| **持有者内存原地覆写与使用方 C2 逆优化 (S3)** | P3 | [`01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §3.4 | `OffsetBindingIndex.getReaders` | 利用 `staticFieldBase/Offset` 原地更新 static final 常量，并对 direct reader 执行 `retransformClasses` 触发 C2 evol_method 依赖链逆优化 |
+| 规划条目 | 优先级 | 版本槽位 | 规范章节 | 前置依赖 | 目标价值与关联问题 |
+|:---|:---:|:---:|:---|:---|:---|
+| **`@HotswapInit` T4 逃生口** | P1 | v0.2.9 ① | [`09-hotswapinit-design.md`](initfix/09-hotswapinit-design.md) §2~§4 | `InitFix.buildPatch` 候选集段；复用现有写协议 | 让 T3 拒绝的初始化式（Kotlin `?.`/`?:`、读配置、跨类依赖）由用户提供值，不再永久停在类型默认值；只换值来源，不换作用域与写协议。验收：三形态红→绿、T3 拒绝路径不放宽、变异检查、Kotlin 真产物夹具同批补 |
+| **入口字节码合法性门禁** | P1 | v0.2.9 ② | §5 风险 13；[`06-runtime-and-perf.md`](topology/06-runtime-and-perf.md) §1 | 无 | 在 `applyRedefinitions` 前校验 magic / class major / 二进制名 / 可解析性：把风险 13 的 VM 级 `EXCEPTION_ACCESS_VIOLATION` 降为可报告拒绝，并顺带闭环"未知 class major 显式拒绝"（原 P3）。必须带负向用例 |
+| **死代码与夹具清理** | P1 | v0.2.9 ② | §4.2 | 无 | 移除 `AnonClassAligner` 的 `tier5Matches` 死字段与 `case 5` 分支；补 `maxLevel > 4 + strict` 负向夹具 |
+| **PatchPlan 基线指纹校验** | P1 | v0.2.9 ③ | [`04-target-design.md`](initfix/04-target-design.md) §2 | 无（`baseClassHash` 在进程内自足） | Target 侧记录当前字节码哈希与分析期基线比对，不匹配即拒绝并重分析，防类漂移热更造成字节码损坏。**不依赖** Analyzer 库化（后者见 §4.1.3） |
+| **风险 16：`sourceBytecodeCache` staged/commit** | P1 | v0.2.9 ③ | [`11-source-bytecode-cache.md`](initfix/11-source-bytecode-cache.md) §9；§5 风险 16 | 与指纹校验同主题，同一批次 | 外部 redefine / retransform 在"写入→回滚"窗口读到未生效字节 → 跳过织入或取旧基线（**语义错判、无声**）；改为按轮次 staged/commit，读方只读已提交版本 |
+| **风险 15：pending 键加 ClassLoader 身份** | P1 | v0.2.9 ③ | [`03-cascading-pipeline.md`](topology/03-cascading-pipeline.md)；§5 风险 15 | 已有 `PendingAlignedMultiLoaderProbe` | 多 loader 串用对齐字节导致布局错配（现状 `[KNOWN-BUG]`）；键改为 `(loader 身份, 类名)` + 消费时校验 + 回归 |
+| **`redefineDynamic` 看门狗 + `plugin-forge.isHostReady()`** | P1 | v0.2.9 ④ | §0.10 残余 1/2 | 无 | 单类 API 入口卡死没有 `[HOTSWAP-STALL]` 线程栈；Forge 缺就绪门闩（默认 fail-open）。两处都是几十行改动 |
+| **真机验收：KnotServer/客户端 + 模板场景 1–8** | P1 | v0.2.9 ④ | [`acceptance/01-manual-checklist.md`](acceptance/01-manual-checklist.md) | 真实 Fabric 1.21.1 客户端（维护者执行） | `HostReadinessProbe` 的 `getTicks`/`world` 访问器名只有替身证据；人工验收结果列当前为空，是发布门槛 |
+| **NeoForge 生产 installer 启动路径验证** | P1 | v0.2.9 ⑤ | §6 `plugin-forge` 行 | 探针 | dev（ModDevGradle 目录 classpath）已证；生产 installer（`unix_args.txt`、模块层归属）未证，JPMS `--add-opens` 需求必须在生产路径重测 |
+| **观测包：批次 N + 吞吐曲线 + 降级会话数** | P1 | 持续（v0.2.9 起） | [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10–§11 | `HotswapBatchListener` / `applyPatch` 日志 / `[VM-INFO]` | 决定"单遍历按类分发""deopt 回落对策""`remold-launcher` 是否升 P1"；只采集数据，不改产品代码 |
+| **NeoForge 26.x / FML 10 代际适配** | P2 | v0.3（先 spike） | `plugin-forge`；原 §4.1.1 条目已并入本节 | FML 10 源码与 `net.neoforged.fml.startup.*` 入口 | 上游已移除 ModLauncher，现有跨 ClassLoader 桥不适用 = 该代际完全不可用；先量化工作量再决定是否全量（避免无用户证据的长期投入） |
+| **`ForgeMixinHotSwap` 接入内部类热更闭环** | P2 | v0.3 | §0.10 残余 8；[`mixin/08`](mixin/08-decisions-and-empirical-ledger.md) | 已有 Fabric 侧闭环可参照 | 拉平 Forge 与 Fabric 的 Mixin 匿名/内部类能力（含覆盖层与事务共退） |
+| **跨类批次拓扑排序** | P2 | v0.3 | [`04-target-design.md`](initfix/04-target-design.md) §5 | 跨类字段依赖图构建器 | 类 X 新增字段被类 Y 初始化式依赖时的跨类事务顺序（当前仅支持单类内部拓扑） |
+| **对齐盲区收敛包** | P2 | v0.3 | 风险 2/3/5；[`03-cascading-pipeline.md`](topology/03-cascading-pipeline.md) §2、[`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §1、[`09-lambda-capture-bridge.md`](topology/09-lambda-capture-bridge.md) §6 | 无 | 同批收敛六处同源盲区：非方法上下文三态标签、同名局部类完整对齐、Tier 1.5 重叠评估（与 Tier 3.5 重复则撤销）、夹具 L 保守代价、`willForward` 转发桩被熔断器先炸、`BODY_MISMATCH` 去重键缺轮次 |
+| **反射与元数据漂移补齐** | P2 | v0.3 | §0.16 / §0.17 / 风险 10 | 无 | Gson/Jackson 真实缓存驱逐前后对照、`EvictionScope.WITH_DESCENDANTS` 评估、类级泛型签名漂移告警、`HashSemantics` 子类读父类新增字段扫描、`AnnotationDefault` 移除读 `SourceFile` 成因定位 |
+| **Mixin `schemaHash` 新合成类名方案** | P2 | v0.3（`[假设]` 先验） | [`mixin/08`](mixin/08-decisions-and-empirical-ledger.md) §4 | 无 | 捕获列表变化时用 `defineClass` 新类名 + 宿主 body-only redefine，验证 `newlyNull=0` 后打破"改 Mixin 匿名类捕获必须重启" |
+| **增强重定义四盲区验证与防护** | P2 | v0.3 | [`08-decisions.md`](topology/08-decisions.md) 附录 A | 专用探针套件 | JIT 内联观察、`volatile`/`final` 复杂修饰符、继承跨层遮蔽、JBR 25 复验 |
+| **Kotlin 真实产物夹具** | P2 | v0.3（T4 配套） | [`01-safety-gate.md`](initfix/01-safety-gate.md) §2.1；风险 4 | kotlinc 夹具 | 委托属性、协程状态机、内联高阶函数；当前 Kotlin 结论只经 Java 仿真验证 |
+| **性能：单遍历按类分发 / deopt 回落对策** | P2 | v0.3（条件：槽位 ⑩） | §4.2 | N 与吞吐实测 | 只有观测证明收益 > 代价才做；单遍历必须复现 `getInstances` 的"含子类不含父类"不对称语义 |
+| **JBR 运行时自举启动器 (`remold-launcher`)** | P2 | v0.3（由降级会话数定） | 运行环境引导规范 | 增强能力探测 | 自动探测/就绪 JBR 并蹦床重启，砍掉接入门槛；无用户阻塞证据前不占 v0.2.9 槽位 |
+| **8 位完整效应掩码** | P3 | T4 之后 | [`01-safety-gate.md`](initfix/01-safety-gate.md) §2.2 | `AliasInterpreter` | T3 误拒精度；T4 已提供合法逃生口，扩静态分析白名单的边际收益下降 |
+| **子类引用多重集正交维度 + 夹具 L** | P3 | 见对齐盲区收敛包 | [`08-decisions.md#d-anon-1`](topology/08-decisions.md#d-anon-1) | `AnonClassHasher` 哈希解耦 | 解耦子类改动向父类逐级传导的雪崩退化 |
+| **MC 1.21.4+ gametest 探针重跑** | P3 | 按需 | §7 | `tests/fabric-gametest-1.21.4/` | 新版本 MC 覆盖；当前主模板为 1.21.1 |
+| **`plugin-arc` 资源热更残余 6 项** | P3 | 按用户反馈 | §6 | 无 | 贴图尺寸/运行期新增贴图/字体/音效/音乐/着色器；属画质级而非崩溃 |
+| **`access$NNN` 编号语义指纹** | P3 | 见对齐盲区收敛包 | 风险 3（D-ANON-5） | 无 | Java 11+ Nestmate 已消除绝大多数桥方法，属长尾 |
+| **`BytecodeSources` 驱逐上限** | P3 | 按需 | §0.10 残余 3 | 无 | 常驻内存无上限；键集合跨 reload 稳定但无驱逐策略 |
+| **ECJ 编译器矩阵** | P3 | 仅取证 | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §4 | ECJ 夹具 | 无用户证据；先补 `$SWITCH_TABLE$`（惰性方法 + 缓存静态字段）形态实测半天 |
+| **新 javac × 旧 `-target` 矩阵** | P3 | 按需 | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §3 | CI 任务 | 交叉编译产物命名与属性 |
+| **伴生类 CAS 迁 `VarHandle`** | P3 | 等 JDK 21+ 下限 | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §3 | 运行时下限 | JEP 471 标准 API 取代 `Unsafe` 反射取偏移 |
+| **Mixin 证据补齐（F6 四类拆分 / 事实③）** | P3 | 按需 | [`mixin/08`](mixin/08-decisions-and-empirical-ledger.md) §4/§6.6 | 真机四类样本 | 观测缺口，不影响判定 |
 
 #### 4.1.1 已完成项与候选清单 (Closed Items & Candidates)
 
@@ -435,25 +455,57 @@
 | ~~**匿名类 `{{ ... }}` / 存量字段初值重放（L1 第一版）**~~ | ✅ | — | `remold.ref.InitializerReplay` + `InitFix` + `HotswapBridge.KIND_CONDITIONAL_EXPECTED`；设计见 [`12-L1-existing-initializer-replay.md`](initfix/12-L1-existing-initializer-replay.md) | 默认关（`-Dremold.agent.init_drift.parents` 为空）；白名单父类匿名子类、非 final 基本类型、旧/新初值均为编译期常量时，按**旧初值条件 CAS** 写匿名类自身实例；运行期改过的值跳过；不写 `FieldLedger`；`@RemoldReinit` 优先。验收与变异检查见 §0.5。未覆盖：具名类已有字段、引用类型、非常量旧值、`final`，以及按匿名类计的堆枚举性能数据。 |
 | ~~**Kotlin `apply {}` 静态持有者初值重放（A 档）**~~ | ✅ | — | `remold.ref.ApplyInitializerReplay` + `InitFix`（`applyFields`/`applyReplay$N`）+ `HotswapBridge.KIND_CONDITIONAL_EXPECTED`；设计见 [`13-kotlin-apply-replay.md`](initfix/13-kotlin-apply-replay.md) | 默认关（`-Dremold.agent.init_drift.apply_holders` 为空）；白名单持有者 `<clinit>` 直线形态、唯一 `NEW`/唯一 `PUTSTATIC dest`、目标字段基本类型/非 final/非 synthetic/非 `@RemoldReinit`、旧/新值均为编译期常量时，`GETSTATIC dest` 取回那一个对象后按**旧初值条件 CAS** 写；运行期改过的值跳过，dest null/类型不符 warn 跳过；不写 `FieldLedger`、不改 `patchGenerated`。验收与变异检查见 §0.6。未覆盖：Kotlin `var` setter、B 档（`<init>`）、C 档（方法体/局部）、引用类型、`final`、非常量、多静态字段共享同一对象。 |
 | `probeAll` 聚合任务（Gradle 内置 JVM 探针，不进 `check`） | ✅ | — | `tests/build.gradle` | 显式 `./gradlew probeAll` 全绿：e2eProbe + DCEVM 套件（除 alignBaselineProbe，见任务说明）+ entity/shadow/class-identity/double-brace/retry/inject-conflict/fingerprint/redefineDynamic/pending-multi-loader/retransform-baseline/addField/initFix-fallback/initDrift-noise+perf 全部 PASS；`doLast` 列出外部容器探针脚本（Fabric C3/C5/mm、Forge C5/mm）及证据路径；外部脚本不在 probeAll 内启动。 |
-| ~~**Forge/NeoForge `ClassInfo` 成员同步**~~ | ✅ | — | `plugin-forge` `ForgeClassInfoSync`；详见 §0.3 | 2026-11-07 完成 Forge 侧实现与真机 E2E；NeoForge 21.1 亦已红→绿（见下两行的已完成项与 §0.4） |
-| ~~**NeoForge Mixin 端到端验证（MDK 探针）**~~ | ✅ | — | `tests/neoforge-mixin-probe/`；详见 §0.4 | NeoForge 21.1.265 dev `runServer` 红→绿（原生 `[[mixins]]`）；**生产 installer 启动路径与 26.x 代际仍开放**（见下两行） |
-| **NeoForge 26.x / FML 10 代际适配** | ⬜ | P1 | `plugin-forge` `ModLauncherMixinBridge` / `ForgeMixinHotSwap`；FML 11.x 源码与 `net.neoforged.fml.startup.*` 入口 | NeoForge 26.x 已移除 ModLauncher（库清单无 `cpw.mods:*`，入口 `net.neoforged.fml.startup.Client`），现有跨 ClassLoader 定位逻辑不适用。验收：26.x dev `runServer` 上定位 Mixin 织入器、重织入、模板热更、`[[mixins]]` 注册各一条真机证据 |
-| **NeoForge 生产 installer 启动路径验证** | ⬜ | P2 | 探针 | dev 运行（ModDevGradle 目录 classpath）已证；生产 installer（`unix_args.txt`、模块层/named module 归属可能不同）未证——JPMS `--add-opens` 需求必须在生产路径重测 |
+| ~~**Forge/NeoForge `ClassInfo` 成员同步**~~ | ✅ | — | `plugin-forge` `ForgeClassInfoSync`；详见 §0.3 | 2026-11-07 完成 Forge 侧实现与真机 E2E；NeoForge 21.1 亦已红→绿（见下行的已完成项与 §0.4） |
+| ~~**NeoForge Mixin 端到端验证（MDK 探针）**~~ | ✅ | — | `tests/neoforge-mixin-probe/`；详见 §0.4 | NeoForge 21.1.265 dev `runServer` 红→绿（原生 `[[mixins]]`）；**生产 installer 启动路径与 26.x 代际仍开放**（已并入 §4.1 表，v0.2.9 ⑤ / v0.3） |
 
 > **架构指引（v0.2.5 发版备忘，仅文档）**：后续若在命名模块层（如 `MC-BOOTSTRAP`）真的触发模块封装限制，**优先**由 Agent 自身在运行期用 `Instrumentation.redefineModule(ClassInfo.class.getModule(), extraOpens, …)` 补 opens，把命令行 `--add-opens` 诊断降级为兜底手段；不要把它当作首要修复。落地前需要两个前提证据：(1) 目标 JVM（JBR 21/25）上 `redefineModule` 对该模块确实生效（本仓库已有的「运行期破壁」先例是 `PackageUnsealer` 经 `IMPL_LOOKUP`/VarHandle 解除 Package 密封，可作为同类手段的可行性参照，但不是 `redefineModule` 本身的证据）；(2) `redefineModule` 生效后 `ClassInfo` 深反射与 `reload` 全链路在真机上红→绿（不能只断言 `isOpen` 返回 true）。
+
+#### 4.1.2 v0.2.9 范围冻结与验收门禁
+
+> 只冻结"这一版做什么"；条目细节见上表。**G0 是发布门禁，不占功能槽位**；其余槽位按顺序推进，前一项未过验收不并行开工。
+
+| 槽位 | 内容 | 验收口径（fail-closed） |
+|:---:|:---|:---|
+| **G0** | 发布合规：`com.gradle.plugin-publish` 升级至 ≥ 2.1.0（当前 1.3.1，门户已告警将拒绝）+ 门户口径统一（§7 / §0.12 / `README.md`）+ 本表刷新 | 门户发布成功或告警消失；三处文档口径一致 |
+| **①** | `@HotswapInit` T4 | 三形态红→绿、T3 拒绝路径不放宽、变异检查、Kotlin 真产物夹具 |
+| **②** | 入口字节码门禁 + 死代码/夹具清理 | 风险 13 负向用例（畸形字节 → 拒绝而非崩 VM）+ `maxLevel > 4 + strict` 负向夹具 |
+| **③** | 基线一致性三连（指纹 / 风险 16 / 风险 15） | 外部 redefine + 文件热更同一序列红/绿对照；多 loader 探针 |
+| **④** | 真机闭环包（`redefineDynamic` 看门狗 + `plugin-forge.isHostReady()` + KnotServer/客户端 + 模板 1–8） | 单类入口能留下 `[HOTSWAP-STALL]` 栈；门闩真机读数；清单结果列填满 |
+| **⑤** | NeoForge 生产 installer 验证 | 生产 installer 起服 + Mixin/ClassInfo 各一条真机证据 |
+| **⑩** | 观测包（持续采集） | 日志/读数落盘；结论前先声明样本窗口与统计口径 |
+
+#### 4.1.3 停车与关闭清单 (Parked & Retired)
+
+> 停车 = 明确不做，直到出现新的触发条件（用户诉求 / 上游断代 / 成本下降）；关闭 = 条目作废（设计契约已变或判据不成立）。
+
+| 条目 | 结论 | 触发条件 / 理由 |
+|:---|:---:|:---|
+| **构造器尾部插桩**（`ConstructorTailInjector`） | 关闭 | 两阶段契约（阶段 A 保留新构造器/`<clinit>`）已取代该缝隙；条目作废，仅保留既有单测，不再作为路线图条目 |
+| **枚举常量增删的运行期修复** | 停车 | 维持 `D-ENUM-1` 拒绝。补测（`topology/10` §3.5.1/§3.6.1）证明"机制可做但不可闭环"：读者 deopt 必须覆盖全部已加载类、`Class` 影子副本无法穷举、redefine→遍历/换数组窗口的并发竞态、用户态按 ordinal 索引的数组无法枚举。重开条件见 §5 风险 20 |
+| **Tier 1.5 内容相似度** | 待评估 | 与已落地的 Tier 3.5（方法体 token 相似度）＋骨架指纹高度重叠；并入 v0.3 对齐盲区收敛包评估，确认重复则撤销条目 |
+| **批次单遍历全堆**（`IterateThroughHeap`） | 停车 | "N 次短停顿换 1 次长停顿"未必划算；等槽位 ⑩ 给出真实 N 与最大单次停顿后再启 |
+| **外部 IDE-JDWP 通道接入两阶段** | 停车 | JDWP 协议没有第二次 redefine 触发点；`redefineDynamic` 已覆盖主工作流 |
+| **Analyzer 独立库化** | 停车 | 构建端预分析出现真实需求再启；PatchPlan 指纹不依赖它（槽位 ③ 在进程内自足） |
+| **槽位预留与侧表免漂移 (S2)** | 停车 | 成本 >> 收益；`LayoutPredictor` + `SuperclassDriftGate` 已事后零错阻断 |
+| **通用 S3（持有者原地覆写 + C2 逆优化）** | 停车 | 阶段 C 的 deopt 屏障已是更便宜的等价手段（宿主既有静态字段重写已接入） |
+| **JDK 8 raw-bits CAS CI 差异验证** | 关闭（改判据） | 运行期下限 JDK 11（DCEVM 产物 v55），JDK 8 只能跑 oracle、测不到产品路径；改为源码守卫（禁止按名探测 `compareAndSetFloat/Double`，一律 raw bits）+ 现有 JDK 矩阵 |
+| **Maven Central 分发** | 停车 | JitPack 坐标可用；Central 需 GPG/Portal 验证，不阻塞使用 |
+| **mod-tools 消费侧切换** | 停车 | 外部仓库事务，本仓无法提供验收证据 |
+| **Android ART（Engine II）** | 独立轨道 | [`HOTSWAP.md`](HOTSWAP.md)；按 AGENTS.md 属独立子项目，不与桌面 JBR 模组线混排 |
 
 ### 4.2 技术债与死代码消除清单 (Tech Debt & Code Cleanup)
 
 | 债务 / 清理项 | 优先级 | 影响位置 | 现状分析与消除方案 |
 |:---|:---:|:---|:---|
-| **`tier5Matches` 残余死字段清理** | P2 | `AnonClassAligner.AlignStats` / `recordTierMatch` | Tier 5（物理类名盲配）已彻底拔除，但统计结构体中仍残留 `tier5Matches` 字段、日志拼装与 `recordTierMatch` 的 `case 5` 分支；该分支**无任何调用者传入 5**，属可安全移除的死代码，需连同日志字段一并清理，避免误导维护者。 |
-| **嵌套深度 strict 熔断缺少夹具** | P2 | `AnonClassAligner.align`（`maxLevel > 4`）/ `RemoldAgent.ANON_STRICT` | 该阈值是**诊断阈值而非能力边界**：非 strict 模式下仅 `warn`（层级推进本身与深度无关，真正的闸门是 `MAX_ANON_PER_HOST` 与 `ALIGN_TIMEOUT_MS`），strict 模式下抛 `AlignmentRejectedException`。缺的是「`maxLevel > 4` + strict → 宿主组原子拒绝」的负向夹具，判定逻辑本身无须改动。 |
-| **JDK 8 raw-bits CAS 自动化 CI 差异验证缺失** | P2 | `.github/workflows/ci.yml` / `HotswapBridge` | 当前 CI 仅运行在 Temurin 25，无法区分 raw-bits 与旧实现；JDK 8 raw-bits CAS 为手工验证，非持续自动化覆盖；需在 CI 矩阵中增加 JDK 8 运行期任务以持续守护差异逻辑。 |
-| **批次内按类重复全堆遍历** | P2 | `InitFix.collectInstancesForPatch` / `LibTool.getInstances` | 每个待补类各调用一次 `IterateOverInstancesOfClass`，而每次调用都是一次 safepoint（1M 匹配实例时 `HeapIterateOperation` 实测约 240 ms，见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10.2）：批次里 N 个待补类 = N 次停世界。可用 `IterateThroughHeap` 一次走完、按类分发，把 N 次停顿压成 1 次。**但这是「N 次短停顿」换「1 次长停顿」**：单遍历没有 VM 内的 klass 过滤，每个对象都要进 native 回调，最大单次停顿大概率更差；对延迟敏感的场景未必划算。做之前必须同时测总停顿与最大单次停顿，并先统计真实批次类数 N（N 很小时很可能不值得）。**另有一条已固定的语义约束**：`getInstances(P)` 含子类实例、`getInstances(C)` 不含父类实例（`remold.LibToolTest#heapScanIncludesSubclassesButNotSuperclasses`，见 [`08-test-audit.md`](initfix/08-test-audit.md) §3.1），单遍历按类分发时必须复现这个**不对称**，而不是简单按 klass 精确匹配。 |
-| **每次 redefine 会大范围失效已编译代码** | P2 | 实测见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §11 | 对照组实测：redefine 一个**无关类**（无论只改方法体还是新增字段），另一个类的 C2 版本同样在窗口内被 `made not entrant`。意味着每次热更后进程可能大范围回退到解释/C1 执行、出现预热回落。归因未定（可能是 DCEVM 的全局失效策略），但成本真实存在；需要真实场景测一次热更后的吞吐恢复曲线。该成本按 redefine **次数**计，因此两阶段的两次 redefine 会把回落代价翻倍（见 §4.1 两阶段条目）。 |
-| **真实批次规模 N 未知** | P2 | `RemoldAgent`（`HotswapBatchListener` 已暴露批次边界）/ `InitFix.applyPatch`（已记 `count=N` 与 `elapsed`） | 「单遍历按类分发」是否值得，取决于真实热更的批次类数 N 与每类实例数，而这两个量目前只有合成数据。观测手段已具备：批次边界走 `HotswapBatchListener`，每类实例数与耗时由 `applyPatch` 的日志给出；需要的是**几天真实热更的样本**，而不是再加代码。 |
+| **`tier5Matches` 残余死字段清理** | P1 · v0.2.9 ② | `AnonClassAligner.AlignStats` / `recordTierMatch` | Tier 5（物理类名盲配）已彻底拔除，但统计结构体中仍残留 `tier5Matches` 字段、日志拼装与 `recordTierMatch` 的 `case 5` 分支；该分支**无任何调用者传入 5**，属可安全移除的死代码，需连同日志字段一并清理。与「嵌套深度 strict 熔断缺夹具」同批做（槽位 ②） |
+| **嵌套深度 strict 熔断缺少夹具** | P1 · v0.2.9 ② | `AnonClassAligner.align`（`maxLevel > 4`）/ `RemoldAgent.ANON_STRICT` | 该阈值是**诊断阈值而非能力边界**（真正的闸门是 `MAX_ANON_PER_HOST` 与 `ALIGN_TIMEOUT_MS`）；缺的是「`maxLevel > 4` + strict → 宿主组原子拒绝」的负向夹具，判定逻辑本身无须改动 |
+| **JDK 8 raw-bits CAS 自动化 CI 差异验证缺失** | 关闭（改判据） | `HotswapBridge` / `.github/workflows/ci.yml` | 运行期下限是 JDK 11（DCEVM 产物 v55），JDK 8 无法加载产品代码；改为源码守卫（禁止按名探测 `compareAndSetFloat/Double`）+ 现有 JDK 矩阵，见 §4.1.3 |
+| **批次内按类重复全堆遍历** | P2（条件：槽位 ⑩） | `InitFix.collectInstancesForPatch` / `LibTool.getInstances` | 每个待补类各调用一次 `IterateOverInstancesOfClass`（1M 匹配实例实测 ~240ms/次，见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10.2）：批次里 N 个待补类 = N 次停世界。可用 `IterateThroughHeap` 一次走完、按类分发，把 N 次停顿压成 1 次；**但这是"N 次短停顿"换"1 次长停顿"**，做之前必须同时测总停顿与最大单次停顿，并先有真实 N。语义约束：`getInstances(P)` 含子类、`getInstances(C)` 不含父类（`remold.LibToolTest#heapScanIncludesSubclassesButNotSuperclasses`），单遍历按类分发必须复现这个**不对称** |
+| **每次 redefine 会大范围失效已编译代码** | P2（条件：槽位 ⑩） | 实测见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §11 | 对照组实测：redefine 一个**无关类**（无论只改方法体还是新增字段），另一个类的 C2 版本同样在窗口内被 `made not entrant` → 每次热更后进程可能大范围回退到解释/C1 执行、出现预热回落。归因未定（可能是 DCEVM 的全局失效策略），成本真实；需要真实场景测一次热更后的吞吐恢复曲线。该成本按 redefine **次数**计，两阶段的两次 redefine 会把回落代价翻倍 |
+| **真实批次规模 N 未知** | P1 · 观测包（槽位 ⑩） | `RemoldAgent`（`HotswapBatchListener` 已暴露批次边界）/ `InitFix.applyPatch`（已记 `count=N` 与 `elapsed`） | 「单遍历按类分发」是否值得，取决于真实批次类数 N 与每类实例数，目前只有合成数据。观测手段已具备，需要的是**几天真实热更样本**，不是再加代码 |
 
 > 关于 `AnonClassHasher.MAX_DEPTH`：该类注释已明确其为**永不生效的历史遗留常量**（`hash` 不递归自调用，三处调用点全传 `depth = 0`，`DeepNestProbe` 实测 depth 8 仍能正确对齐）。保留它是为了不动公开签名 `hash(..., int depth)`，**不应再作为「嵌套深度上限」引用，也不应作为技术债重复登记**。
+
 
 ---
 
@@ -613,6 +665,7 @@
 - **影响**：开发进程直接死亡，且没有 Java 层异常可供上层捕获/回滚；与“补丁生命周期”类问题不同，这是 VM 级故障。
 - **当前处置**：本轮不修。回归探针 `InitFixFallbackProbe` 改为在 `Instrumentation` 边界注入失败，避免把 VM 崩溃当作可重复的测试路径。
 - **候选关闭方向**：在 `applyRedefinitions` 入口校验 `ClassDefinition` 的 class 名与字节可解析性；或把 redefine 调用隔离到可重启的辅助进程（代价高）。需先确认 JBR 25 的触发边界（是否只在批量排序阶段）。
+- **优先级**：P1 · v0.2.9（§4.1 槽位 ② 的入口字节码合法性门禁：畸形字节 → 可报告拒绝，而不是进程死亡）。
 - **关联设计规范**：无。
 - **关联架构决策**：无。
 
@@ -625,7 +678,7 @@
 - **关联设计规范**：[`docs/offset/01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §1.1、[`docs/offset/02-inherited-field-drift-fix.md`](offset/02-inherited-field-drift-fix.md)。
 - **关联架构决策**：无。
 
-### 风险 15：`pendingAlignedClasses` 只有类名键，多 ClassLoader 串用（P3）
+### 风险 15：`pendingAlignedClasses` 只有类名键，多 ClassLoader 串用（P3 → P1 · v0.2.9）
 - **风险描述与底层机制**：`AnnotationTransformer.pendingAlignedClasses` 是 `Map<String, byte[]>`，键只有类内部名/点分名，没有 ClassLoader 身份。`AlignmentTransaction.commit()` 对已加载的匿名类仍会保留 pending 条目；该类在宿主 Loader 中 redefine 时不会消费 pending（`classBeingRedefined != null`），条目会留到**另一个 ClassLoader 首次加载同名类**时被 `transform(..., classBeingRedefined=null, ...)` 消费。
 - **触发条件**：Loader A 已加载 `Host$1`；对齐事务 commit（pending 留下）；A 的 `Host$1` redefine 成功；Loader B 首次加载同名 `Host$1`。
 - **已观测证据**：`PendingAlignedMultiLoaderProbe`（提交 `3061b9c` 之后的修订版）：A 已加载 → commit → `inst.redefineClasses` 成功 → pending 仍在 → B 首次加载返回 `alignedMarker=true`，条目随后被 B 消费；断言标记为 `[KNOWN-BUG]`。
@@ -636,7 +689,7 @@
 - **关联设计规范**：`docs/topology/03-cascading-pipeline.md`。
 - **关联架构决策**：无。
 
-### 风险 16：`sourceBytecodeCache` 写入到回滚之间的并发窗口（P3）
+### 风险 16：`sourceBytecodeCache` 写入到回滚之间的并发窗口（P3 → P1 · v0.2.9）
 - **风险描述与底层机制**：`processChanges` 不是 `synchronized`，`AnnotationTransformer.isNoOpExternalRedefine` / `oldBytecode` 读取 `sourceBytecodeCache` 时也不持有同一把锁。本轮源码在匿名类对齐后、门与 redefine 前就写入缓存；未生效类要等 `applyRedefinitions` 后才回滚。这段窗口内其他线程可能读到“尚未生效”的新源码。
 - **触发条件**：`processChanges` 正在处理一批类（尤其对齐/布局门/重定义耗时较长）时，外部重定义通道或 `retransformLoaded()` 读取 `sourceBytecodeCache`。
 - **后果**：外部重定义 no-op 判定可能把新源码当成已生效基线而跳过织入；旧侧基线可能取到未生效版本。是语义错判，不是内存竞争。
@@ -694,8 +747,11 @@
 - **当前处置**：维持 `ENUM_CONSTANT_SET_CHANGED` 拒绝 + 提示重启；拒绝原因点名 `$VALUES`/`$SwitchMap$`/
   `EnumMap`/JIT-deopt 四项阻断，避免用户误以为"只是 InitFix 没实现"。不做运行期补丁。
   `EnumSwitchReorderGateTest.appendedEnumConstantRejectionNamesTheMeasuredBlockers` 锁住该诊断文案。
-- **重新评估条件**：`$SwitchMap$` 重建、deopt 机制、存量集合的显式判定三项同时具备，且收益足够高；
-  完整清单见该文档 §6。
+- **重新评估条件**：三项能力（`$SwitchMap$` 重建、读者 deopt、存量集合逐实例换数组）经补测**均已具备**
+  （`topology/10` §3.5.1 / §3.6.1），但剩余阻断未闭环：必须 deopt **全部**已加载读者（遗漏即静默旧值）、
+  `Class` 影子副本无法穷举、redefine→遍历/换数组窗口的并发竞态、用户态按 ordinal 索引的数组无法枚举。
+  因此维持拒绝（§4.1.3 停车项）。重开条件改为：出现明确用户诉求**且**能保证失败响亮（拒绝日志/报告）+ 接受覆盖成本，
+  只做 opt-in 实验通道。完整清单见该文档 §6。
 - **关联设计规范**：`docs/topology/10-enum-constant-append-infeasibility.md`。
 - **关联架构决策**：[`D-ENUM-1`](topology/08-decisions.md#d-enum-1)。
 - **关联代码**：`ClassDiffUtil` / `LayoutGate.ENUM_CONSTANT_SET_CHANGED` / `LayoutDecisionEngine.decide` /
@@ -746,7 +802,7 @@
 | 独立仓库与远程 CI 矩阵 | ✅ | `.github/workflows/ci.yml` | 4 个 job：`test`（`setup-java` 装 Temurin 8/11/17/21 + runner 25，`-Dhstest.requireJdks=true` 与 `auto-download=false` 强制五套工具链真实存在，跑 `./gradlew fullCheck` = `check` + `e2eProbe`）、`test-dcevm`（JetBrains Runtime 21 真实 DCEVM 下跑 `:tests:liveDcevmTest`）、`p05-probe`（JBR 17/21 矩阵跑 `:tests:p05Probe`）、`build-native`（g++ 编 Linux x86_64 `.so`、NDK 编 Android arm64-v8a `.so`；Linux aarch64 的 `libtoolaarch64.so` 随仓库分发、与 Windows/macOS 产物同一模式，CI 只校验不重建：`AArch64`、`libc.so.6`+`libpthread.so.0`、glibc 基线 2.17、非 bionic，然后上传制品） |
 | 模组生态隔离与构建产物防御 | ✅ | `docs/ecosystem/01-mod-artifact-and-class-isolation.md`、`gradle-plugin/.../RemoldConfigResolver.java`、`core/.../RemoldAgent.java` | 3D 环境探测（Loom / Forge / NeoForge / Quilt / Essential）阻断 `autoDeploy` 并警告；IDEA BeforeRunTask 收敛为 `Make`；Agent 启动根据元数据比对 ModID 极速巡检 `run/mods/*.jar` 并在控制台黄色高亮警告；文件监听忽略 `mods/` 下的 `.jar` 变更；单元测试全绿 |
 | JitPack 对外分发 | ✅ | `jitpack.yml` + tag `v0.1.0`~`v0.2.6` | 对外坐标 `com.github.I-hope1.Remold:<module>:<tag>`（tag 形如 `v0.2.6`，即 `v<version>`；由 JitPack 按仓库名推导，与项目 `group` 是两个命名空间）；`jitpack.yml` 固定 `openjdk25` 并执行 `publishToMavenLocal -x test`；`README.md` §1.6、两个模组模板、`remold.gradle(.kts)` 薄壳的插件解析均消费该坐标；agent 解析在 `:gradle-plugin` 内完成 |
-| Gradle 二进制插件 (`gradle-plugin`) | 🔶 | `gradle-plugin/`、`gradle-plugin/build.gradle`、`gradle-plugin/README.md` | 提供 `io.github.i-hope1.remold` 二进制插件，支持 Kotlin DSL 与 Groovy DSL 类型安全配置 `remold { ... }`、配置缓存与惰性解析；`RemoldPluginTest` 11/11、`RemoldScriptShimTest` 单元测试通过；JVM 参数注入覆盖 `client`、`server` 与 gametest 运行容器（Fabric Loom / ForgeGradle / NeoForge ModDevGradle，`./gradlew runServer`、`runClientGameTest` 同拿 `-javaagent`），IDEA Loom 同步覆盖 `Minecraft_Server.xml`（Application 风格 `VM_PARAMETERS` 与 Gradle 风格 `vmOptions`）；仓库根 `remold.gradle(.kts)` 已瘦身为薄壳（仅按 Class 应用本插件，实现在本模块），jar 内附带一份副本供离线取用。**Gradle Plugin Portal 尚未上线**：`publishPlugins` 已执行并进入人工审核，审核以「lacks documentation in English」退回、该次提交已被取消（官方邮件明确可复用同一版本号）；据此已补英文插件文档 `gradle-plugin/README.md`、把 `website` 指到该英文文档、并在 `README.md` 顶部加英文摘要，待重新 `publishPlugins` 后由审核结果定论。另：门户已对未声明 Gradle 特性兼容性（`compatibility { features { configurationCache } }`，需 plugin-publish ≥ 2.1.0）的发布告警并计划改为拒绝，当前仍是 1.3.1 |
+| Gradle 二进制插件 (`gradle-plugin`) | 🔶 | `gradle-plugin/`、`gradle-plugin/build.gradle`、`gradle-plugin/README.md` | 提供 `io.github.i-hope1.remold` 二进制插件，支持 Kotlin DSL 与 Groovy DSL 类型安全配置 `remold { ... }`、配置缓存与惰性解析；`RemoldPluginTest` 11/11、`RemoldScriptShimTest` 单元测试通过；JVM 参数注入覆盖 `client`、`server` 与 gametest 运行容器（Fabric Loom / ForgeGradle / NeoForge ModDevGradle，`./gradlew runServer`、`runClientGameTest` 同拿 `-javaagent`），IDEA Loom 同步覆盖 `Minecraft_Server.xml`（Application 风格 `VM_PARAMETERS` 与 Gradle 风格 `vmOptions`）；仓库根 `remold.gradle(.kts)` 已瘦身为薄壳（仅按 Class 应用本插件，实现在本模块），jar 内附带一份副本供离线取用。**Gradle Plugin Portal 已上线**（v0.2.7 起发布；v0.2.8 已验证可解析，见 §0.12 与 `README.md`；英文文档与 `website` 已补齐）。**待办（G0 发布门禁）**：`com.gradle.plugin-publish` 仍为 1.3.1，门户已对未声明 Gradle 特性兼容性（`compatibility { features { configurationCache } }`，需 ≥ 2.1.0）的发布告警并计划改为拒绝，升级列入 §4.1.2 槽位 G0 |
 | GitHub Release 发布物 | ✅ | `.github/workflows/release.yml` | Tag `v*` 触发全量前置验证矩阵（javac 8/11/17/21/25 测试、DCEVM 测试、P0.5 探针与 Linux x64/Android 原生库编译、Linux aarch64 制品 ABI 校验），全绿后自动打包 18 项 Release 资产并发布到 GitHub Releases，消除资产早于构建事故；支持 `workflow_dispatch` 手动触发与 `--clobber` 覆写更新 |
 | Class / 资源防抖分离 | ✅ | `core/src/remold/DebounceWindow.java`（纯状态机）、`RemoldAgent.handleFileChange/handleJarChange/handleAssetChange`、`gradle-plugin` 的 `assetShakeMs` | Class/jar 事件每次重置独立静默窗口（默认 800ms）；资源/配置流独立窗口（默认 250ms），到期只 drain 资源队列，不提前带出 Class 批次；手动 `triggerHotswap()` 取消挂起调度、清空两条流并强制 drain 全部。`DebounceWindowTest` 6/6（无 sleep：事件重置、双流互不影响、nextDelay、clear）、`AssetShakeConfigTest` 1/1；全量 `check` 514/0 skipped。**未验证**：真实 FileWatcher 的 OS 事件节奏（单测只覆盖状态机，未测 Windows 文件系统时延分布） |
 | 模组模板基线（1.21.1 主模板 + 客户端 HotSwap Toast） | ✅ | `minecraft-fabric-template/`（MC 1.21.1 / yarn 1.21.1+build.3 / loader 0.16.9 / fabric-api 0.105.0+1.21.1 / Loom 1.17.21；客户端入口 `com.example.client.ExampleModClient`） | JBR 21（`jbrsdk_jcef-21.0.9`）`./gradlew build --offline` **exit 0**：`HotSwapToastModelTest` **10 tests / 0 skipped / 0 failures**；产物 `build/libs/example_mod-1.0.0.jar` 内含 `com/example/client/*` 且 jar 内 `fabric.mod.json` 含 `client` 入口；Toast 按 1.21.1 的 `Toast.draw(DrawContext, ToastManager, long)` 适配（1.21.1 无 `Toast.update`，展示计时在 `draw` 内完成），结构化报告依赖新版 Agent；v0.2.6 已发布并带结构化批次报告，旧版 Agent 仍显示明确的降级卡片；**未验证**：卡片实际渲染（本环境无显示会话，仅观测到入口/监听器注册日志路径与模型单测），手动步骤见模板 README |

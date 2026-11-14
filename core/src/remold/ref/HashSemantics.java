@@ -69,7 +69,17 @@ public final class HashSemantics {
 		if (addedInstanceFields == null || addedInstanceFields.isEmpty()) return List.of();
 
 		ClassNode cn = new ClassNode();
-		new ClassReader(classBytes).accept(cn, 0);
+		new ClassReader(classBytes).accept(cn, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+		return findDependencies(cn, addedInstanceFields);
+	}
+
+	/**
+	 * 基于已解析的 {@link ClassNode} 扫描本类内从 {@code hashCode}/{@code equals}/{@code compareTo}
+	 * 及其可达方法到新增实例字段的读取路径。
+	 */
+	public static List<Finding> findDependencies(ClassNode cn, Set<String> addedInstanceFields) {
+		Objects.requireNonNull(cn, "cn");
+		if (addedInstanceFields == null || addedInstanceFields.isEmpty()) return List.of();
 
 		Map<String, MethodNode> byKey = new HashMap<>();
 		for (MethodNode mn : cn.methods) byKey.put(mn.name + mn.desc, mn);

@@ -2322,6 +2322,11 @@ public class RemoldAgent {
 		long gateMs = Math.max(0L, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - gateStartNanos) - readersMs);
 
 		long alignDiffStartNanos = System.nanoTime();
+		long fetchNanos = 0L;
+		long lambdaNanos = 0L;
+		long diffNanos = 0L;
+		long annDefNanos = 0L;
+		long initFixNanos = 0L;
 		// 同批内复用按 ClassLoader 分桶的 normalizeAlignBaseline 缓存，避免对同一关联类反复展开 frames 重算。
 		Map<ClassLoader, Map<String, byte[]>> normOldByLoader = new HashMap<>();
 		Map<ClassLoader, Map<String, byte[]>> normNewByLoader = new HashMap<>();
@@ -2394,7 +2399,9 @@ public class RemoldAgent {
 
 					// 如果缓存里没有，主动触发一次 retransform 来"偷"取字节码
 					if (oldBytecode == null) {
+						long t0 = System.nanoTime();
 						oldBytecode = fetchOriginalBytecode(targetClass);
+						fetchNanos += System.nanoTime() - t0;
 						if (oldBytecode != null) {
 							bytecodeCache.put(className, oldBytecode);
 						}
@@ -2402,6 +2409,7 @@ public class RemoldAgent {
 
 					// 执行 ASM Diff
 					if (oldBytecode != null) {
+						long lambdaT0 = System.nanoTime();
 						if (LAMBDA_ALIGN) {
 							boolean hasOldLambdas = LambdaAligner.hasPotentialLambdas(oldBytecode)
 								|| LambdaAligner.hasPotentialLambdas(prevSourceBytes.get(className));
@@ -2466,6 +2474,7 @@ public class RemoldAgent {
 									pendingInvented.put(className,
 									 aligned == null ? java.util.Set.of() : aligned.inventedNames);
 								} catch (LambdaAligner.LambdaAlignmentStrictException e) {
+									lambdaNanos += System.nanoTime() - lambdaT0;
 									error("REJECTED: " + e.getMessage() + ". Please recompile with '-g' or restart.");
 									AlignmentTransaction tx = transactions.get(className);
 									if (tx != null) {
@@ -2479,8 +2488,10 @@ public class RemoldAgent {
 								}
 							}
 						}
+						lambdaNanos += System.nanoTime() - lambdaT0;
 					}
 					if (oldBytecode != null) {
+						long diffT0 = System.nanoTime();
 						GateCachedDiff gateCached = gateDiffCache.get(className);
 						ClassDiffUtil.ClassDiff diff = (gateCached != null
 							&& gateCached.oldBytes() == oldBytecode
@@ -2488,9 +2499,12 @@ public class RemoldAgent {
 							? gateCached.diff()
 							: ClassDiffUtil.diff(oldBytecode, newBytecode);
 						ClassDiffUtil.logDiff(className, diff);
+						diffNanos += System.nanoTime() - diffT0;
+						long annDefT0 = System.nanoTime();
 						String annotationDefaultAbortClass =
 							handleAnnotationDefaultChangeInBatch(className, oldBytecode, newBytecode,
 								transactions, definitions, oldEffectiveBytes, retryCandidates, skips);
+						annDefNanos += System.nanoTime() - annDefT0;
 						if (annotationDefaultAbortClass != null) {
 							annotationDefaultAbort = annotationDefaultAbortClass;
 							continue;
@@ -2538,11 +2552,13 @@ public class RemoldAgent {
 						if (diff.structureChanged()) {
 							log("[DCEVM] Structure change detected, proceeding with enhanced redefinition.");
 						}
+						long initFixT0 = System.nanoTime();
 						InitFix.transform(targetClass, newBytecode, diff);
 						if (!needsTwoPhase && TWO_PHASE
 							&& InitFix.requiresTwoPhase(targetClass, () -> hasLiveInstances(targetClass))) {
 							needsTwoPhase = true;
 						}
+						initFixNanos += System.nanoTime() - initFixT0;
 					} else {
 						log("[WARN] Cannot diff " + className + " (missing old bytecode). Proceeding with redefine.");
 					}
@@ -2715,6 +2731,11 @@ public class RemoldAgent {
 			     + ", readers=" + readersMs + "ms"
 			     + ", gate=" + gateMs + "ms"
 			     + ", alignDiff=" + alignDiffMs + "ms"
+			     + " [fetch=" + TimeUnit.NANOSECONDS.toMillis(fetchNanos) + "ms"
+			     + ", lambda=" + TimeUnit.NANOSECONDS.toMillis(lambdaNanos) + "ms"
+			     + ", diff=" + TimeUnit.NANOSECONDS.toMillis(diffNanos) + "ms"
+			     + ", annDef=" + TimeUnit.NANOSECONDS.toMillis(annDefNanos) + "ms"
+			     + ", initFix=" + TimeUnit.NANOSECONDS.toMillis(initFixNanos) + "ms]"
 			     + ", liveScan=" + LIVE_INSTANCE_SCAN_MILLIS.get() + "ms"
 			     + ", redefine=" + BATCH_REDEFINE_MILLIS.get() + "ms"
 			     + ", redefined=" + successfulDefinitions.size() + ")");

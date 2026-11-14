@@ -9,6 +9,7 @@ import org.objectweb.asm.tree.analysis.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -799,15 +800,17 @@ public class LambdaAligner {
 			ctx.reset();
 			ctx.inventedOldNames = inventedOldNames != null ? inventedOldNames : java.util.Set.of();
 			ctx.newlyInvented.clear();
-			// 只读一遍取形参名：名字是"同一个变量"最硬的证据（槽号会随前序局部变量增删而位移）。
-			// 未带 -g 时两张表为空，后续判据自动退回槽号/类型。
-			ctx.oldParamNames = readLambdaParamNames(oldBytes);
-			ctx.newParamNames = readLambdaParamNames(newBytes);
+			// 与类节点同遍读取形参名：名字是"同一个变量"最硬的证据（槽号会随前序局部变量增删而位移）。
+			// 未带 -g 时两张表为空，后续判据自动退回槽号/类型；同时剥离行号与 LVT 节点，等价于 SKIP_DEBUG。
+			Map<String, String[]> oldParamNames = new HashMap<>();
+			Map<String, String[]> newParamNames = new HashMap<>();
+			ctx.oldParamNames = oldParamNames;
+			ctx.newParamNames = newParamNames;
 
-			// 一次读取即拿到 ClassNode：oldCn 会被 resurrectOrphanedLambdas 复用，
+			// 一次读取即拿到 ClassNode 与 LVT 形参名：oldCn 会被 resurrectOrphanedLambdas 复用，
 			// newCn 会在“无重命名”路径下直接提供 presentKeys。
-			ClassNode oldCn = scan(oldBytes, ctx, true, oldBytecodeResolver);
-			ClassNode newCn = scan(newBytes, ctx, false, newBytecodeResolver);
+			ClassNode oldCn = scan(oldBytes, ctx, true, oldBytecodeResolver, oldParamNames);
+			ClassNode newCn = scan(newBytes, ctx, false, newBytecodeResolver, newParamNames);
 			if (!Objects.equals(oldCn.name, newCn.name)) {
 				throw new IllegalArgumentException(
 				 "New class name does not match old class name: " + newCn.name + " != " + oldCn.name);
@@ -2823,12 +2826,26 @@ public class LambdaAligner {
 	}
 
 	private static ClassNode scan(byte[] bytes, MatchContext ctx, boolean isOld,
-	                              java.util.function.Function<String, byte[]> resolver) {
+	                              Function<String, byte[]> resolver,
+	                              Map<String, String[]> paramNamesOut) {
 		ClassNode cn = new ClassNode();
-		// SKIP_DEBUG：不解析行号 / 局部变量表；SKIP_FRAMES：不解析 StackMapTable。
-		// 二者对逻辑指纹都没有贡献，跳过可减少内存与解析时间。
-		new ClassReader(bytes).accept(cn,
-		 ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+		// SKIP_FRAMES 不解析 StackMapTable；visitSource/visitLineNumber/visitLocalVariable
+		// 被剥离以保持与 SKIP_DEBUG 相同的 ClassNode 内容，同时在同一遍中收集 lambda 形参名。
+		ClassReader cr = new ClassReader(bytes);
+		final String owner = cr.getClassName();
+		cr.accept(new ClassVisitor(Opcodes.ASM9, cn) {
+			@Override
+			public void visitSource(String source, String debug) {
+				// 与 SKIP_DEBUG 一致，跳过源文件名与调试扩展，避免填充无关字段
+			}
+
+			@Override
+			public MethodVisitor visitMethod(int acc, String name, String desc,
+			                                 String sig, String[] ex) {
+				MethodVisitor mv = super.visitMethod(acc, name, desc, sig, ex);
+				return wrapForParamNames(mv, owner, acc, name, desc, paramNamesOut, true);
+			}
+		}, ClassReader.SKIP_FRAMES);
 
 		// 预计算方法体引用的匿名类内容哈希，供 MethodFingerprinter 只查表，避免单例重入与重复计算
 		Map<String, Long> anonHashes = isOld ? ctx.oldAnonHashes : ctx.newAnonHashes;
@@ -3325,48 +3342,97 @@ public class LambdaAligner {
 			@Override
 			public MethodVisitor visitMethod(int acc, String name, String desc,
 			                                 String sig, String[] ex) {
-				if (!MethodFingerprinter.isSyntheticName(name) || name.startsWith("access$")) return null;
-				boolean isStatic = (acc & Opcodes.ACC_STATIC) != 0;
-				Type[] args = Type.getArgumentTypes(desc);
-				int[] slotOf = new int[args.length];
-				int s = isStatic ? 0 : 1;
-				for (int i = 0; i < args.length; i++) {
-					slotOf[i] = s;
-					s += args[i].getSize();
-				}
-				int paramEnd = s;
-				String[] names = new String[args.length];
-				out.put(name + desc, names);
-				return new MethodVisitor(Opcodes.ASM9) {
-					@Override
-					public void visitLocalVariable(String n, String d, String sg,
-					                               Label st, Label en, int idx) {
-						if (idx >= paramEnd) return;              // 只要形参，丢弃方法体局部变量
-						for (int i = 0; i < slotOf.length; i++) {
-							if (slotOf[i] == idx && args[i].getDescriptor().equals(d) && names[i] == null) {
-								names[i] = n;
-							}
-						}
-					}
-
-					@Override
-					public void visitEnd() {
-						// 静态方法的首形参可能是 forceStaticLambdas 前置的接收者：槽是新增的，
-						// 没有 LVT 条目，读出来是 null；若它本来就是实例方法、只是被改成静态，
-						// LVT 里留着 javac 写的 "this"。两者指同一个东西，统一记成 RECEIVER_NAME，
-						// 否则同一个 lambda 在两种来源之间切换会因 "this" vs null 对不上而丢掉按名映射。
-						// 判据是"类型是本类"而不是"名字为空"——真正的同名局部变量会带自己的名字。
-						if (isStatic && names.length > 0
-						    && (names[0] == null || "this".equals(names[0]))
-						    && isReceiverType(args[0].getDescriptor(), owner)) {
-							names[0] = RECEIVER_NAME;
-						}
-						super.visitEnd();
-					}
-				};
+				return wrapForParamNames(null, owner, acc, name, desc, out, false);
 			}
 		}, ClassReader.SKIP_FRAMES);
 		return out;
+	}
+
+	/**
+	 * 包装可选下游 {@link MethodVisitor}，为合成 lambda 方法提取形参 LVT 名字；
+	 * {@code stripDebugNodes} 为 true 时不向 {@code mv} 转发调试事件，使生成的
+	 * {@link MethodNode} 与 {@code ClassReader.SKIP_DEBUG} 保持一致。
+	 */
+	private static MethodVisitor wrapForParamNames(
+	 MethodVisitor mv, String owner, int acc, String name, String desc,
+	 Map<String, String[]> out, boolean stripDebugNodes) {
+		boolean collect = out != null
+			&& MethodFingerprinter.isSyntheticName(name)
+			&& !name.startsWith("access$");
+		if (!collect) {
+			if (!stripDebugNodes || mv == null) return mv;
+			return new MethodVisitor(Opcodes.ASM9, mv) {
+				@Override
+				public void visitLineNumber(int line, Label start) {}
+
+				@Override
+				public void visitLocalVariable(String n, String d, String sg,
+				                               Label st, Label en, int idx) {}
+
+				@Override
+				public AnnotationVisitor visitLocalVariableAnnotation(
+				 int typeRef, TypePath typePath, Label[] start, Label[] end,
+				 int[] index, String descriptor, boolean visible) {
+					return null;
+				}
+			};
+		}
+		boolean isStatic = (acc & Opcodes.ACC_STATIC) != 0;
+		Type[] args = Type.getArgumentTypes(desc);
+		int[] slotOf = new int[args.length];
+		int s = isStatic ? 0 : 1;
+		for (int i = 0; i < args.length; i++) {
+			slotOf[i] = s;
+			s += args[i].getSize();
+		}
+		int paramEnd = s;
+		String[] names = new String[args.length];
+		out.put(name + desc, names);
+		return new MethodVisitor(Opcodes.ASM9, mv) {
+			@Override
+			public void visitLineNumber(int line, Label start) {
+				if (!stripDebugNodes) super.visitLineNumber(line, start);
+			}
+
+			@Override
+			public void visitLocalVariable(String n, String d, String sg,
+			                               Label st, Label en, int idx) {
+				if (idx < paramEnd) {              // 只要形参，丢弃方法体局部变量
+					for (int i = 0; i < slotOf.length; i++) {
+						if (slotOf[i] == idx && args[i].getDescriptor().equals(d) && names[i] == null) {
+							names[i] = n;
+						}
+					}
+				}
+				if (!stripDebugNodes) {
+					super.visitLocalVariable(n, d, sg, st, en, idx);
+				}
+			}
+
+			@Override
+			public AnnotationVisitor visitLocalVariableAnnotation(
+			 int typeRef, TypePath typePath, Label[] start, Label[] end,
+			 int[] index, String descriptor, boolean visible) {
+				return stripDebugNodes
+					? null
+					: super.visitLocalVariableAnnotation(typeRef, typePath, start, end, index, descriptor, visible);
+			}
+
+			@Override
+			public void visitEnd() {
+				// 静态方法的首形参可能是 forceStaticLambdas 前置的接收者：槽是新增的，
+				// 没有 LVT 条目，读出来是 null；若它本来就是实例方法、只是被改成静态，
+				// LVT 里留着 javac 写的 "this"。两者指同一个东西，统一记成 RECEIVER_NAME，
+				// 否则同一个 lambda 在两种来源之间切换会因 "this" vs null 对不上而丢掉按名映射。
+				// 判据是"类型是本类"而不是"名字为空"——真正的同名局部变量会带自己的名字。
+				if (isStatic && names.length > 0
+				    && (names[0] == null || "this".equals(names[0]))
+				    && isReceiverType(args[0].getDescriptor(), owner)) {
+					names[0] = RECEIVER_NAME;
+				}
+				super.visitEnd();
+			}
+		};
 	}
 
 	/**

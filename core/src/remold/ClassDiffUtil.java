@@ -153,6 +153,11 @@ public final class ClassDiffUtil {
 		ClassNode oldNode;
 		ClassNode newNode;
 		try {
+			int oldAccess = new ClassReader(oldBytes).getAccess();
+			int newAccess = new ClassReader(newBytes).getAccess();
+			if (((oldAccess | newAccess) & Opcodes.ACC_ANNOTATION) == 0) {
+				return null;
+			}
 			oldNode = parse(oldBytes);
 			newNode = parse(newBytes);
 		} catch (Throwable t) {

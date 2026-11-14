@@ -566,8 +566,10 @@ public class InitFix {
 	 * 这里刻意<b>只告警不拒绝</b>：破坏的成因是哈希公式变了，拒绝补丁既不能修复容器，还会让新代码读到 0。
 	 * 用户需要知道的是"该重建容器或重启"，而不是"这个字段没补上"。</p>
 	 */
-	private static void warnHashSemanticDependencies(byte[] newBytes, Set<String> addedInstanceFields) {
-		List<HashSemantics.Finding> findings = HashSemantics.findDependencies(newBytes, addedInstanceFields);
+	private static void warnHashSemanticDependencies(ClassNode newClass, byte[] newBytes, Set<String> addedInstanceFields) {
+		List<HashSemantics.Finding> findings = newClass != null
+			? HashSemantics.findDependencies(newClass, addedInstanceFields)
+			: HashSemantics.findDependencies(newBytes, addedInstanceFields);
 		if (findings.isEmpty()) return;
 		RemoldAgent.warn("[HASH-SEMANTICS] " + HashSemantics.describe(findings)
 		                 + "; instances already stored in HashMap/HashSet/TreeMap may end up in incorrect buckets or comparison order, "
@@ -1000,9 +1002,11 @@ public class InitFix {
 		// 而热更是否发生是上游按字节哈希判的 —— 所以"只摘掉一个注解"照样会走到这里。
 		// 不在这里清理的话，将来重新标注解、初值又恰好没改时，会被判成"初值未变"而跳过：
 		// 用户明明刚要求重置，却什么都不会发生。
+		Map<String, ReinitField> preScannedReinit = null;
 		if (diff != null) {
 			if (diff.newClass != null) {
-				pruneReinitRecords(host, scanReinitFields(diff.newClass).keySet());
+				preScannedReinit = scanReinitFields(diff.newClass);
+				pruneReinitRecords(host, preScannedReinit.keySet());
 			}
 			for (String f : diff.typeChangedFields) {
 				reinitAppliedRemove(host, f);
@@ -1037,8 +1041,9 @@ public class InitFix {
 		Set<String> addedInstanceFields = diff.addedInstanceFields;
 
 		Map<String, String> pending = ledgerSnapshot(host);
+		boolean hasReinit = preScannedReinit != null ? !preScannedReinit.isEmpty() : hasReinitAnnotation(newBytes);
 		if (addedStaticFields.isEmpty() && addedInstanceFields.isEmpty()
-		    && !hasReinitAnnotation(newBytes) && pending.isEmpty()
+		    && !hasReinit && pending.isEmpty()
 		    && replayFields.isEmpty() && applyFields.isEmpty()
 		    && applyPlan.decisions().isEmpty()) {
 			REPORTS.put(host, new PatchReport(Map.of(), Map.of(), false));
@@ -1050,10 +1055,10 @@ public class InitFix {
 		}
 
 		String className = diff.newClass.name;
-		warnHashSemanticDependencies(newBytes, addedInstanceFields);
+		warnHashSemanticDependencies(diff.newClass, newBytes, addedInstanceFields);
 		try {
-			BuiltPatch built = buildPatch(host, newBytes, className,
-			 addedStaticFields, addedInstanceFields, pending, replayFields, applyFields,
+			BuiltPatch built = buildPatch(host, diff.newClass, newBytes, className,
+			 addedStaticFields, addedInstanceFields, pending, preScannedReinit, replayFields, applyFields,
 			 applyPlan.decisions());
 			// if (built == null) return;
 
@@ -1154,15 +1159,19 @@ public class InitFix {
 	private record StalePatch(WeakReference<Class<?>> host, List<String> fields, long ageSeconds) { }
 
 	private static BuiltPatch buildPatch(
-	 Class<?> host, byte[] newBytes, String className,
+	 Class<?> host, ClassNode preParsedNewClass, byte[] newBytes, String className,
 	 Set<String> addedStaticFields, Set<String> addedInstanceFields,
 	 Map<String, String> pendingLedger,
+	 Map<String, ReinitField> preScannedReinit,
 	 Map<String, InitializerReplay.ReplayField> replayFields,
 	 Map<String, ApplyInitializerReplay.ReplayField> applyFields,
 	 Map<String, String> applyDecisions) {
 
-		ClassNode newClass = new ClassNode();
-		new ClassReader(newBytes).accept(newClass, 0);
+		ClassNode newClass = preParsedNewClass;
+		if (newClass == null) {
+			newClass = new ClassNode();
+			new ClassReader(newBytes).accept(newClass, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+		}
 		int hostVersion = newClass.version;
 
 		Map<String, FieldNode> fieldNodes = new HashMap<>();
@@ -1201,7 +1210,7 @@ public class InitFix {
 
 		// ==================== docs/initfix/03-runtime-driver.md §4 存量重置扩展：候选集 ====================
 		// 默认只处理新增字段；标了 @RemoldReinit 的已有字段按显式声明进入候选集。
-		Map<String, ReinitField> reinitFields         = scanReinitFields(newClass);
+		Map<String, ReinitField> reinitFields         = preScannedReinit != null ? preScannedReinit : scanReinitFields(newClass);
 		Set<String>              targetInstanceFields = new LinkedHashSet<>(addedInstanceFields);
 		Set<String>              targetStaticFields   = new LinkedHashSet<>(addedStaticFields);
 		Set<String>              forceWriteFields     = new LinkedHashSet<>();

@@ -1,8 +1,11 @@
 package remold;
 
 import org.junit.jupiter.api.Test;
+import org.objectweb.asm.AnnotationVisitor;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.FieldVisitor;
 import org.objectweb.asm.Handle;
+import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
@@ -255,6 +258,200 @@ class BatchHotpathOptimizationTest {
 		body.visitInsn(Opcodes.RETURN);
 		body.visitMaxs(0, 0);
 		body.visitEnd();
+
+		cw.visitEnd();
+		return cw.toByteArray();
+	}
+
+	@Test
+	void describeAnnotationDefaultFastPathStillDetectsRealAnnotationChanges() {
+		byte[] clsV1 = buildSimpleClass("test/PlainAnnoSkip", false, false);
+		byte[] clsV2 = buildSimpleClass("test/PlainAnnoSkip", true, true);
+		assertNull(ClassDiffUtil.describeAnnotationDefaultChange(clsV1, clsV2),
+			"non-annotation classes must fast-path to null");
+
+		byte[] annoV1 = buildAnnotationClass("test/SampleAnno", 1);
+		byte[] annoV1Same = buildAnnotationClass("test/SampleAnno", 1);
+		byte[] annoV2Changed = buildAnnotationClass("test/SampleAnno", 2);
+		assertNull(ClassDiffUtil.describeAnnotationDefaultChange(annoV1, annoV1Same));
+		String changed = ClassDiffUtil.describeAnnotationDefaultChange(annoV1, annoV2Changed);
+		assertNotNull(changed, "real @interface default value change must still be reported");
+		assertTrue(changed.contains("value"), "change description should name the modified member: " + changed);
+
+		String bad = ClassDiffUtil.describeAnnotationDefaultChange(new byte[]{1, 2, 3}, clsV2);
+		assertNotNull(bad);
+		assertTrue(bad.startsWith("cannot verify AnnotationDefault"));
+	}
+
+	@Test
+	void mergedScanPreservesLvtCaptureParamMappingAndLineStrip() {
+		String name = "test/MergedScanHost";
+		byte[] v1 = buildClassWithCapturedLvtLambda(name, false);
+		byte[] v2 = buildClassWithCapturedLvtLambda(name, true);
+
+		// Different line numbers & reordered synthetic method must still match identically
+		// when line numbers/LVT nodes are stripped during merged scan, and LVT param names
+		// must allow alignment without throwing or dropping capture bridge.
+		byte[] aligned = LambdaAligner.align(v1, v2);
+		LambdaAligner.AlignmentResult res = LambdaAligner.LAST_RESULT;
+		assertNotNull(aligned);
+		assertNotNull(res.stats);
+		assertEquals(1, res.stats.step1Pairs,
+			"captured lambda with shifted line numbers should still exact-match in step1");
+
+		Map<String, String[]> pOld = LambdaAligner.readLambdaParamNames(v1);
+		String[] pNames = pOld.get("lambda$compute$0(IILjava/lang/String;)I");
+		assertNotNull(pNames);
+		assertEquals(3, pNames.length);
+		assertEquals("x", pNames[0]);
+		assertEquals("y", pNames[1]);
+		assertEquals("s", pNames[2]);
+
+		// Without LVT on static receiver-taking synthetic, RECEIVER_NAME normalization stays intact.
+		byte[] staticRec = buildClassWithStaticReceiverLambda(name);
+		Map<String, String[]> pRec = LambdaAligner.readLambdaParamNames(staticRec);
+		String[] recNames = pRec.get("lambda$rec$0(L" + name + ";)V");
+		assertNotNull(recNames);
+		assertEquals(LambdaAligner.RECEIVER_NAME, recNames[0]);
+	}
+
+	@Test
+	void initFixReusesDiffNewClassAndPreScannedReinitFields() throws Exception {
+		String hostName = "test.ReinitPreScanHost";
+		byte[] v1 = buildReinitHost(hostName.replace('.', '/'), 10);
+		byte[] v2 = buildReinitHost(hostName.replace('.', '/'), 20);
+		Class<?> host = defineAndInit(hostName, v1);
+		try {
+			ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(v1, v2);
+			assertTrue(diff.addedStaticFields.isEmpty());
+			assertTrue(diff.addedInstanceFields.isEmpty());
+			InitFix.transform(host, v2, diff);
+			assertTrue(InitFix.requiresTwoPhase(host, () -> false),
+				"@RemoldReinit on existing static field must still enqueue PENDING patch even without added fields");
+		} finally {
+			InitFix.afterRedefineFailed(host);
+		}
+	}
+
+	private static byte[] buildAnnotationClass(String internalName, int defaultValue) {
+		ClassWriter cw = new ClassWriter(0);
+		cw.visit(Opcodes.V17,
+			Opcodes.ACC_PUBLIC | Opcodes.ACC_ABSTRACT | Opcodes.ACC_INTERFACE | Opcodes.ACC_ANNOTATION,
+			internalName, null, "java/lang/Object", new String[]{"java/lang/annotation/Annotation"});
+		MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_ABSTRACT, "value", "()I", null, null);
+		AnnotationVisitor dv = mv.visitAnnotationDefault();
+		dv.visit(null, defaultValue);
+		dv.visitEnd();
+		mv.visitEnd();
+		cw.visitEnd();
+		return cw.toByteArray();
+	}
+
+	private static byte[] buildClassWithCapturedLvtLambda(String internalName, boolean v2Shift) {
+		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
+		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC, internalName, null, "java/lang/Object", null);
+
+		MethodVisitor init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+		init.visitCode();
+		init.visitVarInsn(Opcodes.ALOAD, 0);
+		init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+		init.visitInsn(Opcodes.RETURN);
+		init.visitMaxs(0, 0);
+		init.visitEnd();
+
+		String lambdaName = v2Shift ? "lambda$compute$1" : "lambda$compute$0";
+		MethodVisitor compute = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "compute",
+			"(IILjava/lang/String;)Ljava/util/function/IntSupplier;", null, null);
+		compute.visitCode();
+		Handle bsm = new Handle(
+			Opcodes.H_INVOKESTATIC,
+			"java/lang/invoke/LambdaMetafactory",
+			"metafactory",
+			"(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;"
+				+ "Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)"
+				+ "Ljava/lang/invoke/CallSite;",
+			false);
+		Handle target = new Handle(
+			Opcodes.H_INVOKESTATIC,
+			internalName,
+			lambdaName,
+			"(IILjava/lang/String;)I",
+			false);
+		compute.visitVarInsn(Opcodes.ILOAD, 0);
+		compute.visitVarInsn(Opcodes.ILOAD, 1);
+		compute.visitVarInsn(Opcodes.ALOAD, 2);
+		compute.visitInvokeDynamicInsn(
+			"getAsInt",
+			"(IILjava/lang/String;)Ljava/util/function/IntSupplier;",
+			bsm,
+			Type.getMethodType("()I"),
+			target,
+			Type.getMethodType("()I"));
+		compute.visitInsn(Opcodes.ARETURN);
+		compute.visitMaxs(0, 0);
+		compute.visitEnd();
+
+		MethodVisitor body = cw.visitMethod(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+			lambdaName, "(IILjava/lang/String;)I", null, null);
+		body.visitCode();
+		Label start = new Label();
+		Label end = new Label();
+		body.visitLabel(start);
+		body.visitLineNumber(v2Shift ? 42 : 10, start);
+		body.visitVarInsn(Opcodes.ILOAD, 0);
+		body.visitVarInsn(Opcodes.ILOAD, 1);
+		body.visitInsn(Opcodes.IADD);
+		body.visitVarInsn(Opcodes.ALOAD, 2);
+		body.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+		body.visitInsn(Opcodes.IADD);
+		body.visitLabel(end);
+		body.visitInsn(Opcodes.IRETURN);
+		body.visitLocalVariable("x", "I", null, start, end, 0);
+		body.visitLocalVariable("y", "I", null, start, end, 1);
+		body.visitLocalVariable("s", "Ljava/lang/String;", null, start, end, 2);
+		body.visitMaxs(0, 0);
+		body.visitEnd();
+
+		cw.visitEnd();
+		return cw.toByteArray();
+	}
+
+	private static byte[] buildClassWithStaticReceiverLambda(String internalName) {
+		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
+		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC, internalName, null, "java/lang/Object", null);
+		MethodVisitor body = cw.visitMethod(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+			"lambda$rec$0", "(L" + internalName + ";)V", null, null);
+		body.visitCode();
+		body.visitInsn(Opcodes.RETURN);
+		body.visitMaxs(0, 0);
+		body.visitEnd();
+		cw.visitEnd();
+		return cw.toByteArray();
+	}
+
+	private static byte[] buildReinitHost(String internalName, int staticVal) {
+		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
+		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC, internalName, null, "java/lang/Object", null);
+		FieldVisitor fv = cw.visitField(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "COUNT", "I", null, null);
+		AnnotationVisitor av = fv.visitAnnotation("Lremold/annotation/RemoldReinit;", true);
+		av.visitEnd();
+		fv.visitEnd();
+
+		MethodVisitor clinit = cw.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null);
+		clinit.visitCode();
+		clinit.visitIntInsn(Opcodes.BIPUSH, staticVal);
+		clinit.visitFieldInsn(Opcodes.PUTSTATIC, internalName, "COUNT", "I");
+		clinit.visitInsn(Opcodes.RETURN);
+		clinit.visitMaxs(0, 0);
+		clinit.visitEnd();
+
+		MethodVisitor init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+		init.visitCode();
+		init.visitVarInsn(Opcodes.ALOAD, 0);
+		init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+		init.visitInsn(Opcodes.RETURN);
+		init.visitMaxs(0, 0);
+		init.visitEnd();
 
 		cw.visitEnd();
 		return cw.toByteArray();

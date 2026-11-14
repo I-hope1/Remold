@@ -2,6 +2,9 @@ package io.github.ihope1.remold.gradle;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import org.gradle.api.DefaultTask;
 import org.gradle.api.GradleException;
@@ -20,6 +23,7 @@ public abstract class StartRemoldTask extends DefaultTask {
     private File buildDir;
     private String projectName;
     private String executable;
+    private Map<String, String> environment = Collections.emptyMap();
 
     @Internal
     public File getTargetJar() {
@@ -66,29 +70,49 @@ public abstract class StartRemoldTask extends DefaultTask {
         this.executable = executable;
     }
 
+    @Internal
+    public Map<String, String> getEnvironment() {
+        return environment;
+    }
+
+    public void setEnvironment(Map<String, String> environment) {
+        this.environment = environment != null && !environment.isEmpty()
+                ? new LinkedHashMap<>(environment)
+                : Collections.emptyMap();
+    }
+
     @TaskAction
     public void start() {
         if (targetJar != null && !targetJar.exists()) {
             throw new GradleException("[Remold] Target launch JAR does not exist; cannot launch application: "
                     + targetJar.getAbsolutePath());
         }
+        if (projectDir != null && !projectDir.exists()) {
+            projectDir.mkdirs();
+        }
         File argsFile = new File(buildDir, "remold/remold.args");
         boolean isWin = System.getProperty("os.name").toLowerCase().contains("win");
 
         try {
             if (isWin) {
-                new ProcessBuilder("cmd", "/c", "start", "\"Remold [" + projectName + "]\"", executable,
-                        "@" + argsFile.getAbsolutePath())
-                        .directory(projectDir)
-                        .start();
+                ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "start", "\"Remold [" + projectName + "]\"",
+                        executable, "@" + argsFile.getAbsolutePath())
+                        .directory(projectDir);
+                if (!environment.isEmpty()) {
+                    pb.environment().putAll(environment);
+                }
+                pb.start();
                 getLogger().lifecycle("[Remold] Application launched in a separate console window.");
             } else {
                 File logFile = new File(buildDir, "remold/remold.log");
-                new ProcessBuilder(executable, "@" + argsFile.getAbsolutePath())
+                ProcessBuilder pb = new ProcessBuilder(executable, "@" + argsFile.getAbsolutePath())
                         .directory(projectDir)
                         .redirectOutput(logFile)
-                        .redirectErrorStream(true)
-                        .start();
+                        .redirectErrorStream(true);
+                if (!environment.isEmpty()) {
+                    pb.environment().putAll(environment);
+                }
+                pb.start();
                 getLogger().lifecycle("[Remold] Application launched in background. Output log: " + logFile.getAbsolutePath());
             }
         } catch (IOException e) {

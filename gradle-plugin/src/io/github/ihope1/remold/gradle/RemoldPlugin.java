@@ -8,13 +8,19 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 import org.gradle.api.GradleException;
 import org.gradle.api.Plugin;
 import org.gradle.api.Project;
 import org.gradle.api.Task;
+import org.gradle.api.file.Directory;
+import org.gradle.api.file.DirectoryProperty;
 import org.gradle.api.plugins.ExtensionAware;
 import org.gradle.api.provider.ListProperty;
+import org.gradle.api.provider.MapProperty;
+import org.gradle.api.provider.Property;
 import org.gradle.api.tasks.Copy;
 import org.gradle.api.tasks.JavaExec;
 import org.gradle.api.tasks.SourceSet;
@@ -23,6 +29,7 @@ import org.gradle.api.tasks.TaskProvider;
 import org.gradle.api.tasks.compile.JavaCompile;
 import org.gradle.api.tasks.testing.Test;
 import org.gradle.jvm.toolchain.JavaLauncher;
+import org.gradle.process.CommandLineArgumentProvider;
 import org.gradle.process.JavaForkOptions;
 
 /**
@@ -200,6 +207,17 @@ public final class RemoldPlugin implements Plugin<Project> {
                         }
                     } catch (Throwable ignored) {
                     }
+                    JavaExec loomRun = findLoomSourceRunTask(project);
+                    if (loomRun != null) {
+                        wireLoomScriptPrerequisites(project, loomRun);
+                    } else {
+                        project.getGradle().projectsEvaluated(g -> {
+                            JavaExec deferredLoomRun = findLoomSourceRunTask(project);
+                            if (deferredLoomRun != null) {
+                                wireLoomScriptPrerequisites(project, deferredLoomRun);
+                            }
+                        });
+                    }
                 }
 
                 // NeoForge ModDevGradle auto injection (client + dedicated server)
@@ -253,8 +271,59 @@ public final class RemoldPlugin implements Plugin<Project> {
 
                 Task rawRunRemold = project.getTasks().findByName("runRemold");
                 if (rawRunRemold instanceof JavaExec && graph.hasTask(rawRunRemold)) {
+                    ensureStandaloneLauncherSupported(project, "runRemold", false);
                     RemoldResolvedConfig conf = resolver.resolveDeferredSync(project, ext, true);
                     configureRunRemold((JavaExec) rawRunRemold, conf, ext);
+                }
+
+                Task rawStartTask = project.getTasks().findByName("startRemold");
+                if (rawStartTask instanceof StartRemoldTask && graph.hasTask(rawStartTask)) {
+                    ensureStandaloneLauncherSupported(project, "startRemold", true);
+                    StartRemoldTask startTask = (StartRemoldTask) rawStartTask;
+                    JavaExec loomRun = isLoomProject(project) ? findLoomSourceRunTask(project) : null;
+                    RemoldResolvedConfig conf = resolver.resolveDeferredSync(project, ext, loomRun == null);
+                    startTask.setTargetJar(conf.getTargetJar());
+                    startTask.setBuildOutputDir(project.getLayout().getBuildDirectory().getAsFile().get());
+                    startTask.setProjectName(project.getName());
+                    if (loomRun != null) {
+                        startTask.setWorkingDir(resolveLoomWorkingDir(project, loomRun));
+                        startTask.setExecutable(resolveLoomExecutable(conf, loomRun));
+                        startTask.setEnvironment(extractCustomEnvironment(project, loomRun));
+                    } else {
+                        startTask.setWorkingDir(project.getProjectDir());
+                        startTask.setExecutable(conf.getExecutable());
+                    }
+                }
+
+                Task rawScriptTask = project.getTasks().findByName("generateRemoldScript");
+                if (rawScriptTask instanceof GenerateRemoldScriptTask && graph.hasTask(rawScriptTask)) {
+                    ensureStandaloneLauncherSupported(project, "generateRemoldScript", true);
+                    GenerateRemoldScriptTask scriptTask = (GenerateRemoldScriptTask) rawScriptTask;
+                    JavaExec loomRun = isLoomProject(project) ? findLoomSourceRunTask(project) : null;
+                    RemoldResolvedConfig conf = resolver.resolveDeferredSync(project, ext, loomRun == null);
+                    scriptTask.setTargetJar(conf.getTargetJar());
+                    scriptTask.setBuildOutputDir(project.getLayout().getBuildDirectory().getAsFile().get());
+                    scriptTask.setPendingSyncs(conf.getPendingSyncs());
+                    if (loomRun != null) {
+                        String loomMainClass = loomRun.getMainClass().getOrNull();
+                        if (loomMainClass == null || loomMainClass.trim().isEmpty()) {
+                            throw new GradleException("[Remold] Fabric Loom task ':" + loomRun.getName()
+                                    + "' has no mainClass configured; cannot export launcher script.");
+                        }
+                        scriptTask.setWorkingDir(resolveLoomWorkingDir(project, loomRun));
+                        scriptTask.setExecutable(resolveLoomExecutable(conf, loomRun));
+                        scriptTask.setMainClass(loomMainClass);
+                        scriptTask.setJvmArgs(mergeLoomJvmArgs(loomRun, conf));
+                        scriptTask.setAppArgs(mergeLoomAppArgs(loomRun, conf));
+                        scriptTask.setEnvironment(extractCustomEnvironment(project, loomRun));
+                        scriptTask.getRuntimeClasspath().from(loomRun.getClasspath());
+                    } else {
+                        scriptTask.setExecutable(conf.getExecutable());
+                        scriptTask.setMainClass(conf.getMainClass());
+                        scriptTask.setJvmArgs(conf.getJvmArgs());
+                        scriptTask.setAppArgs(conf.getAppArgs());
+                        scriptTask.getRuntimeClasspath().from(conf.getRuntimeClasspath());
+                    }
                 }
 
                 Task rawIdeaTask = project.getTasks().findByName("generateIdeaRunConfig");
@@ -265,31 +334,6 @@ public final class RemoldPlugin implements Plugin<Project> {
                             "generateIdeaRunConfig", "generateRemoldScript", "startRemold");
                     configureIdeaRunConfigTask((GenerateIdeaRunConfigTask) rawIdeaTask,
                             project, ext, resolver, shouldAutoDeploy, isLoom, !explicit);
-                }
-
-                Task rawScriptTask = project.getTasks().findByName("generateRemoldScript");
-                if (rawScriptTask instanceof GenerateRemoldScriptTask && graph.hasTask(rawScriptTask)) {
-                    RemoldResolvedConfig conf = resolver.resolveDeferredSync(project, ext, true);
-                    GenerateRemoldScriptTask scriptTask = (GenerateRemoldScriptTask) rawScriptTask;
-                    scriptTask.setTargetJar(conf.getTargetJar());
-                    scriptTask.setBuildOutputDir(project.getLayout().getBuildDirectory().getAsFile().get());
-                    scriptTask.setExecutable(conf.getExecutable());
-                    scriptTask.setMainClass(conf.getMainClass());
-                    scriptTask.setJvmArgs(conf.getJvmArgs());
-                    scriptTask.setAppArgs(conf.getAppArgs());
-                    scriptTask.setPendingSyncs(conf.getPendingSyncs());
-                    scriptTask.getRuntimeClasspath().from(conf.getRuntimeClasspath());
-                }
-
-                Task rawStartTask = project.getTasks().findByName("startRemold");
-                if (rawStartTask instanceof StartRemoldTask && graph.hasTask(rawStartTask)) {
-                    RemoldResolvedConfig conf = resolver.resolveDeferredSync(project, ext, true);
-                    StartRemoldTask startTask = (StartRemoldTask) rawStartTask;
-                    startTask.setTargetJar(conf.getTargetJar());
-                    startTask.setWorkingDir(project.getProjectDir());
-                    startTask.setBuildOutputDir(project.getLayout().getBuildDirectory().getAsFile().get());
-                    startTask.setProjectName(project.getName());
-                    startTask.setExecutable(conf.getExecutable());
                 }
             });
         });
@@ -309,6 +353,309 @@ public final class RemoldPlugin implements Plugin<Project> {
 
     private static boolean isLoomProject(Project project) {
         return project.getPlugins().hasPlugin("fabric-loom") || project.getExtensions().findByName("loom") != null;
+    }
+
+    static void ensureStandaloneLauncherSupported(Project project, String taskName) {
+        ensureStandaloneLauncherSupported(project, taskName, !"runRemold".equals(taskName));
+    }
+
+    static void ensureStandaloneLauncherSupported(
+            Project project, String taskName, boolean allowLoomRunExtraction) {
+        if (!RemoldConfigResolver.isClassBasedEnvironment(project)) {
+            return;
+        }
+        boolean isLoom = isLoomProject(project);
+        JavaExec loomRun = isLoom ? findLoomSourceRunTask(project) : null;
+        if (allowLoomRunExtraction && isLoom && loomRun != null) {
+            return;
+        }
+        String loaderTaskHint;
+        if (isLoom) {
+            loaderTaskHint = loomRun != null
+                    ? "Use Loom's 'runClient'/'runServer' task or './gradlew startRemold' (or the IDEA"
+                            + " 'Minecraft Client' Application run configuration with"
+                            + " loom.runs.configureEach { preferGradleTask = false } to avoid holding a Gradle daemon)."
+                    : "No Loom 'runClient'/'runServer' JavaExec task was found to extract launch arguments from;"
+                            + " use Loom's native run tasks or the IDEA 'Minecraft Client' Application run configuration.";
+        } else {
+            loaderTaskHint = "Use the loader's native run tasks (e.g. 'runClient'/'runServer') or IDE run configurations.";
+        }
+        throw new GradleException("[Remold] Task ':" + taskName + "' cannot run in standalone mode in this"
+                + " Fabric Loom / Forge / NeoForge environment"
+                + " (bypassing DevLaunchInjector / ModLauncher causes Bootstrap/IllegalAccessError crashes). "
+                + loaderTaskHint);
+    }
+
+    static JavaExec findLoomSourceRunTask(Project project) {
+        Object prop = project.findProperty("remold.loomRunTask");
+        if (prop != null) {
+            String custom = prop.toString().trim();
+            if (!custom.isEmpty()) {
+                Task task = project.getTasks().findByName(custom);
+                return task instanceof JavaExec ? (JavaExec) task : null;
+            }
+        }
+        for (String name : new String[]{"runClient", "runServer"}) {
+            Task task = project.getTasks().findByName(name);
+            if (task instanceof JavaExec) {
+                return (JavaExec) task;
+            }
+        }
+        return null;
+    }
+
+    private static void wireLoomScriptPrerequisites(Project project, JavaExec loomRun) {
+        List<Object> prereqs = new ArrayList<>();
+        try {
+            Set<? extends Task> resolved = loomRun.getTaskDependencies().getDependencies(loomRun);
+            for (Task dep : resolved) {
+                if (dep != null && dep != loomRun) {
+                    prereqs.add(dep);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        if (prereqs.isEmpty()) {
+            for (Object dep : loomRun.getDependsOn()) {
+                if (dep != null && dep != loomRun) {
+                    prereqs.add(dep);
+                }
+            }
+        }
+        if (!prereqs.isEmpty()) {
+            project.getTasks().named("generateRemoldScript", t -> t.dependsOn(prereqs));
+        }
+    }
+
+    private static File resolveLoomWorkingDir(Project project, JavaExec loomRun) {
+        File taskDir = loomRun.getWorkingDir();
+        // Loom's AbstractRunTask leaves JavaExec.workingDir at projectDir until exec() runs;
+        // prefer explicit task overrides, then Loom's internalRunDir / RunConfiguration directory.
+        if (taskDir != null && !Objects.equals(taskDir.getAbsoluteFile(), project.getProjectDir().getAbsoluteFile())) {
+            return taskDir;
+        }
+        Object internalDirProp = invokeAccessibleNoArg(loomRun, "getInternalRunDir");
+        if (internalDirProp instanceof DirectoryProperty) {
+            Directory dirVal = ((DirectoryProperty) internalDirProp).getOrNull();
+            if (dirVal != null) {
+                return dirVal.getAsFile();
+            }
+        }
+        Object runConfig = findLoomRunConfig(project, loomRun);
+        if (runConfig != null) {
+            Object runDirProp = invokeAccessibleNoArg(runConfig, "getRunDirectory");
+            if (runDirProp instanceof DirectoryProperty) {
+                Directory dirVal = ((DirectoryProperty) runDirProp).getOrNull();
+                if (dirVal != null) {
+                    return dirVal.getAsFile();
+                }
+            }
+            Object runDirStr = invokeAccessibleNoArg(runConfig, "getRunDir");
+            if (runDirStr != null) {
+                String rel = runDirStr.toString().trim();
+                if (!rel.isEmpty()) {
+                    File candidate = new File(rel);
+                    return candidate.isAbsolute() ? candidate : new File(project.getProjectDir(), rel);
+                }
+            }
+        }
+        return new File(project.getProjectDir(), "run");
+    }
+
+    private static String resolveLoomExecutable(RemoldResolvedConfig conf, JavaExec loomRun) {
+        if (!"java".equals(conf.getExecutable())) {
+            return conf.getExecutable();
+        }
+        try {
+            if (loomRun.getJavaLauncher().isPresent()) {
+                return loomRun.getJavaLauncher().get().getExecutablePath().getAsFile().getAbsolutePath();
+            }
+        } catch (Throwable ignored) {
+        }
+        String taskExec = loomRun.getExecutable();
+        if (taskExec != null && !taskExec.trim().isEmpty()) {
+            return taskExec;
+        }
+        return conf.getExecutable();
+    }
+
+    static List<String> mergeLoomJvmArgs(JavaExec loomRun, RemoldResolvedConfig conf) {
+        String loomArgFile = resolveLoomArgFilePath(loomRun);
+        List<String> base = stripClasspathArgs(loomRun.getAllJvmArgs(), loomArgFile);
+        List<String> extra = computeExtraJvmArgs(base, conf.getJvmArgs());
+        if (extra.isEmpty()) {
+            return base;
+        }
+        List<String> merged = new ArrayList<>(base.size() + extra.size());
+        merged.addAll(base);
+        merged.addAll(extra);
+        return merged;
+    }
+
+    private static List<String> mergeLoomAppArgs(JavaExec loomRun, RemoldResolvedConfig conf) {
+        List<String> merged = new ArrayList<>();
+        List<String> taskArgs = loomRun.getArgs();
+        if (taskArgs != null) {
+            for (String arg : taskArgs) {
+                if (arg != null) {
+                    merged.add(arg);
+                }
+            }
+        }
+        for (CommandLineArgumentProvider provider : loomRun.getArgumentProviders()) {
+            if (provider == null) continue;
+            Iterable<String> provided = provider.asArguments();
+            if (provided == null) continue;
+            for (String arg : provided) {
+                if (arg != null) {
+                    merged.add(arg);
+                }
+            }
+        }
+        for (String arg : conf.getAppArgs()) {
+            if (arg != null && !merged.contains(arg)) {
+                merged.add(arg);
+            }
+        }
+        return merged;
+    }
+
+    static List<String> stripClasspathArgs(List<String> args) {
+        return stripClasspathArgs(args, null);
+    }
+
+    static List<String> stripClasspathArgs(List<String> args, String loomArgFilePath) {
+        if (args == null || args.isEmpty()) {
+            return Collections.emptyList();
+        }
+        String normalizedArgFile = loomArgFilePath != null ? loomArgFilePath.replace('\\', '/') : null;
+        List<String> cleaned = new ArrayList<>(args.size());
+        for (int i = 0; i < args.size(); i++) {
+            String arg = args.get(i);
+            if (arg == null) continue;
+            if ("-cp".equals(arg) || "-classpath".equals(arg) || "--class-path".equals(arg)) {
+                if (i + 1 < args.size()) {
+                    i++;
+                }
+                continue;
+            }
+            if (arg.startsWith("--class-path=")) {
+                continue;
+            }
+            if (isLoomClasspathArgFileToken(arg, normalizedArgFile)) {
+                continue;
+            }
+            cleaned.add(arg);
+        }
+        return cleaned;
+    }
+
+    private static boolean isLoomClasspathArgFileToken(String arg, String normalizedLoomArgFile) {
+        if (!arg.startsWith("@") || arg.length() <= 1) {
+            return false;
+        }
+        String filePart = arg.substring(1).replace('\\', '/');
+        if (normalizedLoomArgFile != null && normalizedLoomArgFile.equals(filePart)) {
+            return true;
+        }
+        return filePart.contains("/loom-cache/argFiles/");
+    }
+
+    private static String resolveLoomArgFilePath(JavaExec loomRun) {
+        Object prop = invokeAccessibleNoArg(loomRun, "getArgFilePath");
+        if (prop instanceof Property<?>) {
+            Object val = ((Property<?>) prop).getOrNull();
+            return val != null ? val.toString() : null;
+        }
+        return null;
+    }
+
+    private static Map<String, String> extractCustomEnvironment(Project project, JavaExec loomRun) {
+        Map<String, Object> mergedEnv = new LinkedHashMap<>();
+        Map<String, Object> taskEnv = loomRun.getEnvironment();
+        if (taskEnv != null) {
+            mergedEnv.putAll(taskEnv);
+        }
+        Object internalEnvProp = invokeAccessibleNoArg(loomRun, "getInternalEnvironmentVars");
+        if (internalEnvProp instanceof MapProperty<?, ?>) {
+            Map<?, ?> raw = ((MapProperty<?, ?>) internalEnvProp).getOrNull();
+            if (raw != null) {
+                for (Map.Entry<?, ?> e : raw.entrySet()) {
+                    if (e.getKey() != null && e.getValue() != null) {
+                        mergedEnv.put(e.getKey().toString(), e.getValue());
+                    }
+                }
+            }
+        } else {
+            Object runConfig = findLoomRunConfig(project, loomRun);
+            if (runConfig != null) {
+                Object cfgEnv = invokeAccessibleNoArg(runConfig, "getEnvironmentVars");
+                if (cfgEnv instanceof MapProperty<?, ?>) {
+                    Map<?, ?> raw = ((MapProperty<?, ?>) cfgEnv).getOrNull();
+                    if (raw != null) {
+                        for (Map.Entry<?, ?> e : raw.entrySet()) {
+                            if (e.getKey() != null && e.getValue() != null) {
+                                mergedEnv.put(e.getKey().toString(), e.getValue());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (mergedEnv.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<String, String> processEnv = System.getenv();
+        Map<String, String> diff = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : mergedEnv.entrySet()) {
+            if (entry.getKey() == null || entry.getValue() == null) continue;
+            String key = entry.getKey();
+            String val = String.valueOf(entry.getValue());
+            if (!processEnv.containsKey(key) || !Objects.equals(processEnv.get(key), val)) {
+                diff.put(key, val);
+            }
+        }
+        return diff;
+    }
+
+    private static Object findLoomRunConfig(Project project, JavaExec loomRun) {
+        try {
+            Object loom = project.getExtensions().findByName("loom");
+            if (loom == null) return null;
+            Object runs = loom.getClass().getMethod("getRuns").invoke(loom);
+            if (runs == null) return null;
+            Method findByName = runs.getClass().getMethod("findByName", String.class);
+            String taskName = loomRun.getName();
+            List<String> candidates = new ArrayList<>();
+            if (taskName.startsWith("run") && taskName.length() > 3) {
+                String suffix = taskName.substring(3);
+                candidates.add(Character.toLowerCase(suffix.charAt(0)) + suffix.substring(1));
+            }
+            candidates.add(taskName);
+            for (String candidate : candidates) {
+                Object found = findByName.invoke(runs, candidate);
+                if (found != null) {
+                    return found;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static Object invokeAccessibleNoArg(Object target, String methodName) {
+        if (target == null) return null;
+        for (Class<?> cls = target.getClass(); cls != null; cls = cls.getSuperclass()) {
+            try {
+                Method m = cls.getDeclaredMethod(methodName);
+                m.setAccessible(true);
+                return m.invoke(target);
+            } catch (NoSuchMethodException ignored) {
+            } catch (Throwable ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private static boolean isTaskExplicitlyRequested(Project project, String... taskNames) {
@@ -466,7 +813,17 @@ public final class RemoldPlugin implements Plugin<Project> {
 
     static void appendJvmArgsDeduplicated(JavaForkOptions fork, List<String> jvmArgs) {
         if (fork == null || jvmArgs == null || jvmArgs.isEmpty()) return;
-        List<String> existing = fork.getJvmArgs();
+        List<String> existingList = fork.getJvmArgs();
+        List<String> toAdd = computeExtraJvmArgs(existingList, jvmArgs);
+        if (!toAdd.isEmpty()) {
+            fork.jvmArgs(toAdd);
+        }
+    }
+
+    static List<String> computeExtraJvmArgs(List<String> existing, List<String> jvmArgs) {
+        if (jvmArgs == null || jvmArgs.isEmpty()) {
+            return Collections.emptyList();
+        }
         List<String> existingList = existing != null ? existing : Collections.emptyList();
         boolean hasAgent = false;
         for (String arg : existingList) {
@@ -486,9 +843,7 @@ public final class RemoldPlugin implements Plugin<Project> {
                 toAdd.add(arg);
             }
         }
-        if (!toAdd.isEmpty()) {
-            fork.jvmArgs(toAdd);
-        }
+        return toAdd;
     }
 
     /**

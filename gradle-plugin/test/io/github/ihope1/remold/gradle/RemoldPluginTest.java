@@ -7,12 +7,15 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import org.gradle.api.GradleException;
 import org.gradle.api.Project;
+import org.gradle.api.Task;
 import org.gradle.api.provider.ListProperty;
+import org.gradle.api.tasks.JavaExec;
 import org.gradle.api.tasks.compile.JavaCompile;
+import org.gradle.api.tasks.testing.Test;
 import org.gradle.testfixtures.ProjectBuilder;
 import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class RemoldPluginTest {
@@ -20,7 +23,7 @@ class RemoldPluginTest {
     @TempDir
     File tempDir;
 
-    @Test
+    @org.junit.jupiter.api.Test
     void appliesPluginAndRegistersExtensionAndTasks() {
         Project project = ProjectBuilder.builder()
                 .withProjectDir(tempDir)
@@ -44,7 +47,7 @@ class RemoldPluginTest {
         Assertions.assertEquals("source,lines,vars", compileJava.getOptions().getDebugOptions().getDebugLevel(), "debugLevel should be source,lines,vars");
     }
 
-    @Test
+    @org.junit.jupiter.api.Test
     void extensionDslAndConfigResolution() throws Exception {
         Project project = ProjectBuilder.builder()
                 .withProjectDir(tempDir)
@@ -78,7 +81,7 @@ class RemoldPluginTest {
         Assertions.assertSame(conf, cached, "RemoldConfigResolver should return cached instance");
     }
 
-    @Test
+    @org.junit.jupiter.api.Test
     void autoDeployResolution() {
         Project project = ProjectBuilder.builder()
                 .withProjectDir(tempDir)
@@ -94,7 +97,7 @@ class RemoldPluginTest {
         Assertions.assertEquals(new File(tempDir, "mods").getAbsolutePath(), RemoldConfigResolver.resolveDeployDir(project, ext).getAbsolutePath());
     }
 
-    @Test
+    @org.junit.jupiter.api.Test
     void ideaRunConfigGeneratorPortabilityAndXml() throws Exception {
         Project project = ProjectBuilder.builder()
                 .withProjectDir(tempDir)
@@ -125,7 +128,7 @@ class RemoldPluginTest {
         Assertions.assertTrue(content.contains("$PROJECT_DIR$"), "Paths relative to rootDir should use $PROJECT_DIR$");
     }
 
-    @Test
+    @org.junit.jupiter.api.Test
     void syncLoomRunConfigsFixesDeployArtifactAndDeduplicatesPluginJars() throws Exception {
         Project project = ProjectBuilder.builder()
                 .withProjectDir(tempDir)
@@ -182,7 +185,7 @@ class RemoldPluginTest {
         Assertions.assertTrue(syncedXml.contains("<option name=\"Make\" enabled=\"true\" />"), "Loom beforeRun should use Make");
     }
 
-    @Test
+    @org.junit.jupiter.api.Test
     void classBasedEnvironmentDetectionAndAutoDeployBlocking() {
         Project project = ProjectBuilder.builder().build();
         project.getPlugins().apply("java");
@@ -202,7 +205,7 @@ class RemoldPluginTest {
         Assertions.assertFalse(RemoldConfigResolver.shouldAutoDeploy(project, ext));
     }
 
-    @Test
+    @org.junit.jupiter.api.Test
     void embeddedScriptResourcesArePresentAndValid() throws Exception {
         try (InputStream groovy = RemoldPlugin.class.getResourceAsStream("/remold/remold.gradle");
              InputStream kotlin = RemoldPlugin.class.getResourceAsStream("/remold/remold.gradle.kts")) {
@@ -216,7 +219,7 @@ class RemoldPluginTest {
         }
     }
 
-    @Test
+    @org.junit.jupiter.api.Test
     void injectsAgentIntoClientServerAndGameTestRuns() throws Exception {
         Project project = ProjectBuilder.builder().withProjectDir(tempDir).build();
         FakeLoaderRuns.Runs runs = new FakeLoaderRuns.Runs()
@@ -241,7 +244,7 @@ class RemoldPluginTest {
         Assertions.assertTrue(clientGameTest.args.get(0).startsWith("-javaagent:"), "gametest run got a non-agent JVM argument");
     }
 
-    @Test
+    @org.junit.jupiter.api.Test
     void injectRunJvmArgsSupportsAllLoaderApis() {
         Project project = ProjectBuilder.builder().withProjectDir(tempDir).build();
 
@@ -261,7 +264,7 @@ class RemoldPluginTest {
                 Collections.singletonList("-javaagent:/x")), "unknown run API must not report a successful injection");
     }
 
-    @Test
+    @org.junit.jupiter.api.Test
     void syncLoomRunConfigsInjectsAgentIntoMinecraftServer() throws Exception {
         Project project = ProjectBuilder.builder().withProjectDir(tempDir).build();
         File ideaRunDir = new File(tempDir, ".idea/runConfigurations");
@@ -292,7 +295,7 @@ class RemoldPluginTest {
         Assertions.assertTrue(synced.contains("<option name=\"Make\" enabled=\"true\" />"));
     }
 
-    @Test
+    @org.junit.jupiter.api.Test
     void syncLoomRunConfigsUpdatesGradleStyleServerVmOptions() throws Exception {
         Project project = ProjectBuilder.builder().withProjectDir(tempDir).build();
         File ideaRunDir = new File(tempDir, ".idea/runConfigurations");
@@ -321,6 +324,73 @@ class RemoldPluginTest {
         Assertions.assertTrue(synced.contains("vmOptions"), "the vmOptions option must be preserved");
         Assertions.assertFalse(synced.contains("<option name=\"Make\" enabled=\"true\" />"),
                 "Gradle-style configs must not be converted into Make before-run configs");
+    }
+
+    @org.junit.jupiter.api.Test
+    void resolveForAttachDoesNotRequireMainClassOrJar() throws Exception {
+        Project project = ProjectBuilder.builder()
+                .withProjectDir(tempDir)
+                .build();
+        project.getPluginManager().apply("java");
+        project.getPluginManager().apply(RemoldPlugin.class);
+
+        RemoldExtension ext = (RemoldExtension) project.getExtensions().getByName("remold");
+        File dummyAgent = new File(tempDir, "remold-agent.jar");
+        Files.write(dummyAgent.toPath(), new byte[2048]);
+
+        RemoldConfigResolver resolver = new RemoldConfigResolver();
+        Assertions.assertThrows(GradleException.class, () -> resolver.resolve(project, ext),
+                "strict resolve should still require mainClass or jar");
+
+        RemoldResolvedConfig attachConf = resolver.resolveForAttach(project, ext);
+        Assertions.assertNull(attachConf.getMainClass());
+        Assertions.assertTrue(attachConf.getJvmArgs().stream()
+                .anyMatch(a -> a.startsWith("-javaagent:") && a.contains("remold-agent.jar")));
+    }
+
+    @org.junit.jupiter.api.Test
+    void attachInjectsJavaExecAndTestWithoutDuplicatesAndFailsClosed() throws Exception {
+        Project project = ProjectBuilder.builder()
+                .withProjectDir(tempDir)
+                .build();
+        project.getPluginManager().apply("java");
+        project.getPluginManager().apply(RemoldPlugin.class);
+
+        RemoldExtension ext = (RemoldExtension) project.getExtensions().getByName("remold");
+        File dummyAgent = new File(tempDir, "remold-agent.jar");
+        Files.write(dummyAgent.toPath(), new byte[2048]);
+
+        JavaExec customRun = project.getTasks().create("customRun", JavaExec.class);
+        Test testTask = (Test) project.getTasks().getByName("test");
+        RemoldResolvedConfig conf = new RemoldConfigResolver().resolveForAttach(project, ext);
+
+        RemoldPlugin.applyAttachTarget(project, ext, conf, "customRun", false);
+        RemoldPlugin.applyAttachTarget(project, ext, conf, customRun, false);
+        RemoldPlugin.applyAttachTarget(project, ext, conf, testTask, false);
+
+        long runAgentCount = customRun.getJvmArgs().stream()
+                .filter(a -> a.startsWith("-javaagent:") && a.contains("remold-agent.jar"))
+                .count();
+        Assertions.assertEquals(1, runAgentCount, "duplicate attach must not duplicate -javaagent");
+        Assertions.assertTrue(testTask.getJvmArgs().stream()
+                .anyMatch(a -> a.startsWith("-javaagent:") && a.contains("remold-agent.jar")));
+
+        FakeLoaderRuns.VmArgRun customRunObj = new FakeLoaderRuns.VmArgRun();
+        RemoldPlugin.applyAttachTarget(project, ext, conf, customRunObj, false);
+        Assertions.assertTrue(customRunObj.args.stream().anyMatch(a -> a.startsWith("-javaagent:")));
+
+        GradleException missingEx = Assertions.assertThrows(GradleException.class,
+                () -> RemoldPlugin.applyAttachTarget(project, ext, conf, "doesNotExist", false));
+        Assertions.assertTrue(missingEx.getMessage().contains("does not exist"));
+
+        Task compileJava = project.getTasks().getByName("compileJava");
+        GradleException nonForkEx = Assertions.assertThrows(GradleException.class,
+                () -> RemoldPlugin.applyAttachTarget(project, ext, conf, compileJava, false));
+        Assertions.assertTrue(nonForkEx.getMessage().contains("JavaForkOptions"));
+
+        GradleException unsupportedEx = Assertions.assertThrows(GradleException.class,
+                () -> RemoldPlugin.applyAttachTarget(project, ext, conf, new Object(), false));
+        Assertions.assertTrue(unsupportedEx.getMessage().contains("Unsupported remold.attach target type"));
     }
 
     private RemoldResolvedConfig resolvedConfig(Project project, List<String> jvmArgs) throws Exception {

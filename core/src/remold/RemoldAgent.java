@@ -5338,7 +5338,10 @@ public class RemoldAgent {
 				return true;
 			}
 			long diffStartNanos = System.nanoTime();
-			ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, runtimeBytes);
+			ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diffStructural(oldBytes, runtimeBytes);
+			if (InitFix.needsMethodBodies(targetClass, diff)) {
+				ClassDiffUtil.ensureFullClassNodes(diff, oldBytes, runtimeBytes);
+			}
 			String annotationDefaultChange = annotationDefaultGate(className, oldBytes, runtimeBytes);
 			long diffMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - diffStartNanos);
 			if (annotationDefaultChange != null) {

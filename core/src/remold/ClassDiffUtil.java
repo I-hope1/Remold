@@ -6,6 +6,7 @@ import org.objectweb.asm.tree.*;
 
 import java.util.*;
 import java.util.function.*;
+import java.util.zip.CRC32;
 
 /**
  * 类差异分析工具
@@ -59,6 +60,21 @@ public final class ClassDiffUtil {
 	}
 
 
+	private static final Map<byte[], CachedMethodHashes> METHOD_HASH_CACHE =
+		Collections.synchronizedMap(new WeakHashMap<>());
+
+	private static final class CachedMethodHashes {
+		final int length;
+		final long crc32;
+		final Map<String, Long> hashes;
+
+		CachedMethodHashes(int length, long crc32, Map<String, Long> hashes) {
+			this.length = length;
+			this.crc32 = crc32;
+			this.hashes = hashes;
+		}
+	}
+
 	/**
 	 * 比较两个字节码数组的差异
 	 * @param oldBytes 旧版本字节码数组
@@ -68,7 +84,24 @@ public final class ClassDiffUtil {
 	public static ClassDiff diff(byte[] oldBytes, byte[] newBytes) {
 		ClassNode oldNode = parse(oldBytes);
 		ClassNode newNode = parse(newBytes);
-		return diff(oldNode, newNode);
+		return diff(oldNode, newNode, true, cachedMethodHashes(oldBytes, oldNode), cachedMethodHashes(newBytes, newNode));
+	}
+
+	/**
+	 * 结构级差异比较：仅解析类头、字段、注解与方法签名（{@code SKIP_CODE}），不解码指令流也不计算方法体指纹。
+	 * 若后续仍需 {@code ClassNode} 指令树，可调用 {@link #ensureFullClassNodes(ClassDiff, byte[], byte[])} 按需补齐。
+	 */
+	public static ClassDiff diffStructural(byte[] oldBytes, byte[] newBytes) {
+		ClassNode oldNode = parseMetadata(oldBytes);
+		ClassNode newNode = parseMetadata(newBytes);
+		return diff(oldNode, newNode, false, null, null);
+	}
+
+	/** 按需把结构级 {@link ClassDiff} 中的 {@code oldClass}/{@code newClass} 补齐为含方法体的完整 {@link ClassNode}。 */
+	public static void ensureFullClassNodes(ClassDiff diff, byte[] oldBytes, byte[] newBytes) {
+		if (diff == null) return;
+		if (oldBytes != null) diff.oldClass = parse(oldBytes);
+		if (newBytes != null) diff.newClass = parse(newBytes);
 	}
 
 	/**
@@ -296,6 +329,12 @@ public final class ClassDiffUtil {
 		return cn;
 	}
 
+	private static ClassNode parseMetadata(byte[] bytes) {
+		ClassNode cn = new ClassNode();
+		new ClassReader(bytes).accept(cn, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+		return cn;
+	}
+
 	/**
 	 * 类差异结果封装类
 	 * 包含所有类型的变更信息
@@ -429,7 +468,8 @@ public final class ClassDiffUtil {
 	 * @param newC 新版本类节点
 	 * @return 差异结果
 	 */
-	private static ClassDiff diff(ClassNode oldC, ClassNode newC) {
+	private static ClassDiff diff(ClassNode oldC, ClassNode newC, boolean compareMethodBodies,
+	                              Map<String, Long> oldMethodHashes, Map<String, Long> newMethodHashes) {
 		ComparisonContext ctx = ComparisonContext.CONTEXT.get();
 		ctx.reset();
 
@@ -597,7 +637,7 @@ public final class ClassDiffUtil {
 					// 判定为：旧方法删除，新方法新增
 					d.removedMethods.add(oldM.name + oldM.desc);
 					d.addedMethods.add(newM.name + newM.desc);
-				} else if (isCodeChanged(oldM, newM)) {
+				} else if (compareMethodBodies && isCodeChanged(oldM, newM, oldMethodHashes, newMethodHashes)) {
 					// 方法存在且静态性未变，但代码发生了变化
 					d.modifiedBodyMethods.add(newM.name + newM.desc);
 				}
@@ -658,14 +698,39 @@ public final class ClassDiffUtil {
 	 * 1. 首先快速检查访问权限是否改变（不同则肯定有变化）
 	 * 2. 然后计算两个方法的逻辑指纹进行精确对比
 	 */
-	private static boolean isCodeChanged(MethodNode m1, MethodNode m2) {
+	private static boolean isCodeChanged(MethodNode m1, MethodNode m2,
+	                                     Map<String, Long> oldHashes, Map<String, Long> newHashes) {
 		// 快速判断：访问权限不同则肯定有变化
 		// 这是一个重要的早期退出条件，避免不必要的复杂计算
 		if (m1.access != m2.access) return true;
 
-		// 计算逻辑指纹进行精确对比
-		// 通过指令流特征生成哈希值来判断代码是否实质改变
-		return calculateMethodHash(m1) != calculateMethodHash(m2);
+		String key = m1.name + m1.desc;
+		Long h1 = oldHashes != null ? oldHashes.get(key) : null;
+		Long h2 = newHashes != null ? newHashes.get(key) : null;
+		long v1 = h1 != null ? h1 : calculateMethodHash(m1);
+		long v2 = h2 != null ? h2 : calculateMethodHash(m2);
+		return v1 != v2;
+	}
+
+	private static Map<String, Long> cachedMethodHashes(byte[] bytes, ClassNode node) {
+		if (bytes == null || node == null || node.methods == null) return null;
+		long crc = crc32(bytes);
+		CachedMethodHashes cached = METHOD_HASH_CACHE.get(bytes);
+		if (cached != null && cached.length == bytes.length && cached.crc32 == crc) {
+			return cached.hashes;
+		}
+		Map<String, Long> hashes = new HashMap<>(node.methods.size() * 2);
+		for (MethodNode m : node.methods) {
+			hashes.put(m.name + m.desc, calculateMethodHash(m));
+		}
+		METHOD_HASH_CACHE.put(bytes, new CachedMethodHashes(bytes.length, crc, Collections.unmodifiableMap(hashes)));
+		return hashes;
+	}
+
+	private static long crc32(byte[] bytes) {
+		CRC32 crc = new CRC32();
+		crc.update(bytes, 0, bytes.length);
+		return crc.getValue();
 	}
 
 	/**

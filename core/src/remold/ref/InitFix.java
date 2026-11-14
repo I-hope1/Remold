@@ -811,10 +811,27 @@ public class InitFix {
 	/** 新字节码里该字段是否带 {@code ConstantValue}（编译期字面量常量；ASM 存在 {@code FieldNode.value}）。 */
 	private static boolean isCompileTimeConstant(ClassDiff diff, String fieldName) {
 		if (diff == null || diff.newClass == null || diff.newClass.fields == null) return false;
-		for (org.objectweb.asm.tree.FieldNode field : diff.newClass.fields) {
+		for (FieldNode field : diff.newClass.fields) {
 			if (field.name.equals(fieldName)) return field.value != null;
 		}
 		return false;
+	}
+
+	/**
+	 * 判定本次热更是否真正需要读取方法体指令（字段新增、{@code @RemoldReinit}、未修补台账或初值重放）。
+	 * 返回 {@code false} 时，动态重定义路径可只保留 {@code SKIP_CODE} 结构差异，跳过全类方法指令解码与指纹计算。
+	 */
+	public static boolean needsMethodBodies(Class<?> host, ClassDiff diff) {
+		if (diff == null || diff.newClass == null) return true;
+		if (!diff.addedStaticFields.isEmpty() || !diff.addedInstanceFields.isEmpty()
+		    || !diff.reinitFields.isEmpty()) {
+			return true;
+		}
+		if (host != null && !ledgerSnapshot(host).isEmpty()) return true;
+		if (InitializerReplay.mightReplay(diff) || ApplyInitializerReplay.mightReplay(diff)) {
+			return true;
+		}
+		return !scanReinitFields(diff.newClass).isEmpty();
 	}
 
 	/**

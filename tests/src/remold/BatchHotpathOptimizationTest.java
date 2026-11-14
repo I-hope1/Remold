@@ -638,6 +638,47 @@ class BatchHotpathOptimizationTest {
 		return cw.toByteArray();
 	}
 
+	@Test
+	void diffStructuralMatchesFullDiffStructureAndInitFixRequestsBodiesOnlyWhenNeeded() throws Exception {
+		String bodyHostName = "test.DiffStructuralBodyHost";
+		byte[] v1 = buildAlignHost(bodyHostName.replace('.', '/'), Opcodes.ACC_PUBLIC, "handler$zce000$cfg$tick", 1);
+		byte[] v2 = buildAlignHost(bodyHostName.replace('.', '/'), Opcodes.ACC_PUBLIC, "handler$zce000$cfg$tick", 2);
+		Class<?> bodyHost = defineAndInit(bodyHostName, v1);
+
+		ClassDiffUtil.ClassDiff full = ClassDiffUtil.diff(v1, v2);
+		ClassDiffUtil.ClassDiff structural = ClassDiffUtil.diffStructural(v1, v2);
+		assertEquals(full.hierarchyChanged, structural.hierarchyChanged);
+		assertEquals(full.changedFields, structural.changedFields);
+		assertEquals(full.addedMethods, structural.addedMethods);
+		assertEquals(full.removedMethods, structural.removedMethods);
+		assertEquals(List.of("handler$zce000$cfg$tick()I"), full.modifiedBodyMethods);
+		assertTrue(structural.modifiedBodyMethods.isEmpty(),
+			"structural diff skips method body fingerprinting");
+		assertFalse(InitFix.needsMethodBodies(bodyHost, structural),
+			"pure body edit without added fields/@RemoldReinit/ledger/replay does not need method bodies");
+
+		String addedFieldName = "test.DiffStructuralFieldHost";
+		byte[] fv1 = buildSimpleClass(addedFieldName.replace('.', '/'), false, false);
+		byte[] fv2 = buildSimpleClass(addedFieldName.replace('.', '/'), false, true);
+		Class<?> fieldHost = defineAndInit(addedFieldName, fv1);
+
+		ClassDiffUtil.ClassDiff fieldStructural = ClassDiffUtil.diffStructural(fv1, fv2);
+		assertEquals(Set.of("iVal"), fieldStructural.addedInstanceFields);
+		assertTrue(InitFix.needsMethodBodies(fieldHost, fieldStructural),
+			"added instance field must request full method bodies for InitFix");
+		ClassDiffUtil.ensureFullClassNodes(fieldStructural, fv1, fv2);
+		assertFalse(fieldStructural.newClass.methods.isEmpty());
+		assertTrue(fieldStructural.newClass.methods.get(0).instructions.size() > 0,
+			"ensureFullClassNodes must populate method instructions");
+
+		// Calling diff() repeatedly on the same oldBytes must remain correct even with mutated-array check.
+		byte[] copyV1 = v1.clone();
+		ClassDiffUtil.ClassDiff first = ClassDiffUtil.diff(copyV1, v2);
+		assertEquals(List.of("handler$zce000$cfg$tick()I"), first.modifiedBodyMethods);
+		ClassDiffUtil.ClassDiff second = ClassDiffUtil.diff(copyV1, v2);
+		assertEquals(first.modifiedBodyMethods, second.modifiedBodyMethods);
+	}
+
 	private static Class<?> defineAndInit(String dotName, byte[] bytes) throws Exception {
 		ClassLoader cl = new ClassLoader(BatchHotpathOptimizationTest.class.getClassLoader()) {
 			@Override

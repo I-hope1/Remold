@@ -44,12 +44,10 @@ public final class ClassDiffUtil {
 		final LongObjectMap<String>     fieldMap  = new LongObjectMap<>(256);
 		/** 方法映射表：复合hash(方法名+描述符) -> MethodNode */
 		final LongObjectMap<MethodNode> methodMap = new LongObjectMap<>(256);
-		/** 差异结果对象 */
-		final ClassDiff                 result    = new ClassDiff();
 
 		/**
 		 * 重置上下文状态，为下一次比较做准备
-		 * 清空所有映射表和结果集
+		 * 清空所有临时映射表（结果对象每次调用独立分配，避免跨类缓存互相覆盖）。
 		 */
 		void reset() {
 			oldInterfaces.clear();
@@ -57,7 +55,6 @@ public final class ClassDiffUtil {
 
 			fieldMap.clear();
 			methodMap.clear();
-			result.reset();
 		}
 	}
 
@@ -66,7 +63,7 @@ public final class ClassDiffUtil {
 	 * 比较两个字节码数组的差异
 	 * @param oldBytes 旧版本字节码数组
 	 * @param newBytes 新版本字节码数组
-	 * @return 差异结果对象，请勿缓存使用（每次调用都返回新的实例）
+	 * @return 独立的差异结果实例（可安全跨调用缓存）
 	 */
 	public static ClassDiff diff(byte[] oldBytes, byte[] newBytes) {
 		ClassNode oldNode = parse(oldBytes);
@@ -431,7 +428,7 @@ public final class ClassDiffUtil {
 		ComparisonContext ctx = ComparisonContext.CONTEXT.get();
 		ctx.reset();
 
-		ClassDiff d = ctx.result;
+		ClassDiff d = new ClassDiff();
 		d.oldClass = oldC;
 		d.newClass = newC;
 

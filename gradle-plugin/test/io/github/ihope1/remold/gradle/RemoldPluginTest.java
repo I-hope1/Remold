@@ -393,6 +393,52 @@ class RemoldPluginTest {
         Assertions.assertTrue(unsupportedEx.getMessage().contains("Unsupported remold.attach target type"));
     }
 
+    @org.junit.jupiter.api.Test
+    void standaloneLaunchersSupportLoomExtractionAndRejectUnsupportedModLoaders() {
+        Project plain = ProjectBuilder.builder().withProjectDir(tempDir).build();
+        plain.getPlugins().apply("java");
+        Assertions.assertDoesNotThrow(() -> RemoldPlugin.ensureStandaloneLauncherSupported(plain, "startRemold", true));
+        Assertions.assertDoesNotThrow(() -> RemoldPlugin.ensureStandaloneLauncherSupported(plain, "runRemold", false));
+
+        Project loomWithoutRuns = ProjectBuilder.builder().withProjectDir(tempDir).build();
+        loomWithoutRuns.getPlugins().apply("java");
+        loomWithoutRuns.getExtensions().add("loom", new Object());
+        GradleException noRunEx = Assertions.assertThrows(GradleException.class,
+                () -> RemoldPlugin.ensureStandaloneLauncherSupported(loomWithoutRuns, "startRemold", true));
+        Assertions.assertTrue(noRunEx.getMessage().contains("No Loom 'runClient'/'runServer' JavaExec task"));
+
+        Project loomWithRunClient = ProjectBuilder.builder().withProjectDir(tempDir).build();
+        loomWithRunClient.getPlugins().apply("java");
+        loomWithRunClient.getExtensions().add("loom", new Object());
+        loomWithRunClient.getTasks().register("runClient", org.gradle.api.tasks.JavaExec.class);
+        Assertions.assertDoesNotThrow(
+                () -> RemoldPlugin.ensureStandaloneLauncherSupported(loomWithRunClient, "startRemold", true));
+        Assertions.assertDoesNotThrow(
+                () -> RemoldPlugin.ensureStandaloneLauncherSupported(loomWithRunClient, "generateRemoldScript", true));
+        GradleException runRemoldEx = Assertions.assertThrows(GradleException.class,
+                () -> RemoldPlugin.ensureStandaloneLauncherSupported(loomWithRunClient, "runRemold", false));
+        Assertions.assertTrue(runRemoldEx.getMessage().contains("startRemold"));
+
+        Project neoProject = ProjectBuilder.builder().withProjectDir(tempDir).build();
+        neoProject.getPlugins().apply("java");
+        neoProject.getExtensions().add("neoForge", new Object());
+        GradleException neoEx = Assertions.assertThrows(GradleException.class,
+                () -> RemoldPlugin.ensureStandaloneLauncherSupported(neoProject, "startRemold", true));
+        Assertions.assertTrue(neoEx.getMessage().contains("ModLauncher"));
+
+        java.util.List<String> stripped = RemoldPlugin.stripClasspathArgs(java.util.Arrays.asList(
+                "-Xmx2G", "-cp", "a.jar;b.jar", "-Dfoo=bar", "--class-path=c.jar", "-classpath", "d.jar",
+                "@E:\\proj\\build\\loom-cache\\argFiles\\runClient", "@custom/keep.args", "-XX:+UseG1GC"),
+                "custom/other.args");
+        Assertions.assertEquals(
+                java.util.Arrays.asList("-Xmx2G", "-Dfoo=bar", "@custom/keep.args", "-XX:+UseG1GC"),
+                stripped);
+
+        Assertions.assertEquals("-Dplain=C:\\a\\b", GenerateRemoldScriptTask.formatArgFileToken("-Dplain=C:\\a\\b"));
+        Assertions.assertEquals("\"-Dspace=C:\\\\a b\\\\c\"",
+                GenerateRemoldScriptTask.formatArgFileToken("-Dspace=C:\\a b\\c"));
+    }
+
     private RemoldResolvedConfig resolvedConfig(Project project, List<String> jvmArgs) throws Exception {
         File agent = new File(tempDir, "remold-agent.jar");
         Files.write(agent.toPath(), new byte[2048]);

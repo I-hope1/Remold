@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.jar.Attributes;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
@@ -172,6 +173,83 @@ class AttachAndConfigurationCacheTest {
                 .buildAndFail();
         assertTrue(failed.getOutput().contains("Cannot attach to task 'missingRunTask': task does not exist"),
                 "Missing attach target must fail closed with clear message:\n" + failed.getOutput());
+    }
+
+    @Test
+    void loomGenerateRemoldScriptExtractsRunClientAndReusesConfigCache(@TempDir Path tempRoot) throws IOException {
+        Path projectDir = tempRoot.resolve("ws/loom-demo");
+        Files.createDirectories(projectDir);
+        writeJavaMain(projectDir);
+        Path agentJar = projectDir.resolve("libs/remold-agent.jar");
+        createMinimalAgentJar(agentJar);
+
+        write(projectDir.resolve("settings.gradle.kts"), "rootProject.name = \"loom-export-demo\"\n");
+        String agentPathUnix = agentJar.toAbsolutePath().toString().replace('\\', '/');
+        write(projectDir.resolve("build.gradle.kts"), String.join("\n",
+                "plugins {",
+                "    java",
+                "    id(\"io.github.i-hope1.remold\")",
+                "}",
+                "extensions.add(\"loom\", Object())",
+                "remold {",
+                "    agentJar = \"libs/remold-agent.jar\"",
+                "}",
+                "val configureClientLaunch by tasks.registering {",
+                "    doLast {",
+                "        println(\"CONFIGURE_LAUNCH_RAN\")",
+                "    }",
+                "}",
+                "tasks.register<JavaExec>(\"runClient\") {",
+                "    dependsOn(configureClientLaunch, tasks.named(\"classes\"))",
+                "    classpath = sourceSets[\"main\"].runtimeClasspath",
+                "    mainClass.set(\"net.fabricmc.devlaunchinjector.Main\")",
+                "    workingDir = file(\"run\")",
+                "    jvmArgs(\"-Dfabric.dli.env=client\", \"-javaagent:" + agentPathUnix + "\")",
+                "    args(\"--assetIndex\", \"1.21\")",
+                "    environment(\"REMOLD_TEST_ENV\", \"loom-ok\")",
+                "    doFirst {",
+                "        println(\"RUN_CLIENT_SHOULD_NOT_RUN\")",
+                "    }",
+                "}",
+                ""));
+
+        BuildResult run1 = run(projectDir, "generateRemoldScript", "--configuration-cache");
+        String out1 = run1.getOutput();
+        assertTrue(out1.contains("CONFIGURE_LAUNCH_RAN"), "Must run Loom prerequisite task:\n" + out1);
+        assertFalse(out1.contains("RUN_CLIENT_SHOULD_NOT_RUN"), "Must NOT execute runClient itself:\n" + out1);
+
+        Path argsFile = projectDir.resolve("build/remold/remold.args");
+        assertTrue(Files.exists(argsFile), "remold.args must be generated");
+        List<String> lines = Files.readAllLines(argsFile, StandardCharsets.UTF_8);
+        assertTrue(lines.contains("-Dfabric.dli.env=client"), "Missing DLI system property:\n" + lines);
+        assertTrue(lines.contains("net.fabricmc.devlaunchinjector.Main"), "Missing DLI mainClass:\n" + lines);
+        assertTrue(lines.contains("--assetIndex") && lines.contains("1.21"), "Missing Loom app args:\n" + lines);
+        assertEquals(1, lines.stream().filter(l -> l.equals("-cp")).count(),
+                "Must emit -cp exactly once (no duplicate from JavaExec.getAllJvmArgs):\n" + lines);
+        assertEquals(1, lines.stream().filter(l -> l.contains("-javaagent:") && l.contains("remold-agent.jar")).count(),
+                "Must deduplicate remold-agent.jar -javaagent:\n" + lines);
+
+        String bat = new String(Files.readAllBytes(projectDir.resolve("build/run-remold.bat")), StandardCharsets.UTF_8);
+        assertTrue(bat.contains("cd /d \""), "bat script must cd into Loom workingDir:\n" + bat);
+        assertTrue(bat.contains("set \"REMOLD_TEST_ENV=loom-ok\""), "bat script must export custom env:\n" + bat);
+
+        String sh = new String(Files.readAllBytes(projectDir.resolve("build/run-remold.sh")), StandardCharsets.UTF_8);
+        assertTrue(sh.contains("/run\""), "sh script must cd into Loom workingDir:\n" + sh);
+        assertTrue(sh.contains("export REMOLD_TEST_ENV='loom-ok'"), "sh script must export custom env:\n" + sh);
+
+        BuildResult run2 = run(projectDir, "generateRemoldScript", "--configuration-cache", "--rerun-tasks");
+        BuildResult run3 = run(projectDir, "generateRemoldScript", "--configuration-cache", "--rerun-tasks");
+        assertTrue(run3.getOutput().contains("Reusing configuration cache"),
+                "Steady-state Loom generateRemoldScript must reuse configuration cache:\n"
+                        + run2.getOutput() + "\n---\n" + run3.getOutput());
+
+        BuildResult runRemoldFailed = GradleRunner.create()
+                .withProjectDir(projectDir.toFile())
+                .withPluginClasspath()
+                .withArguments("runRemold", "--console=plain")
+                .buildAndFail();
+        assertTrue(runRemoldFailed.getOutput().contains("startRemold"),
+                "runRemold on Loom must fail with startRemold/runClient hint:\n" + runRemoldFailed.getOutput());
     }
 
     private static BuildResult run(Path projectDir, String... args) {

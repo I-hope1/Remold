@@ -74,9 +74,14 @@ public final class AccessAlign {
 				+ ", candidate=" + cand.className);
 		}
 
+		if (!needsAlignment(cand, base)) {
+			return new Result(candidate, 0, narrowed(cand, base));
+		}
+
 		int[] adjustedClass = new int[1];
 		int[] adjustedMembers = new int[1];
-		ClassWriter writer = new ClassWriter(new ClassReader(candidate), 0);
+		ClassReader cr = new ClassReader(candidate);
+		ClassWriter writer = new ClassWriter(cr, 0);
 		ClassVisitor visitor = new ClassVisitor(Opcodes.ASM9, writer) {
 			@Override
 			public void visit(int version, int access, String name, String signature,
@@ -99,11 +104,31 @@ public final class AccessAlign {
 				return super.visitMethod(aligned, name, descriptor, signature, exceptions);
 			}
 		};
-		new ClassReader(candidate).accept(visitor, 0);
+		cr.accept(visitor, 0);
 		byte[] alignedBytes = writer.toByteArray();
 
 		List<String> narrowed = narrowed(alignedBytes, base);
 		return new Result(alignedBytes, adjustedClass[0] + adjustedMembers[0], narrowed);
+	}
+
+	private static boolean needsAlignment(Model cand, Model base) {
+		int[] dummy = new int[1];
+		if (alignClassAccess(cand.access, base.access, dummy) != cand.access) {
+			return true;
+		}
+		for (Map.Entry<String, Integer> e : cand.fields.entrySet()) {
+			int cur = e.getValue();
+			if (alignMemberAccess(cur, base.fields.get(e.getKey()), dummy) != cur) {
+				return true;
+			}
+		}
+		for (Map.Entry<String, Integer> e : cand.methods.entrySet()) {
+			int cur = e.getValue();
+			if (alignMemberAccess(cur, base.methods.get(e.getKey()), dummy) != cur) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** 只做检查不改写：返回 {@code candidate} 中相对 {@code baseline} 访问权限收窄的成员（供自检门复核）。 */
@@ -113,7 +138,10 @@ public final class AccessAlign {
 	}
 
 	private static List<String> narrowed(byte[] candidate, Model base) {
-		Model cand = parse(candidate);
+		return narrowed(parse(candidate), base);
+	}
+
+	private static List<String> narrowed(Model cand, Model base) {
 		List<String> out = new ArrayList<>();
 		if (cand.access != 0 && visibilityRank(cand.access) < visibilityRank(base.access)) {
 			out.add("class " + base.className);

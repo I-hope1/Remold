@@ -1,8 +1,11 @@
 package remold.ref;
 
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.FieldVisitor;
 import org.objectweb.asm.Handle;
+import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.commons.ClassRemapper;
 import org.objectweb.asm.commons.Remapper;
@@ -106,24 +109,40 @@ public final class MixinMemberAlign {
 	 */
 	public static boolean hasMixinGeneratedMembers(byte[] bytecode) {
 		if (bytecode == null) return false;
+		final boolean[] found = {false};
 		try {
-			ClassNode node = read(bytecode);
-			for (MethodNode m : node.methods) {
-				if (isGenerated(m.name)) return true;
-			}
-			for (FieldNode f : node.fields) {
-				if (looksLikeMixinField(f)) return true;
-			}
-		} catch (Throwable ignored) { }
-		return false;
+			// Only inspect member headers so large classes do not allocate MethodNode/InsnList.
+			new ClassReader(bytecode).accept(new ClassVisitor(Opcodes.ASM9) {
+				@Override
+				public FieldVisitor visitField(int access, String name, String descriptor,
+				                               String signature, Object value) {
+					if (!found[0] && looksLikeMixinField(access, name)) {
+						found[0] = true;
+					}
+					return null;
+				}
+
+				@Override
+				public MethodVisitor visitMethod(int access, String name, String descriptor,
+				                                 String signature, String[] exceptions) {
+					if (!found[0] && isGenerated(name)) {
+						found[0] = true;
+					}
+					return null;
+				}
+			}, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+		} catch (Throwable ignored) {
+			return false;
+		}
+		return found[0];
 	}
 
 	/** 字段层面的 Mixin 标记：生成成员名，或"合成 + {@code $}"且不属于 JVM/javac 的合成形态。 */
-	private static boolean looksLikeMixinField(FieldNode f) {
-		if (f.name == null) return false;
-		if (isGenerated(f.name)) return true;
-		if ((f.access & Opcodes.ACC_SYNTHETIC) == 0 || !f.name.contains("$")) return false;
-		return !isJvmSynthesizedFieldName(f.name);
+	private static boolean looksLikeMixinField(int access, String name) {
+		if (name == null) return false;
+		if (isGenerated(name)) return true;
+		if ((access & Opcodes.ACC_SYNTHETIC) == 0 || !name.contains("$")) return false;
+		return !isJvmSynthesizedFieldName(name);
 	}
 
 	/**
@@ -156,8 +175,8 @@ public final class MixinMemberAlign {
 		if (candidate == null || baseline == null) {
 			throw new IllegalArgumentException("candidate/baseline must not be null");
 		}
-		ClassNode base = read(baseline);
-		ClassNode cand = read(candidate);
+		ClassNode base = readMetadata(baseline);
+		ClassNode cand = readMetadata(candidate);
 		if (base.name == null || cand.name == null || !base.name.equals(cand.name)) {
 			throw new IllegalArgumentException("class name mismatch: baseline=" + base.name
 				+ ", candidate=" + cand.name);
@@ -171,31 +190,26 @@ public final class MixinMemberAlign {
 			? candidate
 			: remapReferences(candidate, cand.name, methodRemap, fieldRemap);
 
-		ClassNode aligned = read(remapped);
-		// 枚举的常量表顺序/集合本身就是安全门的判据（ClassDiffUtil 按字段表顺序数 ordinal）。
-		// 对齐器不能替用户"恢复"枚举字段顺序，也不能把被删的常量复活成墓碑字段：那会让
-		// CHANGED_ENUM_ORDER 在 diff 之前被抹平（前线 P0-2）。方法顺序仍可对齐（Mixin 目标可能是枚举）。
-		boolean enumClass = isEnum(base) || isEnum(cand);
-		// 墓碑桩保留（Tombstone Stub Retention）：基线里存在、重织入产物里已消失的 Mixin 生成方法
-		// 不得物理删除。JBR/DCEVM 的重定义发生在 safepoint，但**已在调用栈上的旧栈帧**在 safepoint
-		// 之后会继续执行旧版字节码，并调用旧字节码里的 handler$*/redirect$* —— 方法被删掉就是
-		// NoSuchMethodError。保留一个同名/同描述符/同访问标志的最小空操作桩即可无害返回。
-		List<String> tombstoned = tombstoneMissing(aligned, base);
-		// 基线字段墓碑保留（Tombstone Field Retention）：Mixin 注入的 @Unique 字段在 retarget 移走时
-		// 会从重织入产物里消失；若物理删除，JBR/DCEVM 会对该类的全部实例做 ModifyInstances 缩容，
-		// 随后 retarget 迁回时又把它当"新字段"扩容 + 执行字段初始化补丁 —— 两次堆伸缩正是真机
-		// LootContextPredicate.combinedCondition 被置 null 的肇事窗口。保留墓碑字段后实例内存布局
-		// 在 R1~R4 全程恒定，两次伸缩都不会发生。
-		List<String> tombstonedFields = tombstoneMissingFields(aligned, base, enumClass);
-		boolean reordered = orderMembers(base, aligned, enumClass);
-		byte[] out = (reordered || !tombstoned.isEmpty() || !tombstonedFields.isEmpty())
-			? write(aligned) : remapped;
+		// Probe structure/order mutations on metadata first to avoid decoding method bodies on no-op aligns.
+		ClassNode alignedMeta = (remapped == candidate) ? cand : readMetadata(remapped);
+		boolean enumClass = isEnum(base) || isEnum(alignedMeta);
+		List<String> tombstoned = tombstoneMissing(alignedMeta, base);
+		List<String> tombstonedFields = tombstoneMissingFields(alignedMeta, base, enumClass);
+		boolean reordered = orderMembers(base, alignedMeta, enumClass);
+		byte[] out = remapped;
+		if (reordered || !tombstoned.isEmpty() || !tombstonedFields.isEmpty()) {
+			ClassNode alignedFull = read(remapped);
+			tombstoneMissing(alignedFull, base);
+			tombstoneMissingFields(alignedFull, base, enumClass);
+			orderMembers(base, alignedFull, enumClass);
+			out = write(alignedFull);
+		}
 
 		List<String> missing = new ArrayList<>();
 		List<String> added   = new ArrayList<>();
 		Set<String> candidateGenerated = new HashSet<>();
 		Set<String> baselineGenerated  = new HashSet<>();
-		for (MethodNode m : aligned.methods) {
+		for (MethodNode m : alignedMeta.methods) {
 			if (isGenerated(m.name)) candidateGenerated.add(m.name + m.desc);
 		}
 		for (MethodNode m : base.methods) {
@@ -203,7 +217,7 @@ public final class MixinMemberAlign {
 			baselineGenerated.add(m.name + m.desc);
 			if (!candidateGenerated.contains(m.name + m.desc)) missing.add(m.name + m.desc);
 		}
-		for (MethodNode m : aligned.methods) {
+		for (MethodNode m : alignedMeta.methods) {
 			if (isGenerated(m.name) && !baselineGenerated.contains(m.name + m.desc)) {
 				added.add(m.name + m.desc);
 			}
@@ -387,9 +401,17 @@ public final class MixinMemberAlign {
 		return keyType(m.name) + '\u0000' + tail(m.name) + '\u0000' + m.desc;
 	}
 
+	private static ClassNode readMetadata(byte[] bytes) {
+		return read(bytes, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+	}
+
 	private static ClassNode read(byte[] bytes) {
+		return read(bytes, 0);
+	}
+
+	private static ClassNode read(byte[] bytes, int parsingOptions) {
 		ClassNode node = new ClassNode();
-		new ClassReader(bytes).accept(node, 0);
+		new ClassReader(bytes).accept(node, parsingOptions);
 		return node;
 	}
 

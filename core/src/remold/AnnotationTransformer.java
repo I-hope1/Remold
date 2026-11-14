@@ -69,7 +69,7 @@ public class AnnotationTransformer implements ClassFileTransformer {
 	private static final byte[] FORCED_MARKER_BYTES =
 		"$remold$lambdasForced".getBytes(StandardCharsets.US_ASCII);
 
-	private static boolean containsAscii(byte[] haystack, byte[] needle) {
+	static boolean containsAscii(byte[] haystack, byte[] needle) {
 		if (haystack == null || needle == null || needle.length == 0 || haystack.length < needle.length) {
 			return false;
 		}
@@ -138,33 +138,37 @@ public class AnnotationTransformer implements ClassFileTransformer {
 		// 排除 Agent 自身类以避免递归重入；remold/probe/ 下为测试夹具专用，放行进入转换管线
 		if (className.startsWith("remold/") && !className.startsWith("remold/probe/")) return null;
 
-		// 注册到继承树
-		try {
-			HierarchyTree.register(classfileBuffer); // TODO: 如果父类是系统类，可能会出错
-		} catch (Throwable ignored) {
-		}
-
-		String dotClassName = className.replace('/', '.');
-		if (RemoldAgent.isBlacklisted(dotClassName)) return null;
-
 		RemoldAgent.InternalRedefineContext internalCtx = RemoldAgent.INTERNAL_CONTEXT.get();
 		if (internalCtx != null && internalCtx.isRetransform) {
 			// 内部探测性 retransform（例如 fetchBytecodeMemory），直接返回 null 保持原样
 			return null;
 		}
 
+		String dotClassName = className.replace('/', '.');
 		boolean isInternal = (internalCtx != null && internalCtx.isTarget(dotClassName));
 		boolean modified = false;
 
 		if (RemoldAgent.INTERNAL_AFFECTED_PASSTHROUGH
 		    && internalCtx != null && classBeingRedefined != null && !isInternal
 		    && !internalCtx.suppressesPostRedefine()) {
+			internalCtx.passthroughHookHits++;
 			// JBR 增强重定义会把"受影响的子类"一并拉进事务，并为每个子类回调 ClassFileLoadHook
 			// 取它当前的字节。那些类不是本次热更目标：任何再织入/布局门都会被 JVM 当成它们的
 			// 新版本，把已织入的字节二次织入 → link/verify 失败（裸 InternalError）。
 			// 原样放行：null 表示"不修改"，JVM 使用它自己提供的当前字节。
 			return null;
 		}
+		if (internalCtx != null && isInternal && classBeingRedefined != null) {
+			internalCtx.targetHookHits++;
+		}
+
+		// 注册到继承树（放在内部透传/探针早退之后，避免大基类重定义时为所有受影响子类重复建树）
+		try {
+			HierarchyTree.register(classfileBuffer); // TODO: 如果父类是系统类，可能会出错
+		} catch (Throwable ignored) {
+		}
+
+		if (RemoldAgent.isBlacklisted(dotClassName)) return null;
 
 		// 加载期拦截：若属于已对齐但尚未加载的类，优先使用对齐后的字节码
 		byte[] pending = null;

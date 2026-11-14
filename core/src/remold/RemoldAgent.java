@@ -637,11 +637,22 @@ public class RemoldAgent {
 	 * 额外覆盖“只改了 Mixin 模板 / 只做了 InitFix 修补”的批次。两个回调各自独立捕获异常，
 	 * 新回调的实现出错不会影响旧监听器。</p>
 	 */
+	private static final class ListenerTiming {
+		String slowestName;
+		long slowestMs = -1L;
+	}
+
 	private static void notifyBatchListeners(List<ClassDefinition> definitions, HotswapBatchReport report) {
+		notifyBatchListeners(definitions, report, null);
+	}
+
+	private static void notifyBatchListeners(List<ClassDefinition> definitions, HotswapBatchReport report,
+	                                         ListenerTiming timing) {
 		boolean hasDefinitions = definitions != null && !definitions.isEmpty();
 		boolean hasReport = report != null && report.hasObservableActivity();
 		if (!hasDefinitions && !hasReport) return;
 		for (HotswapBatchListener listener : batchListeners) {
+			long startNanos = timing != null ? System.nanoTime() : 0L;
 			if (hasDefinitions) {
 				try {
 					listener.afterInternalBatch(definitions);
@@ -654,6 +665,13 @@ public class RemoldAgent {
 					listener.afterInternalBatchReport(report);
 				} catch (Throwable t) {
 					error("[HotswapBatchListener] Error notifying batch report listener: " + listener.getClass().getName(), t);
+				}
+			}
+			if (timing != null) {
+				long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+				if (elapsedMs > timing.slowestMs) {
+					timing.slowestMs = elapsedMs;
+					timing.slowestName = listener.getClass().getSimpleName();
 				}
 			}
 		}
@@ -857,6 +875,8 @@ public class RemoldAgent {
 		 */
 		public final boolean suppressPostRedefine;
 		final InternalRedefineContext previous;
+		int targetHookHits;
+		int passthroughHookHits;
 
 		public InternalRedefineContext(Collection<String> targetDotClasses, boolean isRetransform, InternalRedefineContext previous) {
 			this(targetDotClasses, isRetransform, false, previous);
@@ -2887,6 +2907,9 @@ public class RemoldAgent {
 	/** 本批次 {@code inst.redefineClasses} 累计耗时（毫秒）。 */
 	private static final AtomicLong           BATCH_REDEFINE_MILLIS     = new AtomicLong();
 
+	private static final byte[] ON_RELOAD_DESC_BYTES =
+		"Lremold/annotation/OnReload;".getBytes(StandardCharsets.US_ASCII);
+
 	/**
 	 * 在重定义与 InitFix 补丁（静态字段与存量实例字段）全部就位后调用。
 	 *
@@ -2898,6 +2921,11 @@ public class RemoldAgent {
 		for (ClassDefinition def : definitions) {
 			Class<?> clazz = def.getDefinitionClass();
 			if (clazz == null) continue;
+			byte[] bytes = def.getDefinitionClassFile();
+			// Skip getDeclaredMethods() + runtime annotation parsing when the class bytes have no @OnReload descriptor.
+			if (bytes != null && !AnnotationTransformer.containsAscii(bytes, ON_RELOAD_DESC_BYTES)) {
+				continue;
+			}
 			postToMain(() -> processAnnotationsInternal(clazz));
 		}
 	}
@@ -5277,8 +5305,11 @@ public class RemoldAgent {
 			long alignStartNanos = System.nanoTime();
 			// 第二缺陷：Mixin 生成成员名/顺序先对齐回基线，让纯方法体热更退化为 0 新增/0 删除。
 			runtimeBytes = alignMixinGeneratedMembers(className, targetClass, runtimeBytes);
+			long mixinAlignMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - alignStartNanos);
+			long accessAlignStartNanos = System.nanoTime();
 			// 第一层：按已加载基线做访问权限单调对齐；自检门拒绝时绝不调用 redefineClasses。
 			runtimeBytes = alignAccessMonotonicity(className, targetClass, runtimeBytes);
+			long accessAlignMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - accessAlignStartNanos);
 			long alignMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - alignStartNanos);
 			if (runtimeBytes == null) {
 				return false;
@@ -5463,15 +5494,29 @@ public class RemoldAgent {
 				bytecodeCache.put(className, runtimeBytes);
 				sourceBytecodeCache.put(className, sourceBytes);
 				recordCacheLoader(className, targetClass.getClassLoader());
-				processAnnotations(Collections.singletonList(new ClassDefinition(targetClass, runtimeBytes)));
-				notifyBatchListeners(Collections.singletonList(new ClassDefinition(targetClass, runtimeBytes)),
-					BatchReportScope.finish(Collections.singletonList(className)));
+				List<ClassDefinition> defs = Collections.singletonList(new ClassDefinition(targetClass, runtimeBytes));
+				long annoStartNanos = System.nanoTime();
+				processAnnotations(defs);
+				long annoMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - annoStartNanos);
+				long finishStartNanos = System.nanoTime();
+				HotswapBatchReport batchReport = BatchReportScope.finish(Collections.singletonList(className));
+				long finishMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - finishStartNanos);
+				long listenersStartNanos = System.nanoTime();
+				ListenerTiming listenerTiming = PERF_LOG ? new ListenerTiming() : null;
+				notifyBatchListeners(defs, batchReport, listenerTiming);
+				long listenersMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - listenersStartNanos);
 				long postMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - postStartNanos);
+				InternalRedefineContext hookCtx = INTERNAL_CONTEXT.get();
+				int targetHooks = hookCtx != null ? hookCtx.targetHookHits : 0;
+				int passthroughHooks = hookCtx != null ? hookCtx.passthroughHookHits : 0;
+				String maxListenerDetail = (listenerTiming != null && listenerTiming.slowestName != null)
+					? ", max=" + listenerTiming.slowestName + ":" + listenerTiming.slowestMs + "ms"
+					: "";
 				long totalMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - dynStartNanos);
 				String timingSuffix = " (total=" + totalMs + "ms"
 					+ (PERF_LOG
 					   ? " [bridge=" + bridgeMs + "ms"
-					     + ", align=" + alignMs + "ms"
+					     + ", align=" + alignMs + "ms [mixin=" + mixinAlignMs + "ms, access=" + accessAlignMs + "ms]"
 					     + ", baseline=" + baselineMs + "ms"
 					     + ", diff=" + diffMs + "ms"
 					     + ", gate=" + gateMs + "ms"
@@ -5479,7 +5524,9 @@ public class RemoldAgent {
 					     + (twoPhase
 					        ? ", stageA=" + stageAMs + "ms, stageB=" + stageBMs + "ms, stageC=" + stageCMs + "ms"
 					        : ", redefine=" + redefMs + "ms, stageB=" + stageBMs + "ms")
-					     + ", post=" + postMs + "ms]"
+					     + ", hooks=[target=" + targetHooks + ", passthrough=" + passthroughHooks + "]"
+					     + ", post=" + postMs + "ms [anno=" + annoMs + "ms, finish=" + finishMs
+					     + "ms, listeners=" + listenersMs + "ms" + maxListenerDetail + "]]"
 					   : "")
 					+ ")";
 				info("[DYNAMIC-REDEFINE] Successfully redefined " + className

@@ -13,9 +13,15 @@ import remold.RemoldAgent.LayoutAction;
 import remold.RemoldAgent.LayoutDecision;
 import remold.RemoldAgent.Liveness;
 import remold.RemoldAgent.RemovedMemberScan;
+import remold.annotation.OnReload;
+import remold.ref.AccessAlign;
+import remold.ref.ClassHierarchyOracle.HierarchyCheck;
 import remold.ref.InitFix;
+import remold.ref.MixinMemberAlign;
 
+import java.lang.instrument.ClassDefinition;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -498,6 +504,138 @@ class BatchHotpathOptimizationTest {
 			RemoldAgent.DIFF_LOG = prevDiffLog;
 			RemoldAgent.DEBUG = prevDebug;
 		}
+	}
+
+	@Test
+	void alignFastPathsPreserveSemanticsAndAvoidRewritingWhenUnchanged() {
+		String internal = "test/AlignFastPathHost";
+		byte[] baseline = buildAlignHost(internal, Opcodes.ACC_PUBLIC, "handler$zce000$cfg$tick", 1);
+		byte[] bodyOnlyEdit = buildAlignHost(internal, Opcodes.ACC_PUBLIC, "handler$zce000$cfg$tick", 2);
+		byte[] renamedEdit = buildAlignHost(internal, Opcodes.ACC_PUBLIC, "handler$zzc999$cfg$tick", 2);
+		byte[] narrowedEdit = buildAlignHost(internal, Opcodes.ACC_PRIVATE, "handler$zce000$cfg$tick", 2);
+
+		assertTrue(MixinMemberAlign.hasMixinGeneratedMembers(baseline));
+		assertFalse(MixinMemberAlign.hasMixinGeneratedMembers(buildSimpleClass(internal, false, false)));
+
+		MixinMemberAlign.Result noOpMember = MixinMemberAlign.align(bodyOnlyEdit, baseline);
+		assertFalse(noOpMember.changed());
+		assertSame(bodyOnlyEdit, noOpMember.bytes,
+			"metadata-identical MixinMemberAlign must return candidate bytes untouched");
+
+		MixinMemberAlign.Result remappedMember = MixinMemberAlign.align(renamedEdit, baseline);
+		assertTrue(remappedMember.changed());
+		assertEquals(1, remappedMember.renamed);
+		assertNotSame(renamedEdit, remappedMember.bytes);
+
+		AccessAlign.Result noOpAccess = AccessAlign.align(bodyOnlyEdit, baseline);
+		assertFalse(noOpAccess.changed());
+		assertTrue(noOpAccess.narrowed.isEmpty());
+		assertSame(bodyOnlyEdit, noOpAccess.bytes,
+			"unchanged access flags must return candidate bytes without ClassWriter rewrite");
+
+		AccessAlign.Result widenedAccess = AccessAlign.align(narrowedEdit, baseline);
+		assertTrue(widenedAccess.changed());
+		assertTrue(widenedAccess.adjusted > 0);
+		assertTrue(widenedAccess.narrowed.isEmpty());
+	}
+
+	@Test
+	void processAnnotationsSkipsClassesWithoutOnReloadDescriptor() throws Exception {
+		String withoutName = "test.NoOnReloadHost";
+		byte[] withoutBytes = buildSimpleClass(withoutName.replace('.', '/'), false, false);
+		Class<?> withoutHost = defineAndInit(withoutName, withoutBytes);
+
+		String withName = "test.WithOnReloadHost";
+		byte[] withBytes = buildOnReloadHost(withName.replace('.', '/'));
+		Class<?> withHost = defineAndInit(withName, withBytes);
+
+		MainThreadDispatcher prevDispatcher = RemoldAgent.getMainThreadDispatcher();
+		AtomicInteger dispatches = new AtomicInteger();
+		RemoldAgent.setMainThreadDispatcher(task -> {
+			dispatches.incrementAndGet();
+			task.run();
+		});
+		try {
+			RemoldAgent.processAnnotations(List.of(new ClassDefinition(withoutHost, withoutBytes)));
+			assertEquals(0, dispatches.get(),
+				"class without @OnReload descriptor must skip getDeclaredMethods dispatch");
+
+			RemoldAgent.processAnnotations(List.of(new ClassDefinition(withHost, withBytes)));
+			assertEquals(1, dispatches.get(),
+				"class with @OnReload descriptor must dispatch annotation processing");
+			assertEquals(1, withHost.getField("hits").getInt(null),
+				"@OnReload static method must still run once");
+		} finally {
+			RemoldAgent.setMainThreadDispatcher(prevDispatcher);
+		}
+	}
+
+	@Test
+	void passthroughTransformCountsHooksAndSkipsHierarchyRegistration() throws Exception {
+		String internal = "test/PassthroughSubclassProbe";
+		String dotName = internal.replace('/', '.');
+		byte[] bytes = buildSimpleClass(internal, false, false);
+		Class<?> subClass = defineAndInit(dotName, bytes);
+		AnnotationTransformer transformer = new AnnotationTransformer();
+
+		boolean prevPassthrough = RemoldAgent.INTERNAL_AFFECTED_PASSTHROUGH;
+		RemoldAgent.INTERNAL_AFFECTED_PASSTHROUGH = true;
+		RemoldAgent.enterInternalRedefine(Collections.singleton("test.SomeOtherTarget"));
+		try {
+			byte[] out = transformer.transform(subClass.getClassLoader(), internal, subClass, null, bytes);
+			assertNull(out, "internal affected subclass passthrough must return null");
+			RemoldAgent.InternalRedefineContext ctx = RemoldAgent.INTERNAL_CONTEXT.get();
+			assertNotNull(ctx);
+			assertEquals(1, ctx.passthroughHookHits);
+			assertEquals(0, ctx.targetHookHits);
+			assertEquals(HierarchyCheck.UNKNOWN,
+				AnnotationTransformer.HierarchyTree.checkAssignableFrom("java/lang/Number", internal, null),
+				"passthrough fast-path must skip HierarchyTree.register for affected subclasses");
+		} finally {
+			RemoldAgent.exitInternalRedefine();
+			RemoldAgent.INTERNAL_AFFECTED_PASSTHROUGH = prevPassthrough;
+		}
+	}
+
+	private static byte[] buildAlignHost(String internalName, int methodAccess, String handlerName, int bodyVal) {
+		ClassWriter cw = new ClassWriter(0);
+		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC, internalName, null, "java/lang/Object", null);
+		MethodVisitor init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+		init.visitCode();
+		init.visitVarInsn(Opcodes.ALOAD, 0);
+		init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+		init.visitInsn(Opcodes.RETURN);
+		init.visitMaxs(1, 1);
+		init.visitEnd();
+
+		MethodVisitor handler = cw.visitMethod(methodAccess, handlerName, "()I", null, null);
+		handler.visitCode();
+		handler.visitLdcInsn(bodyVal);
+		handler.visitInsn(Opcodes.IRETURN);
+		handler.visitMaxs(1, 1);
+		handler.visitEnd();
+
+		cw.visitEnd();
+		return cw.toByteArray();
+	}
+
+	private static byte[] buildOnReloadHost(String internalName) {
+		ClassWriter cw = new ClassWriter(0);
+		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC, internalName, null, "java/lang/Object", null);
+		cw.visitField(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "hits", "I", null, 0).visitEnd();
+		MethodVisitor onReload = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "onReload", "()V", null, null);
+		AnnotationVisitor av = onReload.visitAnnotation(Type.getDescriptor(OnReload.class), true);
+		av.visitEnd();
+		onReload.visitCode();
+		onReload.visitFieldInsn(Opcodes.GETSTATIC, internalName, "hits", "I");
+		onReload.visitInsn(Opcodes.ICONST_1);
+		onReload.visitInsn(Opcodes.IADD);
+		onReload.visitFieldInsn(Opcodes.PUTSTATIC, internalName, "hits", "I");
+		onReload.visitInsn(Opcodes.RETURN);
+		onReload.visitMaxs(2, 0);
+		onReload.visitEnd();
+		cw.visitEnd();
+		return cw.toByteArray();
 	}
 
 	private static Class<?> defineAndInit(String dotName, byte[] bytes) throws Exception {

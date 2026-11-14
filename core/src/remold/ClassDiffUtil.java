@@ -715,8 +715,12 @@ public final class ClassDiffUtil {
 		appendIfNotEmpty(sb, " -Removed:  ", diff.removedMethods);
 		appendIfNotEmpty(sb, " !Fields:   ", diff.changedFields);
 
-		// 通过RemoldAgent输出日志
-		RemoldAgent.info(sb.toString());
+		// 通过RemoldAgent输出日志（默认开启；-Dremold.agent.diff_log=false 可关闭，DEBUG=true 时始终输出）
+		if (RemoldAgent.DIFF_LOG || RemoldAgent.DEBUG) {
+			RemoldAgent.info(sb.toString());
+		} else {
+			RemoldAgent.log(sb.toString());
+		}
 	}
 
 	/** 系统换行符常量，避免重复调用System.lineSeparator() */

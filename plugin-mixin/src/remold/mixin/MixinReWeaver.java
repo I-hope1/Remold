@@ -1,5 +1,7 @@
 package remold.mixin;
 
+import java.util.concurrent.TimeUnit;
+
 import org.spongepowered.asm.mixin.MixinEnvironment;
 import org.spongepowered.asm.mixin.transformer.IMixinTransformer;
 
@@ -77,17 +79,22 @@ public final class MixinReWeaver {
 				+ ", transformer=" + weaver.getClass().getName());
 		}
 		try {
+			long reweaveStartNanos = System.nanoTime();
 			byte[] woven = weaver.transformClassBytes(dotClassName, dotClassName, sourceBytecode);
+			long weaveMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - reweaveStartNanos);
 			if (woven == null) {
 				reportOnce(dotClassName, "[Mixin] Bytecode re-weaving returned null; falling back to source bytecode", null);
 				return sourceBytecode;
 			}
 			boolean unchanged = woven == sourceBytecode || java.util.Arrays.equals(woven, sourceBytecode);
+			long refeedMs = 0L;
 			if (!unchanged) {
 				// 目标类刚被织入：此刻 Mixin 已登记本次新增的合成内部类（分配了稳定唯一名），
 				// 但字节尚未生成。InitFix 会在同一次 redefine 的内部读这些类的 <init> 元数据，
 				// 因此必须在这里把字节提前生成并回灌（S7 时序缺口）。
+				long refeedStartNanos = System.nanoTime();
 				MixinInnerClassHotSwap.refeedForTarget(weaver, dotClassName);
+				refeedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - refeedStartNanos);
 			}
 			// 同轮中止：refeedForTarget 刚刚可能判定某个合成内部类无法安全落地，并把宿主标成
 			// BLOCKED。此时织入产物已经带着"调用新 <init>"的调用点，绝不能交给 redefineDynamic。
@@ -95,6 +102,11 @@ public final class MixinReWeaver {
 				throw new remold.BytecodeTransformerBridge.Abort(dotClassName
 					+ ": a synthetic inner class was refused by the single-exit gate after re-weaving"
 					+ " (transactional consistency); the woven bytes are discarded and nothing is redefined");
+			}
+			if (!unchanged && RemoldAgent.PERF_LOG) {
+				long totalMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - reweaveStartNanos);
+				RemoldAgent.info("[Mixin] Re-woven " + dotClassName + " (total=" + totalMs
+					+ "ms [weave=" + weaveMs + "ms, refeed=" + refeedMs + "ms])");
 			}
 			if (RemoldAgent.DEBUG) {
 				RemoldAgent.log("[Mixin] bridge out: " + dotClassName

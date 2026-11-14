@@ -237,6 +237,12 @@ public class RemoldAgent {
 	 */
 	public static String LOCAL_CLASS_GUARD = strProp("remold.agent.local_class_guard", "reject");
 
+	/** 是否输出性能细分拆项日志（{@code -Dremold.agent.perf_log=true} 开启；默认 {@code false} 仅保留单行摘要）。 */
+	public static boolean PERF_LOG = boolProp("remold.agent.perf_log", "remold.perfLog", false);
+
+	/** 是否输出每个类的 {@code [DIFF]} 变更明细（默认 {@code true}；{@code -Dremold.agent.diff_log=false} 可关闭）。 */
+	public static boolean DIFF_LOG = boolProp("remold.agent.diff_log", "remold.diffLog", true);
+
 	/** 读字符串属性并做合法性校验；非法值回退到默认值并告警（不静默接受拼错的开关）。 */
 	private static String strProp(String key, String def) {
 		String v = System.getProperty(key);
@@ -1594,6 +1600,9 @@ public class RemoldAgent {
 		DEBOUNCE.setWindows(FILE_SHAKE_MS, ASSET_SHAKE_MS);
 		info("File Shake MS: " + FILE_SHAKE_MS);
 		info("Asset Shake MS: " + ASSET_SHAKE_MS);
+		PERF_LOG = boolProp("remold.agent.perf_log", "remold.perfLog", false);
+		DIFF_LOG = boolProp("remold.agent.diff_log", "remold.diffLog", true);
+		info("Perf Detail Log: " + PERF_LOG + " (Diff Log: " + DIFF_LOG + ")");
 		UI_HOOK = Boolean.parseBoolean(System.getProperty("remold.agent.ui_hook", "false"));
 		info("UI Hook: " + UI_HOOK);
 		boolean cellPropertyRef = Boolean.parseBoolean(System.getProperty("remold.agent.cell_property_ref", "false"));
@@ -2724,18 +2733,20 @@ public class RemoldAgent {
 		notifyBatchListeners(successfulDefinitions, BatchReportScope.finish(redefinedNames));
 		if (!definitions.isEmpty() || injectedCount > 0) {
 			long totalMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - batchStartNanos);
+			String alignDiffDetail = PERF_LOG
+				? " [fetch=" + TimeUnit.NANOSECONDS.toMillis(fetchNanos) + "ms"
+				  + ", lambda=" + TimeUnit.NANOSECONDS.toMillis(lambdaNanos) + "ms"
+				  + ", diff=" + TimeUnit.NANOSECONDS.toMillis(diffNanos) + "ms"
+				  + ", annDef=" + TimeUnit.NANOSECONDS.toMillis(annDefNanos) + "ms"
+				  + ", initFix=" + TimeUnit.NANOSECONDS.toMillis(initFixNanos) + "ms]"
+				: "";
 			info("[HOTSWAP-BATCH] summary: mode=" + (needsTwoPhase && TWO_PHASE ? "2-phase" : "1-phase")
 			     + ", total=" + totalMs + "ms"
 			     + " (anon=" + anonMs + "ms"
 			     + ", guard=" + guardMs + "ms"
 			     + ", readers=" + readersMs + "ms"
 			     + ", gate=" + gateMs + "ms"
-			     + ", alignDiff=" + alignDiffMs + "ms"
-			     + " [fetch=" + TimeUnit.NANOSECONDS.toMillis(fetchNanos) + "ms"
-			     + ", lambda=" + TimeUnit.NANOSECONDS.toMillis(lambdaNanos) + "ms"
-			     + ", diff=" + TimeUnit.NANOSECONDS.toMillis(diffNanos) + "ms"
-			     + ", annDef=" + TimeUnit.NANOSECONDS.toMillis(annDefNanos) + "ms"
-			     + ", initFix=" + TimeUnit.NANOSECONDS.toMillis(initFixNanos) + "ms]"
+			     + ", alignDiff=" + alignDiffMs + "ms" + alignDiffDetail
 			     + ", liveScan=" + LIVE_INSTANCE_SCAN_MILLIS.get() + "ms"
 			     + ", redefine=" + BATCH_REDEFINE_MILLIS.get() + "ms"
 			     + ", redefined=" + successfulDefinitions.size() + ")");
@@ -5245,11 +5256,13 @@ public class RemoldAgent {
 		try {
 			// 动态重定义同样是一个可观测批次：耗时从桥接/布局门之前开始算，
 			// 到 InitFix 与回调完成结束。
+			long dynStartNanos = System.nanoTime();
 			BatchReportScope.begin();
 			LAST_REDEFINE_VM_LEVEL_FAILURE = false;
 			String className = targetClass.getName();
 			byte[] sourceBytes = newBytecode;
 			byte[] runtimeBytes;
+			long bridgeStartNanos = System.nanoTime();
 			try {
 				runtimeBytes = applyTransformerBridges(targetClass.getClassLoader(), className, targetClass, newBytecode);
 			} catch (remold.BytecodeTransformerBridge.Abort abort) {
@@ -5260,17 +5273,22 @@ public class RemoldAgent {
 				     + abort.getMessage() + "). The class keeps its previously loaded bytes; nothing was redefined.");
 				return false;
 			}
+			long bridgeMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - bridgeStartNanos);
+			long alignStartNanos = System.nanoTime();
 			// 第二缺陷：Mixin 生成成员名/顺序先对齐回基线，让纯方法体热更退化为 0 新增/0 删除。
 			runtimeBytes = alignMixinGeneratedMembers(className, targetClass, runtimeBytes);
 			// 第一层：按已加载基线做访问权限单调对齐；自检门拒绝时绝不调用 redefineClasses。
 			runtimeBytes = alignAccessMonotonicity(className, targetClass, runtimeBytes);
+			long alignMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - alignStartNanos);
 			if (runtimeBytes == null) {
 				return false;
 			}
 
+			long baselineStartNanos = System.nanoTime();
 			byte[] oldBytes = bytecodeCache.get(className);
 			if (oldBytes == null) oldBytes = fetchOriginalBytecode(targetClass);
 			if (oldBytes == null) oldBytes = sourceBytecodeCache.get(className);
+			long baselineMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - baselineStartNanos);
 			if (oldBytes == null) {
 				warn("[DYNAMIC-REDEFINE] No baseline for " + className
 					+ " (bytecodeCache/sourceBytecodeCache/fetchOriginalBytecode all empty);"
@@ -5282,11 +5300,16 @@ public class RemoldAgent {
 				// 也不会触发 InitFix / @OnReload / 批次回调。必须默认可见地打出来，否则调用方
 				// 无法区分"真重定义了"与"字节相同直接返回"。
 				info("[DYNAMIC-REDEFINE] no-op: " + className
-				     + " runtime bytecode equals the baseline; no redefine performed (nothing to change).");
+				     + " runtime bytecode equals the baseline; no redefine performed (nothing to change)."
+				     + (PERF_LOG ? " (total=" + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - dynStartNanos)
+				        + "ms [bridge=" + bridgeMs + "ms, align=" + alignMs + "ms, baseline=" + baselineMs + "ms])"
+				        : ""));
 				return true;
 			}
+			long diffStartNanos = System.nanoTime();
 			ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, runtimeBytes);
 			String annotationDefaultChange = annotationDefaultGate(className, oldBytes, runtimeBytes);
+			long diffMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - diffStartNanos);
 			if (annotationDefaultChange != null) {
 				// 探针读数：注解默认值变化后已加载的消费者类仍读旧默认值（JBR 21/25，含 DCEVM 运行时）。
 				// 单类入口没有"同批连坐"的对象，拒绝本类即等于整体不重定义（宿主保持旧版）。
@@ -5304,7 +5327,9 @@ public class RemoldAgent {
 						: " Interface changes require enhanced class redefinition (JBR/DCEVM); RESTART required on this JVM."));
 				return false;
 			}
+			long gateStartNanos = System.nanoTime();
 			LayoutDecision decision = decideDynamicLayout(targetClass, className, diff, runtimeBytes);
+			long gateMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - gateStartNanos);
 			String why = decision.reason() != null
 				? decision.reason()
 				: (decision.layout() != null ? decision.layout().detail() : "unknown reason");
@@ -5334,6 +5359,7 @@ public class RemoldAgent {
 					warn("[LAYOUT-REJECT] Dynamic class " + className + " rejected: " + why);
 					return false;
 			}
+			long initFixStartNanos = System.nanoTime();
 			InitFix.transform(targetClass, runtimeBytes, diff);
 
 			// 动态单类入口也接两阶段（docs/initfix/04-target-design.md §1）：调用方
@@ -5352,21 +5378,29 @@ public class RemoldAgent {
 					twoPhase = false;
 				}
 			}
+			long initFixMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - initFixStartNanos);
 
 			// 堆实例哨兵三切面（默认关闭，-Dremold.probe.heapwatch=true 开启）：
 			// 用于定位「某类字段在 redefine / 字段初始化补丁窗口内被置 null」这类跨类污染。
 			remold.ref.HeapFieldWatch.snapshot("before-redefine", className);
 			enterInternalRedefine(Collections.singleton(className));
 			try {
+				long stageAMs = 0L;
+				long stageBMs = 0L;
+				long stageCMs = 0L;
+				long redefMs = 0L;
 				if (twoPhase) {
 					// ---- 阶段 A：新结构 + 旧方法体（构造器/<clinit> 保留新体） ----
+					long tStageA = System.nanoTime();
 					inst.redefineClasses(new ClassDefinition(targetClass, stageABytes));
+					stageAMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tStageA);
 					remold.ref.HeapFieldWatch.snapshot("after-stage-a", className);
 					// 阶段 A 已生效：分析期 oracle 看的"新结构"仍是 C，但 JVM 当前真实形态是 A，
 					// 缓存先指向 A（与批次两阶段同口径）；C 成功后再推进。
 					bytecodeCache.put(className, stageABytes);
 					info("[DYNAMIC-REDEFINE] " + className + ": stage A applied (new shape with old method"
 					     + " bodies); patching live instances before stage C.");
+					long tStageB = System.nanoTime();
 					try {
 						InitFix.afterRedefine(targetClass);
 					} catch (Throwable t) {
@@ -5374,9 +5408,11 @@ public class RemoldAgent {
 						error("[DYNAMIC-REDEFINE] " + className + ": stage B patch failed (" + t + ");"
 						      + " stage C will still be applied, so unpatched fields stay at defaults.", t);
 					}
+					stageBMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tStageB);
 					remold.ref.HeapFieldWatch.snapshot("after-field-patch", className);
 
 					// ---- 阶段 C：提交现成的 runtimeBytes（桥接与 InitFix.transform 已做过，不重跑） ----
+					long tStageC = System.nanoTime();
 					try {
 						inst.redefineClasses(new ClassDefinition(targetClass, runtimeBytes));
 					} catch (Throwable stageCFailure) {
@@ -5405,27 +5441,49 @@ public class RemoldAgent {
 						                    : "no rollback was possible — RESTART required."), stageCFailure);
 						return false;
 					}
+					stageCMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tStageC);
 					remold.ref.HeapFieldWatch.snapshot("after-stage-c", className);
 				} else {
+					long tRedef = System.nanoTime();
 					inst.redefineClasses(new ClassDefinition(targetClass, runtimeBytes));
+					redefMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tRedef);
 					remold.ref.HeapFieldWatch.snapshot("after-redefine", className);
 					bytecodeCache.put(className, runtimeBytes);
+					long tStageB = System.nanoTime();
 					try {
 						InitFix.afterRedefine(targetClass);
 					} catch (Throwable t) {
 						error("Failed to run InitFix after redefine for " + className, t);
 						InitFix.afterRedefineFailed(targetClass);
 					}
+					stageBMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tStageB);
 					remold.ref.HeapFieldWatch.snapshot("after-field-patch", className);
 				}
+				long postStartNanos = System.nanoTime();
 				bytecodeCache.put(className, runtimeBytes);
 				sourceBytecodeCache.put(className, sourceBytes);
 				recordCacheLoader(className, targetClass.getClassLoader());
 				processAnnotations(Collections.singletonList(new ClassDefinition(targetClass, runtimeBytes)));
 				notifyBatchListeners(Collections.singletonList(new ClassDefinition(targetClass, runtimeBytes)),
 					BatchReportScope.finish(Collections.singletonList(className)));
+				long postMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - postStartNanos);
+				long totalMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - dynStartNanos);
+				String timingSuffix = " (total=" + totalMs + "ms"
+					+ (PERF_LOG
+					   ? " [bridge=" + bridgeMs + "ms"
+					     + ", align=" + alignMs + "ms"
+					     + ", baseline=" + baselineMs + "ms"
+					     + ", diff=" + diffMs + "ms"
+					     + ", gate=" + gateMs + "ms"
+					     + ", initFix=" + initFixMs + "ms"
+					     + (twoPhase
+					        ? ", stageA=" + stageAMs + "ms, stageB=" + stageBMs + "ms, stageC=" + stageCMs + "ms"
+					        : ", redefine=" + redefMs + "ms, stageB=" + stageBMs + "ms")
+					     + ", post=" + postMs + "ms]"
+					   : "")
+					+ ")";
 				info("[DYNAMIC-REDEFINE] Successfully redefined " + className
-				     + (twoPhase ? " (two-phase: A -> patch -> C)" : ""));
+				     + (twoPhase ? " (two-phase: A -> patch -> C)" : "") + timingSuffix);
 				return true;
 			} finally {
 				exitInternalRedefine();

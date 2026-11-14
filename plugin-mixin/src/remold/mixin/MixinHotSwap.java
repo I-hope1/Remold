@@ -15,6 +15,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.tree.AnnotationNode;
@@ -216,6 +217,7 @@ public final class MixinHotSwap {
 		// 上游 Reloaded 状态只机械比对元数据并抛 MixinReloadException。三类变更在 Remold 的重织入
 		// 管线下各自有安全通道：priority 只影响织入排序、targets 走差集卸载+重挂、
 		// interfaces 在增强重定义宿主上可改写接口表。命中即在这里接管，未命中才回落原生 reload。
+		long reloadStartNanos = System.nanoTime();
 		MixinReloadPolicy.Plan plan = MixinReloadPolicy.prepare(transformer, dotClassName, node,
 			RemoldAgent.isEnhancedHotswapEnabled());
 		MixinRetarget.Result retarget = null;
@@ -346,7 +348,9 @@ public final class MixinHotSwap {
 		// 也不能推进快照（否则下一次重试会拿错误基线算增量）。
 		recordMixinReport(dotClassName, node);
 		LAST_RELOADED_BYTES.put(dotClassName, newMixinBytes.clone());
-		RemoldAgent.info("[Mixin] " + dotClassName + " reloaded; affected target(s): " + targets);
+		long reloadMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - reloadStartNanos);
+		RemoldAgent.info("[Mixin] " + dotClassName + " reloaded; affected target(s): " + targets
+			+ (RemoldAgent.PERF_LOG ? " (reload=" + reloadMs + "ms)" : ""));
 		scheduleInnerClassHotUpdate(dotClassName, innerNames);
 		synchronized (PENDING_LOCK) {
 			PENDING.addAll(targets);
@@ -720,6 +724,7 @@ public final class MixinHotSwap {
 			return;
 		}
 
+		long loadedScanStart = System.nanoTime();
 		Map<String, Class<?>> loaded = new HashMap<>();
 		Set<String> wanted = new LinkedHashSet<>(batch);
 		Map<String, List<Class<?>>> duplicates = new HashMap<>();
@@ -737,6 +742,7 @@ public final class MixinHotSwap {
 				loaded.put(candidate.getName(), remold.ClassCopySelector.prefer(previous, candidate));
 			}
 		}
+		long loadedScanMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - loadedScanStart);
 		for (Map.Entry<String, List<Class<?>>> e : duplicates.entrySet()) {
 			RemoldAgent.warn("[Mixin] Multiple loaded copies of " + e.getKey() + " found: "
 				+ e.getValue().stream().map(c -> String.valueOf(c.getClassLoader()))
@@ -745,13 +751,16 @@ public final class MixinHotSwap {
 		}
 
 		for (String name : batch) {
+			long targetStart = System.nanoTime();
 			Class<?> targetClass = loaded.get(name);
 			if (targetClass == null) {
 				// 未加载 ⇒ 下次加载时会直接用新的 Mixin 定义织入，无需热更。
 				RemoldAgent.info("[Mixin] Target class " + name + " is not yet loaded; new mixin will apply upon initial load");
 				continue;
 			}
+			long readOrigStart = System.nanoTime();
 			byte[] originalBytes = readOriginalBytes(targetClass);
+			long readOrigMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - readOrigStart);
 			if (originalBytes == null) {
 				RemoldAgent.warn("[Mixin] Unable to read original bytecode for " + name + "; skipping re-weaving (runtime-generated classes not supported)");
 				continue;
@@ -762,8 +771,18 @@ public final class MixinHotSwap {
 			if (MixinInnerClassHotSwap.isBlocked(name)) {
 				MixinInnerClassHotSwap.clearBlocked(name);
 			}
-			if (RemoldAgent.redefineDynamic(targetClass, originalBytes)) {
-				RemoldAgent.info("[Mixin] Target class " + name + " re-woven with updated mixin and redefined");
+			long redefStart = System.nanoTime();
+			boolean ok = RemoldAgent.redefineDynamic(targetClass, originalBytes);
+			long redefMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - redefStart);
+			if (ok) {
+				long targetTotalMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - targetStart);
+				RemoldAgent.info("[Mixin] Target class " + name + " re-woven with updated mixin and redefined"
+					+ " (total=" + targetTotalMs + "ms"
+					+ (RemoldAgent.PERF_LOG
+					   ? " [loadedScan=" + loadedScanMs + "ms"
+					     + ", readOrig=" + readOrigMs + "ms, redefine=" + redefMs + "ms]"
+					   : "")
+					+ ")");
 			} else if (MixinInnerClassHotSwap.isBlocked(name)) {
 				// 真原子中止：合成类这一轮无法安全落地，宿主的 redefineClasses 一次都没有发生。
 				// 宿主与合成类一起停在已加载旧版。**不清 BLOCKED、并记下这份候选签名**：
@@ -796,9 +815,16 @@ public final class MixinHotSwap {
 
 		// 目标类重织入之后再处理内部类：此时首次引入的内部类已经随目标织入完成登记，
 		// 已加载的合成内部类则可以按新的模板字节重新生成并重定义。
-		IMixinTransformer transformer = MixinReWeaver.activeTransformer();
-		for (Map.Entry<String, List<String>> entry : innerBatch.entrySet()) {
-			reportInnerClassHotUpdate(transformer, entry.getKey(), entry.getValue());
+		if (!innerBatch.isEmpty()) {
+			long innerStart = System.nanoTime();
+			IMixinTransformer transformer = MixinReWeaver.activeTransformer();
+			for (Map.Entry<String, List<String>> entry : innerBatch.entrySet()) {
+				reportInnerClassHotUpdate(transformer, entry.getKey(), entry.getValue());
+			}
+			if (RemoldAgent.PERF_LOG) {
+				long innerMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - innerStart);
+				RemoldAgent.info("[Mixin] Synthetic inner class update batch finished in " + innerMs + "ms");
+			}
 		}
 	}
 

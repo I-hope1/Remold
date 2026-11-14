@@ -15,6 +15,7 @@ import remold.RemoldAgent.Liveness;
 import remold.RemoldAgent.RemovedMemberScan;
 import remold.ref.InitFix;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -455,6 +456,48 @@ class BatchHotpathOptimizationTest {
 
 		cw.visitEnd();
 		return cw.toByteArray();
+	}
+
+	@Test
+	void diffLogAndPerfDetailDefaultsAndSwitchBehavior() {
+		byte[] v1 = buildSimpleClass("test/DiffGateHost", false, false);
+		byte[] v2 = buildSimpleClass("test/DiffGateHost", true, false);
+		ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(v1, v2);
+
+		RemoldAgent.Logger prevLogger = RemoldAgent.logger;
+		boolean prevDiffLog = RemoldAgent.DIFF_LOG;
+		boolean prevDebug = RemoldAgent.DEBUG;
+		List<String> infos = new ArrayList<>();
+		List<String> logs = new ArrayList<>();
+		RemoldAgent.logger = new RemoldAgent.Logger() {
+			@Override public void log(String msg) { logs.add(msg); }
+			@Override public void info(String msg) { infos.add(msg); }
+			@Override public void warn(String msg) {}
+			@Override public void error(String msg) {}
+			@Override public void error(String msg, Throwable t) {}
+		};
+		try {
+			assertTrue(prevDiffLog, "DIFF_LOG must default to true");
+			assertFalse(RemoldAgent.PERF_LOG, "PERF_LOG (detailed breakdown) must default to false");
+
+			RemoldAgent.DIFF_LOG = false;
+			RemoldAgent.DEBUG = false;
+			ClassDiffUtil.logDiff("test.DiffGateHost", diff);
+			assertTrue(infos.isEmpty(), "DIFF_LOG=false & DEBUG=false must suppress info [DIFF]");
+			assertTrue(logs.stream().anyMatch(m -> m.startsWith("[DIFF] ")),
+				"DIFF_LOG=false must demote [DIFF] block to debug log()");
+
+			infos.clear();
+			logs.clear();
+			RemoldAgent.DIFF_LOG = true;
+			ClassDiffUtil.logDiff("test.DiffGateHost", diff);
+			assertTrue(infos.stream().anyMatch(m -> m.startsWith("[DIFF] ")),
+				"DIFF_LOG=true must emit [DIFF] via info()");
+		} finally {
+			RemoldAgent.logger = prevLogger;
+			RemoldAgent.DIFF_LOG = prevDiffLog;
+			RemoldAgent.DEBUG = prevDebug;
+		}
 	}
 
 	private static Class<?> defineAndInit(String dotName, byte[] bytes) throws Exception {

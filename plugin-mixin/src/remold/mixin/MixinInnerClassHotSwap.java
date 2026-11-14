@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
@@ -420,12 +421,14 @@ final class MixinInnerClassHotSwap {
 		}
 		String targetInternal = MixinInnerClassSupport.internalName(targetDotName);
 		int registered = 0;
+		long genNanos = 0L;
+		long redefNanos = 0L;
 		try {
 			Object generator = findInnerClassGenerator(transformer);
 			if (generator == null) {
 				return 0;
 			}
-			java.lang.reflect.Field innerClassesField = findField(generator.getClass(), "innerClasses");
+			Field innerClassesField = findField(generator.getClass(), "innerClasses");
 			Object raw = innerClassesField == null ? null : innerClassesField.get(generator);
 			if (!(raw instanceof Map)) {
 				return 0;
@@ -452,7 +455,8 @@ final class MixinInnerClassHotSwap {
 				// 每次都按**当前**模板重新生成：早先的 "已回灌就跳过" 会让上一次（可能是在
 				// ClassInfo 失配窗口里生成的）旧字节一直遮蔽新映射，retarget 往返后合成类的
 				// 构造器描述符便停留在旧形态（真机 NoSuchMethodError）。生成是确定性的。
-				java.lang.reflect.Field counter = findField(info.getClass(), "loadCounter");
+				long genStart = System.nanoTime();
+				Field counter = findField(info.getClass(), "loadCounter");
 				int loadCounterBefore = counter == null ? 0 : counter.getInt(info);
 				ClassNode fresh = new ClassNode();
 				boolean generated;
@@ -469,20 +473,27 @@ final class MixinInnerClassHotSwap {
 					}
 				}
 				if (!generated) {
+					genNanos += System.nanoTime() - genStart;
 					continue;
 				}
 				// 已加载合成类的实时反射字段表（不变量 A 的唯一锚点）。
 				Class<?> live = inst == null ? null : findLoadedClass(inst, conformedDotted);
-				java.util.List<String> loadedFields = live == null ? java.util.List.of()
+				List<String> loadedFields = live == null ? List.of()
 					: MixinSyntheticSchema.loadedFields(live);
 				// 基线字节 = 本加载器 JVM 实际加载的那份（premain 录口 / 已生效字节），
 				// 不是本进程上一轮生成到覆盖层里的字节：R0 启动期加载的合成类在 R1 首次热更时
 				// 覆盖层是空的，读覆盖层会让 retainConstructors 拿不到任何旧 <init>。
 				// 字段表相对**已加载类实时反射表**（不变量 A）的差异：只做诊断，判决在单一出口里。
-				RemoldAgent.info("[Mixin] synthetic inner class " + conformedDotted + " field table vs loaded: loaded="
+				String schemaLog = "[Mixin] synthetic inner class " + conformedDotted + " field table vs loaded: loaded="
 					+ loadedFields + " fresh=" + MixinSyntheticSchema.nodeFields(fresh)
-					+ " (schemaHash=" + MixinSyntheticSchema.schemaHash(fresh) + ").");
+					+ " (schemaHash=" + MixinSyntheticSchema.schemaHash(fresh) + ").";
+				if (RemoldAgent.DIFF_LOG || RemoldAgent.DEBUG) {
+					RemoldAgent.info(schemaLog);
+				} else {
+					RemoldAgent.log(schemaLog);
+				}
 				byte[] bytes = serialize(fresh);
+				genNanos += System.nanoTime() - genStart;
 				// 这里刻意读**覆盖层**（上一轮生成了什么），不是基线（JVM 里是什么）：它只用来判断
 				// "本次生成的字节相对上一次生成有没有变"，从而决定是否值得多一次 redefine。
 				byte[] previous = generatedBytes(conformedDotted);
@@ -508,7 +519,9 @@ final class MixinInnerClassHotSwap {
 							boolean bytesChanged = previous == null || !java.util.Arrays.equals(previous, bytes);
 							boolean staleSchema = describeSchemaChange(live, fresh) != null;
 							if (bytesChanged || staleSchema) {
+								long redefStart = System.nanoTime();
 								redefineSyntheticBeforeTarget(inst, live, conformedDotted, bytes, targetDotName);
+								redefNanos += System.nanoTime() - redefStart;
 							}
 						}
 					}
@@ -522,7 +535,11 @@ final class MixinInnerClassHotSwap {
 		}
 		if (registered > 0) {
 			RemoldAgent.info("[Mixin] pre-generated " + registered + " synthetic inner class(es) for "
-				+ targetDotName + " before the InitFix metadata scan");
+				+ targetDotName + " before the InitFix metadata scan"
+				+ (RemoldAgent.PERF_LOG
+				   ? " (gen=" + TimeUnit.NANOSECONDS.toMillis(genNanos)
+				     + "ms, redefine=" + TimeUnit.NANOSECONDS.toMillis(redefNanos) + "ms)"
+				   : ""));
 		}
 		return registered;
 	}

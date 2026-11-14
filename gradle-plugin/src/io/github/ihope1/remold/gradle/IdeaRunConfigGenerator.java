@@ -7,16 +7,24 @@ import java.nio.file.Files;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.gradle.api.Project;
+import org.gradle.api.logging.Logger;
+import org.gradle.api.logging.Logging;
 
 /**
  * Generates and synchronizes IntelliJ IDEA run configurations for Remold.
  */
 public final class IdeaRunConfigGenerator {
 
+    private static final Logger LOGGER = Logging.getLogger(IdeaRunConfigGenerator.class);
+
     private IdeaRunConfigGenerator() {}
 
     public static File generate(Project project, RemoldResolvedConfig conf, boolean shouldAutoDeploy, boolean isLoom) {
-        File ideaRunDir = new File(project.getRootDir(), ".idea/runConfigurations");
+        return generate(project.getRootDir(), project.getName(), conf, shouldAutoDeploy, isLoom);
+    }
+
+    public static File generate(File rootDir, String projectName, RemoldResolvedConfig conf, boolean shouldAutoDeploy, boolean isLoom) {
+        File ideaRunDir = new File(rootDir, ".idea/runConfigurations");
         if (!ideaRunDir.exists()) {
             ideaRunDir.mkdirs();
         }
@@ -24,14 +32,14 @@ public final class IdeaRunConfigGenerator {
         StringBuilder jvmArgsBuilder = new StringBuilder();
         for (String arg : conf.getJvmArgs()) {
             if (jvmArgsBuilder.length() > 0) jvmArgsBuilder.append(' ');
-            jvmArgsBuilder.append(makePortable(arg, project.getRootDir()));
+            jvmArgsBuilder.append(makePortable(arg, rootDir));
         }
         String portableJvmArgs = jvmArgsBuilder.toString();
 
         StringBuilder appArgsBuilder = new StringBuilder();
         for (String arg : conf.getAppArgs()) {
             if (appArgsBuilder.length() > 0) appArgsBuilder.append(' ');
-            appArgsBuilder.append(makePortable(arg, project.getRootDir()));
+            appArgsBuilder.append(makePortable(arg, rootDir));
         }
         String portableAppArgs = appArgsBuilder.toString();
 
@@ -66,7 +74,7 @@ public final class IdeaRunConfigGenerator {
             sb.append("    <method v=\"2\" />\n");
             sb.append("  </configuration>\n");
         } else if (conf.getTargetJar() != null) {
-            String portableJar = makePortable(conf.getTargetJar().getAbsolutePath(), project.getRootDir());
+            String portableJar = makePortable(conf.getTargetJar().getAbsolutePath(), rootDir);
             sb.append("  <configuration default=\"false\" name=\"Run with Remold\" type=\"JarApplication\">\n");
             sb.append("    <option name=\"JAR_PATH\" value=\"").append(xmlEscape(portableJar)).append("\" />\n");
             sb.append("    <option name=\"VM_PARAMETERS\" value=\"").append(xmlEscape(portableJvmArgs)).append("\" />\n");
@@ -89,9 +97,9 @@ public final class IdeaRunConfigGenerator {
             sb.append("    </method>\n");
             sb.append("  </configuration>\n");
         } else {
-            String moduleName = project.getName() + ".main";
+            String moduleName = projectName + ".main";
             sb.append("  <configuration default=\"false\" name=\"Run with Remold\" type=\"Application\" factoryName=\"Application\">\n");
-            sb.append("    <option name=\"MAIN_CLASS_NAME\" value=\"").append(xmlEscape(conf.getMainClass())).append("\" />\n");
+            sb.append("    <option name=\"MAIN_CLASS_NAME\" value=\"").append(xmlEscape(conf.getMainClass() != null ? conf.getMainClass() : "")).append("\" />\n");
             sb.append("    <module name=\"").append(xmlEscape(moduleName)).append("\" />\n");
             sb.append("    <option name=\"VM_PARAMETERS\" value=\"").append(xmlEscape(portableJvmArgs)).append("\" />\n");
             if (!portableAppArgs.isEmpty()) {
@@ -118,14 +126,18 @@ public final class IdeaRunConfigGenerator {
         try {
             Files.write(xmlFile.toPath(), sb.toString().getBytes(StandardCharsets.UTF_8));
         } catch (IOException e) {
-            project.getLogger().warn("[Remold] Failed to write " + xmlFile.getAbsolutePath() + ": " + e.getMessage());
+            LOGGER.warn("[Remold] Failed to write " + xmlFile.getAbsolutePath() + ": " + e.getMessage());
         }
 
-        syncLoomRunConfigs(project, conf, ideaRunDir);
+        syncLoomRunConfigs(rootDir, conf, ideaRunDir);
         return xmlFile;
     }
 
     public static void syncLoomRunConfigs(Project project, RemoldResolvedConfig conf, File ideaRunDir) {
+        syncLoomRunConfigs(project.getRootDir(), conf, ideaRunDir);
+    }
+
+    public static void syncLoomRunConfigs(File rootDir, RemoldResolvedConfig conf, File ideaRunDir) {
         String[] loomRunConfigs = new String[]{"Minecraft_Client.xml", "Minecraft_Server.xml"};
         Pattern vmParamPattern = Pattern.compile("<option name=\"VM_PARAMETERS\" value=\"([^\"]*)\"\\s*/>");
         Pattern vmOptionsPattern = Pattern.compile("<option name=\"vmOptions\" value=\"([^\"]*)\"\\s*/>");
@@ -156,7 +168,7 @@ public final class IdeaRunConfigGenerator {
 
                 if (match != null) {
                     String existing = match.group(1);
-                    String updated = mergeJvmArgs(project, conf, existing);
+                    String updated = mergeJvmArgs(rootDir, conf, existing);
                     if (!updated.equals(existing)) {
                         content = content.replace(match.group(0),
                                 "<option name=\"" + optionName + "\" value=\"" + xmlEscape(updated) + "\"/>");
@@ -179,7 +191,7 @@ public final class IdeaRunConfigGenerator {
 
                 if (modified) {
                     Files.write(configFile.toPath(), content.getBytes(StandardCharsets.UTF_8));
-                    project.getLogger().lifecycle("[Remold] Automatically synchronized Remold parameters into " + configName);
+                    LOGGER.lifecycle("[Remold] Automatically synchronized Remold parameters into " + configName);
                 }
             } catch (Throwable ignored) {
             }
@@ -187,11 +199,11 @@ public final class IdeaRunConfigGenerator {
     }
 
     /** Merge the Remold JVM arguments into an IDE VM-options string, staying duplicate-free. */
-    private static String mergeJvmArgs(Project project, RemoldResolvedConfig conf, String existing) {
+    private static String mergeJvmArgs(File rootDir, RemoldResolvedConfig conf, String existing) {
         Pattern agentRegex = Pattern.compile("(?:^|\\s)-javaagent:[^\\s=]+remold-agent\\.jar[^\\s]*");
         String updated = existing;
         for (String arg : conf.getJvmArgs()) {
-            String portableArg = makePortable(arg, project.getRootDir());
+            String portableArg = makePortable(arg, rootDir);
             if (arg.startsWith("-javaagent:") && arg.contains("remold-agent.jar")) {
                 Matcher am = agentRegex.matcher(updated);
                 if (am.find()) {

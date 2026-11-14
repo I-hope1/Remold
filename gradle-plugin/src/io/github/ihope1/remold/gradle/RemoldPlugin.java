@@ -1,14 +1,13 @@
 package io.github.ihope1.remold.gradle;
 
-import java.io.BufferedWriter;
 import java.io.File;
-import java.io.IOException;
 import java.lang.reflect.Method;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.gradle.api.GradleException;
 import org.gradle.api.Plugin;
@@ -20,7 +19,11 @@ import org.gradle.api.tasks.Copy;
 import org.gradle.api.tasks.JavaExec;
 import org.gradle.api.tasks.SourceSet;
 import org.gradle.api.tasks.SourceSetContainer;
+import org.gradle.api.tasks.TaskProvider;
 import org.gradle.api.tasks.compile.JavaCompile;
+import org.gradle.api.tasks.testing.Test;
+import org.gradle.jvm.toolchain.JavaLauncher;
+import org.gradle.process.JavaForkOptions;
 
 /**
  * Remold Gradle Plugin (Binary Plugin).
@@ -76,62 +79,12 @@ public final class RemoldPlugin implements Plugin<Project> {
                 task.setGroup("application");
                 task.setDescription("Runs the application with Remold Java Agent & JBR DCEVM (blocking foreground)");
                 task.setClasspath(mainSourceSet.getRuntimeClasspath());
-
-                task.doFirst(t -> {
-                    RemoldResolvedConfig conf = resolver.resolve(project, ext);
-                    if (conf.getTargetJar() != null && !conf.getTargetJar().exists()) {
-                        throw new GradleException("[Remold] Target launch JAR does not exist; cannot launch application: " + conf.getTargetJar().getAbsolutePath());
-                    }
-                    task.getMainClass().set(conf.getMainClass());
-                    task.setClasspath(conf.getRuntimeClasspath());
-                    if (!conf.getAppArgs().isEmpty()) {
-                        task.args(conf.getAppArgs());
-                    }
-                    if (!"java".equals(conf.getExecutable())) {
-                        task.setExecutable(conf.getExecutable());
-                    }
-                    task.jvmArgs(conf.getJvmArgs());
-
-                    project.getLogger().lifecycle("[Remold] Launch configuration assembled:");
-                    if (conf.getTargetJar() != null) {
-                        project.getLogger().lifecycle("  - Target JAR: " + conf.getTargetJar().getAbsolutePath());
-                    }
-                    project.getLogger().lifecycle("  - Main class: " + conf.getMainClass());
-                    project.getLogger().lifecycle("  - Agent: " + conf.getAgentFile().getAbsolutePath());
-                    project.getLogger().lifecycle("  - Watch directories (" + conf.getAllWatchDirs().size() + "): " + conf.getWatchPath());
-                    if (!conf.getAppArgs().isEmpty()) {
-                        project.getLogger().lifecycle("  - App arguments: " + String.join(" ", conf.getAppArgs()));
-                    }
-                    if (ext.getFileShakeMs() != null) {
-                        project.getLogger().lifecycle("  - File Shake: " + ext.getFileShakeMs() + "ms");
-                    }
-                    if (!"java".equals(conf.getExecutable())) {
-                        project.getLogger().lifecycle("  - JBR: " + conf.getExecutable());
-                    }
-                });
             });
 
             // Register deployArtifact
             project.getTasks().register("deployArtifact", Copy.class, task -> {
                 task.setGroup("application");
                 task.setDescription("Builds and deploys the output JAR into the specified deploy directory");
-                task.dependsOn(project.provider(() -> project.getTasks().findByName("remapJar") != null ? "remapJar" : "jar"));
-                task.doFirst(t -> resolver.resolve(project, ext));
-                task.from(project.provider(() -> {
-                    Task remap = project.getTasks().findByName("remapJar");
-                    return remap != null ? remap : project.getTasks().getByName("jar");
-                }));
-                task.into(project.provider(() -> {
-                    File deployDir = RemoldConfigResolver.resolveDeployDir(project, ext);
-                    if (deployDir == null) {
-                        throw new GradleException("[Remold] autoDeploy is enabled but deploy directory is not configured! Please specify via remold { deployDir = \"...\" } or gradle.properties (remold.deployDir=...).");
-                    }
-                    return deployDir;
-                }));
-                task.doLast(t -> {
-                    File deployDir = RemoldConfigResolver.resolveDeployDir(project, ext);
-                    project.getLogger().lifecycle("[Remold] Artifact deployed to: " + (deployDir != null ? deployDir.getAbsolutePath() : "unknown"));
-                });
             });
 
             // Register deployMod
@@ -141,143 +94,59 @@ public final class RemoldPlugin implements Plugin<Project> {
                 task.dependsOn("deployArtifact");
             });
 
-            // Hook classes doLast
-            project.getTasks().named("classes").configure(task -> {
-                task.doLast(t -> {
-                    try {
-                        File localAgent = new File(project.getRootDir(), ".gradle/remold/remold-agent.jar");
-                        if (!localAgent.exists() || localAgent.length() <= 1024) {
-                            resolver.resolve(project, ext);
-                        }
-                    } catch (Exception ignored) {
-                    }
-                });
-            });
-
             // Register generateIdeaRunConfig
-            project.getTasks().register("generateIdeaRunConfig", task -> {
+            project.getTasks().register("generateIdeaRunConfig", GenerateIdeaRunConfigTask.class, task -> {
                 task.setGroup("application");
                 task.setDescription("Generates IntelliJ IDEA run configuration into .idea/runConfigurations/Run_with_Remold.xml");
                 task.dependsOn("classes");
-
-                task.doLast(t -> {
-                    RemoldResolvedConfig conf = resolver.resolve(project, ext);
-                    boolean shouldAutoDeploy = RemoldConfigResolver.shouldAutoDeploy(project, ext);
-                    boolean isLoom = project.getPlugins().hasPlugin("fabric-loom") || project.getExtensions().findByName("loom") != null;
-                    File xmlFile = IdeaRunConfigGenerator.generate(project, conf, shouldAutoDeploy, isLoom);
-                    if (xmlFile != null) {
-                        project.getLogger().lifecycle("[Remold] Generated IntelliJ IDEA run configuration: " + xmlFile.getAbsolutePath());
-                        project.getLogger().lifecycle("[Remold] Open this project in IDEA to launch directly with the run/debug configuration.");
-                    }
-                });
             });
 
             // Register generateRemoldScript
-            project.getTasks().register("generateRemoldScript", task -> {
+            project.getTasks().register("generateRemoldScript", GenerateRemoldScriptTask.class, task -> {
                 task.setGroup("application");
                 task.setDescription("Generates native standalone launcher scripts and args file to run Remold without Gradle Daemon");
                 task.dependsOn("classes", "generateIdeaRunConfig");
-
-                task.doLast(t -> {
-                    RemoldResolvedConfig conf = resolver.resolve(project, ext);
-                    if (conf.getTargetJar() != null && !conf.getTargetJar().exists()) {
-                        throw new GradleException("[Remold] Target launch JAR does not exist; cannot launch application: " + conf.getTargetJar().getAbsolutePath());
-                    }
-                    File buildDir = project.getLayout().getBuildDirectory().getAsFile().get();
-                    File remoldDir = new File(buildDir, "remold");
-                    remoldDir.mkdirs();
-
-                    File argsFile = new File(remoldDir, "remold.args");
-                    List<String> lines = new ArrayList<>(conf.getJvmArgs());
-                    lines.add("-cp");
-                    lines.add(conf.getRuntimeClasspath().getAsPath());
-                    lines.add(conf.getMainClass());
-                    lines.addAll(conf.getAppArgs());
-
-                    try (BufferedWriter writer = Files.newBufferedWriter(argsFile.toPath(), StandardCharsets.UTF_8)) {
-                        for (String line : lines) {
-                            if (line.contains(" ") || line.contains("\t")) {
-                                writer.write("\"" + line.replace("\\", "\\\\") + "\"\n");
-                            } else {
-                                writer.write(line + "\n");
-                            }
-                        }
-                    } catch (IOException e) {
-                        throw new GradleException("[Remold] Failed to write args file: " + argsFile.getAbsolutePath(), e);
-                    }
-
-                    File batFile = new File(buildDir, "run-remold.bat");
-                    String batContent = "@echo off\r\nset \"JAVA_EXE=" + conf.getExecutable() + "\"\r\nif not exist \"%JAVA_EXE%\" set \"JAVA_EXE=java\"\r\n\"%JAVA_EXE%\" @\"%~dp0remold\\remold.args\" %*\r\n";
-                    try {
-                        Files.write(batFile.toPath(), batContent.getBytes(StandardCharsets.UTF_8));
-                    } catch (IOException e) {
-                        throw new GradleException("[Remold] Failed to write bat script: " + batFile.getAbsolutePath(), e);
-                    }
-
-                    File shFile = new File(buildDir, "run-remold.sh");
-                    String shContent = "#!/usr/bin/env bash\nDIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")\" && pwd)\"\nJAVA_EXE=\"" + conf.getExecutable() + "\"\nif [ ! -f \"$JAVA_EXE\" ]; then\n    JAVA_EXE=\"java\"\nfi\nexec \"$JAVA_EXE\" \"@$DIR/remold/remold.args\" \"$@\"\n";
-                    try {
-                        Files.write(shFile.toPath(), shContent.getBytes(StandardCharsets.UTF_8));
-                        shFile.setExecutable(true, false);
-                    } catch (Exception ignored) {
-                    }
-
-                    project.getLogger().lifecycle("[Remold] Generated native launch script:");
-                    project.getLogger().lifecycle("  - Windows: " + batFile.getAbsolutePath());
-                    project.getLogger().lifecycle("  - Linux/macOS: " + shFile.getAbsolutePath());
-                    project.getLogger().lifecycle("  - Args file: " + argsFile.getAbsolutePath());
-                    project.getLogger().lifecycle("[Remold] Run the script directly to launch the application without Gradle daemon overhead.");
-                });
             });
 
             // Register startRemold
-            project.getTasks().register("startRemold", task -> {
+            project.getTasks().register("startRemold", StartRemoldTask.class, task -> {
                 task.setGroup("application");
                 task.setDescription("Starts the application in a detached process so Gradle Daemon is immediately freed");
                 task.dependsOn("generateRemoldScript");
-
-                task.doLast(t -> {
-                    RemoldResolvedConfig conf = resolver.resolve(project, ext);
-                    if (conf.getTargetJar() != null && !conf.getTargetJar().exists()) {
-                        throw new GradleException("[Remold] Target launch JAR does not exist; cannot launch application: " + conf.getTargetJar().getAbsolutePath());
-                    }
-                    File buildDir = project.getLayout().getBuildDirectory().getAsFile().get();
-                    File argsFile = new File(buildDir, "remold/remold.args");
-                    boolean isWin = System.getProperty("os.name").toLowerCase().contains("win");
-
-                    try {
-                        if (isWin) {
-                            new ProcessBuilder("cmd", "/c", "start", "\"Remold [" + project.getName() + "]\"", conf.getExecutable(), "@" + argsFile.getAbsolutePath())
-                                    .directory(project.getProjectDir())
-                                    .start();
-                            project.getLogger().lifecycle("[Remold] Application launched in a separate console window.");
-                        } else {
-                            File logFile = new File(buildDir, "remold/remold.log");
-                            new ProcessBuilder(conf.getExecutable(), "@" + argsFile.getAbsolutePath())
-                                    .directory(project.getProjectDir())
-                                    .redirectOutput(logFile)
-                                    .redirectErrorStream(true)
-                                    .start();
-                            project.getLogger().lifecycle("[Remold] Application launched in background. Output log: " + logFile.getAbsolutePath());
-                        }
-                    } catch (IOException e) {
-                        throw new GradleException("[Remold] Failed to start application process", e);
-                    }
-                    project.getLogger().lifecycle("[Remold] Gradle Daemon released (IDLE). Run ./gradlew compileJava in terminal anytime to trigger hot-reload.");
-                });
             });
 
-            // Hook afterEvaluate
+            // Configure task inputs and dependencies during afterEvaluate (configuration-cache-safe)
             project.afterEvaluate(p -> {
                 boolean shouldAutoDeploy = RemoldConfigResolver.shouldAutoDeploy(project, ext);
 
                 // Configure toolchain unset on runRemold if custom JBR provided
                 String[] execAndHome = RemoldConfigResolver.resolveExecutableAndHome(project, ext);
                 if (!"java".equals(execAndHome[0])) {
-                    project.getTasks().named("runRemold", JavaExec.class, t -> {
-                        t.getJavaLauncher().set((org.gradle.jvm.toolchain.JavaLauncher) null);
-                    });
+                    project.getTasks().named("runRemold", JavaExec.class, t ->
+                            t.getJavaLauncher().set((JavaLauncher) null));
                 }
+
+                // Configure deployArtifact statically without capturing Project or RemoldExtension
+                project.getTasks().named("deployArtifact", Copy.class, task -> {
+                    Task remap = project.getTasks().findByName("remapJar");
+                    Task artifactTask = remap != null ? remap : project.getTasks().findByName("jar");
+                    if (artifactTask != null) {
+                        task.dependsOn(artifactTask);
+                        task.from(artifactTask);
+                    }
+                    File deployDir = RemoldConfigResolver.resolveDeployDir(project, ext);
+                    if (deployDir != null) {
+                        task.into(deployDir);
+                        String deployPath = deployDir.getAbsolutePath();
+                        task.doLast(t -> t.getLogger().lifecycle("[Remold] Artifact deployed to: " + deployPath));
+                    } else {
+                        task.doFirst(t -> {
+                            throw new GradleException(
+                                    "[Remold] autoDeploy is enabled but deploy directory is not configured!"
+                                            + " Please specify via remold { deployDir = \"...\" } or gradle.properties (remold.deployDir=...).");
+                        });
+                    }
+                });
 
                 // Deduplicated task dependency wiring
                 List<String> targetTasks = Arrays.asList("runRemold", "startRemold", "generateRemoldScript", "generateIdeaRunConfig");
@@ -311,7 +180,7 @@ public final class RemoldPlugin implements Plugin<Project> {
                     if (!xmlFile.exists()) {
                         try {
                             RemoldResolvedConfig conf = resolver.resolve(project, ext);
-                            boolean isLoom = project.getPlugins().hasPlugin("fabric-loom") || project.getExtensions().findByName("loom") != null;
+                            boolean isLoom = isLoomProject(project);
                             File out = IdeaRunConfigGenerator.generate(project, conf, shouldAutoDeploy, isLoom);
                             if (out != null) {
                                 project.getLogger().lifecycle("[Remold] IntelliJ IDEA run configuration ready: " + out.getAbsolutePath());
@@ -322,7 +191,7 @@ public final class RemoldPlugin implements Plugin<Project> {
                 }
 
                 // Fabric Loom auto injection (client + dedicated server)
-                if (project.getPlugins().hasPlugin("fabric-loom") || project.getExtensions().findByName("loom") != null) {
+                if (isLoomProject(project)) {
                     try {
                         Object loom = project.getExtensions().findByName("loom");
                         if (loom != null) {
@@ -355,7 +224,271 @@ public final class RemoldPlugin implements Plugin<Project> {
                 } catch (Throwable ignored) {
                 }
             });
+
+            // Resolve lazy launch tasks right before Configuration Cache serialization when selected in the task graph
+            project.getGradle().getTaskGraph().whenReady(graph -> {
+                Task classesTask = project.getTasks().findByName("classes");
+                if (classesTask != null && graph.hasTask(classesTask)) {
+                    try {
+                        RemoldResolvedConfig warmConf = resolver.resolveDeferredSync(project, ext, false);
+                        Map<File, File> syncs = new LinkedHashMap<>(warmConf.getPendingSyncs());
+                        if (!syncs.isEmpty()) {
+                            classesTask.doLast(t -> RemoldConfigResolver.syncAll(syncs));
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+
+                Task deployTask = project.getTasks().findByName("deployArtifact");
+                if (deployTask != null && graph.hasTask(deployTask)) {
+                    try {
+                        RemoldResolvedConfig deployConf = resolver.resolveDeferredSync(project, ext, false);
+                        Map<File, File> syncs = new LinkedHashMap<>(deployConf.getPendingSyncs());
+                        if (!syncs.isEmpty()) {
+                            deployTask.doFirst(t -> RemoldConfigResolver.syncAll(syncs));
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+
+                Task rawRunRemold = project.getTasks().findByName("runRemold");
+                if (rawRunRemold instanceof JavaExec && graph.hasTask(rawRunRemold)) {
+                    RemoldResolvedConfig conf = resolver.resolveDeferredSync(project, ext, true);
+                    configureRunRemold((JavaExec) rawRunRemold, conf, ext);
+                }
+
+                Task rawIdeaTask = project.getTasks().findByName("generateIdeaRunConfig");
+                if (rawIdeaTask instanceof GenerateIdeaRunConfigTask && graph.hasTask(rawIdeaTask)) {
+                    boolean shouldAutoDeploy = RemoldConfigResolver.shouldAutoDeploy(project, ext);
+                    boolean isLoom = isLoomProject(project);
+                    boolean explicit = isTaskExplicitlyRequested(project,
+                            "generateIdeaRunConfig", "generateRemoldScript", "startRemold");
+                    configureIdeaRunConfigTask((GenerateIdeaRunConfigTask) rawIdeaTask,
+                            project, ext, resolver, shouldAutoDeploy, isLoom, !explicit);
+                }
+
+                Task rawScriptTask = project.getTasks().findByName("generateRemoldScript");
+                if (rawScriptTask instanceof GenerateRemoldScriptTask && graph.hasTask(rawScriptTask)) {
+                    RemoldResolvedConfig conf = resolver.resolveDeferredSync(project, ext, true);
+                    GenerateRemoldScriptTask scriptTask = (GenerateRemoldScriptTask) rawScriptTask;
+                    scriptTask.setTargetJar(conf.getTargetJar());
+                    scriptTask.setBuildOutputDir(project.getLayout().getBuildDirectory().getAsFile().get());
+                    scriptTask.setExecutable(conf.getExecutable());
+                    scriptTask.setMainClass(conf.getMainClass());
+                    scriptTask.setJvmArgs(conf.getJvmArgs());
+                    scriptTask.setAppArgs(conf.getAppArgs());
+                    scriptTask.setPendingSyncs(conf.getPendingSyncs());
+                    scriptTask.getRuntimeClasspath().from(conf.getRuntimeClasspath());
+                }
+
+                Task rawStartTask = project.getTasks().findByName("startRemold");
+                if (rawStartTask instanceof StartRemoldTask && graph.hasTask(rawStartTask)) {
+                    RemoldResolvedConfig conf = resolver.resolveDeferredSync(project, ext, true);
+                    StartRemoldTask startTask = (StartRemoldTask) rawStartTask;
+                    startTask.setTargetJar(conf.getTargetJar());
+                    startTask.setWorkingDir(project.getProjectDir());
+                    startTask.setBuildOutputDir(project.getLayout().getBuildDirectory().getAsFile().get());
+                    startTask.setProjectName(project.getName());
+                    startTask.setExecutable(conf.getExecutable());
+                }
+            });
         });
+
+        // Explicit remold.attach(...) targets work across Java, Test, application, and loader run targets
+        project.afterEvaluate(p -> {
+            if (ext.getAttachTargets().isEmpty()) {
+                return;
+            }
+            boolean shouldAutoDeploy = RemoldConfigResolver.shouldAutoDeploy(project, ext);
+            RemoldResolvedConfig attachConf = resolver.resolveDeferredSync(project, ext, false);
+            for (Object target : ext.getAttachTargets()) {
+                applyAttachTarget(project, ext, attachConf, target, shouldAutoDeploy);
+            }
+        });
+    }
+
+    private static boolean isLoomProject(Project project) {
+        return project.getPlugins().hasPlugin("fabric-loom") || project.getExtensions().findByName("loom") != null;
+    }
+
+    private static boolean isTaskExplicitlyRequested(Project project, String... taskNames) {
+        List<String> requested = project.getGradle().getStartParameter().getTaskNames();
+        if (requested == null || requested.isEmpty()) {
+            return false;
+        }
+        for (String req : requested) {
+            if (req == null) continue;
+            for (String candidate : taskNames) {
+                if (req.equals(candidate) || req.endsWith(":" + candidate)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static void configureRunRemold(JavaExec task, RemoldResolvedConfig conf, RemoldExtension ext) {
+        task.getMainClass().set(conf.getMainClass());
+        task.setClasspath(conf.getRuntimeClasspath());
+        if (!conf.getAppArgs().isEmpty()) {
+            task.args(conf.getAppArgs());
+        }
+        if (!"java".equals(conf.getExecutable())) {
+            task.setExecutable(conf.getExecutable());
+            task.getJavaLauncher().set((JavaLauncher) null);
+        }
+        appendJvmArgsDeduplicated(task, conf.getJvmArgs());
+
+        List<String> summaryLines = new ArrayList<>();
+        summaryLines.add("[Remold] Launch configuration assembled:");
+        if (conf.getTargetJar() != null) {
+            summaryLines.add("  - Target JAR: " + conf.getTargetJar().getAbsolutePath());
+        }
+        summaryLines.add("  - Main class: " + conf.getMainClass());
+        summaryLines.add("  - Agent: " + conf.getAgentFile().getAbsolutePath());
+        summaryLines.add("  - Watch directories (" + conf.getAllWatchDirs().size() + "): " + conf.getWatchPath());
+        if (!conf.getAppArgs().isEmpty()) {
+            summaryLines.add("  - App arguments: " + String.join(" ", conf.getAppArgs()));
+        }
+        if (ext.getFileShakeMs() != null) {
+            summaryLines.add("  - File Shake: " + ext.getFileShakeMs() + "ms");
+        }
+        if (!"java".equals(conf.getExecutable())) {
+            summaryLines.add("  - JBR: " + conf.getExecutable());
+        }
+        File targetJar = conf.getTargetJar();
+        Map<File, File> pendingSyncs = new LinkedHashMap<>(conf.getPendingSyncs());
+
+        task.doFirst(t -> {
+            if (targetJar != null && !targetJar.exists()) {
+                throw new GradleException("[Remold] Target launch JAR does not exist; cannot launch application: "
+                        + targetJar.getAbsolutePath());
+            }
+            RemoldConfigResolver.syncAll(pendingSyncs);
+            for (String line : summaryLines) {
+                t.getLogger().lifecycle(line);
+            }
+        });
+    }
+
+    private static void configureIdeaRunConfigTask(
+            GenerateIdeaRunConfigTask task,
+            Project project,
+            RemoldExtension ext,
+            RemoldConfigResolver resolver,
+            boolean shouldAutoDeploy,
+            boolean isLoom,
+            boolean skipWhenUnconfigured) {
+        task.setRootDir(project.getRootDir());
+        task.setProjectName(project.getName());
+        task.setShouldAutoDeploy(shouldAutoDeploy);
+        task.setLoom(isLoom);
+        task.setSkipWhenUnconfigured(skipWhenUnconfigured);
+        try {
+            RemoldResolvedConfig conf = resolver.resolveDeferredSync(project, ext, true);
+            task.setMainClass(conf.getMainClass());
+            task.setExecutableHome(conf.getExecutableHome());
+            task.setTargetJar(conf.getTargetJar());
+            task.setBuildMode(conf.getBuildMode());
+            task.setJvmArgs(conf.getJvmArgs());
+            task.setAppArgs(conf.getAppArgs());
+            task.setPendingSyncs(conf.getPendingSyncs());
+            task.setMissingConfigMessage(null);
+        } catch (GradleException e) {
+            task.setMissingConfigMessage(e.getMessage());
+        }
+    }
+
+    static void applyAttachTarget(
+            Project project,
+            RemoldExtension ext,
+            RemoldResolvedConfig conf,
+            Object target,
+            boolean shouldAutoDeploy) {
+        if (target == null) return;
+
+        Task resolvedTask = null;
+        if (target instanceof String) {
+            String name = (String) target;
+            resolvedTask = project.getTasks().findByName(name);
+            if (resolvedTask == null && name.startsWith(":")) {
+                resolvedTask = project.getTasks().findByPath(name);
+            }
+            if (resolvedTask == null) {
+                throw new GradleException("[Remold] Cannot attach to task '" + name + "': task does not exist.");
+            }
+        } else if (target instanceof TaskProvider<?>) {
+            resolvedTask = ((TaskProvider<?>) target).get();
+        } else if (target instanceof Task) {
+            resolvedTask = (Task) target;
+        }
+
+        if (resolvedTask != null) {
+            if (!(resolvedTask instanceof JavaForkOptions)) {
+                throw new GradleException("[Remold] Cannot attach to task '" + resolvedTask.getName()
+                        + "' (" + resolvedTask.getClass().getName()
+                        + "): task does not implement JavaForkOptions.");
+            }
+            JavaForkOptions fork = (JavaForkOptions) resolvedTask;
+            appendJvmArgsDeduplicated(fork, conf.getJvmArgs());
+            if (!"java".equals(conf.getExecutable())) {
+                fork.setExecutable(conf.getExecutable());
+                if (resolvedTask instanceof JavaExec) {
+                    ((JavaExec) resolvedTask).getJavaLauncher().set((JavaLauncher) null);
+                } else if (resolvedTask instanceof Test) {
+                    ((Test) resolvedTask).getJavaLauncher().set((JavaLauncher) null);
+                }
+            }
+            if (shouldAutoDeploy && project.getTasks().findByName("deployArtifact") != null) {
+                resolvedTask.dependsOn("deployArtifact");
+            }
+            if (!ext.getDependsOn().isEmpty()) {
+                resolvedTask.dependsOn(ext.getDependsOn());
+            }
+            Map<File, File> pendingSyncs = new LinkedHashMap<>(conf.getPendingSyncs());
+            if (!pendingSyncs.isEmpty()) {
+                resolvedTask.doFirst(t -> RemoldConfigResolver.syncAll(pendingSyncs));
+            }
+            project.getLogger().lifecycle("[Remold] Attached hot-reload agent to task :" + resolvedTask.getName());
+            return;
+        }
+
+        RemoldConfigResolver.syncAll(conf.getPendingSyncs());
+        if (injectRunJvmArgs(target, conf.getJvmArgs())) {
+            project.getLogger().lifecycle("[Remold] Attached hot-reload agent to custom run target: " + target);
+            return;
+        }
+
+        throw new GradleException("[Remold] Unsupported remold.attach target type: "
+                + target.getClass().getName()
+                + ". Expected JavaExec, Test, JavaForkOptions, TaskProvider, task name, or loader run object.");
+    }
+
+    static void appendJvmArgsDeduplicated(JavaForkOptions fork, List<String> jvmArgs) {
+        if (fork == null || jvmArgs == null || jvmArgs.isEmpty()) return;
+        List<String> existing = fork.getJvmArgs();
+        List<String> existingList = existing != null ? existing : Collections.emptyList();
+        boolean hasAgent = false;
+        for (String arg : existingList) {
+            if (arg != null && arg.startsWith("-javaagent:") && arg.contains("remold-agent.jar")) {
+                hasAgent = true;
+                break;
+            }
+        }
+        List<String> toAdd = new ArrayList<>();
+        for (String arg : jvmArgs) {
+            if (arg == null) continue;
+            if (arg.startsWith("-javaagent:") && arg.contains("remold-agent.jar")) {
+                if (hasAgent) continue;
+                hasAgent = true;
+                toAdd.add(arg);
+            } else if (!existingList.contains(arg)) {
+                toAdd.add(arg);
+            }
+        }
+        if (!toAdd.isEmpty()) {
+            fork.jvmArgs(toAdd);
+        }
     }
 
     /**

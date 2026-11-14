@@ -5,6 +5,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
+import org.gradle.api.Task;
+import org.gradle.api.tasks.TaskProvider;
 
 /**
  * Gradle DSL extension for Remold hot-reloading configuration.
@@ -42,6 +44,7 @@ public class RemoldExtension {
     private String buildMode;
     private final List<String> plugins = new ArrayList<>();
     private final List<Object> pluginJars = new ArrayList<>();
+    private final List<Object> attachTargets = new ArrayList<>();
 
     public String getVersion() {
         return version;
@@ -272,5 +275,34 @@ public class RemoldExtension {
 
     public void buildMode(String buildMode) {
         this.buildMode = buildMode;
+    }
+
+    public List<Object> getAttachTargets() {
+        return attachTargets;
+    }
+
+    public void attach(Object... targets) {
+        if (targets == null) return;
+        for (Object target : targets) {
+            if (target instanceof Collection<?>) {
+                for (Object item : (Collection<?>) target) {
+                    if (item != null) this.attachTargets.add(item);
+                }
+            } else if (target != null) {
+                this.attachTargets.add(target);
+            }
+        }
+    }
+
+    public void attach(TaskProvider<?> target) {
+        if (target != null) this.attachTargets.add(target);
+    }
+
+    public void attach(Task target) {
+        if (target != null) this.attachTargets.add(target);
+    }
+
+    public void attach(String taskName) {
+        if (taskName != null) this.attachTargets.add(taskName);
     }
 }

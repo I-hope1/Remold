@@ -2,7 +2,9 @@ package io.github.ihope1.remold.gradle;
 
 import java.io.File;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import org.gradle.api.file.FileCollection;
 
 /**
@@ -21,6 +23,7 @@ public final class RemoldResolvedConfig {
     private final FileCollection runtimeClasspath;
     private final File targetJar;
     private final String buildMode;
+    private final Map<File, File> pendingSyncs;
 
     public RemoldResolvedConfig(
             String mainClass,
@@ -48,6 +51,23 @@ public final class RemoldResolvedConfig {
             FileCollection runtimeClasspath,
             File targetJar,
             String buildMode) {
+        this(mainClass, executable, executableHome, agentFile, allWatchDirs, watchPath,
+                jvmArgs, appArgs, runtimeClasspath, targetJar, buildMode, Collections.emptyMap());
+    }
+
+    public RemoldResolvedConfig(
+            String mainClass,
+            String executable,
+            String executableHome,
+            File agentFile,
+            List<File> allWatchDirs,
+            String watchPath,
+            List<String> jvmArgs,
+            List<String> appArgs,
+            FileCollection runtimeClasspath,
+            File targetJar,
+            String buildMode,
+            Map<File, File> pendingSyncs) {
         this.mainClass = mainClass;
         this.executable = executable;
         this.executableHome = executableHome;
@@ -59,6 +79,9 @@ public final class RemoldResolvedConfig {
         this.runtimeClasspath = runtimeClasspath;
         this.targetJar = targetJar;
         this.buildMode = buildMode != null ? buildMode : "gradle";
+        this.pendingSyncs = pendingSyncs != null && !pendingSyncs.isEmpty()
+                ? Collections.unmodifiableMap(new LinkedHashMap<>(pendingSyncs))
+                : Collections.emptyMap();
     }
 
     public String getMainClass() {
@@ -103,5 +126,9 @@ public final class RemoldResolvedConfig {
 
     public String getBuildMode() {
         return buildMode;
+    }
+
+    public Map<File, File> getPendingSyncs() {
+        return pendingSyncs;
     }
 }

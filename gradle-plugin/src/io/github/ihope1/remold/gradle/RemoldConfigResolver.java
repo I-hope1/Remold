@@ -12,8 +12,10 @@ import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.jar.JarFile;
 
@@ -32,10 +34,39 @@ import org.gradle.api.tasks.SourceSetContainer;
 public final class RemoldConfigResolver {
 
     private RemoldResolvedConfig cachedConfig;
+    private RemoldResolvedConfig cachedAttachConfig;
+    private RemoldResolvedConfig cachedDeferredConfig;
+    private RemoldResolvedConfig cachedDeferredAttachConfig;
 
     public synchronized RemoldResolvedConfig resolve(Project project, RemoldExtension ext) {
+        return resolveInternal(project, ext, true, true);
+    }
+
+    public synchronized RemoldResolvedConfig resolveForAttach(Project project, RemoldExtension ext) {
         if (cachedConfig != null) {
             return cachedConfig;
+        }
+        return resolveInternal(project, ext, false, true);
+    }
+
+    synchronized RemoldResolvedConfig resolveDeferredSync(Project project, RemoldExtension ext, boolean requireLaunchTarget) {
+        if (!requireLaunchTarget && cachedDeferredConfig != null) {
+            return cachedDeferredConfig;
+        }
+        return resolveInternal(project, ext, requireLaunchTarget, false);
+    }
+
+    private RemoldResolvedConfig resolveInternal(
+            Project project,
+            RemoldExtension ext,
+            boolean requireLaunchTarget,
+            boolean syncLocal) {
+        if (syncLocal) {
+            if (requireLaunchTarget && cachedConfig != null) return cachedConfig;
+            if (!requireLaunchTarget && cachedAttachConfig != null) return cachedAttachConfig;
+        } else {
+            if (requireLaunchTarget && cachedDeferredConfig != null) return cachedDeferredConfig;
+            if (!requireLaunchTarget && cachedDeferredAttachConfig != null) return cachedDeferredAttachConfig;
         }
 
         // 0. Resolve target JAR (if configured, enters pure JAR mode)
@@ -78,7 +109,7 @@ public final class RemoldConfigResolver {
             }
         }
 
-        if (main == null) {
+        if (main == null && requireLaunchTarget) {
             if (targetJar != null && targetJar.exists()) {
                 throw new GradleException("[Remold] Could not read Main-Class from MANIFEST.MF of " + targetJar.getName() + ". Please specify it explicitly via remold { mainClass = \"...\" }.");
             } else if (targetJar != null) {
@@ -115,7 +146,7 @@ public final class RemoldConfigResolver {
             explicitAgent = String.valueOf(project.findProperty("remold.agentJar"));
         }
         if (explicitAgent != null) {
-            agentFile = new File(explicitAgent);
+            agentFile = project.file(explicitAgent);
         }
         final boolean explicitAgentConfigured = explicitAgent != null;
 
@@ -220,7 +251,9 @@ public final class RemoldConfigResolver {
             project.getLogger().info("[Remold] Agent version confirmed: " + resolvedAgentVersion);
         }
 
-        File safeAgent = syncIntoLocalRemold(agentFile, new File(localRemoldDir, "remold-agent.jar"));
+        Map<File, File> pendingSyncs = new LinkedHashMap<>();
+        File localAgentTarget = new File(localRemoldDir, "remold-agent.jar");
+        File safeAgent = syncOrPlan(agentFile, localAgentTarget, syncLocal, pendingSyncs);
 
         // 4. Derive compilation outputs and resources watch paths
         String buildMode = resolveBuildMode(project, ext);
@@ -232,6 +265,7 @@ public final class RemoldConfigResolver {
         File outResourceDir = mainSourceSet.getOutput().getResourcesDir();
 
         Set<File> allCandidateDirs = new LinkedHashSet<>();
+        Set<File> declaredDirs = new LinkedHashSet<>();
         if ("idea".equals(buildMode)) {
             File ideaOutDir = new File(project.getProjectDir(), "out/production");
             boolean foundModuleOut = false;
@@ -248,7 +282,7 @@ public final class RemoldConfigResolver {
                 allCandidateDirs.add(ideaOutDir);
             }
         } else if ("auto".equals(buildMode)) {
-            allCandidateDirs.addAll(classesDirs);
+            declaredDirs.addAll(classesDirs);
             File ideaOutDir = new File(project.getProjectDir(), "out/production");
             if (ideaOutDir.isDirectory()) {
                 File[] subs = ideaOutDir.listFiles(File::isDirectory);
@@ -264,18 +298,31 @@ public final class RemoldConfigResolver {
                 }
             }
         } else {
-            allCandidateDirs.addAll(classesDirs);
+            declaredDirs.addAll(classesDirs);
         }
 
-        allCandidateDirs.addAll(resourceDirs);
+        boolean hasExistingResourceSrc = false;
+        for (File resDir : resourceDirs) {
+            allCandidateDirs.add(resDir);
+            if (resDir.exists()) {
+                hasExistingResourceSrc = true;
+            }
+        }
         if (assetsDir.exists()) allCandidateDirs.add(assetsDir);
-        if (outResourceDir != null && outResourceDir.exists()) allCandidateDirs.add(outResourceDir);
+        if (outResourceDir != null && hasExistingResourceSrc) {
+            declaredDirs.add(outResourceDir);
+        }
         // watchDirs may arrive as File or as a path string (script-plugin syntax); project.file handles both.
         for (Object watchDir : ext.getWatchDirs()) {
-            if (watchDir != null) allCandidateDirs.add(project.file(watchDir));
+            if (watchDir != null) declaredDirs.add(project.file(watchDir));
         }
 
         List<File> allWatchDirs = new ArrayList<>();
+        for (File dir : declaredDirs) {
+            if (!allWatchDirs.contains(dir)) {
+                allWatchDirs.add(dir);
+            }
+        }
         for (File dir : allCandidateDirs) {
             if (dir.exists() && !allWatchDirs.contains(dir)) {
                 allWatchDirs.add(dir);
@@ -394,7 +441,8 @@ public final class RemoldConfigResolver {
 
                 File resolvedPluginJar = resolvePluginJar(project, targetModule, ver);
                 if (resolvedPluginJar != null && resolvedPluginJar.exists()) {
-                    pluginJars.add(syncIntoLocalRemold(resolvedPluginJar, new File(localRemoldDir, "plugins/" + resolvedPluginJar.getName())));
+                    File destPlugin = new File(localRemoldDir, "plugins/" + resolvedPluginJar.getName());
+                    pluginJars.add(syncOrPlan(resolvedPluginJar, destPlugin, syncLocal, pendingSyncs));
                 } else {
                     project.getLogger().warn("[Remold] Plugin remold-plugin-" + targetModule + " jar not found; can be ignored if embedded or not required.");
                 }
@@ -420,7 +468,7 @@ public final class RemoldConfigResolver {
             if (arg != null) appArgs.add(arg.toString());
         }
 
-        cachedConfig = new RemoldResolvedConfig(
+        RemoldResolvedConfig resolved = new RemoldResolvedConfig(
                 main,
                 execPath,
                 execHome,
@@ -431,13 +479,46 @@ public final class RemoldConfigResolver {
                 appArgs,
                 runtimeClasspath,
                 targetJar,
-                buildMode
+                buildMode,
+                pendingSyncs
         );
-        return cachedConfig;
+        if (syncLocal) {
+            if (requireLaunchTarget) cachedConfig = resolved;
+            else cachedAttachConfig = resolved;
+        } else {
+            if (requireLaunchTarget) cachedDeferredConfig = resolved;
+            else cachedDeferredAttachConfig = resolved;
+        }
+        return resolved;
     }
 
     public synchronized void clearCache() {
         this.cachedConfig = null;
+        this.cachedAttachConfig = null;
+        this.cachedDeferredConfig = null;
+        this.cachedDeferredAttachConfig = null;
+    }
+
+    private static File syncOrPlan(File src, File dest, boolean syncLocal, Map<File, File> pendingSyncs) {
+        if (syncLocal) {
+            return syncIntoLocalRemold(src, dest);
+        }
+        if (src == null) return dest;
+        try {
+            if (src.getCanonicalPath().equals(dest.getCanonicalPath())) {
+                return src;
+            }
+        } catch (Exception ignored) {
+        }
+        pendingSyncs.put(src, dest);
+        return dest;
+    }
+
+    public static void syncAll(Map<File, File> pendingSyncs) {
+        if (pendingSyncs == null || pendingSyncs.isEmpty()) return;
+        for (Map.Entry<File, File> entry : pendingSyncs.entrySet()) {
+            syncIntoLocalRemold(entry.getKey(), entry.getValue());
+        }
     }
 
     public static String[] resolveExecutableAndHome(Project project, RemoldExtension ext) {
@@ -688,7 +769,7 @@ public final class RemoldConfigResolver {
         try {
             if (src.getCanonicalPath().equals(dest.getCanonicalPath())) {
                 return src;
-            } else if (dest.exists() && dest.length() == src.length() && dest.lastModified() == src.lastModified()) {
+            } else if (src.lastModified() != 0L && dest.length() == src.length() && dest.lastModified() == src.lastModified()) {
                 return dest;
             } else {
                 if (dest.getParentFile() != null) dest.getParentFile().mkdirs();

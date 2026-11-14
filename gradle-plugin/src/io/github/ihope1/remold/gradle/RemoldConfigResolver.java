@@ -416,6 +416,12 @@ public final class RemoldConfigResolver {
         if (autoFabric && !containsIgnoreCase(requestedPlugins, "fabric") && usesFabricEcosystem(project)) {
             requestedPlugins.add("fabric");
         }
+        boolean autoMcToast = project.findProperty("remold.autoMcToast") == null
+                || Boolean.parseBoolean(String.valueOf(project.findProperty("remold.autoMcToast")));
+        if (autoMcToast && !containsIgnoreCase(requestedPlugins, "mc-toast")
+                && (usesFabricEcosystem(project) || usesForgeEcosystem(project))) {
+            requestedPlugins.add("mc-toast");
+        }
 
         List<File> pluginJars = new ArrayList<>();
         for (Object explicit : ext.getPluginJars()) {

@@ -47,63 +47,25 @@
 
 ---
 
-## HotSwap 结果 Toast（MC 1.21.1，右上角卡片）
+## HotSwap 结果 Toast（由 `remold-plugin-mc-toast` 内置提供，模组侧零代码）
 
-客户端入口 `com.example.client.ExampleModClient` 会在客户端初始化时注册一个 Remold 批次监听器；
-每轮热更结束后，右上角弹出（或刷新）一张卡片：
+Remold 对 Fabric / Forge / NeoForge 工程会自动挂载 `mc-toast` 插件（`plugin-mc-toast/`）：
+每轮热更结束后，游戏右上角自动弹出（或就地刷新）一张 HotSwap 结果卡片（英文摘要，适配 Minecraft 默认字体）：
 
 ```text
 [HotSwap] 38 ms
-1 个类已热更：RemoldWandItem
-Mixin RemoldWandItemMixin：+1 @Unique / +1 @Inject
-InitFix：15 个实例 / 1 字段（shield）
+1 class reloaded: RemoldWandItem
+Mixin RemoldWandItemMixin: +1 @Unique / +1 @Inject
+InitFix: 15 instances / 1 field (shield)
 ```
 
-- **耗时**：来自结构化批次报告；旧版 Agent 没有该数据时显示「耗时未知」，不会填 0。
-- **Mixin 增量**：`@Unique` 字段与 `@Inject` handler 的成员级差分。运行时没有可比较的上一版
-  （例如启动后第一次改该 Mixin）时显示「增量未知（当前 N @Unique / M @Inject）」，不伪造 `+0`。
-- **InitFix**：本轮真正跑完补丁的实例位点数与字段名；失败/被放弃的字段单独标「未完成」。
-- **视觉**：深色卡片 + 青色强调条，标题/摘要用 Minecraft 默认字体与颜色区分，不依赖 emoji 字形。
-- **刷新而非叠加**：连续热更复用同一张卡片并重置展示计时（默认 4 秒，遵循「通知显示时长」选项）。
-- **兼容旧 Agent**：模板只 `compileOnly` 依赖已发布 api，监听器接口用 `Proxy` 反射实现；
-  运行时没有 `afterInternalBatchReport` 时退化为 `afterInternalBatch`，卡片明确写
-  「旧版 Agent：耗时 / Mixin / InitFix 数据不可用」。
+- **零模组代码 / 零依赖**：卡片通过 Agent 侧动态 `Proxy` 实现，不进入模组源码，也不给模组引入编译期/运行期 Toast 样板。
+- **跨版本 & 跨映射**：兼容 Minecraft 1.21.1 与 1.21.4+（签名拆分 `update` / `draw` / `getVisibility`），同时识别 Yarn 与 Mojmap 映射；纯服务端环境找不到客户端主类时自动静音降级。
+- **开关控制**：
+  - 启动参数临时静音：`-Dremold.mc_toast=false`
+  - Gradle 构建取消自动挂载：`-Premold.autoMcToast=false`
 
-### 1.21.1 适配说明
-
-1.21.1 的 `Toast` 接口与 1.21.4 不同（已按 1.21.1 的 yarn 映射实测）：
-
-| API | 1.21.1 | 1.21.4 |
-|:--|:--|:--|
-| `Toast.draw` | `draw(DrawContext, ToastManager, long)` | `draw(DrawContext, TextRenderer, long)` |
-| `Toast.update` | **不存在** | 存在 |
-
-因此 `HotSwapToast` 在 `draw` 内自己计时并返回 `Visibility.HIDE` 收起卡片，`TextRenderer` 从
-`manager.getClient().textRenderer` 取；`HotSwapToastModel` 是不依赖 Minecraft 的纯逻辑，
-由 `src/test/java/com/example/client/HotSwapToastModelTest.java` 覆盖（`./gradlew test`）。
-
-数据链路（Agent 侧）见 `remold.HotswapBatchReport` 与 `HotswapBatchListener#afterInternalBatchReport`。
-
-### 手动验证
-
-> 模板默认解析已发布的 `0.2.8` agent；该版本提供结构化批次报告，卡片默认显示耗时 / Mixin / InitFix 维度。
-> 若运行期挂的是更旧的 Agent（接口没有 `afterInternalBatchReport`），卡片会明确降级为「旧版 Agent」。
-> 要验证本分支尚未发布的改动，可把 `runClient` 的 agent 指向本分支构建的
-> `core/build/libs/remold-agent.jar`（并让 `plugin-mixin` 使用本分支的 jar）。
-
-1. 用带 DCEVM 的 **JBR 21** 执行 `./gradlew runClient`（可通过 `-Premold.agentJar=...` 指向本地 agent），进入单人世界；
-2. 日志确认客户端入口已加载：
-   ```text
-   [HotSwapToast] client entrypoint initialized
-   [HotSwapToast] Remold batch listener registered (structured report: true)
-   ```
-3. 保持客户端运行，修改 `src/main/java/com/example/item/RemoldWandItem.java` 里的一行文案；
-4. 执行 `./gradlew compileJava`（或 IDEA 的 `Ctrl + Shift + F9`）；
-5. 观察右上角是否出现 `[HotSwap] ...` 卡片；改 Mixin 类再试一次，应看到 Mixin 行；
-   新增一个字段再试，应看到 InitFix 行。
-
-> 本环境为无显示环境，卡片**实际渲染**未在本机验证；上述「已加载 / 已注册」日志与
-> `HotSwapToastModelTest` 的文案断言是可复跑的，视觉部分需在带图形会话的客户端确认。
+> 说明：本分支对 `plugin-mc-toast` 的零依赖单元测试已覆盖 1.21.1 / 1.21.4+ 与 Mojmap 模拟宿主；带图形窗口的实际屏幕显示效果可在启用图形界面的客户端验证。
 
 ### 客户端 gametest：1.21.1 没有该能力
 

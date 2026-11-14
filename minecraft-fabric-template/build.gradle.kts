@@ -48,7 +48,7 @@ dependencies {
     // Remold 注解与 API 依赖：提供 @RemoldReinit, @OnReload 等热重载控制注解
     compileOnly("com.github.I-hope1.Remold:api:v$remoldVersion")
 
-    // 纯逻辑单测（HotSwapToastModel）：不加载 Minecraft，只跑普通 JUnit。
+    // JUnit 5 单测支持（可按需编写不依赖 Minecraft 的纯逻辑测试）
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }

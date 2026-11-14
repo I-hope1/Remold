@@ -439,6 +439,37 @@ class RemoldPluginTest {
                 GenerateRemoldScriptTask.formatArgFileToken("-Dspace=C:\\a b\\c"));
     }
 
+    @org.junit.jupiter.api.Test
+    void autoMcToastIncludedForMinecraftProjectsAndCanBeDisabled() throws Exception {
+        File dummyAgent = new File(tempDir, "remold-agent.jar");
+        Files.write(dummyAgent.toPath(), new byte[2048]);
+
+        Project fabricProject = ProjectBuilder.builder().withProjectDir(tempDir).build();
+        fabricProject.getPluginManager().apply("java");
+        fabricProject.getPluginManager().apply(RemoldPlugin.class);
+        fabricProject.getExtensions().add("loom", new Object());
+
+        RemoldExtension ext = (RemoldExtension) fabricProject.getExtensions().getByName("remold");
+        ext.setMainClass("net.fabricmc.devlaunchinjector.Main");
+        RemoldResolvedConfig enabledConf = new RemoldConfigResolver().resolve(fabricProject, ext);
+        Assertions.assertTrue(
+                enabledConf.getJvmArgs().stream().anyMatch(a -> a.equals("-Dremold.plugins=mixin,fabric,mc-toast")),
+                "Expected Fabric project to auto-enable mixin,fabric,mc-toast, got: " + enabledConf.getJvmArgs());
+
+        Project disabledProject = ProjectBuilder.builder().withProjectDir(tempDir).build();
+        disabledProject.getPluginManager().apply("java");
+        disabledProject.getPluginManager().apply(RemoldPlugin.class);
+        disabledProject.getExtensions().add("loom", new Object());
+        disabledProject.getExtensions().getExtraProperties().set("remold.autoMcToast", "false");
+
+        RemoldExtension disabledExt = (RemoldExtension) disabledProject.getExtensions().getByName("remold");
+        disabledExt.setMainClass("net.fabricmc.devlaunchinjector.Main");
+        RemoldResolvedConfig disabledConf = new RemoldConfigResolver().resolve(disabledProject, disabledExt);
+        Assertions.assertTrue(
+                disabledConf.getJvmArgs().stream().anyMatch(a -> a.equals("-Dremold.plugins=mixin,fabric")),
+                "Expected remold.autoMcToast=false to omit mc-toast, got: " + disabledConf.getJvmArgs());
+    }
+
     private RemoldResolvedConfig resolvedConfig(Project project, List<String> jvmArgs) throws Exception {
         File agent = new File(tempDir, "remold-agent.jar");
         Files.write(agent.toPath(), new byte[2048]);

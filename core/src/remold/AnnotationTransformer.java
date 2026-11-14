@@ -10,6 +10,7 @@ import java.io.*;
 import java.lang.annotation.Annotation;
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.IllegalClassFormatException;
+import java.nio.charset.StandardCharsets;
 import java.security.ProtectionDomain;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -62,11 +63,36 @@ public class AnnotationTransformer implements ClassFileTransformer {
 
 	//region Fields and Annotation Utilities
 	static final String profileDesc = "L" + internalName(Profile.class) + ";";
+	private static final byte[] PROFILE_DESC_BYTES = profileDesc.getBytes(StandardCharsets.US_ASCII);
+	private static final byte[] LAMBDA_METAFACTORY_BYTES =
+		"java/lang/invoke/LambdaMetafactory".getBytes(StandardCharsets.US_ASCII);
+	private static final byte[] FORCED_MARKER_BYTES =
+		"$remold$lambdasForced".getBytes(StandardCharsets.US_ASCII);
+
+	private static boolean containsAscii(byte[] haystack, byte[] needle) {
+		if (haystack == null || needle == null || needle.length == 0 || haystack.length < needle.length) {
+			return false;
+		}
+		byte first = needle[0];
+		int limit = haystack.length - needle.length;
+		for (int i = 0; i <= limit; i++) {
+			if (haystack[i] != first) continue;
+			int j = 1;
+			while (j < needle.length && haystack[i + j] == needle[j]) {
+				j++;
+			}
+			if (j == needle.length) return true;
+		}
+		return false;
+	}
 
 	private static boolean hasClassAnnotation(byte[] bytes, Class<? extends Annotation> annotationClass) {
 		return hasClassAnnotation(bytes, "L" + annotationClass.getName().replace('.', '/') + ";");
 	}
 	private static boolean hasClassAnnotation(byte[] bytes, String annotationDesc) {
+		if (!containsAscii(bytes, annotationDesc.getBytes(StandardCharsets.US_ASCII))) {
+			return false;
+		}
 		final boolean[] found = {false};
 		new ClassReader(bytes).accept(new ClassVisitor(ASM9) {
 			@Override
@@ -206,7 +232,7 @@ public class AnnotationTransformer implements ClassFileTransformer {
 							}
 						}
 					}
-					if (!waiveReinit && (RemoldAgent.hasLiveInstances(classBeingRedefined) || LayoutGate.hasStaticFieldChange(diff.changedFields))) {
+					if (!waiveReinit && (LayoutGate.hasStaticFieldChange(diff.changedFields) || RemoldAgent.hasLiveInstances(classBeingRedefined))) {
 						RemoldAgent.error("[EXTERNAL-HOTSWAP] Layout change rejected by LayoutGate: " + layoutRes.detail());
 						throw new IllegalClassFormatException("Field layout change rejected for " + dotClassName + ": " + layoutRes.detail());
 					}
@@ -345,6 +371,9 @@ public class AnnotationTransformer implements ClassFileTransformer {
 	 * @see remold.profiler.ProfilerData
 	 */
 	private static byte[] injectProfiler(byte[] bytes, String slashClassName, ClassLoader targetLoader) {
+		if (!containsAscii(bytes, PROFILE_DESC_BYTES)) {
+			return bytes;
+		}
 		ClassReader cr = new ClassReader(bytes);
 		ClassWriter cw = new MyClassWriter(cr, targetLoader);
 
@@ -522,6 +551,13 @@ public class AnnotationTransformer implements ClassFileTransformer {
 	 * @return 变换后的字节码；无需变换或输入不可变换时，原样返回 {@code bytes}
 	 */
 	public static byte[] forceStaticLambdas(byte[] bytes, String slashClassName, ClassLoader targetLoader) {
+		if (bytes == null || !containsAscii(bytes, LAMBDA_METAFACTORY_BYTES)) {
+			return bytes;
+		}
+		// 快速幂等判断：已打 $remold$lambdasForced 标记字段时无需走 EXPAND_FRAMES 全量解压栈帧。
+		if (containsAscii(bytes, FORCED_MARKER_BYTES) && hasForcedMarkerFast(bytes)) {
+			return bytes;
+		}
 		ClassNode cn = new ClassNode(ASM9);
 		try {
 			new ClassReader(bytes).accept(cn, ClassReader.EXPAND_FRAMES);
@@ -739,6 +775,26 @@ public class AnnotationTransformer implements ClassFileTransformer {
 	 * ASM 路径上天然可见，判断只需一次遍历。</p>
 	 */
 	private static final String FORCED_MARKER = "$remold$lambdasForced";
+
+	/** 仅扫字段表验证 {@code $remold$lambdasForced}，避开 EXPAND_FRAMES 的方法体解码开销。 */
+	private static boolean hasForcedMarkerFast(byte[] bytes) {
+		final boolean[] found = {false};
+		try {
+			new ClassReader(bytes).accept(new ClassVisitor(ASM9) {
+				@Override
+				public FieldVisitor visitField(int access, String name, String descriptor,
+				                               String signature, Object value) {
+					if (FORCED_MARKER.equals(name)) {
+						found[0] = true;
+					}
+					return null;
+				}
+			}, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+		} catch (Exception ignored) {
+			return false;
+		}
+		return found[0];
+	}
 
 	/** 判断该类是否已被 {@link #forceStaticLambdas} 处理过。 */
 	private static boolean hasForcedMarker(ClassNode cn) {

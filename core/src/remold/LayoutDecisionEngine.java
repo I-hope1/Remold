@@ -5,6 +5,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 
 import remold.RemoldAgent.LayoutAction;
 import remold.RemoldAgent.LayoutDecision;
@@ -155,6 +156,20 @@ final class LayoutDecisionEngine {
 	                             SuperclassDriftGate.DriftDecision drift,
 	                             Set<String> reinitFields,
 	                             Map<String, String> unextractableReinitFields) {
+		return decide(className, changedFields, mode, () -> liveness, batchNames, scan, drift, reinitFields,
+		              unextractableReinitFields);
+	}
+
+	/**
+	 * 惰性实例探测版本：仅在规则确实依赖“当前是否存在存活实例”时才求值 {@code livenessSupplier}，
+	 * 避免对兼容改动、静态字段改动或只看读者扫描的成员删除触发无意义的 JVMTI 全堆停顿。
+	 */
+	static LayoutDecision decide(String className, List<String> changedFields,
+	                             String mode, Supplier<Liveness> livenessSupplier, Set<String> batchNames,
+	                             RemovedMemberScan scan,
+	                             SuperclassDriftGate.DriftDecision drift,
+	                             Set<String> reinitFields,
+	                             Map<String, String> unextractableReinitFields) {
 		String host = hostNameOf(className);
 		if (LayoutGate.MODE_OFF.equals(mode)) {
 			return new LayoutDecision(LayoutAction.PASS, null, host, Set.of());
@@ -246,7 +261,7 @@ final class LayoutDecisionEngine {
 		// Record 类新增组件（RECORD_COMPONENT_ADDED）安全门控（R1）：
 		if (res.verdict() == LayoutGate.Verdict.RECORD_COMPONENT_ADDED) {
 			// 情况 A：堆上无存活实例 → 安全放行，新实例正常通过规范构造器初始化
-			if (liveness == Liveness.NONE) {
+			if (resolveLiveness(livenessSupplier) == Liveness.NONE) {
 				return new LayoutDecision(LayoutAction.WAIVE, res, host, Set.of());
 			}
 			// 情况 B：堆上有存活实例 → 坚决拒绝，Record 组件无初值表达式且不可变，存量实例将恒为 0/null 破坏不变式
@@ -263,7 +278,7 @@ final class LayoutDecisionEngine {
 					"field type changed and " + describeFindings(scan) + " still resolve to old descriptor");
 			}
 			// 情况 A：堆上无存活实例（liveInstances == 0）且非静态字段 → 直接放行
-			if (liveness == Liveness.NONE && !staticChange) {
+			if (!staticChange && resolveLiveness(livenessSupplier) == Liveness.NONE) {
 				return new LayoutDecision(LayoutAction.WAIVE, res, host, Set.of());
 			}
 			// 情况 B：堆上有存活实例（liveInstances > 0），且新字节码中该字段标有 @RemoldReinit
@@ -323,10 +338,15 @@ final class LayoutDecisionEngine {
 
 		// 无存活实例且不涉及静态字段：没有状态会被错读，放行。
 		// UNKNOWN 落入下面的 REJECT 分支（按"可能有实例"处理）。
-		if (liveness == Liveness.NONE && !staticChange) {
+		if (!staticChange && resolveLiveness(livenessSupplier) == Liveness.NONE) {
 			return new LayoutDecision(LayoutAction.WAIVE, res, host, Set.of());
 		}
 		return new LayoutDecision(LayoutAction.REJECT, res, host, droppedOf(host, batchNames));
+	}
+
+	private static Liveness resolveLiveness(Supplier<Liveness> livenessSupplier) {
+		Liveness liveness = livenessSupplier == null ? null : livenessSupplier.get();
+		return liveness == null ? Liveness.UNKNOWN : liveness;
 	}
 
 	/**

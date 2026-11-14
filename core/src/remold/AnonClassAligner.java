@@ -894,7 +894,23 @@ public final class AnonClassAligner {
 
 	/** 匿名类的直接宿主（去掉尾部 {@code $数字} 链）。调用方须先用 {@link #isBatchAnonClass} 确认它是真匿名类。 */
 	public static String batchAnonHost(String className) {
-		return className == null ? null : className.replaceAll("\\$\\d+(\\$\\d+)*$", "");
+		if (className == null) return null;
+		int cut = className.length();
+		int idx = cut;
+		while (idx > 0) {
+			int pos = idx - 1;
+			char ch = className.charAt(pos);
+			if (ch < '0' || ch > '9') break;
+			while (pos > 0) {
+				char prev = className.charAt(pos - 1);
+				if (prev < '0' || prev > '9') break;
+				pos--;
+			}
+			if (pos == 0 || className.charAt(pos - 1) != '$') break;
+			cut = pos - 1;
+			idx = cut;
+		}
+		return cut == className.length() ? className : className.substring(0, cut);
 	}
 
 	/**

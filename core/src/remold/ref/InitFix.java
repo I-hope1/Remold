@@ -19,6 +19,7 @@ import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 
 import static remold.RemoldAgent.log;
 
@@ -748,11 +749,19 @@ public class InitFix {
 	 * 确认没有任何存活实例，则不存在任何并发读穿窗口，可安全旁路阶段 A，避免无谓的双重 Redefine 元数据分配。</p>
 	 */
 	public static boolean requiresTwoPhase(Class<?> host, boolean hasLiveInstances) {
+		return requiresTwoPhase(host, () -> hasLiveInstances);
+	}
+
+	/**
+	 * 惰性探测版本：只有确认存在“需要两阶段保护且仅含实例字段”的挂起补丁时，才调用 {@code liveInstanceProbe}
+	 * 触发 JVMTI 全堆扫描；没有补丁或含静态字段的类直接短路返回，避免无效 STW 停顿。
+	 */
+	public static boolean requiresTwoPhase(Class<?> host, BooleanSupplier liveInstanceProbe) {
 		if (host == null) return false;
 		PendingPatch patch = PENDING.get(host);
 		if (patch == null || !patch.twoPhase()) return false;
-		if (!patch.plan().hasStatic() && patch.plan().hasInstance() && !hasLiveInstances) {
-			return false;
+		if (!patch.plan().hasStatic() && patch.plan().hasInstance()) {
+			return liveInstanceProbe == null || liveInstanceProbe.getAsBoolean();
 		}
 		return true;
 	}

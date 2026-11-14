@@ -29,6 +29,10 @@ Remold 是一个用于 JVM 热重载的 Java Agent。它监听编译输出目录
 
 ![Minecraft Mixin 重织入演示](docs/media/minecraft-mixin-reweave.gif)
 
+**Minecraft (Fabric)：在 `*.mixins.json` 中热删 / 热加 Mixin（移除 `CreepMixin` 后苦力怕立即恢复原版爆炸，重新加回后绿色粒子特效即时回归）**
+
+![Minecraft Mixin 配置热增删演示](docs/media/minecraft-mixin-config-hot-reload.gif)
+
 ---
 
 ## 怎么跑起来

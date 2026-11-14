@@ -29,6 +29,10 @@ Remold is a JVM hot-reload agent. It watches your compile output directories (e.
 
 ![Minecraft Mixin re-weave demo](docs/media/minecraft-mixin-reweave.gif)
 
+**Minecraft (Fabric): hot-remove and hot-add a Mixin in `*.mixins.json` (removing `CreepMixin` restores vanilla explosions immediately; adding it back restores the green particle effect)**
+
+![Minecraft Mixin config hot-reload demo](docs/media/minecraft-mixin-config-hot-reload.gif)
+
 ---
 
 ## Getting started

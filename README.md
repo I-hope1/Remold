@@ -98,6 +98,11 @@ remold {
 > Java 24+ 上如果启用了受限本地方法（JVMTI 原生库），仍需 `--enable-native-access=ALL-UNNAMED`
 > ——这是 JVM 对"允许调用受限本地方法"的独立授权，`redefineModule` 无法替代。
 
+> **性能调优建议（消除 JBR DCEVM 1–4s 热更长尾）：**
+> - **结构性热更推荐追加 `-XX:TieredStopAtLevel=1`**：开启 `-XX:+AllowEnhancedClassRedefinition` 后，每次重定义会引发 `deopt-all`，后续热更需等待正在执行的 C2 编译排空；仅保留 C1 可将排空等待归零（代价是关闭 C2 稳态峰值优化），大型基类（如 `LivingEntity`）端到端稳定在 **~380ms**，同时可将 `fileShakeMs` 调低至 `200–300`。
+> - **纯方法体极速模式**：日常高频微调逻辑且不改动类/Mixin 结构时，去掉 `-XX:+AllowEnhancedClassRedefinition` 走标准路径可压至 **~55–65ms**。
+> - 排查实录见 [`docs/topology/12-jbr-dcevm-jit-drain-tail-latency.md`](docs/topology/12-jbr-dcevm-jit-drain-tail-latency.md)。
+
 ### 系统属性开关
 
 以下 JVM 系统属性可按需覆盖（Gradle 插件会自动透传对应的 DSL 项）：

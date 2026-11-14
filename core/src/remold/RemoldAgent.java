@@ -26,7 +26,10 @@ import java.util.*;
 import java.util.jar.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 import java.util.zip.*;
 import java.util.regex.*;
@@ -1977,6 +1980,7 @@ public class RemoldAgent {
 	 * 处理文件变化的核心逻辑（批次主体；看门狗由 {@link #processChanges} 负责登记/注销）。
 	 */
 	private static void processChangesBatch(Set<Path> changedFiles, Class<?>[] classes) {
+		final long batchStartNanos = System.nanoTime();
 		// 批次可观测数据的起点：从读盘、对齐、织入、布局门、redefine 到 InitFix 全部计入。
 		// 收集器挂在当前线程上；即使没有任何监听器，这里也只多一次小对象分配，不改变批次行为。
 		BatchReportScope.begin();
@@ -2074,26 +2078,36 @@ public class RemoldAgent {
 		// 必须重启；回队只会造成"每次触发都失败一次"的噪音。
 		Map<String, Path> retryCandidates = new HashMap<>();
 
-		for (String hostName : hostClassesToAlign) {
-			String hostSlash = hostName.replace('.', '/');
-
-			// 预热并收集已加载但尚未缓存的旧匿名类字节码
+		long anonStartNanos = System.nanoTime();
+		// 单遍按宿主分桶旧匿名类，避免在 hostClassesToAlign 外层循环里对全量 loadedClassesMap / bytecodeCache 做 O(H * N) 扫描与 ASM 解析。
+		if (!hostClassesToAlign.isEmpty()) {
 			for (Map.Entry<String, Class<?>> entry : loadedClassesMap.entrySet()) {
 				String cName = entry.getKey();
-				if (!AnonClassAligner.isAnonymousClassName(hostSlash, cName)) continue;
+				String host = AnonClassAligner.batchAnonHost(cName);
+				if (host == null || host.equals(cName) || !hostClassesToAlign.contains(host)) continue;
+				if (!AnonClassAligner.isAnonymousClassName(host, cName)) continue;
 				if (bytecodeCache.containsKey(cName)) continue;
 				byte[] bc = fetchOriginalBytecode(entry.getValue());
 				if (bc != null && AnonClassAligner.isBatchAnonClass(cName, bc)) bytecodeCache.put(cName, bc);
 			}
-
-			Map<String, byte[]> oldAnon = new HashMap<>();
+		}
+		Map<String, Map<String, byte[]>> oldAnonsByHost = new HashMap<>();
+		if (!hostClassesToAlign.isEmpty()) {
 			for (Map.Entry<String, byte[]> entry : bytecodeCache.entrySet()) {
-				byte[] src = sourceBytecodeCache.get(entry.getKey());
+				String cName = entry.getKey();
+				String host = AnonClassAligner.batchAnonHost(cName);
+				if (host == null || host.equals(cName) || !hostClassesToAlign.contains(host)) continue;
+				byte[] src = sourceBytecodeCache.get(cName);
 				byte[] oldBytes = src != null ? src : entry.getValue();
-				if (!AnonClassAligner.isBatchAnonClass(entry.getKey(), oldBytes)) continue;
-				if (!hostName.equals(AnonClassAligner.batchAnonHost(entry.getKey()))) continue;
-				oldAnon.put(entry.getKey(), oldBytes);
+				if (!AnonClassAligner.isBatchAnonClass(cName, oldBytes)) continue;
+				oldAnonsByHost.computeIfAbsent(host, k -> new HashMap<>()).put(cName, oldBytes);
 			}
+		}
+
+		for (String hostName : hostClassesToAlign) {
+			String hostSlash = hostName.replace('.', '/');
+			Map<String, byte[]> oldAnon = new HashMap<>(
+				oldAnonsByHost.getOrDefault(hostName, Collections.emptyMap()));
 
 			// 只取**本宿主**的匿名类（按类自身归属分组，绝不拿"本宿主前缀"去扫整批）
 			Map<String, byte[]> newAnon = new HashMap<>(
@@ -2281,11 +2295,15 @@ public class RemoldAgent {
 		// 既不能被当作普通新类 defineClass，也不能被当作已加载类 redefine，更不能参与读者扫描。
 		newBatchBytes.keySet().removeIf(RemoldAgent::isNonLoadableClass);
 
+		long anonMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - anonStartNanos);
+
 		// ---- 同名局部类编号漂移止血门（docs/topology/07-layout-gate-and-risks.md §2）----
 		//
 		// 位置：宿主匿名对齐之后、实例布局门之前。局部类不在匿名对齐视野内（名字含简单名，被准入闸门
 		// 拒绝），故单开一道门。命中即把宿主及其 `host$...` 整族移出本批，复用同一宿主组拒绝通道。
+		long guardStartNanos = System.nanoTime();
 		applyLocalClassGuard(newBatchBytes, classToPath, transactions, skips);
+		long guardMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - guardStartNanos);
 
 		// ---- 实例状态布局安全门（docs/topology/07-layout-gate-and-risks.md §1，全体类，非仅匿名类）----
 		//
@@ -2296,7 +2314,17 @@ public class RemoldAgent {
 		// 分工：对齐器的 Tier 4 门只挡匿名类的**合成捕获字段**（ClassDiff 会过滤掉它们，
 		// 这里看不见）；本门只看现成的 `ClassDiff.changedFields`，即**非合成**字段的
 		// 删/改类型/改静态性。纯新增放行（交给 InitFix）。
-		applyRedefineLayoutGate(newBatchBytes, classToPath, transactions, skips);
+		long gateStartNanos = System.nanoTime();
+		Map<String, GateCachedDiff> gateDiffCache = new HashMap<>();
+		long[] readersMsOut = new long[1];
+		applyRedefineLayoutGate(newBatchBytes, classToPath, transactions, skips, gateDiffCache, readersMsOut);
+		long readersMs = readersMsOut[0];
+		long gateMs = Math.max(0L, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - gateStartNanos) - readersMs);
+
+		long alignDiffStartNanos = System.nanoTime();
+		// 同批内复用按 ClassLoader 分桶的 normalizeAlignBaseline 缓存，避免对同一关联类反复展开 frames 重算。
+		Map<ClassLoader, Map<String, byte[]>> normOldByLoader = new HashMap<>();
+		Map<ClassLoader, Map<String, byte[]>> normNewByLoader = new HashMap<>();
 
 		for (Map.Entry<String, byte[]> batchEntry : newBatchBytes.entrySet()) {
 			String className = batchEntry.getKey();
@@ -2405,14 +2433,15 @@ public class RemoldAgent {
 								// lambda$buildTitle$5(ImageButton)V），而老 CallSite 持有的是归一化后的
 								// 签名（lambda$buildTitle$5(Window, ImageButton)V）——redefine 之后直接
 								// NoSuchMethodError。原 lambda 还会被重复幽灵化出一份同名异型的空壳。
-								java.util.function.Function<String, byte[]> oldResolver =
+								Function<String, byte[]> oldResolver =
 								 normalizeAlignResolver(name -> {
 									byte[] src = prevSourceBytes.get(name.replace('/', '.'));
 									if (src == null) src = sourceBytecodeCache.get(name.replace('/', '.'));
 									return src != null ? src : bytecodeCache.get(name.replace('/', '.'));
-								 }, alignLoader);
-								java.util.function.Function<String, byte[]> newResolver =
-								 normalizeAlignResolver(name -> newBatchBytes.get(name.replace('/', '.')), alignLoader);
+								 }, alignLoader, normOldByLoader.computeIfAbsent(alignLoader, k -> new HashMap<>()));
+								Function<String, byte[]> newResolver =
+								 normalizeAlignResolver(name -> newBatchBytes.get(name.replace('/', '.')), alignLoader,
+								                        normNewByLoader.computeIfAbsent(alignLoader, k -> new HashMap<>()));
 								byte[] oldSrc = prevSourceBytes.get(className);
 								// 基线优先用 JVM 里**实际生效**的那份（bytecodeCache，含上一轮注入的孤儿桩）：
 								// 源码基线不含桩，多轮序列下会与运行期真实形态脱节（rs_revive 实测：
@@ -2452,7 +2481,12 @@ public class RemoldAgent {
 						}
 					}
 					if (oldBytecode != null) {
-						ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytecode, newBytecode);
+						GateCachedDiff gateCached = gateDiffCache.get(className);
+						ClassDiffUtil.ClassDiff diff = (gateCached != null
+							&& gateCached.oldBytes() == oldBytecode
+							&& gateCached.newBytes() == newBytecode)
+							? gateCached.diff()
+							: ClassDiffUtil.diff(oldBytecode, newBytecode);
 						ClassDiffUtil.logDiff(className, diff);
 						String annotationDefaultAbortClass =
 							handleAnnotationDefaultChangeInBatch(className, oldBytecode, newBytecode,
@@ -2505,7 +2539,10 @@ public class RemoldAgent {
 							log("[DCEVM] Structure change detected, proceeding with enhanced redefinition.");
 						}
 						InitFix.transform(targetClass, newBytecode, diff);
-						if (InitFix.requiresTwoPhase(targetClass, hasLiveInstances(targetClass))) needsTwoPhase = true;
+						if (!needsTwoPhase && TWO_PHASE
+							&& InitFix.requiresTwoPhase(targetClass, () -> hasLiveInstances(targetClass))) {
+							needsTwoPhase = true;
+						}
 					} else {
 						log("[WARN] Cannot diff " + className + " (missing old bytecode). Proceeding with redefine.");
 					}
@@ -2574,6 +2611,8 @@ public class RemoldAgent {
 		// 批量执行重定义（针对已加载类）。
 		// 两阶段：当本批确实要补"新增/类型变更字段"时，先提交阶段 A（新结构 + 旧方法体，构造器保持新体），
 		// 让存量实例在旧行为下被补齐，再提交阶段 C 的新方法体；否则沿用单次重定义的快路径。
+		long alignDiffMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - alignDiffStartNanos);
+
 		RedefineOutcome outcome;
 		if (needsTwoPhase && TWO_PHASE) {
 			outcome = applyTwoPhase(definitions, oldEffectiveBytes, transactions.values(), skips, injectedClasses);
@@ -2667,6 +2706,19 @@ public class RemoldAgent {
 		// finish 会清掉当前线程的批次状态；即使本批没有类成功，也要发布
 		// “Mixin 模板已 reload / InitFix 已修补”这类可观测活动（见 notifyBatchListeners）。
 		notifyBatchListeners(successfulDefinitions, BatchReportScope.finish(redefinedNames));
+		if (!definitions.isEmpty() || injectedCount > 0) {
+			long totalMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - batchStartNanos);
+			info("[HOTSWAP-BATCH] summary: mode=" + (needsTwoPhase && TWO_PHASE ? "2-phase" : "1-phase")
+			     + ", total=" + totalMs + "ms"
+			     + " (anon=" + anonMs + "ms"
+			     + ", guard=" + guardMs + "ms"
+			     + ", readers=" + readersMs + "ms"
+			     + ", gate=" + gateMs + "ms"
+			     + ", alignDiff=" + alignDiffMs + "ms"
+			     + ", liveScan=" + LIVE_INSTANCE_SCAN_MILLIS.get() + "ms"
+			     + ", redefine=" + BATCH_REDEFINE_MILLIS.get() + "ms"
+			     + ", redefined=" + successfulDefinitions.size() + ")");
+		}
 
 		// L0/L1 必须在 InitFix 后处理（afterRedefine）之后运行：
 		// 一是 L1 的"已重放"记录在 applyPatch 里写入，L0 需要据此抑制误导性告警；
@@ -2793,13 +2845,15 @@ public class RemoldAgent {
 	private static void resetLiveInstanceCache() {
 		LIVE_INSTANCE_CACHE.clear();
 		LIVE_INSTANCE_SCAN_MILLIS.set(0);
+		BATCH_REDEFINE_MILLIS.set(0);
 	}
 
 	/** 实例判定缓存：点分类名 → 是否存活实例。见 {@link #hasLiveInstances}。 */
-	private static final Map<String, Boolean>                   LIVE_INSTANCE_CACHE       = new ConcurrentHashMap<>();
+	private static final Map<String, Boolean> LIVE_INSTANCE_CACHE       = new ConcurrentHashMap<>();
 	/** 累计的实例扫描耗时（毫秒），用于观察全堆遍历开销。 */
-	static final         java.util.concurrent.atomic.AtomicLong LIVE_INSTANCE_SCAN_MILLIS =
-	 new java.util.concurrent.atomic.AtomicLong();
+	static final         AtomicLong           LIVE_INSTANCE_SCAN_MILLIS = new AtomicLong();
+	/** 本批次 {@code inst.redefineClasses} 累计耗时（毫秒）。 */
+	private static final AtomicLong           BATCH_REDEFINE_MILLIS     = new AtomicLong();
 
 	/**
 	 * 在重定义与 InitFix 补丁（静态字段与存量实例字段）全部就位后调用。
@@ -3406,6 +3460,8 @@ public class RemoldAgent {
 		List<ClassNode> newClasses = new ArrayList<>();
 		Set<String> hosts = new LinkedHashSet<>();
 		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
+			// 顶层类无 '$' 必不是局部类，跳过 ASM 解析与名单分配。
+			if (e.getKey().indexOf('$') < 0) continue;
 			ClassNode cn = parseClass(e.getValue());
 			if (cn == null) continue;
 			newClasses.add(cn);
@@ -3698,10 +3754,21 @@ public class RemoldAgent {
 		}
 	}
 
+	private record GateCachedDiff(byte[] oldBytes, byte[] newBytes, ClassDiffUtil.ClassDiff diff) {}
+
 	private static void applyRedefineLayoutGate(Map<String, byte[]> newBatchBytes,
 	                                            Map<String, Path> classToPath,
 	                                            Map<String, AlignmentTransaction> transactions,
 	                                            RoundSkips skips) {
+		applyRedefineLayoutGate(newBatchBytes, classToPath, transactions, skips, null, null);
+	}
+
+	private static void applyRedefineLayoutGate(Map<String, byte[]> newBatchBytes,
+	                                            Map<String, Path> classToPath,
+	                                            Map<String, AlignmentTransaction> transactions,
+	                                            RoundSkips skips,
+	                                            Map<String, GateCachedDiff> diffCache,
+	                                            long[] readersMsOut) {
 		if (LayoutGate.MODE_OFF.equals(LAYOUT_GATE)) return;
 
 		// 扫一遍本次批次的新字节码，及时发现本批新引入的偏移量缓存
@@ -3710,7 +3777,11 @@ public class RemoldAgent {
 		}
 
 		// 本轮有"删实例字段"时才做读者扫描（内部先 diff 判断，没有删除就直接返回空表，零成本）。
+		long readersStartNanos = System.nanoTime();
 		Map<String, RemovedMemberScan> readersByClass = RemovedMemberScanner.scan(newBatchBytes, classToPath);
+		if (readersMsOut != null && readersMsOut.length > 0) {
+			readersMsOut[0] = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - readersStartNanos);
+		}
 
 		Set<String> rejectedHosts = new LinkedHashSet<>();
 		for (String className : new ArrayList<>(newBatchBytes.keySet())) {
@@ -3750,13 +3821,14 @@ public class RemoldAgent {
 			Map<String, String> unsafeReinitScope = Map.of();
 			try {
 				ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, newBytes);
+				if (diffCache != null) diffCache.put(className, new GateCachedDiff(oldBytes, newBytes, diff));
 				changed = diff.changedFields;
 				reinitFields = diff.reinitFields;
 				if (!reinitFields.isEmpty() && diff.newClass != null) {
-					unextractableReinit = remold.ref.InitFix.unextractableReinitFields(targetClass, diff.newClass, reinitFields);
+					unextractableReinit = InitFix.unextractableReinitFields(targetClass, diff.newClass, reinitFields);
 					// 继承字段 + 子类初始化器写同字段：INCLUDE_SUBCLASSES 会把声明类初值写进子类实例，
 					// 覆盖子类自己的初值且不重放子类赋值（docs/initfix/03-runtime-driver.md §4）。
-					unsafeReinitScope = remold.ref.InitFix.unsafeInheritedReinitFields(targetClass, diff.newClass, reinitFields);
+					unsafeReinitScope = InitFix.unsafeInheritedReinitFields(targetClass, diff.newClass, reinitFields);
 				}
 			} catch (Throwable t) {
 				warn("[LAYOUT-SKIP] " + className + ": layout gate skipped — cannot diff ("
@@ -3764,16 +3836,17 @@ public class RemoldAgent {
 				continue;
 			}
 
-			// 只有布局不兼容时才去扫堆 —— 一次全堆遍历会触发 safepoint，不能每类都做。
-			// hasLiveInstances 已把"取不到实例信息"保守折叠成 LIVE（见其 javadoc）。
-			Liveness liveness = LayoutGate.checkChangedFields(changed).compatible()
+			// 仅当决策路径实际需要存活实例判定且 changedFields 非兼容时才触发 STW 全堆遍历；
+			// 删字段、枚举、静态改动等分支无需触碰 hasLiveInstances。
+			final List<String> changedRef = changed;
+			Supplier<Liveness> livenessSupplier = () -> LayoutGate.checkChangedFields(changedRef).compatible()
 			 ? Liveness.LIVE
 			 : (hasLiveInstances(className) ? Liveness.LIVE : Liveness.NONE);
 
 			SuperclassDriftGate.DriftDecision drift = checkSuperclassDriftIfApplicable(
 				className, targetClass, changed, newBytes, newBatchBytes);
 
-			LayoutDecision d = decideLayout(className, changed, LAYOUT_GATE, liveness,
+			LayoutDecision d = decideLayout(className, changed, LAYOUT_GATE, livenessSupplier,
 			                                newBatchBytes.keySet(),
 			                                readersByClass.getOrDefault(className, RemovedMemberScan.NOT_SCANNED),
 			                                drift,
@@ -4073,6 +4146,16 @@ public class RemoldAgent {
 		return LayoutDecisionEngine.decide(className, changedFields, mode, liveness, batchNames, scan, drift, reinitFields, unextractableReinitFields);
 	}
 
+	/** 懒求值版布局决策入口：仅当决策分支确实需要存活实例判定时才触发 {@code livenessSupplier}。 */
+	public static LayoutDecision decideLayout(String className, List<String> changedFields,
+	                                          String mode, Supplier<Liveness> livenessSupplier, Set<String> batchNames,
+	                                          RemovedMemberScan scan,
+	                                          SuperclassDriftGate.DriftDecision drift,
+	                                          Set<String> reinitFields,
+	                                          Map<String, String> unextractableReinitFields) {
+		return LayoutDecisionEngine.decide(className, changedFields, mode, livenessSupplier, batchNames, scan, drift, reinitFields, unextractableReinitFields);
+	}
+
 	/** @see LayoutDecisionEngine#skipVerdictForLayout(LayoutDecision, RemovedMemberScan) */
 	public static String skipVerdictForLayout(LayoutDecision d, RemovedMemberScan scan) {
 		return LayoutDecisionEngine.skipVerdictForLayout(d, scan);
@@ -4165,7 +4248,7 @@ public class RemoldAgent {
 				warn("[HOTSWAP-2P] No old bytecode for " + name
 				     + "; stage A falls back to the target bytes for this class.");
 				skeleton = target;
-			} else if (!InitFix.requiresTwoPhase(clazz, hasLiveInstances(clazz))) {
+			} else if (!InitFix.requiresTwoPhase(clazz, () -> hasLiveInstances(clazz))) {
 				// 该类本身无需两阶段保护（如无存量实例且无静态字段，或纯方法体修改）：阶段 A 直接使用目标字节
 				if (DEBUG) log("[HOTSWAP-2P] Stage A uses target bytes directly for " + name + " (no live instances / no read-through hazard)");
 				skeleton = target;
@@ -4335,14 +4418,24 @@ public class RemoldAgent {
 		enterInternalRedefine(targetNames);
 		try {
 			try {
-				inst.redefineClasses(definitions.toArray(new ClassDefinition[0]));
+				long redefineStartNanos = System.nanoTime();
+				try {
+					inst.redefineClasses(definitions.toArray(new ClassDefinition[0]));
+				} finally {
+					BATCH_REDEFINE_MILLIS.addAndGet(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - redefineStartNanos));
+				}
 				for (ClassDefinition def : definitions) ok.add(def.getDefinitionClass().getName());
 			} catch (Throwable t) {
 				error("[HOTSWAP-2P] Stage A bulk redefine failed, switching to individual mode...", t);
 				for (ClassDefinition def : definitions) {
 					String className = def.getDefinitionClass().getName();
 					try {
-						inst.redefineClasses(def);
+						long redefineStartNanos = System.nanoTime();
+						try {
+							inst.redefineClasses(def);
+						} finally {
+							BATCH_REDEFINE_MILLIS.addAndGet(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - redefineStartNanos));
+						}
 						ok.add(className);
 					} catch (Throwable e) {
 						if (isVmLevelRedefineFailure(e)) {
@@ -4458,7 +4551,12 @@ public class RemoldAgent {
 		}
 		enterInternalRedefine(targetNames);
 		try {
-			inst.redefineClasses(definitions.toArray(new ClassDefinition[0]));
+			long redefineStartNanos = System.nanoTime();
+			try {
+				inst.redefineClasses(definitions.toArray(new ClassDefinition[0]));
+			} finally {
+				BATCH_REDEFINE_MILLIS.addAndGet(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - redefineStartNanos));
+			}
 			// 成功行本身也要带上"还有谁没进来"：用户最先看的就是这一行，只报成功个数会让
 			// "我关心的类其实被跳过了"完全隐形。详细名单紧跟其后由 skips.report() 输出。
 			info("HotSwap successful: " + definitions.size() + " classes redefined."
@@ -4488,7 +4586,12 @@ public class RemoldAgent {
 				String className = def.getDefinitionClass().getName();
 				boolean redefined = false;
 				try {
-					inst.redefineClasses(def);
+					long redefineStartNanos = System.nanoTime();
+					try {
+						inst.redefineClasses(def);
+					} finally {
+						BATCH_REDEFINE_MILLIS.addAndGet(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - redefineStartNanos));
+					}
 					redefined = true;
 				} catch (Throwable e) {
 					if (isVmLevelRedefineFailure(e)) {
@@ -5337,14 +5440,13 @@ public class RemoldAgent {
 		if (!LayoutGate.MODE_WARN.equals(LAYOUT_GATE) && diff.newClass != null
 		    && !diff.reinitFields.isEmpty()) {
 			Map<String, String> unsafeReinitScope =
-				remold.ref.InitFix.unsafeInheritedReinitFields(targetClass, diff.newClass, diff.reinitFields);
+				InitFix.unsafeInheritedReinitFields(targetClass, diff.newClass, diff.reinitFields);
 			if (!unsafeReinitScope.isEmpty()) {
 				return LayoutDecisionEngine.rejectUnsafeReinitScope(
 					className, Set.of(className), unsafeReinitScope);
 			}
 		}
-		LayoutGate.Result layoutRes = LayoutGate.checkChangedFields(diff.changedFields);
-		Liveness liveness = layoutRes.compatible()
+		Supplier<Liveness> livenessSupplier = () -> LayoutGate.checkChangedFields(diff.changedFields).compatible()
 			? Liveness.LIVE
 			: (hasLiveInstances(className) ? Liveness.LIVE : Liveness.NONE);
 
@@ -5360,8 +5462,8 @@ public class RemoldAgent {
 		SuperclassDriftGate.DriftDecision drift = checkSuperclassDriftIfApplicable(
 			className, targetClass, diff.changedFields, runtimeBytes, Map.of(className, runtimeBytes));
 
-		return decideLayout(className, diff.changedFields, LAYOUT_GATE, liveness,
-			Set.of(className), scan, drift, diff.reinitFields);
+		return decideLayout(className, diff.changedFields, LAYOUT_GATE, livenessSupplier,
+			Set.of(className), scan, drift, diff.reinitFields, Map.of());
 	}
 
 	/**
@@ -5616,14 +5718,19 @@ public class RemoldAgent {
 	 * @param loader 目标 ClassLoader
 	 * @return 归一化后的解析器；关闭开关时直接返回 {@code raw}
 	 */
-	private static java.util.function.Function<String, byte[]> normalizeAlignResolver(
-	 java.util.function.Function<String, byte[]> raw, ClassLoader loader) {
+	private static Function<String, byte[]> normalizeAlignResolver(
+	 Function<String, byte[]> raw, ClassLoader loader) {
+		return normalizeAlignResolver(raw, loader, FORCE_STATIC_LAMBDA ? new HashMap<>() : null);
+	}
+
+	private static Function<String, byte[]> normalizeAlignResolver(
+	 Function<String, byte[]> raw, ClassLoader loader, Map<String, byte[]> cache) {
 		if (!FORCE_STATIC_LAMBDA) return raw;
-		java.util.Map<String, byte[]> cache = new java.util.HashMap<>();
+		Map<String, byte[]> targetCache = cache != null ? cache : new HashMap<>();
 		return name -> {
-			if (cache.containsKey(name)) return cache.get(name);
+			if (targetCache.containsKey(name)) return targetCache.get(name);
 			byte[] out = normalizeAlignBaseline(raw.apply(name), name, loader);
-			cache.put(name, out);
+			targetCache.put(name, out);
 			return out;
 		};
 	}

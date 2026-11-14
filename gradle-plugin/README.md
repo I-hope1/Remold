@@ -89,11 +89,29 @@ remold {
     // plugins("arc", "mixin")                // Remold ecosystem plugins to attach
     // extraJvmArgs("-Dremold.agent.batch_stall_ms=30000")
     // dependsOn("jar")
+    // attach("run", tasks.named("test"))     // inject agent + JBR into existing JavaExec / Test tasks
 }
 ```
 
 Every option also has a `remold.<name>` project property / `extra` entry (`remold.mainClass`, `remold.jbr`,
 `remold.deployDir`, ...), which is how Kotlin DSL builds configure the plugin without a `remold { }` accessor.
+
+### Attaching to existing `JavaExec` / `Test` tasks
+
+When your build already defines its own launch or test task (e.g. `application`'s `run`, a custom `JavaExec`, or
+`test`), use `attach(...)` instead of configuring `mainClass` / `jar` for `runRemold`:
+
+```kotlin
+remold {
+    version = "0.2.8"
+    attach(tasks.named("run"))
+    attach("test")
+}
+```
+
+`attach(...)` injects the resolved `-javaagent` and JBR DCEVM flags idempotently (no duplicate `-javaagent:`),
+switches the task executable and clears its toolchain `javaLauncher` when a custom JBR is resolved, and fails
+closed if a named task does not exist or is not `JavaForkOptions`.
 
 ### Tasks
 

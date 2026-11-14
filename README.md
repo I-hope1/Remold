@@ -63,6 +63,7 @@ remold {
     // jbrPath = "/path/to/jbr" // 默认从环境变量 JBR_HOME 或系统属性 jbr.home 读取
     // fileShakeMs = 800        // .class 变动防抖窗口（毫秒，默认 800）
     // assetShakeMs = 250       // 资源/配置独立防抖窗口（毫秒，默认 250）
+    // attach('run', tasks.named('test')) // 直接把 agent + JBR 注入已有 JavaExec / Test 任务，无需再填 mainClass
 }
 ```
 

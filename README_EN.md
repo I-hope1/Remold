@@ -63,6 +63,7 @@ remold {
     // jbrPath = "/path/to/jbr" // defaults to the JBR_HOME env var or the jbr.home system property
     // fileShakeMs = 800        // .class debounce window in ms (default 800)
     // assetShakeMs = 250       // resource/config debounce window in ms (default 250)
+    // attach('run', tasks.named('test')) // inject agent + JBR into existing JavaExec / Test tasks without mainClass
 }
 ```
 

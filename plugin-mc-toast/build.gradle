@@ -1,0 +1,65 @@
+plugins {
+	id 'java-library'
+	id 'maven-publish'
+}
+
+sourceSets.main.java.srcDirs = ["src"]
+sourceSets.test.java.srcDirs = ["test"]
+
+publishing {
+	publications {
+		maven(MavenPublication) {
+			from components.java
+			pom {
+				name = 'remold-plugin-mc-toast'
+				description = 'Minecraft client in-game hot-reload Toast notification plugin for Remold (Fabric/Forge/NeoForge, zero MC dependency)'
+				licenses {
+					license {
+						name = 'GNU General Public License v3.0'
+						url = 'https://www.gnu.org/licenses/gpl-3.0.txt'
+					}
+				}
+			}
+		}
+		jitpack(MavenPublication) {
+			groupId = 'com.github.I-hope1.Remold'
+			artifactId = 'plugin-mc-toast'
+			version = "v${version}"
+			from components.java
+			pom {
+				name = 'remold-plugin-mc-toast'
+				description = 'Minecraft client in-game hot-reload Toast notification plugin for Remold (JitPack compatible)'
+				licenses {
+					license {
+						name = 'GNU General Public License v3.0'
+						url = 'https://www.gnu.org/licenses/gpl-3.0.txt'
+					}
+				}
+			}
+		}
+	}
+}
+
+dependencies {
+	// 插件由 Agent 通过 appendToSystemClassLoaderSearch 加载，运行时由 Agent jar 提供 api/core
+	compileOnly project(':api')
+	compileOnly project(':core')
+
+	testImplementation project(':api')
+	testImplementation project(':core')
+	testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
+}
+
+test {
+	useJUnitPlatform()
+}
+
+jar {
+	manifest {
+		attributes(
+			'Remold-Plugin-Class': 'remold.mctoast.McToastHotswapPlugin',
+			'Remold-Plugin-Name': 'mc-toast'
+		)
+	}
+}

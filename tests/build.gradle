@@ -373,7 +373,9 @@ tasks.register("verifyDocStatusMarkers") {
 			file("${rootDir}/api/src"),
 			file("${rootDir}/plugin-arc/src"),
 			file("${rootDir}/plugin-mixin/src"),
+			file("${rootDir}/plugin-fabric/src"),
 			file("${rootDir}/plugin-forge/src"),
+			file("${rootDir}/plugin-mc-toast/src"),
 			file("${rootDir}/panama/src")
 		]
 		def pattern = ~/[✅❌⬜🔶🟣]|\[(已实现|未实现|部分实现|已偏离)/
@@ -442,7 +444,7 @@ tasks.register("verifyStatusSingleSource") {
 				}
 			}
 		}
-		["core/src", "api/src", "plugin-arc/src", "plugin-mixin/src", "plugin-forge/src", "panama/src"].each { d ->
+		["core/src", "api/src", "plugin-arc/src", "plugin-mixin/src", "plugin-fabric/src", "plugin-forge/src", "plugin-mc-toast/src", "panama/src"].each { d ->
 			def dir = file("${rootDir}/$d")
 			if (!dir.exists()) {
 				return
@@ -483,6 +485,7 @@ tasks.register("verifyLogLanguage") {
 			file("${rootDir}/plugin-mixin/src"),
 			file("${rootDir}/plugin-fabric/src"),
 			file("${rootDir}/plugin-forge/src"),
+			file("${rootDir}/plugin-mc-toast/src"),
 			file("${rootDir}/gradle-plugin/src")
 		]
 		// CJK 统一表意文字（含扩展 A/B）、CJK 部首/符号、兼容表意文字、全角形式（中文标点）。

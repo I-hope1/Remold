@@ -80,7 +80,7 @@ assemble.dependsOn('packageModTemplate', 'packageFabricTemplate')
 // 依赖用 `com.github.I-hope1.Remold:api:v<ver>`；任何一侧漏配/漏版本前缀都会让离线解析悬空
 // ——v0.2.5 发版时 `gradle-plugin` 的 jitpack 发布漏了 `version = "v${version}"` 就是这样暴露的。
 def remoldPublishableModules = [':api', ':core', ':gradle-plugin', ':panama',
-                                ':plugin-arc', ':plugin-fabric', ':plugin-forge', ':plugin-mixin']
+                                ':plugin-arc', ':plugin-fabric', ':plugin-forge', ':plugin-mc-toast', ':plugin-mixin']
 tasks.register('verifyReleaseCoordinates') {
 	group = 'verification'
 	description = '断言 mavenLocal 中 io.github.i-hope1.remold:*:<ver> 与 com.github.I-hope1.Remold:*:v<ver> 两套坐标齐全'

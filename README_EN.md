@@ -89,18 +89,6 @@ If you bypass the Gradle plugin and configure the VM arguments by hand in IDEA o
 -javaagent:/path/to/remold-agent.jar=build/classes/java/main;build/classes/kotlin/main
 ```
 
-> **`--add-exports` / `--add-opens` are no longer required.** On the very first line of `premain` the agent calls
-> `Instrumentation.redefineModule` to export + open the nine `java.base` packages `jdk.internal.misc`,
-> `jdk.internal.reflect`, `jdk.internal.loader`, `jdk.internal.access`, `jdk.internal.vm`,
-> `java.lang{,.invoke,.reflect}` and `sun.nio.ch` to **every unnamed module** (the agent itself, the system
-> loader, the thread context loader), which is equivalent to a hand-written chain of
-> `--add-exports …=ALL-UNNAMED` and `--add-opens …=ALL-UNNAMED`; start-up logs a single
-> `[Agent] opened 9 JDK-internal package(s) …` line. Passing the old arguments anyway does not conflict.
-> A `Module.EVERYONE_MODULE` fallback covers class loaders created *after* `premain` (Knot / ModLauncher /
-> plugin loaders). On Java 24+ with the JVMTI native library you still need
-> `--enable-native-access=ALL-UNNAMED` — that is the JVM's separate authorisation for restricted native
-> methods, and `redefineModule` cannot replace it.
-
 ### System properties
 
 The following JVM system properties can be overridden as needed (the Gradle plugin forwards the matching DSL entries):

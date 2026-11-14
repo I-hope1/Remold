@@ -89,19 +89,11 @@ remold {
 -javaagent:/path/to/remold-agent.jar=build/classes/java/main;build/classes/kotlin/main
 ```
 
-> **不再需要 `--add-exports` / `--add-opens`。** agent 在 `premain` 的第一行就调用
-> `Instrumentation.redefineModule`，把 `jdk.internal.misc` / `jdk.internal.reflect` /
-> `jdk.internal.loader` / `jdk.internal.access` / `jdk.internal.vm` / `java.lang{,.invoke,.reflect}` /
-> `sun.nio.ch` 这 9 个包对**所有 unnamed module**（agent 自身、系统加载器、线程上下文加载器）一次性
-> export + open，效果等价于手写一串 `--add-exports …=ALL-UNNAMED` 与 `--add-opens …=ALL-UNNAMED`；
-> 启动日志会打一行 `[Agent] opened 9 JDK-internal package(s) …`。旧参数继续传也不会冲突。
-> Java 24+ 上如果启用了受限本地方法（JVMTI 原生库），仍需 `--enable-native-access=ALL-UNNAMED`
-> ——这是 JVM 对"允许调用受限本地方法"的独立授权，`redefineModule` 无法替代。
-
-> **性能调优建议（消除 JBR DCEVM 1–4s 热更长尾）：**
-> - **结构性热更推荐追加 `-XX:TieredStopAtLevel=1`**：开启 `-XX:+AllowEnhancedClassRedefinition` 后，每次重定义会引发 `deopt-all`，后续热更需等待正在执行的 C2 编译排空；仅保留 C1 可将排空等待归零（代价是关闭 C2 稳态峰值优化），大型基类（如 `LivingEntity`）端到端稳定在 **~380ms**，同时可将 `fileShakeMs` 调低至 `200–300`。
-> - **纯方法体极速模式**：日常高频微调逻辑且不改动类/Mixin 结构时，去掉 `-XX:+AllowEnhancedClassRedefinition` 走标准路径可压至 **~55–65ms**。
-> - 排查实录见 [`docs/topology/12-jbr-dcevm-jit-drain-tail-latency.md`](docs/topology/12-jbr-dcevm-jit-drain-tail-latency.md)。
+> **如果从第 2 轮热更开始突然变慢（动辄 1~4 秒）：**
+> JBR 在 `-XX:+AllowEnhancedClassRedefinition` 下每次重定义都会清空 JIT 编译缓存，下一轮热更前 JVM 还要等正在进行的 C2 编译全部跑完。
+> - **开发时推荐加上 `-XX:TieredStopAtLevel=1`**（只用 C1，不再等 C2 编译）：像 `LivingEntity` 这种带一百多个子类的大类也能稳在 400ms 左右；配合 IDEA `Ctrl + Shift + F9` 单文件编译，可以把 `fileShakeMs` 一起降到 `200~300`。代价是没有 C2 优化，游戏运行帧率会略低一些，开发调试一般够用。
+> - **只改方法体、不改类或 Mixin 结构时**：也可以干脆去掉 `-XX:+AllowEnhancedClassRedefinition`，热更只需 ~60ms（代价是改结构会提示需要重启）。
+> - 具体定位过程与对照数据见 [`docs/topology/12-jbr-dcevm-jit-drain-tail-latency.md`](docs/topology/12-jbr-dcevm-jit-drain-tail-latency.md)。
 
 ### 系统属性开关
 

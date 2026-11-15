@@ -2890,7 +2890,9 @@ public class RemoldAgent {
 		} catch (Throwable t) {
 			// JVMTI 不可用 / 初始化失败 / 扫描异常 —— 一律按"有实例"处理（保守）。
 			warn("[ANON-LAYOUT] Cannot scan instances for " + dotClassName
-			     + " (" + t.getClass().getSimpleName() + "); assuming LIVE instances exist.");
+			     + " (" + t.getClass().getSimpleName()
+			     + (t.getMessage() != null ? ": " + t.getMessage() : "")
+			     + "); assuming LIVE instances exist.");
 			result = true;
 		}
 		long ms = (System.nanoTime() - t0) / 1_000_000;

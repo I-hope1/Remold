@@ -56,22 +56,145 @@ public class LibTool {
 		} catch (Throwable ignored) {
 		}
 
-		// 3. 从 Jar 资源或本地工程目录解包加载
+		// 3. 从 java.library.path、Jar 资源或本地工程目录按平台候选顺序加载
+		// （在无 android.os.Build 的 AndroidJBR / Termux 上，Linux/aarch64 会从 glibc 产物回退到 bionic NDK 产物）
 		String os = System.getProperty("os.name", "unknown");
 		String arch = System.getProperty("os.arch", "unknown");
 		boolean android = isAndroid();
-		String libName = NativeLibraryName.resolve(os, arch, android);
-		File resolved = resolveNativeLibrary(libName);
-		if (resolved != null && resolved.exists()) {
-			System.load(resolved.getAbsolutePath());
-			initialized = true;
-			RemoldAgent.info("[Lib] Loaded " + libName + " from: " + resolved.getAbsolutePath());
-			return;
+		List<String> candidates = NativeLibraryName.candidates(os, arch, android);
+		Throwable lastFailure = null;
+		for (String libName : candidates) {
+			Throwable loadFailure = tryLoadCandidate(libName);
+			if (initialized) return;
+			if (loadFailure != null) lastFailure = loadFailure;
 		}
 
-		throw new UnsatisfiedLinkError("Cannot locate or load native JVMTI library '" + libName
-			+ "' for " + os + "/" + arch + (android ? " (Android)" : "")
-			+ " (tried remold.path.libtool, java.library.path, and embedded resources)");
+		String detail = lastFailure != null && lastFailure.getMessage() != null
+			? ": " + lastFailure.getClass().getSimpleName() + ": " + lastFailure.getMessage()
+			: "";
+		UnsatisfiedLinkError err = new UnsatisfiedLinkError("Cannot locate or load native JVMTI library "
+			+ candidates + " for " + os + "/" + arch + (android ? " (Android)" : "")
+			+ " (tried remold.path.libtool, java.library.path, and embedded resources)" + detail);
+		if (lastFailure != null) err.initCause(lastFailure);
+		throw err;
+	}
+
+	private static Throwable tryLoadCandidate(String libName) {
+		Throwable lastFailure = null;
+		String shortName = stripLibraryAffixes(libName);
+		if (shortName != null && !"tool64".equals(shortName)) {
+			try {
+				System.loadLibrary(shortName);
+				initialized = true;
+				RemoldAgent.info("[Lib] Loaded " + libName + " from java.library.path.");
+				return null;
+			} catch (Throwable ignored) {
+			}
+		}
+
+		byte[] embeddedBytes = readEmbeddedLibrary(libName);
+		if (embeddedBytes != null) {
+			for (File dir : nativeCacheDirs()) {
+				File target = writeNativeLibrary(dir, libName, embeddedBytes);
+				if (target == null) continue;
+				try {
+					System.load(target.getAbsolutePath());
+					initialized = true;
+					RemoldAgent.info("[Lib] Loaded " + libName + " from: " + target.getAbsolutePath());
+					return null;
+				} catch (Throwable t) {
+					lastFailure = t;
+				}
+			}
+		}
+
+		for (File local : localSearchFiles(libName)) {
+			try {
+				System.load(local.getAbsolutePath());
+				initialized = true;
+				RemoldAgent.info("[Lib] Loaded " + libName + " from: " + local.getAbsolutePath());
+				return null;
+			} catch (Throwable t) {
+				lastFailure = t;
+			}
+		}
+		return lastFailure;
+	}
+
+	private static String stripLibraryAffixes(String libName) {
+		if (libName == null) return null;
+		String s = libName;
+		if (s.startsWith("lib")) s = s.substring(3);
+		int dot = s.lastIndexOf('.');
+		return dot > 0 ? s.substring(0, dot) : s;
+	}
+
+	private static byte[] readEmbeddedLibrary(String libName) {
+		String resourcePath = "/libs/" + libName;
+		try (InputStream in = LibTool.class.getResourceAsStream(resourcePath)) {
+			if (in != null) {
+				byte[] bytes = in.readAllBytes();
+				if (bytes.length > 0) return bytes;
+			}
+		} catch (Throwable ignored) {
+		}
+		return null;
+	}
+
+	private static List<File> nativeCacheDirs() {
+		List<File> dirs = new ArrayList<>(2);
+		String tmp = System.getProperty("java.io.tmpdir");
+		if (tmp != null && !tmp.trim().isEmpty()) {
+			dirs.add(new File(tmp.trim(), "remold_natives"));
+		}
+		String home = System.getProperty("user.home");
+		if (home != null && !home.trim().isEmpty()) {
+			File userDir = new File(home.trim(), ".remold/natives");
+			if (!dirs.contains(userDir)) {
+				dirs.add(userDir);
+			}
+		}
+		return dirs;
+	}
+
+	private static File writeNativeLibrary(File tempDir, String libName, byte[] bytes) {
+		try {
+			if (!tempDir.exists() && !tempDir.mkdirs() && !tempDir.isDirectory()) {
+				return null;
+			}
+			File target = new File(tempDir, libName);
+			if (!target.exists() || target.length() != bytes.length) {
+				try {
+					Files.write(target.toPath(), bytes);
+				} catch (IOException e) {
+					// Windows 上同名 DLL 可能已被其他并发进程锁定，生成独立文件名
+					target = new File(tempDir, System.currentTimeMillis() + "_"
+						+ Math.abs(new Random().nextInt()) + "_" + libName);
+					Files.write(target.toPath(), bytes);
+				}
+				target.deleteOnExit();
+			}
+			return target;
+		} catch (Throwable ignored) {
+			return null;
+		}
+	}
+
+	private static List<File> localSearchFiles(String libName) {
+		String[] searchPaths = {
+			"core/libs/" + libName,
+			"../core/libs/" + libName,
+			"libs/" + libName,
+			"../../core/libs/" + libName
+		};
+		List<File> files = new ArrayList<>(searchPaths.length);
+		for (String p : searchPaths) {
+			File f = new File(p);
+			if (f.exists() && f.isFile()) {
+				files.add(f.getAbsoluteFile());
+			}
+		}
+		return files;
 	}
 
 	/** Android/ART 下 {@code os.name} 同样是 {@code Linux}，只能靠该平台独有的类区分。 */
@@ -82,52 +205,6 @@ public class LibTool {
 		} catch (Throwable ignored) {
 			return false;
 		}
-	}
-
-	private static File resolveNativeLibrary(String libName) {
-		// 3.1 尝试从 classpath / jar 内部解包
-		String resourcePath = "/libs/" + libName;
-		try (InputStream in = LibTool.class.getResourceAsStream(resourcePath)) {
-			if (in != null) {
-				byte[] bytes = in.readAllBytes();
-				if (bytes.length > 0) {
-					File tempDir = new File(System.getProperty("java.io.tmpdir"), "remold_natives");
-					if (!tempDir.exists() && !tempDir.mkdirs() && !tempDir.isDirectory()) {
-						tempDir = new File(System.getProperty("user.home"), ".remold/natives");
-						tempDir.mkdirs();
-					}
-					File target = new File(tempDir, libName);
-					if (!target.exists() || target.length() != bytes.length) {
-						try {
-							Files.write(target.toPath(), bytes);
-						} catch (IOException e) {
-							// Windows 上同名 DLL 可能已被其他并发进程锁定，生成独立文件名
-							target = new File(tempDir, System.currentTimeMillis() + "_" + Math.abs(new Random().nextInt()) + "_" + libName);
-							Files.write(target.toPath(), bytes);
-						}
-						target.deleteOnExit();
-					}
-					return target;
-				}
-			}
-		} catch (Throwable ignored) {
-		}
-
-		// 3.2 开发环境探测本地相对路径
-		String[] searchPaths = {
-			"core/libs/" + libName,
-			"../core/libs/" + libName,
-			"libs/" + libName,
-			"../../core/libs/" + libName
-		};
-		for (String p : searchPaths) {
-			File f = new File(p);
-			if (f.exists() && f.isFile()) {
-				return f.getAbsoluteFile();
-			}
-		}
-
-		return null;
 	}
 
 	private static native Object[] nGetInstances(Class<?> clazz);

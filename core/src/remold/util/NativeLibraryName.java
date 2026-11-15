@@ -1,5 +1,8 @@
 package remold.util;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -55,6 +58,28 @@ public final class NativeLibraryName {
 		if (android) return isArm64(arch) ? ANDROID_ARM64 : LINUX_X64;
 		if (isArm64(arch)) return LINUX_ARM64;
 		return LINUX_X64;
+	}
+
+	/**
+	 * 返回按优先级排列的候选 native 库文件名列表。
+	 *
+	 * <p>在没有 {@code android.os.Build} 的 Android Bionic JVM（如 AndroidJBR / Termux）上，
+	 * {@code os.name}/{@code os.arch} 同样是 {@code Linux}/{@code aarch64} 且 {@code isAndroid=false}。
+	 * 若首个 glibc 产物 {@link #LINUX_ARM64} 因缺少 {@code libc.so.6} 装载失败，调用方可继续尝试
+	 * bionic NDK 产物 {@link #ANDROID_ARM64}。</p>
+	 */
+	public static List<String> candidates(String osName, String osArch, boolean android) {
+		String primary = resolve(osName, osArch, android);
+		String os = osName == null ? "" : osName.toLowerCase(Locale.ROOT);
+		if (!android && !os.contains("mac") && !os.contains("darwin") && !os.contains("win") && isArm64(osArch)) {
+			List<String> list = new ArrayList<>(2);
+			list.add(primary);
+			if (!ANDROID_ARM64.equals(primary)) {
+				list.add(ANDROID_ARM64);
+			}
+			return Collections.unmodifiableList(list);
+		}
+		return Collections.singletonList(primary);
 	}
 
 	/** 64 位 ARM 的 {@code os.arch} 取值：JDK/Android 为 {@code aarch64}，部分运行时为 {@code arm64}。 */

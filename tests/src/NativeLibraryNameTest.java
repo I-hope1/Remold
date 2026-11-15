@@ -2,6 +2,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import remold.util.NativeLibraryName;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -60,5 +62,19 @@ class NativeLibraryNameTest {
 		assertFalse(NativeLibraryName.isArm64("amd64"));
 		assertFalse(NativeLibraryName.isArm64(null));
 		assertDoesNotThrow(() -> NativeLibraryName.resolve(null, null, false));
+	}
+
+	@Test
+	@DisplayName("Linux aarch64 candidates include Android bionic fallback for AndroidJBR")
+	void linuxAarch64IncludesBionicFallbackCandidates() {
+		assertEquals(List.of("libtoolaarch64.so", "libtoolarm64.so"),
+			NativeLibraryName.candidates("Linux", "aarch64", false),
+			"AndroidJBR/Termux reports Linux/aarch64 without android.os.Build and must fall back to libtoolarm64.so");
+		assertEquals(List.of("libtoolarm64.so"),
+			NativeLibraryName.candidates("Linux", "aarch64", true));
+		assertEquals(List.of("libtool64.so"),
+			NativeLibraryName.candidates("Linux", "amd64", false));
+		assertEquals(List.of("tool64.dll"),
+			NativeLibraryName.candidates("Windows 11", "amd64", false));
 	}
 }

@@ -17,6 +17,7 @@ import org.objectweb.asm.tree.FieldNode;
 
 import java.io.*;
 import java.lang.instrument.*;
+import java.lang.invoke.*;
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.*;
 import java.net.URL;
@@ -2140,11 +2141,12 @@ public class RemoldAgent {
 		long ioMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(anonStartNanos - ioStartNanos) : 0L;
 		long prepMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(anonStartNanos - batchStartNanos) : 0L;
 		// 单遍按宿主分桶旧匿名类，避免在 hostClassesToAlign 外层循环里对全量 loadedClassesMap / bytecodeCache 做 O(H * N) 扫描与 ASM 解析。
+		String singleAlignHost = hostClassesToAlign.size() == 1 ? hostClassesToAlign.iterator().next() : null;
 		if (!hostClassesToAlign.isEmpty()) {
 			for (Map.Entry<String, Class<?>> entry : loadedClassesMap.entrySet()) {
 				String cName = entry.getKey();
-				String host = AnonClassAligner.batchAnonHost(cName);
-				if (host == null || host.equals(cName) || !hostClassesToAlign.contains(host)) continue;
+				String host = resolveAnonHostCandidate(cName, hostClassesToAlign, singleAlignHost);
+				if (host == null) continue;
 				if (!AnonClassAligner.isAnonymousClassName(host, cName)) continue;
 				if (bytecodeCache.containsKey(cName)) continue;
 				byte[] bc = fetchOriginalBytecode(entry.getValue());
@@ -2155,8 +2157,8 @@ public class RemoldAgent {
 		if (!hostClassesToAlign.isEmpty()) {
 			for (Map.Entry<String, byte[]> entry : bytecodeCache.entrySet()) {
 				String cName = entry.getKey();
-				String host = AnonClassAligner.batchAnonHost(cName);
-				if (host == null || host.equals(cName) || !hostClassesToAlign.contains(host)) continue;
+				String host = resolveAnonHostCandidate(cName, hostClassesToAlign, singleAlignHost);
+				if (host == null) continue;
 				byte[] src = sourceBytecodeCache.get(cName);
 				byte[] oldBytes = src != null ? src : entry.getValue();
 				if (!AnonClassAligner.isBatchAnonClass(cName, oldBytes)) continue;
@@ -3103,16 +3105,61 @@ public class RemoldAgent {
 				info("[Reload] Invoking " + instanceMethods.size() + " instance @OnReload method(s) on "
 				     + instances.length + " live instance(s) of " + clazz.getName() + ".");
 			}
-			for (Object obj : instances) {
-				for (Method m : instanceMethods) {
+			MethodHandle[] instanceHandles = new MethodHandle[instanceMethods.size()];
+			MethodHandles.Lookup lookup = MethodHandles.lookup();
+			for (int i = 0; i < instanceMethods.size(); i++) {
+				Method m = instanceMethods.get(i);
+				if (m.getParameterCount() == 0) {
 					try {
-						m.invoke(obj);
-						if (DEBUG) log("[Reload] Invoked @OnReload on " + obj + "." + m.getName());
-					} catch (Throwable e) {
-						error("Error invoking @OnReload on " + obj + "." + m.getName(), e);
+						instanceHandles[i] = lookup.unreflect(m)
+							.asType(MethodType.methodType(void.class, Object.class));
+					} catch (Throwable ignored) {
 					}
 				}
 			}
+			if (instanceMethods.size() == 1) {
+				Method singleMethod = instanceMethods.get(0);
+				MethodHandle singleHandle = instanceHandles[0];
+				for (Object obj : instances) {
+					invokeReloadMethod(obj, singleMethod, singleHandle);
+				}
+			} else {
+				for (Object obj : instances) {
+					for (int i = 0; i < instanceMethods.size(); i++) {
+						invokeReloadMethod(obj, instanceMethods.get(i), instanceHandles[i]);
+					}
+				}
+			}
+		}
+	}
+
+	static String resolveAnonHostCandidate(
+	 String cName, Set<String> hostClassesToAlign, String singleHost
+	) {
+		int len = cName.length();
+		if (len == 0) return null;
+		char last = cName.charAt(len - 1);
+		if (last < '0' || last > '9') return null;
+		if (singleHost != null) {
+			int hostLen = singleHost.length();
+			if (len <= hostLen + 1 || cName.charAt(hostLen) != '$' || !cName.startsWith(singleHost)) {
+				return null;
+			}
+		}
+		String host = AnonClassAligner.batchAnonHost(cName);
+		return (host != null && !host.equals(cName) && hostClassesToAlign.contains(host)) ? host : null;
+	}
+
+	private static void invokeReloadMethod(Object obj, Method m, MethodHandle handle) {
+		try {
+			if (handle != null) {
+				handle.invokeExact(obj);
+			} else {
+				m.invoke(obj);
+			}
+			if (DEBUG) log("[Reload] Invoked @OnReload on " + obj + "." + m.getName());
+		} catch (Throwable e) {
+			error("Error invoking @OnReload on " + obj + "." + m.getName(), e);
 		}
 	}
 

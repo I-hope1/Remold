@@ -114,7 +114,8 @@ public final class StageASkeleton {
 		newCn.innerClasses = union(oldCn.innerClasses, newCn.innerClasses, n -> n.name);
 		newCn.nestMembers = union(oldCn.nestMembers, newCn.nestMembers, s -> s);
 
-		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+		// 旧/新体各指令序列、maxStack、maxLocals 与帧均未改写，无需 COMPUTE_MAXS 全方法流式重算
+		ClassWriter cw = new ClassWriter(0);
 		newCn.accept(cw);
 		return cw.toByteArray();
 	}

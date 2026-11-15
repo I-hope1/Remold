@@ -20,6 +20,7 @@ import remold.ref.AccessAlign;
 import remold.ref.ClassHierarchyOracle.HierarchyCheck;
 import remold.ref.InitFix;
 import remold.ref.MixinMemberAlign;
+import remold.ref.StageBInstanceCache;
 import remold.util.LibTool;
 
 import java.lang.instrument.ClassDefinition;
@@ -573,6 +574,71 @@ class BatchHotpathOptimizationTest {
 				"@OnReload static method must still run once");
 		} finally {
 			RemoldAgent.setMainThreadDispatcher(prevDispatcher);
+		}
+	}
+
+	@Test
+	void processAnnotationsInstanceFastPathSupportsPrivateNonVoidAndIsolatesErrors() {
+		SingleReloadTarget targetA = new SingleReloadTarget();
+		SingleReloadTarget targetB = new SingleReloadTarget();
+		StageBInstanceCache.clear();
+		StageBInstanceCache.put(SingleReloadTarget.class, new Object[]{targetA, targetB});
+		try {
+			RemoldAgent.processAnnotationsInternal(SingleReloadTarget.class);
+		} finally {
+			StageBInstanceCache.clear();
+		}
+		assertEquals(1, targetA.calls);
+		assertEquals(1, targetB.calls);
+
+		MultiReloadTarget multi = new MultiReloadTarget();
+		StageBInstanceCache.put(MultiReloadTarget.class, new Object[]{multi});
+		try {
+			RemoldAgent.processAnnotationsInternal(MultiReloadTarget.class);
+		} finally {
+			StageBInstanceCache.clear();
+		}
+		assertEquals(1, multi.firstHits);
+		assertEquals(1, multi.secondHits);
+	}
+
+	@Test
+	void resolveAnonHostCandidateFiltersNonDigitsAndSiblingPrefixes() {
+		Set<String> single = Collections.singleton("com.Foo");
+		assertNull(RemoldAgent.resolveAnonHostCandidate("com.Foo", single, "com.Foo"));
+		assertNull(RemoldAgent.resolveAnonHostCandidate("com.Foo$Inner", single, "com.Foo"));
+		assertNull(RemoldAgent.resolveAnonHostCandidate("com.FooBar$1", single, "com.Foo"));
+		assertEquals("com.Foo", RemoldAgent.resolveAnonHostCandidate("com.Foo$1", single, "com.Foo"));
+		assertEquals("com.Foo", RemoldAgent.resolveAnonHostCandidate("com.Foo$1$2", single, "com.Foo"));
+
+		Set<String> multi = Set.of("com.Foo", "com.Bar");
+		assertEquals("com.Bar", RemoldAgent.resolveAnonHostCandidate("com.Bar$3", multi, null));
+		assertNull(RemoldAgent.resolveAnonHostCandidate("com.Other$3", multi, null));
+	}
+
+	static final class SingleReloadTarget {
+		int calls;
+
+		@OnReload
+		private int reloadAndReturnNonVoid() {
+			calls++;
+			return 42;
+		}
+	}
+
+	static final class MultiReloadTarget {
+		int firstHits;
+		int secondHits;
+
+		@OnReload
+		private void firstThrows() {
+			firstHits++;
+			throw new IllegalStateException("boom");
+		}
+
+		@OnReload
+		public void secondStillRuns() {
+			secondHits++;
 		}
 	}
 

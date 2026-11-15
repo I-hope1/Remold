@@ -3930,6 +3930,16 @@ public class InitFix {
 			return;
 		}
 
+		final boolean perfLog = RemoldAgent.PERF_LOG;
+		final long tPatchStart = perfLog ? System.nanoTime() : 0L;
+		long tCollectNs = 0L;
+		long tCompactNs = 0L;
+		long tSelfScanNs = 0L;
+		long tDefineNs = 0L;
+		long tStaticNs = 0L;
+		long tApplyReplayNs = 0L;
+		long tInstNs = 0L;
+
 		PatchPlan    plan  = patch.plan();
 		Set<String>  replayTaskFields = new LinkedHashSet<>();
 		for (FieldPatchTask task : plan.allTasks()) {
@@ -3937,8 +3947,20 @@ public class InitFix {
 		}
 		Object[] alive = null;
 		if (plan.hasInstance()) {
-			alive = collectInstancesForPatch(host);
+			long tBeforeCollect = perfLog ? System.nanoTime() : 0L;
+			Object[] raw = collectRawInstancesForPatch(host);
+			long tAfterCollect = perfLog ? System.nanoTime() : 0L;
+			alive = compactNonNull(raw);
+			long tAfterCompact = perfLog ? System.nanoTime() : 0L;
+			if (perfLog) {
+				tCollectNs = tAfterCollect - tBeforeCollect;
+				tCompactNs = tAfterCompact - tAfterCollect;
+			}
 			if (alive.length == 0 && !plan.hasStatic()) {
+				if (perfLog) {
+					RemoldAgent.info(formatApplyPatchPerf(host, tPatchStart, 0,
+					 tCollectNs, tCompactNs, 0L, 0L, 0L, 0L, 0L, 0L));
+				}
 				RemoldAgent.info("[InitFix] No live instances and no static patch needed for " + host.getName()
 				    + ", skip");
 				return;
@@ -3949,6 +3971,7 @@ public class InitFix {
 		// 才能承接 SELF 字段的写入（docs/initfix/03-runtime-driver.md §4）。这个计数同时喂给
 		// reinitHint —— 否则"SELF 字段没有任何本类实例可写"会被误报成已生效。
 		// 没有 SELF 字段时整段跳过：它按实例做身份比较，纯属白付。
+		long tBeforeSelfScan = perfLog ? System.nanoTime() : 0L;
 		boolean hasSelfOnlyTasks = false;
 		for (FieldPatchTask task : plan.instanceTasks()) {
 			hasSelfOnlyTasks |= task.selfOnly();
@@ -3960,7 +3983,9 @@ public class InitFix {
 				if (scopeMatchesCanonical(host, o, RemoldReinit.Scope.SELF)) selfOnlyTargets++;
 			}
 		}
+		if (perfLog) tSelfScanNs = System.nanoTime() - tBeforeSelfScan;
 
+		long tBeforeDefine = perfLog ? System.nanoTime() : 0L;
 		Lookup   h  = Reflect.defineHiddenClass(host, patch.bytes());
 		Class<?> pc = h.lookupClass();
 
@@ -3994,8 +4019,10 @@ public class InitFix {
 		Set<String>         failedFields   = new LinkedHashSet<>();
 		Set<String>         skippedFields  = new LinkedHashSet<>();
 		Map<String, String> failureReasons = new LinkedHashMap<>();
+		if (perfLog) tDefineNs = System.nanoTime() - tBeforeDefine;
 
 		// ---- 静态字段：整个补丁只跑一次 ----
+		long tBeforeStatic = perfLog ? System.nanoTime() : 0L;
 		if (!plan.staticTasks().isEmpty()) {
 			RemoldAgent.info("Applying static field init patch to " + host.getName()
 			                  + ", fields=" + plan.staticTasks().size());
@@ -4006,11 +4033,13 @@ public class InitFix {
 			RemoldAgent.info("Static field init patch for " + host.getName()
 			                  + " done in " + elapsedMs + "ms");
 		}
+		if (perfLog) tStaticNs = System.nanoTime() - tBeforeStatic;
 
 		// ---- A 档 apply 重放：静态持有者 <clinit> 里的 T().apply{...} ----
 		// 每个候选只写"GETSTATIC holder.dest 取回的那一个对象"；运期改过的值由 expected-CAS 跳过。
 		// 失败/跳过<b>不写 FieldLedger</b>（与 L1 同口径：显式开启的尽力重放，不是欠账），
 		// 单独记在 applyFailed/applySkipped 里，供下面的 [INIT-APPLY-REPLAY] 汇总。
+		long tBeforeApplyReplay = perfLog ? System.nanoTime() : 0L;
 		Set<String>         applyFailed  = new LinkedHashSet<>();
 		Set<String>         applySkipped = new LinkedHashSet<>();
 		Map<String, String> applyReasons = new LinkedHashMap<>();
@@ -4053,8 +4082,10 @@ public class InitFix {
 		// 而实例侧失败只影响出错的那个实例，不能混进这份快照（否则又变成跨实例牵连）。
 		Set<String> staticFailures = new LinkedHashSet<>(failedFields);
 		Set<String> staticSkips    = new LinkedHashSet<>(skippedFields);
+		if (perfLog) tApplyReplayNs = System.nanoTime() - tBeforeApplyReplay;
 
 		// ---- 实例字段：逐实例、逐字段 ----
+		long tBeforeInst = perfLog ? System.nanoTime() : 0L;
 		if (plan.hasInstance() && alive != null && alive.length > 0) {
 			RemoldAgent.info("Applying instance field init patch to " + host.getName()
 			                  + ", enumerated=" + alive.length
@@ -4086,6 +4117,8 @@ public class InitFix {
 				                  + "ms, hotswap thread was blocked");
 			}
 		}
+		long tAfterInst = perfLog ? System.nanoTime() : 0L;
+		if (perfLog) tInstNs = tAfterInst - tBeforeInst;
 
 		// 没真正写进去的注解字段：撤回"已应用"记录，否则下一轮会被"初值未变"误跳过，永久停在旧值。
 		for (String f : plan.reinitFields().keySet()) {
@@ -4243,6 +4276,23 @@ public class InitFix {
 				alive == null ? 0 : alive.length,
 				new ArrayList<>(patchedFieldNames), incomplete.size());
 		}
+		if (perfLog) {
+			long tPostNs = System.nanoTime() - tAfterInst;
+			RemoldAgent.info(formatApplyPatchPerf(host, tPatchStart, alive == null ? 0 : alive.length,
+			 tCollectNs, tCompactNs, tSelfScanNs, tDefineNs, tStaticNs, tApplyReplayNs, tInstNs, tPostNs));
+		}
+	}
+
+	private static String formatApplyPatchPerf(Class<?> host, long patchStartNs, int liveCount,
+	 long collectNs, long compactNs, long selfScanNs, long defineNs,
+	 long staticNs, long applyReplayNs, long instNs, long postNs) {
+		double totalMs = (System.nanoTime() - patchStartNs) / 1_000_000.0;
+		return String.format(Locale.ROOT,
+		 "[InitFix] applyPatch(%s): live=%d, total=%.1fms [collect=%.1f, compact=%.1f, selfScan=%.1f, define=%.1f, static=%.1f, applyReplay=%.1f, inst=%.1f, post=%.1f]",
+		 host.getName(), liveCount, totalMs,
+		 collectNs / 1_000_000.0, compactNs / 1_000_000.0, selfScanNs / 1_000_000.0,
+		 defineNs / 1_000_000.0, staticNs / 1_000_000.0, applyReplayNs / 1_000_000.0,
+		 instNs / 1_000_000.0, postNs / 1_000_000.0);
 	}
 
 	/**
@@ -4589,13 +4639,12 @@ public class InitFix {
 
 	private static final Object[] EMPTY_OBJECTS = new Object[0];
 
-	private static Object[] collectInstancesForPatch(Class<?> host) {
+	private static Object[] collectRawInstancesForPatch(Class<?> host) {
 		// 枚举时机在重定义生效之后、applyPatch 内即时消费后即释放，不跨 redefine 持有，
-		// 因此无需绕行 WeakReference 双重拷贝；直接复用枚举数组，仅在出现 null 槽时压缩。
-		Object[] raw = LibTool.initialized()
+		// 因此无需绕行 WeakReference 双重拷贝；直接复用枚举数组，仅在出现 null 槽时由调用方压缩。
+		return LibTool.initialized()
 		 ? LibTool.getInstances(host)
 		 : InstanceTracker.getInstances(host).toArray();
-		return compactNonNull(raw);
 	}
 
 	static Object[] compactNonNull(Object[] raw) {

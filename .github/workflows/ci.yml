@@ -232,3 +232,89 @@ jobs:
             core/libs/*.so
           if-no-files-found: error
 
+  build-jars:
+    name: Build Distributable Jars
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up runner JDK (25)
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Build Distributions and Jars
+        # 与 release.yml 的发版构建同一条命令：CI 产物与发版资产同源，
+        # 避免"CI 上能跑的 jar 不是最终发的那个"。
+        run: |
+          chmod +x gradlew
+          export JAVA_HOME="$JAVA_HOME_25_X64"
+          ./gradlew assemble
+
+      - name: Collect Artifacts
+        # 与 release.yml 的 Prepare Release Assets 同一套 glob：只做"可下载呈现"，
+        # 不改产物命名与调用约定。agent jar 缺失必须硬失败（那是唯一真入口）。
+        run: |
+          mkdir -p dist
+          VERSION="$(grep -E '^remoldVersion=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')"
+          echo "remold version: $VERSION"
+
+          test -s core/build/libs/remold-agent.jar \
+            || { echo "::error::core/build/libs/remold-agent.jar missing"; exit 1; }
+          cp core/build/libs/remold-agent.jar dist/remold-agent.jar
+          cp core/build/libs/remold-agent.jar "dist/remold-agent-${VERSION}.jar"
+
+          for p in arc mixin forge fabric; do
+            SRC=$(ls plugin-$p/build/libs/remold-plugin-$p-*.jar 2>/dev/null | grep -v 'sources' | sort -V | tail -n 1)
+            if [ -n "$SRC" ] && [ -f "$SRC" ]; then
+              cp "$SRC" "dist/remold-plugin-$p.jar"
+            else
+              echo "::warning::plugin-$p jar not found; skipped"
+            fi
+          done
+
+          SRC_GRADLE=$(ls gradle-plugin/build/libs/remold-gradle-plugin-*.jar 2>/dev/null | grep -vE 'sources|javadoc' | sort -V | tail -n 1)
+          if [ -n "$SRC_GRADLE" ] && [ -f "$SRC_GRADLE" ]; then
+            cp "$SRC_GRADLE" dist/remold-gradle-plugin.jar
+          else
+            echo "::warning::gradle-plugin jar not found; skipped"
+          fi
+
+          SRC_API=$(ls api/build/libs/remold-api-*.jar 2>/dev/null | grep -v 'sources' | sort -V | tail -n 1)
+          if [ -n "$SRC_API" ] && [ -f "$SRC_API" ]; then
+            cp "$SRC_API" dist/remold-api.jar
+          else
+            echo "::warning::api jar not found; skipped"
+          fi
+
+          ( cd dist && sha256sum *.jar > SHA256SUMS.txt )
+          ls -lh dist/
+
+      - name: Present Artifacts in Job Summary
+        # 运行页直接可读：文件名 / 体积 / 校验和前缀，完整哈希见 SHA256SUMS.txt。
+        run: |
+          VERSION="$(grep -E '^remoldVersion=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')"
+          {
+            echo "### Build artifacts (remold ${VERSION})"
+            echo
+            echo "Download from the **Artifacts** section of this run (\`remold-dist\`)."
+            echo
+            echo "| Artifact | Size | SHA-256 |"
+            echo "|:--|--:|:--|"
+            for f in dist/*.jar; do
+              echo "| \`$(basename "$f")\` | $(du -h "$f" | cut -f1) | \`$(sha256sum "$f" | cut -d' ' -f1 | cut -c1-12)\` |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: remold-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+

@@ -9,10 +9,12 @@ import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
+import remold.RemoldAgent.GateCachedDiff;
 import remold.RemoldAgent.LayoutAction;
 import remold.RemoldAgent.LayoutDecision;
 import remold.RemoldAgent.Liveness;
 import remold.RemoldAgent.RemovedMemberScan;
+import remold.RemoldAgent.RoundSkips;
 import remold.annotation.OnReload;
 import remold.ref.AccessAlign;
 import remold.ref.ClassHierarchyOracle.HierarchyCheck;
@@ -22,6 +24,7 @@ import remold.ref.MixinMemberAlign;
 import java.lang.instrument.ClassDefinition;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -677,6 +680,70 @@ class BatchHotpathOptimizationTest {
 		assertEquals(List.of("handler$zce000$cfg$tick()I"), first.modifiedBodyMethods);
 		ClassDiffUtil.ClassDiff second = ClassDiffUtil.diff(copyV1, v2);
 		assertEquals(first.modifiedBodyMethods, second.modifiedBodyMethods);
+	}
+
+	@Test
+	void removedMemberScannerSharesStructuralDiffCacheAndSkipsIdenticalBytes() throws Exception {
+		String hostName = "test.BatchHotpathSharedDiffHost";
+		byte[] v1 = buildAlignHost(hostName.replace('.', '/'), Opcodes.ACC_PUBLIC, "handler$zce000$cfg$tick", 1);
+		byte[] v2Body = buildAlignHost(hostName.replace('.', '/'), Opcodes.ACC_PUBLIC, "handler$zce000$cfg$tick", 2);
+		Class<?> host = defineAndInit(hostName, v1);
+
+		boolean prevDiffLog = RemoldAgent.DIFF_LOG;
+		boolean prevDebug = RemoldAgent.DEBUG;
+		RemoldAgent.bytecodeCache.put(hostName, v1);
+		RemoldAgent.loadedClassesMap.put(hostName, host);
+		try {
+			RemoldAgent.DIFF_LOG = false;
+			RemoldAgent.DEBUG = false;
+
+			// 1. Identical byte arrays short-circuit without touching ClassDiffUtil or polluting cache.
+			Map<String, GateCachedDiff> identicalCache = new HashMap<>();
+			assertTrue(RemovedMemberScanner.scan(Map.of(hostName, v1.clone()), Map.of(), identicalCache).isEmpty());
+			assertTrue(identicalCache.isEmpty(), "identical bytes must skip diff computation and cache put");
+
+			// 2. Method-body edit populates structural cache in scanner and is reused by applyRedefineLayoutGate.
+			Map<String, GateCachedDiff> sharedCache = new HashMap<>();
+			assertTrue(RemovedMemberScanner.scan(Map.of(hostName, v2Body), Map.of(), sharedCache).isEmpty());
+			GateCachedDiff fromScanner = sharedCache.get(hostName);
+			assertNotNull(fromScanner, "scanner miss must populate GateCachedDiff");
+			assertSame(v1, fromScanner.oldBytes());
+			assertSame(v2Body, fromScanner.newBytes());
+			assertFalse(fromScanner.bodyDiffComputed(),
+				"fast batch mode (DIFF_LOG=false, DEBUG=false) must only run structural diff");
+			assertFalse(fromScanner.fullNodesLoaded());
+
+			Map<String, byte[]> batch = new HashMap<>();
+			batch.put(hostName, v2Body);
+			RemoldAgent.applyRedefineLayoutGate(
+				batch, Map.of(), new HashMap<>(), new RoundSkips(), sharedCache, new long[1]);
+			GateCachedDiff afterGate = sharedCache.get(hostName);
+			assertNotNull(afterGate);
+			assertSame(fromScanner.diff(), afterGate.diff(),
+				"applyRedefineLayoutGate must reuse the ClassDiff computed by RemovedMemberScanner");
+
+			// 3. When DIFF_LOG is enabled, scanner upgrades to full diff so alignDiff logDiff needs no re-parse.
+			RemoldAgent.DIFF_LOG = true;
+			Map<String, GateCachedDiff> diffLogCache = new HashMap<>();
+			RemovedMemberScanner.scan(Map.of(hostName, v2Body), Map.of(), diffLogCache);
+			GateCachedDiff loggedEntry = diffLogCache.get(hostName);
+			assertNotNull(loggedEntry);
+			assertTrue(loggedEntry.bodyDiffComputed());
+			assertTrue(loggedEntry.fullNodesLoaded());
+			assertEquals(List.of("handler$zce000$cfg$tick()I"), loggedEntry.diff().modifiedBodyMethods);
+		} finally {
+			RemoldAgent.bytecodeCache.remove(hostName);
+			RemoldAgent.loadedClassesMap.remove(hostName);
+			RemoldAgent.DIFF_LOG = prevDiffLog;
+			RemoldAgent.DEBUG = prevDebug;
+		}
+	}
+
+	@Test
+	void resetLiveInstanceCacheClearsBatchStageBMillis() {
+		RemoldAgent.BATCH_STAGE_B_MILLIS.set(42L);
+		RemoldAgent.resetLiveInstanceCache();
+		assertEquals(0L, RemoldAgent.BATCH_STAGE_B_MILLIS.get());
 	}
 
 	private static Class<?> defineAndInit(String dotName, byte[] bytes) throws Exception {

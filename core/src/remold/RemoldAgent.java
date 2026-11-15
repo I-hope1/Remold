@@ -2521,12 +2521,24 @@ public class RemoldAgent {
 					if (oldBytecode != null) {
 						long diffT0 = System.nanoTime();
 						GateCachedDiff gateCached = gateDiffCache.get(className);
-						ClassDiffUtil.ClassDiff diff = (gateCached != null
-							&& gateCached.oldBytes() == oldBytecode
-							&& gateCached.newBytes() == newBytecode)
-							? gateCached.diff()
-							: ClassDiffUtil.diff(oldBytecode, newBytecode);
-						ClassDiffUtil.logDiff(className, diff);
+						boolean needFullMethodHashes = DIFF_LOG || DEBUG;
+						ClassDiffUtil.ClassDiff diff;
+						boolean fullNodesLoaded;
+						if (gateCached != null
+						    && gateCached.oldBytes() == oldBytecode
+						    && gateCached.newBytes() == newBytecode
+						    && (!needFullMethodHashes || gateCached.bodyDiffComputed())) {
+							diff = gateCached.diff();
+							fullNodesLoaded = gateCached.fullNodesLoaded();
+						} else {
+							diff = needFullMethodHashes
+								? ClassDiffUtil.diff(oldBytecode, newBytecode)
+								: ClassDiffUtil.diffStructural(oldBytecode, newBytecode);
+							fullNodesLoaded = needFullMethodHashes;
+						}
+						if (needFullMethodHashes) {
+							ClassDiffUtil.logDiff(className, diff);
+						}
 						diffNanos += System.nanoTime() - diffT0;
 						long annDefT0 = System.nanoTime();
 						String annotationDefaultAbortClass =
@@ -2581,6 +2593,9 @@ public class RemoldAgent {
 							log("[DCEVM] Structure change detected, proceeding with enhanced redefinition.");
 						}
 						long initFixT0 = System.nanoTime();
+						if (!fullNodesLoaded && InitFix.needsMethodBodies(targetClass, diff)) {
+							ClassDiffUtil.ensureFullClassNodes(diff, oldBytecode, newBytecode);
+						}
 						InitFix.transform(targetClass, newBytecode, diff);
 						if (!needsTwoPhase && TWO_PHASE
 							&& InitFix.requiresTwoPhase(targetClass, () -> hasLiveInstances(targetClass))) {
@@ -2728,6 +2743,7 @@ public class RemoldAgent {
 		if (DEBUG) log("[POST] post-processing " + redefinedOk.size() + " class(es): " + redefinedOk);
 
 		List<ClassDefinition> successfulDefinitions = new ArrayList<>(definitions.size());
+		long stageBStart = System.nanoTime();
 		for (ClassDefinition def : definitions) {
 			if (!redefinedOk.contains(def.getDefinitionClass().getName())) continue;
 			successfulDefinitions.add(def);
@@ -2738,6 +2754,7 @@ public class RemoldAgent {
 				InitFix.afterRedefineFailed(def.getDefinitionClass());
 			}
 		}
+		BATCH_STAGE_B_MILLIS.addAndGet(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - stageBStart));
 
 		// 必须在 InitFix 补丁（静态字段与存量实例字段）全部就位后，再对成功重定义的类触发 @OnReload 回调；
 		// 严禁在补丁就绪前触发，否则回调读到未初始化的零值（时序反转）。
@@ -2768,6 +2785,7 @@ public class RemoldAgent {
 			     + ", alignDiff=" + alignDiffMs + "ms" + alignDiffDetail
 			     + ", liveScan=" + LIVE_INSTANCE_SCAN_MILLIS.get() + "ms"
 			     + ", redefine=" + BATCH_REDEFINE_MILLIS.get() + "ms"
+			     + ", stageB=" + BATCH_STAGE_B_MILLIS.get() + "ms"
 			     + ", redefined=" + successfulDefinitions.size() + ")");
 		}
 
@@ -2893,10 +2911,11 @@ public class RemoldAgent {
 	}
 
 	/** 每轮热更开始时清空实例扫描缓存（实例的存活状况会随轮次变化）。 */
-	private static void resetLiveInstanceCache() {
+	static void resetLiveInstanceCache() {
 		LIVE_INSTANCE_CACHE.clear();
 		LIVE_INSTANCE_SCAN_MILLIS.set(0);
 		BATCH_REDEFINE_MILLIS.set(0);
+		BATCH_STAGE_B_MILLIS.set(0);
 	}
 
 	/** 实例判定缓存：点分类名 → 是否存活实例。见 {@link #hasLiveInstances}。 */
@@ -2905,6 +2924,8 @@ public class RemoldAgent {
 	static final         AtomicLong           LIVE_INSTANCE_SCAN_MILLIS = new AtomicLong();
 	/** 本批次 {@code inst.redefineClasses} 累计耗时（毫秒）。 */
 	private static final AtomicLong           BATCH_REDEFINE_MILLIS     = new AtomicLong();
+	/** 本批次 {@link InitFix#afterRedefine}（两阶段 Stage B + 1-phase 后处理）累计耗时（毫秒）。 */
+	static final         AtomicLong           BATCH_STAGE_B_MILLIS      = new AtomicLong();
 
 	private static final byte[] ON_RELOAD_DESC_BYTES =
 		"Lremold/annotation/OnReload;".getBytes(StandardCharsets.US_ASCII);
@@ -3813,7 +3834,9 @@ public class RemoldAgent {
 		}
 	}
 
-	private record GateCachedDiff(byte[] oldBytes, byte[] newBytes, ClassDiffUtil.ClassDiff diff) {}
+	/** 布局门与后续 alignDiff 共用的同字节数组 diff 缓存，避免对同一个类重复解析两次。 */
+	record GateCachedDiff(byte[] oldBytes, byte[] newBytes, ClassDiffUtil.ClassDiff diff,
+	                      boolean bodyDiffComputed, boolean fullNodesLoaded) {}
 
 	private static void applyRedefineLayoutGate(Map<String, byte[]> newBatchBytes,
 	                                            Map<String, Path> classToPath,
@@ -3822,12 +3845,12 @@ public class RemoldAgent {
 		applyRedefineLayoutGate(newBatchBytes, classToPath, transactions, skips, null, null);
 	}
 
-	private static void applyRedefineLayoutGate(Map<String, byte[]> newBatchBytes,
-	                                            Map<String, Path> classToPath,
-	                                            Map<String, AlignmentTransaction> transactions,
-	                                            RoundSkips skips,
-	                                            Map<String, GateCachedDiff> diffCache,
-	                                            long[] readersMsOut) {
+	static void applyRedefineLayoutGate(Map<String, byte[]> newBatchBytes,
+	                                    Map<String, Path> classToPath,
+	                                    Map<String, AlignmentTransaction> transactions,
+	                                    RoundSkips skips,
+	                                    Map<String, GateCachedDiff> diffCache,
+	                                    long[] readersMsOut) {
 		if (LayoutGate.MODE_OFF.equals(LAYOUT_GATE)) return;
 
 		// 扫一遍本次批次的新字节码，及时发现本批新引入的偏移量缓存
@@ -3835,9 +3858,10 @@ public class RemoldAgent {
 			if (newBytes != null) scanLoadedClassForOffsets(newBytes);
 		}
 
-		// 本轮有"删实例字段"时才做读者扫描（内部先 diff 判断，没有删除就直接返回空表，零成本）。
+		// 本轮有"删实例字段"时才做读者扫描（内部先复用 diff 判断，没有删除就直接返回空表，零成本）。
 		long readersStartNanos = System.nanoTime();
-		Map<String, RemovedMemberScan> readersByClass = RemovedMemberScanner.scan(newBatchBytes, classToPath);
+		Map<String, RemovedMemberScan> readersByClass =
+			RemovedMemberScanner.scan(newBatchBytes, classToPath, diffCache);
 		if (readersMsOut != null && readersMsOut.length > 0) {
 			readersMsOut[0] = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - readersStartNanos);
 		}
@@ -3879,11 +3903,36 @@ public class RemoldAgent {
 			Map<String, String> unextractableReinit = Map.of();
 			Map<String, String> unsafeReinitScope = Map.of();
 			try {
-				ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diff(oldBytes, newBytes);
-				if (diffCache != null) diffCache.put(className, new GateCachedDiff(oldBytes, newBytes, diff));
+				GateCachedDiff cached = diffCache != null ? diffCache.get(className) : null;
+				ClassDiffUtil.ClassDiff diff;
+				boolean bodyDiffComputed;
+				boolean fullNodesLoaded;
+				if (cached != null && cached.oldBytes() == oldBytes && cached.newBytes() == newBytes) {
+					diff = cached.diff();
+					bodyDiffComputed = cached.bodyDiffComputed();
+					fullNodesLoaded = cached.fullNodesLoaded();
+				} else {
+					boolean fullDiff = DIFF_LOG || DEBUG;
+					diff = fullDiff
+						? ClassDiffUtil.diff(oldBytes, newBytes)
+						: ClassDiffUtil.diffStructural(oldBytes, newBytes);
+					bodyDiffComputed = fullDiff;
+					fullNodesLoaded = fullDiff;
+					if (diffCache != null) {
+						diffCache.put(className,
+							new GateCachedDiff(oldBytes, newBytes, diff, bodyDiffComputed, fullNodesLoaded));
+					}
+				}
 				changed = diff.changedFields;
 				reinitFields = diff.reinitFields;
 				if (!reinitFields.isEmpty() && diff.newClass != null) {
+					if (!fullNodesLoaded) {
+						ClassDiffUtil.ensureFullClassNodes(diff, oldBytes, newBytes);
+						if (diffCache != null) {
+							diffCache.put(className,
+								new GateCachedDiff(oldBytes, newBytes, diff, bodyDiffComputed, true));
+						}
+					}
 					unextractableReinit = InitFix.unextractableReinitFields(targetClass, diff.newClass, reinitFields);
 					// 继承字段 + 子类初始化器写同字段：INCLUDE_SUBCLASSES 会把声明类初值写进子类实例，
 					// 覆盖子类自己的初值且不重放子类赋值（docs/initfix/03-runtime-driver.md §4）。
@@ -4373,6 +4422,7 @@ public class RemoldAgent {
 			}
 		}
 		long patchMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - patchStart);
+		BATCH_STAGE_B_MILLIS.addAndGet(patchMs);
 
 		// ---- 阶段 C：只对阶段 A 成功的类提交完整新字节码 ----
 		List<ClassDefinition> stageCDefinitions = new ArrayList<>(stageAOk.size());
@@ -5582,8 +5632,14 @@ public class RemoldAgent {
 		Path classFile = classFilePath(targetClass);
 		if (classFile != null) {
 			// inBatch 必须包含 target 自己。读者扫描器据此排除"本批类"，只扫批次外其他类。
+			byte[] baseline = bytecodeCache.get(className);
+			Map<String, GateCachedDiff> localCache = null;
+			if (baseline != null && diff != null && diff.oldClass != null && diff.newClass != null) {
+				localCache = new HashMap<>();
+				localCache.put(className, new GateCachedDiff(baseline, runtimeBytes, diff, false, false));
+			}
 			Map<String, RemovedMemberScan> scans = RemovedMemberScanner.scan(
-				Map.of(className, runtimeBytes), Map.of(className, classFile));
+				Map.of(className, runtimeBytes), Map.of(className, classFile), localCache);
 			scan = scans.getOrDefault(className, RemovedMemberScan.NOT_SCANNED);
 		}
 

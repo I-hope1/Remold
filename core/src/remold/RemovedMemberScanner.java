@@ -5,6 +5,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.ProtectionDomain;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -14,12 +15,13 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
-import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.MethodNode;
 
+import remold.ClassDiffUtil.ClassDiff;
+import remold.RemoldAgent.GateCachedDiff;
 import remold.RemoldAgent.RemovedMemberScan;
 import remold.ref.RemovedMemberReaders;
 
@@ -74,6 +76,17 @@ final class RemovedMemberScanner {
 	 */
 	static Map<String, RemovedMemberScan> scan(Map<String, byte[]> newBatchBytes,
 	                                           Map<String, Path> classToPath) {
+		return scan(newBatchBytes, classToPath, null);
+	}
+
+	/**
+	 * 带共享 diff 缓存的读者扫描入口：先复用结构级 {@link ClassDiffUtil#diffStructural}
+	 * 产出的 {@code oldClass}/{@code newClass}，并将未命中的 diff 写入 {@code diffCache}，
+	 * 供后续布局门与 {@code alignDiff} 直接复用，避免同一轮多次解析字节码。
+	 */
+	static Map<String, RemovedMemberScan> scan(Map<String, byte[]> newBatchBytes,
+	                                           Map<String, Path> classToPath,
+	                                           Map<String, GateCachedDiff> diffCache) {
 		long start = System.nanoTime();
 
 		// ---- 1. 本批被删的**实例**字段（静态字段不参与，理由见 layout decision 的注释）----
@@ -81,6 +94,8 @@ final class RemovedMemberScanner {
 		Map<String, byte[]> oldBatchBytes = new LinkedHashMap<>();
 		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
 			String className = e.getKey();
+			byte[] newBytes = e.getValue();
+			if (newBytes == null) continue;
 			byte[] oldBytes = bytecodeCache.get(className);
 			if (oldBytes == null) {
 				Class<?> c = loadedClassesMap.get(className);
@@ -94,7 +109,25 @@ final class RemovedMemberScanner {
 			}
 			if (oldBytes == null) continue;
 			oldBatchBytes.put(internalName(className), oldBytes);
-			List<RemovedMemberReaders.RemovedMember> removed = removedMembers(oldBytes, e.getValue());
+			if (Arrays.equals(oldBytes, newBytes)) continue;
+
+			ClassDiff diff = null;
+			if (diffCache != null) {
+				GateCachedDiff cached = diffCache.get(className);
+				if (cached != null && cached.oldBytes() == oldBytes && cached.newBytes() == newBytes) {
+					diff = cached.diff();
+				}
+			}
+			if (diff == null) {
+				boolean fullDiff = RemoldAgent.DIFF_LOG || RemoldAgent.DEBUG;
+				diff = fullDiff
+					? ClassDiffUtil.diff(oldBytes, newBytes)
+					: ClassDiffUtil.diffStructural(oldBytes, newBytes);
+				if (diffCache != null) {
+					diffCache.put(className, new GateCachedDiff(oldBytes, newBytes, diff, fullDiff, fullDiff));
+				}
+			}
+			List<RemovedMemberReaders.RemovedMember> removed = removedMembers(diff.oldClass, diff.newClass);
 			if (!removed.isEmpty()) removedByClass.put(className, removed);
 		}
 		if (removedByClass.isEmpty()) return Map.of();
@@ -233,12 +266,9 @@ final class RemovedMemberScanner {
 	 * （{@code NoSuchMethodError}），也可能被祖先实现静默接住（分派转移），或让具体类失去接口方法
 	 * 的唯一实现（{@code AbstractMethodError}）。三者都由 {@link RemovedMemberReaders} 分类。</p>
 	 */
-	private static List<RemovedMemberReaders.RemovedMember> removedMembers(byte[] oldBytes,
-	                                                                     byte[] newBytes) {
-		ClassNode oldClass = new ClassNode();
-		ClassNode newClass = new ClassNode();
-		new ClassReader(oldBytes).accept(oldClass, ClassReader.SKIP_CODE);
-		new ClassReader(newBytes).accept(newClass, ClassReader.SKIP_CODE);
+	private static List<RemovedMemberReaders.RemovedMember> removedMembers(ClassNode oldClass,
+	                                                                     ClassNode newClass) {
+		if (oldClass == null || newClass == null) return List.of();
 
 		Set<String> fieldSurvivors = new HashSet<>();
 		for (FieldNode f : newClass.fields) {

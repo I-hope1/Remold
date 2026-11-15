@@ -8,6 +8,7 @@ import remold.offset.SuperclassDriftGate;
 import remold.profiler.DynamicProfilerAPI;
 import remold.ref.HotswapBridge;
 import remold.ref.InitFix;
+import remold.ref.StageBInstanceCache;
 import remold.util.*;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
@@ -2013,7 +2014,7 @@ public class RemoldAgent {
 	private static void processChangesBatch(Set<Path> changedFiles, Class<?>[] classes) {
 		final long batchStartNanos = System.nanoTime();
 		// 新批次开始：上一批未被 @OnReload 消费的实例引用不再需要，立即释放。
-		remold.ref.StageBInstanceCache.clear();
+		StageBInstanceCache.clear();
 		// 批次可观测数据的起点：从读盘、对齐、织入、布局门、redefine 到 InitFix 全部计入。
 		// 收集器挂在当前线程上；即使没有任何监听器，这里也只多一次小对象分配，不改变批次行为。
 		BatchReportScope.begin();
@@ -2989,13 +2990,12 @@ public class RemoldAgent {
 			// stageB 补丁刚刚枚举过同一批实例：直接复用，省掉一次完整 JVMTI 堆遍历
 			// （2M 实例实测约 2.9s）。快照语义与"枚举时间点"的差异见 StageBInstanceCache。
 			try {
-				instances = remold.ref.StageBInstanceCache.take(
-				 remold.util.ClassIdentity.canonicalize(clazz));
+				instances = StageBInstanceCache.take(ClassIdentity.canonicalize(clazz));
 			} catch (Throwable ignored) {
 			}
 			if (instances == null) {
 				try {
-					instances = remold.util.LibTool.getInstances(clazz);
+					instances = LibTool.getInstances(clazz);
 				} catch (Throwable ignored) {
 				}
 			}

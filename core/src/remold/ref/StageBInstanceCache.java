@@ -1,8 +1,9 @@
 package remold.ref;
 
 import java.lang.ref.WeakReference;
+import java.util.Collections;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.WeakHashMap;
 
 /**
  * 单次热更批次内的实例枚举缓存。
@@ -16,51 +17,79 @@ import java.util.concurrent.ConcurrentHashMap;
  * "存量实例回调"的目标（它们是在重载之后才构造的，初值已经是新的），因此与逐次重新枚举
  * 的可见差异仅为"枚举窗口内新建实例是否收到回调"，按 {@code @OnReload} 的文档语义应跳过。</p>
  *
- * <p>生命周期：仅在 {@link RemoldAgent} 的 stageB → 回调之间存活；批次开始清空旧条目，
- * 未被消费的条目在 {@link #TTL_NANOS} 后过期。条目只持有实例数组的<b>弱引用</b>：
- * 缓存绝不能延长实例生命周期（P0.5 探针会显式 System.gc() 检查残留实例；强引用缓存
- * 会把旧实例钉在堆里，导致测试失败且真机上造成内存滞留）。弱引用被 GC 清掉时回调路径
- * 回退到实时枚举，行为仍然正确。</p>
+ * <p>生命周期：仅在 {@code RemoldAgent} 的 stageB → 回调之间存活；批次开始清空旧条目，
+ * 未被消费的条目在 {@link #TTL_NANOS} 后过期。条目对 {@code Class<?>} 键与实例数组均只持有
+ * <b>弱引用</b>（符合 AGENTS.md 对内部 {@code Class} 键表的规范）：既不阻拦类卸载，也绝不延长
+ * 实例生命周期（P0.5 探针会显式 System.gc() 检查残留实例；强引用缓存会把旧实例钉在堆里）。
+ * 弱引用被 GC 清掉时回调路径回退到实时枚举，行为仍然正确。</p>
  */
 public final class StageBInstanceCache {
 
 	/** 入口过期时间：足够覆盖 postToMain 排队到主线程执行的延迟，又不会长期持有实例引用。 */
-	private static final long TTL_NANOS = 120_000_000_000L; // 120s
+	static final long TTL_NANOS = 120_000_000_000L; // 120s
 
 	/**
-	 * 用弱引用的原因见 docs：缓存只是"省一次堆遍历"的旁路，绝不能成为实例的强引用持有者。
+	 * 弱引用实例数组条目（WeakHashMap 弱持有键，Entry 弱持有实例数组）。
 	 * stageB 与 @OnReload 之间若发生 GC（或测试里显式 System.gc()），数组被回收，
 	 * {@link #take} 返回 null，回调路径回退到实时枚举——语义正确，只是慢一次。
 	 */
 	private record Entry(WeakReference<Object[]> instances, long timestampNanos) { }
 
-	private static final Map<Class<?>, Entry> CACHE = new ConcurrentHashMap<>();
+	private static final Map<Class<?>, Entry> CACHE = Collections.synchronizedMap(new WeakHashMap<>());
+	private static long lastSweepNanos = System.nanoTime();
 
 	private StageBInstanceCache() { }
 
-	/** 登记本批次补丁枚举的结果；同类的旧条目直接替换。 */
+	/** 登记本批次补丁枚举的结果（含 0 实例结果）；同类的旧条目直接替换。 */
 	public static void put(Class<?> clazz, Object[] instances) {
-		if (clazz == null || instances == null || instances.length == 0) return;
-		long now = System.nanoTime();
-		CACHE.put(clazz, new Entry(new WeakReference<>(instances), now));
-		if (CACHE.size() > 8) sweep(now);
+		put(clazz, instances, System.nanoTime());
+	}
+
+	static void put(Class<?> clazz, Object[] instances, long nowNanos) {
+		if (clazz == null || instances == null) return;
+		synchronized (CACHE) {
+			CACHE.put(clazz, new Entry(new WeakReference<>(instances), nowNanos));
+			if (CACHE.size() > 8 || nowNanos - lastSweepNanos > TTL_NANOS) {
+				sweepLocked(nowNanos);
+			}
+		}
 	}
 
 	/** 取出并移除该类的枚举结果；不存在或已过期返回 null（调用方回退到实时枚举）。 */
 	public static Object[] take(Class<?> clazz) {
+		return take(clazz, System.nanoTime());
+	}
+
+	static Object[] take(Class<?> clazz, long nowNanos) {
 		if (clazz == null) return null;
-		Entry entry = CACHE.remove(clazz);
+		Entry entry;
+		synchronized (CACHE) {
+			entry = CACHE.remove(clazz);
+			if (CACHE.size() > 8 || nowNanos - lastSweepNanos > TTL_NANOS) {
+				sweepLocked(nowNanos);
+			}
+		}
 		if (entry == null) return null;
-		if (System.nanoTime() - entry.timestampNanos() > TTL_NANOS) return null;
+		if (nowNanos - entry.timestampNanos() > TTL_NANOS) return null;
 		return entry.instances().get();
 	}
 
 	/** 批次开始 / 结束时清空，避免上一批的实例引用滞留。 */
 	public static void clear() {
-		CACHE.clear();
+		synchronized (CACHE) {
+			CACHE.clear();
+		}
 	}
 
-	private static void sweep(long now) {
-		CACHE.entrySet().removeIf(e -> now - e.getValue().timestampNanos() > TTL_NANOS);
+	static int size() {
+		synchronized (CACHE) {
+			return CACHE.size();
+		}
+	}
+
+	private static void sweepLocked(long nowNanos) {
+		lastSweepNanos = nowNanos;
+		CACHE.entrySet().removeIf(e ->
+			nowNanos - e.getValue().timestampNanos() > TTL_NANOS || e.getValue().instances().get() == null);
 	}
 }

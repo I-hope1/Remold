@@ -10,6 +10,7 @@ import java.lang.reflect.Field;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -249,7 +250,19 @@ public final class HotswapBridge {
 	 * （JDK 8 的子字类型走模拟、以及任何落到 volatile put 的情形）：
 	 * 那些路径没有条件语义可报告，统一返回 {@code true}（"已写入"）。</p>
 	 */
-	private static final Map<Class<?>, MethodHandle> CONDITIONAL_PUTTERS;
+	private static final int SLOT_OBJECT = 0;
+	private static final int SLOT_BOOLEAN = 1;
+	private static final int SLOT_BYTE = 2;
+	private static final int SLOT_CHAR = 3;
+	private static final int SLOT_SHORT = 4;
+	private static final int SLOT_INT = 5;
+	private static final int SLOT_LONG = 6;
+	private static final int SLOT_FLOAT = 7;
+	private static final int SLOT_DOUBLE = 8;
+	private static final int SLOT_COUNT = 9;
+
+	private static final AtomicReferenceArray<MethodHandle> CONDITIONAL_PUTTERS =
+	 new AtomicReferenceArray<>(SLOT_COUNT);
 
 	/**
 	 * valueClass -> MethodHandle {@code (Object, long, V)void}，无条件 volatile 写。
@@ -257,31 +270,106 @@ public final class HotswapBridge {
 	 * {@code jdk.internal.misc.Unsafe} 上都存在且命名一致（不存在 JDK 版本差异），
 	 * 不需要像条件 CAS 那样维护 fallback 链。</p>
 	 */
-	private static final Map<Class<?>, MethodHandle> FORCE_PUTTERS;
+	private static final AtomicReferenceArray<MethodHandle> FORCE_PUTTERS =
+	 new AtomicReferenceArray<>(SLOT_COUNT);
+
+	/**
+	 * valueClass -> MethodHandle {@code (Object, long, V, V)boolean}：expected 作为参数传入的
+	 * 条件 CAS，供 {@link #KIND_CONDITIONAL_EXPECTED} 使用（L1 存量初值重放）。
+	 *
+	 * <p>与 {@link #CONDITIONAL_PUTTERS} 的区别只有一处：expected 不再在模板期固定为零值，
+	 * 而是链接期由调用点常量绑定。子字类型在 JDK 8 / Android 上复用同一套整字 CAS 模拟；
+	 * 默认关闭的场景按首次调用懒加载，不在 {@code <clinit>} 提前构造。</p>
+	 */
+	private static final AtomicReferenceArray<MethodHandle> EXPECTED_PUTTERS =
+	 new AtomicReferenceArray<>(SLOT_COUNT);
 
 	static {
-		Map<Class<?>, MethodHandle> m = new HashMap<>(16);
 		try {
-			m.put(Object.class, volatilePutter(
-			 new String[]{"putReferenceVolatile", "putObjectVolatile"}, Object.class));
-			m.put(boolean.class, volatilePutter(new String[]{"putBooleanVolatile"}, boolean.class));
-			m.put(byte.class, volatilePutter(new String[]{"putByteVolatile"}, byte.class));
-			m.put(char.class, volatilePutter(new String[]{"putCharVolatile"}, char.class));
-			m.put(short.class, volatilePutter(new String[]{"putShortVolatile"}, short.class));
-			m.put(int.class, volatilePutter(new String[]{"putIntVolatile"}, int.class));
-			m.put(long.class, volatilePutter(new String[]{"putLongVolatile"}, long.class));
-			m.put(float.class, volatilePutter(new String[]{"putFloatVolatile"}, float.class));
-			m.put(double.class, volatilePutter(new String[]{"putDoubleVolatile"}, double.class));
+			// 启动期仅预建 int 条件 CAS 作为环境兼容探针；其余 25 条管线按槽位懒加载，
+			// 且任何构造失败都不写入槽位（不毒化后续链接）。
+			CONDITIONAL_PUTTERS.set(SLOT_INT, buildConditionalPutter(SLOT_INT));
 		} catch (Throwable t) {
 			throw new ExceptionInInitializerError(t);
 		}
-		FORCE_PUTTERS = Collections.unmodifiableMap(m);
+	}
+
+	/**
+	 * 把任意字段值类型折叠进封闭的 9 槽位空间（所有非基本类型统一归一到 {@link #SLOT_OBJECT}），
+	 * 避免按用户 {@link Class} 为键缓存句柄而留住热更 {@link ClassLoader}。
+	 */
+	private static int typeSlot(Class<?> valType) {
+		if (!valType.isPrimitive()) return SLOT_OBJECT;
+		if (valType == int.class) return SLOT_INT;
+		if (valType == boolean.class) return SLOT_BOOLEAN;
+		if (valType == long.class) return SLOT_LONG;
+		if (valType == float.class) return SLOT_FLOAT;
+		if (valType == double.class) return SLOT_DOUBLE;
+		if (valType == byte.class) return SLOT_BYTE;
+		if (valType == char.class) return SLOT_CHAR;
+		if (valType == short.class) return SLOT_SHORT;
+		throw new IllegalArgumentException("unsupported field value type: " + valType);
+	}
+
+	private static MethodHandle conditionalPutter(Class<?> valType) throws Throwable {
+		int slot = typeSlot(valType);
+		MethodHandle cached = CONDITIONAL_PUTTERS.get(slot);
+		if (cached != null) return cached;
+		return cachePutter(CONDITIONAL_PUTTERS, slot, buildConditionalPutter(slot));
+	}
+
+	private static MethodHandle forcePutter(Class<?> valType) throws Throwable {
+		int slot = typeSlot(valType);
+		MethodHandle cached = FORCE_PUTTERS.get(slot);
+		if (cached != null) return cached;
+		return cachePutter(FORCE_PUTTERS, slot, buildForcePutter(slot));
+	}
+
+	private static MethodHandle expectedPutter(Class<?> valType) throws Throwable {
+		int slot = typeSlot(valType);
+		if (slot == SLOT_OBJECT) {
+			throw new IllegalStateException("no expected-CAS putter for " + valType);
+		}
+		MethodHandle cached = EXPECTED_PUTTERS.get(slot);
+		if (cached != null) return cached;
+		return cachePutter(EXPECTED_PUTTERS, slot, buildExpectedPutter(slot));
+	}
+
+	private static MethodHandle cachePutter(
+	 AtomicReferenceArray<MethodHandle> table, int slot, MethodHandle built
+	) {
+		if (table.compareAndSet(slot, null, built)) return built;
+		MethodHandle existing = table.get(slot);
+		return existing != null ? existing : built;
+	}
+
+	/** 仅测试可见：统计指定 kind 封闭 9 槽表中已构造的 putter 数量。 */
+	static int cachedPutterCount(int kind) {
+		AtomicReferenceArray<MethodHandle> table = putterTable(kind);
+		int count = 0;
+		for (int i = 0; i < SLOT_COUNT; i++) {
+			if (table.get(i) != null) count++;
+		}
+		return count;
+	}
+
+	/** 仅测试可见：检查指定字段值类型（归一化后）对应的 putter 槽位是否已构造。 */
+	static boolean isPutterCached(int kind, Class<?> valType) {
+		return putterTable(kind).get(typeSlot(valType)) != null;
+	}
+
+	private static AtomicReferenceArray<MethodHandle> putterTable(int kind) {
+		return switch (kind) {
+			case KIND_CONDITIONAL -> CONDITIONAL_PUTTERS;
+			case KIND_FORCE -> FORCE_PUTTERS;
+			case KIND_CONDITIONAL_EXPECTED -> EXPECTED_PUTTERS;
+			default -> throw new IllegalArgumentException("unknown putter kind: " + kind);
+		};
 	}
 
 	/**
 	 * 组合无条件写句柄：依次尝试 {@code names} 中第一个存在的方法，得到
-	 * {@code (Object, long, V)void}。都不存在则抛异常，让类初始化失败
-	 * （"JDK 版本超出预期"应该大声暴露，而不是退化成静默不写）。
+	 * {@code (Object, long, V)void}。都不存在则抛异常（懒加载期会暴露给 bootstrap 并避免写入缓存槽位）。
 	 */
 	private static MethodHandle volatilePutter(String[] names, Class<?> valueClass)
 	 throws NoSuchMethodException {
@@ -294,72 +382,70 @@ public final class HotswapBridge {
 		 "no volatile put found for " + valueClass + " (tried " + Arrays.toString(names) + ")");
 	}
 
-	static {
-		Map<Class<?>, MethodHandle> m = new HashMap<>(16);
-		try {
+	private static MethodHandle buildForcePutter(int slot) throws Throwable {
+		return switch (slot) {
+			case SLOT_OBJECT -> volatilePutter(
+			 new String[]{"putReferenceVolatile", "putObjectVolatile"}, Object.class);
+			case SLOT_BOOLEAN -> volatilePutter(new String[]{"putBooleanVolatile"}, boolean.class);
+			case SLOT_BYTE -> volatilePutter(new String[]{"putByteVolatile"}, byte.class);
+			case SLOT_CHAR -> volatilePutter(new String[]{"putCharVolatile"}, char.class);
+			case SLOT_SHORT -> volatilePutter(new String[]{"putShortVolatile"}, short.class);
+			case SLOT_INT -> volatilePutter(new String[]{"putIntVolatile"}, int.class);
+			case SLOT_LONG -> volatilePutter(new String[]{"putLongVolatile"}, long.class);
+			case SLOT_FLOAT -> volatilePutter(new String[]{"putFloatVolatile"}, float.class);
+			case SLOT_DOUBLE -> volatilePutter(new String[]{"putDoubleVolatile"}, double.class);
+			default -> throw new IllegalArgumentException("unexpected slot: " + slot);
+		};
+	}
+
+	private static MethodHandle buildConditionalPutter(int slot) throws Throwable {
+		return switch (slot) {
 			// 引用类型：JDK 12+ (Reference) -> JDK 9~11 (Object) -> JDK 8 (compareAndSwapObject)
-			m.put(Object.class, conditional(
+			case SLOT_OBJECT -> conditional(
 			 new String[]{"compareAndSetReference", "compareAndSetObject", "compareAndSwapObject"},
 			 new String[]{"putReferenceVolatile", "putObjectVolatile"},
-			 Object.class, null));
-
+			 Object.class, null);
 			// 子字类型：JDK 9+ 内部 Unsafe 原生支持；JDK 8 / Android 用 int CAS 模拟
-			m.put(boolean.class, conditional(
+			case SLOT_BOOLEAN -> conditional(
 			 new String[]{"compareAndSetBoolean"}, new String[]{"putBooleanVolatile"},
-			 boolean.class, false));
-			m.put(byte.class, conditional(
+			 boolean.class, false);
+			case SLOT_BYTE -> conditional(
 			 new String[]{"compareAndSetByte"}, new String[]{"putByteVolatile"},
-			 byte.class, (byte) 0));
-			m.put(char.class, conditional(
+			 byte.class, (byte) 0);
+			case SLOT_CHAR -> conditional(
 			 new String[]{"compareAndSetChar"}, new String[]{"putCharVolatile"},
-			 char.class, '\u0000'));
-			m.put(short.class, conditional(
+			 char.class, '\u0000');
+			case SLOT_SHORT -> conditional(
 			 new String[]{"compareAndSetShort"}, new String[]{"putShortVolatile"},
-			 short.class, (short) 0));
-
+			 short.class, (short) 0);
 			// int / long：JDK 9+ 叫 compareAndSetXxx，JDK 8 / sun.misc 叫 compareAndSwapXxx
-			m.put(int.class, conditional(
+			case SLOT_INT -> conditional(
 			 new String[]{"compareAndSetInt", "compareAndSwapInt"}, new String[]{"putIntVolatile"},
-			 int.class, 0));
-			m.put(long.class, conditional(
+			 int.class, 0);
+			case SLOT_LONG -> conditional(
 			 new String[]{"compareAndSetLong", "compareAndSwapLong"}, new String[]{"putLongVolatile"},
-			 long.class, 0L));
-
+			 long.class, 0L);
 			// float/double：一律用 raw bits 走 int/long CAS，不依赖
 			// compareAndSetFloat/Double 是否存在（JDK 8 没有；见类注释）。
 			// 这样 JDK 8 与 JDK 9+ 语义一致，且与 T0 的按位判零口径对齐。
-			m.put(float.class, rawBitsConditional(float.class));
-			m.put(double.class, rawBitsConditional(double.class));
-		} catch (Throwable t) {
-			throw new ExceptionInInitializerError(t);
-		}
-		CONDITIONAL_PUTTERS = Collections.unmodifiableMap(m);
+			case SLOT_FLOAT -> rawBitsConditional(float.class);
+			case SLOT_DOUBLE -> rawBitsConditional(double.class);
+			default -> throw new IllegalArgumentException("unexpected slot: " + slot);
+		};
 	}
 
-	/**
-	 * valueClass -> MethodHandle {@code (Object, long, V, V)boolean}：expected 作为参数传入的
-	 * 条件 CAS，供 {@link #KIND_CONDITIONAL_EXPECTED} 使用（L1 存量初值重放）。
-	 *
-	 * <p>与 {@link #CONDITIONAL_PUTTERS} 的区别只有一处：expected 不再在模板期固定为零值，
-	 * 而是链接期由调用点常量绑定。子字类型在 JDK 8 / Android 上复用同一套整字 CAS 模拟。</p>
-	 */
-	private static final Map<Class<?>, MethodHandle> EXPECTED_PUTTERS;
-
-	static {
-		Map<Class<?>, MethodHandle> m = new HashMap<>(16);
-		try {
-			m.put(boolean.class, expectedSubWordPutter("casBoolean", boolean.class));
-			m.put(byte.class, expectedSubWordPutter("casByte", byte.class));
-			m.put(char.class, expectedSubWordPutter("casChar", char.class));
-			m.put(short.class, expectedSubWordPutter("casShort", short.class));
-			m.put(int.class, expectedCasPutter("Int", int.class));
-			m.put(long.class, expectedCasPutter("Long", long.class));
-			m.put(float.class, rawBitsExpectedPutter(float.class));
-			m.put(double.class, rawBitsExpectedPutter(double.class));
-		} catch (Throwable t) {
-			throw new ExceptionInInitializerError(t);
-		}
-		EXPECTED_PUTTERS = Collections.unmodifiableMap(m);
+	private static MethodHandle buildExpectedPutter(int slot) throws Throwable {
+		return switch (slot) {
+			case SLOT_BOOLEAN -> expectedSubWordPutter("casBoolean", boolean.class);
+			case SLOT_BYTE -> expectedSubWordPutter("casByte", byte.class);
+			case SLOT_CHAR -> expectedSubWordPutter("casChar", char.class);
+			case SLOT_SHORT -> expectedSubWordPutter("casShort", short.class);
+			case SLOT_INT -> expectedCasPutter("Int", int.class);
+			case SLOT_LONG -> expectedCasPutter("Long", long.class);
+			case SLOT_FLOAT -> rawBitsExpectedPutter(float.class);
+			case SLOT_DOUBLE -> rawBitsExpectedPutter(double.class);
+			default -> throw new IllegalArgumentException("unexpected expected-CAS slot: " + slot);
+		};
 	}
 
 	/** {@code (Object, long, int|long, V)boolean}：expected 由调用点绑定。 */
@@ -636,12 +722,7 @@ public final class HotswapBridge {
 		boolean isStatic = opcode == Opcodes.PUTSTATIC;
 
 		Class<?> valType = callSiteType.parameterType(isStatic ? 0 : 1);
-		Class<?> key     = valType.isPrimitive() ? valType : Object.class;
-
-		MethodHandle template = EXPECTED_PUTTERS.get(key);
-		if (template == null) {
-			throw new IllegalStateException("no expected-CAS putter for " + valType);
-		}
+		MethodHandle template = expectedPutter(valType);
 
 		Object coerced = coerceExpected(expected, valType);
 		MethodHandle writer = MethodHandles.insertArguments(template, 2, coerced);
@@ -695,12 +776,7 @@ public final class HotswapBridge {
 
 		// 从 callSiteType 派生字段类型：静态在参数 0，实例在参数 1
 		Class<?> valType = callSiteType.parameterType(isStatic ? 0 : 1);
-		Class<?> key     = valType.isPrimitive() ? valType : Object.class;
-
-		MethodHandle template = CONDITIONAL_PUTTERS.get(key);
-		if (template == null) {
-			throw new IllegalStateException("no putter for " + valType);
-		}
+		MethodHandle template = conditionalPutter(valType);
 
 		checkProbe(owner, fieldName);
 		Field field = findField(owner, fieldName, Type.getDescriptor(valType));
@@ -735,12 +811,7 @@ public final class HotswapBridge {
 		boolean isStatic = opcode == Opcodes.PUTSTATIC;
 
 		Class<?> valType = callSiteType.parameterType(isStatic ? 0 : 1);
-		Class<?> key     = valType.isPrimitive() ? valType : Object.class;
-
-		MethodHandle template = FORCE_PUTTERS.get(key);
-		if (template == null) {
-			throw new IllegalStateException("no force putter for " + valType);
-		}
+		MethodHandle template = forcePutter(valType);
 
 		Field field = findField(owner, fieldName, Type.getDescriptor(valType));
 		long offset = isStatic
@@ -804,19 +875,22 @@ public final class HotswapBridge {
 
 	// ==================== 后台预热（消除首次热更冷启动毛刺） ====================
 
-	/** 包内可访问的极简预热宿主，供 {@link #warmUp()} 触发一次完整的 hidden class 定义与 indy 链接。 */
+	/** 包内可访问的极简预热宿主，供 {@link #warmUp()} 触发一次完整的 hidden class 定义与高频类型的 indy 链接。 */
 	static final class WarmupHost {
 		@SuppressWarnings("unused")
 		int v;
+		@SuppressWarnings("unused")
+		Object ref;
 	}
 
 	private static final AtomicBoolean WARMED_UP = new AtomicBoolean();
 
 	/**
-	 * 幂等预热 {@link HotswapBridge} 静态模板、{@link Reflect#defineHiddenClass} 与
-	 * 首个 {@code invokedynamic} 调用点链接，将首次结构性热更的冷启动开销移出关键路径。
+	 * 幂等预热 {@link HotswapBridge} 最常见类型（{@code int}/{@code Object} 条件 CAS）、
+	 * {@link Reflect#defineHiddenClass} 与 {@code invokedynamic} 链接骨架，将首次结构性热更的
+	 * 冷启动开销移出关键路径；其余冷门基本类型与 force/expected 通道保持按需懒加载。
 	 *
-	 * <p>只读写 {@link WarmupHost} 自有字段并只清理该字段自身的统计条目，
+	 * <p>只读写 {@link WarmupHost} 自有字段并只清理这些字段自身的统计条目，
 	 * 即使与真实热更并发也不污染业务统计。</p>
 	 */
 	public static void warmUp() {
@@ -829,15 +903,19 @@ public final class HotswapBridge {
 			 hostInternal + "$WarmupPatch", null, "java/lang/Object", null);
 			MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
 			 "patch", "(" + hostDesc + ")V", null, null);
+			Handle bsm = new Handle(Opcodes.H_INVOKESTATIC, Type.getInternalName(HotswapBridge.class), "bootstrap",
+			 "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;IILjava/lang/Class;Ljava/lang/Class;)Ljava/lang/invoke/CallSite;",
+			 false);
+			Type hostType = Type.getType(WarmupHost.class);
 			mv.visitCode();
 			mv.visitVarInsn(Opcodes.ALOAD, 0);
 			mv.visitInsn(Opcodes.ICONST_1);
 			mv.visitInvokeDynamicInsn("v", "(" + hostDesc + "I)V",
-			 new Handle(Opcodes.H_INVOKESTATIC, Type.getInternalName(HotswapBridge.class), "bootstrap",
-			  "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;IILjava/lang/Class;Ljava/lang/Class;)Ljava/lang/invoke/CallSite;",
-			  false),
-			 KIND_CONDITIONAL, Opcodes.PUTFIELD,
-			 Type.getType(WarmupHost.class), Type.getType(WarmupHost.class));
+			 bsm, KIND_CONDITIONAL, Opcodes.PUTFIELD, hostType, hostType);
+			mv.visitVarInsn(Opcodes.ALOAD, 0);
+			mv.visitLdcInsn("warmup");
+			mv.visitInvokeDynamicInsn("ref", "(" + hostDesc + "Ljava/lang/Object;)V",
+			 bsm, KIND_CONDITIONAL, Opcodes.PUTFIELD, hostType, hostType);
 			mv.visitInsn(Opcodes.RETURN);
 			mv.visitMaxs(2, 1);
 			mv.visitEnd();
@@ -851,6 +929,7 @@ public final class HotswapBridge {
 			// Best-effort warmup: cold path still initializes lazily on demand.
 		} finally {
 			CONDITIONAL_STATS.remove(WarmupHost.class.getName() + "#v");
+			CONDITIONAL_STATS.remove(WarmupHost.class.getName() + "#ref");
 		}
 	}
 }

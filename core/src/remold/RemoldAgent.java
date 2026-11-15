@@ -26,6 +26,7 @@ import java.security.ProtectionDomain;
 import java.util.*;
 import java.util.jar.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
@@ -1390,7 +1391,25 @@ public class RemoldAgent {
 				}
 				TRAILING_OBSERVERS_ARMED = true;
 			}
+			startBackgroundWarmup();
 		}
+	}
+
+	private static final AtomicBoolean WARMUP_STARTED = new AtomicBoolean();
+
+	private static void startBackgroundWarmup() {
+		if (!INIT_FIX) return;
+		if ("false".equalsIgnoreCase(System.getProperty("remold.agent.warmup"))) return;
+		if (!WARMUP_STARTED.compareAndSet(false, true)) return;
+		Thread t = new Thread(() -> {
+			try {
+				ClassIdentity.canonicalize(HotswapBridge.class);
+				HotswapBridge.warmUp();
+			} catch (Throwable ignored) { }
+		}, "Remold-Warmup");
+		t.setDaemon(true);
+		t.setPriority(Thread.MIN_PRIORITY);
+		t.start();
 	}
 
 	/**

@@ -9,6 +9,7 @@ import java.lang.invoke.MethodHandles.Lookup;
 import java.lang.reflect.Field;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -799,5 +800,57 @@ public final class HotswapBridge {
 		};
 
 		return new ConstantCallSite(mh.asType(callSiteType));
+	}
+
+	// ==================== 后台预热（消除首次热更冷启动毛刺） ====================
+
+	/** 包内可访问的极简预热宿主，供 {@link #warmUp()} 触发一次完整的 hidden class 定义与 indy 链接。 */
+	static final class WarmupHost {
+		@SuppressWarnings("unused")
+		int v;
+	}
+
+	private static final AtomicBoolean WARMED_UP = new AtomicBoolean();
+
+	/**
+	 * 幂等预热 {@link HotswapBridge} 静态模板、{@link Reflect#defineHiddenClass} 与
+	 * 首个 {@code invokedynamic} 调用点链接，将首次结构性热更的冷启动开销移出关键路径。
+	 *
+	 * <p>只读写 {@link WarmupHost} 自有字段并只清理该字段自身的统计条目，
+	 * 即使与真实热更并发也不污染业务统计。</p>
+	 */
+	public static void warmUp() {
+		if (!WARMED_UP.compareAndSet(false, true)) return;
+		try {
+			String hostInternal = Type.getInternalName(WarmupHost.class);
+			String hostDesc = Type.getDescriptor(WarmupHost.class);
+			ClassWriter cw = new ClassWriter(0);
+			cw.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_SUPER,
+			 hostInternal + "$WarmupPatch", null, "java/lang/Object", null);
+			MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+			 "patch", "(" + hostDesc + ")V", null, null);
+			mv.visitCode();
+			mv.visitVarInsn(Opcodes.ALOAD, 0);
+			mv.visitInsn(Opcodes.ICONST_1);
+			mv.visitInvokeDynamicInsn("v", "(" + hostDesc + "I)V",
+			 new Handle(Opcodes.H_INVOKESTATIC, Type.getInternalName(HotswapBridge.class), "bootstrap",
+			  "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;IILjava/lang/Class;Ljava/lang/Class;)Ljava/lang/invoke/CallSite;",
+			  false),
+			 KIND_CONDITIONAL, Opcodes.PUTFIELD,
+			 Type.getType(WarmupHost.class), Type.getType(WarmupHost.class));
+			mv.visitInsn(Opcodes.RETURN);
+			mv.visitMaxs(2, 1);
+			mv.visitEnd();
+			cw.visitEnd();
+
+			Lookup lookup = Reflect.defineHiddenClass(WarmupHost.class, cw.toByteArray());
+			MethodHandle mh = lookup.findStatic(lookup.lookupClass(), "patch",
+			 MethodType.methodType(void.class, WarmupHost.class));
+			mh.invokeExact(new WarmupHost());
+		} catch (Throwable ignored) {
+			// Best-effort warmup: cold path still initializes lazily on demand.
+		} finally {
+			CONDITIONAL_STATS.remove(WarmupHost.class.getName() + "#v");
+		}
 	}
 }

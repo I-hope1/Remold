@@ -3907,6 +3907,9 @@ public class InitFix {
 	}
 
 	private static void applyPatch(Class<?> host, PendingPatch patch) throws Throwable {
+		final boolean perfLog = RemoldAgent.PERF_LOG;
+		final long tPatchStart = perfLog ? System.nanoTime() : 0L;
+
 		// 影子 Class 归一（docs/initfix/03-runtime-driver.md §4 的 SELF 作用域判定前提）：
 		// JBR 结构性 redefine 会把静态字段里持有的 Class 引用改写成旧版本影子对象
 		// （同名同加载器、旧字段元数据）。影子类上的 LibTool.getInstances 返回 0，
@@ -3930,8 +3933,6 @@ public class InitFix {
 			return;
 		}
 
-		final boolean perfLog = RemoldAgent.PERF_LOG;
-		final long tPatchStart = perfLog ? System.nanoTime() : 0L;
 		long tCollectNs = 0L;
 		long tCompactNs = 0L;
 		long tSelfScanNs = 0L;

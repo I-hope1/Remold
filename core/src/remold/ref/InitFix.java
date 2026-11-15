@@ -124,14 +124,6 @@ public class InitFix {
 	private static final String INSTANCE_PATCH_PREFIX = "init$";
 	/** A 档 apply 重放的静态方法前缀；按 applyFields 插入顺序编号（驱动侧复用同一顺序）。 */
 	private static final String APPLY_REPLAY_PREFIX    = "applyReplay$";
-
-	/**
-	 * 批量实例补丁方法名：宿主隐藏类上额外生成的 {@code static void init$ALL(Object[])}，
-	 * 在类内部循环调用各字段的 {@code init$F}。用于替换 Java 侧"逐实例 MethodHandle.invokeExact"
-	 * 驱动（百万级实例时调用点退化为 megamorphic，单次约 1.5µs，2M 实例≈3s）。
-	 * 仅在任务无依赖、无 SELF 作用域时生成；其它情况保持逐实例路径。
-	 */
-	private static final String BATCH_INSTANCE_METHOD = "init$ALL";
 	private static final String PATCH_SUFFIX          = "$$HotswapPatch";
 
 	private static final long PENDING_TTL_NANOS     = TimeUnit.MINUTES.toNanos(5);
@@ -2047,62 +2039,6 @@ public class InitFix {
 		for (AbstractInsnNode i : body) m.instructions.add(i);
 		m.instructions.add(new InsnNode(Opcodes.RETURN));
 		return m;
-	}
-
-	/**
-	 * 在补丁隐藏类上追加批量循环方法 {@code static void init$ALL(Object[])}：
-	 * <pre>
-	 *   for (Object o : arr) {
-	 *     init$F0((Host) o);
-	 *     init$F1((Host) o);
-	 *     ...
-	 *   }
-	 * </pre>
-	 * 目的：把逐实例 {@code MethodHandle.invokeExact} 驱动换成一次静态调用 + 类内 JIT 循环。
-	 * 逐实例驱动在百万级实例时调用点因跨轮次换隐藏类而 megamorphic，实测 2M 实例约 3s；
-	 * 循环方法交给 JIT 内联 {@code init$F} 后为常数级小开销。仅用于无依赖、非 SELF 的任务。
-	 */
-	private static byte[] appendBatchInstanceLoop(
-	 byte[] classBytes, String hostInternal, List<FieldPatchTask> tasks) {
-		ClassReader cr = new ClassReader(classBytes);
-		// init$F 声明在补丁隐藏类自身（例如 Host$$HotswapPatch）上，形参才是宿主类型；
-		// 调用 owner 必须是隐藏类自己的名字，不能写宿主名字（否则 NoSuchMethodError）。
-		final String selfName = cr.getClassName();
-		ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-		cr.accept(new ClassVisitor(Opcodes.ASM9, cw) {
-			@Override
-			public void visitEnd() {
-				MethodVisitor mv = cv.visitMethod(
-				 Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, BATCH_INSTANCE_METHOD,
-				 "([Ljava/lang/Object;)V", null, null);
-				mv.visitCode();
-				Label loop = new Label();
-				Label done = new Label();
-				mv.visitInsn(Opcodes.ICONST_0);
-				mv.visitVarInsn(Opcodes.ISTORE, 1);
-				mv.visitLabel(loop);
-				mv.visitVarInsn(Opcodes.ILOAD, 1);
-				mv.visitVarInsn(Opcodes.ALOAD, 0);
-				mv.visitInsn(Opcodes.ARRAYLENGTH);
-				mv.visitJumpInsn(Opcodes.IF_ICMPGE, done);
-				for (FieldPatchTask task : tasks) {
-					mv.visitVarInsn(Opcodes.ALOAD, 0);
-					mv.visitVarInsn(Opcodes.ILOAD, 1);
-					mv.visitInsn(Opcodes.AALOAD);
-					mv.visitTypeInsn(Opcodes.CHECKCAST, hostInternal);
-					mv.visitMethodInsn(Opcodes.INVOKESTATIC, selfName, task.methodName(),
-					 "(L" + hostInternal + ";)V", false);
-				}
-				mv.visitIincInsn(1, 1);
-				mv.visitJumpInsn(Opcodes.GOTO, loop);
-				mv.visitLabel(done);
-				mv.visitInsn(Opcodes.RETURN);
-				mv.visitMaxs(0, 0);
-				mv.visitEnd();
-				cv.visitEnd();
-			}
-		}, 0);
-		return cw.toByteArray();
 	}
 
 	/** 字段名里可能含 {@code . ; [ / < >} 等非法方法名字符（混淆器/字节码注入），替换掉。 */
@@ -4053,20 +3989,7 @@ public class InitFix {
 		if (perfLog) tSelfScanNs = System.nanoTime() - tBeforeSelfScan;
 
 		long tBeforeDefine = perfLog ? System.nanoTime() : 0L;
-		final String hostInternal = host.getName().replace('.', '/');
-		// 批量快速路径资格：所有实例任务无依赖、非 SELF 作用域（SELF 需要逐实例身份判定）。
-		boolean batchInstanceFast = plan.hasInstance() && !plan.instanceTasks().isEmpty();
-		for (FieldPatchTask task : plan.instanceTasks()) {
-			if (!task.dependencies().isEmpty() || task.selfOnly()) {
-				batchInstanceFast = false;
-				break;
-			}
-		}
-		byte[] hiddenBytes = patch.bytes();
-		if (batchInstanceFast && hiddenBytes != null) {
-			hiddenBytes = appendBatchInstanceLoop(hiddenBytes, hostInternal, plan.instanceTasks());
-		}
-		Lookup   h  = Reflect.defineHiddenClass(host, hiddenBytes);
+		Lookup   h  = Reflect.defineHiddenClass(host, patch.bytes());
 		Class<?> pc = h.lookupClass();
 
 		// 必须在取 Handle 时就 asType 适配：init$F 的形参是宿主类型，驱动手里只有 Object。
@@ -4079,15 +4002,6 @@ public class InitFix {
 			instanceTasks[i] = new BoundInstanceTask(task.fieldName(), task.dependencies(), handle,
 			 task.selfOnly());
 			hasInstanceDependencies |= !task.dependencies().isEmpty();
-		}
-		MethodHandle batchInstanceHandle = null;
-		if (batchInstanceFast) {
-			try {
-				batchInstanceHandle = h.findStatic(pc, BATCH_INSTANCE_METHOD,
-				 MethodType.methodType(void.class, Object[].class));
-			} catch (NoSuchMethodException | IllegalAccessException ignored) {
-				batchInstanceHandle = null;
-			}
 		}
 
 		Map<String, MethodHandle> staticHandles = new LinkedHashMap<>();
@@ -4182,27 +4096,13 @@ public class InitFix {
 			                  + ", fields=" + plan.instanceTasks().size());
 
 			long start = System.nanoTime();
-			boolean batched = false;
-			if (batchInstanceHandle != null) {
-				try {
-					batchInstanceHandle.invokeExact(alive);
-					batched = true;
-				} catch (Throwable t) {
-					// 批量循环中途失败：退回逐实例路径重跑一遍。补丁写入是条件 CAS / 幂等覆盖，
-					// 重复执行不会改变结果，失败记录由逐实例路径补齐（每次热更只影响本轮统计）。
-					RemoldAgent.warn("[InitFix] batch instance loop failed for " + host.getName()
-					                  + ", falling back to per-instance patching: " + t);
-				}
-			}
-			if (!batched) {
-				if (hasInstanceDependencies) {
-					runDependentInstanceTasks(host, alive, instanceTasks,
-					 failedFields, skippedFields, failureReasons,
-					 union(staticFailures, staticSkips, Set.of()));
-				} else {
-					runIndependentInstanceTasks(host, alive, instanceTasks,
-					 failedFields, skippedFields, failureReasons);
-				}
+			if (hasInstanceDependencies) {
+				runDependentInstanceTasks(host, alive, instanceTasks,
+				 failedFields, skippedFields, failureReasons,
+				 union(staticFailures, staticSkips, Set.of()));
+			} else {
+				runIndependentInstanceTasks(host, alive, instanceTasks,
+				 failedFields, skippedFields, failureReasons);
 			}
 			long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 

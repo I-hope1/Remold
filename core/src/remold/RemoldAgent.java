@@ -1991,14 +1991,14 @@ public class RemoldAgent {
 	private static void loadClassSnap(Class<?>[] classes) {
 		var newMap = new ConcurrentHashMap<String, Class<?>>((int) (classes.length / 0.75f) + 1);
 		for (Class<?> c : classes) {
-			String   name     = c.getName();
+			String name = c.getName();
 			if (isNonLoadableClass(name)) {
 				// 模板类若被历史版本误注入过，这里把它排除出已加载快照：
 				// 既不重定义，也不让读者扫描把它当外部读者。
 				continue;
 			}
-			Class<?> existing = newMap.get(name);
-			if (isBetterLoadedClassCandidate(c, existing)) {
+			Class<?> existing = newMap.putIfAbsent(name, c);
+			if (existing != null && isBetterLoadedClassCandidate(c, existing)) {
 				newMap.put(name, c);
 			}
 		}
@@ -2038,10 +2038,13 @@ public class RemoldAgent {
 		// 收集器挂在当前线程上；即使没有任何监听器，这里也只多一次小对象分配，不改变批次行为。
 		BatchReportScope.begin();
 		resetLiveInstanceCache();
+		long pkgStartNanos = PERF_LOG ? System.nanoTime() : 0L;
 		refreshPackageLoaders(classes);
+		long snapStartNanos = PERF_LOG ? System.nanoTime() : 0L;
 
 		// 获取当前所有已加载类的快照
 		loadClassSnap(classes);
+		long ioStartNanos = PERF_LOG ? System.nanoTime() : 0L;
 
 		List<ClassDefinition> definitions = new ArrayList<>();
 		// List<Class<?>>        unloadedClasses  = new ArrayList<>();
@@ -2132,6 +2135,10 @@ public class RemoldAgent {
 		Map<String, Path> retryCandidates = new HashMap<>();
 
 		long anonStartNanos = System.nanoTime();
+		long pkgMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(snapStartNanos - pkgStartNanos) : 0L;
+		long snapMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(ioStartNanos - snapStartNanos) : 0L;
+		long ioMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(anonStartNanos - ioStartNanos) : 0L;
+		long prepMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(anonStartNanos - batchStartNanos) : 0L;
 		// 单遍按宿主分桶旧匿名类，避免在 hostClassesToAlign 外层循环里对全量 loadedClassesMap / bytecodeCache 做 O(H * N) 扫描与 ASM 解析。
 		if (!hostClassesToAlign.isEmpty()) {
 			for (Map.Entry<String, Class<?>> entry : loadedClassesMap.entrySet()) {
@@ -2287,6 +2294,7 @@ public class RemoldAgent {
 		// ---- 字节码重织入桥（Mixin / AspectJ / 自定义字节码增强器）----
 		// 位置：源码级对齐之后、局部类门与布局门之前。
 		// 保证对齐器看到的是纯净源码，而布局门与 JVM redefine 看到的是织入后的物理结构。
+		long bridgeStartNanos = PERF_LOG ? System.nanoTime() : 0L;
 		if (!transformerBridges.isEmpty()) {
 			for (String className : new ArrayList<>(newBatchBytes.keySet())) {
 				byte[] rawBytes = newBatchBytes.get(className);
@@ -2348,7 +2356,10 @@ public class RemoldAgent {
 		// 既不能被当作普通新类 defineClass，也不能被当作已加载类 redefine，更不能参与读者扫描。
 		newBatchBytes.keySet().removeIf(RemoldAgent::isNonLoadableClass);
 
-		long anonMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - anonStartNanos);
+		long anonEndNanos = System.nanoTime();
+		long anonMs = TimeUnit.NANOSECONDS.toMillis(anonEndNanos - anonStartNanos);
+		long anonAlignMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(bridgeStartNanos - anonStartNanos) : 0L;
+		long bridgeMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(anonEndNanos - bridgeStartNanos) : 0L;
 
 		// ---- 同名局部类编号漂移止血门（docs/topology/07-layout-gate-and-risks.md §2）----
 		//
@@ -2698,6 +2709,7 @@ public class RemoldAgent {
 		// 让存量实例在旧行为下被补齐，再提交阶段 C 的新方法体；否则沿用单次重定义的快路径。
 		long alignDiffMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - alignDiffStartNanos);
 
+		long redefineWallStartNanos = PERF_LOG ? System.nanoTime() : 0L;
 		RedefineOutcome outcome;
 		if (needsTwoPhase && TWO_PHASE) {
 			outcome = applyTwoPhase(definitions, oldEffectiveBytes, transactions.values(), skips, injectedClasses);
@@ -2706,6 +2718,7 @@ public class RemoldAgent {
 		}
 		Set<String>     redefinedOk = outcome.successful();
 		Set<String>     rolledBack  = outcome.rolledBack();
+		long redefineWallEndNanos = PERF_LOG ? System.nanoTime() : 0L;
 
 		// sourceBytecodeCache 是“最近一次实际生效的源码基线”，不是“本轮编译结果”。
 		// 对齐阶段必须先看到本轮新字节，所以上面暂存写入；这里按类回滚未生效的已加载类。
@@ -2768,6 +2781,7 @@ public class RemoldAgent {
 		// 与"重定义成功"长得一模一样，真机排查时无法区分。DEBUG 下打首尾两行即可定性。
 		if (DEBUG) log("[POST] post-processing " + redefinedOk.size() + " class(es): " + redefinedOk);
 
+		long commitMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - redefineWallEndNanos) : 0L;
 		List<ClassDefinition> successfulDefinitions = new ArrayList<>(definitions.size());
 		long stageBStart = System.nanoTime();
 		for (ClassDefinition def : definitions) {
@@ -2784,17 +2798,29 @@ public class RemoldAgent {
 
 		// 必须在 InitFix 补丁（静态字段与存量实例字段）全部就位后，再对成功重定义的类触发 @OnReload 回调；
 		// 严禁在补丁就绪前触发，否则回调读到未初始化的零值（时序反转）。
+		long annStartNanos = PERF_LOG ? System.nanoTime() : 0L;
 		processAnnotations(successfulDefinitions);
 		if (DEBUG) log("[POST] post-processing done for " + successfulDefinitions.size() + " class(es)");
 		List<String> redefinedNames = new ArrayList<>(successfulDefinitions.size());
 		for (ClassDefinition def : successfulDefinitions) {
 			redefinedNames.add(def.getDefinitionClass().getName());
 		}
+		long listenStartNanos = PERF_LOG ? System.nanoTime() : 0L;
 		// finish 会清掉当前线程的批次状态；即使本批没有类成功，也要发布
 		// “Mixin 模板已 reload / InitFix 已修补”这类可观测活动（见 notifyBatchListeners）。
 		notifyBatchListeners(successfulDefinitions, BatchReportScope.finish(redefinedNames));
+		long listenEndNanos = PERF_LOG ? System.nanoTime() : 0L;
 		if (!definitions.isEmpty() || injectedCount > 0) {
+			boolean twoPhaseMode = needsTwoPhase && TWO_PHASE;
 			long totalMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - batchStartNanos);
+			long redefMs = BATCH_REDEFINE_MILLIS.get();
+			long stageBMs = BATCH_STAGE_B_MILLIS.get();
+			String prepDetail = PERF_LOG
+				? "prep=" + prepMs + "ms [pkg=" + pkgMs + ", snap=" + snapMs + ", io=" + ioMs + "], "
+				: "";
+			String anonDetail = PERF_LOG
+				? " [align=" + anonAlignMs + ", bridge=" + bridgeMs + "]"
+				: "";
 			String alignDiffDetail = PERF_LOG
 				? " [fetch=" + TimeUnit.NANOSECONDS.toMillis(fetchNanos) + "ms"
 				  + ", lambda=" + TimeUnit.NANOSECONDS.toMillis(lambdaNanos) + "ms"
@@ -2802,22 +2828,43 @@ public class RemoldAgent {
 				  + ", annDef=" + TimeUnit.NANOSECONDS.toMillis(annDefNanos) + "ms"
 				  + ", initFix=" + TimeUnit.NANOSECONDS.toMillis(initFixNanos) + "ms]"
 				: "";
-			info("[HOTSWAP-BATCH] summary: mode=" + (needsTwoPhase && TWO_PHASE ? "2-phase" : "1-phase")
+			String redefineDetail = "";
+			String postDetail = "";
+			if (PERF_LOG) {
+				long skelMs = BATCH_TWOPHASE_SKEL_MILLIS.get();
+				long stageBInRedef = twoPhaseMode ? stageBMs : 0L;
+				long redefWrapMs = Math.max(0L,
+					TimeUnit.NANOSECONDS.toMillis(redefineWallEndNanos - redefineWallStartNanos)
+					- redefMs - stageBInRedef - skelMs);
+				redefineDetail = twoPhaseMode
+					? " [A=" + BATCH_STAGE_A_MILLIS.get() + ", C=" + BATCH_STAGE_C_MILLIS.get()
+					  + ", skel=" + skelMs + ", wrap=" + redefWrapMs + "]"
+					: " [wrap=" + redefWrapMs + "]";
+				long annMs = TimeUnit.NANOSECONDS.toMillis(listenStartNanos - annStartNanos);
+				long listenMs = TimeUnit.NANOSECONDS.toMillis(listenEndNanos - listenStartNanos);
+				long postMs = commitMs + annMs + listenMs;
+				postDetail = ", post=" + postMs + "ms [commit=" + commitMs
+					+ ", ann=" + annMs + ", listen=" + listenMs + "]";
+			}
+			info("[HOTSWAP-BATCH] summary: mode=" + (twoPhaseMode ? "2-phase" : "1-phase")
 			     + ", total=" + totalMs + "ms"
-			     + " (anon=" + anonMs + "ms"
+			     + " (" + prepDetail
+			     + "anon=" + anonMs + "ms" + anonDetail
 			     + ", guard=" + guardMs + "ms"
 			     + ", readers=" + readersMs + "ms"
 			     + ", gate=" + gateMs + "ms"
 			     + ", alignDiff=" + alignDiffMs + "ms" + alignDiffDetail
 			     + ", liveScan=" + LIVE_INSTANCE_SCAN_MILLIS.get() + "ms"
-			     + ", redefine=" + BATCH_REDEFINE_MILLIS.get() + "ms"
-			     + ", stageB=" + BATCH_STAGE_B_MILLIS.get() + "ms"
+			     + ", redefine=" + redefMs + "ms" + redefineDetail
+			     + ", stageB=" + stageBMs + "ms"
+			     + postDetail
 			     + ", redefined=" + successfulDefinitions.size() + ")");
 		}
 
 		// L0/L1 必须在 InitFix 后处理（afterRedefine）之后运行：
 		// 一是 L1 的"已重放"记录在 applyPatch 里写入，L0 需要据此抑制误导性告警；
 		// 二是补丁只能作用于真正重定义成功的类。门拒绝/跳过的类必须零 INIT-DRIFT、零实例枚举。
+		long tailStartNanos = PERF_LOG ? System.nanoTime() : 0L;
 		Map<String, byte[]> appliedForDrift = new LinkedHashMap<>();
 		for (String key : newBatchBytes.keySet()) {
 			if (redefinedOk.contains(key)) appliedForDrift.put(key, newBatchBytes.get(key));
@@ -2825,6 +2872,7 @@ public class RemoldAgent {
 		// Drain even when no replay ran: a stale record must not leak into the next round.
 		Map<String, Set<String>> replayedForDrift = remold.ref.InitializerReplay.drainApplied();
 		remold.ref.InitializerDrift.report(appliedForDrift, driftOldBytes, replayedForDrift);
+		long metaStartNanos = PERF_LOG ? System.nanoTime() : 0L;
 
 		Set<Class<?>> successfulClasses = new HashSet<>();
 		for (ClassDefinition def : successfulDefinitions) {
@@ -2833,7 +2881,17 @@ public class RemoldAgent {
 		// 参数注解 / 泛型签名漂移：成员级 WARN 点名（显式登记"用户自持旧句柄不安全"）。
 		// 成员级点名只覆盖字段/方法/构造器的 Signature 与参数注解；类级泛型签名（getGenericSuperclass）不在检测范围，本行也不改变缓存驱逐范围。
 		reportMemberMetadataDrift(appliedForDrift, driftOldBytes);
+		long evictStartNanos = PERF_LOG ? System.nanoTime() : 0L;
 		remold.evict.ReflectionCacheManager.evictAll(successfulClasses);
+		if (PERF_LOG && (!definitions.isEmpty() || injectedCount > 0)) {
+			long tailEndNanos = System.nanoTime();
+			long tailMs = TimeUnit.NANOSECONDS.toMillis(tailEndNanos - tailStartNanos);
+			long driftMs = TimeUnit.NANOSECONDS.toMillis(metaStartNanos - tailStartNanos);
+			long metaMs = TimeUnit.NANOSECONDS.toMillis(evictStartNanos - metaStartNanos);
+			long evictMs = TimeUnit.NANOSECONDS.toMillis(tailEndNanos - evictStartNanos);
+			info("[HOTSWAP-PERF] post-summary tail=" + tailMs + "ms [drift=" + driftMs
+			     + ", meta=" + metaMs + ", evict=" + evictMs + "]");
+		}
 
 		// 与上面的 [HOTSWAP-SKIPPED] 区分：这里是"磁盘哈希没变，本来就没改"，不是被门拦下。
 		if (skippedCount > 0) info("Unchanged: " + skippedCount + " class(es) had identical bytes on disk.");
@@ -2944,6 +3002,9 @@ public class RemoldAgent {
 		LIVE_INSTANCE_SCAN_MILLIS.set(0);
 		BATCH_REDEFINE_MILLIS.set(0);
 		BATCH_STAGE_B_MILLIS.set(0);
+		BATCH_STAGE_A_MILLIS.set(0);
+		BATCH_STAGE_C_MILLIS.set(0);
+		BATCH_TWOPHASE_SKEL_MILLIS.set(0);
 	}
 
 	/** 实例判定缓存：点分类名 → 是否存活实例。见 {@link #hasLiveInstances}。 */
@@ -2954,6 +3015,9 @@ public class RemoldAgent {
 	private static final AtomicLong           BATCH_REDEFINE_MILLIS     = new AtomicLong();
 	/** 本批次 {@link InitFix#afterRedefine}（两阶段 Stage B + 1-phase 后处理）累计耗时（毫秒）。 */
 	static final         AtomicLong           BATCH_STAGE_B_MILLIS      = new AtomicLong();
+	private static final AtomicLong           BATCH_STAGE_A_MILLIS      = new AtomicLong();
+	private static final AtomicLong           BATCH_STAGE_C_MILLIS      = new AtomicLong();
+	private static final AtomicLong           BATCH_TWOPHASE_SKEL_MILLIS = new AtomicLong();
 
 	private static final byte[] ON_RELOAD_DESC_BYTES =
 		"Lremold/annotation/OnReload;".getBytes(StandardCharsets.US_ASCII);
@@ -4379,6 +4443,7 @@ public class RemoldAgent {
 		}
 
 		// ---- 阶段 A：新结构 + 旧方法体（构造器保持新体） ----
+		long skelStartNanos = PERF_LOG ? System.nanoTime() : 0L;
 		List<ClassDefinition> stageADefinitions = new ArrayList<>(definitions.size());
 		Map<String, byte[]>   stageABytes       = new HashMap<>(definitions.size());
 		for (ClassDefinition def : definitions) {
@@ -4408,10 +4473,17 @@ public class RemoldAgent {
 			stageADefinitions.add(new ClassDefinition(clazz, skeleton));
 			stageABytes.put(name, skeleton);
 		}
+		if (PERF_LOG) {
+			BATCH_TWOPHASE_SKEL_MILLIS.addAndGet(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - skelStartNanos));
+		}
 
+		long redefBeforeA = PERF_LOG ? BATCH_REDEFINE_MILLIS.get() : 0L;
 		Set<String> stageAAbandoned = new HashSet<>();
 		Set<String> stageAOk        = redefineStageA(stageADefinitions, stageABytes, transactions, skips, injectedClasses,
 		                                              stageAAbandoned);
+		if (PERF_LOG) {
+			BATCH_STAGE_A_MILLIS.addAndGet(BATCH_REDEFINE_MILLIS.get() - redefBeforeA);
+		}
 		if (stageAOk.isEmpty()) {
 			warn("[HOTSWAP-2P] Stage A did not apply any class; the two-phase transaction is abandoned.");
 			skips.report();
@@ -4469,7 +4541,11 @@ public class RemoldAgent {
 		for (AlignmentTransaction tx : transactions) {
 			if (stageAOk.contains(tx.hostName)) activeTransactions.add(tx);
 		}
+		long redefBeforeC = PERF_LOG ? BATCH_REDEFINE_MILLIS.get() : 0L;
 		RedefineOutcome stageCOutcome = applyRedefinitions(stageCDefinitions, activeTransactions, skips);
+		if (PERF_LOG) {
+			BATCH_STAGE_C_MILLIS.addAndGet(BATCH_REDEFINE_MILLIS.get() - redefBeforeC);
+		}
 		Set<String>     rolledBack    = new HashSet<>(stageCOutcome.rolledBack());
 		rolledBack.addAll(stageAAbandoned);
 		RedefineOutcome outcome = new RedefineOutcome(stageCOutcome.successful(), rolledBack);

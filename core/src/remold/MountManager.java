@@ -1,6 +1,7 @@
 package remold;
 
 import jdk.internal.loader.BuiltinClassLoader;
+import remold.offset.LayoutPredictor;
 import remold.util.Utils;
 
 import java.io.*;
@@ -332,23 +333,48 @@ public class MountManager {
 	 * 这对于解决 NoClassDefFoundError 至关重要。
 	 */
 	static void refreshPackageLoaders(Class<?>[] classes) {
+		IdentityHashMap<ClassLoader, Boolean> ephemeralCache = null;
+		IdentityHashMap<ClassLoader, Integer> rankCache = null;
 		for (Class<?> clazz : classes) {
+			if (clazz.isArray() || clazz.isPrimitive()) continue;
 			ClassLoader cl = clazz.getClassLoader();
-			// 抛弃式预测加载器定义的副本不是"活"的那份，它的包映射会把后续类加载指到死加载器上
-			if (cl != null && !remold.offset.LayoutPredictor.isEphemeralLoader(cl) && clazz.getPackage() != null) {
-				String pkg = clazz.getPackage().getName();
-				WeakReference<ClassLoader> existingRef = packageLoaders.get(pkg);
-				ClassLoader existing = existingRef == null ? null : existingRef.get();
-				// 同名多副本仲裁：宿主加载器（Knot/ModLauncher）优先，绝不让 AppClassLoader 裸副本
-				// 覆盖包映射，否则后续 NoClassDefFoundError 的兜底加载会继续制造裸副本。
-				if (existing == null
-				    || ClassCopySelector.loaderRank(cl) > ClassCopySelector.loaderRank(existing)
-				    || (ClassCopySelector.loaderRank(cl) == ClassCopySelector.loaderRank(existing)
-				        && isChildClassLoader(cl, existing))) {
-					packageLoaders.put(pkg, new WeakReference<>(cl));
-				}
+			if (cl == null) continue;
+			String pkg = clazz.getPackageName();
+			WeakReference<ClassLoader> existingRef = packageLoaders.get(pkg);
+			ClassLoader existing = existingRef == null ? null : existingRef.get();
+			// 同实例直接跳过，避免稳态下对已登记类反复计算 loaderRank 和遍历 parent 链
+			if (existing == cl) continue;
+
+			if (ephemeralCache == null) ephemeralCache = new IdentityHashMap<>();
+			Boolean ephemeral = ephemeralCache.get(cl);
+			if (ephemeral == null) {
+				// 抛弃式预测加载器定义的副本不是"活"的那份，它的包映射会把后续类加载指到死加载器上
+				ephemeral = LayoutPredictor.isEphemeralLoader(cl);
+				ephemeralCache.put(cl, ephemeral);
+			}
+			if (ephemeral) continue;
+
+			if (existing == null) {
+				packageLoaders.put(pkg, new WeakReference<>(cl));
+				continue;
+			}
+			if (rankCache == null) rankCache = new IdentityHashMap<>();
+			int clRank = cachedLoaderRank(rankCache, cl);
+			int exRank = cachedLoaderRank(rankCache, existing);
+			// 同名多副本仲裁：宿主加载器（Knot/ModLauncher）优先，绝不让 AppClassLoader 裸副本
+			// 覆盖包映射，否则后续 NoClassDefFoundError 的兜底加载会继续制造裸副本。
+			if (clRank > exRank || (clRank == exRank && isChildClassLoader(cl, existing))) {
+				packageLoaders.put(pkg, new WeakReference<>(cl));
 			}
 		}
+	}
+
+	private static int cachedLoaderRank(IdentityHashMap<ClassLoader, Integer> cache, ClassLoader cl) {
+		Integer cached = cache.get(cl);
+		if (cached != null) return cached;
+		int rank = ClassCopySelector.loaderRank(cl);
+		cache.put(cl, rank);
+		return rank;
 	}
 
 	//endregion

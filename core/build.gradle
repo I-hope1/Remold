@@ -63,8 +63,8 @@ shadowJar {
 	archiveFileName.set('remold-agent.jar')
 	manifest {
 		attributes(
-				'Agent-Class': 'remold.RemoldAgent',
-				'Premain-Class': 'remold.RemoldAgent',
+				'Agent-Class': 'remold.AgentBootstrap',
+				'Premain-Class': 'remold.AgentBootstrap',
 				'Boot-Class-Path': 'remold-agent.jar',
 				'Can-Retransform-Classes': true,
 				'Can-Redefine-Classes': true,

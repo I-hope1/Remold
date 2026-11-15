@@ -1140,7 +1140,10 @@ public class RemoldAgent {
 		new java.util.concurrent.atomic.AtomicBoolean();
 
 	private static void appendSelfToBootstrapSearch(Instrumentation inst) {
-		if (inst == null || !BOOTSTRAP_APPENDED.compareAndSet(false, true)) return;
+		if (inst == null || RemoldAgent.class.getClassLoader() == null
+		    || !BOOTSTRAP_APPENDED.compareAndSet(false, true)) {
+			return;
+		}
 		try {
 			java.security.CodeSource cs = RemoldAgent.class.getProtectionDomain().getCodeSource();
 			if (cs != null && cs.getLocation() != null) {

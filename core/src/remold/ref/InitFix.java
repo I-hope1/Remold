@@ -122,6 +122,7 @@ import static remold.RemoldAgent.log;
 public class InitFix {
 	private static final String STATIC_PATCH_PREFIX   = "initStatic$";
 	private static final String INSTANCE_PATCH_PREFIX = "init$";
+	private static final String BATCH_PATCH_PREFIX    = "initBatch$";
 	/** A 档 apply 重放的静态方法前缀；按 applyFields 插入顺序编号（驱动侧复用同一顺序）。 */
 	private static final String APPLY_REPLAY_PREFIX    = "applyReplay$";
 	private static final String PATCH_SUFFIX          = "$$HotswapPatch";
@@ -480,7 +481,7 @@ public class InitFix {
 	 */
 	public record FieldPatchTask(
 	 String methodName, String fieldName, boolean isStatic, Set<String> dependencies,
-	 boolean selfOnly, boolean replay) {
+	 boolean selfOnly, boolean replay, String batchMethodName) {
 
 		public FieldPatchTask {
 			dependencies = dependencies == null ? Set.of() : Set.copyOf(dependencies);
@@ -489,13 +490,19 @@ public class InitFix {
 		/** 默认作用域（{@code INCLUDE_SUBCLASSES}）的任务：子类实例同样要补。 */
 		public FieldPatchTask(String methodName, String fieldName, boolean isStatic,
 		                      Set<String> dependencies) {
-			this(methodName, fieldName, isStatic, dependencies, false, false);
+			this(methodName, fieldName, isStatic, dependencies, false, false, null);
 		}
 
 		/** 默认作用域 + 非重放任务。 */
 		public FieldPatchTask(String methodName, String fieldName, boolean isStatic,
 		                      Set<String> dependencies, boolean selfOnly) {
-			this(methodName, fieldName, isStatic, dependencies, selfOnly, false);
+			this(methodName, fieldName, isStatic, dependencies, selfOnly, false, null);
+		}
+
+		/** 兼容不带批方法名的构造（静态任务或无法内联进批循环的切片）。 */
+		public FieldPatchTask(String methodName, String fieldName, boolean isStatic,
+		                      Set<String> dependencies, boolean selfOnly, boolean replay) {
+			this(methodName, fieldName, isStatic, dependencies, selfOnly, replay, null);
 		}
 	}
 
@@ -1729,6 +1736,18 @@ public class InitFix {
 			List<AbstractInsnNode> body = rewriteFieldSlice(
 			 hostInternal, className, new ArrayList<>(chosen.instructions()),
 			 chosen.protectedAccesses(), conditionalFields, forceWriteFields, replayArguments);
+			boolean replayTask = acceptedReplay.contains(fieldName);
+			boolean selfOnlyTask = replayTask || selfOnlyFields.contains(fieldName);
+			String batchMethodName = null;
+			String candidateBatchName = uniqueMethodName(BATCH_PATCH_PREFIX, fieldName, usedMethodNames);
+			MethodNode batchMethod = emitBatchMethod(
+			 candidateBatchName, className, fieldName, body, selfOnlyTask);
+			if (batchMethod != null) {
+				patch.methods.add(batchMethod);
+				batchMethodName = candidateBatchName;
+			} else {
+				usedMethodNames.remove(candidateBatchName);
+			}
 			patch.methods.add(straightLineMethod(method, "(L" + className + ";)", body));
 			// 依赖闭包必须同时统计实例侧与<b>静态侧</b>的读取。
 			// 只传 acceptedInstance 会把切片里的 GETSTATIC 整个漏掉：静态字段补失败后，
@@ -1740,9 +1759,8 @@ public class InitFix {
 			 dependencyOf(fieldName, instanceExtracts, className, acceptedInstance));
 			instanceDeps.addAll(
 			 dependencyOf(fieldName, instanceExtracts, className, acceptedStatic));
-			boolean replayTask = acceptedReplay.contains(fieldName);
 			instanceTasks.add(new FieldPatchTask(method, fieldName, false, instanceDeps,
-			 replayTask || selfOnlyFields.contains(fieldName), replayTask));
+			 selfOnlyTask, replayTask, batchMethodName));
 		}
 
 		for (String fieldName : orderedStatic) {
@@ -2039,6 +2057,246 @@ public class InitFix {
 		for (AbstractInsnNode i : body) m.instructions.add(i);
 		m.instructions.add(new InsnNode(Opcodes.RETURN));
 		return m;
+	}
+
+	private static final int BATCH_LOCAL_TARGETS   = 0;
+	private static final int BATCH_LOCAL_FROM      = 1;
+	private static final int BATCH_LOCAL_TO        = 2;
+	private static final int BATCH_LOCAL_ERROUT    = 3;
+	private static final int BATCH_LOCAL_INDEX     = 4;
+	private static final int BATCH_LOCAL_WRITTEN   = 5;
+	private static final int BATCH_LOCAL_SKIPPED   = 7;
+	private static final int BATCH_LOCAL_TARGET    = 9;
+	private static final String BATCH_METHOD_DESC  = "([Ljava/lang/Object;II[Ljava/lang/Throwable;)I";
+	private static final String BRIDGE_INTERNAL    = Type.getInternalName(HotswapBridge.class);
+
+	/**
+	 * 为无分支字段切片生成在隐藏补丁类内部执行的批量循环方法
+	 * {@code initBatch$F(Object[] targets, int from, int to, Throwable[] errOut)}，
+	 * 消除百万级实例下的跨 {@code MethodHandle} 分派与逐实例 {@code LongAdder} 递增开销。
+	 *
+	 * @return 成功生成返回方法节点；若切片含控制流、额外局部变量或非预期写形态则返回 {@code null}，
+	 *         由驱动退回单实例 {@code init$F}
+	 */
+	private static MethodNode emitBatchMethod(
+	 String batchMethodName, String className, String fieldName,
+	 List<AbstractInsnNode> body, boolean selfOnly) {
+		if (body == null || body.isEmpty()) return null;
+
+		int lastRealIdx = -1;
+		for (int i = body.size() - 1; i >= 0; i--) {
+			AbstractInsnNode insn = body.get(i);
+			if (!(insn instanceof LabelNode || insn instanceof LineNumberNode || insn instanceof FrameNode)) {
+				lastRealIdx = i;
+				break;
+			}
+		}
+		if (lastRealIdx < 0) return null;
+
+		int statsKind = 0; // 0 = none (force write), 1 = conditional, 2 = replay-expected
+		int statsIndyIdx = -1;
+		for (int i = 0; i <= lastRealIdx; i++) {
+			AbstractInsnNode insn = body.get(i);
+			if (insn instanceof LabelNode || insn instanceof LineNumberNode || insn instanceof FrameNode) {
+				continue;
+			}
+			if (insn instanceof JumpInsnNode
+			    || insn instanceof TableSwitchInsnNode
+			    || insn instanceof LookupSwitchInsnNode
+			    || insn instanceof IincInsnNode) {
+				return null;
+			}
+			int op = insn.getOpcode();
+			if (op == Opcodes.RETURN || op == Opcodes.IRETURN || op == Opcodes.LRETURN
+			    || op == Opcodes.FRETURN || op == Opcodes.DRETURN || op == Opcodes.ARETURN
+			    || op == Opcodes.ATHROW || op == Opcodes.RET) {
+				return null;
+			}
+			if (insn instanceof VarInsnNode v) {
+				if (v.getOpcode() != Opcodes.ALOAD || v.var != 0) return null;
+			}
+			if (insn instanceof InvokeDynamicInsnNode indy) {
+				int detected = classifyBatchIndy(indy, fieldName);
+				if (detected < 0) return null;
+				if (detected > 0) {
+					if (statsKind != 0 || i != lastRealIdx) return null;
+					statsKind = detected;
+					statsIndyIdx = i;
+				}
+			}
+		}
+
+		MethodNode m = new MethodNode(
+		 Opcodes.ACC_STATIC | Opcodes.ACC_PUBLIC,
+		 batchMethodName, BATCH_METHOD_DESC, null, null);
+		InsnList out = m.instructions;
+		Type hostType = Type.getObjectType(className);
+		Object[] baseLocals = new Object[]{
+		 "[Ljava/lang/Object;", Opcodes.INTEGER, Opcodes.INTEGER,
+		 "[Ljava/lang/Throwable;", Opcodes.INTEGER, Opcodes.LONG, Opcodes.LONG
+		};
+		Object[] catchLocals = new Object[]{
+		 "[Ljava/lang/Object;", Opcodes.INTEGER, Opcodes.INTEGER,
+		 "[Ljava/lang/Throwable;", Opcodes.INTEGER, Opcodes.LONG, Opcodes.LONG,
+		 "java/lang/Throwable"
+		};
+
+		LabelNode tryStart = new LabelNode();
+		LabelNode tryEnd = new LabelNode();
+		LabelNode loopCond = new LabelNode();
+		LabelNode loopEnd = new LabelNode();
+		LabelNode nextIter = new LabelNode();
+		LabelNode skipStats = new LabelNode();
+		LabelNode catchHandler = new LabelNode();
+		m.tryCatchBlocks.add(new TryCatchBlockNode(tryStart, tryEnd, catchHandler, "java/lang/Throwable"));
+
+		out.add(new VarInsnNode(Opcodes.ILOAD, BATCH_LOCAL_FROM));
+		out.add(new VarInsnNode(Opcodes.ISTORE, BATCH_LOCAL_INDEX));
+		out.add(new InsnNode(Opcodes.LCONST_0));
+		out.add(new VarInsnNode(Opcodes.LSTORE, BATCH_LOCAL_WRITTEN));
+		out.add(new InsnNode(Opcodes.LCONST_0));
+		out.add(new VarInsnNode(Opcodes.LSTORE, BATCH_LOCAL_SKIPPED));
+
+		out.add(tryStart);
+		out.add(loopCond);
+		out.add(new FrameNode(Opcodes.F_FULL, baseLocals.length, baseLocals, 0, new Object[0]));
+		out.add(new VarInsnNode(Opcodes.ILOAD, BATCH_LOCAL_INDEX));
+		out.add(new VarInsnNode(Opcodes.ILOAD, BATCH_LOCAL_TO));
+		out.add(new JumpInsnNode(Opcodes.IF_ICMPGE, loopEnd));
+
+		out.add(new VarInsnNode(Opcodes.ALOAD, BATCH_LOCAL_TARGETS));
+		out.add(new VarInsnNode(Opcodes.ILOAD, BATCH_LOCAL_INDEX));
+		out.add(new InsnNode(Opcodes.AALOAD));
+		out.add(new TypeInsnNode(Opcodes.CHECKCAST, className));
+		out.add(new VarInsnNode(Opcodes.ASTORE, BATCH_LOCAL_TARGET));
+
+		if (selfOnly) {
+			out.add(new VarInsnNode(Opcodes.ALOAD, BATCH_LOCAL_TARGET));
+			out.add(new MethodInsnNode(
+			 Opcodes.INVOKEVIRTUAL, "java/lang/Object", "getClass", "()Ljava/lang/Class;", false));
+			out.add(new LdcInsnNode(hostType));
+			out.add(new JumpInsnNode(Opcodes.IF_ACMPNE, nextIter));
+		}
+
+		Map<LabelNode, LabelNode> emptyLabels = Collections.emptyMap();
+		for (int i = 0; i <= lastRealIdx; i++) {
+			AbstractInsnNode insn = body.get(i);
+			if (insn instanceof LabelNode || insn instanceof LineNumberNode || insn instanceof FrameNode) {
+				continue;
+			}
+			if (i == statsIndyIdx) {
+				InvokeDynamicInsnNode indy = (InvokeDynamicInsnNode) insn;
+				Object[] argsCopy = indy.bsmArgs.clone();
+				argsCopy[0] = statsKind == 1
+				 ? HotswapBridge.KIND_CONDITIONAL_BATCH
+				 : HotswapBridge.KIND_CONDITIONAL_EXPECTED_BATCH;
+				String batchIndyDesc = indy.desc.substring(0, indy.desc.length() - 1) + "Z";
+				out.add(new InvokeDynamicInsnNode(indy.name, batchIndyDesc, indy.bsm, argsCopy));
+				out.add(new JumpInsnNode(Opcodes.IFEQ, skipStats));
+				out.add(new VarInsnNode(Opcodes.LLOAD, BATCH_LOCAL_WRITTEN));
+				out.add(new InsnNode(Opcodes.LCONST_1));
+				out.add(new InsnNode(Opcodes.LADD));
+				out.add(new VarInsnNode(Opcodes.LSTORE, BATCH_LOCAL_WRITTEN));
+				out.add(new JumpInsnNode(Opcodes.GOTO, nextIter));
+
+				Object[] targetLocals = new Object[]{
+				 "[Ljava/lang/Object;", Opcodes.INTEGER, Opcodes.INTEGER,
+				 "[Ljava/lang/Throwable;", Opcodes.INTEGER, Opcodes.LONG, Opcodes.LONG,
+				 className
+				};
+				out.add(skipStats);
+				out.add(new FrameNode(Opcodes.F_FULL, targetLocals.length, targetLocals, 0, new Object[0]));
+				out.add(new VarInsnNode(Opcodes.LLOAD, BATCH_LOCAL_SKIPPED));
+				out.add(new InsnNode(Opcodes.LCONST_1));
+				out.add(new InsnNode(Opcodes.LADD));
+				out.add(new VarInsnNode(Opcodes.LSTORE, BATCH_LOCAL_SKIPPED));
+				continue;
+			}
+			if (insn instanceof VarInsnNode v && v.getOpcode() == Opcodes.ALOAD && v.var == 0) {
+				out.add(new VarInsnNode(Opcodes.ALOAD, BATCH_LOCAL_TARGET));
+			} else {
+				out.add(insn.clone(emptyLabels));
+			}
+		}
+
+		if (selfOnly || statsKind != 0) {
+			out.add(nextIter);
+			out.add(new FrameNode(Opcodes.F_FULL, baseLocals.length, baseLocals, 0, new Object[0]));
+		}
+		out.add(new IincInsnNode(BATCH_LOCAL_INDEX, 1));
+		out.add(new JumpInsnNode(Opcodes.GOTO, loopCond));
+		out.add(tryEnd);
+
+		out.add(loopEnd);
+		out.add(new FrameNode(Opcodes.F_FULL, baseLocals.length, baseLocals, 0, new Object[0]));
+		if (statsKind != 0) {
+			LabelNode returnSuccess = new LabelNode();
+			emitBatchStatsFlush(out, hostType, fieldName, statsKind, returnSuccess);
+			out.add(returnSuccess);
+			out.add(new FrameNode(Opcodes.F_FULL, baseLocals.length, baseLocals, 0, new Object[0]));
+		}
+		out.add(new InsnNode(Opcodes.ICONST_M1));
+		out.add(new InsnNode(Opcodes.IRETURN));
+
+		out.add(catchHandler);
+		out.add(new FrameNode(
+		 Opcodes.F_FULL, baseLocals.length, baseLocals, 1, new Object[]{"java/lang/Throwable"}));
+		out.add(new VarInsnNode(Opcodes.ASTORE, BATCH_LOCAL_TARGET));
+		if (statsKind != 0) {
+			LabelNode skipFlushOnErr = new LabelNode();
+			emitBatchStatsFlush(out, hostType, fieldName, statsKind, skipFlushOnErr);
+			out.add(skipFlushOnErr);
+			out.add(new FrameNode(Opcodes.F_FULL, catchLocals.length, catchLocals, 0, new Object[0]));
+		}
+		out.add(new VarInsnNode(Opcodes.ALOAD, BATCH_LOCAL_ERROUT));
+		out.add(new InsnNode(Opcodes.ICONST_0));
+		out.add(new VarInsnNode(Opcodes.ALOAD, BATCH_LOCAL_TARGET));
+		out.add(new InsnNode(Opcodes.AASTORE));
+		out.add(new VarInsnNode(Opcodes.ILOAD, BATCH_LOCAL_INDEX));
+		out.add(new InsnNode(Opcodes.IRETURN));
+		return m;
+	}
+
+	/** 识别批循环中的 bridge indy：0=无需统计(protected/force)，1=conditional，2=replay-expected，-1=不兼容。 */
+	private static int classifyBatchIndy(InvokeDynamicInsnNode indy, String fieldName) {
+		if (indy.bsmArgs == null || indy.bsmArgs.length < 2 || !(indy.bsmArgs[0] instanceof Integer kind)) {
+			return 0;
+		}
+		if (BRIDGE_BSM.equals(indy.bsm)) {
+			if (kind == HotswapBridge.KIND_CONDITIONAL) {
+				if (!fieldName.equals(indy.name) || indy.desc == null || !indy.desc.endsWith(")V")) return -1;
+				return 1;
+			}
+			return 0;
+		}
+		if (BRIDGE_BSM_EXPECTED.equals(indy.bsm)) {
+			if (kind == HotswapBridge.KIND_CONDITIONAL_EXPECTED) {
+				if (!fieldName.equals(indy.name) || indy.desc == null || !indy.desc.endsWith(")V")) return -1;
+				return 2;
+			}
+			return -1;
+		}
+		return 0;
+	}
+
+	private static void emitBatchStatsFlush(
+	 InsnList out, Type hostType, String fieldName, int statsKind, LabelNode skipLabel) {
+		out.add(new VarInsnNode(Opcodes.LLOAD, BATCH_LOCAL_WRITTEN));
+		out.add(new VarInsnNode(Opcodes.LLOAD, BATCH_LOCAL_SKIPPED));
+		out.add(new InsnNode(Opcodes.LOR));
+		out.add(new InsnNode(Opcodes.LCONST_0));
+		out.add(new InsnNode(Opcodes.LCMP));
+		out.add(new JumpInsnNode(Opcodes.IFEQ, skipLabel));
+		out.add(new LdcInsnNode(hostType));
+		out.add(new LdcInsnNode(fieldName));
+		out.add(new VarInsnNode(Opcodes.LLOAD, BATCH_LOCAL_WRITTEN));
+		out.add(new VarInsnNode(Opcodes.LLOAD, BATCH_LOCAL_SKIPPED));
+		out.add(new MethodInsnNode(
+		 Opcodes.INVOKESTATIC,
+		 BRIDGE_INTERNAL,
+		 statsKind == 1 ? "addConditionalStats" : "addReplayStats",
+		 "(Ljava/lang/Class;Ljava/lang/String;JJ)V",
+		 false));
 	}
 
 	/** 字段名里可能含 {@code . ; [ / < >} 等非法方法名字符（混淆器/字节码注入），替换掉。 */
@@ -3996,12 +4254,17 @@ public class InitFix {
 		// 必须在取 Handle 时就 asType 适配：init$F 的形参是宿主类型，驱动手里只有 Object。
 		BoundInstanceTask[] instanceTasks           = new BoundInstanceTask[plan.instanceTasks().size()];
 		boolean             hasInstanceDependencies = false;
+		MethodType          batchMethodType         = MethodType.methodType(
+		 int.class, Object[].class, int.class, int.class, Throwable[].class);
 		for (int i = 0; i < instanceTasks.length; i++) {
 			FieldPatchTask task = plan.instanceTasks().get(i);
 			MethodHandle handle = h.findStatic(pc, task.methodName(), MethodType.methodType(void.class, host))
 			 .asType(MethodType.methodType(void.class, Object.class));
+			MethodHandle batchHandle = task.batchMethodName() == null
+			 ? null
+			 : h.findStatic(pc, task.batchMethodName(), batchMethodType);
 			instanceTasks[i] = new BoundInstanceTask(task.fieldName(), task.dependencies(), handle,
-			 task.selfOnly());
+			 batchHandle, task.selfOnly());
 			hasInstanceDependencies |= !task.dependencies().isEmpty();
 		}
 
@@ -4399,24 +4662,69 @@ public class InitFix {
 		return canonicalHost.isInstance(instance);
 	}
 
-	private record BoundInstanceTask(String fieldName, Set<String> dependencies, MethodHandle handle,
-	                                 boolean selfOnly) { }
+	record BoundInstanceTask(String fieldName, Set<String> dependencies, MethodHandle handle,
+	                         MethodHandle batchHandle, boolean selfOnly) { }
 
-	private static void runIndependentInstanceTasks(
+	static PatchPlan pendingPlanForTest(Class<?> clazz) {
+		PendingPatch patch = PENDING.get(ClassIdentity.canonicalize(clazz));
+		return patch == null ? null : patch.plan();
+	}
+
+	static byte[] pendingBytesForTest(Class<?> clazz) {
+		PendingPatch patch = PENDING.get(ClassIdentity.canonicalize(clazz));
+		return patch == null ? null : patch.bytes();
+	}
+
+	static void runIndependentInstanceTasks(
 	 Class<?> host, Object[] targets, BoundInstanceTask[] tasks,
 	 Set<String> failedFields, Set<String> skippedFields, Map<String, String> failureReasons) {
 		InstanceFailureBudget budget = new InstanceFailureBudget();
-		if (tasks.length == 1) {
-			BoundInstanceTask single = tasks[0];
-			for (Object target : targets) {
-				executeIndependentTask(host, target, single, budget, failedFields, skippedFields, failureReasons);
+		Throwable[] errOut = null;
+		for (BoundInstanceTask task : tasks) {
+			if (task.batchHandle() != null) {
+				if (errOut == null) errOut = new Throwable[1];
+				runBatchInstanceTask(host, targets, task, budget, errOut,
+				 failedFields, skippedFields, failureReasons);
+			} else {
+				for (Object target : targets) {
+					executeIndependentTask(host, target, task, budget, failedFields, skippedFields, failureReasons);
+				}
 			}
-			return;
 		}
-		for (Object target : targets) {
-			for (BoundInstanceTask task : tasks) {
-				executeIndependentTask(host, target, task, budget, failedFields, skippedFields, failureReasons);
+	}
+
+	private static void runBatchInstanceTask(
+	 Class<?> host, Object[] targets, BoundInstanceTask task, InstanceFailureBudget budget,
+	 Throwable[] errOut, Set<String> failedFields, Set<String> skippedFields,
+	 Map<String, String> failureReasons) {
+		int pos = 0;
+		while (pos < targets.length) {
+			if (budget.exhausted(task.fieldName())) {
+				budget.recordGiveUp(task.fieldName(), skippedFields, failureReasons);
+				return;
 			}
+			errOut[0] = null;
+			int failedIdx;
+			try {
+				failedIdx = (int) task.batchHandle().invokeExact(targets, pos, targets.length, errOut);
+			} catch (LinkageError le) {
+				if (!isolatableLinkFailure(le)) throw le;
+				recordTaskFailure(host, task.fieldName(), le, failedFields, failureReasons);
+				budget.recordFailure(task.fieldName());
+				pos++;
+				continue;
+			} catch (Throwable t) {
+				recordTaskFailure(host, task.fieldName(), t, failedFields, failureReasons);
+				budget.recordFailure(task.fieldName());
+				pos++;
+				continue;
+			}
+			if (failedIdx < 0) return;
+			Throwable failure = errOut[0];
+			if (failure instanceof LinkageError le && !isolatableLinkFailure(le)) throw le;
+			recordTaskFailure(host, task.fieldName(), failure, failedFields, failureReasons);
+			budget.recordFailure(task.fieldName());
+			pos = failedIdx + 1;
 		}
 	}
 

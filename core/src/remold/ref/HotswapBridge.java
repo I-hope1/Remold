@@ -88,6 +88,19 @@ public final class HotswapBridge {
 	 */
 	public static final int KIND_CONDITIONAL_EXPECTED = 3;
 
+	/**
+	 * 批循环专用的条件 CAS 写：与 {@link #KIND_CONDITIONAL} 同构，但直接返回 {@code boolean}
+	 * 写入结果而不逐实例调用 {@code LongAdder}；由生成的批循环在末次通过
+	 * {@link #addConditionalStats} 统一汇总。
+	 */
+	public static final int KIND_CONDITIONAL_BATCH = 4;
+
+	/**
+	 * 批循环专用的 L1 重放条件 CAS 写：直接返回 {@code boolean}，由批循环汇总至
+	 * {@link #addReplayStats}。
+	 */
+	public static final int KIND_CONDITIONAL_EXPECTED_BATCH = 5;
+
 	private static final Unsafe UNSAFE      = Reflect.UNSAFE;
 	private static final Lookup IMPL_LOOKUP = Reflect.IMPL_LOOKUP;
 
@@ -157,6 +170,15 @@ public final class HotswapBridge {
 		 k -> new LongAdder[]{new LongAdder(), new LongAdder()});
 	}
 
+	/** 批循环结束/中止时一次性累加该字段的写入与跳过次数，避免逐实例递增 {@code LongAdder}。 */
+	public static void addConditionalStats(
+	 Class<?> owner, String fieldName, long written, long skipped) {
+		if (written == 0L && skipped == 0L) return;
+		LongAdder[] counters = countersFor(owner, fieldName);
+		if (written != 0L) counters[0].add(written);
+		if (skipped != 0L) counters[1].add(skipped);
+	}
+
 	/**
 	 * 测试探针：命中的 {@code "owner#field"} 在<b>链接期</b>强制失败，用于模拟
 	 * indy bootstrap 抛 {@code BootstrapMethodError}（例如 {@code findField} 解析失败）。
@@ -224,6 +246,15 @@ public final class HotswapBridge {
 	private static LongAdder[] replayCountersFor(Class<?> owner, String fieldName) {
 		return REPLAY_STATS.computeIfAbsent(owner.getName() + "#" + fieldName,
 		 k -> new LongAdder[]{new LongAdder(), new LongAdder()});
+	}
+
+	/** 批循环结束/中止时一次性累加该字段的重放写入与跳过次数。 */
+	public static void addReplayStats(
+	 Class<?> owner, String fieldName, long written, long skipped) {
+		if (written == 0L && skipped == 0L) return;
+		LongAdder[] counters = replayCountersFor(owner, fieldName);
+		if (written != 0L) counters[0].add(written);
+		if (skipped != 0L) counters[1].add(skipped);
 	}
 
 	/** Drain replay-write statistics ({@code "owner#field"} -> {@code [written, skipped]}). */
@@ -360,9 +391,9 @@ public final class HotswapBridge {
 
 	private static AtomicReferenceArray<MethodHandle> putterTable(int kind) {
 		return switch (kind) {
-			case KIND_CONDITIONAL -> CONDITIONAL_PUTTERS;
+			case KIND_CONDITIONAL, KIND_CONDITIONAL_BATCH -> CONDITIONAL_PUTTERS;
 			case KIND_FORCE -> FORCE_PUTTERS;
-			case KIND_CONDITIONAL_EXPECTED -> EXPECTED_PUTTERS;
+			case KIND_CONDITIONAL_EXPECTED, KIND_CONDITIONAL_EXPECTED_BATCH -> EXPECTED_PUTTERS;
 			default -> throw new IllegalArgumentException("unknown putter kind: " + kind);
 		};
 	}
@@ -671,7 +702,8 @@ public final class HotswapBridge {
 		try {
 			return switch (kind) {
 				case KIND_PROTECTED -> protectedCallSite(caller, name, callSiteType, opcode, owner, host);
-				case KIND_CONDITIONAL -> conditionalFieldCallSite(caller, name, callSiteType, opcode, owner);
+				case KIND_CONDITIONAL -> conditionalFieldCallSite(caller, name, callSiteType, opcode, owner, true);
+				case KIND_CONDITIONAL_BATCH -> conditionalFieldCallSite(caller, name, callSiteType, opcode, owner, false);
 				case KIND_FORCE -> forceFieldCallSite(caller, name, callSiteType, opcode, owner);
 				default -> throw new IllegalArgumentException("unknown bridge kind: " + kind);
 			};
@@ -702,10 +734,12 @@ public final class HotswapBridge {
 	 Object expected
 	) {
 		try {
-			if (kind != KIND_CONDITIONAL_EXPECTED) {
+			if (kind != KIND_CONDITIONAL_EXPECTED && kind != KIND_CONDITIONAL_EXPECTED_BATCH) {
 				throw new IllegalArgumentException("unexpected kind for expected-CAS bootstrap: " + kind);
 			}
-			return conditionalExpectedCallSite(caller, name, callSiteType, opcode, owner, expected);
+			return conditionalExpectedCallSite(
+			 caller, name, callSiteType, opcode, owner, expected,
+			 kind == KIND_CONDITIONAL_EXPECTED);
 		} catch (BootstrapMethodError bme) {
 			throw bme;
 		} catch (Throwable t) {
@@ -717,7 +751,7 @@ public final class HotswapBridge {
 
 	private static CallSite conditionalExpectedCallSite(
 	 Lookup caller, String fieldName, MethodType callSiteType, int opcode,
-	 Class<?> owner, Object expected
+	 Class<?> owner, Object expected, boolean recordCounters
 	) throws Throwable {
 		boolean isStatic = opcode == Opcodes.PUTSTATIC;
 
@@ -742,9 +776,11 @@ public final class HotswapBridge {
 			writer = MethodHandles.insertArguments(writer, 0, base);
 		}
 
-		LongAdder[] counters = replayCountersFor(owner, fieldName);
-		writer = MethodHandles.filterReturnValue(writer,
-		 MethodHandles.insertArguments(RECORD_REPLAY, 0, (Object) counters));
+		if (recordCounters) {
+			LongAdder[] counters = replayCountersFor(owner, fieldName);
+			writer = MethodHandles.filterReturnValue(writer,
+			 MethodHandles.insertArguments(RECORD_REPLAY, 0, (Object) counters));
+		}
 
 		return new ConstantCallSite(writer.asType(callSiteType));
 	}
@@ -770,7 +806,8 @@ public final class HotswapBridge {
 	// ==================== 字段条件 CAS 写 ====================
 
 	private static CallSite conditionalFieldCallSite(
-	 Lookup caller, String fieldName, MethodType callSiteType, int opcode, Class<?> owner
+	 Lookup caller, String fieldName, MethodType callSiteType, int opcode,
+	 Class<?> owner, boolean recordCounters
 	) throws Throwable {
 		boolean isStatic = opcode == Opcodes.PUTSTATIC;
 
@@ -790,11 +827,13 @@ public final class HotswapBridge {
 			writer = MethodHandles.insertArguments(writer, 0, base);
 		}
 
-		// 接上计数器：把条件 CAS 的 boolean 结果记进 [written, skipped]。
-		// 这是"跳过"唯一的出口 —— 不接的话，字段因已有值而未补的事实对用户完全不可见。
-		LongAdder[] counters = countersFor(owner, fieldName);
-		writer = MethodHandles.filterReturnValue(writer,
-		 MethodHandles.insertArguments(RECORD_CONDITIONAL, 0, (Object) counters));
+		if (recordCounters) {
+			// 接上计数器：把条件 CAS 的 boolean 结果记进 [written, skipped]。
+			// 这是"跳过"唯一的出口 —— 不接的话，字段因已有值而未补的事实对用户完全不可见。
+			LongAdder[] counters = countersFor(owner, fieldName);
+			writer = MethodHandles.filterReturnValue(writer,
+			 MethodHandles.insertArguments(RECORD_CONDITIONAL, 0, (Object) counters));
+		}
 
 		return new ConstantCallSite(writer.asType(callSiteType));
 	}

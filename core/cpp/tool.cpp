@@ -56,21 +56,6 @@ public:
 #include <type_traits>
 #include <utility>
 
-/** 条件互斥锁守卫：传入 nullptr 时不加锁，供临时 Env 免锁路径共用 RAII 析构。 */
-class OptionalNativeLockGuard {
-    NativeMutex* mutex{nullptr};
-public:
-    OptionalNativeLockGuard() = default;
-    explicit OptionalNativeLockGuard(NativeMutex* m) : mutex(m) {
-        if (mutex) mutex->lock();
-    }
-    ~OptionalNativeLockGuard() {
-        if (mutex) mutex->unlock();
-    }
-    OptionalNativeLockGuard(const OptionalNativeLockGuard&) = delete;
-    OptionalNativeLockGuard& operator=(const OptionalNativeLockGuard&) = delete;
-};
-
 /** 万能 Scope Guard 实现，利用析构函数在离开作用域时执行清理逻辑 */
 template <typename F>
 class ScopeGuard {
@@ -234,26 +219,16 @@ struct InstanceQueryTimings {
 /** 全局缓存的 JavaVM 原子引用（供 getOrAcquireJvmti 与临时 jvmtiEnv 共用）。 */
 static std::atomic<JavaVM*> g_jvm{nullptr};
 
-/** 为单次堆枚举创建独占的临时 jvmtiEnv，结束后 DisposeEnvironment 整表释放 tag，免去逐对象 SetTag(0)。 */
-static jvmtiEnv* acquireTempTaggingJvmti(JNIEnv* env) {
-    JavaVM* vm = g_jvm.load(std::memory_order_acquire);
-    if (!vm) {
-        JavaVM* raw_vm = nullptr;
-        if (env->GetJavaVM(&raw_vm) == JNI_OK && raw_vm) {
-            vm = raw_vm;
-        }
+/**
+ * 复用已预热标签表的常驻 jvmtiEnv，通过一次 VM 堆遍历清空本次打上的 tag。
+ * 相比逐对象 SetTag(0) 或每轮重建并销毁临时 jvmtiEnv，既避免每轮重建 TagHashmap 带来的
+ * rehash 惩罚，也避免逐对象加锁释放 OopStorage。
+ */
+static void clearTaggedClass(jvmtiEnv* jvmti, jclass klass, jlong tag) {
+    if (jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_TAGGED, RollbackClassTagCallback, &tag)
+        != JVMTI_ERROR_NONE) {
+        clearTagFromHeap(jvmti, tag);
     }
-    if (!vm) return nullptr;
-    void* raw_env = nullptr;
-    if (vm->GetEnv(&raw_env, JVMTI_VERSION_1_2) != JNI_OK || !raw_env) {
-        return nullptr;
-    }
-    auto* temp = reinterpret_cast<jvmtiEnv*>(raw_env);
-    if (ensureCapabilities(temp) != JVMTI_ERROR_NONE) {
-        temp->DisposeEnvironment();
-        return nullptr;
-    }
-    return temp;
 }
 
 /**
@@ -261,34 +236,25 @@ static jvmtiEnv* acquireTempTaggingJvmti(JNIEnv* env) {
  * 包含多态子类与接口实现，包含不可达但尚未被 GC 物理回收的对象。
  */
 static std::expected<jobjectArray, jvmtiError>
-getInstancesInternal(jvmtiEnv* fallback_jvmti, JNIEnv* env, jclass klass, InstanceQueryTimings* timings = nullptr) {
+getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTimings* timings = nullptr) {
     const jlong t_start = timings ? monotonicNowNs() : 0;
-    if (auto err = validateInstanceQueryClass(fallback_jvmti, env, klass); err != JVMTI_ERROR_NONE) {
+    if (auto err = validateInstanceQueryClass(jvmti, env, klass); err != JVMTI_ERROR_NONE) {
         return std::unexpected(err);
     }
     const jlong t_after_validate = timings ? monotonicNowNs() : 0;
     if (timings) timings->validate_ns = t_after_validate - t_start;
 
-    jvmtiEnv* temp_jvmti = acquireTempTaggingJvmti(env);
-    const bool owns_temp = temp_jvmti != nullptr;
-    jvmtiEnv* active_jvmti = owns_temp ? temp_jvmti : fallback_jvmti;
+    NativeLockGuard lock(g_heap_mutex);
 
-    // 仅在使用共享 fallback_jvmti 时才需要全局堆互斥锁；临时 env 拥有独立 TagMap，销毁即整体清空。
-    OptionalNativeLockGuard heap_lock(owns_temp ? nullptr : &g_heap_mutex);
-
-    jlong tag = owns_temp ? 1 : allocateTagPair().first;
+    jlong tag = allocateTagPair().first;
     jint count = 0;
     jobject* instances = nullptr;
     bool has_local_frame = false;
 
     SCOPE_EXIT([&] {
         if (instances) {
-            active_jvmti->Deallocate(reinterpret_cast<unsigned char*>(instances));
+            jvmti->Deallocate(reinterpret_cast<unsigned char*>(instances));
             instances = nullptr;
-        }
-        if (temp_jvmti) {
-            temp_jvmti->DisposeEnvironment();
-            temp_jvmti = nullptr;
         }
         if (has_local_frame) {
             env->PopLocalFrame(nullptr);
@@ -298,11 +264,9 @@ getInstancesInternal(jvmtiEnv* fallback_jvmti, JNIEnv* env, jclass klass, Instan
 
     const jlong t_before_iterate = timings ? monotonicNowNs() : 0;
     // 先给目标类及其所有子类、接口实现的未回收实例打上 tag
-    if (auto e = active_jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_EITHER, HeapObjectCallback, &tag);
+    if (auto e = jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_EITHER, HeapObjectCallback, &tag);
         e != JVMTI_ERROR_NONE) {
-        if (!owns_temp) {
-            active_jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_TAGGED, RollbackClassTagCallback, &tag);
-        }
+        clearTaggedClass(jvmti, klass, tag);
         return std::unexpected(e);
     }
     const jlong t_after_iterate = timings ? monotonicNowNs() : 0;
@@ -316,11 +280,9 @@ getInstancesInternal(jvmtiEnv* fallback_jvmti, JNIEnv* env, jclass klass, Instan
     }
 
     // 提取所有打上标记的对象句柄
-    if (auto e = active_jvmti->GetObjectsWithTags(1, &tag, &count, &instances, nullptr);
+    if (auto e = jvmti->GetObjectsWithTags(1, &tag, &count, &instances, nullptr);
         e != JVMTI_ERROR_NONE) {
-        if (!owns_temp) {
-            active_jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_TAGGED, RollbackClassTagCallback, &tag);
-        }
+        clearTaggedClass(jvmti, klass, tag);
         return std::unexpected(e);
     }
     const jlong t_after_collect = timings ? monotonicNowNs() : 0;
@@ -335,20 +297,22 @@ getInstancesInternal(jvmtiEnv* fallback_jvmti, JNIEnv* env, jclass klass, Instan
     if (timings) timings->alloc_ns = t_after_alloc - t_after_collect;
     if (!result) {
         env->ExceptionClear();
-        if (!owns_temp || !has_local_frame) {
+        if (!has_local_frame) {
             for (jint i = 0; i < count; ++i) {
-                if (!owns_temp) active_jvmti->SetTag(instances[i], 0);
-                if (!has_local_frame) env->DeleteLocalRef(instances[i]);
+                env->DeleteLocalRef(instances[i]);
             }
+        }
+        if (count > 0) {
+            clearTaggedClass(jvmti, klass, tag);
         }
         return std::unexpected(JVMTI_ERROR_OUT_OF_MEMORY);
     }
 
     // validateInstanceQueryClass 已前置拦截基本类型与数组类，IterateOverInstancesOfClass 仅返回
-    // klass 及其子类型/实现类；省去循环内冗余的 IsInstanceOf / ExceptionCheck。
-    // 使用临时 jvmtiEnv + PushLocalFrame 时，连 SetTag(0) 与 DeleteLocalRef 也一并由退出阶段整块释放。
+    // klass 及其子类型/实现类；进入独立局部帧后循环内省略 IsInstanceOf / ExceptionCheck / DeleteLocalRef，
+    // tag 统一由后面的单次 JVMTI_HEAP_OBJECT_TAGGED 遍历清空。
     jsize idx = 0;
-    if (owns_temp && has_local_frame) {
+    if (has_local_frame) {
         for (jint i = 0; i < count; ++i) {
             jobject o = instances[i];
             if (o) {
@@ -369,8 +333,7 @@ getInstancesInternal(jvmtiEnv* fallback_jvmti, JNIEnv* env, jclass klass, Instan
                     ++idx;
                 }
             }
-            if (!owns_temp) active_jvmti->SetTag(o, 0);
-            if (!has_local_frame) env->DeleteLocalRef(o);
+            env->DeleteLocalRef(o);
         }
     }
     const jlong t_after_fill = timings ? monotonicNowNs() : 0;
@@ -402,12 +365,11 @@ getInstancesInternal(jvmtiEnv* fallback_jvmti, JNIEnv* env, jclass klass, Instan
     }
 
     if (instances) {
-        active_jvmti->Deallocate(reinterpret_cast<unsigned char*>(instances));
+        jvmti->Deallocate(reinterpret_cast<unsigned char*>(instances));
         instances = nullptr;
     }
-    if (temp_jvmti) {
-        temp_jvmti->DisposeEnvironment();
-        temp_jvmti = nullptr;
+    if (count > 0) {
+        clearTaggedClass(jvmti, klass, tag);
     }
     if (has_local_frame) {
         final_result = reinterpret_cast<jobjectArray>(env->PopLocalFrame(final_result));

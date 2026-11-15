@@ -113,7 +113,7 @@ remold {
 | `-Dremold.agent.file_shake_ms` | `800` | Class/jar 变动防抖窗口（Gradle DSL：`fileShakeMs`） |
 | `-Dremold.agent.asset_shake_ms` | `250` | 资源/配置变动防抖窗口，独立于 Class 窗口（Gradle DSL：`assetShakeMs`） |
 | `-Dremold.agent.perf_log` | `false` | 打印各阶段热点与耗时摘要日志（Gradle DSL：`perfLog`） |
-| `-Dremold.agent.diff_log` | `false` | 打印字节码成员/指令级结构差异调试日志（Gradle DSL：`diffLog`） |
+| `-Dremold.agent.diff_log` | `true` | 打印字节码成员/指令级结构差异调试日志（设为 `false` 可关闭；Gradle DSL：`diffLog`） |
 | `-Dremold.path.libtool` | 自动解析 | 指定本地 `libtool` 原生库绝对路径（用于跳过内嵌释放；Gradle DSL：`libtoolPath`） |
 
 其余安全门开关（`layout_gate`、`anon_align`、`anon_strict`、`local_class_guard`、`offset_strict` 等）见 [`AGENTS.md`](AGENTS.md) 与 [`docs/status.md`](docs/status.md)。
@@ -147,9 +147,9 @@ remold {
 | 主题 | 文档 |
 |:--|:--|
 | Mixin 热更子系统（8 篇：类加载器权威 / 准入与覆盖层 / 重织入与成员对齐 / 结构契约 / 合成类闸门 / 走查 / 运行期诊断 / 决策台账） | [`docs/mixin/01..08`](docs/mixin/01-invariants-and-classloader-authority.md) |
-| 匿名类拓扑对齐（准入、层级交错流水线、置信梯队、布局门、Lambda 捕获桥） | [`docs/topology/01..09`](docs/topology/01-invariants-and-remapping.md) |
+| 匿名类拓扑对齐（准入、层级交错流水线、置信梯队、布局门、Lambda 捕获桥、枚举扩展边界、孤儿体保留、JIT 清空尾延迟） | [`docs/topology/01..12`](docs/topology/01-invariants-and-remapping.md) |
 | InitFix 安全门、闭包与台账、两阶段设计 | [`docs/initfix/01..13`](docs/initfix/01-safety-gate.md) |
-| 物理偏移与第三方缓存驱逐 | [`docs/offset/01`](docs/offset/01-offset-and-reflection-cache.md) |
+| 物理偏移、继承字段漂移防护与第三方缓存驱逐 | [`docs/offset/01..02`](docs/offset/01-offset-and-reflection-cache.md) |
 | 逐项实现状态、验收证据、已知风险（唯一真相源） | [`docs/status.md`](docs/status.md) |
 
 ---
@@ -195,7 +195,7 @@ public class PlayerService {
 |:--|:--|:--|
 | **裸 JBR (DCEVM) + MixinAgent** | 在 VM 层替换类结构与方法体，重织入基础 Mixin 修改 | 不给存量实例补新字段初值；不对齐顺移的 `lambda$*` 与 `$1`/`$2`；Mixin 新增 `@Inject` / `@Unique` 常因旧 `ClassInfo` 未同步被拒 |
 | **HotswapAgent** | 面向 Spring / Hibernate / Tomcat 等企业容器做通用类与插件重载 | 未针对 SpongePowered Mixin 双基线重织入、ModLauncher 跨类加载器隔离、构造器逆向切片补初值及 Lambda 槽位重映射做专门适配 |
-| **Hotwire**（仅 Fabric，源码未公开，参考 [`v0.6.0` 文档](https://github.com/dearIrene/hotwire-public)） | 面向玩家在游戏内动态开关/卸载模组（依赖 AI 辅助为上百个常用模组编写的清理逻辑）；普通 JVM 下拆出 `Sidecar` + `WeakMap` 模拟新成员并在方法入口插桩 `Tripwire`；JBR 下走原生重定义 | 据其公开文档，未做存量对象初值逆向切片回填与编译期 Lambda/匿名类序号对齐；状态不一致抛错时靠异常拦截弹窗并“软重启整个模组”（重跑初始化）恢复 |
+| **Hotwire**（以 Fabric / Ornithe 为主，已开源，Modified PolyForm Strict 1.0.0，参考[公开仓库](https://github.com/dearIrene/hotwire-public)） | 面向玩家在游戏内动态开关、安装/更新或卸载模组（内置 Modrinth 浏览与崩溃自动停用隔离），并提供开发模式（`hotwire/dev` 监听、`F8` 调试窗与 JBR 原生重定义）；普通 JVM 下以隔离类加载器重跑 Mixin，拆出 `Sidecar`（nestmate 伴生类）+ `WeakMap` 持有者并以 `invokedynamic` 重写引用，同时在方法入口插桩 `Tripwire` | 定位偏模组级运行期启停、隔离与开发重载，不直接修改磁盘 `.jar` 本体（更新在退出后落盘）；据公开仓库说明，未针对代码热演进提供构造器逆向切片回填存量对象初值与编译期 Lambda/匿名类序号重映射，遇不可安全切换的冲突时拒绝并隔离 |
 | **NeoHotModInjector**（仅 NeoForge 客户端，参考[公开仓库](https://github.com/yiyuyan/NeoHotModInjector)） | 运行期将游戏类访问权限改为 `public`，经跳板转发（`TRAMPOLINE`）或特定版本 DLL 改内存标志（`NATIVE`）往客户端注入 `.jar` | 不支持模组卸载与注册表变更；不给已存在的实例补新字段初值（目标类若已实例化需在进世界前注入） |
 | **Remold**（开源，支持 Fabric / Quilt / Forge / NeoForge / Mindustry） | 在 JBR 下原位替换字节码，两阶段重定义 + 构造器切片给老对象补初值，对齐漂移的 Lambda 与匿名类，跨加载器重织入 Mixin | 不做玩家端整包模组卸载，不插桩业务方法或用 `WeakMap` 模拟字段；结构变更依赖 JBR，遇到无法安全回填或存在存活读者的破坏性改动会拒绝重定义并提示重启 |
 
@@ -206,10 +206,10 @@ public class PlayerService {
 哪些改动还是得重启，完整台账在 [`docs/status.md`](docs/status.md) 里有持续审计，主要边界如下：
 
 1. **复杂字段初值切片**：构造器里带分支（`if`/`switch`）、循环、`try-catch` 或外部可变 Builder 的字段初始化不会自动回填，会被安全门拒绝并记入 `FieldLedger`。
-2. **删改成员与继承变更**：修改父类/接口、修改字段类型、或者删字段/删方法时堆里还有存活实例（或批次外还有读者），会拒绝重定义。
+2. **删改成员与继承变更**：修改父类（非 JBR/DCEVM 下还包括增删接口）、修改字段类型且无法安全豁免，或者删字段/删方法时批次外仍有读者（或读者扫描未完成），会拒绝重定义。
 3. **局部类深层嵌套与常量折叠**：具名局部类里面再套匿名类（如 `Foo$1Helper$1`）在特定位移下仍走原名直通；已经被 `javac` 内联或被 JIT C2 常量折叠的 `static final` 改值无法单靠写内存逆转。
 4. **孤儿 Lambda 逃逸**：删掉的 Lambda 只有在注册了 `OrphanBreakerPredicate` 的框架分发点才能抛错触发注销，普通业务线程自己持有的 `CallSite` 只能降级返回零值。
-5. **外部 JDWP 通道与微小窗口**：直接在 IDE 里点 "Reload Changed Classes"（走外部 JDWP）或调 `redefineDynamic` 仍是单阶段重定义，存在读穿窗口；JVMTI 堆快照到补丁落盘之间也有微小的并发新建对象窗口。
+5. **外部 JDWP 通道与微小窗口**：直接在 IDE 里点 "Reload Changed Classes"（走外部 JDWP）仍是单阶段重定义，存在读穿窗口（agent 批次与 `redefineDynamic` 默认走两阶段）；JVMTI 堆快照到补丁落盘之间也有微小的并发新建对象窗口。
 6. **NeoForge 26.x（FML 10+）与生产 installer**：NeoForge 21.1 已实测跑通，但移除了 ModLauncher 的 26.x 尚未适配；生产 installer 启动路径下的模块 `--add-opens` 需求未测。
 7. **`plugin` 与 `core` 必须同版本发布**：插件与内核版本错位会退化为 `NoSuchMethodError`（有逐插件 `catch` 与定向日志，但不受支持）。
 8. **Mixin 合成匿名类的成员结构变化一律拒绝**：`<Target>$Anonymous$<hash>` 的捕获字段/`<init>` 描述符一旦变化，无论堆上有无实例都会被拒绝，并连坐宿主目标类本轮不重定义（避免"宿主换新 `<init>`、合成类还是旧的"分裂态）。同一份候选不会自动重试；把捕获列表还原到与已加载类一致、只改方法体即可在同一会话内继续热更，否则需重启或改用 `@RemoldReinit` / lambda 承载状态。`ForgeMixinHotSwap` 尚未接入内部类热更闭环。

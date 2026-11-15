@@ -93,6 +93,12 @@ If you bypass the Gradle plugin and configure the VM arguments by hand in IDEA o
 -javaagent:/path/to/remold-agent.jar=build/classes/java/main;build/classes/kotlin/main
 ```
 
+> **If round 2+ hot-reloads suddenly slow down (1–4 s):**
+> Under `-XX:+AllowEnhancedClassRedefinition`, JBR flushes JIT code caches on every redefinition and waits for in-flight C2 compilations to finish before the next round.
+> - **Recommended for dev: add `-XX:TieredStopAtLevel=1`** (C1 only, no waiting for C2): large hierarchies like `LivingEntity` with 100+ subclasses stay around ~400 ms; together with IDEA `Ctrl + Shift + F9` single-file compilation, you can lower `fileShakeMs` to `200~300`. Trade-off: without C2, peak frame rate is slightly lower, which is usually fine during development.
+> - **For method-body-only edits without structural or Mixin changes**: you can omit `-XX:+AllowEnhancedClassRedefinition` altogether (~60 ms per reload; structural edits will prompt for a restart).
+> - Root-cause analysis and benchmarks: [`docs/topology/12-jbr-dcevm-jit-drain-tail-latency.md`](docs/topology/12-jbr-dcevm-jit-drain-tail-latency.md).
+
 ### System properties
 
 The following JVM system properties can be overridden as needed (the Gradle plugin forwards the matching DSL entries):
@@ -107,7 +113,7 @@ The following JVM system properties can be overridden as needed (the Gradle plug
 | `-Dremold.agent.file_shake_ms` | `800` | Class/jar debounce window (Gradle DSL: `fileShakeMs`) |
 | `-Dremold.agent.asset_shake_ms` | `250` | Resource/config debounce window, independent of the Class window (Gradle DSL: `assetShakeMs`) |
 | `-Dremold.agent.perf_log` | `false` | Emit per-stage hotspot and timing summary logs (Gradle DSL: `perfLog`) |
-| `-Dremold.agent.diff_log` | `false` | Emit verbose structural bytecode diff debug logs (Gradle DSL: `diffLog`) |
+| `-Dremold.agent.diff_log` | `true` | Emit verbose structural bytecode diff debug logs (set `false` to disable; Gradle DSL: `diffLog`) |
 | `-Dremold.path.libtool` | auto-resolved | Explicit absolute path to the native `libtool` library (Gradle DSL: `libtoolPath`) |
 
 The remaining safety-gate switches (`layout_gate`, `anon_align`, `anon_strict`, `local_class_guard`, `offset_strict`, …) are documented in [`AGENTS.md`](AGENTS.md) and [`docs/status.md`](docs/status.md).
@@ -141,9 +147,9 @@ Implementation notes:
 | Topic | Document |
 |:--|:--|
 | Mixin hot-swap subsystem (8 parts: classloader authority / admission & overlay / re-weave & member alignment / reload structure contracts / synthetic gate / walkthrough / runtime diagnostics / decision ledger) | [`docs/mixin/01..08`](docs/mixin/01-invariants-and-classloader-authority.md) |
-| Anonymous-class topology alignment (admission, cascading pipeline, confidence tiers, layout gate, lambda capture bridge) | [`docs/topology/01..09`](docs/topology/01-invariants-and-remapping.md) |
+| Anonymous-class topology alignment (admission, cascading pipeline, confidence tiers, layout gate, lambda capture bridge, enum-append boundary, orphan body retention, JIT drain latency) | [`docs/topology/01..12`](docs/topology/01-invariants-and-remapping.md) |
 | InitFix safety gates, closure and ledger, two-phase design | [`docs/initfix/01..13`](docs/initfix/01-safety-gate.md) |
-| Physical offsets and third-party cache eviction | [`docs/offset/01`](docs/offset/01-offset-and-reflection-cache.md) |
+| Physical offsets, inherited-field drift guard, and third-party cache eviction | [`docs/offset/01..02`](docs/offset/01-offset-and-reflection-cache.md) |
 | Per-feature implementation status, acceptance evidence, known risks (single source of truth) | [`docs/status.md`](docs/status.md) |
 
 ---
@@ -189,7 +195,7 @@ Two semantic details worth knowing:
 |:--|:--|:--|
 | **Plain JBR (DCEVM) + MixinAgent** | Replaces class structure and method bodies at the VM level, re-weaves basic Mixin edits | No initial-value backfill for existing instances; no realignment of shifted `lambda$*` and `$1`/`$2`; newly added `@Inject` / `@Unique` members are often rejected because the old `ClassInfo` is not synced |
 | **HotswapAgent** | Generic class and plugin reload for enterprise containers such as Spring / Hibernate / Tomcat | No specific handling for SpongePowered Mixin dual-baseline re-weaving, ModLauncher cross-classloader isolation, constructor-slice backfill or lambda slot remapping |
-| **Hotwire** (Fabric only, source closed, see the [`v0.6.0` docs](https://github.com/dearIrene/hotwire-public)) | Lets players toggle/unload mods in game (relying on AI-assisted cleanup logic for hundreds of popular mods); on a plain JVM it splits out `Sidecar` + `WeakMap` to simulate new members and instruments a `Tripwire` at method entry; on JBR it uses native redefinition | Per its public docs, no reverse-sliced initial-value backfill for existing objects and no compile-time lambda/anonymous-class ordinal alignment; on inconsistent state it intercepts the exception, shows a dialog and "soft-restarts the whole mod" (re-running initialisation) |
+| **Hotwire** (primarily Fabric / Ornithe, open source under Modified PolyForm Strict 1.0.0, see the [public repository](https://github.com/dearIrene/hotwire-public)) | Lets players toggle, add, update or unload mods in game (with a built-in Modrinth browser and crash auto-disable isolation), plus a dev mode (`hotwire/dev`, `F8` window and native JBR redefinition); on a plain JVM it re-runs Mixin in an isolated classloader, splits new methods into nestmate `Sidecar` classes and new fields into `WeakMap` holders via `invokedynamic`, and instruments `Tripwire` probes at method entry | Focused on mod-level live toggling, isolation and jar/dev reloading rather than leaving mod `.jar`s mutated on disk (updates apply on exit); per its public repository docs, it does not provide constructor-sliced initial-value backfill for surviving instances or compile-time lambda/anonymous-class ordinal remapping, and rejects/isolates conflicting toggles |
 | **NeoHotModInjector** (NeoForge client only, see the [public repository](https://github.com/yiyuyan/NeoHotModInjector)) | Makes game classes `public` at runtime and injects `.jar`s into the client through trampolines (`TRAMPOLINE`) or version-specific DLL memory-flag patching (`NATIVE`) | No mod unloading or registry changes; no initial-value backfill for already existing instances (target classes must be injected before they are instantiated) |
 | **Remold** (open source; Fabric / Quilt / Forge / NeoForge / Mindustry) | Swaps bytecode in place on JBR, two-phase redefine plus constructor slicing to backfill old objects, aligns drifting lambdas and anonymous classes, re-weaves Mixin across classloaders | No player-side whole-mod unloading, no business-method instrumentation or `WeakMap` field simulation; structural changes depend on JBR, and destructive edits that cannot be safely backfilled or that still have live readers are refused with a restart prompt |
 
@@ -200,10 +206,10 @@ Two semantic details worth knowing:
 Some edits still require a restart. The full, continuously audited ledger lives in [`docs/status.md`](docs/status.md); the main boundaries are:
 
 1. **Complex field initializers.** Field initialisers whose constructors contain branches (`if`/`switch`), loops, `try-catch` or an external mutable builder are not backfilled automatically; they are refused by the safety gate and recorded in `FieldLedger`.
-2. **Member deletion and hierarchy changes.** Changing a superclass or interface, changing a field type, or deleting a field/method while live instances exist (or out-of-batch readers remain) results in a refusal.
+2. **Member deletion and hierarchy changes.** Changing a superclass (or changing interfaces on a plain JVM without enhanced redefinition), changing a field type without a safe waiver, or deleting a field/method while out-of-batch readers remain (or reader scanning is incomplete) results in a refusal.
 3. **Deeply nested local classes and constant folding.** A named local class that itself contains an anonymous class (e.g. `Foo$1Helper$1`) still passes through by its original name at certain offsets; a `static final` whose value was inlined by `javac` or constant-folded by JIT C2 cannot be reversed by writing memory alone.
 4. **Escaping orphan lambdas.** A deleted lambda can only throw at framework dispatch points that registered an `OrphanBreakerPredicate`; a `CallSite` held by an ordinary business thread can only degrade to returning zero values.
-5. **External JDWP channel and small windows.** Clicking "Reload Changed Classes" in the IDE (external JDWP) or calling `redefineDynamic` still performs a single-phase redefine with its read-through window; there is also a small window for concurrently created objects between the JVMTI heap snapshot and the patch landing.
+5. **External JDWP channel and small windows.** Clicking "Reload Changed Classes" in the IDE (external JDWP) still performs a single-phase redefine with its read-through window (agent batches and `redefineDynamic` default to two-phase); there is also a small window for concurrently created objects between the JVMTI heap snapshot and the patch landing.
 6. **NeoForge 26.x (FML 10+) and the production installer.** NeoForge 21.1 is verified end-to-end, but 26.x, which removed ModLauncher, is not adapted; the module `--add-opens` requirements under the production installer launch path are untested.
 7. **`plugin` and `core` must be released together.** A version skew between plugin and kernel degrades to `NoSuchMethodError` (there is a per-plugin `catch` and targeted logging, but it is unsupported).
 8. **Mixin synthetic anonymous classes cannot change member structure at all.** Once the captured fields or `<init>` descriptors of `<Target>$Anonymous$<hash>` change, the edit is refused regardless of whether instances exist, and the host target class is aborted for that round (avoiding a split state where the host calls a new `<init>` while the synthetic class is still the old one). The same candidate is not retried automatically; restoring the capture list to match the loaded class and editing only method bodies lets hot reload continue in the same session, otherwise restart or carry the state in `@RemoldReinit` / a lambda. `ForgeMixinHotSwap` is not yet wired into the inner-class hot-swap closed loop.

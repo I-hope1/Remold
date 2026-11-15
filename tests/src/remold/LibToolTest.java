@@ -3,7 +3,9 @@ package remold;
 import org.junit.jupiter.api.Test;
 import remold.util.LibTool;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -102,5 +104,51 @@ public class LibToolTest {
 	@Test
 	void clinitAutomaticallyInitializesLibTool() {
 		assertTrue(LibTool.initialized(), "LibTool static initializer must initialize native library automatically");
+	}
+
+	@Test
+	void perfLogEmitsPhaseBreakdownForGetInstances() {
+		if (!LibTool.initialized()) {
+			LibTool.init();
+		}
+		TargetDummy a = new TargetDummy("a");
+		TargetDummy b = new TargetDummy("b");
+		List<String> infos = new ArrayList<>();
+		RemoldAgent.Logger savedLogger = RemoldAgent.logger;
+		boolean savedPerfLog = RemoldAgent.PERF_LOG;
+		try {
+			RemoldAgent.logger = new RemoldAgent.Logger() {
+				@Override public void log(String msg) {}
+				@Override public void info(String msg) { infos.add(msg); }
+				@Override public void warn(String msg) {}
+				@Override public void error(String msg) {}
+				@Override public void error(String msg, Throwable t) {}
+			};
+
+			RemoldAgent.PERF_LOG = false;
+			LibTool.getInstances(TargetDummy.class);
+			assertTrue(infos.stream().noneMatch(m -> m.contains("[Lib] getInstances(")),
+				"breakdown must not log when PERF_LOG is false");
+
+			RemoldAgent.PERF_LOG = true;
+			TargetDummy[] found = LibTool.getInstances(TargetDummy.class);
+			assertTrue(Arrays.asList(found).containsAll(List.of(a, b)),
+				"timed path must return all live instances");
+			String line = infos.stream()
+				.filter(m -> m.contains("[Lib] getInstances(" + TargetDummy.class.getName() + "):"))
+				.findFirst()
+				.orElse(null);
+			assertNotNull(line, "PERF_LOG=true must emit phase breakdown log, got: " + infos);
+			assertTrue(line.contains("validate=")
+				&& line.contains("iterate=")
+				&& line.contains("collect=")
+				&& line.contains("alloc=")
+				&& line.contains("fill=")
+				&& line.contains("cleanup="),
+				"breakdown line missing phase fields: " + line);
+		} finally {
+			RemoldAgent.PERF_LOG = savedPerfLog;
+			RemoldAgent.logger = savedLogger;
+		}
 	}
 }

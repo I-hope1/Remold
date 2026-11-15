@@ -208,9 +208,11 @@ public class LibTool {
 	}
 
 	private static native Object[] nGetInstances(Class<?> clazz);
+	private static native Object[] nGetInstancesTimed(Class<?> clazz, long[] timingsOut);
 	private static native boolean  nHasLiveInstance(Class<?> clazz);
 	private static native Object[] nGetReferrers(Object targetObject);
 	private static volatile boolean fastLiveProbeSupported = true;
+	private static volatile boolean timedQuerySupported = true;
 
 	@SuppressWarnings("unchecked")
 	private static <T> Class<T> prepareInstanceQueryClass(Class<T> clazz) {
@@ -251,8 +253,37 @@ public class LibTool {
 	@SuppressWarnings("unchecked")
 	public synchronized static <T> T[] getInstances(Class<T> clazz) {
 		clazz = prepareInstanceQueryClass(clazz);
+		if (RemoldAgent.PERF_LOG && timedQuerySupported) {
+			long[] timings = new long[8];
+			long startNanos = System.nanoTime();
+			try {
+				T[] res = (T[]) nGetInstancesTimed(clazz, timings);
+				long totalNanos = System.nanoTime() - startNanos;
+				logInstanceQueryBreakdown(clazz, totalNanos, timings);
+				return res != null ? res : (T[]) Array.newInstance(clazz, 0);
+			} catch (UnsatisfiedLinkError ignored) {
+				timedQuerySupported = false;
+			}
+		}
 		T[] res = (T[]) nGetInstances(clazz);
 		return res != null ? res : (T[]) Array.newInstance(clazz, 0);
+	}
+
+	private static void logInstanceQueryBreakdown(Class<?> clazz, long totalNanos, long[] timings) {
+		RemoldAgent.info(String.format(
+			Locale.ROOT,
+			"[Lib] getInstances(%s): count=%d (kept=%d), total=%.1fms [validate=%.1fms, iterate=%.1fms, collect=%.1fms, alloc=%.1fms, fill=%.1fms, cleanup=%.1fms]",
+			clazz.getName(),
+			timings[6],
+			timings[7],
+			totalNanos / 1_000_000.0,
+			timings[0] / 1_000_000.0,
+			timings[1] / 1_000_000.0,
+			timings[2] / 1_000_000.0,
+			timings[3] / 1_000_000.0,
+			timings[4] / 1_000_000.0,
+			timings[5] / 1_000_000.0
+		));
 	}
 
 	/**

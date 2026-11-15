@@ -4,11 +4,26 @@
 #include <cstdio>
 #include <expected>
 #if defined(_WIN32)
+#include <chrono>
 #include <mutex>
 using NativeMutex = std::mutex;
 using NativeLockGuard = std::lock_guard<std::mutex>;
+static inline jlong monotonicNowNs() {
+    return static_cast<jlong>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()
+        ).count()
+    );
+}
 #else
 #include <pthread.h>
+#include <time.h>
+
+static inline jlong monotonicNowNs() {
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<jlong>(ts.tv_sec) * 1000000000LL + static_cast<jlong>(ts.tv_nsec);
+}
 
 /**
  * POSIX 独占锁封装（仅使用 pthread_rwlock_t）。
@@ -188,26 +203,43 @@ hasLiveInstanceInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass) {
     return found ? JNI_TRUE : JNI_FALSE;
 }
 
+struct InstanceQueryTimings {
+    jlong validate_ns{0};
+    jlong iterate_ns{0};
+    jlong collect_ns{0};
+    jlong alloc_ns{0};
+    jlong fill_ns{0};
+    jlong cleanup_ns{0};
+    jlong raw_count{0};
+    jlong kept_count{0};
+};
+
 /**
  * 获取指定类及其子类在堆中所有尚未被回收的实例并返回局部引用数组。
  * 包含多态子类与接口实现，包含不可达但尚未被 GC 物理回收的对象。
  */
 static std::expected<jobjectArray, jvmtiError>
-getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass) {
+getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTimings* timings = nullptr) {
+    const jlong t_start = timings ? monotonicNowNs() : 0;
     if (auto err = validateInstanceQueryClass(jvmti, env, klass); err != JVMTI_ERROR_NONE) {
         return std::unexpected(err);
     }
+    const jlong t_after_validate = timings ? monotonicNowNs() : 0;
+    if (timings) timings->validate_ns = t_after_validate - t_start;
 
     NativeLockGuard lock(g_heap_mutex);
 
     jlong tag = allocateTagPair().first;
 
+    const jlong t_before_iterate = timings ? monotonicNowNs() : 0;
     // 先给目标类及其所有子类、接口实现的未回收实例打上 tag
     if (auto e = jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_EITHER, HeapObjectCallback, &tag);
         e != JVMTI_ERROR_NONE) {
         jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_TAGGED, RollbackClassTagCallback, &tag);
         return std::unexpected(e);
     }
+    const jlong t_after_iterate = timings ? monotonicNowNs() : 0;
+    if (timings) timings->iterate_ns = t_after_iterate - t_before_iterate;
 
     // 提取所有打上标记的对象句柄
     jint count = 0;
@@ -217,12 +249,19 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass) {
         jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_TAGGED, RollbackClassTagCallback, &tag);
         return std::unexpected(e);
     }
+    const jlong t_after_collect = timings ? monotonicNowNs() : 0;
+    if (timings) {
+        timings->collect_ns = t_after_collect - t_after_iterate;
+        timings->raw_count = static_cast<jlong>(count);
+    }
     SCOPE_EXIT([&] {
         if (instances) jvmti->Deallocate(reinterpret_cast<unsigned char*>(instances));
     });
 
     // 构建结果数组，不再调用 EnsureLocalCapacity 以避免触发超过容量限制的误报失败
     jobjectArray result = env->NewObjectArray(count, klass, nullptr);
+    const jlong t_after_alloc = timings ? monotonicNowNs() : 0;
+    if (timings) timings->alloc_ns = t_after_alloc - t_after_collect;
     if (!result) {
         env->ExceptionClear();
         for (jint i = 0; i < count; ++i) {
@@ -251,8 +290,14 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass) {
         jvmti->SetTag(o, 0);
         env->DeleteLocalRef(o);
     }
+    const jlong t_after_fill = timings ? monotonicNowNs() : 0;
+    if (timings) {
+        timings->fill_ns = t_after_fill - t_after_alloc;
+        timings->kept_count = static_cast<jlong>(idx);
+    }
 
     // 若有元素被过滤，收缩数组长度以匹配实际填充数量
+    jobjectArray final_result = result;
     if (idx != count) {
         jobjectArray trimmed = env->NewObjectArray(idx, klass, nullptr);
         if (trimmed) {
@@ -267,12 +312,21 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass) {
                 if (e) env->DeleteLocalRef(e);
             }
             env->DeleteLocalRef(result);
-            return trimmed;
+            final_result = trimmed;
+        } else {
+            env->ExceptionClear();
         }
-        env->ExceptionClear();
     }
 
-    return result;
+    if (instances) {
+        jvmti->Deallocate(reinterpret_cast<unsigned char*>(instances));
+        instances = nullptr;
+    }
+    if (timings) {
+        timings->cleanup_ns = monotonicNowNs() - t_after_fill;
+    }
+
+    return final_result;
 }
 
 /** 引用者扫描上下文 */
@@ -554,6 +608,42 @@ JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetInstances(
     return *res;
 }
 
+/** JNI 导出函数：获取指定类所有未回收实例并回传各阶段纳秒计时，失败时向 Java 抛出异常 */
+JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetInstancesTimed(
+    JNIEnv* env,
+    jclass,
+    jclass target_clazz,
+    jlongArray timings_out
+) {
+    if (!env) return nullptr;
+    jvmtiEnv* jvmti = getOrAcquireJvmti(env);
+    if (!jvmti) {
+        throwJvmtiException(env, "Failed to acquire JVMTI environment", JVMTI_ERROR_INTERNAL);
+        return nullptr;
+    }
+    InstanceQueryTimings timings{};
+    const bool write_timings = timings_out != nullptr && env->GetArrayLength(timings_out) >= 8;
+    auto res = getInstancesInternal(jvmti, env, target_clazz, write_timings ? &timings : nullptr);
+    if (!res) {
+        throwJvmtiException(env, "JVMTI getInstances failed", res.error());
+        return nullptr;
+    }
+    if (write_timings) {
+        const jlong buf[8] = {
+            timings.validate_ns,
+            timings.iterate_ns,
+            timings.collect_ns,
+            timings.alloc_ns,
+            timings.fill_ns,
+            timings.cleanup_ns,
+            timings.raw_count,
+            timings.kept_count,
+        };
+        env->SetLongArrayRegion(timings_out, 0, 8, buf);
+    }
+    return *res;
+}
+
 /** JNI 导出函数：获取指定对象的所有直接引用者，失败时向 Java 抛出异常 */
 JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetReferrers(
     JNIEnv* env,
@@ -601,13 +691,22 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
             },
         };
         env->RegisterNatives(clazz, methods, 2);
-        JNINativeMethod probeMethod = {
-            .name = const_cast<char*>("nHasLiveInstance"),
-            .signature = const_cast<char*>("(Ljava/lang/Class;)Z"),
-            .fnPtr = reinterpret_cast<void*>(&Java_remold_util_LibTool_nHasLiveInstance),
+        JNINativeMethod optionalMethods[] = {
+            {
+                .name = const_cast<char*>("nHasLiveInstance"),
+                .signature = const_cast<char*>("(Ljava/lang/Class;)Z"),
+                .fnPtr = reinterpret_cast<void*>(&Java_remold_util_LibTool_nHasLiveInstance),
+            },
+            {
+                .name = const_cast<char*>("nGetInstancesTimed"),
+                .signature = const_cast<char*>("(Ljava/lang/Class;[J)[Ljava/lang/Object;"),
+                .fnPtr = reinterpret_cast<void*>(&Java_remold_util_LibTool_nGetInstancesTimed),
+            },
         };
-        if (env->RegisterNatives(clazz, &probeMethod, 1) != JNI_OK && env->ExceptionCheck()) {
-            env->ExceptionClear();
+        for (auto& m : optionalMethods) {
+            if (env->RegisterNatives(clazz, &m, 1) != JNI_OK && env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
         }
         env->DeleteLocalRef(clazz);
     } else {

@@ -77,8 +77,7 @@ import static remold.MountManager.*;
  *   </li>
  *   <li><b>初值纯度审查与补丁装配（InitFix.transform）</b>：
  *       在重定义生效前，{@link InitFix#transform} 针对新增声明字段与标有 {@link RemoldReinit}
- *       的字段进行数据依赖切片与纯度安全门审查，生成独立静态方法的 hidden nestmate 伴生类补丁，并在
- *       {@link InitFix#snapshotInstances(Class)} 捕获存量实例快照。</li>
+ *       的字段进行数据依赖切片与纯度安全门审查，生成独立静态方法的 hidden nestmate 伴生类补丁并暂存待补计划。</li>
  *   <li><b>原子重定义执行（Redefine Execution）</b>：
  *       执行事务预登记（{@code tx.preRegister()}），随后调用 {@link Instrumentation#redefineClasses(ClassDefinition...)}。
  *       若发生批量失败，自动尝试单类降级重定义，并在事务一致性校验失败时原子回滚（{@code tx.rollback()}）。</li>

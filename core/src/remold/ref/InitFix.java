@@ -3935,10 +3935,10 @@ public class InitFix {
 		for (FieldPatchTask task : plan.allTasks()) {
 			if (task.replay()) replayTaskFields.add(task.fieldName());
 		}
-		List<Object> alive = null;
+		Object[] alive = null;
 		if (plan.hasInstance()) {
 			alive = collectInstancesForPatch(host);
-			if (alive.isEmpty() && !plan.hasStatic()) {
+			if (alive.length == 0 && !plan.hasStatic()) {
 				RemoldAgent.info("[InitFix] No live instances and no static patch needed for " + host.getName()
 				    + ", skip");
 				return;
@@ -4055,9 +4055,9 @@ public class InitFix {
 		Set<String> staticSkips    = new LinkedHashSet<>(skippedFields);
 
 		// ---- 实例字段：逐实例、逐字段 ----
-		if (plan.hasInstance() && alive != null && !alive.isEmpty()) {
+		if (plan.hasInstance() && alive != null && alive.length > 0) {
 			RemoldAgent.info("Applying instance field init patch to " + host.getName()
-			                  + ", enumerated=" + alive.size()
+			                  + ", enumerated=" + alive.length
 			                  + (hasSelfOnlyTasks ? ", selfScopeTargets=" + selfOnlyTargets : "")
 			                  + ", fields=" + plan.instanceTasks().size());
 
@@ -4095,7 +4095,7 @@ public class InitFix {
 		// @RemoldReinit 生效点名（docs/initfix/03-runtime-driver.md §4）：
 		// "存量值被重置"与"新增字段被初始化"是两件不同的事，补丁日志只报"打了几个字段"分不出来。
 		String reinitLine = reinitHint(host.getName(), plan,
-		 failedFields, skippedFields, alive == null ? 0 : alive.size(), selfOnlyTargets);
+		 failedFields, skippedFields, alive == null ? 0 : alive.length, selfOnlyTargets);
 		if (reinitLine != null) RemoldAgent.info(reinitLine);
 
 		// L1 重放：本轮真正跑过的字段记入"已处理"，供 L0 跳过"初值变了但不会重放"的告警；
@@ -4240,7 +4240,7 @@ public class InitFix {
 			Set<String> incomplete = new LinkedHashSet<>(failedFields);
 			incomplete.addAll(skippedFields);
 			remold.BatchReportScope.recordInitFix(host.getName(),
-				alive == null ? 0 : alive.size(),
+				alive == null ? 0 : alive.length,
 				new ArrayList<>(patchedFieldNames), incomplete.size());
 		}
 	}
@@ -4349,7 +4349,7 @@ public class InitFix {
 	                                 boolean selfOnly) { }
 
 	private static void runIndependentInstanceTasks(
-	 Class<?> host, List<Object> targets, BoundInstanceTask[] tasks,
+	 Class<?> host, Object[] targets, BoundInstanceTask[] tasks,
 	 Set<String> failedFields, Set<String> skippedFields, Map<String, String> failureReasons) {
 		InstanceFailureBudget budget = new InstanceFailureBudget();
 		for (Object target : targets) {
@@ -4410,7 +4410,7 @@ public class InitFix {
 	}
 
 	private static void runDependentInstanceTasks(
-	 Class<?> host, List<Object> targets, BoundInstanceTask[] tasks,
+	 Class<?> host, Object[] targets, BoundInstanceTask[] tasks,
 	 Set<String> failedFields, Set<String> skippedFields, Map<String, String> failureReasons,
 	 Set<String> staticFailures) {
 
@@ -4571,26 +4571,31 @@ public class InitFix {
 	}
 	// (union 由 docs/initfix/02-closure-and-ledger.md §2 的 FieldLedger 使用；P1-③ 落地前保留为工具方法)
 
-	private static List<Object> collectInstancesForPatch(Class<?> host) {
-		// 枚举时机是本方法（重定义生效之后），不是装配补丁时：见 PendingPatch 的说明。
-		List<WeakReference<Object>> snapshot = snapshotInstances(host);
-		List<Object>                alive    = new ArrayList<>(snapshot.size());
-		for (WeakReference<Object> ref : snapshot) {
-			Object o = ref.get();
-			if (o != null) alive.add(o);
-		}
-		return alive;
+	private static final Object[] EMPTY_OBJECTS = new Object[0];
+
+	private static Object[] collectInstancesForPatch(Class<?> host) {
+		// 枚举时机在重定义生效之后、applyPatch 内即时消费后即释放，不跨 redefine 持有，
+		// 因此无需绕行 WeakReference 双重拷贝；直接复用枚举数组，仅在出现 null 槽时压缩。
+		Object[] raw = LibTool.initialized()
+		 ? LibTool.getInstances(host)
+		 : InstanceTracker.getInstances(host).toArray();
+		return compactNonNull(raw);
 	}
 
-	private static List<WeakReference<Object>> snapshotInstances(Class<?> clazz) {
-		Object[] arr = LibTool.initialized()
-		 ? LibTool.getInstances(clazz)
-		 : InstanceTracker.getInstances(clazz).toArray();
-		List<WeakReference<Object>> refs = new ArrayList<>(arr.length);
-		for (Object o : arr) {
-			if (o != null) refs.add(new WeakReference<>(o));
+	static Object[] compactNonNull(Object[] raw) {
+		if (raw == null || raw.length == 0) return EMPTY_OBJECTS;
+		int nulls = 0;
+		for (Object o : raw) {
+			if (o == null) nulls++;
 		}
-		return refs;
+		if (nulls == 0) return raw;
+		if (nulls == raw.length) return EMPTY_OBJECTS;
+		Object[] out = new Object[raw.length - nulls];
+		int w = 0;
+		for (Object o : raw) {
+			if (o != null) out[w++] = o;
+		}
+		return out;
 	}
 
 	/**

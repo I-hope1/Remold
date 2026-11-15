@@ -4,6 +4,7 @@ plugins {
 }
 
 def mindustryVersion = 'v160.5'
+def coreAgentJarPath = project(':core').tasks.named('shadowJar').flatMap { it.archiveFile }.map { it.asFile.absolutePath }
 
 sourceSets {
 	main {
@@ -168,6 +169,9 @@ test {
 	jvmArgs "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
 	        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8",
 	        "-XX:+IgnoreUnrecognizedVMOptions", "-XX:+AllowEnhancedClassRedefinition"
+	if (JavaVersion.current().majorVersion.toInteger() >= 22) {
+		jvmArgs "--enable-native-access=ALL-UNNAMED"
+	}
 	systemProperty "hstest.fixtures", hstestFixtureRoot.get().asFile.absolutePath
 	if (nativeLibPath != null) {
 		systemProperty "remold.path.libtool", nativeLibPath
@@ -237,7 +241,7 @@ tasks.register("mixinProbe", JavaExec) {
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "remold.MixinCompatibilityTest"
 	doFirst {
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
 		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
 		if (nativeLibPath != null) {
@@ -297,7 +301,7 @@ tasks.register("concurrencyAssert", JavaExec) {
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "ConcurrencyAssert"
 	doFirst {
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
 		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
 		if (nativeLibPath != null) {
@@ -316,7 +320,7 @@ tasks.register("fingerprintAssert", JavaExec) {
 	classpath = sourceSets.main.runtimeClasspath
 	mainClass = "FingerprintAssert"
 	doFirst {
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
 		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
 		if (nativeLibPath != null) {
@@ -569,7 +573,7 @@ tasks.register("liveDcevmTest", JavaExec) {
 		}
 	}
 	doFirst {
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 		        "-XX:+AllowEnhancedClassRedefinition",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
 		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
@@ -603,7 +607,7 @@ tasks.register("addFieldProbe", JavaExec) {
 	doFirst {
 		def watchDir = file("$buildDir/addfield/classes")
 		watchDir.mkdirs()
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}=${watchDir.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}=${watchDir.absolutePath}",
 		        "-XX:+AllowEnhancedClassRedefinition",
 		        "-Dremold.agent.file_shake_ms=200",
 		        "-Dremold.plugins=__probe_none__",
@@ -794,7 +798,7 @@ tasks.register("initFixFallbackProbe", JavaExec) {
 		}
 	}
 	doFirst {
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 		        "-XX:+IgnoreUnrecognizedVMOptions",
 		        "-XX:+AllowEnhancedClassRedefinition",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
@@ -829,7 +833,7 @@ def agentProbe = { String taskName, String mainClassName, String desc ->
 			}
 		}
 		doFirst {
-			jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+			jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 			        "-XX:+IgnoreUnrecognizedVMOptions",
 			        "-XX:+AllowEnhancedClassRedefinition",
 			        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
@@ -867,7 +871,7 @@ tasks.register("fingerprintDiskHashProbe", JavaExec) {
 		}
 	}
 	doFirst {
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 		        "-XX:+IgnoreUnrecognizedVMOptions",
 		        "-XX:+AllowEnhancedClassRedefinition",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
@@ -918,7 +922,7 @@ tasks.register("retransformBaselineProbe", JavaExec) {
 		}
 	}
 	doFirst {
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 		        "-XX:+IgnoreUnrecognizedVMOptions",
 		        "-XX:+AllowEnhancedClassRedefinition",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
@@ -947,7 +951,7 @@ tasks.register("pendingAlignedMultiLoaderProbe", JavaExec) {
 		}
 	}
 	doFirst {
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 		        "-XX:+IgnoreUnrecognizedVMOptions",
 		        "-XX:+AllowEnhancedClassRedefinition",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
@@ -976,7 +980,7 @@ tasks.register("redefineDynamicNoBaselineProbe", JavaExec) {
 		}
 	}
 	doFirst {
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 		        "-XX:+IgnoreUnrecognizedVMOptions",
 		        "-XX:+AllowEnhancedClassRedefinition",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
@@ -1014,7 +1018,7 @@ def remoldAgentDcevmProbe = { String taskName, String mainClassName, String desc
 			}
 		}
 		doFirst {
-			jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+			jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 			        // The tests runtime classpath contains plugin-arc/plugin-mixin; keep the agent from
 			        // auto-loading them so the probe measures the core transformer path only.
 			        "-Dremold.plugins=__probe_none__",
@@ -1053,7 +1057,7 @@ tasks.register("doubleBraceProbe", JavaExec) {
 		}
 	}
 	doFirst {
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 		        "-XX:+IgnoreUnrecognizedVMOptions",
 		        "-XX:+AllowEnhancedClassRedefinition",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
@@ -1086,7 +1090,7 @@ tasks.register("kotlinApplyProbe", JavaExec) {
 		}
 	}
 	doFirst {
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 		        "-XX:+IgnoreUnrecognizedVMOptions",
 		        "-XX:+AllowEnhancedClassRedefinition",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
@@ -1169,7 +1173,7 @@ tasks.register("metadataDriftWarnProbe", JavaExec) {
 		}
 	}
 	doFirst {
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 		        "-XX:+IgnoreUnrecognizedVMOptions", "-XX:+AllowEnhancedClassRedefinition",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
 		        "--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
@@ -1240,7 +1244,7 @@ tasks.register("alignBaselineProbe", JavaExec) {
 		args = [liveDir.absolutePath,
 		        alignProbeRoot.get().dir("v2/T.class").asFile.absolutePath,
 		        alignProbeRoot.get().dir("v3/T.class").asFile.absolutePath]
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}=${liveDir.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}=${liveDir.absolutePath}",
 		        "-XX:+AllowEnhancedClassRedefinition",
 		        "--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
@@ -1324,7 +1328,7 @@ tasks.register("entityProbeToggleProbe", JavaExec) {
 		}
 	}
 	doFirst {
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 		        "-XX:+IgnoreUnrecognizedVMOptions",
 		        "-XX:+AllowEnhancedClassRedefinition",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
@@ -1353,7 +1357,7 @@ tasks.register("shadowClassProbe", JavaExec) {
 		}
 	}
 	doFirst {
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 		        "-XX:+IgnoreUnrecognizedVMOptions",
 		        "-XX:+AllowEnhancedClassRedefinition",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
@@ -1381,7 +1385,7 @@ tasks.register("scopeReinitProbe", JavaExec) {
 		}
 	}
 	doFirst {
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 		        "-XX:+IgnoreUnrecognizedVMOptions",
 		        "-XX:+AllowEnhancedClassRedefinition",
 		        "-Dremold.plugins=__probe_none__",
@@ -1410,7 +1414,7 @@ tasks.register("classIdentityProbe", JavaExec) {
 		}
 	}
 	doFirst {
-		jvmArgs "-javaagent:${project(':core').tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath}",
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
 		        "-XX:+IgnoreUnrecognizedVMOptions",
 		        "-XX:+AllowEnhancedClassRedefinition",
 		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",

@@ -10,13 +10,16 @@ REM   libtoolarm64.so      Android arm64 - NOT built here: core/build.gradle com
 set COMMON=-I"%JAVA_HOME%/include" -I"%JAVA_HOME%/include/win32" -std=c++23 -O3 -g0 -fno-exceptions -fno-rtti -fdeclspec -w
 
 zig c++ -shared -target x86_64-windows -Wl,--strip-all %COMMON% -o ../libs/tool64.dll tool.cpp
-zig c++ -shared -target aarch64-macos -Wl,-dead_strip %COMMON% -o ../libs/libtoolarm64.dylib tool.cpp
-zig c++ -shared -target x86_64-macos -Wl,-dead_strip %COMMON% -o ../libs/libtool64.dylib tool.cpp
-zig c++ -shared -target x86_64-linux-gnu.2.17 -Wl,--strip-all %COMMON% -o ../libs/libtool64.so tool.cpp
+zig c++ -c -target aarch64-macos %COMMON% -o "%TEMP%\tool_macos_arm64.o" tool.cpp
+zig cc -shared -target aarch64-macos -Wl,-dead_strip "%TEMP%\tool_macos_arm64.o" -o ../libs/libtoolarm64.dylib
+zig c++ -c -target x86_64-macos %COMMON% -o "%TEMP%\tool_macos_x64.o" tool.cpp
+zig cc -shared -target x86_64-macos -Wl,-dead_strip "%TEMP%\tool_macos_x64.o" -o ../libs/libtool64.dylib
+zig c++ -c -target x86_64-linux-gnu.2.17 -I"%~dp0jni_posix" %COMMON% -o "%TEMP%\tool_linux_x64.o" tool.cpp
+zig cc -shared -target x86_64-linux-gnu.2.17 -Wl,--strip-all "%TEMP%\tool_linux_x64.o" -o ../libs/libtool64.so
 REM Linux aarch64: put the posix jni_md.h before %COMMON%. The win32 one (__declspec/__int64)
 REM is Windows semantics and must not be used for an ELF artifact.
-REM NOTE: the link phase of "zig c++" builds zig's bundled libc++ from source; that internal build
-REM ignores -w and may print -Wnullability-completeness warnings from libc++ headers. They are
-REM third-party header noise, not from tool.cpp. CI does not rebuild this artifact (it is committed
-REM like the macOS/Windows binaries); see .github/workflows/ci.yml "Verify native ABIs".
-zig c++ -shared -target aarch64-linux-gnu.2.17 -Wl,--strip-all -I"%~dp0jni_posix" %COMMON% -o ../libs/libtoolaarch64.so tool.cpp
+REM Two-step compile + zig cc link: avoids linking zig's bundled libc++ (which would compile
+REM libc++ from source with -Wnullability-completeness warnings) and keeps pthread_rwlock_*
+REM bound to libpthread.so.0@GLIBC_2.17.
+zig c++ -c -target aarch64-linux-gnu.2.17 -I"%~dp0jni_posix" %COMMON% -o "%TEMP%\tool_linux_aarch64.o" tool.cpp
+zig cc -shared -target aarch64-linux-gnu.2.17 -Wl,--strip-all "%TEMP%\tool_linux_aarch64.o" -o ../libs/libtoolaarch64.so

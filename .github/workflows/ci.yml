@@ -15,6 +15,7 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  GRADLE_OPTS: --enable-native-access=ALL-UNNAMED
 
 jobs:
   test:
@@ -51,6 +52,7 @@ jobs:
           # fullCheck = check（JUnit + 文本扫描）+ e2eProbe（独立 JVM / Agent / Kotlin 差分）。
           # 本地日常只跑 check，提交前与 CI 跑全量，避免丢掉探针覆盖。
           ./gradlew fullCheck \
+            -Dorg.gradle.jvmargs="-Xmx2g --enable-native-access=ALL-UNNAMED" \
             -Dhstest.requireJdks=true \
             -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_8_X64,JAVA_HOME_11_X64,JAVA_HOME_17_X64,JAVA_HOME_21_X64,JAVA_HOME_25_X64 \
             -Dorg.gradle.java.installations.auto-detect=false \
@@ -105,6 +107,7 @@ jobs:
           echo "runner JAVA_HOME=$JAVA_HOME"
           echo "JBR 21 JAVA_HOME=$JAVA_HOME_21_X64"
           ./gradlew :tests:liveDcevmTest \
+            -Dorg.gradle.jvmargs="-Xmx2g --enable-native-access=ALL-UNNAMED" \
             -Dhstest.requireJdks=true \
             -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_8_X64,JAVA_HOME_11_X64,JAVA_HOME_17_X64,JAVA_HOME_21_X64,JAVA_HOME_25_X64 \
             -Dorg.gradle.java.installations.auto-detect=false \
@@ -163,6 +166,7 @@ jobs:
           echo "runner JAVA_HOME=$JAVA_HOME"
           echo "probe JAVA_HOME=${{ steps.jbr.outputs.path }}"
           ./gradlew :tests:p05Probe -Pp05.jbr="${{ steps.jbr.outputs.path }}" \
+            -Dorg.gradle.jvmargs="-Xmx2g --enable-native-access=ALL-UNNAMED" \
             -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_8_X64,JAVA_HOME_11_X64,JAVA_HOME_17_X64,JAVA_HOME_21_X64,JAVA_HOME_25_X64 \
             -Dorg.gradle.java.installations.auto-detect=false \
             -Dorg.gradle.java.installations.auto-download=false
@@ -171,12 +175,13 @@ jobs:
         run: |
           export JAVA_HOME="$JAVA_HOME_25_X64"
           ./gradlew :tests:twoPhaseProbe -Pp05.jbr="${{ steps.jbr.outputs.path }}" \
+            -Dorg.gradle.jvmargs="-Xmx2g --enable-native-access=ALL-UNNAMED" \
             -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_8_X64,JAVA_HOME_11_X64,JAVA_HOME_17_X64,JAVA_HOME_21_X64,JAVA_HOME_25_X64 \
             -Dorg.gradle.java.installations.auto-detect=false \
             -Dorg.gradle.java.installations.auto-download=false
 
   build-native:
-    name: Build Native Libraries (Linux x64 & Android arm64)
+    name: Build Native Libraries (Linux x64, Linux aarch64 & Android arm64)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -209,11 +214,23 @@ jobs:
             core/cpp/tool.cpp -o core/libs/libtoolarm64.so
           ls -la core/libs/libtoolarm64.so
 
+      - name: Compile Linux aarch64 (.so, glibc 2.17)
+        # 用 zig 固定 glibc 2.17 目标，避免 ubuntu-24.04 交叉 g++ 把最低 glibc 抬到 2.38+。
+        # 两段式编译（zig c++ -c）+ 链接（zig cc -shared）：tool.cpp 在 POSIX 下仅用
+        # pthread_rwlock_t，不引用 libc++.a 运行时，从而彻底跳过 zig 从源码构建内置 libc++
+        # 时刷出的数千条 -Wnullability-completeness 告警，并让锁符号直接绑定到 libpthread.so.0。
+        run: |
+          curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz -o /tmp/zig.tar.xz
+          tar -xJf /tmp/zig.tar.xz -C /tmp
+          /tmp/zig-x86_64-linux-0.16.0/zig c++ -c -target aarch64-linux-gnu.2.17 \
+            -std=c++23 -O3 -g0 -fno-exceptions -fno-rtti -fdeclspec \
+            -Icore/cpp/jni_posix -I"$JAVA_HOME/include" \
+            core/cpp/tool.cpp -o /tmp/tool_aarch64.o
+          /tmp/zig-x86_64-linux-0.16.0/zig cc -shared -target aarch64-linux-gnu.2.17 \
+            -Wl,--strip-all /tmp/tool_aarch64.o -o core/libs/libtoolaarch64.so
+          ls -la core/libs/libtoolaarch64.so
+
       - name: Verify native ABIs
-        # Linux aarch64 产物与 Windows/macOS 产物一样随仓库分发（core/cpp/compile.bat 用 zig
-        # aarch64-linux-gnu.2.17 生成），CI 只校验、不重建：zig c++ 的链接阶段会从源码构建它
-        # 内置的 libc++，该内部构建不受 -w 控制，会在第三方头文件里刷出数千条
-        # -Wnullability-completeness 注解——那正是把 aarch64 构建搬进 CI 后引入的噪声。
         # 校验项：glibc 构建（libc.so.6 + libpthread.so.0）、aarch64 glibc 基线 2.17、不是 bionic。
         run: |
           test -s core/libs/libtoolaarch64.so
@@ -253,7 +270,8 @@ jobs:
         run: |
           chmod +x gradlew
           export JAVA_HOME="$JAVA_HOME_25_X64"
-          ./gradlew assemble
+          ./gradlew assemble \
+            -Dorg.gradle.jvmargs="-Xmx2g --enable-native-access=ALL-UNNAMED"
 
       - name: Collect Artifacts
         # 与 release.yml 的 Prepare Release Assets 同一套 glob：只做"可下载呈现"，

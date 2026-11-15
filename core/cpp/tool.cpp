@@ -3,7 +3,38 @@
 #include <atomic>
 #include <cstdio>
 #include <expected>
+#if defined(_WIN32)
 #include <mutex>
+using NativeMutex = std::mutex;
+using NativeLockGuard = std::lock_guard<std::mutex>;
+#else
+#include <pthread.h>
+
+/**
+ * POSIX 独占锁封装（仅使用 pthread_rwlock_t）。
+ * 避免引用 libc++.a 的 std::mutex，从而允许两段式 zig cc 链接：既跳过 zig 构建内置 libc++ 时
+ * 的 -Wnullability-completeness 噪声，又让锁符号直接绑定到 libpthread.so.0@GLIBC_2.17。
+ */
+struct NativeMutex {
+    pthread_rwlock_t handle = PTHREAD_RWLOCK_INITIALIZER;
+    NativeMutex() = default;
+    NativeMutex(const NativeMutex&) = delete;
+    NativeMutex& operator=(const NativeMutex&) = delete;
+};
+
+class NativeLockGuard {
+    pthread_rwlock_t& handle;
+public:
+    explicit NativeLockGuard(NativeMutex& m) : handle(m.handle) {
+        pthread_rwlock_wrlock(&handle);
+    }
+    ~NativeLockGuard() {
+        pthread_rwlock_unlock(&handle);
+    }
+    NativeLockGuard(const NativeLockGuard&) = delete;
+    NativeLockGuard& operator=(const NativeLockGuard&) = delete;
+};
+#endif
 #include <span>
 #include <type_traits>
 #include <utility>
@@ -42,7 +73,7 @@ template <typename F>
  * 不使用 JVMTI Raw Monitor：Raw Monitor 的等待者被 JVM 视为需要挂起的线程，
  * 会卡住 safepoint 造成死锁；std::mutex 持有者处于 native 状态，safepoint 可正常推进。
  */
-static std::mutex g_heap_mutex;
+static NativeMutex g_heap_mutex;
 
 /** 全局递增 Tag 序列号，用于生成唯一的动态标签 */
 static std::atomic<jlong> g_tag_sequence{100000};
@@ -167,7 +198,7 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass) {
         return std::unexpected(err);
     }
 
-    std::lock_guard<std::mutex> lock(g_heap_mutex);
+    NativeLockGuard lock(g_heap_mutex);
 
     jlong tag = allocateTagPair().first;
 
@@ -291,7 +322,7 @@ static jint JNICALL ReferrerCallback(
 static std::expected<jobjectArray, jvmtiError> getReferrersInternal(jvmtiEnv* jvmti, JNIEnv* env, jobject target_object) {
     if (!jvmti || !env || !target_object) return std::unexpected(JVMTI_ERROR_NULL_POINTER);
 
-    std::lock_guard<std::mutex> lock(g_heap_mutex);
+    NativeLockGuard lock(g_heap_mutex);
 
     TagPair tags = allocateTagPair();
     jlong target_tag = tags.first;
@@ -383,13 +414,13 @@ static std::expected<jobjectArray, jvmtiError> getReferrersInternal(jvmtiEnv* jv
 /** 全局缓存的 JavaVM 与 JVMTI 实例原子引用及初始化互斥锁 */
 static std::atomic<JavaVM*> g_jvm{nullptr};
 static std::atomic<jvmtiEnv*> g_jvmti{nullptr};
-static std::mutex g_jvmti_mutex;
+static NativeMutex g_jvmti_mutex;
 
 static jvmtiEnv* getOrAcquireJvmti(JNIEnv* env) {
     jvmtiEnv* ti = g_jvmti.load(std::memory_order_acquire);
     if (ti) return ti;
 
-    std::lock_guard<std::mutex> lock(g_jvmti_mutex);
+    NativeLockGuard lock(g_jvmti_mutex);
     ti = g_jvmti.load(std::memory_order_relaxed);
     if (ti) return ti;
 

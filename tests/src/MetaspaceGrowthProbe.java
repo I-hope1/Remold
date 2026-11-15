@@ -41,7 +41,6 @@ public class MetaspaceGrowthProbe {
 
 	private static long sampleMetaspaceUsed() {
 		System.gc();
-		System.runFinalization();
 		try { Thread.sleep(30); } catch (InterruptedException ignored) {}
 		System.gc();
 		MemoryPoolMXBean p = getMetaspacePool();

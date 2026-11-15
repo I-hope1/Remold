@@ -220,10 +220,12 @@ struct InstanceQueryTimings {
 static std::atomic<JavaVM*> g_jvm{nullptr};
 
 /**
- * 复用已预热标签表的常驻 jvmtiEnv，通过一次 VM 堆遍历清空本次打上的 tag。
- * 相比逐对象 SetTag(0) 或每轮重建并销毁临时 jvmtiEnv，既避免每轮重建 TagHashmap 带来的
- * rehash 惩罚，也避免逐对象加锁释放 OopStorage。
+ * 复用已预热标签表的常驻 jvmtiEnv，按规模分流清空本次打上的 tag：
+ * - 实例数 <= 32768 时直接沿用既有实例句柄 SetTag(0)，省去一次完整 VM_HeapWalkOperation safepoint；
+ * - 实例数 > 32768 时改用单次 JVMTI_HEAP_OBJECT_TAGGED 堆遍历批量置零，避免海量 JNI/JVMTI 逐一解锁开销。
  */
+static constexpr jint kTagClearWalkThreshold = 32768;
+
 static void clearTaggedClass(jvmtiEnv* jvmti, jclass klass, jlong tag) {
     if (jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_TAGGED, RollbackClassTagCallback, &tag)
         != JVMTI_ERROR_NONE) {
@@ -364,11 +366,18 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTi
         }
     }
 
+    bool tags_cleared = (count <= 0);
+    if (!tags_cleared && count <= kTagClearWalkThreshold && instances) {
+        for (jint i = 0; i < count; ++i) {
+            if (instances[i]) jvmti->SetTag(instances[i], 0);
+        }
+        tags_cleared = true;
+    }
     if (instances) {
         jvmti->Deallocate(reinterpret_cast<unsigned char*>(instances));
         instances = nullptr;
     }
-    if (count > 0) {
+    if (!tags_cleared) {
         clearTaggedClass(jvmti, klass, tag);
     }
     if (has_local_frame) {

@@ -2600,8 +2600,9 @@ public class RemoldAgent {
 							ClassDiffUtil.ensureFullClassNodes(diff, oldBytecode, newBytecode);
 						}
 						InitFix.transform(targetClass, newBytecode, diff);
-						if (!needsTwoPhase && TWO_PHASE
-							&& InitFix.requiresTwoPhase(targetClass, () -> hasLiveInstances(targetClass))) {
+						// 批次路径直接按补丁结构判定是否需要两阶段：不在此处为了省一次 ~100ms Stage A
+						// 而触发昂贵的全堆实例化扫描（大堆上即使有存活实例也会导致 Stage A 前后扫两次全堆）。
+						if (!needsTwoPhase && TWO_PHASE && InitFix.requiresTwoPhase(targetClass)) {
 							needsTwoPhase = true;
 						}
 						initFixNanos += System.nanoTime() - initFixT0;
@@ -2886,7 +2887,7 @@ public class RemoldAgent {
 				// 尝试初始化；失败会抛 UnsatisfiedLinkError
 				LibTool.init();
 			}
-			result = LibTool.getInstances(c).length > 0;
+			result = LibTool.hasLiveInstance(c);
 		} catch (Throwable t) {
 			// JVMTI 不可用 / 初始化失败 / 扫描异常 —— 一律按"有实例"处理（保守）。
 			warn("[ANON-LAYOUT] Cannot scan instances for " + dotClassName
@@ -4361,9 +4362,9 @@ public class RemoldAgent {
 				warn("[HOTSWAP-2P] No old bytecode for " + name
 				     + "; stage A falls back to the target bytes for this class.");
 				skeleton = target;
-			} else if (!InitFix.requiresTwoPhase(clazz, () -> hasLiveInstances(clazz))) {
-				// 该类本身无需两阶段保护（如无存量实例且无静态字段，或纯方法体修改）：阶段 A 直接使用目标字节
-				if (DEBUG) log("[HOTSWAP-2P] Stage A uses target bytes directly for " + name + " (no live instances / no read-through hazard)");
+			} else if (!InitFix.requiresTwoPhase(clazz)) {
+				// 该类本身无需两阶段保护（如纯方法体修改或无零值暴露字段）：阶段 A 直接使用目标字节
+				if (DEBUG) log("[HOTSWAP-2P] Stage A uses target bytes directly for " + name + " (no read-through hazard)");
 				skeleton = target;
 			} else {
 				try {

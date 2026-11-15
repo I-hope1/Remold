@@ -4352,26 +4352,39 @@ public class InitFix {
 	 Class<?> host, Object[] targets, BoundInstanceTask[] tasks,
 	 Set<String> failedFields, Set<String> skippedFields, Map<String, String> failureReasons) {
 		InstanceFailureBudget budget = new InstanceFailureBudget();
+		if (tasks.length == 1) {
+			BoundInstanceTask single = tasks[0];
+			for (Object target : targets) {
+				executeIndependentTask(host, target, single, budget, failedFields, skippedFields, failureReasons);
+			}
+			return;
+		}
 		for (Object target : targets) {
 			for (BoundInstanceTask task : tasks) {
-				// SELF 作用域：枚举结果里含子类/匿名子类实例，只有恰好等于宿主的那部分可写。
-				// host 在 applyPatch 开头已归一，用快路径避免逐实例 Class.forName。
-				if (task.selfOnly() && !scopeMatchesCanonical(host, target, RemoldReinit.Scope.SELF)) continue;
-				if (budget.exhausted(task.fieldName())) {
-					budget.recordGiveUp(task.fieldName(), skippedFields, failureReasons);
-					continue;
-				}
-				try {
-					task.handle().invokeExact(target);
-				} catch (LinkageError le) {
-					if (!isolatableLinkFailure(le)) throw le;
-					recordTaskFailure(host, task.fieldName(), le, failedFields, failureReasons);
-					budget.recordFailure(task.fieldName());
-				} catch (Throwable t) {
-					recordTaskFailure(host, task.fieldName(), t, failedFields, failureReasons);
-					budget.recordFailure(task.fieldName());
-				}
+				executeIndependentTask(host, target, task, budget, failedFields, skippedFields, failureReasons);
 			}
+		}
+	}
+
+	private static void executeIndependentTask(
+	 Class<?> host, Object target, BoundInstanceTask task, InstanceFailureBudget budget,
+	 Set<String> failedFields, Set<String> skippedFields, Map<String, String> failureReasons) {
+		// SELF 作用域：枚举结果里含子类/匿名子类实例，只有恰好等于宿主的那部分可写。
+		// host 在 applyPatch 开头已归一，用快路径避免逐实例 Class.forName。
+		if (task.selfOnly() && !scopeMatchesCanonical(host, target, RemoldReinit.Scope.SELF)) return;
+		if (budget.exhausted(task.fieldName())) {
+			budget.recordGiveUp(task.fieldName(), skippedFields, failureReasons);
+			return;
+		}
+		try {
+			task.handle().invokeExact(target);
+		} catch (LinkageError le) {
+			if (!isolatableLinkFailure(le)) throw le;
+			recordTaskFailure(host, task.fieldName(), le, failedFields, failureReasons);
+			budget.recordFailure(task.fieldName());
+		} catch (Throwable t) {
+			recordTaskFailure(host, task.fieldName(), t, failedFields, failureReasons);
+			budget.recordFailure(task.fieldName());
 		}
 	}
 
@@ -4387,12 +4400,15 @@ public class InitFix {
 	 */
 	private static final class InstanceFailureBudget {
 		private final Map<String, Integer> counts = new LinkedHashMap<>();
+		private boolean anyFailure;
 
 		boolean exhausted(String fieldName) {
+			if (!anyFailure) return false;
 			return counts.getOrDefault(fieldName, 0) >= MAX_INSTANCE_FAILURES_PER_FIELD;
 		}
 
 		void recordFailure(String fieldName) {
+			anyFailure = true;
 			counts.merge(fieldName, 1, Integer::sum);
 		}
 

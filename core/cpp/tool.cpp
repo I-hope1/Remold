@@ -101,13 +101,17 @@ static jvmtiIterationControl JNICALL HeapObjectCallback(
     return JVMTI_ITERATION_CONTINUE;
 }
 
-/**
- * 获取指定类及其子类在堆中所有尚未被回收的实例并返回局部引用数组。
- * 包含多态子类与接口实现，包含不可达但尚未被 GC 物理回收的对象。
- */
-static std::expected<jobjectArray, jvmtiError>
-getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass) {
-    if (!jvmti || !env || !klass) return std::unexpected(JVMTI_ERROR_NULL_POINTER);
+static jvmtiIterationControl JNICALL
+HasInstanceCallback(jlong /*class_tag*/, jlong /*size*/, jlong* /*tag_ptr*/, void* user_data) {
+    if (user_data) {
+        *static_cast<bool*>(user_data) = true;
+    }
+    return JVMTI_ITERATION_ABORT;
+}
+
+static jvmtiError
+validateInstanceQueryClass(jvmtiEnv* jvmti, JNIEnv* env, jclass klass) {
+    if (!jvmti || !env || !klass) return JVMTI_ERROR_NULL_POINTER;
 
     // 基本类型镜像（int.class / void.class …）在堆中没有物理实例，且 NewObjectArray 要求
     // elementClass 必须是引用类型 Class（HotSpot 内部 as_Klass 返回 nullptr 会直接 SIGSEGV）。
@@ -116,12 +120,12 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass) {
     jclass obj_clazz = env->FindClass("java/lang/Object");
     if (!obj_clazz) {
         env->ExceptionClear();
-        return std::unexpected(JVMTI_ERROR_CLASS_NOT_PREPARED);
+        return JVMTI_ERROR_CLASS_NOT_PREPARED;
     }
     const bool is_primitive = !env->IsAssignableFrom(klass, obj_clazz);
     env->DeleteLocalRef(obj_clazz);
     if (is_primitive) {
-        return std::unexpected(JVMTI_ERROR_ILLEGAL_ARGUMENT);
+        return JVMTI_ERROR_ILLEGAL_ARGUMENT;
     }
 
     // 数组类型（int[].class / int[][].class …）：IterateOverInstancesOfClass 会对该数组类
@@ -129,10 +133,38 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass) {
     // 用 JVMTI 的 IsArrayClass 直接判定，比接口推导更精确（无能力/阶段要求）。
     jboolean is_array_class = JNI_FALSE;
     if (auto e = jvmti->IsArrayClass(klass, &is_array_class); e != JVMTI_ERROR_NONE) {
-        return std::unexpected(e);
+        return e;
     }
     if (is_array_class) {
-        return std::unexpected(JVMTI_ERROR_ILLEGAL_ARGUMENT);
+        return JVMTI_ERROR_ILLEGAL_ARGUMENT;
+    }
+    return JVMTI_ERROR_NONE;
+}
+
+/**
+ * 命中首个未回收实例即通过 JVMTI_ITERATION_ABORT 提前终止遍历，不做打 tag 与对象数组构建。
+ */
+static std::expected<jboolean, jvmtiError>
+hasLiveInstanceInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass) {
+    if (auto err = validateInstanceQueryClass(jvmti, env, klass); err != JVMTI_ERROR_NONE) {
+        return std::unexpected(err);
+    }
+    bool found = false;
+    if (auto e = jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_EITHER, HasInstanceCallback, &found);
+        e != JVMTI_ERROR_NONE) {
+        return std::unexpected(e);
+    }
+    return found ? JNI_TRUE : JNI_FALSE;
+}
+
+/**
+ * 获取指定类及其子类在堆中所有尚未被回收的实例并返回局部引用数组。
+ * 包含多态子类与接口实现，包含不可达但尚未被 GC 物理回收的对象。
+ */
+static std::expected<jobjectArray, jvmtiError>
+getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass) {
+    if (auto err = validateInstanceQueryClass(jvmti, env, klass); err != JVMTI_ERROR_NONE) {
+        return std::unexpected(err);
     }
 
     std::lock_guard<std::mutex> lock(g_heap_mutex);
@@ -451,6 +483,26 @@ JNIEXPORT jobjectArray JNICALL GetReferrers(jvmtiEnv* /*ignored*/, JNIEnv* env, 
     return global;
 }
 
+/** JNI 导出函数：快速探测指定类在堆中是否存在活跃实例（命中首个即中止） */
+JNIEXPORT jboolean JNICALL Java_remold_util_LibTool_nHasLiveInstance(
+    JNIEnv* env,
+    jclass,
+    jclass target_clazz
+) {
+    if (!env) return JNI_FALSE;
+    jvmtiEnv* jvmti = getOrAcquireJvmti(env);
+    if (!jvmti) {
+        throwJvmtiException(env, "Failed to acquire JVMTI environment", JVMTI_ERROR_INTERNAL);
+        return JNI_FALSE;
+    }
+    auto res = hasLiveInstanceInternal(jvmti, env, target_clazz);
+    if (!res) {
+        throwJvmtiException(env, "JVMTI hasLiveInstance failed", res.error());
+        return JNI_FALSE;
+    }
+    return *res;
+}
+
 /** JNI 导出函数：获取指定类所有未回收实例，失败时向 Java 抛出异常 */
 JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetInstances(
     JNIEnv* env,
@@ -518,6 +570,14 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
             },
         };
         env->RegisterNatives(clazz, methods, 2);
+        JNINativeMethod probeMethod = {
+            .name = const_cast<char*>("nHasLiveInstance"),
+            .signature = const_cast<char*>("(Ljava/lang/Class;)Z"),
+            .fnPtr = reinterpret_cast<void*>(&Java_remold_util_LibTool_nHasLiveInstance),
+        };
+        if (env->RegisterNatives(clazz, &probeMethod, 1) != JNI_OK && env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
         env->DeleteLocalRef(clazz);
     } else {
         env->ExceptionClear();

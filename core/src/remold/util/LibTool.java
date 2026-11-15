@@ -208,14 +208,12 @@ public class LibTool {
 	}
 
 	private static native Object[] nGetInstances(Class<?> clazz);
+	private static native boolean  nHasLiveInstance(Class<?> clazz);
 	private static native Object[] nGetReferrers(Object targetObject);
+	private static volatile boolean fastLiveProbeSupported = true;
 
-	/**
-	 * 获取指定类及其子类在堆中所有尚未被回收的实例并返回局部引用数组。
-	 * 包含多态子类与接口实现，包含不可达但尚未被 GC 物理回收的对象。
-	 */
 	@SuppressWarnings("unchecked")
-	public synchronized static <T> T[] getInstances(Class<T> clazz) {
+	private static <T> Class<T> prepareInstanceQueryClass(Class<T> clazz) {
 		Objects.requireNonNull(clazz, "clazz cannot be null");
 		clazz = (Class<T>) ClassIdentity.canonicalize(clazz);
 		if (clazz.isPrimitive()) {
@@ -225,6 +223,34 @@ public class LibTool {
 			throw new IllegalArgumentException("Array types are not supported for instance queries: " + clazz);
 		}
 		if (!initialized) init();
+		return clazz;
+	}
+
+	/**
+	 * 非物化快速判定堆中是否存在指定类（含子类/实现）的未回收实例。
+	 *
+	 * <p>底层支持时会在遍历到第一个实例后立即中止 JVMTI 堆迭代（不打 tag、不构建对象数组）；
+	 * 若运行时加载的旧版 native 库尚无该导出符号，自动降级为 {@link #getInstances(Class)} 判空。</p>
+	 */
+	public synchronized static boolean hasLiveInstance(Class<?> clazz) {
+		clazz = prepareInstanceQueryClass(clazz);
+		if (fastLiveProbeSupported) {
+			try {
+				return nHasLiveInstance(clazz);
+			} catch (UnsatisfiedLinkError ignored) {
+				fastLiveProbeSupported = false;
+			}
+		}
+		return getInstances(clazz).length > 0;
+	}
+
+	/**
+	 * 获取指定类及其子类在堆中所有尚未被回收的实例并返回局部引用数组。
+	 * 包含多态子类与接口实现，包含不可达但尚未被 GC 物理回收的对象。
+	 */
+	@SuppressWarnings("unchecked")
+	public synchronized static <T> T[] getInstances(Class<T> clazz) {
+		clazz = prepareInstanceQueryClass(clazz);
 		T[] res = (T[]) nGetInstances(clazz);
 		return res != null ? res : (T[]) Array.newInstance(clazz, 0);
 	}

@@ -20,8 +20,10 @@ import remold.ref.AccessAlign;
 import remold.ref.ClassHierarchyOracle.HierarchyCheck;
 import remold.ref.InitFix;
 import remold.ref.MixinMemberAlign;
+import remold.util.LibTool;
 
 import java.lang.instrument.ClassDefinition;
+import java.lang.ref.Reference;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -38,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BatchHotpathOptimizationTest {
@@ -744,6 +747,24 @@ class BatchHotpathOptimizationTest {
 		RemoldAgent.BATCH_STAGE_B_MILLIS.set(42L);
 		RemoldAgent.resetLiveInstanceCache();
 		assertEquals(0L, RemoldAgent.BATCH_STAGE_B_MILLIS.get());
+	}
+
+	@Test
+	void libToolHasLiveInstanceDetectsPresenceAndRejectsNonObjectClasses() throws Exception {
+		String clsName = "test.FastLiveProbeSubject";
+		byte[] bytes = buildSimpleClass(clsName.replace('.', '/'), false, true);
+		Class<?> subject = defineAndInit(clsName, bytes);
+
+		assertFalse(LibTool.hasLiveInstance(subject),
+			"freshly defined class with no allocated instances must return false");
+
+		Object instance = subject.getDeclaredConstructor().newInstance();
+		assertTrue(LibTool.hasLiveInstance(subject),
+			"class with a reachable live instance must return true via fast early-abort probe");
+		Reference.reachabilityFence(instance);
+
+		assertThrows(IllegalArgumentException.class, () -> LibTool.hasLiveInstance(int.class));
+		assertThrows(IllegalArgumentException.class, () -> LibTool.hasLiveInstance(Object[].class));
 	}
 
 	private static Class<?> defineAndInit(String dotName, byte[] bytes) throws Exception {

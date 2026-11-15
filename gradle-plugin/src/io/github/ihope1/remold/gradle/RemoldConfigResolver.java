@@ -355,12 +355,7 @@ public final class RemoldConfigResolver {
 
         jvmArgs.addAll(ext.getExtraJvmArgs());
         jvmArgs.add("-Dremold.build_mode=" + buildMode);
-        if (ext.getFileShakeMs() != null) {
-            jvmArgs.add("-Dremold.agent.file_shake_ms=" + ext.getFileShakeMs());
-        }
-        if (ext.getAssetShakeMs() != null) {
-            jvmArgs.add("-Dremold.agent.asset_shake_ms=" + ext.getAssetShakeMs());
-        }
+        addAgentProperties(project, ext, jvmArgs);
 
         if (project.getPlugins().hasPlugin("fabric-loom") || project.getExtensions().findByName("loom") != null || usesMixinEcosystem(project)) {
             File ideaClasses = new File(project.getProjectDir(), "out/production/classes");
@@ -959,5 +954,137 @@ public final class RemoldConfigResolver {
         String v = version.trim();
         if (v.startsWith("v") || v.startsWith("V")) v = v.substring(1);
         return v;
+    }
+
+    private static void addAgentProperties(Project project, RemoldExtension ext, List<String> jvmArgs) {
+        addIntegerOption(project, jvmArgs, "remold.agent.file_shake_ms", ext.getFileShakeMs(),
+                "remold.fileShakeMs", "remold.agent.file_shake_ms");
+        addIntegerOption(project, jvmArgs, "remold.agent.asset_shake_ms", ext.getAssetShakeMs(),
+                "remold.assetShakeMs", "remold.agent.asset_shake_ms");
+        addBooleanOption(project, jvmArgs, "remold.agent.two_phase", ext.getTwoPhase(),
+                "remold.twoPhase", "remold.agent.two_phase");
+        addCsvOption(project, jvmArgs, "remold.agent.init_drift.parents", ext.getInitDriftParents(),
+                "remold.initDriftParents", "remold.agent.init_drift.parents");
+        addCsvOption(project, jvmArgs, "remold.agent.init_drift.apply_holders", ext.getInitDriftApplyHolders(),
+                "remold.initDriftApplyHolders", "remold.agent.init_drift.apply_holders");
+        addIntegerOption(project, jvmArgs, "remold.agent.ready_timeout_ms", ext.getReadyTimeoutMs(),
+                "remold.readyTimeoutMs", "remold.agent.ready_timeout_ms");
+        addIntegerOption(project, jvmArgs, "remold.agent.batch_stall_ms", ext.getBatchStallMs(),
+                "remold.batchStallMs", "remold.agent.batch_stall_ms");
+        addBooleanOption(project, jvmArgs, "remold.agent.perf_log", ext.getPerfLog(),
+                "remold.perfLog", "remold.agent.perf_log");
+        addBooleanOption(project, jvmArgs, "remold.agent.diff_log", ext.getDiffLog(),
+                "remold.diffLog", "remold.agent.diff_log");
+        addStringOption(project, jvmArgs, "remold.path.libtool", ext.getLibtoolPath(),
+                "remold.libtoolPath", "remold.path.libtool");
+    }
+
+    private static void addIntegerOption(
+            Project project,
+            List<String> jvmArgs,
+            String sysProp,
+            Integer dslValue,
+            String... propKeys) {
+        if (dslValue != null) {
+            jvmArgs.add("-D" + sysProp + "=" + dslValue);
+            return;
+        }
+        Object raw = findPropertyValue(project, propKeys);
+        if (raw == null) return;
+        if (raw instanceof Number) {
+            jvmArgs.add("-D" + sysProp + "=" + ((Number) raw).intValue());
+            return;
+        }
+        String text = raw.toString().trim();
+        if (text.isEmpty()) return;
+        try {
+            jvmArgs.add("-D" + sysProp + "=" + Integer.parseInt(text));
+        } catch (NumberFormatException e) {
+            throw new GradleException("[Remold] Invalid integer for " + sysProp + ": " + text, e);
+        }
+    }
+
+    private static void addBooleanOption(
+            Project project,
+            List<String> jvmArgs,
+            String sysProp,
+            Boolean dslValue,
+            String... propKeys) {
+        if (dslValue != null) {
+            jvmArgs.add("-D" + sysProp + "=" + dslValue);
+            return;
+        }
+        Object raw = findPropertyValue(project, propKeys);
+        if (raw == null) return;
+        if (raw instanceof Boolean) {
+            jvmArgs.add("-D" + sysProp + "=" + raw);
+            return;
+        }
+        String text = raw.toString().trim();
+        if (text.isEmpty()) return;
+        if ("true".equalsIgnoreCase(text) || "false".equalsIgnoreCase(text)) {
+            jvmArgs.add("-D" + sysProp + "=" + Boolean.parseBoolean(text));
+            return;
+        }
+        throw new GradleException("[Remold] Invalid boolean for " + sysProp + ": " + text);
+    }
+
+    private static void addStringOption(
+            Project project,
+            List<String> jvmArgs,
+            String sysProp,
+            String dslValue,
+            String... propKeys) {
+        String resolved = dslValue;
+        if (resolved == null) {
+            Object raw = findPropertyValue(project, propKeys);
+            resolved = raw != null ? raw.toString() : null;
+        }
+        if (resolved == null) return;
+        String trimmed = resolved.trim();
+        if (!trimmed.isEmpty()) {
+            jvmArgs.add("-D" + sysProp + "=" + trimmed);
+        }
+    }
+
+    private static void addCsvOption(
+            Project project,
+            List<String> jvmArgs,
+            String sysProp,
+            List<String> dslValues,
+            String... propKeys) {
+        List<String> items = new ArrayList<>();
+        if (dslValues != null && !dslValues.isEmpty()) {
+            for (String value : dslValues) {
+                addTrimmedCsvParts(items, value);
+            }
+        } else {
+            Object raw = findPropertyValue(project, propKeys);
+            if (raw != null) {
+                addTrimmedCsvParts(items, raw.toString());
+            }
+        }
+        if (!items.isEmpty()) {
+            jvmArgs.add("-D" + sysProp + "=" + String.join(",", items));
+        }
+    }
+
+    private static void addTrimmedCsvParts(List<String> target, String raw) {
+        if (raw == null) return;
+        for (String part : raw.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) {
+                target.add(trimmed);
+            }
+        }
+    }
+
+    private static Object findPropertyValue(Project project, String... propKeys) {
+        if (project == null || propKeys == null) return null;
+        for (String key : propKeys) {
+            Object val = project.findProperty(key);
+            if (val != null) return val;
+        }
+        return null;
     }
 }

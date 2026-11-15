@@ -470,6 +470,115 @@ class RemoldPluginTest {
                 "Expected remold.autoMcToast=false to omit mc-toast, got: " + disabledConf.getJvmArgs());
     }
 
+    @org.junit.jupiter.api.Test
+    void agentPropertyOptionsForwardDslAndProjectPropertiesAndOmitDefaults() throws Exception {
+        File dummyAgent = new File(tempDir, "remold-agent.jar");
+        Files.write(dummyAgent.toPath(), new byte[2048]);
+
+        Project defaultProject = ProjectBuilder.builder().withProjectDir(tempDir).build();
+        defaultProject.getPluginManager().apply("java");
+        defaultProject.getPluginManager().apply(RemoldPlugin.class);
+        RemoldExtension defaultExt = (RemoldExtension) defaultProject.getExtensions().getByName("remold");
+        defaultExt.setAgentJar(dummyAgent.getAbsolutePath());
+        defaultExt.setMainClass("com.example.Main");
+
+        RemoldResolvedConfig defaultConf = new RemoldConfigResolver().resolve(defaultProject, defaultExt);
+        Assertions.assertFalse(
+                defaultConf.getJvmArgs().stream().anyMatch(a ->
+                        a.startsWith("-Dremold.agent.") || a.startsWith("-Dremold.path.libtool=")),
+                "Expected unset agent options to emit no flags, got: " + defaultConf.getJvmArgs());
+
+        Project dslProject = ProjectBuilder.builder().withProjectDir(tempDir).build();
+        dslProject.getPluginManager().apply("java");
+        dslProject.getPluginManager().apply(RemoldPlugin.class);
+        RemoldExtension dslExt = (RemoldExtension) dslProject.getExtensions().getByName("remold");
+        dslExt.setAgentJar(dummyAgent.getAbsolutePath());
+        dslExt.setMainClass("com.example.Main");
+        dslExt.setFileShakeMs(900);
+        dslExt.setAssetShakeMs(150);
+        dslExt.setTwoPhase(false);
+        dslExt.initDriftParents("com.example.Base", " com.example.Alt ");
+        dslExt.initDriftApplyHolders("com.example.Reg");
+        dslExt.setReadyTimeoutMs(4000);
+        dslExt.setBatchStallMs(30000);
+        dslExt.setPerfLog(true);
+        dslExt.setDiffLog(true);
+        dslExt.setLibtoolPath("/opt/remold/libtool.so");
+
+        RemoldResolvedConfig dslConf = new RemoldConfigResolver().resolve(dslProject, dslExt);
+        List<String> expectedDslFlags = Arrays.asList(
+                "-Dremold.agent.file_shake_ms=900",
+                "-Dremold.agent.asset_shake_ms=150",
+                "-Dremold.agent.two_phase=false",
+                "-Dremold.agent.init_drift.parents=com.example.Base,com.example.Alt",
+                "-Dremold.agent.init_drift.apply_holders=com.example.Reg",
+                "-Dremold.agent.ready_timeout_ms=4000",
+                "-Dremold.agent.batch_stall_ms=30000",
+                "-Dremold.agent.perf_log=true",
+                "-Dremold.agent.diff_log=true",
+                "-Dremold.path.libtool=/opt/remold/libtool.so"
+        );
+        for (String expected : expectedDslFlags) {
+            Assertions.assertTrue(dslConf.getJvmArgs().contains(expected),
+                    "Missing expected DSL flag " + expected + " in " + dslConf.getJvmArgs());
+        }
+
+        Project propProject = ProjectBuilder.builder().withProjectDir(tempDir).build();
+        propProject.getPluginManager().apply("java");
+        propProject.getPluginManager().apply(RemoldPlugin.class);
+        propProject.getExtensions().getExtraProperties().set("remold.fileShakeMs", "1200");
+        propProject.getExtensions().getExtraProperties().set("remold.agent.asset_shake_ms", "300");
+        propProject.getExtensions().getExtraProperties().set("remold.twoPhase", "true");
+        propProject.getExtensions().getExtraProperties().set("remold.initDriftParents", " a.One , a.Two ");
+        propProject.getExtensions().getExtraProperties().set("remold.agent.init_drift.apply_holders", "b.Holder");
+        propProject.getExtensions().getExtraProperties().set("remold.readyTimeoutMs", "2500");
+        propProject.getExtensions().getExtraProperties().set("remold.batchStallMs", "20000");
+        propProject.getExtensions().getExtraProperties().set("remold.perfLog", "false");
+        propProject.getExtensions().getExtraProperties().set("remold.agent.diff_log", "true");
+        propProject.getExtensions().getExtraProperties().set("remold.libtoolPath", "C:\\native\\tool.dll");
+
+        RemoldExtension propExt = (RemoldExtension) propProject.getExtensions().getByName("remold");
+        propExt.setAgentJar(dummyAgent.getAbsolutePath());
+        propExt.setMainClass("com.example.Main");
+        RemoldResolvedConfig propConf = new RemoldConfigResolver().resolve(propProject, propExt);
+        List<String> expectedPropFlags = Arrays.asList(
+                "-Dremold.agent.file_shake_ms=1200",
+                "-Dremold.agent.asset_shake_ms=300",
+                "-Dremold.agent.two_phase=true",
+                "-Dremold.agent.init_drift.parents=a.One,a.Two",
+                "-Dremold.agent.init_drift.apply_holders=b.Holder",
+                "-Dremold.agent.ready_timeout_ms=2500",
+                "-Dremold.agent.batch_stall_ms=20000",
+                "-Dremold.agent.perf_log=false",
+                "-Dremold.agent.diff_log=true",
+                "-Dremold.path.libtool=C:\\native\\tool.dll"
+        );
+        for (String expected : expectedPropFlags) {
+            Assertions.assertTrue(propConf.getJvmArgs().contains(expected),
+                    "Missing expected property flag " + expected + " in " + propConf.getJvmArgs());
+        }
+
+        Project badIntProject = ProjectBuilder.builder().withProjectDir(tempDir).build();
+        badIntProject.getPluginManager().apply("java");
+        badIntProject.getPluginManager().apply(RemoldPlugin.class);
+        badIntProject.getExtensions().getExtraProperties().set("remold.batchStallMs", "not-a-number");
+        RemoldExtension badIntExt = (RemoldExtension) badIntProject.getExtensions().getByName("remold");
+        badIntExt.setAgentJar(dummyAgent.getAbsolutePath());
+        badIntExt.setMainClass("com.example.Main");
+        Assertions.assertThrows(GradleException.class,
+                () -> new RemoldConfigResolver().resolve(badIntProject, badIntExt));
+
+        Project badBoolProject = ProjectBuilder.builder().withProjectDir(tempDir).build();
+        badBoolProject.getPluginManager().apply("java");
+        badBoolProject.getPluginManager().apply(RemoldPlugin.class);
+        badBoolProject.getExtensions().getExtraProperties().set("remold.perfLog", "maybe");
+        RemoldExtension badBoolExt = (RemoldExtension) badBoolProject.getExtensions().getByName("remold");
+        badBoolExt.setAgentJar(dummyAgent.getAbsolutePath());
+        badBoolExt.setMainClass("com.example.Main");
+        Assertions.assertThrows(GradleException.class,
+                () -> new RemoldConfigResolver().resolve(badBoolProject, badBoolExt));
+    }
+
     private RemoldResolvedConfig resolvedConfig(Project project, List<String> jvmArgs) throws Exception {
         File agent = new File(tempDir, "remold-agent.jar");
         Files.write(agent.toPath(), new byte[2048]);

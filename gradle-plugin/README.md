@@ -75,9 +75,17 @@ remold {
     // agentJar   = "libs/remold-agent.jar"   // use a local agent jar instead of downloading one
     // jbrPath    = "/path/to/jbr"            // JBR home (default: JBR_HOME env / jbr.home system property)
     // mainClass  = "your.package.Main"       // inferred when the application plugin is applied
-    // fileShakeMs = 800                      // class/jar quiet window; every class event resets it
+    // fileShakeMs  = 800                     // class/jar quiet window; every class event resets it
     // assetShakeMs = 250                     // asset/config quiet window; independent from class batches
-    // debug      = true                      // JDWP on 127.0.0.1:5005 (loopback only)
+    // twoPhase     = true                    // schema-first two-phase redefine (false -> single-phase)
+    // readyTimeoutMs = 0                     // startup readiness gate auto-release timeout (0 -> off)
+    // batchStallMs = 15000                   // batch stall watchdog dump threshold in ms (floor: 5000)
+    // initDriftParents("com.example.Base")   // L1 double-brace init replay parent class allowlist
+    // initDriftApplyHolders("com.example.Reg") // A-track Kotlin object / top-level val holder allowlist
+    // perfLog      = false                   // print per-stage perf summary logs
+    // diffLog      = false                   // print bytecode structural diff debug logs
+    // libtoolPath  = "/path/to/libtool.so"   // explicit native libtool library path
+    // debug        = true                    // JDWP on 127.0.0.1:5005 (loopback only)
     // debugPort  = 5005
 
     // JAR launch mode (game mods, standalone clients)

@@ -99,13 +99,16 @@ The following JVM system properties can be overridden as needed (the Gradle plug
 
 | System property | Default | Effect |
 |:--|:--|:--|
-| `-Dremold.agent.two_phase` | `true` | Two-phase schema-first redefine; `false` falls back to single-phase |
-| `-Dremold.agent.init_drift.parents` | empty (off) | L1 double-brace initializer replay allowlist of parent classes (comma separated) |
-| `-Dremold.agent.init_drift.apply_holders` | empty (off) | A-track Kotlin `object` / top-level `val` holder allowlist (comma separated) |
-| `-Dremold.agent.ready_timeout_ms` | `0` | Start-up readiness gate timeout in ms; `0` means never release early |
-| `-Dremold.agent.batch_stall_ms` | `15000` | Batch stall watchdog threshold (floor `5000`); one `[HOTSWAP-STALL]` full thread dump on timeout |
+| `-Dremold.agent.two_phase` | `true` | Two-phase schema-first redefine; `false` falls back to single-phase (Gradle DSL: `twoPhase`) |
+| `-Dremold.agent.init_drift.parents` | empty (off) | L1 double-brace initializer replay allowlist of parent classes (comma separated; Gradle DSL: `initDriftParents`) |
+| `-Dremold.agent.init_drift.apply_holders` | empty (off) | A-track Kotlin `object` / top-level `val` holder allowlist (comma separated; Gradle DSL: `initDriftApplyHolders`) |
+| `-Dremold.agent.ready_timeout_ms` | `0` | Start-up readiness gate timeout in ms; `0` means never release early (Gradle DSL: `readyTimeoutMs`) |
+| `-Dremold.agent.batch_stall_ms` | `15000` | Batch stall watchdog threshold (floor `5000`); one `[HOTSWAP-STALL]` full thread dump on timeout (Gradle DSL: `batchStallMs`) |
 | `-Dremold.agent.file_shake_ms` | `800` | Class/jar debounce window (Gradle DSL: `fileShakeMs`) |
 | `-Dremold.agent.asset_shake_ms` | `250` | Resource/config debounce window, independent of the Class window (Gradle DSL: `assetShakeMs`) |
+| `-Dremold.agent.perf_log` | `false` | Emit per-stage hotspot and timing summary logs (Gradle DSL: `perfLog`) |
+| `-Dremold.agent.diff_log` | `false` | Emit verbose structural bytecode diff debug logs (Gradle DSL: `diffLog`) |
+| `-Dremold.path.libtool` | auto-resolved | Explicit absolute path to the native `libtool` library (Gradle DSL: `libtoolPath`) |
 
 The remaining safety-gate switches (`layout_gate`, `anon_align`, `anon_strict`, `local_class_guard`, `offset_strict`, …) are documented in [`AGENTS.md`](AGENTS.md) and [`docs/status.md`](docs/status.md).
 

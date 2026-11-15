@@ -105,13 +105,16 @@ remold {
 
 | 系统属性 | 默认值 | 作用 |
 |:--|:--|:--|
-| `-Dremold.agent.two_phase` | `true` | 两阶段 Schema-First 重定义；`false` 回退单阶段 |
-| `-Dremold.agent.init_drift.parents` | 空（关闭） | L1 双括号初值重放的父类白名单（逗号分隔） |
-| `-Dremold.agent.init_drift.apply_holders` | 空（关闭） | A 档 Kotlin `object` / 顶层 `val` 持有者白名单（逗号分隔） |
-| `-Dremold.agent.ready_timeout_ms` | `0` | 启动就绪门闩超时放行毫秒数；`0` 表示未就绪时不自动放行 |
-| `-Dremold.agent.batch_stall_ms` | `15000` | 批次卡死看门狗阈值（下限 `5000`）；超时打印一次 `[HOTSWAP-STALL]` 全线程栈 |
+| `-Dremold.agent.two_phase` | `true` | 两阶段 Schema-First 重定义；`false` 回退单阶段（Gradle DSL：`twoPhase`） |
+| `-Dremold.agent.init_drift.parents` | 空（关闭） | L1 双括号初值重放的父类白名单（逗号分隔；Gradle DSL：`initDriftParents`） |
+| `-Dremold.agent.init_drift.apply_holders` | 空（关闭） | A 档 Kotlin `object` / 顶层 `val` 持有者白名单（逗号分隔；Gradle DSL：`initDriftApplyHolders`） |
+| `-Dremold.agent.ready_timeout_ms` | `0` | 启动就绪门闩超时放行毫秒数；`0` 表示未就绪时不自动放行（Gradle DSL：`readyTimeoutMs`） |
+| `-Dremold.agent.batch_stall_ms` | `15000` | 批次卡死看门狗阈值（下限 `5000`）；超时打印一次 `[HOTSWAP-STALL]` 全线程栈（Gradle DSL：`batchStallMs`） |
 | `-Dremold.agent.file_shake_ms` | `800` | Class/jar 变动防抖窗口（Gradle DSL：`fileShakeMs`） |
 | `-Dremold.agent.asset_shake_ms` | `250` | 资源/配置变动防抖窗口，独立于 Class 窗口（Gradle DSL：`assetShakeMs`） |
+| `-Dremold.agent.perf_log` | `false` | 打印各阶段热点与耗时摘要日志（Gradle DSL：`perfLog`） |
+| `-Dremold.agent.diff_log` | `false` | 打印字节码成员/指令级结构差异调试日志（Gradle DSL：`diffLog`） |
+| `-Dremold.path.libtool` | 自动解析 | 指定本地 `libtool` 原生库绝对路径（用于跳过内嵌释放；Gradle DSL：`libtoolPath`） |
 
 其余安全门开关（`layout_gate`、`anon_align`、`anon_strict`、`local_class_guard`、`offset_strict` 等）见 [`AGENTS.md`](AGENTS.md) 与 [`docs/status.md`](docs/status.md)。
 

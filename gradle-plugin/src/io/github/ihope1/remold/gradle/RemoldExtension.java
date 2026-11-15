@@ -37,6 +37,14 @@ public class RemoldExtension {
     private final List<String> extraJvmArgs = new ArrayList<>();
     private Integer fileShakeMs;
     private Integer assetShakeMs;
+    private Boolean twoPhase;
+    private final List<String> initDriftParents = new ArrayList<>();
+    private final List<String> initDriftApplyHolders = new ArrayList<>();
+    private Integer readyTimeoutMs;
+    private Integer batchStallMs;
+    private Boolean perfLog;
+    private Boolean diffLog;
+    private String libtoolPath;
     private final List<Object> dependsOn = new ArrayList<>();
     private Object deployDir;
     private Object modsDir;
@@ -174,6 +182,104 @@ public class RemoldExtension {
 
     public void setAssetShakeMs(Integer assetShakeMs) {
         this.assetShakeMs = assetShakeMs;
+    }
+
+    public Boolean getTwoPhase() {
+        return twoPhase;
+    }
+
+    public void setTwoPhase(Boolean twoPhase) {
+        this.twoPhase = twoPhase;
+    }
+
+    public List<String> getInitDriftParents() {
+        return initDriftParents;
+    }
+
+    public void setInitDriftParents(List<String> parents) {
+        this.initDriftParents.clear();
+        if (parents != null) {
+            for (String parent : parents) {
+                addTrimmedEntry(this.initDriftParents, parent);
+            }
+        }
+    }
+
+    public void initDriftParents(String... parents) {
+        if (parents != null) {
+            for (String parent : parents) {
+                addTrimmedEntry(this.initDriftParents, parent);
+            }
+        }
+    }
+
+    public List<String> getInitDriftApplyHolders() {
+        return initDriftApplyHolders;
+    }
+
+    public void setInitDriftApplyHolders(List<String> holders) {
+        this.initDriftApplyHolders.clear();
+        if (holders != null) {
+            for (String holder : holders) {
+                addTrimmedEntry(this.initDriftApplyHolders, holder);
+            }
+        }
+    }
+
+    public void initDriftApplyHolders(String... holders) {
+        if (holders != null) {
+            for (String holder : holders) {
+                addTrimmedEntry(this.initDriftApplyHolders, holder);
+            }
+        }
+    }
+
+    public Integer getReadyTimeoutMs() {
+        return readyTimeoutMs;
+    }
+
+    public void setReadyTimeoutMs(Integer readyTimeoutMs) {
+        this.readyTimeoutMs = readyTimeoutMs;
+    }
+
+    public Integer getBatchStallMs() {
+        return batchStallMs;
+    }
+
+    public void setBatchStallMs(Integer batchStallMs) {
+        this.batchStallMs = batchStallMs;
+    }
+
+    public Boolean getPerfLog() {
+        return perfLog;
+    }
+
+    public void setPerfLog(Boolean perfLog) {
+        this.perfLog = perfLog;
+    }
+
+    public Boolean getDiffLog() {
+        return diffLog;
+    }
+
+    public void setDiffLog(Boolean diffLog) {
+        this.diffLog = diffLog;
+    }
+
+    public String getLibtoolPath() {
+        return libtoolPath;
+    }
+
+    public void setLibtoolPath(String libtoolPath) {
+        this.libtoolPath = libtoolPath;
+    }
+
+    private static void addTrimmedEntry(List<String> target, String value) {
+        if (value == null) return;
+        String trimmed = value.trim();
+        if (!trimmed.isEmpty()) {
+            target.add(trimmed);
+        }
     }
 
     public List<Object> getDependsOn() {

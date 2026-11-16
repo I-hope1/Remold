@@ -237,11 +237,14 @@ public class CellPropertyRef {
 	private static final    int                    MAX_FAILURES = 20;
 	private static volatile Thread                 uiThread;
 
+	// 并发纪律：chainCache / templateCache 会被 UI 线程（绑定、重定义回调）与清理入口同时触碰，
+	// 用并发容器；不要在 cellState 锁里清它们——该锁的持有者（生产方）并不在这把锁内读写，
+	// 借用它没有任何互斥效果，只会让"看起来受保护"变成误判。
 	private static final Map<Cell<?>, CellState>                            cellState      = new WeakHashMap<>();
 	private static final Map<CellIdentity, Set<Cell<?>>>                    idToCells      = new HashMap<>();
 	private static final Map<String, LinkedHashSet<CellIdentity>>           classToCells   = new HashMap<>();
-	private static final Map<String, Map<String, List<List<PropertyCall>>>> chainCache     = new HashMap<>();
-	private static final Map<CellIdentity, ChainMatch>                      templateCache  = new HashMap<>();
+	private static final Map<String, Map<String, List<List<PropertyCall>>>> chainCache     = new ConcurrentHashMap<>();
+	private static final Map<CellIdentity, ChainMatch>                      templateCache  = new ConcurrentHashMap<>();
 	private static final Map<Cell<?>, CellIdentity>                         unpatchedCells = new WeakHashMap<>();
 	private static final Map<Table, Map<String, Integer>>                   tableSiteOrdinals = new WeakHashMap<>();
 
@@ -356,7 +359,9 @@ public class CellPropertyRef {
 		if (DEBUG) log("[CellProperty] Bound: " + id + " idx=" + chainIdx);
 	}
 
-	private static final Set<Cell<?>> KNOWN_DEFAULTS = Collections.newSetFromMap(new WeakHashMap<>());
+	// 弱键 + 同步包装：WeakHashMap 在并发 add/contains 下会结构性损坏（探测式清理会改内部表）。
+	private static final Set<Cell<?>> KNOWN_DEFAULTS =
+	 Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
 
 	public static boolean isCellDefaults(Cell<?> c) {
 		if (c == null) return false;
@@ -1166,11 +1171,19 @@ public class CellPropertyRef {
 			if (!isLambdaKey(k) && newM.containsKey(k)) out.put(k, k);
 		}
 
-		// 1. 优先采用 LambdaAligner 产出的权威映射（oldKey -> newKey），且仅作用于当前对齐的类。
+		// 1. 优先采用 LambdaAligner 产出的权威映射（oldKey -> newKey），且只采用**本类**那一轮的对齐快照。
 		//
-		// 映射与类名必须来自**同一个快照**：早先它们是两个独立的 volatile 字段，分别读取时
-		// 中间可能插进另一轮对齐，于是"拿 A 类的映射去比 B 类的类名"，比较结果毫无意义。
-		LambdaAligner.AlignmentResult aligned = LambdaAligner.LAST_RESULT;
+		// 必须按类检索：align 是逐类调用的，而本方法在整批类都重定义完之后（afterRedefineBatch）才跑。
+		// 全局单槽 LAST_RESULT 在那一刻只剩"本批最后一个被对齐的类"，用它会让批内前序类静默退回
+		// 相似度猜测（跨类批次里前面每个类的权威映射都会丢）。lastResultFor 返回的仍是不可变快照，
+		// 映射与 alignedClass 来自同一个对象，不存在跨轮拼接。
+		LambdaAligner.AlignmentResult aligned = LambdaAligner.lastResultFor(slashName);
+		if (aligned == null) {
+			// 兼容路径：本轮按类记账缺失（例如新字节不可解析、或调用方只发布了全局单槽）时，
+			// 仅当单槽自己声明的类名就是本类才允许使用——类名相等即同一个快照，不会借到别的类的映射。
+			LambdaAligner.AlignmentResult last = LambdaAligner.LAST_RESULT;
+			if (last != null && Objects.equals(slashName, last.alignedClass)) aligned = last;
+		}
 		if (aligned != null
 		    && aligned.methodMapping != null && !aligned.methodMapping.isEmpty()
 		    && Objects.equals(slashName, aligned.alignedClass)) {
@@ -3808,14 +3821,15 @@ public class CellPropertyRef {
 			cellState.clear();
 			idToCells.clear();
 			classToCells.clear();
-			chainCache.clear();
-			templateCache.clear();
 			unpatchedCells.clear();
 			tableSiteOrdinals.clear();
 			WHOLE_CLASS_HELPERS.clear();
 			HELPER_METHODS_BY_CLASS.clear();
 			SCANNED_HELPER_CLASSES.clear();
 		}
+		// 并发容器：逐项操作自身原子，不再借 cellState 锁（生产方不在该锁内，借了也没有互斥效果）。
+		chainCache.clear();
+		templateCache.clear();
 		info("[CellProperty] 🗑 Cleared all records");
 	}
 
@@ -4537,13 +4551,17 @@ public class CellPropertyRef {
 
 	public static class ElementCallback {
 		public final WeakReference<Element> elementRef;
-		public final Object                 callback;
+		/**
+		 * 只弱引用 callback：callback 往往捕获宿主类/大对象，强引用会让"元素已不可达"的登记项
+		 * 连带把整条对象图钉在内存里，直到某次热更触发清理为止。
+		 */
+		public final WeakReference<Object>  callbackRef;
 		public final String                 registerMethod;
 		public final String                 hostClass;
 
 		public ElementCallback(WeakReference<Element> elementRef, Object callback, String registerMethod, String hostClass) {
 			this.elementRef = elementRef;
-			this.callback = callback;
+			this.callbackRef = new WeakReference<>(callback);
 			this.registerMethod = registerMethod;
 			this.hostClass = hostClass;
 		}
@@ -4555,7 +4573,20 @@ public class CellPropertyRef {
 		if (element == null || callback == null) return;
 		String host = Injector.getHostClassName(callback);
 		String slashHost = host != null ? host.replace('.', '/') : null;
+		pruneStaleCallbacks();
 		TRACKED_CALLBACKS.add(new ElementCallback(new WeakReference<>(element), callback, registerMethod, slashHost));
+	}
+
+	/**
+	 * 清掉元素或 callback 已不可达的登记项。
+	 *
+	 * <p>不依赖后续热更触发：{@code doTriggerCallbackRebuild} 只在宿主类**再次**重定义时才跑，
+	 * 长期不热更的会话里，已死的元素/回调会一直留在表里。</p>
+	 */
+	public static void pruneStaleCallbacks() {
+		synchronized (TRACKED_CALLBACKS) {
+			TRACKED_CALLBACKS.removeIf(cb -> cb.elementRef.get() == null || cb.callbackRef.get() == null);
+		}
 	}
 
 	public static void unregisterElementCallback(Element element, Object callback) {
@@ -4564,8 +4595,10 @@ public class CellPropertyRef {
 			TRACKED_CALLBACKS.removeIf(cb -> {
 				Element el = cb.elementRef.get();
 				if (el == null) return true;
+				Object cbk = cb.callbackRef.get();
+				if (cbk == null) return true;
 				if (element != null && el != element) return false;
-				return callback == null || cb.callback == callback;
+				return callback == null || cbk == callback;
 			});
 		}
 	}
@@ -4600,7 +4633,8 @@ public class CellPropertyRef {
 			}
 		}
 		for (ElementCallback cb : targets) {
-			if (invokeCallback(cb.elementRef.get(), cb.callback)) {
+			Object cbk = cb.callbackRef.get();
+			if (cbk != null && invokeCallback(cb.elementRef.get(), cbk)) {
 				anyInvoked = true;
 			}
 		}
@@ -4614,7 +4648,7 @@ public class CellPropertyRef {
 			while (it.hasNext()) {
 				ElementCallback cb = it.next();
 				Element elem = cb.elementRef.get();
-				if (elem == null) {
+				if (elem == null || cb.callbackRef.get() == null) {
 					it.remove();
 					continue;
 				}
@@ -4631,7 +4665,8 @@ public class CellPropertyRef {
 		boolean anyInvoked = false;
 		for (ElementCallback cb : eligible) {
 			Element el = cb.elementRef.get();
-			if (el != null && invokeCallback(el, cb.callback)) {
+			Object cbk = cb.callbackRef.get();
+			if (el != null && cbk != null && invokeCallback(el, cbk)) {
 				anyInvoked = true;
 			}
 		}

@@ -8,7 +8,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.instrument.ClassDefinition;
 import java.lang.instrument.Instrumentation;
-import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -70,6 +69,7 @@ class AnnotationDefaultGateTest {
 	}
 
 	private final RemoldAgent.Logger originalLogger = RemoldAgent.logger;
+	private final Instrumentation originalInstrumentation = RemoldAgent.getInstrumentation();
 	private final RecordingLogger recorder = new RecordingLogger();
 
 	private void installLogger() {
@@ -78,6 +78,7 @@ class AnnotationDefaultGateTest {
 
 	@AfterEach
 	void restore() {
+		RemoldAgent.swapInstrumentationForTest(this.originalInstrumentation);
 		RemoldAgent.logger = this.originalLogger;
 		System.clearProperty("remold.agent.annotation_default_change");
 	}
@@ -217,19 +218,24 @@ class AnnotationDefaultGateTest {
 	// ------------------------------------------------------------ 动态单类路径
 
 	@Test
-	void dynamicRedefineRefusesWithoutCallingRedefineClasses() throws Exception {
+	void dynamicRedefineRefusesWithoutCallingRedefineClasses() {
 		installLogger();
 		RecordingInstrumentation recorderProxy = new RecordingInstrumentation();
-		installInstrumentation(recorderProxy.proxy);
+		Instrumentation previous = RemoldAgent.swapInstrumentationForTest(recorderProxy.proxy);
 		FixtureLoader fixtureLoader = new FixtureLoader();
 		Class<?> annotationType = fixtureLoader.define(mark("String value() default \"v1\";"));
-		RemoldAgent.bytecodeCache.put(annotationType.getName(), mark("String value() default \"v1\";"));
+		try {
+			RemoldAgent.bytecodeCache.put(annotationType.getName(), mark("String value() default \"v1\";"));
 
-		boolean accepted = RemoldAgent.redefineDynamic(annotationType, mark("String value() default \"v2\";"));
+			boolean accepted = RemoldAgent.redefineDynamic(annotationType, mark("String value() default \"v2\";"));
 
-		assertFalse(accepted, "the dynamic path must refuse an annotation default-value change");
-		assertTrue(recorderProxy.redefinitions.isEmpty(),
-			"a refused class must never reach Instrumentation.redefineClasses: " + recorderProxy.redefinitions);
+			assertFalse(accepted, "the dynamic path must refuse an annotation default-value change");
+			assertTrue(recorderProxy.redefinitions.isEmpty(),
+				"a refused class must never reach Instrumentation.redefineClasses: " + recorderProxy.redefinitions);
+		} finally {
+			RemoldAgent.bytecodeCache.remove(annotationType.getName());
+			RemoldAgent.swapInstrumentationForTest(previous);
+		}
 	}
 
 	// ------------------------------------------------------------ 辅助
@@ -275,12 +281,6 @@ class AnnotationDefaultGateTest {
 			if (type == int.class) return 0;
 			return 0;
 		}
-	}
-
-	private static void installInstrumentation(Instrumentation instrumentation) throws Exception {
-		Field field = RemoldAgent.class.getDeclaredField("inst");
-		field.setAccessible(true);
-		field.set(null, instrumentation);
 	}
 
 	/** 独立加载器：被测注解类型由内存字节定义，不落在测试 classpath 上。 */

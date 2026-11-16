@@ -6,6 +6,7 @@ import remold.offset.OffsetBindingIndex;
 import remold.offset.OffsetScanner;
 import remold.offset.SuperclassDriftGate;
 import remold.profiler.DynamicProfilerAPI;
+import remold.ref.HeapFieldWatch;
 import remold.ref.HotswapBridge;
 import remold.ref.InitFix;
 import remold.ref.StageBInstanceCache;
@@ -2716,7 +2717,13 @@ public class RemoldAgent {
 		if (needsTwoPhase && TWO_PHASE) {
 			outcome = applyTwoPhase(definitions, oldEffectiveBytes, transactions.values(), skips, injectedClasses);
 		} else {
+			if (HeapFieldWatch.enabled() && !definitions.isEmpty()) {
+				HeapFieldWatch.snapshot("before-redefine", batchWatchLabel(definitions));
+			}
 			outcome = applyRedefinitions(definitions, transactions.values(), skips);
+			if (HeapFieldWatch.enabled() && !outcome.successful().isEmpty()) {
+				HeapFieldWatch.snapshot("after-redefine", batchWatchLabel(definitions));
+			}
 		}
 		Set<String>     redefinedOk = outcome.successful();
 		Set<String>     rolledBack  = outcome.rolledBack();
@@ -2797,6 +2804,9 @@ public class RemoldAgent {
 			}
 		}
 		BATCH_STAGE_B_MILLIS.addAndGet(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - stageBStart));
+		if (HeapFieldWatch.enabled() && !(needsTwoPhase && TWO_PHASE) && !successfulDefinitions.isEmpty()) {
+			HeapFieldWatch.snapshot("after-field-patch", batchWatchLabel(successfulDefinitions));
+		}
 
 		// 必须在 InitFix 补丁（静态字段与存量实例字段）全部就位后，再对成功重定义的类触发 @OnReload 回调；
 		// 严禁在补丁就绪前触发，否则回调读到未初始化的零值（时序反转）。
@@ -4524,6 +4534,9 @@ public class RemoldAgent {
 			BATCH_TWOPHASE_SKEL_MILLIS.addAndGet(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - skelStartNanos));
 		}
 
+		if (HeapFieldWatch.enabled()) {
+			HeapFieldWatch.snapshot("before-redefine", batchWatchLabel(stageADefinitions));
+		}
 		long redefBeforeA = PERF_LOG ? BATCH_REDEFINE_MILLIS.get() : 0L;
 		Set<String> stageAAbandoned = new HashSet<>();
 		Set<String> stageAOk        = redefineStageA(stageADefinitions, stageABytes, transactions, skips, injectedClasses,
@@ -4535,6 +4548,9 @@ public class RemoldAgent {
 			warn("[HOTSWAP-2P] Stage A did not apply any class; the two-phase transaction is abandoned.");
 			skips.report();
 			return new RedefineOutcome(Set.of(), Set.of());
+		}
+		if (HeapFieldWatch.enabled()) {
+			HeapFieldWatch.snapshot("after-stage-a", batchWatchLabel(stageADefinitions));
 		}
 		info("[HOTSWAP-2P] Stage A applied for " + stageAOk.size()
 		     + " class(es): new shape with old method bodies; patching live instances before stage C.");
@@ -4578,6 +4594,9 @@ public class RemoldAgent {
 		}
 		long patchMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - patchStart);
 		BATCH_STAGE_B_MILLIS.addAndGet(patchMs);
+		if (HeapFieldWatch.enabled()) {
+			HeapFieldWatch.snapshot("after-field-patch", batchWatchLabel(stageADefinitions));
+		}
 
 		// ---- 阶段 C：只对阶段 A 成功的类提交完整新字节码 ----
 		List<ClassDefinition> stageCDefinitions = new ArrayList<>(stageAOk.size());
@@ -4593,6 +4612,9 @@ public class RemoldAgent {
 		if (PERF_LOG) {
 			BATCH_STAGE_C_MILLIS.addAndGet(BATCH_REDEFINE_MILLIS.get() - redefBeforeC);
 		}
+		if (HeapFieldWatch.enabled() && !stageCOutcome.successful().isEmpty()) {
+			HeapFieldWatch.snapshot("after-stage-c", batchWatchLabel(stageCDefinitions));
+		}
 		Set<String>     rolledBack    = new HashSet<>(stageCOutcome.rolledBack());
 		rolledBack.addAll(stageAAbandoned);
 		RedefineOutcome outcome = new RedefineOutcome(stageCOutcome.successful(), rolledBack);
@@ -4605,6 +4627,13 @@ public class RemoldAgent {
 		        : ".")
 		     );
 		return outcome;
+	}
+
+	private static String batchWatchLabel(List<ClassDefinition> defs) {
+		if (defs == null || defs.isEmpty()) return "batch(0)";
+		return defs.size() == 1
+			? defs.get(0).getDefinitionClass().getName()
+			: "batch(" + defs.size() + ")";
 	}
 
 	/**
@@ -5624,7 +5653,7 @@ public class RemoldAgent {
 
 			// 堆实例哨兵三切面（默认关闭，-Dremold.probe.heapwatch=true 开启）：
 			// 用于定位「某类字段在 redefine / 字段初始化补丁窗口内被置 null」这类跨类污染。
-			remold.ref.HeapFieldWatch.snapshot("before-redefine", className);
+			HeapFieldWatch.snapshot("before-redefine", className);
 			enterInternalRedefine(Collections.singleton(className));
 			try {
 				long stageAMs = 0L;
@@ -5636,7 +5665,7 @@ public class RemoldAgent {
 					long tStageA = System.nanoTime();
 					inst.redefineClasses(new ClassDefinition(targetClass, stageABytes));
 					stageAMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tStageA);
-					remold.ref.HeapFieldWatch.snapshot("after-stage-a", className);
+					HeapFieldWatch.snapshot("after-stage-a", className);
 					// 阶段 A 已生效：分析期 oracle 看的"新结构"仍是 C，但 JVM 当前真实形态是 A，
 					// 缓存先指向 A（与批次两阶段同口径）；C 成功后再推进。
 					bytecodeCache.put(className, stageABytes);
@@ -5651,7 +5680,7 @@ public class RemoldAgent {
 						      + " stage C will still be applied, so unpatched fields stay at defaults.", t);
 					}
 					stageBMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tStageB);
-					remold.ref.HeapFieldWatch.snapshot("after-field-patch", className);
+					HeapFieldWatch.snapshot("after-field-patch", className);
 
 					// ---- 阶段 C：提交现成的 runtimeBytes（桥接与 InitFix.transform 已做过，不重跑） ----
 					long tStageC = System.nanoTime();
@@ -5684,12 +5713,12 @@ public class RemoldAgent {
 						return false;
 					}
 					stageCMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tStageC);
-					remold.ref.HeapFieldWatch.snapshot("after-stage-c", className);
+					HeapFieldWatch.snapshot("after-stage-c", className);
 				} else {
 					long tRedef = System.nanoTime();
 					inst.redefineClasses(new ClassDefinition(targetClass, runtimeBytes));
 					redefMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tRedef);
-					remold.ref.HeapFieldWatch.snapshot("after-redefine", className);
+					HeapFieldWatch.snapshot("after-redefine", className);
 					bytecodeCache.put(className, runtimeBytes);
 					long tStageB = System.nanoTime();
 					try {
@@ -5699,7 +5728,7 @@ public class RemoldAgent {
 						InitFix.afterRedefineFailed(targetClass);
 					}
 					stageBMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tStageB);
-					remold.ref.HeapFieldWatch.snapshot("after-field-patch", className);
+					HeapFieldWatch.snapshot("after-field-patch", className);
 				}
 				long postStartNanos = System.nanoTime();
 				bytecodeCache.put(className, runtimeBytes);

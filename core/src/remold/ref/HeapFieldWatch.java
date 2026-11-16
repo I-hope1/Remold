@@ -1,8 +1,13 @@
 package remold.ref;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.lang.instrument.Instrumentation;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodHandles.Lookup;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -40,7 +45,7 @@ import remold.util.LibTool;
  * <h3>读数语义（校准契约）</h3>
  * <p>一次切面的读数拆成四个互斥计数，任何时候都满足 {@code total = nullCount + absent + unreadable + 正常非空}：</p>
  * <ul>
- *   <li>{@code total}：本次枚举到的该类实例数（分母，取 {@link LibTool#getInstances} 的精确类语义）；</li>
+ *   <li>{@code total}：本次枚举到的该类及子类实例数（分母，走 {@link LibTool#getInstances}）；</li>
  *   <li>{@code nullCount}：字段真实读到 {@code null} 的实例数（判据的唯一来源）；</li>
  *   <li>{@code absent}：实例的整条父类链上都没有该字段——**不得**并进 {@code nullCount}，也不得静默当作 0；</li>
  *   <li>{@code unreadable}：字段存在但读失败（{@code IllegalAccess} 等）——同上。</li>
@@ -85,7 +90,9 @@ public final class HeapFieldWatch {
 	/** 可选第二通道：无参 getter 方法名（默认空=只用字段句柄通道）。 */
 	private static final String GETTER_NAME = System.getProperty("remold.probe.heapwatch.getter", "");
 
-	private static volatile boolean warned;
+	private static final Object SNAPSHOT_LOCK = new Object();
+	private static volatile boolean disabled;
+	private static volatile boolean resolveWarned;
 	private static volatile int totalSnapshots;
 	private static volatile int nullHits;
 	/** 解析结果缓存（类身份在进程内稳定；同名多副本由 {@link ClassCopySelector} 选宿主权威副本）。 */
@@ -111,57 +118,70 @@ public final class HeapFieldWatch {
 	 * @param redefiningClass 当前正在被重定义的类（点分名，仅用于日志关联）
 	 */
 	public static void snapshot(String phase, String redefiningClass) {
-		if (!ENABLED) {
+		if (!ENABLED || disabled) {
 			return;
 		}
-		totalSnapshots++;
-		try {
-			Class<?> target = resolveTarget();
-			if (target == null) {
-				return;   // resolveTarget 已经 warn 过一次
+		synchronized (SNAPSHOT_LOCK) {
+			if (disabled) {
+				return;
 			}
-			Snapshot current = scan(phase, target, FIELD_NAME);
-			RemoldAgent.info(current.line(redefiningClass, resolvedVia));
-			if (current.absent > 0 || current.unreadable > 0) {
-				RemoldAgent.warn("[HEAPWATCH] field cannot be observed on " + current.absent
-					+ " instance(s) (absent) and " + current.unreadable + " instance(s) (unreadable) at phase="
-					+ phase + "; nullCount=" + current.nullCount
-					+ " is NOT evidence that the field is intact; resolve the class/field names first.");
-			}
-			Snapshot previous = last;
-			if (previous != null && previous.className.equals(current.className)
-				&& previous.fieldName.equals(current.fieldName)) {
-				Grouping grouping = group(previous, current);
-				lastGrouping = grouping;
-				lastDiff = grouping.line();
-				RemoldAgent.info(lastDiff);
-				RemoldAgent.info(grouping.identityLine());
-				if (!grouping.identitiesHold()) {
-					RemoldAgent.warn("[HEAPWATCH] grouping identities broken (the counts above do not add up,"
-						+ " so neither nullCount nor newlyNull may be read as evidence): " + grouping.identityLine());
+			totalSnapshots++;
+			try {
+				Class<?> target = resolveTarget();
+				if (target == null) {
+					return;   // resolveTarget 已经按需 warn 过一次
 				}
-				if (grouping.newlyNull > 0) {
-					RemoldAgent.warn("[HEAPWATCH] " + grouping.newlyNull
-						+ " instance(s) went non-null -> null between phase=" + previous.phase
-						+ " and phase=" + current.phase + " on " + current.className + "."
-						+ current.fieldName + " (" + lastDiff + ")");
+				Class<?> canonical = currentClassVersion(target);
+				if (canonical != target) {
+					RemoldAgent.warn("[HEAPWATCH] cached Class for " + target.getName()
+						+ " was a stale shadow written by a redefine; using the current class version."
+						+ " Readings through the stale reference describe the OLD field table.");
+					resolved = canonical;
+					target = canonical;
 				}
-			} else {
-				lastDiff = "";
-				lastGrouping = null;
-			}
-			if (current.channelConflict > 0) {
-				RemoldAgent.warn("[HEAPWATCH] second channel disagrees with the reflective read on "
-					+ current.channelConflict + " of " + current.total + " instance(s) at phase=" + phase
-					+ " (" + current.channelText() + "); treat this reading as unreliable"
-					+ " until the disagreement is explained.");
-			}
-			last = current;
-			nullHits += current.nullCount;
-		} catch (Throwable t) {
-			if (!warned) {
-				warned = true;
-				RemoldAgent.warn("[HEAPWATCH] disabled after failure: " + t);
+				Snapshot current = scan(phase, target, FIELD_NAME);
+				RemoldAgent.info(current.line(redefiningClass, resolvedVia));
+				if (current.absent > 0 || current.unreadable > 0) {
+					RemoldAgent.warn("[HEAPWATCH] field cannot be observed on " + current.absent
+						+ " instance(s) (absent) and " + current.unreadable + " instance(s) (unreadable) at phase="
+						+ phase + "; nullCount=" + current.nullCount
+						+ " is NOT evidence that the field is intact; resolve the class/field names first.");
+				}
+				Snapshot previous = last;
+				if (previous != null && previous.className.equals(current.className)
+					&& previous.fieldName.equals(current.fieldName)) {
+					Grouping grouping = group(previous, current);
+					lastGrouping = grouping;
+					lastDiff = grouping.line();
+					RemoldAgent.info(lastDiff);
+					RemoldAgent.info(grouping.identityLine());
+					if (!grouping.identitiesHold()) {
+						RemoldAgent.warn("[HEAPWATCH] grouping identities broken (the counts above do not add up,"
+							+ " so neither nullCount nor newlyNull may be read as evidence): " + grouping.identityLine());
+					}
+					if (grouping.newlyNull > 0) {
+						RemoldAgent.warn("[HEAPWATCH] " + grouping.newlyNull
+							+ " instance(s) went non-null -> null between phase=" + previous.phase
+							+ " and phase=" + current.phase + " on " + current.className + "."
+							+ current.fieldName + " (" + lastDiff + ")");
+					}
+				} else {
+					lastDiff = "";
+					lastGrouping = null;
+				}
+				if (current.channelConflict > 0) {
+					RemoldAgent.warn("[HEAPWATCH] second channel disagrees with the reflective read on "
+						+ current.channelConflict + " of " + current.total + " instance(s) at phase=" + phase
+						+ " (" + current.channelText() + "); treat this reading as unreliable"
+						+ " until the disagreement is explained.");
+				}
+				last = current;
+				nullHits += current.nullCount;
+			} catch (Throwable t) {
+				if (!disabled) {
+					disabled = true;
+					RemoldAgent.warn("[HEAPWATCH] disabled after failure: " + t);
+				}
 			}
 		}
 	}
@@ -285,7 +305,8 @@ public final class HeapFieldWatch {
 	public static Snapshot scan(String phase, Class<?> scanned, String fieldName) {
 		Class<?> target = currentClassVersion(scanned);
 		Object[] instances = LibTool.getInstances(target);
-		ChannelSet channels = ChannelSet.resolve(target, fieldName);
+		Field targetField = declaredField(target, fieldName);
+		ChannelSet channels = ChannelSet.resolve(target, targetField, fieldName);
 		int total = 0;
 		int nulls = 0;
 		int absent = 0;
@@ -304,14 +325,19 @@ public final class HeapFieldWatch {
 			}
 			int id = System.identityHashCode(instance);
 			ids[total++] = id;
-			Read read = readField(instance, fieldName);
+			Read read = targetField != null
+				? readDeclaredField(instance, targetField)
+				: readField(instance, fieldName);
 			if (read.status == READ_ABSENT) {
 				absent++;
 			} else if (read.status == READ_UNREADABLE) {
 				unreadable++;
 			} else if (read.value == null) {
 				if (nulls == 0) {
-					firstNull = "identity=" + id + " conditions=" + describe(readField(instance, "conditions").value);
+					Read condRead = readField(instance, "conditions");
+					firstNull = condRead.status == READ_OK
+						? "identity=" + id + " conditions=" + describe(condRead.value)
+						: "identity=" + id + " class=" + instance.getClass().getName();
 				}
 				nullIds[nulls++] = id;
 			}
@@ -346,24 +372,16 @@ public final class HeapFieldWatch {
 	 * 把待扫描的 {@code Class} 归一到"当前注册的那一个"。
 	 *
 	 * <p>JBR/DCEVM 的 {@code redefineClasses} 会把<b>静态字段里</b>持有的 {@code Class} 引用改写成旧版本
-	 * "影子类"（同名同加载器，字段元数据是旧的）。本类的 {@code resolved} 正是这样一个静态字段：
-	 * 不归一的话，重定义之后的每个切面都在读<b>旧类版本</b>的字段表——{@code nullCount} 会变成假阴性，
-	 * 第二通道会因为拿不到新版本成员而全线 {@code unavailable}。按名字 + 加载器重新取一次即可
-	 * （{@code Class.forName} 命中已注册的类，不触发初始化）。</p>
+	 * "影子类"（同名同加载器，字段元数据是旧的）。不归一的话，重定义之后读到的是<b>旧类版本</b>的字段表——
+	 * {@code nullCount} 会变成假阴性，第二通道也会因为拿不到新版本成员而全线 {@code unavailable}。
+	 * 纯函数返回当前版本，不改动静态缓存，避免独立调用 {@link #scan} 污染 {@link #snapshot}。</p>
 	 */
 	private static Class<?> currentClassVersion(Class<?> clazz) {
 		if (clazz == null || clazz.isPrimitive() || clazz.isArray() || clazz.getName().indexOf('/') >= 0) {
 			return clazz;
 		}
 		try {
-			Class<?> canonical = Class.forName(clazz.getName(), false, clazz.getClassLoader());
-			if (canonical != clazz) {
-				RemoldAgent.warn("[HEAPWATCH] cached Class for " + clazz.getName()
-					+ " was a stale shadow written by a redefine; using the current class version."
-					+ " Readings through the stale reference describe the OLD field table.");
-				resolved = canonical;
-			}
-			return canonical;
+			return Class.forName(clazz.getName(), false, clazz.getClassLoader());
 		} catch (Throwable t) {
 			return clazz;
 		}
@@ -604,8 +622,8 @@ public final class HeapFieldWatch {
 				resolvedVia = "agent/" + loaderName(viaAgent);
 				return viaAgent;
 			}
-			if (!warned) {
-				warned = true;
+			if (!resolveWarned) {
+				resolveWarned = true;
 				RemoldAgent.warn("[HEAPWATCH] cannot resolve " + CLASS_NAME + " through loadedClasses /"
 					+ " tccl(" + loaderName(tccl) + ") / agent loader; probe stays idle."
 					+ " (system classloader deliberately not used: host loaders such as Knot cannot see"
@@ -653,10 +671,21 @@ public final class HeapFieldWatch {
 		}
 	}
 
+	private static Read readDeclaredField(Object instance, Field field) {
+		try {
+			return new Read(field.get(instance), READ_OK);
+		} catch (Throwable t) {
+			return new Read(t, READ_UNREADABLE);
+		}
+	}
+
 	private static Read readField(Object instance, String name) {
 		for (Class<?> c = instance.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
 			try {
 				Field f = c.getDeclaredField(name);
+				if (Modifier.isStatic(f.getModifiers())) {
+					continue;
+				}
 				f.setAccessible(true);
 				return new Read(f.get(instance), READ_OK);
 			} catch (NoSuchFieldException ignored) {
@@ -709,8 +738,8 @@ public final class HeapFieldWatch {
 			this.getter = getter;
 		}
 
-		static ChannelSet resolve(Class<?> target, String fieldName) {
-			Channel handle = fieldHandleChannel(target, fieldName);
+		static ChannelSet resolve(Class<?> target, Field targetField, String fieldName) {
+			Channel handle = fieldHandleChannel(targetField, fieldName);
 			Channel getter = GETTER_NAME.isEmpty() ? null : getterChannel(target, GETTER_NAME);
 			return new ChannelSet(handle, getter);
 		}
@@ -771,15 +800,15 @@ public final class HeapFieldWatch {
 	 *
 	 * @return 解析失败（无该字段/无 private 访问/运行时没有该 API）时返回 null
 	 */
-	private static Channel fieldHandleChannel(Class<?> target, String fieldName) {
+	private static Channel fieldHandleChannel(Field field, String fieldName) {
+		if (field == null) {
+			return null;
+		}
 		try {
-			Field field = declaredField(target, fieldName);
-			if (field == null) {
-				return null;
-			}
-			java.lang.invoke.MethodHandles.Lookup lookup =
-				java.lang.invoke.MethodHandles.privateLookupIn(target, java.lang.invoke.MethodHandles.lookup());
-			return new FieldHandleChannel(lookup.findGetter(target, fieldName, field.getType()));
+			// 用字段真实声明类的 Lookup，确保父类 private 字段也可建立 getter 通道。
+			Class<?> owner = field.getDeclaringClass();
+			Lookup lookup = MethodHandles.privateLookupIn(owner, MethodHandles.lookup());
+			return new FieldHandleChannel(lookup.findGetter(owner, fieldName, field.getType()));
 		} catch (Throwable t) {
 			return null;
 		}
@@ -791,7 +820,7 @@ public final class HeapFieldWatch {
 			try {
 				Method method = c.getDeclaredMethod(methodName);
 				if (method.getParameterTypes().length != 0
-					|| java.lang.reflect.Modifier.isStatic(method.getModifiers())) {
+					|| Modifier.isStatic(method.getModifiers())) {
 					continue;
 				}
 				method.setAccessible(true);
@@ -809,6 +838,9 @@ public final class HeapFieldWatch {
 		for (Class<?> c = target; c != null && c != Object.class; c = c.getSuperclass()) {
 			try {
 				Field field = c.getDeclaredField(fieldName);
+				if (Modifier.isStatic(field.getModifiers())) {
+					continue;
+				}
 				field.setAccessible(true);
 				return field;
 			} catch (NoSuchFieldException ignored) {
@@ -821,9 +853,9 @@ public final class HeapFieldWatch {
 	}
 
 	private static final class FieldHandleChannel implements Channel {
-		private final java.lang.invoke.MethodHandle getter;
+		private final MethodHandle getter;
 
-		FieldHandleChannel(java.lang.invoke.MethodHandle getter) {
+		FieldHandleChannel(MethodHandle getter) {
 			this.getter = getter;
 		}
 
@@ -854,7 +886,7 @@ public final class HeapFieldWatch {
 		public Object read(Object instance) throws Throwable {
 			try {
 				return getter.invoke(instance);
-			} catch (java.lang.reflect.InvocationTargetException e) {
+			} catch (InvocationTargetException e) {
 				throw e.getCause() == null ? e : e.getCause();
 			}
 		}

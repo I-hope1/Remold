@@ -163,7 +163,7 @@ public class LibToolTest {
 		if (!LibTool.initialized()) {
 			LibTool.init();
 		}
-		// > 524_288 (2^19) exercises both multi-bucket counting sort (2 buckets) and > 32768 clearTagRange.
+		// > 2^18 (262_144) exercises both multi-bucket counting sort (>=2 buckets) and > 32768 clearTagRange.
 		final int expectedCount = 550_000;
 		List<BulkDummy> held = new ArrayList<>(expectedCount);
 		for (int i = 0; i < expectedCount; i++) {
@@ -181,7 +181,7 @@ public class LibToolTest {
 		}
 		assertEquals(expectedCount, seen.cardinality(), "all 550k ids must be present");
 
-		// Second consecutive >524k query verifies warmed tag-map reuse across bulk tag clears.
+		// Second consecutive multi-bucket query verifies warmed tag-map reuse across bulk tag clears.
 		BulkDummy[] second = LibTool.getInstances(BulkDummy.class);
 		assertEquals(expectedCount, second.length,
 			"second large query after bulk tag clear must still return all live instances");

@@ -215,17 +215,21 @@ public class LibTool {
 	private static native int nEnumBucketWindow();
 	private static volatile boolean enumPlanSupported = true;
 
-	/** 实例枚举分桶窗口（实例数）：{@code 1 << 19}，经验值（约 4–6 MB 对象量）。 */
+	/** 实例枚举分桶窗口（实例数）：{@code 1 << 18}，经验值（约 8–12 MB 对象量，为 4M 实测拐点留 2 倍余量）。 */
 	public static int enumerationBucketWindow() {
 		if (!initialized) init();
 		if (enumPlanSupported) {
 			try {
-				return nEnumBucketWindow();
+				int window = nEnumBucketWindow();
+				// 旧 native 库（未随本改动重编）窗口不同：视为不支持，整体回落到 Java 镜像，
+				// 避免"Java 侧报 2^18、C++ 侧仍按 2^19 分桶"的不一致让测试假绿/假红。
+				if (window == (1 << 18)) return window;
+				enumPlanSupported = false;
 			} catch (UnsatisfiedLinkError e) {
 				enumPlanSupported = false;
 			}
 		}
-		return 1 << 19;
+		return 1 << 18;
 	}
 
 	/**
@@ -242,7 +246,7 @@ public class LibTool {
 			}
 		}
 		if (count <= 0) return 1;
-		long buckets = ((count - 1) >> 19) + 1;
+		long buckets = ((count - 1) >> 18) + 1;
 		return buckets > 64 ? 64 : (int) buckets;
 	}
 	private static volatile boolean fastLiveProbeSupported = true;

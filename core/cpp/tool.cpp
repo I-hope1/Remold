@@ -330,12 +330,14 @@ static std::expected<jvmtiEnv*, jvmtiError> getOrAcquireJvmti(JNIEnv* env) {
  */
 static constexpr jint kTagClearWalkThreshold = 32768;
 
-// 实例枚举的计数排序分桶：窗口固定 2^kEnumBucketShift 个实例（经验值；4M 实测证明
-// 2^17–2^19 窗口对 inst 无显著影响，取较大窗口以减少 tag 数/collect 开销）
-// 桶数 = ceil(N / window)，上限 kEnumBucketCap。超过上限时尾部实例仍落在最后一桶，
-// 该桶内不再有序（窗口实际变大）——属于优雅降级，避免 tag 数量膨胀。
+// 实例枚举的计数排序分桶：窗口固定 2^kEnumBucketShift 个实例。
+// 4M 等窗口实验定位到拐点在 2^19→2^20 个对象之间（稳态 inst 1095→5942 ms，测试对象约 32–48 B）；
+// 取 2^18 留 2 倍余量（2^19 贴着拐点，2^20 已明显回退）。该拐点只在上述对象大小上实测，
+// 对象更大时字节量会移动拐点，但 128 B 胖对象对照显示逐元素成本主要随对象跨 cache line 数上升，
+// 与本窗口粒度关系不大。桶数 = ceil(N / window)，上限 kEnumBucketCap；超过上限时尾部实例
+// 落最后一桶，该桶内不再有序——即回到旧行为（不是“降级”），避免 tag 数膨胀。
 // 该规划被抽出为纯函数，便于单元测试覆盖大 N 的上限路径。
-static constexpr jint kEnumBucketShift = 19;
+static constexpr jint kEnumBucketShift = 18;
 static constexpr jint kEnumBucketCap = 64;
 static constexpr jlong kEnumBucketWindow = 1LL << kEnumBucketShift;
 

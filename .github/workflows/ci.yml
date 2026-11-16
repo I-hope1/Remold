@@ -20,9 +20,18 @@ env:
 jobs:
   test:
     name: Test Matrix (javac 8/11/17/21/25)
+    # 测试也会加载 core/libs 下的原生库（tests/build.gradle detectNativeLib）；
+    # 与 build-native 同步，保证"测的库"就是"打包进发布物的库"。
+    needs: build-native
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+
+      - name: Download Native Libraries
+        uses: actions/download-artifact@v7
+        with:
+          name: native-libraries
+          path: core/libs
 
       - name: Set up toolchain JDKs (8/11/17/21)
         uses: actions/setup-java@v6
@@ -70,9 +79,16 @@ jobs:
 
   test-dcevm:
     name: Test on DCEVM (JBR 21)
+    needs: build-native
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+
+      - name: Download Native Libraries
+        uses: actions/download-artifact@v7
+        with:
+          name: native-libraries
+          path: core/libs
 
       - name: Set up toolchain JDKs (8/11/17)
         uses: actions/setup-java@v6

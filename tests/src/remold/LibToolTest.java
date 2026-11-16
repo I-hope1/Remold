@@ -29,6 +29,11 @@ public class LibToolTest {
 		DummyHolder(TargetDummy target) { this.target = target; }
 	}
 
+	static final class BulkDummy {
+		final int id;
+		BulkDummy(int id) { this.id = id; }
+	}
+
 	@Test
 	void nativeLibraryInitialized() {
 		if (!LibTool.initialized()) {
@@ -150,5 +155,33 @@ public class LibToolTest {
 			RemoldAgent.PERF_LOG = savedPerfLog;
 			RemoldAgent.logger = savedLogger;
 		}
+	}
+
+	@Test
+	void largeQueryClearsTagsAndRecoversForSubsequentQueries() {
+		if (!LibTool.initialized()) {
+			LibTool.init();
+		}
+		final int expectedCount = 40_000; // > kTagClearWalkThreshold (32768)
+		List<BulkDummy> held = new ArrayList<>(expectedCount);
+		for (int i = 0; i < expectedCount; i++) {
+			held.add(new BulkDummy(i));
+		}
+
+		BulkDummy[] first = LibTool.getInstances(BulkDummy.class);
+		assertTrue(first.length >= expectedCount,
+			"first large query must return all live instances, got " + first.length);
+
+		// Second consecutive >32768 query verifies warmed tag-map reuse across bulk tag clears.
+		BulkDummy[] second = LibTool.getInstances(BulkDummy.class);
+		assertTrue(second.length >= expectedCount,
+			"second large query after bulk tag clear must still return all live instances, got " + second.length);
+
+		assertTrue(LibTool.hasLiveInstance(BulkDummy.class), "hasLiveInstance must keep working");
+		TargetDummy small = new TargetDummy("after-dispose");
+		DummyHolder holder = new DummyHolder(small);
+		assertTrue(Arrays.asList(LibTool.getInstances(TargetDummy.class)).contains(small));
+		assertTrue(Arrays.asList(LibTool.getReferrers(small)).contains(holder));
+		assertFalse(held.isEmpty());
 	}
 }

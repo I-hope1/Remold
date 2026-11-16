@@ -16,6 +16,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`LibTool.getInstances` 移除 16 桶排序与退化点实测修正**（`core/cpp/tool.cpp` + 6 平台 native 库）：
+  - **16 桶排序退化**：`5977cb1` 为缓解当时解释器慢路径引入的 16 桶排序在目标机（Linux aarch64 2M 实例，
+    对比 `40de58a`）上让 `GetObjectsWithTags(16, ..., &tags_out)`（`collect` +320 ms）、原生分桶重排
+    （`alloc` +20–40 ms）及 `fill`（+500 ms）合计退化约 +0.7–1.2 s；而同机微基准已证明 `ConstLoop`
+    进 C2 后随机序与顺序差距上限仅 ≤ 42 ms。现回到单 tag（`allocateTag()` + `HeapObjectCallback`）与
+    `GetObjectsWithTags(1, ..., nullptr)`。
+  - **逐元素 `ExceptionCheck` 与 `PushLocalFrame(count + 16)` 退化**：在 `has_local_frame` 分支（前置
+    `validateInstanceQueryClass` 已拦截基本类型与数组类）去掉了循环内 200 万次 `ExceptionCheck()`，改为
+    循环结束检查一次；并将 `PushLocalFrame` 恢复为 `16`（本地 Windows x64 JBR 25 2M 实测：传入
+    `2_000_016` 会导致 `fill` 从 120–140 ms 翻倍退化到 222–228 ms）。
+  - **否决 `DisposeEnvironment()` 替代大查询清标**：本地 Windows x64 JBR 25 2M 5 轮对照实测显示，在
+    `count > 32768` 时销毁 `jvmtiEnv` 虽避开清标 STW，但同步释放 2M `OopHandle` + 销毁/冷重建
+    4M 槽 `JvmtiTagMapTable` 使第 2–5 轮 `cleanup` 维持在 600–638 ms、`iterate` 退化到 683–713 ms
+    （稳态比复用常驻 `g_jvmti` + `clearTaggedClass` 的 259–297 ms / 575–622 ms 净慢约 500 ms），
+    因此保留 `kTagClearWalkThreshold = 32768` 复用常驻标签表（Linux aarch64 待同口径复测）。
+  - 回归：`LibToolTest.largeQueryClearsTagsAndRecoversForSubsequentQueries`（40,000 实例 `> 32768`
+    连续两次枚举 + 后续 `hasLiveInstance`/`getInstances`/`getReferrers` 恢复校验）。
+
 - **两阶段触发判据扩展到既有静态字段重写**：`InitFix.requiresReadThroughGuard` 现在除了
   "新增/类型变更字段"外，还会对**宿主的既有静态字段重写**（`@RemoldReinit` / 重放写任务）返回
   true——补丁写内存不会通知 JIT，单阶段下窗口期内重编译的读者可能一直读旧值，阶段 C 的第二次
@@ -26,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DynamicTwoPhaseRedefineTest`（动态入口同顺序，3/3）验证两条路径。
 
 ### Fixed
+
+- **`getInstancesInternal` `!result` OOM 回退路径的悬空指针读取**：旧代码在 `!has_local_frame` 清理
+  `instances[i]` 局部引用前先调用了 `jvmti->Deallocate(instances)`。现调整为先释放局部引用再
+  `Deallocate`。
 
 - **零捕获死分支错桥（S29 形态）**：`stepCaptureBridge` 在唯一候选是"零非接收者捕获"的目标时，
   仅凭 `hits == 1` 建桥。同宿主同 SAM 的兄弟候选若因无 `-g` 捕获类型歧义无法通过 `planBridge`

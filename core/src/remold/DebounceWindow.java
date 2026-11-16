@@ -11,8 +11,16 @@ package remold;
  * <p>{@code jar/zip} 与 {@code .class} 同属 Class 流（由调用方在收事件时选择
  * {@link #onClass(long)}），因为 jar 变化会影响类路径，拆成第三路会造成连续触发。</p>
  *
+ * <p><b>外部提前触发（sticky due）</b>：{@link #markClassDueNow(long)} 用于"构建已完成"这类外部信号。
+ * 置位后 Class 流立即到期，并且在下一次 {@link #clearClass()} 之前，后续 {@link #onClass(long)}
+ * 事件<b>不得</b>把 deadline 推回 {@code now + window}——构建完成与文件事件由不同线程送达，
+ * 没有顺序保证，普通 trailing-edge 语义会让快路径被一个迟到事件悄悄推迟。</p>
+ *
  * <p>本类只做时间判断，不持有队列、不触发动作。调用方负责在到期后 drain 对应队列，
  * 并调用 {@link #clearClass()} / {@link #clearAsset()} 把该流标记为“已处理”。</p>
+ *
+ * <p><b>时间域</b>：所有 {@code nowNanos} 参数与内部 deadline 都必须是 {@link System#nanoTime()}
+ * 的单调纳秒域，<b>不得</b>传入 {@link System#currentTimeMillis()} 的挂钟毫秒。</p>
  */
 public final class DebounceWindow {
 
@@ -21,6 +29,8 @@ public final class DebounceWindow {
 
 	private boolean classPending;
 	private boolean assetPending;
+	/** true = deadline 由 {@link #markClassDueNow(long)} 置为"立即"，在 clearClass 之前不随后续事件延后。 */
+	private boolean classDueLatched;
 	private long classDeadlineNanos;
 	private long assetDeadlineNanos;
 
@@ -38,10 +48,33 @@ public final class DebounceWindow {
 		this.assetWindowNanos = Math.max(0L, assetWindowMillis) * 1_000_000L;
 	}
 
-	/** 收到一次 Class/jar 事件：重置 Class 流的静默 deadline。 */
+	/**
+	 * 收到一次 Class/jar 事件：重置 Class 流的静默 deadline。
+	 *
+	 * <p>若当前处于 {@link #markClassDueNow(long)} 置位的 sticky 状态，则只登记 pending，
+	 * 不延后 deadline（构建已完成的事实比单个文件事件更晚到，也不能被它推迟）。</p>
+	 */
 	public synchronized void onClass(long nowNanos) {
 		classPending = true;
+		if (classDueLatched) {
+			classDeadlineNanos = Math.min(classDeadlineNanos, nowNanos);
+			return;
+		}
 		classDeadlineNanos = nowNanos + classWindowNanos;
+	}
+
+	/**
+	 * 外部信号（构建完成）：把 Class 流标记为<b>立即到期</b>并粘住，直到 {@link #clearClass()}。
+	 *
+	 * <p>用于 marker 快路径：调用方随后应重新挂 0 延迟调度；批次被取走后
+	 * {@link #clearClass()} 会清除 latch，之后的新事件恢复普通 trailing-edge 语义。</p>
+	 *
+	 * <p>{@code nowNanos} 必须是 {@link System#nanoTime()} 域；资源流不受影响。</p>
+	 */
+	public synchronized void markClassDueNow(long nowNanos) {
+		classPending = true;
+		classDueLatched = true;
+		classDeadlineNanos = nowNanos;
 	}
 
 	/** 收到一次资源/配置事件：重置资源流的静默 deadline。 */
@@ -88,9 +121,10 @@ public final class DebounceWindow {
 		return assetPending && assetDeadlineNanos <= nowNanos;
 	}
 
-	/** Class 批次已处理完：清除 Class 流状态。 */
+	/** Class 批次已处理完：清除 Class 流状态（同时清除 {@link #markClassDueNow(long)} 的 sticky latch）。 */
 	public synchronized void clearClass() {
 		classPending = false;
+		classDueLatched = false;
 		classDeadlineNanos = 0L;
 	}
 

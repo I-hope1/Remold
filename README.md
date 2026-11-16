@@ -65,8 +65,9 @@ remold {
     // 本地 remold-agent.jar 的 manifest 版本与 remold.version 不一致时，插件以配置版本为准重新解析/
     // 下载并覆盖 .gradle/remold/remold-agent.jar（显式 agentJar 只告警、不覆盖）
     // jbrPath = "/path/to/jbr" // 默认从环境变量 JBR_HOME 或系统属性 jbr.home 读取
-    // fileShakeMs = 800        // .class 变动防抖窗口（毫秒，默认 800）
+    // fileShakeMs = 800        // .class 变动防抖窗口（毫秒，默认 800；仅在没有构建完成信号时兜底）
     // assetShakeMs = 250       // 资源/配置独立防抖窗口（毫秒，默认 250）
+    // buildTrigger = true      // classes 任务完成时写 marker，agent 收到后立即触发热更并取消防抖等待（默认开启）
     // attach('run', tasks.named('test')) // 直接把 agent + JBR 注入已有 JavaExec / Test 任务，无需再填 mainClass
 }
 ```
@@ -110,8 +111,9 @@ remold {
 | `-Dremold.agent.init_drift.apply_holders` | 空（关闭） | A 档 Kotlin `object` / 顶层 `val` 持有者白名单（逗号分隔；Gradle DSL：`initDriftApplyHolders`） |
 | `-Dremold.agent.ready_timeout_ms` | `0` | 启动就绪门闩超时放行毫秒数；`0` 表示未就绪时不自动放行（Gradle DSL：`readyTimeoutMs`） |
 | `-Dremold.agent.batch_stall_ms` | `15000` | 批次卡死看门狗阈值（下限 `5000`）；超时打印一次 `[HOTSWAP-STALL]` 全线程栈（Gradle DSL：`batchStallMs`） |
-| `-Dremold.agent.file_shake_ms` | `800` | Class/jar 变动防抖窗口（Gradle DSL：`fileShakeMs`） |
+| `-Dremold.agent.file_shake_ms` | `800` | Class/jar 变动防抖窗口（Gradle DSL：`fileShakeMs`）；只用于没有构建完成信号的场景 |
 | `-Dremold.agent.asset_shake_ms` | `250` | 资源/配置变动防抖窗口，独立于 Class 窗口（Gradle DSL：`assetShakeMs`） |
+| `-Dremold.agent.build_trigger_file` | 空（关闭；Gradle 插件默认注入） | 构建完成 marker 路径；agent 收到有效 marker 后立即触发本批热更并取消尚未到期的兜底等待（Gradle DSL：`buildTrigger`；设 `false` 关闭） |
 | `-Dremold.agent.perf_log` | `false` | 打印各阶段热点与耗时摘要日志（Gradle DSL：`perfLog`） |
 | `-Dremold.agent.diff_log` | `true` | 打印字节码成员/指令级结构差异调试日志（设为 `false` 可关闭；Gradle DSL：`diffLog`） |
 | `-Dremold.path.libtool` | 自动解析 | 指定本地 `libtool` 原生库绝对路径（用于跳过内嵌释放；Gradle DSL：`libtoolPath`） |

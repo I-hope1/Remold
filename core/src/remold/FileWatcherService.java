@@ -2,6 +2,7 @@ package remold;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.ClosedWatchServiceException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -23,6 +24,7 @@ import static remold.RemoldAgent.handleJarChange;
 import static remold.RemoldAgent.info;
 import static remold.RemoldAgent.isAssetFile;
 import static remold.RemoldAgent.log;
+import static remold.RemoldAgent.warn;
 
 
 /**
@@ -81,9 +83,177 @@ final class FileWatcherService {
 		}
 	}
 
+	//region Build-trigger marker watcher
+
+	private static final Object triggerLock = new Object();
+	private static volatile TriggerWatcher triggerWatcher;
+	private static volatile Path triggerFile;
+	private static final WatchEvent.Modifier[] EMPTY_MODIFIERS = new WatchEvent.Modifier[0];
+
+	/**
+	 * 启动/替换"构建完成 marker"的专用 watcher。
+	 *
+	 * <p>它与普通 class watcher 完全分离：不参与 {@link #restart()} 的路径集合重建，watch 路径变化
+	 * 不会杀掉它；marker 父目录被删除（如 {@code clean}）时自行重试注册。</p>
+	 *
+	 * @param file marker 文件绝对路径；{@code null} 等价于停止
+	 */
+	static void startBuildTriggerWatcher(Path file) {
+		Path normalized = file == null ? null : file.toAbsolutePath().normalize();
+		synchronized (triggerLock) {
+			if (normalized == null) {
+				stopBuildTriggerWatcherLocked();
+				return;
+			}
+			if (triggerWatcher != null && triggerWatcher.isAlive() && normalized.equals(triggerFile)) {
+				return;
+			}
+			stopBuildTriggerWatcherLocked();
+			try {
+				TriggerWatcher watcher = new TriggerWatcher(normalized);
+				watcher.setDaemon(true);
+				watcher.setName("HotSwap-BuildTrigger-" + normalized.getFileName());
+				watcher.start();
+				triggerWatcher = watcher;
+				triggerFile = normalized;
+				info("[BUILD-TRIGGER] Watching marker file: " + normalized);
+			} catch (IOException e) {
+				error("[BUILD-TRIGGER] Failed to start marker watcher for: " + normalized, e);
+			}
+		}
+	}
+
+	/** 停止 marker watcher（无配置 / agent 关闭时）。 */
+	static void stopBuildTriggerWatcher() {
+		synchronized (triggerLock) {
+			stopBuildTriggerWatcherLocked();
+		}
+	}
+
+	private static void stopBuildTriggerWatcherLocked() {
+		TriggerWatcher watcher = triggerWatcher;
+		triggerWatcher = null;
+		triggerFile = null;
+		if (watcher != null) watcher.interrupt();
+	}
+
+	/**
+	 * macOS 上 {@link WatchService} 的默认轮询灵敏度可能把 marker 到达延迟放大到秒级；
+	 * 尽力使用 {@code com.sun.nio.file.SensitivityWatchEventModifier.HIGH}（反射探测）。
+	 * 取不到就退回默认注册——失败开放，不因为平台修饰符不可用而不启动快路径。
+	 */
+	private static WatchEvent.Modifier[] highSensitivityModifiers() {
+		String os = System.getProperty("os.name", "").toLowerCase();
+		if (!os.contains("mac")) return EMPTY_MODIFIERS;
+		try {
+			Class<?> cls = Class.forName("com.sun.nio.file.SensitivityWatchEventModifier");
+			Object high = cls.getField("HIGH").get(null);
+			return new WatchEvent.Modifier[]{(WatchEvent.Modifier) high};
+		} catch (Throwable t) {
+			if (DEBUG) log("[BUILD-TRIGGER] macOS high-sensitivity watch modifier unavailable: " + t);
+			return EMPTY_MODIFIERS;
+		}
+	}
+
+	/**
+	 * marker 专用 watcher：只认目标文件本身，其余事件一概忽略。
+	 *
+	 * <p>父目录不存在（首次构建前、{@code clean} 之后）时按约 1s 重试创建与注册；注册失败只告警一次，
+	 * 不影响普通 class watcher。</p>
+	 */
+	private static final class TriggerWatcher extends Thread {
+		private final Path target;
+
+		TriggerWatcher(Path target) throws IOException {
+			super("HotSwap-BuildTrigger-" + target.getFileName());
+			this.target = target;
+		}
+
+		@Override
+		public void run() {
+			boolean warned = false;
+			while (!Thread.currentThread().isInterrupted()) {
+				WatchService watchService = null;
+				boolean retry = false;
+				try {
+					Path dir = target.getParent();
+					if (dir == null) {
+						error("[BUILD-TRIGGER] Cannot determine parent directory of marker: " + target);
+						return;
+					}
+					if (!Files.isDirectory(dir)) {
+						Files.createDirectories(dir);
+					}
+					watchService = FileSystems.getDefault().newWatchService();
+					WatchEvent.Kind<?>[] kinds = new WatchEvent.Kind<?>[]{
+						StandardWatchEventKinds.ENTRY_CREATE,
+						StandardWatchEventKinds.ENTRY_MODIFY
+					};
+					try {
+						dir.register(watchService, kinds, highSensitivityModifiers());
+					} catch (UnsupportedOperationException unsupported) {
+						// 平台/文件系统不接受该修饰符：退回默认注册（失败开放，不放弃快路径）。
+						dir.register(watchService, kinds);
+					}
+					warned = false;
+
+					while (!Thread.currentThread().isInterrupted()) {
+						WatchKey key;
+						try {
+							key = watchService.take();
+						} catch (InterruptedException e) {
+							Thread.currentThread().interrupt();
+							return;
+						} catch (ClosedWatchServiceException e) {
+							retry = true;
+							break;
+						}
+						Path watchedDir = (Path) key.watchable();
+						for (WatchEvent<?> event : key.pollEvents()) {
+							if (event.kind() == StandardWatchEventKinds.OVERFLOW) continue;
+							Path full = watchedDir.resolve((Path) event.context()).toAbsolutePath().normalize();
+							if (!full.equals(target)) continue;
+							try {
+								RemoldAgent.handleBuildTriggerFile(full);
+							} catch (Throwable t) {
+								error("[BUILD-TRIGGER] Failed to process marker: " + full, t);
+							}
+						}
+						if (!key.reset()) {
+							retry = true;
+							break;
+						}
+					}
+					if (!retry) return;
+				} catch (ClosedWatchServiceException e) {
+					// 服务被关闭：按目录重建处理
+				} catch (IOException | SecurityException e) {
+					if (!warned) {
+						warn("[BUILD-TRIGGER] Marker watcher unavailable at " + target
+						     + " (" + e + "); retrying every 1s");
+						warned = true;
+					}
+				} finally {
+					if (watchService != null) {
+						try {
+							watchService.close();
+						} catch (IOException ignored) {
+						}
+					}
+				}
+				try {
+					Thread.sleep(1000L);
+				} catch (InterruptedException e) {
+					Thread.currentThread().interrupt();
+					return;
+				}
+			}
+		}
+	}
+	//endregion
+
 	/** 文件监控线程，这个类的设计本身就是可复用的 */
-	private static class WatcherThread extends Thread {
-		private final Path         root;
+	private static class WatcherThread extends Thread {		private final Path         root;
 		private final Path         specificJar; // 非 null 时只响应该文件的事件（直接传入的 jar 模式）
 		private final WatchService watchService;
 

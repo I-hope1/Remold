@@ -9,12 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Gradle 构建完成 marker（build-trigger 快路径）**：`classes` 任务结束时由插件原子写入
+  `<buildDir>/remold/build-trigger`（`-Dremold.agent.build_trigger_file` 注入），agent 收到后立即触发本批热更、
+  取消尚未到期的 `fileShakeMs` 兜底等待；marker 之后才到的同批事件按磁盘指纹跳过（no-op 批次，不产生
+  redefine/回调）。`fileShakeMs` 语义与默认值（800）不变，无 marker 的写入路径（IDE 直接 `Ctrl+Shift+F9`、
+  手写 `-javaagent`）行为与旧版本一致。Gradle DSL：`buildTrigger`（默认 `true`，设 `false` 关闭）。
+  契约见 [`docs/topology/14-build-trigger-mode.md`](docs/topology/14-build-trigger-mode.md)，实测读数见
+  [`docs/topology/15-build-trigger-probe.md`](docs/topology/15-build-trigger-probe.md)。
+
 - **既有静态字段重写的 A/B 探针**（`tests/static-rewrite-probe/`）：同一份"运行时初始化的
   `static final` 引用字段"在单阶段（redefine → Unsafe patch）下，patch 后已编译热读者仍读到旧值；
   在模拟两阶段（Stage A → patch → Stage C）下，阶段 C 的第二次 redefine 把读者退优化，采样立即
   读到新值。用于支撑两阶段触发判据的扩展与回归。
 
 ### Changed
+
+- **Gradle 插件的默认 JVM 参数新增一个常量 `-Dremold.agent.build_trigger_file=<buildDir>/remold/build-trigger`**
+  （`buildTrigger = false` 时不注入，旧版本 agent 会忽略该未知参数）。这是默认参数的可见变化，特此点明；
+  代理行为本身在无 marker 或旧 agent 下与之前一致。
 
 - **`LibTool.getInstances` 移除 16 桶排序与退化点实测修正**（`core/cpp/tool.cpp` + 6 平台 native 库）：
   - **16 桶排序退化**：`5977cb1` 为缓解当时解释器慢路径引入的 16 桶排序在目标机（Linux aarch64 2M 实例，

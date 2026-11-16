@@ -211,6 +211,44 @@ public class LibTool {
 	private static native Object[] nGetInstancesTimed(Class<?> clazz, long[] timingsOut);
 	private static native boolean  nHasLiveInstance(Class<?> clazz);
 	private static native Object[] nGetReferrers(Object targetObject);
+	private static native int nEnumBucketCount(long count);
+	private static native int nEnumBucketWindow();
+	private static volatile boolean enumPlanSupported = true;
+
+	/** 实例枚举分桶窗口（实例数）：{@code 1 << 18}，经验值（约 8–12 MB 对象量，为 4M 实测拐点留 2 倍余量）。 */
+	public static int enumerationBucketWindow() {
+		if (!initialized) init();
+		if (enumPlanSupported) {
+			try {
+				int window = nEnumBucketWindow();
+				// 旧 native 库（未随本改动重编）窗口不同：视为不支持，整体回落到 Java 镜像，
+				// 避免"Java 侧报 2^18、C++ 侧仍按 2^19 分桶"的不一致让测试假绿/假红。
+				if (window == (1 << 18)) return window;
+				enumPlanSupported = false;
+			} catch (UnsatisfiedLinkError e) {
+				enumPlanSupported = false;
+			}
+		}
+		return 1 << 18;
+	}
+
+	/**
+	 * 实例枚举分桶规划：桶数 = ceil(count / window)，上限 64；超过上限时尾部实例进入最后一桶。
+	 * 与 native 侧 {@code enumBucketCount} 保持同一实现，旧版 native 库缺少导出符号时走纯 Java 兜底。
+	 */
+	public static int enumerationBucketCount(long count) {
+		if (!initialized) init();
+		if (enumPlanSupported) {
+			try {
+				return nEnumBucketCount(count);
+			} catch (UnsatisfiedLinkError e) {
+				enumPlanSupported = false;
+			}
+		}
+		if (count <= 0) return 1;
+		long buckets = ((count - 1) >> 18) + 1;
+		return buckets > 64 ? 64 : (int) buckets;
+	}
 	private static volatile boolean fastLiveProbeSupported = true;
 	private static volatile boolean timedQuerySupported = true;
 

@@ -19,7 +19,7 @@ zig cc -shared -target x86_64-linux-gnu.2.17 -Wl,--strip-all "%TEMP%\tool_linux_
 REM Linux aarch64: put the posix jni_md.h before %COMMON%. The win32 one (__declspec/__int64)
 REM is Windows semantics and must not be used for an ELF artifact.
 REM Two-step compile + zig cc link: avoids linking zig's bundled libc++ (which would compile
-REM libc++ from source with -Wnullability-completeness warnings) and keeps pthread_rwlock_*
-REM bound to libpthread.so.0@GLIBC_2.17.
+REM libc++ from source with -Wnullability-completeness warnings) and keeps pthread_mutex_*
+REM bound cleanly at GLIBC_2.17 via libc.so.6.
 zig c++ -c -target aarch64-linux-gnu.2.17 -I"%~dp0jni_posix" %COMMON% -o "%TEMP%\tool_linux_aarch64.o" tool.cpp
 zig cc -shared -target aarch64-linux-gnu.2.17 -Wl,--strip-all "%TEMP%\tool_linux_aarch64.o" -o ../libs/libtoolaarch64.so

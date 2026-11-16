@@ -217,8 +217,9 @@ jobs:
       - name: Compile Linux aarch64 (.so, glibc 2.17)
         # 用 zig 固定 glibc 2.17 目标，避免 ubuntu-24.04 交叉 g++ 把最低 glibc 抬到 2.38+。
         # 两段式编译（zig c++ -c）+ 链接（zig cc -shared）：tool.cpp 在 POSIX 下仅用
-        # pthread_rwlock_t，不引用 libc++.a 运行时，从而彻底跳过 zig 从源码构建内置 libc++
-        # 时刷出的数千条 -Wnullability-completeness 告警，并让锁符号直接绑定到 libpthread.so.0。
+        # pthread_mutex_t，不引用 libc++.a 运行时，从而彻底跳过 zig 从源码构建内置 libc++
+        # 时刷出的数千条 -Wnullability-completeness 告警；pthread_mutex_* 在 libc.so.6 中
+        # 已有 @GLIBC_2.17 转发符号，因此 NEEDED 只会包含 libc.so.6（无需再绑定 libpthread.so.0）。
         run: |
           curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz -o /tmp/zig.tar.xz
           tar -xJf /tmp/zig.tar.xz -C /tmp
@@ -231,13 +232,12 @@ jobs:
           ls -la core/libs/libtoolaarch64.so
 
       - name: Verify native ABIs
-        # 校验项：glibc 构建（libc.so.6 + libpthread.so.0）、aarch64 glibc 基线 2.17、不是 bionic。
+        # 校验项：glibc 构建（libc.so.6）、aarch64 glibc 基线 2.17、不是 bionic。
         run: |
           test -s core/libs/libtoolaarch64.so
           test -s core/libs/libtoolarm64.so
           readelf -h core/libs/libtoolaarch64.so | grep -F 'AArch64'
           readelf -d core/libs/libtoolaarch64.so | grep -F 'libc.so.6'
-          readelf -d core/libs/libtoolaarch64.so | grep -F 'libpthread.so.0'
           readelf -d core/libs/libtoolarm64.so | grep -F '[libc.so]'
           ! readelf -V core/libs/libtoolaarch64.so | grep -E 'GLIBC_2\.(1[89]|[2-9][0-9])'
 

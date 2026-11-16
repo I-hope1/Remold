@@ -2405,9 +2405,21 @@ public class UpdateRef {
 	}
 
 	/**
-	 * 判断给定的 Throwable 是否属于热重载结构变更引起的链接异常（类/方法/字段不存在或签名不兼容）。
-	 * 对于非热重载引发的错误（如 {@link ExceptionInInitializerError} 静态块异常或 {@link VerifyError} 等）应正常抛出，避免吞掉业务异常。
-	 * 若根本原因链包含 {@link ExceptionInInitializerError}（例如类首次初始化失败后再次调用引发的 NoClassDefFoundError），同样认定为业务异常，不予熔断。
+	 * 判断给定的 Throwable 是否属于热重载结构变更引起的链接异常（符号缺失或签名不兼容）。
+	 * <p>
+	 * 判定范围只覆盖"符号缺失"这一类：
+	 * <ul>
+	 *   <li>{@link IncompatibleClassChangeError}：含 {@link NoSuchMethodError}、{@link NoSuchFieldError}、
+	 *       {@link IllegalAccessError} 等，即旧存活的调用点再解析被删除/改签名的成员；</li>
+	 *   <li>{@link NoClassDefFoundError}：符号所属的类在批次外已不可解析；</li>
+	 *   <li>{@link BootstrapMethodError}：{@code invokedynamic} 自举点解析失败。lambda 的调用点把
+	 *       {@code implMethod} 记在自举参数里，目标方法被删除或改签名后，同一调用点再次触发时
+	 *       {@code LambdaMetafactory} 自举失败即抛出此错误（原因通常为 {@link NoSuchMethodError}）。
+	 *       该类型直接继承 {@link LinkageError} 而非 {@link IncompatibleClassChangeError}，故需单列。</li>
+	 * </ul>
+	 * 对于非结构性缺失的链接错误（如 {@link VerifyError} 等字节码校验失败）应正常抛出，避免吞掉业务异常。
+	 * 若根本原因链包含 {@link ExceptionInInitializerError}（例如类首次初始化失败后再次调用引发的 NoClassDefFoundError），
+	 * 同样认定为业务异常，不予熔断；该豁免优先于上述类型判定。
 	 * @param t 目标异常
 	 * @return 若为热重载引起的结构缺失异常则返回 true
 	 */
@@ -2422,7 +2434,8 @@ public class UpdateRef {
 			cur = cur.getCause();
 		}
 		return t instanceof IncompatibleClassChangeError
-		       || t instanceof NoClassDefFoundError;
+		       || t instanceof NoClassDefFoundError
+		       || t instanceof BootstrapMethodError;
 	}
 
 	/**

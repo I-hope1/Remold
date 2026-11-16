@@ -522,4 +522,275 @@ class InitFixBatchLoopTest {
 		errSlotOut[0] = 0;
 		return from;
 	}
+
+	@Test
+	void persistentConstantBatchLoopCoversTypesRawBitsSelfScopeAndIsolatesBadReceiver() throws Throwable {
+		HotswapBridge.drainConditionalStats();
+		String baseName = "remold.ref.ConstLoopHost";
+		String subName = "remold.ref.ConstLoopSub";
+		byte[] v1Base = buildConstHostClass(baseName.replace('.', '/'), "java/lang/Object", false);
+		byte[] v2Base = buildConstHostClass(baseName.replace('.', '/'), "java/lang/Object", true);
+		byte[] subBytes = buildConstHostClass(subName.replace('.', '/'), baseName.replace('.', '/'), false);
+
+		ByteLoader loader = new ByteLoader();
+		Class<?> host = loader.define(baseName, v2Base);
+		Class<?> sub = loader.define(subName, subBytes);
+
+		Object zeroHost = host.getConstructor().newInstance();
+		Object presetHost = host.getConstructor().newInstance();
+		Object subInst = sub.getConstructor().newInstance();
+
+		// Reset zeroHost to type defaults (and negative zero for raw-bits check on presetHost).
+		host.getField("zVal").setBoolean(zeroHost, false);
+		host.getField("bVal").setByte(zeroHost, (byte) 0);
+		host.getField("cVal").setChar(zeroHost, '\u0000');
+		host.getField("sVal").setShort(zeroHost, (short) 0);
+		host.getField("iVal").setInt(zeroHost, 0);
+		host.getField("jVal").setLong(zeroHost, 0L);
+		host.getField("fVal").setFloat(zeroHost, 0.0f);
+		host.getField("dVal").setDouble(zeroHost, 0.0d);
+		host.getField("strVal").set(zeroHost, null);
+		host.getField("forcedSelf").set(zeroHost, "old");
+
+		// Preset host keeps custom values + -0.0f / -0.0d (non-zero raw bits must be skipped).
+		host.getField("zVal").setBoolean(presetHost, false);
+		host.getField("bVal").setByte(presetHost, (byte) 9);
+		host.getField("cVal").setChar(presetHost, 'X');
+		host.getField("sVal").setShort(presetHost, (short) 11);
+		host.getField("iVal").setInt(presetHost, 5);
+		host.getField("jVal").setLong(presetHost, 99L);
+		host.getField("fVal").setFloat(presetHost, -0.0f);
+		host.getField("dVal").setDouble(presetHost, -0.0d);
+		host.getField("strVal").set(presetHost, "custom");
+		host.getField("forcedSelf").set(presetHost, "old");
+
+		host.getField("iVal").setInt(subInst, 0);
+		host.getField("fVal").setFloat(subInst, 0.0f);
+		host.getField("dVal").setDouble(subInst, 0.0d);
+		host.getField("strVal").set(subInst, null);
+		host.getField("forcedSelf").set(subInst, "sub-old");
+
+		ClassDiff diff = ClassDiffUtil.diff(v1Base, v2Base);
+		InitFix.transform(host, v2Base, diff);
+		try {
+			InitFix.PatchPlan plan = InitFix.pendingPlanForTest(host);
+			assertNotNull(plan);
+			assertEquals(10, plan.instanceTasks().size());
+			for (InitFix.FieldPatchTask task : plan.instanceTasks()) {
+				assertNotNull(task.constantInit(),
+					"constant field slice must attach ConstantInitSpec: " + task.fieldName());
+			}
+
+			// Verify persistent loop directly including null slots and ClassCastException isolation.
+			long iOff = HotswapBridge.resolveInstanceFieldOffset(host, "iVal", "I");
+			long fOff = HotswapBridge.resolveInstanceFieldOffset(host, "fVal", "F");
+			long dOff = HotswapBridge.resolveInstanceFieldOffset(host, "dVal", "D");
+			long strOff = HotswapBridge.resolveInstanceFieldOffset(host, "strVal", "Ljava/lang/String;");
+			long forceOff = HotswapBridge.resolveInstanceFieldOffset(host, "forcedSelf", "Ljava/lang/String;");
+
+			MethodHandle iLoop = HotswapBridge.constantBatchLoop(int.class, false);
+			MethodHandle fLoop = HotswapBridge.constantBatchLoop(float.class, false);
+			MethodHandle dLoop = HotswapBridge.constantBatchLoop(double.class, false);
+			MethodHandle strLoop = HotswapBridge.constantBatchLoop(Object.class, false);
+			MethodHandle forceLoop = HotswapBridge.constantBatchLoop(Object.class, true);
+
+			Object[] targets = new Object[]{zeroHost, null, presetHost, subInst};
+			Throwable[] errOut = new Throwable[1];
+			assertEquals(-1, (int) iLoop.invokeExact(host, "iVal", iOff, 42, false, targets, 0, targets.length, errOut));
+			assertEquals(-1, (int) fLoop.invokeExact(host, "fVal", fOff, 1.5f, false, targets, 0, targets.length, errOut));
+			assertEquals(-1, (int) dLoop.invokeExact(host, "dVal", dOff, 2.5d, false, targets, 0, targets.length, errOut));
+			assertEquals(-1, (int) strLoop.invokeExact(host, "strVal", strOff, (Object) "hello", false, targets, 0, targets.length, errOut));
+			assertEquals(-1, (int) forceLoop.invokeExact(host, "forcedSelf", forceOff, (Object) "forced", true, targets, 0, targets.length, errOut));
+
+			assertEquals(42, host.getField("iVal").getInt(zeroHost));
+			assertEquals(1.5f, host.getField("fVal").getFloat(zeroHost));
+			assertEquals(2.5d, host.getField("dVal").getDouble(zeroHost));
+			assertEquals("hello", host.getField("strVal").get(zeroHost));
+			assertEquals("forced", host.getField("forcedSelf").get(zeroHost));
+
+			assertEquals(5, host.getField("iVal").getInt(presetHost));
+			assertEquals(Float.floatToRawIntBits(-0.0f),
+				Float.floatToRawIntBits(host.getField("fVal").getFloat(presetHost)),
+				"raw-bits CAS must preserve -0.0f");
+			assertEquals(Double.doubleToRawLongBits(-0.0d),
+				Double.doubleToRawLongBits(host.getField("dVal").getDouble(presetHost)),
+				"raw-bits CAS must preserve -0.0d");
+			assertEquals("custom", host.getField("strVal").get(presetHost));
+			assertEquals("forced", host.getField("forcedSelf").get(presetHost));
+
+			assertEquals(42, host.getField("iVal").getInt(subInst));
+			assertEquals(1.5f, host.getField("fVal").getFloat(subInst));
+			assertEquals(2.5d, host.getField("dVal").getDouble(subInst));
+			assertEquals("hello", host.getField("strVal").get(subInst));
+			assertEquals("sub-old", host.getField("forcedSelf").get(subInst), "SELF scope must skip subclass");
+
+			Map<String, long[]> stats = HotswapBridge.drainConditionalStats();
+			assertArrayEquals(new long[]{2L, 1L}, stats.get(host.getName() + "#iVal"));
+			assertArrayEquals(new long[]{2L, 1L}, stats.get(host.getName() + "#fVal"));
+			assertArrayEquals(new long[]{2L, 1L}, stats.get(host.getName() + "#dVal"));
+			assertArrayEquals(new long[]{2L, 1L}, stats.get(host.getName() + "#strVal"));
+			assertNull(stats.get(host.getName() + "#forcedSelf"));
+
+			// Wrong element type inside Object[] throws ClassCastException at exact failing index.
+			Object[] badTargets = new Object[]{zeroHost, "not-a-host", subInst};
+			int failedIdx = (int) strLoop.invokeExact(host, "strVal", strOff, (Object) "next", false, badTargets, 0, badTargets.length, errOut);
+			assertEquals(1, failedIdx);
+			assertInstanceOf(ClassCastException.class, errOut[0]);
+			Map<String, long[]> errStats = HotswapBridge.drainConditionalStats();
+			assertArrayEquals(new long[]{0L, 1L}, errStats.get(host.getName() + "#strVal"),
+				"stats accumulated before failing element must flush cleanly");
+
+			if (LibTool.initialized()) {
+				// Probe-injected link failure on one field falls back and remains isolated.
+				HotswapBridge.setBootstrapFailureProbe(host.getName() + "#bVal");
+				InitFix.afterRedefine(host);
+				HotswapBridge.setBootstrapFailureProbe(null);
+			} else {
+				InitFix.afterRedefineFailed(host);
+			}
+		} finally {
+			HotswapBridge.setBootstrapFailureProbe(null);
+			InitFix.afterRedefineFailed(host);
+			HotswapBridge.drainConditionalStats();
+		}
+	}
+
+	@Test
+	void progressiveChunkingVisitsLargeArrayOnceAndPreservesBudgetAcrossChunkBoundaries() throws Throwable {
+		MethodHandle countChunkBatch = MethodHandles.lookup().findStatic(
+		 InitFixBatchLoopTest.class, "simulatedLargeCountingBatch",
+		 MethodType.methodType(int.class, Object[].class, int.class, int.class, Throwable[].class));
+		MethodHandle fusedChunkGroup = MethodHandles.lookup().findStatic(
+		 InitFixBatchLoopTest.class, "simulatedLargeFusedWithFailures",
+		 MethodType.methodType(int.class, Object[].class, int.class, int.class,
+		  boolean[].class, Throwable[].class, int[].class));
+		MethodHandle singleF0 = MethodHandles.lookup().findStatic(
+		 InitFixBatchLoopTest.class, "markSlot0Single", MethodType.methodType(void.class, Object.class));
+		MethodHandle singleF1 = MethodHandles.lookup().findStatic(
+		 InitFixBatchLoopTest.class, "markSlot1Single", MethodType.methodType(void.class, Object.class));
+
+		final int N = 10_000; // Crosses 2048*4 = 8192 small-chunk phase into 8192 big-chunk tail.
+		int[][] counts = new int[N][2];
+		Object[] targets = counts;
+
+		InitFix.BoundInstanceTask singleTask = new InitFix.BoundInstanceTask(
+		 "single", Set.of(), singleF0, countChunkBatch, false);
+		InitFix.runIndependentInstanceTasks(
+		 InitFixBatchLoopTest.class, targets, new InitFix.BoundInstanceTask[]{singleTask},
+		 new LinkedHashSet<>(), new LinkedHashSet<>(), new LinkedHashMap<>());
+		for (int i = 0; i < N; i++) {
+			assertEquals(1, counts[i][0], "single chunked task must visit index " + i + " once");
+			counts[i][0] = 0;
+		}
+
+		// Fused group across 10,000 targets where slot 1 fails at 8 small/large boundary indices.
+		InitFix.BoundInstanceTask[] fusedTasks = new InitFix.BoundInstanceTask[]{
+		 new InitFix.BoundInstanceTask("f0", Set.of(), singleF0, countChunkBatch, false),
+		 new InitFix.BoundInstanceTask("f1", Set.of(), singleF1, countChunkBatch, false)
+		};
+		InitFix.BoundFusedBatchGroup[] groups = new InitFix.BoundFusedBatchGroup[]{
+		 new InitFix.BoundFusedBatchGroup(fusedChunkGroup, new int[]{0, 1})
+		};
+		Set<String> failed = new LinkedHashSet<>();
+		Set<String> skipped = new LinkedHashSet<>();
+		InitFix.runIndependentInstanceTasks(
+		 InitFixBatchLoopTest.class, targets, fusedTasks, groups,
+		 failed, skipped, new LinkedHashMap<>());
+
+		assertTrue(failed.contains("f1"));
+		assertTrue(skipped.contains("f1"), "8th failure across chunk boundaries must trigger budget give-up");
+		for (int i = 0; i < N; i++) {
+			assertEquals(1, counts[i][0], "f0 must visit index " + i + " once across all chunks");
+		}
+		assertEquals(0, counts[8192][1], "8th failing index 8192 must stay failed");
+		assertEquals(0, counts[8193][1], "element 8193 after budget give-up must be skipped");
+	}
+
+	private static byte[] buildConstHostClass(String internalName, String superInternal, boolean withFields) {
+		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+		cw.visit(Opcodes.V11, Opcodes.ACC_PUBLIC, internalName, null, superInternal, null);
+		if (withFields) {
+			cw.visitField(Opcodes.ACC_PUBLIC, "zVal", "Z", null, null).visitEnd();
+			cw.visitField(Opcodes.ACC_PUBLIC, "bVal", "B", null, null).visitEnd();
+			cw.visitField(Opcodes.ACC_PUBLIC, "cVal", "C", null, null).visitEnd();
+			cw.visitField(Opcodes.ACC_PUBLIC, "sVal", "S", null, null).visitEnd();
+			cw.visitField(Opcodes.ACC_PUBLIC, "iVal", "I", null, null).visitEnd();
+			cw.visitField(Opcodes.ACC_PUBLIC, "jVal", "J", null, null).visitEnd();
+			cw.visitField(Opcodes.ACC_PUBLIC, "fVal", "F", null, null).visitEnd();
+			cw.visitField(Opcodes.ACC_PUBLIC, "dVal", "D", null, null).visitEnd();
+			cw.visitField(Opcodes.ACC_PUBLIC, "strVal", "Ljava/lang/String;", null, null).visitEnd();
+			FieldVisitor fv = cw.visitField(Opcodes.ACC_PUBLIC, "forcedSelf", "Ljava/lang/String;", null, null);
+			AnnotationVisitor av = fv.visitAnnotation("Lremold/annotation/RemoldReinit;", true);
+			av.visitEnum("mode", "Lremold/annotation/RemoldReinit$Mode;", "OVERWRITE");
+			av.visitEnum("scope", "Lremold/annotation/RemoldReinit$Scope;", "SELF");
+			av.visitEnd();
+			fv.visitEnd();
+		}
+		MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+		mv.visitCode();
+		mv.visitVarInsn(Opcodes.ALOAD, 0);
+		mv.visitMethodInsn(Opcodes.INVOKESPECIAL, superInternal, "<init>", "()V", false);
+		if (withFields) {
+			mv.visitVarInsn(Opcodes.ALOAD, 0);
+			mv.visitInsn(Opcodes.ICONST_1);
+			mv.visitFieldInsn(Opcodes.PUTFIELD, internalName, "zVal", "Z");
+			mv.visitVarInsn(Opcodes.ALOAD, 0);
+			mv.visitIntInsn(Opcodes.BIPUSH, 7);
+			mv.visitFieldInsn(Opcodes.PUTFIELD, internalName, "bVal", "B");
+			mv.visitVarInsn(Opcodes.ALOAD, 0);
+			mv.visitIntInsn(Opcodes.BIPUSH, 'A');
+			mv.visitFieldInsn(Opcodes.PUTFIELD, internalName, "cVal", "C");
+			mv.visitVarInsn(Opcodes.ALOAD, 0);
+			mv.visitIntInsn(Opcodes.SIPUSH, 321);
+			mv.visitFieldInsn(Opcodes.PUTFIELD, internalName, "sVal", "S");
+			mv.visitVarInsn(Opcodes.ALOAD, 0);
+			mv.visitIntInsn(Opcodes.BIPUSH, 42);
+			mv.visitFieldInsn(Opcodes.PUTFIELD, internalName, "iVal", "I");
+			mv.visitVarInsn(Opcodes.ALOAD, 0);
+			mv.visitLdcInsn(1234567890123L);
+			mv.visitFieldInsn(Opcodes.PUTFIELD, internalName, "jVal", "J");
+			mv.visitVarInsn(Opcodes.ALOAD, 0);
+			mv.visitLdcInsn(1.5f);
+			mv.visitFieldInsn(Opcodes.PUTFIELD, internalName, "fVal", "F");
+			mv.visitVarInsn(Opcodes.ALOAD, 0);
+			mv.visitLdcInsn(2.5d);
+			mv.visitFieldInsn(Opcodes.PUTFIELD, internalName, "dVal", "D");
+			mv.visitVarInsn(Opcodes.ALOAD, 0);
+			mv.visitLdcInsn("hello");
+			mv.visitFieldInsn(Opcodes.PUTFIELD, internalName, "strVal", "Ljava/lang/String;");
+			mv.visitVarInsn(Opcodes.ALOAD, 0);
+			mv.visitLdcInsn("forced");
+			mv.visitFieldInsn(Opcodes.PUTFIELD, internalName, "forcedSelf", "Ljava/lang/String;");
+		}
+		mv.visitInsn(Opcodes.RETURN);
+		mv.visitMaxs(0, 0);
+		mv.visitEnd();
+		cw.visitEnd();
+		return cw.toByteArray();
+	}
+
+	static int simulatedLargeCountingBatch(Object[] targets, int from, int to, Throwable[] errOut) {
+		for (int i = from; i < to; i++) {
+			((int[]) targets[i])[0]++;
+		}
+		return -1;
+	}
+
+	static int simulatedLargeFusedWithFailures(
+	 Object[] targets, int from, int to, boolean[] active, Throwable[] errOut, int[] errSlotOut) {
+		for (int i = from; i < to; i++) {
+			int[] row = (int[]) targets[i];
+			if (active[0]) row[0]++;
+			if (active[1]) {
+				// 7 failures in small chunks (5..11) + 1 failure across big-chunk boundary (8192).
+				if ((i >= 5 && i <= 11) || i == 8192 || i == 8193) {
+					errOut[0] = new IllegalStateException("fail at " + i);
+					errSlotOut[0] = 1;
+					return i;
+				}
+				row[1]++;
+			}
+		}
+		return -1;
+	}
 }

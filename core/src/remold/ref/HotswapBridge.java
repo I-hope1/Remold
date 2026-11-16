@@ -315,6 +315,12 @@ public final class HotswapBridge {
 	private static final AtomicReferenceArray<MethodHandle> EXPECTED_PUTTERS =
 	 new AtomicReferenceArray<>(SLOT_COUNT);
 
+	private static final AtomicReferenceArray<MethodHandle> CONDITIONAL_BATCH_LOOPS =
+	 new AtomicReferenceArray<>(SLOT_COUNT);
+
+	private static final AtomicReferenceArray<MethodHandle> FORCE_BATCH_LOOPS =
+	 new AtomicReferenceArray<>(SLOT_COUNT);
+
 	static {
 		try {
 			// 启动期仅预建 int 条件 CAS 作为环境兼容探针；其余 25 条管线按槽位懒加载，
@@ -866,6 +872,269 @@ public final class HotswapBridge {
 	}
 
 	/**
+	 * 解析实例字段偏移；供 {@link InitFix} 常驻常量批写通道使用，保持与 indy bootstrap
+	 * 相同的失败探测（{@link #checkProbe}）与 {@link BootstrapMethodError} 隔离形态。
+	 */
+	static long resolveInstanceFieldOffset(Class<?> owner, String fieldName, String fieldDesc) {
+		try {
+			checkProbe(owner, fieldName);
+			Field field = findField(owner, fieldName, fieldDesc);
+			return UNSAFE.objectFieldOffset(field);
+		} catch (Throwable t) {
+			throw new BootstrapMethodError(
+			 "Cannot resolve field offset for " + owner.getName() + "." + fieldName + ":" + fieldDesc, t);
+		}
+	}
+
+	/**
+	 * 获取按 {@code (kind, slot)} 缓存在常驻隐藏类中的常量批写循环句柄：
+	 * 签名 {@code (Class host, String fieldName, long offset, V val, boolean selfOnly,
+	 * Object[] targets, int from, int to, Throwable[] errOut)int}。
+	 * 与每轮重定义新建的 {@code $$HotswapPatch} 解耦，预热后永久保持 C2 编译态。
+	 */
+	static MethodHandle constantBatchLoop(Class<?> valType, boolean forceWrite) throws Throwable {
+		int slot = typeSlot(valType);
+		AtomicReferenceArray<MethodHandle> table = forceWrite ? FORCE_BATCH_LOOPS : CONDITIONAL_BATCH_LOOPS;
+		MethodHandle cached = table.get(slot);
+		if (cached != null) return cached;
+		return cachePutter(table, slot, buildConstantBatchLoop(slot, forceWrite));
+	}
+
+	/** 供生成出的常驻批循环隐藏类在 {@code <clinit>} 绑定 {@code static final} putter 句柄。 */
+	static MethodHandle resolveLoopPutter(boolean forceWrite, int slot) throws Throwable {
+		return forceWrite ? forcePutter(slotType(slot)) : conditionalPutter(slotType(slot));
+	}
+
+	private static Class<?> slotType(int slot) {
+		return switch (slot) {
+			case SLOT_OBJECT -> Object.class;
+			case SLOT_BOOLEAN -> boolean.class;
+			case SLOT_BYTE -> byte.class;
+			case SLOT_CHAR -> char.class;
+			case SLOT_SHORT -> short.class;
+			case SLOT_INT -> int.class;
+			case SLOT_LONG -> long.class;
+			case SLOT_FLOAT -> float.class;
+			case SLOT_DOUBLE -> double.class;
+			default -> throw new IllegalArgumentException("unexpected slot: " + slot);
+		};
+	}
+
+	private static Object frameTypeOf(int slot) {
+		return switch (slot) {
+			case SLOT_OBJECT -> "java/lang/Object";
+			case SLOT_LONG -> Opcodes.LONG;
+			case SLOT_FLOAT -> Opcodes.FLOAT;
+			case SLOT_DOUBLE -> Opcodes.DOUBLE;
+			default -> Opcodes.INTEGER;
+		};
+	}
+
+	private static int varLoadOpcode(int slot) {
+		return switch (slot) {
+			case SLOT_OBJECT -> Opcodes.ALOAD;
+			case SLOT_LONG -> Opcodes.LLOAD;
+			case SLOT_FLOAT -> Opcodes.FLOAD;
+			case SLOT_DOUBLE -> Opcodes.DLOAD;
+			default -> Opcodes.ILOAD;
+		};
+	}
+
+	private static MethodHandle buildConstantBatchLoop(int slot, boolean forceWrite) throws Throwable {
+		Class<?> valType = slotType(slot);
+		Type asmValType = Type.getType(valType);
+		String valDesc = asmValType.getDescriptor();
+		int valSize = asmValType.getSize();
+		String bridgeInternal = Type.getInternalName(HotswapBridge.class);
+		String selfInternal = bridgeInternal + "$ConstLoop_" + (forceWrite ? "F_" : "C_") + slot;
+		String putterSig = "(Ljava/lang/Object;J" + valDesc + ")" + (forceWrite ? "V" : "Z");
+		String runSig = "(Ljava/lang/Class;Ljava/lang/String;J" + valDesc
+		                + "Z[Ljava/lang/Object;II[Ljava/lang/Throwable;)I";
+
+		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+		cw.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC,
+		 selfInternal, null, "java/lang/Object", null);
+		cw.visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL,
+		 "WRITER", "Ljava/lang/invoke/MethodHandle;", null, null).visitEnd();
+
+		MethodVisitor clinit = cw.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null);
+		clinit.visitCode();
+		clinit.visitInsn(forceWrite ? Opcodes.ICONST_1 : Opcodes.ICONST_0);
+		clinit.visitIntInsn(Opcodes.BIPUSH, slot);
+		clinit.visitMethodInsn(Opcodes.INVOKESTATIC, bridgeInternal, "resolveLoopPutter",
+		 "(ZI)Ljava/lang/invoke/MethodHandle;", false);
+		clinit.visitFieldInsn(Opcodes.PUTSTATIC, selfInternal, "WRITER", "Ljava/lang/invoke/MethodHandle;");
+		clinit.visitInsn(Opcodes.RETURN);
+		clinit.visitMaxs(0, 0);
+		clinit.visitEnd();
+
+		final int localHost     = 0;
+		final int localField    = 1;
+		final int localOffset   = 2;
+		final int localVal      = 4;
+		final int localSelfOnly = 4 + valSize;
+		final int localTargets  = 5 + valSize;
+		final int localFrom     = 6 + valSize;
+		final int localTo       = 7 + valSize;
+		final int localErrOut   = 8 + valSize;
+		final int localIndex    = 9 + valSize;
+		final int localWritten  = 10 + valSize;
+		final int localSkipped  = 12 + valSize;
+		final int localTarget   = forceWrite ? (10 + valSize) : (14 + valSize);
+
+		Object valFrame = frameTypeOf(slot);
+		Object[] loopLocals = forceWrite
+		 ? new Object[]{
+			"java/lang/Class", "java/lang/String", Opcodes.LONG, valFrame,
+			Opcodes.INTEGER, "[Ljava/lang/Object;", Opcodes.INTEGER, Opcodes.INTEGER,
+			"[Ljava/lang/Throwable;", Opcodes.INTEGER
+		 }
+		 : new Object[]{
+			"java/lang/Class", "java/lang/String", Opcodes.LONG, valFrame,
+			Opcodes.INTEGER, "[Ljava/lang/Object;", Opcodes.INTEGER, Opcodes.INTEGER,
+			"[Ljava/lang/Throwable;", Opcodes.INTEGER, Opcodes.LONG, Opcodes.LONG
+		 };
+		Object[] targetLocals = new Object[loopLocals.length + 1];
+		System.arraycopy(loopLocals, 0, targetLocals, 0, loopLocals.length);
+		targetLocals[loopLocals.length] = "java/lang/Object";
+		Object[] catchLocals = new Object[loopLocals.length + 1];
+		System.arraycopy(loopLocals, 0, catchLocals, 0, loopLocals.length);
+		catchLocals[loopLocals.length] = "java/lang/Throwable";
+
+		MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "run", runSig, null, null);
+		mv.visitCode();
+		Label tryStart     = new Label();
+		Label tryEnd       = new Label();
+		Label loopCond     = new Label();
+		Label loopEnd      = new Label();
+		Label notSelfOnly  = new Label();
+		Label doWrite      = new Label();
+		Label onSkipped    = new Label();
+		Label nextIter     = new Label();
+		Label catchHandler = new Label();
+		mv.visitTryCatchBlock(tryStart, tryEnd, catchHandler, "java/lang/Throwable");
+
+		mv.visitVarInsn(Opcodes.ILOAD, localFrom);
+		mv.visitVarInsn(Opcodes.ISTORE, localIndex);
+		if (!forceWrite) {
+			mv.visitInsn(Opcodes.LCONST_0);
+			mv.visitVarInsn(Opcodes.LSTORE, localWritten);
+			mv.visitInsn(Opcodes.LCONST_0);
+			mv.visitVarInsn(Opcodes.LSTORE, localSkipped);
+		}
+
+		mv.visitLabel(tryStart);
+		mv.visitLabel(loopCond);
+		mv.visitFrame(Opcodes.F_FULL, loopLocals.length, loopLocals, 0, new Object[0]);
+		mv.visitVarInsn(Opcodes.ILOAD, localIndex);
+		mv.visitVarInsn(Opcodes.ILOAD, localTo);
+		mv.visitJumpInsn(Opcodes.IF_ICMPGE, loopEnd);
+
+		mv.visitVarInsn(Opcodes.ALOAD, localTargets);
+		mv.visitVarInsn(Opcodes.ILOAD, localIndex);
+		mv.visitInsn(Opcodes.AALOAD);
+		mv.visitVarInsn(Opcodes.ASTORE, localTarget);
+		mv.visitVarInsn(Opcodes.ALOAD, localTarget);
+		mv.visitJumpInsn(Opcodes.IFNULL, nextIter);
+
+		mv.visitVarInsn(Opcodes.ILOAD, localSelfOnly);
+		mv.visitJumpInsn(Opcodes.IFEQ, notSelfOnly);
+		mv.visitVarInsn(Opcodes.ALOAD, localTarget);
+		mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Object", "getClass", "()Ljava/lang/Class;", false);
+		mv.visitVarInsn(Opcodes.ALOAD, localHost);
+		mv.visitJumpInsn(Opcodes.IF_ACMPNE, nextIter);
+		mv.visitJumpInsn(Opcodes.GOTO, doWrite);
+
+		mv.visitLabel(notSelfOnly);
+		mv.visitFrame(Opcodes.F_FULL, targetLocals.length, targetLocals, 0, new Object[0]);
+		mv.visitVarInsn(Opcodes.ALOAD, localHost);
+		mv.visitVarInsn(Opcodes.ALOAD, localTarget);
+		mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Class", "cast", "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+		mv.visitInsn(Opcodes.POP);
+
+		mv.visitLabel(doWrite);
+		mv.visitFrame(Opcodes.F_FULL, targetLocals.length, targetLocals, 0, new Object[0]);
+		mv.visitFieldInsn(Opcodes.GETSTATIC, selfInternal, "WRITER", "Ljava/lang/invoke/MethodHandle;");
+		mv.visitVarInsn(Opcodes.ALOAD, localTarget);
+		mv.visitVarInsn(Opcodes.LLOAD, localOffset);
+		mv.visitVarInsn(varLoadOpcode(slot), localVal);
+		mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/invoke/MethodHandle", "invokeExact", putterSig, false);
+		if (!forceWrite) {
+			mv.visitJumpInsn(Opcodes.IFEQ, onSkipped);
+			mv.visitVarInsn(Opcodes.LLOAD, localWritten);
+			mv.visitInsn(Opcodes.LCONST_1);
+			mv.visitInsn(Opcodes.LADD);
+			mv.visitVarInsn(Opcodes.LSTORE, localWritten);
+			mv.visitJumpInsn(Opcodes.GOTO, nextIter);
+
+			mv.visitLabel(onSkipped);
+			mv.visitFrame(Opcodes.F_FULL, targetLocals.length, targetLocals, 0, new Object[0]);
+			mv.visitVarInsn(Opcodes.LLOAD, localSkipped);
+			mv.visitInsn(Opcodes.LCONST_1);
+			mv.visitInsn(Opcodes.LADD);
+			mv.visitVarInsn(Opcodes.LSTORE, localSkipped);
+		}
+
+		mv.visitLabel(nextIter);
+		mv.visitFrame(Opcodes.F_FULL, targetLocals.length, targetLocals, 0, new Object[0]);
+		mv.visitIincInsn(localIndex, 1);
+		mv.visitJumpInsn(Opcodes.GOTO, loopCond);
+		mv.visitLabel(tryEnd);
+
+		mv.visitLabel(loopEnd);
+		mv.visitFrame(Opcodes.F_FULL, loopLocals.length, loopLocals, 0, new Object[0]);
+		if (!forceWrite) {
+			Label skipStats = new Label();
+			emitBatchStatsFlush(mv, bridgeInternal, localHost, localField, localWritten, localSkipped, skipStats);
+			mv.visitLabel(skipStats);
+			mv.visitFrame(Opcodes.F_FULL, loopLocals.length, loopLocals, 0, new Object[0]);
+		}
+		mv.visitInsn(Opcodes.ICONST_M1);
+		mv.visitInsn(Opcodes.IRETURN);
+
+		mv.visitLabel(catchHandler);
+		mv.visitFrame(Opcodes.F_FULL, loopLocals.length, loopLocals, 1, new Object[]{"java/lang/Throwable"});
+		mv.visitVarInsn(Opcodes.ASTORE, localTarget);
+		if (!forceWrite) {
+			Label skipErrStats = new Label();
+			emitBatchStatsFlush(mv, bridgeInternal, localHost, localField, localWritten, localSkipped, skipErrStats);
+			mv.visitLabel(skipErrStats);
+			mv.visitFrame(Opcodes.F_FULL, catchLocals.length, catchLocals, 0, new Object[0]);
+		}
+		mv.visitVarInsn(Opcodes.ALOAD, localErrOut);
+		mv.visitInsn(Opcodes.ICONST_0);
+		mv.visitVarInsn(Opcodes.ALOAD, localTarget);
+		mv.visitInsn(Opcodes.AASTORE);
+		mv.visitVarInsn(Opcodes.ILOAD, localIndex);
+		mv.visitInsn(Opcodes.IRETURN);
+
+		mv.visitMaxs(0, 0);
+		mv.visitEnd();
+		cw.visitEnd();
+
+		Lookup lookup = Reflect.defineHiddenClass(HotswapBridge.class, cw.toByteArray());
+		return lookup.findStatic(lookup.lookupClass(), "run", MethodType.fromMethodDescriptorString(
+		 runSig, HotswapBridge.class.getClassLoader()));
+	}
+
+	private static void emitBatchStatsFlush(
+	 MethodVisitor mv, String bridgeInternal, int localHost, int localField,
+	 int localWritten, int localSkipped, Label skipLabel) {
+		mv.visitVarInsn(Opcodes.LLOAD, localWritten);
+		mv.visitVarInsn(Opcodes.LLOAD, localSkipped);
+		mv.visitInsn(Opcodes.LOR);
+		mv.visitInsn(Opcodes.LCONST_0);
+		mv.visitInsn(Opcodes.LCMP);
+		mv.visitJumpInsn(Opcodes.IFEQ, skipLabel);
+		mv.visitVarInsn(Opcodes.ALOAD, localHost);
+		mv.visitVarInsn(Opcodes.ALOAD, localField);
+		mv.visitVarInsn(Opcodes.LLOAD, localWritten);
+		mv.visitVarInsn(Opcodes.LLOAD, localSkipped);
+		mv.visitMethodInsn(Opcodes.INVOKESTATIC, bridgeInternal, "addConditionalStats",
+		 "(Ljava/lang/Class;Ljava/lang/String;JJ)V", false);
+	}
+
+	/**
 	 * 沿 owner -> 父类链逐层 {@code getDeclaredFields()} 查找。
 	 * 热更注入的字段就在 owner 上，第一次迭代即命中。
 	 */
@@ -993,6 +1262,27 @@ public final class HotswapBridge {
 			MethodHandle batchMh = lookup.findStatic(lookup.lookupClass(), "patchBatch",
 			 MethodType.methodType(void.class, Object[].class));
 			batchMh.invokeExact(new Object[]{new WarmupHost()});
+
+			// 预热常驻常量批写循环（int / Object），以 ~2500 次短调用直接跨过 C1/C2 方法入口阈值，
+			// 同时训练 written/skipped、selfOnly=false/true 与 null 跳过分支，消除首次热更的解释器窗口。
+			long offV   = resolveInstanceFieldOffset(WarmupHost.class, "v", "I");
+			long offRef = resolveInstanceFieldOffset(WarmupHost.class, "ref", "Ljava/lang/Object;");
+			MethodHandle intLoop = MethodHandles.insertArguments(
+			 constantBatchLoop(int.class, false), 0, WarmupHost.class, "v", offV, 1);
+			MethodHandle refLoop = MethodHandles.insertArguments(
+			 constantBatchLoop(Object.class, false), 0, WarmupHost.class, "ref", offRef, "warmup");
+			Object[] warmBatch = new Object[]{new WarmupHost(), new WarmupHost(), null, new WarmupHost()};
+			Throwable[] errOut = new Throwable[1];
+			for (int iter = 0; iter < 2500; iter++) {
+				boolean selfOnly = (iter & 1) != 0;
+				int ignoredInt = (int) intLoop.invokeExact(selfOnly, warmBatch, 0, warmBatch.length, errOut);
+				int ignoredRef = (int) refLoop.invokeExact(selfOnly, warmBatch, 0, warmBatch.length, errOut);
+				if (iter < 10) {
+					WarmupHost w = (WarmupHost) warmBatch[0];
+					w.v = 0;
+					w.ref = null;
+				}
+			}
 		} catch (Throwable ignored) {
 			// Best-effort warmup: cold path still initializes lazily on demand.
 		} finally {

@@ -472,6 +472,9 @@ public class InitFix {
 		boolean hasPatch() { return bytes != null; }
 	}
 
+	/** 常量直写批通道描述（供 {@link HotswapBridge#constantBatchLoop} 复用常驻 C2 循环）。 */
+	public record ConstantInitSpec(String fieldDesc, boolean forceWrite, Object value) { }
+
 	/**
 	 * 单个字段的补丁任务（{@code docs/initfix/03-runtime-driver.md} §2）。
 	 * @param methodName   伴生类里承载该字段的独立静态方法名
@@ -483,7 +486,7 @@ public class InitFix {
 	 */
 	public record FieldPatchTask(
 	 String methodName, String fieldName, boolean isStatic, Set<String> dependencies,
-	 boolean selfOnly, boolean replay, String batchMethodName) {
+	 boolean selfOnly, boolean replay, String batchMethodName, ConstantInitSpec constantInit) {
 
 		public FieldPatchTask {
 			dependencies = dependencies == null ? Set.of() : Set.copyOf(dependencies);
@@ -492,19 +495,26 @@ public class InitFix {
 		/** 默认作用域（{@code INCLUDE_SUBCLASSES}）的任务：子类实例同样要补。 */
 		public FieldPatchTask(String methodName, String fieldName, boolean isStatic,
 		                      Set<String> dependencies) {
-			this(methodName, fieldName, isStatic, dependencies, false, false, null);
+			this(methodName, fieldName, isStatic, dependencies, false, false, null, null);
 		}
 
 		/** 默认作用域 + 非重放任务。 */
 		public FieldPatchTask(String methodName, String fieldName, boolean isStatic,
 		                      Set<String> dependencies, boolean selfOnly) {
-			this(methodName, fieldName, isStatic, dependencies, selfOnly, false, null);
+			this(methodName, fieldName, isStatic, dependencies, selfOnly, false, null, null);
 		}
 
 		/** 兼容不带批方法名的构造（静态任务或无法内联进批循环的切片）。 */
 		public FieldPatchTask(String methodName, String fieldName, boolean isStatic,
 		                      Set<String> dependencies, boolean selfOnly, boolean replay) {
-			this(methodName, fieldName, isStatic, dependencies, selfOnly, replay, null);
+			this(methodName, fieldName, isStatic, dependencies, selfOnly, replay, null, null);
+		}
+
+		/** 兼容带批方法名、不带常驻常量直写描述的构造。 */
+		public FieldPatchTask(String methodName, String fieldName, boolean isStatic,
+		                      Set<String> dependencies, boolean selfOnly, boolean replay,
+		                      String batchMethodName) {
+			this(methodName, fieldName, isStatic, dependencies, selfOnly, replay, batchMethodName, null);
 		}
 	}
 
@@ -1764,6 +1774,7 @@ public class InitFix {
 			boolean replayTask = acceptedReplay.contains(fieldName);
 			boolean selfOnlyTask = replayTask || selfOnlyFields.contains(fieldName);
 			String batchMethodName = null;
+			ConstantInitSpec constantInit = null;
 			BatchSliceSpec sliceSpec = inspectBatchSlice(fieldName, body, selfOnlyTask);
 			if (sliceSpec != null) {
 				String candidateBatchName = uniqueMethodName(BATCH_PATCH_PREFIX, fieldName, usedMethodNames);
@@ -1771,6 +1782,9 @@ public class InitFix {
 				batchMethodName = candidateBatchName;
 				batchSpecs.add(sliceSpec);
 				batchIndices.add(instanceTasks.size());
+				if (!replayTask) {
+					constantInit = extractConstantInitSpec(fieldName, className, body);
+				}
 			}
 			patch.methods.add(straightLineMethod(method, "(L" + className + ";)", body));
 			// 依赖闭包必须同时统计实例侧与<b>静态侧</b>的读取。
@@ -1785,7 +1799,7 @@ public class InitFix {
 			 dependencyOf(fieldName, instanceExtracts, className, acceptedStatic));
 			hasInstanceDeps |= !instanceDeps.isEmpty();
 			instanceTasks.add(new FieldPatchTask(method, fieldName, false, instanceDeps,
-			 selfOnlyTask, replayTask, batchMethodName));
+			 selfOnlyTask, replayTask, batchMethodName, constantInit));
 		}
 
 		List<FusedBatchGroup> fusedBatchGroups = List.of();
@@ -2531,6 +2545,119 @@ public class InitFix {
 			return -1;
 		}
 		return 0;
+	}
+
+	/**
+	 * 识别形如 {@code ALOAD 0; <字面量常量>; INVOKEDYNAMIC (Lhost;T)V (CONDITIONAL|FORCE)} 的切片，
+	 * 供 {@link HotswapBridge#constantBatchLoop} 走常驻 C2 批循环而免去每轮新隐藏类的编译延迟。
+	 */
+	private static ConstantInitSpec extractConstantInitSpec(
+	 String fieldName, String className, List<AbstractInsnNode> body) {
+		if (body == null || body.isEmpty()) return null;
+		AbstractInsnNode insn0 = null;
+		AbstractInsnNode insn1 = null;
+		AbstractInsnNode insn2 = null;
+		int realCount = 0;
+		for (AbstractInsnNode insn : body) {
+			if (insn instanceof LabelNode || insn instanceof LineNumberNode || insn instanceof FrameNode) {
+				continue;
+			}
+			if (realCount == 0) insn0 = insn;
+			else if (realCount == 1) insn1 = insn;
+			else if (realCount == 2) insn2 = insn;
+			else return null;
+			realCount++;
+		}
+		if (realCount != 3) return null;
+		if (!(insn0 instanceof VarInsnNode v) || v.getOpcode() != Opcodes.ALOAD || v.var != 0) return null;
+		if (!(insn2 instanceof InvokeDynamicInsnNode indy)) return null;
+		if (!BRIDGE_BSM.equals(indy.bsm) || !fieldName.equals(indy.name)) return null;
+		if (indy.bsmArgs == null || indy.bsmArgs.length < 2 || !(indy.bsmArgs[0] instanceof Integer kind)) {
+			return null;
+		}
+		if (kind != HotswapBridge.KIND_CONDITIONAL && kind != HotswapBridge.KIND_FORCE) return null;
+		Type[] args = Type.getArgumentTypes(indy.desc);
+		if (args.length != 2 || Type.getReturnType(indy.desc).getSort() != Type.VOID) return null;
+		if (args[0].getSort() != Type.OBJECT || !className.equals(args[0].getInternalName())) return null;
+		String fieldDesc = args[1].getDescriptor();
+		Object value = decodeConstantPush(insn1, fieldDesc);
+		if (value == UNSUPPORTED_CONST) return null;
+		return new ConstantInitSpec(fieldDesc, kind == HotswapBridge.KIND_FORCE, value);
+	}
+
+	private static final Object UNSUPPORTED_CONST = new Object();
+
+	private static Object decodeConstantPush(AbstractInsnNode insn, String fieldDesc) {
+		int op = insn.getOpcode();
+		return switch (fieldDesc) {
+			case "Z" -> {
+				Integer iv = decodeIntPush(insn);
+				yield iv == null ? UNSUPPORTED_CONST : Boolean.valueOf(iv != 0);
+			}
+			case "B" -> {
+				Integer iv = decodeIntPush(insn);
+				yield iv == null ? UNSUPPORTED_CONST : Byte.valueOf((byte) iv.intValue());
+			}
+			case "C" -> {
+				Integer iv = decodeIntPush(insn);
+				yield iv == null ? UNSUPPORTED_CONST : Character.valueOf((char) iv.intValue());
+			}
+			case "S" -> {
+				Integer iv = decodeIntPush(insn);
+				yield iv == null ? UNSUPPORTED_CONST : Short.valueOf((short) iv.intValue());
+			}
+			case "I" -> {
+				Integer iv = decodeIntPush(insn);
+				yield iv == null ? UNSUPPORTED_CONST : iv;
+			}
+			case "J" -> {
+				if (op == Opcodes.LCONST_0) yield 0L;
+				if (op == Opcodes.LCONST_1) yield 1L;
+				if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Long l) yield l;
+				yield UNSUPPORTED_CONST;
+			}
+			case "F" -> {
+				if (op == Opcodes.FCONST_0) yield 0.0f;
+				if (op == Opcodes.FCONST_1) yield 1.0f;
+				if (op == Opcodes.FCONST_2) yield 2.0f;
+				if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Float f) yield f;
+				yield UNSUPPORTED_CONST;
+			}
+			case "D" -> {
+				if (op == Opcodes.DCONST_0) yield 0.0d;
+				if (op == Opcodes.DCONST_1) yield 1.0d;
+				if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Double d) yield d;
+				yield UNSUPPORTED_CONST;
+			}
+			default -> {
+				if (!fieldDesc.startsWith("L") && !fieldDesc.startsWith("[")) yield UNSUPPORTED_CONST;
+				if (op == Opcodes.ACONST_NULL) yield null;
+				if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof String s) yield s;
+				yield UNSUPPORTED_CONST;
+			}
+		};
+	}
+
+	private static Integer decodeIntPush(AbstractInsnNode insn) {
+		int op = insn.getOpcode();
+		if (op >= Opcodes.ICONST_M1 && op <= Opcodes.ICONST_5) return op - Opcodes.ICONST_0;
+		if (op == Opcodes.BIPUSH || op == Opcodes.SIPUSH) return ((IntInsnNode) insn).operand;
+		if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Integer i) return i;
+		return null;
+	}
+
+	private static Class<?> descriptorValueClass(String fieldDesc) {
+		return switch (fieldDesc) {
+			case "Z" -> boolean.class;
+			case "B" -> byte.class;
+			case "C" -> char.class;
+			case "S" -> short.class;
+			case "I" -> int.class;
+			case "J" -> long.class;
+			case "F" -> float.class;
+			case "D" -> double.class;
+			default -> Object.class;
+		};
 	}
 
 	private static void emitBatchStatsFlush(
@@ -4508,28 +4635,61 @@ public class InitFix {
 
 		// 必须在取 Handle 时就 asType 适配：init$F 的形参是宿主类型，驱动手里只有 Object。
 		BoundInstanceTask[] instanceTasks           = new BoundInstanceTask[plan.instanceTasks().size()];
+		boolean[]           constantBound           = new boolean[instanceTasks.length];
 		boolean             hasInstanceDependencies = false;
 		MethodType          batchMethodType         = MethodType.methodType(
 		 int.class, Object[].class, int.class, int.class, Throwable[].class);
 		for (int i = 0; i < instanceTasks.length; i++) {
 			FieldPatchTask task = plan.instanceTasks().get(i);
-			MethodHandle handle = h.findStatic(pc, task.methodName(), MethodType.methodType(void.class, host))
-			 .asType(MethodType.methodType(void.class, Object.class));
-			MethodHandle batchHandle = task.batchMethodName() == null
-			 ? null
-			 : h.findStatic(pc, task.batchMethodName(), batchMethodType);
-			instanceTasks[i] = new BoundInstanceTask(task.fieldName(), task.dependencies(), handle,
-			 batchHandle, task.selfOnly());
 			hasInstanceDependencies |= !task.dependencies().isEmpty();
 		}
-		BoundFusedBatchGroup[] fusedGroups = new BoundFusedBatchGroup[plan.fusedBatchGroups().size()];
+		for (int i = 0; i < instanceTasks.length; i++) {
+			FieldPatchTask task = plan.instanceTasks().get(i);
+			MethodHandle handle = h.findStatic(pc, task.methodName(), MethodType.methodType(void.class, host))
+			 .asType(MethodType.methodType(void.class, Object.class));
+			MethodHandle batchHandle = null;
+			if (!hasInstanceDependencies && task.constantInit() != null) {
+				ConstantInitSpec spec = task.constantInit();
+				try {
+					long offset = HotswapBridge.resolveInstanceFieldOffset(host, task.fieldName(), spec.fieldDesc());
+					MethodHandle loopTemplate = HotswapBridge.constantBatchLoop(
+					 descriptorValueClass(spec.fieldDesc()), spec.forceWrite());
+					batchHandle = MethodHandles.insertArguments(
+					 loopTemplate, 0, host, task.fieldName(), offset, spec.value(), task.selfOnly());
+					constantBound[i] = true;
+				} catch (LinkageError le) {
+					if (!isolatableLinkFailure(le)) throw le;
+					// 留空，回退到隐藏类批方法走原有隔离失败与计数逻辑。
+				} catch (Throwable t) {
+					RemoldAgent.warn("Persistent constant batch loop unavailable for "
+					                 + host.getName() + "." + task.fieldName() + ": " + t);
+					batchHandle = null;
+				}
+			}
+			if (batchHandle == null && task.batchMethodName() != null) {
+				batchHandle = h.findStatic(pc, task.batchMethodName(), batchMethodType);
+			}
+			instanceTasks[i] = new BoundInstanceTask(task.fieldName(), task.dependencies(), handle,
+			 batchHandle, task.selfOnly());
+		}
+		List<BoundFusedBatchGroup> fusedGroupList = new ArrayList<>(plan.fusedBatchGroups().size());
 		MethodType fusedBatchMethodType = MethodType.methodType(
 		 int.class, Object[].class, int.class, int.class, boolean[].class, Throwable[].class, int[].class);
-		for (int i = 0; i < fusedGroups.length; i++) {
-			FusedBatchGroup group = plan.fusedBatchGroups().get(i);
+		for (FusedBatchGroup group : plan.fusedBatchGroups()) {
+			int[] indices = group.taskIndices();
+			boolean allConstantBound = indices.length > 0;
+			for (int idx : indices) {
+				if (!constantBound[idx]) {
+					allConstantBound = false;
+					break;
+				}
+			}
+			// 若整组字段均已命中常驻 C2 常量批写循环，直接各自跑已预热的常驻通道，免去每轮新隐藏类编译等待。
+			if (allConstantBound) continue;
 			MethodHandle handle = h.findStatic(pc, group.methodName(), fusedBatchMethodType);
-			fusedGroups[i] = new BoundFusedBatchGroup(handle, group.taskIndices());
+			fusedGroupList.add(new BoundFusedBatchGroup(handle, indices));
 		}
+		BoundFusedBatchGroup[] fusedGroups = fusedGroupList.toArray(new BoundFusedBatchGroup[0]);
 
 		Map<String, MethodHandle> staticHandles = new LinkedHashMap<>();
 		for (FieldPatchTask task : plan.staticTasks()) {
@@ -4997,46 +5157,29 @@ public class InitFix {
 			}
 		}
 		int pos = 0;
+		int chunkCalls = 0;
 		while (pos < targets.length && activeCount > 0) {
 			errOut[0] = null;
 			errSlotOut[0] = -1;
+			int chunkEnd = nextBatchChunkEnd(pos, targets.length, chunkCalls++);
 			int failedIdx;
 			try {
 				failedIdx = (int) group.handle().invokeExact(
-				 targets, pos, targets.length, active, errOut, errSlotOut);
+				 targets, pos, chunkEnd, active, errOut, errSlotOut);
 			} catch (LinkageError le) {
 				if (!isolatableLinkFailure(le)) throw le;
-				for (int j = 0; j < indices.length; j++) {
-					if (!active[j]) continue;
-					BoundInstanceTask task = tasks[indices[j]];
-					if (task.batchHandle() != null) {
-						runBatchInstanceTaskFrom(host, targets, pos, task, budget, errOut,
-						 failedFields, skippedFields, failureReasons);
-					} else {
-						for (int k = pos; k < targets.length; k++) {
-							executeIndependentTask(host, targets[k], task, budget,
-							 failedFields, skippedFields, failureReasons);
-						}
-					}
-				}
+				fallbackFusedGroupFrom(host, targets, pos, indices, active, tasks, budget, errOut,
+				 failedFields, skippedFields, failureReasons);
 				return;
 			} catch (Throwable t) {
-				for (int j = 0; j < indices.length; j++) {
-					if (!active[j]) continue;
-					BoundInstanceTask task = tasks[indices[j]];
-					if (task.batchHandle() != null) {
-						runBatchInstanceTaskFrom(host, targets, pos, task, budget, errOut,
-						 failedFields, skippedFields, failureReasons);
-					} else {
-						for (int k = pos; k < targets.length; k++) {
-							executeIndependentTask(host, targets[k], task, budget,
-							 failedFields, skippedFields, failureReasons);
-						}
-					}
-				}
+				fallbackFusedGroupFrom(host, targets, pos, indices, active, tasks, budget, errOut,
+				 failedFields, skippedFields, failureReasons);
 				return;
 			}
-			if (failedIdx < 0) return;
+			if (failedIdx < 0) {
+				pos = chunkEnd;
+				continue;
+			}
 			int slotJ = errSlotOut[0];
 			Throwable failure = errOut[0];
 			if (failure instanceof LinkageError le && !isolatableLinkFailure(le)) throw le;
@@ -5066,6 +5209,35 @@ public class InitFix {
 		}
 	}
 
+	private static void fallbackFusedGroupFrom(
+	 Class<?> host, Object[] targets, int startPos, int[] indices, boolean[] active,
+	 BoundInstanceTask[] tasks, InstanceFailureBudget budget, Throwable[] errOut,
+	 Set<String> failedFields, Set<String> skippedFields, Map<String, String> failureReasons) {
+		for (int j = 0; j < indices.length; j++) {
+			if (!active[j]) continue;
+			BoundInstanceTask task = tasks[indices[j]];
+			if (task.batchHandle() != null) {
+				runBatchInstanceTaskFrom(host, targets, startPos, task, budget, errOut,
+				 failedFields, skippedFields, failureReasons);
+			} else {
+				for (int k = startPos; k < targets.length; k++) {
+					executeIndependentTask(host, targets[k], task, budget,
+					 failedFields, skippedFields, failureReasons);
+				}
+			}
+		}
+	}
+
+	/**
+	 * 大数组渐进切块：小于等于 4096 一次性跑完；更大数组前 2048 次以步长 4 推进（仅覆盖前 8192 个元素，
+	 * 每元素严格访问一次），稳定通过方法入口计数触发 C1/C2 编译而不依赖异步 OSR，随后按 8192 大块收尾。
+	 */
+	private static int nextBatchChunkEnd(int pos, int total, int chunkCalls) {
+		int remaining = total - pos;
+		if (remaining <= 4096) return total;
+		return chunkCalls < 2048 ? pos + 4 : pos + 8192;
+	}
+
 	private static void runBatchInstanceTask(
 	 Class<?> host, Object[] targets, BoundInstanceTask task, InstanceFailureBudget budget,
 	 Throwable[] errOut, Set<String> failedFields, Set<String> skippedFields,
@@ -5079,15 +5251,17 @@ public class InitFix {
 	 Throwable[] errOut, Set<String> failedFields, Set<String> skippedFields,
 	 Map<String, String> failureReasons) {
 		int pos = startPos;
+		int chunkCalls = 0;
 		while (pos < targets.length) {
 			if (budget.exhausted(task.fieldName())) {
 				budget.recordGiveUp(task.fieldName(), skippedFields, failureReasons);
 				return;
 			}
 			errOut[0] = null;
+			int chunkEnd = nextBatchChunkEnd(pos, targets.length, chunkCalls++);
 			int failedIdx;
 			try {
-				failedIdx = (int) task.batchHandle().invokeExact(targets, pos, targets.length, errOut);
+				failedIdx = (int) task.batchHandle().invokeExact(targets, pos, chunkEnd, errOut);
 			} catch (LinkageError le) {
 				if (!isolatableLinkFailure(le)) throw le;
 				recordTaskFailure(host, task.fieldName(), le, failedFields, failureReasons);
@@ -5100,7 +5274,10 @@ public class InitFix {
 				pos++;
 				continue;
 			}
-			if (failedIdx < 0) return;
+			if (failedIdx < 0) {
+				pos = chunkEnd;
+				continue;
+			}
 			Throwable failure = errOut[0];
 			if (failure instanceof LinkageError le && !isolatableLinkFailure(le)) throw le;
 			recordTaskFailure(host, task.fieldName(), failure, failedFields, failureReasons);

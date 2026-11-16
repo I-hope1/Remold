@@ -2083,18 +2083,20 @@ public class UpdateRef {
 			if (ref != null && ref.isRemoved()) return;
 			// 复用已有的 UpdateRef，追加从注册表注销的动作，避免多层嵌套代理吞掉 LinkageError
 			//
-			// ⚠️ 与 eventsOn 的 WrappedRef 分支**有意不同**，差异有实际后果：
-			// eventsOn 直接把原 listener（即 wr 本身）塞进注册表，而 eventsRemove 的
-			// unwrapTargetKey 能对 WrappedRef 解出 getOriginal()，因此那个条目**可以按内容注销**；
-			// 这里则额外包了一层 new EventCons<>(ref)，而 unwrapTargetKey **不解 EventCons**，
-			// 于是该条目只有传入同一个 EventCons 实例（item == targetKey）才能注销 ——
-			// 而该实例是本方法内新造的，调用方拿不到。
+			// 与 eventsOn 的 WrappedRef 分支**有意不同**：eventsOn 把原 listener（即 wr 本身）直接塞进注册表，
+			// 这里额外包一层 new EventCons<>(ref)。注意该 EventCons 与 wr **共享同一个 UpdateRef**（不新建代理），
+			// 因此两条路径的实际差异只有下面两点：
 			//
-			// 之所以仍然正确：本分支已把 onRemove 挂到 ref 上（addOnRemove），
-			// 真正的移除走那条**主动清理**路径 —— ref 包的是同一个 original，
-			// ref.run() 执行的就是用户原始 Runnable，不依赖注册表里的条目。
-			// 也就是说，注册表里这个条目是**残留**而非功能失效。
-			// 若要统一成 eventsOn 的形态，属于行为变更，需单独评估。
+			//   1) 只影响**身份**匹配，不影响**内容**匹配：注册表里的条目不是调用方手里的实例，故
+			//      `item == listener` 这条身份判定在这条路径上不成立；但 EventCons 自身实现 WrappedRef，
+			//      而 unwrapTargetKey 会对任何 WrappedRef 解出 getOriginal()，所以 eventsRemove /
+			//      removeEventRun 仍能按内容命中该条目 —— 拿原 listener，或任何包着同一 original 的等价包装，
+			//      都不需要传入本方法内新造的实例。
+			//   2) 熔断之后内容匹配失效：clearFn() 把共享的 original 置空，两侧 itemKey 都是 null；
+			//      该情形下的移除由挂在本 ref 上的 addOnRemove 承担（按实例身份从注册表摘除，见上面的 box）。
+			//
+			// 也就是说注册表里这个条目是**正常可注销的**，并非"只剩熔断主动清理一条路"；
+			// 若要统一成 eventsOn 的形态（直接把 wr 塞进注册表），属于行为变更，需单独评估。
 			if (ref != null) {
 				ref.addOnRemove(onRemove);
 			}
@@ -2405,9 +2407,21 @@ public class UpdateRef {
 	}
 
 	/**
-	 * 判断给定的 Throwable 是否属于热重载结构变更引起的链接异常（类/方法/字段不存在或签名不兼容）。
-	 * 对于非热重载引发的错误（如 {@link ExceptionInInitializerError} 静态块异常或 {@link VerifyError} 等）应正常抛出，避免吞掉业务异常。
-	 * 若根本原因链包含 {@link ExceptionInInitializerError}（例如类首次初始化失败后再次调用引发的 NoClassDefFoundError），同样认定为业务异常，不予熔断。
+	 * 判断给定的 Throwable 是否属于热重载结构变更引起的链接异常（符号缺失或签名不兼容）。
+	 * <p>
+	 * 判定范围只覆盖"符号缺失"这一类：
+	 * <ul>
+	 *   <li>{@link IncompatibleClassChangeError}：含 {@link NoSuchMethodError}、{@link NoSuchFieldError}、
+	 *       {@link IllegalAccessError} 等，即旧存活的调用点再解析被删除/改签名的成员；</li>
+	 *   <li>{@link NoClassDefFoundError}：符号所属的类在批次外已不可解析；</li>
+	 *   <li>{@link BootstrapMethodError}：{@code invokedynamic} 自举点解析失败。lambda 的调用点把
+	 *       {@code implMethod} 记在自举参数里，目标方法被删除或改签名后，同一调用点再次触发时
+	 *       {@code LambdaMetafactory} 自举失败即抛出此错误（原因通常为 {@link NoSuchMethodError}）。
+	 *       该类型直接继承 {@link LinkageError} 而非 {@link IncompatibleClassChangeError}，故需单列。</li>
+	 * </ul>
+	 * 对于非结构性缺失的链接错误（如 {@link VerifyError} 等字节码校验失败）应正常抛出，避免吞掉业务异常。
+	 * 若根本原因链包含 {@link ExceptionInInitializerError}（例如类首次初始化失败后再次调用引发的 NoClassDefFoundError），
+	 * 同样认定为业务异常，不予熔断；该豁免优先于上述类型判定。
 	 * @param t 目标异常
 	 * @return 若为热重载引起的结构缺失异常则返回 true
 	 */
@@ -2422,7 +2436,8 @@ public class UpdateRef {
 			cur = cur.getCause();
 		}
 		return t instanceof IncompatibleClassChangeError
-		       || t instanceof NoClassDefFoundError;
+		       || t instanceof NoClassDefFoundError
+		       || t instanceof BootstrapMethodError;
 	}
 
 	/**

@@ -1,6 +1,8 @@
 #include <jni.h>
 #include <jvmti.h>
+#include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <expected>
@@ -27,27 +29,31 @@ static inline jlong monotonicNowNs() {
 }
 
 /**
- * POSIX 独占锁封装（仅使用 pthread_rwlock_t）。
+ * POSIX 独占锁封装（使用 pthread_mutex_t）。
  * 避免引用 libc++.a 的 std::mutex，从而允许两段式 zig cc 链接：既跳过 zig 构建内置 libc++ 时
  * 的 -Wnullability-completeness 噪声，又让锁符号直接绑定到 libpthread.so.0@GLIBC_2.17。
  */
 struct NativeMutex {
-    pthread_rwlock_t handle = PTHREAD_RWLOCK_INITIALIZER;
+    pthread_mutex_t handle = PTHREAD_MUTEX_INITIALIZER;
     NativeMutex() = default;
     NativeMutex(const NativeMutex&) = delete;
     NativeMutex& operator=(const NativeMutex&) = delete;
-    void lock() { pthread_rwlock_wrlock(&handle); }
-    void unlock() { pthread_rwlock_unlock(&handle); }
+    void lock() {
+        if (pthread_mutex_lock(&handle) != 0) std::abort();
+    }
+    void unlock() {
+        if (pthread_mutex_unlock(&handle) != 0) std::abort();
+    }
 };
 
 class NativeLockGuard {
-    pthread_rwlock_t& handle;
+    NativeMutex& mutex;
 public:
-    explicit NativeLockGuard(NativeMutex& m) : handle(m.handle) {
-        pthread_rwlock_wrlock(&handle);
+    explicit NativeLockGuard(NativeMutex& m) : mutex(m) {
+        mutex.lock();
     }
     ~NativeLockGuard() {
-        pthread_rwlock_unlock(&handle);
+        mutex.unlock();
     }
     NativeLockGuard(const NativeLockGuard&) = delete;
     NativeLockGuard& operator=(const NativeLockGuard&) = delete;
@@ -202,6 +208,33 @@ HasInstanceCallback(jlong /*class_tag*/, jlong /*size*/, jlong* /*tag_ptr*/, voi
     return JVMTI_ITERATION_ABORT;
 }
 
+static std::atomic<jclass> g_object_class{nullptr};
+static NativeMutex g_jvmti_mutex;
+
+/** 获取缓存的 java/lang/Object 全局引用（懒初始化并在 JNI_OnUnload 释放）。 */
+static jclass getObjectClass(JNIEnv* env) {
+    jclass cached = g_object_class.load(std::memory_order_acquire);
+    if (cached) return cached;
+
+    NativeLockGuard lock(g_jvmti_mutex);
+    cached = g_object_class.load(std::memory_order_relaxed);
+    if (cached) return cached;
+
+    jclass local = env->FindClass("java/lang/Object");
+    if (!local) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return nullptr;
+    }
+    jclass global = reinterpret_cast<jclass>(env->NewGlobalRef(local));
+    env->DeleteLocalRef(local);
+    if (!global) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return nullptr;
+    }
+    g_object_class.store(global, std::memory_order_release);
+    return global;
+}
+
 static jvmtiError
 validateInstanceQueryClass(jvmtiEnv* jvmti, JNIEnv* env, jclass klass) {
     if (!jvmti || !env || !klass) return JVMTI_ERROR_NULL_POINTER;
@@ -210,14 +243,11 @@ validateInstanceQueryClass(jvmtiEnv* jvmti, JNIEnv* env, jclass klass) {
     // elementClass 必须是引用类型 Class（HotSpot 内部 as_Klass 返回 nullptr 会直接 SIGSEGV）。
     // 这里必须前置拦截，绝不能把基本类型镜像交给 NewObjectArray。
     // 判定方式：基本类型镜像（含 void）都不是 java.lang.Object 的子类型。
-    jclass obj_clazz = env->FindClass("java/lang/Object");
+    jclass obj_clazz = getObjectClass(env);
     if (!obj_clazz) {
-        env->ExceptionClear();
         return JVMTI_ERROR_CLASS_NOT_PREPARED;
     }
-    const bool is_primitive = !env->IsAssignableFrom(klass, obj_clazz);
-    env->DeleteLocalRef(obj_clazz);
-    if (is_primitive) {
+    if (!env->IsAssignableFrom(klass, obj_clazz)) {
         return JVMTI_ERROR_ILLEGAL_ARGUMENT;
     }
 
@@ -332,8 +362,22 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTi
     const jlong t_after_iterate = timings ? monotonicNowNs() : 0;
     if (timings) timings->iterate_ns = t_after_iterate - t_before_iterate;
 
-    // 尽量在独立局部引用帧内物化 GetObjectsWithTags，结束后 PopLocalFrame 一次释放全部临时句柄。
-    if (env->PushLocalFrame(16) == JNI_OK) {
+    if (tag_ctx.seq == 0) {
+        jobjectArray empty = env->NewObjectArray(0, klass, nullptr);
+        if (!empty) {
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            return std::unexpected(JVMTI_ERROR_OUT_OF_MEMORY);
+        }
+        if (timings) {
+            timings->alloc_ns = monotonicNowNs() - t_after_iterate;
+        }
+        return empty;
+    }
+
+    // 尽量在独立局部引用帧内物化 GetObjectsWithTags，按预估容量申请帧，结束后 PopLocalFrame 一次释放临时句柄。
+    const jint local_frame_cap = static_cast<jint>(
+        std::min<jlong>(tag_ctx.seq + 16, static_cast<jlong>(INT32_MAX)));
+    if (env->PushLocalFrame(local_frame_cap) == JNI_OK) {
         has_local_frame = true;
     } else if (env->ExceptionCheck()) {
         env->ExceptionClear();
@@ -394,38 +438,53 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTi
         tags_out = nullptr;
     }
 
+    auto clearCollectedTagsDirect = [&] {
+        for (jint i = 0; i < count; ++i) {
+            if (instances[i]) jvmti->SetTag(instances[i], 0);
+        }
+    };
+
     // 构建结果数组，不再调用 EnsureLocalCapacity 以避免触发超过容量限制的误报失败
     jobjectArray result = env->NewObjectArray(count, klass, nullptr);
     const jlong t_after_alloc = timings ? monotonicNowNs() : 0;
     if (timings) timings->alloc_ns = t_after_alloc - t_after_collect;
     if (!result) {
         env->ExceptionClear();
+        bool cleared = (count <= 0);
+        if (!cleared && count <= kTagClearWalkThreshold && instances) {
+            clearCollectedTagsDirect();
+            cleared = true;
+        }
         if (!has_local_frame) {
             for (jint i = 0; i < count; ++i) {
-                env->DeleteLocalRef(instances[i]);
+                if (instances[i]) env->DeleteLocalRef(instances[i]);
             }
         }
-        if (count > 0) {
+        if (!cleared) {
             clearTaggedClassRange(jvmti, klass, base_tag, used_buckets);
         }
         return std::unexpected(JVMTI_ERROR_OUT_OF_MEMORY);
     }
 
     // validateInstanceQueryClass 已前置拦截基本类型与数组类，IterateOverInstancesOfClass 仅返回
-    // klass 及其子类型/实现类；进入独立局部帧后循环内省略 IsInstanceOf / ExceptionCheck / DeleteLocalRef，
-    // tag 统一由后面的单次 JVMTI_HEAP_OBJECT_TAGGED 遍历清空。
+    // klass 及其子类型/实现类；进入独立局部帧后循环内省略 IsInstanceOf / DeleteLocalRef，
+    // 但仍逐元素检查 SetObjectArrayElement 异常以防止 pending exception 跨 JNI 调用或产生空洞。
     jsize idx = 0;
+    bool tags_cleared = (count <= 0);
     if (has_local_frame) {
         for (jint i = 0; i < count; ++i) {
             jobject o = src[i];
             if (o) {
-                env->SetObjectArrayElement(result, idx++, o);
+                env->SetObjectArrayElement(result, idx, o);
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                } else {
+                    ++idx;
+                }
             }
         }
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-        }
     } else {
+        const bool direct_clear_inline = (count > 0 && count <= kTagClearWalkThreshold);
         for (jint i = 0; i < count; ++i) {
             jobject o = src[i];
             if (o && env->IsInstanceOf(o, klass)) {
@@ -436,8 +495,13 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTi
                     ++idx;
                 }
             }
-            env->DeleteLocalRef(o);
+            if (o) {
+                // 没有独立局部帧时必须在 DeleteLocalRef 前完成 SetTag(0)，避免句柄失效后误用。
+                if (direct_clear_inline) jvmti->SetTag(o, 0);
+                env->DeleteLocalRef(o);
+            }
         }
+        if (direct_clear_inline) tags_cleared = true;
     }
     if (sorted) {
         std::free(sorted);
@@ -449,41 +513,49 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTi
         timings->kept_count = static_cast<jlong>(idx);
     }
 
-    // 若有元素被过滤，收缩数组长度以匹配实际填充数量
+    auto ensureTagsCleared = [&] {
+        if (tags_cleared) return;
+        // 即使曾触发多桶（used_buckets > 1），只要期间 GC 回收掉大量死对象使实际存活 count <= 阈值，
+        // search_tags 查询得到的全部剩余带标存活实例就都在 instances[] 中，可直接逐一清标而不受 used_buckets 限制。
+        if (count <= kTagClearWalkThreshold && instances) {
+            clearCollectedTagsDirect();
+        } else {
+            clearTaggedClassRange(jvmti, klass, base_tag, used_buckets);
+        }
+        tags_cleared = true;
+    };
+
+    // 若有元素被过滤，收缩数组长度以匹配实际填充数量（OOM 时失败返回而非静默残留尾部 null）
     jobjectArray final_result = result;
     if (idx != count) {
         jobjectArray trimmed = env->NewObjectArray(idx, klass, nullptr);
-        if (trimmed) {
-            for (jsize i = 0; i < idx; ++i) {
-                jobject e = env->GetObjectArrayElement(result, i);
-                if (env->ExceptionCheck()) {
-                    env->ExceptionClear();
-                    continue;
-                }
+        if (!trimmed) {
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            if (!has_local_frame) env->DeleteLocalRef(result);
+            ensureTagsCleared();
+            return std::unexpected(JVMTI_ERROR_OUT_OF_MEMORY);
+        }
+        for (jsize i = 0; i < idx; ++i) {
+            jobject e = env->GetObjectArrayElement(result, i);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                if (e) env->DeleteLocalRef(e);
+                continue;
+            }
+            if (e) {
                 env->SetObjectArrayElement(trimmed, i, e);
                 if (env->ExceptionCheck()) env->ExceptionClear();
-                if (e && !has_local_frame) env->DeleteLocalRef(e);
+                env->DeleteLocalRef(e);
             }
-            if (!has_local_frame) env->DeleteLocalRef(result);
-            final_result = trimmed;
-        } else {
-            env->ExceptionClear();
         }
+        if (!has_local_frame) env->DeleteLocalRef(result);
+        final_result = trimmed;
     }
 
-    bool tags_cleared = (count <= 0);
-    if (!tags_cleared && used_buckets == 1 && count <= kTagClearWalkThreshold && instances) {
-        for (jint i = 0; i < count; ++i) {
-            if (instances[i]) jvmti->SetTag(instances[i], 0);
-        }
-        tags_cleared = true;
-    }
+    ensureTagsCleared();
     if (instances) {
         jvmti->Deallocate(reinterpret_cast<unsigned char*>(instances));
         instances = nullptr;
-    }
-    if (!tags_cleared) {
-        clearTaggedClassRange(jvmti, klass, base_tag, used_buckets);
     }
     if (has_local_frame) {
         final_result = reinterpret_cast<jobjectArray>(env->PopLocalFrame(final_result));
@@ -537,7 +609,8 @@ static jint JNICALL ReferrerCallback(
 
 /**
  * 获取指定 Java 对象在堆中的所有直接引用者（Referrers）并返回局部引用数组。
- * 语义说明：仅包含堆中其他对象对它的字段引用，不包含线程栈局部变量、JNI 全局引用等 GC Roots。
+ * 语义说明：仅统计从 GC Roots 可达的堆中其他对象对它的直接对象间引用（不含栈帧局部变量、JNI 全局引用等 Root，
+ * 也不包含尚未回收的不可达对象）；不按 reference_kind 过滤，因此类元信息、数组元素与普通字段引用均会纳入。
  * 若目标对象本身为 Class 对象，堆中所有该类的实例均会被视作引用者（即实例对自身类的类引用关系）。
  */
 static std::expected<jobjectArray, jvmtiError> getReferrersInternal(jvmtiEnv* jvmti, JNIEnv* env, jobject target_object) {
@@ -564,8 +637,10 @@ static std::expected<jobjectArray, jvmtiError> getReferrersInternal(jvmtiEnv* jv
         .has_self_ref = false,
     };
 
+    // 传入 JVMTI_HEAP_FILTER_UNTAGGED：FollowReferences 仍遍历完整可达图，但仅对已打标目标对象
+    // 触发回调，消除海量无关边回调与 JDK 15+ 未逃逸对象的全局 EscapeBarrier 去优化冲击。
     jvmtiError err_follow = jvmti->FollowReferences(
-        0,
+        JVMTI_HEAP_FILTER_UNTAGGED,
         nullptr,
         nullptr,
         &callbacks,
@@ -580,6 +655,17 @@ static std::expected<jobjectArray, jvmtiError> getReferrersInternal(jvmtiEnv* jv
     if (ctx.has_self_ref) {
         jvmti->SetTag(target_object, referrer_tag);
     }
+
+    bool has_local_frame = (env->PushLocalFrame(64) == JNI_OK);
+    if (!has_local_frame && env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+    SCOPE_EXIT([&] {
+        if (has_local_frame) {
+            env->PopLocalFrame(nullptr);
+            has_local_frame = false;
+        }
+    });
 
     jint count = 0;
     jobject* instances = nullptr;
@@ -597,25 +683,37 @@ static std::expected<jobjectArray, jvmtiError> getReferrersInternal(jvmtiEnv* jv
         }
     });
 
-    jclass obj_class = env->FindClass("java/lang/Object");
-    if (!obj_class) {
+    auto clearReferrerTags = [&] {
         jvmti->SetTag(target_object, 0);
-        clearTagFromHeap(jvmti, referrer_tag);
-        // 清理已生成的局部引用，避免在非 JNI 托管的调用路径下发生泄露
-        for (jint i = 0; i < count; ++i) {
-            env->DeleteLocalRef(instances[i]);
+        if (count <= 0) return;
+        if (count <= kTagClearWalkThreshold) {
+            for (jint i = 0; i < count; ++i) {
+                if (instances[i]) jvmti->SetTag(instances[i], 0);
+            }
+        } else {
+            clearTagFromHeap(jvmti, referrer_tag);
+        }
+    };
+
+    jclass obj_class = getObjectClass(env);
+    if (!obj_class) {
+        clearReferrerTags();
+        if (!has_local_frame) {
+            for (jint i = 0; i < count; ++i) {
+                if (instances[i]) env->DeleteLocalRef(instances[i]);
+            }
         }
         return std::unexpected(JVMTI_ERROR_CLASS_NOT_PREPARED);
     }
-    SCOPE_EXIT([&] { env->DeleteLocalRef(obj_class); });
 
     jobjectArray result_array = env->NewObjectArray(count, obj_class, nullptr);
     if (!result_array) {
-        jvmti->SetTag(target_object, 0);
-        clearTagFromHeap(jvmti, referrer_tag);
-        // 清理已生成的局部引用，避免在非 JNI 托管的调用路径下发生泄露
-        for (jint i = 0; i < count; ++i) {
-            env->DeleteLocalRef(instances[i]);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        clearReferrerTags();
+        if (!has_local_frame) {
+            for (jint i = 0; i < count; ++i) {
+                if (instances[i]) env->DeleteLocalRef(instances[i]);
+            }
         }
         return std::unexpected(JVMTI_ERROR_OUT_OF_MEMORY);
     }
@@ -623,20 +721,28 @@ static std::expected<jobjectArray, jvmtiError> getReferrersInternal(jvmtiEnv* jv
     std::span<jobject> objs(instances, static_cast<size_t>(count));
     jsize idx = 0;
     for (jobject element : objs) {
-        env->SetObjectArrayElement(result_array, idx++, element);
+        env->SetObjectArrayElement(result_array, idx, element);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        } else {
+            ++idx;
+        }
         jvmti->SetTag(element, 0);
-        env->DeleteLocalRef(element);
+        if (!has_local_frame && element) env->DeleteLocalRef(element);
     }
 
     jvmti->SetTag(target_object, 0);
+    if (has_local_frame) {
+        result_array = reinterpret_cast<jobjectArray>(env->PopLocalFrame(result_array));
+        has_local_frame = false;
+    }
     return result_array;
 }
 
-/** 全局缓存的 JVMTI 实例原子引用及初始化互斥锁 */
+/** 全局缓存的 JVMTI 实例原子引用 */
 static std::atomic<jvmtiEnv*> g_jvmti{nullptr};
-static NativeMutex g_jvmti_mutex;
 
-static jvmtiEnv* getOrAcquireJvmti(JNIEnv* env) {
+static std::expected<jvmtiEnv*, jvmtiError> getOrAcquireJvmti(JNIEnv* env) {
     jvmtiEnv* ti = g_jvmti.load(std::memory_order_acquire);
     if (ti) return ti;
 
@@ -652,28 +758,46 @@ static jvmtiEnv* getOrAcquireJvmti(JNIEnv* env) {
             vm = raw_vm;
         }
     }
-    if (vm) {
-        void* jvmti_raw = nullptr;
-        if (vm->GetEnv(&jvmti_raw, JVMTI_VERSION_1_2) == JNI_OK && jvmti_raw) {
-            ti = reinterpret_cast<jvmtiEnv*>(jvmti_raw);
-            if (auto e = ensureCapabilities(ti); e != JVMTI_ERROR_NONE) {
-                // 能力申请失败：**不缓存** 这个 jvmti（store 在下面），返回 nullptr，
-                // 调用方见到 nullptr 即直接返回，下一次调用会重试申请。
-                // 不缓存是刻意的：AddCapabilities 的失败可能是瞬时的。
-                (void) e;
-                return nullptr;
-            }
-            g_jvmti.store(ti, std::memory_order_release);
-            return ti;
-        }
+    if (!vm) {
+        return std::unexpected(JVMTI_ERROR_INTERNAL);
     }
-    return nullptr;
+
+    void* jvmti_raw = nullptr;
+    if (vm->GetEnv(&jvmti_raw, JVMTI_VERSION_1_2) != JNI_OK || !jvmti_raw) {
+        return std::unexpected(JVMTI_ERROR_NOT_AVAILABLE);
+    }
+    ti = reinterpret_cast<jvmtiEnv*>(jvmti_raw);
+    if (auto e = ensureCapabilities(ti); e != JVMTI_ERROR_NONE) {
+        // 能力申请失败时立即释放新建的 jvmtiEnv，避免后续重试反复泄漏环境。
+        (void) ti->DisposeEnvironment();
+        return std::unexpected(e);
+    }
+    g_jvmti.store(ti, std::memory_order_release);
+    return ti;
 }
 
 static void throwJvmtiException(JNIEnv* env, const char* msg, jvmtiError err) {
     // 优先尊重底层已有异常（如内存不足导致的 OOM），避免二次调用引发未知行为
     if (env->ExceptionCheck()) return;
-    jclass ex_class = env->FindClass("java/lang/RuntimeException");
+    const char* ex_name = "java/lang/RuntimeException";
+    switch (err) {
+        case JVMTI_ERROR_NULL_POINTER:
+            ex_name = "java/lang/NullPointerException";
+            break;
+        case JVMTI_ERROR_ILLEGAL_ARGUMENT:
+            ex_name = "java/lang/IllegalArgumentException";
+            break;
+        case JVMTI_ERROR_OUT_OF_MEMORY:
+            ex_name = "java/lang/OutOfMemoryError";
+            break;
+        default:
+            break;
+    }
+    jclass ex_class = env->FindClass(ex_name);
+    if (!ex_class) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        ex_class = env->FindClass("java/lang/RuntimeException");
+    }
     if (ex_class) {
         char buf[256];
         std::snprintf(buf, sizeof(buf), "%s (jvmtiError: %d)", msg, static_cast<int>(err));
@@ -690,9 +814,9 @@ extern "C" {
  */
 JNIEXPORT jobjectArray JNICALL GetInstances(jvmtiEnv* /*ignored*/, JNIEnv* env, jclass klass) {
     if (!env) return nullptr;
-    jvmtiEnv* ti = getOrAcquireJvmti(env);
+    auto ti = getOrAcquireJvmti(env);
     if (!ti) return nullptr;
-    auto res = getInstancesInternal(ti, env, klass);
+    auto res = getInstancesInternal(*ti, env, klass);
     if (!res) {
         // Panama FFM 离开 native 栈不会自动抛出异常，必须清空内部遗留的未决异常
         env->ExceptionClear();
@@ -715,9 +839,9 @@ JNIEXPORT jobjectArray JNICALL GetInstances(jvmtiEnv* /*ignored*/, JNIEnv* env, 
  */
 JNIEXPORT jobjectArray JNICALL GetReferrers(jvmtiEnv* /*ignored*/, JNIEnv* env, jobject target_object) {
     if (!env) return nullptr;
-    jvmtiEnv* ti = getOrAcquireJvmti(env);
+    auto ti = getOrAcquireJvmti(env);
     if (!ti) return nullptr;
-    auto res = getReferrersInternal(ti, env, target_object);
+    auto res = getReferrersInternal(*ti, env, target_object);
     if (!res) {
         // Panama FFM 离开 native 栈不会自动抛出异常，必须清空内部遗留的未决异常
         env->ExceptionClear();
@@ -741,12 +865,12 @@ JNIEXPORT jboolean JNICALL Java_remold_util_LibTool_nHasLiveInstance(
     jclass target_clazz
 ) {
     if (!env) return JNI_FALSE;
-    jvmtiEnv* jvmti = getOrAcquireJvmti(env);
+    auto jvmti = getOrAcquireJvmti(env);
     if (!jvmti) {
-        throwJvmtiException(env, "Failed to acquire JVMTI environment", JVMTI_ERROR_INTERNAL);
+        throwJvmtiException(env, "Failed to acquire JVMTI environment", jvmti.error());
         return JNI_FALSE;
     }
-    auto res = hasLiveInstanceInternal(jvmti, env, target_clazz);
+    auto res = hasLiveInstanceInternal(*jvmti, env, target_clazz);
     if (!res) {
         throwJvmtiException(env, "JVMTI hasLiveInstance failed", res.error());
         return JNI_FALSE;
@@ -761,12 +885,12 @@ JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetInstances(
     jclass target_clazz
 ) {
     if (!env) return nullptr;
-    jvmtiEnv* jvmti = getOrAcquireJvmti(env);
+    auto jvmti = getOrAcquireJvmti(env);
     if (!jvmti) {
-        throwJvmtiException(env, "Failed to acquire JVMTI environment", JVMTI_ERROR_INTERNAL);
+        throwJvmtiException(env, "Failed to acquire JVMTI environment", jvmti.error());
         return nullptr;
     }
-    auto res = getInstancesInternal(jvmti, env, target_clazz);
+    auto res = getInstancesInternal(*jvmti, env, target_clazz);
     if (!res) {
         throwJvmtiException(env, "JVMTI getInstances failed", res.error());
         return nullptr;
@@ -782,14 +906,14 @@ JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetInstancesTimed(
     jlongArray timings_out
 ) {
     if (!env) return nullptr;
-    jvmtiEnv* jvmti = getOrAcquireJvmti(env);
+    auto jvmti = getOrAcquireJvmti(env);
     if (!jvmti) {
-        throwJvmtiException(env, "Failed to acquire JVMTI environment", JVMTI_ERROR_INTERNAL);
+        throwJvmtiException(env, "Failed to acquire JVMTI environment", jvmti.error());
         return nullptr;
     }
     InstanceQueryTimings timings{};
     const bool write_timings = timings_out != nullptr && env->GetArrayLength(timings_out) >= 8;
-    auto res = getInstancesInternal(jvmti, env, target_clazz, write_timings ? &timings : nullptr);
+    auto res = getInstancesInternal(*jvmti, env, target_clazz, write_timings ? &timings : nullptr);
     if (!res) {
         throwJvmtiException(env, "JVMTI getInstances failed", res.error());
         return nullptr;
@@ -817,12 +941,12 @@ JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetReferrers(
     jobject target_object
 ) {
     if (!env) return nullptr;
-    jvmtiEnv* jvmti = getOrAcquireJvmti(env);
+    auto jvmti = getOrAcquireJvmti(env);
     if (!jvmti) {
-        throwJvmtiException(env, "Failed to acquire JVMTI environment", JVMTI_ERROR_INTERNAL);
+        throwJvmtiException(env, "Failed to acquire JVMTI environment", jvmti.error());
         return nullptr;
     }
-    auto res = getReferrersInternal(jvmti, env, target_object);
+    auto res = getReferrersInternal(*jvmti, env, target_object);
     if (!res) {
         throwJvmtiException(env, "JVMTI getReferrers failed", res.error());
         return nullptr;
@@ -841,6 +965,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     auto* env = reinterpret_cast<JNIEnv*>(env_raw);
 
     (void)getOrAcquireJvmti(env);
+    (void)getObjectClass(env);
 
     jclass clazz = env->FindClass("remold/util/LibTool");
     if (clazz) {
@@ -855,9 +980,6 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
                 .signature = const_cast<char*>("(Ljava/lang/Object;)[Ljava/lang/Object;"),
                 .fnPtr = reinterpret_cast<void*>(&Java_remold_util_LibTool_nGetReferrers),
             },
-        };
-        env->RegisterNatives(clazz, methods, 2);
-        JNINativeMethod optionalMethods[] = {
             {
                 .name = const_cast<char*>("nHasLiveInstance"),
                 .signature = const_cast<char*>("(Ljava/lang/Class;)Z"),
@@ -869,7 +991,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
                 .fnPtr = reinterpret_cast<void*>(&Java_remold_util_LibTool_nGetInstancesTimed),
             },
         };
-        for (auto& m : optionalMethods) {
+        for (auto& m : methods) {
             if (env->RegisterNatives(clazz, &m, 1) != JNI_OK && env->ExceptionCheck()) {
                 env->ExceptionClear();
             }
@@ -880,6 +1002,21 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     }
 
     return JNI_VERSION_1_6;
+}
+
+JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void*) {
+    NativeLockGuard lock(g_jvmti_mutex);
+    jvmtiEnv* ti = g_jvmti.exchange(nullptr, std::memory_order_acq_rel);
+    if (ti) {
+        (void) ti->DisposeEnvironment();
+    }
+    jclass obj_cls = g_object_class.exchange(nullptr, std::memory_order_acq_rel);
+    if (obj_cls && vm) {
+        void* env_raw = nullptr;
+        if (vm->GetEnv(&env_raw, JNI_VERSION_1_6) == JNI_OK && env_raw) {
+            reinterpret_cast<JNIEnv*>(env_raw)->DeleteGlobalRef(obj_cls);
+        }
+    }
 }
 
 } // extern "C"

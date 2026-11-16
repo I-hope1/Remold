@@ -137,3 +137,27 @@ g++ -shared -fPIC -std=c++2b -O3 -I core/cpp/jni_posix \
 - 单机 KVM guest（Neoverse-N1、2 vCPU）的绝对值不可外推；末级缓存大小未知。
 - `perf` 不可用，`dmb`/miss 机制是推断而非计数验证。
 - null/常量对照的字段数不同（1 vs 2），文中已按字段归一为约 14×。
+
+## 7. CI 产物复核与二进制刷新流程（重要）
+
+`ci.yml` 的 `build-jars` 与 `build-native` **没有 `needs:` 依赖，并行执行**；`build-jars`
+打包的是**仓库里已提交的** `core/libs/*` 二进制。因此只改 `core/cpp/tool.cpp` 不刷新二进制时，
+CI 产出的 `remold-agent.jar` 仍然带旧 .so（实测：首版 CI 产物 2M `inst` 4843/3047 ms，
+与无排序版本一致）。
+
+处理：把 CI `build-native` 的 zig 产物（glibc 2.17 目标）
+`libtool64.so`、`libtoolaarch64.so`、`libtoolarm64.so` 提交进 `core/libs/`（commit `62bfe8c`），
+重新跑 CI 后，产物内的 `libs/libtoolaarch64.so` 与 `native-libraries` artifact 的 md5 一致
+（`e241fc…`），并在该产物上复核：
+
+| 实例数 | 首批 applyPatch | 首批 inst | 稳态 applyPatch | 稳态 inst | 枚举（iterate/collect/fill） |
+|---|---|---|---|---|---|
+| 2M（n=2） | 4628 [4511–4745] | 868 [831–906] | 4081 [4076–4087] | 549 [536–561] | 3650（688/1495/776） |
+| 4M（n=2） | 10186 [10096–10276] | 1751 [1585–1918] | 9022 [8850–9194] | 1077 [1067–1087] | 8352（1282/3600/1603） |
+
+与本地 g++ 构建（2M 4638/3977、inst 894/545；4M 9941/8808、inst 1621/1052）在噪声内一致，
+说明该优化不依赖本地编译器。
+
+待办：`ci.yml` 建议给 `build-jars` 加 `needs: build-native` 并直接消费其 artifact（避免依赖
+人工提交二进制、也避免文件顺序/并行导致的旧库打包）；macOS dylib 与 Windows dll 本工作流不构建，
+`tool.cpp` 的改动在它们被 release 流水线重编前不会生效。

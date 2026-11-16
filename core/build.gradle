@@ -65,7 +65,6 @@ shadowJar {
 		attributes(
 				'Agent-Class': 'remold.AgentBootstrap',
 				'Premain-Class': 'remold.AgentBootstrap',
-				'Boot-Class-Path': 'remold-agent.jar',
 				'Can-Retransform-Classes': true,
 				'Can-Redefine-Classes': true,
 				// 版本元数据：gradle-plugin 在解析本地 agent jar 时读取它（无 remold.version 时回填，

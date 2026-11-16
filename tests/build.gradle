@@ -853,6 +853,45 @@ agentProbe("retryBookkeepingProbe", "RetryBookkeepingProbe",
 agentProbe("injectConflictProbe", "InjectConflictProbe",
 	"新类注入冲突回归 (InjectConflictProbe)：LinkageError 且字节不一致时不得更新 bytecodeCache 基线")
 
+// 构建完成 marker 快路径实测：真实 watcher + 真实 DCEVM redefine。
+// 不挂 check（需要 DCEVM 与真实文件系统事件节奏）；契约见 docs/topology/14-build-trigger-mode.md。
+tasks.register("buildTriggerProbe", JavaExec) {
+	group = "verification"
+	description = "构建完成 marker 实测 (BuildTriggerProbe)：marker→批次延迟 / 取消兜底 / 陈旧 marker / 构建中途"
+	dependsOn classes
+	dependsOn project(":core").tasks.named("shadowJar")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "BuildTriggerProbe"
+	maxHeapSize = "1g"
+	def jbrHome = (project.findProperty("p05.jbr") as String)
+		?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+	if (jbrHome != null) {
+		def javaBin = new File(jbrHome, probeIsWindows ? "bin/java.exe" : "bin/java")
+		if (javaBin.exists()) {
+			executable = javaBin.absolutePath
+			javaLauncher.set((JavaLauncher) null)
+		}
+	}
+	def probeDir = layout.buildDirectory.dir("build-trigger-probe")
+	doFirst {
+		def dir = probeDir.get().asFile
+		def marker = new File(dir, "build/remold/build-trigger")
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
+		        "-XX:+IgnoreUnrecognizedVMOptions",
+		        "-XX:+AllowEnhancedClassRedefinition",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8",
+		        "-DbuildTriggerProbe.dir=" + dir.absolutePath,
+		        "-Dremold.agent.file_shake_ms=800",
+		        "-Dremold.agent.build_trigger_file=" + marker.absolutePath
+		if (nativeLibPath != null) {
+			jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+		}
+	}
+}
+
 tasks.register("fingerprintDiskHashProbe", JavaExec) {
 	group = "verification"
 	description = "任务 2 复现：匿名类重命名后，未变化的第二轮必须零副作用"

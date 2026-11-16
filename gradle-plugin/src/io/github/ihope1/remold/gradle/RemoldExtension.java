@@ -49,6 +49,7 @@ public class RemoldExtension {
     private Object deployDir;
     private Object modsDir;
     private Boolean autoDeploy;
+    private Boolean buildTrigger;
     private String buildMode;
     private final List<String> plugins = new ArrayList<>();
     private final List<Object> pluginJars = new ArrayList<>();
@@ -272,6 +273,15 @@ public class RemoldExtension {
 
     public void setLibtoolPath(String libtoolPath) {
         this.libtoolPath = libtoolPath;
+    }
+
+    /** Whether the {@code classes} task writes a build-completion marker for the agent (null = true). */
+    public Boolean getBuildTrigger() {
+        return buildTrigger;
+    }
+
+    public void setBuildTrigger(Boolean buildTrigger) {
+        this.buildTrigger = buildTrigger;
     }
 
     private static void addTrimmedEntry(List<String> target, String value) {

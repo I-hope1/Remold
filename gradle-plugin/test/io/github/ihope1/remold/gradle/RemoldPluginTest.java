@@ -483,9 +483,14 @@ class RemoldPluginTest {
         defaultExt.setMainClass("com.example.Main");
 
         RemoldResolvedConfig defaultConf = new RemoldConfigResolver().resolve(defaultProject, defaultExt);
+        String expectedMarkerFlag = "-Dremold.agent.build_trigger_file="
+                + BuildTriggerWriter.markerFile(new File(tempDir, "build")).getAbsolutePath();
+        Assertions.assertTrue(defaultConf.getJvmArgs().contains(expectedMarkerFlag),
+                "Build-trigger marker flag must be emitted by default, got: " + defaultConf.getJvmArgs());
         Assertions.assertFalse(
                 defaultConf.getJvmArgs().stream().anyMatch(a ->
-                        a.startsWith("-Dremold.agent.") || a.startsWith("-Dremold.path.libtool=")),
+                        !a.startsWith("-Dremold.agent.build_trigger_file=")
+                        && (a.startsWith("-Dremold.agent.") || a.startsWith("-Dremold.path.libtool="))),
                 "Expected unset agent options to emit no flags, got: " + defaultConf.getJvmArgs());
 
         Project dslProject = ProjectBuilder.builder().withProjectDir(tempDir).build();
@@ -557,6 +562,20 @@ class RemoldPluginTest {
             Assertions.assertTrue(propConf.getJvmArgs().contains(expected),
                     "Missing expected property flag " + expected + " in " + propConf.getJvmArgs());
         }
+
+        Project disabledProject = ProjectBuilder.builder().withProjectDir(tempDir).build();
+        disabledProject.getPluginManager().apply("java");
+        disabledProject.getPluginManager().apply(RemoldPlugin.class);
+        RemoldExtension disabledExt = (RemoldExtension) disabledProject.getExtensions().getByName("remold");
+        disabledExt.setAgentJar(dummyAgent.getAbsolutePath());
+        disabledExt.setMainClass("com.example.Main");
+        disabledExt.setBuildTrigger(false);
+        RemoldResolvedConfig disabledConf = new RemoldConfigResolver().resolve(disabledProject, disabledExt);
+        Assertions.assertFalse(
+                disabledConf.getJvmArgs().stream().anyMatch(a ->
+                        a.startsWith("-Dremold.agent.build_trigger_file=")),
+                "buildTrigger=false must not emit the build-trigger marker flag, got: "
+                        + disabledConf.getJvmArgs());
 
         Project badIntProject = ProjectBuilder.builder().withProjectDir(tempDir).build();
         badIntProject.getPluginManager().apply("java");

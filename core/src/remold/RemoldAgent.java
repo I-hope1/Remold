@@ -1001,6 +1001,33 @@ public class RemoldAgent {
 	private static       ScheduledFuture<?>       scheduledTask;
 	private static final DebounceWindow           DEBOUNCE = new DebounceWindow(FILE_SHAKE_MS, ASSET_SHAKE_MS);
 
+	//region Build-trigger marker state
+
+	/**
+	 * 构建完成 marker 文件；{@code null} = 未配置（只走 {@link #FILE_SHAKE_MS} 兜底）。
+	 *
+	 * <p>配置来源：{@code -Dremold.agent.build_trigger_file=<abs>}（别名 {@code remold.buildTriggerFile}）。
+	 * 契约见 {@code docs/topology/14-build-trigger-mode.md}。</p>
+	 */
+	static volatile Path BUILD_TRIGGER_FILE;
+
+	/** 首个 marker 的扫描下界余量（毫秒）：吸收文件系统 mtime 精度与挂钟边界；后续 marker 不使用。 */
+	static final long BUILD_TRIGGER_LOOKBACK_MILLIS = 2000L;
+
+	/** 扫描条目数告警阈值（只告警、不截断）。 */
+	static final int BUILD_TRIGGER_SWEEP_WARN = 5000;
+
+	/** agent 启动挂钟毫秒：首个 marker 的扫描下界与陈旧判定基准。 */
+	static final long AGENT_START_MILLIS = System.currentTimeMillis();
+
+	/** 最近一次被接受的 marker 的结束挂钟毫秒；{@code 0} = 还没有。 */
+	private static volatile long lastProcessedBuildEndMillis;
+
+	/** 最近一次被接受的 marker 的 build_id（去重键）。 */
+	private static volatile String lastProcessedBuildId;
+
+	//endregion
+
 	/**
 	 * 全局热更独占锁：保证 {@code processChanges} 全流程串行。
 	 *
@@ -1200,6 +1227,35 @@ public class RemoldAgent {
 
 	public static Instrumentation getInstrumentation() {
 		return inst;
+	}
+
+	/**
+	 * <b>仅供单测</b>：读取内部防抖状态机，用于确定性验证 sticky due 与"marker 取消兜底"。
+	 * 生产代码请通过 {@link DebounceWindow} 的公开方法间接使用。
+	 */
+	static DebounceWindow debounceForTest() {
+		return DEBOUNCE;
+	}
+
+	/**
+	 * <b>仅供单测</b>：复位 build-trigger 相关静态状态（marker 路径、去重键、三条队列、防抖状态与已挂调度），
+	 * 避免用例之间串扰。不会停止普通 class watcher。
+	 */
+	static void resetBuildTriggerForTest() {
+		BUILD_TRIGGER_FILE = null;
+		lastProcessedBuildEndMillis = 0L;
+		lastProcessedBuildId = null;
+		FileWatcherService.stopBuildTriggerWatcher();
+		synchronized (pendingChanges) {
+			pendingChanges.clear();
+			pendingJars.clear();
+			pendingAssetChanges.clear();
+			if (scheduledTask != null && !scheduledTask.isDone()) {
+				scheduledTask.cancel(false);
+			}
+			scheduledTask = null;
+		}
+		DEBOUNCE.clearAll();
 	}
 
 	/**
@@ -1670,6 +1726,34 @@ public class RemoldAgent {
 			info("Anonymous Class Alignment DISABLED. Host classes containing anonymous classes will be rejected as a whole.");
 		}
 		info("Structural HotSwap Supported: " + isEnhancedHotswapEnabled());
+		configureBuildTrigger();
+	}
+
+	/**
+	 * 构建完成 marker 的配置接线：解析路径并启动/停止专用 watcher。
+	 *
+	 * <p>marker 是<b>叠加</b>的快路径：未配置时只保留 {@link #FILE_SHAKE_MS} 兜底，行为与旧版本一致。
+	 * watcher 只在 agent 已挂载（{@code inst != null}）时启动，避免单测里 {@code initConfig()}
+	 * 拉起真实文件监听线程。</p>
+	 */
+	private static void configureBuildTrigger() {
+		Path configured = parseBuildTriggerFile(
+			System.getProperty("remold.agent.build_trigger_file"),
+			System.getProperty("remold.buildTriggerFile"));
+		if (configured == null) {
+			BUILD_TRIGGER_FILE = null;
+			if (inst != null) FileWatcherService.stopBuildTriggerWatcher();
+			if (DEBUG) log("[BUILD-TRIGGER] Disabled (no marker file configured)");
+			return;
+		}
+		BUILD_TRIGGER_FILE = configured;
+		info("[BUILD-TRIGGER] Marker file: " + configured
+		     + " (file shake " + FILE_SHAKE_MS + "ms remains the fallback for everything else)");
+		if (inst != null) {
+			FileWatcherService.startBuildTriggerWatcher(configured);
+		} else if (DEBUG) {
+			log("[BUILD-TRIGGER] Marker watcher not started: agent instrumentation is not attached");
+		}
 	}
 
 	/**
@@ -5168,9 +5252,130 @@ public class RemoldAgent {
 		rescheduleDebounce();
 	}
 
-	/** 按 {@link DebounceWindow} 的最早 deadline 重新挂调度。 */
-	private static void rescheduleDebounce() {
+	//region Build-trigger marker handling
+
+	/** 解析 {@code -Dremold.agent.build_trigger_file}；空值 / false / off 视为未配置。 */
+	private static Path parseBuildTriggerFile(String primary, String alias) {
+		String raw = primary != null ? primary : alias;
+		if (raw == null) return null;
+		raw = raw.trim();
+		if (raw.isEmpty() || "false".equalsIgnoreCase(raw) || "off".equalsIgnoreCase(raw)) return null;
+		try {
+			return Paths.get(raw).toAbsolutePath().normalize();
+		} catch (Throwable t) {
+			warn("[BUILD-TRIGGER] Invalid build_trigger_file (ignored): " + raw + " (" + t + ")");
+			return null;
+		}
+	}
+
+	/**
+	 * 构建完成 marker 的处理入口（由 trigger watcher 线程调用）。
+	 *
+	 * <p><b>语义</b>（契约见 {@code docs/topology/14-build-trigger-mode.md} §3）：</p>
+	 * <ol>
+	 *   <li>解析 / 拒绝 / 去重；无效 marker <b>不推进</b>任何已处理状态；</li>
+	 *   <li>按 {@code mtime >= 上次处理点 − 余量} 扫描 watch 目录，与已入队的事件合并；</li>
+	 *   <li>class/jar 队列均非空时调用 {@link DebounceWindow#markClassDueNow(long)}（sticky），
+	 *       并重挂 0 延迟调度——该调用同时取消尚未到期的兜底 task；</li>
+	 *   <li>队列都为空时不标 due、不触发（避免 0 延迟自旋）。</li>
+	 * </ol>
+	 *
+	 * <p>本方法不获取 {@code HOTSWAP_LOCK}：它只操作防抖队列与调度器，真正执行批次的
+	 * {@link #triggerDueHotswap()} 仍走既有锁路径。</p>
+	 */
+	static void handleBuildTriggerFile(Path changed) {
+		Path expected = BUILD_TRIGGER_FILE;
+		if (expected == null || changed == null) return;
+		Path marker = changed.toAbsolutePath().normalize();
+		if (!marker.equals(expected)) return;
+
+		byte[] raw;
+		try {
+			if (Files.size(marker) > BuildTriggerMarker.MAX_BYTES) {
+				warn("[BUILD-TRIGGER] Ignored marker " + marker + ": exceeds "
+				     + BuildTriggerMarker.MAX_BYTES + " bytes");
+				return;
+			}
+			raw = Files.readAllBytes(marker);
+		} catch (IOException | SecurityException e) {
+			warn("[BUILD-TRIGGER] Cannot read marker " + marker + ": " + e);
+			return;
+		}
+
+		long nowMillis = System.currentTimeMillis();
+		BuildTriggerMarker.Parsed parsed = BuildTriggerMarker.parse(raw, nowMillis, AGENT_START_MILLIS);
+		if (!parsed.valid) {
+			warn("[BUILD-TRIGGER] Ignored marker " + marker + ": " + parsed.rejectReason);
+			return;
+		}
+
+		boolean duplicate = parsed.buildId != null
+		                    ? parsed.buildId.equals(lastProcessedBuildId)
+		                    : parsed.endMillis == lastProcessedBuildEndMillis;
+		if (duplicate) {
+			if (DEBUG) {
+				log("[BUILD-TRIGGER] Duplicate marker ignored: build_id=" + parsed.buildId
+				    + ", end=" + parsed.endMillis);
+			}
+			return;
+		}
+
+		// 首个 marker 用 agent 启动点作为下界（含余量吸收 mtime 精度）；之后的 marker 用上一次
+		// 被接受的结束点作为严格下界——若再减余量，会把上一次构建已经处理过的文件重新扫进来，
+		// 让每次连续构建都多出一个 no-op 批次。
+		long since = lastProcessedBuildEndMillis > 0L
+		             ? lastProcessedBuildEndMillis
+		             : AGENT_START_MILLIS - BUILD_TRIGGER_LOOKBACK_MILLIS;
+		BuildTriggerSweep.Result swept = BuildTriggerSweep.collect(
+			activeWatchDirs, activeWatchJars, since, RemoldAgent::isWatchPathIgnored);
+		if (swept.size() > BUILD_TRIGGER_SWEEP_WARN) {
+			warn("[BUILD-TRIGGER] Sweep found " + swept.size() + " changed file(s) since " + since
+			     + "ms; this batch may be large");
+		}
+
+		// 只有被接受的 marker 才推进去重键与扫描下界（无效 marker 已在上方返回）。
+		lastProcessedBuildEndMillis = parsed.endMillis;
+		lastProcessedBuildId = parsed.buildId;
+
+		boolean hasWork;
+		int pendingClassCount;
+		int pendingJarCount;
 		synchronized (pendingChanges) {
+			pendingChanges.addAll(swept.classes);
+			pendingJars.addAll(swept.jars);
+			pendingClassCount = pendingChanges.size();
+			pendingJarCount = pendingJars.size();
+			hasWork = !pendingChanges.isEmpty() || !pendingJars.isEmpty();
+			if (hasWork) {
+				// sticky due：构建完成之后的迟到 class 事件不得把 deadline 推回兜底窗口。
+				DEBOUNCE.markClassDueNow(System.nanoTime());
+			}
+		}
+
+		if (!hasWork) {
+			if (DEBUG) {
+				log("[BUILD-TRIGGER] Marker accepted (build_id=" + parsed.buildId + ", task=" + parsed.task
+				    + ", swept=" + swept.size() + ") but no pending class/jar changes; nothing to trigger");
+			}
+			return;
+		}
+
+		info("[BUILD-TRIGGER] Triggering immediately: build_id=" + parsed.buildId
+		     + ", task=" + parsed.task
+		     + ", end=" + parsed.endMillis
+		     + ", lag=" + Math.max(0L, nowMillis - parsed.endMillis) + "ms"
+		     + ", swept=" + swept.size() + " (classes=" + swept.classes.size()
+		     + ", jars=" + swept.jars.size() + ")"
+		     + ", pending=" + pendingClassCount + " class(es), " + pendingJarCount + " jar(s)"
+		     + "; fallback window " + FILE_SHAKE_MS + "ms canceled for this batch");
+		// cancel 尚未到期的兜底 task，并按 sticky due 立刻重挂（delay = 0）。
+		rescheduleDebounce();
+	}
+
+	//endregion
+
+	/** 按 {@link DebounceWindow} 的最早 deadline 重新挂调度。 */
+	private static void rescheduleDebounce() {		synchronized (pendingChanges) {
 			rescheduleDebounceLocked();
 		}
 	}

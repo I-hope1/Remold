@@ -72,6 +72,26 @@ class DebounceWindowTest {
 	}
 
 	@Test
+	void markerDueIsStickyAcrossFollowingClassEvents() {
+		DebounceWindow window = new DebounceWindow(800, 250);
+		long t0 = 5 * MS;
+		window.markClassDueNow(t0);
+		assertTrue(window.isClassDue(t0));
+		assertEquals(0L, window.nextDelayNanos(t0));
+
+		// A late class event from the same build must not push the deadline back to now + window.
+		window.onClass(t0 + 50 * MS);
+		assertTrue(window.isClassDue(t0 + 50 * MS));
+		assertEquals(0L, window.nextDelayNanos(t0 + 50 * MS));
+
+		// Once the batch is taken, the normal trailing-edge window applies again.
+		window.clearClass();
+		window.onClass(t0 + 60 * MS);
+		assertFalse(window.isClassDue(t0 + 60 * MS));
+		assertTrue(window.isClassDue(t0 + 60 * MS + 800 * MS));
+	}
+
+	@Test
 	void clearAllResetsBothStreams() {
 		DebounceWindow window = new DebounceWindow(800, 250);
 		window.onClass(0);

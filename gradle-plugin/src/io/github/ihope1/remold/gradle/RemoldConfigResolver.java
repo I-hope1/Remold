@@ -356,6 +356,10 @@ public final class RemoldConfigResolver {
         jvmArgs.addAll(ext.getExtraJvmArgs());
         jvmArgs.add("-Dremold.build_mode=" + buildMode);
         addAgentProperties(project, ext, jvmArgs);
+        if (isBuildTriggerEnabled(project, ext)) {
+            jvmArgs.add("-Dremold.agent.build_trigger_file="
+                    + buildTriggerMarkerFile(project).getAbsolutePath());
+        }
 
         if (project.getPlugins().hasPlugin("fabric-loom") || project.getExtensions().findByName("loom") != null || usesMixinEcosystem(project)) {
             File ideaClasses = new File(project.getProjectDir(), "out/production/classes");
@@ -954,6 +958,31 @@ public final class RemoldConfigResolver {
         String v = version.trim();
         if (v.startsWith("v") || v.startsWith("V")) v = v.substring(1);
         return v;
+    }
+
+    /**
+     * Whether the build-completion marker is enabled for this project.
+     *
+     * <p>Precedence: DSL {@code buildTrigger} (non-null wins) &gt; project property
+     * {@code remold.buildTrigger} &gt; default {@code true}. A disabled marker means the plugin neither
+     * writes the file nor passes {@code -Dremold.agent.build_trigger_file}; the agent then behaves exactly
+     * like before (pure {@code fileShakeMs} fallback).</p>
+     */
+    static boolean isBuildTriggerEnabled(Project project, RemoldExtension ext) {
+        if (ext != null && ext.getBuildTrigger() != null) {
+            return ext.getBuildTrigger();
+        }
+        Object raw = project == null ? null : project.findProperty("remold.buildTrigger");
+        if (raw == null) return true;
+        String text = raw.toString().trim();
+        if (text.isEmpty()) return true;
+        return !("false".equalsIgnoreCase(text) || "off".equalsIgnoreCase(text));
+    }
+
+    /** The marker file the agent is told to watch; lives next to {@code remold.args} under the build dir. */
+    static File buildTriggerMarkerFile(Project project) {
+        File buildDir = project.getLayout().getBuildDirectory().getAsFile().get();
+        return BuildTriggerWriter.markerFile(buildDir);
     }
 
     private static void addAgentProperties(Project project, RemoldExtension ext, List<String> jvmArgs) {

@@ -65,8 +65,9 @@ remold {
     // If a local remold-agent.jar manifest version differs from remold.version, the configured release is
     // re-resolved and synced over .gradle/remold/remold-agent.jar (an explicit agentJar is only warned about).
     // jbrPath = "/path/to/jbr" // defaults to the JBR_HOME env var or the jbr.home system property
-    // fileShakeMs = 800        // .class debounce window in ms (default 800)
+    // fileShakeMs = 800        // .class debounce window in ms (default 800; used only when no build-completion signal exists)
     // assetShakeMs = 250       // resource/config debounce window in ms (default 250)
+    // buildTrigger = true      // classes task writes a marker; the agent triggers immediately and cancels the debounce wait (default on)
     // attach('run', tasks.named('test')) // inject agent + JBR into existing JavaExec / Test tasks without mainClass
 }
 ```
@@ -110,8 +111,9 @@ The following JVM system properties can be overridden as needed (the Gradle plug
 | `-Dremold.agent.init_drift.apply_holders` | empty (off) | A-track Kotlin `object` / top-level `val` holder allowlist (comma separated; Gradle DSL: `initDriftApplyHolders`) |
 | `-Dremold.agent.ready_timeout_ms` | `0` | Start-up readiness gate timeout in ms; `0` means never release early (Gradle DSL: `readyTimeoutMs`) |
 | `-Dremold.agent.batch_stall_ms` | `15000` | Batch stall watchdog threshold (floor `5000`); one `[HOTSWAP-STALL]` full thread dump on timeout (Gradle DSL: `batchStallMs`) |
-| `-Dremold.agent.file_shake_ms` | `800` | Class/jar debounce window (Gradle DSL: `fileShakeMs`) |
+| `-Dremold.agent.file_shake_ms` | `800` | Class/jar debounce window (Gradle DSL: `fileShakeMs`); only used when no build-completion signal exists |
 | `-Dremold.agent.asset_shake_ms` | `250` | Resource/config debounce window, independent of the Class window (Gradle DSL: `assetShakeMs`) |
+| `-Dremold.agent.build_trigger_file` | empty (off; injected by the Gradle plugin by default) | Build-completion marker path; a valid marker triggers the current batch immediately and cancels the pending fallback wait (Gradle DSL: `buildTrigger`; set `false` to disable) |
 | `-Dremold.agent.perf_log` | `false` | Emit per-stage hotspot and timing summary logs (Gradle DSL: `perfLog`) |
 | `-Dremold.agent.diff_log` | `true` | Emit verbose structural bytecode diff debug logs (set `false` to disable; Gradle DSL: `diffLog`) |
 | `-Dremold.path.libtool` | auto-resolved | Explicit absolute path to the native `libtool` library (Gradle DSL: `libtoolPath`) |

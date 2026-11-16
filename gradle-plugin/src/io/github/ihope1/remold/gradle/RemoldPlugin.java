@@ -253,6 +253,10 @@ public final class RemoldPlugin implements Plugin<Project> {
                         if (!syncs.isEmpty()) {
                             classesTask.doLast(t -> RemoldConfigResolver.syncAll(syncs));
                         }
+                        if (RemoldConfigResolver.isBuildTriggerEnabled(project, ext)) {
+                            File marker = RemoldConfigResolver.buildTriggerMarkerFile(project);
+                            classesTask.doLast(t -> BuildTriggerWriter.write(marker, "classes", t.getLogger()));
+                        }
                     } catch (Exception ignored) {
                     }
                 }
@@ -700,6 +704,16 @@ public final class RemoldPlugin implements Plugin<Project> {
         if (ext.getFileShakeMs() != null) {
             summaryLines.add("  - File Shake: " + ext.getFileShakeMs() + "ms");
         }
+        String buildTriggerMarker = null;
+        for (String arg : conf.getJvmArgs()) {
+            if (arg.startsWith("-Dremold.agent.build_trigger_file=")) {
+                buildTriggerMarker = arg.substring("-Dremold.agent.build_trigger_file=".length());
+                break;
+            }
+        }
+        summaryLines.add(buildTriggerMarker != null
+                ? "  - Build trigger: " + buildTriggerMarker
+                : "  - Build trigger: off (file shake fallback only)");
         if (!"java".equals(conf.getExecutable())) {
             summaryLines.add("  - JBR: " + conf.getExecutable());
         }

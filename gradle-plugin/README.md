@@ -75,8 +75,9 @@ remold {
     // agentJar   = "libs/remold-agent.jar"   // use a local agent jar instead of downloading one
     // jbrPath    = "/path/to/jbr"            // JBR home (default: JBR_HOME env / jbr.home system property)
     // mainClass  = "your.package.Main"       // inferred when the application plugin is applied
-    // fileShakeMs  = 800                     // class/jar quiet window; every class event resets it
+    // fileShakeMs  = 800                     // class/jar quiet window; only used when no build-completion signal exists
     // assetShakeMs = 250                     // asset/config quiet window; independent from class batches
+    // buildTrigger = true                    // classes task writes a marker; the agent triggers immediately (false -> marker off)
     // twoPhase     = true                    // schema-first two-phase redefine (false -> single-phase)
     // readyTimeoutMs = 0                     // startup readiness gate auto-release timeout (0 -> off)
     // batchStallMs = 15000                   // batch stall watchdog dump threshold in ms (floor: 5000)

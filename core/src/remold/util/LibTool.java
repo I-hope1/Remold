@@ -211,6 +211,40 @@ public class LibTool {
 	private static native Object[] nGetInstancesTimed(Class<?> clazz, long[] timingsOut);
 	private static native boolean  nHasLiveInstance(Class<?> clazz);
 	private static native Object[] nGetReferrers(Object targetObject);
+	private static native int nEnumBucketCount(long count);
+	private static native int nEnumBucketWindow();
+	private static volatile boolean enumPlanSupported = true;
+
+	/** 实例枚举分桶窗口（实例数）：{@code 1 << 19}，经验值（约 4–6 MB 对象量）。 */
+	public static int enumerationBucketWindow() {
+		if (!initialized) init();
+		if (enumPlanSupported) {
+			try {
+				return nEnumBucketWindow();
+			} catch (UnsatisfiedLinkError e) {
+				enumPlanSupported = false;
+			}
+		}
+		return 1 << 19;
+	}
+
+	/**
+	 * 实例枚举分桶规划：桶数 = ceil(count / window)，上限 64；超过上限时尾部实例进入最后一桶。
+	 * 与 native 侧 {@code enumBucketCount} 保持同一实现，旧版 native 库缺少导出符号时走纯 Java 兜底。
+	 */
+	public static int enumerationBucketCount(long count) {
+		if (!initialized) init();
+		if (enumPlanSupported) {
+			try {
+				return nEnumBucketCount(count);
+			} catch (UnsatisfiedLinkError e) {
+				enumPlanSupported = false;
+			}
+		}
+		if (count <= 0) return 1;
+		long buckets = ((count - 1) >> 19) + 1;
+		return buckets > 64 ? 64 : (int) buckets;
+	}
 	private static volatile boolean fastLiveProbeSupported = true;
 	private static volatile boolean timedQuerySupported = true;
 

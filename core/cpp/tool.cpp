@@ -363,6 +363,22 @@ static std::expected<jvmtiEnv*, jvmtiError> getOrAcquireJvmti(JNIEnv* env) {
  */
 static constexpr jint kTagClearWalkThreshold = 32768;
 
+// 实例枚举的计数排序分桶：窗口固定 2^kEnumBucketShift 个实例（经验值；4M 实测证明
+// 2^17–2^19 窗口对 inst 无显著影响，取较大窗口以减少 tag 数/collect 开销）
+// 桶数 = ceil(N / window)，上限 kEnumBucketCap。超过上限时尾部实例仍落在最后一桶，
+// 该桶内不再有序（窗口实际变大）——属于优雅降级，避免 tag 数量膨胀。
+// 该规划被抽出为纯函数，便于单元测试覆盖大 N 的上限路径。
+static constexpr jint kEnumBucketShift = 19;
+static constexpr jint kEnumBucketCap = 64;
+static constexpr jlong kEnumBucketWindow = 1LL << kEnumBucketShift;
+
+static inline jint enumBucketCount(jlong count) {
+    if (count <= 0) return 1;
+    const jlong buckets = ((count - 1) >> kEnumBucketShift) + 1;
+    return buckets > kEnumBucketCap ? kEnumBucketCap : static_cast<jint>(buckets);
+}
+
+
 static void clearTaggedClass(jvmtiEnv* jvmti, jclass klass, jlong tag) {
     if (jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_TAGGED, RollbackClassTagCallback, &tag)
         != JVMTI_ERROR_NONE) {
@@ -388,8 +404,8 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTi
     // 单趟计数排序：遍历时按“序号 >> kSeqBucketShift”把实例分到最多 kSeqBuckets 个桶，
     // tag 值即桶号；一次 GetObjectsWithTags 取回句柄与桶号后，用桶前缀计数直接落位到最终数组，
     // 不再需要中间排序数组或二次回填。桶内顺序 ≈ 堆遍历顺序（≈地址/region 顺序）。
-    constexpr jint kSeqBuckets = 1024;   // 上限；实际桶数 = ceil(count / 2^17)，随实例数增长
-    constexpr jint kSeqBucketShift = 17;
+    const jint kSeqBuckets = kEnumBucketCap;
+    const jint kSeqBucketShift = kEnumBucketShift;
     const jlong base = g_tag_sequence.fetch_add(kSeqBuckets, std::memory_order_relaxed);
 
     jlong bucket_counts[kSeqBuckets] = {0};
@@ -774,6 +790,14 @@ JNIEXPORT jboolean JNICALL Java_remold_util_LibTool_nHasLiveInstance(
 }
 
 /** JNI 导出函数：获取指定类所有未回收实例，失败时向 Java 抛出异常 */
+JNIEXPORT jint JNICALL Java_remold_util_LibTool_nEnumBucketCount(JNIEnv* /*env*/, jclass /*cls*/, jlong count) {
+    return enumBucketCount(count);
+}
+
+JNIEXPORT jint JNICALL Java_remold_util_LibTool_nEnumBucketWindow(JNIEnv* /*env*/, jclass /*cls*/) {
+    return static_cast<jint>(kEnumBucketWindow);
+}
+
 JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetInstances(
     JNIEnv* env,
     jclass,

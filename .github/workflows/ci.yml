@@ -251,6 +251,9 @@ jobs:
 
   build-jars:
     name: Build Distributable Jars
+    # 必须等 build-native：jar 里打包的是 core/libs 下的原生库，若并行执行，
+    # 打包的会是仓库里上次提交的旧二进制，CI 产物验证不到本分支的 tool.cpp 改动。
+    needs: build-native
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -263,6 +266,20 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
+
+      - name: Download Native Libraries
+        uses: actions/download-artifact@v7
+        with:
+          name: native-libraries
+          path: core/libs
+
+      - name: Verify Native Libraries
+        run: |
+          ls -la core/libs/
+          test -s core/libs/libtool64.so
+          test -s core/libs/libtoolaarch64.so
+          test -s core/libs/libtoolarm64.so
+          ! readelf -V core/libs/libtoolaarch64.so | grep -E 'GLIBC_2\.(1[89]|[2-9][0-9])'
 
       - name: Build Distributions and Jars
         # 与 release.yml 的发版构建同一条命令：CI 产物与发版资产同源，

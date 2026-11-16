@@ -45,6 +45,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **跨类热更批次里前序类的权威 lambda 映射被静默丢弃**：`CellPropertyRef.afterRedefineBatch` 在整批类重定义
+  完成后才逐类回调，但 `matchMethods` 读的是 `LambdaAligner.LAST_RESULT` 全局单槽——单槽此刻只剩
+  "本批最后一个被对齐的类"，批内 A、B、C 三类时 A/B 与单槽类名必然不等，权威映射被跳过，只剩 0.6
+  相似度兜底（同宿主多条同形 lambda 时可能配对到错误的 body）。修复：`LambdaAligner` 增加有界（LRU 128）
+  且加锁的按类快照表 `lastResultFor(内部名)`，`align` 的入口清空、成功、失败三条路径统一发布；
+  `matchMethods` 改为按类检索，仅当按类登记缺失且 `LAST_RESULT.alignedClass == 目标类` 时才走兼容回退。
+  回归：`CellLambdaBatchAlignTest`（红→绿；变异：`lastResultFor` 退化为读 `LAST_RESULT`、或去掉消费者的按类检索
+  → 用例红）。契约见 [`docs/topology/13-lambda-alignment-publication-contract.md`](docs/topology/13-lambda-alignment-publication-contract.md)。
+
+- **`CellPropertyRef` 内部登记表的锁域不一致与回调强引用**：`chainCache`/`templateCache` 是普通 `HashMap`，
+  读取方在 `synchronized (cellState)` 之外触碰，`clearAll` 却在 `cellState` 锁内清它们——两者没有互斥，
+  锁只是看起来有效；`KNOWN_DEFAULTS` 是未同步的 `WeakHashMap` 视图（探测式清理会改内部表）；
+  回调登记表对 callback 持强引用（callback 常捕获宿主类），元素不可达后整条对象图滞留到下一次热更。
+  现改为并发容器 + 同步弱集合，回调登记改为 `WeakReference<Object>` 并在注册/注销/重建前清理死项。
+  回归：`CellPropertyLifecycleTest`（清理语义 + GC 弱引用终局；变异：prune 漏判 callback、或给登记表加回强引用
+  → 用例红）。
+
+- **`UpdateRef` 漏判 `BootstrapMethodError` 形态的热更链接异常**：`isHotSwapLinkageError` 只判
+  `IncompatibleClassChangeError || NoClassDefFoundError`。lambda 调用点把 `implMethod` 记在自举参数里，
+  目标方法被删除/改签名后同一调用点再触发时 `LambdaMetafactory` 自举失败抛 `BootstrapMethodError`
+  （直接继承 `LinkageError`，不是 `IncompatibleClassChangeError`），旧逻辑会把它重新抛穿，回调每帧刷屏崩溃。
+  现只加宽这一类；原因链含 `ExceptionInInitializerError` 仍判业务异常，`VerifyError` 等照旧抛出。
+  回归：`UpdateRefLinkageGateTest`（判定矩阵 + 包装回调终局 + `VerifyError` 同形对照；变异：revert 实现 → 用例红）。
+  同批次修正 `eventsRun` 的 WrappedRef 分支注释：`EventCons` 实现 `WrappedRef`，按内容注销可用，
+  旧注释"`unwrapTargetKey` 不解 `EventCons`"与实现不符（`eventsRunWrappedRefEntryCanBeRemovedByContent` 锁定）。
+
 - **`getInstancesInternal` `!result` OOM 回退路径的悬空指针读取**：旧代码在 `!has_local_frame` 清理
   `instances[i]` 局部引用前先调用了 `jvmti->Deallocate(instances)`。现调整为先释放局部引用再
   `Deallocate`。

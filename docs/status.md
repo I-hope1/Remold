@@ -787,6 +787,28 @@
   字节），无一轮延迟；需处理"新类 vs 重定义"的判定与重入。
 - **关联设计规范**：[`02-admission-and-reserved-names.md`](topology/02-admission-and-reserved-names.md) §1.4。
 
+### 风险 22：`CellPropertyRef` 的程序分析与执行手段深度边界（P2/P3 · 未闭环）
+
+- **范围**：Mindustry UI 胶水层 `CellPropertyRef` 的静态链提取与属性重放。它不参与 InitFix 的判决，
+  但决定"热更后 UI 属性链能否被正确重建"。跨类批次映射已按类寻址（契约见
+  [`topology/13-lambda-alignment-publication-contract.md`](topology/13-lambda-alignment-publication-contract.md)）；
+  下列边界仍敞开。
+- **判定手段偏浅**：属性链提取用原生 `SourceInterpreter`，只接受 `SourceValue.insns.size() == 1` 的来源
+  （`extractArgsDataflow`），遇到三元表达式/栈复制即返回 `null`，参数留待运行期 `slotCursor` 按调用序回填；
+  提取阶段**不分析宿主方法的 `if`/循环控制流**，分支导致的调用序差异只能靠运行期观测对齐。
+  失效形态：分支里同 `(method, desc)` 出现顺序相反时，参数可能被填到另一条链（静默错配，不抛异常）。
+- **执行手段偏重**：`verifyBytecode` 用一次性 `ClassLoader.defineClass` 做 JVM 校验（会加载一份重复类，
+  仅用于验证注入字节）；`applyChainUpdate` 每次用 `new Table()` 的 dry-run 判定可应用性；
+  `LambdaInfo` 用 `Proxy.newProxyInstance` + `MethodHandle.invoke` 逐帧代理。三者都偏"运行期试跑"，
+  而非静态效应判定，长期成本与底层精细度未做基准对比。
+- **触发条件**：宿主方法含分支/三元/循环、且同签名属性调用在分支两侧顺序不同；或大量 cell 属性热更。
+- **当前处置**：只登记，不重写。抽取失败/不可应用的链走既有的 unpatched 台账与 `DEBUG` 日志路径，
+  不静默写入；跨类映射与缓存/回调生命周期已按上文收口。
+- **重开条件**：出现可复现的 UI 属性错配现场（含最小字节码形态）时，先补控制流判据（分支内同签名站点
+  顺序不一致 → 拒绝该链），再评估是否需要完整的抽象解释器。
+- **关联代码**：`CellPropertyRef.extractFromMethod` / `extractArgsDataflow` / `verifyBytecode` /
+  `dryRunProperties` / `makeLambda`。
+
 ## 6. 框架集成插件与资源热更新 (Framework Plugins & Asset Hot-Reload)
 
 插件 SPI 契约：[`api/src/remold/HotswapPlugin.java`](../api/src/remold/HotswapPlugin.java)

@@ -384,8 +384,70 @@ public class LambdaAligner {
 	 * 自造名会被误当成 javac 原名，让"同名优先"把老 CallSite 绑到别的 lambda 上。</p>
 	 *
 	 * <p>{@code null} 表示"本轮还没跑过"（进程刚起，或测试显式清空以检测是否记录）。</p>
+	 *
+	 * <p><b>只有"align 返回后同线程立即读"才允许用它</b>。批次结束之后（例如
+	 * {@code CellPropertyRef.afterRedefineBatch}）必须改用 {@link #lastResultFor(String)}：
+	 * 单槽在那一刻只剩最后一个被对齐的类，批内前序类会静默取不到自己的映射。</p>
 	 */
 	public static volatile AlignmentResult LAST_RESULT;
+
+	/**
+	 * 按类保留的最近一次对齐快照。
+	 *
+	 * <p><b>为什么不能只看 {@link #LAST_RESULT}</b>：{@code align} 是逐类调用的，而
+	 * {@code CellPropertyRef.afterRedefineBatch} 在整批类都重定义完以后才跑一次。单槽在那一刻
+	 * 只剩"最后一个被对齐的类"，批内前序类拿它比较类名必然失败，于是静默退回相似度猜测。
+	 * 按类寻址让每个类都能取回自己那一轮的结论；{@link #LAST_RESULT} 继续服务"align 返回后
+	 * 同线程立即读取"的既有调用方。</p>
+	 *
+	 * <p>有界：最多保留 {@value #MAX_RETAINED_RESULTS} 个类，按访问序淘汰最旧项。对齐失败或
+	 * 早退时用空结果覆盖该类的旧快照，避免读者拿到上一轮的映射。</p>
+	 */
+	private static final int MAX_RETAINED_RESULTS = 128;
+	private static final Map<String, AlignmentResult> LAST_RESULTS =
+	 new LinkedHashMap<>(16, 0.75f, true) {
+		 @Override
+		 protected boolean removeEldestEntry(Map.Entry<String, AlignmentResult> eldest) {
+			 return size() > MAX_RETAINED_RESULTS;
+		 }
+	 };
+
+	/**
+	 * 取某个类最近一次对齐的结论（内部名，如 {@code com/example/Foo}）。
+	 *
+	 * <p>{@code null} 表示本进程还没有对齐过这个类；返回对象但 {@link AlignmentResult#methodMapping}
+	 * 为 {@code null} 表示最近一轮没有产出映射（失败或早退）。调用方不得把 {@code null} 当作
+	 * "没有 lambda"，只能当作"没有可用结论"。</p>
+	 */
+	public static AlignmentResult lastResultFor(String slashName) {
+		if (slashName == null) return null;
+		synchronized (LAST_RESULTS) {
+			return LAST_RESULTS.get(slashName);
+		}
+	}
+
+	/**
+	 * 单次发布：写全局单槽 + 按类记账。
+	 *
+	 * @param slashName 内部名；{@code null} 表示字节不可解析（只写全局单槽，不做按类记账）
+	 */
+	private static void publishResult(String slashName, AlignmentResult result) {
+		LAST_RESULT = result;
+		if (slashName == null) return;
+		synchronized (LAST_RESULTS) {
+			LAST_RESULTS.put(slashName, result);
+		}
+	}
+
+	/** 解析内部名；字节不可解析时返回 {@code null}（记账失败不能盖过对齐本身的失败路径）。 */
+	private static String classNameOf(byte[] bytes) {
+		if (bytes == null || bytes.length < 10) return null;
+		try {
+			return new ClassReader(bytes).getClassName();
+		} catch (Throwable ignored) {
+			return null;
+		}
+	}
 
 	/**
 	 * 诊断开关：打开后打印配对决策的细节（谁在哪个阶段拿了哪个旧名字）。
@@ -791,8 +853,9 @@ public class LambdaAligner {
 		long oldHash = oldBytes == null ? 0 : java.util.Arrays.hashCode(oldBytes);
 		long newHash = newBytes == null ? 0 : java.util.Arrays.hashCode(newBytes);
 		// 先发布空结果：下面有"旧字节为空直接返回"的早退路径，不发布会让调用方读到上一轮的值，
-		// 把 A 类的自造名落账到 B 类头上。
-		LAST_RESULT = AlignmentResult.empty(oldLen, newLen, oldHash, newHash);
+		// 把 A 类的自造名落账到 B 类头上。按类记账同理：本轮没有结论时必须覆盖该类的旧快照。
+		String alignKey = classNameOf(newBytes);
+		publishResult(alignKey, AlignmentResult.empty(oldLen, newLen, oldHash, newHash));
 		if (oldBytes == null || oldBytes.length == 0) return newBytes;
 
 		MatchContext ctx = CONTEXT.get();
@@ -989,8 +1052,8 @@ public class LambdaAligner {
 			// 只在 alignedCn 上扫会漏掉它们（幽灵仍占着那个名字，下一轮照样会被误当 javac 原名）。
 			Set<String> invented = collectInventedNames(result, ctx);
 
-			// 唯一的发布点：一次 volatile 写，读者不会读到跨轮拼接。
-			LAST_RESULT = AlignmentResult.builder()
+			// 唯一的发布点：一次 volatile 写（全局单槽）+ 按类记账，读者不会读到跨轮拼接。
+			AlignmentResult snapshot = AlignmentResult.builder()
 			                             .stats(stats)
 			                             .inventedNames(invented)
 			                             .input(oldLen, newLen, oldHash, newHash)
@@ -1001,13 +1064,14 @@ public class LambdaAligner {
 			                             .bridgeCount(ctx.bridges.size())
 			                             .missingLvtLambdas(affectedLvt)
 			                             .build();
+			publishResult(alignKey != null ? alignKey : oldCn.name, snapshot);
 			return result;
 		} catch (Exception | LinkageError | StackOverflowError e) {
 			if (e instanceof LambdaAlignmentStrictException) {
 				throw (LambdaAlignmentStrictException) e;
 			}
 			// 失败也发布：否则调用方会读到上一轮的旧快照，把两轮结果拼在一起。
-			LAST_RESULT = AlignmentResult.empty(oldLen, newLen, oldHash, newHash);
+			publishResult(alignKey, AlignmentResult.empty(oldLen, newLen, oldHash, newHash));
 			// 降级：不崩溃，返回原始字节码。捕获 Exception 与 LinkageError、StackOverflowError 等。
 			// 默认只记一行（热更失败不该刷屏）；DEBUG 下走 Logger 的 (msg, Throwable)
 			// 重载打完整堆栈 —— 而不是直接 printStackTrace，保持输出统一经日志系统。

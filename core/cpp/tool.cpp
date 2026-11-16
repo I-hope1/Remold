@@ -2,6 +2,7 @@
 #include <jvmti.h>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <expected>
 #if defined(_WIN32)
 #include <chrono>
@@ -106,6 +107,29 @@ static inline TagPair allocateTagPair() {
     return {.first = base, .second = base + 1};
 }
 
+/** 原子分配连续 N 个唯一 JVMTI 标签，供分桶遍历保序与区间清理共用。 */
+static inline jlong allocateTagRange(jint count) {
+    return g_tag_sequence.fetch_add(static_cast<jlong>(count), std::memory_order_relaxed);
+}
+
+/**
+ * 大实例数分桶打标参数：每 2^17 = 131,072 个堆扫描序实例推进一个桶（最多 16 桶），
+ * 让 GetObjectsWithTags 回流时能 O(N) 恢复堆空间局部性；<= 131k 时退化为单桶，零额外标签开销。
+ */
+static constexpr jint kLocalityMaxBuckets = 16;
+static constexpr jint kLocalityBucketShift = 17;
+
+struct TagRange {
+    jlong base;
+    jlong end;
+};
+
+struct BucketTagContext {
+    jlong base_tag;
+    jlong seq;
+    jint  max_bucket;
+};
+
 /** 确保当前 JVMTI 环境已启用对象标记能力 */
 static inline jvmtiError ensureCapabilities(jvmtiEnv* jvmti) {
     jvmtiCapabilities caps{
@@ -114,37 +138,58 @@ static inline jvmtiError ensureCapabilities(jvmtiEnv* jvmti) {
     return jvmti->AddCapabilities(&caps);
 }
 
-/** 遍历清理回调：清空指定类的所有带标记实例 */
-static jvmtiIterationControl JNICALL RollbackClassTagCallback(
+/** 遍历清理回调：清空指定类在 [base, end) 标签区间内的所有带标记实例 */
+static jvmtiIterationControl JNICALL RollbackClassTagRangeCallback(
     jlong /*class_tag*/, jlong /*size*/, jlong* tag_ptr, void* user_data
 ) {
-    if (tag_ptr && *tag_ptr == *static_cast<const jlong*>(user_data)) {
-        *tag_ptr = 0;
+    if (tag_ptr) {
+        const auto* r = static_cast<const TagRange*>(user_data);
+        const jlong t = *tag_ptr;
+        if (t >= r->base && t < r->end) {
+            *tag_ptr = 0;
+        }
     }
     return JVMTI_ITERATION_CONTINUE;
 }
 
-/** 全堆遍历回调：通过 IterateThroughHeap 清空任意孤立 Tag（零 JNI 局部引用开销） */
-static jint JNICALL ClearHeapTagCallback(
+/** 全堆遍历回调：通过 IterateThroughHeap 清空任意孤立 Tag 区间（零 JNI 局部引用开销） */
+static jint JNICALL ClearHeapTagRangeCallback(
     jlong /*class_tag*/, jlong /*size*/, jlong* tag_ptr, jint /*length*/, void* user_data
 ) {
-    if (tag_ptr && *tag_ptr == *static_cast<const jlong*>(user_data)) {
-        *tag_ptr = 0;
+    if (tag_ptr) {
+        const auto* r = static_cast<const TagRange*>(user_data);
+        const jlong t = *tag_ptr;
+        if (t >= r->base && t < r->end) {
+            *tag_ptr = 0;
+        }
     }
     return JVMTI_VISIT_OBJECTS;
 }
 
-static void clearTagFromHeap(jvmtiEnv* jvmti, jlong tag) {
-    jvmtiHeapCallbacks cbs{ .heap_iteration_callback = ClearHeapTagCallback };
-    jvmti->IterateThroughHeap(JVMTI_HEAP_FILTER_UNTAGGED, nullptr, &cbs, &tag);
+static void clearTagRangeFromHeap(jvmtiEnv* jvmti, jlong base, jlong end) {
+    TagRange range{base, end};
+    jvmtiHeapCallbacks cbs{ .heap_iteration_callback = ClearHeapTagRangeCallback };
+    jvmti->IterateThroughHeap(JVMTI_HEAP_FILTER_UNTAGGED, nullptr, &cbs, &range);
 }
 
-/** 实例查找回调：为目标类及其子类、接口实现类的实例打上 tag */
-static jvmtiIterationControl JNICALL HeapObjectCallback(
+static void clearTagFromHeap(jvmtiEnv* jvmti, jlong tag) {
+    clearTagRangeFromHeap(jvmti, tag, tag + 1);
+}
+
+/** 实例查找回调：按堆扫描序以每 131k 一个分桶标签打在目标类及其子类/接口实例上 */
+static jvmtiIterationControl JNICALL BucketHeapObjectCallback(
     jlong /*class_tag*/, jlong /*size*/, jlong* tag_ptr, void* user_data
 ) {
     if (tag_ptr) {
-        *tag_ptr = *static_cast<const jlong*>(user_data);
+        auto* ctx = static_cast<BucketTagContext*>(user_data);
+        const jlong raw_b = (ctx->seq++) >> kLocalityBucketShift;
+        const jint bucket = raw_b >= kLocalityMaxBuckets
+            ? (kLocalityMaxBuckets - 1)
+            : static_cast<jint>(raw_b);
+        if (bucket > ctx->max_bucket) {
+            ctx->max_bucket = bucket;
+        }
+        *tag_ptr = ctx->base_tag + bucket;
     }
     return JVMTI_ITERATION_CONTINUE;
 }
@@ -226,10 +271,11 @@ static std::atomic<JavaVM*> g_jvm{nullptr};
  */
 static constexpr jint kTagClearWalkThreshold = 32768;
 
-static void clearTaggedClass(jvmtiEnv* jvmti, jclass klass, jlong tag) {
-    if (jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_TAGGED, RollbackClassTagCallback, &tag)
+static void clearTaggedClassRange(jvmtiEnv* jvmti, jclass klass, jlong base_tag, jint bucket_count) {
+    TagRange range{base_tag, base_tag + static_cast<jlong>(bucket_count)};
+    if (jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_TAGGED, RollbackClassTagRangeCallback, &range)
         != JVMTI_ERROR_NONE) {
-        clearTagFromHeap(jvmti, tag);
+        clearTagRangeFromHeap(jvmti, range.base, range.end);
     }
 }
 
@@ -248,12 +294,23 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTi
 
     NativeLockGuard lock(g_heap_mutex);
 
-    jlong tag = allocateTagPair().first;
+    const jlong base_tag = allocateTagRange(kLocalityMaxBuckets);
+    BucketTagContext tag_ctx{base_tag, 0, 0};
     jint count = 0;
     jobject* instances = nullptr;
+    jlong* tags_out = nullptr;
+    jobject* sorted = nullptr;
     bool has_local_frame = false;
 
     SCOPE_EXIT([&] {
+        if (sorted) {
+            std::free(sorted);
+            sorted = nullptr;
+        }
+        if (tags_out) {
+            jvmti->Deallocate(reinterpret_cast<unsigned char*>(tags_out));
+            tags_out = nullptr;
+        }
         if (instances) {
             jvmti->Deallocate(reinterpret_cast<unsigned char*>(instances));
             instances = nullptr;
@@ -265,12 +322,13 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTi
     });
 
     const jlong t_before_iterate = timings ? monotonicNowNs() : 0;
-    // 先给目标类及其所有子类、接口实现的未回收实例打上 tag
-    if (auto e = jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_EITHER, HeapObjectCallback, &tag);
+    // 先按堆扫描序给目标类及其所有子类、接口实现的未回收实例打上分桶 tag
+    if (auto e = jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_EITHER, BucketHeapObjectCallback, &tag_ctx);
         e != JVMTI_ERROR_NONE) {
-        clearTaggedClass(jvmti, klass, tag);
+        clearTaggedClassRange(jvmti, klass, base_tag, kLocalityMaxBuckets);
         return std::unexpected(e);
     }
+    const jint used_buckets = tag_ctx.max_bucket + 1;
     const jlong t_after_iterate = timings ? monotonicNowNs() : 0;
     if (timings) timings->iterate_ns = t_after_iterate - t_before_iterate;
 
@@ -281,16 +339,59 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTi
         env->ExceptionClear();
     }
 
-    // 提取所有打上标记的对象句柄
-    if (auto e = jvmti->GetObjectsWithTags(1, &tag, &count, &instances, nullptr);
+    jlong search_tags[kLocalityMaxBuckets];
+    for (jint b = 0; b < used_buckets; ++b) {
+        search_tags[b] = base_tag + b;
+    }
+
+    // 提取所有打上标记的对象句柄（> 1 桶时附带读回 tags_out，以便恢复堆桶序）
+    if (auto e = jvmti->GetObjectsWithTags(
+            used_buckets, search_tags, &count, &instances, used_buckets > 1 ? &tags_out : nullptr);
         e != JVMTI_ERROR_NONE) {
-        clearTaggedClass(jvmti, klass, tag);
+        clearTaggedClassRange(jvmti, klass, base_tag, used_buckets);
         return std::unexpected(e);
     }
     const jlong t_after_collect = timings ? monotonicNowNs() : 0;
     if (timings) {
         timings->collect_ns = t_after_collect - t_after_iterate;
         timings->raw_count = static_cast<jlong>(count);
+    }
+
+    jobject* src = instances;
+    if (used_buckets > 1 && tags_out != nullptr && count > 0) {
+        sorted = static_cast<jobject*>(std::malloc(static_cast<size_t>(count) * sizeof(jobject)));
+        if (sorted) {
+            jint counts[kLocalityMaxBuckets]{};
+            bool valid_tags = true;
+            for (jint i = 0; i < count; ++i) {
+                const jlong b = tags_out[i] - base_tag;
+                if (b < 0 || b >= used_buckets) {
+                    valid_tags = false;
+                    break;
+                }
+                counts[static_cast<size_t>(b)]++;
+            }
+            if (valid_tags) {
+                jint offsets[kLocalityMaxBuckets]{};
+                jint sum = 0;
+                for (jint b = 0; b < used_buckets; ++b) {
+                    offsets[b] = sum;
+                    sum += counts[b];
+                }
+                for (jint i = 0; i < count; ++i) {
+                    const jint b = static_cast<jint>(tags_out[i] - base_tag);
+                    sorted[offsets[b]++] = instances[i];
+                }
+                src = sorted;
+            } else {
+                std::free(sorted);
+                sorted = nullptr;
+            }
+        }
+    }
+    if (tags_out) {
+        jvmti->Deallocate(reinterpret_cast<unsigned char*>(tags_out));
+        tags_out = nullptr;
     }
 
     // 构建结果数组，不再调用 EnsureLocalCapacity 以避免触发超过容量限制的误报失败
@@ -305,7 +406,7 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTi
             }
         }
         if (count > 0) {
-            clearTaggedClass(jvmti, klass, tag);
+            clearTaggedClassRange(jvmti, klass, base_tag, used_buckets);
         }
         return std::unexpected(JVMTI_ERROR_OUT_OF_MEMORY);
     }
@@ -316,7 +417,7 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTi
     jsize idx = 0;
     if (has_local_frame) {
         for (jint i = 0; i < count; ++i) {
-            jobject o = instances[i];
+            jobject o = src[i];
             if (o) {
                 env->SetObjectArrayElement(result, idx++, o);
             }
@@ -326,7 +427,7 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTi
         }
     } else {
         for (jint i = 0; i < count; ++i) {
-            jobject o = instances[i];
+            jobject o = src[i];
             if (o && env->IsInstanceOf(o, klass)) {
                 env->SetObjectArrayElement(result, idx, o);
                 if (env->ExceptionCheck()) {
@@ -337,6 +438,10 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTi
             }
             env->DeleteLocalRef(o);
         }
+    }
+    if (sorted) {
+        std::free(sorted);
+        sorted = nullptr;
     }
     const jlong t_after_fill = timings ? monotonicNowNs() : 0;
     if (timings) {
@@ -367,7 +472,7 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTi
     }
 
     bool tags_cleared = (count <= 0);
-    if (!tags_cleared && count <= kTagClearWalkThreshold && instances) {
+    if (!tags_cleared && used_buckets == 1 && count <= kTagClearWalkThreshold && instances) {
         for (jint i = 0; i < count; ++i) {
             if (instances[i]) jvmti->SetTag(instances[i], 0);
         }
@@ -378,7 +483,7 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTi
         instances = nullptr;
     }
     if (!tags_cleared) {
-        clearTaggedClass(jvmti, klass, tag);
+        clearTaggedClassRange(jvmti, klass, base_tag, used_buckets);
     }
     if (has_local_frame) {
         final_result = reinterpret_cast<jobjectArray>(env->PopLocalFrame(final_result));

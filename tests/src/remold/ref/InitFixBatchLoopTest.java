@@ -326,4 +326,200 @@ class InitFixBatchLoopTest {
 		errOut[0] = new NoSuchMethodError("fatal linkage");
 		return from;
 	}
+
+	@Test
+	void fusedBatchGroupUpdatesMultiFieldHostWithExactStatsAndActiveMask() throws Throwable {
+		HotswapBridge.drainConditionalStats();
+		String baseName = "remold.ref.FusedHostSample";
+		String subName = "remold.ref.FusedSubSample";
+		byte[] v1Base = buildBatchHostClass(baseName.replace('.', '/'), "java/lang/Object", false, true, false);
+		byte[] v2Base = buildBatchHostClass(baseName.replace('.', '/'), "java/lang/Object", true, true, false);
+		byte[] subBytes = buildBatchHostClass(subName.replace('.', '/'), baseName.replace('.', '/'), false, false, false);
+
+		ByteLoader loader = new ByteLoader();
+		Class<?> host = loader.define(baseName, v2Base);
+		Class<?> sub = loader.define(subName, subBytes);
+
+		Object baseZero = host.getConstructor().newInstance();
+		Object basePreset = host.getConstructor().newInstance();
+		Object subInst = sub.getConstructor().newInstance();
+
+		Field addedInt = host.getField("addedInt");
+		Field addedStr = host.getField("addedStr");
+		Field forcedInt = host.getField("forcedInt");
+
+		addedInt.setInt(baseZero, 0);
+		addedStr.set(baseZero, null);
+		forcedInt.setInt(baseZero, 5);
+
+		addedInt.setInt(basePreset, 7);
+		addedStr.set(basePreset, "keep");
+		forcedInt.setInt(basePreset, 13);
+
+		addedInt.setInt(subInst, 0);
+		addedStr.set(subInst, null);
+		forcedInt.setInt(subInst, 88);
+
+		ClassDiff diff = ClassDiffUtil.diff(v1Base, v2Base);
+		InitFix.transform(host, v2Base, diff);
+		try {
+			InitFix.PatchPlan plan = InitFix.pendingPlanForTest(host);
+			assertNotNull(plan);
+			assertEquals(1, plan.fusedBatchGroups().size(), "independent batch fields must fuse into 1 group");
+			InitFix.FusedBatchGroup group = plan.fusedBatchGroups().get(0);
+			assertEquals("initBatchGroup$0", group.methodName());
+			assertArrayEquals(new int[]{0, 1, 2}, group.taskIndices());
+
+			byte[] patchBytes = InitFix.pendingBytesForTest(host);
+			Lookup patchLookup = Reflect.defineHiddenClass(host, patchBytes);
+			Class<?> patchClass = patchLookup.lookupClass();
+			MethodType fusedType = MethodType.methodType(
+			 int.class, Object[].class, int.class, int.class,
+			 boolean[].class, Throwable[].class, int[].class);
+			MethodHandle fusedMh = patchLookup.findStatic(patchClass, group.methodName(), fusedType);
+
+			Object[] targets = new Object[]{baseZero, basePreset, subInst};
+			boolean[] active = new boolean[]{true, true, true};
+			Throwable[] errOut = new Throwable[1];
+			int[] errSlotOut = new int[1];
+			int rc = (int) fusedMh.invokeExact(targets, 0, targets.length, active, errOut, errSlotOut);
+			assertEquals(-1, rc);
+			assertNull(errOut[0]);
+
+			assertEquals(42, addedInt.getInt(baseZero));
+			assertEquals("ok", addedStr.get(baseZero));
+			assertEquals(99, forcedInt.getInt(baseZero));
+
+			assertEquals(7, addedInt.getInt(basePreset));
+			assertEquals("keep", addedStr.get(basePreset));
+			assertEquals(99, forcedInt.getInt(basePreset));
+
+			assertEquals(42, addedInt.getInt(subInst));
+			assertEquals("ok", addedStr.get(subInst));
+			assertEquals(88, forcedInt.getInt(subInst));
+
+			Map<String, long[]> stats = HotswapBridge.drainConditionalStats();
+			assertArrayEquals(new long[]{2L, 1L}, stats.get(host.getName() + "#addedInt"));
+			assertArrayEquals(new long[]{2L, 1L}, stats.get(host.getName() + "#addedStr"));
+			assertNull(stats.get(host.getName() + "#forcedInt"));
+
+			// Verify active mask disables individual slots cleanly without touching disabled fields.
+			Object maskedHost = host.getConstructor().newInstance();
+			addedInt.setInt(maskedHost, 0);
+			addedStr.set(maskedHost, null);
+			forcedInt.setInt(maskedHost, 1);
+			boolean[] maskSecondOff = new boolean[]{true, false, true};
+			int maskedRc = (int) fusedMh.invokeExact(
+			 new Object[]{maskedHost}, 0, 1, maskSecondOff, errOut, errSlotOut);
+			assertEquals(-1, maskedRc);
+			assertEquals(42, addedInt.getInt(maskedHost));
+			assertNull(addedStr.get(maskedHost), "masked-out slot must stay untouched");
+			assertEquals(99, forcedInt.getInt(maskedHost));
+			HotswapBridge.drainConditionalStats();
+		} finally {
+			InitFix.afterRedefineFailed(host);
+			HotswapBridge.drainConditionalStats();
+		}
+	}
+
+	@Test
+	void fusedBatchDriverIsolatesMidLoopFailuresRespectsBudgetAndPropagatesFatalLinkageError() throws Throwable {
+		MethodHandle singleF0 = MethodHandles.lookup().findStatic(
+		 InitFixBatchLoopTest.class, "markSlot0Single", MethodType.methodType(void.class, Object.class));
+		MethodHandle singleF1 = MethodHandles.lookup().findStatic(
+		 InitFixBatchLoopTest.class, "markSlot1Single", MethodType.methodType(void.class, Object.class));
+		MethodHandle singleF2 = MethodHandles.lookup().findStatic(
+		 InitFixBatchLoopTest.class, "markSlot2Single", MethodType.methodType(void.class, Object.class));
+		MethodHandle noopBatch = MethodHandles.lookup().findStatic(
+		 InitFixBatchLoopTest.class, "noopBatch",
+		 MethodType.methodType(int.class, Object[].class, int.class, int.class, Throwable[].class));
+		MethodHandle fusedGroupMh = MethodHandles.lookup().findStatic(
+		 InitFixBatchLoopTest.class, "simulatedFusedThreeSlotGroup",
+		 MethodType.methodType(int.class, Object[].class, int.class, int.class,
+		  boolean[].class, Throwable[].class, int[].class));
+
+		InitFix.BoundInstanceTask[] tasks = new InitFix.BoundInstanceTask[]{
+		 new InitFix.BoundInstanceTask("f0", Set.of(), singleF0, noopBatch, false),
+		 new InitFix.BoundInstanceTask("f1", Set.of(), singleF1, noopBatch, false),
+		 new InitFix.BoundInstanceTask("f2", Set.of(), singleF2, noopBatch, false)
+		};
+		InitFix.BoundFusedBatchGroup[] groups = new InitFix.BoundFusedBatchGroup[]{
+		 new InitFix.BoundFusedBatchGroup(fusedGroupMh, new int[]{0, 1, 2})
+		};
+
+		int[][] counts = new int[12][3];
+		Object[] targets = counts;
+		Set<String> failedFields = new LinkedHashSet<>();
+		Set<String> skippedFields = new LinkedHashSet<>();
+		Map<String, String> failureReasons = new LinkedHashMap<>();
+
+		InitFix.runIndependentInstanceTasks(
+		 InitFixBatchLoopTest.class, targets, tasks, groups,
+		 failedFields, skippedFields, failureReasons);
+
+		assertTrue(failedFields.contains("f1"));
+		assertTrue(skippedFields.contains("f1"), "f1 must hit InstanceFailureBudget=8 and disable its fused slot");
+		assertFalse(failedFields.contains("f0"));
+		assertFalse(failedFields.contains("f2"));
+		for (int i = 0; i < targets.length; i++) {
+			assertEquals(1, counts[i][0], "f0 (< failed slot) must execute once at index " + i);
+			assertEquals(1, counts[i][2], "f2 (> failed slot) must execute once even at failed index " + i);
+			int expectedF1 = (i == 0) ? 1 : 0;
+			assertEquals(expectedF1, counts[i][1], "f1 must succeed only at index 0, index " + i);
+		}
+
+		MethodHandle fatalFusedMh = MethodHandles.lookup().findStatic(
+		 InitFixBatchLoopTest.class, "simulatedFatalFusedGroup",
+		 MethodType.methodType(int.class, Object[].class, int.class, int.class,
+		  boolean[].class, Throwable[].class, int[].class));
+		InitFix.BoundInstanceTask fatalTask = new InitFix.BoundInstanceTask(
+		 "fatal", Set.of(), singleF0, noopBatch, false);
+		assertThrows(LinkageError.class, () ->
+		 InitFix.runIndependentInstanceTasks(
+		  InitFixBatchLoopTest.class, new Object[]{new int[3]},
+		  new InitFix.BoundInstanceTask[]{fatalTask},
+		  new InitFix.BoundFusedBatchGroup[]{new InitFix.BoundFusedBatchGroup(fatalFusedMh, new int[]{0})},
+		  new LinkedHashSet<>(), new LinkedHashSet<>(), new LinkedHashMap<>()));
+	}
+
+	static void markSlot0Single(Object target) {
+		((int[]) target)[0]++;
+	}
+
+	static void markSlot1Single(Object target) {
+		((int[]) target)[1]++;
+	}
+
+	static void markSlot2Single(Object target) {
+		((int[]) target)[2]++;
+	}
+
+	static int noopBatch(Object[] targets, int from, int to, Throwable[] errOut) {
+		return -1;
+	}
+
+	static int simulatedFusedThreeSlotGroup(
+	 Object[] targets, int from, int to, boolean[] active, Throwable[] errOut, int[] errSlotOut) {
+		for (int i = from; i < to; i++) {
+			int[] row = (int[]) targets[i];
+			if (active[0]) row[0]++;
+			if (active[1]) {
+				if (i >= 1 && i <= 10) {
+					errOut[0] = new IllegalStateException("f1 bad at " + i);
+					errSlotOut[0] = 1;
+					return i;
+				}
+				row[1]++;
+			}
+			if (active[2]) row[2]++;
+		}
+		return -1;
+	}
+
+	static int simulatedFatalFusedGroup(
+	 Object[] targets, int from, int to, boolean[] active, Throwable[] errOut, int[] errSlotOut) {
+		errOut[0] = new NoSuchMethodError("fatal fused linkage");
+		errSlotOut[0] = 0;
+		return from;
+	}
 }

@@ -958,12 +958,41 @@ public final class HotswapBridge {
 			mv.visitInsn(Opcodes.RETURN);
 			mv.visitMaxs(2, 1);
 			mv.visitEnd();
+
+			MethodVisitor bmv = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+			 "patchBatch", "([Ljava/lang/Object;)V", null, null);
+			bmv.visitCode();
+			bmv.visitVarInsn(Opcodes.ALOAD, 0);
+			bmv.visitInsn(Opcodes.ICONST_0);
+			bmv.visitInsn(Opcodes.AALOAD);
+			bmv.visitTypeInsn(Opcodes.CHECKCAST, hostInternal);
+			bmv.visitInsn(Opcodes.DUP);
+			bmv.visitInsn(Opcodes.ICONST_1);
+			bmv.visitInvokeDynamicInsn("v", "(" + hostDesc + "I)Z",
+			 bsm, KIND_CONDITIONAL_BATCH, Opcodes.PUTFIELD, hostType, hostType);
+			bmv.visitInsn(Opcodes.POP);
+			bmv.visitLdcInsn("warmup");
+			bmv.visitInvokeDynamicInsn("ref", "(" + hostDesc + "Ljava/lang/Object;)Z",
+			 bsm, KIND_CONDITIONAL_BATCH, Opcodes.PUTFIELD, hostType, hostType);
+			bmv.visitInsn(Opcodes.POP);
+			bmv.visitLdcInsn(hostType);
+			bmv.visitLdcInsn("v");
+			bmv.visitInsn(Opcodes.LCONST_1);
+			bmv.visitInsn(Opcodes.LCONST_0);
+			bmv.visitMethodInsn(Opcodes.INVOKESTATIC, Type.getInternalName(HotswapBridge.class),
+			 "addConditionalStats", "(Ljava/lang/Class;Ljava/lang/String;JJ)V", false);
+			bmv.visitInsn(Opcodes.RETURN);
+			bmv.visitMaxs(6, 1);
+			bmv.visitEnd();
 			cw.visitEnd();
 
 			Lookup lookup = Reflect.defineHiddenClass(WarmupHost.class, cw.toByteArray());
 			MethodHandle mh = lookup.findStatic(lookup.lookupClass(), "patch",
 			 MethodType.methodType(void.class, WarmupHost.class));
 			mh.invokeExact(new WarmupHost());
+			MethodHandle batchMh = lookup.findStatic(lookup.lookupClass(), "patchBatch",
+			 MethodType.methodType(void.class, Object[].class));
+			batchMh.invokeExact(new Object[]{new WarmupHost()});
 		} catch (Throwable ignored) {
 			// Best-effort warmup: cold path still initializes lazily on demand.
 		} finally {

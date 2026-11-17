@@ -26,10 +26,15 @@ class StageBInstanceCacheTest {
 
 		assertSame(populated, StageBInstanceCache.take(Dummy.class, t0 + 1));
 		assertNull(StageBInstanceCache.take(Dummy.class, t0 + 2));
+		assertEquals(Integer.valueOf(2), StageBInstanceCache.takeCount(Dummy.class, t0 + 2),
+			"take() for @OnReload must not discard the cached instance count needed by InitializerDrift");
+		assertNull(StageBInstanceCache.takeCount(Dummy.class, t0 + 3),
+			"takeCount() must consume once");
 
 		Object[] empty = new Object[0];
 		StageBInstanceCache.put(Dummy.class, empty, t0 + 3);
 		assertSame(empty, StageBInstanceCache.take(Dummy.class, t0 + 4));
+		assertEquals(Integer.valueOf(0), StageBInstanceCache.takeCount(Dummy.class, t0 + 4));
 	}
 
 	@Test
@@ -40,6 +45,7 @@ class StageBInstanceCacheTest {
 
 		long expired = t0 + StageBInstanceCache.TTL_NANOS + 1;
 		assertNull(StageBInstanceCache.take(Dummy.class, expired));
+		assertNull(StageBInstanceCache.takeCount(Dummy.class, expired));
 		assertEquals(0, StageBInstanceCache.size());
 
 		// Ensure a stale entry in a <= 8-entry cache is still swept once TTL passes.

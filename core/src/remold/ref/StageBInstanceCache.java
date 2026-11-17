@@ -35,7 +35,10 @@ public final class StageBInstanceCache {
 	 */
 	private record Entry(WeakReference<Object[]> instances, long timestampNanos) { }
 
+	private record CountEntry(int count, long timestampNanos) { }
+
 	private static final Map<Class<?>, Entry> CACHE = Collections.synchronizedMap(new WeakHashMap<>());
+	private static final Map<Class<?>, CountEntry> COUNTS = Collections.synchronizedMap(new WeakHashMap<>());
 	private static long lastSweepNanos = System.nanoTime();
 
 	private StageBInstanceCache() { }
@@ -49,7 +52,8 @@ public final class StageBInstanceCache {
 		if (clazz == null || instances == null) return;
 		synchronized (CACHE) {
 			CACHE.put(clazz, new Entry(new WeakReference<>(instances), nowNanos));
-			if (CACHE.size() > 8 || nowNanos - lastSweepNanos > TTL_NANOS) {
+			COUNTS.put(clazz, new CountEntry(instances.length, nowNanos));
+			if (CACHE.size() > 8 || COUNTS.size() > 8 || nowNanos - lastSweepNanos > TTL_NANOS) {
 				sweepLocked(nowNanos);
 			}
 		}
@@ -65,7 +69,7 @@ public final class StageBInstanceCache {
 		Entry entry;
 		synchronized (CACHE) {
 			entry = CACHE.remove(clazz);
-			if (CACHE.size() > 8 || nowNanos - lastSweepNanos > TTL_NANOS) {
+			if (CACHE.size() > 8 || COUNTS.size() > 8 || nowNanos - lastSweepNanos > TTL_NANOS) {
 				sweepLocked(nowNanos);
 			}
 		}
@@ -74,10 +78,33 @@ public final class StageBInstanceCache {
 		return entry.instances().get();
 	}
 
+	/**
+	 * 取出并移除本批次补丁阶段登记的实例个数（不依赖 {@link #take} 是否已被 {@code @OnReload} 消费）；
+	 * 供同批次末尾的 {@link InitializerDrift} 直接复用，避免对同一个类再跑一遍百万级 JVMTI 枚举。
+	 */
+	public static Integer takeCount(Class<?> clazz) {
+		return takeCount(clazz, System.nanoTime());
+	}
+
+	static Integer takeCount(Class<?> clazz, long nowNanos) {
+		if (clazz == null) return null;
+		CountEntry entry;
+		synchronized (CACHE) {
+			entry = COUNTS.remove(clazz);
+			if (CACHE.size() > 8 || COUNTS.size() > 8 || nowNanos - lastSweepNanos > TTL_NANOS) {
+				sweepLocked(nowNanos);
+			}
+		}
+		if (entry == null) return null;
+		if (nowNanos - entry.timestampNanos() > TTL_NANOS) return null;
+		return entry.count();
+	}
+
 	/** 批次开始 / 结束时清空，避免上一批的实例引用滞留。 */
 	public static void clear() {
 		synchronized (CACHE) {
 			CACHE.clear();
+			COUNTS.clear();
 		}
 	}
 
@@ -91,5 +118,6 @@ public final class StageBInstanceCache {
 		lastSweepNanos = nowNanos;
 		CACHE.entrySet().removeIf(e ->
 			nowNanos - e.getValue().timestampNanos() > TTL_NANOS || e.getValue().instances().get() == null);
+		COUNTS.entrySet().removeIf(e -> nowNanos - e.getValue().timestampNanos() > TTL_NANOS);
 	}
 }

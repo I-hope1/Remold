@@ -587,4 +587,55 @@ public class InitializerDriftTest {
 		assertTrue(warns.get(0).contains("instance counts not collected"),
 			"aggregated warn must state that instance counts were not collected: " + warns.get(0));
 	}
+
+	@Test
+	void reusesStageBInstanceCountWhenPresentInSameRound() throws Exception {
+		Map<String, byte[]> v1 = compile("idl20", """
+			package idl20;
+			public class Host { int v = 1; }
+			""", """
+			package idl20;
+			public class Parent { }
+			""");
+		Map<String, byte[]> v2 = compile("idl20", """
+			package idl20;
+			public class Host { int v = 2; }
+			""", """
+			package idl20;
+			public class Parent { }
+			""");
+		ByteLoader loader = new ByteLoader(v1);
+		Class<?> host = Class.forName("idl20.Host", true, loader);
+		Object liveInstance = host.getDeclaredConstructor().newInstance();
+		assertNotNull(liveInstance);
+
+		// Simulate applyPatch having already enumerated instances (e.g. intentionally 7 to prove reuse).
+		remold.ref.StageBInstanceCache.clear();
+		remold.ref.StageBInstanceCache.put(host, new Object[7]);
+
+		java.util.List<String> warns = new java.util.ArrayList<>();
+		java.util.concurrent.ConcurrentHashMap<String, Class<?>> prevLoaded = remold.RemoldAgent.loadedClassesMap;
+		remold.RemoldAgent.Logger oldLogger = remold.RemoldAgent.logger;
+		remold.RemoldAgent.logger = new remold.RemoldAgent.Logger() {
+			public void log(String msg) {}
+			public void info(String msg) {}
+			public void warn(String msg) { warns.add(msg); }
+			public void error(String msg) {}
+			public void error(String msg, Throwable t) {}
+		};
+		try {
+			remold.RemoldAgent.loadedClassesMap = new java.util.concurrent.ConcurrentHashMap<>();
+			remold.RemoldAgent.loadedClassesMap.put("idl20.Host", host);
+			InitializerDrift.report(Map.of("idl20.Host", v2.get("idl20.Host")), v1);
+		} finally {
+			remold.RemoldAgent.loadedClassesMap = prevLoaded;
+			remold.RemoldAgent.logger = oldLogger;
+			remold.ref.StageBInstanceCache.clear();
+		}
+		assertEquals(1, warns.size(), "expected one drift warning: " + warns);
+		assertTrue(warns.get(0).contains("live instances=7"),
+			"InitializerDrift.report must reuse StageBInstanceCache count without re-walking heap: " + warns.get(0));
+		assertNull(remold.ref.StageBInstanceCache.takeCount(host),
+			"count entry must be consumed after report");
+	}
 }

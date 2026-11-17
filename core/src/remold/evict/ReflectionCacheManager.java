@@ -1,17 +1,20 @@
 package remold.evict;
 
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AnnotationNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.RecordComponentNode;
 import remold.RemoldAgent;
 import remold.util.LibTool;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
@@ -66,18 +69,43 @@ public final class ReflectionCacheManager {
 		}
 	}
 
+	static void clearRegisteredForTest() {
+		synchronized (registeredObjectMappers) {
+			registeredObjectMappers.clear();
+		}
+		synchronized (registeredGsons) {
+			registeredGsons.clear();
+		}
+	}
+
 	/**
-	 * 对指定的重定义类集合执行所有已注册框架的缓存驱逐。
+	 * 对指定的重定义类集合执行所有已注册框架的缓存驱逐（保守模式：视为存在结构/元数据变化）。
 	 *
 	 * @param redefinedClasses 重定义成功的类集合
 	 * @return 总驱逐条目/实例数
 	 */
 	public static int evictAll(Set<Class<?>> redefinedClasses) {
+		return evictAll(redefinedClasses, true);
+	}
+
+	/**
+	 * 对指定的重定义类集合执行缓存驱逐。
+	 *
+	 * @param redefinedClasses          重定义成功的类集合
+	 * @param schemaOrMetadataChanged   是否包含结构、签名或注解变化；{@code false}（纯方法体改动）时
+	 *                                  跳过标记为 {@link ReflectionCacheEvictor#skipOnMethodBodyOnlyChange()}
+	 *                                  的序列化器驱逐，避免无意义的全堆扫描
+	 * @return 总驱逐条目/实例数
+	 */
+	public static int evictAll(Set<Class<?>> redefinedClasses, boolean schemaOrMetadataChanged) {
 		if (redefinedClasses == null || redefinedClasses.isEmpty()) {
 			return 0;
 		}
 		int totalEvicted = 0;
 		for (ReflectionCacheEvictor evictor : evictors) {
+			if (!schemaOrMetadataChanged && evictor.skipOnMethodBodyOnlyChange()) {
+				continue;
+			}
 			try {
 				int count = evictor.evict(redefinedClasses);
 				totalEvicted += count;
@@ -89,6 +117,90 @@ public final class ReflectionCacheManager {
 			}
 		}
 		return totalEvicted;
+	}
+
+	/**
+	 * 判定两个版本的字节码是否发生可能影响反射/序列化缓存的结构或元数据变化。
+	 * 仅方法体指令/行号/局部变量表改动且非新增/删除成员、非注解/泛型变化时返回 {@code false}；
+	 * 缺失基线或解析失败时按保守策略返回 {@code true}。
+	 */
+	public static boolean hasSerializationSchemaChange(byte[] oldBytes, byte[] newBytes) {
+		if (oldBytes == null || newBytes == null || oldBytes.length == 0 || newBytes.length == 0) {
+			return true;
+		}
+		if (Arrays.equals(oldBytes, newBytes)) {
+			return false;
+		}
+		try {
+			ClassNode oldNode = parse(oldBytes);
+			ClassNode newNode = parse(newBytes);
+			if (oldNode.access != newNode.access
+			    || !Objects.equals(oldNode.superName, newNode.superName)
+			    || !Objects.equals(oldNode.interfaces, newNode.interfaces)
+			    || !Objects.equals(oldNode.signature, newNode.signature)
+			    || !Objects.equals(renderClassAnnotations(oldNode), renderClassAnnotations(newNode))
+			    || !Objects.equals(renderRecordComponents(oldNode), renderRecordComponents(newNode))) {
+				return true;
+			}
+			if (!Objects.equals(renderFieldSchemas(oldNode), renderFieldSchemas(newNode))) {
+				return true;
+			}
+			return !Objects.equals(renderMethodSchemas(oldNode), renderMethodSchemas(newNode));
+		} catch (Throwable t) {
+			return true;
+		}
+	}
+
+	private static String renderClassAnnotations(ClassNode node) {
+		return renderAnnotationList('V', node.visibleAnnotations) + "|"
+		       + renderAnnotationList('I', node.invisibleAnnotations);
+	}
+
+	private static List<String> renderRecordComponents(ClassNode node) {
+		if (node.recordComponents == null || node.recordComponents.isEmpty()) return Collections.emptyList();
+		List<String> out = new ArrayList<>(node.recordComponents.size());
+		for (RecordComponentNode rc : node.recordComponents) {
+			out.add(rc.name + ":" + rc.descriptor + ":" + rc.signature + ":"
+			        + renderAnnotationList('V', rc.visibleAnnotations)
+			        + renderAnnotationList('I', rc.invisibleAnnotations));
+		}
+		return out;
+	}
+
+	private static List<String> renderFieldSchemas(ClassNode node) {
+		if (node.fields == null || node.fields.isEmpty()) return Collections.emptyList();
+		List<String> out = new ArrayList<>(node.fields.size());
+		for (FieldNode f : node.fields) {
+			out.add(f.access + ":" + f.name + ":" + f.desc + ":" + f.signature + ":" + f.value + ":"
+			        + renderAnnotationList('V', f.visibleAnnotations)
+			        + renderAnnotationList('I', f.invisibleAnnotations));
+		}
+		return out;
+	}
+
+	private static List<String> renderMethodSchemas(ClassNode node) {
+		if (node.methods == null || node.methods.isEmpty()) return Collections.emptyList();
+		List<String> out = new ArrayList<>(node.methods.size());
+		for (MethodNode m : node.methods) {
+			// 方法体内新增/增删 lambda 仅改变合成 lambda$* 体签名，不影响序列化器对宿主契约的视图。
+			if ((m.access & Opcodes.ACC_SYNTHETIC) != 0 && m.name.startsWith("lambda$")) {
+				continue;
+			}
+			out.add(m.access + ":" + m.name + ":" + m.desc + ":" + m.signature + ":"
+			        + m.exceptions + ":"
+			        + renderAnnotationList('V', m.visibleAnnotations)
+			        + renderAnnotationList('I', m.invisibleAnnotations)
+			        + renderParameterAnnotations(m));
+		}
+		return out;
+	}
+
+	private static String renderAnnotationList(char kind, List<AnnotationNode> list) {
+		if (list == null || list.isEmpty()) return "";
+		List<String> rendered = new ArrayList<>(list.size());
+		for (AnnotationNode an : list) rendered.add(renderAnnotation(an));
+		Collections.sort(rendered);
+		return kind + "=" + rendered;
 	}
 
 	//region 参数注解 / 泛型签名漂移点名
@@ -298,6 +410,18 @@ public final class ReflectionCacheManager {
 		return null;
 	}
 
+	private static Class<?> resolveLoadedClass(String dotName) {
+		ConcurrentHashMap<String, Class<?>> loaded = RemoldAgent.loadedClassesMap;
+		if (loaded != null && !loaded.isEmpty()) {
+			return loaded.get(dotName);
+		}
+		try {
+			return Class.forName(dotName, false, ReflectionCacheManager.class.getClassLoader());
+		} catch (Throwable ignored) {
+			return null;
+		}
+	}
+
 	/**
 	 * Jackson {@code ObjectMapper} 实例级缓存与 {@code TypeFactory} 全局缓存驱逐器。
 	 */
@@ -306,19 +430,24 @@ public final class ReflectionCacheManager {
 		public String getName() { return "Jackson"; }
 
 		@Override
+		public boolean skipOnMethodBodyOnlyChange() { return true; }
+
+		@Override
 		public int evict(Set<Class<?>> redefinedClasses) {
 			int count = 0;
-			// 1. 全局 TypeFactory 缓存清理
-			try {
-				Class<?> tfClass = Class.forName("com.fasterxml.jackson.databind.type.TypeFactory");
-				Method mDefault = tfClass.getMethod("defaultInstance");
-				Object tf = mDefault.invoke(null);
-				if (tf != null) {
-					Method mClear = tfClass.getMethod("clearCache");
-					mClear.invoke(tf);
-					count++;
-				}
-			} catch (Throwable ignored) {}
+			// 1. 全局 TypeFactory 缓存清理（未加载时不触发 Class.forName 懒加载）
+			Class<?> tfClass = resolveLoadedClass("com.fasterxml.jackson.databind.type.TypeFactory");
+			if (tfClass != null) {
+				try {
+					Method mDefault = tfClass.getMethod("defaultInstance");
+					Object tf = mDefault.invoke(null);
+					if (tf != null) {
+						Method mClear = tfClass.getMethod("clearCache");
+						mClear.invoke(tf);
+						count++;
+					}
+				} catch (Throwable ignored) {}
+			}
 
 			// 2. 实例级 SerializerCache 与 DeserializerCache 清理
 			Set<Object> instances = new HashSet<>();
@@ -326,13 +455,15 @@ public final class ReflectionCacheManager {
 				instances.addAll(registeredObjectMappers);
 			}
 
-			try {
-				Class<?> omClass = Class.forName("com.fasterxml.jackson.databind.ObjectMapper");
-				Object[] heapInstances = LibTool.getInstances(omClass);
-				if (heapInstances != null) {
-					Collections.addAll(instances, heapInstances);
-				}
-			} catch (Throwable ignored) {}
+			Class<?> omClass = resolveLoadedClass("com.fasterxml.jackson.databind.ObjectMapper");
+			if (omClass != null) {
+				try {
+					Object[] heapInstances = LibTool.getInstances(omClass);
+					if (heapInstances != null) {
+						Collections.addAll(instances, heapInstances);
+					}
+				} catch (Throwable ignored) {}
+			}
 
 			for (Object om : instances) {
 				if (om == null) continue;
@@ -390,6 +521,9 @@ public final class ReflectionCacheManager {
 		public String getName() { return "Gson"; }
 
 		@Override
+		public boolean skipOnMethodBodyOnlyChange() { return true; }
+
+		@Override
 		public int evict(Set<Class<?>> redefinedClasses) {
 			int count = 0;
 			Set<Object> instances = new HashSet<>();
@@ -397,13 +531,15 @@ public final class ReflectionCacheManager {
 				instances.addAll(registeredGsons);
 			}
 
-			try {
-				Class<?> gsonClass = Class.forName("com.google.gson.Gson");
-				Object[] heapInstances = LibTool.getInstances(gsonClass);
-				if (heapInstances != null) {
-					Collections.addAll(instances, heapInstances);
-				}
-			} catch (Throwable ignored) {}
+			Class<?> gsonClass = resolveLoadedClass("com.google.gson.Gson");
+			if (gsonClass != null) {
+				try {
+					Object[] heapInstances = LibTool.getInstances(gsonClass);
+					if (heapInstances != null) {
+						Collections.addAll(instances, heapInstances);
+					}
+				} catch (Throwable ignored) {}
+			}
 
 			for (Object gson : instances) {
 				if (gson == null) continue;

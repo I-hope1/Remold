@@ -122,7 +122,7 @@ jobs:
           export JAVA_HOME="$JAVA_HOME_25_X64"
           echo "runner JAVA_HOME=$JAVA_HOME"
           echo "JBR 21 JAVA_HOME=$JAVA_HOME_21_X64"
-          ./gradlew :tests:liveDcevmTest \
+          ./gradlew :tests:liveDcevmTest :tests:vcsPackProbe :tests:vcsTwoPhaseProbe \
             -Dorg.gradle.jvmargs="-Xmx2g --enable-native-access=ALL-UNNAMED" \
             -Dhstest.requireJdks=true \
             -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_8_X64,JAVA_HOME_11_X64,JAVA_HOME_17_X64,JAVA_HOME_21_X64,JAVA_HOME_25_X64 \

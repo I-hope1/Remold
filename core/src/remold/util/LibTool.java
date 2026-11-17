@@ -230,6 +230,13 @@ public class LibTool {
 	 */
 	public static final int BATCH_TARGET_LIMIT = 16;
 
+	/**
+	 * 存在性探测（{@link #hasLiveInstancesBatch}）的单次 target 上限，可大于
+	 * {@link #BATCH_TARGET_LIMIT}：存在性探测只置位掩码、**不产生对象 tag 槽位**，不受
+	 * 「检索 tag 数」预算约束，所以一次遍历可以覆盖到 native 的 target 上限（64）。
+	 */
+	public static final int BATCH_LIVENESS_TARGET_LIMIT = 64;
+
 	/** 新 native 库（含批次入口）是否可用；旧库缺导出符号时置 false 并整体退回逐类路径。 */
 	private static volatile boolean batchScanSupported = true;
 	private static volatile boolean batchFallbackWarned;
@@ -450,8 +457,8 @@ public class LibTool {
 		if (batchScanSupported) {
 			boolean done = true;
 			try {
-				for (int start = 0; start < canonical.length; start += BATCH_TARGET_LIMIT) {
-					int n = Math.min(BATCH_TARGET_LIMIT, canonical.length - start);
+				for (int start = 0; start < canonical.length; start += BATCH_LIVENESS_TARGET_LIMIT) {
+					int n = Math.min(BATCH_LIVENESS_TARGET_LIMIT, canonical.length - start);
 					Class<?>[] chunk = Arrays.copyOfRange(canonical, start, start + n);
 					long mask = nHasLiveInstancesBatch(chunk);
 					if (mask < 0) {

@@ -72,8 +72,21 @@
 - **降级**：旧 native 库没有 `nGetInstancesBatch`（`UnsatisfiedLinkError`）或 native 返回失败时，
   `LibTool` 整体退回逐类 `getInstances`，结果相同、遍历次数回到 K 次；无 native 时退回
   `InstanceTracker` 的既有降级路径。
-- **`Object[][]` 而不是强类型数组**：按 target 建强类型数组会与数组类/子类实例冲突
-  （`ArrayStoreException`），统一用 `Object[]`，由调用方按需转换。
+- **行数组按 target 强类型**：每个 target 的结果行用 `NewObjectArray(count, targets[i], ...)`，
+  与单类路径一致。子类实例落进祖先行是合法的（`Sub` is-a `Base`），数组类在入口即被拦截，
+  所以强类型化不会误伤；它换来的是**归属错配立刻抛 `ArrayStoreException`**，而不是悄悄塞进
+  `Object[]` 之后继续写错数据。填充阶段**禁止**用笼统的 `ExceptionCheck/ExceptionClear` 吞掉它：
+  一旦命中就打印现场并整体退回逐类路径。
+- **分块上限有两个，不是同一个数**：实例收集一次最多 `BATCH_TARGET_LIMIT = 16` 个 target
+  （对象 tag 槽位数与检索 tag 数都随"命中组数"增长，`GetObjectsWithTags` 的成本随 tag 数上升），
+  K 更大时切成 `ceil(K/16)` 次遍历；存在性探测（只置位、不物化对象、不占对象 tag）用
+  `BATCH_LIVENESS_TARGET_LIMIT = 64`，因此 K=64 的布局门预探测仍是**一次**遍历。
+- **JNI 局部帧生命周期（唯一会让结果静默错位的约束）**：`GetLoadedClasses` 枚举期可以套局部帧，
+  但**必须在枚举结束、`GetObjectsWithTags` 之前收起**。`GetObjectsWithTags` 返回的 `jobject`
+  是「当前帧」里的局部引用；若枚举帧留到函数退出才弹，回收到的对象引用会随帧失效，其
+  `JNIHandleBlock` 槽位会被随后 `NewObjectArray` 的结果数组/行数组复用——填数组时写进行里的
+  就成了容器数组自己（表现为行内自引用，且旧实现用 `Object[]` 行时不抛任何异常）。
+  命中类因此一律转**全局引用**保存，随枚举帧释放局部引用。
 
 **批次存在性探测（与实例收集分开）**
 
@@ -90,6 +103,8 @@
   用于断言"K 次 → 1 次"。
 - `LibTool.getInstancesBatch(Class[], long[] timings)`：`enumerate` / `iterate` / `collect` / `fill` /
   `cleanup` / `rawCount` 六段纳秒，供探针判断时间花在哪一段。
-- `tests/src/InitFixBatchScanProbe.java`（`./gradlew :tests:initFixBatchScanProbe`）：K=1/4/8/16/64
-  的开/关读数与遍历次数；`tests/src/BatchHeapScanEquivalenceTest.java`：批收集 vs 逐类的集合等价门禁。
+- `tests/src/InitFixBatchScanProbe.java`（`./gradlew :tests:initFixBatchScanProbe`）：`[0]` 最小复现
+  （4 类 × 3 实例，单次/切块/重复调用三种形态，专门守局部帧生命周期）、`[1]` 真实活实例终局断言、
+  `[2]` K=1/4/8/16/64 开/关读数与遍历次数、`[4]` 布局门批量存在性探测、`[5]` 大堆对照
+  （20 万无关对象 + 少量目标实例）；`tests/src/BatchHeapScanEquivalenceTest.java`：批收集 vs 逐类的集合等价门禁。
 

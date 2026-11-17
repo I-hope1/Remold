@@ -2,6 +2,7 @@ import org.junit.jupiter.api.Test;
 import remold.util.LibTool;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -199,8 +200,19 @@ class BatchHeapScanEquivalenceTest {
 
 		assertEquals(targets.length, perClassWalks, "per-class path must cost one walk per class");
 		if (LibTool.batchScanIsNative()) {
-			assertEquals(1L, batchWalks, "batch collection must collapse K=" + targets.length
-				+ " heap walks into a single walk");
+			// 一次 native 批查询最多 BATCH_TARGET_LIMIT 个 target（对象 tag 槽位 / 检索 tag 数预算，
+			// 见 docs/initfix/05-jvmti-heap.md）：K 更大时按块切分，故期望值是 ceil(K / LIMIT)。
+			long expected = Math.max(1, (targets.length + LibTool.BATCH_TARGET_LIMIT - 1)
+			                            / LibTool.BATCH_TARGET_LIMIT);
+			assertEquals(expected, batchWalks, "batch collection must collapse K=" + targets.length
+				+ " heap walks into ceil(K/" + LibTool.BATCH_TARGET_LIMIT + ") walks");
+			assertTrue(batchWalks < targets.length,
+			           "batch collection must be strictly cheaper than one walk per class");
+			// 单块内的"K 次 → 1 次"契约单独钉死：这一条是文档里承诺的对外语义。
+			long beforeSingleChunk = walks();
+			LibTool.getInstancesBatch(Arrays.copyOf(targets, LibTool.BATCH_TARGET_LIMIT));
+			assertEquals(1L, walks() - beforeSingleChunk,
+			             "a single chunk of " + LibTool.BATCH_TARGET_LIMIT + " targets must cost exactly one walk");
 		} else {
 			// 旧 native 库：按设计整体退回逐类路径，行为仍然正确（D2 的降级契约）。
 			assertEquals((long) targets.length, batchWalks,

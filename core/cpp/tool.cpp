@@ -521,11 +521,21 @@ static jvmtiError batchScanInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass* target
     // 已加载类数组里每个 jclass 都是 JNI **局部引用**（大进程动辄上万级）。这里逐轮释放：
     // 命中的类转成全局引用留下（数量级远小于已加载类总数），未命中的当场 DeleteLocalRef。
     // 整段再套一层局部帧兜住临时引用，避免频繁热更把局部引用表顶爆。
+    //
+    // 关键约束：这层帧**必须只覆盖枚举期**。JVMTI 的 GetObjectsWithTags 返回的 jobject 也是
+    // 在「当前帧」里分配的局部引用，若把枚举帧留到函数退出才弹，回收到的对象引用会随帧失效，
+    // 其 JNIHandleBlock 槽位马上被后面 NewObjectArray 的结果/行数组复用——填数组时写进行里的
+    // 就变成了容器数组自己（表现为行内自引用、且不抛 ArrayStoreException）。
     const bool has_enum_frame = (env->PushLocalFrame(32) == JNI_OK);
     if (!has_enum_frame && env->ExceptionCheck()) env->ExceptionClear();
-    SCOPE_EXIT([&] {
-        if (has_enum_frame) env->PopLocalFrame(nullptr);
-    });
+    bool enum_frame_open = has_enum_frame;
+    auto popEnumFrame = [&] {
+        if (enum_frame_open) {
+            env->PopLocalFrame(nullptr);
+            enum_frame_open = false;
+        }
+    };
+    SCOPE_EXIT([&] { popEnumFrame(); });
 
     std::vector<jlong> masks;
     std::vector<jclass> tagged_classes;   // 全局引用；清除 tag 后逐个 DeleteGlobalRef
@@ -575,6 +585,9 @@ static jvmtiError batchScanInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass* target
     }
     const jlong t_after_enumerate = timings ? monotonicNowNs() : 0;
     if (timings) timings->enumerate_ns = t_after_enumerate - t_start;
+    // 枚举结束：临时类引用已经全部处理完（命中类已转全局引用），立即收起局部帧，
+    // 让后续 GetObjectsWithTags 的对象引用落在调用方的帧里（见上面的约束说明）。
+    popEnumFrame();
 
     // 类 tag 必须在任何退出路径上清零（否则脏 tag 会污染 JvmtiTagMap，让后续过滤遍历命中错对象）。
     SCOPE_EXIT([&] {
@@ -1332,8 +1345,10 @@ JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetInstancesBatch(
     std::vector<jobjectArray> rows(static_cast<size_t>(k), nullptr);
     std::vector<jlong> cursors(static_cast<size_t>(k), 0);
     for (jint t = 0; t < k; ++t) {
+        // 行数组按 target 自身做强类型（与单类路径一致）：一旦有非本类实例落进来，
+        // JNI 会立刻抛 ArrayStoreException，而不是静默塞进 Object[]。
         rows[static_cast<size_t>(t)] = env->NewObjectArray(static_cast<jsize>(counts[static_cast<size_t>(t)]),
-                                                           obj_clazz, nullptr);
+                                                           targets[static_cast<size_t>(t)], nullptr);
         if (!rows[static_cast<size_t>(t)]) {
             if (env->ExceptionCheck()) env->ExceptionClear();
             env->PopLocalFrame(nullptr);
@@ -1350,7 +1365,16 @@ JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetInstancesBatch(
             if ((mask & (jlong{1} << t)) == 0) continue;
             env->SetObjectArrayElement(rows[static_cast<size_t>(t)],
                                        static_cast<jsize>(cursors[static_cast<size_t>(t)]++), o);
-            if (env->ExceptionCheck()) env->ExceptionClear();
+            if (env->ExceptionCheck()) {
+                // 强类型行 + 归属错配 ⇒ ArrayStoreException。这里**不吞**：打一条 warn 级的
+                // stderr 便于定位，并整体退回逐类路径（正确性优先）。
+                env->ExceptionDescribe();
+                env->ExceptionClear();
+                fprintf(stderr, "[Remold] batch heap scan: instance of a foreign class reached target row %d;"
+                                " falling back to the per-class path\n", static_cast<int>(t));
+                env->PopLocalFrame(nullptr);
+                return nullptr;
+            }
         }
     }
     if (write_timings) {

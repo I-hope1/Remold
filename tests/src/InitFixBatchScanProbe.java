@@ -289,12 +289,18 @@ public final class InitFixBatchScanProbe {
 	}
 
 	private static String deepNames(Object[] row) {
+		return deepNames(row, java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()), 0);
+	}
+
+	private static String deepNames(Object[] row, java.util.Set<Object> seen, int depth) {
+		if (!seen.add(row)) return "<cycle>";
+		if (depth > 3) return "<deep>";
 		StringBuilder sb = new StringBuilder("[");
 		for (int k = 0; k < row.length; k++) {
 			Object e = row[k];
 			if (k > 0) sb.append(',');
 			sb.append(e == null ? "null"
-			        : e instanceof Object[] arr ? ("arr" + arr.length + "<" + deepNames(arr) + ">")
+			        : e instanceof Object[] arr ? ("arr" + arr.length + "<" + deepNames(arr, seen, depth + 1) + ">")
 			        : e.getClass().getSimpleName());
 		}
 		return sb.append(']').toString();

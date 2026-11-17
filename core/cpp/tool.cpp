@@ -124,6 +124,12 @@ struct TagRange { jlong begin; jlong end; };
 /** 单次批次查询覆盖的 target 上限；超过由 Java 侧分块，每块仍只做一次全堆遍历。 */
 static constexpr jint kMaxBatchTargets = 64;
 
+// 对象 tag 的槽位预算：槽位按「不同 target 掩码组合」计，组合数**可以超过** target 数
+// （一个类同时命中多个 target 时是并集掩码），所以不能拿 kMaxBatchTargets 当标签容量
+// —— 否则超出的槽位会写到预留 tag 范围之外，与类 tag 撞车，表现为「某个 target 里混进别的类的实例」
+// （静默错配，不抛异常）。这里独立给容量，超出即整体退回逐类路径。
+static constexpr jint kMaxBatchSlots = 64;
+
 /**
  * 实例收集类全堆遍历的真实计数（逐类路径与批路径都计），供探针断言「K 次 → 1 次」。
  * 只统计「为收集/判定实例而做的遍历」：tag 清理用的 JVMTI_HEAP_FILTER_UNTAGGED 过滤遍历不计。
@@ -415,6 +421,8 @@ struct BatchWalkContext {
     std::vector<jlong> active_masks;
     std::vector<jlong> active_hits;
     bool  presence_only{false};
+    jint  slot_capacity{0};   // 掩码槽位预算（见 kMaxBatchSlots）
+    bool  overflow{false};    // 槽位预算用尽：调用方必须退回逐类路径
     jlong wanted_mask{0};
     jlong seen_mask{0};
     jlong total_hits{0};
@@ -435,6 +443,11 @@ static jint JNICALL BatchHeapIterationCallback(
     if (slot < 0) {
         // 只有真正命中的组才消耗搜索 tag：零实例的 target 不占 tag、不进 GetObjectsWithTags。
         slot = static_cast<jint>(ctx->active_masks.size());
+        if (slot >= ctx->slot_capacity) {
+            // 槽位预算用尽：立即中止本次遍历并标记 overflow，由调用方退回逐类路径。
+            ctx->overflow = true;
+            return JVMTI_VISIT_ABORT;
+        }
         ctx->group_slot[static_cast<size_t>(rel)] = slot;
         ctx->active_masks.push_back(mask);
         ctx->active_hits.push_back(0);
@@ -505,8 +518,17 @@ static jvmtiError batchScanInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass* target
         }
     });
 
+    // 已加载类数组里每个 jclass 都是 JNI **局部引用**（大进程动辄上万级）。这里逐轮释放：
+    // 命中的类转成全局引用留下（数量级远小于已加载类总数），未命中的当场 DeleteLocalRef。
+    // 整段再套一层局部帧兜住临时引用，避免频繁热更把局部引用表顶爆。
+    const bool has_enum_frame = (env->PushLocalFrame(32) == JNI_OK);
+    if (!has_enum_frame && env->ExceptionCheck()) env->ExceptionClear();
+    SCOPE_EXIT([&] {
+        if (has_enum_frame) env->PopLocalFrame(nullptr);
+    });
+
     std::vector<jlong> masks;
-    std::vector<jclass> tagged_classes;
+    std::vector<jclass> tagged_classes;   // 全局引用；清除 tag 后逐个 DeleteGlobalRef
     masks.reserve(16);
     tagged_classes.reserve(16);
     const jlong class_tag_base = allocateTagRange(class_count + 1);
@@ -530,15 +552,26 @@ static jvmtiError batchScanInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass* target
             slot = static_cast<jint>(masks.size());
             masks.push_back(mask);
         }
-        if (auto e = jvmti->SetTag(cls, class_tag_base + slot); e != JVMTI_ERROR_NONE) {
-            env->DeleteLocalRef(cls);
-            loaded[c] = nullptr;
-            for (jclass tagged : tagged_classes) jvmti->SetTag(tagged, 0);
-            for (jclass t : tagged_classes) env->DeleteLocalRef(t);
+        jclass global_cls = reinterpret_cast<jclass>(env->NewGlobalRef(cls));
+        env->DeleteLocalRef(cls);
+        loaded[c] = nullptr;
+        if (!global_cls) {
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            for (jclass tagged : tagged_classes) {
+                jvmti->SetTag(tagged, 0);
+                env->DeleteGlobalRef(tagged);
+            }
+            return JVMTI_ERROR_OUT_OF_MEMORY;
+        }
+        if (auto e = jvmti->SetTag(global_cls, class_tag_base + slot); e != JVMTI_ERROR_NONE) {
+            env->DeleteGlobalRef(global_cls);
+            for (jclass tagged : tagged_classes) {
+                jvmti->SetTag(tagged, 0);
+                env->DeleteGlobalRef(tagged);
+            }
             return e;
         }
-        tagged_classes.push_back(cls);
-        loaded[c] = nullptr;  // 引用所有权移交 tagged_classes
+        tagged_classes.push_back(global_cls);
     }
     const jlong t_after_enumerate = timings ? monotonicNowNs() : 0;
     if (timings) timings->enumerate_ns = t_after_enumerate - t_start;
@@ -551,7 +584,7 @@ static jvmtiError batchScanInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass* target
     });
     SCOPE_EXIT([&] {
         for (jclass tagged : tagged_classes) {
-            if (tagged) env->DeleteLocalRef(tagged);
+            if (tagged) env->DeleteGlobalRef(tagged);
         }
         tagged_classes.clear();
     });
@@ -563,7 +596,7 @@ static jvmtiError batchScanInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass* target
     }
 
     // ---- 2) 一次全堆遍历：只对「类有 tag」的对象触发回调 ----
-    const jlong object_tag_base = allocateTagRange(kMaxBatchTargets);
+    const jlong object_tag_base = allocateTagRange(kMaxBatchSlots);
     BatchWalkContext ctx;
     ctx.class_tag_base = class_tag_base;
     ctx.object_tag_base = object_tag_base;
@@ -573,6 +606,8 @@ static jvmtiError batchScanInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass* target
     ctx.active_masks.reserve(masks.size());
     ctx.active_hits.reserve(masks.size());
     ctx.presence_only = presence_only;
+    ctx.slot_capacity = kMaxBatchSlots;
+    ctx.overflow = false;
     ctx.wanted_mask = (k >= 64) ? ~jlong{0} : ((jlong{1} << k) - 1);
 
     jvmtiHeapCallbacks callbacks{ .heap_iteration_callback = BatchHeapIterationCallback };
@@ -584,6 +619,12 @@ static jvmtiError batchScanInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass* target
     }
     const jlong t_after_iterate = timings ? monotonicNowNs() : 0;
     if (timings) timings->iterate_ns = t_after_iterate - t_before_iterate;
+
+    if (ctx.overflow) {
+        // 不同掩码组合超出槽位预算：不冒"越界写 tag / 静默错配"的风险，交给调用方退回逐类路径。
+        if (timings) timings->cleanup_ns = monotonicNowNs() - t_after_iterate;
+        return JVMTI_ERROR_NOT_AVAILABLE;
+    }
 
     if (presence_only) {
         out.seen_mask = ctx.seen_mask;

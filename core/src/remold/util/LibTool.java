@@ -222,7 +222,13 @@ public class LibTool {
 	 * 单次批次查询覆盖的 target 上限（与 native 侧 {@code kMaxBatchTargets} 同一常量）。
 	 * 超过上限由 {@link #getInstancesBatch(Class[])} 自动分块，每块仍只做一次全堆遍历。
 	 */
-	public static final int BATCH_TARGET_LIMIT = 64;
+	/**
+	 * 单次 native 批查询的 target 上限：对象 tag 的槽位按「不同 target 掩码组合」计，
+	 * 组合数可以超过 target 数（一个类同时命中多个 target 时是并集掩码），而
+	 * {@code GetObjectsWithTags} 的成本随 tag 数增长（历史实测：4M 实例 16 桶 ≈3.3 s）。
+	 * 取 16：槽位预算与检索 tag 数都压在 16，超出由本类按块切分（K=64 时 4 次遍历，仍是 K 次的 1/16）。
+	 */
+	public static final int BATCH_TARGET_LIMIT = 16;
 
 	/** 新 native 库（含批次入口）是否可用；旧库缺导出符号时置 false 并整体退回逐类路径。 */
 	private static volatile boolean batchScanSupported = true;

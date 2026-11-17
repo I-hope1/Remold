@@ -71,6 +71,7 @@ public final class InitFixBatchScanProbe {
 			+ " with a C++ compiler or pass -Dremold.path.libtool)", LibTool.batchScanIsNative());
 		check("heap-walk counter must be available", LibTool.heapWalkCount() >= 0);
 
+		minRepro();
 		measureLiveInstanceScope();
 		measureBatchCost(1);
 		measureBatchCost(4);
@@ -78,10 +79,237 @@ public final class InitFixBatchScanProbe {
 		measureBatchCost(16);
 		measureBatchCost(64);
 		measureLivenessProbe();
+		measureLargeHeapControl();
 
 		System.out.println("\n=== INITFIX BATCH SCAN PROBE: "
 			+ (failures == 0 ? "self-checks passed" : failures + " CHECK(S) FAILED") + " ===");
 		if (failures != 0) System.exit(1);
+	}
+
+	// ------------------------------------------------------------------ [5] large-heap control
+
+	/**
+	 * 大堆对照（主指挥官追加要求）：堆里先塞大量**无关对象**，再放少量目标类实例。
+	 *
+	 * <p>为什么必须单量这一段：批收集的三条性能假设都只在"堆里无关对象很多"时才被检验——</p>
+	 * <ol>
+	 *   <li>{@code IterateThroughHeap(JVMTI_HEAP_FILTER_CLASS_UNTAGGED)} 必须让无关对象<b>不进回调</b>，
+	 *       否则一次遍历就要为几十万个无关对象付回调成本；</li>
+	 *   <li>{@code GetObjectsWithTags} 的成本随 {@code tag 数}增长（历史实测：4M 实例 16 桶 ≈3.3 s），
+	 *       所以"活跃组多"时要看它是否劣化到不可接受；</li>
+	 *   <li>逐类路径是 K 次遍历，与无关对象数无关；批收集若也无关，两者都随堆大小走，比例才稳定。</li>
+	 * </ol>
+	 *
+	 * <p>本段刻意<b>不做</b>性能断言（大堆读数受 GC 与机器噪声影响），只做两件事：结果等价断言
+	 * + 把读数打出来；是否要把活跃组上限从 64 收到 16，以这里的读数为准。</p>
+	 */
+	private static void measureLargeHeapControl() throws Exception {
+		System.out.println("\n--- [5] large-heap control: many unrelated objects + few target instances ---");
+		List<Object> ballast = new ArrayList<>();
+		int unrelated = 200_000;
+		for (int i = 0; i < unrelated; i++) {
+			// 三类最常见的无关对象形态：String / byte[] / 小 Map（与真实堆的成分接近）
+			ballast.add(i % 3 == 0 ? ("unrelated-" + i + "-" + (i * 31))
+			           : i % 3 == 1 ? new byte[24]
+			           : Map.of("k" + i, i));
+		}
+		KEEP_ALIVE.add(ballast);
+		System.out.printf("   ballast: %d unrelated objects retained%n", unrelated);
+
+		for (int k : new int[]{16, 64}) {
+			List<String> names = new ArrayList<>();
+			Map<String, String> sources = new LinkedHashMap<>();
+			for (int i = 0; i < k; i++) {
+				String name = "Probe.Heap" + k + "_" + i;
+				names.add(name);
+				sources.put(name, classSource(name, true));
+			}
+			Map<String, byte[]> bytes = compile(sources);
+			Class<?>[] hosts = hostsOf(names, bytes);
+			// 每个目标类放少量实例（真实热更里"绝大多数类零实例、少数类有几百实例"的混居形态）
+			int perClass = 20;
+			for (Class<?> host : hosts) {
+				Constructor<?> ctor = host.getDeclaredConstructor(int.class);
+				ctor.setAccessible(true);
+				for (int i = 0; i < perClass; i++) KEEP_ALIVE.add(ctor.newInstance(i));
+			}
+
+			long[] walksBefore = {LibTool.heapWalkCount()};
+			long t0 = System.nanoTime();
+			Object[][] batch = LibTool.getInstancesBatch(hosts);
+			long batchNanos = System.nanoTime() - t0;
+			long batchWalks = LibTool.heapWalkCount() - walksBefore[0];
+
+			long[] perClassNanosArr = new long[hosts.length];
+			long perClassNanos = 0;
+			Object[][] single = new Object[hosts.length][];
+			for (int i = 0; i < hosts.length; i++) {
+				long s0 = System.nanoTime();
+				single[i] = LibTool.getInstances(hosts[i]);
+				perClassNanosArr[i] = System.nanoTime() - s0;
+				perClassNanos += perClassNanosArr[i];
+			}
+
+			boolean equal = true;
+			int totalBatch = 0;
+			int totalSingle = 0;
+			for (int i = 0; i < hosts.length; i++) {
+				totalBatch += batch[i] == null ? 0 : batch[i].length;
+				totalSingle += single[i] == null ? 0 : single[i].length;
+				if (!sameInstances(batch[i], single[i])) equal = false;
+			}
+			System.out.printf("   K=%-3d instances/class=%d: batch=%.2fms walks=%d | per-class=%.2fms walks=%d"
+			                  + " | hits=%d/%d equal=%s%n",
+			                  k, perClass, batchNanos / 1e6, batchWalks, perClassNanos / 1e6, hosts.length,
+			                  totalBatch, totalSingle, equal);
+			if (!equal) {
+				for (int i = 0; i < hosts.length; i++) {
+					int wrong = 0;
+					if (batch[i] != null) {
+						for (Object o : batch[i]) if (o.getClass() != hosts[i]) wrong++;
+					}
+					int dup = batch[i] == null ? 0 : batch[i].length;
+					if (wrong > 0 || dup != (single[i] == null ? 0 : single[i].length)) {
+						java.util.List<String> wrongNames = new ArrayList<>();
+						if (batch[i] != null) {
+							for (Object o : batch[i]) {
+								if (o.getClass() != hosts[i]) {
+									wrongNames.add(o.getClass().getName() + "@"
+									          + Integer.toHexString(System.identityHashCode(o.getClass().getClassLoader())));
+								}
+							}
+						}
+						System.out.printf("      [DIAG] target#%d %s: batch=%d (wrongClass=%d) perClass=%d wrong=%s%n",
+						                  i, hosts[i].getSimpleName(), dup, wrong,
+						                  single[i] == null ? 0 : single[i].length, wrongNames);
+					}
+				}
+			}
+			check("K=" + k + " with a " + unrelated + "-object heap: batch and per-class results must be identical",
+			      equal);
+			check("K=" + k + " with a " + unrelated + "-object heap: batch must collapse walks to ceil(K/"
+			      + LibTool.BATCH_TARGET_LIMIT + ")", batchWalks == expectedBatchWalks(k));
+			check("K=" + k + " with a " + unrelated + "-object heap: every instance must be collected",
+			      totalBatch == totalSingle && totalBatch >= k * perClass);
+		}
+		ballast.clear();
+		KEEP_ALIVE.remove(ballast);
+	}
+
+	/** 批收集的期望全堆遍历次数：每块（≤ BATCH_TARGET_LIMIT 个 target）一次。 */
+	private static long expectedBatchWalks(int k) {
+		return Math.max(1, (k + LibTool.BATCH_TARGET_LIMIT - 1) / LibTool.BATCH_TARGET_LIMIT);
+	}
+
+	/** 两个实例数组是否含同一批对象（顺序不敏感）。 */
+	private static boolean sameInstances(Object[] a, Object[] b) {
+		if (a == null || b == null) return (a == null ? 0 : a.length) == (b == null ? 0 : b.length);
+		if (a.length != b.length) return false;
+		java.util.Set<Object> left = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+		left.addAll(Arrays.asList(a));
+		for (Object o : b) if (!left.remove(o)) return false;
+		return left.isEmpty();
+	}
+
+	// ------------------------------------------------------------------ [0] minimal repro
+
+	/**
+	 * 最小复现（主指挥官排障指令 #1）：4 个类、每类 3 个实例、无无关对象。
+	 *
+	 * <p>分三种调用形态，判断污染是「单次调用内」还是「多次调用之间」才会出现：</p>
+	 * <ol>
+	 *   <li>一次调用 4 个 target（等价于 K=4 ≤ 一块）；</li>
+	 *   <li>两次调用各 2 个 target（模拟 K=4 被切成两块）；</li>
+	 *   <li>同一批连续调用两次（看第二次是否被上一次残留污染）。</li>
+	 * </ol>
+	 * <p>对每个落错行/落错类别的元素打印它的类、是否数组、长度与前几个元素，
+	 * 便于判断"混进来的是结果行数组本身"还是"堆里被误打 tag 的无关数组"。</p>
+	 */
+	private static void minRepro() throws Exception {
+		System.out.println("\n--- [0] minimal repro: 4 targets x 3 instances, no unrelated objects ---");
+		Map<String, String> sources = new LinkedHashMap<>();
+		List<String> names = new ArrayList<>();
+		for (int i = 0; i < 4; i++) {
+			String name = "Probe.Min" + i;
+			names.add(name);
+			sources.put(name, classSource(name, true));
+		}
+		Map<String, byte[]> bytes = compile(sources);
+		Class<?>[] hosts = hostsOf(names, bytes);
+		for (Class<?> host : hosts) {
+			Constructor<?> ctor = host.getDeclaredConstructor(int.class);
+			ctor.setAccessible(true);
+			for (int i = 0; i < 3; i++) KEEP_ALIVE.add(ctor.newInstance(i));
+		}
+
+		Object[][] once = LibTool.getInstancesBatch(hosts);
+		reportRows("one call / 4 targets", hosts, once, 3);
+
+		Object[][] split = new Object[4][];
+		Class<?>[] first = {hosts[0], hosts[1]};
+		Class<?>[] second = {hosts[2], hosts[3]};
+		Object[][] a = LibTool.getInstancesBatch(first);
+		Object[][] b = LibTool.getInstancesBatch(second);
+		split[0] = a[0]; split[1] = a[1]; split[2] = b[0]; split[3] = b[1];
+		reportRows("two calls / 2 targets each", hosts, split, 3);
+
+		Object[][] again = LibTool.getInstancesBatch(hosts);
+		reportRows("second identical call", hosts, again, 3);
+
+		check("[0] single call over 4 targets must be clean", rowsClean(hosts, once, 3));
+		check("[0] two calls over 2 targets each must be clean", rowsClean(hosts, split, 3));
+		check("[0] a repeated identical call must be clean", rowsClean(hosts, again, 3));
+	}
+
+	private static boolean rowsClean(Class<?>[] hosts, Object[][] rows, int expected) {
+		for (int i = 0; i < hosts.length; i++) {
+			if (rows[i] == null || rows[i].length != expected) return false;
+			for (Object o : rows[i]) if (o.getClass() != hosts[i]) return false;
+		}
+		return true;
+	}
+
+	private static void reportRows(String label, Class<?>[] hosts, Object[][] rows, int expected) {
+		System.out.printf("   [%s]%n", label);
+		for (int i = 0; i < hosts.length; i++) {
+			int n = rows[i] == null ? 0 : rows[i].length;
+			int wrong = 0;
+			String sample = "";
+			if (rows[i] != null) {
+				for (Object o : rows[i]) {
+					if (o.getClass() == hosts[i]) continue;
+					wrong++;
+					sample = describeForeign(o);
+				}
+			}
+			String deep = rows[i] == null ? "null" : deepNames(rows[i]);
+			System.out.printf("      target#%d %-12s rows=%d (expect %d) wrong=%d %s row=%s%n",
+			                  i, hosts[i].getSimpleName(), n, expected, wrong, sample, deep);
+		}
+	}
+
+	private static String deepNames(Object[] row) {
+		StringBuilder sb = new StringBuilder("[");
+		for (int k = 0; k < row.length; k++) {
+			Object e = row[k];
+			if (k > 0) sb.append(',');
+			sb.append(e == null ? "null"
+			        : e instanceof Object[] arr ? ("arr" + arr.length + "<" + deepNames(arr) + ">")
+			        : e.getClass().getSimpleName());
+		}
+		return sb.append(']').toString();
+	}
+
+	private static String describeForeign(Object o) {
+		StringBuilder sb = new StringBuilder("foreign=").append(o.getClass().getName());
+		if (o instanceof Object[] arr) {
+			sb.append(" len=").append(arr.length).append(" head=");
+			for (int k = 0; k < Math.min(3, arr.length); k++) {
+				Object e = arr[k];
+				sb.append(e == null ? "null" : e.getClass().getSimpleName()).append(',');
+			}
+		}
+		return sb.toString();
 	}
 
 	// ------------------------------------------------------------------ [1] live instances
@@ -280,7 +508,10 @@ public final class InitFixBatchScanProbe {
 		                  timings[4] / 1e6, timings[5]);
 
 		if (k >= InitFix.BATCH_HEAP_SCAN_MIN_TARGETS) {
-			check("K=" + k + ": batch-on must perform exactly one heap walk per round", allEqual(walksOn, 1));
+			// 一次 native 批查询最多 BATCH_TARGET_LIMIT 个 target（槽位/tag 预算），K 更大时按块切分，
+			// 所以断言是 ceil(K/LIMIT) 而不是恒等于 1：K=64 时 4 次遍历，仍是逐类 64 次的 1/16。
+			check("K=" + k + ": batch-on must collapse walks to ceil(K/" + LibTool.BATCH_TARGET_LIMIT + ")",
+			      allEqual(walksOn, expectedBatchWalks(k)));
 		} else {
 			check("K=" + k + " (below the engagement threshold): batch-on must not engage"
 				+ " (same walk count as the per-class path)", allEqual(walksOn, k));
@@ -298,7 +529,7 @@ public final class InitFixBatchScanProbe {
 				allEqual(walksOn, k) && allEqual(walksOff, k));
 		} else {
 			check("K=1: batch collection must be a no-op (same walk count as the per-class path)",
-				allEqual(walksOn, 1) && allEqual(walksOff, 1));
+				allEqual(walksOn, expectedBatchWalks(k)) && allEqual(walksOff, 1));
 		}
 		if (k > 1 && (min(collectOn) < min(collectOff)) != (median(collectOn) < median(collectOff))) {
 			System.out.println("   [NOTE] collect comparison is sensitive to the statistic (min/median disagree)");

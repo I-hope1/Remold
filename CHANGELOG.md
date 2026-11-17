@@ -59,6 +59,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **批次级单次堆遍历：同一批 K 个类的存活实例收集从 K 次全堆扫描收敛为 1 次**
+  （`core/cpp/tool.cpp` + `LibTool` + `InitFix` + `RemoldAgent`）：
+  - 新增 `LibTool.getInstancesBatch(Class[])`（native `nGetInstancesBatch`）。归类靠 JVMTI class tag：
+    先 `GetLoadedClasses` + `IsAssignableFrom` 给每个已加载类算出"命中哪些 target"的掩码（**多态等价性
+    由这一层保证**——不在 targets 里的已加载子类/接口实现同样打上祖先位），只给命中类打 tag，再用
+    `IterateThroughHeap(JVMTI_HEAP_FILTER_CLASS_UNTAGGED)` 让 HotSpot 在进回调前过滤掉无关对象；
+    回调里只做纯 native 计算，不调 JNI。全部 target 零实例时直接跳过 `GetObjectsWithTags`，
+    也不产生任何对象 tag 清理遍历；搜索 tag 数 = 真正命中的组数。
+  - 接合点在 `InitFix.beginBatchInstanceCollection`（两阶段 Stage B 与单阶段后处理两个补丁循环都接上）：
+    收集发生在**重定义生效之后、补丁执行之前**（提前收集会漏掉窗口期新建实例），每个宿主在自己的
+    `applyPatch` 里消费自己的切片，`StageBInstanceCache` 语义不变。K 低于
+    `InitFix.BATCH_HEAP_SCAN_MIN_TARGETS = 8` 时一律走原逐类路径（一次批遍历 ≈ 9 倍单类遍历，
+    小批次批收集是净亏），K=1 零额外开销。
+  - 降级：旧 native 库缺导出符号（`UnsatisfiedLinkError`）或 native 返回失败 → 整体退回逐类
+    `getInstances`（结果相同、遍历次数回到 K 次）；无 native 时退回 `InstanceTracker` 既有路径。
+    基本类型镜像/数组类拦截、`g_heap_mutex` 原生锁、临时 tag 全清三条约束原样保留；
+    target 是 `java.lang.Class` 或数组类超类型时整体退回逐类路径（class tag 编码不可用）。
+  - D3：新增 `LibTool.hasLiveInstancesBatch(Class[])`（只判定存在性、全部 target 都见到实例即
+    `JVMTI_VISIT_ABORT` 早停）。布局门在批次上下文里第一次未命中缓存时对整批做一次遍历并填满
+    `LIVE_INSTANCE_CACHE`，消除"同一批 N 个零实例类 ⇒ N 次全堆扫描"。它只回答"有没有"，**不**把
+    重定义前的快照留给 `applyPatch`（两次遍历的语义边界见规格）。
+  - 取证：`LibTool.heapWalkCount()`（native 真实计数）+ `tests/src/InitFixBatchScanProbe.java`
+    （K=1/4/8/16/64 开/关的 collect 与全流程 min/median/max、遍历次数 K→1、真实活实例的
+    `SELF` vs `INCLUDE_SUBCLASSES` 终局断言）+ `tests/src/BatchHeapScanEquivalenceTest.java`
+    （批收集 vs 逐类的集合等价门禁、无脏 tag、K=1 单次遍历）+ `remold.BatchLivenessPrefetchTest`
+    （批次存活探测 1 次 vs 逐类 K 次，带去触发对照）。
+  - 实测（同一进程、逐轮交替、21 轮）：K=16 collect median 348.0→99.8 ms、full 354.0→102.8 ms；
+    K=64 collect median 754.5→81.4 ms、full 653.0→94.1 ms；K=8 起持平/占优，K=4 与 K=1 不接合。
+  - 规格见 [`docs/initfix/05-jvmti-heap.md`](docs/initfix/05-jvmti-heap.md) §「批次实例收集」。
+
 - **Gradle 插件的默认 JVM 参数新增一个常量 `-Dremold.agent.build_trigger_file=<buildDir>/remold/build-trigger`**
   （`buildTrigger = false` 时不注入，旧版本 agent 会忽略该未知参数）。这是默认参数的可见变化，特此点明；
   代理行为本身在无 marker 或旧 agent 下与之前一致。

@@ -5509,9 +5509,128 @@ public class InitFix {
 
 	private static final Object[] EMPTY_OBJECTS = new Object[0];
 
+	/**
+	 * 批次级实例收集的暂存槽（{@code docs/initfix/05-jvmti-heap.md} §「批次实例收集」）。
+	 *
+	 * <p>一次结构性热更里 K 个类各调一次 {@link #applyPatch} 就是 K 次全堆遍历。批次驱动在
+	 * 「重定义生效之后、补丁执行之前」调 {@link #beginBatchInstanceCollection} 做<b>一次</b>遍历，
+	 * 每个宿主在自己的 {@code applyPatch} 里消费属于自己的切片（{@link #takeBatchInstances}）。</p>
+	 *
+	 * <p><b>为什么不能更早收集</b>：实例必须在重定义生效<b>之后</b>枚举——提前拍快照会漏掉
+	 * 「快照之后、生效之前」新建的实例（{@code docs/status.md} 风险 6）。批次入口因此只由
+	 * 补丁循环的调用方在 redefine 之后调用。</p>
+	 *
+	 * <p>线程封闭：补丁驱动单线程执行（{@code docs/initfix/03-runtime-driver.md} §4），
+	 * 因此用 {@link ThreadLocal} 而不是全局表，避免并发批次互相污染。</p>
+	 */
+	private static final ThreadLocal<Map<Class<?>, Object[]>> BATCH_INSTANCES = new ThreadLocal<>();
+
+	/**
+	 * 启用批次收集的最小 target 数。
+	 *
+	 * <p>一次批次遍历 = <b>一次全堆遍历</b>（{@code IterateThroughHeap} 带 class tag 过滤），而按类
+	 * 遍历是 {@code IterateOverInstancesOfClass}——实测前者约等于后者的 9 倍（同一进程同一堆，
+	 * 64 个零实例类：批 1 次 ≈ 84 ms vs 逐类 64 次 ≈ 588 ms ⇒ 单次批遍历 ≈ 9.2 ms × 9）。
+	 * 因此 K 小的时候批收集反而是净亏：{@code tests/src/InitFixBatchScanProbe} 的 K=4/8/16 读数给出
+	 * 交点，取 8 作为接合阈值（K=8 起持平，K≥16 明显占优）。低于阈值一律走原逐类路径，
+	 * 保证小批次零额外开销。</p>
+	 */
+	public static final int BATCH_HEAP_SCAN_MIN_TARGETS = 8;
+
+	/**
+	 * 批次收集总开关（{@code -Dremold.agent.batch_heap_scan=false} 关闭）。
+	 *
+	 * <p>关掉之后每个宿主照旧各自枚举一次堆，<b>行为必须与开启时逐项等价</b>
+	 * （{@code PatchReport} 的 status / reason / warnings、补丁字节、写入结果一致）——这是这条
+	 * 性能通道可以随时退场的依据，也是等价性门禁的对照面（{@code BatchScanReportEquivalenceTest}）。</p>
+	 */
+	private static volatile boolean batchHeapScanEnabled =
+		!"false".equalsIgnoreCase(System.getProperty("remold.agent.batch_heap_scan", "true"));
+
+	/** 当前是否启用批次收集（诊断/对照用；默认取 {@code -Dremold.agent.batch_heap_scan}）。 */
+	public static boolean batchHeapScanEnabled() {
+		return batchHeapScanEnabled;
+	}
+
+	/** 运行期开关批次收集：只影响"要不要批一次枚举"，两条路径的行为必须逐项等价。 */
+	public static void setBatchHeapScanEnabled(boolean enabled) {
+		batchHeapScanEnabled = enabled;
+	}
+
+	/**
+	 * 为一批宿主做一次全堆遍历，把每个宿主的存活实例切片暂存起来供各自的
+	 * {@link #applyPatch} 消费。
+	 *
+	 * <p>过滤规则（与 {@code applyPatch} 的入口守卫一一对应）：宿主先经
+	 * {@link ClassIdentity#canonicalize} 归一（影子类上枚举恒为 0），未初始化
+	 * （{@link #isInitialized} 为 false）的类剔除，没有实例任务的宿主不参与。过滤后不足
+	 * {@link #BATCH_HEAP_SCAN_MIN_TARGETS} 个宿主时直接返回：<b>小批次走原逐类路径，零额外开销</b>
+	 * （K=1 自然也在此列）。</p>
+	 *
+	 * <p>无 native 库（{@link LibTool#initialized()} 为 false 且初始化失败）时同样直接返回，
+	 * 让 {@code applyPatch} 走既有的 {@link InstanceTracker} 降级路径。</p>
+	 *
+	 * @param hosts 本批次待补丁的宿主类（可含重复/未加载为 null 的项）
+	 */
+	public static void beginBatchInstanceCollection(Collection<Class<?>> hosts) {
+		endBatchInstanceCollection();
+		if (hosts == null || hosts.isEmpty()) return;
+		if (!LibTool.initialized() && !LibTool.tryInit()) return;
+
+		LinkedHashSet<Class<?>> targets = new LinkedHashSet<>();
+		for (Class<?> host : hosts) {
+			if (host == null) continue;
+			Class<?> canonical = ClassIdentity.canonicalize(host);
+			if (!isInitialized(canonical)) continue;
+			PendingPatch patch = PENDING.get(canonical);
+			if (patch == null || !patch.plan().hasInstance()) continue;
+			targets.add(canonical);
+		}
+		if (!batchHeapScanEnabled) return;
+		if (targets.size() < BATCH_HEAP_SCAN_MIN_TARGETS) return;
+
+		Object[][] collected;
+		try {
+			collected = LibTool.getInstancesBatch(targets.toArray(new Class<?>[0]));
+		} catch (Throwable t) {
+			// 批收集失败不能连坐整批：退回逐类枚举，行为与改动前一致。
+			RemoldAgent.warn("[InitFix] Batch instance collection failed (" + t
+			     + "); falling back to one heap walk per class.");
+			return;
+		}
+		if (collected == null || collected.length != targets.size()) return;
+		Map<Class<?>, Object[]> byHost = new HashMap<>(targets.size() * 2);
+		int i = 0;
+		for (Class<?> target : targets) {
+			byHost.put(target, collected[i] != null ? collected[i] : EMPTY_OBJECTS);
+			i++;
+		}
+		BATCH_INSTANCES.set(byHost);
+	}
+
+	/** 结束批次级实例收集并释放暂存切片（切片被实例强引用，必须显式清掉）。 */
+	public static void endBatchInstanceCollection() {
+		Map<Class<?>, Object[]> byHost = BATCH_INSTANCES.get();
+		if (byHost != null) {
+			byHost.clear();
+			BATCH_INSTANCES.remove();
+		}
+	}
+
+	/** 取出本批次为 {@code host} 预收集的实例切片；没有预收集时返回 {@code null}（走实时枚举）。 */
+	private static Object[] takeBatchInstances(Class<?> host) {
+		Map<Class<?>, Object[]> byHost = BATCH_INSTANCES.get();
+		if (byHost == null) return null;
+		Object[] instances = byHost.remove(host);
+		if (byHost.isEmpty()) BATCH_INSTANCES.remove();
+		return instances;
+	}
+
 	private static Object[] collectRawInstancesForPatch(Class<?> host) {
 		// 枚举时机在重定义生效之后、applyPatch 内即时消费后即释放，不跨 redefine 持有，
 		// 因此无需绕行 WeakReference 双重拷贝；直接复用枚举数组，仅在出现 null 槽时由调用方压缩。
+		Object[] batched = takeBatchInstances(host);
+		if (batched != null) return batched;
 		return LibTool.initialized()
 		 ? LibTool.getInstances(host)
 		 : InstanceTracker.getInstances(host).toArray();

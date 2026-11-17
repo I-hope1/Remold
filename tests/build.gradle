@@ -109,6 +109,69 @@ def detectNativeLib() {
 def nativeLibPath = detectNativeLib()
 
 // ------------------------------------------------------------------------------------------------
+// 批次级单次堆遍历（Batch D）需要「当前源码编出来的 native 库」
+//
+// core/libs 下是发布产物（上一版源码的二进制）。它缺 nGetInstancesBatch 时 Java 侧会整体退回逐类
+// 路径——等价性用例就覆盖不到 native 的分类逻辑，变异也杀不掉。这里用本机 C++ 编译器把
+// core/cpp/tool.cpp 编到 build/native/ 下给 test / 探针用；没有可用编译器时退回发布产物并明确提示。
+//
+// inputs/outputs 是刻意声明的：改了 tool.cpp 必须重编，否则"变异 → 测试变红"这条链会失效
+// （测试跑的还是旧 .so，变异杀不掉）。
+// ------------------------------------------------------------------------------------------------
+def nativeToolLibFile = layout.buildDirectory.file(
+	"native/" + (System.getProperty("os.name").toLowerCase().contains("win") ? "tool64probe.dll"
+		: (System.getProperty("os.name").toLowerCase().contains("mac") ? "libtoolprobe.dylib"
+			: "libtoolprobe.so"))).get().asFile
+
+def nativeToolLib = tasks.register("nativeToolLib") {
+	group = "build"
+	description = "把 core/cpp/tool.cpp 编成本机可加载的 native 库（供批次堆遍历回归与探针使用）"
+	def cppRoot = rootProject.file("core/cpp")
+	inputs.files(fileTree(cppRoot))
+	inputs.property("javaHome", System.getProperty("java.home"))
+	outputs.file(nativeToolLibFile)
+	doLast {
+		def osName = System.getProperty("os.name").toLowerCase()
+		if (osName.contains("win")) {
+			logger.warn("[Remold] No Windows native probe build; falling back to the packaged library.")
+			return
+		}
+		def javaHome = System.getenv("JAVA_HOME") ?: System.getProperty("java.home")
+		def osInclude = osName.contains("mac") ? "darwin" : "linux"
+		def candidates = [System.getenv("CXX"), "g++", "clang++", "c++"].findAll { it != null && !it.isEmpty() }
+		nativeToolLibFile.parentFile.mkdirs()
+		List<String> lastOutput = null
+		for (String compiler : candidates) {
+			List<String> cmd = [compiler]
+			cmd.addAll(osName.contains("mac") ? ["-dynamiclib"] : ["-shared", "-fPIC"])
+			cmd.addAll(["-O2", "-std=c++2b",
+			            "-I" + new File(javaHome, "include").absolutePath,
+			            "-I" + new File(javaHome, "include/" + osInclude).absolutePath,
+			            "-I" + new File(cppRoot, "jni_posix").absolutePath,
+			            new File(cppRoot, "tool.cpp").absolutePath,
+			            "-o", nativeToolLibFile.absolutePath])
+			if (!osName.contains("mac")) cmd.add("-lpthread")
+			try {
+				def pb = new ProcessBuilder(cmd).redirectErrorStream(true)
+				def process = pb.start()
+				def output = process.inputStream.text
+				if (process.waitFor() == 0 && nativeToolLibFile.exists()) {
+					logger.lifecycle("[Remold] Native probe library built with ${compiler}: ${nativeToolLibFile}")
+					return
+				}
+				lastOutput = output.readLines()
+			} catch (Exception ignored) {
+				// 编译器不存在：继续试下一个候选。
+			}
+		}
+		logger.warn("[Remold] Cannot build the native probe library (no C++ compiler produced a usable library);"
+			+ " falling back to the packaged library. Last compiler output: "
+			+ (lastOutput == null ? "<none>" : lastOutput.take(5).join(" | ")))
+	}
+}
+
+
+// ------------------------------------------------------------------------------------------------
 // 常驻 javac：把服务端编成 v52，让 JDK 8 也能加载
 //
 // 外部 javac 单次约 2.4s（其中 JVM 启动只占 0.4s，其余是 javac 自己的符号表初始化），
@@ -179,8 +242,19 @@ test {
 			systemProperty prop, val
 		}
 	}
-	if (nativeLibPath != null) {
-		systemProperty "remold.path.libtool", nativeLibPath
+	// native 库选择：优先「当前源码编出来的」探针库（core/libs 下的发布产物是上一版源码的二进制，
+	// 缺批次入口时 Java 侧会整体退回逐类路径，BatchHeapScanEquivalenceTest 就覆盖不到 native 分类逻辑）；
+	// 没有可用 C++ 编译器时退回发布产物，测试自己会按 batchScanIsNative() 走对应的断言分支。
+	dependsOn nativeToolLib
+	// native 库必须进 inputs：只改 core/cpp/tool.cpp 时 test 任务也要重跑，否则
+	// "变异 → 用例变红"这条链会失效（测试跑的还是上一版 .so，变异杀不掉）。
+	inputs.files(nativeToolLib).withPropertyName("nativeToolLib")
+	systemProperty "remold.test.nativeBatchLib", nativeToolLibFile.absolutePath
+	doFirst {
+		def lib = nativeToolLibFile.exists() ? nativeToolLibFile.absolutePath : nativeLibPath
+		if (lib != null) {
+			systemProperty "remold.path.libtool", lib
+		}
 	}
 
 	def requiredJdkMajors = [8, 11, 17, 21, 25]
@@ -1240,6 +1314,32 @@ tasks.register("readerScanProbe", JavaExec) {
 	}
 }
 
+// 批次级单次堆遍历探针（Batch D）：K=1/16/64 的 collect 与全流程读数 + 堆遍历次数 K→1 取证。
+// 测量型任务，刻意不做 up-to-date（要的是本次运行的真实数字，跳过等于给假数据）。
+tasks.register("initFixBatchScanProbe", JavaExec) {
+	group = "verification"
+	description = "批次级单次堆遍历探针 (InitFixBatchScanProbe)：K=1/16/64 的 collect/全流程 min-median-max 与遍历次数 K→1"
+	dependsOn classes
+	dependsOn p05AgentJar
+	dependsOn nativeToolLib
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "InitFixBatchScanProbe"
+	maxHeapSize = "1g"
+	doFirst {
+		def lib = nativeToolLibFile.exists() ? nativeToolLibFile.absolutePath : nativeLibPath
+		jvmArgs "-javaagent:${p05AgentJar.get().archiveFile.get().asFile.absolutePath}",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "-Dremold.projectRoot=${rootDir.absolutePath}",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+		if (JavaVersion.current().majorVersion.toInteger() >= 22) {
+			jvmArgs "--enable-native-access=ALL-UNNAMED"
+		}
+		if (lib != null) {
+			jvmArgs "-Dremold.path.libtool=${lib}"
+		}
+	}
+}
+
 // PR2 派生数据量化基准：对齐侧每个类的真实成本。只测量、不断言，测量型任务刻意不做 up-to-date。
 tasks.register("derivedDataBench", JavaExec) {
 	group = "verification"
@@ -1255,6 +1355,25 @@ tasks.register("derivedDataBench", JavaExec) {
 		}.collect { "-D${it}=${project.property(it)}" }
 		jvmArgs(["-Dremold.projectRoot=${rootDir.absolutePath}",
 		         "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"] + budgets)
+	}
+}
+
+// PR2 slice 3 · Batch A：InitFix 侧扫描成本探针。只测量、不断言；测量型任务不做 up-to-date。
+// 必须**串行排他**运行（跑之前不要有别的 Gradle / 探针在跑），否则耗时读数被抢 CPU 污染。
+tasks.register("initFixScanProbe", JavaExec) {
+	group = "verification"
+	description = "InitFix 侧扫描成本探针 (InitFixScanProbe)：单次 transform 成本分布、JFR 归因、跨类字节读取广度、Reinit 门频次"
+	dependsOn classes
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "InitFixScanProbe"
+	maxHeapSize = "2g"
+	outputs.upToDateWhen { false }
+	jvmArgs "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED"
+	doFirst {
+		def extra = ["-Dremold.projectRoot=${rootDir.absolutePath}",
+		             "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"]
+		if (nativeLibPath != null) extra << "-Dremold.path.libtool=${nativeLibPath}"
+		jvmArgs extra
 	}
 }
 

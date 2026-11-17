@@ -12,7 +12,7 @@ CPP_DIR="$REPO_ROOT/core/cpp"
 TOOL_CPP="$CPP_DIR/tool.cpp"
 OUT_DIR="$REPO_ROOT/core/libs"
 
-ZIG_VERSION="${ZIG_VERSION:-0.16.0}"
+ZIG_VERSION="${ZIG_VERSION:-0.17.1}"
 ZIG_CACHE_DIR="${ZIG_CACHE_DIR:-/tmp/remold-zig-${ZIG_VERSION}}"
 
 if [ -z "${JAVA_HOME:-}" ]; then
@@ -69,16 +69,35 @@ ensure_zig() {
   echo "Using zig: $ZIG_CMD ($("$ZIG_CMD" version))"
 }
 
+# linux-x64 也走 zig（不再是宿主 g++）：三个理由
+# 1) 产物的 NEEDED / glibc 版本floor 必须与本机复核结果一致，否则"仓内产物 vs CI 新构建"的
+#    同步校验没法在非 x86_64 开发机上复现（aarch64 机器上跑不了 g++ 的 x86_64 目标）；
+# 2) 与其余 POSIX 目标共用同一套两段式编译/链接参数，避免各目标之间悄悄分叉；
+# 3) 显式钉住 glibc 2.17 下限，比"宿主发行版的 glibc"更保守。
 build_linux_x64() {
-  local cxx="${CXX:-g++}"
-  echo "[native] Building libtool64.so (linux-x64 via $cxx)"
-  "$cxx" -shared -fPIC -std=c++2b -O3 \
-    -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
-    "$TOOL_CPP" -o "$OUT_DIR/libtool64.so"
-  ls -la "$OUT_DIR/libtool64.so"
+  build_zig_posix_two_step "linux-x64" "x86_64-linux-gnu.2.17" \
+    "-Wl,--strip-all" "$WORK_DIR/tool_linux_x64.o" "$OUT_DIR/libtool64.so"
 }
 
+# Android 产物的编译器选择顺序：
+#   1) ANDROID_CXX —— 显式指定的交叉编译器（例如在 aarch64 宿主上用本机 clang 驱动 r27c sysroot
+#      的 wrapper；NDK 自带的 prebuilt/linux-x86_64 里的 clang 在 aarch64 宿主上无法执行）；
+#   2) NDK 自带的 aarch64-linux-android<API>-clang++。
+# 两条路径都必须产出与前缀一致的导出符号与 NEEDED（libm/libdl/libc）——verify-native.sh --compare 会盯住。
 build_android_arm64() {
+  if [ -n "${ANDROID_CXX:-}" ]; then
+    if [ ! -x "$ANDROID_CXX" ]; then
+      echo "::error::ANDROID_CXX is set but not executable: $ANDROID_CXX" >&2
+      exit 1
+    fi
+    echo "[native] Building libtoolarm64.so (android-arm64 via $ANDROID_CXX, ANDROID_CXX override)"
+    "$ANDROID_CXX" -shared -fPIC -static-libstdc++ -std=c++2b -O3 \
+      -I"$CPP_DIR/jni_posix" \
+      -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+      "$TOOL_CPP" -o "$OUT_DIR/libtoolarm64.so"
+    ls -la "$OUT_DIR/libtoolarm64.so"
+    return 0
+  fi
   local ndk="${ANDROID_NDK_HOME:-}"
   if [ -z "$ndk" ] && [ -n "${ANDROID_SDK_ROOT:-}" ] && [ -d "$ANDROID_SDK_ROOT/ndk" ]; then
     ndk="$(find "$ANDROID_SDK_ROOT/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
@@ -112,13 +131,16 @@ build_zig_posix_two_step() {
 
   ensure_zig
   echo "[native] Building $(basename "$out_file") ($label, target=$target via zig)"
-  # 两段式编译（zig c++ -c）+ 链接（zig cc -shared）：tool.cpp 在 POSIX 下仅用
-  # pthread_mutex_t，不引用 libc++ 运行时，避免触发 zig 内置 libc++ 构建及额外运行库依赖。
+  # 两段式编译（zig c++ -c）+ 链接（zig c++ -shared）。
+  # 链接必须用 **c++ 驱动**：tool.cpp 已经用到 std::vector / std::expected，目标文件里会出现
+  # operator new/delete、__libcpp_verbose_abort 这类 C++ 运行时引用；`zig cc` 只按 C 驱动链接，
+  # 这些符号在 macOS dylib / 静态运行时目标上会直接报 undefined symbol。
+  # 用 c++ 驱动后 zig 会把内置 libc++ 静态链进产物，产物因此不再依赖宿主的 libstdc++。
   "$ZIG_CMD" c++ -c -target "$target" \
     -std=c++23 -O3 -g0 -fno-exceptions -fno-rtti -fdeclspec \
     -I"$CPP_DIR/jni_posix" -I"$JAVA_HOME/include" \
     "$TOOL_CPP" -o "$obj_file"
-  "$ZIG_CMD" cc -shared -target "$target" \
+  "$ZIG_CMD" c++ -shared -target "$target" \
     "$link_flag" "$obj_file" -o "$out_file"
   ls -la "$out_file"
 }

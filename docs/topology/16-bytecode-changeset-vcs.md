@@ -234,12 +234,16 @@ EffBytes   // 只允许：交给 redefineClasses、算 effHash、作为 Eff 树 
 不变量（任何实现都必须成立，测试必须能逐条打红）：
 
 1. **永不用 Eff 哈希判断"源码没改"**：源码变更检测只能是 `rawHash(old) vs rawHash(new)`。
-2. **永不用 Raw 当下一轮 `oldBytes`**：活体对齐的"旧"必须是上一轮 **Eff**（上一轮真正进 JVM 的字节），
-   否则自造名/幽灵/桥的现场会与 JVM 事实错位。
+2. **永不用 Eff 当对齐输入**：Eff 是"上一轮为了让老 `CallSite` 活着而做的全部决定"的累积结果
+   （自造名、幽灵桩、保留体、捕获桥），把它当旧侧配对证据会让这些决定反过来污染本轮配对。
+   对齐的旧侧只能是上一轮的 Raw。
 3. **活体路径是 `Raw ↔ Raw`**：`align(Raw(old), Raw(new), resolverOld, resolverNew, inventedOldNames)`；
-   `inventedOldNames` 来自 head meta（缺失时回退 `inventedSlots`）。Eff 不是对齐输入。
+   `inventedOldNames` 来自 head meta（缺失时回退 `inventedSlots`）。Eff 只作为
+   `redefineClasses` 的输入与继承来源，不参与配对——活体侧的准入闸门、回退与继承落地见
+   [`18-live-raw-to-raw-alignment.md`](18-live-raw-to-raw-alignment.md)。
 4. **遗留幽灵/保留体/捕获桥从 meta/Eff 继承**，不从 Raw 推导：它们是"上一轮为了让老 CallSite 活着而做的
-   决定"，Raw 里没有这些信息。
+   决定"，Raw 里没有这些信息。继承集枚举判据与顺序约束见
+   [`18-live-raw-to-raw-alignment.md`](18-live-raw-to-raw-alignment.md) §4～§5。
 5. 两棵树必须**同批同源**写入：同一次 accept 判定同时写 Raw 与 Eff；不允许只写一树。
 6. 被拒绝的字节不进任何树（§2.1）。
 
@@ -434,9 +438,13 @@ parent = 当前 HEAD，`seq = head.seq + 1`，Eff 树重新派生。**不是**�
 resolver** 参数（`Function<String, byte[]>` 形态），这是接入 commit tree 的天然插口：
 
 - `oldResolver` / `newResolver` 由 VCS 层提供：按 `ClassKey` + 相邻代从 Raw 树取字节（注意：resolver 返回的
-  是**相邻匿名类的 Raw**，用于归属推导；活体对齐的 `oldBytes/newBytes` 本身仍是该类上一轮 Eff 与
-  本轮 Raw——两者不可混用，见 §2.5）。
+  是**相邻匿名类的 Raw**，用于归属推导；活体对齐的 `oldBytes/newBytes` 是该类上一轮 Raw 与本轮 Raw，
+  Eff 不是对齐输入，见 §2.5 与 [`18-live-raw-to-raw-alignment.md`](18-live-raw-to-raw-alignment.md)）。
 - `inventedOldNames` 由 head meta 提供；meta 缺失回退 `inventedSlots`（既有行为）。
+- 灰度期存在两条跑道（`Raw ↔ Raw` 与"上一轮 Eff ↔ 本轮 Raw"兼容跑道），准入闸门、整类回退与
+  "无继承集成员时两跑道逐字节等价"的口径由
+  [`18-live-raw-to-raw-alignment.md`](18-live-raw-to-raw-alignment.md) §3～§6 定义；`align` 的签名与
+  返回值不因跑道切换而变化。
 - `align` 内部**不得**直接读全局静态表作为真值来源；表只作为兜底与迁移期兼容。
 - 结论发布仍走既有 `publishResult` / `LAST_RESULTS`，但持久化由 VCS 层从 `AlignmentResult` 抽取，
   不改变 `align` 的返回值与调用方语义。
@@ -645,8 +653,10 @@ PR1 只验证"记录 / 导出 / 离线重放"这一层，不引入任何决策�
 ### 8.3 PR3：`Raw ↔ Raw` 对齐灰度
 
 - 范围：对齐改走 commit tree（resolver 与 `inventedOldNames` 从树/meta 取），保留字节埋点兜底；
-  灰度开关（默认 off，支持按类白名单/百分比）。
-- 验收：灰度 on/off 输出逐字节相等；attach 前已加载类走 fallback 仍能认领幽灵；清空 meta 后
+  灰度开关（默认 off，支持按类白名单/百分比）。活体侧的准入闸门、继承集落地、整类回退与灰度命中
+  判据以 [`18-live-raw-to-raw-alignment.md`](18-live-raw-to-raw-alignment.md) 为准，本节只锁交付范围。
+- 验收：灰度 on/off 输出逐字节相等（口径：`E_prev` 无继承集成员时；有继承集成员时只要求 Run R
+  自身逐轮可复现）；attach 前已加载类走 fallback 仍能认领幽灵；清空 meta 后
   `LDC <long>; POP2` 兜底可用；`LAMBDA_STRICT` 拒绝行为不变。
 - 变异检查：把"meta 缺失"错误地当成"meta 命中" → fallback 用例变红；把 Raw 当 `oldBytes` →
   自造名错配用例变红；删除埋点写入 → §4.3 兜底用例变红。

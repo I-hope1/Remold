@@ -72,6 +72,7 @@
 
 ## 6. 相关文档
 
+- 对齐输入的选择（`Raw ↔ Raw` 与 Eff_prev 兼容跑道、准入闸门、继承集）：[`18-live-raw-to-raw-alignment.md`](18-live-raw-to-raw-alignment.md)。
 - 状态与残余风险：[`docs/status.md`](../status.md)（风险 22 记录 `CellPropertyRef` 程序分析与执行手段的深度边界）。
 - 批次生命周期与监听器顺序：`RemoldAgent.notifyBatchListeners`、`api/src/remold/HotswapBatchListener.java`。
 - UI 属性追踪的消费者侧：[`plugin-arc/src/remold/uihook/CellPropertyRef.java`](../../plugin-arc/src/remold/uihook/CellPropertyRef.java)。

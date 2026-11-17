@@ -61,6 +61,7 @@ public:
 #endif
 #include <span>
 #include <type_traits>
+#include <vector>
 #include <utility>
 
 /** 万能 Scope Guard 实现，利用析构函数在离开作用域时执行清理逻辑 */
@@ -119,6 +120,26 @@ static inline jlong allocateTagRange(jint count) {
 }
 
 struct TagRange { jlong begin; jlong end; };
+
+/** 单次批次查询覆盖的 target 上限；超过由 Java 侧分块，每块仍只做一次全堆遍历。 */
+static constexpr jint kMaxBatchTargets = 64;
+
+// 对象 tag 的槽位预算：槽位按「不同 target 掩码组合」计，组合数**可以超过** target 数
+// （一个类同时命中多个 target 时是并集掩码），所以不能拿 kMaxBatchTargets 当标签容量
+// —— 否则超出的槽位会写到预留 tag 范围之外，与类 tag 撞车，表现为「某个 target 里混进别的类的实例」
+// （静默错配，不抛异常）。这里独立给容量，超出即整体退回逐类路径。
+static constexpr jint kMaxBatchSlots = 64;
+
+/**
+ * 实例收集类全堆遍历的真实计数（逐类路径与批路径都计），供探针断言「K 次 → 1 次」。
+ * 只统计「为收集/判定实例而做的遍历」：tag 清理用的 JVMTI_HEAP_FILTER_UNTAGGED 过滤遍历不计。
+ */
+static std::atomic<jlong> g_heap_walk_count{0};
+
+static inline void noteHeapWalk() {
+    g_heap_walk_count.fetch_add(1, std::memory_order_relaxed);
+}
+
 
 static jvmtiIterationControl JNICALL ClearClassTagRangeCallback(
     jlong, jlong, jlong* tag_ptr, void* user_data) {
@@ -258,6 +279,7 @@ hasLiveInstanceInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass) {
         return std::unexpected(err);
     }
     bool found = false;
+    noteHeapWalk();
     if (auto e = jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_EITHER, HasInstanceCallback, &found);
         e != JVMTI_ERROR_NONE) {
         return std::unexpected(e);
@@ -347,6 +369,333 @@ static inline jint enumBucketCount(jlong count) {
     return buckets > kEnumBucketCap ? kEnumBucketCap : static_cast<jint>(buckets);
 }
 
+// ============================================================================================
+// 批次级单次全堆遍历（docs/initfix/05-jvmti-heap.md §「批次实例收集」）
+//
+// 同一批 K 个类各自调一次 getInstances 就是 K 次全堆遍历；这里把「按对象精确运行时类归类」
+// 交给 JVMTI 的 class tag 机制，让一次遍历同时填满 K 个 target 的结果桶：
+//   1. GetLoadedClasses 枚举已加载类，对每个类用 IsAssignableFrom 求出「它命中哪些 target」的掩码
+//      （掩码含全部已加载子类/实现类，多态等价性由这一层保证，不依赖遍历顺序）；
+//   2. 只给命中类打 class_tag（tag = class_tag_base + 掩码表下标）；
+//   3. IterateThroughHeap(JVMTI_HEAP_FILTER_CLASS_UNTAGGED)：HotSpot 在进回调前就把
+//      「类没有 tag」的对象过滤掉，回调只对命中对象触发，2M 级 String/byte[]/HashMap$Node 不产生回调；
+//   4. 回调只做纯 native 计算（读 class_tag、写 *tag_ptr、累加计数），绝不调用任何 JNI
+//      （JVMTI 规范明禁在堆遍历回调里调 JNI）；
+//   5. 只有真正命中的组才占用搜索 tag：全部 target 都零实例时直接跳过 GetObjectsWithTags，
+//      也不产生任何对象 tag 清理遍历。
+//
+// tag 空间：类 tag 与对象 tag 各用一段独立区间（都来自 g_tag_sequence 单调区间），退出时
+// 类 tag 逐个还原为 0、对象 tag 逐个清零（超过 kTagClearWalkThreshold 时退回按区间的过滤遍历）。
+// 全进程只有本库使用 JVMTI tag，且所有打标都在 g_heap_mutex 内完成并在释放前清零，
+// 因此「清零」与「恢复旧 tag」等价（旧 tag 恒为 0）。
+// ============================================================================================
+
+struct BatchScanTimings {
+    jlong enumerate_ns{0};
+    jlong iterate_ns{0};
+    jlong collect_ns{0};
+    jlong fill_ns{0};
+    jlong cleanup_ns{0};
+    jlong raw_count{0};
+};
+
+/** 一次批次遍历的结果：对象句柄数组 + 与之一一对应的搜索 tag + 搜索 tag 表。 */
+struct BatchScanOutcome {
+    jobject* objects{nullptr};
+    jlong*   tags{nullptr};
+    jint     count{0};
+    jlong    object_tag_base{0};
+    /** 搜索 tag 槽位 → target 掩码（位 i = targets[i]）。 */
+    std::vector<jlong> active_masks;
+    /** 只做存在性判定时的「已见到」掩码。 */
+    jlong    seen_mask{0};
+};
+
+/** 遍历上下文：回调里只允许纯 native 计算。 */
+struct BatchWalkContext {
+    jlong class_tag_base{0};
+    jlong object_tag_base{0};
+    jint  slot_count{0};
+    const jlong* masks{nullptr};
+    std::vector<jint>  group_slot;   // 掩码下标 → 活跃搜索 tag 槽位（-1 表示尚未命中）
+    std::vector<jlong> active_masks;
+    std::vector<jlong> active_hits;
+    bool  presence_only{false};
+    jint  slot_capacity{0};   // 掩码槽位预算（见 kMaxBatchSlots）
+    bool  overflow{false};    // 槽位预算用尽：调用方必须退回逐类路径
+    jlong wanted_mask{0};
+    jlong seen_mask{0};
+    jlong total_hits{0};
+};
+
+static jint JNICALL BatchHeapIterationCallback(
+    jlong class_tag, jlong /*size*/, jlong* tag_ptr, jint /*length*/, void* user_data) {
+    auto* ctx = static_cast<BatchWalkContext*>(user_data);
+    const jlong rel = class_tag - ctx->class_tag_base;
+    if (rel < 0 || rel >= ctx->slot_count) return JVMTI_VISIT_OBJECTS;
+    const jlong mask = ctx->masks[rel];
+    if (ctx->presence_only) {
+        ctx->seen_mask |= mask;
+        return ((ctx->seen_mask & ctx->wanted_mask) == ctx->wanted_mask)
+            ? JVMTI_VISIT_ABORT : JVMTI_VISIT_OBJECTS;
+    }
+    jint slot = ctx->group_slot[static_cast<size_t>(rel)];
+    if (slot < 0) {
+        // 只有真正命中的组才消耗搜索 tag：零实例的 target 不占 tag、不进 GetObjectsWithTags。
+        slot = static_cast<jint>(ctx->active_masks.size());
+        if (slot >= ctx->slot_capacity) {
+            // 槽位预算用尽：立即中止本次遍历并标记 overflow，由调用方退回逐类路径。
+            ctx->overflow = true;
+            return JVMTI_VISIT_ABORT;
+        }
+        ctx->group_slot[static_cast<size_t>(rel)] = slot;
+        ctx->active_masks.push_back(mask);
+        ctx->active_hits.push_back(0);
+    }
+    if (tag_ptr) *tag_ptr = ctx->object_tag_base + slot;
+    ctx->active_hits[static_cast<size_t>(slot)]++;
+    ctx->total_hits++;
+    return JVMTI_VISIT_OBJECTS;
+}
+
+/**
+ * 一次全堆遍历完成 K 个 target 的实例收集（{@code presence_only} 时只判定「有没有」）。
+ *
+ * <p>多态语义与 {@code getInstancesInternal} 一致：包含子类/接口实现实例、包含不可达但尚未被
+ * GC 物理回收的对象。K=1 由 Java 侧直接走单类路径，这里只处理 K&gt;=2。</p>
+ *
+ * <p>不支持的形态（target 是 {@code java.lang.Class} 或数组类的超类型）返回
+ * {@code JVMTI_ERROR_NOT_AVAILABLE}，由调用方退回逐类路径——类镜像的 tag 与 class tag 共用
+ * 同一存储，给它打对象 tag 会覆盖我们自己写下的类 tag；数组类不在 {@code GetLoadedClasses}
+ * 的结果里，打不上类 tag 会静默漏掉数组实例。</p>
+ */
+static jvmtiError batchScanInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass* targets, jint k,
+                                    bool presence_only, BatchScanOutcome& out,
+                                    BatchScanTimings* timings) {
+    if (!jvmti || !env || !targets) return JVMTI_ERROR_NULL_POINTER;
+    if (k <= 0 || k > kMaxBatchTargets) return JVMTI_ERROR_ILLEGAL_ARGUMENT;
+
+    const jlong t_start = timings ? monotonicNowNs() : 0;
+
+    jclass obj_clazz = getObjectClass(env);
+    if (!obj_clazz) return JVMTI_ERROR_CLASS_NOT_PREPARED;
+
+    // 前置拦截：基本类型镜像/数组类（与 validateInstanceQueryClass 同一取向），以及两种
+    // 「class tag 编码不可用」的形态。任何一种命中都整体退回逐类路径（fail-closed）。
+    jclass class_clazz = env->FindClass("java/lang/Class");
+    jclass obj_array_clazz = env->FindClass("[Ljava/lang/Object;");
+    if (!class_clazz || !obj_array_clazz) {
+        if (class_clazz) env->DeleteLocalRef(class_clazz);
+        if (obj_array_clazz) env->DeleteLocalRef(obj_array_clazz);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return JVMTI_ERROR_NOT_AVAILABLE;
+    }
+    jvmtiError verdict = JVMTI_ERROR_NONE;
+    for (jint i = 0; i < k && verdict == JVMTI_ERROR_NONE; ++i) {
+        jclass t = targets[i];
+        if (!t || !env->IsAssignableFrom(t, obj_clazz)) {
+            verdict = JVMTI_ERROR_ILLEGAL_ARGUMENT;
+        } else if (env->IsAssignableFrom(class_clazz, t) || env->IsAssignableFrom(obj_array_clazz, t)) {
+            verdict = JVMTI_ERROR_NOT_AVAILABLE;
+        }
+    }
+    env->DeleteLocalRef(class_clazz);
+    env->DeleteLocalRef(obj_array_clazz);
+    if (verdict != JVMTI_ERROR_NONE) return verdict;
+
+    NativeLockGuard lock(g_heap_mutex);
+
+    // ---- 1) 已加载类 → target 掩码（含全部已加载子类/实现类） ----
+    jint class_count = 0;
+    jclass* loaded = nullptr;
+    if (auto e = jvmti->GetLoadedClasses(&class_count, &loaded); e != JVMTI_ERROR_NONE) {
+        return e;
+    }
+    SCOPE_EXIT([&] {
+        if (loaded) {
+            jvmti->Deallocate(reinterpret_cast<unsigned char*>(loaded));
+            loaded = nullptr;
+        }
+    });
+
+    // 已加载类数组里每个 jclass 都是 JNI **局部引用**（大进程动辄上万级）。这里逐轮释放：
+    // 命中的类转成全局引用留下（数量级远小于已加载类总数），未命中的当场 DeleteLocalRef。
+    // 整段再套一层局部帧兜住临时引用，避免频繁热更把局部引用表顶爆。
+    //
+    // 关键约束：这层帧**必须只覆盖枚举期**。JVMTI 的 GetObjectsWithTags 返回的 jobject 也是
+    // 在「当前帧」里分配的局部引用，若把枚举帧留到函数退出才弹，回收到的对象引用会随帧失效，
+    // 其 JNIHandleBlock 槽位马上被后面 NewObjectArray 的结果/行数组复用——填数组时写进行里的
+    // 就变成了容器数组自己（表现为行内自引用、且不抛 ArrayStoreException）。
+    const bool has_enum_frame = (env->PushLocalFrame(32) == JNI_OK);
+    if (!has_enum_frame && env->ExceptionCheck()) env->ExceptionClear();
+    bool enum_frame_open = has_enum_frame;
+    auto popEnumFrame = [&] {
+        if (enum_frame_open) {
+            env->PopLocalFrame(nullptr);
+            enum_frame_open = false;
+        }
+    };
+    SCOPE_EXIT([&] { popEnumFrame(); });
+
+    std::vector<jlong> masks;
+    std::vector<jclass> tagged_classes;   // 全局引用；清除 tag 后逐个 DeleteGlobalRef
+    masks.reserve(16);
+    tagged_classes.reserve(16);
+    const jlong class_tag_base = allocateTagRange(class_count + 1);
+    for (jint c = 0; c < class_count; ++c) {
+        jclass cls = loaded[c];
+        if (!cls) continue;
+        jlong mask = 0;
+        for (jint i = 0; i < k; ++i) {
+            if (targets[i] && env->IsAssignableFrom(cls, targets[i])) mask |= (jlong{1} << i);
+        }
+        if (mask == 0) {
+            env->DeleteLocalRef(cls);
+            loaded[c] = nullptr;
+            continue;
+        }
+        jint slot = -1;
+        for (size_t m = 0; m < masks.size(); ++m) {
+            if (masks[m] == mask) { slot = static_cast<jint>(m); break; }
+        }
+        if (slot < 0) {
+            slot = static_cast<jint>(masks.size());
+            masks.push_back(mask);
+        }
+        jclass global_cls = reinterpret_cast<jclass>(env->NewGlobalRef(cls));
+        env->DeleteLocalRef(cls);
+        loaded[c] = nullptr;
+        if (!global_cls) {
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            for (jclass tagged : tagged_classes) {
+                jvmti->SetTag(tagged, 0);
+                env->DeleteGlobalRef(tagged);
+            }
+            return JVMTI_ERROR_OUT_OF_MEMORY;
+        }
+        if (auto e = jvmti->SetTag(global_cls, class_tag_base + slot); e != JVMTI_ERROR_NONE) {
+            env->DeleteGlobalRef(global_cls);
+            for (jclass tagged : tagged_classes) {
+                jvmti->SetTag(tagged, 0);
+                env->DeleteGlobalRef(tagged);
+            }
+            return e;
+        }
+        tagged_classes.push_back(global_cls);
+    }
+    const jlong t_after_enumerate = timings ? monotonicNowNs() : 0;
+    if (timings) timings->enumerate_ns = t_after_enumerate - t_start;
+    // 枚举结束：临时类引用已经全部处理完（命中类已转全局引用），立即收起局部帧，
+    // 让后续 GetObjectsWithTags 的对象引用落在调用方的帧里（见上面的约束说明）。
+    popEnumFrame();
+
+    // 类 tag 必须在任何退出路径上清零（否则脏 tag 会污染 JvmtiTagMap，让后续过滤遍历命中错对象）。
+    SCOPE_EXIT([&] {
+        for (jclass tagged : tagged_classes) {
+            if (tagged) jvmti->SetTag(tagged, 0);
+        }
+    });
+    SCOPE_EXIT([&] {
+        for (jclass tagged : tagged_classes) {
+            if (tagged) env->DeleteGlobalRef(tagged);
+        }
+        tagged_classes.clear();
+    });
+
+    if (masks.empty()) {
+        // 一个已加载类都不命中（例如目标类还没加载）：无需遍历。
+        if (timings) timings->cleanup_ns = monotonicNowNs() - t_after_enumerate;
+        return JVMTI_ERROR_NONE;
+    }
+
+    // ---- 2) 一次全堆遍历：只对「类有 tag」的对象触发回调 ----
+    const jlong object_tag_base = allocateTagRange(kMaxBatchSlots);
+    BatchWalkContext ctx;
+    ctx.class_tag_base = class_tag_base;
+    ctx.object_tag_base = object_tag_base;
+    ctx.slot_count = static_cast<jint>(masks.size());
+    ctx.masks = masks.data();
+    ctx.group_slot.assign(masks.size(), -1);
+    ctx.active_masks.reserve(masks.size());
+    ctx.active_hits.reserve(masks.size());
+    ctx.presence_only = presence_only;
+    ctx.slot_capacity = kMaxBatchSlots;
+    ctx.overflow = false;
+    ctx.wanted_mask = (k >= 64) ? ~jlong{0} : ((jlong{1} << k) - 1);
+
+    jvmtiHeapCallbacks callbacks{ .heap_iteration_callback = BatchHeapIterationCallback };
+    noteHeapWalk();
+    const jlong t_before_iterate = timings ? monotonicNowNs() : 0;
+    if (auto e = jvmti->IterateThroughHeap(JVMTI_HEAP_FILTER_CLASS_UNTAGGED, nullptr, &callbacks, &ctx);
+        e != JVMTI_ERROR_NONE) {
+        return e;
+    }
+    const jlong t_after_iterate = timings ? monotonicNowNs() : 0;
+    if (timings) timings->iterate_ns = t_after_iterate - t_before_iterate;
+
+    if (ctx.overflow) {
+        // 不同掩码组合超出槽位预算：不冒"越界写 tag / 静默错配"的风险，交给调用方退回逐类路径。
+        if (timings) timings->cleanup_ns = monotonicNowNs() - t_after_iterate;
+        return JVMTI_ERROR_NOT_AVAILABLE;
+    }
+
+    if (presence_only) {
+        out.seen_mask = ctx.seen_mask;
+        if (timings) timings->cleanup_ns = monotonicNowNs() - t_after_iterate;
+        return JVMTI_ERROR_NONE;
+    }
+
+    if (ctx.total_hits == 0) {
+        // 全部 target 都零实例：0 次 GetObjectsWithTags、0 次清理遍历。
+        if (timings) timings->cleanup_ns = monotonicNowNs() - t_after_iterate;
+        return JVMTI_ERROR_NONE;
+    }
+
+    // ---- 3) 只按「真正命中的组」取回对象句柄 ----
+    const jint slot_count = static_cast<jint>(ctx.active_masks.size());
+    jlong query_tags[kMaxBatchTargets];
+    for (jint s = 0; s < slot_count; ++s) query_tags[s] = object_tag_base + s;
+
+    jint collected = 0;
+    jobject* instances = nullptr;
+    jlong* out_tags = nullptr;
+    if (auto e = jvmti->GetObjectsWithTags(slot_count, query_tags, &collected, &instances, &out_tags);
+        e != JVMTI_ERROR_NONE) {
+        if (instances) jvmti->Deallocate(reinterpret_cast<unsigned char*>(instances));
+        if (out_tags) jvmti->Deallocate(reinterpret_cast<unsigned char*>(out_tags));
+        return e;
+    }
+    SCOPE_EXIT([&] {
+        if (instances) { jvmti->Deallocate(reinterpret_cast<unsigned char*>(instances)); instances = nullptr; }
+        if (out_tags) { jvmti->Deallocate(reinterpret_cast<unsigned char*>(out_tags)); out_tags = nullptr; }
+    });
+    const jlong t_after_collect = timings ? monotonicNowNs() : 0;
+    if (timings) {
+        timings->collect_ns = t_after_collect - t_after_iterate;
+        timings->raw_count = static_cast<jlong>(collected);
+    }
+
+    // 对象 tag 清零：小规模逐个 SetTag（复用既有阈值），大规模退回按区间的过滤遍历。
+    const bool direct_clear = (collected <= kTagClearWalkThreshold);
+    if (direct_clear) {
+        for (jint i = 0; i < collected; ++i) {
+            if (instances && instances[i]) jvmti->SetTag(instances[i], 0);
+        }
+    } else {
+        clearTagRangeFromHeap(jvmti, object_tag_base, slot_count);
+    }
+    if (timings) timings->cleanup_ns = monotonicNowNs() - t_after_collect;
+
+    out.objects = instances;
+    out.tags = out_tags;
+    out.count = collected;
+    out.object_tag_base = object_tag_base;
+    out.active_masks = ctx.active_masks;
+    instances = nullptr;  // 所有权移交调用方
+    out_tags = nullptr;
+    return JVMTI_ERROR_NONE;
+}
+
 
 /**
  * 获取指定类及其子类在堆中所有尚未被回收的实例并返回局部引用数组。
@@ -397,6 +746,7 @@ getInstancesInternal(jvmtiEnv* jvmti, JNIEnv* env, jclass klass, InstanceQueryTi
     BucketSeqContext bucket_ctx{base, 0, &max_bucket, kEnumBucketCap, kEnumBucketShift};
 
     const jlong t_before_iterate = timings ? monotonicNowNs() : 0;
+    noteHeapWalk();
     if (auto e = jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_EITHER, BucketSeqCallback, &bucket_ctx);
         e != JVMTI_ERROR_NONE) {
         clearTagRange(jvmti, klass, base, kEnumBucketCap);
@@ -917,6 +1267,174 @@ JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetInstancesTimed(
     return *res;
 }
 
+/**
+ * JNI 导出函数：一次全堆遍历收集一批类的实例，返回与 targets 等长的 {@code Object[]} 数组
+ * （下标对齐 targets）。失败/形态不支持时返回 {@code null}，Java 侧退回逐类路径。
+ */
+JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetInstancesBatch(
+    JNIEnv* env,
+    jclass,
+    jobjectArray targets_array,
+    jlongArray timings_out
+) {
+    if (!env || !targets_array) return nullptr;
+    auto jvmti = getOrAcquireJvmti(env);
+    if (!jvmti) {
+        throwJvmtiException(env, "Failed to acquire JVMTI environment", jvmti.error());
+        return nullptr;
+    }
+
+    const jint k = env->GetArrayLength(targets_array);
+    if (k <= 0 || k > kMaxBatchTargets) return nullptr;
+
+    // 局部引用：targets 的每个元素、遍历产生的类引用与对象引用都在这个 frame 里，
+    // 退出时只保留结果数组（PopLocalFrame(result)）。
+    if (env->PushLocalFrame(k + 64) != JNI_OK) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return nullptr;
+    }
+
+    std::vector<jclass> targets(static_cast<size_t>(k), nullptr);
+    for (jint i = 0; i < k; ++i) {
+        targets[static_cast<size_t>(i)] = static_cast<jclass>(env->GetObjectArrayElement(targets_array, i));
+    }
+
+    BatchScanOutcome out;
+    BatchScanTimings timings{};
+    const bool write_timings = timings_out != nullptr && env->GetArrayLength(timings_out) >= 6;
+    if (auto e = batchScanInternal(*jvmti, env, targets.data(), k, false, out,
+                                   write_timings ? &timings : nullptr);
+        e != JVMTI_ERROR_NONE) {
+        // 形态不支持 / 环境失败：交给 Java 侧退回逐类路径，不向调用方抛错。
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->PopLocalFrame(nullptr);
+        return nullptr;
+    }
+    SCOPE_EXIT([&] {
+        if (out.objects) (*jvmti)->Deallocate(reinterpret_cast<unsigned char*>(out.objects));
+        if (out.tags) (*jvmti)->Deallocate(reinterpret_cast<unsigned char*>(out.tags));
+    });
+
+    const jlong t_before_fill = write_timings ? monotonicNowNs() : 0;
+    jclass obj_clazz = getObjectClass(env);
+    if (!obj_clazz) {
+        env->PopLocalFrame(nullptr);
+        return nullptr;
+    }
+
+    // 先按组计数再分配精确长度，避免 Null 槽（集合比较口径下 null 槽会被误判成差异）。
+    std::vector<jlong> counts(static_cast<size_t>(k), 0);
+    std::vector<jlong> slots(static_cast<size_t>(out.count), 0);
+    for (jint i = 0; i < out.count; ++i) {
+        if (!out.objects || !out.objects[i]) continue;
+        const jlong rel = out.tags ? (out.tags[i] - out.object_tag_base) : -1;
+        if (rel < 0 || rel >= static_cast<jlong>(out.active_masks.size())) continue;
+        const jlong mask = out.active_masks[static_cast<size_t>(rel)];
+        slots[static_cast<size_t>(i)] = mask;
+        for (jint t = 0; t < k; ++t) {
+            if ((mask & (jlong{1} << t)) != 0) counts[static_cast<size_t>(t)]++;
+        }
+    }
+
+    jobjectArray result = env->NewObjectArray(k, obj_clazz, nullptr);
+    if (!result) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->PopLocalFrame(nullptr);
+        return nullptr;
+    }
+    std::vector<jobjectArray> rows(static_cast<size_t>(k), nullptr);
+    std::vector<jlong> cursors(static_cast<size_t>(k), 0);
+    for (jint t = 0; t < k; ++t) {
+        // 行数组按 target 自身做强类型（与单类路径一致）：一旦有非本类实例落进来，
+        // JNI 会立刻抛 ArrayStoreException，而不是静默塞进 Object[]。
+        rows[static_cast<size_t>(t)] = env->NewObjectArray(static_cast<jsize>(counts[static_cast<size_t>(t)]),
+                                                           targets[static_cast<size_t>(t)], nullptr);
+        if (!rows[static_cast<size_t>(t)]) {
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            env->PopLocalFrame(nullptr);
+            return nullptr;
+        }
+        env->SetObjectArrayElement(result, t, rows[static_cast<size_t>(t)]);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    for (jint i = 0; i < out.count; ++i) {
+        jobject o = out.objects ? out.objects[i] : nullptr;
+        if (!o) continue;
+        const jlong mask = slots[static_cast<size_t>(i)];
+        for (jint t = 0; t < k; ++t) {
+            if ((mask & (jlong{1} << t)) == 0) continue;
+            env->SetObjectArrayElement(rows[static_cast<size_t>(t)],
+                                       static_cast<jsize>(cursors[static_cast<size_t>(t)]++), o);
+            if (env->ExceptionCheck()) {
+                // 强类型行 + 归属错配 ⇒ ArrayStoreException。这里**不吞**：打一条 warn 级的
+                // stderr 便于定位，并整体退回逐类路径（正确性优先）。
+                env->ExceptionDescribe();
+                env->ExceptionClear();
+                fprintf(stderr, "[Remold] batch heap scan: instance of a foreign class reached target row %d;"
+                                " falling back to the per-class path\n", static_cast<int>(t));
+                env->PopLocalFrame(nullptr);
+                return nullptr;
+            }
+        }
+    }
+    if (write_timings) {
+        timings.fill_ns = monotonicNowNs() - t_before_fill;
+        const jlong buf[6] = {
+            timings.enumerate_ns,
+            timings.iterate_ns,
+            timings.collect_ns,
+            timings.fill_ns,
+            timings.cleanup_ns,
+            timings.raw_count,
+        };
+        env->SetLongArrayRegion(timings_out, 0, 6, buf);
+    }
+    return reinterpret_cast<jobjectArray>(env->PopLocalFrame(result));
+}
+
+/**
+ * JNI 导出函数：一次全堆遍历判定一批类「有没有存活实例」，返回位掩码（位 i = targets[i]）。
+ * 全部 target 都已见到实例时立即 JVMTI_VISIT_ABORT 早停；失败/形态不支持返回 -1，
+ * Java 侧退回逐类 {@link #Java_remold_util_LibTool_nHasLiveInstance} 路径。
+ */
+JNIEXPORT jlong JNICALL Java_remold_util_LibTool_nHasLiveInstancesBatch(
+    JNIEnv* env,
+    jclass,
+    jobjectArray targets_array
+) {
+    if (!env || !targets_array) return -1;
+    auto jvmti = getOrAcquireJvmti(env);
+    if (!jvmti) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return -1;
+    }
+    const jint k = env->GetArrayLength(targets_array);
+    if (k <= 0 || k > kMaxBatchTargets) return -1;
+    if (env->PushLocalFrame(k + 64) != JNI_OK) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return -1;
+    }
+    std::vector<jclass> targets(static_cast<size_t>(k), nullptr);
+    for (jint i = 0; i < k; ++i) {
+        targets[static_cast<size_t>(i)] = static_cast<jclass>(env->GetObjectArrayElement(targets_array, i));
+    }
+    BatchScanOutcome out;
+    jlong seen = -1;
+    if (auto e = batchScanInternal(*jvmti, env, targets.data(), k, true, out, nullptr);
+        e == JVMTI_ERROR_NONE) {
+        seen = out.seen_mask;
+    } else if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+    env->PopLocalFrame(nullptr);
+    return seen;
+}
+
+/** JNI 导出函数：实例收集类全堆遍历的累计次数（探针取证用，真实计数而非估算）。 */
+JNIEXPORT jlong JNICALL Java_remold_util_LibTool_nHeapWalkCount(JNIEnv* /*env*/, jclass /*cls*/) {
+    return g_heap_walk_count.load(std::memory_order_relaxed);
+}
+
 /** JNI 导出函数：获取指定对象的所有直接引用者，失败时向 Java 抛出异常 */
 JNIEXPORT jobjectArray JNICALL Java_remold_util_LibTool_nGetReferrers(
     JNIEnv* env,
@@ -982,6 +1500,21 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
                 .name = const_cast<char*>("nEnumBucketWindow"),
                 .signature = const_cast<char*>("()I"),
                 .fnPtr = reinterpret_cast<void*>(&Java_remold_util_LibTool_nEnumBucketWindow),
+            },
+            {
+                .name = const_cast<char*>("nGetInstancesBatch"),
+                .signature = const_cast<char*>("([Ljava/lang/Class;[J)[Ljava/lang/Object;"),
+                .fnPtr = reinterpret_cast<void*>(&Java_remold_util_LibTool_nGetInstancesBatch),
+            },
+            {
+                .name = const_cast<char*>("nHasLiveInstancesBatch"),
+                .signature = const_cast<char*>("([Ljava/lang/Class;)J"),
+                .fnPtr = reinterpret_cast<void*>(&Java_remold_util_LibTool_nHasLiveInstancesBatch),
+            },
+            {
+                .name = const_cast<char*>("nHeapWalkCount"),
+                .signature = const_cast<char*>("()J"),
+                .fnPtr = reinterpret_cast<void*>(&Java_remold_util_LibTool_nHeapWalkCount),
             },
         };
         for (auto& m : methods) {

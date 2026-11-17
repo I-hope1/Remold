@@ -59,6 +59,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **批次级单次堆遍历：同一批 K 个类的存活实例收集从 K 次全堆扫描收敛为 1 次**
+  （`core/cpp/tool.cpp` + `LibTool` + `InitFix` + `RemoldAgent`）：
+  - 新增 `LibTool.getInstancesBatch(Class[])`（native `nGetInstancesBatch`）。归类靠 JVMTI class tag：
+    先 `GetLoadedClasses` + `IsAssignableFrom` 给每个已加载类算出"命中哪些 target"的掩码（**多态等价性
+    由这一层保证**——不在 targets 里的已加载子类/接口实现同样打上祖先位），只给命中类打 tag，再用
+    `IterateThroughHeap(JVMTI_HEAP_FILTER_CLASS_UNTAGGED)` 让 HotSpot 在进回调前过滤掉无关对象；
+    回调里只做纯 native 计算，不调 JNI。全部 target 零实例时直接跳过 `GetObjectsWithTags`，
+    也不产生任何对象 tag 清理遍历；搜索 tag 数 = 真正命中的组数。
+  - 接合点在 `InitFix.beginBatchInstanceCollection`（两阶段 Stage B 与单阶段后处理两个补丁循环都接上）：
+    收集发生在**重定义生效之后、补丁执行之前**（提前收集会漏掉窗口期新建实例），每个宿主在自己的
+    `applyPatch` 里消费自己的切片，`StageBInstanceCache` 语义不变。K 低于
+    `InitFix.BATCH_HEAP_SCAN_MIN_TARGETS = 8` 时一律走原逐类路径（一次批遍历 ≈ 9 倍单类遍历，
+    小批次批收集是净亏），K=1 零额外开销。
+  - 降级：旧 native 库缺导出符号（`UnsatisfiedLinkError`）或 native 返回失败 → 整体退回逐类
+    `getInstances`（结果相同、遍历次数回到 K 次）；无 native 时退回 `InstanceTracker` 既有路径。
+    基本类型镜像/数组类拦截、`g_heap_mutex` 原生锁、临时 tag 全清三条约束原样保留；
+    target 是 `java.lang.Class` 或数组类超类型时整体退回逐类路径（class tag 编码不可用）。
+  - D3：新增 `LibTool.hasLiveInstancesBatch(Class[])`（只判定存在性、全部 target 都见到实例即
+    `JVMTI_VISIT_ABORT` 早停）。布局门在批次上下文里第一次未命中缓存时对整批做一次遍历并填满
+    `LIVE_INSTANCE_CACHE`，消除"同一批 N 个零实例类 ⇒ N 次全堆扫描"。它只回答"有没有"，**不**把
+    重定义前的快照留给 `applyPatch`（两次遍历的语义边界见规格）。
+  - 取证：`LibTool.heapWalkCount()`（native 真实计数）+ `tests/src/InitFixBatchScanProbe.java`
+    （`[0]` 最小复现、K=1/4/8/16/64 开/关的 collect 与全流程 min/median/max、遍历次数
+    K→ceil(K/16)（单块 K≤16 时恰为 1）、`[5]` 大堆对照、真实活实例的
+    `SELF` vs `INCLUDE_SUBCLASSES` 终局断言）+ `tests/src/BatchHeapScanEquivalenceTest.java`
+    （批收集 vs 逐类的集合等价门禁、无脏 tag、K=1 单次遍历）+ `remold.BatchLivenessPrefetchTest`
+    （批次存活探测 1 次 vs 逐类 K 次，带去触发对照）。
+  - 实测（同一进程、逐轮交替、21 轮，本机 aarch64、JDK 25.0.4.1）：K=8 collect median
+    93.6→45.6 ms（full 97.6→47.8 ms）；K=16 collect 145.0→52.4 ms（full 151.0→64.1 ms）；
+    K=64 collect 632.3→268.9 ms（full 656.8→278.9 ms，4 次遍历）；K=4 与 K=1 不接合。
+    大 heap 对照（20 万无关对象 + 每类 20 实例）：K=16 批 97.9 ms vs 逐类 197.3 ms，K=64
+    批 357.9 ms vs 逐类 779.6 ms，结果与逐类**逐项相等**。
+  - 规格见 [`docs/initfix/05-jvmti-heap.md`](docs/initfix/05-jvmti-heap.md) §「批次实例收集」。
+
+### Fixed
+
+- **批次堆遍历：结果行里混进批容器数组自身（静默错配）**（`core/cpp/tool.cpp`）。根因是
+  JNI 局部帧生命周期：`GetLoadedClasses` 枚举期的局部帧留到函数退出才弹，而 `GetObjectsWithTags`
+  返回的 `jobject` 也是"当前帧"里的局部引用，帧一弹它们的 `JNIHandleBlock` 槽位立刻被随后
+  `NewObjectArray` 的结果数组/行数组复用，填数组时写进行里的就成了容器数组自己（表现为行内
+  自引用；旧实现用 `Object[]` 行数组，所以既不抛 `ArrayStoreException` 也不报错）。修法：枚举帧
+  只覆盖枚举期、命中类转全局引用；行数组改为按 target 强类型，归属错配立刻抛
+  `ArrayStoreException` 并**不吞异常**（打印现场 + 整体退回逐类路径）。
+  另修：对象 tag 的槽位按"不同 target 掩码组合"计，组合数可超过 target 数，原实现按 target 数
+  给容量会让槽位越界撞类 tag → 独立 `kMaxBatchSlots` 预算 + 溢出即退回逐类；实例收集分块上限
+  收紧到 `BATCH_TARGET_LIMIT = 16`（检索 tag 数受控），存在性探测单独放开到
+  `BATCH_LIVENESS_TARGET_LIMIT = 64`（不物化对象、不占对象 tag），因此 K=64 的布局门预探测
+  仍是**一次**遍历。三条变异均被击杀：丢子类 → 多态等价用例红；批收集退化逐类 → 遍历次数断言红；
+  恢复修复前的局部帧生命周期 → 探针 `[0]` 最小复现与大堆对照红（等价性用例抓不住，因为槽位未被
+  复用时引用恰好还有效，这条只能由探针击杀）。
+
 - **Gradle 插件的默认 JVM 参数新增一个常量 `-Dremold.agent.build_trigger_file=<buildDir>/remold/build-trigger`**
   （`buildTrigger = false` 时不注入，旧版本 agent 会忽略该未知参数）。这是默认参数的可见变化，特此点明；
   代理行为本身在无 marker 或旧 agent 下与之前一致。

@@ -898,6 +898,44 @@ tasks.register("buildTriggerProbe", JavaExec) {
 	}
 }
 
+tasks.register("vcsPackProbe", JavaExec) {
+	group = "verification"
+	description = "PR1 字节码 Changeset 旁路记录 E2E (VcsPackProbe)：真实 agent redefine -> 导出包 -> 离线重放"
+	dependsOn classes
+	dependsOn project(":core").tasks.named("shadowJar")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "VcsPackProbe"
+	maxHeapSize = "1g"
+	def jbrHome = (project.findProperty("p05.jbr") as String)
+		?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+	if (jbrHome != null) {
+		def javaBin = new File(jbrHome, probeIsWindows ? "bin/java.exe" : "bin/java")
+		if (javaBin.exists()) {
+			executable = javaBin.absolutePath
+			javaLauncher.set((JavaLauncher) null)
+		}
+	}
+	def probeDir = layout.buildDirectory.dir("vcs-pack-probe")
+	doFirst {
+		def dir = probeDir.get().asFile
+		def pack = new File(dir, "pack")
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
+		        "-XX:+IgnoreUnrecognizedVMOptions",
+		        "-XX:+AllowEnhancedClassRedefinition",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8",
+		        "-DvcsProbe.dir=" + dir.absolutePath,
+		        "-Dremold.agent.file_shake_ms=300",
+		        "-Dremold.vcs.enabled=true",
+		        "-Dremold.vcs.pack_dir=" + pack.absolutePath
+		if (nativeLibPath != null) {
+			jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+		}
+	}
+}
+
 tasks.register("fingerprintDiskHashProbe", JavaExec) {
 	group = "verification"
 	description = "任务 2 复现：匿名类重命名后，未变化的第二轮必须零副作用"

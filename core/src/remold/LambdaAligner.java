@@ -1,5 +1,6 @@
 package remold;
 
+import remold.vcs.AlignmentMetaStore;
 import remold.util.*;
 import org.objectweb.asm.*;
 import org.objectweb.asm.commons.*;
@@ -122,6 +123,15 @@ import java.util.function.Supplier;
  * @see remold.RemoldAgent
  */
 public class LambdaAligner {
+
+	/**
+	 * PoC 开关：对齐期以 {@link AlignmentMetaStore} 的逐代元数据为准（幽灵生前指纹 / 自造名），
+	 * 元数据缺失时退回字节码里的 {@code LDC <long>; POP2} 标记。
+	 *
+	 * <p>默认关闭 = 现有的"读字节"路径；打开后调用方不必再传 {@code inventedOldNames}，
+	 * 也不再依赖桩体标记读出幽灵指纹。</p>
+	 */
+	public static volatile boolean META_SOURCE = Boolean.getBoolean("remold.poc.meta_source");
 
 	public static final ThreadLocal<MatchContext> CONTEXT = ThreadLocal.withInitial(MatchContext::new);
 
@@ -292,6 +302,23 @@ public class LambdaAligner {
 		/** 包含捕获但缺失 LocalVariableTable 的合成 lambda 方法集合；无缺失时为空集合。 */
 		public final Set<String> missingLvtLambdas;
 
+		/**
+		 * PoC：本轮读取的上一代元数据代序号。
+		 *
+		 * <p>{@code -1} 表示未走 meta 读取（开关关闭或元数据缺失、退回字节码标记）。
+		 * 它把"是否真的读了 meta"从日志/计数器这类相关性信号变成结果对象上的可断言读数。</p>
+		 */
+		public final int metaGeneration;
+
+		/**
+		 * PoC：本轮对齐实际采信的"上一轮自造名"集合。
+		 *
+		 * <p>它是调用方旧契约（参数 {@code inventedOldNames}）与 meta 新契约的共同落点：
+		 * 两路等价要求这一集合逐轮相同，因此它把"meta 到底供了什么"变成可断言读数，
+		 * 而不是只看产物字节是否恰好相同。</p>
+		 */
+		public final Set<String> suppliedInventedNames;
+
 		private AlignmentResult(Builder b) {
 			this.stats = b.stats;
 			this.inventedNames = b.inventedNames == null ? Set.of() : Set.copyOf(b.inventedNames);
@@ -305,6 +332,9 @@ public class LambdaAligner {
 			this.alignedClass = b.alignedClass;
 			this.bridgeCount = b.bridgeCount;
 			this.missingLvtLambdas = b.missingLvtLambdas == null ? Set.of() : Set.copyOf(b.missingLvtLambdas);
+			this.metaGeneration = b.metaGeneration;
+			this.suppliedInventedNames = b.suppliedInventedNames == null
+				? Set.of() : Set.copyOf(b.suppliedInventedNames);
 		}
 
 		public static Builder builder() {
@@ -330,6 +360,8 @@ public class LambdaAligner {
 			private Map<String, String> methodMapping;
 			private String alignedClass;
 			private int bridgeCount;
+			private int metaGeneration = -1;
+			private Set<String> suppliedInventedNames;
 			private Set<String> missingLvtLambdas;
 
 			public Builder stats(AlignmentStats v)            { this.stats = v; return this; }
@@ -344,6 +376,8 @@ public class LambdaAligner {
 			public Builder alignedClass(String v)               { this.alignedClass = v; return this; }
 			public Builder bridgeCount(int v)                   { this.bridgeCount = v; return this; }
 			public Builder missingLvtLambdas(Set<String> v)     { this.missingLvtLambdas = v; return this; }
+			public Builder metaGeneration(int v)               { this.metaGeneration = v; return this; }
+			public Builder suppliedInventedNames(Set<String> v) { this.suppliedInventedNames = v; return this; }
 
 			public AlignmentResult build() { return new AlignmentResult(this); }
 		}
@@ -690,6 +724,9 @@ public class LambdaAligner {
 		/** 当前处理的类名（内部名，形如 {@code com/example/Foo}）。 */
 		String currentClass;
 
+		/** 本轮生效的上一代元数据；{@code null} 表示 meta 缺失，读侧退回字节码标记。 */
+		AlignmentMetaStore.Entry oldMeta;
+
 		final LongObjectMap<List<SyntheticInfo>> oldGroups = new LongObjectMap<>(128);
 		final LongObjectMap<List<SyntheticInfo>> newGroups = new LongObjectMap<>(128);
 
@@ -754,6 +791,7 @@ public class LambdaAligner {
 			newAnonHashes.clear();
 			fingerprinter.reset();
 			currentClass = null;
+			oldMeta = null;
 			oldGroups.clear();
 			newGroups.clear();
 			childIndex.clear();
@@ -848,10 +886,33 @@ public class LambdaAligner {
 	                           java.util.function.Function<String, byte[]> oldBytecodeResolver,
 	                           java.util.function.Function<String, byte[]> newBytecodeResolver,
 	                           java.util.Set<String> inventedOldNames) {
+		return align(oldBytes, newBytes, oldBytecodeResolver, newBytecodeResolver, inventedOldNames, null);
+	}
+
+	/**
+	 * 对齐主入口（带 loader 维度）。
+	 *
+	 * <p>loader 只用于把同名类在不同类加载器下的元数据分开（见 {@link AlignmentMetaStore}）；
+	 * 传 {@code null} 表示"无 loader 维度"（引导类 / 直接调用场景）。</p>
+	 */
+	public static byte[] align(byte[] oldBytes, byte[] newBytes,
+	                           java.util.function.Function<String, byte[]> oldBytecodeResolver,
+	                           java.util.function.Function<String, byte[]> newBytecodeResolver,
+	                           java.util.Set<String> inventedOldNames,
+	                           ClassLoader loader) {
 		int  oldLen  = oldBytes == null ? -1 : oldBytes.length;
 		int  newLen  = newBytes == null ? -1 : newBytes.length;
 		long oldHash = oldBytes == null ? 0 : java.util.Arrays.hashCode(oldBytes);
 		long newHash = newBytes == null ? 0 : java.util.Arrays.hashCode(newBytes);
+		// PoC：meta 为准。只有"当前代产出指纹 == 本轮 oldBytes 指纹"时才采信元数据；
+		// 否则退回字节码标记（fail-closed：宁可读标记，也不拿错代指纹去配幽灵）。
+		final boolean metaOn = META_SOURCE;
+		AlignmentMetaStore.Entry oldMeta = null;
+		String metaClass = classNameOf(newBytes);
+		if (metaOn && oldBytes != null && oldBytes.length > 0 && metaClass != null) {
+			oldMeta = AlignmentMetaStore.INSTANCE.headMatching(loader, metaClass, oldHash);
+			if (oldMeta != null) inventedOldNames = oldMeta.inventedNames;
+		}
 		// 先发布空结果：下面有"旧字节为空直接返回"的早退路径，不发布会让调用方读到上一轮的值，
 		// 把 A 类的自造名落账到 B 类头上。按类记账同理：本轮没有结论时必须覆盖该类的旧快照。
 		String alignKey = classNameOf(newBytes);
@@ -862,6 +923,7 @@ public class LambdaAligner {
 		try {
 			ctx.reset();
 			ctx.inventedOldNames = inventedOldNames != null ? inventedOldNames : java.util.Set.of();
+			ctx.oldMeta = oldMeta;
 			ctx.newlyInvented.clear();
 			// 与类节点同遍读取形参名：名字是"同一个变量"最硬的证据（槽号会随前序局部变量增删而位移）。
 			// 未带 -g 时两张表为空，后续判据自动退回槽号/类型；同时剥离行号与 LVT 节点，等价于 SKIP_DEBUG。
@@ -1063,6 +1125,8 @@ public class LambdaAligner {
 			                             .alignedClass(oldCn.name)
 			                             .bridgeCount(ctx.bridges.size())
 			                             .missingLvtLambdas(affectedLvt)
+			                             .metaGeneration(ctx.oldMeta == null ? -1 : ctx.oldMeta.generation)
+			                             .suppliedInventedNames(ctx.inventedOldNames)
 			                             .build();
 			publishResult(alignKey != null ? alignKey : oldCn.name, snapshot);
 			return result;
@@ -2975,7 +3039,13 @@ public class LambdaAligner {
 			// 它必须留在 oldGroups 里供孤儿计算复现，但名字已经是"死名字"，
 			// 不能再被当成某个新 lambda 的目标 —— 否则会把它挤到别的名字上去。
 			info.ghost = isGhostMethod(mn);
-			if (info.ghost) info.ghostOriginalHash = readGhostOriginalHash(mn);
+			if (info.ghost) {
+				// meta 命中就读 meta；缺失（首次热更、历史被淘汰、attach 前已加载的类）
+				// 才退回桩体里的 LDC 标记。
+				Long metaHash = (isOld && ctx.oldMeta != null)
+					? ctx.oldMeta.ghostHashes.get(mn.name + mn.desc) : null;
+				info.ghostOriginalHash = metaHash != null ? metaHash : readGhostOriginalHash(mn);
+			}
 			// 上一轮注入的捕获桥：键在新版本里天然没有对应物，必须在幽灵化之前认出来，
 			// 否则第一轮的成果会在第二轮被自己抹掉（见 stepCaptureBridge）。
 			info.bridge = isBridgeMethod(mn);
@@ -6105,6 +6175,29 @@ public class LambdaAligner {
 		}
 		return 0L;
 	}
+
+	/**
+	 * 扫描一份"实际进入 JVM 的字节码"里全部幽灵桩的生前指纹。
+	 *
+	 * <p>{@code name + desc} → 指纹；无标记的桩记 0。供旁路记账在<b>重定义成功后</b>调用：
+	 * 对齐成功不等于 JVM 接受，所以记录不能绑在 {@code align} 里。</p>
+	 */
+	public static Map<String, Long> scanGhostOriginHashes(byte[] effectiveBytes) {
+		Map<String, Long> out = new HashMap<>();
+		if (effectiveBytes == null || effectiveBytes.length == 0) return out;
+		try {
+			ClassNode cn = new ClassNode();
+			new ClassReader(effectiveBytes).accept(cn, 0);
+			for (MethodNode mn : cn.methods) {
+				if (isGhostMethod(mn)) out.put(mn.name + mn.desc, readGhostOriginalHash(mn));
+			}
+		} catch (Throwable ignored) {
+			// 解析失败返回空表：读侧会退回桩体标记，不影响对齐。
+		}
+		return out;
+	}
+
+
 
 	/**
 	 * 幽灵复活：把"原封不动加回来"的 lambda 认领回它生前的槽位。

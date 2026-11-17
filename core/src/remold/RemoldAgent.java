@@ -2929,16 +2929,27 @@ public class RemoldAgent {
 
 		long commitMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - redefineWallEndNanos) : 0L;
 		List<ClassDefinition> successfulDefinitions = new ArrayList<>(definitions.size());
-		long stageBStart = System.nanoTime();
+		List<Class<?>> patchTargets = new ArrayList<>(definitions.size());
 		for (ClassDefinition def : definitions) {
 			if (!redefinedOk.contains(def.getDefinitionClass().getName())) continue;
 			successfulDefinitions.add(def);
-			try {
-				InitFix.afterRedefine(def.getDefinitionClass());
-			} catch (Throwable e) {
-				error("Failed to process InitFix.", e);
-				InitFix.afterRedefineFailed(def.getDefinitionClass());
+			patchTargets.add(def.getDefinitionClass());
+		}
+		long stageBStart = System.nanoTime();
+		// 批次级单次堆遍历（与两阶段 Stage B 同一入口）：本批 K 个类的实例收集只做一次全堆扫描。
+		// 两阶段路径下这些类的 PENDING 已在 Stage B 被摘掉，这里过滤后为空 → 不产生额外遍历。
+		InitFix.beginBatchInstanceCollection(patchTargets);
+		try {
+			for (Class<?> clazz : patchTargets) {
+				try {
+					InitFix.afterRedefine(clazz);
+				} catch (Throwable e) {
+					error("Failed to process InitFix.", e);
+					InitFix.afterRedefineFailed(clazz);
+				}
 			}
+		} finally {
+			InitFix.endBatchInstanceCollection();
 		}
 		BATCH_STAGE_B_MILLIS.addAndGet(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - stageBStart));
 		if (HeapFieldWatch.enabled() && !(needsTwoPhase && TWO_PHASE) && !successfulDefinitions.isEmpty()) {
@@ -3119,6 +3130,13 @@ public class RemoldAgent {
 		Boolean cached = LIVE_INSTANCE_CACHE.get(dotClassName);
 		if (cached != null) return cached;
 
+		// 批次级惰性预探测：同一批里 K 个类各问一次 liveness 就是 K 次全堆遍历，改成
+		// "第一次未命中时对整批做一次遍历"（docs/initfix/05-jvmti-heap.md §「批次存在性探测」）。
+		// 只在布局门显式设了批次上下文时才生效；单类/外部路径行为不变。
+		prefetchBatchLiveness();
+		cached = LIVE_INSTANCE_CACHE.get(dotClassName);
+		if (cached != null) return cached;
+
 		boolean result;
 		long    t0 = System.nanoTime();
 		try {
@@ -3164,10 +3182,67 @@ public class RemoldAgent {
 		BATCH_STAGE_A_MILLIS.set(0);
 		BATCH_STAGE_C_MILLIS.set(0);
 		BATCH_TWOPHASE_SKEL_MILLIS.set(0);
+		LIVENESS_BATCH = Set.of();
+		LIVENESS_BATCH_DONE.set(true);
+	}
+
+	/**
+	 * 声明本批次待判定存活性的类名集合（布局门批次级预探测的作用域）。
+	 *
+	 * <p>布局门只在「布局不兼容」的类上问 liveness，逐类问就是逐次全堆遍历。批次上下文一旦声明，
+	 * 第一次未命中缓存时用 {@link LibTool#hasLiveInstancesBatch(Class[])} 对整批做<b>一次</b>遍历并
+	 * 填满缓存，后续同批类直接命中缓存。传空集合即关闭（单类 / 外部热更路径）。</p>
+	 */
+	static void setLivenessBatch(Collection<String> classNames) {
+		LIVENESS_BATCH = classNames == null || classNames.isEmpty()
+			? Set.of()
+			: Collections.unmodifiableSet(new LinkedHashSet<>(classNames));
+		LIVENESS_BATCH_DONE.set(LIVENESS_BATCH.size() < 2);
+	}
+
+	/** 批次级惰性存活预探测：整批一次遍历，结果填进 {@link #LIVE_INSTANCE_CACHE}。 */
+	private static void prefetchBatchLiveness() {
+		if (LIVENESS_BATCH_DONE.get() || !LIVENESS_BATCH_DONE.compareAndSet(false, true)) return;
+		Set<String> names = LIVENESS_BATCH;
+		if (names.size() < 2) return;
+		List<Class<?>> classes = new ArrayList<>(names.size());
+		List<String>  keys    = new ArrayList<>(names.size());
+		for (String name : names) {
+			Class<?> c = loadedClassesMap.get(name);
+			// 未加载的类没有实例可言：与 hasLiveInstances(String) 的既有语义一致。
+			if (c == null) continue;
+			keys.add(name);
+			classes.add(c);
+		}
+		if (classes.size() < 2) return;
+		long t0 = System.nanoTime();
+		boolean[] live;
+		try {
+			if (!LibTool.initialized() && !LibTool.tryInit()) return;
+			live = LibTool.hasLiveInstancesBatch(classes.toArray(new Class<?>[0]));
+		} catch (Throwable t) {
+			// 批探测失败不改变判定方向：逐类路径（含"扫描不可用 ⇒ 视为有实例"）照常兜住。
+			warn("[ANON-LAYOUT] Batch liveness probe failed (" + t.getClass().getSimpleName()
+			     + (t.getMessage() != null ? ": " + t.getMessage() : "")
+			     + "); falling back to one heap walk per class.");
+			return;
+		}
+		if (live == null || live.length != keys.size()) return;
+		for (int i = 0; i < live.length; i++) {
+			LIVE_INSTANCE_CACHE.put(keys.get(i), live[i]);
+		}
+		long ms = (System.nanoTime() - t0) / 1_000_000;
+		LIVE_INSTANCE_SCAN_MILLIS.addAndGet(ms);
+		if (DEBUG) log("[ANON-LAYOUT] batch instance scan: " + classes.size()
+		               + " class(es) in one heap walk (" + ms + " ms)");
 	}
 
 	/** 实例判定缓存：点分类名 → 是否存活实例。见 {@link #hasLiveInstances}。 */
 	private static final Map<String, Boolean> LIVE_INSTANCE_CACHE       = new ConcurrentHashMap<>();
+	/** 布局门批次级存活探测的类名集合；空集合表示没有批次上下文。 */
+	private static volatile Set<String> LIVENESS_BATCH = Set.of();
+	/** 本轮的批次级存活预探测是否已完成（含"不需要做"）。 */
+	private static final AtomicBoolean LIVENESS_BATCH_DONE = new AtomicBoolean(true);
 	/** 累计的实例扫描耗时（毫秒），用于观察全堆遍历开销。 */
 	static final         AtomicLong           LIVE_INSTANCE_SCAN_MILLIS = new AtomicLong();
 	/** 本批次 {@code inst.redefineClasses} 累计耗时（毫秒）。 */
@@ -4171,6 +4246,9 @@ public class RemoldAgent {
 		}
 
 		Set<String> rejectedHosts = new LinkedHashSet<>();
+		// 批次级存活探测上下文：本批 K 个类各问一次 liveness 就是 K 次全堆遍历，
+		// 第一次未命中缓存时改为整批一次遍历（docs/initfix/05-jvmti-heap.md §「批次存在性探测」）。
+		setLivenessBatch(newBatchBytes.keySet());
 		for (String className : new ArrayList<>(newBatchBytes.keySet())) {
 			if (isBlacklisted(className)) continue;
 			if (rejectedHosts.contains(LayoutDecisionEngine.hostNameOf(className))) continue;
@@ -4781,16 +4859,26 @@ public class RemoldAgent {
 
 		// ---- 阶段 B：真实 InitFix 驱动补丁（必须在阶段 C 之前全部完成） ----
 		long patchStart = System.nanoTime();
+		List<Class<?>> patchTargets = new ArrayList<>(stageAOk.size());
 		for (ClassDefinition def : stageADefinitions) {
-			Class<?> clazz = def.getDefinitionClass();
-			if (!stageAOk.contains(clazz.getName())) continue;
-			try {
-				InitFix.afterRedefine(clazz);
-			} catch (Throwable t) {
-				// afterRedefine 自己已兜住 LinkageError 等致命异常并记账；这里只防御它自身抛错。
-				error("[HOTSWAP-2P] Stage B patch failed for " + clazz.getName()
-				      + "; stage C will still be applied, so unpatched fields stay at defaults.", t);
+			if (stageAOk.contains(def.getDefinitionClass().getName())) patchTargets.add(def.getDefinitionClass());
+		}
+		// 批次级单次堆遍历：本批 K 个类的存活实例收集从 K 次全堆扫描收敛为 1 次
+		// （docs/initfix/05-jvmti-heap.md §「批次实例收集」）。收集点在 redefine 生效之后、
+		// 补丁执行之前——提前收集会漏掉窗口期新建的实例（docs/status.md 风险 6）。
+		InitFix.beginBatchInstanceCollection(patchTargets);
+		try {
+			for (Class<?> clazz : patchTargets) {
+				try {
+					InitFix.afterRedefine(clazz);
+				} catch (Throwable t) {
+					// afterRedefine 自己已兜住 LinkageError 等致命异常并记账；这里只防御它自身抛错。
+					error("[HOTSWAP-2P] Stage B patch failed for " + clazz.getName()
+					      + "; stage C will still be applied, so unpatched fields stay at defaults.", t);
+				}
 			}
+		} finally {
+			InitFix.endBatchInstanceCollection();
 		}
 		long patchMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - patchStart);
 		BATCH_STAGE_B_MILLIS.addAndGet(patchMs);

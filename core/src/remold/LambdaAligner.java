@@ -1,6 +1,7 @@
 package remold;
 
 import remold.vcs.AlignmentMetaStore;
+import remold.vcs.DerivedDataCache;
 import remold.util.*;
 import org.objectweb.asm.*;
 import org.objectweb.asm.commons.*;
@@ -2833,6 +2834,35 @@ public class LambdaAligner {
 	/**
 	 * 收集方法体内直接引用的属于当前宿主类的匿名类内部名。
 	 */
+	/**
+	 * PR2 派生数据开关：关闭后所有按 blob 的派生缓存只做透传（对照/排障用）。
+	 * 默认开启；关闭不改变任何输出，只改变是否命中缓存。
+	 */
+	private static final boolean DERIVED_DATA_CACHE =
+		Boolean.parseBoolean(System.getProperty("remold.vcs.derived_cache", "true"));
+
+	/**
+	 * 按 blob 内容缓存的"方法 → 引用的匿名类"索引（Per-Blob Derived Data）。
+	 *
+	 * <p>纯函数：只由 {@code blob}（及其自带类名）决定，与轮次、loader、resolver 状态无关；
+	 * 值是不可变 {@code Map<String, Set<String>>}，不持有 {@code ClassNode}/{@code Class}/{@code ClassLoader}。
+	 * 连续热更中"上一轮的 new 字节 == 这一轮的 old 字节"时，old 侧可直接复用该索引。</p>
+	 */
+	static Map<String, Set<String>> deriveAnonRefs(byte[] bytes, ClassNode cn) {
+		if (!DERIVED_DATA_CACHE) return collectAnonRefs(cn);
+		long estimate = Math.max(64L, cn.methods.size() * 48L);
+		return DerivedDataCache.get("anonRefs", bytes, estimate, () -> collectAnonRefs(cn));
+	}
+
+	private static Map<String, Set<String>> collectAnonRefs(ClassNode cn) {
+		Map<String, Set<String>> out = new HashMap<>();
+		for (MethodNode mn : cn.methods) {
+			Set<String> refs = referencedAnonClasses(mn, cn.name);
+			if (refs != null && !refs.isEmpty()) out.put(mn.name + mn.desc, Set.copyOf(new HashSet<>(refs)));
+		}
+		return Map.copyOf(out);
+	}
+
 	private static Set<String> referencedAnonClasses(MethodNode mn, String hostClassName) {
 		Set<String> set = null;
 		for (AbstractInsnNode insn : mn.instructions) {
@@ -2979,8 +3009,11 @@ public class LambdaAligner {
 		Map<String, Long> anonHashes = isOld ? ctx.oldAnonHashes : ctx.newAnonHashes;
 		if (resolver != null) {
 			Set<String> visiting = new HashSet<>();
+			Map<String, Set<String>> anonRefs = deriveAnonRefs(bytes, cn);
 			for (MethodNode mn : cn.methods) {
-				for (String anon : referencedAnonClasses(mn, cn.name)) {
+				Set<String> refs = anonRefs.get(mn.name + mn.desc);
+				if (refs == null) continue;
+				for (String anon : refs) {
 					String canonical = anon.replace('.', '/');
 					if (!anonHashes.containsKey(canonical)) {
 						Long h = AnonClassHasher.hash(canonical, null, cn.name, resolver, anonHashes, visiting, 0);

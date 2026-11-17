@@ -366,7 +366,22 @@
 | 离线回放包导出（`-Dremold.vcs.pack_dir`） | ✅ | §5.3 / §7.4 | `core/src/remold/vcs/BytecodePack.java` | E2E `vcsPackProbe` 18/18（真实 agent + DCEVM redefine → 导出 → 逐字节重放 + 关闭记录对照） |
 | 批次原子提交判据 | ✅ | §5.3 / §8.1 | `core/src/remold/vcs/VcsCommitGate.java` + `RemoldAgent.commitVcsBatch` | 单测 `VcsCommitGateTest` 5 例真值表；变异"部分生效也提交"→ 对应用例变红 |
 | 两阶段只在 Stage C 记一代 | ✅ | §5.3 | `RemoldAgent.processChangesBatch` / `applyTwoPhase` | E2E `vcsTwoPhaseProbe`：真实两阶段批次下 stage A 计数器前进、head generation 精确 +1、存量实例新增字段补成 42；`LAMBDA_STRICT` 拒绝批次 generation 不变 |
-| loader GC 后 head 清理的确定性用例 | ⬜ | §2.3 | 待 PR2 | head/history 仅挂在弱键 `LoaderSlot` 内、无反向强引用；`System.gc` 轮询脆弱，PR2 配确定性回收钩子 |
+| loader GC 后 head 清理的确定性用例 | ✅ | §2.3 | `AlignmentMetaStore.historyEntries()`（按存活槽实时重算） | `AlignmentMetaStoreBudgetTest`：①`WeakReference` 证明 loader 真被回收（store 不持强引用）；②回收后 `historyCount()==0`（无幽灵配额）；③新 loader 的条目不再被死 loader 的配额挤掉。GC 轮询用 `Assumptions` 兜底：JVM 未在窗口内回收时跳过而非假绿 |
+
+---
+
+### 1.2 字节码 Changeset 派生数据缓存（PR2）
+
+设计规格：[`docs/topology/16-bytecode-changeset-vcs.md`](topology/16-bytecode-changeset-vcs.md) §3.7；
+实测读数：[`docs/topology/17-derived-data-cache-probe.md`](topology/17-derived-data-cache-probe.md)
+
+| 机制 / 条目 | 状态 | 规范章节 | 落地位置 | 验收证据与决策依据 |
+|:---|:---:|:---|:---|:---|
+| 内容寻址派生缓存（`(kind, SHA-256(blob))`、双预算 LRU、compute-then-publish） | ✅ | §3.2 / §3.7 | `core/src/remold/vcs/DerivedDataCache.java` | 单测 `DerivedDataCacheTest` 8 例：内容寻址命中/种类隔离/条目与字节预算（预算可覆盖）/关闭透传/预计算键与字节键共用条目/未知 blob `peek` 为空；默认 `remold.vcs.derived_cache=true`，关闭时零行为变化 |
+| 对齐侧：按 `(blob, 方法 name+desc)` 缓存消费者数据流（`findConsumers` 的 ASM `Analyzer`） | ✅ | §3.7 / §3.5 | `LambdaAligner.consumersOf` / `deriveConsumerTags` / `hasConsumerSite` | 值按**指令流下标**对齐（命中后在本轮新解析出的节点上重建，长度不一致直接退回重算）；`ACTIVE_MUTATION` 非空时旁路缓存；**位点预判**：方法体内无"本类 lambda 调用位点"时既不跑数据流也不入池（实测每类 `align()` median 2.02→1.01 ms、条目 4654→495）；`DerivedDataEquivalenceTest` 6 例（开/关字节相等 + `AlignmentResult` 全字段相等 + 换序遍历 + 关闭不写条目 + 键维度/描述符维度 + 直接调用合成方法的位点） |
+| 读者侧：按 blob 缓存类型世界与常量池引用 | ✅ | §3.7 / [`initfix/07`](initfix/07-p05-probe-results.md) §13.6 | `RemovedMemberReaders.describe` / `refs` | `DerivedDataEquivalenceTest.readerFactsCacheIsEquivalent`：`universe()`/`refs()` 开/关逐项相等、pre/post 两世界共用条目（命中数 = 类数）；`ReaderScanProbe` 新增开/关双档同轮读数 |
+| InitFix 侧按 blob 缓存字节解析（`InitFix.NestView` 字段写索引 / `HierarchyTreeOracle.readClassBytes`） | ⬜ | §3.7 | 待测量后决定 | 本切片未取到 InitFix 侧读数：对齐侧消融显示"消费者数据流之外的全部派生"只占约 8%，据此先只缓存对齐侧与读者侧；InitFix 侧的解析量级尚未实测，不做无读数的实现 |
+| 派生缓存粒度与预算的决定依据 | ✅ | §3.7 | `tests/src/DerivedDataBench.java` | 同轮 min/median/max：`findConsumers` 消融占对齐耗时 89～92%；最终实现下真实批次（旧侧命中）对齐 1.52×（k=8）/1.77×（整语料）、读者侧 2.4×～3.3×；条目预算小于一轮工作集时命中率退化为 0（读数与边界见 [`17-derived-data-cache-probe.md`](topology/17-derived-data-cache-probe.md)） |
 
 ---
 

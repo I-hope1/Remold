@@ -10,6 +10,7 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import remold.ref.RemovedMemberReaders;
 import remold.ref.RemovedMemberReaders.Ref;
+import remold.vcs.DerivedDataCache;
 
 import java.io.File;
 import java.io.InputStream;
@@ -70,6 +71,7 @@ public final class ReaderScanProbe {
 		measureProjectClasses(root);
 		measureWholeCorpus();
 		measureWiringPipeline(root);
+		measureDerivedCacheOnOff(root);
 
 		System.out.println("\n=== READER SCAN PROBE SUMMARY: passed=" + passed + ", failed=" + failed + " ===");
 		if (failed > 0) System.exit(1);
@@ -311,6 +313,85 @@ public final class ReaderScanProbe {
 		System.out.printf("   classes=%d%n", bytes.size());
 		reportNanos("universe (ASM describe)", universeNanos);
 		reportNanos("find (refs + resolve)", findNanos);
+	}
+
+	/**
+	 * 派生数据缓存开/关对照（PR2：按 blob 内容寻址的派生量）。
+	 *
+	 * <p>同一 JVM、同一语料、<b>逐轮交替</b>测量：关闭档每轮都从零派生（未缓存路径），开启档只在
+	 * 第一轮前清空（之后各轮命中）。这正是热更的真实形态——多数工程类在相邻两批之间没有改动，
+	 * 但读者扫描每次都要为它们重建类型世界、重扫常量池。</p>
+	 *
+	 * <p>等价断言：两档的类型世界与引用集合必须完全一致；若不一致说明缓存键漏了维度，
+	 * 这种缺陷不会抛异常，只会在下游静默错判。</p>
+	 */
+	private static void measureDerivedCacheOnOff(Path root) throws Exception {
+		System.out.println("\n--- [F] derived data cache on/off (reader corpus) ---");
+		Map<String, byte[]> corpus = new LinkedHashMap<>();
+		for (byte[] b : collectProjectClasses(root, Integer.MAX_VALUE)) {
+			corpus.put(new ClassReader(b).getClassName(), b);
+		}
+		if (corpus.isEmpty()) {
+			System.out.println("   [SKIP] no project classes found under " + root);
+			return;
+		}
+		long bytes = 0;
+		for (byte[] b : corpus.values()) bytes += b.length;
+		System.out.printf("   corpus=%d classes, %.2f MiB; entries_cap=%d bytes_cap=%.0fKiB%n",
+		                  corpus.size(), bytes / 1024.0 / 1024.0,
+		                  DerivedDataCache.maxEntries(), DerivedDataCache.maxBytes() / 1024.0);
+
+		long[] off = new long[3];
+		long[] on = new long[3];
+		DerivedDataCache.reset();
+		boolean warmed = false;
+		for (int round = 0; round < off.length; round++) {
+			System.setProperty("remold.vcs.derived_cache", "false");
+			long t0 = System.nanoTime();
+			scanUniverseAndFind(corpus);
+			off[round] = System.nanoTime() - t0;
+
+			System.setProperty("remold.vcs.derived_cache", "true");
+			if (!warmed) {
+				DerivedDataCache.reset();
+				warmed = true;
+			}
+			t0 = System.nanoTime();
+			scanUniverseAndFind(corpus);
+			on[round] = System.nanoTime() - t0;
+			long[] stats = DerivedDataCache.stats();
+			System.out.printf("   round %d: off=%.2fms  on=%.2fms  (hits=%d misses=%d evictions=%d entries=%d bytes=%.0fKiB)%n",
+			                  round + 1, off[round] / 1e6, on[round] / 1e6,
+			                  stats[0], stats[1], stats[2], stats[3], stats[4] / 1024.0);
+		}
+		reportNanos("cache off", off);
+		reportNanos("cache on (warm)", Arrays.copyOfRange(on, 1, on.length));
+
+		System.setProperty("remold.vcs.derived_cache", "false");
+		DerivedDataCache.reset();
+		Map<String, RemovedMemberReaders.TypeInfo> worldOff = RemovedMemberReaders.universe(corpus);
+		Map<String, Set<Ref>> refsOff = refsOf(corpus);
+		System.setProperty("remold.vcs.derived_cache", "true");
+		DerivedDataCache.reset();
+		Map<String, RemovedMemberReaders.TypeInfo> worldOn = RemovedMemberReaders.universe(corpus);
+		Map<String, Set<Ref>> refsOn = refsOf(corpus);
+		boolean same = worldOff.equals(worldOn) && refsOff.equals(refsOn);
+		check(same, "derived cache on/off must yield identical type world and refs ("
+		            + corpus.size() + " classes)");
+	}
+
+	private static void scanUniverseAndFind(Map<String, byte[]> corpus) {
+		Map<String, RemovedMemberReaders.TypeInfo> world = RemovedMemberReaders.universe(corpus);
+		RemovedMemberReaders.find(world, world, corpus,
+		                          List.of(new RemovedMemberReaders.RemovedMember("p/DoesNotExist", "nope", "I", true, false)));
+	}
+
+	private static Map<String, Set<Ref>> refsOf(Map<String, byte[]> corpus) {
+		Map<String, Set<Ref>> out = new LinkedHashMap<>();
+		for (Map.Entry<String, byte[]> e : corpus.entrySet()) {
+			out.put(e.getKey(), Set.copyOf(RemovedMemberReaders.refs(e.getValue())));
+		}
+		return out;
 	}
 
 	private static void scanClassPathEntries(long[] acc) throws Exception {

@@ -339,6 +339,36 @@ VCS 层在此之上提供按 `(ClassKey, seq)` 的持久化读取，作为回放
 - 写入协议不变：默认条件 CAS（`KIND_CONDITIONAL`），仅 OVERWRITE 用 `KIND_FORCE`；
   `float/double` 走 raw bits（`compareAndSetInt/Long`）。
 
+### 3.7 派生缓存的粒度与键维度
+
+本层缓存的是**单份 blob 的纯派生量**，而不是"整轮结论"。粒度与键维度按下表固定，任何新增派生种类
+必须先在表中登记维度，再实现：
+
+| 派生种类 | 粒度（键） | 值形态（跨轮可复用） | 判据/备注 |
+|:--|:--|:--|:--|
+| `anonRefs` | `(blob, 类)` | `Map<方法名+描述符, 匿名类内部名集合>` | 只由该方法体的引用目标决定，与 resolver 提供的匿名类字节无关 |
+| `alignConsumers` | `(blob, 方法 name+desc)` | 按**指令流下标**对齐的消费者标记表 | `findConsumers` 的输出键是本轮解析出的 `AbstractInsnNode`，不能跨轮持有，因此换成下标；命中后在本轮新解析出的节点上按下标重建 |
+| `readerTypeInfo` | `(blob, 类)` | `TypeInfo`（不可变记录） | 只读类结构，跳过代码与调试信息 |
+| `readerRefs` | `(blob, 类)` | 不可变 `Ref` 列表 | 只读常量池（tag 9/10/11） |
+
+硬约束：
+
+- **不得缓存 `align()` 整包结果**，也不得用 `(preAlignHash, oldEffHash)` 之类"两端哈希"做键：
+  对齐输出还取决于 `inventedOldNames`、外部匿名类字节、策略开关与 `LAST_RESULT` 发布副作用，
+  用两端哈希会静默错配。内容寻址到**单份 blob** 则没有这个问题。
+- 值的不可变性是硬要求：不得持有 `Class`/`ClassLoader`/`ClassNode`/`AbstractInsnNode`
+  以及任何"本轮才有效"的可变对象。派生器在计算期内可以使用这些对象，但返回前必须剥离。
+- **带语义副作用的开关必须旁路缓存**：设计级变异开关（`ACTIVE_MUTATION`）非空时一律走未缓存路径，
+  否则变异档位之间的结果会互相污染。
+- **算法版本维度不在此层**：本层是进程内纯派生，输入只有字节与进程内固定的算法（ASM/JDK 版本随进程固定），
+  因此不需要 §3.2 的 `algoVersion`；跨版本/跨进程复用由导出包与离线回放承担（§7）。
+- **预算语义**：字节预算承担内存上限，条目预算只作"小值刷屏"的兜底。条目预算必须能覆盖**一轮工作集**，
+  否则 LRU 每轮都把上一轮的条目冲干净，命中率退化为 0、缓存只剩开销（实测边界见
+  [`17-derived-data-cache-probe.md`](17-derived-data-cache-probe.md)）。
+- **等价判据**：同一输入下缓存开/关必须①产物字节逐字节相等、②`AlignmentResult` 全字段相等、
+  ③换序遍历（`TEST_REVERSE_GROUP_ORDER`）下仍相等，且用例必须证明缓存**确实命中过**（否则等价性
+  可以靠"缓存从未生效"空转成立）。
+
 ---
 
 ## 4. 三项安全约束

@@ -1,6 +1,7 @@
 package remold;
 
 import remold.vcs.AlignmentMetaStore;
+import remold.vcs.DerivedDataCache;
 import remold.util.*;
 import org.objectweb.asm.*;
 import org.objectweb.asm.commons.*;
@@ -2831,8 +2832,28 @@ public class LambdaAligner {
 	 * @return 该类的 {@link ClassNode}
 	 */
 	/**
-	 * 收集方法体内直接引用的属于当前宿主类的匿名类内部名。
+	 * 按 blob 内容缓存的"方法 → 引用的匿名类"索引（Per-Blob Derived Data）。
+	 *
+	 * <p>纯函数：只由 {@code blob}（及其自带类名）决定，与轮次、loader、resolver 状态无关；
+	 * 值是不可变 {@code Map<String, Set<String>>}，不持有 {@code ClassNode}/{@code Class}/{@code ClassLoader}。
+	 * 连续热更中"上一轮的 new 字节 == 这一轮的 old 字节"时，old 侧可直接复用该索引。</p>
 	 */
+	static Map<String, Set<String>> deriveAnonRefs(String blobKey, ClassNode cn) {
+		if (blobKey == null) return collectAnonRefs(cn);
+		long estimate = Math.max(64L, cn.methods.size() * 48L);
+		return DerivedDataCache.getByKey("anonRefs", blobKey, estimate, () -> collectAnonRefs(cn));
+	}
+
+	private static Map<String, Set<String>> collectAnonRefs(ClassNode cn) {
+		Map<String, Set<String>> out = new HashMap<>();
+		for (MethodNode mn : cn.methods) {
+			Set<String> refs = referencedAnonClasses(mn, cn.name);
+			if (refs != null && !refs.isEmpty()) out.put(mn.name + mn.desc, Set.copyOf(new HashSet<>(refs)));
+		}
+		return Map.copyOf(out);
+	}
+
+	/** 收集方法体内直接引用的、属于当前宿主类的匿名类内部名。 */
 	private static Set<String> referencedAnonClasses(MethodNode mn, String hostClassName) {
 		Set<String> set = null;
 		for (AbstractInsnNode insn : mn.instructions) {
@@ -2953,9 +2974,112 @@ public class LambdaAligner {
 		return map;
 	}
 
+	/**
+	 * 按 blob 缓存的"方法 → 每条指令的消费者标记"索引（Per-Blob Derived Data）。
+	 *
+	 * <p><b>为什么缓存这一项</b>：{@link #findConsumers} 用 ASM {@code Analyzer} 做反向数据流分析，
+	 * 是 {@code align()} 里唯一的重量级派生（占对齐耗时的绝大部分，读数见
+	 * {@code docs/topology/16-bytecode-changeset-vcs.md} §3.7）。它的输出只由「这份 blob 的这个方法」决定，
+	 * 与轮次、loader、{@code inventedOldNames}、resolver 都无关，因此可以跨轮复用。</p>
+	 *
+	 * <p><b>为什么键里必须带方法、值里必须带指令序号</b>：{@link #findConsumers} 返回值的键是
+	 * {@code AbstractInsnNode}——那是<b>本轮</b>解析出来的可变节点，不能跨轮持有。所以缓存值改存
+	 * "按指令流下标对齐的标记表"，命中后用本轮新解析出的节点按下标重建映射。方法维度不能省：
+	 * 同一份 blob 里不同方法的标记表完全不同，漏掉方法维度会让标记整表错位。</p>
+	 */
+	public static final String CONSUMER_CACHE_KIND = "alignConsumers";
+
+	/**
+	 * 单个方法的消费者标记表：按指令流下标对齐，{@code null} 表示该指令不是消费者入口。
+	 *
+	 * <p>粒度选在<b>方法</b>而不是"整类一次性派生"：整类急切派生会在未命中时把类里所有方法都分析一遍，
+	 * 而扫描只走得到其中一部分；实测"旧侧命中 + 新侧未命中"的真实批次形态下，整类粒度的净收益被
+	 * 未命中侧的过度派生吃掉（{@code DerivedDataBench} 的读数）。按方法派生的未命中量恰好等于
+	 * 扫描真正需要的那几个方法。</p>
+	 */
+	private static List<String> deriveConsumerTags(String owner, MethodNode mn) {
+		Map<AbstractInsnNode, String> byNode = findConsumers(owner, mn);
+		if (byNode.isEmpty()) return List.of();
+		AbstractInsnNode[] insns = mn.instructions.toArray();
+		String[] tags = new String[insns.length];
+		boolean any = false;
+		for (int i = 0; i < insns.length; i++) {
+			String tag = byNode.get(insns[i]);
+			if (tag == null) continue;
+			tags[i] = tag;
+			any = true;
+		}
+		return any ? Collections.unmodifiableList(Arrays.asList(tags)) : List.of();
+	}
+
+	/**
+	 * 该方法体里是否存在"消费者标记会被读"的指令位点。
+	 *
+	 * <p>调用方只在<b>本类的 lambda 调用位点</b>（{@code invokedynamic} 的引导参数指向本类方法、
+	 * 或 {@code MethodInsnNode} 指向本类且名字命中合成名模式）上读消费者标记；一个方法里没有这种位点时，
+	 * 它的标记表<b>永远不会被读到</b>。</p>
+	 *
+	 * <p>所以这一层预判必须与读取端逐字对齐：判据偏移一位就会让某类方法静默丢掉消费者证据。
+	 * 超大类里通常只有少数方法写了 lambda，其余方法若照常跑 ASM {@code Analyzer}，既白白消耗 CPU，
+	 * 又会挤占缓存条目池。</p>
+	 */
+	private static boolean hasConsumerSite(ClassNode cn, MethodNode mn) {
+		if (mn.instructions == null) return false;
+		for (AbstractInsnNode n : mn.instructions) {
+			if (n instanceof InvokeDynamicInsnNode indy) {
+				if (indy.bsmArgs == null || indy.bsmArgs.length < 2) continue;
+				if (indy.bsmArgs[1] instanceof Handle h && cn.name.equals(h.getOwner())
+				    && MethodFingerprinter.isSyntheticName(h.getName())) {
+					return true;
+				}
+			} else if (n instanceof MethodInsnNode m) {
+				if (cn.name.equals(m.owner) && MethodFingerprinter.isSyntheticName(m.name)) return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * {@link #findConsumers} 的按方法缓存版：命中时按指令下标重建本轮节点映射，未命中走原实现。
+	 *
+	 * <p>缓存键 = {@code (blob 内容, 方法 name+desc)}：方法维度必须带<b>描述符</b>（同名重载是合法形态，
+	 * 只用名字会互相覆盖），且同一份 blob 里不同方法的标记表完全不同，漏掉维度会让标记整表错位。
+	 * 值里存下标而不是 {@code AbstractInsnNode}：节点是本轮解析出来的可变对象，跨轮持有既会过期也会驻留整棵解析树。</p>
+	 *
+	 * <p>以下情形一律走原实现（不读不写缓存）：方法里没有消费者位点（标记永远不会被读，
+	 * 见 {@link #hasConsumerSite}）、缓存已关闭、blob 键不可用、{@link #ACTIVE_MUTATION} 非空
+	 * ——最后一项是设计级变异测试的钩子，其结果不得跨变异档位复用。</p>
+	 */
+	private static Map<AbstractInsnNode, String> consumersOf(String blobKey, ClassNode cn, MethodNode mn) {
+		if (!hasConsumerSite(cn, mn)) return Collections.emptyMap();
+		if (blobKey == null || !DerivedDataCache.enabled()
+		    || (ACTIVE_MUTATION != null && !ACTIVE_MUTATION.isEmpty())) {
+			return findConsumers(cn.name, mn);
+		}
+		List<String> tags = DerivedDataCache.getByKey(
+			CONSUMER_CACHE_KIND + '/' + mn.name + mn.desc, blobKey,
+			Math.max(64L, 16L + 8L * mn.instructions.size()),
+			() -> deriveConsumerTags(cn.name, mn));
+		if (tags.isEmpty()) return Collections.emptyMap();
+		AbstractInsnNode[] insns = mn.instructions.toArray();
+		if (tags.size() != insns.length) {
+			// 指令流与标记表对不上：说明缓存条目与本次解析口径不一致（例如未来某处换了 ClassReader 标志）。
+			// 这种情形绝不能按下标硬映射——直接退回重算，宁可少一次命中，也不能让标记错位。
+			return findConsumers(cn.name, mn);
+		}
+		Map<AbstractInsnNode, String> out = new HashMap<>();
+		for (int i = 0; i < insns.length; i++) {
+			String tag = tags.get(i);
+			if (tag != null) out.put(insns[i], tag);
+		}
+		return out;
+	}
+
 	private static ClassNode scan(byte[] bytes, MatchContext ctx, boolean isOld,
 	                              Function<String, byte[]> resolver,
 	                              Map<String, String[]> paramNamesOut) {
+		// 同一份 blob 在本次派生里会被查多次（匿名类索引、消费者数据流），键只算一次。
+		String blobKey = DerivedDataCache.blobKey(bytes);
 		ClassNode cn = new ClassNode();
 		// SKIP_FRAMES 不解析 StackMapTable；visitSource/visitLineNumber/visitLocalVariable
 		// 被剥离以保持与 SKIP_DEBUG 相同的 ClassNode 内容，同时在同一遍中收集 lambda 形参名。
@@ -2979,8 +3103,11 @@ public class LambdaAligner {
 		Map<String, Long> anonHashes = isOld ? ctx.oldAnonHashes : ctx.newAnonHashes;
 		if (resolver != null) {
 			Set<String> visiting = new HashSet<>();
+			Map<String, Set<String>> anonRefs = deriveAnonRefs(blobKey, cn);
 			for (MethodNode mn : cn.methods) {
-				for (String anon : referencedAnonClasses(mn, cn.name)) {
+				Set<String> refs = anonRefs.get(mn.name + mn.desc);
+				if (refs == null) continue;
+				for (String anon : refs) {
 					String canonical = anon.replace('.', '/');
 					if (!anonHashes.containsKey(canonical)) {
 						Long h = AnonClassHasher.hash(canonical, null, cn.name, resolver, anonHashes, visiting, 0);
@@ -3130,7 +3257,7 @@ public class LambdaAligner {
 				hostKey = "M:" + mn.name + mn.desc;
 			}
 
-			Map<AbstractInsnNode, String> consumers = findConsumers(cn.name, mn);
+			Map<AbstractInsnNode, String> consumers = consumersOf(blobKey, cn, mn);
 			List<SyntheticInfo> seq = null;
 			for (AbstractInsnNode n : mn.instructions) {
 				String callee = null;
@@ -3184,7 +3311,7 @@ public class LambdaAligner {
 			if (info == null || !info.renameable || info.ghost || info.bridge) continue;
 			// 孤立/死代码不分配正向 callOrder，保持 -1 以标记不可达
 			String hostKey = "L:" + info.hash + (!isMutationActive("1") && info.consumer != null && !info.consumer.isEmpty() ? ":" + info.consumer : "");
-			Map<AbstractInsnNode, String> consumers = findConsumers(cn.name, mn);
+			Map<AbstractInsnNode, String> consumers = consumersOf(blobKey, cn, mn);
 			List<SyntheticInfo> seq = null;
 			for (AbstractInsnNode n : mn.instructions) {
 				String callee = null;

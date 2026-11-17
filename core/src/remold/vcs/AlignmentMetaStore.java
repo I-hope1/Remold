@@ -133,9 +133,14 @@ public final class AlignmentMetaStore {
 		return n;
 	}
 
-	/** 历史条目总数（不含 head）。 */
+	/**
+	 * 历史条目总数（不含 head），按<b>当前仍存活</b>的 loader 槽实时统计。
+	 *
+	 * <p>必须实时算：{@code WeakHashMap} 在 loader 被回收后只是悄悄摘槽，不会回调本类扣减计数器；
+	 * 若返回缓存计数，死 loader 会永久占用全局预算配额（PR2 已修，见 {@code historyBudgetSpent}）。</p>
+	 */
 	public synchronized int historyCount() {
-		return historyEntries;
+		return liveHistoryEntries();
 	}
 
 	/** 读取该键的当前代；不存在返回 {@code null}。 */
@@ -215,7 +220,20 @@ public final class AlignmentMetaStore {
 		return slots.computeIfAbsent(loader, k -> new LoaderSlot(nextLoaderId++));
 	}
 
+	/** 只统计仍然可达（loader 未回收）的历史条目。 */
+	private int liveHistoryEntries() {
+		int n = 0;
+		for (Deque<Entry> d : bootstrapSlot.history.values()) n += d.size();
+		for (LoaderSlot s : slots.values()) {
+			for (Deque<Entry> d : s.history.values()) n += d.size();
+		}
+		return n;
+	}
+
 	private void trimGlobalBudget() {
+		// 先按存活槽重算：死 loader 的条目已随槽消失，缓存的 historyEntries 会偏高，
+		// 若不重算会把活着的条目误淘汰。
+		historyEntries = liveHistoryEntries();
 		if (historyEntries <= HISTORY_MAX_ENTRIES) return;
 		List<Object[]> all = new ArrayList<>();
 		for (Map.Entry<String, Deque<Entry>> en : bootstrapSlot.history.entrySet()) {

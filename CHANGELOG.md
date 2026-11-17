@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **按 blob 内容寻址的派生数据缓存（PR2）**：新增 `remold.vcs.DerivedDataCache`
+  （键 `(kind, SHA-256(blob))`，双预算 LRU；值必须不可变且不得持有 `Class`/`ClassLoader`/`ClassNode`；
+  提供 `-Dremold.vcs.derived_cache`（默认 `true`）与 `-Dremold.vcs.derived_cache_entries` /
+  `-Dremold.vcs.derived_cache_bytes` 两个预算覆盖口）。缓存的是**单份 blob 的纯派生量**，不是
+  `align()` 整包结果（后者还取决于 `inventedOldNames`、外部匿名类字节、策略开关与 `LAST_RESULT`
+  副作用，两端哈希做键会静默错配）。
+  - 对齐侧：按 `(blob, 方法 name+desc)` 缓存 `findConsumers` 的 ASM `Analyzer` 数据流结果，值按
+    **指令流下标**对齐（命中后在本轮新解析出的 `AbstractInsnNode` 上按下标重建，长度不一致退回重算），
+    设计级变异开关 `ACTIVE_MUTATION` 非空时旁路缓存；同轮实测该数据流占 `align()` 耗时的 89～92%，
+    真实批次形态（旧侧命中、新侧未命中）端到端 1.52×（k=8 类）/ 1.77×（整语料）。
+  - 位点预判：方法体内没有"本类 lambda 调用位点"（`invokedynamic` 指向本类合成方法，或直接调本类合成
+    方法）时，既不跑数据流也不写入缓存条目。实测每类 `align()` median 2.02→**1.01 ms**、全命中时的
+    缓存条目 4654→**495**、字节占用 2554→**588 KiB** —— 这部分收益与缓存无关，属"不再对无用方法做分析"。
+  - 读者侧：`RemovedMemberReaders.describe` / `refs` 按 blob 缓存类型世界与常量池引用（pre/post 两个
+    世界共用同一条目），整语料重扫 2.4×～3.3×（口径敏感）。
+  - 等价与判定力：`DerivedDataEquivalenceTest` 断言缓存开/关的产物字节、`AlignmentResult` 全字段、
+    换序遍历（`TEST_REVERSE_GROUP_ORDER`）全部相等，并要求缓存**确实命中**（防空转绿）；键维度按
+    `(blob, 方法 name+desc)` 逐条核对（名字键必须查不到、无位点方法不占条目）；另用定向夹具钉住
+    "预判偏窄"（方法体直接调用本类合成方法也算位点）；
+    `DerivedDataBench` 给出同轮 min/median/max 与预算边界读数。
+  - 预算默认按实测校准：**条目预算必须覆盖一轮工作集**，否则 LRU 每轮把上一轮条目冲干净、命中率
+    退化为 0（实测见 [`docs/topology/17-derived-data-cache-probe.md`](docs/topology/17-derived-data-cache-probe.md)）。
+    默认条目上限由 512 提到 16384，字节上限保持 8 MiB —— 内存上限由字节预算承担。
+  - 规格见 [`docs/topology/16-bytecode-changeset-vcs.md`](docs/topology/16-bytecode-changeset-vcs.md) §3.7。
+
 - **字节码 Changeset 旁路记录（PR1）**：新增 `remold.vcs.AlignmentMetaStore`（按
   `(loader identity, 类名)` 记录每一代"实际进 JVM 的字节"与对齐契约字段；loader 弱键槽 + 单调 `long` 代号，
   head 不随历史预算淘汰、loader 回收即清理）、`remold.vcs.BytecodePack` 离线回放包

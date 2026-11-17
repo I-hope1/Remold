@@ -232,6 +232,13 @@ public class LibTool {
 		return 1 << 18;
 	}
 
+	/** 是否直接由当前加载的 native 库提供 2^18 分桶规划（未回落到 Java 镜像）。 */
+	public static boolean enumerationBucketPlanIsNative() {
+		if (!initialized) init();
+		enumerationBucketWindow();
+		return enumPlanSupported;
+	}
+
 	/**
 	 * 实例枚举分桶规划：桶数 = ceil(count / window)，上限 64；超过上限时尾部实例进入最后一桶。
 	 * 与 native 侧 {@code enumBucketCount} 保持同一实现，旧版 native 库缺少导出符号时走纯 Java 兜底。

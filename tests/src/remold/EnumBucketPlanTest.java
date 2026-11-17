@@ -6,7 +6,7 @@ import remold.util.LibTool;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * 实例枚举分桶规划（窗口固定 2^17、桶数上限 64）的纯函数测试。
+ * 实例枚举分桶规划（窗口固定 2^18、桶数上限 64）的纯函数测试。
  *
  * <p>native 侧 {@code enumBucketCount} 与 {@link LibTool#enumerationBucketCount(long)} 必须是同一实现；
  * 大 N 的上限路径用真实实例无法覆盖（会先耗尽堆），因此在这里以纯函数形式验证。</p>
@@ -23,8 +23,10 @@ public class EnumBucketPlanTest {
 	}
 
 	@Test
-	void windowIsTwoToThe17() {
+	void windowIsTwoToThe18() {
 		if (LibTool.initialized()) {
+			assertTrue(LibTool.enumerationBucketPlanIsNative(),
+				"Expected native enumeration bucket plan (not Java fallback)");
 			assertEquals(WINDOW, LibTool.enumerationBucketWindow());
 		}
 	}

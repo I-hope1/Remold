@@ -173,6 +173,12 @@ test {
 		jvmArgs "--enable-native-access=ALL-UNNAMED"
 	}
 	systemProperty "hstest.fixtures", hstestFixtureRoot.get().asFile.absolutePath
+	["hstest.expectedOsArch", "hstest.requireNativeBucketPlan"].each { prop ->
+		def val = System.getProperty(prop) ?: project.findProperty(prop)?.toString()
+		if (val != null && !val.isEmpty()) {
+			systemProperty prop, val
+		}
+	}
 	if (nativeLibPath != null) {
 		systemProperty "remold.path.libtool", nativeLibPath
 	}

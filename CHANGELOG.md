@@ -89,7 +89,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 实测（同一进程、逐轮交替、21 轮，本机 aarch64、JDK 25.0.4.1）：K=8 collect median
     93.6→45.6 ms（full 97.6→47.8 ms）；K=16 collect 145.0→52.4 ms（full 151.0→64.1 ms）；
     K=64 collect 632.3→268.9 ms（full 656.8→278.9 ms，4 次遍历）；K=4 与 K=1 不接合。
-    大 heap 对照（20 万无关对象 + 每类 20 实例）：K=16 批 97.9 ms vs 逐类 197.3 ms，K=64
+    开/关对照（`-Dremold.agent.batch_heap_scan=false`，`PatchReport` 与写入结果逐项等价、关掉后遍历次数
+    回到 K 次）；大 heap 对照（20 万无关对象 + 每类 20 实例）：K=16 批 97.9 ms vs 逐类 197.3 ms，K=64
     批 357.9 ms vs 逐类 779.6 ms，结果与逐类**逐项相等**。
   - 规格见 [`docs/initfix/05-jvmti-heap.md`](docs/initfix/05-jvmti-heap.md) §「批次实例收集」。
 

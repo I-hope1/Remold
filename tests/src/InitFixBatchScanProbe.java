@@ -21,6 +21,10 @@ import java.lang.reflect.Field;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -47,7 +51,7 @@ import java.util.Map;
  */
 public final class InitFixBatchScanProbe {
 
-	private static final List<String> infoLog = java.util.Collections.synchronizedList(new ArrayList<>());
+	private static final List<String> infoLog = Collections.synchronizedList(new ArrayList<>());
 	private static int failures;
 	private static int instanceCount = 8;
 	private static int rounds = 21;
@@ -78,12 +82,155 @@ public final class InitFixBatchScanProbe {
 		measureBatchCost(8);
 		measureBatchCost(16);
 		measureBatchCost(64);
+		measureReportEquivalence();
 		measureLivenessProbe();
 		measureLargeHeapControl();
 
 		System.out.println("\n=== INITFIX BATCH SCAN PROBE: "
 			+ (failures == 0 ? "self-checks passed" : failures + " CHECK(S) FAILED") + " ===");
 		if (failures != 0) System.exit(1);
+	}
+
+	// ------------------------------------------------------------------ [6] report equivalence
+
+	/**
+	 * 开关等价（PatchReport 口径）：同一形态的两批夹具，一批开批收集、一批关批收集，
+	 * 断言 {@code PatchReport}（instance/static 字段的 status / reason / warnings、patchGenerated、
+	 * 重放字段）与补丁写入结果**逐项相同**。
+	 *
+	 * <p>这条是批次收集"可以随时退场"的依据：批收集只是把 K 次枚举并成 1 次，不得改变任何可观测行为。</p>
+	 */
+	private static void measureReportEquivalence() throws Exception {
+		System.out.println("\n--- [6] report equivalence: batch collection on vs off ---");
+		// 两组夹具的类名前缀不同（避免同名类互相污染），比较前把前缀归一掉。
+		ScopeRound onRound  = runScopeRound("Probe.EqOn", true);
+		ScopeRound offRound = runScopeRound("Probe.EqOff", false);
+		String on  = onRound.signature().replace("EqOn", "EQ");
+		String off = offRound.signature().replace("EqOff", "EQ");
+		System.out.printf("   heap walks: on=%d off=%d%n", onRound.walks(), offRound.walks());
+		System.out.println("   on  = " + on);
+		System.out.println("   off = " + off);
+		check("[6] batch collection on/off must produce identical reports and patch results", on.equals(off));
+		// 反空转：关掉开关必须真的把批遍历关掉（否则"开/关等价"会因为两边都在批而白过）。
+		check("[6] switching batch collection off must really fall back to one walk per class ("
+		      + (onRound.targets()) + " targets)", offRound.walks() == onRound.targets());
+		check("[6] the batch round must collapse those walks into one", onRound.walks() == 1);
+		check("[6] the round must actually patch something (otherwise the comparison is vacuous)",
+		      on.contains("instance={added=") && on.contains("added=7"));
+	}
+
+	/** 一轮的结果：可逐字比较的报告签名 + 本轮真实堆遍历次数 + 目标类数。 */
+	private record ScopeRound(String signature, long walks, int targets) { }
+
+	/** 跑一轮"8 类批次"的补丁，返回报告签名与遍历次数。 */
+	private static ScopeRound runScopeRound(String prefix, boolean batchOn) throws Exception {
+		Map<String, String> sources1 = new LinkedHashMap<>();
+		Map<String, String> sources2 = new LinkedHashMap<>();
+		String hostName = prefix + "Host";
+		sources1.put(hostName, scopeSource(hostName, false));
+		sources2.put(hostName, scopeSource(hostName, true));
+		List<String> otherNames = new ArrayList<>();
+		for (int i = 0; i < 8; i++) {
+			String name = prefix + "Other" + i;
+			otherNames.add(name);
+			sources1.put(name, classSource(name, false));
+			sources2.put(name, classSource(name, true));
+		}
+		Map<String, byte[]> v1 = compile(sources1);
+		Map<String, byte[]> v2 = compile(sources2);
+		ByteLoader loader = new ByteLoader(v2);
+		Class<?> host = Class.forName(hostName, true, loader);
+		List<Class<?>> others = new ArrayList<>();
+		for (String name : otherNames) others.add(Class.forName(name, true, loader));
+
+		List<Object> hostInstances = new ArrayList<>();
+		Constructor<?> ctor = host.getDeclaredConstructor();
+		ctor.setAccessible(true);
+		for (int i = 0; i < 3; i++) hostInstances.add(ctor.newInstance());
+		List<Object> otherInstances = new ArrayList<>();
+		List<Field> otherAdded = new ArrayList<>();
+		for (Class<?> other : others) {
+			Constructor<?> c = other.getDeclaredConstructor(int.class);
+			c.setAccessible(true);
+			Field f = other.getDeclaredField("added");
+			f.setAccessible(true);
+			otherAdded.add(f);
+			for (int i = 0; i < 3; i++) otherInstances.add(c.newInstance(0));
+		}
+		Field added = host.getDeclaredField("added");
+		added.setAccessible(true);
+		for (Object o : hostInstances) added.setInt(o, 0);
+		for (int i = 0; i < otherInstances.size(); i++) otherAdded.get(i / 3).setInt(otherInstances.get(i), 0);
+
+		List<Class<?>> targets = new ArrayList<>();
+		targets.add(host);
+		targets.addAll(others);
+
+		boolean previous = InitFix.batchHeapScanEnabled();
+		InitFix.setBatchHeapScanEnabled(batchOn);
+		long walksBefore = LibTool.heapWalkCount();
+		try {
+			transform(host, v1.get(hostName), v2.get(hostName));
+			for (Class<?> other : others) {
+				transform(other, v1.get(other.getName()), v2.get(other.getName()));
+			}
+			// 两种模式都调用同样的 API，由产品侧的开关决定走不走批路径——
+			// 测试自己 if 掉调用的话，开关写坏也测不出来。
+			InitFix.beginBatchInstanceCollection(targets);
+			for (Class<?> c : targets) InitFix.afterRedefine(c);
+			InitFix.endBatchInstanceCollection();
+		} finally {
+			InitFix.setBatchHeapScanEnabled(previous);
+		}
+
+		StringBuilder sb = new StringBuilder();
+		appendReport(sb, host);
+		for (Class<?> other : others) appendReport(sb, other);
+		sb.append(" added=").append(readInt(added, hostInstances.get(0)));
+		sb.append(" others=");
+		List<Integer> otherValues = new ArrayList<>();
+		for (int i = 0; i < otherInstances.size(); i++) {
+			otherValues.add(otherAdded.get(i / 3).getInt(otherInstances.get(i)));
+		}
+		Collections.sort(otherValues);
+		sb.append(otherValues);
+		return new ScopeRound(sb.toString(), LibTool.heapWalkCount() - walksBefore, targets.size());
+	}
+
+	private static void appendReport(StringBuilder sb, Class<?> host) {
+		InitFix.PatchReport report = InitFix.getLastReport(host);
+		sb.append(host.getSimpleName()).append('{');
+		if (report == null) {
+			sb.append("no-report}");
+			return;
+		}
+		sb.append("gen=").append(report.patchGenerated());
+		sb.append(" instance=").append(describeDecisions(report.instanceFields()));
+		sb.append(" static=").append(describeDecisions(report.staticFields()));
+		sb.append(" replay=").append(report.replayFields());
+		sb.append(" applyReplay=").append(report.applyReplayFields());
+		sb.append('}');
+	}
+
+	private static String describeDecisions(Map<String, InitFix.FieldDecision> decisions) {
+		TreeMap<String, String> sorted = new TreeMap<>();
+		decisions.forEach((k, v) -> sorted.put(k, v.status() + "/" + v.reason() + "/" + v.warnings()));
+		return sorted.toString();
+	}
+
+	/** 带 @RemoldReinit 的最小宿主：SELF 一条 + 新增字段一条，足够产生非空报告。 */
+	private static String scopeSource(String name, boolean v2) {
+		String pkg = name.contains(".") ? name.substring(0, name.lastIndexOf('.')) : "";
+		String simple = name.substring(name.lastIndexOf('.') + 1);
+		StringBuilder sb = new StringBuilder();
+		if (!pkg.isEmpty()) sb.append("package ").append(pkg).append(";\n");
+		sb.append("import remold.annotation.RemoldReinit;\n");
+		sb.append("public class ").append(simple).append(" {\n");
+		sb.append("  @RemoldReinit(scope = RemoldReinit.Scope.SELF) public int self;\n");
+		if (v2) sb.append("  public int added = 7;\n");
+		sb.append("  public ").append(simple).append("() { }\n");
+		sb.append("}\n");
+		return sb.toString();
 	}
 
 	// ------------------------------------------------------------------ [5] large-heap control
@@ -170,7 +317,7 @@ public final class InitFixBatchScanProbe {
 					}
 					int dup = batch[i] == null ? 0 : batch[i].length;
 					if (wrong > 0 || dup != (single[i] == null ? 0 : single[i].length)) {
-						java.util.List<String> wrongNames = new ArrayList<>();
+						List<String> wrongNames = new ArrayList<>();
 						if (batch[i] != null) {
 							for (Object o : batch[i]) {
 								if (o.getClass() != hosts[i]) {
@@ -205,7 +352,7 @@ public final class InitFixBatchScanProbe {
 	private static boolean sameInstances(Object[] a, Object[] b) {
 		if (a == null || b == null) return (a == null ? 0 : a.length) == (b == null ? 0 : b.length);
 		if (a.length != b.length) return false;
-		java.util.Set<Object> left = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+		Set<Object> left = Collections.newSetFromMap(new IdentityHashMap<>());
 		left.addAll(Arrays.asList(a));
 		for (Object o : b) if (!left.remove(o)) return false;
 		return left.isEmpty();
@@ -289,10 +436,10 @@ public final class InitFixBatchScanProbe {
 	}
 
 	private static String deepNames(Object[] row) {
-		return deepNames(row, java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()), 0);
+		return deepNames(row, Collections.newSetFromMap(new IdentityHashMap<>()), 0);
 	}
 
-	private static String deepNames(Object[] row, java.util.Set<Object> seen, int depth) {
+	private static String deepNames(Object[] row, Set<Object> seen, int depth) {
 		if (!seen.add(row)) return "<cycle>";
 		if (depth > 3) return "<deep>";
 		StringBuilder sb = new StringBuilder("[");
@@ -651,11 +798,12 @@ public final class InitFixBatchScanProbe {
 
 	private static final String SCOPE_V1 = """
 		package Probe;
+		import remold.annotation.RemoldReinit;
 		public class BatchScope {
 			int plain = 1;
-			@remold.annotation.RemoldReinit(scope = remold.annotation.RemoldReinit.Scope.SELF)
+			@RemoldReinit(scope = RemoldReinit.Scope.SELF)
 			int self = 1;
-			@remold.annotation.RemoldReinit(scope = remold.annotation.RemoldReinit.Scope.INCLUDE_SUBCLASSES)
+			@RemoldReinit(scope = RemoldReinit.Scope.INCLUDE_SUBCLASSES)
 			int incl = 1;
 			public BatchScope() { }
 		}
@@ -663,11 +811,12 @@ public final class InitFixBatchScanProbe {
 
 	private static final String SCOPE_V2 = """
 		package Probe;
+		import remold.annotation.RemoldReinit;
 		public class BatchScope {
 			int plain = 1;
-			@remold.annotation.RemoldReinit(scope = remold.annotation.RemoldReinit.Scope.SELF)
+			@RemoldReinit(scope = RemoldReinit.Scope.SELF)
 			int self = 2;
-			@remold.annotation.RemoldReinit(scope = remold.annotation.RemoldReinit.Scope.INCLUDE_SUBCLASSES)
+			@RemoldReinit(scope = RemoldReinit.Scope.INCLUDE_SUBCLASSES)
 			int incl = 2;
 			int added = 9;
 			public BatchScope() { }

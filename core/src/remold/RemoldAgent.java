@@ -1,6 +1,7 @@
 package remold;
 
 import remold.annotation.*;
+import remold.evict.ReflectionCacheManager;
 import remold.offset.LayoutPredictor;
 import remold.offset.OffsetBindingIndex;
 import remold.offset.OffsetScanner;
@@ -3030,7 +3031,17 @@ public class RemoldAgent {
 		// 成员级点名只覆盖字段/方法/构造器的 Signature 与参数注解；类级泛型签名（getGenericSuperclass）不在检测范围，本行也不改变缓存驱逐范围。
 		reportMemberMetadataDrift(appliedForDrift, driftOldBytes);
 		long evictStartNanos = PERF_LOG ? System.nanoTime() : 0L;
-		remold.evict.ReflectionCacheManager.evictAll(successfulClasses);
+		boolean schemaOrMetadataChanged = false;
+		for (ClassDefinition def : successfulDefinitions) {
+			String name = def.getDefinitionClass().getName();
+			byte[] oldBytes = driftOldBytes.get(name);
+			byte[] newBytes = appliedForDrift.getOrDefault(name, def.getDefinitionClassFile());
+			if (ReflectionCacheManager.hasSerializationSchemaChange(oldBytes, newBytes)) {
+				schemaOrMetadataChanged = true;
+				break;
+			}
+		}
+		ReflectionCacheManager.evictAll(successfulClasses, schemaOrMetadataChanged);
 		if (PERF_LOG && (!definitions.isEmpty() || injectedCount > 0)) {
 			long tailEndNanos = System.nanoTime();
 			long tailMs = TimeUnit.NANOSECONDS.toMillis(tailEndNanos - tailStartNanos);

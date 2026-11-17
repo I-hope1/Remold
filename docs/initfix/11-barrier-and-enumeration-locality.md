@@ -169,14 +169,6 @@ collect 随桶数单调增长。因此窗口应取**拐点下方并留余量**�
 - 因此 inst 已不是瓶颈，桶策略到此为止；后续要动的是 iterate/cleanup/collect，
   或在 JVMTI 之外换机制（例如 DCEVM 重定义时顺带初始化字段），不属于本 PR。
 
-## 5. 现在的瓶颈结构（2M/4M）
-
-- 2M：首批 applyPatch 4488 ms 中枚举 3435 ms（约 **77%**），inst 979 ms；
-- 4M：9550 ms 中枚举 7639 ms（约 **80%**），inst 1850 ms。
-- 枚举内部：`iterate`（打 tag）与 `cleanup`（清 tag）各约 0.67 s / 1.24 s，均为整趟堆遍历；
-  `collect` 1.26–2.99 s（随 tag 数）；`fill` 0.8–1.56 s。
-- 因此 inst 已不是瓶颈，桶策略到此为止；后续要动的是 iterate/cleanup/collect。
-
 ## 6. 复现
 
 ```bash

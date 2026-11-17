@@ -22,4 +22,12 @@ public interface ReflectionCacheEvictor {
 	 * @return 实际执行驱逐的缓存实例数或条目数
 	 */
 	int evict(Set<Class<?>> redefinedClasses);
+
+	/**
+	 * 仅修改方法体（字段、签名、继承关系与注解均未变化）时是否可跳过本次驱逐。
+	 * 只依赖字段/类型/注解元数据的序列化器可返回 {@code true}，避免全堆实例扫描。
+	 */
+	default boolean skipOnMethodBodyOnlyChange() {
+		return false;
+	}
 }

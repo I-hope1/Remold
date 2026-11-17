@@ -14,6 +14,8 @@ import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 import remold.RemoldAgent;
+import remold.util.ClassIdentity;
+import remold.util.LibTool;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -131,14 +133,23 @@ public final class InitializerDrift {
 			return;
 		}
 		for (DriftEntry entry : entries) {
-			// Enumerate only after drift is detected; this is the expensive JVMTI step.
+			// Enumerate only after drift is detected; reuse Stage B counts when available and
+			// short-circuit empty classes with hasLiveInstance to skip tagging and array allocation.
 			long t0 = System.nanoTime();
 			int instances = -1;
 			try {
 				Class<?> clazz = RemoldAgent.loadedClassesMap.get(entry.className);
 				if (clazz != null) {
 					INSTANCE_ENUMERATIONS.incrementAndGet();
-					instances = remold.util.LibTool.getInstances(clazz).length;
+					Class<?> canonical = ClassIdentity.canonicalize(clazz);
+					Integer cachedCount = StageBInstanceCache.takeCount(canonical);
+					if (cachedCount != null) {
+						instances = cachedCount;
+					} else if (!LibTool.hasLiveInstance(canonical)) {
+						instances = 0;
+					} else {
+						instances = LibTool.getInstances(canonical).length;
+					}
 				}
 			} catch (Throwable ignored) {
 			}

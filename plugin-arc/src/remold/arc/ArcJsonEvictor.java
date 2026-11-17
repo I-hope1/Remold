@@ -57,6 +57,11 @@ public final class ArcJsonEvictor implements ReflectionCacheEvictor {
 	}
 
 	@Override
+	public boolean skipOnMethodBodyOnlyChange() {
+		return true;
+	}
+
+	@Override
 	public int evict(Set<Class<?>> redefinedClasses) {
 		if (redefinedClasses == null || redefinedClasses.isEmpty()) return 0;
 		// 三个字段全部不可读（Arc 版本不匹配）时直接放弃，避免每轮重定义都做一次无意义的全堆扫描。

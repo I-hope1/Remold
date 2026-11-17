@@ -273,7 +273,8 @@ jobs:
       - name: Verify native library on macOS arm64
         run: |
           chmod +x gradlew
-          export JAVA_HOME="$JAVA_HOME_25_ARM64"
+          test -n "${JAVA_HOME_25_AARCH64:-}" && test -n "${JAVA_HOME_21_AARCH64:-}"
+          export JAVA_HOME="$JAVA_HOME_25_AARCH64"
           export PATH="$JAVA_HOME/bin:$PATH"
           ./gradlew :tests:test --no-daemon \
             --tests "remold.LibToolTest" \
@@ -281,13 +282,14 @@ jobs:
             -Dhstest.requireJdks=false \
             -Dhstest.expectedOsArch=aarch64 \
             -Dhstest.requireNativeBucketPlan=true \
-            -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_21_ARM64,JAVA_HOME_25_ARM64 \
+            -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_21_AARCH64,JAVA_HOME_25_AARCH64 \
             -Dorg.gradle.java.installations.auto-detect=false \
             -Dorg.gradle.java.installations.auto-download=false
           python3 scripts/verify-native-junit.py
 
       - name: Verify native library on macOS x64 (Rosetta)
         run: |
+          test -n "${JAVA_HOME_25_X64:-}" && test -n "${JAVA_HOME_21_X64:-}"
           arch -x86_64 env \
             JAVA_HOME="$JAVA_HOME_25_X64" \
             PATH="$JAVA_HOME_25_X64/bin:$PATH" \

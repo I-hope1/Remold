@@ -335,6 +335,54 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 
 ## 10. Git 分支与 Worktree 纪律
 
-- **主工作区固定停留在 `main`**：禁止直接在主工作区（`nipx-hotswap/` 根目录）切换开发分支，避免在主工作区污染未合入修改或阻断后续 `fast-forward` 同步。
-- **开新分支一律使用独立 `git worktree`**：需要切新分支做开发、修 bug 或性能实验时，从最新基线创建独立 worktree（例如 `git worktree add build/wt-<topic> -b <branch> origin/main`），在该 worktree 内完成编辑、构建、验证与提交。
-- **合入后及时清理**：PR 合入 `main` 后，先移除临时 worktree（`git worktree remove build/wt-<topic>`）再删除过期本地分支。
+**一句话流程**：主工作区只读停在 `main`；战役在从 `main` 切出的集成基线分支 `feat/<name>` 上做；批次分支在各自
+worktree 里跑探针与变异；本地把子分支合流回 `feat/<name>` 并跑通全量验收；`battle_audit` 通过后 `battle_seal`
+提交战报并自动清理所有临时 worktree，只留下一条干净的本地 `feat/<name>`；最后一跳交给 PR。
+
+### 10.1 主工作区
+
+- **永远停在 `main`，保持干净**，只用于只读浏览（看代码、读文档、对账 `git log`）。
+- 禁止在主工作区切开发分支、改文件、跑批次探针：任何未提交改动都会阻断后续 `git pull --ff-only`。
+
+### 10.2 启动战役
+
+- 从 `main` 切一条**集成基线分支** `feat/<name>`（例：`git branch feat/derived-data-cache main`），它是本次战役
+  唯一的合流目标。分支切出来即可，**不要求主工作区切过去**。
+- 然后 `battle_init(base_branch: "feat/<name>")`：战役基线就是这条分支，批次分支、worktree、合流与结案都围绕它进行。
+- 同一仓库有战役在跑时，新战役用 `force: true` 另起；之后所有 `battle_*` 调用显式带 `campaign`（完整 id 或短 id），
+  不依赖 `current` 指针。
+
+### 10.3 Agent 本地自由发挥（批次）
+
+- 自己按批次拆 `agent/batch-a` / `agent/batch-b` … 与对应 worktree（`battle_dispatch` 负责建 worktree 与
+  `agent/batch-*` 分支，并把执行者派成 durable 团队成员）；每个执行者只在自己 worktree 的绝对路径内工作，
+  不派发、不合流、不碰其他 worktree。
+- **低耦合批次才派发**；跨模块联调、合流收尾，以及**一切测速探针批次**由 Lead 亲自串行单刷——并行抢 CPU/IO
+  会直接污染 min/median/max 读数（见 §9 第 4 条）。
+- 每个批次留真实证据：`battle_probe`（退出码 / stdout·stderr 哈希 / git HEAD），关键修复跑 `battle_mutation`
+  击杀变异（改既有实现用 `revert`，纯新增用 `strategy: "logic"`）；变异存活必须改进测试或显式写进战报，不得掩盖。
+- 批次之间不共享写域；必须共写时用共享任务板的 `blocked_by` / `write_scopes` 显式排序与声明，合流前由 Lead
+  统一复核 diff 与测试。
+
+### 10.4 合流
+
+- 用 `battle_merge(batches: [...], integration: true, union_cmd: "...")`：在**独立集成 worktree** 里按顺序把各
+  `agent/batch-*` 合流回 `feat/<name>`、逐批跑验收、再跑一次覆盖全部批次的 union 全量；全部通过后
+  `feat/<name>` 才前移到集成 HEAD。冲突 / 逐批验收失败 / union 失败即停，先修再继续。
+- 不要在批次还没通过验收时手动 `git merge` 到 `feat/<name>`：那等于把"未验证"混进集成基线。
+- 主工作区全程不参与合流，仍停在 `main`。
+
+### 10.5 结案与清理
+
+- `battle_audit` 必须 PASS（不变量覆盖、验收探针、变异击杀、合流证据、no-op 空分支、越界改动、证据日志哈希完整性）。
+- `battle_seal` 把战报以 `docs(status)` 提交到 `feat/<name>`，并**自动清理所有临时 worktree**：结束时本地只留一条
+  干净的 `feat/<name>` 分支；证据台账（`.battle/campaigns/<id>/`）保留，不删、不改写。
+- 被打回就按 `battle_audit` 的阻断项逐条补齐再报，不要用"证据已足够"绕开机械检查。
+
+### 10.6 最后一跳：PR
+
+1. `git push -u origin feat/<name>`；
+2. `gh pr create --base main --head feat/<name>`——PR 描述用战报的摘要、退出码、读数和缺口，不贴源码、diff 与原始日志；
+3. 等远端 **8/8 CI 矩阵**跑完（Test Matrix javac 8/11/17/21/25、DCEVM JBR 21、P0.5 JBR 17/21、产物与三平台 native 校验）；
+4. CI 全绿后点 **Merge** 合入 `main`；
+5. 回到主工作区 `git pull --ff-only`，确认 `main` 干净且含该合并提交；本地 `feat/<name>` 分支按需删除。

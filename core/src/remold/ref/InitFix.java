@@ -5538,6 +5538,26 @@ public class InitFix {
 	public static final int BATCH_HEAP_SCAN_MIN_TARGETS = 8;
 
 	/**
+	 * 批次收集总开关（{@code -Dremold.agent.batch_heap_scan=false} 关闭）。
+	 *
+	 * <p>关掉之后每个宿主照旧各自枚举一次堆，<b>行为必须与开启时逐项等价</b>
+	 * （{@code PatchReport} 的 status / reason / warnings、补丁字节、写入结果一致）——这是这条
+	 * 性能通道可以随时退场的依据，也是等价性门禁的对照面（{@code BatchScanReportEquivalenceTest}）。</p>
+	 */
+	private static volatile boolean batchHeapScanEnabled =
+		!"false".equalsIgnoreCase(System.getProperty("remold.agent.batch_heap_scan", "true"));
+
+	/** 当前是否启用批次收集（诊断/对照用；默认取 {@code -Dremold.agent.batch_heap_scan}）。 */
+	public static boolean batchHeapScanEnabled() {
+		return batchHeapScanEnabled;
+	}
+
+	/** 运行期开关批次收集：只影响"要不要批一次枚举"，两条路径的行为必须逐项等价。 */
+	public static void setBatchHeapScanEnabled(boolean enabled) {
+		batchHeapScanEnabled = enabled;
+	}
+
+	/**
 	 * 为一批宿主做一次全堆遍历，把每个宿主的存活实例切片暂存起来供各自的
 	 * {@link #applyPatch} 消费。
 	 *
@@ -5566,6 +5586,7 @@ public class InitFix {
 			if (patch == null || !patch.plan().hasInstance()) continue;
 			targets.add(canonical);
 		}
+		if (!batchHeapScanEnabled) return;
 		if (targets.size() < BATCH_HEAP_SCAN_MIN_TARGETS) return;
 
 		Object[][] collected;

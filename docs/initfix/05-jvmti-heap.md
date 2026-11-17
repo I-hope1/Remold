@@ -69,6 +69,10 @@
 - **K 阈值**：一次批次遍历 ≈ 9 倍单类遍历（同一进程同一堆实测：64 个零实例类批 1 次 ≈ 84 ms，
   逐类 64 次 ≈ 588 ms），因此 `InitFix.BATCH_HEAP_SCAN_MIN_TARGETS = 8` 以下一律走原逐类路径，
   保证小批次零额外开销；K=1 也在此列。
+- **开关与等价性**：`-Dremold.agent.batch_heap_scan=false`（`InitFix.setBatchHeapScanEnabled`）可整体
+  关掉批收集，退回"每个宿主各枚举一次"。两条路径必须在 `PatchReport`（字段 `status`/`reason`/`warnings`、
+  `patchGenerated`、重放字段）与补丁写入结果上**逐项等价**，且关掉时遍历次数必须真的回到 K 次
+  ——这条对照是"批收集随时可退场"的依据，也是防止"关掉仍然是批"白过等价性检查的反空转门。
 - **降级**：旧 native 库没有 `nGetInstancesBatch`（`UnsatisfiedLinkError`）或 native 返回失败时，
   `LibTool` 整体退回逐类 `getInstances`，结果相同、遍历次数回到 K 次；无 native 时退回
   `InstanceTracker` 的既有降级路径。

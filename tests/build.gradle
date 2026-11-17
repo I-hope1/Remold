@@ -1258,6 +1258,25 @@ tasks.register("derivedDataBench", JavaExec) {
 	}
 }
 
+// PR2 slice 3 · Batch A：InitFix 侧扫描成本探针。只测量、不断言；测量型任务不做 up-to-date。
+// 必须**串行排他**运行（跑之前不要有别的 Gradle / 探针在跑），否则耗时读数被抢 CPU 污染。
+tasks.register("initFixScanProbe", JavaExec) {
+	group = "verification"
+	description = "InitFix 侧扫描成本探针 (InitFixScanProbe)：单次 transform 成本分布、JFR 归因、跨类字节读取广度、Reinit 门频次"
+	dependsOn classes
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "InitFixScanProbe"
+	maxHeapSize = "2g"
+	outputs.upToDateWhen { false }
+	jvmArgs "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED"
+	doFirst {
+		def extra = ["-Dremold.projectRoot=${rootDir.absolutePath}",
+		             "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"]
+		if (nativeLibPath != null) extra << "-Dremold.path.libtool=${nativeLibPath}"
+		jvmArgs extra
+	}
+}
+
 // 参数注解 / 泛型签名漂移探针（批次 K，可复用入口供批次 J 使用）：
 // 属性变化（annotations / Signature）在标准 HotSpot 上能否 redefine、旧 Method 句柄读到什么，
 // 全部由探针实测，不预设结论。只需要 Instrumentation，不需要 DCEVM。

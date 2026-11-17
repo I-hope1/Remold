@@ -1240,6 +1240,24 @@ tasks.register("readerScanProbe", JavaExec) {
 	}
 }
 
+// PR2 派生数据量化基准：对齐侧每个类的真实成本。只测量、不断言，测量型任务刻意不做 up-to-date。
+tasks.register("derivedDataBench", JavaExec) {
+	group = "verification"
+	description = "PR2 派生数据量化基准 (DerivedDataBench)：每个 lambda 类的 align() 真实成本，供决定缓存粒度"
+	dependsOn classes
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "DerivedDataBench"
+	maxHeapSize = "1g"
+	doFirst {
+		// 预算参数从 Gradle 侧透传，便于同一代码上做不同预算的对照（-Premold.vcs.derived_cache_entries=...）。
+		def budgets = ["remold.vcs.derived_cache_entries", "remold.vcs.derived_cache_bytes"].findAll {
+			project.hasProperty(it)
+		}.collect { "-D${it}=${project.property(it)}" }
+		jvmArgs(["-Dremold.projectRoot=${rootDir.absolutePath}",
+		         "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"] + budgets)
+	}
+}
+
 // 参数注解 / 泛型签名漂移探针（批次 K，可复用入口供批次 J 使用）：
 // 属性变化（annotations / Signature）在标准 HotSpot 上能否 redefine、旧 Method 句柄读到什么，
 // 全部由探针实测，不预设结论。只需要 Instrumentation，不需要 DCEVM。

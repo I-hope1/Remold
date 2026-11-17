@@ -122,7 +122,9 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 两阶段读穿保护（内部批次路径 + 动态单类入口） | `RemoldAgent.applyTwoPhase` / `redefineStageA`（A→B→C 编排、整组回滚、`isInitialized` 二次检查）；`RemoldAgent.redefineDynamic` 消费 `InitFix.requiresTwoPhase`，在调用内部同步跑 A→补丁→C（阶段 C 复用现成 `runtimeBytes`，失败按 VM 级/非 VM 级分流）；`StageASkeleton.buildWithLiveConstructors`（阶段 A 保留新构造器）；`InitFix.requiresTwoPhase`（只有真正会写的零值暴露字段才触发）；开关 `-Dremold.agent.two_phase=false` |
 | 哈希语义门控 | `HashSemantics`（`core/src/remold/ref/`，本类内调用图扫 `hashCode`/`equals`/`compareTo` 及其可达方法是否读新增实例字段，只告警不拒绝） |
 | 删除成员的读者分析 | `RemovedMemberReaders`（`core/src/remold/ref/`，纯函数：字段按 JVMS 5.4.3.2、方法按 5.4.3.3 + **5.4.6 向下分派**判"改动后引用会怎样"，输出悬空 / 抽象方法缺失 / 分派转移 / 判不了 / 字段改指向五档） |
-| 读者扫描成本探针 | `tests/src/ReaderScanProbe.java`（`./gradlew :tests:readerScanProbe`，不需要 DCEVM）：常量池扫描 vs 方法体精扫、三档扫描范围的真实成本 |
+| 读者扫描成本探针 | `tests/src/ReaderScanProbe.java`（`./gradlew :tests:readerScanProbe`，不需要 DCEVM）：常量池扫描 vs 方法体精扫、三档扫描范围的真实成本、派生缓存开/关双档（§F） |
+| 按 blob 内容寻址的派生数据缓存（PR2） | `core/src/remold/vcs/DerivedDataCache.java`（键 `(kind, SHA-256(blob))`、双预算 LRU、值必须不可变且不持 `Class`/`ClassLoader`/`ClassNode`；开关 `-Dremold.vcs.derived_cache`，预算 `-Dremold.vcs.derived_cache_entries` / `-Dremold.vcs.derived_cache_bytes`）；消费点：`LambdaAligner.consumersOf` / `deriveConsumerTags`（按 `(blob, 方法)` 缓存消费者数据流，值按指令流下标对齐）、`LambdaAligner.deriveAnonRefs`（匿名类引用索引）、`RemovedMemberReaders.describe` / `refs`（类型世界与常量池引用）。**禁止缓存 `align()` 整包结果**，键维度契约见 `docs/topology/16-bytecode-changeset-vcs.md` §3.7 |
+| 派生数据量化基准与等价门禁 | `tests/src/DerivedDataBench.java`（`./gradlew :tests:derivedDataBench`，纯测量：每类 `align()` 成本分布、消费者数据流消融、缓存开/关、预算边界；读数见 `docs/topology/17-derived-data-cache-probe.md`）、`tests/src/DerivedDataEquivalenceTest.java`（门禁：开/关产物逐字节 + `AlignmentResult` 全字段相等、换序遍历、按 `(blob, 方法)` 查条目的键维度断言） |
 | 阶段 A 骨架合成 | `StageASkeleton`（`core/src/remold/ref/`，纯函数：新结构 + 旧执行体，成员按旧 ∪ 新） |
 | 注解 | `remold.annotation.RemoldReinit` |
 | 合成字段过滤 | `ClassDiffUtil.isInternalMarkerField` |
@@ -193,7 +195,12 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 - 缓存填充验证：`./gradlew :tests:cacheWarmingProbe`（只需 `-javaagent`）。改动 transformer 注册顺序或`canRetransform` 标志后必须跑它：它实测"`canRetransform=false` 组整组先于 `true` 组执行"这条规则，并断言 `bytecodeCache` 里存的是对齐/织入**之后**的字节。
 - Forge ClassInfo 成员同步 E2E：`tests/fabric-mixin-probe/forge-classinfo/`（真实 Forge 1.21.1 `runServer`，红基线 + 修复后绿跑；`bash run-forge-classinfo.sh` 复跑，Windows 下用 `verify-evidence.cmd` 做验收；同样不挂 `check`）。改动 `ForgeClassInfoSync` / `ForgeMixinHotSwap.reload` 时序前必须先跑它。
 - NeoForge Mixin 热更 E2E：`tests/neoforge-mixin-probe/`（真实 NeoForge 21.1 dev `runServer`，Mixin 配置走加载器原生 `META-INF/neoforge.mods.toml` `[[mixins]]`；红基线=禁用同步的 plugin jar，绿跑=当前实现；Windows 用 `verify-evidence.cmd` 验收；不挂 `check`）。改动 `ClassInfoMemberSync` / `ForgeMixinHotSwap.reload` 时序或 NeoForge 识别逻辑前必须先跑它。
-- 读者扫描成本验证：`./gradlew :tests:readerScanProbe`（只需 `-javaagent` 提供 Instrumentation，不需要 DCEVM）。改动 `RemovedMemberReaders.refs` 后必须先跑它：其中一条断言要求"常量池扫描是方法体精扫的超集"。
+- 读者扫描成本验证：`./gradlew :tests:readerScanProbe`（只需 `-javaagent` 提供 Instrumentation，不需要 DCEVM）。改动 `RemovedMemberReaders.refs` 后必须先跑它：其中一条断言要求"常量池扫描是方法体精扫的超集"，另一条（§F）要求派生缓存开/关的类型世界与引用集合完全一致。
+- 派生数据缓存验证（PR2）：改动 `DerivedDataCache` 的键/预算语义，或 `LambdaAligner.consumersOf` / `deriveAnonRefs` / `RemovedMemberReaders.describe`·`refs` 的派生路径后，必须跑
+  `./gradlew :tests:test --tests DerivedDataEquivalenceTest` + `./gradlew :tests:derivedDataBench`
+  （后者单跑取数：同轮、逐轮交替、报 min/median/max）。**变异检查**：缓存键去掉任一维度（方法 / blob）
+  必须让 `DerivedDataEquivalenceTest` 变红——注意"开/关产物逐字节相等"这条端到端断言**抓不住**
+  "键漏方法维度"（消费者证据可能恰好不改写产物），键维度由按 `(blob, 方法)` 查条目的用例守。
 - 构建完成 marker 验证：`./gradlew :tests:buildTriggerProbe`（真实 watcher + redefine，不挂 `check`；`-Pp05.jbr=<DCEVM JDK>` 可指定 JVM）。改动 `BuildTriggerMarker` / `BuildTriggerSweep` / `RemoldAgent.handleBuildTriggerFile` / `DebounceWindow.markClassDueNow` / `FileWatcherService` 的 trigger watcher / Gradle 插件 marker 接线后必须先跑它，并做变异检查：去掉 sticky latch、后续 marker 重扫、关掉陈旧/未来校验、关掉扫描 mtime 过滤、空扫描仍置 due、去掉 `classes.doLast` 接线、`buildTrigger=false` 仍注入——对应用例必须变红。
 - 两阶段编排验证：`./gradlew :tests:twoPhaseProbe -Pp05.jbr=<DCEVM JDK 目录>`，把 `StageASkeleton.buildWithLiveConstructors` / `InitFix` 串成 `A → redefine → B → C → redefine` 跑一遍，并驱动真实 `processChanges`：50k 存量实例 + 并发读线程下，开两阶段零 NPE、关两阶段（`-Dremold.agent.two_phase=false`）稳定 NPE（红基线）（同样不挂 `check`）。改动两阶段相关代码（`applyTwoPhase` / `redefineStageA` / `requiresTwoPhase` / `buildWithLiveConstructors`）后必须先跑它，再考虑动 `RemoldAgent`。
 - 偏移量稳定性与漂移实测：`./gradlew :tests:offsetStabilityProbe -Pp05.jbr=<DCEVM JDK 目录>`（同样不挂 `check`），实测单类稳定性（空洞填补、类型重排）、父类字段漂移步长、Updater 错位破坏与 C2 常量折叠使用方逆优化。

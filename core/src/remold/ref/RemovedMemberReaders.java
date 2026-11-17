@@ -5,6 +5,7 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.MethodNode;
+import remold.vcs.DerivedDataCache;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -260,8 +261,31 @@ public final class RemovedMemberReaders {
 	// 类型信息与引用
 	// ------------------------------------------------------------------------------------------------
 
+	/**
+	 * 派生缓存种类：单类的解析相关声明（{@link TypeInfo}）。
+	 *
+	 * <p>{@link TypeInfo} 是纯不可变记录，只由这份字节决定，因此可以按内容跨轮复用：
+	 * 连续几批热更里绝大多数工程类<b>没有改动</b>，但读者扫描每次都要为它们重建类型世界。</p>
+	 */
+	private static final String CACHE_KIND_TYPE_INFO = "readerTypeInfo";
+
+	/**
+	 * 派生缓存种类：单类的常量池成员引用（{@link Ref} 列表）。
+	 *
+	 * <p>同类判据：{@link #refs} 只读常量池，与轮次、解析世界、被删成员集合都无关。</p>
+	 */
+	private static final String CACHE_KIND_REFS = "readerRefs";
+
 	/** 提取一个类的解析相关声明；只读结构，跳过代码与调试信息。 */
 	public static TypeInfo describe(byte[] classBytes) {
+		String key = DerivedDataCache.blobKey(classBytes);
+		if (key == null) return describeUncached(classBytes);
+		return DerivedDataCache.getByKey(CACHE_KIND_TYPE_INFO, key,
+		                                 Math.max(256L, classBytes.length / 8L),
+		                                 () -> describeUncached(classBytes));
+	}
+
+	private static TypeInfo describeUncached(byte[] classBytes) {
 		ClassNode cn = new ClassNode();
 		new ClassReader(classBytes)
 		 .accept(cn, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
@@ -323,6 +347,14 @@ public final class RemovedMemberReaders {
 	 * @throws IllegalArgumentException 常量池结构无法解析（调用方应把它记为"判不了"，不能当成"没有引用"）
 	 */
 	public static List<Ref> refs(byte[] classBytes) {
+		String key = DerivedDataCache.blobKey(classBytes);
+		if (key == null) return refsUncached(classBytes);
+		return DerivedDataCache.getByKey(CACHE_KIND_REFS, key,
+		                                 Math.max(256L, classBytes.length / 2L),
+		                                 () -> refsUncached(classBytes));
+	}
+
+	private static List<Ref> refsUncached(byte[] classBytes) {
 		int count = u2(classBytes, 8);
 		int p = 10;
 		byte[] tag = new byte[count];
@@ -385,7 +417,7 @@ public final class RemovedMemberReaders {
 			out.add(new Ref(t == 9 ? KIND_FIELD : t == 11 ? KIND_INTERFACE_METHOD : KIND_METHOD,
 			                owner, name, desc));
 		}
-		return new ArrayList<>(out);
+		return List.copyOf(out);
 	}
 
 	private static int u2(byte[] b, int offset) {

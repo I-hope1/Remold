@@ -59,6 +59,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **native 构建统一到 zig 0.17.1，linux-x64 也改由 zig 交叉编译**（`scripts/build-native.sh`）：
+  链接步骤从 `zig cc` 换成 `zig c++` 驱动（`tool.cpp` 现在用到 `std::vector`/`std::expected`，
+  目标文件里有 `operator new/delete`、`__libcpp_verbose_abort` 这类 C++ 运行时引用，C 驱动链接在
+  macOS dylib 上会直接报 undefined symbol）。产物因此静态链入 zig 内置 libc++，不再依赖宿主
+  `libstdc++.so.6`/`libgcc_s.so.1`；linux 目标钉住 glibc 2.17 下限。`core/libs/` 下的
+  linux x64/aarch64、macOS x64/arm64、Windows dll 五个产物随之重建。
+- CI 的 native 产物上传改为 `if: always()`：ABI/仓内同步校验失败时也带走刚编出的产物，
+  否则 Android 产物（只能由 x86_64 + NDK 编）无法回灌进仓库。
+
+
 - **批次级单次堆遍历：同一批 K 个类的存活实例收集从 K 次全堆扫描收敛为 1 次**
   （`core/cpp/tool.cpp` + `LibTool` + `InitFix` + `RemoldAgent`）：
   - 新增 `LibTool.getInstancesBatch(Class[])`（native `nGetInstancesBatch`）。归类靠 JVMTI class tag：

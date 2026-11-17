@@ -219,7 +219,11 @@ jobs:
       - name: Verify native ABIs, exports and repo sync
         run: bash scripts/verify-native.sh --compare /tmp/checked-in-libs core/libs
 
+      # always()：即使上面的 ABI/仓内同步校验失败也要把刚编出来的产物带走。
+      # C++ 改动必须有人把新产物回灌进仓库（verify-native 的 --compare 就是门），
+      # 而 Android 产物只能由本 job（x86_64 + NDK）编出来，失败时拿不到产物就断了回灌链路。
       - name: Upload Native Artifacts
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: native-libraries

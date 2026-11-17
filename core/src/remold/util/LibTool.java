@@ -213,7 +213,46 @@ public class LibTool {
 	private static native Object[] nGetReferrers(Object targetObject);
 	private static native int nEnumBucketCount(long count);
 	private static native int nEnumBucketWindow();
+	private static native Object[][] nGetInstancesBatch(Class<?>[] targets, long[] timingsOut);
+	private static native long nHasLiveInstancesBatch(Class<?>[] targets);
+	private static native long nHeapWalkCount();
 	private static volatile boolean enumPlanSupported = true;
+
+	/**
+	 * 单次批次查询覆盖的 target 上限（与 native 侧 {@code kMaxBatchTargets} 同一常量）。
+	 * 超过上限由 {@link #getInstancesBatch(Class[])} 自动分块，每块仍只做一次全堆遍历。
+	 */
+	public static final int BATCH_TARGET_LIMIT = 64;
+
+	/** 新 native 库（含批次入口）是否可用；旧库缺导出符号时置 false 并整体退回逐类路径。 */
+	private static volatile boolean batchScanSupported = true;
+	private static volatile boolean batchFallbackWarned;
+
+	/**
+	 * 当前加载的 native 库是否提供批次级单次全堆遍历入口。
+	 *
+	 * <p>旧版 native 库（未随本改动重编）没有 {@code nGetInstancesBatch}：此时
+	 * {@link #getInstancesBatch(Class[])} 会自动退回逐类路径，行为仍然正确，只是遍历次数回到 K 次。</p>
+	 */
+	public static boolean batchScanIsNative() {
+		return heapWalkCount() >= 0;
+	}
+
+	/**
+	 * 实例收集类全堆遍历的累计真实次数（native 侧计数，非估算）。
+	 *
+	 * <p>统计口径：为「收集实例 / 判定存活」而做的全堆遍历（逐类路径的
+	 * {@code IterateOverInstancesOfClass} 与批次路径的 {@code IterateThroughHeap} 各计一次）；
+	 * tag 清理用的过滤遍历不计。旧版 native 库返回 {@code -1}（无法取证）。</p>
+	 */
+	public static long heapWalkCount() {
+		if (!initialized) init();
+		try {
+			return nHeapWalkCount();
+		} catch (UnsatisfiedLinkError e) {
+			return -1L;
+		}
+	}
 
 	/** 实例枚举分桶窗口（实例数）：{@code 1 << 18}，经验值（约 8–12 MB 对象量，为 4M 实测拐点留 2 倍余量）。 */
 	public static int enumerationBucketWindow() {
@@ -313,6 +352,131 @@ public class LibTool {
 		T[] res = (T[]) nGetInstances(clazz);
 		return res != null ? res : (T[]) Array.newInstance(clazz, 0);
 	}
+
+	/**
+	 * 一次全堆遍历收集一批类（含各自全部已加载子类/接口实现）的存活实例。
+	 *
+	 * <p>返回值与 {@code targets} 下标对齐：{@code result[i]} 是 {@code targets[i]} 的实例集合，
+	 * 元素类型为 {@code Object}（不做强类型数组，避免数组类带来的 {@code ArrayStoreException}）。
+	 * 多态语义与 {@link #getInstances(Class)} 完全一致：按对象的<b>精确运行时类</b>归类，
+	 * 运行时类是某个 target 或其子类型即计入该 target；同一对象可以同时出现在多个 target 的结果里
+	 * （{@code Sub extends Base} 同批出现时，{@code Sub} 实例同时进 {@code Base} 与 {@code Sub}）。</p>
+	 *
+	 * <p><b>K=1 时直接走单类路径</b>（零额外开销）；K&gt;{@link #BATCH_TARGET_LIMIT} 时自动分块，
+	 * 每块一次全堆遍历；旧版 native 库缺少批次入口时整体退回逐类路径（结果相同，遍历次数回到 K 次）。</p>
+	 *
+	 * @param targets 目标类；不得为 {@code null}、基本类型镜像或数组类
+	 * @return 与 targets 等长的实例集合数组
+	 */
+	public synchronized static Object[][] getInstancesBatch(Class<?>[] targets) {
+		return getInstancesBatch(targets, null);
+	}
+
+	/**
+	 * {@link #getInstancesBatch(Class[])} 的诊断版本：额外回传 native 分段耗时（纳秒）。
+	 *
+	 * <p>{@code timings} 长度 ≥ 6：{@code [0]=enumerate}（已加载类 → target 掩码的归类）、
+	 * {@code [1]=iterate}（全堆遍历）、{@code [2]=collect}（{@code GetObjectsWithTags}）、
+	 * {@code [3]=fill}（落进各 target 的数组）、{@code [4]=cleanup}（tag 清零）、
+	 * {@code [5]=rawCount}（本次命中的对象数）。只用于探针取证，产品路径不传。</p>
+	 */
+	public synchronized static Object[][] getInstancesBatch(Class<?>[] targets, long[] timings) {
+		if (targets == null || targets.length == 0) return new Object[0][];
+		Class<?>[] canonical = new Class<?>[targets.length];
+		for (int i = 0; i < targets.length; i++) {
+			canonical[i] = prepareInstanceQueryClass(targets[i]);
+		}
+		if (canonical.length == 1) {
+			// K=1：直走原单类路径，不引入任何额外开销（docs/initfix/05-jvmti-heap.md）。
+			return new Object[][]{ getInstances(canonical[0]) };
+		}
+		Object[][] out = new Object[canonical.length][];
+		if (batchScanSupported) {
+			boolean done = true;
+			try {
+				for (int start = 0; start < canonical.length; start += BATCH_TARGET_LIMIT) {
+					int n = Math.min(BATCH_TARGET_LIMIT, canonical.length - start);
+					Class<?>[] chunk = Arrays.copyOfRange(canonical, start, start + n);
+					Object[][] part = nGetInstancesBatch(chunk, timings);
+					if (part == null) {
+						done = false;
+						break;
+					}
+					for (int i = 0; i < n; i++) {
+						out[start + i] = part[i] != null ? part[i] : EMPTY_OBJECTS;
+					}
+				}
+			} catch (UnsatisfiedLinkError e) {
+				batchScanSupported = false;
+				done = false;
+			}
+			if (done) return out;
+			warnBatchFallbackOnce();
+		}
+		// 降级：逐类路径（旧 native 库 / 目标形态不支持批次归类）。
+		for (int i = 0; i < canonical.length; i++) {
+			out[i] = getInstances(canonical[i]);
+		}
+		return out;
+	}
+
+	/**
+	 * 一次全堆遍历判定一批类各自「有没有存活实例」（{@link #hasLiveInstance(Class)} 的批量版）。
+	 *
+	 * <p>只做存在性判定、不物化对象数组，也<b>不</b>返回可复用的实例快照：存在性探测跑在
+	 * 重定义之前，实例收集跑在重定义之后，两者语义不能混用（{@code docs/initfix/05-jvmti-heap.md}）。
+	 * 全部 target 都已见到实例时 native 侧提前中止遍历。</p>
+	 *
+	 * @param targets 目标类；不得为 {@code null}
+	 * @return 与 targets 等长的布尔数组
+	 */
+	public synchronized static boolean[] hasLiveInstancesBatch(Class<?>[] targets) {
+		if (targets == null || targets.length == 0) return new boolean[0];
+		Class<?>[] canonical = new Class<?>[targets.length];
+		for (int i = 0; i < targets.length; i++) {
+			canonical[i] = prepareInstanceQueryClass(targets[i]);
+		}
+		boolean[] out = new boolean[canonical.length];
+		if (canonical.length == 1) {
+			out[0] = hasLiveInstance(canonical[0]);
+			return out;
+		}
+		if (batchScanSupported) {
+			boolean done = true;
+			try {
+				for (int start = 0; start < canonical.length; start += BATCH_TARGET_LIMIT) {
+					int n = Math.min(BATCH_TARGET_LIMIT, canonical.length - start);
+					Class<?>[] chunk = Arrays.copyOfRange(canonical, start, start + n);
+					long mask = nHasLiveInstancesBatch(chunk);
+					if (mask < 0) {
+						done = false;
+						break;
+					}
+					for (int i = 0; i < n; i++) {
+						out[start + i] = (mask & (1L << i)) != 0L;
+					}
+				}
+			} catch (UnsatisfiedLinkError e) {
+				batchScanSupported = false;
+				done = false;
+			}
+			if (done) return out;
+			warnBatchFallbackOnce();
+		}
+		for (int i = 0; i < canonical.length; i++) {
+			out[i] = hasLiveInstance(canonical[i]);
+		}
+		return out;
+	}
+
+	private static void warnBatchFallbackOnce() {
+		if (batchFallbackWarned) return;
+		batchFallbackWarned = true;
+		RemoldAgent.warn("[Lib] Native batch heap scan is unavailable (old libtool build or unsupported target"
+			+ " shape); instance collection falls back to one full heap walk per class.");
+	}
+
+	private static final Object[] EMPTY_OBJECTS = new Object[0];
 
 	private static void logInstanceQueryBreakdown(Class<?> clazz, long totalNanos, long[] timings) {
 		RemoldAgent.info(String.format(

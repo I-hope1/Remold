@@ -170,10 +170,8 @@ jobs:
       # 堆遍历规模测量需要 Linux x64 的 JVMTI 底座
       - name: Build native libtool (Linux x64)
         run: |
-          mkdir -p core/libs
-          g++ -shared -fPIC -std=c++2b -O3 \
-            -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
-            core/cpp/tool.cpp -o core/libs/libtool64.so
+          export JAVA_HOME="$JAVA_HOME_25_X64"
+          bash scripts/build-native.sh linux-x64
 
       - name: Run P0.5 probe
         run: |
@@ -197,7 +195,7 @@ jobs:
             -Dorg.gradle.java.installations.auto-download=false
 
   build-native:
-    name: Build Native Libraries (Linux x64, Linux aarch64 & Android arm64)
+    name: Build Native Libraries (Linux, Android, macOS & Windows)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -208,54 +206,13 @@ jobs:
           distribution: temurin
           java-version: '25'
 
-      - name: Compile Linux x86_64 (.so)
+      - name: Build all native libraries
         run: |
-          mkdir -p core/libs
-          g++ -shared -fPIC -std=c++2b -O3 \
-            -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
-            core/cpp/tool.cpp -o core/libs/libtool64.so
-          ls -la core/libs/libtool64.so
+          export JAVA_HOME="$JAVA_HOME_25_X64"
+          bash scripts/build-native.sh
 
-      - name: Compile Android arm64-v8a (.so)
-        run: |
-          if [ -z "$ANDROID_NDK_HOME" ] && [ -d "$ANDROID_SDK_ROOT/ndk" ]; then
-            export ANDROID_NDK_HOME=$(find "$ANDROID_SDK_ROOT/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
-          fi
-          echo "Using Android NDK: $ANDROID_NDK_HOME"
-          
-          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang++ \
-            -shared -fPIC -static-libstdc++ -std=c++2b -O3 \
-            -Icore/cpp/jni_posix \
-            -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
-            core/cpp/tool.cpp -o core/libs/libtoolarm64.so
-          ls -la core/libs/libtoolarm64.so
-
-      - name: Compile Linux aarch64 (.so, glibc 2.17)
-        # 用 zig 固定 glibc 2.17 目标，避免 ubuntu-24.04 交叉 g++ 把最低 glibc 抬到 2.38+。
-        # 两段式编译（zig c++ -c）+ 链接（zig cc -shared）：tool.cpp 在 POSIX 下仅用
-        # pthread_mutex_t，不引用 libc++.a 运行时，从而彻底跳过 zig 从源码构建内置 libc++
-        # 时刷出的数千条 -Wnullability-completeness 告警；pthread_mutex_* 在 libc.so.6 中
-        # 已有 @GLIBC_2.17 转发符号，因此 NEEDED 只会包含 libc.so.6（无需再绑定 libpthread.so.0）。
-        run: |
-          curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz -o /tmp/zig.tar.xz
-          tar -xJf /tmp/zig.tar.xz -C /tmp
-          /tmp/zig-x86_64-linux-0.16.0/zig c++ -c -target aarch64-linux-gnu.2.17 \
-            -std=c++23 -O3 -g0 -fno-exceptions -fno-rtti -fdeclspec \
-            -Icore/cpp/jni_posix -I"$JAVA_HOME/include" \
-            core/cpp/tool.cpp -o /tmp/tool_aarch64.o
-          /tmp/zig-x86_64-linux-0.16.0/zig cc -shared -target aarch64-linux-gnu.2.17 \
-            -Wl,--strip-all /tmp/tool_aarch64.o -o core/libs/libtoolaarch64.so
-          ls -la core/libs/libtoolaarch64.so
-
-      - name: Verify native ABIs
-        # 校验项：glibc 构建（libc.so.6）、aarch64 glibc 基线 2.17、不是 bionic。
-        run: |
-          test -s core/libs/libtoolaarch64.so
-          test -s core/libs/libtoolarm64.so
-          readelf -h core/libs/libtoolaarch64.so | grep -F 'AArch64'
-          readelf -d core/libs/libtoolaarch64.so | grep -F 'libc.so.6'
-          readelf -d core/libs/libtoolarm64.so | grep -F '[libc.so]'
-          ! readelf -V core/libs/libtoolaarch64.so | grep -E 'GLIBC_2\.(1[89]|[2-9][0-9])'
+      - name: Verify native ABIs and exports
+        run: bash scripts/verify-native.sh
 
       - name: Upload Native Artifacts
         uses: actions/upload-artifact@v7
@@ -263,6 +220,8 @@ jobs:
           name: native-libraries
           path: |
             core/libs/*.so
+            core/libs/*.dylib
+            core/libs/*.dll
           if-no-files-found: error
 
   build-jars:
@@ -292,10 +251,7 @@ jobs:
       - name: Verify Native Libraries
         run: |
           ls -la core/libs/
-          test -s core/libs/libtool64.so
-          test -s core/libs/libtoolaarch64.so
-          test -s core/libs/libtoolarm64.so
-          ! readelf -V core/libs/libtoolaarch64.so | grep -E 'GLIBC_2\.(1[89]|[2-9][0-9])'
+          bash scripts/verify-native.sh
 
       - name: Build Distributions and Jars
         # 与 release.yml 的发版构建同一条命令：CI 产物与发版资产同源，

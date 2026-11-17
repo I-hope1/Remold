@@ -9,11 +9,12 @@ REM   libtoolaarch64.so    Linux aarch64 (glibc 2.17)
 REM   libtoolarm64.so      Android arm64 - NOT built here: core/build.gradle compileNativeArm64 / CI NDK (bionic ABI).
 set COMMON=-I"%JAVA_HOME%/include" -I"%JAVA_HOME%/include/win32" -std=c++23 -O3 -g0 -fno-exceptions -fno-rtti -fdeclspec -w
 
-zig c++ -shared -target x86_64-windows -Wl,--strip-all %COMMON% -o ../libs/tool64.dll tool.cpp
-zig c++ -c -target aarch64-macos %COMMON% -o "%TEMP%\tool_macos_arm64.o" tool.cpp
-zig cc -shared -target aarch64-macos -Wl,-dead_strip "%TEMP%\tool_macos_arm64.o" -o ../libs/libtoolarm64.dylib
-zig c++ -c -target x86_64-macos %COMMON% -o "%TEMP%\tool_macos_x64.o" tool.cpp
-zig cc -shared -target x86_64-macos -Wl,-dead_strip "%TEMP%\tool_macos_x64.o" -o ../libs/libtool64.dylib
+zig c++ -shared -target x86_64-windows-gnu -Wl,--strip-all %COMMON% -o ../libs/tool64.dll tool.cpp
+if exist ..\libs\tool.lib del /q ..\libs\tool.lib
+zig c++ -c -target aarch64-macos.11.0 %COMMON% -o "%TEMP%\tool_macos_arm64.o" tool.cpp
+zig cc -shared -target aarch64-macos.11.0 -Wl,-dead_strip "%TEMP%\tool_macos_arm64.o" -o ../libs/libtoolarm64.dylib
+zig c++ -c -target x86_64-macos.10.13 %COMMON% -o "%TEMP%\tool_macos_x64.o" tool.cpp
+zig cc -shared -target x86_64-macos.10.13 -Wl,-dead_strip "%TEMP%\tool_macos_x64.o" -o ../libs/libtool64.dylib
 zig c++ -c -target x86_64-linux-gnu.2.17 -I"%~dp0jni_posix" %COMMON% -o "%TEMP%\tool_linux_x64.o" tool.cpp
 zig cc -shared -target x86_64-linux-gnu.2.17 -Wl,--strip-all "%TEMP%\tool_linux_x64.o" -o ../libs/libtool64.so
 REM Linux aarch64: put the posix jni_md.h before %COMMON%. The win32 one (__declspec/__int64)

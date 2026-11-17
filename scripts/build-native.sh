@@ -79,7 +79,25 @@ build_linux_x64() {
     "-Wl,--strip-all" "$WORK_DIR/tool_linux_x64.o" "$OUT_DIR/libtool64.so"
 }
 
+# Android 产物的编译器选择顺序：
+#   1) ANDROID_CXX —— 显式指定的交叉编译器（例如在 aarch64 宿主上用本机 clang 驱动 r27c sysroot
+#      的 wrapper；NDK 自带的 prebuilt/linux-x86_64 里的 clang 在 aarch64 宿主上无法执行）；
+#   2) NDK 自带的 aarch64-linux-android<API>-clang++。
+# 两条路径都必须产出与前缀一致的导出符号与 NEEDED（libm/libdl/libc）——verify-native.sh --compare 会盯住。
 build_android_arm64() {
+  if [ -n "${ANDROID_CXX:-}" ]; then
+    if [ ! -x "$ANDROID_CXX" ]; then
+      echo "::error::ANDROID_CXX is set but not executable: $ANDROID_CXX" >&2
+      exit 1
+    fi
+    echo "[native] Building libtoolarm64.so (android-arm64 via $ANDROID_CXX, ANDROID_CXX override)"
+    "$ANDROID_CXX" -shared -fPIC -static-libstdc++ -std=c++2b -O3 \
+      -I"$CPP_DIR/jni_posix" \
+      -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+      "$TOOL_CPP" -o "$OUT_DIR/libtoolarm64.so"
+    ls -la "$OUT_DIR/libtoolarm64.so"
+    return 0
+  fi
   local ndk="${ANDROID_NDK_HOME:-}"
   if [ -z "$ndk" ] && [ -n "${ANDROID_SDK_ROOT:-}" ] && [ -d "$ANDROID_SDK_ROOT/ndk" ]; then
     ndk="$(find "$ANDROID_SDK_ROOT/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"

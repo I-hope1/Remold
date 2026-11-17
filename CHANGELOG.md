@@ -67,6 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   linux x64/aarch64、macOS x64/arm64、Windows dll 五个产物随之重建。
 - CI 的 native 产物上传改为 `if: always()`：ABI/仓内同步校验失败时也带走刚编出的产物，
   否则 Android 产物（只能由 x86_64 + NDK 编）无法回灌进仓库。
+- `scripts/build-native.sh` 支持 `ANDROID_CXX` 覆盖 Android 交叉编译器：NDK 自带的
+  `prebuilt/linux-x86_64` 里的 clang 在 aarch64 宿主上无法执行（Exec format error），
+  用本机 clang 驱动同一份 r27c sysroot 的 wrapper 即可产出**导出符号与 NEEDED 完全一致**的
+  `libtoolarm64.so`（实测与 CI 用 NDK clang 编出的导出集合逐项相同）。
 
 
 - **批次级单次堆遍历：同一批 K 个类的存活实例收集从 K 次全堆扫描收敛为 1 次**

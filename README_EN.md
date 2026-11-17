@@ -54,12 +54,9 @@ The plugin is published to the **Gradle Plugin Portal**, so no extra repository 
 plugins { id 'io.github.i-hope1.remold' version '0.2.8' }
 ```
 
-Alternatively apply the script plugin in `build.gradle` (pin the URL to a concrete version tag — never `main` — so the build plugin and the agent stay on the same version):
+Whichever way the plugin is applied, configuration goes through the same `remold { }` extension:
 
 ```groovy
-def remoldRef = (findProperty('remold.version') ?: '0.2.8')
-apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remold.gradle"
-
 remold {
     // Reads remold.version from gradle.properties by default; downloads and caches the matching remold-agent.jar.
     // If a local remold-agent.jar manifest version differs from remold.version, the configured release is
@@ -72,7 +69,19 @@ remold {
 }
 ```
 
-With the Kotlin DSL (`build.gradle.kts`), `apply(from = ...)` gives the IDE no type-safe accessors for the script extension, so either pull in the binary plugin `com.github.I-hope1.Remold:gradle-plugin:v<version>` via `buildscript` and `apply(plugin = "io.github.i-hope1.remold")`, or configure through `extra["remold.mainClass"] = "..."`. Offline builds can point at a local plugin jar with `-Premold.pluginJar=<path>`; see [`gradle-plugin/README.md`](gradle-plugin/README.md).
+The Kotlin DSL (`build.gradle.kts`) is the same: `plugins { id("io.github.i-hope1.remold") version "0.2.8" }`, with `remold { }` as the generated type-safe accessor; see [`gradle-plugin/README.md`](gradle-plugin/README.md) for every option.
+
+<details>
+<summary><sub>Not recommended: skip plugin resolution and apply the remote script plugin directly (the script is a thin shim for the binary plugin; <code>apply from</code> of <code>v&lt;version&gt;</code> is equivalent to the <code>plugins { }</code> declaration above)</sub></summary>
+
+> Pin the URL to a concrete version tag (never `main`) so the build plugin and the agent stay on the same version; offline builds can point at a local plugin jar with `-Premold.pluginJar=<path>`.
+
+```groovy
+def remoldRef = (findProperty('remold.version') ?: '0.2.8')
+apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remold.gradle"
+```
+
+</details>
 
 The plugin attaches extensions based on the project type:
 - **Fabric / Quilt projects**: when Loom is detected it attaches the `mixin` and `fabric` plugins (injects `fabric.classPathGroups`, and renames stale build jars of the same modId under `run/mods` to `.remold-disabled` to isolate them);

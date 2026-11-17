@@ -125,10 +125,14 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 读者扫描成本探针 | `tests/src/ReaderScanProbe.java`（`./gradlew :tests:readerScanProbe`，不需要 DCEVM）：常量池扫描 vs 方法体精扫、三档扫描范围的真实成本、派生缓存开/关双档（§F） |
 | 按 blob 内容寻址的派生数据缓存（PR2） | `core/src/remold/vcs/DerivedDataCache.java`（键 `(kind, SHA-256(blob))`、双预算 LRU、值必须不可变且不持 `Class`/`ClassLoader`/`ClassNode`；开关 `-Dremold.vcs.derived_cache`，预算 `-Dremold.vcs.derived_cache_entries` / `-Dremold.vcs.derived_cache_bytes`）；消费点：`LambdaAligner.consumersOf` / `deriveConsumerTags`（按 `(blob, 方法 name+desc)` 缓存消费者数据流，值按指令流下标对齐；`hasConsumerSite` 先判"方法体里有没有本类 lambda 调用位点"，没有则不分析也不入池）、`LambdaAligner.deriveAnonRefs`（匿名类引用索引）、`RemovedMemberReaders.describe` / `refs`（类型世界与常量池引用）。**禁止缓存 `align()` 整包结果**，键维度契约见 `docs/topology/16-bytecode-changeset-vcs.md` §3.7 |
 | 派生数据量化基准与等价门禁 | `tests/src/DerivedDataBench.java`（`./gradlew :tests:derivedDataBench`，纯测量：每类 `align()` 成本分布、消费者数据流消融、缓存开/关、预算边界；读数见 `docs/topology/17-derived-data-cache-probe.md`）、`tests/src/DerivedDataEquivalenceTest.java`（门禁：开/关产物逐字节 + `AlignmentResult` 全字段相等、换序遍历、按 `(blob, 方法)` 查条目的键维度断言） |
+| 逐代对齐元数据旁路记录（PR1） | `core/src/remold/vcs/AlignmentMetaStore.java`（loader 弱键槽 + head/history 两级、`preAlignHash`/`alignOutputHash`/`jvmEffHash` 三口径 + 自造名/幽灵生前指纹/方法映射；`headMatching` 要求 `jvmEffHash` 命中才采信）、`core/src/remold/vcs/VcsCommitGate.java`（批次原子提交真值表）、`core/src/remold/vcs/BytecodePack.java`（`-Dremold.vcs.pack_dir` 离线回放包，未设目录即 no-op）；写入口 `RemoldAgent.commitVcsBatch` 只在"该类最终 redefine 成功之后"提交，两阶段 Stage A 不提交；开关 `-Dremold.vcs.enabled`（默认 false）。规格 `docs/topology/16-bytecode-changeset-vcs.md` §2.3～§2.4/§5.3，验收 `vcsPackProbe` / `vcsTwoPhaseProbe` |
+| 活体对齐的 Raw ↔ Raw 输入与 Eff_prev 继承 | 规格 `docs/topology/18-live-raw-to-raw-alignment.md`（双跑道 + G1/G2/G3 准入闸门 + 继承集枚举与落地顺序 + 整类回退）；消费点 `LambdaAligner.align`（`META_SOURCE` 为 Run R 总闸）、`AlignmentMetaStore.headMatching`、`RemoldAgent.writePendingInvented`/`commitVcsBatch` 之间的代际传递 |
+| 堆实例检索（Native） | `LibTool.getInstances` |
+| 批次堆遍历（同批 K 类收敛为 1 次全堆遍历） | `LibTool.getInstancesBatch` / `hasLiveInstance`（`core/src/remold/util/LibTool.java`：`BATCH_TARGET_LIMIT=16` 分块、`BATCH_LIVENESS_TARGET_LIMIT=64` 存在性探测不物化对象、任一归属/槽位异常整体退回逐类路径），`RemoldAgent` 的逐实例驱动消费；规格 `docs/initfix/05-jvmti-heap.md` §「批次实例收集」 |
+| JNI 局部引用生命周期回归锁 | `tests/src/BatchHeapScanEquivalenceTest.java`（批收集 vs 逐类集合等价、无脏 tag、K=1 单次遍历）+ `tests/src/remold/BatchLivenessPrefetchTest.java`（批次存活探测 1 次 vs 逐类 K 次，带去触发对照）；锁的是"`GetObjectsWithTags` 的 `jobject` 属当前局部帧、帧弹出后被容器数组槽位复用"这一 UAF 形态，等价性用例抓不住，必须由探针击杀 |
 | 阶段 A 骨架合成 | `StageASkeleton`（`core/src/remold/ref/`，纯函数：新结构 + 旧执行体，成员按旧 ∪ 新） |
 | 注解 | `remold.annotation.RemoldReinit` |
 | 合成字段过滤 | `ClassDiffUtil.isInternalMarkerField` |
-| 堆实例检索（Native） | `LibTool.getInstances` |
 | 匿名类与局部类安全门 | `AnonClassAligner`、`LayoutGate`、`LocalClassGuard` |
 | `Object.toString` 例外 | `InitFix.allowedStringCoercion`、`isInertProducer`、`isIntermediateObjectToString`（`effectReason` 在白名单之后、黑名单之前调用） |
 | 测试夹具（Java） | `tests/src/InitFixOracle.java`（内存 `javac`） |
@@ -240,6 +244,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 实例状态布局安全门（LayoutGate）、局部类编号漂移止血门（LocalClassGuard）、蜕变测试 | `docs/topology/07-layout-gate-and-risks.md` |
 | 枚举常量集合变更为什么不做运行期修复（实测读数、候选方案否决、复现探针） | `docs/topology/10-enum-constant-append-infeasibility.md`、`tests/enum-append-probe/README.md` |
 | 孤儿 lambda 桩的默认值 / 保留旧体语义、存活判据与 log-once 告警 | `docs/topology/11-orphan-lambda-body-retention.md` |
+| 活体对齐的输入选择（Raw ↔ Raw / Eff_prev 兼容跑道）、准入闸门、继承集落地与回退 | `docs/topology/18-live-raw-to-raw-alignment.md` |
 | 架构决策记录、偏离原因、JBR 8 组真机数据 | `docs/topology/08-decisions.md` |
 
 ### 物理内存偏移与第三方缓存驱逐 (P0 / P1)

@@ -30,6 +30,14 @@ import java.util.WeakHashMap;
  *       {@link #HISTORY_MAX_ENTRIES} 约束；超预算按全局 {@link Entry#seq} 淘汰最旧。</li>
  * </ul>
  *
+ * <p><b>线程安全</b>：全部公开方法在同一个对象监视器上串行化。这条是必须的——{@code WeakHashMap}
+ * 的 {@code get()} 会在内部触发 {@code expungeStaleEntries()} 改表结构，多线程只读也可能崩；
+ * 因此内部所有对 {@code slots} 的访问（含 {@code slots.size()} / 遍历）都在锁内完成，
+ * 调用方无需再包 {@code Collections.synchronizedMap(...)}。</p>
+ *
+ * <p><b>{@code null} loader</b>：走固定 {@code bootstrapSlot}（id 0），不经过 {@code WeakHashMap}，
+ * 因此引导类加载器下的类不会 NPE，也不参与 loader 回收。</p>
+ *
  * <p><b>写入时机不在本类决定</b>：调用方（{@code RemoldAgent}）必须在该类<b>最终重定义成功</b>
  * 之后才调用 {@link #commit}；对齐期（{@code LambdaAligner.align}）只读不写，避免把"对齐算完了
  * 但 JVM 拒绝/回滚"的字节记成当前代。</p>

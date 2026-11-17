@@ -2139,6 +2139,9 @@ public class RemoldAgent {
 		try {
 			processChangesBatch(changedFiles, classes);
 		} finally {
+			// 旁路暂存（PR1）必须在这里兜底清空：批次中途抛 Throwable 时，提交点可能压根没跑到，
+			// 残余条目会带着上一批的对齐输入污染下一批。
+			PENDING_VCS.clear();
 			BatchWatchdog.exit();
 		}
 	}

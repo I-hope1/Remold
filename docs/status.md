@@ -356,6 +356,20 @@
 
 ---
 
+### 1.1 字节码 Changeset 旁路记录（PR1）
+
+设计规格：[`docs/topology/16-bytecode-changeset-vcs.md`](topology/16-bytecode-changeset-vcs.md)
+
+| 机制 / 条目 | 状态 | 规范章节 | 落地位置 | 验收证据与决策依据 |
+|:---|:---:|:---|:---|:---|
+| 逐代元数据旁路记录（loader 弱键槽 + 单调 long 代号、head/history 两级） | ✅ | §2.3 / §2.4 | `core/src/remold/vcs/AlignmentMetaStore.java` | 单测 `AlignmentMetaEquivalenceTest` 6 例；默认 `remold.vcs.enabled=false`，对齐期只读、不参与决策 |
+| 离线回放包导出（`-Dremold.vcs.pack_dir`） | ✅ | §5.3 / §7.4 | `core/src/remold/vcs/BytecodePack.java` | E2E `vcsPackProbe` 18/18（真实 agent + DCEVM redefine → 导出 → 逐字节重放 + 关闭记录对照） |
+| 批次原子提交判据 | ✅ | §5.3 / §8.1 | `core/src/remold/vcs/VcsCommitGate.java` + `RemoldAgent.commitVcsBatch` | 单测 `VcsCommitGateTest` 5 例真值表；变异"部分生效也提交"→ 对应用例变红 |
+| 两阶段只在 Stage C 记一代 | ✅ | §5.3 | `RemoldAgent.processChangesBatch` / `applyTwoPhase` | E2E `vcsTwoPhaseProbe`：真实两阶段批次下 stage A 计数器前进、head generation 精确 +1、存量实例新增字段补成 42；`LAMBDA_STRICT` 拒绝批次 generation 不变 |
+| loader GC 后 head 清理的确定性用例 | ⬜ | §2.3 | 待 PR2 | head/history 仅挂在弱键 `LoaderSlot` 内、无反向强引用；`System.gc` 轮询脆弱，PR2 配确定性回收钩子 |
+
+---
+
 ## 2. 存量初始化修复器 (InitFix)
 
 设计规格文档：[`docs/initfix/`](initfix/) 系列文档  

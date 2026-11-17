@@ -438,6 +438,11 @@ PR1 的记录是**旁路**：`LambdaAligner.align()` 只读（纯函数，不写
 - **`Raw` 取向（PR1 定义）**：`preAlign` = **进入 `align()` 之前的待对齐产物**（已过前置归一化
   `forceStaticLambdas` 等变换），不是磁盘原生编译产物；磁盘原始字节仍在 `sourceBytecodeCache`。
   PR1 同时记录 `preAlignHash` / `alignOutputHash` / `jvmEffHash`，PR3 换基准时不得混用。
+
+  > **口径预留（Ctrl+Z 识别）**：将来若要识别"IDE 把源码退回原版本"，对照基线应取**进变换链前的
+  > 原生 `.class` 哈希**（即 `sourceBytecodeCache` 侧的原始字节），而不是 `preAlignHash`——
+  > 前置变换（如 `forceStaticLambdas`）一旦跨 agent 版本改变，`preAlignHash` 会随变换实现漂移，
+  > 拿它判断"源码没变"会误判。
 - **动态/外部入口**：`redefineDynamic` 不经过 `LambdaAligner.align`（它的 Lambda 对齐发生在重定义变换链里），
   PR1 不为它产生记录；读侧遇到无记录时退回字节埋点（§4.3），属安全降级而非失败。
 - **失败路径**：`afterRedefineFailed`、`bytecodeCache` 回滚、批次 abort 语义全部不变；VCS 不替代它们，
@@ -556,6 +561,11 @@ PR1 只验证"记录 / 导出 / 离线重放"这一层，不引入任何决策�
   两阶段只记阶段 C 生效的最终字节，不出现"Stage A 代"。
 - **E2E 序列**（`vcsPackProbe`）：真实 agent + 文件监听 + 真实 DCEVM redefine 跑"删除 Lambda → 加回 Lambda"
   两轮：记录开启的那一轮恰好产出一个回放条目；关闭记录的那一轮不产出新条目，且重定义照常生效。
+- **两阶段 E2E**（`vcsTwoPhaseProbe`）：真实 `InitFix` 两阶段批次（新增实例字段 + 存量实例 + Lambda 删除）下，
+  断言 stage B 计数器前进（证明确实走 A→B→C）、head generation 精确 `+1`（不是 0 也不是 2）、存量实例新增字段
+  被补成初值、包内 `jvmEffective` 等于 agent 报告的运行期字节。
+- **拒绝批次零提交**：缺 `-g` 的捕获 Lambda 在 `LAMBDA_STRICT` 下被拒（空批次、无回调），随后用一次合法改动
+  作围栏批次；围栏批次正常生效且前一个被拒批次未推进任何 generation、未导出条目。
 - **离线重放**：读回放包后逐条执行 `align(oldEffective, preAlign)`，输出必须与 `alignOutput` 逐字节相等，
   `inventedNames` / `methodMapping` / `bridgeCount` 契约字段相等，且 `jvmEffective == alignOutput`。
 - **判定力**：把包内 `preAlign` 改一个字节、或把 `inventedNames` 少一个 → 重放断言必须变红；

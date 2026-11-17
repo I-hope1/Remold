@@ -41,6 +41,22 @@ public class LibToolTest {
 			LibTool.init();
 		}
 		assertTrue(LibTool.initialized(), "LibTool native library must be initialized");
+		String osName = System.getProperty("os.name");
+		String osArch = System.getProperty("os.arch");
+		boolean nativeBucketPlan = LibTool.enumerationBucketPlanIsNative();
+		int bucketWindow = LibTool.enumerationBucketWindow();
+		System.out.println("[LibToolTest] os.name=" + osName
+			+ ", os.arch=" + osArch
+			+ ", nativeBucketPlan=" + nativeBucketPlan
+			+ ", bucketWindow=" + bucketWindow);
+		String expectedArch = System.getProperty("hstest.expectedOsArch");
+		if (expectedArch != null && !expectedArch.isEmpty()) {
+			assertEquals(expectedArch, osArch, "Test JVM os.arch mismatch");
+		}
+		if (Boolean.getBoolean("hstest.requireNativeBucketPlan")) {
+			assertTrue(nativeBucketPlan, "Expected native enumeration bucket plan (not Java fallback)");
+			assertEquals(1 << 18, bucketWindow, "Expected native enumeration bucket window 2^18");
+		}
 	}
 
 	@Test

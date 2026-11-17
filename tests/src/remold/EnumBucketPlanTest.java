@@ -26,6 +26,10 @@ public class EnumBucketPlanTest {
 	void windowIsTwoToThe17() {
 		if (LibTool.initialized()) {
 			assertEquals(WINDOW, LibTool.enumerationBucketWindow());
+			if (Boolean.getBoolean("hstest.requireNativeBucketPlan")) {
+				assertTrue(LibTool.enumerationBucketPlanIsNative(),
+					"Expected native enumeration bucket plan (not Java fallback)");
+			}
 		}
 	}
 

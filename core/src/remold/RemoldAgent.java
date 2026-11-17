@@ -10,6 +10,9 @@ import remold.ref.HeapFieldWatch;
 import remold.ref.HotswapBridge;
 import remold.ref.InitFix;
 import remold.ref.StageBInstanceCache;
+import remold.vcs.AlignmentMetaStore;
+import remold.vcs.VcsCommitGate;
+import remold.vcs.BytecodePack;
 import remold.util.*;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
@@ -304,6 +307,33 @@ public class RemoldAgent {
 
 	/** 本轮算出的自造名，redefine 成功后才并入 {@link #inventedSlots}。 */
 	private static final Map<String, java.util.Set<String>> pendingInvented = new ConcurrentHashMap<>();
+
+	/**
+	 * PR1 旁路暂存：本批次"对齐已经算完、但尚未确认 JVM 最终生效"的逐类记录。
+	 *
+	 * <p>写入点在 {@code LambdaAligner.align} 返回之后，<b>不是</b>提交点：对齐成功不代表
+	 * {@code redefineClasses} 会接受。真正提交只在批次最终结果确定后由
+	 * {@link #commitVcsBatch} 完成；本批任何回滚或 {@code LAMBDA_STRICT} 拒绝都会整批丢弃。</p>
+	 */
+	private static final Map<String, VcsPending> PENDING_VCS = new ConcurrentHashMap<>();
+
+	/** 旁路暂存体：对齐输入/产出 + 当轮契约字段。只在批次内短暂存活。 */
+	private static final class VcsPending {
+		final ClassLoader loader;
+		final byte[] oldEffective;
+		final byte[] preAlign;
+		final byte[] alignOutput;
+		final LambdaAligner.AlignmentResult result;
+
+		VcsPending(ClassLoader loader, byte[] oldEffective, byte[] preAlign, byte[] alignOutput,
+		           LambdaAligner.AlignmentResult result) {
+			this.loader = loader;
+			this.oldEffective = oldEffective;
+			this.preAlign = preAlign;
+			this.alignOutput = alignOutput;
+			this.result = result;
+		}
+	}
 
 	/**
 	 * 源码级未织入基线缓存（用于对齐器与源码变更分析，避免 Mixin 等增强注入的合成方法/字段污染对齐逻辑）
@@ -2109,6 +2139,9 @@ public class RemoldAgent {
 		try {
 			processChangesBatch(changedFiles, classes);
 		} finally {
+			// 旁路暂存（PR1）必须在这里兜底清空：批次中途抛 Throwable 时，提交点可能压根没跑到，
+			// 残余条目会带着上一批的对齐输入污染下一批。
+			PENDING_VCS.clear();
 			BatchWatchdog.exit();
 		}
 	}
@@ -2150,6 +2183,9 @@ public class RemoldAgent {
 		Map<String, String> targetToRawName = new HashMap<>(changedFiles.size());
 		// 本轮"改了但没生效"的台账：摘要行据此点名跳过了谁（见 RoundSkips）。
 		RoundSkips skips = new RoundSkips();
+		// 旁路记录（PR1）：批次开始先清暂存，避免上一批未提交项串到本批。
+		PENDING_VCS.clear();
+		boolean lambdaStrictRejected = false;
 		// 本轮因注解默认值变化而整体作废的类（非 null = 事务共退：本批一个类都不重定义）。
 		String annotationDefaultAbort = null;
 		for (Path p : changedFiles) {
@@ -2607,6 +2643,9 @@ public class RemoldAgent {
 								// 删 A2 再加回，第二轮 A2 槽位串到 A3、A3 直接 NoSuchMethodError）。
 								byte[] alignOld = normalizeAlignBaseline(
 								 oldBytecode != null ? oldBytecode : oldSrc, alignSlash, alignLoader);
+								// PR1 旁路：Raw 阶段的定义 = 进入 align() 之前的待对齐产物
+								// （已过前置归一化 forceStaticLambdas 等变换，但不是磁盘原始字节）。
+								byte[] preAlignBytes = newBytecode;
 								// 只在"运行期基线确实变了、但选出来的对齐基线却等于新字节"时才告警：
 								// IDE 重复构建、字节码没变时 oldBytecode 也等于 newBytecode，那属于正常情况。
 								if (java.util.Arrays.equals(alignOld, newBytecode)
@@ -2624,8 +2663,13 @@ public class RemoldAgent {
 									LambdaAligner.AlignmentResult aligned = LambdaAligner.LAST_RESULT;
 									pendingInvented.put(className,
 									 aligned == null ? java.util.Set.of() : aligned.inventedNames);
+									if (Boolean.getBoolean("remold.vcs.enabled")) {
+										PENDING_VCS.put(className, new VcsPending(alignLoader, alignOld,
+											preAlignBytes, newBytecode, aligned));
+									}
 								} catch (LambdaAligner.LambdaAlignmentStrictException e) {
 									lambdaNanos += System.nanoTime() - lambdaT0;
+									lambdaStrictRejected = true;
 									error("REJECTED: " + e.getMessage() + ". Please recompile with '-g' or restart.");
 									AlignmentTransaction tx = transactions.get(className);
 									if (tx != null) {
@@ -2811,6 +2855,14 @@ public class RemoldAgent {
 		}
 		Set<String>     redefinedOk = outcome.successful();
 		Set<String>     rolledBack  = outcome.rolledBack();
+		// PR1 旁路记录（写入点）：只在本批最终重定义结果确定之后提交；对齐期的暂存不在这里。
+		if (Boolean.getBoolean("remold.vcs.enabled")) {
+			try {
+				commitVcsBatch(definitions, redefinedOk, rolledBack, lambdaStrictRejected);
+			} catch (Throwable t) {
+				warn("[VCS] side-channel record skipped: " + t);
+			}
+		}
 		long redefineWallEndNanos = PERF_LOG ? System.nanoTime() : 0L;
 
 		// sourceBytecodeCache 是“最近一次实际生效的源码基线”，不是“本轮编译结果”。
@@ -4571,6 +4623,59 @@ public class RemoldAgent {
 	 * <p><b>不启用条件</b>：本批没有任何「新增/类型变更字段」进入补丁计划（纯方法体热更）时，调用方
 	 * 不会走这里；{@code -Dremold.agent.two_phase=false} 可强制回到单阶段快路径。</p>
 	 */
+	/**
+	 * 提交本批次的旁路记录（PR1）。
+	 *
+	 * <p><b>整批原子</b>：只有本批所有进入重定义的类最终都生效、且没有任何事务回滚 /
+	 * {@code LAMBDA_STRICT} 拒绝时才记录；否则整批丢弃。原因：PR1 的用途是给后续代际能力
+	 * 提供"真实生效序列"，半生效批次记下来会把"JVM 里其实没有这套字节"写成当前代。</p>
+	 *
+	 * <p><b>两阶段</b>：阶段 A 走 {@code redefineStageA}，不经过本方法；阶段 C 的最终字节由
+	 * {@code applyRedefinitions} 应用到 {@code bytecodeCache}，因此这里记录的 {@code jvmBytes}
+	 * 就是最终生效形态。留在阶段 A 的类不会出现在 {@code redefinedOk} 里，整批宁可不记。</p>
+	 */
+	private static void commitVcsBatch(List<ClassDefinition> definitions, Set<String> redefinedOk,
+	                                   Set<String> rolledBack, boolean lambdaStrictRejected) {
+		int total = definitions == null ? 0 : definitions.size();
+		int applied = 0;
+		if (definitions != null) {
+			for (ClassDefinition def : definitions) {
+				if (redefinedOk.contains(def.getDefinitionClass().getName())) applied++;
+			}
+		}
+		if (!VcsCommitGate.shouldCommit(total, applied, rolledBack.size(), lambdaStrictRejected)) {
+			int discarded = PENDING_VCS.size();
+			PENDING_VCS.clear();
+			if (DEBUG) log("[VCS] batch not fully applied (ok=" + redefinedOk.size()
+				+ "/" + (definitions == null ? 0 : definitions.size())
+				+ ", rolledBack=" + rolledBack.size() + ", lambdaStrict=" + lambdaStrictRejected
+				+ "); " + discarded + " pending record(s) discarded.");
+			return;
+		}
+		for (ClassDefinition def : definitions) {
+			String className = def.getDefinitionClass().getName();
+			String slashName = className.replace('.', '/');
+			VcsPending p = PENDING_VCS.remove(className);
+			if (p == null) continue;
+			byte[] jvmBytes = def.getDefinitionClassFile();
+			try {
+				Map<String, Long> ghosts = LambdaAligner.scanGhostOriginHashes(p.alignOutput);
+				Set<String> invented = p.result == null ? Set.of() : p.result.inventedNames;
+				Map<String, String> mapping = p.result == null ? Map.of() : p.result.methodMapping;
+				int bridges = p.result == null ? 0 : p.result.bridgeCount;
+				AlignmentMetaStore.INSTANCE.commit(p.loader, slashName,
+					p.preAlign, p.alignOutput, jvmBytes, invented, ghosts, mapping, bridges);
+				if (BytecodePack.enabled()) {
+					BytecodePack.append(new BytecodePack.Entry(slashName, p.oldEffective, p.preAlign,
+						p.alignOutput, jvmBytes, invented, mapping, bridges));
+				}
+			} catch (Throwable t) {
+				warn("[VCS] record failed for " + className + ": " + t);
+			}
+		}
+		PENDING_VCS.clear();
+	}
+
 	private static RedefineOutcome applyTwoPhase(List<ClassDefinition> definitions,
 	                                             Map<String, byte[]> oldEffectiveBytes,
 	                                             Collection<AlignmentTransaction> transactions,

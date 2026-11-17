@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **字节码 Changeset 旁路记录（PR1）**：新增 `remold.vcs.AlignmentMetaStore`（按
+  `(loader identity, 类名)` 记录每一代"实际进 JVM 的字节"与对齐契约字段；loader 弱键槽 + 单调 `long` 代号，
+  head 不随历史预算淘汰、loader 回收即清理）、`remold.vcs.BytecodePack` 离线回放包
+  （`-Dremold.vcs.pack_dir`）与 `remold.vcs.VcsCommitGate` 批次原子判据。记录点位于 `RemoldAgent`
+  的最终重定义成功之后（两阶段只在 Stage C 生效后记一次），对齐期 `LambdaAligner.align()` 恢复为只读。
+  默认 `remold.vcs.enabled=false`，关闭时零行为变化；`LambdaAligner.META_SOURCE` 保持默认 `false`。
+  规格见 [`docs/topology/16-bytecode-changeset-vcs.md`](docs/topology/16-bytecode-changeset-vcs.md)，
+  E2E 见 `tests/src/VcsPackProbe.java` / `tests/src/VcsTwoPhaseProbe.java`，由 CI 的 `test-dcevm` 任务
+  （JBR 21 DCEVM）执行。
+
 - **Gradle 构建完成 marker（build-trigger 快路径）**：`classes` 任务结束时由插件原子写入
   `<buildDir>/remold/build-trigger`（`-Dremold.agent.build_trigger_file` 注入），agent 收到后立即触发本批热更、
   取消尚未到期的 `fileShakeMs` 兜底等待；marker 之后才到的同批事件按磁盘指纹跳过（no-op 批次，不产生

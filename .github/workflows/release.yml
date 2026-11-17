@@ -201,13 +201,18 @@ jobs:
           distribution: temurin
           java-version: '25'
 
+      - name: Snapshot checked-in native libraries
+        run: |
+          rm -rf /tmp/checked-in-libs
+          cp -r core/libs /tmp/checked-in-libs
+
       - name: Build all native libraries
         run: |
           export JAVA_HOME="$JAVA_HOME_25_X64"
           bash scripts/build-native.sh
 
-      - name: Verify native ABIs and exports
-        run: bash scripts/verify-native.sh
+      - name: Verify native ABIs, exports and repo sync
+        run: bash scripts/verify-native.sh --compare /tmp/checked-in-libs core/libs
 
       - name: Upload Native Artifacts
         uses: actions/upload-artifact@v7

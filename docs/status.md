@@ -378,10 +378,10 @@
 | 机制 / 条目 | 状态 | 规范章节 | 落地位置 | 验收证据与决策依据 |
 |:---|:---:|:---|:---|:---|
 | 内容寻址派生缓存（`(kind, SHA-256(blob))`、双预算 LRU、compute-then-publish） | ✅ | §3.2 / §3.7 | `core/src/remold/vcs/DerivedDataCache.java` | 单测 `DerivedDataCacheTest` 8 例：内容寻址命中/种类隔离/条目与字节预算（预算可覆盖）/关闭透传/预计算键与字节键共用条目/未知 blob `peek` 为空；默认 `remold.vcs.derived_cache=true`，关闭时零行为变化 |
-| 对齐侧：按 `(blob, 方法)` 缓存消费者数据流（`findConsumers` 的 ASM `Analyzer`） | ✅ | §3.7 / §3.5 | `LambdaAligner.consumersOf` / `deriveConsumerTags` | 值按**指令流下标**对齐，命中后在本轮新解析出的节点上重建；`ACTIVE_MUTATION` 非空时旁路缓存；`DerivedDataEquivalenceTest` 4 例（开/关字节相等 + `AlignmentResult` 全字段相等 + 换序遍历仍相等 + 关闭不写条目） |
+| 对齐侧：按 `(blob, 方法 name+desc)` 缓存消费者数据流（`findConsumers` 的 ASM `Analyzer`） | ✅ | §3.7 / §3.5 | `LambdaAligner.consumersOf` / `deriveConsumerTags` / `hasConsumerSite` | 值按**指令流下标**对齐（命中后在本轮新解析出的节点上重建，长度不一致直接退回重算）；`ACTIVE_MUTATION` 非空时旁路缓存；**位点预判**：方法体内无"本类 lambda 调用位点"时既不跑数据流也不入池（实测每类 `align()` median 2.02→1.01 ms、条目 4654→495）；`DerivedDataEquivalenceTest` 6 例（开/关字节相等 + `AlignmentResult` 全字段相等 + 换序遍历 + 关闭不写条目 + 键维度/描述符维度 + 直接调用合成方法的位点） |
 | 读者侧：按 blob 缓存类型世界与常量池引用 | ✅ | §3.7 / [`initfix/07`](initfix/07-p05-probe-results.md) §13.6 | `RemovedMemberReaders.describe` / `refs` | `DerivedDataEquivalenceTest.readerFactsCacheIsEquivalent`：`universe()`/`refs()` 开/关逐项相等、pre/post 两世界共用条目（命中数 = 类数）；`ReaderScanProbe` 新增开/关双档同轮读数 |
 | InitFix 侧按 blob 缓存字节解析（`InitFix.NestView` 字段写索引 / `HierarchyTreeOracle.readClassBytes`） | ⬜ | §3.7 | 待测量后决定 | 本切片未取到 InitFix 侧读数：对齐侧消融显示"消费者数据流之外的全部派生"只占约 8%，据此先只缓存对齐侧与读者侧；InitFix 侧的解析量级尚未实测，不做无读数的实现 |
-| 派生缓存粒度与预算的决定依据 | ✅ | §3.7 | `tests/src/DerivedDataBench.java` | 同轮 min/median/max：`findConsumers` 消融占对齐耗时 94%；真实批次（旧侧命中）对齐 1.85×、读者侧 1.83×；条目预算小于一轮工作集时命中率退化为 0（读数见 [`17-derived-data-cache-probe.md`](topology/17-derived-data-cache-probe.md)） |
+| 派生缓存粒度与预算的决定依据 | ✅ | §3.7 | `tests/src/DerivedDataBench.java` | 同轮 min/median/max：`findConsumers` 消融占对齐耗时 89～92%；最终实现下真实批次（旧侧命中）对齐 1.52×（k=8）/1.77×（整语料）、读者侧 2.4×～3.3×；条目预算小于一轮工作集时命中率退化为 0（读数与边界见 [`17-derived-data-cache-probe.md`](topology/17-derived-data-cache-probe.md)） |
 
 ---
 

@@ -3,7 +3,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
+import org.objectweb.asm.tree.MethodInsnNode;
+import org.objectweb.asm.tree.MethodNode;
 import remold.LambdaAligner;
 import remold.LambdaAligner.AlignmentResult;
 import remold.ref.RemovedMemberReaders;
@@ -120,15 +126,19 @@ public class DerivedDataEquivalenceTest {
 	}
 
 	/**
-	 * 缓存键的维度契约：对齐侧的消费者数据流必须按 <b>(blob, 方法)</b> 分别成条目。
+	 * 缓存键的维度契约：对齐侧的消费者数据流必须按 <b>(blob, 方法 name+desc)</b> 分别成条目，
+	 * 且"没有消费者位点的方法"不得占条目。
 	 *
 	 * <p>为什么单独立一条：端到端"开/关输出相等"只能证明<b>用到的</b>那条派生是对的；如果键里漏掉
 	 * 方法维度（同一份 blob 的所有方法共用一张标记表），只要该语料上消费者证据恰好不改写产物，
 	 * 端到端断言就会**假绿**。本条直接按方法去查条目，把键的形状变成可断言读数。</p>
+	 *
+	 * <p>键必须带<b>描述符</b>：同名重载在同一个类里是合法形态，只按名字做键会互相覆盖。
+	 * 这里用"只带名字的键必须查不到条目"来钉住这一点。</p>
 	 */
 	@Test
 	void consumerCacheIsKeyedPerMethodAndBlob() throws Exception {
-		byte[] oldBytes = corpus().get(0);
+		byte[] oldBytes = pickFixtureWithConsumerSites();
 		byte[] newBytes = resalt(oldBytes, 11);
 		System.setProperty("remold.vcs.derived_cache", "true");
 		DerivedDataCache.reset();
@@ -136,45 +146,165 @@ public class DerivedDataEquivalenceTest {
 
 		String blobKey = DerivedDataCache.blobKey(newBytes);
 		assertNotNull(blobKey, "cache must be enabled for this test");
-		String blobKeyOld = DerivedDataCache.blobKey(oldBytes);
 
-		// 根方法（非合成、非排除）一定会被扫描，因此必然各有一条按方法键的条目。
-		int perMethodEntries = 0;
-		int nonEmptyValues = 0;
-		Set<String> methodKeys = new java.util.LinkedHashSet<>();
-		org.objectweb.asm.tree.ClassNode cn = new org.objectweb.asm.tree.ClassNode();
+		ClassNode cn = new ClassNode();
 		new ClassReader(newBytes).accept(cn, ClassReader.SKIP_FRAMES);
-		for (var mn : cn.methods) {
-			if (mn.name.startsWith("<")) continue;
-			if ((mn.access & Opcodes.ACC_SYNTHETIC) != 0) continue;
+		int withSite = 0;
+		int withoutSite = 0;
+		boolean nonEmpty = false;
+		for (MethodNode mn : cn.methods) {
 			String kind = LambdaAligner.CONSUMER_CACHE_KIND + '/' + mn.name + mn.desc;
 			List<?> cached = DerivedDataCache.peekByKey(kind, blobKey);
-			assertNotNull(cached, "consumer cache must hold a per-method entry for " + mn.name + mn.desc
-			                     + " (key dimension 'method' is missing if this is null)");
-			// 标记表按下标对齐：长度不该超过指令流（探针侧解析会剥掉行号/调试节点，两者计数不必逐一对齐）。
-			assertTrue(cached.size() <= mn.instructions.size(),
-			           "cached tag table must be index-aligned with the instruction stream of "
-			           + mn.name + mn.desc + " (size=" + cached.size()
-			           + ", instructions=" + mn.instructions.size() + ")");
-			perMethodEntries++;
-			methodKeys.add(kind);
-			for (Object tag : cached) {
-				if (tag != null) { nonEmptyValues++; break; }
+			if (hasConsumerSite(cn.name, mn)) {
+				withSite++;
+				assertNotNull(cached, "consumer cache must hold a per-method entry for " + mn.name + mn.desc
+				                     + " (key dimension 'method' is missing if this is null)");
+				assertTrue(cached.size() <= mn.instructions.size(),
+				           "cached tag table must not exceed the instruction stream of " + mn.name + mn.desc);
+				for (Object tag : cached) {
+					if (tag != null) { nonEmpty = true; break; }
+				}
+				// 名字键必须查不到东西：描述符是键的一部分（同名重载靠它区分）。
+				assertNull(DerivedDataCache.peekByKey(LambdaAligner.CONSUMER_CACHE_KIND + '/' + mn.name, blobKey),
+				           "cache key must include the descriptor, name-only key must not resolve");
+			} else if (mn.instructions != null) {
+				withoutSite++;
+				assertNull(cached, "method without any consumer site must not occupy a cache entry: "
+				                   + mn.name + mn.desc);
 			}
 		}
-		assertTrue(perMethodEntries >= 2, "fixture must have at least 2 root methods, got " + perMethodEntries);
-		assertEquals(perMethodEntries, methodKeys.size(), "each method must own its own key");
-		assertTrue(nonEmptyValues > 0, "fixture must exercise the dataflow path (at least one non-empty tag table)");
+		assertTrue(withSite >= 2, "fixture must expose at least 2 methods with consumer sites, got " + withSite);
+		assertTrue(withoutSite >= 1, "fixture must contain methods without consumer sites, got " + withoutSite);
+		assertTrue(nonEmpty, "fixture must exercise the dataflow path (at least one non-empty tag table)");
 
-		// blob 维度同样必须存在：换一份字节（同方法名）不能复用上面这些条目。
-		assertNotNull(blobKeyOld, "old blob key must be computable");
-		assertNotEquals(blobKey, blobKeyOld, "different bytes must produce different blob keys");
+		assertNotEquals(blobKey, DerivedDataCache.blobKey(oldBytes), "different bytes must produce different keys");
 		assertNull(DerivedDataCache.peekByKey(LambdaAligner.CONSUMER_CACHE_KIND + '/' + cn.methods.get(0).name,
 		                                      "not-a-real-blob-key"),
 		           "unknown blob key must not resolve to a cached value");
 	}
 
-	/** 总开关关闭时不得写入任何条目，且产物与开启时相同。 */
+	/** 选一个"至少 2 个方法带消费者位点"的语料类：少于 2 个时键维度断言会退化成单点检查。 */
+	private static byte[] pickFixtureWithConsumerSites() throws Exception {
+		int best = -1;
+		byte[] bestBytes = null;
+		for (byte[] b : corpus()) {
+			ClassNode cn = new ClassNode();
+			new ClassReader(b).accept(cn, ClassReader.SKIP_FRAMES);
+			int sites = 0;
+			for (MethodNode mn : cn.methods) {
+				if (hasConsumerSite(cn.name, mn)) sites++;
+			}
+			if (sites > best) {
+				best = sites;
+				bestBytes = b;
+			}
+		}
+		assertNotNull(bestBytes, "corpus must not be empty");
+		assertTrue(best >= 2, "no corpus class exposes 2+ consumer sites (best=" + best
+		                      + "); the key-dimension assertions need at least two");
+		return bestBytes;
+	}
+
+	/**
+	 * 消费者位点预判必须与读取端逐字对齐：方法体<b>直接调用</b>本类合成方法也算位点。
+	 *
+	 * <p>为什么单独立一条：语料里的 lambda 基本都是 {@code invokedynamic} 形态，位点预判若只认
+	 * {@code invokedynamic} 分支（漏掉"直接 {@code INVOKESTATIC lambda$x$N}"这一半），在真实工程里
+	 * 就会对那些方法静默丢掉消费者证据——而这类方法在本仓库语料里恰好没有，端到端断言看不出来。
+	 * 这里用定向夹具把这一半钉死。</p>
+	 */
+	@Test
+	void consumerSitePreCheckCoversDirectSyntheticCalls() throws Exception {
+		byte[] fixture = directSyntheticCallFixture();
+		System.setProperty("remold.vcs.derived_cache", "true");
+		DerivedDataCache.reset();
+		LambdaAligner.align(fixture, fixture, resolver(), resolver());
+
+		String blobKey = DerivedDataCache.blobKey(fixture);
+		assertNotNull(blobKey, "cache must be enabled for this test");
+		String direct = LambdaAligner.CONSUMER_CACHE_KIND + "/run()V";
+		String plain = LambdaAligner.CONSUMER_CACHE_KIND + "/noop()V";
+		assertNotNull(DerivedDataCache.peekByKey(direct, blobKey),
+		              "a method that directly calls an internal synthetic method has a consumer site");
+		assertNull(DerivedDataCache.peekByKey(plain, blobKey),
+		           "a method with no synthetic call site must not occupy a cache entry");
+	}
+
+	/**
+	 * 定向夹具：{@code run()} 直接 {@code INVOKESTATIC lambda$run$0()}（没有 {@code invokedynamic}），
+	 * {@code noop()} 里什么都没有。
+	 */
+	private static byte[] directSyntheticCallFixture() {
+		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+		String owner = "gen/DirectSyntheticCall";
+		cw.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, owner, null, "java/lang/Object", null);
+
+		var init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+		init.visitCode();
+		init.visitVarInsn(Opcodes.ALOAD, 0);
+		init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+		init.visitInsn(Opcodes.RETURN);
+		init.visitMaxs(0, 0);
+		init.visitEnd();
+
+		var body = cw.visitMethod(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+		                          "lambda$run$0", "()V", null, null);
+		body.visitCode();
+		body.visitInsn(Opcodes.RETURN);
+		body.visitMaxs(0, 0);
+		body.visitEnd();
+
+		var run = cw.visitMethod(Opcodes.ACC_PUBLIC, "run", "()V", null, null);
+		run.visitCode();
+		run.visitMethodInsn(Opcodes.INVOKESTATIC, owner, "lambda$run$0", "()V", false);
+		run.visitInsn(Opcodes.RETURN);
+		run.visitMaxs(0, 0);
+		run.visitEnd();
+
+		var noop = cw.visitMethod(Opcodes.ACC_PUBLIC, "noop", "()V", null, null);
+		noop.visitCode();
+		noop.visitInsn(Opcodes.RETURN);
+		noop.visitMaxs(0, 0);
+		noop.visitEnd();
+
+		cw.visitEnd();
+		return cw.toByteArray();
+	}
+
+	/**
+	 * 与 {@code LambdaAligner.hasConsumerSite} 同判据的测试侧副本。
+	 *
+	 * <p>故意重复实现：测试要独立判定"该方法应不应该有条目"，若直接调产品方法，产品里的判据写错时
+	 * 测试会跟着错，等于没测。两处判据必须逐字对齐（读取端只在"本类 lambda 调用位点"上读标记）。</p>
+	 */
+	private static boolean hasConsumerSite(String owner, MethodNode mn) {
+		if (mn.instructions == null) return false;
+		for (AbstractInsnNode n : mn.instructions) {
+			if (n instanceof InvokeDynamicInsnNode indy) {
+				if (indy.bsmArgs == null || indy.bsmArgs.length < 2) continue;
+				if (indy.bsmArgs[1] instanceof Handle h && owner.equals(h.getOwner()) && isSyntheticName(h.getName())) {
+					return true;
+				}
+			} else if (n instanceof MethodInsnNode m) {
+				if (owner.equals(m.owner) && isSyntheticName(m.name)) return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * 与 {@code MethodFingerprinter.isSyntheticName} 同判据的测试侧副本。
+	 *
+	 * <p>注意产品判据是 {@code contains}（不是 {@code startsWith}）：Kotlin/Scala 的名字形如
+	 * {@code foo$lambda$1} / {@code foo$anonfun$1}，前缀不在开头。这里必须逐字对齐，
+	 * 否则测试会把"产品认定为位点"的方法判成"无位点"，从而断言错方向。</p>
+	 */
+	private static boolean isSyntheticName(String name) {
+		return name != null && (name.contains("lambda$") || name.contains("$lambda")
+		                        || name.contains("$anonfun$") || name.contains("access$"));
+	}
+
+	/** 总开关关闭时不得写入任何条目，且产物与开启时相同。 */	/** 总开关关闭时不得写入任何条目，且产物与开启时相同。 */
 	@Test
 	void disabledSwitchNeitherPopulatesNorChangesOutput() throws Exception {
 		List<byte[]> corpus = corpus();

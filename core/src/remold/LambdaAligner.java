@@ -3013,16 +3013,45 @@ public class LambdaAligner {
 	}
 
 	/**
+	 * 该方法体里是否存在"消费者标记会被读"的指令位点。
+	 *
+	 * <p>调用方只在<b>本类的 lambda 调用位点</b>（{@code invokedynamic} 的引导参数指向本类方法、
+	 * 或 {@code MethodInsnNode} 指向本类且名字命中合成名模式）上读消费者标记；一个方法里没有这种位点时，
+	 * 它的标记表<b>永远不会被读到</b>。</p>
+	 *
+	 * <p>所以这一层预判必须与读取端逐字对齐：判据偏移一位就会让某类方法静默丢掉消费者证据。
+	 * 超大类里通常只有少数方法写了 lambda，其余方法若照常跑 ASM {@code Analyzer}，既白白消耗 CPU，
+	 * 又会挤占缓存条目池。</p>
+	 */
+	private static boolean hasConsumerSite(ClassNode cn, MethodNode mn) {
+		if (mn.instructions == null) return false;
+		for (AbstractInsnNode n : mn.instructions) {
+			if (n instanceof InvokeDynamicInsnNode indy) {
+				if (indy.bsmArgs == null || indy.bsmArgs.length < 2) continue;
+				if (indy.bsmArgs[1] instanceof Handle h && cn.name.equals(h.getOwner())
+				    && MethodFingerprinter.isSyntheticName(h.getName())) {
+					return true;
+				}
+			} else if (n instanceof MethodInsnNode m) {
+				if (cn.name.equals(m.owner) && MethodFingerprinter.isSyntheticName(m.name)) return true;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * {@link #findConsumers} 的按方法缓存版：命中时按指令下标重建本轮节点映射，未命中走原实现。
 	 *
-	 * <p>缓存键 = {@code (blob 内容, 方法 name+desc)}：方法维度不能省，同一份 blob 里不同方法的
-	 * 标记表完全不同，漏掉它会让标记整表错位。值里存下标而不是 {@code AbstractInsnNode}：
-	 * 节点是本轮解析出来的可变对象，跨轮持有既会过期也会驻留整棵解析树。</p>
+	 * <p>缓存键 = {@code (blob 内容, 方法 name+desc)}：方法维度必须带<b>描述符</b>（同名重载是合法形态，
+	 * 只用名字会互相覆盖），且同一份 blob 里不同方法的标记表完全不同，漏掉维度会让标记整表错位。
+	 * 值里存下标而不是 {@code AbstractInsnNode}：节点是本轮解析出来的可变对象，跨轮持有既会过期也会驻留整棵解析树。</p>
 	 *
-	 * <p>以下情形一律走原实现（不读不写缓存）：缓存已关闭、blob 键不可用、{@link #ACTIVE_MUTATION}
-	 * 非空——后者是设计级变异测试的钩子，其结果不得跨变异档位复用。</p>
+	 * <p>以下情形一律走原实现（不读不写缓存）：方法里没有消费者位点（标记永远不会被读，
+	 * 见 {@link #hasConsumerSite}）、缓存已关闭、blob 键不可用、{@link #ACTIVE_MUTATION} 非空
+	 * ——最后一项是设计级变异测试的钩子，其结果不得跨变异档位复用。</p>
 	 */
 	private static Map<AbstractInsnNode, String> consumersOf(String blobKey, ClassNode cn, MethodNode mn) {
+		if (!hasConsumerSite(cn, mn)) return Collections.emptyMap();
 		if (blobKey == null || !DerivedDataCache.enabled()
 		    || (ACTIVE_MUTATION != null && !ACTIVE_MUTATION.isEmpty())) {
 			return findConsumers(cn.name, mn);
@@ -3033,9 +3062,13 @@ public class LambdaAligner {
 			() -> deriveConsumerTags(cn.name, mn));
 		if (tags.isEmpty()) return Collections.emptyMap();
 		AbstractInsnNode[] insns = mn.instructions.toArray();
+		if (tags.size() != insns.length) {
+			// 指令流与标记表对不上：说明缓存条目与本次解析口径不一致（例如未来某处换了 ClassReader 标志）。
+			// 这种情形绝不能按下标硬映射——直接退回重算，宁可少一次命中，也不能让标记错位。
+			return findConsumers(cn.name, mn);
+		}
 		Map<AbstractInsnNode, String> out = new HashMap<>();
-		int n = Math.min(insns.length, tags.size());
-		for (int i = 0; i < n; i++) {
+		for (int i = 0; i < insns.length; i++) {
 			String tag = tags.get(i);
 			if (tag != null) out.put(insns[i], tag);
 		}

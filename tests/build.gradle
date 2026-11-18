@@ -1731,3 +1731,59 @@ tasks.register("probeAll") {
 		println "RemoldAgent.getInst() accessor instead of the package-private field)."
 	}
 }
+
+// ---------------------------------------------------------------------------------------------
+// PR3 真实规模语料读数探针（战役 battle-20261118093654-d10a / 批次 A）
+//
+// 只测量、不断言：语料目录、采样上限全部从系统属性进来，探针内不含任何仓库路径或外部工程知识。
+// 测量型任务刻意不做 up-to-date（跳过等于给假数据）。
+//   :tests:pr3RealWorldReadingsMain    主档（Run R / Run E / 对照档 + M2 预算与提交耗时）
+//   :tests:pr3RealWorldReadingsBudget  预算对照档（独立 JVM + 小 meta_blob_bytes；预算在类初始化时定值）
+//   :tests:pr3RealWorldReadings        聚合入口（上面两条都跑）
+// 透传（可选）：-Ppr3.corpus.new=<dir> -Ppr3.corpus.old=<dir> -Ppr3.corpus.limit=<n>
+//               -Premold.vcs.meta_blob_bytes=<n>（仅预算档）
+// ---------------------------------------------------------------------------------------------
+def pr3ReadingsPropertyArgs = {
+	["pr3.corpus.new", "pr3.corpus.old", "pr3.corpus.limit"]
+		.findAll { project.hasProperty(it) }
+		.collect { "-D${it}=${project.property(it)}" }
+}
+
+tasks.register("pr3RealWorldReadingsMain", JavaExec) {
+	group = "verification"
+	description = "PR3 真实规模语料读数探针主档 (Pr3RealWorldReadingsProbe)：forceStaticLambdas 命中率 / runRGate 与 positionalFallbacks 分布 / blob 预算与 commit 耗时"
+	dependsOn classes
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "Pr3RealWorldReadingsProbe"
+	maxHeapSize = "2g"
+	doFirst {
+		jvmArgs(["-Dpr3.arm=main",
+		         "-Dremold.projectRoot=${rootDir.absolutePath}",
+		         "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"]
+		        + pr3ReadingsPropertyArgs())
+	}
+}
+
+tasks.register("pr3RealWorldReadingsBudget", JavaExec) {
+	group = "verification"
+	description = "PR3 Raw_prev blob 预算对照档 (Pr3RealWorldReadingsProbe, arm=budget)：小预算下 droppedBlobCount 与 NO_RAW_PREV 降级读数"
+	dependsOn classes
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "Pr3RealWorldReadingsProbe"
+	maxHeapSize = "2g"
+	doFirst {
+		def blobBytes = project.findProperty("remold.vcs.meta_blob_bytes") ?: "65536"
+		jvmArgs(["-Dpr3.arm=budget",
+		         "-Dremold.vcs.meta_blob_bytes=${blobBytes}",
+		         "-Dremold.projectRoot=${rootDir.absolutePath}",
+		         "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"]
+		        + pr3ReadingsPropertyArgs())
+	}
+}
+
+tasks.register("pr3RealWorldReadings") {
+	group = "verification"
+	description = "PR3 真实规模语料读数探针（聚合：主档 + 预算对照档）"
+	dependsOn "pr3RealWorldReadingsMain"
+	dependsOn "pr3RealWorldReadingsBudget"
+}

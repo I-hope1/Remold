@@ -132,6 +132,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **修掉「延迟派发落到下一个用例的派发器」导致的顺序相关 flaky**
+  （`tests/src/remold/BatchHotpathOptimizationTest.java`）：`RemoldAgent.scheduleDeferredPostRedefine`
+  在共享定时器上排 20ms 后 `postToMain`，而 `postToMain` 取的是**执行那一刻**装着的派发器，
+  于是上一个用例排下的延迟任务会落到下一个用例刚装的派发器上（落地线程 `HotSwap-Scheduler`）。
+  因此 `processAnnotationsSkipsClassesWithoutOnReloadDescriptor` 的 `dispatches == 0` 断言在集成树全量跑时
+  偶发为红。修法不依赖用例执行顺序、也不打 `@Order`/跳过：派发计数改为按线程分账（本测试线程 vs 外来线程），
+  断言只认本线程同步派发，并新增一条确定性复现用例（排真实延迟任务 → 断言外来线程计数 ≥ 1、本线程恒 0）。
+
+
 - **批次堆遍历：结果行里混进批容器数组自身（静默错配）**（`core/cpp/tool.cpp`）。根因是
   JNI 局部帧生命周期：`GetLoadedClasses` 枚举期的局部帧留到函数退出才弹，而 `GetObjectsWithTags`
   返回的 `jobject` 也是"当前帧"里的局部引用，帧一弹它们的 `JNIHandleBlock` 槽位立刻被随后

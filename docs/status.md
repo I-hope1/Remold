@@ -583,13 +583,23 @@
 - **后续验证方式**：`Pr3RawAlignmentScenarioTest` 覆盖 Ctrl+Z 幽灵继承与桥转发；新增「仅 `E_prev` 可见的见证」用例时以 `positionalFallbacks`/`runRGate` 为终局判据。
 - **决策依据**：[`18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md) §5（继承集枚举）与 §6（fail-closed）。
 
-### 风险 25：`forceStaticLambdas` 归一化导致该类稳定落 Run E
-- **风险描述与底层机制**：`normalizeAlignBaseline` / `forceStaticLambdas` 会把喂给对齐的旧侧字节再做一层归一化；这类类别的 `E_prev_used` 与 `Meta.jvmEffHash` 不一致，G1 代际身份因此判不出，整类回退 Run E。
-- **触发条件**：类含可被 `FORCE_STATIC_LAMBDA` 归一化的 lambda 调用位点（默认开启该归一化时）。
-- **当前缓解措施**：按设计降级而非缺陷——`runRGate = RAW_PREV_MISMATCH` 可观测，行为与旧路径完全一致（R2 等价）。
-- **残余影响**：这些类享受不到 Run R 的配对精度收益，属能力边界。
-- **后续验证方式**：若要覆盖，需要在提交元数据时记录「归一化后指纹」，属规格扩充；扩充字段必须可选（§5）。
-- **决策依据**：[`18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md) §3.2（G1）与 §5（可选字段）。
+### 风险 25：`forceStaticLambdas` 归一化与 Run R 的闸门关系（按实测更正）
+- **风险描述与底层机制**：`normalizeAlignBaseline` / `forceStaticLambdas` 会在对齐前重写 lambda 调用位点；一度担心这类类的 `E_prev_used` 与 `Meta.jvmEffHash` 不同源，导致 G1 代际身份判不出而整类回退 Run E。
+- **实测结论**：该担心不成立。`preAlign` 快照取自归一化**之后**，两侧指纹同源；真实两代语料 400 类里命中归一化的 7 类**全部 `PASSED`**，全语料 `RAW_PREV_MISMATCH` 为 0。读数见 [`19-raw-to-raw-realworld-readings.md`](topology/19-raw-to-raw-realworld-readings.md) §2。
+- **仍然成立的边界**：真正压低 Run R 接合率的是"没有本地 lambda 槽位"的类（只有外部方法引用）——它们判 `TRANSLATION_INCOMPLETE` 并回退；含 lambda 站点的类里接合率为 50/62（80.6%）。
+- **当前缓解措施**：不需要额外缓解；G1 维持"只比 `E_prev` 指纹"的单校验和设计，不做转换前后双哈希。
+- **残余影响**：无（该风险项按读数关闭）。若将来把 `preAlign` 快照挪到归一化之前，本结论立即失效，必须重跑 §2 的读数。
+- **后续验证方式**：`bash gradlew :tests:pr3RealWorldReadings`（需两代语料时用 `-Ppr3.corpus.old/new`）。
+- **决策依据**：[`18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md) §3.2；读数 [`19-raw-to-raw-realworld-readings.md`](topology/19-raw-to-raw-realworld-readings.md)。
+
+### 风险 27：`Raw_prev` blob 预算容量与提交耗时只有单语料读数
+- **风险描述与底层机制**：`Raw_prev` blob 以字节形态进元数据，受 16 MiB 全局 / 每类 256 KiB 双预算约束；预算压力下丢字节保哈希，该类当轮回退 Run E。
+- **实测读数**：真实两代语料 400 类满载 2,389,448 B（占 16 MiB 的 14.2%）、`droppedBlobCount=0`，平均每类 ≈5.97 KB；64 KiB 对照档掉 5 类（1.3%）并全部落 `NO_RAW_PREV`。`commit` 每类 median 0.30 ms / p90 0.65 ms，400 类一批约 170 ms。读数见 [`19-raw-to-raw-realworld-readings.md`](topology/19-raw-to-raw-realworld-readings.md) §3。
+- **触发条件**：单 classloader 内带 blob 的类数超过约 2,700（按本语料类体积外推，属推断）；游戏工程类体积更大时容量更小。
+- **当前缓解措施**：超预算即丢字节保哈希（fail-closed 回退 Run E，每类一条 warn），不会静默用残缺基线配对。
+- **残余影响**：超出容量的尾部类享受不到 Run R；`O(entries)` 记账未做受控微基准，只观测到同批内首末四分位耗时比 3.0×~10.0× 且不随条目数单调。
+- **后续验证方式**：在真实工程上复测 `droppedBlobCount()`；如需确认记账复杂度，做"受控条目数"微基准（固定类体积、变条目数）。
+- **决策依据**：[`18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md) §5。
 
 ### 风险 26：Raw_prev blob 记账为 O(条目数)
 - **风险描述与底层机制**：全局字节预算的维持按条目扫描记账，每类提交一次。

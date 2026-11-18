@@ -1377,7 +1377,8 @@ tasks.register("pr3CommitScaling", JavaExec) {
 	mainClass = "Pr3CommitScalingProbe"
 	maxHeapSize = "1g"
 	doFirst {
-		def probeProps = ["pr3.commitScaling.warmup", "pr3.rounds", "pr3.samples", "pr3.sizes", "pr3.entryBytes"]
+		def probeProps = ["pr3.commitScaling.warmup", "pr3.commitScaling.verifyCounters",
+		                  "pr3.rounds", "pr3.samples", "pr3.sizes", "pr3.entryBytes"]
 		def forwarded = probeProps.collectMany { name ->
 			if (project.hasProperty(name)) return ["-D${name}=${project.property(name)}"]
 			def v = System.getProperty(name)

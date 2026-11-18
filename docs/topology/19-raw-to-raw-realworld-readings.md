@@ -93,3 +93,19 @@
 6. 探针对**每个类**都 `commit` + `align`，而生产只在 `hasPotentialLambdas` 时对齐；因此
    `TRANSLATION_INCOMPLETE` 的真实频率应低于本文件的 87.5%（该 87.5% 主要由"没有本地 lambda 槽位"的类贡献，
    这类类在生产里根本不会进入对齐）。
+
+## 6. 环境可行性侦察（两套模版 + 无头多轮重定义）
+
+本节记录"Run R 能否在真实工程里跑"的**环境前提**，回答的是可执行性问题，不是机制读数。
+
+| 对象 | 结论 | 关键事实 |
+|:--|:--|:--|
+| Mindustry 模版构建 | 可构建 | `mindustry-mod-template/build.gradle.kts` 含 `id("io.github.i-hope1.remold")`；产物 `example-java-modDesktop.jar`（5,146 B） |
+| Mindustry 离线构建 | 可，但需预热缓存 | 冷缓存 `--offline` 报 `No cached version of Anuken:Mindustry:v160.5 available for offline mode`；联网解析一次后冷态离线可用 |
+| Mindustry 真机 | 不可（`BLOCKED(headless)`） | jar 内只有 `mindustry.desktop.DesktopLauncher`，无 `ServerLauncher`；本机 aarch64 + `DISPLAY` 空 + 无 Xvfb |
+| Fabric Loom 模版 | 全绿离线 | `help` 59 s、`compileJava` 5.2 s、`remapJar` 12.2 s（`example_mod-1.0.0.jar`，8,848 B）；Loom 缓存含 client/server/merged jar 与 yarn `1.21.1+build.3`；缺的只是 sources，不阻塞 |
+| `runServer` 任务图 | 可离线解析 | `--dry-run` 通过，含 `generateDLIConfig` / `configureLaunch`；Remold 已给 runClient / runServer 注入 agent 参数 |
+| 无头多轮重定义 | 链路成立 | DCEVM 仅 `/opt/idea/jbr`（JBR-21.0.8，`-XX:+AllowEnhancedClassRedefinition` 实测可用）；本机其它 JDK 全部 `Unrecognized VM option`；agent 在 `DISPLAY=""` 下 premain 正常并打印 `Structural HotSwap Supported: true` |
+
+由此确定的取证分层：**真机门禁用 Fabric `runServer`**（无头、离线、可重复，`JAVA_HOME=/opt/idea/jbr`，首启写 `run/eula.txt`），
+**全量多轮压测与闸门分布用后置字节码夹具**（覆盖率高、无图形/映射依赖、可跑几十轮）；Mindustry 只保留"可构建"证据。

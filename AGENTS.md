@@ -129,6 +129,7 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 | 注解 | `remold.annotation.RemoldReinit` |
 | 合成字段过滤 | `ClassDiffUtil.isInternalMarkerField` |
 | 堆实例检索（Native） | `LibTool.getInstances` |
+| 批次堆实例收集与存活预探测（Native） | `LibTool.getInstancesBatch` / `hasLiveInstancesBatch`（native `nGetInstancesBatch` / `nHasLiveInstancesBatch` / `nHeapWalkCount`）；接线 `InitFix.beginBatchInstanceCollection` / `takeBatchInstances`、`RemoldAgent.setLivenessBatch` / `prefetchBatchLiveness`；规格见 `docs/initfix/05-jvmti-heap.md` §「批次实例收集」（局部帧生命周期、对象 tag 槽位预算、两个分块上限、开关与 `PatchReport` 等价性契约） |
 | 匿名类与局部类安全门 | `AnonClassAligner`、`LayoutGate`、`LocalClassGuard` |
 | `Object.toString` 例外 | `InitFix.allowedStringCoercion`、`isInertProducer`、`isIntermediateObjectToString`（`effectReason` 在白名单之后、黑名单之前调用） |
 | 测试夹具（Java） | `tests/src/InitFixOracle.java`（内存 `javac`） |

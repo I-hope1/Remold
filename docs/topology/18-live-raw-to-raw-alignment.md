@@ -184,8 +184,11 @@ Run R 的每一个前提缺失都**只允许整类回退**，不允许"尽力而
 
 ## 7. 灰度与提交语义
 
-- **灰度开关**：`META_SOURCE`（`-Dremold.poc.meta_source`，默认关）从"仅改自造名来源"升格为
-  "Run R 的总闸"。命中判据必须**按类稳定**（类名哈希取模或白名单），不得按轮次随机——
+- **开关**：`META_SOURCE`（急停 `-Dremold.agent.lambda_raw_alignment=false`，兼容旧 Property
+  `-Dremold.poc.meta_source`）**默认开启**；判定顺序为"急停 → 旧 Property → 默认 true"，
+  因此照抄旧文档里的 `-Dremold.poc.meta_source=true` 不会覆盖急停。关闭后整类回到旧路径
+  （`Run E`），行为与历史版本逐字节等价（R2）。真正的灰度粒度是**按类**的：三道闸门任一不过即该类
+  回退，且回退原因以 `runRGate` 可观测。
   同一类在相邻两轮分别走不同跑道会让"第二轮零改动"这类不变量抖动。
 - **元数据供给开关**：`Meta` 条目只在 `-Dremold.vcs.enabled=true` 时提交。因此 Run R 实际需要
   两个开关同时打开；只开灰度不开记录时必须落 Run E，并**首次**记一条 warn 说明"元数据源未开启"，

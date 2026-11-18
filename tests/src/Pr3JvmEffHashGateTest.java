@@ -189,14 +189,15 @@ public class Pr3JvmEffHashGateTest {
 		LambdaAligner.AlignmentResult round2 = LambdaAligner.LAST_RESULT;
 		assertNotNull(round2, "round 2 must publish an alignment result");
 
-		assertNotEquals(LambdaAligner.RunRGate.PASSED, round2.runRGate,
-			"G1 must reject a generation whose two hashes both miss the old side, got runRGate="
-				+ round2.runRGate);
-		// 观察读数：因为 headMatching 自己的 SHA-256 精判与闸门里的精判是同一个判据，
-		// "两路都不命中"在实现上表现为 NO_ENTRY（Spec §6：Meta 无条目 / G1 哈希不符 -> Run E）。
-		assertTrue(round2.runRGate == LambdaAligner.RunRGate.NO_ENTRY
-				|| round2.runRGate == LambdaAligner.RunRGate.RAW_PREV_MISMATCH,
-			"the gate must report a G1 identity failure, got runRGate=" + round2.runRGate);
+		// 实测读数：两路哈希都不命中时，本实现报的是 NO_ENTRY 而不是 RAW_PREV_MISMATCH。
+		// 原因是同一条判据出现在两处——headMatching 内部已经用 SHA-256 精判过（任一路相等才返回条目），
+		// 闸门里的 RAW_PREV_MISMATCH 分支只可能在"条目能取到、但闸门复核不过"时命中（G2 的 blob
+		// 指纹不符 / 类名不符）；对 align() 这条路，"代际身份不成立"就是 NO_ENTRY。
+		System.out.println("[diag] stale-generation G1 gate = " + round2.runRGate
+			+ ", baselineTree = " + round2.baselineTree);
+		assertEquals(LambdaAligner.RunRGate.NO_ENTRY, round2.runRGate,
+			"a generation whose two G1 hashes both miss the old side must not be attributed to the "
+				+ "round (Spec §6: no entry / G1 mismatch -> Run E), got runRGate=" + round2.runRGate);
 		assertEquals(-1, round2.metaGeneration,
 			"no generation may be attributed to this round, got metaGeneration=" + round2.metaGeneration);
 		assertEquals(LambdaAligner.BaselineTree.EFF_FALLBACK, round2.baselineTree,

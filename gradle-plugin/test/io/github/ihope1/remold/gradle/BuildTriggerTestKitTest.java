@@ -32,6 +32,10 @@ class BuildTriggerTestKitTest {
     @Test
     void classesWritesMarkerAndConfigurationCacheStillWritesItOnReuse(@TempDir Path projectDir) throws IOException {
         createMinimalAgentJar(projectDir.resolve("libs/test-agent.jar"));
+        // Fixture agent: a real minimal Premain agent, not a Remold agent, so the
+        // structural agent-jar check is explicitly disabled here. The check itself is
+        // covered by RemoldAgentJarCheckTest and the resolver failure test.
+        write(projectDir.resolve("gradle.properties"), "remold.agentJarCheck=off\n");
         writeJavaMain(projectDir);
         write(projectDir.resolve("settings.gradle"), "rootProject.name = 'build-trigger-cc'\n");
         write(projectDir.resolve("build.gradle"), String.join("\n",
@@ -69,6 +73,10 @@ class BuildTriggerTestKitTest {
     @Test
     void buildTriggerFalseDoesNotWriteMarker(@TempDir Path projectDir) throws IOException {
         createMinimalAgentJar(projectDir.resolve("libs/test-agent.jar"));
+        // Fixture agent: a real minimal Premain agent, not a Remold agent, so the
+        // structural agent-jar check is explicitly disabled here. The check itself is
+        // covered by RemoldAgentJarCheckTest and the resolver failure test.
+        write(projectDir.resolve("gradle.properties"), "remold.agentJarCheck=off\n");
         writeJavaMain(projectDir);
         write(projectDir.resolve("settings.gradle"), "rootProject.name = 'build-trigger-off'\n");
         write(projectDir.resolve("build.gradle"), String.join("\n",
@@ -91,6 +99,10 @@ class BuildTriggerTestKitTest {
     @Test
     void failedCompilationDoesNotWriteMarker(@TempDir Path projectDir) throws IOException {
         createMinimalAgentJar(projectDir.resolve("libs/test-agent.jar"));
+        // Fixture agent: a real minimal Premain agent, not a Remold agent, so the
+        // structural agent-jar check is explicitly disabled here. The check itself is
+        // covered by RemoldAgentJarCheckTest and the resolver failure test.
+        write(projectDir.resolve("gradle.properties"), "remold.agentJarCheck=off\n");
         write(projectDir.resolve("src/main/java/demo/Main.java"), String.join("\n",
                 "package demo;",
                 "public class Main {",

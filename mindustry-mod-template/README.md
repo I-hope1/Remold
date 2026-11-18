@@ -95,6 +95,40 @@ remold.plugins=arc
 
 ## 常见疑问解答 (FAQ)
 
+### Q: 热更日志说成功，可我的探针/反射调用报 `NoSuchMethodException`？
+
+这几乎总是**用了旧形态的 `remold-agent.jar`**：JitPack 上同版本号的旧发布产物与本仓库现编的 agent
+版本号一样（`Remold-Version` 都是同一个），但结构不同——旧包的 `Agent-Class` 是 `remold.RemoldAgent`，
+没有 `remold.AgentBootstrap` 跳板，也缺新 API（例如 `LambdaAligner.lastResultFor`）。
+热更链路本身不依赖那些新 API，所以**热更会照常打印成功**，只有反射/探针入口才炸：这就是"用旧 jar 跑出假绿"。
+
+识别特征（两条同时出现即可确诊）：
+
+1. 反射某个 agent 侧方法抛 `NoSuchMethodException`（如 `LambdaAligner.lastResultFor`）；
+2. 同一轮热更仍然打印 `HotSwap successful: N classes redefined`。
+
+构建期的防呆：本仓库的 Gradle 插件在启动前会**结构校验**将要用到的 agent jar，入口点不是
+`remold.AgentBootstrap`、或缺 `remold/LambdaAligner.class` 里的 `lastResultFor`、或没有版本元数据时，
+**直接让构建失败**并打印可操作提示，而不是静默换一个 jar 继续跑。
+
+安全覆盖本地 agent jar 的最小步骤（脱离本仓库开发树时）：
+
+```bash
+# 1) 在 Remold 本仓库里编出与源码一致的 agent
+./gradlew :core:shadowJar          # 产物: core/build/libs/remold-agent.jar
+
+# 2) 显式指给模版（推荐写绝对路径，避免相对路径落到别的树）
+./gradlew runServer -Premold.agentJar=/abs/path/to/core/build/libs/remold-agent.jar
+
+# 等价做法：把 jar 放到本模版 libs/ 下，插件会优先发现 libs/remold-agent.jar
+cp /abs/path/to/core/build/libs/remold-agent.jar libs/remold-agent.jar
+```
+
+校验通过时构建日志会正常继续；被拒绝时按提示换成现编 jar 即可。确实要固定旧版 agent（老版本 mod 兼容等）
+才用逃生口 `-Premold.agentJarCheck=warn`（降级为警告）或 `-Premold.agentJarCheck=off`（完全跳过），
+两者都会在日志里留痕，不要用它来"消掉"报错。
+
+
 ### Q: 发布给玩家时需要装 Remold 吗？
 **完全不需要！**  
 Remold 纯粹是开发期挂在 JVM 上的探针（JavaAgent）。打包发布给普通玩家时，直接运行标准的：

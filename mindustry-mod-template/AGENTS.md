@@ -45,5 +45,19 @@ ClassLoader，因此 lambda 体内一引用 `arc.*`、`mindustry.*` 或模组自
 
 ---
 
+### 1.6 agent jar 用了旧形态时的假绿
+
+模版脱离 Remold 开发树时，插件会自己找/下一个 `remold-agent.jar`。旧形态的 jar（`Agent-Class` 是
+`remold.RemoldAgent`、缺 `remold.AgentBootstrap` 跳板与新 API）**版本号可能与期望完全一致**，
+于是热更照常成功、只有反射入口抛 `NoSuchMethodException`——这是"假绿"，不要据此认为热更链路已验证。
+
+排障顺序：
+
+1. 看构建日志有没有 `Refusing to launch a structurally incompatible remold-agent.jar`：有就按提示改用现编 jar
+   （`./gradlew :core:shadowJar` + `-Premold.agentJar=<绝对路径>`）；
+2. 没有该提示说明当前插件版本还没有这道校验，自己核对 jar 的 `META-INF/MANIFEST.MF`
+   （`Agent-Class` 必须是 `remold.AgentBootstrap`）与 `unzip -l` 里有没有 `remold/LambdaAligner.class`；
+3. 确认一致性后再跑探针：先断言前置状态（探针方法可反射到），再断言业务终局，别只看热更日志。
+
 Remold 本体（`../AGENTS.md`）另有全局编码规则：安全门优先、失败即拒绝、拒绝路径必须经统一出口发 `warn`、
 状态信息只在 `docs/status.md` 维护。修改 agent 侧代码前先读它。

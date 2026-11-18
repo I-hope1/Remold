@@ -21,9 +21,29 @@ dependencyResolutionManagement {
 		maven { url = 'https://raw.githubusercontent.com/Zelaux/MindustryRepo/master/repository' }
 		maven { url = 'https://repo.spongepowered.org/repository/maven-public/' }
 		google()
+		// Mindustry 的 dependencies.jar 只存在于 GitHub Releases。这里的 ivy 规则必须与
+		// mindustry-mod-template/build.gradle.kts 的官方规则**同一组 artifactPattern**：
+		// Gradle 的仓库缓存标识包含 patternLayout 里的 artifact 集合，少一条就会让"根构建联网预热过的
+		// 缓存"对模版构建不可见，模版侧冷缓存 --offline 直接报
+		// `No cached version of Anuken:Mindustry:v160.5 available for offline mode`。
+		// 实测（同一 GRADLE_USER_HOME，先单条模式联网、再双条模式离线）可稳定复现该失败；
+		// 反过来先双条联网、再双条离线则通过，说明差异只来自 pattern 集合。
+		// 版本分支与模版保持一致：latest → releases/<rev>/download/，be → releases/download/master/。
+		def mindustryVersion = providers.gradleProperty('mindustryVersion')
+			.orElse(providers.gradleProperty('mindustry.version'))
+			.getOrElse('v160.5')
 		ivy {
 			url = 'https://github.com/'
-			patternLayout { artifact '/[organisation]/[module]/releases/download/[revision]/dependencies.jar' }
+			patternLayout {
+				def pattern = mindustryVersion == 'latest'
+					? '/[organisation]/[module]/releases/[revision]/download/dependencies.jar'
+					: (mindustryVersion == 'be'
+						? '/[organisation]/[module]/releases/download/master/[revision].jar'
+						: '/[organisation]/[module]/releases/download/[revision]/dependencies.jar')
+				def path = pattern.substring(0, pattern.lastIndexOf('/'))
+				artifact("$path/[classifier].jar")
+				artifact(pattern.replaceFirst(/\.jar$/, '(-[classifier]).jar'))
+			}
 			metadataSources { artifact() }
 		}
 	}

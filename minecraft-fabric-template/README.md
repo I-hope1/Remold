@@ -194,6 +194,35 @@ Remold 纯粹是开发期挂载在 JVM 上的探针。打包发布给普通玩�
 2. 本地开发 Remold 本体时，先在仓库根目录执行 `./gradlew :plugin-mixin:jar`，再用 `remold { pluginJar("../<remold 仓库>/plugin-mixin/build/libs/remold-plugin-mixin-0.2.0.jar") }` 指过去。
 3. 正式使用时，需要该版本已发布带 `plugin-mixin` 的 Release / JitPack 制品。
 
+### Q: 热更日志说成功，可我的探针/反射调用报 `NoSuchMethodException`？
+
+先怀疑 **旧形态的 `remold-agent.jar`**。JitPack 上同版本号的旧发布产物与本仓库现编 agent 的
+`Remold-Version` 完全一致，但结构不同：旧包 `Agent-Class` 是 `remold.RemoldAgent`（没有
+`remold.AgentBootstrap` 跳板），也缺新 API（例如 `LambdaAligner.lastResultFor`）。热更链路不碰那些新 API，
+所以**热更照常成功**，只有反射入口炸——这就是"用旧 jar 跑出假绿"，`runServer` 时尤其容易踩到
+（模版自己解析 agent 时会静默拿到仓库里那一份）。
+
+识别特征（两条同时出现即可确诊）：反射 agent 侧方法抛 `NoSuchMethodException`，
+而同轮热更仍打印 `HotSwap successful: N classes redefined`。
+
+安全覆盖本地 agent jar：
+
+```bash
+# 1) 在 Remold 本仓库编出与源码一致的 agent
+./gradlew :core:shadowJar          # 产物: core/build/libs/remold-agent.jar
+
+# 2) 显式指给模版（绝对路径最稳），再走 runServer / runClient
+./gradlew runServer -Premold.agentJar=/abs/path/to/core/build/libs/remold-agent.jar
+
+# 等价：放到模版 libs/ 下，插件优先发现 libs/remold-agent.jar
+cp /abs/path/to/core/build/libs/remold-agent.jar libs/remold-agent.jar
+```
+
+本仓库的 Gradle 插件在启动前会做结构校验：入口点不是 `remold.AgentBootstrap`、缺
+`remold/LambdaAligner.class` 里的 `lastResultFor`、或 jar 无版本元数据时**直接让构建失败**，
+并打印 `./gradlew :core:shadowJar` 与 `-Premold.agentJar=<绝对路径>` 提示。确实要固定旧版 agent 才用
+`-Premold.agentJarCheck=warn`（降级为警告）或 `off`（跳过），两者都会在日志留痕。
+
 ### Q: 不挂 Remold 直接 `runClient`，会不会报错？
 不会。模板代码不引用任何 Remold 类；Mixin 支持完全由 Agent 侧的插件提供，没挂 Agent 时模组行为与原生 Fabric 模组一致。
 

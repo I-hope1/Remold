@@ -149,6 +149,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **模版冷缓存离线必红：根 `settings.gradle` 的 Mindustry ivy 规则与官方模版不是同一组 artifactPattern**
+  （`settings.gradle`）。根构建里的 ivy 仓库原来只有一条
+  `.../releases/download/[revision]/dependencies.jar`，而 `mindustry-mod-template/build.gradle.kts`
+  用的是官方双条规则（额外一条 `[classifier]` 形态，并按 `mindustryVersion` 分 `latest` / `be` 分支）。
+  Gradle 的仓库缓存标识包含 `patternLayout` 的 artifact 集合，于是"根构建联网预热过的缓存"对模版构建
+  不可见，模版侧冷缓存跑 `--offline` 直接报
+  `No cached version of Anuken:Mindustry:v160.5 available for offline mode`。
+  - 归因实验（同一 `GRADLE_USER_HOME`）：先用根的单条规则联网解析 → 用双条规则离线解析**失败**；
+    再用双条规则联网解析 → 双条规则离线**通过**；把双条规则去掉 `exclusiveContent` 包装后身份仍一致
+    （说明差异只来自 pattern 集合，与 `exclusiveContent` 无关）。
+  - 修法：改**根**侧适配官方双条模式（含 `latest` / `be` 的路径分支），模版保持原样——独立用户在线构建
+    不受影响。复验：用修好后的根规则联网预热一个全新 `GRADLE_USER_HOME`，模版
+    `compileJava --offline` 由"必红"转绿。
+  - 注意 `help` 不解析依赖，抓不住这个缺陷；能抓住的是 `compileJava` 这类会解析 `compileClasspath` 的任务。
+
+- **`remold-agent.jar` 静默回落到 JitPack 同版本旧产物：热更"看起来成功"而反射入口 `NoSuchMethodException`**
+  （`gradle-plugin/.../RemoldAgentJarCheck.java`、`RemoldConfigResolver`）。已发布的 `v0.2.8` release agent
+  jar 实测 Manifest 仍是 `Agent-Class: remold.RemoldAgent` 且 `Remold-Version: 0.2.8`——版本号与期望完全一致，
+  于是原有的版本对账（`shouldRefreshAgent` / 同版本比较）分辨不出来，构建照旧用它启动；现象是热更打印成功、
+  而依赖新 API 的探针反射 `LambdaAligner.lastResultFor` 抛 `NoSuchMethodException`（假绿）。
+  - 新增启动前的结构校验 `RemoldAgentJarCheck`：入口点必须是 `remold.AgentBootstrap`（legacy 形态单独提示）、
+    `remold/AgentBootstrap.class` / `remold/RemoldAgent.class` / `remold/LambdaAligner.class` 必须存在、
+    `LambdaAligner` 必须带 `lastResultFor`、jar 必须带版本元数据；任一不满足即
+    **拒绝启动并给出可操作提示**（`./gradlew :core:shadowJar` + `-Premold.agentJar=<绝对路径>`）。
+    有意固定旧版的人用 `-Premold.agentJarCheck=warn`（或 `off`）显式降级，默认 fail-closed。
+  - 顺带修掉 detached 坐标缺 `v` 前缀：JitPack 与 `mavenLocal` 的 jitpack publication 都是
+    `com.github.I-hope1.Remold:core:v<ver>`，只试裸版本号会无条件落空，把用户推到更旧的 release 下载回退路径。
+  - 模版文档补「脱离开发树时如何安全覆盖本地 agent jar」与假绿识别特征（Mindustry 与 Fabric 模版各一处）。
+
 - **修掉「延迟派发落到下一个用例的派发器」导致的顺序相关 flaky**
   （`tests/src/remold/BatchHotpathOptimizationTest.java`）：`RemoldAgent.scheduleDeferredPostRedefine`
   在共享定时器上排 20ms 后 `postToMain`，而 `postToMain` 取的是**执行那一刻**装着的派发器，

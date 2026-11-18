@@ -33,6 +33,10 @@ class AttachAndConfigurationCacheTest {
     void configurationCacheReusesBuiltInTasks(@TempDir Path projectDir) throws IOException {
         Path agentJar = projectDir.resolve("libs/test-agent.jar");
         createMinimalAgentJar(agentJar);
+        // Fixture agent: a real minimal Premain agent, not a Remold agent, so the
+        // structural agent-jar check is explicitly disabled here. The check itself is
+        // covered by RemoldAgentJarCheckTest and the resolver failure test.
+        write(projectDir.resolve("gradle.properties"), "remold.agentJarCheck=off\n");
         writeJavaMain(projectDir);
 
         write(projectDir.resolve("settings.gradle.kts"), "rootProject.name = \"cc-built-in\"\n");
@@ -74,6 +78,10 @@ class AttachAndConfigurationCacheTest {
     void groovyAttachInjectsJavaExecAndPassesConfigurationCache(@TempDir Path projectDir) throws IOException {
         Path agentJar = projectDir.resolve("libs/test-agent.jar");
         createMinimalAgentJar(agentJar);
+        // Fixture agent: a real minimal Premain agent, not a Remold agent, so the
+        // structural agent-jar check is explicitly disabled here. The check itself is
+        // covered by RemoldAgentJarCheckTest and the resolver failure test.
+        write(projectDir.resolve("gradle.properties"), "remold.agentJarCheck=off\n");
         writeJavaMain(projectDir);
 
         write(projectDir.resolve("settings.gradle"), "rootProject.name = 'attach-groovy'\n");
@@ -114,6 +122,10 @@ class AttachAndConfigurationCacheTest {
             throws IOException {
         Path agentJar = projectDir.resolve("libs/test-agent.jar");
         createMinimalAgentJar(agentJar);
+        // Fixture agent: a real minimal Premain agent, not a Remold agent, so the
+        // structural agent-jar check is explicitly disabled here. The check itself is
+        // covered by RemoldAgentJarCheckTest and the resolver failure test.
+        write(projectDir.resolve("gradle.properties"), "remold.agentJarCheck=off\n");
         writeJavaMain(projectDir);
         Files.createDirectories(projectDir.resolve(".idea"));
 
@@ -153,6 +165,10 @@ class AttachAndConfigurationCacheTest {
     void attachFailsClosedWhenTargetTaskMissing(@TempDir Path projectDir) throws IOException {
         Path agentJar = projectDir.resolve("libs/test-agent.jar");
         createMinimalAgentJar(agentJar);
+        // Fixture agent: a real minimal Premain agent, not a Remold agent, so the
+        // structural agent-jar check is explicitly disabled here. The check itself is
+        // covered by RemoldAgentJarCheckTest and the resolver failure test.
+        write(projectDir.resolve("gradle.properties"), "remold.agentJarCheck=off\n");
 
         write(projectDir.resolve("settings.gradle.kts"), "rootProject.name = \"attach-missing\"\n");
         write(projectDir.resolve("build.gradle.kts"), String.join("\n",
@@ -182,6 +198,10 @@ class AttachAndConfigurationCacheTest {
         writeJavaMain(projectDir);
         Path agentJar = projectDir.resolve("libs/remold-agent.jar");
         createMinimalAgentJar(agentJar);
+        // Fixture agent: a real minimal Premain agent, not a Remold agent, so the
+        // structural agent-jar check is explicitly disabled here. The check itself is
+        // covered by RemoldAgentJarCheckTest and the resolver failure test.
+        write(projectDir.resolve("gradle.properties"), "remold.agentJarCheck=off\n");
 
         write(projectDir.resolve("settings.gradle.kts"), "rootProject.name = \"loom-export-demo\"\n");
         String agentPathUnix = agentJar.toAbsolutePath().toString().replace('\\', '/');

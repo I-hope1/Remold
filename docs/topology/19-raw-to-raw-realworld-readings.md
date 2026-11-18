@@ -65,6 +65,23 @@
 （它只影响形参名证据强度）。**未观测**：`E_prev` 里存在上一轮注入的幽灵桩/保留体/捕获桥时的字符串见证缺失——
 单轮模型造不出该状态，见 §5。
 
+## 4.1 与生产链的逐项对账（探针 → `RemoldAgent`）
+
+跑读数前逐项核对过"探针模型 vs 真实活体路径"的形态差异，结论是：**差异只会让 `RAW_PREV_MISMATCH` 更容易出现，
+不会让它更容易消失**，所以 §2 的 0 在两个模型下都成立。
+
+| 环节 | 真实 `RemoldAgent` 路径 | 探针主档（`R(rawBlob)`） | 探针对照档（`R(forced-both)`） |
+|:--|:--|:--|:--|
+| 新侧归一化 | `forceStaticLambdas(newBytecode)` 在 `preAlignBytes = newBytecode` **之前**执行 | 对齐输入用 `gen1Forced`，新侧用未归一化 `gen2` | 两侧都用归一化形态 |
+| `preAlign` 快照 | 归一化**之后**的待对齐字节 | 记录**未归一化**的 `gen1` | 记录归一化后的 `gen1Forced` |
+| 旧侧基线 | `normalizeAlignBaseline(oldBytecode)`（同样过 `forceStaticLambdas`） | 直接用 `gen1Forced`（等价于归一化后的生效侧） | 同左 |
+| `alignOutput` vs `jvmEffective` | 两者**可以不同**：`align()` 之后 JVM 还会再跑一次 transformer（`InitFix` 打补丁、织入），`commit` 分别记 `alignOutput` 与 `def.getDefinitionClassFile()` | 两者都传 `gen1Forced`（同一份） | 同左 |
+| G1 采信口径 | `jvmEffHash` **或** `alignOutputHash` 任一命中 | 只覆盖 `alignOutput` 这一路 | 同左 |
+
+由此产生一条**仍然存在的建模缺口**（已计入 §5）：探针从未构造 `alignOutput ≠ jvmEffective` 的类，
+即"`align()` 之后又被 `InitFix`/织入改写"的形态没有进入读数。该缺口只影响 G1 采信到哪一路哈希，
+不影响"归一化是否导致回退"这个结论（`preAlign` 与 `jvmEff` 的先后关系在两个模型里都已覆盖）。
+
 ## 5. 盲区（探针测不到，不得据此下结论）
 
 1. **单轮模型**：`E_prev` 里没有上一轮注入的幽灵桩 / 保留体 / 捕获桥，因此"见证缺失导致额外兜底"这一项
@@ -72,6 +89,7 @@
 2. `positionalFallbacks` 分布退化为 0 桶（仅 1 例），"缺 LVT vs 见证缺失"的分解无统计意义。
 3. 语料非游戏客户端（见 §1），命中率/预算余量的绝对值需在真实工程上复测。
 4. 耗时是单进程非独占、含 JIT 预热（`max` 有明显冷启动离群），只作量级参考，不用于跨版本比较。
-5. 探针对**每个类**都 `commit` + `align`，而生产只在 `hasPotentialLambdas` 时对齐；因此
+5. `alignOutput ≠ jvmEffective` 的类（`align()` 之后又被 `InitFix` 打补丁或织入改写）未被构造，G1 的"双哈希任一命中"只覆盖了 `alignOutput` 一路；见 §4.1。
+6. 探针对**每个类**都 `commit` + `align`，而生产只在 `hasPotentialLambdas` 时对齐；因此
    `TRANSLATION_INCOMPLETE` 的真实频率应低于本文件的 87.5%（该 87.5% 主要由"没有本地 lambda 槽位"的类贡献，
    这类类在生产里根本不会进入对齐）。

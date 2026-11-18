@@ -6065,11 +6065,16 @@ public class LambdaAligner {
 				ghostHashByKey.putIfAbsent(mn.name + mn.desc, readGhostOriginalHash(mn));
 			}
 		}
+		// 键必须与查表口径一致（查的是 toInject 的 Eff 键）：
+		// Run E 下 oldGroups 就是 E_prev，oi.name 即 Eff 名；Run R 下 oldGroups 是 R_prev，
+		// oi.name 只是 javac 槽位身份。这里若直接写 oi.name + oi.desc，被避障改名的 lambda
+		// 会拿 Raw 键去撞 Eff 键：轻则取不到（原标记 0L），重则撞上"Raw 名恰好等于该 Eff 名"
+		// 的同签名兄弟，把兄弟的生前指纹写进幽灵桩，下一次 stepGhostRevive 认不回原主。
 		for (int gi = ctx.oldGroups.nextEntry(-1); gi != -1; gi = ctx.oldGroups.nextEntry(gi)) {
 			List<SyntheticInfo> g = ctx.oldGroups.valueAt(gi);
 			if (g == null) continue;
 			for (SyntheticInfo oi : g) {
-				String key = oi.name + oi.desc;
+				String key = ctx.effKeyFor(oi);
 				if (ctx.runR && ghostHashByKey.containsKey(key)) continue;   // 生效侧名字优先
 				ghostHashByKey.put(key, oi.ghost ? oi.ghostOriginalHash : oi.hash);
 			}

@@ -1358,6 +1358,23 @@ tasks.register("derivedDataBench", JavaExec) {
 	}
 }
 
+// PR #13 · Batch C：受控条目数微基准（O(entries) 结案）。测量型任务刻意不做 up-to-date ——
+// 要的是本次运行的真实读数，跳过任务等于给假数据。**必须串行排他单跑**（跑之前不要有别的 Gradle /
+// 探针在跑），否则 min/median/p90 被抢 CPU 污染（AGENTS §9 第 4 条）。
+// 低预算档由探针自己 fork 子进程（-Dremold.vcs.meta_blob_bytes=65536）跑，见 Pr3CommitScalingProbe。
+tasks.register("pr3CommitScaling", JavaExec) {
+	group = "verification"
+	description = "PR3 条目数微基准 (Pr3CommitScalingProbe)：50/200/1000/2000 条层级下单次 commit 的 min/median/p90/max 与 blob 预算水位"
+	dependsOn classes
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "Pr3CommitScalingProbe"
+	maxHeapSize = "1g"
+	doFirst {
+		jvmArgs "-Dremold.projectRoot=${rootDir.absolutePath}",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+	}
+}
+
 // PR2 slice 3 · Batch A：InitFix 侧扫描成本探针。只测量、不断言；测量型任务不做 up-to-date。
 // 必须**串行排他**运行（跑之前不要有别的 Gradle / 探针在跑），否则耗时读数被抢 CPU 污染。
 tasks.register("initFixScanProbe", JavaExec) {

@@ -201,9 +201,18 @@ public final class RemoldConfigResolver {
             if (cachedJar.exists() && cachedJar.length() > 1024) {
                 agentFile = cachedJar;
             } else {
-                agentFile = resolveViaDetachedConfiguration(project, "com.github.I-hope1.Remold:core:" + ver);
-                if (agentFile == null || !agentFile.exists()) {
-                    agentFile = resolveViaDetachedConfiguration(project, "com.github.I-hope1.Remold:core:" + ver + ":all");
+                // JitPack（以及本仓库 mavenLocal 的 jitpack publication）的坐标带 v 前缀：
+                // 只试裸版本号会无条件落空，把用户推到"下载 release jar"那条更旧的回退路径上。
+                // 两种写法都试，带前缀优先。
+                List<String> coreCoordinates = Arrays.asList(
+                        "com.github.I-hope1.Remold:core:v" + normalizeVersion(ver),
+                        "com.github.I-hope1.Remold:core:" + ver);
+                for (String coordinate : coreCoordinates) {
+                    agentFile = resolveViaDetachedConfiguration(project, coordinate);
+                    if (agentFile != null && agentFile.exists()) break;
+                    agentFile = resolveViaDetachedConfiguration(project, coordinate + ":all");
+                    if (agentFile != null && agentFile.exists()) break;
+                    agentFile = null;
                 }
                 if (agentFile == null || !agentFile.exists()) {
                     project.getLogger().lifecycle("[Remold] Local agent jar not found; downloading remold-agent.jar (version: " + ver + ")...");
@@ -249,6 +258,24 @@ public final class RemoldConfigResolver {
                     + agentFile.getName() + " (remold.version not configured; using it for plugin resolution)");
         } else if (versionConfigured && resolvedAgentVersion != null) {
             project.getLogger().info("[Remold] Agent version confirmed: " + resolvedAgentVersion);
+        }
+
+        // 3d. Structural check: the version label is not enough. A jar published under the same
+        // version can be structurally older (legacy entry point, missing API) — the exact case that
+        // used to produce a false green: hot swap reported success while reflective entry points
+        // threw NoSuchMethodException. Fail loudly and say how to point the build at the right jar.
+        List<String> structuralProblems = RemoldAgentJarCheck.problems(agentFile);
+        if (!structuralProblems.isEmpty()) {
+            String checkMode = agentJarCheckMode(project);
+            String message = RemoldAgentJarCheck.failureMessage(agentFile, structuralProblems, ver);
+            if ("warn".equals(checkMode)) {
+                project.getLogger().warn(message);
+            } else if ("off".equals(checkMode)) {
+                project.getLogger().info("[Remold] Agent jar structural check disabled"
+                        + " (remold.agentJarCheck=off): " + structuralProblems);
+            } else {
+                throw new GradleException("[Remold] " + message);
+            }
         }
 
         Map<File, File> pendingSyncs = new LinkedHashMap<>();
@@ -932,6 +959,24 @@ public final class RemoldConfigResolver {
         } catch (Exception ignored) {
             return null;
         }
+    }
+
+    /**
+     * How strictly the agent jar's structure is checked: {@code fail} (default), {@code warn}, or
+     * {@code off}.
+     *
+     * <p>The escape hatch exists for builds that intentionally pin an older agent release. Making it
+     * explicit means the default stays fail-closed (no silent fallback) while a deliberate pin is
+     * still possible — and visible in the build log.</p>
+     */
+    static String agentJarCheckMode(Project project) {
+        Object raw = project == null ? null : project.findProperty("remold.agentJarCheck");
+        if (raw == null) return "fail";
+        String text = raw.toString().trim().toLowerCase(java.util.Locale.ROOT);
+        if (text.isEmpty()) return "fail";
+        if ("warn".equals(text)) return "warn";
+        if ("off".equals(text) || "false".equals(text)) return "off";
+        return "fail";
     }
 
     /** Equality of version labels, tolerant of the {@code v} prefix used by JitPack tags. */

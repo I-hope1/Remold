@@ -14,6 +14,7 @@ import org.objectweb.asm.tree.MethodNode;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -179,6 +180,9 @@ public class Pr3RawAlignmentScenarioTest {
 		assertNotNull(newName, "the new lambda must survive as a live method, got " + out);
 		assertFalse(newName.equals("lambda$run$0") || newName.equals("lambda$run$1") || newName.equals(inventedX),
 			"the new lambda must take a fresh slot, not reuse a live name, got " + out);
+
+		// 同一条终局判据：本轮的归属正确必须来自 Run R，而不是位置兜底碰巧对。
+		assertRunRTookOver(LambdaAligner.LAST_RESULT, "round 2 (tweak + new lambda)");
 	}
 
 	private static String nameCarrying(Bytecode out, String body) {
@@ -223,13 +227,122 @@ public class Pr3RawAlignmentScenarioTest {
 			"the invented name must keep carrying the x-body, got " + out);
 
 		// 终局断言 B：配对必须来自证据（槽位身份 / 方法体），不能落到位置兜底。
-		// 位置兜底一旦发生，aligner 自己会声明 "Old CallSites will execute the new body quietly"：
-		// 那正是本战役要消掉的失准形态。
-		List<String> degraded = degradedPairings(result);
-		assertTrue(degraded.isEmpty(),
-			"round 2 must not fall back to positional pairing (raw<->raw slot identity makes it unnecessary): "
-				+ degraded + ", out=" + out);
+		// 判据用 AlignmentResult 的跑道读数（终局读数，不是日志）：基线树必须是 R_prev、
+		// Run R 闸门全过、位置兜底计数为 0。
+		assertRunRTookOver(result, "round 2 (tweak)");
 	}
+
+	/**
+	 * 断言"这一轮确实走的是 Run R（Raw ↔ Raw）+ 零位置兜底"。
+	 *
+	 * <p>三个读数各管一段因果：{@link LambdaAligner.BaselineTree#RAW_PREV} 说明旧侧换成了
+	 * 上一代待对齐产物（不是被污染的实现侧字节）；{@link LambdaAligner.RunRGate#PASSED}
+	 * 说明 G1/G2/G3 三道准入真的成立（不是"看起来像"）；{@code positionalFallbacks == 0}
+	 * 说明本轮没有任何一对是靠位置/顺序猜出来的。</p>
+	 */
+	private static void assertRunRTookOver(LambdaAligner.AlignmentResult result, String what) {
+		assertNotNull(result, what + ": align must publish a result");
+		assertEquals(LambdaAligner.BaselineTree.RAW_PREV, result.baselineTree,
+			what + " must pair against R_prev, got baselineTree=" + result.baselineTree);
+		assertEquals(LambdaAligner.RunRGate.PASSED, result.runRGate,
+			what + " must pass every Run R gate, got runRGate=" + result.runRGate);
+		assertEquals(0, result.positionalFallbacks,
+			what + " must pair from evidence only, got positionalFallbacks=" + result.positionalFallbacks);
+		assertFalse(result.rawToEffKeys.isEmpty(),
+			what + " must publish a non-empty Raw->Eff translation table");
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// 3b. 对照：把 Run R 关掉时必须明确退回 EFF_FALLBACK（变异 (a) 的判别器）
+	// ------------------------------------------------------------------------------------------------
+
+	@Test
+	void runRSwitchOffFallsBackToEffectiveBytesBaseline(@TempDir Path tmp) throws Exception {
+		String javac = HstestFixtures.javac(21);
+		byte[] raw1 = compile(javac, tmp, "f1", V1);
+		byte[] raw2 = compile(javac, tmp, "f2", V2);
+		byte[] raw3 = compile(javac, tmp, "f3", V3_TWEAK);
+
+		Chain chain = runChain(raw1, raw2);
+		Bytecode eff = new Bytecode(chain.eff2);
+		assertEquals("x", eff.literalOf(chain.inventedX), "fixture premise: invented name carries x in eff2");
+
+		// 对照 1：灰度开关关闭（META_SOURCE=false）。自造名只能由调用方回灌。
+		LambdaAligner.META_SOURCE = false;
+		LambdaAligner.LAST_RESULT = null;
+		byte[] eff3SwitchOff = LambdaAligner.align(chain.eff2, raw3, null, null, chain.invented, chain.loader);
+		LambdaAligner.AlignmentResult off = LambdaAligner.LAST_RESULT;
+		LambdaAligner.META_SOURCE = true;
+
+		assertEquals(LambdaAligner.BaselineTree.EFF_FALLBACK, off.baselineTree,
+			"with the gray switch off the old baseline must be E_prev, got " + off.baselineTree);
+		assertEquals(LambdaAligner.RunRGate.META_OFF, off.runRGate,
+			"with the gray switch off the gate must report META_OFF, got " + off.runRGate);
+
+		// 对照 2：开关开着但元数据仓里没有这一代（G1 不成立）。
+		AlignmentMetaStore.INSTANCE.reset();
+		LambdaAligner.LAST_RESULT = null;
+		byte[] eff3NoEntry = LambdaAligner.align(chain.eff2, raw3, null, null, chain.invented, chain.loader);
+		LambdaAligner.AlignmentResult noEntry = LambdaAligner.LAST_RESULT;
+
+		assertEquals(LambdaAligner.BaselineTree.EFF_FALLBACK, noEntry.baselineTree,
+			"without a recorded generation the old baseline must be E_prev, got " + noEntry.baselineTree);
+		assertEquals(LambdaAligner.RunRGate.NO_ENTRY, noEntry.runRGate,
+			"without a recorded generation the gate must report NO_ENTRY, got " + noEntry.runRGate);
+
+		// fail-closed 不等于乱绑：兼容跑道上活体名同样必须守住（这条夹具两跑道结果一致）。
+		for (byte[] bytes : new byte[][] { eff3SwitchOff, eff3NoEntry }) {
+			Bytecode out = new Bytecode(bytes);
+			assertEquals("a", out.literalOf("lambda$run$0"), "fallback must keep $0 -> a-body, got " + out);
+			assertEquals("bMod", out.literalOf("lambda$run$1"), "fallback must keep $1 -> bMod-body, got " + out);
+			assertEquals("x", out.literalOf(chain.inventedX), "fallback must keep the invented slot -> x-body, got " + out);
+		}
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// 3c. blob 预算降级：丢 blob 保哈希 → 次轮 NO_RAW_PREV + EFF_FALLBACK，且仍然 fail-closed
+	// ------------------------------------------------------------------------------------------------
+
+	@Test
+	void blobBudgetExhaustionDegradesToEffectiveBaselineInAForkedJvm() throws Exception {
+		// 预算读数在 AlignmentMetaStore 类初始化时定值（static final），只能靠独立 JVM 的 -D 生效。
+		// 子进程里跑同一套夹具，断言：次轮 baselineTree=EFF_FALLBACK / runRGate=NO_RAW_PREV、
+		// droppedBlobCount()>0，且活体名仍然正确（fail-closed 不静默降级成错绑）。
+		List<String> cmd = new ArrayList<>();
+		cmd.add(Paths.get(System.getProperty("java.home"), "bin", "java").toString());
+		cmd.add("-cp");
+		cmd.add(System.getProperty("java.class.path"));
+		cmd.add("-Dfile.encoding=UTF-8");
+		cmd.add("-Dstdout.encoding=UTF-8");
+		cmd.add("-Dstderr.encoding=UTF-8");
+		// 关键：把 Raw_prev blob 预算压到 16 字节，任何一份 class 都放不下。
+		cmd.add("-Dremold.vcs.meta_blob_bytes=16");
+		cmd.add("-XX:+IgnoreUnrecognizedVMOptions");
+		cmd.add("-XX:+AllowEnhancedClassRedefinition");
+		cmd.add("--add-exports");
+		cmd.add("java.base/jdk.internal.misc=ALL-UNNAMED");
+		if (Runtime.version().feature() >= 22) cmd.add("--enable-native-access=ALL-UNNAMED");
+		String javac21 = System.getProperty("hstest.javac21");
+		if (javac21 != null) cmd.add("-Dhstest.javac21=" + javac21);
+		cmd.add(PR3_BLOB_PROBE);
+
+		Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+		StringBuilder out = new StringBuilder();
+		try (java.io.BufferedReader r = new java.io.BufferedReader(
+			new java.io.InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+			String line;
+			while ((line = r.readLine()) != null) out.append(line).append('\n');
+		}
+		boolean finished = p.waitFor(300, java.util.concurrent.TimeUnit.SECONDS);
+		if (!finished) p.destroyForcibly();
+		assertTrue(finished, "forked blob-budget probe timed out; output so far:\n" + out);
+		assertEquals(0, p.exitValue(), "forked blob-budget probe failed:\n" + out);
+		assertTrue(out.toString().contains("PR3-BLOB-DEGRADE OK"),
+			"forked probe must report the fail-closed degradation, got:\n" + out);
+	}
+
+	/** 子进程入口（tests/src 同包，类路径随 fork 一起带过去）。 */
+	private static final String PR3_BLOB_PROBE = "Pr3BlobBudgetProbe";
 
 	// ------------------------------------------------------------------------------------------------
 	// 4. Ctrl+Z 回退轮：幽灵 / 保留体必须从 Eff_prev 继承（Raw 里没有它们）
@@ -412,6 +525,11 @@ public class Pr3RawAlignmentScenarioTest {
 		commit(loader, raw2, eff2, r);
 		assertNotNull(AlignmentMetaStore.INSTANCE.head(loader, CLASS),
 			"first round must leave a head entry for the class");
+		// 默认预算档的对照读数：Raw_prev blob 真的存下来了，没有任何一代被预算丢弃。
+		assertTrue(AlignmentMetaStore.INSTANCE.blobBytes() > 0,
+			"default budget must retain the R_prev blob, got blobBytes=" + AlignmentMetaStore.INSTANCE.blobBytes());
+		assertEquals(0, AlignmentMetaStore.INSTANCE.droppedBlobCount(),
+			"default budget must not drop any R_prev blob");
 		return new Chain(loader, eff2, invented, onlyInvented(invented));
 	}
 
@@ -435,18 +553,6 @@ public class Pr3RawAlignmentScenarioTest {
 	private static String onlyInvented(Set<String> invented) {
 		assertEquals(1, invented.size(), "fixture premise: exactly one invented name, got " + invented);
 		return invented.iterator().next();
-	}
-
-	/** 本轮发生的"证据不足只能按位置猜"的事件；有就说明配对不是证据驱动的。 */
-	private static List<String> degradedPairings(LambdaAligner.AlignmentResult r) {
-		List<String> out = new ArrayList<>();
-		if (r != null && r.stats != null) {
-			assertTrue(r.stats.passAPairs >= 0, "stats must be present");
-		}
-		for (LambdaAligner.AlignmentEvent e : LambdaAligner.TEST_EVENTS) {
-			if ("POS_MISMATCH".equals(e.kind) || "BODY_MISMATCH".equals(e.kind)) out.add(e.toString());
-		}
-		return out;
 	}
 
 	private static byte[] compile(String javac, Path tmp, String dir, String body) throws Exception {

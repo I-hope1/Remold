@@ -134,6 +134,17 @@ public class LambdaAligner {
 	 */
 	public static volatile boolean META_SOURCE = Boolean.getBoolean("remold.poc.meta_source");
 
+	static {
+		// 兼容口：不显式传 Raw→Eff 键映射的旧 9 参 AlignmentMetaStore.commit 调用方
+		// （测试 / 离线回放：align 之后立刻 commit）从这里取"该类最近一次对齐发布的翻译表"。
+		// 生产路径由 RemoldAgent 显式传值，不依赖该口——所以这里只是把已有的对齐结论转手，
+		// 不引入"align 写元数据"的语义。
+		AlignmentMetaStore.setTranslationLookup(name -> {
+			AlignmentResult r = lastResultFor(name);
+			return r == null ? Map.of() : r.rawToEffKeys;
+		});
+	}
+
 	public static final ThreadLocal<MatchContext> CONTEXT = ThreadLocal.withInitial(MatchContext::new);
 
 	/**
@@ -159,6 +170,39 @@ public class LambdaAligner {
 	 * </ul>
 	 */
 	public static volatile String ACTIVE_MUTATION = System.getProperty("remold.mutation", "");
+
+	/**
+	 * 本轮配对实际采信的旧侧基线（规格 §3.1 的跑道读数）。
+	 *
+	 * <p>只作诊断：产物字节不依赖这个读数，但"这一轮到底走的是哪条跑道、为什么退回"必须能被断言，
+	 * 而不是只能靠日志猜。</p>
+	 */
+	public enum BaselineTree {
+		/** Run R：旧侧 = 上一代待对齐产物（{@code R_prev}），继承集来自 {@code E_prev}。 */
+		RAW_PREV,
+		/** Run E：旧侧 = 上一代进 JVM 的产物（{@code E_prev}），即兼容跑道。 */
+		EFF_FALLBACK,
+		/** 本轮没有配对结论（旧字节缺失 / 对齐失败 / 提前返回）。 */
+		NONE
+	}
+
+	/** Run R 的准入闸门不通过的原因（见规格 §3.2 的 G1/G2/G3）。 */
+	public enum RunRGate {
+		/** 闸门全过，走 Run R。 */
+		PASSED,
+		/** 灰度开关 {@link #META_SOURCE} 关闭。 */
+		META_OFF,
+		/** 元数据仓没有该类的当前代（G1：代际身份不成立）。 */
+		NO_ENTRY,
+		/** 该代没留下 {@code R_prev} 字节（blob 被预算丢弃 / 旧条目）。 */
+		NO_RAW_PREV,
+		/** {@code R_prev} 与元数据记录的 {@code preAlign} 指纹不符（G2：源码侧配对不可证）。 */
+		RAW_PREV_MISMATCH,
+		/** {@code R_prev → E_prev} 键映射不完整，无法确定活体在生效侧的名字（G2）。 */
+		TRANSLATION_INCOMPLETE,
+		/** {@code E_prev} 不可解析 / 继承集无法枚举（G3）。 */
+		EFF_UNREADABLE
+	}
 
 	public static boolean isMutationActive(String mutationKey) {
 		String m = ACTIVE_MUTATION;
@@ -320,6 +364,28 @@ public class LambdaAligner {
 		 */
 		public final Set<String> suppliedInventedNames;
 
+		/** 本轮配对采信的旧侧基线（{@link BaselineTree}）；没有结论时为 {@link BaselineTree#NONE}。 */
+		public final BaselineTree baselineTree;
+
+		/** Run R 准入闸门的判定结果；{@link RunRGate#PASSED} 表示本轮确实走了 Raw ↔ Raw。 */
+		public final RunRGate runRGate;
+
+		/**
+		 * 本轮"证据不足、按位置/顺序兜底配对"的次数。
+		 *
+		 * <p>对应产物里 {@code POS_MISMATCH} 事件的条数（同样受 log-once 去重约束）。它是
+		 * "配对是否由证据驱动"的可断言读数：Raw ↔ Raw 有槽位身份时应当为 {@code 0}。</p>
+		 */
+		public final int positionalFallbacks;
+
+		/**
+		 * 本轮 {@code Raw} 方法键 → 生效侧方法键（{@code name:desc}）的翻译表。
+		 *
+		 * <p>下一轮 Run R 靠它把"Raw 槽位身份"落到"老 CallSite 认的名字"上；空表表示本轮
+		 * 没有可用结论（早退/失败）。</p>
+		 */
+		public final Map<String, String> rawToEffKeys;
+
 		private AlignmentResult(Builder b) {
 			this.stats = b.stats;
 			this.inventedNames = b.inventedNames == null ? Set.of() : Set.copyOf(b.inventedNames);
@@ -336,6 +402,10 @@ public class LambdaAligner {
 			this.metaGeneration = b.metaGeneration;
 			this.suppliedInventedNames = b.suppliedInventedNames == null
 				? Set.of() : Set.copyOf(b.suppliedInventedNames);
+			this.baselineTree = b.baselineTree == null ? BaselineTree.NONE : b.baselineTree;
+			this.runRGate = b.runRGate == null ? RunRGate.META_OFF : b.runRGate;
+			this.positionalFallbacks = b.positionalFallbacks;
+			this.rawToEffKeys = b.rawToEffKeys == null ? Map.of() : Map.copyOf(b.rawToEffKeys);
 		}
 
 		public static Builder builder() {
@@ -364,6 +434,10 @@ public class LambdaAligner {
 			private int metaGeneration = -1;
 			private Set<String> suppliedInventedNames;
 			private Set<String> missingLvtLambdas;
+			private BaselineTree baselineTree;
+			private RunRGate runRGate;
+			private int positionalFallbacks;
+			private Map<String, String> rawToEffKeys;
 
 			public Builder stats(AlignmentStats v)            { this.stats = v; return this; }
 			public Builder inventedNames(Set<String> v)       { this.inventedNames = v; return this; }
@@ -379,6 +453,10 @@ public class LambdaAligner {
 			public Builder missingLvtLambdas(Set<String> v)     { this.missingLvtLambdas = v; return this; }
 			public Builder metaGeneration(int v)               { this.metaGeneration = v; return this; }
 			public Builder suppliedInventedNames(Set<String> v) { this.suppliedInventedNames = v; return this; }
+			public Builder baselineTree(BaselineTree v)         { this.baselineTree = v; return this; }
+			public Builder runRGate(RunRGate v)                 { this.runRGate = v; return this; }
+			public Builder positionalFallbacks(int v)           { this.positionalFallbacks = v; return this; }
+			public Builder rawToEffKeys(Map<String, String> v)  { this.rawToEffKeys = v; return this; }
 
 			public AlignmentResult build() { return new AlignmentResult(this); }
 		}
@@ -482,6 +560,69 @@ public class LambdaAligner {
 		} catch (Throwable ignored) {
 			return null;
 		}
+	}
+
+	/**
+	 * 读方法表（带方法体、剥离调试信息）：Run R 的继承集枚举只需要结构，但保留旧体搬运与桥体
+	 * 解析要读指令，所以这里与 {@code scan} 同口径读入。
+	 */
+	private static ClassNode readMethodTable(byte[] bytes) {
+		ClassNode cn = new ClassNode();
+		new ClassReader(bytes).accept(cn, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+		return cn;
+	}
+
+	/** 一份字节里全部方法键（{@code name + desc}），用作命名池与冲突判定。 */
+	private static Set<String> effPrevKeys(ClassNode cn) {
+		if (cn == null) return Set.of();
+		Set<String> out = new LinkedHashSet<>();
+		for (MethodNode mn : cn.methods) out.add(mn.name + mn.desc);
+		return out;
+	}
+
+	/**
+	 * Run R 的 G2-b：翻译表必须覆盖 {@code R_prev} 里<b>全部</b> lambda 槽位。
+	 *
+	 * <p>只覆盖一部分是不可接受的中间态：没被覆盖的活体只能退回 Raw 名，而这个名字在本代
+	 * 可能已经属于别的 lambda（或干脆不存在），老 {@code CallSite} 会静默解析到错误的方法体上。
+	 * 宁可整类退回兼容跑道，也不做部分继承。</p>
+	 */
+	private static boolean translationCovers(byte[] rawPrevBytes, Map<String, String> rawToEff) {
+		if (rawPrevBytes == null || rawToEff == null || rawToEff.isEmpty()) return false;
+		ClassNode cn = readMethodTable(rawPrevBytes);
+		for (MethodNode mn : cn.methods) {
+			if (mn.name.startsWith("<") || mn.name.startsWith("access$")) continue;
+			if (!MethodFingerprinter.isSyntheticName(mn.name)) continue;
+			String key = mn.name + ':' + mn.desc;
+			if (!rawToEff.containsKey(key)) {
+				dbg(() -> "RUN-R gate: translation table lacks a slot for " + key
+				          + " (the effective-side name of this lambda is unknown this round)");
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/** 每类只打一次 Run R 闸门退回说明（按轮次刷屏会把真信号淹掉）。 */
+	private static final Set<String> LOGGED_RUNR_GATE = ConcurrentHashMap.newKeySet();
+
+	/**
+	 * Run R 闸门未过时的可观测降级说明。
+	 *
+	 * <p>规格 §6 要求"回退必须可观测"：只开灰度没开元数据记录、blob 被预算丢弃、代际不一致
+	 * 这些情况都表现为"开关开了却没效果"，必须有一条能直接对上的 warn。</p>
+	 */
+	private static void warnRunRFallbackOnce(String metaClass, RunRGate gate) {
+		// 灰度开关关闭是常态（默认值），不需要告警；其余都是"用户以为会生效却没生效"的情形。
+		if (gate == RunRGate.META_OFF || gate == RunRGate.NO_ENTRY) return;
+		String key = metaClass + "|" + gate;
+		if (!LOGGED_RUNR_GATE.add(key)) return;
+		RemoldAgent.warn("[LambdaAligner] Raw<->Raw alignment unavailable for "
+			+ (metaClass == null ? "<unknown>" : metaClass.replace('/', '.')) + ": " + gate
+			+ ". This round falls back to the effective-bytes baseline (existing behaviour)."
+			+ (gate == RunRGate.NO_RAW_PREV
+			   ? " The previous pre-alignment bytes were not retained (see -Dremold.vcs.meta_blob_bytes)."
+			   : ""));
 	}
 
 	/**
@@ -679,6 +820,14 @@ public class LambdaAligner {
 		final Set<String> usedOldNames = new HashSet<>(64);
 
 		/**
+		 * 已被占用配对的 Raw 侧槽位名。
+		 *
+		 * <p>与 {@link #usedOldNames}（产物名字空间）分开：Run R 下两者是不同命名空间，
+		 * Run E 下二者恒等。</p>
+		 */
+		final Set<String> usedRawSlots = new HashSet<>(64);
+
+		/**
 		 * 上一轮由对齐器自造的 lambda 方法名（仍在旧类里）。
 		 *
 		 * <p>这些名字<b>不是</b> javac 会产出的编号，因此不能作为"同名 = 同一个 lambda"
@@ -727,6 +876,38 @@ public class LambdaAligner {
 
 		/** 本轮生效的上一代元数据；{@code null} 表示 meta 缺失，读侧退回字节码标记。 */
 		AlignmentMetaStore.Entry oldMeta;
+
+		/**
+		 * Run R（{@code R_prev ↔ R_new}）是否生效。
+		 *
+		 * <p>{@code false} = 兼容跑道 Run E：旧侧就是 {@code E_prev}，配对与继承不分家。
+		 * {@code true} 时配对只看 {@code R_prev}，"幽灵桩 / 保留体 / 捕获桥"改从 {@link #effPrevCn}
+		 * 枚举继承，且产物名字经 {@link #rawKeyToEffKey} 落到生效侧。</p>
+		 */
+		boolean runR;
+
+		/**
+		 * Run R：本轮 {@code R_prev} 方法键（{@code name:desc}）→ 上一代生效侧方法键。
+		 *
+		 * <p>由上一代元数据提供；不完整即视为"源码侧配对不可证"，整类退回 Run E（见
+		 * {@link RunRGate#TRANSLATION_INCOMPLETE}）。</p>
+		 */
+		Map<String, String> rawKeyToEffKey = Map.of();
+
+		/**
+		 * Run R：{@code E_prev} 的结构快照，<b>只用于继承集</b>（幽灵 / 保留体 / 桥 / 命名池），
+		 * 绝不参与配对——那是 {@code R_prev} 的职责。
+		 */
+		ClassNode effPrevCn;
+
+		/** Run R：{@code E_prev} 字节（保留体存活重验与旧体搬运的取值来源）。 */
+		byte[] effPrevBytes;
+
+		/** 本轮"按位置兜底配对"的次数（诊断读数，见 {@link AlignmentResult#positionalFallbacks}）。 */
+		int positionalFallbacks;
+
+		/** Run R 闸门判定（诊断读数）。 */
+		RunRGate runRGate = RunRGate.META_OFF;
 
 		final LongObjectMap<List<SyntheticInfo>> oldGroups = new LongObjectMap<>(128);
 		final LongObjectMap<List<SyntheticInfo>> newGroups = new LongObjectMap<>(128);
@@ -781,6 +962,7 @@ public class LambdaAligner {
 			simpleNameWitness.clear();
 			ambiguousNames.clear();
 			usedOldNames.clear();
+			usedRawSlots.clear();
 			inventedOldNames = java.util.Set.of();
 			newlyInvented.clear();
 			existingNewNames.clear();
@@ -793,7 +975,12 @@ public class LambdaAligner {
 			fingerprinter.reset();
 			currentClass = null;
 			oldMeta = null;
-			oldGroups.clear();
+			runR = false;
+			rawKeyToEffKey = Map.of();
+			effPrevCn = null;
+			effPrevBytes = null;
+			positionalFallbacks = 0;
+			runRGate = RunRGate.META_OFF;			oldGroups.clear();
 			newGroups.clear();
 			childIndex.clear();
 			oldNameIndex.clear();
@@ -810,6 +997,65 @@ public class LambdaAligner {
 			consumerMismatchDebugPairs = 0;
 			prunedPairs = 0;
 			bodyMismatchRefusals = 0;
+		}
+
+		/**
+		 * 配对成功时要写进产物的名字。
+		 *
+		 * <p>Run E 直接用旧侧原名（旧侧就是 {@code E_prev}，名字即身份）。Run R 的旧侧是
+		 * {@code R_prev}，它的名字只是"上一代源码槽位"，必须经 {@link #rawKeyToEffKey} 翻译成
+		 * 上一代生效侧的名字——老 {@code CallSite} 认的是那个名字。</p>
+		 */
+		String outNameFor(SyntheticInfo oi) {
+			if (!runR) return oi.name;
+			String effKey = rawKeyToEffKey.get(keyOf(oi));
+			if (effKey == null) return oi.name;
+			return nameOfKey(effKey);
+		}
+
+		/**
+		 * 旧方法在<b>生效侧</b>的方法键，口径与产物内部一致（{@code name + desc}，无分隔符）。
+		 * Run E 即它自己的键。桥键、{@code presentKeys}、命名池都用这个口径。
+		 */
+		String effKeyFor(SyntheticInfo oi) {
+			if (!runR) return oi.name + oi.desc;
+			String effKey = rawKeyToEffKey.get(keyOf(oi));
+			if (effKey == null) return oi.name + oi.desc;
+			int c = effKey.indexOf(':');
+			return c < 0 ? effKey : effKey.substring(0, c) + effKey.substring(c + 1);
+		}
+
+		/** 生效侧键的对外口径（{@code name:desc}，与 {@code methodMapping} 一致）。 */
+		String effKeyColon(SyntheticInfo oi) {
+			String own = keyOf(oi);
+			if (!runR) return own;
+			String effKey = rawKeyToEffKey.get(own);
+			return effKey == null ? own : effKey;
+		}
+
+		/** 翻译表与 {@code methodMapping} 统一用 {@code name:desc} 口径。 */
+		static String keyOf(SyntheticInfo info) {
+			return info.name + ':' + info.desc;
+		}
+
+		/**
+		 * 该旧方法是否已被占用。
+		 *
+		 * <p>两个命名空间必须分开：{@code usedOldNames} 记的是"产物里那个名字"，{@code usedRawSlots}
+		 * 记的是"这个旧槽位已经配过谁"。Run R 下 Raw 名与生效侧名是两套名字，混在一个扁平集合里会
+		 * 互相顶掉（实测：a 占住生效侧 {@code $0} 与 Raw {@code $1} 之后，Raw 侧 {@code $1} 的 b 被误判
+		 * 成"名字已被占用"而丢掉配对，老 {@code $1} 直接退成幽灵）。</p>
+		 */
+		boolean isOldNameClaimed(SyntheticInfo oi) {
+			if (usedRawSlots.contains(oi.name)) return true;
+			return usedOldNames.contains(outNameFor(oi));
+		}
+
+		/** {@code name:desc} 里的名字部分（描述符里不会出现冒号，回退到原名键时也安全）。 */
+		static String nameOfKey(String key) {
+			if (key == null) return null;
+			int c = key.indexOf(':');
+			return c < 0 ? key : key.substring(0, c);
 		}
 	}
 	//endregion
@@ -911,7 +1157,9 @@ public class LambdaAligner {
 		AlignmentMetaStore.Entry oldMeta = null;
 		String metaClass = classNameOf(newBytes);
 		if (metaOn && oldBytes != null && oldBytes.length > 0 && metaClass != null) {
-			oldMeta = AlignmentMetaStore.INSTANCE.headMatching(loader, metaClass, oldHash);
+			// 代际身份用 SHA-256 定案（规格 §3.2 G1，禁止把 32 位哈希当树身份）；32 位只在
+			// headMatching 内部做快速预筛。精判不成立就是"不是这一代"，不许拿近邻代顶替。
+			oldMeta = AlignmentMetaStore.INSTANCE.headMatching(loader, metaClass, oldBytes);
 			if (oldMeta != null) inventedOldNames = oldMeta.inventedNames;
 		}
 		// 先发布空结果：下面有"旧字节为空直接返回"的早退路径，不发布会让调用方读到上一轮的值，
@@ -920,11 +1168,66 @@ public class LambdaAligner {
 		publishResult(alignKey, AlignmentResult.empty(oldLen, newLen, oldHash, newHash));
 		if (oldBytes == null || oldBytes.length == 0) return newBytes;
 
+		// ---- Run R 准入（规格 §3.2）：三道闸门全过才允许换旧侧，任一不成立整类退回 Run E ----
+		RunRGate gate;
+		byte[] rawPrevBytes = null;
+		Map<String, String> rawToEff = Map.of();
+		ClassNode effPrevCn = null;
+		if (!metaOn) {
+			gate = RunRGate.META_OFF;
+		} else if (oldMeta == null) {
+			gate = RunRGate.NO_ENTRY;
+		} else if (oldMeta.rawPrevBytes() == null) {
+			// 元数据这一代没有留下 R_prev（预算丢弃 / 旧条目 / 从未记录）：继承来源缺失，不能走 Run R。
+			gate = RunRGate.NO_RAW_PREV;
+		} else {
+			rawPrevBytes = oldMeta.rawPrevBytes();
+			// G2-a：源码侧配对可证——blob 必须正是元数据记录的那一份（fail-closed，不用"看起来像"顶替）。
+			String rawSha = AlignmentMetaStore.sha256Hex(rawPrevBytes);
+			if (!rawSha.equals(oldMeta.preAlignSha256)
+			    || !AlignmentMetaStore.sha256Hex(oldBytes).equals(oldMeta.jvmEffSha256)
+			        && !AlignmentMetaStore.sha256Hex(oldBytes).equals(oldMeta.alignOutputSha256)) {
+				gate = RunRGate.RAW_PREV_MISMATCH;
+			} else if (!Objects.equals(classNameOf(rawPrevBytes), metaClass)) {
+				gate = RunRGate.RAW_PREV_MISMATCH;
+			} else if (oldMeta.rawToEffKeys.isEmpty()) {
+				// G2-b：没有 Raw → Eff 翻译表就无法决定"活体该叫哪个生效侧名字"。
+				gate = RunRGate.TRANSLATION_INCOMPLETE;
+			} else {
+				// G3：继承集必须可枚举——E_prev 可解析，且翻译表覆盖 R_prev 的全部 lambda 槽位
+				// （部分翻译会让某些活体退回 Raw 名、把老 CallSite 变成幽灵：禁止部分继承）。
+				try {
+					effPrevCn = readMethodTable(oldBytes);
+				} catch (Throwable t) {
+					effPrevCn = null;
+				}
+				if (effPrevCn == null || !Objects.equals(effPrevCn.name, metaClass)) {
+					gate = RunRGate.EFF_UNREADABLE;
+				} else if (!translationCovers(rawPrevBytes, oldMeta.rawToEffKeys)) {
+					gate = RunRGate.TRANSLATION_INCOMPLETE;
+				} else {
+					gate = RunRGate.PASSED;
+					rawToEff = oldMeta.rawToEffKeys;
+				}
+			}
+		}
+		if (gate != RunRGate.PASSED) {
+			warnRunRFallbackOnce(metaClass, gate);
+			effPrevCn = null;
+			rawPrevBytes = null;
+			rawToEff = Map.of();
+		}
+
 		MatchContext ctx = CONTEXT.get();
 		try {
 			ctx.reset();
 			ctx.inventedOldNames = inventedOldNames != null ? inventedOldNames : java.util.Set.of();
 			ctx.oldMeta = oldMeta;
+			ctx.runR = gate == RunRGate.PASSED;
+			ctx.rawKeyToEffKey = rawToEff;
+			ctx.effPrevCn = effPrevCn;
+			ctx.effPrevBytes = ctx.runR ? oldBytes : null;
+			ctx.runRGate = gate;
 			ctx.newlyInvented.clear();
 			// 与类节点同遍读取形参名：名字是"同一个变量"最硬的证据（槽号会随前序局部变量增删而位移）。
 			// 未带 -g 时两张表为空，后续判据自动退回槽号/类型；同时剥离行号与 LVT 节点，等价于 SKIP_DEBUG。
@@ -935,13 +1238,22 @@ public class LambdaAligner {
 
 			// 一次读取即拿到 ClassNode 与 LVT 形参名：oldCn 会被 resurrectOrphanedLambdas 复用，
 			// newCn 会在“无重命名”路径下直接提供 presentKeys。
-			ClassNode oldCn = scan(oldBytes, ctx, true, oldBytecodeResolver, oldParamNames);
+			//
+			// Run R：配对基线换成 R_prev（上一代待对齐产物）。它与 E_prev 的区别见规格
+			// docs/topology/18-live-raw-to-raw-alignment.md —— R_prev 只含 javac 槽位身份，
+			// 没有自造名/幽灵/桥；E_prev 只用来枚举继承集（ctx.effPrevCn）。
+			ClassNode oldCn = scan(ctx.runR ? rawPrevBytes : oldBytes, ctx, true, oldBytecodeResolver, oldParamNames);
 			ClassNode newCn = scan(newBytes, ctx, false, newBytecodeResolver, newParamNames);
 			if (!Objects.equals(oldCn.name, newCn.name)) {
 				throw new IllegalArgumentException(
 				 "New class name does not match old class name: " + newCn.name + " != " + oldCn.name);
 			}
 			ctx.currentClass = oldCn.name;
+			if (ctx.runR) {
+				// 命名池 = R_prev 方法键 ∪ E_prev 方法键（只增不减）：fresh 名一旦撞上生效侧的幽灵 /
+				// 桥 / 自造名槽位，产物里就会出现两个同名键或抢走幽灵槽位，直接破坏"幽灵单向退休"。
+				ctx.oldNameDescSet.addAll(effPrevKeys(ctx.effPrevCn));
+			}
 
 			List<String> missingLvtNew = findCapturedLambdasWithoutLvt(ctx.newGroups, newCn.name);
 			List<String> missingLvtOld = findCapturedLambdasWithoutLvt(ctx.oldGroups, oldCn.name);
@@ -1079,7 +1391,10 @@ public class LambdaAligner {
 			// 从 alignedCn 直接收集 presentKeys，避免 resurrectOrphanedLambdas 再读一遍
 			Set<String> presentKeys = collectMethodKeys(alignedCn);
 			Map<String, Integer> newMethodRefs = countHandleTargets(alignedCn);
-			Map<String, Integer> oldMethodRefs = countHandleTargets(oldCn);
+			// 继承集的来源永远是"上一代真正进 JVM 的字节"（Run E 时 oldCn 就是它）。
+			final ClassNode inheritCn = ctx.runR ? ctx.effPrevCn : oldCn;
+			final byte[] inheritBytes = ctx.runR ? ctx.effPrevBytes : oldBytes;
+			Map<String, Integer> oldMethodRefs = countHandleTargets(inheritCn);
 
 			// 【阶段三】捕获桥：删掉捕获变量的 lambda，用"老签名 → 新方法"的适配器兜住老实例。
 			//
@@ -1097,20 +1412,28 @@ public class LambdaAligner {
 			                                         ctx.prunedPairs, ctx.bodyMismatchRefusals);
 
 			Map<String, String> methodMapping = new HashMap<>();
+			// Raw 方法键 → 生效侧方法键：下一轮 Run R 的"槽位身份 ↔ 老 CallSite 名字"翻译表。
+			// 覆盖**全部** lambda 槽位（配对上的 + 拿避障名的），缺一项就意味着那个活体无法落到
+			// 自己的生效侧名字上——那正是 Run R 的准入前提（G2/G3），所以这里必须完整。
+			Map<String, String> rawToEffKeys = new HashMap<>();
 			for (int idx = newGroups.nextEntry(-1); idx != -1; idx = newGroups.nextEntry(idx)) {
 				List<SyntheticInfo> g = newGroups.valueAt(idx);
 				if (g == null) continue;
 				for (SyntheticInfo ni : g) {
+					if (!ni.renameable) continue;
+					String rawKey = ni.name + ":" + ni.desc;
+					String effKey = finalName(ctx, ni) + ":" + ni.desc;
+					rawToEffKeys.put(rawKey, effKey);
 					if (ni.matchedWith != null) {
-						String oldKey = ni.matchedWith.name + ":" + ni.matchedWith.desc;
-						String newKey = ni.name + ":" + ni.desc;
-						methodMapping.put(oldKey, newKey);
+						// 映射的旧键口径：Run R 用生效侧键，Run E 沿用旧侧原名键。
+						String oldKey = ctx.effKeyColon(ni.matchedWith);
+						methodMapping.put(oldKey, effKey);
 					}
 				}
 			}
 
-			// 传入 oldCn（已解析过一次）—— 避免 resurrectOrphanedLambdas 二次读 oldBytes
-			byte[] result = resurrectOrphanedLambdas(oldCn, oldBytes, alignedBytes, presentKeys, oldMethodRefs, newMethodRefs, ctx);
+			// 传入 inheritCn（已解析过一次）—— 避免 resurrectOrphanedLambdas 二次读同一份字节
+			byte[] result = resurrectOrphanedLambdas(inheritCn, inheritBytes, alignedBytes, presentKeys, oldMethodRefs, newMethodRefs, ctx);
 			// 自造名必须从**最终产物**统计：复活阶段会往类里加回幽灵方法，
 			// 只在 alignedCn 上扫会漏掉它们（幽灵仍占着那个名字，下一轮照样会被误当 javac 原名）。
 			Set<String> invented = collectInventedNames(result, ctx);
@@ -1128,6 +1451,10 @@ public class LambdaAligner {
 			                             .missingLvtLambdas(affectedLvt)
 			                             .metaGeneration(ctx.oldMeta == null ? -1 : ctx.oldMeta.generation)
 			                             .suppliedInventedNames(ctx.inventedOldNames)
+			                             .baselineTree(ctx.runR ? BaselineTree.RAW_PREV : BaselineTree.EFF_FALLBACK)
+			                             .runRGate(ctx.runRGate)
+			                             .positionalFallbacks(ctx.positionalFallbacks)
+			                             .rawToEffKeys(rawToEffKeys)
 			                             .build();
 			publishResult(alignKey != null ? alignKey : oldCn.name, snapshot);
 			return result;
@@ -1370,7 +1697,8 @@ public class LambdaAligner {
 				ni.matchedWith = null;
 				ni.matched = false;
 				oi.matched = false;
-				ctx.usedOldNames.remove(oi.name);
+				ctx.usedOldNames.remove(ctx.outNameFor(oi));
+				ctx.usedRawSlots.remove(oi.name);
 				totalUndone++;
 				RemoldAgent.warn("[LambdaAligner] Reference consistency violated; reverted pairing: " + ni.name
 				                  + " children " + ni.children + " inconsistent with " + oi.name + " children " + oi.children
@@ -1624,7 +1952,7 @@ public class LambdaAligner {
 
 			boolean hasUnmatchedOld = false;
 			for (SyntheticInfo oi : os) {
-				if (!oi.matched && oi.renameable && !oi.ghost && !ctx.usedOldNames.contains(oi.name)) {
+				if (!oi.matched && oi.renameable && !oi.ghost && !ctx.isOldNameClaimed(oi)) {
 					hasUnmatchedOld = true;
 					break;
 				}
@@ -1723,7 +2051,7 @@ public class LambdaAligner {
 		if (!oi.renameable) return false;
 		// 一个旧简单名只能被一个方法占用（renameBySimpleName 与避障都依赖这一约束）；
 		// step2PassA/step2/stepGhostRevive 都查了，Step 1 与宿主序列锚点也必须对称地查。
-		if (ctx.usedOldNames.contains(oi.name)) return false;
+		if (ctx.isOldNameClaimed(oi)) return false;
 		// 用递归语义指纹而非票据指纹：票据指纹屏蔽了子 lambda 的名字，
 		// 使"整棵树只差最深处叶子"的方法互相撞车（三层嵌套即如此）。
 		// 语义指纹一致 ⇔ 整棵子树等价，因此不会把两个不同的 lambda 配成一对。
@@ -1740,15 +2068,19 @@ public class LambdaAligner {
 		return sa == sb;
 	}
 
-	/** 配对并登记：把 {@code ni} 改名为 {@code oi} 的名字。 */
+	/** 配对并登记：把 {@code ni} 改名为 {@code oi} 的名字（Run R 落生效侧名字）。 */
 	private static void pair(MatchContext ctx, SyntheticInfo ni, SyntheticInfo oi, String pass) {
 		dbg(() -> "[" + pass + "] PAIR " + ni.name + "(shape=" + ni.shape + " depth=" + ni.upDepth + ")"
-		          + " -> " + oi.name + "(shape=" + oi.shape + " depth=" + oi.upDepth + ")");
-		recordRename(ctx, ni, oi.name);
+		          + " -> " + oi.name + "(shape=" + oi.shape + " depth=" + oi.upDepth + ")"
+		          + (ctx.runR ? " effName=" + ctx.outNameFor(oi) : ""));
+		String outName = ctx.outNameFor(oi);
+		recordRename(ctx, ni, outName);
 		ni.matchedWith = oi;
 		ni.matched = true;
 		oi.matched = true;
-		ctx.usedOldNames.add(oi.name);
+		// 认领登记：产物名字空间与 Raw 槽位空间各记一份（Run E 下二者恒等）。
+		ctx.usedOldNames.add(outName);
+		ctx.usedRawSlots.add(oi.name);
 		if (ni.hash != oi.hash) {
 			ctx.hashMismatchPairs++;
 			TEST_EVENTS.add(new AlignmentEvent("HASH_MISMATCH", oi.name, ni.name, "hash " + oi.hash + "->" + ni.hash));
@@ -1847,7 +2179,7 @@ public class LambdaAligner {
 			for (SyntheticInfo oi : oldGroup) {
 				if (oi.matched || oi.ghost) continue;
 				if (!oi.renameable) continue;             // 与 ni 上的限制对称
-				if (ctx.usedOldNames.contains(oi.name)) continue;
+				if (ctx.isOldNameClaimed(oi)) continue;
 				if (oi.upDepth != ni.upDepth) continue;   // 深度必须相等
 				if (!sameNestingLevel(ni, oi)) continue;  // 形状必须相等
 				if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
@@ -1873,7 +2205,7 @@ public class LambdaAligner {
 			           .map(o -> o.name + ":d" + o.upDepth + ":" + o.shape
 			                     + (o.matched ? ":M" : "") + (o.ghost ? ":G" : "")).toList());
 			if (!ni.name.equals(bestOld.name) && ni.hash != bestOld.hash) {
-				warnPositionalMismatch(ctx.currentClass, bestOld, ni.name, ni.desc);
+				warnPositionalMismatch(ctx, bestOld, ni.name, ni.desc);
 			}
 			pair(ctx, ni, bestOld, "PASS_A");
 			ctx.passAPairs++;
@@ -1910,7 +2242,7 @@ public class LambdaAligner {
 			for (SyntheticInfo oi : oldGroup) {
 				if (oi.matched || (!isMutationActive("D") && oi.ghost)) continue;
 				if (!oi.renameable) continue;   // 与 ni 上的限制对称
-				if (ctx.usedOldNames.contains(oi.name)) continue;
+				if (ctx.isOldNameClaimed(oi)) continue;
 				if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
 				if (!sameNestingLevel(ni, oi)) continue;
 				if (!calleesPairTo(ni, oi)) continue;
@@ -1926,7 +2258,7 @@ public class LambdaAligner {
 				for (SyntheticInfo oi : oldGroup) {
 					if (oi.matched || (!isMutationActive("D") && oi.ghost)) continue;
 					if (!oi.renameable) continue;   // 与 ni 上的限制对称
-					if (ctx.usedOldNames.contains(oi.name)) continue;
+					if (ctx.isOldNameClaimed(oi)) continue;
 					if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
 					if (!sameNestingLevel(ni, oi)) continue;
 					if (!calleesPairTo(ni, oi)) continue;
@@ -1954,7 +2286,7 @@ public class LambdaAligner {
 			// invokedynamic）虽然能识别，但"名字是否保住"本身就是充分且更严的证据，
 			// 无需额外遍历指令。
 			if (!ni.name.equals(bestOld.name)) {
-				warnPositionalMismatch(ctx.currentClass, bestOld, ni.name, ni.desc);
+				warnPositionalMismatch(ctx, bestOld, ni.name, ni.desc);
 			}
 			pair(ctx, ni, bestOld, "PASS_B");
 			ctx.passBPairs++;
@@ -2108,7 +2440,7 @@ public class LambdaAligner {
 		for (SyntheticInfo oi : group) {
 			if (oi.matched || oi.ghost) continue;
 			if (!oi.renameable) continue;
-			if (ctx.usedOldNames.contains(oi.name)) continue;
+			if (ctx.isOldNameClaimed(oi)) continue;
 			if (!oi.name.equals(ni.name)) continue;
 			if (!sameSemantics(ni, oi)) continue;
 			if (!isSignatureCompatible(owner, oi, ni)) continue;
@@ -2134,7 +2466,7 @@ public class LambdaAligner {
 			for (SyntheticInfo oi : group) {
 				if (oi.matched || oi.ghost) continue;
 				if (!oi.renameable) continue;                       // 与 ni 上的限制对称
-				if (ctx.usedOldNames.contains(oi.name)) continue;   // 旧名只能被占一次
+				if (ctx.isOldNameClaimed(oi)) continue;   // 旧名只能被占一次
 				if (!sameSemantics(ni, oi)) continue;
 				if (!isSignatureCompatible(owner, oi, ni)) continue;
 				if (!sameNestingLevel(ni, oi)) continue;
@@ -2146,7 +2478,7 @@ public class LambdaAligner {
 		for (SyntheticInfo oi : group) {
 			if (oi.matched || oi.ghost) continue;
 			if (!oi.renameable) continue;                       // 与 ni 上的限制对称
-			if (ctx.usedOldNames.contains(oi.name)) continue;   // 旧名只能被占一次
+			if (ctx.isOldNameClaimed(oi)) continue;   // 旧名只能被占一次
 			if (!sameSemantics(ni, oi)) continue;
 			if (!isSignatureCompatible(owner, oi, ni)) continue;
 			if (!sameNestingLevel(ni, oi)) continue;
@@ -2179,6 +2511,7 @@ public class LambdaAligner {
 	public static void clearLoggedWarnings() {
 		WARNED_REALIGNMENTS.clear();
 		TEST_EVENTS.clear();
+		LOGGED_RUNR_GATE.clear();
 		clearLoggedOrphans();
 	}
 
@@ -2406,7 +2739,11 @@ public class LambdaAligner {
 	 *
 	 * <p>去重键为 {@code 类名 + 新方法名 + 旧方法名}，同一处错配只打印一次。</p>
 	 */
-	private static void warnPositionalMismatch(String owner, SyntheticInfo oi, String newName, String newDesc) {
+	private static void warnPositionalMismatch(MatchContext ctx, SyntheticInfo oi, String newName, String newDesc) {
+		// 计数与告警去重解耦：同一处错配只打一条 warn，但"这一轮发生了多少次位置兜底"是
+		// 配对质量的读数（Run R 应当为 0），不能被 log-once 吞掉。
+		if (ctx != null) ctx.positionalFallbacks++;
+		String owner = ctx == null ? null : ctx.currentClass;
 		String key = owner + "#" + newName + "<-" + oi.name;
 		if (!WARNED_REALIGNMENTS.add(key)) return;
 
@@ -4309,7 +4646,9 @@ public class LambdaAligner {
 		Map<String, Integer>      claims = new HashMap<>();      // newKey -> 被几个老键抢
 		for (SyntheticInfo oi : allOld) {
 			if (oi.matched || oi.ghost || oi.bridge || !oi.renameable) continue;
-			if (presentKeys.contains(oi.name + oi.desc)) continue;
+			// 桥的键是"老 CallSite 认的那个键"：Run E 就是旧侧原名，Run R 是上一代生效侧的名字。
+			// 用 Raw 名当桥键会让老实例解析到一个 Raw 名字上（那个名字在本代可能属于别的 lambda）。
+			if (presentKeys.contains(ctx.effKeyFor(oi))) continue;
 			if (oi.captured == null) continue;
 			SyntheticInfo only = null;
 			int hits = 0;
@@ -4354,7 +4693,7 @@ public class LambdaAligner {
 					+ " matchCount=" + candidates + " host=" + oi.hostKey);
 				only = byOrdinal;
 			}
-			String oldKey = oi.name + oi.desc;
+			String oldKey = ctx.effKeyFor(oi);
 			String newKey = only.name + only.desc;
 			claim.put(oldKey, only);
 			claims.merge(newKey, 1, Integer::sum);
@@ -4393,62 +4732,121 @@ public class LambdaAligner {
 		}
 
 		// ---- 2. 第二轮：上一轮建好的桥，把目标挪到本轮的名字上并重生成 ----
-		for (SyntheticInfo oi : allOld) {
-			if (!oi.bridge) continue;
-			String oldKey = oi.name + oi.desc;
+		// Run E：桥在旧侧方法表里（旧侧就是 E_prev），直接扫 oldGroups。
+		// Run R：桥不在 R_prev 里（它是上一轮为兜住老实例造出来的），只能从 E_prev 枚举，
+		//        再用翻译表把"桥的目标（生效侧名字）"反查回 R_prev 的槽位，才能找到本轮配对物。
+		if (ctx.runR) {
+			stepInheritedBridges(ctx, newCn, presentKeys);
+		} else {
+			for (SyntheticInfo oi : allOld) {
+				if (!oi.bridge) continue;
+				String oldKey = oi.name + oi.desc;
+				if (presentKeys.contains(oldKey)) continue;
+				MethodNode mn = findMethod(oldCn, oi.name, oi.desc);
+				if (mn == null) continue;
+				BridgeDelegate bd = getBridgeDelegate(mn);
+				if (bd == null) {
+					dbg(() -> "BRIDGE unrecognized body: " + oldKey);
+					continue;                                          // 认不出：让它按幽灵处理
+				}
+				SyntheticInfo prevTarget = findOldByKey(ctx, bd.target.name + bd.target.desc);
+				if (prevTarget == null) {
+					dbg(() -> "BRIDGE target vanished: " + oldKey + " -> " + bd.target.name + bd.target.desc);
+					continue;
+				}
+				repointBridge(ctx, oldKey, oi.desc, oi.isStatic(), oi.name, bd, prevTarget, presentKeys);
+			}
+		}
+	}
+
+	/**
+	 * Run R 的桥继承：继承集来自 {@code E_prev}，目标重指向落在本轮最终名字上。
+	 *
+	 * <p>顺序约束（规格 §4.2）：本步必须晚于阶段二（避障名已定案），早于孤儿注入
+	 * （桥体由 {@code resurrectOrphanedLambdas} 按 {@code ctx.bridges} 生成）。</p>
+	 */
+	private static void stepInheritedBridges(MatchContext ctx, ClassNode newCn, Set<String> presentKeys) {
+		ClassNode effCn = ctx.effPrevCn;
+		if (effCn == null) return;
+		// 生效侧方法键 → R_prev 槽位（用于把"上一轮桥指向的生效侧方法"反查回本轮配对物）。
+		Map<String, SyntheticInfo> rawByEffKey = new HashMap<>();
+		for (int gi = ctx.oldGroups.nextEntry(-1); gi != -1; gi = ctx.oldGroups.nextEntry(gi)) {
+			List<SyntheticInfo> g = ctx.oldGroups.valueAt(gi);
+			if (g == null) continue;
+			for (SyntheticInfo oi : g) {
+				rawByEffKey.putIfAbsent(ctx.effKeyFor(oi), oi);
+			}
+		}
+		for (MethodNode mn : effCn.methods) {
+			if (!isBridgeMethod(mn)) continue;
+			String oldKey = mn.name + mn.desc;
 			if (presentKeys.contains(oldKey)) continue;
-			MethodNode mn = findMethod(oldCn, oi.name, oi.desc);
-			if (mn == null) continue;
 			BridgeDelegate bd = getBridgeDelegate(mn);
 			if (bd == null) {
 				dbg(() -> "BRIDGE unrecognized body: " + oldKey);
-				continue;                                          // 认不出：让它按幽灵处理
+				continue;
 			}
-			SyntheticInfo prevTarget = findOldByKey(ctx, bd.target.name + bd.target.desc);
+			SyntheticInfo prevTarget = rawByEffKey.get(bd.target.name + bd.target.desc);
 			if (prevTarget == null) {
 				dbg(() -> "BRIDGE target vanished: " + oldKey + " -> " + bd.target.name + bd.target.desc);
 				continue;
 			}
-			// 配对关系只记在新侧（pair 里 ni.matchedWith = oi），反向要自己找。
-			SyntheticInfo now = findNewForOld(ctx, prevTarget);
-			if (now == null) {
-				dbg(() -> "BRIDGE target unpaired: " + oldKey + " -> " + bd.target.name + bd.target.desc);
-				continue;                                          // 目标真没了
-			}
-			if (now.ghost || !now.renameable) continue;
-			// captured 只在 recordLambdaShape 遇到 indy 时赋值；目标若变成仅被直接调用/不可达，
-			// 这里会是 null。第一轮已判过，第二轮同样不能直接解引用，否则抛 NPE 拖垮整类对齐。
-			if (now.captured == null) continue;
-			if (presentKeys.contains(oldKey)) continue;
-			// 目标的静态位若与上一轮不同，上一轮那份"搬哪些实参"的记录就不再成立
-			// （比如它又用回了 this，目标从静态变回实例，而桥当时把接收者丢掉了）。
-			// 这种情况不猜，退回幽灵桩。
-			if (bd.targetStatic() != now.isStatic()) {
-				dbg(() -> "BRIDGE target staticness changed: " + oldKey);
-				continue;
-			}
-			// 上一轮记下的"每一位从哪来"只覆盖捕获表；解析出的 sources 还带着桥体尾部压的
-			// SAM 实参（它属于目标形参，不属于捕获表）。先按本轮目标描述符算出尾部个数，
-			// 校验总长与尾参类型，再把捕获那一段交给新一轮的 BridgeSpec —— 尾部由
-			// injectBridgeBody 按本轮描述符重新压，不能在轮次间复用。
-			int newFirst   = now.isStatic() ? 0 : 1;
-			int newCapArgs = now.captured.size() - newFirst;
-			int samArgs    = Type.getArgumentTypes(now.desc).length - newCapArgs;
-			if (samArgs < 0 || bd.sources().length != now.captured.size() + samArgs
-			    || !samTailMatches(oi.desc, now.desc, samArgs)) {
-				dbg(() -> "BRIDGE source plan size mismatch: " + oldKey
-					+ " plan=" + bd.sources().length + " want=" + (now.captured.size() + samArgs));
-				continue;
-			}
-			String targetName = finalName(ctx, now);
-			String target = targetName + now.desc;
-			ParamSource[] caps = java.util.Arrays.copyOf(bd.sources(), now.captured.size());
-			ctx.bridges.put(oldKey, new BridgeSpec(oi.desc, targetName, now.desc, caps,
-				oi.isStatic(), now.isStatic(),
-				locationOf(ctx.currentClass, oi.name, oi.desc) + " -> " + target));
-			TEST_EVENTS.add(new AlignmentEvent("BRIDGE_REPOINT", oi.name, now.name,
-				ctx.currentClass + "#" + oldKey + " -> " + target));
+			repointBridge(ctx, oldKey, mn.desc, (mn.access & Opcodes.ACC_STATIC) != 0, mn.name, bd,
+				prevTarget, presentKeys);
 		}
+	}
+
+	/**
+	 * 把一条已存在的捕获桥重新指向本轮产物里的目标方法（Run E / Run R 共用）。
+	 *
+	 * @param oldKey      桥的键（老 CallSite 认的 {@code name+desc}）
+	 * @param bridgeDesc  桥的描述符
+	 * @param bridgeStatic 桥是否静态
+	 * @param bridgeName  桥的方法名（仅用于日志定位）
+	 * @param prevTarget  桥目标在"配对旧侧"里的对应方法
+	 */
+	private static void repointBridge(MatchContext ctx, String oldKey, String bridgeDesc, boolean bridgeStatic,
+	                                  String bridgeName, BridgeDelegate bd, SyntheticInfo prevTarget,
+	                                  Set<String> presentKeys) {
+		// 配对关系只记在新侧（pair 里 ni.matchedWith = oi），反向要自己找。
+		SyntheticInfo now = findNewForOld(ctx, prevTarget);
+		if (now == null) {
+			dbg(() -> "BRIDGE target unpaired: " + oldKey + " -> " + bd.target.name + bd.target.desc);
+			return;                                            // 目标真没了
+		}
+		if (now.ghost || !now.renameable) return;
+		// captured 只在 recordLambdaShape 遇到 indy 时赋值；目标若变成仅被直接调用/不可达，
+		// 这里会是 null。第一轮已判过，第二轮同样不能直接解引用，否则抛 NPE 拖垮整类对齐。
+		if (now.captured == null) return;
+		if (presentKeys.contains(oldKey)) return;
+		// 目标的静态位若与上一轮不同，上一轮那份"搬哪些实参"的记录就不再成立
+		// （比如它又用回了 this，目标从静态变回实例，而桥当时把接收者丢掉了）。
+		// 这种情况不猜，退回幽灵桩。
+		if (bd.targetStatic() != now.isStatic()) {
+			dbg(() -> "BRIDGE target staticness changed: " + oldKey);
+			return;
+		}
+		// 上一轮记下的"每一位从哪来"只覆盖捕获表；解析出的 sources 还带着桥体尾部压的
+		// SAM 实参（它属于目标形参，不属于捕获表）。先按本轮目标描述符算出尾部个数，
+		// 校验总长与尾参类型，再把捕获那一段交给新一轮的 BridgeSpec —— 尾部由
+		// injectBridgeBody 按本轮描述符重新压，不能在轮次间复用。
+		int newFirst   = now.isStatic() ? 0 : 1;
+		int newCapArgs = now.captured.size() - newFirst;
+		int samArgs    = Type.getArgumentTypes(now.desc).length - newCapArgs;
+		if (samArgs < 0 || bd.sources().length != now.captured.size() + samArgs
+		    || !samTailMatches(bridgeDesc, now.desc, samArgs)) {
+			dbg(() -> "BRIDGE source plan size mismatch: " + oldKey
+				+ " plan=" + bd.sources().length + " want=" + (now.captured.size() + samArgs));
+			return;
+		}
+		String targetName = finalName(ctx, now);
+		String target = targetName + now.desc;
+		ParamSource[] caps = java.util.Arrays.copyOf(bd.sources(), now.captured.size());
+		ctx.bridges.put(oldKey, new BridgeSpec(bridgeDesc, targetName, now.desc, caps,
+			bridgeStatic, now.isStatic(),
+			locationOf(ctx.currentClass, bridgeName, bridgeDesc) + " -> " + target));
+		TEST_EVENTS.add(new AlignmentEvent("BRIDGE_REPOINT", bridgeName, now.name,
+			ctx.currentClass + "#" + oldKey + " -> " + target));
 	}
 
 	/**
@@ -5575,13 +5973,25 @@ public class LambdaAligner {
 		// 1. 旧类里的合成方法键集合，差集就是孤儿
 		Set<String> orphanedKeys = new HashSet<>();
 		var         oldGroups    = ctx.oldGroups;
-		for (int idx = oldGroups.nextEntry(-1); idx != -1; idx = oldGroups.nextEntry(idx)) {
-			List<SyntheticInfo> oldGroup = oldGroups.valueAt(idx);
-			if (oldGroup == null) continue;
-			for (SyntheticInfo oi : oldGroup) {
-				if (!oi.renameable) continue; // 关键修复：只对真正可改名的 Lambda 系方法幽灵化，普通合成方法（如 access$/$default）让其自然缺失
-				String key = oi.name + oi.desc;
+		if (ctx.runR) {
+			// 孤儿判定基准是**生效侧**方法表：幽灵桩 / 保留体 / 桥只存在于 E_prev，R_prev 里没有它们。
+			// 判据与 scan 的 renameable 逐字对齐（lambda 系名字 && 非 access$），否则普通合成方法
+			// （$default / $annotations 之类）会被误幽灵化。
+			for (MethodNode mn : oldCn.methods) {
+				if (mn.name.startsWith("<") || mn.name.startsWith("access$")) continue;
+				if (!MethodFingerprinter.isSyntheticName(mn.name)) continue;
+				String key = mn.name + mn.desc;
 				if (!presentKeys.contains(key)) orphanedKeys.add(key);
+			}
+		} else {
+			for (int idx = oldGroups.nextEntry(-1); idx != -1; idx = oldGroups.nextEntry(idx)) {
+				List<SyntheticInfo> oldGroup = oldGroups.valueAt(idx);
+				if (oldGroup == null) continue;
+				for (SyntheticInfo oi : oldGroup) {
+					if (!oi.renameable) continue; // 关键修复：只对真正可改名的 Lambda 系方法幽灵化，普通合成方法（如 access$/$default）让其自然缺失
+					String key = oi.name + oi.desc;
+					if (!presentKeys.contains(key)) orphanedKeys.add(key);
+				}
 			}
 		}
 		if (orphanedKeys.isEmpty()) return newBytes;
@@ -5622,11 +6032,26 @@ public class LambdaAligner {
 		// 而 infoByName 只按名字索引，取到哪一个取决于索引写入顺序 —— 会让标记值在轮次间抖动，
 		// 破坏"第二轮产物与第一轮逐字节相同"这类不变量。
 		final java.util.Map<String, Long> ghostHashByKey = new java.util.HashMap<>();
+		if (ctx.runR) {
+			// Run R：幽灵集合由继承集定义，生前指纹以元数据为准（规格 §5：Meta 校正）。
+			if (ctx.oldMeta != null) {
+				for (java.util.Map.Entry<String, Long> en : ctx.oldMeta.ghostHashes.entrySet()) {
+					ghostHashByKey.put(en.getKey(), en.getValue() == null ? 0L : en.getValue());
+				}
+			}
+			// 元数据缺项时退回桩体标记（逐字与 Run E 同一口径）。
+			for (MethodNode mn : oldCn.methods) {
+				if (!isGhostMethod(mn)) continue;
+				ghostHashByKey.putIfAbsent(mn.name + mn.desc, readGhostOriginalHash(mn));
+			}
+		}
 		for (int gi = ctx.oldGroups.nextEntry(-1); gi != -1; gi = ctx.oldGroups.nextEntry(gi)) {
 			List<SyntheticInfo> g = ctx.oldGroups.valueAt(gi);
 			if (g == null) continue;
 			for (SyntheticInfo oi : g) {
-				ghostHashByKey.put(oi.name + oi.desc, oi.ghost ? oi.ghostOriginalHash : oi.hash);
+				String key = oi.name + oi.desc;
+				if (ctx.runR && ghostHashByKey.containsKey(key)) continue;   // 生效侧名字优先
+				ghostHashByKey.put(key, oi.ghost ? oi.ghostOriginalHash : oi.hash);
 			}
 		}
 
@@ -6352,7 +6777,7 @@ public class LambdaAligner {
 						if (oi.ghostOriginalHash != ni.hash) continue;      // 生前指纹必须一致
 						if (!oi.desc.equals(ni.desc)) continue;             // 形状必须完全一致
 						if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
-						if (ctx.usedOldNames.contains(oi.name)) continue;
+						if (ctx.isOldNameClaimed(oi)) continue;
 						pair(ctx, ni, oi, "GHOST_REVIVE");
 						TEST_EVENTS.add(new AlignmentEvent("GHOST_REVIVE", oi.name, ni.name,
 							ctx.currentClass + "#" + ni.name + ni.desc + " revived to " + oi.name));
@@ -6957,7 +7382,7 @@ public class LambdaAligner {
 
 	private static boolean skeletonEligibleOld(MatchContext ctx, SyntheticInfo oi) {
 		return !oi.matched && !oi.ghost && oi.renameable
-		       && oi.upDepth >= 0 && !ctx.usedOldNames.contains(oi.name);
+		       && oi.upDepth >= 0 && !ctx.isOldNameClaimed(oi);
 	}
 
 	/**

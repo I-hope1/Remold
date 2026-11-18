@@ -4754,9 +4754,12 @@ public class RemoldAgent {
 				Map<String, Long> ghosts = LambdaAligner.scanGhostOriginHashes(p.alignOutput);
 				Set<String> invented = p.result == null ? Set.of() : p.result.inventedNames;
 				Map<String, String> mapping = p.result == null ? Map.of() : p.result.methodMapping;
+				// 下一轮 Raw <-> Raw 的翻译表：Raw 方法键 → 本轮生效侧方法键。显式传值（不依赖
+				// "align 之后立刻 commit"的时序），批次间被丢弃时为空表 —— 读侧会整类退回兼容跑道。
+				Map<String, String> rawToEff = p.result == null ? Map.of() : p.result.rawToEffKeys;
 				int bridges = p.result == null ? 0 : p.result.bridgeCount;
 				AlignmentMetaStore.INSTANCE.commit(p.loader, slashName,
-					p.preAlign, p.alignOutput, jvmBytes, invented, ghosts, mapping, bridges);
+					p.preAlign, p.alignOutput, jvmBytes, invented, ghosts, mapping, bridges, rawToEff);
 				if (BytecodePack.enabled()) {
 					BytecodePack.append(new BytecodePack.Entry(slashName, p.oldEffective, p.preAlign,
 						p.alignOutput, jvmBytes, invented, mapping, bridges));

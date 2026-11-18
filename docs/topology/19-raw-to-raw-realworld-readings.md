@@ -13,7 +13,7 @@
 |:--|:--|
 | 代码版本 | `main @ a6ad2c8`（PR3 合流后） |
 | 语料 | 本仓库五个模块的真实编译产物：`old` = `c998f3f` 的 `core/plugin-mixin/plugin-forge/plugin-arc/api` build/classes（415 类），`new` = `a6ad2c8` 同五模块（417 类）；按内部名稳定排序取前 **400** 类 |
-| 开关 | `-Dremold.vcs.enabled=true` 与 `-Dremold.poc.meta_source=true` 双开（Run R 总闸） |
+| 开关 | 取数时 Run R 由 `-Dremold.poc.meta_source=true` 显式打开（当时默认关）；转正后默认开启，急停为 `-Dremold.agent.lambda_raw_alignment=false` |
 | 执行方式 | Lead 串行单刷（不与任何构建/探针并发），单进程 |
 | 统计量 | 计数类读数逐项一致（可复跑）；耗时报 min / median / p90 / max + 总计 |
 

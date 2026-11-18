@@ -31,6 +31,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
@@ -557,18 +558,15 @@ class BatchHotpathOptimizationTest {
 		Class<?> withHost = defineAndInit(withName, withBytes);
 
 		MainThreadDispatcher prevDispatcher = RemoldAgent.getMainThreadDispatcher();
-		AtomicInteger dispatches = new AtomicInteger();
-		RemoldAgent.setMainThreadDispatcher(task -> {
-			dispatches.incrementAndGet();
-			task.run();
-		});
+		DispatchTally tally = new DispatchTally();
+		RemoldAgent.setMainThreadDispatcher(tally);
 		try {
 			RemoldAgent.processAnnotations(List.of(new ClassDefinition(withoutHost, withoutBytes)));
-			assertEquals(0, dispatches.get(),
+			assertEquals(0, tally.own(),
 				"class without @OnReload descriptor must skip getDeclaredMethods dispatch");
 
 			RemoldAgent.processAnnotations(List.of(new ClassDefinition(withHost, withBytes)));
-			assertEquals(1, dispatches.get(),
+			assertEquals(1, tally.own(),
 				"class with @OnReload descriptor must dispatch annotation processing");
 			assertEquals(1, withHost.getField("hits").getInt(null),
 				"@OnReload static method must still run once");
@@ -576,6 +574,76 @@ class BatchHotpathOptimizationTest {
 			RemoldAgent.setMainThreadDispatcher(prevDispatcher);
 		}
 	}
+
+	/**
+	 * 派发计数器：只把<b>本线程同步派发</b>的任务算作"本次调用的决策"，外来任务单独记账。
+	 *
+	 * <p><b>为什么必须按线程分账</b>：{@code RemoldAgent.scheduleDeferredPostRedefine} 把后置任务
+	 * 交给共享的定时器延迟 20 ms 再 {@code postToMain}，而 {@code postToMain} 用的是<b>那一刻</b>
+	 * 装着的主线程派发器。于是"上一个用例最后一行触发了外部重定义"的定时任务，会落到
+	 * <b>下一个用例</b>刚装好的派发器上——落地线程是 {@code HotSwap-Scheduler}，不是测试线程。
+	 * 集成树里 {@code SourceBytecodeCacheMatrixTest} 的外部重定义段正是这个形态，它与本类相邻时
+	 * 会把 `dispatches` 顶到 1，让"没有 @OnReload 描述符就不该派发"的断言偶发变红
+	 * （2026-11-18 集成树全量跑挂过一次；{@link #delayedForeignDispatchDoesNotPolluteOnReloadSkipCounting()}
+	 * 用同一机制做确定性复现）。</p>
+	 *
+	 * <p>任务本身照常执行（不改变派发语义），只是不计入本次调用的读数。</p>
+	 */
+	private static final class DispatchTally implements MainThreadDispatcher {
+		private final Thread testThread = Thread.currentThread();
+		private final AtomicInteger own = new AtomicInteger();
+		private final AtomicInteger foreign = new AtomicInteger();
+
+		@Override
+		public void dispatch(Runnable task) {
+			if (Thread.currentThread() == testThread) own.incrementAndGet();
+			else foreign.incrementAndGet();
+			task.run();
+		}
+
+		int own() { return own.get(); }
+
+		int foreign() { return foreign.get(); }
+	}
+
+	/**
+	 * 确定性复现并锁定"外来延迟派发"的形态：别的用例排下的 20 ms 后置任务落在本用例窗口里时，
+	 * 既不能把 {@code own()} 顶起来，也不能被当成 {@code processAnnotations} 的决定。
+	 *
+	 * <p>机制证据见 {@link DispatchTally}；这里排一个真实的后置任务（{@link RemoldAgent#scheduleDeferredPostRedefine}）
+	 * 而不是伪造线程，保证锁的是生产路径。</p>
+	 */
+	@Test
+	void delayedForeignDispatchDoesNotPolluteOnReloadSkipCounting() throws Exception {
+		RemoldAgent.scheduleDeferredPostRedefine(LeakProbe.class);
+
+		String name = "test.NoOnReloadHostUnderLeak";
+		byte[] bytes = buildSimpleClass(name.replace('.', '/'), false, false);
+		Class<?> host = defineAndInit(name, bytes);
+
+		MainThreadDispatcher prev = RemoldAgent.getMainThreadDispatcher();
+		DispatchTally tally = new DispatchTally();
+		RemoldAgent.setMainThreadDispatcher(tally);
+		try {
+			RemoldAgent.processAnnotations(List.of(new ClassDefinition(host, bytes)));
+			assertEquals(0, tally.own(),
+				"a class without @OnReload must not dispatch, even while a foreign task is in flight");
+
+			long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(500);
+			while (System.nanoTime() < deadline && tally.foreign() == 0) Thread.sleep(10);
+
+			assertTrue(tally.foreign() >= 1,
+				"repro precondition: the deferred post-redefine task must land on the installed dispatcher "
+					+ "from another thread (this is the leak that used to flake the sibling assertion)");
+			assertEquals(0, tally.own(),
+				"a foreign dispatch must never be counted as this call's dispatch decision");
+		} finally {
+			RemoldAgent.setMainThreadDispatcher(prev);
+		}
+	}
+
+	/** 延迟后置任务的载体：只要是合法 Class 即可（没有 @OnReload）。 */
+	static final class LeakProbe { }
 
 	@Test
 	void processAnnotationsInstanceFastPathSupportsPrivateNonVoidAndIsolatesErrors() {

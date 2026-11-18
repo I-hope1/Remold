@@ -2656,8 +2656,11 @@ public class RemoldAgent {
 										+ " (stale source cache?). Old callsites will bind by raw javac numbering this round.");
 								}
 								try {
+									// loader 维度必须显式传真实类加载器：AlignmentMetaStore 按 loader 身份分槽，
+									// 传 null 只会命中 bootstrap 槽，应用类加载器下的类永远取不到元数据
+									// （历史缺陷：开关生效但读数不变，见 docs/topology/18-live-raw-to-raw-alignment.md §9 F1）。
 									newBytecode = LambdaAligner.align(alignOld, newBytecode, oldResolver, newResolver,
-									 inventedSlots.getOrDefault(className, java.util.Set.of()));
+									 inventedSlots.getOrDefault(className, java.util.Set.of()), alignLoader);
 									// 本轮算出的"自造名"先挂起，等 redefine 成功再落账（失败就丢弃，
 									// 因为旧基线没前进，下一轮仍然是同一份旧字节）。
 									// 从本轮快照里取，避免读到别的轮次（失败时快照的集合是空的，不是 null）。
@@ -4751,9 +4754,12 @@ public class RemoldAgent {
 				Map<String, Long> ghosts = LambdaAligner.scanGhostOriginHashes(p.alignOutput);
 				Set<String> invented = p.result == null ? Set.of() : p.result.inventedNames;
 				Map<String, String> mapping = p.result == null ? Map.of() : p.result.methodMapping;
+				// 下一轮 Raw <-> Raw 的翻译表：Raw 方法键 → 本轮生效侧方法键。显式传值（不依赖
+				// "align 之后立刻 commit"的时序），批次间被丢弃时为空表 —— 读侧会整类退回兼容跑道。
+				Map<String, String> rawToEff = p.result == null ? Map.of() : p.result.rawToEffKeys;
 				int bridges = p.result == null ? 0 : p.result.bridgeCount;
 				AlignmentMetaStore.INSTANCE.commit(p.loader, slashName,
-					p.preAlign, p.alignOutput, jvmBytes, invented, ghosts, mapping, bridges);
+					p.preAlign, p.alignOutput, jvmBytes, invented, ghosts, mapping, bridges, rawToEff);
 				if (BytecodePack.enabled()) {
 					BytecodePack.append(new BytecodePack.Entry(slashName, p.oldEffective, p.preAlign,
 						p.alignOutput, jvmBytes, invented, mapping, bridges));

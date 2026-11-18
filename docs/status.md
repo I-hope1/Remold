@@ -368,6 +368,19 @@
 | 两阶段只在 Stage C 记一代 | ✅ | §5.3 | `RemoldAgent.processChangesBatch` / `applyTwoPhase` | E2E `vcsTwoPhaseProbe`：真实两阶段批次下 stage A 计数器前进、head generation 精确 +1、存量实例新增字段补成 42；`LAMBDA_STRICT` 拒绝批次 generation 不变 |
 | loader GC 后 head 清理的确定性用例 | ✅ | §2.3 | `AlignmentMetaStore.historyEntries()`（按存活槽实时重算） | `AlignmentMetaStoreBudgetTest`：①`WeakReference` 证明 loader 真被回收（store 不持强引用）；②回收后 `historyCount()==0`（无幽灵配额）；③新 loader 的条目不再被死 loader 的配额挤掉。GC 轮询用 `Assumptions` 兜底：JVM 未在窗口内回收时跳过而非假绿 |
 
+
+### 1.1.1 活的 Raw↔Raw 对齐（PR3）
+
+设计规格：[`docs/topology/18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md)
+
+| 机制 / 条目 | 状态 | 规范章节 | 落地位置 | 验收证据与决策依据 |
+|:---|:---:|:---|:---|:---|
+| 活体对齐改走 `R_prev ↔ R_new`（Run R），`Eff_prev` 降级为继承来源 | 🔶 | §2 / §3.2 | `LambdaAligner.align`（Run R 接线）、`AlignmentResult.baselineTree` / `runRGate` | 开关默认关（`-Dremold.poc.meta_source=false`），需与 `remold.vcs.enabled=true` 同时打开；关时行为与旧路径等价 |
+| Raw_prev 字节保管与预算降级（16 MiB 全局 / 每类 256 KiB，超预算丢字节保哈希） | 🔶 | §5 | `AlignmentMetaStore`（`rawPrevBytes`、`blobBytes()`、`droppedBlobCount()`） | 降级后 `runRGate=NO_RAW_PREV` + 每类一条 warn，整类回退 Run E（fail-closed） |
+| 三道整类准入闸门（G1 代际身份 / G2 源码侧配对 / G3 继承集可枚举） | 🔶 | §3.2 | `LambdaAligner`（`RunRGate` 七档读数） | 任一不过即整类回退，禁止部分继承与近邻代顶替 |
+| 幽灵桩 / 保留体 / 捕获桥从 `E_prev` 继承（含 `BRIDGE_REPOINT` 目标重指向与命名池占位） | 🔶 | §5 | `LambdaAligner` 继承集枚举 + `OrphanBodyRetention` | `Pr3RawAlignmentScenarioTest`（Ctrl+Z 幽灵继承、桥转发桩）；变异：继承集不从 `E_prev` 枚举 → 两例红 |
+| 活体路径 loader 传递（`headMatching` 命中正确 loader 槽） | ✅ | §2.3 | `RemoldAgent` → `LambdaAligner.align(…, loader)` | 缺 loader 时元数据永远取不到（只命中 bootstrap 槽），属 PR3 前置缺陷 |
+
 ---
 
 ### 1.2 字节码 Changeset 派生数据缓存（PR2）
@@ -561,6 +574,30 @@
 ## 5. 已知风险、残余盲区与折衷清单 (Known Residual Risks & Limitations)
 
 本节系统记录热更新基础设施中被评审确认、因工程代价或架构边界有意保留的已知残余风险，统一按六段式元结构规范登记：
+
+### 风险 24：Run R 下三条「只看得到 R_prev」的口径缺口
+- **风险描述与底层机制**：活体对齐切到 `R_prev ↔ R_new` 后，配对基线里不含幽灵桩、保留体与捕获桥（它们只存在于 `E_prev`），因此凡是以「旧侧字节里能找到的东西」为前提的判据，覆盖面在 Run R 下收窄到 `R_prev` 一侧。
+- **触发条件**：① `stepGhostRevive`（默认关）在 Run R 下没有幽灵候选可用，等于 no-op；② 无 LVT 的捕获 lambda 形参名扫描只覆盖 `R_prev`，不覆盖 `E_prev` 侧；③ 字符串常量见证表看不到仅存在于 `E_prev` 的幽灵/桥名。
+- **当前缓解措施**：① 幽灵集合改由继承集定义（`E_prev` 枚举 + `Meta.ghostHashes` 校正），复活判据不再依赖 `R_prev`；② 缺少 LVT 时按槽号/类型兜底并记 warn，`LAMBDA_STRICT` 门仍可把它升级为硬失败；③ 见证表缺项只降低配对证据强度，落 Run E 或位置兜底的路径均有读数（`positionalFallbacks`）。
+- **残余影响**：上述三处在 Run R 下的证据强度低于 Run E；不产生静默写入，但可能让本可复活/本可精确配对的用例退化为兜底。
+- **后续验证方式**：`Pr3RawAlignmentScenarioTest` 覆盖 Ctrl+Z 幽灵继承与桥转发；新增「仅 `E_prev` 可见的见证」用例时以 `positionalFallbacks`/`runRGate` 为终局判据。
+- **决策依据**：[`18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md) §5（继承集枚举）与 §6（fail-closed）。
+
+### 风险 25：`forceStaticLambdas` 归一化导致该类稳定落 Run E
+- **风险描述与底层机制**：`normalizeAlignBaseline` / `forceStaticLambdas` 会把喂给对齐的旧侧字节再做一层归一化；这类类别的 `E_prev_used` 与 `Meta.jvmEffHash` 不一致，G1 代际身份因此判不出，整类回退 Run E。
+- **触发条件**：类含可被 `FORCE_STATIC_LAMBDA` 归一化的 lambda 调用位点（默认开启该归一化时）。
+- **当前缓解措施**：按设计降级而非缺陷——`runRGate = RAW_PREV_MISMATCH` 可观测，行为与旧路径完全一致（R2 等价）。
+- **残余影响**：这些类享受不到 Run R 的配对精度收益，属能力边界。
+- **后续验证方式**：若要覆盖，需要在提交元数据时记录「归一化后指纹」，属规格扩充；扩充字段必须可选（§5）。
+- **决策依据**：[`18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md) §3.2（G1）与 §5（可选字段）。
+
+### 风险 26：Raw_prev blob 记账为 O(条目数)
+- **风险描述与底层机制**：全局字节预算的维持按条目扫描记账，每类提交一次。
+- **触发条件**：单批次类数量很大（数百类以上）且每类都带 blob 时。
+- **当前缓解措施**：提交发生在批次收尾而非热路径；每类上限 256 KiB 限制单条贡献，预算默认 16 MiB。
+- **残余影响**：大批次提交期有一次性 O(n) 记账开销，未实测绝对耗时，属推断。
+- **后续验证方式**：若大批次提交耗时成为瓶颈，改为增量记账（维护累计字节数 + 淘汰队列）。
+- **决策依据**：[`18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md) §5。
 
 ### 风险 1：实例存活判定 TOCTOU 竞态窗口
 - **风险描述与底层机制**：从堆遍历（`LibTool.getInstances`）判定“某类无存活实例”到真正执行 `redefineClasses` 生效之间，存在纳秒至微秒级的时间窗口。

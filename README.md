@@ -54,12 +54,9 @@ git clone https://github.com/I-hope1/Remold && cd Remold
 plugins { id 'io.github.i-hope1.remold' version '0.2.8' }
 ```
 
-或者引入脚本插件（注意 URL 必须锁具体版本的 tag，不要写 `main`，保证构建插件与 agent 版本一致）：
+无论用哪种方式引入插件，配置入口都是同一个 `remold { }` 扩展：
 
 ```groovy
-def remoldRef = (findProperty('remold.version') ?: '0.2.8')
-apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remold.gradle"
-
 remold {
     // 默认读取 gradle.properties 中的 remold.version，自动下载并缓存对应版本的 remold-agent.jar
     // 本地 remold-agent.jar 的 manifest 版本与 remold.version 不一致时，插件以配置版本为准重新解析/
@@ -72,7 +69,19 @@ remold {
 }
 ```
 
-如果是 Kotlin DSL（`build.gradle.kts`），由于 `apply(from = ...)` 下 IDE 无法为脚本扩展生成类型安全访问器，建议通过 `buildscript` 引入二进制插件 `com.github.I-hope1.Remold:gradle-plugin:v<version>` 并 `apply(plugin = "io.github.i-hope1.remold")`，或者改用 `extra["remold.mainClass"] = "..."` 配置。离线环境可用 `-Premold.pluginJar=<path>` 指定本地插件 jar，详见 [`gradle-plugin/README.md`](gradle-plugin/README.md)。
+Kotlin DSL（`build.gradle.kts`）写法一致：`plugins { id("io.github.i-hope1.remold") version "0.2.8" }`，`remold { }` 就是插件生成的类型安全访问器；完整配置项见 [`gradle-plugin/README.md`](gradle-plugin/README.md)。
+
+<details>
+<summary><sub>不推荐：跳过插件解析，直接 apply 远程脚本插件（脚本只是二进制插件的薄壳，<code>apply from</code> 到 <code>v&lt;version&gt;</code> 等价于上面的 <code>plugins { }</code> 声明）</sub></summary>
+
+> URL 必须锁到具体版本的 tag（不要写 `main`），保证构建插件与 agent 版本一致；离线环境可用 `-Premold.pluginJar=<path>` 指定本地插件 jar。
+
+```groovy
+def remoldRef = (findProperty('remold.version') ?: '0.2.8')
+apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remold.gradle"
+```
+
+</details>
 
 插件会根据工程类型自动挂载扩展：
 - **Fabric / Quilt 工程**：检测到 Loom 时自动挂载 `mixin` 与 `fabric` 插件（自动注入 `fabric.classPathGroups`，并将 `run/mods` 下同 modId 的残留构建 jar 改名为 `.remold-disabled` 隔离）；

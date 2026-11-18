@@ -81,6 +81,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Run R 的真实规模读数与一处结论更正**（`tests/src/Pr3RealWorldReadingsProbe.java` + 实测记录
+  `docs/topology/19-raw-to-raw-realworld-readings.md`）：在本仓库两个发布点的真实字节（415/417 类，取样 400）
+  上双开关全开实测——① 命中 `forceStaticLambdas` 的类 **7/7 全部 `PASSED`**，全语料 `RAW_PREV_MISMATCH` 为 **0**
+  （`preAlign` 取自归一化之后，两侧指纹同源），因此 G1 **不需要**比对转换前后双校验和，此前"归一化会导致整类回退"
+  的说法按读数更正；② `Raw_prev` blob 满载 2,389,448 B（16 MiB 的 14.2%）、`droppedBlobCount=0`，平均每类 ≈5.97 KB，
+  64 KiB 对照档掉 5 类且全部落 `NO_RAW_PREV`（降级可观测）；`commit` 每类 median 0.30 ms / p90 0.65 ms；
+  ③ `positionalFallbacks` 在本语料 Run R 侧为 0，唯一一例位置兜底出现在 Run E 侧且落在缺 LVT 的类上。
+  真正压低接合率的是"没有本地 lambda 槽位"的类（`TRANSLATION_INCOMPLETE`），含 lambda 站点的类接合率 50/62（80.6%）。
+
+
 - **native 构建统一到 zig 0.17.1，linux-x64 也改由 zig 交叉编译**（`scripts/build-native.sh`）：
   链接步骤从 `zig cc` 换成 `zig c++` 驱动（`tool.cpp` 现在用到 `std::vector`/`std::expected`，
   目标文件里有 `operator new/delete`、`__libcpp_verbose_abort` 这类 C++ 运行时引用，C 驱动链接在

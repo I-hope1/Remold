@@ -168,6 +168,15 @@ public final class AlignmentMetaStore {
 		final long loaderId;
 		final Map<String, Entry> head = new HashMap<>();
 		final Map<String, Deque<Entry>> history = new HashMap<>();
+		/**
+		 * 本槽当前持有的 {@code R_prev} blob 总字节数（head ∪ history，按 {@link Entry} 身份去重：
+		 * head 与 {@code history[0]} 是同一个实例，所以只在入 history 时记账一次）。
+		 *
+		 * <p>随槽一起消失，因此 loader 被回收后这些字节不再计入全局读数——不需要弱表回调。</p>
+		 */
+		long blobBytesHeld;
+		/** 本槽当前历史条目数（不含 head 之外的额外口径：head 一定也是 {@code history[0]}）。 */
+		int historyCount;
 
 		LoaderSlot(long loaderId) {
 			this.loaderId = loaderId;
@@ -182,7 +191,6 @@ public final class AlignmentMetaStore {
 
 	private long nextLoaderId = 1L;
 	private long nextSeq = 1L;
-	private int historyEntries;
 
 	/** 没存下 blob 的代数（诊断读数）。 */
 	private int droppedBlobCount;
@@ -209,10 +217,12 @@ public final class AlignmentMetaStore {
 	}
 
 	/**
-	 * 历史条目总数（不含 head），按<b>当前仍存活</b>的 loader 槽实时统计。
+	 * 历史条目总数（不含 head），按<b>当前仍存活</b>的 loader 槽统计。
 	 *
-	 * <p>必须实时算：{@code WeakHashMap} 在 loader 被回收后只是悄悄摘槽，不会回调本类扣减计数器；
-	 * 若返回缓存计数，死 loader 会永久占用全局预算配额（PR2 已修，见 {@code historyBudgetSpent}）。</p>
+	 * <p>口径要点：{@code WeakHashMap} 在 loader 被回收后只是悄悄摘槽，不会回调本类扣减计数器。
+	 * 所以计数<b>按槽分离</b>（{@link LoaderSlot#historyCount}），全局读数 = 存活槽之和：
+	 * 死 loader 的配额随槽一起消失，不会永久占用全局预算（PR2 的约束，见
+	 * {@code AlignmentMetaStoreBudgetTest}）。</p>
 	 */
 	public synchronized int historyCount() {
 		return liveHistoryEntries();
@@ -324,11 +334,22 @@ public final class AlignmentMetaStore {
 		slot.head.put(className, e);
 
 		Deque<Entry> d = slot.history.computeIfAbsent(className, x -> new ArrayDeque<>());
+		// 上一代若已被全局预算从 history 摘掉（只剩 head 引用），换 head 时它才真正不可达，
+		// 此时必须把它名下的 blob 字节从账上扣掉；否则它已经在某个 deque 里，字节继续由那条记录承担。
+		if (prev != null && prev != e && !containsIdentity(d, prev)) {
+			slot.blobBytesHeld -= prev.blobBytes();
+		}
 		d.addFirst(e);
-		historyEntries++;
+		slot.historyCount++;
+		slot.blobBytesHeld += e.blobBytes();
 		if (d.size() > HISTORY_PER_CLASS) {
-			d.removeLast();
-			historyEntries--;
+			Entry evicted = d.removeLast();
+			slot.historyCount--;
+			// 淘汰的最旧代如果同时还是 head（只有在 history 被清空到只剩一代时才可能），
+			// 它的字节仍被 head 引用，不能从账上扣。
+			if (slot.head.get(className) != evicted) {
+				slot.blobBytesHeld -= evicted.blobBytes();
+			}
 		}
 		trimGlobalBudget();
 		return e;
@@ -339,7 +360,8 @@ public final class AlignmentMetaStore {
 		slots.clear();
 		bootstrapSlot.head.clear();
 		bootstrapSlot.history.clear();
-		historyEntries = 0;
+		bootstrapSlot.blobBytesHeld = 0L;
+		bootstrapSlot.historyCount = 0;
 		nextSeq = 1L;
 		nextLoaderId = 1L;
 		droppedBlobCount = 0;
@@ -350,8 +372,25 @@ public final class AlignmentMetaStore {
 	// Raw_prev blob 预算（丢 blob 保哈希：budget 压力下只影响"能否走 Raw ↔ Raw"，不影响哈希判据）
 	// ---------------------------------------------------------------------------------------------
 
-	/** 当前持有的 blob 总字节数（head + 未被预算回收的历史代）。 */
+	/**
+	 * 当前持有的 blob 总字节数（head + 未被预算回收的历史代）。
+	 *
+	 * <p><b>O(#live loaders)，不是 O(entries)</b>：读数是各槽自持计数之和。槽随 loader 一起不可达，
+	 * 弱表静默摘槽后其字节自然退出全局读数，因此不需要弱表回调，也不会出现"死 loader 占预算"。</p>
+	 */
 	public synchronized long blobBytes() {
+		long n = bootstrapSlot.blobBytesHeld;
+		for (LoaderSlot s : slots.values()) n += s.blobBytesHeld;
+		return n;
+	}
+
+	/**
+	 * 重算真值：{@code head ∪ history} 的 blob 字节数（按 {@link Entry} 身份去重）。
+	 *
+	 * <p>只用于双账校验（{@link #assertCountersConsistent()}）：生产路径<b>不得</b>每次 commit 调它，
+	 * 否则又把 O(entries) 遍历赔回来。</p>
+	 */
+	long recountBlobBytes() {
 		long n = 0;
 		Set<Entry> seen = Collections.newSetFromMap(new IdentityHashMap<>());
 		for (Entry e : bootstrapSlot.head.values()) if (seen.add(e)) n += e.blobBytes();
@@ -362,6 +401,41 @@ public final class AlignmentMetaStore {
 			}
 		}
 		return n;
+	}
+
+	/**
+	 * 重算真值：存活 loader 槽里的历史条目数（不含 head——head 恒等于对应类的 {@code history[0]}）。
+	 *
+	 * <p>只用于双账校验，理由同 {@link #recountBlobBytes()}。</p>
+	 */
+	int recountLiveHistoryEntries() {
+		int n = 0;
+		for (Deque<Entry> d : bootstrapSlot.history.values()) n += d.size();
+		for (LoaderSlot s : slots.values()) {
+			for (Deque<Entry> d : s.history.values()) n += d.size();
+		}
+		return n;
+	}
+
+	/**
+	 * 双账校验：增量计数器必须与重算真值逐项相等，否则抛 {@link IllegalStateException}（带差值）。
+	 *
+	 * <p>接线点：定向单测（每次增删后）与 {@code Pr3CommitScalingProbe} 每档每轮结束
+	 * （{@code -Dpr3.commitScaling.verifyCounters}，默认开）。生产 commit 路径不调用。</p>
+	 */
+	public synchronized void assertCountersConsistent() {
+		long blobCounter = blobBytes();
+		long blobTruth = recountBlobBytes();
+		if (blobCounter != blobTruth) {
+			throw new IllegalStateException("AlignmentMetaStore counter drift: blobBytes counter=" + blobCounter
+				+ "B but recount=" + blobTruth + "B (delta=" + (blobCounter - blobTruth) + "B)");
+		}
+		int liveCounter = liveHistoryEntries();
+		int liveTruth = recountLiveHistoryEntries();
+		if (liveCounter != liveTruth) {
+			throw new IllegalStateException("AlignmentMetaStore counter drift: liveHistory counter=" + liveCounter
+				+ " but recount=" + liveTruth + " (delta=" + (liveCounter - liveTruth) + ")");
+		}
 	}
 
 	/** 因预算/单类上限而没存下 blob 的代数（诊断读数）。 */
@@ -388,8 +462,9 @@ public final class AlignmentMetaStore {
 			return null;
 		}
 		// 先给新代腾地方：从最旧的历史代开始丢 blob（head 的 blob 由"新代覆盖旧代"自然释放）。
-		while (blobBytes() + len > BLOB_BUDGET_BYTES && dropOldestHistoryBlob() > 0) {
-			// 继续回收
+		long held = blobBytes();
+		if (held + len > BLOB_BUDGET_BYTES) {
+			releaseOldestHistoryBlobs(held + len - BLOB_BUDGET_BYTES);
 		}
 		if (blobBytes() + len > BLOB_BUDGET_BYTES) {
 			noteBlobDrop(className, "global budget exhausted (" + blobBytes() + "B held, "
@@ -401,24 +476,51 @@ public final class AlignmentMetaStore {
 		return copy;
 	}
 
-	/** 从最旧的历史代回收一份 blob；返回释放字节数（0 表示没有可回收的）。 */
-	private int dropOldestHistoryBlob() {
-		Entry oldest = null;
-		for (Deque<Entry> d : bootstrapSlot.history.values()) {
+	/**
+	 * 从最旧的历史代回收 blob，直到释放够 {@code needBytes} 或没有可回收的。
+	 *
+	 * <p>一次扫描 + 按 {@code seq} 升序丢弃，与"反复调用单份回收"等价（丢最旧优先），
+	 * 但把 k 次全表扫描压成 1 次。返回实际释放字节数。</p>
+	 */
+	private long releaseOldestHistoryBlobs(long needBytes) {
+		if (needBytes <= 0) return 0;
+		List<Object[]> holders = new ArrayList<>();
+		collectBlobHolders(bootstrapSlot, holders);
+		for (LoaderSlot s : slots.values()) collectBlobHolders(s, holders);
+		if (holders.isEmpty()) return 0;
+		holders.sort(Comparator.comparingLong(o -> ((Entry) o[1]).seq));
+		long freed = 0;
+		for (Object[] row : holders) {
+			if (freed >= needBytes) break;
+			Entry e = (Entry) row[1];
+			int n = e.blobBytes();
+			if (n == 0) continue;
+			int dropped = e.dropBlob();
+			((LoaderSlot) row[0]).blobBytesHeld -= dropped;
+			freed += dropped;
+		}
+		return freed;
+	}
+
+	private static void collectBlobHolders(LoaderSlot slot, List<Object[]> out) {
+		for (Deque<Entry> d : slot.history.values()) {
 			for (Entry e : d) {
-				if (e.blobBytes() == 0) continue;
-				if (oldest == null || e.seq < oldest.seq) oldest = e;
+				if (e.blobBytes() > 0) out.add(new Object[]{ slot, e });
 			}
 		}
-		for (LoaderSlot s : slots.values()) {
-			for (Deque<Entry> d : s.history.values()) {
-				for (Entry e : d) {
-					if (e.blobBytes() == 0) continue;
-					if (oldest == null || e.seq < oldest.seq) oldest = e;
-				}
-			}
+	}
+
+	/**
+	 * 按<b>身份</b>判断某个条目是否还挂在该类的历史代里。
+	 *
+	 * <p>{@link Entry} 没有覆写 {@code equals}，所以 {@code Deque.contains} 已经是身份比较；
+	 * 这里显式写出意图，并且长度上界是 {@link #HISTORY_PER_CLASS}，属常数开销。</p>
+	 */
+	private static boolean containsIdentity(Deque<Entry> d, Entry e) {
+		for (Entry x : d) {
+			if (x == e) return true;
 		}
-		return oldest == null ? 0 : oldest.dropBlob();
+		return false;
 	}
 
 	private void noteBlobDrop(String className, String why) {
@@ -472,21 +574,23 @@ public final class AlignmentMetaStore {
 		return slots.computeIfAbsent(loader, k -> new LoaderSlot(nextLoaderId++));
 	}
 
-	/** 只统计仍然可达（loader 未回收）的历史条目。 */
+	/**
+	 * 仍可达（loader 未回收）的历史条目数。
+	 *
+	 * <p>读数是各槽自持计数之和：{@code WeakHashMap} 摘掉死 loader 槽时，其计数随槽消失，
+	 * 所以死 loader 不会永久占用全局预算配额。</p>
+	 */
 	private int liveHistoryEntries() {
-		int n = 0;
-		for (Deque<Entry> d : bootstrapSlot.history.values()) n += d.size();
-		for (LoaderSlot s : slots.values()) {
-			for (Deque<Entry> d : s.history.values()) n += d.size();
-		}
+		int n = bootstrapSlot.historyCount;
+		for (LoaderSlot s : slots.values()) n += s.historyCount;
 		return n;
 	}
 
 	private void trimGlobalBudget() {
-		// 先按存活槽重算：死 loader 的条目已随槽消失，缓存的 historyEntries 会偏高，
-		// 若不重算会把活着的条目误淘汰。
-		historyEntries = liveHistoryEntries();
-		if (historyEntries <= HISTORY_MAX_ENTRIES) return;
+		// 先按存活槽取读数（O(#live loaders)）：死 loader 的条目已随槽消失，
+		// 若用可能偏高的陈旧计数会把活着的条目误淘汰。
+		int live = liveHistoryEntries();
+		if (live <= HISTORY_MAX_ENTRIES) return;
 		List<Object[]> all = new ArrayList<>();
 		for (Map.Entry<String, Deque<Entry>> en : bootstrapSlot.history.entrySet()) {
 			for (Entry e : en.getValue()) all.add(new Object[]{ bootstrapSlot, en.getKey(), e });
@@ -498,12 +602,20 @@ public final class AlignmentMetaStore {
 		}
 		all.sort(Comparator.comparingLong(o -> ((Entry) o[2]).seq));
 		for (Object[] row : all) {
-			if (historyEntries <= HISTORY_MAX_ENTRIES) break;
+			if (live <= HISTORY_MAX_ENTRIES) break;
+			LoaderSlot slot = (LoaderSlot) row[0];
 			@SuppressWarnings("unchecked")
-			Map<String, Deque<Entry>> h = ((LoaderSlot) row[0]).history;
+			Map<String, Deque<Entry>> h = slot.history;
 			Deque<Entry> d = h.get((String) row[1]);
-			if (d != null && d.remove((Entry) row[2])) {
-				historyEntries--;
+			Entry victim = (Entry) row[2];
+			if (d != null && d.remove(victim)) {
+				live--;
+				slot.historyCount--;
+				// 被摘掉的最旧代如果还是该类的 head（单代类被全局预算淘汰时就是这样），
+				// 字节仍在 head 名下，不能从账上扣。
+				if (slot.head.get((String) row[1]) != victim) {
+					slot.blobBytesHeld -= victim.blobBytes();
+				}
 				if (d.isEmpty()) h.remove((String) row[1]);
 			}
 		}

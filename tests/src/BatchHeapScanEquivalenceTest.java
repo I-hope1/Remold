@@ -1,4 +1,7 @@
 import org.junit.jupiter.api.Test;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Opcodes;
 import remold.util.LibTool;
 
 import java.util.ArrayList;
@@ -61,6 +64,12 @@ class BatchHeapScanEquivalenceTest {
 
 	/** 零存活实例：批收集必须给出空集合，且不能因此多跑一次遍历。 */
 	static class Zero { }
+
+	/**
+	 * The 64th target of the liveness-bitmap case: {@code targets[63]} is the last bit of a 64-bit
+	 * word, which is exactly the bit that used to collide with the {@code -1} error sentinel.
+	 */
+	static class SixtyFourth { }
 
 	/** 一次用例创建的全部实例（强引用保持到用例结束，避免被 GC 提前回收）。 */
 	record Fixtures(List<Object> bases, List<Object> subs, List<Object> subSubs,
@@ -262,6 +271,189 @@ class BatchHeapScanEquivalenceTest {
 		assertFalse(batch[targets.length - 1], "Zero must report no live instance");
 	}
 
+	// ------------------------------------------------------------------ N1 · class tag lifecycle
+
+	/**
+	 * N1: {@code getInstancesBatch} / {@code hasLiveInstancesBatch} must leave <b>no</b> class tag
+	 * behind on the classes they tagged (targets plus already loaded subclasses that are not targets).
+	 *
+	 * <p>Why the return set cannot catch this: a class tag that is never cleared does not corrupt
+	 * <i>this</i> result, it corrupts the <i>next</i> heap walk — the tag map still maps those classes
+	 * to a stale {@code class_tag}, so a later scan silently mixes in the wrong classes. Only reading
+	 * {@code jvmti->GetTag} after the call observes the defect directly.</p>
+	 *
+	 * <p>Teeth: the ordering bug (global ref deleted before the tag is cleared) leaves the tag set,
+	 * so {@link LibTool#classTagOf(Class)} is non-zero. Pairing with the equivalence cases keeps the
+	 * assertion from being vacuous — if tagging were removed altogether the buckets above would be
+	 * empty and those cases would fail, so "tag was set" is established there and "tag was cleared"
+	 * here.</p>
+	 */
+	@Test
+	void classTagsAreClearedAfterEveryBatchQuery() {
+		makeInstances();
+		Class<?>[] taggedBecauseOfSubtype = { Base.class, Sub.class, SubSub.class, Iface.class, ImplA.class, ImplB.class };
+		if (!tagDiagnosticsAvailable()) {
+			// Old native library without the diagnostic exports: the class tag cannot be observed at
+			// all. Degrade to an explicit assertion instead of silently passing — the batch contract
+			// still has to hold, and the message says why the tag check did not run.
+			Class<?>[] targets = { Base.class, Iface.class };
+			Object[][] batch = LibTool.getInstancesBatch(targets);
+			assertEquals(perClass(Base.class), identitySet(batch[0]),
+				"degraded branch (no tag diagnostics in the loaded native library): batch collection"
+					+ " must still match per-class collection");
+			assertEquals(perClass(Iface.class), identitySet(batch[1]),
+				"degraded branch (no tag diagnostics in the loaded native library): batch collection"
+					+ " must still match per-class collection");
+			return;
+		}
+
+		long beforeCollection = walks();
+		LibTool.getInstancesBatch(new Class<?>[]{ Base.class, Iface.class });
+		assertEquals(1L, walks() - beforeCollection, "collection of two targets must cost one heap walk");
+		assertNoClassTags(taggedBecauseOfSubtype, "getInstancesBatch");
+
+		long beforeLiveness = walks();
+		LibTool.hasLiveInstancesBatch(new Class<?>[]{ Base.class, Iface.class });
+		assertEquals(1L, walks() - beforeLiveness, "liveness probe of two targets must cost one heap walk");
+		assertNoClassTags(taggedBecauseOfSubtype, "hasLiveInstancesBatch");
+
+		// A failure-free repeat must also be clean: a leaked tag would already be visible here.
+		LibTool.getInstancesBatch(new Class<?>[]{ Base.class, Iface.class });
+		assertNoClassTags(taggedBecauseOfSubtype, "a repeated getInstancesBatch");
+	}
+
+	// ------------------------------------------------------------------ N2 · bitmap sign bit
+
+	/**
+	 * N2: the 64th target is the last bit of a 64-bit word. When only that target is alive the old
+	 * {@code jlong} bitmap was exactly {@code -1}, which the caller read as its error sentinel: a
+	 * <b>successful</b> walk was reported as a failure and the whole batch fell back to one walk per
+	 * class (64 walks + a warn).
+	 */
+	@Test
+	void sixtyFourthTargetAliveIsNotReportedAsAnError() {
+		Class<?>[] targets = new Class<?>[64];
+		Arrays.fill(targets, Zero.class);
+		targets[63] = SixtyFourth.class;
+		// Strong reference: the instance must be reachable during the walk.
+		Object alive = new SixtyFourth();
+		assertNotNull(alive);
+
+		long before = walks();
+		boolean[] result = LibTool.hasLiveInstancesBatch(targets);
+		long used = walks() - before;
+
+		assertEquals(64, result.length);
+		assertEquals(1L, used, "64 liveness targets must be answered by a single heap walk"
+			+ " (a negative bitmap sentinel used to force the per-class fallback)");
+		assertTrue(result[63], "the 64th target (bit 63) is alive and must be reported alive");
+		for (int i = 0; i < 63; i++) {
+			assertFalse(result[i], "target #" + i + " (Zero) has no live instance");
+		}
+	}
+
+	/** N2: all 64 targets alive — the old bitmap became {@code -1} as well, for the same reason. */
+	@Test
+	void allSixtyFourTargetsAliveUseOneWalk() {
+		Class<?>[] targets = new Class<?>[64];
+		Arrays.fill(targets, Base.class);
+		makeInstances();
+
+		long before = walks();
+		boolean[] result = LibTool.hasLiveInstancesBatch(targets);
+		long used = walks() - before;
+
+		assertEquals(1L, used, "64 alive liveness targets must be answered by a single heap walk");
+		for (int i = 0; i < targets.length; i++) {
+			assertTrue(result[i], "target #" + i + " (Base) has live instances");
+		}
+	}
+
+	/**
+	 * N2: the target count is no longer capped at a 64-bit word — the mask inside the native walk is
+	 * a dynamically sized bitset, so 100 targets still cost one walk.
+	 */
+	@Test
+	void livenessBeyondSixtyFourTargetsStillUsesOneWalk() {
+		makeInstances();
+		Class<?>[] targets = paddedTargets(100);
+
+		long before = walks();
+		boolean[] result = LibTool.hasLiveInstancesBatch(targets);
+		long used = walks() - before;
+
+		assertEquals(targets.length, result.length);
+		assertEquals(1L, used, "100 liveness targets must be answered by a single heap walk");
+		for (int i = 0; i < targets.length; i++) {
+			assertEquals(LibTool.hasLiveInstance(targets[i]), result[i],
+				"batch liveness probe must equal the single-class probe for target #" + i);
+		}
+	}
+
+	// ------------------------------------------------------------------ N3 · overflow cleanup
+
+	/**
+	 * N3: an overflow (more distinct target-mask combinations than object-tag slots) aborts the walk
+	 * and falls back to the per-class path. Everything the callback already tagged must be cleared on
+	 * that path too — a dirty tag survives into the next walk and silently mixes classes.
+	 *
+	 * <p>The fixture builds more distinct mask combinations than the slot budget by generating
+	 * classes that each implement a different subset of seven interfaces. One live instance per class
+	 * guarantees that objects really are tagged before the abort, so the "no tagged object left"
+	 * assertion is not vacuous.</p>
+	 */
+	@Test
+	void overflowFallbackLeavesNoDirtyObjectTags() throws Exception {
+		final int interfaceCount = 7;
+		ComboLoader loader = new ComboLoader(BatchHeapScanEquivalenceTest.class.getClassLoader());
+		Class<?>[] ifaces = new Class<?>[interfaceCount];
+		for (int i = 0; i < interfaceCount; i++) {
+			ifaces[i] = generateInterface(loader, "BatchProbeIface" + i);
+		}
+		// 65 > the 64 object-tag slots: the 65th distinct combination overflows the budget.
+		List<Class<?>> combos = generateComboClasses(loader, ifaces, 65);
+		List<Object> instances = new ArrayList<>();
+		for (Class<?> combo : combos) {
+			instances.add(combo.getDeclaredConstructor().newInstance());
+		}
+
+		long before = walks();
+		Object[][] batch = LibTool.getInstancesBatch(ifaces);
+		long used = walks() - before;
+
+		// Precondition: the batch path really ran and really overflowed (1 aborted walk + K per-class).
+		assertEquals(ifaces.length + 1L, used,
+			"an overflowed batch walk must fall back to one walk per target (1 aborted + " + ifaces.length + ")");
+		// Correctness through the degraded path: each generated instance lands in exactly its buckets.
+		for (int m = 0; m < combos.size(); m++) {
+			Object instance = instances.get(m);
+			int mask = m + 1;
+			for (int i = 0; i < interfaceCount; i++) {
+				boolean expected = (mask & (1 << i)) != 0;
+				assertEquals(expected, identitySet(batch[i]).contains(instance),
+					"combo #" + mask + " must " + (expected ? "" : "not ") + "appear in the bucket of " + ifaces[i].getSimpleName());
+			}
+		}
+		if (!tagDiagnosticsAvailable()) {
+			assertFalse(instances.isEmpty(), "degraded branch (no tag diagnostics): the overflow fixture still ran");
+			return;
+		}
+		assertEquals(0L, LibTool.taggedObjectCount(),
+			"an overflowed batch walk must leave zero tagged objects behind");
+
+		// Second phase: the untouched success path must also end tag-free. HotSpot drops the tag
+		// writes of a walk that ends in an error, so the overflow phase alone cannot observe a
+		// missing cleanup; a completed walk commits its tags, so this phase does.
+		Class<?>[] okTargets = { Base.class, Sub.class, Iface.class };
+		Fixtures fx = makeInstances();
+		long beforeOk = walks();
+		Object[][] okBatch = LibTool.getInstancesBatch(okTargets);
+		assertEquals(1L, walks() - beforeOk, "a successful batch collection must cost one heap walk");
+		assertTrue(identitySet(okBatch[0]).containsAll(fx.bases()), "baseline: the successful batch is populated");
+		assertEquals(0L, LibTool.taggedObjectCount(),
+			"a completed batch walk must leave zero tagged objects behind (search tags are cleared before returning)");
+	}
+
 	@Test
 	void emptyAndNullTargetsAreHandled() {
 		assertEquals(0, LibTool.getInstancesBatch(new Class<?>[0]).length);
@@ -277,5 +469,71 @@ class BatchHeapScanEquivalenceTest {
 		Class<?>[] targets = new Class<?>[size];
 		for (int i = 0; i < size; i++) targets[i] = pool[i % pool.length];
 		return targets;
+	}
+
+	// ------------------------------------------------------------------ helpers (tag + bytecode generation)
+
+	/** Whether the loaded native library exposes the tag diagnostics (old builds do not). */
+	private static boolean tagDiagnosticsAvailable() {
+		return LibTool.classTagOf(BatchHeapScanEquivalenceTest.class) >= 0;
+	}
+
+	private static void assertNoClassTags(Class<?>[] classes, String afterWhat) {
+		StringBuilder dirty = new StringBuilder();
+		for (Class<?> clazz : classes) {
+			long tag = LibTool.classTagOf(clazz);
+			assertTrue(tag >= 0, "class tag query must be available in this build (class " + clazz.getName() + ")");
+			if (tag != 0) dirty.append(clazz.getSimpleName()).append('=').append(tag).append(' ');
+		}
+		assertTrue(dirty.length() == 0,
+			"class tags must be cleared after " + afterWhat + ", but these still carry one: " + dirty);
+	}
+
+	/** Loader that is only used to define throw-away probe types. */
+	private static final class ComboLoader extends ClassLoader {
+		ComboLoader(ClassLoader parent) {
+			super(parent);
+		}
+
+		Class<?> define(String binaryName, byte[] bytes) {
+			return defineClass(binaryName, bytes, 0, bytes.length);
+		}
+	}
+
+	private static Class<?> generateInterface(ClassLoader loader, String simpleName) {
+		String binaryName = BatchHeapScanEquivalenceTest.class.getName() + "$" + simpleName;
+		ClassWriter cw = new ClassWriter(0);
+		cw.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC | Opcodes.ACC_ABSTRACT | Opcodes.ACC_INTERFACE,
+			binaryName.replace('.', '/'), null, "java/lang/Object", null);
+		cw.visitEnd();
+		return ((ComboLoader) loader).define(binaryName, cw.toByteArray());
+	}
+
+	/**
+	 * Generates {@code count} classes, class #i implementing a distinct subset of {@code ifaces}
+	 * (the subset is the low bits of {@code i + 1}), each with a public no-arg constructor.
+	 */
+	private static List<Class<?>> generateComboClasses(ComboLoader loader, Class<?>[] ifaces, int count) {
+		List<Class<?>> out = new ArrayList<>();
+		for (int m = 1; m <= count; m++) {
+			List<String> implemented = new ArrayList<>();
+			for (int i = 0; i < ifaces.length; i++) {
+				if ((m & (1 << i)) != 0) implemented.add(ifaces[i].getName().replace('.', '/'));
+			}
+			String binaryName = BatchHeapScanEquivalenceTest.class.getName() + "$Combo" + m;
+			ClassWriter cw = new ClassWriter(0);
+			cw.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, binaryName.replace('.', '/'), null,
+				"java/lang/Object", implemented.toArray(new String[0]));
+			MethodVisitor ctor = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+			ctor.visitCode();
+			ctor.visitVarInsn(Opcodes.ALOAD, 0);
+			ctor.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+			ctor.visitInsn(Opcodes.RETURN);
+			ctor.visitMaxs(1, 1);
+			ctor.visitEnd();
+			cw.visitEnd();
+			out.add(loader.define(binaryName, cw.toByteArray()));
+		}
+		return out;
 	}
 }

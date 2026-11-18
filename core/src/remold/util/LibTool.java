@@ -214,7 +214,17 @@ public class LibTool {
 	private static native int nEnumBucketCount(long count);
 	private static native int nEnumBucketWindow();
 	private static native Object[][] nGetInstancesBatch(Class<?>[] targets, long[] timingsOut);
-	private static native long nHasLiveInstancesBatch(Class<?>[] targets);
+	/**
+	 * 批次存活探测：返回 JVMTI 状态码（{@code 0} 表示成功），每个 target 的结论写进 {@code aliveOut}。
+	 *
+	 * <p>不用「返回位图 + 负数当错误」的旧签名：K = 64 且第 64 个类存活时位图恰好是 {@code -1}，
+	 * 与错误哨兵撞车，一次成功的遍历会被读成失败。</p>
+	 */
+	private static native int nHasLiveInstancesBatchBits(Class<?>[] targets, boolean[] aliveOut);
+	/** 诊断：读取某个类的 JVMTI tag；不可用或失败返回 {@code -1}。产品路径不调用。 */
+	private static native long nClassTagOf(Class<?> target);
+	/** 诊断：堆上仍带非零 tag 的对象总数（含类镜像）；不可用或失败返回 {@code -1}。产品路径不调用。 */
+	private static native long nTaggedObjectCount();
 	private static native long nHeapWalkCount();
 	private static volatile boolean enumPlanSupported = true;
 
@@ -231,11 +241,12 @@ public class LibTool {
 	public static final int BATCH_TARGET_LIMIT = 16;
 
 	/**
-	 * 存在性探测（{@link #hasLiveInstancesBatch}）的单次 target 上限，可大于
-	 * {@link #BATCH_TARGET_LIMIT}：存在性探测只置位掩码、**不产生对象 tag 槽位**，不受
-	 * 「检索 tag 数」预算约束，所以一次遍历可以覆盖到 native 的 target 上限（64）。
+	 * 存在性探测（{@link #hasLiveInstancesBatch}）的单次 target 上限，可远大于
+	 * {@link #BATCH_TARGET_LIMIT}：存在性探测只置位、**不产生对象 tag 槽位**，不受
+	 * 「检索 tag 数」预算约束；native 侧的位集合按 64 位字动态扩容，K 不受"单个 64 位整数"限制。
+	 * 超过本上限由 Java 侧分块（每块一次全堆遍历）。
 	 */
-	public static final int BATCH_LIVENESS_TARGET_LIMIT = 64;
+	public static final int BATCH_LIVENESS_TARGET_LIMIT = 1024;
 
 	/** 新 native 库（含批次入口）是否可用；旧库缺导出符号时置 false 并整体退回逐类路径。 */
 	private static volatile boolean batchScanSupported = true;
@@ -460,16 +471,16 @@ public class LibTool {
 				for (int start = 0; start < canonical.length; start += BATCH_LIVENESS_TARGET_LIMIT) {
 					int n = Math.min(BATCH_LIVENESS_TARGET_LIMIT, canonical.length - start);
 					Class<?>[] chunk = Arrays.copyOfRange(canonical, start, start + n);
-					long mask = nHasLiveInstancesBatch(chunk);
-					if (mask < 0) {
+					boolean[] alive = new boolean[n];
+					int status = nHasLiveInstancesBatchBits(chunk, alive);
+					if (status != 0) {
 						done = false;
 						break;
 					}
-					for (int i = 0; i < n; i++) {
-						out[start + i] = (mask & (1L << i)) != 0L;
-					}
+					System.arraycopy(alive, 0, out, start, n);
 				}
 			} catch (UnsatisfiedLinkError e) {
+				// 旧 native 库没有该导出符号：整体退回逐类路径（结果相同，遍历次数回到 K 次）。
 				batchScanSupported = false;
 				done = false;
 			}
@@ -480,6 +491,37 @@ public class LibTool {
 			out[i] = hasLiveInstance(canonical[i]);
 		}
 		return out;
+	}
+
+	/**
+	 * 诊断：读取某个类的 JVMTI tag。
+	 *
+	 * <p>存在的理由是「类 tag 生命周期」这条不变量只能在 JVMTI 侧观察：批扫描返回后，命中目标类与
+	 * 其子类的 tag 必须归零。只看返回结果集抓不住"tag 没清干净"的缺陷——脏 tag 的影响出现在
+	 * <b>下一轮</b>遍历里，表现为静默错配而不是异常。旧 native 库/无 JVMTI 环境返回 {@code -1}。</p>
+	 */
+	public synchronized static long classTagOf(Class<?> target) {
+		if (!initialized) init();
+		try {
+			return nClassTagOf(target);
+		} catch (UnsatisfiedLinkError e) {
+			return -1L;
+		}
+	}
+
+	/**
+	 * 诊断：堆上仍带非零 tag 的对象总数（类镜像也是对象，所以类 tag 泄漏同样计入）。
+	 *
+	 * <p>断言口径是「零残留」：overflows、遍历失败、取回失败等异常路径返回后都不允许留下本轮写下的
+	 * 搜索 tag。旧 native 库/无 JVMTI 环境返回 {@code -1}。</p>
+	 */
+	public synchronized static long taggedObjectCount() {
+		if (!initialized) init();
+		try {
+			return nTaggedObjectCount();
+		} catch (UnsatisfiedLinkError e) {
+			return -1L;
+		}
 	}
 
 	private static void warnBatchFallbackOnce() {

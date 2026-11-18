@@ -144,10 +144,27 @@ Run R 的旧侧是"干净源码方法表"，但**避障池不是**：fresh 名�
 | 保留体 | 方法体首调 `onOrphanInvoked` 的 3 参形态（`(String,ZZ)V`） | `ghostHashes` 提供生前指纹 |
 | 捕获桥 | 方法体为"参数重排 + 单条委托调用"的适配形态 | `methodMapping` 提供目标重指向 |
 
-元数据最小集（Run R 的前提）：`jvmEffHash`（G1）、`preAlignHash`（G2）、`inventedNames`、
-`ghostHashes`、`methodMapping`、`generation`。**缺任一必需项即 Run E**；`bridgeCount` 只作读数，
-不参与判定。若实现选择扩充元数据（例如记录保留体键集合、`R_disk` 哈希），扩充字段必须可选：
-旧条目缺字段时仍能按上表枚举，不得因 schema 演进而拒绝整代。
+元数据最小集（Run R 的前提）：`jvmEffHash`（G1）、`preAlignHash`（G2）、`rawPrevBytes`（`R_prev`
+本体）、`inventedNames`、`ghostHashes`、`methodMapping`、`generation`。**缺任一必需项即 Run E**；
+`bridgeCount` 只作读数，不参与判定。若实现选择扩充元数据（例如记录保留体键集合、`R_disk` 哈希），
+扩充字段必须可选：旧条目缺字段时仍能按上表枚举，不得因 schema 演进而拒绝整代。
+
+`rawPrevBytes` 是唯一以字节形态进入元数据的字段（配对基线 `R_prev` 必须是真实字节，哈希无法复原
+方法体），因此它必须有显式预算，且预算压力下的降级方向是**丢字节保哈希**：
+
+- 全局字节预算 `-Dremold.vcs.meta_blob_bytes`（默认 16 MiB）+ 每类上限（默认 256 KiB）；
+- 超出预算 → 该代 `rawPrevBytes` 置空、`preAlignHash` 与其余度量照存，次轮该类走 **Run E**，
+  `runRGate = NO_RAW_PREV`，并每类记一条 warn（降级必须可观测，不得静默切树）；
+- blob 字节必须与 `preAlignHash` 自洽：读回时校验 SHA-256，不符即按 `NO_RAW_PREV` 处理（防止
+  外部改坏的内存/缓存残片被当作配对基线）。
+
+指纹层级（三层，不得混用）：
+
+| 用途 | 指纹 | 说明 |
+|:--|:--|:--|
+| G1 代际身份 | SHA-256(`E_prev_used`)，与 `jvmEffHash`/`alignOutputHash` 任一相等 | 问的是"这条元数据是不是我这一代的 E_prev"，只能比 `E_prev` 自己的指纹 |
+| G2 树身份 / blob 完整性 | SHA-256(`preAlign`) | 认的是 Raw 代；用它当 G1 会让次轮永远取不到条目 |
+| 快速预筛 | 32 位 `Arrays.hashCode` | **只允许**做过滤，不得作为任何树键（§2.2） |
 
 ## 6. 回退与 fail-closed 规则
 

@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **PR3：活的 lambda 对齐改走 `R_prev ↔ R_new`（Run R），`Eff_prev` 降级为继承来源**
+  （`LambdaAligner`、`AlignmentMetaStore`、`RemoldAgent`）：活体路径不再拿被幽灵桩 / 捕获桥 /
+  避障自造名污染的上一轮生效字节去配对，配对基线改为元数据里保留的 Raw_prev 字节；幽灵桩、保留体、
+  捕获桥仍从 `E_prev` 字节枚举（`OrphanBodyRetention` 存活重验与 `BRIDGE_REPOINT` 目标重指向不变），
+  命名池取「Raw 侧 + Eff 侧 + Meta 三源并集」。
+  - `AlignmentMetaStore` 每代保留 `rawPrevBytes`（预算 `-Dremold.vcs.meta_blob_bytes`，默认 16 MiB
+    全局 + 每类 256 KiB；超预算丢字节保哈希 → 次轮该类 fail-closed 走 Run E 并 `runRGate=NO_RAW_PREV`），
+    匹配改用 SHA-256：`E_prev` 指纹定代际身份（G1），`preAlign` 指纹定树身份与 blob 完整性（G2），
+    32 位 `Arrays.hashCode` 降级为预筛。
+  - 三道整类准入闸门（G1 代际身份 / G2 源码侧配对 / G3 继承集可枚举）任一不过即整类回退 Run E，
+    禁止部分继承、禁止用近邻代顶替。
+  - `AlignmentResult` 新增诊断读数 `baselineTree`（`RAW_PREV` / `EFF_FALLBACK` / `NONE`）、
+    `runRGate`（`PASSED` / `META_OFF` / `NO_ENTRY` / `NO_RAW_PREV` / `RAW_PREV_MISMATCH` /
+    `TRANSLATION_INCOMPLETE` / `EFF_UNREADABLE`）、`positionalFallbacks`、`rawToEffKeys`；
+    store 侧 `blobBytes()` / `droppedBlobCount()`。读数不参与产物，只作可断言判据。
+  - 修掉活体路径的 loader 缺失：`RemoldAgent` 调 `LambdaAligner.align` 的 5 参重载未传 loader，
+    导致 `AlignmentMetaStore.headMatching` 只命中 bootstrap 槽（开关打开也永远取不到元数据）。
+  - 规格：`docs/topology/18-live-raw-to-raw-alignment.md` 新增（双跑道、闸门、继承集枚举、指纹分层），
+    `docs/topology/16-bytecode-changeset-vcs.md` §2.5 修掉「永不用 Raw 当 oldBytes」与「活体路径是
+    Raw↔Raw」自相矛盾。
+
+
 - **按 blob 内容寻址的派生数据缓存（PR2）**：新增 `remold.vcs.DerivedDataCache`
   （键 `(kind, SHA-256(blob))`，双预算 LRU；值必须不可变且不得持有 `Class`/`ClassLoader`/`ClassNode`；
   提供 `-Dremold.vcs.derived_cache`（默认 `true`）与 `-Dremold.vcs.derived_cache_entries` /

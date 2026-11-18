@@ -65,6 +65,13 @@ public final class Pr3CommitScalingProbe {
 	private static final double SLOPE_THRESHOLD_US_PER_1000 = 5.0;
 	/** 低预算档的字节预算。 */
 	private static final long LOW_BUDGET_BYTES = 65536L;
+	/**
+	 * 每档每轮结束时做双账校验（{@code -Dpr3.commitScaling.verifyCounters}，默认开）：
+	 * 增量计数器与"重算真值"不等就抛。关掉只用于把耗时压到最纯（校验本身是 O(entries) 扫描，
+	 * 不计入计时样本，但它会在档间制造额外的内存/GC 噪声）。
+	 */
+	private static final boolean VERIFY_COUNTERS =
+		Boolean.parseBoolean(System.getProperty("pr3.commitScaling.verifyCounters", "true"));
 
 	private Pr3CommitScalingProbe() { }
 
@@ -76,6 +83,7 @@ public final class Pr3CommitScalingProbe {
 			+ " blobBudget=" + AlignmentMetaStore.BLOB_BUDGET_BYTES + "B perClassCap="
 			+ AlignmentMetaStore.PER_CLASS_BLOB_BYTES + "B entryBytes=" + ENTRY_BYTES + "B"
 			+ " sizes=" + Arrays.toString(SIZES) + " warmupRounds=" + WARMUP
+			+ " verifyCounters=" + VERIFY_COUNTERS
 			+ " loadavg=" + loadAverage());
 
 		if (!"default".equals(mode)) {
@@ -140,6 +148,7 @@ public final class Pr3CommitScalingProbe {
 						invented(), ghosts(), mapping(), 1, rawToEff());
 					store.head(loader, tag + "/C" + (size / 2));
 				}
+				if (VERIFY_COUNTERS) store.assertCountersConsistent();
 			}
 		}
 		out.println("[warmup] " + WARMUP + " discarded rounds per tier over " + Arrays.toString(SIZES)
@@ -194,6 +203,8 @@ public final class Pr3CommitScalingProbe {
 				if (hit == null) throw new IllegalStateException(tag + ": the O(1) control lookup must hit an"
 					+ " existing entry, got null for " + probeName);
 			}
+			// 双账校验：增量计数器必须等于重算真值（每轮一次，不在计时样本内）。
+			if (VERIFY_COUNTERS) store.assertCountersConsistent();
 			// 反空转：追加的样本必须真的进了仓，且没有被全局历史预算淘汰。
 			requireHead(store, size + SAMPLES, tag, round);
 			requireHistory(store, size + SAMPLES, tag, round);

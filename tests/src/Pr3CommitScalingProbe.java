@@ -53,6 +53,8 @@ public final class Pr3CommitScalingProbe {
 	private static final int[] SIZES = parseSizes(System.getProperty("pr3.sizes", "50,200,1000,2000"));
 	/** 每条 entry 的 blob 体积（{@code -Dpr3.entryBytes=...} 可覆盖，用于把"分配/GC"与"全表遍历"分开）。 */
 	private static final int ENTRY_BYTES = Integer.getInteger("pr3.entryBytes", 4096);
+	/** 每档的丢弃式预热轮数（{@code -Dpr3.commitScaling.warmup}，默认 3；0 = 不预热）。 */
+	private static final int WARMUP = Integer.getInteger("pr3.commitScaling.warmup", 3);
 	/** 主矩阵每档轮数（≥5）。 */
 	private static final int ROUNDS = Integer.getInteger("pr3.rounds", 7);
 	/** 消融子进程每档轮数：只用来定位增量落在哪个环节，不进斜率判定。 */
@@ -73,7 +75,8 @@ public final class Pr3CommitScalingProbe {
 			+ " cpus=" + Runtime.getRuntime().availableProcessors()
 			+ " blobBudget=" + AlignmentMetaStore.BLOB_BUDGET_BYTES + "B perClassCap="
 			+ AlignmentMetaStore.PER_CLASS_BLOB_BYTES + "B entryBytes=" + ENTRY_BYTES + "B"
-			+ " sizes=" + Arrays.toString(SIZES) + " loadavg=" + loadAverage());
+			+ " sizes=" + Arrays.toString(SIZES) + " warmupRounds=" + WARMUP
+			+ " loadavg=" + loadAverage());
 
 		if (!"default".equals(mode)) {
 			runAblationTier(mode);
@@ -111,33 +114,36 @@ public final class Pr3CommitScalingProbe {
 	// 主矩阵：升序 + 降序（每档同时计 commit 与 O(1) 对照 head）
 	// ------------------------------------------------------------------------------------------------
 
+	/**
+	 * 丢弃式预热：**每一档**先跑 {@link #WARMUP} 轮完整流程（reset → 堆到该档 → 追加样本 → O(1) 对照），
+	 * 不入账。条目数越大，commit 路径里的 O(entries) 代码被调用得越多、编译/内联越晚，所以预热必须按档做，
+	 * 而不是只在小档上跑几遍（实测：只在小档预热时，2000 档的第一轮会把 C2 编译时间算进去）。
+	 *
+	 * <p>{@code -Dpr3.commitScaling.warmup=<n>} 控制轮数，默认 3；{@code 0} 表示不预热（只看冷启动形态）。</p>
+	 */
 	private static void warmUp() {
-		// JIT 预热：同一代码路径（reset + 堆 200 条 + 追加 20 条 + 20 次 head）跑 3 遍，不入账。
+		if (WARMUP <= 0) {
+			out.println("[warmup] skipped (-Dpr3.commitScaling.warmup=" + WARMUP + ")");
+			return;
+		}
+		long t0 = System.nanoTime();
 		AlignmentMetaStore store = AlignmentMetaStore.INSTANCE;
 		byte[] blob = blob();
-		for (int rep = 0; rep < 3; rep++) {
-			store.reset();
-			ClassLoader loader = newLoader();
-			build(store, loader, blob, "warm" + rep, 0, 200);
-			for (int i = 0; i < 20; i++) {
-				store.commit(loader, "warm" + rep + "/s" + i, blob, blob, blob,
-					invented(), ghosts(), mapping(), 1, rawToEff());
-				store.head(loader, "warm" + rep + "/C" + (i * 7 % 200));
-			}
-		}
-		// 再对每一档各做一遍不记账的完整流程：大档的 O(N) 路径与哈希/拷贝代码路径都要先编译到 C2，
-		// 否则第一遍测量会把 JIT 编译时间算进小档（实测：无预热时 50 档中位数比预热后高 3-4 倍）。
 		for (int size : SIZES) {
-			store.reset();
-			ClassLoader loader = newLoader();
-			build(store, loader, blob, "warmSweep" + size, 0, size);
-			for (int i = 0; i < 20; i++) {
-				store.commit(loader, "warmSweep" + size + "-s" + i, blob, blob, blob,
-					invented(), ghosts(), mapping(), 1, rawToEff());
+			for (int rep = 0; rep < WARMUP; rep++) {
+				ClassLoader loader = newLoader();
+				store.reset();
+				String tag = "warm-" + size + "-" + rep;
+				build(store, loader, blob, tag, 0, size);
+				for (int i = 0; i < SAMPLES; i++) {
+					store.commit(loader, tag + "-s" + i, blob, blob, blob,
+						invented(), ghosts(), mapping(), 1, rawToEff());
+					store.head(loader, tag + "/C" + (size / 2));
+				}
 			}
 		}
-		out.println("[warmup] 3 rounds of 200 build/commit/head + one full untimed sweep over "
-			+ Arrays.toString(SIZES) + " done");
+		out.println("[warmup] " + WARMUP + " discarded rounds per tier over " + Arrays.toString(SIZES)
+			+ " done in " + ms(System.nanoTime() - t0) + "ms (-Dpr3.commitScaling.warmup)");
 	}
 
 	private static Map<Integer, Stats> runPass(boolean ascending, int rounds) {
@@ -247,9 +253,10 @@ public final class Pr3CommitScalingProbe {
 		double minDesc = slopeOf(descending, true);
 		double controlAsc = slopeOfControls(ascending);
 		double controlDesc = slopeOfControls(descending);
-		out.println("[slope] pass=asc leastSquares=" + fmt(slopeAsc) + "us/1000entries pairwise(200->2000)="
+		String pairLabel = "pairwise(" + lowTier() + "->" + SIZES[SIZES.length - 1] + ")";
+		out.println("[slope] pass=asc leastSquares=" + fmt(slopeAsc) + "us/1000entries " + pairLabel + "="
 			+ fmt(pairAsc) + "us/1000entries");
-		out.println("[slope] pass=desc leastSquares=" + fmt(slopeDesc) + "us/1000entries pairwise(200->2000)="
+		out.println("[slope] pass=desc leastSquares=" + fmt(slopeDesc) + "us/1000entries " + pairLabel + "="
 			+ fmt(pairDesc) + "us/1000entries");
 		out.println("[slope] min-statistic asc=" + fmt(minAsc) + "us/1000entries desc=" + fmt(minDesc)
 			+ "us/1000entries (min = least-interference sample of each tier)");
@@ -311,7 +318,7 @@ public final class Pr3CommitScalingProbe {
 
 	/** 两端点斜率（第二档 → 最后一档），与最小二乘互为口径校验。 */
 	private static double pairwiseSlope(Map<Integer, Stats> bySize) {
-		Stats lo = bySize.get(SIZES[1]);
+		Stats lo = bySize.get(lowTier());
 		Stats hi = bySize.get(SIZES[SIZES.length - 1]);
 		if (lo == null || hi == null) return 0;
 		return (hi.median - lo.median) / 1000.0 / ((hi.size - lo.size) / 1000.0);
@@ -330,6 +337,8 @@ public final class Pr3CommitScalingProbe {
 		cmd.add("-Dstdout.encoding=UTF-8");
 		cmd.add("-Dstderr.encoding=UTF-8");
 		cmd.add("-Dpr3.rounds=" + ABLATION_ROUNDS);
+		// 消融档只用 1 轮预热：它们定位"增量落在哪个环节"，不进斜率判定，省掉重复的冷启动成本。
+		cmd.add("-Dpr3.commitScaling.warmup=1");
 		if (blobBudget != null) cmd.add("-Dremold.vcs.meta_blob_bytes=" + blobBudget);
 		if (entryBytes != null) cmd.add("-Dpr3.entryBytes=" + entryBytes);
 		cmd.add("Pr3CommitScalingProbe");
@@ -414,7 +423,7 @@ public final class Pr3CommitScalingProbe {
 				+ us(stats.p90) + "us max=" + us(stats.max) + "us | head(O(1) control): median="
 				+ us(stats.controlMedian) + "us | gc=" + stats.gcCount + "/" + stats.gcMillis + "ms");
 		}
-		Stats lo = all.get(1);
+		Stats lo = all.get(lowTierIndex());
 		Stats hi = all.get(all.size() - 1);
 		double pair = (hi.median - lo.median) / 1000.0 / ((hi.size - lo.size) / 1000.0);
 		out.println("[tier] mode=" + mode + " entryBytes=" + ENTRY_BYTES + " blobBudget="
@@ -448,7 +457,7 @@ public final class Pr3CommitScalingProbe {
 	}
 
 	private static double pairOfControls(List<Stats> all) {
-		Stats lo = all.get(1);
+		Stats lo = all.get(lowTierIndex());
 		Stats hi = all.get(all.size() - 1);
 		return (hi.controlMedian - lo.controlMedian) / 1000.0 / ((hi.size - lo.size) / 1000.0);
 	}
@@ -456,6 +465,15 @@ public final class Pr3CommitScalingProbe {
 	// ------------------------------------------------------------------------------------------------
 	// 工具
 	// ------------------------------------------------------------------------------------------------
+
+	/** 两端点斜率的低端：默认取第二档（避开最小档的固定开销），档数不足时退回第一档。 */
+	private static int lowTier() {
+		return SIZES[lowTierIndex()];
+	}
+
+	private static int lowTierIndex() {
+		return SIZES.length < 3 ? 0 : 1;
+	}
 
 	private static int[] parseSizes(String spec) {
 		String[] parts = spec.split(",");

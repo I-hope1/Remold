@@ -1362,6 +1362,13 @@ tasks.register("derivedDataBench", JavaExec) {
 // 要的是本次运行的真实读数，跳过任务等于给假数据。**必须串行排他单跑**（跑之前不要有别的 Gradle /
 // 探针在跑），否则 min/median/p90 被抢 CPU 污染（AGENTS §9 第 4 条）。
 // 低预算档由探针自己 fork 子进程（-Dremold.vcs.meta_blob_bytes=65536）跑，见 Pr3CommitScalingProbe。
+// 用法（属性既可用 -P 也可用 -D 传，二者都会转发给 JavaExec 子进程）：
+//   bash gradlew :tests:pr3CommitScaling -Ppr3.commitScaling.warmup=5
+//   -Dpr3.commitScaling.warmup=<n>  每档丢弃式预热轮数（默认 3，0 = 不预热）
+//   -Dpr3.rounds=<n>                每档测量轮数（默认 7）
+//   -Dpr3.samples=<n>               每轮计时样本数（默认 15）
+//   -Dpr3.sizes=a,b,c               条目数档（默认 50,200,1000,2000）
+//   -Dpr3.entryBytes=<n>            每条 blob 体积（默认 4096）
 tasks.register("pr3CommitScaling", JavaExec) {
 	group = "verification"
 	description = "PR3 条目数微基准 (Pr3CommitScalingProbe)：50/200/1000/2000 条层级下单次 commit 的 min/median/p90/max 与 blob 预算水位"
@@ -1370,8 +1377,14 @@ tasks.register("pr3CommitScaling", JavaExec) {
 	mainClass = "Pr3CommitScalingProbe"
 	maxHeapSize = "1g"
 	doFirst {
-		jvmArgs "-Dremold.projectRoot=${rootDir.absolutePath}",
-		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+		def probeProps = ["pr3.commitScaling.warmup", "pr3.rounds", "pr3.samples", "pr3.sizes", "pr3.entryBytes"]
+		def forwarded = probeProps.collectMany { name ->
+			if (project.hasProperty(name)) return ["-D${name}=${project.property(name)}"]
+			def v = System.getProperty(name)
+			return v == null ? [] : ["-D${name}=${v}".toString()]
+		}
+		jvmArgs(["-Dremold.projectRoot=${rootDir.absolutePath}",
+		         "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"] + forwarded)
 	}
 }
 

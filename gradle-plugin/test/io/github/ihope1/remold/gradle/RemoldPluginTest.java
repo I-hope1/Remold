@@ -63,9 +63,9 @@ class RemoldPluginTest {
         ext.setDebug(true);
         ext.setDebugPort(5006);
 
-        // Create dummy agent jar locally to satisfy resolution without remote download
-        File dummyAgent = new File(tempDir, "remold-agent.jar");
-        Files.write(dummyAgent.toPath(), new byte[2048]);
+        // Local agent jar with the current shape (trampoline entry point + the API the plugin uses):
+        // resolution verifies the structure, so a manifest-less stub would now be rejected.
+        File dummyAgent = TestAgentJars.current(tempDir, "0.2.1", "remold-agent.jar");
 
         RemoldConfigResolver resolver = new RemoldConfigResolver();
         RemoldResolvedConfig conf = resolver.resolve(project, ext);
@@ -105,7 +105,7 @@ class RemoldPluginTest {
         project.getPluginManager().apply("java");
 
         File dummyAgent = new File(tempDir, "agent.jar");
-        Files.write(dummyAgent.toPath(), new byte[2048]);
+        TestAgentJars.write(tempDir, "remold-agent.jar", "0.2.8", RemoldAgentJarCheck.EXPECTED_ENTRY_CLASS, true);
 
         RemoldResolvedConfig conf = new RemoldResolvedConfig(
                 "com.example.App",
@@ -151,7 +151,7 @@ class RemoldPluginTest {
         Files.writeString(clientXml.toPath(), existingXml);
 
         File dummyAgent = new File(tempDir, "agent.jar");
-        Files.write(dummyAgent.toPath(), new byte[2048]);
+        TestAgentJars.write(tempDir, "remold-agent.jar", "0.2.8", RemoldAgentJarCheck.EXPECTED_ENTRY_CLASS, true);
 
         RemoldResolvedConfig conf = new RemoldResolvedConfig(
                 "net.fabricmc.devlaunchinjector.Main",
@@ -280,7 +280,7 @@ class RemoldPluginTest {
                 + "</component>\n");
 
         File agent = new File(tempDir, "remold-agent.jar");
-        Files.write(agent.toPath(), new byte[2048]);
+        TestAgentJars.write(tempDir, "remold-agent.jar", "0.2.8", RemoldAgentJarCheck.EXPECTED_ENTRY_CLASS, true);
         RemoldResolvedConfig conf = resolvedConfig(agent, project, Arrays.asList(
                 "-javaagent:" + agent.getAbsolutePath() + "=" + tempDir.getAbsolutePath(),
                 "-Dremold.plugins=mixin",
@@ -312,7 +312,7 @@ class RemoldPluginTest {
                 + "</component>\n");
 
         File agent = new File(tempDir, "remold-agent.jar");
-        Files.write(agent.toPath(), new byte[2048]);
+        TestAgentJars.write(tempDir, "remold-agent.jar", "0.2.8", RemoldAgentJarCheck.EXPECTED_ENTRY_CLASS, true);
         RemoldResolvedConfig conf = resolvedConfig(agent, project, Arrays.asList(
                 "-javaagent:" + agent.getAbsolutePath() + "=" + tempDir.getAbsolutePath(),
                 "-Dremold.plugins=mixin"));
@@ -336,7 +336,7 @@ class RemoldPluginTest {
 
         RemoldExtension ext = (RemoldExtension) project.getExtensions().getByName("remold");
         File dummyAgent = new File(tempDir, "remold-agent.jar");
-        Files.write(dummyAgent.toPath(), new byte[2048]);
+        TestAgentJars.write(tempDir, "remold-agent.jar", "0.2.8", RemoldAgentJarCheck.EXPECTED_ENTRY_CLASS, true);
 
         RemoldConfigResolver resolver = new RemoldConfigResolver();
         Assertions.assertThrows(GradleException.class, () -> resolver.resolve(project, ext),
@@ -358,7 +358,7 @@ class RemoldPluginTest {
 
         RemoldExtension ext = (RemoldExtension) project.getExtensions().getByName("remold");
         File dummyAgent = new File(tempDir, "remold-agent.jar");
-        Files.write(dummyAgent.toPath(), new byte[2048]);
+        TestAgentJars.write(tempDir, "remold-agent.jar", "0.2.8", RemoldAgentJarCheck.EXPECTED_ENTRY_CLASS, true);
 
         JavaExec customRun = project.getTasks().create("customRun", JavaExec.class);
         Test testTask = (Test) project.getTasks().getByName("test");
@@ -442,7 +442,7 @@ class RemoldPluginTest {
     @org.junit.jupiter.api.Test
     void autoMcToastIncludedForMinecraftProjectsAndCanBeDisabled() throws Exception {
         File dummyAgent = new File(tempDir, "remold-agent.jar");
-        Files.write(dummyAgent.toPath(), new byte[2048]);
+        TestAgentJars.write(tempDir, "remold-agent.jar", "0.2.8", RemoldAgentJarCheck.EXPECTED_ENTRY_CLASS, true);
 
         Project fabricProject = ProjectBuilder.builder().withProjectDir(tempDir).build();
         fabricProject.getPluginManager().apply("java");
@@ -473,7 +473,7 @@ class RemoldPluginTest {
     @org.junit.jupiter.api.Test
     void agentPropertyOptionsForwardDslAndProjectPropertiesAndOmitDefaults() throws Exception {
         File dummyAgent = new File(tempDir, "remold-agent.jar");
-        Files.write(dummyAgent.toPath(), new byte[2048]);
+        TestAgentJars.write(tempDir, "remold-agent.jar", "0.2.8", RemoldAgentJarCheck.EXPECTED_ENTRY_CLASS, true);
 
         Project defaultProject = ProjectBuilder.builder().withProjectDir(tempDir).build();
         defaultProject.getPluginManager().apply("java");
@@ -600,7 +600,7 @@ class RemoldPluginTest {
 
     private RemoldResolvedConfig resolvedConfig(Project project, List<String> jvmArgs) throws Exception {
         File agent = new File(tempDir, "remold-agent.jar");
-        Files.write(agent.toPath(), new byte[2048]);
+        TestAgentJars.write(tempDir, "remold-agent.jar", "0.2.8", RemoldAgentJarCheck.EXPECTED_ENTRY_CLASS, true);
         return resolvedConfig(agent, project, jvmArgs);
     }
 

@@ -375,10 +375,10 @@
 
 | 机制 / 条目 | 状态 | 规范章节 | 落地位置 | 验收证据与决策依据 |
 |:---|:---:|:---|:---|:---|
-| 活体对齐改走 `R_prev ↔ R_new`（Run R），`Eff_prev` 降级为继承来源 | 🔶 | §2 / §3.2 | `LambdaAligner.align`（Run R 接线）、`AlignmentResult.baselineTree` / `runRGate` | 开关默认关（`-Dremold.poc.meta_source=false`），需与 `remold.vcs.enabled=true` 同时打开；关时行为与旧路径等价 |
-| Raw_prev 字节保管与预算降级（16 MiB 全局 / 每类 256 KiB，超预算丢字节保哈希） | 🔶 | §5 | `AlignmentMetaStore`（`rawPrevBytes`、`blobBytes()`、`droppedBlobCount()`） | 降级后 `runRGate=NO_RAW_PREV` + 每类一条 warn，整类回退 Run E（fail-closed） |
-| 三道整类准入闸门（G1 代际身份 / G2 源码侧配对 / G3 继承集可枚举） | 🔶 | §3.2 | `LambdaAligner`（`RunRGate` 七档读数） | 任一不过即整类回退，禁止部分继承与近邻代顶替 |
-| 幽灵桩 / 保留体 / 捕获桥从 `E_prev` 继承（含 `BRIDGE_REPOINT` 目标重指向与命名池占位） | 🔶 | §5 | `LambdaAligner` 继承集枚举 + `OrphanBodyRetention` | `Pr3RawAlignmentScenarioTest`（Ctrl+Z 幽灵继承、桥转发桩）；变异：继承集不从 `E_prev` 枚举 → 两例红 |
+| 活体对齐改走 `R_prev ↔ R_new`（Run R），`Eff_prev` 降级为继承来源 | ✅ | §2 / §3.2 | `LambdaAligner.align`（Run R 接线）、`AlignmentResult.baselineTree` / `runRGate` | 默认开启；急停 `-Dremold.agent.lambda_raw_alignment=false`（兼容旧 `-Dremold.poc.meta_source`）一条命令回到旧路径；元数据缺失/闸门不过时按类回退 Run E |
+| Raw_prev 字节保管与预算降级（16 MiB 全局 / 每类 256 KiB，超预算丢字节保哈希） | ✅ | §5 | `AlignmentMetaStore`（`rawPrevBytes`、`blobBytes()`、`droppedBlobCount()`） | 降级后 `runRGate=NO_RAW_PREV` + 每类一条 warn，整类回退 Run E（fail-closed） |
+| 三道整类准入闸门（G1 代际身份 / G2 源码侧配对 / G3 继承集可枚举） | ✅ | §3.2 | `LambdaAligner`（`RunRGate` 七档读数） | 任一不过即整类回退，禁止部分继承与近邻代顶替 |
+| 幽灵桩 / 保留体 / 捕获桥从 `E_prev` 继承（含 `BRIDGE_REPOINT` 目标重指向与命名池占位） | ✅ | §5 | `LambdaAligner` 继承集枚举 + `OrphanBodyRetention` | `Pr3RawAlignmentScenarioTest`（Ctrl+Z 幽灵继承、桥转发桩）；变异：继承集不从 `E_prev` 枚举 → 两例红 |
 | 活体路径 loader 传递（`headMatching` 命中正确 loader 槽） | ✅ | §2.3 | `RemoldAgent` → `LambdaAligner.align(…, loader)` | 缺 loader 时元数据永远取不到（只命中 bootstrap 槽），属 PR3 前置缺陷 |
 
 ---

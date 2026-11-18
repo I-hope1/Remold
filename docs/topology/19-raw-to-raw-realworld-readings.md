@@ -13,7 +13,7 @@
 |:--|:--|
 | 代码版本 | `main @ a6ad2c8`（PR3 合流后） |
 | 语料 | 本仓库五个模块的真实编译产物：`old` = `c998f3f` 的 `core/plugin-mixin/plugin-forge/plugin-arc/api` build/classes（415 类），`new` = `a6ad2c8` 同五模块（417 类）；按内部名稳定排序取前 **400** 类 |
-| 开关 | `-Dremold.vcs.enabled=true` 与 `-Dremold.poc.meta_source=true` 双开（Run R 总闸） |
+| 开关 | 取数时 Run R 由 `-Dremold.poc.meta_source=true` 显式打开（当时默认关）；转正后默认开启，急停为 `-Dremold.agent.lambda_raw_alignment=false` |
 | 执行方式 | Lead 串行单刷（不与任何构建/探针并发），单进程 |
 | 统计量 | 计数类读数逐项一致（可复跑）；耗时报 min / median / p90 / max + 总计 |
 
@@ -82,6 +82,20 @@
 即"`align()` 之后又被 `InitFix`/织入改写"的形态没有进入读数。该缺口只影响 G1 采信到哪一路哈希，
 不影响"归一化是否导致回退"这个结论（`preAlign` 与 `jvmEff` 的先后关系在两个模型里都已覆盖）。
 
+## 4.2 闸门失败码的精确语义（两处观测的合并解释）
+
+本文件 §2 的对照档（反射污染 blob）判出 `RAW_PREV_MISMATCH`，而 G1 双哈希夹具里"两路哈希都不等于旧侧"却判 `NO_ENTRY`。
+两者不冲突，它们对应**两道不同的判据**，合起来给出闸门失败码的精确语义：
+
+| 观测 | 手段 | 读数 | 对应判据 |
+|:--|:--|:--|:--|
+| 条目在，但 blob / 类名复核不过 | 反射写入伪造 blob | `RAW_PREV_MISMATCH` | **G2**（源码侧配对与完整性复核） |
+| 条目根本取不到（代际身份不成立） | 把 `alignOutput` 与 `jvmEffective` 都换成第三份字节 | `NO_ENTRY` | **G1**（`headMatching` 内部的 SHA-256 精判即代际身份判据本身） |
+
+也就是说：`RAW_PREV_MISMATCH` 只表示"元数据里确实有这个类的条目、但它的 blob 或类名与本次旧侧对不上"；
+"代际身份不成立"在 `align()` 这条路上表现为 `NO_ENTRY`，因为 `headMatching` 与闸门用的是同一份 SHA-256 判据。
+两档都是 fail-closed（整类回退 Run E），只是失败码不同——按失败码排障时不要把它们混为一谈。
+
 ## 5. 盲区（探针测不到，不得据此下结论）
 
 1. **单轮模型**：`E_prev` 里没有上一轮注入的幽灵桩 / 保留体 / 捕获桥，因此"见证缺失导致额外兜底"这一项
@@ -93,3 +107,19 @@
 6. 探针对**每个类**都 `commit` + `align`，而生产只在 `hasPotentialLambdas` 时对齐；因此
    `TRANSLATION_INCOMPLETE` 的真实频率应低于本文件的 87.5%（该 87.5% 主要由"没有本地 lambda 槽位"的类贡献，
    这类类在生产里根本不会进入对齐）。
+
+## 6. 环境可行性侦察（两套模版 + 无头多轮重定义）
+
+本节记录"Run R 能否在真实工程里跑"的**环境前提**，回答的是可执行性问题，不是机制读数。
+
+| 对象 | 结论 | 关键事实 |
+|:--|:--|:--|
+| Mindustry 模版构建 | 可构建 | `mindustry-mod-template/build.gradle.kts` 含 `id("io.github.i-hope1.remold")`；产物 `example-java-modDesktop.jar`（5,146 B） |
+| Mindustry 离线构建 | 可，但需预热缓存 | 冷缓存 `--offline` 报 `No cached version of Anuken:Mindustry:v160.5 available for offline mode`；联网解析一次后冷态离线可用 |
+| Mindustry 真机 | 不可（`BLOCKED(headless)`） | jar 内只有 `mindustry.desktop.DesktopLauncher`，无 `ServerLauncher`；本机 aarch64 + `DISPLAY` 空 + 无 Xvfb |
+| Fabric Loom 模版 | 全绿离线 | `help` 59 s、`compileJava` 5.2 s、`remapJar` 12.2 s（`example_mod-1.0.0.jar`，8,848 B）；Loom 缓存含 client/server/merged jar 与 yarn `1.21.1+build.3`；缺的只是 sources，不阻塞 |
+| `runServer` 任务图 | 可离线解析 | `--dry-run` 通过，含 `generateDLIConfig` / `configureLaunch`；Remold 已给 runClient / runServer 注入 agent 参数 |
+| 无头多轮重定义 | 链路成立 | DCEVM 仅 `/opt/idea/jbr`（JBR-21.0.8，`-XX:+AllowEnhancedClassRedefinition` 实测可用）；本机其它 JDK 全部 `Unrecognized VM option`；agent 在 `DISPLAY=""` 下 premain 正常并打印 `Structural HotSwap Supported: true` |
+
+由此确定的取证分层：**真机门禁用 Fabric `runServer`**（无头、离线、可重复，`JAVA_HOME=/opt/idea/jbr`，首启写 `run/eula.txt`），
+**全量多轮压测与闸门分布用后置字节码夹具**（覆盖率高、无图形/映射依赖、可跑几十轮）；Mindustry 只保留"可构建"证据。

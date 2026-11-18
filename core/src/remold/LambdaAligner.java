@@ -126,13 +126,33 @@ import java.util.function.Supplier;
 public class LambdaAligner {
 
 	/**
-	 * PoC 开关：对齐期以 {@link AlignmentMetaStore} 的逐代元数据为准（幽灵生前指纹 / 自造名），
-	 * 元数据缺失时退回字节码里的 {@code LDC <long>; POP2} 标记。
+	 * 活体对齐的基线选择开关（Run R / Run E），**默认开启**。
 	 *
-	 * <p>默认关闭 = 现有的"读字节"路径；打开后调用方不必再传 {@code inventedOldNames}，
-	 * 也不再依赖桩体标记读出幽灵指纹。</p>
+	 * <p>开启：对齐期以 {@link AlignmentMetaStore} 的逐代元数据为准，配对基线用上一代待对齐字节
+	 * （{@code R_prev}），幽灵桩 / 保留体 / 捕获桥仍从上一轮生效字节（{@code E_prev}）继承；
+	 * 元数据缺失或整类闸门不过时**整类**回退旧路径（{@code Run E}），不会部分继承。
+	 * 关闭：完全回到"拿上一轮生效字节当配对基线"的旧路径，行为与历史版本一致。</p>
+	 *
+	 * <p>属性优先级（越靠前越优先）：{@code -Dremold.agent.lambda_raw_alignment=false} 急停 →
+	 * 兼容旧 Property {@code -Dremold.poc.meta_source}=true|false → 默认 {@code true}。
+	 * 规格见 {@code docs/topology/18-live-raw-to-raw-alignment.md}。</p>
 	 */
-	public static volatile boolean META_SOURCE = Boolean.getBoolean("remold.poc.meta_source");
+	public static volatile boolean META_SOURCE = rawAlignmentDefault();
+
+	/**
+	 * 解析 {@link #META_SOURCE} 的默认值。
+	 *
+	 * <p>急停开关 {@code remold.agent.lambda_raw_alignment=false} 必须**先于**旧 Property 判定：
+	 * 转正后若有人在旧文档里照抄 {@code -Dremold.poc.meta_source=true}，急停仍要生效——
+	 * 否则"一条命令关掉"的承诺就不成立。</p>
+	 */
+	private static boolean rawAlignmentDefault() {
+		String emergency = System.getProperty("remold.agent.lambda_raw_alignment");
+		if (emergency != null) return !"false".equalsIgnoreCase(emergency.trim());
+		String legacy = System.getProperty("remold.poc.meta_source");
+		if (legacy != null) return Boolean.parseBoolean(legacy.trim());
+		return true;
+	}
 
 	static {
 		// 兼容口：不显式传 Raw→Eff 键映射的旧 9 参 AlignmentMetaStore.commit 调用方

@@ -81,6 +81,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Run R（活体 `Raw_prev ↔ Raw_new` 对齐）转正为默认启用**（`LambdaAligner.META_SOURCE`）：
+  去掉了 `poc` 前缀的语义负担，配套急停开关 `-Dremold.agent.lambda_raw_alignment=false`；
+  判定优先级为「急停 → 兼容旧 Property `-Dremold.poc.meta_source` → 默认 `true`」，因此照抄旧文档里的
+  `-Dremold.poc.meta_source=true` 不会覆盖急停。真正的灰度粒度是按类的：元数据缺失或 G1/G2/G3 任一闸门
+  不过，该类整类回退旧路径（`Run E`），回退原因由 `runRGate` 可观测，不存在部分继承。
+
+
 - **Run R 的真实规模读数与一处结论更正**（`tests/src/Pr3RealWorldReadingsProbe.java` + 实测记录
   `docs/topology/19-raw-to-raw-realworld-readings.md`）：在本仓库两个发布点的真实字节（415/417 类，取样 400）
   上双开关全开实测——① 命中 `forceStaticLambdas` 的类 **7/7 全部 `PASSED`**，全语料 `RAW_PREV_MISMATCH` 为 **0**

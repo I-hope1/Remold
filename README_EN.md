@@ -159,6 +159,7 @@ Implementation notes:
 |:--|:--|
 | Mixin hot-swap subsystem (8 parts: classloader authority / admission & overlay / re-weave & member alignment / reload structure contracts / synthetic gate / walkthrough / runtime diagnostics / decision ledger) | [`docs/mixin/01..08`](docs/mixin/01-invariants-and-classloader-authority.md) |
 | Anonymous-class topology alignment (admission, cascading pipeline, confidence tiers, layout gate, lambda capture bridge, enum-append boundary, orphan body retention, JIT drain latency) | [`docs/topology/01..12`](docs/topology/01-invariants-and-remapping.md) |
+| Changeset VCS and generational field ledger (per-generation `Changeset` chain, live Raw↔Raw alignment, per-generation `FieldLedger` / `REINIT_APPLIED` and post-revert CAS reconciliation) | [`docs/topology/16..21`](docs/topology/20-generational-field-ledger.md) |
 | InitFix safety gates, closure and ledger, two-phase design | [`docs/initfix/01..13`](docs/initfix/01-safety-gate.md) |
 | Physical offsets, inherited-field drift guard, and third-party cache eviction | [`docs/offset/01..02`](docs/offset/01-offset-and-reflection-cache.md) |
 | Per-feature implementation status, acceptance evidence, known risks (single source of truth) | [`docs/status.md`](docs/status.md) |

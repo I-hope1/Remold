@@ -215,6 +215,34 @@ public class GenerationalReplayWiringTest {
 	}
 
 	/**
+	 * Review follow-up: "confirmed write" must be judged <b>at the generation being reconciled</b>,
+	 * not "any generation ever wrote". A revert keeps the older generations, so an old
+	 * {@code written} row would otherwise vouch for a fact that was never applied — and the round
+	 * would write the skipped generation's theory value again.
+	 */
+	@Test
+	void anOlderConfirmedWriteDoesNotVouchForALaterSkippedGeneration() throws Exception {
+		fixture();
+		Changeset first = commit("h1");
+		record(first, "1", "2");
+		// seq=1 really was written: a legitimately confirmed write, but for the *older* generation.
+		GenerationalFieldLedger.INSTANCE.recordReinitApplied(loader, OWNER_INTERNAL, FIELD,
+		 "OVERWRITE|fixture", "written=1", new GenerationalFieldLedger.GenRef(first.seq(), first.id()));
+		Changeset second = commit("h1");
+		record(second, "2", "5");
+		GenerationalFieldLedger.INSTANCE.markUnclosed(loader, OWNER_INTERNAL, FIELD);
+
+		transformWith(anonV1, anonV2);
+
+		String result = report.replayFields().get(FIELD);
+		assertNotNull(result, "the candidate must stay visible in the report: " + report);
+		assertTrue(result.startsWith("rejected: "),
+		 "the later generation has no confirmed write, so its fact cannot supply an expectation: " + result);
+		assertTrue(result.contains("generation " + second.seq()),
+		 "the reason must name the generation that lacks the write: " + result);
+	}
+
+	/**
 	 * No generational evidence for this key: the gate stays out of the way and the round behaves
 	 * exactly as before B2 (the fact index is derived, so its absence only changes cost, §2.3).
 	 */

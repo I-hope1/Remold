@@ -180,11 +180,13 @@ class GenerationalFieldLedgerTest {
 		GenerationalFieldLedger.INSTANCE.markUnclosed(loader, "probe/Other", "f");
 		assertEquals(2, GenerationalFieldLedger.INSTANCE.unclosedCount(loader));
 
-		int released = GenerationalFieldLedger.INSTANCE.releaseDebt(loader, "f");
+		int released = GenerationalFieldLedger.INSTANCE.releaseDebt(loader, "probe/Holder", "f");
 
-		assertEquals(2, released, "both rows for the removed field are released");
-		assertEquals(0, GenerationalFieldLedger.INSTANCE.unclosedCount(loader),
-		 "a removed field must not leave a permanent debt row behind");
+		assertEquals(1, released, "only the removed class's row is released");
+		assertEquals(1, GenerationalFieldLedger.INSTANCE.unclosedCount(loader),
+		 "another class with the same field name keeps its own debt");
+		assertTrue(GenerationalFieldLedger.INSTANCE.unclosed(loader).get(0).startsWith("probe/Other"),
+		 "releasing must never cross class boundaries");
 	}
 
 	/**

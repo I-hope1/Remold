@@ -110,7 +110,8 @@ B1 在 HEAD 之上新建一代：`seq = N + 1`、`parent = HEAD`、`revertedToSe
 用它的 `newLiteral` 当写入值会把上一轮的旧初值写回堆里（看着成功、实际倒退）。因此消费侧在
 `!revertContext && isUnclosed && 无确认写入` 时一律 fail-closed：不写、不取期望、债务保留，
 直到 `@RemoldReinit(OVERWRITE)` 或显式重建真正写出为止（"确认写入"的唯一可信来源是运行期落账的
-`REINIT_APPLIED` 行）。
+`REINIT_APPLIED` 行，且该行必须属于**待对账那一代**：回退会保留更早的代，若按"历史上任何一代写过"
+判定，旧代记录就会给一条从未写成的事实背书）。
 
 **期望来源唯一**：比较侧只取通过上述三条校验的那条事实的 `oldLiteral`，写入侧取**同一对**事实的 `newLiteral`（`EXACT` / `CHAINED` 同口径）。不设第二个期望来源——`REINIT_APPLIED` 里"由引擎写入"的记录值、污染代 `seq = N` 的 `newLiteral`、类型默认值都不是期望（D12）。理由：引擎在污染代写过的值与用户在运行期改过的值在堆上无法区分（16 §4.1），扩充来源等于把后者当成"未改过"覆盖，并把回退变成静默 no-op。
 

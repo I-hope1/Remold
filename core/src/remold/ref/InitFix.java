@@ -1221,9 +1221,11 @@ public class InitFix {
 	 * <p>判据只有一类可信来源：调用方在真正写出之后落的 {@code REINIT_APPLIED} 行。没写过就说明
 	 * 所有 {@code ReplayFact} 都只是理论值（§4-R3），不能拿来当下一轮的期望。</p>
 	 */
-	private static boolean hasAppliedWrite(ClassLoader loader, String className, String field) {
+	private static boolean hasAppliedWrite(ClassLoader loader, String className, String field, long generation) {
+		if (generation <= 0L) return false;
 		for (GenerationalFieldLedger.ReinitApplied applied
 		 : GenerationalFieldLedger.INSTANCE.reinitApplied(loader, className, field)) {
+			if (applied.gen() == null || applied.gen().seq() != generation) continue;
 			String result = applied.result();
 			if (result != null && result.startsWith("written")) return true;
 		}
@@ -1260,20 +1262,20 @@ public class InitFix {
 			if (!revertContext && !GenerationalFieldLedger.INSTANCE.isUnclosed(loader, owner, replay.name())) {
 				continue;
 			}
-			if (!revertContext && GenerationalFieldLedger.INSTANCE.isUnclosed(loader, owner, replay.name())
-			    && !hasAppliedWrite(loader, owner, replay.name())) {
-				// 欠债但没有任何"确实写成功"的记录：HEAD 那一代的 ReplayFact 只是<b>理论</b>初值
-				// （§4-R3），它的 newLiteral 从没进过堆。按它取期望会把上一代的理论值当成实际值，
-				// 进而写出"上一轮的旧初值"。这里一律 fail-closed，直到显式 OVERWRITE / 重建。
-				refuseGenerationalReplay(loader, owner, replay.name());
-				replayFields.remove(field);
-				replayDecisions.put(field, "rejected: the field is unclosed and no generation has a"
-				 + " confirmed write, so no fact can supply an expectation (fail-closed until"
-				 + " @RemoldReinit(OVERWRITE) or an explicit rebuild)");
-				continue;
-			}
 			GenerationalFieldLedger.Resolved resolved = GenerationalFieldLedger.INSTANCE.resolve(
 			 loader, ChangesetLog.INSTANCE, scope, owner, replay.name(), targetSeq);
+			if (!revertContext && GenerationalFieldLedger.INSTANCE.isUnclosed(loader, owner, replay.name())
+			    && !hasAppliedWrite(loader, owner, replay.name(), resolved.fromGeneration())) {
+				// 欠债且<b>待对账那一代</b>没有确认写入：那条 ReplayFact 只是理论初值（§4-R3），
+				// 它的 newLiteral 从没进过堆。判据必须落在"该代"，不能是"历史上曾经写过任何一代"——
+				// 否则回退保留的旧代 written 记录会给一条未写成的事实背书。
+				refuseGenerationalReplay(loader, owner, replay.name());
+				replayFields.remove(field);
+				replayDecisions.put(field, "rejected: the field is unclosed and generation "
+				 + resolved.fromGeneration() + " has no confirmed write, so its fact cannot supply an"
+				 + " expectation (fail-closed until @RemoldReinit(OVERWRITE) or an explicit rebuild)");
+				continue;
+			}
 			GenerationalReplayGate.Decision decision = GenerationalReplayGate.decide(
 			 resolved, replay.desc(), literalKindOf(replay.desc()));
 			if (decision.oblivious()) continue;
@@ -1299,17 +1301,17 @@ public class InitFix {
 			    && !GenerationalFieldLedger.INSTANCE.isUnclosed(loader, targetInternal, replay.fieldName())) {
 				continue;
 			}
-			if (!revertContext
-			    && !hasAppliedWrite(loader, targetInternal, replay.fieldName())) {
-				refuseGenerationalReplay(loader, targetInternal, replay.fieldName());
-				applyFields.remove(key);
-				applyDecisions.put(key, "rejected: the field is unclosed and no generation has a"
-				 + " confirmed write, so no fact can supply an expectation (fail-closed until"
-				 + " @RemoldReinit(OVERWRITE) or an explicit rebuild)");
-				continue;
-			}
 			GenerationalFieldLedger.Resolved resolved = GenerationalFieldLedger.INSTANCE.resolve(
 			 loader, ChangesetLog.INSTANCE, scope, targetInternal, replay.fieldName(), targetSeq);
+			if (!revertContext
+			    && !hasAppliedWrite(loader, targetInternal, replay.fieldName(), resolved.fromGeneration())) {
+				refuseGenerationalReplay(loader, targetInternal, replay.fieldName());
+				applyFields.remove(key);
+				applyDecisions.put(key, "rejected: the field is unclosed and generation "
+				 + resolved.fromGeneration() + " has no confirmed write, so its fact cannot supply an"
+				 + " expectation (fail-closed until @RemoldReinit(OVERWRITE) or an explicit rebuild)");
+				continue;
+			}
 			GenerationalReplayGate.Decision decision = GenerationalReplayGate.decide(
 			 resolved, replay.fieldDesc(), literalKindOf(replay.fieldDesc()));
 			if (decision.oblivious()) continue;
@@ -1734,6 +1736,27 @@ public class InitFix {
 		transformNow(host, newBytes, diff);
 	}
 
+	/**
+	 * 字段被删掉时，按 {@code (loader, 本类内部名, 字段)} 精确释放该字段的代际债务。
+	 *
+	 * <p>只认结构信号 {@code diff.changedFields} 里的 {@code "- name"}：那是"本类不再声明这个字段"的
+	 * 唯一事实来源。继承字段的债务键是<b>声明类</b>，声明类自己被热更时会走到同一分支，因此两边都能
+	 * 出账，且不会跨类误删同名字段的债务。</p>
+	 */
+	private static void releaseRemovedFieldDebt(Class<?> host, ClassDiff diff) {
+		if (host == null || diff == null || diff.changedFields.isEmpty()) return;
+		String internal = Type.getInternalName(host);
+		for (String change : diff.changedFields) {
+			if (change == null || change.length() < 3 || !change.startsWith("- ")) continue;
+			String field = change.substring(2).trim();
+			int released = GenerationalFieldLedger.INSTANCE.releaseDebt(host.getClassLoader(), internal, field);
+			if (released > 0) {
+				log("FieldLedger: released generational debt for " + internal.replace('/', '.')
+				    + "." + field + " (field no longer declared)");
+			}
+		}
+	}
+
 	private static void transformNow(Class<?> host, byte[] newBytes, ClassDiff diff) {
 		if (!RemoldAgent.INIT_FIX) return;
 
@@ -1755,6 +1778,10 @@ public class InitFix {
 			for (String f : diff.typeChangedFields) {
 				reinitAppliedRemove(host, f);
 			}
+			// 字段从新布局消失：它再也不可能有补丁，代际台账为它欠的债必须随字段一起出账。
+			// 出账点是这里（结构真变了），而不是 pendingLedger 的"字段找不到"分支——那条分支
+			// 只覆盖"补丁重试时字段没了"，L1/A 档的债务根本不走它。
+			releaseRemovedFieldDebt(host, diff);
 		}
 
 		// L1（docs/initfix/12-L1-existing-initializer-replay.md）：默认关闭的存量初值重放。
@@ -2049,11 +2076,7 @@ public class InitFix {
 				reinitAppliedRemove(host, f);   // 记录随字段一起作废，防止同名重加时被误判"初值未变"
 				// 字段已从新版本消失：代际台账里为它欠的债同样无法再补，必须随字段一起出账，
 				// 否则会永久留在未闭环集合里（它不随 Changeset 窗口淘汰）。
-				int released = GenerationalFieldLedger.INSTANCE.releaseDebt(host.getClassLoader(), f);
-				if (released > 0) {
-					log("FieldLedger: released " + released + " generational debt row(s) for "
-					    + className + "." + f + " (field no longer declared)");
-				}
+
 				log("FieldLedger: dropping " + className + "." + f
 				    + " (field no longer declared)");
 				continue;

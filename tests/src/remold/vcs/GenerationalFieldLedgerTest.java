@@ -170,6 +170,24 @@ class GenerationalFieldLedgerTest {
 	}
 
 	/**
+	 * H3: a field that disappears from the new layout can never be patched again, so its debt must be
+	 * released with it. Un-patched debt is not evicted by the window, so leaking it here would be
+	 * permanent.
+	 */
+	@Test
+	void debtIsReleasedWhenTheFieldIsGone() {
+		GenerationalFieldLedger.INSTANCE.markUnclosed(loader, "probe/Holder", "f");
+		GenerationalFieldLedger.INSTANCE.markUnclosed(loader, "probe/Other", "f");
+		assertEquals(2, GenerationalFieldLedger.INSTANCE.unclosedCount(loader));
+
+		int released = GenerationalFieldLedger.INSTANCE.releaseDebt(loader, "f");
+
+		assertEquals(2, released, "both rows for the removed field are released");
+		assertEquals(0, GenerationalFieldLedger.INSTANCE.unclosedCount(loader),
+		 "a removed field must not leave a permanent debt row behind");
+	}
+
+	/**
 	 * F8 (shape half): the ledger keeps only scalars. A value holding a {@code Class} would keep the
 	 * loader alive; this case pins the record shape so an accidental field addition shows up.
 	 */

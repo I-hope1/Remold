@@ -1215,6 +1215,21 @@ public class InitFix {
 	 *
 	 * @return {@code L1:/A: + key} -> 事实带出的期望与写入常量（只有 {@code FACT} 才有条目）
 	 */
+	/**
+	 * 该键是否存在"确实写进堆"的记录（{@code OVERWRITE} / 恢复写入）。
+	 *
+	 * <p>判据只有一类可信来源：调用方在真正写出之后落的 {@code REINIT_APPLIED} 行。没写过就说明
+	 * 所有 {@code ReplayFact} 都只是理论值（§4-R3），不能拿来当下一轮的期望。</p>
+	 */
+	private static boolean hasAppliedWrite(ClassLoader loader, String className, String field) {
+		for (GenerationalFieldLedger.ReinitApplied applied
+		 : GenerationalFieldLedger.INSTANCE.reinitApplied(loader, className, field)) {
+			String result = applied.result();
+			if (result != null && result.startsWith("written")) return true;
+		}
+		return false;
+	}
+
 	private static Map<String, GenerationalReplay> gateGenerationalReplay(
 	 Class<?> host, String className,
 	 Map<String, InitializerReplay.ReplayField> replayFields,
@@ -1245,6 +1260,18 @@ public class InitFix {
 			if (!revertContext && !GenerationalFieldLedger.INSTANCE.isUnclosed(loader, owner, replay.name())) {
 				continue;
 			}
+			if (!revertContext && GenerationalFieldLedger.INSTANCE.isUnclosed(loader, owner, replay.name())
+			    && !hasAppliedWrite(loader, owner, replay.name())) {
+				// 欠债但没有任何"确实写成功"的记录：HEAD 那一代的 ReplayFact 只是<b>理论</b>初值
+				// （§4-R3），它的 newLiteral 从没进过堆。按它取期望会把上一代的理论值当成实际值，
+				// 进而写出"上一轮的旧初值"。这里一律 fail-closed，直到显式 OVERWRITE / 重建。
+				refuseGenerationalReplay(loader, owner, replay.name());
+				replayFields.remove(field);
+				replayDecisions.put(field, "rejected: the field is unclosed and no generation has a"
+				 + " confirmed write, so no fact can supply an expectation (fail-closed until"
+				 + " @RemoldReinit(OVERWRITE) or an explicit rebuild)");
+				continue;
+			}
 			GenerationalFieldLedger.Resolved resolved = GenerationalFieldLedger.INSTANCE.resolve(
 			 loader, ChangesetLog.INSTANCE, scope, owner, replay.name(), targetSeq);
 			GenerationalReplayGate.Decision decision = GenerationalReplayGate.decide(
@@ -1270,6 +1297,15 @@ public class InitFix {
 			String targetInternal = replay.targetClass();
 			if (!revertContext
 			    && !GenerationalFieldLedger.INSTANCE.isUnclosed(loader, targetInternal, replay.fieldName())) {
+				continue;
+			}
+			if (!revertContext
+			    && !hasAppliedWrite(loader, targetInternal, replay.fieldName())) {
+				refuseGenerationalReplay(loader, targetInternal, replay.fieldName());
+				applyFields.remove(key);
+				applyDecisions.put(key, "rejected: the field is unclosed and no generation has a"
+				 + " confirmed write, so no fact can supply an expectation (fail-closed until"
+				 + " @RemoldReinit(OVERWRITE) or an explicit rebuild)");
 				continue;
 			}
 			GenerationalFieldLedger.Resolved resolved = GenerationalFieldLedger.INSTANCE.resolve(
@@ -2011,6 +2047,13 @@ public class InitFix {
 				// 字段已从新版本里消失：无法再补，按已解决出账（避免台账里留死条目）
 				ledgerRemove(host, f);
 				reinitAppliedRemove(host, f);   // 记录随字段一起作废，防止同名重加时被误判"初值未变"
+				// 字段已从新版本消失：代际台账里为它欠的债同样无法再补，必须随字段一起出账，
+				// 否则会永久留在未闭环集合里（它不随 Changeset 窗口淘汰）。
+				int released = GenerationalFieldLedger.INSTANCE.releaseDebt(host.getClassLoader(), f);
+				if (released > 0) {
+					log("FieldLedger: released " + released + " generational debt row(s) for "
+					    + className + "." + f + " (field no longer declared)");
+				}
 				log("FieldLedger: dropping " + className + "." + f
 				    + " (field no longer declared)");
 				continue;

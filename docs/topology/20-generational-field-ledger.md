@@ -105,6 +105,13 @@ B1 在 HEAD 之上新建一代：`seq = N + 1`、`parent = HEAD`、`revertedToSe
 | `REFUSED_DISCONTINUOUS` | 身份或相邻性不过 | 不写；warn；`REINIT_APPLIED` 该字段作废 |
 | `REFUSED_NONE_LITERAL` | `literalKind == NONE` 或形态不匹配 | §4-R4 |
 
+**未写入的代不贡献期望（R3 的日常形态）**：一条事实只说明"那一代的理论初值是这些"，不说明"堆上现在就是它"。
+若某个字段已经欠着未闭环债务、而台账里没有任何"确实写成功"的记录，那么 HEAD 那一代的事实只是理论值——
+用它的 `newLiteral` 当写入值会把上一轮的旧初值写回堆里（看着成功、实际倒退）。因此消费侧在
+`!revertContext && isUnclosed && 无确认写入` 时一律 fail-closed：不写、不取期望、债务保留，
+直到 `@RemoldReinit(OVERWRITE)` 或显式重建真正写出为止（"确认写入"的唯一可信来源是运行期落账的
+`REINIT_APPLIED` 行）。
+
 **期望来源唯一**：比较侧只取通过上述三条校验的那条事实的 `oldLiteral`，写入侧取**同一对**事实的 `newLiteral`（`EXACT` / `CHAINED` 同口径）。不设第二个期望来源——`REINIT_APPLIED` 里"由引擎写入"的记录值、污染代 `seq = N` 的 `newLiteral`、类型默认值都不是期望（D12）。理由：引擎在污染代写过的值与用户在运行期改过的值在堆上无法区分（16 §4.1），扩充来源等于把后者当成"未改过"覆盖，并把回退变成静默 no-op。
 
 由此得到回退后的 **fail-closed 后果**（负向判据见 §6-A5 / §6-A14）：实例若仍持有污染代写入的值，它按 §4-R5 与 `target.oldLiteral` 不等 → CAS 不命中 → 不写、不改写、不记"已应用"——**fail-closed 进 `PENDING`**：该字段仍是未完成项（`PatchReport.applyReplayFields` 的该条结果为 skipped，`REINIT_APPLIED` 不出"已应用"记录，`[g, target]` 区间事实不因这次跳过被改写），下一轮重新进候选。宁可这一轮少写一次，也不把无法验证的值当成"已改回"（AGENTS §3 安全优先）。

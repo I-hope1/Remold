@@ -4890,8 +4890,10 @@ public class RemoldAgent {
 	 * <p>台账是<b>派生索引</b>：口径不合规的记录在这里被拒（不索引、计数），消费侧因此只会看到
 	 * 规范事实；索引丢了可以按 {@code Changeset} 重建，事实丢了只能拒绝。</p>
 	 */
-	private static void recordLedgerFacts(ClassLoader loader, Changeset cs) {
-		if (loader == null || cs == null || cs.replayFacts().isEmpty()) return;
+	static void recordLedgerFacts(ClassLoader loader, Changeset cs) {
+		// {@code loader == null} 是 bootstrap 槽（scope 0）的合法情形：台账专门为它留了槽，
+		// 这里若跳过就会出现"台账有槽、提交侧永不填"的口径不对称。
+		if (cs == null || cs.replayFacts().isEmpty()) return;
 		GenerationalFieldLedger.GenRef gen = new GenerationalFieldLedger.GenRef(cs.seq(), cs.id());
 		for (Changeset.ReplayFact fact : cs.replayFacts()) {
 			String internal = fact.ownerClass().replace('.', '/');

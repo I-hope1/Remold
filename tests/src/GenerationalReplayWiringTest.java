@@ -42,6 +42,12 @@ public class GenerationalReplayWiringTest {
 	private static final String HOST = PKG + ".Host";
 	private static final String ANON = PKG + ".Host$1";
 	private static final String ANON_INTERNAL = PKG + "/Host$1";
+	/**
+	 * L1 replays an <b>inherited</b> field, so the fact (and therefore the ledger key) belongs to the
+	 * <b>declaring</b> class — {@code InitFix.l1ReplayFact} uses {@code ReplayField.declaringClass}.
+	 * The consumer must query the same class or it would never see the fact.
+	 */
+	private static final String OWNER_INTERNAL = PKG + "/Base";
 	private static final String FIELD = "v";
 
 	private Map<String, byte[]> v2Classes;
@@ -136,7 +142,7 @@ public class GenerationalReplayWiringTest {
 	/** Commit one generation whose entry for the anonymous class carries {@code rawHash}. */
 	private Changeset commit(String rawHash) {
 		Map<String, Changeset.Entry> entries = new LinkedHashMap<>();
-		entries.put(ANON_INTERNAL, new Changeset.Entry(ANON_INTERNAL, rawHash, "eff-" + rawHash,
+		entries.put(OWNER_INTERNAL, new Changeset.Entry(OWNER_INTERNAL, rawHash, "eff-" + rawHash,
 		 "meta-" + rawHash));
 		return ChangesetLog.INSTANCE.commit(scope, "r-" + rawHash, entries, Changeset.Manifest.EMPTY,
 		 List.of(), Changeset.currentAlgoVersion(), "", Changeset.PatchTiming.AFTER_COMMIT,
@@ -145,10 +151,10 @@ public class GenerationalReplayWiringTest {
 
 	/** Record one {@code L1} fact for {@code (scope, Host$1, v)} at {@code gen}. */
 	private void record(Changeset gen, String oldLiteral, String newLiteral) {
-		Changeset.ReplayFact fact = new Changeset.ReplayFact(ANON, FIELD, "I", "L1",
+		Changeset.ReplayFact fact = new Changeset.ReplayFact(BASE, FIELD, "I", "L1",
 		 oldLiteral, newLiteral, "INT", "", "", "");
 		GenerationalFieldLedger.RecordResult result = GenerationalFieldLedger.INSTANCE.record(loader,
-		 new GenerationalFieldLedger.LedgerKey(scope, ANON_INTERNAL, FIELD),
+		 new GenerationalFieldLedger.LedgerKey(scope, OWNER_INTERNAL, FIELD),
 		 new GenerationalFieldLedger.GenRef(gen.seq(), gen.id()), fact, gen.algoVersion());
 		assertEquals(GenerationalFieldLedger.RecordResult.ACCEPTED, result,
 		 "precondition: the fact must enter the index");
@@ -177,7 +183,7 @@ public class GenerationalReplayWiringTest {
 		assertReplayCandidate();
 		assertEquals("replayed", report.replayFields().get(FIELD),
 		 "a round without a fact must not be refused: " + report.replayFields());
-		assertFalse(GenerationalFieldLedger.INSTANCE.isUnclosed(loader, ANON_INTERNAL, FIELD),
+		assertFalse(GenerationalFieldLedger.INSTANCE.isUnclosed(loader, OWNER_INTERNAL, FIELD),
 		 "no debt may be recorded when nothing was refused");
 	}
 
@@ -199,7 +205,7 @@ public class GenerationalReplayWiringTest {
 		assertReplayCandidate();
 		assertEquals("replayed", report.replayFields().get(FIELD),
 		 "a fact that passes every gate must keep the candidate: " + report.replayFields());
-		assertFalse(GenerationalFieldLedger.INSTANCE.isUnclosed(loader, ANON_INTERNAL, FIELD));
+		assertFalse(GenerationalFieldLedger.INSTANCE.isUnclosed(loader, OWNER_INTERNAL, FIELD));
 	}
 
 	/**
@@ -224,7 +230,7 @@ public class GenerationalReplayWiringTest {
 		assertTrue(result.contains("not continuous"), "the reason must name the cause: " + result);
 		assertTrue(result.contains("OVERWRITE"), "the reason must name the recovery path: " + result);
 		assertFalse(report.replayGenerated(), "a refused replay must not be counted as generated");
-		assertTrue(GenerationalFieldLedger.INSTANCE.isUnclosed(loader, ANON_INTERNAL, FIELD),
-		 "the unclosed debt must live in the generational ledger");
+		assertTrue(GenerationalFieldLedger.INSTANCE.isUnclosed(loader, OWNER_INTERNAL, FIELD),
+		 "the unclosed debt must live in the generational ledger, keyed by the declaring class");
 	}
 }

@@ -694,7 +694,8 @@ public class InitFix {
 	 + ")Ljava/lang/invoke/CallSite;",
 	 false);
 
-	private record BuiltPatch(byte[] bytes, PatchPlan plan, PatchReport report) {
+	private record BuiltPatch(byte[] bytes, PatchPlan plan, PatchReport report,
+	                          Map<String, String> replayOwners) {
 		boolean hasPatch() { return bytes != null; }
 	}
 
@@ -875,11 +876,16 @@ public class InitFix {
 	 * 新建的实例永远进不了快照，其新增字段永久停在类型默认值（{@code docs/status.md} 风险 6）。
 	 * 重定义之后枚举则天然完备：此后不可能再产生旧布局的实例，而新实例由新构造器初始化。</p>
 	 */
+	/**
+	 * @param replayOwners L1 重放字段 -> 事实所属类（内部名）。L1 写的是<b>继承</b>字段，事实与台账键都在
+	 *                     声明类上，运行期记账（CAS 未命中 / OVERWRITE 闭环）必须用同一个键。
+	 */
 	private record PendingPatch(
 	 PatchPlan plan,
 	 byte[] bytes,
 	 long createdNanos,
-	 boolean twoPhase) {
+	 boolean twoPhase,
+	 Map<String, String> replayOwners) {
 	}
 
 	private record ProtectedAccess(int opcode, String owner, String name, String desc) { }
@@ -1228,15 +1234,18 @@ public class InitFix {
 
 		for (String field : new ArrayList<>(replayFields.keySet())) {
 			InitializerReplay.ReplayField replay = replayFields.get(field);
+			// L1 的字段是<b>继承</b>字段：事实的 owner（{@code l1ReplayFact}）是声明类，不是匿名宿主，
+			// 台账键必须同源，否则消费侧永远查不到这条事实。
+			String owner = replay.declaringClass();
 			GenerationalFieldLedger.Resolved resolved = GenerationalFieldLedger.INSTANCE.resolve(
-			 loader, ChangesetLog.INSTANCE, scope, className, replay.name(), targetSeq);
+			 loader, ChangesetLog.INSTANCE, scope, owner, replay.name(), targetSeq);
 			GenerationalReplayGate.Decision decision = GenerationalReplayGate.decide(
 			 resolved, replay.desc(), literalKindOf(replay.desc()));
 			if (decision.oblivious()) continue;
 			GenerationalReplay override = decision.writable()
 			 ? toGenerationalReplay(decision, replay.desc()) : null;
 			if (override == null) {
-				refuseGenerationalReplay(loader, className, replay.name());
+				refuseGenerationalReplay(loader, owner, replay.name());
 				replayFields.remove(field);
 				replayDecisions.put(field, "rejected: " + reasonOf(decision,
 				 "replay fact literal cannot be decoded without re-deriving bits from decimal text"));
@@ -1806,7 +1815,7 @@ public class InitFix {
 			// 新建的实例。枚举推迟到 applyPatch（重定义之后），见 PendingPatch 的说明。
 			boolean twoPhase = requiresReadThroughGuard(built.plan(), diff);
 			PendingPatch patch = new PendingPatch(
-			 built.plan(), built.bytes(), System.nanoTime(), twoPhase);
+			 built.plan(), built.bytes(), System.nanoTime(), twoPhase, built.replayOwners());
 			PENDING.put(host, patch);
 			if (twoPhase) {
 				log("Two-phase guard required for " + className
@@ -2469,12 +2478,15 @@ public class InitFix {
 		// L1 重放字段 -> 旧初值常量（ASM bootstrap 常量）。只有通过补丁前校验的字段才携带。
 		// 代际对账判 FACT 的字段，比较侧期望与写入值都改取那条事实（docs/topology/20 §3.3）。
 		Map<String, Object> replayArguments = new LinkedHashMap<>();
+		Map<String, String> replayOwners = new LinkedHashMap<>();
 		for (String fieldName : acceptedReplay) {
 			InitializerReplay.ReplayField replay = replayFields.get(fieldName);
 			if (replay == null) continue;
 			GenerationalReplay fact = generational.get(L1_GATE_PREFIX + fieldName);
 			replayArguments.put(fieldName,
 			 fact != null ? fact.expectedConstant() : replay.bootstrapArgument());
+			// 继承字段：事实与台账键都在声明类上（见 gateGenerationalReplay）。
+			replayOwners.put(fieldName, replay.declaringClass());
 		}
 
 		for (String fieldName : orderedInstance) {
@@ -2600,12 +2612,12 @@ public class InitFix {
 		 applyDecisions);
 
 		if (plan.isEmpty()) {
-			return new BuiltPatch(null, PatchPlan.EMPTY, report);
+			return new BuiltPatch(null, PatchPlan.EMPTY, report, Map.of());
 		}
 
 		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
 		patch.accept(cw);
-		return new BuiltPatch(cw.toByteArray(), plan, report);
+		return new BuiltPatch(cw.toByteArray(), plan, report, replayOwners);
 	}
 
 	/**
@@ -2828,21 +2840,22 @@ public class InitFix {
 	 * {@link PatchReport#recoveredFields()} 里记 {@code recovered: overwrite}，下一代不再把它当成欠着。</p>
 	 */
 	private static void recordReplayOutcome(Class<?> host, PatchPlan plan,
+	                                        Map<String, String> replayOwners,
 	                                        Map<String, long[]> l1Stats, Map<String, long[]> applyStats,
 	                                        Set<String> failedFields, Set<String> skippedFields,
 	                                        int aliveCount) {
 		ClassLoader loader = host.getClassLoader();
 		String internal = Type.getInternalName(host);
 		Set<String> skipped = new LinkedHashSet<>();
-		Map<String, String> skippedReasons = new LinkedHashMap<>();
 
 		for (FieldPatchTask task : plan.instanceTasks()) {
 			if (!task.replay()) continue;
 			long[] stat = l1Stats.get(host.getName() + "#" + task.fieldName());
 			if (stat == null || stat[1] == 0L) continue;
+			// L1 的字段是继承字段：台账键是声明类，不是本轮被热更的匿名宿主。
+			String owner = replayOwners.getOrDefault(task.fieldName(), internal);
 			skipped.add(task.fieldName());
-			skippedReasons.put(task.fieldName(), "L1");
-			GenerationalFieldLedger.INSTANCE.markUnclosed(loader, internal, task.fieldName());
+			GenerationalFieldLedger.INSTANCE.markUnclosed(loader, owner, task.fieldName());
 			RemoldAgent.warn("[INIT-REPLAY] " + host.getName() + "." + task.fieldName()
 			 + " was NOT replayed: the current value no longer equals the target generation's"
 			 + " expected initializer, so the conditional write was refused (fail-closed)."
@@ -2856,7 +2869,6 @@ public class InitFix {
 			long[] stat = applyStats.get(statKey);
 			if (stat == null || stat[1] == 0L) continue;
 			skipped.add(entry.getKey());
-			skippedReasons.put(entry.getKey(), "A");
 			GenerationalFieldLedger.INSTANCE.markUnclosed(loader, replay.targetClass(), replay.fieldName());
 			RemoldAgent.warn("[INIT-APPLY-REPLAY] " + host.getName() + ": " + entry.getKey()
 			 + " was NOT replayed: the current value no longer equals the target generation's"
@@ -5858,8 +5870,8 @@ public class InitFix {
 		}
 
 		// 代际重放的运行期对账（G6 / G7）：CAS 未命中的字段按"没写成"记账，不冒充已应用。
-		recordReplayOutcome(host, plan, l1Stats, applyStats, failedFields, skippedFields,
-		 alive == null ? 0 : alive.length);
+		recordReplayOutcome(host, plan, patch.replayOwners(), l1Stats, applyStats,
+		 failedFields, skippedFields, alive == null ? 0 : alive.length);
 
 		// 批次报告：只统计真正跑完的补丁。字段名与实例数都是本轮实测值，
 		// 失败/被放弃的字段单独计数（不把"尝试过"说成"已修补"）。

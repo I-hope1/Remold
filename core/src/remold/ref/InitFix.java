@@ -11,6 +11,7 @@ import org.objectweb.asm.tree.*;
 import org.objectweb.asm.tree.analysis.*;
 import org.objectweb.asm.tree.analysis.Frame;
 
+import java.lang.instrument.ClassDefinition;
 import java.lang.invoke.*;
 import java.lang.invoke.MethodHandles.Lookup;
 import java.lang.ref.WeakReference;
@@ -20,6 +21,8 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.function.BiConsumer;
+import java.util.function.Supplier;
 
 import static remold.RemoldAgent.log;
 
@@ -233,7 +236,222 @@ public class InitFix {
 	 * <p>与 {@link #LEDGER} 同一策略：弱键 + 纯字符串值，不阻止类卸载、不反向持有 {@code Class}。</p>
 	 */
 	private static final Map<Class<?>, Map<String, String>> REINIT_APPLIED =
-	 Collections.synchronizedMap(new WeakHashMap<>());	/** 只读视图：当前台账里该宿主的未决字段（测试与诊断用）。 */
+	 Collections.synchronizedMap(new WeakHashMap<>());
+
+	/** Transient same-batch view; cleared at the end of each batch. */
+	private static final ThreadLocal<BatchContext> BATCH_CONTEXT = new ThreadLocal<>();
+
+	/** Transient runtime failure tokens used only while a batch is being patched. */
+	private static final ThreadLocal<Set<String>> BATCH_FAILURES =
+	 ThreadLocal.withInitial(LinkedHashSet::new);
+
+	private record BatchInput(Class<?> host, byte[] newBytes, ClassDiff diff) { }
+	private record BatchContext(Map<ClassLoader, Map<String, byte[]>> bytesByLoader,
+	                            Map<String, Set<String>> candidateFields, List<BatchInput> inputs,
+	                            Map<ClassLoader, String> loaderIds,
+	                            Map<Class<?>, BatchPlan> plans) { }
+
+	private record BatchPlan(PatchAnalysis analysis, Runnable publish) { }
+
+	private record PatchAnalysis(Map<String, FieldDecision> instanceDecisions,
+	                             Map<String, FieldDecision> staticDecisions,
+	                             Map<String, Set<InitFixBatchGraph.FieldKey>> dependencies,
+	                             BiConsumer<String, String> reject, Runnable close, Supplier<BuiltPatch> emit) {
+		FieldDecision decision(String field) {
+			return instanceDecisions.getOrDefault(field, staticDecisions.get(field));
+		}
+	}
+
+	/** 只读视图：当前台账里该宿主的未决字段（测试与诊断用）。 */
+	/** Install the transient same-batch bytecode view used by offline analysis. */
+	public static void beginBatchBytecodeView(Map<ClassLoader, Map<String, byte[]>> byLoader) {
+		Map<ClassLoader, Map<String, byte[]>> copy = new IdentityHashMap<>();
+		if (byLoader != null) {
+			for (Map.Entry<ClassLoader, Map<String, byte[]>> entry : byLoader.entrySet()) {
+				Map<String, byte[]> bytes = new LinkedHashMap<>();
+				if (entry.getValue() != null) bytes.putAll(entry.getValue());
+				copy.put(entry.getKey(), bytes);
+			}
+		}
+		Map<ClassLoader, String> loaderIds = new IdentityHashMap<>();
+		Map<String, Set<String>> candidateFields = new LinkedHashMap<>();
+		int nextId = 0;
+		for (Map.Entry<ClassLoader, Map<String, byte[]>> entry : copy.entrySet()) {
+			loaderIds.put(entry.getKey(), "L" + nextId++);
+			for (String host : entry.getValue().keySet()) {
+				candidateFields.put(batchHostKeyForId(loaderIds.get(entry.getKey()), host), Set.of());
+			}
+		}
+		BATCH_CONTEXT.set(new BatchContext(copy, candidateFields, new ArrayList<>(), loaderIds, new LinkedHashMap<>()));
+		BATCH_FAILURES.get().clear();
+	}
+
+	/** Clear all transient same-batch state after redefine/post-processing completes. */
+	public static void endBatchBytecodeView() {
+		BATCH_CONTEXT.remove();
+		BATCH_FAILURES.remove();
+	}
+
+	/** Replace the provisional layout-gate view with the definitions that can actually be installed. */
+	public static void setBatchDefinitions(List<ClassDefinition> definitions) {
+		BatchContext context = BATCH_CONTEXT.get();
+		if (context == null) return;
+		context.bytesByLoader().clear();
+		// Start from the keys registered when the view was opened: classes dropped by the layout/annotation
+		// gates never reach transform(), and forgetting them here would let analysis silently read their stale
+		// global-cache bytes instead of failing closed.
+		Map<String, Set<String>> candidates = new LinkedHashMap<>(context.candidateFields());
+		for (BatchInput input : context.inputs()) {
+			if (input.diff() == null || input.diff().newClass == null) continue;
+			Set<String> fields = new LinkedHashSet<>();
+			fields.addAll(input.diff().addedInstanceFields);
+			fields.addAll(input.diff().addedStaticFields);
+			fields.addAll(scanReinitFields(input.diff().newClass).keySet());
+			fields.addAll(ledgerSnapshot(input.host()).keySet());
+			candidates.put(batchHostKey(context, input.host()), fields);
+		}
+		for (ClassDefinition definition : definitions) {
+			Class<?> host = definition.getDefinitionClass();
+			ClassLoader loader = host.getClassLoader();
+			context.loaderIds().computeIfAbsent(loader, ignored -> "L" + context.loaderIds().size());
+			context.bytesByLoader().computeIfAbsent(loader, ignored -> new LinkedHashMap<>())
+			 .put(host.getName(), definition.getDefinitionClassFile());
+		}
+		BATCH_CONTEXT.set(new BatchContext(context.bytesByLoader(), candidates, context.inputs(),
+		 context.loaderIds(), context.plans()));
+	}
+
+	/** Build all batch patches only after every transform input has been collected. */
+	public static void finishBatchTransforms() {
+		BatchContext context = BATCH_CONTEXT.get();
+		if (context == null) return;
+		List<BatchInput> allInputs = new ArrayList<>(context.inputs());
+		List<BatchInput> inputs = allInputs.stream().filter(input -> {
+			Map<String, byte[]> bytes = context.bytesByLoader().get(input.host().getClassLoader());
+			return bytes != null && bytes.containsKey(input.host().getName());
+		}).toList();
+		Map<String, Set<String>> candidates = new LinkedHashMap<>(context.candidateFields());
+		for (BatchInput input : allInputs) {
+			ClassDiff diff = input.diff();
+			if (diff == null || diff.newClass == null) continue;
+			Set<String> fields = new LinkedHashSet<>();
+			fields.addAll(diff.addedInstanceFields);
+			fields.addAll(diff.addedStaticFields);
+			fields.addAll(scanReinitFields(diff.newClass).keySet());
+			fields.addAll(ledgerSnapshot(input.host()).keySet());
+			candidates.put(batchHostKey(context, input.host()), fields);
+		}
+		BATCH_CONTEXT.set(new BatchContext(context.bytesByLoader(), candidates, inputs, context.loaderIds(), context.plans()));
+		for (BatchInput input : inputs) transformNow(input.host(), input.newBytes(), input.diff());
+		convergeBatch(BATCH_CONTEXT.get());
+		for (BatchPlan plan : context.plans().values()) plan.publish().run();
+	}
+
+	private static void convergeBatch(BatchContext context) {
+		Map<String, PatchAnalysis> analyses = new LinkedHashMap<>();
+		context.plans().forEach((host, plan) -> analyses.put(batchHostKey(context, host), plan.analysis()));
+		while (true) {
+			Map<InitFixBatchGraph.FieldKey, Set<InitFixBatchGraph.FieldKey>> edges = new LinkedHashMap<>();
+			Map<InitFixBatchGraph.FieldKey, String> rejected = new LinkedHashMap<>();
+			for (var entry : analyses.entrySet()) {
+				PatchAnalysis analysis = entry.getValue();
+				for (var dependency : analysis.dependencies().entrySet()) {
+					String name = dependency.getKey();
+					if (!analysis.decision(name).accepted()) continue;
+					var field = new InitFixBatchGraph.FieldKey(entry.getKey(), name);
+					Set<InitFixBatchGraph.FieldKey> active = new LinkedHashSet<>();
+					for (var prerequisite : dependency.getValue()) {
+						PatchAnalysis owner = analyses.get(prerequisite.host());
+						FieldDecision decision = owner == null ? null : owner.decision(prerequisite.field());
+						if (decision == null || decision.status() == FieldStatus.REJECTED) {
+							rejected.putIfAbsent(field, "cross-class dependency unavailable: " + prerequisite.field());
+						} else if (decision.accepted()) {
+							active.add(prerequisite);
+						}
+					}
+					edges.put(field, active);
+				}
+			}
+			if (rejected.isEmpty()) {
+				var graph = InitFixBatchGraph.graph(edges);
+				for (var field : graph.cycleMembers()) rejected.put(field, "cross-class dependency cycle");
+				if (rejected.isEmpty()) {
+					for (var field : graph.conflictingHostReaders()) {
+						rejected.put(field, "incompatible cross-class host ordering");
+					}
+				}
+			}
+			if (rejected.isEmpty()) {
+				edges.forEach((field, prerequisites) -> analyses.get(field.host()).dependencies()
+				 .put(field.field(), prerequisites));
+				return;
+			}
+			Set<PatchAnalysis> affected = Collections.newSetFromMap(new IdentityHashMap<>());
+			rejected.forEach((field, reason) -> {
+				PatchAnalysis analysis = analyses.get(field.host());
+				analysis.reject().accept(field.field(), reason);
+				affected.add(analysis);
+			});
+			affected.forEach(analysis -> analysis.close().run());
+		}
+	}
+
+	static boolean batchViewActive(ClassLoader loader) {
+		BatchContext context = BATCH_CONTEXT.get();
+		return context != null && context.bytesByLoader().containsKey(loader);
+	}
+
+	static boolean batchCandidateMissing(ClassLoader loader, String internalName) {
+		BatchContext context = BATCH_CONTEXT.get();
+		return context != null && context.bytesByLoader().containsKey(loader)
+		       && context.candidateFields().containsKey(batchHostKey(context, internalName, loader))
+		       && !context.bytesByLoader().get(loader).containsKey(internalName.replace('/', '.'));
+	}
+
+	static byte[] batchClassBytes(ClassLoader loader, String internalName) {
+		BatchContext context = BATCH_CONTEXT.get();
+		if (context == null || internalName == null) return null;
+		Map<String, byte[]> bytes = context.bytesByLoader().get(loader);
+		return bytes == null ? null : bytes.get(internalName.replace('/', '.'));
+	}
+
+	private static Set<String> activeBatchFailures() {
+		return BATCH_CONTEXT.get() == null ? Set.of() : BATCH_FAILURES.get();
+	}
+
+	private static String batchFailureToken(InitFixBatchGraph.FieldKey field) {
+		return "@batch:" + field.host() + "." + field.field();
+	}
+
+	private static void publishBatchFailure(Class<?> host, String field) {
+		if (BATCH_CONTEXT.get() == null) return;
+		BATCH_FAILURES.get().add(batchFailureToken(
+		 new InitFixBatchGraph.FieldKey(batchHostKeyCurrent(host), field)));
+	}
+
+	private static String batchHostKeyForId(String loaderId, String host) {
+		return loaderId + ":" + host.replace('/', '.');
+	}
+
+	private static String batchHostKey(BatchContext context, Class<?> host) {
+		return context.loaderIds().getOrDefault(host.getClassLoader(), "bootstrap") + ":" + host.getName();
+	}
+
+	private static String batchCandidateOwnerKey(BatchContext context, String owner, ClassLoader loader) {
+		String direct = batchHostKey(context, owner, loader);
+		return context.candidateFields().containsKey(direct) ? direct : null;
+	}
+
+	private static String batchHostKey(BatchContext context, String owner, ClassLoader loader) {
+		return context.loaderIds().getOrDefault(loader, "bootstrap") + ":" + owner.replace('/', '.');
+	}
+
+	static Set<String> batchCandidateFields(ClassLoader loader, String hostName) {
+		BatchContext context = BATCH_CONTEXT.get();
+		if (context == null || hostName == null) return Set.of();
+		return context.candidateFields().getOrDefault(batchHostKey(context, hostName, loader), Set.of());
+	}
+
 	public static Set<UnpatchedField> getUnpatchedFields(Class<?> host) {
 		if (host == null) return Set.of();
 		synchronized (LEDGER) {
@@ -486,35 +704,43 @@ public class InitFix {
 	 */
 	public record FieldPatchTask(
 	 String methodName, String fieldName, boolean isStatic, Set<String> dependencies,
+	 Set<InitFixBatchGraph.FieldKey> batchDependencies,
 	 boolean selfOnly, boolean replay, String batchMethodName, ConstantInitSpec constantInit) {
 
 		public FieldPatchTask {
 			dependencies = dependencies == null ? Set.of() : Set.copyOf(dependencies);
+			batchDependencies = batchDependencies == null ? Set.of() : Set.copyOf(batchDependencies);
 		}
 
-		/** 默认作用域（{@code INCLUDE_SUBCLASSES}）的任务：子类实例同样要补。 */
+		/** Default-scope task with no batch-level dependencies. */
 		public FieldPatchTask(String methodName, String fieldName, boolean isStatic,
 		                      Set<String> dependencies) {
-			this(methodName, fieldName, isStatic, dependencies, false, false, null, null);
+			this(methodName, fieldName, isStatic, dependencies, Set.of(), false, false, null, null);
 		}
 
-		/** 默认作用域 + 非重放任务。 */
+		/** Default-scope task with explicit batch-level dependencies. */
+		public FieldPatchTask(String methodName, String fieldName, boolean isStatic,
+		                      Set<String> dependencies, Set<InitFixBatchGraph.FieldKey> batchDependencies) {
+			this(methodName, fieldName, isStatic, dependencies, batchDependencies, false, false, null, null);
+		}
+
+		/** Default scope + non-replay task. */
 		public FieldPatchTask(String methodName, String fieldName, boolean isStatic,
 		                      Set<String> dependencies, boolean selfOnly) {
-			this(methodName, fieldName, isStatic, dependencies, selfOnly, false, null, null);
+			this(methodName, fieldName, isStatic, dependencies, Set.of(), selfOnly, false, null, null);
 		}
 
-		/** 兼容不带批方法名的构造（静态任务或无法内联进批循环的切片）。 */
+		/** Compatibility constructor without batch method name. */
 		public FieldPatchTask(String methodName, String fieldName, boolean isStatic,
 		                      Set<String> dependencies, boolean selfOnly, boolean replay) {
-			this(methodName, fieldName, isStatic, dependencies, selfOnly, replay, null, null);
+			this(methodName, fieldName, isStatic, dependencies, Set.of(), selfOnly, replay, null, null);
 		}
 
-		/** 兼容带批方法名、不带常驻常量直写描述的构造。 */
+		/** Compatibility constructor with batch method name. */
 		public FieldPatchTask(String methodName, String fieldName, boolean isStatic,
 		                      Set<String> dependencies, boolean selfOnly, boolean replay,
 		                      String batchMethodName) {
-			this(methodName, fieldName, isStatic, dependencies, selfOnly, replay, batchMethodName, null);
+			this(methodName, fieldName, isStatic, dependencies, Set.of(), selfOnly, replay, batchMethodName, null);
 		}
 	}
 
@@ -779,6 +1005,31 @@ public class InitFix {
 	 * 不构成读穿，跟随单阶段路径即可；A 档 apply 重放写入的是<b>另一个类型</b>的字段，宿主阶段 C 的
 	 * deopt 覆盖不到那个类型，故不纳入本判据。</p>
 	 */
+	public static List<Class<?>> orderBatchHosts(List<Class<?>> hosts) {
+		BatchContext context = BATCH_CONTEXT.get();
+		if (context == null) return hosts;
+		Map<String, Class<?>> byKey = new LinkedHashMap<>();
+		Map<InitFixBatchGraph.FieldKey, Set<InitFixBatchGraph.FieldKey>> edges = new LinkedHashMap<>();
+		for (Class<?> host : hosts) {
+			String key = batchHostKey(context, host);
+			byKey.put(key, host);
+			PendingPatch patch = PENDING.get(host);
+			if (patch == null) continue;
+			for (FieldPatchTask task : patch.plan().allTasks()) {
+				edges.put(new InitFixBatchGraph.FieldKey(key, task.fieldName()), task.batchDependencies());
+
+			}
+		}
+		List<String> ordered = InitFixBatchGraph.graph(edges).topologicalHosts(byKey.keySet());
+		if (ordered.isEmpty() && !byKey.isEmpty()) return List.copyOf(hosts);
+		return ordered.stream().map(byKey::get).filter(Objects::nonNull).toList();
+	}
+
+	private static String batchHostKeyCurrent(Class<?> host) {
+		BatchContext context = BATCH_CONTEXT.get();
+		return context == null ? host.getName() : batchHostKey(context, host);
+	}
+
 	public static boolean requiresTwoPhase(Class<?> host) {
 		return requiresTwoPhase(host, true);
 	}
@@ -1048,6 +1299,16 @@ public class InitFix {
 
 	public static void transform(Class<?> host, byte[] newBytes, ClassDiff diff) {
 		if (!RemoldAgent.INIT_FIX) return;
+		BatchContext context = BATCH_CONTEXT.get();
+		if (context != null) {
+			if (host != null) context.inputs().add(new BatchInput(host, newBytes, diff));
+			return;
+		}
+		transformNow(host, newBytes, diff);
+	}
+
+	private static void transformNow(Class<?> host, byte[] newBytes, ClassDiff diff) {
+		if (!RemoldAgent.INIT_FIX) return;
 
 		PENDING.remove(host);
 		cleanupStalePatches();
@@ -1113,10 +1374,35 @@ public class InitFix {
 		String className = diff.newClass.name;
 		warnHashSemanticDependencies(diff.newClass, newBytes, addedInstanceFields);
 		try {
-			BuiltPatch built = buildPatch(host, diff.newClass, newBytes, className,
+			PatchAnalysis analysis = analyzePatch(host, diff.newClass, newBytes, className,
 			 addedStaticFields, addedInstanceFields, pending, preScannedReinit, replayFields, applyFields,
 			 applyPlan.decisions());
-			// if (built == null) return;
+			Runnable publish = () -> publishPatch(host, diff, className, replayFields, applyFields, analysis);
+			BatchContext batch = BATCH_CONTEXT.get();
+			if (batch == null) publish.run();
+			else batch.plans().put(host, new BatchPlan(analysis, publish));
+		} catch (Throwable e) {
+			RemoldAgent.error("Field init patch generation failed for " + className
+			                   + ": " + e.getMessage(), e);
+			// docs/initfix/02-closure-and-ledger.md §2：buildPatch 抛异常意味着没生成任何补丁，但 redefine 会照常推进，
+			// 这些新增字段从此不再出现在 Diff 里。必须在这里记账，否则永久遗忘。
+			// 已有的台账条目原样保留（ledgerPut 会覆盖原因，这里跳过以免丢掉上一轮的结论）。
+			Map<String, String> existing = ledgerSnapshot(host);
+			String              reason   = "patch generation failed: " + e;
+			for (String f : addedInstanceFields) {
+				if (!existing.containsKey(f)) ledgerPut(host, f, reason);
+			}
+			for (String f : addedStaticFields) {
+				if (!existing.containsKey(f)) ledgerPut(host, f, reason);
+			}
+		}
+	}
+
+	private static void publishPatch(Class<?> host, ClassDiff diff, String className,
+	 Map<String, InitializerReplay.ReplayField> replayFields,
+	 Map<String, ApplyInitializerReplay.ReplayField> applyFields, PatchAnalysis analysis) {
+		try {
+			BuiltPatch built = analysis.emit().get();
 
 			REPORTS.put(host, built.report());
 			// 分析级台账：被拒的记入（下轮重试），放行/零值等价的出账。
@@ -1143,20 +1429,14 @@ public class InitFix {
 				    + ": a newly added/type-changed field is actually patched, so new bodies must not"
 				    + " go live before the patch (docs/initfix/04-target-design.md)");
 			}
-		} catch (Throwable e) {
-			RemoldAgent.error("Field init patch generation failed for " + className
-			                   + ": " + e.getMessage(), e);
-			// docs/initfix/02-closure-and-ledger.md §2：buildPatch 抛异常意味着没生成任何补丁，但 redefine 会照常推进，
-			// 这些新增字段从此不再出现在 Diff 里。必须在这里记账，否则永久遗忘。
-			// 已有的台账条目原样保留（ledgerPut 会覆盖原因，这里跳过以免丢掉上一轮的结论）。
-			Map<String, String> existing = ledgerSnapshot(host);
-			String              reason   = "patch generation failed: " + e;
-			for (String f : addedInstanceFields) {
-				if (!existing.containsKey(f)) ledgerPut(host, f, reason);
+		} catch (Throwable failure) {
+			for (String field : analysis.instanceDecisions().keySet()) {
+				if (!replayFields.containsKey(field)) ledgerPutIfAbsent(host, field, "patch emission failed: " + failure);
 			}
-			for (String f : addedStaticFields) {
-				if (!existing.containsKey(f)) ledgerPut(host, f, reason);
+			for (String field : analysis.staticDecisions().keySet()) {
+				ledgerPutIfAbsent(host, field, "patch emission failed: " + failure);
 			}
+			RemoldAgent.error("Field init patch emission failed for " + className, failure);
 		}
 	}
 
@@ -1214,7 +1494,7 @@ public class InitFix {
 	/** 被 TTL 清扫摘除的补丁：宿主弱键 + 未补字段名 + 年龄（秒）。 */
 	private record StalePatch(WeakReference<Class<?>> host, List<String> fields, long ageSeconds) { }
 
-	private static BuiltPatch buildPatch(
+	private static PatchAnalysis analyzePatch(
 	 Class<?> host, ClassNode preParsedNewClass, byte[] newBytes, String className,
 	 Set<String> addedStaticFields, Set<String> addedInstanceFields,
 	 Map<String, String> pendingLedger,
@@ -1573,135 +1853,184 @@ public class InitFix {
 		Set<String> depStatic = new LinkedHashSet<>(targetStaticFields);
 		depStatic.removeAll(zeroStaticFields);
 
-		// 注解豁免过的字段只告警一次，别在 while 循环里刷屏。
 		Set<String> warnedExemptions = new HashSet<>();
-		boolean     changed          = true;
-		while (changed) {
-			changed = false;
-
-			for (String f : new ArrayList<>(acceptedInstance)) {
-				String reason = subsequentProcessingReason(
-				 f, acceptedInstance, instanceExtracts, initMethods,
-				 className, false, fieldNodes.get(f));
-				if (reason == null) continue;
-				if (reinitFields.containsKey(f)) {
-					String warning = warnExemptedReinit(
-					 className, f, fieldNodes.get(f), reason, false, warnedExemptions);
-					instanceDecisions.put(f, FieldDecision.accepted(warning));
-					continue;
+		Map<String, Set<InitFixBatchGraph.FieldKey>> crossDependencies = new LinkedHashMap<>();
+		Runnable close = () -> {
+			crossDependencies.clear();
+			// 跨类候选缺字节的拒绝必须发生在类内闭包<b>之前</b>：先踢出字段，再让 while(changed)
+			// 把读它的类内下游一并收敛。放在闭包之后（历史顺序）会留下 X.c = X.a + 1 这种
+			// "读着未补字段却被放行"的漏网。
+			if (BATCH_CONTEXT.get() != null) {
+				for (String field : new ArrayList<>(acceptedInstance)) {
+					Optional<Set<InitFixBatchGraph.FieldKey>> deps =
+					 batchDependencyOf(field, instanceExtracts, className, host.getClassLoader(), oracle);
+					if (deps.isEmpty()) {
+						instanceDecisions.put(field, FieldDecision.rejected(
+						 "cross-class dependency unavailable: batch candidate bytes are missing"));
+						acceptedInstance.remove(field);
+					} else {
+						crossDependencies.put(field, deps.get());
+					}
 				}
-				log("Field '" + f + "' refused (subsequent processing): " + reason);
-				acceptedInstance.remove(f);
-				instanceDecisions.put(f, FieldDecision.rejected("subsequent processing: " + reason));
-				changed = true;
-			}
-
-			for (String f : new ArrayList<>(acceptedStatic)) {
-				String reason = subsequentProcessingReason(
-				 f, acceptedStatic, staticExtracts, staticScanMethods,
-				 className, true, fieldNodes.get(f));
-				if (reason == null) continue;
-				if (reinitFields.containsKey(f)) {
-					String warning = warnExemptedReinit(
-					 className, f, fieldNodes.get(f), reason, true, warnedExemptions);
-					staticDecisions.put(f, FieldDecision.accepted(warning));
-					continue;
+				for (String field : new ArrayList<>(acceptedStatic)) {
+					Optional<Set<InitFixBatchGraph.FieldKey>> deps =
+					 batchDependencyOf(field, staticExtracts, className, host.getClassLoader(), oracle);
+					if (deps.isEmpty()) {
+						staticDecisions.put(field, FieldDecision.rejected(
+						 "cross-class dependency unavailable: batch candidate bytes are missing"));
+						acceptedStatic.remove(field);
+					} else {
+						crossDependencies.put(field, deps.get());
+					}
 				}
-				log("Static field '" + f + "' refused (subsequent processing): " + reason);
-				acceptedStatic.remove(f);
-				staticDecisions.put(f, FieldDecision.rejected("subsequent processing: " + reason));
-				changed = true;
 			}
+			// 注解豁免过的字段只告警一次，别在 while 循环里刷屏。
+			boolean     changed          = true;
+			while (changed) {
+				changed = false;
 
-			for (String f : new ArrayList<>(acceptedInstance)) {
-				String reason = depReason(
-				 f, instanceExtracts.get(f), className,
-				 acceptedInstance, acceptedStatic,
-				 depInstance, depStatic);
-				if (reason != null) {
-					log("Field '" + f + "' refused (dependency): " + reason);
+				for (String f : new ArrayList<>(acceptedInstance)) {
+					String reason = subsequentProcessingReason(
+					 f, acceptedInstance, instanceExtracts, initMethods,
+					 className, false, fieldNodes.get(f));
+					if (reason == null) continue;
+					if (reinitFields.containsKey(f)) {
+						String warning = warnExemptedReinit(
+						 className, f, fieldNodes.get(f), reason, false, warnedExemptions);
+						instanceDecisions.put(f, FieldDecision.accepted(warning));
+						continue;
+					}
+					log("Field '" + f + "' refused (subsequent processing): " + reason);
 					acceptedInstance.remove(f);
-					instanceDecisions.put(f, FieldDecision.rejected("dependency: " + reason));
+					instanceDecisions.put(f, FieldDecision.rejected("subsequent processing: " + reason));
 					changed = true;
 				}
-			}
 
-			for (String f : new ArrayList<>(acceptedStatic)) {
-				String reason = depReason(
-				 f, staticExtracts.get(f), className,
-				 null, acceptedStatic,
-				 null, depStatic);
-				if (reason != null) {
-					log("Static field '" + f + "' refused (dependency): " + reason);
+				for (String f : new ArrayList<>(acceptedStatic)) {
+					String reason = subsequentProcessingReason(
+					 f, acceptedStatic, staticExtracts, staticScanMethods,
+					 className, true, fieldNodes.get(f));
+					if (reason == null) continue;
+					if (reinitFields.containsKey(f)) {
+						String warning = warnExemptedReinit(
+						 className, f, fieldNodes.get(f), reason, true, warnedExemptions);
+						staticDecisions.put(f, FieldDecision.accepted(warning));
+						continue;
+					}
+					log("Static field '" + f + "' refused (subsequent processing): " + reason);
 					acceptedStatic.remove(f);
-					staticDecisions.put(f, FieldDecision.rejected("dependency: " + reason));
+					staticDecisions.put(f, FieldDecision.rejected("subsequent processing: " + reason));
+					changed = true;
+				}
+
+				for (String f : new ArrayList<>(acceptedInstance)) {
+					String reason = depReason(
+					 f, instanceExtracts.get(f), className,
+					 acceptedInstance, acceptedStatic,
+					 depInstance, depStatic);
+					if (reason != null) {
+						log("Field '" + f + "' refused (dependency): " + reason);
+						acceptedInstance.remove(f);
+						instanceDecisions.put(f, FieldDecision.rejected("dependency: " + reason));
+						changed = true;
+					}
+				}
+
+				for (String f : new ArrayList<>(acceptedStatic)) {
+					String reason = depReason(
+					 f, staticExtracts.get(f), className,
+					 null, acceptedStatic,
+					 null, depStatic);
+					if (reason != null) {
+						log("Static field '" + f + "' refused (dependency): " + reason);
+						acceptedStatic.remove(f);
+						staticDecisions.put(f, FieldDecision.rejected("dependency: " + reason));
+						changed = true;
+					}
+				}
+
+				// docs/initfix/02-closure-and-ledger.md §1 成环检测：并入同一固定点，而不是等闭包收敛后再做一次。
+				//
+				// 环成员被拒会改变接受集合，而依赖这些成员的字段可能早已通过 depReason
+				// （跨组尤其明显：实例字段读静态字段时，静态侧成环被拒，实例侧早已放行）。
+				// 若等闭包收敛后才检测，这些依赖方就是漏网之鱼 —— 补丁照常执行，
+				// 读到未补的默认值，静默写入过期值。
+				//
+				// 收窄：只拒绝<b>环成员</b>（强连通分量），不整组拒绝。
+				// 与环无关的字段因此得以保留 —— 整组拒绝虽安全，却白白损失热更覆盖面。
+				// 安全性由闭包保证：环成员出局后，依赖它们的字段会在下一轮 depReason
+				// 被连带拒绝；出口后置闭合校验（阶段 2.6）还会再兜一道底。
+				Set<String> membersInstance = cycleMembers(acceptedInstance, instanceExtracts, className);
+				if (!membersInstance.isEmpty()) {
+					String desc = describeMembers(membersInstance);
+					log("Cyclic dependency among instance fields of " + className
+					    + "; refusing members: " + desc);
+					for (String f : membersInstance) {
+						if (acceptedInstance.remove(f)) {
+							instanceDecisions.put(f, FieldDecision.rejected(
+							 "cyclic dependency among instance fields: " + desc));
+						}
+					}
+					changed = true;
+				}
+
+				Set<String> membersStatic = cycleMembers(acceptedStatic, staticExtracts, className);
+				if (!membersStatic.isEmpty()) {
+					String desc = describeMembers(membersStatic);
+					log("Cyclic dependency among static fields of " + className
+					    + "; refusing members: " + desc);
+					for (String f : membersStatic) {
+						if (acceptedStatic.remove(f)) {
+							staticDecisions.put(f, FieldDecision.rejected(
+							 "cyclic dependency among static fields: " + desc));
+						}
+					}
 					changed = true;
 				}
 			}
 
-			// docs/initfix/02-closure-and-ledger.md §1 成环检测：并入同一固定点，而不是等闭包收敛后再做一次。
-			//
-			// 环成员被拒会改变接受集合，而依赖这些成员的字段可能早已通过 depReason
-			// （跨组尤其明显：实例字段读静态字段时，静态侧成环被拒，实例侧早已放行）。
-			// 若等闭包收敛后才检测，这些依赖方就是漏网之鱼 —— 补丁照常执行，
-			// 读到未补的默认值，静默写入过期值。
-			//
-			// 收窄：只拒绝<b>环成员</b>（强连通分量），不整组拒绝。
-			// 与环无关的字段因此得以保留 —— 整组拒绝虽安全，却白白损失热更覆盖面。
-			// 安全性由闭包保证：环成员出局后，依赖它们的字段会在下一轮 depReason
-			// 被连带拒绝；出口后置闭合校验（阶段 2.6）还会再兜一道底。
-			Set<String> membersInstance = cycleMembers(acceptedInstance, instanceExtracts, className);
-			if (!membersInstance.isEmpty()) {
-				String desc = describeMembers(membersInstance);
-				log("Cyclic dependency among instance fields of " + className
-				    + "; refusing members: " + desc);
-				for (String f : membersInstance) {
-					if (acceptedInstance.remove(f)) {
-						instanceDecisions.put(f, FieldDecision.rejected(
-						 "cyclic dependency among instance fields: " + desc));
-					}
+			// ==================== 阶段 2.6：出口后置闭合校验（主防线） ====================
+			// 不依赖前面的顺序是否正确：最终放行的集合必须对依赖闭合 ——
+			// 每个放行字段读到的"本轮受补字段"都必须在放行集合内（T0 零值字段除外）。
+			// 它同时覆盖 docs/initfix/02-closure-and-ledger.md §1（成环后依赖方不重判）与 docs/initfix/03-runtime-driver.md §2（静态依赖边缺失）以及将来
+			// 同类的漏网。违反即整类拒绝并打 error，宁可少补也不静默写入过期值。
+			String closureViolation = closureViolation(
+			 acceptedInstance, acceptedStatic, instanceExtracts, staticExtracts,
+			 depInstance, depStatic, className);
+			if (closureViolation != null) {
+				RemoldAgent.error("Field init patch refused for the whole class " + className
+				                   + ": dependency closure violated: " + closureViolation);
+				for (String f : new ArrayList<>(acceptedInstance)) {
+					instanceDecisions.put(f, FieldDecision.rejected(
+					 "dependency closure violated: " + closureViolation));
 				}
-				changed = true;
-			}
-
-			Set<String> membersStatic = cycleMembers(acceptedStatic, staticExtracts, className);
-			if (!membersStatic.isEmpty()) {
-				String desc = describeMembers(membersStatic);
-				log("Cyclic dependency among static fields of " + className
-				    + "; refusing members: " + desc);
-				for (String f : membersStatic) {
-					if (acceptedStatic.remove(f)) {
-						staticDecisions.put(f, FieldDecision.rejected(
-						 "cyclic dependency among static fields: " + desc));
-					}
+				for (String f : new ArrayList<>(acceptedStatic)) {
+					staticDecisions.put(f, FieldDecision.rejected(
+					 "dependency closure violated: " + closureViolation));
 				}
-				changed = true;
+				acceptedInstance.clear();
+				acceptedStatic.clear();
 			}
-		}
+		};
+		close.run();
+		return new PatchAnalysis(instanceDecisions, staticDecisions, crossDependencies, (field, reason) -> {
+			if (acceptedInstance.remove(field)) instanceDecisions.put(field, FieldDecision.rejected(reason));
+			if (acceptedStatic.remove(field)) staticDecisions.put(field, FieldDecision.rejected(reason));
+		}, close, () -> emitPatch(host, className, hostVersion, targetInstanceFields, targetStaticFields,
+		 forceWriteFields, selfOnlyFields, instanceExtracts, staticExtracts, instanceDecisions, staticDecisions,
+		 acceptedInstance, acceptedStatic, acceptedReplay, replayFields, replayDecisions, applyFields,
+		 applyDecisions, reinitFields, reinitKeys, crossDependencies));
+	}
 
-		// ==================== 阶段 2.6：出口后置闭合校验（主防线） ====================
-		// 不依赖前面的顺序是否正确：最终放行的集合必须对依赖闭合 ——
-		// 每个放行字段读到的"本轮受补字段"都必须在放行集合内（T0 零值字段除外）。
-		// 它同时覆盖 docs/initfix/02-closure-and-ledger.md §1（成环后依赖方不重判）与 docs/initfix/03-runtime-driver.md §2（静态依赖边缺失）以及将来
-		// 同类的漏网。违反即整类拒绝并打 error，宁可少补也不静默写入过期值。
-		String closureViolation = closureViolation(
-		 acceptedInstance, acceptedStatic, instanceExtracts, staticExtracts,
-		 depInstance, depStatic, className);
-		if (closureViolation != null) {
-			RemoldAgent.error("Field init patch refused for the whole class " + className
-			                   + ": dependency closure violated: " + closureViolation);
-			for (String f : new ArrayList<>(acceptedInstance)) {
-				instanceDecisions.put(f, FieldDecision.rejected(
-				 "dependency closure violated: " + closureViolation));
-			}
-			for (String f : new ArrayList<>(acceptedStatic)) {
-				staticDecisions.put(f, FieldDecision.rejected(
-				 "dependency closure violated: " + closureViolation));
-			}
-			acceptedInstance.clear();
-			acceptedStatic.clear();
-		}
-
+	private static BuiltPatch emitPatch(Class<?> host, String className, int hostVersion,
+	 Set<String> targetInstanceFields, Set<String> targetStaticFields, Set<String> forceWriteFields,
+	 Set<String> selfOnlyFields, Map<String, List<FieldExtract>> instanceExtracts,
+	 Map<String, List<FieldExtract>> staticExtracts, Map<String, FieldDecision> instanceDecisions,
+	 Map<String, FieldDecision> staticDecisions, Set<String> acceptedInstance, Set<String> acceptedStatic,
+	 Set<String> acceptedReplay, Map<String, InitializerReplay.ReplayField> replayFields,
+	 Map<String, String> replayDecisions, Map<String, ApplyInitializerReplay.ReplayField> applyFields,
+	 Map<String, String> applyDecisions, Map<String, ReinitField> reinitFields, Map<String, String> reinitKeys,
+	 Map<String, Set<InitFixBatchGraph.FieldKey>> crossDependencies) {
 		// ==================== 阶段 2.5：拓扑排序 ====================
 		// 到这里成环已被排除（阶段 2 的固定点），排序必定成功。
 		List<String> orderedInstance = acceptedInstance.isEmpty()
@@ -1798,8 +2127,11 @@ public class InitFix {
 			instanceDeps.addAll(
 			 dependencyOf(fieldName, instanceExtracts, className, acceptedStatic));
 			hasInstanceDeps |= !instanceDeps.isEmpty();
+			Set<InitFixBatchGraph.FieldKey> batchDeps = crossDependencies.getOrDefault(fieldName, Set.of());
+			for (InitFixBatchGraph.FieldKey dep : batchDeps) instanceDeps.add(batchFailureToken(dep));
+			hasInstanceDeps |= !instanceDeps.isEmpty();
 			instanceTasks.add(new FieldPatchTask(method, fieldName, false, instanceDeps,
-			 selfOnlyTask, replayTask, batchMethodName, constantInit));
+			 batchDeps, selfOnlyTask, replayTask, batchMethodName, constantInit));
 		}
 
 		List<FusedBatchGroup> fusedBatchGroups = List.of();
@@ -1826,8 +2158,11 @@ public class InitFix {
 			 hostInternal, className, new ArrayList<>(fe.instructions()),
 			 fe.protectedAccesses(), conditionalFields, forceWriteFields, Map.of());
 			patch.methods.add(straightLineMethod(method, "()", body));
-			staticTasks.add(new FieldPatchTask(method, fieldName, true,
-			 dependencyOf(fieldName, staticExtracts, className, acceptedStatic)));
+			Set<InitFixBatchGraph.FieldKey> batchDeps = crossDependencies.getOrDefault(fieldName, Set.of());
+			Set<String> staticDeps = new LinkedHashSet<>(
+			 dependencyOf(fieldName, staticExtracts, className, acceptedStatic));
+			for (InitFixBatchGraph.FieldKey dep : batchDeps) staticDeps.add(batchFailureToken(dep));
+			staticTasks.add(new FieldPatchTask(method, fieldName, true, staticDeps, batchDeps));
 		}
 
 		// A 档 apply 重放（docs/initfix/13-kotlin-apply-replay.md §4 写入协议）：
@@ -2692,6 +3027,51 @@ public class InitFix {
 		String name = base;
 		for (int n = 2; !used.add(name); n++) name = base + "$" + n;
 		return name;
+	}
+
+	/**
+	 * Cross-class prerequisites read by one field's init slice.
+	 *
+	 * <p>Returns {@link Optional#empty()} when the slice reads a field of a <b>batch candidate</b> whose final
+	 * bytes are not in the batch view: reading the stale global cache there would let the field be patched from
+	 * a schema that will never be installed. Callers must reject the dependent field instead (fail closed).</p>
+	 */
+	private static Optional<Set<InitFixBatchGraph.FieldKey>> batchDependencyOf(
+	 String fieldName, Map<String, List<FieldExtract>> extracts, String className,
+	 ClassLoader loader, HierarchyTreeOracle oracle) {
+		Set<InitFixBatchGraph.FieldKey> deps = new LinkedHashSet<>();
+		BatchContext context = BATCH_CONTEXT.get();
+		if (context == null) return Optional.of(deps);
+		List<FieldExtract> fieldExtracts = extracts.get(fieldName);
+		if (fieldExtracts == null) return Optional.of(deps);
+		Map<String, byte[]> batchBytes = context.bytesByLoader().get(loader);
+		for (FieldExtract extract : fieldExtracts) {
+			for (AbstractInsnNode insn : extract.instructions()) {
+				if (!(insn instanceof FieldInsnNode access)) continue;
+				int opcode = access.getOpcode();
+				if (opcode != Opcodes.GETFIELD && opcode != Opcodes.GETSTATIC) continue;
+				Optional<ClassHierarchyOracle.MemberRef> member = oracle.resolveMember(
+				 access.owner, access.name, access.desc, true);
+				String owner = member.map(ref -> ref.declaringClass.replace('/', '.'))
+				 .orElse(access.owner.replace('/', '.'));
+				// In-class reads stay out of the cross-class graph: the local closure/topoSort already orders
+				// them, and feeding them back would create self-loops (a field reading itself) plus spurious
+				// "@batch:" tokens on ordinary same-class dependencies.
+				if (owner.equals(className.replace('/', '.'))) continue;
+				String ownerKey = batchCandidateOwnerKey(context, owner, loader);
+				if (ownerKey != null && batchBytes != null && !batchBytes.containsKey(owner)) return Optional.empty();
+				if (member.isEmpty()) {
+					if (ownerKey != null && context.candidateFields().getOrDefault(ownerKey, Set.of()).contains(access.name)) {
+						deps.add(new InitFixBatchGraph.FieldKey(ownerKey, access.name));
+					}
+					continue;
+				}
+				if (((member.get().access & Opcodes.ACC_STATIC) != 0) != (opcode == Opcodes.GETSTATIC)) continue;
+				if (ownerKey == null || !context.candidateFields().getOrDefault(ownerKey, Set.of()).contains(access.name)) continue;
+				deps.add(new InitFixBatchGraph.FieldKey(ownerKey, access.name));
+			}
+		}
+		return Optional.of(deps);
 	}
 
 	/** 该字段切片读取的、同样在本轮受补的其它字段（docs/initfix/03-runtime-driver.md §2 的依赖失败传播用）。 */
@@ -4475,8 +4855,9 @@ public class InitFix {
 			// 只能保守地把整个计划记入台账 —— 下一轮条件 CAS 会跳过已写入的值，
 			// OVERWRITE 字段重写同一个值也是幂等的。
 			for (FieldPatchTask task : patch.plan().allTasks()) {
-				if (task.replay()) continue; // L1 重放不写台账
+				if (task.replay()) continue; // L1 replay does not use the ledger
 				ledgerPut(clazz, task.fieldName(), "patch aborted: " + e);
+				publishBatchFailure(clazz, task.fieldName());
 			}
 			RemoldAgent.error("Field init patch failed: " + e.getMessage(), e);
 		}
@@ -4494,6 +4875,7 @@ public class InitFix {
 				// L1 重放字段不写台账（docs/initfix/12-L1-existing-initializer-replay.md §3）。
 				if (task.replay()) continue;
 				ledgerPut(clazz, task.fieldName(), "redefine failed; patch never applied");
+				publishBatchFailure(clazz, task.fieldName());
 			}
 			log("Dropped pending field init patch for " + clazz.getName()
 			    + " after redefine failure; " + dropped.plan().allTasks().size()
@@ -4568,6 +4950,9 @@ public class InitFix {
 		HotswapBridge.drainReplayStats();
 
 		if (!isInitialized(host)) {
+			// 不变量 1：未初始化类直接跳过，<b>不</b>记账、也<b>不</b>发布跨类失败令牌。它的 <clinit> 还没跑过，
+			// 首次访问时 JVM 会执行新 <clinit> 得到正确初值；在此处记账并牵连下游，会把读它的同批字段
+			// 误判成"依赖失败"而永久停在默认值。
 			log("Skip field init patch, class not initialized (or initializing/failed): "
 			    + host.getName());
 			return;
@@ -4707,6 +5092,7 @@ public class InitFix {
 		}
 
 		Set<String>         failedFields   = new LinkedHashSet<>();
+
 		Set<String>         skippedFields  = new LinkedHashSet<>();
 		Map<String, String> failureReasons = new LinkedHashMap<>();
 		if (perfLog) tDefineNs = System.nanoTime() - tBeforeDefine;
@@ -4838,13 +5224,26 @@ public class InitFix {
 			}
 		}
 
+		if (BATCH_CONTEXT.get() != null) {
+			for (FieldPatchTask task : plan.allTasks()) {
+				String token = batchFailureToken(new InitFixBatchGraph.FieldKey(
+				 batchHostKeyCurrent(host), task.fieldName()));
+				if (failedFields.contains(task.fieldName()) || skippedFields.contains(task.fieldName())) {
+					BATCH_FAILURES.get().add(token);
+					continue;
+				}
+				if (!task.isStatic() && (alive == null || alive.length == 0)) continue;
+				BATCH_FAILURES.get().remove(batchFailureToken(
+				 new InitFixBatchGraph.FieldKey(batchHostKeyCurrent(host), task.fieldName())));
+			}
+		}
 		if (!failedFields.isEmpty() || !skippedFields.isEmpty()) {
 			// docs/initfix/02-closure-and-ledger.md §2 待补台账：本轮没补上的字段记入，下一轮候选集自动并回来。
 			// 先写 failed，再写 skipped —— 熔断字段同时属于两者（它确实失败过，
 			// 又被"放弃"），而 skipped 的原因更具体（"达到失败上限后放弃"），
 			// 因此必须后写、覆盖掉笼统的 runtime failure。
 			for (String f : failedFields) {
-				if (replayTaskFields.contains(f)) continue; // L1 重放不写台账
+				if (replayTaskFields.contains(f)) continue; // L1 replay is not a ledger field
 				ledgerPut(host, f, "runtime failure: "
 				                   + failureReasons.getOrDefault(f, "patch execution failed"));
 			}
@@ -5375,13 +5774,15 @@ public class InitFix {
 
 				Set<String> dependencies = task.dependencies();
 				if (!dependencies.isEmpty()
-				    && (!Collections.disjoint(dependencies, localFailed)
+				    && (!Collections.disjoint(dependencies, activeBatchFailures())
+				        || !Collections.disjoint(dependencies, localFailed)
 				        || !Collections.disjoint(dependencies, localSkipped))) {
 					// 全局只做计数与记账；告警不按实例刷屏。
 					localSkipped.add(task.fieldName());
 					if (skippedFields.add(task.fieldName())) {
 						failureReasons.putIfAbsent(task.fieldName(), "dependency failed: "
-						                                             + intersection(dependencies, localFailed, localSkipped));
+						                                             + dependencyFailureDetail(
+						 dependencies, localFailed, localSkipped));
 						RemoldAgent.warn("Skipping field init for " + host.getName() + "."
 						                  + task.fieldName() + " because a dependency failed");
 					}
@@ -5425,11 +5826,13 @@ public class InitFix {
 
 		for (FieldPatchTask task : tasks) {
 			if (!task.dependencies().isEmpty()
-			    && (!Collections.disjoint(task.dependencies(), failedFields)
+			    && (!Collections.disjoint(task.dependencies(), activeBatchFailures())
+			        || !Collections.disjoint(task.dependencies(), failedFields)
 			        || !Collections.disjoint(task.dependencies(), skippedFields))) {
 				if (skippedFields.add(task.fieldName())) {
 					failureReasons.putIfAbsent(task.fieldName(), "dependency failed: "
-					                                             + intersection(task.dependencies(), failedFields, skippedFields));
+					                                             + dependencyFailureDetail(
+					 task.dependencies(), failedFields, skippedFields));
 					RemoldAgent.warn("Skipping field init for " + host.getName() + "."
 					                  + task.fieldName() + " because a dependency failed");
 				}
@@ -5488,6 +5891,19 @@ public class InitFix {
 		if (cause == null) return false;
 		// cause 本身就是 LinkageError → 真正的元数据问题，必须熔断
 		return !(cause instanceof LinkageError);
+	}
+
+	/**
+	 * 依赖跳过的可读归因：本地失败/跳过集合与跨类批次令牌合并，令牌显示成 {@code Host.field} 而不是
+	 * 裸 {@code @batch:} 前缀。历史实现只合并本地集合，跨类跳过因此永远记成 {@code dependency failed: []}。
+	 */
+	private static String dependencyFailureDetail(
+	 Set<String> dependencies, Set<String> localFailed, Set<String> localSkipped) {
+		Set<String> detail = new LinkedHashSet<>(intersection(dependencies, localFailed, localSkipped));
+		Set<String> batch = new LinkedHashSet<>(dependencies);
+		batch.retainAll(activeBatchFailures());
+		for (String token : batch) detail.add(token.replace("@batch:", ""));
+		return detail.isEmpty() ? "<dependency failed>" : detail.toString();
 	}
 
 	private static Set<String> intersection(Set<String> deps, Set<String> a, Set<String> b) {

@@ -419,6 +419,7 @@
 | 参数回溯不可变证明 | ✅ | [`01-safety-gate.md`](initfix/01-safety-gate.md) §3 | `InitFix.scanParamFields` / `InitFix.NestView` | 条件 A（final/val 字段）与条件 B（private + Nest 全单写证明）；`sourceFieldNotImmutableReason` 守卫 |
 | 多根构造器共识 | ✅ | [`01-safety-gate.md`](initfix/01-safety-gate.md) §4 | `InitFix.extractFieldInits` | 要求所有根构造器覆盖完整且参数替换后指令指纹 100% 一致；多构造器歧义安全拒绝 |
 | 依赖闭包与 Tarjan SCC 成环检测 | ✅ | [`02-closure-and-ledger.md`](initfix/02-closure-and-ledger.md) §1 | `InitFix.buildPatch` | 成环检测并入闭包不动点计算，只拒绝环成员；出口后置 `depInstance ∪ depStatic` 闭合校验兜底 |
+| 跨类批次字段依赖收敛与拓扑执行（PR4-A） | ✅ | [`04-target-design.md`](initfix/04-target-design.md) §5 | `InitFix.beginBatchBytecodeView` / `setBatchDefinitions` / `finishBatchTransforms` / `convergeBatch` / `orderBatchHosts`；`InitFixBatchGraph`；`HierarchyTreeOracle.readClassBytes`；`RemoldAgent.processChangesBatch` | 同批最终对齐字节按 loader 隔离供离线层级/Nest/作用域分析，候选类缺字节即 fail-closed（不回退全局旧缓存）；跨类依赖按 `(Class, Field)` 构图，读本批新增/待补字段形成边，读旧字段与 T0 零值字段不成边，静态性与真实声明按描述符解析；拒绝按字段精确传播并在剔除后重跑本地闭包，宿主级环/矛盾交错保守拒绝且不影响独立字段；单阶段与两阶段 Stage B 均按宿主拓扑序执行（不拆同类融合循环）；运行期 prerequisite 失败只跳精确下游字段并各自记入 `FieldLedger`。验收：`CrossClassInitFixTest` 6 用例（loader 隔离、候选字节缺失 fail-closed、跨类拒绝连带类内下游、类内依赖不入跨类图）、`InitFixBatchGraphTest` 6 用例（含顺序稳定性与宿主完整性）、`crossClassInitFixProbe` 28/0（JBR 21 DCEVM；单阶段与两阶段各 14 项——逆序输入跨类静态初始化、运行期 prerequisite 失败只跳下游且台账点名前置字段、未初始化宿主静默跳过不牵连下游；两阶段的失败注入走阶段 A 保留的旧方法体）、`twoPhaseProbe` 72/0、`initFixOracle`、`check`；变异 9/17 击杀（战役台账 5/12；两轮评审修复中手工复现 4/5，均恢复原字节）。已击杀：禁用同批 overlay、打乱宿主顺序、去掉运行期失败 token 发布、去掉循环拒绝、去掉跨类边收集、去掉候选字节缺失 fail-closed、禁用跨类拒绝、把类内边灌进跨类图、未初始化宿主重新记账。存活 6/17 集中在三类：重复试探同一变异点、改到不可达 helper、`test_cmd` 未包含目标断言所在文件 |
 | 失败策略矩阵 | 🔶 | [`02-closure-and-ledger.md`](initfix/02-closure-and-ledger.md) §3 | `InitFix.runIndependentInstanceTasks` / `InstanceFailureBudget` | 已支持单字段失败跳过、依赖跳过、`LinkageError` 熔断；“放弃提交阶段 C”已随两阶段协议落地（`RemoldAgent.applyTwoPhase` / `redefineStageA`，见 §0.7） |
 | 伴生补丁类装配 | ✅ | [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §1 | `InitFix.generatePatchClass` / `Lookup.defineHiddenClass` | 每字段生成独立静态直线方法；宿主 hidden nestmate 隔离异常与加载死锁 |
 | 构造器尾部插桩器 | 🔶 | [`04-target-design.md`](initfix/04-target-design.md) §4 | `core/src/remold/ref/ConstructorTailInjector` | 纯函数字节码改写：在每个根构造器的每个 `RETURN` 前插入 `ALOAD 0; <切片>; PUTFIELD`；跳过 `this(...)` 委托构造器（避免沿委托链重复执行）与体内已自行赋值目标字段的构造器（构造器逻辑优先）；只插直线代码、写入侧仅 `COMPUTE_MAXS` 不重算栈帧。`ConstructorTailInjectorTest` 8 用例覆盖多根构造器、多返回路径、`this` 读取切片与覆盖保护，并做过变异检查。**接线状态**：两阶段契约下阶段 A 保留新构造器/`<clinit>`，窗口内新建实例由新构造器直接初始化，因此本组件**有意不接线**（单测保留，见 §4.1）；仅当将来要求阶段 A 的构造器也回退旧体时才重新需要 |
@@ -489,7 +490,7 @@
 | **观测包：批次 N + 吞吐曲线 + 降级会话数** | P1 | 持续（v0.2.9 起） | [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10–§11 | `HotswapBatchListener` / `applyPatch` 日志 / `[VM-INFO]` | 决定"单遍历按类分发""deopt 回落对策""`remold-launcher` 是否升 P1"；只采集数据，不改产品代码 |
 | **NeoForge 26.x / FML 10 代际适配** | P2 | v0.3（先 spike） | `plugin-forge`；原 §4.1.1 条目已并入本节 | FML 10 源码与 `net.neoforged.fml.startup.*` 入口 | 上游已移除 ModLauncher，现有跨 ClassLoader 桥不适用 = 该代际完全不可用；先量化工作量再决定是否全量（避免无用户证据的长期投入） |
 | **`ForgeMixinHotSwap` 接入内部类热更闭环** | P2 | v0.3 | §0.10 残余 8；[`mixin/08`](mixin/08-decisions-and-empirical-ledger.md) | 已有 Fabric 侧闭环可参照 | 拉平 Forge 与 Fabric 的 Mixin 匿名/内部类能力（含覆盖层与事务共退） |
-| **跨类批次拓扑排序** | P2 | v0.3 | [`04-target-design.md`](initfix/04-target-design.md) §5 | 跨类字段依赖图构建器 | 类 X 新增字段被类 Y 初始化式依赖时的跨类事务顺序（当前仅支持单类内部拓扑） |
+| **跨类批次拓扑排序** | ✅ | 已交付（见 §2 行「跨类批次字段依赖收敛与拓扑执行（PR4-A）」） | [`04-target-design.md`](initfix/04-target-design.md) §5 | 跨类字段依赖图构建器 | 类 X 新增字段被类 Y 初始化式依赖时的跨类事务顺序（含单类内部拓扑）；宿主级环与矛盾交错保守拒绝、独立字段仍可补；运行期 prerequisite 失败只跳精确下游 |
 | **对齐盲区收敛包** | P2 | v0.3 | 风险 2/3/5；[`03-cascading-pipeline.md`](topology/03-cascading-pipeline.md) §2、[`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §1、[`09-lambda-capture-bridge.md`](topology/09-lambda-capture-bridge.md) §6 | 无 | 同批收敛六处同源盲区：非方法上下文三态标签、同名局部类完整对齐、Tier 1.5 重叠评估（与 Tier 3.5 重复则撤销）、夹具 L 保守代价、`willForward` 转发桩被熔断器先炸、`BODY_MISMATCH` 去重键缺轮次 |
 | **反射与元数据漂移补齐** | P2 | v0.3 | §0.16 / §0.17 / 风险 10 | 无 | Gson/Jackson 真实缓存驱逐前后对照、`EvictionScope.WITH_DESCENDANTS` 评估、类级泛型签名漂移告警、`HashSemantics` 子类读父类新增字段扫描、`AnnotationDefault` 移除读 `SourceFile` 成因定位 |
 | **Mixin `schemaHash` 新合成类名方案** | P2 | v0.3（`[假设]` 先验） | [`mixin/08`](mixin/08-decisions-and-empirical-ledger.md) §4 | 无 | 捕获列表变化时用 `defineClass` 新类名 + 宿主 body-only redefine，验证 `newlyNull=0` 后打破"改 Mixin 匿名类捕获必须重启" |
@@ -703,7 +704,9 @@
     里补，窗口仍在。要关窗口必须让 transformer 首次返回阶段 A 骨架、再在补丁完成后主动触发第二次
     redefine；JDWP 协议不提供这个触发点，该通道实际不可达（除非另起触发源）。
   - **补丁被安全门拒绝的字段**：没有补丁就没有可等待的值，两阶段无法代偿，语义仍是「重启」；
-  - **阶段 B 完成前的残余读取**：新构造器若读取本类新增**静态**字段、或读取同批其它类尚未补齐的字段，仍可能拿到默认值（跨类拓扑排序尚未接线，见路线图）。
+  - **阶段 B 完成前的残余读取**：新构造器若读取本类新增**静态**字段，仍可能拿到默认值。跨类部分已由
+    跨类批次字段依赖收敛与宿主拓扑执行收口（见 §2 对应行）：同批其它类的 prerequisite 宿主先补、失败时
+    精确下游被跳过并记账，但**已被拒绝**的下游字段仍无值可等，语义还是「重启」。
 - **窗口量级**（仅对仍敞开的路径有参考意义；实测拆分见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10）：
   - 枚举成本 = **无关对象约 8 ns/个**（全堆遍历固定项）+ **匹配实例约 0.3~1 µs/个**（打 tag 与物化数组）；
   - 极端场景（目标类自身 100 万实例）：`applyPatch` 约 1551 ms，其中 CAS 仅 83 ms、弱引用往返 389 ms；
@@ -712,7 +715,7 @@
   - **暴露时间要扣掉 STW 段**：实测（M6）每次 `getInstances` 是一次 safepoint，1M 匹配实例时 `HeapIterateOperation` 单次 216~242 ms；停世界期间业务线程读不到未补字段。心跳吞吐只有自由速率的 67%，是「一段 STW + 其余阶段并发」的混合，不是全程争抢。
 - **触发条件**：窗口内有线程执行读取新增字段的代码——本类新方法体、同批重定义的其它类、反射/序列化路径、任意业务线程。
 - **缓解措施**：两阶段路径已由编排消除；残余路径上 `HOTSWAP_LOCK` 只互斥热更调度与事务处理、**不阻塞应用线程读**，因此不构成防护；T0 零值等价字段不受影响（默认值即正确值）；`PatchReport` 与条件 CAS 跳过计数可在事后定位“这次写了哪些字段”，但无法预防窗口内的读。
-- **根治与关闭条件**：只剩**外部 IDE/JDWP 重定义通道**——它受"JVM 先完成后置回调"约束，需要在 transformer 里先把新字节改为阶段 A 骨架、再在补丁完成后主动触发阶段 C（JDWP 无该触发点，需另起触发源）。另一条独立残余是跨类批次拓扑排序（阶段 B 完成前新构造器读同批其它类的新字段）。
+- **根治与关闭条件**：只剩**外部 IDE/JDWP 重定义通道**——它受"JVM 先完成后置回调"约束，需要在 transformer 里先把新字节改为阶段 A 骨架、再在补丁完成后主动触发阶段 C（JDWP 无该触发点，需另起触发源）。跨类批次拓扑排序已收口（见 §2）；同批内仍无法代偿的是**被安全门拒绝**的字段与上述 JDWP 通道。
 - **关联设计规范**：[`docs/initfix/04-target-design.md`](initfix/04-target-design.md) §1、[`docs/initfix/03-runtime-driver.md`](initfix/03-runtime-driver.md) §2。
 - **关联架构决策**：无。
 

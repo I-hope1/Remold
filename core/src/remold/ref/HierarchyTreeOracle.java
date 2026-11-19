@@ -286,13 +286,16 @@ public final class HierarchyTreeOracle implements ClassHierarchyOracle {
 	}
 
 	private byte[] readClassBytes(String internalName) {
+		ClassLoader targetLoader = loader.get();
+		byte[] batch = InitFix.batchClassBytes(targetLoader, internalName);
+		if (batch != null) return batch;
+		if (InitFix.batchViewActive(targetLoader) && InitFix.batchCandidateMissing(targetLoader, internalName)) return null;
 		byte[] cached = RemoldAgent.bytecodeCache.get(internalName.replace('/', '.'));
 		if (cached != null) return cached;
 		// 织入期生成的合成类（Mixin 的 Target$Anonymous$<uuid>）磁盘上没有 .class、也不经过
 		// Remold 的 transformer，只能由生成方回灌到登记口。
 		byte[] supplied = BytecodeSources.lookup(internalName);
 		if (supplied != null) return supplied;
-		ClassLoader targetLoader = loader.get();
 		ClassLoader sourceLoader = targetLoader == null ? ClassLoader.getSystemClassLoader() : targetLoader;
 		if (sourceLoader == null) return null;
 		try (InputStream in = sourceLoader.getResourceAsStream(internalName + ".class")) {

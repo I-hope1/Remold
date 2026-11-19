@@ -850,6 +850,9 @@ dcevmProbe("p05Probe", "P05Probe",
 dcevmProbe("twoPhaseProbe", "TwoPhaseProbe",
 	"两阶段编排端到端探针 (TwoPhaseProbe)：阶段 A → redefine → 阶段 B 补丁 → 阶段 C redefine")
 
+dcevmProbe("crossClassInitFixProbe", "CrossClassInitFixProbe",
+	"Cross-class InitFix ordering and failure propagation on DCEVM")
+
 dcevmProbe("offsetStabilityProbe", "OffsetStabilityProbe",
 	"偏移量稳定性与漂移实测探针 (OffsetStabilityProbe)：单类加字段稳定性、父类漂移、Updater破坏与C2逆优化")
 

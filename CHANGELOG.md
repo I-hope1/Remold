@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **PR4-A：跨类批次字段依赖按 `(Class, Field)` 收敛并在宿主拓扑序上执行**
+  （`InitFix`、`InitFixBatchGraph`、`HierarchyTreeOracle`、`RemoldAgent`）：热更批次里「类 X 的新增字段
+  由类 Y 的初始化式读取」这种情况不再按单类孤立处理。
+  - 同批**最终对齐字节**按 ClassLoader 隔离成一份只读视图（`beginBatchBytecodeView` /
+    `setBatchDefinitions` / `endBatchBytecodeView`），供离线层级、Nest 与 `@RemoldReinit` 作用域分析
+    读取；候选类若字节缺失或不可安装一律 fail-closed，不回退到全局旧缓存。
+  - 跨类依赖图按字段节点构建（`InitFixBatchGraph`）：读本批新增/待补字段才成边，读旧字段与已确认的
+    T0 零值字段不成边；`GETFIELD`/`GETSTATIC` 按描述符区分静态性与真实声明；loader 身份参与节点键。
+  - 收敛在发射前一次算清（`convergeBatch`）：跨类拒绝只落到精确下游字段并在剔除后重跑本地闭包；
+    宿主级环与矛盾交错保守拒绝，同批无关字段仍可补。
+  - 单阶段与两阶段 Stage B 都按宿主拓扑序执行（`orderBatchHosts`），同类融合字段循环不被拆分。
+  - 运行期 prerequisite 失败只跳过精确下游字段，上下游各自记入 `FieldLedger`；`@batch:` token 只作
+    内部依赖键，不写进台账字段名。
+  - 批次视图保留候选类**身份**而不只是已安装字节：被布局门/注解门挡掉的类仍是候选，其字节缺失时
+    相关下游字段一律拒绝，绝不回退全局旧缓存（`setBatchDefinitions` / `finishBatchTransforms` 不再丢弃
+    批次开始时登记的候选键）。
+  - 宿主拓扑输入全程保持插入序（不再经 `Set.copyOf` 打乱），同一 JVM 多次运行与跨进程排查得到相同顺序。
+  - 两阶段路径不再提前清空批次视图（原先清在 `applyTwoPhase.finally`），混合批次仍能保持跨类顺序。
+  - 跨类拒绝提前到类内闭包**之前**执行，拒绝一个字段后 `while (changed)` 会把读它的类内下游一并收敛，
+    不再出现「读着未补字段却被放行」；`closureViolation` 仍是出口主防线。
+  - 跨类图只收真正的跨类边（跳过 `owner == 本类`）：类内依赖继续由本地闭包/拓扑负责，避免自读被当成
+    自环误杀、以及普通类内依赖被挂上多余的 `@batch:` 令牌。
+  - 运行期跨类跳过的台账原因合并批次令牌并显示成 `Host.field`（历史实现只合并本地集合，永远记成
+    `dependency failed: []`，丢掉前置宿主的归因）。
+  - 不变量 1 恢复原契约：未初始化宿主静默跳过，**不**记账也**不**发布失败令牌——它的新 `<clinit>` 会在首次
+    访问时执行，牵连下游会把本可正确初始化的字段永久留在默认值。
+  - 验收：`crossClassInitFixProbe` 28/0（JBR 21 DCEVM；单阶段与两阶段各 14 项——逆序输入跨类静态初始化、
+    运行期 prerequisite 失败只跳下游且台账点名前置字段、未初始化宿主静默跳过；两阶段的失败注入走阶段 A
+    保留的旧方法体）、`twoPhaseProbe` 72/0、`initFixOracle`、`check`；单测 `CrossClassInitFixTest` 6 用例 /
+    `InitFixBatchGraphTest` 6 用例；变异 9/17 击杀（战役台账 5/12，两轮评审修复中手工复现 4/5）。
+    已击杀：禁用同批 overlay、打乱宿主顺序、去掉运行期失败 token、去掉循环拒绝、去掉跨类边收集、
+    去掉候选字节缺失 fail-closed、禁用跨类拒绝、把类内边灌进跨类图、未初始化宿主重新记账。
+    存活 6/17 属三类：重复试探同一变异点、改到不可达 helper、`test_cmd` 未包含目标断言所在文件。
+
 - **PR3：活的 lambda 对齐改走 `R_prev ↔ R_new`（Run R），`Eff_prev` 降级为继承来源**
   （`LambdaAligner`、`AlignmentMetaStore`、`RemoldAgent`）：活体路径不再拿被幽灵桩 / 捕获桥 /
   避障自造名污染的上一轮生效字节去配对，配对基线改为元数据里保留的 Raw_prev 字节；幽灵桩、保留体、

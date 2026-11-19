@@ -1,0 +1,173 @@
+import remold.LayoutGate;
+import remold.RemoldAgent;
+import remold.ref.InitFix;
+import remold.util.LibTool;
+
+import java.lang.instrument.Instrumentation;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+public class CrossClassInitFixProbe {
+	private static int passed;
+	private static int failed;
+	private static Instrumentation instrumentation;
+
+	private static void check(boolean condition, String message) {
+		System.out.println((condition ? "[PASS] " : "[FAIL] ") + message);
+		if (condition) passed++; else failed++;
+	}
+
+	public static void main(String[] args) throws Throwable {
+		instrumentation = P05Agent.instrumentation();
+		if (instrumentation == null) throw new IllegalStateException("instrumentation unavailable");
+		Field instField = RemoldAgent.class.getDeclaredField("inst");
+		instField.setAccessible(true);
+		instField.set(null, instrumentation);
+		try { if (!LibTool.initialized()) LibTool.init(); }
+		catch (Throwable failure) { throw new IllegalStateException("native LibTool unavailable", failure); }
+		RemoldAgent.INIT_FIX = true;
+		RemoldAgent.ANON_ALIGN = true;
+		RemoldAgent.LAYOUT_GATE = LayoutGate.MODE_REJECT;
+		RemoldAgent.OFFSET_STRICT = false;
+		RemoldAgent.DEBUG = false;
+		for (boolean twoPhase : new boolean[]{false, true}) {
+			RemoldAgent.TWO_PHASE = twoPhase;
+			scenarioSameBatchStaticOrder(twoPhase);
+			scenarioRuntimePrerequisiteFailure(twoPhase);
+			scenarioUninitialisedPrerequisiteStaysSilent(twoPhase);
+		}
+		System.out.println("CROSS-CLASS INITFIX SUMMARY: passed=" + passed + ", failed=" + failed);
+		if (failed != 0) System.exit(1);
+	}
+
+	private static void scenarioSameBatchStaticOrder(boolean twoPhase) throws Throwable {
+		String pkg = twoPhase ? "ccprobe.order2p" : "ccprobe.order";
+		String tag = twoPhase ? " [two-phase]" : " [single-phase]";
+		String y1 = "package " + pkg + "; public class Y { }";
+		String x1 = "package " + pkg + "; public class X { }";
+		String x2 = "package " + pkg + "; public class X { public static int read = Y.base + 4; }";
+		Fixture f = fixture(pkg, Map.of(pkg + ".X", x1, pkg + ".Y", y1), Map.of(pkg + ".X", x2,
+		 pkg + ".Y", "package " + pkg + "; public class Y { public static int base = 9; }"));
+		Class<?> x = f.load(pkg + ".X"); Class<?> targetY = f.load(pkg + ".Y");
+		check(x.getDeclaredFields().length == 0, "precondition: X has no target field before redefine" + tag);
+		f.hotSwap(pkg + ".X", pkg + ".Y");
+		check(targetY.getField("base").getInt(null) == 9, "Y.base receives its new initializer" + tag);
+		check(x.getField("read").getInt(null) == 13, "X.read observes Y.base after prerequisite host patch" + tag);
+		check(InitFix.getUnpatchedFields(x).stream().noneMatch(field -> field.fieldName().equals("read")),
+		 "successful dependent field is absent from FieldLedger" + tag);
+		f.close();
+	}
+
+	private static void scenarioRuntimePrerequisiteFailure(boolean twoPhase) throws Throwable {
+		String pkg = twoPhase ? "ccprobe.failure2p" : "ccprobe.failure";
+		String tag = twoPhase ? " [two-phase]" : " [single-phase]";
+		// Stage A keeps the OLD method bodies during the patch window, so a "broken new helper" only fails in
+		// single-phase. Use a helper that throws in the OLD body and returns normally in the NEW body: that way
+		// both modes really execute a failing prerequisite patch instead of silently succeeding.
+		String throwingHelper = "public static int compute() { throw new IllegalStateException(\"expected\"); }";
+		String normalHelper = "public static int compute() { return 1; }";
+		String y1 = "package " + pkg + "; public class Y { " + (twoPhase ? throwingHelper : normalHelper) + " }";
+		String y2 = "package " + pkg + "; public class Y { public static int base = compute(); "
+		 + (twoPhase ? normalHelper : throwingHelper) + " }";
+		String x1 = "package " + pkg + "; public class X { }";
+		String x2 = "package " + pkg + "; public class X { public static int blocked = Y.base + 1; public static int independent = 31; }";
+		Fixture f = fixture(pkg, Map.of(pkg + ".X", x1, pkg + ".Y", y1), Map.of(pkg + ".X", x2, pkg + ".Y", y2));
+		Class<?> x = f.load(pkg + ".X"); Class<?> y = f.load(pkg + ".Y");
+		boolean oldHelperBodyActive;
+		try {
+			Object probeValue = y.getMethod("compute").invoke(null);
+			oldHelperBodyActive = !twoPhase && probeValue.equals(1);
+		} catch (java.lang.reflect.InvocationTargetException expected) {
+			oldHelperBodyActive = twoPhase && expected.getCause() instanceof IllegalStateException;
+		}
+		check(x.getDeclaredFields().length == 0 && oldHelperBodyActive,
+		 "precondition: target fields are absent and the pre-redefine helper body is active" + tag);
+		f.hotSwap(pkg + ".X", pkg + ".Y");
+		check(x.getField("blocked").getInt(null) == 0, "X.blocked remains at its default after Y.base runtime failure" + tag);
+		check(x.getField("independent").getInt(null) == 31, "X.independent still executes" + tag);
+		check(InitFix.getUnpatchedFields(x).stream().anyMatch(field -> field.fieldName().equals("blocked")),
+		 "dependent skip is recorded in X FieldLedger" + tag);
+		String blockedReason = InitFix.getUnpatchedFields(x).stream()
+		 .filter(field -> field.fieldName().equals("blocked")).map(InitFix.UnpatchedField::reason)
+		 .findFirst().orElse("");
+		check(blockedReason.contains("Y.base") && !blockedReason.contains("[]"),
+		 "skip reason names the failed prerequisite host field, actual=" + blockedReason + tag);
+		f.close();
+	}
+
+	/**
+	 * Invariant 1: an uninitialised host must be skipped silently — no FieldLedger entry and no cross-class
+	 * failure token. Its new {@code <clinit>} has not run yet, so the first read of {@code Y.base} initialises
+	 * Y and yields the new value; blocking the downstream field here would leave it at the default zero.
+	 */
+	private static void scenarioUninitialisedPrerequisiteStaysSilent(boolean twoPhase) throws Throwable {
+		String pkg = twoPhase ? "ccprobe.uninit2p" : "ccprobe.uninit";
+		String tag = twoPhase ? " [two-phase]" : " [single-phase]";
+		String y1 = "package " + pkg + "; public class Y { }";
+		String x1 = "package " + pkg + "; public class X { }";
+		String x2 = "package " + pkg + "; public class X { public static int read = Y.base + 4; }";
+		Fixture f = fixture(pkg, Map.of(pkg + ".X", x1, pkg + ".Y", y1), Map.of(pkg + ".X", x2,
+		 pkg + ".Y", "package " + pkg + "; public class Y { public static int base = 9; }"));
+		Class<?> x = f.load(pkg + ".X");
+		Class<?> y = f.loadWithoutInitialising(pkg + ".Y");
+		// Y is only loaded (initialize=false) and never touched before the swap, so its <clinit> cannot have run.
+		check(x.getDeclaredFields().length == 0 && y.getDeclaredFields().length == 0,
+		 "precondition: neither host carries the target field yet" + tag);
+		f.hotSwap(pkg + ".X", pkg + ".Y");
+		check(InitFix.getUnpatchedFields(y).isEmpty(),
+		 "uninitialised host is not written into FieldLedger (invariant 1)" + tag);
+		check(x.getField("read").getInt(null) == 13,
+		 "downstream field still patches; reading Y.base runs Y's new <clinit>" + tag);
+		check(y.getField("base").getInt(null) == 9, "Y.base is correct once Y initialises" + tag);
+		check(InitFix.getUnpatchedFields(x).stream().noneMatch(field -> field.fieldName().equals("read")),
+		 "downstream field is not recorded as postponed" + tag);
+		f.close();
+	}
+
+	private static Fixture fixture(String pkg, Map<String, String> oldSources, Map<String, String> newSources)
+	 throws Exception {
+		Map<String, byte[]> oldBytes = LayoutGateAssert.compile(oldSources);
+		Map<String, byte[]> newBytes = LayoutGateAssert.compile(newSources);
+		FixtureLoader loader = new FixtureLoader(oldBytes);
+		Path root = Files.createTempDirectory("cross_class_initfix");
+		Fixture fixture = new Fixture(loader, root);
+		for (Map.Entry<String, byte[]> entry : oldBytes.entrySet()) {
+			RemoldAgent.bytecodeCache.put(entry.getKey(), entry.getValue());
+			RemoldAgent.sourceBytecodeCache.put(entry.getKey(), entry.getValue());
+		}
+		for (Map.Entry<String, byte[]> entry : newBytes.entrySet()) {
+			Path path = root.resolve(entry.getKey().replace('.', '/') + ".class");
+			Files.createDirectories(path.getParent()); Files.write(path, entry.getValue());
+			fixture.paths.put(entry.getKey(), path);
+		}
+		return fixture;
+	}
+
+	private static final class Fixture implements AutoCloseable {
+		final FixtureLoader loader; final Path root; final java.util.Map<String, Path> paths = new java.util.LinkedHashMap<>();
+		Fixture(FixtureLoader loader, Path root) { this.loader = loader; this.root = root; }
+		Class<?> load(String name) throws Exception { return Class.forName(name, true, loader); }
+		Class<?> loadWithoutInitialising(String name) throws Exception { return Class.forName(name, false, loader); }
+		void hotSwap(String... names) throws Exception {
+			Set<Path> changed = new LinkedHashSet<>(); for (String name : names) changed.add(paths.get(name));
+			Method process = RemoldAgent.class.getDeclaredMethod("processChanges", Set.class, Class[].class);
+			process.setAccessible(true); process.invoke(null, changed, instrumentation.getAllLoadedClasses());
+		}
+		public void close() throws Exception { try (var walk = Files.walk(root)) { walk.sorted(java.util.Comparator.reverseOrder()).forEach(path -> { try { Files.deleteIfExists(path); } catch (Exception ignored) {} }); } }
+	}
+
+	private static final class FixtureLoader extends ClassLoader {
+		final Map<String, byte[]> classes;
+		FixtureLoader(Map<String, byte[]> classes) { super(CrossClassInitFixProbe.class.getClassLoader()); this.classes = classes; }
+		protected Class<?> findClass(String name) throws ClassNotFoundException {
+			byte[] bytes = classes.get(name); if (bytes == null) throw new ClassNotFoundException(name);
+			return defineClass(name, bytes, 0, bytes.length);
+		}
+	}
+}

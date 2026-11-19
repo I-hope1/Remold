@@ -212,7 +212,9 @@ public class GenerationalReplayWiringTest {
 		fixture();
 		Changeset first = commit("h1");
 		record(first, "1", "2");
-		commit("h1");
+		// The chain moves without a revert: the fact is now separated from the head by a structure change,
+		// so a gate that re-based this round on the ledger would have to refuse the candidate.
+		commit("h2");
 
 		transformWith(LayoutGateAssert.compile(sources(1)).get(ANON),
 		 LayoutGateAssert.compile(sources(2)).get(ANON));

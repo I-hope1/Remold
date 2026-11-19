@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **PR4-A：跨类批次字段依赖按 `(Class, Field)` 收敛并在宿主拓扑序上执行**
+  （`InitFix`、`InitFixBatchGraph`、`HierarchyTreeOracle`、`RemoldAgent`）：热更批次里「类 X 的新增字段
+  由类 Y 的初始化式读取」这种情况不再按单类孤立处理。
+  - 同批**最终对齐字节**按 ClassLoader 隔离成一份只读视图（`beginBatchBytecodeView` /
+    `setBatchDefinitions` / `endBatchBytecodeView`），供离线层级、Nest 与 `@RemoldReinit` 作用域分析
+    读取；候选类若字节缺失或不可安装一律 fail-closed，不回退到全局旧缓存。
+  - 跨类依赖图按字段节点构建（`InitFixBatchGraph`）：读本批新增/待补字段才成边，读旧字段与已确认的
+    T0 零值字段不成边；`GETFIELD`/`GETSTATIC` 按描述符区分静态性与真实声明；loader 身份参与节点键。
+  - 收敛在发射前一次算清（`convergeBatch`）：跨类拒绝只落到精确下游字段并在剔除后重跑本地闭包；
+    宿主级环与矛盾交错保守拒绝，同批无关字段仍可补。
+  - 单阶段与两阶段 Stage B 都按宿主拓扑序执行（`orderBatchHosts`），同类融合字段循环不被拆分。
+  - 运行期 prerequisite 失败只跳过精确下游字段，上下游各自记入 `FieldLedger`；`@batch:` token 只作
+    内部依赖键，不写进台账字段名。
+  - 验收：`crossClassInitFixProbe` 8/0（JBR 21 DCEVM，逆序输入跨类静态初始化 + 运行期失败只跳下游）、
+    `twoPhaseProbe` 72/0、`initFixOracle`、`check`；单测 `CrossClassInitFixTest` / `InitFixBatchGraphTest`；
+    变异 5 击杀（禁用同批 overlay、打乱宿主顺序、去掉运行期失败 token、去掉循环拒绝、去掉跨类边收集）。
+
 - **PR3：活的 lambda 对齐改走 `R_prev ↔ R_new`（Run R），`Eff_prev` 降级为继承来源**
   （`LambdaAligner`、`AlignmentMetaStore`、`RemoldAgent`）：活体路径不再拿被幽灵桩 / 捕获桥 /
   避障自造名污染的上一轮生效字节去配对，配对基线改为元数据里保留的 Raw_prev 字节；幽灵桩、保留体、

@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **字节码 Changeset 提交刻度（commit tick）**：新增 `remold.vcs.Changeset` 与
+  `remold.vcs.ChangesetLog`，把「一轮热更最多一个 Changeset」落成可查的代际链——每 scope 一条链，
+  `seq` 单调不复用、`parent` 串成链，跨 scope 拆分的多条 Changeset 共享 `roundId`。
+  - `VcsCommitGate` 仍只放行整批生效的轮次：被评估拒绝、部分类 redefine 失败、整组回滚、
+    `LAMBDA_STRICT` 拒绝的轮次不分配 `seq`、不推进 head，只在诊断侧累加 aborted 计数——aborted
+    刻意不立链节点，否则回退侧要额外处理第二类节点。
+  - 窗口 `-Dremold.vcs.changeset_window` 默认 **32**：与 `HISTORY_PER_CLASS = 8` 对齐，典型调试会话在
+    3～4 个互依赖类之间轮流改（`8 × 4`）时不会出现「类字节仍在单类历史上限内、对应 Changeset 先出窗」
+    的错配；Changeset 不持字节也不持 `ClassLoader`，该窗口的堆占用可忽略。
+  - `manifest`（批次分析快照：宿主拓扑序、字段级有向边、带枚举拒绝码的节点、候选字节缺失类）与
+    `replayFacts`（提交级初值事实，`float`/`double` 存原始位模式、`REINIT` 档只记 `scope`/`mode`）
+    作为独立字段随提交点一并固化，不塞进「每类一档」的 `entries`；空边集仍是合法提交，否则该类的
+    Raw/Eff 变化没有提交坐标、后续 `parent` 会断层。
+  - 三级可用性 `ADDRESSABLE` / `REPLAYABLE` / `REVERTABLE` 显式承诺回退能力：目标代达不到 `REVERTABLE`
+    时拒绝执行并报 `NOT_REVERTABLE`，不做「缺类的半吊子回退」。
+  - 单阶段与两阶段的字段状态时序差异写进 `advisory.patchTiming`（`AFTER_COMMIT` / `BEFORE_COMMIT`），
+    `HEAD` 语义仍固定为「redefine 已提交（结构 + 字节）」；字段补丁结果继续走独立可变旁路，不参与
+    `id` 计算与 `HEAD` 推进。
+  - 规格见 [`docs/topology/16-bytecode-changeset-vcs.md`](docs/topology/16-bytecode-changeset-vcs.md)
+    §2.1.1～§2.1.3 / §3.8 / §6.3；单测 `ChangesetTickTest` 14 例、`ReplayFactLiteralTest` 4 例。
+
 - **PR4-A：跨类批次字段依赖按 `(Class, Field)` 收敛并在宿主拓扑序上执行**
   （`InitFix`、`InitFixBatchGraph`、`HierarchyTreeOracle`、`RemoldAgent`）：热更批次里「类 X 的新增字段
   由类 Y 的初始化式读取」这种情况不再按单类孤立处理。

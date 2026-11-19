@@ -4,6 +4,7 @@ import jdk.internal.misc.Unsafe;
 import remold.ClassDiffUtil.ClassDiff;
 import remold.*;
 import remold.annotation.RemoldReinit;
+import remold.vcs.Changeset;
 import remold.util.ClassIdentity;
 import remold.util.LibTool;
 import org.objectweb.asm.*;
@@ -249,7 +250,8 @@ public class InitFix {
 	private record BatchContext(Map<ClassLoader, Map<String, byte[]>> bytesByLoader,
 	                            Map<String, Set<String>> candidateFields, List<BatchInput> inputs,
 	                            Map<ClassLoader, String> loaderIds,
-	                            Map<Class<?>, BatchPlan> plans) { }
+	                            Map<Class<?>, BatchPlan> plans,
+	                            List<Changeset.ReplayFact> replayFacts) { }
 
 	private record BatchPlan(PatchAnalysis analysis, Runnable publish) { }
 
@@ -282,7 +284,8 @@ public class InitFix {
 				candidateFields.put(batchHostKeyForId(loaderIds.get(entry.getKey()), host), Set.of());
 			}
 		}
-		BATCH_CONTEXT.set(new BatchContext(copy, candidateFields, new ArrayList<>(), loaderIds, new LinkedHashMap<>()));
+		BATCH_CONTEXT.set(new BatchContext(copy, candidateFields, new ArrayList<>(), loaderIds,
+		 new LinkedHashMap<>(), new ArrayList<>()));
 		BATCH_FAILURES.get().clear();
 	}
 
@@ -318,7 +321,7 @@ public class InitFix {
 			 .put(host.getName(), definition.getDefinitionClassFile());
 		}
 		BATCH_CONTEXT.set(new BatchContext(context.bytesByLoader(), candidates, context.inputs(),
-		 context.loaderIds(), context.plans()));
+		 context.loaderIds(), context.plans(), context.replayFacts()));
 	}
 
 	/** Build all batch patches only after every transform input has been collected. */
@@ -341,7 +344,8 @@ public class InitFix {
 			fields.addAll(ledgerSnapshot(input.host()).keySet());
 			candidates.put(batchHostKey(context, input.host()), fields);
 		}
-		BATCH_CONTEXT.set(new BatchContext(context.bytesByLoader(), candidates, inputs, context.loaderIds(), context.plans()));
+		BATCH_CONTEXT.set(new BatchContext(context.bytesByLoader(), candidates, inputs,
+		 context.loaderIds(), context.plans(), context.replayFacts()));
 		for (BatchInput input : inputs) transformNow(input.host(), input.newBytes(), input.diff());
 		convergeBatch(BATCH_CONTEXT.get());
 		for (BatchPlan plan : context.plans().values()) plan.publish().run();
@@ -1005,6 +1009,132 @@ public class InitFix {
 	 * 不构成读穿，跟随单阶段路径即可；A 档 apply 重放写入的是<b>另一个类型</b>的字段，宿主阶段 C 的
 	 * deopt 覆盖不到那个类型，故不纳入本判据。</p>
 	 */
+	/**
+	 * 记录一档重放事实（{@code docs/topology/16-bytecode-changeset-vcs.md} §3.8）。
+	 *
+	 * <p>只在批次分析期内累积：事实来自纯函数计划，不依赖运行期写回结果。字面量按描述符定型，
+	 * {@code float}/{@code double} 存原始位模式而不是十进制近似。</p>
+	 */
+	private static void captureReplayFacts(Class<?> host,
+	                                       Map<String, InitializerReplay.ReplayField> l1,
+	                                       Map<String, ApplyInitializerReplay.ReplayField> apply) {
+		BatchContext context = BATCH_CONTEXT.get();
+		if (context == null) return;
+		List<Changeset.ReplayFact> sink = context.replayFacts();
+		if (l1 != null) {
+			for (InitializerReplay.ReplayField field : l1.values()) {
+				sink.add(new Changeset.ReplayFact(dotted(field.declaringClass()), field.name(), field.desc(),
+				 "L1", literalOf(field.expected(), field.oldText(), field.desc()),
+				 literalOf(null, field.newText(), field.desc()), literalKindOf(field.desc()), "", "", ""));
+			}
+		}
+		if (apply != null) {
+			for (ApplyInitializerReplay.ReplayField field : apply.values()) {
+				sink.add(new Changeset.ReplayFact(dotted(field.targetClass()), field.fieldName(), field.fieldDesc(),
+				 "A", literalOf(field.expected(), field.oldText(), field.fieldDesc()),
+				 literalOf(field.newRaw(), field.newText(), field.fieldDesc()),
+				 literalKindOf(field.fieldDesc()), field.dest() + ":" + field.destDesc(), "", ""));
+			}
+		}
+	}
+
+	/** 记录 {@code @RemoldReinit} 档事实：有 scope / mode，但按契约不要求字面量。 */
+	private static void captureReinitFacts(Class<?> host, Map<String, ReinitField> reinit) {
+		BatchContext context = BATCH_CONTEXT.get();
+		if (context == null || reinit == null || reinit.isEmpty()) return;
+		String owner = host.getName();
+		for (Map.Entry<String, ReinitField> e : reinit.entrySet()) {
+			ReinitField rf = e.getValue();
+			context.replayFacts().add(new Changeset.ReplayFact(owner, e.getKey(), "", "REINIT",
+			 null, null, "NONE", "", rf.selfOnly() ? "SELF" : "INCLUDE_SUBCLASSES",
+			 rf.overwrite() ? "OVERWRITE" : "CONDITIONAL"));
+		}
+	}
+
+	private static String dotted(String internalOrDotted) {
+		return internalOrDotted == null ? "" : internalOrDotted.replace('/', '.');
+	}
+
+	static String literalKindOf(String desc) {
+		if (desc == null || desc.isEmpty()) return "NONE";
+		switch (desc.charAt(0)) {
+			case 'I': return "INT";
+			case 'J': return "LONG";
+			case 'F': return "FLOAT_BITS";
+			case 'D': return "DOUBLE_BITS";
+			case 'L': return "Ljava/lang/String;".equals(desc) ? "STRING" : "NONE";
+			default: return "NONE";
+		}
+	}
+
+	/**
+	 * 字面量定型：{@code float}/{@code double} 一律取原始位模式十六进制，
+	 * 避免十进制回读等价造成的对账漂移（§3.8）。
+	 */
+	static String literalOf(Object value, String fallback, String desc) {
+		String kind = literalKindOf(desc);
+		if ("FLOAT_BITS".equals(kind) && value instanceof Float f) {
+			return String.format("0x%08x", Float.floatToRawIntBits(f));
+		}
+		if ("DOUBLE_BITS".equals(kind) && value instanceof Double d) {
+			return String.format("0x%016x", Double.doubleToRawLongBits(d));
+		}
+		if (value != null) return String.valueOf(value);
+		return fallback == null ? "null" : fallback;
+	}
+
+	/**
+	 * 批次分析快照（{@code docs/topology/16-bytecode-changeset-vcs.md} §2.1.2）。
+	 *
+	 * <p>提交时刻批次上下文仍存活（{@code endBatchBytecodeView} 在其后），因此这里读到的是
+	 * Stage B 将要使用的那份图；宿主顺序取自同一确定性排序函数。</p>
+	 */
+	public static Changeset.Manifest batchCommitManifest(List<Class<?>> hosts) {
+		BatchContext context = BATCH_CONTEXT.get();
+		if (context == null) return Changeset.Manifest.EMPTY;
+		List<String> orderedHosts = new ArrayList<>();
+		for (Class<?> host : orderBatchHosts(hosts == null ? List.of() : hosts)) {
+			orderedHosts.add(batchHostKey(context, host));
+		}
+		List<String> edges = new ArrayList<>();
+		List<String> nodes = new ArrayList<>();
+		for (Map.Entry<Class<?>, BatchPlan> e : context.plans().entrySet()) {
+			String from = batchHostKey(context, e.getKey());
+			PatchAnalysis analysis = e.getValue().analysis();
+			for (Map.Entry<String, FieldDecision> decision : analysis.instanceDecisions().entrySet()) {
+				nodes.add(from + "." + decision.getKey() + (decision.getValue().status() == FieldStatus.ACCEPTED
+				 ? "" : "#" + decision.getValue().status().name()));
+			}
+			for (Map.Entry<String, FieldDecision> decision : analysis.staticDecisions().entrySet()) {
+				nodes.add(from + "." + decision.getKey() + (decision.getValue().status() == FieldStatus.ACCEPTED
+				 ? "" : "#" + decision.getValue().status().name()));
+			}
+			for (Map.Entry<String, Set<InitFixBatchGraph.FieldKey>> dep : analysis.dependencies().entrySet()) {
+				for (InitFixBatchGraph.FieldKey to : dep.getValue()) {
+					edges.add(from + "." + dep.getKey() + " -> " + to.host() + "." + to.field());
+				}
+			}
+		}
+		List<String> missing = new ArrayList<>();
+		Map<String, ClassLoader> byId = new IdentityHashMap<>();
+		for (Map.Entry<ClassLoader, String> e : context.loaderIds().entrySet()) byId.put(e.getValue(), e.getKey());
+		for (String candidate : context.candidateFields().keySet()) {
+			int colon = candidate.indexOf(':');
+			if (colon < 0) continue;
+			ClassLoader loader = byId.get(candidate.substring(0, colon));
+			String name = candidate.substring(colon + 1);
+			Map<String, byte[]> bytes = loader == null ? null : context.bytesByLoader().get(loader);
+			if (bytes == null || !bytes.containsKey(name)) missing.add(name);
+		}
+		return new Changeset.Manifest(orderedHosts, edges, nodes, missing);
+	}
+
+	/** 本轮的提交级事实快照；无批次上下文时返回空表。 */
+	public static List<Changeset.ReplayFact> batchReplayFacts() {
+		BatchContext context = BATCH_CONTEXT.get();
+		return context == null ? List.of() : List.copyOf(context.replayFacts());
+	}
+
 	public static List<Class<?>> orderBatchHosts(List<Class<?>> hosts) {
 		BatchContext context = BATCH_CONTEXT.get();
 		if (context == null) return hosts;
@@ -1354,6 +1484,10 @@ public class InitFix {
 		logApplyReplayDecisions(diff == null || diff.newClass == null
 		 ? "?" : diff.newClass.name.replace('/', '.'), applyPlan.decisions());
 
+		// 提交级事实（docs/topology/16-bytecode-changeset-vcs.md §3.8）：分析期把两档重放的
+		// 旧/新初值固化成事实，随 Changeset 落盘；读侧不再依赖旧字节是否还在预算窗口内。
+		captureReplayFacts(host, replayFields, applyFields);
+
 		Set<String> addedStaticFields   = diff.addedStaticFields;
 		Set<String> addedInstanceFields = diff.addedInstanceFields;
 
@@ -1547,6 +1681,7 @@ public class InitFix {
 		// ==================== docs/initfix/03-runtime-driver.md §4 存量重置扩展：候选集 ====================
 		// 默认只处理新增字段；标了 @RemoldReinit 的已有字段按显式声明进入候选集。
 		Map<String, ReinitField> reinitFields         = preScannedReinit != null ? preScannedReinit : scanReinitFields(newClass);
+		captureReinitFacts(host, reinitFields);
 		Set<String>              targetInstanceFields = new LinkedHashSet<>(addedInstanceFields);
 		Set<String>              targetStaticFields   = new LinkedHashSet<>(addedStaticFields);
 		Set<String>              forceWriteFields     = new LinkedHashSet<>();

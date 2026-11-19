@@ -602,6 +602,22 @@
 - **后续验证方式**：`bash gradlew :tests:pr3RealWorldReadings`（需两代语料时用 `-Ppr3.corpus.old/new`）。
 - **决策依据**：[`18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md) §3.2；读数 [`19-raw-to-raw-realworld-readings.md`](topology/19-raw-to-raw-realworld-readings.md)。
 
+### 风险 28：`L1` 继承字段的代际对账依赖声明类在批次里
+- **风险描述与底层机制**：`L1` 重放写的是匿名子类实例里的**继承**字段，而 `replayFacts` 的 `ownerClass`、台账键与相邻性判据（`rawHash` 在 `[g, target]` 恒定）都以**声明类**为键。声明类若从未出现在事实那一代的 `Changeset.entries` 里，`isAdjacent` 无法证明"事实仍成立"，消费侧判 `REFUSED_DISCONTINUOUS` 并把字段挂成未闭环债务；回归头再看，本可重放的字段被拒。
+- **触发条件**：父类（声明类）字节不变、只有匿名子类的初值块在变的批次——这正是 `L1` 最常见的形态。
+- **当前缓解措施**：按 fail-closed 拒绝（不回落"最近活代"事实），`PatchReport` 记 `rejected:` 并点名恢复路径；正向代不查台账（只在回退上下文或已欠债时查），所以这条缺口不会拖慢正常重放。
+- **残余影响**：单靠 `L1` 无法把跨代对账用起来；`vcsLedgerGcProbe` 的夹具必须先让声明类在事实那一代里有条目（探针里每次漂移都重编父类）才能产生可对账的事实——也就是说真实工程里这条通道的实际覆盖面取决于"父类是否随同一次重编"。
+- **后续验证方式**：给 `isAdjacent` 补一条"声明类缺失即视为不连续"的显式负例（现在由 `REFUSED_DISCONTINUOUS` 间接覆盖）；评估用 `Changeset.manifest` 的类级指纹替代 `entries` 存在性，把判据放宽到"该代确实录过这个类"。
+- **决策依据**：[`20-generational-field-ledger.md`](topology/20-generational-field-ledger.md) §3.5 / §4-R6。
+
+### 风险 29：`@RemoldReinit(OVERWRITE)` 无法闭环被回退污染的继承字段
+- **风险描述与底层机制**：回退后 `L1` 字段被挂在台账上未闭环，恢复要求显式重建或 `@RemoldReinit(OVERWRITE)`；但布局门对"`INCLUDE_SUBCLASSES` + 子类初始化器仍在写该继承字段"的注解直接 `LAYOUT-REJECT`（否则会用声明类的值覆盖子类专属初值，且子类赋值不在重放范围内），而 `scope = SELF` 只写宿主自身实例、够不到匿名子类实例。
+- **触发条件**：`L1` 通道（匿名子类实例初始化块写继承字段）上的未闭环字段；声明类与子类都保持原形态。
+- **当前缓解措施**：拒绝而不是放宽——`vcsA14Probe` 的恢复轮同时做两件事：给声明类打 `@RemoldReinit(OVERWRITE)` **并**让子类初始化块不再写该字段（"显式重建"的字面形态），此时布局门放行、写入真的落到存量实例、债务 `markClosed`、报告出现 `recovered: overwrite`。
+- **残余影响**：只想改注解、不动子类初值的用户拿不到恢复路径，只能等下一次结构变化或重启；台账里该字段会一直保持未闭环（可见、不遗忘，但也不再自动重试）。
+- **后续验证方式**：若要支持"子类初值不动也能恢复"，需要先设计"按子类分别取期望"的方案（当前 `KIND_CONDITIONAL_EXPECTED` 只有单一期望来源），并在 `ReinitScopeGate` 补对应负例。
+- **决策依据**：[`20-generational-field-ledger.md`](topology/20-generational-field-ledger.md) §3.5、`docs/initfix/12-L1-existing-initializer-replay.md`。
+
 ### 风险 27：`Raw_prev` blob 预算容量与提交耗时只有单语料读数
 - **风险描述与底层机制**：`Raw_prev` blob 以字节形态进元数据，受 16 MiB 全局 / 每类 256 KiB 双预算约束；预算压力下丢字节保哈希，该类当轮回退 Run E。
 - **实测读数**：真实两代语料 400 类满载 2,389,448 B（占 16 MiB 的 14.2%）、`droppedBlobCount=0`，平均每类 ≈5.97 KB；64 KiB 对照档掉 5 类（1.3%）并全部落 `NO_RAW_PREV`。`commit` 每类 median 0.30 ms / p90 0.65 ms，400 类一批约 170 ms。读数见 [`19-raw-to-raw-realworld-readings.md`](topology/19-raw-to-raw-realworld-readings.md) §3。

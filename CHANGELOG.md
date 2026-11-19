@@ -9,7 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`replayFacts` 两侧统一原始位模式口径**：`L1` 档新侧原先记录的是十进制渲染文本，而旧侧是原始位模式。
+- **代际字段台账（B2 存储层）**：新增 `remold.vcs.GenerationalFieldLedger`，把 `replayFacts` 按代坐标索引起来。
+  - 键 = `(loaderScope, 内部名, field)` + `GenRef(seq, changesetId)`，scope 取 `AlignmentMetaStore.loaderScopeId`，
+    与 `Changeset.loaderScope` 同源；`changesetId` 留作校验位，防止"同 seq 不同代"被当成同一条事实。
+  - **两类保留策略不共用一个窗口**：未闭环债务（判过 `MISS_NO_FACT` / 写入失败的字段）不被 Changeset 窗口淘汰；
+    历史索引跟随 `ChangesetLog.window()`，没有第二个旋钮。
+  - **拒绝而不是补正**：`vcs=1` 旧口径与"`FLOAT_BITS`/`DOUBLE_BITS` 配十进制字面量"的记录一律不索引并计数，
+    绝不在台账侧把十进制补成位模式（那等于伪造事实）。
+  - 回退提交后 `seq > target` 的事实与 `REINIT_APPLIED` **整体作废**（宁可多写一次，不留过期值）。
+  - 槽用 `WeakHashMap` 弱键挂 loader，值只含字符串/标量/枚举，不持 `Class`/`ClassLoader`/字节数组。
+  - 验收：`GenerationalFieldLedgerTest` 9 例；`./gradlew check` exit 0。
+
+- **`replayFacts` 两侧统一原始位模式口径**- **`replayFacts` 两侧统一原始位模式口径**：`L1` 档新侧原先记录的是十进制渲染文本，而旧侧是原始位模式。
   `float`/`double` 的 `-0.0` 与 `0.0` 渲染相同、NaN payload 全部渲染成 `NaN`、十进制还带舍入，
   因此这类字段的多代重放事实上不可用。现在 `InitializerReplay.ReplayField` 携带新侧自然值
   （`newExpected`），`InitFix.l1ReplayFact` 两侧都从字节码常量取位模式；`newText`/`oldText` 降级为

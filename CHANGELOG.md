@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **代际对账接进重放决策（B2 消费侧）**：新增 `remold.vcs.GenerationalReplayGate`，把
+  `GenerationalFieldLedger.resolve` 的结论翻成"这一轮这条字段还写不写、比较侧用什么期望、写入侧写什么值"。
+  - 三种结论：`OBLIVIOUS`（索引里没有这条键的代际证据 → 沿用当轮 `ClassDiff` 的一对初值，与引入前逐字节一致）、
+    `FACT`（`EXACT`/`CHAINED` 且形态/口径/描述符全过 → 期望与写入值都取自**同一条**事实）、
+    `REFUSED`（窗口外、不连续、无字面量、形态非规范、`algoVersion` 不同、描述符不符 → 不写、不记"已应用"）。
+  - **只在回退上下文里改判**：HEAD 是回退代，或该键还欠未闭环债务。否则正向代会被顶成"期望晚一代"，
+    首次漂移之后每轮都判不命中——这是本批次实测到的实现缺陷（夹具每轮产一条事实时，堆值从第 3 轮起停滞）。
+  - `L1` 的台账键改用字段的**声明类**（与 `l1ReplayFact` 的 `ownerClass` 同源）；运行期记账所需的 owner
+    随 `PendingPatch` 传到 `applyPatch`，否则消费侧永远查不到这条事实。
+  - 字面量只解析规范形态（`FLOAT_BITS`/`DOUBLE_BITS` 的 `0x%08x`/`0x%016x`），解不出来即 fail-closed，
+    不回退到十进制反推。
+  - 验收：`GenerationalReplayGateTest` 12 例 + `GenerationalReplayWiringTest` 4 例（真实 `InitFix.transform`，
+    无 DCEVM）+ `vcsA14Probe` 33/33（JBR 21 DCEVM）；变异 9 处击杀。
+
+- **`PatchReport` 增加运行期重放结果与闭环读数**：条件 CAS 未命中的重放字段记 `skipped: ...`（不再冒充
+  `replayed`）、发一条点名字段的 warn、并把债务落到 `GenerationalFieldLedger.markUnclosed`（**不**复用瞬时补丁槽
+  `PENDING`——那里带 5 分钟 TTL，且 `PendingPatch` 不得持 `Class` 强引用）；`@RemoldReinit(OVERWRITE)` 或显式重建
+  真的写入后 `markClosed` 并在新增的 `PatchReport.recoveredFields()` 里记 `recovered: overwrite`。
+
+- **`:tests:vcsA14Probe`**：真机链路探针（JBR 21 + `-XX:+AllowEnhancedClassRedefinition` + 真实回退）。
+  六轮夹具：基线 → `L1` 漂移（`-0.0f` 的位模式与 `Z/B/S/C` 写进存活实例）→ 无关类推进链 → 前向回退到目标代
+  → 同字段再漂移（`-Dremold.vcs.eff_bytes=0`，断言 Eff 确实被淘汰）→ `@RemoldReinit(OVERWRITE)` 恢复。
+  断言落在业务终局：堆值、`PatchReport` 条目、warn 文本、台账债务。
+
+- **`:tests:vcsLedgerGcProbe`（台账真实填充的内存读数）**：`VcsGcBaselineProbe` 新增
+  `-DvcsGcProbe.ledger=true` 模式，每轮多一次匿名子类的初值漂移，于是每代都带一条真实 `L1` 事实；
+  窗口设为 8 以便在 30 轮内看到索引淘汰。读数与边界见 `docs/topology/21-b1-gc-baseline-readings.md` §9。
+
+### Fixed
+
+- **正向代被代际事实顶成"期望晚一代"**：`resolve()` 给出的 `(oldLiteral, newLiteral)` 描述的是**上一代**的那次漂移，
+  用它顶替当轮 `ClassDiff` 会让期望永远落后一代——首次漂移之后每轮条件 CAS 都不命中，重放从第 3 轮起彻底停滞
+  （实测：`accepted` 计数停在 1、堆值停在 2）。现在只在回退上下文里改判（doc 20 §3.1 的口径）。
+- **`L1` 事实的台账键与消费侧查询的类不一致**：`l1ReplayFact` 的 `ownerClass` 是声明类，而消费侧原先用匿名宿主查，
+  因此永远查不到；同时运行期跳过记账若用宿主键，`OVERWRITE` 闭环也永远匹配不上。
+- `Resolved` 带上 `desc` / `algoVersion` / `targetGeneration`，`resolve` 在形态判断之前先拒跨口径事实；
+  新增 `Resolution.REFUSED_LEGACY_VERSION` 与 `isUnclosed(loader, class, field)`。
+
+
 - **代际字段台账（B2 存储层）**：新增 `remold.vcs.GenerationalFieldLedger`，把 `replayFacts` 按代坐标索引起来。
   - 键 = `(loaderScope, 内部名, field)` + `GenRef(seq, changesetId)`，scope 取 `AlignmentMetaStore.loaderScopeId`，
     与 `Changeset.loaderScope` 同源；`changesetId` 留作校验位，防止"同 seq 不同代"被当成同一条事实。

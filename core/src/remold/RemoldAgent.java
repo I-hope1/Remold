@@ -12,6 +12,8 @@ import remold.ref.HotswapBridge;
 import remold.ref.InitFix;
 import remold.ref.StageBInstanceCache;
 import remold.vcs.AlignmentMetaStore;
+import remold.vcs.Changeset;
+import remold.vcs.ChangesetLog;
 import remold.vcs.VcsCommitGate;
 import remold.vcs.BytecodePack;
 import remold.util.*;
@@ -2877,7 +2879,8 @@ public class RemoldAgent {
 		// PR1 旁路记录（写入点）：只在本批最终重定义结果确定之后提交；对齐期的暂存不在这里。
 		if (Boolean.getBoolean("remold.vcs.enabled")) {
 			try {
-				commitVcsBatch(definitions, redefinedOk, rolledBack, lambdaStrictRejected);
+				commitVcsBatch(definitions, redefinedOk, rolledBack, lambdaStrictRejected,
+				 needsTwoPhase && TWO_PHASE);
 			} catch (Throwable t) {
 				warn("[VCS] side-channel record skipped: " + t);
 			}
@@ -4743,7 +4746,8 @@ public class RemoldAgent {
 	 * 就是最终生效形态。留在阶段 A 的类不会出现在 {@code redefinedOk} 里，整批宁可不记。</p>
 	 */
 	private static void commitVcsBatch(List<ClassDefinition> definitions, Set<String> redefinedOk,
-	                                   Set<String> rolledBack, boolean lambdaStrictRejected) {
+	                                   Set<String> rolledBack, boolean lambdaStrictRejected,
+	                                   boolean twoPhaseApplied) {
 		int total = definitions == null ? 0 : definitions.size();
 		int applied = 0;
 		if (definitions != null) {
@@ -4754,12 +4758,23 @@ public class RemoldAgent {
 		if (!VcsCommitGate.shouldCommit(total, applied, rolledBack.size(), lambdaStrictRejected)) {
 			int discarded = PENDING_VCS.size();
 			PENDING_VCS.clear();
+			if (definitions != null) {
+				for (ClassDefinition def : definitions) {
+					// aborted 轮次只记诊断计数：不分配 seq、不推进 head（规格 §6.3）。
+					ChangesetLog.INSTANCE.abort(
+					 AlignmentMetaStore.INSTANCE.loaderScopeId(def.getDefinitionClass().getClassLoader()));
+				}
+			}
 			if (DEBUG) log("[VCS] batch not fully applied (ok=" + redefinedOk.size()
 				+ "/" + (definitions == null ? 0 : definitions.size())
 				+ ", rolledBack=" + rolledBack.size() + ", lambdaStrict=" + lambdaStrictRejected
 				+ "); " + discarded + " pending record(s) discarded.");
 			return;
 		}
+		// 每个 loader scope 一条链：entries 按 scope 分组，批次原子性已由上面的 gate 保证（§2.1.3）。
+		Map<ClassLoader, Map<String, Changeset.Entry>> perScope = new IdentityHashMap<>();
+		Map<ClassLoader, Set<String>> scopeClassNames = new IdentityHashMap<>();
+		List<Class<?>> committedClasses = new ArrayList<>();
 		for (ClassDefinition def : definitions) {
 			String className = def.getDefinitionClass().getName();
 			String slashName = className.replace('.', '/');
@@ -4776,15 +4791,78 @@ public class RemoldAgent {
 				int bridges = p.result == null ? 0 : p.result.bridgeCount;
 				AlignmentMetaStore.INSTANCE.commit(p.loader, slashName,
 					p.preAlign, p.alignOutput, jvmBytes, invented, ghosts, mapping, bridges, rawToEff);
+				AlignmentMetaStore.Entry head = AlignmentMetaStore.INSTANCE.head(p.loader, slashName);
+				if (head != null) {
+					String metaHash = Changeset.metaDigest(slashName, invented, ghosts, mapping, bridges);
+					perScope.computeIfAbsent(p.loader, ignored -> new LinkedHashMap<>())
+					 .put(slashName, new Changeset.Entry(slashName, head.preAlignSha256,
+					  head.jvmEffSha256, metaHash));
+					scopeClassNames.computeIfAbsent(p.loader, ignored -> new LinkedHashSet<>()).add(slashName);
+				}
+				committedClasses.add(def.getDefinitionClass());
 				if (BytecodePack.enabled()) {
 					BytecodePack.append(new BytecodePack.Entry(slashName, p.oldEffective, p.preAlign,
-						p.alignOutput, jvmBytes, invented, mapping, bridges));
+					 p.alignOutput, jvmBytes, invented, mapping, bridges));
 				}
 			} catch (Throwable t) {
 				warn("[VCS] record failed for " + className + ": " + t);
 			}
 		}
 		PENDING_VCS.clear();
+		if (!perScope.isEmpty()) {
+			String roundId = definitions.isEmpty() ? "" : batchWatchLabel(definitions);
+			Changeset.Manifest manifest = InitFix.batchCommitManifest(committedClasses);
+			List<Changeset.ReplayFact> facts = InitFix.batchReplayFacts();
+			Changeset.PatchTiming timing = twoPhaseApplied
+			 ? Changeset.PatchTiming.BEFORE_COMMIT : Changeset.PatchTiming.AFTER_COMMIT;
+			String buildId = System.getProperty("remold.build_id", "");
+			for (Map.Entry<ClassLoader, Map<String, Changeset.Entry>> scope : perScope.entrySet()) {
+				try {
+					Changeset cs = ChangesetLog.INSTANCE.commit(
+					 AlignmentMetaStore.INSTANCE.loaderScopeId(scope.getKey()), roundId,
+					 scope.getValue(), scopeManifest(manifest, scopeClassNames.get(scope.getKey())),
+					 facts, Changeset.currentAlgoVersion(), buildId, timing);
+					// 链式回放包按 seq 逐轮导出：提交后立即写本轮目录，离线侧可按任意 seq 单独检出（§7.1）。
+					if (BytecodePack.enabled()) BytecodePack.exportRound(cs);
+				} catch (Throwable t) {
+					warn("[VCS] changeset commit failed: " + t);
+				}
+			}
+		}
+	}
+
+	/**
+	 * 把批次级 manifest 收窄到单个 scope：跨 scope 时每条 Changeset 只带自己范围内的宿主与边（§2.1.3）。
+	 */
+	private static Changeset.Manifest scopeManifest(Changeset.Manifest manifest, Set<String> slashNames) {
+		if (manifest == null || slashNames == null || slashNames.isEmpty()) {
+			return manifest == null ? Changeset.Manifest.EMPTY : manifest;
+		}
+		Set<String> dotted = new LinkedHashSet<>();
+		for (String name : slashNames) dotted.add(name.replace('/', '.'));
+		List<String> hosts = new ArrayList<>();
+		for (String host : manifest.orderedHosts()) {
+			for (String name : dotted) {
+				if (host.endsWith(":" + name)) {
+					hosts.add(host);
+					break;
+				}
+			}
+		}
+		List<String> nodes = new ArrayList<>();
+		for (String node : manifest.nodes()) {
+			for (String name : dotted) {
+				if (node.startsWith(name + ".")) {
+					nodes.add(node);
+					break;
+				}
+			}
+		}
+		List<String> missing = new ArrayList<>();
+		for (String name : manifest.candidateMissing()) {
+			if (dotted.contains(name)) missing.add(name);
+		}
+		return new Changeset.Manifest(hosts, manifest.edges(), nodes, missing);
 	}
 
 	private static RedefineOutcome applyTwoPhase(List<ClassDefinition> definitions,

@@ -214,6 +214,17 @@ public final class AlignmentMetaStore {
 	 */
 	private static volatile Function<String, Map<String, String>> translationLookup;
 
+	/**
+	 * 该 loader 的 scope 代号（单调、不复用）；{@code null} 映射到 bootstrap 槽 0。
+	 *
+	 * <p>用于把 Changeset 链按 scope 归档而不持有 {@code ClassLoader}：槽是弱键的，
+	 * 但代号本身是普通 {@code long}，离开这里之后不再引用 loader。</p>
+	 */
+	public synchronized long loaderScopeId(ClassLoader loader) {
+		if (loader == null) return bootstrapSlot.loaderId;
+		return slots.computeIfAbsent(loader, ignored -> new LoaderSlot(nextLoaderId++)).loaderId;
+	}
+
 	/** loader 回收后，其名下记录不再计入；这里给出当前仍可用的 loader 槽数（含 bootstrap）。 */
 	public synchronized int liveLoaderCount() {
 		return slots.size() + 1;

@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **字节码回退执行（B1）**：`ChangesetLog` 学会把「退回到第几代」算成字节计划并落地。
+  - 目标字节集合按区间取：`(target, HEAD]` 内被改过的每个类，取其在 `seq <= target` 的最新 Eff；
+    若该类首次进入链就落在被回退区间，则退回 `Eff_0`——首次进链那一轮之前冻结的基线字节。Eff 字节
+    按内容寻址保存在有预算的池里（`-Dremold.vcs.eff_bytes`，默认 16 MiB），预算淘汰或超单条上限即
+    整体拒绝并报 `NOT_REVERTABLE`，不做事后补一半。
+  - 回退以「前向提交」落地：追加 `seq = HEAD + 1`、`parent = HEAD.id`、`revertedToSeq = target` 的新代，
+    不倒拨 `seq`、不造分叉，离线链式导出保持线性。
+  - 执行受 `-Dremold.vcs.revert`（默认关）约束；开启后走真实 `redefineClasses`，失败即整组不生效、链不前进。
+    成功后把 `AlignmentMetaStore` 工作头切回目标代（`hasGeneration` / `restoreHead`），否则下一次正常热更
+    的 Run R 会拿刚被退掉的坏代当基线。
+  - 语义边界：回退只承诺「未来正确」——结构与字方法体回到目标代，已经写进存量实例的字段值保持现状，
+    并记一条 warn 说明该堆事实。
+  - 顺手补的缺口：没有 lambdas 的类原先根本不进 `PENDING_VCS`，既没有提交刻度也无法被回退；现在它们
+    同样产生刻度（由回退探针发现）。
+  - 验收：`ChangesetRevertTest` 7 例、`vcsRevertProbe` 21/21（JBR 21 DCEVM），变异 5 处击杀。
+
 - **字节码 Changeset 提交刻度（commit tick）**：新增 `remold.vcs.Changeset` 与
   `remold.vcs.ChangesetLog`，把「一轮热更最多一个 Changeset」落成可查的代际链——每 scope 一条链，
   `seq` 单调不复用、`parent` 串成链，跨 scope 拆分的多条 Changeset 共享 `roundId`。

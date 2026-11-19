@@ -88,6 +88,18 @@ Governs paradigms across mod environments (Minecraft Fabric/NeoForge/Forge vs. M
 | :--- | :--- |
 | [`01-mod-artifact-and-class-isolation.md`](ecosystem/01-mod-artifact-and-class-isolation.md) | Mod ecosystem duality, 5 build artifact hazards, 3D environment detection matrix, and runtime stale JAR guard |
 
+### 2.5 Changeset VCS, Live Alignment & Generational Field Ledger
+Covers the version layer that answers "which bytes changed in this round, and how are they addressed and replayed across rounds" (16/17), the live-alignment input contract and its real-scale readings (18/19), and how legacy fields are reconciled per generation after a revert (20/21):
+
+| Document | Subject & Core Contents |
+| :--- | :--- |
+| [`16-bytecode-changeset-vcs.md`](topology/16-bytecode-changeset-vcs.md) | Content-addressed per-generation `Changeset` chain and hot-swap version layer (`seq` addressing and window, `patchTiming` semantics, `replayFacts` fact model, derived-cache key contract) |
+| [`17-derived-data-cache-probe.md`](topology/17-derived-data-cache-probe.md) | Derived-data cache granularity, entry/byte budget boundaries, and cache-on/off equivalence readings |
+| [`18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md) | Live-alignment Raw ↔ Raw input selection, G1/G2/G3 admission gates, and `Eff_prev` inheritance set enumeration/order |
+| [`19-raw-to-raw-realworld-readings.md`](topology/19-raw-to-raw-realworld-readings.md) | Real-scale Raw ↔ Raw alignment readings: hits, mismatches, and timings |
+| [`20-generational-field-ledger.md`](topology/20-generational-field-ledger.md) | Generational field ledger (B2): per-generation `FieldLedger` / `REINIT_APPLIED` storage (`GenRef(seq,id)`), post-revert CAS expectations taken strictly from the target generation with fail-closed discipline, and cross-generation `replayFacts` consumption rules |
+| [`21-b1-gc-baseline-readings.md`](topology/21-b1-gc-baseline-readings.md) | B1 side-ledger memory and GC baseline readings (retained-heap/GC methodology and the before/after comparison method for B2) |
+
 ---
 
 ## 3. Build & Infrastructure

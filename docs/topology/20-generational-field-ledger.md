@@ -105,6 +105,13 @@ B1 在 HEAD 之上新建一代：`seq = N + 1`、`parent = HEAD`、`revertedToSe
 | `REFUSED_DISCONTINUOUS` | 身份或相邻性不过 | 不写；warn；`REINIT_APPLIED` 该字段作废 |
 | `REFUSED_NONE_LITERAL` | `literalKind == NONE` 或形态不匹配 | §4-R4 |
 
+**未写入的代不贡献期望（R3 的日常形态）**：一条事实只说明"那一代的理论初值是这些"，不说明"堆上现在就是它"。
+若某个字段已经欠着未闭环债务、而台账里没有任何"确实写成功"的记录，那么 HEAD 那一代的事实只是理论值——
+用它的 `newLiteral` 当写入值会把上一轮的旧初值写回堆里（看着成功、实际倒退）。因此消费侧在
+`!revertContext && isUnclosed && 无确认写入` 时一律 fail-closed：不写、不取期望、债务保留，
+直到 `@RemoldReinit(OVERWRITE)` 或显式重建真正写出为止（"确认写入"的唯一可信来源是运行期落账的
+`REINIT_APPLIED` 行）。
+
 **期望来源唯一**：比较侧只取通过上述三条校验的那条事实的 `oldLiteral`，写入侧取**同一对**事实的 `newLiteral`（`EXACT` / `CHAINED` 同口径）。不设第二个期望来源——`REINIT_APPLIED` 里"由引擎写入"的记录值、污染代 `seq = N` 的 `newLiteral`、类型默认值都不是期望（D12）。理由：引擎在污染代写过的值与用户在运行期改过的值在堆上无法区分（16 §4.1），扩充来源等于把后者当成"未改过"覆盖，并把回退变成静默 no-op。
 
 由此得到回退后的 **fail-closed 后果**（负向判据见 §6-A5 / §6-A14）：实例若仍持有污染代写入的值，它按 §4-R5 与 `target.oldLiteral` 不等 → CAS 不命中 → 不写、不改写、不记"已应用"——**fail-closed 进 `PENDING`**：该字段仍是未完成项（`PatchReport.applyReplayFields` 的该条结果为 skipped，`REINIT_APPLIED` 不出"已应用"记录，`[g, target]` 区间事实不因这次跳过被改写），下一轮重新进候选。宁可这一轮少写一次，也不把无法验证的值当成"已改回"（AGENTS §3 安全优先）。
@@ -116,6 +123,32 @@ B1 在 HEAD 之上新建一代：`seq = N + 1`、`parent = HEAD`、`revertedToSe
 - 回退提交（`revertedToSeq = target`）落地时，对被回退代 `seq > target` 的 `REINIT_APPLIED` 条目**整体作废**（`reinitAppliedClear` 同口径），而不是改写：宁可多写一次，不可静默留下过期值（AGENTS §3 安全优先）。
 - 今日已有作废口保持不变：`reinitAppliedClear`（补丁没生效）、`pruneReinitRecords`（注解被摘掉）、字段消失时的 `reinitAppliedRemove`。
 
+### 3.5 消费侧的判决形状（`GenerationalReplayGate`）
+
+`resolve()` 的结论由 `core/src/remold/vcs/GenerationalReplayGate.java` 翻成"这一轮这条字段还写不写、
+比较侧用什么期望、写入侧写什么值"。它是**纯函数**（只吃一个 `Resolved` + 字段描述符），因此可以在
+纯 JVM 单测里逐条打红；调用方（`InitFix.gateGenerationalReplay`）只负责取坐标、落账与改写发射。
+
+| 结论 | 触发 | 消费侧动作 |
+|:--|:--|:--|
+| `OBLIVIOUS` | `MISS_NO_FACT`（索引里没有这条键的代际证据） | 沿用当轮 `ClassDiff` 的一对初值，与引入代际对账前逐字节一致。**索引缺失只改变成本、不改变判定**（§2.3），所以"没有事实"不是拒绝 |
+| `FACT` | `EXACT` / `CHAINED`，且形态、口径、描述符全部过关 | 比较侧 = 事实的 `oldLiteral`，写入侧 = **同一条**事实的 `newLiteral`（D6）；`InitFix` 用两者重建 `KIND_CONDITIONAL_EXPECTED` 的 bootstrap 常量与压栈常量 |
+| `REFUSED` | `MISS_WINDOW` / `REFUSED_DISCONTINUOUS` / `REFUSED_NONE_LITERAL` / 口径（`algoVersion`）不同 / `kind` 与描述符不符 / 字面量非规范形 | 该字段退出重放候选：`PatchReport.replayFields`（或 `applyReplayFields`）记 `rejected: <原因>`，走既有 warn 出口点名字段；债务落 `markUnclosed` |
+
+三条边界：
+
+- **只在回退上下文里改判**。当轮 `ClassDiff` 的两侧只有在"堆上的值可能是被回退掉那代写的"时才不可信；
+  正向代里 old 侧就是当前字节的初值，本身就正确。因此判据是：HEAD 本身是回退代（`revertedToSeq > 0`），
+  或这条键还欠着未闭环债务。少了这一条，正向重放会被代际事实顶成"期望晚一代"，首次漂移之后每轮都判不命中
+  （实测形态：`PatchReport` 连续 skipped、堆值停滞）。
+- **`L1` 的台账键是字段的声明类，不是被热更的匿名宿主**。`l1ReplayFact` 的 `ownerClass` 取
+  `InitializerReplay.ReplayField.declaringClass`（16 §3.8：`ownerClass` = 声明类），而 `L1` 只重放
+  **继承**字段——写入切片在匿名子类的实例初始化块里，字段却在父类。消费侧查账必须用同一个类，否则永远查不到；
+  运行期的记账（CAS 未命中 / OVERWRITE 闭环）也必须用同一个键，因此该 owner 随 `PendingPatch` 传到记账点。
+- **相邻性按声明类判，因此 `L1` 需要声明类在事实那一代里有条目**。`rawHash` 恒定判据只看
+  `entries[C]`；若声明类在整段区间里从未出现在任何代的 `entries` 里，`isAdjacent` 无法证明"事实仍成立"
+  → `REFUSED_DISCONTINUOUS`（fail-closed，与 §2.3 的"判不了就拒绝"一致，不是"回落到最近活代"）。
+
 ## 4. 跨代 `replayFacts` 消费规则
 
 | # | 规则 | 判据（全部只读已记录的字符串） |
@@ -124,6 +157,7 @@ B1 在 HEAD 之上新建一代：`seq = N + 1`、`parent = HEAD`、`revertedToSe
 | **R2** | `REINIT` 档字段禁止跨代跳读 | 该档 `literalKind = NONE`、两侧字面量为 `null`（16 §3.8）。无字面量就没有"初值是否变过"的证据；它的语义由 `scope` / `mode` / `provenance` 承载，跨代无法比较 |
 | **R3** | `PENDING` 代只贡献写入候选，不贡献期望 | `PENDING` 的键是 `Class<?>` 弱键、无代坐标（不变量 2 不变）；字段被挂起那一代的 `newLiteral` 是**理论**初值，不是堆上实际值。跨过它时：期望取该代之前最近一个**有事实且有写入结果**的代；**禁止**把类型默认值（`null` / `0` / `false`）当 `oldLiteral`——默认值不是初值 |
 | **R4** | `REINIT` 档的拒绝口径 | 同一字段既有 `REINIT` 事实又有 `L1`/`A` 事实时，`REINIT` 优先（AGENTS §1）；重放必须拒绝并走 `InitFix.transform` 的统一 warn 出口，措辞沿用既有形态（`declaring field is annotated @RemoldReinit, the explicit path wins; not replayed`）。**不得**用"两侧字面量都是 `null` → 视为无变化 → 跳过"这种推断；**不得**为 `REINIT` 合成字面量 |
+| **R6** | 消费侧只解析**规范形态**的字面量，解析不了即拒绝 | `FLOAT_BITS`/`DOUBLE_BITS` 只接受 `0x%08x`/`0x%016x`；`Z/B/S/C` 只接受 `literalOf` 产出的规范文本（`true/false`、十进制、单字符）。解析失败返回"判不了"，调用方必须 fail-closed——**不得**回退到十进制反推或就地补位模式（那等于伪造事实）。跨口径（`algoVersion` 不同）的记录同样在这一层被拒，不只依赖存储层的 `record()` 拒收 |
 | **R5** | 字面量比较 = `(literalKind, 规范文本)` 字节精确相等 | `INT`/`LONG` 十进制；`FLOAT_BITS` = `0x%08x`、`DOUBLE_BITS` = `0x%016x` 的**原始位模式**（`literalOf` 的形态）；`STRING` = 转义 UTF-8 + 字节长度；`null` 记文本 `null`。`kind` 不同即不等（`INT 1` ≠ `LONG 1`）；`-0.0f`（`0x80000000`）≠ `0.0f`（`0x00000000`）；NaN 按位区分。禁止 `parseFloat` 回读、禁止数值容差、禁止 `0x…` 与十进制混比 |
 
 R5 的形态前置项（需 Lead 复核）：`captureReplayFacts` 对 `L1` 的 **new 侧**调用的是 `literalOf(null, field.newText(), desc)`，`value == null` 时直接回落到 `newText`（`String.valueOf(naturalNew)` 的十进制渲染），因此 `L1` 的 `float`/`double` 事实会出现"`oldLiteral` 是位模式十六进制、`newLiteral` 是十进制"的混合形态；`A` 档的 new 侧传的是 `newRaw`，不受影响。按 R5，这类记录判为形态不匹配（`REFUSED_NONE_LITERAL`）并拒绝跨代对账，**不得**在台账侧自行把十进制补成位模式（那等于伪造事实）。是否给 `ReplayFact` 的 `L1` new 侧补定型值，属 16 §3.8 格式变更，不在本文件授权范围内。
@@ -167,6 +201,12 @@ R5 的形态前置项（需 Lead 复核）：`captureReplayFacts` 对 `L1` 的 *
 | A12 | loader 被回收后该 scope 的未闭环条目、已应用记录、事实索引一并不可见（`WeakReference` 证明回收 + 读数归零） | 换成本 scope 内 `strongMap` → 回收后仍有幽灵条目 |
 | A13 | `bootstrapSlot`（scope 0）在 `null` loader 下不 NPE，且不参与回收 | 把 `null` loader 丢进 `WeakHashMap` → NPE |
 | A14 | 回退后实例仍持污染代 `newLiteral` 的字段：条件 CAS 的比较侧只接受 `target` 的 `oldLiteral`（§3.3），不命中即 fail-closed 进 `PENDING`——`PatchReport.applyReplayFields` 记 skipped、`REINIT_APPLIED` 不记"已应用"、不出闭环账 | 补进第二期望来源（引擎自写值）→ 变红：回退在堆侧静默 no-op，污染值被当成"已改回"；改用 `KIND_FORCE` 强写 → 变红：覆盖用户运行期修改 |
+
+A5 / A8 / A14 的实现对应物（本文件只定义判据，不登记状态）：
+
+- `tests/src/remold/vcs/GenerationalReplayGateTest.java`：判决层的正/负例（含"没有事实不是拒绝"、非规范形态、跨口径、描述符不符、位模式解码）；
+- `tests/src/GenerationalReplayWiringTest.java`：真实 `InitFix.transform` + 内存 `ChangesetLog`/台账（无 DCEVM），锁"回退上下文里被拒的候选不进补丁、报告点名、债务落台账"，并锁"正向代不被代际事实顶替"；
+- `tests/src/VcsA14Probe.java`：真机链路（JBR 21 + 回退），断言 CAS 未命中 → `skipped` + warn + 台账债务 + 堆值不动，随后 `@RemoldReinit(OVERWRITE)` 写入并把债务闭环。
 
 变异检查（与仓库既有口径一致）：新增/放宽任一条安全门，必须附带负向阻断断言；A5、A6、A7、A9、A11、A14 这六条各自对应一处实现变异，变异存活即视为测试判定力不足，不得以"其它用例已覆盖"解释。
 

@@ -88,6 +88,18 @@ flowchart TD
 | :--- | :--- |
 | [`01-mod-artifact-and-class-isolation.md`](ecosystem/01-mod-artifact-and-class-isolation.md) | 模组生态二元分类、五大构建制品冲突危害、3D 环境探测矩阵与运行时残留 JAR 巡检契约 |
 
+### 2.5 变更集 VCS、活体对齐与代际字段台账 (Changeset VCS & Generational Ledger)
+解决"这一轮热更到底改了哪些字节、跨轮次如何寻址与回放"的版本层（16/17），其上的活体对齐输入契约与真实规模读数（18/19），以及回退后如何按代对账存量字段（20/21）：
+
+| 文档 | 主题与核心内容 |
+| :--- | :--- |
+| [`16-bytecode-changeset-vcs.md`](topology/16-bytecode-changeset-vcs.md) | 内容寻址的逐代 `Changeset` 链与热更版本层规格（`seq` 寻址与窗口、`patchTiming` 时刻语义、`replayFacts` 事实模型、派生数据缓存键契约） |
+| [`17-derived-data-cache-probe.md`](topology/17-derived-data-cache-probe.md) | 派生数据缓存的粒度、条目/字节双预算边界与开/关等价性实测读数 |
+| [`18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md) | 活体对齐的 Raw ↔ Raw 输入选择、G1/G2/G3 准入闸门与 `Eff_prev` 继承集枚举/落地顺序 |
+| [`19-raw-to-raw-realworld-readings.md`](topology/19-raw-to-raw-realworld-readings.md) | 真实规模语料下 Raw ↔ Raw 对齐的命中、失配与耗时读数 |
+| [`20-generational-field-ledger.md`](topology/20-generational-field-ledger.md) | 代际字段台账（B2）：`FieldLedger` / `REINIT_APPLIED` 的按代存储（`GenRef(seq,id)`）、回退后 CAS 期望只取目标代与 fail-closed 口径、`replayFacts` 跨代消费规则 |
+| [`21-b1-gc-baseline-readings.md`](topology/21-b1-gc-baseline-readings.md) | B1 旁路账的内存与 GC 基线读数（保留堆/GC 口径与 B2 引入后的对比方法） |
+
 ---
 
 ## 3. 构建机制与基础设施 (Build & Infrastructure)

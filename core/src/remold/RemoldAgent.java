@@ -14,6 +14,7 @@ import remold.ref.StageBInstanceCache;
 import remold.vcs.AlignmentMetaStore;
 import remold.vcs.Changeset;
 import remold.vcs.ChangesetLog;
+import remold.vcs.GenerationalFieldLedger;
 import remold.vcs.VcsCommitGate;
 import remold.vcs.BytecodePack;
 import remold.util.*;
@@ -4839,6 +4840,9 @@ public class RemoldAgent {
 					 effNow.getOrDefault(scope.getKey(), Map.of()));
 					// 链式回放包按 seq 逐轮导出：提交后立即写本轮目录，离线侧可按任意 seq 单独检出（§7.1）。
 					if (BytecodePack.enabled()) BytecodePack.exportRound(cs);
+					// 台账是派生索引（docs/topology/20 §2.3）：逐条事实带代坐标入索引，口径不合规的
+					// 记录在这里就被拒（不索引），消费侧只会看到规范事实。
+					recordLedgerFacts(scope.getKey(), cs);
 				} catch (Throwable t) {
 					warn("[VCS] changeset commit failed: " + t);
 				}
@@ -4881,11 +4885,44 @@ public class RemoldAgent {
 	}
 
 	/**
+	 * 把一代的 {@code replayFacts} 逐条推进代际台账（{@code docs/topology/20-generational-field-ledger.md} §2.3）。
+	 *
+	 * <p>台账是<b>派生索引</b>：口径不合规的记录在这里被拒（不索引、计数），消费侧因此只会看到
+	 * 规范事实；索引丢了可以按 {@code Changeset} 重建，事实丢了只能拒绝。</p>
+	 */
+	static void recordLedgerFacts(ClassLoader loader, Changeset cs) {
+		// {@code loader == null} 是 bootstrap 槽（scope 0）的合法情形：台账专门为它留了槽，
+		// 这里若跳过就会出现"台账有槽、提交侧永不填"的口径不对称。
+		if (cs == null || cs.replayFacts().isEmpty()) return;
+		GenerationalFieldLedger.GenRef gen = new GenerationalFieldLedger.GenRef(cs.seq(), cs.id());
+		for (Changeset.ReplayFact fact : cs.replayFacts()) {
+			String internal = fact.ownerClass().replace('.', '/');
+			GenerationalFieldLedger.INSTANCE.record(loader,
+			 new GenerationalFieldLedger.LedgerKey(cs.loaderScope(), internal, fact.field()),
+			 gen, fact, cs.algoVersion());
+		}
+		// 历史索引跟随 Changeset 窗口，没有第二个旋钮（§2.3）。
+		GenerationalFieldLedger.INSTANCE.pruneToWindow(loader,
+		 ChangesetLog.INSTANCE.chain(cs.loaderScope()).isEmpty() ? 1L
+		  : ChangesetLog.INSTANCE.chain(cs.loaderScope()).get(0).seq());
+	}
+
+	/**
 	 * 回退到某个已提交代（{@code docs/topology/16-bytecode-changeset-vcs.md} §2.1.1 / §4.1）。
 	 *
 	 * <p>只承诺<b>未来正确</b>：结构与字方法体回到目标代，已经写进存量实例的字段值保持现状，
-	 * 该堆事实由调用方记入 {@code PatchReport} 与告警。执行前先确认每类的工作头都还能切回目标代，
-	 * 切不回去就整体拒绝（fail-closed），不做事后半套回退。</p>
+	 * 该堆事实由调用方记入 {@code PatchReport} 与告警。</p>
+	 *
+	 * <p><b>三阶段，任一阶段失败都不留下半套回退</b>：</p>
+	 * <ol>
+	 *   <li><b>预检</b>：所有 scope 都先算计划、找类、确认目标可达。不动 JVM、不动工作头、不动链、
+	 *       不动缓存——多 scope 时"第 1 个成功、第 2 个抛错"是原来最危险的形态。</li>
+	 *   <li><b>redefine</b>：全部 scope 的字节都装进 JVM。任一 scope 失败就把已 redefine 的 scope
+	 *       尽力写回回退前字节并告警，且<b>不追加任何 Changeset</b>。</li>
+	 *   <li><b>工作头 + 缓存 + 链</b>：代际目标走 {@code restoreHead}，{@code Eff_0} 目标走
+	 *       {@code forgetGenerations}；然后把 agent 侧四张内存表对齐到"JVM 现在真正在跑的字节"，
+	 *       最后才追加前向代。</li>
+	 * </ol>
 	 *
 	 * <p>成功路径追加一条前向 Changeset（{@code seq = HEAD+1}、{@code revertedToSeq = target}），
 	 * 不倒拨 {@code seq}、不造分叉，链式导出保持线性。</p>
@@ -4898,52 +4935,186 @@ public class RemoldAgent {
 			 + " (set -Dremold.vcs.revert=true)");
 		}
 		if (inst == null) throw new IllegalStateException("NOT_REVERTABLE: instrumentation is not attached");
-		StringBuilder summary = new StringBuilder();
+
+		// ---- 阶段 1：全量预检 ----
+		Map<Long, ChangesetLog.RevertPlan> plans = new LinkedHashMap<>();
+		List<RevertScope> work = new ArrayList<>();
 		for (long scope : ChangesetLog.INSTANCE.liveScopes()) {
 			ChangesetLog.RevertPlan plan = ChangesetLog.INSTANCE.revertPlan(scope, targetSeq);
-			if (plan.isEmpty()) {
-				summary.append("scope=").append(scope).append(":noop;");
-				continue;
-			}
-			List<ClassDefinition> defs = new ArrayList<>();
-			Map<ClassLoader, Map<String, String>> byLoader = new IdentityHashMap<>();
+			plans.put(scope, plan);
+			if (plan.isEmpty()) continue;
+			RevertScope step = new RevertScope(scope, plan);
 			for (ChangesetLog.RevertTarget target : plan.targets().values()) {
 				Class<?> cls = findLoadedClassByName(target.className());
 				if (cls == null) {
 					throw new IllegalStateException("NOT_REVERTABLE: class is not loaded: " + target.className());
 				}
-				if (!AlignmentMetaStore.INSTANCE.hasGeneration(cls.getClassLoader(), target.className(),
-				 target.effHash())) {
+				ClassLoader loader = cls.getClassLoader();
+				// {@code Eff_0} 从未进过 AlignmentMetaStore，{@code hasGeneration} 对它必然 false：
+				// 两条路径必须分开判，用同一个放水判据会让"回退到原始态"永远被拒。
+				if (target.fromGeneration()
+				 && !AlignmentMetaStore.INSTANCE.hasGeneration(loader, target.className(), target.effHash())) {
 					throw new IllegalStateException("NOT_REVERTABLE: working head for " + target.className()
 					 + " is no longer addressable at the target generation");
 				}
-				defs.add(new ClassDefinition(cls, target.bytes()));
-				byLoader.computeIfAbsent(cls.getClassLoader(), ignored -> new LinkedHashMap<>())
-				 .put(target.className(), target.effHash());
+				step.add(new RevertClass(cls, loader, target,
+				 bytecodeCache.get(target.className().replace('/', '.'))));
 			}
-			try {
-				inst.redefineClasses(defs.toArray(new ClassDefinition[0]));
-			} catch (Throwable t) {
-				throw new IllegalStateException("NOT_REVERTABLE: revert redefine failed: " + t, t);
+			work.add(step);
+		}
+
+		// ---- 阶段 2：把字节全部装进 JVM ----
+		List<RevertScope> redefined = new ArrayList<>();
+		try {
+			for (RevertScope scope : work) {
+				inst.redefineClasses(scope.definitions().toArray(new ClassDefinition[0]));
+				redefined.add(scope);
 			}
-			for (Map.Entry<ClassLoader, Map<String, String>> e : byLoader.entrySet()) {
-				for (Map.Entry<String, String> gen : e.getValue().entrySet()) {
-					if (!AlignmentMetaStore.INSTANCE.restoreHead(e.getKey(), gen.getKey(), gen.getValue())) {
+		} catch (Throwable t) {
+			restorePreRevertBytes(redefined);
+			throw new IllegalStateException("NOT_REVERTABLE: revert redefine failed: " + t, t);
+		}
+
+		// ---- 阶段 3a：可逆的工作头切换（代际目标）----
+		try {
+			for (RevertScope scope : redefined) {
+				for (RevertClass rc : scope.classes) {
+					if (!rc.target.fromGeneration()) continue;
+					if (!AlignmentMetaStore.INSTANCE.restoreHead(rc.loader, rc.target.className(),
+					 rc.target.effHash())) {
 						throw new IllegalStateException("revert redefine succeeded but working head sync failed for "
-						 + gen.getKey() + "; the next Run R baseline would be wrong");
+						 + rc.target.className() + "; the next Run R baseline would be wrong");
 					}
+				}
+			}
+		} catch (RuntimeException e) {
+			restorePreRevertBytes(redefined);
+			throw e;
+		}
+
+		// ---- 阶段 3b：{@code Eff_0} 目标的代际身份作废（不可逆，必须放在最后）----
+		for (RevertScope scope : redefined) {
+			for (RevertClass rc : scope.classes) {
+				if (rc.target.fromGeneration()) continue;
+				int dropped = AlignmentMetaStore.INSTANCE.forgetGenerations(rc.loader, rc.target.className());
+				warn("[VCS] " + rc.target.className() + " reverts to its Eff_0 baseline: dropped "
+				 + dropped + " recorded generation(s), so the next Run R falls back to Run E.");
+			}
+		}
+
+		// ---- 阶段 3c：缓存同步 + 追加前向代 ----
+		StringBuilder summary = new StringBuilder();
+		for (Map.Entry<Long, ChangesetLog.RevertPlan> entry : plans.entrySet()) {
+			long scope = entry.getKey();
+			ChangesetLog.RevertPlan plan = entry.getValue();
+			if (plan.isEmpty()) {
+				summary.append("scope=").append(scope).append(":noop;");
+				continue;
+			}
+			ClassLoader forwardLoader = null;
+			for (RevertScope done : redefined) {
+				if (done.scope != scope) continue;
+				for (RevertClass rc : done.classes) {
+					// 四张 agent 内存表必须与"JVM 现在真正在跑的字节"对齐，否则下一轮
+					// LambdaAligner / ClassDiffUtil / 磁盘跳过判据都会拿被退掉的污染代当基线。
+					syncCachesAfterRevert(rc.loader, rc.target);
+					if (forwardLoader == null) forwardLoader = rc.loader;
 				}
 			}
 			Changeset forward = ChangesetLog.INSTANCE.appendForwardRevert(scope, plan,
 			 batchWatchLabelFromNames(plan.targets().keySet()), Changeset.currentAlgoVersion(),
 			 System.getProperty("remold.build_id", ""), Changeset.PatchTiming.AFTER_COMMIT);
+			// 被回退掉的代不再有任何承诺：事实与引擎写入记录整体作废（20 §3.4），宁可多写一次。
+			int invalidated = GenerationalFieldLedger.INSTANCE.invalidateAfterRevert(forwardLoader, targetSeq);
 			warn("[VCS] reverted scope " + scope + " to seq " + targetSeq + " (" + plan.targets().size()
 			 + " class(es)); existing instance field values are NOT rolled back"
 			 + " (heap values keep their current state, structure/bodies follow seq " + targetSeq + ").");
 			summary.append("scope=").append(scope).append(":seq=").append(forward.seq())
-			 .append(":classes=").append(plan.targets().size()).append(';');
+			 .append(":classes=").append(plan.targets().size())
+			 .append(":invalidated=").append(invalidated).append(';');
 		}
 		return summary.toString();
+	}
+
+	/** 一次回退里的一个类：类对象、目标，以及回退前 JVM 里跑的字节（失败回滚用）。 */
+	private record RevertClass(Class<?> type, ClassLoader loader, ChangesetLog.RevertTarget target,
+	                           byte[] preRevertBytes) { }
+
+	/** 一个 scope 的回退单元（records 不能增量构建，这里用可变容器）。 */
+	private static final class RevertScope {
+		final long scope;
+		final ChangesetLog.RevertPlan plan;
+		final List<RevertClass> classes = new ArrayList<>();
+
+		RevertScope(long scope, ChangesetLog.RevertPlan plan) {
+			this.scope = scope;
+			this.plan = plan;
+		}
+
+		void add(RevertClass rc) {
+			classes.add(rc);
+		}
+
+		List<ClassDefinition> definitions() {
+			List<ClassDefinition> defs = new ArrayList<>(classes.size());
+			for (RevertClass rc : classes) defs.add(new ClassDefinition(rc.type, rc.target.bytes()));
+			return defs;
+		}
+	}
+
+	/**
+	 * 多 scope 回退中途失败时的尽力回滚：把已经 redefine 的类写回回退前字节，并明确告警。
+	 *
+	 * <p>"尽力"是诚实的边界：回滚本身也可能失败（JVM 拒绝二次重定义等），那时唯一的正确动作是
+	 * 告警要求重启，而不是假装回退没发生过。</p>
+	 */
+	private static void restorePreRevertBytes(List<RevertScope> redefined) {
+		for (RevertScope scope : redefined) {
+			List<ClassDefinition> back = new ArrayList<>(scope.classes.size());
+			for (RevertClass rc : scope.classes) {
+				if (rc.preRevertBytes == null || rc.preRevertBytes.length == 0) continue;
+				back.add(new ClassDefinition(rc.type, rc.preRevertBytes));
+			}
+			if (back.isEmpty()) continue;
+			try {
+				inst.redefineClasses(back.toArray(new ClassDefinition[0]));
+				warn("[VCS] revert aborted after scope " + scope.scope + " was already redefined;"
+				 + " restored the pre-revert bytes of " + back.size() + " class(es) in that scope.");
+			} catch (Throwable t) {
+				warn("[VCS] revert aborted AND the pre-revert bytes of scope " + scope.scope
+				 + " could not be restored (" + t + "); a restart is required.");
+			}
+		}
+	}
+
+	/**
+	 * 把 agent 侧四张表对齐到回退后的目标代。
+	 *
+	 * <p>漏掉这一步不会立刻报错，而是<b>下一轮</b>才错：{@code bytecodeCache} 决定
+	 * {@code LambdaAligner.align} 的旧侧与 {@code ClassDiffUtil.diff} 的基线，{@code sourceBytecodeCache}
+	 * 决定源码基线，{@code inventedSlots} 决定自造名身份，{@code fileDiskHashes} 决定"磁盘没变就跳过"。
+	 * 任一留着污染代的值，回退后的第一次热更就会静默用错代配对，或在字段增删上判"本来就有"而跳过初始化。</p>
+	 */
+	private static void syncCachesAfterRevert(ClassLoader loader, ChangesetLog.RevertTarget target) {
+		String dotted = target.className().replace('/', '.');
+		bytecodeCache.put(dotted, target.bytes().clone());
+		AlignmentMetaStore.Entry head = AlignmentMetaStore.INSTANCE.head(loader, target.className());
+		Set<String> invented = head == null ? Set.of() : head.inventedNames;
+		if (invented.isEmpty()) inventedSlots.remove(dotted);
+		else inventedSlots.put(dotted, Set.copyOf(invented));
+		byte[] raw = head == null ? null : head.rawPrevBytes();
+		if (raw == null) {
+			// 拿不到目标代的 Raw 源字节时宁可清空：读侧会退回 {@code bytecodeCache}，
+			// 而留着污染代的源码基线会让下一轮拿错代的源码去配对。
+			sourceBytecodeCache.remove(dotted);
+		} else {
+			sourceBytecodeCache.put(dotted, raw.clone());
+		}
+		// 磁盘上仍是被退掉的那份内容。标记"无可信基线"（-1 是 changedOnDisk 判据里的无值约定），
+		// 让下一轮扫描把它当改动重新热更上去，而不是误判"未修改"把 JVM 永远留在目标代。
+		synchronized (fileDiskHashes) {
+			fileDiskHashes.put(CRC64.hashString(dotted), -1L);
+		}
 	}
 
 	private static String batchWatchLabelFromNames(Collection<String> names) {

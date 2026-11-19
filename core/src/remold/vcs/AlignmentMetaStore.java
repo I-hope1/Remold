@@ -297,6 +297,47 @@ public final class AlignmentMetaStore {
 		return true;
 	}
 
+	/**
+	 * 把该类的记录整体退回"从未进入任何代"的状态：{@code Eff_0} 回退目标的唯一出口。
+	 *
+	 * <p>{@code Eff_0} 是首次重定义<b>之前</b>的字节，它从来没有经过 {@link #commit}，因此
+	 * {@link #hasGeneration} 必然为 {@code false}、{@link #restoreHead} 也找不到可切回的条目。
+	 * 回退到它的正确语义不是"切到某个代"，而是"这一类在当前 scope 里不再有任何代际身份"：下一次
+	 * Run R 因 {@link #headMatching} 无条目而落 {@code NO_ENTRY}，整类退回 Run E（字节码标记）。
+	 * 用 {@code hasGeneration} 放水或伪造一条记录都会让下一轮拿错代当基线。</p>
+	 *
+	 * <p>计数口径与 {@link #commit}/{@link #restoreHead} 一致：历史条目逐个从
+	 * {@code historyCount} 与可回收 blob 索引里摘除；只被 {@code head} 引用（已被全局预算摘出
+	 * history）的条目单独扣字节。</p>
+	 *
+	 * @return 被移除的历史条目数；0 表示该类本来就没有代际记录（同样是合法的 {@code Eff_0} 状态）
+	 */
+	public synchronized int forgetGenerations(ClassLoader loader, String className) {
+		if (className == null) return 0;
+		LoaderSlot slot = slot(loader);
+		if (slot == null) return 0;
+		Entry prev = slot.head.remove(className);
+		Deque<Entry> d = slot.history.remove(className);
+		boolean headIsInHistory = d != null && prev != null && containsIdentity(d, prev);
+		int removed = 0;
+		if (d != null) {
+			for (Entry e : d) {
+				slot.historyCount--;
+				removed++;
+				if (e.blobBytes() > 0) {
+					slot.blobHolders.remove(e.seq);
+					slot.blobBytesHeld -= e.blobBytes();
+				}
+			}
+		}
+		if (prev != null && !headIsInHistory) {
+			slot.blobBytesHeld -= prev.blobBytes();
+			slot.blobHolders.remove(prev.seq);
+		}
+		if (slot.blobBytesHeld < 0L) slot.blobBytesHeld = 0L;
+		return removed;
+	}
+
 	/** loader 回收后，其名下记录不再计入；这里给出当前仍可用的 loader 槽数（含 bootstrap）。 */
 	public synchronized int liveLoaderCount() {
 		return slots.size() + 1;

@@ -177,8 +177,19 @@ public final class ChangesetLog {
 		return out.toByteArray();
 	}
 
+	/** 回退目标的两条路径：它们不是"同一件事的两种写法"，工作头处理方式完全不同。 */
+	public enum RevertTargetKind {
+		/** 目标代里该类有一条已提交记录：工作头按 {@code jvmEffSha256} 切回那一代。 */
+		GENERATION,
+		/** 该类的首次修改就落在被回退区间内：目标是 {@code Eff_0}，它从未进过任何代。 */
+		EFF0
+	}
+
 	/** 回退计划里的一类目标。 */
-	public record RevertTarget(String className, String effHash, byte[] bytes) {
+	public record RevertTarget(String className, String effHash, byte[] bytes, RevertTargetKind kind) {
+		public boolean fromGeneration() {
+			return kind == RevertTargetKind.GENERATION;
+		}
 	}
 
 	/** 回退计划：目标代 + 需要重定义的类集合（含各自目标字节）。 */
@@ -226,7 +237,8 @@ public final class ChangesetLog {
 				missing.add(className);
 				continue;
 			}
-			targets.put(className, new RevertTarget(className, effHash, bytes.clone()));
+			targets.put(className, new RevertTarget(className, effHash, bytes.clone(),
+			 latest == null ? RevertTargetKind.EFF0 : RevertTargetKind.GENERATION));
 		}
 		if (!missing.isEmpty()) {
 			// 点名缺字节的类：否则只能在"回退被拒"与"回退错代"之间靠猜。

@@ -36,45 +36,62 @@ public class CrossClassInitFixProbe {
 		RemoldAgent.LAYOUT_GATE = LayoutGate.MODE_REJECT;
 		RemoldAgent.OFFSET_STRICT = false;
 		RemoldAgent.DEBUG = false;
-		RemoldAgent.TWO_PHASE = false;
-		scenarioSameBatchStaticOrder();
-		scenarioRuntimePrerequisiteFailure();
+		for (boolean twoPhase : new boolean[]{false, true}) {
+			RemoldAgent.TWO_PHASE = twoPhase;
+			scenarioSameBatchStaticOrder(twoPhase);
+			scenarioRuntimePrerequisiteFailure(twoPhase);
+		}
 		System.out.println("CROSS-CLASS INITFIX SUMMARY: passed=" + passed + ", failed=" + failed);
 		if (failed != 0) System.exit(1);
 	}
 
-	private static void scenarioSameBatchStaticOrder() throws Throwable {
-		String pkg = "ccprobe.order";
+	private static void scenarioSameBatchStaticOrder(boolean twoPhase) throws Throwable {
+		String pkg = twoPhase ? "ccprobe.order2p" : "ccprobe.order";
+		String tag = twoPhase ? " [two-phase]" : " [single-phase]";
 		String y1 = "package " + pkg + "; public class Y { }";
 		String x1 = "package " + pkg + "; public class X { }";
 		String x2 = "package " + pkg + "; public class X { public static int read = Y.base + 4; }";
 		Fixture f = fixture(pkg, Map.of(pkg + ".X", x1, pkg + ".Y", y1), Map.of(pkg + ".X", x2,
 		 pkg + ".Y", "package " + pkg + "; public class Y { public static int base = 9; }"));
 		Class<?> x = f.load(pkg + ".X"); Class<?> targetY = f.load(pkg + ".Y");
-		check(x.getDeclaredFields().length == 0, "precondition: X has no target field before redefine");
+		check(x.getDeclaredFields().length == 0, "precondition: X has no target field before redefine" + tag);
 		f.hotSwap(pkg + ".X", pkg + ".Y");
-		check(targetY.getField("base").getInt(null) == 9, "Y.base receives its new initializer");
-		check(x.getField("read").getInt(null) == 13, "X.read observes Y.base after prerequisite host patch");
+		check(targetY.getField("base").getInt(null) == 9, "Y.base receives its new initializer" + tag);
+		check(x.getField("read").getInt(null) == 13, "X.read observes Y.base after prerequisite host patch" + tag);
 		check(InitFix.getUnpatchedFields(x).stream().noneMatch(field -> field.fieldName().equals("read")),
-		 "successful dependent field is absent from FieldLedger");
+		 "successful dependent field is absent from FieldLedger" + tag);
 		f.close();
 	}
 
-	private static void scenarioRuntimePrerequisiteFailure() throws Throwable {
-		String pkg = "ccprobe.failure";
-		String y1 = "package " + pkg + "; public class Y { public static int compute() { return 1; } }";
-		String y2 = "package " + pkg + "; public class Y { public static int base = compute(); public static int compute() { throw new IllegalStateException(\"expected\"); } }";
+	private static void scenarioRuntimePrerequisiteFailure(boolean twoPhase) throws Throwable {
+		String pkg = twoPhase ? "ccprobe.failure2p" : "ccprobe.failure";
+		String tag = twoPhase ? " [two-phase]" : " [single-phase]";
+		// Stage A keeps the OLD method bodies during the patch window, so a "broken new helper" only fails in
+		// single-phase. Use a helper that throws in the OLD body and returns normally in the NEW body: that way
+		// both modes really execute a failing prerequisite patch instead of silently succeeding.
+		String throwingHelper = "public static int compute() { throw new IllegalStateException(\"expected\"); }";
+		String normalHelper = "public static int compute() { return 1; }";
+		String y1 = "package " + pkg + "; public class Y { " + (twoPhase ? throwingHelper : normalHelper) + " }";
+		String y2 = "package " + pkg + "; public class Y { public static int base = compute(); "
+		 + (twoPhase ? normalHelper : throwingHelper) + " }";
 		String x1 = "package " + pkg + "; public class X { }";
 		String x2 = "package " + pkg + "; public class X { public static int blocked = Y.base + 1; public static int independent = 31; }";
 		Fixture f = fixture(pkg, Map.of(pkg + ".X", x1, pkg + ".Y", y1), Map.of(pkg + ".X", x2, pkg + ".Y", y2));
 		Class<?> x = f.load(pkg + ".X"); Class<?> y = f.load(pkg + ".Y");
-		check(x.getDeclaredFields().length == 0 && y.getMethod("compute").invoke(null).equals(1),
-		 "precondition: target fields are absent and old helper is active");
+		boolean oldHelperBodyActive;
+		try {
+			Object probeValue = y.getMethod("compute").invoke(null);
+			oldHelperBodyActive = !twoPhase && probeValue.equals(1);
+		} catch (java.lang.reflect.InvocationTargetException expected) {
+			oldHelperBodyActive = twoPhase && expected.getCause() instanceof IllegalStateException;
+		}
+		check(x.getDeclaredFields().length == 0 && oldHelperBodyActive,
+		 "precondition: target fields are absent and the pre-redefine helper body is active" + tag);
 		f.hotSwap(pkg + ".X", pkg + ".Y");
-		check(x.getField("blocked").getInt(null) == 0, "X.blocked remains at its default after Y.base runtime failure");
-		check(x.getField("independent").getInt(null) == 31, "X.independent still executes");
+		check(x.getField("blocked").getInt(null) == 0, "X.blocked remains at its default after Y.base runtime failure" + tag);
+		check(x.getField("independent").getInt(null) == 31, "X.independent still executes" + tag);
 		check(InitFix.getUnpatchedFields(x).stream().anyMatch(field -> field.fieldName().equals("blocked")),
-		 "dependent skip is recorded in X FieldLedger");
+		 "dependent skip is recorded in X FieldLedger" + tag);
 		f.close();
 	}
 

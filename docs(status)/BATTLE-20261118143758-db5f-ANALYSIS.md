@@ -92,9 +92,8 @@ Implement PR4-A only: use same-batch latest bytecode for InitFix analysis, conve
 - 无
 
 ## 5.1 已接受局限 / 挂账债务 (4)
-- The original campaign acceptance commands used ./gradlew although the repository wrapper is not executable; this was corrected to bash ./gradlew before final integration acceptance acceptance.
-- The original campaign acceptance list used ./gradlew even though the repository wrapper is not executable (mode 100644); it was corrected to bash ./gradlew and those two exit-126 harness-error records were invalidated. Restore +x on gradlew if the repository wants bare ./gradlew invocations.
-- Repository gradlew is mode 100644, so bare ./gradlew invocations fail with exit 126; all campaign acceptance commands were normalized to bash ./gradlew. Restore +x on gradlew if bare invocations should work.
+- `gradlew` is mode 100644, so bare `./gradlew` fails with exit 126; all campaign acceptance commands were normalized to `bash ./gradlew`, and the two exit-126 records were invalidated rather than counted as code failures. Restore +x on `gradlew` if bare invocations should work.
+- Five of twelve mutation trials survived: they were duplicate probes of the same mutation point, mutations of unreachable helper code, or trials whose `test_cmd` did not include the file holding the target assertion. Every real implementation point (overlay, host order, runtime token, cycle detection, cross-class edges) has at least one killed trial anchored to a failing assertion.
 - Five of twelve recorded mutation trials survived. Surviving trials were either duplicate probes of the same mutation point, mutations of unreachable helper code, or mutations whose target assertion lives only in a separate test file excluded by that trial's test_cmd; each real implementation point (overlay, host order, runtime token, cycle detection, cross-class edges) has at least one killed trial anchored to a failing assertion.
 - 1 条 harness-error 证据（环境/命令未真正执行，不计入通过/击杀）: ev-20261118151508-2cff
 

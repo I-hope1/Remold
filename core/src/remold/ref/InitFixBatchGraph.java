@@ -15,9 +15,11 @@ public final class InitFixBatchGraph {
 
     public record Graph(Map<FieldKey, Set<FieldKey>> dependencies) {
         public Graph {
+            // Insertion order must be preserved end to end: Set.copyOf randomises iteration order per JVM run,
+            // which would make topologicalHosts' output drift between processes and defeat order debugging.
             Map<FieldKey, Set<FieldKey>> copy = new LinkedHashMap<>();
             for (Map.Entry<FieldKey, Set<FieldKey>> entry : dependencies.entrySet()) {
-                copy.put(entry.getKey(), Set.copyOf(entry.getValue()));
+                copy.put(entry.getKey(), Collections.unmodifiableSet(new LinkedHashSet<>(entry.getValue())));
             }
             dependencies = Collections.unmodifiableMap(copy);
         }
@@ -34,7 +36,7 @@ public final class InitFixBatchGraph {
             for (FieldKey node : dependencies.keySet()) {
                 if (!index.containsKey(node)) tarjan(node, index, low, stack, onStack, cycles, next);
             }
-            return Set.copyOf(cycles);
+            return Collections.unmodifiableSet(new LinkedHashSet<>(cycles));
         }
 
         private void tarjan(FieldKey node, Map<FieldKey, Integer> index, Map<FieldKey, Integer> low,
@@ -81,7 +83,7 @@ public final class InitFixBatchGraph {
                     }
                 }
             }
-            return Set.copyOf(conflicts);
+            return Collections.unmodifiableSet(new LinkedHashSet<>(conflicts));
         }
 
         private static boolean reaches(Map<String, Set<String>> edges, String from, String target, Set<String> seen) {

@@ -299,7 +299,10 @@ public class InitFix {
 		context.bytesByLoader().clear();
 		Set<Class<?>> installed = Collections.newSetFromMap(new IdentityHashMap<>());
 		for (ClassDefinition definition : definitions) installed.add(definition.getDefinitionClass());
-		Map<String, Set<String>> candidates = new LinkedHashMap<>();
+		// Start from the keys registered when the view was opened: classes dropped by the layout/annotation
+		// gates never reach transform(), and forgetting them here would let analysis silently read their stale
+		// global-cache bytes instead of failing closed.
+		Map<String, Set<String>> candidates = new LinkedHashMap<>(context.candidateFields());
 		for (BatchInput input : context.inputs()) {
 			if (input.diff() == null || input.diff().newClass == null) continue;
 			Set<String> fields = new LinkedHashSet<>();
@@ -329,7 +332,7 @@ public class InitFix {
 			Map<String, byte[]> bytes = context.bytesByLoader().get(input.host().getClassLoader());
 			return bytes != null && bytes.containsKey(input.host().getName());
 		}).toList();
-		Map<String, Set<String>> candidates = new LinkedHashMap<>();
+		Map<String, Set<String>> candidates = new LinkedHashMap<>(context.candidateFields());
 		for (BatchInput input : allInputs) {
 			ClassDiff diff = input.diff();
 			if (diff == null || diff.newClass == null) continue;
@@ -1984,11 +1987,27 @@ public class InitFix {
 				acceptedStatic.clear();
 			}
 			if (BATCH_CONTEXT.get() != null) {
-				for (String field : acceptedInstance) {
-					crossDependencies.put(field, batchDependencyOf(field, instanceExtracts, className, host.getClassLoader(), oracle));
+				for (String field : new ArrayList<>(acceptedInstance)) {
+					Optional<Set<InitFixBatchGraph.FieldKey>> deps =
+					 batchDependencyOf(field, instanceExtracts, className, host.getClassLoader(), oracle);
+					if (deps.isEmpty()) {
+						instanceDecisions.put(field, FieldDecision.rejected(
+						 "cross-class dependency unavailable: batch candidate bytes are missing"));
+						acceptedInstance.remove(field);
+					} else {
+						crossDependencies.put(field, deps.get());
+					}
 				}
-				for (String field : acceptedStatic) {
-					crossDependencies.put(field, batchDependencyOf(field, staticExtracts, className, host.getClassLoader(), oracle));
+				for (String field : new ArrayList<>(acceptedStatic)) {
+					Optional<Set<InitFixBatchGraph.FieldKey>> deps =
+					 batchDependencyOf(field, staticExtracts, className, host.getClassLoader(), oracle);
+					if (deps.isEmpty()) {
+						staticDecisions.put(field, FieldDecision.rejected(
+						 "cross-class dependency unavailable: batch candidate bytes are missing"));
+						acceptedStatic.remove(field);
+					} else {
+						crossDependencies.put(field, deps.get());
+					}
 				}
 			}
 		};
@@ -3009,14 +3028,22 @@ public class InitFix {
 		return name;
 	}
 
-	private static Set<InitFixBatchGraph.FieldKey> batchDependencyOf(
+	/**
+	 * Cross-class prerequisites read by one field's init slice.
+	 *
+	 * <p>Returns {@link Optional#empty()} when the slice reads a field of a <b>batch candidate</b> whose final
+	 * bytes are not in the batch view: reading the stale global cache there would let the field be patched from
+	 * a schema that will never be installed. Callers must reject the dependent field instead (fail closed).</p>
+	 */
+	private static Optional<Set<InitFixBatchGraph.FieldKey>> batchDependencyOf(
 	 String fieldName, Map<String, List<FieldExtract>> extracts, String className,
 	 ClassLoader loader, HierarchyTreeOracle oracle) {
 		Set<InitFixBatchGraph.FieldKey> deps = new LinkedHashSet<>();
 		BatchContext context = BATCH_CONTEXT.get();
-		if (context == null) return deps;
+		if (context == null) return Optional.of(deps);
 		List<FieldExtract> fieldExtracts = extracts.get(fieldName);
-		if (fieldExtracts == null) return deps;
+		if (fieldExtracts == null) return Optional.of(deps);
+		Map<String, byte[]> batchBytes = context.bytesByLoader().get(loader);
 		for (FieldExtract extract : fieldExtracts) {
 			for (AbstractInsnNode insn : extract.instructions()) {
 				if (!(insn instanceof FieldInsnNode access)) continue;
@@ -3027,6 +3054,7 @@ public class InitFix {
 				String owner = member.map(ref -> ref.declaringClass.replace('/', '.'))
 				 .orElse(access.owner.replace('/', '.'));
 				String ownerKey = batchCandidateOwnerKey(context, owner, loader);
+				if (ownerKey != null && batchBytes != null && !batchBytes.containsKey(owner)) return Optional.empty();
 				if (member.isEmpty()) {
 					if (ownerKey != null && context.candidateFields().getOrDefault(ownerKey, Set.of()).contains(access.name)) {
 						deps.add(new InitFixBatchGraph.FieldKey(ownerKey, access.name));
@@ -3038,7 +3066,7 @@ public class InitFix {
 				deps.add(new InitFixBatchGraph.FieldKey(ownerKey, access.name));
 			}
 		}
-		return deps;
+		return Optional.of(deps);
 	}
 
 	/** 该字段切片读取的、同样在本轮受补的其它字段（docs/initfix/03-runtime-driver.md §2 的依赖失败传播用）。 */

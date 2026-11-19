@@ -4901,7 +4901,10 @@ public class RemoldAgent {
 			}
 		} finally {
 			InitFix.endBatchInstanceCollection();
-			InitFix.endBatchBytecodeView();
+			// The batch bytecode view intentionally survives until the caller's Stage B loop ends: the outer
+			// processChangesBatch still runs InitFix.orderBatchHosts over every redefined class, and clearing
+			// the view here would silently drop cross-class ordering for any class that still holds a pending
+			// patch (mixed two-phase / single-phase batches).
 		}
 		long patchMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - patchStart);
 		BATCH_STAGE_B_MILLIS.addAndGet(patchMs);

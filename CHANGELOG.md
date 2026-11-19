@@ -22,9 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 单阶段与两阶段 Stage B 都按宿主拓扑序执行（`orderBatchHosts`），同类融合字段循环不被拆分。
   - 运行期 prerequisite 失败只跳过精确下游字段，上下游各自记入 `FieldLedger`；`@batch:` token 只作
     内部依赖键，不写进台账字段名。
-  - 验收：`crossClassInitFixProbe` 8/0（JBR 21 DCEVM，逆序输入跨类静态初始化 + 运行期失败只跳下游）、
-    `twoPhaseProbe` 72/0、`initFixOracle`、`check`；单测 `CrossClassInitFixTest` / `InitFixBatchGraphTest`；
-    变异 5 击杀（禁用同批 overlay、打乱宿主顺序、去掉运行期失败 token、去掉循环拒绝、去掉跨类边收集）。
+  - 批次视图保留候选类**身份**而不只是已安装字节：被布局门/注解门挡掉的类仍是候选，其字节缺失时
+    相关下游字段一律拒绝，绝不回退全局旧缓存（`setBatchDefinitions` / `finishBatchTransforms` 不再丢弃
+    批次开始时登记的候选键）。
+  - 宿主拓扑输入全程保持插入序（不再经 `Set.copyOf` 打乱），同一 JVM 多次运行与跨进程排查得到相同顺序。
+  - 两阶段路径不再提前清空批次视图（原先清在 `applyTwoPhase.finally`），混合批次仍能保持跨类顺序。
+  - 验收：`crossClassInitFixProbe` 16/0（JBR 21 DCEVM；单阶段与两阶段各 8 项——逆序输入跨类静态初始化、
+    运行期 prerequisite 失败只跳下游；两阶段的失败注入走阶段 A 保留的旧方法体）、`twoPhaseProbe` 72/0、
+    `initFixOracle`、`check`；单测 `CrossClassInitFixTest` 4 用例 / `InitFixBatchGraphTest` 6 用例；
+    变异 6 击杀（禁用同批 overlay、打乱宿主顺序、去掉运行期失败 token、去掉循环拒绝、去掉跨类边收集、
+    去掉候选字节缺失 fail-closed）。
 
 - **PR3：活的 lambda 对齐改走 `R_prev ↔ R_new`（Run R），`Eff_prev` 降级为继承来源**
   （`LambdaAligner`、`AlignmentMetaStore`、`RemoldAgent`）：活体路径不再拿被幽灵桩 / 捕获桥 /

@@ -2142,6 +2142,7 @@ public class RemoldAgent {
 		} finally {
 			// 旁路暂存（PR1）必须在这里兜底清空：批次中途抛 Throwable 时，提交点可能压根没跑到，
 			// 残余条目会带着上一批的对齐输入污染下一批。
+			InitFix.endBatchBytecodeView();
 			PENDING_VCS.clear();
 			BatchWatchdog.exit();
 		}
@@ -2485,6 +2486,15 @@ public class RemoldAgent {
 		long anonAlignMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(bridgeStartNanos - anonStartNanos) : 0L;
 		long bridgeMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(anonEndNanos - bridgeStartNanos) : 0L;
 
+		Map<ClassLoader, Map<String, byte[]>> batchView = new IdentityHashMap<>();
+		for (Map.Entry<String, byte[]> entry : newBatchBytes.entrySet()) {
+			Class<?> loaded = loadedClassesMap.get(entry.getKey());
+			ClassLoader loader = loaded != null ? loaded.getClassLoader()
+				: findTargetClassLoader(entry.getKey(), classToPath.get(entry.getKey()));
+			batchView.computeIfAbsent(loader, ignored -> new LinkedHashMap<>()).put(entry.getKey(), entry.getValue());
+		}
+		InitFix.beginBatchBytecodeView(batchView);
+
 		// ---- 同名局部类编号漂移止血门（docs/topology/07-layout-gate-and-risks.md §2）----
 		//
 		// 位置：宿主匿名对齐之后、实例布局门之前。局部类不在匿名对齐视野内（名字含简单名，被准入闸门
@@ -2768,11 +2778,6 @@ public class RemoldAgent {
 							ClassDiffUtil.ensureFullClassNodes(diff, oldBytecode, newBytecode);
 						}
 						InitFix.transform(targetClass, newBytecode, diff);
-						// 批次路径直接按补丁结构判定是否需要两阶段：不在此处为了省一次 ~100ms Stage A
-						// 而触发昂贵的全堆实例化扫描（大堆上即使有存活实例也会导致 Stage A 前后扫两次全堆）。
-						if (!needsTwoPhase && TWO_PHASE && InitFix.requiresTwoPhase(targetClass)) {
-							needsTwoPhase = true;
-						}
 						initFixNanos += System.nanoTime() - initFixT0;
 					} else {
 						log("[WARN] Cannot diff " + className + " (missing old bytecode). Proceeding with redefine.");
@@ -2826,6 +2831,16 @@ public class RemoldAgent {
 				}
 			} catch (Throwable e) {
 				error("Failed to process " + path, e);
+			}
+		}
+		InitFix.setBatchDefinitions(definitions);
+		InitFix.finishBatchTransforms();
+		if (TWO_PHASE) {
+			for (ClassDefinition definition : definitions) {
+				if (InitFix.requiresTwoPhase(definition.getDefinitionClass())) {
+					needsTwoPhase = true;
+					break;
+				}
 			}
 		}
 
@@ -2943,7 +2958,7 @@ public class RemoldAgent {
 		// 两阶段路径下这些类的 PENDING 已在 Stage B 被摘掉，这里过滤后为空 → 不产生额外遍历。
 		InitFix.beginBatchInstanceCollection(patchTargets);
 		try {
-			for (Class<?> clazz : patchTargets) {
+			for (Class<?> clazz : InitFix.orderBatchHosts(patchTargets)) {
 				try {
 					InitFix.afterRedefine(clazz);
 				} catch (Throwable e) {
@@ -2953,6 +2968,7 @@ public class RemoldAgent {
 			}
 		} finally {
 			InitFix.endBatchInstanceCollection();
+			InitFix.endBatchBytecodeView();
 		}
 		BATCH_STAGE_B_MILLIS.addAndGet(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - stageBStart));
 		if (HeapFieldWatch.enabled() && !(needsTwoPhase && TWO_PHASE) && !successfulDefinitions.isEmpty()) {
@@ -4874,7 +4890,7 @@ public class RemoldAgent {
 		// 补丁执行之前——提前收集会漏掉窗口期新建的实例（docs/status.md 风险 6）。
 		InitFix.beginBatchInstanceCollection(patchTargets);
 		try {
-			for (Class<?> clazz : patchTargets) {
+			for (Class<?> clazz : InitFix.orderBatchHosts(patchTargets)) {
 				try {
 					InitFix.afterRedefine(clazz);
 				} catch (Throwable t) {
@@ -4885,6 +4901,7 @@ public class RemoldAgent {
 			}
 		} finally {
 			InitFix.endBatchInstanceCollection();
+			InitFix.endBatchBytecodeView();
 		}
 		long patchMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - patchStart);
 		BATCH_STAGE_B_MILLIS.addAndGet(patchMs);

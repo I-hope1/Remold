@@ -105,16 +105,11 @@ B1 在 HEAD 之上新建一代：`seq = N + 1`、`parent = HEAD`、`revertedToSe
 | `REFUSED_DISCONTINUOUS` | 身份或相邻性不过 | 不写；warn；`REINIT_APPLIED` 该字段作废 |
 | `REFUSED_NONE_LITERAL` | `literalKind == NONE` 或形态不匹配 | §4-R4 |
 
-### 3.4 引擎自写值的附加期望（需 Lead 复核）
+**期望来源唯一**：比较侧只取通过上述三条校验的那条事实的 `oldLiteral`，写入侧取**同一对**事实的 `newLiteral`（`EXACT` / `CHAINED` 同口径）。不设第二个期望来源——`REINIT_APPLIED` 里"由引擎写入"的记录值、污染代 `seq = N` 的 `newLiteral`、类型默认值都不是期望（D12）。理由：引擎在污染代写过的值与用户在运行期改过的值在堆上无法区分（16 §4.1），扩充来源等于把后者当成"未改过"覆盖，并把回退变成静默 no-op。
 
-回退后实例常持有污染代写入的 `newLiteral`：只认 `target.oldLiteral` 会让 CAS 全部跳过。本规格允许**有界**放宽，条件全部可机械校验：
+由此得到回退后的 **fail-closed 后果**（负向判据见 §6-A5 / §6-A14）：实例若仍持有污染代写入的值，它按 §4-R5 与 `target.oldLiteral` 不等 → CAS 不命中 → 不写、不改写、不记"已应用"——**fail-closed 进 `PENDING`**：该字段仍是未完成项（`PatchReport.applyReplayFields` 的该条结果为 skipped，`REINIT_APPLIED` 不出"已应用"记录，`[g, target]` 区间事实不因这次跳过被改写），下一轮重新进候选。宁可这一轮少写一次，也不把无法验证的值当成"已改回"（AGENTS §3 安全优先）。
 
-- 候选值 `v` 是 `REINIT_APPLIED` 中**同一** `(scope, C, field)` 在某个 `seq ∈ (target, N]` 上记录"由引擎写入"的字面量，且该记录的 `seq` 能在 `chain(scope)` 里找到；
-- 且 `v` 与 `target.oldLiteral` 按 §4-R5 **字节精确**比较，不做数值转换、不做容差。
-
-不满足即按 `EXACT`/`CHAINED` 单值处理并计入跳过。**该放宽是本文件里唯一一处超出 16 §3.6"期望值必须来自当前代旧值 key"字面表述的取舍**，由 Lead 复核后决定保留或删除。
-
-### 3.5 `REINIT_APPLIED` 按代与作废
+### 3.4 `REINIT_APPLIED` 按代与作废
 
 - 记录形状：`(scope, C, field) → (seq, changesetId, key = reinitRecordKey 的 "模式|切片指纹", result)`；`result` 只记运行期结果（写入数 / 跳过数 / 拒绝原因枚举），不记字面量以外的运行期对象。
 - `key == null`（切片不封闭，`reinitRecordKey` 返回 `null`）表示"判不了初值表达式是否变过" → 该字段**不得**跨代跳过，每代照常重置。
@@ -150,7 +145,7 @@ R5 的形态前置项（需 Lead 复核）：`captureReplayFacts` 对 `L1` 的 *
 | D9 | `PENDING` 保持无代坐标；其所在代只贡献写入候选 | 默认值不是初值；未产生的写入不能进"已应用"，否则 CAS 会把零值当旧值 |
 | D10 | 字面量按 kind + 规范文本字节精确比较 | `float`/`double` 的十进制回读会把 `-0.0`/`0.0`、不同 NaN payload 混同（16 §3.8） |
 | D11 | 回退提交后 `seq > target` 的 `REINIT_APPLIED` 整体作废 | 无法验证的"已应用"记录会给下一轮提供错误期望；多写一次可恢复，静默过期不可恢复 |
-| D12 | 引擎自写值可作**有界**附加期望（§3.4） | 否则回退后所有实例都判"跳过"，回退在堆侧变成 no-op；边界靠 `appliedSeq` 可证 + 字节精确比较 |
+| D12 | 回退后 CAS **只有单一期望来源**：`target` 的 `oldLiteral`；引擎自写值不作期望 | 引擎写过的值与用户运行期改过的值在堆上无法区分；多源期望会把后者当"未改过"覆盖，且"记录值可信"这一点无法机械校验。代价是实例持污染代写入值的字段整体判跳过（回退在堆侧不搬运这些值）——这是有意的取舍：不命中即 fail-closed 进 `PENDING`，宁可少写一次也不静默写错 |
 
 ## 6. 验收判据
 
@@ -162,7 +157,7 @@ R5 的形态前置项（需 Lead 复核）：`captureReplayFacts` 对 `L1` 的 *
 | A2 | 同 scope 内两条记录引用不同 `seq` 但相同 `changesetId` 时报身份错配 | 去掉 `id` 校验 → 链重建后仍命中 |
 | A3 | 未闭环字段在窗口 `M` 满窗淘汰后仍在 `getUnpatchedFields` 里，且下一轮重新进候选集 | 让未闭环条目随窗口淘汰 → 字段被永久遗忘 |
 | A4 | 事实所在代出窗后判 `MISS_WINDOW` 且不写、不顶替代用品 | 回落到"最近活代"事实 → 用错代初值仍写入 |
-| A5 | 回退到 `target` 后 CAS 期望 == `target` 的 `oldLiteral`，写入 == `target` 的 `newLiteral` | **期望取自 `seq = N`（被回退掉的污染代）→ 必须变红**（本批次的核心负向） |
+| A5 | 回退到 `target` 后 CAS 期望 == `target` 的 `oldLiteral`，写入 == `target` 的 `newLiteral` | **期望取自 `seq = N`（被回退掉的污染代）→ 必须变红**（本批次的核心负向）；把"引擎自写值"或 `REINIT_APPLIED` 记录值补进期望来源 → 同样变红（回退在堆侧静默 no-op，实例仍持污染值却判"无需写"） |
 | A6 | 中间代里 `C` 的 `rawHash` 变过且该代无事实 → `REFUSED_DISCONTINUOUS`，不写 | 把相邻性判据放宽成"最近有事实即用" → 变红 |
 | A7 | `INT 1` 与 `LONG 1`、`0x80000000` 与 `0.0f`、两种 NaN payload 逐对判不等 | 比较改用 `parseFloat` / `String` 去前导零 → 变红 |
 | A8 | `L1` 的 `float`/`double` 事实在 new 侧为非位模式形态时判 `REFUSED_NONE_LITERAL` | 允许把十进制补成位模式 → 变红（等于伪造事实） |
@@ -171,8 +166,9 @@ R5 的形态前置项（需 Lead 复核）：`captureReplayFacts` 对 `L1` 的 *
 | A11 | 回退提交后 `seq > target` 的 `REINIT_APPLIED` 条目消失，下一轮重新走安全门 | 保留记录并改写成 `target` 的值 → 变红 |
 | A12 | loader 被回收后该 scope 的未闭环条目、已应用记录、事实索引一并不可见（`WeakReference` 证明回收 + 读数归零） | 换成本 scope 内 `strongMap` → 回收后仍有幽灵条目 |
 | A13 | `bootstrapSlot`（scope 0）在 `null` loader 下不 NPE，且不参与回收 | 把 `null` loader 丢进 `WeakHashMap` → NPE |
+| A14 | 回退后实例仍持污染代 `newLiteral` 的字段：条件 CAS 的比较侧只接受 `target` 的 `oldLiteral`（§3.3），不命中即 fail-closed 进 `PENDING`——`PatchReport.applyReplayFields` 记 skipped、`REINIT_APPLIED` 不记"已应用"、不出闭环账 | 补进第二期望来源（引擎自写值）→ 变红：回退在堆侧静默 no-op，污染值被当成"已改回"；改用 `KIND_FORCE` 强写 → 变红：覆盖用户运行期修改 |
 
-变异检查（与仓库既有口径一致）：新增/放宽任一条安全门，必须附带负向阻断断言；A5、A6、A7、A9、A11 这五条各自对应一处实现变异，变异存活即视为测试判定力不足，不得以"其它用例已覆盖"解释。
+变异检查（与仓库既有口径一致）：新增/放宽任一条安全门，必须附带负向阻断断言；A5、A6、A7、A9、A11、A14 这六条各自对应一处实现变异，变异存活即视为测试判定力不足，不得以"其它用例已覆盖"解释。
 
 ---
 
@@ -182,7 +178,7 @@ R5 的形态前置项（需 Lead 复核）：`captureReplayFacts` 对 `L1` 的 *
 |:--|:--|
 | 16 §2.1.1 `seq` / 窗口 / 三级可用性 | §2.2、§2.3（窗口跟随，不复用；`REVERTABLE` 不达即 B1 报 `NOT_REVERTABLE`，台账不提供替代品） |
 | 16 §2.1.3 `patchTiming` | §4-R3：`AFTER_COMMIT` 代的提交时刻字段尚未补，故该代不得提供"已应用"证据 |
-| 16 §3.6 台账多代化、`REINIT_APPLIED` 按代 | §1、§3.5 |
+| 16 §3.6 台账多代化、`REINIT_APPLIED` 按代 | §1、§3.4 |
 | 16 §3.8 `replayFacts` 是事实、不可重建 | §2.3、§4-R5（含 L1 new 侧形态前置项） |
 | 16 §4.1 堆事实不可由字节恢复 | §0 边界、§3 全节（回退不恢复实例/静态值，跳过必须落 `PatchReport`） |
 | 16 §5.2 `InitFix` 契约（台账不负责放行） | §0、§4-R4（拒绝走统一 warn 出口） |
@@ -190,6 +186,5 @@ R5 的形态前置项（需 Lead 复核）：`captureReplayFacts` 对 `L1` 的 *
 
 未决项（需 Lead 裁量，均不影响上文规则的机械可判定性）：
 
-1. §3.4 的"引擎自写值可作附加期望"是否保留——它是全篇唯一超出 16 §3.6 字面表述的放宽。
-2. R5 的 L1 new 侧定型缺口：扩 `Changeset.ReplayFact` 需回到 16 §3.8 做格式评审；否则 `L1` 的 `float`/`double` 跨代对账长期停在"拒绝"档。
-3. 本文件编号与既有 [`19-raw-to-raw-realworld-readings.md`](19-raw-to-raw-realworld-readings.md) 同为 `19-` 前缀，是否改为 `20-`。
+1. R5 的 L1 new 侧定型缺口：扩 `Changeset.ReplayFact` 需回到 16 §3.8 做格式评审；否则 `L1` 的 `float`/`double` 跨代对账长期停在"拒绝"档。
+2. 本文件编号与既有 [`19-raw-to-raw-realworld-readings.md`](19-raw-to-raw-realworld-readings.md) 同为 `19-` 前缀，是否改为 `20-`。

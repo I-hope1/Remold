@@ -14,6 +14,7 @@ import remold.ref.StageBInstanceCache;
 import remold.vcs.AlignmentMetaStore;
 import remold.vcs.Changeset;
 import remold.vcs.ChangesetLog;
+import remold.vcs.GenerationalFieldLedger;
 import remold.vcs.VcsCommitGate;
 import remold.vcs.BytecodePack;
 import remold.util.*;
@@ -4839,6 +4840,9 @@ public class RemoldAgent {
 					 effNow.getOrDefault(scope.getKey(), Map.of()));
 					// 链式回放包按 seq 逐轮导出：提交后立即写本轮目录，离线侧可按任意 seq 单独检出（§7.1）。
 					if (BytecodePack.enabled()) BytecodePack.exportRound(cs);
+					// 台账是派生索引（docs/topology/20 §2.3）：逐条事实带代坐标入索引，口径不合规的
+					// 记录在这里就被拒（不索引），消费侧只会看到规范事实。
+					recordLedgerFacts(scope.getKey(), cs);
 				} catch (Throwable t) {
 					warn("[VCS] changeset commit failed: " + t);
 				}
@@ -4878,6 +4882,27 @@ public class RemoldAgent {
 			if (dotted.contains(name)) missing.add(name);
 		}
 		return new Changeset.Manifest(hosts, manifest.edges(), nodes, missing);
+	}
+
+	/**
+	 * 把一代的 {@code replayFacts} 逐条推进代际台账（{@code docs/topology/20-generational-field-ledger.md} §2.3）。
+	 *
+	 * <p>台账是<b>派生索引</b>：口径不合规的记录在这里被拒（不索引、计数），消费侧因此只会看到
+	 * 规范事实；索引丢了可以按 {@code Changeset} 重建，事实丢了只能拒绝。</p>
+	 */
+	private static void recordLedgerFacts(ClassLoader loader, Changeset cs) {
+		if (loader == null || cs == null || cs.replayFacts().isEmpty()) return;
+		GenerationalFieldLedger.GenRef gen = new GenerationalFieldLedger.GenRef(cs.seq(), cs.id());
+		for (Changeset.ReplayFact fact : cs.replayFacts()) {
+			String internal = fact.ownerClass().replace('.', '/');
+			GenerationalFieldLedger.INSTANCE.record(loader,
+			 new GenerationalFieldLedger.LedgerKey(cs.loaderScope(), internal, fact.field()),
+			 gen, fact, cs.algoVersion());
+		}
+		// 历史索引跟随 Changeset 窗口，没有第二个旋钮（§2.3）。
+		GenerationalFieldLedger.INSTANCE.pruneToWindow(loader,
+		 ChangesetLog.INSTANCE.chain(cs.loaderScope()).isEmpty() ? 1L
+		  : ChangesetLog.INSTANCE.chain(cs.loaderScope()).get(0).seq());
 	}
 
 	/**
@@ -4934,14 +4959,18 @@ public class RemoldAgent {
 					}
 				}
 			}
+			ClassLoader forwardLoader = byLoader.isEmpty() ? null : byLoader.keySet().iterator().next();
 			Changeset forward = ChangesetLog.INSTANCE.appendForwardRevert(scope, plan,
 			 batchWatchLabelFromNames(plan.targets().keySet()), Changeset.currentAlgoVersion(),
 			 System.getProperty("remold.build_id", ""), Changeset.PatchTiming.AFTER_COMMIT);
+			// 被回退掉的代不再有任何承诺：事实与引擎写入记录整体作废（20 §3.4），宁可多写一次。
+			int invalidated = GenerationalFieldLedger.INSTANCE.invalidateAfterRevert(forwardLoader, targetSeq);
 			warn("[VCS] reverted scope " + scope + " to seq " + targetSeq + " (" + plan.targets().size()
 			 + " class(es)); existing instance field values are NOT rolled back"
 			 + " (heap values keep their current state, structure/bodies follow seq " + targetSeq + ").");
 			summary.append("scope=").append(scope).append(":seq=").append(forward.seq())
-			 .append(":classes=").append(plan.targets().size()).append(';');
+			 .append(":classes=").append(plan.targets().size())
+			 .append(":invalidated=").append(invalidated).append(';');
 		}
 		return summary.toString();
 	}

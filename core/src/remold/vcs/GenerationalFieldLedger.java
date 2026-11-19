@@ -224,6 +224,95 @@ public final class GenerationalFieldLedger {
 		return dropped;
 	}
 
+	/** §3.3 的判定结果；只有 {@link Resolution#EXACT} 与 {@link Resolution#CHAINED} 允许写入。 */
+	public enum Resolution {
+		EXACT, CHAINED, MISS_NO_FACT, MISS_WINDOW, REFUSED_DISCONTINUOUS, REFUSED_NONE_LITERAL
+	}
+
+	/** 一次对账的结论。{@code oldLiteral} 是比较侧期望，{@code newLiteral} 是写入值——两者必须同源。 */
+	public record Resolved(Resolution resolution, long fromGeneration, GenRef gen,
+	                       String oldLiteral, String newLiteral, String literalKind) {
+		public boolean writable() {
+			return resolution == Resolution.EXACT || resolution == Resolution.CHAINED;
+		}
+	}
+
+	private static final Resolved NO_FACT = new Resolved(Resolution.MISS_NO_FACT, 0L, null, null, null, null);
+
+	/**
+	 * 按 §3.3 做确定性查找：目标代 → 最新可采信事实 → 身份 / 相邻性 / 形态三关。
+	 *
+	 * <p><b>期望来源唯一</b>：比较侧与写入侧都取自<b>同一条</b>事实（{@code oldLiteral} →
+	 * {@code newLiteral}）。被回退掉的污染代事实、引擎写入值、类型默认值都<b>不是</b>期望
+	 * （§3.3 D12）——否则实例仍持有污染代写入值时会被判"无需写"，回退变成静默 no-op。</p>
+	 *
+	 * @param targetSeq 调用方请求对账到的那一代；若该代本身是回退代，按 {@code revertedToSeq}
+	 *                  单跳解析到具体目标（<b>不做</b>多跳传递闭包）
+	 */
+	public synchronized Resolved resolve(ClassLoader loader, ChangesetLog log, long scope,
+	                                     String className, String field, long targetSeq) {
+		long target = revertTargetOf(log, scope, targetSeq);
+		Deque<Fact> rows = slotFor(loader).history.get(rowKey(className, field));
+		if (rows == null || rows.isEmpty()) {
+			// 事实可能在窗口外：链本身也退到了 target 之前，说明这条事实不可重建（§2.3）。
+			return log.bySeq(scope, target).isEmpty()
+			 ? new Resolved(Resolution.MISS_WINDOW, 0L, null, null, null, null) : NO_FACT;
+		}
+		Fact candidate = null;
+		boolean sawAnyAtOrBefore = false;
+		for (Fact fact : rows) {
+			if (fact.gen().seq() > target) continue;
+			sawAnyAtOrBefore = true;
+			candidate = fact;
+			break;
+		}
+		if (!sawAnyAtOrBefore) return NO_FACT;
+		Changeset source = log.bySeq(scope, candidate.gen().seq()).orElse(null);
+		if (source == null || !source.id().equals(candidate.gen().changesetId())) {
+			// 代已出窗，或 id 对不上（同 seq 不同代）：拒绝，且不回落到"最近活代"顶替。
+			return new Resolved(Resolution.MISS_WINDOW, 0L, candidate.gen(), null, null, null);
+		}
+		if (!isAdjacent(log, scope, className, candidate.gen().seq(), target)) {
+			return new Resolved(Resolution.REFUSED_DISCONTINUOUS, 0L, candidate.gen(), null, null, null);
+		}
+		if (candidate.literalKind() == null || "NONE".equals(candidate.literalKind())
+		 || !isCanonical(candidate.literalKind(), candidate.oldLiteral(), candidate.newLiteral())) {
+			return new Resolved(Resolution.REFUSED_NONE_LITERAL, 0L, candidate.gen(), null, null, null);
+		}
+		Resolution resolution = candidate.gen().seq() == target ? Resolution.EXACT : Resolution.CHAINED;
+		return new Resolved(resolution, candidate.gen().seq(), candidate.gen(),
+		 candidate.oldLiteral(), candidate.newLiteral(), candidate.literalKind());
+	}
+
+	/** 回退代沿 {@code revertedToSeq} 单跳解析；非回退代就是它自己。 */
+	private static long revertTargetOf(ChangesetLog log, long scope, long seq) {
+		Optional<Changeset> cs = log.bySeq(scope, seq);
+		if (cs.isPresent() && cs.get().revertedToSeq() > 0L) return cs.get().revertedToSeq();
+		return seq;
+	}
+
+	/**
+	 * 相邻性（§3.3 第 2 条）：该类在 {@code [g, target]} 区间内 {@code rawHash} 恒定。
+	 *
+	 * <p>「最近有事实」不等于「事实还成立」：非常量初始化不产出记录，中间代初值可能已经变过。
+	 * 只有 {@code rawHash} 在整段区间里一字未动，才能证明这条事实仍描述当前结构。</p>
+	 */
+	private static boolean isAdjacent(ChangesetLog log, long scope, String className, long from, long target) {
+		List<Changeset> chain = log.chain(scope);
+		String expected = null;
+		for (Changeset cs : chain) {
+			if (cs.seq() < from || cs.seq() > target) continue;
+			Changeset.Entry entry = cs.entries().get(className);
+			if (entry == null) continue;
+			if (expected == null) {
+				expected = entry.rawHash();
+			} else if (!expected.equals(entry.rawHash())) {
+				return false;
+			}
+		}
+		return expected != null;
+	}
+
 	/** 记一个未闭环字段（写入失败 / 无事实 / 形态被拒都落到这里，见 §6-A5）。 */
 	public synchronized void markUnclosed(ClassLoader loader, String className, String field) {
 		slotFor(loader).unclosed.add(rowKey(className, field));

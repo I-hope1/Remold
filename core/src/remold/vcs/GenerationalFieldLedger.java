@@ -347,6 +347,23 @@ public final class GenerationalFieldLedger {
 		slotFor(loader).unclosed.add(rowKey(className, field));
 	}
 
+	/**
+	 * 字段已从新布局里消失时释放它的债（{@code ledgerRemove} 同口径）。
+	 *
+	 * <p>未闭环债务不随 Changeset 窗口淘汰，所以字段被删掉之后如果不出账，这条债会永久留在集合里。
+	 * 键里的类名可能是<b>声明类</b>（L1 的继承字段），而出账点只知道宿主，因此这里按字段名在该 scope
+	 * 内匹配；字段名在单个 scope 内重名的概率与代价都可忽略，返回条数供调用方记日志。</p>
+	 *
+	 * @return 被释放的债务条目数
+	 */
+	public synchronized int releaseDebt(ClassLoader loader, String field) {
+		if (field == null || field.isEmpty()) return 0;
+		ScopeSlot slot = slotFor(loader);
+		int before = slot.unclosed.size();
+		slot.unclosed.removeIf(key -> key.endsWith("\u0001" + field));
+		return before - slot.unclosed.size();
+	}
+
 	/** 字段闭环后从债务表移除。 */
 	public synchronized void markClosed(ClassLoader loader, String className, String field) {
 		slotFor(loader).unclosed.remove(rowKey(className, field));

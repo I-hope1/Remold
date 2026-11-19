@@ -51,6 +51,8 @@ public class GenerationalReplayWiringTest {
 	private static final String FIELD = "v";
 
 	private Map<String, byte[]> v2Classes;
+	private byte[] anonV1;
+	private byte[] anonV2;
 	private ClassLoader loader;
 	private Class<?> host;
 	private long scope;
@@ -113,8 +115,8 @@ public class GenerationalReplayWiringTest {
 	private void fixture() throws Exception {
 		Map<String, byte[]> v1 = LayoutGateAssert.compile(sources(1));
 		v2Classes = LayoutGateAssert.compile(sources(2));
-		byte[] anonV1 = v1.get(ANON);
-		byte[] anonV2 = v2Classes.get(ANON);
+		this.anonV1 = v1.get(ANON);
+		this.anonV2 = v2Classes.get(ANON);
 		assertNotNull(anonV1, "precondition: v1 anonymous class bytes");
 		assertNotNull(anonV2, "precondition: v2 anonymous class bytes");
 
@@ -181,6 +183,36 @@ public class GenerationalReplayWiringTest {
 	}
 
 	// ------------------------------------------------------------------------------------------
+
+	/**
+	 * §4-R3 / review finding: a generation whose conditional CAS never wrote contributes no
+	 * expectation. If the field is unclosed and no generation has a confirmed write, reconciling
+	 * against the newest fact would use a <b>theory</b> value as if it were on the heap — the round
+	 * would write the previous initialiser back (e.g. 5 instead of 6) while looking successful.
+	 *
+	 * <p>Guarded here at the decision layer: the candidate is dropped, the debt stays open.</p>
+	 */
+	@Test
+	void unclosedFieldWithoutAConfirmedWriteRefusesToReconcile() throws Exception {
+		fixture();
+		// The fact recorded for the skipped generation is theory only: its CAS never landed.
+		Changeset gen = commit("h1");
+		record(gen, "2", "5");
+		GenerationalFieldLedger.INSTANCE.markUnclosed(loader, OWNER_INTERNAL, FIELD);
+
+		// A later ordinary round (HEAD is not a revert generation) must not use that theory value.
+		transformWith(anonV1, anonV2);
+
+		String result = report.replayFields().get(FIELD);
+		assertNotNull(result, "the refused candidate must stay visible in the report: "
+		 + report.replayFields());
+		assertTrue(result.startsWith("rejected: "), "the report must say it was refused: " + result);
+		assertTrue(result.contains("confirmed write"),
+		 "the reason must name the cause (no confirmed write): " + result);
+		assertFalse(report.replayGenerated(), "a refused replay must not be counted as generated");
+		assertEquals(1, GenerationalFieldLedger.INSTANCE.unclosedCount(loader),
+		 "the debt stays open until an explicit recovery writes the field");
+	}
 
 	/**
 	 * No generational evidence for this key: the gate stays out of the way and the round behaves

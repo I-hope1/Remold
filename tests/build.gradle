@@ -1087,6 +1087,45 @@ tasks.register("vcsGcBaselineProbe", JavaExec) {
 	}
 }
 
+tasks.register("vcsLedgerGcProbe", JavaExec) {
+	group = "verification"
+	description = "Ledger-filled GC reading (VcsGcBaselineProbe in -DvcsGcProbe.ledger=true mode): every round carries a real L1 replay fact, small changeset window so index eviction is visible"
+	dependsOn classes
+	dependsOn project(":core").tasks.named("shadowJar")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "VcsGcBaselineProbe"
+	maxHeapSize = "1g"
+	def jbrHome = (project.findProperty("p05.jbr") as String)
+		?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+	if (jbrHome != null) {
+		def javaBin = new File(jbrHome, probeIsWindows ? "bin/java.exe" : "bin/java")
+		if (javaBin.exists()) {
+			executable = javaBin.absolutePath
+			javaLauncher.set((JavaLauncher) null)
+		}
+	}
+	def probeDir = layout.buildDirectory.dir("vcs-ledger-gc-probe")
+	doFirst {
+		def dir = probeDir.get().asFile
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
+		        "-XX:+IgnoreUnrecognizedVMOptions",
+		        "-XX:+AllowEnhancedClassRedefinition",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8",
+		        "-DvcsGcProbe.dir=" + dir.absolutePath,
+		        "-DvcsGcProbe.ledger=true",
+		        "-Dremold.agent.init_drift.parents=probe/Base",
+		        "-Dremold.vcs.changeset_window=8",
+		        "-Dremold.agent.file_shake_ms=150",
+		        "-Dremold.vcs.enabled=true"
+		if (nativeLibPath != null) {
+			jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+		}
+	}
+}
+
 tasks.register("vcsRevertProbe", JavaExec) {
 	group = "verification"
 	description = "B1 回退执行 E2E (VcsRevertProbe)：真实 agent redefine -> 回退到目标代 -> 回退后再热更"

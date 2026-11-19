@@ -1230,6 +1230,11 @@ public class InitFix {
 		// 本进程还没为这个 scope 提交过代：没有代际坐标，沿用当轮 ClassDiff（引入前行为）。
 		if (head.isEmpty()) return out;
 		long targetSeq = head.get().seq();
+		// <b>只在回退上下文里改判</b>（§3.1："代际上下文只影响第二行"）。当轮 ClassDiff 的两侧只有在
+		// "堆上的值可能是被回退掉那代写的" 时才不可信；正向代里 old 侧就是当前字节的初值，本身就正确，
+		// 用代际事实去顶替它会让期望整体晚一代（每次都被判"不匹配"），把正常重放变成长期停滞。
+		// 判据：HEAD 本身是回退代，或这条键还欠着未闭环债务（判过之后要保持 fail-closed 直到显式恢复）。
+		boolean revertContext = head.get().revertedToSeq() > 0L;
 		String display = className.replace('/', '.');
 
 		for (String field : new ArrayList<>(replayFields.keySet())) {
@@ -1237,6 +1242,9 @@ public class InitFix {
 			// L1 的字段是<b>继承</b>字段：事实的 owner（{@code l1ReplayFact}）是声明类，不是匿名宿主，
 			// 台账键必须同源，否则消费侧永远查不到这条事实。
 			String owner = replay.declaringClass();
+			if (!revertContext && !GenerationalFieldLedger.INSTANCE.isUnclosed(loader, owner, replay.name())) {
+				continue;
+			}
 			GenerationalFieldLedger.Resolved resolved = GenerationalFieldLedger.INSTANCE.resolve(
 			 loader, ChangesetLog.INSTANCE, scope, owner, replay.name(), targetSeq);
 			GenerationalReplayGate.Decision decision = GenerationalReplayGate.decide(
@@ -1260,6 +1268,10 @@ public class InitFix {
 		for (String key : new ArrayList<>(applyFields.keySet())) {
 			ApplyInitializerReplay.ReplayField replay = applyFields.get(key);
 			String targetInternal = replay.targetClass();
+			if (!revertContext
+			    && !GenerationalFieldLedger.INSTANCE.isUnclosed(loader, targetInternal, replay.fieldName())) {
+				continue;
+			}
 			GenerationalFieldLedger.Resolved resolved = GenerationalFieldLedger.INSTANCE.resolve(
 			 loader, ChangesetLog.INSTANCE, scope, targetInternal, replay.fieldName(), targetSeq);
 			GenerationalReplayGate.Decision decision = GenerationalReplayGate.decide(

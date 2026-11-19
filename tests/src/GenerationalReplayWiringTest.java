@@ -141,12 +141,26 @@ public class GenerationalReplayWiringTest {
 
 	/** Commit one generation whose entry for the anonymous class carries {@code rawHash}. */
 	private Changeset commit(String rawHash) {
+		byte[] blob = (rawHash + "-base").getBytes(java.nio.charset.StandardCharsets.UTF_8);
 		Map<String, Changeset.Entry> entries = new LinkedHashMap<>();
-		entries.put(OWNER_INTERNAL, new Changeset.Entry(OWNER_INTERNAL, rawHash, "eff-" + rawHash,
-		 "meta-" + rawHash));
+		entries.put(OWNER_INTERNAL, new Changeset.Entry(OWNER_INTERNAL, rawHash,
+		 ChangesetLog.effSha256(blob), Changeset.metaDigest(OWNER_INTERNAL + rawHash, List.of(),
+		  Map.of(), Map.of(), 0)));
+		// The Eff blob must be committed too: a forward revert reads it back by {@code effHash}.
 		return ChangesetLog.INSTANCE.commit(scope, "r-" + rawHash, entries, Changeset.Manifest.EMPTY,
 		 List.of(), Changeset.currentAlgoVersion(), "", Changeset.PatchTiming.AFTER_COMMIT,
-		 Map.of(), Map.of());
+		 Map.of(), Map.of(OWNER_INTERNAL, blob));
+	}
+
+	/**
+	 * Land a forward revert: the gate only overrides the round's {@code ClassDiff} pair in a revert
+	 * context (HEAD is a revert generation, or the key already owes a debt), so the reconcile cases below
+	 * have to build one — exactly like a real {@code revertTo} does.
+	 */
+	private Changeset revertTo(long targetSeq) {
+		return ChangesetLog.INSTANCE.appendForwardRevert(scope,
+		 ChangesetLog.INSTANCE.revertPlan(scope, targetSeq), "revert",
+		 Changeset.currentAlgoVersion(), "", Changeset.PatchTiming.AFTER_COMMIT);
 	}
 
 	/** Record one {@code L1} fact for {@code (scope, Host$1, v)} at {@code gen}. */
@@ -187,6 +201,28 @@ public class GenerationalReplayWiringTest {
 		 "no debt may be recorded when nothing was refused");
 	}
 
+	/**
+	 * A plain forward round keeps the round's {@code ClassDiff} pair even when a fact exists: the fact
+	 * describes the previous drift, so overriding a forward round with it would leave the expectation one
+	 * generation behind and stall every replay (§3.1: the generational context only re-bases the
+	 * comparison side once a revert is in effect).
+	 */
+	@Test
+	void aForwardRoundKeepsTheClassDiffPairEvenWithAFact() throws Exception {
+		fixture();
+		Changeset first = commit("h1");
+		record(first, "1", "2");
+		commit("h1");
+
+		transformWith(LayoutGateAssert.compile(sources(1)).get(ANON),
+		 LayoutGateAssert.compile(sources(2)).get(ANON));
+
+		assertReplayCandidate();
+		assertEquals("replayed", report.replayFields().get(FIELD),
+		 "a forward round is not re-based on the ledger: " + report.replayFields());
+		assertFalse(GenerationalFieldLedger.INSTANCE.isUnclosed(loader, OWNER_INTERNAL, FIELD));
+	}
+
 	/** A fact on the target generation is usable: the candidate stays in the patch. */
 	@Test
 	void factOnTheTargetGenerationKeepsTheCandidateWritable() throws Exception {
@@ -199,6 +235,8 @@ public class GenerationalReplayWiringTest {
 		scope = AlignmentMetaStore.INSTANCE.loaderScopeId(loader);
 		Changeset gen = commit("h1");
 		record(gen, "1", "2");
+		commit("h2");
+		revertTo(gen.seq());
 
 		transformWith(v1.get(ANON), v2.get(ANON));
 
@@ -218,7 +256,8 @@ public class GenerationalReplayWiringTest {
 		fixture();
 		Changeset first = commit("h1");
 		record(first, "1", "2");
-		commit("h2");
+		Changeset second = commit("h2");
+		revertTo(second.seq());
 
 		transformWith(LayoutGateAssert.compile(sources(1)).get(ANON),
 		 LayoutGateAssert.compile(sources(2)).get(ANON));

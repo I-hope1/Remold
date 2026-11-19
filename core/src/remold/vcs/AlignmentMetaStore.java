@@ -225,6 +225,78 @@ public final class AlignmentMetaStore {
 		return slots.computeIfAbsent(loader, ignored -> new LoaderSlot(nextLoaderId++)).loaderId;
 	}
 
+	/**
+	 * 该类的某个代是否仍可寻址（按 {@code jvmEffSha256} 精确匹配 head 或 history）。
+	 *
+	 * <p>回退执行前必须先问它：工作头切不回去就意味着下一次 Run R 会用错基线，
+	 * 此时必须在<b>动 JVM 之前</b>拒绝，而不是 redefine 完再发现。</p>
+	 */
+	public synchronized boolean hasGeneration(ClassLoader loader, String className, String jvmEffSha256) {
+		if (jvmEffSha256 == null || jvmEffSha256.isEmpty()) return false;
+		LoaderSlot slot = loader == null ? bootstrapSlot : slots.get(loader);
+		if (slot == null) return false;
+		Entry head = slot.head.get(className);
+		if (head != null && jvmEffSha256.equals(head.jvmEffSha256)) return true;
+		Deque<Entry> history = slot.history.get(className);
+		if (history != null) {
+			for (Entry candidate : history) {
+				if (jvmEffSha256.equals(candidate.jvmEffSha256)) return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * 把该类的<b>工作头</b>切回某个已记录代（按 {@code jvmEffSha256} 精确匹配）。
+	 *
+	 * <p>回退后必须调用：否则下一次正常热更走 Run R 对齐时，仍会拿刚被退掉的坏代当基线
+	 * （{@code docs/topology/16-bytecode-changeset-vcs.md} §2.1.1 的工作头同步约束）。</p>
+	 *
+	 * <p>被切回的代同时被提到 history 头部：它就是"最近一次生效的代"，按代淘汰时也应按此顺序。</p>
+	 *
+	 * @return 找到并切换成功返回 {@code true}；目标代已被淘汰返回 {@code false}（调用方必须 fail-closed）
+	 */
+	public synchronized boolean restoreHead(ClassLoader loader, String className, String jvmEffSha256) {
+		if (jvmEffSha256 == null || jvmEffSha256.isEmpty()) return false;
+		LoaderSlot slot = loader == null ? bootstrapSlot : slots.get(loader);
+		if (slot == null) return false;
+		Entry prev = slot.head.get(className);
+		Entry found = null;
+		Deque<Entry> d = slot.history.get(className);
+		if (d != null) {
+			for (Entry candidate : d) {
+				if (jvmEffSha256.equals(candidate.jvmEffSha256)) {
+					found = candidate;
+					break;
+				}
+			}
+		}
+		if (found == null) {
+			if (prev != null && jvmEffSha256.equals(prev.jvmEffSha256)) return true;
+			return false;
+		}
+		if (found == prev) return true;
+		boolean counted = d != null && containsIdentity(d, found);
+		if (d == null) d = slot.history.computeIfAbsent(className, x -> new ArrayDeque<>());
+		Entry restore = found;
+		d.removeIf(entry -> entry == restore);
+		d.addFirst(restore);
+		if (!counted) {
+			slot.historyCount++;
+			slot.blobBytesHeld += found.blobBytes();
+			if (found.blobBytes() > 0) slot.blobHolders.put(found.seq, found);
+		}
+		slot.head.put(className, found);
+		if (d.size() > HISTORY_PER_CLASS) {
+			Entry evicted = d.removeLast();
+			slot.historyCount--;
+			slot.blobHolders.remove(evicted.seq);
+			if (slot.head.get(className) != evicted) slot.blobBytesHeld -= evicted.blobBytes();
+		}
+		trimGlobalBudget();
+		return true;
+	}
+
 	/** loader 回收后，其名下记录不再计入；这里给出当前仍可用的 loader 槽数（含 bootstrap）。 */
 	public synchronized int liveLoaderCount() {
 		return slots.size() + 1;

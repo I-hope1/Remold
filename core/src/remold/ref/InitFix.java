@@ -297,8 +297,6 @@ public class InitFix {
 		BatchContext context = BATCH_CONTEXT.get();
 		if (context == null) return;
 		context.bytesByLoader().clear();
-		Set<Class<?>> installed = Collections.newSetFromMap(new IdentityHashMap<>());
-		for (ClassDefinition definition : definitions) installed.add(definition.getDefinitionClass());
 		// Start from the keys registered when the view was opened: classes dropped by the layout/annotation
 		// gates never reach transform(), and forgetting them here would let analysis silently read their stale
 		// global-cache bytes instead of failing closed.
@@ -1859,6 +1857,33 @@ public class InitFix {
 		Map<String, Set<InitFixBatchGraph.FieldKey>> crossDependencies = new LinkedHashMap<>();
 		Runnable close = () -> {
 			crossDependencies.clear();
+			// 跨类候选缺字节的拒绝必须发生在类内闭包<b>之前</b>：先踢出字段，再让 while(changed)
+			// 把读它的类内下游一并收敛。放在闭包之后（历史顺序）会留下 X.c = X.a + 1 这种
+			// "读着未补字段却被放行"的漏网。
+			if (BATCH_CONTEXT.get() != null) {
+				for (String field : new ArrayList<>(acceptedInstance)) {
+					Optional<Set<InitFixBatchGraph.FieldKey>> deps =
+					 batchDependencyOf(field, instanceExtracts, className, host.getClassLoader(), oracle);
+					if (deps.isEmpty()) {
+						instanceDecisions.put(field, FieldDecision.rejected(
+						 "cross-class dependency unavailable: batch candidate bytes are missing"));
+						acceptedInstance.remove(field);
+					} else {
+						crossDependencies.put(field, deps.get());
+					}
+				}
+				for (String field : new ArrayList<>(acceptedStatic)) {
+					Optional<Set<InitFixBatchGraph.FieldKey>> deps =
+					 batchDependencyOf(field, staticExtracts, className, host.getClassLoader(), oracle);
+					if (deps.isEmpty()) {
+						staticDecisions.put(field, FieldDecision.rejected(
+						 "cross-class dependency unavailable: batch candidate bytes are missing"));
+						acceptedStatic.remove(field);
+					} else {
+						crossDependencies.put(field, deps.get());
+					}
+				}
+			}
 			// 注解豁免过的字段只告警一次，别在 while 循环里刷屏。
 			boolean     changed          = true;
 			while (changed) {
@@ -1985,30 +2010,6 @@ public class InitFix {
 				}
 				acceptedInstance.clear();
 				acceptedStatic.clear();
-			}
-			if (BATCH_CONTEXT.get() != null) {
-				for (String field : new ArrayList<>(acceptedInstance)) {
-					Optional<Set<InitFixBatchGraph.FieldKey>> deps =
-					 batchDependencyOf(field, instanceExtracts, className, host.getClassLoader(), oracle);
-					if (deps.isEmpty()) {
-						instanceDecisions.put(field, FieldDecision.rejected(
-						 "cross-class dependency unavailable: batch candidate bytes are missing"));
-						acceptedInstance.remove(field);
-					} else {
-						crossDependencies.put(field, deps.get());
-					}
-				}
-				for (String field : new ArrayList<>(acceptedStatic)) {
-					Optional<Set<InitFixBatchGraph.FieldKey>> deps =
-					 batchDependencyOf(field, staticExtracts, className, host.getClassLoader(), oracle);
-					if (deps.isEmpty()) {
-						staticDecisions.put(field, FieldDecision.rejected(
-						 "cross-class dependency unavailable: batch candidate bytes are missing"));
-						acceptedStatic.remove(field);
-					} else {
-						crossDependencies.put(field, deps.get());
-					}
-				}
 			}
 		};
 		close.run();
@@ -3053,6 +3054,10 @@ public class InitFix {
 				 access.owner, access.name, access.desc, true);
 				String owner = member.map(ref -> ref.declaringClass.replace('/', '.'))
 				 .orElse(access.owner.replace('/', '.'));
+				// In-class reads stay out of the cross-class graph: the local closure/topoSort already orders
+				// them, and feeding them back would create self-loops (a field reading itself) plus spurious
+				// "@batch:" tokens on ordinary same-class dependencies.
+				if (owner.equals(className.replace('/', '.'))) continue;
 				String ownerKey = batchCandidateOwnerKey(context, owner, loader);
 				if (ownerKey != null && batchBytes != null && !batchBytes.containsKey(owner)) return Optional.empty();
 				if (member.isEmpty()) {
@@ -4945,12 +4950,9 @@ public class InitFix {
 		HotswapBridge.drainReplayStats();
 
 		if (!isInitialized(host)) {
-			String reason = "class not initialized; field patch skipped";
-			for (FieldPatchTask task : patch.plan().allTasks()) {
-				if (task.replay()) continue;
-				ledgerPut(host, task.fieldName(), reason);
-				publishBatchFailure(host, task.fieldName());
-			}
+			// 不变量 1：未初始化类直接跳过，<b>不</b>记账、也<b>不</b>发布跨类失败令牌。它的 <clinit> 还没跑过，
+			// 首次访问时 JVM 会执行新 <clinit> 得到正确初值；在此处记账并牵连下游，会把读它的同批字段
+			// 误判成"依赖失败"而永久停在默认值。
 			log("Skip field init patch, class not initialized (or initializing/failed): "
 			    + host.getName());
 			return;
@@ -5779,7 +5781,8 @@ public class InitFix {
 					localSkipped.add(task.fieldName());
 					if (skippedFields.add(task.fieldName())) {
 						failureReasons.putIfAbsent(task.fieldName(), "dependency failed: "
-						                                             + intersection(dependencies, localFailed, localSkipped));
+						                                             + dependencyFailureDetail(
+						 dependencies, localFailed, localSkipped));
 						RemoldAgent.warn("Skipping field init for " + host.getName() + "."
 						                  + task.fieldName() + " because a dependency failed");
 					}
@@ -5828,7 +5831,8 @@ public class InitFix {
 			        || !Collections.disjoint(task.dependencies(), skippedFields))) {
 				if (skippedFields.add(task.fieldName())) {
 					failureReasons.putIfAbsent(task.fieldName(), "dependency failed: "
-					                                             + intersection(task.dependencies(), failedFields, skippedFields));
+					                                             + dependencyFailureDetail(
+					 task.dependencies(), failedFields, skippedFields));
 					RemoldAgent.warn("Skipping field init for " + host.getName() + "."
 					                  + task.fieldName() + " because a dependency failed");
 				}
@@ -5887,6 +5891,19 @@ public class InitFix {
 		if (cause == null) return false;
 		// cause 本身就是 LinkageError → 真正的元数据问题，必须熔断
 		return !(cause instanceof LinkageError);
+	}
+
+	/**
+	 * 依赖跳过的可读归因：本地失败/跳过集合与跨类批次令牌合并，令牌显示成 {@code Host.field} 而不是
+	 * 裸 {@code @batch:} 前缀。历史实现只合并本地集合，跨类跳过因此永远记成 {@code dependency failed: []}。
+	 */
+	private static String dependencyFailureDetail(
+	 Set<String> dependencies, Set<String> localFailed, Set<String> localSkipped) {
+		Set<String> detail = new LinkedHashSet<>(intersection(dependencies, localFailed, localSkipped));
+		Set<String> batch = new LinkedHashSet<>(dependencies);
+		batch.retainAll(activeBatchFailures());
+		for (String token : batch) detail.add(token.replace("@batch:", ""));
+		return detail.isEmpty() ? "<dependency failed>" : detail.toString();
 	}
 
 	private static Set<String> intersection(Set<String> deps, Set<String> a, Set<String> b) {

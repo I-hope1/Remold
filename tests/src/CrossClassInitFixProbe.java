@@ -40,6 +40,7 @@ public class CrossClassInitFixProbe {
 			RemoldAgent.TWO_PHASE = twoPhase;
 			scenarioSameBatchStaticOrder(twoPhase);
 			scenarioRuntimePrerequisiteFailure(twoPhase);
+			scenarioUninitialisedPrerequisiteStaysSilent(twoPhase);
 		}
 		System.out.println("CROSS-CLASS INITFIX SUMMARY: passed=" + passed + ", failed=" + failed);
 		if (failed != 0) System.exit(1);
@@ -92,6 +93,40 @@ public class CrossClassInitFixProbe {
 		check(x.getField("independent").getInt(null) == 31, "X.independent still executes" + tag);
 		check(InitFix.getUnpatchedFields(x).stream().anyMatch(field -> field.fieldName().equals("blocked")),
 		 "dependent skip is recorded in X FieldLedger" + tag);
+		String blockedReason = InitFix.getUnpatchedFields(x).stream()
+		 .filter(field -> field.fieldName().equals("blocked")).map(InitFix.UnpatchedField::reason)
+		 .findFirst().orElse("");
+		check(blockedReason.contains("Y.base") && !blockedReason.contains("[]"),
+		 "skip reason names the failed prerequisite host field, actual=" + blockedReason + tag);
+		f.close();
+	}
+
+	/**
+	 * Invariant 1: an uninitialised host must be skipped silently — no FieldLedger entry and no cross-class
+	 * failure token. Its new {@code <clinit>} has not run yet, so the first read of {@code Y.base} initialises
+	 * Y and yields the new value; blocking the downstream field here would leave it at the default zero.
+	 */
+	private static void scenarioUninitialisedPrerequisiteStaysSilent(boolean twoPhase) throws Throwable {
+		String pkg = twoPhase ? "ccprobe.uninit2p" : "ccprobe.uninit";
+		String tag = twoPhase ? " [two-phase]" : " [single-phase]";
+		String y1 = "package " + pkg + "; public class Y { }";
+		String x1 = "package " + pkg + "; public class X { }";
+		String x2 = "package " + pkg + "; public class X { public static int read = Y.base + 4; }";
+		Fixture f = fixture(pkg, Map.of(pkg + ".X", x1, pkg + ".Y", y1), Map.of(pkg + ".X", x2,
+		 pkg + ".Y", "package " + pkg + "; public class Y { public static int base = 9; }"));
+		Class<?> x = f.load(pkg + ".X");
+		Class<?> y = f.loadWithoutInitialising(pkg + ".Y");
+		// Y is only loaded (initialize=false) and never touched before the swap, so its <clinit> cannot have run.
+		check(x.getDeclaredFields().length == 0 && y.getDeclaredFields().length == 0,
+		 "precondition: neither host carries the target field yet" + tag);
+		f.hotSwap(pkg + ".X", pkg + ".Y");
+		check(InitFix.getUnpatchedFields(y).isEmpty(),
+		 "uninitialised host is not written into FieldLedger (invariant 1)" + tag);
+		check(x.getField("read").getInt(null) == 13,
+		 "downstream field still patches; reading Y.base runs Y's new <clinit>" + tag);
+		check(y.getField("base").getInt(null) == 9, "Y.base is correct once Y initialises" + tag);
+		check(InitFix.getUnpatchedFields(x).stream().noneMatch(field -> field.fieldName().equals("read")),
+		 "downstream field is not recorded as postponed" + tag);
 		f.close();
 	}
 
@@ -118,6 +153,7 @@ public class CrossClassInitFixProbe {
 		final FixtureLoader loader; final Path root; final java.util.Map<String, Path> paths = new java.util.LinkedHashMap<>();
 		Fixture(FixtureLoader loader, Path root) { this.loader = loader; this.root = root; }
 		Class<?> load(String name) throws Exception { return Class.forName(name, true, loader); }
+		Class<?> loadWithoutInitialising(String name) throws Exception { return Class.forName(name, false, loader); }
 		void hotSwap(String... names) throws Exception {
 			Set<Path> changed = new LinkedHashSet<>(); for (String name : names) changed.add(paths.get(name));
 			Method process = RemoldAgent.class.getDeclaredMethod("processChanges", Set.class, Class[].class);

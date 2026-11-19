@@ -27,11 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     批次开始时登记的候选键）。
   - 宿主拓扑输入全程保持插入序（不再经 `Set.copyOf` 打乱），同一 JVM 多次运行与跨进程排查得到相同顺序。
   - 两阶段路径不再提前清空批次视图（原先清在 `applyTwoPhase.finally`），混合批次仍能保持跨类顺序。
-  - 验收：`crossClassInitFixProbe` 16/0（JBR 21 DCEVM；单阶段与两阶段各 8 项——逆序输入跨类静态初始化、
-    运行期 prerequisite 失败只跳下游；两阶段的失败注入走阶段 A 保留的旧方法体）、`twoPhaseProbe` 72/0、
-    `initFixOracle`、`check`；单测 `CrossClassInitFixTest` 4 用例 / `InitFixBatchGraphTest` 6 用例；
-    变异 6 击杀（禁用同批 overlay、打乱宿主顺序、去掉运行期失败 token、去掉循环拒绝、去掉跨类边收集、
-    去掉候选字节缺失 fail-closed）。
+  - 跨类拒绝提前到类内闭包**之前**执行，拒绝一个字段后 `while (changed)` 会把读它的类内下游一并收敛，
+    不再出现「读着未补字段却被放行」；`closureViolation` 仍是出口主防线。
+  - 跨类图只收真正的跨类边（跳过 `owner == 本类`）：类内依赖继续由本地闭包/拓扑负责，避免自读被当成
+    自环误杀、以及普通类内依赖被挂上多余的 `@batch:` 令牌。
+  - 运行期跨类跳过的台账原因合并批次令牌并显示成 `Host.field`（历史实现只合并本地集合，永远记成
+    `dependency failed: []`，丢掉前置宿主的归因）。
+  - 不变量 1 恢复原契约：未初始化宿主静默跳过，**不**记账也**不**发布失败令牌——它的新 `<clinit>` 会在首次
+    访问时执行，牵连下游会把本可正确初始化的字段永久留在默认值。
+  - 验收：`crossClassInitFixProbe` 28/0（JBR 21 DCEVM；单阶段与两阶段各 14 项——逆序输入跨类静态初始化、
+    运行期 prerequisite 失败只跳下游且台账点名前置字段、未初始化宿主静默跳过；两阶段的失败注入走阶段 A
+    保留的旧方法体）、`twoPhaseProbe` 72/0、`initFixOracle`、`check`；单测 `CrossClassInitFixTest` 6 用例 /
+    `InitFixBatchGraphTest` 6 用例；变异 8 击杀（禁用同批 overlay、打乱宿主顺序、去掉运行期失败 token、
+    去掉循环拒绝、去掉跨类边收集、去掉候选字节缺失 fail-closed、禁用跨类拒绝、把类内边灌进跨类图、
+    未初始化宿主重新记账）。
 
 - **PR3：活的 lambda 对齐改走 `R_prev ↔ R_new`（Run R），`Eff_prev` 降级为继承来源**
   （`LambdaAligner`、`AlignmentMetaStore`、`RemoldAgent`）：活体路径不再拿被幽灵桩 / 捕获桥 /

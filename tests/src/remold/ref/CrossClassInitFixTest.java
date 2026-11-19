@@ -36,16 +36,23 @@ class CrossClassInitFixTest {
 
 	/** Old bytes: no fields at all, so the target field is genuinely added. */
 	private static byte[] empty(String name) {
-		return build(name, null, false, false);
+		return build(name, null, false, false, false);
 	}
 
 	/** Target bytes: one static field `value`, read from {@code dependencyHost.dependencyField} when given. */
 	private static byte[] withValue(String name, String dependencyHost, String dependencyField, boolean unrelated) {
 		return build(name, dependencyHost == null ? null
-		 : new String[]{dependencyHost, dependencyField}, true, unrelated);
+		 : new String[]{dependencyHost, dependencyField}, true, unrelated, false);
 	}
 
-	private static byte[] build(String name, String[] dependency, boolean withField, boolean unrelated) {
+	/** Adds `derived = value + 1` so the class carries an in-class dependency on `value`. */
+	private static byte[] withValueAndDerived(String name, String dependencyHost, String dependencyField) {
+		return build(name, dependencyHost == null ? null
+		 : new String[]{dependencyHost, dependencyField}, true, false, true);
+	}
+
+	private static byte[] build(String name, String[] dependency, boolean withField, boolean unrelated,
+	                            boolean derived) {
 		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
 		String internal = name.replace('.', '/');
 		cw.visit(Opcodes.V11, Opcodes.ACC_PUBLIC, internal, null, "java/lang/Object", null);
@@ -54,6 +61,9 @@ class CrossClassInitFixTest {
 		}
 		if (unrelated) {
 			cw.visitField(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "independent", "I", null, null).visitEnd();
+		}
+		if (derived) {
+			cw.visitField(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "derived", "I", null, null).visitEnd();
 		}
 		MethodVisitor init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
 		init.visitCode();
@@ -80,6 +90,12 @@ class CrossClassInitFixTest {
 		if (unrelated) {
 			clinit.visitIntInsn(Opcodes.BIPUSH, 17);
 			clinit.visitFieldInsn(Opcodes.PUTSTATIC, internal, "independent", "I");
+		}
+		if (derived) {
+			clinit.visitFieldInsn(Opcodes.GETSTATIC, internal, "value", "I");
+			clinit.visitInsn(Opcodes.ICONST_1);
+			clinit.visitInsn(Opcodes.IADD);
+			clinit.visitFieldInsn(Opcodes.PUTSTATIC, internal, "derived", "I");
 		}
 		clinit.visitInsn(Opcodes.RETURN);
 		clinit.visitMaxs(0, 0);
@@ -210,6 +226,63 @@ class CrossClassInitFixTest {
 		} finally {
 			InitFix.afterRedefineFailed(firstHost);
 			InitFix.afterRedefineFailed(secondHost);
+		}
+	}
+
+	@Test
+	void crossClassRejectionAlsoRejectsTheInClassDependentsOfTheRejectedField() throws Exception {
+		ByteLoader loader = new ByteLoader();
+		String readerName = "crossbatch.ReaderDerived";
+		String candidateName = "crossbatch.CandidateDerived";
+		byte[] readerOld = empty(readerName);
+		byte[] candidateOld = empty(candidateName);
+		// value reads the candidate (rejected because its bytes are missing), derived = value + 1 is purely
+		// in-class. Rejecting value alone would let derived read an unpatched zero.
+		byte[] readerNew = withValueAndDerived(readerName, candidateName, "value");
+		byte[] candidateNew = withValue(candidateName, null, null, false);
+		Class<?> reader = loader.define(readerName, readerOld);
+		loader.define(candidateName, candidateOld);
+		InitFix.beginBatchBytecodeView(view(loader, readerName, readerNew, candidateName, candidateNew));
+		try {
+			InitFix.transform(reader, readerNew, ClassDiffUtil.diff(readerOld, readerNew));
+			InitFix.setBatchDefinitions(java.util.List.of(new java.lang.instrument.ClassDefinition(reader, readerNew)));
+			InitFix.finishBatchTransforms();
+			assertEquals(InitFix.FieldStatus.REJECTED,
+			 InitFix.getLastReport(reader).staticFields().get("value").status());
+			assertEquals(InitFix.FieldStatus.REJECTED,
+			 InitFix.getLastReport(reader).staticFields().get("derived").status(),
+			 "an in-class dependent field must follow its rejected prerequisite instead of patching from a zero");
+			// A fully rejected class stages no plan at all, which is equivalent to "no task survived".
+			var stagedPlan = InitFix.pendingPlanForTest(reader);
+			assertTrue(stagedPlan == null || stagedPlan.staticTasks().isEmpty(),
+			 "no task may survive for a field whose prerequisite was rejected");
+		} finally {
+			InitFix.afterRedefineFailed(reader);
+		}
+	}
+
+	@Test
+	void inClassDependenciesStayOutOfTheCrossClassGraph() throws Exception {
+		ByteLoader loader = new ByteLoader();
+		String name = "crossbatch.LocalEdges";
+		byte[] oldBytes = empty(name);
+		// derived = value + 1 reads only this class: it must not become a self/cross edge, and no "@batch:"
+		// token may be attached to it (historical risk: self-loop -> Tarjan cycle -> whole field rejected).
+		byte[] newBytes = withValueAndDerived(name, null, null);
+		Class<?> host = loader.define(name, oldBytes);
+		InitFix.beginBatchBytecodeView(view(loader, name, newBytes, name + "Other", newBytes));
+		try {
+			InitFix.transform(host, newBytes, ClassDiffUtil.diff(oldBytes, newBytes));
+			InitFix.setBatchDefinitions(java.util.List.of(new java.lang.instrument.ClassDefinition(host, newBytes)));
+			InitFix.finishBatchTransforms();
+			assertEquals(InitFix.FieldStatus.ACCEPTED, InitFix.getLastReport(host).staticFields().get("value").status());
+			assertEquals(InitFix.FieldStatus.ACCEPTED, InitFix.getLastReport(host).staticFields().get("derived").status(),
+			 "an in-class dependency must not be turned into a cross-class self-cycle");
+			assertTrue(InitFix.pendingPlanForTest(host).staticTasks().stream()
+			 .flatMap(task -> task.dependencies().stream()).noneMatch(dep -> dep.startsWith("@batch:")),
+			 "in-class dependencies must not emit @batch: failure tokens");
+		} finally {
+			InitFix.afterRedefineFailed(host);
 		}
 	}
 }

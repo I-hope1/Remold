@@ -147,6 +147,97 @@ commit 链，每个 commit 记录该轮 Raw（磁盘原始字节）与 Effective
 - Changeset 不持有 `Class`、`ClassLoader`、`Method` 等运行时对象；只持有字符串、哈希、以及**弱**加载器身份
   （§2.4）。
 
+### 2.1.1 提交刻度：`seq`、`HEAD` 与窗口
+
+一轮热更**最多**产生一个 Changeset。只有通过 `VcsCommitGate` 的轮次才分配 `seq` 并推进 `HEAD`；
+被评估拒绝、部分类 redefine 失败、整组回滚、`LAMBDA_STRICT` 拒绝的轮次**不产生 Changeset、
+不推进 `seq`**，只在诊断侧记一条 `aborted` 事实（不含树根、不进链）。`seq` 只表示"已提交代"，
+否则回退侧要额外处理第二类节点。
+
+| 字段 | 类型 | 语义 |
+|:--|:--|:--|
+| `id` | 128-bit hex | `SHA-256(parentId ‖ seq ‖ 排序后的 entries 摘要 ‖ rawRoot ‖ effRoot ‖ metaRoot ‖ manifestHash ‖ algoVersion)` 截断 |
+| `parent` | id 或 `null` | 同一 `loaderScope` 内上一提交；首代为 `null` |
+| `seq` | long | 同一 `loaderScope` 内单调 +1，不复用（见 §5.4） |
+| `roundId` | 字符串 | 本轮批次标识；跨 scope 拆分的多条 Changeset 共享它，便于把一轮热更当整体诊断 |
+| `loaderScope` | long | 复用 loader 单调代号；**不持有 `ClassLoader`** |
+| `entries` | 每类记录 | `ClassKey → (rawHash, effHash, metaHash, accepted)`；只含 `accepted=true` |
+| `manifest` | 批次清单 | 见 §2.1.2，独立字段 |
+| `replayFacts` | 字段级事实 | 见 §3.8，独立字段 |
+| `rawRoot` / `effRoot` / `metaRoot` | 128-bit hex | 本轮三棵树根哈希 |
+| `algoVersion` | 字符串 | ASM/JDK 指纹 + Remold 版本 + 判据开关摘要 |
+| `buildId` | 字符串或 `null` | 与构建完成 marker 的 `build_id` 对齐 |
+
+确定性口径：`id` 对 `(parentId, seq, 内容)` 确定；**同一份字节内容在不同 `seq` 上必须得到不同 `id`**
+（`A → B → A` 的回改是新代，不是旧代的复用），因此不得把"内容相同"写成"`id` 相同"。
+
+窗口与淘汰：
+
+- Changeset 自身窗口 `M`，默认 **32**，`-Dremold.vcs.changeset_window` 覆盖。取 32 的理由是与
+  `HISTORY_PER_CLASS = 8` 对齐：典型调试会话在 3～4 个互依赖类之间轮流改时（`8 × 4 = 32`），
+  `M` 小于该值会出现"某类字节还在单类历史上限内、对应 Changeset 却先出窗"的错配。Changeset 不持字节、
+  不持 `ClassLoader`，该窗口的堆占用可忽略。
+- 两套淘汰互不替代：`HISTORY_PER_CLASS` 与 `Raw_prev` 预算决定"该类还能不能走 `Raw ↔ Raw`"，
+  `M` 决定"还能查多少代"。
+- Changeset 出窗后，`HEAD` 与 `parent` 链不回指它；引用它的导出包须经 `refs/pins/*` 提前固定（§5.4）。
+
+**三级可用性**（对回退能力的显式承诺，不许含糊）：
+
+| 级别 | 成立条件 | 允许的操作 |
+|:--|:--|:--|
+| `addressable` | Changeset 仍在窗口内 | 查代、查哈希、读 `manifest` / `replayFacts` |
+| `replayable` | 该代 `Raw` 字节与 `Meta` 记录都可得 | 重算 Eff、离线逐字节重放 |
+| `revertable` | `Eff` 字节可得（现存，或由 `Raw + Meta` 重算成功） | 运行期回退到该代 |
+
+- `addressable` **不依赖** `AlignmentMetaStore` 的每类 8 代上限：`entries` / `manifest` / `replayFacts`
+  是 Changeset 自带的轻量快照。因此某类的 per-class 条目被淘汰只把该代降级为 `addressable`，
+  不破坏链的完整性。
+- 回退执行时目标代必须达到 `revertable`；只有 `addressable` 时**拒绝执行并报 `NOT_REVERTABLE`**，
+  不做"缺类的半吊子回退"——那会毁掉批次一致性，比不回退更危险。
+- **区间回退的附加约束**：单代 `revertable` 只约束该代自身 `entries`。把 `HEAD` 回退到 `target`
+  还需要把 `(target, HEAD]` 之间改过、但不在 `target.entries` 里的类还原到 `seq ≤ target` 时的状态，
+  其中包含某类**首次进入链之前**的基线 `Eff_0`。因此首次纳入链的类必须在其首个 Changeset 里保留
+  （或可由首次 `Raw_prev` 导出）`Eff_0`；该槽位由本规格要求预留，具体落地不在 PR1 范围。
+
+### 2.1.2 `manifest`：批次分析上下文
+
+`manifest` 是分析期产物的一次性快照，随 Changeset 一并固化，用于离线复现"这一轮为什么按这个顺序补"。
+
+| 字段 | 内容 |
+|:--|:--|
+| `orderedHosts` | 本轮 Stage B 实际宿主顺序（`loaderScope:类名`），拓扑序 |
+| `edges` | 字段级有向边：`(fromHost, fromField) → (toHost, toField)` |
+| `nodes` | 参与依赖判定的字段集合；被拒者带**枚举**拒绝码，不带自由文本 |
+| `candidateMissing` | 因候选类字节缺失而 fail-closed 的类名集合 |
+
+- 与 `entries` 分家的理由：`entries` 是"每类一档"，塞入批次级数据会污染其语义，且区间回退要迁移格式。
+- **空边集是合法提交**：类在 scope 内、字节确有变化、但本轮没有跨类依赖边时，照常推进 `seq`；
+  否则该类的 Raw/Eff 变化没有提交坐标，后续它产生依赖时 `parent` 会断层。
+- 接入点只有 `InitFix` 的 `batchCommitManifest()`（只导出字符串与枚举）。提交时刻 `BatchContext`
+  仍然存活（见 §2.1.3），因此跨类收敛逻辑不需要改动。
+
+### 2.1.3 提交时序契约
+
+| 阶段 | 位置 | 与提交的关系 |
+|:--|:--|:--|
+| 批次开始 | `processChangesBatch` 建立批次字节视图 | 无 |
+| 分析 | `transform*` → `setBatchDefinitions` → `finishBatchTransforms` | 产出 `manifest` 与 `replayFacts` 素材 |
+| **提交点** | `commitVcsBatch` | 分配 `seq`、推进 `HEAD`、固化不可变 Changeset |
+| 补丁（单阶段） | Stage B 的 `afterRedefine` 循环 | **提交之后** |
+| 清视图 | `endBatchBytecodeView` | 提交之后 |
+| 补丁（两阶段） | `applyTwoPhase` 内的 A→B→C | **提交之前** |
+
+- `HEAD` 的语义固定为"**redefine 已提交（结构 + 字节）**"。两种模式的差异必须显式记录：
+  附加字段 `advisory.patchTiming ∈ {BEFORE_COMMIT, AFTER_COMMIT}`，让回退侧知道该代记录时刻的字段状态
+  是否已终态。
+- 字段补丁结果写入独立的可变旁路（`FieldLedger` / `REINIT_APPLIED` 现状不变），**不参与** `id` 计算
+  与 `HEAD` 推进。把补丁失败塞进原子提交会造出第二种失败模型。
+- `applyTwoPhase` 成功时，提交点处批次上下文与 `manifest` / `replayFacts` 素材仍存活未释放；
+  A→B→C 任一步失败并回滚时不得推进 `VcsCommitGate`，只记 `aborted`。
+- 跨 scope：单个批次可能触及多个 loader（`newBatchBytes` 按类解析各自的 loader）。此时**按 scope 各生成
+  一条 Changeset**（各自的 `parent` / `seq` 链，共享 `roundId`），原子性仍按整批判定——要么全部提交，
+  要么全部不提交。
+
 ### 2.2 三棵树与 Ref
 
 - **Raw 树**：内容寻址 blob 存储，键 = `rawHash`（128 位内容哈希，见下），值 = 原始字节。
@@ -375,6 +466,42 @@ VCS 层在此之上提供按 `(ClassKey, seq)` 的持久化读取，作为回放
 
 ---
 
+### 3.8 提交级事实：`replayFacts` 不是派生数据
+
+`replayFacts` 记录"某一代该字段的初值是什么、来自哪种重放档位"，用于多代初值重放（PR4-B）。
+它**不能**由 `Raw + Meta` 重建（旧一代字节可能已被预算淘汰），因此属于**事实**而非派生数据，
+必须随 Changeset 落盘。
+
+| 字段 | 语义 |
+|:--|:--|
+| `ownerClass` | 声明类（点分名） |
+| `field` / `desc` | 字段名与描述符 |
+| `tier` | `L1` / `A` / `REINIT` |
+| `oldLiteral` / `newLiteral` | 相邻两代初值，**两侧都记**（跨代跳读、以及"理论初值 vs 实际已应用"对账都只依赖它） |
+| `literalKind` | `INT` / `LONG` / `FLOAT_BITS` / `DOUBLE_BITS` / `STRING` / `NULL` / `NONE` |
+| `provenance` | `<clinit>` 切片哈希；`A` 档含唯一 `NEW` 站点标识 |
+| `scope` / `mode` | 仅 `REINIT` 档：`SELF` / `INCLUDE_SUBCLASSES`、`CONDITIONAL` / `OVERWRITE` |
+
+档位与字面量的关系（避免"非常量不产出"与 `REINIT` 档冲突）：
+
+- `L1` / `A` 两档**要求**初值是编译期常量，必须给出 `literalKind` 与两侧字面量；
+- `REINIT` 档**允许无字面量**：`literalKind = NONE`、两侧字面量为 `null`，只记录 `scope` / `mode` /
+  `provenance` 供重放判据使用；
+- 三档之外的非常量初始化不猜、不产出记录（该字段在本代无事实，回退侧按"无代际承诺"处理）。
+
+字面量规范化（回退与 CAS 对账的硬约束）：
+
+- `float` / `double` **只存原始位模式的十六进制**（`-0.0f` 记 `0x80000000`），与写入协议一致；
+  不得存十进制近似，也不得依赖 `Double.toString` 的回读等价。
+- `int` / `long` 存十进制；`String` 存转义后的 UTF-8 与字节长度；`null` 记 `NULL`。
+
+计算时机与纯度：
+
+- 在**分析期**由既有的纯函数 `InitializerReplay.plan(host, diff)` 与 `ApplyInitializerReplay.plan(host, diff)`
+  产出（二者只依赖宿主与 `ClassDiff`），随 `commitVcsBatch` 一并写入；
+- **不得**依赖 `afterRedefine` 的写回循环，也不得在读侧重新解析旧字节——被淘汰的代必须仍能读事实；
+- 运行期跳过的判定（例如 `A` 档 `dest` 为 `null`/类型不符）属于运行期结果，记入可变旁路，不进 `replayFacts`。
+
 ## 4. 三项安全约束
 
 ### 4.1 回退 = 正向 revert，绝不 reset
@@ -471,6 +598,8 @@ PR1 的记录是**旁路**：`LambdaAligner.align()` 只读（纯函数，不写
   无 `LAMBDA_STRICT` 拒绝时，才逐类提交并清空暂存；否则整批丢弃。这是 PR1 的原子口径，牺牲覆盖率换
   "绝不把半生效批次记成当前代"。该判据抽成纯函数 `VcsCommitGate.shouldCommit(...)`，用真值表用例钉住
   （放宽成"部分生效也提交"必须变红）。
+- **提交刻度与 `seq`**：通过判据的轮次才分配 `seq` 并推进 `HEAD`；两种重定义模式下"提交时刻字段是否已
+  补完"并不相同，差异用 `advisory.patchTiming` 记录，完整时序见 §2.1.3。
 - **两阶段**：阶段 A 走 `redefineStageA`，不经过提交点、也不更新 `bytecodeCache`；阶段 C 的最终字节由
   `applyRedefinitions` 应用。因此"只在 Stage C 成功后记一次"由结构保证，不存在 Stage A 记账。
 - **`Raw` 取向（PR1 定义）**：`preAlign` = **进入 `align()` 之前的待对齐产物**（已过前置归一化
@@ -526,6 +655,16 @@ PR1 的记录是**旁路**：`LambdaAligner.align()` 只读（纯函数，不写
   （刷新 `bytecodeCache`/`sourceBytecodeCache` 与 meta 视图）→ 释放 Staging。
 - 任一失败：不写树、不前进、整批 discard；日志必须能区分"评估拒绝"与"redefine 失败"（两类原因分开记）。
 - 部分类 redefine 失败的补偿：沿用 `applyTwoPhase` 的整组回滚语义；HEAD 是原子的，**不允许出现半代**。
+- 提交判据的精确语义（"无关类"必须区分两种，否则 `parent` 会断层）：
+
+| 情形 | 是否产生 Changeset |
+|:--|:--|
+| 字节无变化 / 不在任何 `loaderScope` / 非 Remold 管理的类 | 否 |
+| 在 scope 内、字节确有变化、`manifest.edges` 为空 | **是**（空边集合法；否则该类的 Raw/Eff 变化没有提交坐标） |
+| 任一类 redefine 失败或整组回滚 | 否（整批零提交，`seq` 不动） |
+| 两阶段 A→B→C 任一步失败回滚 | 否 |
+| 全部 redefine 成功、部分字段被安全门拒绝 | 是（结构已装，字段状态走 `advisory`） |
+| 批次跨多个 scope | 每个 scope 一条 Changeset（共享 `roundId`），原子性按整批 |
 - redefine 成功但树写入失败（例如预算/溢出）：视为提交失败，必须回滚到"写树之前"的状态，
   并让下一轮从旧 HEAD 继续（下一轮 `oldBytes` 仍是旧 Eff，与 JVM 事实不符时必须拒绝并 warn，
   不得静默降级）。

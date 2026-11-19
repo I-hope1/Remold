@@ -159,6 +159,7 @@ apply from: "https://raw.githubusercontent.com/I-hope1/Remold/v${remoldRef}/remo
 |:--|:--|
 | Mixin 热更子系统（8 篇：类加载器权威 / 准入与覆盖层 / 重织入与成员对齐 / 结构契约 / 合成类闸门 / 走查 / 运行期诊断 / 决策台账） | [`docs/mixin/01..08`](docs/mixin/01-invariants-and-classloader-authority.md) |
 | 匿名类拓扑对齐（准入、层级交错流水线、置信梯队、布局门、Lambda 捕获桥、枚举扩展边界、孤儿体保留、JIT 清空尾延迟） | [`docs/topology/01..12`](docs/topology/01-invariants-and-remapping.md) |
+| 变更集 VCS 与代际字段台账（逐代 `Changeset` 链、活体 Raw↔Raw 对齐、按代 `FieldLedger` / `REINIT_APPLIED` 与回退后 CAS 对账） | [`docs/topology/16..21`](docs/topology/20-generational-field-ledger.md) |
 | InitFix 安全门、闭包与台账、两阶段设计 | [`docs/initfix/01..13`](docs/initfix/01-safety-gate.md) |
 | 物理偏移、继承字段漂移防护与第三方缓存驱逐 | [`docs/offset/01..02`](docs/offset/01-offset-and-reflection-cache.md) |
 | 逐项实现状态、验收证据、已知风险（唯一真相源） | [`docs/status.md`](docs/status.md) |

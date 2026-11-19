@@ -38,9 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 验收：`crossClassInitFixProbe` 28/0（JBR 21 DCEVM；单阶段与两阶段各 14 项——逆序输入跨类静态初始化、
     运行期 prerequisite 失败只跳下游且台账点名前置字段、未初始化宿主静默跳过；两阶段的失败注入走阶段 A
     保留的旧方法体）、`twoPhaseProbe` 72/0、`initFixOracle`、`check`；单测 `CrossClassInitFixTest` 6 用例 /
-    `InitFixBatchGraphTest` 6 用例；变异 8 击杀（禁用同批 overlay、打乱宿主顺序、去掉运行期失败 token、
-    去掉循环拒绝、去掉跨类边收集、去掉候选字节缺失 fail-closed、禁用跨类拒绝、把类内边灌进跨类图、
-    未初始化宿主重新记账）。
+    `InitFixBatchGraphTest` 6 用例；变异 9/17 击杀（战役台账 5/12，两轮评审修复中手工复现 4/5）。
+    已击杀：禁用同批 overlay、打乱宿主顺序、去掉运行期失败 token、去掉循环拒绝、去掉跨类边收集、
+    去掉候选字节缺失 fail-closed、禁用跨类拒绝、把类内边灌进跨类图、未初始化宿主重新记账。
+    存活 6/17 属三类：重复试探同一变异点、改到不可达 helper、`test_cmd` 未包含目标断言所在文件。
 
 - **PR3：活的 lambda 对齐改走 `R_prev ↔ R_new`（Run R），`Eff_prev` 降级为继承来源**
   （`LambdaAligner`、`AlignmentMetaStore`、`RemoldAgent`）：活体路径不再拿被幽灵桩 / 捕获桥 /

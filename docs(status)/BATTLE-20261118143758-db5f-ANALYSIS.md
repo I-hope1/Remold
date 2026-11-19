@@ -91,10 +91,9 @@ Implement PR4-A only: use same-batch latest bytecode for InitFix analysis, conve
 ## 5. 机械缺口与风险 (0)
 - 无
 
-## 5.1 已接受局限 / 挂账债务 (4)
+## 5.1 已接受局限 / 挂账债务 (3)
 - `gradlew` is mode 100644, so bare `./gradlew` fails with exit 126; all campaign acceptance commands were normalized to `bash ./gradlew`, and the two exit-126 records were invalidated rather than counted as code failures. Restore +x on `gradlew` if bare invocations should work.
-- Five of twelve mutation trials survived: they were duplicate probes of the same mutation point, mutations of unreachable helper code, or trials whose `test_cmd` did not include the file holding the target assertion. Every real implementation point (overlay, host order, runtime token, cycle detection, cross-class edges) has at least one killed trial anchored to a failing assertion.
-- Five of twelve recorded mutation trials survived. Surviving trials were either duplicate probes of the same mutation point, mutations of unreachable helper code, or mutations whose target assertion lives only in a separate test file excluded by that trial's test_cmd; each real implementation point (overlay, host order, runtime token, cycle detection, cross-class edges) has at least one killed trial anchored to a failing assertion.
+- Campaign ledger holds 12 mutation trials: 5 killed, 5 survived, 2 errored (the mutation target did not exist). Surviving trials were duplicate probes of one mutation point, mutations of unreachable helper code, or trials whose `test_cmd` did not include the file holding the target assertion; every real implementation point (overlay, host order, runtime token, cycle detection, cross-class edges) still has at least one killed trial anchored to a failing assertion. Five further mutations were run manually while applying two review rounds (all restored byte-identically): 4 killed, 1 survived (disabling the cross-class `Optional.empty()` rejection).
 - 1 条 harness-error 证据（环境/命令未真正执行，不计入通过/击杀）: ev-20261118151508-2cff
 
 ## 6. 下一步

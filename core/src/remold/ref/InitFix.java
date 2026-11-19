@@ -1749,10 +1749,12 @@ public class InitFix {
 		// 代际对账（docs/topology/20-generational-field-ledger.md §3.3）：回退之后当轮 ClassDiff
 		// 不再是"JVM 里实际是什么"的可信描述，期望与写入值必须取自目标代的那一条事实。
 		Map<String, String> replayDecisions = new LinkedHashMap<>();
-		Map<String, GenerationalReplay> generational = gateGenerationalReplay(
-		 host, diff.newClass.name, replayFields, applyFields, replayDecisions, applyDecisions);
-		logApplyReplayDecisions(diff == null || diff.newClass.name == null
-		 ? "?" : diff.newClass.name.replace('/', '.'), applyDecisions);
+		String analyzedName = diff == null || diff.newClass == null ? null : diff.newClass.name;
+		Map<String, GenerationalReplay> generational = analyzedName == null
+		 ? Map.of()
+		 : gateGenerationalReplay(host, analyzedName, replayFields, applyFields,
+		    replayDecisions, applyDecisions);
+		logApplyReplayDecisions(analyzedName == null ? "?" : analyzedName.replace('/', '.'), applyDecisions);
 
 		// 提交级事实（docs/topology/16-bytecode-changeset-vcs.md §3.8）：分析期把两档重放的
 		// 旧/新初值固化成事实，随 Changeset 落盘；读侧不再依赖旧字节是否还在预算窗口内。

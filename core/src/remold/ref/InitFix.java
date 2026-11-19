@@ -1022,11 +1022,7 @@ public class InitFix {
 		if (context == null) return;
 		List<Changeset.ReplayFact> sink = context.replayFacts();
 		if (l1 != null) {
-			for (InitializerReplay.ReplayField field : l1.values()) {
-				sink.add(new Changeset.ReplayFact(dotted(field.declaringClass()), field.name(), field.desc(),
-				 "L1", literalOf(field.expected(), field.oldText(), field.desc()),
-				 literalOf(null, field.newText(), field.desc()), literalKindOf(field.desc()), "", "", ""));
-			}
+			for (InitializerReplay.ReplayField field : l1.values()) sink.add(l1ReplayFact(field));
 		}
 		if (apply != null) {
 			for (ApplyInitializerReplay.ReplayField field : apply.values()) {
@@ -1036,6 +1032,20 @@ public class InitFix {
 				 literalKindOf(field.fieldDesc()), field.dest() + ":" + field.destDesc(), "", ""));
 			}
 		}
+	}
+
+	/**
+	 * {@code L1} 档提交级事实（{@code docs/topology/16-bytecode-changeset-vcs.md} §3.8）。
+	 *
+	 * <p>两侧字面量都取自字节码常量的自然值，<b>不</b>从 {@code oldText}/{@code newText} 反推：
+	 * 那两列是给人读的十进制渲染（{@code -0.0f}、NaN payload 与十进制舍入都会在往返中失真），
+	 * 只保证一侧规范会让该字段的多代重放整体不可用。</p>
+	 */
+	static Changeset.ReplayFact l1ReplayFact(InitializerReplay.ReplayField field) {
+		return new Changeset.ReplayFact(dotted(field.declaringClass()), field.name(), field.desc(),
+		 "L1", literalOf(field.expected(), field.oldText(), field.desc()),
+		 literalOf(field.newExpected(), field.newText(), field.desc()),
+		 literalKindOf(field.desc()), "", "", "");
 	}
 
 	/** 记录 {@code @RemoldReinit} 档事实：有 scope / mode，但按契约不要求字面量。 */

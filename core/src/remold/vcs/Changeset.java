@@ -234,7 +234,9 @@ public record Changeset(
 
 	/** 派生算法版本指纹（§2.1.1）：ASM API 级别 + 运行期 JDK + 本契约版本。 */
 	public static String currentAlgoVersion() {
-		return "vcs=1|asm=9|jdk=" + Runtime.version().feature();
+		// vcs=2: replayFacts 的 L1 档新侧改为真实原始位模式（此前是十进制文本，浮点会失真）。
+		// 位模式参与 id 预算，格式变更必须体现在版本号里，旧记录才能被识别并拒绝。
+		return "vcs=2|asm=9|jdk=" + Runtime.version().feature();
 	}
 
 	/** SHA-256 截断到 128 位，十六进制小写（§2.2 内容哈希规则）。 */

@@ -1894,3 +1894,40 @@ tasks.register("pr3RealWorldReadings") {
 	dependsOn "pr3RealWorldReadingsMain"
 	dependsOn "pr3RealWorldReadingsBudget"
 }
+
+tasks.register("vcsRevertSyncProbe", JavaExec) {
+	group = "verification"
+	description = "B2 回退同步 E2E (VcsRevertSyncProbe)：缓存同步 / Eff_0 目标 / 多 scope 原子"
+	dependsOn classes
+	dependsOn project(":core").tasks.named("shadowJar")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "VcsRevertSyncProbe"
+	maxHeapSize = "1g"
+	def jbrHome = (project.findProperty("p05.jbr") as String)
+		?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+	if (jbrHome != null) {
+		def javaBin = new File(jbrHome, probeIsWindows ? "bin/java.exe" : "bin/java")
+		if (javaBin.exists()) {
+			executable = javaBin.absolutePath
+			javaLauncher.set((JavaLauncher) null)
+		}
+	}
+	def probeDir = layout.buildDirectory.dir("vcs-revert-sync-probe")
+	doFirst {
+		def dir = probeDir.get().asFile
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}",
+		        "-XX:+IgnoreUnrecognizedVMOptions",
+		        "-XX:+AllowEnhancedClassRedefinition",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8",
+		        "-DvcsRevertSyncProbe.dir=" + dir.absolutePath,
+		        "-Dremold.agent.file_shake_ms=250",
+		        "-Dremold.vcs.enabled=true",
+		        "-Dremold.vcs.revert=true"
+		if (nativeLibPath != null) {
+			jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+		}
+	}
+}

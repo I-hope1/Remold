@@ -1065,9 +1065,21 @@ public class InitFix {
 		return internalOrDotted == null ? "" : internalOrDotted.replace('/', '.');
 	}
 
+	/**
+	 * 字面量定型（{@code docs/topology/16-bytecode-changeset-vcs.md} §3.8）。
+	 *
+	 * <p>八种基本类型都有台账口径：{@code Z/B/S/C} 与 {@code I/J} 同档（编译期常量、{@code ConstantValue}
+	 * 语义一致），{@code F/D} 走原始位模式。{@code L1} 与 A 档都放行全部基本类型，消费侧
+	 * （{@code GenerationalFieldLedger.resolve}）见 {@code NONE} 一律 {@code REFUSED_NONE_LITERAL}；
+	 * 把 {@code Z/B/S/C} 留在 {@code NONE} 会让这四类的跨代对账整类失效。</p>
+	 */
 	static String literalKindOf(String desc) {
 		if (desc == null || desc.isEmpty()) return "NONE";
 		switch (desc.charAt(0)) {
+			case 'Z': return "BOOLEAN";
+			case 'B': return "BYTE";
+			case 'S': return "SHORT";
+			case 'C': return "CHAR";
 			case 'I': return "INT";
 			case 'J': return "LONG";
 			case 'F': return "FLOAT_BITS";
@@ -1078,16 +1090,40 @@ public class InitFix {
 	}
 
 	/**
-	 * 字面量定型：{@code float}/{@code double} 一律取原始位模式十六进制，
+	 * 字面量定型 + 规范化：{@code float}/{@code double} 一律取原始位模式十六进制，
 	 * 避免十进制回读等价造成的对账漂移（§3.8）。
+	 *
+	 * <p>{@code Z/B/S/C} 的规范形与 {@code Boolean/Byte/Short/Character.toString} 一致
+	 * （{@code true/false}、十进制、单字符），并且同样接受<b>常量池里的原始 Integer</b>：
+	 * 这样"自然装箱值"（{@code L1} 的 {@code expected}）与"未装箱的字节码常量"（A 档的
+	 * {@code newRaw}）落到同一段文本，两侧同源——否则 {@code boolean} 会写成
+	 * {@code "true"} vs {@code "1"}，跨代 CAS 永远对不上。</p>
 	 */
 	static String literalOf(Object value, String fallback, String desc) {
 		String kind = literalKindOf(desc);
-		if ("FLOAT_BITS".equals(kind) && value instanceof Float f) {
-			return String.format("0x%08x", Float.floatToRawIntBits(f));
-		}
-		if ("DOUBLE_BITS".equals(kind) && value instanceof Double d) {
-			return String.format("0x%016x", Double.doubleToRawLongBits(d));
+		switch (kind) {
+			case "FLOAT_BITS":
+				if (value instanceof Float f) return String.format("0x%08x", Float.floatToRawIntBits(f));
+				break;
+			case "DOUBLE_BITS":
+				if (value instanceof Double d) return String.format("0x%016x", Double.doubleToRawLongBits(d));
+				break;
+			case "BOOLEAN":
+				if (value instanceof Boolean b) return b.toString();
+				if (value instanceof Number n) return n.intValue() != 0 ? "true" : "false";
+				break;
+			case "BYTE":
+				if (value instanceof Number n) return Byte.toString(n.byteValue());
+				break;
+			case "SHORT":
+				if (value instanceof Number n) return Short.toString(n.shortValue());
+				break;
+			case "CHAR":
+				if (value instanceof Character c) return c.toString();
+				if (value instanceof Number n) return String.valueOf((char) n.intValue());
+				break;
+			default:
+				break;
 		}
 		if (value != null) return String.valueOf(value);
 		return fallback == null ? "null" : fallback;
@@ -1126,14 +1162,17 @@ public class InitFix {
 			}
 		}
 		List<String> missing = new ArrayList<>();
-		Map<String, ClassLoader> byId = new IdentityHashMap<>();
+		// 按 <b>值</b> 查 loader：候选键里的 id 是每次拼接出来的新 String，用 IdentityHashMap
+		// 会把整批候选都查成"缺字节"。bootstrap loader 的 key 就是 null，也必须照常查
+		// （bytesByLoader 本身允许 null key），否则它名下每个类都会被误报。
+		Map<String, ClassLoader> byId = new HashMap<>();
 		for (Map.Entry<ClassLoader, String> e : context.loaderIds().entrySet()) byId.put(e.getValue(), e.getKey());
 		for (String candidate : context.candidateFields().keySet()) {
 			int colon = candidate.indexOf(':');
 			if (colon < 0) continue;
-			ClassLoader loader = byId.get(candidate.substring(0, colon));
+			String id = candidate.substring(0, colon);
 			String name = candidate.substring(colon + 1);
-			Map<String, byte[]> bytes = loader == null ? null : context.bytesByLoader().get(loader);
+			Map<String, byte[]> bytes = byId.containsKey(id) ? context.bytesByLoader().get(byId.get(id)) : null;
 			if (bytes == null || !bytes.containsKey(name)) missing.add(name);
 		}
 		return new Changeset.Manifest(orderedHosts, edges, nodes, missing);

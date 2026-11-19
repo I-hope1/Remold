@@ -48,7 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   新增 `Resolution.REFUSED_LEGACY_VERSION` 与 `isUnclosed(loader, class, field)`。
 
 
-- **代际字段台账（B2 存储层）**：新增 `remold.vcs.GenerationalFieldLedger`，把 `replayFacts` 按代坐标索引起来。
+- **修复：未闭环字段会把上一代的"理论初值"当成实际值写回**（PR #24 review 发现）。条件 CAS 被跳过、
+  字段留作未闭环之后，下一轮普通更新会拿"那一代记下但从未写进堆"的 `ReplayFact` 当期望：实例堆值恰好
+  等于它的 `oldLiteral` 时 CAS 命中，于是把**上一轮的旧初值**（例如 5）写进堆，看着成功、实际倒退。
+  - `InitFix.gateGenerationalReplay` 现在对"欠债且**没有任何确认写入**"的键一律 fail-closed：不取期望、
+    不写、债务保留，报告记 `rejected:` 并点明恢复路径；"确认写入"的唯一可信来源是运行期落账的
+    `REINIT_APPLIED` 行（`written…`）。L1 与 A 两档同一条判据。
+  - 顺带补齐两处口径：`recordLedgerFacts` 不再跳过 `loader == null`（否则 bootstrap 槽永远填不上，
+    与消费侧不对称）；字段从新布局消失时释放它的代际债务（未闭环债务不随窗口淘汰，泄漏即为永久）。
+  - 验收：`GenerationalReplayWiringTest`（无确认写入必拒）、`BootstrapLedgerSymmetryTest`、
+    `GenerationalFieldLedgerTest.debtIsReleasedWhenTheFieldIsGone`；变异：去掉 fail-closed 判定 → 用例红。
+
+- **代际字段台账（B2 存储层）**- **代际字段台账（B2 存储层）**：新增 `remold.vcs.GenerationalFieldLedger`，把 `replayFacts` 按代坐标索引起来。
   - 键 = `(loaderScope, 内部名, field)` + `GenRef(seq, changesetId)`，scope 取 `AlignmentMetaStore.loaderScopeId`，
     与 `Changeset.loaderScope` 同源；`changesetId` 留作校验位，防止"同 seq 不同代"被当成同一条事实。
   - **两类保留策略不共用一个窗口**：未闭环债务（判过 `MISS_NO_FACT` / 写入失败的字段）不被 Changeset 窗口淘汰；

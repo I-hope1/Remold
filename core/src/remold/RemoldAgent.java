@@ -2700,6 +2700,13 @@ public class RemoldAgent {
 							}
 						}
 						lambdaNanos += System.nanoTime() - lambdaT0;
+						// 没有 lambdas 的类不走对齐分支，但同样需要提交刻度：否则它既进不了 Changeset，
+						// 也无法被区间回退（B1 的回退集合按 Changeset 的 entries 计算）。
+						if (LAMBDA_ALIGN && Boolean.getBoolean("remold.vcs.enabled")
+						    && !PENDING_VCS.containsKey(className)) {
+							PENDING_VCS.put(className, new VcsPending(targetClass.getClassLoader(), oldBytecode,
+							 newBytecode, newBytecode, null));
+						}
 					}
 					if (oldBytecode != null) {
 						long diffT0 = System.nanoTime();
@@ -4773,6 +4780,8 @@ public class RemoldAgent {
 		}
 		// 每个 loader scope 一条链：entries 按 scope 分组，批次原子性已由上面的 gate 保证（§2.1.3）。
 		Map<ClassLoader, Map<String, Changeset.Entry>> perScope = new IdentityHashMap<>();
+		Map<ClassLoader, Map<String, byte[]>> effBefore = new IdentityHashMap<>();
+		Map<ClassLoader, Map<String, byte[]>> effNow = new IdentityHashMap<>();
 		Map<ClassLoader, Set<String>> scopeClassNames = new IdentityHashMap<>();
 		List<Class<?>> committedClasses = new ArrayList<>();
 		for (ClassDefinition def : definitions) {
@@ -4798,6 +4807,10 @@ public class RemoldAgent {
 					 .put(slashName, new Changeset.Entry(slashName, head.preAlignSha256,
 					  head.jvmEffSha256, metaHash));
 					scopeClassNames.computeIfAbsent(p.loader, ignored -> new LinkedHashSet<>()).add(slashName);
+					if (p.oldEffective != null) {
+						effBefore.computeIfAbsent(p.loader, ignored -> new LinkedHashMap<>()).put(slashName, p.oldEffective);
+					}
+					effNow.computeIfAbsent(p.loader, ignored -> new LinkedHashMap<>()).put(slashName, jvmBytes);
 				}
 				committedClasses.add(def.getDefinitionClass());
 				if (BytecodePack.enabled()) {
@@ -4821,7 +4834,9 @@ public class RemoldAgent {
 					Changeset cs = ChangesetLog.INSTANCE.commit(
 					 AlignmentMetaStore.INSTANCE.loaderScopeId(scope.getKey()), roundId,
 					 scope.getValue(), scopeManifest(manifest, scopeClassNames.get(scope.getKey())),
-					 facts, Changeset.currentAlgoVersion(), buildId, timing);
+					 facts, Changeset.currentAlgoVersion(), buildId, timing,
+					 effBefore.getOrDefault(scope.getKey(), Map.of()),
+					 effNow.getOrDefault(scope.getKey(), Map.of()));
 					// 链式回放包按 seq 逐轮导出：提交后立即写本轮目录，离线侧可按任意 seq 单独检出（§7.1）。
 					if (BytecodePack.enabled()) BytecodePack.exportRound(cs);
 				} catch (Throwable t) {
@@ -4863,6 +4878,86 @@ public class RemoldAgent {
 			if (dotted.contains(name)) missing.add(name);
 		}
 		return new Changeset.Manifest(hosts, manifest.edges(), nodes, missing);
+	}
+
+	/**
+	 * 回退到某个已提交代（{@code docs/topology/16-bytecode-changeset-vcs.md} §2.1.1 / §4.1）。
+	 *
+	 * <p>只承诺<b>未来正确</b>：结构与字方法体回到目标代，已经写进存量实例的字段值保持现状，
+	 * 该堆事实由调用方记入 {@code PatchReport} 与告警。执行前先确认每类的工作头都还能切回目标代，
+	 * 切不回去就整体拒绝（fail-closed），不做事后半套回退。</p>
+	 *
+	 * <p>成功路径追加一条前向 Changeset（{@code seq = HEAD+1}、{@code revertedToSeq = target}），
+	 * 不倒拨 {@code seq}、不造分叉，链式导出保持线性。</p>
+	 *
+	 * @return 人可读的回退摘要；开 {@code -Dremold.vcs.revert} 才允许执行
+	 */
+	public static String revertTo(long targetSeq) {
+		if (!Boolean.getBoolean("remold.vcs.revert")) {
+			throw new IllegalStateException("NOT_REVERTABLE: revert execution is disabled"
+			 + " (set -Dremold.vcs.revert=true)");
+		}
+		if (inst == null) throw new IllegalStateException("NOT_REVERTABLE: instrumentation is not attached");
+		StringBuilder summary = new StringBuilder();
+		for (long scope : ChangesetLog.INSTANCE.liveScopes()) {
+			ChangesetLog.RevertPlan plan = ChangesetLog.INSTANCE.revertPlan(scope, targetSeq);
+			if (plan.isEmpty()) {
+				summary.append("scope=").append(scope).append(":noop;");
+				continue;
+			}
+			List<ClassDefinition> defs = new ArrayList<>();
+			Map<ClassLoader, Map<String, String>> byLoader = new IdentityHashMap<>();
+			for (ChangesetLog.RevertTarget target : plan.targets().values()) {
+				Class<?> cls = findLoadedClassByName(target.className());
+				if (cls == null) {
+					throw new IllegalStateException("NOT_REVERTABLE: class is not loaded: " + target.className());
+				}
+				if (!AlignmentMetaStore.INSTANCE.hasGeneration(cls.getClassLoader(), target.className(),
+				 target.effHash())) {
+					throw new IllegalStateException("NOT_REVERTABLE: working head for " + target.className()
+					 + " is no longer addressable at the target generation");
+				}
+				defs.add(new ClassDefinition(cls, target.bytes()));
+				byLoader.computeIfAbsent(cls.getClassLoader(), ignored -> new LinkedHashMap<>())
+				 .put(target.className(), target.effHash());
+			}
+			try {
+				inst.redefineClasses(defs.toArray(new ClassDefinition[0]));
+			} catch (Throwable t) {
+				throw new IllegalStateException("NOT_REVERTABLE: revert redefine failed: " + t, t);
+			}
+			for (Map.Entry<ClassLoader, Map<String, String>> e : byLoader.entrySet()) {
+				for (Map.Entry<String, String> gen : e.getValue().entrySet()) {
+					if (!AlignmentMetaStore.INSTANCE.restoreHead(e.getKey(), gen.getKey(), gen.getValue())) {
+						throw new IllegalStateException("revert redefine succeeded but working head sync failed for "
+						 + gen.getKey() + "; the next Run R baseline would be wrong");
+					}
+				}
+			}
+			Changeset forward = ChangesetLog.INSTANCE.appendForwardRevert(scope, plan,
+			 batchWatchLabelFromNames(plan.targets().keySet()), Changeset.currentAlgoVersion(),
+			 System.getProperty("remold.build_id", ""), Changeset.PatchTiming.AFTER_COMMIT);
+			warn("[VCS] reverted scope " + scope + " to seq " + targetSeq + " (" + plan.targets().size()
+			 + " class(es)); existing instance field values are NOT rolled back"
+			 + " (heap values keep their current state, structure/bodies follow seq " + targetSeq + ").");
+			summary.append("scope=").append(scope).append(":seq=").append(forward.seq())
+			 .append(":classes=").append(plan.targets().size()).append(';');
+		}
+		return summary.toString();
+	}
+
+	private static String batchWatchLabelFromNames(Collection<String> names) {
+		return "revert:" + String.join(",", new TreeSet<>(names));
+	}
+
+	/** 按点分名找已加载类（回退入口用；找不到即拒绝，不做隐式加载）。 */
+	private static Class<?> findLoadedClassByName(String dottedName) {
+		if (inst == null || dottedName == null) return null;
+		String internal = dottedName.replace('.', '/');
+		for (Class<?> cls : inst.getAllLoadedClasses()) {
+			if (cls.getName().replace('.', '/').equals(internal)) return cls;
+		}
+		return null;
 	}
 
 	private static RedefineOutcome applyTwoPhase(List<ClassDefinition> definitions,

@@ -46,9 +46,15 @@ public final class GenerationalFieldLedger {
 		}
 	}
 
-	/** 一条已记录事实的只读快照（§3.3：期望与写入值必须来自同一对，禁止跨事实混搭）。 */
+	/**
+	 * 一条已记录事实的只读快照（§3.3：期望与写入值必须来自同一对，禁止跨事实混搭）。
+	 *
+	 * <p>{@code desc} 与 {@code algoVersion} 都只作<b>校验位</b>：前者挡住同名异型，后者挡住跨口径
+	 * 复用（消费侧据此 fail-closed 拒绝 {@code vcs=1} 之类旧记录，见
+	 * {@link GenerationalReplayGate}）。两者都是字符串，不改变"值里不持 {@code Class}"的形状。</p>
+	 */
 	public record Fact(LedgerKey key, GenRef gen, String tier, String desc,
-	                   String oldLiteral, String newLiteral, String literalKind) {
+	                   String oldLiteral, String newLiteral, String literalKind, String algoVersion) {
 	}
 
 	/** 写入台账的结果；拒绝都是 fail-closed，不做事后补正（§4-R5）。 */
@@ -118,7 +124,7 @@ public final class GenerationalFieldLedger {
 		ScopeSlot slot = slotFor(loader);
 		if (slot.scope < 0L) slot.scope = key.scope();
 		Fact entry = new Fact(key, gen, fact.tier(), fact.desc(),
-		 fact.oldLiteral(), fact.newLiteral(), fact.literalKind());
+		 fact.oldLiteral(), fact.newLiteral(), fact.literalKind(), algoVersion);
 		Deque<Fact> rows = slot.history.computeIfAbsent(rowKey(key.className(), key.field()),
 		 ignored -> new ArrayDeque<>());
 		rows.addFirst(entry);
@@ -226,18 +232,32 @@ public final class GenerationalFieldLedger {
 
 	/** §3.3 的判定结果；只有 {@link Resolution#EXACT} 与 {@link Resolution#CHAINED} 允许写入。 */
 	public enum Resolution {
-		EXACT, CHAINED, MISS_NO_FACT, MISS_WINDOW, REFUSED_DISCONTINUOUS, REFUSED_NONE_LITERAL
+		EXACT, CHAINED, MISS_NO_FACT, MISS_WINDOW, REFUSED_DISCONTINUOUS, REFUSED_NONE_LITERAL,
+		/** 事实登记的 {@code algoVersion} 与当前口径不同：拒绝而不是猜（§4-R5 / G8）。 */
+		REFUSED_LEGACY_VERSION
 	}
 
-	/** 一次对账的结论。{@code oldLiteral} 是比较侧期望，{@code newLiteral} 是写入值——两者必须同源。 */
-	public record Resolved(Resolution resolution, long fromGeneration, GenRef gen,
-	                       String oldLiteral, String newLiteral, String literalKind) {
+	/**
+	 * 一次对账的结论。{@code oldLiteral} 是比较侧期望，{@code newLiteral} 是写入值——两者必须同源。
+	 *
+	 * @param fromGeneration   事实所在代
+	 * @param targetGeneration 本次对账解析到的目标代（回退代已被单跳解析）
+	 * @param desc             事实登记的字段描述符（校验位，可为空）
+	 * @param algoVersion      事实登记时的口径指纹（校验位）
+	 */
+	public record Resolved(Resolution resolution, long fromGeneration, long targetGeneration, GenRef gen,
+	                       String oldLiteral, String newLiteral, String literalKind,
+	                       String desc, String algoVersion) {
 		public boolean writable() {
 			return resolution == Resolution.EXACT || resolution == Resolution.CHAINED;
 		}
 	}
 
-	private static final Resolved NO_FACT = new Resolved(Resolution.MISS_NO_FACT, 0L, null, null, null, null);
+	private static final Resolved NO_FACT = miss(Resolution.MISS_NO_FACT, 0L, null);
+
+	private static Resolved miss(Resolution resolution, long target, GenRef gen) {
+		return new Resolved(resolution, 0L, target, gen, null, null, null, null, null);
+	}
 
 	/**
 	 * 按 §3.3 做确定性查找：目标代 → 最新可采信事实 → 身份 / 相邻性 / 形态三关。
@@ -256,7 +276,7 @@ public final class GenerationalFieldLedger {
 		if (rows == null || rows.isEmpty()) {
 			// 事实可能在窗口外：链本身也退到了 target 之前，说明这条事实不可重建（§2.3）。
 			return log.bySeq(scope, target).isEmpty()
-			 ? new Resolved(Resolution.MISS_WINDOW, 0L, null, null, null, null) : NO_FACT;
+			 ? miss(Resolution.MISS_WINDOW, target, null) : NO_FACT;
 		}
 		Fact candidate = null;
 		boolean sawAnyAtOrBefore = false;
@@ -270,18 +290,27 @@ public final class GenerationalFieldLedger {
 		Changeset source = log.bySeq(scope, candidate.gen().seq()).orElse(null);
 		if (source == null || !source.id().equals(candidate.gen().changesetId())) {
 			// 代已出窗，或 id 对不上（同 seq 不同代）：拒绝，且不回落到"最近活代"顶替。
-			return new Resolved(Resolution.MISS_WINDOW, 0L, candidate.gen(), null, null, null);
+			return miss(Resolution.MISS_WINDOW, target, candidate.gen());
 		}
 		if (!isAdjacent(log, scope, className, candidate.gen().seq(), target)) {
-			return new Resolved(Resolution.REFUSED_DISCONTINUOUS, 0L, candidate.gen(), null, null, null);
+			return miss(Resolution.REFUSED_DISCONTINUOUS, target, candidate.gen());
+		}
+		// 口径（algoVersion）在形态之前判：旧口径的字面量形态本来就不该被解读，先拒绝更窄。
+		// 索引层已经在 record() 拒收跨口径记录，这里是消费侧的第二道（§4-R5 / G8）。
+		if (candidate.algoVersion() == null
+		 || !candidate.algoVersion().equals(Changeset.currentAlgoVersion())) {
+			return new Resolved(Resolution.REFUSED_LEGACY_VERSION, 0L, target, candidate.gen(),
+			 null, null, null, candidate.desc(), candidate.algoVersion());
 		}
 		if (candidate.literalKind() == null || "NONE".equals(candidate.literalKind())
 		 || !isCanonical(candidate.literalKind(), candidate.oldLiteral(), candidate.newLiteral())) {
-			return new Resolved(Resolution.REFUSED_NONE_LITERAL, 0L, candidate.gen(), null, null, null);
+			return new Resolved(Resolution.REFUSED_NONE_LITERAL, 0L, target, candidate.gen(),
+			 null, null, candidate.literalKind(), candidate.desc(), candidate.algoVersion());
 		}
 		Resolution resolution = candidate.gen().seq() == target ? Resolution.EXACT : Resolution.CHAINED;
-		return new Resolved(resolution, candidate.gen().seq(), candidate.gen(),
-		 candidate.oldLiteral(), candidate.newLiteral(), candidate.literalKind());
+		return new Resolved(resolution, candidate.gen().seq(), target, candidate.gen(),
+		 candidate.oldLiteral(), candidate.newLiteral(), candidate.literalKind(),
+		 candidate.desc(), candidate.algoVersion());
 	}
 
 	/** 回退代沿 {@code revertedToSeq} 单跳解析；非回退代就是它自己。 */
@@ -321,6 +350,11 @@ public final class GenerationalFieldLedger {
 	/** 字段闭环后从债务表移除。 */
 	public synchronized void markClosed(ClassLoader loader, String className, String field) {
 		slotFor(loader).unclosed.remove(rowKey(className, field));
+	}
+
+	/** 该键当前是否欠着（未闭环）；写入成功后的闭环判定用它，不必暴露行键格式。 */
+	public synchronized boolean isUnclosed(ClassLoader loader, String className, String field) {
+		return slotFor(loader).unclosed.contains(rowKey(className, field));
 	}
 
 	public synchronized List<String> unclosed(ClassLoader loader) {

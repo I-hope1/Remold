@@ -4,7 +4,11 @@ import jdk.internal.misc.Unsafe;
 import remold.ClassDiffUtil.ClassDiff;
 import remold.*;
 import remold.annotation.RemoldReinit;
+import remold.vcs.AlignmentMetaStore;
 import remold.vcs.Changeset;
+import remold.vcs.ChangesetLog;
+import remold.vcs.GenerationalFieldLedger;
+import remold.vcs.GenerationalReplayGate;
 import remold.util.ClassIdentity;
 import remold.util.LibTool;
 import org.objectweb.asm.*;
@@ -694,6 +698,23 @@ public class InitFix {
 		boolean hasPatch() { return bytes != null; }
 	}
 
+	/** L1 档在代际对账表里的键前缀（L1 只写宿主自身字段，键就是字段名）。 */
+	private static final String L1_GATE_PREFIX = "L1:";
+
+	/** A 档在代际对账表里的键前缀（键是 {@link ApplyInitializerReplay.ReplayField#key()}）。 */
+	private static final String APPLY_GATE_PREFIX = "A:";
+
+	/**
+	 * 一条重放候选的代际对账结论（{@code docs/topology/20-generational-field-ledger.md} §3.3）。
+	 *
+	 * <p>只有 {@link GenerationalReplayGate.Mode#FACT} 会产出本记录：比较侧 {@code expectedConstant}
+	 * 与写入侧 {@code writeConstant} 都是<b>同一条</b>事实的两个字面量解出来的 bootstrap 常量，
+	 * 不存在第二期望来源（D12）。</p>
+	 */
+	private record GenerationalReplay(String oldLiteral, String newLiteral, String literalKind,
+	                                  String fieldDesc, Object expectedConstant, Object writeConstant,
+	                                  long fromGeneration) { }
+
 	/** 常量直写批通道描述（供 {@link HotswapBridge#constantBatchLoop} 复用常驻 C2 循环）。 */
 	public record ConstantInitSpec(String fieldDesc, boolean forceWrite, Object value) { }
 
@@ -944,7 +965,8 @@ public class InitFix {
 	 Map<String, FieldDecision> staticFields,
 	 boolean patchGenerated,
 	 Map<String, String> replayFields,
-	 Map<String, String> applyReplayFields
+	 Map<String, String> applyReplayFields,
+	 Map<String, String> recoveredFields
 	) {
 		public PatchReport {
 			replayFields = replayFields == null || replayFields.isEmpty()
@@ -953,6 +975,9 @@ public class InitFix {
 			applyReplayFields = applyReplayFields == null || applyReplayFields.isEmpty()
 			 ? Map.of()
 			 : Collections.unmodifiableMap(new LinkedHashMap<>(applyReplayFields));
+			recoveredFields = recoveredFields == null || recoveredFields.isEmpty()
+			 ? Map.of()
+			 : Collections.unmodifiableMap(new LinkedHashMap<>(recoveredFields));
 		}
 
 		/** 兼容不带 apply 重放诊断的构造。 */
@@ -960,14 +985,14 @@ public class InitFix {
 		                   Map<String, FieldDecision> staticFields,
 		                   boolean patchGenerated,
 		                   Map<String, String> replayFields) {
-			this(instanceFields, staticFields, patchGenerated, replayFields, Map.of());
+			this(instanceFields, staticFields, patchGenerated, replayFields, Map.of(), Map.of());
 		}
 
 		/** 兼容不带重放诊断的构造：默认路径（L1/A 档关闭）不会产生 replay 字段。 */
 		public PatchReport(Map<String, FieldDecision> instanceFields,
 		                   Map<String, FieldDecision> staticFields,
 		                   boolean patchGenerated) {
-			this(instanceFields, staticFields, patchGenerated, Map.of(), Map.of());
+			this(instanceFields, staticFields, patchGenerated, Map.of(), Map.of(), Map.of());
 		}
 
 		/** L1 是否真的生成了至少一个重放补丁。 */
@@ -985,7 +1010,45 @@ public class InitFix {
 			}
 			return false;
 		}
+
+		/**
+		 * 代际对账后仍未闭环的字段名（运行期 CAS 未命中，或消费侧 fail-closed 拒绝）。
+		 *
+		 * <p>这些字段的值<b>没有</b>被写成目标代的值，且台账（
+		 * {@link GenerationalFieldLedger#markUnclosed}）里留有债务；恢复只能靠显式重建或
+		 * {@code @RemoldReinit(OVERWRITE)}（{@code docs/topology/20-generational-field-ledger.md} §3.3 / G6）。</p>
+		 */
+		public List<String> unclosedReplayFields() {
+			List<String> out = new ArrayList<>();
+			for (Map.Entry<String, String> e : replayFields.entrySet()) {
+				if (isSkippedReplayResult(e.getValue())) out.add(e.getKey());
+			}
+			for (Map.Entry<String, String> e : applyReplayFields.entrySet()) {
+				if (isSkippedReplayResult(e.getValue())) out.add(e.getKey());
+			}
+			return out;
+		}
+
+		/**
+		 * 经 {@code @RemoldReinit(OVERWRITE)} 或显式重建闭环的字段（字段名 -> 闭环方式）。
+		 *
+		 * <p>闭环意味着台账里那条未闭环债务已被 {@link GenerationalFieldLedger#markClosed} 清掉：
+		 * 下一代的 {@code resolve} 不再把它当成"还欠着"（G7）。</p>
+		 */
+		public Map<String, String> recoveredFields() {
+			return recoveredFields;
+		}
+
+		private static boolean isSkippedReplayResult(String result) {
+			return result != null && result.startsWith(SKIP_RESULT_PREFIX);
+		}
 	}
+
+	/** 重放结果里"跳过了、没写成"的统一前缀（运行期 CAS 未命中也用它，G6）。 */
+	public static final String SKIP_RESULT_PREFIX = "skipped: ";
+
+	/** 经 {@code @RemoldReinit(OVERWRITE)} 闭环的字段在 {@link PatchReport#recoveredFields()} 里的取值。 */
+	public static final String RECOVERED_BY_OVERWRITE = "recovered: overwrite";
 
 	public static PatchReport getLastReport(Class<?> host) {
 		if (host == null) return null;
@@ -1127,6 +1190,134 @@ public class InitFix {
 		}
 		if (value != null) return String.valueOf(value);
 		return fallback == null ? "null" : fallback;
+	}
+
+	/**
+	 * 把 {@link GenerationalFieldLedger#resolve} 接进重放决策（
+	 * {@code docs/topology/20-generational-field-ledger.md} §3.3 / A14 / G6～G8）。
+	 *
+	 * <p><b>为什么要接</b>：L1 与 A 档的 {@code KIND_CONDITIONAL_EXPECTED} 期望值原本取自当轮
+	 * {@code ClassDiff} 的旧初值。一旦发生过回退，那份 {@code ClassDiff} 描述的是"回退后 JVM 在跑的
+	 * 字节"，而堆上的值可能是<b>被回退掉的污染代</b>写入的——用当轮旧初值做期望，会把污染代的写入值
+	 * 当成"已经是目标代的值"，回退在堆侧静默 no-op。代际台账给出的 {@code (oldLiteral, newLiteral)}
+	 * 一对才是可校验的期望与写入值（§3.3 / D12）。</p>
+	 *
+	 * <p><b>三种结论</b>：{@code OBLIVIOUS} 不动（索引里没有这条键的代际证据，沿用当轮 {@code ClassDiff}，
+	 * 与引入代际对账前逐字节一致）；{@code FACT} 记一条 {@link GenerationalReplay}，发射时改写期望与写入值；
+	 * {@code REFUSED} 把该字段从重放候选里摘掉、记 {@code rejected:} 决策（走既有 warn 出口）、并把债务
+	 * 落到 {@link GenerationalFieldLedger#markUnclosed}（<b>不</b>碰瞬时补丁槽 {@link #PENDING}）。</p>
+	 *
+	 * @return {@code L1:/A: + key} -> 事实带出的期望与写入常量（只有 {@code FACT} 才有条目）
+	 */
+	private static Map<String, GenerationalReplay> gateGenerationalReplay(
+	 Class<?> host, String className,
+	 Map<String, InitializerReplay.ReplayField> replayFields,
+	 Map<String, ApplyInitializerReplay.ReplayField> applyFields,
+	 Map<String, String> replayDecisions,
+	 Map<String, String> applyDecisions) {
+
+		Map<String, GenerationalReplay> out = new LinkedHashMap<>();
+		if (replayFields.isEmpty() && applyFields.isEmpty()) return out;
+		ClassLoader loader = host == null ? null : host.getClassLoader();
+		long scope = AlignmentMetaStore.INSTANCE.loaderScopeId(loader);
+		Optional<Changeset> head = ChangesetLog.INSTANCE.head(scope);
+		// 本进程还没为这个 scope 提交过代：没有代际坐标，沿用当轮 ClassDiff（引入前行为）。
+		if (head.isEmpty()) return out;
+		long targetSeq = head.get().seq();
+		String display = className.replace('/', '.');
+
+		for (String field : new ArrayList<>(replayFields.keySet())) {
+			InitializerReplay.ReplayField replay = replayFields.get(field);
+			GenerationalFieldLedger.Resolved resolved = GenerationalFieldLedger.INSTANCE.resolve(
+			 loader, ChangesetLog.INSTANCE, scope, className, replay.name(), targetSeq);
+			GenerationalReplayGate.Decision decision = GenerationalReplayGate.decide(
+			 resolved, replay.desc(), literalKindOf(replay.desc()));
+			if (decision.oblivious()) continue;
+			GenerationalReplay override = decision.writable()
+			 ? toGenerationalReplay(decision, replay.desc()) : null;
+			if (override == null) {
+				refuseGenerationalReplay(loader, className, replay.name());
+				replayFields.remove(field);
+				replayDecisions.put(field, "rejected: " + reasonOf(decision,
+				 "replay fact literal cannot be decoded without re-deriving bits from decimal text"));
+				continue;
+			}
+			out.put(L1_GATE_PREFIX + field, override);
+			RemoldAgent.info("[INIT-REPLAY] " + display + "." + replay.name()
+			 + " is reconciled against the generation-" + override.fromGeneration() + " replay fact"
+			 + " (expect " + override.oldLiteral() + ", write " + override.newLiteral() + ")");
+		}
+
+		for (String key : new ArrayList<>(applyFields.keySet())) {
+			ApplyInitializerReplay.ReplayField replay = applyFields.get(key);
+			String targetInternal = replay.targetClass();
+			GenerationalFieldLedger.Resolved resolved = GenerationalFieldLedger.INSTANCE.resolve(
+			 loader, ChangesetLog.INSTANCE, scope, targetInternal, replay.fieldName(), targetSeq);
+			GenerationalReplayGate.Decision decision = GenerationalReplayGate.decide(
+			 resolved, replay.fieldDesc(), literalKindOf(replay.fieldDesc()));
+			if (decision.oblivious()) continue;
+			GenerationalReplay override = decision.writable()
+			 ? toGenerationalReplay(decision, replay.fieldDesc()) : null;
+			if (override == null) {
+				refuseGenerationalReplay(loader, targetInternal, replay.fieldName());
+				applyFields.remove(key);
+				applyDecisions.put(key, "rejected: " + reasonOf(decision,
+				 "replay fact literal cannot be decoded without re-deriving bits from decimal text"));
+				continue;
+			}
+			out.put(APPLY_GATE_PREFIX + key, override);
+			RemoldAgent.info("[INIT-APPLY-REPLAY] " + display + ": " + key
+			 + " is reconciled against the generation-" + override.fromGeneration() + " replay fact"
+			 + " (expect " + override.oldLiteral() + ", write " + override.newLiteral() + ")");
+		}
+		return out;
+	}
+
+	/**
+	 * 消费侧拒绝的记账出口：未闭环债务落台账（{@link GenerationalFieldLedger#markUnclosed}）。
+	 *
+	 * <p>告警不在这里发：拒绝文案以 {@code rejected: } 前缀进 {@link PatchReport#replayFields()} /
+	 * {@link PatchReport#applyReplayFields()}，由既有的 {@link #logReplayResult} /
+	 * {@link #logApplyReplayDecisions} 统一 warn（AGENTS §3：拒绝必须经统一出口可见，且只报一次）。</p>
+	 */
+	private static void refuseGenerationalReplay(ClassLoader loader, String internalName, String field) {
+		GenerationalFieldLedger.INSTANCE.markUnclosed(loader, internalName, field);
+	}
+
+	/** 拒绝文案：事实给出的原因 + 固定的 fail-closed 后果与恢复路径（进 PatchReport，随 warn 输出）。 */
+	private static String reasonOf(GenerationalReplayGate.Decision decision, String fallback) {
+		String reason = decision.reason();
+		String base = reason == null || reason.isEmpty() ? fallback : reason;
+		return base + " (fail-closed: the field stays unclosed in GenerationalFieldLedger;"
+		 + " recovery needs an explicit rebuild or @RemoldReinit(mode = OVERWRITE))";
+	}
+
+	/** 判决 → 期望/写入常量；任一侧解不出来就返回 {@code null}（调用方必须 fail-closed）。 */
+	private static GenerationalReplay toGenerationalReplay(GenerationalReplayGate.Decision decision,
+	                                                       String fieldDesc) {
+		Object expected = GenerationalReplayGate.toBootstrapConstant(
+		 decision.literalKind(), decision.oldLiteral(), fieldDesc);
+		Object write = GenerationalReplayGate.toBootstrapConstant(
+		 decision.literalKind(), decision.newLiteral(), fieldDesc);
+		if (expected == null || write == null) return null;
+		return new GenerationalReplay(decision.oldLiteral(), decision.newLiteral(),
+		 decision.literalKind(), fieldDesc, expected, write, decision.fromGeneration());
+	}
+
+	/**
+	 * 把 L1 重放切片里的"值"部分换成事实带出的规范常量（{@code docs/topology/20} §3.3 D6）。
+	 *
+	 * <p>切片形状由 {@link #replayExtractReason} 锁定为 {@code ALOAD 0; <自包含常量>; PUTFIELD}，
+	 * 因此这里保留首尾指令、只重建中间的值指令。写入值因此与比较侧同源。</p>
+	 */
+	private static List<AbstractInsnNode> withReplayValue(List<AbstractInsnNode> body, Object constant,
+	                                                      String fieldDesc) {
+		if (body == null || body.size() < 3 || constant == null) return body;
+		List<AbstractInsnNode> out = new ArrayList<>(3);
+		out.add(body.get(0));
+		out.add(applyReplayConstant(constant, fieldDesc));
+		out.add(body.get(body.size() - 1));
+		return out;
 	}
 
 	/**
@@ -1512,7 +1703,9 @@ public class InitFix {
 		// L1（docs/initfix/12-L1-existing-initializer-replay.md）：默认关闭的存量初值重放。
 		// 只对白名单父类的匿名子类、且旧/新初值都是编译期常量时生成补丁；检测失败只告警。
 		InitializerReplay.Plan replayPlan = InitializerReplay.plan(host, diff);
-		Map<String, InitializerReplay.ReplayField> replayFields = replayPlan.fields();
+		// 可变副本：代际对账要把被拒绝的候选从这里摘掉（否则它会照样进补丁）。
+		Map<String, InitializerReplay.ReplayField> replayFields =
+		 new LinkedHashMap<>(replayPlan.fields());
 		if (!replayPlan.notices().isEmpty() && diff != null && diff.newClass != null) {
 			String displayName = diff.newClass.name.replace('/', '.');
 			for (String notice : replayPlan.notices()) {
@@ -1523,18 +1716,26 @@ public class InitFix {
 		// A 档（docs/initfix/13-kotlin-apply-replay.md）：Kotlin object / 顶层 val 的
 		// `T().apply { field = const }`。默认关闭；只处理白名单持有者 <clinit> 的直线形态。
 		ApplyInitializerReplay.Plan applyPlan = ApplyInitializerReplay.plan(host, diff);
-		Map<String, ApplyInitializerReplay.ReplayField> applyFields = applyPlan.fields();
+		Map<String, ApplyInitializerReplay.ReplayField> applyFields =
+		 new LinkedHashMap<>(applyPlan.fields());
+		Map<String, String> applyDecisions = new LinkedHashMap<>(applyPlan.decisions());
 		if (!applyPlan.notices().isEmpty() && diff != null && diff.newClass != null) {
 			String displayName = diff.newClass.name.replace('/', '.');
 			for (String notice : applyPlan.notices()) {
 				RemoldAgent.warn("[INIT-APPLY-REPLAY] " + displayName + ": " + notice);
 			}
 		}
-		logApplyReplayDecisions(diff == null || diff.newClass == null
-		 ? "?" : diff.newClass.name.replace('/', '.'), applyPlan.decisions());
+		// 代际对账（docs/topology/20-generational-field-ledger.md §3.3）：回退之后当轮 ClassDiff
+		// 不再是"JVM 里实际是什么"的可信描述，期望与写入值必须取自目标代的那一条事实。
+		Map<String, String> replayDecisions = new LinkedHashMap<>();
+		Map<String, GenerationalReplay> generational = gateGenerationalReplay(
+		 host, diff.newClass.name, replayFields, applyFields, replayDecisions, applyDecisions);
+		logApplyReplayDecisions(diff == null || diff.newClass.name == null
+		 ? "?" : diff.newClass.name.replace('/', '.'), applyDecisions);
 
 		// 提交级事实（docs/topology/16-bytecode-changeset-vcs.md §3.8）：分析期把两档重放的
 		// 旧/新初值固化成事实，随 Changeset 落盘；读侧不再依赖旧字节是否还在预算窗口内。
+		// 被代际对账拒绝的候选已经不在两个 map 里，因此不会产出事实。
 		captureReplayFacts(host, replayFields, applyFields);
 
 		Set<String> addedStaticFields   = diff.addedStaticFields;
@@ -1545,7 +1746,7 @@ public class InitFix {
 		if (addedStaticFields.isEmpty() && addedInstanceFields.isEmpty()
 		    && !hasReinit && pending.isEmpty()
 		    && replayFields.isEmpty() && applyFields.isEmpty()
-		    && applyPlan.decisions().isEmpty()) {
+		    && replayDecisions.isEmpty() && applyDecisions.isEmpty()) {
 			REPORTS.put(host, new PatchReport(Map.of(), Map.of(), false));
 			return;
 		}
@@ -1559,7 +1760,7 @@ public class InitFix {
 		try {
 			PatchAnalysis analysis = analyzePatch(host, diff.newClass, newBytes, className,
 			 addedStaticFields, addedInstanceFields, pending, preScannedReinit, replayFields, applyFields,
-			 applyPlan.decisions());
+			 replayDecisions, applyDecisions, generational);
 			Runnable publish = () -> publishPatch(host, diff, className, replayFields, applyFields, analysis);
 			BatchContext batch = BATCH_CONTEXT.get();
 			if (batch == null) publish.run();
@@ -1684,7 +1885,9 @@ public class InitFix {
 	 Map<String, ReinitField> preScannedReinit,
 	 Map<String, InitializerReplay.ReplayField> replayFields,
 	 Map<String, ApplyInitializerReplay.ReplayField> applyFields,
-	 Map<String, String> applyDecisions) {
+	 Map<String, String> replayDecisions,
+	 Map<String, String> applyDecisions,
+	 Map<String, GenerationalReplay> generational) {
 
 		ClassNode newClass = preParsedNewClass;
 		if (newClass == null) {
@@ -1864,7 +2067,6 @@ public class InitFix {
 		// ==================== L1：存量初值重放的补丁前校验 ====================
 		// 计划阶段只确认"旧/新初值都是常量"；这里再让正式提取器过一遍，确认写入切片确实
 		// 是自包含的常量表达式、且每个根构造器都覆盖。失败的不进补丁、也不写台账（L1 是尽力重放）。
-		Map<String, String> replayDecisions = new LinkedHashMap<>();
 		Set<String>         acceptedReplay  = new LinkedHashSet<>();
 		for (InitializerReplay.ReplayField replay : replayFields.values()) {
 			String reason = replayExtractReason(
@@ -2203,7 +2405,7 @@ public class InitFix {
 		}, close, () -> emitPatch(host, className, hostVersion, targetInstanceFields, targetStaticFields,
 		 forceWriteFields, selfOnlyFields, instanceExtracts, staticExtracts, instanceDecisions, staticDecisions,
 		 acceptedInstance, acceptedStatic, acceptedReplay, replayFields, replayDecisions, applyFields,
-		 applyDecisions, reinitFields, reinitKeys, crossDependencies));
+		 applyDecisions, reinitFields, reinitKeys, crossDependencies, generational));
 	}
 
 	private static BuiltPatch emitPatch(Class<?> host, String className, int hostVersion,
@@ -2214,7 +2416,8 @@ public class InitFix {
 	 Set<String> acceptedReplay, Map<String, InitializerReplay.ReplayField> replayFields,
 	 Map<String, String> replayDecisions, Map<String, ApplyInitializerReplay.ReplayField> applyFields,
 	 Map<String, String> applyDecisions, Map<String, ReinitField> reinitFields, Map<String, String> reinitKeys,
-	 Map<String, Set<InitFixBatchGraph.FieldKey>> crossDependencies) {
+	 Map<String, Set<InitFixBatchGraph.FieldKey>> crossDependencies,
+	 Map<String, GenerationalReplay> generational) {
 		// ==================== 阶段 2.5：拓扑排序 ====================
 		// 到这里成环已被排除（阶段 2 的固定点），排序必定成功。
 		List<String> orderedInstance = acceptedInstance.isEmpty()
@@ -2264,10 +2467,14 @@ public class InitFix {
 		boolean              hasInstanceDeps = false;
 
 		// L1 重放字段 -> 旧初值常量（ASM bootstrap 常量）。只有通过补丁前校验的字段才携带。
+		// 代际对账判 FACT 的字段，比较侧期望与写入值都改取那条事实（docs/topology/20 §3.3）。
 		Map<String, Object> replayArguments = new LinkedHashMap<>();
 		for (String fieldName : acceptedReplay) {
 			InitializerReplay.ReplayField replay = replayFields.get(fieldName);
-			if (replay != null) replayArguments.put(fieldName, replay.bootstrapArgument());
+			if (replay == null) continue;
+			GenerationalReplay fact = generational.get(L1_GATE_PREFIX + fieldName);
+			replayArguments.put(fieldName,
+			 fact != null ? fact.expectedConstant() : replay.bootstrapArgument());
 		}
 
 		for (String fieldName : orderedInstance) {
@@ -2281,8 +2488,14 @@ public class InitFix {
 			if (chosen == null) chosen = instanceExtracts.get(fieldName).get(0);
 
 			String method = uniqueMethodName(INSTANCE_PATCH_PREFIX, fieldName, usedMethodNames);
+			GenerationalReplay fact = generational.get(L1_GATE_PREFIX + fieldName);
+			List<AbstractInsnNode> chosenBody = new ArrayList<>(chosen.instructions());
+			if (fact != null) {
+				// 写入值也必须来自那条事实（§3.3 D6）：只剩"接收者 + 一个规范常量 + 唯一写指令"。
+				chosenBody = withReplayValue(chosenBody, fact.writeConstant(), fact.fieldDesc());
+			}
 			List<AbstractInsnNode> body = rewriteFieldSlice(
-			 hostInternal, className, new ArrayList<>(chosen.instructions()),
+			 hostInternal, className, chosenBody,
 			 chosen.protectedAccesses(), conditionalFields, forceWriteFields, replayArguments);
 			boolean replayTask = acceptedReplay.contains(fieldName);
 			boolean selfOnlyTask = replayTask || selfOnlyFields.contains(fieldName);
@@ -2354,9 +2567,11 @@ public class InitFix {
 		// apply 任务名按 applyFields 的插入顺序编号（驱动侧用同一顺序解析句柄，不做名字重算）。
 		// 目标字段属于 apply 对象类型 T，不属于宿主；expected 是旧初值常量，只有运行期值仍等于它才写。
 		int applyIndex = 0;
-		for (ApplyInitializerReplay.ReplayField replay : applyFields.values()) {
+		for (Map.Entry<String, ApplyInitializerReplay.ReplayField> applyEntry : applyFields.entrySet()) {
+			ApplyInitializerReplay.ReplayField replay = applyEntry.getValue();
 			String method = APPLY_REPLAY_PREFIX + applyIndex++;
-			List<AbstractInsnNode> body = applyReplayBody(className, replay);
+			List<AbstractInsnNode> body = applyReplayBody(className, replay,
+			 generational.get(APPLY_GATE_PREFIX + applyEntry.getKey()));
 			patch.methods.add(straightLineMethod(method, "()", body));
 			log("Emitting apply replay patch: " + className.replace('/', '.') + " -> "
 			    + replay.key() + " (" + replay.oldText() + " -> " + replay.newText() + ")");
@@ -2419,7 +2634,8 @@ public class InitFix {
 		 Collections.unmodifiableMap(staticDecisions),
 		 !plan.isEmpty() && !onlyReplay,
 		 replayDecisions,
-		 applyDecisions);
+		 applyDecisions,
+		 Map.of());
 	}
 
 	/**
@@ -2434,12 +2650,13 @@ public class InitFix {
 	 * （唯一 provenance，不枚举堆）；条件 CAS 由 {@link HotswapBridge#bootstrapExpected} 完成。
 	 */
 	private static List<AbstractInsnNode> applyReplayBody(
-	 String holderInternal, ApplyInitializerReplay.ReplayField replay) {
+	 String holderInternal, ApplyInitializerReplay.ReplayField replay, GenerationalReplay fact) {
 
 		List<AbstractInsnNode> body = new ArrayList<>(4);
 		body.add(new FieldInsnNode(Opcodes.GETSTATIC, holderInternal,
 		 replay.dest(), replay.destDesc()));
-		body.add(applyReplayConstant(replay.newRaw(), replay.fieldDesc()));
+		body.add(applyReplayConstant(fact != null ? fact.writeConstant() : replay.newRaw(),
+		 replay.fieldDesc()));
 		body.add(new InvokeDynamicInsnNode(
 		 replay.fieldName(),
 		 "(" + replay.destDesc() + replay.fieldDesc() + ")V",
@@ -2449,7 +2666,7 @@ public class InitFix {
 		  Opcodes.PUTFIELD,
 		  Type.getObjectType(replay.targetClass()),
 		  Type.getObjectType(holderInternal),
-		  replay.bootstrapArgument()
+		  fact != null ? fact.expectedConstant() : replay.bootstrapArgument()
 		 }));
 		return body;
 	}
@@ -2590,6 +2807,110 @@ public class InitFix {
 				                 + " NOT replayed: " + result.substring("rejected: ".length()));
 			}
 		}
+	}
+
+	/**
+	 * 重放通道的运行期对账（{@code docs/topology/20-generational-field-ledger.md} §3.3 / G6 / G7）。
+	 *
+	 * <p><b>CAS 未命中 = 没写成</b>：条件写在"字段当前值已不是目标代的期望初值"时按设计跳过。跳过必须
+	 * 是<b>可见的未完成</b>，不能读成"已改回"：</p>
+	 * <ul>
+	 *   <li>{@link PatchReport#applyReplayFields()} / {@link PatchReport#replayFields()} 该条改成
+	 *       {@code skipped: ...}（不记"replayed"）；</li>
+	 *   <li>发一条 warn 点名字段；</li>
+	 *   <li>债务落 {@link GenerationalFieldLedger#markUnclosed}——<b>不</b>复用 {@link #PENDING}
+	 *       弱键瞬时槽（那是补丁暂存，带 5 分钟 TTL，塞台账语义会同时破坏弱键不变量与
+	 *       "台账只负责不遗忘"的分工）。</li>
+	 * </ul>
+	 *
+	 * <p><b>OVERWRITE 写成 = 闭环</b>：{@code @RemoldReinit(mode = OVERWRITE)}（或显式重建）真的写了
+	 * 该字段时，把台账里那条债务 {@link GenerationalFieldLedger#markClosed} 清掉，并在
+	 * {@link PatchReport#recoveredFields()} 里记 {@code recovered: overwrite}，下一代不再把它当成欠着。</p>
+	 */
+	private static void recordReplayOutcome(Class<?> host, PatchPlan plan,
+	                                        Map<String, long[]> l1Stats, Map<String, long[]> applyStats,
+	                                        Set<String> failedFields, Set<String> skippedFields,
+	                                        int aliveCount) {
+		ClassLoader loader = host.getClassLoader();
+		String internal = Type.getInternalName(host);
+		Set<String> skipped = new LinkedHashSet<>();
+		Map<String, String> skippedReasons = new LinkedHashMap<>();
+
+		for (FieldPatchTask task : plan.instanceTasks()) {
+			if (!task.replay()) continue;
+			long[] stat = l1Stats.get(host.getName() + "#" + task.fieldName());
+			if (stat == null || stat[1] == 0L) continue;
+			skipped.add(task.fieldName());
+			skippedReasons.put(task.fieldName(), "L1");
+			GenerationalFieldLedger.INSTANCE.markUnclosed(loader, internal, task.fieldName());
+			RemoldAgent.warn("[INIT-REPLAY] " + host.getName() + "." + task.fieldName()
+			 + " was NOT replayed: the current value no longer equals the target generation's"
+			 + " expected initializer, so the conditional write was refused (fail-closed)."
+			 + " The field stays unclosed in GenerationalFieldLedger;"
+			 + " use @RemoldReinit(mode = OVERWRITE) or rebuild it explicitly to recover.");
+		}
+
+		for (Map.Entry<String, ApplyInitializerReplay.ReplayField> entry : plan.applyFields().entrySet()) {
+			ApplyInitializerReplay.ReplayField replay = entry.getValue();
+			String statKey = replay.targetClass().replace('/', '.') + "#" + replay.fieldName();
+			long[] stat = applyStats.get(statKey);
+			if (stat == null || stat[1] == 0L) continue;
+			skipped.add(entry.getKey());
+			skippedReasons.put(entry.getKey(), "A");
+			GenerationalFieldLedger.INSTANCE.markUnclosed(loader, replay.targetClass(), replay.fieldName());
+			RemoldAgent.warn("[INIT-APPLY-REPLAY] " + host.getName() + ": " + entry.getKey()
+			 + " was NOT replayed: the current value no longer equals the target generation's"
+			 + " expected initializer, so the conditional write was refused (fail-closed)."
+			 + " The field stays unclosed in GenerationalFieldLedger;"
+			 + " use @RemoldReinit(mode = OVERWRITE) or rebuild it explicitly to recover.");
+		}
+
+		// OVERWRITE / 显式重建真的写进去时闭环（G7）。只有确实执行过写才敢出账：
+		// 静态字段一定执行；实例字段要求本轮至少枚举到一个实例。
+		Map<String, String> recovered = new LinkedHashMap<>();
+		for (Map.Entry<String, String> entry : plan.reinitFields().entrySet()) {
+			String field = entry.getKey();
+			if (!"OVERWRITE".equals(entry.getValue())) continue;
+			if (failedFields.contains(field) || skippedFields.contains(field)) continue;
+			boolean isStatic = false;
+			boolean known = false;
+			for (FieldPatchTask task : plan.staticTasks()) {
+				if (task.fieldName().equals(field)) {
+					isStatic = true;
+					known = true;
+					break;
+				}
+			}
+			for (FieldPatchTask task : plan.instanceTasks()) {
+				if (task.fieldName().equals(field)) {
+					known = true;
+					break;
+				}
+			}
+			if (!known) continue;
+			if (!isStatic && aliveCount == 0) continue;
+			if (!GenerationalFieldLedger.INSTANCE.isUnclosed(loader, internal, field)) continue;
+			GenerationalFieldLedger.INSTANCE.markClosed(loader, internal, field);
+			recovered.put(field, RECOVERED_BY_OVERWRITE);
+			RemoldAgent.info("[INIT-REPLAY] " + host.getName() + "." + field
+			 + " was recovered by @RemoldReinit(OVERWRITE); its generational ledger debt is closed");
+		}
+
+		if (skipped.isEmpty() && recovered.isEmpty()) return;
+		PatchReport base = REPORTS.get(host);
+		if (base == null) return;
+		Map<String, String> replay = new LinkedHashMap<>(base.replayFields());
+		Map<String, String> apply = new LinkedHashMap<>(base.applyReplayFields());
+		for (String key : skipped) {
+			String result = SKIP_RESULT_PREFIX
+			 + "current value no longer equals the target generation's expected initializer";
+			if (replay.containsKey(key)) replay.put(key, result);
+			else apply.put(key, result);
+		}
+		Map<String, String> recoveredAll = new LinkedHashMap<>(base.recoveredFields());
+		recoveredAll.putAll(recovered);
+		REPORTS.put(host, new PatchReport(base.instanceFields(), base.staticFields(),
+		 base.patchGenerated(), replay, apply, recoveredAll));
 	}
 
 	/** A 档 apply 重放的成功明细（每个候选一行 info；拒绝已由 {@link #logApplyReplayDecisions} 报过）。 */
@@ -5535,6 +5856,10 @@ public class InitFix {
 				                 + "; not recorded in FieldLedger");
 			}
 		}
+
+		// 代际重放的运行期对账（G6 / G7）：CAS 未命中的字段按"没写成"记账，不冒充已应用。
+		recordReplayOutcome(host, plan, l1Stats, applyStats, failedFields, skippedFields,
+		 alive == null ? 0 : alive.length);
 
 		// 批次报告：只统计真正跑完的补丁。字段名与实例数都是本轮实测值，
 		// 失败/被放弃的字段单独计数（不把"尝试过"说成"已修补"）。

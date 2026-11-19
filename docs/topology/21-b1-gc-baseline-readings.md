@@ -1,0 +1,71 @@
+# B1 旁路账的内存与 GC 基线读数
+
+文档类型：实测记录（读数与口径；机制状态以 [`docs/status.md`](../status.md) 为准）
+
+## 1. 这份读数回答什么
+
+PR4-B2 要引入按代 `FieldLedger` 与跨代事实索引，届时需要一组**引入前**的基线才能判断"新增的账是否真的多占内存/多花 GC"。
+本文件固定那组基线：在真实 agent + 真实 redefine 下连续热更互依赖类，分两档字节预算，记录
+Retained Heap、OldGen 占用与 GC Pause。
+
+探针：`tests/src/VcsGcBaselineProbe.java`，任务 `./gradlew :tests:vcsGcBaselineProbe -Pp05.jbr=<DCEVM JDK>`。
+
+## 2. 口径（先看口径，再看数）
+
+| 项 | 取值 |
+|:--|:--|
+| 夹具 | 四个互依赖类 `D → C → B → A`，每类带一个自身常量；`D.d()` 返回四条方法调用之和 |
+| 每轮操作 | 轮换重编其中**一个**类并把它自身的常量 +1，其余三个类字节不动 |
+| 轮数 | 预热 4 轮（不计入）→ 阶段一 30 轮 → 阶段二 30 轮 |
+| 阶段一预算 | `remold.vcs.eff_bytes` 缺省（16 MiB） |
+| 阶段二预算 | `remold.vcs.eff_bytes=0`（强制淘汰，模拟预算压力） |
+| Retained Heap | 每轮结束后两次 `System.gc()` + 40 ms 静置，再读 `MemoryMXBean.getHeapMemoryUsage().getUsed()` |
+| OldGen | 同上时刻读名字含 `Old`/`Tenured` 的 `MemoryPoolMXBean` |
+| GC Pause | 本轮开始到本轮批处理结束之间 `GarbageCollectorMXBean.getCollectionTime()` 的增量；**采样点在 settle 之前**，因此不含 settle 自身触发的回收 |
+| 统计量 | 每阶段 30 个样本的 min / median / max；三档同时报，不挑有利的那个 |
+
+**探针同时断言机制真的在跑**（否则"曲线平"会被误读成"账很便宜"）：
+
+- 每轮断言新常量在整个依赖图上可见（`D.d()` 等于四个常量之和）——下面 131 条断言里绝大多数是这条；
+- 每轮断言 `Changeset` 链恰好前进 1 代（`seq_after == seq_before + 1`）；
+- 阶段一断言零淘汰，阶段二断言淘汰计数确实增长（否则"第二档预算"名不副实）。
+
+## 3. 读数
+
+环境：JBR 21.0.8（`-XX:+AllowEnhancedClassRedefinition`）、`-Xmx1g`、单机单次串行运行（不与其它构建/探针并行）。
+
+| 阶段 | Retained Heap (MB) min/median/max | OldGen (MB) min/median/max | GC Pause (ms) min/median/max | Eff 保留字节 min/median/max |
+|:--|:--|:--|:--|:--|
+| 阶段一 · 默认 16 MiB | 15.78 / 15.83 / 15.87 | 15.78 / 15.83 / 15.87 | 0 / 0 / 0 | 2389 / 6346 / 10081 |
+| 阶段二 · 强制淘汰 0 B | 15.87 / 15.88 / 15.89 | 15.87 / 15.88 / 15.89 | 0 / 0 / 0 | 10081 / 10081 / 10081 |
+
+结算读数：`effBytesHeld=10081`、`effDropped>0`（阶段二）、`scopes=[1]`（单 scope，符合"四类同一加载器"）。
+
+## 4. 怎么读这组数（已观测 vs 推断）
+
+**已观测**
+
+- 两阶段的 Retained Heap 中位数相差约 `0.05 MB`（15.83 → 15.88），量级与"少存了不到 10 KB 的 Eff 字节 + 多记了淘汰计数"一致；
+  本夹具规模下**账本身的内存占用没有被 GC 曲线单独分辨出来**。
+- 阶段二 `Eff 保留字节` 三档全等于 10081，即该阶段**零新增保留**（淘汰生效），而热更与提交链仍逐轮推进 1 代 ——
+  "字节被淘汰" 与 "记账/提交继续工作" 是两件事，回退能力才是代价（回退此时会判 `NOT_REVERTABLE`）。
+- 每轮 GC Pause 增量在毫秒精度上全为 0，说明单轮批处理落在这个分辨率的噪声里。
+
+**推断（附前提，未升级为观测）**
+
+- "账的内存影响可忽略" 只在**本夹具规模**（4 类 / 每类单方法 / 30 轮 / 单 scope）成立；
+  真实工程里类数、方法体规模与别名链都大一到两个量级，需要以同一探针换夹具重测后再引用。
+- GC Pause 的 0 ms 是**分辨率限制**而非"没有回收"：`getCollectionTime()` 是整毫秒累加值，
+  单轮批处理低于 1 ms 时读不出来。要拿到亚毫秒证据需要 `-Xlog:gc*` 时间戳对齐，本文件不含该实验。
+
+## 5. 本组数的边界
+
+- 单机、单 JVM、单次运行；不同 CPU/堆参数下绝对值会移动，**只做同口径前后对比**（B2 引入后按同一探针同一参数重跑）。
+- 未覆盖：多 scope（多个 `ClassLoader`）、大方法体、lambda 对齐路径（本夹具无 lambda，且 `PENDING_VCS` 的 lambda 分支未参与）。
+- 未覆盖：`-Xlog:gc*` 级别的回收次数/晋升量分解；本文件只有毫秒级暂停增量。
+
+## 6. B2 引入后的对比方法
+
+同一探针、同一参数、同一轮数与预算两档，重跑一次；对比项固定为
+`Retained Heap median`、`OldGen median`、`GC Pause max`、`Eff 保留字节 median` 四个数，
+并同时报 min/max 以说明分布。**不得**只报中位数、也不得跨口径（换夹具/换堆参数/换轮数）拼接对比。

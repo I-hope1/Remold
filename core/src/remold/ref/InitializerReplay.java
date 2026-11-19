@@ -68,10 +68,14 @@ public final class InitializerReplay {
 	 *                           ({@code Integer} for Z/B/C/S/I, otherwise the matching box)
 	 * @param oldText            human readable OLD value
 	 * @param newText            human readable NEW value
+	 * @param newExpected        NEW initializer value, natural boxed type: the commit-level fact
+	 *                           needs the real bits, and {@code newText} is a lossy rendering
+	 *                           ({@code -0.0f}, NaN payloads, decimal rounding)
 	 */
 	public record ReplayField(
 	 String name, String desc, String declaringClass, int access,
-	 Object expected, Object bootstrapArgument, String oldText, String newText) {
+	 Object expected, Object bootstrapArgument, String oldText, String newText,
+	 Object newExpected) {
 	}
 
 	/** Result of one plan: replayable fields + refusal notices for drifted but non-replayable fields. */
@@ -208,7 +212,7 @@ public final class InitializerReplay {
 			if (naturalOld.equals(naturalNew)) continue; // same value: nothing to replay
 
 			fields.put(name, new ReplayField(name, newInsn.desc, declaring, access,
-			 naturalOld, oldRaw, String.valueOf(naturalOld), String.valueOf(naturalNew)));
+			 naturalOld, oldRaw, String.valueOf(naturalOld), String.valueOf(naturalNew), naturalNew));
 		}
 
 		if (fields.isEmpty() && notices.isEmpty()) return Plan.EMPTY;

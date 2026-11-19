@@ -36,7 +36,9 @@ public record Changeset(
  String metaRoot,
  String algoVersion,
  String buildId,
- PatchTiming patchTiming) {
+ PatchTiming patchTiming,
+ Map<String, String> eff0,
+ long revertedToSeq) {
 
 	/** 提交时刻字段补丁的状态时刻：单阶段补丁在提交之后，两阶段在提交之前（§2.1.3）。 */
 	public enum PatchTiming {
@@ -124,6 +126,8 @@ public record Changeset(
 		manifest = manifest == null ? Manifest.EMPTY : manifest;
 		replayFacts = replayFacts == null ? List.of() : List.copyOf(replayFacts);
 		patchTiming = patchTiming == null ? PatchTiming.AFTER_COMMIT : patchTiming;
+		eff0 = eff0 == null ? Map.of() : Collections.unmodifiableMap(new TreeMap<>(eff0));
+		if (revertedToSeq < 0) throw new IllegalArgumentException("revertedToSeq must be >= 0");
 	}
 
 	/**
@@ -136,19 +140,46 @@ public record Changeset(
 	                               Map<String, Entry> entries, Manifest manifest,
 	                               List<ReplayFact> replayFacts, String algoVersion, String buildId,
 	                               PatchTiming patchTiming) {
+		return create(parentId, seq, roundId, loaderScope, entries, manifest, replayFacts,
+		 algoVersion, buildId, patchTiming, Map.of(), 0L);
+	}
+
+	/**
+	 * 扩展构造：额外固化 {@code Eff_0} 基线哈希与（回退时的）目标代序号。
+	 *
+	 * <p>{@code eff0} 只在该类首次进入本 scope 链的那一代填写，之后各代原样携带；它是区间回退到
+	 * 「首次修改之前」时的唯一字节来源（{@code docs/topology/16-bytecode-changeset-vcs.md} §2.1.1）。</p>
+	 */
+	public static Changeset create(String parentId, long seq, String roundId, long loaderScope,
+	                               Map<String, Entry> entries, Manifest manifest,
+	                               List<ReplayFact> replayFacts, String algoVersion, String buildId,
+	                               PatchTiming patchTiming, Map<String, String> eff0,
+	                               long revertedToSeq) {
 		Map<String, Entry> sorted = new TreeMap<>(entries);
 		String rawRoot = rootOf(sorted, Entry::rawHash);
 		String effRoot = rootOf(sorted, Entry::effHash);
 		String metaRoot = rootOf(sorted, Entry::metaHash);
+		String eff0Digest = identityRoot(eff0);
 		String id = sha128(String.join("\u0000",
 		 parentId == null ? "" : parentId,
 		 Long.toString(seq),
 		 sortedDigest(sorted),
 		 rawRoot, effRoot, metaRoot,
 		 manifestDigest(manifest),
+		 eff0Digest,
+		 Long.toString(revertedToSeq),
 		 algoVersion == null ? "" : algoVersion));
 		return new Changeset(id, parentId, seq, roundId, loaderScope, sorted, manifest, replayFacts,
-		 rawRoot, effRoot, metaRoot, algoVersion, buildId, patchTiming);
+		 rawRoot, effRoot, metaRoot, algoVersion, buildId, patchTiming, eff0, revertedToSeq);
+	}
+
+	private static String identityRoot(Map<String, String> values) {
+		Map<String, String> sorted = new TreeMap<>(values == null ? Map.of() : values);
+		StringBuilder sb = new StringBuilder();
+		for (Map.Entry<String, String> e : sorted.entrySet()) {
+			sb.append(e.getKey()).append('\u0001').append(e.getValue()).append('\u0001');
+		}
+		return sha128(sb.toString());
 	}
 
 	private static String rootOf(Map<String, Entry> sorted, Function<Entry, String> hash) {

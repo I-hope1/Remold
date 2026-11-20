@@ -95,6 +95,14 @@ final class DynamicRedefineExecutor {
 	 * @return 是否重定义成功
 	 */
 	static boolean redefineDynamic(Class<?> targetClass, byte[] newBytecode) {
+		boolean applied = redefineDynamicApplied(targetClass, newBytecode);
+		// 失败（返回 false）才记中止：no-op 走的是"无需变更"的 true 分支，不是失败。
+		if (!applied && targetClass != null) DynamicVcsCommit.abort(targetClass.getClassLoader());
+		return applied;
+	}
+
+	/** 实际实现；{@code seq} 的三种状态转移由 {@link #redefineDynamic} 统一收口。 */
+	private static boolean redefineDynamicApplied(Class<?> targetClass, byte[] newBytecode) {
 		if (targetClass == null || newBytecode == null) return false;
 		if (inst == null || !inst.isRedefineClassesSupported()) {
 			error("[DYNAMIC-REDEFINE] JVM does not support class redefinition or agent not attached.");
@@ -326,6 +334,8 @@ final class DynamicRedefineExecutor {
 					stageBMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tStageB);
 					HeapFieldWatch.snapshot("after-field-patch", className);
 				}
+				// 提交刻度：只有 redefineClasses 真的成功之后才产生一代（no-op 与失败路径都不走这里）。
+				DynamicVcsCommit.commit(targetClass, oldBytes, sourceBytes, runtimeBytes, twoPhase);
 				long postStartNanos = System.nanoTime();
 				recordRuntimeBytecode(className, runtimeBytes);
 				recordSourceBytecode(className, sourceBytes);

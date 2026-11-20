@@ -78,6 +78,13 @@ public final class GenerationalFieldLedger {
 		final Set<String> unclosed = new TreeSet<>();
 		/** 每代的引擎写入结果（§3.4），随回退整体作废。 */
 		final Map<String, ArrayDeque<ReinitApplied>> reinitApplied = new HashMap<>();
+		/**
+		 * 被裁剪掉的写点计数：{@code class\u0001field} → 条数。
+		 *
+		 * <p>这是"遗忘必须可观测"的载体（规格 {@code docs/vcs/07} L5）：条目被窗口淘汰之后，
+		 * 该键的结论只能退化，且退化次数要能查到——不允许静默变成"从来没有事实"。</p>
+		 */
+		final Map<String, Integer> forgotten = new HashMap<>();
 
 		ScopeSlot(long scope) {
 			this.scope = scope;
@@ -91,6 +98,7 @@ public final class GenerationalFieldLedger {
 	private final Map<ClassLoader, ScopeSlot> slots = new WeakHashMap<>();
 	private final ScopeSlot bootstrapSlot = new ScopeSlot(0L);
 	private long acceptedCount;
+	private long forgottenWritersTotal;
 	private long refusedLegacyCount;
 	private long refusedNonCanonicalCount;
 
@@ -223,11 +231,33 @@ public final class GenerationalFieldLedger {
 			Deque<Fact> rows = entry.getValue();
 			int before = rows.size();
 			rows.removeIf(row -> row.gen().seq() < oldestSeq);
-			dropped += before - rows.size();
+			int pruned = before - rows.size();
+			if (pruned > 0) {
+				dropped += pruned;
+				slot.forgotten.merge(entry.getKey(), pruned, Integer::sum);
+				forgottenWritersTotal += pruned;
+			}
 		}
 		slot.history.entrySet().removeIf(entry -> entry.getValue().isEmpty()
 		 && !slot.unclosed.contains(entry.getKey()));
 		return dropped;
+	}
+
+	/**
+	 * 该键被裁剪掉的写点条数（0 表示没有被遗忘过）。
+	 *
+	 * <p>非零即意味着"这条键曾经有过事实，但已经不在窗口里"：消费侧必须把结论降级为
+	 * {@code OPAQUE_GUARDED}，而不是当作 {@code MISS_NO_FACT} 放行。</p>
+	 */
+	public synchronized int forgottenWriters(ClassLoader loader, LedgerKey key) {
+		ScopeSlot slot = slots.get(loader);
+		if (slot == null || key == null) return 0;
+		return slot.forgotten.getOrDefault(key.className() + "\u0001" + key.field(), 0);
+	}
+
+	/** 进程内被裁剪掉的写点总条数。 */
+	public synchronized long forgottenWritersTotal() {
+		return forgottenWritersTotal;
 	}
 
 	/** §3.3 的判定结果；只有 {@link Resolution#EXACT} 与 {@link Resolution#CHAINED} 允许写入。 */
@@ -392,6 +422,7 @@ public final class GenerationalFieldLedger {
 		out.put("accepted", acceptedCount);
 		out.put("refusedLegacy", refusedLegacyCount);
 		out.put("refusedNonCanonical", refusedNonCanonicalCount);
+		out.put("forgottenWriters", forgottenWritersTotal);
 		return Collections.unmodifiableMap(out);
 	}
 

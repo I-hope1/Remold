@@ -284,4 +284,14 @@ class GenerationalReplayGateTest {
 		assertNull(GenerationalReplayGate.toBootstrapConstant("INT", "1", "F"),
 		 "the kind must agree with the descriptor");
 	}
+
+	/** 被裁剪过的键：即使解析结果是 MISS_NO_FACT，也只能拒（降级为 OPAQUE_GUARDED）。 */
+	@Test
+	void prunedKeyIsRefusedInsteadOfOblivious() {
+		GenerationalReplayGate.Decision d = GenerationalReplayGate.decide(null, "I", "INT", true);
+
+		assertTrue(d.refused(), "a pruned field must not be treated as 'never had a fact'");
+		assertTrue(d.reason().contains("OPAQUE_GUARDED"),
+		 "the reason must name the downgrade target, actual=" + d.reason());
+	}
 }

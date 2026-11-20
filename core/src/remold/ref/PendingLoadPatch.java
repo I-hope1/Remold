@@ -101,8 +101,20 @@ public final class PendingLoadPatch {
 
 	private PendingLoadPatch() { }
 
+	/**
+	 * 统一成 JVM 内部名（斜杠形态）。
+	 *
+	 * <p><b>这一步是必需的</b>：批次侧的名字来自 {@code ClassReader.getClassName()} 的等价物但被
+	 * {@code Utils.getClassNameASM(...)} 转成了点分名，而出生点（{@code ClassFileTransformer}）
+	 * 拿到的是斜杠内部名。不归一化就会出现"登记用 {@code a.b.C}、查找用 {@code a/b/C}"
+	 * 的全量 miss —— 而且是静默 miss。</p>
+	 */
+	static String normalize(String name) {
+		return name == null ? null : name.replace('.', '/');
+	}
+
 	private static String key(long loaderScope, String internalName) {
-		return loaderScope + "\u0000" + internalName;
+		return loaderScope + "\u0000" + normalize(internalName);
 	}
 
 	/**
@@ -170,7 +182,7 @@ public final class PendingLoadPatch {
 	                                 boolean projectLocated,
 	                                 BiFunction<String, byte[], byte[]> transforms) {
 		if (!projectLocated) return new Decision(Outcome.REFUSED_NON_PROJECT, null);
-		String dot = internalName.replace('/', '.');
+		String dot = normalize(internalName).replace('/', '.');
 		if (looksWoven(internalName, buffer)) return new Decision(Outcome.REFUSED_WOVEN, null);
 
 		byte[] payload;

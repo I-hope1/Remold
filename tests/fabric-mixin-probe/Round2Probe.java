@@ -32,6 +32,10 @@ public class Round2Probe implements ModInitializer {
 
 	@Override
 	public void onInitialize() {
+		// JVM 启动 → mod 初始化完成（含 Mixin 织入）：冷启动对照的同口径锚点。
+		p("[COLDSTART] onInitialize uptimeMs="
+			+ java.lang.management.ManagementFactory.getRuntimeMXBean().getUptime()
+			+ " hooks=" + System.getProperty("remold.probe.load_hooks", "true"));
 		Thread t = new Thread(this::run, "remold-round2-probe");
 		t.setDaemon(true);
 		t.start();

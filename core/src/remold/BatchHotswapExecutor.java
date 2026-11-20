@@ -39,7 +39,77 @@ import java.util.function.Supplier;
 import java.util.jar.*;
 
 import static remold.MountManager.*;
-import static remold.RemoldAgent.*;
+
+import remold.RemoldAgent.AlignmentTransaction;
+import remold.RemoldAgent.BytecodeTransformerBridge;
+import remold.RemoldAgent.GateCachedDiff;
+import remold.RemoldAgent.RedefineMode;
+import remold.RemoldAgent.RedefineOutcome;
+import remold.RemoldAgent.RoundSkips;
+
+import static remold.RemoldAgent.ANON_ALIGN;
+import static remold.RemoldAgent.BATCH_REDEFINE_MILLIS;
+import static remold.RemoldAgent.BATCH_STAGE_A_MILLIS;
+import static remold.RemoldAgent.BATCH_STAGE_B_MILLIS;
+import static remold.RemoldAgent.BATCH_STAGE_C_MILLIS;
+import static remold.RemoldAgent.BATCH_TWOPHASE_SKEL_MILLIS;
+import static remold.RemoldAgent.DEBUG;
+import static remold.RemoldAgent.DIFF_LOG;
+import static remold.RemoldAgent.FORCE_STATIC_LAMBDA;
+import static remold.RemoldAgent.HOTSWAP_BLACKLIST;
+import static remold.RemoldAgent.LAMBDA_ALIGN;
+import static remold.RemoldAgent.LIVENESS_BATCH;
+import static remold.RemoldAgent.LIVENESS_BATCH_DONE;
+import static remold.RemoldAgent.LIVE_INSTANCE_CACHE;
+import static remold.RemoldAgent.LIVE_INSTANCE_SCAN_MILLIS;
+import static remold.RemoldAgent.PERF_LOG;
+import static remold.RemoldAgent.REDEFINE_MODE;
+import static remold.RemoldAgent.TWO_PHASE;
+import static remold.RemoldAgent.UCP_APPEND;
+import static remold.RemoldAgent.activeWatchDirs;
+import static remold.RemoldAgent.alignAccessMonotonicity;
+import static remold.RemoldAgent.alignAnonClasses;
+import static remold.RemoldAgent.alignMixinGeneratedMembers;
+import static remold.RemoldAgent.applyLocalClassGuard;
+import static remold.RemoldAgent.applyRedefineLayoutGate;
+import static remold.RemoldAgent.applyRedefinitions;
+import static remold.RemoldAgent.applyTransformerBridges;
+import static remold.RemoldAgent.applyTwoPhase;
+import static remold.RemoldAgent.batchWatchLabel;
+import static remold.RemoldAgent.calculateHash;
+import static remold.RemoldAgent.commitVcsBatch;
+import static remold.RemoldAgent.enterInternalRetransform;
+import static remold.RemoldAgent.error;
+import static remold.RemoldAgent.exitInternalRedefine;
+import static remold.RemoldAgent.fileDiskHashes;
+import static remold.RemoldAgent.getRuntimeBytecode;
+import static remold.RemoldAgent.getSourceBytecode;
+import static remold.RemoldAgent.handleAnnotationDefaultChangeInBatch;
+import static remold.RemoldAgent.hasRuntimeBytecode;
+import static remold.RemoldAgent.info;
+import static remold.RemoldAgent.init;
+import static remold.RemoldAgent.injectNewClass;
+import static remold.RemoldAgent.inst;
+import static remold.RemoldAgent.inventedSlots;
+import static remold.RemoldAgent.isEnhancedHotswapEnabled;
+import static remold.RemoldAgent.isNonLoadableClass;
+import static remold.RemoldAgent.loadClassSnap;
+import static remold.RemoldAgent.loadedClassesMap;
+import static remold.RemoldAgent.log;
+import static remold.RemoldAgent.mustSkipForMissingEnhancedRedefinition;
+import static remold.RemoldAgent.normalizeAlignBaseline;
+import static remold.RemoldAgent.normalizeAlignResolver;
+import static remold.RemoldAgent.notifyBatchListeners;
+import static remold.RemoldAgent.pendingChanges;
+import static remold.RemoldAgent.pendingInvented;
+import static remold.RemoldAgent.postToMain;
+import static remold.RemoldAgent.recordRuntimeBytecode;
+import static remold.RemoldAgent.recordSourceBytecode;
+import static remold.RemoldAgent.rejectHostGroup;
+import static remold.RemoldAgent.rollbackSourceCache;
+import static remold.RemoldAgent.runtimeBytecodeEntries;
+import static remold.RemoldAgent.transformerBridges;
+import static remold.RemoldAgent.warn;
 
 /**
  * 批量热更主体执行器（从 {@link RemoldAgent} 拆出）。
@@ -171,18 +241,18 @@ final class BatchHotswapExecutor {
 				String host = resolveAnonHostCandidate(cName, hostClassesToAlign, singleAlignHost);
 				if (host == null) continue;
 				if (!AnonClassAligner.isAnonymousClassName(host, cName)) continue;
-				if (bytecodeCache.containsKey(cName)) continue;
+				if (hasRuntimeBytecode(cName)) continue;
 				byte[] bc = fetchOriginalBytecode(entry.getValue());
-				if (bc != null && AnonClassAligner.isBatchAnonClass(cName, bc)) bytecodeCache.put(cName, bc);
+				if (bc != null && AnonClassAligner.isBatchAnonClass(cName, bc)) recordRuntimeBytecode(cName, bc);
 			}
 		}
 		Map<String, Map<String, byte[]>> oldAnonsByHost = new HashMap<>();
 		if (!hostClassesToAlign.isEmpty()) {
-			for (Map.Entry<String, byte[]> entry : bytecodeCache.entrySet()) {
+			for (Map.Entry<String, byte[]> entry : runtimeBytecodeEntries()) {
 				String cName = entry.getKey();
 				String host = resolveAnonHostCandidate(cName, hostClassesToAlign, singleAlignHost);
 				if (host == null) continue;
-				byte[] src = sourceBytecodeCache.get(cName);
+				byte[] src = getSourceBytecode(cName);
 				byte[] oldBytes = src != null ? src : entry.getValue();
 				if (!AnonClassAligner.isBatchAnonClass(cName, oldBytes)) continue;
 				oldAnonsByHost.computeIfAbsent(host, k -> new HashMap<>()).put(cName, oldBytes);
@@ -223,8 +293,8 @@ final class BatchHotswapExecutor {
 
 			Function<String, byte[]> oldRes = name -> {
 				String dot = name.replace('/', '.');
-				byte[] src = sourceBytecodeCache.get(dot);
-				return src != null ? src : bytecodeCache.get(dot);
+				byte[] src = getSourceBytecode(dot);
+				return src != null ? src : getRuntimeBytecode(dot);
 			};
 			Function<String, byte[]> newRes = name -> newBatchBytes.get(name.replace('/', '.'));
 
@@ -307,13 +377,13 @@ final class BatchHotswapExecutor {
 		Map<String, byte[]> driftOldBytes = new HashMap<>();
 		Set<String> loadedBefore = new HashSet<>(loadedClassesMap.keySet());
 		for (String key : newBatchBytes.keySet()) {
-			byte[] prev = sourceBytecodeCache.get(key);
+			byte[] prev = getSourceBytecode(key);
 			sourceBefore.put(key, prev);
-			driftOldBytes.put(key, bytecodeCache.get(key));
+			driftOldBytes.put(key, getRuntimeBytecode(key));
 			if (prev != null) prevSourceBytes.put(key, prev);
 		}
 		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
-			sourceBytecodeCache.put(e.getKey(), e.getValue());
+			recordSourceBytecode(e.getKey(), e.getValue());
 		}
 
 		// ---- 字节码重织入桥（Mixin / AspectJ / 自定义字节码增强器）----
@@ -493,7 +563,7 @@ final class BatchHotswapExecutor {
 
 
 					byte[] newBytecode = bytecode;
-					byte[] oldBytecode = bytecodeCache.get(className);
+					byte[] oldBytecode = getRuntimeBytecode(className);
 
 					// 如果缓存里没有，主动触发一次 retransform 来"偷"取字节码
 					if (oldBytecode == null) {
@@ -501,7 +571,7 @@ final class BatchHotswapExecutor {
 						oldBytecode = fetchOriginalBytecode(targetClass);
 						fetchNanos += System.nanoTime() - t0;
 						if (oldBytecode != null) {
-							bytecodeCache.put(className, oldBytecode);
+							recordRuntimeBytecode(className, oldBytecode);
 						}
 					}
 
@@ -542,8 +612,8 @@ final class BatchHotswapExecutor {
 								Function<String, byte[]> oldResolver =
 								 normalizeAlignResolver(name -> {
 									byte[] src = prevSourceBytes.get(name.replace('/', '.'));
-									if (src == null) src = sourceBytecodeCache.get(name.replace('/', '.'));
-									return src != null ? src : bytecodeCache.get(name.replace('/', '.'));
+									if (src == null) src = getSourceBytecode(name.replace('/', '.'));
+									return src != null ? src : getRuntimeBytecode(name.replace('/', '.'));
 								 }, alignLoader, normOldByLoader.computeIfAbsent(alignLoader, k -> new HashMap<>()));
 								Function<String, byte[]> newResolver =
 								 normalizeAlignResolver(name -> newBatchBytes.get(name.replace('/', '.')), alignLoader,
@@ -710,7 +780,7 @@ final class BatchHotswapExecutor {
 					// 退化到纯包名推断（findTargetClassLoader(className)），inject 照常走，lazy_load 挂 tmpDir 路径
 					if (REDEFINE_MODE == RedefineMode.inject) {
 						if (injectNewClass(className, clHintPath, bytecode)) {
-							bytecodeCache.put(className, bytecode);
+							recordRuntimeBytecode(className, bytecode);
 							injectedCount++;
 							injectedClasses.add(className);
 							// 注入成功即视为生效：指纹可立即落账（不经过 applyRedefinitions）。
@@ -731,7 +801,7 @@ final class BatchHotswapExecutor {
 							PackageUnsealer.unsealClassPackage(loader, className);
 							mountForClass(loader, mountPath);
 						}
-						bytecodeCache.put(className, bytecode);
+						recordRuntimeBytecode(className, bytecode);
 						// lazy_load 只是挂载路径，类尚未真正加载生效 —— 指纹**不**落账，
 						// 等它真正被加载/重定义时再记，否则会漏掉后续的首次加载。
 					}
@@ -1342,7 +1412,7 @@ final class BatchHotswapExecutor {
 	}
 	static byte[] fetchCurrentBytecode(Class<?> clazz) {
 		String className = clazz.getName();
-		if (bytecodeCache.containsKey(className)) return bytecodeCache.get(className);
+		if (hasRuntimeBytecode(className)) return getRuntimeBytecode(className);
 		return fetchOriginalBytecode(clazz);
 	}
 	static byte[] fetchOriginalBytecode(Class<?> clazz) {

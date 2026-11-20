@@ -25,10 +25,10 @@ import remold.RemoldAgent.GateCachedDiff;
 import remold.RemoldAgent.RemovedMemberScan;
 import remold.ref.RemovedMemberReaders;
 
-import static remold.RemoldAgent.bytecodeCache;
 import static remold.RemoldAgent.dotted;
 import static remold.RemoldAgent.exitInternalRedefine;
 import static remold.RemoldAgent.fetchOriginalBytecode;
+import static remold.RemoldAgent.getRuntimeBytecode;
 import static remold.RemoldAgent.info;
 import static remold.RemoldAgent.inst;
 import static remold.RemoldAgent.internalName;
@@ -96,7 +96,7 @@ final class RemovedMemberScanner {
 			String className = e.getKey();
 			byte[] newBytes = e.getValue();
 			if (newBytes == null) continue;
-			byte[] oldBytes = bytecodeCache.get(className);
+			byte[] oldBytes = getRuntimeBytecode(className);
 			if (oldBytes == null) {
 				Class<?> c = loadedClassesMap.get(className);
 				if (c != null) {
@@ -151,7 +151,7 @@ final class RemovedMemberScanner {
 			if (clazz.isArray() || clazz.isHidden()) continue;
 			if (!inst.isModifiableClass(clazz)) continue;
 			if (!isProjectClass(clazz, roots)) continue;
-			byte[] bytes = bytecodeCache.get(name);
+			byte[] bytes = getRuntimeBytecode(name);
 			if (bytes == null) {
 				missing.add(clazz);
 				continue;
@@ -164,7 +164,7 @@ final class RemovedMemberScanner {
 		if (!missing.isEmpty()) {
 			warmBytecodeCache(missing);
 			for (Class<?> clazz : missing) {
-				byte[] bytes = bytecodeCache.get(clazz.getName());
+				byte[] bytes = getRuntimeBytecode(clazz.getName());
 				if (bytes == null) {
 					uncached++;
 					continue;
@@ -409,6 +409,6 @@ final class RemovedMemberScanner {
 		} finally {
 			inst.removeTransformer(capture);
 		}
-		captured.forEach(bytecodeCache::putIfAbsent);
+		captured.forEach(RemoldAgent::recordRuntimeBytecodeIfAbsent);
 	}
 }

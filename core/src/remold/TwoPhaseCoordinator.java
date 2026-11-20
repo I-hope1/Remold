@@ -14,7 +14,33 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
-import static remold.RemoldAgent.*;
+import remold.RemoldAgent.AlignmentTransaction;
+import remold.RemoldAgent.RedefineOutcome;
+import remold.RemoldAgent.RoundSkips;
+
+import static remold.RemoldAgent.BATCH_REDEFINE_MILLIS;
+import static remold.RemoldAgent.BATCH_STAGE_A_MILLIS;
+import static remold.RemoldAgent.BATCH_STAGE_B_MILLIS;
+import static remold.RemoldAgent.BATCH_STAGE_C_MILLIS;
+import static remold.RemoldAgent.BATCH_TWOPHASE_SKEL_MILLIS;
+import static remold.RemoldAgent.DEBUG;
+import static remold.RemoldAgent.LAST_REDEFINE_VM_LEVEL_FAILURE;
+import static remold.RemoldAgent.PERF_LOG;
+import static remold.RemoldAgent.VM_POISONED_CLASSES;
+import static remold.RemoldAgent.alignAccessMonotonicity;
+import static remold.RemoldAgent.commitInvented;
+import static remold.RemoldAgent.enterInternalRedefine;
+import static remold.RemoldAgent.error;
+import static remold.RemoldAgent.exitInternalRedefine;
+import static remold.RemoldAgent.info;
+import static remold.RemoldAgent.inst;
+import static remold.RemoldAgent.isVmLevelRedefineFailure;
+import static remold.RemoldAgent.loadedClassesMap;
+import static remold.RemoldAgent.log;
+import static remold.RemoldAgent.markVmLevelFailure;
+import static remold.RemoldAgent.recordCacheLoader;
+import static remold.RemoldAgent.recordRuntimeBytecode;
+import static remold.RemoldAgent.warn;
 
 /**
  * 两阶段 Schema-First 重定义与批量降级重定义协调器。
@@ -304,7 +330,7 @@ final class TwoPhaseCoordinator {
 		for (String name : ok) {
 			byte[] bytes = stageABytes.get(name);
 			if (bytes != null) {
-				bytecodeCache.put(name, bytes);
+				recordRuntimeBytecode(name, bytes);
 				Class<?> c = loadedClassesMap.get(name);
 				recordCacheLoader(name, c == null ? null : c.getClassLoader());
 			}
@@ -409,7 +435,7 @@ final class TwoPhaseCoordinator {
 			     + (skips.isEmpty() ? "" : " " + skips.size()
 			        + " class(es) were skipped this round — listed below."));
 			for (ClassDefinition def : definitions) {
-				bytecodeCache.put(def.getDefinitionClass().getName(), def.getDefinitionClassFile());
+				recordRuntimeBytecode(def.getDefinitionClass().getName(), def.getDefinitionClassFile());
 				recordCacheLoader(def.getDefinitionClass().getName(), def.getDefinitionClass().getClassLoader());
 				commitInvented(def.getDefinitionClass().getName());
 				successfulClasses.add(def.getDefinitionClass().getName());
@@ -454,7 +480,7 @@ final class TwoPhaseCoordinator {
 				// "redefine 失败" —— 那会 afterRedefineFailed（弹补丁 + 假台账）并让调用方
 				// 跳过 afterRedefine，结果是类已生效但存量实例保持类型默认值。
 				try {
-					bytecodeCache.put(className, def.getDefinitionClassFile());
+					recordRuntimeBytecode(className, def.getDefinitionClassFile());
 					recordCacheLoader(className, def.getDefinitionClass().getClassLoader());
 					commitInvented(className);
 				} catch (Throwable be) {

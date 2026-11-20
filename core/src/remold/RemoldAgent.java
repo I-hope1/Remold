@@ -828,9 +828,47 @@ public class RemoldAgent {
 		return dotClassName != null ? sourceBytecodeCache.get(dotClassName) : null;
 	}
 
+	/** 写入源码级未织入基线缓存。 */
+	static void recordSourceBytecode(String dotClassName, byte[] bytecode) {
+		if (dotClassName != null && bytecode != null) {
+			sourceBytecodeCache.put(dotClassName, bytecode);
+		}
+	}
+
+	/** 移除源码级未织入基线缓存条目。 */
+	static void removeSourceBytecode(String dotClassName) {
+		if (dotClassName != null) {
+			sourceBytecodeCache.remove(dotClassName);
+		}
+	}
+
 	/** 获取运行时生效基线（织入 Mixin / 插件后的实际运行字节，供 InitFix / Schema 判断用） */
 	public static byte[] getRuntimeBytecode(String dotClassName) {
 		return dotClassName != null ? bytecodeCache.get(dotClassName) : null;
+	}
+
+	/** 判断运行时生效基线缓存是否已包含指定类。 */
+	public static boolean hasRuntimeBytecode(String dotClassName) {
+		return dotClassName != null && bytecodeCache.containsKey(dotClassName);
+	}
+
+	/** 写入运行时生效基线缓存。 */
+	public static void recordRuntimeBytecode(String dotClassName, byte[] bytecode) {
+		if (dotClassName != null && bytecode != null) {
+			bytecodeCache.put(dotClassName, bytecode);
+		}
+	}
+
+	/** 若尚未登记则写入运行时生效基线缓存。 */
+	static void recordRuntimeBytecodeIfAbsent(String dotClassName, byte[] bytecode) {
+		if (dotClassName != null && bytecode != null) {
+			bytecodeCache.putIfAbsent(dotClassName, bytecode);
+		}
+	}
+
+	/** 遍历运行时生效基线缓存的只读快照视图。 */
+	static Set<Map.Entry<String, byte[]>> runtimeBytecodeEntries() {
+		return Collections.unmodifiableSet(bytecodeCache.entrySet());
 	}
 
 	/**
@@ -2444,6 +2482,17 @@ public class RemoldAgent {
 	public static void warn(String s) { logger.warn(s); }
 	public static void error(String msg) { logger.error(msg); }
 	public static void error(String msg, Throwable t) { logger.error(msg, t); }
+
+	static {
+		Diag.setSink(new Diag.Sink() {
+			@Override public void log(String msg) { RemoldAgent.log(msg); }
+			@Override public void info(String msg) { RemoldAgent.info(msg); }
+			@Override public void warn(String msg) { RemoldAgent.warn(msg); }
+			@Override public void error(String msg, Throwable t) {
+				if (t == null) RemoldAgent.error(msg); else RemoldAgent.error(msg, t);
+			}
+		});
+	}
 	//endregion
 
 	//region Environment Detection

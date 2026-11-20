@@ -5,6 +5,8 @@ set -euo pipefail
 # 用法：
 #   bash scripts/build-native.sh               # 构建全部 6 个平台产物到 core/libs/
 #   bash scripts/build-native.sh linux-x64     # 仅构建指定目标（linux-x64|android-arm64|linux-aarch64|macos-x64|macos-arm64|windows-x64）
+#   bash scripts/build-native.sh all-parallel  # 6 个目标并行（NATIVE_JOBS 控制并发度，默认 nproc）
+#   bash scripts/build-native.sh prepare       # 只解包 zig，不编译（并行前置）
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -172,8 +174,45 @@ build_windows_x64() {
   ls -la "$OUT_DIR/tool64.dll"
 }
 
+ALL_TARGETS=(linux-x64 android-arm64 linux-aarch64 macos-x64 macos-arm64 windows-x64)
+
+# 只把 zig 解包好、不编译：并行构建前必须先把这一步串行做掉，否则多个子进程会同时
+# 下载同一个 tarball 到同一个目录（互相截断）。
+if [ "$#" -ge 1 ] && [ "$1" = "prepare" ]; then
+  ensure_zig
+  echo "[native] zig ready: $ZIG_CMD"
+  exit 0
+fi
+
+# 并行构建：每个目标一个子进程（各自 mktemp 工作目录、各自输出文件，互不覆盖）。
+# 串行时 6 个目标 ≈ 3.5 分钟，主要成本是把同一份 tool.cpp 按 6 个 target 各编译一遍。
+if [ "$#" -ge 1 ] && { [ "$1" = "all-parallel" ] || [ "$1" = "parallel" ]; }; then
+  ensure_zig
+  jobs="${NATIVE_JOBS:-0}"
+  if [ "$jobs" -le 0 ] 2>/dev/null; then
+    jobs="$( (command -v nproc >/dev/null 2>&1 && nproc) || echo 4 )"
+  fi
+  echo "[native] building ${#ALL_TARGETS[@]} targets with up to $jobs in parallel"
+  pids=()
+  for t in "${ALL_TARGETS[@]}"; do
+    while [ "$(jobs -rp | wc -l)" -ge "$jobs" ]; do wait -n 2>/dev/null || true; done
+    bash "${BASH_SOURCE[0]}" "$t" &
+    pids+=($!)
+  done
+  failed=0
+  for p in "${pids[@]}"; do
+    if ! wait "$p"; then failed=1; fi
+  done
+  if [ "$failed" -ne 0 ]; then
+    echo "::error::one or more native targets failed" >&2
+    exit 1
+  fi
+  echo "[native] all ${#ALL_TARGETS[@]} targets built"
+  exit 0
+fi
+
 if [ "$#" -eq 0 ] || [ "$1" = "all" ]; then
-  TARGETS=(linux-x64 android-arm64 linux-aarch64 macos-x64 macos-arm64 windows-x64)
+  TARGETS=("${ALL_TARGETS[@]}")
 else
   TARGETS=("$@")
 fi

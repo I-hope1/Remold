@@ -13,7 +13,7 @@
 | `./gradlew :tests:verifyDocStatusMarkers` | 是 | 检查 `docs/{initfix,topology,offset,ecosystem}` 与各模块 `*/src` 无违规状态标记 |
 | `./gradlew :tests:verifyStatusSingleSource` | 是 | 检查 `docs/**` 文档类型横幅与单一真相源边界（主源码不得出现交付状态散文） |
 | `./gradlew :tests:verifyLogLanguage` | 是 | 检查主源码字符串字面量无 CJK/全角标点 |
-| `.github/workflows/ci.yml` | CI | `setup-java` 8/11/17/21 + runner 25（`hstest.requireJdks=true`）+ `test-dcevm`（JBR 21 跑 `liveDcevmTest`）+ `p05-probe`（JBR 17/21）+ `build-native` |
+| `.github/workflows/ci.yml` | CI | `setup-java` 8/11/17/21 + runner 25（`hstest.requireJdks=true`）+ `test-dcevm`（JBR 21 跑 `liveDcevmTest`）+ `p05-probe`（JBR 17/21）+ `build-native`（`scripts/build-native.sh all-parallel`：6 个目标并行，zig 工具链与编译缓存分别缓存） |
 
 ## 2. 按改动域触发的专项探针与变异检查
 

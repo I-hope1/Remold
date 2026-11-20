@@ -77,12 +77,13 @@ public record Changeset(
 	 * @param candidateMissing 因候选类字节缺失而 fail-closed 的类名
 	 */
 	public record Manifest(List<String> orderedHosts, List<String> edges, List<String> nodes,
-	                       List<String> candidateMissing, Births births) {
+	                       List<String> candidateMissing, Births births,
+	                       int droppedBirths, int unresolvedBirths) {
 
 		/** 兼容工厂：不需要关心出生水位线的调用方，缺省为空区间（不用委托构造，见下）。 */
 		public static Manifest of(List<String> orderedHosts, List<String> edges, List<String> nodes,
 		                          List<String> candidateMissing) {
-			return new Manifest(orderedHosts, edges, nodes, candidateMissing, Births.NONE);
+			return new Manifest(orderedHosts, edges, nodes, candidateMissing, Births.NONE, 0, 0);
 		}
 
 		public Manifest {
@@ -91,6 +92,13 @@ public record Changeset(
 			nodes = copy(nodes);
 			candidateMissing = copy(candidateMissing);
 			births = births == null ? Births.NONE : births;
+			if (droppedBirths < 0) droppedBirths = 0;
+			if (unresolvedBirths < 0) unresolvedBirths = 0;
+		}
+
+		/** 本轮是否发生过"出生记录不完整"（丢弃或哈希无法确定）——发生即只允许保守结论。 */
+		public boolean birthsIncomplete() {
+			return droppedBirths > 0 || unresolvedBirths > 0;
 		}
 
 		private static List<String> copy(List<String> in) {
@@ -257,7 +265,11 @@ public record Changeset(
 		parts.add(String.join("\u0001", manifest.edges()));
 		parts.add(String.join("\u0001", manifest.nodes()));
 		parts.add(String.join("\u0001", manifest.candidateMissing()));
-		if (tracksBirths(algoVersion)) parts.add(manifest.births().text());
+		if (tracksBirths(algoVersion)) {
+			parts.add(manifest.births().text());
+			parts.add(Integer.toString(manifest.droppedBirths()));
+			parts.add(Integer.toString(manifest.unresolvedBirths()));
+		}
 		return sha128(String.join("\u0002", parts));
 	}
 

@@ -197,6 +197,8 @@ jobs:
   build-native:
     name: Build Native Libraries (Linux, Android, macOS & Windows)
     runs-on: ubuntu-24.04
+    env:
+      ZIG_VERSION: '0.17.1'
     steps:
       - uses: actions/checkout@v7
 
@@ -206,15 +208,39 @@ jobs:
           distribution: temurin
           java-version: '25'
 
+      # zig 工具链（含各 target 的预编译 libc++）与 zig 的编译缓存分开缓存：
+      # 前者只随 zig 版本变，后者随 C++ 源码变，混在一个 key 里会让每次改 C++ 都重下工具链。
+      # 注意：缓存目录只能写在 step 级 env 里 —— {@code runner} 上下文在 job 级 env 中不可用，
+      # 写在那里会让整个 workflow 校验失败（run 会 0s 失败且没有任何 job）。
+      - name: Cache zig toolchain
+        uses: actions/cache@v6
+        with:
+          # 放在可缓存路径下：默认的 /tmp 每次 runner 都是冷的，zig tarball 会重下。
+          path: ${{ runner.temp }}/remold-zig-0.17.1
+          key: zig-toolchain-${{ runner.os }}-${{ env.ZIG_VERSION }}-v1
+
+      - name: Cache zig compile cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/remold-zig-global
+          key: zig-cache-${{ runner.os }}-${{ env.ZIG_VERSION }}-${{ hashFiles('core/cpp/**', 'scripts/build-native.sh') }}
+          restore-keys: |
+            zig-cache-${{ runner.os }}-${{ env.ZIG_VERSION }}-
+
       - name: Snapshot checked-in native libraries
         run: |
           rm -rf /tmp/checked-in-libs
           cp -r core/libs /tmp/checked-in-libs
 
+      # 6 个目标互相独立（各自 mktemp 工作目录、各自输出文件），串行时主要成本是
+      # 把同一份 tool.cpp 按 6 个 target 各编译一遍；并行后受最慢目标约束。
       - name: Build all native libraries
+        env:
+          ZIG_CACHE_DIR: ${{ runner.temp }}/remold-zig-0.17.1
+          ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/remold-zig-global
         run: |
           export JAVA_HOME="$JAVA_HOME_25_X64"
-          bash scripts/build-native.sh
+          bash scripts/build-native.sh all-parallel
 
       - name: Verify native ABIs, exports and repo sync
         run: bash scripts/verify-native.sh --compare /tmp/checked-in-libs core/libs
@@ -408,7 +434,7 @@ jobs:
           arch -x86_64 env \
             JAVA_HOME="$JAVA_HOME_25_X64" \
             PATH="$JAVA_HOME_25_X64/bin:$PATH" \
-            ./gradlew :tests:test --no-daemon --rerun-tasks \
+            ./gradlew :tests:test --no-daemon --rerun --build-cache \
               --tests "remold.LibToolTest" \
               --tests "remold.EnumBucketPlanTest" \
               -Dhstest.requireJdks=false \

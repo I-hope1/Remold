@@ -174,9 +174,10 @@ public final class LoadFrontier {
 			resolver = HASH_RESOLVER;
 		}
 		if (resolver == null) {
-			int size = pending();
+			// 一次出队即用真实长度加账：先 pending() 再 drain() 会让两次调用之间新到的出生
+			// 被消费掉却漏记账（评审指出的窗口）。
+			int size = drain().size();
 			if (size > 0) {
-				drain();
 				synchronized (LOCK) {
 					unresolvedBirths += size;
 				}

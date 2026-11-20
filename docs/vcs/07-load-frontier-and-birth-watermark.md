@@ -84,8 +84,8 @@ births = <prevWatermark>..<currWatermark>
 
 "编辑早于加载"是独立于 VCS 的缺口：`seq 1` 改了尚未加载的类，`redefineClasses` 当时无事可做；之后它首次加载时，
 若加载器给出的是陈旧字节，那次编辑就静默失效。红基线
-`tests/src/remold/BirthStaleBytesRedBaselineTest.java` 记录当前形态——出生点 transformer 永远返回 `null`
-（不替换字节），且把 stale buffer 记进运行时基线缓存，连后续 diff 的基线一起污染。
+`tests/src/remold/BirthPatchTest.java` 记录当前形态——出生点 transformer 永远返回 `null`
+：出生点曾把 stale buffer 原样放行并记进运行时基线缓存，连后续 diff 的基线一起污染。
 
 补丁语义：对"构建输出已更新、但类尚未加载"的 `(loader, class)` 保留一份待消费记录；在该类出生时用新字节替换。
 

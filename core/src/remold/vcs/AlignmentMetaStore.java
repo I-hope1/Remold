@@ -250,7 +250,7 @@ public final class AlignmentMetaStore {
 	 * 把该类的<b>工作头</b>切回某个已记录代（按 {@code jvmEffSha256} 精确匹配）。
 	 *
 	 * <p>回退后必须调用：否则下一次正常热更走 Run R 对齐时，仍会拿刚被退掉的坏代当基线
-	 * （{@code docs/topology/16-bytecode-changeset-vcs.md} §2.1.1 的工作头同步约束）。</p>
+	 * （{@code docs/vcs/01-bytecode-changeset-vcs.md} §2.1.1 的工作头同步约束）。</p>
 	 *
 	 * <p>被切回的代同时被提到 history 头部：它就是"最近一次生效的代"，按代淘汰时也应按此顺序。</p>
 	 *

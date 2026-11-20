@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * F8: the generational ledger must not keep a {@code ClassLoader} (and therefore not the
  * {@code Class} objects defined by it) alive past the window or past a scope unload
- * ({@code docs/topology/20-generational-field-ledger.md} §2.4).
+ * ({@code docs/vcs/05-generational-field-ledger.md} §2.4).
  *
  * <p><b>What is guarded</b>: {@link GenerationalFieldLedger} keys its scope slots by a
  * {@link java.util.WeakHashMap} on the loader and stores only scalars in the values. Both halves

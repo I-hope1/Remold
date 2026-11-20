@@ -71,7 +71,7 @@ public class DerivedDataCacheTest {
 		}
 	}
 
-	/** 条目预算与字节预算都能被系统属性覆盖（默认值按实测校准，见 docs/topology/16 §3.7）。 */
+	/** 条目预算与字节预算都能被系统属性覆盖（默认值按实测校准，见 docs/vcs/01 §3.7）。 */
 	@Test
 	void budgetsComeFromSystemProperties() {
 		assertEquals(DerivedDataCache.MAX_ENTRIES, DerivedDataCache.maxEntries(), "default entry budget");

@@ -35,7 +35,7 @@ import java.util.function.Supplier;
  *             （本类成员引用存活判据通过时），避免调用方拿到 {@code null}/0 后 NPE / 除零 / 数组越界；
  *             判据不通过则回退返回类型默认值。{@code void} 孤儿默认 no-op（删掉的副作用不再执行），
  *             可用 {@code -Dremold.agent.orphan_retain_void=true} 打开。契约见
- *             {@code docs/topology/11-orphan-lambda-body-retention.md}。</li>
+ *             {@code docs/lambda/02-orphan-body-retention.md}。</li>
  *       </ul>
  *   </li>
  * </ol>
@@ -135,7 +135,7 @@ public class LambdaAligner {
 	 *
 	 * <p>属性优先级（越靠前越优先）：{@code -Dremold.agent.lambda_raw_alignment=false} 急停 →
 	 * 兼容旧 Property {@code -Dremold.poc.meta_source}=true|false → 默认 {@code true}。
-	 * 规格见 {@code docs/topology/18-live-raw-to-raw-alignment.md}。</p>
+	 * 规格见 {@code docs/vcs/03-live-raw-to-raw-alignment.md}。</p>
 	 */
 	public static volatile boolean META_SOURCE = rawAlignmentDefault();
 
@@ -706,7 +706,7 @@ public class LambdaAligner {
 		 *       非 {@code void} 孤儿在成员引用存活判据通过时<b>执行上一轮方法体</b>（三参
 		 *       {@link #onOrphanInvoked(String, boolean, boolean)} 标记），否则返回默认值
 		 *       （0 / null / false）；{@code void} 孤儿默认 no-op。见
-		 *       {@code docs/topology/11-orphan-lambda-body-retention.md}。</li>
+		 *       {@code docs/lambda/02-orphan-body-retention.md}。</li>
 		 * </ul>
 		 */
 		SMART_ADAPTIVE,
@@ -730,7 +730,7 @@ public class LambdaAligner {
 		return orphanPolicy;
 	}
 
-	//region 孤儿 Lambda 方法体保留（docs/topology/11-orphan-lambda-body-retention.md）
+	//region 孤儿 Lambda 方法体保留（docs/lambda/02-orphan-body-retention.md）
 
 	/**
 	 * 非 {@code void} 孤儿 lambda 是否保留上一轮方法体（默认<b>开启</b>）。
@@ -1260,7 +1260,7 @@ public class LambdaAligner {
 			// newCn 会在“无重命名”路径下直接提供 presentKeys。
 			//
 			// Run R：配对基线换成 R_prev（上一代待对齐产物）。它与 E_prev 的区别见规格
-			// docs/topology/18-live-raw-to-raw-alignment.md —— R_prev 只含 javac 槽位身份，
+			// docs/vcs/03-live-raw-to-raw-alignment.md —— R_prev 只含 javac 槽位身份，
 			// 没有自造名/幽灵/桥；E_prev 只用来枚举继承集（ctx.effPrevCn）。
 			ClassNode oldCn = scan(ctx.runR ? rawPrevBytes : oldBytes, ctx, true, oldBytecodeResolver, oldParamNames);
 			ClassNode newCn = scan(newBytes, ctx, false, newBytecodeResolver, newParamNames);
@@ -3336,7 +3336,7 @@ public class LambdaAligner {
 	 *
 	 * <p><b>为什么缓存这一项</b>：{@link #findConsumers} 用 ASM {@code Analyzer} 做反向数据流分析，
 	 * 是 {@code align()} 里唯一的重量级派生（占对齐耗时的绝大部分，读数见
-	 * {@code docs/topology/16-bytecode-changeset-vcs.md} §3.7）。它的输出只由「这份 blob 的这个方法」决定，
+	 * {@code docs/vcs/01-bytecode-changeset-vcs.md} §3.7）。它的输出只由「这份 blob 的这个方法」决定，
 	 * 与轮次、loader、{@code inventedOldNames}、resolver 都无关，因此可以跨轮复用。</p>
 	 *
 	 * <p><b>为什么键里必须带方法、值里必须带指令序号</b>：{@link #findConsumers} 返回值的键是
@@ -6080,7 +6080,7 @@ public class LambdaAligner {
 			}
 		}
 
-		// 2.5 保留旧方法体（docs/topology/11-orphan-lambda-body-retention.md）：
+		// 2.5 保留旧方法体（docs/lambda/02-orphan-body-retention.md）：
 		//     非 void 孤儿默认把上一轮的真实方法体（含 StackMapTable）搬进幽灵方法，
 		//     避免调用方拿到 null/0 后 NPE / 除零 / 数组越界。只在需要时用 EXPAND_FRAMES
 		//     重新解析一次旧字节码（oldCn 是 SKIP_FRAMES 的），并解析新类结构做成员存活判定。
@@ -6330,7 +6330,7 @@ public class LambdaAligner {
 	 * <b>关键设计（默认值桩 100% 线性无跳转分支，彻底杜绝 VerifyError）</b>：<br>
 	 * <p>注意：{@link #injectRetainedBody} 走的是另一条路径——它会搬运旧方法体（含
 	 * {@code StackMapTable} 帧与异常表），因此不再是"无分支"形态；见
-	 * {@code docs/topology/11-orphan-lambda-body-retention.md} §3.1。</p>
+	 * {@code docs/lambda/02-orphan-body-retention.md} §3.1。</p>
 	 * 字节码中完全不使用任何 {@code IFEQ} / {@code GOTO} 等分支跳转指令和 {@link Label}。
 	 * 所有的策略判定、孤儿熔断栈探测、异常抛出与日志去重均下沉到纯 Java 静态方法
 	 * {@link #onOrphanInvoked(String, boolean)} 中执行。<br>

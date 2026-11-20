@@ -43,7 +43,7 @@
 |:--|:--|
 | Agent 协作模块（`core/src/remold/`） | `EnvironmentProbe`（增强重定义能力探测与降级）、`LayoutDecisionEngine`（布局门纯判决）、`RemovedMemberScanner`（被删成员的批次外读者扫描）、`JarExtractor`（jar 解压与临时挂载映射）、`WatchPathRegistry`（监控路径分槽与聚合）、`FileWatcherService`（WatchService 监听线程）；编排与流水线仍在 `RemoldAgent` |
 | 文件热更防抖状态机 | `core/src/remold/DebounceWindow.java`（纯状态机：Class/jar 与资源流各自 trailing-edge 静默窗口；`markClassDueNow` 为外部构建完成信号的 sticky due） |
-| 构建完成 marker（build-trigger） | `core/src/remold/BuildTriggerMarker.java`（解析/拒绝/去重）、`BuildTriggerSweep.java`（按 mtime 收集最近变更）、`RemoldAgent.configureBuildTrigger` / `handleBuildTriggerFile`、`FileWatcherService` 专用 trigger watcher；`gradle-plugin` `BuildTriggerWriter` + `RemoldPlugin` 的 `classes.doLast` + `RemoldConfigResolver` 注入 `-Dremold.agent.build_trigger_file`（DSL `buildTrigger`，默认 `true`）。设计：`docs/topology/14-build-trigger-mode.md` |
+| 构建完成 marker（build-trigger） | `core/src/remold/BuildTriggerMarker.java`（解析/拒绝/去重）、`BuildTriggerSweep.java`（按 mtime 收集最近变更）、`RemoldAgent.configureBuildTrigger` / `handleBuildTriggerFile`、`FileWatcherService` 专用 trigger watcher；`gradle-plugin` `BuildTriggerWriter` + `RemoldPlugin` 的 `classes.doLast` + `RemoldConfigResolver` 注入 `-Dremold.agent.build_trigger_file`（DSL `buildTrigger`，默认 `true`）。设计：`docs/runtime/01-build-trigger-mode.md` |
 | 启动就绪门闩与批次看门狗 | `core/src/remold/StartupGate.java`（`PENDING→READY`，`-Dremold.agent.ready_timeout_ms`）、`core/src/remold/BatchWatchdog.java`（`enter/exit/current` + `armedWatchdogs()` 不变量，`-Dremold.agent.batch_stall_ms` 默认 15000，`[HOTSWAP-STALL]` dump）；挂点 `RemoldAgent.processChanges` 与 `retransformLoaded`，漏斗 `triggerDueHotswap`；就绪投票 `api` `HotswapPlugin.isHostReady()`（`plugin-fabric` `HostReadinessProbe`） |
 | 织入生成类的字节码登记口 | `core/src/remold/BytecodeSources.java`（多来源按顺序查询，无缓存）；被 `HierarchyTreeOracle.readClassBytes` 消费；`plugin-mixin` `MixinInnerClassHotSwap` 回灌与 `refeedForTarget` 按需提前生成 |
 | 运行时常量访问器登记表 | `remold.RuntimeConstants`（core 登记口；`plugin-arc` `ArcHotswapPlugin.onAgentInit` 登记 `Scl.scl()`）；被 `InitFix` 效应审查与捕获桥常量合成共用 |
@@ -52,11 +52,11 @@
 
 | 关注点 | 位置 |
 |:--|:--|
-| 逐代对齐元数据与 Changeset 链（PR1 / B1） | `core/src/remold/vcs/AlignmentMetaStore.java`、`core/src/remold/vcs/Changeset.java`、`core/src/remold/vcs/ChangesetLog.java`、`core/src/remold/vcs/VcsCommitGate.java`、`core/src/remold/vcs/BytecodePack.java`、`RemoldAgent.commitVcsBatch` / `revertTo`；开关 `-Dremold.vcs.enabled`、`-Dremold.vcs.revert`、`-Dremold.vcs.pack_dir`；规格 `docs/topology/16-bytecode-changeset-vcs.md` |
-| 按 blob 内容寻址的派生数据缓存（PR2） | `core/src/remold/vcs/DerivedDataCache.java`（键 `(kind, SHA-256(blob))`、双预算 LRU、值不可变；开关 `-Dremold.vcs.derived_cache`、`-Dremold.vcs.derived_cache_entries` / `_bytes`）；消费点：`LambdaAligner.consumersOf` / `deriveConsumerTags` / `hasConsumerSite`、`LambdaAligner.deriveAnonRefs`、`RemovedMemberReaders.describe` / `refs`。**禁止缓存 `align()` 整包结果**，规格 `docs/topology/16-bytecode-changeset-vcs.md` §3.7 |
-| 活体对齐 Raw ↔ Raw 与 `Eff_prev` 继承（PR3） | `LambdaAligner.align`（`META_SOURCE` 为 Run R 总闸）、`AlignmentMetaStore.headMatching`、`RemoldAgent.writePendingInvented` / `commitVcsBatch`；规格 `docs/topology/18-live-raw-to-raw-alignment.md` |
-| 孤儿 lambda 方法体保留 | `LambdaAligner.injectRetainedBody` / `OrphanBodyRetention`（`core/src/remold/`，纯函数）；规格 `docs/topology/11-orphan-lambda-body-retention.md` |
-| 捕获桥（删除 + 可证明的新增） | `LambdaAligner.stepCaptureBridge` / `getBridgeDelegate` / `onBridgeInvoked`；接收者归一在 `captureNamesOf`，`readLambdaParamNames` 只报 LVT 原文；规格 `docs/topology/09-lambda-capture-bridge.md` |
+| 逐代对齐元数据与 Changeset 链（PR1 / B1） | `core/src/remold/vcs/AlignmentMetaStore.java`、`core/src/remold/vcs/Changeset.java`、`core/src/remold/vcs/ChangesetLog.java`、`core/src/remold/vcs/VcsCommitGate.java`、`core/src/remold/vcs/BytecodePack.java`、`RemoldAgent.commitVcsBatch` / `revertTo`；开关 `-Dremold.vcs.enabled`、`-Dremold.vcs.revert`、`-Dremold.vcs.pack_dir`；规格 `docs/vcs/01-bytecode-changeset-vcs.md` |
+| 按 blob 内容寻址的派生数据缓存（PR2） | `core/src/remold/vcs/DerivedDataCache.java`（键 `(kind, SHA-256(blob))`、双预算 LRU、值不可变；开关 `-Dremold.vcs.derived_cache`、`-Dremold.vcs.derived_cache_entries` / `_bytes`）；消费点：`LambdaAligner.consumersOf` / `deriveConsumerTags` / `hasConsumerSite`、`LambdaAligner.deriveAnonRefs`、`RemovedMemberReaders.describe` / `refs`。**禁止缓存 `align()` 整包结果**，规格 `docs/vcs/01-bytecode-changeset-vcs.md` §3.7 |
+| 活体对齐 Raw ↔ Raw 与 `Eff_prev` 继承（PR3） | `LambdaAligner.align`（`META_SOURCE` 为 Run R 总闸）、`AlignmentMetaStore.headMatching`、`RemoldAgent.writePendingInvented` / `commitVcsBatch`；规格 `docs/vcs/03-live-raw-to-raw-alignment.md` |
+| 孤儿 lambda 方法体保留 | `LambdaAligner.injectRetainedBody` / `OrphanBodyRetention`（`core/src/remold/`，纯函数）；规格 `docs/lambda/02-orphan-body-retention.md` |
+| 捕获桥（删除 + 可证明的新增） | `LambdaAligner.stepCaptureBridge` / `getBridgeDelegate` / `onBridgeInvoked`；接收者归一在 `captureNamesOf`，`readLambdaParamNames` 只报 LVT 原文；规格 `docs/lambda/01-capture-bridge.md` |
 
 ## 5. 框架插件、偏移稳定性、反射驱逐与 Gradle 工具链
 

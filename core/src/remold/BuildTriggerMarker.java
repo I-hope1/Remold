@@ -7,7 +7,7 @@ import java.nio.charset.StandardCharsets;
  *
  * <p>marker 是构建工具（当前由 Gradle 插件写入）在编译任务结束后原子写出的普通文本文件。
  * agent 只依赖本类定义的契约，不依赖任何构建工具类型。格式见
- * {@code docs/topology/14-build-trigger-mode.md} §2.3。</p>
+ * {@code docs/runtime/01-build-trigger-mode.md} §2.3。</p>
  *
  * <p><b>时间域</b>：{@code build_end_millis} 是 {@link System#currentTimeMillis()} 的挂钟毫秒；
  * 与 {@link DebounceWindow} 的 {@link System#nanoTime()} 单调域不同，换算只发生在调用方。</p>

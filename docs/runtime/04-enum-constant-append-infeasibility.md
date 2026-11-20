@@ -282,7 +282,7 @@ OBS mirror.newEnumMap(shadow).put(blue) = THREW ClassCastException: class test.C
 点名三类主要阻断（`$VALUES`、`$SwitchMap$`、`EnumMap`/`EnumSet`）与 JIT/deopt，避免用户误以为"只是
 InitFix 没实现，值得自己补"。
 
-决策记录见 [`08-decisions.md`](08-decisions.md) 的 `D-ENUM-1`。
+决策记录见 [`../topology/08-decisions.md`](../topology/08-decisions.md) 的 `D-ENUM-1`。
 
 ---
 

@@ -29,7 +29,7 @@ import java.util.stream.Stream;
  * A14 runtime probe: post-revert conditional CAS fail-closed into the generational ledger, explicit
  * {@code @RemoldReinit(OVERWRITE)} recovery, and cross-generation {@code replayFacts} consumption with
  * the Eff byte budget at zero
- * ({@code docs/topology/20-generational-field-ledger.md} §3.3 / §4, criteria A14, G6, G7, G9).
+ * ({@code docs/vcs/05-generational-field-ledger.md} §3.3 / §4, criteria A14, G6, G7, G9).
  *
  * <p><b>What it proves, in order (each item is a regression lock):</b></p>
  * <ol>

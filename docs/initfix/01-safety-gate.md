@@ -90,7 +90,7 @@
 源码级"无参"枚举构造器在字节码里**不是** `()V`：javac 把 `name`/`ordinal` 两个合成参数插在最前，
 `enum E { A; E() {} }` 的构造器描述符是 `<init>(Ljava/lang/String;I)V`，`E(int x)` 是
 `<init>(Ljava/lang/String;II)V`（`javap -p -s` 实测，见
-[`docs/topology/10-enum-constant-append-infeasibility.md`](../topology/10-enum-constant-append-infeasibility.md) §5）。
+[`docs/runtime/04-enum-constant-append-infeasibility.md`](../runtime/04-enum-constant-append-infeasibility.md) §5）。
 
 本节判据**不按元数**判断"无参"：切片提取、参数回溯、根构造器共识都按实际调用描述符工作，所以枚举的
 `(String,int)` 构造器不会被误当成"依赖外部入参"。唯一相关但不是元数误判的形态是旧 javac 的

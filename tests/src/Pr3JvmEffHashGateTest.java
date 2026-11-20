@@ -32,7 +32,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * {@code InitFix} 打补丁、织入等 transformer 会在对齐之后再改一次，于是
  * {@code AlignmentMetaStore.commit(preAlign, alignOutput, jvmEffective)} 的
  * {@code alignOutput} 与 {@code jvmEffective} <b>可以不同</b>。规格
- * （{@code docs/topology/18-live-raw-to-raw-alignment.md} §3.3 / §5）把 G1 定义为
+ * （{@code docs/vcs/03-live-raw-to-raw-alignment.md} §3.3 / §5）把 G1 定义为
  * "SHA-256({@code E_prev_used}) 与 {@code jvmEffHash} <b>或</b> {@code alignOutputHash} 任一相等"，
  * 但既有夹具（{@link Pr3RawAlignmentScenarioTest} / {@link AlignmentMetaEquivalenceTest}）
  * 一律 {@code commit(..., alignOutput, alignOutput)}，两个哈希恒等，因此"只经 jvmEffHash 命中"

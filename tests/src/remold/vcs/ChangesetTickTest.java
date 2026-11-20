@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Contract tests for the commit tick in {@code docs/topology/16-bytecode-changeset-vcs.md}
+ * Contract tests for the commit tick in {@code docs/vcs/01-bytecode-changeset-vcs.md}
  * §2.1.1-§2.1.3.
  *
  * <p><b>What is guarded</b>: {@code seq} only moves for committed rounds, the parent chain stays

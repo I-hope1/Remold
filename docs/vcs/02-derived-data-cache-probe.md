@@ -4,7 +4,7 @@
 
 本文件记录 **PR2 派生数据缓存**的量化依据：为什么把缓存粒度定在"单份 blob 的纯派生"、
 为什么对齐侧只缓存消费者数据流、条目预算与字节预算各自承担什么，以及这些选择对应的等价性与
-变异检查读数。规格与契约见 [`16-bytecode-changeset-vcs.md`](16-bytecode-changeset-vcs.md) §3.7。
+变异检查读数。规格与契约见 [`01-bytecode-changeset-vcs.md`](01-bytecode-changeset-vcs.md) §3.7。
 
 ## 1. 测量口径
 

@@ -2,7 +2,7 @@
 
 > **文档类型**：实测记录（只写读数与运行条件；实现状态、验收证据汇总以 [`docs/status.md`](../status.md) 为准）
 
-契约见 [`14-build-trigger-mode.md`](14-build-trigger-mode.md)。本文件只记录
+契约见 [`01-build-trigger-mode.md`](01-build-trigger-mode.md)。本文件只记录
 `./gradlew :tests:buildTriggerProbe` 的一次真实端到端运行读数。
 
 ## 1. 运行条件

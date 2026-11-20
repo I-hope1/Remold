@@ -331,10 +331,10 @@ EffBytes   // 只允许：交给 redefineClasses、算 effHash、作为 Eff 树 
 3. **活体路径是 `Raw ↔ Raw`**：`align(Raw(old), Raw(new), resolverOld, resolverNew, inventedOldNames)`；
    `inventedOldNames` 来自 head meta（缺失时回退 `inventedSlots`）。Eff 只作为
    `redefineClasses` 的输入与继承来源，不参与配对——活体侧的准入闸门、回退与继承落地见
-   [`18-live-raw-to-raw-alignment.md`](18-live-raw-to-raw-alignment.md)。
+   [`03-live-raw-to-raw-alignment.md`](03-live-raw-to-raw-alignment.md)。
 4. **遗留幽灵/保留体/捕获桥从 meta/Eff 继承**，不从 Raw 推导：它们是"上一轮为了让老 CallSite 活着而做的
    决定"，Raw 里没有这些信息。继承集枚举判据与顺序约束见
-   [`18-live-raw-to-raw-alignment.md`](18-live-raw-to-raw-alignment.md) §4～§5。
+   [`03-live-raw-to-raw-alignment.md`](03-live-raw-to-raw-alignment.md) §4～§5。
 5. 两棵树必须**同批同源**写入：同一次 accept 判定同时写 Raw 与 Eff；不允许只写一树。
 6. 被拒绝的字节不进任何树（§2.1）。
 
@@ -459,7 +459,7 @@ VCS 层在此之上提供按 `(ClassKey, seq)` 的持久化读取，作为回放
   因此不需要 §3.2 的 `algoVersion`；跨版本/跨进程复用由导出包与离线回放承担（§7）。
 - **预算语义**：字节预算承担内存上限，条目预算只作"小值刷屏"的兜底。条目预算必须能覆盖**一轮工作集**，
   否则 LRU 每轮都把上一轮的条目冲干净，命中率退化为 0、缓存只剩开销（实测边界见
-  [`17-derived-data-cache-probe.md`](17-derived-data-cache-probe.md)）。
+  [`02-derived-data-cache-probe.md`](02-derived-data-cache-probe.md)）。
 - **等价判据**：同一输入下缓存开/关必须①产物字节逐字节相等、②`AlignmentResult` 全字段相等、
   ③换序遍历（`TEST_REVERSE_GROUP_ORDER`）下仍相等，且用例必须证明缓存**确实命中过**（否则等价性
   可以靠"缓存从未生效"空转成立）。
@@ -575,11 +575,11 @@ resolver** 参数（`Function<String, byte[]>` 形态），这是接入 commit t
 
 - `oldResolver` / `newResolver` 由 VCS 层提供：按 `ClassKey` + 相邻代从 Raw 树取字节（注意：resolver 返回的
   是**相邻匿名类的 Raw**，用于归属推导；活体对齐的 `oldBytes/newBytes` 是该类上一轮 Raw 与本轮 Raw，
-  Eff 不是对齐输入，见 §2.5 与 [`18-live-raw-to-raw-alignment.md`](18-live-raw-to-raw-alignment.md)）。
+  Eff 不是对齐输入，见 §2.5 与 [`03-live-raw-to-raw-alignment.md`](03-live-raw-to-raw-alignment.md)）。
 - `inventedOldNames` 由 head meta 提供；meta 缺失回退 `inventedSlots`（既有行为）。
 - 灰度期存在两条跑道（`Raw ↔ Raw` 与"上一轮 Eff ↔ 本轮 Raw"兼容跑道），准入闸门、整类回退与
   "无继承集成员时两跑道逐字节等价"的口径由
-  [`18-live-raw-to-raw-alignment.md`](18-live-raw-to-raw-alignment.md) §3～§6 定义；`align` 的签名与
+  [`03-live-raw-to-raw-alignment.md`](03-live-raw-to-raw-alignment.md) §3～§6 定义；`align` 的签名与
   返回值不因跑道切换而变化。
 - `align` 内部**不得**直接读全局静态表作为真值来源；表只作为兜底与迁移期兼容。
 - 结论发布仍走既有 `publishResult` / `LAST_RESULTS`，但持久化由 VCS 层从 `AlignmentResult` 抽取，
@@ -802,7 +802,7 @@ PR1 只验证"记录 / 导出 / 离线重放"这一层，不引入任何决策�
 
 - 范围：对齐改走 commit tree（resolver 与 `inventedOldNames` 从树/meta 取），保留字节埋点兜底；
   灰度开关（默认 off，支持按类白名单/百分比）。活体侧的准入闸门、继承集落地、整类回退与灰度命中
-  判据以 [`18-live-raw-to-raw-alignment.md`](18-live-raw-to-raw-alignment.md) 为准，本节只锁交付范围。
+  判据以 [`03-live-raw-to-raw-alignment.md`](03-live-raw-to-raw-alignment.md) 为准，本节只锁交付范围。
 - 验收：灰度 on/off 输出逐字节相等（口径：`E_prev` 无继承集成员时；有继承集成员时只要求 Run R
   自身逐轮可复现）；attach 前已加载类走 fallback 仍能认领幽灵；清空 meta 后
   `LDC <long>; POP2` 兜底可用；`LAMBDA_STRICT` 拒绝行为不变。
@@ -870,14 +870,14 @@ PR1 只验证"记录 / 导出 / 离线重放"这一层，不引入任何决策�
 
 - 双树与写入钩子：[`RemoldAgent`](../../core/src/remold/RemoldAgent.java)
 - 对齐结论与按类发布：[`LambdaAligner`](../../core/src/remold/LambdaAligner.java)、
-  [`13-lambda-alignment-publication-contract.md`](13-lambda-alignment-publication-contract.md)
-- 孤儿方法体保留（幽灵语义）：[`11-orphan-lambda-body-retention.md`](11-orphan-lambda-body-retention.md)、
+  [`../lambda/03-publication-contract.md`](../lambda/03-publication-contract.md)
+- 孤儿方法体保留（幽灵语义）：[`../lambda/02-orphan-body-retention.md`](../lambda/02-orphan-body-retention.md)、
   [`OrphanBodyRetention`](../../core/src/remold/OrphanBodyRetention.java)
-- 捕获桥：[`09-lambda-capture-bridge.md`](09-lambda-capture-bridge.md)
+- 捕获桥：[`../lambda/01-capture-bridge.md`](../lambda/01-capture-bridge.md)
 - InitFix 台账与写入协议：[`02-closure-and-ledger.md`](../initfix/02-closure-and-ledger.md)、
   [`03-runtime-driver.md`](../initfix/03-runtime-driver.md)、[`InitFix`](../../core/src/remold/ref/InitFix.java)
 - 两阶段与对齐不变量：[`04-target-design.md`](../initfix/04-target-design.md)、
-  [`03-cascading-pipeline.md`](03-cascading-pipeline.md)
+  [`../topology/03-cascading-pipeline.md`](../topology/03-cascading-pipeline.md)
 - 成员删除读者判据：[`07-p05-probe-results.md`](../initfix/07-p05-probe-results.md) §13、§15、§16
-- 构建完成 marker（`buildId` 关联）：[`14-build-trigger-mode.md`](14-build-trigger-mode.md)
+- 构建完成 marker（`buildId` 关联）：[`../runtime/01-build-trigger-mode.md`](../runtime/01-build-trigger-mode.md)
 - 当前状态与验收证据：[`docs/status.md`](../status.md)

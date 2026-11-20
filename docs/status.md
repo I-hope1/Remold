@@ -22,7 +22,7 @@
 |:---|:---|:---|
 | **本文件 `docs/status.md`** | 机制/能力状态、验证证据、风险、路线图 | 缺陷修复记录（现场形态、根因、复现步骤只进 `CHANGELOG.md`；设计契约进规格文档） |
 | **设计规格**（`docs/topology` · `initfix` · `offset` · `ecosystem` · `mixin`、`HOTSWAP.md`） | 客观规格、契约、判据、已知边界 | 交付状态散文（`已实现`/`未实现`/`待实现`/`已落地`/`已上线`/`待评审`/`已收口`/`未接线`…）与 `✅/⬜/🔶` 标记 |
-| **实测记录 / 审计记录**（`initfix/07`、`initfix/08`、`topology/10`、`neoforge/01`） | 一次性读数与证据（可腐化） | 当前实现状态断言；横幅必须点名本文件 |
+| **实测记录 / 审计记录**（`initfix/07`、`initfix/08`、`runtime/04`、`neoforge/01`） | 一次性读数与证据（可腐化） | 当前实现状态断言；横幅必须点名本文件 |
 | **决策记录**（`topology/08`、`mixin/08`、`initfix/06`） | 决策、否决理由、历史结论 | 状态标记 |
 | `CHANGELOG.md` / `docs/releases/` / `docs/acceptance/` | 发布历史、验收清单结果、缺陷修复明细 | 当前状态（以本文件为准） |
 | **代码 Javadoc / 注释** | 契约、边界、不变量、运行时语义 | 交付状态；写「不在当前范围」并指向本文件 |
@@ -115,7 +115,7 @@
 | 删除成员的批次外读者分析 | ✅ | [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §13.6、§15 | `core/src/remold/ref/RemovedMemberReaders` | 纯函数。字段按 JVMS 5.4.3.2（自身 → 父接口 → 父类）判"改动后引用是否悬空"；**实例方法额外走 JVMS 5.4.6 的向下分派**（归属方向相反：owner 可以是 `A` 的任何祖先），输出六档——悬空 / 抽象方法缺失 / **静态性翻转（ICCE）** / 判不了 / 分派回退 / 同静态性改指向；**只有前三档阻断**，后两档是合法回退，只记日志（§16.4）。`refs()` 为纯常量池扫描（tag 15 的 `reference_index` 必然回指 9/10/11，故天然覆盖指令与 `invokedynamic`/`LDC` 的句柄）。`RemovedMemberReadersTest` 23 用例、`LayoutGateWiringTest` 34 用例，6 处变异检查；`ReaderScanProbe` 验证"常量池扫描是方法体精扫的超集"，`P05Probe` M7/M8 给出失败形态实测。**接线**：`applyRedefineLayoutGate` 在批次循环前扫一次；`decideLayout` 对 `REMOVED_FIELD` 用 `WAIVE_NO_READERS` / `REJECT`，对"本轮删过方法"另设分支（**必须在 `compatible()` 早退之前**，否则只删方法的编辑永远不会被拦），扫描未完成时方法一律拒绝。扫描范围取"已加载的工程类（内存字节）+ 工程构建输出"，JDK 与第三方 jar 不在范围内；成本 434 类约 25 ms（§14.6）。缓存覆盖由 `CacheWarmingTransformer`（首次加载填充）+ 一次批量 retransform 补齐，并滤掉数组类/hidden class/不可重定义类。**缺口**：pre-11 合成访问器未折算；`invokespecial` 与 `invokevirtual` 在常量池里同 tag，按"可能分派"保守处理 |
 | 标准 JVM 能力探测、结构变化摘批与降级开关 | ✅ | [`06-runtime-and-perf.md`](topology/06-runtime-and-perf.md) §1 | `RemoldAgent.probeEnhancedHotswap` / `mustSkipForMissingEnhancedRedefinition` | 厂商标识 + flag 文本双条件，杜绝 `-XX:+IgnoreUnrecognizedVMOptions` 回显造成的误判；结构变化类在无增强能力时摘出本批，不再拖垮同批纯方法体修改；`FORCE_STATIC_LAMBDA` 在无能力时被强制降级关闭并打 `DEGRADED` 日志（`degradeForMissingEnhancedRedefinition`；`INIT_FIX` 刻意不降级，否则会让直接调用 `InitFix.transform` 的路径静默空转）；`minecraft-fabric-template/README.md` 已按运行时能力分档说明，不再承诺“完美适配任意 JDK 21+”；`EnhancedHotswapGateTest` 9 用例，含变异检查（改回参数文本探测时 `probeMatchesRealVmOptionState` 变红） |
 | 重定义层三态存活判定与静态字段门 | ✅ | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1 | `RemoldAgent.decideLayout` | `COMPATIBLE` / `WAIVED` / `REJECTED`。**删除静态字段**与实例字段共用"批次外读者为空"，但扫描未完成时只能拒绝——静态值不随实例存在，liveness 兜不住（[`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §16）。**编译期常量（`ConstantValue`）放行（只记日志）**：javac 把值内联进读者的 `ldc`/`bipush`，这类读者常量池里没有 `Fieldref`，"无读者"不是安全证明而是没有信号；未内联的读者仍有 `Fieldref`，会被 `hits` 正常抓到（§16.1）。已内联的读者需全量重编才能看到新值，这属于 Java 常量的既有语义 |
-| 枚举常量声明顺序/集合安全门与 Switch 级联阻断 | ✅ | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1 | `ClassDiffUtil` / `LayoutGate` / `LayoutDecisionEngine` / `RemoldAgent` / `MixinMemberAlign` | 拦截枚举常量重排/前插导致的 ordinal 漂移（`CHANGED_ENUM_ORDER` 拒绝并提示 revert 或 restart）；末尾追加/删除常量虽不改已有 ordinal，但 JVM 重定义不重跑 `<clinit>`，新增常量运行期恒 null、删除常量仍留在旧 `$VALUES`，同样拒绝（`ENUM_CONSTANT_SET_CHANGED`）；级联阻断本批中持有对应 `$SwitchMap$`/进行 switch 的调用类，以及直接引用变更常量的类，杜绝 switch 静默错位与延迟 `NoSuchFieldError`；**顺序判定之前不得有成员表重写**：`MixinMemberAlign` 只对 Mixin 生成成员生效，普通枚举的 `$VALUES` 等 JVM 合成字段不再触发对齐，且枚举类字段表不重排、被删常量不复活（契约见 [`mixin/03`](mixin/03-reweave-and-member-alignment.md) §2）；`EnumSwitchReorderGateTest`（9 用例，含"追加拒绝原因必须点名实测阻断项"的文案守卫）+ `EnumAlignmentGateWiringTest`（8 用例，含错位对齐的红测试与变异击杀）；**追加/删除常量不做运行期修复**：JBR 21 真机探针证明"重写 `$VALUES` + 清两个 `Class` 枚举缓存"必要但不充分（JIT 折叠 / `$SwitchMap$` 无法自动补新 case / 存量 `EnumMap`·`EnumSet` 无法原地扩容；后两项补测为"可修但有覆盖与竞态前提"），读数见 [`10-enum-constant-append-infeasibility.md`](topology/10-enum-constant-append-infeasibility.md)、决策 [`D-ENUM-1`](topology/08-decisions.md#d-enum-1)，探针 `tests/enum-append-probe/` |
+| 枚举常量声明顺序/集合安全门与 Switch 级联阻断 | ✅ | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1 | `ClassDiffUtil` / `LayoutGate` / `LayoutDecisionEngine` / `RemoldAgent` / `MixinMemberAlign` | 拦截枚举常量重排/前插导致的 ordinal 漂移（`CHANGED_ENUM_ORDER` 拒绝并提示 revert 或 restart）；末尾追加/删除常量虽不改已有 ordinal，但 JVM 重定义不重跑 `<clinit>`，新增常量运行期恒 null、删除常量仍留在旧 `$VALUES`，同样拒绝（`ENUM_CONSTANT_SET_CHANGED`）；级联阻断本批中持有对应 `$SwitchMap$`/进行 switch 的调用类，以及直接引用变更常量的类，杜绝 switch 静默错位与延迟 `NoSuchFieldError`；**顺序判定之前不得有成员表重写**：`MixinMemberAlign` 只对 Mixin 生成成员生效，普通枚举的 `$VALUES` 等 JVM 合成字段不再触发对齐，且枚举类字段表不重排、被删常量不复活（契约见 [`mixin/03`](mixin/03-reweave-and-member-alignment.md) §2）；`EnumSwitchReorderGateTest`（9 用例，含"追加拒绝原因必须点名实测阻断项"的文案守卫）+ `EnumAlignmentGateWiringTest`（8 用例，含错位对齐的红测试与变异击杀）；**追加/删除常量不做运行期修复**：JBR 21 真机探针证明"重写 `$VALUES` + 清两个 `Class` 枚举缓存"必要但不充分（JIT 折叠 / `$SwitchMap$` 无法自动补新 case / 存量 `EnumMap`·`EnumSet` 无法原地扩容；后两项补测为"可修但有覆盖与竞态前提"），读数见 [`10-enum-constant-append-infeasibility.md`](runtime/04-enum-constant-append-infeasibility.md)、决策 [`D-ENUM-1`](topology/08-decisions.md#d-enum-1)，探针 `tests/enum-append-probe/` |
 | Record 组件变更与 `@RemoldReinit` 初值可行性安全门 | ✅ | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1 | `ClassDiffUtil` / `LayoutGate` / `LayoutDecisionEngine` / `InitFix.unextractableReinitFields` | 拦截 Record 类新增组件（`RECORD_COMPONENT_ADDED`，有存活实例坚决拒绝，无存活实例放行）；解决 `@RemoldReinit` 授权放行与初值提取切片脱节导致的存量实例静默清零问题：在授权 `WAIVE_REINIT` 前核验切片提取可行性，若为 Record 组件、构造器参数自赋值或无合法初值表达式则拒绝放行（`LAYOUT-REJECT`）；`RecordAndReinitExtractabilityGateTest`（5 用例，覆盖 Record 加组件有/无实例、Record 改类型标 reinit 拒绝、构造器自赋值标 reinit 拒绝、普通类合法初值标 reinit 放行，变异检查通过） |
 | 同名局部类编号漂移止血门 | 🔶 | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §2 | `LocalClassGuard` / `RemoldAgent.LOCAL_CLASS_GUARD` | 识别同名局部类计数 >= 2 并将宿主整族移出本轮；**未覆盖“唯一简单名局部类内部的匿名类位移”形态**（见风险 5） |
 | 同名局部类完整拓扑对齐 | ⬜ | [`07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §2 | 待实现于 `LocalClassGuard` | 路线图规划；规划准入与保留简单名改号；当前由止血门安全拦截 |
@@ -132,7 +132,7 @@
 
 ### 1.1 字节码 Changeset 旁路记录（PR1）
 
-设计规格：[`docs/topology/16-bytecode-changeset-vcs.md`](topology/16-bytecode-changeset-vcs.md)
+设计规格：[`docs/vcs/01-bytecode-changeset-vcs.md`](vcs/01-bytecode-changeset-vcs.md)
 
 | 机制 / 条目 | 状态 | 规范章节 | 落地位置 | 验收证据与决策依据 |
 |:---|:---:|:---|:---|:---|
@@ -156,7 +156,7 @@
 
 ### 1.1.1 活的 Raw↔Raw 对齐（PR3）
 
-设计规格：[`docs/topology/18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md)
+设计规格：[`docs/vcs/03-live-raw-to-raw-alignment.md`](vcs/03-live-raw-to-raw-alignment.md)
 
 | 机制 / 条目 | 状态 | 规范章节 | 落地位置 | 验收证据与决策依据 |
 |:---|:---:|:---|:---|:---|
@@ -170,8 +170,8 @@
 
 ### 1.2 字节码 Changeset 派生数据缓存（PR2）
 
-设计规格：[`docs/topology/16-bytecode-changeset-vcs.md`](topology/16-bytecode-changeset-vcs.md) §3.7；
-实测读数：[`docs/topology/17-derived-data-cache-probe.md`](topology/17-derived-data-cache-probe.md)
+设计规格：[`docs/vcs/01-bytecode-changeset-vcs.md`](vcs/01-bytecode-changeset-vcs.md) §3.7；
+实测读数：[`docs/vcs/02-derived-data-cache-probe.md`](vcs/02-derived-data-cache-probe.md)
 
 | 机制 / 条目 | 状态 | 规范章节 | 落地位置 | 验收证据与决策依据 |
 |:---|:---:|:---|:---|:---|
@@ -179,7 +179,7 @@
 | 对齐侧：按 `(blob, 方法 name+desc)` 缓存消费者数据流（`findConsumers` 的 ASM `Analyzer`） | ✅ | §3.7 / §3.5 | `LambdaAligner.consumersOf` / `deriveConsumerTags` / `hasConsumerSite` | 值按**指令流下标**对齐（命中后在本轮新解析出的节点上重建，长度不一致直接退回重算）；`ACTIVE_MUTATION` 非空时旁路缓存；**位点预判**：方法体内无"本类 lambda 调用位点"时既不跑数据流也不入池（实测每类 `align()` median 2.02→1.01 ms、条目 4654→495）；`DerivedDataEquivalenceTest` 6 例（开/关字节相等 + `AlignmentResult` 全字段相等 + 换序遍历 + 关闭不写条目 + 键维度/描述符维度 + 直接调用合成方法的位点） |
 | 读者侧：按 blob 缓存类型世界与常量池引用 | ✅ | §3.7 / [`initfix/07`](initfix/07-p05-probe-results.md) §13.6 | `RemovedMemberReaders.describe` / `refs` | `DerivedDataEquivalenceTest.readerFactsCacheIsEquivalent`：`universe()`/`refs()` 开/关逐项相等、pre/post 两世界共用条目（命中数 = 类数）；`ReaderScanProbe` 新增开/关双档同轮读数 |
 | InitFix 侧按 blob 缓存字节解析（`InitFix.NestView` 字段写索引 / `HierarchyTreeOracle.readClassBytes`） | ⬜ | §3.7 | 待测量后决定 | 本切片未取到 InitFix 侧读数：对齐侧消融显示"消费者数据流之外的全部派生"只占约 8%，据此先只缓存对齐侧与读者侧；InitFix 侧的解析量级尚未实测，不做无读数的实现 |
-| 派生缓存粒度与预算的决定依据 | ✅ | §3.7 | `tests/src/DerivedDataBench.java` | 同轮 min/median/max：`findConsumers` 消融占对齐耗时 89～92%；最终实现下真实批次（旧侧命中）对齐 1.52×（k=8）/1.77×（整语料）、读者侧 2.4×～3.3×；条目预算小于一轮工作集时命中率退化为 0（读数与边界见 [`17-derived-data-cache-probe.md`](topology/17-derived-data-cache-probe.md)） |
+| 派生缓存粒度与预算的决定依据 | ✅ | §3.7 | `tests/src/DerivedDataBench.java` | 同轮 min/median/max：`findConsumers` 消融占对齐耗时 89～92%；最终实现下真实批次（旧侧命中）对齐 1.52×（k=8）/1.77×（整语料）、读者侧 2.4×～3.3×；条目预算小于一轮工作集时命中率退化为 0（读数与边界见 [`17-derived-data-cache-probe.md`](vcs/02-derived-data-cache-probe.md)） |
 
 ---
 
@@ -276,7 +276,7 @@
 | **NeoForge 26.x / FML 10 代际适配** | P2 | v0.3（先 spike） | `plugin-forge`；原 §4.1.1 条目已并入本节 | FML 10 源码与 `net.neoforged.fml.startup.*` 入口 | 上游已移除 ModLauncher，现有跨 ClassLoader 桥不适用 = 该代际完全不可用；先量化工作量再决定是否全量（避免无用户证据的长期投入） |
 | **`ForgeMixinHotSwap` 接入内部类热更闭环** | P2 | v0.3 | [历史归档 §0.10](releases/historical-rounds-archive.md) 残余 8；[`mixin/08`](mixin/08-decisions-and-empirical-ledger.md) | 已有 Fabric 侧闭环可参照 | 拉平 Forge 与 Fabric 的 Mixin 匿名/内部类能力（含覆盖层与事务共退） |
 | **跨类批次拓扑排序** | ✅ | 已交付（见 §2 行「跨类批次字段依赖收敛与拓扑执行（PR4-A）」） | [`04-target-design.md`](initfix/04-target-design.md) §5 | 跨类字段依赖图构建器 | 类 X 新增字段被类 Y 初始化式依赖时的跨类事务顺序（含单类内部拓扑）；宿主级环与矛盾交错保守拒绝、独立字段仍可补；运行期 prerequisite 失败只跳精确下游 |
-| **对齐盲区收敛包** | P2 | v0.3 | 风险 2/3/5；[`03-cascading-pipeline.md`](topology/03-cascading-pipeline.md) §2、[`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §1、[`09-lambda-capture-bridge.md`](topology/09-lambda-capture-bridge.md) §6 | 无 | 同批收敛六处同源盲区：非方法上下文三态标签、同名局部类完整对齐、Tier 1.5 重叠评估（与 Tier 3.5 重复则撤销）、夹具 L 保守代价、`willForward` 转发桩被熔断器先炸、`BODY_MISMATCH` 去重键缺轮次 |
+| **对齐盲区收敛包** | P2 | v0.3 | 风险 2/3/5；[`03-cascading-pipeline.md`](topology/03-cascading-pipeline.md) §2、[`04-tiers-and-rejection.md`](topology/04-tiers-and-rejection.md) §1、[`09-lambda-capture-bridge.md`](lambda/01-capture-bridge.md) §6 | 无 | 同批收敛六处同源盲区：非方法上下文三态标签、同名局部类完整对齐、Tier 1.5 重叠评估（与 Tier 3.5 重复则撤销）、夹具 L 保守代价、`willForward` 转发桩被熔断器先炸、`BODY_MISMATCH` 去重键缺轮次 |
 | **反射与元数据漂移补齐** | P2 | v0.3 | [历史归档 §0.16/§0.17](releases/historical-rounds-archive.md) / 风险 10 | 无 | Gson/Jackson 真实缓存驱逐前后对照、`EvictionScope.WITH_DESCENDANTS` 评估、类级泛型签名漂移告警、`HashSemantics` 子类读父类新增字段扫描、`AnnotationDefault` 移除读 `SourceFile` 成因定位 |
 | **Mixin `schemaHash` 新合成类名方案** | P2 | v0.3（`[假设]` 先验） | [`mixin/08`](mixin/08-decisions-and-empirical-ledger.md) §4 | 无 | 捕获列表变化时用 `defineClass` 新类名 + 宿主 body-only redefine，验证 `newlyNull=0` 后打破"改 Mixin 匿名类捕获必须重启" |
 | **增强重定义四盲区验证与防护** | P2 | v0.3 | [`08-decisions.md`](topology/08-decisions.md) 附录 A | 专用探针套件 | JIT 内联观察、`volatile`/`final` 复杂修饰符、继承跨层遮蔽、JBR 25 复验 |
@@ -328,7 +328,7 @@
 | 条目 | 结论 | 触发条件 / 理由 |
 |:---|:---:|:---|
 | **构造器尾部插桩**（`ConstructorTailInjector`） | 关闭 | 两阶段契约（阶段 A 保留新构造器/`<clinit>`）已取代该缝隙；条目作废，仅保留既有单测，不再作为路线图条目 |
-| **枚举常量增删的运行期修复** | 停车 | 维持 `D-ENUM-1` 拒绝。补测（`topology/10` §3.5.1/§3.6.1）证明"机制可做但不可闭环"：读者 deopt 必须覆盖全部已加载类、`Class` 影子副本无法穷举、redefine→遍历/换数组窗口的并发竞态、用户态按 ordinal 索引的数组无法枚举。重开条件见 §5 风险 20 |
+| **枚举常量增删的运行期修复** | 停车 | 维持 `D-ENUM-1` 拒绝。补测（`runtime/04` §3.5.1/§3.6.1）证明"机制可做但不可闭环"：读者 deopt 必须覆盖全部已加载类、`Class` 影子副本无法穷举、redefine→遍历/换数组窗口的并发竞态、用户态按 ordinal 索引的数组无法枚举。重开条件见 §5 风险 20 |
 | **Tier 1.5 内容相似度** | 待评估 | 与已落地的 Tier 3.5（方法体 token 相似度）＋骨架指纹高度重叠；并入 v0.3 对齐盲区收敛包评估，确认重复则撤销条目 |
 | **批次单遍历全堆**（`IterateThroughHeap`） | 已移出（见 §2） | 已于 §2 交付 `LibTool.getInstancesBatch` / `hasLiveInstancesBatch`（K≥8 走批扫描，旧原生库或小批次退回逐类） |
 | **外部 IDE-JDWP 通道接入两阶段** | 停车 | JDWP 协议没有第二次 redefine 触发点；`redefineDynamic` 已覆盖主工作流 |
@@ -350,7 +350,7 @@
 | **批次内按类重复全堆遍历（已收口）** | 已收口（见 §2） | `LibTool.getInstancesBatch` / `hasLiveInstancesBatch` | §2 已按分块上限（16/64）与 K≥8 阈值交付单次全堆遍历，保留 `remold.LibToolTest#heapScanIncludesSubclassesButNotSuperclasses` 子类不对称语义与旧原生库降级路径 |
 | **每次 redefine 会大范围失效已编译代码** | P2（条件：槽位 ⑩） | 实测见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §11 | 对照组实测：redefine 一个**无关类**（无论只改方法体还是新增字段），另一个类的 C2 版本同样在窗口内被 `made not entrant` → 每次热更后进程可能大范围回退到解释/C1 执行、出现预热回落。归因未定（可能是 DCEVM 的全局失效策略），成本真实；需要真实场景测一次热更后的吞吐恢复曲线。该成本按 redefine **次数**计，两阶段的两次 redefine 会把回落代价翻倍 |
 | **真实批次规模 N 未知** | P1 · 观测包（槽位 ⑩） | `RemoldAgent`（`HotswapBatchListener` 已暴露批次边界）/ `InitFix.applyPatch`（已记 `count=N` 与 `elapsed`） | 「单遍历按类分发」是否值得，取决于真实批次类数 N 与每类实例数，目前只有合成数据。观测手段已具备，需要的是**几天真实热更样本**，不是再加代码 |
-| **连带保留子体（消除保留体混跑）** | P2（条件：出现"旧实例必须完全保留旧语义"的诉求） | `LambdaAligner` 幽灵注入 / `OrphanBodyRetention` | 旧体 indy 引用的嵌套 lambda 被配对更新时，当前策略是"保留旧体 + `warn` 点名混跑风险"（旧实例语义优先，不退回默认值桩）；彻底消除混跑需把子 lambda 也搬成幽灵、不参与本轮配对，属配对-保留联合决策；规格 [`11-orphan-lambda-body-retention.md`](topology/11-orphan-lambda-body-retention.md) §3.4 |
+| **连带保留子体（消除保留体混跑）** | P2（条件：出现"旧实例必须完全保留旧语义"的诉求） | `LambdaAligner` 幽灵注入 / `OrphanBodyRetention` | 旧体 indy 引用的嵌套 lambda 被配对更新时，当前策略是"保留旧体 + `warn` 点名混跑风险"（旧实例语义优先，不退回默认值桩）；彻底消除混跑需把子 lambda 也搬成幽灵、不参与本轮配对，属配对-保留联合决策；规格 [`11-orphan-lambda-body-retention.md`](lambda/02-orphan-body-retention.md) §3.4 |
 
 > 关于 `AnonClassHasher.MAX_DEPTH`：该类注释已明确其为**永不生效的历史遗留常量**（`hash` 不递归自调用，三处调用点全传 `depth = 0`，`DeepNestProbe` 实测 depth 8 仍能正确对齐）。保留它是为了不动公开签名 `hash(..., int depth)`，**不应再作为「嵌套深度上限」引用，也不应作为技术债重复登记**。
 
@@ -367,16 +367,16 @@
 - **当前缓解措施**：① 幽灵集合改由继承集定义（`E_prev` 枚举 + `Meta.ghostHashes` 校正），复活判据不再依赖 `R_prev`；② 缺少 LVT 时按槽号/类型兜底并记 warn，`LAMBDA_STRICT` 门仍可把它升级为硬失败；③ 见证表缺项只降低配对证据强度，落 Run E 或位置兜底的路径均有读数（`positionalFallbacks`）。
 - **残余影响**：上述三处在 Run R 下的证据强度低于 Run E；不产生静默写入，但可能让本可复活/本可精确配对的用例退化为兜底。
 - **后续验证方式**：`Pr3RawAlignmentScenarioTest` 覆盖 Ctrl+Z 幽灵继承与桥转发；新增「仅 `E_prev` 可见的见证」用例时以 `positionalFallbacks`/`runRGate` 为终局判据。
-- **决策依据**：[`18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md) §5（继承集枚举）与 §6（fail-closed）。
+- **决策依据**：[`18-live-raw-to-raw-alignment.md`](vcs/03-live-raw-to-raw-alignment.md) §5（继承集枚举）与 §6（fail-closed）。
 
 ### 风险 25：`forceStaticLambdas` 归一化与 Run R 的闸门关系（按实测更正）
 - **风险描述与底层机制**：`normalizeAlignBaseline` / `forceStaticLambdas` 会在对齐前重写 lambda 调用位点；一度担心这类类的 `E_prev_used` 与 `Meta.jvmEffHash` 不同源，导致 G1 代际身份判不出而整类回退 Run E。
-- **实测结论**：该担心不成立。`preAlign` 快照取自归一化**之后**，两侧指纹同源；真实两代语料 400 类里命中归一化的 7 类**全部 `PASSED`**，全语料 `RAW_PREV_MISMATCH` 为 0。读数见 [`19-raw-to-raw-realworld-readings.md`](topology/19-raw-to-raw-realworld-readings.md) §2。
+- **实测结论**：该担心不成立。`preAlign` 快照取自归一化**之后**，两侧指纹同源；真实两代语料 400 类里命中归一化的 7 类**全部 `PASSED`**，全语料 `RAW_PREV_MISMATCH` 为 0。读数见 [`19-raw-to-raw-realworld-readings.md`](vcs/04-raw-to-raw-realworld-readings.md) §2。
 - **仍然成立的边界**：真正压低 Run R 接合率的是"没有本地 lambda 槽位"的类（只有外部方法引用）——它们判 `TRANSLATION_INCOMPLETE` 并回退；含 lambda 站点的类里接合率为 50/62（80.6%）。
 - **当前缓解措施**：不需要额外缓解；G1 维持"只比 `E_prev` 指纹"的单校验和设计，不做转换前后双哈希。
 - **残余影响**：无（该风险项按读数关闭）。若将来把 `preAlign` 快照挪到归一化之前，本结论立即失效，必须重跑 §2 的读数。
 - **后续验证方式**：`bash gradlew :tests:pr3RealWorldReadings`（需两代语料时用 `-Ppr3.corpus.old/new`）。
-- **决策依据**：[`18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md) §3.2；读数 [`19-raw-to-raw-realworld-readings.md`](topology/19-raw-to-raw-realworld-readings.md)。
+- **决策依据**：[`18-live-raw-to-raw-alignment.md`](vcs/03-live-raw-to-raw-alignment.md) §3.2；读数 [`19-raw-to-raw-realworld-readings.md`](vcs/04-raw-to-raw-realworld-readings.md)。
 
 ### 风险 28：`L1` 继承字段的代际对账依赖声明类在批次里
 - **风险描述与底层机制**：`L1` 重放写的是匿名子类实例里的**继承**字段，而 `replayFacts` 的 `ownerClass`、台账键与相邻性判据（`rawHash` 在 `[g, target]` 恒定）都以**声明类**为键。声明类若从未出现在事实那一代的 `Changeset.entries` 里，`isAdjacent` 无法证明"事实仍成立"，消费侧判 `REFUSED_DISCONTINUOUS` 并把字段挂成未闭环债务；回归头再看，本可重放的字段被拒。
@@ -384,7 +384,7 @@
 - **当前缓解措施**：按 fail-closed 拒绝（不回落"最近活代"事实），`PatchReport` 记 `rejected:` 并点名恢复路径；正向代不查台账（只在回退上下文或已欠债时查），所以这条缺口不会拖慢正常重放。
 - **残余影响**：单靠 `L1` 无法把跨代对账用起来；`vcsLedgerGcProbe` 的夹具必须先让声明类在事实那一代里有条目（探针里每次漂移都重编父类）才能产生可对账的事实——也就是说真实工程里这条通道的实际覆盖面取决于"父类是否随同一次重编"。
 - **后续验证方式**：给 `isAdjacent` 补一条"声明类缺失即视为不连续"的显式负例（现在由 `REFUSED_DISCONTINUOUS` 间接覆盖）；评估用 `Changeset.manifest` 的类级指纹替代 `entries` 存在性，把判据放宽到"该代确实录过这个类"。
-- **决策依据**：[`20-generational-field-ledger.md`](topology/20-generational-field-ledger.md) §3.5 / §4-R6。
+- **决策依据**：[`20-generational-field-ledger.md`](vcs/05-generational-field-ledger.md) §3.5 / §4-R6。
 
 ### 风险 29：`@RemoldReinit(OVERWRITE)` 无法闭环被回退污染的继承字段
 - **风险描述与底层机制**：回退后 `L1` 字段被挂在台账上未闭环，恢复要求显式重建或 `@RemoldReinit(OVERWRITE)`；但布局门对"`INCLUDE_SUBCLASSES` + 子类初始化器仍在写该继承字段"的注解直接 `LAYOUT-REJECT`（否则会用声明类的值覆盖子类专属初值，且子类赋值不在重放范围内），而 `scope = SELF` 只写宿主自身实例、够不到匿名子类实例。
@@ -392,16 +392,16 @@
 - **当前缓解措施**：拒绝而不是放宽——`vcsA14Probe` 的恢复轮同时做两件事：给声明类打 `@RemoldReinit(OVERWRITE)` **并**让子类初始化块不再写该字段（"显式重建"的字面形态），此时布局门放行、写入真的落到存量实例、债务 `markClosed`、报告出现 `recovered: overwrite`。
 - **残余影响**：只想改注解、不动子类初值的用户拿不到恢复路径，只能等下一次结构变化或重启；台账里该字段会一直保持未闭环（可见、不遗忘，但也不再自动重试）。
 - **后续验证方式**：若要支持"子类初值不动也能恢复"，需要先设计"按子类分别取期望"的方案（当前 `KIND_CONDITIONAL_EXPECTED` 只有单一期望来源），并在 `ReinitScopeGate` 补对应负例。
-- **决策依据**：[`20-generational-field-ledger.md`](topology/20-generational-field-ledger.md) §3.5、`docs/initfix/12-L1-existing-initializer-replay.md`。
+- **决策依据**：[`20-generational-field-ledger.md`](vcs/05-generational-field-ledger.md) §3.5、`docs/initfix/12-L1-existing-initializer-replay.md`。
 
 ### 风险 27：`Raw_prev` blob 预算容量与提交耗时只有单语料读数
 - **风险描述与底层机制**：`Raw_prev` blob 以字节形态进元数据，受 16 MiB 全局 / 每类 256 KiB 双预算约束；预算压力下丢字节保哈希，该类当轮回退 Run E。
-- **实测读数**：真实两代语料 400 类满载 2,389,448 B（占 16 MiB 的 14.2%）、`droppedBlobCount=0`，平均每类 ≈5.97 KB；64 KiB 对照档掉 5 类（1.3%）并全部落 `NO_RAW_PREV`。`commit` 每类 median 0.30 ms / p90 0.65 ms，400 类一批约 170 ms。读数见 [`19-raw-to-raw-realworld-readings.md`](topology/19-raw-to-raw-realworld-readings.md) §3。
+- **实测读数**：真实两代语料 400 类满载 2,389,448 B（占 16 MiB 的 14.2%）、`droppedBlobCount=0`，平均每类 ≈5.97 KB；64 KiB 对照档掉 5 类（1.3%）并全部落 `NO_RAW_PREV`。`commit` 每类 median 0.30 ms / p90 0.65 ms，400 类一批约 170 ms。读数见 [`19-raw-to-raw-realworld-readings.md`](vcs/04-raw-to-raw-realworld-readings.md) §3。
 - **触发条件**：单 classloader 内带 blob 的类数超过约 2,700（按本语料类体积外推，属推断）；游戏工程类体积更大时容量更小。
 - **当前缓解措施**：超预算即丢字节保哈希（fail-closed 回退 Run E，每类一条 warn），不会静默用残缺基线配对。
 - **残余影响**：超出容量的尾部类享受不到 Run R；`O(entries)` 记账未做受控微基准，只观测到同批内首末四分位耗时比 3.0×~10.0× 且不随条目数单调。
 - **后续验证方式**：在真实工程上复测 `droppedBlobCount()`；如需确认记账复杂度，做"受控条目数"微基准（固定类体积、变条目数）。
-- **决策依据**：[`18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md) §5。
+- **决策依据**：[`18-live-raw-to-raw-alignment.md`](vcs/03-live-raw-to-raw-alignment.md) §5。
 
 ### 风险 26：Raw_prev blob 记账为 O(条目数)
 - **风险描述与底层机制**：全局字节预算的维持按条目扫描记账，每类提交一次。
@@ -409,7 +409,7 @@
 - **当前缓解措施**：提交发生在批次收尾而非热路径；每类上限 256 KiB 限制单条贡献，预算默认 16 MiB。
 - **残余影响**：大批次提交期有一次性 O(n) 记账开销，未实测绝对耗时，属推断。
 - **后续验证方式**：若大批次提交耗时成为瓶颈，改为增量记账（维护累计字节数 + 淘汰队列）。
-- **决策依据**：[`18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md) §5。
+- **决策依据**：[`18-live-raw-to-raw-alignment.md`](vcs/03-live-raw-to-raw-alignment.md) §5。
 
 ### 风险 1：实例存活判定 TOCTOU 竞态窗口
 - **风险描述与底层机制**：从堆遍历（`LibTool.getInstances`）判定“某类无存活实例”到真正执行 `redefineClasses` 生效之间，存在纳秒至微秒级的时间窗口。
@@ -642,17 +642,17 @@
   存量 `EnumMap`/`EnumSet` 实例无法原地扩容（AIOOBE / 迭代陈旧），补测表明逐实例换 `keyUniverse`/`vals`/
   `universe` 可行（`heap-repair`），但需遍历堆全覆盖 + 窗口/并发防护，跨 64 常量边界不可；
   另有 `Class` 影子副本与懒加载旧代码不可闭环。读数与复现见
-  [`topology/10-enum-constant-append-infeasibility.md`](topology/10-enum-constant-append-infeasibility.md)。
+  [`runtime/04-enum-constant-append-infeasibility.md`](runtime/04-enum-constant-append-infeasibility.md)。
 - **触发条件**：枚举类常量集合变化（新增或删除任意常量）。
 - **当前处置**：维持 `ENUM_CONSTANT_SET_CHANGED` 拒绝 + 提示重启；拒绝原因点名 `$VALUES`/`$SwitchMap$`/
   `EnumMap`/JIT-deopt 四项阻断，避免用户误以为"只是 InitFix 没实现"。不做运行期补丁。
   `EnumSwitchReorderGateTest.appendedEnumConstantRejectionNamesTheMeasuredBlockers` 锁住该诊断文案。
 - **重新评估条件**：三项能力（`$SwitchMap$` 重建、读者 deopt、存量集合逐实例换数组）经补测**均已具备**
-  （`topology/10` §3.5.1 / §3.6.1），但剩余阻断未闭环：必须 deopt **全部**已加载读者（遗漏即静默旧值）、
+  （`runtime/04` §3.5.1 / §3.6.1），但剩余阻断未闭环：必须 deopt **全部**已加载读者（遗漏即静默旧值）、
   `Class` 影子副本无法穷举、redefine→遍历/换数组窗口的并发竞态、用户态按 ordinal 索引的数组无法枚举。
   因此维持拒绝（§4.1.3 停车项）。重开条件改为：出现明确用户诉求**且**能保证失败响亮（拒绝日志/报告）+ 接受覆盖成本，
   只做 opt-in 实验通道。完整清单见该文档 §6。
-- **关联设计规范**：`docs/topology/10-enum-constant-append-infeasibility.md`。
+- **关联设计规范**：`docs/runtime/04-enum-constant-append-infeasibility.md`。
 - **关联架构决策**：[`D-ENUM-1`](topology/08-decisions.md#d-enum-1)。
 - **关联代码**：`ClassDiffUtil` / `LayoutGate.ENUM_CONSTANT_SET_CHANGED` / `LayoutDecisionEngine.decide` /
   `RemoldAgent.dropEnumSwitchDependents` / `dropEnumConstantDependents`；探针 `tests/enum-append-probe/`。
@@ -672,7 +672,7 @@
 
 - **范围**：Mindustry UI 胶水层 `CellPropertyRef` 的静态链提取与属性重放。它不参与 InitFix 的判决，
   但决定"热更后 UI 属性链能否被正确重建"。跨类批次映射已按类寻址（契约见
-  [`topology/13-lambda-alignment-publication-contract.md`](topology/13-lambda-alignment-publication-contract.md)）；
+  [`lambda/03-publication-contract.md`](lambda/03-publication-contract.md)）；
   下列边界仍敞开。
 - **判定手段偏浅**：属性链提取用原生 `SourceInterpreter`，只接受 `SourceValue.insns.size() == 1` 的来源
   （`extractArgsDataflow`），遇到三元表达式/栈复制即返回 `null`，参数留待运行期 `slotCursor` 按调用序回填；
@@ -703,7 +703,7 @@
   被拒绝的 marker 只在日志里给出原因与 `delta`，不会自动关闭 marker——用户可设 `buildTrigger = false` 回到纯兜底。
 - **未覆盖的验证面**：JBR 17/21 DCEVM、Linux、macOS 的高灵敏度 watcher 路径、多类/匿名类/lambda 批次、
   多次连续构建的长期稳定性。
-- **关联设计规范**：`docs/topology/14-build-trigger-mode.md`；读数：`docs/topology/15-build-trigger-probe.md`。
+- **关联设计规范**：`docs/runtime/01-build-trigger-mode.md`；读数：`docs/runtime/02-build-trigger-probe.md`。
 
 ## 6. 框架集成插件与资源热更新 (Framework Plugins & Asset Hot-Reload)
 
@@ -753,7 +753,7 @@
 | Gradle 二进制插件 (`gradle-plugin`) | ✅ | `gradle-plugin/`、`gradle-plugin/build.gradle`、`gradle-plugin/README.md` | 提供 `io.github.i-hope1.remold` 二进制插件，支持 Kotlin DSL 与 Groovy DSL 类型安全配置 `remold { ... }`、`remold.attach(...)`（直接注入既有 `JavaExec` / `Test` / `TaskProvider` / 运行器，不强制 `mainClass`/`jar`、去重 `-javaagent:` 并重置 JBR `javaLauncher`）与真配置缓存兼容（`GenerateIdeaRunConfigTask` / `GenerateRemoldScriptTask` / `StartRemoldTask` / `CleanRemoldCacheTask` + `whenReady` + 延后本地 agent 同步，`agentJar` 支持 `project.file` 相对路径）；`RemoldPluginTest` 13/13、`AttachAndConfigurationCacheTest` 4/4（TestKit `--configuration-cache` 复用 + 真 `JavaExec` 探针）、`RemoldScriptShimTest`、`CleanRemoldCacheTaskTest`、`RemoldAgentVersionTest` 全绿，`validatePlugins` 通过；JVM 参数注入覆盖 `client`、`server` 与 gametest 运行容器（Fabric Loom / ForgeGradle / NeoForge ModDevGradle），IDEA Loom 同步覆盖 `Minecraft_Server.xml`（Application 风格 `VM_PARAMETERS` 与 Gradle 风格 `vmOptions`）；仓库根 `remold.gradle(.kts)` 已瘦身为薄壳（仅按 Class 应用本插件，实现在本模块），jar 内附带一份副本供离线取用。**Gradle Plugin Portal 已上线**（v0.2.7 起发布；v0.2.8 已验证可解析，见顶部发版说明、[`releases/v0.2.8.md`](releases/v0.2.8.md) 与 `README.md`；英文文档与 `website` 已补齐）；**G0 合规已完成**：`com.gradle.plugin-publish` 已升至 `2.2.1` 并声明 `compatibility { features { configurationCache = true } }` |
 | GitHub Release 发布物 | ✅ | `.github/workflows/release.yml` | Tag `v*` 触发全量前置验证矩阵（javac 8/11/17/21/25 测试、DCEVM 测试、P0.5 探针与 Linux x64/Android 原生库编译、Linux aarch64 制品 ABI 校验），全绿后自动打包 18 项 Release 资产并发布到 GitHub Releases，消除资产早于构建事故；支持 `workflow_dispatch` 手动触发与 `--clobber` 覆写更新 |
 | Class / 资源防抖分离 | ✅ | `core/src/remold/DebounceWindow.java`（纯状态机）、`RemoldAgent.handleFileChange/handleJarChange/handleAssetChange`、`gradle-plugin` 的 `assetShakeMs` | Class/jar 事件每次重置独立静默窗口（默认 800ms）；资源/配置流独立窗口（默认 250ms），到期只 drain 资源队列，不提前带出 Class 批次；手动 `triggerHotswap()` 取消挂起调度、清空两条流并强制 drain 全部。`DebounceWindowTest` 6/6（无 sleep：事件重置、双流互不影响、nextDelay、clear）、`AssetShakeConfigTest` 1/1；全量 `check` 514/0 skipped。**未验证**：真实 FileWatcher 的 OS 事件节奏（单测只覆盖状态机，未测 Windows 文件系统时延分布） |
-| 构建完成 marker（build-trigger 快路径） | ✅ | `core/src/remold/BuildTriggerMarker.java`（解析/拒绝/去重）、`core/src/remold/BuildTriggerSweep.java`（mtime 扫描）、`RemoldAgent.configureBuildTrigger` / `handleBuildTriggerFile`、`DebounceWindow.markClassDueNow`（sticky due）、`FileWatcherService` 专用 trigger watcher；`gradle-plugin` `BuildTriggerWriter` + `RemoldPlugin` 的 `classes.doLast` + `RemoldConfigResolver` 注入；设计 `docs/topology/14-build-trigger-mode.md`，读数 `docs/topology/15-build-trigger-probe.md` | **已观测（Windows + JBR 25.0.2，单进程单轮同口径）**：`./gradlew :tests:buildTriggerProbe` 63/0；marker→批次回调（含 redefine）min/median/max = 57/97/325ms（20 轮）；同一编译不写 marker 的对照 min/median = 883/887ms（3 轮；max 3652ms 那一轮的 `redefine=2855ms`，属单轮长尾，不是窗口变长）；取消兜底（窗口临时 3000ms）marker→批次 114ms，之后 700ms 内无第二次非空批次；陈旧 marker（−60s）0 批次；无变更 marker 0 次非空批次。单测 `BuildTriggerMarkerTest` 9/9、`BuildTriggerSweepTest` 7/7、`BuildTriggerTest` 7/7、`DebounceWindowTest` 7/7；插件 `BuildTriggerWriterTest` 3/3、`BuildTriggerTestKitTest` 3/3（含配置缓存复用轮仍写出有效 marker）、`RemoldPluginTest` 16/16。**变异 7/7 击杀**（sticky latch 关闭 / 后续 marker 重扫 / 陈旧+未来校验关闭 / 扫描 mtime 过滤关闭 / 空扫描仍置 due / `buildTrigger=false` 仍注入 / `classes.doLast` 接线删除）。**未验证/残余**：JBR 17/21 DCEVM、Linux、macOS 未复测；macOS 高灵敏度 watcher 修饰符无实测；构建时长 > 兜底窗口时编译中途批次仍拦不住；marker 之后到达的同批事件仍产生 no-op 批次（哈希全跳过，无 redefine/回调）；mtime 扫描依赖文件系统时间语义 |
+| 构建完成 marker（build-trigger 快路径） | ✅ | `core/src/remold/BuildTriggerMarker.java`（解析/拒绝/去重）、`core/src/remold/BuildTriggerSweep.java`（mtime 扫描）、`RemoldAgent.configureBuildTrigger` / `handleBuildTriggerFile`、`DebounceWindow.markClassDueNow`（sticky due）、`FileWatcherService` 专用 trigger watcher；`gradle-plugin` `BuildTriggerWriter` + `RemoldPlugin` 的 `classes.doLast` + `RemoldConfigResolver` 注入；设计 `docs/runtime/01-build-trigger-mode.md`，读数 `docs/runtime/02-build-trigger-probe.md` | **已观测（Windows + JBR 25.0.2，单进程单轮同口径）**：`./gradlew :tests:buildTriggerProbe` 63/0；marker→批次回调（含 redefine）min/median/max = 57/97/325ms（20 轮）；同一编译不写 marker 的对照 min/median = 883/887ms（3 轮；max 3652ms 那一轮的 `redefine=2855ms`，属单轮长尾，不是窗口变长）；取消兜底（窗口临时 3000ms）marker→批次 114ms，之后 700ms 内无第二次非空批次；陈旧 marker（−60s）0 批次；无变更 marker 0 次非空批次。单测 `BuildTriggerMarkerTest` 9/9、`BuildTriggerSweepTest` 7/7、`BuildTriggerTest` 7/7、`DebounceWindowTest` 7/7；插件 `BuildTriggerWriterTest` 3/3、`BuildTriggerTestKitTest` 3/3（含配置缓存复用轮仍写出有效 marker）、`RemoldPluginTest` 16/16。**变异 7/7 击杀**（sticky latch 关闭 / 后续 marker 重扫 / 陈旧+未来校验关闭 / 扫描 mtime 过滤关闭 / 空扫描仍置 due / `buildTrigger=false` 仍注入 / `classes.doLast` 接线删除）。**未验证/残余**：JBR 17/21 DCEVM、Linux、macOS 未复测；macOS 高灵敏度 watcher 修饰符无实测；构建时长 > 兜底窗口时编译中途批次仍拦不住；marker 之后到达的同批事件仍产生 no-op 批次（哈希全跳过，无 redefine/回调）；mtime 扫描依赖文件系统时间语义 |
 | 模组模板基线（1.21.1 主模板 + 客户端 HotSwap Toast） | ✅ | `minecraft-fabric-template/`（MC 1.21.1 / yarn 1.21.1+build.3 / loader 0.16.9 / fabric-api 0.105.0+1.21.1 / Loom 1.17.21；客户端入口 `com.example.client.ExampleModClient`） | JBR 21（`jbrsdk_jcef-21.0.9`）`./gradlew build --offline` **exit 0**：`HotSwapToastModelTest` **10 tests / 0 skipped / 0 failures**；产物 `build/libs/example_mod-1.0.0.jar` 内含 `com/example/client/*` 且 jar 内 `fabric.mod.json` 含 `client` 入口；Toast 按 1.21.1 的 `Toast.draw(DrawContext, ToastManager, long)` 适配（1.21.1 无 `Toast.update`，展示计时在 `draw` 内完成），结构化报告依赖新版 Agent；v0.2.6 已发布并带结构化批次报告，旧版 Agent 仍显示明确的降级卡片；**未验证**：卡片实际渲染（本环境无显示会话，仅观测到入口/监听器注册日志路径与模型单测），手动步骤见模板 README |
 | 1.21.4 客户端 gametest 探针 | 🔶 | `tests/fabric-gametest-1.21.4/`（独立 Gradle 工程：MC 1.21.4 / yarn 1.21.4+build.8 / loader 0.16.14 / fabric-api 0.119.4+1.21.4 / Loom 1.17.21） | 由 1.21.4 模板的 tracked 文件裁剪而来（删除 Toast 的 `src/main/java/com/example/client/`、`src/test/` 与 `client` 入口点；保留 wand/Mixin/`src/gametest/` 与截图模板）；JBR 21 `./gradlew compileJava --offline` 与 `./gradlew compileGametestJava --offline` 均 **exit 0**；日志确认真实注入：`[Remold] Injected hot-reload agent parameters into Fabric Loom runClientGameTest!`；`configure<FabricApiExtension>{configureTests{...}}` 生成 `gametest` 源集 + `clientGameTest` 运行配置。**端到端 `runClientGameTest` 证据沿用 1.21.4 模板时期（`4d459ff`：真客户端建世界 → 热栏截图断言 → 真实右键聊天栏 `[Remold]`）；本次移动后未重跑**（无显示环境），不计为新增验证 |
 | Maven Central 分发 | ⬜ | `build.gradle` 的 `group = 'io.github.i-hope1.remold'` | 仅 `README.md` 标注为「预留坐标」，未实际发布；走通需 Central Portal + GPG 签名 + `io.github.<user>` 命名空间验证。当前 `publishToMavenLocal` 落盘该 group 仅供本机联调兜底（`remold.gradle(.kts)` 的 m2 候选路径按文件探测，文件不存在即跳过） |

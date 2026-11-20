@@ -4,7 +4,7 @@
 
 > 本文件记录 Run R（活体 `R_prev ↔ R_new` 对齐）在**真实规模语料**上的三项读数：`forceStaticLambdas`
 > 命中类导致的闸门回退率、`Raw_prev` blob 预算与提交耗时、`runRGate` 与 `positionalFallbacks` 的分布。
-> 规格见 [`18-live-raw-to-raw-alignment.md`](18-live-raw-to-raw-alignment.md)。
+> 规格见 [`03-live-raw-to-raw-alignment.md`](03-live-raw-to-raw-alignment.md)。
 > 取数脚本：`tests/src/Pr3RealWorldReadingsProbe.java`（任务 `:tests:pr3RealWorldReadings`）。
 
 ## 1. 口径（先声明局限，再报数）

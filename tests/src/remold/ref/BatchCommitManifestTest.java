@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * {@code Changeset.Manifest.candidateMissing} must name only classes whose bytes really are absent
- * ({@code docs/topology/16-bytecode-changeset-vcs.md} §2.1.2).
+ * ({@code docs/vcs/01-bytecode-changeset-vcs.md} §2.1.2).
  *
  * <p><b>What is guarded</b>: the candidate-to-loader lookup used to be an {@code IdentityHashMap}
  * keyed by loader id {@code String}, so every per-candidate {@code substring} produced a fresh

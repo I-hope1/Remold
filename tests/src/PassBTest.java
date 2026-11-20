@@ -218,7 +218,7 @@ public class PassBTest {
 	 * （互相依赖），{@code plugin-fabric}/{@code plugin-mixin}/{@code plugin-forge} 各自单独编译。
 	 * 插件的外部第三方依赖（{@code org.spongepowered:mixin}）从本地 Gradle 缓存按坐标发现；
 	 * 缓存里没有就<b>不静默跳过</b>，而是把它记进 {@link Corpus#gaps} 并打印
-	 * {@code [BodyFingerprintFP-GAP]} 行（缺口在 {@code docs/topology/09-lambda-capture-bridge.md}
+	 * {@code [BodyFingerprintFP-GAP]} 行（缺口在 {@code docs/lambda/01-capture-bridge.md}
 	 * 有显式条目）。{@code plugin-arc} 无论缓存有没有都编不动，原因见该方法末尾登记的缺口。</p>
 	 */
 	@Test
@@ -276,7 +276,7 @@ public class PassBTest {
 			+ " @TypeIOHandler 生成的类型）；javac 会把 arc/mindustry 引用解析到这些源文件，"
 			+ "随即以'找不到 mindustry.annotations.Annotations'/'找不到 TypeIOHandler'失败，"
 			+ "而补齐它们需要 Mindustry 自带的注解处理器（离线缓存里没有该制品）。"
-			+ "该缺口在 docs/topology/09-lambda-capture-bridge.md 显式登记。");
+			+ "该缺口在 docs/lambda/01-capture-bridge.md 显式登记。");
 
 		int withLambdas = corpus.withLambdas;
 		assertTrue(withLambdas >= 20,

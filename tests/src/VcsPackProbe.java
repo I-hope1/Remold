@@ -30,7 +30,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * PR1 end-to-end probe: real agent + real file watching + real JVM redefine, then replay the
  * exported pack offline and assert byte-identical alignment.
  *
- * <p>Scenarios (see {@code docs/topology/16-bytecode-changeset-vcs.md} §7.3):</p>
+ * <p>Scenarios (see {@code docs/vcs/01-bytecode-changeset-vcs.md} §7.3):</p>
  * <ol>
  *   <li><b>record on</b>: one lambda-deleting hot swap must produce exactly one pack entry, and
  *       the redefined class must report the new value (the record must not disturb the redefine).</li>

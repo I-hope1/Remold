@@ -2,7 +2,7 @@ package remold.vcs;
 
 /**
  * 消费侧代际对账门：把 {@link GenerationalFieldLedger#resolve} 的结论翻成"这一轮这条字段还写不写、
- * 比较侧用什么期望、写入侧写什么值"（{@code docs/topology/20-generational-field-ledger.md} §3.3 / §4）。
+ * 比较侧用什么期望、写入侧写什么值"（{@code docs/vcs/05-generational-field-ledger.md} §3.3 / §4）。
  *
  * <p><b>期望来源唯一</b>：{@link Mode#FACT} 下比较侧取事实的 {@code oldLiteral}、写入侧取<b>同一条</b>
  * 事实的 {@code newLiteral}（§3.3 / D6）。本类不产生第二来源：引擎自写值、{@code REINIT_APPLIED}

@@ -3,7 +3,7 @@
 > **文档类型**：设计规格（只写规格与契约；当前实现状态、验收证据与残余风险以 [`docs/status.md`](../status.md) 为准）
 
 本文件定义"构建完成信号"（build-trigger marker）的写入格式、消费规则、与 `fileShakeMs` 兜底窗口的关系，
-以及可观测的边界。它不定义任何实现进度；探针读数见 `15-build-trigger-probe.md`。
+以及可观测的边界。它不定义任何实现进度；探针读数见 `02-build-trigger-probe.md`。
 
 ## 1. 术语与范围
 
@@ -167,7 +167,7 @@ no-op 批次的可观测规则：`HotswapBatchListener` 的 `afterInternalBatch`
 | 非本地/保留 mtime 的文件系统 | 扫描可能漏；事件路径保证最终一致 |
 | 配置缓存命中 | 第二轮构建仍必须写出有效 marker（见验收要求） |
 
-## 7. 验收要求（细节见 `15-build-trigger-probe.md`）
+## 7. 验收要求（细节见 `02-build-trigger-probe.md`）
 
 - sticky due：`markClassDueNow` 后立即 `onClass` 断言仍 due（先写红再实现）。
 - 取消兜底：事件已入队、兜底 task 已挂起时收到 marker，批次必须在兜底 deadline 之前开始；同轮同口径对照为

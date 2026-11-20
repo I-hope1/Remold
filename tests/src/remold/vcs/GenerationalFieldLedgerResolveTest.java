@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Deterministic cross-generation resolution ({@code docs/topology/20-generational-field-ledger.md}
+ * Deterministic cross-generation resolution ({@code docs/vcs/05-generational-field-ledger.md}
  * §3.2 / §3.3, negative criteria A5 and A14).
  *
  * <p><b>What is guarded</b>: the expectation a conditional CAS compares against is taken from the

@@ -1,8 +1,7 @@
 # 代际字段台账（B2）：`FieldLedger` / `REINIT_APPLIED` 的按代存储与 CAS 对账
 
-文档类型：设计规格。交付状态与验收计数只在 [`docs/status.md`](../status.md) 登记，本文件不重复。
-上游规格：[`16-bytecode-changeset-vcs.md`](16-bytecode-changeset-vcs.md) §2.1.1～§2.1.3 / §3.6 / §3.8 / §4.1 / §5.2 / §5.4，
-本文件只做**扩展**；与 16 冲突处以 16 为准。
+> **文档类型**：设计规格（交付状态与验收计数以 [`docs/status.md`](../status.md) 为准）
+> 上游规格：[`01-bytecode-changeset-vcs.md`](01-bytecode-changeset-vcs.md) §2.1.1～§2.1.3 / §3.6 / §3.8 / §4.1 / §5.2 / §5.4，本文件只做扩展；冲突处以 `01` 为准。
 
 ## 0. 边界
 
@@ -227,5 +226,4 @@ A5 / A8 / A14 的实现对应物（本文件只定义判据，不登记状态）
 
 未决项（需 Lead 裁量，均不影响上文规则的机械可判定性）：
 
-1. R5 的 L1 new 侧定型缺口：扩 `Changeset.ReplayFact` 需回到 16 §3.8 做格式评审；否则 `L1` 的 `float`/`double` 跨代对账长期停在"拒绝"档。
-2. 本文件编号与既有 [`19-raw-to-raw-realworld-readings.md`](19-raw-to-raw-realworld-readings.md) 同为 `19-` 前缀，是否改为 `20-`。
+1. R5 的 L1 new 侧定型缺口：扩 `Changeset.ReplayFact` 需回到 [`01-bytecode-changeset-vcs.md`](01-bytecode-changeset-vcs.md) §3.8 做格式评审；否则 `L1` 的 `float`/`double` 跨代对账长期停在"拒绝"档。

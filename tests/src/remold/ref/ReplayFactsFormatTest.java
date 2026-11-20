@@ -9,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Commit-level replay facts must carry the same canonical form on BOTH sides
- * ({@code docs/topology/16-bytecode-changeset-vcs.md} §3.8).
+ * ({@code docs/vcs/01-bytecode-changeset-vcs.md} §3.8).
  *
  * <p><b>What is guarded</b>: the {@code L1} tier's new value comes from the replay plan's real
  * boxed constant, not from its human-readable rendering. Only normalising the old side would make

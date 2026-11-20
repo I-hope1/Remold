@@ -62,8 +62,8 @@ HotSwap / InitFix 核心开发规范。所有规则与不变量在本文件定�
 |:--|:--|:--|
 | InitFix 存量初始化与代际台账 | `core/src/remold/ref/`、`core/src/remold/vcs/Generational*` | `docs/code-map.md` §1、`docs/initfix/` |
 | 两阶段 Redefine、JVMTI 批扫描与布局门 | `RemoldAgent`、`LibTool`、`LayoutGate`、`RemovedMemberReaders`、`StageASkeleton` | `docs/code-map.md` §2、`docs/initfix/04`·`05` |
-| Agent 调度、防抖、Trigger 与看门狗 | `core/src/remold/`（`DebounceWindow`、`BuildTrigger*`、`StartupGate`、`BatchWatchdog`、`BytecodeSources`） | `docs/code-map.md` §3、`docs/topology/14` |
-| 字节码 VCS、派生缓存与 Raw 对齐 | `core/src/remold/vcs/`、`LambdaAligner`、`OrphanBodyRetention` | `docs/code-map.md` §4、`docs/topology/16`·`18`·`20` |
+| Agent 调度、防抖、Trigger 与看门狗 | `core/src/remold/`（`DebounceWindow`、`BuildTrigger*`、`StartupGate`、`BatchWatchdog`、`BytecodeSources`） | `docs/code-map.md` §3、`docs/runtime/01` |
+| 字节码 VCS、派生缓存与 Raw 对齐 | `core/src/remold/vcs/`、`LambdaAligner`、`OrphanBodyRetention` | `docs/code-map.md` §4、`docs/vcs/01`·`03`·`05` |
 | 加载器插件、Mixin、偏移与 Gradle 插件 | `plugin-{fabric,mixin,forge,arc}/`、`core/.../offset/`·`evict/`·`reflect/mixin/`、`gradle-plugin/` | `docs/code-map.md` §5、`docs/mixin/`、`docs/offset/` |
 | 测试夹具、外部源码与专项探针 | `tests/src/`、`tests/ktfix/`、`.sources/` | `docs/code-map.md` §6、`docs/testing-guide.md` |
 
@@ -93,7 +93,10 @@ HotSwap / InitFix 核心开发规范。所有规则与不变量在本文件定�
 
 修改对应子系统前先读规格与索引（完整总目录见 [`docs/index.md`](docs/index.md) / [`docs/index_en.md`](docs/index_en.md)）：
 - **InitFix**：`docs/initfix/` — `01-safety-gate.md`（分层/效应/参数回溯）、`02-closure-and-ledger.md`（闭包/成环/台账）、`03-runtime-driver.md`（补丁驱动/`@RemoldReinit`）、`04-target-design.md`（两阶段/跨类拓扑）、`05-jvmti-heap.md`（JVMTI 批扫描）、`06-decisions.md`、`07-p05-probe-results.md`、`09-hotswapinit-design.md`、`12-L1-existing-initializer-replay.md`、`13-kotlin-apply-replay.md`。
-- **拓扑对齐 / VCS / 代际台账**：`docs/topology/` — `01`~`08`（不变量/准入/流水线/Tier/开关/LayoutGate/决策 ADR）、`09-lambda-capture-bridge.md`、`10-enum-constant-append-infeasibility.md`、`11-orphan-lambda-body-retention.md`、`14-build-trigger-mode.md`、`16-bytecode-changeset-vcs.md`、`18-live-raw-to-raw-alignment.md`、`20-generational-field-ledger.md`。
+- **匿名类拓扑对齐**：`docs/topology/` — `01`~`08`（不变量/准入/流水线/Tier/开关/LayoutGate/决策 ADR）。
+- **Lambda 对齐**：`docs/lambda/` — `01-capture-bridge.md`、`02-orphan-body-retention.md`、`03-publication-contract.md`。
+- **字节码 VCS / 台账**：`docs/vcs/` — `01-bytecode-changeset-vcs.md`、`03-live-raw-to-raw-alignment.md`、`05-generational-field-ledger.md`（及对应实测 `02`/`04`/`06`）。
+- **Agent 调度与运行时实测**：`docs/runtime/` — `01-build-trigger-mode.md`、`03-jbr-dcevm-jit-drain-tail-latency.md`、`04-enum-constant-append-infeasibility.md`。
 - **偏移与缓存驱逐**：`docs/offset/01-offset-and-reflection-cache.md`。
 - **Mixin 子系统**：`docs/mixin/01`~`08`（类加载权威/覆盖层/重织入/结构突破/合成类闸门/运行诊断/决策台账）。
 

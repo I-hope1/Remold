@@ -4,7 +4,7 @@
 
 > 本文件定义 `LambdaAligner` 每轮对齐结论的**发布形式**，以及"批次结束后才读结论"的消费者
 > （`CellPropertyRef.afterRedefineBatch`）的取用与降级规则。对齐算法本身（配对判据、捕获桥、孤儿桩）
-> 见 [`01-invariants-and-remapping.md`](01-invariants-and-remapping.md)～[`11-orphan-lambda-body-retention.md`](11-orphan-lambda-body-retention.md)。
+> 见 [`../topology/01-invariants-and-remapping.md`](../topology/01-invariants-and-remapping.md)～[`02-orphan-body-retention.md`](02-orphan-body-retention.md)。
 
 ## 1. 问题：逐类对齐 + 批末消费
 
@@ -72,7 +72,7 @@
 
 ## 6. 相关文档
 
-- 对齐输入的选择（`Raw ↔ Raw` 与 Eff_prev 兼容跑道、准入闸门、继承集）：[`18-live-raw-to-raw-alignment.md`](18-live-raw-to-raw-alignment.md)。
+- 对齐输入的选择（`Raw ↔ Raw` 与 Eff_prev 兼容跑道、准入闸门、继承集）：[`../vcs/03-live-raw-to-raw-alignment.md`](../vcs/03-live-raw-to-raw-alignment.md)。
 - 状态与残余风险：[`docs/status.md`](../status.md)（风险 22 记录 `CellPropertyRef` 程序分析与执行手段的深度边界）。
 - 批次生命周期与监听器顺序：`RemoldAgent.notifyBatchListeners`、`api/src/remold/HotswapBatchListener.java`。
 - UI 属性追踪的消费者侧：[`plugin-arc/src/remold/uihook/CellPropertyRef.java`](../../plugin-arc/src/remold/uihook/CellPropertyRef.java)。

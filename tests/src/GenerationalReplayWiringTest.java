@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Analysis-time wiring of {@code GenerationalFieldLedger.resolve} into the {@code L1} replay decision
- * ({@code docs/topology/20-generational-field-ledger.md} §3.3, criteria A5 / A14, invariants G6 / G8).
+ * ({@code docs/vcs/05-generational-field-ledger.md} §3.3, criteria A5 / A14, invariants G6 / G8).
  *
  * <p><b>What is guarded</b>: once a scope has generational history, a replay candidate whose fact is
  * stale / discontinuous / out of window must be <b>dropped from the patch</b>, reported as

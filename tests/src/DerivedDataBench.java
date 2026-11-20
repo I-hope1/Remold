@@ -17,7 +17,7 @@ import java.util.stream.Stream;
 
 /**
  * PR2「派生数据缓存」的规模量化基准：先量出对齐侧与读者侧各自的真实成本，
- * 再据此决定缓存粒度（读数写进 {@code docs/topology/16-bytecode-changeset-vcs.md}，本类不进门禁）。
+ * 再据此决定缓存粒度（读数写进 {@code docs/vcs/01-bytecode-changeset-vcs.md}，本类不进门禁）。
  *
  * <p>唯一的断言是"缓存开/关的产物必须相等"（对齐侧逐字节、读者侧类型世界+引用集合），
  * 那是缓存正确性的必要条件；真正的门禁用例在 JUnit（{@code DerivedDataEquivalenceTest}）。</p>

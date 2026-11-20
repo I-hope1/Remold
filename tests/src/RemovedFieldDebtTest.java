@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Un-closed generational debt must be released when the field is deleted from the new layout
- * ({@code docs/topology/20-generational-field-ledger.md} §2.3).
+ * ({@code docs/vcs/05-generational-field-ledger.md} §2.3).
  *
  * <p><b>What is guarded</b>: the release hangs off the <b>structural</b> signal
  * ({@code diff.changedFields} entry {@code "- name"}) and is keyed exactly by

@@ -451,6 +451,9 @@ tasks.register("verifyDocStatusMarkers") {
 		def checkDirs = [
 			file("${rootDir}/docs/initfix"),
 			file("${rootDir}/docs/topology"),
+			file("${rootDir}/docs/lambda"),
+			file("${rootDir}/docs/vcs"),
+			file("${rootDir}/docs/runtime"),
 			file("${rootDir}/docs/offset"),
 			file("${rootDir}/docs/ecosystem"),
 			file("${rootDir}/core/src"),
@@ -937,7 +940,7 @@ agentProbe("injectConflictProbe", "InjectConflictProbe",
 	"新类注入冲突回归 (InjectConflictProbe)：LinkageError 且字节不一致时不得更新 bytecodeCache 基线")
 
 // 构建完成 marker 快路径实测：真实 watcher + 真实 DCEVM redefine。
-// 不挂 check（需要 DCEVM 与真实文件系统事件节奏）；契约见 docs/topology/14-build-trigger-mode.md。
+// 不挂 check（需要 DCEVM 与真实文件系统事件节奏）；契约见 docs/runtime/01-build-trigger-mode.md。
 tasks.register("buildTriggerProbe", JavaExec) {
 	group = "verification"
 	description = "构建完成 marker 实测 (BuildTriggerProbe)：marker→批次延迟 / 取消兜底 / 陈旧 marker / 构建中途"

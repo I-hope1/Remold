@@ -14,7 +14,7 @@ import java.util.TreeMap;
 import java.util.function.Function;
 
 /**
- * 一轮热更提交刻度的不可变记录（{@code docs/topology/16-bytecode-changeset-vcs.md} §2.1.1）。
+ * 一轮热更提交刻度的不可变记录（{@code docs/vcs/01-bytecode-changeset-vcs.md} §2.1.1）。
  *
  * <p>本类型只持有字符串、哈希与 loader scope 代号：不持有 {@code Class}、{@code ClassLoader}、
  * {@code ClassNode} 或任何字节数组，因此可以安全地长期驻留而不拖住类元数据（不变量 C8）。</p>
@@ -148,7 +148,7 @@ public record Changeset(
 	 * 扩展构造：额外固化 {@code Eff_0} 基线哈希与（回退时的）目标代序号。
 	 *
 	 * <p>{@code eff0} 只在该类首次进入本 scope 链的那一代填写，之后各代原样携带；它是区间回退到
-	 * 「首次修改之前」时的唯一字节来源（{@code docs/topology/16-bytecode-changeset-vcs.md} §2.1.1）。</p>
+	 * 「首次修改之前」时的唯一字节来源（{@code docs/vcs/01-bytecode-changeset-vcs.md} §2.1.1）。</p>
 	 */
 	public static Changeset create(String parentId, long seq, String roundId, long loaderScope,
 	                               Map<String, Entry> entries, Manifest manifest,

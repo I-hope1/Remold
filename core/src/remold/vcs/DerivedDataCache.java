@@ -37,7 +37,7 @@ public final class DerivedDataCache {
 	 *
 	 * <p>为什么可覆盖：不同派生种类的<b>工作集</b>差两个数量级——对齐侧按"本轮改动的类 × 方法数"计
 	 * （典型批次几百条），读者扫描侧按"整个工程类语料"计（上千条）。实测（{@code DerivedDataBench}，
-	 * 读数见 {@code docs/topology/16-bytecode-changeset-vcs.md} §3.7）：条目上限低于一轮工作集时
+	 * 读数见 {@code docs/vcs/01-bytecode-changeset-vcs.md} §3.7）：条目上限低于一轮工作集时
 	 * 命中率直接掉到 0（LRU 每轮把上一轮的条目全冲掉），缓存反而只剩开销。</p>
 	 *
 	 * <p>因此默认值取到"<b>字节</b>预算成为真正的内存上限"的量级（每条约 0.5～1.8 KiB），

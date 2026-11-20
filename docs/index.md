@@ -89,17 +89,17 @@ flowchart TD
 | :--- | :--- |
 | [`01-mod-artifact-and-class-isolation.md`](ecosystem/01-mod-artifact-and-class-isolation.md) | 模组生态二元分类、五大构建制品冲突危害、3D 环境探测矩阵与运行时残留 JAR 巡检契约 |
 
-### 2.5 变更集 VCS、活体对齐与代际字段台账 (Changeset VCS & Generational Ledger)
-解决"这一轮热更到底改了哪些字节、跨轮次如何寻址与回放"的版本层（16/17），其上的活体对齐输入契约与真实规模读数（18/19），以及回退后如何按代对账存量字段（20/21）：
+### 2.5 变更集 VCS、活体对齐与代际字段台账 (Changeset VCS & Generational Ledger, `docs/vcs/`)
+解决"这一轮热更到底改了哪些字节、跨轮次如何寻址与回放"的版本层（`01`/`02`），其上的活体对齐输入契约与真实规模读数（`03`/`04`），以及回退后如何按代对账存量字段（`05`/`06`）：
 
 | 文档 | 主题与核心内容 |
 | :--- | :--- |
-| [`16-bytecode-changeset-vcs.md`](topology/16-bytecode-changeset-vcs.md) | 内容寻址的逐代 `Changeset` 链与热更版本层规格（`seq` 寻址与窗口、`patchTiming` 时刻语义、`replayFacts` 事实模型、派生数据缓存键契约） |
-| [`17-derived-data-cache-probe.md`](topology/17-derived-data-cache-probe.md) | 派生数据缓存的粒度、条目/字节双预算边界与开/关等价性实测读数 |
-| [`18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md) | 活体对齐的 Raw ↔ Raw 输入选择、G1/G2/G3 准入闸门与 `Eff_prev` 继承集枚举/落地顺序 |
-| [`19-raw-to-raw-realworld-readings.md`](topology/19-raw-to-raw-realworld-readings.md) | 真实规模语料下 Raw ↔ Raw 对齐的命中、失配与耗时读数 |
-| [`20-generational-field-ledger.md`](topology/20-generational-field-ledger.md) | 代际字段台账（B2）：`FieldLedger` / `REINIT_APPLIED` 的按代存储（`GenRef(seq,id)`）、回退后 CAS 期望只取目标代与 fail-closed 口径、`replayFacts` 跨代消费规则 |
-| [`21-b1-gc-baseline-readings.md`](topology/21-b1-gc-baseline-readings.md) | B1 旁路账的内存与 GC 基线读数（保留堆/GC 口径与 B2 引入后的对比方法） |
+| [`01-bytecode-changeset-vcs.md`](vcs/01-bytecode-changeset-vcs.md) | 内容寻址的逐代 `Changeset` 链与热更版本层规格（`seq` 寻址与窗口、`patchTiming` 时刻语义、`replayFacts` 事实模型、派生数据缓存键契约） |
+| [`02-derived-data-cache-probe.md`](vcs/02-derived-data-cache-probe.md) | 派生数据缓存的粒度、条目/字节双预算边界与开/关等价性实测读数 |
+| [`03-live-raw-to-raw-alignment.md`](vcs/03-live-raw-to-raw-alignment.md) | 活体对齐的 Raw ↔ Raw 输入选择、G1/G2/G3 准入闸门与 `Eff_prev` 继承集枚举/落地顺序 |
+| [`04-raw-to-raw-realworld-readings.md`](vcs/04-raw-to-raw-realworld-readings.md) | 真实规模语料下 Raw ↔ Raw 对齐的命中、失配与耗时读数 |
+| [`05-generational-field-ledger.md`](vcs/05-generational-field-ledger.md) | 代际字段台账（B2）：`FieldLedger` / `REINIT_APPLIED` 的按代存储（`GenRef(seq,id)`）、回退后 CAS 期望只取目标代与 fail-closed 口径、`replayFacts` 跨代消费规则 |
+| [`06-b1-gc-baseline-readings.md`](vcs/06-b1-gc-baseline-readings.md) | B1 旁路账的内存与 GC 基线读数（保留堆/GC 口径与 B2 引入后的对比方法） |
 
 ### 2.6 Mixin 热更子系统 (Mixin Hot-Reload)
 体系化收录 Mixin 类加载器权威、覆盖层注入、级联重织入、结构契约突破与合成内部类闸门（`docs/mixin/01..08`）：
@@ -114,6 +114,25 @@ flowchart TD
 | [`06-walkthrough.md`](mixin/06-walkthrough.md) | 四个真实闭环场景的字节流与读数 |
 | [`07-runtime-and-diagnostics.md`](mixin/07-runtime-and-diagnostics.md) | 启动门闩、批次看门狗、`[VM-INFO]`、双通道堆哨兵 |
 | [`08-decisions-and-empirical-ledger.md`](mixin/08-decisions-and-empirical-ledger.md) | Lambda vs 匿名类、放弃原地扩容的实证链、未闭合项与 P2 |
+
+### 2.7 Lambda 对齐与捕获桥 (`docs/lambda/`)
+覆盖 `LambdaAligner` 的单向捕获桥合成、孤儿方法体保留与按类发布契约：
+
+| 文档 | 主题与核心内容 |
+| :--- | :--- |
+| [`01-capture-bridge.md`](lambda/01-capture-bridge.md) | Lambda 捕获桥（单向）：删除与可证明新增捕获变量的桥接、三道判定门与产物形态 |
+| [`02-orphan-body-retention.md`](lambda/02-orphan-body-retention.md) | 孤儿 Lambda 方法体保留：非 void 默认保留旧体、本类成员存活性判据与幽灵身份解耦 |
+| [`03-publication-contract.md`](lambda/03-publication-contract.md) | Lambda 对齐结论按类发布与检索契约 |
+
+### 2.8 构建触发与运行时边界实测 (`docs/runtime/`)
+收录 Agent 构建触发 marker 契约及非拓扑类 JVM/枚举运行时边界实测：
+
+| 文档 | 主题与核心内容 |
+| :--- | :--- |
+| [`01-build-trigger-mode.md`](runtime/01-build-trigger-mode.md) | 构建完成 marker（build-trigger）：提前触发与兜底取消契约 |
+| [`02-build-trigger-probe.md`](runtime/02-build-trigger-probe.md) | build-trigger 探针实测读数与对照组 |
+| [`03-jbr-dcevm-jit-drain-tail-latency.md`](runtime/03-jbr-dcevm-jit-drain-tail-latency.md) | Fabric + DCEVM 4 秒尾延迟调查：JIT drain safepoint 实测与退避定位 |
+| [`04-enum-constant-append-infeasibility.md`](runtime/04-enum-constant-append-infeasibility.md) | 枚举常量集合变更不做运行期修复的 JBR 21 实测记录与否决证据 |
 
 ---
 

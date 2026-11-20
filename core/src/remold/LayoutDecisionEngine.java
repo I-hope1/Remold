@@ -242,7 +242,7 @@ final class LayoutDecisionEngine {
 		// 旧 $VALUES 数组里。继续 redefine 只会得到"HotSwap successful 但源码变更没生效"的假成功。
 		//
 		// 拒绝原因必须把"为什么补不回来"讲全，否则用户会以为只是 InitFix 没实现：真机实测
-		// （JBR 21，两种 javac 字节码形态，见 docs/topology/10-enum-constant-append-infeasibility.md）
+		// （JBR 21，两种 javac 字节码形态，见 docs/runtime/04-enum-constant-append-infeasibility.md）
 		// 证明事后重写 $VALUES + 清空 java.lang.Class 的两个枚举缓存也不够——已 JIT 编译的读者在
 		// deopt 前仍持有旧常量表；已初始化消费类的 $SwitchMap$/$SWITCH_TABLE$ 无法补 case
 		// （AIOOBE，或扩容后静默落 default）；存量 EnumMap/EnumSet 无法扩容（AIOOBE / 迭代陈旧）。

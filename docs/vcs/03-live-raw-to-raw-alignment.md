@@ -5,9 +5,9 @@
 > 本文件定义 `LambdaAligner.align` 在**活体热更路径**上的输入选择契约：什么时候可以把"上一代
 > 待对齐产物（`R_prev`）"而不是"上一代进 JVM 的产物（`E_prev`）"送给对齐器，以及在这种情况下
 > 幽灵桩、保留体、捕获桥从哪里继承。对齐算法本身的配对判据、捕获桥构造、孤儿桩形态见
-> [`01-invariants-and-remapping.md`](01-invariants-and-remapping.md)～[`11-orphan-lambda-body-retention.md`](11-orphan-lambda-body-retention.md)；
-> 代际元数据仓与离线回放包见 [`16-bytecode-changeset-vcs.md`](16-bytecode-changeset-vcs.md)；
-> 结论发布见 [`13-lambda-alignment-publication-contract.md`](13-lambda-alignment-publication-contract.md)。
+> [`../topology/01-invariants-and-remapping.md`](../topology/01-invariants-and-remapping.md)～[`../lambda/02-orphan-body-retention.md`](../lambda/02-orphan-body-retention.md)；
+> 代际元数据仓与离线回放包见 [`01-bytecode-changeset-vcs.md`](01-bytecode-changeset-vcs.md)；
+> 结论发布见 [`../lambda/03-publication-contract.md`](../lambda/03-publication-contract.md)。
 
 ## 0. 术语
 
@@ -38,7 +38,7 @@
 | 提交 | `Meta.commit(loader, 类, preAlign=R_new, alignOutput=E_new, jvmEffective, ...)` | — | 只有整批全绿才提交；`-Dremold.vcs.enabled` 关闭时整条旁路不写入 |
 
 结论：现行为是**单跑道 `E_prev ↔ R_new`**。`Meta` 只承担"自造名与幽灵指纹的更可靠来源"，
-不改变对齐输入——这一点与 [`16-bytecode-changeset-vcs.md`](16-bytecode-changeset-vcs.md) §2.5 第 3 条
+不改变对齐输入——这一点与 [`01-bytecode-changeset-vcs.md`](01-bytecode-changeset-vcs.md) §2.5 第 3 条
 "活体路径是 `Raw ↔ Raw`"的长期目标不一致，本文件即该条的活体落地规格。
 
 ## 2. 为什么 `E_prev ↔ R_new` 会失准
@@ -106,7 +106,7 @@ Run E 的语义必须与当前实现**逐字节等价**：这正是老契约零�
 | 二：未配对新方法取避障名 | 命名池 = `R_prev` 全部方法名 ∪ `E_prev` 全部方法名（含 key）∪ `R_new` 已有名 | 池必须比 Run E 更大：幽灵名、桥名只存在于 `E_prev` |
 | 三：捕获桥 | 计划基线是 `R_prev`（源码捕获表），不是 `E_prev` | 上一轮的桥不再被当老 lambda 参与规划 |
 | 四：孤儿与继承注入 | 孤儿判定基准 = `R_prev` 键 ∪ `E_prev` 键 − 本轮 `presentKeys` | 三件套统一在这一阶段落地（见 §4.2） |
-| 五：自造名统计与发布 | 最终产物 + `Meta.inventedNames` 并集 | 发布契约不变（[`13-...`](13-lambda-alignment-publication-contract.md)） |
+| 五：自造名统计与发布 | 最终产物 + `Meta.inventedNames` 并集 | 发布契约不变（[`13-...`](../lambda/03-publication-contract.md)） |
 
 ### 4.2 继承集落地规则（阶段四）
 
@@ -194,7 +194,7 @@ Run R 的每一个前提缺失都**只允许整类回退**，不允许"尽力而
   两个开关同时打开；只开灰度不开记录时必须落 Run E，并**首次**记一条 warn 说明"元数据源未开启"，
   不能静默假装走了 Run R。
 - **提交语义不变**：提交点在"该类最终 `redefineClasses` 成功之后"，两阶段的阶段 A 不提交，
-  整批任一回滚/拒绝即整批丢弃（[`16-bytecode-changeset-vcs.md`](16-bytecode-changeset-vcs.md) §5.3）。
+  整批任一回滚/拒绝即整批丢弃（[`01-bytecode-changeset-vcs.md`](01-bytecode-changeset-vcs.md) §5.3）。
   Run R 的产物与 Run E 的产物在提交时的字段口径完全相同：`preAlign=R_new`、`alignOutput=E_new`。
 - **不变量**：`align()` 仍然只读 `Meta`，不写任何代；写入口仍由调用方在成功之后触发。
 
@@ -244,14 +244,14 @@ Run R 的每一个前提缺失都**只允许整类回退**，不允许"尽力而
 - **风险**：三源命名池会让 fresh 名编号继续膨胀（池越大，可选号越靠后）。名称只增不减是既有
   不变量，不得为了紧凑回收历史名字。
 - **不在本规格范围**：`InitFix` 的字段台账多代化、`Staging` 跨类原子提交（见
-  [`16-bytecode-changeset-vcs.md`](16-bytecode-changeset-vcs.md) §8.4）、离线回放包格式、
+  [`01-bytecode-changeset-vcs.md`](01-bytecode-changeset-vcs.md) §8.4）、离线回放包格式、
   字节埋点的删除（埋点降级为 fallback，不删）。
 
 ## 11. 相关文档
 
-- 配对判据与不变量：[`01-invariants-and-remapping.md`](01-invariants-and-remapping.md)、
-  [`03-cascading-pipeline.md`](03-cascading-pipeline.md)、[`04-tiers-and-rejection.md`](04-tiers-and-rejection.md)
-- 孤儿桩与保留体：[`11-orphan-lambda-body-retention.md`](11-orphan-lambda-body-retention.md)
-- 捕获桥：[`09-lambda-capture-bridge.md`](09-lambda-capture-bridge.md)
-- 结论发布与按类检索：[`13-lambda-alignment-publication-contract.md`](13-lambda-alignment-publication-contract.md)
-- 代际元数据/回放包/提交点契约：[`16-bytecode-changeset-vcs.md`](16-bytecode-changeset-vcs.md)
+- 配对判据与不变量：[`../topology/01-invariants-and-remapping.md`](../topology/01-invariants-and-remapping.md)、
+  [`../topology/03-cascading-pipeline.md`](../topology/03-cascading-pipeline.md)、[`../topology/04-tiers-and-rejection.md`](../topology/04-tiers-and-rejection.md)
+- 孤儿桩与保留体：[`../lambda/02-orphan-body-retention.md`](../lambda/02-orphan-body-retention.md)
+- 捕获桥：[`../lambda/01-capture-bridge.md`](../lambda/01-capture-bridge.md)
+- 结论发布与按类检索：[`../lambda/03-publication-contract.md`](../lambda/03-publication-contract.md)
+- 代际元数据/回放包/提交点契约：[`01-bytecode-changeset-vcs.md`](01-bytecode-changeset-vcs.md)

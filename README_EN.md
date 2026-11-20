@@ -107,7 +107,7 @@ If you bypass the Gradle plugin and configure the VM arguments by hand in IDEA o
 > Under `-XX:+AllowEnhancedClassRedefinition`, JBR flushes JIT code caches on every redefinition and waits for in-flight C2 compilations to finish before the next round.
 > - **Recommended for dev: add `-XX:TieredStopAtLevel=1`** (C1 only, no waiting for C2): large hierarchies like `LivingEntity` with 100+ subclasses stay around ~400 ms; together with IDEA `Ctrl + Shift + F9` single-file compilation, you can lower `fileShakeMs` to `200~300`. Trade-off: without C2, peak frame rate is slightly lower, which is usually fine during development.
 > - **For method-body-only edits without structural or Mixin changes**: you can omit `-XX:+AllowEnhancedClassRedefinition` altogether (~60 ms per reload; structural edits will prompt for a restart).
-> - Root-cause analysis and benchmarks: [`docs/topology/12-jbr-dcevm-jit-drain-tail-latency.md`](docs/topology/12-jbr-dcevm-jit-drain-tail-latency.md).
+> - Root-cause analysis and benchmarks: [`docs/runtime/03-jbr-dcevm-jit-drain-tail-latency.md`](docs/runtime/03-jbr-dcevm-jit-drain-tail-latency.md).
 
 ### System properties
 
@@ -159,7 +159,7 @@ Implementation notes:
 |:--|:--|
 | Mixin hot-swap subsystem (8 parts: classloader authority / admission & overlay / re-weave & member alignment / reload structure contracts / synthetic gate / walkthrough / runtime diagnostics / decision ledger) | [`docs/mixin/01..08`](docs/mixin/01-invariants-and-classloader-authority.md) |
 | Anonymous-class topology alignment (admission, cascading pipeline, confidence tiers, layout gate, lambda capture bridge, enum-append boundary, orphan body retention, JIT drain latency) | [`docs/topology/01..12`](docs/topology/01-invariants-and-remapping.md) |
-| Changeset VCS and generational field ledger (per-generation `Changeset` chain, live Raw↔Raw alignment, per-generation `FieldLedger` / `REINIT_APPLIED` and post-revert CAS reconciliation) | [`docs/topology/16..21`](docs/topology/20-generational-field-ledger.md) |
+| Changeset VCS and generational field ledger (per-generation `Changeset` chain, live Raw↔Raw alignment, per-generation `FieldLedger` / `REINIT_APPLIED` and post-revert CAS reconciliation) | [`docs/vcs/01..21`](docs/vcs/05-generational-field-ledger.md) |
 | InitFix safety gates, closure and ledger, two-phase design | [`docs/initfix/01..13`](docs/initfix/01-safety-gate.md) |
 | Physical offsets, inherited-field drift guard, and third-party cache eviction | [`docs/offset/01..02`](docs/offset/01-offset-and-reflection-cache.md) |
 | Per-feature implementation status, acceptance evidence, known risks (single source of truth) | [`docs/status.md`](docs/status.md) |

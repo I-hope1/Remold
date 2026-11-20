@@ -200,7 +200,7 @@ final class VcsAgentCoordinator {
 		for (String name : manifest.candidateMissing()) {
 			if (dotted.contains(name)) missing.add(name);
 		}
-		return new Changeset.Manifest(hosts, manifest.edges(), nodes, missing);
+		return Changeset.Manifest.of(hosts, manifest.edges(), nodes, missing);
 	}
 
 	/**

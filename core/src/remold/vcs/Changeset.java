@@ -77,25 +77,69 @@ public record Changeset(
 	 * @param candidateMissing 因候选类字节缺失而 fail-closed 的类名
 	 */
 	public record Manifest(List<String> orderedHosts, List<String> edges, List<String> nodes,
-	                       List<String> candidateMissing) {
+	                       List<String> candidateMissing, Births births) {
+
+		/** 兼容工厂：不需要关心出生水位线的调用方，缺省为空区间（不用委托构造，见下）。 */
+		public static Manifest of(List<String> orderedHosts, List<String> edges, List<String> nodes,
+		                          List<String> candidateMissing) {
+			return new Manifest(orderedHosts, edges, nodes, candidateMissing, Births.NONE);
+		}
+
 		public Manifest {
 			orderedHosts = copy(orderedHosts);
 			edges = copy(edges);
 			nodes = copy(nodes);
 			candidateMissing = copy(candidateMissing);
+			births = births == null ? Births.NONE : births;
 		}
 
 		private static List<String> copy(List<String> in) {
 			return in == null ? List.of() : List.copyOf(in);
 		}
 
-		public static final Manifest EMPTY = new Manifest(List.of(), List.of(), List.of(), List.of());
+		public static final Manifest EMPTY = Manifest.of(List.of(), List.of(), List.of(), List.of());
 
 		/** 空边集是合法提交：该类的 Raw/Eff 变化仍需提交坐标，否则后续 parent 会断层（§6.3）。 */
 		public boolean hasEdges() {
 			return !edges.isEmpty();
 		}
 	}
+
+	/**
+	 * 一代提交时的出生水位线区间（{@code prev..curr}）。
+	 *
+	 * <p>它只回答"作者当时可见的世界推进到了哪里"，不承载类的字节。回放端据此判断自己复现的是哪个
+	 * 加载状态；缺失或混血时只能拒绝，不能当作空集（规格 §4.1）。</p>
+	 */
+	public record Births(long prev, long curr) {
+		public static final Births NONE = new Births(0L, 0L);
+
+		public Births {
+			if (prev < 0L) prev = 0L;
+			if (curr < prev) curr = prev;
+		}
+
+		/** 清单里的文本形态：{@code prev..curr}。 */
+		public String text() {
+			return prev + ".." + curr;
+		}
+
+		/** 解析清单文本；形态不合法时返回空区间（调用方仍须按"缺失"处理）。 */
+		public static Births parse(String text) {
+			if (text == null) return NONE;
+			String t = text.trim();
+			if (t.isEmpty()) return NONE;
+			int sep = t.indexOf("..");
+			if (sep <= 0) return NONE;
+			try {
+				return new Births(Long.parseLong(t.substring(0, sep).trim()),
+				 Long.parseLong(t.substring(sep + 2).trim()));
+			} catch (NumberFormatException e) {
+				return NONE;
+			}
+		}
+	}
+
 
 	/**
 	 * 提交级事实（§3.8）：某一代该字段的初值是什么、来自哪种重放档位。
@@ -165,7 +209,7 @@ public record Changeset(
 		 Long.toString(seq),
 		 sortedDigest(sorted),
 		 rawRoot, effRoot, metaRoot,
-		 manifestDigest(manifest),
+		 manifestDigest(manifest, algoVersion),
 		 eff0Digest,
 		 Long.toString(revertedToSeq),
 		 algoVersion == null ? "" : algoVersion));
@@ -202,14 +246,24 @@ public record Changeset(
 		return sha128(sb.toString());
 	}
 
-	private static String manifestDigest(Manifest manifest) {
+	/**
+	 * 清单指纹。<b>{@code births} 只从 {@code vcs=3} 起进入前置像</b>：更早的代按旧前置像算出 id，
+	 * 让新字段参与旧代计算会让历史 id 整体失去意义（规格 §4.1）。
+	 */
+	private static String manifestDigest(Manifest manifest, String algoVersion) {
 		if (manifest == null) return sha128("");
 		List<String> parts = new ArrayList<>();
 		parts.add(String.join("\u0001", manifest.orderedHosts()));
 		parts.add(String.join("\u0001", manifest.edges()));
 		parts.add(String.join("\u0001", manifest.nodes()));
 		parts.add(String.join("\u0001", manifest.candidateMissing()));
+		if (tracksBirths(algoVersion)) parts.add(manifest.births().text());
 		return sha128(String.join("\u0002", parts));
+	}
+
+	/** 该算法版本是否把出生水位线纳入内容寻址前置像。 */
+	public static boolean tracksBirths(String algoVersion) {
+		return algoVersion != null && algoVersion.startsWith("vcs=3");
 	}
 
 	/**
@@ -236,7 +290,7 @@ public record Changeset(
 	public static String currentAlgoVersion() {
 		// vcs=2: replayFacts 的 L1 档新侧改为真实原始位模式（此前是十进制文本，浮点会失真）。
 		// 位模式参与 id 预算，格式变更必须体现在版本号里，旧记录才能被识别并拒绝。
-		return "vcs=2|asm=9|jdk=" + Runtime.version().feature();
+		return "vcs=3|asm=9|jdk=" + Runtime.version().feature();
 	}
 
 	/** SHA-256 截断到 128 位，十六进制小写（§2.2 内容哈希规则）。 */

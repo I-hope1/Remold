@@ -1425,7 +1425,7 @@ public class InitFix {
 			Map<String, byte[]> bytes = byId.containsKey(id) ? context.bytesByLoader().get(byId.get(id)) : null;
 			if (bytes == null || !bytes.containsKey(name)) missing.add(name);
 		}
-		return new Changeset.Manifest(orderedHosts, edges, nodes, missing);
+		return Changeset.Manifest.of(orderedHosts, edges, nodes, missing);
 	}
 
 	/** 本轮的提交级事实快照；无批次上下文时返回空表。 */

@@ -53,6 +53,41 @@ public class TwoPhaseProbe {
 	static int passed = 0;
 	static int failed = 0;
 
+	/** 等到读线程至少观察到一次旧行为（{@code "v1"}）才继续；超时带诊断继续，不静默通过。 */
+	private static void awaitReaderWarm(Set<String> seen, java.util.function.BooleanSupplier dead) {
+		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+		while (System.nanoTime() < deadline) {
+			if (seen.contains("v1") || dead.getAsBoolean()) return;
+			try {
+				Thread.sleep(5);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				return;
+			}
+		}
+		System.out.println("   [WARN] reader did not observe the old body within 10s; continuing");
+	}
+
+	/**
+	 * 等后台 C2 把指定方法编译到 level 4（以 safepoint 日志出现该方法的 level-4 cid 为准）。
+	 *
+	 * <p>调用计数够了只代表"排队编译"，不代表"已落盘"；不等这一步，重定义窗口里就可能没有
+	 * 任何编译产物可失效，断言随之空转或偶发红。</p>
+	 */
+	private static void awaitLevel4Compiled(String method) {
+		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+		while (System.nanoTime() < deadline) {
+			try {
+				if (lastLevel4CidBefore(method, System.nanoTime()) > 0L) return;
+				Thread.sleep(50);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				return;
+			}
+		}
+		System.out.println("   [WARN] no level-4 version of " + method + " within 30s; continuing");
+	}
+
 	static void check(boolean cond, String msg) {
 		if (cond) {
 			System.out.println("   [PASS] " + msg);
@@ -356,9 +391,10 @@ public class TwoPhaseProbe {
 			checkEq("v1", call(host, legacy, "hi"), "precondition: fixture runs v1");
 
 			// 放大阶段 B 的枚举/CAS 窗口，让读线程有足够时间撞进窗口。
-			List<Object> ballast = new ArrayList<>(50_000);
-			for (int i = 0; i < 50_000; i++) ballast.add(host.getConstructor().newInstance());
-			check(ballast.size() == 50_000, "50k live instances created to widen the stage-B window");
+			// 150k 是实测下界之上的余量：runner 变快时 50k 会被单阶段扫描一口吃完，读线程来不及撞进窗口。
+			List<Object> ballast = new ArrayList<>(150_000);
+			for (int i = 0; i < 150_000; i++) ballast.add(host.getConstructor().newInstance());
+			check(ballast.size() == 150_000, "150k live instances created to widen the stage-B window");
 
 			Method hi = host.getMethod("hi");
 			AtomicBoolean stop   = new AtomicBoolean(false);
@@ -375,6 +411,9 @@ public class TwoPhaseProbe {
 			}, "tp-reader");
 			reader.setDaemon(true);
 			reader.start();
+			// 启动握手：必须等读线程真正跑进热循环再触发重定义，否则 runner 一忙就会出现
+			// "redefine 结束时 reader 还没抢到 CPU"，对照组随机漏窗（曾在 CI 上偶发红）。
+			awaitReaderWarm(seen, () -> !reader.isAlive());
 
 			long t0 = System.nanoTime();
 			process(v2File.toPath(), inst);
@@ -558,6 +597,9 @@ public class TwoPhaseProbe {
 			// 用大量「短调用」而不是一次长循环：只有方法级调用计数器才会驱动整方法 C2 编译；
 			// 一次长循环只产生 OSR 版本，而 OSR 版本会被 unstable_if 反复淘汰。
 			for (int i = 0; i < 600_000; i++) loop.invoke(2);
+			// 后台 C2 编译是异步的：调用计数够了不等于 level-4 版本已落盘。等到 safepoint 日志里
+			// 出现该方法的 level-4 cid 再重定义，否则断言会因"编译还没完成"偶发红。
+			awaitLevel4Compiled("jit.C::loop");
 			check(a.getDeclaredFields().length == 1, "before redefinition A declares only field 'a'");
 
 			long us = redefine(inst, a, aV2);

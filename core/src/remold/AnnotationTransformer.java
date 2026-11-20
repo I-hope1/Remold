@@ -21,6 +21,8 @@ import static remold.RemoldAgent.FORCE_STATIC_LAMBDA;
 import static remold.RemoldAgent.INIT_FIX;
 import static remold.RemoldAgent.error;
 import static org.objectweb.asm.Opcodes.*;
+import remold.ref.PendingLoadPatch;
+import remold.vcs.AlignmentMetaStore;
 
 /**
  * 核心类文件转换器（ClassFileTransformer）。
@@ -166,15 +168,10 @@ public class AnnotationTransformer implements ClassFileTransformer {
 			internalCtx.targetHookHits++;
 		}
 
-		// 注册到继承树（放在内部透传/探针早退之后，避免大基类重定义时为所有受影响子类重复建树）
-		try {
-			HierarchyTree.register(classfileBuffer); // TODO: 如果父类是系统类，可能会出错
-		} catch (Throwable ignored) {
-		}
-
 		if (RemoldAgent.isBlacklisted(dotClassName)) return null;
 
-		// 加载期拦截：若属于已对齐但尚未加载的类，优先使用对齐后的字节码
+		// 加载期拦截：若属于已对齐但尚未加载的类，优先使用对齐后的字节码。
+		// 出生点补丁排在它之后：对齐结果是"已经算好的字节"，不能被原始 Raw 覆盖。
 		byte[] pending = null;
 		if (classBeingRedefined == null) {
 			pending = pendingAlignedClasses.remove(className);
@@ -186,7 +183,24 @@ public class AnnotationTransformer implements ClassFileTransformer {
 			if (pending != null) {
 				classfileBuffer = pending;
 				modified = true;
+				// 对齐结果就是生效字节：把同名的待决出生补丁消费掉，避免它在下一次加载时再插一脚。
+				PendingLoadPatch.discard(loader, className);
+			} else {
+				PendingLoadPatch.Decision decision = PendingLoadPatch.take(loader, className,
+				 classfileBuffer, RemoldAgentBootstrap.isProjectLocation(protectionDomain),
+				 RemoldAgent::applySourceTransforms);
+				if (decision.applied()) {
+					classfileBuffer = decision.bytes();
+					modified = true;
+				}
 			}
+		}
+
+		// 注册到继承树：必须在生效字节确定之后，否则继承树拿到的是被替换前的形态，
+		// 与下游 CacheWarmingTransformer/bytecodeCache 记录的字节不一致（规格 docs/vcs/07 §5 护栏 3）。
+		try {
+			HierarchyTree.register(classfileBuffer); // TODO: 如果父类是系统类，可能会出错
+		} catch (Throwable ignored) {
 		}
 
 		byte[] bytes = classfileBuffer;  // 不clone，用引用做"是否修改"判断

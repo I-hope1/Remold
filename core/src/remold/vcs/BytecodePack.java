@@ -260,8 +260,12 @@ public final class BytecodePack {
 			if (!fields.containsKey("droppedBirths") || !fields.containsKey("unresolvedBirths")) {
 				return Compat.REFUSED_MALFORMED;
 			}
-			// births=bad 这类损坏文本不能靠 Births.parse 静默退回 0..0 蒙混过关。
-			return isWellFormedBirths(fields.get("births")) ? Compat.OK : Compat.REFUSED_MALFORMED;
+			// births=bad 这类损坏文本不能靠 Births.parse 静默退回 0..0 蒙混过关；
+			// 两个计数字段同理，损坏时 parseInt 会静默钳成 0，必须在这里封死。
+			if (!isWellFormedBirths(fields.get("births"))) return Compat.REFUSED_MALFORMED;
+			if (!isNonNegativeDecimal(fields.get("droppedBirths"))) return Compat.REFUSED_MALFORMED;
+			if (!isNonNegativeDecimal(fields.get("unresolvedBirths"))) return Compat.REFUSED_MALFORMED;
+			return Compat.OK;
 		} catch (Throwable t) {
 			return Compat.REFUSED_MALFORMED;
 		}

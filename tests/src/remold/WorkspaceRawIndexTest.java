@@ -123,4 +123,21 @@ class WorkspaceRawIndexTest {
 		assertTrue(counters.get("totalNanos") > 0L, "the index must actually measure lookup cost");
 		assertTrue(counters.get("maxNanos") > 0L);
 	}
+
+	/** 同一批里点分与斜杠混查必须命中同一条缓存（否则会白打两次来源）。 */
+	@Test
+	void dottedAndSlashShareOneCacheEntry() {
+		register(RAW);
+		WorkspaceRawIndex.beginBatch();
+		try {
+			assertArrayEquals(RAW, WorkspaceRawIndex.lookup("probe.RawTarget"));
+			int afterFirst = calls;
+			assertArrayEquals(RAW, WorkspaceRawIndex.lookup("probe/RawTarget"));
+			assertEquals(afterFirst, calls,
+			 "the same class queried in both name forms must not hit the sources twice");
+			assertEquals(1L, WorkspaceRawIndex.counters().get("hits"));
+		} finally {
+			WorkspaceRawIndex.endBatch();
+		}
+	}
 }

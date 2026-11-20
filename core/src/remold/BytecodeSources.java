@@ -1,5 +1,7 @@
 package remold;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import remold.util.Names;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -103,18 +105,18 @@ public final class BytecodeSources {
 	 * @param internalNameOrDotted 内部名或点分名
 	 * @return 去重后的命中字节（按来源登记顺序）；无命中返回空表
 	 */
-	public static java.util.List<byte[]> lookupAll(String internalNameOrDotted) {
-		if (internalNameOrDotted == null || internalNameOrDotted.isEmpty()) return java.util.List.of();
+	public static List<byte[]> lookupAll(String internalNameOrDotted) {
+		if (internalNameOrDotted == null || internalNameOrDotted.isEmpty()) return List.of();
 		String internal = Names.internal(internalNameOrDotted);
 		String dotted = Names.external(internal);
-		java.util.List<byte[]> hits = new java.util.ArrayList<>(2);
+		List<byte[]> hits = new ArrayList<>(2);
 		for (Function<String, byte[]> source : SOURCES) {
 			byte[] bytes = ask(source, internal);
 			if (bytes == null && !dotted.equals(internal)) bytes = ask(source, dotted);
 			if (bytes == null) continue;
 			boolean duplicate = false;
 			for (byte[] seen : hits) {
-				if (java.util.Arrays.equals(seen, bytes)) {
+				if (Arrays.equals(seen, bytes)) {
 					duplicate = true;
 					break;
 				}

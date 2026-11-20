@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **加载前沿与出生水位线（load frontier / birth watermark）**：把"代码何时被改"与"类何时被懒加载"分开记账，
+  规格见 `docs/vcs/07-load-frontier-and-birth-watermark.md`。
+  - `LoadFrontier`：单调水位线 + 有界出生队列（标量三元组），队列触限或哈希不可解析即进入
+    `conservativeOnly()`，结论一律推向保守；`droppedBirths` / `unresolvedBirths` 进本轮 manifest。
+  - 出生信息随 Manifest 与回放包落地：`BytecodePack.FORMAT_VERSION=2`，旧包 `REFUSED_LEGACY_PACK`、
+    畸形 `REFUSED_MALFORMED`、更高版本 `REFUSED_FUTURE_PACK`；`algoVersion` 数值 ≥ 3 才参与前置像。
+  - `PendingLoadPatch`：出生点补丁只在"未织入、非 Mixin 目标、能解析到工程 Raw"时生效，
+    每次判决都消费待决项，点分/斜杠双向归一。
+  - `MixinTargetIndex` 三态 + 发布时序：启动窗口 `available=false`，`isHostReady()` 懒发布；
+    2000 次发布并发回归覆盖 clear-then-fill 竞态。Fabric 1.21.1 实测读数见
+    `tests/fabric-mixin-probe/LF-PROBE-RESULTS.md`。
+  - 两级保留：裁剪只把结论推向保守，`forgottenWriters` 可观测；`GenerationalReplayGate` 对裁剪过的键
+    拒绝而非放行。
+  - `ScopeVerdicts`：空集放行带加载前沿时间戳，前沿推进/进入保守态/被裁剪即失效，与 Changeset 窗口同源裁剪。
+  - 动态重定义自成一代（`roundId = "dynamic:<fqcn>"`，成功/失败/no-op 三种状态转移），
+    单类批次上下文在 `InitFix.transform` 之前开启、最外层 `finally` 清理。
+  - 偏移索引改按加载前沿门控；`WorkspaceRawIndex` 提供按需 Raw 查询（懒加载 + 批内复用 + 找不到/歧义 fail-closed）。
+  - `remold.util.Names` 收敛类名形态转换，配只减不增的守卫基线。
+
 - **代际对账接进重放决策（B2 消费侧）**：新增 `remold.vcs.GenerationalReplayGate`，把
   `GenerationalFieldLedger.resolve` 的结论翻成"这一轮这条字段还写不写、比较侧用什么期望、写入侧写什么值"。
   - 三种结论：`OBLIVIOUS`（索引里没有这条键的代际证据 → 沿用当轮 `ClassDiff` 的一对初值，与引入前逐字节一致）、

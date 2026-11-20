@@ -8,6 +8,7 @@ import remold.vcs.Changeset;
 import remold.vcs.ChangesetLog;
 import remold.vcs.GenerationalFieldLedger;
 import remold.vcs.VcsCommitGate;
+import remold.vcs.ScopeVerdicts;
 
 import java.lang.instrument.ClassDefinition;
 import java.util.ArrayList;
@@ -209,6 +210,21 @@ final class VcsAgentCoordinator {
 	 * <p>台账是<b>派生索引</b>：口径不合规的记录在这里被拒（不索引、计数），消费侧因此只会看到
 	 * 规范事实；索引丢了可以按 {@code Changeset} 重建，事实丢了只能拒绝。</p>
 	 */
+	/**
+	 * 当前链最老保留代出生时的加载前沿水位线（裁剪判决用的 keepWatermark）。
+	 *
+	 * <p>与 {@link ChangesetLog#window()} 同源：判决记录只活在有 Changeset 证据的那段历史里，
+	 * 不引入第二套保留阈值。取不到出生信息时退回 0，等价于"什么都不裁"——宁可不裁，不要错裁。</p>
+	 */
+	private static long oldestWindowWatermark(long scope, long oldestSeq) {
+		for (Changeset round : ChangesetLog.INSTANCE.chain(scope)) {
+			if (round.seq() != oldestSeq) continue;
+			Changeset.Manifest manifest = round.manifest();
+			return manifest == null || manifest.births() == null ? 0L : manifest.births().prev();
+		}
+		return 0L;
+	}
+
 	static void recordLedgerFacts(ClassLoader loader, Changeset cs) {
 		// {@code loader == null} 是 bootstrap 槽（scope 0）的合法情形：台账专门为它留了槽，
 		// 这里若跳过就会出现"台账有槽、提交侧永不填"的口径不对称。
@@ -221,9 +237,13 @@ final class VcsAgentCoordinator {
 			 gen, fact, cs.algoVersion());
 		}
 		// 历史索引跟随 Changeset 窗口，没有第二个旋钮（§2.3）。
-		GenerationalFieldLedger.INSTANCE.pruneToWindow(loader,
-		 ChangesetLog.INSTANCE.chain(cs.loaderScope()).isEmpty() ? 1L
-		  : ChangesetLog.INSTANCE.chain(cs.loaderScope()).get(0).seq());
+		long oldestSeq = ChangesetLog.INSTANCE.chain(cs.loaderScope()).isEmpty() ? 1L
+		 : ChangesetLog.INSTANCE.chain(cs.loaderScope()).get(0).seq();
+		GenerationalFieldLedger.INSTANCE.pruneToWindow(loader, oldestSeq);
+		// 作用域判决与代际台账同源裁剪：窗口内靠 LoadFrontier.watermark() 判 FRESH/STALE，
+		// 滑出窗口的旧判决随窗口淘汰并计入 forgotten（此后查询返回 STALE 而非 UNKNOWN）。
+		ScopeVerdicts.INSTANCE.pruneToWindow(
+		 oldestWindowWatermark(cs.loaderScope(), oldestSeq));
 	}
 
 	/**

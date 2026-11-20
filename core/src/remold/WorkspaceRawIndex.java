@@ -1,8 +1,11 @@
 package remold;
 
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import remold.util.Names;
 
 /**
  * 工作区 Raw 字节的按需索引（包 A 最后一项）。
@@ -82,9 +85,11 @@ public final class WorkspaceRawIndex {
 	/** 与 {@link #lookup(String)} 相同，但把结论形态交出来（供诊断与用例断言）。 */
 	public static Result query(String internalNameOrDotted) {
 		if (internalNameOrDotted == null || internalNameOrDotted.isEmpty()) return Result.MISS;
+		// 缓存键按内部名归一：同一批里点分与斜杠混查必须命中同一条，否则会白打两次来源。
+		String key = Names.internal(internalNameOrDotted);
 		Map<String, Result> cache = BATCH_CACHE.get();
 		if (cache != null) {
-			Result cached = cache.get(internalNameOrDotted);
+			Result cached = cache.get(key);
 			if (cached != null) return cached;
 		}
 
@@ -101,7 +106,7 @@ public final class WorkspaceRawIndex {
 			result = new Result(Status.HIT, bytes, 1);
 		}
 		record(result, System.nanoTime() - start, cache != null);
-		if (cache != null) cache.put(internalNameOrDotted, result);
+		if (cache != null) cache.put(key, result);
 		return result;
 	}
 
@@ -128,14 +133,14 @@ public final class WorkspaceRawIndex {
 	/** 诊断读数：命中/未命中/歧义/批次外命中与耗时。 */
 	public static Map<String, Long> counters() {
 		synchronized (LOCK) {
-			Map<String, Long> out = new java.util.LinkedHashMap<>();
+			Map<String, Long> out = new LinkedHashMap<>();
 			out.put("hits", hits);
 			out.put("misses", misses);
 			out.put("ambiguous", ambiguous);
 			out.put("unattributedHits", unattributedHits);
 			out.put("totalNanos", totalNanos);
 			out.put("maxNanos", maxNanos);
-			return java.util.Collections.unmodifiableMap(out);
+			return Collections.unmodifiableMap(out);
 		}
 	}
 

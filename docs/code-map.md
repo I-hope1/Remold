@@ -16,6 +16,12 @@
 | 离线层级 | `ClassHierarchyOracle` / `HierarchyTreeOracle`，底层 `AnnotationTransformer.HierarchyTree` |
 | 台账 | `InitFix.LEDGER`、`getUnpatchedFields` |
 | 跨类批次字段依赖收敛与拓扑执行（PR4-A） | `InitFix.beginBatchBytecodeView` / `setBatchDefinitions` / `finishBatchTransforms` / `convergeBatch` / `orderBatchHosts`、`InitFixBatchGraph` |
+| 加载前沿与出生水位线 | `core/src/remold/vcs/LoadFrontier.java`（单调水位线、有界出生队列、`conservativeOnly()`、`flush`/`flushBeforeCommit`） |
+| 出生点补丁与三态目标索引 | `core/src/remold/ref/PendingLoadPatch.java`、`core/src/remold/reflect/mixin/MixinTargetIndex.java`、`plugin-mixin/src/remold/mixin/MixinTargetPublisher.java` |
+| 两级保留与作用域判决时间戳 | `core/src/remold/vcs/GenerationalFieldLedger.java`（`pruneToWindow` / `forgottenWriters`）、`core/src/remold/vcs/ScopeVerdicts.java` |
+| 工作区 Raw 按需索引 | `core/src/remold/WorkspaceRawIndex.java`（懒查询 + 批内复用 + 找不到/歧义 fail-closed），与 `InitFix.beginBatchBytecodeView` / `endBatchBytecodeView` 同寿 |
+| 类名形态转换单一入口 | `core/src/remold/util/Names.java`（守卫 `tests/src/remold/util/NameConversionGuardTest.java` + `name-conversion-baseline.txt`） |
+| 动态代提交 | `core/src/remold/DynamicVcsCommit.java`（`roundId = "dynamic:<fqcn>"`，三种状态转移、字节四元组映射） |
 | 代际字段台账与回退重放门控（B2） | `core/src/remold/vcs/GenerationalFieldLedger.java`、`core/src/remold/vcs/GenerationalReplayGate.java`、`InitFix.gateGenerationalReplay` / `recordReplayOutcome` / `releaseRemovedFieldDebt` |
 | 逐实例驱动 | `InitFixRuntimeDriver`（`runDependentInstanceTasks` / `runIndependentInstanceTasks`、`InstanceFailureBudget`、`InitFix` 保留包内/公开委托） |
 | 写入桥 | `HotswapBridge`（`KIND_CONDITIONAL` / `KIND_CONDITIONAL_EXPECTED` / `KIND_FORCE`） |
@@ -45,7 +51,7 @@
 | 文件热更防抖状态机 | `core/src/remold/DebounceWindow.java`（纯状态机：Class/jar 与资源流各自 trailing-edge 静默窗口；`markClassDueNow` 为外部构建完成信号的 sticky due） |
 | 构建完成 marker（build-trigger） | `core/src/remold/BuildTriggerMarker.java`（解析/拒绝/去重）、`BuildTriggerSweep.java`（按 mtime 收集最近变更）、`RemoldAgentBootstrap.configureBuildTrigger` / `AgentWatchCoordinator.handleBuildTriggerFile`、`FileWatcherService` 专用 trigger watcher；`gradle-plugin` `BuildTriggerWriter` + `RemoldPlugin` 的 `classes.doLast` + `RemoldConfigResolver` 注入 `-Dremold.agent.build_trigger_file`（DSL `buildTrigger`，默认 `true`）。设计：`docs/runtime/01-build-trigger-mode.md` |
 | 启动就绪门闩与批次看门狗 | `core/src/remold/StartupGate.java`（`PENDING→READY`，`-Dremold.agent.ready_timeout_ms`）、`core/src/remold/BatchWatchdog.java`（`enter/exit/current` + `armedWatchdogs()` 不变量，`-Dremold.agent.batch_stall_ms` 默认 15000，`[HOTSWAP-STALL]` dump）；挂点 `RemoldAgent.processChanges` 与 `retransformLoaded`，漏斗 `triggerDueHotswap`；就绪投票 `api` `HotswapPlugin.isHostReady()`（`plugin-fabric` `HostReadinessProbe`） |
-| 织入生成类的字节码登记口 | `core/src/remold/BytecodeSources.java`（多来源按顺序查询，无缓存）；被 `HierarchyTreeOracle.readClassBytes` 消费；`plugin-mixin` `MixinInnerClassHotSwap` 回灌与 `refeedForTarget` 按需提前生成 |
+| 织入生成类的字节码登记口 | `core/src/remold/BytecodeSources.java`（多来源按顺序查询，无缓存；`lookupAll` 供调用方区分"唯一来源"与"来源矛盾"）；被 `WorkspaceRawIndex` 与 `HierarchyTreeOracle.readClassBytes` 消费；`plugin-mixin` `MixinInnerClassHotSwap` 回灌与 `refeedForTarget` 按需提前生成 |
 | 运行时常量访问器与诊断门面 | `remold.RuntimeConstants`（core 登记口；`plugin-arc` `ArcHotswapPlugin.onAgentInit` 登记 `Scl.scl()`）、`core/src/remold/util/Diag.java`（默认全静默，`RemoldAgent` 静态接入 logger 与 `isDebugEnabled`/`isPerfEnabled`；目录级零依赖与全局去通配符由 `AnalysisBoundaryGuardTest` 守卫）、`RemoldAgent.getRuntimeBytecode` / `recordRuntimeBytecode`（`bytecodeCache` / `sourceBytecodeCache` 唯一收口访问器） |
 
 ## 4. 字节码 VCS、Derived Cache、Raw 对齐、Lambda 与孤儿桩

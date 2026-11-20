@@ -100,6 +100,7 @@ Covers the version layer that answers "which bytes changed in this round, and ho
 | [`04-raw-to-raw-realworld-readings.md`](vcs/04-raw-to-raw-realworld-readings.md) | Real-scale Raw ↔ Raw alignment readings: hits, mismatches, and timings |
 | [`05-generational-field-ledger.md`](vcs/05-generational-field-ledger.md) | Generational field ledger (B2): per-generation `FieldLedger` / `REINIT_APPLIED` storage (`GenRef(seq,id)`), post-revert CAS expectations taken strictly from the target generation with fail-closed discipline, and cross-generation `replayFacts` consumption rules |
 | [`06-b1-gc-baseline-readings.md`](vcs/06-b1-gc-baseline-readings.md) | B1 side-ledger memory and GC baseline readings (retained-heap/GC methodology and the before/after comparison method for B2) |
+| [`07-load-frontier-and-birth-watermark.md`](vcs/07-load-frontier-and-birth-watermark.md) | Load frontier and birth watermark: edit/load dual timelines, replay watermark with versioned identity, birth-patch guardrails, conservative degradation |
 
 ### 2.6 Mixin Hot-Reload Subsystem (`docs/mixin/01..08`)
 Systematically specifies Mixin classloader authority, bytecode overlay injection, cascading re-weave, structural reload contracts, and synthetic inner-class gates:

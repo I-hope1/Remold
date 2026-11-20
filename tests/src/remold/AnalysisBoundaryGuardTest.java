@@ -3,13 +3,19 @@ package remold;
 import org.junit.jupiter.api.Test;
 import remold.util.Diag;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.PrintStream;
+import java.lang.reflect.Method;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -21,43 +27,34 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Architectural dependency-boundary guards locking in:
  * <ol>
- *   <li>Pure bytecode analysis and emitter modules never reference {@link RemoldAgent};</li>
- *   <li>Extracted {@link RemoldAgent} coordinator modules never use wildcard static imports;</li>
+ *   <li>All of {@code remold/util/} and all non-driver files under {@code remold/ref/} plus pure
+ *       top-level analyzers never reference {@link RemoldAgent};</li>
+ *   <li>No file under {@code core/src/} uses {@code import static remold.RemoldAgent.*;};</li>
  *   <li>{@code RemoldAgent.bytecodeCache} and {@code sourceBytecodeCache} are not accessed directly
  *       outside {@link RemoldAgent};</li>
- *   <li>{@link Diag} dynamically forwards to the active {@link RemoldAgent#logger}.</li>
+ *   <li>{@link Diag} is completely silent by default when {@link RemoldAgent} is absent, and forwards
+ *       dynamically to {@link RemoldAgent#logger} / flags once wired.</li>
  * </ol>
  */
 class AnalysisBoundaryGuardTest {
 
-	private static final List<String> PURE_ANALYSIS_AND_EMITTER_FILES = List.of(
-		"core/src/remold/util/Diag.java",
+	/** Runtime/driver classes under {@code core/src/remold/ref/} that legitimately interact with {@link RemoldAgent}. */
+	private static final Set<String> REF_RUNTIME_EXEMPTIONS = Set.of(
+		"core/src/remold/ref/InitFix.java",
+		"core/src/remold/ref/InitFixRuntimeDriver.java",
+		"core/src/remold/ref/HeapFieldWatch.java",
+		"core/src/remold/ref/HierarchyTreeOracle.java",
+		"core/src/remold/ref/InitializerDrift.java"
+	);
+
+	private static final List<String> PURE_TOP_LEVEL_FILES = List.of(
 		"core/src/remold/LambdaBodyFingerprint.java",
 		"core/src/remold/LambdaBytecodeScanner.java",
 		"core/src/remold/LambdaCaptureBridge.java",
 		"core/src/remold/LambdaOrphanEmitter.java",
 		"core/src/remold/LayoutGate.java",
 		"core/src/remold/LocalClassGuard.java",
-		"core/src/remold/OrphanBodyRetention.java",
-		"core/src/remold/ref/InitFixSafetyGate.java",
-		"core/src/remold/ref/InitFixSliceExtractor.java",
-		"core/src/remold/ref/InitFixPatchEmitter.java",
-		"core/src/remold/ref/RemovedMemberReaders.java",
-		"core/src/remold/ref/InitializerReplay.java",
-		"core/src/remold/ref/ApplyInitializerReplay.java",
-		"core/src/remold/ref/HashSemantics.java",
-		"core/src/remold/ref/StageASkeleton.java",
-		"core/src/remold/ref/ConstructorTailInjector.java"
-	);
-
-	private static final List<String> AGENT_COORDINATOR_FILES = List.of(
-		"core/src/remold/VcsAgentCoordinator.java",
-		"core/src/remold/TwoPhaseCoordinator.java",
-		"core/src/remold/RemoldAgentBootstrap.java",
-		"core/src/remold/AgentWatchCoordinator.java",
-		"core/src/remold/BatchHotswapExecutor.java",
-		"core/src/remold/BatchLayoutCoordinator.java",
-		"core/src/remold/DynamicRedefineExecutor.java"
+		"core/src/remold/OrphanBodyRetention.java"
 	);
 
 	private static final Pattern BLOCK_COMMENTS  = Pattern.compile("/\\*.*?\\*/", Pattern.DOTALL);
@@ -89,10 +86,28 @@ class AnalysisBoundaryGuardTest {
 	}
 
 	@Test
-	void pureAnalysisAndEmitterModulesHaveZeroRemoldAgentReferences() throws IOException {
+	void utilPackageAndNonDriverRefModulesNeverReferenceRemoldAgent() throws IOException {
 		Path root = repoRoot();
+		List<String> guardedFiles = new ArrayList<>(PURE_TOP_LEVEL_FILES);
+		try (var utilStream = Files.walk(root.resolve("core/src/remold/util"))) {
+			for (Path file : utilStream.filter(p -> p.toString().endsWith(".java")).toList()) {
+				guardedFiles.add(root.relativize(file).toString().replace('\\', '/'));
+			}
+		}
+		try (var refStream = Files.walk(root.resolve("core/src/remold/ref"))) {
+			for (Path file : refStream.filter(p -> p.toString().endsWith(".java")).toList()) {
+				String rel = root.relativize(file).toString().replace('\\', '/');
+				if (!REF_RUNTIME_EXEMPTIONS.contains(rel)) {
+					guardedFiles.add(rel);
+				}
+			}
+		}
+
+		assertTrue(guardedFiles.contains("core/src/remold/util/Utils.java"), "Expected util directory scan");
+		assertTrue(guardedFiles.contains("core/src/remold/ref/InitFixSafetyGate.java"), "Expected ref directory scan");
+
 		List<String> violations = new ArrayList<>();
-		for (String rel : PURE_ANALYSIS_AND_EMITTER_FILES) {
+		for (String rel : guardedFiles) {
 			Path file = root.resolve(rel);
 			assertTrue(Files.isRegularFile(file), "Missing guarded file: " + rel);
 			String code = stripCommentsAndStrings(Files.readString(file, StandardCharsets.UTF_8));
@@ -101,30 +116,36 @@ class AnalysisBoundaryGuardTest {
 			}
 		}
 		assertEquals(List.of(), violations,
-			"Pure analysis/emitter modules must not reference RemoldAgent (use Diag for logging)");
+			"remold/util/, non-driver remold/ref/, and pure top-level analyzers must not reference RemoldAgent");
 
-		// Negative control: the same detector must catch an actual RemoldAgent coordinator file.
+		// Negative controls: coordinator and exempt driver files must trip the detector.
 		String coordinatorCode = stripCommentsAndStrings(
 			Files.readString(root.resolve("core/src/remold/RemoldAgentBootstrap.java"), StandardCharsets.UTF_8));
+		String driverCode = stripCommentsAndStrings(
+			Files.readString(root.resolve("core/src/remold/ref/InitFixRuntimeDriver.java"), StandardCharsets.UTF_8));
 		assertTrue(containsMatch(REMOLD_AGENT_ID, coordinatorCode),
-			"Negative control failed: scanner must detect RemoldAgent references in coordinator sources");
+			"Negative control failed: scanner must detect RemoldAgent in coordinator sources");
+		assertTrue(containsMatch(REMOLD_AGENT_ID, driverCode),
+			"Negative control failed: scanner must detect RemoldAgent in exempt runtime driver");
 	}
 
 	@Test
-	void coordinatorModulesDisallowWildcardStaticImportOfRemoldAgent() throws IOException {
+	void coreSourcesDisallowWildcardStaticImportOfRemoldAgent() throws IOException {
 		Path root = repoRoot();
+		Path coreSrc = root.resolve("core/src");
 		List<String> violations = new ArrayList<>();
 		String forbidden = "import static remold.RemoldAgent.*;";
-		for (String rel : AGENT_COORDINATOR_FILES) {
-			Path file = root.resolve(rel);
-			assertTrue(Files.isRegularFile(file), "Missing coordinator file: " + rel);
-			String code = stripCommentsAndStrings(Files.readString(file, StandardCharsets.UTF_8));
-			if (code.contains(forbidden)) {
-				violations.add(rel);
+		try (var stream = Files.walk(coreSrc)) {
+			for (Path file : stream.filter(p -> p.toString().endsWith(".java")).toList()) {
+				String rel = root.relativize(file).toString().replace('\\', '/');
+				String code = stripCommentsAndStrings(Files.readString(file, StandardCharsets.UTF_8));
+				if (code.contains(forbidden)) {
+					violations.add(rel);
+				}
 			}
 		}
 		assertEquals(List.of(), violations,
-			"Coordinator modules must use explicit imports instead of wildcard static import");
+			"No file under core/src may use wildcard static import of RemoldAgent");
 
 		// Negative control: exact detector matches a wildcard import snippet.
 		assertTrue(stripCommentsAndStrings("package p;\n" + forbidden + "\nclass C {}").contains(forbidden),
@@ -157,11 +178,61 @@ class AnalysisBoundaryGuardTest {
 	}
 
 	@Test
-	void diagForwardsDynamicallyToCurrentRemoldAgentLogger() {
+	void diagStandaloneDefaultSinkIsCompletelySilent() throws Exception {
+		URL codeSource = Diag.class.getProtectionDomain().getCodeSource().getLocation();
+		assertNotNull(codeSource, "Cannot locate Diag code source");
+
+		PrintStream savedOut = System.out;
+		PrintStream savedErr = System.err;
+		ByteArrayOutputStream capturedOut = new ByteArrayOutputStream();
+		ByteArrayOutputStream capturedErr = new ByteArrayOutputStream();
+		try (URLClassLoader isolated = new URLClassLoader(new URL[]{codeSource}, ClassLoader.getPlatformClassLoader())) {
+			Class<?> isolatedDiag = Class.forName("remold.util.Diag", true, isolated);
+			Method isDebug = isolatedDiag.getMethod("isDebugEnabled");
+			Method isPerf  = isolatedDiag.getMethod("isPerfEnabled");
+			Method log     = isolatedDiag.getMethod("log", String.class);
+			Method info    = isolatedDiag.getMethod("info", String.class);
+			Method warn    = isolatedDiag.getMethod("warn", String.class);
+			Method error   = isolatedDiag.getMethod("error", String.class, Throwable.class);
+
+			assertFalse((Boolean) isDebug.invoke(null), "Standalone Diag default must report debug disabled");
+			assertFalse((Boolean) isPerf.invoke(null), "Standalone Diag default must report perf disabled");
+
+			System.setOut(new PrintStream(capturedOut, true, StandardCharsets.UTF_8));
+			System.setErr(new PrintStream(capturedErr, true, StandardCharsets.UTF_8));
+			log.invoke(null, "silent-log");
+			info.invoke(null, "silent-info");
+			warn.invoke(null, "silent-warn");
+			error.invoke(null, "silent-error", new RuntimeException("boom"));
+		} finally {
+			System.setOut(savedOut);
+			System.setErr(savedErr);
+		}
+
+		assertEquals("", capturedOut.toString(StandardCharsets.UTF_8),
+			"Standalone Diag default sink must write nothing to stdout");
+		assertEquals("", capturedErr.toString(StandardCharsets.UTF_8),
+			"Standalone Diag default sink must write nothing to stderr");
+	}
+
+	@Test
+	void diagForwardsDynamicallyToCurrentRemoldAgentLoggerAndFlags() {
 		assertNotNull(RemoldAgent.logger, "Baseline: RemoldAgent.logger must be initialized");
-		RemoldAgent.Logger saved = RemoldAgent.logger;
+		RemoldAgent.Logger savedLogger = RemoldAgent.logger;
+		boolean savedDebug = RemoldAgent.DEBUG;
+		boolean savedPerf  = RemoldAgent.PERF_LOG;
 		List<String> captured = new ArrayList<>();
 		try {
+			RemoldAgent.DEBUG = true;
+			RemoldAgent.PERF_LOG = true;
+			assertTrue(Diag.isDebugEnabled(), "Diag.isDebugEnabled must reflect RemoldAgent.DEBUG");
+			assertTrue(Diag.isPerfEnabled(), "Diag.isPerfEnabled must reflect RemoldAgent.PERF_LOG");
+
+			RemoldAgent.DEBUG = false;
+			RemoldAgent.PERF_LOG = false;
+			assertFalse(Diag.isDebugEnabled(), "Diag.isDebugEnabled must turn false when RemoldAgent.DEBUG is false");
+			assertFalse(Diag.isPerfEnabled(), "Diag.isPerfEnabled must turn false when RemoldAgent.PERF_LOG is false");
+
 			RemoldAgent.logger = new RemoldAgent.Logger() {
 				@Override public void log(String msg) { captured.add("log:" + msg); }
 				@Override public void info(String msg) { captured.add("info:" + msg); }
@@ -186,7 +257,9 @@ class AnalysisBoundaryGuardTest {
 				"Diag must dynamically dispatch to the active RemoldAgent.logger"
 			);
 		} finally {
-			RemoldAgent.logger = saved;
+			RemoldAgent.logger = savedLogger;
+			RemoldAgent.DEBUG = savedDebug;
+			RemoldAgent.PERF_LOG = savedPerf;
 		}
 
 		// Control: once original logger is restored, subsequent Diag events must not enter captured list.

@@ -2491,6 +2491,8 @@ public class RemoldAgent {
 			@Override public void error(String msg, Throwable t) {
 				if (t == null) RemoldAgent.error(msg); else RemoldAgent.error(msg, t);
 			}
+			@Override public boolean isDebugEnabled() { return RemoldAgent.DEBUG; }
+			@Override public boolean isPerfEnabled() { return RemoldAgent.PERF_LOG; }
 		});
 	}
 	//endregion

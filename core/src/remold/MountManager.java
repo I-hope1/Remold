@@ -14,7 +14,11 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
-import static remold.RemoldAgent.*;
+import static remold.RemoldAgent.DEBUG;
+import static remold.RemoldAgent.error;
+import static remold.RemoldAgent.info;
+import static remold.RemoldAgent.loadedClassesMap;
+import static remold.RemoldAgent.log;
 
 /**
  * 类加载路径动态挂载与 ClassLoader 解析管理器。

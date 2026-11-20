@@ -1,7 +1,5 @@
 package remold.util;
 
-import remold.RemoldAgent;
-
 import java.io.File;
 import java.io.InputStream;
 import java.io.IOException;
@@ -42,7 +40,7 @@ public class LibTool {
 			if (file.exists() && file.isFile()) {
 				System.load(file.getAbsolutePath());
 				initialized = true;
-				RemoldAgent.info("[Lib] Loaded libtool from property: " + file.getAbsolutePath());
+				Diag.info("[Lib] Loaded libtool from property: " + file.getAbsolutePath());
 				return;
 			}
 		}
@@ -51,7 +49,7 @@ public class LibTool {
 		try {
 			System.loadLibrary("tool64");
 			initialized = true;
-			RemoldAgent.info("[Lib] Loaded libtool from java.library.path.");
+			Diag.info("[Lib] Loaded libtool from java.library.path.");
 			return;
 		} catch (Throwable ignored) {
 		}
@@ -86,7 +84,7 @@ public class LibTool {
 			try {
 				System.loadLibrary(shortName);
 				initialized = true;
-				RemoldAgent.info("[Lib] Loaded " + libName + " from java.library.path.");
+				Diag.info("[Lib] Loaded " + libName + " from java.library.path.");
 				return null;
 			} catch (Throwable ignored) {
 			}
@@ -100,7 +98,7 @@ public class LibTool {
 				try {
 					System.load(target.getAbsolutePath());
 					initialized = true;
-					RemoldAgent.info("[Lib] Loaded " + libName + " from: " + target.getAbsolutePath());
+					Diag.info("[Lib] Loaded " + libName + " from: " + target.getAbsolutePath());
 					return null;
 				} catch (Throwable t) {
 					lastFailure = t;
@@ -112,7 +110,7 @@ public class LibTool {
 			try {
 				System.load(local.getAbsolutePath());
 				initialized = true;
-				RemoldAgent.info("[Lib] Loaded " + libName + " from: " + local.getAbsolutePath());
+				Diag.info("[Lib] Loaded " + libName + " from: " + local.getAbsolutePath());
 				return null;
 			} catch (Throwable t) {
 				lastFailure = t;
@@ -361,7 +359,7 @@ public class LibTool {
 	@SuppressWarnings("unchecked")
 	public synchronized static <T> T[] getInstances(Class<T> clazz) {
 		clazz = prepareInstanceQueryClass(clazz);
-		if (RemoldAgent.PERF_LOG && timedQuerySupported) {
+		if (Diag.isPerfEnabled() && timedQuerySupported) {
 			long[] timings = new long[8];
 			long startNanos = System.nanoTime();
 			try {
@@ -527,14 +525,14 @@ public class LibTool {
 	private static void warnBatchFallbackOnce() {
 		if (batchFallbackWarned) return;
 		batchFallbackWarned = true;
-		RemoldAgent.warn("[Lib] Native batch heap scan is unavailable (old libtool build or unsupported target"
+		Diag.warn("[Lib] Native batch heap scan is unavailable (old libtool build or unsupported target"
 			+ " shape); instance collection falls back to one full heap walk per class.");
 	}
 
 	private static final Object[] EMPTY_OBJECTS = new Object[0];
 
 	private static void logInstanceQueryBreakdown(Class<?> clazz, long totalNanos, long[] timings) {
-		RemoldAgent.info(String.format(
+		Diag.info(String.format(
 			Locale.ROOT,
 			"[Lib] getInstances(%s): count=%d (kept=%d), total=%.1fms [validate=%.1fms, iterate=%.1fms, collect=%.1fms, alloc=%.1fms, fill=%.1fms, cleanup=%.1fms]",
 			clazz.getName(),

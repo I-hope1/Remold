@@ -15,7 +15,11 @@ import java.security.ProtectionDomain;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
-import static remold.RemoldAgent.*;
+import static remold.RemoldAgent.DEBUG;
+import static remold.RemoldAgent.ENABLE_HOTSWAP_EVENT;
+import static remold.RemoldAgent.FORCE_STATIC_LAMBDA;
+import static remold.RemoldAgent.INIT_FIX;
+import static remold.RemoldAgent.error;
 import static org.objectweb.asm.Opcodes.*;
 
 /**

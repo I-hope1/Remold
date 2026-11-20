@@ -1,7 +1,5 @@
 package remold.util;
 
-import remold.RemoldAgent;
-
 /**
  * JBR/DCEVM {@code redefineClasses} rewrites {@code Class} references held in <b>static fields</b>
  * to an old-version "shadow" {@code Class} object (same name and loader, old field metadata;
@@ -28,7 +26,7 @@ public final class ClassIdentity {
 		try {
 			Class<?> canonical = Class.forName(name, false, clazz.getClassLoader());
 			if (canonical != clazz) {
-				RemoldAgent.warn("[SHADOW-CLASS] normalized stale Class ref for " + name
+				Diag.warn("[SHADOW-CLASS] normalized stale Class ref for " + name
 					+ " (shadow=" + System.identityHashCode(clazz)
 					+ ", canonical=" + System.identityHashCode(canonical) + ")");
 			}

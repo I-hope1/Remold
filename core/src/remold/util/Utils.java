@@ -5,8 +5,6 @@ import org.objectweb.asm.ClassReader;
 import java.io.*;
 import java.nio.file.*;
 
-import static remold.RemoldAgent.*;
-
 public class Utils {
 	/**
 	 * 计算复合 Key：将逻辑名 Hash 和描述符 Hash 压缩进一个 long
@@ -23,7 +21,7 @@ public class Utils {
 	}
 
 	public static String getClassName(Path classFile) {
-		if (DEBUG) log("[PARSE] Parsing class file: " + classFile);
+		if (Diag.isDebugEnabled()) Diag.log("[PARSE] Parsing class file: " + classFile);
 		return getClassNameASM(classFile);
 	}
 

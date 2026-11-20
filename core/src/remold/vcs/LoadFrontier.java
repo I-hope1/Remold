@@ -1,6 +1,7 @@
 package remold.vcs;
 
 import java.util.ArrayDeque;
+import java.util.List;
 import java.util.Deque;
 
 /**
@@ -27,6 +28,8 @@ public final class LoadFrontier {
 	private static int capacity = DEFAULT_CAPACITY;
 	private static long watermark;
 	private static long droppedBirths;
+	private static long unresolvedBirths;
+	private static HashResolver HASH_RESOLVER;
 
 	private LoadFrontier() { }
 
@@ -73,13 +76,114 @@ public final class LoadFrontier {
 		}
 	}
 
-	/** 取走全部待处理出生（flush 语义：调用方拿到即视为已消费）。 */
-	public static java.util.List<Birth> drain() {
+	/**
+	 * flush 的结果：区分"哈希可确定"与"无法确定"的出生。
+	 *
+	 * <p>无法确定的一律按 L5 保守处理——相关字段的结论只能是 {@code OPAQUE_GUARDED}，不允许硬算。</p>
+	 */
+	public record Flush(List<Birth> resolved, int unresolved) {
+		public Flush {
+			resolved = resolved == null ? List.of() : List.copyOf(resolved);
+		}
+	}
+
+	/** 哈希解析口：由调用方（知道 {@code bytecodeCache} 语义的那一层）注入，避免本类反向依赖 agent。 */
+	@FunctionalInterface
+	public interface HashResolver {
+		/**
+		 * @return 该次出生真正生效字节的 sha256；<b>无法唯一确定时必须返回 {@code null}</b>
+		 *         （例如同一类名在多个 loader 下都出生过、或缓存里已经没有这一条）
+		 */
+		String hashOf(long loaderId, String internalName);
+	}
+
+	/**
+	 * 消费队列并补齐哈希。
+	 *
+	 * <p>解析不出来的条目<b>不会</b>被当成"哈希为空"静默放行：它们计入 {@code unresolved}，
+	 * 由调用方据此把相关结论降级。</p>
+	 */
+	public static Flush flush(HashResolver resolver) {
+		if (resolver == null) throw new IllegalArgumentException("resolver");
+		List<Birth> pending;
 		synchronized (LOCK) {
-			java.util.List<Birth> out = java.util.List.copyOf(QUEUE);
+			pending = List.copyOf(QUEUE);
+			QUEUE.clear();
+		}
+		List<Birth> resolved = new java.util.ArrayList<>(pending.size());
+		int unresolved = 0;
+		for (Birth b : pending) {
+			String hash = b.effSha256() == null || b.effSha256().isEmpty()
+			 ? resolver.hashOf(b.loaderId(), b.internalName()) : b.effSha256();
+			if (hash == null || hash.isEmpty()) {
+				unresolved++;
+				continue;
+			}
+			resolved.add(new Birth(b.loaderId(), b.internalName(), hash));
+		}
+		synchronized (LOCK) {
+			unresolvedBirths += unresolved;
+		}
+		return new Flush(resolved, unresolved);
+	}
+
+	/** 已 flush 但无法确定哈希的出生累计数；非零表示写点闭包不完备。 */
+	public static long unresolvedBirths() {
+		synchronized (LOCK) {
+			return unresolvedBirths;
+		}
+	}
+
+	/**
+	 * 当前世界是否只允许保守结论：发生过丢弃或存在无法确定哈希的出生时为 {@code true}（规格 L4/L5）。
+	 */
+	public static boolean conservativeOnly() {
+		synchronized (LOCK) {
+			return droppedBirths > 0L || unresolvedBirths > 0L;
+		}
+	}
+
+	/** 取走全部待处理出生（flush 语义：调用方拿到即视为已消费）。 */
+	public static List<Birth> drain() {
+		synchronized (LOCK) {
+			List<Birth> out = List.copyOf(QUEUE);
 			QUEUE.clear();
 			return out;
 		}
+	}
+
+	/**
+	 * 注册哈希解析口（由 agent 层在初始化时注册；只允许一个，重复注册覆盖）。
+	 *
+	 * <p>依赖方向：{@code vcs} 不认识 {@code RemoldAgent}，所以口子朝内开。</p>
+	 */
+	public static void setResolver(HashResolver resolver) {
+		synchronized (LOCK) {
+			HASH_RESOLVER = resolver;
+		}
+	}
+
+	/**
+	 * 提交前的 flush 边界（规格 L3）：把待处理出生消费成计数，供本轮清单记账。
+	 *
+	 * <p>没有注册解析口时无法补哈希，全部计入 {@code unresolved}——这是保守方向，不是放行。</p>
+	 */
+	public static Flush flushBeforeCommit() {
+		HashResolver resolver;
+		synchronized (LOCK) {
+			resolver = HASH_RESOLVER;
+		}
+		if (resolver == null) {
+			int size = pending();
+			if (size > 0) {
+				drain();
+				synchronized (LOCK) {
+					unresolvedBirths += size;
+				}
+			}
+			return new Flush(List.of(), size);
+		}
+		return flush(resolver);
 	}
 
 	/** 测试与诊断用：重置全部状态。 */
@@ -88,6 +192,8 @@ public final class LoadFrontier {
 			QUEUE.clear();
 			watermark = 0L;
 			droppedBirths = 0L;
+			unresolvedBirths = 0L;
+			HASH_RESOLVER = null;
 			capacity = DEFAULT_CAPACITY;
 		}
 	}

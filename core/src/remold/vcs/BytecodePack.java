@@ -129,7 +129,7 @@ public final class BytecodePack {
 	 */
 	public record Round(long seq, String id, String parentId, String roundId, long loaderScope,
 	                    String algoVersion, String patchTiming, List<Entry> entries,
-	                    Changeset.Births births) {
+	                    Changeset.Births births, int droppedBirths, int unresolvedBirths) {
 
 		public Round {
 			id = id == null ? "" : id;
@@ -139,6 +139,8 @@ public final class BytecodePack {
 			patchTiming = patchTiming == null ? "" : patchTiming;
 			entries = entries == null ? List.of() : List.copyOf(entries);
 			births = births == null ? Changeset.Births.NONE : births;
+			if (droppedBirths < 0) droppedBirths = 0;
+			if (unresolvedBirths < 0) unresolvedBirths = 0;
 		}
 
 		/** 按类名取条目（内部名，如 {@code probe/Subject}）。 */
@@ -253,8 +255,13 @@ public final class BytecodePack {
 			int version = Integer.parseInt(raw.trim());
 			if (version < FORMAT_VERSION) return Compat.REFUSED_LEGACY_PACK;
 			if (version > FORMAT_VERSION) return Compat.REFUSED_FUTURE_PACK;
-			// 版本号写着 2 却缺 births= 行的清单是损坏件，同样不能当空集放行。
-			return fields.containsKey("births") ? Compat.OK : Compat.REFUSED_MALFORMED;
+			// 版本号写着 2 却缺字段的清单是损坏件，同样不能当空集放行。
+			if (!fields.containsKey("births")) return Compat.REFUSED_MALFORMED;
+			if (!fields.containsKey("droppedBirths") || !fields.containsKey("unresolvedBirths")) {
+				return Compat.REFUSED_MALFORMED;
+			}
+			// births=bad 这类损坏文本不能靠 Births.parse 静默退回 0..0 蒙混过关。
+			return isWellFormedBirths(fields.get("births")) ? Compat.OK : Compat.REFUSED_MALFORMED;
 		} catch (Throwable t) {
 			return Compat.REFUSED_MALFORMED;
 		}
@@ -311,7 +318,8 @@ public final class BytecodePack {
 			 m.getOrDefault("parentId", ""), m.getOrDefault("roundId", ""),
 			 parseLong(m.get("loaderScope")), m.getOrDefault("algoVersion", ""),
 			 m.getOrDefault("patchTiming", ""), entries,
-			 Changeset.Births.parse(m.get("births"))));
+			 Changeset.Births.parse(m.get("births")),
+			 parseInt(m.get("droppedBirths")), parseInt(m.get("unresolvedBirths"))));
 		} catch (Throwable t) {
 			return Optional.empty();
 		}
@@ -414,6 +422,8 @@ public final class BytecodePack {
 		sb.append("buildId=").append(escape(cs.buildId())).append('\n');
 		Changeset.Births births = cs.manifest() == null ? Changeset.Births.NONE : cs.manifest().births();
 		sb.append("births=").append(births.text()).append('\n');
+		sb.append("droppedBirths=").append(cs.manifest() == null ? 0 : cs.manifest().droppedBirths()).append('\n');
+		sb.append("unresolvedBirths=").append(cs.manifest() == null ? 0 : cs.manifest().unresolvedBirths()).append('\n');
 		sb.append("entryCount=").append(entries.size()).append('\n');
 		for (int i = 0; i < entries.size(); i++) {
 			Entry e = entries.get(i);
@@ -430,6 +440,33 @@ public final class BytecodePack {
 		Files.writeString(tmp, sb.toString(), StandardCharsets.UTF_8,
 		 StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
 		Files.move(tmp, dst, StandardCopyOption.REPLACE_EXISTING);
+	}
+
+	/** {@code births=prev..curr} 的严格形态校验（两个非负十进制 + 恰好一个 {@code ..}）。 */
+	private static boolean isWellFormedBirths(String text) {
+		if (text == null) return false;
+		String t = text.trim();
+		int sep = t.indexOf("..");
+		if (sep <= 0 || sep != t.lastIndexOf("..")) return false;
+		return isNonNegativeDecimal(t.substring(0, sep)) && isNonNegativeDecimal(t.substring(sep + 2));
+	}
+
+	private static boolean isNonNegativeDecimal(String s) {
+		String t = s == null ? "" : s.trim();
+		if (t.isEmpty()) return false;
+		for (int i = 0; i < t.length(); i++) {
+			if (!Character.isDigit(t.charAt(i))) return false;
+		}
+		return true;
+	}
+
+	private static int parseInt(String s) {
+		if (s == null) return 0;
+		try {
+			return Math.max(0, Integer.parseInt(s.trim()));
+		} catch (NumberFormatException e) {
+			return 0;
+		}
 	}
 
 	private static Map<String, String> readManifest(Path manifest) throws IOException {

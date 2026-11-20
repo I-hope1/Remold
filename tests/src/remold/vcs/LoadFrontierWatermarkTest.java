@@ -161,4 +161,74 @@ class LoadFrontierWatermarkTest {
 		assertFalse(Changeset.tracksBirths(null));
 	}
 
+
+	/** flush 把出生消费成"可判定/不可判定"两半；不可判定不得静默放行。 */
+	@Test
+	void flushResolvesHashesAndCountsTheUnresolvable() {
+		LoadFrontier.reset();
+		LoadFrontier.birth(1L, "probe/Known", "");
+		LoadFrontier.birth(1L, "probe/Unknown", "");
+
+		LoadFrontier.Flush flush = LoadFrontier.flush((loaderId, internalName) ->
+		 internalName.endsWith("Known") && !internalName.endsWith("Unknown") ? "sha-known" : null);
+
+		assertEquals(1, flush.resolved().size(), "only the resolvable birth may be accepted");
+		assertEquals("sha-known", flush.resolved().get(0).effSha256());
+		assertEquals(1, flush.unresolved(), "the unresolvable birth must be counted, not dropped silently");
+		assertEquals(1L, LoadFrontier.unresolvedBirths());
+		assertTrue(LoadFrontier.conservativeOnly(),
+		 "an unresolvable birth must force conservative-only conclusions (spec L5)");
+		assertEquals(0, LoadFrontier.pending(), "flush consumes the queue");
+	}
+
+	/** 队列触限：丢弃最旧并计数，且立刻进入保守模式。 */
+	@Test
+	void overflowCountsDropsAndForcesConservativeMode() {
+		LoadFrontier.reset();
+		LoadFrontier.capacityForTest(2);
+		for (int i = 0; i < 4; i++) LoadFrontier.birth(1L, "probe/C" + i, "");
+		assertEquals(2, LoadFrontier.pending());
+		assertEquals(2L, LoadFrontier.droppedBirths(), "drops must be counted");
+		assertTrue(LoadFrontier.conservativeOnly(), "any drop forces conservative-only conclusions (spec L4)");
+	}
+
+	/** 清单只记"本轮增量"，不是进程累计值。 */
+	@Test
+	void manifestRecordsPerRoundDeltasOnly() throws Exception {
+		LoadFrontier.reset();
+		ChangesetLog.INSTANCE.reset();
+		LoadFrontier.capacityForTest(1);
+		LoadFrontier.birth(1L, "probe/A", "");
+		LoadFrontier.birth(1L, "probe/B", "");
+		Changeset first = commitOne(9L, "raw-9", "r9");
+		assertEquals(1, first.manifest().droppedBirths(), "first commit carries the drop delta");
+		assertTrue(first.manifest().birthsIncomplete(), "incomplete births must be visible on the manifest");
+
+		// 第二轮没有再丢弃：增量必须是 0，不能把累计值重复写一遍。
+		LoadFrontier.capacityForTest(64);
+		LoadFrontier.birth(1L, "probe/C", "");
+		LoadFrontier.birth(1L, "probe/D", "");
+		Changeset second = commitOne(9L, "raw-10", "r10");
+		assertEquals(0, second.manifest().droppedBirths(), "cumulative counters must not be re-recorded");
+		assertEquals(first.manifest().births().curr(), second.manifest().births().prev(),
+		 "watermarks must stay adjacent across commits");
+	}
+
+	/** corrupt births text must be refused, not silently treated as 0..0. */
+	@Test
+	void corruptBirthsTextIsRefused() throws Exception {
+		LoadFrontier.reset();
+		Changeset cs = commitOne(11L, "raw-11", "r11");
+		rootA = Files.createTempDirectory("pack-corrupt");
+		assertTrue(BytecodePack.exportRound(rootA, cs, List.of(packEntry())));
+		String manifest = Files.readString(BytecodePack.manifestPath(rootA, cs.seq()), StandardCharsets.UTF_8);
+
+		Path bad = Files.createTempDirectory("pack-bad-births");
+		Path round = BytecodePack.roundDir(bad, cs.seq());
+		Files.createDirectories(round);
+		Files.writeString(round.resolve(BytecodePack.MANIFEST_FILE),
+		 manifest.replaceFirst("births=[0-9.]+", "births=bad"), StandardCharsets.UTF_8);
+		assertEquals(BytecodePack.Compat.REFUSED_MALFORMED, BytecodePack.compat(bad, cs.seq()),
+		 "a malformed births token must be refused instead of decoying Births.parse into 0..0");
+	}
 }

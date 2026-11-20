@@ -38,6 +38,9 @@ public final class ChangesetLog {
 
 	/** 每个 scope 上一次提交时的出生水位线：下一代的 {@code prev} 必须接上这一代的 {@code curr}。 */
 	private final Map<Long, Long> lastBirthWatermark = new LinkedHashMap<>();
+	/** 每个 scope 上一次提交时已经记账的丢弃/未解析出生累计数（清单只写增量）。 */
+	private final Map<Long, Long> lastDroppedBirths = new LinkedHashMap<>();
+	private final Map<Long, Long> lastUnresolvedBirths = new LinkedHashMap<>();
 	private final Map<Long, Long> abortedCounts = new LinkedHashMap<>();
 	/** 内容寻址的 Eff 字节（Eff_0 与逐代 Eff 共用，按 sha256 去重）：回退的唯一字节来源。 */
 	private final Map<String, byte[]> effBlobs = new LinkedHashMap<>();
@@ -123,11 +126,20 @@ public final class ChangesetLog {
 			lastBirthWatermark.put(loaderScope, supplied.curr());
 			return base;
 		}
+		// flush 边界（规格 L3）：本轮提交之前把待处理出生消费掉，才能把"记录是否完整"写进清单。
+		LoadFrontier.flushBeforeCommit();
 		long curr = LoadFrontier.watermark();
 		long prev = lastBirthWatermark.getOrDefault(loaderScope, 0L);
 		lastBirthWatermark.put(loaderScope, curr);
+		// 清单记**本轮增量**而不是进程累计值：累计值会让同一份历史在不同重启点产生不同 id。
+		long dropped = LoadFrontier.droppedBirths();
+		long unresolved = LoadFrontier.unresolvedBirths();
+		int droppedDelta = (int) Math.max(0L, dropped - lastDroppedBirths.getOrDefault(loaderScope, 0L));
+		int unresolvedDelta = (int) Math.max(0L, unresolved - lastUnresolvedBirths.getOrDefault(loaderScope, 0L));
+		lastDroppedBirths.put(loaderScope, dropped);
+		lastUnresolvedBirths.put(loaderScope, unresolved);
 		return new Changeset.Manifest(base.orderedHosts(), base.edges(), base.nodes(),
-		 base.candidateMissing(), new Changeset.Births(prev, curr));
+		 base.candidateMissing(), new Changeset.Births(prev, curr), droppedDelta, unresolvedDelta);
 	}
 
 	/**
@@ -375,6 +387,8 @@ public final class ChangesetLog {
 
 	public synchronized void reset() {
 		lastBirthWatermark.clear();
+		lastDroppedBirths.clear();
+		lastUnresolvedBirths.clear();
 		chains.clear();
 		abortedCounts.clear();
 		effBlobs.clear();

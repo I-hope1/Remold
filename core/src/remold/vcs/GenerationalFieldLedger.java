@@ -250,7 +250,9 @@ public final class GenerationalFieldLedger {
 	 * {@code OPAQUE_GUARDED}，而不是当作 {@code MISS_NO_FACT} 放行。</p>
 	 */
 	public synchronized int forgottenWriters(ClassLoader loader, LedgerKey key) {
-		ScopeSlot slot = slots.get(loader);
+		// loader == null 是 bootstrap 槽（scope 0）：pruneToWindow 走 slotFor(...)，查询必须同口径，
+		// 否则启动加载器下的类被裁剪后永远报 0。
+		ScopeSlot slot = loader == null ? bootstrapSlot : slots.get(loader);
 		if (slot == null || key == null) return 0;
 		return slot.forgotten.getOrDefault(key.className() + "\u0001" + key.field(), 0);
 	}
@@ -429,7 +431,9 @@ public final class GenerationalFieldLedger {
 	/** 清空（测试与 agent 重启口径）。 */
 	public synchronized void reset() {
 		slots.clear();
+		forgottenWritersTotal = 0L;
 		bootstrapSlot.history.clear();
+		bootstrapSlot.forgotten.clear();
 		bootstrapSlot.unclosed.clear();
 		bootstrapSlot.reinitApplied.clear();
 		acceptedCount = 0L;

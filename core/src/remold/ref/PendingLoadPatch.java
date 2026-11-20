@@ -186,7 +186,7 @@ public final class PendingLoadPatch {
 	                                 boolean projectLocated,
 	                                 BiFunction<String, byte[], byte[]> transforms) {
 		if (!projectLocated) return new Decision(Outcome.REFUSED_NON_PROJECT, null);
-		String dot = normalize(internalName).replace('/', '.');
+		String dot = Names.external(normalize(internalName));
 		// 明确是 Mixin 目标：拒绝。UNKNOWN 不能当成 NOT_TARGET（见 MixinTargetIndex 的 Javadoc）。
 		if (MixinTargetIndex.lookup(internalName) == MixinTargetIndex.Lookup.TARGET) {
 			return new Decision(Outcome.REFUSED_MIXIN_TARGET, null);

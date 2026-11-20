@@ -1,5 +1,6 @@
 package remold.ref;
 
+import remold.WorkspaceRawIndex;
 import remold.AnnotationTransformer;
 import remold.BytecodeSources;
 import remold.RemoldAgent;
@@ -294,7 +295,7 @@ public final class HierarchyTreeOracle implements ClassHierarchyOracle {
 		if (cached != null) return cached;
 		// 织入期生成的合成类（Mixin 的 Target$Anonymous$<uuid>）磁盘上没有 .class、也不经过
 		// Remold 的 transformer，只能由生成方回灌到登记口。
-		byte[] supplied = BytecodeSources.lookup(internalName);
+		byte[] supplied = WorkspaceRawIndex.lookup(internalName);
 		if (supplied != null) return supplied;
 		ClassLoader sourceLoader = targetLoader == null ? ClassLoader.getSystemClassLoader() : targetLoader;
 		if (sourceLoader == null) return null;

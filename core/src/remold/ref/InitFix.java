@@ -1,6 +1,7 @@
 package remold.ref;
 
 import jdk.internal.misc.Unsafe;
+import remold.WorkspaceRawIndex;
 import remold.ClassDiffUtil.ClassDiff;
 import remold.*;
 import remold.annotation.RemoldReinit;
@@ -293,12 +294,15 @@ public class InitFix {
 		BATCH_CONTEXT.set(new BatchContext(copy, candidateFields, new ArrayList<>(), loaderIds,
 		 new LinkedHashMap<>(), new ArrayList<>()));
 		BATCH_FAILURES.get().clear();
+		// 工作区 Raw 索引与批次上下文同寿：批内复用，批末清空（不做跨批次失效协议）。
+		WorkspaceRawIndex.beginBatch();
 	}
 
 	/** Clear all transient same-batch state after redefine/post-processing completes. */
 	public static void endBatchBytecodeView() {
 		BATCH_CONTEXT.remove();
 		BATCH_FAILURES.remove();
+		WorkspaceRawIndex.endBatch();
 	}
 
 	/** Replace the provisional layout-gate view with the definitions that can actually be installed. */

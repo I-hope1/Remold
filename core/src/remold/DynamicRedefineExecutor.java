@@ -399,7 +399,6 @@ final class DynamicRedefineExecutor {
 				     + (twoPhase ? " (two-phase: A -> patch -> C)" : "") + timingSuffix);
 				return true;
 			} finally {
-				InitFix.endBatchBytecodeView();
 				exitInternalRedefine();
 			}
 		} catch (Throwable t) {
@@ -412,6 +411,9 @@ final class DynamicRedefineExecutor {
 			InitFix.afterRedefineFailed(targetClass);
 			return false;
 		} finally {
+			// 批次上下文的清理放在最外层：中间任何一步（transform/两阶段/堆快照）抛异常都会走到这里，
+			// 而不是绕过内层 finally 把 ThreadLocal BATCH_CONTEXT 留给下一轮文件热更批次。
+			InitFix.endBatchBytecodeView();
 			BatchReportScope.discard();
 			HOTSWAP_LOCK.unlock();
 		}

@@ -185,13 +185,14 @@
 
 设计规格：[`docs/vcs/07-load-frontier-and-birth-watermark.md`](vcs/07-load-frontier-and-birth-watermark.md)；
 实测读数：[`tests/fabric-mixin-probe/LF-PROBE-RESULTS.md`](../tests/fabric-mixin-probe/LF-PROBE-RESULTS.md)
+（第二轮：运行期 config 变更 + 未声明类的负对照，见 [`LF-ROUND2-RESULTS.md`](../tests/fabric-mixin-probe/LF-ROUND2-RESULTS.md)）
 
 | 机制 / 条目 | 状态 | 规范章节 | 落地位置 | 验收证据与决策依据 |
 |:---|:---:|:---|:---|:---|
 | 单调加载水位线 + 有界出生队列（标量三元组、`droppedBirths` / `unresolvedBirths`、`conservativeOnly()`） | ✅ | L2 / L3 | `core/src/remold/vcs/LoadFrontier.java` | `LoadFrontierWatermarkTest`：水位线单调、队列触限进入保守态、`flush` 只取一次、`flushBeforeCommit` 保证提交时计数=1 |
 | 出生信息进 Manifest 与回放包（`births=prev..curr`、`algoVersion` 数值 ≥ 3 才参与前置像） | ✅ | L3 | `Changeset.Manifest` / `BytecodePack`（`FORMAT_VERSION=2`） | 旧格式包一律 `REFUSED_LEGACY_PACK`；`births` 缺失/畸形 `REFUSED_MALFORMED`；更高版本 `REFUSED_FUTURE_PACK` |
 | 出生点补丁（`PendingLoadPatch`）：不被 Mixin/上游织入字节覆盖、只消费一次、点分/斜杠归一 | ✅ | L4 | `core/src/remold/ref/PendingLoadPatch.java`、`AnnotationTransformer` | `BirthPatchTest` 12 例（含 `AnnotationTransformer` 链路、`APPLIED/EQUAL/REFUSED_NON_PROJECT/REFUSED_WOVEN/REFUSED_MIXIN_TARGET/REFUSED_UNRESOLVED_PAYLOAD`、双向名字形态）；变异：去掉归一化 → 双向用例同时变红 |
-| Mixin 目标索引三态（`TARGET` / `NOT_TARGET` / `UNKNOWN`）与发布时序 | ✅ | L6 | `core/src/remold/reflect/mixin/MixinTargetIndex.java`、`plugin-mixin/.../MixinTargetPublisher` | Fabric 1.21.1 实测：mod init 阶段 `available=false size=0`（32 个 config 已就绪）、`isHostReady()` 后 `size=162 stamp=1`；`mixinMapping`/`unhandledTargets` 为点分而 `getTargetClasses()` 为斜杠，归一后两源并集完整；`MixinTargetIndexTest` 含 2000 次发布并发回归（clear-then-fill 变异变红） |
+| Mixin 目标索引三态（`TARGET` / `NOT_TARGET` / `UNKNOWN`）与发布时序 | ✅ | L6 | `core/src/remold/reflect/mixin/MixinTargetIndex.java`、`plugin-mixin/.../MixinTargetPublisher` | Fabric 1.21.1 实测：mod init 阶段 `available=false size=0`（32 个 config 已就绪）、`isHostReady()` 后 `size=162 stamp=1`；`mixinMapping`/`unhandledTargets` 为点分而 `getTargetClasses()` 为斜杠，归一后两源并集完整；`MixinTargetIndexTest` 含 2000 次发布并发回归（clear-then-fill 变异变红）；第二轮真机读数：运行期改写 `mixins.json` 后 `stamp` 0→3、`size` 0→163、目标 `UNKNOWN`→`TARGET`，未列入任何 config 的 `@Mixin` 类则 `stamp` 不变且目标恒为 `NOT_TARGET` |
 | 两级保留：内存裁剪只把结论推向保守，遗忘必须可观测 | ✅ | L5 | `GenerationalFieldLedger.pruneToWindow` / `GenerationalReplayGate.decide(..., prunedFromLedger)` | 裁剪按 `class\u0001field` 计 `forgottenWriters` 并进 `counters()`；生产侧 `InitFix` 两个真实重放点都传裁剪标志，裁剪过的键即使解析成 `MISS_NO_FACT` 也被拒（理由串点名降级为 `OPAQUE_GUARDED`）；`LedgerRetentionTest` + `LedgerResetAndBootstrapSlotTest` |
 | 作用域判决时间戳（空集放行可追责、失效可重判） | ✅ | L5 / L6 | `core/src/remold/vcs/ScopeVerdicts.java` | 判决记录 `(subject, watermark, conservativeAtStamp)`，按 loader 隔离含 bootstrap 槽；前沿推进/进入保守态/被裁剪三条判失效，被裁剪返回 `STALE` 而非 `UNKNOWN`；与 `GenerationalFieldLedger` 同源裁剪（`keepWatermark` 取链最老保留代的 `births().prev()`）；`ScopeVerdictsTest` 5 例 |
 | 动态重定义自成一代（`dynamic:` 标记，三种状态转移） | ✅ | L0 | `core/src/remold/DynamicVcsCommit.java`、`DynamicRedefineExecutor` | 成功提交一代、失败记中止、no-op 不动 `seq`；字节四元组 `preAlign=source / alignOutput=jvm=runtime / effBefore=old`；`DynamicVcsCommitTest` 5 例 + 导出包 `entryCount=1` 用例；单类批次上下文在 `InitFix.transform` **之前**开启、最外层 `finally` 清理 |

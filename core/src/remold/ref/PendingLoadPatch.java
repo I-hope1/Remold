@@ -43,6 +43,15 @@ public final class PendingLoadPatch {
 	/** 合成/内部类的名字形态：这些类即使工作区里有同名产物也不该由本机制替换。 */
 	private static final Pattern SYNTHETIC_NAME = Pattern.compile(".*(\\$Anonymous\\$|\\$mixin\\$|\\$\\$).*");
 
+	/**
+	 * "加载器未知"的 scope 哨兵。
+	 *
+	 * <p>批次提交时类还没加载，谁会成为它的定义加载器要等 JVM 决定；此时无法按 scope 精确定位。
+	 * 这类待决记录用哨兵登记，出生时<b>先查精确 scope、再退回哨兵</b>。跨 loader 泄漏由出生点的
+	 * 工作区归属校验兜住：非工作区类一律拒绝，所以外部类拿不到这条记录。</p>
+	 */
+	public static final long ANY_SCOPE = Long.MIN_VALUE;
+
 	/** 待决队列上限：类加载路径上的记账必须有界。 */
 	public static final int DEFAULT_CAPACITY = 1024;
 
@@ -97,6 +106,16 @@ public final class PendingLoadPatch {
 	}
 
 	/**
+	 * 登记一条"加载器未知"的待决补丁（批次提交时类尚未加载的典型形态）。
+	 *
+	 * @param internalName 内部名
+	 * @param diskRaw      磁盘上的 v2 Raw 字节（变换在出生时做）
+	 */
+	public static void offerAny(String internalName, byte[] diskRaw) {
+		offer(ANY_SCOPE, internalName, diskRaw);
+	}
+
+	/**
 	 * 登记一条待决补丁（批次提交时调用：类已改但尚未加载）。
 	 *
 	 * @param diskRaw 磁盘上的 v2 Raw 字节；<b>不是</b>变换后字节，变换在出生时做
@@ -128,9 +147,16 @@ public final class PendingLoadPatch {
 	                              BiFunction<String, byte[], byte[]> applySourceTransforms) {
 		Pending pending;
 		synchronized (LOCK) {
-			pending = PENDING.get(key(loaderScope, internalName));
+			String exact = key(loaderScope, internalName);
+			pending = PENDING.get(exact);
+			if (pending != null) {
+				PENDING.remove(exact);
+			} else {
+				String any = key(ANY_SCOPE, internalName);
+				pending = PENDING.get(any);
+				if (pending != null) PENDING.remove(any);
+			}
 			if (pending == null) return Decision.NONE;
-			PENDING.remove(key(loaderScope, internalName));
 		}
 		Decision d = evaluate(pending, internalName, buffer, projectLocated, applySourceTransforms);
 		synchronized (LOCK) {

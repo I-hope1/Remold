@@ -46,6 +46,7 @@ import remold.RemoldAgent.GateCachedDiff;
 import remold.RemoldAgent.RedefineMode;
 import remold.RemoldAgent.RedefineOutcome;
 import remold.RemoldAgent.RoundSkips;
+import remold.ref.PendingLoadPatch;
 
 import static remold.RemoldAgent.ANON_ALIGN;
 import static remold.RemoldAgent.BATCH_REDEFINE_MILLIS;
@@ -779,7 +780,8 @@ final class BatchHotswapExecutor {
 					// clHintPath == null 表示来自直接传入的 activeWatchJar，无虚拟 watchDir 路径，
 					// 退化到纯包名推断（findTargetClassLoader(className)），inject 照常走，lazy_load 挂 tmpDir 路径
 					if (REDEFINE_MODE == RedefineMode.inject) {
-						if (injectNewClass(className, clHintPath, bytecode)) {
+						boolean injected = injectNewClass(className, clHintPath, bytecode);
+						if (injected) {
 							recordRuntimeBytecode(className, bytecode);
 							injectedCount++;
 							injectedClasses.add(className);
@@ -791,6 +793,9 @@ final class BatchHotswapExecutor {
 							synchronized (fileDiskHashes) {
 								fileDiskHashes.put(CRC64.hashString(injectRawName), diskHash);
 							}
+						} else {
+							// 注入失败：类仍未加载，登记出生点补丁作为兜底（失败时不落指纹，下次触发会重试）。
+							PendingLoadPatch.offerAny(className, bytecode);
 						}
 					} else if (REDEFINE_MODE == RedefineMode.lazy_load && UCP_APPEND) {
 						ClassLoader loader = findTargetClassLoader(className, clHintPath);
@@ -802,6 +807,9 @@ final class BatchHotswapExecutor {
 							mountForClass(loader, mountPath);
 						}
 						recordRuntimeBytecode(className, bytecode);
+						// 类尚未加载：登记出生点补丁，让它第一次加载时直接拿到这次编辑的字节
+						// （加载器此刻还未知，按 ANY_SCOPE 登记；出生点的工作区归属校验兜底）。
+						PendingLoadPatch.offerAny(className, bytecode);
 						// lazy_load 只是挂载路径，类尚未真正加载生效 —— 指纹**不**落账，
 						// 等它真正被加载/重定义时再记，否则会漏掉后续的首次加载。
 					}

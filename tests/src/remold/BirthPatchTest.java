@@ -262,4 +262,32 @@ class BirthPatchTest {
 		assertEquals(0, PendingLoadPatch.pending(),
 		 "the pending patch must be discarded once the alignment queue supplied effective bytes");
 	}
+
+	/** 批次里"类尚未加载、加载器未知"的登记：出生时无论谁成为定义加载器都能拿到这次编辑。 */
+	@Test
+	void unknownScopeOfferIsConsumedByWhicheverLoaderLoadsFirst() {
+		byte[] v2 = classBytes("V2");
+		PendingLoadPatch.offerAny(INTERNAL, v2);
+
+		// 加载器此刻才确定：任意 scope 都应命中这条 ANY_SCOPE 记录。
+		PendingLoadPatch.Decision d = PendingLoadPatch.decide(424242L, INTERNAL, classBytes("V1"), true,
+		 (dot, raw) -> raw);
+
+		assertTrue(d.applied(), "the pending patch registered before the loader was known must still apply");
+		assertArrayEquals(v2, d.bytes());
+		assertEquals(0, PendingLoadPatch.pending(), "consumed once");
+	}
+
+	/** 但归属校验仍然优先：外部类即使名字相同也不能消费这条记录。 */
+	@Test
+	void unknownScopeOfferStillRequiresProjectOwnership() {
+		byte[] v2 = classBytes("V2");
+		PendingLoadPatch.offerAny(INTERNAL, v2);
+
+		PendingLoadPatch.Decision d = PendingLoadPatch.decide(7L, INTERNAL, classBytes("V1"), false,
+		 (dot, raw) -> raw);
+
+		assertFalse(d.applied());
+		assertEquals(PendingLoadPatch.Outcome.REFUSED_NON_PROJECT, d.outcome());
+	}
 }

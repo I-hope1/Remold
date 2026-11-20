@@ -75,6 +75,8 @@ public final class BytecodePack {
 		OK,
 		/** 旧格式（{@code formatVersion < 2}）：没有出生水位线，无法证明复现的是哪个加载状态。 */
 		REFUSED_LEGACY_PACK,
+		/** 比当前实现更新的格式：本端不知道该格式的语义，不能猜。 */
+		REFUSED_FUTURE_PACK,
 		/** 清单缺失或损坏。 */
 		REFUSED_MALFORMED,
 		/** 包目录不存在。 */
@@ -126,7 +128,8 @@ public final class BytecodePack {
 	 * @param patchTiming 提交时刻字段补丁状态（{@code BEFORE_COMMIT} / {@code AFTER_COMMIT}）
 	 */
 	public record Round(long seq, String id, String parentId, String roundId, long loaderScope,
-	                    String algoVersion, String patchTiming, List<Entry> entries) {
+	                    String algoVersion, String patchTiming, List<Entry> entries,
+	                    Changeset.Births births) {
 
 		public Round {
 			id = id == null ? "" : id;
@@ -135,6 +138,7 @@ public final class BytecodePack {
 			algoVersion = algoVersion == null ? "" : algoVersion;
 			patchTiming = patchTiming == null ? "" : patchTiming;
 			entries = entries == null ? List.of() : List.copyOf(entries);
+			births = births == null ? Changeset.Births.NONE : births;
 		}
 
 		/** 按类名取条目（内部名，如 {@code probe/Subject}）。 */
@@ -243,16 +247,17 @@ public final class BytecodePack {
 		Path manifest = roundDir(root, seq).resolve(MANIFEST_FILE);
 		if (!Files.isRegularFile(manifest)) return Compat.MISSING;
 		try {
-			for (String line : Files.readAllLines(manifest)) {
-				int eq = line.indexOf('=');
-				if (eq <= 0 || !"formatVersion".equals(line.substring(0, eq).trim())) continue;
-				int version = Integer.parseInt(line.substring(eq + 1).trim());
-				return version == FORMAT_VERSION ? Compat.OK : Compat.REFUSED_LEGACY_PACK;
-			}
+			Map<String, String> fields = readManifest(manifest);
+			String raw = fields.get("formatVersion");
+			if (raw == null) return Compat.REFUSED_MALFORMED;
+			int version = Integer.parseInt(raw.trim());
+			if (version < FORMAT_VERSION) return Compat.REFUSED_LEGACY_PACK;
+			if (version > FORMAT_VERSION) return Compat.REFUSED_FUTURE_PACK;
+			// 版本号写着 2 却缺 births= 行的清单是损坏件，同样不能当空集放行。
+			return fields.containsKey("births") ? Compat.OK : Compat.REFUSED_MALFORMED;
 		} catch (Throwable t) {
 			return Compat.REFUSED_MALFORMED;
 		}
-		return Compat.REFUSED_MALFORMED;
 	}
 
 	/** 整条链的兼容性：任一代不是当前格式即拒绝（混血链）。 */
@@ -305,7 +310,8 @@ public final class BytecodePack {
 			return Optional.of(new Round(seq, m.getOrDefault("changesetId", ""),
 			 m.getOrDefault("parentId", ""), m.getOrDefault("roundId", ""),
 			 parseLong(m.get("loaderScope")), m.getOrDefault("algoVersion", ""),
-			 m.getOrDefault("patchTiming", ""), entries));
+			 m.getOrDefault("patchTiming", ""), entries,
+			 Changeset.Births.parse(m.get("births"))));
 		} catch (Throwable t) {
 			return Optional.empty();
 		}

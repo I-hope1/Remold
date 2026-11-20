@@ -14,6 +14,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -113,7 +114,51 @@ class LoadFrontierWatermarkTest {
 		assertEquals(BytecodePack.Compat.REFUSED_LEGACY_PACK, BytecodePack.compat(legacy, cs.seq()),
 		 "v1 包必须被显式拒绝（不得按没有 births 当空集放行）");
 		assertEquals(BytecodePack.Compat.REFUSED_LEGACY_PACK, BytecodePack.compatChain(legacy));
+
+		// 未来格式：本端不知道该格式的语义，不能当成旧包糊过去。
+		Path future = Files.createTempDirectory("pack-future");
+		Path futureRound = BytecodePack.roundDir(future, cs.seq());
+		Files.createDirectories(futureRound);
+		Files.writeString(futureRound.resolve(BytecodePack.MANIFEST_FILE),
+		 manifest.replace("formatVersion=2", "formatVersion=9"), StandardCharsets.UTF_8);
+		assertEquals(BytecodePack.Compat.REFUSED_FUTURE_PACK, BytecodePack.compat(future, cs.seq()),
+		 "未来格式必须单独拒绝，不能归成 legacy");
+
+		// 版本号写着 2 却缺 births= 行：损坏件，同样不能当空集放行。
+		Path broken = Files.createTempDirectory("pack-broken");
+		Path brokenRound = BytecodePack.roundDir(broken, cs.seq());
+		Files.createDirectories(brokenRound);
+		String withoutBirths = String.join("\n", java.util.Arrays.stream(manifest.split("\n"))
+		 .filter(line -> !line.startsWith("births=")).toList());
+		Files.writeString(brokenRound.resolve(BytecodePack.MANIFEST_FILE), withoutBirths + "\n",
+		 StandardCharsets.UTF_8);
+		assertEquals(BytecodePack.Compat.REFUSED_MALFORMED, BytecodePack.compat(broken, cs.seq()),
+		 "缺 births 的 v2 清单是损坏件，必须拒绝");
 	}
 
-	/** 提交并把这一代导出到给定目录；返回带水位线的 Changeset。 */
+	/** 回放端必须能读到水位线，否则"复现的是哪个世界"这一问题在 API 层就无解。 */
+	@Test
+	void roundParsesTheBirthWatermark() throws Exception {
+		LoadFrontier.reset();
+		LoadFrontier.birth(3L, "probe/Born", "sha");
+		LoadFrontier.birth(3L, "probe/Born2", "sha2");
+		Changeset cs = commitOne(5L, "raw-5", "r5");
+		rootA = Files.createTempDirectory("pack-round");
+		assertTrue(BytecodePack.exportRound(rootA, cs, List.of(packEntry())));
+
+		BytecodePack.Round round = BytecodePack.round(rootA, cs.seq()).orElseThrow();
+		assertEquals(0L, round.births().prev(), "prev 必须是该 scope 的起点");
+		assertEquals(2L, round.births().curr(), "curr 必须等于提交时的水位线");
+	}
+
+	/** 版本判定按数值比较：vcs=4 仍然要把 births 纳入前置像。 */
+	@Test
+	void birthTrackingSurvivesFutureAlgoVersions() {
+		assertTrue(Changeset.tracksBirths("vcs=3|asm=9|jdk=21"));
+		assertTrue(Changeset.tracksBirths("vcs=4|asm=9|jdk=21"),
+		 "版本升到 vcs=4 时不能因为前缀不匹配就悄悄把 births 从 id 前置像里丢掉");
+		assertFalse(Changeset.tracksBirths("vcs=2|asm=9|jdk=21"));
+		assertFalse(Changeset.tracksBirths(null));
+	}
+
 }

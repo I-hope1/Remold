@@ -70,7 +70,7 @@
 **阶段 C 的第二重作用（JIT deopt 屏障）**：补丁写的是内存（实例字段、静态字段），不会通知 JIT
 退优化；在阶段 A 到阶段 B 之间抢跑重编译、把补丁前的零值/旧值提升进机器码的读者，由阶段 C 的第二次
 redefine 统一退优化，后续重编译读到补丁值。该屏障对运行时初始化的 `static final` 引用字段的读者同样
-成立（实测见 `docs/topology/10-enum-constant-append-infeasibility.md` §3.4.2 与
+成立（实测见 `docs/runtime/04-enum-constant-append-infeasibility.md` §3.4.2 与
 `tests/static-rewrite-probe/`）；`@RemoldReinit`/重放对**宿主既有静态字段**的重写也由该屏障覆盖
 （单阶段 patch 后热读者可能一直读旧值，两阶段的阶段 C 会再 deopt 一次）；`ConstantValue` 编译期
 常量除外（读者已内联字面量，deopt 无法改回）。A 档 apply 重放写的是**另一个类型**的字段，宿主阶段 C

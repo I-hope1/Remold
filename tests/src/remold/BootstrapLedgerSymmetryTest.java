@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Commit-side ledger symmetry ({@code docs/topology/20-generational-field-ledger.md} §2.4).
+ * Commit-side ledger symmetry ({@code docs/vcs/05-generational-field-ledger.md} §2.4).
  *
  * <p><b>What is guarded</b>: the {@code GenerationalFieldLedger} reserves a bootstrap slot
  * ({@code scope 0}) for classes on the bootstrap loader. If the commit hook skipped

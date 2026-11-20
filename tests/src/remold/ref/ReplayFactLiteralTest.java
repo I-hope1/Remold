@@ -9,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Literal canonicalisation for commit-level replay facts
- * ({@code docs/topology/16-bytecode-changeset-vcs.md} §3.8).
+ * ({@code docs/vcs/01-bytecode-changeset-vcs.md} §3.8).
  *
  * <p><b>What is guarded</b>: {@code float}/{@code double} facts must be stored as the raw bit
  * pattern. A decimal rendering would make the old-value CAS comparison depend on

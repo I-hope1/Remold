@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Generational field ledger storage layer
- * ({@code docs/topology/20-generational-field-ledger.md} §2 / §3.4).
+ * ({@code docs/vcs/05-generational-field-ledger.md} §2 / §3.4).
  *
  * <p><b>What is guarded</b>: facts are indexed by {@code (scope, internal name, field)} plus
  * {@code GenRef(seq, changesetId)}; the un-patched debt survives window pruning while the history

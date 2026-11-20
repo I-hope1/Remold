@@ -150,7 +150,7 @@ class EnumSwitchReorderGateTest {
 	@Test
 	void appendedEnumConstantRejectionNamesTheMeasuredBlockers() {
 		// 追加常量不是"补个 $VALUES 就完事"：真机实测（JBR 21，两种 javac 字节码形态，见
-		// docs/topology/10-enum-constant-append-infeasibility.md）证明运行期重写 $VALUES 并清空
+		// docs/runtime/04-enum-constant-append-infeasibility.md）证明运行期重写 $VALUES 并清空
 		// java.lang.Class 的两个枚举缓存之后，仍有 JIT 折叠、已初始化的 $SwitchMap$ 无法补 case、
 		// 存量 EnumMap/EnumSet 无法扩容三类不可修复残留。拒绝原因必须把这三种阻断讲清楚，
 		// 否则用户只会被"请重启"打发，以为值得去写运行期补丁。

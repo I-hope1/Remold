@@ -15,7 +15,7 @@ import java.util.WeakHashMap;
 
 /**
  * 代际字段台账：把 {@code Changeset.replayFacts} 的事实按代坐标索引起来，供跨代重放对账
- * （{@code docs/topology/20-generational-field-ledger.md} §2 / §3）。
+ * （{@code docs/vcs/05-generational-field-ledger.md} §2 / §3）。
  *
  * <p><b>它是派生索引，不是真值</b>：真值是各代 {@code Changeset.replayFacts}；索引丢了可以重建，
  * 事实丢了只能拒绝（§2.3）。因此这里只存字符串、标量记录与枚举，</p>
@@ -108,7 +108,7 @@ public final class GenerationalFieldLedger {
 
 	/**
 	 * 记一条事实。口径不合规即拒绝并计数，<b>不</b>就地规范化：把十进制文本补成位模式等于伪造事实
-	 * （{@code docs/topology/16-bytecode-changeset-vcs.md} §3.8）。
+	 * （{@code docs/vcs/01-bytecode-changeset-vcs.md} §3.8）。
 	 */
 	public synchronized RecordResult record(ClassLoader loader, LedgerKey key, GenRef gen,
 	                                        Changeset.ReplayFact fact, String algoVersion) {

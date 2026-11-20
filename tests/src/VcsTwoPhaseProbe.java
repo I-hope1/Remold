@@ -26,7 +26,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * PR1 two-phase end-to-end probe: a real batch that triggers {@code InitFix.requiresTwoPhase}
  * (added instance field + a live pre-existing instance) while the lambda set also changes.
  *
- * <p>Assertions (see {@code docs/topology/16-bytecode-changeset-vcs.md} §5.3 / §7.4):</p>
+ * <p>Assertions (see {@code docs/vcs/01-bytecode-changeset-vcs.md} §5.3 / §7.4):</p>
  * <ol>
  *   <li><b>stage A was actually taken</b> — the agent's stage-A rewrite counter advanced;</li>
  *   <li><b>exactly one generation was recorded</b> — head generation goes {@code 0 -> 1} (not

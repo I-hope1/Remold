@@ -4,7 +4,7 @@
 （`values()` / `valueOf()` / `EnumMap` / `EnumSet` / `switch` 全部看到它）？**
 
 它**不挂 `check`**，需要 DCEVM 能力与一个真实 JDK 8 javac，只用于取证与回归。结论与逐条读数见
-[`docs/topology/10-enum-constant-append-infeasibility.md`](../../docs/topology/10-enum-constant-append-infeasibility.md)；
+[`docs/runtime/04-enum-constant-append-infeasibility.md`](../../docs/runtime/04-enum-constant-append-infeasibility.md)；
 实现状态见 [`docs/status.md`](../../docs/status.md)。
 
 ## 为什么需要它
@@ -73,7 +73,7 @@ JBR 21.0.9 实测（`jit-inline` / `jit-values-write` / `deopt-*` / `jit-spin-re
 结论：`$VALUES` **不是** ConstantValue 常量折叠，旧读数是已编译代码里被提升的 `getstatic` / 内联
 `values()`；直接 deopt 读者确实能刷新。但这不改变"追加常量仍拒绝"的结论——`$SwitchMap$` 持有类、
 存量 `EnumMap`/`EnumSet` 不随 deopt 修复，且必须覆盖全部已加载读者，遗漏即静默旧值。
-逐条读数与设计结论见 [`docs/topology/10-enum-constant-append-infeasibility.md`](../../docs/topology/10-enum-constant-append-infeasibility.md) §3.4.1。
+逐条读数与设计结论见 [`docs/runtime/04-enum-constant-append-infeasibility.md`](../../docs/runtime/04-enum-constant-append-infeasibility.md) §3.4.1。
 
 注：`deopt-*`（S8a~S8e）是**静默路径控制组**——在没有并发热读者的 JVM 里，redefine 本身已经把
 已编译读者 deopt 掉（读数直接为 3），因此它们不区分 deopt 手段；真正有区分力的读数是
@@ -103,4 +103,4 @@ JBR 21.0.9 实测（`jit-inline` / `jit-values-write` / `deopt-*` / `jit-spin-re
   陈旧副本问题，不在被测方案的能力范围内。
 - 探针用 `Unsafe.allocateInstance` 物化新常量（反射 `Constructor.newInstance` 对枚举被 JDK 显式禁止）；
   Remold 的实际补丁走 NESTMATE 隐藏类里的 `invokespecial <init>`，能保留逐常量构造状态，见
-  `docs/topology/10-enum-constant-append-infeasibility.md` §5。
+  `docs/runtime/04-enum-constant-append-infeasibility.md` §5。

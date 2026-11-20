@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Consumer-side generational reconciliation gate
- * ({@code docs/topology/20-generational-field-ledger.md} §3.3 / §4-R5, criteria A5, A8, A14, G8).
+ * ({@code docs/vcs/05-generational-field-ledger.md} §3.3 / §4-R5, criteria A5, A8, A14, G8).
  *
  * <p><b>What is guarded</b>: the decision that feeds {@code KIND_CONDITIONAL_EXPECTED}. The expectation
  * and the written value must both come from <b>one</b> fact of the <b>target</b> generation; a fact that

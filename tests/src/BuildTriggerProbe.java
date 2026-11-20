@@ -30,7 +30,7 @@ import java.util.stream.Stream;
  *
  * <p>运行：{@code ./gradlew :tests:buildTriggerProbe -Pp05.jbr=<DCEVM JDK>}（不挂 {@code check}）。</p>
  *
- * <p>场景与断言见 {@code docs/topology/14-build-trigger-mode.md} §7：快路径 vs 去触发对照、
+ * <p>场景与断言见 {@code docs/runtime/01-build-trigger-mode.md} §7：快路径 vs 去触发对照、
  * 无关 marker 不触发、取消兜底、构建中途、陈旧 marker。耗时按 marker 写入 → 批次回调统计
  * min/median/max（同轮同口径）并打印原始样本。</p>
  */

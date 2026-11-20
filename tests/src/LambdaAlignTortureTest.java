@@ -333,7 +333,7 @@ public class LambdaAlignTortureTest {
 		MethodNode slot = byKey(aligned, oldName, "()Ljava/lang/String;");
 		assertNotNull(slot, "旧 P0 的槽位消失了（" + table(aligned) + "）");
 		assertTrue(isGhost(slot), "L5：旧 P0 的槽位必须幽灵化（拒绝配对），实际 " + table(aligned));
-		// 非 void 孤儿默认保留上一轮方法体（docs/topology/11）：幽灵仍调用 onOrphanInvoked
+		// 非 void 孤儿默认保留上一轮方法体（docs/lambda/02）：幽灵仍调用 onOrphanInvoked
 		// 完成策略分发/熔断，但随后执行旧逻辑而不是返回 null；老 CallSite 因此拿到合法返回值。
 		assertEquals("P0", identity(aligned, slot, 0),
 			"非 void 幽灵必须保留旧方法体（" + table(aligned) + "）");
@@ -1457,7 +1457,7 @@ public class LambdaAlignTortureTest {
 	 * 逻辑身份集合。
 	 *
 	 * <p><b>幽灵不参与</b>：非 {@code void} 孤儿的幽灵默认保留上一轮方法体
-	 * （{@code docs/topology/11-orphan-lambda-body-retention.md}），其方法体仍能解析出旧身份，
+	 * （{@code docs/lambda/02-orphan-body-retention.md}），其方法体仍能解析出旧身份，
 	 * 但它是"死名字"，不算产物里活着的逻辑 lambda。身份集合只统计非幽灵方法，
 	 * 否则"产物身份集合 == 新类身份集合"会被保留体污染。</p>
 	 */

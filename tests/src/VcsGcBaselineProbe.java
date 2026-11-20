@@ -27,7 +27,7 @@ import java.util.stream.Stream;
 
 /**
  * Retained-heap / OldGen / GC-pause baseline for the VCS side-car accounting
- * ({@code docs/topology/21-b1-gc-baseline-readings.md}).
+ * ({@code docs/vcs/06-b1-gc-baseline-readings.md}).
  *
  * <p>Drives {@code ROUNDS} real hot updates of four mutually dependent classes (each round rewrites
  * one of them, so the batch has to align against a baseline that a previous round produced) and
@@ -50,7 +50,7 @@ public final class VcsGcBaselineProbe {
 	 * inherited field's initialiser <b>every</b> round, so each generation carries a real {@code L1}
 	 * {@code replayFacts} entry and the generational ledger is actually populated. Without it the four-class
 	 * graph produces no facts at all and the reading says nothing about the ledger's own cost
-	 * ({@code docs/topology/21-b1-gc-baseline-readings.md} §8 boundary).
+	 * ({@code docs/vcs/06-b1-gc-baseline-readings.md} §8 boundary).
 	 */
 	private static boolean ledgerMode;
 	/** Initialiser written by the anonymous subclass' instance-initialiser block, bumped every round. */

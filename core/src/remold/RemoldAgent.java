@@ -1041,7 +1041,7 @@ public class RemoldAgent {
 	 * 构建完成 marker 文件；{@code null} = 未配置（只走 {@link #FILE_SHAKE_MS} 兜底）。
 	 *
 	 * <p>配置来源：{@code -Dremold.agent.build_trigger_file=<abs>}（别名 {@code remold.buildTriggerFile}）。
-	 * 契约见 {@code docs/topology/14-build-trigger-mode.md}。</p>
+	 * 契约见 {@code docs/runtime/01-build-trigger-mode.md}。</p>
 	 */
 	static volatile Path BUILD_TRIGGER_FILE;
 
@@ -2671,7 +2671,7 @@ public class RemoldAgent {
 								try {
 									// loader 维度必须显式传真实类加载器：AlignmentMetaStore 按 loader 身份分槽，
 									// 传 null 只会命中 bootstrap 槽，应用类加载器下的类永远取不到元数据
-									// （历史缺陷：开关生效但读数不变，见 docs/topology/18-live-raw-to-raw-alignment.md §9 F1）。
+									// （历史缺陷：开关生效但读数不变，见 docs/vcs/03-live-raw-to-raw-alignment.md §9 F1）。
 									newBytecode = LambdaAligner.align(alignOld, newBytecode, oldResolver, newResolver,
 									 inventedSlots.getOrDefault(className, java.util.Set.of()), alignLoader);
 									// 本轮算出的"自造名"先挂起，等 redefine 成功再落账（失败就丢弃，
@@ -4840,7 +4840,7 @@ public class RemoldAgent {
 					 effNow.getOrDefault(scope.getKey(), Map.of()));
 					// 链式回放包按 seq 逐轮导出：提交后立即写本轮目录，离线侧可按任意 seq 单独检出（§7.1）。
 					if (BytecodePack.enabled()) BytecodePack.exportRound(cs);
-					// 台账是派生索引（docs/topology/20 §2.3）：逐条事实带代坐标入索引，口径不合规的
+					// 台账是派生索引（docs/vcs/05 §2.3）：逐条事实带代坐标入索引，口径不合规的
 					// 记录在这里就被拒（不索引），消费侧只会看到规范事实。
 					recordLedgerFacts(scope.getKey(), cs);
 				} catch (Throwable t) {
@@ -4885,7 +4885,7 @@ public class RemoldAgent {
 	}
 
 	/**
-	 * 把一代的 {@code replayFacts} 逐条推进代际台账（{@code docs/topology/20-generational-field-ledger.md} §2.3）。
+	 * 把一代的 {@code replayFacts} 逐条推进代际台账（{@code docs/vcs/05-generational-field-ledger.md} §2.3）。
 	 *
 	 * <p>台账是<b>派生索引</b>：口径不合规的记录在这里被拒（不索引、计数），消费侧因此只会看到
 	 * 规范事实；索引丢了可以按 {@code Changeset} 重建，事实丢了只能拒绝。</p>
@@ -4908,7 +4908,7 @@ public class RemoldAgent {
 	}
 
 	/**
-	 * 回退到某个已提交代（{@code docs/topology/16-bytecode-changeset-vcs.md} §2.1.1 / §4.1）。
+	 * 回退到某个已提交代（{@code docs/vcs/01-bytecode-changeset-vcs.md} §2.1.1 / §4.1）。
 	 *
 	 * <p>只承诺<b>未来正确</b>：结构与字方法体回到目标代，已经写进存量实例的字段值保持现状，
 	 * 该堆事实由调用方记入 {@code PatchReport} 与告警。</p>
@@ -5845,7 +5845,7 @@ public class RemoldAgent {
 	/**
 	 * 构建完成 marker 的处理入口（由 trigger watcher 线程调用）。
 	 *
-	 * <p><b>语义</b>（契约见 {@code docs/topology/14-build-trigger-mode.md} §3）：</p>
+	 * <p><b>语义</b>（契约见 {@code docs/runtime/01-build-trigger-mode.md} §3）：</p>
 	 * <ol>
 	 *   <li>解析 / 拒绝 / 去重；无效 marker <b>不推进</b>任何已处理状态；</li>
 	 *   <li>按 {@code mtime >= 上次处理点 − 余量} 扫描 watch 目录，与已入队的事件合并；</li>

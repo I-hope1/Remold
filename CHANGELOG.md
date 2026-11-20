@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`:tests:vcsLedgerGcProbe`（台账真实填充的内存读数）**：`VcsGcBaselineProbe` 新增
   `-DvcsGcProbe.ledger=true` 模式，每轮多一次匿名子类的初值漂移，于是每代都带一条真实 `L1` 事实；
-  窗口设为 8 以便在 30 轮内看到索引淘汰。读数与边界见 `docs/topology/21-b1-gc-baseline-readings.md` §9。
+  窗口设为 8 以便在 30 轮内看到索引淘汰。读数与边界见 `docs/vcs/06-b1-gc-baseline-readings.md` §9。
 
 ### Fixed
 
@@ -67,7 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     跨整个 loader 匹配还会误删别的类同名字段的债务。
   - 验收：`RemovedFieldDebtTest`、`GenerationalReplayWiringTest.anOlderConfirmedWriteDoesNotVouchForALaterSkippedGeneration`。
 
-- **代际字段台账（B2 存储层）**- **代际字段台账（B2 存储层）**- **代际字段台账（B2 存储层）**：新增 `remold.vcs.GenerationalFieldLedger`，把 `replayFacts` 按代坐标索引起来。
+- **代际字段台账（B2 存储层）**：新增 `remold.vcs.GenerationalFieldLedger`，把 `replayFacts` 按代坐标索引起来。
   - 键 = `(loaderScope, 内部名, field)` + `GenRef(seq, changesetId)`，scope 取 `AlignmentMetaStore.loaderScopeId`，
     与 `Changeset.loaderScope` 同源；`changesetId` 留作校验位，防止"同 seq 不同代"被当成同一条事实。
   - **两类保留策略不共用一个窗口**：未闭环债务（判过 `MISS_NO_FACT` / 写入失败的字段）不被 Changeset 窗口淘汰；
@@ -78,7 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 槽用 `WeakHashMap` 弱键挂 loader，值只含字符串/标量/枚举，不持 `Class`/`ClassLoader`/字节数组。
   - 验收：`GenerationalFieldLedgerTest` 9 例；`./gradlew check` exit 0。
 
-- **`replayFacts` 两侧统一原始位模式口径**- **`replayFacts` 两侧统一原始位模式口径**：`L1` 档新侧原先记录的是十进制渲染文本，而旧侧是原始位模式。
+- **`replayFacts` 两侧统一原始位模式口径**：`L1` 档新侧原先记录的是十进制渲染文本，而旧侧是原始位模式。
   `float`/`double` 的 `-0.0` 与 `0.0` 渲染相同、NaN payload 全部渲染成 `NaN`、十进制还带舍入，
   因此这类字段的多代重放事实上不可用。现在 `InitializerReplay.ReplayField` 携带新侧自然值
   （`newExpected`），`InitFix.l1ReplayFact` 两侧都从字节码常量取位模式；`newText`/`oldText` 降级为
@@ -86,7 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   让旧口径记录可被识别并按非规范记录 fail-closed 拒绝，而不是被当成同口径数据消费。
   验收：`ReplayFactsFormatTest` 5 例。
 
-- **字节码回退执行（B1）**- **字节码回退执行（B1）**：`ChangesetLog` 学会把「退回到第几代」算成字节计划并落地。
+- **字节码回退执行（B1）**：`ChangesetLog` 学会把「退回到第几代」算成字节计划并落地。
   - 目标字节集合按区间取：`(target, HEAD]` 内被改过的每个类，取其在 `seq <= target` 的最新 Eff；
     若该类首次进入链就落在被回退区间，则退回 `Eff_0`——首次进链那一轮之前冻结的基线字节。Eff 字节
     按内容寻址保存在有预算的池里（`-Dremold.vcs.eff_bytes`，默认 16 MiB），预算淘汰或超单条上限即
@@ -120,7 +120,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 单阶段与两阶段的字段状态时序差异写进 `advisory.patchTiming`（`AFTER_COMMIT` / `BEFORE_COMMIT`），
     `HEAD` 语义仍固定为「redefine 已提交（结构 + 字节）」；字段补丁结果继续走独立可变旁路，不参与
     `id` 计算与 `HEAD` 推进。
-  - 规格见 [`docs/topology/16-bytecode-changeset-vcs.md`](docs/topology/16-bytecode-changeset-vcs.md)
+  - 规格见 [`docs/vcs/01-bytecode-changeset-vcs.md`](docs/vcs/01-bytecode-changeset-vcs.md)
     §2.1.1～§2.1.3 / §3.8 / §6.3；单测 `ChangesetTickTest` 14 例、`ReplayFactLiteralTest` 4 例。
 
 - **PR4-A：跨类批次字段依赖按 `(Class, Field)` 收敛并在宿主拓扑序上执行**
@@ -174,8 +174,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     store 侧 `blobBytes()` / `droppedBlobCount()`。读数不参与产物，只作可断言判据。
   - 修掉活体路径的 loader 缺失：`RemoldAgent` 调 `LambdaAligner.align` 的 5 参重载未传 loader，
     导致 `AlignmentMetaStore.headMatching` 只命中 bootstrap 槽（开关打开也永远取不到元数据）。
-  - 规格：`docs/topology/18-live-raw-to-raw-alignment.md` 新增（双跑道、闸门、继承集枚举、指纹分层），
-    `docs/topology/16-bytecode-changeset-vcs.md` §2.5 修掉「永不用 Raw 当 oldBytes」与「活体路径是
+  - 规格：`docs/vcs/03-live-raw-to-raw-alignment.md` 新增（双跑道、闸门、继承集枚举、指纹分层），
+    `docs/vcs/01-bytecode-changeset-vcs.md` §2.5 修掉「永不用 Raw 当 oldBytes」与「活体路径是
     Raw↔Raw」自相矛盾。
 
 
@@ -200,9 +200,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     "预判偏窄"（方法体直接调用本类合成方法也算位点）；
     `DerivedDataBench` 给出同轮 min/median/max 与预算边界读数。
   - 预算默认按实测校准：**条目预算必须覆盖一轮工作集**，否则 LRU 每轮把上一轮条目冲干净、命中率
-    退化为 0（实测见 [`docs/topology/17-derived-data-cache-probe.md`](docs/topology/17-derived-data-cache-probe.md)）。
+    退化为 0（实测见 [`docs/vcs/02-derived-data-cache-probe.md`](docs/vcs/02-derived-data-cache-probe.md)）。
     默认条目上限由 512 提到 16384，字节上限保持 8 MiB —— 内存上限由字节预算承担。
-  - 规格见 [`docs/topology/16-bytecode-changeset-vcs.md`](docs/topology/16-bytecode-changeset-vcs.md) §3.7。
+  - 规格见 [`docs/vcs/01-bytecode-changeset-vcs.md`](docs/vcs/01-bytecode-changeset-vcs.md) §3.7。
 
 - **字节码 Changeset 旁路记录（PR1）**：新增 `remold.vcs.AlignmentMetaStore`（按
   `(loader identity, 类名)` 记录每一代"实际进 JVM 的字节"与对齐契约字段；loader 弱键槽 + 单调 `long` 代号，
@@ -210,7 +210,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   （`-Dremold.vcs.pack_dir`）与 `remold.vcs.VcsCommitGate` 批次原子判据。记录点位于 `RemoldAgent`
   的最终重定义成功之后（两阶段只在 Stage C 生效后记一次），对齐期 `LambdaAligner.align()` 恢复为只读。
   默认 `remold.vcs.enabled=false`，关闭时零行为变化；`LambdaAligner.META_SOURCE` 保持默认 `false`。
-  规格见 [`docs/topology/16-bytecode-changeset-vcs.md`](docs/topology/16-bytecode-changeset-vcs.md)，
+  规格见 [`docs/vcs/01-bytecode-changeset-vcs.md`](docs/vcs/01-bytecode-changeset-vcs.md)，
   E2E 见 `tests/src/VcsPackProbe.java` / `tests/src/VcsTwoPhaseProbe.java`，由 CI 的 `test-dcevm` 任务
   （JBR 21 DCEVM）执行。
 
@@ -219,8 +219,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   取消尚未到期的 `fileShakeMs` 兜底等待；marker 之后才到的同批事件按磁盘指纹跳过（no-op 批次，不产生
   redefine/回调）。`fileShakeMs` 语义与默认值（800）不变，无 marker 的写入路径（IDE 直接 `Ctrl+Shift+F9`、
   手写 `-javaagent`）行为与旧版本一致。Gradle DSL：`buildTrigger`（默认 `true`，设 `false` 关闭）。
-  契约见 [`docs/topology/14-build-trigger-mode.md`](docs/topology/14-build-trigger-mode.md)，实测读数见
-  [`docs/topology/15-build-trigger-probe.md`](docs/topology/15-build-trigger-probe.md)。
+  契约见 [`docs/runtime/01-build-trigger-mode.md`](docs/runtime/01-build-trigger-mode.md)，实测读数见
+  [`docs/runtime/02-build-trigger-probe.md`](docs/runtime/02-build-trigger-probe.md)。
 
 - **既有静态字段重写的 A/B 探针**（`tests/static-rewrite-probe/`）：同一份"运行时初始化的
   `static final` 引用字段"在单阶段（redefine → Unsafe patch）下，patch 后已编译热读者仍读到旧值；
@@ -237,7 +237,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 - **Run R 的真实规模读数与一处结论更正**（`tests/src/Pr3RealWorldReadingsProbe.java` + 实测记录
-  `docs/topology/19-raw-to-raw-realworld-readings.md`）：在本仓库两个发布点的真实字节（415/417 类，取样 400）
+  `docs/vcs/04-raw-to-raw-realworld-readings.md`）：在本仓库两个发布点的真实字节（415/417 类，取样 400）
   上双开关全开实测——① 命中 `forceStaticLambdas` 的类 **7/7 全部 `PASSED`**，全语料 `RAW_PREV_MISMATCH` 为 **0**
   （`preAlign` 取自归一化之后，两侧指纹同源），因此 G1 **不需要**比对转换前后双校验和，此前"归一化会导致整类回退"
   的说法按读数更正；② `Raw_prev` blob 满载 2,389,448 B（16 MiB 的 14.2%）、`droppedBlobCount=0`，平均每类 ≈5.97 KB，
@@ -390,7 +390,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   且加锁的按类快照表 `lastResultFor(内部名)`，`align` 的入口清空、成功、失败三条路径统一发布；
   `matchMethods` 改为按类检索，仅当按类登记缺失且 `LAST_RESULT.alignedClass == 目标类` 时才走兼容回退。
   回归：`CellLambdaBatchAlignTest`（红→绿；变异：`lastResultFor` 退化为读 `LAST_RESULT`、或去掉消费者的按类检索
-  → 用例红）。契约见 [`docs/topology/13-lambda-alignment-publication-contract.md`](docs/topology/13-lambda-alignment-publication-contract.md)。
+  → 用例红）。契约见 [`docs/lambda/03-publication-contract.md`](docs/lambda/03-publication-contract.md)。
 
 - **`CellPropertyRef` 内部登记表的锁域不一致与回调强引用**：`chainCache`/`templateCache` 是普通 `HashMap`，
   读取方在 `synchronized (cellState)` 之外触碰，`clearAll` 却在 `cellState` 锁内清它们——两者没有互斥，
@@ -527,7 +527,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **孤儿 lambda 保留上一轮方法体（非 `void` 默认开启）**：幽灵桩不再返回类型默认值，而是保留上一轮
   方法体（帧与异常表一并搬运）；旧体引用本轮已删的本类成员或静态性翻转时回退默认值桩并输出英文原因。
   `void` 孤儿默认仍 no-op（`-Dremold.agent.orphan_retain_void=true` 可开）；首次真正调用输出一次
-  点名 WARN，多轮热更原样搬运。规格 `docs/topology/11-orphan-lambda-body-retention.md`；
+  点名 WARN，多轮热更原样搬运。规格 `docs/lambda/02-orphan-body-retention.md`；
   `OrphanBodyRetentionTest` 6/6（变异：关闭保留 → 3 红，关闭存活判据 → 1 红）。
 - **Gradle 插件：agent 版本对账 + `cleanRemoldCache`**：`remold-agent.jar` manifest 写入
   `Remold-Version`，本地 jar 与配置版本不一致时重新解析并覆盖（日志点名被忽略的旧文件），版本匹配走
@@ -547,7 +547,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `ENUM_CONSTANT_SET_CHANGED` 拒绝并提示重启，同批直接引用变更常量的调用方一并移出；
   - 拒绝原因改为实测阻断清单：JIT 编译后的旧常量表、`$SwitchMap$`/`$SWITCH_TABLE$` 补不出新 case、
     存量 `EnumMap`/`EnumSet` 无法扩容（JBR 21 真机 30 次独立 JVM、javac 21 与真 javac 8 两种字节码；
-    `tests/enum-append-probe/`、`docs/topology/10-enum-constant-append-infeasibility.md`、`D-ENUM-1`）；
+    `tests/enum-append-probe/`、`docs/runtime/04-enum-constant-append-infeasibility.md`、`D-ENUM-1`）；
   - `MixinMemberAlign` 不再把 `$VALUES` 等 JVM/javac 合成字段当 Mixin 成员而抢跑恢复基线顺序，
     枚举类不做字段表重排、被删常量不复活成墓碑字段。
 - **注解默认值漂移 fail-closed**：注解成员默认值变化/移除/新增时默认拒绝——已加载的
@@ -604,10 +604,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **设计文档只留设计**：`docs/initfix/04-target-design.md` 移除"落地状态/路线图状态列"，路线图与残余
   边界统一收敛到 `docs/status.md` §4.1/§4.2 与风险 9；`@HotswapInit` 标注为"目标设计、未落地"。
-- **新增专题**：`docs/topology/10`（枚举追加不可运行期修复）、`docs/topology/11`（孤儿 lambda
+- **新增专题**：`docs/runtime/04`（枚举追加不可运行期修复）、`docs/lambda/02`（孤儿 lambda
   保留旧体）、`docs/releases/v0.2.8.md`（本版发布说明）。
 - **`AGENTS.md`**：新增日志语言强制规则、代码地图补孤儿 lambda 保留与两阶段动态入口、
-  按需文档索引补 topology/10 与 topology/11。
+  按需文档索引补 runtime/04 与 lambda/02。
 - **文档去内部代号**：清理状态/拓扑/Mixin 文档中的战役代号、批次编号与证据流水号，改为机制直述
   （约 40 个 docs 提交，不改行为）。
 

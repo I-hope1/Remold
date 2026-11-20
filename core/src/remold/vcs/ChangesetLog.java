@@ -16,7 +16,7 @@ import java.util.Set;
 import java.util.TreeMap;
 
 /**
- * 每个 loader scope 一条 Changeset 链（{@code docs/topology/16-bytecode-changeset-vcs.md} §2.1.1）。
+ * 每个 loader scope 一条 Changeset 链（{@code docs/vcs/01-bytecode-changeset-vcs.md} §2.1.1）。
  *
  * <p>链上只存 {@link Changeset}：全是字符串、哈希与 scope 代号，不持 {@code ClassLoader}，
  * 因此 scope 用单调 long 寻址而不是用 loader 对象做键（不变量 C8）。</p>

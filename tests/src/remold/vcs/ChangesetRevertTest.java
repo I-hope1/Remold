@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Revert planning and forward-revert commits
- * ({@code docs/topology/16-bytecode-changeset-vcs.md} §2.1.1 interval revert constraints).
+ * ({@code docs/vcs/01-bytecode-changeset-vcs.md} §2.1.1 interval revert constraints).
  *
  * <p><b>What is guarded</b>: the target byte set for a revert is the union of classes changed in
  * {@code (target, HEAD]}, each resolved to its latest Eff at {@code seq <= target} or to its

@@ -706,7 +706,7 @@ public class InitFix {
 	private static final String APPLY_GATE_PREFIX = "A:";
 
 	/**
-	 * 一条重放候选的代际对账结论（{@code docs/topology/20-generational-field-ledger.md} §3.3）。
+	 * 一条重放候选的代际对账结论（{@code docs/vcs/05-generational-field-ledger.md} §3.3）。
 	 *
 	 * <p>只有 {@link GenerationalReplayGate.Mode#FACT} 会产出本记录：比较侧 {@code expectedConstant}
 	 * 与写入侧 {@code writeConstant} 都是<b>同一条</b>事实的两个字面量解出来的 bootstrap 常量，
@@ -1022,7 +1022,7 @@ public class InitFix {
 		 *
 		 * <p>这些字段的值<b>没有</b>被写成目标代的值，且台账（
 		 * {@link GenerationalFieldLedger#markUnclosed}）里留有债务；恢复只能靠显式重建或
-		 * {@code @RemoldReinit(OVERWRITE)}（{@code docs/topology/20-generational-field-ledger.md} §3.3 / G6）。</p>
+		 * {@code @RemoldReinit(OVERWRITE)}（{@code docs/vcs/05-generational-field-ledger.md} §3.3 / G6）。</p>
 		 */
 		public List<String> unclosedReplayFields() {
 			List<String> out = new ArrayList<>();
@@ -1079,7 +1079,7 @@ public class InitFix {
 	 * deopt 覆盖不到那个类型，故不纳入本判据。</p>
 	 */
 	/**
-	 * 记录一档重放事实（{@code docs/topology/16-bytecode-changeset-vcs.md} §3.8）。
+	 * 记录一档重放事实（{@code docs/vcs/01-bytecode-changeset-vcs.md} §3.8）。
 	 *
 	 * <p>只在批次分析期内累积：事实来自纯函数计划，不依赖运行期写回结果。字面量按描述符定型，
 	 * {@code float}/{@code double} 存原始位模式而不是十进制近似。</p>
@@ -1104,7 +1104,7 @@ public class InitFix {
 	}
 
 	/**
-	 * {@code L1} 档提交级事实（{@code docs/topology/16-bytecode-changeset-vcs.md} §3.8）。
+	 * {@code L1} 档提交级事实（{@code docs/vcs/01-bytecode-changeset-vcs.md} §3.8）。
 	 *
 	 * <p>两侧字面量都取自字节码常量的自然值，<b>不</b>从 {@code oldText}/{@code newText} 反推：
 	 * 那两列是给人读的十进制渲染（{@code -0.0f}、NaN payload 与十进制舍入都会在往返中失真），
@@ -1135,7 +1135,7 @@ public class InitFix {
 	}
 
 	/**
-	 * 字面量定型（{@code docs/topology/16-bytecode-changeset-vcs.md} §3.8）。
+	 * 字面量定型（{@code docs/vcs/01-bytecode-changeset-vcs.md} §3.8）。
 	 *
 	 * <p>八种基本类型都有台账口径：{@code Z/B/S/C} 与 {@code I/J} 同档（编译期常量、{@code ConstantValue}
 	 * 语义一致），{@code F/D} 走原始位模式。{@code L1} 与 A 档都放行全部基本类型，消费侧
@@ -1200,7 +1200,7 @@ public class InitFix {
 
 	/**
 	 * 把 {@link GenerationalFieldLedger#resolve} 接进重放决策（
-	 * {@code docs/topology/20-generational-field-ledger.md} §3.3 / A14 / G6～G8）。
+	 * {@code docs/vcs/05-generational-field-ledger.md} §3.3 / A14 / G6～G8）。
 	 *
 	 * <p><b>为什么要接</b>：L1 与 A 档的 {@code KIND_CONDITIONAL_EXPECTED} 期望值原本取自当轮
 	 * {@code ClassDiff} 的旧初值。一旦发生过回退，那份 {@code ClassDiff} 描述的是"回退后 JVM 在跑的
@@ -1364,7 +1364,7 @@ public class InitFix {
 	}
 
 	/**
-	 * 把 L1 重放切片里的"值"部分换成事实带出的规范常量（{@code docs/topology/20} §3.3 D6）。
+	 * 把 L1 重放切片里的"值"部分换成事实带出的规范常量（{@code docs/vcs/05} §3.3 D6）。
 	 *
 	 * <p>切片形状由 {@link #replayExtractReason} 锁定为 {@code ALOAD 0; <自包含常量>; PUTFIELD}，
 	 * 因此这里保留首尾指令、只重建中间的值指令。写入值因此与比较侧同源。</p>
@@ -1380,7 +1380,7 @@ public class InitFix {
 	}
 
 	/**
-	 * 批次分析快照（{@code docs/topology/16-bytecode-changeset-vcs.md} §2.1.2）。
+	 * 批次分析快照（{@code docs/vcs/01-bytecode-changeset-vcs.md} §2.1.2）。
 	 *
 	 * <p>提交时刻批次上下文仍存活（{@code endBatchBytecodeView} 在其后），因此这里读到的是
 	 * Stage B 将要使用的那份图；宿主顺序取自同一确定性排序函数。</p>
@@ -1809,7 +1809,7 @@ public class InitFix {
 				RemoldAgent.warn("[INIT-APPLY-REPLAY] " + displayName + ": " + notice);
 			}
 		}
-		// 代际对账（docs/topology/20-generational-field-ledger.md §3.3）：回退之后当轮 ClassDiff
+		// 代际对账（docs/vcs/05-generational-field-ledger.md §3.3）：回退之后当轮 ClassDiff
 		// 不再是"JVM 里实际是什么"的可信描述，期望与写入值必须取自目标代的那一条事实。
 		Map<String, String> replayDecisions = new LinkedHashMap<>();
 		String analyzedName = diff == null || diff.newClass == null ? null : diff.newClass.name;
@@ -1819,7 +1819,7 @@ public class InitFix {
 		    replayDecisions, applyDecisions);
 		logApplyReplayDecisions(analyzedName == null ? "?" : analyzedName.replace('/', '.'), applyDecisions);
 
-		// 提交级事实（docs/topology/16-bytecode-changeset-vcs.md §3.8）：分析期把两档重放的
+		// 提交级事实（docs/vcs/01-bytecode-changeset-vcs.md §3.8）：分析期把两档重放的
 		// 旧/新初值固化成事实，随 Changeset 落盘；读侧不再依赖旧字节是否还在预算窗口内。
 		// 被代际对账拒绝的候选已经不在两个 map 里，因此不会产出事实。
 		captureReplayFacts(host, replayFields, applyFields);
@@ -2556,7 +2556,7 @@ public class InitFix {
 		boolean              hasInstanceDeps = false;
 
 		// L1 重放字段 -> 旧初值常量（ASM bootstrap 常量）。只有通过补丁前校验的字段才携带。
-		// 代际对账判 FACT 的字段，比较侧期望与写入值都改取那条事实（docs/topology/20 §3.3）。
+		// 代际对账判 FACT 的字段，比较侧期望与写入值都改取那条事实（docs/vcs/05 §3.3）。
 		Map<String, Object> replayArguments = new LinkedHashMap<>();
 		Map<String, String> replayOwners = new LinkedHashMap<>();
 		for (String fieldName : acceptedReplay) {
@@ -2902,7 +2902,7 @@ public class InitFix {
 	}
 
 	/**
-	 * 重放通道的运行期对账（{@code docs/topology/20-generational-field-ledger.md} §3.3 / G6 / G7）。
+	 * 重放通道的运行期对账（{@code docs/vcs/05-generational-field-ledger.md} §3.3 / G6 / G7）。
 	 *
 	 * <p><b>CAS 未命中 = 没写成</b>：条件写在"字段当前值已不是目标代的期望初值"时按设计跳过。跳过必须
 	 * 是<b>可见的未完成</b>，不能读成"已改回"：</p>

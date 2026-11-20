@@ -242,8 +242,7 @@ flowchart LR
   `remold.evict.*` 仍然全绿（实测 `mut-4da1` survived）。接线仅由 `:tests:metadataDriftWarnProbe`
   **单点把关**（它驱动真实批次并断言 WARN 点名），合流门禁为 **`:tests:check`**（该任务已 `dependsOn`
   到探针；`:tests:check --dry-run` 的任务图里可见它）。
-- **未交付**：`EvictionScope.WITH_DESCENDANTS` 驱逐范围扩展整体停在 `parked/k-eviction-scope` 分支
-  （含 3 条"驱逐器实际收到哪些类"的用例），**不在**本主题的合流候选里。缺的读数是
+- **未并入主干**：`EvictionScope.WITH_DESCENDANTS` 驱逐范围扩展（含 3 条"驱逐器实际收到哪些类"的用例）**不在**本主题的合流候选里（对应试验分支已清理）。缺的读数是
   **"已注册缓存（Gson/Jackson/插件）驱逐前读到错误值、驱逐后读到正确值"的前后对照**；
   在该对照取得之前，本主题不主张驱逐范围扩展的任何效果。
 - 缓存驱逐能力边界：驱逐只作用于**已注册**的框架缓存；用户自持的 `Method` 句柄不在其覆盖范围。

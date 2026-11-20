@@ -123,7 +123,7 @@
   懒加载的旧代码无法穷举。放行只会把"热更没生效"换成"静默走错分支或延迟 AIOOBE"。
 - **重新评估的条件**：`$SwitchMap$` 重建（解析新 `<clinit>` 的常量→label 映射）、deopt 机制、
   存量集合的显式判定三项同时具备，且真实场景收益足够高。完整清单见
-  [`10-enum-constant-append-infeasibility.md`](10-enum-constant-append-infeasibility.md) §6。
+  [`../runtime/04-enum-constant-append-infeasibility.md`](../runtime/04-enum-constant-append-infeasibility.md) §6。
 - **关联代码**：`ClassDiffUtil`（`addedEnumConstants` / `removedEnumConstants`）、
   `LayoutGate.ENUM_CONSTANT_SET_CHANGED`、`LayoutDecisionEngine.decide`、
   `RemoldAgent.dropEnumSwitchDependents` / `dropEnumConstantDependents`。

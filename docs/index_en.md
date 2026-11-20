@@ -42,6 +42,7 @@ flowchart TD
 ```
 
 - **Single Source of Truth for Status**: The detailed implementation status, code locations, regression test evidence, and technical debts are maintained in [**`docs/status.md`**](status.md). Design specifications strictly define objective invariants and contracts without perishable progress tags.
+- **Engineering Navigation & Archives**: [`Code Map (code-map.md)`](code-map.md) · [`Testing & Probe Guide (testing-guide.md)`](testing-guide.md) · [`Battle Reports (battles/)`](battles/README.md) · [`Release Notes & Archives (releases/)`](releases/historical-rounds-archive.md)
 
 ---
 
@@ -88,17 +89,50 @@ Governs paradigms across mod environments (Minecraft Fabric/NeoForge/Forge vs. M
 | :--- | :--- |
 | [`01-mod-artifact-and-class-isolation.md`](ecosystem/01-mod-artifact-and-class-isolation.md) | Mod ecosystem duality, 5 build artifact hazards, 3D environment detection matrix, and runtime stale JAR guard |
 
-### 2.5 Changeset VCS, Live Alignment & Generational Field Ledger
-Covers the version layer that answers "which bytes changed in this round, and how are they addressed and replayed across rounds" (16/17), the live-alignment input contract and its real-scale readings (18/19), and how legacy fields are reconciled per generation after a revert (20/21):
+### 2.5 Changeset VCS, Live Alignment & Generational Field Ledger (`docs/vcs/`)
+Covers the version layer that answers "which bytes changed in this round, and how are they addressed and replayed across rounds" (`01`/`02`), the live-alignment input contract and its real-scale readings (`03`/`04`), and how legacy fields are reconciled per generation after a revert (`05`/`06`):
 
 | Document | Subject & Core Contents |
 | :--- | :--- |
-| [`16-bytecode-changeset-vcs.md`](topology/16-bytecode-changeset-vcs.md) | Content-addressed per-generation `Changeset` chain and hot-swap version layer (`seq` addressing and window, `patchTiming` semantics, `replayFacts` fact model, derived-cache key contract) |
-| [`17-derived-data-cache-probe.md`](topology/17-derived-data-cache-probe.md) | Derived-data cache granularity, entry/byte budget boundaries, and cache-on/off equivalence readings |
-| [`18-live-raw-to-raw-alignment.md`](topology/18-live-raw-to-raw-alignment.md) | Live-alignment Raw ↔ Raw input selection, G1/G2/G3 admission gates, and `Eff_prev` inheritance set enumeration/order |
-| [`19-raw-to-raw-realworld-readings.md`](topology/19-raw-to-raw-realworld-readings.md) | Real-scale Raw ↔ Raw alignment readings: hits, mismatches, and timings |
-| [`20-generational-field-ledger.md`](topology/20-generational-field-ledger.md) | Generational field ledger (B2): per-generation `FieldLedger` / `REINIT_APPLIED` storage (`GenRef(seq,id)`), post-revert CAS expectations taken strictly from the target generation with fail-closed discipline, and cross-generation `replayFacts` consumption rules |
-| [`21-b1-gc-baseline-readings.md`](topology/21-b1-gc-baseline-readings.md) | B1 side-ledger memory and GC baseline readings (retained-heap/GC methodology and the before/after comparison method for B2) |
+| [`01-bytecode-changeset-vcs.md`](vcs/01-bytecode-changeset-vcs.md) | Content-addressed per-generation `Changeset` chain and hot-swap version layer (`seq` addressing and window, `patchTiming` semantics, `replayFacts` fact model, derived-cache key contract) |
+| [`02-derived-data-cache-probe.md`](vcs/02-derived-data-cache-probe.md) | Derived-data cache granularity, entry/byte budget boundaries, and cache-on/off equivalence readings |
+| [`03-live-raw-to-raw-alignment.md`](vcs/03-live-raw-to-raw-alignment.md) | Live-alignment Raw ↔ Raw input selection, G1/G2/G3 admission gates, and `Eff_prev` inheritance set enumeration/order |
+| [`04-raw-to-raw-realworld-readings.md`](vcs/04-raw-to-raw-realworld-readings.md) | Real-scale Raw ↔ Raw alignment readings: hits, mismatches, and timings |
+| [`05-generational-field-ledger.md`](vcs/05-generational-field-ledger.md) | Generational field ledger (B2): per-generation `FieldLedger` / `REINIT_APPLIED` storage (`GenRef(seq,id)`), post-revert CAS expectations taken strictly from the target generation with fail-closed discipline, and cross-generation `replayFacts` consumption rules |
+| [`06-b1-gc-baseline-readings.md`](vcs/06-b1-gc-baseline-readings.md) | B1 side-ledger memory and GC baseline readings (retained-heap/GC methodology and the before/after comparison method for B2) |
+
+### 2.6 Mixin Hot-Reload Subsystem (`docs/mixin/01..08`)
+Systematically specifies Mixin classloader authority, bytecode overlay injection, cascading re-weave, structural reload contracts, and synthetic inner-class gates:
+
+| Document | Subject & Core Contents |
+| :--- | :--- |
+| [`01-invariants-and-classloader-authority.md`](mixin/01-invariants-and-classloader-authority.md) | Classloader authority arbitration, baseline protection, monotonic visibility, and `ClassInfo.cache` anchoring |
+| [`02-admission-and-bytecode-overlay.md`](mixin/02-admission-and-bytecode-overlay.md) | New Mixin admission, four-tier byte sources, overlay & `config.service` replacement, pending retry |
+| [`03-reweave-and-member-alignment.md`](mixin/03-reweave-and-member-alignment.md) | Cascading re-weave pipeline, `refeedForTarget`, member alignment, method stub & tombstone retention |
+| [`04-structural-reload-and-retarget.md`](mixin/04-structural-reload-and-retarget.md) | `priority`, `targets`, and `interfaces` structural reload contracts & rollback |
+| [`05-synthetic-inner-gate-and-abort.md`](mixin/05-synthetic-inner-gate-and-abort.md) | Single-exit synthetic inner-class gate, host transaction abort, abort retry ledger |
+| [`06-walkthrough.md`](mixin/06-walkthrough.md) | Four real-world closed-loop bytecode walkthroughs and readings |
+| [`07-runtime-and-diagnostics.md`](mixin/07-runtime-and-diagnostics.md) | Startup readiness gate, batch watchdog, `[VM-INFO]`, dual-channel heap watch |
+| [`08-decisions-and-empirical-ledger.md`](mixin/08-decisions-and-empirical-ledger.md) | Lambda vs anonymous classes, empirical evidence against in-place widening, open items & P2 |
+
+### 2.7 Lambda Alignment & Capture Bridges (`docs/lambda/`)
+Covers `LambdaAligner` one-way capture bridges, orphan body retention, and per-class publication contracts:
+
+| Document | Subject & Core Contents |
+| :--- | :--- |
+| [`01-capture-bridge.md`](lambda/01-capture-bridge.md) | Lambda capture bridge (one-way): capture deletions/provable additions, three admission gates, and generated bridge shape |
+| [`02-orphan-body-retention.md`](lambda/02-orphan-body-retention.md) | Orphan lambda body retention: retaining previous bodies for non-void stubs, member liveness checks, and ghost decoupling |
+| [`03-publication-contract.md`](lambda/03-publication-contract.md) | Lambda alignment publication and per-class lookup contract |
+
+### 2.8 Build Trigger & Runtime Empirical Limits (`docs/runtime/`)
+Covers agent build-trigger marker contracts and non-topological JVM/enum runtime measurements:
+
+| Document | Subject & Core Contents |
+| :--- | :--- |
+| [`01-build-trigger-mode.md`](runtime/01-build-trigger-mode.md) | Build-completion marker (`build-trigger`): early trigger and trailing-debounce cancellation contract |
+| [`02-build-trigger-probe.md`](runtime/02-build-trigger-probe.md) | Build-trigger probe readings and control runs |
+| [`03-jbr-dcevm-jit-drain-tail-latency.md`](runtime/03-jbr-dcevm-jit-drain-tail-latency.md) | Fabric + DCEVM 4s tail-latency investigation: JIT drain safepoint measurements |
+| [`04-enum-constant-append-infeasibility.md`](runtime/04-enum-constant-append-infeasibility.md) | Empirical JBR 21 study showing why enum constant set changes are rejected rather than patched at runtime |
 
 ---
 

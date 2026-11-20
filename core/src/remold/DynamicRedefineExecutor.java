@@ -94,6 +94,21 @@ final class DynamicRedefineExecutor {
 	 * @param newBytecode 新生成的未织入或已织入字节码
 	 * @return 是否重定义成功
 	 */
+	/**
+	 * 为单类动态重定义打开一个最小批次上下文。
+	 *
+	 * <p>键是 loader 身份（{@code null} 表示 bootstrap 槽），值是"该类这一轮的生效字节"。
+	 * 与批次路径的差别只在规模：这里永远只有一个类，因此 manifest 的边/节点都是单点，
+	 * facts 也只可能来自本类。</p>
+	 */
+	private static void beginSingleClassBatch(Class<?> targetClass, String className, byte[] runtimeBytes) {
+		Map<ClassLoader, Map<String, byte[]>> view = new IdentityHashMap<>();
+		Map<String, byte[]> bytes = new LinkedHashMap<>();
+		bytes.put(className, runtimeBytes);
+		view.put(targetClass.getClassLoader(), bytes);
+		InitFix.beginBatchBytecodeView(view);
+	}
+
 	static boolean redefineDynamic(Class<?> targetClass, byte[] newBytecode) {
 		boolean applied = redefineDynamicApplied(targetClass, newBytecode);
 		// 失败（返回 false）才记中止：no-op 走的是"无需变更"的 true 分支，不是失败。
@@ -235,7 +250,12 @@ final class DynamicRedefineExecutor {
 					return false;
 			}
 			long initFixStartNanos = System.nanoTime();
+			// 单类批次上下文：没有它，InitFix 的 batchCommitManifest / batchReplayFacts 会退回空表，
+			// 动态代的 manifest/facts 就是空的（"没有分析"与"分析后无决策"无法区分）。
+			beginSingleClassBatch(targetClass, className, runtimeBytes);
 			InitFix.transform(targetClass, runtimeBytes, diff);
+			InitFix.setBatchDefinitions(Collections.singletonList(new ClassDefinition(targetClass, runtimeBytes)));
+			InitFix.finishBatchTransforms();
 
 			// 动态单类入口也接两阶段（docs/initfix/04-target-design.md §1）：调用方
 			// （MixinHotSwap / ForgeMixinHotSwap 等）在返回后立即做后续处理，所以
@@ -379,6 +399,7 @@ final class DynamicRedefineExecutor {
 				     + (twoPhase ? " (two-phase: A -> patch -> C)" : "") + timingSuffix);
 				return true;
 			} finally {
+				InitFix.endBatchBytecodeView();
 				exitInternalRedefine();
 			}
 		} catch (Throwable t) {

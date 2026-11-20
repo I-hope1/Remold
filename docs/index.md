@@ -42,6 +42,7 @@ flowchart TD
 ```
 
 - **实现状态唯一真相源**：全部特性的研发进度、落地位置、验收证据与技术债务统一收录在 [**`docs/status.md`**](status.md)。各设计规格文档严格保持客观中立，不混入易腐进度标记。
+- **工程导航与归档**：[`代码地图 (code-map.md)`](code-map.md) · [`探针与变异检查手册 (testing-guide.md)`](testing-guide.md) · [`战役实证战报 (battles/)`](battles/README.md) · [`版本发布与历史归档 (releases/)`](releases/historical-rounds-archive.md)
 
 ---
 
@@ -99,6 +100,20 @@ flowchart TD
 | [`19-raw-to-raw-realworld-readings.md`](topology/19-raw-to-raw-realworld-readings.md) | 真实规模语料下 Raw ↔ Raw 对齐的命中、失配与耗时读数 |
 | [`20-generational-field-ledger.md`](topology/20-generational-field-ledger.md) | 代际字段台账（B2）：`FieldLedger` / `REINIT_APPLIED` 的按代存储（`GenRef(seq,id)`）、回退后 CAS 期望只取目标代与 fail-closed 口径、`replayFacts` 跨代消费规则 |
 | [`21-b1-gc-baseline-readings.md`](topology/21-b1-gc-baseline-readings.md) | B1 旁路账的内存与 GC 基线读数（保留堆/GC 口径与 B2 引入后的对比方法） |
+
+### 2.6 Mixin 热更子系统 (Mixin Hot-Reload)
+体系化收录 Mixin 类加载器权威、覆盖层注入、级联重织入、结构契约突破与合成内部类闸门（`docs/mixin/01..08`）：
+
+| 文档 | 主题与核心内容 |
+| :--- | :--- |
+| [`01-invariants-and-classloader-authority.md`](mixin/01-invariants-and-classloader-authority.md) | 类加载器权威仲裁 / 基线防覆盖 / 访问权限单调不降级 / `ClassInfo.cache` 锚回 |
+| [`02-admission-and-bytecode-overlay.md`](mixin/02-admission-and-bytecode-overlay.md) | 新 Mixin 准入、四级字节来源、覆盖层与 `config.service` 替换、待决接力 |
+| [`03-reweave-and-member-alignment.md`](mixin/03-reweave-and-member-alignment.md) | 级联重织入管线、`refeedForTarget`、成员名/顺序回映、方法桩与字段墓碑保留 |
+| [`04-structural-reload-and-retarget.md`](mixin/04-structural-reload-and-retarget.md) | `priority` / `targets` / `interfaces` 三大结构契约的突破与回滚 |
+| [`05-synthetic-inner-gate-and-abort.md`](mixin/05-synthetic-inner-gate-and-abort.md) | 合成类单出口闸门、事务共退、自愈账本 |
+| [`06-walkthrough.md`](mixin/06-walkthrough.md) | 四个真实闭环场景的字节流与读数 |
+| [`07-runtime-and-diagnostics.md`](mixin/07-runtime-and-diagnostics.md) | 启动门闩、批次看门狗、`[VM-INFO]`、双通道堆哨兵 |
+| [`08-decisions-and-empirical-ledger.md`](mixin/08-decisions-and-empirical-ledger.md) | Lambda vs 匿名类、放弃原地扩容的实证链、未闭合项与 P2 |
 
 ---
 

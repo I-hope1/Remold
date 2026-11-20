@@ -6,7 +6,7 @@
 `val dest = T().apply { field = 常量 }` 初值变化，在可证明安全时重放到**存量对象**。
 
 本文只定义设计规格、判据与写入协议，不含实现状态；状态与验收读数统一登记在
-[`docs/status.md`](status.md)。L1（匿名类双括号写继承字段）见
+[`docs/status.md`](../status.md)。L1（匿名类双括号写继承字段）见
 [`12-L1-existing-initializer-replay.md`](12-L1-existing-initializer-replay.md)；
 L0 只检测不重放，见 [`10-initializer-change-detection.md`](10-initializer-change-detection.md)。
 

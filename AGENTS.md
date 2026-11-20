@@ -1,35 +1,18 @@
-# InitFix 开发规则
+# Remold 开发规则
 
-InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例和静态环境的系统。
-修改 InitFix 相关代码前先读本文件；细节见第 7 节按需文档索引。
+HotSwap / InitFix 核心开发规范。所有规则与不变量在本文件定义，完整代码索引见 [`docs/code-map.md`](docs/code-map.md)，探针命令与变异检查清单见 [`docs/testing-guide.md`](docs/testing-guide.md)，实现状态唯一真相源见 [`docs/status.md`](docs/status.md)。
 
 ## 1. 作用域
 
-- 只处理本次 Redefine **新增声明的字段**（存量实例 + 静态）。
-- 禁止实现：修改已有字段初值、删除字段、修改方法签名、动态修改字段描述符类型。
-  - 删除字段：具名类走重定义层，匿名类合成字段走 `LayoutGate.check`（判 `COMPATIBLE`）。两层判据都是"**批次外读者为空**"（批次内扫新字节码、批次外扫当前字节码），判据实现为 `RemovedMemberReaders` + `decideLayout`（接线状态见 `docs/status.md` 风险 12，做法见 `docs/initfix/07-p05-probe-results.md` §13.6）。不能简化成"有删除就拒"——删 private 字段与正常连带重编的批次都是安全的。有存活实例时若无读者也放行（`WAIVE_NO_READERS`）；**扫描未完成时一律拒绝，不退回存活实例判据**。实测后果见 §13：字节码语义下实例迁移保全未删字段值、废弃槽位不复用，字节码读者失败形态是抛 `NoSuchFieldError`（`LinkageError`）；底层物理偏移紧缩（`OffsetStabilityProbe` A4-2），有缓存物理偏移者会错读相邻字段。
-    - **静态字段**走同一判据，但**没有 liveness 兜底**：静态值不随实例存在，扫描未完成时只能拒绝。失败形态实测三种（§16.2）：`NoSuchFieldError`、被父类/父接口同名字段**接住**、落到父类实例字段上抛 `IncompatibleClassChangeError`。
-    - **只拦"会抛错"的**：`hits`（`NoSuchFieldError`/`NoSuchMethodError`）、`abstractMissing`（`AbstractMethodError`）、**静态性翻转**（ICCE）。**合法回退不算读者**——删掉子类 Override 方法或遮蔽字段后回退到父类实现 / **同静态性**的父类字段，零异常、读者源码不用改、全量重编后字节码仍对得上，只记日志（§16.4）。
-    - **编译期常量**（`ConstantValue`，JLS §13.4.9，基本类型与 `String` 的 `static final`）**放行**：内联的读者运行期根本不解析该字段（零异常），未内联的读者常量池里仍有 `Fieldref`，会被 `hits` 正常抓到。边界不在 `final` 而在 `ConstantValue`：运行期初始化的 `static final` 与引用类型照常走 `Fieldref`（§16.1）。
-  - 删除方法：**与字段不是同一套查找规则**。字段只有向上解析（JVMS 5.4.3.2）；实例方法还有向下分派（JVMS 5.4.6），因此引用 owner 可以是 `A` 的**任何祖先**（`InterfaceMethodref I.m` / `Methodref Super.m`），只按 `declaring == A` 归属会整类漏掉。失败形态有三种：`NoSuchMethodError`（整条链都没有同签名方法）、`AbstractMethodError`（只有接口声明、没有实现）、**回退到祖先实现**（连 `Methodref A.m` 本身都不抛错）。前两种拒绝，**第三种放行**——那是删掉 Override 的本意（§16.4）。判据与字段共用"批次外读者为空"，但**扫描未完成时只能拒绝**：方法删除没有存活实例判据可以退，它的影响与"当前有没有实例"正交。实测与判据见 `docs/initfix/07-p05-probe-results.md` §15。
-- 唯一例外：字段标 `@RemoldReinit(mode = OVERWRITE)` 时，才允许覆写存量值。
-- **L1 存量初值重放**（`docs/initfix/12-L1-existing-initializer-replay.md`）：默认关闭；仅当
-  `-Dremold.agent.init_drift.parents=<父类名,...>` 显式开启、且宿主是白名单父类的**匿名子类**、字段是
-  **非 final 基本类型**、旧/新初值都是编译期常量时，才按"旧初值条件 CAS"重放。该通道只写**匿名类自身
-  枚举到的**存量实例，不覆盖运行期改过的值（当前值 ≠ 旧初值即跳过），不写 `FieldLedger`，
-  `@RemoldReinit` 优先；具名类与引用类型字段不在第一版范围。
-- **A 档 Kotlin `apply {}` 静态持有者初值重放**（`docs/initfix/13-kotlin-apply-replay.md`）：默认关闭；仅当
-  `-Dremold.agent.init_drift.apply_holders=<持有者类 fqcn,...>` 显式开启、且持有者是白名单内的
-  `object` / 顶层 `val` 类时，才处理其 `<clinit>` 中 `T().apply { field = 编译期常量 }` 的形态。写入协议是
-  `GETSTATIC holder.dest` 取回 `<clinit>` 唯一存储的那一个存量对象，再按**旧初值条件 CAS** 写目标类型 `T` 的
-  字段；运行期改过的值跳过，`dest` 为 null/类型不符 warn 跳过。只接受直线 `<clinit>`、唯一 `NEW` 站点且对象
-  无其它逃逸、`dest` 声明在持有者自身且描述符精确为 `LT;`、目标字段基本类型/非 final/非 synthetic/非
-  `@RemoldReinit`、旧/新值均为编译期常量且不同；Kotlin `var` setter（`invokevirtual`）、具名类属性
-  （`<init>`，B 档）、方法体/局部（C 档）、引用类型字段不在范围。不写 `FieldLedger`、不改变 `patchGenerated`。
-- Android ART 与 `$extras` 扩展槽属于独立子项目（Engine II），不在此处理。
-- 运行时前提：
-  - JBR 17/21+：`Lookup.defineHiddenClass`（NESTMATE）+ `jdk.internal.misc.Unsafe`
-  - DCEVM/TravaJDK 11：`Unsafe.defineAnonymousClass` + `sun.misc.Unsafe`（产物为 v55，JDK 8 无法加载）
+- **InitFix**：只处理本次 Redefine **新增声明的字段**（存量实例 + 静态）。禁止实现：修改已有字段初值（`OVERWRITE` / 显式重放通道除外）、删除字段、修改方法签名、动态修改字段描述符类型。
+  - **字段删除**：具名类走重定义层，匿名类合成字段走 `LayoutGate.check`。判据为"批次外读者为空"（批次内扫新字节码、批次外扫当前字节码，即 `RemovedMemberReaders` + `decideLayout`），不能简化成"有删除就拒"；有存活实例且无读者时 `WAIVE_NO_READERS` 放行；**扫描未完成时一律拒绝，不退回存活实例判据**。静态字段共用同一判据但**无 liveness 兜底**；编译期常量（`ConstantValue`）放行；合法回退（同静态性父类/接口字段）不算读者，只阻断 `hits`/`abstractMissing`/静态性翻转 ICCE。详情见 `docs/initfix/07-p05-probe-results.md` §13、§16。
+  - **方法删除**：与字段规则不同——实例方法还涉及 JVMS 5.4.6 向下分派（owner 可为 `A` 的任何祖先）。只阻断 `NoSuchMethodError` 与 `AbstractMethodError`，**合法回退到祖先实现放行**。扫描未完成时一律拒绝（无 liveness 兜底）。详情见 `docs/initfix/07-p05-probe-results.md` §15。
+- **例外与显式重放通道**：
+  - `@RemoldReinit(mode = OVERWRITE)`：允许覆写存量值。
+  - **L1 存量初值重放**（默认关闭，`-Dremold.agent.init_drift.parents=<fqcn,...>`）：白名单父类匿名子类 + 非 final 基本类型 + 编译期常量旧/新初值，按"旧初值条件 CAS"写匿名类自身实例（当前值 ≠ 旧初值跳过）；不写 `FieldLedger`，`@RemoldReinit` 优先。规格：`docs/initfix/12-L1-existing-initializer-replay.md`。
+  - **A 档 Kotlin `apply {}` 静态持有者重放**（默认关闭，`-Dremold.agent.init_drift.apply_holders=<fqcn,...>`）：仅处理白名单 `object`/顶层 `val` 类直线 `<clinit>` 中的唯一 `NEW` + 唯一 `PUTSTATIC dest`（基本类型/非 final/非 synthetic/非 `@RemoldReinit`、旧/新值均为编译期常量且不同），按 `GETSTATIC dest` 取对象并旧初值条件 CAS；不写 `FieldLedger`、不改 `patchGenerated`。规格：`docs/initfix/13-kotlin-apply-replay.md`。
+- Android ART 与 `$extras` 扩展槽属于独立子项目（Engine II，`docs/HOTSWAP.md`），不在此处理。
+- 运行时前提：JBR 17/21+（`Lookup.defineHiddenClass` NESTMATE + `jdk.internal.misc.Unsafe`）；DCEVM/TravaJDK 11（`Unsafe.defineAnonymousClass` + `sun.misc.Unsafe`；产物 v55，JDK 8 无法加载）。
 
 ## 2. 五条不变量（任何改动都不得破坏）
 
@@ -44,350 +27,97 @@ InitFix：热更新（Redefine）后，为**新增字段**初始化存量实例�
 **安全优先**
 - 拿不准就拒绝。宁可漏补，不可静默写入过期值。
 - 切片（含递归调用闭包）禁止调用"已存在但本次被修改"的方法。
-- `Object.toString` 的例外只允许 Kotlin `trim`/`trimStart`/`trimEnd` 展开形态（条件见 `docs/initfix/01-safety-gate.md` §2.1）。`Object.hashCode` 不得放宽；不得新增"任意静态方法"作为放行来源。
-- 判定逻辑取不到来源信息（`frames` 为 null 等）时必须拒绝（fail-closed），不要照抄 `builderMutatorReason` 里 `frames == null` 即放行的写法。
-- 新增拒绝路径时，必须经 `InitFix.transform` 的统一出口发 `warn`。不要只调用 `log(...)`，它受 `DEBUG` 门控，默认不输出。
-- 台账（`FieldLedger`）只负责"不遗忘"，不负责"放行"。台账字段回流后仍走同一套安全门。
+- `Object.toString` 例外只允许 Kotlin `trim`/`trimStart`/`trimEnd` 展开形态（`docs/initfix/01-safety-gate.md` §2.1）。`Object.hashCode` 不得放宽；不得新增"任意静态方法"放行来源。
+- 判定取不到来源信息（`frames == null` 等）时必须 fail-closed，不要照抄 `builderMutatorReason` 里 `frames == null` 即放行的写法。
+- 新增拒绝路径必须经 `InitFix.transform` 统一出口发 `warn`；禁止只调受 `DEBUG` 门控的 `log(...)`。
+- `FieldLedger` 只负责"不遗忘"，不负责"放行"；回流字段仍走同一套安全门。
 
 **日志语言（强制）**
-- 运行期日志、拒绝/告警提示与用户可见字符串**一律英文**（含多行拼接的每一段）；不得出现中文或中文标点。
-  原因：GBK 控制台/日志采集端会把中文打成乱码，跨平台日志扫描与用户排障依赖 ASCII。
-- 中文只允许出现在注释、Javadoc 与 `docs/` 设计文档中；`tests/src` 的断言消息不受此限（仍建议英文）。
-- 守卫：`./gradlew :tests:verifyLogLanguage`（已挂 `check`）扫描主源码字符串字面量，CJK/全角标点即失败。
-  新增日志时先跑它，不要靠肉眼检查。
+- 运行期日志、拒绝/告警提示与用户可见字符串**一律英文**（含多行拼接的每一段），不得出现中文或全角标点；中文仅限注释、Javadoc 与 `docs/`（`tests/src` 建议英文）。
+- 守卫：`./gradlew :tests:verifyLogLanguage`（挂 `check`），改动日志后先跑它。
 
-**写入**
-- 默认用条件 CAS（`KIND_CONDITIONAL`）。仅 `OVERWRITE` 使用 `KIND_FORCE`。
-- `float`/`double` 一律走 raw bits（`compareAndSetInt/Long`），不要按名字探测 `compareAndSetFloat/Double`。
-
-**分析期**
-- 层级、修饰符、Nest 查询走 `ClassHierarchyOracle`，不得使用 `Class.forName` 或反射。
-- 字段名（`String`）是唯一 Key，不支持同名异型字段。
-
-**数据结构与兼容**
-- 以 `Class` 为键的内部表用弱引用，值里不得反向持有 `Class`。不要换成 `java.lang.ClassValue`。
-- 本模块保留 Android/ART 路径。引用 ART 低版本不存在的新 API 必须用反射探测，不得直接写进静态字段类型。
+**写入 / 分析期 / 数据结构**
+- 默认条件 CAS（`KIND_CONDITIONAL`）；仅 `OVERWRITE` 用 `KIND_FORCE`。`float`/`double` 一律走 raw bits（`compareAndSetInt/Long`），禁止按名探测 `compareAndSetFloat/Double`。
+- 分析期层级、修饰符、Nest 查询走 `ClassHierarchyOracle`，禁止 `Class.forName` 或反射；字段名（`String`）是唯一 Key，不支持同名异型字段。
+- 以 `Class` 为键的内部表用弱引用，值不得反向持 `Class`，勿换 `java.lang.ClassValue`。保留 Android/ART 路径，新 API 必须反射探测。
 
 **外部引擎查验**
-- 项目根目录下的 `.sources/` 是本地只读的外部引擎源码符号镜像（已 gitignore，例如 `.sources/mindustry/` 指向真实的 Mindustry/Arc 源码）。
-- 核验外部框架（Mindustry / Arc / Fabric / Mixin / ASM 等）的内部机制时——类层级、字段修饰符、泛型签名、生命周期、注解参数语义——**必须先检索 `.sources/` 对应源码**，严禁凭经验或模糊记忆猜测；`.sources/` 未覆盖的部分再查上游仓库或已发布 jar 的源码包。
-- `.sources/` 只读：不修改、不提交、不作为构建输入。
+- `.sources/` 为本地只读外部引擎源码镜像（如 `.sources/mindustry/`），已 gitignore；核验 Mindustry / Arc / Fabric / Mixin / ASM 内部机制时**先检索 `.sources/`**（未覆盖再查上游源码包），严禁凭经验猜测；禁止修改或提交 `.sources/`。
 
-**状态管理规则**
-- 状态信息唯一真相源：`docs/status.md`。本文件只承载规则、不变量、代码地图与测试要求，不登记任何实现状态、测试计数或验收证据。
-- **严禁在 Javadoc、代码注释以及各 `docs/` 设计文档中重新混入实现状态信息**（如 `✅`、`[已实现]` 等易腐标记）。设计文档与 Javadoc 仅负责定义客观的设计规格、原理与交互契约；直接重复处一律转为链接。
-- **文档类型横幅（强制）**：`docs/**` 下每个 `.md`（`status.md`、`releases/`、`acceptance/` 除外）前 10 行必须有
-  `文档类型：<设计规格|实测记录|审计记录|决策记录|独立子项目规格|索引>`。设计规格与独立子项目规格**禁止**交付状态散文
-  （`已实现`/`未实现`/`待实现`/`已落地`/`尚未落地`/`已上线`/`尚未上线`/`待评审`/`已收口`/`未收口`/`未接线`/`尚未接线`/`尚未实现`）
-  与 `✅/⬜/🔶/🟣/❌` 标记；决策记录允许历史结论但不得出现状态标记；实测/审计记录只写读数，且横幅必须点名
-  `docs/status.md`。守卫：`./gradlew :tests:verifyStatusSingleSource`（挂 `check`，扫描 `docs/**` 与主源码），
-  新增文档缺横幅或类型不符即失败。
-- **代码注释与 Javadoc 只写契约与边界**：不得写"尚未实现 / 未接线 / 已实现"等交付状态，改写成"不在当前范围"并指向
-  `docs/status.md`；运行时语义（如"字节尚未提交"）可以写，但不要用状态词形（`已落地` 之类）表达交付状态。
-- **历史归档**：`docs/status.md` §0.x 只做历史归档，逐项明细以 `CHANGELOG.md` 为准；新条目只进 §1～§7 状态表与 CHANGELOG。
-- **缺陷记录边界**：`docs/status.md` §1～§7 **只登记机制/能力状态与残余风险**（行 = 稳定机制，不是一次缺陷）。修一个已有机制**不新增 §1 行**；一次缺陷的现场形态、根因、复现步骤只进 `CHANGELOG.md`，契约变化进对应 `docs/` 规格，未闭环残余进 §5 风险 / §4.2 债务。
+**状态管理规则（强制）**
+- 唯一真相源：[`docs/status.md`](docs/status.md)。本文件与其它 `docs/` 规格文档不登记实现状态、测试计数、验收证据。
+- `docs/**`（`status.md`、`releases/`、`acceptance/` 除外）前 10 行必须有 `文档类型：<设计规格|实测记录|审计记录|决策记录|独立子项目规格|索引>`。设计规格与独立子项目规格禁止交付状态散文与 `✅/⬜/🔶/🟣/❌`；决策记录禁止状态标记；实测/审计记录只写读数且横幅必须点名 `docs/status.md`。
+- 守卫：`./gradlew :tests:verifyStatusSingleSource` 与 `:tests:verifyDocStatusMarkers`（均挂 `check`）。
+- 代码注释与 Javadoc 只写契约与边界（写"不在当前范围"并指向 `docs/status.md`），不写交付状态词；缺陷现场与根因只进 `CHANGELOG.md`，`docs/status.md` §1～§7 只登记稳定机制状态与残余风险。
 
-**代码风格**
+**代码风格 & 数据汇报**
+- **禁止在代码正文写 FQCN**（一律 `import` 后用简单名；注释/文档/自包含测试夹具源码字符串除外）。
+- **数据汇报铁律**：禁止用经验估计或跨轮次/异口径拼接数据下结论；性能结论须满足：(1) 源于实测；(2) 同轮次同口径对比；(3) 耗时具备分布支撑（min/median/max）。缺失则先声明局限，禁止直接下结论。
 
-- **禁止在代码里写全限定类名（FQCN）**：需要时用 `import`（本仓库大量文件已 `import java.util.*`），
-  让声明处与使用处都可读；新增/重构代码一律写简单名。
-- 例外：注释、文档、测试夹具里的源码字符串（自包含夹具需要写出 `java.util.function.Function` 之类）。
-  历史文件里的旧 FQCN 不强制一次性清理，但改到哪一行就顺手改掉。
+## 4. 代码地图与子系统索引
 
-**数据汇报铁律**
-- 严禁使用经验估计、未验证的机制前提或跨轮次/异口径的拼接数据下结论。
-- 输出任何性能结论前，必须显式确认：(1) 数据源于实测而非推算；(2) 对比序列属于同一轮次与同一统计口径；(3) 延迟与耗时类结论具备分布支撑而非单一聚合指标。
-- 若缺失上述条件，必须先声明数据局限，禁止直接导出结论。
+完整 60+ 项类级代码地图见 [`docs/code-map.md`](docs/code-map.md)：
 
-## 4. 代码地图
-
-| 关注点 | 位置 |
-|:--|:--|
-| 入口与主流程 | `InitFix.transform` / `buildPatch` / `applyPatch` |
-| 提取与安全门 | `extractFieldInits`、`checkSafe`、`effectReason`、`blacklistedCallReason`、`builderMutatorReason` |
-| L1 存量初值重放（白名单父类匿名子类 + 常量旧值） | `core/src/remold/ref/InitializerReplay.java`（纯函数候选/声明类解析）；`HotswapBridge.KIND_CONDITIONAL_EXPECTED`（旧初值 CAS） |
-| A 档 Kotlin `apply {}` 静态持有者重放（白名单持有者 `<clinit>` + 唯一 provenance） | `core/src/remold/ref/ApplyInitializerReplay.java`（纯分析：`<clinit>` 直线抽象解释、局部变量副本溯源、唯一 `NEW`/唯一 `PUTSTATIC dest`、目标字段安全门）；`InitFix`（`PatchPlan.applyFields` + `applyReplay$N` 补丁方法 + `PatchReport.applyReplayFields`）；`HotswapBridge.KIND_CONDITIONAL_EXPECTED` 的链接期字段复核 |
-| 参数回溯 | `scanParamFields`、`sourceFieldNotImmutableReason`、`InitFix.NestView` |
-| 离线层级 | `ClassHierarchyOracle` / `HierarchyTreeOracle`，底层 `AnnotationTransformer.HierarchyTree` |
-| 台账 | `InitFix.LEDGER`、`getUnpatchedFields` |
-| 逐实例驱动 | `runDependentInstanceTasks` / `runIndependentInstanceTasks`、`InstanceFailureBudget` |
-| Agent 协作模块（`core/src/remold/`） | `EnvironmentProbe`（增强重定义能力探测与降级）、`LayoutDecisionEngine`（布局门纯判决）、`RemovedMemberScanner`（被删成员的批次外读者扫描）、`JarExtractor`（jar 解压与临时挂载映射）、`WatchPathRegistry`（监控路径分槽与聚合）、`FileWatcherService`（WatchService 监听线程）；编排与流水线仍在 `RemoldAgent` |
-| 文件热更防抖状态机 | `core/src/remold/DebounceWindow.java`（纯状态机：Class/jar 与资源流各自 trailing-edge 静默窗口；`markClassDueNow` 为外部构建完成信号的 sticky due；无队列、无调度、无真实时钟，供 `RemoldAgent` 与单测共用） |
-| 构建完成 marker（build-trigger） | `core/src/remold/BuildTriggerMarker.java`（marker 解析/拒绝/去重，纯函数）、`BuildTriggerSweep.java`（按 mtime 收集最近变更，纯函数）、`RemoldAgent.configureBuildTrigger` / `handleBuildTriggerFile`（解析 → 扫描入队 → sticky due → 取消防抖等待）、`FileWatcherService` 专用 trigger watcher；`gradle-plugin` `BuildTriggerWriter` + `RemoldPlugin` 的 `classes.doLast` + `RemoldConfigResolver` 注入 `-Dremold.agent.build_trigger_file`（DSL `buildTrigger`，默认 `true`）。设计：`docs/topology/14-build-trigger-mode.md` |
-| 启动就绪门闩与批次看门狗 | `core/src/remold/StartupGate.java`（纯状态机：`PENDING→READY`，`-Dremold.agent.ready_timeout_ms`）、`core/src/remold/BatchWatchdog.java`（`enter/exit/current` 作用域 API + `armedWatchdogs()` 不变量；`-Dremold.agent.batch_stall_ms` 默认 15000，`ThreadMXBean.dumpAllThreads(true,true)` 单次 dump，前缀 `[HOTSWAP-STALL]`）；挂点是 `RemoldAgent.processChanges`（覆盖防抖/手动批次）与 `retransformLoaded`，漏斗在 `triggerDueHotswap`；就绪判定由 `api` 的 `HotswapPlugin.isHostReady()` 投票（默认 true，`plugin-fabric` 经 `HostReadinessProbe` 按 MC 主循环 tick 判定，探测不到即 fail-open），core 不含任何加载器/游戏专属判断 |
-| 织入生成类的字节码登记口 | `core/src/remold/BytecodeSources.java`（纯 JDK：多来源按注册顺序查询，内部名/点分名皆可，来源抛异常只记一条 warn；无缓存）；被 `HierarchyTreeOracle.readClassBytes`（Nest 扫描、`resolveMember`/构造器可见性）消费；`plugin-mixin` `MixinInnerClassHotSwap` 在生成合成内部类后回灌，并由 `refeedForTarget` 在**目标类织入之后、InitFix 扫描之前**按需提前生成（覆盖"本次织入新登记"的合成类，生成后还原 `loadCounter` 以免假已加载） |
-| 加载器集成插件（`plugin-fabric/`） | `FabricHotswapPlugin` 实现 `HotswapPlugin` 的三个通用窗口：`onPremain`（`FabricClassPathGroups`，必须在插件加载后、`init` 前执行）、`onWatchPathsChanged`（`ModJarInspector` 巡检 `run/mods` 残留制品）、`isWatchPathIgnored`（`DevWatchExclusions` 排除 `mods` 目录）；Gradle 侧 `autoFabric` 自动挂载。core 不出现任何加载器专属目录或属性约定 |
-| 写入桥 | `HotswapBridge`（`KIND_CONDITIONAL` / `KIND_FORCE`） |
-| 构造器尾部插桩 | `ConstructorTailInjector`（`core/src/remold/ref/`，纯函数：根构造器 `RETURN` 前注入字段切片；当前两阶段契约下不接线） |
-| 两阶段读穿保护（内部批次路径 + 动态单类入口） | `RemoldAgent.applyTwoPhase` / `redefineStageA`（A→B→C 编排、整组回滚、`isInitialized` 二次检查）；`RemoldAgent.redefineDynamic` 消费 `InitFix.requiresTwoPhase`，在调用内部同步跑 A→补丁→C（阶段 C 复用现成 `runtimeBytes`，失败按 VM 级/非 VM 级分流）；`StageASkeleton.buildWithLiveConstructors`（阶段 A 保留新构造器）；`InitFix.requiresTwoPhase`（只有真正会写的零值暴露字段才触发）；开关 `-Dremold.agent.two_phase=false` |
-| 哈希语义门控 | `HashSemantics`（`core/src/remold/ref/`，本类内调用图扫 `hashCode`/`equals`/`compareTo` 及其可达方法是否读新增实例字段，只告警不拒绝） |
-| 删除成员的读者分析 | `RemovedMemberReaders`（`core/src/remold/ref/`，纯函数：字段按 JVMS 5.4.3.2、方法按 5.4.3.3 + **5.4.6 向下分派**判"改动后引用会怎样"，输出悬空 / 抽象方法缺失 / 分派转移 / 判不了 / 字段改指向五档） |
-| 读者扫描成本探针 | `tests/src/ReaderScanProbe.java`（`./gradlew :tests:readerScanProbe`，不需要 DCEVM）：常量池扫描 vs 方法体精扫、三档扫描范围的真实成本、派生缓存开/关双档（§F） |
-| 按 blob 内容寻址的派生数据缓存（PR2） | `core/src/remold/vcs/DerivedDataCache.java`（键 `(kind, SHA-256(blob))`、双预算 LRU、值必须不可变且不持 `Class`/`ClassLoader`/`ClassNode`；开关 `-Dremold.vcs.derived_cache`，预算 `-Dremold.vcs.derived_cache_entries` / `-Dremold.vcs.derived_cache_bytes`）；消费点：`LambdaAligner.consumersOf` / `deriveConsumerTags`（按 `(blob, 方法 name+desc)` 缓存消费者数据流，值按指令流下标对齐；`hasConsumerSite` 先判"方法体里有没有本类 lambda 调用位点"，没有则不分析也不入池）、`LambdaAligner.deriveAnonRefs`（匿名类引用索引）、`RemovedMemberReaders.describe` / `refs`（类型世界与常量池引用）。**禁止缓存 `align()` 整包结果**，键维度契约见 `docs/topology/16-bytecode-changeset-vcs.md` §3.7 |
-| 派生数据量化基准与等价门禁 | `tests/src/DerivedDataBench.java`（`./gradlew :tests:derivedDataBench`，纯测量：每类 `align()` 成本分布、消费者数据流消融、缓存开/关、预算边界；读数见 `docs/topology/17-derived-data-cache-probe.md`）、`tests/src/DerivedDataEquivalenceTest.java`（门禁：开/关产物逐字节 + `AlignmentResult` 全字段相等、换序遍历、按 `(blob, 方法)` 查条目的键维度断言） |
-| 逐代对齐元数据旁路记录（PR1） | `core/src/remold/vcs/AlignmentMetaStore.java`（loader 弱键槽 + head/history 两级、`preAlignHash`/`alignOutputHash`/`jvmEffHash` 三口径 + 自造名/幽灵生前指纹/方法映射；`headMatching` 要求 `jvmEffHash` 命中才采信）、`core/src/remold/vcs/VcsCommitGate.java`（批次原子提交真值表）、`core/src/remold/vcs/BytecodePack.java`（`-Dremold.vcs.pack_dir` 离线回放包，未设目录即 no-op）；写入口 `RemoldAgent.commitVcsBatch` 只在"该类最终 redefine 成功之后"提交，两阶段 Stage A 不提交；开关 `-Dremold.vcs.enabled`（默认 false）。规格 `docs/topology/16-bytecode-changeset-vcs.md` §2.3～§2.4/§5.3，验收 `vcsPackProbe` / `vcsTwoPhaseProbe` |
-| 活体对齐的 Raw ↔ Raw 输入与 Eff_prev 继承 | 规格 `docs/topology/18-live-raw-to-raw-alignment.md`（双跑道 + G1/G2/G3 准入闸门 + 继承集枚举与落地顺序 + 整类回退）；消费点 `LambdaAligner.align`（`META_SOURCE` 为 Run R 总闸）、`AlignmentMetaStore.headMatching`、`RemoldAgent.writePendingInvented`/`commitVcsBatch` 之间的代际传递 |
-| 堆实例检索（Native） | `LibTool.getInstances` |
-| 批次堆遍历（同批 K 类收敛为 1 次全堆遍历） | `LibTool.getInstancesBatch` / `hasLiveInstancesBatch`（native `nGetInstancesBatch` / `nHasLiveInstancesBatch` / `nHeapWalkCount`；`core/src/remold/util/LibTool.java`：`BATCH_TARGET_LIMIT=16` 分块、`BATCH_LIVENESS_TARGET_LIMIT=64` 存在性探测不物化对象、任一归属/槽位异常整体退回逐类路径）；接线 `InitFix.beginBatchInstanceCollection` / `takeBatchInstances`、`RemoldAgent.setLivenessBatch` / `prefetchBatchLiveness` 与逐实例驱动消费；规格 `docs/initfix/05-jvmti-heap.md` §「批次实例收集」（局部帧生命周期、对象 tag 槽位预算、两个分块上限、开关与 `PatchReport` 等价性契约） |
-| JNI 局部引用生命周期回归锁 | `tests/src/BatchScanLocalRefLifetimeTest.java`（16 类 × 20 实例：一次批遍历必须只花 1 次全堆遍历）+ `tests/src/BatchHeapScanEquivalenceTest.java`（批收集 vs 逐类集合等价、无脏 tag、K=1 单次遍历）+ `tests/src/remold/BatchLivenessPrefetchTest.java`（批次存活探测 1 次 vs 逐类 K 次，带去触发对照）；锁的是"`GetObjectsWithTags` 的 `jobject` 属当前局部帧、帧弹出后被容器数组槽位复用"这一 UAF 形态，等价性用例抓不住，必须由探针击杀 |
-| 阶段 A 骨架合成 | `StageASkeleton`（`core/src/remold/ref/`，纯函数：新结构 + 旧执行体，成员按旧 ∪ 新） |
-| 注解 | `remold.annotation.RemoldReinit` |
-| 合成字段过滤 | `ClassDiffUtil.isInternalMarkerField` |
-| 匿名类与局部类安全门 | `AnonClassAligner`、`LayoutGate`、`LocalClassGuard` |
-| `Object.toString` 例外 | `InitFix.allowedStringCoercion`、`isInertProducer`、`isIntermediateObjectToString`（`effectReason` 在白名单之后、黑名单之前调用） |
-| 测试夹具（Java） | `tests/src/InitFixOracle.java`（内存 `javac`） |
-| 测试夹具（Kotlin） | `tests/ktfix/v1/`、`v2/` 下的 `.kt`，由 `ktfixV1`/`ktfixV2` source set 编译 |
-| P0.5 前置验证探针 | `tests/src/P05Probe.java`（配套最小 agent `P05Agent.java`，`./gradlew :tests:p05Probe -Pp05.jbr=<dcevm-jdk>`） |
-| 既有静态字段重写 A/B 探针 | `tests/static-rewrite-probe/`（单阶段 redefine→patch 的 stale 读者 vs 两阶段 Stage A→patch→Stage C 的刷新；`bash tests/static-rewrite-probe/build.sh && bash tests/static-rewrite-probe/run.sh`） |
-| 两阶段编排探针 | `tests/src/TwoPhaseProbe.java`（`./gradlew :tests:twoPhaseProbe -Pp05.jbr=<dcevm-jdk>`，串起 A → B → C） |
-| A 档 Kotlin apply 重放探针 | `tests/src/KotlinApplyProbe.java`（`./gradlew :tests:kotlinApplyProbe -Pp05.jbr=<dcevm-jdk>`，真实 `processChanges` + redefine；Java 等价夹具，Kotlin 真实字节证据见 `docs/initfix/13-kotlin-apply-replay.md` §2） |
-| 测试判定力审计记录 | `docs/initfix/08-test-audit.md`（变异检查证据；审计产生的缺口与结论，一次性证据不放状态表） |
-| lambda 对齐压力测试 | `tests/src/LambdaAlignTortureTest.java`（旧 callsite 名字 → body 归属的自动断言；JDK 8/17/21 × 前插/删除/重排，覆盖 `lambda$static$N`/`lambda$new$N`；含判定力自检） |
-| 孤儿 lambda 方法体保留（非 void 默认保留旧体、本类成员存活性判据、幽灵身份与体形态解耦） | `LambdaAligner.injectRetainedBody` / `OrphanBodyRetention`（`core/src/remold/`，纯函数）；规格见 `docs/topology/11-orphan-lambda-body-retention.md`，测试 `tests/src/OrphanBodyRetentionTest.java` |
-| 捕获桥（删除 + 可证明的新增：常量 / final 字段 / 可折叠算式 / 构造器参数经 final 字段 / 运行时常量） | `LambdaAligner.stepCaptureBridge` / `getBridgeDelegate` / `onBridgeInvoked`；接收者归一在 `captureNamesOf`（槽号结构优先，名字 `null`/`this`/`this$0` 只兜底回溯失败），`readLambdaParamNames` 只报告 LVT 原文；规格见 `docs/topology/09-lambda-capture-bridge.md` |
-| 运行时常量访问器登记表 | `remold.RuntimeConstants`（core 只提供登记口；`plugin-arc` 的 `ArcHotswapPlugin.onAgentInit` 登记 Arc 专属的 `Scl.scl()`）；被 `InitFix` 效应审查与捕获桥常量合成共用 |
-| 捕获桥判定力 | `tests/src/LambdaBridgeAlignTest.java`（对齐期，无需 DCEVM）；`tests/src/LambdaBridgeProbe.java`（`./gradlew :tests:lambdaBridgeProbe -Pp05.jbr=<dcevm-jdk>`，实测运行时失败形态） |
-| 常驻 javac（测试提速） | `tests/src/JavacDaemon.java`（客户端）+ `tests/javacdaemon/JavacDaemonServer.java`（服务端，`--release 8`，任务 `javacDaemonServer`）；每个 JDK 一个进程、复用 `JavaCompiler`/`FileManager`，失败自动回退外部 javac；`-Phstest.noJavacDaemon` 可强制回退 |
-| `@HotswapInit` 设计契约 | `docs/initfix/09-hotswapinit-design.md`（T4 逃生口的豁免边界、签名与调用基数、重复触发、异常边界、用例清单） |
-| 外部引擎源码索引 | `.sources/`（如 `.sources/mindustry/` 指向本地 Mindustry/Arc 真实源码；只读参考，已 gitignore） |
-| Mixin 共享反射引擎 | `core/src/remold/reflect/mixin/`（`MixinConfigDiffer`、`NewMixinRegistrar`、`MixinConfigContext`、`MixinReflection`）：纯 JDK + 反射，无 Mixin / ModLauncher 编译期依赖；负责 `*.mixins.json` 差异、新 Mixin 登记、删除 tombstone 与目标重织入回调。**目标加载抑制器不设 core 侧接口**：以 `Function<Collection<String>,Object>` + `Consumer<Object>` 跨边界传递（插件只传方法引用），避免插件类硬链接 core 可选类型在类链接期抛 `NoClassDefFoundError` |
-| Mixin 生态扩展插件 | `plugin-mixin/`（Fabric 薄适配：`MixinHotswapPlugin`、`MixinReWeaver`、`MixinHotSwap`、`FabricLauncherSpoof`；匿名/内部类热更：`MixinBytecodeOverlay`（把 Remold 已知的新类字节接进 Mixin 的 `IClassBytecodeProvider`，含上游 `ClassInfo` 负缓存驱逐）、`MixinInnerClassSupport`（内部类归属/嵌套名推导的纯函数）、`MixinInnerClassHotSwap`（按 `InnerClassGenerator` 的稳定唯一名重新生成并重定义运行期合成内部类））；`plugin-forge/`（Forge/NeoForge 薄适配：`ModLauncherMixinBridge`、`ForgeMixinConfigDiff`、`ModLauncherClassTrackerSpoof`） |
-| Forge 与 NeoForge 扩展插件 | `plugin-forge/`（`remold.forge.ForgeHotswapPlugin`、`NeoForgeHotswapPlugin`、`ModLauncherMixinBridge`、`ForgeEventBusRefresher`、`ForgeMixinHotSwap`（Mixin 模板热更 + 目标级联）、`ForgeClassInfoSync`（薄适配，委托 core 引擎）） |
-| ClassInfo 成员同步单一引擎 | `core/src/remold/reflect/ClassInfoMemberSync.java`（反射-only，跨 ClassLoader 按宿主类型解析；Fabric `MixinClassInfoSync` 与 Forge/NeoForge `ForgeClassInfoSync` 都只是类型擦除 + 日志前缀的薄适配） |
-| 偏移量与访问器扫描器 | `OffsetScanner`（`core/src/remold/offset/`，常量池预过滤 + 多轮过程间数据流分析，识别 `objectFieldOffset`/`newUpdater`/`findVarHandle` 产生源） |
-| 偏移绑定索引与漂移安全门 | `OffsetBindingIndex` / `SuperclassDriftGate`（`core/src/remold/offset/`，父类新增实例字段时检测子孙类全部实例字段是否被缓存，结合 `LibTool` 堆存活探测，阻断漂移） |
-| 布局预测器 | `LayoutPredictor`（`core/src/remold/offset/`，抛弃式加载器干净加载预测物理偏移，协同注入非 JDK 祖先链防御 package-private 运行时包隔离） |
-| 反射与序列化缓存驱逐 | `ReflectionCacheManager`（`core/src/remold/evict/`，实例级缓存清除 SPI，内置 Jackson/Gson）；Arc `Json` 驱逐器在 `plugin-arc/src/remold/arc/ArcJsonEvictor`，由插件注册 |
-| 偏移量稳定性与漂移探针 | `tests/src/OffsetStabilityProbe.java`（`./gradlew :tests:offsetStabilityProbe -Pp05.jbr=<dcevm-jdk>`，实测单类稳定性、父类漂移、Updater 破坏与 C2 逆优化） |
-| Gradle 插件坐标 | `gradle-plugin/`（`java-gradle-plugin`，坐标 `io.github.i-hope1.remold`；二进制插件实现 `RemoldPlugin` + `RemoldExtension` 类型安全 DSL + 配置缓存，同时将仓库根 `remold.gradle(.kts)` 打包进 jar 作为脚本资源；`RemoldConfigResolver` 读取本地 `remold-agent.jar` manifest 的 `Remold-Version` 与 `remold.version` 对账（不匹配则重解析并同步覆盖），`cleanRemoldCache` 任务显式清理项目/用户目录/`build` 三处 Remold 缓存且不挂 `clean`） |
+| 子系统 | 核心包 / 位置 | 索引与规格 |
+|:--|:--|:--|
+| InitFix 存量初始化与代际台账 | `core/src/remold/ref/`、`core/src/remold/vcs/Generational*` | `docs/code-map.md` §1、`docs/initfix/` |
+| 两阶段 Redefine、JVMTI 批扫描与布局门 | `RemoldAgent`、`LibTool`、`LayoutGate`、`RemovedMemberReaders`、`StageASkeleton` | `docs/code-map.md` §2、`docs/initfix/04`·`05` |
+| Agent 调度、防抖、Trigger 与看门狗 | `core/src/remold/`（`DebounceWindow`、`BuildTrigger*`、`StartupGate`、`BatchWatchdog`、`BytecodeSources`） | `docs/code-map.md` §3、`docs/topology/14` |
+| 字节码 VCS、派生缓存与 Raw 对齐 | `core/src/remold/vcs/`、`LambdaAligner`、`OrphanBodyRetention` | `docs/code-map.md` §4、`docs/topology/16`·`18`·`20` |
+| 加载器插件、Mixin、偏移与 Gradle 插件 | `plugin-{fabric,mixin,forge,arc}/`、`core/.../offset/`·`evict/`·`reflect/mixin/`、`gradle-plugin/` | `docs/code-map.md` §5、`docs/mixin/`、`docs/offset/` |
+| 测试夹具、外部源码与专项探针 | `tests/src/`、`tests/ktfix/`、`.sources/` | `docs/code-map.md` §6、`docs/testing-guide.md` |
 
 ## 5. 实现状态
 
-本文件**不登记任何实现状态**（完成度、测试计数、验收证据、残余风险等）。
-逐项状态、落地位置、验收证据、已知风险与技术债统一见 [`docs/status.md`](docs/status.md)；
-设计规格见 [`docs/topology/`](docs/topology/)、[`docs/initfix/`](docs/initfix/)、[`docs/offset/`](docs/offset/)。
+本文件**不登记任何实现状态**。逐项状态、落地位置、验收证据、已知风险与技术债见 [`docs/status.md`](docs/status.md)；历史战役实证战报见 [`docs/battles/`](docs/battles/README.md)；逐版发布历史见 [`CHANGELOG.md`](CHANGELOG.md) 与 [`docs/releases/`](docs/releases/)。
 
 ## 6. 测试要求
 
-**【测试与验证防空转铁律】** 严禁将"通过的测试"直接等同于"机制已验证"。所有有效性断言必须满足三要素：
-1. **前置基线确认**：触发变更/失效前，必须先断言目标状态已处于预期的生效态，排除"原本即为空"的假阳性；
-2. **因果链终局断言**：断言必须落在业务可观测的最后一环（实际读写结果/状态终局），严禁用调用成功、日志输出、内部计数器等相关性/代理信号代替终局结果；
-3. **严格时间窗约束**：状态转换与失效必须绑定明确的时间戳窗口（$[T_0, T_0 + \Delta t]$），区分"机制主动生效"与"TTL 自然过期"。
+**【测试与验证防空转铁律】** 严禁将"通过的测试"等同于"机制已验证"。所有有效性断言须满足三要素：
+1. **前置基线确认**：触发变更前先断言目标处于预期生效态，排除"原本即空"的假阳性；
+2. **因果链终局断言**：落在业务可观测最后一环（实际读写结果/状态终局），禁止用调用成功/日志/计数器等代理信号替代；
+3. **严格时间窗约束**：状态转换与失效绑定 $[T_0, T_0 + \Delta t]$，区分"主动生效"与"TTL 过期"。
 
-写完测试后必须自问：**若注释掉核心生效代码，该断言是否必挂？**
+写完测试必须自问：**若注释掉核心生效代码，该断言是否必挂？** 并配齐两种对照（缺一不可；确无特异性对照须在注释写明原因）：
+- **去触发**：去掉触发动作（如 `redefineClasses`），断言必红；
+- **换无关输入**：换成无关同类操作，断言必不成立。
 
-**对照组（因果归因的前提）** —— 分两种，缺一不可：
-- **去触发**：注释掉触发动作（如 `redefineClasses`），断言必须变红；
-- **换无关输入**：把触发对象换成无关的同类操作（如 redefine 一个无关类），断言必须不成立。
-
-两种对照都指向同一件事：断言必须能区分「机制做了这件事」与「别的原因也产生了同一个信号」。若某用例确实
-没有自然的特异性对照，必须在用例注释里写明原因（例如"该断言只记录观测结果，不具备归因能力"），
-不允许用形式化的对照凑数。
-
-- 回归任务：`:tests:initFixOracle`（挂在 `check`；场景数与断言数以任务实际输出为准，当前快照登记在 `docs/status.md`）。纯 JVM 运行环境，0 额外框架依赖。
-- 必须通过 `./gradlew initFixOracle`（或 `./gradlew :tests:initFixOracle`）运行，不要直接 `java -cp`：Kotlin 夹具由 Gradle 先编译，输出目录经 `-Dremold.ktfix.v1/v2` 传入。
-- Kotlin 夹具的 v1/v2 输出目录**绝不能**进入任何 classpath（同名类会静默只命中其一，造成假绿）。
-- 迭代期间只跑 `./gradlew initFixOracle`，收尾时才跑一次 `./gradlew check`。
-- 匿名类/对齐主题套件为标准 JUnit 测试：`./gradlew test`（或 `./gradlew :tests:test`，挂在 `check`）。入口用 `-Dhstest.javac8/11/17/21/25` 现编夹具，不再有 `expected-count.txt` 基线。
-- L1 存量初值重放：`./gradlew :tests:initFixOracle` + `InitializerReplayTest`（走 `:tests:test`）+ `./gradlew :tests:doubleBraceProbe`（L1 场景需要 DCEVM 与 `-XX:+AllowEnhancedClassRedefinition`，不挂 `check`）。改动 `InitializerReplay` 的候选/安全门、或 `HotswapBridge.KIND_CONDITIONAL_EXPECTED` 后，必须跑 `doubleBraceProbe` 并做变异检查：白名单判定放宽必须让非白名单用例变红，条件写改成 FORCE 必须让"运行期改过的值"用例变红。
-- A 档 Kotlin apply 静态持有者重放：`./gradlew :tests:test --tests ApplyInitializerReplayTest` +
-  `./gradlew :tests:kotlinApplyProbe -Pp05.jbr=<DCEVM JDK 目录>`（不挂 `check`）+ L1 的 `doubleBraceProbe` 保持 104/0。
-  改动 `ApplyInitializerReplay` 的候选/安全门、`InitFix` 的 `applyFields` 计划/发射、或
-  `HotswapBridge.KIND_CONDITIONAL_EXPECTED` 后必须跑它并做变异检查：白名单判定放宽必须让非白名单用例变红，
-  条件写改成 FORCE 必须让"运行期改过的值"用例变红。
-- P0.5 前置验证：`./gradlew :tests:p05Probe -Pp05.jbr=<DCEVM JDK 目录>`（或设 `JBR_HOME`）。**不挂 `check`**，因为需要 JBR 17/21 的 `-XX:+AllowEnhancedClassRedefinition`；CI 由 `p05-probe` 的 JBR 17/21 矩阵承担。探针刻意用最小 agent（`P05Agent`）而非 `remold-agent.jar`，避免 `LayoutGate`/`InitFix` 介入被测重定义。
-- 缓存填充验证：`./gradlew :tests:cacheWarmingProbe`（只需 `-javaagent`）。改动 transformer 注册顺序或`canRetransform` 标志后必须跑它：它实测"`canRetransform=false` 组整组先于 `true` 组执行"这条规则，并断言 `bytecodeCache` 里存的是对齐/织入**之后**的字节。
-- Forge ClassInfo 成员同步 E2E：`tests/fabric-mixin-probe/forge-classinfo/`（真实 Forge 1.21.1 `runServer`，红基线 + 修复后绿跑；`bash run-forge-classinfo.sh` 复跑，Windows 下用 `verify-evidence.cmd` 做验收；同样不挂 `check`）。改动 `ForgeClassInfoSync` / `ForgeMixinHotSwap.reload` 时序前必须先跑它。
-- NeoForge Mixin 热更 E2E：`tests/neoforge-mixin-probe/`（真实 NeoForge 21.1 dev `runServer`，Mixin 配置走加载器原生 `META-INF/neoforge.mods.toml` `[[mixins]]`；红基线=禁用同步的 plugin jar，绿跑=当前实现；Windows 用 `verify-evidence.cmd` 验收；不挂 `check`）。改动 `ClassInfoMemberSync` / `ForgeMixinHotSwap.reload` 时序或 NeoForge 识别逻辑前必须先跑它。
-- 读者扫描成本验证：`./gradlew :tests:readerScanProbe`（只需 `-javaagent` 提供 Instrumentation，不需要 DCEVM）。改动 `RemovedMemberReaders.refs` 后必须先跑它：其中一条断言要求"常量池扫描是方法体精扫的超集"，另一条（§F）要求派生缓存开/关的类型世界与引用集合完全一致。
-- 派生数据缓存验证（PR2）：改动 `DerivedDataCache` 的键/预算语义，或 `LambdaAligner.consumersOf` / `deriveAnonRefs` / `RemovedMemberReaders.describe`·`refs` 的派生路径后，必须跑
-  `./gradlew :tests:test --tests DerivedDataEquivalenceTest` + `./gradlew :tests:derivedDataBench`
-  （后者单跑取数：同轮、逐轮交替、报 min/median/max）。**变异检查**：缓存键去掉任一维度（方法 / blob）
-  必须让 `DerivedDataEquivalenceTest` 变红——注意"开/关产物逐字节相等"这条端到端断言**抓不住**
-  "键漏方法维度"（消费者证据可能恰好不改写产物），键维度由按 `(blob, 方法)` 查条目的用例守。
-- 构建完成 marker 验证：`./gradlew :tests:buildTriggerProbe`（真实 watcher + redefine，不挂 `check`；`-Pp05.jbr=<DCEVM JDK>` 可指定 JVM）。改动 `BuildTriggerMarker` / `BuildTriggerSweep` / `RemoldAgent.handleBuildTriggerFile` / `DebounceWindow.markClassDueNow` / `FileWatcherService` 的 trigger watcher / Gradle 插件 marker 接线后必须先跑它，并做变异检查：去掉 sticky latch、后续 marker 重扫、关掉陈旧/未来校验、关掉扫描 mtime 过滤、空扫描仍置 due、去掉 `classes.doLast` 接线、`buildTrigger=false` 仍注入——对应用例必须变红。
-- 两阶段编排验证：`./gradlew :tests:twoPhaseProbe -Pp05.jbr=<DCEVM JDK 目录>`，把 `StageASkeleton.buildWithLiveConstructors` / `InitFix` 串成 `A → redefine → B → C → redefine` 跑一遍，并驱动真实 `processChanges`：50k 存量实例 + 并发读线程下，开两阶段零 NPE、关两阶段（`-Dremold.agent.two_phase=false`）稳定 NPE（红基线）（同样不挂 `check`）。改动两阶段相关代码（`applyTwoPhase` / `redefineStageA` / `requiresTwoPhase` / `buildWithLiveConstructors`）后必须先跑它，再考虑动 `RemoldAgent`。
-- 偏移量稳定性与漂移实测：`./gradlew :tests:offsetStabilityProbe -Pp05.jbr=<DCEVM JDK 目录>`（同样不挂 `check`），实测单类稳定性（空洞填补、类型重排）、父类字段漂移步长、Updater 错位破坏与 C2 常量折叠使用方逆优化。
-- 耗时类探针固定报 **min / median / max** 三个数；结论必须同时对 min 与 median 成立，只对其中一个成立时标注「口径敏感」，不得只报有利的那个。统计量不得在看到数据之后才选。
-- 探针日志默认带 `-Xlog:safepoint`（`uptimenanos` 装饰符）、`-Xlog:gc*`、`-Xlog:jit+compilation=debug`，落在 `build/p05/`。断言里引用日志时间戳时，基准必须取 safepoint 窗口的**开始**（`时间戳 − Total`）——日志行是在 safepoint 结束时打印的；unified logging 有缓冲，日志分析要放在运行结束后做。
-- `test` 的测试数下限由 `tests/build.gradle` 的 `hstestMinTests` 守卫（基线值见该文件；当前实测计数登记在 `docs/status.md`；`verifyTestCount` 读 XML 断言总数 ≥ 基线且 `skipped == 0`）：删除/禁用/跳过测试会让 `check` 变红，上调基线要有意识地改这一行。
-- CI：`.github/workflows/ci.yml`（`setup-java` 装 8/11/17/21 + runner JDK 25，`hstest.requireJdks=true`；以及 `test-dcevm` 任务在真实 JBR 21 DCEVM 下执行 `liveDcevmTest`）。首次 Linux 跑，Windows 假设（路径分隔符、GBK）可能暴露，按原因分类再处理。
-- 新增或放宽安全门：必须有负向阻断断言。
-- 修复缺陷：必须有先红后绿的回归断言。
-- 新增或放宽安全门例外：除正向、负向用例外，必须做**变异检查**——故意放宽一处实现，确认对应用例会变红，再撤销。
-- 新增测试注释和断言消息用英文，已有中文不改。涉及中文输出的任务需带 UTF-8 JVM 参数（`initFixOracle` 已配置）。
-- 涉及 float/double CAS：必须在真实 JDK 8 上验证（oracle 跑在 JDK 25，区分不出两种实现）。
+**核心门禁与通用纪律**：
+- `./gradlew :tests:initFixOracle`（挂 `check`，纯 JVM）：Kotlin 夹具目录由 `-Dremold.ktfix.v1/v2` 传入，**绝不能**进入任何 classpath。迭代先跑它，收尾跑 `./gradlew check`。
+- `./gradlew :tests:test`（挂 `check`）：测试数下限由 `tests/build.gradle` 的 `hstestMinTests` + `verifyTestCount` 守卫（总数 ≥ 基线且 `skipped == 0`）。
+- 新增或放宽安全门必须有负向阻断断言；修缺陷必须有先红后绿回归断言；新增/放宽安全门例外或关键修复必须做**变异检查**（故意改坏实现确认对应断言变红再恢复）。
+- 新增测试注释/断言建议用英文；涉中文输出任务须带 UTF-8 JVM 参数；改 `float`/`double` CAS 后须在真实 JDK 8 补测（`initFixOracle` 跑在 JDK 25，区分不出两种实现）。
+- 专项探针命令（L1 / A / P0.5 / Forge·NeoForge E2E / PR1~PR4 / TwoPhase 等）与变异清单详表见 [**`docs/testing-guide.md`**](docs/testing-guide.md)。
 
 ## 7. 按需文档
 
-### InitFix 存量初始化
-| 修改内容 | 先读 |
-|:--|:--|
-| 判决分层、效应检查、参数回溯、已知限制、单例与 Kotlin 字节码事实、测试夹具机制 | `docs/initfix/01-safety-gate.md` |
-| 依赖闭包、成环、台账、失败策略 | `docs/initfix/02-closure-and-ledger.md` |
-| 补丁驱动、写入协议、`@RemoldReinit` | `docs/initfix/03-runtime-driver.md` |
-| 两阶段、基线指纹、构造器插桩、目标设计路线图 | `docs/initfix/04-target-design.md` |
-| P0.5 前置验证的实测方法与原始数据 | `docs/initfix/07-p05-probe-results.md` |
-| Kotlin `apply {}` 静态持有者初值重放（A 档）的候选判据、写入协议与 Kotlin 字节码事实 | `docs/initfix/13-kotlin-apply-replay.md` |
-| JVMTI 堆遍历 | `docs/initfix/05-jvmti-heap.md` |
-| 为什么这么设计、历史缺陷 | `docs/initfix/06-decisions.md` |
-
-### 匿名类拓扑对齐与安全门
-| 修改内容 | 先读 |
-|:--|:--|
-| 核心不变量、改写范围契约、栈图处理 | `docs/topology/01-invariants-and-remapping.md` |
-| 属性优先准入、SwitchMap 评估、保留名域与挂起避让 | `docs/topology/02-admission-and-reserved-names.md` |
-| 层级交错流水线、Self Hash、调用链追溯、INV-1/INV-2 架构不变量 | `docs/topology/03-cascading-pipeline.md` |
-| Tier 1~4 置信梯队、Tier 3 拓扑相等过滤、宿主级原子拒绝 | `docs/topology/04-tiers-and-rejection.md` |
-| 典型场景端到端推演案例 | `docs/topology/05-walkthrough.md` |
-| JBR-21/DCEVM 能力与限制、事务乐观预登记、数量与超时闸门、开关配置 | `docs/topology/06-runtime-and-perf.md` |
-| 实例状态布局安全门（LayoutGate）、局部类编号漂移止血门（LocalClassGuard）、蜕变测试 | `docs/topology/07-layout-gate-and-risks.md` |
-| 枚举常量集合变更为什么不做运行期修复（实测读数、候选方案否决、复现探针） | `docs/topology/10-enum-constant-append-infeasibility.md`、`tests/enum-append-probe/README.md` |
-| 孤儿 lambda 桩的默认值 / 保留旧体语义、存活判据与 log-once 告警 | `docs/topology/11-orphan-lambda-body-retention.md` |
-| 活体对齐的输入选择（Raw ↔ Raw / Eff_prev 兼容跑道）、准入闸门、继承集落地与回退 | `docs/topology/18-live-raw-to-raw-alignment.md` |
-| 架构决策记录、偏离原因、JBR 8 组真机数据 | `docs/topology/08-decisions.md` |
-
-### 物理内存偏移与第三方缓存驱逐 (P0 / P1)
-| 修改内容 | 先读 |
-|:--|:--|
-| 物理偏移漂移判决、布局预测器、VarHandle 阻断、MethodHandle 自愈边界与缓存驱逐 SPI | `docs/offset/01-offset-and-reflection-cache.md` |
+修改对应子系统前先读规格与索引（完整总目录见 [`docs/index.md`](docs/index.md) / [`docs/index_en.md`](docs/index_en.md)）：
+- **InitFix**：`docs/initfix/` — `01-safety-gate.md`（分层/效应/参数回溯）、`02-closure-and-ledger.md`（闭包/成环/台账）、`03-runtime-driver.md`（补丁驱动/`@RemoldReinit`）、`04-target-design.md`（两阶段/跨类拓扑）、`05-jvmti-heap.md`（JVMTI 批扫描）、`06-decisions.md`、`07-p05-probe-results.md`、`09-hotswapinit-design.md`、`12-L1-existing-initializer-replay.md`、`13-kotlin-apply-replay.md`。
+- **拓扑对齐 / VCS / 代际台账**：`docs/topology/` — `01`~`08`（不变量/准入/流水线/Tier/开关/LayoutGate/决策 ADR）、`09-lambda-capture-bridge.md`、`10-enum-constant-append-infeasibility.md`、`11-orphan-lambda-body-retention.md`、`14-build-trigger-mode.md`、`16-bytecode-changeset-vcs.md`、`18-live-raw-to-raw-alignment.md`、`20-generational-field-ledger.md`。
+- **偏移与缓存驱逐**：`docs/offset/01-offset-and-reflection-cache.md`。
+- **Mixin 子系统**：`docs/mixin/01`~`08`（类加载权威/覆盖层/重织入/结构突破/合成类闸门/运行诊断/决策台账）。
 
 ## 8. 排查纪律（证据与观测）
 
-定位缺陷时的失效模式多数不是"推理不够"，而是**证据不成立**。以下七条按"先证据、后假设、再修复、再汇报"排列。
-
-### 8.1 日志里"没有"某条记录，先查日志级别
-
-`log(...)` 受 `DEBUG` 门控（默认关闭），只有 `warn` / `error` 默认可见。看不到某条记录时，先确认它是否会打，再推断"代码没执行"。同理，拒绝路径必须走 `warn`（§3）：否则"静默跳过"会被读成"没有发生"，而两者对应的修法完全不同。
-
-反向同样成立：**"没有日志"只有在"该路径上所有分支都会打日志"时才算证据**。只要存在一条不打日志的早退分支，或者异常可能被上层吞掉，缺失就只能记作"未观测到"，不能推出"没执行"。要下这个结论，先把分支照亮。
-
-### 8.2 先加观测，再做假设
-
-能用一行打点区分"没进入 / 进入了但被跳过 / 进入了且生效"的，先加打点，别先造理论。观测应打**阶段首尾**（进入与结束各一行），使"中途异常退出"与"整段没执行"一眼可分。异常边界同理：被调度器 / `Future` 承载的入口必须有显式 `catch` 上报，否则失败与成功在日志上无法区分。
-
-### 8.3 未验证的测量不得用来改产品代码
-
-探针、断言、反射查询都是测量工具，本身会坏。用某个观测手段下结论前，先做**强弱对照**：让机制必然生效与必然失效两种情形分别跑该观测。两种情形给出同一结果，说明它测不到被测对象，此时得到的"缺陷"只是测量假象。
-
-实例：一次 schema 变更后的探针里，`Class.getField("added")` 抛 `NoSuchFieldException`，而同一实例在方法内读该字段拿到的是正确值——**异常与"字段是否真的存在"无关，成因至今未查清**。此处不要写任何未经验证的机制解释（例如"反射缓存没失效"：该说法与"JBR 每次重定义都会重置该缓存"的既有信息直接冲突，已被排除）。判定应落在业务终局：方法内读字段、真正调用结果，而不是反射元数据。**测量工具没被验证之前，不得据此修改产品代码。**
-
-> 与 §3 / §6 的分工：本节要求的对照针对**测量工具本身**（它测得准不准）；§6 的"去触发 / 换无关输入"针对**被测机制**（信号是不是它造成的）；§3 的"数据汇报铁律"管结论口径与统计方法。三者不互相替代。
-
-### 8.4 假设之前，先问能直接回答的事实
-
-运行环境、构建版本、操作序列、复现步骤、开关取值，用户能一句话给出，比自己构造假设便宜。但"事实"与"假设"的分量不同：
-
-- 用户陈述的**事实**（改的是哪一行、第三轮有没有动 lambda、这个版本会不会重置某状态）优先采信：那是一手信息，通常比从日志反推可靠。
-- 用户提出的**假设**（"是不是某模块的类加载器导致的"）与任何假设等价，仍须证据验证。把它当结论接着往下推，会让整条排查线偏离。正确做法是先把假设里的事实部分收下，再单独验证因果部分。
-- 例外：用户的**事实陈述**若与一手观测冲突（例如日志显示那一轮确实改动了 lambda），以观测为准，并把冲突明确告知用户——既不默默采信，也不默默否定。
-
-### 8.5 合成探针不是真实环境的替身
-
-探针只能复现它包含的成分。真实环境里多出来的东西——自定义类加载器、字节码增强、启动参数、依赖库——往往正是触发条件。因此：
-
-- 探针跑绿而真机仍坏时，先列"探针缺了哪些成分"，不要宣布"无法复现"；
-- 结论以真实环境日志为准，探针只承担**隔离**与**回归**；
-- 版本对照用同一探针、同一序列（`git worktree add` 构建旧版本），差异才可归因。
-
-### 8.6 定位不等于修完
-
-修复必须闭环，三者缺一不可：
-
-1. 用**原始复现序列**在真实环境端到端复跑，看到预期终局（不是"日志看起来对了"）；
-2. 加回归测试并做**变异检查**：把修复改回去，用例必须变红；恢复后变绿；
-3. 同套用例的对照保持绿，确认没有把正常路径一起改掉。
-
-修复未在真实环境复跑前，只能表述为"已定位并加了防护"，不得表述为"已修复"。
-
-### 8.7 结论里分开写"已观测"与"推断"
-
-汇报时逐条标注证据强度，不要用同一种语气混着说：
-
-- **已观测**：写明观测手段与读数（哪条日志、哪个断言、哪个测量、什么输入）。
-- **推断**：写明它依赖的前提，以及**还差哪个实验**才能升级为观测。
-
-推断不得使用"说明""证明""可见""显然"等断言性措辞。读者应当一眼看出哪句有证据、哪句还没有——否则推断会被下一轮当成事实继续引用。
+按"先证据、后假设、再修复、再汇报"执行：
+1. **日志"没有"先查级别**：`log(...)` 默认关闭，拒绝必走 `warn`；"无日志"仅当路径上全分支均打日志才作证据，否则只记"未观测到"。
+2. **先加观测再假设**：用阶段首尾打点区分"未进入 / 进入跳过 / 生效"；异步入口须显式 `catch` 上报。
+3. **未验证的测量不得改产品代码**：先对测量工具做强弱对照；以业务终局结果为准（勿仅凭反射元数据等间接手段下结论）。
+4. **先问直接事实**：区分用户陈述的"事实"与"假设"——假设必须验证；若陈述与一手观测冲突，明确告知用户以观测为准。
+5. **合成探针非真实环境替身**：探针绿而真机坏时先列"探针缺了哪些成分"，不宣布"无法复现"；版本对照用 `git worktree` 同探针同序列比较。
+6. **定位 ≠ 修完**：闭环需 (1) 原始复现序列实测看到预期终局 + (2) 回归测试变异检查通过 + (3) 对照组保持绿；未在真实环境复跑前只表述为"已定位并加了防护"。
+7. **结论分列"已观测"与"推断"**：已观测须写明手段/读数/输入；推断须写明前提与所缺实验，禁用"说明/证明/显然"等断言措辞。
 
 ## 9. 工具并发调用纪律
 
-**第一原则：批量发出 ≠ 并行执行。** 同一轮里发出多个工具调用只省掉往返，执行端按序处理；真正的并行只有「后台 job / 子代理 / 团队成员 / workflow」这几条通道。
-
-**实测读数**（2026-11-14 本会话，Git Bash on Windows；属**单环境观测**，换执行端/平台后须重测再引用，不得当成通用前提）：
-
-| 通道 | 实测时间区间 | 结论 |
-|:--|:--|:--|
-| 同一消息两个 1s 前台 `bash` | A `11:13:44→45`、B `11:13:46→47` | 区间**不重叠**，前台批量是串行 |
-| 两个 2s `run_in_background` job | job1 `11:13:56→59`、job2 `11:13:57→59` | 区间**重叠**，总耗时约 3s 而非 4s，后台是真并发 |
-
-**选型（按"能不能并行"选通道，不要凭手感）**
-
-| 场景 | 用什么 |
-|:--|:--|
-| 多个互不依赖的读（读文件、多路 grep、探针命令行查询） | 同消息批量调用，省往返即可 |
-| 长跑构建 / 探针 / `gradlew` / 大测试 | `run_in_background` + `job_output`（禁止同消息批量前台跑多个重任务） |
-| 独立调研、独立实现、独立审查 | `subagent` / `subagent_fork` |
-| 大改动拆分交付（写不同文件域） | Agent Teams + 共享任务板 |
-| 几十个文件的审计/迁移扇出 | `workflow` 的 `parallel` / `pipeline` |
-
-**纪律**
-
-1. **有依赖就别并发**：后一步要前一步结果（先读再改、先编译再跑）时，分轮执行；并发只服务无依赖步骤。
-2. **并行写必须划不相交写域**：同一文件/同一目录族只能有一个写者。任务板上把写域记为 advisory 声明，合流前由 Lead 统一复核 diff 与测试。
-3. **进度上报与副作用要幂等**：并发分支持续时间可能超过单轮预算，重试/续跑时不得重复产生副作用（重复追加、重复提交、重复解压）。后台 job 的 id 必须登记并在收尾时逐个 `job_output` 收集，不能只收"完成了的那个"。
-4. **并发探针的读数口径**：并行跑的探针若互相抢占 CPU/IO，耗时类读数会被污染。要出性能结论时按 §3「数据汇报铁律」单跑同一轮次、同一口径，不要拿并行期的读数当基线。
-5. **不要用"批量调用"冒充并行**：需要并行语义（真同时）时显式选后台 job / 子代理，否则在日志时间戳上会自证串行（见上表），后面的"并发假设"全部失效。
+- **批量发出 ≠ 并行执行**：同一消息的多个前台调用按序处理；真并行只能走后台任务 / 子代理 / 团队成员 / `workflow`。
+- **按依赖选通道**：多路只读用同消息批量省往返；长跑构建/`gradlew`/探针用后台任务（禁前台批量跑重任务）；独立调研/实现用 subagent；大改动拆分用团队+共享任务板（写域不相交，Lead 复核 diff）；大规模扇出用 `workflow`。
+- **禁忌**：有前后依赖不并发；并发分支副作用必须幂等且不共享写域；性能/耗时探针严禁与其他重任务并发，按单轮同口径单跑。
 
 ## 10. Git 分支与 Worktree 纪律
 
-**一句话流程**：主工作区只读停在 `main`；战役在从 `main` 切出的集成基线分支 `feat/<name>` 上做；批次分支在各自
-worktree 里跑探针与变异；本地把子分支合流回 `feat/<name>` 并跑通全量验收；`battle_audit` 通过后 `battle_seal`
-提交战报并自动清理所有临时 worktree，只留下一条干净的本地 `feat/<name>`；最后一跳交给 PR。
-
-### 10.1 主工作区
-
-- **永远停在 `main`，保持干净**，只用于只读浏览（看代码、读文档、对账 `git log`）。
-- 禁止在主工作区切开发分支、改文件、跑批次探针：任何未提交改动都会阻断后续 `git pull --ff-only`。
-
-### 10.2 启动战役
-
-- 从 `main` 切一条**集成基线分支** `feat/<name>`（例：`git branch feat/derived-data-cache main`），它是本次战役
-  唯一的合流目标。分支切出来即可，**不要求主工作区切过去**。
-- 然后 `battle_init(base_branch: "feat/<name>")`：战役基线就是这条分支，批次分支、worktree、合流与结案都围绕它进行。
-- 同一仓库有战役在跑时，新战役用 `force: true` 另起；之后所有 `battle_*` 调用显式带 `campaign`（完整 id 或短 id），
-  不依赖 `current` 指针。
-
-### 10.3 Agent 本地自由发挥（批次）
-
-- 自己按批次拆 `agent/batch-a` / `agent/batch-b` … 与对应 worktree（`battle_dispatch` 负责建 worktree 与
-  `agent/batch-*` 分支，并把执行者派成 durable 团队成员）；每个执行者只在自己 worktree 的绝对路径内工作，
-  不派发、不合流、不碰其他 worktree。
-- **低耦合批次才派发**；跨模块联调、合流收尾，以及**一切测速探针批次**由 Lead 亲自串行单刷——并行抢 CPU/IO
-  会直接污染 min/median/max 读数（见 §9 第 4 条）。
-- 每个批次留真实证据：`battle_probe`（退出码 / stdout·stderr 哈希 / git HEAD），关键修复跑 `battle_mutation`
-  击杀变异（改既有实现用 `revert`，纯新增用 `strategy: "logic"`）；变异存活必须改进测试或显式写进战报，不得掩盖。
-- 批次之间不共享写域；必须共写时用共享任务板的 `blocked_by` / `write_scopes` 显式排序与声明，合流前由 Lead
-  统一复核 diff 与测试。
-
-### 10.4 合流
-
-- 用 `battle_merge(batches: [...], integration: true, union_cmd: "...")`：在**独立集成 worktree** 里按顺序把各
-  `agent/batch-*` 合流回 `feat/<name>`、逐批跑验收、再跑一次覆盖全部批次的 union 全量；全部通过后
-  `feat/<name>` 才前移到集成 HEAD。冲突 / 逐批验收失败 / union 失败即停，先修再继续。
-- 不要在批次还没通过验收时手动 `git merge` 到 `feat/<name>`：那等于把"未验证"混进集成基线。
-- 主工作区全程不参与合流，仍停在 `main`。
-
-### 10.5 结案与清理
-
-- `battle_audit` 必须 PASS（不变量覆盖、验收探针、变异击杀、合流证据、no-op 空分支、越界改动、证据日志哈希完整性）。
-- `battle_seal` 把战报以 `docs(status)` 提交到 `feat/<name>`，并**自动清理所有临时 worktree**：结束时本地只留一条
-  干净的 `feat/<name>` 分支；证据台账（`.battle/campaigns/<id>/`）保留，不删、不改写。
-- 被打回就按 `battle_audit` 的阻断项逐条补齐再报，不要用"证据已足够"绕开机械检查。
-
-### 10.6 最后一跳：PR
-
-1. `git push -u origin feat/<name>`；
-2. `gh pr create --base main --head feat/<name>`——PR 描述用战报的摘要、退出码、读数和缺口，不贴源码、diff 与原始日志；
-3. 等远端 **8/8 CI 矩阵**跑完（Test Matrix javac 8/11/17/21/25、DCEVM JBR 21、P0.5 JBR 17/21、产物与三平台 native 校验）；
-4. CI 全绿后点 **Merge** 合入 `main`；
-5. 回到主工作区 `git pull --ff-only`，确认 `main` 干净且含该合并提交；本地 `feat/<name>` 分支按需删除。
+1. **主工作区停 `main` 且只读保持干净**：禁止在主工作区切分支、改文件或跑批次探针，确保 `git pull --ff-only` 永不阻塞。
+2. **集成基线分支与战役**：从 `main` 切 `feat/<name>`（或专用分支）作为唯一合流目标；`battle_init(base_branch: "feat/<name>")`；并发战役须显式传 `campaign` id。
+3. **批次 worktree 隔离**：各 `agent/batch-*` 仅在各自 worktree 绝对路径内工作，写域不相交；联调、合流与**所有测速探针**由 Lead 串行单刷；关键修复留 `battle_probe` 与 `battle_mutation` 真实证据（存活如实写战报）。
+4. **合流与结案**：仅通过验收的批次才按序合流回集成基线并跑 union 全量；`battle_audit` PASS 后由 `battle_seal` 将战报写入 [`docs/battles/`](docs/battles/README.md)（提交前缀 `docs(status): ...`）并自动清理临时 worktree（保留 `.battle/campaigns/<id>/`）。
+5. **PR 收尾**：推送集成基线创建 PR（摘要/退出码/读数/缺口，不贴大段源码与原始 log）→ 等远端 **8/8 CI** 全绿后合并 → 回主工作区 `git pull --ff-only` 并按需清理本地分支。

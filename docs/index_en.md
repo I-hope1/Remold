@@ -42,6 +42,7 @@ flowchart TD
 ```
 
 - **Single Source of Truth for Status**: The detailed implementation status, code locations, regression test evidence, and technical debts are maintained in [**`docs/status.md`**](status.md). Design specifications strictly define objective invariants and contracts without perishable progress tags.
+- **Engineering Navigation & Archives**: [`Code Map (code-map.md)`](code-map.md) · [`Testing & Probe Guide (testing-guide.md)`](testing-guide.md) · [`Battle Reports (battles/)`](battles/README.md) · [`Release Notes & Archives (releases/)`](releases/historical-rounds-archive.md)
 
 ---
 
@@ -99,6 +100,20 @@ Covers the version layer that answers "which bytes changed in this round, and ho
 | [`19-raw-to-raw-realworld-readings.md`](topology/19-raw-to-raw-realworld-readings.md) | Real-scale Raw ↔ Raw alignment readings: hits, mismatches, and timings |
 | [`20-generational-field-ledger.md`](topology/20-generational-field-ledger.md) | Generational field ledger (B2): per-generation `FieldLedger` / `REINIT_APPLIED` storage (`GenRef(seq,id)`), post-revert CAS expectations taken strictly from the target generation with fail-closed discipline, and cross-generation `replayFacts` consumption rules |
 | [`21-b1-gc-baseline-readings.md`](topology/21-b1-gc-baseline-readings.md) | B1 side-ledger memory and GC baseline readings (retained-heap/GC methodology and the before/after comparison method for B2) |
+
+### 2.6 Mixin Hot-Reload Subsystem (`docs/mixin/01..08`)
+Systematically specifies Mixin classloader authority, bytecode overlay injection, cascading re-weave, structural reload contracts, and synthetic inner-class gates:
+
+| Document | Subject & Core Contents |
+| :--- | :--- |
+| [`01-invariants-and-classloader-authority.md`](mixin/01-invariants-and-classloader-authority.md) | Classloader authority arbitration, baseline protection, monotonic visibility, and `ClassInfo.cache` anchoring |
+| [`02-admission-and-bytecode-overlay.md`](mixin/02-admission-and-bytecode-overlay.md) | New Mixin admission, four-tier byte sources, overlay & `config.service` replacement, pending retry |
+| [`03-reweave-and-member-alignment.md`](mixin/03-reweave-and-member-alignment.md) | Cascading re-weave pipeline, `refeedForTarget`, member alignment, method stub & tombstone retention |
+| [`04-structural-reload-and-retarget.md`](mixin/04-structural-reload-and-retarget.md) | `priority`, `targets`, and `interfaces` structural reload contracts & rollback |
+| [`05-synthetic-inner-gate-and-abort.md`](mixin/05-synthetic-inner-gate-and-abort.md) | Single-exit synthetic inner-class gate, host transaction abort, abort retry ledger |
+| [`06-walkthrough.md`](mixin/06-walkthrough.md) | Four real-world closed-loop bytecode walkthroughs and readings |
+| [`07-runtime-and-diagnostics.md`](mixin/07-runtime-and-diagnostics.md) | Startup readiness gate, batch watchdog, `[VM-INFO]`, dual-channel heap watch |
+| [`08-decisions-and-empirical-ledger.md`](mixin/08-decisions-and-empirical-ledger.md) | Lambda vs anonymous classes, empirical evidence against in-place widening, open items & P2 |
 
 ---
 

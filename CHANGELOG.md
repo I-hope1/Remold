@@ -67,7 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     跨整个 loader 匹配还会误删别的类同名字段的债务。
   - 验收：`RemovedFieldDebtTest`、`GenerationalReplayWiringTest.anOlderConfirmedWriteDoesNotVouchForALaterSkippedGeneration`。
 
-- **代际字段台账（B2 存储层）**- **代际字段台账（B2 存储层）**- **代际字段台账（B2 存储层）**：新增 `remold.vcs.GenerationalFieldLedger`，把 `replayFacts` 按代坐标索引起来。
+- **代际字段台账（B2 存储层）**：新增 `remold.vcs.GenerationalFieldLedger`，把 `replayFacts` 按代坐标索引起来。
   - 键 = `(loaderScope, 内部名, field)` + `GenRef(seq, changesetId)`，scope 取 `AlignmentMetaStore.loaderScopeId`，
     与 `Changeset.loaderScope` 同源；`changesetId` 留作校验位，防止"同 seq 不同代"被当成同一条事实。
   - **两类保留策略不共用一个窗口**：未闭环债务（判过 `MISS_NO_FACT` / 写入失败的字段）不被 Changeset 窗口淘汰；
@@ -78,7 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 槽用 `WeakHashMap` 弱键挂 loader，值只含字符串/标量/枚举，不持 `Class`/`ClassLoader`/字节数组。
   - 验收：`GenerationalFieldLedgerTest` 9 例；`./gradlew check` exit 0。
 
-- **`replayFacts` 两侧统一原始位模式口径**- **`replayFacts` 两侧统一原始位模式口径**：`L1` 档新侧原先记录的是十进制渲染文本，而旧侧是原始位模式。
+- **`replayFacts` 两侧统一原始位模式口径**：`L1` 档新侧原先记录的是十进制渲染文本，而旧侧是原始位模式。
   `float`/`double` 的 `-0.0` 与 `0.0` 渲染相同、NaN payload 全部渲染成 `NaN`、十进制还带舍入，
   因此这类字段的多代重放事实上不可用。现在 `InitializerReplay.ReplayField` 携带新侧自然值
   （`newExpected`），`InitFix.l1ReplayFact` 两侧都从字节码常量取位模式；`newText`/`oldText` 降级为
@@ -86,7 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   让旧口径记录可被识别并按非规范记录 fail-closed 拒绝，而不是被当成同口径数据消费。
   验收：`ReplayFactsFormatTest` 5 例。
 
-- **字节码回退执行（B1）**- **字节码回退执行（B1）**：`ChangesetLog` 学会把「退回到第几代」算成字节计划并落地。
+- **字节码回退执行（B1）**：`ChangesetLog` 学会把「退回到第几代」算成字节计划并落地。
   - 目标字节集合按区间取：`(target, HEAD]` 内被改过的每个类，取其在 `seq <= target` 的最新 Eff；
     若该类首次进入链就落在被回退区间，则退回 `Eff_0`——首次进链那一轮之前冻结的基线字节。Eff 字节
     按内容寻址保存在有预算的池里（`-Dremold.vcs.eff_bytes`，默认 16 MiB），预算淘汰或超单条上限即

@@ -1,5 +1,6 @@
 package remold.reflect.mixin;
 
+import remold.util.Names;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
@@ -124,6 +125,6 @@ public final class MixinTargetIndex {
 	}
 
 	static String normalize(String name) {
-		return name == null ? null : name.trim().replace('.', '/');
+		return name == null ? null : Names.internal(name.trim());
 	}
 }

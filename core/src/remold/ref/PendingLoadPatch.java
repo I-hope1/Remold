@@ -1,5 +1,6 @@
 package remold.ref;
 
+import remold.util.Names;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -113,7 +114,7 @@ public final class PendingLoadPatch {
 	 * 的全量 miss —— 而且是静默 miss。</p>
 	 */
 	static String normalize(String name) {
-		return name == null ? null : name.replace('.', '/');
+		return Names.internal(name);
 	}
 
 	private static String key(long loaderScope, String internalName) {

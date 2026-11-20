@@ -86,6 +86,25 @@ public final class GenerationalReplayGate {
 	 */
 	public static Decision decide(GenerationalFieldLedger.Resolved resolved, String fieldDesc,
 	                              String expectedKind) {
+		return decide(resolved, fieldDesc, expectedKind, false);
+	}
+
+	/**
+	 * 判决一条已解析的事实，并显式告知"这条键是否被裁剪过"。
+	 *
+	 * <p>被裁剪过的键即使现在解出 {@code MISS_NO_FACT}，也<b>不能</b>按 OBLIVIOUS 放行：那等于把
+	 * "忘了"当成"从来没有"（规格 {@code docs/vcs/07} L5，结论只能退化为 {@code OPAQUE_GUARDED}）。
+	 * 这里统一按 REFUSED 收口，理由串直接指出退化方向。</p>
+	 */
+	public static Decision decide(GenerationalFieldLedger.Resolved resolved, String fieldDesc,
+	                              String expectedKind, boolean prunedFromLedger) {
+		if (prunedFromLedger && (resolved == null
+		    || resolved.resolution() == GenerationalFieldLedger.Resolution.MISS_NO_FACT)) {
+			return new Decision(Mode.REFUSED, null, null, null,
+			 "this field's generational facts were pruned from the ledger window; the conclusion is"
+			  + " downgraded to OPAQUE_GUARDED and no literal is replayed", 0L,
+			 resolved == null ? 0L : resolved.targetGeneration());
+		}
 		if (resolved == null) return OBLIVIOUS;
 		switch (resolved.resolution()) {
 			case MISS_NO_FACT:

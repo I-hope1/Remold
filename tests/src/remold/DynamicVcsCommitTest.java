@@ -10,6 +10,7 @@ import java.util.List;
 import remold.vcs.AlignmentMetaStore;
 import remold.vcs.Changeset;
 import remold.vcs.ChangesetLog;
+import remold.vcs.BytecodePack;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -114,5 +115,23 @@ class DynamicVcsCommitTest {
 			if (!chain.isEmpty()) return chain.get(chain.size() - 1).seq();
 		}
 		return 0L;
+	}
+
+	/** 回放包导出：动态代必须先 append 再 export，否则 seq-<n> 清单的 entryCount 会是 0。 */
+	@Test
+	void exportedRoundCarriesItsEntry() throws Exception {
+		java.nio.file.Path root = java.nio.file.Files.createTempDirectory("dyn-pack");
+		System.setProperty(remold.vcs.BytecodePack.DIR_PROPERTY, root.toString());
+		try {
+			Changeset cs = DynamicVcsCommit.commit(DynamicVcsCommitTest.class, bytes("OLD"), bytes("SRC"),
+			 bytes("NEW"), false);
+			assertNotNull(cs);
+			BytecodePack.Round round = BytecodePack.round(root, cs.seq()).orElseThrow();
+			assertEquals(1, round.entries().size(),
+			 "a dynamic round must export its class entry, not an empty round");
+			assertEquals("remold/DynamicVcsCommitTest", round.entries().get(0).className);
+		} finally {
+			System.clearProperty(remold.vcs.BytecodePack.DIR_PROPERTY);
+		}
 	}
 }

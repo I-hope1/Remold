@@ -1,5 +1,6 @@
 package remold;
 
+import remold.util.Names;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -56,7 +57,7 @@ final class DynamicVcsCommit {
 		if (target == null || runtimeBytes == null) return null;
 		ClassLoader loader = target.getClassLoader();
 		String dot = target.getName();
-		String slash = dot.replace('.', '/');
+		String slash = Names.internal(dot);
 		try {
 			Set<String> invented = Set.of();
 			Map<String, Long> ghosts = Map.of();
@@ -82,7 +83,12 @@ final class DynamicVcsCommit {
 			Changeset cs = ChangesetLog.INSTANCE.commit(scope, ROUND_PREFIX + dot, entries, manifest, facts,
 			 Changeset.currentAlgoVersion(), System.getProperty("remold.build_id", ""), timing,
 			 effBefore, effNow);
-			if (BytecodePack.enabled()) BytecodePack.exportRound(cs);
+			if (BytecodePack.enabled()) {
+				// 与批次侧同序：先把本轮的类×代条目写进单轮布局，exportRound 才匹配得到（否则 entryCount=0）。
+				BytecodePack.append(new BytecodePack.Entry(slash, oldBytes, sourceBytes, runtimeBytes,
+				 runtimeBytes, invented, mapping, bridges));
+				BytecodePack.exportRound(cs);
+			}
 			VcsAgentCoordinator.recordLedgerFacts(loader, cs);
 			if (RemoldAgent.DEBUG) {
 				RemoldAgent.log("[VCS] dynamic round committed: seq=" + cs.seq() + " round=" + cs.roundId());

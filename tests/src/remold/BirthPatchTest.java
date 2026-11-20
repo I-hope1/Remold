@@ -14,6 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import remold.ref.PendingLoadPatch;
+import remold.reflect.mixin.MixinTargetIndex;
 import remold.vcs.AlignmentMetaStore;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -39,7 +40,7 @@ class BirthPatchTest {
 	@AfterEach
 	void cleanUp() {
 		PendingLoadPatch.reset();
-		remold.reflect.mixin.MixinTargetIndex.reset();
+		MixinTargetIndex.reset();
 		RemoldAgent.bytecodeCache.remove(DOT);
 		if (projectDir != null) RemoldAgent.activeWatchDirs.remove(projectDir);
 	}
@@ -337,7 +338,7 @@ class BirthPatchTest {
 	void mixinTargetIsRefused() {
 		byte[] v2 = classBytes("V2");
 		PendingLoadPatch.offerAny(INTERNAL, v2);
-		remold.reflect.mixin.MixinTargetIndex.publish(java.util.List.of(new Object() {
+		MixinTargetIndex.publish(java.util.List.of(new Object() {
 			@SuppressWarnings("unused")
 			private final java.util.Map<String, java.util.List<Object>> mixinMapping =
 			 java.util.Map.of(DOT, java.util.List.of(new Object()));
@@ -350,6 +351,6 @@ class BirthPatchTest {
 
 		assertEquals(PendingLoadPatch.Outcome.REFUSED_MIXIN_TARGET, d.outcome(),
 		 "a confirmed mixin target must never be overwritten by the birth patch");
-		remold.reflect.mixin.MixinTargetIndex.reset();
+		MixinTargetIndex.reset();
 	}
 }

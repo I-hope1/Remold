@@ -1,8 +1,8 @@
 package remold.reflect.mixin;
 
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Mixin 目标类索引：回答"这个类是不是某个 Mixin 的织入目标"。
@@ -34,7 +34,13 @@ public final class MixinTargetIndex {
 	}
 
 	private static final Object LOCK = new Object();
-	private static final Set<String> TARGETS = ConcurrentHashMap.newKeySet();
+	/**
+	 * 不可变快照引用：{@link #lookup} 无锁读它，{@link #publish} 在锁内整表换引用。
+	 *
+	 * <p>用可变集合 + {@code clear()/addAll()} 会出现"半空表瞬间"：读线程恰好在两者之间查到
+	 * NOT_TARGET，把真实目标误判成可替换——那是会冲掉上游织入的错误方向。</p>
+	 */
+	private static volatile Set<String> targets = Set.of();
 	private static volatile boolean published;
 	private static volatile long stamp;
 
@@ -47,19 +53,20 @@ public final class MixinTargetIndex {
 	 * 而漏判一个真实目标会让补丁冲掉织入，方向比多拒一次危险得多。</p>
 	 */
 	public static void publish(Iterable<?> configs) {
-		Set<String> fresh = ConcurrentHashMap.newKeySet();
+		Set<String> scratch = new HashSet<>();
 		int seen = 0;
 		if (configs != null) {
 			for (Object config : configs) {
 				if (config == null) continue;
 				seen++;
-				collectMapping(config, fresh);
-				collectUnhandled(config, fresh);
+				collectMapping(config, scratch);
+				collectUnhandled(config, scratch);
 			}
 		}
+		Set<String> snapshot = Set.copyOf(scratch);
 		synchronized (LOCK) {
-			TARGETS.clear();
-			TARGETS.addAll(fresh);
+			// 整表换引用（原子可见），不清空再填充。
+			targets = snapshot;
 			published = seen > 0;
 			stamp++;
 		}
@@ -89,7 +96,7 @@ public final class MixinTargetIndex {
 	public static Lookup lookup(String internalName) {
 		if (internalName == null || internalName.isEmpty()) return Lookup.UNKNOWN;
 		if (!published) return Lookup.UNKNOWN;
-		return TARGETS.contains(normalize(internalName)) ? Lookup.TARGET : Lookup.NOT_TARGET;
+		return targets.contains(normalize(internalName)) ? Lookup.TARGET : Lookup.NOT_TARGET;
 	}
 
 	/** 是否已经发布过配置（用于诊断与"宿主没有 Mixin"的判定）。 */
@@ -99,7 +106,7 @@ public final class MixinTargetIndex {
 
 	/** 已收录的目标类数量。 */
 	public static int size() {
-		return TARGETS.size();
+		return targets.size();
 	}
 
 	/** 索引版本：每次 {@link #publish} 递增，便于调用方判断是否需要重算派生结论。 */
@@ -110,7 +117,7 @@ public final class MixinTargetIndex {
 	/** 测试用：回到"未发布"状态。 */
 	public static void reset() {
 		synchronized (LOCK) {
-			TARGETS.clear();
+			targets = Set.of();
 			published = false;
 			stamp = 0L;
 		}

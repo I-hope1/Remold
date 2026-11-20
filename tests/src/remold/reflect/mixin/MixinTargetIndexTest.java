@@ -83,4 +83,32 @@ class MixinTargetIndexTest {
 		assertTrue(MixinTargetIndex.available());
 		assertEquals(MixinTargetIndex.Lookup.NOT_TARGET, MixinTargetIndex.lookup("a/b/C"));
 	}
+
+	/**
+	 * 热刷新期间不得出现"半空表瞬间"：持续发布时，一个在两份配置里都存在的目标
+	 * 一次都不能被读成 NOT_TARGET（那是会冲掉上游织入的错误方向）。
+	 */
+	@Test
+	void concurrentPublishNeverExposesAnEmptySnapshot() throws Exception {
+		FakeConfig first = new FakeConfig(Map.of("a.Stable", List.of(), "a.Old", List.of()), Set.of());
+		FakeConfig second = new FakeConfig(Map.of("a.Stable", List.of(), "a.New", List.of()), Set.of());
+		MixinTargetIndex.publish(List.of(first));
+
+		java.util.concurrent.atomic.AtomicBoolean stop = new java.util.concurrent.atomic.AtomicBoolean();
+		java.util.concurrent.atomic.AtomicInteger wrong = new java.util.concurrent.atomic.AtomicInteger();
+		Thread reader = new Thread(() -> {
+			while (!stop.get()) {
+				if (MixinTargetIndex.lookup("a/Stable") == MixinTargetIndex.Lookup.NOT_TARGET) wrong.incrementAndGet();
+			}
+		});
+		reader.start();
+		for (int i = 0; i < 2000; i++) {
+			MixinTargetIndex.publish(List.of(i % 2 == 0 ? first : second));
+		}
+		stop.set(true);
+		reader.join(2000);
+
+		assertEquals(0, wrong.get(),
+		 "publish must swap an immutable snapshot, never clear-then-fill under a concurrent reader");
+	}
 }

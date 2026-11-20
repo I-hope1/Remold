@@ -269,7 +269,7 @@ final class LambdaCaptureBridge {
 			// 兄弟候选（它的映射算不出来，但同样是"同一个 lambda"的候选）。此时先数一遍
 			// bridgeGatesHold 能过的候选：≥2 就必须交给宿主序号消歧，消歧不通过则放弃建桥、
 			// 安全退回保留旧方法体，绝不把旧实例绑到空捕获死分支（n -> ""）。
-			if (hits == 1 && only != null && !LambdaAligner.hasCapturedVariables(only, newCn.name)) {
+			if (hits == 1 && only != null && !LambdaBytecodeScanner.hasCapturedVariables(only, newCn.name)) {
 				int eligible = 0;
 				for (LambdaAligner.SyntheticInfo other : unpairedNew) {
 					if (bridgeGatesHold(oi, other)) eligible++;
@@ -316,7 +316,7 @@ final class LambdaCaptureBridge {
 			String target = targetName + ni.desc;
 			ctx.bridges.put(e.getKey(), new BridgeSpec(oi.desc, targetName, ni.desc, plan,
 				oi.isStatic(), ni.isStatic(),
-				LambdaAligner.locationOf(ctx.currentClass, oi.name, oi.desc) + " -> " + target));
+				LambdaOrphanEmitter.locationOf(ctx.currentClass, oi.name, oi.desc) + " -> " + target));
 			// 有合成位就单独留痕：这是一次"桥替老实例重新造了一个值"，属于可观测的行为变化
 			// （不是简单搬运），排查时最想知道的就是"哪个位置、从哪来"。
 			StringBuilder synth = new StringBuilder();
@@ -451,7 +451,7 @@ final class LambdaCaptureBridge {
 		ParamSource[] caps = Arrays.copyOf(bd.sources(), now.captured.size());
 		ctx.bridges.put(oldKey, new BridgeSpec(bridgeDesc, targetName, now.desc, caps,
 			bridgeStatic, now.isStatic(),
-			LambdaAligner.locationOf(ctx.currentClass, bridgeName, bridgeDesc) + " -> " + target));
+			LambdaOrphanEmitter.locationOf(ctx.currentClass, bridgeName, bridgeDesc) + " -> " + target));
 		LambdaAligner.TEST_EVENTS.add(new LambdaAligner.AlignmentEvent("BRIDGE_REPOINT", bridgeName, now.name,
 			ctx.currentClass + "#" + oldKey + " -> " + target));
 	}

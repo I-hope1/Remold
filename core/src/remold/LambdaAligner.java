@@ -677,7 +677,7 @@ public class LambdaAligner {
 	}
 
 	/** 按当前测试钩子决定的方向，在 {@code groups} 上迭代（返回下标序列）。 */
-	private static int[] groupOrder(LongObjectMap<?> groups) {
+	static int[] groupOrder(LongObjectMap<?> groups) {
 		int n = 0;
 		for (int idx = groups.nextEntry(-1); idx != -1; idx = groups.nextEntry(idx)) n++;
 		int[] order = new int[n];
@@ -720,61 +720,27 @@ public class LambdaAligner {
 		SILENT
 	}
 
-	private static volatile OrphanPolicy orphanPolicy = OrphanPolicy.SMART_ADAPTIVE;
-
 	public static void setOrphanPolicy(OrphanPolicy policy) {
-		orphanPolicy = Objects.requireNonNull(policy);
+		LambdaOrphanEmitter.setOrphanPolicy(policy);
 	}
 
 	public static OrphanPolicy getOrphanPolicy() {
-		return orphanPolicy;
+		return LambdaOrphanEmitter.getOrphanPolicy();
 	}
 
 	//region 孤儿 Lambda 方法体保留（docs/lambda/02-orphan-body-retention.md）
 
-	/**
-	 * 非 {@code void} 孤儿 lambda 是否保留上一轮方法体（默认<b>开启</b>）。
-	 *
-	 * <p>默认值是安全取向的：{@code Supplier.get()} / {@code Function.apply()} 返回
-	 * {@code null}/0 会被调用方直接链式调用或拆箱，故障从"热更没生效"升级为 NPE / 除零 /
-	 * 数组越界。保留旧体至少维持合法返回值；但旧体引用的本类成员若已删除，则由
-	 * {@link OrphanBodyRetention} 判据拒绝并回退默认值桩。</p>
-	 *
-	 * <p>系统属性：{@code -Dremold.agent.orphan_retain_body=false} 可整体关闭。</p>
-	 */
-	private static volatile boolean retainOrphanBody = initRetainFlag("remold.agent.orphan_retain_body", true);
-
-	/**
-	 * {@code void} 孤儿 lambda 是否保留上一轮方法体（默认<b>关闭</b>）。
-	 *
-	 * <p>{@code void} 的默认语义是"用户在源码里删掉的副作用不应继续在后台执行"，
-	 * 所以默认维持 {@code no-op} 空壳。确实需要"删掉回调但仍要跑旧逻辑"的场景，可用
-	 * {@code -Dremold.agent.orphan_retain_void=true} 打开。</p>
-	 */
-	private static volatile boolean retainOrphanBodyVoid = initRetainFlag("remold.agent.orphan_retain_void", false);
-
-	private static boolean initRetainFlag(String property, boolean fallback) {
-		String p = System.getProperty(property);
-		if (p == null) {
-			p = System.getenv(property.replace('.', '_').replace('-', '_').toUpperCase(Locale.ROOT));
-		}
-		if (p == null) return fallback;
-		p = p.trim();
-		return p.isEmpty() ? fallback : Boolean.parseBoolean(p);
-	}
-
 	/** 测试/嵌入方覆盖开关；不改系统属性，回到默认值请再调用一次传 {@code true/false}。 */
 	public static void setOrphanBodyRetention(boolean nonVoidEnabled, boolean voidEnabled) {
-		retainOrphanBody = nonVoidEnabled;
-		retainOrphanBodyVoid = voidEnabled;
+		LambdaOrphanEmitter.setOrphanBodyRetention(nonVoidEnabled, voidEnabled);
 	}
 
 	public static boolean isOrphanBodyRetainedForNonVoid() {
-		return retainOrphanBody;
+		return LambdaOrphanEmitter.isOrphanBodyRetainedForNonVoid();
 	}
 
 	public static boolean isOrphanBodyRetainedForVoid() {
-		return retainOrphanBodyVoid;
+		return LambdaOrphanEmitter.isOrphanBodyRetainedForVoid();
 	}
 	//endregion
 
@@ -782,25 +748,23 @@ public class LambdaAligner {
 	 * 清空已记录的孤儿 Lambda 日志去重缓存。
 	 */
 	public static void clearLoggedOrphans() {
-		LOGGED_ORPHANS.clear();
-		LOGGED_FORWARDS.clear();
-		LOGGED_RETAINED.clear();
+		LambdaOrphanEmitter.clearLoggedOrphans();
 	}
 
 	public static int getLoggedOrphanCount() {
-		return LOGGED_ORPHANS.size();
+		return LambdaOrphanEmitter.getLoggedOrphanCount();
 	}
 
 	public static int getLoggedForwardCount() {
-		return LOGGED_FORWARDS.size();
+		return LambdaOrphanEmitter.getLoggedForwardCount();
 	}
 
 	public static boolean isOrphanLogged(String location) {
-		return LOGGED_ORPHANS.contains(location);
+		return LambdaOrphanEmitter.isOrphanLogged(location);
 	}
 
 	public static boolean isForwardLogged(String location) {
-		return LOGGED_FORWARDS.contains(location);
+		return LambdaOrphanEmitter.isForwardLogged(location);
 	}
 
 	//region 匹配上下文
@@ -1275,8 +1239,8 @@ public class LambdaAligner {
 				ctx.oldNameDescSet.addAll(effPrevKeys(ctx.effPrevCn));
 			}
 
-			List<String> missingLvtNew = findCapturedLambdasWithoutLvt(ctx.newGroups, newCn.name);
-			List<String> missingLvtOld = findCapturedLambdasWithoutLvt(ctx.oldGroups, oldCn.name);
+			List<String> missingLvtNew = LambdaBytecodeScanner.findCapturedLambdasWithoutLvt(ctx.newGroups, newCn.name);
+			List<String> missingLvtOld = LambdaBytecodeScanner.findCapturedLambdasWithoutLvt(ctx.oldGroups, oldCn.name);
 			Set<String> affectedLvt = new LinkedHashSet<>(missingLvtNew);
 			affectedLvt.addAll(missingLvtOld);
 			if (!affectedLvt.isEmpty()) {
@@ -1404,17 +1368,17 @@ public class LambdaAligner {
 				alignedBytes = newBytes;
 				alignedCn = newCn;
 			} else {
-				alignedCn = applyTransform(newBytes, ctx);
-				alignedBytes = writeClass(alignedCn);
+				alignedCn = LambdaBytecodeScanner.applyTransform(newBytes, ctx);
+				alignedBytes = LambdaBytecodeScanner.writeClass(alignedCn);
 			}
 
 			// 从 alignedCn 直接收集 presentKeys，避免 resurrectOrphanedLambdas 再读一遍
-			Set<String> presentKeys = collectMethodKeys(alignedCn);
-			Map<String, Integer> newMethodRefs = countHandleTargets(alignedCn);
+			Set<String> presentKeys = LambdaBytecodeScanner.collectMethodKeys(alignedCn);
+			Map<String, Integer> newMethodRefs = LambdaBytecodeScanner.countHandleTargets(alignedCn);
 			// 继承集的来源永远是"上一代真正进 JVM 的字节"（Run E 时 oldCn 就是它）。
 			final ClassNode inheritCn = ctx.runR ? ctx.effPrevCn : oldCn;
 			final byte[] inheritBytes = ctx.runR ? ctx.effPrevBytes : oldBytes;
-			Map<String, Integer> oldMethodRefs = countHandleTargets(inheritCn);
+			Map<String, Integer> oldMethodRefs = LambdaBytecodeScanner.countHandleTargets(inheritCn);
 
 			// 【阶段三】捕获桥：删掉捕获变量的 lambda，用"老签名 → 新方法"的适配器兜住老实例。
 			//
@@ -1423,7 +1387,7 @@ public class LambdaAligner {
 			LambdaCaptureBridge.stepCaptureBridge(oldCn, alignedCn, ctx, presentKeys);
 
 			// 后置廉价校验：确保本地 indy 句柄引用的目标方法实际存在
-			validateIndyTargets(alignedCn, presentKeys);
+			LambdaBytecodeScanner.validateIndyTargets(alignedCn, presentKeys);
 
 			AlignmentStats stats = new AlignmentStats(ctx.step1Pairs, ctx.passAPairs, ctx.passBPairs,
 			                                         ctx.step1AnchorPairs, ctx.hashMismatchPairs,
@@ -1453,7 +1417,7 @@ public class LambdaAligner {
 			}
 
 			// 传入 inheritCn（已解析过一次）—— 避免 resurrectOrphanedLambdas 二次读同一份字节
-			byte[] result = resurrectOrphanedLambdas(inheritCn, inheritBytes, alignedBytes, presentKeys, oldMethodRefs, newMethodRefs, ctx);
+			byte[] result = LambdaOrphanEmitter.resurrectOrphanedLambdas(inheritCn, inheritBytes, alignedBytes, presentKeys, oldMethodRefs, newMethodRefs, ctx);
 			// 自造名必须从**最终产物**统计：复活阶段会往类里加回幽灵方法，
 			// 只在 alignedCn 上扫会漏掉它们（幽灵仍占着那个名字，下一轮照样会被误当 javac 原名）。
 			Set<String> invented = collectInventedNames(result, ctx);
@@ -2872,466 +2836,6 @@ public class LambdaAligner {
 	//region 字节码转换 + 扫描
 
 	/**
-	 * 应用转换规则到字节码，返回 remapped 后的 {@link ClassNode}。
-	 *
-	 * <p>为什么返回 {@code ClassNode} 而不是 {@code byte[]}：让调用方在写出之前
-	 * 有机会直接从同一份节点上收集 {@code name + desc} 集合（供
-	 * {@link #resurrectOrphanedLambdas} 判断孤儿），避免重复解析 newBytes。</p>
-	 *
-	 * <p>本方法使用 {@code ClassReader(bytes).accept(cn, 0)} 完整读取，
-	 * 因为要写出合法的 Class 文件必须保留 StackMapTable 帧数据。</p>
-	 *
-	 * <p>整体流程：</p>
-	 * <ol>
-	 *   <li>读入 {@link ClassNode}。</li>
-	 *   <li>通过 {@link ClassRemapper} 应用方法名与字符串常量的重命名。</li>
-	 *   <li>对 {@code $deserializeLambda$} 做 {@code lookupswitch} 的 key 后处理。</li>
-	 *   <li>返回 remapped 后的节点，由调用方写出。</li>
-	 * </ol>
-	 */
-	private static ClassNode applyTransform(byte[] bytes, MatchContext ctx) {
-		ClassNode cn = new ClassNode();
-		new ClassReader(bytes).accept(cn, 0);
-
-		ClassNode remapped = new ClassNode();
-		Remapper remapper = new Remapper(Opcodes.ASM9) {
-			@Override
-			public String mapMethodName(String owner, String name, String desc) {
-				if (owner.equals(ctx.currentClass)) {
-					String nn = ctx.renameMap.get(name + desc);
-					if (nn != null) return nn;
-				}
-				return name;
-			}
-
-			@Override
-			public Object mapValue(Object value) {
-				if (value instanceof String s && MethodFingerprinter.isSyntheticName(s)) {
-					// 同名歧义时不动字符串常量，避免误改
-					if (!ctx.ambiguousNames.contains(s)) {
-						String nn = ctx.renameBySimpleName.get(s);
-						if (nn != null) return nn;
-					}
-				}
-				return super.mapValue(value);
-			}
-		};
-		cn.accept(new ClassRemapper(remapped, remapper));
-
-		// 后处理：$deserializeLambda$ 里的 lookupswitch hash key 必须跟着字符串常量一起更新
-		for (MethodNode mn : remapped.methods) {
-			if ("$deserializeLambda$".equals(mn.name)) {
-				fixDeserializeSwitch(mn);
-			}
-		}
-		return remapped;
-	}
-
-	/** 把 {@link ClassNode} 序列化为字节码。 */
-	private static byte[] writeClass(ClassNode cn) {
-		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
-		cn.accept(cw);
-		return cw.toByteArray();
-	}
-
-	/** 收集一个类里所有方法的 {@code name + desc}，并校验方法键唯一性（防重复定义引发 ClassFormatError）。 */
-	private static Set<String> collectMethodKeys(ClassNode cn) {
-		Set<String> keys = new HashSet<>(cn.methods.size() * 2);
-		for (MethodNode mn : cn.methods) {
-			if (!keys.add(mn.name + mn.desc)) {
-				throw new IllegalStateException("Duplicate method after align: " + mn.name + mn.desc);
-			}
-		}
-		return keys;
-	}
-
-	/** 后置廉价结构校验：确保类内所有指向本类的 invokedynamic 目标方法实际存在。 */
-	private static void validateIndyTargets(ClassNode cn, Set<String> presentKeys) {
-		for (MethodNode mn : cn.methods) {
-			for (AbstractInsnNode insn : mn.instructions) {
-				if (insn instanceof InvokeDynamicInsnNode indy) {
-					if (indy.bsmArgs != null && indy.bsmArgs.length > 1 && indy.bsmArgs[1] instanceof Handle h) {
-						if (cn.name.equals(h.getOwner()) && MethodFingerprinter.isSyntheticName(h.getName())) {
-							String key = h.getName() + h.getDesc();
-							if (!presentKeys.contains(key)) {
-								throw new IllegalStateException("Missing indy target method: " + key + " in " + cn.name);
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	/**
-	 * 重建 {@code $deserializeLambda$} 中 {@code String.hashCode()} 分派的
-	 * {@code lookupswitch} 键值。
-	 *
-	 * <p>javac 生成的模式：</p>
-	 * <pre>
-	 *   s.hashCode() -> LOOKUPSWITCH
-	 *     Label_1: LDC "lambda$foo$1"; s.equals(...); ...
-	 *     Label_2: LDC "lambda$foo$2"; s.equals(...); ...
-	 * </pre>
-	 *
-	 * <p>重命名器会改写 LDC 字符串，但 int 型 key 是常量，不会被自动更新，
-	 * 因此必须重新计算并按升序重排。</p>
-	 *
-	 * <p><b>容错策略</b>：某个 case 块内找不到“符合合成名特征的 implMethodName
-	 * 字面量”时，<b>沿用该 case 的原 key</b>，而不是放弃整个 switch 修复。
-	 * 这保证了“同时包含方法引用（如 {@code "trim"}）和 lambda 的类”也能被
-	 * 正确对齐——方法引用名不会被 Remapper 改写，其原 key 天然正确。</p>
-	 *
-	 * <p>重算后若 key 之间发生碰撞，才放弃整个 switch 的改写，并打一条警告。
-	 * 不抛异常的原因：与其让整次热更失败，不如保留原 switch（对没被改名的
-	 * lambda 仍然可用）。</p>
-	 */
-	private static void fixDeserializeSwitch(MethodNode mn) {
-		for (AbstractInsnNode n : mn.instructions.toArray()) {
-			if (!(n instanceof LookupSwitchInsnNode sw)) continue;
-			if (!isStringHashSwitch(sw)) continue;
-
-			// 边界：本 switch 的所有 case label 以及 default label
-			Set<LabelNode> boundaries = new HashSet<>(sw.labels);
-			if (sw.dflt != null) boundaries.add(sw.dflt);
-
-			int   size    = sw.labels.size();
-			int[] newKeys = new int[size];
-			for (int i = 0; i < size; i++) {
-				String s = uniqueStringLdcInBlock(sw.labels.get(i), boundaries);
-				if (s != null) {
-					newKeys[i] = s.hashCode();
-				} else {
-					// 块内没有可识别的合成方法名 —— 沿用原 key。
-					// 常见于：方法引用（"trim" / "doWork"）或描述符（"()V"）之类
-					// 不会被 Remapper 改写的字符串，其 hash 保持不变，原 key 天然有效。
-					newKeys[i] = sw.keys.get(i);
-				}
-			}
-
-			// 碰撞检测：重算后的 key 不允许重复
-			Set<Integer> seen = new HashSet<>();
-			boolean      ok   = true;
-			for (int k : newKeys) {
-				if (!seen.add(k)) {
-					ok = false;
-					break;
-				}
-			}
-			if (!ok) {
-				warnSkipSwitch(mn, "hashCode collision detected after recalculation");
-				continue;
-			}
-
-			// 按新 key 升序重排 labels（lookupswitch 的 key 必须升序）
-			Integer[] order = new Integer[size];
-			for (int i = 0; i < size; i++) order[i] = i;
-			final int[] nk = newKeys;
-			Arrays.sort(order, Comparator.comparingInt(i -> nk[i]));
-
-			List<LabelNode> newLabels  = new ArrayList<>(size);
-			List<Integer>   newKeyList = new ArrayList<>(size);
-			for (int i : order) {
-				newLabels.add(sw.labels.get(i));
-				newKeyList.add(newKeys[i]);
-			}
-			sw.labels = newLabels;
-			sw.keys = newKeyList;
-		}
-	}
-
-	/**
-	 * 判断一个 {@link LookupSwitchInsnNode} 是否是 {@code String.hashCode()} 分派。
-	 * <p>启发式规则：其前一条有效指令为 {@code java/lang/String.hashCode()I}。</p>
-	 */
-	private static boolean isStringHashSwitch(LookupSwitchInsnNode sw) {
-		AbstractInsnNode p = sw.getPrevious();
-		while (p != null && (p.getOpcode() < 0 || p.getOpcode() == Opcodes.NOP)) {
-			p = p.getPrevious();
-		}
-		if (!(p instanceof MethodInsnNode mi)) return false;
-		return "java/lang/String".equals(mi.owner)
-		       && "hashCode".equals(mi.name)
-		       && "()I".equals(mi.desc);
-	}
-
-	/**
-	 * 从 case 块中提取“implMethodName 比较用的”字符串常量。
-	 *
-	 * <p><b>定位规则</b>：扫描块内所有 {@code java/lang/String.equals} 调用，
-	 * 只看与它关联的 LDC 参数（见下），且该字符串必须满足
-	 * {@link MethodFingerprinter#isSyntheticName}。这会过滤掉：</p>
-	 * <ul>
-	 *   <li>ECJ 单 switch 布局下 {@code getFunctionalInterfaceClass} /
-	 *       {@code getImplMethodSignature} 比较用的 {@code "com/foo/Bar"}、
-	 *       {@code "()V"} 等字符串；</li>
-	 *   <li>方法引用名（如 {@code "trim"}）—— 它们不会被 Remapper 改写，
-	 *       原 key 天然正确，无需重算。</li>
-	 * </ul>
-	 *
-	 * <p><b>两种字节码形态</b>都要覆盖：</p>
-	 * <ol>
-	 *   <li><b>标准形式</b>{@code s.equals("const")}：栈序 {@code [ALOAD, LDC]}，
-	 *       则 equals 的直接前驱就是 LDC。</li>
-	 *   <li><b>反向形式</b>{@code "const".equals(s)}：栈序 {@code [LDC, ALOAD]}，
-	 *       则 equals 的前驱是 ALOAD，需要再往前一步才是 LDC。
-	 *       某些字节码优化器或非标准编译产出会出现这种形态。</li>
-	 * </ol>
-	 *
-	 * <p>注意 ASM 在读取时会把 {@code aload_0}~{@code aload_3} 这类无操作数形式
-	 * 归一化为 {@code visitVarInsn(ALOAD, n)}，因此只需判断
-	 * {@code VarInsnNode} 且 {@code getOpcode() == Opcodes.ALOAD} 即可覆盖全部
-	 * 变量加载变体。</p>
-	 *
-	 * <p>块内若出现两个 <b>不同</b> 的合成名字符串（hash 碰撞导致的合并 case），
-	 * 返回 {@code null} 由调用方沿用原 key；只出现一个合成名时返回它。</p>
-	 *
-	 * <p><b>终止条件</b>：</p>
-	 * <ol>
-	 *   <li>遇到 {@code boundaries} 中任一标签（本 switch 的其它 case 或 default）。</li>
-	 *   <li>遇到无条件跳转或返回指令 —— 当前 case 逻辑已终结，后续指令属于其它
-	 *       基本块，不应计入。若缺此截断，“最后一个 case”会一路穿透到
-	 *       {@code $deserializeLambda$} 尾部的 LDC，使统计结果错误。</li>
-	 *   <li>指令流自然结束。</li>
-	 * </ol>
-	 */
-	private static String uniqueStringLdcInBlock(LabelNode start, Set<LabelNode> boundaries) {
-		String found = null;
-		for (AbstractInsnNode n = start.getNext(); n != null; n = n.getNext()) {
-			if (n instanceof LabelNode l && boundaries.contains(l)) break;
-
-			if (n instanceof MethodInsnNode mi
-			    && "java/lang/String".equals(mi.owner)
-			    && "equals".equals(mi.name)
-			    && "(Ljava/lang/Object;)Z".equals(mi.desc)) {
-
-				AbstractInsnNode prev = previousRealInsn(mi);
-
-				// 反向形式 "const".equals(s)：前一条是 ALOAD，再往前才是 LDC。
-				// 标准形式 s.equals("const")：前一条就是 LDC，不做这一跳。
-				// ASM 会把 aload_0~aload_3 归一化为 VarInsnNode(ALOAD, n)，
-				// 所以只需判断 opcode == ALOAD 就能覆盖全部变体。
-				if (prev instanceof VarInsnNode v && v.getOpcode() == Opcodes.ALOAD) {
-					prev = previousRealInsn(prev);
-				}
-
-				if (prev instanceof LdcInsnNode ldc
-				    && ldc.cst instanceof String s
-				    && MethodFingerprinter.isSyntheticName(s)) {
-					if (found == null) {
-						found = s;
-					} else if (!found.equals(s)) {
-						// 块内出现两个不同的合成名（hash 碰撞合并 case），
-						// 保守返回 null，由调用方沿用原 key。
-						return null;
-					}
-				}
-			}
-
-			// 遇到无条件跳转或返回指令：当前 case 逻辑已终结，立即截断
-			int op = n.getOpcode();
-			if (op == Opcodes.GOTO
-			    || op == Opcodes.RETURN
-			    || op == Opcodes.IRETURN || op == Opcodes.LRETURN
-			    || op == Opcodes.FRETURN || op == Opcodes.DRETURN
-			    || op == Opcodes.ARETURN
-			    || op == Opcodes.ATHROW) {
-				break;
-			}
-		}
-		return found;
-	}
-
-	/**
-	 * 跳过 {@link FrameNode} / {@link LabelNode} / {@link LineNumberNode}
-	 * 以及插桩工具插入的 {@code NOP}，返回前一条真正的指令节点；
-	 * 没有则返回 {@code null}。
-	 *
-	 * <p>与 {@link #isStringHashSwitch} 内部的过滤保持对称：都同时跳过
-	 * “伪节点（opcode &lt; 0）”和 {@code NOP}。</p>
-	 */
-	private static AbstractInsnNode previousRealInsn(AbstractInsnNode n) {
-		AbstractInsnNode p = n.getPrevious();
-		while (p != null && (p.getOpcode() < 0 || p.getOpcode() == Opcodes.NOP)) {
-			p = p.getPrevious();
-		}
-		return p;
-	}
-
-	/** 放弃修复时留痕，避免“静默失效”。 */
-	private static void warnSkipSwitch(MethodNode mn, String reason) {
-		RemoldAgent.info("[LambdaAligner] Skipped $deserializeLambda$ switch repair ("
-		                  + mn.name + mn.desc + "): " + reason);
-	}
-
-	/**
-	 * 扫描字节码并收集合成方法信息，返回 {@link ClassNode}。
-	 *
-	 * <p><b>无条件</b>把所有方法（含构造函数、静态块、桥接、普通业务方法、
-	 * 合成方法）的 {@code name}/{@code name+desc} 分别登记到
-	 * {@link MatchContext#existingNewNames} / {@link MatchContext#oldNameDescSet}，
-	 * 作为 fresh name 的避障集，避免生成的新名与类中已有的普通方法签名碰撞
-	 * （会导致 {@code ClassFormatError: Duplicate method name&signature}）。</p>
-	 *
-	 * <p>随后跳过：构造函数、静态初始化块、桥接方法，以及
-	 * {@link MethodFingerprinter#isExcluded} 列出的方法（如
-	 * {@code $deserializeLambda$}）。</p>
-	 *
-	 * <p>返回的 {@link ClassNode} 使用 {@code SKIP_DEBUG | SKIP_FRAMES} 读取，
-	 * 因此<b>不能直接写回字节码</b>——它被用于：
-	 * （a）取 {@code name}；（b）在 {@code renameMap} 为空时供调用方收集
-	 * {@code presentKeys}（只需 {@code name + desc}）；
-	 * （c）供 {@link #resurrectOrphanedLambdas} 提取孤儿方法的签名头，
-	 * 避免再次读取 {@code oldBytes}。</p>
-	 * @param bytes 要扫描的字节码
-	 * @param ctx   匹配上下文
-	 * @param isOld 是否为旧版本
-	 * @return 该类的 {@link ClassNode}
-	 */
-	/**
-	 * 按 blob 内容缓存的"方法 → 引用的匿名类"索引（Per-Blob Derived Data）。
-	 *
-	 * <p>纯函数：只由 {@code blob}（及其自带类名）决定，与轮次、loader、resolver 状态无关；
-	 * 值是不可变 {@code Map<String, Set<String>>}，不持有 {@code ClassNode}/{@code Class}/{@code ClassLoader}。
-	 * 连续热更中"上一轮的 new 字节 == 这一轮的 old 字节"时，old 侧可直接复用该索引。</p>
-	 */
-	static Map<String, Set<String>> deriveAnonRefs(String blobKey, ClassNode cn) {
-		if (blobKey == null) return collectAnonRefs(cn);
-		long estimate = Math.max(64L, cn.methods.size() * 48L);
-		return DerivedDataCache.getByKey("anonRefs", blobKey, estimate, () -> collectAnonRefs(cn));
-	}
-
-	private static Map<String, Set<String>> collectAnonRefs(ClassNode cn) {
-		Map<String, Set<String>> out = new HashMap<>();
-		for (MethodNode mn : cn.methods) {
-			Set<String> refs = referencedAnonClasses(mn, cn.name);
-			if (refs != null && !refs.isEmpty()) out.put(mn.name + mn.desc, Set.copyOf(new HashSet<>(refs)));
-		}
-		return Map.copyOf(out);
-	}
-
-	/** 收集方法体内直接引用的、属于当前宿主类的匿名类内部名。 */
-	private static Set<String> referencedAnonClasses(MethodNode mn, String hostClassName) {
-		Set<String> set = null;
-		for (AbstractInsnNode insn : mn.instructions) {
-			String owner = null;
-			if (insn instanceof TypeInsnNode tin) {
-				owner = tin.desc;
-			} else if (insn instanceof MethodInsnNode min) {
-				owner = min.owner;
-			} else if (insn instanceof FieldInsnNode fin) {
-				owner = fin.owner;
-			} else if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Type t) {
-				if (t.getSort() == Type.OBJECT) owner = t.getInternalName();
-			}
-			if (owner != null && isAnonClassOf(owner, hostClassName)) {
-				if (set == null) set = new HashSet<>(4);
-				set.add(owner);
-			}
-		}
-		return set == null ? Collections.emptySet() : set;
-	}
-
-	private static boolean isAnonClassOf(String className, String hostClassName) {
-		if (className == null) return false;
-		if (className.startsWith("[")) {
-			int idx = className.lastIndexOf('[');
-			if (idx + 2 < className.length() && className.charAt(idx + 1) == 'L' && className.endsWith(";")) {
-				className = className.substring(idx + 2, className.length() - 1);
-			}
-		}
-		if (!className.startsWith(hostClassName + "$")) return false;
-		String suffix = className.substring(hostClassName.length() + 1);
-		return MethodFingerprinter.isUnstableNestedSuffix(suffix);
-	}
-
-	/**
-	 * 基于 ASM {@link Analyzer} 和 {@link SourceInterpreter} 进行反向数据流栈分析，
-	 * 精确提取方法内所有 Lambda 实例化指令（invokedynamic / method call）的操作数栈消费目标。
-	 *
-	 * <p>相较于单纯向后线性扫描，本方法具备完全的栈感知能力，能免疫中间指令及参数前置计算的干扰：
-	 * <ul>
-	 *   <li>{@code foo(() -> a, () -> b)}：两个 indy 均能准确识别为同一 {@code CALL:...foo} 的入参；</li>
-	 *   <li>{@code a(() -> x, 5)}：indy 之后的常量加载指令不会干扰消费者判定；</li>
-	 *   <li>{@code a(() -> x, bar())}：作为参数的嵌套调用 {@code bar()} 不会被误判为消费端；</li>
-	 *   <li>三元表达式 / 分支合并（多生产者）：返回空证据，严守 Fail-Closed 拒绝猜测；</li>
-	 *   <li>排除本地变量存储（{@code ASTORE}）作为特征，防止前插局部变量导致槽位位移误判。</li>
-	 * </ul>
-	 * </p>
-	 */
-	private static Map<AbstractInsnNode, String> findConsumers(String owner, MethodNode mn) {
-		if (isMutationActive("4")) return Collections.emptyMap();
-		Map<AbstractInsnNode, String> map = new HashMap<>();
-		if (mn.instructions == null || mn.instructions.size() == 0) return map;
-		Frame<SourceValue>[] frames;
-		try {
-			Analyzer<SourceValue> analyzer = new Analyzer<>(new SourceInterpreter());
-			frames = analyzer.analyze(owner, mn);
-		} catch (AnalyzerException | RuntimeException t) {
-			// 分析失败时保守降级，返回空映射
-			return Collections.emptyMap();
-		}
-		if (frames == null) return Collections.emptyMap();
-
-		AbstractInsnNode[] insns = mn.instructions.toArray();
-		for (int i = 0; i < insns.length; i++) {
-			AbstractInsnNode insn = insns[i];
-			Frame<SourceValue> frame = frames[i];
-			if (frame == null) continue;
-
-			String consumerTag = null;
-			int consumedCount = 0;
-
-			if (insn instanceof MethodInsnNode min) {
-				Type[] args = Type.getArgumentTypes(min.desc);
-				consumedCount = args.length + (min.getOpcode() == Opcodes.INVOKESTATIC ? 0 : 1);
-				consumerTag = "CALL:" + min.owner + "." + min.name + min.desc;
-			} else if (insn instanceof InvokeDynamicInsnNode indy) {
-				Type[] args = Type.getArgumentTypes(indy.desc);
-				consumedCount = args.length;
-				consumerTag = "INDY:" + indy.name + indy.desc;
-			} else if (insn instanceof FieldInsnNode fin) {
-				if (fin.getOpcode() == Opcodes.PUTFIELD) {
-					consumedCount = 2; // objectref + value
-					consumerTag = "PUT:" + fin.owner + "." + fin.name + fin.desc;
-				} else if (fin.getOpcode() == Opcodes.PUTSTATIC) {
-					consumedCount = 1; // value
-					consumerTag = "PUT:" + fin.owner + "." + fin.name + fin.desc;
-				}
-			} else if (insn.getOpcode() == Opcodes.ARETURN) {
-				consumedCount = 1;
-				consumerTag = "RETURN";
-			} else if (insn.getOpcode() == Opcodes.ATHROW) {
-				consumedCount = 1;
-				consumerTag = "THROW";
-			}
-
-			if (consumerTag != null && consumedCount > 0) {
-				int stackSize = frame.getStackSize();
-				int startSlot = Math.max(0, stackSize - consumedCount);
-				for (int slot = startSlot; slot < stackSize; slot++) {
-					SourceValue val = frame.getStack(slot);
-					if (val == null || val.insns == null) continue;
-					if (val.insns.size() == 1) {
-						AbstractInsnNode producer = val.insns.iterator().next();
-						if (!map.containsKey(producer)) {
-							map.put(producer, consumerTag);
-						} else if (!consumerTag.equals(map.get(producer))) {
-							map.put(producer, ""); // 冲突歧义置空
-						}
-					} else {
-						// 多生产者（三元表达式/分支合并等）：标记歧义，拒绝猜测
-						for (AbstractInsnNode producer : val.insns) {
-							map.put(producer, "");
-						}
-					}
-				}
-			}
-		}
-		return map;
-	}
-
-	/**
 	 * 按 blob 缓存的"方法 → 每条指令的消费者标记"索引（Per-Blob Derived Data）。
 	 *
 	 * <p><b>为什么缓存这一项</b>：{@link #findConsumers} 用 ASM {@code Analyzer} 做反向数据流分析，
@@ -3346,91 +2850,6 @@ public class LambdaAligner {
 	 */
 	public static final String CONSUMER_CACHE_KIND = "alignConsumers";
 
-	/**
-	 * 单个方法的消费者标记表：按指令流下标对齐，{@code null} 表示该指令不是消费者入口。
-	 *
-	 * <p>粒度选在<b>方法</b>而不是"整类一次性派生"：整类急切派生会在未命中时把类里所有方法都分析一遍，
-	 * 而扫描只走得到其中一部分；实测"旧侧命中 + 新侧未命中"的真实批次形态下，整类粒度的净收益被
-	 * 未命中侧的过度派生吃掉（{@code DerivedDataBench} 的读数）。按方法派生的未命中量恰好等于
-	 * 扫描真正需要的那几个方法。</p>
-	 */
-	private static List<String> deriveConsumerTags(String owner, MethodNode mn) {
-		Map<AbstractInsnNode, String> byNode = findConsumers(owner, mn);
-		if (byNode.isEmpty()) return List.of();
-		AbstractInsnNode[] insns = mn.instructions.toArray();
-		String[] tags = new String[insns.length];
-		boolean any = false;
-		for (int i = 0; i < insns.length; i++) {
-			String tag = byNode.get(insns[i]);
-			if (tag == null) continue;
-			tags[i] = tag;
-			any = true;
-		}
-		return any ? Collections.unmodifiableList(Arrays.asList(tags)) : List.of();
-	}
-
-	/**
-	 * 该方法体里是否存在"消费者标记会被读"的指令位点。
-	 *
-	 * <p>调用方只在<b>本类的 lambda 调用位点</b>（{@code invokedynamic} 的引导参数指向本类方法、
-	 * 或 {@code MethodInsnNode} 指向本类且名字命中合成名模式）上读消费者标记；一个方法里没有这种位点时，
-	 * 它的标记表<b>永远不会被读到</b>。</p>
-	 *
-	 * <p>所以这一层预判必须与读取端逐字对齐：判据偏移一位就会让某类方法静默丢掉消费者证据。
-	 * 超大类里通常只有少数方法写了 lambda，其余方法若照常跑 ASM {@code Analyzer}，既白白消耗 CPU，
-	 * 又会挤占缓存条目池。</p>
-	 */
-	private static boolean hasConsumerSite(ClassNode cn, MethodNode mn) {
-		if (mn.instructions == null) return false;
-		for (AbstractInsnNode n : mn.instructions) {
-			if (n instanceof InvokeDynamicInsnNode indy) {
-				if (indy.bsmArgs == null || indy.bsmArgs.length < 2) continue;
-				if (indy.bsmArgs[1] instanceof Handle h && cn.name.equals(h.getOwner())
-				    && MethodFingerprinter.isSyntheticName(h.getName())) {
-					return true;
-				}
-			} else if (n instanceof MethodInsnNode m) {
-				if (cn.name.equals(m.owner) && MethodFingerprinter.isSyntheticName(m.name)) return true;
-			}
-		}
-		return false;
-	}
-
-	/**
-	 * {@link #findConsumers} 的按方法缓存版：命中时按指令下标重建本轮节点映射，未命中走原实现。
-	 *
-	 * <p>缓存键 = {@code (blob 内容, 方法 name+desc)}：方法维度必须带<b>描述符</b>（同名重载是合法形态，
-	 * 只用名字会互相覆盖），且同一份 blob 里不同方法的标记表完全不同，漏掉维度会让标记整表错位。
-	 * 值里存下标而不是 {@code AbstractInsnNode}：节点是本轮解析出来的可变对象，跨轮持有既会过期也会驻留整棵解析树。</p>
-	 *
-	 * <p>以下情形一律走原实现（不读不写缓存）：方法里没有消费者位点（标记永远不会被读，
-	 * 见 {@link #hasConsumerSite}）、缓存已关闭、blob 键不可用、{@link #ACTIVE_MUTATION} 非空
-	 * ——最后一项是设计级变异测试的钩子，其结果不得跨变异档位复用。</p>
-	 */
-	private static Map<AbstractInsnNode, String> consumersOf(String blobKey, ClassNode cn, MethodNode mn) {
-		if (!hasConsumerSite(cn, mn)) return Collections.emptyMap();
-		if (blobKey == null || !DerivedDataCache.enabled()
-		    || (ACTIVE_MUTATION != null && !ACTIVE_MUTATION.isEmpty())) {
-			return findConsumers(cn.name, mn);
-		}
-		List<String> tags = DerivedDataCache.getByKey(
-			CONSUMER_CACHE_KIND + '/' + mn.name + mn.desc, blobKey,
-			Math.max(64L, 16L + 8L * mn.instructions.size()),
-			() -> deriveConsumerTags(cn.name, mn));
-		if (tags.isEmpty()) return Collections.emptyMap();
-		AbstractInsnNode[] insns = mn.instructions.toArray();
-		if (tags.size() != insns.length) {
-			// 指令流与标记表对不上：说明缓存条目与本次解析口径不一致（例如未来某处换了 ClassReader 标志）。
-			// 这种情形绝不能按下标硬映射——直接退回重算，宁可少一次命中，也不能让标记错位。
-			return findConsumers(cn.name, mn);
-		}
-		Map<AbstractInsnNode, String> out = new HashMap<>();
-		for (int i = 0; i < insns.length; i++) {
-			String tag = tags.get(i);
-			if (tag != null) out.put(insns[i], tag);
-		}
-		return out;
-	}
 
 	private static ClassNode scan(byte[] bytes, MatchContext ctx, boolean isOld,
 	                              Function<String, byte[]> resolver,
@@ -3452,7 +2871,7 @@ public class LambdaAligner {
 			public MethodVisitor visitMethod(int acc, String name, String desc,
 			                                 String sig, String[] ex) {
 				MethodVisitor mv = super.visitMethod(acc, name, desc, sig, ex);
-				return wrapForParamNames(mv, owner, acc, name, desc, paramNamesOut, true);
+				return LambdaBytecodeScanner.wrapForParamNames(mv, owner, acc, name, desc, paramNamesOut, true);
 			}
 		}, ClassReader.SKIP_FRAMES);
 
@@ -3460,7 +2879,7 @@ public class LambdaAligner {
 		Map<String, Long> anonHashes = isOld ? ctx.oldAnonHashes : ctx.newAnonHashes;
 		if (resolver != null) {
 			Set<String> visiting = new HashSet<>();
-			Map<String, Set<String>> anonRefs = deriveAnonRefs(blobKey, cn);
+			Map<String, Set<String>> anonRefs = LambdaBytecodeScanner.deriveAnonRefs(blobKey, cn);
 			for (MethodNode mn : cn.methods) {
 				Set<String> refs = anonRefs.get(mn.name + mn.desc);
 				if (refs == null) continue;
@@ -3494,7 +2913,7 @@ public class LambdaAligner {
 			MethodFingerprinter fp = ctx.fingerprinter;
 			fp.reset();
 			fp.setContext(cn.name);
-			fp.setValidLabels(collectValidLabels(mn));
+			fp.setValidLabels(LambdaBytecodeScanner.collectValidLabels(mn));
 			fp.setAnonHashes(anonHashes);
 
 			// 回放指令流；传入的 Label 与 collectValidLabels 取出的实例一致
@@ -3522,13 +2941,13 @@ public class LambdaAligner {
 			// 幽灵空壳（上一轮为兜住老 CallSite 而注入的空方法）标记为"不参与匹配"：
 			// 它必须留在 oldGroups 里供孤儿计算复现，但名字已经是"死名字"，
 			// 不能再被当成某个新 lambda 的目标 —— 否则会把它挤到别的名字上去。
-			info.ghost = isGhostMethod(mn);
+			info.ghost = LambdaOrphanEmitter.isGhostMethod(mn);
 			if (info.ghost) {
 				// meta 命中就读 meta；缺失（首次热更、历史被淘汰、attach 前已加载的类）
 				// 才退回桩体里的 LDC 标记。
 				Long metaHash = (isOld && ctx.oldMeta != null)
 					? ctx.oldMeta.ghostHashes.get(mn.name + mn.desc) : null;
-				info.ghostOriginalHash = metaHash != null ? metaHash : readGhostOriginalHash(mn);
+				info.ghostOriginalHash = metaHash != null ? metaHash : LambdaOrphanEmitter.readGhostOriginalHash(mn);
 			}
 			// 上一轮注入的捕获桥：键在新版本里天然没有对应物，必须在幽灵化之前认出来，
 			// 否则第一轮的成果会在第二轮被自己抹掉（见 stepCaptureBridge）。
@@ -3614,14 +3033,14 @@ public class LambdaAligner {
 				hostKey = "M:" + mn.name + mn.desc;
 			}
 
-			Map<AbstractInsnNode, String> consumers = consumersOf(blobKey, cn, mn);
+			Map<AbstractInsnNode, String> consumers = LambdaBytecodeScanner.consumersOf(blobKey, cn, mn);
 			List<SyntheticInfo> seq = null;
 			for (AbstractInsnNode n : mn.instructions) {
 				String callee = null;
 				if (n instanceof InvokeDynamicInsnNode i && i.bsmArgs != null && i.bsmArgs.length > 1
 				    && i.bsmArgs[1] instanceof Handle h && cn.name.equals(h.getOwner())) {
 					callee = h.getName();
-					recordLambdaShape(nameIndex.get(callee), i, h, mn,
+					LambdaBytecodeScanner.recordLambdaShape(nameIndex.get(callee), i, h, mn,
 					                  isOld ? ctx.oldParamNames : ctx.newParamNames, cn.name);
 				} else if (n instanceof MethodInsnNode m && cn.name.equals(m.owner)) {
 					callee = m.name;
@@ -3668,14 +3087,14 @@ public class LambdaAligner {
 			if (info == null || !info.renameable || info.ghost || info.bridge) continue;
 			// 孤立/死代码不分配正向 callOrder，保持 -1 以标记不可达
 			String hostKey = "L:" + info.hash + (!isMutationActive("1") && info.consumer != null && !info.consumer.isEmpty() ? ":" + info.consumer : "");
-			Map<AbstractInsnNode, String> consumers = consumersOf(blobKey, cn, mn);
+			Map<AbstractInsnNode, String> consumers = LambdaBytecodeScanner.consumersOf(blobKey, cn, mn);
 			List<SyntheticInfo> seq = null;
 			for (AbstractInsnNode n : mn.instructions) {
 				String callee = null;
 				if (n instanceof InvokeDynamicInsnNode i && i.bsmArgs != null && i.bsmArgs.length > 1
 				    && i.bsmArgs[1] instanceof Handle h && cn.name.equals(h.getOwner())) {
 					callee = h.getName();
-					recordLambdaShape(nameIndex.get(callee), i, h, mn,
+					LambdaBytecodeScanner.recordLambdaShape(nameIndex.get(callee), i, h, mn,
 					                  isOld ? ctx.oldParamNames : ctx.newParamNames, cn.name);
 				} else if (n instanceof MethodInsnNode m && cn.name.equals(m.owner)) {
 					callee = m.name;
@@ -3928,129 +3347,8 @@ public class LambdaAligner {
 		// 若已有活方法且当前为幽灵/桥：保留活方法，静默忽略
 	}
 
-	/**
-	 * 只读一遍字节码，取合成方法<b>形参槽</b>的 {@code LocalVariableTable} 名字。
-	 *
-	 * <p>为什么单开一趟而不是把 {@code scan} 的 {@code SKIP_DEBUG} 去掉：{@code scan} 要读
-	 * 指令流算指纹，多带调试信息会拖慢主路径，也会让指纹受 {@code -g} 设置影响。这里只关心
-	 * 名字，非合成方法直接 {@code return null}，连 {@code Code} 都不展开。</p>
-	 *
-	 * <p>名字是比槽号更硬的证据：宿主方法里增删前序局部变量会让槽号整体位移，名字不会。
-	 * 未带 {@code -g} 编译时整张表为空，调用方退回槽号/类型判据。</p>
-	 *
-	 * <p><b>静态方法的首形参可能是被前置的接收者</b>：{@code forceStaticLambdas} 会把实例方法
-	 * 改成静态方法并把 {@code this} 变成显式首形参，而那个槽是<b>新加的、没有 LVT 条目</b>的，
-	 * 读出来是 {@code null}。这里统一记成 {@link #RECEIVER_NAME}——否则"任一位缺名字就整体
-	 * 放弃按名映射"那条严格判据会把这类 lambda 全部判成没证据。</p>
-	 *
-	 * <p><b>这里只归一 {@code null} 与 {@code "this"}，不碰 {@code "this$0"}</b>：前两者是
-	 * 无歧义的（{@code this} 是关键字，不可能是变量名；{@code null} 表示没有 LVT 条目），
-	 * 而 {@code this$0} 是合法的 Java 标识符——一个真叫 {@code this$0} 的局部变量会被误归一。
-	 * 那一档留给 {@link #captureNamesOf}：它手里有捕获的宿主槽号，能证明"这一位到底是不是
-	 * 宿主 {@code aload 0} 压上来的"。本方法只报告 LVT 里写了什么。</p>
-	 *
-	 * @return {@code name + desc -> 形参名字数组}（按形参顺序；实例方法不含接收者）
-	 */
 	public static Map<String, String[]> readLambdaParamNames(byte[] bytes) {
-		Map<String, String[]> out = new HashMap<>();
-		if (bytes == null || bytes.length == 0) return out;
-		ClassReader cr = new ClassReader(bytes);
-		final String owner = cr.getClassName();
-		cr.accept(new ClassVisitor(Opcodes.ASM9) {
-			@Override
-			public MethodVisitor visitMethod(int acc, String name, String desc,
-			                                 String sig, String[] ex) {
-				return wrapForParamNames(null, owner, acc, name, desc, out, false);
-			}
-		}, ClassReader.SKIP_FRAMES);
-		return out;
-	}
-
-	/**
-	 * 包装可选下游 {@link MethodVisitor}，为合成 lambda 方法提取形参 LVT 名字；
-	 * {@code stripDebugNodes} 为 true 时不向 {@code mv} 转发调试事件，使生成的
-	 * {@link MethodNode} 与 {@code ClassReader.SKIP_DEBUG} 保持一致。
-	 */
-	private static MethodVisitor wrapForParamNames(
-	 MethodVisitor mv, String owner, int acc, String name, String desc,
-	 Map<String, String[]> out, boolean stripDebugNodes) {
-		boolean collect = out != null
-			&& MethodFingerprinter.isSyntheticName(name)
-			&& !name.startsWith("access$");
-		if (!collect) {
-			if (!stripDebugNodes || mv == null) return mv;
-			return new MethodVisitor(Opcodes.ASM9, mv) {
-				@Override
-				public void visitLineNumber(int line, Label start) {}
-
-				@Override
-				public void visitLocalVariable(String n, String d, String sg,
-				                               Label st, Label en, int idx) {}
-
-				@Override
-				public AnnotationVisitor visitLocalVariableAnnotation(
-				 int typeRef, TypePath typePath, Label[] start, Label[] end,
-				 int[] index, String descriptor, boolean visible) {
-					return null;
-				}
-			};
-		}
-		boolean isStatic = (acc & Opcodes.ACC_STATIC) != 0;
-		Type[] args = Type.getArgumentTypes(desc);
-		int[] slotOf = new int[args.length];
-		int s = isStatic ? 0 : 1;
-		for (int i = 0; i < args.length; i++) {
-			slotOf[i] = s;
-			s += args[i].getSize();
-		}
-		int paramEnd = s;
-		String[] names = new String[args.length];
-		out.put(name + desc, names);
-		return new MethodVisitor(Opcodes.ASM9, mv) {
-			@Override
-			public void visitLineNumber(int line, Label start) {
-				if (!stripDebugNodes) super.visitLineNumber(line, start);
-			}
-
-			@Override
-			public void visitLocalVariable(String n, String d, String sg,
-			                               Label st, Label en, int idx) {
-				if (idx < paramEnd) {              // 只要形参，丢弃方法体局部变量
-					for (int i = 0; i < slotOf.length; i++) {
-						if (slotOf[i] == idx && args[i].getDescriptor().equals(d) && names[i] == null) {
-							names[i] = n;
-						}
-					}
-				}
-				if (!stripDebugNodes) {
-					super.visitLocalVariable(n, d, sg, st, en, idx);
-				}
-			}
-
-			@Override
-			public AnnotationVisitor visitLocalVariableAnnotation(
-			 int typeRef, TypePath typePath, Label[] start, Label[] end,
-			 int[] index, String descriptor, boolean visible) {
-				return stripDebugNodes
-					? null
-					: super.visitLocalVariableAnnotation(typeRef, typePath, start, end, index, descriptor, visible);
-			}
-
-			@Override
-			public void visitEnd() {
-				// 静态方法的首形参可能是 forceStaticLambdas 前置的接收者：槽是新增的，
-				// 没有 LVT 条目，读出来是 null；若它本来就是实例方法、只是被改成静态，
-				// LVT 里留着 javac 写的 "this"。两者指同一个东西，统一记成 RECEIVER_NAME，
-				// 否则同一个 lambda 在两种来源之间切换会因 "this" vs null 对不上而丢掉按名映射。
-				// 判据是"类型是本类"而不是"名字为空"——真正的同名局部变量会带自己的名字。
-				if (isStatic && names.length > 0
-				    && (names[0] == null || "this".equals(names[0]))
-				    && isReceiverType(args[0].getDescriptor(), owner)) {
-					names[0] = RECEIVER_NAME;
-				}
-				super.visitEnd();
-			}
-		};
+		return LambdaBytecodeScanner.readLambdaParamNames(bytes);
 	}
 
 	/**
@@ -4081,897 +3379,32 @@ public class LambdaAligner {
 	 */
 	public static final String RECEIVER_NAME = "$this";
 
-	/**
-	 * 把合成方法的形参名裁成"捕获名"：前 {@code captured - offset} 项即捕获变量
-	 * （实例 lambda 的形参表不含接收者，故 {@code captured[0]} 由这里补上）。
-	 *
-	 * <p>接收者槽一律记作 {@link #RECEIVER_NAME}。静态方法里那个"被前置的接收者"有<b>三种</b>
-	 * 字节码来源（见 {@link #RECEIVER_NAME}），{@code LocalVariableTable} 各不相同，所以归一
-	 * 分两档：</p>
-	 * <ul>
-	 *   <li><b>结构证据优先</b>：{@code captureSlots[0] == 0} 且宿主是非静态方法，说明这一位
-	 *       就是从宿主方法里 {@code aload 0} 压上来的 {@code this}。这是证明，不看名字。</li>
-	 *   <li><b>没有结构证据时</b>（回溯失败）才退回名字：{@code null} / {@code "this"} /
-	 *       {@code "this$0"}。</li>
-	 * </ul>
-	 *
-	 * <p>反过来，结构证据<b>证伪</b>（首捕获的槽号不是 0）时，名字即使是 {@code "this$0"} 也
-	 * <b>不得</b>归一：{@code this$0} 是合法的 Java 标识符，源码里真的可以写
-	 * {@code void d(Foo this$0)}。把这种变量当成接收者，桥就会把接收者喂给一个本该是别的对象
-	 * 的位置——静默错值。宁可这一位没名字（按名映射整体弃权，退回槽号/类型推断），也不猜。</p>
-	 *
-	 * @param captureSlots 每个捕获在<b>宿主方法</b>里的局部变量槽号；回溯失败时为 {@code null}
-	 * @param hostIsStatic 宿主方法是否静态（静态宿主的槽 0 是形参，不可能是 {@code this}）
-	 */
-	private static List<String> captureNamesOf(String[] paramNames, List<String> captured,
-	                                           boolean isStatic, String owner,
-	                                           List<Integer> captureSlots, boolean hostIsStatic) {
-		if (paramNames == null) return null;
-		int offset = isStatic ? 0 : 1;
-		int n = captured.size() - offset;
-		if (n < 0 || paramNames.length < n) return null;
-		List<String> out = new ArrayList<>(captured.size());
-		if (!isStatic) out.add(RECEIVER_NAME);                     // 接收者没有源码名
-		for (int i = 0; i < n; i++) out.add(paramNames[i]);
-		if (!out.isEmpty() && isReceiverType(captured.get(0), owner)) {
-			boolean structural = captureSlots != null && !captureSlots.isEmpty() && !hostIsStatic;
-			boolean receiver = structural ? captureSlots.get(0) == 0 : isReceiverName(out.get(0));
-			if (receiver) out.set(0, RECEIVER_NAME);
-		}
-		return out;
-	}
-
-	/**
-	 * 各编译器给"捕获到的外层 {@code this}"写过的 {@code LocalVariableTable} 名字。
-	 *
-	 * <p>javac 写 {@code "this"}（且只在实例方法被改写成静态时保留下来），kotlinc 写
-	 * {@code "this$0"}，{@code forceStaticLambdas} 前置的新槽干脆没有条目（{@code null}）。
-	 * 三者指同一个东西。</p>
-	 */
-	private static boolean isReceiverName(String n) {
-		return n == null || RECEIVER_NAME.equals(n) || "this".equals(n) || "this$0".equals(n);
-	}
-
-	/** 该描述符是不是"当前类自己的引用"（{@code forceStaticLambdas} 前置 receiver 的形态）。 */
-	private static boolean isReceiverType(String desc, String owner) {
-		return owner != null && desc != null && desc.equals("L" + owner + ";");
-	}
-
-	private static int getReceiverOffset(SyntheticInfo info, String owner) {
-		if (info == null) return 0;
-		if (!info.isStatic()) return 1;
-		if (info.captureNames != null && !info.captureNames.isEmpty() && isReceiverName(info.captureNames.get(0))) {
-			return 1;
-		}
-		if (info.captured != null && !info.captured.isEmpty() && isReceiverType(info.captured.get(0), owner)
-		    && info.captureSlots != null && !info.captureSlots.isEmpty() && info.captureSlots.get(0) == 0) {
-			return 1;
-		}
-		return 0;
-	}
-
-	static boolean hasCapturedVariables(SyntheticInfo info, String owner) {
-		if (info == null || info.captured == null || info.captured.isEmpty()) return false;
-		int receiverOffset = getReceiverOffset(info, owner);
-		return info.captured.size() > receiverOffset;
-	}
-
-	static boolean hasCapturedLambdaWithoutLvt(SyntheticInfo info, String owner) {
-		if (info == null || info.ghost || info.bridge || !info.renameable) return false;
-		if (!hasCapturedVariables(info, owner)) return false;
-		if (info.captureNames == null) return true;
-		int receiverOffset = getReceiverOffset(info, owner);
-		for (int i = receiverOffset; i < info.captureNames.size(); i++) {
-			if (info.captureNames.get(i) == null) return true;
-		}
-		return false;
-	}
-
-	static List<String> findCapturedLambdasWithoutLvt(LongObjectMap<List<SyntheticInfo>> groups, String owner) {
-		List<String> list = new ArrayList<>();
-		if (groups == null) return list;
-		for (int idx : groupOrder(groups)) {
-			List<SyntheticInfo> g = groups.valueAt(idx);
-			if (g == null) continue;
-			for (SyntheticInfo ni : g) {
-				if (hasCapturedLambdaWithoutLvt(ni, owner)) {
-					list.add(ni.name + ni.desc);
-				}
-			}
-		}
-		return list;
-	}
-
-	/**
-	 * 把 indy 调用点上的 lambda 形状（捕获表 / 功能接口 / SAM 签名）记到目标合成方法上。
-	 *
-	 * <p><b>必须再比一次描述符</b>：{@code nameIndex} 是按名字索引的，同名不同描述符的重载
-	 * （JDK 8 的 {@code lambda$null$0(II)} 与 {@code lambda$null$0(I)}）会互相覆盖。
-	 * 不比的话会把 A 的捕获表贴到 B 上，桥接的参数映射会直接错位——那是静默错值。</p>
-	 *
-	 * <p>只取<b>先见到的</b>那个调用点：同一个合成方法被多处 indy 引用时，各处的捕获表
-	 * 必然一致（它就是方法签名的一部分），不一致只可能来自索引错位，此时保留第一份。</p>
-	 */
-	private static void recordLambdaShape(SyntheticInfo info, InvokeDynamicInsnNode indy, Handle impl,
-	                                      MethodNode host, Map<String, String[]> paramNames,
-	                                      String owner) {
-		if (info == null || info.captured != null) return;
-		if (!info.desc.equals(impl.getDesc())) return;
-		if (indy.bsmArgs.length < 3) return;
-		if (!(indy.bsmArgs[0] instanceof Type sam) || !(indy.bsmArgs[2] instanceof Type inst)) return;
-		Type[] caps = Type.getArgumentTypes(indy.desc);
-		List<String> captured = new ArrayList<>(caps.length);
-		for (Type t : caps) captured.add(t.getDescriptor());
-		info.captured = captured;
-		info.fiType = Type.getReturnType(indy.desc).getInternalName();
-		info.samSig = sam.getDescriptor();
-		info.instSig = inst.getDescriptor();
-		info.captureSlots = captureSlotsOf(indy, caps);
-		info.captureNames = captureNamesOf(paramNames.get(info.name + info.desc), captured,
-			info.isStatic(), owner, info.captureSlots,
-			host != null && (host.access & Opcodes.ACC_STATIC) != 0);
-		info.hostParamEndSlot = paramEndSlot(host);
-		info.hostMethod = host;
-	}
-
-	/** 宿主方法形参槽的结束位置（第一个局部变量所在的槽）。 */
-	private static int paramEndSlot(MethodNode host) {
-		int s = (host.access & Opcodes.ACC_STATIC) != 0 ? 0 : 1;
-		for (Type t : Type.getArgumentTypes(host.desc)) s += t.getSize();
-		return s;
-	}
-
-	/**
-	 * 回溯每个捕获实参来自宿主方法的哪个局部变量槽。
-	 *
-	 * <p>javac 在 indy 之前按捕获顺序把实参压栈，所以从 indy 往前数 {@code captured.length}
-	 * 条真实指令就是它们的来源。只认<b>直接的局部变量加载</b>：实参若是临时值
-	 * （{@code () -> use(make(a))} 会先算出一个临时槽再捕获），槽号没有跨版本的身份，
-	 * 回溯一律判失败——宁可退回类型推断，也不能拿一个随机槽号去"证明"映射。</p>
-	 *
-	 * @return 与 {@code captured} 对齐的槽号；无法回溯时 {@code null}
-	 */
-	private static List<Integer> captureSlotsOf(InvokeDynamicInsnNode indy, Type[] captured) {
-		int n = captured.length;
-		if (n == 0) return List.of();
-		int[] slots = new int[n];
-		AbstractInsnNode cur = indy.getPrevious();
-		for (int k = n - 1; k >= 0; k--) {
-			while (cur != null && cur.getOpcode() < 0) cur = cur.getPrevious();   // 跳过 Label/LineNumber
-			if (!(cur instanceof VarInsnNode v)) return null;
-			if (!loadMatches(v.getOpcode(), captured[k])) return null;
-			slots[k] = v.var;
-			cur = cur.getPrevious();
-		}
-		List<Integer> out = new ArrayList<>(n);
-		for (int s : slots) out.add(s);
-		return out;
-	}
-
-	/** 加载指令与类型是否匹配（用于校验回溯没有错位）。 */
-	private static boolean loadMatches(int op, Type t) {
-		switch (t.getSort()) {
-			case Type.BOOLEAN: case Type.CHAR: case Type.BYTE: case Type.SHORT: case Type.INT:
-				return op == Opcodes.ILOAD;
-			case Type.LONG:   return op == Opcodes.LLOAD;
-			case Type.FLOAT:  return op == Opcodes.FLOAD;
-			case Type.DOUBLE: return op == Opcodes.DLOAD;
-			case Type.OBJECT: case Type.ARRAY: return op == Opcodes.ALOAD;
-			default: return false;
-		}
-	}
 
 	/** 在已扫描的旧/新分组里按名字找 SyntheticInfo（供子指纹计算使用）。 */
-	private static SyntheticInfo infoByName(MatchContext ctx, boolean isOld, String name) {		// O(1) 查索引。早先是"遍历所有 group 的所有成员"的双重循环，而本方法被
+	static SyntheticInfo infoByName(MatchContext ctx, boolean isOld, String name) {		// O(1) 查索引。早先是"遍历所有 group 的所有成员"的双重循环，而本方法被
 		// **三个 64 轮定稿循环**按"每个方法 × 每个子"调用，最坏合计 O(64·N²)。
 		// 见 MatchContext.oldNameIndex / newNameIndex 的说明。
 		return (isOld ? ctx.oldNameIndex : ctx.newNameIndex).get(name);
-	}
-
-	/**
-	 * 收集逻辑相关的 Label：只包含被跳转指令、switch、异常表引用的 Label。
-	 *
-	 * <p>排除纯调试标签（行号锚点、局部变量作用域边界），这些标签在不同
-	 * {@code -g} 设置下数量与位置都会变，不应参与指纹。</p>
-	 *
-	 * <p>返回的 {@link Label} 实例与 {@link MethodNode#accept(MethodVisitor)}
-	 * 回放时传入的是同一对象，可直接用作集合元素。</p>
-	 */
-	private static Set<Label> collectValidLabels(MethodNode mn) {
-		Set<Label> valid = new HashSet<>();
-		for (AbstractInsnNode insn : mn.instructions) {
-			if (insn instanceof JumpInsnNode j) {
-				valid.add(j.label.getLabel());
-			} else if (insn instanceof TableSwitchInsnNode t) {
-				valid.add(t.dflt.getLabel());
-				for (LabelNode l : t.labels) valid.add(l.getLabel());
-			} else if (insn instanceof LookupSwitchInsnNode l) {
-				valid.add(l.dflt.getLabel());
-				for (LabelNode ln : l.labels) valid.add(ln.getLabel());
-			}
-		}
-		if (mn.tryCatchBlocks != null) {
-			for (TryCatchBlockNode tcb : mn.tryCatchBlocks) {
-				valid.add(tcb.start.getLabel());
-				valid.add(tcb.end.getLabel());
-				valid.add(tcb.handler.getLabel());
-			}
-		}
-		return valid;
-	}
-
-	/**
-	 * 将被删除的 lambda 以“空方法体”的形式复活注入到新字节码中，
-	 * 防止被缓存的 {@code CallSite} 抛出 {@link NoSuchMethodError}。
-	 *
-	 * <p>复用调用方已经解析好的 {@code oldCn} 提取孤儿方法的签名头，
-	 * 避免再次读取 {@code oldBytes}。</p>
-	 *
-	 * <p>{@code oldCn} 是用 {@code SKIP_DEBUG | SKIP_FRAMES} 读入的，
-	 * 但注入空壳只用到 {@code access} / {@code name} / {@code desc} /
-	 * {@code signature} / {@code exceptions} 这些方法头字段——它们不受
-	 * {@code SKIP_*} 影响。方法体（Code 属性）由 {@link #injectDummyBody}
-	 * 重新生成，不会拷贝 {@code oldCn} 中的原始指令。</p>
-	 * @param oldCn       已解析的旧类节点（由 {@code align} 中的 {@code scan} 提供）
-	 * @param newBytes    经过重命名处理后的新版本字节码
-	 * @param presentKeys 新版本里实际存在的所有方法键（{@code name + desc}）
-	 * @param ctx         当前匹配上下文
-	 * @return 注入幽灵方法后的最终字节码；若无孤儿则原样返回 {@code newBytes}
-	 */
-	/**
-	 * 统计类中所有通过 {@code invokedynamic} 引导参数直接引用的方法句柄目标出现频次。
-	 * 键格式形如：{@code "com/example/Foo.save()V"}（不含 Handle tag，兼容跨 JDK 版本与私有调用模式差异）。
-	 */
-	private static Map<String, Integer> countHandleTargets(ClassNode cn) {
-		Map<String, Integer> counts = new HashMap<>();
-		if (cn == null || cn.methods == null) return counts;
-		for (MethodNode mn : cn.methods) {
-			if (mn.instructions == null) continue;
-			for (AbstractInsnNode i : mn.instructions) {
-				if (i instanceof InvokeDynamicInsnNode indy && indy.bsmArgs != null) {
-					for (Object a : indy.bsmArgs) {
-						if (a instanceof Handle h) {
-							String key = h.getOwner() + "." + h.getName() + h.getDesc();
-							counts.put(key, counts.getOrDefault(key, 0) + 1);
-						}
-					}
-				}
-			}
-		}
-		return counts;
-	}
-
-	/** 纯委托调用信息：包含被调用的目标方法节点、转发所需的主体指令序列以及上一轮是否已是转发桩。 */
-	private record Delegate(MethodInsnNode target, List<AbstractInsnNode> body, boolean wasForwarding) {}
-
-	/** 包装类内部名集合（用于装箱/拆箱适配识别）。兼容 Java 8 编译。 */
-	private static final Set<String> WRAPPERS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
-		"java/lang/Integer", "java/lang/Long", "java/lang/Short", "java/lang/Byte",
-		"java/lang/Character", "java/lang/Boolean", "java/lang/Float", "java/lang/Double")));
-
-	private static boolean isPrimitive(Type t) {
-		return t.getSort() >= Type.BOOLEAN && t.getSort() <= Type.DOUBLE;
-	}
-
-	private static boolean isBoxing(MethodInsnNode m) {
-		if (m.getOpcode() != Opcodes.INVOKESTATIC || !m.name.equals("valueOf")
-		    || !WRAPPERS.contains(m.owner)) return false;
-		Type[] args = Type.getArgumentTypes(m.desc);
-		Type ret = Type.getReturnType(m.desc);
-		return args.length == 1 && isPrimitive(args[0])
-		       && ret.getSort() == Type.OBJECT && m.owner.equals(ret.getInternalName());
-	}
-
-	private static boolean isUnboxing(MethodInsnNode m) {
-		return m.getOpcode() == Opcodes.INVOKEVIRTUAL && WRAPPERS.contains(m.owner)
-		       && m.name.endsWith("Value") && m.desc.startsWith("()")
-		       && isPrimitive(Type.getReturnType(m.desc));
-	}
-
-	private static boolean isWidening(int op) {
-		return op == Opcodes.I2L || op == Opcodes.I2F || op == Opcodes.I2D
-		       || op == Opcodes.L2F || op == Opcodes.L2D || op == Opcodes.F2D;
-	}
-
-	/**
-	 * 判定方法节点是否为严格的“纯委托或标准适配委托”实现。
-	 *
-	 * <p>支持由 LambdaMetafactory 自动完成的无分支标准适配：装箱、拆箱、基本类型加宽、丢弃返回值 (POP/POP2)、CHECKCAST。</p>
-	 * <p>若上一轮已为此方法注入过幽灵桩（前缀为 {@code LDC loc; ICONST_0/1; INVOKESTATIC onOrphanInvoked}），
-	 * 会自动跳过该固定前缀，并仅提取后续的委托主体指令，避免多轮热更时前缀重复调用或退化为空壳。</p>
-	 */
-	private static Delegate getPureDelegate(MethodNode mn) {
-		if (mn.instructions == null || mn.instructions.size() == 0) return null;
-		List<AbstractInsnNode> real = new ArrayList<>();
-		for (AbstractInsnNode i : mn.instructions) {
-			if (i.getOpcode() >= 0) real.add(i);
-		}
-
-		// 先剥掉"生前指纹"标记：LDC <long>; POP2。它是 injectDummyBody 加的，不是桩体语义的一部分。
-		// 不剥掉的话，下面的转发前缀检测会把它当成 LDC loc，整段判定失效（转发桩退化成空壳）。
-		if (real.size() >= 2
-		    && real.get(0) instanceof LdcInsnNode marker
-		    && marker.cst instanceof Long
-		    && real.get(1).getOpcode() == Opcodes.POP2) {
-			real = new ArrayList<>(real.subList(2, real.size()));
-		}
-
-		// 跳过上一轮转发桩的固定前缀：LDC loc; ICONST_0/1; INVOKESTATIC onOrphanInvoked
-		int start = 0;
-		boolean wasForwarding = false;
-		if (real.size() >= 3
-		    && real.get(0) instanceof LdcInsnNode
-		    && (real.get(1).getOpcode() == Opcodes.ICONST_0 || real.get(1).getOpcode() == Opcodes.ICONST_1)
-		    && real.get(2) instanceof MethodInsnNode p
-		    && p.owner.equals(Type.getInternalName(LambdaAligner.class))
-		    && p.name.equals("onOrphanInvoked")) {
-			start = 3;
-			wasForwarding = (real.get(1).getOpcode() == Opcodes.ICONST_1);
-		} else if (real.size() >= 2
-		           && real.get(0) instanceof LdcInsnNode
-		           && real.get(1) instanceof MethodInsnNode p
-		           && p.owner.equals(Type.getInternalName(LambdaAligner.class))
-		           && p.name.equals("onOrphanInvoked")) {
-			start = 2;
-		}
-		List<AbstractInsnNode> body = real.subList(start, real.size());
-
-		boolean voidRet = Type.getReturnType(mn.desc).getSort() == Type.VOID;
-		int expectSlot = 0;
-		int endSlot = Type.getArgumentsAndReturnSizes(mn.desc) >> 2;   // 参数槽总数（含 this 的 +1）
-		if ((mn.access & Opcodes.ACC_STATIC) != 0) endSlot -= 1;
-
-		MethodInsnNode core = null, onlyInvoke = null;
-		int invokes = 0;
-
-		for (AbstractInsnNode insn : body) {
-			int op = insn.getOpcode();
-			if (insn instanceof VarInsnNode v && op >= Opcodes.ILOAD && op <= Opcodes.ALOAD) {
-				if (v.var != expectSlot) return null;                    // 必须按槽位顺序加载
-				expectSlot += (op == Opcodes.LLOAD || op == Opcodes.DLOAD) ? 2 : 1;
-			} else if (op >= Opcodes.IRETURN && op <= Opcodes.RETURN) {
-				// ok
-			} else if (isWidening(op) || (insn instanceof TypeInsnNode && op == Opcodes.CHECKCAST)) {
-				// ok
-			} else if ((op == Opcodes.POP || op == Opcodes.POP2) && voidRet) {
-				// ok：Runnable r = this::a 丢弃返回值
-			} else if (insn instanceof MethodInsnNode m) {
-				invokes++;
-				onlyInvoke = m;
-				if (!isBoxing(m) && !isUnboxing(m)) {
-					if (core != null) return null;
-					core = m;
-				}
-			} else {
-				return null;
-			}
-		}
-		if (core == null && invokes == 1) core = onlyInvoke;             // 如 IntFunction<Integer> ← Integer::valueOf
-		if (core == null || expectSlot != endSlot) return null;          // 每个形参恰好加载一次
-		return new Delegate(core, body, wasForwarding);
 	}
 
 	public static void onBridgeInvoked(String location) {
 		LambdaCaptureBridge.onBridgeInvoked(location);
 	}
 
-	/**
-	 * 将被删除的 lambda 以“空方法体或透明转发桩”的形式复活注入到新字节码中，
-	 * 防止被缓存的 {@code CallSite} 抛出 {@link NoSuchMethodError}。
-	 *
-	 * <p>复用调用方已经解析好的 {@code oldCn} 提取孤儿方法的签名头，
-	 * 避免再次读取 {@code oldBytes}。</p>
-	 *
-	 * <p>{@code oldCn} 是用 {@code SKIP_DEBUG | SKIP_FRAMES} 读入的，
-	 * 但注入空壳只用到 {@code access} / {@code name} / {@code desc} /
-	 * {@code signature} / {@code exceptions} 这些方法头字段——它们不受
-	 * {@code SKIP_*} 影响。方法体（Code 属性）由 {@link #injectDummyBody}
-	 * 重新生成，不会拷贝 {@code oldCn} 中的原始指令。</p>
-	 * @param oldCn         已解析的旧类节点（由 {@code align} 中的 {@code scan} 提供；{@code SKIP_FRAMES}）
-	 * @param oldBytes      上一轮实际生效的字节码。仅在"保留旧方法体"候选存在时用
-	 *                      {@code EXPAND_FRAMES} 重新解析一次，取方法体（含 StackMapTable）。
-	 * @param newBytes      经过重命名处理后的新版本字节码
-	 * @param presentKeys   新版本里实际存在的所有方法键（{@code name + desc}）
-	 * @param oldMethodRefs 旧版本中所有 indy 句柄引用的目标方法出现频次
-	 * @param newMethodRefs 新版本中所有 indy 句柄引用的目标方法出现频次
-	 * @param ctx           当前匹配上下文
-	 * @return 注入幽灵方法后的最终字节码；若无孤儿则原样返回 {@code newBytes}
-	 */
-	private static byte[] resurrectOrphanedLambdas(ClassNode oldCn, byte[] oldBytes, byte[] newBytes,
-	                                               Set<String> presentKeys,
-	                                               Map<String, Integer> oldMethodRefs,
-	                                               Map<String, Integer> newMethodRefs,
-	                                               MatchContext ctx) {
-		// 1. 旧类里的合成方法键集合，差集就是孤儿
-		Set<String> orphanedKeys = new HashSet<>();
-		var         oldGroups    = ctx.oldGroups;
-		if (ctx.runR) {
-			// 孤儿判定基准是**生效侧**方法表：幽灵桩 / 保留体 / 桥只存在于 E_prev，R_prev 里没有它们。
-			// 判据与 scan 的 renameable 逐字对齐（lambda 系名字 && 非 access$），否则普通合成方法
-			// （$default / $annotations 之类）会被误幽灵化。
-			for (MethodNode mn : oldCn.methods) {
-				if (mn.name.startsWith("<") || mn.name.startsWith("access$")) continue;
-				if (!MethodFingerprinter.isSyntheticName(mn.name)) continue;
-				String key = mn.name + mn.desc;
-				if (!presentKeys.contains(key)) orphanedKeys.add(key);
-			}
-		} else {
-			for (int idx = oldGroups.nextEntry(-1); idx != -1; idx = oldGroups.nextEntry(idx)) {
-				List<SyntheticInfo> oldGroup = oldGroups.valueAt(idx);
-				if (oldGroup == null) continue;
-				for (SyntheticInfo oi : oldGroup) {
-					if (!oi.renameable) continue; // 关键修复：只对真正可改名的 Lambda 系方法幽灵化，普通合成方法（如 access$/$default）让其自然缺失
-					String key = oi.name + oi.desc;
-					if (!presentKeys.contains(key)) orphanedKeys.add(key);
-				}
-			}
-		}
-		if (orphanedKeys.isEmpty()) return newBytes;
-
-		// 2. 从已解析的 oldCn 中取遗弃方法的签名头（不再二次读 oldBytes）
-		List<MethodNode> toInject = new ArrayList<>();
-		for (MethodNode mn : oldCn.methods) {
-			String key = mn.name + mn.desc;
-			if (!orphanedKeys.contains(key)) continue;
-			toInject.add(mn);
-		}
-		if (toInject.isEmpty()) return newBytes;
-
-		// 可观测性：幽灵化是"静默"发生在对齐期的。把这行与
-		// warnPositionalMismatch 放在一起看，就能认出"删除 + 改体同时发生"这一形态
-		StringBuilder ghosted = new StringBuilder();
-		int bridgeCount = 0;
-		for (MethodNode mn : toInject) {
-			if (ctx.bridges.containsKey(mn.name + mn.desc)) {
-				bridgeCount++;
-				continue;
-			}
-			if (ghosted.length() > 0) ghosted.append(", ");
-			ghosted.append(mn.name);
-		}
-		RemoldAgent.info("[LambdaAligner] " + oldCn.name + " ghosted " + (toInject.size() - bridgeCount)
-		                  + " method(s) (old CallSites will fuse/degrade): " + ghosted
-		                  + (bridgeCount > 0 ? "; created " + bridgeCount + " capture bridge(s) (forwarding to new methods)" : ""));
-
-		// 3. 以空壳或转发桩形式追加到新类末尾
-		ClassReader cr = new ClassReader(newBytes);
-		// 关键：不用 COMPUTE_FRAMES，避免 getCommonSuperClass 触发目标类加载
-		ClassWriter  cw        = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
-		final String className = cr.getClassName();
-
-		// 生前指纹必须按 name+desc 精确取：幽灵可能**同名不同描述符**
-		// （JDK 8 的 lambda$null$0(II) 与 lambda$null$0(I) 就是这样），
-		// 而 infoByName 只按名字索引，取到哪一个取决于索引写入顺序 —— 会让标记值在轮次间抖动，
-		// 破坏"第二轮产物与第一轮逐字节相同"这类不变量。
-		final java.util.Map<String, Long> ghostHashByKey = new java.util.HashMap<>();
-		if (ctx.runR) {
-			// Run R：幽灵集合由继承集定义，生前指纹以元数据为准（规格 §5：Meta 校正）。
-			if (ctx.oldMeta != null) {
-				for (java.util.Map.Entry<String, Long> en : ctx.oldMeta.ghostHashes.entrySet()) {
-					ghostHashByKey.put(en.getKey(), en.getValue() == null ? 0L : en.getValue());
-				}
-			}
-			// 元数据缺项时退回桩体标记（逐字与 Run E 同一口径）。
-			for (MethodNode mn : oldCn.methods) {
-				if (!isGhostMethod(mn)) continue;
-				ghostHashByKey.putIfAbsent(mn.name + mn.desc, readGhostOriginalHash(mn));
-			}
-		}
-		// 键必须与查表口径一致（查的是 toInject 的 Eff 键）：
-		// Run E 下 oldGroups 就是 E_prev，oi.name 即 Eff 名；Run R 下 oldGroups 是 R_prev，
-		// oi.name 只是 javac 槽位身份。这里若直接写 oi.name + oi.desc，被避障改名的 lambda
-		// 会拿 Raw 键去撞 Eff 键：轻则取不到（原标记 0L），重则撞上"Raw 名恰好等于该 Eff 名"
-		// 的同签名兄弟，把兄弟的生前指纹写进幽灵桩，下一次 stepGhostRevive 认不回原主。
-		for (int gi = ctx.oldGroups.nextEntry(-1); gi != -1; gi = ctx.oldGroups.nextEntry(gi)) {
-			List<SyntheticInfo> g = ctx.oldGroups.valueAt(gi);
-			if (g == null) continue;
-			for (SyntheticInfo oi : g) {
-				String key = ctx.effKeyFor(oi);
-				if (ctx.runR && ghostHashByKey.containsKey(key)) continue;   // 生效侧名字优先
-				ghostHashByKey.put(key, oi.ghost ? oi.ghostOriginalHash : oi.hash);
-			}
-		}
-
-		// 2.5 保留旧方法体（docs/lambda/02-orphan-body-retention.md）：
-		//     非 void 孤儿默认把上一轮的真实方法体（含 StackMapTable）搬进幽灵方法，
-		//     避免调用方拿到 null/0 后 NPE / 除零 / 数组越界。只在需要时用 EXPAND_FRAMES
-		//     重新解析一次旧字节码（oldCn 是 SKIP_FRAMES 的），并解析新类结构做成员存活判定。
-		boolean retentionOn = retainOrphanBody || retainOrphanBodyVoid;
-		Map<String, MethodNode> oldBodies = java.util.Collections.emptyMap();
-		ClassNode  oldBodyCn  = null;
-		ClassNode  newStruct  = null;
-		Set<String> plannedKeys = new HashSet<>();
-		for (MethodNode mn : toInject) plannedKeys.add(mn.name + mn.desc);
-		if (retentionOn) {
-			try {
-				oldBodyCn = readWithFrames(oldBytes);
-				newStruct = readStructure(newBytes);
-				Map<String, MethodNode> bodies = new HashMap<>();
-				for (MethodNode m : oldBodyCn.methods) bodies.put(m.name + m.desc, m);
-				oldBodies = bodies;
-			} catch (Throwable t) {
-				RemoldAgent.warn("[LambdaAligner] " + oldCn.name + ": cannot read the previous method bodies ("
-				                 + t + "); orphan lambdas fall back to default-value stubs");
-				retentionOn = false;
-				oldBodies = java.util.Collections.emptyMap();
-			}
-		}
-		final boolean                 retentionActive    = retentionOn;
-		final Map<String, MethodNode> prevBodies         = oldBodies;
-		final ClassNode               prevClassNode      = oldBodyCn;
-		final ClassNode               nextClassNode      = newStruct;
-		final int[]                   retainedBodies     = {0};
-		final List<String>            retentionFallbacks = new ArrayList<>();
-
-		ClassVisitor cv = new ClassVisitor(Opcodes.ASM9, cw) {
-			@Override
-			public void visitEnd() {
-				for (MethodNode mn : toInject) {
-					// 空壳方法必须带 Code 属性，强制清掉 abstract / native
-					int access = mn.access & ~(Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE);
-					MethodVisitor dummy = super.visitMethod(
-					 access, mn.name, mn.desc, mn.signature,
-					 mn.exceptions == null ? null : mn.exceptions.toArray(new String[0]));
-					if (dummy != null) {
-						String     key     = mn.name + mn.desc;
-						MethodNode oldBody = prevBodies.get(key);
-						// 上一轮已经是"保留体"幽灵：原样搬运（它的 3 参标记与旧体一起走），
-						// 保证多轮产物稳定、旧实例拿到的一直是同一份旧逻辑——
-						// 但**必须每轮重做成员存活校验**：上一轮还活着的 helper()/x 可能这一轮被删，
-						// 直接搬运会保留调用已删成员的字节码，旧实例一执行就 NoSuchMethodError / NoSuchFieldError。
-						if (retentionActive && oldBody != null && hasRetainedBodyMarker(oldBody)) {
-							String carriedWhy = OrphanBodyRetention.rejectionReason(
-							 prevClassNode, nextClassNode, oldBody, plannedKeys);
-							if (carriedWhy == null) {
-								injectWholeBody(dummy, access, mn, oldBody);
-								retainedBodies[0]++;
-								TEST_EVENTS.add(new AlignmentEvent("GHOST_KEEP_BODY", mn.name, null,
-								 className + "#" + key + " (carried over)"));
-								continue;
-							}
-							retentionFallbacks.add(key + ": carried-over body rejected (" + carriedWhy + ")");
-						}
-						// 捕获桥优先：这个老键不是"死了"，只是参数表缩水，转发给新方法即可。
-						LambdaCaptureBridge.BridgeSpec bridge = ctx.bridges.get(mn.name + mn.desc);
-						if (bridge != null) {
-							TEST_EVENTS.add(new AlignmentEvent("BRIDGE_INJECT", mn.name, bridge.targetName,
-							 className + "#" + mn.name + mn.desc));
-							LambdaCaptureBridge.injectBridgeBody(dummy, className,
-							 (oldCn.access & Opcodes.ACC_INTERFACE) != 0, bridge);
-							continue;
-						}
-						Delegate delegate = getPureDelegate(mn);
-						boolean canForward = false;
-						if (delegate != null) {
-							String targetKey = delegate.target.owner + "." + delegate.target.name + delegate.target.desc;
-							int newCount = newMethodRefs.getOrDefault(targetKey, 0);
-							int oldCount = oldMethodRefs.getOrDefault(targetKey, 0);
-							// 门禁判定：若上一轮已是转发桩，则只要新版本仍有该方法引用即继承转发；
-							// 若为首次退役为孤儿，则必须满足新版本对该方法引用的句柄数量净增（newCount > oldCount）。
-							canForward = delegate.wasForwarding ? (newCount > 0) : (newCount > oldCount);
-						}
-						long originalHash = ghostHashByKey.getOrDefault(key, 0L);
-						boolean keepPrevious = false;
-						if (!canForward && !isGhostMethod(mn)) {
-							if (retentionActive && oldBody != null) {
-								boolean isVoid = Type.getReturnType(mn.desc).getSort() == Type.VOID;
-								boolean want   = isVoid ? retainOrphanBodyVoid : retainOrphanBody;
-								if (want) {
-									String why = OrphanBodyRetention.rejectionReason(
-									 prevClassNode, nextClassNode, oldBody, plannedKeys);
-									keepPrevious = why == null;
-									if (why != null) {
-										retentionFallbacks.add(key + ": " + why);
-									} else {
-										// 旧实例语义优先：嵌套 lambda 被原位更新时仍保留旧体，
-										// 但混跑（旧外层 + 新内层）必须可观测，不能静默。
-										String mixed = OrphanBodyRetention.updatedNestedLambda(
-										 prevClassNode, nextClassNode, oldBody, plannedKeys);
-										if (mixed != null) {
-											RemoldAgent.warn("[LambdaAligner] " + className + "#" + key
-												+ ": retained body calls updated nested lambda " + mixed
-												+ "; old instances may mix old outer with new inner semantics");
-										}
-									}
-								} else {
-									retentionFallbacks.add(key + ": " + (isVoid
-									 ? "void orphan (remold.agent.orphan_retain_void=false)"
-									 : "non-void orphan (remold.agent.orphan_retain_body=false)"));
-								}
-							} else if (retentionActive) {
-								retentionFallbacks.add(key + ": the previous body is unavailable");
-							}
-						}
-						if (keepPrevious) {
-							injectRetainedBody(dummy, access, mn, className, oldBody, originalHash);
-							retainedBodies[0]++;
-							// 仍发 GHOST 事件：既有计数/哨兵按"这个老名字被幽灵化"记账；
-							// GHOST_KEEP_BODY 是新增的可观测性明细（是否保留旧体）。
-							TEST_EVENTS.add(new AlignmentEvent("GHOST", mn.name, null, className + "#" + key));
-							TEST_EVENTS.add(new AlignmentEvent("GHOST_KEEP_BODY", mn.name, null,
-							 className + "#" + key + " (previous body retained)"));
-						} else {
-							TEST_EVENTS.add(new AlignmentEvent("GHOST", mn.name, null, className + "#" + key));
-							injectDummyBody(dummy, className, mn.name, mn.desc, canForward ? delegate : null,
-							 originalHash);
-						}
-					}
-				}
-				super.visitEnd();
-			}
-		};
-		cr.accept(cv, 0);
-		if (retainedBodies[0] > 0) {
-			RemoldAgent.info("[LambdaAligner] " + oldCn.name + " kept the previous body for "
-			                 + retainedBodies[0] + " orphan lambda(s)"
-			                 + " (existing CallSites keep a legal return value instead of null/0)");
-		}
-		if (!retentionFallbacks.isEmpty()) {
-			RemoldAgent.warn("[LambdaAligner] " + oldCn.name + ": " + retentionFallbacks.size()
-			                 + " orphan lambda(s) fell back to the default-value stub: "
-			                 + describeFirst(retentionFallbacks, 3));
-		}
-		return cw.toByteArray();
-	}
-
-	/** 只列前 {@code n} 条，其余用 {@code +K more} 交代，保证一行可读。 */
-	private static String describeFirst(List<String> items, int n) {
-		StringBuilder sb = new StringBuilder();
-		int limit = Math.min(n, items.size());
-		for (int i = 0; i < limit; i++) {
-			if (i > 0) sb.append("; ");
-			sb.append(items.get(i));
-		}
-		if (items.size() > limit) sb.append("; +").append(items.size() - limit).append(" more");
-		return sb.toString();
-	}
-
-	/** 用 {@code EXPAND_FRAMES} 读入：保留 StackMapTable（{@link FrameNode}）与标签，供方法体搬运。 */
-	private static ClassNode readWithFrames(byte[] bytes) {
-		ClassNode cn = new ClassNode();
-		new ClassReader(bytes).accept(cn, ClassReader.EXPAND_FRAMES);
-		return cn;
-	}
-
-	/** 只读结构（成员表/修饰符），不读方法体。 */
-	private static ClassNode readStructure(byte[] bytes) {
-		ClassNode cn = new ClassNode();
-		new ClassReader(bytes).accept(cn,
-		 ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
-		return cn;
-	}
-
-	private static final String RETAINED_MARKER_DESC = "(Ljava/lang/String;ZZ)V";
-
-	/**
-	 * 上一轮注入的"保留体"幽灵：桩体里有 3 参
-	 * {@code onOrphanInvoked(String, boolean, boolean)} 调用。
-	 * <p>与默认值桩（2 参调用）区分，用于多轮搬运时保持旧体不被重新判定/覆盖。</p>
-	 */
-	private static boolean hasRetainedBodyMarker(MethodNode mn) {
-		for (AbstractInsnNode n : mn.instructions) {
-			if (n instanceof MethodInsnNode m
-			    && m.owner.equals(Type.getInternalName(LambdaAligner.class))
-			    && m.name.equals("onOrphanInvoked")
-			    && m.desc.equals(RETAINED_MARKER_DESC)) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	/**
-	 * 注入"保留上一轮方法体"的幽灵：前缀（指纹标记 + 3 参 onOrphanInvoked）+ 旧方法体（含帧）。
-	 * <p>前缀不改变局部变量与栈，因此旧 StackMapTable 仍然有效；写入侧仍是 {@code COMPUTE_MAXS}。</p>
-	 */
-	private static void injectRetainedBody(MethodVisitor mv, int access, MethodNode header,
-	                                       String className, MethodNode srcBody, long originalHash) {
-		MethodNode out = new MethodNode(Opcodes.ASM9, access, header.name, header.desc,
-		 header.signature, header.exceptions == null ? null : header.exceptions.toArray(new String[0]));
-		if (originalHash != 0L) {
-			out.instructions.add(new LdcInsnNode(originalHash));
-			out.instructions.add(new InsnNode(Opcodes.POP2));
-		}
-		out.instructions.add(new LdcInsnNode(locationOf(className, header.name, header.desc)));
-		out.instructions.add(new InsnNode(Opcodes.ICONST_0));   // willForward = false
-		out.instructions.add(new InsnNode(Opcodes.ICONST_1));   // willRunPreviousBody = true
-		out.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,
-		 Type.getInternalName(LambdaAligner.class), "onOrphanInvoked", RETAINED_MARKER_DESC, false));
-		copyBody(srcBody, out);
-		out.accept(mv);
-	}
-
-	/** 原样搬运上一轮的幽灵方法体（保留体或旧格式桩），不改一个字节。 */
-	private static void injectWholeBody(MethodVisitor mv, int access, MethodNode header, MethodNode srcBody) {
-		MethodNode out = new MethodNode(Opcodes.ASM9, access, header.name, header.desc,
-		 header.signature, header.exceptions == null ? null : header.exceptions.toArray(new String[0]));
-		copyBody(srcBody, out);
-		out.accept(mv);
-	}
-
-	/**
-	 * 搬运方法体：指令、标签、StackMapTable 帧、异常表一起克隆。
-	 * <p>标签必须重建并映射，否则帧/异常表会指向旧 MethodNode 的标签对象，写入器算出的偏移会错。</p>
-	 */
-	private static void copyBody(MethodNode src, MethodNode dst) {
-		Map<LabelNode, LabelNode> labels = new HashMap<>();
-		for (AbstractInsnNode n : src.instructions) {
-			if (n instanceof LabelNode l) labels.put(l, new LabelNode());
-		}
-		if (src.tryCatchBlocks != null) {
-			for (TryCatchBlockNode t : src.tryCatchBlocks) {
-				labels.computeIfAbsent(t.start, k -> new LabelNode());
-				labels.computeIfAbsent(t.end, k -> new LabelNode());
-				labels.computeIfAbsent(t.handler, k -> new LabelNode());
-			}
-		}
-		for (AbstractInsnNode n : src.instructions) {
-			dst.instructions.add(n instanceof LabelNode l ? labels.get(l) : n.clone(labels));
-		}
-		if (src.tryCatchBlocks != null) {
-			for (TryCatchBlockNode t : src.tryCatchBlocks) {
-				dst.tryCatchBlocks.add(new TryCatchBlockNode(
-				 labels.get(t.start), labels.get(t.end), labels.get(t.handler), t.type));
-			}
-		}
-	}
-
-	/**
-	 * 生成空壳 Lambda 方法体或方法引用转发桩的指令流。
-	 * <p>
-	 * <b>关键设计（默认值桩 100% 线性无跳转分支，彻底杜绝 VerifyError）</b>：<br>
-	 * <p>注意：{@link #injectRetainedBody} 走的是另一条路径——它会搬运旧方法体（含
-	 * {@code StackMapTable} 帧与异常表），因此不再是"无分支"形态；见
-	 * {@code docs/lambda/02-orphan-body-retention.md} §3.1。</p>
-	 * 字节码中完全不使用任何 {@code IFEQ} / {@code GOTO} 等分支跳转指令和 {@link Label}。
-	 * 所有的策略判定、孤儿熔断栈探测、异常抛出与日志去重均下沉到纯 Java 静态方法
-	 * {@link #onOrphanInvoked(String, boolean)} 中执行。<br>
-	 * <ul>
-	 *   <li>若为熔断器保护的调用：Java 静态方法直接抛出 {@link NoSuchMethodError} 展开栈中断执行；</li>
-	 *   <li>若为普通业务调用：若命中方法引用委托则透明转发；若非委托则线性返回类型默认值（0 / null / false）。</li>
-	 * </ul>
-	 * 从而在各版本 JVM 下无需 StackMapTable 即可 100% 通过类验证。
-	 * </p>
-	 */
-	private static void injectDummyBody(MethodVisitor mv, String className, String name, String desc,
-	                                    Delegate delegate, long originalHash) {
-		mv.visitCode();
-		boolean willForward = delegate != null;
-
-		// 0. 生前指纹标记：LDC <long>; POP2。
-		//
-		// 桩体一注入，这个方法的指纹就变成空壳的指纹，再也认不出"原封不动加回来"的同一个
-		// lambda。把生前指纹钉在桩体里（跟着字节码走，不依赖任何外部内存），下一轮扫描时
-		// 由 readGhostOriginalHash 读回来，供 stepGhostRevive 认领。
-		// 放在最前面且紧跟 POP2，保证不影响后续指令的栈平衡；getPureDelegate 的转发前缀
-		// 检测会跳过这 2 条指令。
-		if (originalHash != 0L) {
-			mv.visitLdcInsn(originalHash);
-			mv.visitInsn(Opcodes.POP2);
-		}
-
-		// 1. 调用纯 Java 静态方法：统一处理策略分发、熔断栈探测及日志去重。
-		//
-		// 传入拼好的 location 常量与 willForward 标志（单个 LDC + ICONST）：
-		// 运行时热路径上不分配任何 String，集合查找是 O(1) 哈希查找。
-		mv.visitLdcInsn(locationOf(className, name, desc));
-		mv.visitInsn(willForward ? Opcodes.ICONST_1 : Opcodes.ICONST_0);
-		mv.visitMethodInsn(Opcodes.INVOKESTATIC,
-		 Type.getInternalName(LambdaAligner.class),
-		 "onOrphanInvoked", "(Ljava/lang/String;Z)V", false);
-
-		// 2. 若可透明转发，则回放委托方法体指令流；否则 100% 线性无分支返回类型默认值
-		if (willForward) {
-			for (AbstractInsnNode insn : delegate.body) {
-				insn.accept(mv);
-			}
-		} else {
-			injectDefaultReturnValue(mv, Type.getReturnType(desc), desc);
-		}
-		mv.visitMaxs(0, 0);
-		mv.visitEnd();
-	}
-
-	/** location 文本：{@code com.example.Foo#lambda$build$0()V}。注入期算一次，写进字节码常量。 */
-	static String locationOf(String className, String name, String desc) {
-		if (className == null || className.isEmpty()) return name + desc;
-		return className.replace('/', '.') + '#' + name + desc;
-	}
-
-	private static void injectDefaultReturnValue(MethodVisitor mv, Type returnType, String desc) {
-		switch (returnType.getSort()) {
-			case Type.VOID:
-				mv.visitInsn(Opcodes.RETURN);
-				break;
-			case Type.BOOLEAN:
-			case Type.CHAR:
-			case Type.BYTE:
-			case Type.SHORT:
-			case Type.INT:
-				mv.visitInsn(Opcodes.ICONST_0);
-				mv.visitInsn(Opcodes.IRETURN);
-				break;
-			case Type.FLOAT:
-				mv.visitInsn(Opcodes.FCONST_0);
-				mv.visitInsn(Opcodes.FRETURN);
-				break;
-			case Type.LONG:
-				mv.visitInsn(Opcodes.LCONST_0);
-				mv.visitInsn(Opcodes.LRETURN);
-				break;
-			case Type.DOUBLE:
-				mv.visitInsn(Opcodes.DCONST_0);
-				mv.visitInsn(Opcodes.DRETURN);
-				break;
-			case Type.OBJECT:
-			case Type.ARRAY:
-				mv.visitInsn(Opcodes.ACONST_NULL);
-				mv.visitInsn(Opcodes.ARETURN);
-				break;
-			default:
-				throw new IllegalStateException("Unhandled return type parsing: " + desc);
-		}
-	}
-
-	private static final List<OrphanBreakerPredicate>    ORPHAN_BREAKERS       = new CopyOnWriteArrayList<>();
-	private static final List<TransparentFramePredicate> TRANSPARENT_PREDICATES = new CopyOnWriteArrayList<>();
-
 	public static void addOrphanBreaker(OrphanBreakerPredicate predicate) {
-		if (predicate != null) ORPHAN_BREAKERS.add(predicate);
+		LambdaOrphanEmitter.addOrphanBreaker(predicate);
 	}
 
 	public static void removeOrphanBreaker(OrphanBreakerPredicate predicate) {
-		ORPHAN_BREAKERS.remove(predicate);
+		LambdaOrphanEmitter.removeOrphanBreaker(predicate);
 	}
 
 	public static void addTransparentFramePredicate(TransparentFramePredicate predicate) {
-		if (predicate != null) TRANSPARENT_PREDICATES.add(predicate);
+		LambdaOrphanEmitter.addTransparentFramePredicate(predicate);
 	}
 
 	public static void removeTransparentFramePredicate(TransparentFramePredicate predicate) {
-		TRANSPARENT_PREDICATES.remove(predicate);
-	}
-
-	/**
-	 * 已打印过日志的 location（并发安全）。
-	 */
-	private static final Set<String> LOGGED_ORPHANS =
-	 Collections.newSetFromMap(new ConcurrentHashMap<>());
-	private static final Set<String> LOGGED_FORWARDS =
-	 Collections.newSetFromMap(new ConcurrentHashMap<>());
-	/** 保留旧方法体的幽灵：首次被旧实例调用时告警一次（避免每帧刷屏）。 */
-	private static final Set<String> LOGGED_RETAINED =
-	 Collections.newSetFromMap(new ConcurrentHashMap<>());
-
-	/** 日志去重。{@code add} 返回 true 表示本次是首次，才打印。 */
-	private static void logOrphanOnce(String location) {
-		if (LOGGED_ORPHANS.add(location)) {
-			RemoldAgent.warn("[LambdaAligner] orphaned lambda invoked: " + location
-			                  + " (subsequent invocations will be muted)");
-		}
-	}
-
-	private static void logForwardOnce(String location) {
-		if (LOGGED_FORWARDS.add(location)) {
-			RemoldAgent.info("[LambdaAligner] orphaned lambda forwarded to method ref: " + location
-			                  + " (ghost, not reclaimed; subsequent invocations will be muted)");
-		}
-	}
-
-	/**
-	 * 保留旧方法体的幽灵首次被调用：按 location 去重告警。
-	 *
-	 * <p>为什么在这里而不是对齐期：对齐期不知道有没有存活实例在调它，给每个孤儿都发 WARN
-	 * 只会制造噪音；运行期第一次真正走到这里时告警，既说明"哪个类哪个 lambda 在跑旧逻辑"，
-	 * 又对没有存活实例的死孤儿保持安静。</p>
-	 */
-	private static void logRetainedOnce(String location) {
-		if (LOGGED_RETAINED.add(location)) {
-			RemoldAgent.warn("[LambdaAligner] orphaned lambda executed on existing instances: " + location
-			                  + " - running the previous method body instead of returning a default value;"
-			                  + " recreate the holder instance or restart to apply the new logic"
-			                  + " (subsequent invocations will be muted)");
-		}
+		LambdaOrphanEmitter.removeTransparentFramePredicate(predicate);
 	}
 
 	/**
@@ -4979,7 +3412,7 @@ public class LambdaAligner {
 	 * @param location 形如 {@code com.example.Foo#lambda$build$0()V} 的常量
 	 */
 	public static void onOrphanInvoked(String location) {
-		onOrphanInvoked(location, false, false);
+		LambdaOrphanEmitter.onOrphanInvoked(location);
 	}
 
 	/**
@@ -4988,101 +3421,22 @@ public class LambdaAligner {
 	 * @param willForward 是否将继续执行转发到方法引用的逻辑
 	 */
 	public static void onOrphanInvoked(String location, boolean willForward) {
-		onOrphanInvoked(location, willForward, false);
+		LambdaOrphanEmitter.onOrphanInvoked(location, willForward);
 	}
 
 	/**
 	 * 当热重载中被删除/孤立的 Lambda 方法被调用时由生成的字节码调用
 	 * （保留旧方法体的幽灵走这个三参入口）。
-	 *
-	 * @param location            形如 {@code com.example.Foo#lambda$build$0()V} 的常量
-	 * @param willForward         是否将继续执行转发到方法引用的逻辑
-	 * @param willRunPreviousBody 桩体随后会执行<b>上一轮的真实方法体</b>（保留体），
-	 *                            而不是返回类型默认值 {@code 0/null/false}
 	 */
 	public static void onOrphanInvoked(String location, boolean willForward, boolean willRunPreviousBody) {
-		OrphanPolicy policy = orphanPolicy;
-
-		if (policy == OrphanPolicy.SMART_ADAPTIVE) {
-			if (isOrphanBreakerTriggered()) {
-				throw new NoSuchMethodError("Lambda removed by hot swap: " + location);
-			}
-			// 普通业务调用：去重后打印日志
-			logOrphanDispatch(location, willForward, willRunPreviousBody);
-			return;
-		}
-
-		if (policy == OrphanPolicy.THROW_NO_SUCH_METHOD) {
-			throw new NoSuchMethodError("Lambda removed by hot swap: " + location);
-		}
-
-		if (policy == OrphanPolicy.THROW) {
-			throw new IllegalStateException("Lambda removed by hot swap: " + location);
-		}
-
-		if (policy == OrphanPolicy.LOG_AND_RETURN_DEFAULT) {
-			logOrphanDispatch(location, willForward, willRunPreviousBody);
-			return;
-		}
-
-		// OrphanPolicy.SILENT: 静默返回
-	}
-
-	private static void logOrphanDispatch(String location, boolean willForward, boolean willRunPreviousBody) {
-		if (willForward) {
-			logForwardOnce(location);
-		} else if (willRunPreviousBody) {
-			logRetainedOnce(location);
-		} else {
-			logOrphanOnce(location);
-		}
+		LambdaOrphanEmitter.onOrphanInvoked(location, willForward, willRunPreviousBody);
 	}
 
 	/**
 	 * 判断当前调用是否由已注册的孤儿熔断器（{@link OrphanBreakerPredicate}）发起（决定是否熔断）。
-	 *
-	 * <p><b>判据是"幽灵桩的直接调用者是否匹配注册的熔断器"</b>，而不是"调用栈上某处是否有
-	 * 匹配项"：后者会被无关的同栈帧干扰（例如"业务代码 → 框架分发器 → 另一个 lambda"
-	 * 这种情形，那个 lambda 其实不是受保护回调）。</p>
-	 *
-	 * <p><b>为什么不再用 {@code limit(16)} 扫描</b>：那是<b>深度相关</b>的判据 ——
-	 * 回调链路上只要夹了较深的用户代码或框架帧（例如嵌套的
-	 * {@code Time.run(10, () -> Time.run(5, () -> ...))}），熔断帧就会被截掉，
-	 * 于是误判为"非熔断帧"，<b>熔断静默失效</b>。改为"定位幽灵桩入口后取 +2 帧"
-	 * 与深度无关：栈有多深都能看到直接调用者。</p>
-	 *
-	 * <p>降级路径（无 StackWalker 的环境，如 Android/desugar）同样按"定位 {@code onOrphanInvoked}，
-	 * 再跳过透明帧取调用者"处理，语义与 StackWalker 路径一致。
-	 * 桌面 JVM 上该分支实际不可达（本类最低要求 Java 16+，而 StackWalker 自 Java 9 起可用），
-	 * 保留它是为了 Android 等没有 StackWalker 的运行时。</p>
-	 * @return 若直接调用者匹配已注册的熔断器则返回 true
 	 */
 	public static boolean isOrphanBreakerTriggered() {
-		try {
-			if (StackWalkerHolder.IS_SUPPORTED) {
-				return StackWalkerHolder.checkBreaker();
-			}
-		} catch (Throwable ignored) { }
-
-		try {
-			StackTraceElement[] t     = new Throwable().getStackTrace();
-			int lastOrphan = -1;
-			for (int i = 0; i < t.length; i++) {
-				if (SELF.equals(t[i].getClassName()) && "onOrphanInvoked".equals(t[i].getMethodName())) {
-					lastOrphan = i;
-				} else if (lastOrphan >= 0) {
-					break;
-				}
-			}
-			if (lastOrphan < 0) return false;
-			// 与 StackWalker 路径同构：桩之后跳过透明帧，取第一个真实调用者。
-			int skip  = lastOrphan + 2;   // 跳过最外层 onOrphanInvoked 自身与桩
-			int limit = Math.min(t.length, skip + MAX_TRANSPARENT_FRAMES + 1);
-			while (skip < limit && isTransparentFrame(t[skip].getClassName())) skip++;
-			if (skip >= t.length) return false;
-			return shouldBreakOrphan(t[skip].getClassName(), t[skip].getMethodName());
-		} catch (Throwable ignored) { }
-		return false;
+		return LambdaOrphanEmitter.isOrphanBreakerTriggered();
 	}
 
 	/**
@@ -5091,182 +3445,21 @@ public class LambdaAligner {
 	 */
 	@Deprecated
 	public static boolean isCalledByUpdateRef() {
-		return isOrphanBreakerTriggered();
+		return LambdaOrphanEmitter.isOrphanBreakerTriggered();
 	}
 
-	/** 本类的全限定名，用于在栈帧里定位幽灵桩入口。 */
-	private static final String SELF = LambdaAligner.class.getName();
-
-	/**
-	 * 透明帧扫描的深度上限。
-	 *
-	 * <p>穿透代理/隐藏帧时给一个上界，避免在"整条栈全是透明帧"的病态情况下无界扫描。
-	 * 正常回调链路上透明帧屈指可数（代理 1 + handler 1 + invoke 1 + 少量 MethodHandle 帧），
-	 * 64 远超实际需要，同时仍与栈的绝对深度无关。</p>
-	 */
-	private static final int MAX_TRANSPARENT_FRAMES = 64;
-
-	/**
-	 * 透明帧：桩与真实调用者之间由 {@code invokedynamic} 生成的代理类帧或注册的包装代理帧。
-	 *
-	 * <p>必须穿透，否则"固定 +2"在两种环境下会静默失效，而后果正是本机制要消灭的
-	 * （熔断不触发）：</p>
-	 * <ul>
-	 *   <li>开了 {@code -XX:+ShowHiddenFrames} 时，{@code Foo$$Lambda/0x...} 会出现在栈里；</li>
-	 *   <li>Android/desugar 之后的 {@code -$$Lambda$} 类不是隐藏类，在
-	 *       {@code getStackTrace} 里本来就是可见帧。</li>
-	 * </ul>
-	 *
-	 * <p>此外，UI 框架（如代理层）会用 {@link java.lang.reflect.Proxy}
-	 * 把回调参数包成动态代理：幽灵桩与真正的调用者之间会夹着 <b>代理类帧</b>（JDK 9+ 的
-	 * {@code jdk.proxyN.$ProxyNN}、JDK 8 的 {@code com.sun.proxy.$ProxyNN}）、
-	 * <b>代理 handler 帧</b> 与 <b>方法句柄帧</b>（{@code java.lang.invoke.*}，仅 ShowHiddenFrames 下可见）。
-	 * 这些同样通过已注册的 {@link TransparentFramePredicate} 穿透，否则熔断对"被代理的回调"永远不触发。</p>
-	 */
+	/** 反射契约保留入口（供测试探针 {@code GhostProbe} 调用）。 */
+	@SuppressWarnings("unused")
 	private static boolean isTransparentFrame(String className) {
-		if (className == null || className.isEmpty()) return false;
-		// 刻意只用**类名**（不取 Class 对象），因此无需 RETAIN_CLASS_REFERENCE，
-		// 也避免为判断而触发类加载。
-		if (className.contains("$$Lambda")
-		       || className.contains("$$$Lambda")
-		       || className.startsWith("jdk.internal.reflect.")
-		       || className.startsWith("jdk.proxy")           // JDK 9+ 动态代理 jdk.proxyN.$ProxyNN
-		       || className.startsWith("com.sun.proxy.")      // JDK 8 动态代理
-		       || className.startsWith("java.lang.reflect.")  // Proxy 调度
-		       || className.startsWith("java.lang.invoke.")) { // MethodHandle 隐藏帧
-			return true;
-		}
-		for (TransparentFramePredicate predicate : TRANSPARENT_PREDICATES) {
-			try {
-				if (predicate.isTransparent(className)) return true;
-			} catch (Throwable ignored) { }
-		}
-		return false;
-	}
-
-	/**
-	 * 该帧是否匹配已注册的孤儿熔断器。
-	 */
-	private static boolean shouldBreakOrphan(String className, String methodName) {
-		if (className == null || methodName == null) return false;
-		for (OrphanBreakerPredicate breaker : ORPHAN_BREAKERS) {
-			try {
-				if (breaker.shouldBreak(className, methodName)) return true;
-			} catch (Throwable ignored) { }
-		}
-		return false;
-	}
-
-	/**
-	 * 延迟初始化 Holder 类，避免在缺少 StackWalker 的低版本环境中触发 ClassNotFoundException / NoClassDefFoundError。
-	 */
-	private static class StackWalkerHolder {
-		static final boolean     IS_SUPPORTED;
-		static final StackWalker WALKER;
-
-		static {
-			boolean     supported = false;
-			StackWalker walker    = null;
-			try {
-				walker = StackWalker.getInstance();
-				supported = true;
-			} catch (Throwable ignored) { }
-			IS_SUPPORTED = supported;
-			WALKER = walker;
-		}
-
-		static boolean checkBreaker() {
-			if (!IS_SUPPORTED || WALKER == null) return false;
-			return Boolean.TRUE.equals(WALKER.walk(s -> s
-			 .dropWhile(f -> !isOrphanEntry(f))        // 定位幽灵桩入口
-			 .dropWhile(f -> isOrphanEntry(f))         // 跳过所有 onOrphanInvoked 帧（兼顾 1 参和 2 参重载）
-			 .skip(1)                                  // 跳过桩自身
-			 .limit(MAX_TRANSPARENT_FRAMES + 1)        // 透明帧扫描深度上界
-			 .filter(f -> !isTransparentFrame(f.getClassName()))  // 穿透代理/隐藏帧
-			 .findFirst()
-			 .map(f -> shouldBreakOrphan(f.getClassName(), f.getMethodName()))
-			 .orElse(false)));
-		}
-
-		/** 该帧是否为幽灵桩入口（LambdaAligner 的 {@code onOrphanInvoked}）。 */
-		private static boolean isOrphanEntry(StackWalker.StackFrame f) {
-			return SELF.equals(f.getClassName()) && "onOrphanInvoked".equals(f.getMethodName());
-		}
-	}
-	//endregion
-
-	//region 辅助方法
-
-	/**
-	 * 识别"幽灵空壳"方法：上一轮为兜住被删除 lambda 的老 {@code CallSite} 而注入的空方法。
-	 *
-	 * <p>它调用 {@link #onOrphanInvoked} 来完成策略分发，所以只凭这一个特征就能认出，
-	 * 不需要自定义 attribute。识别出的方法会：
-	 * <ul>
-	 *   <li><b>保留</b>在 {@link MatchContext#oldGroups} 里 —— 孤儿计算要靠它继续复现注入，
-	 *       否则下一轮它就从类里消失了，老 {@code CallSite} 会变成 {@link NoSuchMethodError} 之外的
-	 *       更糟形态；</li>
-	 *   <li><b>不参与任何匹配</b>（见 {@link SyntheticInfo#ghost}）—— 它的名字是死名字，
-	 *       只能被兜住，不能被某个新 lambda "认领"，否则会把本该活着的 lambda 挤到别的名字上。</li>
-	 * </ul>
-	 *
-	 * <p>实测动机（{@code scratch/hstest/del/}）：V1 两个 lambda、V2 删掉第一个（留下幽灵
-	 * {@code $0}）、V3 改剩下那个的方法体。修复前 V3 会对齐成
-	 * {@code $0=[新体]}、{@code $1=幽灵} —— 活着的 lambda 丢了它自己的名字 {@code $1}，
-	 * 持有 {@code $1} 的调用点转而执行新代码。幽灵退出匹配后，它会稳定保持在
-	 * {@code $1} 这个名字下继续当空壳。</p>
-	 */
-	private static boolean isGhostMethod(MethodNode mn) {
-		for (AbstractInsnNode n : mn.instructions) {
-			if (n instanceof MethodInsnNode mi
-			    && mi.owner.equals(Type.getInternalName(LambdaAligner.class))
-			    && mi.name.equals("onOrphanInvoked")) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	/**
-	 * 读出幽灵桩体开头的"生前指纹"标记（{@code LDC <long>; POP2}）。
-	 *
-	 * <p>标记必须放在方法体最前面，且只认前 3 条指令内出现的 long 常量——避免把业务方法里
-	 * 偶然出现的 long 常量误当成标记。返回 0 表示没有标记（旧版本注入的桩、或转发桩）。</p>
-	 */
-	private static long readGhostOriginalHash(MethodNode mn) {
-		AbstractInsnNode first = mn.instructions.getFirst();
-		if (first instanceof LdcInsnNode ldc && ldc.cst instanceof Long v) {
-			AbstractInsnNode next = first.getNext();
-			// 必须紧跟 POP2：这是本对齐器写标记的固定形态。
-			// 旧实现只看"前 3 条指令里有没有 long 常量"，保留旧方法体后方法体自身开头的
-			// long 常量（LDC 123L）会被误读成生前指纹，导致 stepGhostRevive 拿错票据。
-			if (next != null && next.getOpcode() == Opcodes.POP2) return v;
-		}
-		return 0L;
+		return LambdaOrphanEmitter.isTransparentFrame(className);
 	}
 
 	/**
 	 * 扫描一份"实际进入 JVM 的字节码"里全部幽灵桩的生前指纹。
-	 *
-	 * <p>{@code name + desc} → 指纹；无标记的桩记 0。供旁路记账在<b>重定义成功后</b>调用：
-	 * 对齐成功不等于 JVM 接受，所以记录不能绑在 {@code align} 里。</p>
 	 */
 	public static Map<String, Long> scanGhostOriginHashes(byte[] effectiveBytes) {
-		Map<String, Long> out = new HashMap<>();
-		if (effectiveBytes == null || effectiveBytes.length == 0) return out;
-		try {
-			ClassNode cn = new ClassNode();
-			new ClassReader(effectiveBytes).accept(cn, 0);
-			for (MethodNode mn : cn.methods) {
-				if (isGhostMethod(mn)) out.put(mn.name + mn.desc, readGhostOriginalHash(mn));
-			}
-		} catch (Throwable ignored) {
-			// 解析失败返回空表：读侧会退回桩体标记，不影响对齐。
-		}
-		return out;
+		return LambdaOrphanEmitter.scanGhostOriginHashes(effectiveBytes);
 	}
-
-
 
 	/**
 	 * 幽灵复活：把"原封不动加回来"的 lambda 认领回它生前的槽位。

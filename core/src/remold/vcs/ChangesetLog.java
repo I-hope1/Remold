@@ -35,6 +35,9 @@ public final class ChangesetLog {
 	public static final long DEFAULT_EFF_BYTES = 16L * 1024 * 1024;
 
 	private final Map<Long, ArrayDeque<Changeset>> chains = new LinkedHashMap<>();
+
+	/** 每个 scope 上一次提交时的出生水位线：下一代的 {@code prev} 必须接上这一代的 {@code curr}。 */
+	private final Map<Long, Long> lastBirthWatermark = new LinkedHashMap<>();
 	private final Map<Long, Long> abortedCounts = new LinkedHashMap<>();
 	/** 内容寻址的 Eff 字节（Eff_0 与逐代 Eff 共用，按 sha256 去重）：回退的唯一字节来源。 */
 	private final Map<String, byte[]> effBlobs = new LinkedHashMap<>();
@@ -97,11 +100,34 @@ public final class ChangesetLog {
 			for (Map.Entry<String, byte[]> e : effNow.entrySet()) retainEff(e.getValue());
 		}
 		Changeset next = Changeset.create(parent == null ? null : parent.id(), seq, roundId, loaderScope,
-		 sorted, manifest, replayFacts, algoVersion, buildId, patchTiming, eff0, 0L);
+		 sorted, withBirths(loaderScope, manifest), replayFacts, algoVersion, buildId, patchTiming,
+		 eff0, 0L);
 		chain.addLast(next);
 		int window = window();
 		while (chain.size() > window) chain.removeFirst();
 		return next;
+	}
+
+	/**
+	 * 给清单钉上本代的出生水位线 {@code prev..curr}。
+	 *
+	 * <p>{@code prev} 取该 scope 上一次提交时的 {@code curr}，{@code curr} 取当前 {@link LoadFrontier}
+	 * 水位。相邻代必须首尾相接，否则回放端会看到"缺失的一段加载历史"，只能拒绝
+	 * （规格 {@code docs/vcs/07-load-frontier-and-birth-watermark.md} §4.1）。</p>
+	 */
+	private Changeset.Manifest withBirths(long loaderScope, Changeset.Manifest manifest) {
+		Changeset.Manifest base = manifest == null ? Changeset.Manifest.EMPTY : manifest;
+		Changeset.Births supplied = base.births();
+		if (supplied != null && (supplied.prev() != 0L || supplied.curr() != 0L)) {
+			// 调用方已经显式给了水位线（回放夹具 / 测试）：以它为准，只更新 scope 的衔接点。
+			lastBirthWatermark.put(loaderScope, supplied.curr());
+			return base;
+		}
+		long curr = LoadFrontier.watermark();
+		long prev = lastBirthWatermark.getOrDefault(loaderScope, 0L);
+		lastBirthWatermark.put(loaderScope, curr);
+		return new Changeset.Manifest(base.orderedHosts(), base.edges(), base.nodes(),
+		 base.candidateMissing(), new Changeset.Births(prev, curr));
 	}
 
 	/**
@@ -278,7 +304,7 @@ public final class ChangesetLog {
 		}
 		long seq = head.seq() + 1L;
 		Changeset next = Changeset.create(head.id(), seq, roundId, loaderScope, entries,
-		 Changeset.Manifest.EMPTY, List.of(), algoVersion, buildId, patchTiming,
+		 withBirths(loaderScope, Changeset.Manifest.EMPTY), List.of(), algoVersion, buildId, patchTiming,
 		 head.eff0(), plan.targetSeq());
 		chain.addLast(next);
 		int window = window();
@@ -348,6 +374,7 @@ public final class ChangesetLog {
 	}
 
 	public synchronized void reset() {
+		lastBirthWatermark.clear();
 		chains.clear();
 		abortedCounts.clear();
 		effBlobs.clear();

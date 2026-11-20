@@ -94,7 +94,11 @@ class ReplayFactsFormatTest {
 	/** E3: the canonical-form change is visible in the algo version that the Changeset id binds. */
 	@Test
 	void algoVersionMarksTheRawBitsFormat() {
-		assertTrue(Changeset.currentAlgoVersion().startsWith("vcs=2"),
-		 "the two-sided raw-bits format must bump algoVersion (actual=" + Changeset.currentAlgoVersion() + ")");
+		// vcs=2 引入两侧原始位模式；vcs=3 再把出生水位线纳入 id 前置像。
+		// 断言的是"不早于 vcs=2"，因此后续版本递增不会误伤这条语义。
+		String version = Changeset.currentAlgoVersion();
+		int at = version.startsWith("vcs=") ? Integer.parseInt(version.substring(4, 5)) : -1;
+		assertTrue(at >= 2,
+		 "the two-sided raw-bits format must bump algoVersion to at least vcs=2 (actual=" + version + ")");
 	}
 }

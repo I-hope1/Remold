@@ -61,7 +61,25 @@ public final class BytecodePack {
 	public static final String DIR_PROPERTY = "remold.vcs.pack_dir";
 
 	/** 导出包格式版本：清单字段集合或布局变化时递增（回放端按它判兼容）。 */
-	public static final int FORMAT_VERSION = 1;
+	/**
+	 * 导出包格式版本。
+	 *
+	 * <p>2：清单增加出生水位线 {@code births=prev..curr}（规格 {@code docs/vcs/07} §4.1）。
+	 * 读侧对非 2 的包必须<b>显式拒绝</b>，不能按"没有 births 就当空集"放行——那等于伪造加载状态。</p>
+	 */
+	public static final int FORMAT_VERSION = 2;
+
+	/** 兼容性判定结果。 */
+	public enum Compat {
+		/** 包格式与当前版本一致，可回放。 */
+		OK,
+		/** 旧格式（{@code formatVersion < 2}）：没有出生水位线，无法证明复现的是哪个加载状态。 */
+		REFUSED_LEGACY_PACK,
+		/** 清单缺失或损坏。 */
+		REFUSED_MALFORMED,
+		/** 包目录不存在。 */
+		MISSING
+	}
 
 	/** 链式布局下每代子目录前缀，后接十进制 {@code seq}（从 1 开始）。 */
 	public static final String ROUND_DIR_PREFIX = "seq-";
@@ -214,6 +232,40 @@ public final class BytecodePack {
 		}
 	}
 
+	/**
+	 * 判定某个包是否可回放：只认当前 {@link #FORMAT_VERSION}。
+	 *
+	 * <p>旧格式没有出生水位线，回放端无法证明自己复现的是哪个加载状态；混血链（同一目录里既有旧格式又有
+	 * 新格式）同样必须拒绝。两种情况下都<b>不允许</b>把缺失的水位线当作空集。</p>
+	 */
+	public static Compat compat(Path root, long seq) {
+		if (root == null || !Files.isDirectory(root)) return Compat.MISSING;
+		Path manifest = roundDir(root, seq).resolve(MANIFEST_FILE);
+		if (!Files.isRegularFile(manifest)) return Compat.MISSING;
+		try {
+			for (String line : Files.readAllLines(manifest)) {
+				int eq = line.indexOf('=');
+				if (eq <= 0 || !"formatVersion".equals(line.substring(0, eq).trim())) continue;
+				int version = Integer.parseInt(line.substring(eq + 1).trim());
+				return version == FORMAT_VERSION ? Compat.OK : Compat.REFUSED_LEGACY_PACK;
+			}
+		} catch (Throwable t) {
+			return Compat.REFUSED_MALFORMED;
+		}
+		return Compat.REFUSED_MALFORMED;
+	}
+
+	/** 整条链的兼容性：任一代不是当前格式即拒绝（混血链）。 */
+	public static Compat compatChain(Path root) {
+		List<Long> seqs = chainRounds(root);
+		if (seqs.isEmpty()) return Compat.MISSING;
+		for (long seq : seqs) {
+			Compat one = compat(root, seq);
+			if (one != Compat.OK) return one;
+		}
+		return Compat.OK;
+	}
+
 	/** 已导出的 {@code seq} 升序列表（只认带清单的子目录）；未启用或目录不存在返回空表。 */
 	public static List<Long> chainRounds() {
 		return chainRounds(dir());
@@ -354,6 +406,8 @@ public final class BytecodePack {
 		sb.append("patchTiming=")
 		 .append(cs.patchTiming() == null ? "" : cs.patchTiming().name()).append('\n');
 		sb.append("buildId=").append(escape(cs.buildId())).append('\n');
+		Changeset.Births births = cs.manifest() == null ? Changeset.Births.NONE : cs.manifest().births();
+		sb.append("births=").append(births.text()).append('\n');
 		sb.append("entryCount=").append(entries.size()).append('\n');
 		for (int i = 0; i < entries.size(); i++) {
 			Entry e = entries.get(i);

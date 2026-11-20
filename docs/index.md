@@ -100,6 +100,7 @@ flowchart TD
 | [`04-raw-to-raw-realworld-readings.md`](vcs/04-raw-to-raw-realworld-readings.md) | 真实规模语料下 Raw ↔ Raw 对齐的命中、失配与耗时读数 |
 | [`05-generational-field-ledger.md`](vcs/05-generational-field-ledger.md) | 代际字段台账（B2）：`FieldLedger` / `REINIT_APPLIED` 的按代存储（`GenRef(seq,id)`）、回退后 CAS 期望只取目标代与 fail-closed 口径、`replayFacts` 跨代消费规则 |
 | [`06-b1-gc-baseline-readings.md`](vcs/06-b1-gc-baseline-readings.md) | B1 旁路账的内存与 GC 基线读数（保留堆/GC 口径与 B2 引入后的对比方法） |
+| [`07-load-frontier-and-birth-watermark.md`](vcs/07-load-frontier-and-birth-watermark.md) | 加载前沿与出生水位线：编辑/加载双轨、回放水位线与格式版本化、出生点补丁的三条护栏、保守退化与三态可见性 |
 
 ### 2.6 Mixin 热更子系统 (Mixin Hot-Reload)
 体系化收录 Mixin 类加载器权威、覆盖层注入、级联重织入、结构契约突破与合成内部类闸门（`docs/mixin/01..08`）：

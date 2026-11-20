@@ -189,7 +189,7 @@ class ChangesetTickTest {
 	/** C5: a class with no cross-class edge still needs a commit coordinate. */
 	@Test
 	void emptyEdgeManifestStillAdvancesSeq() {
-		Changeset.Manifest empty = new Changeset.Manifest(List.of("L0:a.A"), List.of(),
+		Changeset.Manifest empty = Changeset.Manifest.of(List.of("L0:a.A"), List.of(),
 		 List.of("a.A.f"), List.of());
 		Changeset cs = commit(ChangesetLog.INSTANCE, "r1", entry("a/A", "h"), empty, List.of());
 
@@ -201,7 +201,7 @@ class ChangesetTickTest {
 	/** C5: the manifest is a batch-level field, not something smuggled into per-class entries. */
 	@Test
 	void manifestIsItsOwnFieldAndSurvivesOnTheRecord() {
-		Changeset.Manifest manifest = new Changeset.Manifest(
+		Changeset.Manifest manifest = Changeset.Manifest.of(
 		 List.of("L0:a.A", "L0:a.B"),
 		 List.of("L0:a.B.f -> L0:a.A.base"),
 		 List.of("a.A.base", "a.B.f#REJECTED"),

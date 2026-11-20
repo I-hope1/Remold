@@ -14,6 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import remold.ref.PendingLoadPatch;
+import remold.vcs.AlignmentMetaStore;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -52,8 +53,12 @@ class BirthPatchTest {
 	}
 
 	private static byte[] classBytes(String marker) {
+		return classBytes(marker, "java/lang/Object");
+	}
+
+	private static byte[] classBytes(String marker, String superName) {
 		ClassWriter cw = new ClassWriter(0);
-		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC, INTERNAL, null, "java/lang/Object", null);
+		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC, INTERNAL, null, superName, null);
 		MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "marker",
 		 "()Ljava/lang/String;", null, null);
 		mv.visitCode();
@@ -198,5 +203,63 @@ class BirthPatchTest {
 		mv.visitEnd();
 		cw.visitEnd();
 		return cw.toByteArray();
+	}
+
+	/**
+	 * 穿过真实转换器链的集成断言：AnnotationTransformer 决定生效字节，CacheWarmingTransformer 记账。
+	 *
+	 * <p>这三条正是"注释掉接线是否必挂"的自检点：替换、单次出生记账、继承树拿到生效字节。</p>
+	 */
+	@Test
+	void transformerChainAppliesPatchRecordsOneBirthAndRegistersEffectiveBytes() throws Exception {
+		ProtectionDomain pd = projectDomain();
+		byte[] v1 = classBytes("V1", "probe/V1Base");
+		byte[] v2 = classBytes("V2", "probe/V2Base");
+		long scope = AlignmentMetaStore.INSTANCE.loaderScopeId(loader);
+		PendingLoadPatch.offer(scope, INTERNAL, v2);
+
+		remold.vcs.LoadFrontier.reset();
+		byte[] fromAnnotation = new remold.AnnotationTransformer()
+		 .transform(loader, INTERNAL, null, pd, v1);
+		assertArrayEquals(v2, fromAnnotation,
+		 "the annotation transformer must return the patched bytes to the JVM");
+
+		// JVM 会把返回的字节喂给下一个 transformer（注册顺序：AnnotationTransformer 在前）。
+		byte[] effective = fromAnnotation == null ? v1 : fromAnnotation;
+		byte[] fromCacheWarming = new RemoldAgent.CacheWarmingTransformer()
+		 .transform(loader, INTERNAL, null, pd, effective);
+		assertNull(fromCacheWarming, "the cache-warming transformer never substitutes bytes");
+		assertArrayEquals(v2, RemoldAgent.getRuntimeBytecode(DOT),
+		 "the recorded runtime baseline must be the effective (patched) bytes");
+
+		assertEquals(1L, remold.vcs.LoadFrontier.watermark(),
+		 "one load must advance the frontier exactly once (no double accounting)");
+
+		assertTrue(remold.AnnotationTransformer.HierarchyTree
+		 .knownSubtypes("probe/V2Base", loader).contains(INTERNAL),
+		 "the hierarchy tree must register the effective bytes (v2 superclass)");
+		assertFalse(remold.AnnotationTransformer.HierarchyTree
+		 .knownSubtypes("probe/V1Base", loader).contains(INTERNAL),
+		 "the stale superclass must not be the one recorded");
+	}
+
+	/** 对齐队列优先：对齐字节与出生补丁同时存在时用对齐字节，并把补丁消费掉。 */
+	@Test
+	void alignmentQueueWinsOverBirthPatch() throws Exception {
+		ProtectionDomain pd = projectDomain();
+		byte[] v1 = classBytes("V1", "java/lang/Object");
+		byte[] aligned = classBytes("ALIGNED", "probe/AlignedBase");
+		byte[] patch = classBytes("PATCH", "probe/PatchBase");
+		long scope = AlignmentMetaStore.INSTANCE.loaderScopeId(loader);
+		PendingLoadPatch.offer(scope, INTERNAL, patch);
+		remold.AnnotationTransformer.pendingAlignedClasses.put(INTERNAL, aligned);
+
+		byte[] result = new remold.AnnotationTransformer()
+		 .transform(loader, INTERNAL, null, pd, v1);
+
+		assertArrayEquals(aligned, result,
+		 "already-computed alignment bytes must not be overwritten by the raw birth patch");
+		assertEquals(0, PendingLoadPatch.pending(),
+		 "the pending patch must be discarded once the alignment queue supplied effective bytes");
 	}
 }

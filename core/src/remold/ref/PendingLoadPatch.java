@@ -4,6 +4,15 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.regex.Pattern;
+import java.util.function.BiFunction;
+
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.FieldVisitor;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Opcodes;
+
+import remold.vcs.AlignmentMetaStore;
 
 /**
  * 出生点补丁：某类在构建输出里已被改成 v2、但 JVM 还没加载它时，用它第一次加载的那一刻替换字节。
@@ -47,8 +56,6 @@ public final class PendingLoadPatch {
 		EQUAL,
 		/** 非工作区类：不替换。 */
 		REFUSED_NON_PROJECT,
-		/** loader scope 不匹配：不替换（防跨 loader 冒名）。 */
-		REFUSED_LOADER_MISMATCH,
 		/** 疑似已织入：不替换，保留上游结果。 */
 		REFUSED_WOVEN,
 		/** 磁盘 Raw 取不到或形态无法解释：不替换。 */
@@ -74,8 +81,8 @@ public final class PendingLoadPatch {
 		}
 	}
 
-	/** 待决记录：磁盘 Raw v2 字节 + 记录时的加载前沿水位线（用于观测陈旧程度）。 */
-	private record Pending(long loaderScope, byte[] diskRaw, long watermark) { }
+	/** 待决记录：磁盘 Raw v2 字节（变换在出生时做，见护栏 3）。 */
+	private record Pending(long loaderScope, byte[] diskRaw) { }
 
 	private static final Object LOCK = new Object();
 	private static final Map<String, Pending> PENDING = new LinkedHashMap<>();
@@ -103,7 +110,7 @@ public final class PendingLoadPatch {
 				PENDING.remove(oldest);
 			}
 			PENDING.put(key(loaderScope, internalName),
-			 new Pending(loaderScope, Arrays.copyOf(diskRaw, diskRaw.length), 0L));
+			 new Pending(loaderScope, Arrays.copyOf(diskRaw, diskRaw.length)));
 		}
 	}
 
@@ -118,7 +125,7 @@ public final class PendingLoadPatch {
 	 */
 	public static Decision decide(long loaderScope, String internalName, byte[] buffer,
 	                              boolean projectLocated,
-	                              java.util.function.BiFunction<String, byte[], byte[]> applySourceTransforms) {
+	                              BiFunction<String, byte[], byte[]> applySourceTransforms) {
 		Pending pending;
 		synchronized (LOCK) {
 			pending = PENDING.get(key(loaderScope, internalName));
@@ -135,10 +142,8 @@ public final class PendingLoadPatch {
 
 	private static Decision evaluate(Pending pending, String internalName, byte[] buffer,
 	                                 boolean projectLocated,
-	                                 java.util.function.BiFunction<String, byte[], byte[]> transforms) {
+	                                 BiFunction<String, byte[], byte[]> transforms) {
 		if (!projectLocated) return new Decision(Outcome.REFUSED_NON_PROJECT, null);
-		if (pending.loaderScope() < 0L) return new Decision(Outcome.REFUSED_LOADER_MISMATCH, null);
-
 		String dot = internalName.replace('/', '.');
 		if (looksWoven(internalName, buffer)) return new Decision(Outcome.REFUSED_WOVEN, null);
 
@@ -173,24 +178,23 @@ public final class PendingLoadPatch {
 
 	private static boolean hasMixinMemberName(byte[] buffer) {
 		try {
-			org.objectweb.asm.ClassReader reader = new org.objectweb.asm.ClassReader(buffer);
+			ClassReader reader = new ClassReader(buffer);
 			boolean[] hit = {false};
-			reader.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9) {
+			reader.accept(new ClassVisitor(Opcodes.ASM9) {
 				@Override
-				public org.objectweb.asm.FieldVisitor visitField(int access, String name, String desc,
+				public FieldVisitor visitField(int access, String name, String desc,
 				                                                 String signature, Object value) {
 					if (name != null && MIXIN_MEMBER.matcher(name).matches()) hit[0] = true;
 					return null;
 				}
 
 				@Override
-				public org.objectweb.asm.MethodVisitor visitMethod(int access, String name, String desc,
+				public MethodVisitor visitMethod(int access, String name, String desc,
 				                                                   String signature, String[] exceptions) {
 					if (name != null && MIXIN_MEMBER.matcher(name).matches()) hit[0] = true;
 					return null;
 				}
-			}, org.objectweb.asm.ClassReader.SKIP_CODE | org.objectweb.asm.ClassReader.SKIP_DEBUG
-			 | org.objectweb.asm.ClassReader.SKIP_FRAMES);
+			}, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
 			return hit[0];
 		} catch (Throwable t) {
 			// 读不出来就当作"疑似织入"：拒绝替换的方向是安全的（否则可能覆盖掉不可解析的产物）。
@@ -201,7 +205,7 @@ public final class PendingLoadPatch {
 	/** 丢弃某类的待决记录（对齐队列已经给出生效字节时调用）。 */
 	public static void discard(ClassLoader loader, String internalName) {
 		if (internalName == null) return;
-		long scope = remold.vcs.AlignmentMetaStore.INSTANCE.loaderScopeId(loader);
+		long scope = AlignmentMetaStore.INSTANCE.loaderScopeId(loader);
 		synchronized (LOCK) {
 			PENDING.remove(key(scope, internalName));
 		}
@@ -213,8 +217,8 @@ public final class PendingLoadPatch {
 	 */
 	public static Decision take(ClassLoader loader, String internalName, byte[] buffer,
 	                            boolean projectLocated,
-	                            java.util.function.BiFunction<String, byte[], byte[]> transforms) {
-		long scope = remold.vcs.AlignmentMetaStore.INSTANCE.loaderScopeId(loader);
+	                            BiFunction<String, byte[], byte[]> transforms) {
+		long scope = AlignmentMetaStore.INSTANCE.loaderScopeId(loader);
 		return decide(scope, internalName, buffer, projectLocated, transforms);
 	}
 

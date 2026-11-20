@@ -23,7 +23,6 @@ import static remold.RemoldAgent.error;
 import static org.objectweb.asm.Opcodes.*;
 import remold.ref.PendingLoadPatch;
 import remold.vcs.AlignmentMetaStore;
-import remold.vcs.LoadFrontier;
 
 /**
  * 核心类文件转换器（ClassFileTransformer）。
@@ -174,7 +173,6 @@ public class AnnotationTransformer implements ClassFileTransformer {
 		// 加载期拦截：若属于已对齐但尚未加载的类，优先使用对齐后的字节码。
 		// 出生点补丁排在它之后：对齐结果是"已经算好的字节"，不能被原始 Raw 覆盖。
 		byte[] pending = null;
-		boolean birthPatched = false;
 		if (classBeingRedefined == null) {
 			pending = pendingAlignedClasses.remove(className);
 			if (pending == null) {
@@ -194,7 +192,6 @@ public class AnnotationTransformer implements ClassFileTransformer {
 				if (decision.applied()) {
 					classfileBuffer = decision.bytes();
 					modified = true;
-					birthPatched = true;
 				}
 			}
 		}
@@ -204,11 +201,6 @@ public class AnnotationTransformer implements ClassFileTransformer {
 		try {
 			HierarchyTree.register(classfileBuffer); // TODO: 如果父类是系统类，可能会出错
 		} catch (Throwable ignored) {
-		}
-		if (birthPatched) {
-			// 替换生效后按"生效字节"记出生，而不是按加载器送来的旧字节（同一份世界记录）。
-			LoadFrontier.birth(AlignmentMetaStore.INSTANCE.loaderScopeId(loader), className,
-			 AlignmentMetaStore.sha256Hex(classfileBuffer));
 		}
 
 		byte[] bytes = classfileBuffer;  // 不clone，用引用做"是否修改"判断

@@ -5,7 +5,6 @@ core/src/remold/AnonClassAligner.java	15
 core/src/remold/AnonClassHasher.java	2
 core/src/remold/BatchHotswapExecutor.java	15
 core/src/remold/BatchLayoutCoordinator.java	6
-core/src/remold/BytecodeSources.java	2
 core/src/remold/DynamicRedefineExecutor.java	1
 core/src/remold/LambdaAligner.java	4
 core/src/remold/LambdaOrphanEmitter.java	1

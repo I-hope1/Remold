@@ -1,5 +1,6 @@
 package remold;
 
+import remold.util.Names;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -79,8 +80,8 @@ public final class BytecodeSources {
 	 */
 	public static byte[] lookup(String internalNameOrDotted) {
 		if (internalNameOrDotted == null || internalNameOrDotted.isEmpty()) return null;
-		String internal = internalNameOrDotted.replace('.', '/');
-		String dotted   = internal.replace('/', '.');
+		String internal = Names.internal(internalNameOrDotted);
+		String dotted   = Names.external(internal);
 		for (Function<String, byte[]> source : SOURCES) {
 			byte[] bytes = ask(source, internal);
 			if (bytes != null) return bytes;
@@ -90,6 +91,37 @@ public final class BytecodeSources {
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * 查询全部来源，返回去重后的命中结果。
+	 *
+	 * <p>与 {@link #lookup(String)} 的差别只在"愿不愿意看见冲突"：这里会把每个来源都问一遍，
+	 * 让调用方能区分"只有一个来源有这份字节"与"多个来源给出不同字节"。后者必须按不可证处理
+	 * ——运行期已织入的字节与磁盘 Raw 混在一起猜，正是最难查的一类错误。</p>
+	 *
+	 * @param internalNameOrDotted 内部名或点分名
+	 * @return 去重后的命中字节（按来源登记顺序）；无命中返回空表
+	 */
+	public static java.util.List<byte[]> lookupAll(String internalNameOrDotted) {
+		if (internalNameOrDotted == null || internalNameOrDotted.isEmpty()) return java.util.List.of();
+		String internal = Names.internal(internalNameOrDotted);
+		String dotted = Names.external(internal);
+		java.util.List<byte[]> hits = new java.util.ArrayList<>(2);
+		for (Function<String, byte[]> source : SOURCES) {
+			byte[] bytes = ask(source, internal);
+			if (bytes == null && !dotted.equals(internal)) bytes = ask(source, dotted);
+			if (bytes == null) continue;
+			boolean duplicate = false;
+			for (byte[] seen : hits) {
+				if (java.util.Arrays.equals(seen, bytes)) {
+					duplicate = true;
+					break;
+				}
+			}
+			if (!duplicate) hits.add(bytes);
+		}
+		return hits;
 	}
 
 	/** 已登记的来源数量（诊断与测试用）。 */

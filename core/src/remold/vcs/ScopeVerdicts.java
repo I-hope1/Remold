@@ -1,6 +1,10 @@
 package remold.vcs;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
 
@@ -116,8 +120,8 @@ public final class ScopeVerdicts {
 		return dropped;
 	}
 
-	private java.util.List<Slot> allSlots() {
-		java.util.List<Slot> out = new java.util.ArrayList<>(slots.values());
+	private List<Slot> allSlots() {
+		List<Slot> out = new ArrayList<>(slots.values());
 		out.add(bootstrapSlot);
 		return out;
 	}
@@ -139,11 +143,11 @@ public final class ScopeVerdicts {
 
 	/** 诊断读数。 */
 	public synchronized Map<String, Long> counters() {
-		Map<String, Long> out = new java.util.LinkedHashMap<>();
+		Map<String, Long> out = new LinkedHashMap<>();
 		out.put("recorded", recordedTotal);
 		out.put("forgotten", forgottenTotal);
 		out.put("staleChecks", staleChecks);
-		return java.util.Collections.unmodifiableMap(out);
+		return Collections.unmodifiableMap(out);
 	}
 
 	/** 清空（测试与 agent 重启口径）。 */

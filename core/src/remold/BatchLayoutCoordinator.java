@@ -401,6 +401,31 @@ final class BatchLayoutCoordinator {
 	}
 
 	/**
+	 * 空索引判定（S2）：只有加载前沿相对上次判空推进过才重扫，返回本次是否发生了重扫。
+	 *
+	 * @return 1 表示这次重扫了，0 表示水位线没变/重扫后仍空
+	 */
+	static int rescanOnEmptyIndexForTest() {
+		long frontier = LoadFrontier.watermark();
+		if (emptyIndexWatermark == frontier) return 0;
+		rescanLoadedClassesForOffsets();
+		emptyIndexWatermark = frontier;
+		emptyIndexRescans++;
+		return 1;
+	}
+
+	/** 测试用：把"上次判空水位线"重置为未记录。 */
+	static void resetEmptyIndexWatermarkForTest() {
+		emptyIndexWatermark = -1L;
+		emptyIndexRescans = 0;
+	}
+
+	/** 测试用：已发生的空索引重扫次数。 */
+	static int rescanCountForTest() {
+		return emptyIndexRescans;
+	}
+
+	/**
 	 * 索引为空但加载前沿推进过时的增量重扫。
 	 *
 	 * <p>扫描对象是<b>已加载</b>的类，字节按既有 {@link #fetchBytecodeForOffsetScanner} 取；
@@ -427,6 +452,7 @@ final class BatchLayoutCoordinator {
 	 * 绑定。用加载前沿做判据，只在"水位线推进过"时才重扫，避免每次无偏移的普通热更都白跑全量预测。</p>
 	 */
 	private static volatile long emptyIndexWatermark = -1L;
+	private static volatile int emptyIndexRescans;
 
 	static void scanLoadedClassForOffsets(byte[] classfileBuffer) {
 		if (classfileBuffer == null) return;

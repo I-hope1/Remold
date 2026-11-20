@@ -9,6 +9,7 @@ import remold.vcs.Changeset;
 import remold.vcs.ChangesetLog;
 import remold.vcs.GenerationalFieldLedger;
 import remold.vcs.GenerationalReplayGate;
+import remold.vcs.ScopeVerdicts;
 import remold.util.ClassIdentity;
 import remold.util.LibTool;
 import remold.util.Names;
@@ -1740,7 +1741,19 @@ public class InitFix {
 		ClassLoader loader = host == null ? null : host.getClassLoader();
 		HierarchyTreeOracle oracle = new HierarchyTreeOracle(loader, classNode);
 		Set<String> subtypes = oracle.knownSubtypes(classNode.name);
-		if (subtypes.isEmpty()) return Map.of();
+		if (subtypes.isEmpty()) {
+			// 空集放行必须带时间戳（S1/S3）：这条结论只在"当前加载前沿"内成立。
+			// 记录之后，若世界推进/进入保守模式/条目被裁剪，后续查询会返回 STALE，
+			// 那时不得再用"没看到子类"作为安全证明。
+			ScopeVerdicts.Availability previous = ScopeVerdicts.INSTANCE.check(loader, classNode.name);
+			ScopeVerdicts.INSTANCE.record(loader, classNode.name, true);
+			if (previous == ScopeVerdicts.Availability.STALE) {
+				// 上一次的"没看到子类"已经过期：这次重判得到空集是新的结论，不沿用旧的。
+				log("Reinit scope verdict for " + Names.external(classNode.name)
+				    + " was stale (load frontier advanced); recomputed on the current world");
+			}
+			return Map.of();
+		}
 		Map<String, byte[]> subtypeBytes = new LinkedHashMap<>();
 		for (String subtype : subtypes) {
 			byte[] bytes = oracle.classBytes(subtype);

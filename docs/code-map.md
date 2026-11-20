@@ -35,15 +35,15 @@
 | 批次堆遍历（同批 K 类收敛为 1 次全堆遍历） | `LibTool.getInstancesBatch` / `hasLiveInstancesBatch`（native `nGetInstancesBatch` / `nHasLiveInstancesBatch` / `nHeapWalkCount`；`core/src/remold/util/LibTool.java`：`BATCH_TARGET_LIMIT=16` 分块、`BATCH_LIVENESS_TARGET_LIMIT=64` 存在性探测不物化对象、任一归属/槽位异常整体退回逐类路径）；接线 `InitFix.beginBatchInstanceCollection` / `takeBatchInstances`、`RemoldAgent.setLivenessBatch` / `prefetchBatchLiveness` 与逐实例驱动消费；规格 `docs/initfix/05-jvmti-heap.md` |
 | JNI 局部引用生命周期回归锁 | `tests/src/BatchScanLocalRefLifetimeTest.java` + `tests/src/BatchHeapScanEquivalenceTest.java` + `tests/src/remold/BatchLivenessPrefetchTest.java` |
 | 删除成员的读者分析 | `RemovedMemberReaders`（`core/src/remold/ref/`，纯函数：字段按 JVMS 5.4.3.2、方法按 5.4.3.3 + 5.4.6 向下分派判"改动后引用会怎样"，输出悬空 / 抽象方法缺失 / 分派转移 / 判不了 / 字段改指向五档） |
-| 匿名类与局部类安全门 | `AnonClassAligner`、`LayoutGate`、`LocalClassGuard` |
+| 匿名类与局部类安全门 | `AnonClassAligner`、`LayoutGate`、`LocalClassGuard`、`BatchLayoutCoordinator`（`applyLocalClassGuard`、`applyRedefineLayoutGate`、`dropEnum*`、`OffsetScanner` 偏移扫描索引） |
 
 ## 3. Agent 基础设施、防抖、Trigger 与启动门闩
 
 | 关注点 | 位置 |
 |:--|:--|
-| Agent 协作模块（`core/src/remold/`） | `EnvironmentProbe`（增强重定义能力探测与降级）、`LayoutDecisionEngine`（布局门纯判决）、`RemovedMemberScanner`（被删成员的批次外读者扫描）、`JarExtractor`（jar 解压与临时挂载映射）、`WatchPathRegistry`（监控路径分槽与聚合）、`FileWatcherService`（WatchService 监听线程）；编排与流水线仍在 `RemoldAgent` |
+| Agent 协作模块（`core/src/remold/`） | `EnvironmentProbe`（增强重定义能力探测与降级）、`LayoutDecisionEngine`（布局门纯判决）、`RemovedMemberScanner`（被删成员的批次外读者扫描）、`JarExtractor`（jar 解压与临时挂载映射）、`WatchPathRegistry`（监控路径分槽与聚合）、`FileWatcherService`（WatchService 监听线程）、`RemoldAgentBootstrap`（`init` / `initConfig` / 路径挂载 / 插件装载与预热）、`AgentWatchCoordinator`（文件/jar 受理、build-trigger 消费、防抖与启动门闩重查）、`BatchHotswapExecutor`（`processChangesBatch` 批次流水线、liveness 预探测、`@OnReload` 与字节读取）、`BatchLayoutCoordinator`（布局门/局部类门/枚举依赖与偏移扫描协调）、`DynamicRedefineExecutor`（`redefineDynamic` 无盘单类重定义）；公共入口、共享状态与反射契约保留在 `RemoldAgent` |
 | 文件热更防抖状态机 | `core/src/remold/DebounceWindow.java`（纯状态机：Class/jar 与资源流各自 trailing-edge 静默窗口；`markClassDueNow` 为外部构建完成信号的 sticky due） |
-| 构建完成 marker（build-trigger） | `core/src/remold/BuildTriggerMarker.java`（解析/拒绝/去重）、`BuildTriggerSweep.java`（按 mtime 收集最近变更）、`RemoldAgent.configureBuildTrigger` / `handleBuildTriggerFile`、`FileWatcherService` 专用 trigger watcher；`gradle-plugin` `BuildTriggerWriter` + `RemoldPlugin` 的 `classes.doLast` + `RemoldConfigResolver` 注入 `-Dremold.agent.build_trigger_file`（DSL `buildTrigger`，默认 `true`）。设计：`docs/runtime/01-build-trigger-mode.md` |
+| 构建完成 marker（build-trigger） | `core/src/remold/BuildTriggerMarker.java`（解析/拒绝/去重）、`BuildTriggerSweep.java`（按 mtime 收集最近变更）、`RemoldAgentBootstrap.configureBuildTrigger` / `AgentWatchCoordinator.handleBuildTriggerFile`、`FileWatcherService` 专用 trigger watcher；`gradle-plugin` `BuildTriggerWriter` + `RemoldPlugin` 的 `classes.doLast` + `RemoldConfigResolver` 注入 `-Dremold.agent.build_trigger_file`（DSL `buildTrigger`，默认 `true`）。设计：`docs/runtime/01-build-trigger-mode.md` |
 | 启动就绪门闩与批次看门狗 | `core/src/remold/StartupGate.java`（`PENDING→READY`，`-Dremold.agent.ready_timeout_ms`）、`core/src/remold/BatchWatchdog.java`（`enter/exit/current` + `armedWatchdogs()` 不变量，`-Dremold.agent.batch_stall_ms` 默认 15000，`[HOTSWAP-STALL]` dump）；挂点 `RemoldAgent.processChanges` 与 `retransformLoaded`，漏斗 `triggerDueHotswap`；就绪投票 `api` `HotswapPlugin.isHostReady()`（`plugin-fabric` `HostReadinessProbe`） |
 | 织入生成类的字节码登记口 | `core/src/remold/BytecodeSources.java`（多来源按顺序查询，无缓存）；被 `HierarchyTreeOracle.readClassBytes` 消费；`plugin-mixin` `MixinInnerClassHotSwap` 回灌与 `refeedForTarget` 按需提前生成 |
 | 运行时常量访问器登记表 | `remold.RuntimeConstants`（core 登记口；`plugin-arc` `ArcHotswapPlugin.onAgentInit` 登记 `Scl.scl()`）；被 `InitFix` 效应审查与捕获桥常量合成共用 |

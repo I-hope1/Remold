@@ -26,7 +26,59 @@ import java.util.jar.Manifest;
 import java.util.zip.ZipEntry;
 
 import static remold.MountManager.*;
-import static remold.RemoldAgent.*;
+
+import remold.RemoldAgent.CacheWarmingTransformer;
+import remold.RemoldAgent.RedefineMode;
+
+import static remold.RemoldAgent.ANON_ALIGN;
+import static remold.RemoldAgent.ANON_DEBUG;
+import static remold.RemoldAgent.ANON_LAYOUT_GATE;
+import static remold.RemoldAgent.ANON_STRICT;
+import static remold.RemoldAgent.ASSET_SHAKE_MS;
+import static remold.RemoldAgent.BUILD_TRIGGER_FILE;
+import static remold.RemoldAgent.DEBOUNCE;
+import static remold.RemoldAgent.DEBUG;
+import static remold.RemoldAgent.DIFF_LOG;
+import static remold.RemoldAgent.ENABLE_HOTSWAP_EVENT;
+import static remold.RemoldAgent.FILE_SHAKE_MS;
+import static remold.RemoldAgent.FORCE_REINIT;
+import static remold.RemoldAgent.FORCE_STATIC_LAMBDA;
+import static remold.RemoldAgent.HOTSWAP_BLACKLIST;
+import static remold.RemoldAgent.HOTSWAP_LOCK;
+import static remold.RemoldAgent.INIT_FIX;
+import static remold.RemoldAgent.INTERNAL_AFFECTED_PASSTHROUGH;
+import static remold.RemoldAgent.LAMBDA_ALIGN;
+import static remold.RemoldAgent.LAMBDA_STRICT;
+import static remold.RemoldAgent.LAYOUT_GATE;
+import static remold.RemoldAgent.LOCAL_CLASS_GUARD;
+import static remold.RemoldAgent.MIXIN_MEMBER_ALIGN;
+import static remold.RemoldAgent.PERF_LOG;
+import static remold.RemoldAgent.REDEFINE_MODE;
+import static remold.RemoldAgent.RETRANSFORM_LOADED;
+import static remold.RemoldAgent.SOURCE_RUNTIME;
+import static remold.RemoldAgent.TRAILING_OBSERVERS;
+import static remold.RemoldAgent.TRAILING_OBSERVERS_ARMED;
+import static remold.RemoldAgent.TWO_PHASE;
+import static remold.RemoldAgent.UI_HOOK;
+import static remold.RemoldAgent.activeWatchDirs;
+import static remold.RemoldAgent.activeWatchJars;
+import static remold.RemoldAgent.appendSelfToBootstrapSearch;
+import static remold.RemoldAgent.boolProp;
+import static remold.RemoldAgent.degradationReason;
+import static remold.RemoldAgent.degradeForMissingEnhancedRedefinition;
+import static remold.RemoldAgent.error;
+import static remold.RemoldAgent.info;
+import static remold.RemoldAgent.inst;
+import static remold.RemoldAgent.intProp;
+import static remold.RemoldAgent.intPropAsset;
+import static remold.RemoldAgent.isEnhancedHotswapEnabled;
+import static remold.RemoldAgent.log;
+import static remold.RemoldAgent.plugins;
+import static remold.RemoldAgent.registerPlugin;
+import static remold.RemoldAgent.retransformLoaded;
+import static remold.RemoldAgent.transformer;
+import static remold.RemoldAgent.triggerPluginInit;
+import static remold.RemoldAgent.warn;
 
 /**
  * Agent 启动引导、监控路径与配置初始化及插件发现装载器（从 {@link RemoldAgent} 拆出）。

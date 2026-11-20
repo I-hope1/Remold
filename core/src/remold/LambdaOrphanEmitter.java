@@ -6,6 +6,7 @@ import remold.LambdaAligner.AlignmentEvent;
 import remold.LambdaAligner.MatchContext;
 import remold.LambdaAligner.OrphanPolicy;
 import remold.LambdaAligner.SyntheticInfo;
+import remold.util.Diag;
 import remold.util.LongObjectMap;
 
 import java.util.*;
@@ -261,9 +262,9 @@ final class LambdaOrphanEmitter {
 			if (ghosted.length() > 0) ghosted.append(", ");
 			ghosted.append(mn.name);
 		}
-		RemoldAgent.info("[LambdaAligner] " + oldCn.name + " ghosted " + (toInject.size() - bridgeCount)
-		                  + " method(s) (old CallSites will fuse/degrade): " + ghosted
-		                  + (bridgeCount > 0 ? "; created " + bridgeCount + " capture bridge(s) (forwarding to new methods)" : ""));
+		Diag.info("[LambdaAligner] " + oldCn.name + " ghosted " + (toInject.size() - bridgeCount)
+		          + " method(s) (old CallSites will fuse/degrade): " + ghosted
+		          + (bridgeCount > 0 ? "; created " + bridgeCount + " capture bridge(s) (forwarding to new methods)" : ""));
 
 		// 3. 以空壳或转发桩形式追加到新类末尾
 		ClassReader cr = new ClassReader(newBytes);
@@ -322,7 +323,7 @@ final class LambdaOrphanEmitter {
 				for (MethodNode m : oldBodyCn.methods) bodies.put(m.name + m.desc, m);
 				oldBodies = bodies;
 			} catch (Throwable t) {
-				RemoldAgent.warn("[LambdaAligner] " + oldCn.name + ": cannot read the previous method bodies ("
+				Diag.warn("[LambdaAligner] " + oldCn.name + ": cannot read the previous method bodies ("
 				                 + t + "); orphan lambdas fall back to default-value stubs");
 				retentionOn = false;
 				oldBodies = Collections.emptyMap();
@@ -400,7 +401,7 @@ final class LambdaOrphanEmitter {
 										String mixed = OrphanBodyRetention.updatedNestedLambda(
 										 prevClassNode, nextClassNode, oldBody, plannedKeys);
 										if (mixed != null) {
-											RemoldAgent.warn("[LambdaAligner] " + className + "#" + key
+											Diag.warn("[LambdaAligner] " + className + "#" + key
 												+ ": retained body calls updated nested lambda " + mixed
 												+ "; old instances may mix old outer with new inner semantics");
 										}
@@ -434,14 +435,14 @@ final class LambdaOrphanEmitter {
 		};
 		cr.accept(cv, 0);
 		if (retainedBodies[0] > 0) {
-			RemoldAgent.info("[LambdaAligner] " + oldCn.name + " kept the previous body for "
-			                 + retainedBodies[0] + " orphan lambda(s)"
-			                 + " (existing CallSites keep a legal return value instead of null/0)");
+			Diag.info("[LambdaAligner] " + oldCn.name + " kept the previous body for "
+			          + retainedBodies[0] + " orphan lambda(s)"
+			          + " (existing CallSites keep a legal return value instead of null/0)");
 		}
 		if (!retentionFallbacks.isEmpty()) {
-			RemoldAgent.warn("[LambdaAligner] " + oldCn.name + ": " + retentionFallbacks.size()
-			                 + " orphan lambda(s) fell back to the default-value stub: "
-			                 + describeFirst(retentionFallbacks, 3));
+			Diag.warn("[LambdaAligner] " + oldCn.name + ": " + retentionFallbacks.size()
+			          + " orphan lambda(s) fell back to the default-value stub: "
+			          + describeFirst(retentionFallbacks, 3));
 		}
 		return cw.toByteArray();
 	}
@@ -678,15 +679,15 @@ final class LambdaOrphanEmitter {
 	/** 日志去重。{@code add} 返回 true 表示本次是首次，才打印。 */
 	private static void logOrphanOnce(String location) {
 		if (LOGGED_ORPHANS.add(location)) {
-			RemoldAgent.warn("[LambdaAligner] orphaned lambda invoked: " + location
-			                  + " (subsequent invocations will be muted)");
+			Diag.warn("[LambdaAligner] orphaned lambda invoked: " + location
+			          + " (subsequent invocations will be muted)");
 		}
 	}
 
 	private static void logForwardOnce(String location) {
 		if (LOGGED_FORWARDS.add(location)) {
-			RemoldAgent.info("[LambdaAligner] orphaned lambda forwarded to method ref: " + location
-			                  + " (ghost, not reclaimed; subsequent invocations will be muted)");
+			Diag.info("[LambdaAligner] orphaned lambda forwarded to method ref: " + location
+			          + " (ghost, not reclaimed; subsequent invocations will be muted)");
 		}
 	}
 
@@ -699,7 +700,7 @@ final class LambdaOrphanEmitter {
 	 */
 	private static void logRetainedOnce(String location) {
 		if (LOGGED_RETAINED.add(location)) {
-			RemoldAgent.warn("[LambdaAligner] orphaned lambda executed on existing instances: " + location
+			Diag.warn("[LambdaAligner] orphaned lambda executed on existing instances: " + location
 			                  + " - running the previous method body instead of returning a default value;"
 			                  + " recreate the holder instance or restart to apply the new logic"
 			                  + " (subsequent invocations will be muted)");

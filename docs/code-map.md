@@ -46,7 +46,7 @@
 | 构建完成 marker（build-trigger） | `core/src/remold/BuildTriggerMarker.java`（解析/拒绝/去重）、`BuildTriggerSweep.java`（按 mtime 收集最近变更）、`RemoldAgentBootstrap.configureBuildTrigger` / `AgentWatchCoordinator.handleBuildTriggerFile`、`FileWatcherService` 专用 trigger watcher；`gradle-plugin` `BuildTriggerWriter` + `RemoldPlugin` 的 `classes.doLast` + `RemoldConfigResolver` 注入 `-Dremold.agent.build_trigger_file`（DSL `buildTrigger`，默认 `true`）。设计：`docs/runtime/01-build-trigger-mode.md` |
 | 启动就绪门闩与批次看门狗 | `core/src/remold/StartupGate.java`（`PENDING→READY`，`-Dremold.agent.ready_timeout_ms`）、`core/src/remold/BatchWatchdog.java`（`enter/exit/current` + `armedWatchdogs()` 不变量，`-Dremold.agent.batch_stall_ms` 默认 15000，`[HOTSWAP-STALL]` dump）；挂点 `RemoldAgent.processChanges` 与 `retransformLoaded`，漏斗 `triggerDueHotswap`；就绪投票 `api` `HotswapPlugin.isHostReady()`（`plugin-fabric` `HostReadinessProbe`） |
 | 织入生成类的字节码登记口 | `core/src/remold/BytecodeSources.java`（多来源按顺序查询，无缓存）；被 `HierarchyTreeOracle.readClassBytes` 消费；`plugin-mixin` `MixinInnerClassHotSwap` 回灌与 `refeedForTarget` 按需提前生成 |
-| 运行时常量访问器登记表 | `remold.RuntimeConstants`（core 登记口；`plugin-arc` `ArcHotswapPlugin.onAgentInit` 登记 `Scl.scl()`）；被 `InitFix` 效应审查与捕获桥常量合成共用 |
+| 运行时常量访问器与诊断门面 | `remold.RuntimeConstants`（core 登记口；`plugin-arc` `ArcHotswapPlugin.onAgentInit` 登记 `Scl.scl()`）、`core/src/remold/util/Diag.java`（纯分析/发射模块最小日志门面，由 `RemoldAgent` 静态接入；源码边界由 `AnalysisBoundaryGuardTest` 守卫）、`RemoldAgent.getRuntimeBytecode` / `recordRuntimeBytecode`（`bytecodeCache` / `sourceBytecodeCache` 唯一收口访问器） |
 
 ## 4. 字节码 VCS、Derived Cache、Raw 对齐、Lambda 与孤儿桩
 

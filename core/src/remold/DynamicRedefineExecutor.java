@@ -36,7 +36,46 @@ import java.util.function.Supplier;
 import java.util.jar.*;
 
 import static remold.MountManager.*;
-import static remold.RemoldAgent.*;
+
+import remold.RemoldAgent.BytecodeTransformerBridge;
+import remold.RemoldAgent.GateCachedDiff;
+import remold.RemoldAgent.InternalRedefineContext;
+import remold.RemoldAgent.LayoutAction;
+import remold.RemoldAgent.LayoutDecision;
+import remold.RemoldAgent.ListenerTiming;
+import remold.RemoldAgent.Liveness;
+import remold.RemoldAgent.RemovedMemberScan;
+
+import static remold.RemoldAgent.HOTSWAP_LOCK;
+import static remold.RemoldAgent.INTERNAL_CONTEXT;
+import static remold.RemoldAgent.LAST_REDEFINE_VM_LEVEL_FAILURE;
+import static remold.RemoldAgent.LAYOUT_GATE;
+import static remold.RemoldAgent.PERF_LOG;
+import static remold.RemoldAgent.VM_POISONED_CLASSES;
+import static remold.RemoldAgent.alignAccessMonotonicity;
+import static remold.RemoldAgent.alignMixinGeneratedMembers;
+import static remold.RemoldAgent.annotationDefaultGate;
+import static remold.RemoldAgent.applyTransformerBridges;
+import static remold.RemoldAgent.checkSuperclassDriftIfApplicable;
+import static remold.RemoldAgent.decideLayout;
+import static remold.RemoldAgent.enterInternalRedefine;
+import static remold.RemoldAgent.error;
+import static remold.RemoldAgent.exitInternalRedefine;
+import static remold.RemoldAgent.fetchOriginalBytecode;
+import static remold.RemoldAgent.getRuntimeBytecode;
+import static remold.RemoldAgent.getSourceBytecode;
+import static remold.RemoldAgent.hasLiveInstances;
+import static remold.RemoldAgent.info;
+import static remold.RemoldAgent.inst;
+import static remold.RemoldAgent.isEnhancedHotswapEnabled;
+import static remold.RemoldAgent.isVmLevelRedefineFailure;
+import static remold.RemoldAgent.markVmLevelFailure;
+import static remold.RemoldAgent.notifyBatchListeners;
+import static remold.RemoldAgent.processAnnotations;
+import static remold.RemoldAgent.recordCacheLoader;
+import static remold.RemoldAgent.recordRuntimeBytecode;
+import static remold.RemoldAgent.recordSourceBytecode;
+import static remold.RemoldAgent.warn;
 
 /**
  * 动态单类（无磁盘文件）重定义执行器（从 {@link RemoldAgent} 拆出）。
@@ -110,9 +149,9 @@ final class DynamicRedefineExecutor {
 			}
 
 			long baselineStartNanos = System.nanoTime();
-			byte[] oldBytes = bytecodeCache.get(className);
+			byte[] oldBytes = getRuntimeBytecode(className);
 			if (oldBytes == null) oldBytes = fetchOriginalBytecode(targetClass);
-			if (oldBytes == null) oldBytes = sourceBytecodeCache.get(className);
+			if (oldBytes == null) oldBytes = getSourceBytecode(className);
 			long baselineMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - baselineStartNanos);
 			if (oldBytes == null) {
 				warn("[DYNAMIC-REDEFINE] No baseline for " + className
@@ -225,7 +264,7 @@ final class DynamicRedefineExecutor {
 					HeapFieldWatch.snapshot("after-stage-a", className);
 					// 阶段 A 已生效：分析期 oracle 看的"新结构"仍是 C，但 JVM 当前真实形态是 A，
 					// 缓存先指向 A（与批次两阶段同口径）；C 成功后再推进。
-					bytecodeCache.put(className, stageABytes);
+					recordRuntimeBytecode(className, stageABytes);
 					info("[DYNAMIC-REDEFINE] " + className + ": stage A applied (new shape with old method"
 					     + " bodies); patching live instances before stage C.");
 					long tStageB = System.nanoTime();
@@ -256,10 +295,10 @@ final class DynamicRedefineExecutor {
 						boolean rolledBack = false;
 						try {
 							inst.redefineClasses(new ClassDefinition(targetClass, oldBytes));
-							bytecodeCache.put(className, oldBytes);
+							recordRuntimeBytecode(className, oldBytes);
 							rolledBack = true;
 						} catch (Throwable rollbackFailure) {
-							bytecodeCache.put(className, stageABytes);
+							recordRuntimeBytecode(className, stageABytes);
 							warn("[DYNAMIC-REDEFINE] " + className + ": stage C failed and rollback to the baseline"
 							     + " also failed (" + rollbackFailure + "); the class stays at stage A (old bodies,"
 							     + " patched fields). RESTART required.");
@@ -276,7 +315,7 @@ final class DynamicRedefineExecutor {
 					inst.redefineClasses(new ClassDefinition(targetClass, runtimeBytes));
 					redefMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tRedef);
 					HeapFieldWatch.snapshot("after-redefine", className);
-					bytecodeCache.put(className, runtimeBytes);
+					recordRuntimeBytecode(className, runtimeBytes);
 					long tStageB = System.nanoTime();
 					try {
 						InitFix.afterRedefine(targetClass);
@@ -288,8 +327,8 @@ final class DynamicRedefineExecutor {
 					HeapFieldWatch.snapshot("after-field-patch", className);
 				}
 				long postStartNanos = System.nanoTime();
-				bytecodeCache.put(className, runtimeBytes);
-				sourceBytecodeCache.put(className, sourceBytes);
+				recordRuntimeBytecode(className, runtimeBytes);
+				recordSourceBytecode(className, sourceBytes);
 				recordCacheLoader(className, targetClass.getClassLoader());
 				List<ClassDefinition> defs = Collections.singletonList(new ClassDefinition(targetClass, runtimeBytes));
 				long annoStartNanos = System.nanoTime();
@@ -377,7 +416,7 @@ final class DynamicRedefineExecutor {
 		Path classFile = classFilePath(targetClass);
 		if (classFile != null) {
 			// inBatch 必须包含 target 自己。读者扫描器据此排除"本批类"，只扫批次外其他类。
-			byte[] baseline = bytecodeCache.get(className);
+			byte[] baseline = getRuntimeBytecode(className);
 			Map<String, GateCachedDiff> localCache = null;
 			if (baseline != null && diff != null && diff.oldClass != null && diff.newClass != null) {
 				localCache = new HashMap<>();

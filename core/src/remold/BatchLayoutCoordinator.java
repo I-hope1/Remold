@@ -41,7 +41,44 @@ import java.util.function.Supplier;
 import java.util.jar.*;
 
 import static remold.MountManager.*;
-import static remold.RemoldAgent.*;
+
+import remold.RemoldAgent.AlignmentTransaction;
+import remold.RemoldAgent.GateCachedDiff;
+import remold.RemoldAgent.LayoutAction;
+import remold.RemoldAgent.LayoutDecision;
+import remold.RemoldAgent.Liveness;
+import remold.RemoldAgent.RemovedMemberScan;
+import remold.RemoldAgent.RoundSkips;
+
+import static remold.RemoldAgent.DEBUG;
+import static remold.RemoldAgent.DIFF_LOG;
+import static remold.RemoldAgent.LAYOUT_GATE;
+import static remold.RemoldAgent.LAYOUT_GATE_REJECTED;
+import static remold.RemoldAgent.LAYOUT_GATE_WAIVED;
+import static remold.RemoldAgent.LOCAL_CLASS_GUARD;
+import static remold.RemoldAgent.LOCAL_CLASS_REJECTED;
+import static remold.RemoldAgent.LOCAL_CLASS_WAIVED;
+import static remold.RemoldAgent.OFFSET_STRICT;
+import static remold.RemoldAgent.calculateHash;
+import static remold.RemoldAgent.clearRejected;
+import static remold.RemoldAgent.decideLayout;
+import static remold.RemoldAgent.decideLocalClassGuard;
+import static remold.RemoldAgent.dotted;
+import static remold.RemoldAgent.error;
+import static remold.RemoldAgent.fetchOriginalBytecode;
+import static remold.RemoldAgent.fileDiskHashes;
+import static remold.RemoldAgent.getRuntimeBytecode;
+import static remold.RemoldAgent.hasLiveInstances;
+import static remold.RemoldAgent.info;
+import static remold.RemoldAgent.internalName;
+import static remold.RemoldAgent.isBlacklisted;
+import static remold.RemoldAgent.loadedClassesMap;
+import static remold.RemoldAgent.log;
+import static remold.RemoldAgent.noteRejected;
+import static remold.RemoldAgent.recordRuntimeBytecode;
+import static remold.RemoldAgent.setLivenessBatch;
+import static remold.RemoldAgent.skipVerdictForLayout;
+import static remold.RemoldAgent.warn;
 
 /**
  * 批量热更布局门、局部类/枚举守卫与偏移扫描协调器（从 {@link RemoldAgent} 拆出）。
@@ -276,10 +313,10 @@ final class BatchLayoutCoordinator {
 			for (Map.Entry<String, Class<?>> e : loadedClassesMap.entrySet()) {
 				String name = e.getKey();
 				if (!name.startsWith(hostDot + "$")) continue;
-				byte[] bytes = bytecodeCache.get(name);
+				byte[] bytes = getRuntimeBytecode(name);
 				if (bytes == null) {
 					bytes = fetchOriginalBytecode(e.getValue());
-					if (bytes != null) bytecodeCache.put(name, bytes);
+					if (bytes != null) recordRuntimeBytecode(name, bytes);
 				}
 				if (bytes == null) continue;
 				ClassNode cn = parseClass(bytes);
@@ -376,7 +413,7 @@ final class BatchLayoutCoordinator {
 
 	private static byte[] fetchBytecodeForOffsetScanner(String internalName) {
 		String dotName = dotted(internalName);
-		byte[] b = bytecodeCache.get(dotName);
+		byte[] b = getRuntimeBytecode(dotName);
 		if (b != null) return b;
 		Class<?> c = loadedClassesMap.get(dotName);
 		if (c != null) {
@@ -465,7 +502,7 @@ final class BatchLayoutCoordinator {
 			}
 			return fields;
 		}
-		byte[] b = bytecodeCache.get(dotName);
+		byte[] b = getRuntimeBytecode(dotName);
 		if (b != null) {
 			return parseInstanceFieldsFromBytecode(b);
 		}
@@ -541,10 +578,10 @@ final class BatchLayoutCoordinator {
 			Class<?> targetClass = loadedClassesMap.get(className);
 			if (targetClass == null) continue; // 未加载：无旧状态需要保护
 
-			byte[] oldBytes = bytecodeCache.get(className);
+			byte[] oldBytes = getRuntimeBytecode(className);
 			if (oldBytes == null) {
 				oldBytes = fetchOriginalBytecode(targetClass);
-				if (oldBytes != null) bytecodeCache.put(className, oldBytes);
+				if (oldBytes != null) recordRuntimeBytecode(className, oldBytes);
 			}
 			if (oldBytes == null) {
 				warn("[LAYOUT-SKIP] " + className + ": layout gate skipped — no baseline bytecode"

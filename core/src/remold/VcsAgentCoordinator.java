@@ -21,7 +21,18 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 
-import static remold.RemoldAgent.*;
+import static remold.RemoldAgent.DEBUG;
+import static remold.RemoldAgent.batchWatchLabel;
+import static remold.RemoldAgent.dotted;
+import static remold.RemoldAgent.fileDiskHashes;
+import static remold.RemoldAgent.getRuntimeBytecode;
+import static remold.RemoldAgent.inst;
+import static remold.RemoldAgent.inventedSlots;
+import static remold.RemoldAgent.log;
+import static remold.RemoldAgent.recordRuntimeBytecode;
+import static remold.RemoldAgent.recordSourceBytecode;
+import static remold.RemoldAgent.removeSourceBytecode;
+import static remold.RemoldAgent.warn;
 
 /**
  * VCS 旁路提交与代际回退协调器。
@@ -266,7 +277,7 @@ final class VcsAgentCoordinator {
 					 + " is no longer addressable at the target generation");
 				}
 				step.add(new RevertClass(cls, loader, target,
-				 bytecodeCache.get(target.className().replace('/', '.'))));
+				 getRuntimeBytecode(target.className().replace('/', '.'))));
 			}
 			work.add(step);
 		}
@@ -405,7 +416,7 @@ final class VcsAgentCoordinator {
 	 */
 	private static void syncCachesAfterRevert(ClassLoader loader, ChangesetLog.RevertTarget target) {
 		String dotted = target.className().replace('/', '.');
-		bytecodeCache.put(dotted, target.bytes().clone());
+		recordRuntimeBytecode(dotted, target.bytes().clone());
 		AlignmentMetaStore.Entry head = AlignmentMetaStore.INSTANCE.head(loader, target.className());
 		Set<String> invented = head == null ? Set.of() : head.inventedNames;
 		if (invented.isEmpty()) inventedSlots.remove(dotted);
@@ -414,9 +425,9 @@ final class VcsAgentCoordinator {
 		if (raw == null) {
 			// 拿不到目标代的 Raw 源字节时宁可清空：读侧会退回 {@code bytecodeCache}，
 			// 而留着污染代的源码基线会让下一轮拿错代的源码去配对。
-			sourceBytecodeCache.remove(dotted);
+			removeSourceBytecode(dotted);
 		} else {
-			sourceBytecodeCache.put(dotted, raw.clone());
+			recordSourceBytecode(dotted, raw.clone());
 		}
 		// 磁盘上仍是被退掉的那份内容。标记"无可信基线"（-1 是 changedOnDisk 判据里的无值约定），
 		// 让下一轮扫描把它当改动重新热更上去，而不是误判"未修改"把 JVM 永远留在目标代。

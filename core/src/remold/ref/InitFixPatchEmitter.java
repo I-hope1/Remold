@@ -5,7 +5,7 @@ import org.objectweb.asm.tree.*;
 
 import java.util.*;
 
-import static remold.RemoldAgent.log;
+import static remold.util.Diag.log;
 import static remold.ref.InitFix.*;
 
 /**

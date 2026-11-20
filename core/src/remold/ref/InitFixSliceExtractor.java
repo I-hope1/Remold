@@ -29,8 +29,8 @@ import org.objectweb.asm.tree.analysis.AnalyzerException;
 import org.objectweb.asm.tree.analysis.Frame;
 import org.objectweb.asm.tree.analysis.SourceInterpreter;
 import org.objectweb.asm.tree.analysis.SourceValue;
-import remold.RemoldAgent;
 import remold.RuntimeConstants;
+import remold.util.Diag;
 
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
@@ -43,7 +43,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-import static remold.RemoldAgent.log;
+import static remold.util.Diag.log;
 
 /**
  * InitFix 切片提取器（AliasInterpreter 数据流分析、多构造器根判定与安全检查）。
@@ -162,7 +162,7 @@ final class InitFixSliceExtractor {
 		try {
 			frames = analyze(className, method);
 		} catch (AnalyzerException e) {
-			RemoldAgent.warn("Analysis failed for " + method.name + method.desc
+			Diag.warn("Analysis failed for " + method.name + method.desc
 			                  + ": " + e.getMessage());
 			if (outReasons != null) {
 				for (String f : targetFields) {
@@ -242,7 +242,7 @@ final class InitFixSliceExtractor {
 			}
 
 			if (unsafeReason != null) {
-				RemoldAgent.warn("Field '" + f.name + "' initialization skipped: " + unsafeReason);
+				Diag.warn("Field '" + f.name + "' initialization skipped: " + unsafeReason);
 				InitFixSafetyGate.recordReason(outReasons, f.name,
 				 "no safe initialization expression in " + method.name + method.desc
 				 + ": " + unsafeReason);

@@ -85,7 +85,7 @@ public final class InitializerDrift {
 			byte[] newBytes = e.getValue();
 			if (className == null || newBytes == null) continue;
 			byte[] oldBytes = oldBytesByClass != null
-				? oldBytesByClass.get(className) : RemoldAgent.bytecodeCache.get(className);
+				? oldBytesByClass.get(className) : RemoldAgent.getRuntimeBytecode(className);
 			if (oldBytes == null) continue;
 			Drift drift;
 			try {

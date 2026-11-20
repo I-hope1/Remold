@@ -17,7 +17,43 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 import static remold.MountManager.*;
-import static remold.RemoldAgent.*;
+
+import static remold.RemoldAgent.AGENT_START_MILLIS;
+import static remold.RemoldAgent.BUILD_TRIGGER_FILE;
+import static remold.RemoldAgent.BUILD_TRIGGER_LOOKBACK_MILLIS;
+import static remold.RemoldAgent.BUILD_TRIGGER_SWEEP_WARN;
+import static remold.RemoldAgent.CONCURRENT_HOTSWAP;
+import static remold.RemoldAgent.CONCURRENT_HOTSWAP_PEAK;
+import static remold.RemoldAgent.DEBOUNCE;
+import static remold.RemoldAgent.DEBUG;
+import static remold.RemoldAgent.FILE_SHAKE_MS;
+import static remold.RemoldAgent.GATE_RETRY_MIN_MS;
+import static remold.RemoldAgent.HOTSWAP_LOCK;
+import static remold.RemoldAgent.STARTUP_GATE;
+import static remold.RemoldAgent.activeWatchDirs;
+import static remold.RemoldAgent.activeWatchJars;
+import static remold.RemoldAgent.calculateHash;
+import static remold.RemoldAgent.error;
+import static remold.RemoldAgent.fileDiskHashes;
+import static remold.RemoldAgent.gateBlockLogged;
+import static remold.RemoldAgent.gateReadyLogged;
+import static remold.RemoldAgent.getRuntimeBytecode;
+import static remold.RemoldAgent.info;
+import static remold.RemoldAgent.inst;
+import static remold.RemoldAgent.isBlacklisted;
+import static remold.RemoldAgent.isWatchPathIgnored;
+import static remold.RemoldAgent.lastProcessedBuildEndMillis;
+import static remold.RemoldAgent.lastProcessedBuildId;
+import static remold.RemoldAgent.log;
+import static remold.RemoldAgent.notifyAssetChanges;
+import static remold.RemoldAgent.pendingAssetChanges;
+import static remold.RemoldAgent.pendingChanges;
+import static remold.RemoldAgent.pendingJars;
+import static remold.RemoldAgent.plugins;
+import static remold.RemoldAgent.processChanges;
+import static remold.RemoldAgent.resetLiveInstanceCache;
+import static remold.RemoldAgent.scheduledTask;
+import static remold.RemoldAgent.warn;
 
 /**
  * 文件变化受理、构建完成标记处理、防抖与启动门闩触发协调器（从 {@link RemoldAgent} 拆出）。
@@ -50,7 +86,7 @@ final class AgentWatchCoordinator {
 								Files.createDirectories(outPath.getParent());
 								Files.write(outPath, diskBytes);
 								JarExtractor.tmpToJar().put(outPath, jar);
-								byte[] memBytes = bytecodeCache.get(cName);
+								byte[] memBytes = getRuntimeBytecode(cName);
 								if (memBytes != null && calculateHash(memBytes) != diskHash) {
 									if (DEBUG) log("[INIT-SYNC] " + cName + " (direct jar) out of sync.");
 									outOfSync.add(outPath);
@@ -101,7 +137,7 @@ final class AgentWatchCoordinator {
 											if (cName == null || isBlacklisted(cName)) continue;
 											long diskHash = calculateHash(diskBytes);
 
-											byte[] memBytes = bytecodeCache.get(cName);
+											byte[] memBytes = getRuntimeBytecode(cName);
 											if (memBytes != null && calculateHash(memBytes) != diskHash) {
 												if (DEBUG) log("[INIT-SYNC] " + cName + " (in jar) is out of sync. Reloading...");
 												Path outPath = tmpDir.resolve(entry.getName().replace('/', File.separatorChar));
@@ -156,7 +192,7 @@ final class AgentWatchCoordinator {
 
 			try {
 				long diskHash = calculateHash(diskBytes);
-				byte[] memBytes = bytecodeCache.get(cName);
+				byte[] memBytes = getRuntimeBytecode(cName);
 				if (memBytes != null) {
 					long memHash = calculateHash(memBytes);
 					if (diskHash != memHash) {

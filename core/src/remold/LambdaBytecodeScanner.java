@@ -8,6 +8,7 @@ import remold.LambdaAligner.AlignmentEvent;
 import remold.LambdaAligner.MatchContext;
 import remold.LambdaAligner.SyntheticInfo;
 import remold.vcs.DerivedDataCache;
+import remold.util.Diag;
 import remold.util.LongObjectMap;
 
 import java.util.*;
@@ -308,7 +309,7 @@ final class LambdaBytecodeScanner {
 
 	/** 放弃修复时留痕，避免“静默失效”。 */
 	private static void warnSkipSwitch(MethodNode mn, String reason) {
-		RemoldAgent.info("[LambdaAligner] Skipped $deserializeLambda$ switch repair ("
+		Diag.info("[LambdaAligner] Skipped $deserializeLambda$ switch repair ("
 		                  + mn.name + mn.desc + "): " + reason);
 	}
 

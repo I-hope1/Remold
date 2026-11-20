@@ -16,6 +16,7 @@ import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.VarInsnNode;
+import remold.util.Diag;
 import remold.util.LongObjectMap;
 
 import java.util.ArrayDeque;
@@ -328,12 +329,12 @@ final class LambdaCaptureBridge {
 			if (synth.length() > 0) {
 				LambdaAligner.TEST_EVENTS.add(new LambdaAligner.AlignmentEvent("BRIDGE_SYNTH", oi.name, ni.name,
 					ctx.currentClass + "#" + e.getKey() + " " + synth));
-				RemoldAgent.info("[LambdaAligner] Capture bridge replaying added capture: " + ctx.currentClass + "#"
-				                 + e.getKey() + ": " + synth);
+				Diag.info("[LambdaAligner] Capture bridge replaying added capture: " + ctx.currentClass + "#"
+				          + e.getKey() + ": " + synth);
 			}
 			LambdaAligner.TEST_EVENTS.add(new LambdaAligner.AlignmentEvent("BRIDGE", oi.name, ni.name,
 				ctx.currentClass + "#" + e.getKey() + " -> " + target));
-			RemoldAgent.info("[LambdaAligner] Capture bridge " + ctx.currentClass + "#" + e.getKey()
+			Diag.info("[LambdaAligner] Capture bridge " + ctx.currentClass + "#" + e.getKey()
 			                 + " -> " + target + " (captures: " + oi.captured.size() + " -> "
 			                 + ni.captured.size() + ", old instances remain active)");
 		}
@@ -1542,7 +1543,7 @@ final class LambdaCaptureBridge {
 	 */
 	public static void onBridgeInvoked(String location) {
 		if (LOGGED_BRIDGES.add(location)) {
-			RemoldAgent.info("[LambdaAligner] bridged lambda invoked: " + location
+			Diag.info("[LambdaAligner] bridged lambda invoked: " + location
 			                 + " (capture list shrank; forwarding to the new body)");
 		}
 	}

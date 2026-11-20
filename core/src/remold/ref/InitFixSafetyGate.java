@@ -29,8 +29,8 @@ import org.objectweb.asm.tree.analysis.AnalyzerException;
 import org.objectweb.asm.tree.analysis.Frame;
 import org.objectweb.asm.tree.analysis.SourceInterpreter;
 import org.objectweb.asm.tree.analysis.SourceValue;
-import remold.RemoldAgent;
 import remold.RuntimeConstants;
+import remold.util.Diag;
 
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
@@ -43,7 +43,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-import static remold.RemoldAgent.log;
+import static remold.util.Diag.log;
 
 /**
  * InitFix 静态安全门（Nest 视图、T0 零值等价、P0 最小效应门、参数不可变证明）。
@@ -60,8 +60,8 @@ final class InitFixSafetyGate {
 	 * 的"该字段在任何地方都没被写过"判定。</p>
 	 *
 	 * <p><b>只读字节码，绝不 {@code Class.forName}</b>：优先取
-	 * {@link RemoldAgent#bytecodeCache}（内存里当前生效的新版本），其次取
-	 * {@link remold.BytecodeSources} 登记口（织入期生成的合成类），退化为 ClassLoader
+	 * {@code bytecodeCache}（内存里当前生效的新版本），其次取
+	 * {@code BytecodeSources} 登记口（织入期生成的合成类），退化为 ClassLoader
 	 * 资源流。任一成员读不到时 {@link #complete()} 为 false，调用方必须按"无法证明"处理
 	 * （拒绝），而不是当作"没有第二处写入"。</p>
 	 */
@@ -84,7 +84,7 @@ final class InitFixSafetyGate {
 				oracle.getNestMembers(hostClass.name);
 				return new NestView(oracle.getNestFieldWrites(hostClass.name), true);
 			} catch (IllegalStateException unavailable) {
-				RemoldAgent.warn("Nest scan incomplete for " + hostClass.name + ": "
+				Diag.warn("Nest scan incomplete for " + hostClass.name + ": "
 					+ unavailable.getMessage()
 					+ missingBytecodeHint(unresolvedClassOf(unavailable.getMessage())));
 				return new NestView(List.of(), false);

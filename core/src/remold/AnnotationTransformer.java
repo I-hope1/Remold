@@ -121,9 +121,9 @@ public class AnnotationTransformer implements ClassFileTransformer {
 	 */
 	static boolean isNoOpExternalRedefine(String dotClassName, byte[] rawBytes) {
 		if (dotClassName == null || rawBytes == null) return false;
-		byte[] source = RemoldAgent.sourceBytecodeCache.get(dotClassName);
+		byte[] source = RemoldAgent.getSourceBytecode(dotClassName);
 		if (source != null && Arrays.equals(source, rawBytes)) return true;
-		byte[] runtime = RemoldAgent.bytecodeCache.get(dotClassName);
+		byte[] runtime = RemoldAgent.getRuntimeBytecode(dotClassName);
 		return runtime != null && Arrays.equals(runtime, rawBytes);
 	}
 
@@ -207,9 +207,9 @@ public class AnnotationTransformer implements ClassFileTransformer {
 			}
 
 			// 2. 基线获取与 LayoutGate 校验
-			byte[] oldBytecode = RemoldAgent.bytecodeCache.get(dotClassName);
+			byte[] oldBytecode = RemoldAgent.getRuntimeBytecode(dotClassName);
 			if (oldBytecode == null) {
-				oldBytecode = RemoldAgent.sourceBytecodeCache.get(dotClassName);
+				oldBytecode = RemoldAgent.getSourceBytecode(dotClassName);
 			}
 			if (oldBytecode == null) {
 				oldBytecode = RemoldAgent.fetchOriginalBytecode(classBeingRedefined);
@@ -279,8 +279,8 @@ public class AnnotationTransformer implements ClassFileTransformer {
 
 			// 5. 更新基线缓存
 			byte[] finalBytes = modified ? bytes : classfileBuffer;
-			RemoldAgent.sourceBytecodeCache.put(dotClassName, classfileBuffer);
-			RemoldAgent.bytecodeCache.put(dotClassName, finalBytes);
+			RemoldAgent.recordSourceBytecode(dotClassName, classfileBuffer);
+			RemoldAgent.recordRuntimeBytecode(dotClassName, finalBytes);
 
 			// 记下外部已应用（含织入）的字节指纹，让后续内部批次按"磁盘未变"跳过，避免同一改动二次回调
 			if (!noOpExternal && !captureOnly) {
@@ -957,7 +957,7 @@ public class AnnotationTransformer implements ClassFileTransformer {
 
 			// 尝试从缓存获取 (兼容原有的 bytecodeCache)
 			String dotName     = slashName.replace('/', '.');
-			byte[] cachedBytes = bytecodeCache.get(dotName);
+			byte[] cachedBytes = RemoldAgent.getRuntimeBytecode(dotName);
 			if (cachedBytes != null) {
 				register(cachedBytes);
 				return tree.get(slashName);

@@ -27,6 +27,26 @@ public class MixinHotswapPlugin implements HotswapPlugin {
 	@Override
 	public void onAssetsChanged(Set<Path> changedAssets) {
 		MixinConfigDiff.onAssetsChanged(changedAssets);
+		refreshTargetIndex();
+	}
+
+	/**
+	 * 整表重推一次 Mixin 目标索引。
+	 *
+	 * <p>时机都在宿主/批次侧的稳定点：配置重载、资源变更之后。绝不在类加载路径上调用——
+	 * 那里反向去拿 processor 锁会与 Mixin 自身持锁触发的类加载形成锁反转。</p>
+	 */
+	private static void refreshTargetIndex() {
+		boolean published = MixinTargetPublisher.publishNow();
+		MixinTargetPublisher.warnIfStillUnknown();
+		if (RemoldAgent.DEBUG) {
+			RemoldAgent.log("[Mixin] Target index refresh: " + MixinTargetPublisher.describe(published));
+		}
+	}
+
+	@Override
+	public void onConfigReload() {
+		refreshTargetIndex();
 	}
 
 	/**
@@ -45,6 +65,8 @@ public class MixinHotswapPlugin implements HotswapPlugin {
 	public void onAgentInit(Instrumentation inst) {
 		// agentmain（运行期 attach）路径没有 onPremain 窗口：同样幂等安装一次。
 		MixinClassBaseline.install();
+		// 早期窗口里 processor 往往还没装配：允许失败，索引保持 UNKNOWN（绝不当作"不是目标"）。
+		refreshTargetIndex();
 		try {
 			RemoldAgent.addTransformerBridge(new MixinBytecodeBridge());
 			RemoldAgent.info("[Mixin] Re-weaving bridge registered (plugin-mixin)");

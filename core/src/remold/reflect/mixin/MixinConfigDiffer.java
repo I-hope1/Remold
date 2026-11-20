@@ -179,6 +179,8 @@ public final class MixinConfigDiffer {
 							+ ": no live MixinConfig with that file name is registered");
 					}
 				}
+				// 配置可能刚被改动：整表重推目标索引（在 processor 锁内做拷贝，读端仍是无锁快照）。
+				MixinTargetIndex.publish(List.copyOf(configs));
 			}
 		} catch (Throwable t) {
 			RemoldAgent.warn("[Mixin] Failed to apply mixin config change: " + t);

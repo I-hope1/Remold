@@ -49,6 +49,7 @@ import remold.RemoldAgent.LayoutDecision;
 import remold.RemoldAgent.Liveness;
 import remold.RemoldAgent.RemovedMemberScan;
 import remold.RemoldAgent.RoundSkips;
+import remold.vcs.LoadFrontier;
 
 import static remold.RemoldAgent.DEBUG;
 import static remold.RemoldAgent.DIFF_LOG;
@@ -396,7 +397,36 @@ final class BatchLayoutCoordinator {
 	static void clearOffsetIndex() {
 		scannedOffsetBindings.clear();
 		offsetIndex = OffsetBindingIndex.empty();
+		emptyIndexWatermark = -1L;
 	}
+
+	/**
+	 * 索引为空但加载前沿推进过时的增量重扫。
+	 *
+	 * <p>扫描对象是<b>已加载</b>的类，字节按既有 {@link #fetchBytecodeForOffsetScanner} 取；
+	 * 不做启动全扫、不读磁盘目录树。代价上限是"已加载工程类 × 一次 ASM 常量池扫描"，
+	 * 且只在"索引空 + 水位线推进"这一窄条件下发生。</p>
+	 *
+	 * @return 本次新发现的绑定数
+	 */
+	static int rescanLoadedClassesForOffsets() {
+		int before = scannedOffsetBindings.size();
+		for (Map.Entry<String, Class<?>> e : loadedClassesMap.entrySet()) {
+			Class<?> cls = e.getValue();
+			if (cls == null || cls.isPrimitive() || cls.isArray()) continue;
+			byte[] bytes = fetchBytecodeForOffsetScanner(internalName(cls.getName()));
+			if (bytes != null) scanLoadedClassForOffsets(bytes);
+		}
+		return scannedOffsetBindings.size() - before;
+	}
+
+	/**
+	 * 索引判空时"已经排空"的那个加载前沿水位线；{@code -1} 表示还没记录过。
+	 *
+	 * <p>空索引不等于"工程里没有偏移持有者"：新类出生可能带来新的 {@code Unsafe.objectFieldOffset}
+	 * 绑定。用加载前沿做判据，只在"水位线推进过"时才重扫，避免每次无偏移的普通热更都白跑全量预测。</p>
+	 */
+	private static volatile long emptyIndexWatermark = -1L;
 
 	static void scanLoadedClassForOffsets(byte[] classfileBuffer) {
 		if (classfileBuffer == null) return;
@@ -431,8 +461,16 @@ final class BatchLayoutCoordinator {
 	static SuperclassDriftGate.DriftDecision checkSuperclassDriftIfApplicable(
 			String className, Class<?> targetClass, List<String> changedFields,
 			byte[] newBytes, Map<String, byte[]> newBatchBytes) {
-		if (targetClass == null || changedFields == null || changedFields.isEmpty() || offsetIndex == null || offsetIndex.isEmpty()) {
-			return null;
+		if (targetClass == null || changedFields == null || changedFields.isEmpty()) return null;
+		if (offsetIndex == null || offsetIndex.isEmpty()) {
+			// 空索引有两种含义：①工程里确实没有任何偏移绑定；②索引建立之后又有类出生，
+			// 可能带来新的绑定。只有①可以安全短路；②必须先按新出生的类增量重扫（§2 开放世界）。
+			long frontier = LoadFrontier.watermark();
+			if (emptyIndexWatermark != frontier) {
+				rescanLoadedClassesForOffsets();
+				emptyIndexWatermark = frontier;
+			}
+			if (offsetIndex == null || offsetIndex.isEmpty()) return null;
 		}
 		boolean hasInstanceFieldChange = false;
 		for (String cf : changedFields) {

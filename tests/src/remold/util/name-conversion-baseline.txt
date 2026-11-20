@@ -24,7 +24,6 @@ core/src/remold/ref/InitFixRuntimeDriver.java	1
 core/src/remold/ref/InitFixSliceExtractor.java	1
 core/src/remold/ref/InitializerDrift.java	1
 core/src/remold/ref/InitializerReplay.java	1
-core/src/remold/ref/PendingLoadPatch.java	1
 core/src/remold/ref/ReinitScopeGate.java	2
 core/src/remold/ref/RemovedMemberReaders.java	1
 core/src/remold/reflect/ClassInfoMemberSync.java	2

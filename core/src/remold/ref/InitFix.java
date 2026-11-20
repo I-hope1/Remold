@@ -11,6 +11,7 @@ import remold.vcs.GenerationalFieldLedger;
 import remold.vcs.GenerationalReplayGate;
 import remold.util.ClassIdentity;
 import remold.util.LibTool;
+import remold.util.Names;
 import org.objectweb.asm.*;
 import org.objectweb.asm.tree.*;
 import org.objectweb.asm.tree.analysis.*;
@@ -1084,6 +1085,25 @@ public class InitFix {
 	 * <p>只在批次分析期内累积：事实来自纯函数计划，不依赖运行期写回结果。字面量按描述符定型，
 	 * {@code float}/{@code double} 存原始位模式而不是十进制近似。</p>
 	 */
+	/**
+	 * 该键的代际事实是否被窗口裁剪过（{@code docs/vcs/07} L5）。
+	 *
+	 * <p>裁剪之后 {@code resolve} 可能返回 {@code MISS_NO_FACT}，而它的语义是"索引里没有证据"。
+	 * 若真相是"曾经有、被裁掉了"，继续按 OBLIVIOUS 放行就是把遗忘当成从未发生。</p>
+	 */
+	private static boolean prunedFromLedger(ClassLoader loader, String className, String field) {
+		if (className == null || field == null) return false;
+		try {
+			return GenerationalFieldLedger.INSTANCE.forgottenWriters(loader,
+			 new GenerationalFieldLedger.LedgerKey(
+			  AlignmentMetaStore.INSTANCE.loaderScopeId(loader),
+			  Names.internal(className), field)) > 0;
+		} catch (Throwable t) {
+			// 查询失败按"被裁剪过"处理：方向保守，绝不因为查不到就放行。
+			return true;
+		}
+	}
+
 	private static void captureReplayFacts(Class<?> host,
 	                                       Map<String, InitializerReplay.ReplayField> l1,
 	                                       Map<String, ApplyInitializerReplay.ReplayField> apply) {
@@ -1276,8 +1296,10 @@ public class InitFix {
 				 + " expectation (fail-closed until @RemoldReinit(OVERWRITE) or an explicit rebuild)");
 				continue;
 			}
+			// 被裁剪过的键不能按 OBLIVIOUS 放行：MISS_NO_FACT 可能是"忘了"而不是"从来没有"（规格 L5）。
 			GenerationalReplayGate.Decision decision = GenerationalReplayGate.decide(
-			 resolved, replay.desc(), literalKindOf(replay.desc()));
+			 resolved, replay.desc(), literalKindOf(replay.desc()),
+			 prunedFromLedger(loader, owner, replay.name()));
 			if (decision.oblivious()) continue;
 			GenerationalReplay override = decision.writable()
 			 ? toGenerationalReplay(decision, replay.desc()) : null;
@@ -1313,7 +1335,8 @@ public class InitFix {
 				continue;
 			}
 			GenerationalReplayGate.Decision decision = GenerationalReplayGate.decide(
-			 resolved, replay.fieldDesc(), literalKindOf(replay.fieldDesc()));
+			 resolved, replay.fieldDesc(), literalKindOf(replay.fieldDesc()),
+			 prunedFromLedger(loader, targetInternal, replay.fieldName()));
 			if (decision.oblivious()) continue;
 			GenerationalReplay override = decision.writable()
 			 ? toGenerationalReplay(decision, replay.fieldDesc()) : null;

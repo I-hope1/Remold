@@ -9,17 +9,17 @@
 | 关注点 | 位置 |
 |:--|:--|
 | 入口与主流程 | `InitFix.transform` / `buildPatch` / `applyPatch` |
-| 提取与安全门 | `extractFieldInits`、`checkSafe`、`effectReason`、`blacklistedCallReason`、`builderMutatorReason` |
+| 切片提取与安全门 | `InitFixSliceExtractor`（`AliasInterpreter`、`extractFieldInits`、`checkSafe`、`isRootConstructor`）、`InitFixSafetyGate`（`NestView`、T0/P0 效应检查、`blacklistedCallReason`、`builderMutatorReason`） |
 | L1 存量初值重放（白名单父类匿名子类 + 常量旧值） | `core/src/remold/ref/InitializerReplay.java`（纯函数候选/声明类解析）；`HotswapBridge.KIND_CONDITIONAL_EXPECTED`（旧初值 CAS） |
 | A 档 Kotlin `apply {}` 静态持有者重放（白名单持有者 `<clinit>` + 唯一 provenance） | `core/src/remold/ref/ApplyInitializerReplay.java`（纯分析：`<clinit>` 直线抽象解释、局部变量副本溯源、唯一 `NEW`/唯一 `PUTSTATIC dest`、目标字段安全门）；`InitFix`（`PatchPlan.applyFields` + `applyReplay$N` 补丁方法 + `PatchReport.applyReplayFields`）；`HotswapBridge.KIND_CONDITIONAL_EXPECTED` 的链接期字段复核 |
-| 参数回溯 | `scanParamFields`、`sourceFieldNotImmutableReason`、`InitFix.NestView` |
+| 参数回溯 | `InitFixSafetyGate.scanParamFields`、`sourceFieldNotImmutableReason`、`InitFixSafetyGate.NestView` |
 | 离线层级 | `ClassHierarchyOracle` / `HierarchyTreeOracle`，底层 `AnnotationTransformer.HierarchyTree` |
 | 台账 | `InitFix.LEDGER`、`getUnpatchedFields` |
 | 跨类批次字段依赖收敛与拓扑执行（PR4-A） | `InitFix.beginBatchBytecodeView` / `setBatchDefinitions` / `finishBatchTransforms` / `convergeBatch` / `orderBatchHosts`、`InitFixBatchGraph` |
 | 代际字段台账与回退重放门控（B2） | `core/src/remold/vcs/GenerationalFieldLedger.java`、`core/src/remold/vcs/GenerationalReplayGate.java`、`InitFix.gateGenerationalReplay` / `recordReplayOutcome` / `releaseRemovedFieldDebt` |
 | 逐实例驱动 | `runDependentInstanceTasks` / `runIndependentInstanceTasks`、`InstanceFailureBudget` |
 | 写入桥 | `HotswapBridge`（`KIND_CONDITIONAL` / `KIND_CONDITIONAL_EXPECTED` / `KIND_FORCE`） |
-| `Object.toString` 例外 | `InitFix.allowedStringCoercion`、`isInertProducer`、`isIntermediateObjectToString`（`effectReason` 在白名单之后、黑名单之前调用） |
+| `Object.toString` 例外 | `InitFixSafetyGate.allowedStringCoercion`（`InitFix` 保留反射转发口）、`isInertProducer`、`isIntermediateObjectToString`（`effectReason` 在白名单之后、黑名单之前调用） |
 | 哈希语义门控 | `HashSemantics`（`core/src/remold/ref/`，本类内调用图扫 `hashCode`/`equals`/`compareTo` 及其可达方法是否读新增实例字段，只告警不拒绝） |
 | `@HotswapInit` 设计契约 | `docs/initfix/09-hotswapinit-design.md`（T4 逃生口契约） |
 | 注解与过滤 | `remold.annotation.RemoldReinit`、`ClassDiffUtil.isInternalMarkerField` |
@@ -28,7 +28,7 @@
 
 | 关注点 | 位置 |
 |:--|:--|
-| 两阶段读穿保护（内部批次路径 + 动态单类入口） | `RemoldAgent.applyTwoPhase` / `redefineStageA`（A→B→C 编排、整组回滚、`isInitialized` 二次检查）；`RemoldAgent.redefineDynamic` 消费 `InitFix.requiresTwoPhase`，在调用内部同步跑 A→补丁→C（阶段 C 复用现成 `runtimeBytes`，失败按 VM 级/非 VM 级分流）；`StageASkeleton.buildWithLiveConstructors`（阶段 A 保留新构造器）；`InitFix.requiresTwoPhase`（只有真正会写的零值暴露字段才触发）；开关 `-Dremold.agent.two_phase=false` |
+| 两阶段读穿保护（内部批次路径 + 动态单类入口） | `TwoPhaseCoordinator`（`RemoldAgent.applyTwoPhase` / `redefineStageA` / `applyRedefinitions` 委托，A→B→C 编排、整组回滚、`isInitialized` 二次检查）；`RemoldAgent.redefineDynamic` 消费 `InitFix.requiresTwoPhase`，在调用内部同步跑 A→补丁→C（阶段 C 复用现成 `runtimeBytes`，失败按 VM 级/非 VM 级分流）；`StageASkeleton.buildWithLiveConstructors`（阶段 A 保留新构造器）；`InitFix.requiresTwoPhase`（只有真正会写的零值暴露字段才触发）；开关 `-Dremold.agent.two_phase=false` |
 | 阶段 A 骨架合成 | `StageASkeleton`（`core/src/remold/ref/`，纯函数：新结构 + 旧执行体，成员按旧 ∪ 新） |
 | 构造器尾部插桩（保留组件，当前不接线） | `ConstructorTailInjector`（`core/src/remold/ref/`，纯函数：根构造器 `RETURN` 前注入字段切片） |
 | 堆实例检索（Native） | `LibTool.getInstances` |
@@ -52,11 +52,11 @@
 
 | 关注点 | 位置 |
 |:--|:--|
-| 逐代对齐元数据与 Changeset 链（PR1 / B1） | `core/src/remold/vcs/AlignmentMetaStore.java`、`core/src/remold/vcs/Changeset.java`、`core/src/remold/vcs/ChangesetLog.java`、`core/src/remold/vcs/VcsCommitGate.java`、`core/src/remold/vcs/BytecodePack.java`、`RemoldAgent.commitVcsBatch` / `revertTo`；开关 `-Dremold.vcs.enabled`、`-Dremold.vcs.revert`、`-Dremold.vcs.pack_dir`；规格 `docs/vcs/01-bytecode-changeset-vcs.md` |
+| 逐代对齐元数据与 Changeset 链（PR1 / B1） | `core/src/remold/vcs/AlignmentMetaStore.java`、`Changeset.java`、`ChangesetLog.java`、`VcsCommitGate.java`、`BytecodePack.java`、`VcsAgentCoordinator`（`RemoldAgent.commitVcsBatch` / `revertTo` 协调）；开关 `-Dremold.vcs.enabled`、`-Dremold.vcs.revert`、`-Dremold.vcs.pack_dir`；规格 `docs/vcs/01-bytecode-changeset-vcs.md` |
 | 按 blob 内容寻址的派生数据缓存（PR2） | `core/src/remold/vcs/DerivedDataCache.java`（键 `(kind, SHA-256(blob))`、双预算 LRU、值不可变；开关 `-Dremold.vcs.derived_cache`、`-Dremold.vcs.derived_cache_entries` / `_bytes`）；消费点：`LambdaAligner.consumersOf` / `deriveConsumerTags` / `hasConsumerSite`、`LambdaAligner.deriveAnonRefs`、`RemovedMemberReaders.describe` / `refs`。**禁止缓存 `align()` 整包结果**，规格 `docs/vcs/01-bytecode-changeset-vcs.md` §3.7 |
-| 活体对齐 Raw ↔ Raw 与 `Eff_prev` 继承（PR3） | `LambdaAligner.align`（`META_SOURCE` 为 Run R 总闸）、`AlignmentMetaStore.headMatching`、`RemoldAgent.writePendingInvented` / `commitVcsBatch`；规格 `docs/vcs/03-live-raw-to-raw-alignment.md` |
+| 活体对齐 Raw ↔ Raw 与 `Eff_prev` 继承（PR3） | `LambdaAligner.align`（`META_SOURCE` 为 Run R 总闸）、`LambdaBodyFingerprint`（体指纹归一化与常量折叠）、`AlignmentMetaStore.headMatching`、`RemoldAgent.writePendingInvented` / `commitVcsBatch`；规格 `docs/vcs/03-live-raw-to-raw-alignment.md` |
 | 孤儿 lambda 方法体保留 | `LambdaAligner.injectRetainedBody` / `OrphanBodyRetention`（`core/src/remold/`，纯函数）；规格 `docs/lambda/02-orphan-body-retention.md` |
-| 捕获桥（删除 + 可证明的新增） | `LambdaAligner.stepCaptureBridge` / `getBridgeDelegate` / `onBridgeInvoked`；接收者归一在 `captureNamesOf`，`readLambdaParamNames` 只报 LVT 原文；规格 `docs/lambda/01-capture-bridge.md` |
+| 捕获桥（删除 + 可证明的新增） | `LambdaCaptureBridge`（`stepCaptureBridge` / `getBridgeDelegate` / `injectBridgeBody`，`LambdaAligner.onBridgeInvoked` 保留委托）；接收者归一在 `captureNamesOf`，`readLambdaParamNames` 只报 LVT 原文；规格 `docs/lambda/01-capture-bridge.md` |
 
 ## 5. 框架插件、偏移稳定性、反射驱逐与 Gradle 工具链
 

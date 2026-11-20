@@ -200,7 +200,8 @@
 | 工作区 Raw 按需索引（懒查询 + 批内复用 + fail-closed） | ✅ | L4 | `core/src/remold/WorkspaceRawIndex.java`、`BytecodeSources.lookupAll` | 找不到给 `null` + `misses`，多来源给出不同字节判 `ambiguous` 且不猜；批内缓存与 `InitFix` 批次上下文同寿、批末清空；`WorkspaceRawIndexTest` 7 例（含点分/斜杠共用一条缓存、批外不缓存、读数含耗时） |
 | 名字形态转换单一入口 + 只减不增守卫 | ✅ | — | `core/src/remold/util/Names.java` | `NameConversionGuardTest` 以存量基线（逐文件计数）冻结现存手写转换：新增文件红、既有文件计数变多变红、基线条目已干净未删行也红 |
 
-**残余边界（详见 §5）**：`BytecodeSources` 目前只有 Mixin 内部类与新 Mixin 类两个内存来源，
+**残余边界（详见 §5）**：两轮 Fabric 真机读数均为 **KnotServer 单侧**（无头 runner 无 X 显示，KnotClient 未测）；
+`BytecodeSources` 目前只有 Mixin 内部类与新 Mixin 类两个内存来源，
 普通工作区磁盘输出目录尚未登记，`WorkspaceRawIndex` 的实际覆盖面因此有限，普通工程类仍靠
 `HierarchyTreeOracle` 的资源流兜底；`ScopeVerdicts` 的判决只在"有 Changeset 证据的那段历史"内保留。
 

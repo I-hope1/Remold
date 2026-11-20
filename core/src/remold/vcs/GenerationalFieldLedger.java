@@ -348,20 +348,18 @@ public final class GenerationalFieldLedger {
 	}
 
 	/**
-	 * 字段已从新布局里消失时释放它的债（{@code ledgerRemove} 同口径）。
+	 * 字段已从新布局里消失时按 <b>(loader, 类, 字段)</b> 精确释放它的债。
 	 *
-	 * <p>未闭环债务不随 Changeset 窗口淘汰，所以字段被删掉之后如果不出账，这条债会永久留在集合里。
-	 * 键里的类名可能是<b>声明类</b>（L1 的继承字段），而出账点只知道宿主，因此这里按字段名在该 scope
-	 * 内匹配；字段名在单个 scope 内重名的概率与代价都可忽略，返回条数供调用方记日志。</p>
+	 * <p>未闭环债务不随 Changeset 窗口淘汰，字段删掉后不出账就会永久留存。这里要求键完全匹配：
+	 * 早先按"字段名在整个 loader 内匹配"的写法会误删同 loader 下另一个类同名字段的债务，
+	 * 而债务出账的语义是"这个类的这个字段不再需要补"，不能跨类。</p>
 	 *
-	 * @return 被释放的债务条目数
+	 * @return 被释放的债务条目数（0 或 1）
 	 */
-	public synchronized int releaseDebt(ClassLoader loader, String field) {
-		if (field == null || field.isEmpty()) return 0;
-		ScopeSlot slot = slotFor(loader);
-		int before = slot.unclosed.size();
-		slot.unclosed.removeIf(key -> key.endsWith("\u0001" + field));
-		return before - slot.unclosed.size();
+	public synchronized int releaseDebt(ClassLoader loader, String className, String field) {
+		if (className == null || field == null || field.isEmpty()) return 0;
+		boolean removed = slotFor(loader).unclosed.remove(className + '\u0001' + field);
+		return removed ? 1 : 0;
 	}
 
 	/** 字段闭环后从债务表移除。 */

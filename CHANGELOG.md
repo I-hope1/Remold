@@ -59,7 +59,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 验收：`GenerationalReplayWiringTest`（无确认写入必拒）、`BootstrapLedgerSymmetryTest`、
     `GenerationalFieldLedgerTest.debtIsReleasedWhenTheFieldIsGone`；变异：去掉 fail-closed 判定 → 用例红。
 
-- **代际字段台账（B2 存储层）**- **代际字段台账（B2 存储层）**：新增 `remold.vcs.GenerationalFieldLedger`，把 `replayFacts` 按代坐标索引起来。
+- **修复（PR #24 review follow-up）**：两处口径。
+  - 「确认写入」改为按**代**判据：只认待对账那一代自己的 `REINIT_APPLIED` `written` 记录。回退保留更早的
+    代，若按"历史上任何一代写过"判定，旧代记录会给一条从未写成的事实背书，未闭环误写会重新出现。
+  - 字段被删除时的债务出账改挂**结构信号**（`diff.changedFields` 的 `- name`），按 `(loader, 声明类, 字段)`
+    精确释放。此前的调用点在 `pendingLedger` 重试分支里，而 L1/A 档债务根本不走它（等于死代码）；按字段名
+    跨整个 loader 匹配还会误删别的类同名字段的债务。
+  - 验收：`RemovedFieldDebtTest`、`GenerationalReplayWiringTest.anOlderConfirmedWriteDoesNotVouchForALaterSkippedGeneration`。
+
+- **代际字段台账（B2 存储层）**- **代际字段台账（B2 存储层）**- **代际字段台账（B2 存储层）**：新增 `remold.vcs.GenerationalFieldLedger`，把 `replayFacts` 按代坐标索引起来。
   - 键 = `(loaderScope, 内部名, field)` + `GenRef(seq, changesetId)`，scope 取 `AlignmentMetaStore.loaderScopeId`，
     与 `Changeset.loaderScope` 同源；`changesetId` 留作校验位，防止"同 seq 不同代"被当成同一条事实。
   - **两类保留策略不共用一个窗口**：未闭环债务（判过 `MISS_NO_FACT` / 写入失败的字段）不被 Changeset 窗口淘汰；

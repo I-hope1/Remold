@@ -39,6 +39,7 @@ class BirthStaleBytesRedBaselineTest {
 
 	@AfterEach
 	void cleanUp() {
+		remold.vcs.LoadFrontier.reset();
 		if (projectDir != null) RemoldAgent.activeWatchDirs.remove(projectDir);
 		RemoldAgent.bytecodeCache.remove(DOT_NAME);
 	}
@@ -77,6 +78,9 @@ class BirthStaleBytesRedBaselineTest {
 		assertTrue(cached != null, "红基线：出生点应当把加载进来的字节记账");
 		assertArrayEquals(staleBytes, cached,
 		 "红基线：缓存记录的是加载器送来的陈旧字节，不是构建输出里的新字节");
+		// 出生事件必须被记进加载前沿：这是"这一代世界里有哪些类"的唯一来源。
+		assertTrue(remold.vcs.LoadFrontier.watermark() > 0L,
+		 "工作区类出生时必须推进加载前沿水位线");
 		assertArrayEquals(editedBytes,
 		 Files.readAllBytes(projectDir.resolve("StaleBirth.class")),
 		 "对照组：构建输出确实已经是新字节——缺口不在\"编辑没发生\"，而在\"出生点没用它\"");

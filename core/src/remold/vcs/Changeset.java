@@ -261,9 +261,25 @@ public record Changeset(
 		return sha128(String.join("\u0002", parts));
 	}
 
-	/** 该算法版本是否把出生水位线纳入内容寻址前置像。 */
+	/**
+	 * 该算法版本是否把出生水位线纳入内容寻址前置像。
+	 *
+	 * <p>按<b>数值</b>比较而不是前缀匹配：写成 {@code startsWith("vcs=3")} 会在版本升到 {@code vcs=4}
+	 * 时静默返回 false，把 births 从 {@code changesetId} 前置像里丢掉——那是不可见的历史不一致。</p>
+	 */
 	public static boolean tracksBirths(String algoVersion) {
-		return algoVersion != null && algoVersion.startsWith("vcs=3");
+		if (algoVersion == null) return false;
+		int at = algoVersion.indexOf("vcs=");
+		if (at < 0) return false;
+		int i = at + 4;
+		int start = i;
+		while (i < algoVersion.length() && Character.isDigit(algoVersion.charAt(i))) i++;
+		if (i == start) return false;
+		try {
+			return Integer.parseInt(algoVersion.substring(start, i)) >= 3;
+		} catch (NumberFormatException e) {
+			return false;
+		}
 	}
 
 	/**

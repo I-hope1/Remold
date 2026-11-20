@@ -208,7 +208,14 @@ class ChangesetTickTest {
 		 List.of("a.Missing"));
 		Changeset cs = commit(ChangesetLog.INSTANCE, "r1", entry("a/A", "h"), manifest, List.of());
 
-		assertEquals(manifest, cs.manifest());
+		// 四个内容字段原样保留；births 由 ChangesetLog 在提交时拍水位线（规格 docs/vcs/07 §4.1），
+		// 因此这里逐字段比较而不是整体 equals —— 整体比较会把"水位线被正确写入"当成失败。
+		assertEquals(manifest.orderedHosts(), cs.manifest().orderedHosts());
+		assertEquals(manifest.edges(), cs.manifest().edges());
+		assertEquals(manifest.nodes(), cs.manifest().nodes());
+		assertEquals(manifest.candidateMissing(), cs.manifest().candidateMissing());
+		assertEquals(LoadFrontier.watermark(), cs.manifest().births().curr(),
+		 "the commit must stamp the current load frontier");
 		assertEquals(1, cs.entries().size(), "the manifest must not leak into entries");
 		assertEquals(1, cs.manifest().edges().size());
 	}

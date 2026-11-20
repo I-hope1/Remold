@@ -14,6 +14,7 @@ import remold.ref.StageBInstanceCache;
 import remold.vcs.AlignmentMetaStore;
 import remold.vcs.Changeset;
 import remold.vcs.ChangesetLog;
+import remold.vcs.LoadFrontier;
 import remold.vcs.GenerationalFieldLedger;
 import remold.vcs.VcsCommitGate;
 import remold.vcs.BytecodePack;
@@ -1400,6 +1401,10 @@ public class RemoldAgent {
 			scanLoadedClassForOffsets(classfileBuffer);
 			if (!RemoldAgentBootstrap.isProjectLocation(protectionDomain)) return null;
 			bytecodeCache.putIfAbsent(className.replace('/', '.'), classfileBuffer);
+			// 出生事件：只记标量（scope 号 + 内部名）并推进加载前沿水位线，不在这里算摘要、不解析字节码
+			// （规格 docs/vcs/07 L2）。字节哈希留到 flush 时按需补，避免把成本压到加载路径上。
+			// 只对工作区类记录：外部库/JDK 不在"写点证明"的闭包内，记进来只会让队列被噪声撑爆。
+			LoadFrontier.birth(AlignmentMetaStore.INSTANCE.loaderScopeId(loader), className, "");
 			return null;
 		}
 	}

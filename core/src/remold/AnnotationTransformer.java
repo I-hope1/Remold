@@ -185,7 +185,7 @@ public class AnnotationTransformer implements ClassFileTransformer {
 				modified = true;
 				// 对齐结果就是生效字节：把同名的待决出生补丁消费掉，避免它在下一次加载时再插一脚。
 				PendingLoadPatch.discard(loader, className);
-			} else {
+			} else if (RemoldAgent.LOAD_HOOKS) {
 				PendingLoadPatch.Decision decision = PendingLoadPatch.take(loader, className,
 				 classfileBuffer, RemoldAgentBootstrap.isProjectLocation(protectionDomain),
 				 RemoldAgent::applySourceTransforms);

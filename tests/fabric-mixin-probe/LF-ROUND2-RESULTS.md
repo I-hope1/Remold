@@ -59,3 +59,45 @@ KnotServer 从 scratch Loom 工程启动，Remold agent 与 `plugin-mixin` 由�
 - **`stamp` 从 0 直接跳到 3**：`stamp` 是"发布次数"而非"内容版本"，本轮三次发布来自
   配置差异路径 + 就绪门懒发布 + 一次待决重试；读数只说明"发生了重推"，不能用来推断单次变更的
   发布次数上限。
+
+## 附：加载钩子路径的逐类开销（代理测量，非冷启动）
+
+命令：编译 `tests/src/remold/LoadPathOverheadBench.java` 后直接跑 `main`（JBR 21.0.8，`-Xmx1g`，
+3000 个类名、每项 2 万次预热）。**这是进程内逐类开销，不等于真机冷启动或懒加载掉帧**；后者需要
+KnotServer 起停对照，本轮未做。
+
+```
+=== per-op cost over 3000 classes (ns/op) ===
+LoadFrontier.birth                 min=  240 p50=  440 max=1239926 mean=  931.5 ns
+MixinTargetIndex.lookup            min=  160 p50=  240 max= 132880 mean=  350.7 ns
+PendingLoadPatch.decide            min=  240 p50=  360 max=2893774 mean= 1682.8 ns
+all three (current hook path)      min=  400 p50=  600 max= 683723 mean=  948.6 ns
+```
+
+读数结论（已观测）：
+
+- 三者合并 p50 **600 ns/类**，按 3000 个类合计约 **1.8 ms**；单看 `p50`，这条热路径上的叠加
+  在"每个类多花几百纳秒"的量级，不是可感知量级；
+- `max` 达到毫秒级的那几次是 GC/JIT 抖动（同轮 `min`/`p50` 稳定），不能当成稳态成本；
+- 该基准没有覆盖 `HierarchyTree.register`（需要真实 ASM `ClassNode`）与
+  `AnnotationTransformer` 的整链，因此**不能**用它替代真机冷启动读数。
+
+## 附：KnotServer 冷启动开/关对照（真机读数）
+
+开关：`-Dremold.probe.load_hooks=false` 只跳过"出生事件记录"与"待决出生补丁应用"两条新逻辑，
+其余（继承树注册、Mixin 三态索引）保持不变。锚点取 `RuntimeMXBean.getUptime()`，在 mod 初始化完成
+（此时 Mixin 已织入、43 个 mod 全部加载）时打点。
+
+| 轮次 | hooks 开 | hooks 关 |
+|:--|--:|--:|
+| 1 | 14029 ms | 14173 ms |
+| 2 | 15023 ms | 14260 ms |
+| 中位数 | ~14526 ms | ~14217 ms |
+
+读数结论（已观测）：
+
+- 开/关差异（约 0.3 s）**小于同一模式下的轮间离散度**（开：14029 → 15023，跨 0.99 s），
+  因此这组读数只能支持"没有可感知量级回归"，**不能**证明亚秒级差异不存在；
+- 若要分辨亚秒效应，需要更多轮次并固定世界缓存状态（本轮第二轮复用同一个 `world`，本身就是一个噪声源）。
+
+**未覆盖**：真机懒加载阶段的掉帧/停顿未测（需要跑图脚本）；本轮只测了冷启动到 mod 初始化完成。

@@ -80,6 +80,23 @@ births = <prevWatermark>..<currWatermark>
 历史索引按 `ChangesetLog.window()` 同源裁剪。裁剪动作本身必须：①留下 `forgottenWriters` 计数；
 ②使受影响键的结论立即降级为 `OPAQUE_GUARDED`；③在状态面可观测（不允许静默遗忘）。
 
+降级是**构造性**的，不需要额外的"锁死"标志：更早的代一旦离开台账，后续任何新事实都无法再证明跨代连续性，
+于是解析结论停在 `REFUSED_DISCONTINUOUS`，判决只能拒。`forgottenWriters` 的作用是让这件事**可归因**
+（否则"找不到事实"会被读成"从来没有事实"），而不是承担锁死职责。
+
+### 4.4 裁剪态如何进入离线回放
+
+`forgottenWriters` 目前只活在进程内台账（`GenerationalFieldLedger` / `ScopeVerdicts`），回放包
+（`BytecodePack` v2）的 manifest 只带 `droppedBirths` / `unresolvedBirths`。因此线下回放一个"线上已经裁过"
+的包时，无法从包本身区分"这条键从没有事实"与"这条键的事实被裁掉了"。
+
+**口径（不改包格式）**：离线回放必须使用与线上**同一窗口**（`remold.vcs.changeset_window`）重算裁剪，
+并在回放开始时校验窗口一致；窗口不一致即拒绝回放并报出两个窗口值，不允许"用更宽的窗口回放一个被裁过的
+历史"再拿结论去解释线上行为。这样裁剪态是**可重算**的，包格式不需要携带键级遗忘信息。
+
+若将来需要"包自证裁剪态"，走 manifest 增加每轮标量增量的路线（格式升版并对旧版显式拒绝），
+而不是把被遗忘键列表塞进每轮 manifest——后者会让常规提交路径随裁剪量变重。
+
 ## 5. 出生点补丁（PendingLoadPatch）
 
 "编辑早于加载"是独立于 VCS 的缺口：`seq 1` 改了尚未加载的类，`redefineClasses` 当时无事可做；之后它首次加载时，

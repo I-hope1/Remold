@@ -1404,10 +1404,22 @@ public class RemoldAgent {
 			// 出生事件：只记标量（scope 号 + 内部名）并推进加载前沿水位线，不在这里算摘要、不解析字节码
 			// （规格 docs/vcs/07 L2）。字节哈希留到 flush 时按需补，避免把成本压到加载路径上。
 			// 只对工作区类记录：外部库/JDK 不在"写点证明"的闭包内，记进来只会让队列被噪声撑爆。
-			LoadFrontier.birth(AlignmentMetaStore.INSTANCE.loaderScopeId(loader), className, "");
+			if (LOAD_HOOKS) {
+				LoadFrontier.birth(AlignmentMetaStore.INSTANCE.loaderScopeId(loader), className, "");
+			}
 			return null;
 		}
 	}
+
+	/**
+	 * 出生事件与待决出生补丁是否生效。
+	 *
+	 * <p>默认开启；{@code -Dremold.probe.load_hooks=false} 只用于"开/关对照"的测量，
+	 * 关掉之后出生水位线不再推进、待决出生补丁不再应用，行为退回到引入加载前沿之前。
+	 * 它<b>不是</b>给用户用的降级开关：关掉意味着规格 {@code docs/vcs/07} 的闭包不再完整。</p>
+	 */
+	public static final boolean LOAD_HOOKS = !"false".equalsIgnoreCase(
+	 System.getProperty("remold.probe.load_hooks"));
 
 	/**
 	 * 读取布尔开关：优先 {@code primary}，缺省时回退到 {@code alias}。

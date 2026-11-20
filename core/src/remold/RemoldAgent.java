@@ -40,6 +40,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 import java.util.zip.*;
@@ -310,34 +311,7 @@ public class RemoldAgent {
 	public static final Map<String, java.util.Set<String>> inventedSlots = new ConcurrentHashMap<>();
 
 	/** 本轮算出的自造名，redefine 成功后才并入 {@link #inventedSlots}。 */
-	private static final Map<String, java.util.Set<String>> pendingInvented = new ConcurrentHashMap<>();
-
-	/**
-	 * PR1 旁路暂存：本批次"对齐已经算完、但尚未确认 JVM 最终生效"的逐类记录。
-	 *
-	 * <p>写入点在 {@code LambdaAligner.align} 返回之后，<b>不是</b>提交点：对齐成功不代表
-	 * {@code redefineClasses} 会接受。真正提交只在批次最终结果确定后由
-	 * {@link #commitVcsBatch} 完成；本批任何回滚或 {@code LAMBDA_STRICT} 拒绝都会整批丢弃。</p>
-	 */
-	private static final Map<String, VcsPending> PENDING_VCS = new ConcurrentHashMap<>();
-
-	/** 旁路暂存体：对齐输入/产出 + 当轮契约字段。只在批次内短暂存活。 */
-	private static final class VcsPending {
-		final ClassLoader loader;
-		final byte[] oldEffective;
-		final byte[] preAlign;
-		final byte[] alignOutput;
-		final LambdaAligner.AlignmentResult result;
-
-		VcsPending(ClassLoader loader, byte[] oldEffective, byte[] preAlign, byte[] alignOutput,
-		           LambdaAligner.AlignmentResult result) {
-			this.loader = loader;
-			this.oldEffective = oldEffective;
-			this.preAlign = preAlign;
-			this.alignOutput = alignOutput;
-			this.result = result;
-		}
-	}
+	static final Map<String, Set<String>> pendingInvented = new ConcurrentHashMap<>();
 
 	/**
 	 * 源码级未织入基线缓存（用于对齐器与源码变更分析，避免 Mixin 等增强注入的合成方法/字段污染对齐逻辑）
@@ -360,7 +334,7 @@ public class RemoldAgent {
 	public interface BytecodeTransformerBridge extends remold.BytecodeTransformerBridge {
 	}
 
-	private static final List<remold.BytecodeTransformerBridge> transformerBridges = new CopyOnWriteArrayList<>();
+	static final List<remold.BytecodeTransformerBridge> transformerBridges = new CopyOnWriteArrayList<>();
 
 	public static void addTransformerBridge(remold.BytecodeTransformerBridge bridge) {
 		if (bridge != null && !transformerBridges.contains(bridge)) {
@@ -468,10 +442,10 @@ public class RemoldAgent {
 	}
 
 	/** 本会话内已发生 JVM 级重定义失败（InternalError/VerifyError）的类：拒绝再次重织入。 */
-	private static final Set<String> VM_POISONED_CLASSES = ConcurrentHashMap.newKeySet();
+	static final Set<String> VM_POISONED_CLASSES = ConcurrentHashMap.newKeySet();
 
 	/** 最近一次重定义是否以 JVM 级失败告终（插件据此把用户引向重启，而不是误报 LayoutGate）。 */
-	private static volatile boolean LAST_REDEFINE_VM_LEVEL_FAILURE;
+	static volatile boolean LAST_REDEFINE_VM_LEVEL_FAILURE;
 
 	/** 该类是否已被本会话的 JVM 级重定义失败拉黑。 */
 	public static boolean isVmRedefinitionPoisoned(String dotClassName) {
@@ -483,7 +457,7 @@ public class RemoldAgent {
 		return LAST_REDEFINE_VM_LEVEL_FAILURE;
 	}
 
-	private static boolean isVmLevelRedefineFailure(Throwable t) {
+	static boolean isVmLevelRedefineFailure(Throwable t) {
 		if (t == null) return false;
 		if (t instanceof InternalError || t instanceof VerifyError) return true;
 		String n = t.getClass().getName();
@@ -496,7 +470,7 @@ public class RemoldAgent {
 	 * <p>这类失败意味着 JVM 元数据/编译队列可能已不一致（实测可在数秒后引发 C1 崩溃），
 	 * 继续对同一类重织入只会扩大污染面，必须要求重启。</p>
 	 */
-	private static void markVmLevelFailure(String className, Throwable t) {
+	static void markVmLevelFailure(String className, Throwable t) {
 		VM_POISONED_CLASSES.add(className);
 		LAST_REDEFINE_VM_LEVEL_FAILURE = true;
 		dumpVmInternalExceptions(className + " (" + t.getClass().getSimpleName() + ")");
@@ -632,7 +606,7 @@ public class RemoldAgent {
 	//region Dispatcher & SPI Lifecycle
 	private static volatile MainThreadDispatcher mainThreadDispatcher = Runnable::run;
 	private static final List<HotswapBatchListener> batchListeners = new CopyOnWriteArrayList<>();
-	private static final List<HotswapPlugin> plugins = new CopyOnWriteArrayList<>();
+	static final List<HotswapPlugin> plugins = new CopyOnWriteArrayList<>();
 
 	/**
 	 * 设置主线程调度器（默认 {@code Runnable::run}）。
@@ -674,16 +648,16 @@ public class RemoldAgent {
 	 * 额外覆盖“只改了 Mixin 模板 / 只做了 InitFix 修补”的批次。两个回调各自独立捕获异常，
 	 * 新回调的实现出错不会影响旧监听器。</p>
 	 */
-	private static final class ListenerTiming {
+	static final class ListenerTiming {
 		String slowestName;
 		long slowestMs = -1L;
 	}
 
-	private static void notifyBatchListeners(List<ClassDefinition> definitions, HotswapBatchReport report) {
+	static void notifyBatchListeners(List<ClassDefinition> definitions, HotswapBatchReport report) {
 		notifyBatchListeners(definitions, report, null);
 	}
 
-	private static void notifyBatchListeners(List<ClassDefinition> definitions, HotswapBatchReport report,
+	static void notifyBatchListeners(List<ClassDefinition> definitions, HotswapBatchReport report,
 	                                         ListenerTiming timing) {
 		boolean hasDefinitions = definitions != null && !definitions.isEmpty();
 		boolean hasReport = report != null && report.hasObservableActivity();
@@ -791,7 +765,7 @@ public class RemoldAgent {
 
 	private static final Set<HotswapPlugin> initializedPlugins = Collections.newSetFromMap(new IdentityHashMap<>());
 
-	private static void triggerPluginInit(HotswapPlugin plugin) {
+	static void triggerPluginInit(HotswapPlugin plugin) {
 		if (plugin == null || inst == null) return;
 		synchronized (initializedPlugins) {
 			if (!initializedPlugins.add(plugin)) return;
@@ -1000,7 +974,7 @@ public class RemoldAgent {
 	}
 
 	// 仅记录byte的指纹
-	private static final LongLongMap fileDiskHashes = new LongLongMap(2048);
+	static final LongLongMap fileDiskHashes = new LongLongMap(2048);
 
 	/**
 	 * Records the bytes an external redefine (IDE JDWP / external agent) already applied, so the
@@ -1024,16 +998,16 @@ public class RemoldAgent {
 	/** 待处理的 .class 变动；包内可见以让 {@link JarExtractor} 批量入队（所有访问均在 synchronized(pendingChanges) 内） */
 	static final Set<Path>                pendingChanges = Collections.synchronizedSet(new HashSet<>());
 	/** 待解压的 jar/zip，防抖后统一解压；所有访问均在 synchronized(pendingChanges) 内，无需额外同步 */
-	private static final Set<Path>                pendingJars    = new HashSet<>();
+	static final Set<Path>                pendingJars    = new HashSet<>();
 	/** 待通知的资源文件变动（非 .class 资源，如贴图、语言包等），防抖后统一通知；所有访问均在 synchronized(pendingChanges) 内 */
 	static final Set<Path>                pendingAssetChanges = new HashSet<>();
-	private static final ScheduledExecutorService scheduler      = Executors.newSingleThreadScheduledExecutor(r -> {
+	static final ScheduledExecutorService scheduler      = Executors.newSingleThreadScheduledExecutor(r -> {
 		Thread t = new Thread(r, "HotSwap-Scheduler");
 		t.setDaemon(true);
 		return t;
 	});
-	private static       ScheduledFuture<?>       scheduledTask;
-	private static final DebounceWindow           DEBOUNCE = new DebounceWindow(FILE_SHAKE_MS, ASSET_SHAKE_MS);
+	static       ScheduledFuture<?>       scheduledTask;
+	static final DebounceWindow           DEBOUNCE = new DebounceWindow(FILE_SHAKE_MS, ASSET_SHAKE_MS);
 
 	//region Build-trigger marker state
 
@@ -1055,10 +1029,10 @@ public class RemoldAgent {
 	static final long AGENT_START_MILLIS = System.currentTimeMillis();
 
 	/** 最近一次被接受的 marker 的结束挂钟毫秒；{@code 0} = 还没有。 */
-	private static volatile long lastProcessedBuildEndMillis;
+	static volatile long lastProcessedBuildEndMillis;
 
 	/** 最近一次被接受的 marker 的 build_id（去重键）。 */
-	private static volatile String lastProcessedBuildId;
+	static volatile String lastProcessedBuildId;
 
 	//endregion
 
@@ -1088,7 +1062,7 @@ public class RemoldAgent {
 	 *
 	 * <p>可重入：{@link #init} 持锁后会再次经 {@link #triggerHotswap()} 进入，这是预期的。</p>
 	 */
-	private static final ReentrantLock HOTSWAP_LOCK = new ReentrantLock();
+	static final ReentrantLock HOTSWAP_LOCK = new ReentrantLock();
 
 	/**
 	 * 并发探针（测试用）：当前处于热更流程内的线程数，以及历史峰值。
@@ -1107,7 +1081,7 @@ public class RemoldAgent {
 	 * 加载器/游戏专属判断。首个"全部插件就绪"的观测点把门闩翻到 READY，此后不再回退
 	 * —— 启动期是一次性窗口，运行期抖动不该让热更整体停摆。</p>
 	 */
-	private static volatile StartupGate STARTUP_GATE =
+	static volatile StartupGate STARTUP_GATE =
 	 new StartupGate(StartupGate.resolveTimeoutMillis(System.getProperty(StartupGate.PROP_READY_TIMEOUT_MS)));
 
 	/**
@@ -1118,12 +1092,12 @@ public class RemoldAgent {
 	 BatchWatchdog.resolveStallMillis(System.getProperty(BatchWatchdog.PROP_STALL_MS));
 
 	/** 门闩未就绪时的重查间隔下限：绝不能按"防抖已到期"的 0 延迟自旋。 */
-	private static final long GATE_RETRY_MIN_MS = 100L;
+	static final long GATE_RETRY_MIN_MS = 100L;
 
 	/** 门闩阻断日志去重（同一批变更只打一条，避免按重查节奏刷屏）。 */
-	private static volatile boolean gateBlockLogged;
+	static volatile boolean gateBlockLogged;
 	/** 就绪状态变迁日志去重（每次 PENDING → READY 只打一条）。 */
-	private static volatile boolean gateReadyLogged;
+	static volatile boolean gateReadyLogged;
 
 	/** 当前门闩（诊断/单测用）。 */
 	public static StartupGate startupGate() {
@@ -1195,16 +1169,16 @@ public class RemoldAgent {
 	 * <p>见 {@link #addTrailingLoadObserver(java.lang.instrument.ClassFileTransformer)}：它们必须挂在
 	 * 所有会改字节的 transformer 之后，才能看到 JVM 最终定义的那份字节。</p>
 	 */
-	private static final java.util.Set<java.lang.instrument.ClassFileTransformer> TRAILING_OBSERVERS =
+	static final Set<ClassFileTransformer> TRAILING_OBSERVERS =
 		java.util.Collections.synchronizedSet(new java.util.LinkedHashSet<>());
 
 	/** {@code initTransformer} 已经把登记在册的观测器全部挂上 JVM 之后置 true。 */
-	private static volatile boolean TRAILING_OBSERVERS_ARMED;
+	static volatile boolean TRAILING_OBSERVERS_ARMED;
 
 	private static final java.util.concurrent.atomic.AtomicBoolean BOOTSTRAP_APPENDED =
 		new java.util.concurrent.atomic.AtomicBoolean();
 
-	private static void appendSelfToBootstrapSearch(Instrumentation inst) {
+	static void appendSelfToBootstrapSearch(Instrumentation inst) {
 		if (inst == null || RemoldAgent.class.getClassLoader() == null
 		    || !BOOTSTRAP_APPENDED.compareAndSet(false, true)) {
 			return;
@@ -1310,236 +1284,51 @@ public class RemoldAgent {
 	}
 
 	public static void init(String agentArgs, boolean reinit) {
-		init(SOURCE_RUNTIME, agentArgs, reinit);
+		RemoldAgentBootstrap.init(agentArgs, reinit);
 	}
 
 	public static void init(String source, String agentArgs, boolean reinit) {
-		// 整体持锁：本方法包含 retransformLoaded / initializeAgentState / FileWatcherService.restart，
-		// 而旧 watcher 排进 scheduler 的任务可能尚未跑完。可重入，末尾 triggerHotswap() 嵌套获取无碍。
-		HOTSWAP_LOCK.lock();
-		try {
-			init0(source, agentArgs, reinit);
-		} finally {
-			HOTSWAP_LOCK.unlock();
-		}
+		RemoldAgentBootstrap.init(source, agentArgs, reinit);
 	}
 
-	private static void init0(String source, String agentArgs, boolean reinit) {
-		initConfig();
-		if (inst != null) {
-			appendSelfToBootstrapSearch(inst);
-		}
-		remold.util.LibTool.tryInit();
-
-		initTransformer();
-		var loadedClasses = inst != null ? inst.getAllLoadedClasses() : new Class<?>[0];
-		refreshPackageLoaders(loadedClasses);
-
-		if (RETRANSFORM_LOADED && inst != null) {
-			retransformLoaded(loadedClasses);
-		}
-
-		for (HotswapPlugin plugin : plugins) {
-			triggerPluginInit(plugin);
-		}
-
-		if (source == null || source.trim().isEmpty()) {
-			source = SOURCE_RUNTIME;
-		}
-
-		Set<Path> newWatchDirs = new HashSet<>();
-		Set<Path> newWatchJars = new HashSet<>();
-		if (agentArgs != null && !agentArgs.trim().isEmpty()) {
-			WatchPathRegistry.parse(agentArgs, newWatchDirs, newWatchJars);
-		}
-
-		if (newWatchDirs.isEmpty() && newWatchJars.isEmpty()) {
-			if (activeWatchDirs.isEmpty() && activeWatchJars.isEmpty()) {
-				error("No valid watch paths provided.");
-			}
-			return;
-		}
-
-		WatchPathRegistry.set(source, newWatchDirs, newWatchJars);
-	}
-
-	/**
-	 * 设置指定来源的监控路径（支持分号或冒号分隔的目录或 Jar 路径）。
-	 * 若 paths 为空，则移除该来源对应的监控路径。
-	 *
-	 * <p>锁纪律：路径变更会重建监听器并重扫已加载类，必须与热更互斥，因此统一在此持
-	 * {@link #HOTSWAP_LOCK}；分槽记账与聚合见 {@link WatchPathRegistry}。</p>
-	 *
-	 * @param source 来源标识符（如 "cli", "mod-tools", "runtime" 等）
-	 * @param paths  待监控路径（支持分号或冒号分隔）
-	 */
 	public static void setWatchPaths(String source, String paths) {
-		HOTSWAP_LOCK.lock();
-		try {
-			if (source == null || source.trim().isEmpty()) {
-				source = SOURCE_RUNTIME;
-			}
-			if (paths == null || paths.trim().isEmpty()) {
-				WatchPathRegistry.remove(source);
-				return;
-			}
-			Set<Path> dirs = new HashSet<>();
-			Set<Path> jars = new HashSet<>();
-			WatchPathRegistry.parse(paths, dirs, jars);
-			WatchPathRegistry.set(source, dirs, jars);
-		} finally {
-			HOTSWAP_LOCK.unlock();
-		}
+		RemoldAgentBootstrap.setWatchPaths(source, paths);
 	}
 
-	/**
-	 * 设置指定来源的目录与 Jar 路径集合。
-	 */
 	public static void setWatchPaths(String source, Collection<Path> dirs, Collection<Path> jars) {
-		HOTSWAP_LOCK.lock();
-		try {
-			if (source == null || source.trim().isEmpty()) {
-				source = SOURCE_RUNTIME;
-			}
-			WatchPathRegistry.set(source, dirs != null ? new HashSet<>(dirs) : Collections.emptySet(),
-			                      jars != null ? new HashSet<>(jars) : Collections.emptySet());
-		} finally {
-			HOTSWAP_LOCK.unlock();
-		}
+		RemoldAgentBootstrap.setWatchPaths(source, dirs, jars);
 	}
 
-	/**
-	 * 向指定来源追加监控路径。
-	 */
 	public static void addWatchPaths(String source, String paths) {
-		HOTSWAP_LOCK.lock();
-		try {
-			if (source == null || source.trim().isEmpty()) {
-				source = SOURCE_RUNTIME;
-			}
-			if (paths == null || paths.trim().isEmpty()) return;
-			Set<Path> dirs = new HashSet<>(getWatchDirs(source));
-			Set<Path> jars = new HashSet<>(getWatchJars(source));
-			WatchPathRegistry.parse(paths, dirs, jars);
-			WatchPathRegistry.set(source, dirs, jars);
-		} finally {
-			HOTSWAP_LOCK.unlock();
-		}
+		RemoldAgentBootstrap.addWatchPaths(source, paths);
 	}
 
-	/**
-	 * 移除指定来源的全部监控路径。
-	 */
 	public static void removeWatchSource(String source) {
-		HOTSWAP_LOCK.lock();
-		try {
-			if (source == null) return;
-			WatchPathRegistry.remove(source);
-		} finally {
-			HOTSWAP_LOCK.unlock();
-		}
+		RemoldAgentBootstrap.removeWatchSource(source);
 	}
 
-	/** 获取指定来源的监控目录集合（只读不可变副本） */
 	public static Set<Path> getWatchDirs(String source) {
-		return WatchPathRegistry.dirs(source);
+		return RemoldAgentBootstrap.getWatchDirs(source);
 	}
 
-	/** 获取指定来源的监控 Jar 集合（只读不可变副本） */
 	public static Set<Path> getWatchJars(String source) {
-		return WatchPathRegistry.jars(source);
+		return RemoldAgentBootstrap.getWatchJars(source);
 	}
 
-	/** 获取当前所有来源的监控目录映射（只读不可变副本） */
 	public static Map<String, Set<Path>> getAllWatchDirSources() {
-		return WatchPathRegistry.allDirSources();
+		return RemoldAgentBootstrap.getAllWatchDirSources();
 	}
 
-	/** 获取当前所有来源的监控 Jar 映射（只读不可变副本） */
 	public static Map<String, Set<Path>> getAllWatchJarSources() {
-		return WatchPathRegistry.allJarSources();
+		return RemoldAgentBootstrap.getAllWatchJarSources();
 	}
 
 	private static void initTransformer() {
-		if (transformer == null) {
-			transformer = new AnnotationTransformer();
-			inst.addTransformer(transformer, true);
-			// 必须也是 canRetransform = true：JVM 先跑完**所有** canRetransform=false 的 transformer，
-			// 再跑 canRetransform=true 的那组（注册顺序只在组内生效）。若这里传 false，
-			// 首次加载时本 transformer 会先于 AnnotationTransformer 执行，拿到的是对齐/织入**之前**
-			// 的字节——缓存就存错了版本。同组内按注册顺序执行，所以它仍然排在 AnnotationTransformer 之后。
-			inst.addTransformer(new CacheWarmingTransformer(), true);
-			if (isEnhancedHotswapEnabled()) {
-				try {
-					DynamicProfilerAPI.init();
-				} catch (Throwable ignored) { }
-			} else {
-				info("Skipped dynamic profiler injector because structural hotswap is unsupported.");
-			}
-			// 观测器最后挂（含 profiler 注入之后）：它们拿到的就是 JVM 最终定义的字节。
-			synchronized (TRAILING_OBSERVERS) {
-				for (java.lang.instrument.ClassFileTransformer observer : TRAILING_OBSERVERS) {
-					registerTrailingObserver(observer);
-				}
-				TRAILING_OBSERVERS_ARMED = true;
-			}
-			startBackgroundWarmup();
-		}
+		RemoldAgentBootstrap.initTransformer();
 	}
 
-	private static final AtomicBoolean WARMUP_STARTED = new AtomicBoolean();
-
-	private static void startBackgroundWarmup() {
-		if (!INIT_FIX) return;
-		if ("false".equalsIgnoreCase(System.getProperty("remold.agent.warmup"))) return;
-		if (!WARMUP_STARTED.compareAndSet(false, true)) return;
-		Thread t = new Thread(() -> {
-			try {
-				ClassIdentity.canonicalize(HotswapBridge.class);
-				HotswapBridge.warmUp();
-			} catch (Throwable ignored) { }
-		}, "Remold-Warmup");
-		t.setDaemon(true);
-		t.setPriority(Thread.MIN_PRIORITY);
-		t.start();
-	}
-
-	/**
-	 * 登记一个"加载后观测器"：只读加载期字节、不改任何字节的 transformer。
-	 *
-	 * <p><b>为什么需要延迟注册</b>：JVM 先整组跑 {@code canRetransform=false} 的 transformer，
-	 * 再按注册顺序跑 {@code canRetransform=true} 的那组。观测器若在 {@link #initTransformer()} 之前
-	 * 挂上（插件 {@code onPremain} 正是这么早的窗口），拿到的是对齐/织入<b>之前</b>的字节；
-	 * 因此本方法只登记，真正的 {@code addTransformer} 落在 {@code initTransformer} 末尾。
-	 * {@code initTransformer} 之后再登记则立即挂上（幂等：同一实例只挂一次）。</p>
-	 *
-	 * <p><b>边界</b>：观测器只覆盖 Remold 自身与 profiler 之后注册的 transformer；此后别的插件
-	 * 若再挂 rewriter，它对字节的改写不在观测视野内。</p>
-	 *
-	 * @param observer 观测器；{@code null} 忽略
-	 */
-	public static void addTrailingLoadObserver(java.lang.instrument.ClassFileTransformer observer) {
-		if (observer == null) {
-			return;
-		}
-		synchronized (TRAILING_OBSERVERS) {
-			if (!TRAILING_OBSERVERS.add(observer)) {
-				return;
-			}
-			if (!TRAILING_OBSERVERS_ARMED || inst == null) {
-				return;   // 精确落点：initTransformer 末尾统一挂
-			}
-			registerTrailingObserver(observer);
-		}
-	}
-
-	private static void registerTrailingObserver(java.lang.instrument.ClassFileTransformer observer) {
-		try {
-			inst.addTransformer(observer, true);
-		} catch (Throwable t) {
-			warn("[Agent] Failed to register a trailing load observer; its view of the defined bytes is"
-				+ " lost (callers must fail-closed instead of degrading silently): " + t);
-		}
+	public static void addTrailingLoadObserver(ClassFileTransformer observer) {
+		RemoldAgentBootstrap.addTrailingLoadObserver(observer);
 	}
 
 	/**
@@ -1571,70 +1360,10 @@ public class RemoldAgent {
 			if (className.contains("/0x")) return null;             // hidden class（lambda 等）
 			if (className.startsWith("remold/")) return null;        // agent 自身，避免递归
 			scanLoadedClassForOffsets(classfileBuffer);
-			if (!isProjectLocation(protectionDomain)) return null;
+			if (!RemoldAgentBootstrap.isProjectLocation(protectionDomain)) return null;
 			bytecodeCache.putIfAbsent(className.replace('/', '.'), classfileBuffer);
 			return null;
 		}
-	}
-
-	/** CodeSource 位置 → 是否属于工程自身。按位置字符串缓存，避免每个类都解析一次 URI。 */
-	private static final Map<String, Boolean> projectLocations = new ConcurrentHashMap<>();
-
-	/**
-	 * 判定一个保护域的位置是否属于"工程自身"。
-	 *
-	 * <p>先认 agent 正在监听的目录与 jar（{@code watchDirSources} / {@code watchJarSources} /
-	 * {@code activeWatchJars}）——那才是工程的边界，mod 以 jar 形式分发时也成立。
-	 * 监听配置为空时退回"file: 目录"判据：jar 里的类按依赖处理，不属于工程自身。</p>
-	 */
-	private static boolean isProjectLocation(ProtectionDomain pd) {
-		if (pd == null) return false;
-		java.security.CodeSource cs = pd.getCodeSource();
-		if (cs == null || cs.getLocation() == null) return false;
-		String key = cs.getLocation().toString();
-		Boolean cached = projectLocations.get(key);
-		if (cached != null) return cached;
-
-		boolean project = false;
-		try {
-			java.net.URI uri = cs.getLocation().toURI();
-			Path location = Path.of(uri).toAbsolutePath().normalize();
-			for (Set<Path> dirs : WatchPathRegistry.dirSources().values()) {
-				for (Path dir : dirs) {
-					if (location.startsWith(dir.toAbsolutePath().normalize())) {
-						project = true;
-						break;
-					}
-				}
-				if (project) break;
-			}
-			if (!project) {
-				for (Path jar : activeWatchJars) {
-					if (location.equals(jar.toAbsolutePath().normalize())) {
-						project = true;
-						break;
-					}
-				}
-			}
-			if (!project) {
-				for (Set<Path> jars : WatchPathRegistry.jarSources().values()) {
-					for (Path jar : jars) {
-						if (location.equals(jar.toAbsolutePath().normalize())) {
-							project = true;
-							break;
-						}
-					}
-					if (project) break;
-				}
-			}
-			if (!project && WatchPathRegistry.dirSources().isEmpty() && activeWatchJars.isEmpty()) {
-				project = "file".equals(uri.getScheme()) && Files.isDirectory(location);
-			}
-		} catch (Throwable ignored) {
-			project = false;
-		}
-		projectLocations.put(key, project);
-		return project;
 	}
 
 	/**
@@ -1647,13 +1376,13 @@ public class RemoldAgent {
 	 * <p><b>注意</b>：本方法会在类初始化期（字段赋值时）被调用，因此**不得**打日志 ——
 	 * {@code logger} 字段声明在类体后部，此时仍为 {@code null}。</p>
 	 */
-	private static boolean boolProp(String primary, String alias, boolean def) {
+	static boolean boolProp(String primary, String alias, boolean def) {
 		String v = System.getProperty(primary);
 		if (v == null && alias != null) v = System.getProperty(alias);
 		return v == null ? def : Boolean.parseBoolean(v.trim());
 	}
 
-	private static int intProp(String primary, String alias, int def) {
+	static int intProp(String primary, String alias, int def) {
 		String v = System.getProperty(primary);
 		if (v == null && alias != null) v = System.getProperty(alias);
 		if (v == null) {
@@ -1675,7 +1404,7 @@ public class RemoldAgent {
 		}
 	}
 
-	private static int intPropAsset(String primary, String alias, int def) {
+	static int intPropAsset(String primary, String alias, int def) {
 		String v = System.getProperty(primary);
 		if (v == null && alias != null) {
 			v = System.getProperty(alias);
@@ -1699,265 +1428,13 @@ public class RemoldAgent {
 	}
 
 	public static void initConfig() {
-		info("DEBUG: " + DEBUG);
-		REDEFINE_MODE = RedefineMode.valueOfFail(System.getProperty("remold.agent.redefine_mode", "inject"), RedefineMode.inject);
-		info("Redefine Mode: " + REDEFINE_MODE);
-		String bl = System.getProperty("remold.agent.hotswap_blacklist", "").trim();
-		HOTSWAP_BLACKLIST = bl.isEmpty() ? new String[0] : bl.split(",");
-		info("Injection Blacklist: " + String.join(",", HOTSWAP_BLACKLIST));
-		INIT_FIX = boolProp("remold.agent.init_fix", "remold.initFix", true);
-		TWO_PHASE = boolProp("remold.agent.two_phase", "remold.twoPhase", true);
-		MIXIN_MEMBER_ALIGN = boolProp("remold.agent.mixin_member_align", "remold.mixinMemberAlign", true);
-		INTERNAL_AFFECTED_PASSTHROUGH = boolProp("remold.agent.internal_passthrough", "remold.internalPassthrough", true);
-		FORCE_STATIC_LAMBDA = boolProp("remold.agent.force_static_lambda", "remold.agent.force_static_lambdas", false);
-		for (String degradedSwitch : degradeForMissingEnhancedRedefinition(isEnhancedHotswapEnabled())) {
-			warn("DEGRADED: " + degradedSwitch + " forced OFF. " + degradationReason(degradedSwitch));
-		}
-		info("InitFix: " + INIT_FIX);
-		info("Two-phase redefine: " + TWO_PHASE);
-		info("Force Static Lambda: " + FORCE_STATIC_LAMBDA);
-		ENABLE_HOTSWAP_EVENT = Boolean.parseBoolean(System.getProperty("remold.agent.hotswap_event", "false"));
-		info("HotSwap Event: " + ENABLE_HOTSWAP_EVENT);
-		FORCE_REINIT = Boolean.parseBoolean(System.getProperty("remold.agent.force_reinit", "false"));
-		if (FORCE_REINIT) {
-			info("Force Reinit: ON — @RemoldReinit will ignore the initializer fingerprint and replay"
-			     + " the declaring class's initializer slice this session.");
-		}
-		LAMBDA_ALIGN = boolProp("remold.agent.lambda_align", "remold.lambdaAlign.enabled", true);
-		LAMBDA_STRICT = boolProp("remold.agent.lambda_strict", "remold.lambdaAlign.strict", false);
-		info("Lambda Align: " + LAMBDA_ALIGN + " (strict=" + LAMBDA_STRICT + ")");
-		if (LAMBDA_ALIGN) {
-			info("Lambda Alignment ENABLED. Recompilation with '-g' (LocalVariableTable) is required for reliable lambda capture reordering detection.");
-		}
-		FILE_SHAKE_MS = intProp("remold.agent.file_shake_ms", "remold.fileShakeMs", FILE_SHAKE_MS);
-		ASSET_SHAKE_MS = intPropAsset("remold.agent.asset_shake_ms", "remold.assetShakeMs", ASSET_SHAKE_MS);
-		DEBOUNCE.setWindows(FILE_SHAKE_MS, ASSET_SHAKE_MS);
-		info("File Shake MS: " + FILE_SHAKE_MS);
-		info("Asset Shake MS: " + ASSET_SHAKE_MS);
-		PERF_LOG = boolProp("remold.agent.perf_log", "remold.perfLog", false);
-		DIFF_LOG = boolProp("remold.agent.diff_log", "remold.diffLog", true);
-		info("Perf Detail Log: " + PERF_LOG + " (Diff Log: " + DIFF_LOG + ")");
-		UI_HOOK = Boolean.parseBoolean(System.getProperty("remold.agent.ui_hook", "false"));
-		info("UI Hook: " + UI_HOOK);
-		boolean cellPropertyRef = Boolean.parseBoolean(System.getProperty("remold.agent.cell_property_ref", "false"));
-		info("Cell Property Ref: " + cellPropertyRef);
-		loadConfiguredPlugins();
-		for (HotswapPlugin plugin : plugins) {
-			try {
-				plugin.onConfigReload();
-			} catch (Throwable t) {
-				error("[HotswapPlugin] Error reloading plugin config: " + plugin.getName(), t);
-			}
-		}
-		info("Anon Align: " + ANON_ALIGN + " (strict=" + ANON_STRICT + ", debug=" + ANON_DEBUG
-		     + ", maxPerHost=" + AnonClassAligner.MAX_ANON_PER_HOST
-		     + ", timeoutMs=" + AnonClassAligner.ALIGN_TIMEOUT_MS
-		     + ", layoutGate=" + ANON_LAYOUT_GATE + ", redefineLayoutGate=" + LAYOUT_GATE
-		     + ", localClassGuard=" + LOCAL_CLASS_GUARD + ")");
-		if (ANON_ALIGN) {
-			info("Anonymous Class Alignment ENABLED. Ambiguity is resolved conservatively (never by class name).");
-		} else {
-			info("Anonymous Class Alignment DISABLED. Host classes containing anonymous classes will be rejected as a whole.");
-		}
-		info("Structural HotSwap Supported: " + isEnhancedHotswapEnabled());
-		configureBuildTrigger();
+		RemoldAgentBootstrap.initConfig();
 	}
 
-	/**
-	 * 构建完成 marker 的配置接线：解析路径并启动/停止专用 watcher。
-	 *
-	 * <p>marker 是<b>叠加</b>的快路径：未配置时只保留 {@link #FILE_SHAKE_MS} 兜底，行为与旧版本一致。
-	 * watcher 只在 agent 已挂载（{@code inst != null}）时启动，避免单测里 {@code initConfig()}
-	 * 拉起真实文件监听线程。</p>
-	 */
-	private static void configureBuildTrigger() {
-		Path configured = parseBuildTriggerFile(
-			System.getProperty("remold.agent.build_trigger_file"),
-			System.getProperty("remold.buildTriggerFile"));
-		if (configured == null) {
-			BUILD_TRIGGER_FILE = null;
-			if (inst != null) FileWatcherService.stopBuildTriggerWatcher();
-			if (DEBUG) log("[BUILD-TRIGGER] Disabled (no marker file configured)");
-			return;
-		}
-		BUILD_TRIGGER_FILE = configured;
-		info("[BUILD-TRIGGER] Marker file: " + configured
-		     + " (file shake " + FILE_SHAKE_MS + "ms remains the fallback for everything else)");
-		if (inst != null) {
-			FileWatcherService.startBuildTriggerWatcher(configured);
-		} else if (DEBUG) {
-			log("[BUILD-TRIGGER] Marker watcher not started: agent instrumentation is not attached");
-		}
-	}
-
-	/**
-	 * 插件只发现一次：{@link #bootstrapPlugins} 会在 premain 首段先跑，之后 {@link #initConfig} 再调
-	 * 到这里时应直接返回，否则每次 {@code init()} 都会重新实例化一遍插件（注册口按类名去重，
-	 * 新实例会被丢弃，白付构造开销与副作用）。
-	 */
-	private static final java.util.concurrent.atomic.AtomicBoolean PLUGINS_LOADED =
-	 new java.util.concurrent.atomic.AtomicBoolean();
-
-	/**
-	 * 极早插件引导：完成插件发现并触发 {@link HotswapPlugin#onPremain}。
-	 *
-	 * <p><b>为什么必须早于 {@code init}</b>：有些运行期集成只有在宿主类加载器初始化之前设置才生效
-	 * （例如按 class path group 模拟模组隔离的启动器）。这类知识属于具体加载器，因此放在插件里，
-	 * 由引擎在 premain 首段统一提供窗口。</p>
-	 *
-	 * @param agentArgs 原始 agent 参数串，可为 {@code null}
-	 */
 	static void bootstrapPlugins(String agentArgs) {
-		loadConfiguredPlugins();
-		for (HotswapPlugin plugin : plugins) {
-			try {
-				plugin.onPremain(agentArgs);
-			} catch (Throwable t) {
-				error("[HotswapPlugin] Error in onPremain for " + plugin.getName(), t);
-			}
-		}
+		RemoldAgentBootstrap.bootstrapPlugins(agentArgs);
 	}
 
-	private static void loadConfiguredPlugins() {
-		if (inst == null) return;
-		if (!PLUGINS_LOADED.compareAndSet(false, true)) return;
-
-		// 1. 读取请求启用的插件名称/过滤集合（若未配置或为 * / all，则默认加载发现的所有插件）
-		String pluginsProp = System.getProperty("remold.plugins");
-		Set<String> requestedPlugins = null;
-		if (pluginsProp != null && !pluginsProp.trim().isEmpty() && !pluginsProp.trim().equals("*") && !pluginsProp.trim().equalsIgnoreCase("all")) {
-			requestedPlugins = new HashSet<>();
-			for (String name : pluginsProp.split("[,;]")) {
-				String trimmed = name.trim().toLowerCase();
-				if (!trimmed.isEmpty()) requestedPlugins.add(trimmed);
-			}
-		}
-
-		List<JarFile> pluginJars = new ArrayList<>();
-
-		// 2. 读取并通过 Instrumentation 追加外部插件 JAR 到系统类加载器搜索路径
-		String pluginJarsProp = System.getProperty("remold.plugin.jars");
-		if (pluginJarsProp != null && !pluginJarsProp.trim().isEmpty()) {
-			String[] jarPaths = pluginJarsProp.split("[;," + File.pathSeparator + "]");
-			for (String rawPath : jarPaths) {
-				String path = rawPath.trim();
-				if (path.isEmpty()) continue;
-				File jarFile = new File(path);
-				if (jarFile.exists()) {
-					try {
-						JarFile jf = new JarFile(jarFile);
-						inst.appendToSystemClassLoaderSearch(jf);
-						pluginJars.add(jf);
-						info("[Plugin] Appended plugin JAR to system search: " + jarFile.getAbsolutePath());
-					} catch (Throwable t) {
-						error("[Plugin] Failed to append plugin JAR: " + path, t);
-					}
-				} else {
-					warn("[Plugin] Specified plugin JAR does not exist: " + path);
-				}
-			}
-		}
-
-		// 3. 从外部插件 JAR 的元数据中动态解析插件类配置 (SPI services 或 Manifest 声明，无任何名称硬编码)
-		Set<String> candidateClassNames = new LinkedHashSet<>();
-		for (JarFile jf : pluginJars) {
-			// A. 读取 META-INF/services/remold.HotswapPlugin 服务发现配置
-			try {
-				ZipEntry serviceEntry = jf.getEntry("META-INF/services/remold.HotswapPlugin");
-				if (serviceEntry != null) {
-					try (BufferedReader reader = new BufferedReader(new InputStreamReader(jf.getInputStream(serviceEntry), StandardCharsets.UTF_8))) {
-						String line;
-						while ((line = reader.readLine()) != null) {
-							line = line.trim();
-							if (!line.isEmpty() && !line.startsWith("#")) {
-								candidateClassNames.add(line);
-							}
-						}
-					}
-				}
-			} catch (Throwable t) {
-				warn("[Plugin] Failed to read SPI services descriptor from " + jf.getName() + ": " + t.getMessage());
-			}
-
-			// B. 读取 Manifest 中的 Remold-Plugin-Class 或 Plugin-Class 声明
-			try {
-				Manifest manifest = jf.getManifest();
-				if (manifest != null) {
-					String pluginAttr = manifest.getMainAttributes().getValue("Remold-Plugin-Class");
-					if (pluginAttr == null) {
-						pluginAttr = manifest.getMainAttributes().getValue("Plugin-Class");
-					}
-					if (pluginAttr != null && !pluginAttr.trim().isEmpty()) {
-						for (String cls : pluginAttr.split("[,;]")) {
-							String trimmed = cls.trim();
-							if (!trimmed.isEmpty()) candidateClassNames.add(trimmed);
-						}
-					}
-				}
-			} catch (Throwable t) {
-				warn("[Plugin] Failed to read Manifest from " + jf.getName() + ": " + t.getMessage());
-			}
-		}
-
-		// 4. 实例化并通过插件自声明的名称 (plugin.getName()) 进行匹配注册
-		for (String className : candidateClassNames) {
-			try {
-				Class<?> cls = Class.forName(className, true, ClassLoader.getSystemClassLoader());
-				if (HotswapPlugin.class.isAssignableFrom(cls)) {
-					HotswapPlugin p = (HotswapPlugin) cls.getDeclaredConstructor().newInstance();
-					String pluginName = p.getName() != null ? p.getName().trim().toLowerCase() : "";
-					String classLower = className.toLowerCase();
-					if (requestedPlugins == null || requestedPlugins.contains(pluginName) || requestedPlugins.contains(classLower)) {
-						registerPlugin(p);
-						info("[Plugin] Automatically loaded and registered plugin: " + p.getName() + " (" + className + ")");
-					}
-				} else {
-					warn("[Plugin] Class " + className + " does not implement HotswapPlugin");
-				}
-			} catch (Throwable t) {
-				error("[Plugin] Failed to instantiate plugin class '" + className + "': " + t.getMessage(), t);
-			}
-		}
-
-		// 5. 通过标准 ServiceLoader 探测系统类加载器中已注册的 HotswapPlugin 服务实现
-		try {
-			ServiceLoader<HotswapPlugin> loader = ServiceLoader.load(HotswapPlugin.class, ClassLoader.getSystemClassLoader());
-			for (HotswapPlugin p : loader) {
-				String pluginName = p.getName() != null ? p.getName().trim().toLowerCase() : "";
-				String classLower = p.getClass().getName().toLowerCase();
-				if (requestedPlugins == null || requestedPlugins.contains(pluginName) || requestedPlugins.contains(classLower)) {
-					registerPlugin(p);
-				}
-			}
-		} catch (Throwable ignored) { }
-
-		// 6. 如果用户显式传入了类名（包含 package 点号且尚未被注册），尝试直接反射加载
-		if (requestedPlugins != null) {
-			for (String requested : requestedPlugins) {
-				if (requested.contains(".")) {
-					boolean alreadyRegistered = false;
-					for (HotswapPlugin p : plugins) {
-						if (p.getClass().getName().equalsIgnoreCase(requested)) {
-							alreadyRegistered = true;
-							break;
-						}
-					}
-					if (!alreadyRegistered) {
-						try {
-							Class<?> cls = Class.forName(requested, true, ClassLoader.getSystemClassLoader());
-							if (HotswapPlugin.class.isAssignableFrom(cls)) {
-								HotswapPlugin p = (HotswapPlugin) cls.getDeclaredConstructor().newInstance();
-								registerPlugin(p);
-								info("[Plugin] Loaded explicit plugin class: " + p.getName() + " (" + requested + ")");
-							}
-						} catch (Throwable t) {
-							error("[Plugin] Failed to load explicit plugin class '" + requested + "': " + t.getMessage(), t);
-						}
-					}
-				}
-			}
-		}
-	}
 	//endregion
 
 	//region Class Retransformation
@@ -1979,7 +1456,7 @@ public class RemoldAgent {
 	 * 登记 {@link BatchWatchdog}——否则这条路径卡死时日志里不会留下任何线程栈。
 	 * 它与 {@code processChanges} 串行（都在同一把锁下），不会嵌套成同一批次。</p>
 	 */
-	private static void retransformLoaded(Class<?>[] classes) {
+	static void retransformLoaded(Class<?>[] classes) {
 		BatchWatchdog.enter(BATCH_STALL_MS, "retransform-loaded(" + classes.length + " loaded class(es))");
 		try {
 			info("Force retransform all loaded classes...");
@@ -2108,7 +1585,7 @@ public class RemoldAgent {
 		return ClassCopySelector.isBetter(candidate, existing);
 	}
 
-	private static void loadClassSnap(Class<?>[] classes) {
+	static void loadClassSnap(Class<?>[] classes) {
 		var newMap = new ConcurrentHashMap<String, Class<?>>((int) (classes.length / 0.75f) + 1);
 		for (Class<?> c : classes) {
 			String name = c.getName();
@@ -2138,7 +1615,7 @@ public class RemoldAgent {
 	 * 因此把看门狗从 {@code runClassBatch} 上移到这里不会造成同一批次两条
 	 * {@link BatchWatchdog#PREFIX}。异常路径由 {@code finally} 保证注销。</p>
 	 */
-	private static void processChanges(Set<Path> changedFiles, Class<?>[] classes) {
+	static void processChanges(Set<Path> changedFiles, Class<?>[] classes) {
 		BatchWatchdog.enter(BATCH_STALL_MS, "class-batch(" + changedFiles.size() + " file(s))");
 		try {
 			processChangesBatch(changedFiles, classes);
@@ -2146,1385 +1623,77 @@ public class RemoldAgent {
 			// 旁路暂存（PR1）必须在这里兜底清空：批次中途抛 Throwable 时，提交点可能压根没跑到，
 			// 残余条目会带着上一批的对齐输入污染下一批。
 			InitFix.endBatchBytecodeView();
-			PENDING_VCS.clear();
+			VcsAgentCoordinator.PENDING_VCS.clear();
 			BatchWatchdog.exit();
 		}
 	}
 
-	/**
-	 * 处理文件变化的核心逻辑（批次主体；看门狗由 {@link #processChanges} 负责登记/注销）。
-	 */
+	/** 实例判定缓存：点分类名 → 是否存活实例。见 {@link #hasLiveInstances}。 */
+	static final Map<String, Boolean> LIVE_INSTANCE_CACHE       = new ConcurrentHashMap<>();
+	/** 布局门批次级存活探测的类名集合；空集合表示没有批次上下文。 */
+	static volatile Set<String> LIVENESS_BATCH = Set.of();
+	/** 本轮的批次级存活预探测是否已完成（含"不需要做"）。 */
+	static final AtomicBoolean LIVENESS_BATCH_DONE = new AtomicBoolean(true);
+	/** 累计的实例扫描耗时（毫秒），用于观察全堆遍历开销。 */
+	static final AtomicLong LIVE_INSTANCE_SCAN_MILLIS = new AtomicLong();
+	/** 本批次 {@code inst.redefineClasses} 累计耗时（毫秒）。 */
+	static final AtomicLong BATCH_REDEFINE_MILLIS = new AtomicLong();
+	/** 本批次 {@link InitFix#afterRedefine}（两阶段 Stage B + 1-phase 后处理）累计耗时（毫秒）。 */
+	static final AtomicLong BATCH_STAGE_B_MILLIS = new AtomicLong();
+	static final AtomicLong BATCH_STAGE_A_MILLIS = new AtomicLong();
+	static final AtomicLong BATCH_STAGE_C_MILLIS = new AtomicLong();
+	static final AtomicLong BATCH_TWOPHASE_SKEL_MILLIS = new AtomicLong();
+
 	private static void processChangesBatch(Set<Path> changedFiles, Class<?>[] classes) {
-		final long batchStartNanos = System.nanoTime();
-		// 新批次开始：上一批未被 @OnReload 消费的实例引用不再需要，立即释放。
-		StageBInstanceCache.clear();
-		// 批次可观测数据的起点：从读盘、对齐、织入、布局门、redefine 到 InitFix 全部计入。
-		// 收集器挂在当前线程上；即使没有任何监听器，这里也只多一次小对象分配，不改变批次行为。
-		BatchReportScope.begin();
-		resetLiveInstanceCache();
-		long pkgStartNanos = PERF_LOG ? System.nanoTime() : 0L;
-		refreshPackageLoaders(classes);
-		long snapStartNanos = PERF_LOG ? System.nanoTime() : 0L;
-
-		// 获取当前所有已加载类的快照
-		loadClassSnap(classes);
-		long ioStartNanos = PERF_LOG ? System.nanoTime() : 0L;
-
-		List<ClassDefinition> definitions = new ArrayList<>();
-		// List<Class<?>>        unloadedClasses  = new ArrayList<>();
-		int skippedCount  = 0;
-		int injectedCount = 0;
-		// 本轮"作为新类定义"的类名（此前未加载）：它们不参与 Stage A 重定义，也不得被一致性校验回滚。
-		Set<String> injectedClasses = new HashSet<>();
-		// 两阶段需要"补丁分析使用的阶段 C 字节"与"JVM 当前生效的旧字节"两份输入。
-		Map<String, byte[]> oldEffectiveBytes = new HashMap<>();
-		boolean             needsTwoPhase     = false;
-
-		Map<String, byte[]> newBatchBytes = new LinkedHashMap<>(changedFiles.size());
-		Map<String, Path>   classToPath   = new HashMap<>(changedFiles.size());
-		// 磁盘原始字节的指纹：只由 Files.readAllBytes 的结果计算，绝不含对齐/织入后的改写。
-		Map<String, Long>   rawDiskHashes  = new HashMap<>(changedFiles.size());
-		// 目标类名 -> 它在磁盘上的原始类名（匿名类重命名后两者不同）。
-		Map<String, String> targetToRawName = new HashMap<>(changedFiles.size());
-		// 本轮"改了但没生效"的台账：摘要行据此点名跳过了谁（见 RoundSkips）。
-		RoundSkips skips = new RoundSkips();
-		// 旁路记录（PR1）：批次开始先清暂存，避免上一批未提交项串到本批。
-		PENDING_VCS.clear();
-		boolean lambdaStrictRejected = false;
-		// 本轮因注解默认值变化而整体作废的类（非 null = 事务共退：本批一个类都不重定义）。
-		String annotationDefaultAbort = null;
-		for (Path p : changedFiles) {
-			try {
-				byte[] bc = Files.readAllBytes(p);
-				String cn = Utils.getClassNameASM(bc);
-				if (cn != null) {
-					Path existingPath = classToPath.get(cn);
-					if (existingPath != null) {
-						try {
-							java.nio.file.attribute.FileTime curTime = Files.getLastModifiedTime(p);
-							java.nio.file.attribute.FileTime oldTime = Files.getLastModifiedTime(existingPath);
-							if (curTime.compareTo(oldTime) <= 0) {
-								if (DEBUG) log("[TIMESTAMP-SKIP] Skipping older class file " + p + " for " + cn + " (existing " + existingPath + " is newer)");
-								continue;
-							}
-						} catch (Throwable ignored) {
-						}
-					}
-					newBatchBytes.put(cn, bc);
-					classToPath.put(cn, p);
-					rawDiskHashes.put(cn, calculateHash(bc));
-					targetToRawName.put(cn, cn);
-				} else {
-					// 不并进 skippedCount：那个计数只统计"磁盘哈希没变"的类，含义是"本来就没改"。
-					// 读不出类名是"改了但读不了"，属于跳过，进台账由摘要点名。
-					skips.add(p.toString(), RoundSkips.verdict("NO-CLASS-NAME",
-						"unreadable class file", "recompile it and hot-swap again"));
-					error("[SKIP] No className: " + p);
-				}
-			} catch (Throwable ignored) { }
-		}
-
-		// 批次匿名类按**类自身**归属分组：一个类只归一个宿主。不能拿"宿主前缀"去过滤整个批次——
-		// 那会让某个宿主的对齐周期看到并移走别的宿主的类（跨宿主误归属 / 误移出）。
-		Map<String, Map<String, byte[]>> newAnonsByHost = AnonClassAligner.groupBatchAnons(newBatchBytes);
-
-		// 收集需要对齐匿名类的所有宿主类：宿主自身变了，或它的匿名类变了
-		Set<String> hostClassesToAlign = new LinkedHashSet<>();
-		for (Map.Entry<String, byte[]> entry : newBatchBytes.entrySet()) {
-			String cn = entry.getKey();
-			long newHash = calculateHash(entry.getValue());
-			long cnKey = CRC64.hashString(cn);
-			boolean changedOnDisk;
-			synchronized (fileDiskHashes) {
-				long oldHash = fileDiskHashes.get(cnKey);
-				changedOnDisk = (oldHash == -1 || oldHash == LongLongMap.NOT_FOUND || oldHash != newHash);
-			}
-			if (!changedOnDisk) continue;
-			String host = AnonClassAligner.batchAnonHost(cn);
-			if (host != null && !host.equals(cn) && AnonClassAligner.isBatchAnonClass(cn, entry.getValue())) {
-				hostClassesToAlign.add(host);        // 匿名类变了：宿主跟着对齐
-			} else {
-				hostClassesToAlign.add(cn);          // 宿主自己变了：它的匿名类要跟着对齐
-			}
-		}
-
-		// 记录所有对齐过程中产生的旧孤儿类（不得在本次重定义中被误更新）
-		Set<String>                       allOrphanClasses = new HashSet<>();
-		Map<String, AlignmentTransaction> transactions     = new LinkedHashMap<>();
-
-		// 【指纹延后落账】类名 hash → 新磁盘指纹。循环里只登记，不写 fileDiskHashes；
-		// 待 applyRedefinitions 完成后，仅对**确实成功**的类落账（见本方法末尾）。
-		// 这样失败/被拒的类下次触发时不会被误判为 "file hash unchanged" 而跳过。
-		LongLongMap pendingHashes = new LongLongMap(256);
-		// 【失败回队】类名 → 源文件路径，用于重定义失败后把文件放回 pendingChanges。
-		// 注意：hierarchyChanged 的拒绝**不**回队 —— 那种变更 JVM 层面不支持，重试无意义，
-		// 必须重启；回队只会造成"每次触发都失败一次"的噪音。
-		Map<String, Path> retryCandidates = new HashMap<>();
-
-		long anonStartNanos = System.nanoTime();
-		long pkgMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(snapStartNanos - pkgStartNanos) : 0L;
-		long snapMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(ioStartNanos - snapStartNanos) : 0L;
-		long ioMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(anonStartNanos - ioStartNanos) : 0L;
-		long prepMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(anonStartNanos - batchStartNanos) : 0L;
-		// 单遍按宿主分桶旧匿名类，避免在 hostClassesToAlign 外层循环里对全量 loadedClassesMap / bytecodeCache 做 O(H * N) 扫描与 ASM 解析。
-		String singleAlignHost = hostClassesToAlign.size() == 1 ? hostClassesToAlign.iterator().next() : null;
-		if (!hostClassesToAlign.isEmpty()) {
-			for (Map.Entry<String, Class<?>> entry : loadedClassesMap.entrySet()) {
-				String cName = entry.getKey();
-				String host = resolveAnonHostCandidate(cName, hostClassesToAlign, singleAlignHost);
-				if (host == null) continue;
-				if (!AnonClassAligner.isAnonymousClassName(host, cName)) continue;
-				if (bytecodeCache.containsKey(cName)) continue;
-				byte[] bc = fetchOriginalBytecode(entry.getValue());
-				if (bc != null && AnonClassAligner.isBatchAnonClass(cName, bc)) bytecodeCache.put(cName, bc);
-			}
-		}
-		Map<String, Map<String, byte[]>> oldAnonsByHost = new HashMap<>();
-		if (!hostClassesToAlign.isEmpty()) {
-			for (Map.Entry<String, byte[]> entry : bytecodeCache.entrySet()) {
-				String cName = entry.getKey();
-				String host = resolveAnonHostCandidate(cName, hostClassesToAlign, singleAlignHost);
-				if (host == null) continue;
-				byte[] src = sourceBytecodeCache.get(cName);
-				byte[] oldBytes = src != null ? src : entry.getValue();
-				if (!AnonClassAligner.isBatchAnonClass(cName, oldBytes)) continue;
-				oldAnonsByHost.computeIfAbsent(host, k -> new HashMap<>()).put(cName, oldBytes);
-			}
-		}
-
-		for (String hostName : hostClassesToAlign) {
-			String hostSlash = hostName.replace('.', '/');
-			Map<String, byte[]> oldAnon = new HashMap<>(
-				oldAnonsByHost.getOrDefault(hostName, Collections.emptyMap()));
-
-			// 只取**本宿主**的匿名类（按类自身归属分组，绝不拿"本宿主前缀"去扫整批）
-			Map<String, byte[]> newAnon = new HashMap<>(
-				newAnonsByHost.getOrDefault(hostName, Collections.emptyMap()));
-
-			if (oldAnon.isEmpty() && newAnon.isEmpty()) {
-				continue;
-			}
-
-			if (!ANON_ALIGN) {
-				// 总开关关闭：**不能**退化成"按类名照旧重定义" —— 那正是编号位移篡夺场景本身。
-				// 唯一安全的关闭语义是把该宿主组整体移出本批重定义。
-				rejectHostGroup(newBatchBytes, classToPath, hostName, skips,
-				 new AnonClassAligner.AlignmentRejectedException(hostSlash,
-					"anonymous class alignment disabled (remold.agent.anon_align=false)"));
-				continue;
-			}
-
-			AlignmentTransaction tx = new AlignmentTransaction(hostName);
-			for (Map.Entry<String, byte[]> entry : oldAnon.entrySet()) {
-				tx.pinOldBytes.put(entry.getKey(), entry.getValue());
-			}
-
-			byte[] hostBytes = newBatchBytes.get(hostName);
-			if (DEBUG) {
-				log("[ANON_ALIGN] Aligning anonymous classes for host: " + hostName + " (old=" + oldAnon.size() + ", new=" + newAnon.size() + ")");
-			}
-
-			java.util.function.Function<String, byte[]> oldRes = name -> {
-				String dot = name.replace('/', '.');
-				byte[] src = sourceBytecodeCache.get(dot);
-				return src != null ? src : bytecodeCache.get(dot);
-			};
-			java.util.function.Function<String, byte[]> newRes = name -> newBatchBytes.get(name.replace('/', '.'));
-
-			AnonClassAligner.Result res;
-			try {
-				res = AnonClassAligner.align(hostSlash, hostBytes, oldAnon, newAnon, oldRes, newRes,
-				 RemoldAgent::hasLiveInstances,
-				 // 避让上一批已分配、但还没被加载的对齐类编号（挂在 pendingAlignedClasses 里）。
-				 // 传**快照**而非 keySet() 实时视图：视图会让编号分配随挂起集合的并发变化漂移，
-				 // 破坏对齐结果的可确定性。
-				 Set.copyOf(AnnotationTransformer.pendingAlignedClasses.keySet()));
-			} catch (Throwable t) {
-				// docs/topology/04-tiers-and-rejection.md §4：以「宿主类 + 其下属全部匿名类」为原子单元整体拒绝。
-				//
-				// 这里**必须** continue 而不能让异常冒泡：冒泡会让整个 processChanges 中断，
-				// 结果是"本轮所有类的热更静默失效"（异常最终只留在 ScheduledFuture 里，无人观测）；
-				// 而对齐失败也不能只跳过匿名类 —— 该宿主的新字节码会引用到未对齐的 Foo$N。
-				// 因此正确做法是连宿主一起移出本批，其余宿主照常处理。
-				rejectHostGroup(newBatchBytes, classToPath, hostName, skips, t);
-				continue;
-			}
-
-			if (res.alignedHostBytes != null) {
-				newBatchBytes.put(hostName, res.alignedHostBytes);
-			}
-			// 对齐重命名后，目标类名对应的磁盘原始类名可能不同；指纹必须跟随原始磁盘文件。
-			for (Map.Entry<String, String> rename : res.renameMap.entrySet()) {
-				String rawDot    = rename.getKey().replace('/', '.');
-				String targetDot = rename.getValue().replace('/', '.');
-				targetToRawName.put(targetDot, rawDot);
-			}
-
-			for (String orphan : res.orphanOldClasses) {
-				allOrphanClasses.add(orphan.replace('/', '.'));
-			}
-
-			// 真匿名类不得按原名重定义（编号位移会篡夺槽位），所以未对齐的一律移出本批；
-			// 但"移出"必须可观测：对齐器没消费的类要进跳过台账并点名 warn（S22 曾在此静默丢弃）。
-			for (String originalAnonName : newAnon.keySet()) {
-				String rawSlash = originalAnonName.replace('.', '/');
-				boolean consumed = res.renameMap.containsKey(rawSlash)
-					|| res.alignedAnonClasses.containsKey(rawSlash);
-				newBatchBytes.remove(originalAnonName);
-				if (!consumed) {
-					Path anonPath = classToPath.get(originalAnonName);
-					skips.add(anonPath == null ? originalAnonName : anonPath.toString(),
-						RoundSkips.verdict("ANON-NOT-ALIGNED",
-							"anonymous class was not consumed by host alignment", "recompile it and hot-swap again"));
-					warn("[ANON_ALIGN] " + originalAnonName + " was not aligned under host " + hostName
-						+ "; it is kept out of this batch");
-				}
-			}
-
-			// 将对齐重命名后的新匿名类注入批次并登记到事务
-			Path hostPath = classToPath.get(hostName);
-			for (Map.Entry<String, byte[]> entry : res.alignedAnonClasses.entrySet()) {
-				String targetSlash  = entry.getKey();
-				String targetDot    = targetSlash.replace('/', '.');
-				byte[] alignedBytes = entry.getValue();
-
-				newBatchBytes.put(targetDot, alignedBytes);
-				if (hostPath != null && !classToPath.containsKey(targetDot)) {
-					classToPath.put(targetDot, hostPath);
-				}
-
-				tx.pendingAdds.put(targetSlash, alignedBytes);
-				tx.cacheUpdates.put(targetDot, alignedBytes);
-				tx.targetClasses.add(targetDot);
-			}
-			transactions.put(hostName, tx);
-		}
-
-		// 记录源码级对齐基线
-		//
-		// 注意：这里写入的是**本轮新字节**，而同一方法里的 lambda 对齐（下面约 150 行后）
-		// 需要的是**上一轮的源码基线**。所以先把旧值快照下来，供本轮对齐读取；
-		// 否则 align(old == new) 会静默地什么都不做（实测见 docs/initfix/08-test-audit.md §10.5）。
-		Map<String, byte[]> prevSourceBytes = new HashMap<>();
-		Map<String, byte[]> sourceBefore = new HashMap<>();
-		Map<String, byte[]> driftOldBytes = new HashMap<>();
-		Set<String> loadedBefore = new HashSet<>(loadedClassesMap.keySet());
-		for (String key : newBatchBytes.keySet()) {
-			byte[] prev = sourceBytecodeCache.get(key);
-			sourceBefore.put(key, prev);
-			driftOldBytes.put(key, bytecodeCache.get(key));
-			if (prev != null) prevSourceBytes.put(key, prev);
-		}
-		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
-			sourceBytecodeCache.put(e.getKey(), e.getValue());
-		}
-
-		// ---- 字节码重织入桥（Mixin / AspectJ / 自定义字节码增强器）----
-		// 位置：源码级对齐之后、局部类门与布局门之前。
-		// 保证对齐器看到的是纯净源码，而布局门与 JVM redefine 看到的是织入后的物理结构。
-		long bridgeStartNanos = PERF_LOG ? System.nanoTime() : 0L;
-		if (!transformerBridges.isEmpty()) {
-			for (String className : new ArrayList<>(newBatchBytes.keySet())) {
-				byte[] rawBytes = newBatchBytes.get(className);
-				if (rawBytes == null) continue;
-				Class<?> targetClass = loadedClassesMap.get(className);
-				ClassLoader cl = targetClass != null ? targetClass.getClassLoader() : findTargetClassLoader(className, classToPath.get(className));
-				byte[] weaved;
-				try {
-					weaved = applyTransformerBridges(cl, className, targetClass, rawBytes);
-				} catch (remold.BytecodeTransformerBridge.Abort abort) {
-					// 事务一致性（单类粒度）：该类本轮整体移出批次，既不 redefine 织入后的新字节，
-					// 也不退回未织入的原始字节。宿主与它关联的类一起保持已加载旧版。
-					newBatchBytes.remove(className);
-					classToPath.remove(className);
-					skips.add(className, RoundSkips.verdict("BRIDGE-TRANSACTION-ABORT",
-						"bytecode bridge refused this class for the whole round: " + abort.getMessage(),
-						"nothing was redefined for this class; the next batch retries"));
-					if (targetClass != null) InitFix.afterRedefineFailed(targetClass);
-					continue;
-				}
-				weaved = alignMixinGeneratedMembers(className, targetClass, weaved);
-				if (weaved != null && weaved != rawBytes) {
-					newBatchBytes.put(className, weaved);
-					for (AlignmentTransaction tx : transactions.values()) {
-						if (tx.cacheUpdates.containsKey(className)) {
-							tx.cacheUpdates.put(className, weaved);
-						}
-						String slash = className.replace('.', '/');
-						if (tx.pendingAdds.containsKey(slash)) {
-							tx.pendingAdds.put(slash, weaved);
-						}
-					}
-				}
-			}
-		}
-
-		// ---- 访问权限单调对齐（Access Monotonicity Alignment）----
-		// 桥接产物可能来自原始 jar/磁盘字节，丢掉宿主加载器在 Mixin 之前做的访问变换；
-		// 一旦以更窄权限送回 JVM，JBR 增强重定义会把子类一并 link/verify，跨包 protected 访问
-		// 会当场 VerifyError -> InternalError。这里按已加载运行时字节码单调对齐，并在自检门拒绝失败项。
-		for (String className : new ArrayList<>(newBatchBytes.keySet())) {
-			byte[] rawBytes = newBatchBytes.get(className);
-			if (rawBytes == null) continue;
-			Class<?> targetClass = loadedClassesMap.get(className);
-			byte[] aligned = alignAccessMonotonicity(className, targetClass, rawBytes);
-			if (aligned != null) {
-				if (aligned != rawBytes) newBatchBytes.put(className, aligned);
-				continue;
-			}
-			newBatchBytes.remove(className);
-			classToPath.remove(className);
-			skips.add(className, RoundSkips.verdict("ACCESS-GATE-REFUSED",
-				"member access narrowed after re-weave",
-				"refused before redefineClasses; see [ACCESS-GATE]"));
-			if (targetClass != null) InitFix.afterRedefineFailed(targetClass);
-		}
-
-		// 插件在桥接阶段会把 Mixin 等模板类登记为"不可加载"。它们不能进入本批：
-		// 既不能被当作普通新类 defineClass，也不能被当作已加载类 redefine，更不能参与读者扫描。
-		newBatchBytes.keySet().removeIf(RemoldAgent::isNonLoadableClass);
-
-		long anonEndNanos = System.nanoTime();
-		long anonMs = TimeUnit.NANOSECONDS.toMillis(anonEndNanos - anonStartNanos);
-		long anonAlignMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(bridgeStartNanos - anonStartNanos) : 0L;
-		long bridgeMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(anonEndNanos - bridgeStartNanos) : 0L;
-
-		Map<ClassLoader, Map<String, byte[]>> batchView = new IdentityHashMap<>();
-		for (Map.Entry<String, byte[]> entry : newBatchBytes.entrySet()) {
-			Class<?> loaded = loadedClassesMap.get(entry.getKey());
-			ClassLoader loader = loaded != null ? loaded.getClassLoader()
-				: findTargetClassLoader(entry.getKey(), classToPath.get(entry.getKey()));
-			batchView.computeIfAbsent(loader, ignored -> new LinkedHashMap<>()).put(entry.getKey(), entry.getValue());
-		}
-		InitFix.beginBatchBytecodeView(batchView);
-
-		// ---- 同名局部类编号漂移止血门（docs/topology/07-layout-gate-and-risks.md §2）----
-		//
-		// 位置：宿主匿名对齐之后、实例布局门之前。局部类不在匿名对齐视野内（名字含简单名，被准入闸门
-		// 拒绝），故单开一道门。命中即把宿主及其 `host$...` 整族移出本批，复用同一宿主组拒绝通道。
-		long guardStartNanos = System.nanoTime();
-		applyLocalClassGuard(newBatchBytes, classToPath, transactions, skips);
-		long guardMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - guardStartNanos);
-
-		// ---- 实例状态布局安全门（docs/topology/07-layout-gate-and-risks.md §1，全体类，非仅匿名类）----
-		//
-		// 位置：宿主对齐之后、逐类 redefine 之前。这样具名类与匿名类一起被覆盖，
-		// 且被拒的宿主组可以干净地复用 docs/topology/04-tiers-and-rejection.md §4 的"宿主 + 下属匿名类整组移出本批"通道
-		// （`rejectHostGroup` / `dropHostGroup`）。
-		//
-		// 分工：对齐器的 Tier 4 门只挡匿名类的**合成捕获字段**（ClassDiff 会过滤掉它们，
-		// 这里看不见）；本门只看现成的 `ClassDiff.changedFields`，即**非合成**字段的
-		// 删/改类型/改静态性。纯新增放行（交给 InitFix）。
-		long gateStartNanos = System.nanoTime();
-		Map<String, GateCachedDiff> gateDiffCache = new HashMap<>();
-		long[] readersMsOut = new long[1];
-		applyRedefineLayoutGate(newBatchBytes, classToPath, transactions, skips, gateDiffCache, readersMsOut);
-		long readersMs = readersMsOut[0];
-		long gateMs = Math.max(0L, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - gateStartNanos) - readersMs);
-
-		long alignDiffStartNanos = System.nanoTime();
-		long fetchNanos = 0L;
-		long lambdaNanos = 0L;
-		long diffNanos = 0L;
-		long annDefNanos = 0L;
-		long initFixNanos = 0L;
-		// 同批内复用按 ClassLoader 分桶的 normalizeAlignBaseline 缓存，避免对同一关联类反复展开 frames 重算。
-		Map<ClassLoader, Map<String, byte[]>> normOldByLoader = new HashMap<>();
-		Map<ClassLoader, Map<String, byte[]>> normNewByLoader = new HashMap<>();
-
-		for (Map.Entry<String, byte[]> batchEntry : newBatchBytes.entrySet()) {
-			String className = batchEntry.getKey();
-			byte[] bytecode  = batchEntry.getValue();
-			Path   path      = classToPath.get(className);
-			if (DEBUG) log("Processing changes: " + (path != null ? path : className));
-
-			if (isNonLoadableClass(className)) {
-				if (DEBUG) log("[SKIP-TEMPLATE] " + className + " is a non-loadable template; skipped");
-				continue;
-			}
-
-			if (allOrphanClasses.contains(className)) {
-				if (DEBUG) log("[ORPHAN-RETAIN] Retaining orphan class: " + className);
-				continue;
-			}
-
-			try {
-				if (isBlacklisted(className)) {
-					if (DEBUG) log("[SKIP-BLACKLIST] " + className);
-					skips.add(className, RoundSkips.verdict("BLACKLIST",
-						"matches remold.agent.hotswap.blacklist", "drop the prefix or restart"));
-					continue;
-				}
-
-				// 指纹取磁盘原始字节：对齐/织入后的 bytecode 不能参与“磁盘是否变化”的判定。
-				String rawName    = targetToRawName.getOrDefault(className, className);
-				Long   rawHash    = rawDiskHashes.get(rawName);
-				long   newHash    = rawHash != null ? rawHash : calculateHash(bytecode);
-				long   classNameKey = CRC64.hashString(rawName);
-
-				// 检查指纹
-				synchronized (fileDiskHashes) {
-					long oldDiskHash = fileDiskHashes.get(classNameKey);
-					if (oldDiskHash != -1 && oldDiskHash != LongLongMap.NOT_FOUND && oldDiskHash == newHash) {
-						if (DEBUG) log("[SKIP] " + className + " (file hash unchanged)");
-						skippedCount++;
-						continue;
-					}
-					// 【不在此处落账】指纹必须等到该类**确实重定义成功**后才记录。
-					//
-					// 旧实现把 put 放在这里（重定义之前），于是以下两条"没生效"的路径
-					// 也会留下已记账的指纹，导致下一次触发被判为 "file hash unchanged" 而跳过 ——
-					// 文件明明改了，却永远不再尝试重试：
-					//   • hierarchyChanged 的 continue（本方法下方）—— 需重启，属于已知拒绝；
-					//   • applyRedefinitions 批量/单类失败 —— 本轮没生效，但指纹已写。
-					// 因此只在这里登记"待落账"，真正的 put 由 applyRedefinitions 之后按成功集合执行。
-					pendingHashes.put(classNameKey, newHash);
-				}
-
-				Class<?> targetClass = loadedClassesMap.get(className);
-
-				if (targetClass != null) {
-					// 过滤 JVM 不可修改类（如 Hidden Class、VM 内部动态代理类等）
-					if (inst != null && !inst.isModifiableClass(targetClass)) {
-						if (DEBUG) log("[SKIP-UNMODIFIABLE] " + className + " is not modifiable by JVM.");
-						skips.add(className, RoundSkips.verdict("NOT-MODIFIABLE",
-							"hidden / VM-generated class the JVM refuses to redefine", "restart"));
-						continue;
-					}
-					// 类已加载：无论模式，都必须执行 redefinition
-					if (DEBUG) log("[MODIFIED] " + className);
-
-
-					byte[] newBytecode = bytecode;
-					byte[] oldBytecode = bytecodeCache.get(className);
-
-					// 如果缓存里没有，主动触发一次 retransform 来"偷"取字节码
-					if (oldBytecode == null) {
-						long t0 = System.nanoTime();
-						oldBytecode = fetchOriginalBytecode(targetClass);
-						fetchNanos += System.nanoTime() - t0;
-						if (oldBytecode != null) {
-							bytecodeCache.put(className, oldBytecode);
-						}
-					}
-
-					// 执行 ASM Diff
-					if (oldBytecode != null) {
-						long lambdaT0 = System.nanoTime();
-						if (LAMBDA_ALIGN) {
-							boolean hasOldLambdas = LambdaAligner.hasPotentialLambdas(oldBytecode)
-								|| LambdaAligner.hasPotentialLambdas(prevSourceBytes.get(className));
-							boolean hasNewLambdas = LambdaAligner.hasPotentialLambdas(newBytecode);
-							boolean hasInvented = inventedSlots.containsKey(className)
-								&& !inventedSlots.get(className).isEmpty();
-							if (hasOldLambdas || hasNewLambdas || hasInvented) {
-								// 【基线一致性】oldBytecode 来自 bytecodeCache，是"上一次 transform 之后
-								// JVM 里实际生效"的形态（若开了 FORCE_STATIC_LAMBDA，则其中的 lambda 已被
-								// forceStaticLambdas 转成"静态 + this 显式首参数"）。而 newBytecode 是刚
-								// 从磁盘读到的原始编译产物，还是"实例 lambda"。两者形态不一致时，
-								// LambdaAligner 会把同一个 lambda 判成"删除 + 新增"，生成
-								// lambda$build$21 这类避障名，随后 redefine 触发的 transform 又会把新类
-								// 强制成静态，于是 JVM 里仍持有老 CallSite 的 UI 监听器直接
-								// NoSuchMethodError。这里让 newBytecode 先过一遍同样的归一化，
-								// 保证比对双方是同一种形态。该方法幂等，即便随后的 transform 再跑一次
-								// 也不会二次前置 this。
-								final ClassLoader alignLoader = targetClass.getClassLoader();
-								final String alignSlash = className.replace('.', '/');
-								if (FORCE_STATIC_LAMBDA) {
-									newBytecode = AnnotationTransformer.forceStaticLambdas(
-									 newBytecode, alignSlash, alignLoader);
-								}
-								// 【两侧基线必须同形态】newBytecode 上面刚归一化过，旧侧也必须归一化。
-								// sourceBytecodeCache 在批量路径上存的是**磁盘原始字节码**（实例 lambda），
-								// 而 JVM 里实际生效的 bytecodeCache 才是归一化后的形态。若旧侧直接用
-								// sourceBytecodeCache，LambdaAligner 会因 desc 不同把同一个 lambda 判成
-								// "删除 + 新增"：复活出的幽灵空壳沿用未归一化的签名（例如
-								// lambda$buildTitle$5(ImageButton)V），而老 CallSite 持有的是归一化后的
-								// 签名（lambda$buildTitle$5(Window, ImageButton)V）——redefine 之后直接
-								// NoSuchMethodError。原 lambda 还会被重复幽灵化出一份同名异型的空壳。
-								Function<String, byte[]> oldResolver =
-								 normalizeAlignResolver(name -> {
-									byte[] src = prevSourceBytes.get(name.replace('/', '.'));
-									if (src == null) src = sourceBytecodeCache.get(name.replace('/', '.'));
-									return src != null ? src : bytecodeCache.get(name.replace('/', '.'));
-								 }, alignLoader, normOldByLoader.computeIfAbsent(alignLoader, k -> new HashMap<>()));
-								Function<String, byte[]> newResolver =
-								 normalizeAlignResolver(name -> newBatchBytes.get(name.replace('/', '.')), alignLoader,
-								                        normNewByLoader.computeIfAbsent(alignLoader, k -> new HashMap<>()));
-								byte[] oldSrc = prevSourceBytes.get(className);
-								// 基线优先用 JVM 里**实际生效**的那份（bytecodeCache，含上一轮注入的孤儿桩）：
-								// 源码基线不含桩，多轮序列下会与运行期真实形态脱节（rs_revive 实测：
-								// 删 A2 再加回，第二轮 A2 槽位串到 A3、A3 直接 NoSuchMethodError）。
-								byte[] alignOld = normalizeAlignBaseline(
-								 oldBytecode != null ? oldBytecode : oldSrc, alignSlash, alignLoader);
-								// PR1 旁路：Raw 阶段的定义 = 进入 align() 之前的待对齐产物
-								// （已过前置归一化 forceStaticLambdas 等变换，但不是磁盘原始字节）。
-								byte[] preAlignBytes = newBytecode;
-								// 只在"运行期基线确实变了、但选出来的对齐基线却等于新字节"时才告警：
-								// IDE 重复构建、字节码没变时 oldBytecode 也等于 newBytecode，那属于正常情况。
-								if (java.util.Arrays.equals(alignOld, newBytecode)
-									&& oldBytecode != null && !java.util.Arrays.equals(oldBytecode, newBytecode)) {
-									warn("[LambdaAligner] baseline == new bytes for " + className
-										+ " while the loaded class differs — alignment had nothing to align"
-										+ " (stale source cache?). Old callsites will bind by raw javac numbering this round.");
-								}
-								try {
-									// loader 维度必须显式传真实类加载器：AlignmentMetaStore 按 loader 身份分槽，
-									// 传 null 只会命中 bootstrap 槽，应用类加载器下的类永远取不到元数据
-									// （历史缺陷：开关生效但读数不变，见 docs/vcs/03-live-raw-to-raw-alignment.md §9 F1）。
-									newBytecode = LambdaAligner.align(alignOld, newBytecode, oldResolver, newResolver,
-									 inventedSlots.getOrDefault(className, java.util.Set.of()), alignLoader);
-									// 本轮算出的"自造名"先挂起，等 redefine 成功再落账（失败就丢弃，
-									// 因为旧基线没前进，下一轮仍然是同一份旧字节）。
-									// 从本轮快照里取，避免读到别的轮次（失败时快照的集合是空的，不是 null）。
-									LambdaAligner.AlignmentResult aligned = LambdaAligner.LAST_RESULT;
-									pendingInvented.put(className,
-									 aligned == null ? java.util.Set.of() : aligned.inventedNames);
-									if (Boolean.getBoolean("remold.vcs.enabled")) {
-										PENDING_VCS.put(className, new VcsPending(alignLoader, alignOld,
-											preAlignBytes, newBytecode, aligned));
-									}
-								} catch (LambdaAligner.LambdaAlignmentStrictException e) {
-									lambdaNanos += System.nanoTime() - lambdaT0;
-									lambdaStrictRejected = true;
-									error("REJECTED: " + e.getMessage() + ". Please recompile with '-g' or restart.");
-									AlignmentTransaction tx = transactions.get(className);
-									if (tx != null) {
-										tx.rollback(true);
-										transactions.remove(className);
-									}
-									skips.add(className, RoundSkips.verdict("LAMBDA-STRICT-REJECT",
-										"captured lambda missing LocalVariableTable (compiled without -g)",
-										"recompile with '-g' or restart"));
-									continue;
-								}
-							}
-						}
-						lambdaNanos += System.nanoTime() - lambdaT0;
-						// 没有 lambdas 的类不走对齐分支，但同样需要提交刻度：否则它既进不了 Changeset，
-						// 也无法被区间回退（B1 的回退集合按 Changeset 的 entries 计算）。
-						if (LAMBDA_ALIGN && Boolean.getBoolean("remold.vcs.enabled")
-						    && !PENDING_VCS.containsKey(className)) {
-							PENDING_VCS.put(className, new VcsPending(targetClass.getClassLoader(), oldBytecode,
-							 newBytecode, newBytecode, null));
-						}
-					}
-					if (oldBytecode != null) {
-						long diffT0 = System.nanoTime();
-						GateCachedDiff gateCached = gateDiffCache.get(className);
-						boolean needFullMethodHashes = DIFF_LOG || DEBUG;
-						ClassDiffUtil.ClassDiff diff;
-						boolean fullNodesLoaded;
-						if (gateCached != null
-						    && gateCached.oldBytes() == oldBytecode
-						    && gateCached.newBytes() == newBytecode
-						    && (!needFullMethodHashes || gateCached.bodyDiffComputed())) {
-							diff = gateCached.diff();
-							fullNodesLoaded = gateCached.fullNodesLoaded();
-						} else {
-							diff = needFullMethodHashes
-								? ClassDiffUtil.diff(oldBytecode, newBytecode)
-								: ClassDiffUtil.diffStructural(oldBytecode, newBytecode);
-							fullNodesLoaded = needFullMethodHashes;
-						}
-						if (needFullMethodHashes) {
-							ClassDiffUtil.logDiff(className, diff);
-						}
-						diffNanos += System.nanoTime() - diffT0;
-						long annDefT0 = System.nanoTime();
-						String annotationDefaultAbortClass =
-							handleAnnotationDefaultChangeInBatch(className, oldBytecode, newBytecode,
-								transactions, definitions, oldEffectiveBytes, retryCandidates, skips);
-						annDefNanos += System.nanoTime() - annDefT0;
-						if (annotationDefaultAbortClass != null) {
-							annotationDefaultAbort = annotationDefaultAbortClass;
-							continue;
-						}
-						if (ClassDiffUtil.mustRejectHierarchyChange(diff, isEnhancedHotswapEnabled())) {
-							error("REJECTED: Class hierarchy change detected for " + className + " ("
-								+ ClassDiffUtil.describeHierarchyChange(diff) + ")."
-								+ (diff.superChanged
-									? " Changing the superclass is not supported by any redefinition mode. Please RESTART application."
-									: " Interface changes require enhanced class redefinition (JBR/DCEVM with"
-										+ " -XX:+AllowEnhancedClassRedefinition); this JVM has none. Please RESTART application."));
-							AlignmentTransaction tx = transactions.get(className);
-							if (tx != null) {
-								tx.rollback(true);
-								transactions.remove(className);
-							}
-							// 直接跳过该类的重定义，避免抛出 UnsupportedOperationException
-							skips.add(className, RoundSkips.verdict("HIERARCHY-CHANGED",
-								"superclass / interfaces changed",
-								"restart — the JVM cannot apply this"));
-							continue;
-						}
-
-						if (mustSkipForMissingEnhancedRedefinition(
-						 diff.structureChanged(), isEnhancedHotswapEnabled())) {
-							// 标准 HotSpot 的 redefineClasses 不允许 schema 变化，且批量提交是全有或全无：
-							// 放它进 definitions 会让同批次里纯方法体修改的类一起失败。
-							// 因此把该类摘出本批，其余类照常重定义。
-							error("REJECTED: " + className + " has field/method structure changes but"
-							      + " this JVM has no enhanced class redefinition (JBR/DCEVM)."
-							      + " Skipping this class; other classes in this batch continue."
-							      + " See docs/initfix/04-target-design.md.");
-							AlignmentTransaction tx = transactions.get(className);
-							if (tx != null) {
-								tx.rollback(true);
-								transactions.remove(className);
-							}
-							// 与 hierarchyChanged 同理：受 JVM 能力限制的拒绝，重试永远不会成功，
-							// 不登记 retryCandidates，避免"每次触发都失败一次"的噪音。
-							skips.add(className, RoundSkips.verdict("NO-ENHANCED-REDEFINE",
-								"field/method structure changed but this JVM has no enhanced redefinition",
-								"run on JBR/DCEVM, or restart"));
-							continue;
-						}
-						if (diff.structureChanged()) {
-							log("[DCEVM] Structure change detected, proceeding with enhanced redefinition.");
-						}
-						long initFixT0 = System.nanoTime();
-						if (!fullNodesLoaded && InitFix.needsMethodBodies(targetClass, diff)) {
-							ClassDiffUtil.ensureFullClassNodes(diff, oldBytecode, newBytecode);
-						}
-						InitFix.transform(targetClass, newBytecode, diff);
-						initFixNanos += System.nanoTime() - initFixT0;
-					} else {
-						log("[WARN] Cannot diff " + className + " (missing old bytecode). Proceeding with redefine.");
-					}
-					if (oldBytecode != null) oldEffectiveBytes.put(className, oldBytecode);
-
-					definitions.add(new ClassDefinition(targetClass, newBytecode));
-					// 登记为"待重定义"：成败由 applyRedefinitions 决定。
-					// 若最终失败，文件会被放回 pendingChanges 以便下次重试。
-					//
-					// 位置很关键：必须在 hierarchyChanged 的 continue **之后** ——
-					// 那种拒绝受 JVM 能力限制，重试永远不会成功，回队只会造成
-					// "每次触发都失败一次"的噪音。这里只会登记真正进入 definitions 的类。
-					if (path != null) retryCandidates.put(className, path);
-				} else {
-					if (DEBUG) log("[NEW] " + className);
-					// 类尚未加载：根据 REDEFINE_MODE 处理
-					// 若 path 来自 jar 临时目录，需还原为 watchDir 内的虚拟路径以正确推断 ClassLoader
-					Path clHintPath = JarExtractor.tmpToJar().containsKey(path)
-					 ? JarExtractor.resolveWatchDirPath(JarExtractor.tmpToJar().get(path), className)
-					 : path;
-					// clHintPath == null 表示来自直接传入的 activeWatchJar，无虚拟 watchDir 路径，
-					// 退化到纯包名推断（findTargetClassLoader(className)），inject 照常走，lazy_load 挂 tmpDir 路径
-					if (REDEFINE_MODE == RedefineMode.inject) {
-						if (injectNewClass(className, clHintPath, bytecode)) {
-							bytecodeCache.put(className, bytecode);
-							injectedCount++;
-							injectedClasses.add(className);
-							// 注入成功即视为生效：指纹可立即落账（不经过 applyRedefinitions）。
-							// 失败时不落账，下次触发会重试。指纹同样只记磁盘原始字节。
-							String injectRawName = targetToRawName.getOrDefault(className, className);
-							Long   injectRawHash = rawDiskHashes.get(injectRawName);
-							long   diskHash = injectRawHash != null ? injectRawHash : calculateHash(bytecode);
-							synchronized (fileDiskHashes) {
-								fileDiskHashes.put(CRC64.hashString(injectRawName), diskHash);
-							}
-						}
-					} else if (REDEFINE_MODE == RedefineMode.lazy_load && UCP_APPEND) {
-						ClassLoader loader = findTargetClassLoader(className, clHintPath);
-						// lazy_load + jar：ClassLoader 推断用虚拟路径（clHintPath），
-						// 实际挂载用真实 tmpDir 路径，否则 ClassLoader 找不到 class 文件
-						Path mountPath = JarExtractor.tmpToJar().containsKey(path) ? path : clHintPath;
-						if (mountPath != null) {
-							PackageUnsealer.unsealClassPackage(loader, className);
-							mountForClass(loader, mountPath);
-						}
-						bytecodeCache.put(className, bytecode);
-						// lazy_load 只是挂载路径，类尚未真正加载生效 —— 指纹**不**落账，
-						// 等它真正被加载/重定义时再记，否则会漏掉后续的首次加载。
-					}
-				}
-			} catch (Throwable e) {
-				error("Failed to process " + path, e);
-			}
-		}
-		InitFix.setBatchDefinitions(definitions);
-		InitFix.finishBatchTransforms();
-		if (TWO_PHASE) {
-			for (ClassDefinition definition : definitions) {
-				if (InitFix.requiresTwoPhase(definition.getDefinitionClass())) {
-					needsTwoPhase = true;
-					break;
-				}
-			}
-		}
-
-		// 注解默认值变化的**事务共退**：本轮整体作废（连坐），避免"注解类型换上了新默认值、
-		// 已加载的消费者仍读旧默认值"这种半套状态。记账动作在
-		// {@link #abortRoundForAnnotationDefault} 里（同一入口被单测覆盖），这里只补一条可见的总结。
-		// 下游的 sourceBytecodeCache 回滚 / 指纹不落账 / 不回队逻辑照常执行（outcome 为空）。
-		if (annotationDefaultAbort != null) {
-			error("[HOTSWAP] Round aborted: annotation default value changed in " + annotationDefaultAbort
-				+ "; no class of this batch was redefined (transaction co-rollback)."
-				+ " RESTART required for the new default to take effect.");
-		}
-
-		// 批量执行重定义（针对已加载类）。
-		// 两阶段：当本批确实要补"新增/类型变更字段"时，先提交阶段 A（新结构 + 旧方法体，构造器保持新体），
-		// 让存量实例在旧行为下被补齐，再提交阶段 C 的新方法体；否则沿用单次重定义的快路径。
-		long alignDiffMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - alignDiffStartNanos);
-
-		long redefineWallStartNanos = PERF_LOG ? System.nanoTime() : 0L;
-		RedefineOutcome outcome;
-		if (needsTwoPhase && TWO_PHASE) {
-			outcome = applyTwoPhase(definitions, oldEffectiveBytes, transactions.values(), skips, injectedClasses);
-		} else {
-			if (HeapFieldWatch.enabled() && !definitions.isEmpty()) {
-				HeapFieldWatch.snapshot("before-redefine", batchWatchLabel(definitions));
-			}
-			outcome = applyRedefinitions(definitions, transactions.values(), skips);
-			if (HeapFieldWatch.enabled() && !outcome.successful().isEmpty()) {
-				HeapFieldWatch.snapshot("after-redefine", batchWatchLabel(definitions));
-			}
-		}
-		Set<String>     redefinedOk = outcome.successful();
-		Set<String>     rolledBack  = outcome.rolledBack();
-		// PR1 旁路记录（写入点）：只在本批最终重定义结果确定之后提交；对齐期的暂存不在这里。
-		if (Boolean.getBoolean("remold.vcs.enabled")) {
-			try {
-				commitVcsBatch(definitions, redefinedOk, rolledBack, lambdaStrictRejected,
-				 needsTwoPhase && TWO_PHASE);
-			} catch (Throwable t) {
-				warn("[VCS] side-channel record skipped: " + t);
-			}
-		}
-		long redefineWallEndNanos = PERF_LOG ? System.nanoTime() : 0L;
-
-		// sourceBytecodeCache 是“最近一次实际生效的源码基线”，不是“本轮编译结果”。
-		// 对齐阶段必须先看到本轮新字节，所以上面暂存写入；这里按类回滚未生效的已加载类。
-		// 注入的新类不在 loadedBefore 中，保持新源码；成功类保持新源码。
-		rollbackSourceCache(sourceBefore, redefinedOk, loadedBefore);
-
-		// ---- 指纹落账 + 失败回队 ----
-		//
-		// 指纹只对"确实生效"的类记录。未生效的类不落账，因此下次触发不会被
-		// "file hash unchanged" 误跳过 —— 这正是本次修复的核心。
-		//
-		// 同时把重定义失败的类的源文件放回 pendingChanges：失败的文件在
-		// triggerHotswapWith0 里已被取走，而 triggerHotswap() 不重扫磁盘，
-		// 不回队的话"再热更一次"实际上什么也不会发生（文件不再被写入就不会有新的 watcher 事件）。
-		//
-		// **例外：被 rollback 的事务组不回队。** 那种情况下宿主可能已生效、而 cache/pending
-		// 被钉回旧版本；重试会拿与 JVM 实际状态不一致的基线重新对齐。只提示重启。
-		int requeued    = 0;
-		int notRequeued = 0;
-		for (Map.Entry<String, Path> e : retryCandidates.entrySet()) {
-			String className = e.getKey();
-			if (redefinedOk.contains(className)) {
-				// 成功：落账指纹（键必须是磁盘原始类名，不能是重命名后的目标类名）
-				String rawName = targetToRawName.getOrDefault(className, className);
-				synchronized (fileDiskHashes) {
-					fileDiskHashes.put(CRC64.hashString(rawName), pendingHashes.get(CRC64.hashString(rawName)));
-				}
-				continue;
-			}
-			if (rolledBack.contains(className)) {
-				// 被 rollback 的组：不落账、也不回队（回队不安全，见上）
-				notRequeued++;
-				if (DEBUG) log("[RETRY-SKIP] " + className + " in rolled-back group; not requeued.");
-				continue;
-			}
-			// 普通失败：不落账（下次仍会尝试），并回队以便立即重试
-			Path p = e.getValue();
-			if (p != null && !Files.exists(p)) {
-				// jar 来源的类：临时目录会在下一次 extractJarToTemp 时被清空重建，
-				// 回队的路径可能已不存在。不报出来这些类会静默丢失重试。
-				error("[RETRY-QUEUE] Source file no longer exists for " + className + ": " + p
-				      + " (likely a jar temp dir that was rebuilt); this class cannot be retried"
-				      + " until its jar is written again.");
-				continue;
-			}
-			pendingChanges.add(p);
-			requeued++;
-			if (DEBUG) log("[RETRY-QUEUE] " + className + " failed to redefine; requeued " + p);
-		}
-		if (requeued > 0) {
-			warn("[HOTSWAP-RETRY] " + requeued + " class(es) failed to redefine and were requeued; "
-			     + "press hot-swap again to retry.");
-		}
-		if (notRequeued > 0) {
-			warn("[HOTSWAP-RETRY] " + notRequeued + " class(es) in an inconsistent group were NOT requeued; "
-			     + "RESTART is required for those.");
-		}
-
-		// 后处理是否真的跑起来了，必须能从日志里看出来：这一阶段的缺失（InitFix 补丁、@OnReload 回调）
-		// 与"重定义成功"长得一模一样，真机排查时无法区分。DEBUG 下打首尾两行即可定性。
-		if (DEBUG) log("[POST] post-processing " + redefinedOk.size() + " class(es): " + redefinedOk);
-
-		long commitMs = PERF_LOG ? TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - redefineWallEndNanos) : 0L;
-		List<ClassDefinition> successfulDefinitions = new ArrayList<>(definitions.size());
-		List<Class<?>> patchTargets = new ArrayList<>(definitions.size());
-		for (ClassDefinition def : definitions) {
-			if (!redefinedOk.contains(def.getDefinitionClass().getName())) continue;
-			successfulDefinitions.add(def);
-			patchTargets.add(def.getDefinitionClass());
-		}
-		long stageBStart = System.nanoTime();
-		// 批次级单次堆遍历（与两阶段 Stage B 同一入口）：本批 K 个类的实例收集只做一次全堆扫描。
-		// 两阶段路径下这些类的 PENDING 已在 Stage B 被摘掉，这里过滤后为空 → 不产生额外遍历。
-		InitFix.beginBatchInstanceCollection(patchTargets);
-		try {
-			for (Class<?> clazz : InitFix.orderBatchHosts(patchTargets)) {
-				try {
-					InitFix.afterRedefine(clazz);
-				} catch (Throwable e) {
-					error("Failed to process InitFix.", e);
-					InitFix.afterRedefineFailed(clazz);
-				}
-			}
-		} finally {
-			InitFix.endBatchInstanceCollection();
-			InitFix.endBatchBytecodeView();
-		}
-		BATCH_STAGE_B_MILLIS.addAndGet(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - stageBStart));
-		if (HeapFieldWatch.enabled() && !(needsTwoPhase && TWO_PHASE) && !successfulDefinitions.isEmpty()) {
-			HeapFieldWatch.snapshot("after-field-patch", batchWatchLabel(successfulDefinitions));
-		}
-
-		// 必须在 InitFix 补丁（静态字段与存量实例字段）全部就位后，再对成功重定义的类触发 @OnReload 回调；
-		// 严禁在补丁就绪前触发，否则回调读到未初始化的零值（时序反转）。
-		long annStartNanos = PERF_LOG ? System.nanoTime() : 0L;
-		processAnnotations(successfulDefinitions);
-		if (DEBUG) log("[POST] post-processing done for " + successfulDefinitions.size() + " class(es)");
-		List<String> redefinedNames = new ArrayList<>(successfulDefinitions.size());
-		for (ClassDefinition def : successfulDefinitions) {
-			redefinedNames.add(def.getDefinitionClass().getName());
-		}
-		long listenStartNanos = PERF_LOG ? System.nanoTime() : 0L;
-		// finish 会清掉当前线程的批次状态；即使本批没有类成功，也要发布
-		// “Mixin 模板已 reload / InitFix 已修补”这类可观测活动（见 notifyBatchListeners）。
-		notifyBatchListeners(successfulDefinitions, BatchReportScope.finish(redefinedNames));
-		long listenEndNanos = PERF_LOG ? System.nanoTime() : 0L;
-		if (!definitions.isEmpty() || injectedCount > 0) {
-			boolean twoPhaseMode = needsTwoPhase && TWO_PHASE;
-			long totalMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - batchStartNanos);
-			long redefMs = BATCH_REDEFINE_MILLIS.get();
-			long stageBMs = BATCH_STAGE_B_MILLIS.get();
-			String prepDetail = PERF_LOG
-				? "prep=" + prepMs + "ms [pkg=" + pkgMs + ", snap=" + snapMs + ", io=" + ioMs + "], "
-				: "";
-			String anonDetail = PERF_LOG
-				? " [align=" + anonAlignMs + ", bridge=" + bridgeMs + "]"
-				: "";
-			String alignDiffDetail = PERF_LOG
-				? " [fetch=" + TimeUnit.NANOSECONDS.toMillis(fetchNanos) + "ms"
-				  + ", lambda=" + TimeUnit.NANOSECONDS.toMillis(lambdaNanos) + "ms"
-				  + ", diff=" + TimeUnit.NANOSECONDS.toMillis(diffNanos) + "ms"
-				  + ", annDef=" + TimeUnit.NANOSECONDS.toMillis(annDefNanos) + "ms"
-				  + ", initFix=" + TimeUnit.NANOSECONDS.toMillis(initFixNanos) + "ms]"
-				: "";
-			String redefineDetail = "";
-			String postDetail = "";
-			if (PERF_LOG) {
-				long skelMs = BATCH_TWOPHASE_SKEL_MILLIS.get();
-				long stageBInRedef = twoPhaseMode ? stageBMs : 0L;
-				long redefWrapMs = Math.max(0L,
-					TimeUnit.NANOSECONDS.toMillis(redefineWallEndNanos - redefineWallStartNanos)
-					- redefMs - stageBInRedef - skelMs);
-				redefineDetail = twoPhaseMode
-					? " [A=" + BATCH_STAGE_A_MILLIS.get() + ", C=" + BATCH_STAGE_C_MILLIS.get()
-					  + ", skel=" + skelMs + ", wrap=" + redefWrapMs + "]"
-					: " [wrap=" + redefWrapMs + "]";
-				long annMs = TimeUnit.NANOSECONDS.toMillis(listenStartNanos - annStartNanos);
-				long listenMs = TimeUnit.NANOSECONDS.toMillis(listenEndNanos - listenStartNanos);
-				long postMs = commitMs + annMs + listenMs;
-				postDetail = ", post=" + postMs + "ms [commit=" + commitMs
-					+ ", ann=" + annMs + ", listen=" + listenMs + "]";
-			}
-			info("[HOTSWAP-BATCH] summary: mode=" + (twoPhaseMode ? "2-phase" : "1-phase")
-			     + ", total=" + totalMs + "ms"
-			     + " (" + prepDetail
-			     + "anon=" + anonMs + "ms" + anonDetail
-			     + ", guard=" + guardMs + "ms"
-			     + ", readers=" + readersMs + "ms"
-			     + ", gate=" + gateMs + "ms"
-			     + ", alignDiff=" + alignDiffMs + "ms" + alignDiffDetail
-			     + ", liveScan=" + LIVE_INSTANCE_SCAN_MILLIS.get() + "ms"
-			     + ", redefine=" + redefMs + "ms" + redefineDetail
-			     + ", stageB=" + stageBMs + "ms"
-			     + postDetail
-			     + ", redefined=" + successfulDefinitions.size() + ")");
-		}
-
-		// L0/L1 必须在 InitFix 后处理（afterRedefine）之后运行：
-		// 一是 L1 的"已重放"记录在 applyPatch 里写入，L0 需要据此抑制误导性告警；
-		// 二是补丁只能作用于真正重定义成功的类。门拒绝/跳过的类必须零 INIT-DRIFT、零实例枚举。
-		long tailStartNanos = PERF_LOG ? System.nanoTime() : 0L;
-		Map<String, byte[]> appliedForDrift = new LinkedHashMap<>();
-		for (String key : newBatchBytes.keySet()) {
-			if (redefinedOk.contains(key)) appliedForDrift.put(key, newBatchBytes.get(key));
-		}
-		// Drain even when no replay ran: a stale record must not leak into the next round.
-		Map<String, Set<String>> replayedForDrift = remold.ref.InitializerReplay.drainApplied();
-		remold.ref.InitializerDrift.report(appliedForDrift, driftOldBytes, replayedForDrift);
-		long metaStartNanos = PERF_LOG ? System.nanoTime() : 0L;
-
-		Set<Class<?>> successfulClasses = new HashSet<>();
-		for (ClassDefinition def : successfulDefinitions) {
-			successfulClasses.add(def.getDefinitionClass());
-		}
-		// 参数注解 / 泛型签名漂移：成员级 WARN 点名（显式登记"用户自持旧句柄不安全"）。
-		// 成员级点名只覆盖字段/方法/构造器的 Signature 与参数注解；类级泛型签名（getGenericSuperclass）不在检测范围，本行也不改变缓存驱逐范围。
-		reportMemberMetadataDrift(appliedForDrift, driftOldBytes);
-		long evictStartNanos = PERF_LOG ? System.nanoTime() : 0L;
-		boolean schemaOrMetadataChanged = false;
-		for (ClassDefinition def : successfulDefinitions) {
-			String name = def.getDefinitionClass().getName();
-			byte[] oldBytes = driftOldBytes.get(name);
-			byte[] newBytes = appliedForDrift.getOrDefault(name, def.getDefinitionClassFile());
-			if (ReflectionCacheManager.hasSerializationSchemaChange(oldBytes, newBytes)) {
-				schemaOrMetadataChanged = true;
-				break;
-			}
-		}
-		ReflectionCacheManager.evictAll(successfulClasses, schemaOrMetadataChanged);
-		if (PERF_LOG && (!definitions.isEmpty() || injectedCount > 0)) {
-			long tailEndNanos = System.nanoTime();
-			long tailMs = TimeUnit.NANOSECONDS.toMillis(tailEndNanos - tailStartNanos);
-			long driftMs = TimeUnit.NANOSECONDS.toMillis(metaStartNanos - tailStartNanos);
-			long metaMs = TimeUnit.NANOSECONDS.toMillis(evictStartNanos - metaStartNanos);
-			long evictMs = TimeUnit.NANOSECONDS.toMillis(tailEndNanos - evictStartNanos);
-			info("[HOTSWAP-PERF] post-summary tail=" + tailMs + "ms [drift=" + driftMs
-			     + ", meta=" + metaMs + ", evict=" + evictMs + "]");
-		}
-
-		// 与上面的 [HOTSWAP-SKIPPED] 区分：这里是"磁盘哈希没变，本来就没改"，不是被门拦下。
-		if (skippedCount > 0) info("Unchanged: " + skippedCount + " class(es) had identical bytes on disk.");
-		if (injectedCount > 0) info("Injected " + injectedCount + " new classes.");
+		BatchHotswapExecutor.processChangesBatch(changedFiles, classes);
 	}
 
-	/**
-	 * 参数注解 / 泛型签名漂移的接线点：逐类比对重定义前的有效字节与本轮生效字节，成员级点名并 {@code warn}。
-	 *
-	 * <p>这条告警是"用户自持旧 {@code Method} 句柄不安全"的唯一登记入口：缓存驱逐只覆盖已注册驱逐器，
-	 * 无法修复用户代码或未注册框架里已经解析好的句柄。缺了它，读到日志的人会把
-	 * "驱逐过缓存"误读成"已解决"。</p>
-	 *
-	 * <p><b>仅限内部用途（internal use only）</b>：本方法是 Agent 内部接线点，不是公开 API；
-	 * 保持 {@code public static} 只因调用方（{@code tests/src/remold/evict} 包）与
-	 * {@link RemoldAgent} 不同包——同包可见性改不了。语义/签名随批次演进不承诺兼容。</p>
-	 *
-	 * <p>单测用 {@link #logger} 捕获告警做终局断言，而不是复制一份比对逻辑（复制出来的那份不会随实现漂移）。</p>
-	 *
-	 * @param newBytes 本轮生效字节（键为目标类名）
-	 * @param oldBytes 重定义前的有效字节（键同上；缺键表示没有基线，不判定，也不当作"没变"）
-	 * @return 是否发现至少一处漂移（调用方据此把缓存驱逐范围扩到派生类）
-	 */
 	public static boolean reportMemberMetadataDrift(Map<String, byte[]> newBytes, Map<String, byte[]> oldBytes) {
-		if (newBytes == null || newBytes.isEmpty()) return false;
-		boolean drift = false;
-		for (Map.Entry<String, byte[]> e : newBytes.entrySet()) {
-			byte[] before = oldBytes == null ? null : oldBytes.get(e.getKey());
-			if (before == null) continue;
-			List<String> lines = remold.evict.ReflectionCacheManager
-				.describeMemberMetadataDrift(e.getKey(), before, e.getValue());
-			if (lines.isEmpty()) continue;
-			drift = true;
-			for (String line : lines) warn(line);
-		}
-		return drift;
+		return BatchHotswapExecutor.reportMemberMetadataDrift(newBytes, oldBytes);
 	}
 
-
-	/**
-	 * 布局门用：某个类是否还有存活实例（{@code docs/topology/07-layout-gate-and-risks.md} §1 的精确变体）。
-	 *
-	 * <p><b>判定规则（三条都很关键，别简化）</b>：</p>
-	 * <ol>
-	 *   <li><b>{@code LibTool} 优先</b> —— 走 JVMTI 的 {@code IterateOverInstancesOfClass}，
-	 *       覆盖全部堆实例。</li>
-	 *   <li><b>{@code LibTool} 不可用或异常 ⇒ 视为"有实例"。</b>
-	 *       刻意<b>不</b>回退到 {@link InstanceTracker}：它只是一个由注入代码
-	 *       {@code register()} 填充的弱集合，对匿名类基本是空的，
-	 *       信它会误判成"无实例"而放行 —— 那正是我们最不想要的方向。
-	 *       保守方向的代价只是少配对，放行的代价是静默读零值。</li>
-	 *   <li><b>按类缓存</b> —— 每次扫描都是一次全堆遍历（会触发 safepoint），
-	 *       而同一批里可能有多个类命中。</li>
-	 * </ol>
-	 *
-	 * <p><b>语义边界</b>：返回值 {@code false} 只表示<b>本轮 JVMTI 堆扫描没有看见</b>该类的实例，
-	 * 不能反证“实例不存在”（扫描不可用/异常时走保守分支返回 {@code true}；扫描本身也看不到
-	 * 它没覆盖到的对象）。因此派生的日志不得把 {@code false} 写成“实例已死”或安全结论，
-	 * 只能表述为“扫描可见的活实例为 0”。</p>
-	 *
-	 * <p>仅用于布局不兼容的类，因此调用频率很低。</p>
-	 */
 	static boolean hasLiveInstances(Class<?> c) {
-		if (c == null) return false;
-		String dotClassName = c.getName();
-		Boolean cached = LIVE_INSTANCE_CACHE.get(dotClassName);
-		if (cached != null) return cached;
-
-		// 批次级惰性预探测：同一批里 K 个类各问一次 liveness 就是 K 次全堆遍历，改成
-		// "第一次未命中时对整批做一次遍历"（docs/initfix/05-jvmti-heap.md §「批次存在性探测」）。
-		// 只在布局门显式设了批次上下文时才生效；单类/外部路径行为不变。
-		prefetchBatchLiveness();
-		cached = LIVE_INSTANCE_CACHE.get(dotClassName);
-		if (cached != null) return cached;
-
-		boolean result;
-		long    t0 = System.nanoTime();
-		try {
-			if (!LibTool.initialized()) {
-				// 尝试初始化；失败会抛 UnsatisfiedLinkError
-				LibTool.init();
-			}
-			result = LibTool.hasLiveInstance(c);
-		} catch (Throwable t) {
-			// JVMTI 不可用 / 初始化失败 / 扫描异常 —— 一律按"有实例"处理（保守）。
-			warn("[ANON-LAYOUT] Cannot scan instances for " + dotClassName
-			     + " (" + t.getClass().getSimpleName()
-			     + (t.getMessage() != null ? ": " + t.getMessage() : "")
-			     + "); assuming LIVE instances exist.");
-			result = true;
-		}
-		long ms = (System.nanoTime() - t0) / 1_000_000;
-		LIVE_INSTANCE_SCAN_MILLIS.addAndGet(ms);
-		if (DEBUG || ms > 50) {
-			log("[ANON-LAYOUT] instance scan " + dotClassName + " -> " + (result ? "LIVE" : "none")
-			    + " (" + ms + " ms)");
-		}
-		LIVE_INSTANCE_CACHE.put(dotClassName, result);
-		return result;
+		return BatchHotswapExecutor.hasLiveInstances(c);
 	}
 
 	static boolean hasLiveInstances(String dotClassName) {
-		Class<?> c = loadedClassesMap.get(dotClassName);
-		if (c == null) {
-			// 旧类未加载 ⇒ 不可能有实例。这是**安全**方向的"无实例"：
-			// 未加载的类没有对象可言，放行配对不会让任何东西读到零值。
-			return false;
-		}
-		return hasLiveInstances(c);
+		return BatchHotswapExecutor.hasLiveInstances(dotClassName);
 	}
 
-	/** 每轮热更开始时清空实例扫描缓存（实例的存活状况会随轮次变化）。 */
 	static void resetLiveInstanceCache() {
-		LIVE_INSTANCE_CACHE.clear();
-		LIVE_INSTANCE_SCAN_MILLIS.set(0);
-		BATCH_REDEFINE_MILLIS.set(0);
-		BATCH_STAGE_B_MILLIS.set(0);
-		BATCH_STAGE_A_MILLIS.set(0);
-		BATCH_STAGE_C_MILLIS.set(0);
-		BATCH_TWOPHASE_SKEL_MILLIS.set(0);
-		LIVENESS_BATCH = Set.of();
-		LIVENESS_BATCH_DONE.set(true);
+		BatchHotswapExecutor.resetLiveInstanceCache();
 	}
 
-	/**
-	 * 声明本批次待判定存活性的类名集合（布局门批次级预探测的作用域）。
-	 *
-	 * <p>布局门只在「布局不兼容」的类上问 liveness，逐类问就是逐次全堆遍历。批次上下文一旦声明，
-	 * 第一次未命中缓存时用 {@link LibTool#hasLiveInstancesBatch(Class[])} 对整批做<b>一次</b>遍历并
-	 * 填满缓存，后续同批类直接命中缓存。传空集合即关闭（单类 / 外部热更路径）。</p>
-	 */
 	static void setLivenessBatch(Collection<String> classNames) {
-		LIVENESS_BATCH = classNames == null || classNames.isEmpty()
-			? Set.of()
-			: Collections.unmodifiableSet(new LinkedHashSet<>(classNames));
-		LIVENESS_BATCH_DONE.set(LIVENESS_BATCH.size() < 2);
+		BatchHotswapExecutor.setLivenessBatch(classNames);
 	}
 
-	/** 批次级惰性存活预探测：整批一次遍历，结果填进 {@link #LIVE_INSTANCE_CACHE}。 */
-	private static void prefetchBatchLiveness() {
-		if (LIVENESS_BATCH_DONE.get() || !LIVENESS_BATCH_DONE.compareAndSet(false, true)) return;
-		Set<String> names = LIVENESS_BATCH;
-		if (names.size() < 2) return;
-		List<Class<?>> classes = new ArrayList<>(names.size());
-		List<String>  keys    = new ArrayList<>(names.size());
-		for (String name : names) {
-			Class<?> c = loadedClassesMap.get(name);
-			// 未加载的类没有实例可言：与 hasLiveInstances(String) 的既有语义一致。
-			if (c == null) continue;
-			keys.add(name);
-			classes.add(c);
-		}
-		if (classes.size() < 2) return;
-		long t0 = System.nanoTime();
-		boolean[] live;
-		try {
-			if (!LibTool.initialized() && !LibTool.tryInit()) return;
-			live = LibTool.hasLiveInstancesBatch(classes.toArray(new Class<?>[0]));
-		} catch (Throwable t) {
-			// 批探测失败不改变判定方向：逐类路径（含"扫描不可用 ⇒ 视为有实例"）照常兜住。
-			warn("[ANON-LAYOUT] Batch liveness probe failed (" + t.getClass().getSimpleName()
-			     + (t.getMessage() != null ? ": " + t.getMessage() : "")
-			     + "); falling back to one heap walk per class.");
-			return;
-		}
-		if (live == null || live.length != keys.size()) return;
-		for (int i = 0; i < live.length; i++) {
-			LIVE_INSTANCE_CACHE.put(keys.get(i), live[i]);
-		}
-		long ms = (System.nanoTime() - t0) / 1_000_000;
-		LIVE_INSTANCE_SCAN_MILLIS.addAndGet(ms);
-		if (DEBUG) log("[ANON-LAYOUT] batch instance scan: " + classes.size()
-		               + " class(es) in one heap walk (" + ms + " ms)");
-	}
-
-	/** 实例判定缓存：点分类名 → 是否存活实例。见 {@link #hasLiveInstances}。 */
-	private static final Map<String, Boolean> LIVE_INSTANCE_CACHE       = new ConcurrentHashMap<>();
-	/** 布局门批次级存活探测的类名集合；空集合表示没有批次上下文。 */
-	private static volatile Set<String> LIVENESS_BATCH = Set.of();
-	/** 本轮的批次级存活预探测是否已完成（含"不需要做"）。 */
-	private static final AtomicBoolean LIVENESS_BATCH_DONE = new AtomicBoolean(true);
-	/** 累计的实例扫描耗时（毫秒），用于观察全堆遍历开销。 */
-	static final         AtomicLong           LIVE_INSTANCE_SCAN_MILLIS = new AtomicLong();
-	/** 本批次 {@code inst.redefineClasses} 累计耗时（毫秒）。 */
-	private static final AtomicLong           BATCH_REDEFINE_MILLIS     = new AtomicLong();
-	/** 本批次 {@link InitFix#afterRedefine}（两阶段 Stage B + 1-phase 后处理）累计耗时（毫秒）。 */
-	static final         AtomicLong           BATCH_STAGE_B_MILLIS      = new AtomicLong();
-	private static final AtomicLong           BATCH_STAGE_A_MILLIS      = new AtomicLong();
-	private static final AtomicLong           BATCH_STAGE_C_MILLIS      = new AtomicLong();
-	private static final AtomicLong           BATCH_TWOPHASE_SKEL_MILLIS = new AtomicLong();
-
-	private static final byte[] ON_RELOAD_DESC_BYTES =
-		"Lremold/annotation/OnReload;".getBytes(StandardCharsets.US_ASCII);
-
-	/**
-	 * 在重定义与 InitFix 补丁（静态字段与存量实例字段）全部就位后调用。
-	 *
-	 * <p>扫描目标类中标记了 {@link OnReload} 的方法并触发调用。必须在 InitFix 之后触发，
-	 * 保证回调执行时新增/覆写的字段已处于就绪态，杜绝时序反转读到零值。</p>
-	 */
 	static void processAnnotations(List<ClassDefinition> definitions) {
-		if (definitions == null || definitions.isEmpty()) return;
-		for (ClassDefinition def : definitions) {
-			Class<?> clazz = def.getDefinitionClass();
-			if (clazz == null) continue;
-			byte[] bytes = def.getDefinitionClassFile();
-			// Skip getDeclaredMethods() + runtime annotation parsing when the class bytes have no @OnReload descriptor.
-			if (bytes != null && !AnnotationTransformer.containsAscii(bytes, ON_RELOAD_DESC_BYTES)) {
-				continue;
-			}
-			postToMain(() -> processAnnotationsInternal(clazz));
-		}
+		BatchHotswapExecutor.processAnnotations(definitions);
 	}
 
 	static void processAnnotationsInternal(Class<?> clazz) {
-		if (clazz == null) return;
-		List<Method> staticMethods = new ArrayList<>(2);
-		List<Method> instanceMethods = new ArrayList<>(2);
-		for (Method m : clazz.getDeclaredMethods()) {
-			if (m.isAnnotationPresent(OnReload.class)) {
-				m.setAccessible(true);
-				if (Modifier.isStatic(m.getModifiers())) {
-					staticMethods.add(m);
-				} else {
-					instanceMethods.add(m);
-				}
-			}
-		}
-		if (staticMethods.isEmpty() && instanceMethods.isEmpty()) return;
-		info("[Reload] Found @OnReload on " + clazz);
-
-		for (Method m : staticMethods) {
-			try {
-				m.invoke(null);
-				if (DEBUG) log("[Reload] Invoked @OnReload static method: " + m.getName());
-			} catch (Throwable e) {
-				error("Error invoking static @OnReload method " + m.getName() + " on " + clazz.getName(), e);
-			}
-		}
-
-		if (!instanceMethods.isEmpty()) {
-			Object[] instances = null;
-			// stageB 补丁刚刚枚举过同一批实例：直接复用，省掉一次完整 JVMTI 堆遍历
-			// （2M 实例实测约 2.9s）。快照语义与"枚举时间点"的差异见 StageBInstanceCache。
-			try {
-				instances = StageBInstanceCache.take(ClassIdentity.canonicalize(clazz));
-			} catch (Throwable ignored) {
-			}
-			if (instances == null) {
-				try {
-					instances = LibTool.getInstances(clazz);
-				} catch (Throwable ignored) {
-				}
-			}
-			if (instances == null || instances.length == 0) {
-				List<?> trackerInstances = InstanceTracker.getInstances(clazz);
-				if (!trackerInstances.isEmpty()) {
-					instances = trackerInstances.toArray();
-				}
-			}
-			if (instances == null) instances = new Object[0];
-			// 实例回调是"对存量实例"，不是"模组收到通知"：零实例时它一次都不会跑。
-			// 这种情况原先完全静默（只打一行 "Found @OnReload"），最容易被误读成"回调没生效"，
-			// 所以必须显式说明"没有调用"以及为什么。
-			if (instances.length == 0) {
-				warn("[Reload] " + clazz.getName() + " declares " + instanceMethods.size()
-				     + " instance @OnReload method(s) but NO live instance was found — they were NOT"
-				     + " invoked. @OnReload on an instance method is a per-instance callback, not a"
-				     + " 'mod reloaded' notification: a static-only holder (or a class whose instances"
-				     + " are already gone) never receives it. Use a static @OnReload method instead if"
-				     + " you want one call per hotswap.");
-			} else {
-				info("[Reload] Invoking " + instanceMethods.size() + " instance @OnReload method(s) on "
-				     + instances.length + " live instance(s) of " + clazz.getName() + ".");
-			}
-			MethodHandle[] instanceHandles = new MethodHandle[instanceMethods.size()];
-			MethodHandles.Lookup lookup = MethodHandles.lookup();
-			for (int i = 0; i < instanceMethods.size(); i++) {
-				Method m = instanceMethods.get(i);
-				if (m.getParameterCount() == 0) {
-					try {
-						instanceHandles[i] = lookup.unreflect(m)
-							.asType(MethodType.methodType(void.class, Object.class));
-					} catch (Throwable ignored) {
-					}
-				}
-			}
-			if (instanceMethods.size() == 1) {
-				Method singleMethod = instanceMethods.get(0);
-				MethodHandle singleHandle = instanceHandles[0];
-				for (Object obj : instances) {
-					invokeReloadMethod(obj, singleMethod, singleHandle);
-				}
-			} else {
-				for (Object obj : instances) {
-					for (int i = 0; i < instanceMethods.size(); i++) {
-						invokeReloadMethod(obj, instanceMethods.get(i), instanceHandles[i]);
-					}
-				}
-			}
-		}
+		BatchHotswapExecutor.processAnnotationsInternal(clazz);
 	}
 
-	static String resolveAnonHostCandidate(
-	 String cName, Set<String> hostClassesToAlign, String singleHost
-	) {
-		int len = cName.length();
-		if (len == 0) return null;
-		char last = cName.charAt(len - 1);
-		if (last < '0' || last > '9') return null;
-		if (singleHost != null) {
-			int hostLen = singleHost.length();
-			if (len <= hostLen + 1 || cName.charAt(hostLen) != '$' || !cName.startsWith(singleHost)) {
-				return null;
-			}
-		}
-		String host = AnonClassAligner.batchAnonHost(cName);
-		return (host != null && !host.equals(cName) && hostClassesToAlign.contains(host)) ? host : null;
+	static String resolveAnonHostCandidate(String cName, Set<String> hostClassesToAlign, String singleHost) {
+		return BatchHotswapExecutor.resolveAnonHostCandidate(cName, hostClassesToAlign, singleHost);
 	}
-
-	private static void invokeReloadMethod(Object obj, Method m, MethodHandle handle) {
-		try {
-			if (handle != null) {
-				handle.invokeExact(obj);
-			} else {
-				m.invoke(obj);
-			}
-			if (DEBUG) log("[Reload] Invoked @OnReload on " + obj + "." + m.getName());
-		} catch (Throwable e) {
-			error("Error invoking @OnReload on " + obj + "." + m.getName(), e);
-		}
-	}
-
 
 	static boolean isBlacklisted(String className) {
-		if (HOTSWAP_BLACKLIST == null) return false;
-		for (String prefix : HOTSWAP_BLACKLIST) {
-			if (!prefix.isEmpty() && className.startsWith(prefix)) return true;
-		}
-		return false;
+		return BatchHotswapExecutor.isBlacklisted(className);
 	}
 
 	public static byte[] fetchBytecodeMemory(Class<?> clazz) throws UnmodifiableClassException {
-		byte[][] bytecode = {null};
-		class MyTransformer implements ClassFileTransformer {
-			@Override
-			public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
-			                        ProtectionDomain protectionDomain, byte[] classfileBuffer) {
-				if (
-				 clazz == classBeingRedefined
-					/* className.equals(clazz.getName()) && loader == clazz.getClassLoader() */) {
-					bytecode[0] = classfileBuffer;
-				}
-				return null;
-			}
-		}
-		MyTransformer transformer1 = new MyTransformer();
-		inst.addTransformer(transformer1, true);
-		enterInternalRetransform(Collections.singleton(clazz.getName()));
-		try {
-			inst.retransformClasses(clazz);
-			return bytecode[0];
-		} finally {
-			exitInternalRedefine();
-			inst.removeTransformer(transformer1);
-		}
+		return BatchHotswapExecutor.fetchBytecodeMemory(clazz);
 	}
+
 	public static byte[] fetchCurrentBytecode(Class<?> clazz) {
-		String className = clazz.getName();
-		if (bytecodeCache.containsKey(className)) return bytecodeCache.get(className);
-		return fetchOriginalBytecode(clazz);
+		return BatchHotswapExecutor.fetchCurrentBytecode(clazz);
 	}
+
 	public static byte[] fetchOriginalBytecode(Class<?> clazz) {
-		String      path = clazz.getName().replace('.', '/') + ".class";
-		ClassLoader cl   = clazz.getClassLoader();
-		if (cl == null) cl = ClassLoader.getSystemClassLoader();
-
-		try {
-			// 核心扬弃：获取所有同名资源，执行空间隔离
-			var resources = cl.getResources(path);
-
-			while (resources.hasMoreElements()) {
-				URL     url            = resources.nextElement();
-				boolean isFromWatchDir = false;
-
-				// 异质点校验：判断这个流是否来自我们监控（已被修改）的目录
-				if ("file".equals(url.getProtocol())) {
-					// 普通 .class 文件：直接判断路径是否在 watchDir 下
-					try {
-						Path resourcePath = Paths.get(url.toURI()).toAbsolutePath();
-						for (Path watchDir : activeWatchDirs) {
-							if (resourcePath.startsWith(watchDir.toAbsolutePath())) {
-								isFromWatchDir = true;
-								break;
-							}
-						}
-					} catch (Exception ignored) {
-						// URI格式异常，防守性跳过
-					}
-				} else if ("jar".equals(url.getProtocol())) {
-					// jar 内 .class：URL 形如 jar:file:/watchdir/foo.jar!/com/Foo.class
-					// 需要把宿主 jar 的路径单独解析出来再做判断
-					try {
-						String jarUrlStr = url.getPath();          // file:/watchdir/foo.jar!/com/Foo.class
-						int    bangIdx   = jarUrlStr.indexOf("!/");
-						if (bangIdx != -1) {
-							String jarFileStr = jarUrlStr.substring(0, bangIdx); // file:/watchdir/foo.jar
-							Path   jarPath    = Paths.get(new java.net.URI(jarFileStr)).toAbsolutePath();
-							for (Path watchDir : activeWatchDirs) {
-								if (jarPath.startsWith(watchDir.toAbsolutePath())) {
-									isFromWatchDir = true;
-									break;
-								}
-							}
-						}
-					} catch (Exception ignored) {
-						// URI格式异常，防守性跳过
-					}
-				}
-
-				// 只要不是来自监控目录（包括目录内的 jar），就视为未被污染的原始字节码
-				if (!isFromWatchDir) {
-					try (InputStream is = url.openStream()) {
-						return is.readAllBytes();
-					}
-				} else {
-					if (DEBUG) log(" Ignored polluted mount path: " + url);
-				}
-			}
-		} catch (Throwable t) {
-			// 吞掉异常，退化到盲狙
-		}
-		return null;
+		return BatchHotswapExecutor.fetchOriginalBytecode(clazz);
 	}
 	//endregion
 
@@ -3535,7 +1704,7 @@ public class RemoldAgent {
 	 * <p>基线顺序：bytecodeCache → fetchOriginalBytecode → sourceBytecodeCache；
 	 * 三者都没有时 warn 并拒绝，不能跳过 LayoutGate/InitFix 静默重定义。</p>
 	 */
-	private static boolean injectNewClass(String className, Path path, byte[] bytes) {
+	static boolean injectNewClass(String className, Path path, byte[] bytes) {
 		if (isNonLoadableClass(className)) {
 			// Mixin 模板类不是可加载类：defineClass 会污染宿主 ClassLoader，
 			// 并让读者扫描把它误认为外部读者。
@@ -3645,191 +1814,24 @@ public class RemoldAgent {
 		}
 	}
 
-	/**
-	 * {@code docs/topology/04-tiers-and-rejection.md} §4 宿主级拒绝：把「宿主类 + 其下属全部匿名类」整体移出本批重定义。
-	 *
-	 * <p><b>为什么必须连新侧匿名类的原始类名一起移除</b>：一旦不做对齐，新编译产物的 {@code Foo$2}
-	 * 与 JVM 中已加载的旧 {@code Foo$2} 同名但语义不同，把它送进 redefinition 就是把老实例的方法表
-	 * 交给无关的新类 —— 正是本模块存在的理由。同理，宿主本身也必须一起移除，否则它的新字节码会
-	 * 引用到没有被对齐过的 {@code Foo$N}。</p>
-	 *
-	 * <p>因此拒绝的语义是"这一组本轮完全不动"，与 {@code docs/topology/04-tiers-and-rejection.md} §4
-	 * 的"以宿主 + 其下属全部匿名类为原子单元整体拒绝回滚"一致。</p>
-	 * @param t 触发拒绝的异常；{@link AnonClassAligner.AlignmentRejectedException} 视为**预期**拒绝
-	 *          （打 {@code [HOTSWAP-REJECT]} 告警），其它异常视为对齐器缺陷（打 error + 堆栈）
-	 * @param skips 本轮摘要台账：宿主与整组匿名类都要登记，否则摘要里只剩"成功了几个"
-	 */
-	private static void rejectHostGroup(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,
-	                                    String hostName, RoundSkips skips, Throwable t) {
-		boolean expected = t instanceof AnonClassAligner.AlignmentRejectedException;
-		String reason = expected
-		 ? ((AnonClassAligner.AlignmentRejectedException) t).reason
-		 : (t.getClass().getSimpleName() + ": " + t.getMessage());
-		if (expected) {
-			warn("[HOTSWAP-REJECT] Structural ambiguity detected in " + hostName
-			     + ". Redefine skipped safely. Reason: " + reason
-			     + ". Please hot-swap again or restart.");
-		} else {
-			error("[HOTSWAP-REJECT] Anonymous class alignment failed in " + hostName
-			      + ". Redefine skipped safely. Reason: " + reason
-			      + ". Please hot-swap again or restart.", t);
-		}
-		List<String> dropped = dropHostGroup(newBatchBytes, classToPath, hostName);
-		skips.addGroup(dropped, hostName, RoundSkips.verdict("ANON-ALIGN-REJECT", reason,
-			"hot-swap again, or restart if it repeats"));
+	static void rejectHostGroup(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,
+	                            String hostName, RoundSkips skips, Throwable t) {
+		BatchLayoutCoordinator.rejectHostGroup(newBatchBytes, classToPath, hostName, skips, t);
 	}
 
-	/** 从批次中移除一个类（点分与斜杠两种键形态都移除，避免因键写法不同而漏删）。 */
-	private static void dropFromBatch(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,
-	                                  String className) {
-		newBatchBytes.remove(className);
-		classToPath.remove(className);
-		String alt = className.indexOf('/') >= 0 ? className.replace('/', '.') : className.replace('.', '/');
-		newBatchBytes.remove(alt);
-		classToPath.remove(alt);
+	static List<String> dropHostGroup(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,
+	                                  String hostName) {
+		return BatchLayoutCoordinator.dropHostGroup(newBatchBytes, classToPath, hostName);
 	}
 
-	/**
-	 * 宿主组移除核心：把「宿主 + 其下属全部匿名类」从本批移出。
-	 *
-	 * <p>{@link #rejectHostGroup}（对齐器拒绝）与 {@link #applyRedefineLayoutGate}（布局门拒绝）
-	 * 共用同一机制，只是日志与触发理由不同 —— 保证两种拒绝的"原子单元"语义完全一致。</p>
-	 */
-	private static List<String> dropHostGroup(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,
-	                                          String hostName) {
-		String hostSlash = hostName.replace('.', '/');
-		List<String> anons = new ArrayList<>();
-		for (String cn : new ArrayList<>(newBatchBytes.keySet())) {
-			if (AnonClassAligner.isAnonymousClassName(hostSlash, cn)) anons.add(cn);
-		}
-		dropFromBatch(newBatchBytes, classToPath, hostName);
-		for (String anon : anons) dropFromBatch(newBatchBytes, classToPath, anon);
-		List<String> dropped = new ArrayList<>(1 + anons.size());
-		dropped.add(hostName);
-		dropped.addAll(anons);
-		return dropped;
-	}
-
-	/**
-	 * 级联阻断：当某个枚举因常量顺序变动被拒绝时，批次中任何持有该枚举 SwitchMap 或对其进行 switch 的调用类也必须移出。
-	 * 避免调用方带着期望新 ordinal 的新 switch 代码被载入，导致与存量枚举实例的旧 ordinal 发生静默错位（R6b 守卫）。
-	 */
 	static void dropEnumSwitchDependents(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,
-	                                     String enumDotName, RoundSkips skips) {
-		String enumSlash = enumDotName.replace('.', '/');
-		String switchMapKey = "$SwitchMap$" + enumSlash.replace('/', '$');
-		String switchTableMethod = "$SWITCH_TABLE$" + enumSlash.replace('/', '$');
-		List<String> dependents = new ArrayList<>();
-
-		for (Map.Entry<String, byte[]> entry : newBatchBytes.entrySet()) {
-			byte[] b = entry.getValue();
-			if (b == null) continue;
-			String clsName = entry.getKey();
-			if (clsName.equals(enumDotName) || clsName.equals(enumSlash)) continue;
-
-			try {
-				org.objectweb.asm.ClassReader cr = new org.objectweb.asm.ClassReader(b);
-				org.objectweb.asm.tree.ClassNode cn = new org.objectweb.asm.tree.ClassNode();
-				cr.accept(cn, org.objectweb.asm.ClassReader.SKIP_DEBUG | org.objectweb.asm.ClassReader.SKIP_FRAMES);
-
-				boolean hasSwitch = false;
-				for (org.objectweb.asm.tree.FieldNode fn : cn.fields) {
-					if (fn.name.contains(switchMapKey)) {
-						hasSwitch = true;
-						break;
-					}
-				}
-				if (!hasSwitch) {
-					for (org.objectweb.asm.tree.MethodNode mn : cn.methods) {
-						if (mn.name.contains(switchTableMethod)) {
-							hasSwitch = true;
-							break;
-						}
-					}
-				}
-				if (!hasSwitch) {
-					for (org.objectweb.asm.tree.MethodNode mn : cn.methods) {
-						for (org.objectweb.asm.tree.AbstractInsnNode insn = mn.instructions.getFirst();
-						     insn != null; insn = insn.getNext()) {
-							if (insn instanceof org.objectweb.asm.tree.FieldInsnNode) {
-								org.objectweb.asm.tree.FieldInsnNode fin = (org.objectweb.asm.tree.FieldInsnNode) insn;
-								if (fin.name.contains(switchMapKey)) {
-									hasSwitch = true;
-									break;
-								}
-							} else if (insn instanceof org.objectweb.asm.tree.MethodInsnNode) {
-								org.objectweb.asm.tree.MethodInsnNode min = (org.objectweb.asm.tree.MethodInsnNode) insn;
-								if (min.name.contains(switchTableMethod)) {
-									hasSwitch = true;
-									break;
-								}
-							}
-						}
-						if (hasSwitch) break;
-					}
-				}
-
-				if (hasSwitch) {
-					dependents.add(clsName);
-				}
-			} catch (Throwable ignored) {
-			}
-		}
-
-		for (String dep : dependents) {
-			dropFromBatch(newBatchBytes, classToPath, dep);
-			if (skips != null) {
-				skips.add(dep, RoundSkips.verdict("LAYOUT-REJECT",
-					"depends on enum " + enumDotName + " whose constant order changed",
-					"revert the enum constant order or restart to continue"));
-			}
-			warn("[LAYOUT-REJECT] " + dep + ": REFUSED redefine — depends on enum " + enumDotName
-			     + " whose constant order changed; dropped to prevent silent switch-on-enum misrouting.");
-		}
+	                                     String enumName, RoundSkips skips) {
+		BatchLayoutCoordinator.dropEnumSwitchDependents(newBatchBytes, classToPath, enumName, skips);
 	}
 
-	/**
-	 * 级联阻断：枚举<b>常量集合</b>（新增/删除）被拒时，批次中直接引用这些常量的类也必须移出。
-	 *
-	 * <p>与 {@link #dropEnumSwitchDependents} 并列但判据不同：那里找 switch 映射持有者，这里找
-	 * {@code GETSTATIC/PUTSTATIC Enum.PURPLE} 一类常量引用。被拒的枚举保持旧版加载，若引用新增常量
-	 * 的调用方随批次重定义，会在运行期解析到不存在的字段（{@code NoSuchFieldError}，推迟到热更事务
-	 * 之外）；引用被删常量的旧读者则由读者扫描单独拦截。两类依赖都移出，本轮保持整批一致。</p>
-	 */
 	static void dropEnumConstantDependents(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,
-	                                       String enumDotName, List<String> changedConstants, RoundSkips skips) {
-		if (changedConstants == null || changedConstants.isEmpty()) return;
-		String enumSlash = enumDotName.replace('.', '/');
-		java.util.Set<String> names = new java.util.HashSet<>(changedConstants);
-		List<String> dependents = new ArrayList<>();
-		for (Map.Entry<String, byte[]> entry : newBatchBytes.entrySet()) {
-			String clsName = entry.getKey();
-			if (clsName.equals(enumDotName)) continue;
-			byte[] b = entry.getValue();
-			if (b == null) continue;
-			try {
-				for (remold.ref.RemovedMemberReaders.Ref ref : remold.ref.RemovedMemberReaders.refs(b)) {
-					if (enumSlash.equals(ref.owner()) && names.contains(ref.name())) {
-						dependents.add(clsName);
-						break;
-					}
-				}
-			} catch (Throwable ignored) {
-				// 解析不了常量池的类不能证明"没引用"：保守移出本批（宁可本轮不更新，也不分裂状态）。
-				dependents.add(clsName);
-			}
-		}
-		for (String dep : dependents) {
-			dropFromBatch(newBatchBytes, classToPath, dep);
-			if (skips != null) {
-				skips.add(dep, RoundSkips.verdict("LAYOUT-REJECT",
-					"references a changed constant of enum " + enumDotName,
-					"revert the enum constant add/remove or restart to continue"));
-			}
-			warn("[LAYOUT-REJECT] " + dep + ": REFUSED redefine — references a changed constant of enum "
-			     + enumDotName + " whose constant set changed; dropped together with the enum to prevent"
-			     + " a delayed NoSuchFieldError.");
-		}
+	                                       String enumName, List<String> addedConstants, RoundSkips skips) {
+		BatchLayoutCoordinator.dropEnumConstantDependents(newBatchBytes, classToPath, enumName, addedConstants, skips);
 	}
 
 	/**
@@ -3928,108 +1930,23 @@ public class RemoldAgent {
 	static final java.util.concurrent.atomic.AtomicLong LOCAL_CLASS_WAIVED =
 	 new java.util.concurrent.atomic.AtomicLong();
 
-	/**
-	 * 同名局部类编号漂移止血（{@code docs/topology/07-layout-gate-and-risks.md} §2）的接线。
-	 *
-	 * <p>判决是纯函数 {@link LocalClassGuard#decide}；这里只负责"解析批次与已加载旧侧字节、执行动作、
-	 * 回滚事务"。</p>
-	 *
-	 * <p>候选宿主 = 本批里出现的局部类（{@code EnclosingMethod.owner}）。对每个候选宿主，旧侧扫
-	 * {@link #loadedClassesMap} 中其 {@code host$...} 已加载家族；新旧两侧交给纯函数按
-	 * {@code (宿主, 简单名)} 归并，任一侧同名计数 ≥2 即命中。{@code reject} 时把宿主及其
-	 * {@code host$...} 整族移出本批。</p>
-	 */
-	private static void applyLocalClassGuard(Map<String, byte[]> newBatchBytes,
-	                                         Map<String, Path>   classToPath,
-	                                         Map<String, AlignmentTransaction> transactions,
-	                                         RoundSkips skips) {
-		if (LocalClassGuard.MODE_OFF.equals(LOCAL_CLASS_GUARD)) return;
-
-		// 新侧：解析批次全部类，收集局部类宿主（斜杠内部名）。
-		List<ClassNode> newClasses = new ArrayList<>();
-		Set<String> hosts = new LinkedHashSet<>();
-		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
-			// 顶层类无 '$' 必不是局部类，跳过 ASM 解析与名单分配。
-			if (e.getKey().indexOf('$') < 0) continue;
-			ClassNode cn = parseClass(e.getValue());
-			if (cn == null) continue;
-			newClasses.add(cn);
-			String h = LocalClassGuard.hostOf(cn);
-			if (h != null) hosts.add(h);
-		}
-		if (hosts.isEmpty()) return;
-
-		// 旧侧：对每个候选宿主，扫已加载的 host$... 家族。
-		List<ClassNode> oldClasses = new ArrayList<>();
-		for (String hostSlash : hosts) {
-			String hostDot = hostSlash.replace('/', '.');
-			for (Map.Entry<String, Class<?>> e : loadedClassesMap.entrySet()) {
-				String name = e.getKey();
-				if (!name.startsWith(hostDot + "$")) continue;
-				byte[] bytes = bytecodeCache.get(name);
-				if (bytes == null) {
-					bytes = fetchOriginalBytecode(e.getValue());
-					if (bytes != null) bytecodeCache.put(name, bytes);
-				}
-				if (bytes == null) continue;
-				ClassNode cn = parseClass(bytes);
-				if (cn != null) oldClasses.add(cn);
-			}
-		}
-
-		LocalClassGuard.Decision d = LocalClassGuard.decide(oldClasses, newClasses, LOCAL_CLASS_GUARD,
-			newBatchBytes.keySet());
-
-		if (d.action() == LocalClassGuard.Action.PASS) {
-			if (!d.collisions().isEmpty()) {
-				LOCAL_CLASS_WAIVED.incrementAndGet();
-				warn("[LOCAL-CLASS-WARN] same-named local classes in " + d.hosts()
-				     + " (" + d.collisions() + "); redefining anyway because remold.agent."
-				     + "local_class_guard=warn. Numbering may have shifted -> a live instance can silently"
-				     + " run the wrong implementation. Set the default reject to refuse instead.");
-			}
-			return;
-		}
-
-		for (String hostDot : d.hosts()) {
-			warn("[LOCAL-CLASS-REJECT] same-named local classes in " + hostDot + " (" + d.collisions()
-			     + "). Redefine skipped safely: inserting/removing/reordering a same-named local class"
-			     + " shifts their physical numbering, which would silently swap implementations for live"
-			     + " instances. Host and its local/anonymous classes are skipped this round. TO PROCEED:"
-			     + " restart (or make the local class simple name unique), or set -Dremold.agent."
-			     + "local_class_guard=warn to force it and accept the mismatch.");
-		}
-		for (String dropped : d.dropped()) dropFromBatch(newBatchBytes, classToPath, dropped);
-		// 摘要台账：宿主自己与它名下的局部/匿名类分开标注（多个宿主时不能互相挂错组）。
-		String localVerdict = RoundSkips.verdict("LOCAL-CLASS-REJECT",
-			"same-named local classes shifted their numbering",
-			"rename the local class (or restart) to continue");
-		for (String dropped : d.dropped()) {
-			skips.add(dropped, d.hosts().contains(dropped)
-			 ? localVerdict
-			 : localVerdict + " (same host group as its enclosing class)");
-		}
-		for (String hostDot : d.hosts()) {
-			LOCAL_CLASS_REJECTED.incrementAndGet();
-			AlignmentTransaction tx = transactions.remove(hostDot);
-			if (tx != null) tx.rollback(false);
-		}
+	static void applyLocalClassGuard(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,
+	                                 Map<String, AlignmentTransaction> transactions, RoundSkips skips) {
+		BatchLayoutCoordinator.applyLocalClassGuard(newBatchBytes, classToPath, transactions, skips);
 	}
 
-	/** 解析类元数据（不取指令，只要 InnerClasses/EnclosingMethod）；失败返回 null（不阻断本批）。 */
-	private static ClassNode parseClass(byte[] bytes) {
-		if (bytes == null) return null;
-		try {
-			ClassNode cn = new ClassNode();
-			new org.objectweb.asm.ClassReader(bytes)
-			 .accept(cn, org.objectweb.asm.ClassReader.SKIP_CODE
-			           | org.objectweb.asm.ClassReader.SKIP_DEBUG
-			           | org.objectweb.asm.ClassReader.SKIP_FRAMES);
-			return cn;
-		} catch (Throwable t) {
-			return null;
-		}
+	static LocalClassGuard.Decision decideLocalClassGuard(List<ClassNode> oldClasses, List<ClassNode> newClasses,
+	                                                    String mode, Set<String> batchNames) {
+		return LocalClassGuard.decide(oldClasses, newClasses, mode, batchNames);
 	}
+
+	static AnonClassAligner.Result alignAnonClasses(String hostSlash, byte[] hostBytes,
+	                                                Map<String, byte[]> oldAnon, Map<String, byte[]> newAnon,
+	                                                Function<String, byte[]> oldRes, Function<String, byte[]> newRes,
+	                                                Predicate<String> hasLive, Set<String> reserved) {
+		return AnonClassAligner.align(hostSlash, hostBytes, oldAnon, newAnon, oldRes, newRes, hasLive, reserved);
+	}
+
 
 	/** 布局门拒绝的类/宿主次数（诊断用，见 {@link #applyRedefineLayoutGate}）。 */
 	static final java.util.concurrent.atomic.AtomicLong LAYOUT_GATE_REJECTED =
@@ -4095,153 +2012,29 @@ public class RemoldAgent {
 		return internalName.replace('/', '.');
 	}
 
-	private static final OffsetScanner offsetScanner = new OffsetScanner(RemoldAgent::fetchBytecodeForOffsetScanner);
-	private static final Map<String, OffsetScanner.Binding> scannedOffsetBindings = new ConcurrentHashMap<>();
-	private static volatile OffsetBindingIndex offsetIndex = OffsetBindingIndex.empty();
-
 	public static OffsetBindingIndex getOffsetIndex() {
-		return offsetIndex;
+		return BatchLayoutCoordinator.getOffsetIndex();
 	}
 
 	public static void registerOffsetBinding(OffsetScanner.Binding binding) {
-		if (binding != null) {
-			scannedOffsetBindings.put(binding.toString(), binding);
-			offsetIndex = OffsetBindingIndex.from(scannedOffsetBindings.values());
-		}
+		BatchLayoutCoordinator.registerOffsetBinding(binding);
 	}
 
 	public static void clearOffsetIndex() {
-		scannedOffsetBindings.clear();
-		offsetIndex = OffsetBindingIndex.empty();
+		BatchLayoutCoordinator.clearOffsetIndex();
 	}
 
-	private static void scanLoadedClassForOffsets(byte[] classfileBuffer) {
-		if (classfileBuffer == null) return;
-		try {
-			List<OffsetScanner.Binding> list = offsetScanner.scan(classfileBuffer);
-			if (list != null && !list.isEmpty()) {
-				for (OffsetScanner.Binding b : list) {
-					scannedOffsetBindings.put(b.toString(), b);
-				}
-				offsetIndex = OffsetBindingIndex.from(scannedOffsetBindings.values());
-			}
-		} catch (Throwable ignored) { }
+	static void scanLoadedClassForOffsets(byte[] classfileBuffer) {
+		BatchLayoutCoordinator.scanLoadedClassForOffsets(classfileBuffer);
 	}
 
-	private static byte[] fetchBytecodeForOffsetScanner(String internalName) {
-		String dotName = dotted(internalName);
-		byte[] b = bytecodeCache.get(dotName);
-		if (b != null) return b;
-		Class<?> c = loadedClassesMap.get(dotName);
-		if (c != null) {
-			try {
-				b = fetchOriginalBytecode(c);
-				if (b != null) return b;
-			} catch (Throwable ignored) { }
-		}
-		try (InputStream in = RemoldAgent.class.getClassLoader().getResourceAsStream(internalName + ".class")) {
-			if (in != null) return in.readAllBytes();
-		} catch (Throwable ignored) { }
-		return null;
+	static SuperclassDriftGate.DriftDecision checkSuperclassDriftIfApplicable(
+	 String className, Class<?> targetClass, List<String> changedFields,
+	 byte[] newBytes, Map<String, byte[]> newBatchBytes) {
+		return BatchLayoutCoordinator.checkSuperclassDriftIfApplicable(
+		 className, targetClass, changedFields, newBytes, newBatchBytes);
 	}
 
-	private static SuperclassDriftGate.DriftDecision checkSuperclassDriftIfApplicable(
-			String className, Class<?> targetClass, List<String> changedFields,
-			byte[] newBytes, Map<String, byte[]> newBatchBytes) {
-		if (targetClass == null || changedFields == null || changedFields.isEmpty() || offsetIndex == null || offsetIndex.isEmpty()) {
-			return null;
-		}
-		boolean hasInstanceFieldChange = false;
-		for (String cf : changedFields) {
-			if (cf != null && (cf.startsWith("+") || cf.startsWith("-") || cf.startsWith("~"))
-			    && !cf.startsWith("+ *") && !cf.startsWith("+*")
-			    && !cf.startsWith("- *") && !cf.startsWith("-*")
-			    && !cf.startsWith("~ *") && !cf.startsWith("~*")) {
-				hasInstanceFieldChange = true;
-				break;
-			}
-		}
-		if (!hasInstanceFieldChange) return null;
-
-		LayoutPredictor.PredictionResult prediction = LayoutPredictor.predictLayout(
-			targetClass,
-			newBytes,
-			newBatchBytes,
-			RemoldAgent::fetchBytecodeForOffsetScanner,
-			base -> getLoadedDescendantInternalNames(targetClass)
-		);
-
-		int blindSpots = (offsetIndex != null ? offsetIndex.dynamicHolders().size() : 0);
-
-		SuperclassDriftGate.DriftDecision decision = SuperclassDriftGate.checkLayoutDrift(
-			internalName(className),
-			prediction,
-			offsetIndex,
-			RemoldAgent::hasLiveInstances,
-			OFFSET_STRICT,
-			blindSpots
-		);
-
-		if (decision == null) {
-			// 如果预测器无法 clean-load 预测（如缺少依赖），退回保守全量子孙类扫描
-			return SuperclassDriftGate.checkSuperclassDrift(
-				internalName(className),
-				offsetIndex,
-				base -> getLoadedDescendantInternalNames(targetClass),
-				RemoldAgent::getDeclaredInstanceFields,
-				RemoldAgent::hasLiveInstances
-			);
-		}
-
-		return decision;
-	}
-
-	private static Set<String> getLoadedDescendantInternalNames(Class<?> baseClass) {
-		if (baseClass == null || baseClass.isInterface()) return Collections.emptySet();
-		Set<String> descendants = new HashSet<>();
-		for (Class<?> c : loadedClassesMap.values()) {
-			if (c != null && c != baseClass && !c.isInterface() && baseClass.isAssignableFrom(c)) {
-				descendants.add(internalName(c.getName()));
-			}
-		}
-		return descendants;
-	}
-
-	private static Collection<String> getDeclaredInstanceFields(String internalName) {
-		String dotName = dotted(internalName);
-		Class<?> c = loadedClassesMap.get(dotName);
-		if (c != null) {
-			List<String> fields = new ArrayList<>();
-			for (Field f : c.getDeclaredFields()) {
-				if (!Modifier.isStatic(f.getModifiers())) {
-					fields.add(f.getName());
-				}
-			}
-			return fields;
-		}
-		byte[] b = bytecodeCache.get(dotName);
-		if (b != null) {
-			return parseInstanceFieldsFromBytecode(b);
-		}
-		return Collections.emptyList();
-	}
-
-	private static Collection<String> parseInstanceFieldsFromBytecode(byte[] b) {
-		try {
-			ClassReader cr = new ClassReader(b);
-			ClassNode cn = new ClassNode();
-			cr.accept(cn, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
-			List<String> fields = new ArrayList<>();
-			for (FieldNode fn : cn.fields) {
-				if ((fn.access & Opcodes.ACC_STATIC) == 0) {
-					fields.add(fn.name);
-				}
-			}
-			return fields;
-		} catch (Throwable ignored) {
-			return Collections.emptyList();
-		}
-	}
 
 	/** 布局门与后续 alignDiff 共用的同字节数组 diff 缓存，避免对同一个类重复解析两次。 */
 	record GateCachedDiff(byte[] oldBytes, byte[] newBytes, ClassDiffUtil.ClassDiff diff,
@@ -4251,7 +2044,7 @@ public class RemoldAgent {
 	                                            Map<String, Path> classToPath,
 	                                            Map<String, AlignmentTransaction> transactions,
 	                                            RoundSkips skips) {
-		applyRedefineLayoutGate(newBatchBytes, classToPath, transactions, skips, null, null);
+		BatchLayoutCoordinator.applyRedefineLayoutGate(newBatchBytes, classToPath, transactions, skips);
 	}
 
 	static void applyRedefineLayoutGate(Map<String, byte[]> newBatchBytes,
@@ -4260,238 +2053,9 @@ public class RemoldAgent {
 	                                    RoundSkips skips,
 	                                    Map<String, GateCachedDiff> diffCache,
 	                                    long[] readersMsOut) {
-		if (LayoutGate.MODE_OFF.equals(LAYOUT_GATE)) return;
-
-		// 扫一遍本次批次的新字节码，及时发现本批新引入的偏移量缓存
-		for (byte[] newBytes : newBatchBytes.values()) {
-			if (newBytes != null) scanLoadedClassForOffsets(newBytes);
-		}
-
-		// 本轮有"删实例字段"时才做读者扫描（内部先复用 diff 判断，没有删除就直接返回空表，零成本）。
-		long readersStartNanos = System.nanoTime();
-		Map<String, RemovedMemberScan> readersByClass =
-			RemovedMemberScanner.scan(newBatchBytes, classToPath, diffCache);
-		if (readersMsOut != null && readersMsOut.length > 0) {
-			readersMsOut[0] = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - readersStartNanos);
-		}
-
-		Set<String> rejectedHosts = new LinkedHashSet<>();
-		// 批次级存活探测上下文：本批 K 个类各问一次 liveness 就是 K 次全堆遍历，
-		// 第一次未命中缓存时改为整批一次遍历（docs/initfix/05-jvmti-heap.md §「批次存在性探测」）。
-		setLivenessBatch(newBatchBytes.keySet());
-		for (String className : new ArrayList<>(newBatchBytes.keySet())) {
-			if (isBlacklisted(className)) continue;
-			if (rejectedHosts.contains(LayoutDecisionEngine.hostNameOf(className))) continue;
-
-			byte[] newBytes = newBatchBytes.get(className);
-			if (newBytes == null) continue;
-
-			// 若该类在磁盘上的文件哈希未发生变化，说明本批未修改该类，跳过布局门检查
-			long newHash = calculateHash(newBytes);
-			long classNameKey = CRC64.hashString(className);
-			synchronized (fileDiskHashes) {
-				long oldDiskHash = fileDiskHashes.get(classNameKey);
-				if (oldDiskHash != -1 && oldDiskHash != LongLongMap.NOT_FOUND && oldDiskHash == newHash) {
-					continue;
-				}
-			}
-
-			Class<?> targetClass = loadedClassesMap.get(className);
-			if (targetClass == null) continue; // 未加载：无旧状态需要保护
-
-			byte[] oldBytes = bytecodeCache.get(className);
-			if (oldBytes == null) {
-				oldBytes = fetchOriginalBytecode(targetClass);
-				if (oldBytes != null) bytecodeCache.put(className, oldBytes);
-			}
-			if (oldBytes == null) {
-				warn("[LAYOUT-SKIP] " + className + ": layout gate skipped — no baseline bytecode"
-				     + " to diff. Redefining without a field-layout check.");
-				continue;
-			}
-
-			List<String> changed;
-			Set<String> reinitFields = Set.of();
-			Map<String, String> unextractableReinit = Map.of();
-			Map<String, String> unsafeReinitScope = Map.of();
-			try {
-				GateCachedDiff cached = diffCache != null ? diffCache.get(className) : null;
-				ClassDiffUtil.ClassDiff diff;
-				boolean bodyDiffComputed;
-				boolean fullNodesLoaded;
-				if (cached != null && cached.oldBytes() == oldBytes && cached.newBytes() == newBytes) {
-					diff = cached.diff();
-					bodyDiffComputed = cached.bodyDiffComputed();
-					fullNodesLoaded = cached.fullNodesLoaded();
-				} else {
-					boolean fullDiff = DIFF_LOG || DEBUG;
-					diff = fullDiff
-						? ClassDiffUtil.diff(oldBytes, newBytes)
-						: ClassDiffUtil.diffStructural(oldBytes, newBytes);
-					bodyDiffComputed = fullDiff;
-					fullNodesLoaded = fullDiff;
-					if (diffCache != null) {
-						diffCache.put(className,
-							new GateCachedDiff(oldBytes, newBytes, diff, bodyDiffComputed, fullNodesLoaded));
-					}
-				}
-				changed = diff.changedFields;
-				reinitFields = diff.reinitFields;
-				if (!reinitFields.isEmpty() && diff.newClass != null) {
-					if (!fullNodesLoaded) {
-						ClassDiffUtil.ensureFullClassNodes(diff, oldBytes, newBytes);
-						if (diffCache != null) {
-							diffCache.put(className,
-								new GateCachedDiff(oldBytes, newBytes, diff, bodyDiffComputed, true));
-						}
-					}
-					unextractableReinit = InitFix.unextractableReinitFields(targetClass, diff.newClass, reinitFields);
-					// 继承字段 + 子类初始化器写同字段：INCLUDE_SUBCLASSES 会把声明类初值写进子类实例，
-					// 覆盖子类自己的初值且不重放子类赋值（docs/initfix/03-runtime-driver.md §4）。
-					unsafeReinitScope = InitFix.unsafeInheritedReinitFields(targetClass, diff.newClass, reinitFields);
-				}
-			} catch (Throwable t) {
-				warn("[LAYOUT-SKIP] " + className + ": layout gate skipped — cannot diff ("
-				     + t.getClass().getSimpleName() + "). Redefining without a field-layout check.");
-				continue;
-			}
-
-			// 仅当决策路径实际需要存活实例判定且 changedFields 非兼容时才触发 STW 全堆遍历；
-			// 删字段、枚举、静态改动等分支无需触碰 hasLiveInstances。
-			final List<String> changedRef = changed;
-			Supplier<Liveness> livenessSupplier = () -> LayoutGate.checkChangedFields(changedRef).compatible()
-			 ? Liveness.LIVE
-			 : (hasLiveInstances(className) ? Liveness.LIVE : Liveness.NONE);
-
-			SuperclassDriftGate.DriftDecision drift = checkSuperclassDriftIfApplicable(
-				className, targetClass, changed, newBytes, newBatchBytes);
-
-			LayoutDecision d = decideLayout(className, changed, LAYOUT_GATE, livenessSupplier,
-			                                newBatchBytes.keySet(),
-			                                readersByClass.getOrDefault(className, RemovedMemberScan.NOT_SCANNED),
-			                                drift,
-			                                reinitFields,
-			                                unextractableReinit);
-			// Reinit 作用域安全门独立于 changedFields：即使布局门判 COMPATIBLE 也必须拒绝。
-			if (!unsafeReinitScope.isEmpty() && !LayoutGate.MODE_WARN.equals(LAYOUT_GATE)) {
-				d = LayoutDecisionEngine.rejectUnsafeReinitScope(className, Set.copyOf(newBatchBytes.keySet()),
-					unsafeReinitScope);
-			}
-
-			// 显式出口：取不到基线 / 无法 diff 就不是"放行"，而是"没法判"。
-			// 静默放行会重演"整轮静默失效"那类难排查的问题，所以必须说出来。
-			if (d.action() == LayoutAction.SKIP) {
-				warn("[LAYOUT-SKIP] " + className + ": layout gate skipped — no usable baseline"
-				     + " bytecode to diff. Redefining without a field-layout check.");
-				continue;
-			}
-
-			if (d.action() == LayoutAction.WAIVE_NO_READERS) {
-				LAYOUT_GATE_WAIVED.incrementAndGet();
-				clearRejected(className);
-				RemovedMemberScan memberScan =
-					readersByClass.getOrDefault(className, RemovedMemberScan.NOT_SCANNED);
-				StringBuilder note = new StringBuilder();
-				if (!memberScan.dispatchShifted().isEmpty()) {
-					note.append(" Fallback(s): ").append(memberScan.dispatchShifted().size())
-					    .append(" reference(s) now resolve to a supertype implementation or a")
-					    .append(" same-kind field — that is what removing the override/shadow meant.");
-				}
-				if (memberScan.hasConstantFields()) {
-					note.append(" Compile-time constant(s) removed: ").append(memberScan.constantFields())
-					    .append(" — readers that inlined the value keep it and never touch the field;")
-					    .append(" recompile them to pick up the new value.");
-				}
-				warn("[LAYOUT-WAIVE] " + className + ": member(s) removed ("
-				     + (d.layout() == null ? "?" : d.layout().detail()) + ") and no out-of-batch reader"
-				     + " still needs them; redefining. Surviving instances lose the removed slot, which"
-				     + " nothing reads." + note
-				     + " Scope note: only project classes were scanned — a reader inside a third-party"
-				     + " jar is outside this check.");
-				continue;
-			}
-
-			if (d.action() == LayoutAction.WAIVE_REINIT) {
-				LAYOUT_GATE_WAIVED.incrementAndGet();
-				clearRejected(className);
-				info("[LAYOUT-REINIT] " + className + ": field type change authorized by @RemoldReinit ("
-				     + (d.layout() == null ? "?" : d.layout().detail()) + ")");
-				continue;
-			}
-
-			if (d.action() == LayoutAction.WAIVE) {
-				LAYOUT_GATE_WAIVED.incrementAndGet();
-				clearRejected(className);
-				warn("[LAYOUT-WAIVE] " + className + ": incompatible field layout ("
-				     + d.layout().detail() + ") but no scan-visible live instances; redefining anyway — new"
-				     + " instances go through the new constructor and initialize correctly. This is what the"
-				     + " heap scan saw, not proof that no instance exists.");
-				continue;
-			}
-
-			if (d.action() == LayoutAction.REJECT) {
-				LAYOUT_GATE_REJECTED.incrementAndGet();
-				String why = d.reason() != null
-					? d.reason()
-					: "field layout incompatible (" + (d.layout() == null ? "unknown" : d.layout().detail()) + ")";
-				int repeats = noteRejected(className, why);
-				String hint = "";
-				if (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.CHANGED_FIELD_TYPE) {
-					hint = "annotate the field with @RemoldReinit and save again to switch its type and reset the"
-					     + " value without a restart; or ";
-				}
-				warn("[LAYOUT-REJECT] " + className + ": REFUSED redefine — " + why + ". Host "
-				     + d.hostName() + " and its anonymous classes are"
-				     + " skipped this round; existing instances keep running the OLD code, so this edit will"
-				     + " NOT take effect for them. TO PROCEED: " + hint + "recreate/restart so the classes load fresh, or"
-				     + " set -Dremold.agent.layout_gate=warn to force the redefine and accept the consequences.");
-				if (repeats >= 2) {
-					// 拒绝不改运行态：类仍带旧布局，而源码已经不同 → 下次 diff 出同一条变更 → 又被拒。
-					// 用户很容易以为"再热一次就好了"，实际上只有重启或改读者能打破。
-					warn("[LAYOUT-STUCK] " + className + ": refused " + repeats + " times for the same"
-					     + " reason since its last successful redefine. The running class still holds the"
-					     + " old layout while the source no longer matches it, so every later hotswap of"
-					     + " this class will be refused the same way — including method-body-only edits,"
-					     + " which are dropped together with the whole class. Restart (or otherwise"
-					     + " recreate the class) to break the loop.");
-				}
-				for (String dropped : d.dropped()) dropFromBatch(newBatchBytes, classToPath, dropped);
-				skips.addGroup(d.dropped(), d.hostName(),
-				 skipVerdictForLayout(d, readersByClass.getOrDefault(className, RemovedMemberScan.NOT_SCANNED)));
-				AlignmentTransaction tx = transactions.remove(d.hostName());
-				if (tx != null) tx.rollback(false);
-				rejectedHosts.add(d.hostName());
-				if (d.layout() != null && d.layout().verdict() == LayoutGate.Verdict.CHANGED_ENUM_ORDER) {
-					dropEnumSwitchDependents(newBatchBytes, classToPath, className, skips);
-				} else if (d.layout() != null
-				           && d.layout().verdict() == LayoutGate.Verdict.ENUM_CONSTANT_SET_CHANGED) {
-					// 常量集合变化：switch 映射与直接常量引用都会与新 enum 语义不一致，两类都移出。
-					dropEnumSwitchDependents(newBatchBytes, classToPath, className, skips);
-					try {
-						ClassDiffUtil.ClassDiff cd = ClassDiffUtil.diff(oldBytes, newBytes);
-						List<String> changedConstants = new ArrayList<>(cd.addedEnumConstants);
-						changedConstants.addAll(cd.removedEnumConstants);
-						dropEnumConstantDependents(newBatchBytes, classToPath, className, changedConstants, skips);
-					} catch (Throwable t) {
-						warn("[LAYOUT-REJECT] " + className + ": cannot re-diff to cascade enum constant"
-						     + " dependents (" + t + "); the enum itself is dropped this round.");
-					}
-				}
-				continue;
-			}
-
-			// action == PASS：可能是"字段没变/纯新增"，也可能是 warn 模式下的强制放行。
-			clearRejected(className);
-			if (d.layout() != null && !d.layout().compatible()) {
-				LAYOUT_GATE_WAIVED.incrementAndGet();
-				warn("[LAYOUT-WARN] " + className + ": incompatible field layout ("
-				     + d.layout().detail() + "); redefining anyway because remold.agent.layout_gate=warn."
-				     + " Surviving instances may read 0 / misread old values until recreated.");
-			} else if (d.layout() != null && !d.layout().detail().equals("compatible")) {
-				log("[LAYOUT-ALLOW] " + className + ": " + d.layout().detail());
-			}
-		}
+		BatchLayoutCoordinator.applyRedefineLayoutGate(newBatchBytes, classToPath, transactions, skips, diffCache, readersMsOut);
 	}
+
 
 	/** {@link #decideLayout} 的动作。 */
 	public enum LayoutAction {
@@ -4687,7 +2251,7 @@ public class RemoldAgent {
 	 * <p>只在成功路径调用：失败/回滚时旧基线（{@link #bytecodeCache}）没有前进，
 	 * 自造名集合也必须保持与旧基线一致，否则下一轮会拿"从未加载过的版本"的身份去做配对。</p>
 	 */
-	private static void commitInvented(String className) {
+	static void commitInvented(String className) {
 		java.util.Set<String> pending = pendingInvented.remove(className);
 		if (pending == null) {
 			inventedSlots.remove(className);
@@ -4742,1900 +2306,95 @@ public class RemoldAgent {
 	 * <p><b>不启用条件</b>：本批没有任何「新增/类型变更字段」进入补丁计划（纯方法体热更）时，调用方
 	 * 不会走这里；{@code -Dremold.agent.two_phase=false} 可强制回到单阶段快路径。</p>
 	 */
-	/**
-	 * 提交本批次的旁路记录（PR1）。
-	 *
-	 * <p><b>整批原子</b>：只有本批所有进入重定义的类最终都生效、且没有任何事务回滚 /
-	 * {@code LAMBDA_STRICT} 拒绝时才记录；否则整批丢弃。原因：PR1 的用途是给后续代际能力
-	 * 提供"真实生效序列"，半生效批次记下来会把"JVM 里其实没有这套字节"写成当前代。</p>
-	 *
-	 * <p><b>两阶段</b>：阶段 A 走 {@code redefineStageA}，不经过本方法；阶段 C 的最终字节由
-	 * {@code applyRedefinitions} 应用到 {@code bytecodeCache}，因此这里记录的 {@code jvmBytes}
-	 * 就是最终生效形态。留在阶段 A 的类不会出现在 {@code redefinedOk} 里，整批宁可不记。</p>
-	 */
-	private static void commitVcsBatch(List<ClassDefinition> definitions, Set<String> redefinedOk,
+	static void commitVcsBatch(List<ClassDefinition> definitions, Set<String> redefinedOk,
 	                                   Set<String> rolledBack, boolean lambdaStrictRejected,
 	                                   boolean twoPhaseApplied) {
-		int total = definitions == null ? 0 : definitions.size();
-		int applied = 0;
-		if (definitions != null) {
-			for (ClassDefinition def : definitions) {
-				if (redefinedOk.contains(def.getDefinitionClass().getName())) applied++;
-			}
-		}
-		if (!VcsCommitGate.shouldCommit(total, applied, rolledBack.size(), lambdaStrictRejected)) {
-			int discarded = PENDING_VCS.size();
-			PENDING_VCS.clear();
-			if (definitions != null) {
-				for (ClassDefinition def : definitions) {
-					// aborted 轮次只记诊断计数：不分配 seq、不推进 head（规格 §6.3）。
-					ChangesetLog.INSTANCE.abort(
-					 AlignmentMetaStore.INSTANCE.loaderScopeId(def.getDefinitionClass().getClassLoader()));
-				}
-			}
-			if (DEBUG) log("[VCS] batch not fully applied (ok=" + redefinedOk.size()
-				+ "/" + (definitions == null ? 0 : definitions.size())
-				+ ", rolledBack=" + rolledBack.size() + ", lambdaStrict=" + lambdaStrictRejected
-				+ "); " + discarded + " pending record(s) discarded.");
-			return;
-		}
-		// 每个 loader scope 一条链：entries 按 scope 分组，批次原子性已由上面的 gate 保证（§2.1.3）。
-		Map<ClassLoader, Map<String, Changeset.Entry>> perScope = new IdentityHashMap<>();
-		Map<ClassLoader, Map<String, byte[]>> effBefore = new IdentityHashMap<>();
-		Map<ClassLoader, Map<String, byte[]>> effNow = new IdentityHashMap<>();
-		Map<ClassLoader, Set<String>> scopeClassNames = new IdentityHashMap<>();
-		List<Class<?>> committedClasses = new ArrayList<>();
-		for (ClassDefinition def : definitions) {
-			String className = def.getDefinitionClass().getName();
-			String slashName = className.replace('.', '/');
-			VcsPending p = PENDING_VCS.remove(className);
-			if (p == null) continue;
-			byte[] jvmBytes = def.getDefinitionClassFile();
-			try {
-				Map<String, Long> ghosts = LambdaAligner.scanGhostOriginHashes(p.alignOutput);
-				Set<String> invented = p.result == null ? Set.of() : p.result.inventedNames;
-				Map<String, String> mapping = p.result == null ? Map.of() : p.result.methodMapping;
-				// 下一轮 Raw <-> Raw 的翻译表：Raw 方法键 → 本轮生效侧方法键。显式传值（不依赖
-				// "align 之后立刻 commit"的时序），批次间被丢弃时为空表 —— 读侧会整类退回兼容跑道。
-				Map<String, String> rawToEff = p.result == null ? Map.of() : p.result.rawToEffKeys;
-				int bridges = p.result == null ? 0 : p.result.bridgeCount;
-				AlignmentMetaStore.INSTANCE.commit(p.loader, slashName,
-					p.preAlign, p.alignOutput, jvmBytes, invented, ghosts, mapping, bridges, rawToEff);
-				AlignmentMetaStore.Entry head = AlignmentMetaStore.INSTANCE.head(p.loader, slashName);
-				if (head != null) {
-					String metaHash = Changeset.metaDigest(slashName, invented, ghosts, mapping, bridges);
-					perScope.computeIfAbsent(p.loader, ignored -> new LinkedHashMap<>())
-					 .put(slashName, new Changeset.Entry(slashName, head.preAlignSha256,
-					  head.jvmEffSha256, metaHash));
-					scopeClassNames.computeIfAbsent(p.loader, ignored -> new LinkedHashSet<>()).add(slashName);
-					if (p.oldEffective != null) {
-						effBefore.computeIfAbsent(p.loader, ignored -> new LinkedHashMap<>()).put(slashName, p.oldEffective);
-					}
-					effNow.computeIfAbsent(p.loader, ignored -> new LinkedHashMap<>()).put(slashName, jvmBytes);
-				}
-				committedClasses.add(def.getDefinitionClass());
-				if (BytecodePack.enabled()) {
-					BytecodePack.append(new BytecodePack.Entry(slashName, p.oldEffective, p.preAlign,
-					 p.alignOutput, jvmBytes, invented, mapping, bridges));
-				}
-			} catch (Throwable t) {
-				warn("[VCS] record failed for " + className + ": " + t);
-			}
-		}
-		PENDING_VCS.clear();
-		if (!perScope.isEmpty()) {
-			String roundId = definitions.isEmpty() ? "" : batchWatchLabel(definitions);
-			Changeset.Manifest manifest = InitFix.batchCommitManifest(committedClasses);
-			List<Changeset.ReplayFact> facts = InitFix.batchReplayFacts();
-			Changeset.PatchTiming timing = twoPhaseApplied
-			 ? Changeset.PatchTiming.BEFORE_COMMIT : Changeset.PatchTiming.AFTER_COMMIT;
-			String buildId = System.getProperty("remold.build_id", "");
-			for (Map.Entry<ClassLoader, Map<String, Changeset.Entry>> scope : perScope.entrySet()) {
-				try {
-					Changeset cs = ChangesetLog.INSTANCE.commit(
-					 AlignmentMetaStore.INSTANCE.loaderScopeId(scope.getKey()), roundId,
-					 scope.getValue(), scopeManifest(manifest, scopeClassNames.get(scope.getKey())),
-					 facts, Changeset.currentAlgoVersion(), buildId, timing,
-					 effBefore.getOrDefault(scope.getKey(), Map.of()),
-					 effNow.getOrDefault(scope.getKey(), Map.of()));
-					// 链式回放包按 seq 逐轮导出：提交后立即写本轮目录，离线侧可按任意 seq 单独检出（§7.1）。
-					if (BytecodePack.enabled()) BytecodePack.exportRound(cs);
-					// 台账是派生索引（docs/vcs/05 §2.3）：逐条事实带代坐标入索引，口径不合规的
-					// 记录在这里就被拒（不索引），消费侧只会看到规范事实。
-					recordLedgerFacts(scope.getKey(), cs);
-				} catch (Throwable t) {
-					warn("[VCS] changeset commit failed: " + t);
-				}
-			}
-		}
+		VcsAgentCoordinator.commitVcsBatch(definitions, redefinedOk, rolledBack, lambdaStrictRejected, twoPhaseApplied);
 	}
 
-	/**
-	 * 把批次级 manifest 收窄到单个 scope：跨 scope 时每条 Changeset 只带自己范围内的宿主与边（§2.1.3）。
-	 */
-	private static Changeset.Manifest scopeManifest(Changeset.Manifest manifest, Set<String> slashNames) {
-		if (manifest == null || slashNames == null || slashNames.isEmpty()) {
-			return manifest == null ? Changeset.Manifest.EMPTY : manifest;
-		}
-		Set<String> dotted = new LinkedHashSet<>();
-		for (String name : slashNames) dotted.add(name.replace('/', '.'));
-		List<String> hosts = new ArrayList<>();
-		for (String host : manifest.orderedHosts()) {
-			for (String name : dotted) {
-				if (host.endsWith(":" + name)) {
-					hosts.add(host);
-					break;
-				}
-			}
-		}
-		List<String> nodes = new ArrayList<>();
-		for (String node : manifest.nodes()) {
-			for (String name : dotted) {
-				if (node.startsWith(name + ".")) {
-					nodes.add(node);
-					break;
-				}
-			}
-		}
-		List<String> missing = new ArrayList<>();
-		for (String name : manifest.candidateMissing()) {
-			if (dotted.contains(name)) missing.add(name);
-		}
-		return new Changeset.Manifest(hosts, manifest.edges(), nodes, missing);
-	}
-
-	/**
-	 * 把一代的 {@code replayFacts} 逐条推进代际台账（{@code docs/vcs/05-generational-field-ledger.md} §2.3）。
-	 *
-	 * <p>台账是<b>派生索引</b>：口径不合规的记录在这里被拒（不索引、计数），消费侧因此只会看到
-	 * 规范事实；索引丢了可以按 {@code Changeset} 重建，事实丢了只能拒绝。</p>
-	 */
 	static void recordLedgerFacts(ClassLoader loader, Changeset cs) {
-		// {@code loader == null} 是 bootstrap 槽（scope 0）的合法情形：台账专门为它留了槽，
-		// 这里若跳过就会出现"台账有槽、提交侧永不填"的口径不对称。
-		if (cs == null || cs.replayFacts().isEmpty()) return;
-		GenerationalFieldLedger.GenRef gen = new GenerationalFieldLedger.GenRef(cs.seq(), cs.id());
-		for (Changeset.ReplayFact fact : cs.replayFacts()) {
-			String internal = fact.ownerClass().replace('.', '/');
-			GenerationalFieldLedger.INSTANCE.record(loader,
-			 new GenerationalFieldLedger.LedgerKey(cs.loaderScope(), internal, fact.field()),
-			 gen, fact, cs.algoVersion());
-		}
-		// 历史索引跟随 Changeset 窗口，没有第二个旋钮（§2.3）。
-		GenerationalFieldLedger.INSTANCE.pruneToWindow(loader,
-		 ChangesetLog.INSTANCE.chain(cs.loaderScope()).isEmpty() ? 1L
-		  : ChangesetLog.INSTANCE.chain(cs.loaderScope()).get(0).seq());
+		VcsAgentCoordinator.recordLedgerFacts(loader, cs);
 	}
 
-	/**
-	 * 回退到某个已提交代（{@code docs/vcs/01-bytecode-changeset-vcs.md} §2.1.1 / §4.1）。
-	 *
-	 * <p>只承诺<b>未来正确</b>：结构与字方法体回到目标代，已经写进存量实例的字段值保持现状，
-	 * 该堆事实由调用方记入 {@code PatchReport} 与告警。</p>
-	 *
-	 * <p><b>三阶段，任一阶段失败都不留下半套回退</b>：</p>
-	 * <ol>
-	 *   <li><b>预检</b>：所有 scope 都先算计划、找类、确认目标可达。不动 JVM、不动工作头、不动链、
-	 *       不动缓存——多 scope 时"第 1 个成功、第 2 个抛错"是原来最危险的形态。</li>
-	 *   <li><b>redefine</b>：全部 scope 的字节都装进 JVM。任一 scope 失败就把已 redefine 的 scope
-	 *       尽力写回回退前字节并告警，且<b>不追加任何 Changeset</b>。</li>
-	 *   <li><b>工作头 + 缓存 + 链</b>：代际目标走 {@code restoreHead}，{@code Eff_0} 目标走
-	 *       {@code forgetGenerations}；然后把 agent 侧四张内存表对齐到"JVM 现在真正在跑的字节"，
-	 *       最后才追加前向代。</li>
-	 * </ol>
-	 *
-	 * <p>成功路径追加一条前向 Changeset（{@code seq = HEAD+1}、{@code revertedToSeq = target}），
-	 * 不倒拨 {@code seq}、不造分叉，链式导出保持线性。</p>
-	 *
-	 * @return 人可读的回退摘要；开 {@code -Dremold.vcs.revert} 才允许执行
-	 */
 	public static String revertTo(long targetSeq) {
-		if (!Boolean.getBoolean("remold.vcs.revert")) {
-			throw new IllegalStateException("NOT_REVERTABLE: revert execution is disabled"
-			 + " (set -Dremold.vcs.revert=true)");
-		}
-		if (inst == null) throw new IllegalStateException("NOT_REVERTABLE: instrumentation is not attached");
-
-		// ---- 阶段 1：全量预检 ----
-		Map<Long, ChangesetLog.RevertPlan> plans = new LinkedHashMap<>();
-		List<RevertScope> work = new ArrayList<>();
-		for (long scope : ChangesetLog.INSTANCE.liveScopes()) {
-			ChangesetLog.RevertPlan plan = ChangesetLog.INSTANCE.revertPlan(scope, targetSeq);
-			plans.put(scope, plan);
-			if (plan.isEmpty()) continue;
-			RevertScope step = new RevertScope(scope, plan);
-			for (ChangesetLog.RevertTarget target : plan.targets().values()) {
-				Class<?> cls = findLoadedClassByName(target.className());
-				if (cls == null) {
-					throw new IllegalStateException("NOT_REVERTABLE: class is not loaded: " + target.className());
-				}
-				ClassLoader loader = cls.getClassLoader();
-				// {@code Eff_0} 从未进过 AlignmentMetaStore，{@code hasGeneration} 对它必然 false：
-				// 两条路径必须分开判，用同一个放水判据会让"回退到原始态"永远被拒。
-				if (target.fromGeneration()
-				 && !AlignmentMetaStore.INSTANCE.hasGeneration(loader, target.className(), target.effHash())) {
-					throw new IllegalStateException("NOT_REVERTABLE: working head for " + target.className()
-					 + " is no longer addressable at the target generation");
-				}
-				step.add(new RevertClass(cls, loader, target,
-				 bytecodeCache.get(target.className().replace('/', '.'))));
-			}
-			work.add(step);
-		}
-
-		// ---- 阶段 2：把字节全部装进 JVM ----
-		List<RevertScope> redefined = new ArrayList<>();
-		try {
-			for (RevertScope scope : work) {
-				inst.redefineClasses(scope.definitions().toArray(new ClassDefinition[0]));
-				redefined.add(scope);
-			}
-		} catch (Throwable t) {
-			restorePreRevertBytes(redefined);
-			throw new IllegalStateException("NOT_REVERTABLE: revert redefine failed: " + t, t);
-		}
-
-		// ---- 阶段 3a：可逆的工作头切换（代际目标）----
-		try {
-			for (RevertScope scope : redefined) {
-				for (RevertClass rc : scope.classes) {
-					if (!rc.target.fromGeneration()) continue;
-					if (!AlignmentMetaStore.INSTANCE.restoreHead(rc.loader, rc.target.className(),
-					 rc.target.effHash())) {
-						throw new IllegalStateException("revert redefine succeeded but working head sync failed for "
-						 + rc.target.className() + "; the next Run R baseline would be wrong");
-					}
-				}
-			}
-		} catch (RuntimeException e) {
-			restorePreRevertBytes(redefined);
-			throw e;
-		}
-
-		// ---- 阶段 3b：{@code Eff_0} 目标的代际身份作废（不可逆，必须放在最后）----
-		for (RevertScope scope : redefined) {
-			for (RevertClass rc : scope.classes) {
-				if (rc.target.fromGeneration()) continue;
-				int dropped = AlignmentMetaStore.INSTANCE.forgetGenerations(rc.loader, rc.target.className());
-				warn("[VCS] " + rc.target.className() + " reverts to its Eff_0 baseline: dropped "
-				 + dropped + " recorded generation(s), so the next Run R falls back to Run E.");
-			}
-		}
-
-		// ---- 阶段 3c：缓存同步 + 追加前向代 ----
-		StringBuilder summary = new StringBuilder();
-		for (Map.Entry<Long, ChangesetLog.RevertPlan> entry : plans.entrySet()) {
-			long scope = entry.getKey();
-			ChangesetLog.RevertPlan plan = entry.getValue();
-			if (plan.isEmpty()) {
-				summary.append("scope=").append(scope).append(":noop;");
-				continue;
-			}
-			ClassLoader forwardLoader = null;
-			for (RevertScope done : redefined) {
-				if (done.scope != scope) continue;
-				for (RevertClass rc : done.classes) {
-					// 四张 agent 内存表必须与"JVM 现在真正在跑的字节"对齐，否则下一轮
-					// LambdaAligner / ClassDiffUtil / 磁盘跳过判据都会拿被退掉的污染代当基线。
-					syncCachesAfterRevert(rc.loader, rc.target);
-					if (forwardLoader == null) forwardLoader = rc.loader;
-				}
-			}
-			Changeset forward = ChangesetLog.INSTANCE.appendForwardRevert(scope, plan,
-			 batchWatchLabelFromNames(plan.targets().keySet()), Changeset.currentAlgoVersion(),
-			 System.getProperty("remold.build_id", ""), Changeset.PatchTiming.AFTER_COMMIT);
-			// 被回退掉的代不再有任何承诺：事实与引擎写入记录整体作废（20 §3.4），宁可多写一次。
-			int invalidated = GenerationalFieldLedger.INSTANCE.invalidateAfterRevert(forwardLoader, targetSeq);
-			warn("[VCS] reverted scope " + scope + " to seq " + targetSeq + " (" + plan.targets().size()
-			 + " class(es)); existing instance field values are NOT rolled back"
-			 + " (heap values keep their current state, structure/bodies follow seq " + targetSeq + ").");
-			summary.append("scope=").append(scope).append(":seq=").append(forward.seq())
-			 .append(":classes=").append(plan.targets().size())
-			 .append(":invalidated=").append(invalidated).append(';');
-		}
-		return summary.toString();
+		return VcsAgentCoordinator.revertTo(targetSeq);
 	}
 
-	/** 一次回退里的一个类：类对象、目标，以及回退前 JVM 里跑的字节（失败回滚用）。 */
-	private record RevertClass(Class<?> type, ClassLoader loader, ChangesetLog.RevertTarget target,
-	                           byte[] preRevertBytes) { }
-
-	/** 一个 scope 的回退单元（records 不能增量构建，这里用可变容器）。 */
-	private static final class RevertScope {
-		final long scope;
-		final ChangesetLog.RevertPlan plan;
-		final List<RevertClass> classes = new ArrayList<>();
-
-		RevertScope(long scope, ChangesetLog.RevertPlan plan) {
-			this.scope = scope;
-			this.plan = plan;
-		}
-
-		void add(RevertClass rc) {
-			classes.add(rc);
-		}
-
-		List<ClassDefinition> definitions() {
-			List<ClassDefinition> defs = new ArrayList<>(classes.size());
-			for (RevertClass rc : classes) defs.add(new ClassDefinition(rc.type, rc.target.bytes()));
-			return defs;
-		}
-	}
-
-	/**
-	 * 多 scope 回退中途失败时的尽力回滚：把已经 redefine 的类写回回退前字节，并明确告警。
-	 *
-	 * <p>"尽力"是诚实的边界：回滚本身也可能失败（JVM 拒绝二次重定义等），那时唯一的正确动作是
-	 * 告警要求重启，而不是假装回退没发生过。</p>
-	 */
-	private static void restorePreRevertBytes(List<RevertScope> redefined) {
-		for (RevertScope scope : redefined) {
-			List<ClassDefinition> back = new ArrayList<>(scope.classes.size());
-			for (RevertClass rc : scope.classes) {
-				if (rc.preRevertBytes == null || rc.preRevertBytes.length == 0) continue;
-				back.add(new ClassDefinition(rc.type, rc.preRevertBytes));
-			}
-			if (back.isEmpty()) continue;
-			try {
-				inst.redefineClasses(back.toArray(new ClassDefinition[0]));
-				warn("[VCS] revert aborted after scope " + scope.scope + " was already redefined;"
-				 + " restored the pre-revert bytes of " + back.size() + " class(es) in that scope.");
-			} catch (Throwable t) {
-				warn("[VCS] revert aborted AND the pre-revert bytes of scope " + scope.scope
-				 + " could not be restored (" + t + "); a restart is required.");
-			}
-		}
-	}
-
-	/**
-	 * 把 agent 侧四张表对齐到回退后的目标代。
-	 *
-	 * <p>漏掉这一步不会立刻报错，而是<b>下一轮</b>才错：{@code bytecodeCache} 决定
-	 * {@code LambdaAligner.align} 的旧侧与 {@code ClassDiffUtil.diff} 的基线，{@code sourceBytecodeCache}
-	 * 决定源码基线，{@code inventedSlots} 决定自造名身份，{@code fileDiskHashes} 决定"磁盘没变就跳过"。
-	 * 任一留着污染代的值，回退后的第一次热更就会静默用错代配对，或在字段增删上判"本来就有"而跳过初始化。</p>
-	 */
-	private static void syncCachesAfterRevert(ClassLoader loader, ChangesetLog.RevertTarget target) {
-		String dotted = target.className().replace('/', '.');
-		bytecodeCache.put(dotted, target.bytes().clone());
-		AlignmentMetaStore.Entry head = AlignmentMetaStore.INSTANCE.head(loader, target.className());
-		Set<String> invented = head == null ? Set.of() : head.inventedNames;
-		if (invented.isEmpty()) inventedSlots.remove(dotted);
-		else inventedSlots.put(dotted, Set.copyOf(invented));
-		byte[] raw = head == null ? null : head.rawPrevBytes();
-		if (raw == null) {
-			// 拿不到目标代的 Raw 源字节时宁可清空：读侧会退回 {@code bytecodeCache}，
-			// 而留着污染代的源码基线会让下一轮拿错代的源码去配对。
-			sourceBytecodeCache.remove(dotted);
-		} else {
-			sourceBytecodeCache.put(dotted, raw.clone());
-		}
-		// 磁盘上仍是被退掉的那份内容。标记"无可信基线"（-1 是 changedOnDisk 判据里的无值约定），
-		// 让下一轮扫描把它当改动重新热更上去，而不是误判"未修改"把 JVM 永远留在目标代。
-		synchronized (fileDiskHashes) {
-			fileDiskHashes.put(CRC64.hashString(dotted), -1L);
-		}
-	}
-
-	private static String batchWatchLabelFromNames(Collection<String> names) {
-		return "revert:" + String.join(",", new TreeSet<>(names));
-	}
-
-	/** 按点分名找已加载类（回退入口用；找不到即拒绝，不做隐式加载）。 */
-	private static Class<?> findLoadedClassByName(String dottedName) {
-		if (inst == null || dottedName == null) return null;
-		String internal = dottedName.replace('.', '/');
-		for (Class<?> cls : inst.getAllLoadedClasses()) {
-			if (cls.getName().replace('.', '/').equals(internal)) return cls;
-		}
-		return null;
-	}
-
-	private static RedefineOutcome applyTwoPhase(List<ClassDefinition> definitions,
+	static RedefineOutcome applyTwoPhase(List<ClassDefinition> definitions,
 	                                             Map<String, byte[]> oldEffectiveBytes,
 	                                             Collection<AlignmentTransaction> transactions,
 	                                             RoundSkips skips,
 	                                             Set<String> injectedClasses) {
-		long startedNanos = System.nanoTime();
-		if (definitions.isEmpty()) {
-			for (AlignmentTransaction tx : transactions) tx.commit();
-			skips.report();
-			return new RedefineOutcome(Set.of(), Set.of());
-		}
-
-		// ---- 阶段 A：新结构 + 旧方法体（构造器保持新体） ----
-		long skelStartNanos = PERF_LOG ? System.nanoTime() : 0L;
-		List<ClassDefinition> stageADefinitions = new ArrayList<>(definitions.size());
-		Map<String, byte[]>   stageABytes       = new HashMap<>(definitions.size());
-		for (ClassDefinition def : definitions) {
-			Class<?> clazz  = def.getDefinitionClass();
-			String   name   = clazz.getName();
-			byte[]   target = def.getDefinitionClassFile();
-			byte[]   old    = oldEffectiveBytes.get(name);
-			byte[]   skeleton;
-			if (old == null) {
-				// 没有可信旧字节就合成不出「旧方法体」；该类退化为直接提交目标字节（带告警）。
-				warn("[HOTSWAP-2P] No old bytecode for " + name
-				     + "; stage A falls back to the target bytes for this class.");
-				skeleton = target;
-			} else if (!InitFix.requiresTwoPhase(clazz)) {
-				// 该类本身无需两阶段保护（如纯方法体修改或无零值暴露字段）：阶段 A 直接使用目标字节
-				if (DEBUG) log("[HOTSWAP-2P] Stage A uses target bytes directly for " + name + " (no read-through hazard)");
-				skeleton = target;
-			} else {
-				try {
-					skeleton = remold.ref.StageASkeleton.buildWithLiveConstructors(old, target);
-				} catch (Throwable t) {
-					error("[HOTSWAP-2P] Cannot synthesise stage A for " + name
-					      + "; falling back to the target bytes for this class.", t);
-					skeleton = target;
-				}
-			}
-			stageADefinitions.add(new ClassDefinition(clazz, skeleton));
-			stageABytes.put(name, skeleton);
-		}
-		if (PERF_LOG) {
-			BATCH_TWOPHASE_SKEL_MILLIS.addAndGet(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - skelStartNanos));
-		}
-
-		if (HeapFieldWatch.enabled()) {
-			HeapFieldWatch.snapshot("before-redefine", batchWatchLabel(stageADefinitions));
-		}
-		long redefBeforeA = PERF_LOG ? BATCH_REDEFINE_MILLIS.get() : 0L;
-		Set<String> stageAAbandoned = new HashSet<>();
-		Set<String> stageAOk        = redefineStageA(stageADefinitions, stageABytes, transactions, skips, injectedClasses,
-		                                              stageAAbandoned);
-		if (PERF_LOG) {
-			BATCH_STAGE_A_MILLIS.addAndGet(BATCH_REDEFINE_MILLIS.get() - redefBeforeA);
-		}
-		if (stageAOk.isEmpty()) {
-			warn("[HOTSWAP-2P] Stage A did not apply any class; the two-phase transaction is abandoned.");
-			skips.report();
-			return new RedefineOutcome(Set.of(), Set.of());
-		}
-		if (HeapFieldWatch.enabled()) {
-			HeapFieldWatch.snapshot("after-stage-a", batchWatchLabel(stageADefinitions));
-		}
-		info("[HOTSWAP-2P] Stage A applied for " + stageAOk.size()
-		     + " class(es): new shape with old method bodies; patching live instances before stage C.");
-
-		// isInitialized 二次检查（docs/initfix/04-target-design.md §1）：阶段 A 已生效后，若类的 <clinit>
-		// 仍在别的线程里执行，补丁会被 InitFix 的未初始化守卫跳过；此时不能再提交阶段 C 的新方法体，
-		// 否则新体读到的是默认值。把这类类留在阶段 A（旧体）并提示重启。
-		Set<String> initialising = new HashSet<>();
-		for (ClassDefinition def : stageADefinitions) {
-			Class<?> clazz = def.getDefinitionClass();
-			if (!stageAOk.contains(clazz.getName())) continue;
-			if (!InitFix.isInitialized(clazz)) {
-				error("[HOTSWAP-2P] " + clazz.getName() + " is being initialized by another thread"
-				      + " (<clinit> in flight); stage C is withheld for it, so it stays on the old bodies."
-				      + " RESTART is required for this class.");
-				initialising.add(clazz.getName());
-			}
-		}
-		if (!initialising.isEmpty()) {
-			for (String name : initialising) {
-				skips.add(name, RoundSkips.verdict("INITIALISING-AT-STAGE-A",
-					"<clinit> in flight; stage C withheld", "restart required"));
-			}
-			// 这些类已经提交了阶段 A，重试基线不再等同于磁盘旧版本：不做自动回队，提示重启。
-			stageAAbandoned.addAll(initialising);
-			stageAOk.removeAll(initialising);
-		}
-
-		// ---- 阶段 B：真实 InitFix 驱动补丁（必须在阶段 C 之前全部完成） ----
-		long patchStart = System.nanoTime();
-		List<Class<?>> patchTargets = new ArrayList<>(stageAOk.size());
-		for (ClassDefinition def : stageADefinitions) {
-			if (stageAOk.contains(def.getDefinitionClass().getName())) patchTargets.add(def.getDefinitionClass());
-		}
-		// 批次级单次堆遍历：本批 K 个类的存活实例收集从 K 次全堆扫描收敛为 1 次
-		// （docs/initfix/05-jvmti-heap.md §「批次实例收集」）。收集点在 redefine 生效之后、
-		// 补丁执行之前——提前收集会漏掉窗口期新建的实例（docs/status.md 风险 6）。
-		InitFix.beginBatchInstanceCollection(patchTargets);
-		try {
-			for (Class<?> clazz : InitFix.orderBatchHosts(patchTargets)) {
-				try {
-					InitFix.afterRedefine(clazz);
-				} catch (Throwable t) {
-					// afterRedefine 自己已兜住 LinkageError 等致命异常并记账；这里只防御它自身抛错。
-					error("[HOTSWAP-2P] Stage B patch failed for " + clazz.getName()
-					      + "; stage C will still be applied, so unpatched fields stay at defaults.", t);
-				}
-			}
-		} finally {
-			InitFix.endBatchInstanceCollection();
-			// The batch bytecode view intentionally survives until the caller's Stage B loop ends: the outer
-			// processChangesBatch still runs InitFix.orderBatchHosts over every redefined class, and clearing
-			// the view here would silently drop cross-class ordering for any class that still holds a pending
-			// patch (mixed two-phase / single-phase batches).
-		}
-		long patchMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - patchStart);
-		BATCH_STAGE_B_MILLIS.addAndGet(patchMs);
-		if (HeapFieldWatch.enabled()) {
-			HeapFieldWatch.snapshot("after-field-patch", batchWatchLabel(stageADefinitions));
-		}
-
-		// ---- 阶段 C：只对阶段 A 成功的类提交完整新字节码 ----
-		List<ClassDefinition> stageCDefinitions = new ArrayList<>(stageAOk.size());
-		for (ClassDefinition def : definitions) {
-			if (stageAOk.contains(def.getDefinitionClass().getName())) stageCDefinitions.add(def);
-		}
-		List<AlignmentTransaction> activeTransactions = new ArrayList<>(transactions.size());
-		for (AlignmentTransaction tx : transactions) {
-			if (stageAOk.contains(tx.hostName)) activeTransactions.add(tx);
-		}
-		long redefBeforeC = PERF_LOG ? BATCH_REDEFINE_MILLIS.get() : 0L;
-		RedefineOutcome stageCOutcome = applyRedefinitions(stageCDefinitions, activeTransactions, skips);
-		if (PERF_LOG) {
-			BATCH_STAGE_C_MILLIS.addAndGet(BATCH_REDEFINE_MILLIS.get() - redefBeforeC);
-		}
-		if (HeapFieldWatch.enabled() && !stageCOutcome.successful().isEmpty()) {
-			HeapFieldWatch.snapshot("after-stage-c", batchWatchLabel(stageCDefinitions));
-		}
-		Set<String>     rolledBack    = new HashSet<>(stageCOutcome.rolledBack());
-		rolledBack.addAll(stageAAbandoned);
-		RedefineOutcome outcome = new RedefineOutcome(stageCOutcome.successful(), rolledBack);
-		info("[HOTSWAP-2P] Two-phase transaction finished: A=" + stageAOk.size()
-		     + " class(es), patch=" + patchMs + "ms, C=" + outcome.successful().size()
-		     + " class(es), total=" + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos) + "ms"
-		     + (outcome.successful().size() < stageAOk.size()
-		        ? "; " + (stageAOk.size() - outcome.successful().size())
-		          + " class(es) stayed at stage A (old behavior) — RESTART is required for those."
-		        : ".")
-		     );
-		return outcome;
+		return TwoPhaseCoordinator.applyTwoPhase(definitions, oldEffectiveBytes, transactions, skips, injectedClasses);
 	}
 
-	private static String batchWatchLabel(List<ClassDefinition> defs) {
-		if (defs == null || defs.isEmpty()) return "batch(0)";
-		return defs.size() == 1
-			? defs.get(0).getDefinitionClass().getName()
-			: "batch(" + defs.size() + ")";
+	static String batchWatchLabel(List<ClassDefinition> defs) {
+		return TwoPhaseCoordinator.batchWatchLabel(defs);
 	}
 
-	/**
-	 * 只提交阶段 A 字节码：成功集合、缓存与事务登记都不算「本轮生效」，要等阶段 C 才落账。
-	 *
-	 * <p>失败的类立即丢弃其暂存补丁并记入台账（与单阶段 {@link #applyRedefinitions} 的失败语义一致）；
-	 * 宿主与匿名类必须整组成功，否则回滚事务并整组移出阶段 C（重试基线已不一致，提示重启）。</p>
-	 */
-	/**
-	 * Stage A 宿主/匿名一致性判据。
-	 *
-	 * <p><b>新注入组不参与 Stage A 重定义</b>：此前未加载、本轮通过 {@code injectNewClass} 或
-	 * 待注入表定义的 {@code (host, anon)} 组，既不进 {@code definitions}，也不会有 {@code ok} 记录；
-	 * 把它们纳入一致性校验会让整组被误判"半生效"并回滚（{@code ROLLED-BACK-A} + 要求重启），
-	 * 而它们本来就已经按新字节码定义完毕。反过来，新注入的宿主配已加载的匿名类时，匿名类仍要校验。</p>
-	 */
 	public static boolean stageAConsistent(String hostName, Set<String> targets, Set<String> ok,
-	                                Set<String> injected, Set<String> loaded) {
-		if (hostName == null) return false;
-		boolean hostOk = ok.contains(hostName) || (injected != null && injected.contains(hostName));
-		if (!hostOk) return false;
-		if (targets == null) return true;
-		for (String target : targets) {
-			if (injected != null && injected.contains(target)) continue;
-			if (loaded != null && loaded.contains(target) && !ok.contains(target)) return false;
-		}
-		return true;
+	                                       Set<String> injected, Set<String> loaded) {
+		return TwoPhaseCoordinator.stageAConsistent(hostName, targets, ok, injected, loaded);
 	}
 
-	private static Set<String> redefineStageA(List<ClassDefinition> definitions,
-	                                          Map<String, byte[]> stageABytes,
-	                                          Collection<AlignmentTransaction> transactions,
-	                                          RoundSkips skips,
-	                                          Set<String> injectedClasses,
-	                                          Set<String> abandonedOut) {
-		for (AlignmentTransaction tx : transactions) tx.preRegister();
-
-		// 阶段 A 同样可能收到"重织入产物"，必须过同一道访问权限单调对齐 + 自检门。
-		List<ClassDefinition> aligned = new ArrayList<>(definitions.size());
-		for (ClassDefinition def : definitions) {
-			String name = def.getDefinitionClass().getName();
-			if (VM_POISONED_CLASSES.contains(name)) {
-				warn("[VM-REDEFINE-POISON] Skipping stage A redefinition of " + name
-				     + ": poisoned by an earlier JVM-level redefine failure; RESTART required.");
-				skips.add(name, RoundSkips.verdict("VM-POISONED",
-					"InternalError/VerifyError earlier this session", "restart required"));
-				InitFix.afterRedefineFailed(def.getDefinitionClass());
-				continue;
-			}
-			byte[] rawBytes = def.getDefinitionClassFile();
-			byte[] alignedBytes = alignAccessMonotonicity(name, def.getDefinitionClass(), rawBytes);
-			if (alignedBytes == null) {
-				skips.add(name, RoundSkips.verdict("ACCESS-GATE-REFUSED",
-					"member access narrowed after re-weave",
-					"stage A refused; see [ACCESS-GATE]"));
-				InitFix.afterRedefineFailed(def.getDefinitionClass());
-				continue;
-			}
-			if (alignedBytes != rawBytes) {
-				stageABytes.put(name, alignedBytes);
-				def = new ClassDefinition(def.getDefinitionClass(), alignedBytes);
-			}
-			aligned.add(def);
-		}
-		definitions = aligned;
-
-		// 与单阶段一致：被引用的匿名类先提交，宿主最后提交，降低半生效风险。
-		definitions.sort((d1, d2) -> {
-			boolean a1 = d1.getDefinitionClass().getName().contains("$");
-			boolean a2 = d2.getDefinitionClass().getName().contains("$");
-			if (a1 && !a2) return -1;
-			if (!a1 && a2) return 1;
-			return 0;
-		});
-
-		Set<String> targetNames = new HashSet<>();
-		for (ClassDefinition def : definitions) targetNames.add(def.getDefinitionClass().getName());
-		Set<String> ok = new HashSet<>();
-		enterInternalRedefine(targetNames);
-		try {
-			try {
-				long redefineStartNanos = System.nanoTime();
-				try {
-					inst.redefineClasses(definitions.toArray(new ClassDefinition[0]));
-				} finally {
-					BATCH_REDEFINE_MILLIS.addAndGet(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - redefineStartNanos));
-				}
-				for (ClassDefinition def : definitions) ok.add(def.getDefinitionClass().getName());
-			} catch (Throwable t) {
-				error("[HOTSWAP-2P] Stage A bulk redefine failed, switching to individual mode...", t);
-				for (ClassDefinition def : definitions) {
-					String className = def.getDefinitionClass().getName();
-					try {
-						long redefineStartNanos = System.nanoTime();
-						try {
-							inst.redefineClasses(def);
-						} finally {
-							BATCH_REDEFINE_MILLIS.addAndGet(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - redefineStartNanos));
-						}
-						ok.add(className);
-					} catch (Throwable e) {
-						if (isVmLevelRedefineFailure(e)) {
-							markVmLevelFailure(className, e);
-						} else {
-							error("[FAIL] stage A redefinition of " + className, e);
-						}
-						skips.add(className, RoundSkips.verdict("STAGE-A-FAILED",
-						 e.getClass().getSimpleName(),
-						 "see the stack trace above; the file is requeued"));
-						InitFix.afterRedefineFailed(def.getDefinitionClass());
-					}
-				}
-			}
-		} finally {
-			exitInternalRedefine();
-		}
-
-		// JVM 现在生效的是骨架字节码；缓存必须反映当前真实状态，供阶段 B 的层级/元数据查询使用。
-		for (String name : ok) {
-			byte[] bytes = stageABytes.get(name);
-			if (bytes != null) {
-				bytecodeCache.put(name, bytes);
-				Class<?> c = loadedClassesMap.get(name);
-				recordCacheLoader(name, c == null ? null : c.getClassLoader());
-			}
-		}
-
-		// 宿主与匿名类必须同批生效；否则阶段 C 的基线已不一致，整组移出。
-		Set<String> abandoned = new HashSet<>();
-		for (AlignmentTransaction tx : transactions) {
-			if (stageAConsistent(tx.hostName, tx.targetClasses, ok, injectedClasses, loadedClassesMap.keySet())) {
-				continue;
-			}
-			error("[HOTSWAP-PARTIAL] Stage A: host " + tx.hostName
-			      + " and its anonymous classes were not redefined consistently;"
-			      + " rolling back pending injections and excluding the group from stage C."
-			      + " RESTART is required for those classes.");
-			tx.rollback(true);
-			abandoned.add(tx.hostName);
-			abandoned.addAll(tx.targetClasses);
-			skips.add(tx.hostName, RoundSkips.verdict("ROLLED-BACK-A",
-				"stage A host/anonymous mismatch", "restart required"));
-		}
-		if (!abandoned.isEmpty()) {
-			for (String name : abandoned) {
-				if (!ok.contains(name)) continue;
-				Class<?> clazz = loadedClassesMap.get(name);
-				if (clazz != null) InitFix.afterRedefineFailed(clazz);
-			}
-			abandonedOut.addAll(abandoned);
-			ok.removeAll(abandoned);
-		}
-		return ok;
-	}
-
-	private static RedefineOutcome applyRedefinitions(List<ClassDefinition> definitions,
+	static RedefineOutcome applyRedefinitions(List<ClassDefinition> definitions,
 	                                                  Collection<AlignmentTransaction> transactions,
 	                                                  RoundSkips skips) {
-		Set<String> successfulClasses = new HashSet<>();
-		Set<String> rolledBackClasses = new HashSet<>();
-		LAST_REDEFINE_VM_LEVEL_FAILURE = false;
-
-		// 第四层：JVM 级失败后的不可恢复熔断——本会话内不再尝试重定义这些类。
-		List<ClassDefinition> filtered = new ArrayList<>(definitions.size());
-		for (ClassDefinition def : definitions) {
-			String name = def.getDefinitionClass().getName();
-			if (VM_POISONED_CLASSES.contains(name)) {
-				warn("[VM-REDEFINE-POISON] Skipping " + name
-				     + ": poisoned by an earlier JVM-level redefine failure (InternalError/VerifyError) in this session;"
-				     + " RESTART the client before hot-swapping it again.");
-				skips.add(name, RoundSkips.verdict("VM-POISONED",
-					"InternalError/VerifyError earlier this session", "restart required"));
-				InitFix.afterRedefineFailed(def.getDefinitionClass());
-				continue;
-			}
-			filtered.add(def);
-		}
-		definitions = filtered;
-
-		if (definitions.isEmpty()) {
-			for (AlignmentTransaction tx : transactions) {
-				tx.commit();
-			}
-			// 一条都没进 redefine 时，原来这里**完全静默**：用户只看到若干条 warn，然后等不到任何
-			// "成功/失败"汇总，只能猜是不是热更没触发。有跳过项就必须点名，这是"整轮静默失效"
-			// 那类最难排查的问题的正面对冲。
-			if (!skips.isEmpty()) {
-				warn("[HOTSWAP-SUMMARY] 0 class(es) were redefined this round — nothing reached the JVM."
-				     + " The classes below are the ones that did not take effect:");
-				skips.report();
-			}
-			return new RedefineOutcome(successfulClasses, rolledBackClasses);
-		}
-
-		// 关键竞态消除：在调用 redefineClasses 之前先乐观登记新的 pending 注入！
-		// 避免宿主重定义成功到事务提交之间，并发线程或初始化方法首次加载未加载类时读到磁盘错位产物
-		for (AlignmentTransaction tx : transactions) {
-			tx.preRegister();
-		}
-
-		// 排序：被引用的匿名类优先重定义，宿主类最后重定义，降低单类重定义模式下的半生效风险
-		definitions.sort((d1, d2) -> {
-			boolean a1 = d1.getDefinitionClass().getName().contains("$");
-			boolean a2 = d2.getDefinitionClass().getName().contains("$");
-			if (a1 && !a2) return -1;
-			if (!a1 && a2) return 1;
-			return 0;
-		});
-		Set<String> targetNames = new HashSet<>();
-		for (ClassDefinition def : definitions) {
-			targetNames.add(def.getDefinitionClass().getName());
-		}
-		enterInternalRedefine(targetNames);
-		try {
-			long redefineStartNanos = System.nanoTime();
-			try {
-				inst.redefineClasses(definitions.toArray(new ClassDefinition[0]));
-			} finally {
-				BATCH_REDEFINE_MILLIS.addAndGet(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - redefineStartNanos));
-			}
-			// 成功行本身也要带上"还有谁没进来"：用户最先看的就是这一行，只报成功个数会让
-			// "我关心的类其实被跳过了"完全隐形。详细名单紧跟其后由 skips.report() 输出。
-			info("HotSwap successful: " + definitions.size() + " classes redefined."
-			     + (skips.isEmpty() ? "" : " " + skips.size()
-			        + " class(es) were skipped this round — listed below."));
-			for (ClassDefinition def : definitions) {
-				bytecodeCache.put(def.getDefinitionClass().getName(), def.getDefinitionClassFile());
-				recordCacheLoader(def.getDefinitionClass().getName(), def.getDefinitionClass().getClassLoader());
-				commitInvented(def.getDefinitionClass().getName());
-				successfulClasses.add(def.getDefinitionClass().getName());
-			}
-			for (AlignmentTransaction tx : transactions) {
-				tx.commit();
-			}
-		} catch (Throwable t) {
-			LAST_REDEFINE_VM_LEVEL_FAILURE = isVmLevelRedefineFailure(t);
-			if (LAST_REDEFINE_VM_LEVEL_FAILURE) {
-				// 批量失败无法归因到具体类；先记录标志，逐类重试时再精确拉黑。
-				error("[VM-REDEFINE-POISON] Bulk redefine failed at JVM level ("
-				      + t.getClass().getSimpleName() + "); falling back to per-class mode to attribute it.", t);
-			} else {
-				error("Bulk Redefine failed, switching to individual mode...", t);
-			}
-			// redefineClasses 对一批类是原子的：批量失败意味着没有任何类生效。
-			// 因此 PENDING 补丁必须保留，留给下面的逐类重试；只有逐类重试也失败时才丢弃。
-			for (ClassDefinition def : definitions) {
-				String className = def.getDefinitionClass().getName();
-				boolean redefined = false;
-				try {
-					long redefineStartNanos = System.nanoTime();
-					try {
-						inst.redefineClasses(def);
-					} finally {
-						BATCH_REDEFINE_MILLIS.addAndGet(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - redefineStartNanos));
-					}
-					redefined = true;
-				} catch (Throwable e) {
-					if (isVmLevelRedefineFailure(e)) {
-						markVmLevelFailure(className, e);
-					} else {
-						error("[FAIL] " + className, e);
-					}
-					skips.add(className, RoundSkips.verdict("REDEFINE-FAILED",
-						e.getClass().getSimpleName(), "see the stack trace above; the file is requeued"));
-					InitFix.afterRedefineFailed(def.getDefinitionClass());
-				}
-				if (!redefined) continue;
-				// 记账不属于重定义事务：JVM 已经应用了这个类，此处再抛错不能回退成
-				// "redefine 失败" —— 那会 afterRedefineFailed（弹补丁 + 假台账）并让调用方
-				// 跳过 afterRedefine，结果是类已生效但存量实例保持类型默认值。
-				try {
-					bytecodeCache.put(className, def.getDefinitionClassFile());
-					recordCacheLoader(className, def.getDefinitionClass().getClassLoader());
-					commitInvented(className);
-				} catch (Throwable be) {
-					error("[BOOKKEEPING] " + className + " was redefined, but recording the new baseline failed."
-						+ " The class is live; its pending InitFix patch is kept and will be applied.", be);
-				}
-				successfulClasses.add(className);
-				if (DEBUG) log("[OK] " + className);
-			}
-			// 校验事务组的一致性
-			for (AlignmentTransaction tx : transactions) {
-				boolean hostOk     = successfulClasses.contains(tx.hostName);
-				boolean allAnonsOk = true;
-				for (String target : tx.targetClasses) {
-					if (loadedClassesMap.containsKey(target) && !successfulClasses.contains(target)) {
-						allAnonsOk = false;
-					}
-				}
-				if (hostOk && allAnonsOk) {
-					tx.commit();
-				} else {
-					if (hostOk != allAnonsOk) {
-						error("[HOTSWAP-PARTIAL] Host " + tx.hostName + " and its anonymous classes redefined inconsistently! Note: classes already applied in JVM cannot be un-redefined; rolling back pending injections and cache, and pinning old bytecode in pending to protect future class loading.");
-						error("[HOTSWAP-PARTIAL] Host " + tx.hostName
-						      + ": NOT requeued for retry — a retry would re-align against a baseline"
-						      + " that no longer matches the JVM's actual state. RESTART is required.");
-					}
-					tx.rollback(true);
-					// 记录整组（宿主 + 其匿名类），供调用方排除出"失败回队"。
-					// 原因：宿主可能已生效、而 cache/pending 被钉回旧版本，重试基线不一致。
-					rolledBackClasses.add(tx.hostName);
-					rolledBackClasses.addAll(tx.targetClasses);
-					// 摘要台账：这些类的运行态可能已经半生效（宿主成功、匿名类失败），
-					// 所以判决码不能写成"没生效"，必须说清"状态不一致，需重启"。
-					skips.add(tx.hostName, RoundSkips.verdict("ROLLED-BACK",
-						"host may already be live, its anonymous classes were not",
-						"restart required"));
-					skips.addGroup(tx.targetClasses, tx.hostName, RoundSkips.verdict("ROLLED-BACK",
-						"group inconsistent with its host", "restart required"));
-				}
-			}
-		} finally {
-			exitInternalRedefine();
-		}
-		skips.report();
-		return new RedefineOutcome(successfulClasses, rolledBackClasses);
+		return TwoPhaseCoordinator.applyRedefinitions(definitions, transactions, skips);
 	}
 
-	/**
-	 * {@link #applyRedefinitions} 的结果。
-	 * @param successful 确实重定义成功的类名
-	 * @param rolledBack 因事务组不一致被 rollback 的类名（宿主 + 其匿名类）——
-	 *                   这些类<b>不得回队重试</b>，理由见该方法 javadoc
-	 */
-	private record RedefineOutcome(Set<String> successful, Set<String> rolledBack) { }
+	record RedefineOutcome(Set<String> successful, Set<String> rolledBack) { }
 	//endregion
 
 	//region File Processing Utilities
 
 	static void initializeAgentState(Class<?>[] classes) {
-		info("Scanning files...");
-		// 直接传入的 jar/zip 文件：立即解压扫描
-		for (Path jar : activeWatchJars) {
-			String stem = jar.getFileName().toString().replaceAll("[^a-zA-Z0-9_-]", "_");
-			Path tmpDir = Paths.get(System.getProperty("java.io.tmpdir"), "remold-hotswap",
-			 stem + "-" + Long.toHexString(CRC64.hashString(jar.toString())));
-			List<Path> outOfSync = new ArrayList<>();
-			try {
-				Files.createDirectories(tmpDir);
-				JarExtractor.tmpToJar().entrySet().removeIf(e -> e.getValue().equals(jar));
-				try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(Files.newInputStream(jar)))) {
-					ZipEntry entry;
-					while ((entry = zis.getNextEntry()) != null) {
-						try {
-							if (!entry.isDirectory() && entry.getName().endsWith(".class")) {
-								byte[] diskBytes = zis.readAllBytes();
-								String cName     = Utils.getClassNameASM(diskBytes);
-								if (cName == null || isBlacklisted(cName)) continue;
-								long diskHash = calculateHash(diskBytes);
-								Path outPath  = tmpDir.resolve(entry.getName().replace('/', File.separatorChar));
-								Files.createDirectories(outPath.getParent());
-								Files.write(outPath, diskBytes);
-								JarExtractor.tmpToJar().put(outPath, jar);
-								byte[] memBytes = bytecodeCache.get(cName);
-								if (memBytes != null && calculateHash(memBytes) != diskHash) {
-									if (DEBUG) log("[INIT-SYNC] " + cName + " (direct jar) out of sync.");
-									outOfSync.add(outPath);
-								}
-								synchronized (fileDiskHashes) {
-									fileDiskHashes.put(CRC64.hashString(cName), diskHash);
-								}
-							}
-						} catch (Exception ignored) {
-						} finally {
-							zis.closeEntry();
-						}
-					}
-				}
-				if (!outOfSync.isEmpty()) pendingChanges.addAll(outOfSync);
-			} catch (IOException e) {
-				error("Failed to scan direct jar: " + jar, e);
-			}
-		}
-		Map<String, Path> latestClassPaths = new HashMap<>();
-		Map<String, byte[]> latestClassBytes = new HashMap<>();
-		for (Path root : activeWatchDirs) {
-			try (Stream<Path> walk = Files.walk(root)) {
-				walk.filter(p -> {
-					String s = p.toString().replace('\\', '/');
-					if (isWatchPathIgnored(p)) return false;
-					// jar/zip 只取 root 直属子文件（depth == 1），.class 全量递归
-					if (s.endsWith(".jar") || s.endsWith(".zip")) return p.getParent().equals(root);
-					return s.endsWith(".class");
-				}).forEach(path -> {
-					String ps = path.toString();
-					if (ps.endsWith(".jar") || ps.endsWith(".zip")) {
-						// 对 jar/zip：解压后做 hash 对比，out-of-sync 的类批量加入 pendingChanges
-						Path   absJar = path.toAbsolutePath();
-						String stem   = absJar.getFileName().toString().replaceAll("[^a-zA-Z0-9_-]", "_");
-						Path tmpDir = Paths.get(System.getProperty("java.io.tmpdir"), "remold-hotswap",
-						 stem + "-" + Long.toHexString(CRC64.hashString(absJar.toString())));
-						List<Path> outOfSync = new ArrayList<>();
-						try {
-							Files.createDirectories(tmpDir);
-							try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(Files.newInputStream(absJar)))) {
-								ZipEntry entry;
-								while ((entry = zis.getNextEntry()) != null) {
-									try {
-										if (!entry.isDirectory() && entry.getName().endsWith(".class")) {
-											byte[] diskBytes = zis.readAllBytes();
-											String cName     = Utils.getClassNameASM(diskBytes);
-											if (cName == null || isBlacklisted(cName)) continue;
-											long diskHash = calculateHash(diskBytes);
-
-											byte[] memBytes = bytecodeCache.get(cName);
-											if (memBytes != null && calculateHash(memBytes) != diskHash) {
-												if (DEBUG) log("[INIT-SYNC] " + cName + " (in jar) is out of sync. Reloading...");
-												Path outPath = tmpDir.resolve(entry.getName().replace('/', File.separatorChar));
-												Files.createDirectories(outPath.getParent());
-												Files.write(outPath, diskBytes);
-												JarExtractor.tmpToJar().put(outPath, absJar);
-												outOfSync.add(outPath);
-											}
-											synchronized (fileDiskHashes) {
-												fileDiskHashes.put(CRC64.hashString(cName), diskHash);
-											}
-										}
-									} catch (Exception ignored) {
-									} finally {
-										zis.closeEntry();
-									}
-								}
-							}
-							// 批量加入，只锁一次
-							if (!outOfSync.isEmpty()) pendingChanges.addAll(outOfSync);
-						} catch (IOException ignored) { }
-						return;
-					}
-					// 原始 .class 文件逻辑：按类名聚合，并取最后修改时间最新者
-					try {
-						byte[] diskBytes = Files.readAllBytes(path);
-						String cName     = Utils.getClassNameASM(diskBytes);
-						if (cName == null || isBlacklisted(cName)) return;
-
-						Path existing = latestClassPaths.get(cName);
-						if (existing != null) {
-							try {
-								if (Files.getLastModifiedTime(path).compareTo(Files.getLastModifiedTime(existing)) <= 0) {
-									return;
-								}
-							} catch (Throwable ignored) {
-							}
-						}
-						latestClassPaths.put(cName, path);
-						latestClassBytes.put(cName, diskBytes);
-					} catch (Exception ignored) { }
-				});
-			} catch (IOException ignored) { }
-		}
-
-		// 统一对最新版本的 .class 进行哈希比对与落账
-		for (Map.Entry<String, Path> entry : latestClassPaths.entrySet()) {
-			String cName = entry.getKey();
-			Path   path  = entry.getValue();
-			byte[] diskBytes = latestClassBytes.get(cName);
-			if (diskBytes == null) continue;
-
-			try {
-				long diskHash = calculateHash(diskBytes);
-				byte[] memBytes = bytecodeCache.get(cName);
-				if (memBytes != null) {
-					long memHash = calculateHash(memBytes);
-					if (diskHash != memHash) {
-						if (DEBUG) log("[INIT-SYNC] " + cName + " is out of sync. Reloading...");
-						pendingChanges.add(path);
-					}
-				}
-				synchronized (fileDiskHashes) {
-					fileDiskHashes.put(CRC64.hashString(cName), diskHash);
-				}
-			} catch (Exception ignored) { }
-		}
-		// 入参 classes 是调用方在 FileWatcherService.restart 之前取的快照，此刻可能已过期
-		// （旧 watcher 排进 scheduler 的任务期间可能又有类被加载）。改走 triggerHotswap()，
-		// 由它在锁内重新取一份新鲜快照。
-		if (!pendingChanges.isEmpty() || !pendingAssetChanges.isEmpty()) triggerHotswap();
+		AgentWatchCoordinator.initializeAgentState(classes);
 	}
 
-	/**
-	 * 判断文件是否为资源文件（贴图、字体、多语言包、配置文件、音频、着色器等）。
-	 * 过滤掉隐藏文件、临时文件及字节码/压缩包。
-	 */
 	public static boolean isAssetFile(Path path) {
-		if (path == null) return false;
-		Path fileName = path.getFileName();
-		if (fileName == null) return false;
-		String name = fileName.toString().toLowerCase();
-		if (name.startsWith(".") || name.endsWith(".tmp") || name.endsWith(".swp") || name.endsWith(".bak") || name.endsWith("~")) {
-			return false;
-		}
-		if (name.endsWith(".class") || name.endsWith(".jar") || name.endsWith(".zip")) {
-			return false;
-		}
-		return name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg")
-		    || name.endsWith(".properties")
-		    || name.endsWith(".json") || name.endsWith(".hjson")
-		    || name.endsWith(".ogg") || name.endsWith(".wav") || name.endsWith(".mp3")
-		    || name.endsWith(".frag") || name.endsWith(".vert") || name.endsWith(".glsl")
-		    || name.endsWith(".fnt") || name.endsWith(".ttf") || name.endsWith(".woff")
-		    || name.endsWith(".atlas") || name.endsWith(".csv") || name.endsWith(".txt");
+		return AgentWatchCoordinator.isAssetFile(path);
 	}
 
 	static void handleAssetChange(Path changedAsset) {
-		if (DEBUG) log("[ASSET] Queued asset change: " + changedAsset);
-		synchronized (pendingChanges) {
-			pendingAssetChanges.add(changedAsset);
-			DEBOUNCE.onAsset(System.nanoTime());
-		}
-		rescheduleDebounce();
+		AgentWatchCoordinator.handleAssetChange(changedAsset);
 	}
 
 	static void handleFileChange(Path changedFile) {
-		synchronized (pendingChanges) {
-			pendingChanges.add(changedFile);
-			DEBOUNCE.onClass(System.nanoTime());
-		}
-		rescheduleDebounce();
+		AgentWatchCoordinator.handleFileChange(changedFile);
 	}
 
-	/**
-	 * 处理 jar/zip 变化：与 .class 共用 Class 流的静默窗口，防止读到写了一半的 jar。
-	 * 真正的解压在 Class 批次到期后由 {@link JarExtractor#extract} 完成。
-	 */
 	static void handleJarChange(Path jarPath) {
-		if (DEBUG) log("[JAR] Queued for extraction: " + jarPath);
-		synchronized (pendingChanges) {
-			pendingJars.add(jarPath.toAbsolutePath());
-			DEBOUNCE.onClass(System.nanoTime());
-		}
-		rescheduleDebounce();
+		AgentWatchCoordinator.handleJarChange(jarPath);
 	}
 
-	//region Build-trigger marker handling
-
-	/** 解析 {@code -Dremold.agent.build_trigger_file}；空值 / false / off 视为未配置。 */
-	private static Path parseBuildTriggerFile(String primary, String alias) {
-		String raw = primary != null ? primary : alias;
-		if (raw == null) return null;
-		raw = raw.trim();
-		if (raw.isEmpty() || "false".equalsIgnoreCase(raw) || "off".equalsIgnoreCase(raw)) return null;
-		try {
-			return Paths.get(raw).toAbsolutePath().normalize();
-		} catch (Throwable t) {
-			warn("[BUILD-TRIGGER] Invalid build_trigger_file (ignored): " + raw + " (" + t + ")");
-			return null;
-		}
-	}
-
-	/**
-	 * 构建完成 marker 的处理入口（由 trigger watcher 线程调用）。
-	 *
-	 * <p><b>语义</b>（契约见 {@code docs/runtime/01-build-trigger-mode.md} §3）：</p>
-	 * <ol>
-	 *   <li>解析 / 拒绝 / 去重；无效 marker <b>不推进</b>任何已处理状态；</li>
-	 *   <li>按 {@code mtime >= 上次处理点 − 余量} 扫描 watch 目录，与已入队的事件合并；</li>
-	 *   <li>class/jar 队列均非空时调用 {@link DebounceWindow#markClassDueNow(long)}（sticky），
-	 *       并重挂 0 延迟调度——该调用同时取消尚未到期的兜底 task；</li>
-	 *   <li>队列都为空时不标 due、不触发（避免 0 延迟自旋）。</li>
-	 * </ol>
-	 *
-	 * <p>本方法不获取 {@code HOTSWAP_LOCK}：它只操作防抖队列与调度器，真正执行批次的
-	 * {@link #triggerDueHotswap()} 仍走既有锁路径。</p>
-	 */
 	static void handleBuildTriggerFile(Path changed) {
-		Path expected = BUILD_TRIGGER_FILE;
-		if (expected == null || changed == null) return;
-		Path marker = changed.toAbsolutePath().normalize();
-		if (!marker.equals(expected)) return;
-
-		byte[] raw;
-		try {
-			if (Files.size(marker) > BuildTriggerMarker.MAX_BYTES) {
-				warn("[BUILD-TRIGGER] Ignored marker " + marker + ": exceeds "
-				     + BuildTriggerMarker.MAX_BYTES + " bytes");
-				return;
-			}
-			raw = Files.readAllBytes(marker);
-		} catch (IOException | SecurityException e) {
-			warn("[BUILD-TRIGGER] Cannot read marker " + marker + ": " + e);
-			return;
-		}
-
-		long nowMillis = System.currentTimeMillis();
-		BuildTriggerMarker.Parsed parsed = BuildTriggerMarker.parse(raw, nowMillis, AGENT_START_MILLIS);
-		if (!parsed.valid) {
-			warn("[BUILD-TRIGGER] Ignored marker " + marker + ": " + parsed.rejectReason);
-			return;
-		}
-
-		boolean duplicate = parsed.buildId != null
-		                    ? parsed.buildId.equals(lastProcessedBuildId)
-		                    : parsed.endMillis == lastProcessedBuildEndMillis;
-		if (duplicate) {
-			if (DEBUG) {
-				log("[BUILD-TRIGGER] Duplicate marker ignored: build_id=" + parsed.buildId
-				    + ", end=" + parsed.endMillis);
-			}
-			return;
-		}
-
-		// 首个 marker 用 agent 启动点作为下界（含余量吸收 mtime 精度）；之后的 marker 用上一次
-		// 被接受的结束点作为严格下界——若再减余量，会把上一次构建已经处理过的文件重新扫进来，
-		// 让每次连续构建都多出一个 no-op 批次。
-		long since = lastProcessedBuildEndMillis > 0L
-		             ? lastProcessedBuildEndMillis
-		             : AGENT_START_MILLIS - BUILD_TRIGGER_LOOKBACK_MILLIS;
-		BuildTriggerSweep.Result swept = BuildTriggerSweep.collect(
-			activeWatchDirs, activeWatchJars, since, RemoldAgent::isWatchPathIgnored);
-		if (swept.size() > BUILD_TRIGGER_SWEEP_WARN) {
-			warn("[BUILD-TRIGGER] Sweep found " + swept.size() + " changed file(s) since " + since
-			     + "ms; this batch may be large");
-		}
-
-		// 只有被接受的 marker 才推进去重键与扫描下界（无效 marker 已在上方返回）。
-		lastProcessedBuildEndMillis = parsed.endMillis;
-		lastProcessedBuildId = parsed.buildId;
-
-		boolean hasWork;
-		int pendingClassCount;
-		int pendingJarCount;
-		synchronized (pendingChanges) {
-			pendingChanges.addAll(swept.classes);
-			pendingJars.addAll(swept.jars);
-			pendingClassCount = pendingChanges.size();
-			pendingJarCount = pendingJars.size();
-			hasWork = !pendingChanges.isEmpty() || !pendingJars.isEmpty();
-			if (hasWork) {
-				// sticky due：构建完成之后的迟到 class 事件不得把 deadline 推回兜底窗口。
-				DEBOUNCE.markClassDueNow(System.nanoTime());
-			}
-		}
-
-		if (!hasWork) {
-			if (DEBUG) {
-				log("[BUILD-TRIGGER] Marker accepted (build_id=" + parsed.buildId + ", task=" + parsed.task
-				    + ", swept=" + swept.size() + ") but no pending class/jar changes; nothing to trigger");
-			}
-			return;
-		}
-
-		info("[BUILD-TRIGGER] Triggering immediately: build_id=" + parsed.buildId
-		     + ", task=" + parsed.task
-		     + ", end=" + parsed.endMillis
-		     + ", lag=" + Math.max(0L, nowMillis - parsed.endMillis) + "ms"
-		     + ", swept=" + swept.size() + " (classes=" + swept.classes.size()
-		     + ", jars=" + swept.jars.size() + ")"
-		     + ", pending=" + pendingClassCount + " class(es), " + pendingJarCount + " jar(s)"
-		     + "; fallback window " + FILE_SHAKE_MS + "ms canceled for this batch");
-		// cancel 尚未到期的兜底 task，并按 sticky due 立刻重挂（delay = 0）。
-		rescheduleDebounce();
+		AgentWatchCoordinator.handleBuildTriggerFile(changed);
 	}
 
-	//endregion
-
-	/** 按 {@link DebounceWindow} 的最早 deadline 重新挂调度。 */
-	private static void rescheduleDebounce() {		synchronized (pendingChanges) {
-			rescheduleDebounceLocked();
-		}
-	}
-
-	private static void rescheduleDebounceLocked() {
-		long delay = DEBOUNCE.nextDelayNanos(System.nanoTime());
-		if (scheduledTask != null && !scheduledTask.isDone()) {
-			scheduledTask.cancel(false);
-		}
-		if (delay < 0) {
-			scheduledTask = null;
-			return;
-		}
-		scheduledTask = scheduler.schedule(RemoldAgent::triggerDueHotswap, delay, TimeUnit.NANOSECONDS);
-	}
-
-	/**
-	 * 启动就绪门闩判定：{@code true} = 允许本批进入批次执行。
-	 *
-	 * <p><b>就绪来源</b>（core 不认识任何加载器/游戏专属概念）：</p>
-	 * <ul>
-	 *   <li>插件投票：{@link HotswapPlugin#isHostReady()} 任一返回 {@code false} 即未就绪；</li>
-	 *   <li>{@link StartupGate} 的 PENDING → READY 一次性变迁（全部插件就绪的首个观测点）；</li>
-	 *   <li>可选超时放行：{@code -Dremold.agent.ready_timeout_ms}（默认 {@code 0} = 不放行），
-	 *       只用于"宿主插件永远不报就绪"这种死等，且日志必须标明是超时放行。</li>
-	 * </ul>
-	 *
-	 * <p>调用方必须持有 {@code HOTSWAP_LOCK}；本方法内部只进 {@code synchronized(pendingChanges)}
-	 * （锁序正确：先全局锁、后队列锁）。</p>
-	 */
-	private static boolean startupGateAllowsBatch() {
-		StartupGate gate = STARTUP_GATE;
-		long       now   = System.nanoTime();
-		String     blocker = firstPluginNotReady();
-
-		if (blocker != null) {
-			// 插件明确说未就绪（宿主仍在启动期）：门闩保持 PENDING，一个批次都不落。
-			// 唯一的出口是显式配置的超时放行——默认 0 表示宁可押着，也不要在启动风暴里落批次。
-			// 注意：门闩此前已经 READY（启动期已过）时 isReadyAt 也返回 true，但那种情况
-			// **不是**超时放行，插件的否票仍然生效（fail-closed），否则运行期插件回退就失去意义。
-			boolean gateOpen = gate.isReadyAt(now);
-			if (gateOpen && gate.isTimedOutRelease()) {
-				logGateReadyOnce(true, blocker, gate);
-				return true;
-			}
-			int classPending;
-			int assetPending;
-			synchronized (pendingChanges) {
-				classPending = pendingChanges.size() + pendingJars.size();
-				assetPending = pendingAssetChanges.size();
-			}
-			if (classPending == 0 && assetPending == 0) {
-				// 没有待处理变更：没什么可推迟的，不挂重查（下一次入队会重新挂防抖）。
-				return false;
-			}
-			if (!gateBlockLogged) {
-				gateBlockLogged = true;
-				warn("[READY-GATE] hot-swap batches deferred: plugin '" + blocker + "' reports isHostReady()=false; "
-				     + classPending + " class/jar change(s) and " + assetPending + " asset change(s) stay queued"
-				     + (gate.getTimeoutMillis() > 0
-				         ? " (ready_timeout_ms=" + gate.getTimeoutMillis() + ")"
-				         : " (ready_timeout_ms=0: no timeout release)")
-				     + (gateOpen ? " [startup gate already READY; the plugin veto is honored]" : "")
-				     + ". Further deferrals of this same batch are not logged again.");
-			}
-			rescheduleStartupGateRetry();
-			return false;
-		}
-
-		// 全部插件就绪：首个观测点把门闩翻到 READY，此后不再回退（启动期是一次性窗口）。
-		if (gate.markReady()) {
-			logGateReadyOnce(false, null, gate);
-		}
-		if (!gate.isReady()) {
-			// 防御：门闩没开就不放行。
-			rescheduleStartupGateRetry();
-			return false;
-		}
-		return true;
-	}
-
-	/** 返回第一个明确报告未就绪的插件名；全部就绪返回 {@code null}。 */
-	private static String firstPluginNotReady() {
-		for (HotswapPlugin plugin : plugins) {
-			try {
-				if (!plugin.isHostReady()) return plugin.getName();
-			} catch (Throwable t) {
-				// fail-closed：判定不了就按未就绪处理。细节走 DEBUG 门控（避免按重查节奏刷屏），
-				// 阻断日志（warn）已经点名是哪个插件，信息不丢。
-				log("[READY-GATE] plugin " + plugin.getName()
-				    + " threw from isHostReady(); treating it as not ready: " + t);
-				return plugin.getName();
-			}
-		}
-		return null;
-	}
-
-	/** 就绪状态变化只打一条：{@code PENDING → READY} 或超时放行各一次。 */
-	private static void logGateReadyOnce(boolean byTimeout, String blocker, StartupGate gate) {
-		if (gateReadyLogged) return;
-		gateReadyLogged = true;
-		// 新的一次就绪允许下一段阻断重新打点，否则运行期再次未就绪时会静默。
-		gateBlockLogged = false;
-		if (byTimeout) {
-			warn("[READY-GATE] ready_timeout_ms=" + gate.getTimeoutMillis()
-			     + " elapsed while plugin '" + blocker + "' still reports isHostReady()=false — "
-			     + "releasing the startup gate by timeout; batches resume even though the host may still be booting.");
-		} else {
-			info("[READY-GATE] host reported ready (all plugins return isHostReady()=true) —"
-			     + " class/asset batches are enabled");
-		}
-	}
-
-	/**
-	 * 门闩未放行时的重查挂载：固定间隔（不小于 {@link #GATE_RETRY_MIN_MS}），
-	 * 绝不复用 {@link #rescheduleDebounce()}——防抖已到期时它的延迟是 0，会变成锁内自旋。
-	 */
-	private static void rescheduleStartupGateRetry() {
-		long retryMillis = Math.max(GATE_RETRY_MIN_MS, FILE_SHAKE_MS);
-		synchronized (pendingChanges) {
-			if (scheduledTask != null && !scheduledTask.isDone()) {
-				scheduledTask.cancel(false);
-			}
-			scheduledTask = scheduler.schedule(RemoldAgent::triggerDueHotswap, retryMillis, TimeUnit.MILLISECONDS);
-		}
-	}
-
-	/**
-	 * 防抖到期入口：只处理已经静默到期的流。资源流到期时绝不提前 drain 尚未静默的
-	 * Class/jar 队列；Class 流到期时也只在同一个批次里处理 Class + jar。
-	 *
-	 * <p><b>唯一批次入口</b>：启动就绪门闩在这里生效——宿主未就绪时<b>只</b>把变更留在
-	 * {@code pendingChanges} / {@code pendingAssetChanges} 里，绝不进入 {@link #runClassBatch}
-	 * 或 {@link #processChanges}（后者硬性要求持有 {@code HOTSWAP_LOCK}）。</p>
-	 */
 	private static void triggerDueHotswap() {
-		if (inst == null) {
-			return;
-		}
-		HOTSWAP_LOCK.lock();
-		try {
-			// 门闩在 drain 之前：未就绪时一条变更都不许被取走，否则"留在队列里"是空话。
-			if (!startupGateAllowsBatch()) {
-				return;
-			}
-			Set<Path> assets = null;
-			Set<Path> jars = null;
-			boolean classDue;
-			boolean assetDue;
-			synchronized (pendingChanges) {
-				long now = System.nanoTime();
-				classDue = DEBOUNCE.isClassDue(now)
-					&& (!pendingChanges.isEmpty() || !pendingJars.isEmpty());
-				assetDue = DEBOUNCE.isAssetDue(now) && !pendingAssetChanges.isEmpty();
-				if (assetDue) {
-					assets = new HashSet<>(pendingAssetChanges);
-					pendingAssetChanges.clear();
-					DEBOUNCE.clearAsset();
-				}
-				if (classDue) {
-					jars = new HashSet<>(pendingJars);
-					pendingJars.clear();
-					// 先不清 Class pending：jar 解压可能向 pendingChanges 追加类文件，
-					// 这些也是本批的一部分；最终 drain 放在解压之后。
-				}
-			}
-			if (assets != null) {
-				notifyAssetChanges(assets);
-			}
-			if (!classDue) {
-				rescheduleDebounce();
-			}
-			if (classDue) {
-				if (jars != null) {
-					try {
-						jars.forEach(JarExtractor::extract);
-					} catch (Throwable t) {
-						error("[HOTSWAP] Jar extraction failed; the current class batch will still be processed: " + t);
-					}
-				}
-				Set<Path> changes;
-				synchronized (pendingChanges) {
-					changes = new HashSet<>(pendingChanges);
-					pendingChanges.clear();
-					// 解压期间若又有新的 jar 事件，留给下一批，不要把 Class 流标记为已处理。
-					if (pendingJars.isEmpty()) {
-						DEBOUNCE.clearClass();
-					}
-					rescheduleDebounceLocked();
-				}
-				runClassBatch(changes);
-			}
-		} finally {
-			HOTSWAP_LOCK.unlock();
-		}
-	}
-
-	/**
-	 * 执行一批已经静默的 Class 变更；错误边界与手动触发保持一致。
-	 *
-	 * <p><b>看门狗不在这里</b>：{@link BatchWatchdog} 挂在 {@link #processChanges} 上，
-	 * 这样手动 {@link #triggerHotswap()} 等入口也能覆盖。本方法<b>不得</b>再独立
-	 * {@code arm} 一个看门狗——那会让同一批次出现两条 {@code [HOTSWAP-STALL]}
-	 * （一次批次两次 dump = 前缀被训练成噪声）。这里只保留错误边界与批次统计的清理。</p>
-	 */
-	private static void runClassBatch(Set<Path> changes) {
-		try {
-			resetLiveInstanceCache();
-			if (!changes.isEmpty()) {
-				processChanges(changes, inst.getAllLoadedClasses());
-			}
-		} catch (Throwable t) {
-			error("[HOTSWAP] Hot-swap pipeline aborted: redefine and post-processing are not atomic,"
-			      + " so classes may have been redefined WITHOUT InitFix patches or @OnReload callbacks."
-			      + " The next save re-runs from the current baseline; if it keeps failing, restart.", t);
-		} finally {
-			BatchReportScope.discard();
-		}
+		AgentWatchCoordinator.triggerDueHotswap();
 	}
 
 	private static void triggerHotswapWith(Class<?>[] classes) {
-		// 锁不变量：任何进入 processChanges 的路径都必须持有 HOTSWAP_LOCK。
-		// 用抛异常而非 assert —— assert 默认关闭（需 -ea），而这条不变量一旦被破坏就是
-		// 静默的并发数据竞争，必须无条件暴露。将来有人新增绕过锁的入口时会立刻在这里炸掉。
-		if (!HOTSWAP_LOCK.isHeldByCurrentThread()) {
-			throw new IllegalStateException(
-			 "triggerHotswapWith called without HOTSWAP_LOCK on thread "
-			 + Thread.currentThread().getName()
-			 + " — all hot-swap entry points must acquire HOTSWAP_LOCK first");
-		}
-
-		// 并发探针：测试用，记录同时处于热更流程内的线程数及其历史峰值。
-		// 不加锁时应观察到峰值 2（scheduler 一轮 + 按钮线程一轮），加锁后恒为 1。
-		// getAndAccumulate 本身是原子的，无需再补一次 set。
-		int concurrent = CONCURRENT_HOTSWAP.incrementAndGet();
-		CONCURRENT_HOTSWAP_PEAK.getAndAccumulate(concurrent, Math::max);
-		try {
-			triggerHotswapWith0(classes);
-		} finally {
-			CONCURRENT_HOTSWAP.decrementAndGet();
-		}
+		AgentWatchCoordinator.triggerHotswapWith(classes);
 	}
 
-	/**
-	 * 一轮热更的统一错误边界。
-	 *
-	 * <p><b>为什么必须有</b>：本方法由防抖调度器以 {@code scheduler.schedule(RemoldAgent::triggerDueHotswap, ...)}
-	 * 调用，抛出的一切都会被 {@link java.util.concurrent.Future} 静默吞掉——没有任何线程的
-	 * uncaught handler 会看到它。而 {@code processChanges} 的后处理（InitFix 补丁、{@code @OnReload}
-	 * 回调、缓存驱逐）排在 {@code redefineClasses} 成功之后：那里一旦抛异常，用户看到的就是
-	 * 日志里"HotSwap successful"之后<b>再无下文</b>——新增字段停在 0、回调不触发，且毫无线索。</p>
-	 *
-	 * <p>所以这里兜住 {@link Throwable} 并显式 {@code error(...)}：宁可让这一轮失败得大声，
-	 * 也不要让它失败得像成功。</p>
-	 */
-	private static void triggerHotswapWith0(Class<?>[] classes) {
-		try {
-			triggerHotswapWith0Unchecked(classes);
-		} catch (Throwable t) {
-			error("[HOTSWAP] Hot-swap pipeline aborted: redefine and post-processing are not atomic,"
-			      + " so classes may have been redefined WITHOUT InitFix patches or @OnReload callbacks."
-			      + " The next save re-runs from the current baseline; if it keeps failing, restart.", t);
-		} finally {
-			// 异常路径不会走到 processChanges 末尾的 finish；这里兜底清掉 ThreadLocal，
-			// 防止下一轮批次把上一轮的半截统计混进来。
-			BatchReportScope.discard();
-		}
-	}
-
-	private static void triggerHotswapWith0Unchecked(Class<?>[] classes) {
-		// 手动/强制入口：取消挂起的防抖调度并清空两条流的状态，立即处理全部队列。
-		synchronized (pendingChanges) {
-			if (scheduledTask != null && !scheduledTask.isDone()) {
-				scheduledTask.cancel(false);
-			}
-			scheduledTask = null;
-			DEBOUNCE.clearAll();
-		}
-		// 实例存活状况每轮都可能变（对象被创建/回收），缓存必须按轮清空
-		resetLiveInstanceCache();
-		// 先把所有待处理的 jar 解压（防抖已结束，文件写入完毕）
-		Set<Path> jars;
-		synchronized (pendingChanges) {
-			jars = new HashSet<>(pendingJars);
-			pendingJars.clear();
-		}
-		jars.forEach(JarExtractor::extract);
-
-		Set<Path> changes;
-		Set<Path> assetChanges;
-		synchronized (pendingChanges) {
-			if (pendingChanges.isEmpty() && pendingAssetChanges.isEmpty()) return;
-			changes = new HashSet<>(pendingChanges);
-			pendingChanges.clear();
-			assetChanges = new HashSet<>(pendingAssetChanges);
-			pendingAssetChanges.clear();
-		}
-		if (!assetChanges.isEmpty()) {
-			notifyAssetChanges(assetChanges);
-		}
-		if (!changes.isEmpty()) {
-			processChanges(changes, classes);
-		}
-	}
-
-	/** 对外api，触发热更新 */
 	public static void triggerHotswap() {
-		if (inst == null) return;
-		HOTSWAP_LOCK.lock();
-		try {
-			// 快照必须在锁内取：排队等待期间 getAllLoadedClasses() 的结果会过期
-			triggerHotswapWith(inst.getAllLoadedClasses());
-		} finally {
-			HOTSWAP_LOCK.unlock();
-		}
+		AgentWatchCoordinator.triggerHotswap();
 	}
 
-	/**
-	 * 动态生成类的热更入口（供 Aspector、动态代理框架等无磁盘文件的场景调用）。
-	 *
-	 * <p>直接对内存中的类进行重定义，跳过磁盘文件监听与文件 Diff，但仍执行字节码重织入桥、
-	 * 布局安全门 (LayoutGate) 校验与 InitFix 实例初始化补丁。</p>
-	 *
-	 * @param targetClass 已加载的目标类
-	 * @param newBytecode 新生成的未织入或已织入字节码
-	 * @return 是否重定义成功
-	 */
 	public static boolean redefineDynamic(Class<?> targetClass, byte[] newBytecode) {
-		if (targetClass == null || newBytecode == null) return false;
-		if (inst == null || !inst.isRedefineClassesSupported()) {
-			error("[DYNAMIC-REDEFINE] JVM does not support class redefinition or agent not attached.");
-			return false;
-		}
-		if (!inst.isModifiableClass(targetClass)) {
-			warn("[DYNAMIC-REDEFINE] Class " + targetClass.getName() + " is not modifiable by JVM; skipped.");
-			return false;
-		}
-
-		if (VM_POISONED_CLASSES.contains(targetClass.getName())) {
-			LAST_REDEFINE_VM_LEVEL_FAILURE = true;
-			warn("[DYNAMIC-REDEFINE] Refusing to redefine " + targetClass.getName()
-			     + ": an earlier JVM-level redefine failure (InternalError/VerifyError) already poisoned"
-			     + " this class in the current session. RESTART the client before further hot-swaps.");
-			return false;
-		}
-
-		HOTSWAP_LOCK.lock();
-		try {
-			// 动态重定义同样是一个可观测批次：耗时从桥接/布局门之前开始算，
-			// 到 InitFix 与回调完成结束。
-			long dynStartNanos = System.nanoTime();
-			BatchReportScope.begin();
-			LAST_REDEFINE_VM_LEVEL_FAILURE = false;
-			String className = targetClass.getName();
-			byte[] sourceBytes = newBytecode;
-			byte[] runtimeBytes;
-			long bridgeStartNanos = System.nanoTime();
-			try {
-				runtimeBytes = applyTransformerBridges(targetClass.getClassLoader(), className, targetClass, newBytecode);
-			} catch (remold.BytecodeTransformerBridge.Abort abort) {
-				// 事务一致性：桥接器判定本轮不能落地（例如目标类的合成内部类被闸拒绝）。
-				// 此时既不能送织入后的新字节（会与旧合成类组成 NoSuchMethodError 分裂状态），
-				// 也不能送未织入的原始字节（会抹掉 Mixin 钩子）——唯一正确动作是不 redefineClasses。
-				warn("[DYNAMIC-REDEFINE] " + className + ": aborted by the bytecode bridge before redefineClasses ("
-				     + abort.getMessage() + "). The class keeps its previously loaded bytes; nothing was redefined.");
-				return false;
-			}
-			long bridgeMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - bridgeStartNanos);
-			long alignStartNanos = System.nanoTime();
-			// 第二缺陷：Mixin 生成成员名/顺序先对齐回基线，让纯方法体热更退化为 0 新增/0 删除。
-			runtimeBytes = alignMixinGeneratedMembers(className, targetClass, runtimeBytes);
-			long mixinAlignMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - alignStartNanos);
-			long accessAlignStartNanos = System.nanoTime();
-			// 第一层：按已加载基线做访问权限单调对齐；自检门拒绝时绝不调用 redefineClasses。
-			runtimeBytes = alignAccessMonotonicity(className, targetClass, runtimeBytes);
-			long accessAlignMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - accessAlignStartNanos);
-			long alignMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - alignStartNanos);
-			if (runtimeBytes == null) {
-				return false;
-			}
-
-			long baselineStartNanos = System.nanoTime();
-			byte[] oldBytes = bytecodeCache.get(className);
-			if (oldBytes == null) oldBytes = fetchOriginalBytecode(targetClass);
-			if (oldBytes == null) oldBytes = sourceBytecodeCache.get(className);
-			long baselineMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - baselineStartNanos);
-			if (oldBytes == null) {
-				warn("[DYNAMIC-REDEFINE] No baseline for " + className
-					+ " (bytecodeCache/sourceBytecodeCache/fetchOriginalBytecode all empty);"
-					+ " refusing to redefine without LayoutGate and InitFix.");
-				return false;
-			}
-			if (Arrays.equals(oldBytes, runtimeBytes)) {
-				// 返回 true 在这里表示"无需变更"，不是"热更已生效"：没有任何类被 redefine，
-				// 也不会触发 InitFix / @OnReload / 批次回调。必须默认可见地打出来，否则调用方
-				// 无法区分"真重定义了"与"字节相同直接返回"。
-				info("[DYNAMIC-REDEFINE] no-op: " + className
-				     + " runtime bytecode equals the baseline; no redefine performed (nothing to change)."
-				     + (PERF_LOG ? " (total=" + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - dynStartNanos)
-				        + "ms [bridge=" + bridgeMs + "ms, align=" + alignMs + "ms, baseline=" + baselineMs + "ms])"
-				        : ""));
-				return true;
-			}
-			long diffStartNanos = System.nanoTime();
-			ClassDiffUtil.ClassDiff diff = ClassDiffUtil.diffStructural(oldBytes, runtimeBytes);
-			if (InitFix.needsMethodBodies(targetClass, diff)) {
-				ClassDiffUtil.ensureFullClassNodes(diff, oldBytes, runtimeBytes);
-			}
-			String annotationDefaultChange = annotationDefaultGate(className, oldBytes, runtimeBytes);
-			long diffMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - diffStartNanos);
-			if (annotationDefaultChange != null) {
-				// 探针读数：注解默认值变化后已加载的消费者类仍读旧默认值（JBR 21/25，含 DCEVM 运行时）。
-				// 单类入口没有"同批连坐"的对象，拒绝本类即等于整体不重定义（宿主保持旧版）。
-				error("[DYNAMIC-REDEFINE] " + className + ": annotation default value changed ("
-					+ annotationDefaultChange + "); refusing the redefine because classes that are already"
-					+ " loaded keep the OLD default value — RESTART required."
-					+ " Explicit override: -Dremold.agent.annotation_default_change=allow.");
-				return false;
-			}
-			if (ClassDiffUtil.mustRejectHierarchyChange(diff, isEnhancedHotswapEnabled())) {
-				error("REJECTED: Class hierarchy change detected for dynamic class " + className + " ("
-					+ ClassDiffUtil.describeHierarchyChange(diff) + ")."
-					+ (diff.superChanged
-						? " Changing the superclass is not supported by any redefinition mode; RESTART required."
-						: " Interface changes require enhanced class redefinition (JBR/DCEVM); RESTART required on this JVM."));
-				return false;
-			}
-			long gateStartNanos = System.nanoTime();
-			LayoutDecision decision = decideDynamicLayout(targetClass, className, diff, runtimeBytes);
-			long gateMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - gateStartNanos);
-			String why = decision.reason() != null
-				? decision.reason()
-				: (decision.layout() != null ? decision.layout().detail() : "unknown reason");
-			switch (decision.action()) {
-				case PASS:
-					break;
-				case WAIVE_NO_READERS:
-					warn("[LAYOUT-WAIVE] Dynamic class " + className + ": member(s) removed ("
-					     + why + ") and no out-of-batch reader still needs them; redefining.");
-					break;
-				case WAIVE:
-					warn("[LAYOUT-WAIVE] Dynamic class " + className + ": incompatible field layout ("
-					     + why + ") but no scan-visible live instances; redefining anyway — new instances go"
-					     + " through the new constructor and initialize correctly. This is what the heap scan"
-					     + " saw, not proof that no instance exists.");
-					break;
-				case WAIVE_REINIT:
-					info("[LAYOUT-REINIT] Dynamic class " + className
-					     + ": field type change authorized by @RemoldReinit (" + why + ")");
-					break;
-				case SKIP:
-					warn("[LAYOUT-SKIP] Dynamic class " + className + ": layout gate skipped — no"
-					     + " usable baseline; redefining without a field-layout check.");
-					break;
-				case REJECT:
-				default:
-					warn("[LAYOUT-REJECT] Dynamic class " + className + " rejected: " + why);
-					return false;
-			}
-			long initFixStartNanos = System.nanoTime();
-			InitFix.transform(targetClass, runtimeBytes, diff);
-
-			// 动态单类入口也接两阶段（docs/initfix/04-target-design.md §1）：调用方
-			// （MixinHotSwap / ForgeMixinHotSwap 等）在返回后立即做后续处理，所以
-			// A → 补丁 → C 必须在本方法内部同步跑完——返回时 JVM 已是终态，不暴露阶段 A 中间态，
-			// 公开 API 的返回语义不变。twoPhase 标志由 InitFix.transform 写进 PendingPatch，
-			// 这里只消费 InitFix.requiresTwoPhase；不额外跑堆扫描（批次路径才有堆 liveness 旁路优化）。
-			boolean twoPhase = InitFix.requiresTwoPhase(targetClass);
-			byte[]  stageABytes = null;
-			if (twoPhase) {
-				try {
-					stageABytes = remold.ref.StageASkeleton.buildWithLiveConstructors(oldBytes, runtimeBytes);
-				} catch (Throwable t) {
-					warn("[DYNAMIC-REDEFINE] " + className + ": cannot synthesise stage A (" + t
-					     + "); falling back to a single redefine — the read-through window stays open.");
-					twoPhase = false;
-				}
-			}
-			long initFixMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - initFixStartNanos);
-
-			// 堆实例哨兵三切面（默认关闭，-Dremold.probe.heapwatch=true 开启）：
-			// 用于定位「某类字段在 redefine / 字段初始化补丁窗口内被置 null」这类跨类污染。
-			HeapFieldWatch.snapshot("before-redefine", className);
-			enterInternalRedefine(Collections.singleton(className));
-			try {
-				long stageAMs = 0L;
-				long stageBMs = 0L;
-				long stageCMs = 0L;
-				long redefMs = 0L;
-				if (twoPhase) {
-					// ---- 阶段 A：新结构 + 旧方法体（构造器/<clinit> 保留新体） ----
-					long tStageA = System.nanoTime();
-					inst.redefineClasses(new ClassDefinition(targetClass, stageABytes));
-					stageAMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tStageA);
-					HeapFieldWatch.snapshot("after-stage-a", className);
-					// 阶段 A 已生效：分析期 oracle 看的"新结构"仍是 C，但 JVM 当前真实形态是 A，
-					// 缓存先指向 A（与批次两阶段同口径）；C 成功后再推进。
-					bytecodeCache.put(className, stageABytes);
-					info("[DYNAMIC-REDEFINE] " + className + ": stage A applied (new shape with old method"
-					     + " bodies); patching live instances before stage C.");
-					long tStageB = System.nanoTime();
-					try {
-						InitFix.afterRedefine(targetClass);
-					} catch (Throwable t) {
-						// 与批次路径一致：补丁失败不阻止阶段 C；未补字段停在默认值并记账。
-						error("[DYNAMIC-REDEFINE] " + className + ": stage B patch failed (" + t + ");"
-						      + " stage C will still be applied, so unpatched fields stay at defaults.", t);
-					}
-					stageBMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tStageB);
-					HeapFieldWatch.snapshot("after-field-patch", className);
-
-					// ---- 阶段 C：提交现成的 runtimeBytes（桥接与 InitFix.transform 已做过，不重跑） ----
-					long tStageC = System.nanoTime();
-					try {
-						inst.redefineClasses(new ClassDefinition(targetClass, runtimeBytes));
-					} catch (Throwable stageCFailure) {
-						LAST_REDEFINE_VM_LEVEL_FAILURE = isVmLevelRedefineFailure(stageCFailure);
-						if (LAST_REDEFINE_VM_LEVEL_FAILURE) {
-							// VM 级失败（InternalError/VerifyError）：不再对同一类做第二次 redefine。
-							markVmLevelFailure(className, stageCFailure);
-							error("[DYNAMIC-REDEFINE] " + className + ": stage C redefine failed at the VM level ("
-							      + stageCFailure + "); the class stays at stage A (old bodies). RESTART required.",
-								stageCFailure);
-							return false;
-						}
-						boolean rolledBack = false;
-						try {
-							inst.redefineClasses(new ClassDefinition(targetClass, oldBytes));
-							bytecodeCache.put(className, oldBytes);
-							rolledBack = true;
-						} catch (Throwable rollbackFailure) {
-							bytecodeCache.put(className, stageABytes);
-							warn("[DYNAMIC-REDEFINE] " + className + ": stage C failed and rollback to the baseline"
-							     + " also failed (" + rollbackFailure + "); the class stays at stage A (old bodies,"
-							     + " patched fields). RESTART required.");
-						}
-						error("[DYNAMIC-REDEFINE] " + className + ": stage C redefine failed (" + stageCFailure + "); "
-						      + (rolledBack ? "rolled back to the baseline bytes (best effort)."
-						                    : "no rollback was possible — RESTART required."), stageCFailure);
-						return false;
-					}
-					stageCMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tStageC);
-					HeapFieldWatch.snapshot("after-stage-c", className);
-				} else {
-					long tRedef = System.nanoTime();
-					inst.redefineClasses(new ClassDefinition(targetClass, runtimeBytes));
-					redefMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tRedef);
-					HeapFieldWatch.snapshot("after-redefine", className);
-					bytecodeCache.put(className, runtimeBytes);
-					long tStageB = System.nanoTime();
-					try {
-						InitFix.afterRedefine(targetClass);
-					} catch (Throwable t) {
-						error("Failed to run InitFix after redefine for " + className, t);
-						InitFix.afterRedefineFailed(targetClass);
-					}
-					stageBMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tStageB);
-					HeapFieldWatch.snapshot("after-field-patch", className);
-				}
-				long postStartNanos = System.nanoTime();
-				bytecodeCache.put(className, runtimeBytes);
-				sourceBytecodeCache.put(className, sourceBytes);
-				recordCacheLoader(className, targetClass.getClassLoader());
-				List<ClassDefinition> defs = Collections.singletonList(new ClassDefinition(targetClass, runtimeBytes));
-				long annoStartNanos = System.nanoTime();
-				processAnnotations(defs);
-				long annoMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - annoStartNanos);
-				long finishStartNanos = System.nanoTime();
-				HotswapBatchReport batchReport = BatchReportScope.finish(Collections.singletonList(className));
-				long finishMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - finishStartNanos);
-				long listenersStartNanos = System.nanoTime();
-				ListenerTiming listenerTiming = PERF_LOG ? new ListenerTiming() : null;
-				notifyBatchListeners(defs, batchReport, listenerTiming);
-				long listenersMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - listenersStartNanos);
-				long postMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - postStartNanos);
-				InternalRedefineContext hookCtx = INTERNAL_CONTEXT.get();
-				int targetHooks = hookCtx != null ? hookCtx.targetHookHits : 0;
-				int passthroughHooks = hookCtx != null ? hookCtx.passthroughHookHits : 0;
-				String maxListenerDetail = (listenerTiming != null && listenerTiming.slowestName != null)
-					? ", max=" + listenerTiming.slowestName + ":" + listenerTiming.slowestMs + "ms"
-					: "";
-				long totalMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - dynStartNanos);
-				String timingSuffix = " (total=" + totalMs + "ms"
-					+ (PERF_LOG
-					   ? " [bridge=" + bridgeMs + "ms"
-					     + ", align=" + alignMs + "ms [mixin=" + mixinAlignMs + "ms, access=" + accessAlignMs + "ms]"
-					     + ", baseline=" + baselineMs + "ms"
-					     + ", diff=" + diffMs + "ms"
-					     + ", gate=" + gateMs + "ms"
-					     + ", initFix=" + initFixMs + "ms"
-					     + (twoPhase
-					        ? ", stageA=" + stageAMs + "ms, stageB=" + stageBMs + "ms, stageC=" + stageCMs + "ms"
-					        : ", redefine=" + redefMs + "ms, stageB=" + stageBMs + "ms")
-					     + ", hooks=[target=" + targetHooks + ", passthrough=" + passthroughHooks + "]"
-					     + ", post=" + postMs + "ms [anno=" + annoMs + "ms, finish=" + finishMs
-					     + "ms, listeners=" + listenersMs + "ms" + maxListenerDetail + "]]"
-					   : "")
-					+ ")";
-				info("[DYNAMIC-REDEFINE] Successfully redefined " + className
-				     + (twoPhase ? " (two-phase: A -> patch -> C)" : "") + timingSuffix);
-				return true;
-			} finally {
-				exitInternalRedefine();
-			}
-		} catch (Throwable t) {
-			LAST_REDEFINE_VM_LEVEL_FAILURE = isVmLevelRedefineFailure(t);
-			if (LAST_REDEFINE_VM_LEVEL_FAILURE) {
-				markVmLevelFailure(targetClass.getName(), t);
-			} else {
-				error("[DYNAMIC-REDEFINE] Failed to redefine " + targetClass.getName(), t);
-			}
-			InitFix.afterRedefineFailed(targetClass);
-			return false;
-		} finally {
-			BatchReportScope.discard();
-			HOTSWAP_LOCK.unlock();
-		}
+		return DynamicRedefineExecutor.redefineDynamic(targetClass, newBytecode);
 	}
 
-	/**
-	 * 动态单类重定义的布局判决。
-	 *
-	 * <p>与批量路径共用 {@link LayoutDecisionEngine}，但必须显式构造"批次"：{@code targetClass}
-	 * 自己就是本批唯一成员。只有这样读者扫描才会把它当作批次内类（用新字节），而不是从
-	 * {@code bytecodeCache} 里拿它的旧字节当成外部读者——否则删字段永远会被自己旧 handler 挡下。</p>
-	 */
 	private static LayoutDecision decideDynamicLayout(Class<?> targetClass, String className,
 	                                                   ClassDiffUtil.ClassDiff diff, byte[] runtimeBytes) {
-		if (LayoutGate.MODE_OFF.equals(LAYOUT_GATE)) {
-			return new LayoutDecision(LayoutAction.PASS, null, className, Set.of());
-		}
-		// 与批量路径同源的继承作用域门：命中即拒绝（warn 模式仍按既有语义强制放行）。
-		if (!LayoutGate.MODE_WARN.equals(LAYOUT_GATE) && diff.newClass != null
-		    && !diff.reinitFields.isEmpty()) {
-			Map<String, String> unsafeReinitScope =
-				InitFix.unsafeInheritedReinitFields(targetClass, diff.newClass, diff.reinitFields);
-			if (!unsafeReinitScope.isEmpty()) {
-				return LayoutDecisionEngine.rejectUnsafeReinitScope(
-					className, Set.of(className), unsafeReinitScope);
-			}
-		}
-		Supplier<Liveness> livenessSupplier = () -> LayoutGate.checkChangedFields(diff.changedFields).compatible()
-			? Liveness.LIVE
-			: (hasLiveInstances(className) ? Liveness.LIVE : Liveness.NONE);
-
-		RemovedMemberScan scan = RemovedMemberScan.NOT_SCANNED;
-		Path classFile = classFilePath(targetClass);
-		if (classFile != null) {
-			// inBatch 必须包含 target 自己。读者扫描器据此排除"本批类"，只扫批次外其他类。
-			byte[] baseline = bytecodeCache.get(className);
-			Map<String, GateCachedDiff> localCache = null;
-			if (baseline != null && diff != null && diff.oldClass != null && diff.newClass != null) {
-				localCache = new HashMap<>();
-				localCache.put(className, new GateCachedDiff(baseline, runtimeBytes, diff, false, false));
-			}
-			Map<String, RemovedMemberScan> scans = RemovedMemberScanner.scan(
-				Map.of(className, runtimeBytes), Map.of(className, classFile), localCache);
-			scan = scans.getOrDefault(className, RemovedMemberScan.NOT_SCANNED);
-		}
-
-		SuperclassDriftGate.DriftDecision drift = checkSuperclassDriftIfApplicable(
-			className, targetClass, diff.changedFields, runtimeBytes, Map.of(className, runtimeBytes));
-
-		return decideLayout(className, diff.changedFields, LAYOUT_GATE, livenessSupplier,
-			Set.of(className), scan, drift, diff.reinitFields, Map.of());
+		return DynamicRedefineExecutor.decideDynamicLayout(targetClass, className, diff, runtimeBytes);
 	}
 
-	/**
-	 * 由已加载类的 CodeSource 还原它在磁盘上的 .class 路径，供读者扫描反推工程根目录。
-	 * 取不到（运行时生成类、无 CodeSource 等）时返回 {@code null}；调用方必须退回"未扫描"判据。
-	 */
-	private static Path classFilePath(Class<?> type) {
-		try {
-			if (type == null || type.getProtectionDomain() == null
-			    || type.getProtectionDomain().getCodeSource() == null
-			    || type.getProtectionDomain().getCodeSource().getLocation() == null) {
-				return null;
-			}
-			Path root = Path.of(type.getProtectionDomain().getCodeSource().getLocation().toURI());
-			return root.resolve(type.getName().replace('.', '/') + ".class");
-		} catch (Throwable t) {
-			return null;
-		}
-	}
 
-	private static long calculateHash(byte[] data) {
+	static long calculateHash(byte[] data) {
 		return CRC64.update(data);
 	}
 	//endregion
@@ -6853,7 +2612,7 @@ public class RemoldAgent {
 	 * @param loader    用于计算 StackMapTable 的目标 ClassLoader，可为 {@code null}
 	 * @return 归一化后的字节码；关闭开关或输入为 {@code null} 时原样返回
 	 */
-	private static byte[] normalizeAlignBaseline(byte[] bytes, String slashName, ClassLoader loader) {
+	static byte[] normalizeAlignBaseline(byte[] bytes, String slashName, ClassLoader loader) {
 		if (bytes == null || !FORCE_STATIC_LAMBDA) return bytes;
 		return AnnotationTransformer.forceStaticLambdas(bytes, slashName, loader);
 	}
@@ -6869,12 +2628,12 @@ public class RemoldAgent {
 	 * @param loader 目标 ClassLoader
 	 * @return 归一化后的解析器；关闭开关时直接返回 {@code raw}
 	 */
-	private static Function<String, byte[]> normalizeAlignResolver(
+	static Function<String, byte[]> normalizeAlignResolver(
 	 Function<String, byte[]> raw, ClassLoader loader) {
 		return normalizeAlignResolver(raw, loader, FORCE_STATIC_LAMBDA ? new HashMap<>() : null);
 	}
 
-	private static Function<String, byte[]> normalizeAlignResolver(
+	static Function<String, byte[]> normalizeAlignResolver(
 	 Function<String, byte[]> raw, ClassLoader loader, Map<String, byte[]> cache) {
 		if (!FORCE_STATIC_LAMBDA) return raw;
 		Map<String, byte[]> targetCache = cache != null ? cache : new HashMap<>();

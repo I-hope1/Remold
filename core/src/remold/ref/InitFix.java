@@ -58,7 +58,7 @@ import static remold.RemoldAgent.log;
  *       按位为零。标记 {@link FieldStatus#NOTHING_TO_PATCH}，零开销放行、不告警、不生成补丁
  *       （浮点按位比较，{@code -0.0f}/{@code NaN} 不算零值）。</li>
  *   <li><b>T1 编译期常量</b>（{@code docs/initfix/01-safety-gate.md} §1）：静态 {@code ConstantValue} 走专用通道。</li>
- *   <li><b>T2 纯计算切片</b>（{@code docs/initfix/01-safety-gate.md} §1）：经 {@link AliasInterpreter} 逆向数据流切片，并通过效应安全门。</li>
+ *   <li><b>T2 纯计算切片</b>（{@code docs/initfix/01-safety-gate.md} §1）：经 {@link InitFixSliceExtractor.AliasInterpreter} 逆向数据流切片，并通过效应安全门。</li>
  *   <li><b>T3 复杂或不安全</b>（{@code docs/initfix/01-safety-gate.md} §1）：含分支、环境依赖、可变源字段，拒绝生成代码并输出诊断。</li>
  *   <li><b>T4 显式逃生口 {@code @HotswapInit}（目标设计，未落地）</b>（{@code docs/initfix/09-hotswapinit-design.md} 与
  *       {@code docs/initfix/01-safety-gate.md} §1）：规划中由伴生类直接调用该静态方法、免效应检查；
@@ -81,7 +81,7 @@ import static remold.RemoldAgent.log;
  * {@code ALOAD 0; GETFIELD this.f}。重写前提是源字段可证明不可变：</p>
  * <ul>
  *   <li><b>条件 A</b>：源字段具有 {@code ACC_FINAL}（含 Kotlin {@code val}）。</li>
- *   <li><b>条件 B</b>：非 final 时必须为 {@code private}，且通过 {@link NestView} 证明全 Nest 范围内
+ *   <li><b>条件 B</b>：非 final 时必须为 {@code private}，且通过 {@link InitFixSafetyGate.NestView} 证明全 Nest 范围内
  *       除本次构造器 pattern 外<b>不存在第二处针对该字段的 {@code PUTFIELD}</b>。</li>
  * </ul>
  *
@@ -134,11 +134,11 @@ public class InitFix {
 	private static final String BATCH_GROUP_PREFIX    = "initBatchGroup$";
 	private static final int    MAX_FUSED_BATCH_FIELDS = 8;
 	/** A 档 apply 重放的静态方法前缀；按 applyFields 插入顺序编号（驱动侧复用同一顺序）。 */
-	private static final String APPLY_REPLAY_PREFIX    = "applyReplay$";
+	static final String APPLY_REPLAY_PREFIX    = "applyReplay$";
 	private static final String PATCH_SUFFIX          = "$$HotswapPatch";
 
 	private static final long PENDING_TTL_NANOS     = TimeUnit.MINUTES.toNanos(5);
-	private static final int  MAX_DETAILED_FAILURES = 5;
+	static final int  MAX_DETAILED_FAILURES = 5;
 
 	/**
 	 * {@link #PENDING_TTL_NANOS} 的可调副本，仅供测试/诊断把 TTL 缩短以触发清扫。
@@ -163,13 +163,13 @@ public class InitFix {
 	 * 都各自失败一遍</b>，日志与耗时放大成 N 倍。这个配额把同一字段的失败次数封顶，
 	 * 超过即停止继续尝试该字段（该字段及其下游仍照常记账）。</p>
 	 */
-	private static final int MAX_INSTANCE_FAILURES_PER_FIELD = 8;
+	static final int MAX_INSTANCE_FAILURES_PER_FIELD = 8;
 
 	/**
 	 * 详细失败日志的全局配额：逐实例驱动下同一轮可能有成千上万个实例各自失败，
 	 * 逐个打栈会淹没日志（{@code docs/initfix/03-runtime-driver.md} §2 的 {@code handleFieldException}）。
 	 */
-	private static final AtomicInteger DETAILED_FAILURE_LOGS = new AtomicInteger();
+	static final AtomicInteger DETAILED_FAILURE_LOGS = new AtomicInteger();
 
 	/** 识别存量重置注解 RemoldReinit。 */
 	private static boolean isReinitDesc(String desc) {
@@ -195,9 +195,9 @@ public class InitFix {
 	 */
 	private record ReinitField(boolean overwrite, boolean selfOnly, boolean scopeExplicit) { }
 
-	private static final Unsafe UNSAFE = Unsafe.getUnsafe();
+	static final Unsafe UNSAFE = Unsafe.getUnsafe();
 
-	private static final Map<Class<?>, PendingPatch> PENDING =
+	static final Map<Class<?>, PendingPatch> PENDING =
 	 Collections.synchronizedMap(new WeakHashMap<>());
 
 	/**
@@ -244,10 +244,10 @@ public class InitFix {
 	 Collections.synchronizedMap(new WeakHashMap<>());
 
 	/** Transient same-batch view; cleared at the end of each batch. */
-	private static final ThreadLocal<BatchContext> BATCH_CONTEXT = new ThreadLocal<>();
+	static final ThreadLocal<BatchContext> BATCH_CONTEXT = new ThreadLocal<>();
 
 	/** Transient runtime failure tokens used only while a batch is being patched. */
-	private static final ThreadLocal<Set<String>> BATCH_FAILURES =
+	static final ThreadLocal<Set<String>> BATCH_FAILURES =
 	 ThreadLocal.withInitial(LinkedHashSet::new);
 
 	private record BatchInput(Class<?> host, byte[] newBytes, ClassDiff diff) { }
@@ -423,15 +423,15 @@ public class InitFix {
 		return bytes == null ? null : bytes.get(internalName.replace('/', '.'));
 	}
 
-	private static Set<String> activeBatchFailures() {
+	static Set<String> activeBatchFailures() {
 		return BATCH_CONTEXT.get() == null ? Set.of() : BATCH_FAILURES.get();
 	}
 
-	private static String batchFailureToken(InitFixBatchGraph.FieldKey field) {
+	static String batchFailureToken(InitFixBatchGraph.FieldKey field) {
 		return "@batch:" + field.host() + "." + field.field();
 	}
 
-	private static void publishBatchFailure(Class<?> host, String field) {
+	static void publishBatchFailure(Class<?> host, String field) {
 		if (BATCH_CONTEXT.get() == null) return;
 		BATCH_FAILURES.get().add(batchFailureToken(
 		 new InitFixBatchGraph.FieldKey(batchHostKeyCurrent(host), field)));
@@ -471,7 +471,7 @@ public class InitFix {
 		}
 	}
 
-	private static Map<String, String> ledgerSnapshot(Class<?> host) {
+	static Map<String, String> ledgerSnapshot(Class<?> host) {
 		synchronized (LEDGER) {
 			Map<String, String> m = LEDGER.get(host);
 			return m == null ? Map.of() : new LinkedHashMap<>(m);
@@ -479,7 +479,7 @@ public class InitFix {
 	}
 
 	/** 记入台账（同名字段覆盖原因，保留最新一次）。 */
-	private static void ledgerPut(Class<?> host, String fieldName, String reason) {
+	static void ledgerPut(Class<?> host, String fieldName, String reason) {
 		if (host == null || fieldName == null) return;
 		String r = reason == null ? "unpatched" : reason;
 		if (r.length() > 200) r = r.substring(0, 200) + "...";
@@ -528,7 +528,7 @@ public class InitFix {
 		}
 	}
 
-	private static void reinitAppliedRemove(Class<?> host, String fieldName) {
+	static void reinitAppliedRemove(Class<?> host, String fieldName) {
 		if (host == null) return;
 		synchronized (REINIT_APPLIED) {
 			Map<String, String> m = REINIT_APPLIED.get(host);
@@ -539,7 +539,7 @@ public class InitFix {
 	}
 
 	/** 整类记录作废：补丁没生效（redefine 失败 / 待补过期）时，下一轮必须重新写。 */
-	private static void reinitAppliedClear(Class<?> host) {
+	static void reinitAppliedClear(Class<?> host) {
 		if (host == null) return;
 		REINIT_APPLIED.remove(host);
 	}
@@ -661,7 +661,7 @@ public class InitFix {
 	 * protected 成员桥接或新增字段的条件 CAS 写。
 	 * <p>bsmArgs 布局：{@code [int kind, int opcode, Class owner, Class host]}。</p>
 	 */
-	private static final Handle BRIDGE_BSM = new Handle(
+	static final Handle BRIDGE_BSM = new Handle(
 	 Opcodes.H_INVOKESTATIC,
 	 Type.getInternalName(HotswapBridge.class),
 	 "bootstrap",
@@ -679,7 +679,7 @@ public class InitFix {
 	 * L1 存量初值重放的 bootstrap：在 {@link #BRIDGE_BSM} 的 bsmArgs 后追加旧初值常量。
 	 * <p>bsmArgs 布局：{@code [int kind, int opcode, Class owner, Class host, Object expected]}。</p>
 	 */
-	private static final Handle BRIDGE_BSM_EXPECTED = new Handle(
+	static final Handle BRIDGE_BSM_EXPECTED = new Handle(
 	 Opcodes.H_INVOKESTATIC,
 	 Type.getInternalName(HotswapBridge.class),
 	 "bootstrapExpected",
@@ -880,7 +880,7 @@ public class InitFix {
 	 * @param replayOwners L1 重放字段 -> 事实所属类（内部名）。L1 写的是<b>继承</b>字段，事实与台账键都在
 	 *                     声明类上，运行期记账（CAS 未命中 / OVERWRITE 闭环）必须用同一个键。
 	 */
-	private record PendingPatch(
+	record PendingPatch(
 	 PatchPlan plan,
 	 byte[] bytes,
 	 long createdNanos,
@@ -888,25 +888,25 @@ public class InitFix {
 	 Map<String, String> replayOwners) {
 	}
 
-	private record ProtectedAccess(int opcode, String owner, String name, String desc) { }
+	record ProtectedAccess(int opcode, String owner, String name, String desc) { }
 
-	private record FieldExtract(
+	record FieldExtract(
 	 List<AbstractInsnNode> instructions,
 	 Map<AbstractInsnNode, ProtectedAccess> protectedAccesses,
 	 boolean dependsOnParam,
 	 boolean fromRootCtor,
 	 Set<AbstractInsnNode> originalInsns) { }
 
-	private record ParamField(FieldNode field, int slot) { }
+	record ParamField(FieldNode field, int slot) { }
 
 	/**
 	 * 一次构造器参数扫描的结果。
 	 * @param accepted 可用作参数回溯的槽位映射
-	 * @param rejected 被拒的槽位 -> 拒绝原因（按槽位记录，供 {@link #checkSafe}
+	 * @param rejected 被拒的槽位 -> 拒绝原因（按槽位记录，供 {@link InitFixSliceExtractor#checkSafe}
 	 *                 把"真实原因"透传进 {@link PatchReport}，而不是笼统的
 	 *                 "depends on local variables"）
 	 */
-	private record ParamScan(Map<Integer, ParamField> accepted, Map<Integer, String> rejected) {
+	record ParamScan(Map<Integer, ParamField> accepted, Map<Integer, String> rejected) {
 		static final ParamScan EMPTY = new ParamScan(Map.of(), Map.of());
 	}
 
@@ -1454,7 +1454,7 @@ public class InitFix {
 		return ordered.stream().map(byKey::get).filter(Objects::nonNull).toList();
 	}
 
-	private static String batchHostKeyCurrent(Class<?> host) {
+	static String batchHostKeyCurrent(Class<?> host) {
 		BatchContext context = BATCH_CONTEXT.get();
 		return context == null ? host.getName() : batchHostKey(context, host);
 	}
@@ -1578,7 +1578,7 @@ public class InitFix {
 		}
 
 		HierarchyTreeOracle oracle = new HierarchyTreeOracle(host == null ? null : host.getClassLoader(), classNode);
-		NestView nest = NestView.of(host, classNode, oracle);
+		InitFixSafetyGate.NestView nest = InitFixSafetyGate.NestView.of(host, classNode, oracle);
 
 		Map<String, FieldNode> fieldNodes = new HashMap<>();
 		for (FieldNode fn : classNode.fields) {
@@ -1612,7 +1612,7 @@ public class InitFix {
 				Map<MethodNode, Boolean> rootCtorCache = new IdentityHashMap<>();
 				int rootCtorCount = 0;
 				for (MethodNode init : initMethods) {
-					if (isRootConstructor(classNode, init, rootCtorCache)) rootCtorCount++;
+					if (InitFixSliceExtractor.isRootConstructor(classNode, init, rootCtorCache)) rootCtorCount++;
 				}
 				if (rootCtorCount == 0) {
 					for (String f : instanceFields) {
@@ -1630,10 +1630,10 @@ public class InitFix {
 					Map<String, String> instanceReasons = new LinkedHashMap<>();
 
 					for (MethodNode init : initMethods) {
-						boolean fromRoot = isRootConstructor(classNode, init, rootCtorCache);
-						ParamScan scan = scanParamFields(host, classNode, init, nest);
+						boolean fromRoot = InitFixSliceExtractor.isRootConstructor(classNode, init, rootCtorCache);
+						ParamScan scan = InitFixSafetyGate.scanParamFields(host, classNode, init, nest);
 						Map<Integer, ParamField> paramFields = scan.accepted();
-						Map<String, FieldExtract> perField = extractFieldInits(
+						Map<String, FieldExtract> perField = InitFixSliceExtractor.extractFieldInits(
 							host, classNode.name, init, instanceFields, false, privateMethods,
 							paramFields, scan.rejected(), fromRoot, selfAssignedFields, instanceReasons, oracle);
 						for (Map.Entry<String, FieldExtract> fe : perField.entrySet()) {
@@ -1686,7 +1686,7 @@ public class InitFix {
 					}
 				}
 				Map<String, String> staticReasons = new LinkedHashMap<>();
-				Map<String, FieldExtract> perField = extractFieldInits(
+				Map<String, FieldExtract> perField = InitFixSliceExtractor.extractFieldInits(
 					host, classNode.name, clinit, staticFields, true, privateMethods,
 					Map.of(), Map.of(), true, null, staticReasons, oracle);
 				for (String f : staticFields) {
@@ -2004,7 +2004,7 @@ public class InitFix {
 		Map<MethodNode, Boolean> rootCtorCache = new IdentityHashMap<>();
 		int                      rootCtorCount = 0;
 		for (MethodNode init : initMethods) {
-			if (isRootConstructor(newClass, init, rootCtorCache)) rootCtorCount++;
+			if (InitFixSliceExtractor.isRootConstructor(newClass, init, rootCtorCache)) rootCtorCount++;
 		}
 		if (rootCtorCount > 1) {
 			log("Class " + className + " has " + rootCtorCount
@@ -2014,7 +2014,7 @@ public class InitFix {
 		// 宿主 Nest 视图：docs/initfix/01-safety-gate.md §3 的"全 Nest 单写证明"与 §1 T0 的"无写入"判定都基于它。
 		// 全程只读字节码，不调用 Class.forName，避免在 transform 线程上触发类加载死锁。
 		HierarchyTreeOracle oracle = new HierarchyTreeOracle(host == null ? null : host.getClassLoader(), newClass);
-		NestView nest = NestView.of(host, newClass, oracle);
+		InitFixSafetyGate.NestView nest = InitFixSafetyGate.NestView.of(host, newClass, oracle);
 
 		// ==================== docs/initfix/03-runtime-driver.md §4 存量重置扩展：候选集 ====================
 		// 默认只处理新增字段；标了 @RemoldReinit 的已有字段按显式声明进入候选集。
@@ -2096,8 +2096,8 @@ public class InitFix {
 		Map<String, String>             instanceReasons    = new LinkedHashMap<>();
 		for (MethodNode init : initMethods) {
 			log("Extracting field init for " + className + "." + init.name + "()");
-			boolean                  fromRoot    = isRootConstructor(newClass, init, rootCtorCache);
-			ParamScan                scan        = scanParamFields(host, newClass, init, nest);
+			boolean                  fromRoot    = InitFixSliceExtractor.isRootConstructor(newClass, init, rootCtorCache);
+			ParamScan                scan        = InitFixSafetyGate.scanParamFields(host, newClass, init, nest);
 			Map<Integer, ParamField> paramFields = scan.accepted();
 			if (!paramFields.isEmpty()) {
 				StringBuilder slots = new StringBuilder();
@@ -2108,7 +2108,7 @@ public class InitFix {
 				log("Constructor param->field mapping in " + className
 				    + "." + init.name + "(): " + slots);
 			}
-			Map<String, FieldExtract> perField = extractFieldInits(
+			Map<String, FieldExtract> perField = InitFixSliceExtractor.extractFieldInits(
 			 host, className, init, targetInstanceFields, false, privateMethods,
 			 paramFields, scan.rejected(), fromRoot, selfAssignedFields, instanceReasons, oracle);
 
@@ -2123,7 +2123,7 @@ public class InitFix {
 		Map<String, List<FieldExtract>> staticExtracts = new LinkedHashMap<>();
 		Map<String, String>             staticReasons  = new LinkedHashMap<>();
 		if (clinitMethod != null) {
-			Map<String, FieldExtract> perField = extractFieldInits(
+			Map<String, FieldExtract> perField = InitFixSliceExtractor.extractFieldInits(
 			 host, className, clinitMethod, targetStaticFields,
 			 true, privateMethods, Map.of(), Map.of(), true, null, staticReasons, oracle);
 			for (Map.Entry<String, FieldExtract> fe : perField.entrySet()) {
@@ -2194,14 +2194,14 @@ public class InitFix {
 			// L1 重放字段的"零值等价"不成立：存量值可能是旧初值（非零），新初值为 0 时也必须
 			// 条件写回，不能按 T0 当作"已经是对的"跳过。
 			if (acceptedReplay.contains(f)) continue;
-			if (isZeroEquivalentField(nest, newClass, fieldNodes.get(f), false, instanceExtracts)) {
+			if (InitFixSafetyGate.isZeroEquivalentField(nest, newClass, fieldNodes.get(f), false, instanceExtracts)) {
 				zeroInstanceFields.add(f);
 			}
 		}
 		Set<String> zeroStaticFields = new LinkedHashSet<>();
 		for (String f : targetStaticFields) {
 			if (reinitFields.containsKey(f)) continue;
-			if (isZeroEquivalentField(nest, newClass, fieldNodes.get(f), true, staticExtracts)) {
+			if (InitFixSafetyGate.isZeroEquivalentField(nest, newClass, fieldNodes.get(f), true, staticExtracts)) {
 				zeroStaticFields.add(f);
 			}
 		}
@@ -2551,7 +2551,7 @@ public class InitFix {
 		Set<String>          usedMethodNames = new HashSet<>();
 		List<FieldPatchTask> instanceTasks   = new ArrayList<>();
 		List<FieldPatchTask> staticTasks     = new ArrayList<>();
-		List<BatchSliceSpec> batchSpecs      = new ArrayList<>();
+		List<InitFixPatchEmitter.BatchSliceSpec> batchSpecs      = new ArrayList<>();
 		List<Integer>        batchIndices    = new ArrayList<>();
 		boolean              hasInstanceDeps = false;
 
@@ -2579,32 +2579,32 @@ public class InitFix {
 			}
 			if (chosen == null) chosen = instanceExtracts.get(fieldName).get(0);
 
-			String method = uniqueMethodName(INSTANCE_PATCH_PREFIX, fieldName, usedMethodNames);
+			String method = InitFixPatchEmitter.uniqueMethodName(INSTANCE_PATCH_PREFIX, fieldName, usedMethodNames);
 			GenerationalReplay fact = generational.get(L1_GATE_PREFIX + fieldName);
 			List<AbstractInsnNode> chosenBody = new ArrayList<>(chosen.instructions());
 			if (fact != null) {
 				// 写入值也必须来自那条事实（§3.3 D6）：只剩"接收者 + 一个规范常量 + 唯一写指令"。
 				chosenBody = withReplayValue(chosenBody, fact.writeConstant(), fact.fieldDesc());
 			}
-			List<AbstractInsnNode> body = rewriteFieldSlice(
+			List<AbstractInsnNode> body = InitFixPatchEmitter.rewriteFieldSlice(
 			 hostInternal, className, chosenBody,
 			 chosen.protectedAccesses(), conditionalFields, forceWriteFields, replayArguments);
 			boolean replayTask = acceptedReplay.contains(fieldName);
 			boolean selfOnlyTask = replayTask || selfOnlyFields.contains(fieldName);
 			String batchMethodName = null;
 			ConstantInitSpec constantInit = null;
-			BatchSliceSpec sliceSpec = inspectBatchSlice(fieldName, body, selfOnlyTask);
+			InitFixPatchEmitter.BatchSliceSpec sliceSpec = InitFixPatchEmitter.inspectBatchSlice(fieldName, body, selfOnlyTask);
 			if (sliceSpec != null) {
-				String candidateBatchName = uniqueMethodName(BATCH_PATCH_PREFIX, fieldName, usedMethodNames);
-				patch.methods.add(emitBatchMethod(candidateBatchName, className, sliceSpec));
+				String candidateBatchName = InitFixPatchEmitter.uniqueMethodName(BATCH_PATCH_PREFIX, fieldName, usedMethodNames);
+				patch.methods.add(InitFixPatchEmitter.emitBatchMethod(candidateBatchName, className, sliceSpec));
 				batchMethodName = candidateBatchName;
 				batchSpecs.add(sliceSpec);
 				batchIndices.add(instanceTasks.size());
 				if (!replayTask) {
-					constantInit = extractConstantInitSpec(fieldName, className, body);
+					constantInit = InitFixPatchEmitter.extractConstantInitSpec(fieldName, className, body);
 				}
 			}
-			patch.methods.add(straightLineMethod(method, "(L" + className + ";)", body));
+			patch.methods.add(InitFixPatchEmitter.straightLineMethod(method, "(L" + className + ";)", body));
 			// 依赖闭包必须同时统计实例侧与<b>静态侧</b>的读取。
 			// 只传 acceptedInstance 会把切片里的 GETSTATIC 整个漏掉：静态字段补失败后，
 			// 依赖它的实例任务不会被跳过，照常执行并读到未补的静态字段默认值 ——
@@ -2630,23 +2630,23 @@ public class InitFix {
 				int end = Math.min(batchSpecs.size(), start + MAX_FUSED_BATCH_FIELDS);
 				int groupSize = end - start;
 				if (groupSize < 2) break;
-				List<BatchSliceSpec> subSpecs = batchSpecs.subList(start, end);
+				List<InitFixPatchEmitter.BatchSliceSpec> subSpecs = batchSpecs.subList(start, end);
 				int[] indices = new int[groupSize];
 				for (int k = 0; k < groupSize; k++) indices[k] = batchIndices.get(start + k);
-				String groupMethod = uniqueMethodName(BATCH_GROUP_PREFIX, String.valueOf(fusedBatchGroups.size()),
+				String groupMethod = InitFixPatchEmitter.uniqueMethodName(BATCH_GROUP_PREFIX, String.valueOf(fusedBatchGroups.size()),
 				 usedMethodNames);
-				patch.methods.add(emitFusedBatchMethod(groupMethod, className, subSpecs));
+				patch.methods.add(InitFixPatchEmitter.emitFusedBatchMethod(groupMethod, className, subSpecs));
 				fusedBatchGroups.add(new FusedBatchGroup(groupMethod, indices));
 			}
 		}
 
 		for (String fieldName : orderedStatic) {
 			FieldExtract fe     = staticExtracts.get(fieldName).get(0);
-			String       method = uniqueMethodName(STATIC_PATCH_PREFIX, fieldName, usedMethodNames);
-			List<AbstractInsnNode> body = rewriteFieldSlice(
+			String       method = InitFixPatchEmitter.uniqueMethodName(STATIC_PATCH_PREFIX, fieldName, usedMethodNames);
+			List<AbstractInsnNode> body = InitFixPatchEmitter.rewriteFieldSlice(
 			 hostInternal, className, new ArrayList<>(fe.instructions()),
 			 fe.protectedAccesses(), conditionalFields, forceWriteFields, Map.of());
-			patch.methods.add(straightLineMethod(method, "()", body));
+			patch.methods.add(InitFixPatchEmitter.straightLineMethod(method, "()", body));
 			Set<InitFixBatchGraph.FieldKey> batchDeps = crossDependencies.getOrDefault(fieldName, Set.of());
 			Set<String> staticDeps = new LinkedHashSet<>(
 			 dependencyOf(fieldName, staticExtracts, className, acceptedStatic));
@@ -2664,7 +2664,7 @@ public class InitFix {
 			String method = APPLY_REPLAY_PREFIX + applyIndex++;
 			List<AbstractInsnNode> body = applyReplayBody(className, replay,
 			 generational.get(APPLY_GATE_PREFIX + applyEntry.getKey()));
-			patch.methods.add(straightLineMethod(method, "()", body));
+			patch.methods.add(InitFixPatchEmitter.straightLineMethod(method, "()", body));
 			log("Emitting apply replay patch: " + className.replace('/', '.') + " -> "
 			    + replay.key() + " (" + replay.oldText() + " -> " + replay.newText() + ")");
 		}
@@ -2919,7 +2919,7 @@ public class InitFix {
 	 * 该字段时，把台账里那条债务 {@link GenerationalFieldLedger#markClosed} 清掉，并在
 	 * {@link PatchReport#recoveredFields()} 里记 {@code recovered: overwrite}，下一代不再把它当成欠着。</p>
 	 */
-	private static void recordReplayOutcome(Class<?> host, PatchPlan plan,
+	static void recordReplayOutcome(Class<?> host, PatchPlan plan,
 	                                        Map<String, String> replayOwners,
 	                                        Map<String, long[]> l1Stats, Map<String, long[]> applyStats,
 	                                        Set<String> failedFields, Set<String> skippedFields,
@@ -3023,608 +3023,6 @@ public class InitFix {
 		}
 	}
 
-	/** 一个字段的完整补丁体：protected 桥接 → 私有调用改写 → 写入协议改写。 */
-	private static List<AbstractInsnNode> rewriteFieldSlice(
-	 String hostInternal, String className, List<AbstractInsnNode> insns,
-	 Map<AbstractInsnNode, ProtectedAccess> protectedAccesses,
-	 Set<String> conditionalFields, Set<String> forceFields,
-	 Map<String, Object> replayArguments) {
-
-		insns = rewriteProtectedAccesses(hostInternal, insns, protectedAccesses);
-		insns = rewritePrivateInvokes(className, insns);
-		insns = rewriteFieldPuts(className, insns, conditionalFields, forceFields, replayArguments);
-		return insns;
-	}
-
-	/** 生成一个静态直线方法：{@code methodName(desc)V}，体内为切片 + RETURN。 */
-	private static MethodNode straightLineMethod(
-	 String methodName, String argDesc, List<AbstractInsnNode> body) {
-		MethodNode m = new MethodNode(
-		 Opcodes.ACC_STATIC | Opcodes.ACC_PUBLIC,
-		 methodName, argDesc + "V", null, null);
-		for (AbstractInsnNode i : body) m.instructions.add(i);
-		m.instructions.add(new InsnNode(Opcodes.RETURN));
-		return m;
-	}
-
-	private static final int    BATCH_LOCAL_TARGETS  = 0;
-	private static final int    BATCH_LOCAL_FROM     = 1;
-	private static final int    BATCH_LOCAL_TO       = 2;
-	private static final int    BATCH_LOCAL_ERROUT   = 3;
-	private static final int    BATCH_LOCAL_INDEX    = 4;
-	private static final int    BATCH_LOCAL_WRITTEN  = 5;
-	private static final int    BATCH_LOCAL_SKIPPED  = 7;
-	private static final int    BATCH_LOCAL_TARGET   = 9;
-	private static final String BATCH_METHOD_DESC    = "([Ljava/lang/Object;II[Ljava/lang/Throwable;)I";
-	private static final String FUSED_BATCH_DESC     = "([Ljava/lang/Object;II[Z[Ljava/lang/Throwable;[I)I";
-	private static final String BRIDGE_INTERNAL      = Type.getInternalName(HotswapBridge.class);
-
-	private record BatchSliceSpec(
-	 String fieldName, List<AbstractInsnNode> body, int lastRealIdx,
-	 int statsKind, int statsIndyIdx, boolean selfOnly) { }
-
-	/**
-	 * 校验并提取可内联进批循环的直线切片元信息；含控制流、额外局部变量或非预期 indy 形态时返回 {@code null}。
-	 */
-	private static BatchSliceSpec inspectBatchSlice(
-	 String fieldName, List<AbstractInsnNode> body, boolean selfOnly) {
-		if (body == null || body.isEmpty()) return null;
-
-		int lastRealIdx = -1;
-		for (int i = body.size() - 1; i >= 0; i--) {
-			AbstractInsnNode insn = body.get(i);
-			if (!(insn instanceof LabelNode || insn instanceof LineNumberNode || insn instanceof FrameNode)) {
-				lastRealIdx = i;
-				break;
-			}
-		}
-		if (lastRealIdx < 0) return null;
-
-		int statsKind = 0; // 0 = none (force write), 1 = conditional, 2 = replay-expected
-		int statsIndyIdx = -1;
-		for (int i = 0; i <= lastRealIdx; i++) {
-			AbstractInsnNode insn = body.get(i);
-			if (insn instanceof LabelNode || insn instanceof LineNumberNode || insn instanceof FrameNode) {
-				continue;
-			}
-			if (insn instanceof JumpInsnNode
-			    || insn instanceof TableSwitchInsnNode
-			    || insn instanceof LookupSwitchInsnNode
-			    || insn instanceof IincInsnNode) {
-				return null;
-			}
-			int op = insn.getOpcode();
-			if (op == Opcodes.RETURN || op == Opcodes.IRETURN || op == Opcodes.LRETURN
-			    || op == Opcodes.FRETURN || op == Opcodes.DRETURN || op == Opcodes.ARETURN
-			    || op == Opcodes.ATHROW || op == Opcodes.RET) {
-				return null;
-			}
-			if (insn instanceof VarInsnNode v) {
-				if (v.getOpcode() != Opcodes.ALOAD || v.var != 0) return null;
-			}
-			if (insn instanceof InvokeDynamicInsnNode indy) {
-				int detected = classifyBatchIndy(indy, fieldName);
-				if (detected < 0) return null;
-				if (detected > 0) {
-					if (statsKind != 0 || i != lastRealIdx) return null;
-					statsKind = detected;
-					statsIndyIdx = i;
-				}
-			}
-		}
-		return new BatchSliceSpec(fieldName, body, lastRealIdx, statsKind, statsIndyIdx, selfOnly);
-	}
-
-	/**
-	 * 为单字段无分支切片生成隐藏补丁类内的批量循环方法
-	 * {@code initBatch$F(Object[] targets, int from, int to, Throwable[] errOut)}。
-	 */
-	private static MethodNode emitBatchMethod(
-	 String batchMethodName, String className, BatchSliceSpec spec) {
-		MethodNode m = new MethodNode(
-		 Opcodes.ACC_STATIC | Opcodes.ACC_PUBLIC,
-		 batchMethodName, BATCH_METHOD_DESC, null, null);
-		InsnList out = m.instructions;
-		Type hostType = Type.getObjectType(className);
-		Object[] baseLocals = new Object[]{
-		 "[Ljava/lang/Object;", Opcodes.INTEGER, Opcodes.INTEGER,
-		 "[Ljava/lang/Throwable;", Opcodes.INTEGER, Opcodes.LONG, Opcodes.LONG
-		};
-		Object[] targetLocals = new Object[]{
-		 "[Ljava/lang/Object;", Opcodes.INTEGER, Opcodes.INTEGER,
-		 "[Ljava/lang/Throwable;", Opcodes.INTEGER, Opcodes.LONG, Opcodes.LONG,
-		 className
-		};
-		Object[] catchLocals = new Object[]{
-		 "[Ljava/lang/Object;", Opcodes.INTEGER, Opcodes.INTEGER,
-		 "[Ljava/lang/Throwable;", Opcodes.INTEGER, Opcodes.LONG, Opcodes.LONG,
-		 "java/lang/Throwable"
-		};
-
-		LabelNode tryStart = new LabelNode();
-		LabelNode tryEnd = new LabelNode();
-		LabelNode loopCond = new LabelNode();
-		LabelNode loopEnd = new LabelNode();
-		LabelNode nextIter = new LabelNode();
-		LabelNode catchHandler = new LabelNode();
-		m.tryCatchBlocks.add(new TryCatchBlockNode(tryStart, tryEnd, catchHandler, "java/lang/Throwable"));
-
-		out.add(new VarInsnNode(Opcodes.ILOAD, BATCH_LOCAL_FROM));
-		out.add(new VarInsnNode(Opcodes.ISTORE, BATCH_LOCAL_INDEX));
-		out.add(new InsnNode(Opcodes.LCONST_0));
-		out.add(new VarInsnNode(Opcodes.LSTORE, BATCH_LOCAL_WRITTEN));
-		out.add(new InsnNode(Opcodes.LCONST_0));
-		out.add(new VarInsnNode(Opcodes.LSTORE, BATCH_LOCAL_SKIPPED));
-
-		out.add(tryStart);
-		out.add(loopCond);
-		out.add(new FrameNode(Opcodes.F_FULL, baseLocals.length, baseLocals, 0, new Object[0]));
-		out.add(new VarInsnNode(Opcodes.ILOAD, BATCH_LOCAL_INDEX));
-		out.add(new VarInsnNode(Opcodes.ILOAD, BATCH_LOCAL_TO));
-		out.add(new JumpInsnNode(Opcodes.IF_ICMPGE, loopEnd));
-
-		out.add(new VarInsnNode(Opcodes.ALOAD, BATCH_LOCAL_TARGETS));
-		out.add(new VarInsnNode(Opcodes.ILOAD, BATCH_LOCAL_INDEX));
-		out.add(new InsnNode(Opcodes.AALOAD));
-		out.add(new TypeInsnNode(Opcodes.CHECKCAST, className));
-		out.add(new VarInsnNode(Opcodes.ASTORE, BATCH_LOCAL_TARGET));
-
-		if (spec.selfOnly()) {
-			out.add(new VarInsnNode(Opcodes.ALOAD, BATCH_LOCAL_TARGET));
-			out.add(new MethodInsnNode(
-			 Opcodes.INVOKEVIRTUAL, "java/lang/Object", "getClass", "()Ljava/lang/Class;", false));
-			out.add(new LdcInsnNode(hostType));
-			out.add(new JumpInsnNode(Opcodes.IF_ACMPNE, nextIter));
-		}
-
-		emitBatchSliceBody(
-		 out, spec, BATCH_LOCAL_TARGET, BATCH_LOCAL_WRITTEN, BATCH_LOCAL_SKIPPED, nextIter, targetLocals);
-
-		if (spec.selfOnly() || spec.statsKind() != 0) {
-			out.add(nextIter);
-			out.add(new FrameNode(Opcodes.F_FULL, baseLocals.length, baseLocals, 0, new Object[0]));
-		}
-		out.add(new IincInsnNode(BATCH_LOCAL_INDEX, 1));
-		out.add(new JumpInsnNode(Opcodes.GOTO, loopCond));
-		out.add(tryEnd);
-
-		out.add(loopEnd);
-		out.add(new FrameNode(Opcodes.F_FULL, baseLocals.length, baseLocals, 0, new Object[0]));
-		if (spec.statsKind() != 0) {
-			LabelNode returnSuccess = new LabelNode();
-			emitBatchStatsFlush(out, hostType, spec.fieldName(), spec.statsKind(),
-			 BATCH_LOCAL_WRITTEN, BATCH_LOCAL_SKIPPED, returnSuccess);
-			out.add(returnSuccess);
-			out.add(new FrameNode(Opcodes.F_FULL, baseLocals.length, baseLocals, 0, new Object[0]));
-		}
-		out.add(new InsnNode(Opcodes.ICONST_M1));
-		out.add(new InsnNode(Opcodes.IRETURN));
-
-		out.add(catchHandler);
-		out.add(new FrameNode(
-		 Opcodes.F_FULL, baseLocals.length, baseLocals, 1, new Object[]{"java/lang/Throwable"}));
-		out.add(new VarInsnNode(Opcodes.ASTORE, BATCH_LOCAL_TARGET));
-		if (spec.statsKind() != 0) {
-			LabelNode skipFlushOnErr = new LabelNode();
-			emitBatchStatsFlush(out, hostType, spec.fieldName(), spec.statsKind(),
-			 BATCH_LOCAL_WRITTEN, BATCH_LOCAL_SKIPPED, skipFlushOnErr);
-			out.add(skipFlushOnErr);
-			out.add(new FrameNode(Opcodes.F_FULL, catchLocals.length, catchLocals, 0, new Object[0]));
-		}
-		out.add(new VarInsnNode(Opcodes.ALOAD, BATCH_LOCAL_ERROUT));
-		out.add(new InsnNode(Opcodes.ICONST_0));
-		out.add(new VarInsnNode(Opcodes.ALOAD, BATCH_LOCAL_TARGET));
-		out.add(new InsnNode(Opcodes.AASTORE));
-		out.add(new VarInsnNode(Opcodes.ILOAD, BATCH_LOCAL_INDEX));
-		out.add(new InsnNode(Opcodes.IRETURN));
-		return m;
-	}
-
-	/**
-	 * 将同一批内多个无依赖字段融合为单次数组遍历 {@code initBatchGroup$G}，
-	 * 让百万级实例在字段数 ≥ 2 时只需承担一轮堆访存与局部性开销，同时保持按字段异常隔离与预算上限。
-	 */
-	private static MethodNode emitFusedBatchMethod(
-	 String methodName, String className, List<BatchSliceSpec> specs) {
-		final int localTargets    = 0;
-		final int localFrom       = 1;
-		final int localTo         = 2;
-		final int localActive     = 3;
-		final int localErrOut     = 4;
-		final int localErrSlotOut = 5;
-		final int localIndex      = 6;
-		final int localIsSelf     = 7;
-
-		int g = specs.size();
-		int[] writtenLocals = new int[g];
-		int[] skippedLocals = new int[g];
-		int nextLocal = 8;
-		int statsFieldCount = 0;
-		boolean allSelfOnly = true;
-		boolean anySelfOnly = false;
-		for (int j = 0; j < g; j++) {
-			BatchSliceSpec s = specs.get(j);
-			allSelfOnly &= s.selfOnly();
-			anySelfOnly |= s.selfOnly();
-			if (s.statsKind() != 0) {
-				writtenLocals[j] = nextLocal;
-				skippedLocals[j] = nextLocal + 2;
-				nextLocal += 4;
-				statsFieldCount++;
-			} else {
-				writtenLocals[j] = -1;
-				skippedLocals[j] = -1;
-			}
-		}
-		final int localTarget = nextLocal;
-
-		int baseFrameLen = 8 + 2 * statsFieldCount;
-		Object[] baseLocals = new Object[baseFrameLen];
-		baseLocals[0] = "[Ljava/lang/Object;";
-		baseLocals[1] = Opcodes.INTEGER;
-		baseLocals[2] = Opcodes.INTEGER;
-		baseLocals[3] = "[Z";
-		baseLocals[4] = "[Ljava/lang/Throwable;";
-		baseLocals[5] = "[I";
-		baseLocals[6] = Opcodes.INTEGER;
-		baseLocals[7] = Opcodes.INTEGER;
-		for (int k = 0; k < 2 * statsFieldCount; k++) {
-			baseLocals[8 + k] = Opcodes.LONG;
-		}
-		Object[] targetLocals = new Object[baseFrameLen + 1];
-		System.arraycopy(baseLocals, 0, targetLocals, 0, baseFrameLen);
-		targetLocals[baseFrameLen] = className;
-
-		MethodNode m = new MethodNode(
-		 Opcodes.ACC_STATIC | Opcodes.ACC_PUBLIC,
-		 methodName, FUSED_BATCH_DESC, null, null);
-		InsnList out = m.instructions;
-		Type hostType = Type.getObjectType(className);
-
-		LabelNode loopCond = new LabelNode();
-		LabelNode loopEnd = new LabelNode();
-		LabelNode nextIter = new LabelNode();
-		LabelNode catchFlushReturn = new LabelNode();
-		LabelNode[] fieldNext = new LabelNode[g];
-		LabelNode[] tryStart = new LabelNode[g];
-		LabelNode[] tryEnd = new LabelNode[g];
-		LabelNode[] catchHandler = new LabelNode[g];
-		for (int j = 0; j < g; j++) {
-			fieldNext[j] = (j == g - 1) ? nextIter : new LabelNode();
-			tryStart[j] = new LabelNode();
-			tryEnd[j] = new LabelNode();
-			catchHandler[j] = new LabelNode();
-			m.tryCatchBlocks.add(new TryCatchBlockNode(tryStart[j], tryEnd[j], catchHandler[j], "java/lang/Throwable"));
-		}
-
-		out.add(new VarInsnNode(Opcodes.ILOAD, localFrom));
-		out.add(new VarInsnNode(Opcodes.ISTORE, localIndex));
-		out.add(new InsnNode(Opcodes.ICONST_0));
-		out.add(new VarInsnNode(Opcodes.ISTORE, localIsSelf));
-		for (int j = 0; j < g; j++) {
-			if (specs.get(j).statsKind() != 0) {
-				out.add(new InsnNode(Opcodes.LCONST_0));
-				out.add(new VarInsnNode(Opcodes.LSTORE, writtenLocals[j]));
-				out.add(new InsnNode(Opcodes.LCONST_0));
-				out.add(new VarInsnNode(Opcodes.LSTORE, skippedLocals[j]));
-			}
-		}
-
-		out.add(loopCond);
-		out.add(new FrameNode(Opcodes.F_FULL, baseLocals.length, baseLocals, 0, new Object[0]));
-		out.add(new VarInsnNode(Opcodes.ILOAD, localIndex));
-		out.add(new VarInsnNode(Opcodes.ILOAD, localTo));
-		out.add(new JumpInsnNode(Opcodes.IF_ICMPGE, loopEnd));
-
-		out.add(new VarInsnNode(Opcodes.ALOAD, localTargets));
-		out.add(new VarInsnNode(Opcodes.ILOAD, localIndex));
-		out.add(new InsnNode(Opcodes.AALOAD));
-		out.add(new TypeInsnNode(Opcodes.CHECKCAST, className));
-		out.add(new VarInsnNode(Opcodes.ASTORE, localTarget));
-
-		if (allSelfOnly) {
-			out.add(new VarInsnNode(Opcodes.ALOAD, localTarget));
-			out.add(new MethodInsnNode(
-			 Opcodes.INVOKEVIRTUAL, "java/lang/Object", "getClass", "()Ljava/lang/Class;", false));
-			out.add(new LdcInsnNode(hostType));
-			out.add(new JumpInsnNode(Opcodes.IF_ACMPNE, nextIter));
-		} else if (anySelfOnly) {
-			LabelNode notSelf = new LabelNode();
-			LabelNode selfDone = new LabelNode();
-			out.add(new VarInsnNode(Opcodes.ALOAD, localTarget));
-			out.add(new MethodInsnNode(
-			 Opcodes.INVOKEVIRTUAL, "java/lang/Object", "getClass", "()Ljava/lang/Class;", false));
-			out.add(new LdcInsnNode(hostType));
-			out.add(new JumpInsnNode(Opcodes.IF_ACMPNE, notSelf));
-			out.add(new InsnNode(Opcodes.ICONST_1));
-			out.add(new JumpInsnNode(Opcodes.GOTO, selfDone));
-			out.add(notSelf);
-			out.add(new FrameNode(Opcodes.F_FULL, targetLocals.length, targetLocals, 0, new Object[0]));
-			out.add(new InsnNode(Opcodes.ICONST_0));
-			out.add(selfDone);
-			out.add(new FrameNode(
-			 Opcodes.F_FULL, targetLocals.length, targetLocals, 1, new Object[]{Opcodes.INTEGER}));
-			out.add(new VarInsnNode(Opcodes.ISTORE, localIsSelf));
-		}
-
-		for (int j = 0; j < g; j++) {
-			BatchSliceSpec spec = specs.get(j);
-			if (j > 0) {
-				out.add(fieldNext[j - 1]);
-				out.add(new FrameNode(Opcodes.F_FULL, targetLocals.length, targetLocals, 0, new Object[0]));
-			}
-			out.add(new VarInsnNode(Opcodes.ALOAD, localActive));
-			out.add(new IntInsnNode(Opcodes.BIPUSH, j));
-			out.add(new InsnNode(Opcodes.BALOAD));
-			out.add(new JumpInsnNode(Opcodes.IFEQ, fieldNext[j]));
-			if (!allSelfOnly && spec.selfOnly()) {
-				out.add(new VarInsnNode(Opcodes.ILOAD, localIsSelf));
-				out.add(new JumpInsnNode(Opcodes.IFEQ, fieldNext[j]));
-			}
-			out.add(tryStart[j]);
-			emitBatchSliceBody(
-			 out, spec, localTarget, writtenLocals[j], skippedLocals[j], fieldNext[j], targetLocals);
-			out.add(tryEnd[j]);
-		}
-
-		out.add(nextIter);
-		out.add(new FrameNode(Opcodes.F_FULL, targetLocals.length, targetLocals, 0, new Object[0]));
-		out.add(new IincInsnNode(localIndex, 1));
-		out.add(new JumpInsnNode(Opcodes.GOTO, loopCond));
-
-		out.add(loopEnd);
-		out.add(new FrameNode(Opcodes.F_FULL, baseLocals.length, baseLocals, 0, new Object[0]));
-		emitFusedStatsFlushes(out, hostType, specs, writtenLocals, skippedLocals, baseLocals);
-		out.add(new InsnNode(Opcodes.ICONST_M1));
-		out.add(new InsnNode(Opcodes.IRETURN));
-
-		for (int j = 0; j < g; j++) {
-			out.add(catchHandler[j]);
-			out.add(new FrameNode(
-			 Opcodes.F_FULL, baseLocals.length, baseLocals, 1, new Object[]{"java/lang/Throwable"}));
-			out.add(new VarInsnNode(Opcodes.ASTORE, localTarget));
-			out.add(new VarInsnNode(Opcodes.ALOAD, localErrOut));
-			out.add(new InsnNode(Opcodes.ICONST_0));
-			out.add(new VarInsnNode(Opcodes.ALOAD, localTarget));
-			out.add(new InsnNode(Opcodes.AASTORE));
-			out.add(new VarInsnNode(Opcodes.ALOAD, localErrSlotOut));
-			out.add(new InsnNode(Opcodes.ICONST_0));
-			out.add(new IntInsnNode(Opcodes.BIPUSH, j));
-			out.add(new InsnNode(Opcodes.IASTORE));
-			out.add(new JumpInsnNode(Opcodes.GOTO, catchFlushReturn));
-		}
-
-		out.add(catchFlushReturn);
-		out.add(new FrameNode(Opcodes.F_FULL, baseLocals.length, baseLocals, 0, new Object[0]));
-		emitFusedStatsFlushes(out, hostType, specs, writtenLocals, skippedLocals, baseLocals);
-		out.add(new VarInsnNode(Opcodes.ILOAD, localIndex));
-		out.add(new InsnNode(Opcodes.IRETURN));
-		return m;
-	}
-
-	private static void emitBatchSliceBody(
-	 InsnList out, BatchSliceSpec spec, int targetLocal,
-	 int writtenLocal, int skippedLocal, LabelNode nextTargetLabel, Object[] targetLocals) {
-		Map<LabelNode, LabelNode> emptyLabels = Collections.emptyMap();
-		for (int i = 0; i <= spec.lastRealIdx(); i++) {
-			AbstractInsnNode insn = spec.body().get(i);
-			if (insn instanceof LabelNode || insn instanceof LineNumberNode || insn instanceof FrameNode) {
-				continue;
-			}
-			if (i == spec.statsIndyIdx()) {
-				InvokeDynamicInsnNode indy = (InvokeDynamicInsnNode) insn;
-				Object[] argsCopy = indy.bsmArgs.clone();
-				argsCopy[0] = spec.statsKind() == 1
-				 ? HotswapBridge.KIND_CONDITIONAL_BATCH
-				 : HotswapBridge.KIND_CONDITIONAL_EXPECTED_BATCH;
-				String batchIndyDesc = indy.desc.substring(0, indy.desc.length() - 1) + "Z";
-				LabelNode skipStats = new LabelNode();
-				out.add(new InvokeDynamicInsnNode(indy.name, batchIndyDesc, indy.bsm, argsCopy));
-				out.add(new JumpInsnNode(Opcodes.IFEQ, skipStats));
-				out.add(new VarInsnNode(Opcodes.LLOAD, writtenLocal));
-				out.add(new InsnNode(Opcodes.LCONST_1));
-				out.add(new InsnNode(Opcodes.LADD));
-				out.add(new VarInsnNode(Opcodes.LSTORE, writtenLocal));
-				out.add(new JumpInsnNode(Opcodes.GOTO, nextTargetLabel));
-
-				out.add(skipStats);
-				out.add(new FrameNode(Opcodes.F_FULL, targetLocals.length, targetLocals, 0, new Object[0]));
-				out.add(new VarInsnNode(Opcodes.LLOAD, skippedLocal));
-				out.add(new InsnNode(Opcodes.LCONST_1));
-				out.add(new InsnNode(Opcodes.LADD));
-				out.add(new VarInsnNode(Opcodes.LSTORE, skippedLocal));
-				continue;
-			}
-			if (insn instanceof VarInsnNode v && v.getOpcode() == Opcodes.ALOAD && v.var == 0) {
-				out.add(new VarInsnNode(Opcodes.ALOAD, targetLocal));
-			} else {
-				out.add(insn.clone(emptyLabels));
-			}
-		}
-	}
-
-	private static void emitFusedStatsFlushes(
-	 InsnList out, Type hostType, List<BatchSliceSpec> specs,
-	 int[] writtenLocals, int[] skippedLocals, Object[] frameLocals) {
-		for (int j = 0; j < specs.size(); j++) {
-			BatchSliceSpec s = specs.get(j);
-			if (s.statsKind() == 0) continue;
-			LabelNode nextFlush = new LabelNode();
-			emitBatchStatsFlush(out, hostType, s.fieldName(), s.statsKind(),
-			 writtenLocals[j], skippedLocals[j], nextFlush);
-			out.add(nextFlush);
-			out.add(new FrameNode(Opcodes.F_FULL, frameLocals.length, frameLocals, 0, new Object[0]));
-		}
-	}
-
-	/** 识别批循环中的 bridge indy：0=无需统计(protected/force)，1=conditional，2=replay-expected，-1=不兼容。 */
-	private static int classifyBatchIndy(InvokeDynamicInsnNode indy, String fieldName) {
-		if (indy.bsmArgs == null || indy.bsmArgs.length < 2 || !(indy.bsmArgs[0] instanceof Integer kind)) {
-			return 0;
-		}
-		if (BRIDGE_BSM.equals(indy.bsm)) {
-			if (kind == HotswapBridge.KIND_CONDITIONAL) {
-				if (!fieldName.equals(indy.name) || indy.desc == null || !indy.desc.endsWith(")V")) return -1;
-				return 1;
-			}
-			return 0;
-		}
-		if (BRIDGE_BSM_EXPECTED.equals(indy.bsm)) {
-			if (kind == HotswapBridge.KIND_CONDITIONAL_EXPECTED) {
-				if (!fieldName.equals(indy.name) || indy.desc == null || !indy.desc.endsWith(")V")) return -1;
-				return 2;
-			}
-			return -1;
-		}
-		return 0;
-	}
-
-	/**
-	 * 识别形如 {@code ALOAD 0; <字面量常量>; INVOKEDYNAMIC (Lhost;T)V (CONDITIONAL|FORCE)} 的切片，
-	 * 供 {@link HotswapBridge#constantBatchLoop} 走常驻 C2 批循环而免去每轮新隐藏类的编译延迟。
-	 */
-	private static ConstantInitSpec extractConstantInitSpec(
-	 String fieldName, String className, List<AbstractInsnNode> body) {
-		if (body == null || body.isEmpty()) return null;
-		AbstractInsnNode insn0 = null;
-		AbstractInsnNode insn1 = null;
-		AbstractInsnNode insn2 = null;
-		int realCount = 0;
-		for (AbstractInsnNode insn : body) {
-			if (insn instanceof LabelNode || insn instanceof LineNumberNode || insn instanceof FrameNode) {
-				continue;
-			}
-			if (realCount == 0) insn0 = insn;
-			else if (realCount == 1) insn1 = insn;
-			else if (realCount == 2) insn2 = insn;
-			else return null;
-			realCount++;
-		}
-		if (realCount != 3) return null;
-		if (!(insn0 instanceof VarInsnNode v) || v.getOpcode() != Opcodes.ALOAD || v.var != 0) return null;
-		if (!(insn2 instanceof InvokeDynamicInsnNode indy)) return null;
-		if (!BRIDGE_BSM.equals(indy.bsm) || !fieldName.equals(indy.name)) return null;
-		if (indy.bsmArgs == null || indy.bsmArgs.length < 2 || !(indy.bsmArgs[0] instanceof Integer kind)) {
-			return null;
-		}
-		if (kind != HotswapBridge.KIND_CONDITIONAL && kind != HotswapBridge.KIND_FORCE) return null;
-		Type[] args = Type.getArgumentTypes(indy.desc);
-		if (args.length != 2 || Type.getReturnType(indy.desc).getSort() != Type.VOID) return null;
-		if (args[0].getSort() != Type.OBJECT || !className.equals(args[0].getInternalName())) return null;
-		String fieldDesc = args[1].getDescriptor();
-		Object value = decodeConstantPush(insn1, fieldDesc);
-		if (value == UNSUPPORTED_CONST) return null;
-		return new ConstantInitSpec(fieldDesc, kind == HotswapBridge.KIND_FORCE, value);
-	}
-
-	private static final Object UNSUPPORTED_CONST = new Object();
-
-	private static Object decodeConstantPush(AbstractInsnNode insn, String fieldDesc) {
-		int op = insn.getOpcode();
-		return switch (fieldDesc) {
-			case "Z" -> {
-				Integer iv = decodeIntPush(insn);
-				yield iv == null ? UNSUPPORTED_CONST : Boolean.valueOf(iv != 0);
-			}
-			case "B" -> {
-				Integer iv = decodeIntPush(insn);
-				yield iv == null ? UNSUPPORTED_CONST : Byte.valueOf((byte) iv.intValue());
-			}
-			case "C" -> {
-				Integer iv = decodeIntPush(insn);
-				yield iv == null ? UNSUPPORTED_CONST : Character.valueOf((char) iv.intValue());
-			}
-			case "S" -> {
-				Integer iv = decodeIntPush(insn);
-				yield iv == null ? UNSUPPORTED_CONST : Short.valueOf((short) iv.intValue());
-			}
-			case "I" -> {
-				Integer iv = decodeIntPush(insn);
-				yield iv == null ? UNSUPPORTED_CONST : iv;
-			}
-			case "J" -> {
-				if (op == Opcodes.LCONST_0) yield 0L;
-				if (op == Opcodes.LCONST_1) yield 1L;
-				if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Long l) yield l;
-				yield UNSUPPORTED_CONST;
-			}
-			case "F" -> {
-				if (op == Opcodes.FCONST_0) yield 0.0f;
-				if (op == Opcodes.FCONST_1) yield 1.0f;
-				if (op == Opcodes.FCONST_2) yield 2.0f;
-				if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Float f) yield f;
-				yield UNSUPPORTED_CONST;
-			}
-			case "D" -> {
-				if (op == Opcodes.DCONST_0) yield 0.0d;
-				if (op == Opcodes.DCONST_1) yield 1.0d;
-				if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Double d) yield d;
-				yield UNSUPPORTED_CONST;
-			}
-			default -> {
-				if (!fieldDesc.startsWith("L") && !fieldDesc.startsWith("[")) yield UNSUPPORTED_CONST;
-				if (op == Opcodes.ACONST_NULL) yield null;
-				if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof String s) yield s;
-				yield UNSUPPORTED_CONST;
-			}
-		};
-	}
-
-	private static Integer decodeIntPush(AbstractInsnNode insn) {
-		int op = insn.getOpcode();
-		if (op >= Opcodes.ICONST_M1 && op <= Opcodes.ICONST_5) return op - Opcodes.ICONST_0;
-		if (op == Opcodes.BIPUSH || op == Opcodes.SIPUSH) return ((IntInsnNode) insn).operand;
-		if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Integer i) return i;
-		return null;
-	}
-
-	private static Class<?> descriptorValueClass(String fieldDesc) {
-		return switch (fieldDesc) {
-			case "Z" -> boolean.class;
-			case "B" -> byte.class;
-			case "C" -> char.class;
-			case "S" -> short.class;
-			case "I" -> int.class;
-			case "J" -> long.class;
-			case "F" -> float.class;
-			case "D" -> double.class;
-			default -> Object.class;
-		};
-	}
-
-	private static void emitBatchStatsFlush(
-	 InsnList out, Type hostType, String fieldName, int statsKind,
-	 int writtenLocal, int skippedLocal, LabelNode skipLabel) {
-		out.add(new VarInsnNode(Opcodes.LLOAD, writtenLocal));
-		out.add(new VarInsnNode(Opcodes.LLOAD, skippedLocal));
-		out.add(new InsnNode(Opcodes.LOR));
-		out.add(new InsnNode(Opcodes.LCONST_0));
-		out.add(new InsnNode(Opcodes.LCMP));
-		out.add(new JumpInsnNode(Opcodes.IFEQ, skipLabel));
-		out.add(new LdcInsnNode(hostType));
-		out.add(new LdcInsnNode(fieldName));
-		out.add(new VarInsnNode(Opcodes.LLOAD, writtenLocal));
-		out.add(new VarInsnNode(Opcodes.LLOAD, skippedLocal));
-		out.add(new MethodInsnNode(
-		 Opcodes.INVOKESTATIC,
-		 BRIDGE_INTERNAL,
-		 statsKind == 1 ? "addConditionalStats" : "addReplayStats",
-		 "(Ljava/lang/Class;Ljava/lang/String;JJ)V",
-		 false));
-	}
-
-	/** 字段名里可能含 {@code . ; [ / < >} 等非法方法名字符（混淆器/字节码注入），替换掉。 */
-	private static String uniqueMethodName(String prefix, String fieldName, Set<String> used) {
-		StringBuilder sb = new StringBuilder(prefix);
-		for (int i = 0; i < fieldName.length(); i++) {
-			char c = fieldName.charAt(i);
-			sb.append(c == '.' || c == ';' || c == '[' || c == '/' || c == '<' || c == '>' ? '_' : c);
-		}
-		String base = sb.toString();
-		String name = base;
-		for (int n = 2; !used.add(name); n++) name = base + "$" + n;
-		return name;
-	}
 
 	/**
 	 * Cross-class prerequisites read by one field's init slice.
@@ -4096,67 +3494,6 @@ public class InitFix {
 		}
 	}
 
-	// ==================== Analyzer 封装 ====================
-
-	private static Frame<SourceValue>[] analyze(String className, MethodNode method)
-	 throws AnalyzerException {
-		Analyzer<SourceValue> analyzer = new Analyzer<>(new AliasInterpreter()) {
-			@Override
-			protected boolean newControlFlowExceptionEdge(int insnIndex, TryCatchBlockNode tcb) {
-				return false;
-			}
-		};
-		return analyzer.analyze(className, method);
-	}
-
-	// ==================== 根构造器判定 ====================
-
-	private static boolean isRootConstructor(ClassNode hostClass, MethodNode init,
-	                                         Map<MethodNode, Boolean> cache) {
-		Boolean cached = cache.get(init);
-		if (cached != null) return cached;
-
-		boolean result = computeIsRootConstructor(hostClass, init);
-		cache.put(init, result);
-		return result;
-	}
-
-	private static boolean computeIsRootConstructor(ClassNode hostClass, MethodNode init) {
-		Frame<SourceValue>[] frames;
-		try {
-			frames = analyze(hostClass.name, init);
-		} catch (AnalyzerException e) {
-			return true;
-		}
-
-		InsnList insns = init.instructions;
-		for (int i = 0; i < insns.size(); i++) {
-			AbstractInsnNode n = insns.get(i);
-			if (!(n instanceof MethodInsnNode m)
-			    || m.getOpcode() != Opcodes.INVOKESPECIAL
-			    || !"<init>".equals(m.name)
-			    || !m.owner.equals(hostClass.name)) { continue; }
-
-			Frame<SourceValue> frame = frames[i];
-			if (frame == null) continue;
-
-			int argCount = Type.getArgumentTypes(m.desc).length;
-			int recvIdx  = frame.getStackSize() - 1 - argCount;
-			if (recvIdx < 0) continue;
-
-			SourceValue sv = frame.getStack(recvIdx);
-			if (sv == null) continue;
-
-			for (AbstractInsnNode src : sv.insns) {
-				if (src instanceof VarInsnNode v
-				    && v.getOpcode() == Opcodes.ALOAD
-				    && v.var == 0) {
-					return false;
-				}
-			}
-		}
-		return true;
-	}
 
 	// ==================== 后续加工检查 ====================
 
@@ -4180,8 +3517,8 @@ public class InitFix {
 			}
 		}
 
-		boolean fieldIsPrimitive = isPrimitiveDesc(fieldNode.desc);
-		boolean fieldIsImmutable = isImmutableType(fieldNode.desc);
+		boolean fieldIsPrimitive = InitFixSafetyGate.isPrimitiveDesc(fieldNode.desc);
+		boolean fieldIsImmutable = InitFixSafetyGate.isImmutableType(fieldNode.desc);
 
 		int putOp = isStatic ? Opcodes.PUTSTATIC : Opcodes.PUTFIELD;
 		int getOp = isStatic ? Opcodes.GETSTATIC : Opcodes.GETFIELD;
@@ -4202,7 +3539,7 @@ public class InitFix {
 					if (!acceptedInsns.contains(n)) {
 						String where = className + "." + m.name + " at index "
 						               + m.instructions.indexOf(n);
-						if (isThreadAffineType(fieldNode.desc)) {
+						if (InitFixSafetyGate.isThreadAffineType(fieldNode.desc)) {
 							// 按线程的值类型单独说清楚：补丁在热更线程上单线程执行，
 							// 构造器里对它的使用无法重放，重算只会得到另一条线程的副本。
 							return "thread-affine field " + fieldNode.desc + " is used outside its "
@@ -4257,7 +3594,7 @@ public class InitFix {
 		StringBuilder sb = new StringBuilder();
 		sb.append("@RemoldReinit waived gate (").append(gateReason).append("): "
 		                                                                  + "patch only reconstructs initializer, constructor usage will not be replayed");
-		if (fieldNode != null && isThreadAffineType(fieldNode.desc)) {
+		if (fieldNode != null && InitFixSafetyGate.isThreadAffineType(fieldNode.desc)) {
 			sb.append("; field has thread-affine type (").append(fieldNode.desc)
 			 .append("), patch executes single-threaded on hotswap thread, per-thread copy cannot be restored, "
 			         + "use @OnReload if per-instance/thread replenishment is needed");
@@ -4395,1694 +3732,35 @@ public class InitFix {
 		return null;
 	}
 
-	// ==================== 宿主 Nest 视图（docs/initfix/01-safety-gate.md §3 / §1 的字节码底座） ====================
-
-	/**
-	 * 宿主的 Nest 视图：完整成员清单与紧凑的 Nest 字段写入索引。
-	 *
-	 * <p>用于两件事：{@code docs/initfix/01-safety-gate.md} §3 的"全 Nest 单写证明"，以及 {@code docs/initfix/01-safety-gate.md} §1 T0
-	 * 的"该字段在任何地方都没被写过"判定。</p>
-	 *
-	 * <p><b>只读字节码，绝不 {@code Class.forName}</b>：优先取
-	 * {@link RemoldAgent#bytecodeCache}（内存里当前生效的新版本），其次取
-	 * {@link remold.BytecodeSources} 登记口（织入期生成的合成类），退化为 ClassLoader
-	 * 资源流。任一成员读不到时 {@link #complete()} 为 false，调用方必须按"无法证明"处理
-	 * （拒绝），而不是当作"没有第二处写入"。</p>
-	 */
-	private static final class NestView {
-		private final List<ClassHierarchyOracle.NestFieldWrite> writes;
-		private final boolean                                   complete;
-
-		private NestView(List<ClassHierarchyOracle.NestFieldWrite> writes, boolean complete) {
-			this.writes = writes;
-			this.complete = complete;
-		}
-
-		static NestView of(Class<?> host, ClassNode hostClass) {
-			ClassLoader loader = host == null ? null : host.getClassLoader();
-			return of(host, hostClass, new HierarchyTreeOracle(loader, hostClass));
-		}
-
-		static NestView of(Class<?> host, ClassNode hostClass, HierarchyTreeOracle oracle) {
-			try {
-				oracle.getNestMembers(hostClass.name);
-				return new NestView(oracle.getNestFieldWrites(hostClass.name), true);
-			} catch (IllegalStateException unavailable) {
-				RemoldAgent.warn("Nest scan incomplete for " + hostClass.name + ": "
-					+ unavailable.getMessage()
-					+ missingBytecodeHint(unresolvedClassOf(unavailable.getMessage())));
-				return new NestView(List.of(), false);
-			}
-		}
-
-		boolean complete() { return complete; }
-
-		/**
-		 * 统计 Nest 内针对指定字段的写指令总数。
-		 * <p>只有 {@link #complete()} 为 true 时结果才可用于"零写入"断言。</p>
-		 */
-		int countPuts(String ownerInternal, String name, String desc, int putOp) {
-			int n = 0;
-			for (ClassHierarchyOracle.NestFieldWrite write : writes) {
-				FieldInsnNode field = write.instruction;
-				if (field.getOpcode() != putOp) continue;
-				if (!field.owner.equals(ownerInternal)
-				    || !field.name.equals(name)
-				    || !field.desc.equals(desc)) { continue; }
-				n++;
-			}
-			return n;
-		}
-
-		/**
-		 * 找出 Nest 内除 {@code self} 之外的第一处写指令。
-		 * @return {@code 类.方法描述符} 形式的位置；null 表示不存在第二处写入
-		 */
-		String firstOtherPut(String ownerInternal, String name, String desc,
-		                     int putOp, FieldInsnNode self) {
-			for (ClassHierarchyOracle.NestFieldWrite write : writes) {
-				FieldInsnNode field = write.instruction;
-				if (field.getOpcode() != putOp || field == self) continue;
-				if (!field.owner.equals(ownerInternal)
-				    || !field.name.equals(name)
-				    || !field.desc.equals(desc)) { continue; }
-				return write.className + "." + write.methodName + write.methodDesc;
-			}
-			return null;
-		}
-	}
-
-	// ==================== T0 零值等价（docs/initfix/01-safety-gate.md §1） ====================
-
-	/**
-	 * T0 判定：该新增字段是否"零值等价"——存量实例与静态环境本来就已经是默认值。
-	 *
-	 * <p>判据：</p>
-	 * <ol>
-	 *   <li>静态字段带 {@code ConstantValue}：按位判零（{@code static final String S = ""}
-	 *       <b>不是</b>零值，因为存量静态环境里是 {@code null}）；</li>
-	 *   <li>全 Nest 范围内没有任何写指令：仅声明未赋值，类型默认值即最终值；</li>
-	 *   <li>该字段的每一次写都能拿到安全切片，且切片都是"压入类型零值 + 写字段"。</li>
-	 * </ol>
-	 *
-	 * <p>浮点按位判定：{@code -0.0f} / {@code -0.0d} / {@code NaN} 的位模式非零，
-	 * 因此<b>不</b>算零值等价（{@code docs/initfix/01-safety-gate.md} §1 明确排除）。第 3 条要求"切片数与写指令数相等"，
-	 * 避免出现"只看得到零值那次写、看不到另一次危险写"的静默误判。</p>
-	 */
-	private static boolean isZeroEquivalentField(
-	 NestView nest, ClassNode newClass, FieldNode field, boolean isStatic,
-	 Map<String, List<FieldExtract>> extracts) {
-
-		if (field == null) return false;
-
-		if (isStatic && field.value != null) {
-			return isZeroConstant(field.value);
-		}
-		if (!nest.complete()) return false;
-
-		int putOp  = isStatic ? Opcodes.PUTSTATIC : Opcodes.PUTFIELD;
-		int writes = nest.countPuts(newClass.name, field.name, field.desc, putOp);
-		if (writes == 0) return true;
-
-		List<FieldExtract> feList = extracts.get(field.name);
-		if (feList == null || feList.size() != writes) return false;
-
-		for (FieldExtract fe : feList) {
-			if (!isZeroValueExtract(fe.instructions(), isStatic, field.desc)) return false;
-		}
-		return true;
-	}
-
-	/** 按位判零的 {@code ConstantValue}（引用常量只有 {@code null} 才是零值，而 null 不落属性）。 */
-	private static boolean isZeroConstant(Object cst) {
-		if (cst instanceof Integer i) return i == 0;
-		if (cst instanceof Long l) return l == 0L;
-		if (cst instanceof Float f) return Float.floatToRawIntBits(f) == 0;
-		if (cst instanceof Double d) return Double.doubleToRawLongBits(d) == 0;
-		if (cst instanceof Short s) return s == 0;
-		if (cst instanceof Byte b) return b == 0;
-		if (cst instanceof Character c) return c == '\u0000';
-		if (cst instanceof Boolean b) return !b;
-		return false;
-	}
-
-	/**
-	 * 切片是否就是"压入类型零值 + 写字段"。
-	 * <p>实例字段的期望形态是 {@code [ALOAD 0, <零值>, PUTFIELD]}，
-	 * 静态字段是 {@code [<零值>, PUTSTATIC]}（切片经过提取器裁剪，已不含 label/frame）。</p>
-	 */
-	private static boolean isZeroValueExtract(
-	 List<AbstractInsnNode> insns, boolean isStatic, String desc) {
-
-		int expected = isStatic ? 2 : 3;
-		if (insns.size() != expected) return false;
-
-		int valueIdx = isStatic ? 0 : 1;
-		int putIdx   = isStatic ? 1 : 2;
-
-		if (!isStatic) {
-			if (!(insns.get(0) instanceof VarInsnNode v
-			      && v.getOpcode() == Opcodes.ALOAD && v.var == 0)) { return false; }
-		}
-		if (!(insns.get(putIdx) instanceof FieldInsnNode f)
-		    || f.getOpcode() != (isStatic ? Opcodes.PUTSTATIC : Opcodes.PUTFIELD)) { return false; }
-
-		return isZeroConstantInsn(insns.get(valueIdx), desc);
-	}
-
-	/** 单条指令是否是字段描述符对应的类型零值。 */
-	private static boolean isZeroConstantInsn(AbstractInsnNode n, String desc) {
-		if (n == null || desc == null || desc.isEmpty()) return false;
-
-		char    c   = desc.charAt(0);
-		boolean ref = c == 'L' || c == '[';
-		boolean isJ = c == 'J';
-		boolean isF = c == 'F';
-		boolean isD = c == 'D';
-		boolean isI = !ref && !isJ && !isF && !isD;   // Z/B/C/S/I
-
-		if (ref) return n.getOpcode() == Opcodes.ACONST_NULL;
-		if (n.getOpcode() == Opcodes.ICONST_0) return isI;
-		if (n.getOpcode() == Opcodes.LCONST_0) return isJ;
-		if (n.getOpcode() == Opcodes.FCONST_0) return isF;
-		if (n.getOpcode() == Opcodes.DCONST_0) return isD;
-
-		if (n instanceof LdcInsnNode ldc) {
-			Object cst = ldc.cst;
-			if (cst instanceof Integer i) return isI && i == 0;
-			if (cst instanceof Long l) return isJ && l == 0L;
-			if (cst instanceof Float f) return isF && Float.floatToRawIntBits(f) == 0;
-			if (cst instanceof Double d) return isD && Double.doubleToRawLongBits(d) == 0;
-		}
-		return false;
-	}
-
-	// ==================== P0 最小效应防御（docs/initfix/01-safety-gate.md §2 的完整 8 位掩码属于 P2） ====================
-
-	/** 基础集合的无参构造：{@code ALLOC_PURE}，永不拦截（docs/initfix/01-safety-gate.md §2.1 要求"严防误杀"）。 */
-	private static final Set<String> PURE_NOARG_CTOR_OWNERS = Set.of(
-	 "java/util/ArrayList", "java/util/LinkedList", "java/util/Vector", "java/util/Stack",
-	 "java/util/HashMap", "java/util/LinkedHashMap", "java/util/TreeMap", "java/util/Hashtable",
-	 "java/util/WeakHashMap", "java/util/IdentityHashMap",
-	 "java/util/HashSet", "java/util/LinkedHashSet", "java/util/TreeSet",
-	 "java/util/ArrayDeque", "java/util/PriorityQueue",
-	 "java/util/concurrent/ConcurrentHashMap", "java/util/concurrent/ConcurrentLinkedQueue",
-	 "java/util/concurrent/CopyOnWriteArrayList", "java/util/concurrent/CopyOnWriteArraySet",
-	 "java/lang/StringBuilder", "java/lang/StringBuffer");
-
-	/** Logger 工厂：新增 {@code private static final Logger LOG = ...} 字段依赖它。 */
-	private static final Set<String> LOGGER_FACTORY_OWNERS = Set.of(
-	 "org/slf4j/LoggerFactory", "java/util/logging/Logger",
-	 "org/apache/logging/log4j/LogManager", "org/apache/commons/logging/LogFactory");
-
-	/** Logger 类型：其 {@code isXxxEnabled}/{@code getXxx} 是纯查询，放行；落地方法走黑名单。 */
-	private static final Set<String> LOGGER_TYPES = Set.of(
-	 "org/slf4j/Logger", "java/util/logging/Logger",
-	 "org/apache/logging/log4j/Logger", "org/apache/commons/logging/Log");
-
-	/** ThreadLocal 家族（{@code InheritableThreadLocal} 复用的是同一套方法名）。 */
-	private static final Set<String> THREAD_LOCAL_OWNERS = Set.of(
-	 "java/lang/ThreadLocal", "java/lang/InheritableThreadLocal");
-
-	/**
-	 * 字段描述符层面的"按线程的值"类型。
-	 *
-	 * <p>这类字段在构造器里的<b>使用</b>（不只是初始化式）无法被补丁重放：补丁只在
-	 * 热更线程上单线程跑，而构造器当时是在应用线程上跑的，per-thread 副本根本不是同一份。
-	 * 因此它们默认被"后续加工检查"拒绝；{@code @RemoldReinit} 可以显式解锁，但必须告警。</p>
-	 */
-	private static final Set<String> THREAD_AFFINE_DESCS = Set.of(
-	 "Ljava/lang/ThreadLocal;", "Ljava/lang/InheritableThreadLocal;");
-
-	private static boolean isThreadAffineType(String desc) {
-		return desc != null && THREAD_AFFINE_DESCS.contains(desc);
-	}
-
-	/**
-	 * ThreadLocal 家族里依赖"执行线程"的方法：{@code get}/{@code initialValue}/{@code childValue}
-	 * 读的是<b>当前线程</b>的副本（{@code docs/initfix/01-safety-gate.md} §2 bit 4 {@code READS_MUTABLE}），{@code set}/{@code remove}
-	 * 变异堆状态（bit 5 {@code MUTATES_HEAP}）。
-	 *
-	 * <p>补丁永远在热更线程上执行，而实例是在应用线程上构造的 —— 两者不是同一条线程，
-	 * 重算必然读到另一份（通常是空的）副本。实测：构造线程上 {@code snapshot="abc"}，
-	 * 补丁线程算出 {@code ""} 并静默写入，属"宁可不补"要拦的那类。
-	 * {@code withInitial} 只是分配一个新的 ThreadLocal，不读任何线程状态，保持放行。</p>
-	 */
-	private static final Set<String> THREAD_LOCAL_STATEFUL = Set.of(
-	 "get", "set", "remove", "initialValue", "childValue");
-
-	/** 可复用 builder 的类型：两者都是 final 类，不存在"宿主自身即接收者"的情况。 */
-	private static final Set<String> BUILDER_OWNERS = Set.of(
-	 "java/lang/StringBuilder", "java/lang/StringBuffer");
-
-	/**
-	 * builder 的变异方法。这些方法本身必须放行（{@code new StringBuilder().append(..)}
-	 * 是 {@code docs/initfix/01-safety-gate.md} §2 明确要求豁免的 {@code ALLOC_PURE}），所以判定落在<b>接收者</b>上，
-	 * 见 {@link #builderMutatorReason}。
-	 */
-	private static final Set<String> BUILDER_MUTATORS = Set.of(
-	 "append", "insert", "delete", "deleteCharAt", "replace", "reverse",
-	 "setLength", "setCharAt", "ensureCapacity", "trimToSize");
-
-	/**
-	 * P0 版最小效应判定。
-	 *
-	 * <p>判决顺序：</p>
-	 * <ol>
-	 *   <li><b>精确危险重载</b>：环境依赖的个别重载（无参 {@code String.toUpperCase()}、
-	 *       默认字符集的 {@code getBytes()}/{@code new String(byte[])}、{@code String.format}、
-	 *       {@code String.intern()}）；</li>
-	 *   <li><b>白名单</b>：基础集合无参构造、Logger 工厂与纯查询、{@code Objects.requireNonNull}、
-	 *       Kotlin {@code Intrinsics}、不可变集合工厂 —— 优先级高于第 3 步的包级黑名单，
-	 *       这正是"严防误杀基础集合构造与 Logger"的落点；</li>
-	 *   <li><b>黑名单</b>：非确定性（时间/随机/identityHashCode/默认时区与字符集）、
-	 *       线程局部堆状态（ThreadLocal 的 get/set/remove）、反射与动态调用、
-	 *       进程与类加载、文件/网络 IO、日志输出；</li>
-	 *   <li><b>A+ exception for the {@code Object.toString} coercion</b>: the blacklist item
-	 *       {@code identity-dependent dispatch java/lang/Object.toString} is skipped when the
-	 *       receiver is proven to be built inside the slice out of constants, checkcasts and one
-	 *       of the whitelisted {@code kotlin.text.StringsKt} trim functions
-	 *       (see {@link #allowedStringCoercion}). {@code hashCode} is never exempted.</li>
-	 *   <li><b>接收者敏感的可复用 builder 判定</b>：{@code StringBuilder}/{@code StringBuffer}
-	 *       的变异方法，接收者不是本切片内 {@code NEW} 出来的对象时拒绝
-	 *       （见 {@link #builderMutatorReason}）；</li>
-	 *   <li>未命中者 P0 一律放行 —— 这一步只做"明确危险"的负向拦截，
-	 *       真正的白名单准入（{@code ALLOWED_MASK}）在 P2 落地。</li>
-	 * </ol>
-	 * @return null 表示放行；否则返回拒绝原因
-	 */
-	private static String effectReason(AbstractInsnNode n, InsnList insns,
-	                                   Frame<SourceValue>[] frames,
-	                                   Set<AbstractInsnNode> collected) {
-		if (n instanceof MethodInsnNode m) {
-			if (isImpureOverload(m)) {
-				return "environment-dependent call " + m.owner + "." + m.name + m.desc;
-			}
-			if (isWhitelistedCall(m)) return null;
-			if (allowedStringCoercion(m, insns, frames, collected)) return null;
-			return blacklistedCallReason(m);
-		}
-		if (n instanceof FieldInsnNode f && f.getOpcode() == Opcodes.GETSTATIC) {
-			if ("java/lang/System".equals(f.owner)
-			    && ("out".equals(f.name) || "err".equals(f.name) || "in".equals(f.name))) {
-				return "reads process-global stream java/lang/System." + f.name;
-			}
-			if ("java/io/File".equals(f.owner) && f.name.startsWith("separator")) {
-				return "reads platform-dependent java/io/File." + f.name;
-			}
-		}
-		return null;
-	}
-
-	/** {@code docs/initfix/01-safety-gate.md} §2 bit 3 的典型例子：同名重载里依赖默认 Locale / 默认 Charset 的那几个。 */
-	private static boolean isImpureOverload(MethodInsnNode m) {
-		if (!"java/lang/String".equals(m.owner)) return false;
-		String name = m.name, desc = m.desc;
-		if ("<init>".equals(name)) {
-			return desc.equals("([B)V") || desc.equals("([BII)V");
-		}
-		if ("toUpperCase".equals(name) || "toLowerCase".equals(name)) {
-			return desc.equals("()Ljava/lang/String;");
-		}
-		if ("getBytes".equals(name)) return desc.equals("()[B");
-		if ("format".equals(name) || "formatted".equals(name)) return true;
-		return "intern".equals(name);
-	}
-
-	/** 误杀白名单：命中即放行，优先于包级黑名单。 */
-	private static boolean isWhitelistedCall(MethodInsnNode m) {
-		// 已登记的"运行时常量"访问器：调用方已断言它在整个运行期返回同一个值，
-		// 于是它对切片来说是常量来源，不是副作用。（见 remold.RuntimeConstants）
-		if (remold.RuntimeConstants.isRuntimeConstant(m)) return true;
-
-		if ("<init>".equals(m.name) && "()V".equals(m.desc)
-		    && PURE_NOARG_CTOR_OWNERS.contains(m.owner)) { return true; }
-
-		if ("java/util/Objects".equals(m.owner) && m.name.startsWith("requireNonNull")) return true;
-		if ("java/lang/Object".equals(m.owner) && "getClass".equals(m.name)) return true;
-		if ("java/lang/System".equals(m.owner) && "arraycopy".equals(m.name)) return true;
-		if (m.owner.startsWith("kotlin/jvm/internal/Intrinsics")) return true;
-		if ("java/util/Collections".equals(m.owner)
-		    && (m.name.startsWith("empty") || m.name.startsWith("singleton")
-		        || m.name.startsWith("unmodifiable"))) { return true; }
-		if ("java/util/Arrays".equals(m.owner)
-		    && (m.name.startsWith("asList") || m.name.startsWith("copyOf"))) { return true; }
-
-		// Logger：工厂与纯查询放行；落地方法（info/debug/log/...）不在此列，走黑名单。
-		if (m.getOpcode() == Opcodes.INVOKESTATIC && LOGGER_FACTORY_OWNERS.contains(m.owner)
-		    && ("getLogger".equals(m.name) || "getLog".equals(m.name))) { return true; }
-		if (LOGGER_TYPES.contains(m.owner)
-		    && (m.name.startsWith("is") || m.name.startsWith("get"))) { return true; }
-		return false;
-	}
-
-	/** 黑名单：非确定性 / 线程局部状态 / 环境依赖 / 反射 / 进程 / IO / 日志输出。 */
-	private static String blacklistedCallReason(MethodInsnNode m) {
-		String owner = m.owner, name = m.name;
-
-		if (THREAD_LOCAL_OWNERS.contains(owner) && THREAD_LOCAL_STATEFUL.contains(name)) {
-			return "thread-local heap state " + owner + "." + name
-			       + " (value depends on execution thread; recomputing on hotswap thread would yield dirty value)";
-		}
-
-		if ("java/lang/System".equals(owner)) {
-			switch (name) {
-				case "currentTimeMillis", "nanoTime", "identityHashCode", "lineSeparator",
-				     "getProperty", "getProperties", "getenv", "console", "gc", "exit",
-				     "getSecurityManager", "setProperty", "setProperties":
-					return "non-deterministic/environment-dependent call java/lang/System." + name;
-				default:
-					break;
-			}
-			return null;
-		}
-		if ("java/lang/Math".equals(owner) && "random".equals(name)) {
-			return "non-deterministic random source java/lang/Math.random";
-		}
-		if ("java/util/Random".equals(owner) || "java/util/SplittableRandom".equals(owner)
-		    || "java/util/concurrent/ThreadLocalRandom".equals(owner)
-		    || "java/security/SecureRandom".equals(owner) || owner.startsWith("java/security/")) {
-			return "non-deterministic random source " + owner;
-		}
-		if ("java/util/UUID".equals(owner) && "randomUUID".equals(name)) {
-			return "non-deterministic java/util/UUID.randomUUID";
-		}
-		if ("java/lang/Thread".equals(owner)) {
-			return "thread/environment state " + owner + "." + name;
-		}
-		if ("java/lang/Object".equals(owner) && ("hashCode".equals(name) || "toString".equals(name))) {
-			return "identity-dependent dispatch java/lang/Object." + name;
-		}
-		if ("java/util/Date".equals(owner) || "java/util/Calendar".equals(owner)
-		    || "java/time/Clock".equals(owner)) {
-			return "reads wall clock " + owner + "." + name;
-		}
-		if (isWallClockNow(owner, name)) {
-			return "reads wall clock " + owner + "." + name;
-		}
-		if ("java/util/Locale".equals(owner) && "getDefault".equals(name)) {
-			return "reads default locale java/util/Locale.getDefault";
-		}
-		if ("java/util/TimeZone".equals(owner) && "getDefault".equals(name)) {
-			return "reads default time zone java/util/TimeZone.getDefault";
-		}
-		if ("java/nio/charset/Charset".equals(owner) && "defaultCharset".equals(name)) {
-			return "reads default charset java/nio/charset/Charset.defaultCharset";
-		}
-		if (("java/lang/Integer".equals(owner) || "java/lang/Long".equals(owner)
-		     || "java/lang/Boolean".equals(owner))
-		    && ("getInteger".equals(name) || "getLong".equals(name) || "getBoolean".equals(name))) {
-			return "reads system property " + owner + "." + name;
-		}
-
-		if (owner.startsWith("java/lang/reflect/") || owner.startsWith("java/lang/invoke/")) {
-			return "reflective/dynamic call " + owner + "." + name;
-		}
-		if ("java/lang/Class".equals(owner)
-		    && ("forName".equals(name) || "newInstance".equals(name)
-		        || name.startsWith("getResource") || "getClassLoader".equals(name)
-		        || "getProtectionDomain".equals(name) || "desiredAssertionStatus".equals(name))) {
-			return "reflective/environment-dependent call java/lang/Class." + name;
-		}
-		if ("java/lang/Runtime".equals(owner) || "java/lang/ProcessBuilder".equals(owner)
-		    || "java/lang/Process".equals(owner) || "java/lang/ClassLoader".equals(owner)) {
-			return "process/loader call " + owner + "." + name;
-		}
-		if (owner.startsWith("java/io/") || owner.startsWith("java/net/")
-		    || owner.startsWith("java/nio/file/") || owner.startsWith("java/nio/channels/")) {
-			return "I/O call " + owner + "." + name;
-		}
-		if (owner.startsWith("java/util/logging/") || owner.startsWith("org/slf4j/")
-		    || owner.startsWith("org/apache/logging/")
-		    || owner.startsWith("org/apache/commons/logging/")) {
-			return "logging output (IO_SYS) " + owner + "." + name;
-		}
-		return null;
-	}
-
-	/** {@code LocalDate.now()} / {@code Instant.now()} 之类的挂钟读取。 */
-	private static boolean isWallClockNow(String owner, String name) {
-		if (!"now".equals(name)) return false;
-		return owner.startsWith("java/time/") || owner.startsWith("java/time/chrono/");
-	}
-
-	/**
-	 * {@code docs/initfix/01-safety-gate.md} §2「接收者敏感的堆读取判定」+「局部逃逸豁免严格边界」的最小落地。
-	 *
-	 * <p>两种形态在指令层面只差<b>接收者从哪来</b>：</p>
-	 * <ul>
-	 *   <li>{@code this.key = new StringBuilder().append(a).toString()}：接收者是切片内
-	 *       {@code NEW} 出来的对象，从未逃逸 → {@code ALLOC_PURE}，<b>放行</b>；</li>
-	 *   <li>{@code this.key = BUF.append(name).toString()}（{@code BUF} 是可复用缓存字段）：
-	 *       接收者来自字段/参数 → 读到的是别人留下的内容，且会把外部堆状态改脏
-	 *       （{@code docs/initfix/01-safety-gate.md} §2 bit 4 + bit 5）。更隐蔽的是 {@code setLength(0)} 这类重置语句通常写在
-	 *       <b>切片之外</b>，提取时看不见，于是补丁重放会得到 {@code "abcabc"} 这种累积值。
-	 *       实测确认过这条路径，<b>拒绝</b>。</li>
-	 * </ul>
-	 *
-	 * <p>完整的逃逸证明（对象是否被赋值给外部字段、是否传给了非纯调用）属于 P2 的代数模型；
-	 * 这里只排除"接收者不是切片内新建对象"这一档已实测会读脏的形态。</p>
-	 * @return null 表示放行；否则返回拒绝原因
-	 */
-	private static String builderMutatorReason(
-	 MethodInsnNode m, InsnList insns, Frame<SourceValue>[] frames) {
-
-		if (m.getOpcode() == Opcodes.INVOKESTATIC) return null;
-		if (!BUILDER_OWNERS.contains(m.owner) || !BUILDER_MUTATORS.contains(m.name)) return null;
-		if (frames == null) return null;
-
-		int idx = insns.indexOf(m);
-		if (idx < 0 || idx >= frames.length) return null;
-		Frame<SourceValue> fr = frames[idx];
-		if (fr == null) return null;
-
-		int argCount = Type.getArgumentTypes(m.desc).length;
-		int recvIdx  = fr.getStackSize() - 1 - argCount;
-		if (recvIdx < 0) return null;
-
-		SourceValue recv = fr.getStack(recvIdx);
-		if (recv == null) return null;
-
-		StringBuilder origin = new StringBuilder();
-		for (AbstractInsnNode src : recv.insns) {
-			if (src instanceof TypeInsnNode t && t.getOpcode() == Opcodes.NEW) {
-				if (t.desc.equals(m.owner)) return null;   // 局部逃逸豁免
-				appendOrigin(origin, "new " + t.desc);
-			} else if (src instanceof FieldInsnNode f) {
-				appendOrigin(origin, f.owner + "." + f.name);
-			} else if (src instanceof VarInsnNode v) {
-				appendOrigin(origin, v.var == 0 ? "this" : "slot" + v.var);
-			}
-		}
-		return "mutates a reusable " + m.owner + " obtained outside the slice"
-		       + " (receiver origin: " + (origin.length() == 0 ? "unknown" : origin) + ")";
-	}
-
-	private static void appendOrigin(StringBuilder sb, String what) {
-		if (sb.length() > 0) sb.append(", ");
-		sb.append(what);
-	}
-
-	/**
-	 * A+ whitelist: the exact {@code owner.name+desc} keys whose result a String field may
-	 * coerce with {@code Object.toString()}. Verified with javap on Kotlin 2.3.0 — these are the
-	 * only string ops that return {@code CharSequence} and therefore force that coercion.
-	 */
-	private static final Set<String> STRING_COERCION_PRODUCERS = Set.of(
-	 "kotlin/text/StringsKt.trim(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;",
-	 "kotlin/text/StringsKt.trimStart(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;",
-	 "kotlin/text/StringsKt.trimEnd(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;");
-
-	/** True for exactly an INVOKESTATIC call to one of {@link #STRING_COERCION_PRODUCERS}. */
-	private static boolean isStringCoercionProducer(AbstractInsnNode n) {
-		return n instanceof MethodInsnNode m
-		       && m.getOpcode() == Opcodes.INVOKESTATIC
-		       && STRING_COERCION_PRODUCERS.contains(m.owner + "." + m.name + m.desc);
-	}
-
-	/** Producers that create no value of their own: constants and identity-preserving casts. */
-	private static boolean isInertProducer(AbstractInsnNode n) {
-		return n instanceof LdcInsnNode
-		       || (n instanceof TypeInsnNode t && t.getOpcode() == Opcodes.CHECKCAST);
-	}
-
-	/**
-	 * The {@code Object.toString()} coercion itself (or an intermediate one of a chained
-	 * expression). Restricted to the virtual/interface dispatch that can actually target
-	 * {@code Object.toString} and, deliberately, excludes {@code hashCode} so it keeps being
-	 * rejected.
-	 */
-	private static boolean isIntermediateObjectToString(AbstractInsnNode n) {
-		return n instanceof MethodInsnNode m
-		       && (m.getOpcode() == Opcodes.INVOKEVIRTUAL
-		           || m.getOpcode() == Opcodes.INVOKEINTERFACE)
-		       && "java/lang/Object".equals(m.owner)
-		       && "toString".equals(m.name)
-		       && "()Ljava/lang/String;".equals(m.desc);
-	}
-
-	/**
-	 * A+ exception for the {@code identity-dependent dispatch java/lang/Object.toString} rule.
-	 *
-	 * <p>Kotlin's {@code "  a ".trim()} compiles to {@code ldc; checkcast CharSequence;
-	 * invokestatic StringsKt.trim; invokevirtual java/lang/Object.toString}, so the coercion is
-	 * dispatched through {@code Object} even though the value is always a String. Accept it only
-	 * when the receiver is <b>proven</b> to be built inside the slice:</p>
-	 * <ol>
-	 *   <li>the direct producer (checkcasts ignored) is one of {@link #STRING_COERCION_PRODUCERS};</li>
-	 *   <li>every instruction in the receiver's provenance closure is inert, a whitelisted
-	 *       producer, or an intermediate {@code Object.toString()} of the same chained
-	 *       expression, and all of them lie inside {@code collected};</li>
-	 *   <li>fails closed — no frames, no frame, no receiver or an empty closure means "reject",
-	 *       so the original rule still covers {@code Any().toString()}, field receivers and
-	 *       user-defined methods.</li>
-	 * </ol>
-	 * {@code hashCode} is deliberately never exempted.
-	 */
+	// 兼容 InitFixOracle 对 A+ 窄例外的反射直调守卫
 	private static boolean allowedStringCoercion(MethodInsnNode m, InsnList insns,
 	                                             Frame<SourceValue>[] frames,
 	                                             Set<AbstractInsnNode> collected) {
-		if (!isIntermediateObjectToString(m)) return false;
-		if (frames == null || collected == null) return false;
-
-		int idx = insns.indexOf(m);
-		if (idx < 0 || idx >= frames.length) return false;
-		Frame<SourceValue> fr = frames[idx];
-		if (fr == null) return false;
-
-		int recvIdx = fr.getStackSize() - 1 - Type.getArgumentTypes(m.desc).length;
-		if (recvIdx < 0) return false;
-		SourceValue recv = fr.getStack(recvIdx);
-		if (recv == null || recv.insns.isEmpty()) return false;
-
-		int directIdx = -1;
-		for (AbstractInsnNode src : recv.insns) {
-			int at = insns.indexOf(src);
-			if (at < 0 || !collected.contains(src)) return false;   // rule 2: slice-local only
-			if (isStringCoercionProducer(src)) {
-				if (at > directIdx) directIdx = at;                  // rule 1: the direct producer
-			} else if (isIntermediateObjectToString(src)) {
-				// A chained coercion: "  a ".trim().trimStart() emits two Object.toString calls
-				// and AliasInterpreter merges the first into the second one's closure. Admitting
-				// it is sound because `src` is in `collected`, so the in-order slice walk
-				// (minIdx..putIdx, first failure wins) vetted it on its own beforehand.
-			} else if (!isInertProducer(src)) {
-				return false;                                        // rule 2: nothing else
-			}
-		}
-		return directIdx >= 0;
+		return InitFixSafetyGate.allowedStringCoercion(m, insns, frames, collected);
 	}
 
-	// ==================== 构造器参数 -> 字段扫描 ====================
+	public static final int BATCH_HEAP_SCAN_MIN_TARGETS = 8;
 
-	/**
-	 * 扫描 {@code <init>} 里 {@code ALOAD 0; XLOAD n; PUTFIELD this.f} 形态的
-	 * "参数持久化到字段"模式，建立 {@code slot -> field} 回溯映射。
-	 *
-	 * <p><b>{@code docs/initfix/01-safety-gate.md} §3 源字段不可变证明</b>：映射成立后，切片段里的 {@code ALOAD n} 会被改写为
-	 * {@code ALOAD 0; GETFIELD this.f}。补丁在 redefine 之后才执行，读到的是字段
-	 * <b>当前</b>值而非构造时的值，所以只有当 {@code f} 在构造完成后不可能再变时改写才等价：</p>
-	 * <ol>
-	 *   <li><b>条件 A</b>：{@code f} 带 {@code ACC_FINAL}（JVM 只允许在构造器内写入）；</li>
-	 *   <li><b>条件 B</b>：{@code f} 非 final，但为 {@code private}，且{@link NestView 全 Nest 范围内}
-	 *       除本次 pattern 外不存在第二处 {@code PUTFIELD}（排除 setter 二次修改、其它构造器写入、
-	 *       内部类跨实例写入）。证明通过后该字段的读取在效应审查中按 {@code READS_FINAL} 等价处理。</li>
-	 * </ol>
-	 * <p>二者都不满足时拒绝映射 —— 宁可不补，也不能拿被改过的值去算。</p>
-	 * @param host 宿主类（仅用于取 ClassLoader 读 Nest 成员资源，<b>不做</b> {@code Class.forName}）
-	 * @param nest 宿主 Nest 视图
-	 * @return 可用映射 + 被拒槽位的真实原因（原因会被透传进 {@link PatchReport}）
-	 */
-	private static ParamScan scanParamFields(
-	 Class<?> host, ClassNode hostClass, MethodNode init, NestView nest) {
-
-		Map<Integer, ParamField> map      = new HashMap<>();
-		Map<Integer, String>     rejected = new LinkedHashMap<>();
-		InsnList                 insns    = init.instructions;
-		List<AbstractInsnNode>   real     = filterReal(insns);
-
-		for (int i = 0; i + 2 < real.size(); i++) {
-			AbstractInsnNode a = real.get(i);
-			AbstractInsnNode b = real.get(i + 1);
-			AbstractInsnNode c = real.get(i + 2);
-
-			if (!(a instanceof VarInsnNode va)
-			    || va.getOpcode() != Opcodes.ALOAD || va.var != 0) { continue; }
-			if (!(b instanceof VarInsnNode vb)
-			    || !isLoadOfParam(vb)) { continue; }
-			if (!(c instanceof FieldInsnNode fc)
-			    || fc.getOpcode() != Opcodes.PUTFIELD) { continue; }
-			if (!fc.owner.equals(hostClass.name)) continue;
-
-			int slot = vb.var;
-			if (map.containsKey(slot)) continue;
-
-			int    startOrig  = insns.indexOf(a);
-			int    putOrig    = insns.indexOf(c);
-			String ctrlReason = checkControlDependency(insns, startOrig, putOrig);
-			if (ctrlReason != null) {
-				rejectParamSlot(rejected, slot, "pattern has control dependency: " + ctrlReason);
-				log("Skipping constructor param slot " + slot + " in "
-				    + hostClass.name + ".<init>: pattern has control dependency: "
-				    + ctrlReason);
-				continue;
-			}
-
-			// 参数类型必须与字段描述符严格一致，否则替换成 GETFIELD 后
-			// 后续指令期望的类型会不匹配，触发 VerifyError
-			if (!paramTypeMatches(init.desc, slot, fc.desc)) {
-				rejectParamSlot(rejected, slot, "parameter type != field type " + fc.desc);
-				log("Skipping constructor param slot " + slot + " in "
-				    + hostClass.name + ".<init>: parameter type != field type "
-				    + fc.desc);
-				continue;
-			}
-
-			// docs/initfix/01-safety-gate.md §3：源字段必须可证明不可变
-			FieldNode source = null;
-			for (FieldNode fn : hostClass.fields) {
-				if (fn.name.equals(fc.name) && fn.desc.equals(fc.desc)) {
-					source = fn;
-					break;
-				}
-			}
-			if (source == null) {
-				rejectParamSlot(rejected, slot, "source field declaration not found");
-				continue;
-			}
-			String immutableReason = sourceFieldNotImmutableReason(hostClass, source, fc, nest);
-			if (immutableReason != null) {
-				rejectParamSlot(rejected, slot, "source field '" + source.name
-				                                + "' is not provably immutable: " + immutableReason);
-				log("Skipping constructor param slot " + slot + " in "
-				    + hostClass.name + ".<init>: source field '" + source.name
-				    + "' is not provably immutable: " + immutableReason);
-				continue;
-			}
-
-			int paramWidth = (vb.getOpcode() == Opcodes.LLOAD
-			                  || vb.getOpcode() == Opcodes.DLOAD) ? 2 : 1;
-
-			String unsafeReason = null;
-
-			for (int k = 0; k < i; k++) {
-				AbstractInsnNode n = real.get(k);
-				if (n instanceof VarInsnNode v && isStore(v.getOpcode())) {
-					int storeWidth = (v.getOpcode() == Opcodes.LSTORE
-					                  || v.getOpcode() == Opcodes.DSTORE) ? 2 : 1;
-					if (slotsOverlap(slot, paramWidth, v.var, storeWidth)) {
-						unsafeReason = "slot overwritten before pattern by xSTORE at real index "
-						               + k + " (store slot=" + v.var + " width=" + storeWidth + ")";
-						break;
-					}
-				} else if (n instanceof IincInsnNode inc) {
-					if (slotsOverlap(slot, paramWidth, inc.var, 1)) {
-						unsafeReason = "slot incremented before pattern by IINC at real index "
-						               + k + " (iinc slot=" + inc.var + ")";
-						break;
-					}
-				}
-			}
-			if (unsafeReason != null) {
-				rejectParamSlot(rejected, slot, unsafeReason);
-				log("Skipping constructor param slot " + slot + " in "
-				    + hostClass.name + ".<init>: " + unsafeReason);
-				continue;
-			}
-
-			for (int k = i + 3; k < real.size(); k++) {
-				AbstractInsnNode n = real.get(k);
-
-				if (n instanceof VarInsnNode v && isStore(v.getOpcode())) {
-					int storeWidth = (v.getOpcode() == Opcodes.LSTORE
-					                  || v.getOpcode() == Opcodes.DSTORE) ? 2 : 1;
-					if (slotsOverlap(slot, paramWidth, v.var, storeWidth)) {
-						unsafeReason = "slot overwritten by xSTORE at real index " + k
-						               + " (store slot=" + v.var + " width=" + storeWidth + ")";
-						break;
-					}
-				} else if (n instanceof IincInsnNode inc) {
-					if (slotsOverlap(slot, paramWidth, inc.var, 1)) {
-						unsafeReason = "slot incremented by IINC at real index " + k
-						               + " (iinc slot=" + inc.var + ")";
-						break;
-					}
-				} else if (n instanceof FieldInsnNode f
-				           && f.getOpcode() == Opcodes.PUTFIELD
-				           && f.owner.equals(hostClass.name)
-				           && f.name.equals(fc.name)) {
-					unsafeReason = "field " + fc.name + " overwritten by PUTFIELD at real index " + k;
-					break;
-				}
-			}
-			if (unsafeReason != null) {
-				rejectParamSlot(rejected, slot, unsafeReason);
-				log("Skipping constructor param slot " + slot + " in "
-				    + hostClass.name + ".<init>: " + unsafeReason);
-				continue;
-			}
-
-			map.put(slot, new ParamField(source, slot));
-		}
-		return new ParamScan(map, rejected);
-	}
-
-	/** 记录被拒槽位的原因（首次为准，保留最贴近根因的那条）。 */
-	private static void rejectParamSlot(Map<Integer, String> rejected, int slot, String reason) {
-		if (rejected != null) rejected.putIfAbsent(slot, reason);
-	}
-
-	/** 记录字段被拒的真实原因（首次为准）。 */
-	private static void recordReason(Map<String, String> outReasons, String field, String reason) {
-		if (outReasons != null) outReasons.putIfAbsent(field, reason);
-	}
-
-	/**
-	 * {@code docs/initfix/01-safety-gate.md} §3 源字段不可变证明。
-	 * @param pattern 本次触发映射的 {@code PUTFIELD}（Nest 扫描时按对象身份排除）
-	 * @return null 表示可证明构造后不再变化；否则返回拒绝原因
-	 */
-	private static String sourceFieldNotImmutableReason(
-	 ClassNode hostClass, FieldNode field, FieldInsnNode pattern, NestView nest) {
-
-		// 条件 A：final（JVM 只允许在声明类构造器内写入）
-		if ((field.access & Opcodes.ACC_FINAL) != 0) return null;
-
-		// 条件 B：private + 全 Nest 单写
-		if ((field.access & Opcodes.ACC_PRIVATE) == 0) {
-			return "not final and not private (neither condition A nor B satisfied)";
-		}
-		if (!nest.complete()) {
-			return "cannot read every nest member to prove a single write";
-		}
-		String where = nest.firstOtherPut(hostClass.name, field.name, field.desc,
-		 Opcodes.PUTFIELD, pattern);
-		if (where != null) {
-			return "private but written again at " + where;
-		}
-		return null;
-	}
-
-	/**
-	 * 校验方法描述符中 {@code slot} 处的参数类型是否与 {@code fieldDesc} 一致。
-	 * <p>slot 0 是 this；long/double 占 2 槽。</p>
-	 */
-	private static boolean paramTypeMatches(String methodDesc, int slot, String fieldDesc) {
-		Type[] args = Type.getArgumentTypes(methodDesc);
-		int    cur  = 1;
-		for (Type t : args) {
-			if (cur == slot) {
-				return t.getDescriptor().equals(fieldDesc);
-			}
-			cur += t.getSize();
-			if (cur > slot) return false;
-		}
-		return false;
-	}
-
-	private static List<AbstractInsnNode> filterReal(InsnList insns) {
-		List<AbstractInsnNode> real = new ArrayList<>(insns.size());
-		for (AbstractInsnNode n : insns) {
-			if (n.getOpcode() != -1) real.add(n);
-		}
-		return real;
-	}
-
-	private static boolean slotsOverlap(int s1, int w1, int s2, int w2) {
-		return s1 < s2 + w2 && s2 < s1 + w1;
-	}
-
-	private static boolean isLoadOfParam(VarInsnNode v) {
-		int op = v.getOpcode();
-		boolean isLoad = op == Opcodes.ALOAD || op == Opcodes.ILOAD
-		                 || op == Opcodes.LLOAD || op == Opcodes.FLOAD
-		                 || op == Opcodes.DLOAD;
-		return isLoad && v.var != 0;
-	}
-
-	private static boolean isStore(int op) {
-		return op == Opcodes.ASTORE || op == Opcodes.ISTORE || op == Opcodes.LSTORE
-		       || op == Opcodes.FSTORE || op == Opcodes.DSTORE;
-	}
-
-	private static boolean isPrimitiveDesc(String desc) {
-		if (desc == null || desc.isEmpty()) return false;
-		char c = desc.charAt(0);
-		return c == 'Z' || c == 'B' || c == 'C' || c == 'S'
-		       || c == 'I' || c == 'J' || c == 'F' || c == 'D';
-	}
-
-	private static boolean isImmutableType(String desc) {
-		if (desc == null || desc.length() < 3 || desc.charAt(0) != 'L') return false;
-		String c = desc.substring(1, desc.length() - 1);
-		switch (c) {
-			case "java/lang/String":
-			case "java/lang/Integer":
-			case "java/lang/Long":
-			case "java/lang/Short":
-			case "java/lang/Byte":
-			case "java/lang/Character":
-			case "java/lang/Boolean":
-			case "java/lang/Float":
-			case "java/lang/Double":
-			case "java/lang/Class":
-			case "java/math/BigDecimal":
-			case "java/math/BigInteger":
-			case "java/time/Instant":
-			case "java/time/Duration":
-			case "java/time/LocalDate":
-			case "java/time/LocalTime":
-			case "java/time/LocalDateTime":
-			case "java/time/ZonedDateTime":
-			case "java/util/UUID":
-				return true;
-			default:
-				return false;
-		}
-	}
-
-	// ==================== 指令改写 ====================
-
-	private static List<AbstractInsnNode> rewriteProtectedAccesses(
-	 String hostInternal,
-	 List<AbstractInsnNode> insns,
-	 Map<AbstractInsnNode, ProtectedAccess> accesses) {
-
-		if (accesses.isEmpty()) return insns;
-
-		Type hostType = Type.getObjectType(hostInternal);
-
-		List<AbstractInsnNode> rewritten = new ArrayList<>(insns.size());
-		for (AbstractInsnNode insn : insns) {
-			ProtectedAccess pa = accesses.get(insn);
-			if (pa == null) {
-				rewritten.add(insn);
-				continue;
-			}
-
-			String ownerInternal = pa.owner();
-			String indyDesc      = indyDescFor(pa, hostInternal);
-
-			Object[] bsmArgs = new Object[]{
-			 HotswapBridge.KIND_PROTECTED,
-			 pa.opcode(),
-			 Type.getObjectType(ownerInternal),
-			 hostType
-			};
-
-			rewritten.add(new InvokeDynamicInsnNode(pa.name(), indyDesc, BRIDGE_BSM, bsmArgs));
-			log("Bridging protected access via indy: "
-			    + ownerInternal + "." + pa.name() + " " + pa.desc()
-			    + " (opcode=" + pa.opcode() + ", host=" + hostInternal + ")");
-		}
-		return rewritten;
-	}
-
-	private static String indyDescFor(ProtectedAccess pa, String hostInternal) {
-		return switch (pa.opcode()) {
-			case Opcodes.GETFIELD -> "(L" + hostInternal + ";)" + pa.desc();
-			case Opcodes.PUTFIELD -> "(L" + hostInternal + ";" + pa.desc() + ")V";
-			case Opcodes.GETSTATIC -> "()" + pa.desc();
-			case Opcodes.PUTSTATIC -> "(" + pa.desc() + ")V";
-			case Opcodes.INVOKEVIRTUAL, Opcodes.INVOKEINTERFACE -> "(L" + hostInternal + ";" + pa.desc().substring(1);
-			case Opcodes.INVOKESTATIC -> pa.desc();
-			default -> throw new IllegalStateException(
-			 "unexpected opcode for protected bridge: " + pa.opcode());
-		};
-	}
-
-	private static List<AbstractInsnNode> rewritePrivateInvokes(
-	 String className, List<AbstractInsnNode> insns) {
-		if (insns.isEmpty()) return insns;
-
-		List<AbstractInsnNode> rewritten = new ArrayList<>(insns.size());
-		for (AbstractInsnNode insn : insns) {
-			if (insn instanceof MethodInsnNode m
-			    && m.getOpcode() == Opcodes.INVOKESPECIAL
-			    && !"<init>".equals(m.name)
-			    && m.owner.equals(className)) {
-				int newOpcode = m.itf ? Opcodes.INVOKEINTERFACE : Opcodes.INVOKEVIRTUAL;
-				rewritten.add(new MethodInsnNode(newOpcode, m.owner, m.name, m.desc, m.itf));
-
-			} else if (insn instanceof InvokeDynamicInsnNode indy) {
-				InvokeDynamicInsnNode replaced = rewriteIndyHandles(className, indy);
-				rewritten.add(replaced != null ? replaced : indy);
-
-			} else {
-				rewritten.add(insn);
-			}
-		}
-		return rewritten;
-	}
-
-	private static InvokeDynamicInsnNode rewriteIndyHandles(
-	 String className, InvokeDynamicInsnNode indy) {
-		Object[] args = indy.bsmArgs;
-		if (args == null) return null;
-		Object[] copy = null;
-		for (int i = 0; i < args.length; i++) {
-			if (args[i] instanceof Handle h
-			    && h.getTag() == Opcodes.H_INVOKESPECIAL
-			    && !"<init>".equals(h.getName())
-			    && h.getOwner().equals(className)) {
-				if (copy == null) copy = args.clone();
-				int newTag = h.isInterface()
-				 ? Opcodes.H_INVOKEINTERFACE : Opcodes.H_INVOKEVIRTUAL;
-				copy[i] = new Handle(newTag, h.getOwner(), h.getName(), h.getDesc(), h.isInterface());
-			}
-		}
-		if (copy == null) return null;
-		return new InvokeDynamicInsnNode(indy.name, indy.desc, indy.bsm, copy);
-	}
-
-	/**
-	 * 把补丁片段里对目标字段的 {@code PUTFIELD}/{@code PUTSTATIC} 改写为
-	 * {@code invokedynamic}，由 {@link HotswapBridge} 在链接期算好 Unsafe offset 后写入：
-	 * {@link HotswapBridge#KIND_CONDITIONAL} 条件 CAS（仅当字段仍是类型默认值），
-	 * {@link HotswapBridge#KIND_FORCE} 无条件写（{@code @RemoldReinit(mode = OVERWRITE)}），
-	 * {@link HotswapBridge#KIND_CONDITIONAL_EXPECTED} 对旧初值常量的条件写（L1 存量重放）。
-	 * <p>final 与非 final 走同一条路径，语义统一。</p>
-	 * @param conditionalFields 走条件 CAS 的字段
-	 * @param forceFields       走强制写的字段（两者不相交；force 优先）
-	 * @param replayArguments   L1 重放字段 -> 旧初值常量（ASM bootstrap 常量）
-	 */
-	private static List<AbstractInsnNode> rewriteFieldPuts(
-	 String className, List<AbstractInsnNode> insns,
-	 Set<String> conditionalFields, Set<String> forceFields,
-	 Map<String, Object> replayArguments) {
-		if (insns.isEmpty()
-		    || (conditionalFields.isEmpty() && forceFields.isEmpty() && replayArguments.isEmpty())) {
-			return insns;
-		}
-
-		List<AbstractInsnNode> rewritten = new ArrayList<>(insns.size());
-		for (AbstractInsnNode insn : insns) {
-			if (!(insn instanceof FieldInsnNode f)
-			    || !f.owner.equals(className)
-			    || (f.getOpcode() != Opcodes.PUTFIELD && f.getOpcode() != Opcodes.PUTSTATIC)) {
-				rewritten.add(insn);
-				continue;
-			}
-
-			Object replayExpected = replayArguments.get(f.name);
-			if (replayExpected != null) {
-				boolean isStatic = f.getOpcode() == Opcodes.PUTSTATIC;
-				String  indyDesc = (isStatic ? "(" : "(L" + className + ";") + f.desc + ")V";
-				Type    hostType = Type.getObjectType(className);
-				Object[] bsmArgs = new Object[]{
-				 HotswapBridge.KIND_CONDITIONAL_EXPECTED,
-				 f.getOpcode(),
-				 hostType,
-				 hostType,
-				 replayExpected
-				};
-				rewritten.add(new InvokeDynamicInsnNode(f.name, indyDesc, BRIDGE_BSM_EXPECTED, bsmArgs));
-				log("Rewriting field write via indy(replay-expected): "
-				    + className + "." + f.name + " " + f.desc + ", expected=" + replayExpected);
-				continue;
-			}
-
-			boolean forced = forceFields.contains(f.name);
-			if (!forced && !conditionalFields.contains(f.name)) {
-				rewritten.add(insn);
-				continue;
-			}
-
-			boolean isStatic = f.getOpcode() == Opcodes.PUTSTATIC;
-			String  indyDesc = (isStatic ? "(" : "(L" + className + ";") + f.desc + ")V";
-			Type    hostType = Type.getObjectType(className);
-
-			Object[] bsmArgs = new Object[]{
-			 forced ? HotswapBridge.KIND_FORCE : HotswapBridge.KIND_CONDITIONAL,
-			 f.getOpcode(),
-			 hostType,
-			 hostType
-			};
-
-			rewritten.add(new InvokeDynamicInsnNode(f.name, indyDesc, BRIDGE_BSM, bsmArgs));
-			log("Rewriting field write via indy(" + (forced ? "force" : "conditional") + "): "
-			    + className + "." + f.name + " " + f.desc);
-		}
-		return rewritten;
-	}
-
-	// ==================== 应用与生命周期 ====================
-
-	/**
-	 * 供外部重定义（IDE JDWP / 外部 Agent）后置异步任务调用的修补方法。
-	 * 先复核 JVM 是否真正成功重定义了该类；若被 JVM 拒绝则立即注销并记入台账（保证不变量 5）。
-	 */
 	public static void afterRedefineExternal(Class<?> clazz) {
-		if (!RemoldAgent.INIT_FIX || clazz == null) return;
-
-		PendingPatch patch = PENDING.get(clazz);
-		if (patch == null) return;
-
-		// 验证字段是否已在 JVM 中就绪（若未就绪说明 redefine 被 JVM 拒绝）
-		// L1 重放字段是继承字段，getDeclaredField 必然找不到，只取非重放任务做样本。
-		FieldPatchTask sampleTask = null;
-		for (FieldPatchTask task : patch.plan().allTasks()) {
-			if (!task.replay()) {
-				sampleTask = task;
-				break;
-			}
-		}
-		if (sampleTask != null) {
-			try {
-				clazz.getDeclaredField(sampleTask.fieldName());
-			} catch (NoSuchFieldException e) {
-				RemoldAgent.warn("Class " + clazz.getName() + " was not redefined by JVM; aborting external patch.");
-				afterRedefineFailed(clazz);
-				return;
-			}
-		}
-		afterRedefine(clazz);
+		InitFixRuntimeDriver.afterRedefineExternal(clazz);
 	}
 
 	public static void afterRedefine(Class<?> clazz) {
-		if (!RemoldAgent.INIT_FIX || clazz == null) return;
-
-		PendingPatch patch = PENDING.remove(clazz);
-		if (patch == null) return;
-
-		try {
-			applyPatch(clazz, patch);
-		} catch (Throwable e) {
-			// applyPatch 半途夭折（例如 LinkageError 熔断）：我们不知道哪些字段已经写成功，
-			// 只能保守地把整个计划记入台账 —— 下一轮条件 CAS 会跳过已写入的值，
-			// OVERWRITE 字段重写同一个值也是幂等的。
-			for (FieldPatchTask task : patch.plan().allTasks()) {
-				if (task.replay()) continue; // L1 replay does not use the ledger
-				ledgerPut(clazz, task.fieldName(), "patch aborted: " + e);
-				publishBatchFailure(clazz, task.fieldName());
-			}
-			RemoldAgent.error("Field init patch failed: " + e.getMessage(), e);
-		}
+		InitFixRuntimeDriver.afterRedefine(clazz);
 	}
 
 	public static void afterRedefineFailed(Class<?> clazz) {
-		if (clazz == null) return;
-		PendingPatch dropped = PENDING.remove(clazz);
-		if (dropped != null) {
-			// 补丁一个字段都没写进去，"已应用"记录跟着作废：下一轮必须重新判定，不能凭旧指纹跳过。
-			reinitAppliedClear(clazz);
-			// docs/initfix/02-closure-and-ledger.md §2 的核心场景：redefine 失败，但补丁计划已经生成、类结构随时可能推进；
-			// 这些字段一个都没补，必须记账，否则它们再也不会出现在 Diff 里。
-			for (FieldPatchTask task : dropped.plan().allTasks()) {
-				// L1 重放字段不写台账（docs/initfix/12-L1-existing-initializer-replay.md §3）。
-				if (task.replay()) continue;
-				ledgerPut(clazz, task.fieldName(), "redefine failed; patch never applied");
-				publishBatchFailure(clazz, task.fieldName());
-			}
-			log("Dropped pending field init patch for " + clazz.getName()
-			    + " after redefine failure; " + dropped.plan().allTasks().size()
-			    + " field(s) recorded in FieldLedger");
-		}
+		InitFixRuntimeDriver.afterRedefineFailed(clazz);
 	}
 
-	/**
-	 * 宿主侧补丁驱动器（{@code docs/initfix/03-runtime-driver.md} §2）。
-	 *
-	 * <p>逐字段调度：每个字段一个独立的静态直线方法，失败只影响该字段与其下游，
-	 * 不会像"单方法承载全部字段"那样由一行异常跳过其后所有字段。依赖字段失败的
-	 * 字段会被显式跳过并记账（{@code FieldLedger} 记入失败原因）。</p>
-	 *
-	 * <p>{@code LinkageError} 仍然上抛熔断（AGENTS.md 不变量 4）：它意味着类元数据假设已被
-	 * JVM 打破，继续修补没有意义。</p>
-	 */
-	/**
-	 * A 档 apply 重放的安全前置检查（{@code docs/initfix/13-kotlin-apply-replay.md} §5）：
-	 * 把 {@code GETSTATIC holder.dest} 会取回的对象先读一遍，确认非 null 且运行时类型确实是
-	 * 目标类型 T。缺失的检查会让 Unsafe 把 T 的字段偏移套到不匹配的对象上（内存安全问题），
-	 * 因此这里是硬门，读不到/读失败一律视为不可重放。
-	 *
-	 * <p>只在补丁执行前做一次（不是逐实例），不参与分析期判定；返回 {@code null} 表示可写。</p>
-	 */
-	private static String applyDestinationSkipReason(
-	 Class<?> host, ApplyInitializerReplay.ReplayField replay) {
-
-		Object value;
-		try {
-			java.lang.reflect.Field dest = host.getDeclaredField(replay.dest());
-			dest.setAccessible(true);
-			value = dest.get(null);
-		} catch (Throwable t) {
-			return "cannot read the holder's static field " + replay.dest() + ": " + t;
-		}
-		if (value == null) {
-			return "the holder's static field " + replay.dest() + " is null";
-		}
-		try {
-			Class<?> target = Class.forName(replay.targetClass().replace('/', '.'), false,
-			 host.getClassLoader());
-			if (!target.isInstance(value)) {
-				return "the holder's static field " + replay.dest() + " holds "
-				       + value.getClass().getName() + ", not " + target.getName();
-			}
-		} catch (Throwable t) {
-			return "cannot resolve the apply object type " + replay.targetClass() + ": " + t;
-		}
-		return null;
-	}
-
-	private static void applyPatch(Class<?> host, PendingPatch patch) throws Throwable {
-		final boolean perfLog = RemoldAgent.PERF_LOG;
-		final long tPatchStart = perfLog ? System.nanoTime() : 0L;
-
-		// 影子 Class 归一（docs/initfix/03-runtime-driver.md §4 的 SELF 作用域判定前提）：
-		// JBR 结构性 redefine 会把静态字段里持有的 Class 引用改写成旧版本影子对象
-		// （同名同加载器、旧字段元数据）。影子类上的 LibTool.getInstances 返回 0，
-		// 且存活实例的 getClass() 是 canonical 类而不是影子类 —— 不归一的话
-		// "运行时类恰好等于声明类"会把所有实例判成不匹配，SELF 静默什么都不写。
-		host = ClassIdentity.canonicalize(host);
-
-		// 详细失败日志配额是"本轮"的（见 DETAILED_FAILURE_LOGS 的 Javadoc）：
-		// 不重置的话它是进程级累计，前几轮热更失败满 5 次之后，
-		// 之后所有热更都不再打详细栈。
-		DETAILED_FAILURE_LOGS.set(0);
-
-		// 条件 CAS 统计是"本轮"的：先清掉可能残留的计数，避免上一轮的数据混进本轮告警。
-		// 正常路径下每轮结束都会 drain；这里兜住异常路径留下的残留。
-		HotswapBridge.drainConditionalStats();
-		HotswapBridge.drainReplayStats();
-
-		if (!isInitialized(host)) {
-			// 不变量 1：未初始化类直接跳过，<b>不</b>记账、也<b>不</b>发布跨类失败令牌。它的 <clinit> 还没跑过，
-			// 首次访问时 JVM 会执行新 <clinit> 得到正确初值；在此处记账并牵连下游，会把读它的同批字段
-			// 误判成"依赖失败"而永久停在默认值。
-			log("Skip field init patch, class not initialized (or initializing/failed): "
-			    + host.getName());
-			return;
-		}
-
-		long tCollectNs = 0L;
-		long tCompactNs = 0L;
-		long tSelfScanNs = 0L;
-		long tDefineNs = 0L;
-		long tStaticNs = 0L;
-		long tApplyReplayNs = 0L;
-		long tInstNs = 0L;
-
-		PatchPlan    plan  = patch.plan();
-		Set<String>  replayTaskFields = new LinkedHashSet<>();
-		for (FieldPatchTask task : plan.allTasks()) {
-			if (task.replay()) replayTaskFields.add(task.fieldName());
-		}
-		Object[] alive = null;
-		if (plan.hasInstance()) {
-			long tBeforeCollect = perfLog ? System.nanoTime() : 0L;
-			Object[] raw = collectRawInstancesForPatch(host);
-			long tAfterCollect = perfLog ? System.nanoTime() : 0L;
-			alive = compactNonNull(raw);
-			// 本批次的枚举结果留给 @OnReload 回调复用（见 StageBInstanceCache）：
-			// 一次结构性热更里补丁和实例回调各枚举一次堆，百万级实例下这是双倍开销。
-			StageBInstanceCache.put(host, alive);
-			long tAfterCompact = perfLog ? System.nanoTime() : 0L;
-			if (perfLog) {
-				tCollectNs = tAfterCollect - tBeforeCollect;
-				tCompactNs = tAfterCompact - tAfterCollect;
-			}
-			if (alive.length == 0 && !plan.hasStatic()) {
-				if (perfLog) {
-					RemoldAgent.info(formatApplyPatchPerf(host, tPatchStart, 0,
-					 tCollectNs, tCompactNs, 0L, 0L, 0L, 0L, 0L, 0L));
-				}
-				RemoldAgent.info("[InitFix] No live instances and no static patch needed for " + host.getName()
-				    + ", skip");
-				return;
-			}
-		}
-
-		// SELF 作用域的可写目标数：枚举结果含子类/匿名子类实例，只有运行时类恰好等于宿主的那部分
-		// 才能承接 SELF 字段的写入（docs/initfix/03-runtime-driver.md §4）。这个计数同时喂给
-		// reinitHint —— 否则"SELF 字段没有任何本类实例可写"会被误报成已生效。
-		// 没有 SELF 字段时整段跳过：它按实例做身份比较，纯属白付。
-		long tBeforeSelfScan = perfLog ? System.nanoTime() : 0L;
-		boolean hasSelfOnlyTasks = false;
-		for (FieldPatchTask task : plan.instanceTasks()) {
-			hasSelfOnlyTasks |= task.selfOnly();
-		}
-		int selfOnlyTargets = 0;
-		if (hasSelfOnlyTasks && alive != null) {
-			// host 在本方法开头已经归一为 canonical 类，这里走不重复 Class.forName 的快路径。
-			for (Object o : alive) {
-				if (scopeMatchesCanonical(host, o, RemoldReinit.Scope.SELF)) selfOnlyTargets++;
-			}
-		}
-		if (perfLog) tSelfScanNs = System.nanoTime() - tBeforeSelfScan;
-
-		long tBeforeDefine = perfLog ? System.nanoTime() : 0L;
-		Lookup   h  = Reflect.defineHiddenClass(host, patch.bytes());
-		Class<?> pc = h.lookupClass();
-
-		// 必须在取 Handle 时就 asType 适配：init$F 的形参是宿主类型，驱动手里只有 Object。
-		BoundInstanceTask[] instanceTasks           = new BoundInstanceTask[plan.instanceTasks().size()];
-		boolean[]           constantBound           = new boolean[instanceTasks.length];
-		boolean             hasInstanceDependencies = false;
-		MethodType          batchMethodType         = MethodType.methodType(
-		 int.class, Object[].class, int.class, int.class, Throwable[].class);
-		for (int i = 0; i < instanceTasks.length; i++) {
-			FieldPatchTask task = plan.instanceTasks().get(i);
-			hasInstanceDependencies |= !task.dependencies().isEmpty();
-		}
-		for (int i = 0; i < instanceTasks.length; i++) {
-			FieldPatchTask task = plan.instanceTasks().get(i);
-			MethodHandle handle = h.findStatic(pc, task.methodName(), MethodType.methodType(void.class, host))
-			 .asType(MethodType.methodType(void.class, Object.class));
-			MethodHandle batchHandle = null;
-			if (!hasInstanceDependencies && task.constantInit() != null) {
-				ConstantInitSpec spec = task.constantInit();
-				try {
-					long offset = HotswapBridge.resolveInstanceFieldOffset(host, task.fieldName(), spec.fieldDesc());
-					MethodHandle loopTemplate = HotswapBridge.constantBatchLoop(
-					 descriptorValueClass(spec.fieldDesc()), spec.forceWrite());
-					batchHandle = MethodHandles.insertArguments(
-					 loopTemplate, 0, host, task.fieldName(), offset, spec.value(), task.selfOnly());
-					constantBound[i] = true;
-				} catch (LinkageError le) {
-					if (!isolatableLinkFailure(le)) throw le;
-					// 留空，回退到隐藏类批方法走原有隔离失败与计数逻辑。
-				} catch (Throwable t) {
-					RemoldAgent.warn("Persistent constant batch loop unavailable for "
-					                 + host.getName() + "." + task.fieldName() + ": " + t);
-					batchHandle = null;
-				}
-			}
-			if (batchHandle == null && task.batchMethodName() != null) {
-				batchHandle = h.findStatic(pc, task.batchMethodName(), batchMethodType);
-			}
-			instanceTasks[i] = new BoundInstanceTask(task.fieldName(), task.dependencies(), handle,
-			 batchHandle, task.selfOnly());
-		}
-		List<BoundFusedBatchGroup> fusedGroupList = new ArrayList<>(plan.fusedBatchGroups().size());
-		MethodType fusedBatchMethodType = MethodType.methodType(
-		 int.class, Object[].class, int.class, int.class, boolean[].class, Throwable[].class, int[].class);
-		for (FusedBatchGroup group : plan.fusedBatchGroups()) {
-			int[] indices = group.taskIndices();
-			boolean allConstantBound = indices.length > 0;
-			for (int idx : indices) {
-				if (!constantBound[idx]) {
-					allConstantBound = false;
-					break;
-				}
-			}
-			// 若整组字段均已命中常驻 C2 常量批写循环，直接各自跑已预热的常驻通道，免去每轮新隐藏类编译等待。
-			if (allConstantBound) continue;
-			MethodHandle handle = h.findStatic(pc, group.methodName(), fusedBatchMethodType);
-			fusedGroupList.add(new BoundFusedBatchGroup(handle, indices));
-		}
-		BoundFusedBatchGroup[] fusedGroups = fusedGroupList.toArray(new BoundFusedBatchGroup[0]);
-
-		Map<String, MethodHandle> staticHandles = new LinkedHashMap<>();
-		for (FieldPatchTask task : plan.staticTasks()) {
-			staticHandles.put(task.fieldName(),
-			 h.findStatic(pc, task.methodName(), MethodType.methodType(void.class)));
-		}
-
-		// A 档 apply 重放：补丁方法名按 applyFields 插入顺序编号（装配与驱动同序，不重算名字）。
-		List<Map.Entry<String, ApplyInitializerReplay.ReplayField>> applyEntries =
-		 new ArrayList<>(plan.applyFields().entrySet());
-		MethodHandle[] applyHandles = new MethodHandle[applyEntries.size()];
-		for (int i = 0; i < applyEntries.size(); i++) {
-			applyHandles[i] = h.findStatic(pc, APPLY_REPLAY_PREFIX + i,
-			 MethodType.methodType(void.class));
-		}
-
-		Set<String>         failedFields   = new LinkedHashSet<>();
-
-		Set<String>         skippedFields  = new LinkedHashSet<>();
-		Map<String, String> failureReasons = new LinkedHashMap<>();
-		if (perfLog) tDefineNs = System.nanoTime() - tBeforeDefine;
-
-		// ---- 静态字段：整个补丁只跑一次 ----
-		long tBeforeStatic = perfLog ? System.nanoTime() : 0L;
-		if (!plan.staticTasks().isEmpty()) {
-			RemoldAgent.info("Applying static field init patch to " + host.getName()
-			                  + ", fields=" + plan.staticTasks().size());
-			long start = System.nanoTime();
-			runTasks(host, plan.staticTasks(), staticHandles, null,
-			 failedFields, skippedFields, failureReasons);
-			long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-			RemoldAgent.info("Static field init patch for " + host.getName()
-			                  + " done in " + elapsedMs + "ms");
-		}
-		if (perfLog) tStaticNs = System.nanoTime() - tBeforeStatic;
-
-		// ---- A 档 apply 重放：静态持有者 <clinit> 里的 T().apply{...} ----
-		// 每个候选只写"GETSTATIC holder.dest 取回的那一个对象"；运期改过的值由 expected-CAS 跳过。
-		// 失败/跳过<b>不写 FieldLedger</b>（与 L1 同口径：显式开启的尽力重放，不是欠账），
-		// 单独记在 applyFailed/applySkipped 里，供下面的 [INIT-APPLY-REPLAY] 汇总。
-		long tBeforeApplyReplay = perfLog ? System.nanoTime() : 0L;
-		Set<String>         applyFailed  = new LinkedHashSet<>();
-		Set<String>         applySkipped = new LinkedHashSet<>();
-		Map<String, String> applyReasons = new LinkedHashMap<>();
-		if (!applyEntries.isEmpty()) {
-			RemoldAgent.info("Applying static holder apply replay to " + host.getName()
-			                 + ", targets=" + applyEntries.size());
-			long start = System.nanoTime();
-			for (int i = 0; i < applyEntries.size(); i++) {
-				String key = applyEntries.get(i).getKey();
-				ApplyInitializerReplay.ReplayField replay = applyEntries.get(i).getValue();
-				String skip = applyDestinationSkipReason(host, replay);
-				if (skip != null) {
-					applySkipped.add(key);
-					applyReasons.put(key, skip);
-					RemoldAgent.warn("[INIT-APPLY-REPLAY] " + host.getName() + ": " + key
-					                 + " NOT replayed: " + skip);
-					continue;
-				}
-				try {
-					applyHandles[i].invokeExact();
-				} catch (LinkageError le) {
-					if (!isolatableLinkFailure(le)) throw le;
-					applyFailed.add(key);
-					applyReasons.put(key, String.valueOf(le));
-					RemoldAgent.warn("[INIT-APPLY-REPLAY] " + host.getName() + ": " + key
-					                 + " replay failed: " + le);
-				} catch (Throwable t) {
-					applyFailed.add(key);
-					applyReasons.put(key, String.valueOf(t));
-					RemoldAgent.warn("[INIT-APPLY-REPLAY] " + host.getName() + ": " + key
-					                 + " replay failed: " + t);
-				}
-			}
-			long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-			RemoldAgent.info("Static holder apply replay for " + host.getName()
-			                 + " done in " + elapsedMs + "ms");
-		}
-
-		// 静态侧失败必须在实例阶段开始前冻结一份快照：它全局唯一，对每个实例都生效；
-		// 而实例侧失败只影响出错的那个实例，不能混进这份快照（否则又变成跨实例牵连）。
-		Set<String> staticFailures = new LinkedHashSet<>(failedFields);
-		Set<String> staticSkips    = new LinkedHashSet<>(skippedFields);
-		if (perfLog) tApplyReplayNs = System.nanoTime() - tBeforeApplyReplay;
-
-		// ---- 实例字段：逐实例、逐字段 ----
-		long tBeforeInst = perfLog ? System.nanoTime() : 0L;
-		if (plan.hasInstance() && alive != null && alive.length > 0) {
-			RemoldAgent.info("Applying instance field init patch to " + host.getName()
-			                  + ", enumerated=" + alive.length
-			                  + (hasSelfOnlyTasks ? ", selfScopeTargets=" + selfOnlyTargets : "")
-			                  + ", fields=" + plan.instanceTasks().size());
-
-			long start = System.nanoTime();
-			if (hasInstanceDependencies) {
-				runDependentInstanceTasks(host, alive, instanceTasks,
-				 failedFields, skippedFields, failureReasons,
-				 union(staticFailures, staticSkips, Set.of()));
-			} else {
-				runIndependentInstanceTasks(host, alive, instanceTasks, fusedGroups,
-				 failedFields, skippedFields, failureReasons);
-			}
-			long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-
-			StringBuilder sb = new StringBuilder("Instance field init patch for ")
-			 .append(host.getName())
-			 .append(" done: fields=").append(plan.instanceTasks().size())
-			 .append(", failedFields=").append(failedFields)
-			 .append(", skippedFields=").append(skippedFields)
-			 .append(", elapsed=").append(elapsedMs).append("ms");
-			RemoldAgent.info(sb.toString());
-
-			if (elapsedMs > 1000) {
-				RemoldAgent.warn("Instance field init patch for " + host.getName()
-				                  + " took " + elapsedMs
-				                  + "ms, hotswap thread was blocked");
-			}
-		}
-		long tAfterInst = perfLog ? System.nanoTime() : 0L;
-		if (perfLog) tInstNs = tAfterInst - tBeforeInst;
-
-		// 没真正写进去的注解字段：撤回"已应用"记录，否则下一轮会被"初值未变"误跳过，永久停在旧值。
-		for (String f : plan.reinitFields().keySet()) {
-			if (failedFields.contains(f) || skippedFields.contains(f)) reinitAppliedRemove(host, f);
-		}
-
-		// @RemoldReinit 生效点名（docs/initfix/03-runtime-driver.md §4）：
-		// "存量值被重置"与"新增字段被初始化"是两件不同的事，补丁日志只报"打了几个字段"分不出来。
-		String reinitLine = reinitHint(host.getName(), plan,
-		 failedFields, skippedFields, alive == null ? 0 : alive.length, selfOnlyTargets);
-		if (reinitLine != null) RemoldAgent.info(reinitLine);
-
-		// L1 重放：本轮真正跑过的字段记入"已处理"，供 L0 跳过"初值变了但不会重放"的告警；
-		// 失败/跳过的字段不记（让 L0 继续提示），也不写 FieldLedger（L1 是尽力重放，不是欠账）。
-		for (String f : replayTaskFields) {
-			if (failedFields.contains(f) || skippedFields.contains(f)) continue;
-			InitializerReplay.recordApplied(host.getName(), f);
-		}
-		if (!replayTaskFields.isEmpty()) {
-			Set<String> replayFailed = new LinkedHashSet<>(failedFields);
-			replayFailed.retainAll(replayTaskFields);
-			Set<String> replaySkipped = new LinkedHashSet<>(skippedFields);
-			replaySkipped.retainAll(replayTaskFields);
-			if (!replayFailed.isEmpty() || !replaySkipped.isEmpty()) {
-				RemoldAgent.warn("[INIT-REPLAY] " + host.getName() + ": replay failed=" + replayFailed
-				                 + ", skipped=" + replaySkipped + " (not recorded in FieldLedger)");
-			}
-		}
-
-		if (BATCH_CONTEXT.get() != null) {
-			for (FieldPatchTask task : plan.allTasks()) {
-				String token = batchFailureToken(new InitFixBatchGraph.FieldKey(
-				 batchHostKeyCurrent(host), task.fieldName()));
-				if (failedFields.contains(task.fieldName()) || skippedFields.contains(task.fieldName())) {
-					BATCH_FAILURES.get().add(token);
-					continue;
-				}
-				if (!task.isStatic() && (alive == null || alive.length == 0)) continue;
-				BATCH_FAILURES.get().remove(batchFailureToken(
-				 new InitFixBatchGraph.FieldKey(batchHostKeyCurrent(host), task.fieldName())));
-			}
-		}
-		if (!failedFields.isEmpty() || !skippedFields.isEmpty()) {
-			// docs/initfix/02-closure-and-ledger.md §2 待补台账：本轮没补上的字段记入，下一轮候选集自动并回来。
-			// 先写 failed，再写 skipped —— 熔断字段同时属于两者（它确实失败过，
-			// 又被"放弃"），而 skipped 的原因更具体（"达到失败上限后放弃"），
-			// 因此必须后写、覆盖掉笼统的 runtime failure。
-			for (String f : failedFields) {
-				if (replayTaskFields.contains(f)) continue; // L1 replay is not a ledger field
-				ledgerPut(host, f, "runtime failure: "
-				                   + failureReasons.getOrDefault(f, "patch execution failed"));
-			}
-			for (String f : skippedFields) {
-				if (replayTaskFields.contains(f)) continue;
-				ledgerPut(host, f, "skipped: "
-				                   + failureReasons.getOrDefault(f, "a dependency field failed to patch"));
-			}
-			Set<String> failedForLedger = new LinkedHashSet<>(failedFields);
-			failedForLedger.removeAll(replayTaskFields);
-			Set<String> skippedForLedger = new LinkedHashSet<>(skippedFields);
-			skippedForLedger.removeAll(replayTaskFields);
-			if (!failedForLedger.isEmpty() || !skippedForLedger.isEmpty()) {
-				RemoldAgent.warn("Field init patch incomplete for " + host.getName()
-				                  + ": failed=" + failedForLedger + ", skipped=" + skippedForLedger
-				                  + " (recorded in FieldLedger; will be reconsidered in next hotswap cycle)");
-			}
-		}
-
-		// 条件 CAS 跳过汇总：字段在补丁执行前已被别的线程赋过非默认值 → CAS 失败 → 补丁未生效。
-		// 这是"已解决"而非"失败"（条件写本来就该保守跳过），所以不进台账、不参与上面的失败告警；
-		// 但它必须被<b>报告</b> —— 否则用户无法区分"补上了"与"因已有值而跳过"。
-		//
-		// 仅首轮有告警价值：台账重试轮里，已补过的实例会因"字段已非默认值"而跳过，
-		// 那是预期行为，报成 warn 会误导。重试轮因此降为 info。
-		Map<String, long[]> casStats = HotswapBridge.drainConditionalStats();
-		if (!casStats.isEmpty()) {
-			long         totalSkipped = 0;
-			List<String> skippedNames = new ArrayList<>();
-			for (Map.Entry<String, long[]> e : casStats.entrySet()) {
-				long skipped = e.getValue()[1];
-				if (skipped > 0) {
-					totalSkipped += skipped;
-					skippedNames.add(e.getKey() + " x" + skipped);
-				}
-			}
-			if (totalSkipped > 0) {
-				String msg = "Field init patch skipped " + totalSkipped + " conditional write(s) for "
-				             + host.getName() + " (field already had a non-default value): "
-				             + skippedNames;
-				if (ledgerSnapshot(host).isEmpty()) {
-					RemoldAgent.warn(msg + " (conditional write conservatively skipped by design; use @RemoldReinit(OVERWRITE) to force overwrite)");
-				} else {
-					// 重试轮：这些跳过多半来自上一轮已成功补过的实例，属预期
-					RemoldAgent.info(msg + " (retry pass, typically instance already patched in prior round)");
-				}
-			}
-		}
-
-		// 重放统计按 owner 拆分：L1 的 owner 是锚点类自身，apply 的 owner 是 apply 对象类型 T。
-		// 混在一条 [INIT-REPLAY] 里会把"另一个类的字段被写了"说成"宿主的实例字段被写了"。
-		Map<String, long[]> replayStats = HotswapBridge.drainReplayStats();
-		String               hostPrefix  = host.getName() + "#";
-		Map<String, long[]>  l1Stats      = new LinkedHashMap<>();
-		Map<String, long[]>  applyStats   = new LinkedHashMap<>();
-		for (Map.Entry<String, long[]> e : replayStats.entrySet()) {
-			(e.getKey().startsWith(hostPrefix) ? l1Stats : applyStats).put(e.getKey(), e.getValue());
-		}
-		// L1 重放统计：写入/跳过数分别来自校验通过字段的 expected-CAS 结果。
-		// 跳过意味着该实例的当前值已不等于旧初值（运行期改过），按设计保守放弃写入。
-		if (!l1Stats.isEmpty()) {
-			long         totalWritten = 0;
-			long         totalSkipped = 0;
-			List<String> skippedNames = new ArrayList<>();
-			for (Map.Entry<String, long[]> e : l1Stats.entrySet()) {
-				totalWritten += e.getValue()[0];
-				long skipped = e.getValue()[1];
-				totalSkipped += skipped;
-				if (skipped > 0) skippedNames.add(e.getKey() + " x" + skipped);
-			}
-			RemoldAgent.info("[INIT-REPLAY] " + host.getName() + ": wrote " + totalWritten
-			                 + " instance field(s)"
-			                 + (totalSkipped > 0
-			                    ? ", skipped " + totalSkipped
-			                      + " whose current value no longer equals the old initializer: " + skippedNames
-			                    : ""));
-		}
-		// A 档 apply 重放统计：owner 是目标类型 T；dest 为 null/类型不符的候选已在执行前跳过，
-		// 这里的 skipped 只表示"运行期值已不等于旧初值"（条件 CAS 按设计保守放弃）。
-		if (!applyStats.isEmpty() || !applyFailed.isEmpty() || !applySkipped.isEmpty()) {
-			long         written = 0;
-			long         skipped = 0;
-			List<String> skippedNames = new ArrayList<>();
-			for (Map.Entry<String, long[]> e : applyStats.entrySet()) {
-				written += e.getValue()[0];
-				long s = e.getValue()[1];
-				skipped += s;
-				if (s > 0) skippedNames.add(e.getKey() + " x" + s);
-			}
-			RemoldAgent.info("[INIT-APPLY-REPLAY] " + host.getName() + ": wrote " + written
-			                 + " apply-object field(s)"
-			                 + (skipped > 0
-			                    ? ", skipped " + skipped
-			                      + " whose current value no longer equals the old initializer: " + skippedNames
-			                    : ""));
-			if (!applyFailed.isEmpty() || !applySkipped.isEmpty()) {
-				StringBuilder why = new StringBuilder();
-				for (Map.Entry<String, String> e : applyReasons.entrySet()) {
-					if (why.length() > 0) why.append("; ");
-					why.append(e.getKey()).append(" -> ").append(e.getValue());
-				}
-				RemoldAgent.warn("[INIT-APPLY-REPLAY] " + host.getName() + ": replay incomplete"
-				                 + " (failed=" + applyFailed + ", skipped=" + applySkipped + ")"
-				                 + (why.length() > 0 ? " (" + why + ")" : "")
-				                 + "; not recorded in FieldLedger");
-			}
-		}
-
-		// 代际重放的运行期对账（G6 / G7）：CAS 未命中的字段按"没写成"记账，不冒充已应用。
-		recordReplayOutcome(host, plan, patch.replayOwners(), l1Stats, applyStats,
-		 failedFields, skippedFields, alive == null ? 0 : alive.length);
-
-		// 批次报告：只统计真正跑完的补丁。字段名与实例数都是本轮实测值，
-		// 失败/被放弃的字段单独计数（不把"尝试过"说成"已修补"）。
-		Set<String> patchedFieldNames = new LinkedHashSet<>();
-		for (FieldPatchTask task : plan.allTasks()) {
-			patchedFieldNames.add(task.fieldName());
-		}
-		if (!patchedFieldNames.isEmpty()) {
-			Set<String> incomplete = new LinkedHashSet<>(failedFields);
-			incomplete.addAll(skippedFields);
-			remold.BatchReportScope.recordInitFix(host.getName(),
-				alive == null ? 0 : alive.length,
-				new ArrayList<>(patchedFieldNames), incomplete.size());
-		}
-		if (perfLog) {
-			long tPostNs = System.nanoTime() - tAfterInst;
-			RemoldAgent.info(formatApplyPatchPerf(host, tPatchStart, alive == null ? 0 : alive.length,
-			 tCollectNs, tCompactNs, tSelfScanNs, tDefineNs, tStaticNs, tApplyReplayNs, tInstNs, tPostNs));
-		}
-	}
-
-	private static String formatApplyPatchPerf(Class<?> host, long patchStartNs, int liveCount,
-	 long collectNs, long compactNs, long selfScanNs, long defineNs,
-	 long staticNs, long applyReplayNs, long instNs, long postNs) {
-		double totalMs = (System.nanoTime() - patchStartNs) / 1_000_000.0;
-		return String.format(Locale.ROOT,
-		 "[InitFix] applyPatch(%s): live=%d, total=%.1fms [collect=%.1f, compact=%.1f, selfScan=%.1f, define=%.1f, static=%.1f, applyReplay=%.1f, inst=%.1f, post=%.1f]",
-		 host.getName(), liveCount, totalMs,
-		 collectNs / 1_000_000.0, compactNs / 1_000_000.0, selfScanNs / 1_000_000.0,
-		 defineNs / 1_000_000.0, staticNs / 1_000_000.0, applyReplayNs / 1_000_000.0,
-		 instNs / 1_000_000.0, postNs / 1_000_000.0);
-	}
-
-	/**
-	 * {@code @RemoldReinit} 生效点名的文案（{@code docs/initfix/03-runtime-driver.md} §4）。
-	 *
-	 * <p>默认作用域只含"本次新增字段"，已有字段能进补丁<b>只能</b>是注解要求的。但补丁日志本身
-	 * 只报"给几个字段打了补丁"，两者在日志里长得一模一样：用户看到
-	 * {@code Applying static field init patch ..., fields=1} 时无从判断自己的存量值为什么被改了，
-	 * 也不知道"我改了初值却没生效"是因为没标注解。这一行负责把这件事说破。</p>
-	 *
-	 * <p>纯函数（只读入参，不碰 {@link RemoldAgent}），文案因此可以被测试直接断言。</p>
-	 *
-	 * @param className       宿主类名，仅用于日志
-	 * @param plan            本轮补丁计划；{@link PatchPlan#reinitFields()} 为空时整行不输出
-	 * @param failedFields    运行期失败的字段
-	 * @param skippedFields   因依赖失败被放弃的字段
-	 * @param instanceTargets 实例阶段枚举到的实例数（{@code INCLUDE_SUBCLASSES} 字段的可写目标数）
-	 * @param selfTargets     {@code SELF} 字段的可写目标数（运行时类恰好等于宿主的实例数）；
-	 *                        SELF 字段不能用 {@code instanceTargets} 判"有没有实例可写"，
-	 *                        否则"只有子类实例存活"会被误报成已生效
-	 * @return 需要输出的整行日志；没有任何注解字段真正生效时返回 {@code null}（保持静默）
-	 */
 	static String reinitHint(
 	 String className, PatchPlan plan, Set<String> failedFields,
 	 Set<String> skippedFields, int instanceTargets, int selfTargets) {
-
-		if (plan == null || plan.reinitFields().isEmpty()) return null;
-
-		Set<String> staticNames = new HashSet<>();
-		for (FieldPatchTask task : plan.staticTasks()) staticNames.add(task.fieldName());
-		Set<String> selfOnlyNames = new HashSet<>();
-		for (FieldPatchTask task : plan.instanceTasks()) {
-			if (task.selfOnly()) selfOnlyNames.add(task.fieldName());
-		}
-
-		StringBuilder applied = new StringBuilder();
-		StringBuilder notDone = new StringBuilder();
-		for (Map.Entry<String, String> e : plan.reinitFields().entrySet()) {
-			String  field    = e.getKey();
-			boolean isStatic = staticNames.contains(field);
-			int     targets  = selfOnlyNames.contains(field) ? selfTargets : instanceTargets;
-			String  why;
-			if (failedFields.contains(field)) {
-				why = "failed";
-			} else if (skippedFields.contains(field)) {
-				why = "skipped";
-			} else if (!isStatic && targets == 0) {
-				// 计划里有、但没有实例可写：说"生效"就是撒谎。
-				why = "no live instance";
-			} else {
-				why = null;
-			}
-
-			StringBuilder target = why == null ? applied : notDone;
-			if (target.length() > 0) target.append(", ");
-			target.append(field).append(" (").append(e.getValue())
-			 .append(isStatic ? ", static" : ", instance").append(')');
-			if (why != null) target.append(" - ").append(why);
-		}
-
-		StringBuilder line = new StringBuilder("[REINIT] @RemoldReinit ");
-		if (applied.length() > 0) {
-			line.append("applied to ").append(className).append(": ").append(applied);
-			if (notDone.length() > 0) line.append("; not applied: ").append(notDone);
-			return line.append(" (default scope only includes newly added fields; these fields entered candidates via annotation; "
-			                    + "modifying initial values of unannotated existing fields will not be reset)").toString();
-		}
-		return line.append("did not take effect on ").append(className)
-		 .append(": ").append(notDone).toString();
+		return InitFixRuntimeDriver.reinitHint(className, plan, failedFields, skippedFields, instanceTargets, selfTargets);
 	}
 
-	/**
-	 * 判断一个存活实例是否落在该注解字段的重置作用域内（{@code docs/initfix/03-runtime-driver.md} §4）。
-	 *
-	 * <p>纯函数：不碰堆、不写状态，供驱动层与测试直接调用。</p>
-	 *
-	 * <p><b>必须先归一宿主 Class</b>：JBR 结构性 redefine 会把静态字段里持有的 Class 引用改写成
-	 * 旧版本影子对象（同名同加载器、旧字段元数据）。影子类与 canonical 类不是同一个
-	 * {@code java.lang.Class}，直接拿它做 {@code isInstance} / 身份比较会把所有实例判成不匹配。</p>
-	 *
-	 * @param host     声明该字段的宿主类（允许是影子类，内部归一）
-	 * @param instance 堆里的存活实例
-	 * @param scope    {@link RemoldReinit.Scope#SELF} 只匹配运行时类恰好等于宿主的实例；
-	 *                 {@code INCLUDE_SUBCLASSES}（含 {@code null}）匹配宿主及其子类/匿名子类实例
-	 * @return 该实例是否应被写入；{@code null} 入参一律返回 {@code false}（fail-closed）
-	 */
 	public static boolean scopeMatches(Class<?> host, Object instance, RemoldReinit.Scope scope) {
-		if (host == null || instance == null) return false;
-		return scopeMatchesCanonical(ClassIdentity.canonicalize(host), instance, scope);
-	}
-
-	/**
-	 * {@link #scopeMatches} 的已归一快路径：调用方保证 {@code canonicalHost} 已经是 canonical 类
-	 * （例如 {@code applyPatch} 开头统一归一后的宿主），因此不再逐实例调用 {@code Class.forName}。
-	 */
-	private static boolean scopeMatchesCanonical(Class<?> canonicalHost, Object instance,
-	                                             RemoldReinit.Scope scope) {
-		if (canonicalHost == null || instance == null) return false;
-		if (scope == RemoldReinit.Scope.SELF) return instance.getClass() == canonicalHost;
-		return canonicalHost.isInstance(instance);
+		return InitFixRuntimeDriver.scopeMatches(host, instance, scope);
 	}
 
 	record BoundInstanceTask(String fieldName, Set<String> dependencies, MethodHandle handle,
@@ -6091,1250 +3769,48 @@ public class InitFix {
 	record BoundFusedBatchGroup(MethodHandle handle, int[] taskIndices) { }
 
 	static PatchPlan pendingPlanForTest(Class<?> clazz) {
-		PendingPatch patch = PENDING.get(ClassIdentity.canonicalize(clazz));
-		return patch == null ? null : patch.plan();
+		return InitFixRuntimeDriver.pendingPlanForTest(clazz);
 	}
 
 	static byte[] pendingBytesForTest(Class<?> clazz) {
-		PendingPatch patch = PENDING.get(ClassIdentity.canonicalize(clazz));
-		return patch == null ? null : patch.bytes();
+		return InitFixRuntimeDriver.pendingBytesForTest(clazz);
 	}
 
 	static void runIndependentInstanceTasks(
 	 Class<?> host, Object[] targets, BoundInstanceTask[] tasks,
 	 Set<String> failedFields, Set<String> skippedFields, Map<String, String> failureReasons) {
-		runIndependentInstanceTasks(host, targets, tasks, new BoundFusedBatchGroup[0],
-		 failedFields, skippedFields, failureReasons);
+		InitFixRuntimeDriver.runIndependentInstanceTasks(host, targets, tasks, failedFields, skippedFields, failureReasons);
 	}
 
 	static void runIndependentInstanceTasks(
 	 Class<?> host, Object[] targets, BoundInstanceTask[] tasks, BoundFusedBatchGroup[] fusedGroups,
 	 Set<String> failedFields, Set<String> skippedFields, Map<String, String> failureReasons) {
-		InstanceFailureBudget budget = new InstanceFailureBudget();
-		Throwable[] errOut = null;
-		boolean[] handled = fusedGroups != null && fusedGroups.length > 0 ? new boolean[tasks.length] : null;
-		if (fusedGroups != null && fusedGroups.length > 0) {
-			errOut = new Throwable[1];
-			int[] errSlotOut = new int[1];
-			for (BoundFusedBatchGroup group : fusedGroups) {
-				for (int idx : group.taskIndices()) {
-					handled[idx] = true;
-				}
-				runFusedBatchGroup(host, targets, tasks, group, budget, errOut, errSlotOut,
-				 failedFields, skippedFields, failureReasons);
-			}
-		}
-		for (int i = 0; i < tasks.length; i++) {
-			if (handled != null && handled[i]) continue;
-			BoundInstanceTask task = tasks[i];
-			if (task.batchHandle() != null) {
-				if (errOut == null) errOut = new Throwable[1];
-				runBatchInstanceTask(host, targets, task, budget, errOut,
-				 failedFields, skippedFields, failureReasons);
-			} else {
-				for (Object target : targets) {
-					executeIndependentTask(host, target, task, budget, failedFields, skippedFields, failureReasons);
-				}
-			}
-		}
-	}
-
-	private static void runFusedBatchGroup(
-	 Class<?> host, Object[] targets, BoundInstanceTask[] tasks, BoundFusedBatchGroup group,
-	 InstanceFailureBudget budget, Throwable[] errOut, int[] errSlotOut,
-	 Set<String> failedFields, Set<String> skippedFields, Map<String, String> failureReasons) {
-		int[] indices = group.taskIndices();
-		if (indices.length == 0 || targets.length == 0) return;
-		boolean[] active = new boolean[indices.length];
-		int activeCount = 0;
-		for (int j = 0; j < indices.length; j++) {
-			String fieldName = tasks[indices[j]].fieldName();
-			if (budget.exhausted(fieldName)) {
-				budget.recordGiveUp(fieldName, skippedFields, failureReasons);
-			} else {
-				active[j] = true;
-				activeCount++;
-			}
-		}
-		int pos = 0;
-		int chunkCalls = 0;
-		while (pos < targets.length && activeCount > 0) {
-			errOut[0] = null;
-			errSlotOut[0] = -1;
-			int chunkEnd = nextBatchChunkEnd(pos, targets.length, chunkCalls++);
-			int failedIdx;
-			try {
-				failedIdx = (int) group.handle().invokeExact(
-				 targets, pos, chunkEnd, active, errOut, errSlotOut);
-			} catch (LinkageError le) {
-				if (!isolatableLinkFailure(le)) throw le;
-				fallbackFusedGroupFrom(host, targets, pos, indices, active, tasks, budget, errOut,
-				 failedFields, skippedFields, failureReasons);
-				return;
-			} catch (Throwable t) {
-				fallbackFusedGroupFrom(host, targets, pos, indices, active, tasks, budget, errOut,
-				 failedFields, skippedFields, failureReasons);
-				return;
-			}
-			if (failedIdx < 0) {
-				pos = chunkEnd;
-				continue;
-			}
-			int slotJ = errSlotOut[0];
-			Throwable failure = errOut[0];
-			if (failure instanceof LinkageError le && !isolatableLinkFailure(le)) throw le;
-			if (slotJ >= 0 && slotJ < indices.length && active[slotJ]) {
-				BoundInstanceTask failedTask = tasks[indices[slotJ]];
-				recordTaskFailure(host, failedTask.fieldName(), failure, failedFields, failureReasons);
-				budget.recordFailure(failedTask.fieldName());
-				if (budget.exhausted(failedTask.fieldName())) {
-					budget.recordGiveUp(failedTask.fieldName(), skippedFields, failureReasons);
-					active[slotJ] = false;
-					activeCount--;
-				}
-				Object failedTarget = targets[failedIdx];
-				for (int m = slotJ + 1; m < indices.length; m++) {
-					if (!active[m]) continue;
-					BoundInstanceTask remTask = tasks[indices[m]];
-					executeIndependentTask(host, failedTarget, remTask, budget,
-					 failedFields, skippedFields, failureReasons);
-					if (budget.exhausted(remTask.fieldName())) {
-						budget.recordGiveUp(remTask.fieldName(), skippedFields, failureReasons);
-						active[m] = false;
-						activeCount--;
-					}
-				}
-			}
-			pos = failedIdx + 1;
-		}
-	}
-
-	private static void fallbackFusedGroupFrom(
-	 Class<?> host, Object[] targets, int startPos, int[] indices, boolean[] active,
-	 BoundInstanceTask[] tasks, InstanceFailureBudget budget, Throwable[] errOut,
-	 Set<String> failedFields, Set<String> skippedFields, Map<String, String> failureReasons) {
-		for (int j = 0; j < indices.length; j++) {
-			if (!active[j]) continue;
-			BoundInstanceTask task = tasks[indices[j]];
-			if (task.batchHandle() != null) {
-				runBatchInstanceTaskFrom(host, targets, startPos, task, budget, errOut,
-				 failedFields, skippedFields, failureReasons);
-			} else {
-				for (int k = startPos; k < targets.length; k++) {
-					executeIndependentTask(host, targets[k], task, budget,
-					 failedFields, skippedFields, failureReasons);
-				}
-			}
-		}
-	}
-
-	/**
-	 * 大数组渐进切块：小于等于 4096 一次性跑完；更大数组前 2048 次以步长 4 推进（仅覆盖前 8192 个元素，
-	 * 每元素严格访问一次），稳定通过方法入口计数触发 C1/C2 编译而不依赖异步 OSR，随后按 8192 大块收尾。
-	 */
-	private static int nextBatchChunkEnd(int pos, int total, int chunkCalls) {
-		int remaining = total - pos;
-		if (remaining <= 4096) return total;
-		return chunkCalls < 2048 ? pos + 4 : pos + 8192;
-	}
-
-	private static void runBatchInstanceTask(
-	 Class<?> host, Object[] targets, BoundInstanceTask task, InstanceFailureBudget budget,
-	 Throwable[] errOut, Set<String> failedFields, Set<String> skippedFields,
-	 Map<String, String> failureReasons) {
-		runBatchInstanceTaskFrom(host, targets, 0, task, budget, errOut,
+		InitFixRuntimeDriver.runIndependentInstanceTasks(host, targets, tasks, fusedGroups,
 		 failedFields, skippedFields, failureReasons);
 	}
 
-	private static void runBatchInstanceTaskFrom(
-	 Class<?> host, Object[] targets, int startPos, BoundInstanceTask task, InstanceFailureBudget budget,
-	 Throwable[] errOut, Set<String> failedFields, Set<String> skippedFields,
-	 Map<String, String> failureReasons) {
-		int pos = startPos;
-		int chunkCalls = 0;
-		while (pos < targets.length) {
-			if (budget.exhausted(task.fieldName())) {
-				budget.recordGiveUp(task.fieldName(), skippedFields, failureReasons);
-				return;
-			}
-			errOut[0] = null;
-			int chunkEnd = nextBatchChunkEnd(pos, targets.length, chunkCalls++);
-			int failedIdx;
-			try {
-				failedIdx = (int) task.batchHandle().invokeExact(targets, pos, chunkEnd, errOut);
-			} catch (LinkageError le) {
-				if (!isolatableLinkFailure(le)) throw le;
-				recordTaskFailure(host, task.fieldName(), le, failedFields, failureReasons);
-				budget.recordFailure(task.fieldName());
-				pos++;
-				continue;
-			} catch (Throwable t) {
-				recordTaskFailure(host, task.fieldName(), t, failedFields, failureReasons);
-				budget.recordFailure(task.fieldName());
-				pos++;
-				continue;
-			}
-			if (failedIdx < 0) {
-				pos = chunkEnd;
-				continue;
-			}
-			Throwable failure = errOut[0];
-			if (failure instanceof LinkageError le && !isolatableLinkFailure(le)) throw le;
-			recordTaskFailure(host, task.fieldName(), failure, failedFields, failureReasons);
-			budget.recordFailure(task.fieldName());
-			pos = failedIdx + 1;
-		}
-	}
-
-	private static void executeIndependentTask(
-	 Class<?> host, Object target, BoundInstanceTask task, InstanceFailureBudget budget,
-	 Set<String> failedFields, Set<String> skippedFields, Map<String, String> failureReasons) {
-		// SELF 作用域：枚举结果里含子类/匿名子类实例，只有恰好等于宿主的那部分可写。
-		// host 在 applyPatch 开头已归一，用快路径避免逐实例 Class.forName。
-		if (task.selfOnly() && !scopeMatchesCanonical(host, target, RemoldReinit.Scope.SELF)) return;
-		if (budget.exhausted(task.fieldName())) {
-			budget.recordGiveUp(task.fieldName(), skippedFields, failureReasons);
-			return;
-		}
-		try {
-			task.handle().invokeExact(target);
-		} catch (LinkageError le) {
-			if (!isolatableLinkFailure(le)) throw le;
-			recordTaskFailure(host, task.fieldName(), le, failedFields, failureReasons);
-			budget.recordFailure(task.fieldName());
-		} catch (Throwable t) {
-			recordTaskFailure(host, task.fieldName(), t, failedFields, failureReasons);
-			budget.recordFailure(task.fieldName());
-		}
-	}
-
-	/**
-	 * 逐实例驱动的失败预算（{@code docs/initfix/03-runtime-driver.md} §2 的代价控制）。
-	 *
-	 * <p>按实例隔离"依赖跳过"之后，确定性失败（切片本身必然抛异常）会让每个实例
-	 * 都各自失败一遍，日志与耗时放大成 N 倍。这里给每个字段一个本轮的失败配额，
-	 * 用满即对后续实例放弃该字段。</p>
-	 *
-	 * <p>预算按<b>每个 applyPatch 一轮</b>计，不跨轮累积 —— 下一轮热更会重新给足配额，
-	 * 与台账"下一轮重新纳入候选"的语义一致。</p>
-	 */
-	private static final class InstanceFailureBudget {
-		private final Map<String, Integer> counts = new LinkedHashMap<>();
-		private boolean anyFailure;
-
-		boolean exhausted(String fieldName) {
-			if (!anyFailure) return false;
-			return counts.getOrDefault(fieldName, 0) >= MAX_INSTANCE_FAILURES_PER_FIELD;
-		}
-
-		void recordFailure(String fieldName) {
-			anyFailure = true;
-			counts.merge(fieldName, 1, Integer::sum);
-		}
-
-		/** 记一次"放弃"：该字段已耗尽配额，本轮不再重试。 */
-		void recordGiveUp(String fieldName, Set<String> skippedFields,
-		                  Map<String, String> failureReasons) {
-			if (skippedFields.add(fieldName)) {
-				// put 而非 putIfAbsent：首次失败已记下原始异常文本，
-				// 这里的"放弃"是更具体的结论，覆盖它。
-				failureReasons.put(fieldName, "field failed "
-				                              + MAX_INSTANCE_FAILURES_PER_FIELD
-				                              + " times, giving up for this round");
-			}
-		}
-	}
-
-	private static void runDependentInstanceTasks(
-	 Class<?> host, Object[] targets, BoundInstanceTask[] tasks,
-	 Set<String> failedFields, Set<String> skippedFields, Map<String, String> failureReasons,
-	 Set<String> staticFailures) {
-
-		InstanceFailureBudget budget = new InstanceFailureBudget();
-
-		for (Object target : targets) {
-			// docs/initfix/03-runtime-driver.md §2：依赖跳过必须<b>按实例</b>隔离。
-			// 旧实现让所有实例共享 failed/skipped：某个实例的 X 失败后，
-			// 其余实例的依赖字段 Y 全被跳过 —— 尽管它们的 X 是成功的，
-			// 同一轮内状态因此是分裂的。这里每个 target 一份局部集合。
-			//
-			// 局部集合只继承<b>静态侧</b>的失败（staticFailures）：静态字段全局唯一，
-			// 它失败时每个实例的下游都该跳过；而实例侧的失败只影响出错的那个实例。
-			Set<String> localFailed  = new LinkedHashSet<>(staticFailures);
-			Set<String> localSkipped = new LinkedHashSet<>();
-
-			for (BoundInstanceTask task : tasks) {
-				// SELF 作用域：子类/匿名子类实例不承接该字段的写入。
-				if (task.selfOnly() && !scopeMatchesCanonical(host, target, RemoldReinit.Scope.SELF)) continue;
-				// 熔断：该字段在本轮已连续失败多次，不再对后续实例重试。
-				if (budget.exhausted(task.fieldName())) {
-					localSkipped.add(task.fieldName());
-					budget.recordGiveUp(task.fieldName(), skippedFields, failureReasons);
-					continue;
-				}
-
-				Set<String> dependencies = task.dependencies();
-				if (!dependencies.isEmpty()
-				    && (!Collections.disjoint(dependencies, activeBatchFailures())
-				        || !Collections.disjoint(dependencies, localFailed)
-				        || !Collections.disjoint(dependencies, localSkipped))) {
-					// 全局只做计数与记账；告警不按实例刷屏。
-					localSkipped.add(task.fieldName());
-					if (skippedFields.add(task.fieldName())) {
-						failureReasons.putIfAbsent(task.fieldName(), "dependency failed: "
-						                                             + dependencyFailureDetail(
-						 dependencies, localFailed, localSkipped));
-						RemoldAgent.warn("Skipping field init for " + host.getName() + "."
-						                  + task.fieldName() + " because a dependency failed");
-					}
-					continue;
-				}
-				try {
-					task.handle().invokeExact(target);
-				} catch (LinkageError le) {
-					if (!isolatableLinkFailure(le)) throw le;
-					localFailed.add(task.fieldName());
-					budget.recordFailure(task.fieldName());
-					recordTaskFailure(host, task.fieldName(), le, failedFields, failureReasons);
-				} catch (Throwable t) {
-					localFailed.add(task.fieldName());
-					budget.recordFailure(task.fieldName());
-					recordTaskFailure(host, task.fieldName(), t, failedFields, failureReasons);
-				}
-			}
-		}
-	}
-
-	private static void recordTaskFailure(
-	 Class<?> host, String fieldName, Throwable failure,
-	 Set<String> failedFields, Map<String, String> failureReasons) {
-		failedFields.add(fieldName);
-		failureReasons.putIfAbsent(fieldName, String.valueOf(failure));
-		if (DETAILED_FAILURE_LOGS.incrementAndGet() <= MAX_DETAILED_FAILURES) {
-			RemoldAgent.error("Field init patch failed for " + host.getName()
-			                   + "." + fieldName + ": " + failure.getMessage(), failure);
-		}
-	}
-
-	/**
-	 * 按拓扑序执行一组字段任务。
-	 * @param target 实例字段时为对象，静态字段时忽略
-	 */
-	private static void runTasks(
-	 Class<?> host, List<FieldPatchTask> tasks, Map<String, MethodHandle> handles,
-	 Object target, Set<String> failedFields, Set<String> skippedFields,
-	 Map<String, String> failureReasons) {
-
-		for (FieldPatchTask task : tasks) {
-			if (!task.dependencies().isEmpty()
-			    && (!Collections.disjoint(task.dependencies(), activeBatchFailures())
-			        || !Collections.disjoint(task.dependencies(), failedFields)
-			        || !Collections.disjoint(task.dependencies(), skippedFields))) {
-				if (skippedFields.add(task.fieldName())) {
-					failureReasons.putIfAbsent(task.fieldName(), "dependency failed: "
-					                                             + dependencyFailureDetail(
-					 task.dependencies(), failedFields, skippedFields));
-					RemoldAgent.warn("Skipping field init for " + host.getName() + "."
-					                  + task.fieldName() + " because a dependency failed");
-				}
-				continue;
-			}
-			MethodHandle mh = handles.get(task.fieldName());
-			if (mh == null) {
-				skippedFields.add(task.fieldName());
-				failureReasons.putIfAbsent(task.fieldName(), "no MethodHandle for method");
-				continue;
-			}
-			try {
-				if (target == null) { mh.invokeExact(); } else mh.invokeExact(target);
-			} catch (LinkageError le) {
-				// AGENTS.md 不变量 4 熔断只针对"JVM 元数据假设已被打破"的系统性故障。
-				// indy bootstrap 失败（BootstrapMethodError 包装了我们自己的解析失败）
-				// 是<b>单字段</b>的链接问题，不该中止整轮 —— 那与"每字段一个方法、
-				// 失败隔离"的设计目标直接冲突。
-				if (!isolatableLinkFailure(le)) throw le;
-				recordTaskFailure(host, task.fieldName(), le, failedFields, failureReasons);
-			} catch (Throwable t) {
-				recordTaskFailure(host, task.fieldName(), t, failedFields, failureReasons);
-			}
-		}
-	}
-
-	/**
-	 * 判断一个 {@code LinkageError} 是否是<b>可隔离的单字段链接失败</b>，
-	 * 而不是"JVM 元数据假设已被打破"的系统性故障（后者必须熔断，AGENTS.md 不变量 4）。
-	 *
-	 * <p>为什么需要区分：{@code HotswapBridge.bootstrap} 把任何 {@code Throwable} 都包成
-	 * {@code BootstrapMethodError}（{@code LinkageError} 的子类）。因此某个字段的
-	 * {@code findField} 解析失败，在驱动侧看起来与"类结构被破坏"一模一样 ——
-	 * 一律 {@code throw} 会让<b>一个字段</b>的链接问题中止所有字段、所有实例，
-	 * 与"每字段一个方法、失败隔离"的设计目标直接冲突。</p>
-	 *
-	 * <p><b>判定依据是"异常来源"而非异常类型</b>：{@code BootstrapMethodError} 既能包装
-	 * 我们自己的解析失败（{@code NoSuchFieldException} 等），也能包装真正的
-	 * {@code LinkageError}（实测 `getCause()` 两种情况都可能）。因此：</p>
-	 * <ul>
-	 *   <li>{@code BootstrapMethodError} 且 cause 是<b>非</b> {@code LinkageError}
-	 *       → 我们自己 bootstrap 阶段的解析失败，只影响该字段 → 可隔离。</li>
-	 *   <li>{@code BootstrapMethodError} 且 cause <b>是</b> {@code LinkageError}
-	 *       → 真正的元数据问题被透传上来 → 熔断。</li>
-	 *   <li>其它 {@code LinkageError}（{@code NoSuchFieldError}、{@code VerifyError}、
-	 *       {@code IncompatibleClassChangeError} …）→ 熔断。</li>
-	 * </ul>
-	 *
-	 * <p>误判代价不对称：把系统性故障当可隔离，会继续修补一个已经不可信的类
-	 * （危险）；把可隔离失败当系统性故障，只是回到旧行为（保守但过度中止）。
-	 * 因此判定取<b>窄</b>。</p>
-	 */
-	private static boolean isolatableLinkFailure(LinkageError le) {
-		if (!(le instanceof BootstrapMethodError)) return false;
-		Throwable cause = le.getCause();
-		if (cause == null) return false;
-		// cause 本身就是 LinkageError → 真正的元数据问题，必须熔断
-		return !(cause instanceof LinkageError);
-	}
-
-	/**
-	 * 依赖跳过的可读归因：本地失败/跳过集合与跨类批次令牌合并，令牌显示成 {@code Host.field} 而不是
-	 * 裸 {@code @batch:} 前缀。历史实现只合并本地集合，跨类跳过因此永远记成 {@code dependency failed: []}。
-	 */
-	private static String dependencyFailureDetail(
-	 Set<String> dependencies, Set<String> localFailed, Set<String> localSkipped) {
-		Set<String> detail = new LinkedHashSet<>(intersection(dependencies, localFailed, localSkipped));
-		Set<String> batch = new LinkedHashSet<>(dependencies);
-		batch.retainAll(activeBatchFailures());
-		for (String token : batch) detail.add(token.replace("@batch:", ""));
-		return detail.isEmpty() ? "<dependency failed>" : detail.toString();
-	}
-
-	private static Set<String> intersection(Set<String> deps, Set<String> a, Set<String> b) {
-		Set<String> out = new LinkedHashSet<>();
-		for (String d : deps) {
-			if (a.contains(d) || b.contains(d)) out.add(d);
-		}
-		return out;
-	}
-
-	private static Set<String> union(Set<String> a, Set<String> b, Set<String> c) {
-		Set<String> out = new LinkedHashSet<>();
-		if (a != null) out.addAll(a);
-		out.addAll(b);
-		out.addAll(c);
-		return out;
-	}
-	// (union 由 docs/initfix/02-closure-and-ledger.md §2 的 FieldLedger 使用；P1-③ 落地前保留为工具方法)
-
-	private static final Object[] EMPTY_OBJECTS = new Object[0];
-
-	/**
-	 * 批次级实例收集的暂存槽（{@code docs/initfix/05-jvmti-heap.md} §「批次实例收集」）。
-	 *
-	 * <p>一次结构性热更里 K 个类各调一次 {@link #applyPatch} 就是 K 次全堆遍历。批次驱动在
-	 * 「重定义生效之后、补丁执行之前」调 {@link #beginBatchInstanceCollection} 做<b>一次</b>遍历，
-	 * 每个宿主在自己的 {@code applyPatch} 里消费属于自己的切片（{@link #takeBatchInstances}）。</p>
-	 *
-	 * <p><b>为什么不能更早收集</b>：实例必须在重定义生效<b>之后</b>枚举——提前拍快照会漏掉
-	 * 「快照之后、生效之前」新建的实例（{@code docs/status.md} 风险 6）。批次入口因此只由
-	 * 补丁循环的调用方在 redefine 之后调用。</p>
-	 *
-	 * <p>线程封闭：补丁驱动单线程执行（{@code docs/initfix/03-runtime-driver.md} §4），
-	 * 因此用 {@link ThreadLocal} 而不是全局表，避免并发批次互相污染。</p>
-	 */
-	private static final ThreadLocal<Map<Class<?>, Object[]>> BATCH_INSTANCES = new ThreadLocal<>();
-
-	/**
-	 * 启用批次收集的最小 target 数。
-	 *
-	 * <p>一次批次遍历 = <b>一次全堆遍历</b>（{@code IterateThroughHeap} 带 class tag 过滤），而按类
-	 * 遍历是 {@code IterateOverInstancesOfClass}——实测前者约等于后者的 9 倍（同一进程同一堆，
-	 * 64 个零实例类：批 1 次 ≈ 84 ms vs 逐类 64 次 ≈ 588 ms ⇒ 单次批遍历 ≈ 9.2 ms × 9）。
-	 * 因此 K 小的时候批收集反而是净亏：{@code tests/src/InitFixBatchScanProbe} 的 K=4/8/16 读数给出
-	 * 交点，取 8 作为接合阈值（K=8 起持平，K≥16 明显占优）。低于阈值一律走原逐类路径，
-	 * 保证小批次零额外开销。</p>
-	 */
-	public static final int BATCH_HEAP_SCAN_MIN_TARGETS = 8;
-
-	/**
-	 * 批次收集总开关（{@code -Dremold.agent.batch_heap_scan=false} 关闭）。
-	 *
-	 * <p>关掉之后每个宿主照旧各自枚举一次堆，<b>行为必须与开启时逐项等价</b>
-	 * （{@code PatchReport} 的 status / reason / warnings、补丁字节、写入结果一致）——这是这条
-	 * 性能通道可以随时退场的依据，也是等价性门禁的对照面（{@code BatchScanReportEquivalenceTest}）。</p>
-	 */
-	private static volatile boolean batchHeapScanEnabled =
-		!"false".equalsIgnoreCase(System.getProperty("remold.agent.batch_heap_scan", "true"));
-
-	/** 当前是否启用批次收集（诊断/对照用；默认取 {@code -Dremold.agent.batch_heap_scan}）。 */
 	public static boolean batchHeapScanEnabled() {
-		return batchHeapScanEnabled;
+		return InitFixRuntimeDriver.batchHeapScanEnabled();
 	}
 
-	/** 运行期开关批次收集：只影响"要不要批一次枚举"，两条路径的行为必须逐项等价。 */
 	public static void setBatchHeapScanEnabled(boolean enabled) {
-		batchHeapScanEnabled = enabled;
+		InitFixRuntimeDriver.setBatchHeapScanEnabled(enabled);
 	}
 
-	/**
-	 * 为一批宿主做一次全堆遍历，把每个宿主的存活实例切片暂存起来供各自的
-	 * {@link #applyPatch} 消费。
-	 *
-	 * <p>过滤规则（与 {@code applyPatch} 的入口守卫一一对应）：宿主先经
-	 * {@link ClassIdentity#canonicalize} 归一（影子类上枚举恒为 0），未初始化
-	 * （{@link #isInitialized} 为 false）的类剔除，没有实例任务的宿主不参与。过滤后不足
-	 * {@link #BATCH_HEAP_SCAN_MIN_TARGETS} 个宿主时直接返回：<b>小批次走原逐类路径，零额外开销</b>
-	 * （K=1 自然也在此列）。</p>
-	 *
-	 * <p>无 native 库（{@link LibTool#initialized()} 为 false 且初始化失败）时同样直接返回，
-	 * 让 {@code applyPatch} 走既有的 {@link InstanceTracker} 降级路径。</p>
-	 *
-	 * @param hosts 本批次待补丁的宿主类（可含重复/未加载为 null 的项）
-	 */
 	public static void beginBatchInstanceCollection(Collection<Class<?>> hosts) {
-		endBatchInstanceCollection();
-		if (hosts == null || hosts.isEmpty()) return;
-		if (!LibTool.initialized() && !LibTool.tryInit()) return;
-
-		LinkedHashSet<Class<?>> targets = new LinkedHashSet<>();
-		for (Class<?> host : hosts) {
-			if (host == null) continue;
-			Class<?> canonical = ClassIdentity.canonicalize(host);
-			if (!isInitialized(canonical)) continue;
-			PendingPatch patch = PENDING.get(canonical);
-			if (patch == null || !patch.plan().hasInstance()) continue;
-			targets.add(canonical);
-		}
-		if (!batchHeapScanEnabled) return;
-		if (targets.size() < BATCH_HEAP_SCAN_MIN_TARGETS) return;
-
-		Object[][] collected;
-		try {
-			collected = LibTool.getInstancesBatch(targets.toArray(new Class<?>[0]));
-		} catch (Throwable t) {
-			// 批收集失败不能连坐整批：退回逐类枚举，行为与改动前一致。
-			RemoldAgent.warn("[InitFix] Batch instance collection failed (" + t
-			     + "); falling back to one heap walk per class.");
-			return;
-		}
-		if (collected == null || collected.length != targets.size()) return;
-		Map<Class<?>, Object[]> byHost = new HashMap<>(targets.size() * 2);
-		int i = 0;
-		for (Class<?> target : targets) {
-			byHost.put(target, collected[i] != null ? collected[i] : EMPTY_OBJECTS);
-			i++;
-		}
-		BATCH_INSTANCES.set(byHost);
+		InitFixRuntimeDriver.beginBatchInstanceCollection(hosts);
 	}
 
-	/** 结束批次级实例收集并释放暂存切片（切片被实例强引用，必须显式清掉）。 */
 	public static void endBatchInstanceCollection() {
-		Map<Class<?>, Object[]> byHost = BATCH_INSTANCES.get();
-		if (byHost != null) {
-			byHost.clear();
-			BATCH_INSTANCES.remove();
-		}
-	}
-
-	/** 取出本批次为 {@code host} 预收集的实例切片；没有预收集时返回 {@code null}（走实时枚举）。 */
-	private static Object[] takeBatchInstances(Class<?> host) {
-		Map<Class<?>, Object[]> byHost = BATCH_INSTANCES.get();
-		if (byHost == null) return null;
-		Object[] instances = byHost.remove(host);
-		if (byHost.isEmpty()) BATCH_INSTANCES.remove();
-		return instances;
-	}
-
-	private static Object[] collectRawInstancesForPatch(Class<?> host) {
-		// 枚举时机在重定义生效之后、applyPatch 内即时消费后即释放，不跨 redefine 持有，
-		// 因此无需绕行 WeakReference 双重拷贝；直接复用枚举数组，仅在出现 null 槽时由调用方压缩。
-		Object[] batched = takeBatchInstances(host);
-		if (batched != null) return batched;
-		return LibTool.initialized()
-		 ? LibTool.getInstances(host)
-		 : InstanceTracker.getInstances(host).toArray();
+		InitFixRuntimeDriver.endBatchInstanceCollection();
 	}
 
 	static Object[] compactNonNull(Object[] raw) {
-		if (raw == null || raw.length == 0) return EMPTY_OBJECTS;
-		int nulls = 0;
-		for (Object o : raw) {
-			if (o == null) nulls++;
-		}
-		if (nulls == 0) return raw;
-		if (nulls == raw.length) return EMPTY_OBJECTS;
-		Object[] out = new Object[raw.length - nulls];
-		int w = 0;
-		for (Object o : raw) {
-			if (o != null) out[w++] = o;
-		}
-		return out;
+		return InitFixRuntimeDriver.compactNonNull(raw);
 	}
 
-	/**
-	 * 类是否已完成初始化。两阶段驱动在阶段 A 之后用它对每个类做二次检查
-	 * （{@code docs/initfix/04-target-design.md} §1「isInitialized 二次检查」）。
-	 */
 	public static boolean isInitialized(Class<?> clazz) {
-		return !UNSAFE.shouldBeInitialized(clazz);
+		return InitFixRuntimeDriver.isInitialized(clazz);
 	}
 
-	// ==================== 基于 ASM Analyzer 的字段初始化提取 ====================
-
-	private static class AliasInterpreter extends SourceInterpreter {
-		AliasInterpreter() { super(Opcodes.ASM9); }
-
-		@Override
-		public SourceValue copyOperation(AbstractInsnNode insn, SourceValue v) {
-			int op = insn.getOpcode();
-			if (op >= Opcodes.DUP && op <= Opcodes.SWAP) return v;
-			return super.copyOperation(insn, v);
-		}
-
-		@Override
-		public SourceValue unaryOperation(AbstractInsnNode insn, SourceValue v) {
-			return withOperands(super.unaryOperation(insn, v), List.of(v));
-		}
-
-		@Override
-		public SourceValue binaryOperation(AbstractInsnNode insn, SourceValue a, SourceValue b) {
-			return withOperands(super.binaryOperation(insn, a, b), List.of(a, b));
-		}
-
-		@Override
-		public SourceValue naryOperation(AbstractInsnNode insn, List<? extends SourceValue> vs) {
-			return withOperands(super.naryOperation(insn, vs), vs);
-		}
-
-		private static SourceValue withOperands(SourceValue base,
-		                                        List<? extends SourceValue> ops) {
-			if (ops.isEmpty()) return base;
-			Set<AbstractInsnNode> s = new HashSet<>(base.insns);
-			for (SourceValue o : ops) s.addAll(o.insns);
-			return new SourceValue(base.size, s);
-		}
-	}
-
-	private static Map<String, FieldExtract> extractFieldInits(
-	 Class<?> host, String className, MethodNode method, Set<String> targetFields,
-	 boolean isStatic, Set<String> privateMethods,
-	 Map<Integer, ParamField> paramFields, Map<Integer, String> rejectedParamSlots,
-	 boolean fromRootCtor, Set<String> outSelfAssigned,
-	 Map<String, String> outReasons, ClassHierarchyOracle oracle) {
-
-		if (method == null || targetFields.isEmpty()) return Map.of();
-
-		Frame<SourceValue>[] frames;
-		try {
-			frames = analyze(className, method);
-		} catch (AnalyzerException e) {
-			RemoldAgent.warn("Analysis failed for " + method.name + method.desc
-			                  + ": " + e.getMessage());
-			if (outReasons != null) {
-				for (String f : targetFields) {
-					outReasons.putIfAbsent(f, "bytecode analysis failed in "
-					                          + method.name + method.desc + ": " + e.getMessage());
-				}
-			}
-			return Map.of();
-		}
-
-		InsnList                                            insns             = method.instructions;
-		Set<LabelNode>                                      jumpTargets       = collectJumpTargets(method);
-		Map<String, Set<AbstractInsnNode>>                  perFieldCollected = new LinkedHashMap<>();
-		Map<String, Map<AbstractInsnNode, ProtectedAccess>> perFieldProtected = new HashMap<>();
-		Set<String>                                         refusedFields     = new HashSet<>();
-
-		for (int i = 0; i < insns.size(); i++) {
-			AbstractInsnNode insn = insns.get(i);
-			if (!(insn instanceof FieldInsnNode f)) continue;
-
-			int op = f.getOpcode();
-			if (isStatic ? op != Opcodes.PUTSTATIC : op != Opcodes.PUTFIELD) continue;
-			if (!f.owner.equals(className) || !targetFields.contains(f.name)) continue;
-
-			if (refusedFields.contains(f.name)) continue;
-
-			Frame<SourceValue> frame = frames[i];
-			if (frame == null) {
-				recordReason(outReasons, f.name,
-				 "no stack frame at the write site in " + method.name + method.desc);
-				continue;
-			}
-
-			int stackSize = frame.getStackSize();
-			if (isStatic ? stackSize < 1 : stackSize < 2) {
-				recordReason(outReasons, f.name,
-				 "unexpected stack shape at the write site in " + method.name + method.desc);
-				continue;
-			}
-
-			SourceValue value    = frame.getStack(stackSize - 1);
-			SourceValue receiver = isStatic ? null : frame.getStack(stackSize - 2);
-
-			Set<AbstractInsnNode> collected = new HashSet<>(value.insns);
-			if (receiver != null) collected.addAll(receiver.insns);
-			collected.add(insn);
-
-			Map<AbstractInsnNode, ProtectedAccess> localProtected = new HashMap<>();
-
-			String unsafeReason;
-			try {
-				expandAssociatedCalls(collected, insns, frames, i);
-
-				int minIdx = Integer.MAX_VALUE, maxIdx = -1;
-				for (AbstractInsnNode n : collected) {
-					int idx = insns.indexOf(n);
-					if (idx < 0) continue;
-					if (idx < minIdx) minIdx = idx;
-					if (idx > maxIdx) maxIdx = idx;
-				}
-
-				if (minIdx == Integer.MAX_VALUE) {
-					unsafeReason = "empty collection";
-				} else if (maxIdx > i) {
-					unsafeReason = "collected instructions after the put";
-				} else {
-					unsafeReason = checkSafe(host, className, method, insns, jumpTargets,
-					 frames, receiver, collected, minIdx, i, isStatic, privateMethods,
-					 paramFields, rejectedParamSlots, localProtected, oracle);
-					if (unsafeReason == null && !isStackBalanced(frames, minIdx, i, isStatic)) {
-						unsafeReason = "unbalanced stack after extraction";
-					}
-				}
-			} catch (RuntimeException e) {
-				unsafeReason = "extraction threw " + e.getClass().getSimpleName()
-				               + ": " + e.getMessage();
-			}
-
-			if (unsafeReason != null) {
-				RemoldAgent.warn("Field '" + f.name + "' initialization skipped: " + unsafeReason);
-				recordReason(outReasons, f.name,
-				 "no safe initialization expression in " + method.name + method.desc
-				 + ": " + unsafeReason);
-				continue;
-			}
-
-			if (perFieldCollected.containsKey(f.name)) {
-				String reason = "multiple safe writes to the same field in "
-				                + className + "." + method.name + "()";
-				log("Field '" + f.name + "' has multiple safe PUTFIELD in "
-				    + className + "." + method.name + "(): refusing");
-				perFieldCollected.remove(f.name);
-				perFieldProtected.remove(f.name);
-				refusedFields.add(f.name);
-				recordReason(outReasons, f.name, reason);
-				continue;
-			}
-			perFieldCollected.put(f.name, collected);
-			perFieldProtected.put(f.name, localProtected);
-		}
-
-		Map<String, FieldExtract> perField = new LinkedHashMap<>();
-		for (Map.Entry<String, Set<AbstractInsnNode>> e : perFieldCollected.entrySet()) {
-			String                fieldName  = e.getKey();
-			Set<AbstractInsnNode> fieldInsns = e.getValue();
-			Map<AbstractInsnNode, ProtectedAccess> fieldProtected =
-			 perFieldProtected.getOrDefault(fieldName, Map.of());
-
-			Map<LabelNode, LabelNode>              labelMap        = new HashMap<>();
-			List<AbstractInsnNode>                 cloned          = new ArrayList<>();
-			Map<AbstractInsnNode, ProtectedAccess> clonedProtected = new HashMap<>();
-			boolean                                dependsOnParam  = false;
-			boolean                                selfAssign      = false;
-
-			for (int i = 0; i < insns.size(); i++) {
-				AbstractInsnNode insn = insns.get(i);
-				if (!fieldInsns.contains(insn)) continue;
-
-				if (insn instanceof VarInsnNode v
-				    && isLoadOfParam(v)
-				    && paramFields.containsKey(v.var)) {
-					FieldNode fn = paramFields.get(v.var).field();
-					if (fn.name.equals(fieldName)) {
-						selfAssign = true;
-						break;
-					}
-					cloned.add(new VarInsnNode(Opcodes.ALOAD, 0));
-					cloned.add(new FieldInsnNode(Opcodes.GETFIELD, className, fn.name, fn.desc));
-					dependsOnParam = true;
-					continue;
-				}
-
-				AbstractInsnNode c = insn.clone(labelMap);
-				cloned.add(c);
-				ProtectedAccess pa = fieldProtected.get(insn);
-				if (pa != null) clonedProtected.put(c, pa);
-			}
-
-			if (selfAssign) {
-				if (outSelfAssigned != null) outSelfAssigned.add(fieldName);
-				log("Field '" + fieldName + "' is self-assigned from its own constructor "
-				    + "parameter in " + className + "." + method.name
-				    + "(); patch would be a no-op. Refusing.");
-				recordReason(outReasons, fieldName,
-				 "self-assignment from its own constructor parameter");
-				continue;
-			}
-			perField.put(fieldName, new FieldExtract(
-			 cloned, clonedProtected, dependsOnParam, fromRootCtor, fieldInsns));
-		}
-		return perField;
-	}
-
-	private static void expandAssociatedCalls(Set<AbstractInsnNode> collected,
-	                                          InsnList insns,
-	                                          Frame<SourceValue>[] frames,
-	                                          int putIdx) {
-		boolean changed = true;
-		while (changed) {
-			changed = false;
-			for (int i = 0; i < putIdx; i++) {
-				AbstractInsnNode insn = insns.get(i);
-				if (collected.contains(insn)) continue;
-
-				Frame<SourceValue> frame = frames[i];
-				if (frame == null) continue;
-
-				int op = insn.getOpcode();
-				int ss = frame.getStackSize();
-
-				if (op == Opcodes.INVOKESPECIAL
-				    && insn instanceof MethodInsnNode m
-				    && "<init>".equals(m.name)) {
-					int argCount = Type.getArgumentTypes(m.desc).length;
-					int recvIdx  = ss - 1 - argCount;
-					if (recvIdx >= 0 && intersects(frame.getStack(recvIdx), collected)) {
-						collected.add(insn);
-						collected.addAll(frame.getStack(recvIdx).insns);
-						for (int k = 0; k < argCount; k++) {
-							int idx = recvIdx + 1 + k;
-							if (idx < ss) collected.addAll(frame.getStack(idx).insns);
-						}
-						changed = true;
-					}
-
-				} else if (op == Opcodes.INVOKESTATIC
-				           && insn instanceof MethodInsnNode m
-				           && "kotlin/jvm/internal/Intrinsics".equals(m.owner)
-				           && m.desc.endsWith(")V")) {
-					int argCount = Type.getArgumentTypes(m.desc).length;
-					int base     = ss - argCount;
-					if (argCount > 0 && base >= 0 && intersects(frame.getStack(base), collected)) {
-						collected.add(insn);
-						for (int k = 0; k < argCount; k++) {
-							collected.addAll(frame.getStack(base + k).insns);
-						}
-						changed = true;
-					}
-
-				} else if (insn instanceof MethodInsnNode m && isNullCheck(m)) {
-					int args  = Type.getArgumentTypes(m.desc).length;
-					int total = args + (op == Opcodes.INVOKESTATIC ? 0 : 1);
-					int base  = ss - total;
-					if (base < 0) continue;
-
-					boolean matched = false;
-					for (int k = 0; k < total; k++) {
-						if (intersects(frame.getStack(base + k), collected)) {
-							matched = true;
-							break;
-						}
-					}
-					if (matched) {
-						collected.add(insn);
-						for (int k = 0; k < total; k++) {
-							collected.addAll(frame.getStack(base + k).insns);
-						}
-						changed = true;
-					}
-
-				} else if (op == Opcodes.POP || op == Opcodes.POP2) {
-					int n = entriesFor(frame, wordsOf(op));
-					if (n <= 0) continue;
-					boolean matched = false;
-					for (int k = 0; k < n && k < ss; k++) {
-						if (intersects(frame.getStack(ss - 1 - k), collected)) {
-							matched = true;
-							break;
-						}
-					}
-					if (matched) {
-						collected.add(insn);
-						changed = true;
-					}
-
-				} else if (op >= Opcodes.DUP && op <= Opcodes.SWAP) {
-					int n = entriesFor(frame, wordsOf(op));
-					if (n <= 0 || ss < n) continue;
-
-					boolean matched = false;
-					for (int k = 0; k < n; k++) {
-						if (intersects(frame.getStack(ss - 1 - k), collected)) {
-							matched = true;
-							break;
-						}
-					}
-					if (matched) {
-						collected.add(insn);
-						for (int k = 0; k < n; k++) {
-							collected.addAll(frame.getStack(ss - 1 - k).insns);
-						}
-						changed = true;
-					}
-
-				} else if (op >= Opcodes.IASTORE && op <= Opcodes.SASTORE) {
-					int base = ss - 3;
-					if (base < 0) continue;
-					if (intersects(frame.getStack(base), collected)) {
-						collected.add(insn);
-						for (int k = 0; k < 3; k++) {
-							collected.addAll(frame.getStack(base + k).insns);
-						}
-						changed = true;
-					}
-				}
-			}
-		}
-	}
-
-	private static int wordsOf(int op) {
-		return switch (op) {
-			case Opcodes.DUP, Opcodes.POP -> 1;
-			case Opcodes.DUP_X1, Opcodes.SWAP, Opcodes.DUP2, Opcodes.POP2 -> 2;
-			case Opcodes.DUP_X2, Opcodes.DUP2_X1 -> 3;
-			case Opcodes.DUP2_X2 -> 4;
-			default -> 0;
-		};
-	}
-
-	private static int entriesFor(Frame<SourceValue> f, int words) {
-		int n = 0, w = 0, ss = f.getStackSize();
-		while (w < words && n < ss) {
-			w += f.getStack(ss - 1 - n++).getSize();
-		}
-		return n;
-	}
-
-	private static boolean intersects(SourceValue sv, Set<AbstractInsnNode> collected) {
-		if (sv == null) return false;
-		for (AbstractInsnNode n : sv.insns) {
-			if (collected.contains(n)) return true;
-		}
-		return false;
-	}
-
-	private static String checkSafe(Class<?> host, String className, MethodNode method,
-	                                InsnList insns, Set<LabelNode> jumpTargets,
-	                                Frame<SourceValue>[] frames,
-	                                SourceValue receiver,
-	                                Set<AbstractInsnNode> collected,
-	                                int minIdx, int putIdx, boolean isStatic,
-	                                Set<String> privateMethods,
-	                                Map<Integer, ParamField> paramFields,
-	                                Map<Integer, String> rejectedParamSlots,
-	                                Map<AbstractInsnNode, ProtectedAccess> outProtectedAccesses,
-	                                ClassHierarchyOracle oracle) {
-		if (!isStatic) {
-			if (receiver == null || receiver.insns.size() != 1) return "unexpected receiver";
-			AbstractInsnNode recv = receiver.insns.iterator().next();
-			if (!(recv instanceof VarInsnNode v
-			      && v.getOpcode() == Opcodes.ALOAD && v.var == 0)) {
-				return "unexpected receiver";
-			}
-		}
-
-		if (oracle == null) {
-			oracle = new HierarchyTreeOracle(host == null ? null : host.getClassLoader());
-		}
-		for (int k = minIdx; k <= putIdx; k++) {
-			AbstractInsnNode n = insns.get(k);
-			if (n.getOpcode() != -1 && !collected.contains(n)) {
-				return "contains instructions outside the expression tree";
-			}
-		}
-		for (int k = minIdx + 1; k <= putIdx; k++) {
-			if (insns.get(k) instanceof LabelNode l && jumpTargets.contains(l)) {
-				return "contains branch";
-			}
-		}
-
-		for (TryCatchBlockNode tc : method.tryCatchBlocks) {
-			int tryStart   = insns.indexOf(tc.start);
-			int tryEnd     = insns.indexOf(tc.end);
-			int handlerIdx = insns.indexOf(tc.handler);
-
-			boolean overlaps = tryStart <= putIdx && tryEnd > minIdx;
-			if (overlaps) {
-				return "extraction range overlaps try-catch block";
-			}
-			if (handlerIdx >= minIdx && handlerIdx <= putIdx) {
-				return "extraction range contains exception handler";
-			}
-		}
-
-		String ctrlReason = checkControlDependency(insns, minIdx, putIdx);
-		if (ctrlReason != null) return ctrlReason;
-
-		// 按<b>字节码顺序</b>遍历 collected（而不是 HashSet 的迭代顺序）：
-		// 同一个切片里可能同时命中多条门（例如"依赖构造器参数"与"IO 调用"），
-		// HashSet 的迭代顺序由 identity hash 决定、每次 JVM 运行都可能不同，
-		// 会让 PatchReport 里的 reason 飘忽。按序取第一条，报告才稳定且指向最早的问题。
-		for (int k = minIdx; k <= putIdx; k++) {
-			AbstractInsnNode n = insns.get(k);
-			if (!collected.contains(n)) continue;
-			if (n instanceof VarInsnNode v) {
-				if (isStatic) return "depends on local variables";
-				if (v.getOpcode() == Opcodes.ALOAD && v.var == 0) {
-					// this，放行
-				} else if (isLoadOfParam(v) && paramFields.containsKey(v.var)) {
-					// 构造器参数，克隆阶段会替换为 ALOAD 0; GETFIELD
-				} else if (isLoadOfParam(v) && rejectedParamSlots != null
-				           && rejectedParamSlots.containsKey(v.var)) {
-					// 该槽位本来是"参数->字段"模式的候选，但被 docs/initfix/01-safety-gate.md §3 不可变证明或
-					// 单赋值检查拒掉了：把真实原因透传出去，而不是笼统的"局部变量"。
-					return "constructor parameter slot " + v.var
-					       + " cannot be back-tracked: " + rejectedParamSlots.get(v.var);
-				} else {
-					return "depends on local variables";
-				}
-			}
-			if (n.getOpcode() == Opcodes.IINC) {
-				return "depends on local variables";
-			}
-
-			// docs/initfix/01-safety-gate.md §2 的最小效应防御（P0 版）：明确非确定性 / 环境依赖 / IO 的调用直接拒绝。
-			String effect = effectReason(n, insns, frames, collected);
-			if (effect != null) return effect;
-
-			// docs/initfix/01-safety-gate.md §2 局部逃逸豁免的接收者敏感判定：可复用 builder 的接收者必须来自本切片。
-			if (n instanceof MethodInsnNode mm) {
-				String builderReason = builderMutatorReason(mm, insns, frames);
-				if (builderReason != null) return builderReason;
-			}
-
-			if (n instanceof MethodInsnNode m
-			    && m.getOpcode() == Opcodes.INVOKESPECIAL
-			    && !"<init>".equals(m.name)) {
-				if (!m.owner.equals(className)) {
-					return "invokespecial non-<init> on foreign owner not usable from hidden class";
-				}
-				if (!privateMethods.contains(m.name + m.desc)) {
-					return "invokespecial non-<init> target is not a private method of host";
-				}
-			}
-
-			if (n instanceof MethodInsnNode m
-			    && m.getOpcode() == Opcodes.INVOKESPECIAL
-			    && "<init>".equals(m.name)) {
-				Boolean prot = isProtectedCrossPackageAccess(oracle, host, className, m.owner, m.name, m.desc, false);
-				if (prot == null) {
-					return "cannot determine protected status of constructor "
-					       + m.owner + "." + m.name + m.desc + missingBytecodeHint(m.owner);
-				}
-				if (prot) {
-					return "protected constructor across packages not bridgeable";
-				}
-			}
-
-			if (n instanceof InvokeDynamicInsnNode indy && indy.bsmArgs != null) {
-				for (Object arg : indy.bsmArgs) {
-					if (arg instanceof Handle h
-					    && h.getTag() == Opcodes.H_INVOKESPECIAL
-					    && !"<init>".equals(h.getName())) {
-						if (!h.getOwner().equals(className)) {
-							return "invokedynamic bsmArgs contains H_INVOKESPECIAL "
-							       + "on foreign owner: " + h.getOwner()
-							       + "." + h.getName() + h.getDesc();
-						}
-						if (!privateMethods.contains(h.getName() + h.getDesc())) {
-							return "invokedynamic bsmArgs contains H_INVOKESPECIAL "
-							       + "target not a private method of host: "
-							       + h.getName() + h.getDesc();
-						}
-					}
-				}
-			}
-
-			if (n instanceof FieldInsnNode f && isFieldAccessOpcode(f.getOpcode())) {
-				Boolean prot = isProtectedCrossPackageAccess(oracle, host, className, f.owner, f.name, f.desc, true);
-				if (prot == null) {
-					return "cannot determine protected status of field access "
-					       + f.owner + "." + f.name + ":" + f.desc + missingBytecodeHint(f.owner);
-				}
-				if (prot) {
-					outProtectedAccesses.put(n,
-					 new ProtectedAccess(f.getOpcode(), f.owner, f.name, f.desc));
-				}
-			}
-			if (n instanceof MethodInsnNode m && !m.owner.startsWith("[")) {
-				Boolean prot = isProtectedCrossPackageAccess(oracle, host, className, m.owner, m.name, m.desc, false);
-				if (prot == null) {
-					return "cannot determine protected status of method access "
-					       + m.owner + "." + m.name + m.desc + missingBytecodeHint(m.owner);
-				}
-				if (prot) {
-					outProtectedAccesses.put(n,
-					 new ProtectedAccess(m.getOpcode(), m.owner, m.name, m.desc));
-				}
-			}
-		}
-		return null;
-	}
-
-	private static boolean isFieldAccessOpcode(int op) {
-		return op == Opcodes.GETFIELD || op == Opcodes.PUTFIELD
-		       || op == Opcodes.GETSTATIC || op == Opcodes.PUTSTATIC;
-	}
-
-	private static String checkControlDependency(InsnList insns, int minIdx, int putIdx) {
-		for (int i = 0; i < insns.size(); i++) {
-			AbstractInsnNode n       = insns.get(i);
-			int              op      = n.getOpcode();
-			boolean          inRange = i >= minIdx && i <= putIdx;
-			boolean          before  = i < minIdx;
-			boolean          after   = i > putIdx;
-
-			if (n instanceof JumpInsnNode j) {
-				if (inRange) return "jump instruction inside extraction range";
-				int t = insns.indexOf(j.label);
-				if (before && t > putIdx) {
-					return "jump at " + i + " skips put (target=" + t + ")";
-				}
-				if (after && t <= putIdx) {
-					return "back-edge at " + i + " into put (target=" + t + ")";
-				}
-			} else if (n instanceof TableSwitchInsnNode s) {
-				if (inRange) return "switch instruction inside extraction range";
-				String r = switchTargetCheck(insns, s.dflt, s.labels,
-				 before, after, minIdx, putIdx);
-				if (r != null) return r;
-			} else if (n instanceof LookupSwitchInsnNode s) {
-				if (inRange) return "switch instruction inside extraction range";
-				String r = switchTargetCheck(insns, s.dflt, s.labels,
-				 before, after, minIdx, putIdx);
-				if (r != null) return r;
-			} else if (op == Opcodes.RETURN || op == Opcodes.IRETURN
-			           || op == Opcodes.LRETURN || op == Opcodes.FRETURN
-			           || op == Opcodes.DRETURN || op == Opcodes.ARETURN) {
-				if (inRange) return "return inside extraction range";
-				if (before) return "return before put at index " + i;
-			} else if (op == Opcodes.ATHROW) {
-				if (inRange) return "athrow inside extraction range";
-			}
-		}
-		return null;
-	}
-
-	private static String switchTargetCheck(InsnList insns, LabelNode dflt,
-	                                        List<LabelNode> labels,
-	                                        boolean before, boolean after,
-	                                        int minIdx, int putIdx) {
-		List<LabelNode> all = new ArrayList<>(labels.size() + 1);
-		all.add(dflt);
-		all.addAll(labels);
-		for (LabelNode l : all) {
-			int t = insns.indexOf(l);
-			if (before && t > putIdx) {
-				return "switch target at " + t + " skips put";
-			}
-			if (after && t <= putIdx) {
-				return "switch back-edge to " + t + " into put";
-			}
-		}
-		return null;
-	}
-
-	private static Boolean isProtectedCrossPackageAccess(
-	 ClassHierarchyOracle oracle, Class<?> host, String hostName, String ownerInternal,
-	 String name, String desc, boolean isField) {
-
-		if (ownerInternal.isEmpty() || ownerInternal.charAt(0) == '[') return Boolean.FALSE;
-
-		Optional<ClassHierarchyOracle.MemberRef> member =
-		 oracle.resolveMember(ownerInternal, name, desc, isField);
-		if (member.isEmpty()) return null;
-
-		String hostInternal = host != null ? host.getName().replace('.', '/') : hostName;
-		if (hostInternal == null) return null;
-		return Modifier.isProtected(member.get().access)
-		       && !packageName(member.get().declaringClass).equals(packageName(hostInternal));
-	}
-
-	private static String packageName(String internalName) {
-		int separator = internalName.lastIndexOf('/');
-		return separator < 0 ? "" : internalName.substring(0, separator);
-	}
-
-	/**
-	 * 从"&lt;原因&gt;: &lt;类名&gt;"形态的诊断文案里取出类名（取不到返回 {@code null}）。
-	 */
-	private static String unresolvedClassOf(String diagnostic) {
-		if (diagnostic == null) return null;
-		int separator = diagnostic.lastIndexOf(": ");
-		return separator < 0 ? null : diagnostic.substring(separator + 2).trim();
-	}
-
-	/**
-	 * 诊断归因：读不到字节的对象若是「织入期生成的合成内部类」，点名并给出唯一的补救路径。
-	 *
-	 * <p>Mixin 的 {@code InnerClassGenerator} 在织入期按 {@code Target$Anonymous$<hex>} 生成合成内部类，
-	 * 并把名字登记进目标类的 {@code nestMembers}。这类字节磁盘上没有、也不经过 Remold 的
-	 * {@code ClassFileTransformer}，于是 Nest 扫描只能判 {@code incomplete}、成员可见性只能判
-	 * "无法确定"，两条路径都 fail-closed。不把归因写进日志，读者会去找一个根本不存在的
-	 * {@code .class}，而真正的补救动作是让织入方把字节回灌到 {@link remold.BytecodeSources}。</p>
-	 *
-	 * @param className 类名（内部名或点分名）
-	 * @return 归因后缀；无提示时返回空串
-	 */
-	private static String missingBytecodeHint(String className) {
-		if (className == null || className.isEmpty()) return "";
-		int separator = Math.max(className.lastIndexOf('/'), className.lastIndexOf('.'));
-		String simple = className.substring(separator + 1);
-		if (simple.contains("$Anonymous$")) {
-			return " — " + simple + " is a synthetic inner class generated at weaving time"
-				+ " (Mixin InnerClassGenerator): it has no .class on the classpath and never passes"
-				+ " Remold's ClassFileTransformer. Its bytes must be registered with"
-				+ " remold.BytecodeSources (key = internal name) by the weaving plugin; without that"
-				+ " bytecode re-feed the metadata stays unresolvable and this decision stays"
-				+ " fail-closed.";
-		}
-		return " — if this member is a synthetic inner class produced by a weaving framework"
-			+ " (Mixin/Forge/NeoForge), its bytecode exists only in memory and must be re-fed to"
-			+ " remold.BytecodeSources; otherwise this stays fail-closed by design.";
-	}
-
-	private static boolean isStackBalanced(Frame<SourceValue>[] frames,
-	                                       int first, int putIdx, boolean isStatic) {
-		Frame<SourceValue> a = frames[first];
-		Frame<SourceValue> b = frames[putIdx];
-		if (a == null || b == null) return false;
-		return b.getStackSize() - a.getStackSize() == (isStatic ? 1 : 2);
-	}
-
-	private static Set<LabelNode> collectJumpTargets(MethodNode m) {
-		Set<LabelNode> t = new HashSet<>();
-		for (AbstractInsnNode n : m.instructions) {
-			if (n instanceof JumpInsnNode j) {
-				t.add(j.label);
-			} else if (n instanceof TableSwitchInsnNode s) {
-				t.add(s.dflt);
-				t.addAll(s.labels);
-			} else if (n instanceof LookupSwitchInsnNode s) {
-				t.add(s.dflt);
-				t.addAll(s.labels);
-			}
-		}
-		for (TryCatchBlockNode tc : m.tryCatchBlocks) {
-			t.add(tc.start);
-			t.add(tc.end);
-			t.add(tc.handler);
-		}
-		return t;
-	}
-
-	private static boolean isNullCheck(MethodInsnNode m) {
-		return (m.getOpcode() == Opcodes.INVOKESTATIC
-		        && "java/util/Objects".equals(m.owner) && "requireNonNull".equals(m.name))
-		       || (m.getOpcode() == Opcodes.INVOKEVIRTUAL
-		           && "java/lang/Object".equals(m.owner) && "getClass".equals(m.name));
-	}
 }

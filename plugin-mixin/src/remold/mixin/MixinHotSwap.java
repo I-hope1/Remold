@@ -238,6 +238,8 @@ public final class MixinHotSwap {
 			} else {
 				RemoldAgent.info("[Mixin] " + dotClassName + " target mapping migrated ("
 					+ retarget.describe() + "); reloading the mixin state");
+				// 目标集合变了：整表重推目标索引，否则旧目标会一直是 TARGET、新目标仍是 NOT_TARGET。
+				MixinTargetPublisher.publishNow();
 			}
 		}
 		if (plan.usable() && plan.interfacesChanged()) {

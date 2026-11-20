@@ -262,4 +262,72 @@ class BirthPatchTest {
 		assertEquals(0, PendingLoadPatch.pending(),
 		 "the pending patch must be discarded once the alignment queue supplied effective bytes");
 	}
+
+	/** 批次里"类尚未加载、加载器未知"的登记：出生时无论谁成为定义加载器都能拿到这次编辑。 */
+	@Test
+	void unknownScopeOfferIsConsumedByWhicheverLoaderLoadsFirst() {
+		byte[] v2 = classBytes("V2");
+		PendingLoadPatch.offerAny(INTERNAL, v2);
+
+		// 加载器此刻才确定：任意 scope 都应命中这条 ANY_SCOPE 记录。
+		PendingLoadPatch.Decision d = PendingLoadPatch.decide(424242L, INTERNAL, classBytes("V1"), true,
+		 (dot, raw) -> raw);
+
+		assertTrue(d.applied(), "the pending patch registered before the loader was known must still apply");
+		assertArrayEquals(v2, d.bytes());
+		assertEquals(0, PendingLoadPatch.pending(), "consumed once");
+	}
+
+	/** 但归属校验仍然优先：外部类即使名字相同也不能消费这条记录。 */
+	@Test
+	void unknownScopeOfferStillRequiresProjectOwnership() {
+		byte[] v2 = classBytes("V2");
+		PendingLoadPatch.offerAny(INTERNAL, v2);
+
+		PendingLoadPatch.Decision d = PendingLoadPatch.decide(7L, INTERNAL, classBytes("V1"), false,
+		 (dot, raw) -> raw);
+
+		assertFalse(d.applied());
+		assertEquals(PendingLoadPatch.Outcome.REFUSED_NON_PROJECT, d.outcome());
+	}
+
+	/**
+	 * 生产路径的名字形态：批次侧登记的是<b>点分名</b>（{@code Utils.getClassNameASM} 产出），
+	 * 出生点是<b>斜杠内部名</b>。两侧必须归一化，否则会静默全量 miss。
+	 *
+	 * <p>这条用例走真实链路：用点分名登记 → 经 {@code AnnotationTransformer} 以斜杠名出生。</p>
+	 */
+	@Test
+	void dottedOfferIsConsumedBySlashInternalNameAtBirth() throws Exception {
+		ProtectionDomain pd = projectDomain();
+		byte[] v1 = classBytes("V1", "probe/V1Base");
+		byte[] v2 = classBytes("V2", "probe/V2Base");
+		// 批次侧真实形态：点分名。
+		PendingLoadPatch.offerAny(DOT, v2);
+		assertEquals(1, PendingLoadPatch.pending());
+
+		byte[] result = transformAtBirth(pd, v1);
+
+		assertArrayEquals(v2, result,
+		 "a dotted registration must still be found by the slash internal name at birth");
+		assertEquals(0, PendingLoadPatch.pending(), "the dotted entry must be consumed");
+		assertEquals(1L, PendingLoadPatch.appliedCount());
+	}
+
+	/** 同上，但登记侧给斜杠名、出生侧给点分名：两个方向都要通。 */
+	@Test
+	void slashOfferIsConsumedByDottedLookup() {
+		byte[] v1 = classBytes("V1");
+		byte[] v2 = classBytes("V2");
+		PendingLoadPatch.offerAny(INTERNAL, v2);
+
+		PendingLoadPatch.Decision d = PendingLoadPatch.decide(5L, DOT, v1, true, (dot, raw) -> raw);
+
+		assertTrue(d.applied(), "normalization must work in both directions");
+		assertArrayEquals(v2, d.bytes());
+	}
+
+	private byte[] transformAtBirth(ProtectionDomain pd, byte[] buffer) throws Exception {
+		return new remold.AnnotationTransformer().transform(loader, INTERNAL, null, pd, buffer);
+	}
 }

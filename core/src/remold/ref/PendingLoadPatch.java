@@ -43,6 +43,15 @@ public final class PendingLoadPatch {
 	/** 合成/内部类的名字形态：这些类即使工作区里有同名产物也不该由本机制替换。 */
 	private static final Pattern SYNTHETIC_NAME = Pattern.compile(".*(\\$Anonymous\\$|\\$mixin\\$|\\$\\$).*");
 
+	/**
+	 * "加载器未知"的 scope 哨兵。
+	 *
+	 * <p>批次提交时类还没加载，谁会成为它的定义加载器要等 JVM 决定；此时无法按 scope 精确定位。
+	 * 这类待决记录用哨兵登记，出生时<b>先查精确 scope、再退回哨兵</b>。跨 loader 泄漏由出生点的
+	 * 工作区归属校验兜住：非工作区类一律拒绝，所以外部类拿不到这条记录。</p>
+	 */
+	public static final long ANY_SCOPE = Long.MIN_VALUE;
+
 	/** 待决队列上限：类加载路径上的记账必须有界。 */
 	public static final int DEFAULT_CAPACITY = 1024;
 
@@ -92,8 +101,30 @@ public final class PendingLoadPatch {
 
 	private PendingLoadPatch() { }
 
+	/**
+	 * 统一成 JVM 内部名（斜杠形态）。
+	 *
+	 * <p><b>这一步是必需的</b>：批次侧的名字来自 {@code ClassReader.getClassName()} 的等价物但被
+	 * {@code Utils.getClassNameASM(...)} 转成了点分名，而出生点（{@code ClassFileTransformer}）
+	 * 拿到的是斜杠内部名。不归一化就会出现"登记用 {@code a.b.C}、查找用 {@code a/b/C}"
+	 * 的全量 miss —— 而且是静默 miss。</p>
+	 */
+	static String normalize(String name) {
+		return name == null ? null : name.replace('.', '/');
+	}
+
 	private static String key(long loaderScope, String internalName) {
-		return loaderScope + "\u0000" + internalName;
+		return loaderScope + "\u0000" + normalize(internalName);
+	}
+
+	/**
+	 * 登记一条"加载器未知"的待决补丁（批次提交时类尚未加载的典型形态）。
+	 *
+	 * @param internalName 内部名
+	 * @param diskRaw      磁盘上的 v2 Raw 字节（变换在出生时做）
+	 */
+	public static void offerAny(String internalName, byte[] diskRaw) {
+		offer(ANY_SCOPE, internalName, diskRaw);
 	}
 
 	/**
@@ -128,9 +159,16 @@ public final class PendingLoadPatch {
 	                              BiFunction<String, byte[], byte[]> applySourceTransforms) {
 		Pending pending;
 		synchronized (LOCK) {
-			pending = PENDING.get(key(loaderScope, internalName));
+			String exact = key(loaderScope, internalName);
+			pending = PENDING.get(exact);
+			if (pending != null) {
+				PENDING.remove(exact);
+			} else {
+				String any = key(ANY_SCOPE, internalName);
+				pending = PENDING.get(any);
+				if (pending != null) PENDING.remove(any);
+			}
 			if (pending == null) return Decision.NONE;
-			PENDING.remove(key(loaderScope, internalName));
 		}
 		Decision d = evaluate(pending, internalName, buffer, projectLocated, applySourceTransforms);
 		synchronized (LOCK) {
@@ -144,7 +182,7 @@ public final class PendingLoadPatch {
 	                                 boolean projectLocated,
 	                                 BiFunction<String, byte[], byte[]> transforms) {
 		if (!projectLocated) return new Decision(Outcome.REFUSED_NON_PROJECT, null);
-		String dot = internalName.replace('/', '.');
+		String dot = normalize(internalName).replace('/', '.');
 		if (looksWoven(internalName, buffer)) return new Decision(Outcome.REFUSED_WOVEN, null);
 
 		byte[] payload;

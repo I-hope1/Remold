@@ -12,6 +12,7 @@ import org.objectweb.asm.FieldVisitor;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
+import remold.reflect.mixin.MixinTargetIndex;
 import remold.vcs.AlignmentMetaStore;
 
 /**
@@ -67,6 +68,8 @@ public final class PendingLoadPatch {
 		REFUSED_NON_PROJECT,
 		/** 疑似已织入：不替换，保留上游结果。 */
 		REFUSED_WOVEN,
+		/** 确认是 Mixin 目标类：不替换（上游织入结果必须保留）。 */
+		REFUSED_MIXIN_TARGET,
 		/** 磁盘 Raw 取不到或形态无法解释：不替换。 */
 		REFUSED_UNRESOLVED_PAYLOAD
 	}
@@ -183,6 +186,10 @@ public final class PendingLoadPatch {
 	                                 BiFunction<String, byte[], byte[]> transforms) {
 		if (!projectLocated) return new Decision(Outcome.REFUSED_NON_PROJECT, null);
 		String dot = normalize(internalName).replace('/', '.');
+		// 明确是 Mixin 目标：拒绝。UNKNOWN 不能当成 NOT_TARGET（见 MixinTargetIndex 的 Javadoc）。
+		if (MixinTargetIndex.lookup(internalName) == MixinTargetIndex.Lookup.TARGET) {
+			return new Decision(Outcome.REFUSED_MIXIN_TARGET, null);
+		}
 		if (looksWoven(internalName, buffer)) return new Decision(Outcome.REFUSED_WOVEN, null);
 
 		byte[] payload;

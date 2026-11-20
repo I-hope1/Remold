@@ -39,6 +39,7 @@ class BirthPatchTest {
 	@AfterEach
 	void cleanUp() {
 		PendingLoadPatch.reset();
+		remold.reflect.mixin.MixinTargetIndex.reset();
 		RemoldAgent.bytecodeCache.remove(DOT);
 		if (projectDir != null) RemoldAgent.activeWatchDirs.remove(projectDir);
 	}
@@ -329,5 +330,26 @@ class BirthPatchTest {
 
 	private byte[] transformAtBirth(ProtectionDomain pd, byte[] buffer) throws Exception {
 		return new remold.AnnotationTransformer().transform(loader, INTERNAL, null, pd, buffer);
+	}
+
+	/** 确认是 Mixin 目标时拒绝出生点补丁：上游织入结果必须保留。 */
+	@Test
+	void mixinTargetIsRefused() {
+		byte[] v2 = classBytes("V2");
+		PendingLoadPatch.offerAny(INTERNAL, v2);
+		remold.reflect.mixin.MixinTargetIndex.publish(java.util.List.of(new Object() {
+			@SuppressWarnings("unused")
+			private final java.util.Map<String, java.util.List<Object>> mixinMapping =
+			 java.util.Map.of(DOT, java.util.List.of(new Object()));
+			@SuppressWarnings("unused")
+			private final java.util.Set<String> unhandledTargets = java.util.Set.of();
+		}));
+
+		PendingLoadPatch.Decision d = PendingLoadPatch.decide(1L, INTERNAL, classBytes("V1"), true,
+		 (dot, raw) -> raw);
+
+		assertEquals(PendingLoadPatch.Outcome.REFUSED_MIXIN_TARGET, d.outcome(),
+		 "a confirmed mixin target must never be overwritten by the birth patch");
+		remold.reflect.mixin.MixinTargetIndex.reset();
 	}
 }

@@ -43,6 +43,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static remold.util.Diag.isDebugEnabled;
 import static remold.util.Diag.log;
 
 /**
@@ -252,8 +253,10 @@ final class InitFixSliceExtractor {
 			if (perFieldCollected.containsKey(f.name)) {
 				String reason = "multiple safe writes to the same field in "
 				                + className + "." + method.name + "()";
-				log("Field '" + f.name + "' has multiple safe PUTFIELD in "
-				    + className + "." + method.name + "(): refusing");
+				if (isDebugEnabled()) {
+					log("Field '" + f.name + "' has multiple safe PUTFIELD in "
+					    + className + "." + method.name + "(): refusing");
+				}
 				perFieldCollected.remove(f.name);
 				perFieldProtected.remove(f.name);
 				refusedFields.add(f.name);
@@ -303,9 +306,11 @@ final class InitFixSliceExtractor {
 
 			if (selfAssign) {
 				if (outSelfAssigned != null) outSelfAssigned.add(fieldName);
-				log("Field '" + fieldName + "' is self-assigned from its own constructor "
-				    + "parameter in " + className + "." + method.name
-				    + "(); patch would be a no-op. Refusing.");
+				if (isDebugEnabled()) {
+					log("Field '" + fieldName + "' is self-assigned from its own constructor "
+					    + "parameter in " + className + "." + method.name
+					    + "(); patch would be a no-op. Refusing.");
+				}
 				InitFixSafetyGate.recordReason(outReasons, fieldName,
 				 "self-assignment from its own constructor parameter");
 				continue;

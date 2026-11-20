@@ -5,6 +5,7 @@ import org.objectweb.asm.tree.*;
 
 import java.util.*;
 
+import static remold.util.Diag.isDebugEnabled;
 import static remold.util.Diag.log;
 import static remold.ref.InitFix.*;
 
@@ -647,9 +648,11 @@ final class InitFixPatchEmitter {
 			};
 
 			rewritten.add(new InvokeDynamicInsnNode(pa.name(), indyDesc, BRIDGE_BSM, bsmArgs));
-			log("Bridging protected access via indy: "
-			    + ownerInternal + "." + pa.name() + " " + pa.desc()
-			    + " (opcode=" + pa.opcode() + ", host=" + hostInternal + ")");
+			if (isDebugEnabled()) {
+				log("Bridging protected access via indy: "
+				    + ownerInternal + "." + pa.name() + " " + pa.desc()
+				    + " (opcode=" + pa.opcode() + ", host=" + hostInternal + ")");
+			}
 		}
 		return rewritten;
 	}
@@ -753,8 +756,10 @@ final class InitFixPatchEmitter {
 				 replayExpected
 				};
 				rewritten.add(new InvokeDynamicInsnNode(f.name, indyDesc, BRIDGE_BSM_EXPECTED, bsmArgs));
-				log("Rewriting field write via indy(replay-expected): "
-				    + className + "." + f.name + " " + f.desc + ", expected=" + replayExpected);
+				if (isDebugEnabled()) {
+					log("Rewriting field write via indy(replay-expected): "
+					    + className + "." + f.name + " " + f.desc + ", expected=" + replayExpected);
+				}
 				continue;
 			}
 
@@ -776,8 +781,10 @@ final class InitFixPatchEmitter {
 			};
 
 			rewritten.add(new InvokeDynamicInsnNode(f.name, indyDesc, BRIDGE_BSM, bsmArgs));
-			log("Rewriting field write via indy(" + (forced ? "force" : "conditional") + "): "
-			    + className + "." + f.name + " " + f.desc);
+			if (isDebugEnabled()) {
+				log("Rewriting field write via indy(" + (forced ? "force" : "conditional") + "): "
+				    + className + "." + f.name + " " + f.desc);
+			}
 		}
 		return rewritten;
 	}

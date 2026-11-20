@@ -43,6 +43,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static remold.util.Diag.isDebugEnabled;
 import static remold.util.Diag.log;
 
 /**
@@ -678,9 +679,11 @@ final class InitFixSafetyGate {
 			String ctrlReason = InitFixSliceExtractor.checkControlDependency(insns, startOrig, putOrig);
 			if (ctrlReason != null) {
 				rejectParamSlot(rejected, slot, "pattern has control dependency: " + ctrlReason);
-				log("Skipping constructor param slot " + slot + " in "
-				    + hostClass.name + ".<init>: pattern has control dependency: "
-				    + ctrlReason);
+				if (isDebugEnabled()) {
+					log("Skipping constructor param slot " + slot + " in "
+					    + hostClass.name + ".<init>: pattern has control dependency: "
+					    + ctrlReason);
+				}
 				continue;
 			}
 
@@ -688,9 +691,11 @@ final class InitFixSafetyGate {
 			// 后续指令期望的类型会不匹配，触发 VerifyError
 			if (!paramTypeMatches(init.desc, slot, fc.desc)) {
 				rejectParamSlot(rejected, slot, "parameter type != field type " + fc.desc);
-				log("Skipping constructor param slot " + slot + " in "
-				    + hostClass.name + ".<init>: parameter type != field type "
-				    + fc.desc);
+				if (isDebugEnabled()) {
+					log("Skipping constructor param slot " + slot + " in "
+					    + hostClass.name + ".<init>: parameter type != field type "
+					    + fc.desc);
+				}
 				continue;
 			}
 
@@ -710,9 +715,11 @@ final class InitFixSafetyGate {
 			if (immutableReason != null) {
 				rejectParamSlot(rejected, slot, "source field '" + source.name
 				                                + "' is not provably immutable: " + immutableReason);
-				log("Skipping constructor param slot " + slot + " in "
-				    + hostClass.name + ".<init>: source field '" + source.name
-				    + "' is not provably immutable: " + immutableReason);
+				if (isDebugEnabled()) {
+					log("Skipping constructor param slot " + slot + " in "
+					    + hostClass.name + ".<init>: source field '" + source.name
+					    + "' is not provably immutable: " + immutableReason);
+				}
 				continue;
 			}
 
@@ -741,8 +748,10 @@ final class InitFixSafetyGate {
 			}
 			if (unsafeReason != null) {
 				rejectParamSlot(rejected, slot, unsafeReason);
-				log("Skipping constructor param slot " + slot + " in "
-				    + hostClass.name + ".<init>: " + unsafeReason);
+				if (isDebugEnabled()) {
+					log("Skipping constructor param slot " + slot + " in "
+					    + hostClass.name + ".<init>: " + unsafeReason);
+				}
 				continue;
 			}
 
@@ -773,8 +782,10 @@ final class InitFixSafetyGate {
 			}
 			if (unsafeReason != null) {
 				rejectParamSlot(rejected, slot, unsafeReason);
-				log("Skipping constructor param slot " + slot + " in "
-				    + hostClass.name + ".<init>: " + unsafeReason);
+				if (isDebugEnabled()) {
+					log("Skipping constructor param slot " + slot + " in "
+					    + hostClass.name + ".<init>: " + unsafeReason);
+				}
 				continue;
 			}
 

@@ -135,7 +135,6 @@ public class ShadowFieldInitFixProbe {
 		 "non-shadowed field MidG1.nm must be patched to 41, was " + call(midInst, "selfNm"));
 		check(call(leafInst, "selfNl") == 42,
 		 "non-shadowed field LeafG2.nl must be patched to 42, was " + call(leafInst, "selfNl"));
-		diagnose("v3");
 		check(call(midInst, "selfX") == 200 && call(leafInst, "selfX") == 300,
 		 "shadowed values must stay at their patched initializers across the next round, was "
 			+ call(midInst, "selfX") + "/" + call(leafInst, "selfX"));
@@ -218,35 +217,6 @@ public class ShadowFieldInitFixProbe {
 		       + " bx=" + call(leafInst, "baseBx") + " mx=" + call(leafInst, "selfMx")
 		       + " leaf.lx=" + call(leafInst, "selfLx")
 		       + " " + optional("mid.nm", midInst, "selfNm") + optional("leaf.nl", leafInst, "selfNl");
-	}
-
-	private static void diagnose(String tag) {
-		for (String name : new String[]{"shadowprobe.BaseG0", "shadowprobe.MidG1", "shadowprobe.LeafG2"}) {
-			try {
-				Class<?> c = Class.forName(name);
-				StringBuilder sb = new StringBuilder();
-				for (java.lang.reflect.Field f : c.getDeclaredFields()) {
-					if (f.getType() != int.class) continue;
-					long off = remold.Reflect.UNSAFE.objectFieldOffset(f);
-					Object target = name.endsWith("LeafG2") ? leafInst : midInst;
-					sb.append(f.getName()).append('@').append(off).append('=')
-					  .append(remold.Reflect.UNSAFE.getIntVolatile(target, off)).append(' ');
-				}
-				System.out.println("PROBE-DIAG[" + tag + "] " + c.getSimpleName() + ": " + sb);
-			} catch (Throwable t) {
-				System.out.println("PROBE-DIAG[" + tag + "] " + name + " failed: " + t);
-			}
-		}
-		System.out.println("PROBE-DIAG[" + tag + "] baseX via BaseG0.class="
-		                   + invokeDeclared("shadowprobe.BaseG0", leafInst, "baseX"));
-	}
-
-	private static String invokeDeclared(String owner, Object instance, String method) {
-		try {
-			return String.valueOf(Class.forName(owner).getMethod(method).invoke(instance));
-		} catch (Throwable t) {
-			return "<ERR " + t + ">";
-		}
 	}
 
 	private static String optional(String label, Object instance, String method) {

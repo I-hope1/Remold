@@ -179,6 +179,39 @@ class BytecodeGateTransactionTest {
 		 "the host must be named in the round's skip ledger when its group is dropped: " + skips);
 	}
 
+	/**
+	 * 两阶段入口同样要在 stage A 的 {@code preRegister} 之前裁掉被拒类的事务。
+	 *
+	 * <p>两阶段路径的提交点分散在 stage A 的 {@code preRegister}（登记 pending）与 stage C 的
+	 * {@code commit()}（写 bytecodeCache）两处，只修单阶段会在这里留下后门：被拒类的对齐字节照样在
+	 * stage A 之前被登记进 pending，下一轮首次加载就拿到从未生效的字节。</p>
+	 */
+	@Test
+	void rejectedClassTransactionStaysOutOfTheTwoPhasePreRegister() {
+		byte[] goodBytes = validBytes(GOOD_INTERNAL);
+		Class<?> goodTarget = define(GOOD_INTERNAL, goodBytes);
+		ClassDefinition goodDefinition = new ClassDefinition(goodTarget, goodBytes);
+
+		byte[] badAligned = classBytes(BAD_ANON_INTERNAL);
+		RemoldAgent.AlignmentTransaction badTransaction =
+		 transaction(BAD_DOT, BAD_ANON_INTERNAL, BAD_ANON_DOT, badAligned);
+
+		// 前置基线：本轮的拒绝名单里确实有这个宿主（与生产路径上 gate 记进台账的形态一致）。
+		RemoldAgent.RoundSkips skips = new RemoldAgent.RoundSkips();
+		skips.markBytecodeRejected(BAD_DOT);
+		assertTrue(skips.bytecodeRejected().contains(BAD_DOT), "precondition: the refusal is recorded");
+
+		RemoldAgent.RedefineOutcome outcome = TwoPhaseCoordinator.applyTwoPhase(
+		 List.of(goodDefinition), Map.of(), List.of(badTransaction), skips, Set.of());
+
+		assertFalse(badTransaction.committed,
+		 "the two-phase path must not commit the transaction of a refused class: " + outcome);
+		assertNull(AnnotationTransformer.pendingAlignedClasses.get(BAD_ANON_INTERNAL),
+		 "stage A's preRegister must never run for a refused group (pending would publish unapplied bytes)");
+		assertNull(RemoldAgent.bytecodeCache.get(BAD_ANON_DOT),
+		 "stage C must never write the refused group's bytes into bytecodeCache");
+	}
+
 	// ------------------------------------------------------------ M1 反向：空批次必须回滚
 
 	/**

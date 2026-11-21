@@ -162,7 +162,43 @@ class RedefineEntryGateCoverageTest {
 				String body = code.substring(start, end);
 				assertTrue(body.contains("RedefineEntryGate.gate(") || body.contains("RedefineEntryGate.gateOne("),
 				 entry.getKey() + "#" + method + " is declared as gated but never calls RedefineEntryGate");
+				// 每个 redefineClasses 调用点都要"吃到"门禁产物：只要求"方法体里出现过门禁"会漏掉
+				// "stage A 的门禁被拆掉、但同方法里 stage C 的门禁还在"这种半裸形态。
+				assertEveryRedefineArgumentIsGated(body, entry.getKey() + "#" + method);
 			}
+		}
+	}
+
+	/**
+	 * 逐个 {@code redefineClasses} 实参核验它确实是门禁产物。
+	 *
+	 * <p>两种合法形态：① 实参本身带 {@code RedefineEntryGate}（就地门禁）；② 实参是某个标识符，
+	 * 而同一方法体内有 {@code 标识符 = RedefineEntryGate.gate/gateOne(...)} 的赋值（门禁产物被复用，
+	 * 例如 stage A 与 stage C 共用同一个 {@code finalDefinition}）。</p>
+	 */
+	private static void assertEveryRedefineArgumentIsGated(String body, String where) {
+		Matcher m = Pattern.compile("redefineClasses\\s*\\(").matcher(body);
+		while (m.find()) {
+			int open = body.indexOf('(', m.start());
+			int close = matchingParen(body, open);
+			String argument = body.substring(open + 1, close).trim();
+			if (argument.contains("RedefineEntryGate")) continue;
+			Matcher id = Pattern.compile("^([A-Za-z_$][A-Za-z0-9_$]*)").matcher(argument);
+			assertTrue(id.find(),
+			 where + " passes a redefine argument that is neither a gate call nor a named gate result: " + argument);
+			String name = id.group(1);
+			// 门禁产物可以整体赋值（{@code X = gate(...)}），也可以先塞进容器
+			// （{@code m.put(k, RedefineEntryGate.gate(...))}）再由 {@code X.get(k)} 取回；
+			// 后者要求容器里至少有一处门禁写入，否则"取回来的东西"可能根本不是门禁产物。
+			boolean producedByGate = Pattern.compile(
+			 "\\b" + Pattern.quote(name) + "\\s*=\\s*RedefineEntryGate\\.gate(One)?\\("
+			).matcher(body).find()
+			 || Pattern.compile(
+			 "\\.(put|add|addAll|putAll)\\s*\\([^;]*RedefineEntryGate\\.gate(One)?\\("
+			).matcher(body).find();
+			assertTrue(producedByGate,
+			 where + " redefines with '" + argument + "' but '" + name
+			  + "' is never assigned from RedefineEntryGate in that method: every redefine site needs its own gate");
 		}
 	}
 

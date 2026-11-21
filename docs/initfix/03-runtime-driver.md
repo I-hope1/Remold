@@ -54,6 +54,19 @@
 - 首轮报 `warn`；台账重试轮降为 `info`（重试轮的跳过多半来自上一轮已补过的实例）。
 - 无 CAS 语义的无条件回退（子字模拟、volatile put）统一返回 `true`，不产生跳过计数。
 
+**祖先期望值条件写（`KIND_CONDITIONAL_ANCESTOR`）**
+- 目标字段是**本轮新增且遮蔽了祖先同名字段**时的默认写入方式：期望值不是类型默认值，而是同一实例上
+  该祖先字段的运行期读数（`insertArguments` 绑定的声明类 + 字段偏移 + 读取 MethodHandle）。
+- 理由是 DCEVM 的迁移复制按 `(name, desc)` 把祖先槽位的值写进新槽，新槽一开始就不是类型默认值；用零值
+  做期望必然 miss。比较基准必须取**重定义前**层级上的那条声明——那才是迁移复制的来源；按批次新层级解析
+  会让基准随补丁顺序漂移。
+- 判据分三档：等于祖先读数 ⇒ 按新初值写入；等于类型默认值 ⇒ 同样写入（等价于普通条件写）；其余值 ⇒
+  视为实例已被真实写入，跳过并计入 `[SHADOW-FIELD]` 告警与跳过计数。
+- 访问权限不是边界：DCEVM 迁移复制不区分 `private`/包内权限，运行期读取走完整权限 lookup；只有静态性
+  不符、超类链不可解析这两类 fail-closed 退回零值条件写。
+- **T0 例外**：遮蔽的新增字段不参与 T0 零值等价判定（`docs/initfix/01-safety-gate.md` §1），否则
+  `int x = 0;` 这种形态会在生成补丁前被丢掉。
+
 **强制写（`KIND_FORCE`）**
 - 无条件 volatile 写，仅用于 `@RemoldReinit(mode = OVERWRITE)`。
 - 必须经 `Unsafe`，不能用 `putfield`：`final` 字段只允许在声明类构造器里赋值，补丁是 hidden nestmate，直接 `putfield` 会在链接期抛 `IllegalAccessError`。因此 final 字段同样适用。

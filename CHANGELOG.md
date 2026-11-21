@@ -351,7 +351,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   槽位停在迁移副本上），豁免后 `mid.x=200`/`mid.bx=15`/`mid.mx=31`、祖先槽位 `10/10`、
   `leaf.x=300`、`leaf.lx=540`、`anon.lx=540`，
   下一轮新增的非遮蔽字段 `v3m=46`/`v3l=586`（匿名实例同样 `586`）；T0 组 `zero.x=0`、`bare.x=0`
-  （祖先仍 `10/10`）；private 组 `sub.x=200`（私有槽位仍 `10`）。单测 `ShadowFieldInitFixTest` 21 例
+  （祖先仍 `10/10`）；private 组 `sub.x=200`（私有槽位仍 `10`）。单测 `ShadowFieldInitFixTest` 22 例
   （遮蔽检测/最近声明类/重定义前层级解析/private 采纳/static·同名异型 fail-closed/超类链不可解析/
   T0 合成切片与"有写指令不合成"负向/发射器接线/运行期 F1·F2·private 私有槽不被写入）；变异检查见
   `docs/battles/` 战报。

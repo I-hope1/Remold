@@ -95,67 +95,6 @@ public final class HierarchyTreeOracle implements ClassHierarchyOracle {
 		return Optional.empty();
 	}
 
-	/**
-	 * 新版本的 {@code className} 是否遮蔽了父类链上声明的实例字段（字段遮蔽）。
-	 *
-	 * <p>DCEVM 给子类新增字段时，按 {@code (name, desc)} 把父类同名字段的槽位值复制进新槽，
-	 * <b>不区分访问权限</b>：父类 {@code private} 字段同样会把非零值带进来。因此这里只按声明匹配，
-	 * 不走 {@link #findField} 的可见性过滤（那条路径用于解析"从本类可见的成员"）。</p>
-	 *
-	 * <p>只沿 {@code superName} 链向上：接口字段一定是 {@code static final}，不占实例槽位，
-	 * 不构成遮蔽。</p>
-	 *
-	 * @return 命中的祖先类内部名；没有命中、或父类链任一环取不到字节码时返回 empty
-	 *         （解析不到就不能断言"不是遮蔽"，fail-closed 交回既有的条件 CAS 行为）
-	 */
-	public Optional<String> findInstanceFieldDeclaredInSuperclasses(
-	 String className, String fieldName, String fieldDesc) {
-		ClassNode node = resolve(className);
-		if (node == null) return Optional.empty();
-		Set<String> visited = new HashSet<>();
-		String      current = node.superName;
-		while (current != null && visited.add(current)) {
-			ClassNode parent = resolve(current);
-			if (parent == null) return Optional.empty();
-			if (parent.fields != null) {
-				for (FieldNode field : parent.fields) {
-					if (!field.name.equals(fieldName) || !field.desc.equals(fieldDesc)) continue;
-					if ((field.access & Opcodes.ACC_STATIC) != 0) continue;
-					return Optional.of(current);
-				}
-			}
-			current = parent.superName;
-		}
-		return Optional.empty();
-	}
-
-	/**
-	 * 新版本的 {@code className} 是否遮蔽了父类链上声明的<b>静态</b>字段。
-	 *
-	 * <p>与实例字段分开：静态字段的槽位复制行为由 DCEVM 实现决定，必须实测（见
-	 * {@code ShadowFieldProbe}）；未验证前不得把它当成实例字段同款处理。</p>
-	 */
-	public Optional<String> findStaticFieldDeclaredInSuperclasses(
-	 String className, String fieldName, String fieldDesc) {
-		ClassNode node = resolve(className);
-		if (node == null) return Optional.empty();
-		Set<String> visited = new HashSet<>();
-		String      current = node.superName;
-		while (current != null && visited.add(current)) {
-			ClassNode parent = resolve(current);
-			if (parent == null) return Optional.empty();
-			if (parent.fields != null) {
-				for (FieldNode field : parent.fields) {
-					if (!field.name.equals(fieldName) || !field.desc.equals(fieldDesc)) continue;
-					if ((field.access & Opcodes.ACC_STATIC) == 0) continue;
-					return Optional.of(current);
-				}
-			}
-			current = parent.superName;
-		}
-		return Optional.empty();
-	}
-
 	@Override
 	public Optional<Integer> getMethodModifiers(String className, String methodName, String desc) {
 		return resolveMember(className, methodName, desc, false).map(member -> member.access);
@@ -256,8 +195,7 @@ public final class HierarchyTreeOracle implements ClassHierarchyOracle {
 		if (node == null) return Optional.empty();
 		for (FieldNode field : node.fields) {
 			if (field.name.equals(name) && field.desc.equals(desc)) {
-				return Optional.of(new InheritedField(
-				 currentType, field.access, visibleFromLookup(lookupType, currentType, field.access)));
+				return Optional.of(new InheritedField(currentType, field.access));
 			}
 		}
 		if (node.interfaces != null) {

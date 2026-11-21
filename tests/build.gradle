@@ -1728,7 +1728,7 @@ tasks.register("e2eProbe") {
 // 第 3 档：DCEVM 机制探针。需要 JBR，本来就不参与门禁，聚起来只为方便一键跑。
 tasks.register("dcevmProbeSuite") {
 	group = "verification"
-	description = "全部 DCEVM 机制探针（需要 JBR）：liveDcevmTest / p05 / twoPhase / offset / lambdaBridge / readerScan / cacheWarming / alignBaseline"
+	description = "全部 DCEVM 机制探针（需要 JBR）：liveDcevmTest / p05 / twoPhase / offset / lambdaBridge / readerScan / cacheWarming / alignBaseline / shadowField"
 	dependsOn "liveDcevmTest"
 	dependsOn "p05Probe"
 	dependsOn "twoPhaseProbe"
@@ -1737,6 +1737,7 @@ tasks.register("dcevmProbeSuite") {
 	dependsOn "readerScanProbe"
 	dependsOn "cacheWarmingProbe"
 	dependsOn "alignBaselineProbe"
+	dependsOn "shadowFieldProbe"
 }
 
 // 全量门禁：CI 与提交前用这个（第 1 + 2 档）。第 3 档仍按需单跑。
@@ -1889,6 +1890,7 @@ tasks.register("probeAll") {
 	dependsOn "alignBaselineProbe"
 	dependsOn "entityProbeToggleProbe"
 	dependsOn "shadowClassProbe"
+	dependsOn "shadowFieldProbe"
 	dependsOn "scopeReinitProbe"
 	dependsOn "classIdentityProbe"
 	dependsOn "doubleBraceProbe"

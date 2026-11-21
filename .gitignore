@@ -16,3 +16,4 @@ core/libs/tool.lib
 .workbuddy-ai/
 .sources/
 /deploy.bat
+tests/classes/

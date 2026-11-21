@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
+import remold.LoadedClassIndex;
 import remold.RemoldAgent;
 import remold.arc.ArcJsonEvictor;
 
@@ -212,8 +213,8 @@ public class ReflectionCacheManagerTest {
 	@Test
 	@DisplayName("loadedClassesMap 非空且未加载 Jackson/Gson 时不触发 Class.forName 懒加载")
 	public void testUnloadedSerializersInLoadedClassesMapAreSkipped() {
-		ConcurrentHashMap<String, Class<?>> prev = RemoldAgent.loadedClassesMap;
-		ConcurrentHashMap<String, Class<?>> fakeMap = new ConcurrentHashMap<>();
+		LoadedClassIndex prev = RemoldAgent.loadedClassesMap;
+		LoadedClassIndex fakeMap = new LoadedClassIndex();
 		fakeMap.put(SampleTarget1.class.getName(), SampleTarget1.class);
 		try {
 			ReflectionCacheManager.clearRegisteredForTest();

@@ -9,6 +9,7 @@ import remold.vcs.ChangesetLog;
 import remold.vcs.GenerationalFieldLedger;
 import remold.vcs.VcsCommitGate;
 import remold.vcs.ScopeVerdicts;
+import remold.RemoldAgent.RoundSkips;
 
 import java.lang.instrument.ClassDefinition;
 import java.util.ArrayList;
@@ -278,6 +279,9 @@ final class VcsAgentCoordinator {
 		// ---- 阶段 1：全量预检 ----
 		Map<Long, ChangesetLog.RevertPlan> plans = new LinkedHashMap<>();
 		List<RevertScope> work = new ArrayList<>();
+		// 入口门禁的台账：回退路径没有"本轮跳过摘要"，但被拒的类必须与批次路径同一套记录。
+		RoundSkips skips = new RoundSkips();
+		Map<Long, List<ClassDefinition>> gated = new LinkedHashMap<>();
 		for (long scope : ChangesetLog.INSTANCE.liveScopes()) {
 			ChangesetLog.RevertPlan plan = ChangesetLog.INSTANCE.revertPlan(scope, targetSeq);
 			plans.put(scope, plan);
@@ -299,14 +303,25 @@ final class VcsAgentCoordinator {
 				step.add(new RevertClass(cls, loader, target,
 				 getRuntimeBytecode(target.className().replace('/', '.'))));
 			}
+			// 门禁必须在"任何 redefine 之前"跑完整批：回退是结构+方法体一起倒拨，少装一个类
+			// 就是"一半在目标代、一半在原代"的半套回退。被拒的类由 gate 逐类 warn + 记账，
+			// 这里只要发现台账非空就整批中止，绝不带着缺口往下走。
+			List<ClassDefinition> scopeDefinitions = step.definitions();
+			gated.put(scope, RedefineEntryGate.gate(scopeDefinitions, skips));
 			work.add(step);
+		}
+		if (!skips.isEmpty()) {
+			skips.report();
+			throw new IllegalStateException("NOT_REVERTABLE: " + skips.size()
+			 + " class(es) have bytes this JVM must not receive; nothing was redefined and no generation was"
+			 + " touched (see [BYTECODE-GATE] above for the per-class reason)");
 		}
 
 		// ---- 阶段 2：把字节全部装进 JVM ----
 		List<RevertScope> redefined = new ArrayList<>();
 		try {
 			for (RevertScope scope : work) {
-				inst.redefineClasses(scope.definitions().toArray(new ClassDefinition[0]));
+				inst.redefineClasses(gated.get(scope.scope).toArray(new ClassDefinition[0]));
 				redefined.add(scope);
 			}
 		} catch (Throwable t) {
@@ -415,8 +430,17 @@ final class VcsAgentCoordinator {
 				back.add(new ClassDefinition(rc.type, rc.preRevertBytes));
 			}
 			if (back.isEmpty()) continue;
+			// 回滚也是 redefine：同样过门禁。这里被拒时只剩"更保守"的一条路——不把畸形字节送给
+			// JVM，并在下面显式告警"回滚不完整，需要重启"，绝不假装回滚成功。
+			List<ClassDefinition> safeBack = RedefineEntryGate.gate(back, null);
+			if (safeBack.size() != back.size()) {
+				warn("[VCS] revert aborted and " + (back.size() - safeBack.size())
+				 + " class(es) of scope " + scope.scope + " cannot be restored: their pre-revert bytes fail the"
+				 + " redefine entry gate; a restart is required.");
+			}
+			if (safeBack.isEmpty()) continue;
 			try {
-				inst.redefineClasses(back.toArray(new ClassDefinition[0]));
+				inst.redefineClasses(safeBack.toArray(new ClassDefinition[0]));
 				warn("[VCS] revert aborted after scope " + scope.scope + " was already redefined;"
 				 + " restored the pre-revert bytes of " + back.size() + " class(es) in that scope.");
 			} catch (Throwable t) {

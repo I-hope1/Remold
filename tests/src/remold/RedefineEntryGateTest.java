@@ -4,6 +4,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.ConstantDynamic;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
@@ -175,6 +177,296 @@ class RedefineEntryGateTest {
 		String problem = RemoldAgent.definitionProblem(target, aboveCeiling);
 		assertNotNull(problem, "a class file newer than the running JVM must be refused");
 		assertTrue(problem.contains("major"), "the refusal must name the version problem: " + problem);
+	}
+
+	// ------------------------------------------------------------ 现代常量池 tag（不得误伤合法新版本产物）
+
+	/**
+	 * {@code 17 Dynamic} / {@code 18 InvokeDynamic}：真实可加载的现代常量池产物必须放行。
+	 *
+	 * <p>字节由 ASM 现造：一个 {@code LDC} 动态常量（{@code CONSTANT_Dynamic}）+ 一个 lambda 调用点
+	 * （{@code CONSTANT_InvokeDynamic}）。这两项在旧走查器里漏一个 tag，就会把整类当成"截断"拒掉——
+	 * 这类误伤比放过畸形字节更难发现，因为日志里只说"unparseable"。</p>
+	 */
+	@Test
+	void dynamicAndInvokeDynamicConstantPoolEntriesAreAccepted() throws Exception {
+		byte[] bytes = modernDynamicBytes(INTERNAL);
+		Class<?> target = define(INTERNAL, bytes);
+		ClassDefinition definition = new ClassDefinition(target, bytes);
+
+		assertNull(RemoldAgent.definitionProblem(target, bytes),
+		 "a legal class file carrying CONSTANT_Dynamic/CONSTANT_InvokeDynamic must pass the gate");
+		List<ClassDefinition> safe = RemoldAgent.gateDefinitions(
+		 List.of(definition), new RemoldAgent.RoundSkips());
+		assertEquals(1, safe.size(), "the gate must not drop a legal modern class file");
+	}
+
+	/**
+	 * {@code 19 Module} / {@code 20 Package}：真实 module-info 常量池必须整池走完。
+	 *
+	 * <p>这里断言的不是"module-info 能过门禁"（它的类名本来就不匹配目标类），而是<b>拒绝原因必须是
+	 * 名字不匹配</b>——只要出现 {@code unknown constant pool tag 19/20} 或 {@code truncated}，就说明
+	 * tag 遍历漏了条目，"合法新版产物被误伤"。</p>
+	 */
+	@Test
+	void moduleAndPackageConstantPoolEntriesAreWalkedToTheEnd() {
+		byte[] moduleBytes = moduleInfoBytes("probe/gate");
+		Class<?> target = define(INTERNAL, validBytes(INTERNAL));
+
+		String problem = RemoldAgent.definitionProblem(target, moduleBytes);
+		assertNotNull(problem, "a module-info class name never matches a normal target class");
+		assertTrue(problem.contains("does not match"),
+		 "the only reason may be the binary-name mismatch (tags 19/20 must be walked, not rejected): " + problem);
+		assertFalse(problem.contains("unknown constant pool tag"),
+		 "tags 19 (Module) and 20 (Package) must be covered by the walker: " + problem);
+		assertFalse(problem.contains("truncated"),
+		 "the walker must reach the end of a module class file's constant pool: " + problem);
+	}
+
+	/**
+	 * 手工构造：一个 {@code this_class} 匹配目标类、常量池同时含 {@code 19 Module} / {@code 20 Package} /
+	 * {@code 17 Dynamic} / {@code 18 InvokeDynamic} 的 class 文件，门禁必须<b>放行</b>。
+	 *
+	 * <p>这些条目对"入口门禁"只要求结构可读：门禁是进 JVM 之前的结构闸，不是字节码校验器。JVMS 限定
+	 * 19/20 只出现在 module 类里，所以这份字节不会真的被 {@code defineClass}；断言点正是"不要因为见到
+	 * 新 tag 就拒"，这正是误伤合法新版本产物的那类退化。</p>
+	 */
+	@Test
+	void handBuiltModernConstantPoolWithMatchingNameIsAccepted() throws Exception {
+		byte[] bytes = taggedConstantPoolBytes(INTERNAL);
+		Class<?> target = define(INTERNAL, validBytes(INTERNAL));
+
+		assertNull(RemoldAgent.definitionProblem(target, bytes),
+		 "a matching-name class file whose constant pool uses tags 19/20/17/18 must pass: "
+				+ RemoldAgent.definitionProblem(target, bytes));
+	}
+
+	/**
+	 * 合法现代 class 字节：<b>真实可加载</b>的 {@code CONSTANT_Dynamic} + {@code CONSTANT_InvokeDynamic}。
+	 */
+	private static byte[] modernDynamicBytes(String internalName) {
+		ClassWriter cw = new ClassWriter(0);
+		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC, internalName, null, "java/lang/Object", null);
+
+		MethodVisitor init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+		init.visitCode();
+		init.visitVarInsn(Opcodes.ALOAD, 0);
+		init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+		init.visitInsn(Opcodes.RETURN);
+		init.visitMaxs(1, 1);
+		init.visitEnd();
+
+		// 常量池 tag 17：LDC 一个动态常量，引导方法就在本类里。
+		MethodVisitor dynamic = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "dynamicValue",
+		 "()Ljava/lang/Object;", null, null);
+		dynamic.visitCode();
+		dynamic.visitLdcInsn(new ConstantDynamic("cd", "Ljava/lang/Object;", new Handle(
+		 Opcodes.H_INVOKESTATIC, internalName, "bsm",
+		 "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/Object;",
+		 false)));
+		dynamic.visitInsn(Opcodes.ARETURN);
+		dynamic.visitMaxs(1, 0);
+		dynamic.visitEnd();
+
+		MethodVisitor bsm = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "bsm",
+		 "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/Object;",
+		 null, null);
+		bsm.visitCode();
+		bsm.visitInsn(Opcodes.ACONST_NULL);
+		bsm.visitInsn(Opcodes.ARETURN);
+		bsm.visitMaxs(1, 3);
+		bsm.visitEnd();
+
+		// 常量池 tag 18：一个真实的 LambdaMetafactory 调用点。
+		MethodVisitor lambda = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "runnable",
+		 "()Ljava/lang/Runnable;", null, null);
+		lambda.visitCode();
+		lambda.visitInvokeDynamicInsn("run", "()Ljava/lang/Runnable;", new Handle(
+		 Opcodes.H_INVOKESTATIC, "java/lang/invoke/LambdaMetafactory", "metafactory",
+		 "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;"
+			 + "Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)"
+			 + "Ljava/lang/invoke/CallSite;", false),
+		 org.objectweb.asm.Type.getMethodType("()V"),
+		 new Handle(Opcodes.H_INVOKESTATIC, internalName, "runBody", "()V", false),
+		 org.objectweb.asm.Type.getMethodType("()V"));
+		lambda.visitInsn(Opcodes.ARETURN);
+		lambda.visitMaxs(1, 0);
+		lambda.visitEnd();
+
+		MethodVisitor body = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "runBody", "()V", null, null);
+		body.visitCode();
+		body.visitInsn(Opcodes.RETURN);
+		body.visitMaxs(0, 0);
+		body.visitEnd();
+
+		cw.visitEnd();
+		return cw.toByteArray();
+	}
+
+	/** 合法 module-info（常量池含 {@code 19 Module} + {@code 20 Package}）。 */
+	private static byte[] moduleInfoBytes(String moduleName) {
+		ClassWriter cw = new ClassWriter(0);
+		cw.visit(Opcodes.V17, Opcodes.ACC_MODULE, "module-info", null, null, null);
+		org.objectweb.asm.ModuleVisitor mv = cw.visitModule(moduleName, 0, null);
+		mv.visitRequire("java.base", Opcodes.ACC_MANDATED, null);
+		mv.visitPackage(moduleName + "/pkg");
+		mv.visitEnd();
+		cw.visitEnd();
+		return cw.toByteArray();
+	}
+
+	/**
+	 * 手工常量池：{@code this_class} 指向目标类名，池内含 17/18/19/20。
+	 *
+	 * <p>只构造到"常量池 + 类头"为止（fields/methods/attributes 全 0）：门禁的契约是"能读完常量池、
+	 * 类头可读、名字匹配"，这份字节正好逐项压到它。</p>
+	 */
+	private static byte[] taggedConstantPoolBytes(String internalName) throws Exception {
+		Pool pool = new Pool();
+		int thisName = pool.utf8(internalName);
+		int thisClass = pool.clazz(thisName);
+		int objectName = pool.utf8("java/lang/Object");
+		int objectClass = pool.clazz(objectName);
+		pool.integer(7);
+		pool.afloat(1.5f);
+		pool.along(42L);
+		pool.adouble(2.5d);
+		int utf8Field = pool.utf8("field");
+		int utf8Desc = pool.utf8("Ljava/lang/Object;");
+		int nat = pool.nameAndType(utf8Field, utf8Desc);
+		int fieldref = pool.ref(9, objectClass, nat);
+		pool.ref(10, objectClass, nat);
+		pool.ref(11, objectClass, nat);
+		int stringEntry = pool.string(utf8Field);
+		pool.methodType(utf8Desc);
+		pool.methodHandle(Opcodes.H_GETSTATIC, fieldref);
+		pool.dynamic(17, 0, nat);
+		pool.dynamic(18, 0, nat);
+		pool.module(pool.utf8("probe.modular"));
+		pool.pkg(pool.utf8("probe/pkg"));
+
+		java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+		java.io.DataOutputStream data = new java.io.DataOutputStream(out);
+		data.writeInt(0xCAFEBABE);
+		data.writeShort(0);
+		data.writeShort(61);                 // JDK 17 产物
+		data.writeShort(pool.size());
+		data.write(pool.bytes());
+		data.writeShort(Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER);
+		data.writeShort(thisClass);
+		data.writeShort(objectClass);
+		data.writeShort(0);                  // interfaces
+		data.writeShort(0);                  // fields
+		data.writeShort(0);                  // methods
+		data.writeShort(0);                  // attributes
+		data.flush();
+		return out.toByteArray();
+	}
+
+	/** 极简 class 常量池写入器：只为构造"含全部现代 tag"的字节。 */
+	private static final class Pool {
+		private final java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+		private final java.io.DataOutputStream out = new java.io.DataOutputStream(this.bytes);
+		private int next = 1;
+
+		int size() { return this.next; }
+		byte[] bytes() { return this.bytes.toByteArray(); }
+
+		int utf8(String value) throws java.io.IOException {
+			byte[] payload = value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+			this.out.writeByte(1);
+			this.out.writeShort(payload.length);
+			this.out.write(payload);
+			return this.next++;
+		}
+
+		int integer(int value) throws java.io.IOException {
+			this.out.writeByte(3);
+			this.out.writeInt(value);
+			return this.next++;
+		}
+
+		int afloat(float value) throws java.io.IOException {
+			this.out.writeByte(4);
+			this.out.writeFloat(value);
+			return this.next++;
+		}
+
+		/** {@code Long} 占两个常量池槽：返回首个槽的索引。 */
+		int along(long value) throws java.io.IOException {
+			this.out.writeByte(5);
+			this.out.writeLong(value);
+			int at = this.next;
+			this.next += 2;
+			return at;
+		}
+
+		/** {@code Double} 占两个常量池槽。 */
+		int adouble(double value) throws java.io.IOException {
+			this.out.writeByte(6);
+			this.out.writeDouble(value);
+			int at = this.next;
+			this.next += 2;
+			return at;
+		}
+
+		int clazz(int nameIndex) throws java.io.IOException {
+			this.out.writeByte(7);
+			this.out.writeShort(nameIndex);
+			return this.next++;
+		}
+
+		int string(int utf8Index) throws java.io.IOException {
+			this.out.writeByte(8);
+			this.out.writeShort(utf8Index);
+			return this.next++;
+		}
+
+		int ref(int tag, int classIndex, int nameAndTypeIndex) throws java.io.IOException {
+			this.out.writeByte(tag);
+			this.out.writeShort(classIndex);
+			this.out.writeShort(nameAndTypeIndex);
+			return this.next++;
+		}
+
+		int nameAndType(int nameIndex, int descriptorIndex) throws java.io.IOException {
+			this.out.writeByte(12);
+			this.out.writeShort(nameIndex);
+			this.out.writeShort(descriptorIndex);
+			return this.next++;
+		}
+
+		int methodHandle(int kind, int referenceIndex) throws java.io.IOException {
+			this.out.writeByte(15);
+			this.out.writeByte(kind);
+			this.out.writeShort(referenceIndex);
+			return this.next++;
+		}
+
+		int methodType(int descriptorIndex) throws java.io.IOException {
+			this.out.writeByte(16);
+			this.out.writeShort(descriptorIndex);
+			return this.next++;
+		}
+
+		int dynamic(int tag, int bootstrapIndex, int nameAndTypeIndex) throws java.io.IOException {
+			this.out.writeByte(tag);
+			this.out.writeShort(bootstrapIndex);
+			this.out.writeShort(nameAndTypeIndex);
+			return this.next++;
+		}
+
+		int module(int nameIndex) throws java.io.IOException {
+			this.out.writeByte(19);
+			this.out.writeShort(nameIndex);
+			return this.next++;
+		}
+
+		int pkg(int nameIndex) throws java.io.IOException {
+			this.out.writeByte(20);
+			this.out.writeShort(nameIndex);
+			return this.next++;
+		}
 	}
 
 	// ------------------------------------------------------------ 辅助

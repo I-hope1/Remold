@@ -1868,7 +1868,7 @@ public class RemoldAgent {
 	//endregion
 
 	//region HotSwap Core Logic
-	public static volatile ConcurrentHashMap<String, Class<?>> loadedClassesMap = new ConcurrentHashMap<>();
+	public static volatile LoadedClassIndex loadedClassesMap = new LoadedClassIndex();
 
 	/** 每个 dot 名当前缓存字节的来源加载器 rank（0 bootstrap / 1 System-Agent / 2 宿主）与描述。 */
 	private static final Map<String, Integer> CACHE_LOADER_RANK = new ConcurrentHashMap<>();
@@ -1964,20 +1964,28 @@ public class RemoldAgent {
 	}
 
 	static void loadClassSnap(Class<?>[] classes) {
-		var newMap = new ConcurrentHashMap<String, Class<?>>((int) (classes.length / 0.75f) + 1);
+		LoadedClassIndex index = new LoadedClassIndex();
+		// loader → scope 只解析一次：AlignmentMetaStore 的 scope 分配是加锁的，逐类调用会在
+		// 万级已加载类上反复抢同一把锁。
+		Map<ClassLoader, Long> scopes = new IdentityHashMap<>();
 		for (Class<?> c : classes) {
+			if (c == null) continue;
 			String name = c.getName();
 			if (isNonLoadableClass(name)) {
-				// 模板类若被历史版本误注入过，这里把它排除出已加载快照：
+				// 模板类若被历史版本误注入过，把它排除出已加载快照：
 				// 既不重定义，也不让读者扫描把它当外部读者。
 				continue;
 			}
-			Class<?> existing = newMap.putIfAbsent(name, c);
-			if (existing != null && isBetterLoadedClassCandidate(c, existing)) {
-				newMap.put(name, c);
+			ClassLoader loader = c.getClassLoader();
+			Long scope = scopes.get(loader);
+			if (scope == null) {
+				scope = AlignmentMetaStore.INSTANCE.loaderScopeId(loader);
+				scopes.put(loader, scope);
 			}
+			// 按 (scope, 类名) 登记：同名类在另一个 loader 下的副本不再被覆盖/顶掉。
+			index.put(scope, name, c);
 		}
-		loadedClassesMap = newMap;              // 原子切换，读者要么看到完整旧 map，要么完整新 map
+		loadedClassesMap = index;               // 原子切换，读者要么看到完整旧快照，要么完整新快照
 	}
 
 	/**
@@ -2210,6 +2218,12 @@ public class RemoldAgent {
 	 *
 	 * <p>scope 号统一由 {@link AlignmentMetaStore#loaderScopeId} 分配，这里只负责"类名 → 当前定义
 	 * loader"这一段，不自己造身份。</p>
+	 *
+	 * <p><b>降级语义</b>：这里拿不到 loader，只能走 {@link LoadedClassIndex#get(Object)} 的"仅类名"
+	 * 查询——同名类在两个 loader 下各有一份且无唯一权威副本时，它返回 {@code null}（并 warn），
+	 * 于是本次解析退回 {@link PendingLoadPatch#ANY_SCOPE}。哨兵的含义是"出生时先查精确 scope、再退回
+	 * 它"，方向保守，<b>不会</b>把 A 的 loader 冒充成 B 的。拿得到 loader 的调用方应当直接用
+	 * {@link LoadedClassIndex#get(long, String)}。</p>
 	 */
 	static long scopeOfLoadedClass(String dotClassName) {
 		try {
@@ -2876,26 +2890,7 @@ public class RemoldAgent {
 	 * 既不复制也不重读磁盘——这是"校验用的字节 == 送进 redefine 的字节"的唯一保证方式。</p>
 	 */
 	static List<ClassDefinition> gateDefinitions(List<ClassDefinition> definitions, RoundSkips skips) {
-		if (definitions == null || definitions.isEmpty()) return definitions;
-		List<ClassDefinition> safe = new ArrayList<>(definitions.size());
-		for (ClassDefinition def : definitions) {
-			if (def == null) continue;
-			Class<?> type = def.getDefinitionClass();
-			String className = type == null ? "<unknown>" : type.getName();
-			String problem = definitionProblem(type, def.getDefinitionClassFile());
-			if (problem == null) {
-				safe.add(def);
-				continue;
-			}
-			// 拒绝必须用户可见：受 DEBUG 门控的 log 在这里等于静默。
-			warn("[BYTECODE-GATE] Skipping " + className + ": " + problem
-			     + ". This class was NOT sent to redefineClasses — enhanced redefinition can terminate the VM"
-			     + " on a malformed ClassDefinition. Recompile the class and retry.");
-			if (skips != null) {
-				skips.add(className, RoundSkips.verdict("BYTECODE-GATE", problem, "recompile the class and retry"));
-			}
-		}
-		return safe;
+		return RedefineEntryGate.gate(definitions, skips);
 	}
 
 	private static void require(byte[] bytes, int pos, int length, String what) {
@@ -2934,7 +2929,7 @@ public class RemoldAgent {
 	                                             Collection<AlignmentTransaction> transactions,
 	                                             RoundSkips skips,
 	                                             Set<String> injectedClasses) {
-		return TwoPhaseCoordinator.applyTwoPhase(gateDefinitions(definitions, skips), oldEffectiveBytes,
+		return TwoPhaseCoordinator.applyTwoPhase(RedefineEntryGate.gate(definitions, skips), oldEffectiveBytes,
 		 transactions, skips, injectedClasses);
 	}
 
@@ -2965,7 +2960,7 @@ public class RemoldAgent {
 	static RedefineOutcome applyRedefinitions(List<ClassDefinition> definitions,
 	                                                  Collection<AlignmentTransaction> transactions,
 	                                                  RoundSkips skips) {
-		return TwoPhaseCoordinator.applyRedefinitions(gateDefinitions(definitions, skips), transactions, skips);
+		return TwoPhaseCoordinator.applyRedefinitions(RedefineEntryGate.gate(definitions, skips), transactions, skips);
 	}
 
 	record RedefineOutcome(Set<String> successful, Set<String> rolledBack) { }

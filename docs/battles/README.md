@@ -40,4 +40,5 @@
 | [`BATTLE-20261119164202-681c-ANALYSIS.md`](BATTLE-20261119164202-681c-ANALYSIS.md) | 战报 · 战役 battle-20261119164202-681c | 生成时间 2026-11-19T16:55:05.413Z · 阶段 reported · 基线 feat/pr24-debt-accounting@169977c96326 · 证据 7 条（已作废 0） |
 | [`BATTLE-20261121040554-2a44-ANALYSIS.md`](BATTLE-20261121040554-2a44-ANALYSIS.md) | 战报 · 战役 battle-20261121040554-2a44（callee overlap 证据） | 阶段 integrating · `battle_audit` 判 **NOOP_BRANCH**（先合 PR 后审计，批次分支相对 main 已无 diff；代码本身经 PR #51 合入）· 证据 9 条 |
 | [`BATTLE-20261121053528-6662-ANALYSIS.md`](BATTLE-20261121053528-6662-ANALYSIS.md) | 战报 · 战役 battle-20261121053528-6662（callee overlap 文档同步 + 审计时序纪律） | 阶段 integrating · `battle_audit` **PASS** · `battle_seal` 已结案 · 证据 4 条（含 union 全量） |
+| [`BATTLE-20261121065047-c605-ANALYSIS.md`](BATTLE-20261121065047-c605-ANALYSIS.md) | 战报 · 战役 battle-20261121065047-c605（发布链补齐 mc-toast + 状态真相源同步） | 阶段 integrating · `battle_audit` **PASS** · `battle_seal` 已结案 · 证据 4 条（含 union 全量） |
 | [`BATTLE-v0.2.5-RELEASE.md`](BATTLE-v0.2.5-RELEASE.md) | 收口战报 · v0.2.5 封板（R1 + R2） | 阶段：**v0.2.5 稳健发版封板**（不改核心业务算法） |

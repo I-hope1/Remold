@@ -21,6 +21,7 @@ import remold.vcs.VcsCommitGate;
 import remold.vcs.BytecodePack;
 import remold.util.*;
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
@@ -2790,17 +2791,31 @@ public class RemoldAgent {
 	 * {@code EXCEPTION_ACCESS_VIOLATION} 直接终止进程（{@code docs/status.md} §5 风险 13）——
 	 * 没有异常可捕获、没有回滚可做，所以只能"进 JVM 之前"判。</p>
 	 *
-	 * <p><b>四项检查，全部 fail-closed</b>：</p>
+	 * <p><b>五项检查，全部 fail-closed</b>：</p>
 	 * <ol>
 	 *   <li>魔数 {@code 0xCAFEBABE}；</li>
-	 *   <li><b>结构不截断</b>：按常量池逐项走一遍（tag → 长度 → 边界），任何越界/未知 tag/非法索引
-	 *       都拒绝。刻意<b>不</b>用"长度 ≥ N"这种代理判据：截断点可以落在任何一项中间，
-	 *       只有真正走完常量池才能证明后续字段可读；</li>
+	 *   <li><b>廉价前置：常量池逐项走一遍</b>（tag → 长度 → 边界），任何越界/未知 tag/非法索引都拒绝。
+	 *       刻意<b>不</b>用"长度 ≥ N"这种代理判据：截断点可以落在任何一项中间，只有真正走完常量池
+	 *       才能证明后续字段可读；</li>
 	 *   <li>{@code major} 不超过 {@link #MAX_CLASS_MAJOR}（未知/更新的 class 版本显式拒绝，
 	 *       不让 JVM 去猜）；</li>
 	 *   <li>{@code this_class} 解析出的内部名与目标类的内部名一致——二进制名不匹配会让增强重定义
-	 *       的拓扑排序读到错位的元数据。</li>
+	 *       的拓扑排序读到错位的元数据。比较按<b>字节</b>做（JVMS 4.4.7 的 modified UTF-8 语义），
+	 *       不走标准 UTF-8 解码：见 {@link #walkClassFile}；</li>
+	 *   <li><b>结构完整性：ASM 真解析一遍</b>（{@link #asmStructureProblem}）。前四项只看头部与常量池，
+	 *       看不到 {@code super_class} 之后的字段/方法/属性与尾部，截断在那些位置仍然"合法"。</li>
 	 * </ol>
+	 *
+	 * <p><b>两道结构检查的分工</b>：廉价前置检查先跑，语义是"<b>不依赖任何第三方解析器</b>也能拒掉
+	 * 头部/常量池级别的畸形"——ASM 对某些畸形输入的行为不作保证（可能抛任意 {@code RuntimeException}，
+	 * 也可能在超大 {@code poolCount} 上先分配大数组），所以它不能当第一道；ASM 解析跑在它之后，
+	 * 负责"常量池之后被截断/损坏"的那部分结构，因为重写一份覆盖字段/方法/属性的走查器等于把 ASM 的
+	 * 工作量再做一遍，且更容易漏项。</p>
+	 *
+	 * <p><b>两道 {@code major} 判据都要保留</b>：本类的 {@link #MAX_CLASS_MAJOR} 按运行期 JVM 推导，
+	 * 而 {@link ClassReader} 自带一份"打包进来的 ASM 认识哪些版本"的口径，两者不一定相等。前者先判，
+	 * 后者遇到它不认识的版本会抛 {@code IllegalArgumentException("Unsupported class file version")}，
+	 * 这里同样收敛成拒绝并显式点名原因（fail-closed：ASM 解析不了就无法证明结构完整）。</p>
 	 *
 	 * <p>本方法<b>只读</b>传入数组，不复制、不重读磁盘：调用方必须把校验过的这同一份引用交给
 	 * {@code redefineClasses}（{@link ClassDefinition#getDefinitionClassFile()}），否则"校验"与
@@ -2822,14 +2837,55 @@ public class RemoldAgent {
 			return "class file major " + major + " is newer than this JVM's maximum " + MAX_CLASS_MAJOR;
 		}
 		try {
-			return walkClassFile(type, bytes, major);
+			String cheap = walkClassFile(type, bytes, major);
+			if (cheap != null) return cheap;
 		} catch (RuntimeException e) {
 			// 走查器自己抛的越界/非法项一律收敛成拒绝：fail-closed，绝不让"没读完"变成"放行"。
 			return "unparseable class file: " + e.getMessage();
 		}
+		return asmStructureProblem(bytes);
 	}
 
-	/** 常量池走查 + 名字核对；越界一律抛 {@link IllegalStateException}，由调用方收敛成拒绝原因。 */
+	/**
+	 * 第二道结构检查：用 ASM {@link ClassReader} 把整份字节真解析一遍。
+	 *
+	 * <p>为什么需要它：{@link #walkClassFile} 只走到 {@code this_class}，{@code super_class}、
+	 * {@code interfaces}、字段/方法表、属性表与尾部结构一个都没读——"常量池完整、之后被截断"的字节
+	 * 在它眼里完全合法。{@code accept()} 会逐项走完类、字段、方法（含 {@code Code} 属性里的指令流）
+	 * 与属性表，越界读、非法长度、损坏的结构都会抛出来。</p>
+	 *
+	 * <p><b>边界（有意保留）</b>：ASM 对不认识的属性按声明长度跳过、不做内容校验，因此"截断点正好落在
+	 * 最后一个未知属性的 payload 里"不会被这一步发现。这一类残留由 {@code docs/status.md} §5 风险 13
+	 * 的关闭条件统一登记，不在此处再加第三道走查器。</p>
+	 *
+	 * @return {@code null} 表示 ASM 能完整解析；否则是英文拒绝原因
+	 */
+	private static String asmStructureProblem(byte[] bytes) {
+		try {
+			new ClassReader(bytes).accept(new ClassVisitor(Opcodes.ASM9) { }, 0);
+			return null;
+		} catch (RuntimeException e) {
+			String message = e.getMessage();
+			if (message != null && message.startsWith("Unsupported class file")) {
+				// ASM 的版本口径窄于本 JVM：不能证明结构完整 → 拒绝，并说清是哪一个口径不够。
+				return "the bundled ASM cannot parse this class file (" + message
+				     + "); this JVM accepts up to major " + MAX_CLASS_MAJOR
+				     + ", so the agent predates the class file version";
+			}
+			return "unparseable class file (ASM " + e.getClass().getSimpleName()
+			     + (message == null ? "" : ": " + message) + ")";
+		}
+	}
+
+	/**
+	 * 常量池走查 + 名字核对；越界一律抛 {@link IllegalStateException}，由调用方收敛成拒绝原因。
+	 *
+	 * <p><b>名字比较按字节做，不解码</b>：常量池里的 {@code Utf8} 是 JVMS 4.4.7 的 modified UTF-8，
+	 * 对增补字符（{@code U+10000} 以上）用的是<b>代理对拆成两个三字节序列</b>（CESU-8 形态），
+	 * 标准 UTF-8 解码会把这种合法序列解成替换字符，于是合法类名（如含 {@code U+1F600}）与
+	 * {@code Class.getName()} 被误判成不一致而<b>误拒合法字节</b>。这里把目标名用同一编码重新编一遍，
+	 * 逐字节比较：既没有解码口径问题，也不受代理对/替换字符影响。</p>
+	 */
 	private static String walkClassFile(Class<?> type, byte[] bytes, int major) {
 		int pos = 8;
 		int poolCount = readU2(bytes, pos, "constant pool count");
@@ -2837,7 +2893,10 @@ public class RemoldAgent {
 		if (poolCount < 1) return "constant pool count " + poolCount + " is empty";
 		// 常量池索引 1..poolCount-1；Long/Double 各占两个槽（后一个索引不可寻址）。
 		int[] classEntryNameIndex = new int[poolCount];
-		String[] utf8 = new String[poolCount];
+		// Utf8 项只记原始字节区间，不解码：比较口径见方法 Javadoc。{@code -1} = 不是 Utf8 项。
+		int[] utf8Offset = new int[poolCount];
+		int[] utf8Length = new int[poolCount];
+		Arrays.fill(utf8Offset, -1);
 		for (int i = 1; i < poolCount; i++) {
 			int tag = readU1(bytes, pos, "tag of constant #" + i);
 			pos += 1;
@@ -2846,9 +2905,8 @@ public class RemoldAgent {
 					int length = readU2(bytes, pos, "Utf8 length of constant #" + i);
 					pos += 2;
 					require(bytes, pos, length, "Utf8 payload of constant #" + i);
-					// 常量池里的 Utf8 项按 JVMS 4.4.7 是"修改版 UTF-8"，名字部分是 ASCII，
-					// 用 UTF-8 解码只为拿到可比较的字符串，不参与任何写入。
-					utf8[i] = new String(bytes, pos, length, StandardCharsets.UTF_8);
+					utf8Offset[i] = pos;
+					utf8Length[i] = length;
 					pos += length;
 					break;
 				}
@@ -2884,6 +2942,8 @@ public class RemoldAgent {
 			}
 		}
 		// access_flags(2) + this_class(2)：这两项可读才说明常量池之后的结构没有在边界上断开。
+		// super_class 及其之后的一切（interfaces / fields / methods / attributes / 尾部）不在这一步的
+		// 覆盖范围内 —— 那是第二步 ASM 解析的职责（见 definitionProblem 的五项检查与分工说明）。
 		require(bytes, pos, 4, "class header after the constant pool");
 		int thisClassIndex = readU2(bytes, pos + 2, "this_class");
 		if (thisClassIndex <= 0 || thisClassIndex >= poolCount) {
@@ -2893,15 +2953,58 @@ public class RemoldAgent {
 		if (nameIndex <= 0 || nameIndex >= poolCount) {
 			return "this_class does not point at a CONSTANT_Class entry";
 		}
-		String internalName = utf8[nameIndex];
-		if (internalName == null || internalName.isEmpty()) {
+		int nameOffset = utf8Offset[nameIndex];
+		if (nameOffset < 0 || utf8Length[nameIndex] <= 0) {
 			return "this_class name is not a readable Utf8 entry";
 		}
 		String expected = Names.internal(type.getName());
-		if (!expected.equals(internalName)) {
-			return "binary name '" + internalName + "' does not match the target class '" + expected + "'";
+		if (!sameBytes(bytes, nameOffset, utf8Length[nameIndex], modifiedUtf8(expected))) {
+			// 只用于消息：这一份解码结果不参与判定（判定已按字节做完）。
+			String shown = new String(bytes, nameOffset, utf8Length[nameIndex], StandardCharsets.UTF_8);
+			return "binary name '" + shown + "' does not match the target class '" + expected + "'";
 		}
 		return null;
+	}
+
+	/** 定长区间逐字节比较（{@code expected} 长度不符即不相等）。 */
+	private static boolean sameBytes(byte[] bytes, int offset, int length, byte[] expected) {
+		if (expected.length != length) return false;
+		for (int i = 0; i < length; i++) {
+			if (bytes[offset + i] != expected[i]) return false;
+		}
+		return true;
+	}
+
+	/**
+	 * 把字符串编成 JVMS 4.4.7 的 <b>modified UTF-8</b>（常量池 {@code CONSTANT_Utf8} 的编码）。
+	 *
+	 * <p>与标准 UTF-8 的差别只有两处，但两处都必须照抄：{@code NUL} 编成 {@code C0 80}；
+	 * 增补字符（{@code U+10000} 以上）在 Java 字符串里是两个代理项，各自单独编成三字节，
+	 * 因此一个增补字符在常量池里占 <b>6 字节</b>（CESU-8 形态）。这样"编码再逐字节比较"
+	 * 与 JVM 写进去的形态完全同构，不依赖任何解码器的容错口径。</p>
+	 */
+	static byte[] modifiedUtf8(String value) {
+		int length = 0;
+		for (int i = 0; i < value.length(); i++) {
+			char c = value.charAt(i);
+			length += (c >= 0x0001 && c <= 0x007F) ? 1 : (c <= 0x07FF) ? 2 : 3;
+		}
+		byte[] out = new byte[length];
+		int at = 0;
+		for (int i = 0; i < value.length(); i++) {
+			char c = value.charAt(i);
+			if (c >= 0x0001 && c <= 0x007F) {
+				out[at++] = (byte) c;
+			} else if (c <= 0x07FF) {
+				out[at++] = (byte) (0xC0 | ((c >> 6) & 0x1F));
+				out[at++] = (byte) (0x80 | (c & 0x3F));
+			} else {
+				out[at++] = (byte) (0xE0 | ((c >> 12) & 0x0F));
+				out[at++] = (byte) (0x80 | ((c >> 6) & 0x3F));
+				out[at++] = (byte) (0x80 | (c & 0x3F));
+			}
+		}
+		return out;
 	}
 
 	/**

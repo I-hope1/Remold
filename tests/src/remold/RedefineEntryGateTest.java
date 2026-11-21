@@ -108,6 +108,68 @@ class RedefineEntryGateTest {
 		assertRejectedAndNeverRedefined(target, bytes, "does not match");
 	}
 
+	/**
+	 * 常量池完整、{@code this_class} 之后被截断：只有真解析一遍结构才能发现。
+	 *
+	 * <p>这份字节的魔数、{@code major}、整张常量池与 {@code this_class} 全部合法——廉价前置走查会
+	 * 放它过去（截断点正好落在 {@code access_flags + this_class} 之后）。{@code super_class} 起的所有
+	 * 结构都缺失，必须由 ASM 解析那一步拒掉，否则畸形 {@code ClassDefinition} 会直接进入
+	 * {@code redefineClasses}（JBR 上就是 VM 崩溃，见 {@code docs/status.md} §5 风险 13）。</p>
+	 */
+	@Test
+	void truncatedAfterThisClassIsRejectedBeforeRedefine() {
+		byte[] whole = validBytes(INTERNAL);
+		int beforeSuperClass = endOfConstantPool(whole) + 4;   // access_flags(2) + this_class(2)
+		byte[] truncated = Arrays.copyOf(whole, beforeSuperClass);
+		Class<?> target = define(INTERNAL, whole);
+
+		assertTrue(beforeSuperClass < whole.length - 4,
+		 "precondition: the sample really loses the tail (kept " + beforeSuperClass + " of " + whole.length + ")");
+		String problem = RemoldAgent.definitionProblem(target, truncated);
+		assertNotNull(problem,
+		 "a class file truncated right after this_class must be refused: constant pool and this_class alone"
+				+ " do not prove the structure is complete");
+		assertTrue(problem.contains("ASM"),
+		 "the refusal must come from the structural pass, not from the cheap prefix walk: " + problem);
+		assertRejectedAndNeverRedefined(target, truncated, "ASM");
+	}
+
+	/**
+	 * 类名含增补字符（{@code U+1F600}）的合法字节必须放行。
+	 *
+	 * <p>常量池的 {@code Utf8} 是 modified UTF-8：该字符在池里是代理对拆开的两个三字节序列（CESU-8），
+	 * 标准 UTF-8 解码会解成替换字符，于是"名字不一致"的误判把合法字节拒掉。名字比较改按字节做之后，
+	 * 这条用例放行；下一节的"名字确实不符"仍然被拒（否则就成了"一律放行"的假修复）。</p>
+	 */
+	@Test
+	void supplementaryCharacterClassNameIsAccepted() {
+		String internal = "probe/GateTarget\uD83D\uDE00";
+		String dot = "probe.GateTarget\uD83D\uDE00";
+		byte[] bytes = validBytes(internal);
+		Class<?> target = define(internal, bytes);
+
+		assertEquals(dot, target.getName(), "precondition: the JVM keeps the supplementary character in the name");
+		assertNull(RemoldAgent.definitionProblem(target, bytes),
+		 "a legal class name carrying a supplementary character must pass the gate: "
+				+ RemoldAgent.definitionProblem(target, bytes));
+
+		List<ClassDefinition> safe = RemoldAgent.gateDefinitions(
+		 List.of(new ClassDefinition(target, bytes)), new RemoldAgent.RoundSkips());
+		assertEquals(1, safe.size(), "the gate must not drop a legal class whose name needs modified UTF-8");
+	}
+
+	/** 名字确实不符（两个名字都含增补字符）仍被拒：字节比较不是"一律放行"。 */
+	@Test
+	void supplementaryCharacterNameMismatchIsStillRejected() {
+		String internal = "probe/GateTarget\uD83D\uDE00";
+		String otherInternal = "probe/GateTarget\uD83D\uDE01";
+		Class<?> target = define(internal, validBytes(internal));
+
+		String problem = RemoldAgent.definitionProblem(target, validBytes(otherInternal));
+		assertNotNull(problem, "a different supplementary-character name must be refused");
+		assertTrue(problem.contains("does not match"), "the refusal must name the mismatch: " + problem);
+	}
+
 	// ------------------------------------------------------------ 正向对照
 
 	/**
@@ -345,6 +407,11 @@ class RedefineEntryGateTest {
 		pool.module(pool.utf8("probe.modular"));
 		pool.pkg(pool.utf8("probe/pkg"));
 
+		// CONSTANT_Dynamic / InvokeDynamic 都必须有引导方法表；缺了它这份字节就不是可加载的类文件，
+		// 第二步的 ASM 解析会（正确地）拒掉。这里补一张合法的 BootstrapMethods，让样本仍然"可放行"。
+		int bootstrapMethodsName = pool.utf8("BootstrapMethods");
+		int methodHandle = pool.methodHandle(Opcodes.H_GETSTATIC, fieldref);
+
 		java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
 		java.io.DataOutputStream data = new java.io.DataOutputStream(out);
 		data.writeInt(0xCAFEBABE);
@@ -358,7 +425,12 @@ class RedefineEntryGateTest {
 		data.writeShort(0);                  // interfaces
 		data.writeShort(0);                  // fields
 		data.writeShort(0);                  // methods
-		data.writeShort(0);                  // attributes
+		data.writeShort(1);                  // attributes: BootstrapMethods
+		data.writeShort(bootstrapMethodsName);
+		data.writeInt(2 + 2 + 2);            // num_bootstrap_methods + one (ref, argCount) pair
+		data.writeShort(1);                  // num_bootstrap_methods
+		data.writeShort(methodHandle);       // bootstrap_method_ref
+		data.writeShort(0);                  // num_bootstrap_arguments
 		data.flush();
 		return out.toByteArray();
 	}
@@ -470,6 +542,48 @@ class RedefineEntryGateTest {
 	}
 
 	// ------------------------------------------------------------ 辅助
+
+	/**
+	 * 常量池末端的偏移（即 {@code access_flags} 的起点）。
+	 *
+	 * <p>只用于构造"常量池完整、{@code this_class} 之后截断"的样本：截断点必须落在常量池完整之后，
+	 * 否则廉价前置检查会先拒掉它，就覆盖不到 ASM 解析那一步。</p>
+	 */
+	private static int endOfConstantPool(byte[] bytes) {
+		int pos = 8;
+		int count = u2(bytes, pos);
+		pos += 2;
+		for (int i = 1; i < count; i++) {
+			int tag = bytes[pos++] & 0xFF;
+			switch (tag) {
+				case 1: {                                  // Utf8
+					int length = u2(bytes, pos);
+					pos += 2 + length;
+					break;
+				}
+				case 7: case 8: case 16: case 19: case 20: // Class / String / MethodType / Module / Package
+					pos += 2;
+					break;
+				case 15:                                   // MethodHandle
+					pos += 3;
+					break;
+				case 3: case 4: case 9: case 10: case 11: case 12: case 17: case 18:
+					pos += 4;
+					break;
+				case 5: case 6:                            // Long / Double 占两个槽
+					pos += 8;
+					i++;
+					break;
+				default:
+					throw new AssertionError("unexpected constant pool tag " + tag);
+			}
+		}
+		return pos;
+	}
+
+	private static int u2(byte[] bytes, int pos) {
+		return ((bytes[pos] & 0xFF) << 8) | (bytes[pos + 1] & 0xFF);
+	}
 
 	/** 走真实入口：被拒的类不进 redefine、进 skip 台账、并有用户可见 warn。 */
 	private void assertRejectedAndNeverRedefined(Class<?> target, byte[] bytes, String expectedReasonPart) {

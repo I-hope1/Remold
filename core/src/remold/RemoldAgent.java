@@ -2876,26 +2876,7 @@ public class RemoldAgent {
 	 * 既不复制也不重读磁盘——这是"校验用的字节 == 送进 redefine 的字节"的唯一保证方式。</p>
 	 */
 	static List<ClassDefinition> gateDefinitions(List<ClassDefinition> definitions, RoundSkips skips) {
-		if (definitions == null || definitions.isEmpty()) return definitions;
-		List<ClassDefinition> safe = new ArrayList<>(definitions.size());
-		for (ClassDefinition def : definitions) {
-			if (def == null) continue;
-			Class<?> type = def.getDefinitionClass();
-			String className = type == null ? "<unknown>" : type.getName();
-			String problem = definitionProblem(type, def.getDefinitionClassFile());
-			if (problem == null) {
-				safe.add(def);
-				continue;
-			}
-			// 拒绝必须用户可见：受 DEBUG 门控的 log 在这里等于静默。
-			warn("[BYTECODE-GATE] Skipping " + className + ": " + problem
-			     + ". This class was NOT sent to redefineClasses — enhanced redefinition can terminate the VM"
-			     + " on a malformed ClassDefinition. Recompile the class and retry.");
-			if (skips != null) {
-				skips.add(className, RoundSkips.verdict("BYTECODE-GATE", problem, "recompile the class and retry"));
-			}
-		}
-		return safe;
+		return RedefineEntryGate.gate(definitions, skips);
 	}
 
 	private static void require(byte[] bytes, int pos, int length, String what) {
@@ -2934,7 +2915,7 @@ public class RemoldAgent {
 	                                             Collection<AlignmentTransaction> transactions,
 	                                             RoundSkips skips,
 	                                             Set<String> injectedClasses) {
-		return TwoPhaseCoordinator.applyTwoPhase(gateDefinitions(definitions, skips), oldEffectiveBytes,
+		return TwoPhaseCoordinator.applyTwoPhase(RedefineEntryGate.gate(definitions, skips), oldEffectiveBytes,
 		 transactions, skips, injectedClasses);
 	}
 
@@ -2965,7 +2946,7 @@ public class RemoldAgent {
 	static RedefineOutcome applyRedefinitions(List<ClassDefinition> definitions,
 	                                                  Collection<AlignmentTransaction> transactions,
 	                                                  RoundSkips skips) {
-		return TwoPhaseCoordinator.applyRedefinitions(gateDefinitions(definitions, skips), transactions, skips);
+		return TwoPhaseCoordinator.applyRedefinitions(RedefineEntryGate.gate(definitions, skips), transactions, skips);
 	}
 
 	record RedefineOutcome(Set<String> successful, Set<String> rolledBack) { }

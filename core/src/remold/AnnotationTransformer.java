@@ -114,11 +114,108 @@ public class AnnotationTransformer implements ClassFileTransformer {
 	//endregion
 
 	/**
-	 * 对齐后待注入的类字节码缓存（类内部名 / 点分名 -> 对齐后的字节码）。
+	 * 对齐后待注入的类字节码缓存（<b>loader 身份 + 类内部名/点分名</b> → 对齐后的字节码）。
 	 * 用于在未加载类首次被 JVM ClassLoader 加载时（classBeingRedefined == null），
 	 * 拦截并返回对齐后的字节码，防止类加载器从磁盘读取未对齐的原始编号产物。
+	 *
+	 * <p><b>为什么键必须带 loader</b>：纯类名键会让 A 宿主对齐出来的字节被 B 首次加载的同名类消费——
+	 * 那是 A 的字段布局与编号，装到 B 上就是错配（{@code docs/status.md} §5 风险 15）。scope 号由
+	 * {@link AlignmentMetaStore#loaderScopeId} 统一分配，与 {@link PendingLoadPatch}、{@code InitFix}、
+	 * {@code LoadFrontier} 同一口径，不另造第三套 loader 身份。</p>
+	 *
+	 * <p><b>"加载器未知"的登记</b>：批次提交时宿主类可能还没加载，谁会成为定义加载器要等 JVM 决定。
+	 * 这类条目按 {@link PendingLoadPatch#ANY_SCOPE} 登记，出生时<b>先查精确 scope、再退回哨兵</b>。
+	 * {@link PendingAlignedClasses#keySet()} / {@link PendingAlignedClasses#containsKey} /
+	 * {@link PendingAlignedClasses#get} 保持"名字维度并集"的读法，供编号避让与诊断使用。</p>
 	 */
-	public static final Map<String, byte[]> pendingAlignedClasses = new ConcurrentHashMap<>();
+	public static final PendingAlignedClasses pendingAlignedClasses = new PendingAlignedClasses();
+
+	/**
+	 * {@link #pendingAlignedClasses} 的存储。键 = {@code scope + '\0' + 名字}，与
+	 * {@code PendingLoadPatch.key} 同形态；scope 只取 {@link AlignmentMetaStore#loaderScopeId}
+	 * 分配的值或 {@link PendingLoadPatch#ANY_SCOPE}，不持有 {@code ClassLoader} 强引用。
+	 */
+	public static final class PendingAlignedClasses {
+		private final Map<String, byte[]> entries = new ConcurrentHashMap<>();
+
+		private static String key(long scope, String name) {
+			return scope + "\u0000" + name;
+		}
+
+		private static String nameOf(String key) {
+			int split = key.indexOf('\u0000');
+			return split < 0 ? key : key.substring(split + 1);
+		}
+
+		/** 登记一条"加载器未知"的待注入字节（批次提交时宿主尚未加载的形态）。 */
+		public void put(String name, byte[] bytes) {
+			put(PendingLoadPatch.ANY_SCOPE, name, bytes);
+		}
+
+		/** 按 scope 登记；{@code scope} 必须来自 {@link AlignmentMetaStore#loaderScopeId}。 */
+		public void put(long scope, String name, byte[] bytes) {
+			if (name == null || bytes == null) return;
+			entries.put(key(scope, name), bytes);
+		}
+
+		/**
+		 * 取走该 scope 下这个类的待注入字节（取到即删）。
+		 *
+		 * <p>斜杠名优先、点分名兜底，命中后两种键一起清掉——与引入 scope 之前的键规范化、
+		 * 读取路径与清理时机完全一致。</p>
+		 */
+		public byte[] take(long scope, String slashName, String dotName) {
+			byte[] hit = remove(scope, slashName);
+			if (hit == null) return remove(scope, dotName);
+			remove(scope, dotName);
+			return hit;
+		}
+
+		/** 精确 scope 移除。 */
+		public byte[] remove(long scope, String name) {
+			return name == null ? null : entries.remove(key(scope, name));
+		}
+
+		/** 名字维度移除（所有 scope）：清理/回滚与旧"纯类名 remove"语义一致。 */
+		public byte[] remove(String name) {
+			if (name == null) return null;
+			byte[] hit = null;
+			for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
+				if (!name.equals(nameOf(entry.getKey()))) continue;
+				if (hit == null) hit = entry.getValue();
+				entries.remove(entry.getKey());
+			}
+			return hit;
+		}
+
+		/** 名字维度读取（所有 scope 的并集；诊断/回滚用）。 */
+		public byte[] get(String name) {
+			if (name == null) return null;
+			for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
+				if (name.equals(nameOf(entry.getKey()))) return entry.getValue();
+			}
+			return null;
+		}
+
+		public boolean containsKey(String name) {
+			return get(name) != null;
+		}
+
+		public void clear() {
+			entries.clear();
+		}
+
+		public int size() {
+			return entries.size();
+		}
+
+		/** 名字维度并集快照（编号避让需要"还有谁没被加载"的完整名单）。 */
+		public Set<String> keySet() {
+			Set<String> names = new LinkedHashSet<>();
+			for (String key : entries.keySet()) names.add(nameOf(key));
+			return names;
+		}
+	}
 
 	/**
 	 * An external redefine carries no new declaration when its bytes match either the
@@ -172,13 +269,14 @@ public class AnnotationTransformer implements ClassFileTransformer {
 
 		// 加载期拦截：若属于已对齐但尚未加载的类，优先使用对齐后的字节码。
 		// 出生点补丁排在它之后：对齐结果是"已经算好的字节"，不能被原始 Raw 覆盖。
+		// 消费顺序：先在**本次真实 loader 的 scope** 里找，找不到再退回"加载器未知"哨兵
+		// （与 PendingLoadPatch.decide 同一口径）。别的 loader 名下的对齐字节一步都不能借。
 		byte[] pending = null;
 		if (classBeingRedefined == null) {
-			pending = pendingAlignedClasses.remove(className);
+			long scope = AlignmentMetaStore.INSTANCE.loaderScopeId(loader);
+			pending = pendingAlignedClasses.take(scope, className, dotClassName);
 			if (pending == null) {
-				pending = pendingAlignedClasses.remove(dotClassName);
-			} else {
-				pendingAlignedClasses.remove(dotClassName);
+				pending = pendingAlignedClasses.take(PendingLoadPatch.ANY_SCOPE, className, dotClassName);
 			}
 			if (pending != null) {
 				classfileBuffer = pending;

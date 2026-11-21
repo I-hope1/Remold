@@ -10,6 +10,7 @@ import remold.profiler.DynamicProfilerAPI;
 import remold.ref.HeapFieldWatch;
 import remold.ref.HotswapBridge;
 import remold.ref.InitFix;
+import remold.ref.PendingLoadPatch;
 import remold.ref.StageBInstanceCache;
 import remold.vcs.AlignmentMetaStore;
 import remold.vcs.Changeset;
@@ -311,8 +312,99 @@ public class RemoldAgent {
 	 */
 	public static final Map<String, java.util.Set<String>> inventedSlots = new ConcurrentHashMap<>();
 
-	/** 本轮算出的自造名，redefine 成功后才并入 {@link #inventedSlots}。 */
-	static final Map<String, Set<String>> pendingInvented = new ConcurrentHashMap<>();
+	/**
+	 * 本轮算出的自造名，redefine 成功后才并入 {@link #inventedSlots}。
+	 *
+	 * <p>键 = <b>(loader 身份, 类名)</b>：scope 号由 {@link AlignmentMetaStore#loaderScopeId} 统一分配
+	 * （与 {@link AnnotationTransformer.PendingAlignedClasses}、{@link PendingLoadPatch} 同一口径）。
+	 * 只按类名键会在"两个 loader 各有一个同名类"时串用——A 算出的自造名被 B 的成功回执取走，
+	 * 下一轮 B 的 lambda 会按 A 的槽位名配对（{@code docs/status.md} §5 风险 15）。</p>
+	 */
+	static final PendingInvented pendingInvented = new PendingInvented();
+
+	/**
+	 * {@link #pendingInvented} 的存储：{@code scope + '\0' + 类名} → 自造名集合。
+	 *
+	 * <p>写入侧（对齐期）与消费侧（{@link #commitInvented}）都只能拿到类名，因此两处都用
+	 * {@link #scopeOfLoadedClass} 解析当前定义 loader 的 scope；写入时把解析结果记进
+	 * {@code writeScope}，消费时优先用它——这样"写入到成功回执之间 {@code loadedClassesMap} 被重建"
+	 * 不会把暂存读丢，也不会让别的 scope 的条目被误取。</p>
+	 *
+	 * <p>仍按 {@code Map<String, Set<String>>} 的读法暴露（{@code keySet} / {@code size} 为并集视图），
+	 * 是因为编号避让与既有探针按名字维度遍历它；精确 scope 的读写用 {@code (long, String)} 重载。</p>
+	 */
+	static final class PendingInvented extends AbstractMap<String, Set<String>> {
+		private final Map<String, Set<String>> entries = new ConcurrentHashMap<>();
+		private final Map<String, Long> writeScope = new ConcurrentHashMap<>();
+
+		private static String key(long scope, String className) {
+			return scope + "\u0000" + className;
+		}
+
+		@Override
+		public Set<String> put(String className, Set<String> names) {
+			if (className == null) return null;
+			long scope = scopeOfLoadedClass(className);
+			writeScope.put(className, scope);
+			return entries.put(key(scope, className), names == null ? Set.of() : names);
+		}
+
+		/** 按 scope 写入：scope 必须来自 {@link AlignmentMetaStore#loaderScopeId}。 */
+		Set<String> put(long scope, String className, Set<String> names) {
+			if (className == null) return null;
+			writeScope.put(className, scope);
+			return entries.put(key(scope, className), names == null ? Set.of() : names);
+		}
+
+		/** 精确 scope 取走；scope 不匹配说明条目属于别的 loader，一步都不借。 */
+		Set<String> remove(long scope, String className) {
+			return className == null ? null : entries.remove(key(scope, className));
+		}
+
+		/** 按类名取走：scope 取写入时记下的那一个，没有则按当前定义 loader 解析。 */
+		@Override
+		public Set<String> remove(Object className) {
+			if (!(className instanceof String)) return null;
+			Long written = writeScope.remove(className);
+			long scope = written != null ? written : scopeOfLoadedClass((String) className);
+			return entries.remove(key(scope, (String) className));
+		}
+
+		@Override
+		public Set<String> get(Object className) {
+			if (!(className instanceof String)) return null;
+			Long written = writeScope.get(className);
+			long scope = written != null ? written : scopeOfLoadedClass((String) className);
+			Set<String> exact = entries.get(key(scope, (String) className));
+			if (exact != null) return exact;
+			for (Map.Entry<String, Set<String>> entry : entries.entrySet()) {
+				if (entry.getKey().endsWith("\u0000" + className)) return entry.getValue();
+			}
+			return null;
+		}
+
+		@Override
+		public int size() {
+			return entries.size();
+		}
+
+		@Override
+		public void clear() {
+			entries.clear();
+			writeScope.clear();
+		}
+
+		@Override
+		public Set<Entry<String, Set<String>>> entrySet() {
+			Map<String, Set<String>> names = new LinkedHashMap<>();
+			for (Map.Entry<String, Set<String>> entry : entries.entrySet()) {
+				int split = entry.getKey().indexOf('\u0000');
+				String name = split < 0 ? entry.getKey() : entry.getKey().substring(split + 1);
+				names.putIfAbsent(name, entry.getValue());
+			}
+			return Set.copyOf(names.entrySet());
+		}
+	}
 
 	/**
 	 * 源码级未织入基线缓存（用于对齐器与源码变更分析，避免 Mixin 等增强注入的合成方法/字段污染对齐逻辑）
@@ -1823,9 +1915,22 @@ public class RemoldAgent {
 		public final Set<String>         targetClasses = new LinkedHashSet<>();
 		public       boolean             preRegistered = false;
 		public       boolean             committed     = false;
+		/**
+		 * 本事务 pending 登记用的 loader scope。
+		 *
+		 * <p>构造时按宿主类解析：宿主已加载就取它的 {@code ClassLoader} 身份，由
+		 * {@link AlignmentMetaStore#loaderScopeId} 分配 scope 号（与 {@code PendingLoadPatch} /
+		 * {@code InitFix} / {@code LoadFrontier} 同一口径）；宿主此刻还没加载则退回
+		 * {@link PendingLoadPatch#ANY_SCOPE}，出生时"先查精确 scope、再退回哨兵"。</p>
+		 *
+		 * <p>只在构造时解析一次：preRegister / rollback / commit 必须落在同一个 scope 上，
+		 * 否则"登记进去、回滚删不掉"。</p>
+		 */
+		public final long                pendingScope;
 
 		public AlignmentTransaction(String hostName) {
 			this.hostName = hostName;
+			this.pendingScope = scopeOfLoadedClass(hostName);
 		}
 
 		public void preRegister() {
@@ -1835,8 +1940,8 @@ public class RemoldAgent {
 				String targetSlash = entry.getKey().replace('.', '/');
 				String targetDot   = entry.getKey().replace('/', '.');
 				byte[] bytes       = entry.getValue();
-				AnnotationTransformer.pendingAlignedClasses.put(targetSlash, bytes);
-				AnnotationTransformer.pendingAlignedClasses.put(targetDot, bytes);
+				AnnotationTransformer.pendingAlignedClasses.put(pendingScope, targetSlash, bytes);
+				AnnotationTransformer.pendingAlignedClasses.put(pendingScope, targetDot, bytes);
 			}
 		}
 
@@ -1852,8 +1957,8 @@ public class RemoldAgent {
 		public void rollback(boolean pinOldToPending) {
 			if (committed) return;
 			for (String key : pendingAdds.keySet()) {
-				AnnotationTransformer.pendingAlignedClasses.remove(key.replace('.', '/'));
-				AnnotationTransformer.pendingAlignedClasses.remove(key.replace('/', '.'));
+				AnnotationTransformer.pendingAlignedClasses.remove(pendingScope, key.replace('.', '/'));
+				AnnotationTransformer.pendingAlignedClasses.remove(pendingScope, key.replace('/', '.'));
 			}
 			if (pinOldToPending) {
 				// 将被磁盘新文件覆盖但重定义未生效的旧版本字节码钉在 pending 中
@@ -1861,12 +1966,28 @@ public class RemoldAgent {
 					if (entry.getValue() != null) {
 						String slash = entry.getKey().replace('.', '/');
 						String dot   = entry.getKey().replace('/', '.');
-						AnnotationTransformer.pendingAlignedClasses.put(slash, entry.getValue());
-						AnnotationTransformer.pendingAlignedClasses.put(dot, entry.getValue());
+						AnnotationTransformer.pendingAlignedClasses.put(pendingScope, slash, entry.getValue());
+						AnnotationTransformer.pendingAlignedClasses.put(pendingScope, dot, entry.getValue());
 					}
 				}
 			}
 		}
+	}
+
+	/**
+	 * 已加载类的 loader scope；类尚未加载（或查询失败）时退回 {@link PendingLoadPatch#ANY_SCOPE}。
+	 *
+	 * <p>scope 号统一由 {@link AlignmentMetaStore#loaderScopeId} 分配，这里只负责"类名 → 当前定义
+	 * loader"这一段，不自己造身份。</p>
+	 */
+	static long scopeOfLoadedClass(String dotClassName) {
+		try {
+			Class<?> loaded = dotClassName == null ? null : loadedClassesMap.get(dotClassName);
+			if (loaded != null) return AlignmentMetaStore.INSTANCE.loaderScopeId(loaded.getClassLoader());
+		} catch (Throwable ignored) {
+			// 解析失败按"加载器未知"处理：方向保守，绝不冒充某个 scope。
+		}
+		return PendingLoadPatch.ANY_SCOPE;
 	}
 
 	static void rejectHostGroup(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,

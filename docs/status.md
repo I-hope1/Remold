@@ -9,7 +9,7 @@
 |:---|:---|
 | **基准提交 (Baseline Commit)** | `v0.2.8` tag `f18851e`（annotated → commit `43fc583`，`main` @ `43fc583`）；上一发布 `v0.2.7` tag `0852506`，其代码基线 `db65bf0`；再上一发布 `v0.2.6` tag `2159d21`。v0.2.8 内容：前线 P0 安全门收口（枚举顺序门被 Mixin 对齐器抢跑、枚举常量集合变更假成功、读者扫描被无关常量池污染、`@RemoldReinit` 契约）、运行期日志英文化 + `verifyLogLanguage`、gradle-plugin agent 版本对账 + `cleanRemoldCache`、孤儿 lambda 保留旧体、`redefineDynamic` 接入两阶段、Linux aarch64 原生库、发版坐标自检大小写敏感（逐项见 [`releases/v0.2.8.md`](releases/v0.2.8.md)） |
 | **发布说明** | `v0.2.8` **已发布 2026-11-12**：[GitHub release](https://github.com/I-hope1/Remold/releases/tag/v0.2.8)（正文 [`releases/v0.2.8.md`](releases/v0.2.8.md)；JitPack 与 Gradle Plugin Portal 均已验证可解析）；上一发布 [`releases/v0.2.7`](https://github.com/I-hope1/Remold/releases/tag/v0.2.7)（历史档见 `releases/`） |
-| **最后更新时间** | 2026-11-21（发布链补齐 `plugin-mc-toast`：`release.yml` 与 `ci.yml` 的插件打包循环此前只含 `arc mixin forge fabric`，而 `RemoldConfigResolver` 已对 Fabric/Forge 默认自动加 `mc-toast`，导致下一版 release assets 缺该插件、仓库外用户落到 JitPack 兜底；同时把 `plugin-mc-toast` 登记进状态表与代码地图、清掉模板行里已被删除的 `com/example/client/*` 与 `HotSwapToastModelTest` 描述）。此前 2026-11-14（完成 **G0** 发布合规与真配置缓存改造 + `remold.attach(...)`：`gradle-plugin` 的 `com.gradle.plugin-publish` 升至 `2.2.1` 并声明 `compatibility { features { configurationCache = true } }`，重构 `RemoldPlugin` / 新增 `GenerateIdeaRunConfigTask`、`GenerateRemoldScriptTask`、`StartRemoldTask` 及延后本地同步，修复 `agentJar` 相对路径与构建输出目录配置期 `exists()` 失效，新增 `remold.attach(...)` 支持既有 `JavaExec` / `Test` / `TaskProvider` / 运行器注入；`validatePlugins` 与 TestKit `--configuration-cache` 全绿，§7 升为 `✅`，原 `§0.12`（现归档于 [`releases/historical-rounds-archive.md`](releases/historical-rounds-archive.md)）错链统一改指 [`releases/v0.2.8.md`](releases/v0.2.8.md)；此前 2026-11-13 为路线图重排：§4.1 合并"失效形态"排序、新增 §4.1.2 范围冻结与 §4.1.3 停车清单、§4.2 优先级重排、§7 门户口径纠偏、§5 风险 13/15/16/20 定级） |
+| **最后更新时间** | 2026-11-21（v0.2.9 硬化线合入（PR #56）：redefine 入口合法性门禁（魔数/常量池/`major`/类名/ASM 全结构）与仓库级裸调用点守卫、`pending` 与 `loadedClassesMap` 按 `(scope, name)` 隔离、`sourceBytecodeCache` 按轮次 staged/commit；§5 拆为 5.1 活跃待修债务 / 5.2 已接受物理边界，风险 13/15/16 由「待修」改为「已落地 + 残余面」；`V3 S41` 登记为风险 31。此前 2026-11-21（发布链补齐 `plugin-mc-toast`：`release.yml` 与 `ci.yml` 的插件打包循环此前只含 `arc mixin forge fabric`，而 `RemoldConfigResolver` 已对 Fabric/Forge 默认自动加 `mc-toast`，导致下一版 release assets 缺该插件、仓库外用户落到 JitPack 兜底；同时把 `plugin-mc-toast` 登记进状态表与代码地图、清掉模板行里已被删除的 `com/example/client/*` 与 `HotSwapToastModelTest` 描述）。此前 2026-11-14（完成 **G0** 发布合规与真配置缓存改造 + `remold.attach(...)`：`gradle-plugin` 的 `com.gradle.plugin-publish` 升至 `2.2.1` 并声明 `compatibility { features { configurationCache = true } }`，重构 `RemoldPlugin` / 新增 `GenerateIdeaRunConfigTask`、`GenerateRemoldScriptTask`、`StartRemoldTask` 及延后本地同步，修复 `agentJar` 相对路径与构建输出目录配置期 `exists()` 失效，新增 `remold.attach(...)` 支持既有 `JavaExec` / `Test` / `TaskProvider` / 运行器注入；`validatePlugins` 与 TestKit `--configuration-cache` 全绿，§7 升为 `✅`，原 `§0.12`（现归档于 [`releases/historical-rounds-archive.md`](releases/historical-rounds-archive.md)）错链统一改指 [`releases/v0.2.8.md`](releases/v0.2.8.md)；此前 2026-11-13 为路线图重排：§4.1 合并"失效形态"排序、新增 §4.1.2 范围冻结与 §4.1.3 停车清单、§4.2 优先级重排、§7 门户口径纠偏、§5 风险 13/15/16/20 定级） |
 | **审计负责人 / 角色** | HotSwap 架构守卫小组 & 自动化回归验证套件 |
 | **更新触发条件** | 任何合入包含特性落地、架构偏离、安全门调整、测试基线变更或发现已知缺陷/残余风险的 PR/commit 时，必须同步原子化更新本文件。提交时由作者/维护者更新基准哈希。 |
 | **管辖范围与边界声明** | 本状态表权威管辖：<br>1. **匿名类拓扑对齐与安全门 (Anonymous Class Alignment & Safety Gates)**（[`docs/topology/`](topology/)）<br>2. **存量初始化修复器 (InitFix / Legacy Instance & Static Reinitialization)**（[`docs/initfix/`](initfix/)）<br>3. **物理内存偏移稳定性与第三方缓存驱逐 (Physical Memory Offset Stability & Reflection Cache Eviction)**（[`docs/offset/`](offset/)）<br>*边界与后续治理声明*：同属字节码重映射体系的 `LambdaAligner`（Lambda 表达式对齐器）以及 Mindustry UI 胶水层（`CellPropertyRef` / 动态参数表达式指纹），其实现状态当前由各自单元测试覆盖（`CellHelperTest` 35 个用例持续全绿、`LambdaAlignerTest` 等）；它们的详细状态审计矩阵尚未并入本总表，计划在下一轮治理中统一建立验收标准并纳入。 |
@@ -506,15 +506,15 @@
 - **关联设计规范**：[`docs/topology/07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1。
 - **关联架构决策**：无。
 
-### 风险 13：JBR 25 增强重定义对畸形 `ClassDefinition` 直接崩溃 VM
+### 风险 13：JBR 25 增强重定义对畸形 `ClassDefinition` 直接崩溃 VM（入口门禁已落地，残余见下）
 - **风险描述与底层机制**：`Instrumentation.redefineClasses` 收到畸形/非法 `ClassDefinition`（例如截断的 class 文件、二进制名与目标类不匹配的字节）时，JBR 25.0.2 + `-XX:+AllowEnhancedClassRedefinition` 不是抛 `LinkageError`，而是在 `VM_EnhancedRedefineClasses::do_topological_class_sorting` 触发 `EXCEPTION_ACCESS_VIOLATION`，整个 JVM 终止。`RemoldAgent.applyRedefinitions` 没有对传入字节做格式/类名校验，批量与逐类两条路径都会把字节直接交给 JVM。
 - **触发条件**：`applyRedefinitions` 的批量 `redefineClasses` 或逐类兜底收到畸形 `ClassDefinition`。本轮实测两种构造均触发：截断字节（`new byte[]{0x00}`）与“合法 class 文件但二进制名不匹配”。批量与逐类都触发过。
 - **已观测证据**：JBR 25.0.2（`jbrsdk_jcef-25.0.2`）两次崩溃，`hs_err` 文件为 `tests/hs_err_pid20676.log`、`tests/hs_err_pid15436.log`（另有一次 `tests/hs_err_pid19664.log`）；栈顶 `V [jvm.dll+0x5fda20] VM_EnhancedRedefineClasses::do_topological_class_sorting+0x270`。这些日志在记录后已删除，未提交。
 - **影响**：开发进程直接死亡，且没有 Java 层异常可供上层捕获/回滚；与“补丁生命周期”类问题不同，这是 VM 级故障。
-- **当前处置**：本轮不修。回归探针 `InitFixFallbackProbe` 改为在 `Instrumentation` 边界注入失败，避免把 VM 崩溃当作可重复的测试路径。
+- **当前处置**：**已修**（PR #56）。入口门禁 `RedefineEntryGate`：魔数 / 常量池逐项走到末尾 / `major <= Runtime.version().feature() + 44` / `this_class` 原始字节与目标类名（modified UTF-8 重编码）逐字节比较 / 再用 ASM `ClassReader` 做一次全结构解析；不过则逐类 warn 拒绝、不调 `redefineClasses`，并进 `RoundSkips` 台账。仓库内全部生产 `redefineClasses` 调用点已由 `RedefineEntryGateCoverageTest` 锁死（`plugin-arc` ×2 与 `plugin-mixin` ×1 按 `VALID_BY_CONSTRUCTION` 登记）。回归探针 `InitFixFallbackProbe` 仍在 `Instrumentation` 边界注入失败。
 - **候选关闭方向**：在 `applyRedefinitions` 入口校验 `ClassDefinition` 的 class 名与字节可解析性；或把 redefine 调用隔离到可重启的辅助进程（代价高）。需先确认 JBR 25 的触发边界（是否只在批量排序阶段）。
 - **优先级**：P1 · v0.2.9（§4.1 槽位 ② 的入口字节码合法性门禁：畸形字节 → 可报告拒绝，而不是进程死亡）。
-- **当前缓解措施**：修复进行中，见 v0.2.9 批次（`applyRedefinitions` 入口的 `ClassDefinition` 合法性门禁：魔数 / 结构截断 / `major` 上限 / 字节内部名与目标类一致，不过则 warn 拒绝、不调 `redefineClasses`）。门禁落地前维持"入口不校验"的现状与探针改道。
+- **残余面**：① 本机无 JBR 25，VM 崩溃形态未真机复现，门禁只在 Java 边界证明畸形字节进不去；② 被拒类不 pin 旧字节（该类从未进 JVM，磁盘畸形字节下次加载会响亮失败）；③ 截断点正好落在最后一个"未知属性 payload 内"时 ASM 按声明长度跳过。
 - **关联设计规范**：无。
 - **关联架构决策**：无。
 
@@ -527,25 +527,25 @@
 - **关联设计规范**：[`docs/offset/01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md) §1.1、[`docs/offset/02-inherited-field-drift-fix.md`](offset/02-inherited-field-drift-fix.md)。
 - **关联架构决策**：无。
 
-### 风险 15：`pendingAlignedClasses` 只有类名键，多 ClassLoader 串用（P3 → P1 · v0.2.9）
+### 风险 15：`pendingAlignedClasses` 只有类名键，多 ClassLoader 串用（P3 → P1 · v0.2.9 已落地，残余见下）
 - **风险描述与底层机制**：`AnnotationTransformer.pendingAlignedClasses` 是 `Map<String, byte[]>`，键只有类内部名/点分名，没有 ClassLoader 身份。`AlignmentTransaction.commit()` 对已加载的匿名类仍会保留 pending 条目；该类在宿主 Loader 中 redefine 时不会消费 pending（`classBeingRedefined != null`），条目会留到**另一个 ClassLoader 首次加载同名类**时被 `transform(..., classBeingRedefined=null, ...)` 消费。
 - **触发条件**：Loader A 已加载 `Host$1`；对齐事务 commit（pending 留下）；A 的 `Host$1` redefine 成功；Loader B 首次加载同名 `Host$1`。
 - **已观测证据**：`PendingAlignedMultiLoaderProbe`（提交 `3061b9c` 之后的修订版）：A 已加载 → commit → `inst.redefineClasses` 成功 → pending 仍在 → B 首次加载返回 `alignedMarker=true`，条目随后被 B 消费；断言标记为 `[KNOWN-BUG]`。
 - **影响**：B 的类会拿到 A 宿主对齐后的字段布局/编号，可能与 B 的宿主结构不一致；P3（错误注入/错配，非必然崩溃）。
 - **目标环境**：Forge + Mixin；以 Forge 实测的 ClassLoader 身份为准（Fabric 探针只能证明单 JVM 内的类名键冲突，不能替代 Forge 多 loader 实测）。
-- **当前处置**：只记录，未修。
+- **当前处置**：**已修**（PR #56）。`AnnotationTransformer.pendingAlignedClasses`、`RemoldAgent.pendingInvented`、`INVENTED_SLOTS` 全部改为 `scope + '\0' + name` 键（scope 只由 `AlignmentMetaStore.loaderScopeId` 分配，`ANY_SCOPE` 哨兵先精确后兜底）；`loadedClassesMap` 改 `LoadedClassIndex` 按 `(scope, name)` 存，纯类名查询在同 rank 双副本时返回空并打 `[LOADED-NAME-AMBIGUOUS]`；生产写入走 `stageInventedNames(alignScope, …)`、回执 `commitInvented(scope, name)`。公开字段描述符保持不变（`ConcurrentHashMap` / `Map`），旧插件 jar 不会因描述符变化 `NoSuchFieldError`。
 - **候选关闭方向**：pending 键改为 `(ClassLoader 身份, 类名)`，或 commit 时对已加载类不登记 pending；消费时校验 loader；补多 loader 回归。
-- **当前缓解措施**：修复进行中，见 v0.2.9 批次（pending 键按 ClassLoader 身份隔离，消费侧校验 loader）；落地前维持"只记录、不修"与 `[KNOWN-BUG]` 探针口径。
+- **残余面**：① VCS 回退路径仍按纯类名写 `inventedSlots`（写入时解析 scope）；② `loadedClassesMap` 的复合写（`putIfAbsent` / `merge` / `compute*`）没有 scope 维度，Javadoc 标注禁用；③ Forge 多 loader 的端到端实测仍是探针缺口。
 - **关联设计规范**：`docs/topology/03-cascading-pipeline.md`。
 - **关联架构决策**：无。
 
-### 风险 16：`sourceBytecodeCache` 写入到回滚之间的并发窗口（P3 → P1 · v0.2.9）
+### 风险 16：`sourceBytecodeCache` 写入到回滚之间的并发窗口（P3 → P1 · v0.2.9 已落地，残余见下）
 - **风险描述与底层机制**：`processChanges` 不是 `synchronized`，`AnnotationTransformer.isNoOpExternalRedefine` / `oldBytecode` 读取 `sourceBytecodeCache` 时也不持有同一把锁。本轮源码在匿名类对齐后、门与 redefine 前就写入缓存；未生效类要等 `applyRedefinitions` 后才回滚。这段窗口内其他线程可能读到“尚未生效”的新源码。
 - **触发条件**：`processChanges` 正在处理一批类（尤其对齐/布局门/重定义耗时较长）时，外部重定义通道或 `retransformLoaded()` 读取 `sourceBytecodeCache`。
 - **后果**：外部重定义 no-op 判定可能把新源码当成已生效基线而跳过织入；旧侧基线可能取到未生效版本。是语义错判，不是内存竞争。
-- **当前处置**：只记录，未升级为 staged；快照+回滚已缩短窗口，但未消除。证据：`SourceBytecodeCacheTest` 四路径 helper 测试、E3 端到端、变异检查（注释回滚调用仅 E3 变红）。
+- **当前处置**：**已修**（PR #56）。`sourceBytecodeCache` 改为按轮次 staged → commit：`SourceBytecodeStaging` 维护 `volatile` 不可变已提交快照，读方（`CommittedView`）只读已提交版本；提交在锁内构造新快照再整体替换、暂存先清空；回滚丢弃暂存不留半写条目；事务边界由 `BatchHotswapExecutor` 的轮次开启/收束掌握。证据：`SourceBytecodeCacheStageTest` 四条并发用例（真实线程 + `CountDownLatch`，断言落在字节内容）、既有 `SourceBytecodeCacheTest` 四路径、变异 2 击杀。
 - **候选关闭方向**：按设计稿引入 `SourceRound` staged/commit，读取方只读已提交版本；或把 `processChanges` 与读取方统一到同一锁。
-- **当前缓解措施**：修复进行中，见 v0.2.9 批次（按轮次 staged/commit，读取方只读已提交版本）；落地前维持"快照 + 回滚"的既有窗口。
+- **残余面**：① 原子性证据是间接的——击杀挂在"不可变快照拒绝就地写"，没有并发读线程观察到"旧批或新批、绝不撕裂"；② 多线程同时提交（两个 redefine 事务并发）未测；③ 非事务调用方（首次加载 / 外部重定义 / VCS 回退）仍立即写已提交视图。
 - **关联设计规范**：`docs/initfix/11-source-bytecode-cache.md` §9。
 - **关联架构决策**：无。
 

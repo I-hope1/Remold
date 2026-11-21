@@ -366,7 +366,7 @@
 | 条目 | 结论 | 说明 |
 |:---|:---:|:---|
 | 批实例切块越界（`nextBatchChunkEnd` 未钳 `total`） | 已修 | 剩余量落在 `(4096, 8192)` 时块尾越过数组末端，生成器只判 `localIndex < localTo`，导致每个实例抛 `ArrayIndexOutOfBoundsException`，连续撞满单字段失败配额后把已补成功的字段当成放弃；融合批退回 `fallbackFusedGroupFrom` 重复条件 CAS。回归锁 `InitFixChunkBoundaryTest`（含 12289/15000/16384 边界），去掉钳位后 3 条断言变红 |
-| `V3 S41`：`super::baseM` 跨代幽灵保留旧体（实测 `base:b-v3`，期望 `base:b-v3:L3`） | 已归因，待修 | A/B 实测：Run R 下 `FAIL=1`，Run E（`-Dremold.agent.lambda_raw_alignment=false`）下 `FAIL=0` 且实测输出正确——**根因在 Run R 的配对侧**。因果链：V1→V2 时 Raw 与 Eff 槽位交叉（V2 Raw `$1` 接续 V1 活体 Eff `$0`、V2 Raw `$0` 改名 Eff `$4`）；V2→V3 时 Run R 用 **Raw 侧序号**配对，V2 Raw `$0`（活体在 Eff `$4`）抢走 V3 Raw `$0`（`superLam` 的 `L3` 版本），使占着活体 Eff `$0` 的 V2 Raw `$1` 无对象可配而幽灵化并保留 V2 旧体。修法方向：候选排序必须按**活体 Eff 身份**（经 `rawToEff` 翻译）而非 Raw 序号，且"会制造活体 Eff 空位"的配对必须让位给能保住活体的候选 |
+| `V3 S41`：`super::baseM` 跨代幽灵保留旧体（实测 `base:b-v3`，期望 `base:b-v3:L3`） | 配对层已修，残余暂不修 | A/B 实测：Run R 下 `FAIL=1`，Run E（`-Dremold.agent.lambda_raw_alignment=false`）下 `FAIL=0` 且实测输出正确——**根因在 Run R 的配对侧**。因果链：V1→V2 时 Raw 与 Eff 槽位交叉（V2 Raw `$1` 接续 V1 活体 Eff `$0`、V2 Raw `$0` 改名 Eff `$4`）；V2→V3 时 Run R 用 **Raw 侧序号**配对，V2 Raw `$0`（活体在 Eff `$4`）抢走 V3 Raw `$0`（`superLam` 的 `L3` 版本），使占着活体 Eff `$0` 的 V2 Raw `$1` 无对象可配而幽灵化并保留 V2 旧体。修法方向：候选排序必须按**活体 Eff 身份**（经 `rawToEff` 翻译）而非 Raw 序号，且"会制造活体 Eff 空位"的配对必须让位给能保住活体的候选。**后续实测**（callee overlap 证据落地后，含无绑定方法引用形态）：V2→V3 配对已正确（`old lambda$makeAll$1 <- new lambda$makeAll$0`、`:L3` 保留），`FAIL=0`；残余差异落在捕获值/方法引用目标层面，无稳定跨代身份判据，口径见 §5.2 风险 31 |
 | `NestView` 跨同文件兄弟类连带失效 | 待优化 | 同 Nest 里有一个嵌套类被 `LayoutGate` 拒绝时，兄弟类的 Nest 扫描因 `batchCandidateMissing` 整体退回 `incomplete`（fail-closed）。方向是安全的（不会错写），但存在误伤：被拒的类本轮<b>不会</b>被重定义，JVM 里跑的就是 `bytecodeCache` 里的旧字节，兄弟类读它"有没有写自己的私有字段"其实合法。需要区分"跨类依赖查询"与"未重定义兄弟类的 Nest 扫描" |
 | 64 轮定点迭代上限（66 层嵌套） | 维持现状 | 63 层全绿、66 层打印 4 条 `did not converge in 64 rounds` 并安全退化（最外层幽灵化保留旧体），内层与新实例仍正确收敛 |
 | 无 `-g` 下同类型局部捕获重排 | 维持现状 | 信息论边界：无 LVT 时无法区分同类型局部变量的换序，`strict=false` 下按既有语义处理；需要严防时开 `LAMBDA_STRICT` 或由插件强制 `-g` |
@@ -411,66 +411,9 @@
 
 本节系统记录热更新基础设施中被评审确认、因工程代价或架构边界有意保留的已知残余风险，统一按六段式元结构规范登记：
 
-### 风险 24：Run R 下三条「只看得到 R_prev」的口径缺口
-- **风险描述与底层机制**：活体对齐切到 `R_prev ↔ R_new` 后，配对基线里不含幽灵桩、保留体与捕获桥（它们只存在于 `E_prev`），因此凡是以「旧侧字节里能找到的东西」为前提的判据，覆盖面在 Run R 下收窄到 `R_prev` 一侧。
-- **触发条件**：① `stepGhostRevive`（默认关）在 Run R 下没有幽灵候选可用，等于 no-op；② 无 LVT 的捕获 lambda 形参名扫描只覆盖 `R_prev`，不覆盖 `E_prev` 侧；③ 字符串常量见证表看不到仅存在于 `E_prev` 的幽灵/桥名。
-- **当前缓解措施**：① 幽灵集合改由继承集定义（`E_prev` 枚举 + `Meta.ghostHashes` 校正），复活判据不再依赖 `R_prev`；② 缺少 LVT 时按槽号/类型兜底并记 warn，`LAMBDA_STRICT` 门仍可把它升级为硬失败；③ 见证表缺项只降低配对证据强度，落 Run E 或位置兜底的路径均有读数（`positionalFallbacks`）。
-- **残余影响**：上述三处在 Run R 下的证据强度低于 Run E；不产生静默写入，但可能让本可复活/本可精确配对的用例退化为兜底。
-- **后续验证方式**：`Pr3RawAlignmentScenarioTest` 覆盖 Ctrl+Z 幽灵继承与桥转发；新增「仅 `E_prev` 可见的见证」用例时以 `positionalFallbacks`/`runRGate` 为终局判据。
-- **决策依据**：[`18-live-raw-to-raw-alignment.md`](vcs/03-live-raw-to-raw-alignment.md) §5（继承集枚举）与 §6（fail-closed）。
+### 5.1 活跃待修债务
 
-### 风险 25：`forceStaticLambdas` 归一化与 Run R 的闸门关系（按实测更正）
-- **风险描述与底层机制**：`normalizeAlignBaseline` / `forceStaticLambdas` 会在对齐前重写 lambda 调用位点；一度担心这类类的 `E_prev_used` 与 `Meta.jvmEffHash` 不同源，导致 G1 代际身份判不出而整类回退 Run E。
-- **实测结论**：该担心不成立。`preAlign` 快照取自归一化**之后**，两侧指纹同源；真实两代语料 400 类里命中归一化的 7 类**全部 `PASSED`**，全语料 `RAW_PREV_MISMATCH` 为 0。读数见 [`19-raw-to-raw-realworld-readings.md`](vcs/04-raw-to-raw-realworld-readings.md) §2。
-- **仍然成立的边界**：真正压低 Run R 接合率的是"没有本地 lambda 槽位"的类（只有外部方法引用）——它们判 `TRANSLATION_INCOMPLETE` 并回退；含 lambda 站点的类里接合率为 50/62（80.6%）。
-- **当前缓解措施**：不需要额外缓解；G1 维持"只比 `E_prev` 指纹"的单校验和设计，不做转换前后双哈希。
-- **残余影响**：无（该风险项按读数关闭）。若将来把 `preAlign` 快照挪到归一化之前，本结论立即失效，必须重跑 §2 的读数。
-- **后续验证方式**：`bash gradlew :tests:pr3RealWorldReadings`（需两代语料时用 `-Ppr3.corpus.old/new`）。
-- **决策依据**：[`18-live-raw-to-raw-alignment.md`](vcs/03-live-raw-to-raw-alignment.md) §3.2；读数 [`19-raw-to-raw-realworld-readings.md`](vcs/04-raw-to-raw-realworld-readings.md)。
-
-### 风险 28：`L1` 继承字段的代际对账依赖声明类在批次里
-- **风险描述与底层机制**：`L1` 重放写的是匿名子类实例里的**继承**字段，而 `replayFacts` 的 `ownerClass`、台账键与相邻性判据（`rawHash` 在 `[g, target]` 恒定）都以**声明类**为键。声明类若从未出现在事实那一代的 `Changeset.entries` 里，`isAdjacent` 无法证明"事实仍成立"，消费侧判 `REFUSED_DISCONTINUOUS` 并把字段挂成未闭环债务；回归头再看，本可重放的字段被拒。
-- **触发条件**：父类（声明类）字节不变、只有匿名子类的初值块在变的批次——这正是 `L1` 最常见的形态。
-- **当前缓解措施**：按 fail-closed 拒绝（不回落"最近活代"事实），`PatchReport` 记 `rejected:` 并点名恢复路径；正向代不查台账（只在回退上下文或已欠债时查），所以这条缺口不会拖慢正常重放。
-- **残余影响**：单靠 `L1` 无法把跨代对账用起来；`vcsLedgerGcProbe` 的夹具必须先让声明类在事实那一代里有条目（探针里每次漂移都重编父类）才能产生可对账的事实——也就是说真实工程里这条通道的实际覆盖面取决于"父类是否随同一次重编"。
-- **后续验证方式**：给 `isAdjacent` 补一条"声明类缺失即视为不连续"的显式负例（现在由 `REFUSED_DISCONTINUOUS` 间接覆盖）；评估用 `Changeset.manifest` 的类级指纹替代 `entries` 存在性，把判据放宽到"该代确实录过这个类"。
-- **决策依据**：[`20-generational-field-ledger.md`](vcs/05-generational-field-ledger.md) §3.5 / §4-R6。
-
-### 风险 29：`@RemoldReinit(OVERWRITE)` 无法闭环被回退污染的继承字段
-- **风险描述与底层机制**：回退后 `L1` 字段被挂在台账上未闭环，恢复要求显式重建或 `@RemoldReinit(OVERWRITE)`；但布局门对"`INCLUDE_SUBCLASSES` + 子类初始化器仍在写该继承字段"的注解直接 `LAYOUT-REJECT`（否则会用声明类的值覆盖子类专属初值，且子类赋值不在重放范围内），而 `scope = SELF` 只写宿主自身实例、够不到匿名子类实例。
-- **触发条件**：`L1` 通道（匿名子类实例初始化块写继承字段）上的未闭环字段；声明类与子类都保持原形态。
-- **当前缓解措施**：拒绝而不是放宽——`vcsA14Probe` 的恢复轮同时做两件事：给声明类打 `@RemoldReinit(OVERWRITE)` **并**让子类初始化块不再写该字段（"显式重建"的字面形态），此时布局门放行、写入真的落到存量实例、债务 `markClosed`、报告出现 `recovered: overwrite`。
-- **残余影响**：只想改注解、不动子类初值的用户拿不到恢复路径，只能等下一次结构变化或重启；台账里该字段会一直保持未闭环（可见、不遗忘，但也不再自动重试）。
-- **后续验证方式**：若要支持"子类初值不动也能恢复"，需要先设计"按子类分别取期望"的方案（当前 `KIND_CONDITIONAL_EXPECTED` 只有单一期望来源），并在 `ReinitScopeGate` 补对应负例。
-- **决策依据**：[`20-generational-field-ledger.md`](vcs/05-generational-field-ledger.md) §3.5、`docs/initfix/12-L1-existing-initializer-replay.md`。
-
-### 风险 27：`Raw_prev` blob 预算容量与提交耗时只有单语料读数
-- **风险描述与底层机制**：`Raw_prev` blob 以字节形态进元数据，受 16 MiB 全局 / 每类 256 KiB 双预算约束；预算压力下丢字节保哈希，该类当轮回退 Run E。
-- **实测读数**：真实两代语料 400 类满载 2,389,448 B（占 16 MiB 的 14.2%）、`droppedBlobCount=0`，平均每类 ≈5.97 KB；64 KiB 对照档掉 5 类（1.3%）并全部落 `NO_RAW_PREV`。`commit` 每类 median 0.30 ms / p90 0.65 ms，400 类一批约 170 ms。读数见 [`19-raw-to-raw-realworld-readings.md`](vcs/04-raw-to-raw-realworld-readings.md) §3。
-- **触发条件**：单 classloader 内带 blob 的类数超过约 2,700（按本语料类体积外推，属推断）；游戏工程类体积更大时容量更小。
-- **当前缓解措施**：超预算即丢字节保哈希（fail-closed 回退 Run E，每类一条 warn），不会静默用残缺基线配对。
-- **残余影响**：超出容量的尾部类享受不到 Run R；`O(entries)` 记账未做受控微基准，只观测到同批内首末四分位耗时比 3.0×~10.0× 且不随条目数单调。
-- **后续验证方式**：在真实工程上复测 `droppedBlobCount()`；如需确认记账复杂度，做"受控条目数"微基准（固定类体积、变条目数）。
-- **决策依据**：[`18-live-raw-to-raw-alignment.md`](vcs/03-live-raw-to-raw-alignment.md) §5。
-
-### 风险 26：Raw_prev blob 记账为 O(条目数)
-- **风险描述与底层机制**：全局字节预算的维持按条目扫描记账，每类提交一次。
-- **触发条件**：单批次类数量很大（数百类以上）且每类都带 blob 时。
-- **当前缓解措施**：提交发生在批次收尾而非热路径；每类上限 256 KiB 限制单条贡献，预算默认 16 MiB。
-- **残余影响**：大批次提交期有一次性 O(n) 记账开销，未实测绝对耗时，属推断。
-- **后续验证方式**：若大批次提交耗时成为瓶颈，改为增量记账（维护累计字节数 + 淘汰队列）。
-- **决策依据**：[`18-live-raw-to-raw-alignment.md`](vcs/03-live-raw-to-raw-alignment.md) §5。
-
-### 风险 1：实例存活判定 TOCTOU 竞态窗口
-- **风险描述与底层机制**：从堆遍历（`LibTool.getInstances`）判定“某类无存活实例”到真正执行 `redefineClasses` 生效之间，存在纳秒至微秒级的时间窗口。
-- **触发条件**：应用工作线程在此窗口内并发执行 `new Foo()`。该新实例在重定义生效前分配，持有旧字段布局；重定义后访问新增字段将读取默认零值。
-- **当前缓解措施**：
-  1. 重定义全程持有 `HOTSWAP_LOCK` 全局互斥锁；
-  2. 游戏通常在主循环安全点或调试暂停期触发热更；
-  3. 若类已存在已知存活实例，直接进入 InitFix 逐实例补丁队列，不依赖“零实例豁免”。
-- **根治与关闭条件**：落地两阶段重定义（内部批次路径已落地，见 [历史归档 §0.7](releases/historical-rounds-archive.md)）；构造器尾部插桩在当前两阶段契约下不再需要（见 §4.1）；或在 HotSwap 期间通过 JVM TI 暂停全部应用线程（代价过高，目前维持极窄竞态记录）。
-- **关联设计规范**：[`docs/topology/07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1.3。
-- **关联架构决策**：无（属并发系统已知 TOCTOU 折衷）。
+**分栏判据**：只问一件事——**能不能通过改 Remold 代码修掉**。能，且已有明确动作（补判据 / 补门禁 / 补扫描范围 / 补读数 / 补负例）的，归本栏；本栏的风险都还欠一个可由我们闭环的动作，不等于当前存在静默写入。风险 13 / 15 / 16 正在 v0.2.9 批次修复中，保持"待修"口径。
 
 ### 风险 2：SwitchMap 类的偶然作用域安全
 - **风险描述与底层机制**：编译器生成的枚举 switch 映射类（如 `Foo$1`）未被特殊排除且未原名直通。它之所以在实测中未与其它匿名类发生误配，是因为业务匿名类的宿主方法回退解析为 `<init>`，而 SwitchMap 无 `NEW` 点其 `outerMethod` 保持为 `null`，两侧 scope 不一致导致 Tier 4 匹配天然失败。
@@ -515,15 +458,6 @@
 - **关联设计规范**：[`docs/topology/07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §2.2。
 - **关联架构决策**：无。
 
-### 风险 6：并发实例化缝隙
-- **风险描述与底层机制**：存活实例的枚举若发生在重定义**之前**，「枚举完成 → 重定义生效」之间新建的实例就不在集合里；重定义后这些实例的新增字段停在类型默认值，且因为它们不再出现在后续 Diff 中，永远不会被补。
-- **触发条件**：热更新期间应用线程仍在分配对象（游戏主循环的常态）。
-- **当前缓解措施**：**枚举已后置到重定义生效之后**（`InitFix.applyPatch` → `collectInstancesForPatch`，见 [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §2）。此后不可能再产生旧布局实例，枚举天然完备；枚举期间新建的实例由新构造器初始化，条件 CAS 对它们是无害的空操作。回归断言 `InitFixSnapshotTimingTest`（先红后绿）。
-- **残余边界（已关闭）**：两阶段路径下阶段 A 保留新构造器/`<clinit>`（`StageASkeleton.buildWithLiveConstructors`），阶段 A 到阶段 C 之间新建的实例由新构造器直接完成初始化，不再停在默认值；`StageASkeletonTest` 的窗口实例用例（新构造器初始化、旧体不回退到新字段）守卫该点。构造器尾部插桩在当前契约下不再需要（见 §4.1）。
-- **根治与关闭条件**：已由两阶段路径的「构造器保留新体」达成（[`04-target-design.md`](initfix/04-target-design.md) §1；原 §4 构造器尾部插桩方案在当前契约下不接线）；外部 IDE/JDWP 通道的同类窗口见风险 9。
-- **关联设计规范**：[`docs/initfix/03-runtime-driver.md`](initfix/03-runtime-driver.md) §2、[`docs/initfix/04-target-design.md`](initfix/04-target-design.md) §4。
-- **关联架构决策**：无。
-
 ### 风险 7：InstanceTracker 字节码回退可靠性局限
 - **风险描述与底层机制**：在无 JVMTI native 环境（如 Android 或纯 Java agent 回退）下，系统退化为基于弱引用表与构造器插桩的 `InstanceTracker`。
 - **触发条件**：垃圾回收频繁触发导致弱引用被清理，或者实例通过非受控通道（如 `Unsafe.allocateInstance`、反序列化、未插桩的类加载器）创建。
@@ -532,42 +466,6 @@
   2. 回退模式下触发警告，提示开发者存在实例漏检风险。
 - **根治与关闭条件**：优先保障 Native JVMTI 运行期环境；为纯 Java 回退通道补充强弱引用分层感知与反序列化挂钩。
 - **关联设计规范**：[`docs/initfix/05-jvmti-heap.md`](initfix/05-jvmti-heap.md)。
-- **关联架构决策**：无。
-
-### 风险 8：JBR 字段布局探针实验局限（已闭环收敛）
-- **风险描述与底层机制**：增强类重定义下物理内存布局在 JIT 极端优化下的行为较为复杂；早前假设单类新增字段为纯尾部追加（H1）以及父类加字段不影响子类已被物理探针证伪。
-- **触发条件**：新增字段填补空洞或基本类型聚类导致存量字段物理偏移漂移；JIT C2 激进常量折叠导致读取旧偏移；VarHandle 固化旧偏移错读相邻字段。
-- **当前缓解措施**：
-  1. `OffsetStabilityProbe`（47 项断言通过）全量实测了 DCEVM 字段布局规律、空洞填补、类型重排、继承体系漂移、C2 常量折叠以及访问器自愈边界；
-  2. 落地 `LayoutPredictor`，在重定义前通过抛弃式加载器 clean-load 预测物理偏移（与 DCEVM 重定义后 100% 吻合）；
-  3. 落地 `SuperclassDriftGate`，阻断存在偏移持有者的 `LAYOUT_DRIFT`、`SUPERCLASS_FIELD_DRIFT` 以及 `DELETED_FIELD_OFFSET_CONFLICT`；
-  4. 落地 `populateNonJdkSuperclasses` 预注入整条非 JDK 祖先链，防御 package-private 运行时包隔离。
-- **根治与关闭条件**：已通过 P0/P1 的 `LayoutPredictor` 与 `SuperclassDriftGate` 达成事前确定性拦截；未来探索 S2 槽位预留或 S3 使用方 C2 逆优化以进一步放宽阻断。
-- **关联设计规范**：[`docs/offset/01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md)。
-- **关联架构决策**：[`docs/topology/08-decisions.md`](topology/08-decisions.md) 附录 A。
-
-### 风险 9：重定义生效到补丁完成之间的读穿窗口
-- **风险描述与底层机制**：`redefineClasses` 返回后新方法体即可执行，而新增字段要等 `InitFix.applyPatch` 枚举完堆才写入。窗口内的读取拿到类型默认值（引用类型 `null`、数值类型 `0`），不抛异常也不打日志；引用类型的下游解引用直接 NPE（真实渲染/逻辑线程在第 4 行日志级别即可观察到）。
-- **已关闭的路径**：内部批次路径（文件监听 → `processChanges`）已由两阶段 Schema-First 重定义关闭（见 [历史归档 §0.7](releases/historical-rounds-archive.md)、路线图 §4.1）。当本批存在真正会写的「新增/类型变更字段」时：阶段 A 提交新结构 + 旧方法体（构造器/`<clinit>` 保留新体），旧方法体在编译期不引用新增字段，因而窗口内不可能读穿；阶段 B 完成补丁后再提交阶段 C 的新方法体。只在本批存在零值暴露字段时触发，纯方法体热更不付出第二次 redefine 的代价。证据：`TwoPhaseProbe` 72/0 的 50k 实例并发读线程红/绿对照（关两阶段稳定 NPE，开两阶段零 NPE）已实测。
-- **已关闭的路径（动态单类入口）**：`redefineDynamic` 消费 `InitFix.requiresTwoPhase`，在**调用内部同步**完成 A → 补丁 → C（阶段 C 直接提交现成的 `runtimeBytes`，不重跑 transformer 桥接/`InitFix.transform`），返回时 JVM 已是终态——公开 API 的返回语义不变，插件调用方在返回后看不到阶段 A 中间态。阶段 C 失败时按 VM 级/非 VM 级分流：VM 级标记毒化并停在阶段 A 提示重启；非 VM 级尝试回滚到基线字节并返回 `false`。证据：`DynamicTwoPhaseRedefineTest` 2/2（两次 redefine 的顺序与字节：Stage A 旧体 + 新字段、Stage C 新体；纯方法体仍单次），变异：强制 `twoPhase=false` → 用例红；真机（JBR 21 DCEVM）`redefineDynamicNoBaselineProbe` 13/0，日志显示 `two-phase: A -> patch -> C` 且存量实例 `b=42`。
-- **仍敞开的路径（残余）**：
-  - **外部 IDE/JDWP 重定义通道**：JVM 先按新字节码完成重定义，Remold 只能在 `afterRedefineExternal`
-    里补，窗口仍在。要关窗口必须让 transformer 首次返回阶段 A 骨架、再在补丁完成后主动触发第二次
-    redefine；JDWP 协议不提供这个触发点，该通道实际不可达（除非另起触发源）。
-  - **补丁被安全门拒绝的字段**：没有补丁就没有可等待的值，两阶段无法代偿，语义仍是「重启」；
-  - **阶段 B 完成前的残余读取**：新构造器若读取本类新增**静态**字段，仍可能拿到默认值。跨类部分已由
-    跨类批次字段依赖收敛与宿主拓扑执行收口（见 §2 对应行）：同批其它类的 prerequisite 宿主先补、失败时
-    精确下游被跳过并记账，但**已被拒绝**的下游字段仍无值可等，语义还是「重启」。
-- **窗口量级**（仅对仍敞开的路径有参考意义；实测拆分见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10）：
-  - 枚举成本 = **无关对象约 8 ns/个**（全堆遍历固定项）+ **匹配实例约 0.3~1 µs/个**（打 tag 与物化数组）；
-  - 极端场景（目标类自身 100 万实例）：`applyPatch` 约 1551 ms，其中 CAS 仅 83 ms、弱引用往返 389 ms；
-  - 现实场景（堆里几百万对象、目标类只有几百个实例）：实测 100 个目标 + 100 万无关对象仅 8 ms，窗口在**几十毫秒**量级；
-  - **随批次线性放大的项**：`getInstances` 按类调用，批次里 N 个待补类 = N 次全堆遍历；
-  - **暴露时间要扣掉 STW 段**：实测（M6）每次 `getInstances` 是一次 safepoint，1M 匹配实例时 `HeapIterateOperation` 单次 216~242 ms；停世界期间业务线程读不到未补字段。心跳吞吐只有自由速率的 67%，是「一段 STW + 其余阶段并发」的混合，不是全程争抢。
-- **触发条件**：窗口内有线程执行读取新增字段的代码——本类新方法体、同批重定义的其它类、反射/序列化路径、任意业务线程。
-- **缓解措施**：两阶段路径已由编排消除；残余路径上 `HOTSWAP_LOCK` 只互斥热更调度与事务处理、**不阻塞应用线程读**，因此不构成防护；T0 零值等价字段不受影响（默认值即正确值）；`PatchReport` 与条件 CAS 跳过计数可在事后定位“这次写了哪些字段”，但无法预防窗口内的读。
-- **根治与关闭条件**：只剩**外部 IDE/JDWP 重定义通道**——它受"JVM 先完成后置回调"约束，需要在 transformer 里先把新字节改为阶段 A 骨架、再在补丁完成后主动触发阶段 C（JDWP 无该触发点，需另起触发源）。跨类批次拓扑排序已收口（见 §2）；同批内仍无法代偿的是**被安全门拒绝**的字段与上述 JDWP 通道。
-- **关联设计规范**：[`docs/initfix/04-target-design.md`](initfix/04-target-design.md) §1、[`docs/initfix/03-runtime-driver.md`](initfix/03-runtime-driver.md) §2。
 - **关联架构决策**：无。
 
 ### 风险 10：新增字段参与 hashCode/equals 后哈希容器失效
@@ -616,6 +514,7 @@
 - **当前处置**：本轮不修。回归探针 `InitFixFallbackProbe` 改为在 `Instrumentation` 边界注入失败，避免把 VM 崩溃当作可重复的测试路径。
 - **候选关闭方向**：在 `applyRedefinitions` 入口校验 `ClassDefinition` 的 class 名与字节可解析性；或把 redefine 调用隔离到可重启的辅助进程（代价高）。需先确认 JBR 25 的触发边界（是否只在批量排序阶段）。
 - **优先级**：P1 · v0.2.9（§4.1 槽位 ② 的入口字节码合法性门禁：畸形字节 → 可报告拒绝，而不是进程死亡）。
+- **当前缓解措施**：修复进行中，见 v0.2.9 批次（`applyRedefinitions` 入口的 `ClassDefinition` 合法性门禁：魔数 / 结构截断 / `major` 上限 / 字节内部名与目标类一致，不过则 warn 拒绝、不调 `redefineClasses`）。门禁落地前维持"入口不校验"的现状与探针改道。
 - **关联设计规范**：无。
 - **关联架构决策**：无。
 
@@ -636,6 +535,7 @@
 - **目标环境**：Forge + Mixin；以 Forge 实测的 ClassLoader 身份为准（Fabric 探针只能证明单 JVM 内的类名键冲突，不能替代 Forge 多 loader 实测）。
 - **当前处置**：只记录，未修。
 - **候选关闭方向**：pending 键改为 `(ClassLoader 身份, 类名)`，或 commit 时对已加载类不登记 pending；消费时校验 loader；补多 loader 回归。
+- **当前缓解措施**：修复进行中，见 v0.2.9 批次（pending 键按 ClassLoader 身份隔离，消费侧校验 loader）；落地前维持"只记录、不修"与 `[KNOWN-BUG]` 探针口径。
 - **关联设计规范**：`docs/topology/03-cascading-pipeline.md`。
 - **关联架构决策**：无。
 
@@ -645,23 +545,8 @@
 - **后果**：外部重定义 no-op 判定可能把新源码当成已生效基线而跳过织入；旧侧基线可能取到未生效版本。是语义错判，不是内存竞争。
 - **当前处置**：只记录，未升级为 staged；快照+回滚已缩短窗口，但未消除。证据：`SourceBytecodeCacheTest` 四路径 helper 测试、E3 端到端、变异检查（注释回滚调用仅 E3 变红）。
 - **候选关闭方向**：按设计稿引入 `SourceRound` staged/commit，读取方只读已提交版本；或把 `processChanges` 与读取方统一到同一锁。
+- **当前缓解措施**：修复进行中，见 v0.2.9 批次（按轮次 staged/commit，读取方只读已提交版本）；落地前维持"快照 + 回滚"的既有窗口。
 - **关联设计规范**：`docs/initfix/11-source-bytecode-cache.md` §9。
-- **关联架构决策**：无。
-
-### 风险 17：L0 不覆盖静态字段初值变化（P3）
-- **风险描述**：`InitializerDrift` 只扫描 `<init>` 的实例字段 `PUTFIELD`；`<clinit>`/`PUTSTATIC` 不在 L0 范围。`static int s = 1` 改为 `2` 不会产生 `[INIT-DRIFT]`，存量静态值不会重置。
-- **触发条件**：只改静态字段初值，且没有新增静态字段/`@RemoldReinit`。
-- **当前处置**：设计上不覆盖（L0 只做实例字段可见性）；`InitializerDriftTest.staticFieldIsNotCovered` 明确断言为空，不实现静态检测。
-- **候选方向**：L0 扩展 `<clinit>` 切片比较，或由 InitFix 静态补丁路径单独处理。
-- **关联设计规范**：`docs/initfix/10-initializer-change-detection.md`。
-- **关联架构决策**：无。
-
-### 风险 18：L0 不覆盖 lambda 体变化（P3）
-- **风险描述**：L0 只比较 `<init>` 中已有字段的写入切片；lambda 体变化（包括 lambda 前插导致的 `lambda$...$N` 重编号）不会产生 `[INIT-DRIFT]`。`InitializerDriftTest`/`L0-lambda` 端到端用例已验证：真实 `processChanges` 下 Host v1→v2、lambda 插入，`[INIT-DRIFT]` 新增 0。
-- **触发条件**：只改 lambda 体或 lambda 顺序/编号，且没有已有字段初始化块变化。
-- **当前处置**：设计上不覆盖（lambda 由 LambdaAligner 负责）；只记录，不实现。
-- **候选方向**：如需可见性，单独比较 `invokedynamic` bootstrap 参数或 lambda 方法体；不要混入字段初值检测。
-- **关联设计规范**：`docs/initfix/10-initializer-change-detection.md`。
 - **关联架构决策**：无。
 
 ### 风险 19：实体探针在 Forge + Mixin 织入后的目标类上抛 `ClassFormatError`（v0.2.4 已修复）
@@ -680,6 +565,134 @@
 - **修复（已落地，全量回归通过）**：① `transform` 改为**全部局部状态**（`classReader/classWriter/targetMethodNames/anyProfiled` 局部化），单实例可重入/并发安全；`targetMethods` 改 `ConcurrentHashMap`；② 新增 `remold.util.ClassIdentity.canonicalize(Class<?>)`，在 `DynamicProfilerAPI.toggleEntityProbe`、`ProfilerTransformer` 目标表读写、`LibTool.getInstances` 入口归一化静态字段影子 `Class`（影子对象 `getDeclaredFields` 是旧版本、`getInstances=0`、`retransform` 静默空转）；③ `toggleEntityProbe` 返回 `boolean`，捕获 `Throwable`，按调用前快照回滚：enable 失败恢复原注册（空则删表项）、disable 失败重新登记（探针字节仍在）；④ 目标匹配增加 name+loader 与 `HierarchyTree` 名称回退，覆盖“影子基类 + 子类”形态。
 - **回归证据**：`:tests:shadowClassProbe` 9/9（红→绿：修复前 `LibTool.getInstances(shadow)=0`、disable 后计数继续增长；变异检查撤销 canonicalize → 红）；`EntityProbeFailureRollbackTest` 2/2（撤销回滚 → 红）；Forge C5 修复后 `ENTITY-PROBE counter=1`、`RESULT PASS`、无 NPE/ClassFormatError。**二分矩阵（已归档 `tests/fabric-mixin-probe/evidence/bisect/`）**：Forge plain/Mixin × `d5327fe`/`6091057` 四格稳态 toggle 全部 `counter=1`、无 `ClassFormatError`；构造期早期 toggle 复现 `ProfilerTransformer` 单例可变字段 NPE（`classReader`/`targetMethodNames` 为 null，并发类加载触发）。Fabric 四格 **未运行**（时间上限，`SUMMARY.md` 标注）；无 CFE 瞬间 dump，CFE 与 H2 的因果仍为推断。
 - **关联设计规范**：`docs/initfix/03-runtime-driver.md` §4（`@RemoldReinit` 与实体探针均属显式 opt-in 通道）。
+- **关联架构决策**：无。
+
+### 风险 21：懒加载类的旧字节基线可能取到当前磁盘（真匿名类残余）
+
+- **现象与范围**：一个类若在**批次之间**才被 JVM 懒加载（典型：枚举常量体、`@OnReload` 期间首次触发的匿名子类），
+  它没有走过注入/重定义路径，`bytecodeCache` / `sourceBytecodeCache` 里都没有它的**旧**字节。批次预热时
+  `fetchOriginalBytecode(Class)` 通过资源读盘拿到的是**当前磁盘**字节，于是对齐器看到的 old==new，差异被吞掉。
+- **当前处置**：枚举常量体已按独立类直接重定义（字节路由，不依赖旧基线）；真匿名类若基线缺失，对齐不产出
+  结果，批次把它移出时写 `ANON-NOT-ALIGNED` 跳过台账并发 `warn` —— 失败响亮，但该类本轮不热更。
+- **修复方向**：加载期基线登记（`AnnotationTransformer` 对监控目录下新加载类登记 `(loader, 类名)` 与初始
+  字节），无一轮延迟；需处理"新类 vs 重定义"的判定与重入。
+- **关联设计规范**：[`02-admission-and-reserved-names.md`](topology/02-admission-and-reserved-names.md) §1.4。
+
+### 风险 24：Run R 下三条「只看得到 R_prev」的口径缺口
+- **风险描述与底层机制**：活体对齐切到 `R_prev ↔ R_new` 后，配对基线里不含幽灵桩、保留体与捕获桥（它们只存在于 `E_prev`），因此凡是以「旧侧字节里能找到的东西」为前提的判据，覆盖面在 Run R 下收窄到 `R_prev` 一侧。
+- **触发条件**：① `stepGhostRevive`（默认关）在 Run R 下没有幽灵候选可用，等于 no-op；② 无 LVT 的捕获 lambda 形参名扫描只覆盖 `R_prev`，不覆盖 `E_prev` 侧；③ 字符串常量见证表看不到仅存在于 `E_prev` 的幽灵/桥名。
+- **当前缓解措施**：① 幽灵集合改由继承集定义（`E_prev` 枚举 + `Meta.ghostHashes` 校正），复活判据不再依赖 `R_prev`；② 缺少 LVT 时按槽号/类型兜底并记 warn，`LAMBDA_STRICT` 门仍可把它升级为硬失败；③ 见证表缺项只降低配对证据强度，落 Run E 或位置兜底的路径均有读数（`positionalFallbacks`）。
+- **残余影响**：上述三处在 Run R 下的证据强度低于 Run E；不产生静默写入，但可能让本可复活/本可精确配对的用例退化为兜底。
+- **后续验证方式**：`Pr3RawAlignmentScenarioTest` 覆盖 Ctrl+Z 幽灵继承与桥转发；新增「仅 `E_prev` 可见的见证」用例时以 `positionalFallbacks`/`runRGate` 为终局判据。
+- **决策依据**：[`18-live-raw-to-raw-alignment.md`](vcs/03-live-raw-to-raw-alignment.md) §5（继承集枚举）与 §6（fail-closed）。
+
+### 风险 26：Raw_prev blob 记账为 O(条目数)
+- **风险描述与底层机制**：全局字节预算的维持按条目扫描记账，每类提交一次。
+- **触发条件**：单批次类数量很大（数百类以上）且每类都带 blob 时。
+- **当前缓解措施**：提交发生在批次收尾而非热路径；每类上限 256 KiB 限制单条贡献，预算默认 16 MiB。
+- **残余影响**：大批次提交期有一次性 O(n) 记账开销，未实测绝对耗时，属推断。
+- **后续验证方式**：若大批次提交耗时成为瓶颈，改为增量记账（维护累计字节数 + 淘汰队列）。
+- **决策依据**：[`18-live-raw-to-raw-alignment.md`](vcs/03-live-raw-to-raw-alignment.md) §5。
+
+### 风险 27：`Raw_prev` blob 预算容量与提交耗时只有单语料读数
+- **风险描述与底层机制**：`Raw_prev` blob 以字节形态进元数据，受 16 MiB 全局 / 每类 256 KiB 双预算约束；预算压力下丢字节保哈希，该类当轮回退 Run E。
+- **实测读数**：真实两代语料 400 类满载 2,389,448 B（占 16 MiB 的 14.2%）、`droppedBlobCount=0`，平均每类 ≈5.97 KB；64 KiB 对照档掉 5 类（1.3%）并全部落 `NO_RAW_PREV`。`commit` 每类 median 0.30 ms / p90 0.65 ms，400 类一批约 170 ms。读数见 [`19-raw-to-raw-realworld-readings.md`](vcs/04-raw-to-raw-realworld-readings.md) §3。
+- **触发条件**：单 classloader 内带 blob 的类数超过约 2,700（按本语料类体积外推，属推断）；游戏工程类体积更大时容量更小。
+- **当前缓解措施**：超预算即丢字节保哈希（fail-closed 回退 Run E，每类一条 warn），不会静默用残缺基线配对。
+- **残余影响**：超出容量的尾部类享受不到 Run R；`O(entries)` 记账未做受控微基准，只观测到同批内首末四分位耗时比 3.0×~10.0× 且不随条目数单调。
+- **后续验证方式**：在真实工程上复测 `droppedBlobCount()`；如需确认记账复杂度，做"受控条目数"微基准（固定类体积、变条目数）。
+- **决策依据**：[`18-live-raw-to-raw-alignment.md`](vcs/03-live-raw-to-raw-alignment.md) §5。
+
+### 风险 28：`L1` 继承字段的代际对账依赖声明类在批次里
+- **风险描述与底层机制**：`L1` 重放写的是匿名子类实例里的**继承**字段，而 `replayFacts` 的 `ownerClass`、台账键与相邻性判据（`rawHash` 在 `[g, target]` 恒定）都以**声明类**为键。声明类若从未出现在事实那一代的 `Changeset.entries` 里，`isAdjacent` 无法证明"事实仍成立"，消费侧判 `REFUSED_DISCONTINUOUS` 并把字段挂成未闭环债务；回归头再看，本可重放的字段被拒。
+- **触发条件**：父类（声明类）字节不变、只有匿名子类的初值块在变的批次——这正是 `L1` 最常见的形态。
+- **当前缓解措施**：按 fail-closed 拒绝（不回落"最近活代"事实），`PatchReport` 记 `rejected:` 并点名恢复路径；正向代不查台账（只在回退上下文或已欠债时查），所以这条缺口不会拖慢正常重放。
+- **残余影响**：单靠 `L1` 无法把跨代对账用起来；`vcsLedgerGcProbe` 的夹具必须先让声明类在事实那一代里有条目（探针里每次漂移都重编父类）才能产生可对账的事实——也就是说真实工程里这条通道的实际覆盖面取决于"父类是否随同一次重编"。
+- **后续验证方式**：给 `isAdjacent` 补一条"声明类缺失即视为不连续"的显式负例（现在由 `REFUSED_DISCONTINUOUS` 间接覆盖）；评估用 `Changeset.manifest` 的类级指纹替代 `entries` 存在性，把判据放宽到"该代确实录过这个类"。
+- **决策依据**：[`20-generational-field-ledger.md`](vcs/05-generational-field-ledger.md) §3.5 / §4-R6。
+
+### 风险 29：`@RemoldReinit(OVERWRITE)` 无法闭环被回退污染的继承字段
+- **风险描述与底层机制**：回退后 `L1` 字段被挂在台账上未闭环，恢复要求显式重建或 `@RemoldReinit(OVERWRITE)`；但布局门对"`INCLUDE_SUBCLASSES` + 子类初始化器仍在写该继承字段"的注解直接 `LAYOUT-REJECT`（否则会用声明类的值覆盖子类专属初值，且子类赋值不在重放范围内），而 `scope = SELF` 只写宿主自身实例、够不到匿名子类实例。
+- **触发条件**：`L1` 通道（匿名子类实例初始化块写继承字段）上的未闭环字段；声明类与子类都保持原形态。
+- **当前缓解措施**：拒绝而不是放宽——`vcsA14Probe` 的恢复轮同时做两件事：给声明类打 `@RemoldReinit(OVERWRITE)` **并**让子类初始化块不再写该字段（"显式重建"的字面形态），此时布局门放行、写入真的落到存量实例、债务 `markClosed`、报告出现 `recovered: overwrite`。
+- **残余影响**：只想改注解、不动子类初值的用户拿不到恢复路径，只能等下一次结构变化或重启；台账里该字段会一直保持未闭环（可见、不遗忘，但也不再自动重试）。
+- **后续验证方式**：若要支持"子类初值不动也能恢复"，需要先设计"按子类分别取期望"的方案（当前 `KIND_CONDITIONAL_EXPECTED` 只有单一期望来源），并在 `ReinitScopeGate` 补对应负例。
+- **决策依据**：[`20-generational-field-ledger.md`](vcs/05-generational-field-ledger.md) §3.5、`docs/initfix/12-L1-existing-initializer-replay.md`。
+
+### 5.2 已接受物理边界
+
+**分栏判据**：同一个问题——**能不能通过改 Remold 代码修掉**——答案是"不能"或"明确不修"的，归本栏：成因在上游（JBR / DCEVM 行为、JDWP 协议）、语言或平台语义（JVM 规范、文件系统时间语义、无绑定方法引用没有稳定的跨代身份）、或修复代价已被否决（全线程暂停、完整抽象解释器、重写既有契约）。判不出归属的条目不硬塞进 5.1：按最近一次实测结论落到本栏并在小节里注明依据。
+
+### 风险 1：实例存活判定 TOCTOU 竞态窗口
+- **风险描述与底层机制**：从堆遍历（`LibTool.getInstances`）判定“某类无存活实例”到真正执行 `redefineClasses` 生效之间，存在纳秒至微秒级的时间窗口。
+- **触发条件**：应用工作线程在此窗口内并发执行 `new Foo()`。该新实例在重定义生效前分配，持有旧字段布局；重定义后访问新增字段将读取默认零值。
+- **当前缓解措施**：
+  1. 重定义全程持有 `HOTSWAP_LOCK` 全局互斥锁；
+  2. 游戏通常在主循环安全点或调试暂停期触发热更；
+  3. 若类已存在已知存活实例，直接进入 InitFix 逐实例补丁队列，不依赖“零实例豁免”。
+- **根治与关闭条件**：落地两阶段重定义（内部批次路径已落地，见 [历史归档 §0.7](releases/historical-rounds-archive.md)）；构造器尾部插桩在当前两阶段契约下不再需要（见 §4.1）；或在 HotSwap 期间通过 JVM TI 暂停全部应用线程（代价过高，目前维持极窄竞态记录）。
+- **关联设计规范**：[`docs/topology/07-layout-gate-and-risks.md`](topology/07-layout-gate-and-risks.md) §1.3。
+- **关联架构决策**：无（属并发系统已知 TOCTOU 折衷）。
+
+### 风险 6：并发实例化缝隙
+- **风险描述与底层机制**：存活实例的枚举若发生在重定义**之前**，「枚举完成 → 重定义生效」之间新建的实例就不在集合里；重定义后这些实例的新增字段停在类型默认值，且因为它们不再出现在后续 Diff 中，永远不会被补。
+- **触发条件**：热更新期间应用线程仍在分配对象（游戏主循环的常态）。
+- **当前缓解措施**：**枚举已后置到重定义生效之后**（`InitFix.applyPatch` → `collectInstancesForPatch`，见 [`03-runtime-driver.md`](initfix/03-runtime-driver.md) §2）。此后不可能再产生旧布局实例，枚举天然完备；枚举期间新建的实例由新构造器初始化，条件 CAS 对它们是无害的空操作。回归断言 `InitFixSnapshotTimingTest`（先红后绿）。
+- **残余边界（已关闭）**：两阶段路径下阶段 A 保留新构造器/`<clinit>`（`StageASkeleton.buildWithLiveConstructors`），阶段 A 到阶段 C 之间新建的实例由新构造器直接完成初始化，不再停在默认值；`StageASkeletonTest` 的窗口实例用例（新构造器初始化、旧体不回退到新字段）守卫该点。构造器尾部插桩在当前契约下不再需要（见 §4.1）。
+- **根治与关闭条件**：已由两阶段路径的「构造器保留新体」达成（[`04-target-design.md`](initfix/04-target-design.md) §1；原 §4 构造器尾部插桩方案在当前契约下不接线）；外部 IDE/JDWP 通道的同类窗口见风险 9。
+- **关联设计规范**：[`docs/initfix/03-runtime-driver.md`](initfix/03-runtime-driver.md) §2、[`docs/initfix/04-target-design.md`](initfix/04-target-design.md) §4。
+- **关联架构决策**：无。
+
+### 风险 8：JBR 字段布局探针实验局限（已闭环收敛）
+- **风险描述与底层机制**：增强类重定义下物理内存布局在 JIT 极端优化下的行为较为复杂；早前假设单类新增字段为纯尾部追加（H1）以及父类加字段不影响子类已被物理探针证伪。
+- **触发条件**：新增字段填补空洞或基本类型聚类导致存量字段物理偏移漂移；JIT C2 激进常量折叠导致读取旧偏移；VarHandle 固化旧偏移错读相邻字段。
+- **当前缓解措施**：
+  1. `OffsetStabilityProbe`（47 项断言通过）全量实测了 DCEVM 字段布局规律、空洞填补、类型重排、继承体系漂移、C2 常量折叠以及访问器自愈边界；
+  2. 落地 `LayoutPredictor`，在重定义前通过抛弃式加载器 clean-load 预测物理偏移（与 DCEVM 重定义后 100% 吻合）；
+  3. 落地 `SuperclassDriftGate`，阻断存在偏移持有者的 `LAYOUT_DRIFT`、`SUPERCLASS_FIELD_DRIFT` 以及 `DELETED_FIELD_OFFSET_CONFLICT`；
+  4. 落地 `populateNonJdkSuperclasses` 预注入整条非 JDK 祖先链，防御 package-private 运行时包隔离。
+- **根治与关闭条件**：已通过 P0/P1 的 `LayoutPredictor` 与 `SuperclassDriftGate` 达成事前确定性拦截；未来探索 S2 槽位预留或 S3 使用方 C2 逆优化以进一步放宽阻断。
+- **关联设计规范**：[`docs/offset/01-offset-and-reflection-cache.md`](offset/01-offset-and-reflection-cache.md)。
+- **关联架构决策**：[`docs/topology/08-decisions.md`](topology/08-decisions.md) 附录 A。
+
+### 风险 9：重定义生效到补丁完成之间的读穿窗口
+- **风险描述与底层机制**：`redefineClasses` 返回后新方法体即可执行，而新增字段要等 `InitFix.applyPatch` 枚举完堆才写入。窗口内的读取拿到类型默认值（引用类型 `null`、数值类型 `0`），不抛异常也不打日志；引用类型的下游解引用直接 NPE（真实渲染/逻辑线程在第 4 行日志级别即可观察到）。
+- **已关闭的路径**：内部批次路径（文件监听 → `processChanges`）已由两阶段 Schema-First 重定义关闭（见 [历史归档 §0.7](releases/historical-rounds-archive.md)、路线图 §4.1）。当本批存在真正会写的「新增/类型变更字段」时：阶段 A 提交新结构 + 旧方法体（构造器/`<clinit>` 保留新体），旧方法体在编译期不引用新增字段，因而窗口内不可能读穿；阶段 B 完成补丁后再提交阶段 C 的新方法体。只在本批存在零值暴露字段时触发，纯方法体热更不付出第二次 redefine 的代价。证据：`TwoPhaseProbe` 72/0 的 50k 实例并发读线程红/绿对照（关两阶段稳定 NPE，开两阶段零 NPE）已实测。
+- **已关闭的路径（动态单类入口）**：`redefineDynamic` 消费 `InitFix.requiresTwoPhase`，在**调用内部同步**完成 A → 补丁 → C（阶段 C 直接提交现成的 `runtimeBytes`，不重跑 transformer 桥接/`InitFix.transform`），返回时 JVM 已是终态——公开 API 的返回语义不变，插件调用方在返回后看不到阶段 A 中间态。阶段 C 失败时按 VM 级/非 VM 级分流：VM 级标记毒化并停在阶段 A 提示重启；非 VM 级尝试回滚到基线字节并返回 `false`。证据：`DynamicTwoPhaseRedefineTest` 2/2（两次 redefine 的顺序与字节：Stage A 旧体 + 新字段、Stage C 新体；纯方法体仍单次），变异：强制 `twoPhase=false` → 用例红；真机（JBR 21 DCEVM）`redefineDynamicNoBaselineProbe` 13/0，日志显示 `two-phase: A -> patch -> C` 且存量实例 `b=42`。
+- **仍敞开的路径（残余）**：
+  - **外部 IDE/JDWP 重定义通道**：JVM 先按新字节码完成重定义，Remold 只能在 `afterRedefineExternal`
+    里补，窗口仍在。要关窗口必须让 transformer 首次返回阶段 A 骨架、再在补丁完成后主动触发第二次
+    redefine；JDWP 协议不提供这个触发点，该通道实际不可达（除非另起触发源）。
+  - **补丁被安全门拒绝的字段**：没有补丁就没有可等待的值，两阶段无法代偿，语义仍是「重启」；
+  - **阶段 B 完成前的残余读取**：新构造器若读取本类新增**静态**字段，仍可能拿到默认值。跨类部分已由
+    跨类批次字段依赖收敛与宿主拓扑执行收口（见 §2 对应行）：同批其它类的 prerequisite 宿主先补、失败时
+    精确下游被跳过并记账，但**已被拒绝**的下游字段仍无值可等，语义还是「重启」。
+- **窗口量级**（仅对仍敞开的路径有参考意义；实测拆分见 [`07-p05-probe-results.md`](initfix/07-p05-probe-results.md) §10）：
+  - 枚举成本 = **无关对象约 8 ns/个**（全堆遍历固定项）+ **匹配实例约 0.3~1 µs/个**（打 tag 与物化数组）；
+  - 极端场景（目标类自身 100 万实例）：`applyPatch` 约 1551 ms，其中 CAS 仅 83 ms、弱引用往返 389 ms；
+  - 现实场景（堆里几百万对象、目标类只有几百个实例）：实测 100 个目标 + 100 万无关对象仅 8 ms，窗口在**几十毫秒**量级；
+  - **随批次线性放大的项**：`getInstances` 按类调用，批次里 N 个待补类 = N 次全堆遍历；
+  - **暴露时间要扣掉 STW 段**：实测（M6）每次 `getInstances` 是一次 safepoint，1M 匹配实例时 `HeapIterateOperation` 单次 216~242 ms；停世界期间业务线程读不到未补字段。心跳吞吐只有自由速率的 67%，是「一段 STW + 其余阶段并发」的混合，不是全程争抢。
+- **触发条件**：窗口内有线程执行读取新增字段的代码——本类新方法体、同批重定义的其它类、反射/序列化路径、任意业务线程。
+- **缓解措施**：两阶段路径已由编排消除；残余路径上 `HOTSWAP_LOCK` 只互斥热更调度与事务处理、**不阻塞应用线程读**，因此不构成防护；T0 零值等价字段不受影响（默认值即正确值）；`PatchReport` 与条件 CAS 跳过计数可在事后定位“这次写了哪些字段”，但无法预防窗口内的读。
+- **根治与关闭条件**：只剩**外部 IDE/JDWP 重定义通道**——它受"JVM 先完成后置回调"约束，需要在 transformer 里先把新字节改为阶段 A 骨架、再在补丁完成后主动触发阶段 C（JDWP 无该触发点，需另起触发源）。跨类批次拓扑排序已收口（见 §2）；同批内仍无法代偿的是**被安全门拒绝**的字段与上述 JDWP 通道。
+- **关联设计规范**：[`docs/initfix/04-target-design.md`](initfix/04-target-design.md) §1、[`docs/initfix/03-runtime-driver.md`](initfix/03-runtime-driver.md) §2。
+- **关联架构决策**：无。
+
+### 风险 17：L0 不覆盖静态字段初值变化（P3）
+- **风险描述**：`InitializerDrift` 只扫描 `<init>` 的实例字段 `PUTFIELD`；`<clinit>`/`PUTSTATIC` 不在 L0 范围。`static int s = 1` 改为 `2` 不会产生 `[INIT-DRIFT]`，存量静态值不会重置。
+- **触发条件**：只改静态字段初值，且没有新增静态字段/`@RemoldReinit`。
+- **当前处置**：设计上不覆盖（L0 只做实例字段可见性）；`InitializerDriftTest.staticFieldIsNotCovered` 明确断言为空，不实现静态检测。
+- **候选方向**：L0 扩展 `<clinit>` 切片比较，或由 InitFix 静态补丁路径单独处理。
+- **关联设计规范**：`docs/initfix/10-initializer-change-detection.md`。
+- **关联架构决策**：无。
+
+### 风险 18：L0 不覆盖 lambda 体变化（P3）
+- **风险描述**：L0 只比较 `<init>` 中已有字段的写入切片；lambda 体变化（包括 lambda 前插导致的 `lambda$...$N` 重编号）不会产生 `[INIT-DRIFT]`。`InitializerDriftTest`/`L0-lambda` 端到端用例已验证：真实 `processChanges` 下 Host v1→v2、lambda 插入，`[INIT-DRIFT]` 新增 0。
+- **触发条件**：只改 lambda 体或 lambda 顺序/编号，且没有已有字段初始化块变化。
+- **当前处置**：设计上不覆盖（lambda 由 LambdaAligner 负责）；只记录，不实现。
+- **候选方向**：如需可见性，单独比较 `invokedynamic` bootstrap 参数或 lambda 方法体；不要混入字段初值检测。
+- **关联设计规范**：`docs/initfix/10-initializer-change-detection.md`。
 - **关联架构决策**：无。
 
 ### 风险 20：枚举常量集合变更无法在运行期修复（实测否决候选方案）
@@ -707,17 +720,6 @@
 - **关联代码**：`ClassDiffUtil` / `LayoutGate.ENUM_CONSTANT_SET_CHANGED` / `LayoutDecisionEngine.decide` /
   `RemoldAgent.dropEnumSwitchDependents` / `dropEnumConstantDependents`；探针 `tests/enum-append-probe/`。
 
-### 风险 21：懒加载类的旧字节基线可能取到当前磁盘（真匿名类残余）
-
-- **现象与范围**：一个类若在**批次之间**才被 JVM 懒加载（典型：枚举常量体、`@OnReload` 期间首次触发的匿名子类），
-  它没有走过注入/重定义路径，`bytecodeCache` / `sourceBytecodeCache` 里都没有它的**旧**字节。批次预热时
-  `fetchOriginalBytecode(Class)` 通过资源读盘拿到的是**当前磁盘**字节，于是对齐器看到的 old==new，差异被吞掉。
-- **当前处置**：枚举常量体已按独立类直接重定义（字节路由，不依赖旧基线）；真匿名类若基线缺失，对齐不产出
-  结果，批次把它移出时写 `ANON-NOT-ALIGNED` 跳过台账并发 `warn` —— 失败响亮，但该类本轮不热更。
-- **修复方向**：加载期基线登记（`AnnotationTransformer` 对监控目录下新加载类登记 `(loader, 类名)` 与初始
-  字节），无一轮延迟；需处理"新类 vs 重定义"的判定与重入。
-- **关联设计规范**：[`02-admission-and-reserved-names.md`](topology/02-admission-and-reserved-names.md) §1.4。
-
 ### 风险 22：`CellPropertyRef` 的程序分析与执行手段深度边界（P2/P3 · 未闭环）
 
 - **范围**：Mindustry UI 胶水层 `CellPropertyRef` 的静态链提取与属性重放。它不参与 InitFix 的判决，
@@ -739,6 +741,30 @@
   顺序不一致 → 拒绝该链），再评估是否需要完整的抽象解释器。
 - **关联代码**：`CellPropertyRef.extractFromMethod` / `extractArgsDataflow` / `verifyBytecode` /
   `dryRunProperties` / `makeLambda`。
+
+### 风险 23：构建完成 marker 的触发边界（P3）
+
+- **风险描述与底层机制**：marker 只能取消**尚未到期**的兜底 task；若一次构建时长超过 `fileShakeMs`
+  （默认 800ms）且期间出现超过窗口的静默，编译中途的批次可能先跑一次。marker 到得晚时只补余下变更，
+  已生效的类由磁盘指纹跳过——最终状态正确，但"构建期间完全不触发热更"不成立。
+- **迟到事件**：marker 批次之后才被 watcher 线程送达的同批事件会重新挂一次兜底；该批次按磁盘指纹全部跳过，
+  产生 0 次 redefine 的 no-op 批次（不触发 `@OnReload`/补丁/监听器回调），只带来扫描/读盘与日志成本。
+- **扫描依赖文件系统时间**：`marker` 路径用 `mtime >= since` 挑选变更；保留时间戳的复制工具、网络挂载或
+  mtime 精度异常的文件系统可能漏扫，此时事件路径仍保证最终一致（只是失去快路径）。
+- **平台假设**：陈旧/未来判定（±5s）与"Gradle 与游戏 JVM 同机同时钟"假设在容器/远程挂载下可能不成立；
+  被拒绝的 marker 只在日志里给出原因与 `delta`，不会自动关闭 marker——用户可设 `buildTrigger = false` 回到纯兜底。
+- **未覆盖的验证面**：JBR 17/21 DCEVM、Linux、macOS 的高灵敏度 watcher 路径、多类/匿名类/lambda 批次、
+  多次连续构建的长期稳定性。
+- **关联设计规范**：`docs/runtime/01-build-trigger-mode.md`；读数：`docs/runtime/02-build-trigger-probe.md`。
+
+### 风险 25：`forceStaticLambdas` 归一化与 Run R 的闸门关系（按实测更正）
+- **风险描述与底层机制**：`normalizeAlignBaseline` / `forceStaticLambdas` 会在对齐前重写 lambda 调用位点；一度担心这类类的 `E_prev_used` 与 `Meta.jvmEffHash` 不同源，导致 G1 代际身份判不出而整类回退 Run E。
+- **实测结论**：该担心不成立。`preAlign` 快照取自归一化**之后**，两侧指纹同源；真实两代语料 400 类里命中归一化的 7 类**全部 `PASSED`**，全语料 `RAW_PREV_MISMATCH` 为 0。读数见 [`19-raw-to-raw-realworld-readings.md`](vcs/04-raw-to-raw-realworld-readings.md) §2。
+- **仍然成立的边界**：真正压低 Run R 接合率的是"没有本地 lambda 槽位"的类（只有外部方法引用）——它们判 `TRANSLATION_INCOMPLETE` 并回退；含 lambda 站点的类里接合率为 50/62（80.6%）。
+- **当前缓解措施**：不需要额外缓解；G1 维持"只比 `E_prev` 指纹"的单校验和设计，不做转换前后双哈希。
+- **残余影响**：无（该风险项按读数关闭）。若将来把 `preAlign` 快照挪到归一化之前，本结论立即失效，必须重跑 §2 的读数。
+- **后续验证方式**：`bash gradlew :tests:pr3RealWorldReadings`（需两代语料时用 `-Ppr3.corpus.old/new`）。
+- **决策依据**：[`18-live-raw-to-raw-alignment.md`](vcs/03-live-raw-to-raw-alignment.md) §3.2；读数 [`19-raw-to-raw-realworld-readings.md`](vcs/04-raw-to-raw-realworld-readings.md)。
 
 ### 风险 30：JBR DCEVM 同名遮蔽字段的槽位污染（上游，不可修）
 
@@ -763,20 +789,14 @@
   另外该 cache 以类名为全局键，继承风险 15 的多 loader 限制。
 - **未覆盖**：其它 JBR 版本/平台、父加载器创建实例、Remold 两阶段 Stage A/C 顺序的模拟。
 
-### 风险 23：构建完成 marker 的触发边界（P3）
+### 风险 31：V3 S41 无绑定方法引用跨代配对（已接受已知边界）
 
-- **风险描述与底层机制**：marker 只能取消**尚未到期**的兜底 task；若一次构建时长超过 `fileShakeMs`
-  （默认 800ms）且期间出现超过窗口的静默，编译中途的批次可能先跑一次。marker 到得晚时只补余下变更，
-  已生效的类由磁盘指纹跳过——最终状态正确，但"构建期间完全不触发热更"不成立。
-- **迟到事件**：marker 批次之后才被 watcher 线程送达的同批事件会重新挂一次兜底；该批次按磁盘指纹全部跳过，
-  产生 0 次 redefine 的 no-op 批次（不触发 `@OnReload`/补丁/监听器回调），只带来扫描/读盘与日志成本。
-- **扫描依赖文件系统时间**：`marker` 路径用 `mtime >= since` 挑选变更；保留时间戳的复制工具、网络挂载或
-  mtime 精度异常的文件系统可能漏扫，此时事件路径仍保证最终一致（只是失去快路径）。
-- **平台假设**：陈旧/未来判定（±5s）与"Gradle 与游戏 JVM 同机同时钟"假设在容器/远程挂载下可能不成立；
-  被拒绝的 marker 只在日志里给出原因与 `delta`，不会自动关闭 marker——用户可设 `buildTrigger = false` 回到纯兜底。
-- **未覆盖的验证面**：JBR 17/21 DCEVM、Linux、macOS 的高灵敏度 watcher 路径、多类/匿名类/lambda 批次、
-  多次连续构建的长期稳定性。
-- **关联设计规范**：`docs/runtime/01-build-trigger-mode.md`；读数：`docs/runtime/02-build-trigger-probe.md`。
+- **现象**：把 `String::toUpperCase` 改成 `String::trim` 这类**无绑定方法引用**（`String::method`，不锚在某个捕获实例上）后，跨代旧实例落 `KNOWN_GAP`（保留上一代的方法引用目标）。
+- **实测读数**（外部工程 `RemoldLambdaRegressionTest`）：`actual=ret=[this:a-v3;base:b-v3:L3;I(c-v3);5; AB ]|fresh=[...;Ab]`；日志显示 V2→V3 配对**已正确**（`old lambda$makeAll$1 <- new lambda$makeAll$0`，`:L3` 保留），只 ghost 了转直接方法引用的那两个。
+- **当前结论**：配对层面已修好（callee overlap 证据落地后 `FAIL=0`）；剩余差异是**捕获值 / 方法引用目标**层面的差异，不是配对错配。本轮分布 `PASS=69 / KNOWN-GAP=15 / FAIL=0`。
+- **暂不修的理由**：无绑定方法引用没有稳定的跨代身份判据——同一个 `String::trim` 站点在两代之间既可能整体替换，也可能与相邻的 `String::toUpperCase` 互换，名字与描述符都不携带"这是同一个站点"的证据；硬配等于按名字猜身份，会把已修好的配对重新引入成静默错值（比 `KNOWN_GAP` 可见更糟）。
+- **重开条件**：外部语料出现"配对正确但业务输出错误"的可复现现场，且能给出无绑定方法引用的跨代身份判据（例如站点字节位置 + 捕获差异可归因于源码编辑）；届时先在 `LambdaAligner` 补判据与负例，再改 `KNOWN_GAP` 口径。
+- **关联设计规范**：[`docs/lambda/01-capture-bridge.md`](lambda/01-capture-bridge.md) §11；同口径见 §1.3.1 残余边界与 §4.1.2.1 `V3 S41` 行。
 
 ## 6. 框架集成插件与资源热更新 (Framework Plugins & Asset Hot-Reload)
 

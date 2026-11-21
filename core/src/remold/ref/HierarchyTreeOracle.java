@@ -33,6 +33,8 @@ public final class HierarchyTreeOracle implements ClassHierarchyOracle {
 	private final ClassNode                  preferredClass;
 	private final Map<String, ClassNode>     resolved     = new HashMap<>();
 	private final Map<String, ClassNode>     nestResolved = new HashMap<>();
+	/** 祖先字段定位用的"重定义前"视图：与 {@link #resolved} 的批次新字节码口径不同。 */
+	private final Map<String, ClassNode>     preRedefineResolved = new HashMap<>();
 
 	public HierarchyTreeOracle(ClassLoader loader) {
 		this(loader, null);
@@ -185,11 +187,48 @@ public final class HierarchyTreeOracle implements ClassHierarchyOracle {
 		return Optional.empty();
 	}
 
+	/**
+	 * 祖先链按<b>重定义前</b>的层级解析：DCEVM 迁移新字段时复制的也是那一条声明上的值。
+	 * 若同一批次里中间类也新增了同名字段，用批次新字节码会解析到那条新声明，
+	 * 而实例槽位里复制的仍是更上层旧声明的值 —— 比较基准会随补丁顺序漂移。
+	 */
 	@Override
 	public Optional<InheritedField> findInheritedField(String className, String fieldName, String desc) {
 		ClassNode node = resolve(className);
 		if (node == null) return Optional.empty();
 		return findInheritedField(className, node.superName, fieldName, desc, new HashSet<>());
+	}
+
+	private ClassNode resolvePreRedefine(String internalName) {
+		ClassNode known = preRedefineResolved.get(internalName);
+		if (known != null) return known;
+		byte[] bytes = readPreRedefineClassBytes(internalName);
+		if (bytes == null) return null;
+		try {
+			ClassNode node = new ClassNode();
+			new ClassReader(bytes).accept(node,
+			 ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+			preRedefineResolved.put(internalName, node);
+			return node;
+		} catch (Throwable ignored) {
+			return null;
+		}
+	}
+
+	/** 只读"重定义已生效"的基线字节：运行期缓存 → 生成类登记口 → 类加载器资源流（不读批次新字节码）。 */
+	private byte[] readPreRedefineClassBytes(String internalName) {
+		byte[] cached = RemoldAgent.getRuntimeBytecode(internalName.replace('/', '.'));
+		if (cached != null) return cached;
+		byte[] supplied = WorkspaceRawIndex.lookup(internalName);
+		if (supplied != null) return supplied;
+		ClassLoader sourceLoader = loader.get();
+		if (sourceLoader == null) sourceLoader = ClassLoader.getSystemClassLoader();
+		if (sourceLoader == null) return null;
+		try (InputStream in = sourceLoader.getResourceAsStream(internalName + ".class")) {
+			return in == null ? null : in.readAllBytes();
+		} catch (Throwable ignored) {
+			return null;
+		}
 	}
 
 	/**
@@ -203,7 +242,7 @@ public final class HierarchyTreeOracle implements ClassHierarchyOracle {
 		Set<String> visited = new HashSet<>();
 		while (node.superName != null) {
 			if (!visited.add(node.superName)) return true;
-			node = resolve(node.superName);
+			node = resolvePreRedefine(node.superName);
 			if (node == null) return false;
 		}
 		return true;
@@ -212,7 +251,7 @@ public final class HierarchyTreeOracle implements ClassHierarchyOracle {
 	private Optional<InheritedField> findInheritedField(
 	 String lookupType, String currentType, String name, String desc, Set<String> visited) {
 		if (currentType == null || !visited.add(currentType)) return Optional.empty();
-		ClassNode node = resolve(currentType);
+		ClassNode node = resolvePreRedefine(currentType);
 		if (node == null) return Optional.empty();
 		for (FieldNode field : node.fields) {
 			if (field.name.equals(name) && field.desc.equals(desc)) {

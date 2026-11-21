@@ -335,15 +335,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   期望值，判定"已有非默认值"→ 跳过并 warn，`mid.x` / `leaf.x` 停在 `10`，由字段算出的 `lx` 也随之错。
   根因是"新槽位一旦有值就一定被人写过"这个隐含前提：字段遮蔽时，DCEVM 的迁移复制会给出一个非默认但
   完全合法的初始状态。修法是在分析期用纯字节码元数据定位**祖先链上最近的同名字段声明**（不含被重定义类
-  自身），把该字段在同实例上的运行时读数作为 CAS 期望值：等于祖先值才按新初值回写；既不等于默认值也不
+  自身，且按**重定义前**的层级解析：DCEVM 迁移复制的就是旧层级那条声明的值，同一批里中间类也新增同名
+  字段时按批次新字节码解析会让比较基准随补丁顺序漂移），把该字段在同实例上的运行时读数作为 CAS 期望值：等于祖先值才按新初值回写；既不等于默认值也不
   等于祖先值（真被写过 / 来源不明）仍跳过并计入 skipped→warn；非遮蔽新增字段完全不变（零值 CAS）。
   不可读的祖先声明（private / 跨包包内 / 静态性不符）与不可解析的超类链一律 fail-closed 退回原行为并
   告警，运行期 bootstrap 再做一次同样的复核（链接失败只隔离该字段）。实测（JBR 21.0.8 + DCEVM，
   `:tests:shadowFieldProbe`）：修复前 `mid.x=10 leaf.x=10`（warn 报告跳过 1/2 次条件写），修复后
   `mid.x=200 leaf.x=300`、祖先 `BaseG0.x` 保持 `10/10`，下一轮新增的非遮蔽字段 `nm=41`/`nl=42` 照常写入。
-  单测 `ShadowFieldInitFixTest` 15 例（遮蔽检测/最近声明类/private·static·同名异型 fail-closed/超类链
-  不可解析/发射器接线/运行期 F1·F2 语义）；变异检查 2/2 击杀（恒不判定遮蔽 → 遮蔽检测与 F1 用例红；
-  去掉祖先值比较改恒回写 → F2 负向用例红）。
+  单测 `ShadowFieldInitFixTest` 16 例（遮蔽检测/最近声明类/重定义前层级解析/private·static·同名异型
+  fail-closed/超类链不可解析/发射器接线/运行期 F1·F2 语义）；变异检查 3/3 击杀（恒不判定遮蔽 →
+  遮蔽检测与 F1 用例红；去掉祖先值比较改恒回写 → F2 负向用例红；祖先改按批次新层级解析 →
+  重定义前层级用例红）。
 
 - **发布链漏打 `plugin-mc-toast`**：`release.yml` 与 `ci.yml` 的插件打包循环只列了 `arc mixin forge fabric`，而 `RemoldConfigResolver` 已对 Fabric/Forge 默认自动追加 `mc-toast`，`resolvePluginJar` 又优先找本地构建产物——下一版 release assets / `remold-dist` 会缺这个插件，仓库外用户只能落到 JitPack 兜底或直接 `plugin jar not found`。两处循环补齐 `mc-toast`。
 

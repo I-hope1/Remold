@@ -4,6 +4,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
@@ -240,6 +241,65 @@ public class ShadowFieldInitFixTest {
 			"an unreadable superclass chain must not be treated as 'definitely not shadowing'");
 		assertTrue(warnings.stream().anyMatch(w -> w.contains("SHADOW-FIELD")),
 			"the unprovable case must warn, was " + warnings);
+	}
+
+	/**
+	 * 顺序无关性：同一批次里中间类也新增了同名字段时，比较基准必须是<b>重定义前</b>层级上的
+	 * 那条声明（祖先的旧值），否则中间类先被补丁写上新值后，子类的期望值会随之漂移。
+	 *
+	 * <p>夹具：{@code Child extends Parent extends Grand}，Grand 一直声明 {@code int x}；
+	 * Parent 的批次新版本新增 {@code int x}（DCEVM 复制给 Child 的仍是 Grand.x 的值），
+	 * 这里把 Parent 的重定义前字节码登记进运行期基线，批次视图里只放 Parent 的新版本。</p>
+	 */
+	@Test
+	void shadowingAncestorIsResolvedFromThePreRedefineHierarchy() throws Exception {
+		String grandName = "shadowreq/Grand";
+		String parentName = "shadowreq/Parent";
+		String childName = "shadowreq/Child";
+		byte[] grandBytes = simpleClass(grandName, "java/lang/Object", new String[]{"x", "I", "1"});
+		byte[] parentOldBytes = simpleClass(parentName, grandName, null);
+		byte[] parentNewBytes = simpleClass(parentName, grandName, new String[]{"x", "I", "200"});
+		byte[] childBytes = simpleClass(childName, parentName, new String[]{"x", "I", "300"});
+		ClassNode childNode = new ClassNode();
+		new ClassReader(childBytes).accept(childNode, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+
+		RemoldAgent.recordRuntimeBytecode(grandName.replace('/', '.'), grandBytes);
+		RemoldAgent.recordRuntimeBytecode(parentName.replace('/', '.'), parentOldBytes);
+		Map<ClassLoader, Map<String, byte[]>> view = new java.util.IdentityHashMap<>();
+		Map<String, byte[]> batchBytes = new java.util.LinkedHashMap<>();
+		batchBytes.put(parentName, parentNewBytes);
+		batchBytes.put(childName, childBytes);
+		view.put(ShadowFieldInitFixTest.class.getClassLoader(), batchBytes);
+		InitFix.beginBatchBytecodeView(view);
+		try {
+			ClassHierarchyOracle oracle = new HierarchyTreeOracle(
+				ShadowFieldInitFixTest.class.getClassLoader(), childNode);
+			Map<String, String> shadows = InitFix.detectShadowedAddedFields(
+				oracle, childName, Set.of("x"), fieldNodes(childNode));
+			assertEquals(grandName, shadows.get("x"),
+				"the expectation must come from the declaration that existed before the redefine,"
+				+ " not from the in-batch declaration added by the intermediate ancestor");
+		} finally {
+			InitFix.endBatchBytecodeView();
+		}
+	}
+
+	/** 生成一个只有无参构造器与可选 {@code int} 字段的最小类。 */
+	private static byte[] simpleClass(String name, String superName, String[] field) {
+		ClassWriter writer = new ClassWriter(0);
+		writer.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, name, null, superName, null);
+		if (field != null) {
+			writer.visitField(Opcodes.ACC_PUBLIC, field[0], field[1], null, null).visitEnd();
+		}
+		var init = writer.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+		init.visitCode();
+		init.visitVarInsn(Opcodes.ALOAD, 0);
+		init.visitMethodInsn(Opcodes.INVOKESPECIAL, superName, "<init>", "()V", false);
+		init.visitInsn(Opcodes.RETURN);
+		init.visitMaxs(0, 0);
+		init.visitEnd();
+		writer.visitEnd();
+		return writer.toByteArray();
 	}
 
 	// ---------------------------------------------------------------- emitter wiring

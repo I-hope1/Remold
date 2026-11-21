@@ -96,7 +96,7 @@ HotSwap / InitFix 核心开发规范。所有规则与不变量在本文件定�
 - **匿名类拓扑对齐**：`docs/topology/` — `01`~`08`（不变量/准入/流水线/Tier/开关/LayoutGate/决策 ADR）。
 - **Lambda 对齐**：`docs/lambda/` — `01-capture-bridge.md`、`02-orphan-body-retention.md`、`03-publication-contract.md`。
 - **字节码 VCS / 台账**：`docs/vcs/` — `01-bytecode-changeset-vcs.md`、`03-live-raw-to-raw-alignment.md`、`05-generational-field-ledger.md`（及对应实测 `02`/`04`/`06`）。
-- **Agent 调度与运行时实测**：`docs/runtime/` — `01-build-trigger-mode.md`、`03-jbr-dcevm-jit-drain-tail-latency.md`、`04-enum-constant-append-infeasibility.md`。
+- **Agent 调度与运行时实测**：`docs/runtime/` — `01-build-trigger-mode.md`、`03-jbr-dcevm-jit-drain-tail-latency.md`、`04-enum-constant-append-infeasibility.md`、`05-jbr-dcevm-shadowed-field-slot-pollution.md`。
 - **偏移与缓存驱逐**：`docs/offset/01-offset-and-reflection-cache.md`。
 - **Mixin 子系统**：`docs/mixin/01`~`08`（类加载权威/覆盖层/重织入/结构突破/合成类闸门/运行诊断/决策台账）。
 

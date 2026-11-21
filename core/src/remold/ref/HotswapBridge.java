@@ -101,6 +101,16 @@ public final class HotswapBridge {
 	 */
 	public static final int KIND_CONDITIONAL_EXPECTED_BATCH = 5;
 
+	/**
+	 * 遮蔽新增字段的条件 CAS 写：expected 不是常量，而是<b>同一实例上祖先字段的当前值</b>。
+	 *
+	 * <p>DCEVM 重定义会把被遮蔽的继承槽位值复制进子类新增的同名槽位，于是存量实例上该槽位
+	 * "已有非默认值"却仍是合法初始状态。此处把比较基准换成祖先字段的运行时读数：
+	 * 相等则按新初值回写，其余非默认值仍保守跳过。祖先字段不可证明可读时在链接期失败
+	 * （按 {@code BootstrapMethodError} 单字段隔离），不退化成猜测。</p>
+	 */
+	public static final int KIND_CONDITIONAL_ANCESTOR = 6;
+
 	private static final Unsafe UNSAFE      = Reflect.UNSAFE;
 	private static final Lookup IMPL_LOOKUP = Reflect.IMPL_LOOKUP;
 
@@ -807,6 +817,113 @@ public final class HotswapBridge {
 			throw new NoSuchFieldException("field " + field + " is final; replay channels may not"
 			                               + " rewrite final fields");
 		}
+	}
+
+	// ==================== 遮蔽新增字段的条件 CAS 写 ====================
+
+	/**
+	 * {@link #KIND_CONDITIONAL_ANCESTOR} 的 bootstrap：expected 在<b>每次调用时</b>从同一实例的
+	 * 祖先字段读出（DCEVM 迁移复制的就是那个值）。
+	 *
+	 * <p>bsmArgs 布局：{@code [int kind, int opcode, Class owner, Class host, Class ancestorOwner]}，
+	 * {@code ancestorOwner} 是分析期用 {@link ClassHierarchyOracle#findInheritedField} 定位到的
+	 * 祖先声明类。祖先字段在链接期复核可读性（实例性、非 private、确为祖先），任一不满足即抛
+	 * {@code BootstrapMethodError}；上层把它当作单字段链接失败隔离，字段留在待补台账，不会静默写入。</p>
+	 */
+	public static CallSite bootstrapAncestor(
+	 Lookup caller,
+	 String name,
+	 MethodType callSiteType,
+	 int kind,
+	 int opcode,
+	 Class<?> owner,
+	 Class<?> host,
+	 Class<?> ancestorOwner
+	) {
+		try {
+			if (kind != KIND_CONDITIONAL_ANCESTOR || opcode != Opcodes.PUTFIELD) {
+				throw new IllegalArgumentException(
+				 "unexpected ancestor-CAS call site (kind=" + kind + ", opcode=" + opcode + ")");
+			}
+			return conditionalAncestorCallSite(caller, name, callSiteType, owner, ancestorOwner);
+		} catch (BootstrapMethodError bme) {
+			throw bme;
+		} catch (Throwable t) {
+			throw new BootstrapMethodError(
+			 "Cannot link ancestor bridge for " + owner.getName() + "." + name
+			 + " (ancestor=" + ancestorOwner.getName() + ")", t);
+		}
+	}
+
+	private static CallSite conditionalAncestorCallSite(
+	 Lookup caller, String fieldName, MethodType callSiteType,
+	 Class<?> owner, Class<?> ancestorOwner
+	) throws Throwable {
+		Class<?> valType = callSiteType.parameterType(1);
+		String   desc    = Type.getDescriptor(valType);
+
+		if (!ancestorOwner.isAssignableFrom(owner)) {
+			throw new NoSuchFieldException(ancestorOwner.getName() + " is not an ancestor of " + owner.getName());
+		}
+		checkProbe(owner, fieldName);
+		Field field = findField(owner, fieldName, desc);
+		if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
+			throw new NoSuchFieldException("field " + field + " is static; a shadowed added field"
+			                               + " must be an instance field");
+		}
+		long offset = UNSAFE.objectFieldOffset(field);
+
+		Field inherited = findDeclaredField(ancestorOwner, fieldName, desc);
+		int   inheritedModifiers = inherited.getModifiers();
+		if (java.lang.reflect.Modifier.isStatic(inheritedModifiers)) {
+			throw new NoSuchFieldException("inherited field " + inherited + " is static; its value"
+			                               + " cannot be compared on the instance");
+		}
+		if (java.lang.reflect.Modifier.isPrivate(inheritedModifiers)) {
+			throw new NoSuchFieldException("inherited field " + inherited + " is private and not readable"
+			                               + " from the subclass");
+		}
+
+		MethodHandle getter = IMPL_LOOKUP.findGetter(ancestorOwner, fieldName, valType)
+		 .asType(MethodType.methodType(valType, Object.class));
+		MethodHandle expected = ancestorExpectedPutter(valType);
+		MethodHandle bound = MethodHandles.insertArguments(expected, 1, offset);
+		MethodHandle reordered = MethodHandles.permuteArguments(bound,
+		 MethodType.methodType(boolean.class, valType, Object.class, valType), 1, 0, 2);
+		MethodHandle writer = MethodHandles.foldArguments(reordered, getter);
+
+		LongAdder[] counters = countersFor(owner, fieldName);
+		writer = MethodHandles.filterReturnValue(writer,
+		 MethodHandles.insertArguments(RECORD_CONDITIONAL, 0, (Object) counters));
+		return new ConstantCallSite(writer.asType(callSiteType));
+	}
+
+	/** 只在 {@code owner} 自身声明里找字段（不向上遍历，保证比较基准就是那条祖先声明）。 */
+	private static Field findDeclaredField(Class<?> owner, String name, String desc)
+	 throws NoSuchFieldException {
+		for (Field field : owner.getDeclaredFields()) {
+			if (name.equals(field.getName()) && Type.getDescriptor(field.getType()).equals(desc)) {
+				return field;
+			}
+		}
+		throw new NoSuchFieldException(owner.getName() + "." + name + ":" + desc);
+	}
+
+	/**
+	 * expected 作为参数的 CAS 模板 {@code (Object, long, V, V)boolean}，覆盖引用类型：
+	 * 引用字段的期望值是运行期对象，不能像 L1 那样在链接期绑定常量。
+	 */
+	private static MethodHandle ancestorExpectedPutter(Class<?> valType) throws Throwable {
+		if (typeSlot(valType) != SLOT_OBJECT) return expectedPutter(valType);
+		MethodType type = MethodType.methodType(
+		 boolean.class, Object.class, long.class, Object.class, Object.class);
+		MethodHandle cas = tryFind("compareAndSetReference", type);
+		if (cas == null) cas = tryFind("compareAndSetObject", type);
+		if (cas == null) cas = tryFind("compareAndSwapObject", type);
+		if (cas == null) {
+			throw new NoSuchMethodException("no reference CAS for a shadowed object field");
+		}
+		return cas;
 	}
 
 	// ==================== 字段条件 CAS 写 ====================

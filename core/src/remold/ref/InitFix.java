@@ -700,6 +700,25 @@ public class InitFix {
 	 + ")Ljava/lang/invoke/CallSite;",
 	 false);
 
+	/**
+	 * 遮蔽新增字段的条件 CAS：expected 由 bootstrap 在运行期从同一实例的祖先字段读出。
+	 * <p>bsmArgs 布局：{@code [int kind, int opcode, Class owner, Class host, Class ancestorOwner]}。</p>
+	 */
+	static final Handle BRIDGE_BSM_ANCESTOR = new Handle(
+	 Opcodes.H_INVOKESTATIC,
+	 Type.getInternalName(HotswapBridge.class),
+	 "bootstrapAncestor",
+	 "(Ljava/lang/invoke/MethodHandles$Lookup;"
+	 + "Ljava/lang/String;"
+	 + "Ljava/lang/invoke/MethodType;"
+	 + "I"
+	 + "I"
+	 + "Ljava/lang/Class;"
+	 + "Ljava/lang/Class;"
+	 + "Ljava/lang/Class;"
+	 + ")Ljava/lang/invoke/CallSite;",
+	 false);
+
 	private record BuiltPatch(byte[] bytes, PatchPlan plan, PatchReport report,
 	                          Map<String, String> replayOwners) {
 		boolean hasPatch() { return bytes != null; }
@@ -2004,6 +2023,67 @@ public class InitFix {
 	/** 被 TTL 清扫摘除的补丁：宿主弱键 + 未补字段名 + 年龄（秒）。 */
 	private record StalePatch(WeakReference<Class<?>> host, List<String> fields, long ageSeconds) { }
 
+	/**
+	 * 识别本轮<b>新增实例字段里遮蔽了祖先同名字段</b>的那些，返回 {@code 字段名 -> 祖先声明类内部名}。
+	 *
+	 * <p>为什么需要它：DCEVM 重定义会把被遮蔽的继承槽位值复制进子类新增同名槽位，于是存量实例上
+	 * 该槽位"已有非默认值"，而默认的零值条件 CAS 会据此跳过、把新初值丢掉。这里只负责把可读的祖先
+	 * 声明类找出来；比较基准由 {@link HotswapBridge#bootstrapAncestor} 在运行期读取。</p>
+	 *
+	 * <p>fail-closed 边界（F4）：祖先声明存在但不可读（private / 包内跨包 / 静态性不符）时<b>不</b>采纳，
+	 * 退回默认零值条件 CAS 并告警 —— 宁可漏补，也不拿猜测的期望值覆盖存量值。祖先链上根本没有同名同
+	 * 描述符声明则不是遮蔽，保持原行为、不告警。</p>
+	 *
+	 * <p>本方法只读字节码元数据（{@link ClassHierarchyOracle}），不触发类加载，供分析期与单测共用。</p>
+	 *
+	 * @param oracle             分析期层级查询口
+	 * @param className          被重定义类的内部名
+	 * @param addedInstanceFields 本轮新增的实例字段名
+	 * @param fieldNodes         新版本类自身的字段表（取描述符）
+	 */
+	static Map<String, String> detectShadowedAddedFields(
+	 ClassHierarchyOracle oracle, String className, Set<String> addedInstanceFields,
+	 Map<String, FieldNode> fieldNodes) {
+		if (addedInstanceFields.isEmpty()) return Map.of();
+		Map<String, String> shadows = new LinkedHashMap<>();
+		for (String field : addedInstanceFields) {
+			FieldNode fn = fieldNodes.get(field);
+			if (fn == null || (fn.access & Opcodes.ACC_STATIC) != 0) continue;
+			Optional<ClassHierarchyOracle.InheritedField> inherited;
+			try {
+				inherited = oracle.findInheritedField(className, field, fn.desc);
+			} catch (RuntimeException failure) {
+				RemoldAgent.warn("[SHADOW-FIELD] cannot inspect ancestor declarations of "
+				                 + Names.external(className) + "." + field + ": " + failure
+				                 + "; falling back to the zero-value conditional write (fail-closed)");
+				continue;
+			}
+			if (inherited.isEmpty()) continue;
+			ClassHierarchyOracle.InheritedField decl = inherited.get();
+			String reason = shadowAncestorUnreadableReason(decl);
+			if (reason != null) {
+				RemoldAgent.warn("[SHADOW-FIELD] added field " + Names.external(className) + "." + field
+				                 + " shadows " + Names.external(decl.declaringClass) + "." + field
+				                 + ", but that inherited field " + reason
+				                 + "; falling back to the zero-value conditional write (fail-closed)");
+				continue;
+			}
+			shadows.put(field, decl.declaringClass);
+		}
+		return shadows;
+	}
+
+	/** 祖先声明能否作为运行期比较基准；返回 {@code null} 表示可读。 */
+	private static String shadowAncestorUnreadableReason(ClassHierarchyOracle.InheritedField decl) {
+		if ((decl.access & Opcodes.ACC_STATIC) != 0) {
+			return "is static, so its value cannot be compared on the instance";
+		}
+		if (!decl.readable) {
+			return "is not visible from the subclass (private or package-private in another package)";
+		}
+		return null;
+	}
+
 	private static PatchAnalysis analyzePatch(
 	 Class<?> host, ClassNode preParsedNewClass, byte[] newBytes, String className,
 	 Set<String> addedStaticFields, Set<String> addedInstanceFields,
@@ -2094,6 +2174,18 @@ public class InitFix {
 		if (!reinitFields.isEmpty()) {
 			log("@RemoldReinit expanded candidate set for " + className
 			    + ": instance=" + targetInstanceFields + ", static=" + targetStaticFields);
+		}
+
+		// 新增实例字段若与祖先同名字段同描述符（遮蔽）：DCEVM 已把继承槽位值复制进新槽位，
+		// 默认零值条件 CAS 会把它当成"已被写过"而跳过。这里定位可读的祖先声明类，
+		// 由 {@link HotswapBridge#KIND_CONDITIONAL_ANCESTOR} 在运行期以祖先字段值为期望值。
+		Set<String> shadowCandidates = new LinkedHashSet<>(addedInstanceFields);
+		shadowCandidates.removeAll(forceWriteFields);
+		Map<String, String> shadowAncestors =
+		 detectShadowedAddedFields(oracle, className, shadowCandidates, fieldNodes);
+		if (!shadowAncestors.isEmpty()) {
+			log("Shadowed added field(s) of " + className + " resolve their expected value from: "
+			    + shadowAncestors);
 		}
 
 		// L1 存量初值重放：继承字段不在本类字段表里，必须补一份合成的 FieldNode 元数据，
@@ -2534,7 +2626,7 @@ public class InitFix {
 		}, close, () -> emitPatch(host, className, hostVersion, targetInstanceFields, targetStaticFields,
 		 forceWriteFields, selfOnlyFields, instanceExtracts, staticExtracts, instanceDecisions, staticDecisions,
 		 acceptedInstance, acceptedStatic, acceptedReplay, replayFields, replayDecisions, applyFields,
-		 applyDecisions, reinitFields, reinitKeys, crossDependencies, generational));
+		 applyDecisions, reinitFields, reinitKeys, crossDependencies, generational, shadowAncestors));
 	}
 
 	private static BuiltPatch emitPatch(Class<?> host, String className, int hostVersion,
@@ -2546,7 +2638,7 @@ public class InitFix {
 	 Map<String, String> replayDecisions, Map<String, ApplyInitializerReplay.ReplayField> applyFields,
 	 Map<String, String> applyDecisions, Map<String, ReinitField> reinitFields, Map<String, String> reinitKeys,
 	 Map<String, Set<InitFixBatchGraph.FieldKey>> crossDependencies,
-	 Map<String, GenerationalReplay> generational) {
+	 Map<String, GenerationalReplay> generational, Map<String, String> shadowAncestors) {
 		// ==================== 阶段 2.5：拓扑排序 ====================
 		// 到这里成环已被排除（阶段 2 的固定点），排序必定成功。
 		List<String> orderedInstance = acceptedInstance.isEmpty()
@@ -2628,7 +2720,8 @@ public class InitFix {
 			}
 			List<AbstractInsnNode> body = InitFixPatchEmitter.rewriteFieldSlice(
 			 hostInternal, className, chosenBody,
-			 chosen.protectedAccesses(), conditionalFields, forceWriteFields, replayArguments);
+			 chosen.protectedAccesses(), conditionalFields, forceWriteFields, replayArguments,
+			 shadowAncestors);
 			boolean replayTask = acceptedReplay.contains(fieldName);
 			boolean selfOnlyTask = replayTask || selfOnlyFields.contains(fieldName);
 			String batchMethodName = null;
@@ -2685,7 +2778,7 @@ public class InitFix {
 			String       method = InitFixPatchEmitter.uniqueMethodName(STATIC_PATCH_PREFIX, fieldName, usedMethodNames);
 			List<AbstractInsnNode> body = InitFixPatchEmitter.rewriteFieldSlice(
 			 hostInternal, className, new ArrayList<>(fe.instructions()),
-			 fe.protectedAccesses(), conditionalFields, forceWriteFields, Map.of());
+			 fe.protectedAccesses(), conditionalFields, forceWriteFields, Map.of(), Map.of());
 			patch.methods.add(InitFixPatchEmitter.straightLineMethod(method, "()", body));
 			Set<InitFixBatchGraph.FieldKey> batchDeps = crossDependencies.getOrDefault(fieldName, Set.of());
 			Set<String> staticDeps = new LinkedHashSet<>(

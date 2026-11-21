@@ -47,6 +47,29 @@ public interface ClassHierarchyOracle {
 
 	Optional<MemberRef> resolveMember(String className, String name, String desc, boolean isField);
 
+	/**
+	 * 查找 {@code className} 的<b>祖先</b>（超类链与接口，<b>不含</b> {@code className} 自身）中
+	 * 同名同描述符的字段声明，返回最近的一条。
+	 *
+	 * <p>用于识别"本次新增字段遮蔽了祖先字段"：{@code empty} 表示祖先链上没有任何同名同描述符声明
+	 * （不是遮蔽）；声明存在但 {@link InheritedField#readable} 为 {@code false} 时仍返回该条记录，
+	 * 由调用方 fail-closed 退回原有行为并告警。</p>
+	 */
+	Optional<InheritedField> findInheritedField(String className, String fieldName, String desc);
+
+	/** 祖先字段声明：最近的声明类、其修饰符，以及它从被查询类视角是否可读。 */
+	final class InheritedField {
+		public final String  declaringClass;
+		public final int     access;
+		public final boolean readable;
+
+		public InheritedField(String declaringClass, int access, boolean readable) {
+			this.declaringClass = declaringClass;
+			this.access = access;
+			this.readable = readable;
+		}
+	}
+
 	final class MemberRef {
 		public final String declaringClass;
 		public final int    access;

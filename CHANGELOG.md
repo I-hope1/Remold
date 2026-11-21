@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Lambda 对齐新增"内容证据"（callee overlap）**：位置同名只说明编译器把两个 lambda 排在同一序号；
+  删除 `$0` 改写 `$1` 与删除 `$1` 改写 `$0` 是镜像编辑，只按序号配对必然有一种会错。现在从方法体收集
+  非合成被调目标（`owner#name+desc`，不绑 opcode，兼容 JDK 8 `INVOKESPECIAL` 与 11+ 私有/父类调用），
+  在 Pass A / Pass B 的**合法候选**内择优：只有当某候选的交集**唯一、严格最大且为正**时才覆盖同名优先；
+  平票 / 零交集 / 单候选一律退回既有规则（`isSameNameEvidence` → `hasSameExplicitConsumer` → 原顺序）。
+  样板调用（`Object.<init>`、`Objects.requireNonNull*`、`Intrinsics*`、装箱拆箱）先过滤；`Object#toString`
+  刻意保留，改用"单条共享调用须来自非通用库 owner"的门槛控噪。
+
+  `CompeteDeleteTest` 里原本"固化误绑缺陷"的基线（注释写明限制消失时必须变红）确实变红，已改为断言
+  修复后的行为，并把业务内容断言（`tagA`/`useA` 不得出现）排在结构断言之前。
+
 ### Fixed
 
 - **批实例切块越界（`InitFixRuntimeDriver.nextBatchChunkEnd`）**：步长从 4 放大到 8192 时没有钳到

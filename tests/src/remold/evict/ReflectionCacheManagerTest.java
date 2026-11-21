@@ -213,7 +213,7 @@ public class ReflectionCacheManagerTest {
 	@Test
 	@DisplayName("loadedClassesMap 非空且未加载 Jackson/Gson 时不触发 Class.forName 懒加载")
 	public void testUnloadedSerializersInLoadedClassesMapAreSkipped() {
-		LoadedClassIndex prev = RemoldAgent.loadedClassesMap;
+		LoadedClassIndex prev = RemoldAgent.loadedClassIndex();
 		LoadedClassIndex fakeMap = new LoadedClassIndex();
 		fakeMap.put(SampleTarget1.class.getName(), SampleTarget1.class);
 		try {

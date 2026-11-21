@@ -1799,7 +1799,30 @@ public class RemoldAgent {
 	//endregion
 
 	//region HotSwap Core Logic
-	public static volatile LoadedClassIndex loadedClassesMap = new LoadedClassIndex();
+	/**
+	 * 已加载类快照（实现是 {@link LoadedClassIndex}：按 {@code (loader scope, 类名)} 分键）。
+	 *
+	 * <p><b>声明类型是二进制兼容契约</b>：这个字段历史上是
+	 * {@code ConcurrentHashMap<String, Class<?>>}，已发布的插件 jar（{@code plugin-fabric} 的就绪探测、
+	 * {@code plugin-mc-toast} 的宿主类定位）按旧字段描述符
+	 * {@code Ljava/util/concurrent/ConcurrentHashMap;} 链接它——声明类型一变就是链接期
+	 * {@code NoSuchFieldError}（{@code loadClassSnap} 的原子切换也是整体替换引用，读者语义不变）。
+	 * 因此这里保持旧声明类型、装入 {@link LoadedClassIndex} 实例：描述符不变、行为升级。
+	 * 需要精确 scope 的调用方用 {@link #loadedClassIndex()}。</p>
+	 */
+	public static volatile ConcurrentHashMap<String, Class<?>> loadedClassesMap = new LoadedClassIndex();
+
+	/**
+	 * {@link #loadedClassesMap} 的类型化读取口（精确 scope 查 {@link LoadedClassIndex#get(long, String)}）。
+	 *
+	 * <p>字段的声明类型为了二进制兼容保持在 {@code ConcurrentHashMap}；生产路径上它<b>总是</b>
+	 * {@link LoadedClassIndex}。万一有人塞进一张普通 {@code ConcurrentHashMap}，这里按每份副本自己的
+	 * loader 重建索引（scope 由 loader 推导，不是猜），避免调用方拿到 {@code null} 而静默漏扫。</p>
+	 */
+	public static LoadedClassIndex loadedClassIndex() {
+		ConcurrentHashMap<String, Class<?>> current = loadedClassesMap;
+		return current instanceof LoadedClassIndex index ? index : new LoadedClassIndex(current);
+	}
 
 	/** 每个 dot 名当前缓存字节的来源加载器 rank（0 bootstrap / 1 System-Agent / 2 宿主）与描述。 */
 	private static final Map<String, Integer> CACHE_LOADER_RANK = new ConcurrentHashMap<>();
@@ -2110,8 +2133,8 @@ public class RemoldAgent {
 				String targetSlash = entry.getKey().replace('.', '/');
 				String targetDot   = entry.getKey().replace('/', '.');
 				byte[] bytes       = entry.getValue();
-				AnnotationTransformer.pendingAlignedClasses.put(pendingScope, targetSlash, bytes);
-				AnnotationTransformer.pendingAlignedClasses.put(pendingScope, targetDot, bytes);
+				AnnotationTransformer.PENDING_ALIGNED.put(pendingScope, targetSlash, bytes);
+				AnnotationTransformer.PENDING_ALIGNED.put(pendingScope, targetDot, bytes);
 			}
 		}
 
@@ -2127,8 +2150,8 @@ public class RemoldAgent {
 		public void rollback(boolean pinOldToPending) {
 			if (committed) return;
 			for (String key : pendingAdds.keySet()) {
-				AnnotationTransformer.pendingAlignedClasses.remove(pendingScope, key.replace('.', '/'));
-				AnnotationTransformer.pendingAlignedClasses.remove(pendingScope, key.replace('/', '.'));
+				AnnotationTransformer.PENDING_ALIGNED.remove(pendingScope, key.replace('.', '/'));
+				AnnotationTransformer.PENDING_ALIGNED.remove(pendingScope, key.replace('/', '.'));
 			}
 			if (pinOldToPending) {
 				// 将被磁盘新文件覆盖但重定义未生效的旧版本字节码钉在 pending 中

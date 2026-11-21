@@ -3,7 +3,6 @@ package remold;
 import remold.offset.LayoutPredictor;
 import remold.vcs.AlignmentMetaStore;
 
-import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -38,8 +37,21 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <p>{@code keySet} / {@code values} / {@code entrySet} 是<b>并集视图</b>（同名的每个副本都在），
  * 供"扫一遍所有已加载类"的读者扫描 / 宿主家族扫描使用：那里要的是"有没有"，不是"哪一个是权威"。</p>
+ *
+ * <p><b>为什么继承 {@link ConcurrentHashMap}</b>：{@code RemoldAgent.loadedClassesMap} 是 agent 的公开面，
+ * 已发布的插件 jar（{@code plugin-fabric} 的就绪探测、{@code plugin-mc-toast} 的宿主类定位）按
+ * <b>旧字段描述符</b> {@code Ljava/util/concurrent/ConcurrentHashMap;} 链接它，声明类型一变就是链接期
+ * {@code NoSuchFieldError}。因此本类继承 {@code ConcurrentHashMap}，字段声明类型保持旧描述符、装入本类
+ * 实例：描述符不变、行为升级。</p>
+ *
+ * <p><b>父类存储的语义</b>：{@code ConcurrentHashMap} 自己那张表维护的是<b>纯类名 → 仲裁后的权威副本</b>
+ * （与引入 scope 之前的读法一致），每次 {@code (scope, 类名)} 变更后同步。这样任何<b>未被本类覆盖</b>的
+ * {@code ConcurrentHashMap} 方法（{@code forEach} / {@code getOrDefault} 等）读到的也是真实副本，
+ * 而不是一张空表。写入侧例外：{@code putIfAbsent} / {@code merge} / {@code compute*} 这类复合写没有
+ * scope 维度，实现上只落在父类表里——agent 自身与已发布插件都只用 {@code get}/{@code put}/{@code remove}
+ * 这一组，不要新增复合写调用点。</p>
  */
-public final class LoadedClassIndex extends AbstractMap<String, Class<?>> {
+public final class LoadedClassIndex extends ConcurrentHashMap<String, Class<?>> {
 
 	/** 类名 → (scope → Class)。同一 scope 内同名类只可能有一份（loader 定义语义保证）。 */
 	private final ConcurrentHashMap<String, ConcurrentHashMap<Long, Class<?>>> byName = new ConcurrentHashMap<>();
@@ -64,7 +76,10 @@ public final class LoadedClassIndex extends AbstractMap<String, Class<?>> {
 	 */
 	public Class<?> put(long scope, String dotClassName, Class<?> type) {
 		if (dotClassName == null || type == null) return null;
-		return byName.computeIfAbsent(dotClassName, ignored -> new ConcurrentHashMap<>()).put(scope, type);
+		Class<?> previous = byName.computeIfAbsent(dotClassName, ignored -> new ConcurrentHashMap<>())
+		 .put(scope, type);
+		syncMirror(dotClassName);
+		return previous;
 	}
 
 	/**
@@ -85,7 +100,32 @@ public final class LoadedClassIndex extends AbstractMap<String, Class<?>> {
 		if (copies == null) return null;
 		Class<?> removed = copies.remove(scope);
 		if (copies.isEmpty()) byName.remove(dotClassName, copies);
+		syncMirror(dotClassName);
 		return removed;
+	}
+
+	/**
+	 * 把某个类名的登记结果同步进父类表（纯类名 → 一份副本）。
+	 *
+	 * <p><b>键必须齐</b>：父类表的 {@code keySet()} 是"类名维度"的完整名单（{@code loadedBefore}、
+	 * {@code stageAConsistent} 这类"这个类加载了没有"的判据都读它），漏一个名字就会让调用方以为它没加载。</p>
+	 *
+	 * <p><b>值只是占位</b>：真歧义（多副本且判不出唯一权威）时这里放的是其中一份，但
+	 * {@link #get(Object)} 仍按同一套仲裁返回 {@code null} + {@code warn}——对外暴露的"按名字取权威副本"
+	 * 语义没有放宽，父类表的值只服务"未被本类覆盖的读法"（如 {@code forEach}）。</p>
+	 */
+	private void syncMirror(String dotClassName) {
+		ConcurrentHashMap<Long, Class<?>> copies = byName.get(dotClassName);
+		if (copies == null || copies.isEmpty()) {
+			super.remove(dotClassName);
+			return;
+		}
+		if (copies.size() == 1) {
+			super.put(dotClassName, copies.values().iterator().next());
+			return;
+		}
+		Class<?> authoritative = strictlyPreferred(copies.values());
+		super.put(dotClassName, authoritative != null ? authoritative : copies.values().iterator().next());
 	}
 
 	/** 该名字当前登记的全部副本（scope → Class 的只读快照），用于诊断与歧义日志。 */
@@ -188,14 +228,16 @@ public final class LoadedClassIndex extends AbstractMap<String, Class<?>> {
 	public Class<?> remove(Object dotClassName) {
 		if (!(dotClassName instanceof String name)) return null;
 		ConcurrentHashMap<Long, Class<?>> copies = byName.remove(name);
-		if (copies == null || copies.isEmpty()) return null;
-		return copies.size() == 1 ? copies.values().iterator().next() : null;
+		Class<?> previous = super.remove(name);
+		if (copies == null || copies.isEmpty()) return previous;
+		return copies.size() == 1 ? copies.values().iterator().next() : previous;
 	}
 
 	@Override
 	public void clear() {
 		byName.clear();
 		warned.clear();
+		super.clear();
 	}
 
 	@Override
@@ -213,10 +255,8 @@ public final class LoadedClassIndex extends AbstractMap<String, Class<?>> {
 		return byName.isEmpty();
 	}
 
-	@Override
-	public Set<String> keySet() {
-		return Collections.unmodifiableSet(byName.keySet());
-	}
+	// keySet() 刻意不覆盖：{@link ConcurrentHashMap#keySet()} 的返回类型是 {@code KeySetView}，
+	// 而父类表的键已经覆盖所有已登记类名（见 {@link #syncMirror}），名字维度语义与并集视图一致。
 
 	@Override
 	public Collection<Class<?>> values() {

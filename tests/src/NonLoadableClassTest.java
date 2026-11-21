@@ -25,7 +25,7 @@ public class NonLoadableClassTest {
 		RemoldAgent.markNonLoadableClass(name);
 		assertTrue(RemoldAgent.isNonLoadableClass(name));
 
-		remold.LoadedClassIndex previous = RemoldAgent.loadedClassesMap;
+		remold.LoadedClassIndex previous = RemoldAgent.loadedClassIndex();
 		try {
 			Method load = RemoldAgent.class.getDeclaredMethod("loadClassSnap", Class[].class);
 			load.setAccessible(true);
@@ -42,7 +42,7 @@ public class NonLoadableClassTest {
 		String name = NonLoadableFixture.class.getName();
 		RemoldAgent.markNonLoadableClass(name);
 
-		remold.LoadedClassIndex previous = RemoldAgent.loadedClassesMap;
+		remold.LoadedClassIndex previous = RemoldAgent.loadedClassIndex();
 		try {
 			// Make findTargetClassLoader succeed: the loader lookup walks loadedClassesMap by package.
 			RemoldAgent.loadedClassesMap.put("remold.NonLoadableSibling", NonLoadableFixture.class);

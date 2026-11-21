@@ -110,7 +110,7 @@ public class InjectConflictProbe {
 			"injectNewClass", String.class, Path.class, byte[].class);
 		inject.setAccessible(true);
 
-		remold.LoadedClassIndex previousLoaded = RemoldAgent.loadedClassesMap;
+		remold.LoadedClassIndex previousLoaded = RemoldAgent.loadedClassIndex();
 		try {
 			RemoldAgent.loadedClassesMap = new remold.LoadedClassIndex(
 				Map.of("inject.Conflict", conflict, "inject.Sibling", sibling));

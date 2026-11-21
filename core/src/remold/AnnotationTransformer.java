@@ -128,14 +128,25 @@ public class AnnotationTransformer implements ClassFileTransformer {
 	 * {@link PendingAlignedClasses#keySet()} / {@link PendingAlignedClasses#containsKey} /
 	 * {@link PendingAlignedClasses#get} 保持"名字维度并集"的读法，供编号避让与诊断使用。</p>
 	 */
-	public static final PendingAlignedClasses pendingAlignedClasses = new PendingAlignedClasses();
+	static final PendingAlignedClasses PENDING_ALIGNED = new PendingAlignedClasses();
+
+	/**
+	 * {@link #PENDING_ALIGNED} 的 {@code Map} 视图。
+	 *
+	 * <p><b>声明类型是二进制兼容契约</b>：这个字段历史上是 {@code Map<String, byte[]>}，已发布的
+	 * 插件 jar（{@code plugin-fabric} / {@code plugin-mc-toast} 等）按旧字段描述符
+	 * {@code Ljava/util/Map;} 链接它，声明类型一变就是链接期 {@code NoSuchFieldError}。
+	 * 因此这里保持 {@code Map} 的声明类型、装入新的实现实例：描述符不变、行为升级。
+	 * 精确 scope 的读写走包内可见的 {@link #PENDING_ALIGNED}（同一实例，不存在两份状态）。</p>
+	 */
+	public static final Map<String, byte[]> pendingAlignedClasses = PENDING_ALIGNED;
 
 	/**
 	 * {@link #pendingAlignedClasses} 的存储。键 = {@code scope + '\0' + 名字}，与
 	 * {@code PendingLoadPatch.key} 同形态；scope 只取 {@link AlignmentMetaStore#loaderScopeId}
 	 * 分配的值或 {@link PendingLoadPatch#ANY_SCOPE}，不持有 {@code ClassLoader} 强引用。
 	 */
-	public static final class PendingAlignedClasses {
+	public static final class PendingAlignedClasses extends AbstractMap<String, byte[]> {
 		private final Map<String, byte[]> entries = new ConcurrentHashMap<>();
 
 		private static String key(long scope, String name) {
@@ -148,14 +159,15 @@ public class AnnotationTransformer implements ClassFileTransformer {
 		}
 
 		/** 登记一条"加载器未知"的待注入字节（批次提交时宿主尚未加载的形态）。 */
-		public void put(String name, byte[] bytes) {
-			put(PendingLoadPatch.ANY_SCOPE, name, bytes);
+		@Override
+		public byte[] put(String name, byte[] bytes) {
+			return put(PendingLoadPatch.ANY_SCOPE, name, bytes);
 		}
 
 		/** 按 scope 登记；{@code scope} 必须来自 {@link AlignmentMetaStore#loaderScopeId}。 */
-		public void put(long scope, String name, byte[] bytes) {
-			if (name == null || bytes == null) return;
-			entries.put(key(scope, name), bytes);
+		public byte[] put(long scope, String name, byte[] bytes) {
+			if (name == null || bytes == null) return null;
+			return entries.put(key(scope, name), bytes);
 		}
 
 		/**
@@ -177,11 +189,12 @@ public class AnnotationTransformer implements ClassFileTransformer {
 		}
 
 		/** 名字维度移除（所有 scope）：清理/回滚与旧"纯类名 remove"语义一致。 */
-		public byte[] remove(String name) {
-			if (name == null) return null;
+		@Override
+		public byte[] remove(Object name) {
+			if (!(name instanceof String wanted)) return null;
 			byte[] hit = null;
 			for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
-				if (!name.equals(nameOf(entry.getKey()))) continue;
+				if (!wanted.equals(nameOf(entry.getKey()))) continue;
 				if (hit == null) hit = entry.getValue();
 				entries.remove(entry.getKey());
 			}
@@ -189,31 +202,46 @@ public class AnnotationTransformer implements ClassFileTransformer {
 		}
 
 		/** 名字维度读取（所有 scope 的并集；诊断/回滚用）。 */
-		public byte[] get(String name) {
-			if (name == null) return null;
+		@Override
+		public byte[] get(Object name) {
+			if (!(name instanceof String wanted)) return null;
 			for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
-				if (name.equals(nameOf(entry.getKey()))) return entry.getValue();
+				if (wanted.equals(nameOf(entry.getKey()))) return entry.getValue();
 			}
 			return null;
 		}
 
-		public boolean containsKey(String name) {
+		@Override
+		public boolean containsKey(Object name) {
 			return get(name) != null;
 		}
 
+		@Override
 		public void clear() {
 			entries.clear();
 		}
 
+		@Override
 		public int size() {
 			return entries.size();
 		}
 
 		/** 名字维度并集快照（编号避让需要"还有谁没被加载"的完整名单）。 */
+		@Override
 		public Set<String> keySet() {
 			Set<String> names = new LinkedHashSet<>();
 			for (String key : entries.keySet()) names.add(nameOf(key));
 			return names;
+		}
+
+		/** 名字维度并集视图（{@link AbstractMap} 的读法；精确 scope 请用 {@link #take}/{@link #remove(long, String)}）。 */
+		@Override
+		public Set<Entry<String, byte[]>> entrySet() {
+			Map<String, byte[]> names = new LinkedHashMap<>();
+			for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
+				names.putIfAbsent(nameOf(entry.getKey()), entry.getValue());
+			}
+			return Set.copyOf(names.entrySet());
 		}
 	}
 
@@ -274,9 +302,9 @@ public class AnnotationTransformer implements ClassFileTransformer {
 		byte[] pending = null;
 		if (classBeingRedefined == null) {
 			long scope = AlignmentMetaStore.INSTANCE.loaderScopeId(loader);
-			pending = pendingAlignedClasses.take(scope, className, dotClassName);
+			pending = PENDING_ALIGNED.take(scope, className, dotClassName);
 			if (pending == null) {
-				pending = pendingAlignedClasses.take(PendingLoadPatch.ANY_SCOPE, className, dotClassName);
+				pending = PENDING_ALIGNED.take(PendingLoadPatch.ANY_SCOPE, className, dotClassName);
 			}
 			if (pending != null) {
 				classfileBuffer = pending;

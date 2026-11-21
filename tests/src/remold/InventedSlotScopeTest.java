@@ -21,6 +21,7 @@ import java.util.Set;
 import remold.vcs.AlignmentMetaStore;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -135,6 +136,45 @@ class InventedSlotScopeTest {
 		} catch (Exception e) {
 			throw new AssertionError(e);
 		}
+	}
+
+	/**
+	 * 调用点守卫：{@code BatchHotswapExecutor} 里只允许经 {@link BatchHotswapExecutor#stageInventedNames}
+	 * 写入自造名，且生产调用点必须把 scope 传进去。
+	 *
+	 * <p>只测辅助方法是不够的——把调用点改回 {@code pendingInvented.put(className, …)} 时上面的用例
+	 * 照样绿，因为它是直接调辅助方法；这里锁的是"真实调用点没被换掉"。</p>
+	 */
+	@Test
+	void productionCallSiteStagesInventedNamesWithAScope() throws Exception {
+		java.nio.file.Path root = java.nio.file.Path.of("").toAbsolutePath();
+		while (root != null && !java.nio.file.Files.isRegularFile(root.resolve("settings.gradle"))) {
+			root = root.getParent();
+		}
+		assertTrue(root != null, "cannot locate the repository root from " + java.nio.file.Path.of("").toAbsolutePath());
+		String code = java.nio.file.Files.readString(
+		 root.resolve("core/src/remold/BatchHotswapExecutor.java"), java.nio.charset.StandardCharsets.UTF_8);
+		// 允许 stageInventedNames 自己那一处写入，但任何一处都必须带 scope 作为第一个实参：
+		// 退回纯类名时第一实参就是 className，这里会立刻红。
+		java.util.regex.Matcher direct = java.util.regex.Pattern
+		 .compile("pendingInvented\\s*\\.\\s*put\\s*\\(\\s*([A-Za-z_$][A-Za-z0-9_$]*)").matcher(code);
+		while (direct.find()) {
+			assertTrue(direct.group(1).toLowerCase(java.util.Locale.ROOT).contains("scope"),
+			 "invented names must be staged with a loader scope, not by bare class name: "
+			  + direct.group(1));
+		}
+		java.util.regex.Matcher calls = java.util.regex.Pattern
+		 .compile("stageInventedNames\\s*\\(\\s*([A-Za-z_$][A-Za-z0-9_$]*)").matcher(code);
+		int sites = 0;
+		while (calls.find()) {
+			String before = code.substring(Math.max(0, calls.start() - 40), calls.start());
+			if (before.contains("void ")) continue;   // 方法声明本身不是调用点
+			sites++;
+			String firstArgument = calls.group(1);
+			assertTrue(firstArgument.toLowerCase(java.util.Locale.ROOT).contains("scope"),
+			 "the production call site must pass a loader scope, was '" + firstArgument + "'");
+		}
+		assertTrue(sites >= 1, "the align flow must stage invented names through stageInventedNames");
 	}
 
 	private static byte[] classBytes(String dotName) {

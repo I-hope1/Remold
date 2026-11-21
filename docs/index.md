@@ -134,6 +134,7 @@ flowchart TD
 | [`02-build-trigger-probe.md`](runtime/02-build-trigger-probe.md) | build-trigger 探针实测读数与对照组 |
 | [`03-jbr-dcevm-jit-drain-tail-latency.md`](runtime/03-jbr-dcevm-jit-drain-tail-latency.md) | Fabric + DCEVM 4 秒尾延迟调查：JIT drain safepoint 实测与退避定位 |
 | [`04-enum-constant-append-infeasibility.md`](runtime/04-enum-constant-append-infeasibility.md) | 枚举常量集合变更不做运行期修复的 JBR 21 实测记录与否决证据 |
+| [`05-jbr-dcevm-shadowed-field-slot-pollution.md`](runtime/05-jbr-dcevm-shadowed-field-slot-pollution.md) | 上游 JBR DCEVM 同名遮蔽字段的槽位污染：纯 JBR 对照实测、对照分组与最小 repro |
 
 ---
 

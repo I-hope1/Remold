@@ -27,6 +27,7 @@
 | 缓存预热顺序 | `./gradlew :tests:cacheWarmingProbe`（只需 `-javaagent`） | 改动 transformer 顺序或 `canRetransform` 后必跑：实测 `false` 组先于 `true` 组执行，且缓存写入发生在对齐/织入之后 |
 | Forge ClassInfo 同步 | `tests/fabric-mixin-probe/forge-classinfo/`（`bash run-forge-classinfo.sh`，Windows 用 `verify-evidence.cmd`） | 改动 `ForgeClassInfoSync` / `ForgeMixinHotSwap.reload` 时序前必跑 |
 | NeoForge Mixin 热更 | `tests/neoforge-mixin-probe/`（Windows 用 `verify-evidence.cmd`） | 改动 `ClassInfoMemberSync` / `ForgeMixinHotSwap.reload` 时序或 NeoForge 识别逻辑前必跑 |
+| 遮蔽新增字段初值 | `./gradlew :tests:shadowFieldProbe -Pp05.jbr=<JBR 路径>`（需 DCEVM） | 改动 `InitFix` 的遮蔽检测、T0 例外或 `KIND_CONDITIONAL_ANCESTOR` 后必跑：三层夹具断言 `leaf.x=300`、`leaf.lx=540`、`anon.lx=540`，T0 组 `x=0`，private 组 `sub.x=200`；上游 relayout 污染不在此探针断言范围内（见 `docs/runtime/05-jbr-dcevm-shadowed-field-slot-pollution.md`） |
 | 读者扫描成本 | `./gradlew :tests:readerScanProbe`（需 `-javaagent`，无需 DCEVM） | 改动 `RemovedMemberReaders.refs` 后必跑：断言常量池扫描是方法体精扫超集，且缓存开/关结果一致 |
 | 派生数据缓存（PR2） | `./gradlew :tests:test --tests DerivedDataEquivalenceTest` + `./gradlew :tests:derivedDataBench` | 缓存键去掉任一维度（方法/blob）必须使 `DerivedDataEquivalenceTest` 变红；benchmark 同轮逐轮交替报 min/median/max |
 | 构建完成 marker | `./gradlew :tests:buildTriggerProbe`（`-Pp05.jbr=<jbr>` 可选） | 7 项变异：去 sticky latch、后续 marker 重扫、关陈旧/未来校验、关 mtime 过滤、空扫描仍置 due、去 `classes.doLast` 接线、`buildTrigger=false` 仍注入 |

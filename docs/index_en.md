@@ -134,6 +134,7 @@ Covers agent build-trigger marker contracts and non-topological JVM/enum runtime
 | [`02-build-trigger-probe.md`](runtime/02-build-trigger-probe.md) | Build-trigger probe readings and control runs |
 | [`03-jbr-dcevm-jit-drain-tail-latency.md`](runtime/03-jbr-dcevm-jit-drain-tail-latency.md) | Fabric + DCEVM 4s tail-latency investigation: JIT drain safepoint measurements |
 | [`04-enum-constant-append-infeasibility.md`](runtime/04-enum-constant-append-infeasibility.md) | Empirical JBR 21 study showing why enum constant set changes are rejected rather than patched at runtime |
+| [`05-jbr-dcevm-shadowed-field-slot-pollution.md`](runtime/05-jbr-dcevm-shadowed-field-slot-pollution.md) | Upstream JBR DCEVM slot pollution for same-named shadowed fields: pure-JBR control runs, cohorts and a minimal repro |
 
 ---
 

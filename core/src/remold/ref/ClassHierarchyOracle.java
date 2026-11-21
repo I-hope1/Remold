@@ -66,20 +66,19 @@ public interface ClassHierarchyOracle {
 	boolean isSuperclassChainResolvable(String className);
 
 	/**
-	 * 祖先字段声明：最近的声明类、其修饰符，以及它从被查询类视角是否按 Java 语言规则可见。
+	 * 祖先字段声明：最近的声明类与其修饰符。
 	 *
-	 * <p>{@link #readable} 只反映语言层可见性，<b>不是</b>遮蔽判定门：运行期读取祖先槽位走完整权限的
-	 * lookup，{@code private} 声明同样可读。</p>
+	 * <p>刻意<b>不</b>携带"从被查询类视角是否可见"：DCEVM 的迁移复制不区分访问权限，遮蔽判定只看
+	 * {@code (name, desc)} 与静态性，运行期读取祖先槽位走完整权限的 lookup，{@code private} 声明同样可读。
+	 * 多带一个可见性字段只会让人以为它是判定门。</p>
 	 */
 	final class InheritedField {
-		public final String  declaringClass;
-		public final int     access;
-		public final boolean readable;
+		public final String declaringClass;
+		public final int    access;
 
-		public InheritedField(String declaringClass, int access, boolean readable) {
+		public InheritedField(String declaringClass, int access) {
 			this.declaringClass = declaringClass;
 			this.access = access;
-			this.readable = readable;
 		}
 	}
 

@@ -845,10 +845,22 @@ final class InitFixRuntimeDriver {
 	 * 大数组渐进切块：小于等于 4096 一次性跑完；更大数组前 2048 次以步长 4 推进（仅覆盖前 8192 个元素，
 	 * 每元素严格访问一次），稳定通过方法入口计数触发 C1/C2 编译而不依赖异步 OSR，随后按 8192 大块收尾。
 	 */
-	private static int nextBatchChunkEnd(int pos, int total, int chunkCalls) {
+	/**
+	 * 下一块的结束下标（不含）。
+	 *
+	 * <p>前 2048 次调用按 4 递增把 JIT 的调用点预热到稳定形态，之后放大到 8192 以减少解释/调用开销。
+	 * 步长放大必须钳到 {@code total}：剩余量落在 {@code (4096, 8192)} 时（{@code total} 属于
+	 * 12289..16383 等区间），{@code pos + 8192} 会越过数组末端，生成器的循环只判
+	 * {@code localIndex < localTo}，于是每个实例都抛 {@code ArrayIndexOutOfBoundsException}，
+	 * 直到单个字段的失败配额被撞满——已补成功的字段因此被当成"失败放弃"，
+	 * 而两阶段路径会退回 {@code fallbackFusedGroupFrom}，对同一段实例重复做条件 CAS。</p>
+	 *
+	 * @return {@code pos < 返回值 <= total}
+	 */
+	static int nextBatchChunkEnd(int pos, int total, int chunkCalls) {
 		int remaining = total - pos;
 		if (remaining <= 4096) return total;
-		return chunkCalls < 2048 ? pos + 4 : pos + 8192;
+		return Math.min(total, chunkCalls < 2048 ? pos + 4 : pos + 8192);
 	}
 
 	private static void runBatchInstanceTask(

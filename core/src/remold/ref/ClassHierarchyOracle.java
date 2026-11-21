@@ -57,6 +57,14 @@ public interface ClassHierarchyOracle {
 	 */
 	Optional<InheritedField> findInheritedField(String className, String fieldName, String desc);
 
+	/**
+	 * {@code className} 的超类链（不含接口）是否全部可由字节码元数据解析。
+	 *
+	 * <p>为 {@code false} 时"祖先链上没有同名字段"这个结论不可信（读不到祖先字节码），
+	 * 调用方必须 fail-closed 退回原有行为并告警，不得据此认定"不是遮蔽"。</p>
+	 */
+	boolean isSuperclassChainResolvable(String className);
+
 	/** 祖先字段声明：最近的声明类、其修饰符，以及它从被查询类视角是否可读。 */
 	final class InheritedField {
 		public final String  declaringClass;

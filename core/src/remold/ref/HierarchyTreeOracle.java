@@ -196,6 +196,19 @@ public final class HierarchyTreeOracle implements ClassHierarchyOracle {
 	 * 在祖先链上按 {@code superclass -> interfaces -> superclass'} 的顺序找第一条同名同描述符声明，
 	 * <b>不</b>跳过不可见成员：可读性作为结果字段返回，由调用方决定 fail-closed。
 	 */
+	@Override
+	public boolean isSuperclassChainResolvable(String className) {
+		ClassNode node = resolve(className);
+		if (node == null) return false;
+		Set<String> visited = new HashSet<>();
+		while (node.superName != null) {
+			if (!visited.add(node.superName)) return true;
+			node = resolve(node.superName);
+			if (node == null) return false;
+		}
+		return true;
+	}
+
 	private Optional<InheritedField> findInheritedField(
 	 String lookupType, String currentType, String name, String desc, Set<String> visited) {
 		if (currentType == null || !visited.add(currentType)) return Optional.empty();

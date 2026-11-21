@@ -2045,6 +2045,13 @@ public class InitFix {
 	 ClassHierarchyOracle oracle, String className, Set<String> addedInstanceFields,
 	 Map<String, FieldNode> fieldNodes) {
 		if (addedInstanceFields.isEmpty()) return Map.of();
+		if (!oracle.isSuperclassChainResolvable(className)) {
+			RemoldAgent.warn("[SHADOW-FIELD] cannot read the complete superclass chain of "
+			                 + Names.external(className) + " from bytecode, so it cannot be proven"
+			                 + " whether an added field shadows an inherited one; every added field"
+			                 + " keeps the zero-value conditional write (fail-closed)");
+			return Map.of();
+		}
 		Map<String, String> shadows = new LinkedHashMap<>();
 		for (String field : addedInstanceFields) {
 			FieldNode fn = fieldNodes.get(field);

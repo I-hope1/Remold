@@ -886,7 +886,9 @@ public final class HotswapBridge {
 
 		MethodHandle getter = IMPL_LOOKUP.findGetter(ancestorOwner, fieldName, valType)
 		 .asType(MethodType.methodType(valType, Object.class));
-		MethodHandle expected = ancestorExpectedPutter(valType);
+		// 引用类型的 CAS 模板参数全是 Object，先适配到字段类型，permuteArguments 才认得出同一组参数。
+		MethodHandle expected = ancestorExpectedPutter(valType)
+		 .asType(MethodType.methodType(boolean.class, Object.class, long.class, valType, valType));
 		MethodHandle bound = MethodHandles.insertArguments(expected, 1, offset);
 		MethodHandle reordered = MethodHandles.permuteArguments(bound,
 		 MethodType.methodType(boolean.class, valType, Object.class, valType), 1, 0, 2);

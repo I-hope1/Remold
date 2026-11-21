@@ -200,6 +200,18 @@
 | 工作区 Raw 按需索引（懒查询 + 批内复用 + fail-closed） | ✅ | L4 | `core/src/remold/WorkspaceRawIndex.java`、`BytecodeSources.lookupAll` | 找不到给 `null` + `misses`，多来源给出不同字节判 `ambiguous` 且不猜；批内缓存与 `InitFix` 批次上下文同寿、批末清空；`WorkspaceRawIndexTest` 7 例（含点分/斜杠共用一条缓存、批外不缓存、读数含耗时） |
 | 名字形态转换单一入口 + 只减不增守卫 | ✅ | — | `core/src/remold/util/Names.java` | `NameConversionGuardTest` 以存量基线（逐文件计数）冻结现存手写转换：新增文件红、既有文件计数变多变红、基线条目已干净未删行也红 |
 
+#### 1.3.1 Lambda 对齐的内容证据（callee overlap）
+
+| 机制 / 条目 | 状态 | 规范章节 | 落地位置 | 验收证据与决策依据 |
+|:---|:---:|:---|:---|:---|
+| 被调集合作为跨代配对证据（仅"唯一严格最大正交集"介入，平票退回既有规则） | ✅ | [`docs/lambda/01-capture-bridge.md`](lambda/01-capture-bridge.md) §11 | `core/src/remold/LambdaAligner.java`（`SyntheticInfo.callees` / `uniqueStrictMaxOverlap` / `qualifiesAsEvidence`）、`Pass A` / `Pass B` | `CalleeOverlapEvidenceTest` 11 条（编辑 A 与镜像编辑 B 各选相反候选、平票/零交集/单候选不介入、单条工具调用不算证据、两条工具调用算证据、单条业务调用算证据、样板与 `toString` 边界、合成名不算内容）；`CompeteDeleteTest` 端到端：旧基线从"固化误绑"翻转为"固化已修复"，业务内容断言（`tagA`/`useA` 不得出现）排在结构断言之前 |
+| 样板过滤与证据门槛 | ✅ | 同上 | `collectCallees` / `isBoilerplateCallee` / `qualifiesAsEvidence` | 显式列举 `Object.<init>`、`Objects.requireNonNull*`、`Intrinsics*`、装箱拆箱；`Object#toString` 刻意保留；**单条**共享调用须来自非通用库 owner（排除 `java/` `javax/` `jdk/` `sun/` `com/sun/` `kotlin/` `scala/`），**≥2 条**不论 owner |
+
+**残余边界**：外部工程 84 条 Run R / Run E 对照不在本仓库，`V3 S41` 的真机复跑需在外部执行
+`RemoldLambdaRegressionTest`（期望 `FAIL=0`）；本仓库锁的是规则的双向对称与一条端到端竞争删除场景。
+**残余风险**：`stamp` 类的"次数语义"不适用于本机制；若将来把被调集合扩展到字段访问或常量引用，
+需重新评估"单条即证据"的门槛。
+
 **残余边界（详见 §5）**：两轮 Fabric 真机读数均为 **KnotServer 单侧**（无头 runner 无 X 显示，KnotClient 未测）；
 `BytecodeSources` 目前只有 Mixin 内部类与新 Mixin 类两个内存来源，
 普通工作区磁盘输出目录尚未登记，`WorkspaceRawIndex` 的实际覆盖面因此有限，普通工程类仍靠

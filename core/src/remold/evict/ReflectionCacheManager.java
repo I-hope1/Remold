@@ -412,7 +412,7 @@ public final class ReflectionCacheManager {
 	}
 
 	private static Class<?> resolveLoadedClass(String dotName) {
-		LoadedClassIndex loaded = RemoldAgent.loadedClassesMap;
+		LoadedClassIndex loaded = RemoldAgent.loadedClassIndex();
 		if (loaded != null && !loaded.isEmpty()) {
 			return loaded.get(dotName);
 		}

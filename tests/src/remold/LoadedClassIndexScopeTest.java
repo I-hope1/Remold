@@ -39,7 +39,7 @@ class LoadedClassIndexScopeTest {
 	@BeforeEach
 	void install() {
 		RemoldAgent.logger = this.recorder;
-		this.originalIndex = RemoldAgent.loadedClassesMap;
+		this.originalIndex = RemoldAgent.loadedClassIndex();
 	}
 
 	@AfterEach
@@ -106,7 +106,7 @@ class LoadedClassIndexScopeTest {
 
 		RemoldAgent.loadClassSnap(new Class<?>[] {classA, classB});
 
-		LoadedClassIndex snapshot = RemoldAgent.loadedClassesMap;
+		LoadedClassIndex snapshot = RemoldAgent.loadedClassIndex();
 		long scopeA = AlignmentMetaStore.INSTANCE.loaderScopeId(loaderA);
 		long scopeB = AlignmentMetaStore.INSTANCE.loaderScopeId(loaderB);
 		assertEquals(2, snapshot.copyCount(DOT), "the snapshot must keep both loader copies");

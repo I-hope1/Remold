@@ -483,7 +483,7 @@ public class InitializerDriftTest {
 		// Load the v1 class but never instantiate it: the class is live, the instance count is 0.
 		Class<?> host = Class.forName("idl19.Host", false, new ByteLoader(v1));
 		remold.LoadedClassIndex previousLoaded =
-			remold.RemoldAgent.loadedClassesMap;
+			remold.RemoldAgent.loadedClassIndex();
 		remold.RemoldAgent.bytecodeCache.put("idl19.Host", v1.get("idl19.Host"));
 		java.util.List<String> warns = new java.util.ArrayList<>();
 		java.util.List<String> infos = new java.util.ArrayList<>();
@@ -566,7 +566,7 @@ public class InitializerDriftTest {
 		// A loaded sentinel makes the old per-class enumeration observable: each of the six
 		// keys resolves to a live Class, so the aggregation path must still not touch LibTool.
 		remold.LoadedClassIndex previousLoaded =
-			remold.RemoldAgent.loadedClassesMap;
+			remold.RemoldAgent.loadedClassIndex();
 		long enumerationsBefore = InitializerDrift.INSTANCE_ENUMERATIONS.get();
 		try {
 			remold.RemoldAgent.loadedClassesMap = new remold.LoadedClassIndex();
@@ -614,7 +614,7 @@ public class InitializerDriftTest {
 		remold.ref.StageBInstanceCache.put(host, new Object[7]);
 
 		java.util.List<String> warns = new java.util.ArrayList<>();
-		remold.LoadedClassIndex prevLoaded = remold.RemoldAgent.loadedClassesMap;
+		remold.LoadedClassIndex prevLoaded = remold.RemoldAgent.loadedClassIndex();
 		remold.RemoldAgent.Logger oldLogger = remold.RemoldAgent.logger;
 		remold.RemoldAgent.logger = new remold.RemoldAgent.Logger() {
 			public void log(String msg) {}

@@ -70,8 +70,8 @@ class PendingLoaderIsolationTest {
 		assertTrue(scopeA != scopeB, "precondition: two loaders must map to two distinct scopes");
 
 		byte[] aligned = classBytes(HOST_INTERNAL, true);
-		AnnotationTransformer.pendingAlignedClasses.put(scopeA, HOST_INTERNAL, aligned);
-		AnnotationTransformer.pendingAlignedClasses.put(scopeA, HOST_DOT, aligned);
+		AnnotationTransformer.PENDING_ALIGNED.put(scopeA, HOST_INTERNAL, aligned);
+		AnnotationTransformer.PENDING_ALIGNED.put(scopeA, HOST_DOT, aligned);
 
 		byte[] forB = new AnnotationTransformer().transform(loaderB, HOST_INTERNAL, null, loaderB.domain, classBytes(HOST_INTERNAL, false));
 

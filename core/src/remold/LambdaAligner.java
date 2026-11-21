@@ -1578,6 +1578,115 @@ public class LambdaAligner {
 	}
 
 	/**
+	 * 收集方法体内的非合成被调目标（{@code owner#name+desc}）。
+	 *
+	 * <p>不绑定 opcode：父类/私有调用在 JDK 8 与 11+ 走不同指令（{@code INVOKESPECIAL} vs
+	 * {@code INVOKEVIRTUAL}，见 JEP 181），绑 opcode 会让证据随 JDK 版本漂移。</p>
+	 *
+	 * <p>过滤样板：带合成名的（{@code lambda$} / {@code $lambda} / {@code $anonfun$} / {@code access$}）
+	 * 不是内容证据；装箱拆箱、{@code Object.<init>}、{@code Objects.requireNonNull*}、
+	 * {@code kotlin/jvm/internal/Intrinsics*} 是每个 lambda 都会有的公共噪声。</p>
+	 */
+	private static Set<String> collectCallees(MethodNode mn) {
+		if (mn.instructions == null) return Collections.emptySet();
+		Set<String> out = new LinkedHashSet<>();
+		for (AbstractInsnNode insn : mn.instructions) {
+			if (!(insn instanceof MethodInsnNode m)) continue;
+			if (MethodFingerprinter.isSyntheticName(m.name)) continue;
+			if (isBoilerplateCallee(m)) continue;
+			out.add(m.owner + "#" + m.name + m.desc);
+		}
+		return out.isEmpty() ? Collections.emptySet() : Collections.unmodifiableSet(out);
+	}
+
+	/** 通用样板调用：出现在任何 lambda 里都不能当作"这两个 lambda 在做同一件事"。 */
+	private static boolean isBoilerplateCallee(MethodInsnNode m) {
+		String owner = m.owner;
+		if ("java/lang/Object".equals(owner) && "<init>".equals(m.name)) return true;
+		if ("java/util/Objects".equals(owner) && m.name.startsWith("requireNonNull")) return true;
+		if (owner.startsWith("kotlin/jvm/internal/Intrinsics")) return true;
+		return isBoxingCallee(owner, m.name);
+	}
+
+	/** 装箱/拆箱族：{@code Integer.valueOf} / {@code Integer.intValue} 这类不携带业务内容。 */
+	private static boolean isBoxingCallee(String owner, String name) {
+		if (!name.equals("valueOf") && !name.endsWith("Value")) return false;
+		return "java/lang/Integer".equals(owner) || "java/lang/Long".equals(owner)
+		 || "java/lang/Short".equals(owner) || "java/lang/Byte".equals(owner)
+		 || "java/lang/Character".equals(owner) || "java/lang/Boolean".equals(owner)
+		 || "java/lang/Float".equals(owner) || "java/lang/Double".equals(owner);
+	}
+
+	/** 两个 lambda 的被调集合交集。 */
+	private static Set<String> sharedCallees(SyntheticInfo ni, SyntheticInfo oi) {
+		if (ni.callees.isEmpty() || oi.callees.isEmpty()) return Collections.emptySet();
+		Set<String> shared = new LinkedHashSet<>();
+		for (String callee : ni.callees) {
+			if (oi.callees.contains(callee)) shared.add(callee);
+		}
+		return shared;
+	}
+
+	/** 两个 lambda 的被调集合交集大小。 */
+	private static int calleeOverlap(SyntheticInfo ni, SyntheticInfo oi) {
+		return sharedCallees(ni, oi).size();
+	}
+
+	/**
+	 * 该交集是否够格当证据：交集里至少有一条"业务调用"，或至少两条。
+	 *
+	 * <p>为什么不能只看基数：一条共享的<b>工具调用</b>就能在 {@code 1 vs 0} 时压过同名与 consumer 证据。
+	 * {@code Object#toString} 是刻意保留的（字符串拼接里真实出现），但它同时也是最常见的共享噪声。
+	 * 因此单条交集必须<b>不属于</b> JDK / Kotlin / Scala 这类通用库 owner 才算证据；两条以上才不论出处——
+	 * 两条独立共享调用同时纯属巧合的概率已经很低。</p>
+	 */
+	private static boolean qualifiesAsEvidence(Set<String> shared) {
+		if (shared.size() >= 2) return true;
+		for (String callee : shared) {
+			if (!isGenericLibraryOwner(callee.substring(0, Math.max(0, callee.indexOf('#'))))) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** 通用库 owner：这些包里的调用不携带"这两个 lambda 在做同一件业务"的信息。 */
+	private static boolean isGenericLibraryOwner(String owner) {
+		return owner.startsWith("java/") || owner.startsWith("javax/") || owner.startsWith("jdk/")
+		 || owner.startsWith("sun/") || owner.startsWith("com/sun/")
+		 || owner.startsWith("kotlin/") || owner.startsWith("scala/");
+	}
+
+	/**
+	 * 在<b>已经通过全部准入过滤</b>的旧候选里挑"唯一严格最大正交集"的那个。
+	 *
+	 * <p>为什么必须是"唯一 + 严格最大"：交集并列说明内容证据分不开它们，此时任何偏袒都只是把
+	 * 一种编辑形态的错误换成镜像形态的错误（删 {@code $0} 改 {@code $1} 与删 {@code $1} 改
+	 * {@code $0} 完全对称）。分不开就老老实实退回既有规则。</p>
+	 *
+	 * @return 唯一严格最大者；交集全零、并列最大、或候选不足两个时返回 {@code null}
+	 */
+	private static SyntheticInfo uniqueStrictMaxOverlap(SyntheticInfo ni, List<SyntheticInfo> legal) {
+		if (ni.callees.isEmpty() || legal.size() < 2) return null;
+		SyntheticInfo best = null;
+		int bestOverlap = 0;
+		boolean tie = false;
+		for (SyntheticInfo oi : legal) {
+			Set<String> shared = sharedCallees(ni, oi);
+			if (!qualifiesAsEvidence(shared)) continue;
+			int overlap = shared.size();
+			if (overlap > bestOverlap) {
+				bestOverlap = overlap;
+				best = oi;
+				tie = false;
+			} else if (overlap == bestOverlap && overlap > 0) {
+				tie = true;
+			}
+		}
+		return bestOverlap > 0 && !tie ? best : null;
+	}
+
+	/**
 	 * 当双方都有子 lambda 时，检查"子的配对对象"是否与旧方法的子逐个吻合。
 	 *
 	 * <p>为什么需要：{@link #sameSemantics} 是递归语义指纹，后代一旦被编辑，祖先的语义
@@ -2159,7 +2268,7 @@ public class LambdaAligner {
 			if (ni.upDepth < 0) continue;                 // 未定稿：不参与
 			if (hasUnmatchedChild(ctx, ni)) continue;
 
-			SyntheticInfo bestOld = null;
+			List<SyntheticInfo> legalOld = new ArrayList<>();
 			for (SyntheticInfo oi : oldGroup) {
 				if (oi.matched || oi.ghost) continue;
 				if (!oi.renameable) continue;             // 与 ni 上的限制对称
@@ -2169,17 +2278,30 @@ public class LambdaAligner {
 				if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
 				if (!calleesPairTo(ni, oi)) continue;     // 必须满足结构证据（后代修改时的关键防护）
 				if (!fallbackPairingAllowed(ctx, ni, oi)) continue;
-				if (isSameNameEvidence(ctx, oi, ni)) {
-					bestOld = oi;
-					break;
-				}   // 同名者优先（自造名不算证据）
-				if (bestOld == null) {
-					bestOld = oi;
-				} else if (hasSameExplicitConsumer(ni, oi) && !hasSameExplicitConsumer(ni, bestOld)) {
-					// 没有同名证据时，优先选"消费端指令相同"的候选：
-					// 同一宿主方法里 btnSave(...) / btnDelete(...) 的 lambda 形状完全一样，
-					// 只有 consumer 能把它们分开。仅作偏好，不构成硬约束（消费点本身可能被改）。
-					bestOld = oi;
+				legalOld.add(oi);
+			}
+			if (legalOld.isEmpty()) continue;
+
+			// 内容证据优先：被调集合"唯一严格最大正交集"者胜出（平票/全零不走这里）。
+			SyntheticInfo overlapPick = uniqueStrictMaxOverlap(ni, legalOld);
+			SyntheticInfo bestOld = overlapPick;
+			if (overlapPick != null) {
+				dbg(() -> "A-PASS callee-overlap ni=" + ni.name + " -> " + overlapPick.name
+				          + " overlap=" + calleeOverlap(ni, overlapPick));
+			} else {
+				for (SyntheticInfo oi : legalOld) {
+					if (isSameNameEvidence(ctx, oi, ni)) {
+						bestOld = oi;
+						break;
+					}   // 同名者优先（自造名不算证据）
+					if (bestOld == null) {
+						bestOld = oi;
+					} else if (hasSameExplicitConsumer(ni, oi) && !hasSameExplicitConsumer(ni, bestOld)) {
+						// 没有同名证据时，优先选"消费端指令相同"的候选：
+						// 同一宿主方法里 btnSave(...) / btnDelete(...) 的 lambda 形状完全一样，
+						// 只有 consumer 能把它们分开。仅作偏好，不构成硬约束（消费点本身可能被改）。
+						bestOld = oi;
+					}
 				}
 			}
 			if (bestOld == null) continue;
@@ -2211,11 +2333,9 @@ public class LambdaAligner {
 			if (ni.matched || !ni.renameable) continue;
 			if (hasUnmatchedChild(ctx, ni)) continue;
 
-			SyntheticInfo bestOld = null;
-
-			// 第一优先级：组内同名且签名逻辑等价，且子结构吻合
+			// 先收齐合法候选：两次趟的过滤条件完全一致，只是择优顺序不同。
 			//
-			// 两道约束缺一不可：
+			// 准入条件下面的语义不能改：
 			//   • oi.matched    —— 旧方法只能被用一次；
 			//   • usedOldNames  —— 旧**名字**只能被占一次。
 			// 第二道是必需的：不同的新方法可以各自选中同一个未被 matched 的旧方法
@@ -2223,6 +2343,7 @@ public class LambdaAligner {
 			// 会被登记给两个不同描述符的新方法，renameMap 里一个键覆盖另一个，
 			// 结果新方法内部对被改名的子的引用指向了别处。实测见 scratch/hstest/deep2/ 变体乙：
 			// 新的叶子占了旧 $2，而新外层内部引用的 $2 实际指向新的中层。
+			List<SyntheticInfo> legalOld = new ArrayList<>();
 			for (SyntheticInfo oi : oldGroup) {
 				if (oi.matched || (!isMutationActive("D") && oi.ghost)) continue;
 				if (!oi.renameable) continue;   // 与 ni 上的限制对称
@@ -2231,25 +2352,27 @@ public class LambdaAligner {
 				if (!sameNestingLevel(ni, oi)) continue;
 				if (!calleesPairTo(ni, oi)) continue;
 				if (!fallbackPairingAllowed(ctx, ni, oi)) continue;
-				if (isSameNameEvidence(ctx, oi, ni)) {
-					bestOld = oi;
-					break;
+				legalOld.add(oi);
+			}
+			if (legalOld.isEmpty()) continue;
+
+			// 内容证据优先：被调集合唯一严格最大正交集者胜出（平票/全零退回既有顺序）。
+			SyntheticInfo overlapPick = uniqueStrictMaxOverlap(ni, legalOld);
+
+			// 第一优先级：同名，其次按原顺序先到先得
+			SyntheticInfo bestOld = overlapPick;
+			if (bestOld == null) {
+				for (SyntheticInfo oi : legalOld) {
+					if (isSameNameEvidence(ctx, oi, ni)) {
+						bestOld = oi;
+						break;
+					}
 				}
 			}
 
 			// 第二优先级：签名逻辑等价且子结构吻合的未匹配旧方法
 			if (bestOld == null) {
-				for (SyntheticInfo oi : oldGroup) {
-					if (oi.matched || (!isMutationActive("D") && oi.ghost)) continue;
-					if (!oi.renameable) continue;   // 与 ni 上的限制对称
-					if (ctx.isOldNameClaimed(oi)) continue;
-					if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
-					if (!sameNestingLevel(ni, oi)) continue;
-					if (!calleesPairTo(ni, oi)) continue;
-					if (!fallbackPairingAllowed(ctx, ni, oi)) continue;
-					bestOld = oi;
-					break;
-				}
+				bestOld = legalOld.get(0);
 			}
 
 			if (bestOld == null) continue;
@@ -2957,6 +3080,8 @@ public class LambdaAligner {
 			// 桥不是 lambda 体：它体内那条 INVOKESTATIC 指向目标方法，若照常登记成"子 lambda"，
 			// 目标就会平白多出一个（永远配不上对的）父，把 hasUnmatchedChild 卡死。
 			info.children = info.bridge ? Collections.emptyList() : collectChildLambdaNames(mn, cn.name);
+			// 内容证据：这个方法体到底调了谁。
+			info.callees = collectCallees(mn);
 			if (!isOld) putNameIndex(ctx.childIndex, info);
 			// 完整名字索引（两侧各一份），供 infoByName 做 O(1) 查找。
 			// 这里就地填充即可：scan 的循环体已经走完该名字对应的 SyntheticInfo 构建。
@@ -3537,6 +3662,32 @@ public class LambdaAligner {
 	}
 
 	/**
+	 * 测试钩子：按被调集合验证"唯一严格最大正交集"择优规则。
+	 *
+	 * @param newCallees 新 lambda 的被调集合
+	 * @param oldCallees 各候选旧 lambda 的被调集合（顺序即原顺序）
+	 * @return 被选中的候选下标；{@code -1} 表示规则不介入（交集全零 / 并列最大 / 候选不足两个）
+	 */
+	public static int calleeOverlapPickForTest(Set<String> newCallees,
+	                                          List<Set<String>> oldCallees) {
+		SyntheticInfo ni = new SyntheticInfo("n", "()V", 0, 0L, "n", true);
+		ni.callees = newCallees == null ? Collections.emptySet() : newCallees;
+		List<SyntheticInfo> legal = new ArrayList<>();
+		for (int i = 0; i < oldCallees.size(); i++) {
+			SyntheticInfo oi = new SyntheticInfo("o" + i, "()V", 0, 0L, "o" + i, true);
+			oi.callees = oldCallees.get(i) == null ? Collections.emptySet() : oldCallees.get(i);
+			legal.add(oi);
+		}
+		SyntheticInfo pick = uniqueStrictMaxOverlap(ni, legal);
+		return pick == null ? -1 : legal.indexOf(pick);
+	}
+
+	/** 测试钩子：给定方法的被调集合（按生产过滤规则）。 */
+	public static Set<String> calleesForTest(MethodNode mn) {
+		return collectCallees(mn);
+	}
+
+	/**
 	 * 测试钩子：把两个常量 token 交给 {@link LambdaBodyFingerprint} 折叠，返回折叠结果的位模式；
 	 * 不可折叠返回 {@code null}。仅用于单测，生产代码不得引用。
 	 */
@@ -4065,6 +4216,17 @@ public class LambdaAligner {
 		String hostKey;
 		/** 在该宿主方法中的出现序号（0-indexed）。 */
 		int    hostOrdinal = -1;
+		/**
+		 * 方法体内<b>非合成被调目标</b>的集合（{@code owner#name+desc}）。
+		 *
+		 * <p>这是"内容证据"：位置同名只说明编译器把两个 lambda 放到了同一个序号上，而这个集合说明
+		 * 它们<b>真正调用了谁</b>。样板调用（装箱拆箱、{@code Object.<init>}、
+		 * {@code Objects.requireNonNull*}、{@code Intrinsics*}）先过滤掉，否则每个 lambda 都会因为
+		 * 共同的样板而"看起来相似"。</p>
+		 *
+		 * <p>只用于在合法候选之间<b>择优</b>，不参与准入判定（见 {@link #uniqueStrictMaxOverlap}）。</p>
+		 */
+		Set<String> callees = Collections.emptySet();
 		/** 在 class 文件方法表中的下标，用于保持编译器位置序。 */
 		int    methodIndex = -1;
 		/** 实例化该 Lambda 后的消费指令（如 "CALL:pkg/Cls.method(Ljava/lang/Runnable;)V"）。 */

@@ -168,7 +168,9 @@ public class ShadowFieldInitFixTest {
 			"an added int field must resolve the nearest readable ancestor declaration");
 		assertEquals(internalName(Anc.class), shadows.get("s"),
 			"an added reference field resolves the same way");
-		assertTrue(warnings.isEmpty(), "a readable shadowing declaration must not warn, was " + warnings);
+		// 采纳遮蔽字段时必须打一条用户可见告警：InitFix 只保证子类槽位，管不到 JBR DCEVM 的 relayout。
+		assertTrue(hasRelayoutAdvisory(warnings),
+			"an adopted shadowing declaration must carry the JBR relayout advisory, was " + warnings);
 	}
 
 	@Test
@@ -184,6 +186,22 @@ public class ShadowFieldInitFixTest {
 			"the declaration class must be the nearest ancestor that declares the field, not the subclass");
 	}
 
+	/** 采纳遮蔽字段时的用户可见告警（JBR DCEVM relayout 风险），与 fail-closed 告警是两件事。 */
+	private static boolean hasRelayoutAdvisory(List<String> warnings) {
+		for (String w : warnings) {
+			if (w.contains("shadows") && w.contains("JBR DCEVM relayout")) return true;
+		}
+		return false;
+	}
+
+	/** fail-closed 告警：祖先不可用而退回零值 CAS。 */
+	private static boolean hasFailClosedWarning(List<String> warnings) {
+		for (String w : warnings) {
+			if (w.contains("falling back to the zero-value conditional write")) return true;
+		}
+		return false;
+	}
+
 	@Test
 	void privateAncestorFieldIsAdopted() throws Exception {
 		ClassNode preferred = newClassNode(PrivateShadow.class);
@@ -196,7 +214,10 @@ public class ShadowFieldInitFixTest {
 		assertEquals(internalName(PrivateAnc.class), shadows.get("p"),
 			"a private ancestor declaration must still be adopted: the migrated value is copied"
 			+ " regardless of access and the run-time read uses a full-privilege lookup");
-		assertTrue(warnings.isEmpty(), "a private ancestor is not a fail-closed case, was " + warnings);
+		assertFalse(hasFailClosedWarning(warnings),
+			"a private ancestor is not a fail-closed case, was " + warnings);
+		assertTrue(hasRelayoutAdvisory(warnings),
+			"an adopted private shadowing declaration must carry the JBR relayout advisory, was " + warnings);
 	}
 
 	@Test

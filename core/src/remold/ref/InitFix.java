@@ -2085,6 +2085,16 @@ public class InitFix {
 				                 + "; falling back to the zero-value conditional write (fail-closed)");
 				continue;
 			}
+			// 用户可见告警：InitFix 只保证子类槽位按新初值写入，管不到 JBR DCEVM 的 relayout。
+			// 实测（`tests/jbr-dcevm-shadowed-field/`、`docs/runtime/05-...`）：子类遮蔽父类同名字段时，
+			// 下一轮结构性重定义会把最派生声明的值按名字写进同名祖先槽位，重定义之前就已存在的实例
+			// 因此读到子类的值。这是上游行为，Remold 侧无法修正，只能点名告诉用户别这么写。
+			RemoldAgent.warn("[SHADOW-FIELD] added field " + Names.external(className) + "." + field
+			                 + " shadows " + Names.external(decl.declaringClass) + "." + field
+			                 + "; InitFix will initialize the subclass slot, but JBR DCEVM relayout may copy"
+			                 + " the most derived value into same-named ancestor slots of instances that"
+			                 + " predate this redefinition. Avoid same-name field shadowing across a hot-reload"
+			                 + " boundary, or rename the field.");
 			shadows.put(field, decl.declaringClass);
 		}
 		return shadows;

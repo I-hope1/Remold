@@ -740,6 +740,25 @@
 - **关联代码**：`CellPropertyRef.extractFromMethod` / `extractArgsDataflow` / `verifyBytecode` /
   `dryRunProperties` / `makeLambda`。
 
+### 风险 30：JBR DCEVM 同名遮蔽字段的槽位污染（上游，不可修）
+
+- **风险描述与底层机制**：子类声明与父类同名同描述符的字段（字段遮蔽）后，下一轮**结构性**重定义
+  （子类新增字段）会把最派生声明的值按字段名写进所有同名槽位——**重定义之前就存在的实例**上，
+  父类槽位里躺着子类的值。纯 JBR 21.0.8 + `Instrumentation.redefineClasses`、零 Remold 代码即可复现；
+  父类槽位内容本身被改写（方法体、外部 `getfield`、反射、`Unsafe` 直读四条路径一致）。
+- **触发条件**：① 父子类有同名同描述符实例字段；② 本轮重定义为子类新增字段（无新增字段的重复重定义不触发）；
+  ③ 实例在该轮重定义之前创建（重定义之后新建的实例正常）。改名去掉同名后不再发生。
+- **当前缓解措施**：InitFix 对新增遮蔽字段仍按源码初值写子类槽位（[`docs/status.md`](status.md) §4、
+  [`initfix/03-runtime-driver.md`](initfix/03-runtime-driver.md) §1），并在采纳遮蔽字段时打一条
+  `[SHADOW-FIELD]` 告警，明确建议避免跨热更边界的同名遮蔽或重命名字段。**父类槽位不修**：
+  成因在 relayout 而非补丁，「快照父槽再回填」属于修改已有字段值，按 [`AGENTS.md`](../AGENTS.md) §1
+  需显式通道，当前未实现。
+- **残余影响**：用户若坚持同名遮蔽，重定义后父类读取路径可能返回子类的值（静默错值），Remold 不阻断、
+  只告警；表现与是否开启 InitFix 无关。
+- **读数与复现**：[`docs/runtime/05-jbr-dcevm-shadowed-field-slot-pollution.md`](runtime/05-jbr-dcevm-shadowed-field-slot-pollution.md)；
+  repro 工程 `tests/jbr-dcevm-shadowed-field/`（不含 Remold 代码，可直接作为上游 Issue 的最小用例）。
+- **未覆盖**：其它 JBR 版本/平台、父加载器创建实例、Remold 两阶段 Stage A/C 顺序的模拟。
+
 ### 风险 23：构建完成 marker 的触发边界（P3）
 
 - **风险描述与底层机制**：marker 只能取消**尚未到期**的兜底 task；若一次构建时长超过 `fileShakeMs`

@@ -721,6 +721,9 @@ tasks.register("shadowFieldProbe", JavaExec) {
 		}
 	}
 	doFirst {
+		// 每轮从空目录开始：上一轮留下的 v2/v3 class 文件会让本轮的 v1 写入变成"版本回退"，
+		// agent 会把它们算进同一次批处理，探针读数就不再是这一轮的真实结果。
+		delete file("$buildDir/shadowfield")
 		def watchDir = file("$buildDir/shadowfield/classes")
 		watchDir.mkdirs()
 		jvmArgs "-javaagent:${coreAgentJarPath.get()}=${watchDir.absolutePath}",

@@ -2027,14 +2027,24 @@ public class InitFix {
 	 * 识别本轮<b>新增实例字段里遮蔽了祖先同名字段</b>的那些，返回 {@code 字段名 -> 祖先声明类内部名}。
 	 *
 	 * <p>为什么需要它：DCEVM 重定义会把被遮蔽的继承槽位值复制进子类新增同名槽位，于是存量实例上
-	 * 该槽位"已有非默认值"，而默认的零值条件 CAS 会据此跳过、把新初值丢掉。这里只负责把可读的祖先
+	 * 该槽位"已有非默认值"，而默认的零值条件 CAS 会据此跳过、把新初值丢掉。这里只负责把祖先
 	 * 声明类找出来；比较基准由 {@link HotswapBridge#bootstrapAncestor} 在运行期读取。</p>
 	 *
-	 * <p>fail-closed 边界（F4）：祖先声明存在但不可读（private / 包内跨包 / 静态性不符）时<b>不</b>采纳，
-	 * 退回默认零值条件 CAS 并告警 —— 宁可漏补，也不拿猜测的期望值覆盖存量值。祖先链上根本没有同名同
-	 * 描述符声明则不是遮蔽，保持原行为、不告警。</p>
+	 * <p>访问权限不是边界：DCEVM 的迁移复制按 {@code (name, desc)} 匹配，<b>不</b>区分访问权限，
+	 * {@code private} 祖先字段的值同样会被复制进子类新槽。运行期读取走完整权限的 lookup，
+	 * 因此 {@code private} / 跨包包内声明一律照常采纳。</p>
+	 *
+	 * <p>fail-closed 边界：祖先声明存在但<b>静态性不符</b>（实例槽位对不上静态字段，没有可比读数），
+	 * 或祖先链任一环取不到字节码（无法证明"不是遮蔽"）时<b>不</b>采纳，退回默认零值条件 CAS 并告警
+	 * —— 宁可漏补，也不拿猜测的期望值覆盖存量值。祖先链上根本没有同名同描述符声明则不是遮蔽，
+	 * 保持原行为、不告警。</p>
 	 *
 	 * <p>本方法只读字节码元数据（{@link ClassHierarchyOracle}），不触发类加载，供分析期与单测共用。</p>
+	 *
+	 * <p><b>已知保守边界</b>：同一批 Stage B 里若祖先字段自己被 {@code @RemoldReinit} 先改写成了新值，
+	 * 运行期读到的期望值就与新槽里那份 DCEVM 迁移副本对不上，条件 CAS 判不相等后按保守语义跳过
+	 * （计入 skipped 并告警）：结果是漏补、字段留在继承值上等下一轮，<b>不是</b>把旧值误写进新字段。
+	 * 该取舍刻意保留 —— 换成不看当前值的强制写会连带放弃"真被写过就不覆盖"的负向保证。</p>
 	 *
 	 * @param oracle             分析期层级查询口
 	 * @param className          被重定义类的内部名
@@ -2080,15 +2090,74 @@ public class InitFix {
 		return shadows;
 	}
 
-	/** 祖先声明能否作为运行期比较基准；返回 {@code null} 表示可读。 */
+	/**
+	 * 祖先声明能否作为运行期比较基准；返回 {@code null} 表示可用。
+	 *
+	 * <p>只拦真正读不到的形态：静态性不符（实例槽位没有可比读数）。访问权限不在此列 ——
+	 * 运行期用完整权限的 lookup 读槽位，{@code private} 祖先照样能读到。</p>
+	 */
 	private static String shadowAncestorUnreadableReason(ClassHierarchyOracle.InheritedField decl) {
 		if ((decl.access & Opcodes.ACC_STATIC) != 0) {
 			return "is static, so its value cannot be compared on the instance";
 		}
-		if (!decl.readable) {
-			return "is not visible from the subclass (private or package-private in another package)";
-		}
 		return null;
+	}
+
+	/**
+	 * 给"只声明不赋值"的遮蔽新增字段补一份"压入类型零值 + 写字段"的合成切片。
+	 *
+	 * <p>这类字段在新版本字节码里没有任何写指令，提取阶段自然拿不到切片；豁免 T0 之后会被
+	 * {@code "no safe initialization expression found in constructors"} 拒掉，槽位仍停在 DCEVM
+	 * 迁移复制进来的祖先值上。它的新初值就是类型默认值，所以在这类遮蔽字段上"写回 0"才是语义终局
+	 * （{@code docs/initfix/01-safety-gate.md} §1 的 T0 判据只适用于"存量槽位本来就是默认值"）。</p>
+	 *
+	 * <p>只处理 {@link InitFixSafetyGate#isZeroEquivalentField} 认可的零值等价字段：有写指令却取不到
+	 * 切片的形态说明那些写无法证明是零值写，不得替它编一个切片出来（宁可漏补）。</p>
+	 */
+	static void synthesizeZeroValueShadowExtracts(
+	 InitFixSafetyGate.NestView nest, ClassNode newClass, String className,
+	 Set<String> targetInstanceFields, Set<String> forceWriteFields,
+	 Map<String, ReinitField> reinitFields, Set<String> acceptedReplay,
+	 Set<String> selfAssignedFields, Map<String, String> shadowAncestors,
+	 Map<String, FieldNode> fieldNodes, Map<String, List<FieldExtract>> instanceExtracts,
+	 int rootCtorCount) {
+		if (shadowAncestors.isEmpty()) return;
+		for (String fieldName : shadowAncestors.keySet()) {
+			if (!targetInstanceFields.contains(fieldName)) continue;
+			if (forceWriteFields.contains(fieldName)) continue;
+			if (reinitFields.containsKey(fieldName) || acceptedReplay.contains(fieldName)) continue;
+			if (selfAssignedFields.contains(fieldName)) continue;
+			if (instanceExtracts.containsKey(fieldName)) continue;
+			FieldNode field = fieldNodes.get(fieldName);
+			if (field == null) continue;
+			if (!InitFixSafetyGate.isZeroEquivalentField(nest, newClass, field, false, instanceExtracts)) {
+				continue;
+			}
+			int copies = Math.max(1, rootCtorCount);
+			List<FieldExtract> slices = new ArrayList<>(copies);
+			for (int i = 0; i < copies; i++) {
+				List<AbstractInsnNode> insns = List.of(
+				 new VarInsnNode(Opcodes.ALOAD, 0),
+				 zeroValueInsn(field.desc),
+				 new FieldInsnNode(Opcodes.PUTFIELD, className, fieldName, field.desc));
+				slices.add(new FieldExtract(insns, Map.of(), false, true, new HashSet<>(insns)));
+			}
+			instanceExtracts.put(fieldName, slices);
+			log("Synthesized zero-value slice for the shadowed added field " + className + "."
+			    + fieldName + " (" + field.desc + "): the new initializer is the type default");
+		}
+	}
+
+	/** 字段描述符对应的类型默认值压栈指令（与 {@link InitFixSafetyGate} 的 T0 判据同口径）。 */
+	private static AbstractInsnNode zeroValueInsn(String desc) {
+		char c = desc.isEmpty() ? 'I' : desc.charAt(0);
+		return switch (c) {
+			case 'L', '[' -> new InsnNode(Opcodes.ACONST_NULL);
+			case 'J' -> new InsnNode(Opcodes.LCONST_0);
+			case 'F' -> new InsnNode(Opcodes.FCONST_0);
+			case 'D' -> new InsnNode(Opcodes.DCONST_0);
+			default -> new InsnNode(Opcodes.ICONST_0);   // Z/B/C/S/I
+		};
 	}
 
 	private static PatchAnalysis analyzePatch(
@@ -2326,6 +2395,13 @@ public class InitFix {
 		// 显式 = null / = 0 / = false、仅声明未赋值、以及 static ConstantValue 按位为零的字段，
 		// 存量实例与静态环境本来就是默认值：零开销放行，不生成补丁（也不会生成恒等 CAS 写）。
 		// 浮点按位判定，-0.0f / -0.0d / NaN 的位模式非零，不算零值等价。
+		//
+		// 遮蔽新增字段是例外：DCEVM 迁移复制已经按 (name, desc) 把祖先槽位的值写进新槽，
+		// 存量实例上这个槽位<b>不是</b>类型默认值。"零值等价"的前提在这里不成立，
+		// 必须生成一次"祖先值 -> 新初值"的条件写，否则字段停在继承值上。
+		synthesizeZeroValueShadowExtracts(nest, newClass, className, targetInstanceFields,
+		 forceWriteFields, reinitFields, acceptedReplay, selfAssignedFields,
+		 shadowAncestors, fieldNodes, instanceExtracts, rootCtorCount);
 		Set<String> zeroInstanceFields = new LinkedHashSet<>();
 		for (String f : targetInstanceFields) {
 			if (selfAssignedFields.contains(f)) continue;
@@ -2333,6 +2409,7 @@ public class InitFix {
 			// L1 重放字段的"零值等价"不成立：存量值可能是旧初值（非零），新初值为 0 时也必须
 			// 条件写回，不能按 T0 当作"已经是对的"跳过。
 			if (acceptedReplay.contains(f)) continue;
+			if (shadowAncestors.containsKey(f)) continue;   // 见上：遮蔽字段的存量槽位是继承值，不是类型默认值
 			if (InitFixSafetyGate.isZeroEquivalentField(nest, newClass, fieldNodes.get(f), false, instanceExtracts)) {
 				zeroInstanceFields.add(f);
 			}

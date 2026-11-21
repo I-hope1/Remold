@@ -37,10 +37,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * 遮蔽新增字段（与祖先同名同描述符）的决策与写入语义。
  *
- * <p>分析期部分锁 F1（可读祖先才采纳）、F3（非遮蔽字段不进表）、F4（不可读 / 静态性不符 /
- * 祖先链不可解析一律 fail-closed 并告警）；运行期部分直接驱动
- * {@link HotswapBridge#bootstrapAncestor} 的调用点，锁 F1（当前值等于祖先值才回写）、
- * F2（既不等于默认值也不等于祖先值必须跳过）。真机路径由 {@code ShadowFieldInitFixProbe} 覆盖。</p>
+ * <p>分析期部分锁 F1（祖先声明被采纳，含 private 声明）、F3（非遮蔽字段不进表）、
+ * F4（静态性不符 / 祖先链不可解析一律 fail-closed 并告警）、以及 T0 零值遮蔽的合成切片；
+ * 运行期部分直接驱动 {@link HotswapBridge#bootstrapAncestor} 的调用点，锁 F1（当前值等于祖先值才
+ * 回写，private 祖先照常读）、F2（既不等于默认值也不等于祖先值必须跳过）。
+ * 真机路径由 {@code ShadowFieldInitFixProbe} 覆盖。</p>
  */
 public class ShadowFieldInitFixTest {
 
@@ -70,7 +71,7 @@ public class ShadowFieldInitFixTest {
 		public int g = 7;
 	}
 
-	/** 祖先字段 private：不可读，F4 fail-closed。 */
+	/** 祖先字段 private：DCEVM 的迁移复制同样会带进非零值，运行期用完整权限 lookup 读私有槽。 */
 	public static class PrivateAnc {
 		private int p = 1;
 
@@ -81,6 +82,22 @@ public class ShadowFieldInitFixTest {
 
 	public static class PrivateShadow extends PrivateAnc {
 		public int p = 1;
+	}
+
+	/** T0 遮蔽：祖先 {@code x = 10}，子类新增的 {@code x} 只声明不赋值（新版本里没有任何写指令）。 */
+	public static class ZeroAnc {
+		public int x = 10;
+	}
+
+	public static class ZeroDeclaredOnly extends ZeroAnc {
+		@SuppressWarnings("unused")
+		public int x;
+	}
+
+	/** T0 遮蔽：显式零值初值。 */
+	public static class ZeroExplicit extends ZeroAnc {
+		@SuppressWarnings("unused")
+		public int x = 0;
 	}
 
 	/** 静态性不符：祖先静态字段无法在实例上取值，F4 fail-closed。 */
@@ -168,18 +185,18 @@ public class ShadowFieldInitFixTest {
 	}
 
 	@Test
-	void privateAncestorFieldFailsClosedWithWarning() throws Exception {
-		ClassNode preferred = newShadowClassNode(PrivateShadow.class);
+	void privateAncestorFieldIsAdopted() throws Exception {
+		ClassNode preferred = newClassNode(PrivateShadow.class);
 		ClassHierarchyOracle oracle = new HierarchyTreeOracle(
 			ShadowFieldInitFixTest.class.getClassLoader(), preferred);
 
 		Map<String, String> shadows = InitFix.detectShadowedAddedFields(
 			oracle, preferred.name, Set.of("p"), fieldNodes(preferred));
 
-		assertFalse(shadows.containsKey("p"),
-			"a private ancestor field cannot be read, so the field must keep the zero-value conditional write");
-		assertTrue(warnings.stream().anyMatch(w -> w.contains("SHADOW-FIELD") && w.contains(".p")),
-			"the fail-closed fallback must warn, was " + warnings);
+		assertEquals(internalName(PrivateAnc.class), shadows.get("p"),
+			"a private ancestor declaration must still be adopted: the migrated value is copied"
+			+ " regardless of access and the run-time read uses a full-privilege lookup");
+		assertTrue(warnings.isEmpty(), "a private ancestor is not a fail-closed case, was " + warnings);
 	}
 
 	@Test
@@ -302,6 +319,83 @@ public class ShadowFieldInitFixTest {
 		return writer.toByteArray();
 	}
 
+	// ---------------------------------------------------------------- T0 zero-value shadow
+
+	/**
+	 * 前置基线：只声明不赋值的遮蔽新增字段在 T0 判据里是"零值等价"。
+	 *
+	 * <p>没有这条事实，{@code analyzePatch} 里那个豁免就没有存在理由；反过来，若豁免被去掉，
+	 * 字段会在补丁生成前被丢掉（真机终局读数见 {@code ShadowFieldInitFixProbe} 的 t0 组）。</p>
+	 */
+	@Test
+	void declaredOnlyShadowFieldIsZeroEquivalentBeforeTheExemption() throws Exception {
+		ClassNode node = newClassNode(ZeroDeclaredOnly.class);
+		HierarchyTreeOracle oracle = new HierarchyTreeOracle(
+			ShadowFieldInitFixTest.class.getClassLoader(), node);
+		InitFixSafetyGate.NestView nest = InitFixSafetyGate.NestView.of(null, node, oracle);
+
+		assertTrue(InitFixSafetyGate.isZeroEquivalentField(
+			nest, node, fieldNodes(node).get("x"), false, new java.util.LinkedHashMap<>()),
+			"a shadowed added field with no write instruction at all is judged zero-equivalent,"
+			+ " so analyzePatch must exempt it explicitly");
+	}
+
+	/**
+	 * 只声明不赋值的遮蔽字段拿不到任何提取切片，必须补一份"压入类型零值 + 写字段"的合成切片，
+	 * 否则豁免 T0 之后会以"没有安全初值表达式"被拒，槽位停在 DCEVM 复制进来的祖先值上。
+	 */
+	@Test
+	void declaredOnlyShadowFieldGetsASynthesizedZeroSlice() throws Exception {
+		ClassNode node = newClassNode(ZeroDeclaredOnly.class);
+		HierarchyTreeOracle oracle = new HierarchyTreeOracle(
+			ShadowFieldInitFixTest.class.getClassLoader(), node);
+		InitFixSafetyGate.NestView nest = InitFixSafetyGate.NestView.of(null, node, oracle);
+		Map<String, List<InitFix.FieldExtract>> extracts = new java.util.LinkedHashMap<>();
+
+		InitFix.synthesizeZeroValueShadowExtracts(nest, node, node.name, Set.of("x"), Set.of(),
+			Map.of(), Set.of(), Set.of(), Map.of("x", internalName(ZeroAnc.class)),
+			fieldNodes(node), extracts, 1);
+
+		List<InitFix.FieldExtract> slices = extracts.get("x");
+		assertTrue(slices != null && slices.size() == 1,
+			"exactly one synthesized slice is expected, was " + slices);
+		List<AbstractInsnNode> insns = slices.get(0).instructions();
+		assertEquals(3, insns.size(), "the slice must be ALOAD 0 / zero / PUTFIELD: " + insns);
+		assertTrue(insns.get(0) instanceof VarInsnNode v
+		           && v.getOpcode() == Opcodes.ALOAD && v.var == 0,
+			"the synthesized slice must start from the receiver");
+		assertEquals(Opcodes.ICONST_0, insns.get(1).getOpcode(),
+			"an int field's type default is pushed as ICONST_0");
+		assertTrue(insns.get(2) instanceof FieldInsnNode f
+		           && f.getOpcode() == Opcodes.PUTFIELD && f.name.equals("x"),
+			"the synthesized slice must write the shadowed field itself");
+		assertTrue(slices.get(0).fromRootCtor(), "the slice stands for every root constructor");
+	}
+
+	/**
+	 * 合成切片只适用于"整段没有写指令"的形态：有写指令却取不到切片说明那些写无法证明是零值写，
+	 * 不得替它编一个切片出来（宁可漏补）。非遮蔽字段同理不进这条通道。
+	 */
+	@Test
+	void noSliceIsSynthesizedWhenTheFieldHasAWrite() throws Exception {
+		for (Class<?> type : List.of(ZeroExplicit.class, PlainShadow.class)) {
+			ClassNode node = newClassNode(type);
+			HierarchyTreeOracle oracle = new HierarchyTreeOracle(
+				ShadowFieldInitFixTest.class.getClassLoader(), node);
+			InitFixSafetyGate.NestView nest = InitFixSafetyGate.NestView.of(null, node, oracle);
+			Map<String, List<InitFix.FieldExtract>> extracts = new java.util.LinkedHashMap<>();
+			String field = type == ZeroExplicit.class ? "x" : "fresh";
+
+			InitFix.synthesizeZeroValueShadowExtracts(nest, node, node.name, Set.of(field), Set.of(),
+				Map.of(), Set.of(), Set.of(), Map.of(field, internalName(ZeroAnc.class)),
+				fieldNodes(node), extracts, 1);
+
+			assertFalse(extracts.containsKey(field),
+				"no slice may be invented for " + type.getSimpleName() + "." + field
+				+ ": its writes exist but cannot be proven to be zero-value writes");
+		}
+	}
+
 	// ---------------------------------------------------------------- emitter wiring
 
 	@Test
@@ -410,20 +504,38 @@ public class ShadowFieldInitFixTest {
 		assertEquals("written-by-user", shadow.s, "a genuinely written reference value must be kept");
 	}
 
-	/** F4 运行期复核：祖先字段 private 时链接失败（单字段隔离），不退化成猜测。 */
+	/**
+	 * private 祖先的运行期契约：槽位等于私有祖先值（DCEVM 复制的结果）时回写，
+	 * 且写入只落在子类自己的槽位上 —— 私有祖先槽位必须保持原值。
+	 */
 	@Test
-	void callSiteFailsClosedWhenTheAncestorFieldIsNotReadable() {
-		Throwable failure = assertThrows(Throwable.class, () -> HotswapBridge.bootstrapAncestor(
-			MethodHandles.lookup(), "p", MethodType.methodType(void.class, PrivateShadow.class, int.class),
-			HotswapBridge.KIND_CONDITIONAL_ANCESTOR, Opcodes.PUTFIELD,
-			PrivateShadow.class, PrivateShadow.class, PrivateAnc.class));
-		assertTrue(failure instanceof java.lang.BootstrapMethodError,
-			"an unreadable ancestor field must fail the call site, not silently fall back to a guess");
-		assertTrue(failure.getCause() != null && failure.getCause().toString().contains("private"),
-			"the failure must name the readability problem, was " + failure.getCause());
+	void callSiteReadsThePrivateAncestorSlot() throws Throwable {
+		HotswapBridge.drainConditionalStats();
+		PrivateShadow shadow = new PrivateShadow();
+
+		MethodHandle writer = privateAncestorWriter();
+		writer.invoke(shadow, 200);
+
+		assertEquals(200, shadow.p,
+			"a shadow field whose slot holds the migrated private ancestor value must be rewritten");
+		assertEquals(1, shadow.readP(),
+			"the private ancestor slot itself must not be touched by the subclass write");
 	}
 
-	/** F4 运行期复核：祖先字段静态性与实例槽位不符时链接失败。 */
+	/** private 祖先的负向侧：真被写过（既不等于祖先值也不等于默认值）仍然跳过。 */
+	@Test
+	void callSiteKeepsAReallyWrittenValueEvenWithAPrivateAncestor() throws Throwable {
+		PrivateShadow shadow = new PrivateShadow();
+		shadow.p = 777;
+
+		MethodHandle writer = privateAncestorWriter();
+		writer.invoke(shadow, 200);
+
+		assertEquals(777, shadow.p, "a genuinely written value must be kept");
+		assertEquals(1, shadow.readP(), "the private ancestor slot stays untouched");
+	}
+
+	/** 真正读不到的形态才是链接失败：静态性不符（实例槽位没有可比读数）。 */
 	@Test
 	void callSiteFailsClosedWhenTheAncestorFieldIsStatic() {
 		Throwable failure = assertThrows(Throwable.class, () -> HotswapBridge.bootstrapAncestor(
@@ -436,6 +548,20 @@ public class ShadowFieldInitFixTest {
 			"the failure must name the static mismatch, was " + failure.getCause());
 	}
 
+	/** 祖先类常量解析不到 / 不是祖先：同样在链接期失败（单字段隔离），不退化成猜测。 */
+	@Test
+	void callSiteFailsClosedWhenTheAncestorClassIsNotAnAncestor() {
+		Throwable failure = assertThrows(Throwable.class, () -> HotswapBridge.bootstrapAncestor(
+			MethodHandles.lookup(), "x", MethodType.methodType(void.class, Shadow.class, int.class),
+			HotswapBridge.KIND_CONDITIONAL_ANCESTOR, Opcodes.PUTFIELD,
+			Shadow.class, Shadow.class, PlainAnc.class));
+		assertTrue(failure instanceof java.lang.BootstrapMethodError,
+			"an unrelated ancestor class must fail the call site");
+		assertTrue(failure.getCause() != null
+		           && failure.getCause().toString().contains("not an ancestor"),
+			"the failure must name the ancestor mismatch, was " + failure.getCause());
+	}
+
 	// ---------------------------------------------------------------- helpers
 
 	private MethodHandle ancestorWriter(String field, Class<?> valueType) throws Throwable {
@@ -443,6 +569,14 @@ public class ShadowFieldInitFixTest {
 		CallSite site = HotswapBridge.bootstrapAncestor(
 			MethodHandles.lookup(), field, type, HotswapBridge.KIND_CONDITIONAL_ANCESTOR,
 			Opcodes.PUTFIELD, Shadow.class, Shadow.class, Anc.class);
+		return site.dynamicInvoker();
+	}
+
+	private MethodHandle privateAncestorWriter() throws Throwable {
+		MethodType type = MethodType.methodType(void.class, PrivateShadow.class, int.class);
+		CallSite site = HotswapBridge.bootstrapAncestor(
+			MethodHandles.lookup(), "p", type, HotswapBridge.KIND_CONDITIONAL_ANCESTOR,
+			Opcodes.PUTFIELD, PrivateShadow.class, PrivateShadow.class, PrivateAnc.class);
 		return site.dynamicInvoker();
 	}
 

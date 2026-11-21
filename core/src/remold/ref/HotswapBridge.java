@@ -106,8 +106,14 @@ public final class HotswapBridge {
 	 *
 	 * <p>DCEVM 重定义会把被遮蔽的继承槽位值复制进子类新增的同名槽位，于是存量实例上该槽位
 	 * "已有非默认值"却仍是合法初始状态。此处把比较基准换成祖先字段的运行时读数：
-	 * 相等则按新初值回写，其余非默认值仍保守跳过。祖先字段不可证明可读时在链接期失败
-	 * （按 {@code BootstrapMethodError} 单字段隔离），不退化成猜测。</p>
+	 * 相等则按新初值回写，其余非默认值仍保守跳过。祖先字段不可比较（静态性不符、祖先类解析不到）
+	 * 时在链接期失败（按 {@code BootstrapMethodError} 单字段隔离），不退化成猜测。</p>
+	 *
+	 * <p><b>已知保守边界</b>：同一批 Stage B 里若祖先字段自己被 {@code @RemoldReinit} 先改写成新值，
+	 * 期望值就会与新槽里那份 DCEVM 迁移副本（旧值）对不上，条件 CAS 判不相等后按保守语义跳过、
+	 * 计入 skipped 并告警 —— 结果是<b>漏补</b>（字段留在继承值上，等待下一轮补），而不是把旧值误写进
+	 * 新字段。这是刻意保留的取舍：改成不看当前值的强制写会同时放弃"真被写过就不覆盖"的负向保证，
+	 * 属于 {@link #KIND_FORCE} 的语义。</p>
 	 */
 	public static final int KIND_CONDITIONAL_ANCESTOR = 6;
 
@@ -827,8 +833,11 @@ public final class HotswapBridge {
 	 *
 	 * <p>bsmArgs 布局：{@code [int kind, int opcode, Class owner, Class host, Class ancestorOwner]}，
 	 * {@code ancestorOwner} 是分析期用 {@link ClassHierarchyOracle#findInheritedField} 定位到的
-	 * 祖先声明类。祖先字段在链接期复核可读性（实例性、非 private、确为祖先），任一不满足即抛
-	 * {@code BootstrapMethodError}；上层把它当作单字段链接失败隔离，字段留在待补台账，不会静默写入。</p>
+	 * 祖先声明类。链接期只复核<b>真正决定"能不能比较"</b>的形态：确实持有该字段、确为祖先、
+	 * 祖先声明是实例字段。访问权限不是边界 —— 祖先槽位的读数走完整权限的 lookup，
+	 * {@code private} / 跨包包内声明照样可读（DCEVM 的迁移复制同样不区分访问权限）。
+	 * 任一复核不通过即抛 {@code BootstrapMethodError}；上层把它当作单字段链接失败隔离，
+	 * 字段留在待补台账，不会静默写入。</p>
 	 */
 	public static CallSite bootstrapAncestor(
 	 Lookup caller,
@@ -879,11 +888,10 @@ public final class HotswapBridge {
 			throw new NoSuchFieldException("inherited field " + inherited + " is static; its value"
 			                               + " cannot be compared on the instance");
 		}
-		if (java.lang.reflect.Modifier.isPrivate(inheritedModifiers)) {
-			throw new NoSuchFieldException("inherited field " + inherited + " is private and not readable"
-			                               + " from the subclass");
-		}
 
+		// 祖父/曾祖父层声明的 private 槽位：IMPL_LOOKUP 是完整权限的 lookup，读得到；
+		// 私有性不构成"读不到"，只有类无法解析（bsmArgs 里的 Class 常量解析失败 → 链接期报错）
+		// 或静态性不符才拒绝。
 		MethodHandle getter = IMPL_LOOKUP.findGetter(ancestorOwner, fieldName, valType)
 		 .asType(MethodType.methodType(valType, Object.class));
 		// 引用类型的 CAS 模板参数全是 Object，先适配到字段类型，permuteArguments 才认得出同一组参数。

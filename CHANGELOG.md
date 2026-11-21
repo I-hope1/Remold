@@ -338,14 +338,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   自身，且按**重定义前**的层级解析：DCEVM 迁移复制的就是旧层级那条声明的值，同一批里中间类也新增同名
   字段时按批次新字节码解析会让比较基准随补丁顺序漂移），把该字段在同实例上的运行时读数作为 CAS 期望值：等于祖先值才按新初值回写；既不等于默认值也不
   等于祖先值（真被写过 / 来源不明）仍跳过并计入 skipped→warn；非遮蔽新增字段完全不变（零值 CAS）。
-  不可读的祖先声明（private / 跨包包内 / 静态性不符）与不可解析的超类链一律 fail-closed 退回原行为并
-  告警，运行期 bootstrap 再做一次同样的复核（链接失败只隔离该字段）。实测（JBR 21.0.8 + DCEVM，
-  `:tests:shadowFieldProbe`）：修复前 `mid.x=10 leaf.x=10`（warn 报告跳过 1/2 次条件写），修复后
-  `mid.x=200 leaf.x=300`、祖先 `BaseG0.x` 保持 `10/10`，下一轮新增的非遮蔽字段 `nm=41`/`nl=42` 照常写入。
-  单测 `ShadowFieldInitFixTest` 16 例（遮蔽检测/最近声明类/重定义前层级解析/private·static·同名异型
-  fail-closed/超类链不可解析/发射器接线/运行期 F1·F2 语义）；变异检查 3/3 击杀（恒不判定遮蔽 →
-  遮蔽检测与 F1 用例红；去掉祖先值比较改恒回写 → F2 负向用例红；祖先改按批次新层级解析 →
-  重定义前层级用例红）。
+  祖先声明的**访问权限不是边界**：DCEVM 的迁移复制按 `(name, desc)` 匹配、不区分访问权限，父类
+  `private` 字段的非零值同样会进子类新槽，因此 `private` / 跨包包内声明照常采纳，运行期祖先读数走
+  完整权限的 `MethodHandles.Lookup`（`IMPL_LOOKUP.findGetter`）；只有**静态性不符**与**不可解析的
+  超类链**才 fail-closed 退回原行为并告警，运行期 bootstrap 复核同一口径（链接失败只隔离该字段）。
+  同一处还有两个配套修正：其一，遮蔽新增字段**不参与 T0 零值等价判定** —— 存量槽位是继承值而不是
+  类型默认值，"显式 = 0"与"只声明不赋值"两种形态都会被 T0 在补丁生成前丢掉，前者现由补丁显式写回
+  `0`，后者补一份"压入类型零值 + 写字段"的合成切片；其二，记录一条**刻意保留的保守边界**：同一批
+  Stage B 里祖先字段若被 `@RemoldReinit` 先改写成新值，期望值与迁移副本对不上 → 保守跳过（漏补而非
+  误写），不改成强制写。实测（JBR 21.0.8 + DCEVM，`:tests:shadowFieldProbe`，三层夹具
+  `BaseG0 -> MidG1 -> LeafG2` + 匿名子类实例）：T0 豁免前该组读到 `zero.x=10`（字段被 T0 丢掉，
+  槽位停在迁移副本上），豁免后 `mid.x=200`/`mid.bx=15`/`mid.mx=31`、祖先槽位 `10/10`、
+  `leaf.x=300`、`leaf.lx=540`、`anon.lx=540`，
+  下一轮新增的非遮蔽字段 `v3m=46`/`v3l=586`（匿名实例同样 `586`）；T0 组 `zero.x=0`、`bare.x=0`
+  （祖先仍 `10/10`）；private 组 `sub.x=200`（私有槽位仍 `10`）。单测 `ShadowFieldInitFixTest` 21 例
+  （遮蔽检测/最近声明类/重定义前层级解析/private 采纳/static·同名异型 fail-closed/超类链不可解析/
+  T0 合成切片与"有写指令不合成"负向/发射器接线/运行期 F1·F2·private 私有槽不被写入）；变异检查见
+  `docs/battles/` 战报。
 
 - **发布链漏打 `plugin-mc-toast`**：`release.yml` 与 `ci.yml` 的插件打包循环只列了 `arc mixin forge fabric`，而 `RemoldConfigResolver` 已对 Fabric/Forge 默认自动追加 `mc-toast`，`resolvePluginJar` 又优先找本地构建产物——下一版 release assets / `remold-dist` 会缺这个插件，仓库外用户只能落到 JitPack 兜底或直接 `plugin jar not found`。两处循环补齐 `mc-toast`。
 

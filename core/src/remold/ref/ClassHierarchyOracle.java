@@ -52,8 +52,8 @@ public interface ClassHierarchyOracle {
 	 * 同名同描述符的字段声明，返回最近的一条。
 	 *
 	 * <p>用于识别"本次新增字段遮蔽了祖先字段"：{@code empty} 表示祖先链上没有任何同名同描述符声明
-	 * （不是遮蔽）；声明存在但 {@link InheritedField#readable} 为 {@code false} 时仍返回该条记录，
-	 * 由调用方 fail-closed 退回原有行为并告警。</p>
+	 * （不是遮蔽）。访问权限不作为返回条件 —— {@code private} / 跨包包内的声明照样返回，
+	 * 由调用方按"静态性是否与实例槽位相符"决定是否采用。</p>
 	 */
 	Optional<InheritedField> findInheritedField(String className, String fieldName, String desc);
 
@@ -65,7 +65,12 @@ public interface ClassHierarchyOracle {
 	 */
 	boolean isSuperclassChainResolvable(String className);
 
-	/** 祖先字段声明：最近的声明类、其修饰符，以及它从被查询类视角是否可读。 */
+	/**
+	 * 祖先字段声明：最近的声明类、其修饰符，以及它从被查询类视角是否按 Java 语言规则可见。
+	 *
+	 * <p>{@link #readable} 只反映语言层可见性，<b>不是</b>遮蔽判定门：运行期读取祖先槽位走完整权限的
+	 * lookup，{@code private} 声明同样可读。</p>
+	 */
 	final class InheritedField {
 		public final String  declaringClass;
 		public final int     access;

@@ -45,6 +45,7 @@ import remold.RemoldAgent.LayoutDecision;
 import remold.RemoldAgent.ListenerTiming;
 import remold.RemoldAgent.Liveness;
 import remold.RemoldAgent.RemovedMemberScan;
+import remold.RemoldAgent.RoundSkips;
 
 import static remold.RemoldAgent.HOTSWAP_LOCK;
 import static remold.RemoldAgent.INTERNAL_CONTEXT;
@@ -142,6 +143,8 @@ final class DynamicRedefineExecutor {
 			// 到 InitFix 与回调完成结束。
 			long dynStartNanos = System.nanoTime();
 			BatchReportScope.begin();
+			// 入口门禁与批次路径同一套跳过台账：单类入口也要让"被拦下"在日志里可见（#[HOTSWAP-SKIPPED]）。
+			RoundSkips skips = new RoundSkips();
 			LAST_REDEFINE_VM_LEVEL_FAILURE = false;
 			String className = targetClass.getName();
 			byte[] sourceBytes = newBytecode;
@@ -275,6 +278,23 @@ final class DynamicRedefineExecutor {
 			}
 			long initFixMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - initFixStartNanos);
 
+			// 入口门禁在本方法内、任何 redefine 之前跑完：单类入口没有"其余类照常"可言，被拒即整类不落地，
+			// 且必须在第一次 redefine 之前就判——否则阶段 A 已生效、阶段 C 被拒，JVM 就停在半套状态。
+			ClassDefinition stageADefinition = null;
+			if (twoPhase) {
+				stageADefinition = RedefineEntryGate.gateOne(new ClassDefinition(targetClass, stageABytes), skips);
+				if (stageADefinition == null) {
+					skips.report();
+					return false;
+				}
+			}
+			ClassDefinition finalDefinition = RedefineEntryGate.gateOne(
+			 new ClassDefinition(targetClass, runtimeBytes), skips);
+			if (finalDefinition == null) {
+				skips.report();
+				return false;
+			}
+
 			// 堆实例哨兵三切面（默认关闭，-Dremold.probe.heapwatch=true 开启）：
 			// 用于定位「某类字段在 redefine / 字段初始化补丁窗口内被置 null」这类跨类污染。
 			HeapFieldWatch.snapshot("before-redefine", className);
@@ -287,7 +307,7 @@ final class DynamicRedefineExecutor {
 				if (twoPhase) {
 					// ---- 阶段 A：新结构 + 旧方法体（构造器/<clinit> 保留新体） ----
 					long tStageA = System.nanoTime();
-					inst.redefineClasses(new ClassDefinition(targetClass, stageABytes));
+					inst.redefineClasses(stageADefinition);
 					stageAMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tStageA);
 					HeapFieldWatch.snapshot("after-stage-a", className);
 					// 阶段 A 已生效：分析期 oracle 看的"新结构"仍是 C，但 JVM 当前真实形态是 A，
@@ -309,7 +329,7 @@ final class DynamicRedefineExecutor {
 					// ---- 阶段 C：提交现成的 runtimeBytes（桥接与 InitFix.transform 已做过，不重跑） ----
 					long tStageC = System.nanoTime();
 					try {
-						inst.redefineClasses(new ClassDefinition(targetClass, runtimeBytes));
+						inst.redefineClasses(finalDefinition);
 					} catch (Throwable stageCFailure) {
 						LAST_REDEFINE_VM_LEVEL_FAILURE = isVmLevelRedefineFailure(stageCFailure);
 						if (LAST_REDEFINE_VM_LEVEL_FAILURE) {
@@ -321,8 +341,15 @@ final class DynamicRedefineExecutor {
 							return false;
 						}
 						boolean rolledBack = false;
+						// 回滚同样是 redefine：畸形字节一样会在 VM 里炸，所以这里也过门禁。
+						ClassDefinition rollbackDefinition = RedefineEntryGate.gateOne(
+						 new ClassDefinition(targetClass, oldBytes), skips);
 						try {
-							inst.redefineClasses(new ClassDefinition(targetClass, oldBytes));
+							if (rollbackDefinition == null) {
+								throw new IllegalStateException("the baseline bytes of " + className
+								 + " fail the redefine entry gate, so they cannot be restored");
+							}
+							inst.redefineClasses(rollbackDefinition);
 							recordRuntimeBytecode(className, oldBytes);
 							rolledBack = true;
 						} catch (Throwable rollbackFailure) {
@@ -340,7 +367,7 @@ final class DynamicRedefineExecutor {
 					HeapFieldWatch.snapshot("after-stage-c", className);
 				} else {
 					long tRedef = System.nanoTime();
-					inst.redefineClasses(new ClassDefinition(targetClass, runtimeBytes));
+					inst.redefineClasses(finalDefinition);
 					redefMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - tRedef);
 					HeapFieldWatch.snapshot("after-redefine", className);
 					recordRuntimeBytecode(className, runtimeBytes);

@@ -482,8 +482,8 @@ public class InitializerDriftTest {
 			""");
 		// Load the v1 class but never instantiate it: the class is live, the instance count is 0.
 		Class<?> host = Class.forName("idl19.Host", false, new ByteLoader(v1));
-		java.util.concurrent.ConcurrentHashMap<String, Class<?>> previousLoaded =
-			remold.RemoldAgent.loadedClassesMap;
+		remold.LoadedClassIndex previousLoaded =
+			remold.RemoldAgent.loadedClassIndex();
 		remold.RemoldAgent.bytecodeCache.put("idl19.Host", v1.get("idl19.Host"));
 		java.util.List<String> warns = new java.util.ArrayList<>();
 		java.util.List<String> infos = new java.util.ArrayList<>();
@@ -497,7 +497,7 @@ public class InitializerDriftTest {
 		};
 		long enumerationsBefore = InitializerDrift.INSTANCE_ENUMERATIONS.get();
 		try {
-			remold.RemoldAgent.loadedClassesMap = new java.util.concurrent.ConcurrentHashMap<>();
+			remold.RemoldAgent.loadedClassesMap = new remold.LoadedClassIndex();
 			remold.RemoldAgent.loadedClassesMap.put("idl19.Host", host);
 			InitializerDrift.report(Map.of("idl19.Host", v2.get("idl19.Host")), v1);
 		} finally {
@@ -565,11 +565,11 @@ public class InitializerDriftTest {
 		};
 		// A loaded sentinel makes the old per-class enumeration observable: each of the six
 		// keys resolves to a live Class, so the aggregation path must still not touch LibTool.
-		java.util.concurrent.ConcurrentHashMap<String, Class<?>> previousLoaded =
-			remold.RemoldAgent.loadedClassesMap;
+		remold.LoadedClassIndex previousLoaded =
+			remold.RemoldAgent.loadedClassIndex();
 		long enumerationsBefore = InitializerDrift.INSTANCE_ENUMERATIONS.get();
 		try {
-			remold.RemoldAgent.loadedClassesMap = new java.util.concurrent.ConcurrentHashMap<>();
+			remold.RemoldAgent.loadedClassesMap = new remold.LoadedClassIndex();
 			for (String key : batch.keySet()) {
 				remold.RemoldAgent.loadedClassesMap.put(key, InitializerDriftTest.class);
 			}
@@ -614,7 +614,7 @@ public class InitializerDriftTest {
 		remold.ref.StageBInstanceCache.put(host, new Object[7]);
 
 		java.util.List<String> warns = new java.util.ArrayList<>();
-		java.util.concurrent.ConcurrentHashMap<String, Class<?>> prevLoaded = remold.RemoldAgent.loadedClassesMap;
+		remold.LoadedClassIndex prevLoaded = remold.RemoldAgent.loadedClassIndex();
 		remold.RemoldAgent.Logger oldLogger = remold.RemoldAgent.logger;
 		remold.RemoldAgent.logger = new remold.RemoldAgent.Logger() {
 			public void log(String msg) {}
@@ -624,7 +624,7 @@ public class InitializerDriftTest {
 			public void error(String msg, Throwable t) {}
 		};
 		try {
-			remold.RemoldAgent.loadedClassesMap = new java.util.concurrent.ConcurrentHashMap<>();
+			remold.RemoldAgent.loadedClassesMap = new remold.LoadedClassIndex();
 			remold.RemoldAgent.loadedClassesMap.put("idl20.Host", host);
 			InitializerDrift.report(Map.of("idl20.Host", v2.get("idl20.Host")), v1);
 		} finally {

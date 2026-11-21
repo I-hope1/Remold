@@ -10,6 +10,7 @@ import remold.profiler.DynamicProfilerAPI;
 import remold.ref.HeapFieldWatch;
 import remold.ref.HotswapBridge;
 import remold.ref.InitFix;
+import remold.ref.PendingLoadPatch;
 import remold.ref.StageBInstanceCache;
 import remold.vcs.AlignmentMetaStore;
 import remold.vcs.Changeset;
@@ -20,6 +21,7 @@ import remold.vcs.VcsCommitGate;
 import remold.vcs.BytecodePack;
 import remold.util.*;
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
@@ -309,16 +311,234 @@ public class RemoldAgent {
 	 * <p>生命周期与 {@link #bytecodeCache} 严格一致：只在 redefine 成功后落账，
 	 * 失败/回滚不动，避免"用一份从未加载过的版本"当身份依据。</p>
 	 */
-	public static final Map<String, java.util.Set<String>> inventedSlots = new ConcurrentHashMap<>();
+	static final ScopeKeyedNames INVENTED_SLOTS = new ScopeKeyedNames();
 
-	/** 本轮算出的自造名，redefine 成功后才并入 {@link #inventedSlots}。 */
-	static final Map<String, Set<String>> pendingInvented = new ConcurrentHashMap<>();
+	/**
+	 * {@link #INVENTED_SLOTS} 的只读 {@code Map} 视图。
+	 *
+	 * <p><b>为什么分成两个字段</b>：这个字段是 agent 的公开面（历史插件/探针按
+	 * {@code Map<String, Set<String>>} 读它），声明类型必须保持 {@code java.util.Map} 的字节码描述符，
+	 * 否则旧插件在链接期就 {@code NoSuchFieldError}。精确 scope 的读写走包内可见的
+	 * {@link #INVENTED_SLOTS}，两者指向<b>同一个实例</b>，不存在两份状态。</p>
+	 */
+	public static final Map<String, java.util.Set<String>> inventedSlots = INVENTED_SLOTS;
+
+	/**
+	 * 本轮算出的自造名，redefine 成功后才并入 {@link #INVENTED_SLOTS}。
+	 *
+	 * <p>键 = <b>(loader scope, 类名)</b>：scope 号由 {@link AlignmentMetaStore#loaderScopeId} 统一分配
+	 * （与 {@link AnnotationTransformer.PendingAlignedClasses}、{@link PendingLoadPatch} 同一口径）。
+	 * 只按类名键会在"两个 loader 各有一个同名类"时串用——A 算出的自造名被 B 的成功回执取走，
+	 * 下一轮 B 的 lambda 会按 A 的槽位名配对（{@code docs/status.md} §5 风险 15）。</p>
+	 *
+	 * <p>生产写入侧（对齐期）已能拿到 {@code alignLoader}，所以走精确 scope 写入
+	 * （{@link ScopeKeyedNames#put(long, String, Set)}），不再靠 {@link #scopeOfLoadedClass} 猜；
+	 * 成功回执（{@link #commitInvented}) 按同一 scope 取。</p>
+	 */
+	static final ScopeKeyedNames pendingInvented = new ScopeKeyedNames();
+
+	/** 源码级未织入基线的 staged → commit 两级容器（风险 16：并发语义窗口）。 */
+	private static final SourceBytecodeStaging SOURCE_BYTES = new SourceBytecodeStaging();
 
 	/**
 	 * 源码级未织入基线缓存（用于对齐器与源码变更分析，避免 Mixin 等增强注入的合成方法/字段污染对齐逻辑）
 	 * dotClassName -> sourceBytecode
+	 *
+	 * <p>这里暴露的只是<b>已提交视图</b>：一次 redefine 事务从"写入候选字节"到"提交/回滚"之间，
+	 * 候选字节只存在于 {@link #SOURCE_ROUND} 指向的轮次暂存里，读方（对齐器、外部重定义的
+	 * no-op 判定、Mixin 兜底）永远只看到上一版已生效字节。提交时整表替换快照，因此一轮多键
+	 * 写入对读方是原子的（不会看到半批提交）。</p>
 	 */
-	public static final Map<String, byte[]> sourceBytecodeCache = new ConcurrentHashMap<>();
+	public static final Map<String, byte[]> sourceBytecodeCache = SOURCE_BYTES.committedView();
+
+	/**
+	 * 当前线程进行中的源码基线事务轮次；{@code null} 表示无事务（写入直接落已提交视图）。
+	 *
+	 * <p>按线程而非全局持有：轮次暂存不会跨轮、也不会串到别的事务线程；读方从不读它。</p>
+	 */
+	private static final ThreadLocal<SourceBytecodeStaging.Round> SOURCE_ROUND = new ThreadLocal<>();
+
+	/**
+	 * 源码级未织入基线的 staged → commit 两级容器（风险 16：<b>并发语义窗口</b>）。
+	 *
+	 * <p><b>为什么需要它</b>：一次 redefine 事务在"写入本轮候选源码字节"到"失败回滚 / 成功提交"之间
+	 * 存在真实窗口，跨度包含匿名类对齐、织入桥、布局门与 {@code redefineClasses}。直接写全局缓存时，
+	 * 窗口内的读方（外部 redefine/retransform 触发的 no-op 判定、对齐旧侧、Mixin 兜底）会读到
+	 * <b>从未生效</b>的字节，从而静默跳过织入或拿错基线。</p>
+	 *
+	 * <p><b>职责边界</b>：</p>
+	 * <ul>
+	 *   <li><b>已提交视图</b>：{@link #committedView()} 是读方唯一可见的字节。读取无锁，写入在锁内
+	 *       整表替换快照，因此一轮多处提交对读方表现为"要么全见旧值、要么全见新值"。</li>
+	 *   <li><b>轮次暂存</b>：{@link #begin()} 产出按轮次身份存在的 {@link Round}（挂在调用线程上，
+	 *       不跨轮、不跨线程串味）。事务窗口内的写入只落这里，读方永远看不到。</li>
+	 *   <li>提交：{@link Round#commit} 按类判定是否生效，再<b>一次性</b>并入已提交视图并清空暂存；
+	 *       回滚：{@link Round#discard()} 整份丢弃，已提交视图保持上一版，不留半写条目。</li>
+	 * </ul>
+	 *
+	 * <p><b>不变量</b>：键仍是 dot 类名；不持 {@code Class}、不持 {@code ClassLoader}、不新增强引用；
+	 * 值仍是调用方给的那份字节数组（与旧实现一致，不做防御性拷贝）。</p>
+	 */
+	static final class SourceBytecodeStaging {
+
+		/** 已提交快照；读方无锁读取，写方在 {@link #writeLock} 内整表替换。 */
+		private volatile Map<String, byte[]> committed = Map.of();
+
+		private final Object writeLock = new Object();
+
+		byte[] committedGet(String key) {
+			return key == null ? null : committed.get(key);
+		}
+
+		/** 非事务写：直接进已提交视图（首次加载登记 / 外部重定义 / VCS 回退等非事务调用方）。 */
+		byte[] committedPut(String key, byte[] bytes) {
+			if (key == null || bytes == null) return null;
+			synchronized (writeLock) {
+				Map<String, byte[]> next = new HashMap<>(committed);
+				byte[] prev = next.put(key, bytes);
+				committed = Collections.unmodifiableMap(next);
+				return prev;
+			}
+		}
+
+		/** 非事务删：立即从已提交视图移除（清理时机与旧实现一致）。 */
+		byte[] committedRemove(String key) {
+			if (key == null) return null;
+			synchronized (writeLock) {
+				if (!committed.containsKey(key)) return null;
+				Map<String, byte[]> next = new HashMap<>(committed);
+				byte[] prev = next.remove(key);
+				committed = Collections.unmodifiableMap(next);
+				return prev;
+			}
+		}
+
+		/** 一次性并入多条：读方在替换前后看到的都是完整快照，不会看到半批提交。 */
+		void committedPutAll(Map<String, byte[]> entries) {
+			if (entries == null || entries.isEmpty()) return;
+			synchronized (writeLock) {
+				Map<String, byte[]> next = new HashMap<>(committed);
+				next.putAll(entries);
+				committed = Collections.unmodifiableMap(next);
+			}
+		}
+
+		/** 读方使用的已提交视图（实现 {@link Map}，但写入走的仍是快照替换，不是原地改）。 */
+		Map<String, byte[]> committedView() {
+			return new CommittedView();
+		}
+
+		/** 开启一轮暂存。调用方负责在本轮结束时 commit 或 discard。 */
+		Round begin() {
+			return new Round(this);
+		}
+
+		/**
+		 * 单轮暂存容器。生命周期严格由开启它的线程掌握：
+		 * {@link #stage} → {@link #commit} / {@link #discard}。
+		 */
+		static final class Round {
+			private final SourceBytecodeStaging owner;
+			private final Map<String, byte[]> staged = new LinkedHashMap<>();
+
+			Round(SourceBytecodeStaging owner) {
+				this.owner = owner;
+			}
+
+			/** 只写暂存；同一 key 重复 stage 以最后一次为准。读方看不到。 */
+			void stage(String key, byte[] bytes) {
+				if (key == null || bytes == null) return;
+				staged.put(key, bytes);
+			}
+
+			byte[] stagedBytes(String key) {
+				return key == null ? null : staged.get(key);
+			}
+
+			int stagedCount() {
+				return staged.size();
+			}
+
+			boolean isEmpty() {
+				return staged.isEmpty();
+			}
+
+			/** 回滚：整份丢弃，已提交视图保持上一版，不留半写条目。 */
+			void discard() {
+				staged.clear();
+			}
+
+			/**
+			 * 提交：按类判定本轮暂存是否生效，再原子并入已提交视图。
+			 *
+			 * <p>判据与旧的回滚语义逐条对齐（未生效类在已提交视图里本来就还是上一版，丢弃暂存即可）：</p>
+			 * <ul>
+			 *   <li>{@code previous} 里没有该 key：本轮不负责它（例如事务期间由外部回调直接写的条目），保留新字节；</li>
+			 *   <li>该类重定义成功（{@code applied}）：保留新字节；</li>
+			 *   <li>该类本轮新注入（旧源码为空且不在 {@code loadedBefore}）：保留新字节；</li>
+			 *   <li>其余未生效类：丢弃暂存条目，已提交视图不动。</li>
+			 * </ul>
+			 */
+			void commit(Map<String, byte[]> previous, Set<String> applied, Set<String> loadedBefore) {
+				Map<String, byte[]> effective = new LinkedHashMap<>();
+				for (Map.Entry<String, byte[]> entry : staged.entrySet()) {
+					String key = entry.getKey();
+					if (!previous.containsKey(key) || applied.contains(key)) {
+						effective.put(key, entry.getValue());
+						continue;
+					}
+					byte[] prev = previous.get(key);
+					if (prev == null && !loadedBefore.contains(key)) {
+						effective.put(key, entry.getValue());
+					}
+				}
+				// 先结束本轮，再并入快照：即使并入失败也不会把条目漏给下一轮。
+				staged.clear();
+				owner.committedPutAll(effective);
+			}
+		}
+
+		/** 已提交视图：{@code get} 读当前快照；{@code put}/{@code remove} 走快照替换（非事务写）。 */
+		private final class CommittedView extends AbstractMap<String, byte[]> {
+			@Override
+			public byte[] get(Object key) {
+				return committed.get(key);
+			}
+
+			@Override
+			public boolean containsKey(Object key) {
+				return committed.containsKey(key);
+			}
+
+			@Override
+			public int size() {
+				return committed.size();
+			}
+
+			@Override
+			public Set<Entry<String, byte[]>> entrySet() {
+				return committed.entrySet();
+			}
+
+			@Override
+			public byte[] put(String key, byte[] value) {
+				return committedPut(key, value);
+			}
+
+			@Override
+			public byte[] remove(Object key) {
+				return committedRemove(key instanceof String ? (String) key : null);
+			}
+
+			@Override
+			public void clear() {
+				synchronized (writeLock) {
+					committed = Map.of();
+				}
+			}
+		}
+	}
+
 
 	/**
 	 * 字节码重织入桥接接口（用于 Mixin、AspectJ、自定义字节码增强器在热重载时重新织入）。
@@ -826,21 +1046,55 @@ public class RemoldAgent {
 
 	/** 获取源码基线（对齐后、未织入第三方切片的原始字节，供 Diff / 对齐比对用） */
 	public static byte[] getSourceBytecode(String dotClassName) {
-		return dotClassName != null ? sourceBytecodeCache.get(dotClassName) : null;
+		return dotClassName != null ? SOURCE_BYTES.committedGet(dotClassName) : null;
 	}
 
-	/** 写入源码级未织入基线缓存。 */
+	/**
+	 * 写入源码级未织入基线缓存。
+	 *
+	 * <p>有进行中的事务轮次时只写轮次暂存（读方看不到，等提交才可见）；否则直接进已提交视图
+	 * （首次加载登记、外部重定义回调、VCS 回退等非事务路径）。</p>
+	 */
 	static void recordSourceBytecode(String dotClassName, byte[] bytecode) {
-		if (dotClassName != null && bytecode != null) {
-			sourceBytecodeCache.put(dotClassName, bytecode);
+		if (dotClassName == null || bytecode == null) return;
+		SourceBytecodeStaging.Round round = SOURCE_ROUND.get();
+		if (round != null) {
+			round.stage(dotClassName, bytecode);
+		} else {
+			SOURCE_BYTES.committedPut(dotClassName, bytecode);
 		}
 	}
 
-	/** 移除源码级未织入基线缓存条目。 */
+	/** 移除源码级未织入基线缓存条目（清理时机与旧实现一致：立即作用于已提交视图）。 */
 	static void removeSourceBytecode(String dotClassName) {
 		if (dotClassName != null) {
-			sourceBytecodeCache.remove(dotClassName);
+			SOURCE_BYTES.committedRemove(dotClassName);
 		}
+	}
+
+	/**
+	 * 开启一轮源码基线事务暂存。
+	 *
+	 * <p>防御：若本线程上一轮因异常未收尾，先整份丢弃，绝不让上一轮的条目串到新轮。</p>
+	 */
+	static SourceBytecodeStaging.Round beginSourceRound() {
+		abandonSourceRound();
+		SourceBytecodeStaging.Round round = SOURCE_BYTES.begin();
+		SOURCE_ROUND.set(round);
+		return round;
+	}
+
+	/** 当前线程未收尾的暂存轮次（仅事务自身可见；无事务返回 {@code null}）。 */
+	static SourceBytecodeStaging.Round currentSourceRound() {
+		return SOURCE_ROUND.get();
+	}
+
+	/** 放弃本线程未收尾的暂存轮次（异常路径防御）：整份丢弃，不留半写条目。 */
+	static void abandonSourceRound() {
+		SourceBytecodeStaging.Round round = SOURCE_ROUND.get();
+		if (round == null) return;
+		SOURCE_ROUND.remove();
+		round.discard();
 	}
 
 	/** 获取运行时生效基线（织入 Mixin / 插件后的实际运行字节，供 InitFix / Schema 判断用） */
@@ -1545,7 +1799,30 @@ public class RemoldAgent {
 	//endregion
 
 	//region HotSwap Core Logic
-	public static volatile ConcurrentHashMap<String, Class<?>> loadedClassesMap = new ConcurrentHashMap<>();
+	/**
+	 * 已加载类快照（实现是 {@link LoadedClassIndex}：按 {@code (loader scope, 类名)} 分键）。
+	 *
+	 * <p><b>声明类型是二进制兼容契约</b>：这个字段历史上是
+	 * {@code ConcurrentHashMap<String, Class<?>>}，已发布的插件 jar（{@code plugin-fabric} 的就绪探测、
+	 * {@code plugin-mc-toast} 的宿主类定位）按旧字段描述符
+	 * {@code Ljava/util/concurrent/ConcurrentHashMap;} 链接它——声明类型一变就是链接期
+	 * {@code NoSuchFieldError}（{@code loadClassSnap} 的原子切换也是整体替换引用，读者语义不变）。
+	 * 因此这里保持旧声明类型、装入 {@link LoadedClassIndex} 实例：描述符不变、行为升级。
+	 * 需要精确 scope 的调用方用 {@link #loadedClassIndex()}。</p>
+	 */
+	public static volatile ConcurrentHashMap<String, Class<?>> loadedClassesMap = new LoadedClassIndex();
+
+	/**
+	 * {@link #loadedClassesMap} 的类型化读取口（精确 scope 查 {@link LoadedClassIndex#get(long, String)}）。
+	 *
+	 * <p>字段的声明类型为了二进制兼容保持在 {@code ConcurrentHashMap}；生产路径上它<b>总是</b>
+	 * {@link LoadedClassIndex}。万一有人塞进一张普通 {@code ConcurrentHashMap}，这里按每份副本自己的
+	 * loader 重建索引（scope 由 loader 推导，不是猜），避免调用方拿到 {@code null} 而静默漏扫。</p>
+	 */
+	public static LoadedClassIndex loadedClassIndex() {
+		ConcurrentHashMap<String, Class<?>> current = loadedClassesMap;
+		return current instanceof LoadedClassIndex index ? index : new LoadedClassIndex(current);
+	}
 
 	/** 每个 dot 名当前缓存字节的来源加载器 rank（0 bootstrap / 1 System-Agent / 2 宿主）与描述。 */
 	private static final Map<String, Integer> CACHE_LOADER_RANK = new ConcurrentHashMap<>();
@@ -1641,20 +1918,28 @@ public class RemoldAgent {
 	}
 
 	static void loadClassSnap(Class<?>[] classes) {
-		var newMap = new ConcurrentHashMap<String, Class<?>>((int) (classes.length / 0.75f) + 1);
+		LoadedClassIndex index = new LoadedClassIndex();
+		// loader → scope 只解析一次：AlignmentMetaStore 的 scope 分配是加锁的，逐类调用会在
+		// 万级已加载类上反复抢同一把锁。
+		Map<ClassLoader, Long> scopes = new IdentityHashMap<>();
 		for (Class<?> c : classes) {
+			if (c == null) continue;
 			String name = c.getName();
 			if (isNonLoadableClass(name)) {
-				// 模板类若被历史版本误注入过，这里把它排除出已加载快照：
+				// 模板类若被历史版本误注入过，把它排除出已加载快照：
 				// 既不重定义，也不让读者扫描把它当外部读者。
 				continue;
 			}
-			Class<?> existing = newMap.putIfAbsent(name, c);
-			if (existing != null && isBetterLoadedClassCandidate(c, existing)) {
-				newMap.put(name, c);
+			ClassLoader loader = c.getClassLoader();
+			Long scope = scopes.get(loader);
+			if (scope == null) {
+				scope = AlignmentMetaStore.INSTANCE.loaderScopeId(loader);
+				scopes.put(loader, scope);
 			}
+			// 按 (scope, 类名) 登记：同名类在另一个 loader 下的副本不再被覆盖/顶掉。
+			index.put(scope, name, c);
 		}
-		loadedClassesMap = newMap;              // 原子切换，读者要么看到完整旧 map，要么完整新 map
+		loadedClassesMap = index;               // 原子切换，读者要么看到完整旧快照，要么完整新快照
 	}
 
 	/**
@@ -1823,9 +2108,22 @@ public class RemoldAgent {
 		public final Set<String>         targetClasses = new LinkedHashSet<>();
 		public       boolean             preRegistered = false;
 		public       boolean             committed     = false;
+		/**
+		 * 本事务 pending 登记用的 loader scope。
+		 *
+		 * <p>构造时按宿主类解析：宿主已加载就取它的 {@code ClassLoader} 身份，由
+		 * {@link AlignmentMetaStore#loaderScopeId} 分配 scope 号（与 {@code PendingLoadPatch} /
+		 * {@code InitFix} / {@code LoadFrontier} 同一口径）；宿主此刻还没加载则退回
+		 * {@link PendingLoadPatch#ANY_SCOPE}，出生时"先查精确 scope、再退回哨兵"。</p>
+		 *
+		 * <p>只在构造时解析一次：preRegister / rollback / commit 必须落在同一个 scope 上，
+		 * 否则"登记进去、回滚删不掉"。</p>
+		 */
+		public final long                pendingScope;
 
 		public AlignmentTransaction(String hostName) {
 			this.hostName = hostName;
+			this.pendingScope = scopeOfLoadedClass(hostName);
 		}
 
 		public void preRegister() {
@@ -1835,8 +2133,8 @@ public class RemoldAgent {
 				String targetSlash = entry.getKey().replace('.', '/');
 				String targetDot   = entry.getKey().replace('/', '.');
 				byte[] bytes       = entry.getValue();
-				AnnotationTransformer.pendingAlignedClasses.put(targetSlash, bytes);
-				AnnotationTransformer.pendingAlignedClasses.put(targetDot, bytes);
+				AnnotationTransformer.PENDING_ALIGNED.put(pendingScope, targetSlash, bytes);
+				AnnotationTransformer.PENDING_ALIGNED.put(pendingScope, targetDot, bytes);
 			}
 		}
 
@@ -1852,8 +2150,8 @@ public class RemoldAgent {
 		public void rollback(boolean pinOldToPending) {
 			if (committed) return;
 			for (String key : pendingAdds.keySet()) {
-				AnnotationTransformer.pendingAlignedClasses.remove(key.replace('.', '/'));
-				AnnotationTransformer.pendingAlignedClasses.remove(key.replace('/', '.'));
+				AnnotationTransformer.PENDING_ALIGNED.remove(pendingScope, key.replace('.', '/'));
+				AnnotationTransformer.PENDING_ALIGNED.remove(pendingScope, key.replace('/', '.'));
 			}
 			if (pinOldToPending) {
 				// 将被磁盘新文件覆盖但重定义未生效的旧版本字节码钉在 pending 中
@@ -1861,12 +2159,34 @@ public class RemoldAgent {
 					if (entry.getValue() != null) {
 						String slash = entry.getKey().replace('.', '/');
 						String dot   = entry.getKey().replace('/', '.');
-						AnnotationTransformer.pendingAlignedClasses.put(slash, entry.getValue());
-						AnnotationTransformer.pendingAlignedClasses.put(dot, entry.getValue());
+						AnnotationTransformer.PENDING_ALIGNED.put(pendingScope, slash, entry.getValue());
+						AnnotationTransformer.PENDING_ALIGNED.put(pendingScope, dot, entry.getValue());
 					}
 				}
 			}
 		}
+	}
+
+	/**
+	 * 已加载类的 loader scope；类尚未加载（或查询失败）时退回 {@link PendingLoadPatch#ANY_SCOPE}。
+	 *
+	 * <p>scope 号统一由 {@link AlignmentMetaStore#loaderScopeId} 分配，这里只负责"类名 → 当前定义
+	 * loader"这一段，不自己造身份。</p>
+	 *
+	 * <p><b>降级语义</b>：这里拿不到 loader，只能走 {@link LoadedClassIndex#get(Object)} 的"仅类名"
+	 * 查询——同名类在两个 loader 下各有一份且无唯一权威副本时，它返回 {@code null}（并 warn），
+	 * 于是本次解析退回 {@link PendingLoadPatch#ANY_SCOPE}。哨兵的含义是"出生时先查精确 scope、再退回
+	 * 它"，方向保守，<b>不会</b>把 A 的 loader 冒充成 B 的。拿得到 loader 的调用方应当直接用
+	 * {@link LoadedClassIndex#get(long, String)}。</p>
+	 */
+	static long scopeOfLoadedClass(String dotClassName) {
+		try {
+			Class<?> loaded = dotClassName == null ? null : loadedClassesMap.get(dotClassName);
+			if (loaded != null) return AlignmentMetaStore.INSTANCE.loaderScopeId(loaded.getClassLoader());
+		} catch (Throwable ignored) {
+			// 解析失败按"加载器未知"处理：方向保守，绝不冒充某个 scope。
+		}
+		return PendingLoadPatch.ANY_SCOPE;
 	}
 
 	static void rejectHostGroup(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,
@@ -1911,6 +2231,16 @@ public class RemoldAgent {
 
 		private final Map<String, String> byClass = new LinkedHashMap<>();
 
+		/**
+		 * 本轮被 {@link RedefineEntryGate}（class 文件合法性门禁）拒掉的类名。
+		 *
+		 * <p><b>为什么单独留一份</b>：判决文本是给人读的，程序判据不能靠解字符串。而"被拒类对应的
+		 * {@link AlignmentTransaction} 不许提交"这条规则必须有<b>机器可读</b>的输入，否则
+		 * {@code TwoPhaseCoordinator} 只能看到过滤后的 {@code definitions}、看不到"谁被拒了"，
+		 * 于是把被拒类的事务一起 commit —— 未生效字节就此变成基线（{@code docs/status.md} §5 风险 15/16）。</p>
+		 */
+		private final Set<String> bytecodeRejected = new LinkedHashSet<>();
+
 		/** 记一条。同名只保留<b>首个</b>判决 —— 第一个拦下它的门才是真正原因。 */
 		void add(String className, String verdict) {
 			if (className == null || className.isEmpty()) return;
@@ -1938,6 +2268,20 @@ public class RemoldAgent {
 
 		/** 被跳过的类数（用于成功行上的"还有几个没进来"）。 */
 		int size() { return byClass.size(); }
+
+		/** 记一条"被 class 文件合法性门禁拒掉"的结构化事实（见 {@link #bytecodeRejected}）。 */
+		void markBytecodeRejected(String className) {
+			if (className != null && !className.isEmpty()) bytecodeRejected.add(className);
+		}
+
+		/**
+		 * 本轮被合法性门禁拒掉的类名（只读快照）。
+		 *
+		 * <p>消费方只有一处：{@link RedefineEntryGate#withoutRejectedGroups} 据此把"含被拒类的事务组"
+		 * 整组移出提交范围。<b>不得</b>把它当成通用拒绝清单使用——其它门的拒绝语义不同（有的要回队、
+		 * 有的要重启），混用会改变那些路径的行为。</p>
+		 */
+		Set<String> bytecodeRejected() { return Set.copyOf(bytecodeRejected); }
 
 		/**
 		 * 拼一条紧凑判决：{@code CODE: detail — action}（detail / action 为空则省略）。
@@ -2301,46 +2645,59 @@ public class RemoldAgent {
 	}
 
 	/**
-	 * redefine 成功后，把本轮算出的"自造槽位名"并入 {@link #inventedSlots}。
+	 * redefine 成功后，把本轮算出的"自造槽位名"并入 {@link #INVENTED_SLOTS}。
 	 *
 	 * <p>只在成功路径调用：失败/回滚时旧基线（{@link #bytecodeCache}）没有前进，
 	 * 自造名集合也必须保持与旧基线一致，否则下一轮会拿"从未加载过的版本"的身份去做配对。</p>
+	 *
+	 * <p><b>回执必须按同一 scope 取/写</b>：写侧（对齐期）用本类的定义 loader 的 scope 写入，
+	 * 回执侧必须用同一个 scope 消费与落账。按类名落账会让 A 的成功回执改掉 B 的自造名集合
+	 * （{@code docs/status.md} §5 风险 15）。</p>
 	 */
-	static void commitInvented(String className) {
-		java.util.Set<String> pending = pendingInvented.remove(className);
-		if (pending == null) {
-			inventedSlots.remove(className);
-		} else if (pending.isEmpty()) {
-			inventedSlots.remove(className);
+	static void commitInvented(long scope, String className) {
+		java.util.Set<String> pending = pendingInvented.take(scope, className);
+		if (pending == null || pending.isEmpty()) {
+			// 精确 scope 删除：这里**不能**退化成"按名字删所有 scope"，
+			// 那会把另一个 loader 名下同名类的自造名一起抹掉。
+			INVENTED_SLOTS.remove(scope, className);
 		} else {
-			inventedSlots.put(className, pending);
+			INVENTED_SLOTS.put(scope, className, pending);
 		}
 	}
 
+	/** 类定义 loader 的 scope（{@link AlignmentMetaStore#loaderScopeId} 是唯一分配口径）。 */
+	static long loaderScope(ClassLoader loader) {
+		return AlignmentMetaStore.INSTANCE.loaderScopeId(loader);
+	}
+
 	/**
-	 * 分块执行 Redefine，防止其中一个类出错导致所有类失败，并依据重定义成败驱动事务提交或回滚。
+	 * 收尾一轮源码基线事务：把缓存回滚到"上一版 + 本轮生效类"的状态。
 	 *
-	 * <p>注：真正的多类原子一致性依赖 JVM 批量 {@code inst.redefineClasses(definitions)} 的原子调用；
-	 * 当批量失败切换到单类模式时，属于尽力挽救兜底，客观上存在短暂的类间不一致时间窗口。</p>
-	 * @return 确实重定义成功的类名集合。调用方据此决定是否落账文件指纹、以及失败类是否回队重试。
-	 * <p>另有两条必须区分的语义，通过 {@link RedefineOutcome} 一并返回：</p>
-	 * <ul>
-	 *   <li>{@code rejectedHierarchy} —— 因 {@code hierarchyChanged} 被拒的类。
-	 *       受 JVM 能力限制，重试永不会成功，<b>不得回队</b>。</li>
-	 *   <li>{@code rolledBackGroups} —— 因事务组不一致而 {@code rollback} 的类。
-	 *       这些类的宿主可能<b>已经在 JVM 里生效</b>，而 cache/pending 被钉回旧版本；
-	 *       此时重试会拿"基线与 JVM 实际状态不一致"的数据重新对齐，<b>不得回队</b>。</li>
-	 * </ul>
+	 * <p>有进行中的轮次时（生产路径）：按类判定本轮暂存是否生效，<b>一次性</b>原子并入已提交视图，
+	 * 其余条目整份丢弃（未生效类在已提交视图里本来就还是上一版，回滚即"丢弃暂存"）。判据与旧语义
+	 * 逐条对齐：成功重定义的类保留新源码；本轮新注入的类（没有旧源码、也不在 {@code loadedBefore}）
+	 * 保留新源码；其余未生效类回到上一版。</p>
+	 *
+	 * <p>没有进行中的轮次时（直接写已提交视图的调用方 / 单测），退化为对已提交视图做同样的按类恢复。</p>
 	 */
 	static void rollbackSourceCache(Map<String, byte[]> sourceBefore, Set<String> applied,
 	                                Set<String> loadedBefore) {
+		SourceBytecodeStaging.Round round = SOURCE_ROUND.get();
+		if (round != null) {
+			try {
+				round.commit(sourceBefore, applied, loadedBefore);
+			} finally {
+				SOURCE_ROUND.remove();
+			}
+			return;
+		}
 		for (String key : sourceBefore.keySet()) {
 			if (applied.contains(key)) continue;
 			byte[] prev = sourceBefore.get(key);
 			// 新注入类（没有旧源码、也不在 loadedBefore）保持新源码；其余未成功类回滚。
 			if (prev == null && !loadedBefore.contains(key)) continue;
-			if (prev == null) sourceBytecodeCache.remove(key);
-			else sourceBytecodeCache.put(key, prev);
+			if (prev == null) SOURCE_BYTES.committedRemove(key);
+			else SOURCE_BYTES.committedPut(key, prev);
 		}
 	}
 
@@ -2375,12 +2732,294 @@ public class RemoldAgent {
 		return VcsAgentCoordinator.revertTo(targetSeq);
 	}
 
+	//region Redefine 入口：class 文件合法性门禁（风险 13）
+
+	/**
+	 * 当前 JVM 能加载的最高 class file major。
+	 *
+	 * <p>{@code major = feature + 44} 是 JVMS 的固定换算（JDK 8 → 52、11 → 55、17 → 61、21 → 65），
+	 * 因此这里按运行期 {@link Runtime#version()} 推导而不是钉死一个数：钉死会让未来 JDK 上的合法
+	 * 产物被误拒，也会让"未知 major 显式拒绝"退化成"按某个历史版本卡"。推导值在类初始化时取一次，
+	 * 热更不会改变运行期 JVM，重复取没有意义。</p>
+	 */
+	static final int MAX_CLASS_MAJOR = Runtime.version().feature() + 44;
+
+	/**
+	 * 廉价硬拦截：判断一份字节能否安全送进 {@code Instrumentation.redefineClasses}。
+	 *
+	 * <p><b>为什么必须在 Java 层判</b>：JBR 25 + {@code AllowEnhancedClassRedefinition} 收到畸形
+	 * {@code ClassDefinition} 不是抛 {@code LinkageError}，而是在
+	 * {@code VM_EnhancedRedefineClasses::do_topological_class_sorting} 触发
+	 * {@code EXCEPTION_ACCESS_VIOLATION} 直接终止进程（{@code docs/status.md} §5 风险 13）——
+	 * 没有异常可捕获、没有回滚可做，所以只能"进 JVM 之前"判。</p>
+	 *
+	 * <p><b>五项检查，全部 fail-closed</b>：</p>
+	 * <ol>
+	 *   <li>魔数 {@code 0xCAFEBABE}；</li>
+	 *   <li><b>廉价前置：常量池逐项走一遍</b>（tag → 长度 → 边界），任何越界/未知 tag/非法索引都拒绝。
+	 *       刻意<b>不</b>用"长度 ≥ N"这种代理判据：截断点可以落在任何一项中间，只有真正走完常量池
+	 *       才能证明后续字段可读；</li>
+	 *   <li>{@code major} 不超过 {@link #MAX_CLASS_MAJOR}（未知/更新的 class 版本显式拒绝，
+	 *       不让 JVM 去猜）；</li>
+	 *   <li>{@code this_class} 解析出的内部名与目标类的内部名一致——二进制名不匹配会让增强重定义
+	 *       的拓扑排序读到错位的元数据。比较按<b>字节</b>做（JVMS 4.4.7 的 modified UTF-8 语义），
+	 *       不走标准 UTF-8 解码：见 {@link #walkClassFile}；</li>
+	 *   <li><b>结构完整性：ASM 真解析一遍</b>（{@link #asmStructureProblem}）。前四项只看头部与常量池，
+	 *       看不到 {@code super_class} 之后的字段/方法/属性与尾部，截断在那些位置仍然"合法"。</li>
+	 * </ol>
+	 *
+	 * <p><b>两道结构检查的分工</b>：廉价前置检查先跑，语义是"<b>不依赖任何第三方解析器</b>也能拒掉
+	 * 头部/常量池级别的畸形"——ASM 对某些畸形输入的行为不作保证（可能抛任意 {@code RuntimeException}，
+	 * 也可能在超大 {@code poolCount} 上先分配大数组），所以它不能当第一道；ASM 解析跑在它之后，
+	 * 负责"常量池之后被截断/损坏"的那部分结构，因为重写一份覆盖字段/方法/属性的走查器等于把 ASM 的
+	 * 工作量再做一遍，且更容易漏项。</p>
+	 *
+	 * <p><b>两道 {@code major} 判据都要保留</b>：本类的 {@link #MAX_CLASS_MAJOR} 按运行期 JVM 推导，
+	 * 而 {@link ClassReader} 自带一份"打包进来的 ASM 认识哪些版本"的口径，两者不一定相等。前者先判，
+	 * 后者遇到它不认识的版本会抛 {@code IllegalArgumentException("Unsupported class file version")}，
+	 * 这里同样收敛成拒绝并显式点名原因（fail-closed：ASM 解析不了就无法证明结构完整）。</p>
+	 *
+	 * <p>本方法<b>只读</b>传入数组，不复制、不重读磁盘：调用方必须把校验过的这同一份引用交给
+	 * {@code redefineClasses}（{@link ClassDefinition#getDefinitionClassFile()}），否则"校验"与
+	 * "真正送进 JVM"之间会出现新的 TOCTOU 窗口。</p>
+	 *
+	 * @return {@code null} 表示可以安全进入 redefine；否则是英文拒绝原因（直接进 {@code warn}）
+	 */
+	static String definitionProblem(Class<?> type, byte[] bytes) {
+		if (type == null) return "target class is null";
+		if (bytes == null) return "class file bytes are null";
+		if (bytes.length < 8) return "class file is shorter than the 8-byte header (" + bytes.length + " bytes)";
+		if ((bytes[0] & 0xFF) != 0xCA || (bytes[1] & 0xFF) != 0xFE
+		    || (bytes[2] & 0xFF) != 0xBA || (bytes[3] & 0xFF) != 0xBE) {
+			return "bad magic " + hex4(bytes, 0) + " (expected cafebabe)";
+		}
+		int major = u2(bytes, 6);
+		if (major < 45) return "implausible class file major " + major;
+		if (major > MAX_CLASS_MAJOR) {
+			return "class file major " + major + " is newer than this JVM's maximum " + MAX_CLASS_MAJOR;
+		}
+		try {
+			String cheap = walkClassFile(type, bytes, major);
+			if (cheap != null) return cheap;
+		} catch (RuntimeException e) {
+			// 走查器自己抛的越界/非法项一律收敛成拒绝：fail-closed，绝不让"没读完"变成"放行"。
+			return "unparseable class file: " + e.getMessage();
+		}
+		return asmStructureProblem(bytes);
+	}
+
+	/**
+	 * 第二道结构检查：用 ASM {@link ClassReader} 把整份字节真解析一遍。
+	 *
+	 * <p>为什么需要它：{@link #walkClassFile} 只走到 {@code this_class}，{@code super_class}、
+	 * {@code interfaces}、字段/方法表、属性表与尾部结构一个都没读——"常量池完整、之后被截断"的字节
+	 * 在它眼里完全合法。{@code accept()} 会逐项走完类、字段、方法（含 {@code Code} 属性里的指令流）
+	 * 与属性表，越界读、非法长度、损坏的结构都会抛出来。</p>
+	 *
+	 * <p><b>边界（有意保留）</b>：ASM 对不认识的属性按声明长度跳过、不做内容校验，因此"截断点正好落在
+	 * 最后一个未知属性的 payload 里"不会被这一步发现。这一类残留由 {@code docs/status.md} §5 风险 13
+	 * 的关闭条件统一登记，不在此处再加第三道走查器。</p>
+	 *
+	 * @return {@code null} 表示 ASM 能完整解析；否则是英文拒绝原因
+	 */
+	private static String asmStructureProblem(byte[] bytes) {
+		try {
+			new ClassReader(bytes).accept(new ClassVisitor(Opcodes.ASM9) { }, 0);
+			return null;
+		} catch (RuntimeException e) {
+			String message = e.getMessage();
+			if (message != null && message.startsWith("Unsupported class file")) {
+				// ASM 的版本口径窄于本 JVM：不能证明结构完整 → 拒绝，并说清是哪一个口径不够。
+				return "the bundled ASM cannot parse this class file (" + message
+				     + "); this JVM accepts up to major " + MAX_CLASS_MAJOR
+				     + ", so the agent predates the class file version";
+			}
+			return "unparseable class file (ASM " + e.getClass().getSimpleName()
+			     + (message == null ? "" : ": " + message) + ")";
+		}
+	}
+
+	/**
+	 * 常量池走查 + 名字核对；越界一律抛 {@link IllegalStateException}，由调用方收敛成拒绝原因。
+	 *
+	 * <p><b>名字比较按字节做，不解码</b>：常量池里的 {@code Utf8} 是 JVMS 4.4.7 的 modified UTF-8，
+	 * 对增补字符（{@code U+10000} 以上）用的是<b>代理对拆成两个三字节序列</b>（CESU-8 形态），
+	 * 标准 UTF-8 解码会把这种合法序列解成替换字符，于是合法类名（如含 {@code U+1F600}）与
+	 * {@code Class.getName()} 被误判成不一致而<b>误拒合法字节</b>。这里把目标名用同一编码重新编一遍，
+	 * 逐字节比较：既没有解码口径问题，也不受代理对/替换字符影响。</p>
+	 */
+	private static String walkClassFile(Class<?> type, byte[] bytes, int major) {
+		int pos = 8;
+		int poolCount = readU2(bytes, pos, "constant pool count");
+		pos += 2;
+		if (poolCount < 1) return "constant pool count " + poolCount + " is empty";
+		// 常量池索引 1..poolCount-1；Long/Double 各占两个槽（后一个索引不可寻址）。
+		int[] classEntryNameIndex = new int[poolCount];
+		// Utf8 项只记原始字节区间，不解码：比较口径见方法 Javadoc。{@code -1} = 不是 Utf8 项。
+		int[] utf8Offset = new int[poolCount];
+		int[] utf8Length = new int[poolCount];
+		Arrays.fill(utf8Offset, -1);
+		for (int i = 1; i < poolCount; i++) {
+			int tag = readU1(bytes, pos, "tag of constant #" + i);
+			pos += 1;
+			switch (tag) {
+				case 1: { // Utf8
+					int length = readU2(bytes, pos, "Utf8 length of constant #" + i);
+					pos += 2;
+					require(bytes, pos, length, "Utf8 payload of constant #" + i);
+					utf8Offset[i] = pos;
+					utf8Length[i] = length;
+					pos += length;
+					break;
+				}
+				case 7: // Class
+					classEntryNameIndex[i] = readU2(bytes, pos, "name index of constant #" + i);
+					pos += 2;
+					break;
+				case 8: case 16: case 19: case 20: // String / MethodType / Module / Package
+					require(bytes, pos, 2, "constant #" + i);
+					pos += 2;
+					break;
+				case 15: // MethodHandle
+					require(bytes, pos, 3, "constant #" + i);
+					pos += 3;
+					break;
+				case 3: case 4: case 9: case 10: case 11: case 12: case 17: case 18:
+					// Integer / Float / Fieldref / Methodref / InterfaceMethodref / NameAndType /
+					// Dynamic / InvokeDynamic
+					require(bytes, pos, 4, "constant #" + i);
+					pos += 4;
+					break;
+				case 5: case 6: // Long / Double 占两个常量池槽
+					require(bytes, pos, 8, "constant #" + i);
+					pos += 8;
+					if (i + 1 >= poolCount) {
+						throw new IllegalStateException("constant #" + i
+						    + " is a two-slot entry but the pool ends right after it");
+					}
+					i++;
+					break;
+				default:
+					return "unknown constant pool tag " + tag + " at constant #" + i;
+			}
+		}
+		// access_flags(2) + this_class(2)：这两项可读才说明常量池之后的结构没有在边界上断开。
+		// super_class 及其之后的一切（interfaces / fields / methods / attributes / 尾部）不在这一步的
+		// 覆盖范围内 —— 那是第二步 ASM 解析的职责（见 definitionProblem 的五项检查与分工说明）。
+		require(bytes, pos, 4, "class header after the constant pool");
+		int thisClassIndex = readU2(bytes, pos + 2, "this_class");
+		if (thisClassIndex <= 0 || thisClassIndex >= poolCount) {
+			return "this_class index " + thisClassIndex + " is out of the constant pool range";
+		}
+		int nameIndex = classEntryNameIndex[thisClassIndex];
+		if (nameIndex <= 0 || nameIndex >= poolCount) {
+			return "this_class does not point at a CONSTANT_Class entry";
+		}
+		int nameOffset = utf8Offset[nameIndex];
+		if (nameOffset < 0 || utf8Length[nameIndex] <= 0) {
+			return "this_class name is not a readable Utf8 entry";
+		}
+		String expected = Names.internal(type.getName());
+		if (!sameBytes(bytes, nameOffset, utf8Length[nameIndex], modifiedUtf8(expected))) {
+			// 只用于消息：这一份解码结果不参与判定（判定已按字节做完）。
+			String shown = new String(bytes, nameOffset, utf8Length[nameIndex], StandardCharsets.UTF_8);
+			return "binary name '" + shown + "' does not match the target class '" + expected + "'";
+		}
+		return null;
+	}
+
+	/** 定长区间逐字节比较（{@code expected} 长度不符即不相等）。 */
+	private static boolean sameBytes(byte[] bytes, int offset, int length, byte[] expected) {
+		if (expected.length != length) return false;
+		for (int i = 0; i < length; i++) {
+			if (bytes[offset + i] != expected[i]) return false;
+		}
+		return true;
+	}
+
+	/**
+	 * 把字符串编成 JVMS 4.4.7 的 <b>modified UTF-8</b>（常量池 {@code CONSTANT_Utf8} 的编码）。
+	 *
+	 * <p>与标准 UTF-8 的差别只有两处，但两处都必须照抄：{@code NUL} 编成 {@code C0 80}；
+	 * 增补字符（{@code U+10000} 以上）在 Java 字符串里是两个代理项，各自单独编成三字节，
+	 * 因此一个增补字符在常量池里占 <b>6 字节</b>（CESU-8 形态）。这样"编码再逐字节比较"
+	 * 与 JVM 写进去的形态完全同构，不依赖任何解码器的容错口径。</p>
+	 */
+	static byte[] modifiedUtf8(String value) {
+		int length = 0;
+		for (int i = 0; i < value.length(); i++) {
+			char c = value.charAt(i);
+			length += (c >= 0x0001 && c <= 0x007F) ? 1 : (c <= 0x07FF) ? 2 : 3;
+		}
+		byte[] out = new byte[length];
+		int at = 0;
+		for (int i = 0; i < value.length(); i++) {
+			char c = value.charAt(i);
+			if (c >= 0x0001 && c <= 0x007F) {
+				out[at++] = (byte) c;
+			} else if (c <= 0x07FF) {
+				out[at++] = (byte) (0xC0 | ((c >> 6) & 0x1F));
+				out[at++] = (byte) (0x80 | (c & 0x3F));
+			} else {
+				out[at++] = (byte) (0xE0 | ((c >> 12) & 0x0F));
+				out[at++] = (byte) (0x80 | ((c >> 6) & 0x3F));
+				out[at++] = (byte) (0x80 | (c & 0x3F));
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * 入口门禁：把不安全的定义<b>逐个</b>摘出本批并 {@code warn}。
+	 *
+	 * <p>单个畸形类不得拖垮整批：与"单字段链接失败只隔离该字段"同一取向——其余类照常 redefine，
+	 * 被摘掉的类进 {@link RoundSkips}，由同轮的 skip 摘要点名，用户不会看到一条静默的成功行。</p>
+	 *
+	 * <p>放行下去的就是刚才校验过的那一个 {@link ClassDefinition} 实例（同一个字节数组引用），
+	 * 既不复制也不重读磁盘——这是"校验用的字节 == 送进 redefine 的字节"的唯一保证方式。</p>
+	 */
+	static List<ClassDefinition> gateDefinitions(List<ClassDefinition> definitions, RoundSkips skips) {
+		return RedefineEntryGate.gate(definitions, skips);
+	}
+
+	private static void require(byte[] bytes, int pos, int length, String what) {
+		if (pos < 0 || length < 0 || pos + length > bytes.length) {
+			throw new IllegalStateException("truncated class file while reading " + what
+			    + " (needs " + length + " byte(s) at offset " + pos + ", file length " + bytes.length + ")");
+		}
+	}
+
+	private static int readU1(byte[] bytes, int pos, String what) {
+		require(bytes, pos, 1, what);
+		return bytes[pos] & 0xFF;
+	}
+
+	private static int readU2(byte[] bytes, int pos, String what) {
+		require(bytes, pos, 2, what);
+		return u2(bytes, pos);
+	}
+
+	private static int u2(byte[] bytes, int pos) {
+		return ((bytes[pos] & 0xFF) << 8) | (bytes[pos + 1] & 0xFF);
+	}
+
+	private static String hex4(byte[] bytes, int pos) {
+		StringBuilder sb = new StringBuilder(8);
+		for (int i = 0; i < 4; i++) {
+			if (pos + i >= bytes.length) { sb.append("??"); continue; }
+			sb.append(Character.forDigit((bytes[pos + i] >> 4) & 0xF, 16));
+			sb.append(Character.forDigit(bytes[pos + i] & 0xF, 16));
+		}
+		return sb.toString();
+	}
+
 	static RedefineOutcome applyTwoPhase(List<ClassDefinition> definitions,
 	                                             Map<String, byte[]> oldEffectiveBytes,
 	                                             Collection<AlignmentTransaction> transactions,
 	                                             RoundSkips skips,
 	                                             Set<String> injectedClasses) {
-		return TwoPhaseCoordinator.applyTwoPhase(definitions, oldEffectiveBytes, transactions, skips, injectedClasses);
+		return TwoPhaseCoordinator.applyTwoPhase(RedefineEntryGate.gate(definitions, skips), oldEffectiveBytes,
+		 transactions, skips, injectedClasses);
 	}
 
 	static String batchWatchLabel(List<ClassDefinition> defs) {
@@ -2392,10 +3031,25 @@ public class RemoldAgent {
 		return TwoPhaseCoordinator.stageAConsistent(hostName, targets, ok, injected, loaded);
 	}
 
+	/**
+	 * 分块执行 Redefine，防止其中一个类出错导致所有类失败，并依据重定义成败驱动事务提交或回滚。
+	 *
+	 * <p>注：真正的多类原子一致性依赖 JVM 批量 {@code inst.redefineClasses(definitions)} 的原子调用；
+	 * 当批量失败切换到单类模式时，属于尽力挽救兜底，客观上存在短暂的类间不一致时间窗口。</p>
+	 * @return 确实重定义成功的类名集合。调用方据此决定是否落账文件指纹、以及失败类是否回队重试。
+	 * <p>另有两条必须区分的语义，通过 {@link RedefineOutcome} 一并返回：</p>
+	 * <ul>
+	 *   <li>{@code rejectedHierarchy} —— 因 {@code hierarchyChanged} 被拒的类。
+	 *       受 JVM 能力限制，重试永不会成功，<b>不得回队</b>。</li>
+	 *   <li>{@code rolledBackGroups} —— 因事务组不一致而 {@code rollback} 的类。
+	 *       这些类的宿主可能<b>已经在 JVM 里生效</b>，而 cache/pending 被钉回旧版本；
+	 *       此时重试会拿"基线与 JVM 实际状态不一致"的数据重新对齐，<b>不得回队</b>。</li>
+	 * </ul>
+	 */
 	static RedefineOutcome applyRedefinitions(List<ClassDefinition> definitions,
 	                                                  Collection<AlignmentTransaction> transactions,
 	                                                  RoundSkips skips) {
-		return TwoPhaseCoordinator.applyRedefinitions(definitions, transactions, skips);
+		return TwoPhaseCoordinator.applyRedefinitions(RedefineEntryGate.gate(definitions, skips), transactions, skips);
 	}
 
 	record RedefineOutcome(Set<String> successful, Set<String> rolledBack) { }

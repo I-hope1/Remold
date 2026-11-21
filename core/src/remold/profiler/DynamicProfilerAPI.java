@@ -1,5 +1,6 @@
 package remold.profiler;
 
+import remold.RedefineEntryGate;
 import remold.RemoldAgent;
 import remold.util.ClassIdentity;
 import org.objectweb.asm.*;
@@ -57,9 +58,13 @@ public class DynamicProfilerAPI {
 			}
 		}, 0);
 		bytes = cw.toByteArray();
+		// 入口门禁：profiler 走的是同一条 redefineClasses，畸形字节同样能让 VM 直接终止。
+		// 被拒时只放弃这一次 profiler 重定义（warn + 单类跳过摘要已由门禁打出），不影响 agent 其余部分。
+		ClassDefinition definition = RedefineEntryGate.gateOne(new ClassDefinition(Walker, bytes));
+		if (definition == null) return;
 		RemoldAgent.enterInternalRedefine(Collections.singleton(Walker.getName()));
 		try {
-			inst.redefineClasses(new ClassDefinition(Walker, bytes));
+			inst.redefineClasses(definition);
 		} finally {
 			RemoldAgent.exitInternalRedefine();
 		}

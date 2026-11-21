@@ -43,4 +43,7 @@
 | [`BATTLE-20261121065047-c605-ANALYSIS.md`](BATTLE-20261121065047-c605-ANALYSIS.md) | 战报 · 战役 battle-20261121065047-c605（发布链补齐 mc-toast + 状态真相源同步） | 阶段 integrating · `battle_audit` **PASS** · `battle_seal` 已结案 · 证据 4 条（含 union 全量） |
 | [`BATTLE-20261121075638-ef27-ANALYSIS.md`](BATTLE-20261121075638-ef27-ANALYSIS.md) | 战报 · 战役 battle-20261121075638-ef27（IF_I13 遮蔽新增字段） | 阶段 integrating · `battle_audit` **PASS** · `battle_seal` 已结案 · 证据 38 条（6 条已作废）· 变异 6 击杀/7 次 |
 | [`BATTLE-20261121105031-6da8-ANALYSIS.md`](BATTLE-20261121105031-6da8-ANALYSIS.md) | 战报 · 战役 battle-20261121105031-6da8（PR#54 评审问题收口） | 阶段 integrating · `battle_audit` **PASS** · `battle_seal` 已结案 · 证据 5 条 |
+| [`BATTLE-20261121111606-cd62-ANALYSIS.md`](BATTLE-20261121111606-cd62-ANALYSIS.md) | 战报 · 战役 battle-20261121111606-cd62（redefine 入口门禁 / pending 与 source cache 隔离） | 阶段 integrating · `battle_audit` **PASS** · `battle_seal` 已结案 · 证据 37 条 · 变异 12 击杀/15 次 · 3 挂账 |
+| [`BATTLE-20261121124239-97fe-ANALYSIS.md`](BATTLE-20261121124239-97fe-ANALYSIS.md) | 战报 · 战役 battle-20261121124239-97fe（旁路入口门禁 + loadedClassesMap 多 loader） | 阶段 integrating · `battle_audit` **PASS** · `battle_seal` 已结案 · 证据 14 条 · 变异 5 击杀/8 次 · 6 挂账 |
+| [`BATTLE-20261121135205-8b0c-ANALYSIS.md`](BATTLE-20261121135205-8b0c-ANALYSIS.md) | 战报 · 战役 battle-20261121135205-8b0c（PR#56 评审 6 条收口） | 阶段 integrating · `battle_audit` **PASS** · `battle_seal` 已结案 · 证据 19 条 · 变异 6 击杀/11 次 · 5 挂账 |
 | [`BATTLE-v0.2.5-RELEASE.md`](BATTLE-v0.2.5-RELEASE.md) | 收口战报 · v0.2.5 封板（R1 + R2） | 阶段：**v0.2.5 稳健发版封板**（不改核心业务算法） |

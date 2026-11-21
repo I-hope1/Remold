@@ -110,9 +110,9 @@ public class InjectConflictProbe {
 			"injectNewClass", String.class, Path.class, byte[].class);
 		inject.setAccessible(true);
 
-		ConcurrentHashMap<String, Class<?>> previousLoaded = RemoldAgent.loadedClassesMap;
+		remold.LoadedClassIndex previousLoaded = RemoldAgent.loadedClassIndex();
 		try {
-			RemoldAgent.loadedClassesMap = new ConcurrentHashMap<>(
+			RemoldAgent.loadedClassesMap = new remold.LoadedClassIndex(
 				Map.of("inject.Conflict", conflict, "inject.Sibling", sibling));
 			Object identical = inject.invoke(null, "inject.Conflict", null, conflictV1);
 			check(Boolean.TRUE.equals(identical),

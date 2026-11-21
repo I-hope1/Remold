@@ -147,7 +147,6 @@ public final class AnonClassAligner {
 		public int  layoutGateWaived;
 		/** 布局门扫描存活实例的总耗时（毫秒），用于观察全堆遍历的开销。 */
 		public long layoutGateScanMillis;
-		public int  tier5Matches;
 		public int  ambiguousMatches;
 		/**
 		 * 在**禁止 minDiff 仲裁的层**（Tier 2 / Tier 4）完成"双向唯一"配对后，仍然无法确定性区分的候选对数（{@code docs/topology/04-tiers-and-rejection.md} §4）。
@@ -201,7 +200,7 @@ public final class AnonClassAligner {
 		public String toString() {
 			return "AlignmentStats[T1=" + tier1Matches + ", T2=" + tier2Matches +
 			       ", T3=" + tier3Matches + ", T4=" + tier4Matches +
-			       ", T5=" + tier5Matches + ", ambiguous=" + ambiguousMatches +
+			       ", ambiguous=" + ambiguousMatches +
 			       ", ambiguousPairs=" + ambiguousPairs +
 			       ", topology=" + topologyMatches +
 			       ", topoCandBefore=" + topologyCandidatesBefore +
@@ -2544,9 +2543,6 @@ public final class AnonClassAligner {
 				break;
 			case 4:
 				stats.tier4Matches++;
-				break;
-			case 5:
-				stats.tier5Matches++;
 				break;
 		}
 	}

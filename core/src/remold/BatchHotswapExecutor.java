@@ -77,6 +77,7 @@ import static remold.RemoldAgent.applyRedefinitions;
 import static remold.RemoldAgent.applyTransformerBridges;
 import static remold.RemoldAgent.applyTwoPhase;
 import static remold.RemoldAgent.batchWatchLabel;
+import static remold.RemoldAgent.beginSourceRound;
 import static remold.RemoldAgent.calculateHash;
 import static remold.RemoldAgent.commitVcsBatch;
 import static remold.RemoldAgent.enterInternalRetransform;
@@ -91,11 +92,12 @@ import static remold.RemoldAgent.info;
 import static remold.RemoldAgent.init;
 import static remold.RemoldAgent.injectNewClass;
 import static remold.RemoldAgent.inst;
-import static remold.RemoldAgent.inventedSlots;
+import static remold.RemoldAgent.INVENTED_SLOTS;
 import static remold.RemoldAgent.isEnhancedHotswapEnabled;
 import static remold.RemoldAgent.isNonLoadableClass;
 import static remold.RemoldAgent.loadClassSnap;
 import static remold.RemoldAgent.loadedClassesMap;
+import static remold.RemoldAgent.loaderScope;
 import static remold.RemoldAgent.log;
 import static remold.RemoldAgent.mustSkipForMissingEnhancedRedefinition;
 import static remold.RemoldAgent.normalizeAlignBaseline;
@@ -383,6 +385,10 @@ final class BatchHotswapExecutor {
 			driftOldBytes.put(key, getRuntimeBytecode(key));
 			if (prev != null) prevSourceBytes.put(key, prev);
 		}
+		// 风险 16（并发语义窗口）：本轮源码基线不再直接写已提交视图，而是进入按轮次的 staged 容器。
+		// 从这一行到下面的 rollbackSourceCache 之间，任何外部 redefine/retransform 触发的读方
+		// （no-op 判定、对齐旧侧、Mixin 兜底）只能读到上一版已生效字节，不会读到本轮候选字节。
+		beginSourceRound();
 		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
 			recordSourceBytecode(e.getKey(), e.getValue());
 		}
@@ -552,6 +558,9 @@ final class BatchHotswapExecutor {
 				Class<?> targetClass = loadedClassesMap.get(className);
 
 				if (targetClass != null) {
+					// loader scope 只解析一次：本类的 lambda 自造名读写都按它分键（docs/status.md §5 风险 15）。
+					// 这里用的是**这个类自己的定义 loader**，不是按名字反查出来的猜测值。
+					final long alignScope = loaderScope(targetClass.getClassLoader());
 					// 过滤 JVM 不可修改类（如 Hidden Class、VM 内部动态代理类等）
 					if (inst != null && !inst.isModifiableClass(targetClass)) {
 						if (DEBUG) log("[SKIP-UNMODIFIABLE] " + className + " is not modifiable by JVM.");
@@ -583,8 +592,9 @@ final class BatchHotswapExecutor {
 							boolean hasOldLambdas = LambdaAligner.hasPotentialLambdas(oldBytecode)
 								|| LambdaAligner.hasPotentialLambdas(prevSourceBytes.get(className));
 							boolean hasNewLambdas = LambdaAligner.hasPotentialLambdas(newBytecode);
-							boolean hasInvented = inventedSlots.containsKey(className)
-								&& !inventedSlots.get(className).isEmpty();
+							// 读：精确 scope 优先（写入者身份兜底），绝不按名字跨 loader 借条目。
+							Set<String> oldInvented = INVENTED_SLOTS.lookup(alignScope, className);
+							boolean hasInvented = oldInvented != null && !oldInvented.isEmpty();
 							if (hasOldLambdas || hasNewLambdas || hasInvented) {
 								// 【基线一致性】oldBytecode 来自 bytecodeCache，是"上一次 transform 之后
 								// JVM 里实际生效"的形态（若开了 FORCE_STATIC_LAMBDA，则其中的 lambda 已被
@@ -641,12 +651,13 @@ final class BatchHotswapExecutor {
 									// 传 null 只会命中 bootstrap 槽，应用类加载器下的类永远取不到元数据
 									// （历史缺陷：开关生效但读数不变，见 docs/vcs/03-live-raw-to-raw-alignment.md §9 F1）。
 									newBytecode = LambdaAligner.align(alignOld, newBytecode, oldResolver, newResolver,
-									 inventedSlots.getOrDefault(className, Set.of()), alignLoader);
+									 oldInvented == null ? Set.of() : oldInvented, alignLoader);
 									// 本轮算出的"自造名"先挂起，等 redefine 成功再落账（失败就丢弃，
 									// 因为旧基线没前进，下一轮仍然是同一份旧字节）。
 									// 从本轮快照里取，避免读到别的轮次（失败时快照的集合是空的，不是 null）。
 									LambdaAligner.AlignmentResult aligned = LambdaAligner.LAST_RESULT;
-									pendingInvented.put(className,
+									// 写：按已知的 alignScope 精确登记，成功回执（commitInvented）按同一 scope 取。
+									stageInventedNames(alignScope, className,
 									 aligned == null ? Set.of() : aligned.inventedNames);
 									if (Boolean.getBoolean("remold.vcs.enabled")) {
 										VcsAgentCoordinator.PENDING_VCS.put(className, new VcsAgentCoordinator.VcsPending(alignLoader, alignOld,
@@ -871,8 +882,8 @@ final class BatchHotswapExecutor {
 		long redefineWallEndNanos = PERF_LOG ? System.nanoTime() : 0L;
 
 		// sourceBytecodeCache 是“最近一次实际生效的源码基线”，不是“本轮编译结果”。
-		// 对齐阶段必须先看到本轮新字节，所以上面暂存写入；这里按类回滚未生效的已加载类。
-		// 注入的新类不在 loadedBefore 中，保持新源码；成功类保持新源码。
+		// 对齐阶段必须能看到本轮新字节（它读的是 prevSourceBytes 快照，不是缓存），所以候选字节只进 staged；
+		// 这里按类判定生效性后一次性原子并入已提交视图，未生效类丢弃，注入的新类与成功类保留新源码。
 		rollbackSourceCache(sourceBefore, redefinedOk, loadedBefore);
 
 		// ---- 指纹落账 + 失败回队 ----
@@ -1071,6 +1082,20 @@ final class BatchHotswapExecutor {
 		// 与上面的 [HOTSWAP-SKIPPED] 区分：这里是"磁盘哈希没变，本来就没改"，不是被门拦下。
 		if (skippedCount > 0) info("Unchanged: " + skippedCount + " class(es) had identical bytes on disk.");
 		if (injectedCount > 0) info("Injected " + injectedCount + " new classes.");
+	}
+
+	/**
+	 * 生产写入点：把本轮对齐算出的"自造槽位名"按 <b>已知的 alignScope</b> 暂存，等 redefine 成功后由
+	 * {@link RemoldAgent#commitInvented(long, String)} 按同一 scope 回执落账。
+	 *
+	 * <p><b>为什么单独成方法</b>：写入侧的对齐逻辑埋在批次主流程里，无法在单测里驱动；把"怎么写"收敛成
+	 * 唯一一处入口，回归用例就能驱动<b>同一条</b>写入路径（而不是自己拼一个等价调用）——否则
+	 * "生产写入退回纯类名"这类退化在测试里完全不可见（{@code docs/status.md} §5 风险 15）。</p>
+	 *
+	 * @param alignScope 这个类自己的定义 loader 的 scope（{@code AlignmentMetaStore#loaderScopeId}）
+	 */
+	static void stageInventedNames(long alignScope, String className, Set<String> inventedNames) {
+		pendingInvented.put(alignScope, className, inventedNames);
 	}
 
 	/**

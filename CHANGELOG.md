@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **批实例切块越界（`InitFixRuntimeDriver.nextBatchChunkEnd`）**：步长从 4 放大到 8192 时没有钳到
+  `total`。剩余量落在 `(4096, 8192)`（例如 15000 个实例：8192 + 6808）时块尾越过数组末端，生成器
+  只判 `localIndex < localTo`，于是每个实例都抛 `ArrayIndexOutOfBoundsException`，连续撞满单字段
+  失败配额后把**已经补成功**的字段当成"放弃"；后续无关热更还会经台账回流重跑整批实例，融合批则退回
+  `fallbackFusedGroupFrom` 对同一段实例重复做条件 CAS，并打出误导性 `skipped ... conditional write(s)`
+  告警。修复为 `Math.min(total, ...)`；回归锁 `tests/src/remold/ref/InitFixChunkBoundaryTest`
+  （4096/4097/12288/12289/15000/16383/16384/20481 等边界，断言 `pos < end <= total` 且恰好覆盖全部
+  实例一次），去掉钳位即 3 条断言变红。
+
 ### Added
 
 - **加载前沿与出生水位线（load frontier / birth watermark）**：把"代码何时被改"与"类何时被懒加载"分开记账，

@@ -345,6 +345,19 @@
 | **⑤** | NeoForge 生产 installer 验证 | 生产 installer 起服 + Mixin/ClassInfo 各一条真机证据 |
 | **⑩** | 观测包（持续采集） | 日志/读数落盘；结论前先声明样本窗口与统计口径 |
 
+#### 4.1.2.1 外部极限压测带回的待办 (From External Limit Stress-Test)
+
+> 来源：外部工程（JBR 21 + 真实 agent jar，`-Dremold.vcs.enabled=true` / `-Dremold.poc.meta_source=true`）
+> 的 38 项极限压测。这里只登记需要跟进的事项，不含实现状态描述。
+
+| 条目 | 结论 | 说明 |
+|:---|:---:|:---|
+| 批实例切块越界（`nextBatchChunkEnd` 未钳 `total`） | 已修 | 剩余量落在 `(4096, 8192)` 时块尾越过数组末端，生成器只判 `localIndex < localTo`，导致每个实例抛 `ArrayIndexOutOfBoundsException`，连续撞满单字段失败配额后把已补成功的字段当成放弃；融合批退回 `fallbackFusedGroupFrom` 重复条件 CAS。回归锁 `InitFixChunkBoundaryTest`（含 12289/15000/16384 边界），去掉钳位后 3 条断言变红 |
+| `V3 S41`：`super::baseM` 跨代幽灵保留旧体（实测 `base:b-v3`，期望 `base:b-v3:L3`） | 待归因 | 外部夹具不在本仓库，无法在此复跑。归因口径已定：先用 `-Dremold.agent.lambda_raw_alignment=false` 做开/关 A/B，关掉即绿 ⇒ Run R（`PR #11/#13`）在 `super::` / `INVOKESPECIAL` 委托或 `V2→V3` 继承映射上引入；仍红 ⇒ `LambdaAligner` 既有路径与 `V3 S41` 幽灵保留语义冲突 |
+| `NestView` 跨同文件兄弟类连带失效 | 待优化 | 同 Nest 里有一个嵌套类被 `LayoutGate` 拒绝时，兄弟类的 Nest 扫描因 `batchCandidateMissing` 整体退回 `incomplete`（fail-closed）。方向是安全的（不会错写），但存在误伤：被拒的类本轮<b>不会</b>被重定义，JVM 里跑的就是 `bytecodeCache` 里的旧字节，兄弟类读它"有没有写自己的私有字段"其实合法。需要区分"跨类依赖查询"与"未重定义兄弟类的 Nest 扫描" |
+| 64 轮定点迭代上限（66 层嵌套） | 维持现状 | 63 层全绿、66 层打印 4 条 `did not converge in 64 rounds` 并安全退化（最外层幽灵化保留旧体），内层与新实例仍正确收敛 |
+| 无 `-g` 下同类型局部捕获重排 | 维持现状 | 信息论边界：无 LVT 时无法区分同类型局部变量的换序，`strict=false` 下按既有语义处理；需要严防时开 `LAMBDA_STRICT` 或由插件强制 `-g` |
+
 #### 4.1.3 停车与关闭清单 (Parked & Retired)
 
 > 停车 = 明确不做，直到出现新的触发条件（用户诉求 / 上游断代 / 成本下降）；关闭 = 条目作废（设计契约已变或判据不成立）。

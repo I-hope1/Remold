@@ -54,8 +54,14 @@ final class TwoPhaseCoordinator {
 	                                             RoundSkips skips,
 	                                             Set<String> injectedClasses) {
 		long startedNanos = System.nanoTime();
+		// 被字节码门禁拒掉的类，其对齐事务一步都不许提交（见 RedefineEntryGate#withoutRejectedGroups）。
+		// 必须在这里、stage A 的 preRegister 之前裁：preRegister 本身就会往 pendingAlignedClasses 登记。
+		transactions = RedefineEntryGate.withoutRejectedGroups(transactions, skips);
 		if (definitions.isEmpty()) {
-			for (AlignmentTransaction tx : transactions) tx.commit();
+			// 没有类进 redefine 时**不能** commit：commit 会把本轮从未生效的对齐字节写进
+			// pendingAlignedClasses / bytecodeCache，等于把未生效字节变成基线（风险 15/16）。
+			// 语义是"回滚"：登记过的条目撤掉，旧字节钉在 pending 里保护未来的首次加载。
+			for (AlignmentTransaction tx : transactions) tx.rollback(true);
 			skips.report();
 			return new RedefineOutcome(Set.of(), Set.of());
 		}
@@ -106,6 +112,9 @@ final class TwoPhaseCoordinator {
 			BATCH_STAGE_A_MILLIS.addAndGet(BATCH_REDEFINE_MILLIS.get() - redefBeforeA);
 		}
 		if (stageAOk.isEmpty()) {
+			// stage A 一个类都没生效：preRegister 已经登记过本轮的对齐字节，必须整轮回滚。
+			// 不撤的话这些"从未加载过的字节"会留在 pending 里，成为下一次首次加载的基线。
+			for (AlignmentTransaction tx : transactions) tx.rollback(true);
 			warn("[HOTSWAP-2P] Stage A did not apply any class; the two-phase transaction is abandoned.");
 			skips.report();
 			return new RedefineOutcome(Set.of(), Set.of());
@@ -388,9 +397,15 @@ final class TwoPhaseCoordinator {
 		}
 		definitions = filtered;
 
+		// 被字节码门禁拒掉的类，其对齐事务一步都不许提交（见 RedefineEntryGate#withoutRejectedGroups）。
+		transactions = RedefineEntryGate.withoutRejectedGroups(transactions, skips);
+
 		if (definitions.isEmpty()) {
+			// "这一轮什么都没生效"的语义是**回滚**，不是"无事发生地提交"：commit() 会把本轮从未
+			// 生效的对齐字节写进 pendingAlignedClasses / bytecodeCache，而这两张表都被下一轮当成
+			// "JVM 里实际生效的基线"来读（docs/status.md §5 风险 15/16）。
 			for (AlignmentTransaction tx : transactions) {
-				tx.commit();
+				tx.rollback(true);
 			}
 			// 一条都没进 redefine 时，原来这里**完全静默**：用户只看到若干条 warn，然后等不到任何
 			// "成功/失败"汇总，只能猜是不是热更没触发。有跳过项就必须点名，这是"整轮静默失效"

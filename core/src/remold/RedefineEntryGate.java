@@ -2,7 +2,9 @@ package remold;
 
 import java.lang.instrument.ClassDefinition;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 全仓唯一的 {@code Instrumentation.redefineClasses} 入口门禁。
@@ -67,6 +69,7 @@ public final class RedefineEntryGate {
 		if (skips != null) {
 			skips.add(className, RemoldAgent.RoundSkips.verdict("BYTECODE-GATE", problem,
 			 "recompile the class and retry"));
+			skips.markBytecodeRejected(className);
 		}
 		return null;
 	}
@@ -82,5 +85,61 @@ public final class RedefineEntryGate {
 		ClassDefinition admitted = gateOne(definition, skips);
 		if (admitted == null) skips.report();
 		return admitted;
+	}
+
+	/**
+	 * 门禁之后裁剪<b>对齐事务</b>：只要有成员被本门禁拒掉，这个 {@link RemoldAgent.AlignmentTransaction}
+	 * 就一步都不许提交。
+	 *
+	 * <p><b>为什么必须在提交之前裁</b>：{@code gate} 只过滤 {@code definitions}，事务集合原样传下去；
+	 * 而 {@code AlignmentTransaction.commit()} / {@code preRegister()} 会做两件持久化的事——
+	 * 往 {@link AnnotationTransformer#pendingAlignedClasses} 登记类字节、把 {@code cacheUpdates} 写进
+	 * {@code bytecodeCache}。于是<b>没进 redefineClasses 的类，其未生效字节反而成了基线</b>：
+	 * 下一轮对齐拿它当"已生效版本"，别处的 {@code no-op} 判定也会把它当成现状
+	 * （{@code docs/status.md} §5 风险 15/16 要消灭的正是这个形态）。</p>
+	 *
+	 * <p><b>为什么是 rollback(false) 而不是 rollback(true)</b>：{@code pinOldToPending=true} 是给
+	 * "宿主/匿名类半生效"准备的——那种情况下 JVM 里已经有新字节，必须用旧字节把未来的首次加载钉住。
+	 * 被门禁拒掉的类<b>根本没进 JVM</b>，运行态与旧基线仍然一致，不需要（也不应该）往 pending 里写
+	 * 任何条目：那里每写一条，就等于给"没生效的字节"再发一次基线身份。</p>
+	 *
+	 * <p>被拒类已由 {@link #gateOne} 记进 {@link RemoldAgent.RoundSkips}；这里只补一条宿主组级别的
+	 * {@code warn}，让"整组不提交"在日志里也可见。</p>
+	 *
+	 * @param transactions 本轮对齐事务（可为 {@code null} / 空）
+	 * @param skips        本轮台账，{@code null} 时不做任何裁剪（没有结构化拒绝名单可用）
+	 * @return 可以继续提交的事务；无裁剪时原样返回入参
+	 */
+	static Collection<RemoldAgent.AlignmentTransaction> withoutRejectedGroups(
+	 Collection<RemoldAgent.AlignmentTransaction> transactions, RemoldAgent.RoundSkips skips) {
+		if (transactions == null || transactions.isEmpty() || skips == null) return transactions;
+		Set<String> rejected = skips.bytecodeRejected();
+		if (rejected.isEmpty()) return transactions;
+		List<RemoldAgent.AlignmentTransaction> kept = new ArrayList<>(transactions.size());
+		for (RemoldAgent.AlignmentTransaction tx : transactions) {
+			String rejectedMember = firstRejectedMember(tx, rejected);
+			if (rejectedMember == null) {
+				kept.add(tx);
+				continue;
+			}
+			tx.rollback(false);
+			skips.add(tx.hostName, RemoldAgent.RoundSkips.verdict("BYTECODE-GATE",
+			 "alignment group holds " + rejectedMember + ", which the bytecode gate refused",
+			 "recompile the class and retry"));
+			RemoldAgent.warn("[BYTECODE-GATE] Alignment group of " + tx.hostName + " is NOT committed: "
+			 + rejectedMember + " was refused by the bytecode gate, so the aligned bytes for this group"
+			 + " must not become the baseline. Nothing was sent to redefineClasses for the refused class.");
+		}
+		return kept;
+	}
+
+	/** 该事务组里第一个被门禁拒掉的成员（宿主或匿名类）；没有则 {@code null}。 */
+	private static String firstRejectedMember(RemoldAgent.AlignmentTransaction tx, Set<String> rejected) {
+		if (tx == null) return null;
+		if (tx.hostName != null && rejected.contains(tx.hostName)) return "the host class " + tx.hostName;
+		for (String target : tx.targetClasses) {
+			if (rejected.contains(target)) return "anonymous class " + target;
+		}
+		return null;
 	}
 }

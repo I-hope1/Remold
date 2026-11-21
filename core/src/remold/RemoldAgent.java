@@ -2205,8 +2205,8 @@ public class RemoldAgent {
 					if (entry.getValue() != null) {
 						String slash = entry.getKey().replace('.', '/');
 						String dot   = entry.getKey().replace('/', '.');
-						AnnotationTransformer.pendingAlignedClasses.put(pendingScope, slash, entry.getValue());
-						AnnotationTransformer.pendingAlignedClasses.put(pendingScope, dot, entry.getValue());
+						AnnotationTransformer.PENDING_ALIGNED.put(pendingScope, slash, entry.getValue());
+						AnnotationTransformer.PENDING_ALIGNED.put(pendingScope, dot, entry.getValue());
 					}
 				}
 			}
@@ -2277,6 +2277,16 @@ public class RemoldAgent {
 
 		private final Map<String, String> byClass = new LinkedHashMap<>();
 
+		/**
+		 * 本轮被 {@link RedefineEntryGate}（class 文件合法性门禁）拒掉的类名。
+		 *
+		 * <p><b>为什么单独留一份</b>：判决文本是给人读的，程序判据不能靠解字符串。而"被拒类对应的
+		 * {@link AlignmentTransaction} 不许提交"这条规则必须有<b>机器可读</b>的输入，否则
+		 * {@code TwoPhaseCoordinator} 只能看到过滤后的 {@code definitions}、看不到"谁被拒了"，
+		 * 于是把被拒类的事务一起 commit —— 未生效字节就此变成基线（{@code docs/status.md} §5 风险 15/16）。</p>
+		 */
+		private final Set<String> bytecodeRejected = new LinkedHashSet<>();
+
 		/** 记一条。同名只保留<b>首个</b>判决 —— 第一个拦下它的门才是真正原因。 */
 		void add(String className, String verdict) {
 			if (className == null || className.isEmpty()) return;
@@ -2304,6 +2314,20 @@ public class RemoldAgent {
 
 		/** 被跳过的类数（用于成功行上的"还有几个没进来"）。 */
 		int size() { return byClass.size(); }
+
+		/** 记一条"被 class 文件合法性门禁拒掉"的结构化事实（见 {@link #bytecodeRejected}）。 */
+		void markBytecodeRejected(String className) {
+			if (className != null && !className.isEmpty()) bytecodeRejected.add(className);
+		}
+
+		/**
+		 * 本轮被合法性门禁拒掉的类名（只读快照）。
+		 *
+		 * <p>消费方只有一处：{@link RedefineEntryGate#withoutRejectedGroups} 据此把"含被拒类的事务组"
+		 * 整组移出提交范围。<b>不得</b>把它当成通用拒绝清单使用——其它门的拒绝语义不同（有的要回队、
+		 * 有的要重启），混用会改变那些路径的行为。</p>
+		 */
+		Set<String> bytecodeRejected() { return Set.copyOf(bytecodeRejected); }
 
 		/**
 		 * 拼一条紧凑判决：{@code CODE: detail — action}（detail / action 为空则省略）。

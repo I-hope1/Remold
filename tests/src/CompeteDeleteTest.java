@@ -117,13 +117,15 @@ public class CompeteDeleteTest {
 		// 现在的形态是：B 链三级全部存活，被删的 A 链整条幽灵化。
 		// 断言从"固化误绑"改为"固化不误绑"，并把判据落在**业务内容**上：
 		// 存活的 B 链必须调 tagB/useB，绝不能再出现 tagA/useA（那才是绑到已删链上去的证据）。
-		assertTrue(isLive(cnAligned, "lambda$build$5", "(II)V"), "Chain B 最外层必须存活");
-		assertTrue(isLive(cnAligned, "lambda$build$4", "(II)V"), "Chain B 中层必须存活");
+		// 先断业务内容（这才是"有没有绑错链"的直接判据），再断结构：
+		// 变异检查里最先变红的应当是这个内容断言，而不是"某个方法还活着"这种代理信号。
 		assertFalse(invokesAny(cnAligned, Set.of("tagA")),
 			"存活方法里不得再出现 tagA：出现即说明祖先绑到了已删的 Chain A 上");
 		assertFalse(invokesAny(cnAligned, Set.of("useA")),
 			"存活方法里不得再出现 useA：叶子同理");
 		assertTrue(invokesAny(cnAligned, Set.of("tagB")), "Chain B 的 tagB 调用必须保留在新体里");
+		assertTrue(isLive(cnAligned, "lambda$build$5", "(II)V"), "Chain B 最外层必须存活");
+		assertTrue(isLive(cnAligned, "lambda$build$4", "(II)V"), "Chain B 中层必须存活");
 
 		int ghostCount = 0;
 		for (MethodNode mn : cnAligned.methods) {

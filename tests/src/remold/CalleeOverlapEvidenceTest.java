@@ -119,4 +119,38 @@ class CalleeOverlapEvidenceTest {
 		assertTrue(LambdaAligner.calleesForTest(mn).isEmpty(),
 		 "synthetic names are structure, not content");
 	}
+	/**
+	 * 边界（评审提出）：<b>单条共享工具调用</b>不得当作证据。
+	 *
+	 * <p>{@code Object#toString}、{@code String#valueOf} 这类调用在字符串拼接里极其常见，一条就能在
+	 * {@code 1 vs 0} 时压过同名与 consumer 证据。因此单条交集必须来自非通用库 owner；两条以上才不论出处。</p>
+	 */
+	@Test
+	void singleSharedUtilityCallIsNotEvidence() {
+		String toString = "java/lang/Object#toString()Ljava/lang/String;";
+		int pick = LambdaAligner.calleeOverlapPickForTest(
+		 Set.of(toString),
+		 List.of(Set.of(THIS_CALL), Set.of(toString)));
+		assertEquals(-1, pick, "one shared JDK call must not override the same-name candidate");
+	}
+
+	/** 两条共享工具调用已经不太可能是巧合，允许作为证据。 */
+	@Test
+	void twoSharedUtilityCallsQualify() {
+		String a = "java/lang/Object#toString()Ljava/lang/String;";
+		String b = "java/lang/String#valueOf(I)Ljava/lang/String;";
+		int pick = LambdaAligner.calleeOverlapPickForTest(
+		 Set.of(a, b),
+		 List.of(Set.of(THIS_CALL), Set.of(a, b)));
+		assertEquals(1, pick, "two independent shared calls are strong enough to decide");
+	}
+
+	/** 单条但来自业务 owner（例如父类方法）仍然算证据：这正是 S41 的形态。 */
+	@Test
+	void singleBusinessCallQualifies() {
+		int pick = LambdaAligner.calleeOverlapPickForTest(
+		 Set.of(SUPER_REF),
+		 List.of(Set.of(THIS_CALL), Set.of(SUPER_REF)));
+		assertEquals(1, pick);
+	}
 }

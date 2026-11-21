@@ -1578,19 +1578,6 @@ public class LambdaAligner {
 	}
 
 	/**
-	 * 当双方都有子 lambda 时，检查"子的配对对象"是否与旧方法的子逐个吻合。
-	 *
-	 * <p>为什么需要：{@link #sameSemantics} 是递归语义指纹，后代一旦被编辑，祖先的语义
-	 * 指纹也会变，于是祖先拿不到任何候选（实测 save3 的 V2→V3：中层/外层因此被幽灵化，
-	 * 子被改体是 update 期最常见的动作）。子树等价这条证据在"后代被改"时必然失效，
-	 * 此时退而求其次用**结构证据**：子已经落定（{@link #hasUnmatchedChild} 保证），
-	 * 顺着"新子被配给了哪个旧方法"看，只有"子正好是那些旧方法"的旧候选才有资格当选。
-	 * 逐层传递，不需要知道嵌套深度。</p>
-	 *
-	 * <p>只在双方都有子、且子数量一致时启用（结构不符已由 {@link #sameNestingLevel}
-	 * 否决）；子尚未落定或信息不足时返回 true，不额外限制。</p>
-	 */
-	/**
 	 * 收集方法体内的非合成被调目标（{@code owner#name+desc}）。
 	 *
 	 * <p>不绑定 opcode：父类/私有调用在 JDK 8 与 11+ 走不同指令（{@code INVOKESPECIAL} vs
@@ -1602,7 +1589,7 @@ public class LambdaAligner {
 	 */
 	private static Set<String> collectCallees(MethodNode mn) {
 		if (mn.instructions == null) return Collections.emptySet();
-		Set<String> out = new java.util.LinkedHashSet<>();
+		Set<String> out = new LinkedHashSet<>();
 		for (AbstractInsnNode insn : mn.instructions) {
 			if (!(insn instanceof MethodInsnNode m)) continue;
 			if (MethodFingerprinter.isSyntheticName(m.name)) continue;
@@ -1630,14 +1617,44 @@ public class LambdaAligner {
 		 || "java/lang/Float".equals(owner) || "java/lang/Double".equals(owner);
 	}
 
-	/** 两个 lambda 的被调集合交集大小。 */
-	private static int calleeOverlap(SyntheticInfo ni, SyntheticInfo oi) {
-		if (ni.callees.isEmpty() || oi.callees.isEmpty()) return 0;
-		int shared = 0;
+	/** 两个 lambda 的被调集合交集。 */
+	private static Set<String> sharedCallees(SyntheticInfo ni, SyntheticInfo oi) {
+		if (ni.callees.isEmpty() || oi.callees.isEmpty()) return Collections.emptySet();
+		Set<String> shared = new LinkedHashSet<>();
 		for (String callee : ni.callees) {
-			if (oi.callees.contains(callee)) shared++;
+			if (oi.callees.contains(callee)) shared.add(callee);
 		}
 		return shared;
+	}
+
+	/** 两个 lambda 的被调集合交集大小。 */
+	private static int calleeOverlap(SyntheticInfo ni, SyntheticInfo oi) {
+		return sharedCallees(ni, oi).size();
+	}
+
+	/**
+	 * 该交集是否够格当证据：交集里至少有一条"业务调用"，或至少两条。
+	 *
+	 * <p>为什么不能只看基数：一条共享的<b>工具调用</b>就能在 {@code 1 vs 0} 时压过同名与 consumer 证据。
+	 * {@code Object#toString} 是刻意保留的（字符串拼接里真实出现），但它同时也是最常见的共享噪声。
+	 * 因此单条交集必须<b>不属于</b> JDK / Kotlin / Scala 这类通用库 owner 才算证据；两条以上才不论出处——
+	 * 两条独立共享调用同时纯属巧合的概率已经很低。</p>
+	 */
+	private static boolean qualifiesAsEvidence(Set<String> shared) {
+		if (shared.size() >= 2) return true;
+		for (String callee : shared) {
+			if (!isGenericLibraryOwner(callee.substring(0, Math.max(0, callee.indexOf('#'))))) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** 通用库 owner：这些包里的调用不携带"这两个 lambda 在做同一件业务"的信息。 */
+	private static boolean isGenericLibraryOwner(String owner) {
+		return owner.startsWith("java/") || owner.startsWith("javax/") || owner.startsWith("jdk/")
+		 || owner.startsWith("sun/") || owner.startsWith("com/sun/")
+		 || owner.startsWith("kotlin/") || owner.startsWith("scala/");
 	}
 
 	/**
@@ -1655,7 +1672,9 @@ public class LambdaAligner {
 		int bestOverlap = 0;
 		boolean tie = false;
 		for (SyntheticInfo oi : legal) {
-			int overlap = calleeOverlap(ni, oi);
+			Set<String> shared = sharedCallees(ni, oi);
+			if (!qualifiesAsEvidence(shared)) continue;
+			int overlap = shared.size();
 			if (overlap > bestOverlap) {
 				bestOverlap = overlap;
 				best = oi;
@@ -1667,6 +1686,19 @@ public class LambdaAligner {
 		return bestOverlap > 0 && !tie ? best : null;
 	}
 
+	/**
+	 * 当双方都有子 lambda 时，检查"子的配对对象"是否与旧方法的子逐个吻合。
+	 *
+	 * <p>为什么需要：{@link #sameSemantics} 是递归语义指纹，后代一旦被编辑，祖先的语义
+	 * 指纹也会变，于是祖先拿不到任何候选（实测 save3 的 V2→V3：中层/外层因此被幽灵化，
+	 * 子被改体是 update 期最常见的动作）。子树等价这条证据在"后代被改"时必然失效，
+	 * 此时退而求其次用**结构证据**：子已经落定（{@link #hasUnmatchedChild} 保证），
+	 * 顺着"新子被配给了哪个旧方法"看，只有"子正好是那些旧方法"的旧候选才有资格当选。
+	 * 逐层传递，不需要知道嵌套深度。</p>
+	 *
+	 * <p>只在双方都有子、且子数量一致时启用（结构不符已由 {@link #sameNestingLevel}
+	 * 否决）；子尚未落定或信息不足时返回 true，不额外限制。</p>
+	 */
 	private static boolean calleesPairTo(SyntheticInfo ni, SyntheticInfo oi) {
 		if (ni.children.isEmpty() || oi.children.isEmpty()) return true;
 		if (ni.children.size() != oi.children.size()) return false;
@@ -3636,8 +3668,8 @@ public class LambdaAligner {
 	 * @param oldCallees 各候选旧 lambda 的被调集合（顺序即原顺序）
 	 * @return 被选中的候选下标；{@code -1} 表示规则不介入（交集全零 / 并列最大 / 候选不足两个）
 	 */
-	public static int calleeOverlapPickForTest(java.util.Set<String> newCallees,
-	                                          java.util.List<java.util.Set<String>> oldCallees) {
+	public static int calleeOverlapPickForTest(Set<String> newCallees,
+	                                          List<Set<String>> oldCallees) {
 		SyntheticInfo ni = new SyntheticInfo("n", "()V", 0, 0L, "n", true);
 		ni.callees = newCallees == null ? Collections.emptySet() : newCallees;
 		List<SyntheticInfo> legal = new ArrayList<>();
@@ -3651,7 +3683,7 @@ public class LambdaAligner {
 	}
 
 	/** 测试钩子：给定方法的被调集合（按生产过滤规则）。 */
-	public static java.util.Set<String> calleesForTest(MethodNode mn) {
+	public static Set<String> calleesForTest(MethodNode mn) {
 		return collectCallees(mn);
 	}
 

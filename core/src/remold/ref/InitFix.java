@@ -196,7 +196,7 @@ public class InitFix {
 	 *                     与"注解默认值"：静态字段只有一个槽位，作用域对它没有意义，
 	 *                     只有用户显式写 scope 时才需要提醒（{@code docs/initfix/03-runtime-driver.md} §4）。
 	 */
-	private record ReinitField(boolean overwrite, boolean selfOnly, boolean scopeExplicit) { }
+	record ReinitField(boolean overwrite, boolean selfOnly, boolean scopeExplicit) { }
 
 	static final Unsafe UNSAFE = Unsafe.getUnsafe();
 
@@ -697,6 +697,25 @@ public class InitFix {
 	 + "Ljava/lang/Class;"
 	 + "Ljava/lang/Class;"
 	 + "Ljava/lang/Object;"
+	 + ")Ljava/lang/invoke/CallSite;",
+	 false);
+
+	/**
+	 * 遮蔽新增字段的条件 CAS：expected 由 bootstrap 在运行期从同一实例的祖先字段读出。
+	 * <p>bsmArgs 布局：{@code [int kind, int opcode, Class owner, Class host, Class ancestorOwner]}。</p>
+	 */
+	static final Handle BRIDGE_BSM_ANCESTOR = new Handle(
+	 Opcodes.H_INVOKESTATIC,
+	 Type.getInternalName(HotswapBridge.class),
+	 "bootstrapAncestor",
+	 "(Ljava/lang/invoke/MethodHandles$Lookup;"
+	 + "Ljava/lang/String;"
+	 + "Ljava/lang/invoke/MethodType;"
+	 + "I"
+	 + "I"
+	 + "Ljava/lang/Class;"
+	 + "Ljava/lang/Class;"
+	 + "Ljava/lang/Class;"
 	 + ")Ljava/lang/invoke/CallSite;",
 	 false);
 
@@ -2004,6 +2023,153 @@ public class InitFix {
 	/** 被 TTL 清扫摘除的补丁：宿主弱键 + 未补字段名 + 年龄（秒）。 */
 	private record StalePatch(WeakReference<Class<?>> host, List<String> fields, long ageSeconds) { }
 
+	/**
+	 * 识别本轮<b>新增实例字段里遮蔽了祖先同名字段</b>的那些，返回 {@code 字段名 -> 祖先声明类内部名}。
+	 *
+	 * <p>为什么需要它：DCEVM 重定义会把被遮蔽的继承槽位值复制进子类新增同名槽位，于是存量实例上
+	 * 该槽位"已有非默认值"，而默认的零值条件 CAS 会据此跳过、把新初值丢掉。这里只负责把祖先
+	 * 声明类找出来；比较基准由 {@link HotswapBridge#bootstrapAncestor} 在运行期读取。</p>
+	 *
+	 * <p>访问权限不是边界：DCEVM 的迁移复制按 {@code (name, desc)} 匹配，<b>不</b>区分访问权限，
+	 * {@code private} 祖先字段的值同样会被复制进子类新槽。运行期读取走完整权限的 lookup，
+	 * 因此 {@code private} / 跨包包内声明一律照常采纳。</p>
+	 *
+	 * <p>fail-closed 边界：祖先声明存在但<b>静态性不符</b>（实例槽位对不上静态字段，没有可比读数），
+	 * 或祖先链任一环取不到字节码（无法证明"不是遮蔽"）时<b>不</b>采纳，退回默认零值条件 CAS 并告警
+	 * —— 宁可漏补，也不拿猜测的期望值覆盖存量值。祖先链上根本没有同名同描述符声明则不是遮蔽，
+	 * 保持原行为、不告警。</p>
+	 *
+	 * <p>本方法只读字节码元数据（{@link ClassHierarchyOracle}），不触发类加载，供分析期与单测共用。</p>
+	 *
+	 * <p><b>已知保守边界</b>：同一批 Stage B 里若祖先字段自己被 {@code @RemoldReinit} 先改写成了新值，
+	 * 运行期读到的期望值就与新槽里那份 DCEVM 迁移副本对不上，条件 CAS 判不相等后按保守语义跳过
+	 * （计入 skipped 并告警）：结果是漏补、字段留在继承值上等下一轮，<b>不是</b>把旧值误写进新字段。
+	 * 该取舍刻意保留 —— 换成不看当前值的强制写会连带放弃"真被写过就不覆盖"的负向保证。</p>
+	 *
+	 * @param oracle             分析期层级查询口
+	 * @param className          被重定义类的内部名
+	 * @param addedInstanceFields 本轮新增的实例字段名
+	 * @param fieldNodes         新版本类自身的字段表（取描述符）
+	 */
+	static Map<String, String> detectShadowedAddedFields(
+	 ClassHierarchyOracle oracle, String className, Set<String> addedInstanceFields,
+	 Map<String, FieldNode> fieldNodes) {
+		if (addedInstanceFields.isEmpty()) return Map.of();
+		if (!oracle.isSuperclassChainResolvable(className)) {
+			RemoldAgent.warn("[SHADOW-FIELD] cannot read the complete superclass chain of "
+			                 + Names.external(className) + " from bytecode, so it cannot be proven"
+			                 + " whether an added field shadows an inherited one; every added field"
+			                 + " keeps the zero-value conditional write (fail-closed)");
+			return Map.of();
+		}
+		Map<String, String> shadows = new LinkedHashMap<>();
+		for (String field : addedInstanceFields) {
+			FieldNode fn = fieldNodes.get(field);
+			if (fn == null || (fn.access & Opcodes.ACC_STATIC) != 0) continue;
+			Optional<ClassHierarchyOracle.InheritedField> inherited;
+			try {
+				inherited = oracle.findInheritedField(className, field, fn.desc);
+			} catch (RuntimeException failure) {
+				RemoldAgent.warn("[SHADOW-FIELD] cannot inspect ancestor declarations of "
+				                 + Names.external(className) + "." + field + ": " + failure
+				                 + "; falling back to the zero-value conditional write (fail-closed)");
+				continue;
+			}
+			if (inherited.isEmpty()) continue;
+			ClassHierarchyOracle.InheritedField decl = inherited.get();
+			String reason = shadowAncestorUnreadableReason(decl);
+			if (reason != null) {
+				RemoldAgent.warn("[SHADOW-FIELD] added field " + Names.external(className) + "." + field
+				                 + " shadows " + Names.external(decl.declaringClass) + "." + field
+				                 + ", but that inherited field " + reason
+				                 + "; falling back to the zero-value conditional write (fail-closed)");
+				continue;
+			}
+			// 用户可见告警：InitFix 只保证子类槽位按新初值写入，管不到 JBR DCEVM 的 relayout。
+			// 实测（`tests/jbr-dcevm-shadowed-field/`、`docs/runtime/05-...`）：子类遮蔽父类同名字段时，
+			// 下一轮结构性重定义会把最派生声明的值按名字写进同名祖先槽位，重定义之前就已存在的实例
+			// 因此读到子类的值。这是上游行为，Remold 侧无法修正，只能点名告诉用户别这么写。
+			RemoldAgent.warn("[SHADOW-FIELD] added field " + Names.external(className) + "." + field
+			                 + " shadows " + Names.external(decl.declaringClass) + "." + field
+			                 + "; InitFix will initialize the subclass slot, but JBR DCEVM relayout may copy"
+			                 + " the most derived value into same-named ancestor slots of instances that"
+			                 + " predate this redefinition. Avoid same-name field shadowing across a hot-reload"
+			                 + " boundary, or rename the field.");
+			shadows.put(field, decl.declaringClass);
+		}
+		return shadows;
+	}
+
+	/**
+	 * 祖先声明能否作为运行期比较基准；返回 {@code null} 表示可用。
+	 *
+	 * <p>只拦真正读不到的形态：静态性不符（实例槽位没有可比读数）。访问权限不在此列 ——
+	 * 运行期用完整权限的 lookup 读槽位，{@code private} 祖先照样能读到。</p>
+	 */
+	private static String shadowAncestorUnreadableReason(ClassHierarchyOracle.InheritedField decl) {
+		if ((decl.access & Opcodes.ACC_STATIC) != 0) {
+			return "is static, so its value cannot be compared on the instance";
+		}
+		return null;
+	}
+
+	/**
+	 * 给"只声明不赋值"的遮蔽新增字段补一份"压入类型零值 + 写字段"的合成切片。
+	 *
+	 * <p>这类字段在新版本字节码里没有任何写指令，提取阶段自然拿不到切片；豁免 T0 之后会被
+	 * {@code "no safe initialization expression found in constructors"} 拒掉，槽位仍停在 DCEVM
+	 * 迁移复制进来的祖先值上。它的新初值就是类型默认值，所以在这类遮蔽字段上"写回 0"才是语义终局
+	 * （{@code docs/initfix/01-safety-gate.md} §1 的 T0 判据只适用于"存量槽位本来就是默认值"）。</p>
+	 *
+	 * <p>只处理 {@link InitFixSafetyGate#isZeroEquivalentField} 认可的零值等价字段：有写指令却取不到
+	 * 切片的形态说明那些写无法证明是零值写，不得替它编一个切片出来（宁可漏补）。</p>
+	 */
+	static void synthesizeZeroValueShadowExtracts(
+	 InitFixSafetyGate.NestView nest, ClassNode newClass, String className,
+	 Set<String> targetInstanceFields, Set<String> forceWriteFields,
+	 Map<String, ReinitField> reinitFields, Set<String> acceptedReplay,
+	 Set<String> selfAssignedFields, Map<String, String> shadowAncestors,
+	 Map<String, FieldNode> fieldNodes, Map<String, List<FieldExtract>> instanceExtracts,
+	 int rootCtorCount) {
+		if (shadowAncestors.isEmpty()) return;
+		for (String fieldName : shadowAncestors.keySet()) {
+			if (!targetInstanceFields.contains(fieldName)) continue;
+			if (forceWriteFields.contains(fieldName)) continue;
+			if (reinitFields.containsKey(fieldName) || acceptedReplay.contains(fieldName)) continue;
+			if (selfAssignedFields.contains(fieldName)) continue;
+			if (instanceExtracts.containsKey(fieldName)) continue;
+			FieldNode field = fieldNodes.get(fieldName);
+			if (field == null) continue;
+			if (!InitFixSafetyGate.isZeroEquivalentField(nest, newClass, field, false, instanceExtracts)) {
+				continue;
+			}
+			int copies = Math.max(1, rootCtorCount);
+			List<FieldExtract> slices = new ArrayList<>(copies);
+			for (int i = 0; i < copies; i++) {
+				List<AbstractInsnNode> insns = List.of(
+				 new VarInsnNode(Opcodes.ALOAD, 0),
+				 zeroValueInsn(field.desc),
+				 new FieldInsnNode(Opcodes.PUTFIELD, className, fieldName, field.desc));
+				slices.add(new FieldExtract(insns, Map.of(), false, true, new HashSet<>(insns)));
+			}
+			instanceExtracts.put(fieldName, slices);
+			log("Synthesized zero-value slice for the shadowed added field " + className + "."
+			    + fieldName + " (" + field.desc + "): the new initializer is the type default");
+		}
+	}
+
+	/** 字段描述符对应的类型默认值压栈指令（与 {@link InitFixSafetyGate} 的 T0 判据同口径）。 */
+	private static AbstractInsnNode zeroValueInsn(String desc) {
+		char c = desc.isEmpty() ? 'I' : desc.charAt(0);
+		return switch (c) {
+			case 'L', '[' -> new InsnNode(Opcodes.ACONST_NULL);
+			case 'J' -> new InsnNode(Opcodes.LCONST_0);
+			case 'F' -> new InsnNode(Opcodes.FCONST_0);
+			case 'D' -> new InsnNode(Opcodes.DCONST_0);
+			default -> new InsnNode(Opcodes.ICONST_0);   // Z/B/C/S/I
+		};
+	}
+
 	private static PatchAnalysis analyzePatch(
 	 Class<?> host, ClassNode preParsedNewClass, byte[] newBytes, String className,
 	 Set<String> addedStaticFields, Set<String> addedInstanceFields,
@@ -2094,6 +2260,18 @@ public class InitFix {
 		if (!reinitFields.isEmpty()) {
 			log("@RemoldReinit expanded candidate set for " + className
 			    + ": instance=" + targetInstanceFields + ", static=" + targetStaticFields);
+		}
+
+		// 新增实例字段若与祖先同名字段同描述符（遮蔽）：DCEVM 已把继承槽位值复制进新槽位，
+		// 默认零值条件 CAS 会把它当成"已被写过"而跳过。这里定位可读的祖先声明类，
+		// 由 {@link HotswapBridge#KIND_CONDITIONAL_ANCESTOR} 在运行期以祖先字段值为期望值。
+		Set<String> shadowCandidates = new LinkedHashSet<>(addedInstanceFields);
+		shadowCandidates.removeAll(forceWriteFields);
+		Map<String, String> shadowAncestors =
+		 detectShadowedAddedFields(oracle, className, shadowCandidates, fieldNodes);
+		if (!shadowAncestors.isEmpty()) {
+			log("Shadowed added field(s) of " + className + " resolve their expected value from: "
+			    + shadowAncestors);
 		}
 
 		// L1 存量初值重放：继承字段不在本类字段表里，必须补一份合成的 FieldNode 元数据，
@@ -2227,6 +2405,13 @@ public class InitFix {
 		// 显式 = null / = 0 / = false、仅声明未赋值、以及 static ConstantValue 按位为零的字段，
 		// 存量实例与静态环境本来就是默认值：零开销放行，不生成补丁（也不会生成恒等 CAS 写）。
 		// 浮点按位判定，-0.0f / -0.0d / NaN 的位模式非零，不算零值等价。
+		//
+		// 遮蔽新增字段是例外：DCEVM 迁移复制已经按 (name, desc) 把祖先槽位的值写进新槽，
+		// 存量实例上这个槽位<b>不是</b>类型默认值。"零值等价"的前提在这里不成立，
+		// 必须生成一次"祖先值 -> 新初值"的条件写，否则字段停在继承值上。
+		synthesizeZeroValueShadowExtracts(nest, newClass, className, targetInstanceFields,
+		 forceWriteFields, reinitFields, acceptedReplay, selfAssignedFields,
+		 shadowAncestors, fieldNodes, instanceExtracts, rootCtorCount);
 		Set<String> zeroInstanceFields = new LinkedHashSet<>();
 		for (String f : targetInstanceFields) {
 			if (selfAssignedFields.contains(f)) continue;
@@ -2234,6 +2419,7 @@ public class InitFix {
 			// L1 重放字段的"零值等价"不成立：存量值可能是旧初值（非零），新初值为 0 时也必须
 			// 条件写回，不能按 T0 当作"已经是对的"跳过。
 			if (acceptedReplay.contains(f)) continue;
+			if (shadowAncestors.containsKey(f)) continue;   // 见上：遮蔽字段的存量槽位是继承值，不是类型默认值
 			if (InitFixSafetyGate.isZeroEquivalentField(nest, newClass, fieldNodes.get(f), false, instanceExtracts)) {
 				zeroInstanceFields.add(f);
 			}
@@ -2534,7 +2720,7 @@ public class InitFix {
 		}, close, () -> emitPatch(host, className, hostVersion, targetInstanceFields, targetStaticFields,
 		 forceWriteFields, selfOnlyFields, instanceExtracts, staticExtracts, instanceDecisions, staticDecisions,
 		 acceptedInstance, acceptedStatic, acceptedReplay, replayFields, replayDecisions, applyFields,
-		 applyDecisions, reinitFields, reinitKeys, crossDependencies, generational));
+		 applyDecisions, reinitFields, reinitKeys, crossDependencies, generational, shadowAncestors));
 	}
 
 	private static BuiltPatch emitPatch(Class<?> host, String className, int hostVersion,
@@ -2546,7 +2732,7 @@ public class InitFix {
 	 Map<String, String> replayDecisions, Map<String, ApplyInitializerReplay.ReplayField> applyFields,
 	 Map<String, String> applyDecisions, Map<String, ReinitField> reinitFields, Map<String, String> reinitKeys,
 	 Map<String, Set<InitFixBatchGraph.FieldKey>> crossDependencies,
-	 Map<String, GenerationalReplay> generational) {
+	 Map<String, GenerationalReplay> generational, Map<String, String> shadowAncestors) {
 		// ==================== 阶段 2.5：拓扑排序 ====================
 		// 到这里成环已被排除（阶段 2 的固定点），排序必定成功。
 		List<String> orderedInstance = acceptedInstance.isEmpty()
@@ -2628,7 +2814,8 @@ public class InitFix {
 			}
 			List<AbstractInsnNode> body = InitFixPatchEmitter.rewriteFieldSlice(
 			 hostInternal, className, chosenBody,
-			 chosen.protectedAccesses(), conditionalFields, forceWriteFields, replayArguments);
+			 chosen.protectedAccesses(), conditionalFields, forceWriteFields, replayArguments,
+			 shadowAncestors);
 			boolean replayTask = acceptedReplay.contains(fieldName);
 			boolean selfOnlyTask = replayTask || selfOnlyFields.contains(fieldName);
 			String batchMethodName = null;
@@ -2685,7 +2872,7 @@ public class InitFix {
 			String       method = InitFixPatchEmitter.uniqueMethodName(STATIC_PATCH_PREFIX, fieldName, usedMethodNames);
 			List<AbstractInsnNode> body = InitFixPatchEmitter.rewriteFieldSlice(
 			 hostInternal, className, new ArrayList<>(fe.instructions()),
-			 fe.protectedAccesses(), conditionalFields, forceWriteFields, Map.of());
+			 fe.protectedAccesses(), conditionalFields, forceWriteFields, Map.of(), Map.of());
 			patch.methods.add(InitFixPatchEmitter.straightLineMethod(method, "()", body));
 			Set<InitFixBatchGraph.FieldKey> batchDeps = crossDependencies.getOrDefault(fieldName, Set.of());
 			Set<String> staticDeps = new LinkedHashSet<>(

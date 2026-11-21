@@ -1,6 +1,7 @@
 package remold.ref;
 
 import remold.WorkspaceRawIndex;
+import remold.util.Names;
 import remold.AnnotationTransformer;
 import remold.BytecodeSources;
 import remold.RemoldAgent;
@@ -33,6 +34,8 @@ public final class HierarchyTreeOracle implements ClassHierarchyOracle {
 	private final ClassNode                  preferredClass;
 	private final Map<String, ClassNode>     resolved     = new HashMap<>();
 	private final Map<String, ClassNode>     nestResolved = new HashMap<>();
+	/** 祖先字段定位用的"重定义前"视图：与 {@link #resolved} 的批次新字节码口径不同。 */
+	private final Map<String, ClassNode>     preRedefineResolved = new HashMap<>();
 
 	public HierarchyTreeOracle(ClassLoader loader) {
 		this(loader, null);
@@ -92,6 +95,67 @@ public final class HierarchyTreeOracle implements ClassHierarchyOracle {
 		return Optional.empty();
 	}
 
+	/**
+	 * 新版本的 {@code className} 是否遮蔽了父类链上声明的实例字段（字段遮蔽）。
+	 *
+	 * <p>DCEVM 给子类新增字段时，按 {@code (name, desc)} 把父类同名字段的槽位值复制进新槽，
+	 * <b>不区分访问权限</b>：父类 {@code private} 字段同样会把非零值带进来。因此这里只按声明匹配，
+	 * 不走 {@link #findField} 的可见性过滤（那条路径用于解析"从本类可见的成员"）。</p>
+	 *
+	 * <p>只沿 {@code superName} 链向上：接口字段一定是 {@code static final}，不占实例槽位，
+	 * 不构成遮蔽。</p>
+	 *
+	 * @return 命中的祖先类内部名；没有命中、或父类链任一环取不到字节码时返回 empty
+	 *         （解析不到就不能断言"不是遮蔽"，fail-closed 交回既有的条件 CAS 行为）
+	 */
+	public Optional<String> findInstanceFieldDeclaredInSuperclasses(
+	 String className, String fieldName, String fieldDesc) {
+		ClassNode node = resolve(className);
+		if (node == null) return Optional.empty();
+		Set<String> visited = new HashSet<>();
+		String      current = node.superName;
+		while (current != null && visited.add(current)) {
+			ClassNode parent = resolve(current);
+			if (parent == null) return Optional.empty();
+			if (parent.fields != null) {
+				for (FieldNode field : parent.fields) {
+					if (!field.name.equals(fieldName) || !field.desc.equals(fieldDesc)) continue;
+					if ((field.access & Opcodes.ACC_STATIC) != 0) continue;
+					return Optional.of(current);
+				}
+			}
+			current = parent.superName;
+		}
+		return Optional.empty();
+	}
+
+	/**
+	 * 新版本的 {@code className} 是否遮蔽了父类链上声明的<b>静态</b>字段。
+	 *
+	 * <p>与实例字段分开：静态字段的槽位复制行为由 DCEVM 实现决定，必须实测（见
+	 * {@code ShadowFieldProbe}）；未验证前不得把它当成实例字段同款处理。</p>
+	 */
+	public Optional<String> findStaticFieldDeclaredInSuperclasses(
+	 String className, String fieldName, String fieldDesc) {
+		ClassNode node = resolve(className);
+		if (node == null) return Optional.empty();
+		Set<String> visited = new HashSet<>();
+		String      current = node.superName;
+		while (current != null && visited.add(current)) {
+			ClassNode parent = resolve(current);
+			if (parent == null) return Optional.empty();
+			if (parent.fields != null) {
+				for (FieldNode field : parent.fields) {
+					if (!field.name.equals(fieldName) || !field.desc.equals(fieldDesc)) continue;
+					if ((field.access & Opcodes.ACC_STATIC) == 0) continue;
+					return Optional.of(current);
+				}
+			}
+			current = parent.superName;
+		}
+		return Optional.empty();
+	}
+
 	@Override
 	public Optional<Integer> getMethodModifiers(String className, String methodName, String desc) {
 		return resolveMember(className, methodName, desc, false).map(member -> member.access);
@@ -122,6 +186,87 @@ public final class HierarchyTreeOracle implements ClassHierarchyOracle {
 			}
 		}
 		return Optional.empty();
+	}
+
+	/**
+	 * 祖先链按<b>重定义前</b>的层级解析：DCEVM 迁移新字段时复制的也是那一条声明上的值。
+	 * 若同一批次里中间类也新增了同名字段，用批次新字节码会解析到那条新声明，
+	 * 而实例槽位里复制的仍是更上层旧声明的值 —— 比较基准会随补丁顺序漂移。
+	 */
+	@Override
+	public Optional<InheritedField> findInheritedField(String className, String fieldName, String desc) {
+		ClassNode node = resolve(className);
+		if (node == null) return Optional.empty();
+		return findInheritedField(className, node.superName, fieldName, desc, new HashSet<>());
+	}
+
+	private ClassNode resolvePreRedefine(String internalName) {
+		ClassNode known = preRedefineResolved.get(internalName);
+		if (known != null) return known;
+		byte[] bytes = readPreRedefineClassBytes(internalName);
+		if (bytes == null) return null;
+		try {
+			ClassNode node = new ClassNode();
+			new ClassReader(bytes).accept(node,
+			 ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+			preRedefineResolved.put(internalName, node);
+			return node;
+		} catch (Throwable ignored) {
+			return null;
+		}
+	}
+
+	/** 只读"重定义已生效"的基线字节：运行期缓存 → 生成类登记口 → 类加载器资源流（不读批次新字节码）。 */
+	private byte[] readPreRedefineClassBytes(String internalName) {
+		byte[] cached = RemoldAgent.getRuntimeBytecode(Names.external(internalName));
+		if (cached != null) return cached;
+		byte[] supplied = WorkspaceRawIndex.lookup(internalName);
+		if (supplied != null) return supplied;
+		ClassLoader sourceLoader = loader.get();
+		if (sourceLoader == null) sourceLoader = ClassLoader.getSystemClassLoader();
+		if (sourceLoader == null) return null;
+		try (InputStream in = sourceLoader.getResourceAsStream(internalName + ".class")) {
+			return in == null ? null : in.readAllBytes();
+		} catch (Throwable ignored) {
+			return null;
+		}
+	}
+
+	/**
+	 * 在祖先链上按 {@code superclass -> interfaces -> superclass'} 的顺序找第一条同名同描述符声明，
+	 * <b>不</b>跳过不可见成员：可读性作为结果字段返回，由调用方决定 fail-closed。
+	 */
+	@Override
+	public boolean isSuperclassChainResolvable(String className) {
+		ClassNode node = resolve(className);
+		if (node == null) return false;
+		Set<String> visited = new HashSet<>();
+		while (node.superName != null) {
+			if (!visited.add(node.superName)) return true;
+			node = resolvePreRedefine(node.superName);
+			if (node == null) return false;
+		}
+		return true;
+	}
+
+	private Optional<InheritedField> findInheritedField(
+	 String lookupType, String currentType, String name, String desc, Set<String> visited) {
+		if (currentType == null || !visited.add(currentType)) return Optional.empty();
+		ClassNode node = resolvePreRedefine(currentType);
+		if (node == null) return Optional.empty();
+		for (FieldNode field : node.fields) {
+			if (field.name.equals(name) && field.desc.equals(desc)) {
+				return Optional.of(new InheritedField(
+				 currentType, field.access, visibleFromLookup(lookupType, currentType, field.access)));
+			}
+		}
+		if (node.interfaces != null) {
+			for (String itf : node.interfaces) {
+				Optional<InheritedField> found = findInheritedField(lookupType, itf, name, desc, visited);
+				if (found.isPresent()) return found;
+			}
+		}
+		return findInheritedField(lookupType, node.superName, name, desc, visited);
 	}
 
 	private Optional<MemberRef> findField(String lookupType, String currentType, String name, String desc,

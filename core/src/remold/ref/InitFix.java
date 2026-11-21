@@ -196,7 +196,7 @@ public class InitFix {
 	 *                     与"注解默认值"：静态字段只有一个槽位，作用域对它没有意义，
 	 *                     只有用户显式写 scope 时才需要提醒（{@code docs/initfix/03-runtime-driver.md} §4）。
 	 */
-	private record ReinitField(boolean overwrite, boolean selfOnly, boolean scopeExplicit) { }
+	record ReinitField(boolean overwrite, boolean selfOnly, boolean scopeExplicit) { }
 
 	static final Unsafe UNSAFE = Unsafe.getUnsafe();
 

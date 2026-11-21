@@ -394,6 +394,32 @@ public class ShadowFieldInitFixTest {
 	}
 
 	/**
+	 * 显式通道优先：字段若在 {@code @RemoldReinit} 或已接受的重放通道里，就不得被合成零值切片顶掉。
+	 *
+	 * <p>这条是"合成切片只负责没有初值表达式的遮蔽字段"的边界；去掉排除后，`@RemoldReinit(OVERWRITE)`
+	 * 的用户意图会被合成切片悄悄改写成"写回类型零值"。</p>
+	 */
+	@Test
+	void reinitChannelWinsOverTheSynthesizedZeroSlice() throws Exception {
+		ClassNode node = newClassNode(ZeroDeclaredOnly.class);
+		HierarchyTreeOracle oracle = new HierarchyTreeOracle(
+			ShadowFieldInitFixTest.class.getClassLoader(), node);
+		InitFixSafetyGate.NestView nest = InitFixSafetyGate.NestView.of(null, node, oracle);
+		Map<String, List<InitFix.FieldExtract>> extracts = new java.util.LinkedHashMap<>();
+
+		Map<String, InitFix.ReinitField> reinitFields = new java.util.HashMap<>();
+		reinitFields.put("x", new InitFix.ReinitField(true, false, false));   // @RemoldReinit(OVERWRITE)
+		InitFix.synthesizeZeroValueShadowExtracts(nest, node, node.name, Set.of("x"), Set.of(),
+			reinitFields, Set.of(), Set.of(), Map.of("x", internalName(ZeroAnc.class)),
+			fieldNodes(node), extracts, 1);
+
+		assertNull(extracts.get("x"),
+			"an explicit reinit channel must not be overridden by the synthesized zero slice, was "
+			+ extracts.get("x"));
+	}
+
+
+	/**
 	 * 合成切片只适用于"整段没有写指令"的形态：有写指令却取不到切片说明那些写无法证明是零值写，
 	 * 不得替它编一个切片出来（宁可漏补）。非遮蔽字段同理不进这条通道。
 	 */

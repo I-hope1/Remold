@@ -77,6 +77,7 @@ import static remold.RemoldAgent.applyRedefinitions;
 import static remold.RemoldAgent.applyTransformerBridges;
 import static remold.RemoldAgent.applyTwoPhase;
 import static remold.RemoldAgent.batchWatchLabel;
+import static remold.RemoldAgent.beginSourceRound;
 import static remold.RemoldAgent.calculateHash;
 import static remold.RemoldAgent.commitVcsBatch;
 import static remold.RemoldAgent.enterInternalRetransform;
@@ -383,6 +384,10 @@ final class BatchHotswapExecutor {
 			driftOldBytes.put(key, getRuntimeBytecode(key));
 			if (prev != null) prevSourceBytes.put(key, prev);
 		}
+		// 风险 16（并发语义窗口）：本轮源码基线不再直接写已提交视图，而是进入按轮次的 staged 容器。
+		// 从这一行到下面的 rollbackSourceCache 之间，任何外部 redefine/retransform 触发的读方
+		// （no-op 判定、对齐旧侧、Mixin 兜底）只能读到上一版已生效字节，不会读到本轮候选字节。
+		beginSourceRound();
 		for (Map.Entry<String, byte[]> e : newBatchBytes.entrySet()) {
 			recordSourceBytecode(e.getKey(), e.getValue());
 		}
@@ -871,8 +876,8 @@ final class BatchHotswapExecutor {
 		long redefineWallEndNanos = PERF_LOG ? System.nanoTime() : 0L;
 
 		// sourceBytecodeCache 是“最近一次实际生效的源码基线”，不是“本轮编译结果”。
-		// 对齐阶段必须先看到本轮新字节，所以上面暂存写入；这里按类回滚未生效的已加载类。
-		// 注入的新类不在 loadedBefore 中，保持新源码；成功类保持新源码。
+		// 对齐阶段必须能看到本轮新字节（它读的是 prevSourceBytes 快照，不是缓存），所以候选字节只进 staged；
+		// 这里按类判定生效性后一次性原子并入已提交视图，未生效类丢弃，注入的新类与成功类保留新源码。
 		rollbackSourceCache(sourceBefore, redefinedOk, loadedBefore);
 
 		// ---- 指纹落账 + 失败回队 ----

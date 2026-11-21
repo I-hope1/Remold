@@ -185,6 +185,11 @@ class BytecodeGateTransactionTest {
 	 * <p>两阶段路径的提交点分散在 stage A 的 {@code preRegister}（登记 pending）与 stage C 的
 	 * {@code commit()}（写 bytecodeCache）两处，只修单阶段会在这里留下后门：被拒类的对齐字节照样在
 	 * stage A 之前被登记进 pending，下一轮首次加载就拿到从未生效的字节。</p>
+	 *
+	 * <p><b>为什么要在 redefineClasses 那一刻采样</b>：事后看最终态是干净的——stage A 的组一致性
+	 * 检查会把整组 rollback 掉。但违规登记<b>存在过</b>一段时间窗口，窗口里任何线程首次加载该类
+	 * 都会拿到从未生效的字节。所以断言落在"进 redefineClasses 那一刻 pending 里有没有它"，
+	 * 而不是"函数返回后有没有它"。</p>
 	 */
 	@Test
 	void rejectedClassTransactionStaysOutOfTheTwoPhasePreRegister() {
@@ -201,9 +206,16 @@ class BytecodeGateTransactionTest {
 		skips.markBytecodeRejected(BAD_DOT);
 		assertTrue(skips.bytecodeRejected().contains(BAD_DOT), "precondition: the refusal is recorded");
 
+		this.instrumentation.watchedPendingName = BAD_ANON_INTERNAL;
 		RemoldAgent.RedefineOutcome outcome = TwoPhaseCoordinator.applyTwoPhase(
 		 List.of(goodDefinition), Map.of(), List.of(badTransaction), skips, Set.of());
 
+		assertFalse(this.instrumentation.pendingAtRedefine.isEmpty(),
+		 "precondition: stage A really entered redefineClasses, so the window was sampled");
+		for (byte[] seen : this.instrumentation.pendingAtRedefine) {
+			assertNull(seen, "the refused group's bytes must never be observable in pendingAlignedClasses,"
+				+ " not even while stage A runs");
+		}
 		assertFalse(badTransaction.committed,
 		 "the two-phase path must not commit the transaction of a refused class: " + outcome);
 		assertNull(AnnotationTransformer.pendingAlignedClasses.get(BAD_ANON_INTERNAL),
@@ -321,6 +333,9 @@ class BytecodeGateTransactionTest {
 	/** 只录制 {@code redefineClasses}；不真的重定义（测试用的类与字节码不同源）。 */
 	private static final class RecordingInstrumentation implements InvocationHandler {
 		final List<ClassDefinition[]> redefinitions = new ArrayList<>();
+		/** 采样：每次调 {@code redefineClasses} 时，{@link #watchedPendingName} 在 pending 里的字节。 */
+		final List<byte[]> pendingAtRedefine = new ArrayList<>();
+		String watchedPendingName;
 		final Instrumentation proxy = (Instrumentation) Proxy.newProxyInstance(
 		 BytecodeGateTransactionTest.class.getClassLoader(), new Class<?>[] {Instrumentation.class}, this);
 
@@ -336,6 +351,10 @@ class BytecodeGateTransactionTest {
 				case "getInitiatedClasses":
 					return new Class<?>[0];
 				case "redefineClasses":
+					if (this.watchedPendingName != null) {
+						this.pendingAtRedefine.add(
+							AnnotationTransformer.pendingAlignedClasses.get(this.watchedPendingName));
+					}
 					this.redefinitions.add((ClassDefinition[]) args[0]);
 					return null;
 				case "addTransformer":

@@ -310,7 +310,7 @@ jobs:
           cp core/build/libs/remold-agent.jar dist/remold-agent.jar
           cp core/build/libs/remold-agent.jar "dist/remold-agent-${VERSION}.jar"
 
-          for p in arc mixin forge fabric; do
+          for p in arc mixin forge fabric mc-toast; do
             SRC=$(ls plugin-$p/build/libs/remold-plugin-$p-*.jar 2>/dev/null | grep -v 'sources' | sort -V | tail -n 1)
             if [ -n "$SRC" ] && [ -f "$SRC" ]; then
               cp "$SRC" "dist/remold-plugin-$p.jar"

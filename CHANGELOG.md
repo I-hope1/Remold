@@ -7,30 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **Lambda 对齐新增"内容证据"（callee overlap）**：位置同名只说明编译器把两个 lambda 排在同一序号；
-  删除 `$0` 改写 `$1` 与删除 `$1` 改写 `$0` 是镜像编辑，只按序号配对必然有一种会错。现在从方法体收集
-  非合成被调目标（`owner#name+desc`，不绑 opcode，兼容 JDK 8 `INVOKESPECIAL` 与 11+ 私有/父类调用），
-  在 Pass A / Pass B 的**合法候选**内择优：只有当某候选的交集**唯一、严格最大且为正**时才覆盖同名优先；
-  平票 / 零交集 / 单候选一律退回既有规则（`isSameNameEvidence` → `hasSameExplicitConsumer` → 原顺序）。
-  样板调用（`Object.<init>`、`Objects.requireNonNull*`、`Intrinsics*`、装箱拆箱）先过滤；`Object#toString`
-  刻意保留，改用"单条共享调用须来自非通用库 owner"的门槛控噪。
-
-  `CompeteDeleteTest` 里原本"固化误绑缺陷"的基线（注释写明限制消失时必须变红）确实变红，已改为断言
-  修复后的行为，并把业务内容断言（`tagA`/`useA` 不得出现）排在结构断言之前。
-
-### Fixed
-
-- **批实例切块越界（`InitFixRuntimeDriver.nextBatchChunkEnd`）**：步长从 4 放大到 8192 时没有钳到
-  `total`。剩余量落在 `(4096, 8192)`（例如 15000 个实例：8192 + 6808）时块尾越过数组末端，生成器
-  只判 `localIndex < localTo`，于是每个实例都抛 `ArrayIndexOutOfBoundsException`，连续撞满单字段
-  失败配额后把**已经补成功**的字段当成"放弃"；后续无关热更还会经台账回流重跑整批实例，融合批则退回
-  `fallbackFusedGroupFrom` 对同一段实例重复做条件 CAS，并打出误导性 `skipped ... conditional write(s)`
-  告警。修复为 `Math.min(total, ...)`；回归锁 `tests/src/remold/ref/InitFixChunkBoundaryTest`
-  （4096/4097/12288/12289/15000/16383/16384/20481 等边界，断言 `pos < end <= total` 且恰好覆盖全部
-  实例一次），去掉钳位即 3 条断言变红。
-
 ### Added
 
 - **加载前沿与出生水位线（load frontier / birth watermark）**：把"代码何时被改"与"类何时被懒加载"分开记账，
@@ -80,7 +56,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `-DvcsGcProbe.ledger=true` 模式，每轮多一次匿名子类的初值漂移，于是每代都带一条真实 `L1` 事实；
   窗口设为 8 以便在 30 轮内看到索引淘汰。读数与边界见 `docs/vcs/06-b1-gc-baseline-readings.md` §9。
 
-### Fixed
 
 - **正向代被代际事实顶成"期望晚一代"**：`resolve()` 给出的 `(oldLiteral, newLiteral)` 描述的是**上一代**的那次漂移，
   用它顶替当轮 `ClassDiff` 会让期望永远落后一代——首次漂移之后每轮条件 CAS 都不命中，重放从第 3 轮起彻底停滞
@@ -272,6 +247,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Lambda 对齐新增"内容证据"（callee overlap）**：位置同名只说明编译器把两个 lambda 排在同一序号；
+  删除 `$0` 改写 `$1` 与删除 `$1` 改写 `$0` 是镜像编辑，只按序号配对必然有一种会错。现在从方法体收集
+  非合成被调目标（`owner#name+desc`，不绑 opcode，兼容 JDK 8 `INVOKESPECIAL` 与 11+ 私有/父类调用），
+  在 Pass A / Pass B 的**合法候选**内择优：只有当某候选的交集**唯一、严格最大且为正**时才覆盖同名优先；
+  平票 / 零交集 / 单候选一律退回既有规则（`isSameNameEvidence` → `hasSameExplicitConsumer` → 原顺序）。
+  样板调用（`Object.<init>`、`Objects.requireNonNull*`、`Intrinsics*`、装箱拆箱）先过滤；`Object#toString`
+  刻意保留，改用"单条共享调用须来自非通用库 owner"的门槛控噪。
+
+  `CompeteDeleteTest` 里原本"固化误绑缺陷"的基线（注释写明限制消失时必须变红）确实变红，已改为断言
+  修复后的行为，并把业务内容断言（`tagA`/`useA` 不得出现）排在结构断言之前。
+
 - **Run R（活体 `Raw_prev ↔ Raw_new` 对齐）转正为默认启用**（`LambdaAligner.META_SOURCE`）：
   去掉了 `poc` 前缀的语义负担，配套急停开关 `-Dremold.agent.lambda_raw_alignment=false`；
   判定优先级为「急停 → 兼容旧 Property `-Dremold.poc.meta_source` → 默认 `true`」，因此照抄旧文档里的
@@ -339,6 +325,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 规格见 [`docs/initfix/05-jvmti-heap.md`](docs/initfix/05-jvmti-heap.md) §「批次实例收集」。
 
 ### Fixed
+
+- **发布链漏打 `plugin-mc-toast`**：`release.yml` 与 `ci.yml` 的插件打包循环只列了 `arc mixin forge fabric`，而 `RemoldConfigResolver` 已对 Fabric/Forge 默认自动追加 `mc-toast`，`resolvePluginJar` 又优先找本地构建产物——下一版 release assets / `remold-dist` 会缺这个插件，仓库外用户只能落到 JitPack 兜底或直接 `plugin jar not found`。两处循环补齐 `mc-toast`。
+
+- **批实例切块越界（`InitFixRuntimeDriver.nextBatchChunkEnd`）**：步长从 4 放大到 8192 时没有钳到
+  `total`。剩余量落在 `(4096, 8192)`（例如 15000 个实例：8192 + 6808）时块尾越过数组末端，生成器
+  只判 `localIndex < localTo`，于是每个实例都抛 `ArrayIndexOutOfBoundsException`，连续撞满单字段
+  失败配额后把**已经补成功**的字段当成"放弃"；后续无关热更还会经台账回流重跑整批实例，融合批则退回
+  `fallbackFusedGroupFrom` 对同一段实例重复做条件 CAS，并打出误导性 `skipped ... conditional write(s)`
+  告警。修复为 `Math.min(total, ...)`；回归锁 `tests/src/remold/ref/InitFixChunkBoundaryTest`
+  （4096/4097/12288/12289/15000/16383/16384/20481 等边界，断言 `pos < end <= total` 且恰好覆盖全部
+  实例一次），去掉钳位即 3 条断言变红。
 
 - **模版冷缓存离线必红：根 `settings.gradle` 的 Mindustry ivy 规则与官方模版不是同一组 artifactPattern**
   （`settings.gradle`）。根构建里的 ivy 仓库原来只有一条
@@ -423,8 +420,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   单测：`TwoPhaseGuardTest` 新增"既有静态字段重写 → true / `ConstantValue` 常量重写 → false"；
   `BatchTwoPhaseStaticRewriteTest`（批次驱动 Stage A → patch → Stage C，1/1）与
   `DynamicTwoPhaseRedefineTest`（动态入口同顺序，3/3）验证两条路径。
-
-### Fixed
 
 - **跨类热更批次里前序类的权威 lambda 映射被静默丢弃**：`CellPropertyRef.afterRedefineBatch` 在整批类重定义
   完成后才逐类回调，但 `matchMethods` 读的是 `LambdaAligner.LAST_RESULT` 全局单槽——单槽此刻只剩

@@ -10,6 +10,7 @@ import remold.profiler.DynamicProfilerAPI;
 import remold.ref.HeapFieldWatch;
 import remold.ref.HotswapBridge;
 import remold.ref.InitFix;
+import remold.ref.PendingLoadPatch;
 import remold.ref.StageBInstanceCache;
 import remold.vcs.AlignmentMetaStore;
 import remold.vcs.Changeset;
@@ -311,8 +312,99 @@ public class RemoldAgent {
 	 */
 	public static final Map<String, java.util.Set<String>> inventedSlots = new ConcurrentHashMap<>();
 
-	/** 本轮算出的自造名，redefine 成功后才并入 {@link #inventedSlots}。 */
-	static final Map<String, Set<String>> pendingInvented = new ConcurrentHashMap<>();
+	/**
+	 * 本轮算出的自造名，redefine 成功后才并入 {@link #inventedSlots}。
+	 *
+	 * <p>键 = <b>(loader 身份, 类名)</b>：scope 号由 {@link AlignmentMetaStore#loaderScopeId} 统一分配
+	 * （与 {@link AnnotationTransformer.PendingAlignedClasses}、{@link PendingLoadPatch} 同一口径）。
+	 * 只按类名键会在"两个 loader 各有一个同名类"时串用——A 算出的自造名被 B 的成功回执取走，
+	 * 下一轮 B 的 lambda 会按 A 的槽位名配对（{@code docs/status.md} §5 风险 15）。</p>
+	 */
+	static final PendingInvented pendingInvented = new PendingInvented();
+
+	/**
+	 * {@link #pendingInvented} 的存储：{@code scope + '\0' + 类名} → 自造名集合。
+	 *
+	 * <p>写入侧（对齐期）与消费侧（{@link #commitInvented}）都只能拿到类名，因此两处都用
+	 * {@link #scopeOfLoadedClass} 解析当前定义 loader 的 scope；写入时把解析结果记进
+	 * {@code writeScope}，消费时优先用它——这样"写入到成功回执之间 {@code loadedClassesMap} 被重建"
+	 * 不会把暂存读丢，也不会让别的 scope 的条目被误取。</p>
+	 *
+	 * <p>仍按 {@code Map<String, Set<String>>} 的读法暴露（{@code keySet} / {@code size} 为并集视图），
+	 * 是因为编号避让与既有探针按名字维度遍历它；精确 scope 的读写用 {@code (long, String)} 重载。</p>
+	 */
+	static final class PendingInvented extends AbstractMap<String, Set<String>> {
+		private final Map<String, Set<String>> entries = new ConcurrentHashMap<>();
+		private final Map<String, Long> writeScope = new ConcurrentHashMap<>();
+
+		private static String key(long scope, String className) {
+			return scope + "\u0000" + className;
+		}
+
+		@Override
+		public Set<String> put(String className, Set<String> names) {
+			if (className == null) return null;
+			long scope = scopeOfLoadedClass(className);
+			writeScope.put(className, scope);
+			return entries.put(key(scope, className), names == null ? Set.of() : names);
+		}
+
+		/** 按 scope 写入：scope 必须来自 {@link AlignmentMetaStore#loaderScopeId}。 */
+		Set<String> put(long scope, String className, Set<String> names) {
+			if (className == null) return null;
+			writeScope.put(className, scope);
+			return entries.put(key(scope, className), names == null ? Set.of() : names);
+		}
+
+		/** 精确 scope 取走；scope 不匹配说明条目属于别的 loader，一步都不借。 */
+		Set<String> remove(long scope, String className) {
+			return className == null ? null : entries.remove(key(scope, className));
+		}
+
+		/** 按类名取走：scope 取写入时记下的那一个，没有则按当前定义 loader 解析。 */
+		@Override
+		public Set<String> remove(Object className) {
+			if (!(className instanceof String)) return null;
+			Long written = writeScope.remove(className);
+			long scope = written != null ? written : scopeOfLoadedClass((String) className);
+			return entries.remove(key(scope, (String) className));
+		}
+
+		@Override
+		public Set<String> get(Object className) {
+			if (!(className instanceof String)) return null;
+			Long written = writeScope.get(className);
+			long scope = written != null ? written : scopeOfLoadedClass((String) className);
+			Set<String> exact = entries.get(key(scope, (String) className));
+			if (exact != null) return exact;
+			for (Map.Entry<String, Set<String>> entry : entries.entrySet()) {
+				if (entry.getKey().endsWith("\u0000" + className)) return entry.getValue();
+			}
+			return null;
+		}
+
+		@Override
+		public int size() {
+			return entries.size();
+		}
+
+		@Override
+		public void clear() {
+			entries.clear();
+			writeScope.clear();
+		}
+
+		@Override
+		public Set<Entry<String, Set<String>>> entrySet() {
+			Map<String, Set<String>> names = new LinkedHashMap<>();
+			for (Map.Entry<String, Set<String>> entry : entries.entrySet()) {
+				int split = entry.getKey().indexOf('\u0000');
+				String name = split < 0 ? entry.getKey() : entry.getKey().substring(split + 1);
+				names.putIfAbsent(name, entry.getValue());
+			}
+			return Set.copyOf(names.entrySet());
+		}
+	}
 
 	/**
 	 * 源码级未织入基线缓存（用于对齐器与源码变更分析，避免 Mixin 等增强注入的合成方法/字段污染对齐逻辑）
@@ -1823,9 +1915,22 @@ public class RemoldAgent {
 		public final Set<String>         targetClasses = new LinkedHashSet<>();
 		public       boolean             preRegistered = false;
 		public       boolean             committed     = false;
+		/**
+		 * 本事务 pending 登记用的 loader scope。
+		 *
+		 * <p>构造时按宿主类解析：宿主已加载就取它的 {@code ClassLoader} 身份，由
+		 * {@link AlignmentMetaStore#loaderScopeId} 分配 scope 号（与 {@code PendingLoadPatch} /
+		 * {@code InitFix} / {@code LoadFrontier} 同一口径）；宿主此刻还没加载则退回
+		 * {@link PendingLoadPatch#ANY_SCOPE}，出生时"先查精确 scope、再退回哨兵"。</p>
+		 *
+		 * <p>只在构造时解析一次：preRegister / rollback / commit 必须落在同一个 scope 上，
+		 * 否则"登记进去、回滚删不掉"。</p>
+		 */
+		public final long                pendingScope;
 
 		public AlignmentTransaction(String hostName) {
 			this.hostName = hostName;
+			this.pendingScope = scopeOfLoadedClass(hostName);
 		}
 
 		public void preRegister() {
@@ -1835,8 +1940,8 @@ public class RemoldAgent {
 				String targetSlash = entry.getKey().replace('.', '/');
 				String targetDot   = entry.getKey().replace('/', '.');
 				byte[] bytes       = entry.getValue();
-				AnnotationTransformer.pendingAlignedClasses.put(targetSlash, bytes);
-				AnnotationTransformer.pendingAlignedClasses.put(targetDot, bytes);
+				AnnotationTransformer.pendingAlignedClasses.put(pendingScope, targetSlash, bytes);
+				AnnotationTransformer.pendingAlignedClasses.put(pendingScope, targetDot, bytes);
 			}
 		}
 
@@ -1852,8 +1957,8 @@ public class RemoldAgent {
 		public void rollback(boolean pinOldToPending) {
 			if (committed) return;
 			for (String key : pendingAdds.keySet()) {
-				AnnotationTransformer.pendingAlignedClasses.remove(key.replace('.', '/'));
-				AnnotationTransformer.pendingAlignedClasses.remove(key.replace('/', '.'));
+				AnnotationTransformer.pendingAlignedClasses.remove(pendingScope, key.replace('.', '/'));
+				AnnotationTransformer.pendingAlignedClasses.remove(pendingScope, key.replace('/', '.'));
 			}
 			if (pinOldToPending) {
 				// 将被磁盘新文件覆盖但重定义未生效的旧版本字节码钉在 pending 中
@@ -1861,12 +1966,28 @@ public class RemoldAgent {
 					if (entry.getValue() != null) {
 						String slash = entry.getKey().replace('.', '/');
 						String dot   = entry.getKey().replace('/', '.');
-						AnnotationTransformer.pendingAlignedClasses.put(slash, entry.getValue());
-						AnnotationTransformer.pendingAlignedClasses.put(dot, entry.getValue());
+						AnnotationTransformer.pendingAlignedClasses.put(pendingScope, slash, entry.getValue());
+						AnnotationTransformer.pendingAlignedClasses.put(pendingScope, dot, entry.getValue());
 					}
 				}
 			}
 		}
+	}
+
+	/**
+	 * 已加载类的 loader scope；类尚未加载（或查询失败）时退回 {@link PendingLoadPatch#ANY_SCOPE}。
+	 *
+	 * <p>scope 号统一由 {@link AlignmentMetaStore#loaderScopeId} 分配，这里只负责"类名 → 当前定义
+	 * loader"这一段，不自己造身份。</p>
+	 */
+	static long scopeOfLoadedClass(String dotClassName) {
+		try {
+			Class<?> loaded = dotClassName == null ? null : loadedClassesMap.get(dotClassName);
+			if (loaded != null) return AlignmentMetaStore.INSTANCE.loaderScopeId(loaded.getClassLoader());
+		} catch (Throwable ignored) {
+			// 解析失败按"加载器未知"处理：方向保守，绝不冒充某个 scope。
+		}
+		return PendingLoadPatch.ANY_SCOPE;
 	}
 
 	static void rejectHostGroup(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,
@@ -2375,12 +2496,211 @@ public class RemoldAgent {
 		return VcsAgentCoordinator.revertTo(targetSeq);
 	}
 
+	//region Redefine 入口：class 文件合法性门禁（风险 13）
+
+	/**
+	 * 当前 JVM 能加载的最高 class file major。
+	 *
+	 * <p>{@code major = feature + 44} 是 JVMS 的固定换算（JDK 8 → 52、11 → 55、17 → 61、21 → 65），
+	 * 因此这里按运行期 {@link Runtime#version()} 推导而不是钉死一个数：钉死会让未来 JDK 上的合法
+	 * 产物被误拒，也会让"未知 major 显式拒绝"退化成"按某个历史版本卡"。推导值在类初始化时取一次，
+	 * 热更不会改变运行期 JVM，重复取没有意义。</p>
+	 */
+	static final int MAX_CLASS_MAJOR = Runtime.version().feature() + 44;
+
+	/**
+	 * 廉价硬拦截：判断一份字节能否安全送进 {@code Instrumentation.redefineClasses}。
+	 *
+	 * <p><b>为什么必须在 Java 层判</b>：JBR 25 + {@code AllowEnhancedClassRedefinition} 收到畸形
+	 * {@code ClassDefinition} 不是抛 {@code LinkageError}，而是在
+	 * {@code VM_EnhancedRedefineClasses::do_topological_class_sorting} 触发
+	 * {@code EXCEPTION_ACCESS_VIOLATION} 直接终止进程（{@code docs/status.md} §5 风险 13）——
+	 * 没有异常可捕获、没有回滚可做，所以只能"进 JVM 之前"判。</p>
+	 *
+	 * <p><b>四项检查，全部 fail-closed</b>：</p>
+	 * <ol>
+	 *   <li>魔数 {@code 0xCAFEBABE}；</li>
+	 *   <li><b>结构不截断</b>：按常量池逐项走一遍（tag → 长度 → 边界），任何越界/未知 tag/非法索引
+	 *       都拒绝。刻意<b>不</b>用"长度 ≥ N"这种代理判据：截断点可以落在任何一项中间，
+	 *       只有真正走完常量池才能证明后续字段可读；</li>
+	 *   <li>{@code major} 不超过 {@link #MAX_CLASS_MAJOR}（未知/更新的 class 版本显式拒绝，
+	 *       不让 JVM 去猜）；</li>
+	 *   <li>{@code this_class} 解析出的内部名与目标类的内部名一致——二进制名不匹配会让增强重定义
+	 *       的拓扑排序读到错位的元数据。</li>
+	 * </ol>
+	 *
+	 * <p>本方法<b>只读</b>传入数组，不复制、不重读磁盘：调用方必须把校验过的这同一份引用交给
+	 * {@code redefineClasses}（{@link ClassDefinition#getDefinitionClassFile()}），否则"校验"与
+	 * "真正送进 JVM"之间会出现新的 TOCTOU 窗口。</p>
+	 *
+	 * @return {@code null} 表示可以安全进入 redefine；否则是英文拒绝原因（直接进 {@code warn}）
+	 */
+	static String definitionProblem(Class<?> type, byte[] bytes) {
+		if (type == null) return "target class is null";
+		if (bytes == null) return "class file bytes are null";
+		if (bytes.length < 8) return "class file is shorter than the 8-byte header (" + bytes.length + " bytes)";
+		if ((bytes[0] & 0xFF) != 0xCA || (bytes[1] & 0xFF) != 0xFE
+		    || (bytes[2] & 0xFF) != 0xBA || (bytes[3] & 0xFF) != 0xBE) {
+			return "bad magic " + hex4(bytes, 0) + " (expected cafebabe)";
+		}
+		int major = u2(bytes, 6);
+		if (major < 45) return "implausible class file major " + major;
+		if (major > MAX_CLASS_MAJOR) {
+			return "class file major " + major + " is newer than this JVM's maximum " + MAX_CLASS_MAJOR;
+		}
+		try {
+			return walkClassFile(type, bytes, major);
+		} catch (RuntimeException e) {
+			// 走查器自己抛的越界/非法项一律收敛成拒绝：fail-closed，绝不让"没读完"变成"放行"。
+			return "unparseable class file: " + e.getMessage();
+		}
+	}
+
+	/** 常量池走查 + 名字核对；越界一律抛 {@link IllegalStateException}，由调用方收敛成拒绝原因。 */
+	private static String walkClassFile(Class<?> type, byte[] bytes, int major) {
+		int pos = 8;
+		int poolCount = readU2(bytes, pos, "constant pool count");
+		pos += 2;
+		if (poolCount < 1) return "constant pool count " + poolCount + " is empty";
+		// 常量池索引 1..poolCount-1；Long/Double 各占两个槽（后一个索引不可寻址）。
+		int[] classEntryNameIndex = new int[poolCount];
+		String[] utf8 = new String[poolCount];
+		for (int i = 1; i < poolCount; i++) {
+			int tag = readU1(bytes, pos, "tag of constant #" + i);
+			pos += 1;
+			switch (tag) {
+				case 1: { // Utf8
+					int length = readU2(bytes, pos, "Utf8 length of constant #" + i);
+					pos += 2;
+					require(bytes, pos, length, "Utf8 payload of constant #" + i);
+					// 常量池里的 Utf8 项按 JVMS 4.4.7 是"修改版 UTF-8"，名字部分是 ASCII，
+					// 用 UTF-8 解码只为拿到可比较的字符串，不参与任何写入。
+					utf8[i] = new String(bytes, pos, length, StandardCharsets.UTF_8);
+					pos += length;
+					break;
+				}
+				case 7: // Class
+					classEntryNameIndex[i] = readU2(bytes, pos, "name index of constant #" + i);
+					pos += 2;
+					break;
+				case 8: case 16: case 19: case 20: // String / MethodType / Module / Package
+					require(bytes, pos, 2, "constant #" + i);
+					pos += 2;
+					break;
+				case 15: // MethodHandle
+					require(bytes, pos, 3, "constant #" + i);
+					pos += 3;
+					break;
+				case 3: case 4: case 9: case 10: case 11: case 12: case 17: case 18:
+					// Integer / Float / Fieldref / Methodref / InterfaceMethodref / NameAndType /
+					// Dynamic / InvokeDynamic
+					require(bytes, pos, 4, "constant #" + i);
+					pos += 4;
+					break;
+				case 5: case 6: // Long / Double 占两个常量池槽
+					require(bytes, pos, 8, "constant #" + i);
+					pos += 8;
+					if (i + 1 >= poolCount) {
+						throw new IllegalStateException("constant #" + i
+						    + " is a two-slot entry but the pool ends right after it");
+					}
+					i++;
+					break;
+				default:
+					return "unknown constant pool tag " + tag + " at constant #" + i;
+			}
+		}
+		// access_flags(2) + this_class(2)：这两项可读才说明常量池之后的结构没有在边界上断开。
+		require(bytes, pos, 4, "class header after the constant pool");
+		int thisClassIndex = readU2(bytes, pos + 2, "this_class");
+		if (thisClassIndex <= 0 || thisClassIndex >= poolCount) {
+			return "this_class index " + thisClassIndex + " is out of the constant pool range";
+		}
+		int nameIndex = classEntryNameIndex[thisClassIndex];
+		if (nameIndex <= 0 || nameIndex >= poolCount) {
+			return "this_class does not point at a CONSTANT_Class entry";
+		}
+		String internalName = utf8[nameIndex];
+		if (internalName == null || internalName.isEmpty()) {
+			return "this_class name is not a readable Utf8 entry";
+		}
+		String expected = Names.internal(type.getName());
+		if (!expected.equals(internalName)) {
+			return "binary name '" + internalName + "' does not match the target class '" + expected + "'";
+		}
+		return null;
+	}
+
+	/**
+	 * 入口门禁：把不安全的定义<b>逐个</b>摘出本批并 {@code warn}。
+	 *
+	 * <p>单个畸形类不得拖垮整批：与"单字段链接失败只隔离该字段"同一取向——其余类照常 redefine，
+	 * 被摘掉的类进 {@link RoundSkips}，由同轮的 skip 摘要点名，用户不会看到一条静默的成功行。</p>
+	 *
+	 * <p>放行下去的就是刚才校验过的那一个 {@link ClassDefinition} 实例（同一个字节数组引用），
+	 * 既不复制也不重读磁盘——这是"校验用的字节 == 送进 redefine 的字节"的唯一保证方式。</p>
+	 */
+	static List<ClassDefinition> gateDefinitions(List<ClassDefinition> definitions, RoundSkips skips) {
+		if (definitions == null || definitions.isEmpty()) return definitions;
+		List<ClassDefinition> safe = new ArrayList<>(definitions.size());
+		for (ClassDefinition def : definitions) {
+			if (def == null) continue;
+			Class<?> type = def.getDefinitionClass();
+			String className = type == null ? "<unknown>" : type.getName();
+			String problem = definitionProblem(type, def.getDefinitionClassFile());
+			if (problem == null) {
+				safe.add(def);
+				continue;
+			}
+			// 拒绝必须用户可见：受 DEBUG 门控的 log 在这里等于静默。
+			warn("[BYTECODE-GATE] Skipping " + className + ": " + problem
+			     + ". This class was NOT sent to redefineClasses — enhanced redefinition can terminate the VM"
+			     + " on a malformed ClassDefinition. Recompile the class and retry.");
+			if (skips != null) {
+				skips.add(className, RoundSkips.verdict("BYTECODE-GATE", problem, "recompile the class and retry"));
+			}
+		}
+		return safe;
+	}
+
+	private static void require(byte[] bytes, int pos, int length, String what) {
+		if (pos < 0 || length < 0 || pos + length > bytes.length) {
+			throw new IllegalStateException("truncated class file while reading " + what
+			    + " (needs " + length + " byte(s) at offset " + pos + ", file length " + bytes.length + ")");
+		}
+	}
+
+	private static int readU1(byte[] bytes, int pos, String what) {
+		require(bytes, pos, 1, what);
+		return bytes[pos] & 0xFF;
+	}
+
+	private static int readU2(byte[] bytes, int pos, String what) {
+		require(bytes, pos, 2, what);
+		return u2(bytes, pos);
+	}
+
+	private static int u2(byte[] bytes, int pos) {
+		return ((bytes[pos] & 0xFF) << 8) | (bytes[pos + 1] & 0xFF);
+	}
+
+	private static String hex4(byte[] bytes, int pos) {
+		StringBuilder sb = new StringBuilder(8);
+		for (int i = 0; i < 4; i++) {
+			if (pos + i >= bytes.length) { sb.append("??"); continue; }
+			sb.append(Character.forDigit((bytes[pos + i] >> 4) & 0xF, 16));
+			sb.append(Character.forDigit(bytes[pos + i] & 0xF, 16));
+		}
+		return sb.toString();
+	}
+
 	static RedefineOutcome applyTwoPhase(List<ClassDefinition> definitions,
 	                                             Map<String, byte[]> oldEffectiveBytes,
 	                                             Collection<AlignmentTransaction> transactions,
 	                                             RoundSkips skips,
 	                                             Set<String> injectedClasses) {
-		return TwoPhaseCoordinator.applyTwoPhase(definitions, oldEffectiveBytes, transactions, skips, injectedClasses);
+		return TwoPhaseCoordinator.applyTwoPhase(gateDefinitions(definitions, skips), oldEffectiveBytes,
+		 transactions, skips, injectedClasses);
 	}
 
 	static String batchWatchLabel(List<ClassDefinition> defs) {
@@ -2395,7 +2715,7 @@ public class RemoldAgent {
 	static RedefineOutcome applyRedefinitions(List<ClassDefinition> definitions,
 	                                                  Collection<AlignmentTransaction> transactions,
 	                                                  RoundSkips skips) {
-		return TwoPhaseCoordinator.applyRedefinitions(definitions, transactions, skips);
+		return TwoPhaseCoordinator.applyRedefinitions(gateDefinitions(definitions, skips), transactions, skips);
 	}
 
 	record RedefineOutcome(Set<String> successful, Set<String> rolledBack) { }

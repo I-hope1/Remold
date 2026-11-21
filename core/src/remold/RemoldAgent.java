@@ -406,11 +406,220 @@ public class RemoldAgent {
 		}
 	}
 
+	/** 源码级未织入基线的 staged → commit 两级容器（风险 16：并发语义窗口）。 */
+	private static final SourceBytecodeStaging SOURCE_BYTES = new SourceBytecodeStaging();
+
 	/**
 	 * 源码级未织入基线缓存（用于对齐器与源码变更分析，避免 Mixin 等增强注入的合成方法/字段污染对齐逻辑）
 	 * dotClassName -> sourceBytecode
+	 *
+	 * <p>这里暴露的只是<b>已提交视图</b>：一次 redefine 事务从"写入候选字节"到"提交/回滚"之间，
+	 * 候选字节只存在于 {@link #SOURCE_ROUND} 指向的轮次暂存里，读方（对齐器、外部重定义的
+	 * no-op 判定、Mixin 兜底）永远只看到上一版已生效字节。提交时整表替换快照，因此一轮多键
+	 * 写入对读方是原子的（不会看到半批提交）。</p>
 	 */
-	public static final Map<String, byte[]> sourceBytecodeCache = new ConcurrentHashMap<>();
+	public static final Map<String, byte[]> sourceBytecodeCache = SOURCE_BYTES.committedView();
+
+	/**
+	 * 当前线程进行中的源码基线事务轮次；{@code null} 表示无事务（写入直接落已提交视图）。
+	 *
+	 * <p>按线程而非全局持有：轮次暂存不会跨轮、也不会串到别的事务线程；读方从不读它。</p>
+	 */
+	private static final ThreadLocal<SourceBytecodeStaging.Round> SOURCE_ROUND = new ThreadLocal<>();
+
+	/**
+	 * 源码级未织入基线的 staged → commit 两级容器（风险 16：<b>并发语义窗口</b>）。
+	 *
+	 * <p><b>为什么需要它</b>：一次 redefine 事务在"写入本轮候选源码字节"到"失败回滚 / 成功提交"之间
+	 * 存在真实窗口，跨度包含匿名类对齐、织入桥、布局门与 {@code redefineClasses}。直接写全局缓存时，
+	 * 窗口内的读方（外部 redefine/retransform 触发的 no-op 判定、对齐旧侧、Mixin 兜底）会读到
+	 * <b>从未生效</b>的字节，从而静默跳过织入或拿错基线。</p>
+	 *
+	 * <p><b>职责边界</b>：</p>
+	 * <ul>
+	 *   <li><b>已提交视图</b>：{@link #committedView()} 是读方唯一可见的字节。读取无锁，写入在锁内
+	 *       整表替换快照，因此一轮多处提交对读方表现为"要么全见旧值、要么全见新值"。</li>
+	 *   <li><b>轮次暂存</b>：{@link #begin()} 产出按轮次身份存在的 {@link Round}（挂在调用线程上，
+	 *       不跨轮、不跨线程串味）。事务窗口内的写入只落这里，读方永远看不到。</li>
+	 *   <li>提交：{@link Round#commit} 按类判定是否生效，再<b>一次性</b>并入已提交视图并清空暂存；
+	 *       回滚：{@link Round#discard()} 整份丢弃，已提交视图保持上一版，不留半写条目。</li>
+	 * </ul>
+	 *
+	 * <p><b>不变量</b>：键仍是 dot 类名；不持 {@code Class}、不持 {@code ClassLoader}、不新增强引用；
+	 * 值仍是调用方给的那份字节数组（与旧实现一致，不做防御性拷贝）。</p>
+	 */
+	static final class SourceBytecodeStaging {
+
+		/** 已提交快照；读方无锁读取，写方在 {@link #writeLock} 内整表替换。 */
+		private volatile Map<String, byte[]> committed = Map.of();
+
+		private final Object writeLock = new Object();
+
+		byte[] committedGet(String key) {
+			return key == null ? null : committed.get(key);
+		}
+
+		boolean committedContains(String key) {
+			return key != null && committed.containsKey(key);
+		}
+
+		int committedSize() {
+			return committed.size();
+		}
+
+		Set<Map.Entry<String, byte[]>> committedEntries() {
+			return committed.entrySet();
+		}
+
+		/** 非事务写：直接进已提交视图（首次加载登记 / 外部重定义 / VCS 回退等非事务调用方）。 */
+		byte[] committedPut(String key, byte[] bytes) {
+			if (key == null || bytes == null) return null;
+			synchronized (writeLock) {
+				Map<String, byte[]> next = new HashMap<>(committed);
+				byte[] prev = next.put(key, bytes);
+				committed = Collections.unmodifiableMap(next);
+				return prev;
+			}
+		}
+
+		/** 非事务删：立即从已提交视图移除（清理时机与旧实现一致）。 */
+		byte[] committedRemove(String key) {
+			if (key == null) return null;
+			synchronized (writeLock) {
+				if (!committed.containsKey(key)) return null;
+				Map<String, byte[]> next = new HashMap<>(committed);
+				byte[] prev = next.remove(key);
+				committed = Collections.unmodifiableMap(next);
+				return prev;
+			}
+		}
+
+		/** 一次性并入多条：读方在替换前后看到的都是完整快照，不会看到半批提交。 */
+		void committedPutAll(Map<String, byte[]> entries) {
+			if (entries == null || entries.isEmpty()) return;
+			synchronized (writeLock) {
+				Map<String, byte[]> next = new HashMap<>(committed);
+				next.putAll(entries);
+				committed = Collections.unmodifiableMap(next);
+			}
+		}
+
+		/** 读方使用的已提交视图（实现 {@link Map}，但写入走的仍是快照替换，不是原地改）。 */
+		Map<String, byte[]> committedView() {
+			return new CommittedView();
+		}
+
+		/** 开启一轮暂存。调用方负责在本轮结束时 commit 或 discard。 */
+		Round begin() {
+			return new Round(this);
+		}
+
+		/**
+		 * 单轮暂存容器。生命周期严格由开启它的线程掌握：
+		 * {@link #stage} → {@link #commit} / {@link #discard}。
+		 */
+		static final class Round {
+			private final SourceBytecodeStaging owner;
+			private final Map<String, byte[]> staged = new LinkedHashMap<>();
+
+			Round(SourceBytecodeStaging owner) {
+				this.owner = owner;
+			}
+
+			/** 只写暂存；同一 key 重复 stage 以最后一次为准。读方看不到。 */
+			void stage(String key, byte[] bytes) {
+				if (key == null || bytes == null) return;
+				staged.put(key, bytes);
+			}
+
+			byte[] stagedBytes(String key) {
+				return key == null ? null : staged.get(key);
+			}
+
+			int stagedCount() {
+				return staged.size();
+			}
+
+			boolean isEmpty() {
+				return staged.isEmpty();
+			}
+
+			/** 回滚：整份丢弃，已提交视图保持上一版，不留半写条目。 */
+			void discard() {
+				staged.clear();
+			}
+
+			/**
+			 * 提交：按类判定本轮暂存是否生效，再原子并入已提交视图。
+			 *
+			 * <p>判据与旧的回滚语义逐条对齐（未生效类在已提交视图里本来就还是上一版，丢弃暂存即可）：</p>
+			 * <ul>
+			 *   <li>{@code previous} 里没有该 key：本轮不负责它（例如事务期间由外部回调直接写的条目），保留新字节；</li>
+			 *   <li>该类重定义成功（{@code applied}）：保留新字节；</li>
+			 *   <li>该类本轮新注入（旧源码为空且不在 {@code loadedBefore}）：保留新字节；</li>
+			 *   <li>其余未生效类：丢弃暂存条目，已提交视图不动。</li>
+			 * </ul>
+			 */
+			void commit(Map<String, byte[]> previous, Set<String> applied, Set<String> loadedBefore) {
+				Map<String, byte[]> effective = new LinkedHashMap<>();
+				for (Map.Entry<String, byte[]> entry : staged.entrySet()) {
+					String key = entry.getKey();
+					if (!previous.containsKey(key) || applied.contains(key)) {
+						effective.put(key, entry.getValue());
+						continue;
+					}
+					byte[] prev = previous.get(key);
+					if (prev == null && !loadedBefore.contains(key)) {
+						effective.put(key, entry.getValue());
+					}
+				}
+				// 先结束本轮，再并入快照：即使并入失败也不会把条目漏给下一轮。
+				staged.clear();
+				owner.committedPutAll(effective);
+			}
+		}
+
+		/** 已提交视图：{@code get} 读当前快照；{@code put}/{@code remove} 走快照替换（非事务写）。 */
+		private final class CommittedView extends AbstractMap<String, byte[]> {
+			@Override
+			public byte[] get(Object key) {
+				return committed.get(key);
+			}
+
+			@Override
+			public boolean containsKey(Object key) {
+				return committed.containsKey(key);
+			}
+
+			@Override
+			public int size() {
+				return committed.size();
+			}
+
+			@Override
+			public Set<Entry<String, byte[]>> entrySet() {
+				return committed.entrySet();
+			}
+
+			@Override
+			public byte[] put(String key, byte[] value) {
+				return committedPut(key, value);
+			}
+
+			@Override
+			public byte[] remove(Object key) {
+				return committedRemove(key instanceof String ? (String) key : null);
+			}
+
+			@Override
+			public void clear() {
+				synchronized (writeLock) {
+					committed = Map.of();
+				}
+			}
+		}
+	}
+
 
 	/**
 	 * 字节码重织入桥接接口（用于 Mixin、AspectJ、自定义字节码增强器在热重载时重新织入）。
@@ -918,21 +1127,55 @@ public class RemoldAgent {
 
 	/** 获取源码基线（对齐后、未织入第三方切片的原始字节，供 Diff / 对齐比对用） */
 	public static byte[] getSourceBytecode(String dotClassName) {
-		return dotClassName != null ? sourceBytecodeCache.get(dotClassName) : null;
+		return dotClassName != null ? SOURCE_BYTES.committedGet(dotClassName) : null;
 	}
 
-	/** 写入源码级未织入基线缓存。 */
+	/**
+	 * 写入源码级未织入基线缓存。
+	 *
+	 * <p>有进行中的事务轮次时只写轮次暂存（读方看不到，等提交才可见）；否则直接进已提交视图
+	 * （首次加载登记、外部重定义回调、VCS 回退等非事务路径）。</p>
+	 */
 	static void recordSourceBytecode(String dotClassName, byte[] bytecode) {
-		if (dotClassName != null && bytecode != null) {
-			sourceBytecodeCache.put(dotClassName, bytecode);
+		if (dotClassName == null || bytecode == null) return;
+		SourceBytecodeStaging.Round round = SOURCE_ROUND.get();
+		if (round != null) {
+			round.stage(dotClassName, bytecode);
+		} else {
+			SOURCE_BYTES.committedPut(dotClassName, bytecode);
 		}
 	}
 
-	/** 移除源码级未织入基线缓存条目。 */
+	/** 移除源码级未织入基线缓存条目（清理时机与旧实现一致：立即作用于已提交视图）。 */
 	static void removeSourceBytecode(String dotClassName) {
 		if (dotClassName != null) {
-			sourceBytecodeCache.remove(dotClassName);
+			SOURCE_BYTES.committedRemove(dotClassName);
 		}
+	}
+
+	/**
+	 * 开启一轮源码基线事务暂存。
+	 *
+	 * <p>防御：若本线程上一轮因异常未收尾，先整份丢弃，绝不让上一轮的条目串到新轮。</p>
+	 */
+	static SourceBytecodeStaging.Round beginSourceRound() {
+		abandonSourceRound();
+		SourceBytecodeStaging.Round round = SOURCE_BYTES.begin();
+		SOURCE_ROUND.set(round);
+		return round;
+	}
+
+	/** 当前线程未收尾的暂存轮次（仅事务自身可见；无事务返回 {@code null}）。 */
+	static SourceBytecodeStaging.Round currentSourceRound() {
+		return SOURCE_ROUND.get();
+	}
+
+	/** 放弃本线程未收尾的暂存轮次（异常路径防御）：整份丢弃，不留半写条目。 */
+	static void abandonSourceRound() {
+		SourceBytecodeStaging.Round round = SOURCE_ROUND.get();
+		if (round == null) return;
+		SOURCE_ROUND.remove();
+		round.discard();
 	}
 
 	/** 获取运行时生效基线（织入 Mixin / 插件后的实际运行字节，供 InitFix / Schema 判断用） */
@@ -2439,29 +2682,33 @@ public class RemoldAgent {
 	}
 
 	/**
-	 * 分块执行 Redefine，防止其中一个类出错导致所有类失败，并依据重定义成败驱动事务提交或回滚。
+	 * 收尾一轮源码基线事务：把缓存回滚到"上一版 + 本轮生效类"的状态。
 	 *
-	 * <p>注：真正的多类原子一致性依赖 JVM 批量 {@code inst.redefineClasses(definitions)} 的原子调用；
-	 * 当批量失败切换到单类模式时，属于尽力挽救兜底，客观上存在短暂的类间不一致时间窗口。</p>
-	 * @return 确实重定义成功的类名集合。调用方据此决定是否落账文件指纹、以及失败类是否回队重试。
-	 * <p>另有两条必须区分的语义，通过 {@link RedefineOutcome} 一并返回：</p>
-	 * <ul>
-	 *   <li>{@code rejectedHierarchy} —— 因 {@code hierarchyChanged} 被拒的类。
-	 *       受 JVM 能力限制，重试永不会成功，<b>不得回队</b>。</li>
-	 *   <li>{@code rolledBackGroups} —— 因事务组不一致而 {@code rollback} 的类。
-	 *       这些类的宿主可能<b>已经在 JVM 里生效</b>，而 cache/pending 被钉回旧版本；
-	 *       此时重试会拿"基线与 JVM 实际状态不一致"的数据重新对齐，<b>不得回队</b>。</li>
-	 * </ul>
+	 * <p>有进行中的轮次时（生产路径）：按类判定本轮暂存是否生效，<b>一次性</b>原子并入已提交视图，
+	 * 其余条目整份丢弃（未生效类在已提交视图里本来就还是上一版，回滚即"丢弃暂存"）。判据与旧语义
+	 * 逐条对齐：成功重定义的类保留新源码；本轮新注入的类（没有旧源码、也不在 {@code loadedBefore}）
+	 * 保留新源码；其余未生效类回到上一版。</p>
+	 *
+	 * <p>没有进行中的轮次时（直接写已提交视图的调用方 / 单测），退化为对已提交视图做同样的按类恢复。</p>
 	 */
 	static void rollbackSourceCache(Map<String, byte[]> sourceBefore, Set<String> applied,
 	                                Set<String> loadedBefore) {
+		SourceBytecodeStaging.Round round = SOURCE_ROUND.get();
+		if (round != null) {
+			try {
+				round.commit(sourceBefore, applied, loadedBefore);
+			} finally {
+				SOURCE_ROUND.remove();
+			}
+			return;
+		}
 		for (String key : sourceBefore.keySet()) {
 			if (applied.contains(key)) continue;
 			byte[] prev = sourceBefore.get(key);
 			// 新注入类（没有旧源码、也不在 loadedBefore）保持新源码；其余未成功类回滚。
 			if (prev == null && !loadedBefore.contains(key)) continue;
-			if (prev == null) sourceBytecodeCache.remove(key);
-			else sourceBytecodeCache.put(key, prev);
+			if (prev == null) SOURCE_BYTES.committedRemove(key);
+			else SOURCE_BYTES.committedPut(key, prev);
 		}
 	}
 
@@ -2712,6 +2959,21 @@ public class RemoldAgent {
 		return TwoPhaseCoordinator.stageAConsistent(hostName, targets, ok, injected, loaded);
 	}
 
+	/**
+	 * 分块执行 Redefine，防止其中一个类出错导致所有类失败，并依据重定义成败驱动事务提交或回滚。
+	 *
+	 * <p>注：真正的多类原子一致性依赖 JVM 批量 {@code inst.redefineClasses(definitions)} 的原子调用；
+	 * 当批量失败切换到单类模式时，属于尽力挽救兜底，客观上存在短暂的类间不一致时间窗口。</p>
+	 * @return 确实重定义成功的类名集合。调用方据此决定是否落账文件指纹、以及失败类是否回队重试。
+	 * <p>另有两条必须区分的语义，通过 {@link RedefineOutcome} 一并返回：</p>
+	 * <ul>
+	 *   <li>{@code rejectedHierarchy} —— 因 {@code hierarchyChanged} 被拒的类。
+	 *       受 JVM 能力限制，重试永不会成功，<b>不得回队</b>。</li>
+	 *   <li>{@code rolledBackGroups} —— 因事务组不一致而 {@code rollback} 的类。
+	 *       这些类的宿主可能<b>已经在 JVM 里生效</b>，而 cache/pending 被钉回旧版本；
+	 *       此时重试会拿"基线与 JVM 实际状态不一致"的数据重新对齐，<b>不得回队</b>。</li>
+	 * </ul>
+	 */
 	static RedefineOutcome applyRedefinitions(List<ClassDefinition> definitions,
 	                                                  Collection<AlignmentTransaction> transactions,
 	                                                  RoundSkips skips) {

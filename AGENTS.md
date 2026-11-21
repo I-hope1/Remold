@@ -119,8 +119,33 @@ HotSwap / InitFix 核心开发规范。所有规则与不变量在本文件定�
 
 ## 10. Git 分支与 Worktree 纪律
 
-1. **主工作区停 `main` 且只读保持干净**：禁止在主工作区切分支、改文件或跑批次探针，确保 `git pull --ff-only` 永不阻塞。
-2. **集成基线分支与战役**：从 `main` 切 `feat/<name>`（或专用分支）作为唯一合流目标；`battle_init(base_branch: "feat/<name>")`；并发战役须显式传 `campaign` id。
-3. **批次 worktree 隔离**：各 `agent/batch-*` 仅在各自 worktree 绝对路径内工作，写域不相交；联调、合流与**所有测速探针**由 Lead 串行单刷；关键修复留 `battle_probe` 与 `battle_mutation` 真实证据（存活如实写战报）。
-4. **合流与结案**：仅通过验收的批次才按序合流回集成基线并跑 union 全量；`battle_audit` PASS 后由 `battle_seal` 将战报写入 [`docs/battles/`](docs/battles/README.md)（提交前缀 `docs(status): ...`）并自动清理临时 worktree（保留 `.battle/campaigns/<id>/`）。
-5. **PR 收尾**：推送集成基线创建 PR（摘要/退出码/读数/缺口，不贴大段源码与原始 log）→ 等远端 **8/8 CI** 全绿后合并 → 回主工作区 `git pull --ff-only` 并按需清理本地分支。
+**三层分支模型（唯一口径）**：
+
+```
+main ──► feat/<大特性>            ← 唯一合流目标 & 唯一 PR 来源
+              ├── feat/<战斗>     ← 单个战斗的本地分支
+              ├── feat/<战斗>
+              └── agent/batch-*   ← battle_dispatch 拉起的隔离 worktree
+```
+
+1. **`main` 只承接 PR**：不直接提交、不在其上开分支干活；主工作区尽量停 `main` 且保持干净，确保
+   `git pull --ff-only` 永不阻塞。需要在主工作区干活时，切到 `feat/<大特性>` 或 `feat/<战斗>`，
+   收尾后必须切回 `main`。
+2. **`feat/<大特性>` 是唯一合流目标**：从 `main` 切出，承载一条特性线的全部战斗；它的存在周期就是
+   这条特性线的周期。一次大特性可以有 N 个战斗，但它们都只往这里合，不互相合。
+3. **`feat/<战斗>` 只做一件事**：从 `feat/<大特性>` 切出（不是从 `main`），完成后合回
+   `feat/<大特性>`；**禁止**对它直接发 PR、**禁止**直接合 `main`。`battle_dispatch` 生成的
+   `agent/batch-*` 属于同一层，同样只合大特性。
+4. **战役初始化必须指定集成基线**：`battle_init(base_branch: "feat/<大特性>")`，于是 `battle_merge`
+   天然合到大特性而不是 `main`；同一仓库并发多条特性线时，所有 `battle_*` 调用都要显式带 `campaign`。
+5. **批次 worktree 隔离**：各 `agent/batch-*` 仅在各自 worktree 绝对路径内工作，写域不相交；联调、
+   合流与**所有测速探针**由 Lead 串行单刷；关键修复留 `battle_probe` 与 `battle_mutation` 真实证据
+   （存活如实写战报）。
+6. **合流与结案**：仅通过验收的战斗才按序合回 `feat/<大特性>` 并跑 union 全量；`battle_audit` PASS 后
+   由 `battle_seal` 将战报写入 [`docs/battles/`](docs/battles/README.md)（提交前缀 `docs(status): ...`）
+   并自动清理临时 worktree（保留 `.battle/campaigns/<id>/`）。
+7. **PR 只从 `feat/<大特性>` 发**：摘要把该特性线下所有战斗的成绩、退出码、读数与缺口一起交代
+   （不贴大段源码与原始 log）→ 等远端 **8/8 CI** 全绿后合并 → 回主工作区 `git pull --ff-only`，
+   再清理已合入的 `feat/<战斗>` 与 `agent/batch-*` 分支。
+8. **失败往回修，不往前糊**：集成基线或 PR CI 上暴露的问题，回到对应 `feat/<战斗>` 修，重新走
+   probe/mutation 与合流；禁止在 `feat/<大特性>` 或 `main` 上直接打补丁绕过证据链。

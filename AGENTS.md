@@ -64,7 +64,7 @@ HotSwap / InitFix 核心开发规范。所有规则与不变量在本文件定�
 | 两阶段 Redefine、JVMTI 批扫描与布局门 | `RemoldAgent`、`LibTool`、`LayoutGate`、`RemovedMemberReaders`、`StageASkeleton` | `docs/code-map.md` §2、`docs/initfix/04`·`05` |
 | Agent 调度、防抖、Trigger 与看门狗 | `core/src/remold/`（`DebounceWindow`、`BuildTrigger*`、`StartupGate`、`BatchWatchdog`、`BytecodeSources`） | `docs/code-map.md` §3、`docs/runtime/01` |
 | 字节码 VCS、派生缓存与 Raw 对齐 | `core/src/remold/vcs/`、`LambdaAligner`、`OrphanBodyRetention` | `docs/code-map.md` §4、`docs/vcs/01`·`03`·`05` |
-| 加载器插件、Mixin、偏移与 Gradle 插件 | `plugin-{fabric,mixin,forge,arc}/`、`core/.../offset/`·`evict/`·`reflect/mixin/`、`gradle-plugin/` | `docs/code-map.md` §5、`docs/mixin/`、`docs/offset/` |
+| 加载器插件、Mixin、偏移与 Gradle 插件 | `plugin-{fabric,mixin,forge,arc,mc-toast}/`、`core/.../offset/`·`evict/`·`reflect/mixin/`、`gradle-plugin/` | `docs/code-map.md` §5、`docs/mixin/`、`docs/offset/` |
 | 测试夹具、外部源码与专项探针 | `tests/src/`、`tests/ktfix/`、`.sources/` | `docs/code-map.md` §6、`docs/testing-guide.md` |
 
 ## 5. 实现状态

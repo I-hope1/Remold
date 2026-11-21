@@ -311,101 +311,31 @@ public class RemoldAgent {
 	 * <p>生命周期与 {@link #bytecodeCache} 严格一致：只在 redefine 成功后落账，
 	 * 失败/回滚不动，避免"用一份从未加载过的版本"当身份依据。</p>
 	 */
-	public static final Map<String, java.util.Set<String>> inventedSlots = new ConcurrentHashMap<>();
+	static final ScopeKeyedNames INVENTED_SLOTS = new ScopeKeyedNames();
 
 	/**
-	 * 本轮算出的自造名，redefine 成功后才并入 {@link #inventedSlots}。
+	 * {@link #INVENTED_SLOTS} 的只读 {@code Map} 视图。
 	 *
-	 * <p>键 = <b>(loader 身份, 类名)</b>：scope 号由 {@link AlignmentMetaStore#loaderScopeId} 统一分配
+	 * <p><b>为什么分成两个字段</b>：这个字段是 agent 的公开面（历史插件/探针按
+	 * {@code Map<String, Set<String>>} 读它），声明类型必须保持 {@code java.util.Map} 的字节码描述符，
+	 * 否则旧插件在链接期就 {@code NoSuchFieldError}。精确 scope 的读写走包内可见的
+	 * {@link #INVENTED_SLOTS}，两者指向<b>同一个实例</b>，不存在两份状态。</p>
+	 */
+	public static final Map<String, java.util.Set<String>> inventedSlots = INVENTED_SLOTS;
+
+	/**
+	 * 本轮算出的自造名，redefine 成功后才并入 {@link #INVENTED_SLOTS}。
+	 *
+	 * <p>键 = <b>(loader scope, 类名)</b>：scope 号由 {@link AlignmentMetaStore#loaderScopeId} 统一分配
 	 * （与 {@link AnnotationTransformer.PendingAlignedClasses}、{@link PendingLoadPatch} 同一口径）。
 	 * 只按类名键会在"两个 loader 各有一个同名类"时串用——A 算出的自造名被 B 的成功回执取走，
 	 * 下一轮 B 的 lambda 会按 A 的槽位名配对（{@code docs/status.md} §5 风险 15）。</p>
-	 */
-	static final PendingInvented pendingInvented = new PendingInvented();
-
-	/**
-	 * {@link #pendingInvented} 的存储：{@code scope + '\0' + 类名} → 自造名集合。
 	 *
-	 * <p>写入侧（对齐期）与消费侧（{@link #commitInvented}）都只能拿到类名，因此两处都用
-	 * {@link #scopeOfLoadedClass} 解析当前定义 loader 的 scope；写入时把解析结果记进
-	 * {@code writeScope}，消费时优先用它——这样"写入到成功回执之间 {@code loadedClassesMap} 被重建"
-	 * 不会把暂存读丢，也不会让别的 scope 的条目被误取。</p>
-	 *
-	 * <p>仍按 {@code Map<String, Set<String>>} 的读法暴露（{@code keySet} / {@code size} 为并集视图），
-	 * 是因为编号避让与既有探针按名字维度遍历它；精确 scope 的读写用 {@code (long, String)} 重载。</p>
+	 * <p>生产写入侧（对齐期）已能拿到 {@code alignLoader}，所以走精确 scope 写入
+	 * （{@link ScopeKeyedNames#put(long, String, Set)}），不再靠 {@link #scopeOfLoadedClass} 猜；
+	 * 成功回执（{@link #commitInvented}) 按同一 scope 取。</p>
 	 */
-	static final class PendingInvented extends AbstractMap<String, Set<String>> {
-		private final Map<String, Set<String>> entries = new ConcurrentHashMap<>();
-		private final Map<String, Long> writeScope = new ConcurrentHashMap<>();
-
-		private static String key(long scope, String className) {
-			return scope + "\u0000" + className;
-		}
-
-		@Override
-		public Set<String> put(String className, Set<String> names) {
-			if (className == null) return null;
-			long scope = scopeOfLoadedClass(className);
-			writeScope.put(className, scope);
-			return entries.put(key(scope, className), names == null ? Set.of() : names);
-		}
-
-		/** 按 scope 写入：scope 必须来自 {@link AlignmentMetaStore#loaderScopeId}。 */
-		Set<String> put(long scope, String className, Set<String> names) {
-			if (className == null) return null;
-			writeScope.put(className, scope);
-			return entries.put(key(scope, className), names == null ? Set.of() : names);
-		}
-
-		/** 精确 scope 取走；scope 不匹配说明条目属于别的 loader，一步都不借。 */
-		Set<String> remove(long scope, String className) {
-			return className == null ? null : entries.remove(key(scope, className));
-		}
-
-		/** 按类名取走：scope 取写入时记下的那一个，没有则按当前定义 loader 解析。 */
-		@Override
-		public Set<String> remove(Object className) {
-			if (!(className instanceof String)) return null;
-			Long written = writeScope.remove(className);
-			long scope = written != null ? written : scopeOfLoadedClass((String) className);
-			return entries.remove(key(scope, (String) className));
-		}
-
-		@Override
-		public Set<String> get(Object className) {
-			if (!(className instanceof String)) return null;
-			Long written = writeScope.get(className);
-			long scope = written != null ? written : scopeOfLoadedClass((String) className);
-			Set<String> exact = entries.get(key(scope, (String) className));
-			if (exact != null) return exact;
-			for (Map.Entry<String, Set<String>> entry : entries.entrySet()) {
-				if (entry.getKey().endsWith("\u0000" + className)) return entry.getValue();
-			}
-			return null;
-		}
-
-		@Override
-		public int size() {
-			return entries.size();
-		}
-
-		@Override
-		public void clear() {
-			entries.clear();
-			writeScope.clear();
-		}
-
-		@Override
-		public Set<Entry<String, Set<String>>> entrySet() {
-			Map<String, Set<String>> names = new LinkedHashMap<>();
-			for (Map.Entry<String, Set<String>> entry : entries.entrySet()) {
-				int split = entry.getKey().indexOf('\u0000');
-				String name = split < 0 ? entry.getKey() : entry.getKey().substring(split + 1);
-				names.putIfAbsent(name, entry.getValue());
-			}
-			return Set.copyOf(names.entrySet());
-		}
-	}
+	static final ScopeKeyedNames pendingInvented = new ScopeKeyedNames();
 
 	/** 源码级未织入基线的 staged → commit 两级容器（风险 16：并发语义窗口）。 */
 	private static final SourceBytecodeStaging SOURCE_BYTES = new SourceBytecodeStaging();
@@ -2692,20 +2622,29 @@ public class RemoldAgent {
 	}
 
 	/**
-	 * redefine 成功后，把本轮算出的"自造槽位名"并入 {@link #inventedSlots}。
+	 * redefine 成功后，把本轮算出的"自造槽位名"并入 {@link #INVENTED_SLOTS}。
 	 *
 	 * <p>只在成功路径调用：失败/回滚时旧基线（{@link #bytecodeCache}）没有前进，
 	 * 自造名集合也必须保持与旧基线一致，否则下一轮会拿"从未加载过的版本"的身份去做配对。</p>
+	 *
+	 * <p><b>回执必须按同一 scope 取/写</b>：写侧（对齐期）用本类的定义 loader 的 scope 写入，
+	 * 回执侧必须用同一个 scope 消费与落账。按类名落账会让 A 的成功回执改掉 B 的自造名集合
+	 * （{@code docs/status.md} §5 风险 15）。</p>
 	 */
-	static void commitInvented(String className) {
-		java.util.Set<String> pending = pendingInvented.remove(className);
-		if (pending == null) {
-			inventedSlots.remove(className);
-		} else if (pending.isEmpty()) {
-			inventedSlots.remove(className);
+	static void commitInvented(long scope, String className) {
+		java.util.Set<String> pending = pendingInvented.take(scope, className);
+		if (pending == null || pending.isEmpty()) {
+			// 精确 scope 删除：这里**不能**退化成"按名字删所有 scope"，
+			// 那会把另一个 loader 名下同名类的自造名一起抹掉。
+			INVENTED_SLOTS.remove(scope, className);
 		} else {
-			inventedSlots.put(className, pending);
+			INVENTED_SLOTS.put(scope, className, pending);
 		}
+	}
+
+	/** 类定义 loader 的 scope（{@link AlignmentMetaStore#loaderScopeId} 是唯一分配口径）。 */
+	static long loaderScope(ClassLoader loader) {
+		return AlignmentMetaStore.INSTANCE.loaderScopeId(loader);
 	}
 
 	/**

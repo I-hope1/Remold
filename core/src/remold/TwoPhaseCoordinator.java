@@ -36,6 +36,7 @@ import static remold.RemoldAgent.info;
 import static remold.RemoldAgent.inst;
 import static remold.RemoldAgent.isVmLevelRedefineFailure;
 import static remold.RemoldAgent.loadedClassesMap;
+import static remold.RemoldAgent.loaderScope;
 import static remold.RemoldAgent.log;
 import static remold.RemoldAgent.markVmLevelFailure;
 import static remold.RemoldAgent.recordCacheLoader;
@@ -452,7 +453,9 @@ final class TwoPhaseCoordinator {
 			for (ClassDefinition def : definitions) {
 				recordRuntimeBytecode(def.getDefinitionClass().getName(), def.getDefinitionClassFile());
 				recordCacheLoader(def.getDefinitionClass().getName(), def.getDefinitionClass().getClassLoader());
-				commitInvented(def.getDefinitionClass().getName());
+				// 回执按"这个类自己的定义 loader"的 scope 取/落：与对齐期写入侧同一口径（风险 15）。
+				commitInvented(loaderScope(def.getDefinitionClass().getClassLoader()),
+				               def.getDefinitionClass().getName());
 				successfulClasses.add(def.getDefinitionClass().getName());
 			}
 			for (AlignmentTransaction tx : transactions) {
@@ -497,7 +500,7 @@ final class TwoPhaseCoordinator {
 				try {
 					recordRuntimeBytecode(className, def.getDefinitionClassFile());
 					recordCacheLoader(className, def.getDefinitionClass().getClassLoader());
-					commitInvented(className);
+					commitInvented(loaderScope(def.getDefinitionClass().getClassLoader()), className);
 				} catch (Throwable be) {
 					error("[BOOKKEEPING] " + className + " was redefined, but recording the new baseline failed."
 						+ " The class is live; its pending InitFix patch is kept and will be applied.", be);

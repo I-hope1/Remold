@@ -8,6 +8,7 @@ import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.RecordComponentNode;
+import remold.LoadedClassIndex;
 import remold.RemoldAgent;
 import remold.util.LibTool;
 
@@ -411,7 +412,7 @@ public final class ReflectionCacheManager {
 	}
 
 	private static Class<?> resolveLoadedClass(String dotName) {
-		ConcurrentHashMap<String, Class<?>> loaded = RemoldAgent.loadedClassesMap;
+		LoadedClassIndex loaded = RemoldAgent.loadedClassesMap;
 		if (loaded != null && !loaded.isEmpty()) {
 			return loaded.get(dotName);
 		}

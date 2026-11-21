@@ -1,6 +1,7 @@
 package remold.ref;
 
 import remold.WorkspaceRawIndex;
+import remold.util.Names;
 import remold.AnnotationTransformer;
 import remold.BytecodeSources;
 import remold.RemoldAgent;
@@ -217,7 +218,7 @@ public final class HierarchyTreeOracle implements ClassHierarchyOracle {
 
 	/** 只读"重定义已生效"的基线字节：运行期缓存 → 生成类登记口 → 类加载器资源流（不读批次新字节码）。 */
 	private byte[] readPreRedefineClassBytes(String internalName) {
-		byte[] cached = RemoldAgent.getRuntimeBytecode(internalName.replace('/', '.'));
+		byte[] cached = RemoldAgent.getRuntimeBytecode(Names.external(internalName));
 		if (cached != null) return cached;
 		byte[] supplied = WorkspaceRawIndex.lookup(internalName);
 		if (supplied != null) return supplied;

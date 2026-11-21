@@ -459,18 +459,6 @@ public class RemoldAgent {
 			return key == null ? null : committed.get(key);
 		}
 
-		boolean committedContains(String key) {
-			return key != null && committed.containsKey(key);
-		}
-
-		int committedSize() {
-			return committed.size();
-		}
-
-		Set<Map.Entry<String, byte[]>> committedEntries() {
-			return committed.entrySet();
-		}
-
 		/** 非事务写：直接进已提交视图（首次加载登记 / 外部重定义 / VCS 回退等非事务调用方）。 */
 		byte[] committedPut(String key, byte[] bytes) {
 			if (key == null || bytes == null) return null;

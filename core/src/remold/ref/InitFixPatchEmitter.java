@@ -20,11 +20,11 @@ final class InitFixPatchEmitter {
 	 String hostInternal, String className, List<AbstractInsnNode> insns,
 	 Map<AbstractInsnNode, ProtectedAccess> protectedAccesses,
 	 Set<String> conditionalFields, Set<String> forceFields,
-	 Map<String, Object> replayArguments) {
+	 Map<String, Object> replayArguments, Map<String, String> shadowAncestors) {
 
 		insns = rewriteProtectedAccesses(hostInternal, insns, protectedAccesses);
 		insns = rewritePrivateInvokes(className, insns);
-		insns = rewriteFieldPuts(className, insns, conditionalFields, forceFields, replayArguments);
+		insns = rewriteFieldPuts(className, insns, conditionalFields, forceFields, replayArguments, shadowAncestors);
 		return insns;
 	}
 
@@ -468,6 +468,8 @@ final class InitFixPatchEmitter {
 			}
 			return -1;
 		}
+		// 遮蔽字段的 indy 需要同实例上的祖先读数，无法在批循环里用裸 target 局部量重放。
+		if (BRIDGE_BSM_ANCESTOR.equals(indy.bsm)) return -1;
 		return 0;
 	}
 
@@ -724,11 +726,12 @@ final class InitFixPatchEmitter {
 	 * @param conditionalFields 走条件 CAS 的字段
 	 * @param forceFields       走强制写的字段（两者不相交；force 优先）
 	 * @param replayArguments   L1 重放字段 -> 旧初值常量（ASM bootstrap 常量）
+	 * @param shadowAncestors   遮蔽新增字段 -> 祖先声明类内部名（期望值改为运行期读祖先字段）
 	 */
 	private static List<AbstractInsnNode> rewriteFieldPuts(
 	 String className, List<AbstractInsnNode> insns,
 	 Set<String> conditionalFields, Set<String> forceFields,
-	 Map<String, Object> replayArguments) {
+	 Map<String, Object> replayArguments, Map<String, String> shadowAncestors) {
 		if (insns.isEmpty()
 		    || (conditionalFields.isEmpty() && forceFields.isEmpty() && replayArguments.isEmpty())) {
 			return insns;
@@ -772,6 +775,23 @@ final class InitFixPatchEmitter {
 			boolean isStatic = f.getOpcode() == Opcodes.PUTSTATIC;
 			String  indyDesc = (isStatic ? "(" : "(L" + className + ";") + f.desc + ")V";
 			Type    hostType = Type.getObjectType(className);
+
+			String shadowAncestor = forced || isStatic ? null : shadowAncestors.get(f.name);
+			if (shadowAncestor != null) {
+				Object[] ancestorArgs = new Object[]{
+				 HotswapBridge.KIND_CONDITIONAL_ANCESTOR,
+				 f.getOpcode(),
+				 hostType,
+				 hostType,
+				 Type.getObjectType(shadowAncestor)
+				};
+				rewritten.add(new InvokeDynamicInsnNode(f.name, indyDesc, BRIDGE_BSM_ANCESTOR, ancestorArgs));
+				if (isDebugEnabled()) {
+					log("Rewriting field write via indy(ancestor-conditional): "
+					    + className + "." + f.name + " " + f.desc + ", ancestor=" + shadowAncestor);
+				}
+				continue;
+			}
 
 			Object[] bsmArgs = new Object[]{
 			 forced ? HotswapBridge.KIND_FORCE : HotswapBridge.KIND_CONDITIONAL,

@@ -108,6 +108,7 @@ import static remold.RemoldAgent.pendingInvented;
 import static remold.RemoldAgent.postToMain;
 import static remold.RemoldAgent.recordRuntimeBytecode;
 import static remold.RemoldAgent.recordSourceBytecode;
+import static remold.RemoldAgent.dropHostGroup;
 import static remold.RemoldAgent.rejectHostGroup;
 import static remold.RemoldAgent.rollbackSourceCache;
 import static remold.RemoldAgent.runtimeBytecodeEntries;
@@ -272,6 +273,21 @@ final class BatchHotswapExecutor {
 				newAnonsByHost.getOrDefault(hostName, Collections.emptyMap()));
 
 			if (oldAnon.isEmpty() && newAnon.isEmpty()) {
+				continue;
+			}
+
+			// Kotlin 的匿名类命名是 Host$方法名$序号（Host$metricTable$1$1），不是 JVM 规范的
+			// Host$序号链。名字判据只认尾部数字链，于是这一族会被归到一个**不存在的宿主**名下
+			// （Host$metricTable）：对齐时宿主字节永远取不到，匹配只能靠退化证据，最后把新匿名类
+			// 重新编号注入成幽灵类名，而真宿主照旧按原名重定义 —— 结果是"宿主 v2 + 闭包 v1"的
+			// 混合态，后续调用直接 NoClassDefFoundError。
+			//
+			// 对着解析不出宿主字节的宿主做对齐，本质上没有可信证据，因此按 fail-closed 处理：
+			// 整族（真实祖先宿主 + 其名下匿名类）移出本批，旧版本继续生效。
+			String ghostHostAncestor = ghostHostAncestor(hostName, newBatchBytes);
+			if (ghostHostAncestor != null) {
+				rejectGhostHostFamily(newBatchBytes, classToPath, hostName, ghostHostAncestor, skips,
+					oldAnon.size(), newAnon.size());
 				continue;
 			}
 
@@ -785,7 +801,10 @@ final class BatchHotswapExecutor {
 					if (DEBUG) log("[NEW] " + className);
 					// 类尚未加载：根据 REDEFINE_MODE 处理
 					// 若 path 来自 jar 临时目录，需还原为 watchDir 内的虚拟路径以正确推断 ClassLoader
-					Path clHintPath = JarExtractor.tmpToJar().containsKey(path)
+					// path == null 是合法状态：对齐器注入的类、或来自直接传入的 activeWatchJar 的类都没有
+					// watchDir 内的路径。tmpToJar 是 ConcurrentHashMap，传 null 键会抛
+					// "Cannot invoke Object.hashCode() because key is null"，所以必须先判空。
+					Path clHintPath = path != null && JarExtractor.tmpToJar().containsKey(path)
 					 ? JarExtractor.resolveWatchDirPath(JarExtractor.tmpToJar().get(path), className)
 					 : path;
 					// clHintPath == null 表示来自直接传入的 activeWatchJar，无虚拟 watchDir 路径，
@@ -812,7 +831,7 @@ final class BatchHotswapExecutor {
 						ClassLoader loader = findTargetClassLoader(className, clHintPath);
 						// lazy_load + jar：ClassLoader 推断用虚拟路径（clHintPath），
 						// 实际挂载用真实 tmpDir 路径，否则 ClassLoader 找不到 class 文件
-						Path mountPath = JarExtractor.tmpToJar().containsKey(path) ? path : clHintPath;
+						Path mountPath = path != null && JarExtractor.tmpToJar().containsKey(path) ? path : clHintPath;
 						if (mountPath != null) {
 							PackageUnsealer.unsealClassPackage(loader, className);
 							mountForClass(loader, mountPath);
@@ -1394,6 +1413,95 @@ final class BatchHotswapExecutor {
 		}
 		String host = AnonClassAligner.batchAnonHost(cName);
 		return (host != null && !host.equals(cName) && hostClassesToAlign.contains(host)) ? host : null;
+	}
+
+	/**
+	 * 宿主是否真的存在：批次里有新字节、已加载、或能取到运行期/源码基线字节。
+	 *
+	 * <p>只有名字判据（{@link AnonClassAligner#batchAnonHost}）不够：Kotlin 的
+	 * {@code Host$方法名$序号} 形态会推断出 {@code Host$方法名} 这种**不存在的宿主**。
+	 * 幽灵宿主上的对齐没有可信证据，调用方必须走整族拒绝通道。</p>
+	 */
+	static boolean isResolvableAnonHost(String hostName, Map<String, byte[]> newBatchBytes) {
+		if (hostName == null || hostName.isEmpty()) return false;
+		if (newBatchBytes != null && newBatchBytes.containsKey(hostName)) return true;
+		if (loadedClassesMap.containsKey(hostName)) return true;
+		if (getRuntimeBytecode(hostName) != null) return true;
+		return getSourceBytecode(hostName) != null;
+	}
+
+	/**
+	 * 推断出的宿主不可解析时，返回可用于拒绝通道的**真实祖先宿主**；宿主本身可解析时返回 {@code null}。
+	 *
+	 * <p>逐级剥掉尾部 {@code $segment}：{@code Host$metricTable} → {@code Host}。一个祖先都解析不出来时
+	 * 返回入参本身 —— 调用方据此只移出该前缀下的族（没有宿主可移）。</p>
+	 */
+	static String ghostHostAncestor(String hostName, Map<String, byte[]> newBatchBytes) {
+		if (hostName == null) return null;
+		if (isResolvableAnonHost(hostName, newBatchBytes)) return null;
+		int cut = hostName.lastIndexOf('$');
+		while (cut > 0) {
+			String ancestor = hostName.substring(0, cut);
+			if (isResolvableAnonHost(ancestor, newBatchBytes)) return ancestor;
+			cut = ancestor.lastIndexOf('$');
+		}
+		return hostName;
+	}
+
+	/**
+	 * 幽灵宿主族的 fail-closed 拒绝：真实祖先宿主 + 其名下全部匿名类整族移出本批。
+	 *
+	 * <p>不能只移出血统里的"匿名类"：真宿主这一轮的新字节引用的是重编号后的新匿名类名，
+	 * 若宿主照旧重定义、匿名类却被移出，调用点就链接到不存在的类（{@code NoClassDefFoundError}）。
+	 * 原子单元必须是"宿主 + 族"。</p>
+	 */
+	private static void rejectGhostHostFamily(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,
+	                                          String ghostHost, String realHost, RoundSkips skips,
+	                                          int oldCount, int newCount) {
+		List<String> dropped = new ArrayList<>();
+		if (!ghostHost.equals(realHost)) {
+			dropped.addAll(dropHostGroup(newBatchBytes, classToPath, realHost));
+		}
+		// Kotlin 宿主名后缀族（Host$方法名$序号...）不被名字判据认作匿名类，必须按前缀显式移出；
+		// 否则它们会按原名重定义 —— 那正是"编号位移篡夺槽位"本身。
+		for (String cn : collectHostSuffixFamily(newBatchBytes.keySet(), realHost)) {
+			if (dropped.contains(cn)) continue;
+			dropBatchClass(newBatchBytes, classToPath, cn);
+			dropped.add(cn);
+		}
+		String reason = "inferred host " + ghostHost + " resolves to no class"
+		 + " (Kotlin host-suffix naming: Host$method$1$1)";
+		warn("[ANON_ALIGN] " + reason + "; resolved real host: " + realHost
+		     + ". Kept out of this batch: " + dropped.size() + " class(es)"
+		     + " (recorded old anonymous classes: " + oldCount + ", new: " + newCount + ")."
+		     + " Nothing in this family was redefined — the previous version keeps running."
+		     + " Recompile without moving existing anonymous classes, or restart to adopt the new layout.");
+		skips.addGroup(dropped, realHost, RoundSkips.verdict("ANON-GHOST-HOST", reason,
+			"recompile without moving anonymous classes, or restart"));
+	}
+
+	/** 批次中属于 {@code host$...} 族、且尾部是数字链的类名（含跨级 Kotlin 形态 Host$m$1$1）。 */
+	private static List<String> collectHostSuffixFamily(Set<String> batchKeys, String hostName) {
+		String prefix = hostName + "$";
+		List<String> out = new ArrayList<>();
+		for (String cn : batchKeys) {
+			if (cn == null || !cn.startsWith(prefix)) continue;
+			String suffix = cn.substring(prefix.length());
+			int    tail   = suffix.length();
+			while (tail > 0 && Character.isDigit(suffix.charAt(tail - 1))) tail--;
+			// 尾部不是数字 = 具名内部类，不属族；纯数字链 = JVM 匿名类，已由 dropHostGroup 处理。
+			if (tail == suffix.length() || tail == 0) continue;
+			out.add(cn);
+		}
+		return out;
+	}
+
+	private static void dropBatchClass(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath, String cn) {
+		// 两种键写法都要删：批次里点分名为主，但对齐器产出的条目可能是斜杠形态。
+		for (String key : new String[]{cn, Names.external(cn), Names.internal(cn)}) {
+			newBatchBytes.remove(key);
+			classToPath.remove(key);
+		}
 	}
 
 	private static void invokeReloadMethod(Object obj, Method m, MethodHandle handle) {

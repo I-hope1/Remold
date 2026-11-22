@@ -685,7 +685,16 @@ public final class AnonClassAligner {
 			Map<String, byte[]> alignedAnonClasses = new LinkedHashMap<>();
 			for (AnonInfo n : newInfos) {
 				String targetName = renameMap.get(n.name);
-				byte[] remapped   = remapClass(n.bytecode, renameMap);
+				if (targetName == null || targetName.isEmpty()) {
+					// 没有落地槽位就没有可写的目标类名：绝不能以空名进 alignedAnonClasses ——
+					// 下游按"新匿名类 → 目标类名"迭代注入，空名会一路传到缓存登记处，在
+					// ConcurrentHashMap 上以 "key is null" 崩掉整批的提交阶段。
+					RemoldAgent.warn("[ANON_ALIGN] Host " + hostSlash + ": no target slot resolved for new anonymous"
+						+ " class " + n.name + "; it stays out of this batch and keeps the previous definition."
+						+ " Recompile without moving anonymous classes, or restart to adopt the new layout.");
+					continue;
+				}
+				byte[] remapped = remapClass(n.bytecode, renameMap);
 				alignedAnonClasses.put(targetName, remapped);
 			}
 

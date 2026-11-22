@@ -237,9 +237,31 @@ final class TwoPhaseCoordinator {
 	 */
 	static boolean stageAConsistent(String hostName, Set<String> targets, Set<String> ok,
 	                                Set<String> injected, Set<String> loaded) {
+		// 兼容旧调用口径：没有 requested 信息时，所有 loaded 类都视为"本轮要处理"。
+		return stageAConsistent(hostName, targets, ok, injected, loaded, loaded);
+	}
+
+	/**
+	 * 带"本轮实际提交 Stage A 的类名集合"的一致性判据。
+	 *
+	 * <p><b>为什么需要 requested</b>：宿主类可能本轮**没有变更**（例如只改最内层匿名类体），
+	 * 因此不在 {@code definitions} 里、也不会进 {@code ok}；旧判据只看 host 是否在 ok 中，
+	 * 会把这种"宿主保持不变、匿名类已生效"的形态误判成半生效并打出
+	 * {@code ROLLED-BACK-A}。requested 只包含**本轮真正交给 Stage A 的类**：
+	 * 未提交且已加载的 host 保持旧字节是预期状态，不需要出现在 ok 中；提交了却没成功
+	 * 的类仍然必须回滚。被判据拒掉/过滤掉的类仍会出现在 requested 里，因此不会放松真正
+	 * 的 host/anonymous 半生效检测。</p>
+	 *
+	 * @param requested 本轮进入 Stage A 的类名（过滤前）；{@code null} 等价于旧口径（所有 loaded 都算）
+	 */
+	static boolean stageAConsistent(String hostName, Set<String> targets, Set<String> ok,
+	                                Set<String> injected, Set<String> loaded, Set<String> requested) {
 		if (hostName == null) return false;
+		boolean hostRequested = requested == null || requested.contains(hostName);
 		boolean hostOk = ok.contains(hostName) || (injected != null && injected.contains(hostName));
-		if (!hostOk) return false;
+		// 未请求且已加载的 host：本轮不改它，旧字节就是一致状态。
+		boolean unchangedLoadedHost = !hostRequested && loaded != null && loaded.contains(hostName);
+		if (!hostOk && !unchangedLoadedHost) return false;
 		if (targets == null) return true;
 		for (String target : targets) {
 			if (injected != null && injected.contains(target)) continue;
@@ -255,6 +277,11 @@ final class TwoPhaseCoordinator {
 	                                          Set<String> injectedClasses,
 	                                          Set<String> abandonedOut) {
 		for (AlignmentTransaction tx : transactions) tx.preRegister();
+
+		// 过滤前先冻结"本轮提交 Stage A 的类"：宿主只改匿名类时不在 definitions/ok 中，
+		// 但它是旧字节保持不变的预期状态，不能按半生效回滚。
+		Set<String> requested = new HashSet<>(definitions.size());
+		for (ClassDefinition def : definitions) requested.add(def.getDefinitionClass().getName());
 
 		// 阶段 A 同样可能收到"重织入产物"，必须过同一道访问权限单调对齐 + 自检门。
 		List<ClassDefinition> aligned = new ArrayList<>(definitions.size());
@@ -349,7 +376,8 @@ final class TwoPhaseCoordinator {
 		// 宿主与匿名类必须同批生效；否则阶段 C 的基线已不一致，整组移出。
 		Set<String> abandoned = new HashSet<>();
 		for (AlignmentTransaction tx : transactions) {
-			if (stageAConsistent(tx.hostName, tx.targetClasses, ok, injectedClasses, loadedClassesMap.keySet())) {
+			if (stageAConsistent(tx.hostName, tx.targetClasses, ok, injectedClasses,
+			                     loadedClassesMap.keySet(), requested)) {
 				continue;
 			}
 			error("[HOTSWAP-PARTIAL] Stage A: host " + tx.hostName

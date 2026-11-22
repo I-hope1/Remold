@@ -280,10 +280,11 @@ test {
 }
 
 // 断言测试总数 ≥ 基线且 0 skipped。
-// 基线 = 2026-11-11 v0.2.7 封版时的全量实测（`./gradlew :tests:test` 与 CI `Test Matrix` 双端一致：
-// 718 tests / 0 skipped / 0 failures）。历史上它曾是 318（2026-10-30）→ 405，每次上调都对应一轮
+// 基线 = 2026-11-22 的全量实测（`./gradlew :tests:test` 与 CI `Test Matrix` 双端一致：
+// 1249 tests / 0 skipped / 0 failures）。历史上它曾是 318（2026-10-30）→ 405 → 718（2026-11-11 v0.2.7
+// 封版），每次上调都对应一轮
 // 有意识的新增用例；下调或跳过同样必须是有意识的改动——这个守卫就是用来把"悄悄少跑了一批用例"变成红灯的。
-def hstestMinTests = 718
+def hstestMinTests = 1249
 tasks.register("verifyTestCount") {
 	group = "verification"
 	description = "断言 JUnit 测试数不低于基线 ${hstestMinTests}"

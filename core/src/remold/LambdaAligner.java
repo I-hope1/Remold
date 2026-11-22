@@ -924,6 +924,13 @@ public class LambdaAligner {
 		final Map<String, List<SyntheticInfo>> oldHostSeq = new LinkedHashMap<>(64);
 		final Map<String, List<SyntheticInfo>> newHostSeq = new LinkedHashMap<>(64);
 
+		/**
+		 * Non-synthetic method-reference targets in the new class ({@code owner#name+desc}).
+		 * A same-name lambda whose old helper moved to such a method reference was converted
+		 * rather than edited in place; it must not steal the old lambda's body.
+		 */
+		final Set<String> newMethodRefTargets = new HashSet<>();
+
 		int step1Pairs;
 		int passAPairs;
 		int passBPairs;
@@ -971,6 +978,7 @@ public class LambdaAligner {
 			newNameIndex.clear();
 			oldHostSeq.clear();
 			newHostSeq.clear();
+			newMethodRefTargets.clear();
 			step1Pairs = 0;
 			passAPairs = 0;
 			passBPairs = 0;
@@ -1599,6 +1607,30 @@ public class LambdaAligner {
 		return out.isEmpty() ? Collections.emptySet() : Collections.unmodifiableSet(out);
 	}
 
+	/**
+	 * Own-class private/instance callees. Static package-private business helpers are deliberately
+	 * excluded: a body that only switches between them is a legitimate position-preserving rename
+	 * (the Pr3 fallback scenario), not the L22 cross-helper misbinding.
+	 */
+	private static Set<String> collectOwnHelpers(MethodNode mn, ClassNode owner) {
+		if (mn.instructions == null || owner == null) return Collections.emptySet();
+		Map<String, Integer> access = new HashMap<>();
+		for (MethodNode method : owner.methods) access.put(method.name + method.desc, method.access);
+		Set<String> out = new HashSet<>();
+		for (AbstractInsnNode insn : mn.instructions) {
+			if (!(insn instanceof MethodInsnNode m)) continue;
+			if (!owner.name.equals(m.owner)) continue;
+			if (MethodFingerprinter.isSyntheticName(m.name)) continue;
+			if (isBoilerplateCallee(m)) continue;
+			Integer flags = access.get(m.name + m.desc);
+			if (flags == null) continue;
+			boolean privateOrInstance = (flags & Opcodes.ACC_PRIVATE) != 0
+			                           || (flags & Opcodes.ACC_STATIC) == 0;
+			if (privateOrInstance) out.add(m.owner + "#" + m.name + m.desc);
+		}
+		return out.isEmpty() ? Collections.emptySet() : Collections.unmodifiableSet(out);
+	}
+
 	/** 通用样板调用：出现在任何 lambda 里都不能当作"这两个 lambda 在做同一件事"。 */
 	private static boolean isBoilerplateCallee(MethodInsnNode m) {
 		String owner = m.owner;
@@ -1684,6 +1716,97 @@ public class LambdaAligner {
 			}
 		}
 		return bestOverlap > 0 && !tie ? best : null;
+	}
+
+	/** Whether a consumer tag is a named-field write ({@code PUT:owner.field desc}). */
+	private static boolean isPutConsumer(String consumer) {
+		return consumer != null && consumer.startsWith("PUT:");
+	}
+
+	private static int consumerCount(List<SyntheticInfo> host, String consumer) {
+		if (host == null || consumer == null) return 0;
+		int count = 0;
+		for (SyntheticInfo info : host) {
+			if (consumer.equals(info.consumer)) count++;
+		}
+		return count;
+	}
+
+	/**
+	 * A unique named-field write anchor: the same {@code PUT:} consumer appears exactly once in
+	 * both host sequences and the two lambdas sit in the same host sequence. This is deliberately
+	 * stricter than {@link #hasSameExplicitConsumer}: duplicate field writes in if/else branches
+	 * make the anchor ineligible instead of guessing.
+	 */
+	static boolean uniquePutAnchor(MatchContext ctx, SyntheticInfo ni, SyntheticInfo oi) {
+		if (ni == null || oi == null) return false;
+		if (!isPutConsumer(ni.consumer) || !ni.consumer.equals(oi.consumer)) return false;
+		if (ni.hostKey == null || !ni.hostKey.equals(oi.hostKey)) return false;
+		List<SyntheticInfo> ns = ctx.newHostSeq.get(ni.hostKey);
+		List<SyntheticInfo> os = ctx.oldHostSeq.get(oi.hostKey);
+		return consumerCount(ns, ni.consumer) == 1 && consumerCount(os, oi.consumer) == 1;
+	}
+
+	/**
+	 * Two unique PUT anchors in the same host sequence point at different fields. Pairing them
+	 * would be a field-identity contradiction; reject it in every pass. If either side's PUT is
+	 * duplicated (or missing), this returns {@code false} and the existing evidence decides.
+	 */
+	private static boolean putAnchorConflict(MatchContext ctx, SyntheticInfo ni, SyntheticInfo oi) {
+		if (ni == null || oi == null) return false;
+		if (!isPutConsumer(ni.consumer) || !isPutConsumer(oi.consumer)) return false;
+		if (ni.hostKey == null || !ni.hostKey.equals(oi.hostKey)) return false;
+		if (ni.consumer.equals(oi.consumer)) return false;
+		List<SyntheticInfo> ns = ctx.newHostSeq.get(ni.hostKey);
+		List<SyntheticInfo> os = ctx.oldHostSeq.get(oi.hostKey);
+		return consumerCount(ns, ni.consumer) == 1 && consumerCount(os, oi.consumer) == 1;
+	}
+
+	/** Among already-admitted legal old candidates, the one matching a unique PUT anchor. */
+	private static SyntheticInfo uniquePutAnchorPick(MatchContext ctx, SyntheticInfo ni, List<SyntheticInfo> legal) {
+		if (legal == null || legal.isEmpty() || !isPutConsumer(ni.consumer)) return null;
+		SyntheticInfo found = null;
+		for (SyntheticInfo oi : legal) {
+			if (!uniquePutAnchor(ctx, ni, oi)) continue;
+			if (found != null) return null;   // more than one anchor match is not unique
+			found = oi;
+		}
+		return found;
+	}
+
+	/**
+	 * L22 safety veto: renamed fallback candidates whose own-class private/instance helper sets are
+	 * both non-empty and disjoint must not be paired by order alone. External-library and static
+	 * package-private business helpers are intentionally not part of this set, so legitimate
+	 * refactors that only switch such methods stay untouched.
+	 */
+	private static boolean disjointSameClassHelpers(MatchContext ctx, SyntheticInfo ni, SyntheticInfo oi) {
+		Set<String> newHelpers = ni.ownHelpers;
+		Set<String> oldHelpers = oi.ownHelpers;
+		if (newHelpers.isEmpty() || oldHelpers.isEmpty()) return false;
+		for (String helper : newHelpers) {
+			if (oldHelpers.contains(helper)) return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Same-name lambdas are normally an in-place edit and must keep working. The exception is a
+	 * lambda whose old helper has been converted to a method reference in the new class (L22):
+	 * that old body was replaced by {@code this::helper}, not edited, so it must be ghosted
+	 * instead of stealing the new lambda at the same ordinal.
+	 */
+	private static boolean helperMovedToNewMethodRef(MatchContext ctx, SyntheticInfo oi) {
+		return helperMovedToNewMethodRefForTest(oi.ownHelpers, ctx.newMethodRefTargets);
+	}
+
+	/** Test hook: old helper set ∩ new non-synthetic method-reference targets. */
+	static boolean helperMovedToNewMethodRefForTest(Set<String> oldHelpers, Set<String> newMethodRefs) {
+		if (oldHelpers == null || newMethodRefs == null) return false;
+		for (String helper : oldHelpers) {
+			if (newMethodRefs.contains(helper)) return true;
+		}
+		return false;
 	}
 
 	/**
@@ -2142,6 +2265,7 @@ public class LambdaAligner {
 		// scan 把 access$ / Kotlin $annotations 这类设为非 renameable，用意是不让它们参与改名；
 		// 若这里不查，一个空体新 lambda 仍可能认领空体旧 $annotations 的名字。
 		if (!oi.renameable) return false;
+		if (putAnchorConflict(ctx, ni, oi)) return false;   // unique field identities disagree
 		// 一个旧简单名只能被一个方法占用（renameBySimpleName 与避障都依赖这一约束）；
 		// step2PassA/step2/stepGhostRevive 都查了，Step 1 与宿主序列锚点也必须对称地查。
 		if (ctx.isOldNameClaimed(oi)) return false;
@@ -2283,9 +2407,13 @@ public class LambdaAligner {
 			if (legalOld.isEmpty()) continue;
 
 			// 内容证据优先：被调集合"唯一严格最大正交集"者胜出（平票/全零不走这里）。
-			SyntheticInfo overlapPick = uniqueStrictMaxOverlap(ni, legalOld);
-			SyntheticInfo bestOld = overlapPick;
-			if (overlapPick != null) {
+			SyntheticInfo anchorPick = uniquePutAnchorPick(ctx, ni, legalOld);
+			SyntheticInfo overlapPick = anchorPick == null ? uniqueStrictMaxOverlap(ni, legalOld) : null;
+			SyntheticInfo bestOld = anchorPick != null ? anchorPick : overlapPick;
+			if (anchorPick != null) {
+				dbg(() -> "A-PASS put-anchor ni=" + ni.name + " -> " + anchorPick.name
+				          + " consumer=" + ni.consumer);
+			} else if (overlapPick != null) {
 				dbg(() -> "A-PASS callee-overlap ni=" + ni.name + " -> " + overlapPick.name
 				          + " overlap=" + calleeOverlap(ni, overlapPick));
 			} else {
@@ -2357,10 +2485,11 @@ public class LambdaAligner {
 			if (legalOld.isEmpty()) continue;
 
 			// 内容证据优先：被调集合唯一严格最大正交集者胜出（平票/全零退回既有顺序）。
-			SyntheticInfo overlapPick = uniqueStrictMaxOverlap(ni, legalOld);
+			SyntheticInfo anchorPick = uniquePutAnchorPick(ctx, ni, legalOld);
+			SyntheticInfo overlapPick = anchorPick == null ? uniqueStrictMaxOverlap(ni, legalOld) : null;
 
 			// 第一优先级：同名，其次按原顺序先到先得
-			SyntheticInfo bestOld = overlapPick;
+			SyntheticInfo bestOld = anchorPick != null ? anchorPick : overlapPick;
 			if (bestOld == null) {
 				for (SyntheticInfo oi : legalOld) {
 					if (isSameNameEvidence(ctx, oi, ni)) {
@@ -2670,7 +2799,20 @@ public class LambdaAligner {
 			warnBodyMismatch(ctx, oi, ni);
 			return false;
 		}
-		if (ni.name.equals(oi.name)) return true;
+		if (putAnchorConflict(ctx, ni, oi)) {
+			dbg(() -> "PUT-ANCHOR-CONFLICT " + ni.name + " <-> " + oi.name
+			          + " (" + ni.consumer + " vs " + oi.consumer + ")");
+			return false;
+		}
+		boolean sameName = ni.name.equals(oi.name);
+		if (disjointSameClassHelpers(ctx, ni, oi)
+		    && (!sameName || helperMovedToNewMethodRef(ctx, oi))) {
+			dbg(() -> "DISJOINT-HELPER veto " + ni.name + " <-> " + oi.name
+			          + " (new=" + ni.ownHelpers + ", old=" + oi.ownHelpers + ")");
+			warnBodyMismatch(ctx, oi, ni);
+			return false;
+		}
+		if (sameName) return true;
 		if (hasDiscriminatingConsumer(ctx, ni, oi)) return true;
 		if (isSkeletonGloballyUnique(ctx, ni, oi)) return true;
 		if (isChildIdentityEstablished(ni, oi)) return true;
@@ -3082,6 +3224,7 @@ public class LambdaAligner {
 			info.children = info.bridge ? Collections.emptyList() : collectChildLambdaNames(mn, cn.name);
 			// 内容证据：这个方法体到底调了谁。
 			info.callees = collectCallees(mn);
+			info.ownHelpers = collectOwnHelpers(mn, cn);
 			if (!isOld) putNameIndex(ctx.childIndex, info);
 			// 完整名字索引（两侧各一份），供 infoByName 做 O(1) 查找。
 			// 这里就地填充即可：scan 的循环体已经走完该名字对应的 SyntheticInfo 构建。
@@ -3165,6 +3308,9 @@ public class LambdaAligner {
 				if (n instanceof InvokeDynamicInsnNode i && i.bsmArgs != null && i.bsmArgs.length > 1
 				    && i.bsmArgs[1] instanceof Handle h && cn.name.equals(h.getOwner())) {
 					callee = h.getName();
+					if (!isOld && !MethodFingerprinter.isSyntheticName(callee)) {
+						ctx.newMethodRefTargets.add(cn.name + "#" + callee + h.getDesc());
+					}
 					LambdaBytecodeScanner.recordLambdaShape(nameIndex.get(callee), i, h, mn,
 					                  isOld ? ctx.oldParamNames : ctx.newParamNames, cn.name);
 				} else if (n instanceof MethodInsnNode m && cn.name.equals(m.owner)) {
@@ -3219,6 +3365,9 @@ public class LambdaAligner {
 				if (n instanceof InvokeDynamicInsnNode i && i.bsmArgs != null && i.bsmArgs.length > 1
 				    && i.bsmArgs[1] instanceof Handle h && cn.name.equals(h.getOwner())) {
 					callee = h.getName();
+					if (!isOld && !MethodFingerprinter.isSyntheticName(callee)) {
+						ctx.newMethodRefTargets.add(cn.name + "#" + callee + h.getDesc());
+					}
 					LambdaBytecodeScanner.recordLambdaShape(nameIndex.get(callee), i, h, mn,
 					                  isOld ? ctx.oldParamNames : ctx.newParamNames, cn.name);
 				} else if (n instanceof MethodInsnNode m && cn.name.equals(m.owner)) {
@@ -3685,6 +3834,46 @@ public class LambdaAligner {
 	/** 测试钩子：给定方法的被调集合（按生产过滤规则）。 */
 	public static Set<String> calleesForTest(MethodNode mn) {
 		return collectCallees(mn);
+	}
+
+	/** Test hook: whether a pair carries the same unique named-field PUT anchor. */
+	static boolean uniquePutAnchorForTest(String oldConsumer, String newConsumer,
+	                                     List<String> oldHostConsumers, List<String> newHostConsumers) {
+		if (!isPutConsumer(oldConsumer) || !oldConsumer.equals(newConsumer)) return false;
+		return countConsumers(oldHostConsumers, oldConsumer) == 1
+		       && countConsumers(newHostConsumers, newConsumer) == 1;
+	}
+
+	/** Test hook: two different PUT anchors with unique occurrences conflict. */
+	static boolean putAnchorConflictForTest(String oldConsumer, String newConsumer,
+	                                       List<String> oldHostConsumers, List<String> newHostConsumers) {
+		if (!isPutConsumer(oldConsumer) || !isPutConsumer(newConsumer)) return false;
+		if (oldConsumer.equals(newConsumer)) return false;
+		return countConsumers(oldHostConsumers, oldConsumer) == 1
+		       && countConsumers(newHostConsumers, newConsumer) == 1;
+	}
+
+	private static int countConsumers(List<String> consumers, String target) {
+		if (consumers == null || target == null) return 0;
+		int count = 0;
+		for (String consumer : consumers) {
+			if (target.equals(consumer)) count++;
+		}
+		return count;
+	}
+
+	/** Test hook: the own-class private/instance callee set used by the L22 veto. */
+	static Set<String> ownHelpersForTest(MethodNode mn, ClassNode owner) {
+		return collectOwnHelpers(mn, owner);
+	}
+
+	/** Test hook: the narrow own-class helper disjointness used by the L22 veto. */
+	static boolean disjointSameClassHelpersForTest(Set<String> oldHelpers, Set<String> newHelpers) {
+		if (oldHelpers == null || newHelpers == null || oldHelpers.isEmpty() || newHelpers.isEmpty()) return false;
+		for (String helper : newHelpers) {
+			if (oldHelpers.contains(helper)) return false;
+		}
+		return true;
 	}
 
 	/**
@@ -4227,6 +4416,8 @@ public class LambdaAligner {
 		 * <p>只用于在合法候选之间<b>择优</b>，不参与准入判定（见 {@link #uniqueStrictMaxOverlap}）。</p>
 		 */
 		Set<String> callees = Collections.emptySet();
+		/** Own-class private/instance helper calls, the narrow L22 disjointness set. */
+		Set<String> ownHelpers = Collections.emptySet();
 		/** 在 class 文件方法表中的下标，用于保持编译器位置序。 */
 		int    methodIndex = -1;
 		/** 实例化该 Lambda 后的消费指令（如 "CALL:pkg/Cls.method(Ljava/lang/Runnable;)V"）。 */

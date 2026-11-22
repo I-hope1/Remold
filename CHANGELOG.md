@@ -348,6 +348,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RemoldLambdaRegressionTest`（PASS=69 / KNOWN-GAP=15 / FAIL=0）；全量输出中
   `HOTSWAP-PARTIAL` / `ROLLED-BACK` 命中 0。
 
+- **Lambda fallback 的 PUT 字段锚点与 own-class helper 不相交否决（L21/L22）**：
+  `LambdaAligner` 现在把同一宿主内**唯一一次** `PUT:owner.field desc` 消费端作为硬锚点：唯一且
+  同名时优先于位置同名，两个唯一但不同的 PUT 锚点直接拒绝配对；重复 `PUT`（如 `if/else` 两分支）
+  不构成锚点，退回既有证据。`LambdaCaptureBridge` 在多候选歧义时也优先用该锚点，不再被
+  `oldSeq.size() != newSeq.size()` 的序号前提挡掉。
+  另外在 `fallbackPairingAllowed` 的 `isOrderConsistent` 之前增加窄否决：只有**换名**且双方
+  都有本类 private/instance helper 调用、且两个集合完全不交时才拒绝按顺序强配；同名候选默认仍
+  视为原地编辑，例外是旧 helper 在新类中已转成 `this::helper` 方法引用（L22：旧 $0 helperC 被
+  `this::helperC` 取代）——这时同名也不能偷旧体，必须先 ghost。外部库方法替换、静态包内业务
+  helper（Pr3 形态）仍不受影响。测试 `PutAnchorFallbackTest` 9 条，`Pr3JvmEffHashGateTest` 3 条、
+  `Pr3RawAlignmentScenarioTest` 8 条与 `SemAssertTest` 8 条保持绿；全量 `check` 1245 用例。
+
 - **子类新增字段遮蔽祖先同名字段时，InitFix 把 DCEVM 迁移复制进来的继承值当成"已被写过"而跳过**
   （`InitFix.detectShadowedAddedFields` / `ClassHierarchyOracle.findInheritedField` /
   `HotswapBridge.KIND_CONDITIONAL_ANCESTOR`）。缺陷现场（外部压力测试，V1→V2 热更）：

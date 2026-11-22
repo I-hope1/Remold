@@ -277,7 +277,9 @@ final class LambdaCaptureBridge {
 				}
 				if (eligible >= 2) {
 					final int eligibleCount = eligible;
-					LambdaAligner.SyntheticInfo byOrdinal = bridgeTargetByHostOrdinal(ctx, oi, unpairedNew, newCn);
+					LambdaAligner.SyntheticInfo byAnchor = bridgeTargetByPutAnchor(ctx, oi, unpairedNew, newCn);
+					LambdaAligner.SyntheticInfo byOrdinal = byAnchor != null
+					 ? byAnchor : bridgeTargetByHostOrdinal(ctx, oi, unpairedNew, newCn);
 					if (byOrdinal == null) {
 						LambdaAligner.dbg(() -> "CAPTURE-BRIDGE-SKIPPED zero-capture ambiguous: " + oi.name + oi.desc
 							+ " eligible=" + eligibleCount);
@@ -290,7 +292,9 @@ final class LambdaCaptureBridge {
 				// 多候选歧义：只在"同宿主新旧调用序列长度一致"时用序号消歧（长度一致 ⇒ 没有插入/删除）。
 				// 长度不一致（S40 的中间插入）一律不用位置配对，避免把旧调用点绑到错误语义。
 				final int candidates = hits;
-				LambdaAligner.SyntheticInfo byOrdinal = bridgeTargetByHostOrdinal(ctx, oi, unpairedNew, newCn);
+				LambdaAligner.SyntheticInfo byAnchor = bridgeTargetByPutAnchor(ctx, oi, unpairedNew, newCn);
+				LambdaAligner.SyntheticInfo byOrdinal = byAnchor != null
+				 ? byAnchor : bridgeTargetByHostOrdinal(ctx, oi, unpairedNew, newCn);
 				if (byOrdinal == null) {
 					LambdaAligner.dbg(() -> "CAPTURE-BRIDGE-SKIPPED " + ctx.currentClass + "#"
 						+ oi.name + oi.desc + " matchCount=" + candidates + " host=" + oi.hostKey);
@@ -491,6 +495,25 @@ final class LambdaCaptureBridge {
 	 * <p>只接受普通方法宿主（{@code M:}）：lambda 宿主的键是链式 {@code L:hash@up}，哈希屏蔽字面量，
 	 * 跨宿主同形时并不可靠。</p>
 	 */
+	/**
+	 * A unique named-field write anchor beats host-ordinal fallback when several same-SAM
+	 * candidates are eligible. It is skipped when the field is written more than once, so
+	 * if/else duplicate writes never become a positional guess.
+	 */
+	private static LambdaAligner.SyntheticInfo bridgeTargetByPutAnchor(LambdaAligner.MatchContext ctx,
+	                                                       LambdaAligner.SyntheticInfo oi,
+	                                                       List<LambdaAligner.SyntheticInfo> unpairedNew,
+	                                                       ClassNode newCn) {
+		LambdaAligner.SyntheticInfo found = null;
+		for (LambdaAligner.SyntheticInfo ni : unpairedNew) {
+			if (planBridge(oi, ni, newCn) == null) continue;
+			if (!LambdaAligner.uniquePutAnchor(ctx, ni, oi)) continue;
+			if (found != null) return null;   // not unique
+			found = ni;
+		}
+		return found;
+	}
+
 	private static LambdaAligner.SyntheticInfo bridgeTargetByHostOrdinal(LambdaAligner.MatchContext ctx, LambdaAligner.SyntheticInfo oi,
 	                                                       List<LambdaAligner.SyntheticInfo> unpairedNew, ClassNode newCn) {
 		if (oi.hostKey == null || !oi.hostKey.startsWith("M:")) return null;

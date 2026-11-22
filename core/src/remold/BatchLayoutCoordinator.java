@@ -143,7 +143,12 @@ final class BatchLayoutCoordinator {
 		String hostSlash = hostName.replace('.', '/');
 		List<String> anons = new ArrayList<>();
 		for (String cn : new ArrayList<>(newBatchBytes.keySet())) {
-			if (AnonClassAligner.isAnonymousClassName(hostSlash, cn)) anons.add(cn);
+			// JVM 形态（Host$1 / Host$1$2）与 Kotlin 宿主名后缀形态（Host$m$1$1）都要移出：
+			// 宿主的新字节引用的是重编号后的族成员，只移一半会让另一边链接到不存在的类。
+			if (AnonClassAligner.isAnonymousClassName(hostSlash, cn)
+			 || AnonClassAligner.isHostSuffixFamilyMember(hostSlash, cn)) {
+				anons.add(cn);
+			}
 		}
 		dropFromBatch(newBatchBytes, classToPath, hostName);
 		for (String anon : anons) dropFromBatch(newBatchBytes, classToPath, anon);

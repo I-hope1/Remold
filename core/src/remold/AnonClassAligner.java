@@ -13,6 +13,8 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 
+import remold.util.Names;
+
 import java.util.*;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -955,6 +957,31 @@ public final class AnonClassAligner {
 			}
 		}
 		return !suffix.contains("$$") && !suffix.startsWith("$") && !suffix.endsWith("$");
+	}
+
+	/**
+	 * 宿主名后缀族成员判据：{@code Host$segment$digits...} 且尾部是数字链。
+	 *
+	 * <p>JVM 规范的匿名类只有纯数字链（{@code Host$1}、{@code Host$1$2}），由
+	 * {@link #isAnonymousClassName} 覆盖。Kotlin 把匿名类与它的 SAM 闭包命名为
+	 * {@code Host$方法名$1$1}、{@code Host$方法名$1$1$1}：中间夹着方法名段，因此
+	 * {@code isAnonymousClassName} 判不出来，{@code batchAnonHost} 还会把它归到一个**不存在的**
+	 * 宿主（{@code Host$方法名}）名下。凡是"宿主 + 它的整族"必须一起处理的通道
+	 * （拒绝、移出、孤儿点名）都要用本判据补齐这一族，否则它们会按原名重定义 —— 那正是
+	 * 编号位移篡夺槽位本身。</p>
+	 *
+	 * <p>具名内部类（{@code Host$Inner}、{@code Host$Inner$Deep}）尾部不是数字链，不属族；
+	 * 纯数字链已由 {@link #isAnonymousClassName} 覆盖，这里返回 {@code false}。</p>
+	 */
+	public static boolean isHostSuffixFamilyMember(String hostClassName, String className) {
+		if (hostClassName == null || className == null) return false;
+		String host = Names.internal(hostClassName);
+		String cls  = Names.internal(className);
+		if (!cls.startsWith(host + "$")) return false;
+		String suffix = cls.substring(host.length() + 1);
+		int    tail   = suffix.length();
+		while (tail > 0 && Character.isDigit(suffix.charAt(tail - 1))) tail--;
+		return tail > 0 && tail < suffix.length();
 	}
 
 	public static int parseIndex(String hostClassName, String className) {

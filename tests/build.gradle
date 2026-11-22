@@ -25,6 +25,7 @@ sourceSets {
 	// only the v1 output goes on the probe classpath, v2/v3 are read as bytes and fed to the batch.
 	ktclassClsV1 { kotlin.srcDirs = ["ktclass/class/v1"] }
 	ktclassClsV2 { kotlin.srcDirs = ["ktclass/class/v2"] }
+	ktclassClsV3 { kotlin.srcDirs = ["ktclass/class/v3"] }
 	ktclassPreV1 { kotlin.srcDirs = ["ktclass/prepend/v1"] }
 	ktclassPreV2 { kotlin.srcDirs = ["ktclass/prepend/v2"] }
 	// javac control group (same anonymous-class shape, real host names).
@@ -41,7 +42,7 @@ tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
 // Only the four Kotlin class-mode fixture source sets are compiled with SAM conversions disabled.
 // Keeping this out of the global configureEach block is deliberate: the ktfixV1/V2 fixtures model
 // default (indy) Kotlin output and must not silently switch codegen mode.
-["ktclassClsV1", "ktclassClsV2", "ktclassPreV1", "ktclassPreV2"].each { ss ->
+["ktclassClsV1", "ktclassClsV2", "ktclassClsV3", "ktclassPreV1", "ktclassPreV2"].each { ss ->
 	tasks.named("compile${ss.capitalize()}Kotlin").configure {
 		compilerOptions {
 			freeCompilerArgs.add("-Xsam-conversions=class")
@@ -74,6 +75,7 @@ dependencies {
 	// the stdlib through ktclassClsV1RuntimeClasspath on its classpath.
 	ktclassClsV1Implementation "org.jetbrains.kotlin:kotlin-stdlib"
 	ktclassClsV2Implementation "org.jetbrains.kotlin:kotlin-stdlib"
+	ktclassClsV3Implementation "org.jetbrains.kotlin:kotlin-stdlib"
 	ktclassPreV1Implementation "org.jetbrains.kotlin:kotlin-stdlib"
 	ktclassPreV2Implementation "org.jetbrains.kotlin:kotlin-stdlib"
 
@@ -396,6 +398,7 @@ tasks.register("kotlinClassModeProbe", JavaExec) {
 	dependsOn project(":panama").tasks.named("jar")
 	dependsOn tasks.named("compileKtclassClsV1Kotlin")
 	dependsOn tasks.named("compileKtclassClsV2Kotlin")
+	dependsOn tasks.named("compileKtclassClsV3Kotlin")
 	dependsOn tasks.named("compileKtclassPreV1Kotlin")
 	dependsOn tasks.named("compileKtclassPreV2Kotlin")
 	dependsOn tasks.named("compileKtclassCtlV1Java")
@@ -406,6 +409,9 @@ tasks.register("kotlinClassModeProbe", JavaExec) {
 	systemProperty "remold.kcm.scenario", kcmScenario
 	systemProperty "remold.kcm.class.v1", sourceSets.ktclassClsV1.output.classesDirs.asPath
 	systemProperty "remold.kcm.class.v2", sourceSets.ktclassClsV2.output.classesDirs.asPath
+	// "classv3" reuses the v1 baseline and swaps in the grown-class-set v3 build.
+	systemProperty "remold.kcm.classv3.v1", sourceSets.ktclassClsV1.output.classesDirs.asPath
+	systemProperty "remold.kcm.classv3.v2", sourceSets.ktclassClsV3.output.classesDirs.asPath
 	systemProperty "remold.kcm.prepend.v1", sourceSets.ktclassPreV1.output.classesDirs.asPath
 	systemProperty "remold.kcm.prepend.v2", sourceSets.ktclassPreV2.output.classesDirs.asPath
 	systemProperty "remold.kcm.control.v1", sourceSets.ktclassCtlV1.output.classesDirs.asPath

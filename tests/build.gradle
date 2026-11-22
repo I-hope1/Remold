@@ -1809,6 +1809,10 @@ tasks.register("e2eProbe") {
 	dependsOn "ghostProbe"
 	dependsOn "concurrencyAssert"
 	dependsOn "fingerprintAssert"
+	// Kotlin class 模式（-Xsam-conversions=class）宿主名后缀匿名类热更：需要 -javaagent 与独立
+	// Kotlin 夹具编译，属第 2 档。四个场景（class / classv3 / prepend / control）全部绿灯才算通过，
+	// control 是"没有过度拒绝"的负向对照。
+	dependsOn "kotlinClassModeProbe"
 }
 
 // 第 3 档：DCEVM 机制探针。需要 JBR，本来就不参与门禁，聚起来只为方便一键跑。

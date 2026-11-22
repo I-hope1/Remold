@@ -474,31 +474,16 @@ final class LambdaCaptureBridge {
 	}
 
 	/**
-	 * 判定能否建桥，并给出"新形参 → 老形参"的映射。
+	 * 多候选歧义时的<b>字段锚点</b>消歧：唯一 {@code PUT:} 命名写（同一宿主序列里两侧各只出现一次，
+	 * 且两侧 {@code hostKey} 相同）是字段身份证明，优先于宿主序号。
 	 *
-	 * <p>返回 {@code null} 表示不建桥。映射按可靠性分三级：</p>
-	 * <ol>
-	 *   <li><b>形参名</b>（最硬）：两侧都带 {@code -g} 时，源码里的变量名直接就是身份。
-	 *       名字不随宿主方法增删局部变量而变，所以宿主签名变了也照样能定映射；</li>
-	 *   <li><b>宿主形参槽号</b>：只对"捕获来自宿主形参"成立——形参槽在宿主描述符不变时稳定，
-	 *       而<b>局部变量槽会随前序局部增删整体位移</b>，槽号相等不构成证明；</li>
-	 *   <li><b>类型唯一性</b>（兜底）：每个新形参在旧捕获表里恰好一个同类型位置。</li>
-	 * </ol>
+	 * <p>与 {@link #bridgeTargetByHostOrdinal} 的分工：序号证据要求序列等长，因而在"插入/删除导致
+	 * 序号位移"时必须放弃；字段身份不依赖长度，所以先试这一路。没有唯一锚点（字段写两次以上、
+	 * 两侧锚点不一致、或候选不止一个）一律返回 {@code null}，由调用方退回序号消歧。</p>
 	 *
-	 * <p>三级都必须满足"每个新形参恰好一个来源 + 整体内射"。内射是硬要求：两个新形参
-	 * 共用一个旧值意味着它们是<b>两个不同的变量</b>，值不一定相同，喂同一个值是静默错值。</p>
-	 */
-	/**
-	 * 多候选歧义时的位置消歧：只在**同宿主的新旧调用序列长度一致**时成立（长度一致 ⇒ 没有插入/删除，
-	 * 序号就是可靠证据）。长度不一致（S40 的"中间插入"）一律不使用位置配对，退回幽灵/保留旧体。
-	 *
-	 * <p>只接受普通方法宿主（{@code M:}）：lambda 宿主的键是链式 {@code L:hash@up}，哈希屏蔽字面量，
-	 * 跨宿主同形时并不可靠。</p>
-	 */
-	/**
-	 * A unique named-field write anchor beats host-ordinal fallback when several same-SAM
-	 * candidates are eligible. It is skipped when the field is written more than once, so
-	 * if/else duplicate writes never become a positional guess.
+	 * <p><b>不要求普通方法宿主</b>：判据只由 {@link LambdaAligner#uniquePutAnchor} 给，即
+	 * "两侧同名唯一 {@code PUT:} 消费端 + 同一个 {@code hostKey}"；{@code M:} 与 {@code L:} 宿主
+	 * 一视同仁（lambda 宿主只要两侧键相同，同样能作锚点）。</p>
 	 */
 	private static LambdaAligner.SyntheticInfo bridgeTargetByPutAnchor(LambdaAligner.MatchContext ctx,
 	                                                       LambdaAligner.SyntheticInfo oi,
@@ -514,6 +499,14 @@ final class LambdaCaptureBridge {
 		return found;
 	}
 
+	/**
+	 * 多候选歧义时的<b>位置</b>消歧：只在<b>同宿主的新旧调用序列长度一致</b>时成立（长度一致 ⇒ 没有
+	 * 插入/删除，序号就是可靠证据）。长度不一致（S40 的"中间插入"）一律不使用位置配对，
+	 * 退回幽灵/保留旧体。
+	 *
+	 * <p>只接受普通方法宿主（{@code M:}）：lambda 宿主的键是链式 {@code L:hash@up}，哈希屏蔽字面量，
+	 * 跨宿主同形时并不可靠。宿主不同就不是同一个调用序列，"同一个序号"没有意义。</p>
+	 */
 	private static LambdaAligner.SyntheticInfo bridgeTargetByHostOrdinal(LambdaAligner.MatchContext ctx, LambdaAligner.SyntheticInfo oi,
 	                                                       List<LambdaAligner.SyntheticInfo> unpairedNew, ClassNode newCn) {
 		if (oi.hostKey == null || !oi.hostKey.startsWith("M:")) return null;
@@ -527,6 +520,21 @@ final class LambdaCaptureBridge {
 		return planBridge(oi, target, newCn) == null ? null : target;
 	}
 
+	/**
+	 * 判定能否建桥，并给出"新形参 → 老形参"的映射。
+	 *
+	 * <p>返回 {@code null} 表示不建桥。映射按可靠性分三级：</p>
+	 * <ol>
+	 *   <li><b>形参名</b>（最硬）：两侧都带 {@code -g} 时，源码里的变量名直接就是身份。
+	 *       名字不随宿主方法增删局部变量而变，所以宿主签名变了也照样能定映射；</li>
+	 *   <li><b>宿主形参槽号</b>：只对"捕获来自宿主形参"成立——形参槽在宿主描述符不变时稳定，
+	 *       而<b>局部变量槽会随前序局部增删整体位移</b>，槽号相等不构成证明；</li>
+	 *   <li><b>类型唯一性</b>（兜底）：每个新形参在旧捕获表里恰好一个同类型位置。</li>
+	 * </ol>
+	 *
+	 * <p>三级都必须满足"每个新形参恰好一个来源 + 整体内射"。内射是硬要求：两个新形参
+	 * 共用一个旧值意味着它们是<b>两个不同的变量</b>，值不一定相同，喂同一个值是静默错值。</p>
+	 */
 	private static ParamSource[] planBridge(LambdaAligner.SyntheticInfo oi, LambdaAligner.SyntheticInfo ni, ClassNode newCn) {
 		if (!bridgeGatesHold(oi, ni)) return null;
 		int[] legacy = legacyMapping(oi, ni);

@@ -336,6 +336,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Stage A 把本轮未提交的已加载宿主误判为"半生效"（L18 V3 假回滚）**：
+  `TwoPhaseCoordinator.stageAConsistent` 原先只问宿主是否在 `ok` 中；当 V2→V3 只改最内层
+  匿名类体时，外层 local class 已加载但不在本轮 `definitions`，于是被判 host/anonymous mismatch，
+  打出 `[HOTSWAP-PARTIAL]` / `ROLLED-BACK-A` 并把已成功的匿名类移出阶段 C。现在把"本轮提交
+  Stage A 的类名集合"传入判据：未提交且已加载的 host 保持旧字节是预期状态，不要求出现在
+  `ok`；提交了却失败的成员仍按原规则回滚。回归 `StageARequestedScopeTest` 直接驱动
+  `redefineStageA`（Method→Local→Anon 形态），去掉 requested 口径即变红；既有
+  `StageAConsistencyTest` 的 5 个负例保持绿。规格见 `docs/initfix/04-target-design.md` §阶段 A 一致性。
+  外部两套回归同轮读数：`RemoldExtremeLimitsTest` 64 项（59 PASS / 5 KNOWN_LIMIT / 0 FAIL）、
+  `RemoldLambdaRegressionTest`（PASS=69 / KNOWN-GAP=15 / FAIL=0）；全量输出中
+  `HOTSWAP-PARTIAL` / `ROLLED-BACK` 命中 0。
+
 - **子类新增字段遮蔽祖先同名字段时，InitFix 把 DCEVM 迁移复制进来的继承值当成"已被写过"而跳过**
   （`InitFix.detectShadowedAddedFields` / `ClassHierarchyOracle.findInheritedField` /
   `HotswapBridge.KIND_CONDITIONAL_ANCESTOR`）。缺陷现场（外部压力测试，V1→V2 热更）：

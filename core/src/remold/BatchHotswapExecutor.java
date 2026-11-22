@@ -1482,16 +1482,11 @@ final class BatchHotswapExecutor {
 
 	/** 批次中属于 {@code host$...} 族、且尾部是数字链的类名（含跨级 Kotlin 形态 Host$m$1$1）。 */
 	private static List<String> collectHostSuffixFamily(Set<String> batchKeys, String hostName) {
-		String prefix = hostName + "$";
 		List<String> out = new ArrayList<>();
 		for (String cn : batchKeys) {
-			if (cn == null || !cn.startsWith(prefix)) continue;
-			String suffix = cn.substring(prefix.length());
-			int    tail   = suffix.length();
-			while (tail > 0 && Character.isDigit(suffix.charAt(tail - 1))) tail--;
-			// 尾部不是数字 = 具名内部类，不属族；纯数字链 = JVM 匿名类，已由 dropHostGroup 处理。
-			if (tail == suffix.length() || tail == 0) continue;
-			out.add(cn);
+			// 判据只有一份：与 dropHostGroup 共用 AnonClassAligner.isHostSuffixFamilyMember，
+			// 两条拒绝通道对"谁属于这一族"的回答必须完全一致。
+			if (AnonClassAligner.isHostSuffixFamilyMember(hostName, cn)) out.add(cn);
 		}
 		return out;
 	}

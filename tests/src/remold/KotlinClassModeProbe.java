@@ -50,7 +50,8 @@ import remold.util.LibTool;
  * (alignment/rejection names a host class that does not exist in the fixture set), {@code K1-partial},
  * {@code K1-cache}, {@code K1-ncdfe}, {@code K3-swap}, {@code K5-control}, {@code K5-no-trigger}.</p>
  *
- * <p>Run via {@code ./gradlew :tests:kotlinClassModeProbe [-Dremold.kcm.scenario=class|prepend|control|all]}.</p>
+ * <p>Run via {@code ./gradlew :tests:kotlinClassModeProbe
+ * [-Dremold.kcm.scenario=class|classv3|prepend|control|all]}.</p>
  */
 public class KotlinClassModeProbe {
 
@@ -64,6 +65,18 @@ public class KotlinClassModeProbe {
 		"t1:v1-header:v1-body", "t2:v2-header:v2-body",
 		"v1-header", "v2-header", "v1-body", "v2-body",
 		"v1-nested-outer:v1-nested-inner", "v2-nested-outer:v2-nested-inner");
+
+	/**
+	 * classv3 scenario: same SAM-off host-suffix shape as {@code class}, but the new build grows the
+	 * class SET by one closure. This is the shape where "host redefined, closures left behind" cannot
+	 * even link: the fresh factory call references a closure class name the old build never defined,
+	 * so the end state shows {@code NoClassDefFoundError} (violation {@code K1-ncdfe}).
+	 */
+	private static final ScenarioSpec CLASS_V3 = new ScenarioSpec(
+		"classv3", "kcm.classmode.ClosureHost", new String[]{"slots"},
+		"t1:v1-header:v1-body", "t3:v3-header:v3-body:v3-extra",
+		"v1-header", "v3-header", "v1-body", "v3-body",
+		"v1-nested-outer:v1-nested-inner", "v3-nested-outer:v3-nested-inner");
 
 	/** prepend scenario: v2 prepends one anonymous object, shifting $1/$2 to $2/$3. */
 	private static final ScenarioSpec PREPEND = new ScenarioSpec(
@@ -106,9 +119,9 @@ public class KotlinClassModeProbe {
 		String requested = System.getProperty("remold.kcm.scenario", "all").trim().toLowerCase(Locale.ROOT);
 		System.out.println("KCM-CONFIG scenario=" + requested + " workDir=" + work);
 
-		List<ScenarioSpec> order = List.of(CLASS_MODE, PREPEND, CONTROL);
+		List<ScenarioSpec> order = List.of(CLASS_MODE, CLASS_V3, PREPEND, CONTROL);
 		Set<String> wanted = "all".equals(requested)
-			? new LinkedHashSet<>(List.of("class", "prepend", "control"))
+			? new LinkedHashSet<>(List.of("class", "classv3", "prepend", "control"))
 			: new LinkedHashSet<>(java.util.Arrays.asList(requested.split(",")));
 
 		for (ScenarioSpec spec : order) {

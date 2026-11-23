@@ -142,6 +142,11 @@ final class BatchHotswapExecutor {
 		long ioStartNanos = PERF_LOG ? System.nanoTime() : 0L;
 
 		List<ClassDefinition> definitions = new ArrayList<>();
+		// 本轮真实改动类名（上一轮源码字节 ≠ 本轮磁盘字节）：只喂给摘要计数（RedefineSummary），不参与判决。
+		// 必须在**读文件**阶段判定，早于匿名类对齐与各道门：被门拒绝的类同样属于"这轮改过但没生效"，
+		// 否则"零生效"会被误报成"没有改动"（假成功的另一面）。
+		Set<String> changedRawNames = new LinkedHashSet<>();
+		Set<String> changedNames = new LinkedHashSet<>();
 		// List<Class<?>>        unloadedClasses  = new ArrayList<>();
 		int skippedCount  = 0;
 		int injectedCount = 0;
@@ -181,6 +186,8 @@ final class BatchHotswapExecutor {
 						} catch (Throwable ignored) {
 						}
 					}
+					byte[] prevSource = getSourceBytecode(cn);
+					if (prevSource == null || !Arrays.equals(prevSource, bc)) changedRawNames.add(cn);
 					newBatchBytes.put(cn, bc);
 					classToPath.put(cn, p);
 					rawDiskHashes.put(cn, calculateHash(bc));
@@ -385,6 +392,17 @@ final class BatchHotswapExecutor {
 			}
 			transactions.put(hostName, tx);
 		}
+
+		// 变更集映射到目标类名：definitions 里的名字是 target 名，被 Mixin 重命名的类两者不同。
+		// 位置在匿名类对齐**之后**：此时 renameMap 已全部登记完，不会漏掉后处理宿主的重命名。
+		Map<String, String> rawToTargetName = new HashMap<>(targetToRawName.size());
+		for (Map.Entry<String, String> rename : targetToRawName.entrySet()) {
+			rawToTargetName.put(rename.getValue(), rename.getKey());
+		}
+		for (String raw : changedRawNames) {
+			changedNames.add(rawToTargetName.getOrDefault(raw, raw));
+		}
+		if (DEBUG) log("[CHANGED] raw=" + changedRawNames + " target=" + changedNames);
 
 		// 记录源码级对齐基线
 		//
@@ -877,12 +895,12 @@ final class BatchHotswapExecutor {
 		long redefineWallStartNanos = PERF_LOG ? System.nanoTime() : 0L;
 		RedefineOutcome outcome;
 		if (needsTwoPhase && TWO_PHASE) {
-			outcome = applyTwoPhase(definitions, oldEffectiveBytes, transactions.values(), skips, injectedClasses);
+			outcome = applyTwoPhase(definitions, oldEffectiveBytes, changedNames, transactions.values(), skips, injectedClasses);
 		} else {
 			if (HeapFieldWatch.enabled() && !definitions.isEmpty()) {
 				HeapFieldWatch.snapshot("before-redefine", batchWatchLabel(definitions));
 			}
-			outcome = applyRedefinitions(definitions, transactions.values(), skips);
+			outcome = applyRedefinitions(definitions, changedNames, transactions.values(), skips);
 			if (HeapFieldWatch.enabled() && !outcome.successful().isEmpty()) {
 				HeapFieldWatch.snapshot("after-redefine", batchWatchLabel(definitions));
 			}
@@ -1053,7 +1071,7 @@ final class BatchHotswapExecutor {
 			     + ", redefine=" + redefMs + "ms" + redefineDetail
 			     + ", stageB=" + stageBMs + "ms"
 			     + postDetail
-			     + ", redefined=" + successfulDefinitions.size() + ")");
+			     + ", " + RedefineSummary.of(changedNames, successfulDefinitions, skips.size()).counters() + ")");
 		}
 
 		// L0/L1 必须在 InitFix 后处理（afterRedefine）之后运行：

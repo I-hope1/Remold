@@ -27,6 +27,10 @@
 * **字段删除是另一类问题**：实测（`docs/initfix/07-p05-probe-results.md` §13）字节码层由 DCEVM 实例迁移保全未删字段值、废弃槽位不复用，字节码读者失败形态是**批次外读者抛确定性的 `NoSuchFieldError`**；底层物理内存布局实际紧缩，若有缓存物理偏移的读者会读写错位（见 `OffsetStabilityProbe` A4-2）。判据是"**批次外读者为空**"（批次内扫新字节码、批次外扫当前字节码），两个入口共用该判据：命中 `Fieldref` 才拒，且 owner 是编译期静态类型而非声明类，须按 JVMS 5.4.3.2 判"解析是否真的落在被删字段上"——沿继承树展开、父类遮蔽与接口截胡都要排除，private 例外（JLS §6.6，owner 恒为声明类）。不能简化成"有删除就拒"，那会误杀删 private 字段与正常连带重编的批次（做法见 §13.6）。**两个入口判决不同**：匿名类合成字段删除由 `LayoutGate.check` 判 `COMPATIBLE` 放行（读者必为空，可证），具名类字段删除由 `checkChangedFields` 判 `REMOVED_FIELD` 后再按读者集判。完备性取决于扫描范围（只扫已加载类会漏掉未加载的陈旧读者），扫描未完成时退回存活实例判据（`docs/status.md` 风险 12）。
 * **方法删除另有机制**：实例方法在解析之后还有一层**向下分派**（JVMS 5.4.6），所以引用 owner 可以是 `A` 的**任何祖先**，失败形态有三种——`NoSuchMethodError`（整条链都没有）、`AbstractMethodError`（只有接口声明没有实现）、以及**静默分派转移**（祖先实现接住；实测连 `Methodref A.m` 本身都不抛错）。判据与字段共用"批次外读者为空"，但**扫描未完成时只能拒绝**——方法删除没有存活实例判据可以退。见 §15。
 * 匿名类的合成捕获字段（`val$*` / `this$0`）被 `ClassDiffUtil` 过滤，无法通过 InitFix 补丁覆盖。
+* **普通匿名类的非合成字段变更另有两道前置门**（顺序即语义）：`ANON-LAYOUT` 配对门
+  （`remold.agent.anon_layout_gate`，默认 `reject`，可 `warn`）与**后置换名布局校验**
+  （`ANON_ALIGN_VALIDATION`，**无档位、恒拒**）。因此「改类型」在匿名类上即使把两档都放宽为 `warn`
+  也到不了 JBR 的实例重排；矩阵与读数见 [`runtime/06-anon-field-shape-drill.md`](../runtime/06-anon-field-shape-drill.md)。
 
 ### 1.2 双入口协同防护机制
 

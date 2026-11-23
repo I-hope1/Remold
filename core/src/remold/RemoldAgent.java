@@ -3039,8 +3039,21 @@ public class RemoldAgent {
 	                                             Collection<AlignmentTransaction> transactions,
 	                                             RoundSkips skips,
 	                                             Set<String> injectedClasses) {
+		return applyTwoPhase(definitions, oldEffectiveBytes, null, transactions, skips, injectedClasses);
+	}
+
+	/**
+	 * @param changedNames 本轮真实改动的类名（磁盘字节 ≠ 运行期基线），只用于摘要计数与措辞；
+	 *                     {@code null} = 调用方未提供，退化为"入参即变更"的旧口径。
+	 */
+	static RedefineOutcome applyTwoPhase(List<ClassDefinition> definitions,
+	                                             Map<String, byte[]> oldEffectiveBytes,
+	                                             Collection<String> changedNames,
+	                                             Collection<AlignmentTransaction> transactions,
+	                                             RoundSkips skips,
+	                                             Set<String> injectedClasses) {
 		return TwoPhaseCoordinator.applyTwoPhase(RedefineEntryGate.gate(definitions, skips), oldEffectiveBytes,
-		 transactions, skips, injectedClasses);
+		 changedNames, transactions, skips, injectedClasses);
 	}
 
 	static String batchWatchLabel(List<ClassDefinition> defs) {
@@ -3070,7 +3083,19 @@ public class RemoldAgent {
 	static RedefineOutcome applyRedefinitions(List<ClassDefinition> definitions,
 	                                                  Collection<AlignmentTransaction> transactions,
 	                                                  RoundSkips skips) {
-		return TwoPhaseCoordinator.applyRedefinitions(RedefineEntryGate.gate(definitions, skips), transactions, skips);
+		return applyRedefinitions(definitions, null, transactions, skips);
+	}
+
+	/**
+	 * @param changedNames 本轮真实改动的类名；{@code null} = 调用方未提供（旧口径）。
+	 *                     只影响摘要计数与措辞，不参与任何放行/拒绝判决。
+	 */
+	static RedefineOutcome applyRedefinitions(List<ClassDefinition> definitions,
+	                                                  Collection<String> changedNames,
+	                                                  Collection<AlignmentTransaction> transactions,
+	                                                  RoundSkips skips) {
+		return TwoPhaseCoordinator.applyRedefinitions(RedefineEntryGate.gate(definitions, skips), changedNames,
+		 transactions, skips);
 	}
 
 	record RedefineOutcome(Set<String> successful, Set<String> rolledBack) { }

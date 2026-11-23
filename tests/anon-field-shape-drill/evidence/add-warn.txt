@@ -1,0 +1,90 @@
+> Task :api:compileJava UP-TO-DATE
+> Task :api:processResources NO-SOURCE
+> Task :api:classes UP-TO-DATE
+> Task :api:jar UP-TO-DATE
+> Task :core:compileJava UP-TO-DATE
+> Task :core:processResources NO-SOURCE
+> Task :core:classes UP-TO-DATE
+> Task :core:shadowJar UP-TO-DATE
+> Task :core:jar UP-TO-DATE
+> Task :panama:compileJava UP-TO-DATE
+> Task :panama:processResources NO-SOURCE
+> Task :panama:classes UP-TO-DATE
+> Task :panama:jar UP-TO-DATE
+> Task :plugin-arc:compileJava UP-TO-DATE
+> Task :plugin-arc:processResources UP-TO-DATE
+> Task :plugin-arc:classes UP-TO-DATE
+> Task :plugin-arc:jar UP-TO-DATE
+> Task :plugin-fabric:compileJava UP-TO-DATE
+> Task :plugin-fabric:processResources NO-SOURCE
+> Task :plugin-fabric:classes UP-TO-DATE
+> Task :plugin-fabric:jar UP-TO-DATE
+> Task :plugin-forge:compileJava UP-TO-DATE
+> Task :plugin-forge:processResources UP-TO-DATE
+> Task :plugin-forge:classes UP-TO-DATE
+> Task :plugin-forge:jar UP-TO-DATE
+> Task :plugin-mixin:compileJava UP-TO-DATE
+> Task :plugin-mixin:processResources NO-SOURCE
+> Task :plugin-mixin:classes UP-TO-DATE
+> Task :plugin-mixin:jar UP-TO-DATE
+> Task :tests:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :tests:compileKotlin NO-SOURCE
+> Task :tests:compileJava UP-TO-DATE
+> Task :tests:processResources NO-SOURCE
+> Task :tests:classes UP-TO-DATE
+
+> Task :tests:anonFieldShapeProbe
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+[Remold] [Agent] opened 9 JDK-internal package(s) of java.base to ALL-UNNAMED via Instrumentation.redefineModule; --add-exports/--add-opens are no longer required
+[Remold] DEBUG: false
+[Remold] Redefine Mode: inject
+[Remold] Injection Blacklist: 
+[Remold] InitFix: true
+[Remold] Two-phase redefine: true
+[Remold] Force Static Lambda: false
+[Remold] HotSwap Event: false
+[Remold] Lambda Align: true (strict=false)
+[Remold] Lambda Alignment ENABLED. Recompilation with '-g' (LocalVariableTable) is required for reliable lambda capture reordering detection.
+[Remold] File Shake MS: 200
+[Remold] Asset Shake MS: 250
+[Remold] Perf Detail Log: false (Diff Log: true)
+[Remold] UI Hook: false
+[Remold] Cell Property Ref: false
+[Remold] Anon Align: true (strict=false, debug=false, maxPerHost=128, timeoutMs=2000, layoutGate=reject, redefineLayoutGate=warn, localClassGuard=reject)
+[Remold] Anonymous Class Alignment ENABLED. Ambiguity is resolved conservatively (never by class name).
+[Remold] Structural HotSwap Supported: true
+[Remold] [Lib] Loaded libtoolaarch64.so from: /tmp/remold_natives/libtoolaarch64.so
+[Remold] Watch paths updated across sources:
+  - [cli] dirs=[/home/ubuntu/remold/tests/build/anonfield/classes] jars=[]
+[Remold] Scanning files...
+DRILL-CONFIG shape=add gate=warn dir=/home/ubuntu/remold/tests/build/anonfield layoutGate=warn heapwatch=true watchField=payload watchClass=drillprobe.AnonHost$1
+DRILL-PRE before ver=1/1 read1=P-v1|B-v1|D-v1 read2=P-v1|B-v1|D-v1 ctl=K-v1 fields=[payload:Object,bystander:Object,dropped:Object]
+[Remold] [READY-GATE] host reported ready (all plugins return isHostReady()=true) — class/asset batches are enabled
+[Remold] [ANON_MATCH] Tier 4 bi-unique paired: drillprobe/AnonHost$1 -> drillprobe/AnonHost$1
+[Remold] [DIFF] drillprobe.AnonHost$1:
+ *Modified: [<init>()V, ver()I, read()Ljava/lang/String;]
+ !Fields:   [+ extra]
+
+[Remold] [HEAPWATCH] phase=before-redefine redefining=batch(4) class=drillprobe.AnonHost$1 loader=loadedClasses/jdk.internal.loader.ClassLoaders$AppClassLoader field=payload total=2 nullCount=0 valueTypes{java.lang.String=2} channels{agree=2 conflict=0 unavailable=0}
+[Remold] [WARN] [HEAPWATCH] cached Class for drillprobe.AnonHost$1 was a stale shadow written by a redefine; using the current class version. Readings through the stale reference describe the OLD field table.
+[Remold] [HEAPWATCH] phase=after-stage-a redefining=batch(4) class=drillprobe.AnonHost$1 loader=loadedClasses/jdk.internal.loader.ClassLoaders$AppClassLoader field=payload total=2 nullCount=0 valueTypes{java.lang.String=2} channels{agree=2 conflict=0 unavailable=0}
+[Remold] [HEAPWATCH-DIFF] before=before-redefine after=after-stage-a total{before=2 after=2 same=2 created=0 collected=0} null{before=0 after=0 persisted=0 vanished=0 newlyNull=0}
+[Remold] [HEAPWATCH-IDENTITY] before=before-redefine after=after-stage-a same+collected=2 beforeTotal=2 same+created=2 afterTotal=2 persisted+vanished=0 beforeNull=0 ok=true
+[Remold] [HOTSWAP-2P] Stage A applied for 4 class(es): new shape with old method bodies; patching live instances before stage C.
+[Remold] Applying instance field init patch to drillprobe.AnonHost$1, enumerated=2, fields=1
+[Remold] Instance field init patch for drillprobe.AnonHost$1 done: fields=1, failedFields=[], skippedFields=[], elapsed=1ms
+[Remold] [HEAPWATCH] phase=after-field-patch redefining=batch(4) class=drillprobe.AnonHost$1 loader=loadedClasses/jdk.internal.loader.ClassLoaders$AppClassLoader field=payload total=2 nullCount=0 valueTypes{java.lang.String=2} channels{agree=2 conflict=0 unavailable=0}
+[Remold] [HEAPWATCH-DIFF] before=after-stage-a after=after-field-patch total{before=2 after=2 same=2 created=0 collected=0} null{before=0 after=0 persisted=0 vanished=0 newlyNull=0}
+[Remold] [HEAPWATCH-IDENTITY] before=after-stage-a after=after-field-patch same+collected=2 beforeTotal=2 same+created=2 afterTotal=2 persisted+vanished=0 beforeNull=0 ok=true
+[Remold] HotSwap successful: 4 classes redefined.
+[Remold] [WARN] [HEAPWATCH] cached Class for drillprobe.AnonHost$1 was a stale shadow written by a redefine; using the current class version. Readings through the stale reference describe the OLD field table.
+[Remold] [HEAPWATCH] phase=after-stage-c redefining=batch(4) class=drillprobe.AnonHost$1 loader=loadedClasses/jdk.internal.loader.ClassLoaders$AppClassLoader field=payload total=2 nullCount=0 valueTypes{java.lang.String=2} channels{agree=2 conflict=0 unavailable=0}
+[Remold] [HEAPWATCH-DIFF] before=after-field-patch after=after-stage-c total{before=2 after=2 same=2 created=0 collected=0} null{before=0 after=0 persisted=0 vanished=0 newlyNull=0}
+[Remold] [HEAPWATCH-IDENTITY] before=after-field-patch after=after-stage-c same+collected=2 beforeTotal=2 same+created=2 afterTotal=2 persisted+vanished=0 beforeNull=0 ok=true
+[Remold] [HOTSWAP-2P] Two-phase transaction finished: A=4 class(es), patch=31ms, C=4 class(es), total=375ms.
+DRILL-READING shape=add gate=warn applied=true ver=2 read1=P-v1|B-v1|D-v1|E-v2 read2=P-v1|B-v1|D-v1|E-v2 bystander1=B-v1 bystander2=B-v1 ctl=K-v1 fields=[payload:Object,bystander:Object,dropped:Object,extra:Object]
+DRILL-SUMMARY shape=add gate=warn result=PASS violations=0
+
+BUILD SUCCESSFUL in 5s
+19 actionable tasks: 1 executed, 18 up-to-date
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.7.1/userguide/configuration_cache_enabling.html

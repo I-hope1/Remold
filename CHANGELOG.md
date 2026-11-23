@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **摘要假成功与计数虚高**：`HotSwap successful: N classes redefined` 之前用的是"本批提交给
+  `redefineClasses` 的定义个数"，其中混着仅因磁盘文件被重写而被重新读取、字节与运行期完全一致的类。
+  真机读数（`tests/anon-field-shape-drill/evidence/retype-reject.txt`）：用户改的匿名类被后置布局校验
+  `ANON_ALIGN_VALIDATION` 拒绝、终局 `ver=1` 根本没生效，日志却同时打
+  `HotSwap successful: 2 classes redefined` 与 `2 class(es) were skipped … did NOT take effect`
+  —— 那 2 个"成功"是同批里未被改动的对照类（`[POST] post-processing 2 class(es): [drillprobe.DrillCtl,
+  drillprobe.DrillCtl$1]`）。排查时这一行先入为主，自动化探针按关键字判胜也会假绿。
+  - 计数口径拆成四个独立数：`changed`（上一轮源码字节 ≠ 本轮磁盘字节，读文件阶段判定、按类去重，
+    含被门拒绝者）/ `applied`（其中进入 `redefineClasses` 并成功者）/ `noop`（提交了但字节未变）/
+    `skipped`（跳过台账），见 `core/src/remold/RedefineSummary.java`；批量性能行同步改为
+    `changed=…, applied=…, noop=…, skipped=…`，不再有"按阶段累加"的可能（同一类在阶段 A/C 各提交
+    一次也只算一个）。
+  - **红线**：`applied == 0` 时禁止打印成功行，改走 `[HOTSWAP-SUMMARY] 0 changed class(es) took effect
+    this round — nothing reached the JVM.`（`warn` 级）并点名跳过名单。
+  - 单测 `RedefineSummaryTest` 5 例锁死两条性质（零生效禁称成功、两阶段同类只计一次）；变异 2/2 击杀
+    （`nothingTookEffect()` 改恒假 → `zeroEffectiveMustNotClaimSuccess` 红；去掉按名去重 → 
+    `twoPhaseSameClassIsCountedOnce` 红）。真机复验：改类型格现为
+    `[HOTSWAP-SUMMARY] 0 changed class(es) took effect … 2 unchanged class(es) were redefined as no-ops.`
+    （`changed=1, applied=0, noop=2, skipped=2`），新增格为
+    `HotSwap successful: 1 class(es) redefined. 3 unchanged class(es) were redefined as no-ops.`。
+
 ### Added
 
 - **加载前沿与出生水位线（load frontier / birth watermark）**：把"代码何时被改"与"类何时被懒加载"分开记账，

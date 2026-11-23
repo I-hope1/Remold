@@ -34,8 +34,12 @@
 **闸 1 必须在最前**：改捕获列表会**同时**改字段表与 `<init>` 描述符，若先撞闸 2，`fieldTableChanged`
 永远不计数，真机只能看到 `gateRejected` 而看不到 schema 变化。
 
-> `[观测]` 真机裁定：已加载合成类的**任何**成员 schema 变化一律拒绝。`live{raw=0}`（堆上 0 实例）时
-> 仍然 `newlyNull=230`，故实例数不参与判决；`live{raw}` 只作诊断读数。
+> `[观测]` 真机裁定：已加载合成类的**任何**成员 schema 变化一律拒绝。判据不看实例数——但**两个读数的主语不同**，
+> 不能读成「污染与实例数无关」：`live{raw,reachable}` 量的是**被重定义的合成匿名类**的堆实例数
+> （`syntheticLive(Class)` → `LibTool.getInstances`），而 `newlyNull` 量的是**目标/宿主类**
+> （默认 `…LootContextPredicate`，字段 `combinedCondition`）实例里被监视字段变 null 的个数。
+> 正确读法是「闸门的 liveness 主语覆盖不到真实受损主语」；`raw=0` 时仍 `newlyNull=230` 正是这条主语错位的表现，
+> 而不是实例数与污染无关。口径与读数见 [`runtime/06-anon-field-shape-drill.md`](../runtime/06-anon-field-shape-drill.md) §5。
 
 ## 3. 事务共退：`BytecodeTransformerBridge.Abort`
 

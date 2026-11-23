@@ -77,5 +77,16 @@
   `2 class(es) were skipped this round and did NOT take effect` 并存，而终局读数 `ver=1` 证明**没有生效**；
 - 新增 / 缩容（两阶段）格：变更文件只有 2 个类，却报 `HotSwap successful: 4 classes redefined`。
 
-即"成功计数"既不等于实际生效类数，也不等于变更文件数（疑似按阶段/入口重复计数）。这是**假成功**形态的
-可观测性缺陷，属既有汇总口径问题，本次验证不修。
+即"成功计数"既不等于实际生效类数，也不等于变更文件数。根因已定位并修掉（缺陷现场与修法见
+`CHANGELOG.md` 的 Fixed 条目；计数口径现由 `core/src/remold/RedefineSummary.java` 定义）：
+修复后读数（`tests/anon-field-shape-drill/evidence-postfix/*.log`，每格恰好一条发声行）：
+
+| 形态 × 档位 | 摘要行 | 计数行 |
+|:--|:--|:--|
+| `retype` × reject / warn / anonGate=warn | `[HOTSWAP-SUMMARY] 0 changed class(es) took effect this round — nothing reached the JVM. 2 unchanged class(es) were redefined as no-ops. The classes below did not take effect:`（`warn` 级） | `changed=1, applied=0, noop=2, skipped=2` |
+| `add` × reject / warn | `HotSwap successful: 1 class(es) redefined. 3 unchanged class(es) were redefined as no-ops.` | `changed=1, applied=1, noop=3, skipped=0` |
+| `drop` × reject / warn | 同上（`1 … 3 …`；`warn` 格计数行 `changed=1, applied=1, noop=1, skipped=0`） | — |
+
+`changed=1` 的原因是该矩阵只改匿名类，宿主类字节本身没变。启动期首轮那种"纯重扫"（无改动、无跳过）
+按新口径**完全静默**，不再制造"nothing reached the JVM"噪音。修复前读数保留在
+`tests/anon-field-shape-drill/evidence/*.log` 作为对照。

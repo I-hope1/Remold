@@ -15,6 +15,11 @@ GRADLE_USER_HOME=/home/ubuntu/remold/.gradle-user \
 持有 2 个存活实例，再把所选形态的 v2 源码编译进同一个被监控目录，等 agent 防抖后热更，最后用**实例方法**
 （`ver()` / `read()`）读终局，不用反射字段元数据当判据。
 
+## 两套日志
+
+- `evidence/`：**修复前**读数（当时摘要用"提交定义数"当成功数，见 `CHANGELOG.md` Fixed 条目）。
+- `evidence-postfix/`：计数口径修好之后的同一矩阵；每格恰好一条发声行，启动期纯重扫静默。
+
 ## 单元格与原始日志（`evidence/`）
 
 | 单元格 | 日志 | 终局 |

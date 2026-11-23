@@ -54,6 +54,19 @@ final class TwoPhaseCoordinator {
 	                                             Collection<AlignmentTransaction> transactions,
 	                                             RoundSkips skips,
 	                                             Set<String> injectedClasses) {
+		return applyTwoPhase(definitions, oldEffectiveBytes, null, transactions, skips, injectedClasses);
+	}
+
+	/**
+	 * @param changedNames 本轮真实改动的类名（磁盘字节 ≠ 运行期基线）；{@code null} = 调用方未提供，
+	 *                     此时成功行退化为"入参即变更"的旧口径。仅用于计数措辞，不参与判决。
+	 */
+	static RedefineOutcome applyTwoPhase(List<ClassDefinition> definitions,
+	                                             Map<String, byte[]> oldEffectiveBytes,
+	                                             Collection<String> changedNames,
+	                                             Collection<AlignmentTransaction> transactions,
+	                                             RoundSkips skips,
+	                                             Set<String> injectedClasses) {
 		long startedNanos = System.nanoTime();
 		// 被字节码门禁拒掉的类，其对齐事务一步都不许提交（见 RedefineEntryGate#withoutRejectedGroups）。
 		// 必须在这里、stage A 的 preRegister 之前裁：preRegister 本身就会往 pendingAlignedClasses 登记。
@@ -193,7 +206,7 @@ final class TwoPhaseCoordinator {
 			if (stageAOk.contains(tx.hostName)) activeTransactions.add(tx);
 		}
 		long redefBeforeC = PERF_LOG ? BATCH_REDEFINE_MILLIS.get() : 0L;
-		RedefineOutcome stageCOutcome = applyRedefinitions(stageCDefinitions, activeTransactions, skips);
+		RedefineOutcome stageCOutcome = applyRedefinitions(stageCDefinitions, changedNames, activeTransactions, skips);
 		if (PERF_LOG) {
 			BATCH_STAGE_C_MILLIS.addAndGet(BATCH_REDEFINE_MILLIS.get() - redefBeforeC);
 		}
@@ -405,6 +418,17 @@ final class TwoPhaseCoordinator {
 	static RedefineOutcome applyRedefinitions(List<ClassDefinition> definitions,
 	                                                  Collection<AlignmentTransaction> transactions,
 	                                                  RoundSkips skips) {
+		return applyRedefinitions(definitions, null, transactions, skips);
+	}
+
+	/**
+	 * @param changedNames 本轮真实改动的类名（可为 {@code null} = 旧入口，退化为"入参即变更"）。
+	 *                     只影响计数与摘要措辞：{@code changed} 为 0 时不得出现"成功"字样。
+	 */
+	static RedefineOutcome applyRedefinitions(List<ClassDefinition> definitions,
+	                                                  Collection<String> changedNames,
+	                                                  Collection<AlignmentTransaction> transactions,
+	                                                  RoundSkips skips) {
 		Set<String> successfulClasses = new HashSet<>();
 		Set<String> rolledBackClasses = new HashSet<>();
 		LAST_REDEFINE_VM_LEVEL_FAILURE = false;
@@ -473,11 +497,16 @@ final class TwoPhaseCoordinator {
 			} finally {
 				BATCH_REDEFINE_MILLIS.addAndGet(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - redefineStartNanos));
 			}
-			// 成功行本身也要带上"还有谁没进来"：用户最先看的就是这一行，只报成功个数会让
-			// "我关心的类其实被跳过了"完全隐形。详细名单紧跟其后由 skips.report() 输出。
-			info("HotSwap successful: " + definitions.size() + " classes redefined."
-			     + (skips.isEmpty() ? "" : " " + skips.size()
-			        + " class(es) were skipped this round — listed below."));
+			// 成功行必须按"真实改动"计数，并且**零生效时不得出现成功字样**：
+			// 入参 definitions 里可能全是"仅因磁盘重写而被重新提交、字节未变"的类，
+			// 此时用户改的类其实被门拒绝了，报 successful 会直接误导排障（假成功）。
+			// 详细跳过名单由本轮末尾的 skips.report() 输出。
+			RedefineSummary summary = RedefineSummary.of(changedNames, definitions, skips.size());
+			String summaryLine = summary.line();
+			if (summaryLine != null) {
+				if (summary.warnLevel()) warn(summaryLine);
+				else info(summaryLine);
+			}
 			for (ClassDefinition def : definitions) {
 				recordRuntimeBytecode(def.getDefinitionClass().getName(), def.getDefinitionClassFile());
 				recordCacheLoader(def.getDefinitionClass().getName(), def.getDefinitionClass().getClassLoader());

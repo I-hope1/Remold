@@ -19,11 +19,34 @@ sourceSets {
 	ktfixV2 {
 		kotlin.srcDirs = ["ktfix/v2"]
 	}
+	// Kotlin *class mode* fixtures (`-Xsam-conversions=class`, i.e. SAM conversions emitted as real
+	// class files instead of invokedynamic call sites) for KotlinClassModeProbe. Every version is its
+	// own source set: the versions share package/class names, so they must never share a classpath —
+	// only the v1 output goes on the probe classpath, v2/v3 are read as bytes and fed to the batch.
+	ktclassClsV1 { kotlin.srcDirs = ["ktclass/class/v1"] }
+	ktclassClsV2 { kotlin.srcDirs = ["ktclass/class/v2"] }
+	ktclassClsV3 { kotlin.srcDirs = ["ktclass/class/v3"] }
+	ktclassPreV1 { kotlin.srcDirs = ["ktclass/prepend/v1"] }
+	ktclassPreV2 { kotlin.srcDirs = ["ktclass/prepend/v2"] }
+	// javac control group (same anonymous-class shape, real host names).
+	ktclassCtlV1 { java.srcDirs = ["ktclass/control/v1"] }
+	ktclassCtlV2 { java.srcDirs = ["ktclass/control/v2"] }
 }
 
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
 	compilerOptions {
 		jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21
+	}
+}
+
+// Only the four Kotlin class-mode fixture source sets are compiled with SAM conversions disabled.
+// Keeping this out of the global configureEach block is deliberate: the ktfixV1/V2 fixtures model
+// default (indy) Kotlin output and must not silently switch codegen mode.
+["ktclassClsV1", "ktclassClsV2", "ktclassClsV3", "ktclassPreV1", "ktclassPreV2"].each { ss ->
+	tasks.named("compile${ss.capitalize()}Kotlin").configure {
+		compilerOptions {
+			freeCompilerArgs.add("-Xsam-conversions=class")
+		}
 	}
 }
 
@@ -47,6 +70,14 @@ dependencies {
 
 	ktfixV1Implementation "org.jetbrains.kotlin:kotlin-stdlib"
 	ktfixV2Implementation "org.jetbrains.kotlin:kotlin-stdlib"
+
+	// Class-mode fixtures call kotlin-stdlib helpers (Intrinsics, joinToString); the probe JVM gets
+	// the stdlib through ktclassClsV1RuntimeClasspath on its classpath.
+	ktclassClsV1Implementation "org.jetbrains.kotlin:kotlin-stdlib"
+	ktclassClsV2Implementation "org.jetbrains.kotlin:kotlin-stdlib"
+	ktclassClsV3Implementation "org.jetbrains.kotlin:kotlin-stdlib"
+	ktclassPreV1Implementation "org.jetbrains.kotlin:kotlin-stdlib"
+	ktclassPreV2Implementation "org.jetbrains.kotlin:kotlin-stdlib"
 
 	implementation platform("org.junit:junit-bom:5.11.4")
 	implementation "org.junit.jupiter:junit-jupiter"
@@ -348,6 +379,60 @@ tasks.register("initFixOracle", JavaExec) {
 	        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
 	if (nativeLibPath != null) {
 		jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+	}
+}
+
+// 3b. KotlinClassModeProbe（K1/K3：class 模式闭包 / 宿主名后缀匿名类对齐）
+//
+// 夹具是**真实 kotlinc 产物**（`-Xsam-conversions=class`），每个版本一个 source set、各占一个输出目录：
+// 版本之间同名同包，绝不能共用一个 classpath。探针只把 v1 拷进临时输出目录并交给自己的 URLClassLoader
+// （该目录同时充当"编译输出目录"这个真实前提：watcher 目录就是 classpath 目录），v2 只以字节形式读入并
+// 喂给生产批次主体 `RemoldAgent.processChanges`。
+def kcmScenario = System.getProperty("remold.kcm.scenario")
+	?: project.findProperty("remold.kcm.scenario") ?: "all"
+tasks.register("kotlinClassModeProbe", JavaExec) {
+	group = "verification"
+	description = "Kotlin class 模式（-Xsam-conversions=class）闭包与宿主名后缀匿名类热更复现探针（K1/K3）"
+	dependsOn classes
+	dependsOn project(":core").tasks.named("shadowJar")
+	dependsOn project(":panama").tasks.named("jar")
+	dependsOn tasks.named("compileKtclassClsV1Kotlin")
+	dependsOn tasks.named("compileKtclassClsV2Kotlin")
+	dependsOn tasks.named("compileKtclassClsV3Kotlin")
+	dependsOn tasks.named("compileKtclassPreV1Kotlin")
+	dependsOn tasks.named("compileKtclassPreV2Kotlin")
+	dependsOn tasks.named("compileKtclassCtlV1Java")
+	dependsOn tasks.named("compileKtclassCtlV2Java")
+	// 只有 v1 夹具目录在 classpath 之外（探针按 -D 目录自建 loader），这里补 kotlin-stdlib。
+	classpath = sourceSets.main.runtimeClasspath + configurations.ktclassClsV1RuntimeClasspath
+	mainClass = "remold.KotlinClassModeProbe"
+	systemProperty "remold.kcm.scenario", kcmScenario
+	systemProperty "remold.kcm.class.v1", sourceSets.ktclassClsV1.output.classesDirs.asPath
+	systemProperty "remold.kcm.class.v2", sourceSets.ktclassClsV2.output.classesDirs.asPath
+	// "classv3" reuses the v1 baseline and swaps in the grown-class-set v3 build.
+	systemProperty "remold.kcm.classv3.v1", sourceSets.ktclassClsV1.output.classesDirs.asPath
+	systemProperty "remold.kcm.classv3.v2", sourceSets.ktclassClsV3.output.classesDirs.asPath
+	systemProperty "remold.kcm.prepend.v1", sourceSets.ktclassPreV1.output.classesDirs.asPath
+	systemProperty "remold.kcm.prepend.v2", sourceSets.ktclassPreV2.output.classesDirs.asPath
+	systemProperty "remold.kcm.control.v1", sourceSets.ktclassCtlV1.output.classesDirs.asPath
+	systemProperty "remold.kcm.control.v2", sourceSets.ktclassCtlV2.output.classesDirs.asPath
+	systemProperty "remold.kcm.dir", layout.buildDirectory.dir("kotlinClassMode/live").get().asFile.absolutePath
+	doFirst {
+		// 每个 scenario 自己清空临时输出目录；这里只保证 agent 的 watch 目录存在且**永远为空**：
+		// 探针是直接调批次主体的，不能让 watcher 并发触发第二批。
+		def idle = layout.buildDirectory.dir("kotlinClassMode/idle").get().asFile
+		idle.mkdirs()
+		delete file("$buildDir/kotlinClassMode/live")
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}=${idle.absolutePath}",
+		        "-Dremold.plugins=__probe_none__",
+		        "-Dremold.agent.file_shake_ms=200",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+		if (nativeLibPath != null) {
+			jvmArgs "-Dremold.path.libtool=${nativeLibPath}"
+		}
 	}
 }
 
@@ -1777,6 +1862,10 @@ tasks.register("e2eProbe") {
 	dependsOn "ghostProbe"
 	dependsOn "concurrencyAssert"
 	dependsOn "fingerprintAssert"
+	// Kotlin class 模式（-Xsam-conversions=class）宿主名后缀匿名类热更：需要 -javaagent 与独立
+	// Kotlin 夹具编译，属第 2 档。四个场景（class / classv3 / prepend / control）全部绿灯才算通过，
+	// control 是"没有过度拒绝"的负向对照。
+	dependsOn "kotlinClassModeProbe"
 }
 
 // 第 3 档：DCEVM 机制探针。需要 JBR，本来就不参与门禁，聚起来只为方便一键跑。

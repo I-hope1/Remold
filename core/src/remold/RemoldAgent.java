@@ -2130,6 +2130,7 @@ public class RemoldAgent {
 			if (preRegistered || committed) return;
 			preRegistered = true;
 			for (Map.Entry<String, byte[]> entry : pendingAdds.entrySet()) {
+				if (!isNameableTarget(entry.getKey(), "pendingAdds")) continue;
 				String targetSlash = entry.getKey().replace('.', '/');
 				String targetDot   = entry.getKey().replace('/', '.');
 				byte[] bytes       = entry.getValue();
@@ -2143,20 +2144,40 @@ public class RemoldAgent {
 			preRegister();
 			committed = true;
 			for (Map.Entry<String, byte[]> entry : cacheUpdates.entrySet()) {
+				if (!isNameableTarget(entry.getKey(), "cacheUpdates")) continue;
 				bytecodeCache.put(entry.getKey().replace('/', '.'), entry.getValue());
 			}
+		}
+
+		/**
+		 * 事务只登记**有名字**的类。
+		 *
+		 * <p>{@code bytecodeCache} 是 {@link java.util.concurrent.ConcurrentHashMap}：空键会抛
+		 * {@code NullPointerException: Cannot invoke "Object.hashCode()" because "key" is null}，
+		 * 而这发生在一轮热更的提交阶段，会把整批的收尾打断。真正的问题是上游给了没有目标类名的条目
+		 * （对齐器无法为某个新匿名类决定落地槽位时就会出现），这里按 fail-closed 只跳过该条并点名，
+		 * 不把空名塞进缓存。</p>
+		 */
+		private boolean isNameableTarget(String name, String source) {
+			if (name != null && !name.isEmpty()) return true;
+			warn("[HOTSWAP-REJECT] Anonymous class alignment produced an entry without a target class name"
+			     + " in " + source + " for host " + hostName + "; the entry is skipped"
+			     + " (the previous class definition keeps running). Recompile without moving anonymous"
+			     + " classes, or restart to adopt the new layout.");
+			return false;
 		}
 
 		public void rollback(boolean pinOldToPending) {
 			if (committed) return;
 			for (String key : pendingAdds.keySet()) {
+				if (key == null || key.isEmpty()) continue;
 				AnnotationTransformer.PENDING_ALIGNED.remove(pendingScope, key.replace('.', '/'));
 				AnnotationTransformer.PENDING_ALIGNED.remove(pendingScope, key.replace('/', '.'));
 			}
 			if (pinOldToPending) {
 				// 将被磁盘新文件覆盖但重定义未生效的旧版本字节码钉在 pending 中
 				for (Map.Entry<String, byte[]> entry : pinOldBytes.entrySet()) {
-					if (entry.getValue() != null) {
+					if (entry.getValue() != null && entry.getKey() != null && !entry.getKey().isEmpty()) {
 						String slash = entry.getKey().replace('.', '/');
 						String dot   = entry.getKey().replace('/', '.');
 						AnnotationTransformer.PENDING_ALIGNED.put(pendingScope, slash, entry.getValue());

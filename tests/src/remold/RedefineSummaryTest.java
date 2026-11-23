@@ -86,6 +86,23 @@ class RedefineSummaryTest {
 	}
 
 	@Test
+	void wholeFamilyRejectedWithEmptyDefinitionsStillReportsZeroEffect() {
+		// Kotlin 宿主名后缀族整族被拒的形态：一个定义都没提交，但有真实改动 + 跳过项。
+		// 两条零生效路径（空定义 / 非空但全 no-op）必须共用同一措辞与同一"禁称成功"红线。
+		RedefineSummary summary = RedefineSummary.of(
+			List.of("kcm.classmode.ClosureHost$metricTable$1$1"),
+			List.of(),
+			5);
+		assertEquals(1, summary.changed);
+		assertEquals(0, summary.applied);
+		assertTrue(summary.nothingTookEffect());
+		String line = summary.line();
+		assertNotNull(line, "有改动且有跳过时必须发声");
+		assertFalse(line.contains("HotSwap successful"), "整族被拒时不得出现成功字样，实际行: " + line);
+		assertTrue(summary.warnLevel(), "零生效必须 warn 级");
+	}
+
+	@Test
 	void legacyEntryWithoutChangedSetDoesNotInventNoops() {
 		// 旧入口（changedNames == null）：没有变更集信息时不得凭空判断"无实质变更"。
 		RedefineSummary summary = RedefineSummary.of(null, List.of(def(String.class), def(Long.class)), 0);

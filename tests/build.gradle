@@ -767,6 +767,9 @@ tasks.register("anonFieldShapeProbe", JavaExec) {
 	doFirst {
 		// 每轮从空目录开始：上一轮的 v2 类文件会让本轮 v1 的写入变成"版本回退"，读数不再是本轮真实结果。
 		delete drillDir
+		if ((project.findProperty("drill.debug") ?: "false").toString() == "true") {
+			environment "remold.agent.debug", "true"
+		}
 		def watchDir = drillDir.get().dir("classes").asFile
 		watchDir.mkdirs()
 		jvmArgs "-javaagent:${coreAgentJarPath.get()}=${watchDir.absolutePath}",
@@ -786,6 +789,7 @@ tasks.register("anonFieldShapeProbe", JavaExec) {
 		        "-Ddrill.gate=${drillGate}",
 		        "-Ddrill.anonGate=${drillAnonGate}",
 		        "-Ddrill.dir=${drillDir.get().asFile.absolutePath}",
+		        "-Ddrill.debug=${(project.findProperty("drill.debug") ?: "false")}",
 		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
 	}
 }

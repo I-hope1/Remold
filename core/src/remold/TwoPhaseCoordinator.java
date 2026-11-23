@@ -76,6 +76,8 @@ final class TwoPhaseCoordinator {
 			// pendingAlignedClasses / bytecodeCache，等于把未生效字节变成基线（风险 15/16）。
 			// 语义是"回滚"：登记过的条目撤掉，旧字节钉在 pending 里保护未来的首次加载。
 			for (AlignmentTransaction tx : transactions) tx.rollback(true);
+			// 与单阶段路径共用同一计数口径：本轮确有改动或被跳过才发声；纯重扫（无改动、无跳过）保持静默。
+			emitNoEffect(RedefineSummary.of(changedNames, List.of(), skips.size()));
 			skips.report();
 			return new RedefineOutcome(Set.of(), Set.of());
 		}
@@ -463,11 +465,8 @@ final class TwoPhaseCoordinator {
 			// 一条都没进 redefine 时，原来这里**完全静默**：用户只看到若干条 warn，然后等不到任何
 			// "成功/失败"汇总，只能猜是不是热更没触发。有跳过项就必须点名，这是"整轮静默失效"
 			// 那类最难排查的问题的正面对冲。
-			if (!skips.isEmpty()) {
-				warn("[HOTSWAP-SUMMARY] 0 class(es) were redefined this round — nothing reached the JVM."
-				     + " The classes below are the ones that did not take effect:");
-				skips.report();
-			}
+			emitNoEffect(RedefineSummary.of(changedNames, List.of(), skips.size()));
+			skips.report();
 			return new RedefineOutcome(successfulClasses, rolledBackClasses);
 		}
 
@@ -501,12 +500,7 @@ final class TwoPhaseCoordinator {
 			// 入参 definitions 里可能全是"仅因磁盘重写而被重新提交、字节未变"的类，
 			// 此时用户改的类其实被门拒绝了，报 successful 会直接误导排障（假成功）。
 			// 详细跳过名单由本轮末尾的 skips.report() 输出。
-			RedefineSummary summary = RedefineSummary.of(changedNames, definitions, skips.size());
-			String summaryLine = summary.line();
-			if (summaryLine != null) {
-				if (summary.warnLevel()) warn(summaryLine);
-				else info(summaryLine);
-			}
+			emitSummary(RedefineSummary.of(changedNames, definitions, skips.size()));
 			for (ClassDefinition def : definitions) {
 				recordRuntimeBytecode(def.getDefinitionClass().getName(), def.getDefinitionClassFile());
 				recordCacheLoader(def.getDefinitionClass().getName(), def.getDefinitionClass().getClassLoader());
@@ -602,6 +596,20 @@ final class TwoPhaseCoordinator {
 		}
 		skips.report();
 		return new RedefineOutcome(successfulClasses, rolledBackClasses);
+	}
+
+	/** 摘要行最外层出口：成功行走 info，零生效行走 warn，无事可报时静默。 */
+	private static void emitSummary(RedefineSummary summary) {
+		String line = summary.line();
+		if (line == null) return;
+		if (summary.warnLevel()) warn(line);
+		else info(line);
+	}
+
+	/** 空定义路径专用：只有"确有改动"或"实有跳过"时才需要一条零生效汇总。 */
+	private static void emitNoEffect(RedefineSummary summary) {
+		if (summary.line() == null) return;
+		warn(summary.line());
 	}
 
 	/**

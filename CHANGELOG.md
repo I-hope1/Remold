@@ -23,7 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     一次也只算一个）。
   - **红线**：`applied == 0` 时禁止打印成功行，改走 `[HOTSWAP-SUMMARY] 0 changed class(es) took effect
     this round — nothing reached the JVM.`（`warn` 级）并点名跳过名单。
-  - 单测 `RedefineSummaryTest` 5 例锁死两条性质（零生效禁称成功、两阶段同类只计一次）；变异 2/2 击杀
+  - 两处零生效路径（`definitions` 为空 / 非空但全是 no-op）统一走同一出口 `emitSummary`/`emitNoEffect`，
+    措辞与计数不再分叉：Kotlin 宿主名后缀族整族被拒的三种形态实测都只打一条
+    `[HOTSWAP-SUMMARY] 0 changed class(es) took effect this round`，且四种场景全程 0 次 `HotSwap successful`
+    （`tests/src/KotlinClassModeProbe.java`，`KCM-TOTAL scenarios=4 failed=0 violations=0`）。
+  - 单测 `RedefineSummaryTest` 7 例锁死两条性质（零生效禁称成功、两阶段同类只计一次）；变异 2/2 击杀
     （`nothingTookEffect()` 改恒假 → `zeroEffectiveMustNotClaimSuccess` 红；去掉按名去重 → 
     `twoPhaseSameClassIsCountedOnce` 红）。真机复验：改类型格现为
     `[HOTSWAP-SUMMARY] 0 changed class(es) took effect … 2 unchanged class(es) were redefined as no-ops.`

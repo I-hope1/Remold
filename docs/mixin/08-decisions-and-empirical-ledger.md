@@ -21,8 +21,8 @@
 | # | 条件 | 读数 | 结论 |
 |:--|:--|:--|:--|
 | 1 | 合成类字段表变化，堆上**有**存活实例 | `[HEAPWATCH-DIFF] null{before=0 after=230 newlyNull=230}`，双通道 `agree=1220 / conflict=0` | `[观测]` 污染发生 |
-| 2 | 字段表变化，`live{raw=4 reachable=0}`（GC 后 0 可达） | 放行后同样 `newlyNull=230` 并崩服 | `[观测]` 与可达实例数无关 |
-| 3 | 字段表变化，`live{raw=0 reachable=0}`（堆上 0 实例） | 仍 `newlyNull=230` | `[观测]` 触发条件 = **成员 schema 与已加载版本不一致** |
+| 2 | 字段表变化，`live{raw=4 reachable=0}`（GC 后 0 可达） | 放行后同样 `newlyNull=230` 并崩服 | `[观测]` 主语不同：`live` 是**合成类**实例数、`newlyNull` 是**目标类**实例上被监视字段的丢值数（`runtime/06` §5） |
+| 3 | 字段表变化，`live{raw=0 reachable=0}`（堆上 0 实例） | 仍 `newlyNull=230` | `[观测]` 触发条件 = **成员 schema 与已加载版本不一致**；`raw=0` 量的是合成类，受损面在目标类实例（同上） |
 | 4 | 只改方法体（`fieldTableChanged=false`） | 17~25 切面 `nullCount=0 / newlyNull=0`，双通道 `agree=6100 / conflict=0` | `[观测]` 方法体热更安全 |
 
 因此：**已加载合成匿名类的任何成员 schema 变化一律拒绝**（见 [`05-synthetic-inner-gate-and-abort.md`](05-synthetic-inner-gate-and-abort.md)），

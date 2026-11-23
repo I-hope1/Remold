@@ -741,6 +741,55 @@ tasks.register("shadowFieldProbe", JavaExec) {
 	}
 }
 
+// 9.4b 普通匿名类非合成字段形态矩阵（轻量验证，需 DCEVM）
+// 目的：验两道边界 —— ①layout_gate=reject 下"新增/改类型/缩容"是否按契约拦死或合法放行（护城河）；
+// ②layout_gate=warn 下旁观对照字段是否纹丝不动（JBR 实例重排的跨槽位连坐）。
+// 用法：./gradlew :tests:anonFieldShapeProbe -Pp05.jbr=/opt/idea/jbr -Pdrill.shape=retype -Pdrill.gate=warn
+tasks.register("anonFieldShapeProbe", JavaExec) {
+	group = "verification"
+	description = "普通匿名类非合成字段的 3 形态 × (reject/warn) 读数（需 DCEVM；不改主干代码）"
+	dependsOn classes
+	dependsOn project(":core").tasks.named("shadowJar")
+	def drillDir = layout.buildDirectory.dir("anonfield")
+	classpath = sourceSets.main.runtimeClasspath + files(drillDir.map { it.dir("classes") })
+	mainClass = "AnonFieldShapeProbe"
+	def drillShape = (project.findProperty("drill.shape") ?: "retype").toString()
+	def drillGate  = (project.findProperty("drill.gate")  ?: "reject").toString()
+	def drillAnonGate = (project.findProperty("drill.anonGate") ?: "reject").toString()
+	def jbrHome = project.findProperty("p05.jbr") ?: System.getenv("JBR_HOME") ?: System.getenv("JAVA_HOME_DCEVM") ?: System.getenv("JAVA_HOME_21_X64")
+	if (jbrHome != null) {
+		def javaBin = new File(jbrHome.toString(), System.getProperty("os.name").toLowerCase().contains("win") ? "bin/java.exe" : "bin/java")
+		if (javaBin.exists()) {
+			executable = javaBin.absolutePath
+			javaLauncher.set((JavaLauncher) null)
+		}
+	}
+	doFirst {
+		// 每轮从空目录开始：上一轮的 v2 类文件会让本轮 v1 的写入变成"版本回退"，读数不再是本轮真实结果。
+		delete drillDir
+		def watchDir = drillDir.get().dir("classes").asFile
+		watchDir.mkdirs()
+		jvmArgs "-javaagent:${coreAgentJarPath.get()}=${watchDir.absolutePath}",
+		        "-XX:+AllowEnhancedClassRedefinition",
+		        "-Dremold.agent.file_shake_ms=200",
+		        "-Dremold.agent.layout_gate=${drillGate}",
+		        "-Dremold.agent.anon_layout_gate=${drillAnonGate}",
+		        // 堆实例哨兵：主谓只锚这个匿名类与它的被试字段；读数口径与真机台账一致。
+		        "-Dremold.probe.heapwatch=true",
+		        "-Dremold.probe.heapwatch.class=drillprobe.AnonHost\$1",
+		        "-Dremold.probe.heapwatch.field=payload",
+		        "-Dremold.plugins=__probe_none__",
+		        "--add-exports", "java.base/jdk.internal.loader=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.reflect=ALL-UNNAMED",
+		        "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+		        "-Ddrill.shape=${drillShape}",
+		        "-Ddrill.gate=${drillGate}",
+		        "-Ddrill.anonGate=${drillAnonGate}",
+		        "-Ddrill.dir=${drillDir.get().asFile.absolutePath}",
+		        "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"
+	}
+}
+
 // 9.5 P05Probe (P0.5 前置微验证：两阶段重定义 / 阶段 A 链接 / 堆遍历规模)
 // 需要 DCEVM 能力，不挂 check；用 -Pp05.jbr=<jdk-home> 或 JBR_HOME/JAVA_HOME_DCEVM/JAVA_HOME_21_X64 指定运行时。
 // 刻意使用最小 agent（P05Agent）而非 remold-agent：测量目标是 JVM/DCEVM 原生能力，

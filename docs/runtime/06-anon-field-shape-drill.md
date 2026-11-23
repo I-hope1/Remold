@@ -79,7 +79,7 @@
 
 即"成功计数"既不等于实际生效类数，也不等于变更文件数。根因已定位并修掉（缺陷现场与修法见
 `CHANGELOG.md` 的 Fixed 条目；计数口径现由 `core/src/remold/RedefineSummary.java` 定义）：
-修复后读数（`tests/anon-field-shape-drill/evidence-postfix/*.log`，每格恰好一条发声行）：
+修复后读数（`tests/anon-field-shape-drill/evidence-postfix/*.txt`，每格恰好一条发声行）：
 
 | 形态 × 档位 | 摘要行 | 计数行 |
 |:--|:--|:--|
@@ -89,4 +89,4 @@
 
 `changed=1` 的原因是该矩阵只改匿名类，宿主类字节本身没变。启动期首轮那种"纯重扫"（无改动、无跳过）
 按新口径**完全静默**，不再制造"nothing reached the JVM"噪音。修复前读数保留在
-`tests/anon-field-shape-drill/evidence/*.log` 作为对照。
+`tests/anon-field-shape-drill/evidence/*.txt` 作为对照。

@@ -1,0 +1,86 @@
+> Task :api:compileJava UP-TO-DATE
+> Task :api:processResources NO-SOURCE
+> Task :api:classes UP-TO-DATE
+> Task :api:jar UP-TO-DATE
+> Task :core:compileJava UP-TO-DATE
+> Task :core:processResources NO-SOURCE
+> Task :core:classes UP-TO-DATE
+> Task :core:shadowJar UP-TO-DATE
+> Task :core:jar UP-TO-DATE
+> Task :panama:compileJava UP-TO-DATE
+> Task :panama:processResources NO-SOURCE
+> Task :panama:classes UP-TO-DATE
+> Task :panama:jar UP-TO-DATE
+> Task :plugin-arc:compileJava UP-TO-DATE
+> Task :plugin-arc:processResources UP-TO-DATE
+> Task :plugin-arc:classes UP-TO-DATE
+> Task :plugin-arc:jar UP-TO-DATE
+> Task :plugin-fabric:compileJava UP-TO-DATE
+> Task :plugin-fabric:processResources NO-SOURCE
+> Task :plugin-fabric:classes UP-TO-DATE
+> Task :plugin-fabric:jar UP-TO-DATE
+> Task :plugin-forge:compileJava UP-TO-DATE
+> Task :plugin-forge:processResources UP-TO-DATE
+> Task :plugin-forge:classes UP-TO-DATE
+> Task :plugin-forge:jar UP-TO-DATE
+> Task :plugin-mixin:compileJava UP-TO-DATE
+> Task :plugin-mixin:processResources NO-SOURCE
+> Task :plugin-mixin:classes UP-TO-DATE
+> Task :plugin-mixin:jar UP-TO-DATE
+> Task :tests:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :tests:compileKotlin NO-SOURCE
+> Task :tests:compileJava UP-TO-DATE
+> Task :tests:processResources NO-SOURCE
+> Task :tests:classes UP-TO-DATE
+
+> Task :tests:anonFieldShapeProbe
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+[Remold] [Agent] opened 9 JDK-internal package(s) of java.base to ALL-UNNAMED via Instrumentation.redefineModule; --add-exports/--add-opens are no longer required
+[Remold] DEBUG: false
+[Remold] Redefine Mode: inject
+[Remold] Injection Blacklist: 
+[Remold] InitFix: true
+[Remold] Two-phase redefine: true
+[Remold] Force Static Lambda: false
+[Remold] HotSwap Event: false
+[Remold] Lambda Align: true (strict=false)
+[Remold] Lambda Alignment ENABLED. Recompilation with '-g' (LocalVariableTable) is required for reliable lambda capture reordering detection.
+[Remold] File Shake MS: 200
+[Remold] Asset Shake MS: 250
+[Remold] Perf Detail Log: false (Diff Log: true)
+[Remold] UI Hook: false
+[Remold] Cell Property Ref: false
+[Remold] Anon Align: true (strict=false, debug=false, maxPerHost=128, timeoutMs=2000, layoutGate=reject, redefineLayoutGate=warn, localClassGuard=reject)
+[Remold] Anonymous Class Alignment ENABLED. Ambiguity is resolved conservatively (never by class name).
+[Remold] Structural HotSwap Supported: true
+[Remold] [Lib] Loaded libtoolaarch64.so from: /tmp/remold_natives/libtoolaarch64.so
+[Remold] Watch paths updated across sources:
+  - [cli] dirs=[/home/ubuntu/remold/tests/build/anonfield/classes] jars=[]
+[Remold] Scanning files...
+DRILL-CONFIG shape=retype gate=warn dir=/home/ubuntu/remold/tests/build/anonfield layoutGate=warn heapwatch=true watchField=payload watchClass=drillprobe.AnonHost$1
+[Remold] [READY-GATE] host reported ready (all plugins return isHostReady()=true) — class/asset batches are enabled
+DRILL-PRE before ver=1/1 read1=P-v1|B-v1|D-v1 read2=P-v1|B-v1|D-v1 ctl=K-v1 fields=[payload:Object,bystander:Object,dropped:Object]
+[Remold] Could not find a suitable ClassLoader for new class: drillprobe.AnonHost
+[Remold] Could not find a suitable ClassLoader for new class: drillprobe.AnonHost$1
+[Remold] [HEAPWATCH] phase=before-redefine redefining=batch(2) class=drillprobe.AnonHost$1 loader=loadedClasses/jdk.internal.loader.ClassLoaders$AppClassLoader field=payload total=2 nullCount=0 valueTypes{java.lang.String=2} channels{agree=2 conflict=0 unavailable=0}
+[Remold] HotSwap successful: 2 classes redefined.
+[Remold] [HEAPWATCH] phase=after-redefine redefining=batch(2) class=drillprobe.AnonHost$1 loader=loadedClasses/jdk.internal.loader.ClassLoaders$AppClassLoader field=payload total=2 nullCount=0 valueTypes{java.lang.String=2} channels{agree=2 conflict=0 unavailable=0}
+[Remold] [HEAPWATCH-DIFF] before=before-redefine after=after-redefine total{before=2 after=2 same=2 created=0 collected=0} null{before=0 after=0 persisted=0 vanished=0 newlyNull=0}
+[Remold] [HEAPWATCH-IDENTITY] before=before-redefine after=after-redefine same+collected=2 beforeTotal=2 same+created=2 afterTotal=2 persisted+vanished=0 beforeNull=0 ok=true
+[Remold] [HEAPWATCH] phase=after-field-patch redefining=batch(2) class=drillprobe.AnonHost$1 loader=loadedClasses/jdk.internal.loader.ClassLoaders$AppClassLoader field=payload total=2 nullCount=0 valueTypes{java.lang.String=2} channels{agree=2 conflict=0 unavailable=0}
+[Remold] [HEAPWATCH-DIFF] before=after-redefine after=after-field-patch total{before=2 after=2 same=2 created=0 collected=0} null{before=0 after=0 persisted=0 vanished=0 newlyNull=0}
+[Remold] [HEAPWATCH-IDENTITY] before=after-redefine after=after-field-patch same+collected=2 beforeTotal=2 same+created=2 afterTotal=2 persisted+vanished=0 beforeNull=0 ok=true
+[Remold] [HOTSWAP-BATCH] summary: mode=1-phase, total=343ms (anon=15ms, guard=0ms, readers=0ms, gate=8ms, alignDiff=13ms, liveScan=0ms, redefine=179ms, stageB=2ms, redefined=2)
+[Remold] [WARN] [ANON-LAYOUT] drillprobe/AnonHost$1 -> drillprobe/AnonHost$1: REFUSED to pair (incompatible layout with live instances). The old class is kept as an orphan; its LIVE instances keep running the OLD code, so this edit will NOT take effect for them until they are recreated. Reason: field type changed: [payload Ljava/lang/Object; -> Ljava/lang/String;]
+[Remold] [ANON_MATCH] Tier 3.5 body-similarity paired: drillprobe/AnonHost$1 -> drillprobe/AnonHost$1 (score=0.857, margin=1.000)
+[Remold] [WARN] [HOTSWAP-REJECT] Structural ambiguity detected in drillprobe.AnonHost. Redefine skipped safely. Reason: post-rename field layout mismatch on field 'payload': new 'Ljava/lang/Object;' rewrites to 'Ljava/lang/String;' but old is 'Ljava/lang/Object;' — the field's anonymous-class type does not survive renaming, so this host group cannot be redefined safely. The host group is rejected; hot-swap again or restart the JVM for this edit to take effect [ANON_ALIGN_VALIDATION]. Please hot-swap again or restart.
+[Remold] [WARN] [HOTSWAP-SUMMARY] 0 class(es) were redefined this round — nothing reached the JVM. The classes below are the ones that did not take effect:
+[Remold] [WARN] [HOTSWAP-SKIPPED] 2 class(es) were skipped this round and did NOT take effect — the running code is still the previous version:
+[Remold] [WARN] [HOTSWAP-SKIPPED]   drillprobe.AnonHost  <- ANON-ALIGN-REJECT: post-rename field layout mismatch on field 'payload': new 'Ljava/lang/Object;' rewrites to 'Ljava/lang/String;' but old is 'Ljava/lang/Object;' — the field's anonymous-class type does not survive renaming, so this host group cannot be redefined safely. The host group is rejected; hot-swap again or restart the JVM for this edit to take effect [ANON_ALIGN_VALIDATION] — hot-swap again, or restart if it repeats
+[Remold] [WARN] [HOTSWAP-SKIPPED]   drillprobe.AnonHost$1  <- ANON-ALIGN-REJECT: post-rename field layout mismatch on field 'payload': new 'Ljava/lang/Object;' rewrites to 'Ljava/lang/String;' but old is 'Ljava/lang/Object;' — the field's anonymous-class type does not survive renaming, so this host group cannot be redefined safely. The host group is rejected; hot-swap again or restart the JVM for this edit to take effect [ANON_ALIGN_VALIDATION] — hot-swap again, or restart if it repeats (same host group as drillprobe.AnonHost)
+DRILL-READING shape=retype gate=warn applied=false ver=1 read1=P-v1|B-v1|D-v1 read2=P-v1|B-v1|D-v1 bystander1=B-v1 bystander2=B-v1 ctl=K-v1 fields=[payload:Object,bystander:Object,dropped:Object]
+DRILL-SUMMARY shape=retype gate=warn result=PASS violations=0
+
+BUILD SUCCESSFUL in 19s
+19 actionable tasks: 1 executed, 18 up-to-date
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.7.1/userguide/configuration_cache_enabling.html

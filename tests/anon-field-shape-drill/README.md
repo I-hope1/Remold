@@ -24,10 +24,10 @@ GRADLE_USER_HOME=/home/ubuntu/remold/.gradle-user \
 
 | 单元格 | 日志 | 终局 |
 |:--|:--|:--|
-| retype × reject | `evidence/retype-reject.log` | 拒绝（`ANON-LAYOUT` 拒配对 + 后置换名校验），值全保留 |
-| retype × warn | `evidence/retype-warn.log` | 仍拒绝（后置换名校验无档位） |
-| retype × warn + anonGate=warn | `evidence/retype-warn-anongate-warn.log` | 仍拒绝（同上） |
-| add × reject | `evidence/add-reject.log` | 放行（两阶段），新字段补值，既有字段不动 |
-| add × warn | `evidence/add-warn.log` | 同上 |
-| drop × reject | `evidence/drop-reject.log` | 放行（`WAIVE_NO_READERS`），既有字段值保留 |
-| drop × warn | `evidence/drop-warn.log` | 同上 |
+| retype × reject | `evidence/retype-reject.txt` | 拒绝（`ANON-LAYOUT` 拒配对 + 后置换名校验），值全保留 |
+| retype × warn | `evidence/retype-warn.txt` | 仍拒绝（后置换名校验无档位） |
+| retype × warn + anonGate=warn | `evidence/retype-warn-anongate-warn.txt` | 仍拒绝（同上） |
+| add × reject | `evidence/add-reject.txt` | 放行（两阶段），新字段补值，既有字段不动 |
+| add × warn | `evidence/add-warn.txt` | 同上 |
+| drop × reject | `evidence/drop-reject.txt` | 放行（`WAIVE_NO_READERS`），既有字段值保留 |
+| drop × warn | `evidence/drop-warn.txt` | 同上 |

@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **摘要假成功与计数虚高**：`HotSwap successful: N classes redefined` 之前用的是"本批提交给
   `redefineClasses` 的定义个数"，其中混着仅因磁盘文件被重写而被重新读取、字节与运行期完全一致的类。
-  真机读数（`tests/anon-field-shape-drill/evidence/retype-reject.log`）：用户改的匿名类被后置布局校验
+  真机读数（`tests/anon-field-shape-drill/evidence/retype-reject.txt`）：用户改的匿名类被后置布局校验
   `ANON_ALIGN_VALIDATION` 拒绝、终局 `ver=1` 根本没生效，日志却同时打
   `HotSwap successful: 2 classes redefined` 与 `2 class(es) were skipped … did NOT take effect`
   —— 那 2 个"成功"是同批里未被改动的对照类（`[POST] post-processing 2 class(es): [drillprobe.DrillCtl,

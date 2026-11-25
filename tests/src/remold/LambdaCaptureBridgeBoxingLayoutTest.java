@@ -79,10 +79,13 @@ class LambdaCaptureBridgeBoxingLayoutTest {
 
 	@Test
 	void boxedToPrimitiveForwardingIsRejected() {
-		// Same instantiated SAM type, but the impl descriptors differ in the FORWARDED tail: the bridge would
-		// push an Integer into an int parameter. Must be rejected even though the layout check tolerates boxing.
-		LambdaAligner.SyntheticInfo oldInfo = info("(I)V", "(Ljava/lang/Integer;)V");
-		LambdaAligner.SyntheticInfo newInfo = info("(Ljava/lang/Integer;)V", "(Ljava/lang/Integer;)V");
+		// Same instantiated SAM type and a real capture on both sides (so the empty-capture rule is not what
+		// rejects it), but the impl descriptors differ in the FORWARDED tail: the bridge would push an Integer
+		// into an int parameter. Must be rejected even though the layout check tolerates boxing.
+		LambdaAligner.SyntheticInfo oldInfo = info("(Ljava/lang/String;I)V", "(Ljava/lang/Integer;)V",
+			"Ljava/lang/String;");
+		LambdaAligner.SyntheticInfo newInfo = info("(Ljava/lang/String;Ljava/lang/Integer;)V",
+			"(Ljava/lang/Integer;)V", "Ljava/lang/String;");
 		oldInfo.hostKey = newInfo.hostKey = "M:run()V";
 		assertFalse(LambdaCaptureBridge.bridgeGatesHold(oldInfo, newInfo),
 			"forwarding an Integer into an int parameter would be a VerifyError — no bridge");

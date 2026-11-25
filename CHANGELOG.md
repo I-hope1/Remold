@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Kotlin 宿主/匿名两阶段锁死**：宿主类累计 ghost + bridge 之后，`compileKotlin` 每轮都会重新输出宿主
+  `.class`（内存字节与磁盘不同 ⇒ 进 Stage A），而匿名类 `.class` 磁盘字节未变、被过滤成 Unchanged，
+  于是既不在 `requested` 也不在 `ok`。旧判据要求"每个已加载 target 都必须在 ok 里"，每轮都判
+  宿主/匿名不一致并打 `ROLLED-BACK-A`，整个宿主锁死到重启。
+  `stageAConsistent` 现对 target 侧套用与宿主侧**对称**的 requested 豁免；"提交了却没成功"的 target
+  依旧回滚。`StageARequestedScopeTest` 的旧期望按新契约翻转（失败形态写进注释），变异去掉豁免即变红。
+- **新增字段初值不可提取时不再"只补一半"**：`InitFixSliceExtractor` 的白名单拒掉真实存在的初值表达式
+  （Kotlin `?:` / `if` / `when` 的分支指令、以及部分非直线形态）时，旧行为是"重定义照常生效、补丁没有"，
+  存量实例上该字段停在类型零值 —— 对 Kotlin 的非空 `val` 就是"声明非空却读到 null"，NPE 出现在离热更
+  很远的位置。现在由批次门整类拒绝：日志 `[INITFIX-REFUSE] <class>: new field initializer cannot be
+  extracted (<field> -> <reason>) … RESTART to adopt this class`，跳过台账记
+  `INITFIX-UNEXPRESSIBLE-INIT`，对齐事务回滚、暂存补丁丢弃（新增
+  `InitFix.discardPending`：**不**把它记成 "redefine failed" 债务），本批因此 0 生效时也不会打成功行。
+  - 判据只认 `InitFix.UNEXPRESSIBLE_INIT_PREFIX` 这一族（"源码写了初值但提取不到"）；初值来自构造器
+    参数、或压根没写初值的字段保持原行为（默认零值本就是源码语义），不受影响。
+  - 单测 `InitFixUnexpressibleInitTest` 5 例（提取不到/其它拒绝/非新增字段/静态新增/已接受）；
+    探针 `:tests:initFixUnexpressibleProbe`（JBR 真机，26 断言）：R0 基线生效 → R1 拒绝且存量实例留在
+    旧版本、类定义未更新、无成功行 → R2 对照（常量初值 + 无初值字段）照常生效，证明不是一刀切拒绝。
+    变异：门恒空 → 探针 R1 全红 + 单测红；把"所有拒绝都算不可提取" → `otherRejectionsAreNotTreatedAsUnexpressible` 红。
+
+### Added
+
 - **摘要假成功与计数虚高**：`HotSwap successful: N classes redefined` 之前用的是"本批提交给
   `redefineClasses` 的定义个数"，其中混着仅因磁盘文件被重写而被重新读取、字节与运行期完全一致的类。
   真机读数（`tests/anon-field-shape-drill/evidence/retype-reject.txt`）：用户改的匿名类被后置布局校验

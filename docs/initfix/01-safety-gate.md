@@ -20,6 +20,25 @@
 - 覆盖提取期（`initialization skipped`）和闭包期（后续加工、依赖、成环、根构造器覆盖不全、指纹不一致）。
 - 新增拒绝路径时沿用这个出口，不要自建日志路径。
 
+## 1.5 批次级拒绝：初值表达式存在但切片提取不到
+
+字段级安全门拒掉一条真实存在的初值表达式时（分支指令、非直线形态），**不允许"重定义照常、补丁缺失"**：
+新字段表已经换上，而补丁生成不了，存量实例只能读到类型零值 —— 对 Kotlin 的非空 `val` 就是"声明非空却
+读到 null"，NPE 会出现在离热更很远的位置。
+
+因此批次门在 `finishBatchTransforms()` 之后、任何 `redefineClasses` 之前做一次整类判决：
+
+* 判据：`diff.addedInstanceFields` / `addedStaticFields` 中某个字段的决策为 `REJECTED`，且原因以
+  `InitFix.UNEXPRESSIBLE_INIT_PREFIX` 开头（"源码写了初值、但提取不到"这一族）。
+* 动作：整类移出本批（对齐事务回滚、批次字节撤销、暂存补丁丢弃）、跳过台账记
+  `INITFIX-UNEXPRESSIBLE-INIT`、日志点名字段与原因并提示重启。
+* **不属于**这一族的缺失不受影响：初值来自构造器参数、或字段压根没写初值，默认零值本身就是源码语义，
+  仍按字段级跳过处理。
+* 暂存补丁用 `InitFix.discardPending`（不是 `afterRedefineFailed`）：这个类从未进过 redefine，记成
+  "redefine failed; patch never applied" 会误导台账。
+
+读数与端到端证据见 `tests/src/InitFixUnexpressibleProbe.java`；实现状态以 `docs/status.md` 为准。
+
 ## 2. 效应检查
 
 ### 2.1 当前实现（P0 形态）

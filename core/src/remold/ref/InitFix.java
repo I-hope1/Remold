@@ -925,6 +925,58 @@ public class InitFix {
 	record ParamField(FieldNode field, int slot) { }
 
 	/**
+	 * "源码里确实写了初值，但切片提取不到这条表达式"这一族的固定前缀。
+	 *
+	 * <p>用它区分两种完全不同的缺失：<b>这一族</b>意味着初值表达式存在、只是超出白名单（分支等），
+	 * 存量实例必然只会读到零值 —— Kotlin 非空 {@code val} 会因此静默变成 {@code null}；而"初值来自
+	 * 构造器参数 / 无初值"属另一回事，默认零值本来就是源码语义。前缀只在这里定义一次。</p>
+	 */
+	public static final String UNEXPRESSIBLE_INIT_PREFIX = "no safe initialization expression";
+
+	/**
+	 * 本轮新增字段里「源码写了初值、但切片提取不到」的那些：{@code 字段 -> 原因}。
+	 *
+	 * <p><b>为什么必须由调用方据此拒绝整类</b>：这类字段的初值表达式真实存在（Kotlin
+	 * {@code listOf("a","b")} 的 vararg 数组构造、{@code ?:} / if / when 的分支），只是超出
+	 * {@code InitFixSliceExtractor} 的直线白名单。重定义照常生效、补丁却没有，存量实例上该字段
+	 * 停在类型零值 —— 对 Kotlin 的非空 {@code val} 就是"声明非空却读到 null"，NPE 会出现在离热更
+	 * 很远的地方。因此调用方必须把这类类整批拒绝并提示重启，而不是只补一半。</p>
+	 *
+	 * <p>只认 {@link InitFixSafetyGate#UNEXPRESSIBLE_INIT_PREFIX} 这一族：初值来自构造器参数、
+	 * 或压根没写初值的字段不在此列（默认零值本来就是源码语义）。</p>
+	 *
+	 * @param host 已加载宿主类
+	 * @param diff 本轮的类差异（只取 {@code addedInstanceFields} / {@code addedStaticFields}）
+	 * @return 字段名 -> 拒绝原因；无此类字段时返回空表
+	 */
+	public static Map<String, String> unexpressibleNewFieldInits(Class<?> host, ClassDiff diff) {
+		if (host == null) return Map.of();
+		return classifyUnexpressibleNewFieldInits(getLastReport(host), diff);
+	}
+
+	/** 纯函数形态（单测入口）：给定一份 {@link PatchReport} 与类差异，挑出不可提取初值的新增字段。 */
+	public static Map<String, String> classifyUnexpressibleNewFieldInits(PatchReport report, ClassDiff diff) {
+		if (report == null || diff == null) return Map.of();
+		Map<String, String> out = new LinkedHashMap<>();
+		collectUnexpressible(out, report.instanceFields(), diff.addedInstanceFields);
+		collectUnexpressible(out, report.staticFields(), diff.addedStaticFields);
+		return out;
+	}
+
+	private static void collectUnexpressible(Map<String, String> out,
+	                                         Map<String, FieldDecision> decisions,
+	                                         Set<String> addedFields) {
+		if (decisions == null || decisions.isEmpty() || addedFields == null || addedFields.isEmpty()) return;
+		for (String field : addedFields) {
+			FieldDecision decision = decisions.get(field);
+			if (decision == null || decision.status() != FieldStatus.REJECTED) continue;
+			String reason = decision.reason();
+			if (reason == null || !reason.startsWith(InitFix.UNEXPRESSIBLE_INIT_PREFIX)) continue;
+			out.put(field, reason);
+		}
+	}
+
+	/**
 	 * 一次构造器参数扫描的结果。
 	 * @param accepted 可用作参数回溯的槽位映射
 	 * @param rejected 被拒的槽位 -> 拒绝原因（按槽位记录，供 {@link InitFixSliceExtractor#checkSafe}
@@ -3978,6 +4030,14 @@ public class InitFix {
 
 	public static void afterRedefineFailed(Class<?> clazz) {
 		InitFixRuntimeDriver.afterRedefineFailed(clazz);
+	}
+
+	/**
+	 * 批次门整类拒绝时调用：丢掉该类的暂存补丁，但<b>不</b>把它记成"redefine 失败"。
+	 * 见 {@link InitFixRuntimeDriver#discardPending(Class)}。
+	 */
+	public static void discardPending(Class<?> clazz) {
+		InitFixRuntimeDriver.discardPending(clazz);
 	}
 
 	static String reinitHint(

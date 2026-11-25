@@ -245,7 +245,7 @@ final class InitFixSliceExtractor {
 			if (unsafeReason != null) {
 				Diag.warn("Field '" + f.name + "' initialization skipped: " + unsafeReason);
 				InitFixSafetyGate.recordReason(outReasons, f.name,
-				 "no safe initialization expression in " + method.name + method.desc
+				 InitFix.UNEXPRESSIBLE_INIT_PREFIX + " in " + method.name + method.desc
 				 + ": " + unsafeReason);
 				continue;
 			}

@@ -95,12 +95,21 @@ class StageARequestedScopeTest {
 		 "a requested anonymous class that failed stage A must still be rejected");
 	}
 
-	/** Relaxing the host must not relax a loaded anonymous target: it still needs an ok entry. */
+	/**
+	 * Mirror of L18, found on a real client: the host is rewritten (ghost + bridge insertion) while the
+	 * anonymous class file on disk is byte-identical, so the anonymous class is filtered out as Unchanged.
+	 * It is then neither requested nor ok; the old judgement demanded an ok entry and locked the whole
+	 * host group into a permanent ROLLED-BACK-A loop (restart required every round).
+	 *
+	 * <p>The exemption is symmetric with the host side: "not requested this round" means "keeps its old
+	 * bytes", which is exactly the expected state. A target that <em>was</em> requested but failed still
+	 * rolls the group back ({@link #requestedAnonMissingFromOkStillRollsBack}).</p>
+	 */
 	@Test
-	void loadedUnsubmittedAnonStillNeedsAnOkEntry() {
-		assertFalse(TwoPhaseCoordinator.stageAConsistent(
+	void unsubmittedAnonIsExemptLikeAnUnchangedHost() {
+		assertTrue(TwoPhaseCoordinator.stageAConsistent(
 		 HOST, Set.of(ANON), Set.of(HOST), Set.of(), Set.of(HOST, ANON), Set.of(HOST)),
-		 "only the unchanged host is exempt; a loaded anonymous target is still checked");
+		 "an anonymous class that was not submitted this round keeps its old bytes; that is consistent");
 	}
 
 	private static void assertFixturePrecondition(Class<?> host, Class<?> anon) {

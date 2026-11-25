@@ -147,6 +147,8 @@ final class BatchHotswapExecutor {
 		// 否则"零生效"会被误报成"没有改动"（假成功的另一面）。
 		Set<String> changedRawNames = new LinkedHashSet<>();
 		Set<String> changedNames = new LinkedHashSet<>();
+		// host -> 本轮类差异：InitFix 拒绝门要按"新增字段"精确筛选（见 dropUnexpressibleInitClasses）。
+		Map<Class<?>, ClassDiffUtil.ClassDiff> diffByHost = new IdentityHashMap<>();
 		// List<Class<?>>        unloadedClasses  = new ArrayList<>();
 		int skippedCount  = 0;
 		int injectedCount = 0;
@@ -801,6 +803,7 @@ final class BatchHotswapExecutor {
 							ClassDiffUtil.ensureFullClassNodes(diff, oldBytecode, newBytecode);
 						}
 						InitFix.transform(targetClass, newBytecode, diff);
+						diffByHost.put(targetClass, diff);
 						initFixNanos += System.nanoTime() - initFixT0;
 					} else {
 						log("[WARN] Cannot diff " + className + " (missing old bytecode). Proceeding with redefine.");
@@ -868,6 +871,10 @@ final class BatchHotswapExecutor {
 		}
 		InitFix.setBatchDefinitions(definitions);
 		InitFix.finishBatchTransforms();
+		// 新增字段写了初值、切片却提取不到（Kotlin vararg 集合工厂 / ?: / if / when）：
+		// 重定义照常生效而补丁缺失，存量实例上这些字段停在类型零值 —— Kotlin 的非空 val 会因此
+		// 静默变成 null。安全优先：整类移出本批并点名，提示重启，绝不产出"只补一半"的结果。
+		dropUnexpressibleInitClasses(definitions, newBatchBytes, classToPath, transactions, skips, diffByHost);
 		if (TWO_PHASE) {
 			for (ClassDefinition definition : definitions) {
 				if (InitFix.requiresTwoPhase(definition.getDefinitionClass())) {
@@ -1507,6 +1514,57 @@ final class BatchHotswapExecutor {
 			if (AnonClassAligner.isHostSuffixFamilyMember(hostName, cn)) out.add(cn);
 		}
 		return out;
+	}
+
+	/**
+	 * 拒绝门：新增字段的初值表达式存在、但 {@code InitFixSliceExtractor} 提取不到。
+	 *
+	 * <p>为什么整类拒绝而不是只跳过字段：重定义会把新字段表换上，而补丁生成不了，存量实例读到类型
+	 * 零值。对 Java 的原始类型这是"和源码语义一致"，对 Kotlin 的非空 {@code val} 就是"声明非空却
+	 * 读到 null"，NPE 出现在离热更很远的位置（{@code tests/ktfix} 实测：vararg 工厂与 elvis/when
+	 * 两支都是这个形态）。整类拒绝让损失止于"这个类需要重启"，而不是扩散成运行期空指针。</p>
+	 *
+	 * <p>只认 {@link InitFix#unexpressibleNewFieldInits} 判定出的那一族；初值来自构造器参数或无初值
+	 * 的字段不受影响。</p>
+	 */
+	private static void dropUnexpressibleInitClasses(List<ClassDefinition> definitions,
+	                                                Map<String, byte[]> newBatchBytes,
+	                                                Map<String, Path> classToPath,
+	                                                Map<String, AlignmentTransaction> transactions,
+	                                                RoundSkips skips,
+	                                                Map<Class<?>, ClassDiffUtil.ClassDiff> diffByHost) {
+		if (definitions.isEmpty() || diffByHost.isEmpty()) return;
+		List<ClassDefinition> kept = new ArrayList<>(definitions.size());
+		for (ClassDefinition def : definitions) {
+			Class<?> host = def.getDefinitionClass();
+			Map<String, String> refused = InitFix.unexpressibleNewFieldInits(host, diffByHost.get(host));
+			if (refused.isEmpty()) {
+				kept.add(def);
+				continue;
+			}
+			String hostName = host.getName();
+			StringBuilder detail = new StringBuilder();
+			for (Map.Entry<String, String> e : refused.entrySet()) {
+				if (detail.length() > 0) detail.append("; ");
+				detail.append(e.getKey()).append(" -> ").append(e.getValue());
+			}
+			warn("[INITFIX-REFUSE] " + hostName + ": new field initializer cannot be extracted ("
+			     + detail + "). This class is kept out of this batch — redefining it would leave the field"
+			     + " at its type default, which reads as null for a Kotlin non-null val."
+			     + " RESTART to adopt this class.");
+			skips.add(hostName, RoundSkips.verdict("INITFIX-UNEXPRESSIBLE-INIT", detail.toString(),
+				"restart to adopt this class"));
+			// 对齐结果一步都不许提交：类没进 redefine，事务却 commit 会把未生效字节变成基线（风险 15/16）。
+			AlignmentTransaction tx = transactions.remove(hostName);
+			if (tx != null) tx.rollback(true);
+			dropBatchClass(newBatchBytes, classToPath, hostName);
+			// 只丢暂存补丁：这个类根本没进 redefine，记成"redefine failed"债务是误导。
+			InitFix.discardPending(host);
+		}
+		if (kept.size() != definitions.size()) {
+			definitions.clear();
+			definitions.addAll(kept);
+		}
 	}
 
 	private static void dropBatchClass(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath, String cn) {

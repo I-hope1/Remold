@@ -2386,24 +2386,62 @@ public class LambdaAligner {
 	 */
 	private static boolean step2PassA(MatchContext ctx, List<SyntheticInfo> newGroup,
 	                                  List<SyntheticInfo> oldGroup) {
+		// 两段式（A1）：先让"能在旧组里命中唯一 PUT 锚点"的新候选全部配完，再让剩下的候选走既有回退。
+		//
+		// 为什么必须分两段：一个没有 PUT 消费端的新 lambda（Kotlin 构造器里的局部 val，消费端不是
+		// 字段写）在"同名 → 第一个合法候选"的兜底里会抢走旧组里被唯一 PUT 锚点指名的槽位——锚点候选
+		// 还没轮到，它的旧候选就已经被同名证据吃掉了，存量实例上的旧 CallSite 于是静默执行新语义。
+		// 两段之间不重置任何状态：第一段只是把"有硬身份证据"的对提上来，因此无锚点输入的配对能力
+		// （以及 renameMap 的稳定形态）不变——第二段的条件与择优顺序逐字保持原样。
+		boolean anchored = step2PassAAnchored(ctx, newGroup, oldGroup);
+		boolean fallback = step2PassAFallback(ctx, newGroup, oldGroup);
+		return anchored | fallback;
+	}
+
+	/**
+	 * PASS_A 第一段：只配"唯一 PUT 锚点在旧组里命中"的新候选。
+	 *
+	 * <p>准入条件与第二段同源（{@link #legalPassAOld}），唯一额外要求是
+	 * {@link #uniquePutAnchorPick} 非空：字段身份是硬证据，必须先于任何位置/同名推断落定。
+	 * 返回是否有新配对，供调用方的迭代收敛使用。</p>
+	 */
+	private static boolean step2PassAAnchored(MatchContext ctx, List<SyntheticInfo> newGroup,
+	                                          List<SyntheticInfo> oldGroup) {
 		boolean progressed = false;
 		for (SyntheticInfo ni : newGroup) {
 			if (ni.matched || !ni.renameable) continue;
 			if (ni.upDepth < 0) continue;                 // 未定稿：不参与
 			if (hasUnmatchedChild(ctx, ni)) continue;
 
-			List<SyntheticInfo> legalOld = new ArrayList<>();
-			for (SyntheticInfo oi : oldGroup) {
-				if (oi.matched || oi.ghost) continue;
-				if (!oi.renameable) continue;             // 与 ni 上的限制对称
-				if (ctx.isOldNameClaimed(oi)) continue;
-				if (oi.upDepth != ni.upDepth) continue;   // 深度必须相等
-				if (!sameNestingLevel(ni, oi)) continue;  // 形状必须相等
-				if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
-				if (!calleesPairTo(ni, oi)) continue;     // 必须满足结构证据（后代修改时的关键防护）
-				if (!fallbackPairingAllowed(ctx, ni, oi)) continue;
-				legalOld.add(oi);
-			}
+			List<SyntheticInfo> legalOld = legalPassAOld(ctx, ni, oldGroup);
+			if (legalOld.isEmpty()) continue;
+
+			SyntheticInfo anchorPick = uniquePutAnchorPick(ctx, ni, legalOld);
+			if (anchorPick == null) continue;             // 无锚点候选等第二段，不许抢锚点槽位
+
+			dbg(() -> "A-PASS(anchored) put-anchor ni=" + ni.name + " -> " + anchorPick.name
+			          + " consumer=" + ni.consumer);
+			pairPassA(ctx, ni, anchorPick);
+			progressed = true;
+		}
+		return progressed;
+	}
+
+	/**
+	 * PASS_A 第二段：剩余候选沿用原有回退（锚点 / 唯一严格最大重叠 / 同名 / 消费端 / 先到先得）。
+	 *
+	 * <p>第一段已经配对过的候选在这里因 {@code ni.matched} 被跳过；本段内部仍保留锚点优先级，
+	 * 使"第一段跑完后才变唯一"的锚点（例如旧候选被别的段释放）依旧先于位置推断生效。</p>
+	 */
+	private static boolean step2PassAFallback(MatchContext ctx, List<SyntheticInfo> newGroup,
+	                                          List<SyntheticInfo> oldGroup) {
+		boolean progressed = false;
+		for (SyntheticInfo ni : newGroup) {
+			if (ni.matched || !ni.renameable) continue;
+			if (ni.upDepth < 0) continue;                 // 未定稿：不参与
+			if (hasUnmatchedChild(ctx, ni)) continue;
+
+			List<SyntheticInfo> legalOld = legalPassAOld(ctx, ni, oldGroup);
 			if (legalOld.isEmpty()) continue;
 
 			// 内容证据优先：被调集合"唯一严格最大正交集"者胜出（平票/全零不走这里）。
@@ -2434,18 +2472,39 @@ public class LambdaAligner {
 			}
 			if (bestOld == null) continue;
 
-			dbg(() -> "A-PASS ni=" + ni.name + " depth=" + ni.upDepth + " shape=" + ni.shape
-			          + " oldCandidates=" + oldGroup.stream()
-			           .map(o -> o.name + ":d" + o.upDepth + ":" + o.shape
-			                     + (o.matched ? ":M" : "") + (o.ghost ? ":G" : "")).toList());
-			if (!ni.name.equals(bestOld.name) && ni.hash != bestOld.hash) {
-				warnPositionalMismatch(ctx, bestOld, ni.name, ni.desc);
-			}
-			pair(ctx, ni, bestOld, "PASS_A");
-			ctx.passAPairs++;
+			pairPassA(ctx, ni, bestOld);
 			progressed = true;
 		}
 		return progressed;
+	}
+
+	/** PASS_A 的合法旧候选集：两段共用，避免只改其中一段导致准入条件漂移。 */
+	private static List<SyntheticInfo> legalPassAOld(MatchContext ctx, SyntheticInfo ni,
+	                                                 List<SyntheticInfo> oldGroup) {
+		List<SyntheticInfo> legalOld = new ArrayList<>();
+		for (SyntheticInfo oi : oldGroup) {
+			if (oi.matched || oi.ghost) continue;
+			if (!oi.renameable) continue;             // 与 ni 上的限制对称
+			if (ctx.isOldNameClaimed(oi)) continue;
+			if (oi.upDepth != ni.upDepth) continue;   // 深度必须相等
+			if (!sameNestingLevel(ni, oi)) continue;  // 形状必须相等
+			if (!isSignatureCompatible(ctx.currentClass, oi, ni)) continue;
+			if (!calleesPairTo(ni, oi)) continue;     // 必须满足结构证据（后代修改时的关键防护）
+			if (!fallbackPairingAllowed(ctx, ni, oi)) continue;
+			legalOld.add(oi);
+		}
+		return legalOld;
+	}
+
+	/** PASS_A 的统一落账点（两段共用）：告警口径与计数器必须与旧实现逐字一致。 */
+	private static void pairPassA(MatchContext ctx, SyntheticInfo ni, SyntheticInfo bestOld) {
+		dbg(() -> "A-PASS ni=" + ni.name + " depth=" + ni.upDepth + " shape=" + ni.shape
+		          + " old=" + bestOld.name);
+		if (!ni.name.equals(bestOld.name) && ni.hash != bestOld.hash) {
+			warnPositionalMismatch(ctx, bestOld, ni.name, ni.desc);
+		}
+		pair(ctx, ni, bestOld, "PASS_A");
+		ctx.passAPairs++;
 	}
 
 	/**

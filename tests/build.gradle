@@ -1524,6 +1524,9 @@ def remoldAgentDcevmProbe = { String taskName, String mainClassName, String desc
 remoldAgentDcevmProbe("cacheSourceMatrixProbe", "CacheSourceMatrixProbe",
 	"sourceBytecodeCache real-path matrix: first load / ordinary redefine / weave keeps pre-weave bytes / multi-loader no overwrite")
 
+remoldAgentDcevmProbe("onReloadJvmStaticProbe", "OnReloadJvmStaticProbe",
+	"@JvmStatic @OnReload dispatch: the static forwarder and its instance target share one callback (fires once), while a real static body plus an unrelated instance callback still both fire")
+
 remoldAgentDcevmProbe("initFixUnexpressibleProbe", "InitFixUnexpressibleProbe",
 	"InitFix refusal gate: a new field whose initializer exists but cannot be sliced takes the class out of the batch (no silent null), while legal added fields still apply")
 

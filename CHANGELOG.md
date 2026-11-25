@@ -36,6 +36,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **UI 元素源码视图（`UiSource`，调试只读）**：`plugin-arc` 新增 `remold.uihook.UiSource` /
+  `SourceSnippet`，把 `CellPropertyRef` 记录的创建站点（host 类/方法/行号）解析成源码片段：
+  `UiSource.of(cell)` 默认返回目标行前后各 4 行上下文（`of(cell, context)` 可调），
+  `UiSource.of(element)` 按元素反查受追踪 Cell。片段带行号与 `>` 目标行标记；源码根取
+  `-Dremold.source_roots`（别名 `-Dremold.agent.source_roots`，按主机路径分隔符切分），未设置时
+  探测进程工作目录的 `src/main/java` 与 `src/main/kotlin`；解析不到时输出位置 + 原因，不抛异常。
+  前提是 `CellPropertyRef` 追踪已开启（模组侧 `CellPropertyRef.enable()`）；未开启或元素未经
+  Table/Cell 创建链绑定时返回带原因的片段。
+  `CellPropertyRef` 侧新增只读访问器 `identityOf` / `sourceFileOf` / `helperSourceFileOf` / `cellOf`，
+  创建站点记录新增栈帧 `SourceFile` 名。下游模组以 compileOnly 依赖 `plugin-arc` 调用。
+  `UiSourceViewTest` 9 用例（上下文窗口、首尾夹取、目标行标记、源码根解析、类名回退、站点反查、
+  未追踪 Cell 提示）。
 - **加载前沿与出生水位线（load frontier / birth watermark）**：把"代码何时被改"与"类何时被懒加载"分开记账，
   规格见 `docs/vcs/07-load-frontier-and-birth-watermark.md`。
   - `LoadFrontier`：单调水位线 + 有界出生队列（标量三元组），队列触限或哈希不可解析即进入

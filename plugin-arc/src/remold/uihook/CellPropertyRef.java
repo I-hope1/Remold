@@ -190,11 +190,11 @@ public class CellPropertyRef {
 
 	private record HostFrame(
 		String hostClass, String hostMethod, String hostDesc,
-		int line, String creatorName,
-		String helperClass, String helperMethod, int helperLine
+		int line, String creatorName, String fileName,
+		String helperClass, String helperMethod, int helperLine, String helperFileName
 	) {
-		HostFrame(String hostClass, String hostMethod, String hostDesc, int line, String creatorName) {
-			this(hostClass, hostMethod, hostDesc, line, creatorName, null, null, -1);
+		HostFrame(String hostClass, String hostMethod, String hostDesc, int line, String creatorName, String fileName) {
+			this(hostClass, hostMethod, hostDesc, line, creatorName, fileName, null, null, -1, null);
 		}
 	}
 
@@ -216,6 +216,8 @@ public class CellPropertyRef {
 		CellIdentity       id;
 		int                chainIdx;
 		List<PropertyCall> chain;
+		String             sourceFile;
+		String             helperSourceFile;
 		final Map<String, Integer> slotCursor = new HashMap<>();
 		Cell baseline;
 		Geometry16 snapshot;
@@ -348,6 +350,8 @@ public class CellPropertyRef {
 		} catch (Throwable ignored) { }
 
 		CellState st = new CellState(id, chainIdx, chain);
+		st.sourceFile = hf.fileName;
+		st.helperSourceFile = hf.helperFileName;
 		st.baseline = snap;
 		st.snapshot = snap;
 
@@ -555,7 +559,8 @@ public class CellPropertyRef {
 			String firstDesc = first.getDescriptor();
 
 			if (!isHelper(firstCls, firstName, firstDesc)) {
-				return new HostFrame(firstCls, firstName, firstDesc, first.getLineNumber(), creatorName);
+				return new HostFrame(firstCls, firstName, firstDesc, first.getLineNumber(), creatorName,
+				                     first.getFileName());
 			}
 
 			// 最内层 helper 帧（方法名 + 行号）
@@ -572,7 +577,8 @@ public class CellPropertyRef {
 
 				if (!isHelper(cls, name, desc)) {
 					return new HostFrame(cls, name, desc, f.getLineNumber(), creatorName,
-					                     helperCls, helperMethod, helperLine);
+					                     f.getFileName(), helperCls, helperMethod, helperLine,
+					                     first.getFileName());
 				}
 			}
 
@@ -1551,6 +1557,63 @@ public class CellPropertyRef {
 		}
 		return res;
 	}
+	//endregion
+
+	//region 调试视图（源码定位）
+
+	/**
+	 * Debug view: the creation site recorded for a tracked cell, or {@code null} when the cell
+	 * was never bound by the tracker (tracking disabled, or no creator call was observed).
+	 * Read-only entry point; it never takes part in a hot-swap decision.
+	 */
+	public static CellIdentity identityOf(Cell<?> cell) {
+		if (cell == null) return null;
+		synchronized (cellState) {
+			CellState st = cellState.get(cell);
+			return st == null || st == IGNORED_STATE ? null : st.id;
+		}
+	}
+
+	/**
+	 * Debug view: source file name of the cell's creation site (the stack frame's
+	 * {@code SourceFile} attribute), or {@code null} when unavailable.
+	 */
+	public static String sourceFileOf(Cell<?> cell) {
+		if (cell == null) return null;
+		synchronized (cellState) {
+			CellState st = cellState.get(cell);
+			return st == null || st == IGNORED_STATE ? null : st.sourceFile;
+		}
+	}
+
+	/**
+	 * Debug view: source file name of the innermost helper frame when the creator call went
+	 * through a helper, or {@code null}.
+	 */
+	public static String helperSourceFileOf(Cell<?> cell) {
+		if (cell == null) return null;
+		synchronized (cellState) {
+			CellState st = cellState.get(cell);
+			return st == null || st == IGNORED_STATE ? null : st.helperSourceFile;
+		}
+	}
+
+	/**
+	 * Debug view: the tracked cell that renders {@code element}, or {@code null}.
+	 * Linear scan over live tracked cells; intended for debug tooling only.
+	 */
+	public static Cell<?> cellOf(Element element) {
+		if (element == null) return null;
+		synchronized (cellState) {
+			for (Entry<Cell<?>, CellState> e : cellState.entrySet()) {
+				Cell<?> c = e.getKey();
+				if (c == null || e.getValue() == IGNORED_STATE) continue;
+				if (c.get() == element) return c;
+			}
+		}
+		return null;
+	}
+
 	//endregion
 
 	//region 属性与子元素更新

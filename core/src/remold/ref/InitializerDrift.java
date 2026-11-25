@@ -16,6 +16,7 @@ import org.objectweb.asm.tree.VarInsnNode;
 import remold.RemoldAgent;
 import remold.util.ClassIdentity;
 import remold.util.LibTool;
+import remold.util.Names;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -263,7 +264,7 @@ public final class InitializerDrift {
 
 	private static byte[] lookupBytes(String internalName, Map<String, byte[]> newBatchBytes,
 	                                   Map<String, byte[]> oldBytesByClass) {
-		String dot = internalName.replace('/', '.');
+		String dot = Names.external(internalName);
 		if (newBatchBytes != null) {
 			byte[] b = newBatchBytes.get(dot);
 			if (b == null) b = newBatchBytes.get(internalName);

@@ -549,7 +549,7 @@ final class LambdaCaptureBridge {
 	/**
 	 * 建桥的硬前提。任一不成立就退回幽灵桩（行为与引入本机制前完全一致）。
 	 */
-	private static boolean bridgeGatesHold(LambdaAligner.SyntheticInfo oi, LambdaAligner.SyntheticInfo ni) {
+	static boolean bridgeGatesHold(LambdaAligner.SyntheticInfo oi, LambdaAligner.SyntheticInfo ni) {
 		if (oi.captured == null || ni.captured == null) return false;
 		// 方向限制：
 		//  - 实例 → 静态：允许。这正是"删掉 this 引用"的形态（新方法体物理上读不到接收者），
@@ -562,6 +562,10 @@ final class LambdaCaptureBridge {
 		if (!Objects.equals(oi.samSig, ni.samSig)) return false;
 		if (!Objects.equals(oi.instSig, ni.instSig)) return false;
 		if (!layoutHolds(oi) || !layoutHolds(ni)) return false;
+		// 布局自检放宽了 primitive↔boxed，但**转发边界不放宽**：桥体按描述符原样把尾部实参压给目标，
+		// 两侧尾部严格不等就意味着要把 Integer 塞给 int 形参（VerifyError）。plan 与 spec 必须用同一
+		// 判据，否则会出现"算出了配对却建不出桥"的静默半成品。
+		if (!forwardedTailMatches(oi, ni)) return false;
 		// 空捕获表下任何"证明"都是空洞的：两侧都空，映射算出来是个空数组，证明通过却什么也没证。
 		// 这类 lambda 没有实参可搬，建桥没有任何意义，一律不建（必须放在按名字映射之前——
 		// 名字映射对 0 个捕获会返回一个合法的空数组，正好绕过等长闸）。
@@ -569,6 +573,22 @@ final class LambdaCaptureBridge {
 		// 这条也挡住了"零捕获 → 新增捕获"：老实例完全没有状态，谈"同一个 lambda"没有任何依据
 		// （LambdaAlignTortureTest 的"删掉中间层"就是靠这条不被误接成桥）。
 		return !oi.captured.isEmpty();
+	}
+
+	/** 两侧 SAM 尾参（桥体真正转发的实参）必须严格相同；返回类型同样严格。 */
+	private static boolean forwardedTailMatches(LambdaAligner.SyntheticInfo oi, LambdaAligner.SyntheticInfo ni) {
+		int oldTail = samTailCount(oi);
+		int newTail = samTailCount(ni);
+		if (oldTail != newTail) return false;
+		if (!Type.getReturnType(oi.desc).equals(Type.getReturnType(ni.desc))) return false;
+		return samTailMatches(oi.desc, ni.desc, oldTail);
+	}
+
+	/** impl 描述符里"捕获表之后那一段"的形参个数（捕获表含接收者时先剥掉）。 */
+	private static int samTailCount(LambdaAligner.SyntheticInfo info) {
+		int caps = info.captured.size() - (info.isStatic() ? 0 : 1);
+		int tail = Type.getArgumentTypes(info.desc).length - caps;
+		return tail < 0 ? -1 : tail;
 	}
 
 	/**
@@ -1240,7 +1260,7 @@ final class LambdaCaptureBridge {
 	 * {@code aload_0; indy (LC;)LRunnable;}，而 impl 是 {@code private void lambda$f$0()}
 	 * ——接收者不在描述符里。所以非 static 时必须先剥掉第一个捕获再拼。</p>
 	 */
-	private static boolean layoutHolds(LambdaAligner.SyntheticInfo info) {
+	static boolean layoutHolds(LambdaAligner.SyntheticInfo info) {
 		if (info.captured == null || info.instSig == null) return false;
 		List<String> caps = info.captured;
 		if (!info.isStatic()) {
@@ -1251,7 +1271,60 @@ final class LambdaCaptureBridge {
 		for (String c : caps) sb.append(c);
 		for (Type t : Type.getArgumentTypes(info.instSig)) sb.append(t.getDescriptor());
 		sb.append(')').append(Type.getReturnType(info.instSig).getDescriptor());
-		return sb.toString().equals(info.desc);
+		String expected = sb.toString();
+		if (expected.equals(info.desc)) return true;
+		// Kotlin 的原始类型特化：impl 描述符用原始 I/Z/J…，而 indy 的 instantiatedMethodType 是装箱
+		// 形态 (Ljava/lang/Integer;)Ljava/lang/Integer;。javac 从不产生这种分离，所以以前这里一律不等，
+		// 于是 (Int)->Int / ()->Int 这类 lambda 的两侧布局自检同时失败、整族退回幽灵桩。
+		// 只放宽"逐位可装箱等价"，其余（位数、原始↔原始、引用↔引用）一律照旧严格相等。
+		return boxingEquivalentLayout(expected, info.desc);
+	}
+
+	/**
+	 * 两个描述符是否"逐位可装箱等价"：参数个数与返回必须一一对应，任一位要么完全相等，要么是
+	 * primitive 与其包装类的配对。
+	 *
+	 * <p>刻意收得很窄：{@code (I)V} 与 {@code (J)V}、{@code (Ljava/lang/String;)V} 与
+	 * {@code (Ljava/lang/Object;)V} 都不等价 —— 桥体会按描述符原样转发实参，错的等价就是 VerifyError。</p>
+	 */
+	static boolean boxingEquivalentLayout(String a, String b) {
+		if (a == null || b == null) return false;
+		Type[] pa = Type.getArgumentTypes(a);
+		Type[] pb = Type.getArgumentTypes(b);
+		if (pa.length != pb.length) return false;
+		if (!boxingEquivalent(Type.getReturnType(a), Type.getReturnType(b))) return false;
+		for (int i = 0; i < pa.length; i++) {
+			if (!boxingEquivalent(pa[i], pb[i])) return false;
+		}
+		return true;
+	}
+
+	/** 两个类型要么相同，要么恰好是 primitive ↔ 它的包装类。 */
+	static boolean boxingEquivalent(Type a, Type b) {
+		if (a == null || b == null) return false;
+		if (a.equals(b)) return true;
+		return primitiveMatchesBoxed(a, b) || primitiveMatchesBoxed(b, a);
+	}
+
+	private static boolean primitiveMatchesBoxed(Type primitive, Type boxed) {
+		if (primitive.getSort() < Type.BOOLEAN || primitive.getSort() > Type.DOUBLE) return false;
+		if (boxed.getSort() != Type.OBJECT) return false;
+		return boxed(primitive).equals(boxed);
+	}
+
+	/** 仅用于比较：primitive → 其包装类类型；其它排序原样返回。 */
+	private static Type boxed(Type t) {
+		switch (t.getSort()) {
+			case Type.BOOLEAN:  return Type.getObjectType("java/lang/Boolean");
+			case Type.CHAR:     return Type.getObjectType("java/lang/Character");
+			case Type.BYTE:     return Type.getObjectType("java/lang/Byte");
+			case Type.SHORT:    return Type.getObjectType("java/lang/Short");
+			case Type.INT:      return Type.getObjectType("java/lang/Integer");
+			case Type.FLOAT:    return Type.getObjectType("java/lang/Float");
+			case Type.LONG:     return Type.getObjectType("java/lang/Long");
+			case Type.DOUBLE:   return Type.getObjectType("java/lang/Double");
+			default:            return t;
+		}
 	}
 
 	/**

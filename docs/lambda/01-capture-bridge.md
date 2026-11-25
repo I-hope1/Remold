@@ -30,6 +30,24 @@ VM 不会按名字错配到同名的新方法上；且异常抛在调用点之�
 
 ---
 
+## 1.1 布局自检：primitive ↔ boxed 的 SAM 边界
+
+桥只有在"捕获表 ++ 实例化 SAM 形参 == impl 描述符"这条布局自检成立时才建；不成立就说明该调用点的
+布局另有蹊跷，此时任何参数映射都是猜的。
+
+**Kotlin 原始类型特化**是这条自检唯一的合法例外：`(Int) -> Int` 的 impl 描述符是原始的 `(I)I`，而
+indy 的 `instantiatedMethodType` 仍是装箱的 `(Ljava/lang/Integer;)Ljava/lang/Integer;`（`Function1<Integer, Integer>`）。
+javac 从不把这两者拆开，所以旧判据在该族上**两侧同时**不成立，整族退回幽灵桩
+（`CAPTURE-BRIDGE-SKIPPED … matchCount=0`）。
+
+判据因此改成：逐位**相等**，或恰为 primitive ↔ 它的包装类（`I/Integer`、`Z/Boolean`、`J/Long`…）。
+位数、原始↔原始、引用↔引用（含 `Object` 拓宽）一律**不**等价 —— 布局证明只允许装箱这一种差异。
+
+**放宽只发生在布局证明里，转发边界仍然严格**：桥体按描述符原样把尾部实参压给目标，若两侧尾参类型
+不等价（例如旧 `(I)V` 对新 `(Ljava/lang/Integer;)V`），把 `Integer` 压进 `int` 形参就是 `VerifyError`。
+`bridgeGatesHold` 因此额外要求同元数、同返回、同尾参类型均**严格相等**；配对决策与桥体生成必须用同一
+判据，否则会出现"算出了配对却建不出桥"的静默半成品。
+
 ## 2. 边界：删除 + 「可证明的新增」
 
 **删除方向可证**：新描述符的形参表是旧形参表的<b>子序列</b>，被删掉的槽位在新方法体里

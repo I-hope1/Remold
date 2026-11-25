@@ -89,7 +89,7 @@ public final class InitializerDrift {
 			if (oldBytes == null) continue;
 			Drift drift;
 			try {
-				drift = detectDetailed(oldBytes, newBytes, reinitFields);
+				drift = detectDetailed(oldBytes, newBytes, reinitFields, superChain(newBytes, newBatchBytes, oldBytesByClass));
 			} catch (Throwable t) {
 				continue;
 			}
@@ -176,14 +176,27 @@ public final class InitializerDrift {
 	}
 
 	public static Drift detectDetailed(byte[] oldBytes, byte[] newBytes, Set<String> reinitFields) {
+		return detectDetailed(oldBytes, newBytes, reinitFields, Set.of());
+	}
+
+	/**
+	 * @param superNames 宿主可解析的祖先链（内部名，含自身）。用来证明"这个 PUTFIELD 写的是继承字段"；
+	 *                   证明不了的一律按"别人的容器"跳过，绝不猜成 inherited。
+	 */
+	static Drift detectDetailed(byte[] oldBytes, byte[] newBytes, Set<String> reinitFields,
+	                            Set<String> superNames) {
 		ClassNode oldNode = read(oldBytes);
 		ClassNode newNode = read(newBytes);
 		if (oldNode == null || newNode == null) return new Drift(List.of(), List.of(), List.of());
 
 		Map<String, FieldNode> oldFields = fields(oldNode);
 		Map<String, FieldNode> newFields = fields(newNode);
-		Map<String, Set<String>> oldSlices = slices(oldNode, oldFields);
-		Map<String, Set<String>> newSlices = slices(newNode, newFields);
+		WriteSlices oldScan = writeSlices(oldNode, oldFields);
+		WriteSlices newScan = writeSlices(newNode, newFields);
+		Map<String, Set<String>> oldSlices = oldScan.slices();
+		Map<String, Set<String>> newSlices = newScan.slices();
+		Map<String, Set<String>> writeOwners = new HashMap<>(oldScan.owners());
+		newScan.owners().forEach((k, v) -> writeOwners.computeIfAbsent(k, x -> new LinkedHashSet<>()).addAll(v));
 
 		List<String> changed = new ArrayList<>();
 		List<String> inherited = new ArrayList<>();
@@ -207,18 +220,66 @@ public final class InitializerDrift {
 			boolean hostAnnotated = reinitFields.contains(newNode.name + "." + name);
 			if (hostDeclared && hostAnnotated) continue; // explicit host-level reinit: no warning
 
-			boolean parentAnnotated = reinitFields.stream().anyMatch(s -> s.endsWith("." + name));
-			if (!hostDeclared && parentAnnotated) {
-				inheritedReinit.add(name);
-			} else if (!hostDeclared) {
-				inherited.add(name);
-			} else {
-				changed.add(name);
+			if (!hostDeclared) {
+				// 不是本类声明的字段：只有当写它的 owner 确实是本类的祖先时才算"继承字段"。
+				// 证明不了（Kotlin 捕获盒 Ref$IntRef.element、其它第三方容器）就跳过 ——
+				// 那些写入根本不是"本类初值"，报成 inherited 只会误导用户去动父类。
+				Set<String> owners = writeOwners.getOrDefault(name, Set.of());
+				boolean inheritedWrite = false;
+				boolean inheritedAnnotated = false;
+				for (String owner : owners) {
+					if (!superNames.contains(owner)) continue;
+					inheritedWrite = true;
+					if (reinitFields.stream().anyMatch(r -> r.endsWith("." + name))) inheritedAnnotated = true;
+				}
+				if (!inheritedWrite) continue;
+				if (inheritedAnnotated) inheritedReinit.add(name); else inherited.add(name);
+				continue;
 			}
+			changed.add(name);
 		}
 		return new Drift(changed, inherited, inheritedReinit);
 	}
 
+
+	/**
+	 * 宿主可解析的祖先链（内部名，含自身）。链在某个祖先取不到字节时就停在那里 —— 证明不了的祖先
+	 * 不会让"继承"判定成立（{@link #detectDetailed} 因此只会漏报，不会误报）。
+	 */
+	static Set<String> superChain(byte[] hostBytes, Map<String, byte[]> newBatchBytes,
+	                              Map<String, byte[]> oldBytesByClass) {
+		ClassNode host = read(hostBytes);
+		if (host == null) return Set.of();
+		Set<String> out = new LinkedHashSet<>();
+		out.add(host.name);
+		String next = host.superName;
+		while (next != null && out.add(next)) {
+			byte[] bytes = lookupBytes(next, newBatchBytes, oldBytesByClass);
+			ClassNode node = read(bytes);
+			next = node == null ? null : node.superName;
+		}
+		return out;
+	}
+
+	private static byte[] lookupBytes(String internalName, Map<String, byte[]> newBatchBytes,
+	                                   Map<String, byte[]> oldBytesByClass) {
+		String dot = internalName.replace('/', '.');
+		if (newBatchBytes != null) {
+			byte[] b = newBatchBytes.get(dot);
+			if (b == null) b = newBatchBytes.get(internalName);
+			if (b != null) return b;
+		}
+		if (oldBytesByClass != null) {
+			byte[] b = oldBytesByClass.get(dot);
+			if (b == null) b = oldBytesByClass.get(internalName);
+			if (b != null) return b;
+		}
+		try {
+			return RemoldAgent.getRuntimeBytecode(dot);
+		} catch (Throwable t) {
+			return null;
+		}
+	}
 
 	private static ClassNode read(byte[] bytes) {
 		if (bytes == null || bytes.length == 0) return null;
@@ -266,7 +327,21 @@ public final class InitializerDrift {
 	}
 
 	private static Map<String, Set<String>> slices(ClassNode node, Map<String, FieldNode> fields) {
+		return writeSlices(node, fields).slices();
+	}
+
+	/**
+	 * {@code 字段名 -> 写入表达式集合} 加上 {@code 字段名 -> PUTFIELD owner 集合}。
+	 *
+	 * <p>owner 是判"这是本类自己的字段、真继承来的字段、还是别人的容器"的唯一依据：
+	 * Kotlin 把捕获的 {@code var} 包在 {@code kotlin.jvm.internal.Ref$IntRef} 里，宿主 {@code <init>} 里
+	 * 可能就有写 {@code Ref$IntRef.element} 的指令，而那个字段既不属于本类也不属于任何父类。</p>
+	 */
+	private record WriteSlices(Map<String, Set<String>> slices, Map<String, Set<String>> owners) { }
+
+	private static WriteSlices writeSlices(ClassNode node, Map<String, FieldNode> fields) {
 		Map<String, Set<String>> out = new HashMap<>();
+		Map<String, Set<String>> owners = new HashMap<>();
 		for (MethodNode m : node.methods) {
 			if (!"<init>".equals(m.name) || m.instructions == null) continue;
 			List<AbstractInsnNode> insns = new ArrayList<>();
@@ -279,9 +354,10 @@ public final class InitializerDrift {
 				if (fi.name.startsWith("this$") || fi.name.startsWith("val$")) continue;
 				String slice = slice(insns, i);
 				if (!slice.isEmpty()) out.computeIfAbsent(fi.name, k -> new LinkedHashSet<>()).add(slice);
+				owners.computeIfAbsent(fi.name, k -> new LinkedHashSet<>()).add(fi.owner);
 			}
 		}
-		return out;
+		return new WriteSlices(out, owners);
 	}
 
 	/** Collect the write expression from the previous statement boundary to the PUTFIELD. */

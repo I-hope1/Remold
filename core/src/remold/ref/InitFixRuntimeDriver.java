@@ -78,6 +78,24 @@ final class InitFixRuntimeDriver {
 		}
 	}
 
+	/**
+	 * 类根本没有进 {@code redefineClasses}（被批次门整类拒绝）：只丢暂存补丁，<b>不</b>写
+	 * "redefine failed; patch never applied" 债务。
+	 *
+	 * <p>与 {@link #afterRedefineFailed} 的区别就是"有没有尝试过"：真失败说明类结构已经推进、
+	 * 计划随时作废，必须记账；而整类被拒时 JVM 里什么都没变，下一轮会重新判定并重新生成计划，
+	 * 记账只会让台账里多出一条误导性的"补丁失败"。计划期已记的"未补字段"记录保持不动。</p>
+	 */
+	static void discardPending(Class<?> clazz) {
+		if (clazz == null) return;
+		PendingPatch dropped = PENDING.remove(clazz);
+		if (dropped == null) return;
+		// 类没重定义 ⇒ 本轮什么都没写进去：作废"已应用"指纹，下一轮必须重新判定。
+		reinitAppliedClear(clazz);
+		log("Dropped pending field init patch for " + clazz.getName()
+		    + " (the class was kept out of the batch by a gate; nothing was redefined)");
+	}
+
 	static void afterRedefineFailed(Class<?> clazz) {
 		if (clazz == null) return;
 		PendingPatch dropped = PENDING.remove(clazz);

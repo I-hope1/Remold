@@ -1524,6 +1524,9 @@ def remoldAgentDcevmProbe = { String taskName, String mainClassName, String desc
 remoldAgentDcevmProbe("cacheSourceMatrixProbe", "CacheSourceMatrixProbe",
 	"sourceBytecodeCache real-path matrix: first load / ordinary redefine / weave keeps pre-weave bytes / multi-loader no overwrite")
 
+remoldAgentDcevmProbe("initFixUnexpressibleProbe", "InitFixUnexpressibleProbe",
+	"InitFix refusal gate: a new field whose initializer exists but cannot be sliced takes the class out of the batch (no silent null), while legal added fields still apply")
+
 remoldAgentDcevmProbe("layoutRejectRecoverProbe", "LayoutRejectRecoverProbe",
 	"LayoutGate reject -> next-round recover E2E: reject keeps live state/caches intact, no pending poison, next legal round applies")
 

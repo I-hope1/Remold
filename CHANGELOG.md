@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Kotlin `PASS_A` 锚点被无锚点候选抢走**：构造器里新插入一个没有 PUT 消费端的 lambda、而旧组里另有
+  被唯一 PUT 字段锚点指名的 lambda 时，单趟遍历会先让无锚点候选落到"同名 → 第一个合法候选"的兜底，
+  把锚点槽位吃掉；随后锚点候选只能另找旧槽，存量实例上的旧 CallSite 于是静默执行新语义（`111 → 1004`）。
+  `step2PassA` 拆成两段：先跑完全部能在旧组命中**唯一** PUT 锚点的候选（`step2PassAAnchored`），再让其余
+  候选走原有回退（`step2PassAFallback`，条件与择优顺序逐字保留）。准入与落账抽成 `legalPassAOld` /
+  `pairPassA` 共用，`hasUnmatchedChild`、`upDepth<0`、深度/shape/签名/callee 证据门与 `passAPairs` 计数不变。
+  证据：`LambdaAlignerPassAOrderTest`（两种声明顺序 + 确定性 + 无锚点回退对照），变异移除两段式即红。
+  实测补充：javac 夹具里 PASS_A 按**槽号倒序**遍历，所以"无锚点声明在前"反而侥幸正确，真正复现缺陷的是
+  "锚点候选在前、无锚点候选在后"；两种顺序现都被锁死。
+- **Kotlin 原始类型 lambda 的捕获桥全灭**：`(Int) -> Int` / `() -> Int` 的 impl 描述符是原始的 `(I)I`，
+  而 indy 的 `instantiatedMethodType` 是装箱的 `(Ljava/lang/Integer;)Ljava/lang/Integer;`；javac 从不产生
+  这种分离，于是"捕获表 ++ 实例化 SAM 形参 == impl 描述符"这条布局自检对该族**两侧同时**不成立，桥全部
+  退回幽灵桩（`CAPTURE-BRIDGE-SKIPPED … matchCount=0`）。`layoutHolds` 现接受逐位"相等或 primitive↔包装类"
+  的等价，其余（位数、原始↔原始、引用↔引用）一律照旧严格；放宽只发生在布局证明里 —— `bridgeGatesHold`
+  另加一条**转发边界严格**校验（同元数、同返回、同尾参类型），避免把 `Integer` 压进 `int` 形参（那是
+  VerifyError 而非"少建一座桥"）。证据：`LambdaCaptureBridgeBoxingLayoutTest` 8 例 + 两处 logic 变异击杀。
+- **`INIT-DRIFT` 把别人的容器当成继承字段**：Kotlin 捕获的 `var` 编译成 `kotlin.jvm.internal.Ref$IntRef`，
+  宿主 `<init>` 里会有写 `Ref$IntRef.element` 的指令；该字段既非本类声明也非继承，旧判据"非本类声明即继承"
+  却打出 `inherited field initializer changed but will NOT be replayed: element`，把用户引向无关的父类。
+  切片扫描现在记录每条 `PUTFIELD` 的 owner，并解析宿主的可证祖先链（批次字节 → 运行期字节）；只有写入者是
+  祖先时才按 `inherited` 报，证明不了一律静默（这是告警面，宁可漏报不可错报）。可证的 double-brace / 子类
+  写父类字段与父类 `@RemoldReinit` 两段文案保持原样。证据：`InitializerDriftOwnerTest` 4 例 + logic 变异击杀。
+
+### Added
+
 - **Kotlin 宿主/匿名两阶段锁死**：宿主类累计 ghost + bridge 之后，`compileKotlin` 每轮都会重新输出宿主
   `.class`（内存字节与磁盘不同 ⇒ 进 Stage A），而匿名类 `.class` 磁盘字节未变、被过滤成 Unchanged，
   于是既不在 `requested` 也不在 `ok`。旧判据要求"每个已加载 target 都必须在 ok 里"，每轮都判

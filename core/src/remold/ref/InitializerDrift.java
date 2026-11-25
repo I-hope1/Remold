@@ -169,7 +169,9 @@ public final class InitializerDrift {
 	}
 
 	public static List<String> detect(byte[] oldBytes, byte[] newBytes) {
-		Drift d = detectDetailed(oldBytes, newBytes, Set.of());
+		// 生产语义：祖先链从"已加载类字节"解析（运行期父类一定在）。直接调用方（探针/单测）手上若有父类
+		// 字节，用带 superNames 的重载显式传入，否则"继承"判定证明不了、按哨兵静默。
+		Drift d = detectDetailed(oldBytes, newBytes, Set.of(), superChain(newBytes, Map.of(), Map.of()));
 		List<String> all = new ArrayList<>(d.changed());
 		all.addAll(d.inherited());
 		all.addAll(d.inheritedReinit());

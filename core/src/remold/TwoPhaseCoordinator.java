@@ -280,6 +280,13 @@ final class TwoPhaseCoordinator {
 		if (targets == null) return true;
 		for (String target : targets) {
 			if (injected != null && injected.contains(target)) continue;
+			// 与宿主侧**对称**的豁免：本轮没有提交它的匿名类，保持旧字节就是一致状态。
+			// 真机反例（Kotlin 宿主 7 个 ghost + 1 个 bridge 之后）：compileKotlin 重新输出宿主
+			// .class（因内存字节与磁盘不同而进 Stage A），而匿名类 .class 磁盘字节未变、被过滤成
+			// Unchanged ⇒ 它不在 requested 也不在 ok。旧判据仍要求它出现在 ok 里，于是每一轮都判
+			// 宿主/匿名不一致并打出 ROLLED-BACK-A，把整个宿主锁死到重启。
+			// 反之"提交了却没成功"的匿名类仍必须回滚（requested 含被过滤前的全部类）。
+			if (requested != null && !requested.contains(target)) continue;
 			if (loaded != null && loaded.contains(target) && !ok.contains(target)) return false;
 		}
 		return true;

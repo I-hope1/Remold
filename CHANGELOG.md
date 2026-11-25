@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`@JvmStatic @OnReload` 双触发**：`companion object` 里的 `@JvmStatic @OnReload fun ping()` 在字节码上出现两次
+  ——外层类的静态转发器 + 它委派的 `Companion` 实例方法。派发按类遍历已标注方法，于是同一次热更里回调体执行
+  两遍（探针实测 `actual=2`）；重建缓存、翻转标志一类的回调会把工作做两遍。派发现在按**实现**去重
+  （`内部名#name#desc`，批次级集合）：静态成员若方法体是"取伴生对象 → 调同名同描述符"的纯转发器，则记下
+  **被调方**的实现键，目标类自己派发时发现键已被占而跳过；实例派发走同一集合，顺序无关；调用抛异常会释放
+  键（"没跑成"不算"跑过了"）。转发器判据刻意收窄：只有一条 INVOKE、同名同描述符、无字段写、无跳转。
+  证据：`:tests:onReloadJvmStaticProbe`（JBR，8 断言）—— R0 必须恰好 1 次（关掉去重实测 2 次），R1 对照
+  保留"真静态体 + 无关实例回调"各一次；revert 变异击杀。
+- **kotlinc 形态的捕获桥端到端实证**（上一版只到谓词单测）：`impl (III)I` + `samMethodType (Object)Object` +
+  `instantiatedMethodType (Integer)Integer` 的夹具在真实重定义里能建出桥，旧 lambda 经桥进入 v2 实现
+  （`8 → 11`，且断言了 `BRIDGE` 事件，排除"孤儿体保留恰好看起来正确"）。红色基线（关掉装箱等价）下旧 lambda
+  停在旧体（`8`）、不建桥、2 条断言红。夹具特意用 `(int, String)` 两种不同类型的捕获：同类捕获会让子序列映射
+  歧义、桥被正确拒绝，那样探针会为错误的原因变绿。
+
+### Added
+
 - **Kotlin `PASS_A` 锚点被无锚点候选抢走**：构造器里新插入一个没有 PUT 消费端的 lambda、而旧组里另有
   被唯一 PUT 字段锚点指名的 lambda 时，单趟遍历会先让无锚点候选落到"同名 → 第一个合法候选"的兜底，
   把锚点槽位吃掉；随后锚点候选只能另找旧槽，存量实例上的旧 CallSite 于是静默执行新语义（`111 → 1004`）。

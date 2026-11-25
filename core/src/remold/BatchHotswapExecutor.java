@@ -20,6 +20,12 @@ import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
+import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.JumpInsnNode;
+import org.objectweb.asm.tree.LookupSwitchInsnNode;
+import org.objectweb.asm.tree.MethodInsnNode;
+import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TableSwitchInsnNode;
 
 import java.io.*;
 import java.lang.instrument.*;
@@ -1311,6 +1317,9 @@ final class BatchHotswapExecutor {
 		               + " class(es) in one heap walk (" + ms + " ms)");
 	}
 
+	/** 本轮 {@code @OnReload} 已经跑过的实现键：{@code internalOwner#name#desc}。 */
+	private static final Set<String> RELOAD_INVOKED = ConcurrentHashMap.newKeySet();
+
 	private static final byte[] ON_RELOAD_DESC_BYTES =
 		"Lremold/annotation/OnReload;".getBytes(StandardCharsets.US_ASCII);
 
@@ -1322,6 +1331,10 @@ final class BatchHotswapExecutor {
 	 */
 	static void processAnnotations(List<ClassDefinition> definitions) {
 		if (definitions == null || definitions.isEmpty()) return;
+		// 本轮已派发的"实现"（owner#name#desc）。@JvmStatic 让同一个 Kotlin 函数同时以静态转发器和
+		// 实例方法两种身份带着 @OnReload 出现，按类派发就会执行两次；集合的键是**实现**而不是入口，
+		// 于是转发器与它的目标共用同一个键，谁先跑谁生效。
+		RELOAD_INVOKED.clear();
 		for (ClassDefinition def : definitions) {
 			Class<?> clazz = def.getDefinitionClass();
 			if (clazz == null) continue;
@@ -1332,6 +1345,64 @@ final class BatchHotswapExecutor {
 			}
 			postToMain(() -> processAnnotationsInternal(clazz));
 		}
+	}
+
+	/** 一个方法的"实现"键：{@code owner#name#desc}（owner 用内部名，避免点/斜杠两种写法分裂）。 */
+	private static String implementationKey(Class<?> owner, Method m) {
+		// 用 MethodType 拿 JVM 描述符：这里的 Type 是 java.lang.reflect.Type（同一文件里有 reflector 用），
+		// 直接用 ASM 的 Type.getMethodDescriptor 会被遮蔽。
+		String desc = MethodType.methodType(m.getReturnType(), m.getParameterTypes()).toMethodDescriptorString();
+		return Names.internal(owner.getName()) + "#" + m.getName() + "#" + desc;
+	}
+
+	/**
+	 * 若 {@code m} 是 {@code @JvmStatic} 生成的**纯转发器**，返回它委派的实现键；否则 {@code null}。
+	 *
+	 * <p>判据刻意收窄：方法体除返回外只有一条 INVOKE，且被调方法的 owner+name+desc 与本方法同名同签名
+	 * （Kotlin 的 {@code object} 转发器调 {@code Foo.reload()}，{@code companion object} 的转发器调
+	 * {@code Foo$Companion.reload()}）。有其它指令（算术、字段写、分支）就不是转发器，绝不按名字猜。</p>
+	 */
+	private static String forwarderTargetKey(Class<?> clazz, Method m) {
+		if (m.getParameterCount() != 0) return null;
+		byte[] bytes = RemoldAgent.getRuntimeBytecode(clazz.getName());
+		if (bytes == null) return null;
+		ClassNode node = new ClassNode();
+		try {
+			new ClassReader(bytes).accept(node, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+		} catch (Throwable t) {
+			return null;
+		}
+		String desc = MethodType.methodType(m.getReturnType(), m.getParameterTypes()).toMethodDescriptorString();
+		for (MethodNode mn : node.methods) {
+			if (!mn.name.equals(m.getName()) || !mn.desc.equals(desc)) continue;
+			String calleeOwner = null;
+			int invokes = 0;
+			for (AbstractInsnNode insn : mn.instructions) {
+				int op = insn.getOpcode();
+				if (op < 0 || op == Opcodes.RETURN || op == Opcodes.IRETURN || op == Opcodes.ARETURN
+				    || op == Opcodes.LRETURN || op == Opcodes.FRETURN || op == Opcodes.DRETURN) {
+					continue;
+				}
+				if (insn instanceof MethodInsnNode mi) {
+					invokes++;
+					if (invokes > 1) return null;
+					if (!mi.name.equals(m.getName()) || !mi.desc.equals(desc)) return null;
+					calleeOwner = mi.owner;
+					continue;
+				}
+				if (insn.getOpcode() == Opcodes.GETFIELD || insn.getOpcode() == Opcodes.PUTFIELD
+				    || insn.getOpcode() == Opcodes.PUTSTATIC) {
+					return null;                     // 写了字段：有副作用，不是纯转发器
+				}
+				if (insn instanceof JumpInsnNode || insn instanceof TableSwitchInsnNode
+				    || insn instanceof LookupSwitchInsnNode) {
+					return null;
+				}
+			}
+			if (invokes != 1 || calleeOwner == null) return null;
+			return calleeOwner + "#" + m.getName() + "#" + desc;
+		}
+		return null;
 	}
 
 	static void processAnnotationsInternal(Class<?> clazz) {
@@ -1352,10 +1423,26 @@ final class BatchHotswapExecutor {
 		info("[Reload] Found @OnReload on " + clazz);
 
 		for (Method m : staticMethods) {
+			// @JvmStatic 转发器：方法体只是"取单例/伴生对象 → 调同名同描述符的方法"。它的目标才是实现，
+			// 两边共用一个实现键，因此只执行一次（见 RELOAD_INVOKED 的注释）。
+			String forwardKey = forwarderTargetKey(clazz, m);
+			String ownKey = implementationKey(clazz, m);
+			if (forwardKey != null && !RELOAD_INVOKED.add(forwardKey)) {
+				if (DEBUG) log("[Reload] Skipping @OnReload static forwarder " + m.getName()
+				               + " on " + clazz.getName() + ": its target already ran this round");
+				continue;
+			}
+			if (forwardKey == null && !RELOAD_INVOKED.add(ownKey)) {
+				if (DEBUG) log("[Reload] Skipping @OnReload static method " + m.getName()
+				               + " on " + clazz.getName() + ": already ran this round");
+				continue;
+			}
 			try {
 				m.invoke(null);
 				if (DEBUG) log("[Reload] Invoked @OnReload static method: " + m.getName());
 			} catch (Throwable e) {
+				// 调用失败要放掉键，否则下一轮会把"没跑成"当成"跑过了"。
+				RELOAD_INVOKED.remove(forwardKey != null ? forwardKey : ownKey);
 				error("Error invoking static @OnReload method " + m.getName() + " on " + clazz.getName(), e);
 			}
 		}
@@ -1410,13 +1497,24 @@ final class BatchHotswapExecutor {
 			if (instanceMethods.size() == 1) {
 				Method singleMethod = instanceMethods.get(0);
 				MethodHandle singleHandle = instanceHandles[0];
-				for (Object obj : instances) {
-					invokeReloadMethod(obj, singleMethod, singleHandle);
+				if (!RELOAD_INVOKED.add(implementationKey(clazz, singleMethod))) {
+					if (DEBUG) log("[Reload] Skipping instance @OnReload " + singleMethod.getName()
+					               + " on " + clazz.getName() + ": already ran this round");
+				} else {
+					for (Object obj : instances) {
+						invokeReloadMethod(obj, singleMethod, singleHandle);
+					}
 				}
 			} else {
-				for (Object obj : instances) {
-					for (int i = 0; i < instanceMethods.size(); i++) {
-						invokeReloadMethod(obj, instanceMethods.get(i), instanceHandles[i]);
+				for (int i = 0; i < instanceMethods.size(); i++) {
+					Method m = instanceMethods.get(i);
+					if (!RELOAD_INVOKED.add(implementationKey(clazz, m))) {
+						if (DEBUG) log("[Reload] Skipping instance @OnReload " + m.getName()
+						               + " on " + clazz.getName() + ": already ran this round");
+						continue;
+					}
+					for (Object obj : instances) {
+						invokeReloadMethod(obj, m, instanceHandles[i]);
 					}
 				}
 			}

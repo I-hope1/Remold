@@ -127,6 +127,8 @@ jobs:
 
   p05-probe:
     name: P0.5 Probe (JBR ${{ matrix.jbr }})
+    # 同 ci.yml：复用 build-native 产物，避免每个矩阵腿现拉一遍 zig 工具链。
+    needs: build-native
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -163,10 +165,11 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Build native libtool (Linux x64)
-        run: |
-          export JAVA_HOME="$JAVA_HOME_25_X64"
-          bash scripts/build-native.sh linux-x64
+      - name: Download Native Libraries
+        uses: actions/download-artifact@v7
+        with:
+          name: native-libraries
+          path: core/libs
 
       - name: Run P0.5 probe
         run: |
@@ -201,12 +204,30 @@ jobs:
           distribution: temurin
           java-version: '25'
 
+      # 与 ci.yml 同 key：工具链只随 zig 版本变，编译缓存随 C++ 源码变。
+      - name: Cache zig toolchain
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/remold-zig-0.17.1
+          key: zig-toolchain-${{ runner.os }}-0.17.1-v1
+
+      - name: Cache zig compile cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/remold-zig-global
+          key: zig-cache-${{ runner.os }}-0.17.1-${{ hashFiles('core/cpp/**', 'scripts/build-native.sh') }}
+          restore-keys: |
+            zig-cache-${{ runner.os }}-0.17.1-
+
       - name: Snapshot checked-in native libraries
         run: |
           rm -rf /tmp/checked-in-libs
           cp -r core/libs /tmp/checked-in-libs
 
       - name: Build all native libraries
+        env:
+          ZIG_CACHE_DIR: ${{ runner.temp }}/remold-zig-0.17.1
+          ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/remold-zig-global
         run: |
           export JAVA_HOME="$JAVA_HOME_25_X64"
           bash scripts/build-native.sh

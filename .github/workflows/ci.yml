@@ -131,6 +131,10 @@ jobs:
 
   p05-probe:
     name: P0.5 Probe (JBR ${{ matrix.jbr }})
+    # 探针同样要加载 core/libs 下与发布物一致的原生库。直接复用 build-native 的产物，而不是在本 job
+    # 重新编译：重编意味着每个矩阵腿都要从 ziglang.org 现拉一遍 zig 工具链，实测两腿分别卡在下载上
+    # 808s / 773s（compiling 本身只要 0.2s），而 build-native 有工具链+编译缓存、6 个目标并行只要 ~106s。
+    needs: build-native
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -167,11 +171,13 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      # 堆遍历规模测量需要 Linux x64 的 JVMTI 底座
-      - name: Build native libtool (Linux x64)
-        run: |
-          export JAVA_HOME="$JAVA_HOME_25_X64"
-          bash scripts/build-native.sh linux-x64
+      # 堆遍历规模测量需要 Linux x64 的 JVMTI 底座：用 build-native 的产物（同一 commit 编出、且已过
+      # verify-native ABI/导出/仓内同步校验），不要在本 job 重编。
+      - name: Download Native Libraries
+        uses: actions/download-artifact@v7
+        with:
+          name: native-libraries
+          path: core/libs
 
       - name: Run P0.5 probe
         run: |

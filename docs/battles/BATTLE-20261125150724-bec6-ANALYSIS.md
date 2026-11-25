@@ -1,5 +1,7 @@
 # 战报 · 战役 battle-20261125150724-bec6
 
+> **文档类型**：审计记录（战役实证战报；全局实现状态以 [docs/status.md](../status.md) 为准）
+
 > 生成时间 2026-11-25T15:37:14.775Z · 阶段 reported · 基线 feat/kotlin-align-followups@db015dc9b889 · 证据 11 条（已作废 0）
 
 ## 1. 目标

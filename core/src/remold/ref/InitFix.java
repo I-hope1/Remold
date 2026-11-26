@@ -273,6 +273,16 @@ public class InitFix {
 		     + " state=" + state + " reason=" + reason;
 	}
 
+	/**
+	 * 状态日志允许出现的原因枚举全集。
+	 *
+	 * <p>{@code other} 是兜底项，**不应当出现**：出现即说明归因没做完，探针框架会把它当失败处理。要新增原因，
+	 * 必须同时更新本集合与 {@code TypeChangedFieldLogFormatTest} 的断言。</p>
+	 */
+	public static final java.util.Set<String> TYPE_CHANGED_REASONS = java.util.Set.of(
+		"none", "ctor-param-assign", "no-initializer", "later-gate", "type-unchanged", "key-mismatch",
+		"reinit-owned", "other");
+
 	/** 把计划给的自由文本原因归一成枚举，避免日志里出现会变动的散文。 */
 	public static String typeChangedReason(String rawReason) {
 		if (rawReason == null) return "none";
@@ -1983,7 +1993,8 @@ public class InitFix {
 				for (String f : diff.typeChangedFields) {
 					FieldDecision decided = analysis.decision(f);
 					if (decided == null) {
-						RemoldAgent.warn(typeChangedState(className, f, "not-candidate", "candidate-set-miss"));
+						RemoldAgent.warn(typeChangedState(className, f, "not-candidate",
+							"key-mismatch"));
 					} else if (decided.status() == FieldStatus.ACCEPTED) {
 						RemoldAgent.log(typeChangedState(className, f, "accepted", "none"));
 					} else {
@@ -2264,7 +2275,11 @@ public class InitFix {
 		if (typeChangedFields == null || typeChangedFields.isEmpty()) return;
 		for (String fieldName : typeChangedFields) {
 			if (!targetInstanceFields.contains(fieldName)) {
-				RemoldAgent.warn(typeChangedState(className, fieldName, "not-candidate", "candidate-set-miss"));
+				// 拆成两种：字段压根不在新类里（key 对不上——静态/改名的口径差异），
+				// 或字段在、只是没进实例候选集（说明它其实不是"类型改变"）。
+				boolean presentInNewClass = fieldNodes.get(fieldName) != null;
+				RemoldAgent.warn(typeChangedState(className, fieldName, "not-candidate",
+					presentInNewClass ? "type-unchanged" : "key-mismatch"));
 				continue;
 			}
 			// 注意：不能因为字段在 forceWriteFields 里就跳过 —— 类型改变字段**本身**就被强制写，

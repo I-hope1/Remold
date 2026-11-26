@@ -262,6 +262,27 @@ public class InitFix {
 
 	private record BatchPlan(PatchAnalysis analysis, Runnable publish) { }
 
+	/**
+	 * 类型改变字段的状态日志（**接口而非文案**：探针会拿它做前置断言）。
+	 *
+	 * <p>格式固定 {@code [TYPE-CHANGED-FIELD] cls=<internal> field=<name> state=<accepted|rejected|not-candidate> reason=<enum>}；
+	 * 参数只放类名、字段名与原因枚举，**不放实例**——格式化被补丁对象会触发它的 {@code toString()}，把日志变成一次方法调用。</p>
+	 */
+	public static String typeChangedState(String className, String fieldName, String state, String reason) {
+		return "[TYPE-CHANGED-FIELD] cls=" + className + " field=" + fieldName
+		     + " state=" + state + " reason=" + reason;
+	}
+
+	/** 把计划给的自由文本原因归一成枚举，避免日志里出现会变动的散文。 */
+	public static String typeChangedReason(String rawReason) {
+		if (rawReason == null) return "none";
+		if (rawReason.contains("written outside its extraction")) return "ctor-param-assign";
+		if (rawReason.contains("no safe initialization expression")) return "no-initializer";
+		if (rawReason.contains("self-assignment")) return "ctor-param-assign";
+		if (rawReason.contains("subsequent processing")) return "later-gate";
+		return "other";
+	}
+
 	private record PatchAnalysis(Map<String, FieldDecision> instanceDecisions,
 	                             Map<String, FieldDecision> staticDecisions,
 	                             Map<String, Set<InitFixBatchGraph.FieldKey>> dependencies,
@@ -1958,6 +1979,19 @@ public class InitFix {
 			PatchAnalysis analysis = analyzePatch(host, diff.newClass, newBytes, className,
 			 addedStaticFields, addedInstanceFields, diff.typeChangedFields, pending, preScannedReinit, replayFields, applyFields,
 			 replayDecisions, applyDecisions, generational);
+			if (diff.typeChangedFields != null) {
+				for (String f : diff.typeChangedFields) {
+					FieldDecision decided = analysis.decision(f);
+					if (decided == null) {
+						RemoldAgent.warn(typeChangedState(className, f, "not-candidate", "candidate-set-miss"));
+					} else if (decided.status() == FieldStatus.ACCEPTED) {
+						RemoldAgent.log(typeChangedState(className, f, "accepted", "none"));
+					} else {
+						// 被丢弃必须让人看到：行为的"没发生"与日志的"声称发生"不一致，是比缺日志更糟的形态。
+						RemoldAgent.warn(typeChangedState(className, f, "rejected", typeChangedReason(decided.reason())));
+					}
+				}
+			}
 			Runnable publish = () -> publishPatch(host, diff, className, replayFields, applyFields, analysis);
 			BatchContext batch = BATCH_CONTEXT.get();
 			if (batch == null) publish.run();
@@ -2229,7 +2263,10 @@ public class InitFix {
 	 Map<String, List<FieldExtract>> instanceExtracts, int rootCtorCount) {
 		if (typeChangedFields == null || typeChangedFields.isEmpty()) return;
 		for (String fieldName : typeChangedFields) {
-			if (!targetInstanceFields.contains(fieldName)) continue;
+			if (!targetInstanceFields.contains(fieldName)) {
+				RemoldAgent.warn(typeChangedState(className, fieldName, "not-candidate", "candidate-set-miss"));
+				continue;
+			}
 			// 注意：不能因为字段在 forceWriteFields 里就跳过 —— 类型改变字段**本身**就被强制写，
 			// 这里要决定的只是"写什么"：有可证明初值就写初值（由提取通道负责），没有就写新类型零值。
 			if (reinitFields.containsKey(fieldName) || acceptedReplay.contains(fieldName)) continue;
@@ -2247,10 +2284,8 @@ public class InitFix {
 				slices.add(new FieldExtract(insns, Map.of(), false, true, new HashSet<>(insns)));
 			}
 			instanceExtracts.put(fieldName, slices);
-			RemoldAgent.warn("[TYPE-CHANGED-FIELD] " + className + "." + fieldName + " (" + field.desc
-			     + ") has no provable initializer: existing instances carried a value of the OLD type, so it is reset to"
-			     + " the type default. Reading it before it is assigned again will fail loudly instead of running on a"
-			     + " wrong-typed object");
+			// 只记录"排队"，不声称"已重置"：是否进计划、是否真执行，由后面的计划判定与执行结果决定。
+			RemoldAgent.log(typeChangedState(className, fieldName, "accepted-pending", "no-initializer"));
 		}
 	}
 

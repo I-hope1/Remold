@@ -139,7 +139,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        jbr: [ '17', '21' ]
+        jbr: [ '17', '21', '25' ]
     steps:
       - uses: actions/checkout@v7
 

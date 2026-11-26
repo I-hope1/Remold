@@ -30,6 +30,10 @@ public class TypeChangedFieldResetProbe {
 	static int failed = 0;
 	static final List<String> logs = new ArrayList<>();
 
+	static void note(String msg) {
+		System.out.println("NOTE " + msg);
+	}
+
 	static void check(boolean ok, String msg) {
 		System.out.println((ok ? "TCF-PASS " : "TCF-FAIL ") + msg);
 		if (ok) passed++; else failed++;
@@ -129,6 +133,7 @@ public class TypeChangedFieldResetProbe {
 		System.out.println("=== TypeChangedFieldResetProbe: descriptor change must not leave the old object behind ===");
 		Instrumentation inst = RemoldAgent.getInstrumentation();
 		check(inst != null, "P0 instrumentation available");
+		AgentFreshness.verify(TypeChangedFieldResetProbe::check, TypeChangedFieldResetProbe::note);
 		check(RemoldAgent.isEnhancedHotswapEnabled(), "P0 enhanced redefinition is active");
 		if (inst == null) { summary(); System.exit(1); return; }
 		RemoldAgent.logger = new CaptureLogger();

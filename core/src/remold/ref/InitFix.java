@@ -2255,55 +2255,6 @@ public class InitFix {
 		}
 	}
 
-	/**
-	 * 给"改了描述符"的实例字段补一份"压入新类型零值 + 写字段"的合成切片。
-	 *
-	 * <p>为什么必须显式写：DCEVM 把描述符变更当作"删旧字段 + 加新字段"，但**存量实例槽位里的旧值会保留**
-	 * （{@code tests/src/DcevmCrossHostProbe.java} 实测：真机 JBR 21 上读回来仍是原对象）。这类字段在提取阶段
-	 * 往往拿不到可证明的初值（{@code this$0} 由构造器参数赋值、没有常量来源），于是根本不生成补丁，旧类型的
-	 * 对象就带着新类型的标签留在堆里 —— 之后任何 cast/调用都会失败，类型恰好可赋值时则静默作用在错对象上。</p>
-	 *
-	 * <p>清零而不是保留：引用类型写 {@code null}、基本类型写 {@code 0}，把"静默错对象"降级成"响亮的 NPE"。
-	 * 已经由 reinit/重放通道接管的字段、被显式强制写的字段、以及已提取到切片的字段一律不碰。</p>
-	 */
-	static void synthesizeTypeChangedResetExtracts(
-	 InitFixSafetyGate.NestView nest, ClassNode newClass, String className,
-	 Set<String> targetInstanceFields, Set<String> forceWriteFields,
-	 Map<String, ReinitField> reinitFields, Set<String> acceptedReplay,
-	 Set<String> typeChangedFields, Map<String, FieldNode> fieldNodes,
-	 Map<String, List<FieldExtract>> instanceExtracts, int rootCtorCount) {
-		if (typeChangedFields == null || typeChangedFields.isEmpty()) return;
-		for (String fieldName : typeChangedFields) {
-			if (!targetInstanceFields.contains(fieldName)) {
-				// 拆成两种：字段压根不在新类里（key 对不上——静态/改名的口径差异），
-				// 或字段在、只是没进实例候选集（说明它其实不是"类型改变"）。
-				boolean presentInNewClass = fieldNodes.get(fieldName) != null;
-				RemoldAgent.warn(typeChangedState(className, fieldName, "not-candidate",
-					presentInNewClass ? "type-unchanged" : "key-mismatch"));
-				continue;
-			}
-			// 注意：不能因为字段在 forceWriteFields 里就跳过 —— 类型改变字段**本身**就被强制写，
-			// 这里要决定的只是"写什么"：有可证明初值就写初值（由提取通道负责），没有就写新类型零值。
-			if (reinitFields.containsKey(fieldName) || acceptedReplay.contains(fieldName)) continue;
-			if (instanceExtracts.containsKey(fieldName)) continue;   // 已有可证明的初值来源，不动
-			FieldNode field = fieldNodes.get(fieldName);
-			if (field == null) continue;
-			if ((field.access & Opcodes.ACC_STATIC) != 0) continue;  // 静态侧另走静态切片，不在本函数范围
-			int copies = Math.max(1, rootCtorCount);
-			List<FieldExtract> slices = new ArrayList<>(copies);
-			for (int i = 0; i < copies; i++) {
-				List<AbstractInsnNode> insns = List.of(
-				 new VarInsnNode(Opcodes.ALOAD, 0),
-				 zeroValueInsn(field.desc),
-				 new FieldInsnNode(Opcodes.PUTFIELD, className, fieldName, field.desc));
-				slices.add(new FieldExtract(insns, Map.of(), false, true, new HashSet<>(insns)));
-			}
-			instanceExtracts.put(fieldName, slices);
-			// 只记录"排队"，不声称"已重置"：是否进计划、是否真执行，由后面的计划判定与执行结果决定。
-			RemoldAgent.log(typeChangedState(className, fieldName, "accepted-pending", "no-initializer"));
-		}
-	}
-
 	/** 字段描述符对应的类型默认值压栈指令（与 {@link InitFixSafetyGate} 的 T0 判据同口径）。 */
 	private static AbstractInsnNode zeroValueInsn(String desc) {
 		char c = desc.isEmpty() ? 'I' : desc.charAt(0);
@@ -2377,19 +2328,6 @@ public class InitFix {
 		Set<String>              forceWriteFields     = new LinkedHashSet<>();
 		Set<String>              selfOnlyFields       = new LinkedHashSet<>();
 		List<String>             staticScopeIgnored   = new ArrayList<>();
-		// 类型改变的字段（name 同、desc 不同）必须是**无条件写**：
-		// DCEVM 把它当"删旧+加新"，且把旧值迁移进同槽位（实测：真机 JBR 21 读回来仍是原对象）。
-		// 走默认的"仅当仍是类型默认值才写"守卫时，那个非默认的旧值会让条件写**静默跳过** —— 于是字段带着
-		// 旧类型的对象留在堆里：类型可赋值时静默作用在错对象上，不可赋值时才在下次 cast 处炸。
-		// 这里的取值来源二选一：能提取到初值就写新初值；提取不到就写新类型零值（见 synthesizeTypeChangedResetExtracts）。
-		if (typeChangedFields != null) {
-			for (String f : typeChangedFields) {
-				FieldNode fn = fieldNodes.get(f);
-				if (fn == null || (fn.access & Opcodes.ACC_STATIC) != 0) continue;
-				targetInstanceFields.add(f);
-				forceWriteFields.add(f);
-			}
-		}
 		for (Map.Entry<String, ReinitField> e : reinitFields.entrySet()) {
 			FieldNode fn = fieldNodes.get(e.getKey());
 			if (fn == null) continue;   // 注解在不存在的字段上（理论上不可能）
@@ -2576,8 +2514,6 @@ public class InitFix {
 		// 没有任何常量来源），于是不生成补丁 —— 旧类型的对象就以新类型的身份留在堆里：之后任何 cast/调用都会炸，
 		// 或者更糟，类型恰好可赋值时静默跑在错对象上。宁可显式清零（引用类型写 null、基本类型写 0，读错变成
 		// NPE 而不是错对象），也不留一个类型错位的引用。
-		synthesizeTypeChangedResetExtracts(nest, newClass, className, targetInstanceFields, forceWriteFields,
-		 reinitFields, acceptedReplay, typeChangedFields, fieldNodes, instanceExtracts, rootCtorCount);
 		Set<String> zeroInstanceFields = new LinkedHashSet<>();
 		for (String f : targetInstanceFields) {
 			if (selfAssignedFields.contains(f)) continue;

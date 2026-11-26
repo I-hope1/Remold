@@ -237,6 +237,7 @@ final class BatchHotswapExecutor {
 
 		// 记录所有对齐过程中产生的旧孤儿类（不得在本次重定义中被误更新）
 		Set<String>                       allOrphanClasses = new HashSet<>();
+		Map<String, ClassLoader>          alignedAnonLoaders = new HashMap<>();
 		Map<String, AlignmentTransaction> transactions     = new LinkedHashMap<>();
 
 		// 【指纹延后落账】类名 hash → 新磁盘指纹。循环里只登记，不写 fileDiskHashes；
@@ -279,7 +280,16 @@ final class BatchHotswapExecutor {
 			}
 		}
 
-		for (String hostName : hostClassesToAlign) {
+		// 由外向内处理宿主：外层匿名类被对齐改名后，其**内层嵌套类**的新侧名字必须跟着落到同一个
+		// 名字空间里，才谈得上与旧内层配对（见下方 propagateAnonSubspace）。
+		List<String> hostOrder = new ArrayList<>(hostClassesToAlign);
+		// 只保证"真实宿主先于匿名宿主"，**不**在匿名宿主之间重排：匿名宿主的处理顺序决定了新槽位的
+		// 分配顺序，把它按名字重排会改变对齐结果（实测：class-mode 探针的 prepend 场景因此拿到一个
+		// 从未被定义的槽位）。稳定排序 + 单一配对键，插入顺序原样保留。
+		hostOrder.sort(Comparator.comparingInt(h -> anonDepth(h) == 0 ? 0 : 1));
+		Set<String> runtimeNamesBefore = new HashSet<>(loadedClassesMap.keySet());
+		for (int hostIdx = 0; hostIdx < hostOrder.size(); hostIdx++) {
+			String hostName = hostOrder.get(hostIdx);
 			String hostSlash = hostName.replace('.', '/');
 			Map<String, byte[]> oldAnon = new HashMap<>(
 				oldAnonsByHost.getOrDefault(hostName, Collections.emptyMap()));
@@ -352,6 +362,23 @@ final class BatchHotswapExecutor {
 				continue;
 			}
 
+			// 门：改名的目标必须真有落地字节。对齐器可能在"拒绝猜配对"的同时仍给新匿名类分配了全新槽位，
+			// 于是宿主字节被改成 NEW Host$5，却没有任何定义被装上（$5 既不在批次、也不在磁盘）——
+			// 运行期构造宿主直接 NoClassDefFoundError。这种半生效必须整族 fail-closed，
+			// 与"宿主 v2 + 闭包 v1"是同一条纪律。
+			List<String> missingTargets = new ArrayList<>();
+			for (String target : res.renameMap.values()) {
+				String targetDot = Names.external(target);
+				if (res.alignedAnonClasses.containsKey(target)) continue;
+				if (runtimeNamesBefore.contains(targetDot)) continue;   // 目标就是活着的旧类，无需装字节
+				missingTargets.add(target);
+			}
+			if (!missingTargets.isEmpty()) {
+				rejectHostGroup(newBatchBytes, classToPath, hostName, skips,
+				 new AnonClassAligner.AlignmentRejectedException(hostSlash,
+					"aligned host would reference anonymous class(es) with no bytes to install: " + missingTargets));
+				continue;
+			}
 			if (res.alignedHostBytes != null) {
 				newBatchBytes.put(hostName, res.alignedHostBytes);
 			}
@@ -359,7 +386,21 @@ final class BatchHotswapExecutor {
 			for (Map.Entry<String, String> rename : res.renameMap.entrySet()) {
 				String rawDot    = rename.getKey().replace('/', '.');
 				String targetDot = rename.getValue().replace('/', '.');
-				targetToRawName.put(targetDot, rawDot);
+				// 已被外层改名传播登记过的目标（其磁盘名是改名前的内层名）不得被覆盖。
+				targetToRawName.putIfAbsent(targetDot, rawDot);
+			}
+			// 外层匿名类改名后，把同一改名传播到还没处理的内层宿主组：
+			// 旧内层挂在**原始**宿主名下（$3$innerObj$1），新内层挂在改名前的宿主名下（$4$innerObj$1），
+			// 若不传播，内层对齐就会以 $4 为宿主去旧侧找 $3 的内层（old=0），随后 Stage A 判定
+			// "宿主与其匿名类未一致重定义"整族回滚，存量内层实例永远停在旧版本。
+			Map<String, Map<String, String>> ancestorPatches = new LinkedHashMap<>();
+			for (Map.Entry<String, String> rename : res.renameMap.entrySet()) {
+				String outerTarget = Names.external(rename.getValue());
+				Map<String, String> childRenames = propagateAnonSubspace(
+					Names.external(rename.getKey()), outerTarget,
+					hostOrder, hostIdx, newAnonsByHost, newBatchBytes, classToPath, targetToRawName,
+					runtimeNamesBefore);
+				if (!childRenames.isEmpty()) ancestorPatches.put(outerTarget, childRenames);
 			}
 
 			for (String orphan : res.orphanOldClasses) {
@@ -385,10 +426,16 @@ final class BatchHotswapExecutor {
 
 			// 将对齐重命名后的新匿名类注入批次并登记到事务
 			Path hostPath = classToPath.get(hostName);
+			Class<?> alignHostClass = loadedClassesMap.get(hostName);
+			if (DEBUG) log("[ANON-TARGETS] host=" + hostName + " aligned=" + res.alignedAnonClasses.keySet()
+				+ " rename=" + res.renameMap + " inBatch=" + newBatchBytes.keySet().containsAll(res.alignedAnonClasses.keySet()));
 			for (Map.Entry<String, byte[]> entry : res.alignedAnonClasses.entrySet()) {
 				String targetSlash  = entry.getKey();
 				String targetDot    = targetSlash.replace('/', '.');
 				byte[] alignedBytes = entry.getValue();
+				// 对齐产物的加载器 = 宿主的加载器。按路径推断会在"磁盘上没有同名文件"时退回按包名猜，
+				// 装错加载器后宿主看不见它（定义成功但构造仍 NoClassDefFoundError）。
+				if (alignHostClass != null) alignedAnonLoaders.put(targetDot, alignHostClass.getClassLoader());
 
 				newBatchBytes.put(targetDot, alignedBytes);
 				if (hostPath != null && !classToPath.containsKey(targetDot)) {
@@ -398,6 +445,15 @@ final class BatchHotswapExecutor {
 				tx.pendingAdds.put(targetSlash, alignedBytes);
 				tx.cacheUpdates.put(targetDot, alignedBytes);
 				tx.targetClasses.add(targetDot);
+			}
+			// 内层改名完成后修祖先字节：外层类的字节已按外层改名重写过一次（Host$1 → Host$2），
+			// 但它对内层类的引用当时还停在编译期名字（NEW Host$1$1）。不修就是"外层叫 $2、里面仍 NEW $1$1"，
+			// 运行期 NoClassDefFoundError。必须在对齐结果入批**之后**做，否则改的是尚未写入的旧条目。
+			for (Map.Entry<String, Map<String, String>> patch : ancestorPatches.entrySet()) {
+				byte[] ancestor = newBatchBytes.get(patch.getKey());
+				if (ancestor == null) continue;
+				byte[] fixed = AnonClassAligner.remapClass(ancestor, patch.getValue());
+				if (fixed != ancestor) newBatchBytes.put(patch.getKey(), fixed);
 			}
 			transactions.put(hostName, tx);
 		}
@@ -575,6 +631,10 @@ final class BatchHotswapExecutor {
 
 				// 指纹取磁盘原始字节：对齐/织入后的 bytecode 不能参与“磁盘是否变化”的判定。
 				String rawName    = targetToRawName.getOrDefault(className, className);
+				// 运行期名字 ≠ 磁盘名字：这是对齐器重编号/新合成的类（如新槽位 Host$5 来自磁盘上的
+				// Host$3）。它的字节不是从磁盘那个文件读的，磁盘文件"没变"完全不能推出"这个类已定义过"。
+				// 用原始名的指纹跳过它，会让宿主字节里 NEW 的名字永远没人定义 → 构造期 NoClassDefFoundError。
+				boolean renamedTarget = !rawName.equals(className);
 				Long   rawHash    = rawDiskHashes.get(rawName);
 				long   newHash    = rawHash != null ? rawHash : calculateHash(bytecode);
 				long   classNameKey = CRC64.hashString(rawName);
@@ -582,7 +642,8 @@ final class BatchHotswapExecutor {
 				// 检查指纹
 				synchronized (fileDiskHashes) {
 					long oldDiskHash = fileDiskHashes.get(classNameKey);
-					if (oldDiskHash != -1 && oldDiskHash != LongLongMap.NOT_FOUND && oldDiskHash == newHash) {
+					if (!renamedTarget
+					    && oldDiskHash != -1 && oldDiskHash != LongLongMap.NOT_FOUND && oldDiskHash == newHash) {
 						if (DEBUG) log("[SKIP] " + className + " (file hash unchanged)");
 						skippedCount++;
 						continue;
@@ -838,7 +899,8 @@ final class BatchHotswapExecutor {
 					// clHintPath == null 表示来自直接传入的 activeWatchJar，无虚拟 watchDir 路径，
 					// 退化到纯包名推断（findTargetClassLoader(className)），inject 照常走，lazy_load 挂 tmpDir 路径
 					if (REDEFINE_MODE == RedefineMode.inject) {
-						boolean injected = injectNewClass(className, clHintPath, bytecode);
+						boolean injected = injectNewClass(className, clHintPath, bytecode,
+							alignedAnonLoaders.get(className));
 						if (injected) {
 							recordRuntimeBytecode(className, bytecode);
 							injectedCount++;
@@ -853,23 +915,57 @@ final class BatchHotswapExecutor {
 							}
 						} else {
 							// 注入失败：类仍未加载，登记出生点补丁作为兜底（失败时不落指纹，下次触发会重试）。
+							// 必须可见：出生点补丁只有在"同一个加载器按名请求该类"时才生效，若宿主字节已经
+							// NEW 了这个名字，兜底不成立就是构造期 NoClassDefFoundError。
+							warn("[NEW] " + className + " could not be defined now and will rely on a birth patch;"
+								+ " if the host already references this name, constructing the host fails with"
+								+ " NoClassDefFoundError until the class is defined.");
 							PendingLoadPatch.offerAny(className, bytecode);
 						}
 					} else if (REDEFINE_MODE == RedefineMode.lazy_load && UCP_APPEND) {
-						ClassLoader loader = findTargetClassLoader(className, clHintPath);
-						// lazy_load + jar：ClassLoader 推断用虚拟路径（clHintPath），
-						// 实际挂载用真实 tmpDir 路径，否则 ClassLoader 找不到 class 文件
-						Path mountPath = path != null && JarExtractor.tmpToJar().containsKey(path) ? path : clHintPath;
-						if (mountPath != null) {
-							PackageUnsealer.unsealClassPackage(loader, className);
-							mountForClass(loader, mountPath);
+						String lazyRawName = targetToRawName.get(className);
+						// 被对齐器重编号/新合成的匿名类，其**运行期名字**在磁盘上根本不存在
+						// （磁盘上只有编译期名字，例如 $3 而不是 $5）。lazy_load 是靠"按名到挂载目录找
+						// .class"生效的，所以这类类永远不会被找到：宿主字节码里写着 NEW $5，构造时直接
+						// NoClassDefFoundError。凡是运行期名字 ≠ 磁盘名字（name-mismatch）的类，懒加载
+						// 路径必须让位给主动注入 —— 这也是 inject 模式对同类问题的既有处置。
+						boolean nameMismatch = needsActiveInjection(className, targetToRawName);
+						boolean injectedHere = nameMismatch
+							&& injectNewClass(className, clHintPath, bytecode, alignedAnonLoaders.get(className));
+						if (injectedHere) {
+							recordRuntimeBytecode(className, bytecode);
+							injectedCount++;
+							injectedClasses.add(className);
+							String lazyRaw = lazyRawName;
+							Long lazyHash = rawDiskHashes.get(lazyRaw);
+							long diskHash = lazyHash != null ? lazyHash : calculateHash(bytecode);
+							synchronized (fileDiskHashes) {
+								fileDiskHashes.put(CRC64.hashString(lazyRaw), diskHash);
+							}
+							if (DEBUG) log("[NEW] " + className + " (renumbered; injected instead of lazy-loaded, disk name=" + lazyRaw + ")");
+						} else {
+							if (nameMismatch) {
+								// 注入也失败：类仍未定义。挂载 + 出生点补丁是最后的兜底，
+								// 但要如实点名——这一类靠名字在磁盘上永远找不到。
+								warn("[NEW] " + className + " has runtime name " + className + " but disk name "
+									+ lazyRawName + "; it is not on disk, so lazy loading cannot resolve it."
+									+ " Injection failed too; the class stays undefined until the next round.");
+							}
+							ClassLoader loader = findTargetClassLoader(className, clHintPath);
+							// lazy_load + jar：ClassLoader 推断用虚拟路径（clHintPath），
+							// 实际挂载用真实 tmpDir 路径，否则 ClassLoader 找不到 class 文件
+							Path mountPath = path != null && JarExtractor.tmpToJar().containsKey(path) ? path : clHintPath;
+							if (mountPath != null) {
+								PackageUnsealer.unsealClassPackage(loader, className);
+								mountForClass(loader, mountPath);
+							}
+							recordRuntimeBytecode(className, bytecode);
+							// 类尚未加载：登记出生点补丁，让它第一次加载时直接拿到这次编辑的字节
+							// （加载器此刻还未知，按 ANY_SCOPE 登记；出生点的工作区归属校验兜底）。
+							PendingLoadPatch.offerAny(className, bytecode);
+							// lazy_load 只是挂载路径，类尚未真正加载生效 —— 指纹**不**落账，
+							// 等它真正被加载/重定义时再记，否则会漏掉后续的首次加载。
 						}
-						recordRuntimeBytecode(className, bytecode);
-						// 类尚未加载：登记出生点补丁，让它第一次加载时直接拿到这次编辑的字节
-						// （加载器此刻还未知，按 ANY_SCOPE 登记；出生点的工作区归属校验兜底）。
-						PendingLoadPatch.offerAny(className, bytecode);
-						// lazy_load 只是挂载路径，类尚未真正加载生效 —— 指纹**不**落账，
-						// 等它真正被加载/重定义时再记，否则会漏掉后续的首次加载。
 					}
 				}
 			} catch (Throwable e) {
@@ -1561,6 +1657,109 @@ final class BatchHotswapExecutor {
 	 * <p>逐级剥掉尾部 {@code $segment}：{@code Host$metricTable} → {@code Host}。一个祖先都解析不出来时
 	 * 返回入参本身 —— 调用方据此只移出该前缀下的族（没有宿主可移）。</p>
 	 */
+	/**
+	 * 该类在 {@code lazy_load} 模式下是否必须"主动注入"，而不是指望按名懒加载。
+	 *
+	 * <p>判据只有一条：批次里的**运行期名字**与**磁盘名字**是否一致。被对齐器重编号/新合成的匿名类，
+	 * 磁盘上只有编译期名字（如 {@code Host$3}），而宿主新字节码引用的是新名字（如 {@code Host$5}）；
+	 * 懒加载是按名到挂载目录找 {@code .class}，这类名字永远找不到，构造时直接 NoClassDefFoundError。
+	 * 名字一致（含没有任何重映射记录）时维持原懒加载语义。</p>
+	 */
+	static boolean needsActiveInjection(String className, Map<String, String> targetToRawName) {
+		if (className == null || targetToRawName == null) return false;
+		String raw = targetToRawName.get(className);
+		return raw != null && !raw.equals(className);
+	}
+
+	/** 匿名类层级深度：名字里 {@code $} 越多越深，用于"由外向内"处理宿主组。 */
+	static int anonDepth(String dotName) {
+		if (dotName == null) return 0;
+		int depth = 0;
+		for (int i = 0; i < dotName.length(); i++) if (dotName.charAt(i) == '$') depth++;
+		return depth;
+	}
+
+	/** 名字 {@code name} 若落在 {@code rawDot} 的子空间里，返回换到 {@code targetDot} 子空间后的名字。 */
+	static String renameSubspace(String name, String rawDot, String targetDot) {
+		if (name == null || rawDot == null || targetDot == null || rawDot.equals(targetDot)) return name;
+		if (name.equals(rawDot)) return targetDot;
+		String prefix = rawDot + "$";
+		return name.startsWith(prefix) ? targetDot + name.substring(rawDot.length()) : name;
+	}
+
+	/**
+	 * 把外层匿名类的一次改名传播到它名下、还没处理的内层宿主组。
+	 *
+	 * <p>背景（真机现场）：源码里外层匿名对象换了位置，编译产物变成 {@code Host$4}，对齐器把它匹配回
+	 * 存量槽位 {@code Host$3}；而它的内层嵌套匿名类编译成 {@code Host$4$innerObj$1}，旧侧对应的是
+	 * {@code Host$3$innerObj$1}。内层作为**独立宿主组**再次进入对齐时，宿主名若还停在改名前的
+	 * {@code Host$4}，旧侧就什么都找不到（{@code level 2: old=0, new=1}），随后 Stage A 以
+	 * "宿主与其匿名类未一致重定义"整族回滚，存量内层实例永远停在旧版本。</p>
+	 *
+	 * <p>只对"目标名是**已存在的运行期类**"的改名传播（即匹配回旧槽位）。若外层拿到的是**全新槽位**
+	 * （旧外层因布局门拒绝而无法原地更新），老内层仍属于老外层，把新内层搬过去只会造成跨代串位，
+	 * 因此不做传播——那种情况由布局门/注入路径处理。</p>
+	 */
+	static Map<String, String> propagateAnonSubspace(String rawDot, String targetDot, List<String> hostOrder, int fromIdx,
+	                                  Map<String, Map<String, byte[]>> newAnonsByHost,
+	                                  Map<String, byte[]> newBatchBytes,
+	                                  Map<String, Path> classToPath,
+	                                  Map<String, String> targetToRawName,
+	                                  Set<String> runtimeNamesBefore) {
+		Map<String, String> childRenames = new LinkedHashMap<>();
+		if (rawDot == null || targetDot == null || rawDot.equals(targetDot)) return childRenames;
+		if (runtimeNamesBefore == null || !runtimeNamesBefore.contains(targetDot)) return childRenames;
+
+		// 1) 待处理宿主改名（只改还没轮到的，已处理过的不能再动）
+		for (int i = fromIdx + 1; i < hostOrder.size(); i++) {
+			String renamed = renameSubspace(hostOrder.get(i), rawDot, targetDot);
+			if (!renamed.equals(hostOrder.get(i))) hostOrder.set(i, renamed);
+		}
+
+		// 2) 新侧桶：桶键（宿主名）与桶内类名一起迁移，字节同步重写
+		Map<String, String> subspaceMap = new LinkedHashMap<>();
+		subspaceMap.put(Names.internal(rawDot), Names.internal(targetDot));
+		for (String bucketHost : new ArrayList<>(newAnonsByHost.keySet())) {
+			String newBucketHost = renameSubspace(bucketHost, rawDot, targetDot);
+			Map<String, byte[]> bucket = newAnonsByHost.get(bucketHost);
+			if (bucket == null) continue;
+			Map<String, byte[]> moved = new HashMap<>();
+			for (Map.Entry<String, byte[]> e : bucket.entrySet()) {
+				String newName = renameSubspace(e.getKey(), rawDot, targetDot);
+				if (newName.equals(e.getKey())) { moved.put(e.getKey(), e.getValue()); continue; }
+				subspaceMap.put(Names.internal(e.getKey()), Names.internal(newName));
+				childRenames.put(Names.internal(e.getKey()), Names.internal(newName));
+				byte[] remapped = AnonClassAligner.remapClass(e.getValue(), subspaceMap);
+				subspaceMap.remove(Names.internal(e.getKey()));
+				moved.put(newName, remapped);
+				moveBatchEntry(newBatchBytes, classToPath, targetToRawName, e.getKey(), newName);
+				// 迁移后再把**改过名**的字节写回批次：批次里必须留改名后的字节，
+				// 否则内层组的 newRes 取到的是编译期名字的旧字节，对齐出来仍是 $4$...，改名等于白做。
+				newBatchBytes.put(newName, remapped);
+			}
+			if (newBucketHost.equals(bucketHost)) {
+				newAnonsByHost.put(bucketHost, moved);
+			} else {
+				newAnonsByHost.remove(bucketHost);
+				newAnonsByHost.computeIfAbsent(newBucketHost, k -> new HashMap<>()).putAll(moved);
+			}
+		}
+
+		return childRenames;
+	}
+
+	/** 把批次里一个类的登记整体改到新名字下（字节、路径、磁盘名映射三处保持一致）。 */
+	static void moveBatchEntry(Map<String, byte[]> newBatchBytes, Map<String, Path> classToPath,
+	                           Map<String, String> targetToRawName, String fromDot, String toDot) {
+		if (fromDot == null || toDot == null || fromDot.equals(toDot)) return;
+		byte[] bytes = newBatchBytes.remove(fromDot);
+		if (bytes != null) newBatchBytes.put(toDot, bytes);
+		Path path = classToPath.remove(fromDot);
+		if (path != null) classToPath.put(toDot, path);
+		String raw = targetToRawName.remove(fromDot);
+		if (raw != null) targetToRawName.put(toDot, raw);
+	}
+
 	static String ghostHostAncestor(String hostName, Map<String, byte[]> newBatchBytes) {
 		if (hostName == null) return null;
 		if (isResolvableAnonHost(hostName, newBatchBytes)) return null;

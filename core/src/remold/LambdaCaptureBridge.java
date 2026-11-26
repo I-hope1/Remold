@@ -321,7 +321,8 @@ final class LambdaCaptureBridge {
 			String target = targetName + ni.desc;
 			ctx.bridges.put(e.getKey(), new BridgeSpec(oi.desc, targetName, ni.desc, plan,
 				oi.isStatic(), ni.isStatic(),
-				LambdaOrphanEmitter.locationOf(ctx.currentClass, oi.name, oi.desc) + " -> " + target));
+				LambdaOrphanEmitter.locationOf(ctx.currentClass, oi.name, oi.desc) + " -> " + target
+					+ " [" + bridgeKind(plan, Type.getArgumentTypes(oi.desc)) + "]"));
 			// 有合成位就单独留痕：这是一次"桥替老实例重新造了一个值"，属于可观测的行为变化
 			// （不是简单搬运），排查时最想知道的就是"哪个位置、从哪来"。
 			StringBuilder synth = new StringBuilder();
@@ -456,7 +457,8 @@ final class LambdaCaptureBridge {
 		ParamSource[] caps = Arrays.copyOf(bd.sources(), now.captured.size());
 		ctx.bridges.put(oldKey, new BridgeSpec(bridgeDesc, targetName, now.desc, caps,
 			bridgeStatic, now.isStatic(),
-			LambdaOrphanEmitter.locationOf(ctx.currentClass, bridgeName, bridgeDesc) + " -> " + target));
+			LambdaOrphanEmitter.locationOf(ctx.currentClass, bridgeName, bridgeDesc) + " -> " + target
+				+ " [" + bridgeKind(caps, Type.getArgumentTypes(bridgeDesc)) + "]"));
 		LambdaAligner.TEST_EVENTS.add(new LambdaAligner.AlignmentEvent("BRIDGE_REPOINT", bridgeName, now.name,
 			ctx.currentClass + "#" + oldKey + " -> " + target));
 	}
@@ -1647,9 +1649,37 @@ final class LambdaCaptureBridge {
 	 */
 	public static void onBridgeInvoked(String location) {
 		if (LOGGED_BRIDGES.add(location)) {
+			// 桥的种类（缩减 / 重排 / 合成增长）在**构建期**就由 {@link #bridgeKind} 定下来并写进
+			// location，这里不再无条件宣称"缩减"——那会把重排和合成增长的现场误导成另一种成因。
 			Diag.info("[LambdaAligner] bridged lambda invoked: " + location
-			                 + " (capture list shrank; forwarding to the new body)");
+			                 + " (forwarding to the new body)");
 		}
+	}
+
+	/**
+	 * 桥的成因：老捕获表相对新目标的差异。
+	 *
+	 * <p>运行期只看到"桥被调用"，看不到成因；而排查时最需要区分的是"形参被删（缩减）"、
+	 * "形参换序（重排）"与"目标多出合成分（合成增长）"——三者的处置完全不同。</p>
+	 */
+	static String bridgeKind(ParamSource[] plan, Type[] oldArgs) {
+		if (plan == null) return "unknown";
+		boolean synth = false;
+		boolean reorder = false;
+		for (int i = 0; i < plan.length; i++) {
+			ParamSource ps = plan[i];
+			if (ps == null) continue;
+			if (ps.kind != ParamSource.OLD) synth = true;
+			else if (ps.oldIndex != i) reorder = true;
+		}
+		int oldLen = oldArgs == null ? plan.length : oldArgs.length;
+		if (plan.length < oldLen) {
+			return synth ? "capture list shrank + synthetic capture" : "capture list shrank";
+		}
+		if (synth && reorder) return "capture list reordered + synthetic capture";
+		if (synth) return "synthetic capture growth";
+		if (reorder) return "capture list reordered";
+		return "capture list unchanged";
 	}
 
 	private static final Set<String> LOGGED_BRIDGES =

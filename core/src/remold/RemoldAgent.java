@@ -2051,6 +2051,19 @@ public class RemoldAgent {
 	 * 三者都没有时 warn 并拒绝，不能跳过 LayoutGate/InitFix 静默重定义。</p>
 	 */
 	static boolean injectNewClass(String className, Path path, byte[] bytes) {
+		return injectNewClass(className, path, bytes, null);
+	}
+
+	/**
+	 * 同 {@link #injectNewClass(String, Path, byte[])}，但允许调用方指定**加载器提示**。
+	 *
+	 * <p>对齐器重编号/新合成的匿名类在磁盘上没有同名文件，按路径推断加载器会退回"按包名猜"，
+	 * 结果是 defineClass 装进了错误的加载器：定义本身成功（没有任何告警），但宿主所在加载器看不见它，
+	 * 构造宿主时照样 NoClassDefFoundError。这类类的正确加载器就是它宿主的加载器。</p>
+	 *
+	 * @param loaderHint 目标加载器；为 null 时按原有路径推断逻辑
+	 */
+	static boolean injectNewClass(String className, Path path, byte[] bytes, ClassLoader loaderHint) {
 		if (isNonLoadableClass(className)) {
 			// Mixin 模板类不是可加载类：defineClass 会污染宿主 ClassLoader，
 			// 并让读者扫描把它误认为外部读者。
@@ -2058,7 +2071,7 @@ public class RemoldAgent {
 			return false;
 		}
 		try {
-			ClassLoader loader = findTargetClassLoader(className, path);
+			ClassLoader loader = loaderHint != null ? loaderHint : findTargetClassLoader(className, path);
 			if (loader == null) {
 				error("Could not find a suitable ClassLoader for new class: " + className);
 				return false;

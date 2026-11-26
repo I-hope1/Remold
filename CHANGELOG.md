@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **跨宿主复用的 JVM 层可行性探针**（`tests/src/DcevmCrossHostProbe.java`，真机 JBR 21.0.8）：把「字段描述符能否原地改」「嵌套类能否改属 `NestHost`」这两条一直靠推理的假设变成读数。结论：两条都成立——描述符 `LA;`→`LB;` 被当作
+  "删旧字段+加新字段"接受，`NestHost`/`NestMembers` 可在同一轮改属且改后旧类名能访问新宿主私有成员。附带发现：
+  存量实例里的旧值**不会被清空**（读到的是原对象），所以限制复用的不是"值缺失"而是"值类型错位"。
+
 - **外层匿名类顺移后，内层嵌套匿名类被整类移出本批（现场：Kotlin 属性里的匿名对象）**：外层被匹配回旧槽位
   （`Host$4`→`Host$3`）后，内层 `Host$4$innerObj$1` 的分组名虽已改写为 `Host$3$innerObj$1`，但**字节里**的
   `EnclosingMethod` 仍写着编译期的 `Host$4`，准入判据拿它比对宿主 `Host$3` 判否 → 宿主层级桶为空

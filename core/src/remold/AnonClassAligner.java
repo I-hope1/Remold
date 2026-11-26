@@ -860,6 +860,13 @@ public final class AnonClassAligner {
 	public static boolean isAnonymousClass(ClassNode cn, String hostClassName) {
 		if (cn == null || hostClassName == null) return false;
 		if ((cn.access & Opcodes.ACC_ENUM) != 0) return false;
+		String host = Names.internal(hostClassName);
+		// EnclosingMethod 是权威：kotlinc 的 Host$方法名$序号 在名字上不像匿名类，只有属性说得清。
+		if (cn.outerClass != null && !cn.outerClass.isEmpty()) {
+			// 宿主组会收集整族（含嵌套层）：外层匿名类的宿主是 host，内层的 EnclosingMethod 指外层匿名类，
+			// 因此沿 $ 边界做祖先判定，而不是只认相等。
+			return cn.outerClass.equals(host) || cn.outerClass.startsWith(host + "$");
+		}
 		if (cn.innerClasses != null) {
 			for (org.objectweb.asm.tree.InnerClassNode icn : cn.innerClasses) {
 				if (cn.name.equals(icn.name)) {
@@ -870,7 +877,7 @@ public final class AnonClassAligner {
 				}
 			}
 		}
-		return isAnonymousClassName(hostClassName, cn.name);
+		return AnonHostResolver.isAnonymousName(cn.name, host);
 	}
 
 	/** 字节版：解析失败一律按"不是匿名类"处理（解不开的字节也进不了对齐器，布局门仍会兜底）。 */
@@ -1211,11 +1218,25 @@ public final class AnonClassAligner {
 		if (input == null) return result;
 		for (Map.Entry<String, byte[]> entry : input.entrySet()) {
 			String name = entry.getKey().replace('.', '/');
-			if (isAnonymousClassName(hostSlash, name)) {
+			// 与 collectAnonInfos 同一判据：属性优先。名字判据只认 Host$数字，会把 kotlinc 的
+			// Host$方法名$序号 整批过滤掉 —— 那正是"对齐器看到 0 个类、于是什么都没做"的成因。
+			ClassNode cn = parseNode(entry.getValue());
+			if (cn != null ? isAnonymousClass(cn, hostSlash) : AnonHostResolver.isAnonymousName(name, hostSlash)) {
 				result.put(name, entry.getValue());
 			}
 		}
 		return result;
+	}
+
+	private static ClassNode parseNode(byte[] bytes) {
+		if (bytes == null || bytes.length == 0) return null;
+		try {
+			ClassNode cn = new ClassNode();
+			new ClassReader(bytes).accept(cn, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+			return cn;
+		} catch (RuntimeException e) {
+			return null;
+		}
 	}
 
 	public static String normalizeEnclosingMethod(String outerMethod) {

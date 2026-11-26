@@ -126,7 +126,7 @@
 | **[偏离]** 不实现 SwitchMap 排除与原名直通 | 🟣 | [`08-decisions.md#d-anon-3`](topology/08-decisions.md#d-anon-3) | `AnonClassAligner` | 决策记录 [D-ANON-3](topology/08-decisions.md#d-anon-3)；验收证据 `SwitchMapAlignTest` (javac 21)；曾设计“将 SwitchMap 列入排除名录并原名直通”，但论证表明原名直通会在前插枚举时打开槽位篡夺漏洞，因而明确否决并推翻原排除直通设计；当前靠作用域差异与布局门安全拦截，残余机理见风险 2 |
 | **[偏离]** 合成捕获字段计入哈希而非剥离 | 🟣 | [`08-decisions.md#d-anon-4`](topology/08-decisions.md#d-anon-4) | `AnonClassHasher` + `LayoutGate` | 决策记录 [D-ANON-4](topology/08-decisions.md#d-anon-4)；JBR 证实捕获字段变更使存活实例读零值；计入哈希以触发 Tier 4 布局门拦截，防止原地破坏 |
 | **[偏离]** `access$` 编译器访问器保名不改名 | 🟣 | [`08-decisions.md#d-anon-5`](topology/08-decisions.md#d-anon-5) | `AnonClassAligner.remapClass` | 决策记录 [D-ANON-5](topology/08-decisions.md#d-anon-5)；跨类调用点无法同步修改，改名会导致 NoSuchMethodError；保名可区分不同访问器 |
-| **[偏离]** 继承体系变更一律拒绝并提示重启 | 🟣 | [`08-decisions.md#d-anon-7`](topology/08-decisions.md#d-anon-7) | `RemoldAgent.processChanges` | 决策记录 [D-ANON-7](topology/08-decisions.md#d-anon-7)；与原规划“尝试支持接口变更”相反，父类/接口变动一律熔断以守卫全局类型体系安全 |
+| **[偏离]** 父类变更一律拒绝并提示重启；**接口增删在增强重定义下放行** | 🟣 | [`08-decisions.md#d-anon-7`](topology/08-decisions.md#d-anon-7) | `RemoldAgent.processChanges` | 决策记录 [D-ANON-7](topology/08-decisions.md#d-anon-7)；父类变更无条件熔断（任何重定义模式都不支持）；**接口增删只在没有增强重定义时拒绝**（`ClassDiffUtil.mustRejectHierarchyChange` 的 `!enhanced` 分支），真机实测（`:tests:hierarchyChangeProbe`）：活类新增接口后存量实例 `instanceof` 即为 true、经新接口调用返回新实现，删除后回到 false，父类变更按名拒绝且类保持可用 |
 
 ---
 

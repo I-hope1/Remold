@@ -889,6 +889,7 @@
 | 嵌套匿名类跨层准入（EnclosingMethod 别名） | ✅ | `AnonClassAligner.setEnclosingAliases` + `BatchHotswapExecutor`（按宿主组设定并清理）、`tests/src/remold/NestedKotlinShapeAlignTest.java` | 合成字节复现现场形态：host 是匿名类、子类在 `$innerObj$1` 一层（level 2），且新侧字节仍写着改名前的 `$4` 前缀时也能被消费（5 用例）；变异：屏蔽别名准入后两条用例转红。边界：别名只覆盖"本批已确定 target 的宿主"，跨批次残留的旧名字不认 |
 | 匿名宿主的旧侧收集 + 属性自洽 | ✅ | `BatchHotswapExecutor.resolveOldAnonHost`、`AnonClassAligner.setHostRenames`、`tests/src/NestedAnonHostOldSideProbe.java` | 真机 JBR 21：探针 14/14 —— R1 纯方法体修改存量实例跟进、R2 外层顺移后仍配对、R3 捕获增长走 `[ANON-LAYOUT]` 拒绝而非静默重编号；变异：旧侧退回名字口径 4 条转红、字节重写不带宿主链改名 1 条转红。边界：旧类若连名字父链上都找不到真实祖先，仍按属性兜底 |
 | 跨宿主复用（JVM 层可行性） | 🟡 | `tests/src/DcevmCrossHostProbe.java` | 真机 JBR 21.0.8 读数：①字段描述符 `LA;`→`LB;` 被 DCEVM 接受（删旧+加新），且**存量实例里的旧值被保留**（读到原对象而非 null）→ 「值来源」的真实问题是类型错位而非缺失；②`NestHost`/`NestMembers` 可在同一轮改属，改后旧类名可访问新宿主私有成员。复用功能本身未实现，仍走「孤儿 + 注入」；缺口：运行期未在 JBR 25 上验证 |
+| 类型改变字段的补值 | ✅ | `InitFix.synthesizeTypeChangedResetExtracts` + `forceWriteFields` 无条件写、`tests/src/TypeChangedFieldResetProbe.java` | 真机 JBR 21：默认模式整轮 `[LAYOUT-REJECT]`（存量实例保持旧代码）；`warn` 强制放行时有可证明初值则无条件写新初值、无初值（构造器参数赋值形态）则清成 `null` 并告警。变异：去掉无条件写 → R2 两条转红；清零通道早退 → R3 告警断言转红。边界：静态字段的类型改变未覆盖 |
 
 > **事实③（`db74eec` 中 3 参 `<init>` 存在却 `NoSuchMethodError`）**：**不再追查、未闭合**。
 > **`newlyNull=230` 的口径**：在该客户端实测、该类、该序列下，对已加载合成类做字段表变化的 `redefine`，

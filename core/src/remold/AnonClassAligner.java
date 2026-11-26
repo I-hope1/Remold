@@ -190,6 +190,13 @@ public final class AnonClassAligner {
 		 */
 		public int  deterministicZeroScanPairs;
 		/**
+		 * Tier 3.6「同一声明点改名」配对数。
+		 *
+		 * <p>判据是外层方法 + 描述符 + 序号在剩余集里各自唯一、拓扑签名一致、布局门兼容；
+		 * 每一对都在日志里带 {@code [ANON-RENAMED-SITE]} 留痕，便于把"改名配对"与"结构唯一匹配"分开审计。</p>
+		 */
+		public int  declarationSitePairs;
+		/**
 		 * @deprecated 0.2.6 的旧字段名，仅为下游二进制兼容保留；值与
 		 * {@link #deterministicZeroScanPairs} 同步，勿在新代码里读取。
 		 */
@@ -1430,7 +1437,10 @@ public final class AnonClassAligner {
 				Collections.sort(methods);
 			}
 
-			int orderIdx = parseIndex(hostSlash, name);
+			// 序号取自解析器（尾部数字链），不能用严格名字判据：kotlinc 的 Host$方法名$序号 在
+			// parseIndex 眼里不是匿名类名，会一律返回 -1，于是"同声明点改名"配对永远没有序号可用。
+			int parsedIdx = parseIndex(hostSlash, name);
+			int orderIdx  = parsedIdx >= 0 ? parsedIdx : AnonHostResolver.resolve(name, bytes).index();
 			list.add(new AnonInfo(
 			 name, bytes, hash, superName, interfaces,
 			 outerMethod, outerMethodDesc, fields, methods, orderIdx, topology,
@@ -1563,6 +1573,18 @@ public final class AnonClassAligner {
 		if (!RemoldAgent.ANON_STRICT && !remainingNew.isEmpty() && !remainingOld.isEmpty()) {
 			matchByBodySimilarity(remainingNew, remainingOld, matchedNewToOld, stats,
 			 tier4Predicate, hostSlash, startNanos);
+		}
+
+		// ---- Tier 3.6：同一**声明点**内的改名配对 ----
+		//
+		// kotlinc 把局部变量名拼进类名：`Host$makeLocalNamedAnons$first$1` 改名成
+		// `Host$makeLocalNamedAnons$renamedFirst$1` 后，旧类与新类名字不同，前四层都无从配对，
+		// 旧类只能落孤儿、存量实例永远停在旧版本（真机读数：localFirst 停在 v1）。
+		// 声明点身份是（外层方法 + 外层方法描述符 + 序号）：两者相同、双方在**剩余集**里各自唯一、
+		// 拓扑签名一致、且布局门判兼容时，才认定为"同一个声明点改了名"。
+		// 与 Tier 3.5 同理不参与 strict（strict 的语义是"没有唯一证据就整组拒绝"）。
+		if (!RemoldAgent.ANON_STRICT && !remainingNew.isEmpty() && !remainingOld.isEmpty()) {
+			matchRenamedDeclarationSites(remainingNew, remainingOld, matchedNewToOld, stats, hostSlash);
 		}
 
 		// ---- Tier 4.5：扫描可见零存活的确定性兜底 ----
@@ -2014,6 +2036,59 @@ public final class AnonClassAligner {
 	 * 日志必须显式打出 {@code deterministic-zero-scan-pair (scan-visible live instances: 0)}，
 	 * 并在宿主字段可能持有时点名字段（{@code docs/topology/04-tiers-and-rejection.md} §2.4）。</p>
 	 */
+	/**
+	 * 同一声明点改名配对：外层方法 + 描述符 + 序号相同，双方在剩余集里各自唯一。
+	 *
+	 * <p>为什么需要它：kotlinc 的类名含局部变量名，改名后旧/新类名不同，内容哈希与"同类名"这类证据
+	 * 全部失效，旧类只能落孤儿。声明点身份不随变量名变化，是这种情况下唯一可审计的线索。</p>
+	 *
+	 * <p>为什么要求拓扑签名一致：只靠"同方法同序号"会允许"删掉一个、加一个"被误当改名；
+	 * 拓扑签名（结构，不含方法体）相同才说明是同一处声明的同一形状。</p>
+	 */
+	private static void matchRenamedDeclarationSites(
+	 Set<AnonInfo> remainingNew, Set<AnonInfo> remainingOld,
+	 Map<AnonInfo, AnonInfo> matchedNewToOld, AlignmentStats stats, String hostSlash) {
+
+		Map<String, List<AnonInfo>> oldBySite = new LinkedHashMap<>();
+		Map<String, List<AnonInfo>> newBySite = new LinkedHashMap<>();
+		for (AnonInfo o : remainingOld) oldBySite.computeIfAbsent(siteKey(o), k -> new ArrayList<>()).add(o);
+		for (AnonInfo n : remainingNew) newBySite.computeIfAbsent(siteKey(n), k -> new ArrayList<>()).add(n);
+
+		List<AnonInfo> pairedNew = new ArrayList<>();
+		List<AnonInfo> pairedOld = new ArrayList<>();
+		for (Map.Entry<String, List<AnonInfo>> e : newBySite.entrySet()) {
+			if (e.getValue().size() != 1) continue;
+			List<AnonInfo> olds = oldBySite.get(e.getKey());
+			if (olds == null || olds.size() != 1) continue;
+			AnonInfo n = e.getValue().get(0);
+			AnonInfo o = olds.get(0);
+			if (n.name.equals(o.name)) continue;                       // 同名的不归本层管
+			if (n.orderIndex < 0 || o.orderIndex != n.orderIndex) continue;
+			if (n.topology == null || o.topology == null) continue;     // 拓扑未知不是证据
+			if (!n.topology.equals(o.topology)) continue;
+			if (!LayoutGate.MODE_OFF.equals(RemoldAgent.ANON_LAYOUT_GATE)
+			    && !LayoutGate.check(o.fieldInfos, n.fieldInfos).compatible()) continue;
+			pairedNew.add(n);
+			pairedOld.add(o);
+		}
+		for (int i = 0; i < pairedNew.size(); i++) {
+			AnonInfo n = pairedNew.get(i);
+			AnonInfo o = pairedOld.get(i);
+			matchedNewToOld.put(n, o);
+			if (stats != null) stats.declarationSitePairs++;
+			RemoldAgent.warn("[ANON-RENAMED-SITE] " + n.name + " -> " + o.name
+			                 + ": same declaration site (" + n.outerMethod + " #" + n.orderIndex
+			                 + ") with an identical topology signature; the declaration was renamed");
+		}
+		remainingOld.removeAll(pairedOld);
+		remainingNew.removeAll(pairedNew);
+	}
+
+	/** 声明点身份：外层方法 + 描述符 + 序号。 */
+	private static String siteKey(AnonInfo a) {
+		return a.outerMethod + '\u0000' + a.outerMethodDesc + '\u0000' + a.orderIndex;
+	}
+
 	private static void matchZeroScanPairs(
 	 Set<AnonInfo> remainingNew, Set<AnonInfo> remainingOld,
 	 Map<AnonInfo, AnonInfo> matchedNewToOld, AlignmentStats stats,

@@ -226,8 +226,9 @@ final class BatchHotswapExecutor {
 				changedOnDisk = (oldHash == -1 || oldHash == LongLongMap.NOT_FOUND || oldHash != newHash);
 			}
 			if (!changedOnDisk) continue;
-			String host = AnonClassAligner.batchAnonHost(cn);
-			if (host != null && !host.equals(cn) && AnonClassAligner.isBatchAnonClass(cn, entry.getValue())) {
+			String host = AnonHostResolver.hostOf(cn, entry.getValue());
+			if (host != null && !host.equals(Names.internal(cn))
+			    && AnonClassAligner.isBatchAnonClass(cn, entry.getValue())) {
 				hostClassesToAlign.add(host);        // 匿名类变了：宿主跟着对齐
 			} else {
 				hostClassesToAlign.add(cn);          // 宿主自己变了：它的匿名类要跟着对齐
@@ -257,9 +258,9 @@ final class BatchHotswapExecutor {
 		if (!hostClassesToAlign.isEmpty()) {
 			for (Map.Entry<String, Class<?>> entry : loadedClassesMap.entrySet()) {
 				String cName = entry.getKey();
-				String host = resolveAnonHostCandidate(cName, hostClassesToAlign, singleAlignHost);
+				String host = resolveAnonHostCandidate(cName, null, hostClassesToAlign, singleAlignHost);
 				if (host == null) continue;
-				if (!AnonClassAligner.isAnonymousClassName(host, cName)) continue;
+				if (!AnonHostResolver.isAnonymousName(cName, host)) continue;
 				if (hasRuntimeBytecode(cName)) continue;
 				byte[] bc = fetchOriginalBytecode(entry.getValue());
 				if (bc != null && AnonClassAligner.isBatchAnonClass(cName, bc)) recordRuntimeBytecode(cName, bc);
@@ -269,10 +270,10 @@ final class BatchHotswapExecutor {
 		if (!hostClassesToAlign.isEmpty()) {
 			for (Map.Entry<String, byte[]> entry : runtimeBytecodeEntries()) {
 				String cName = entry.getKey();
-				String host = resolveAnonHostCandidate(cName, hostClassesToAlign, singleAlignHost);
-				if (host == null) continue;
 				byte[] src = getSourceBytecode(cName);
 				byte[] oldBytes = src != null ? src : entry.getValue();
+				String host = resolveAnonHostCandidate(cName, oldBytes, hostClassesToAlign, singleAlignHost);
+				if (host == null) continue;
 				if (!AnonClassAligner.isBatchAnonClass(cName, oldBytes)) continue;
 				oldAnonsByHost.computeIfAbsent(host, k -> new HashMap<>()).put(cName, oldBytes);
 			}
@@ -1522,7 +1523,7 @@ final class BatchHotswapExecutor {
 	}
 
 	static String resolveAnonHostCandidate(
-	 String cName, Set<String> hostClassesToAlign, String singleHost
+	 String cName, byte[] bytes, Set<String> hostClassesToAlign, String singleHost
 	) {
 		int len = cName.length();
 		if (len == 0) return null;
@@ -1530,12 +1531,13 @@ final class BatchHotswapExecutor {
 		if (last < '0' || last > '9') return null;
 		if (singleHost != null) {
 			int hostLen = singleHost.length();
-			if (len <= hostLen + 1 || cName.charAt(hostLen) != '$' || !cName.startsWith(singleHost)) {
-				return null;
+			if (len > hostLen + 1 && cName.charAt(hostLen) == '$' && cName.startsWith(singleHost)) {
+				return singleHost;   // 单宿主模式：宿主已指定，无需解析
 			}
 		}
-		String host = AnonClassAligner.batchAnonHost(cName);
-		return (host != null && !host.equals(cName) && hostClassesToAlign.contains(host)) ? host : null;
+		String host = AnonHostResolver.hostOf(cName, bytes);
+		return (host != null && !host.equals(Names.internal(cName)) && hostClassesToAlign.contains(host))
+		 ? host : null;
 	}
 
 	/**

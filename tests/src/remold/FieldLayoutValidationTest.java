@@ -20,7 +20,7 @@ class FieldLayoutValidationTest {
 		List<FieldInfo> fs = List.of(new FieldInfo(fieldName, desc, false, true));
 		return new AnonClassAligner.AnonInfo(
 			"X$1", new byte[]{}, 1L, "java/lang/Object", List.of(),
-			"run", "()V", List.of(), List.of(), 1, null, fs, fs);
+			"run", "()V", List.of(), List.of(), 1, null, "X", 1, fs, fs);
 	}
 
 	private static Map<AnonClassAligner.AnonInfo, AnonClassAligner.AnonInfo> pair(String newDesc, String oldDesc) {

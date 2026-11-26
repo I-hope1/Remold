@@ -190,6 +190,13 @@ public final class AnonClassAligner {
 		 */
 		public int  deterministicZeroScanPairs;
 		/**
+		 * Tier 3.6「同一声明点改名」配对数。
+		 *
+		 * <p>判据是外层方法 + 描述符 + 序号在剩余集里各自唯一、拓扑签名一致、布局门兼容；
+		 * 每一对都在日志里带 {@code [ANON-RENAMED-SITE]} 留痕，便于把"改名配对"与"结构唯一匹配"分开审计。</p>
+		 */
+		public int  declarationSitePairs;
+		/**
 		 * @deprecated 0.2.6 的旧字段名，仅为下游二进制兼容保留；值与
 		 * {@link #deterministicZeroScanPairs} 同步，勿在新代码里读取。
 		 */
@@ -586,6 +593,17 @@ public final class AnonClassAligner {
 				}
 			}
 
+			// ---- 跨作用域的声明点补配（局部变量改名）----
+			//
+			// kotlinc 把局部变量名拼进类名，改名后旧 `$m$first$1` 与新 `$m$renamedFirst$1` 的
+			// **名字父级不同**，于是被分到不同作用域：两侧在同一层级里根本见不到彼此，逐层配对永远配不上
+			// （真机读数：level 1 old=0 new=0，改名后的类落在 level 3、作用域是个不存在的父级）。
+			// 这里在逐层推进结束后，对**仍未被认领**的类补一次"同声明点"配对：外层方法 + 描述符 + 序号
+			// 在剩余集里各自唯一、拓扑签名一致、布局门兼容。只在放不进任何既有作用域时生效，不改既有层级语义。
+			if (!RemoldAgent.ANON_STRICT) {
+				matchRenamedAcrossScopes(oldInfos, newInfos, matchedNewToOld, renameMap, stats, hostSlash);
+			}
+
 			// 收集孤儿类
 			Set<String> matchedOldNames = new HashSet<>();
 			for (AnonInfo o : matchedNewToOld.values()) {
@@ -680,7 +698,10 @@ public final class AnonClassAligner {
 			}
 
 			// 后置严格校验 (Validation Invariants)：单射/前缀 + 改名后字段布局
-			validateRenameMap(renameMap, hostSlash, matchedNewToOld);
+			Set<String> knownNames = new HashSet<>();
+			for (AnonInfo o : oldInfos) knownNames.add(o.name);
+			for (AnonInfo n : newInfos) knownNames.add(n.name);
+			validateRenameMap(renameMap, hostSlash, matchedNewToOld, knownNames);
 			dbg("renameMap=" + renameMap);
 
 			// 应用 ClassRemapper 重写所有新匿名类字节码
@@ -752,6 +773,30 @@ public final class AnonClassAligner {
 		return anonSlash.substring(0, lastDollar);
 	}
 
+	/**
+	 * 按**解析出的外层链**算嵌套层级：父级是宿主 → 1 层；父级本身是匿名类 → 父级层级 + 1。
+	 *
+	 * <p>为什么不能用名字数 {@code $} 段：kotlinc 把属性名/方法名/局部变量名拼进类名，
+	 * {@code Host$makeLocalNamedAnons$renamedFirst$1} 数出来是 3 层、父级是个从不存在的名字，
+	 * 于是新旧两侧被分到**不同作用域**，同一处声明改个名就再也配不上（真机读数：level 1 old=0 new=0，
+	 * 改名后的类落在 level 3 且作用域是假父级）。层级只能来自 {@code EnclosingMethod} 链。</p>
+	 */
+	private static int hierarchyLevel(String hostSlash, String name, String enclosing,
+	                                  Function<String, byte[]> resolver) {
+		int    level = 1;
+		String cur   = enclosing;
+		Set<String> seen = new HashSet<>();
+		while (cur != null && cur.startsWith(hostSlash + "$") && seen.add(cur)) {
+			level++;
+			byte[] bytes = resolver != null ? resolver.apply(cur) : null;
+			String parent = bytes != null ? AnonHostResolver.resolve(cur, bytes).host() : getParentName(hostSlash, cur);
+			if (parent == null || parent.equals(cur)) break;
+			cur = parent;
+			if (level > 8) break;   // 防御：解析链异常时不要无限上溯
+		}
+		return level;
+	}
+
 	public static class EnclosingMethodInfo {
 		public final String name;
 		public final String desc;
@@ -806,6 +851,21 @@ public final class AnonClassAligner {
 	 */
 	public static void validateRenameMap(Map<String, String> renameMap, String hostSlash,
 	                                     Map<AnonInfo, AnonInfo> matchedNewToOld) {
+		validateRenameMap(renameMap, hostSlash, matchedNewToOld, null);
+	}
+
+	/**
+	 * 同上，但知道本批里**真实存在**的类名时，对"名字父级不存在"的源类放行前缀不变量。
+	 *
+	 * <p>为什么：kotlinc 把局部变量名拼进类名，改名后源类的名字父级
+	 * （{@code $makeLocalNamedAnons$renamedFirst}）从来就不存在，任何目标名都不可能以它为前缀；
+	 * 这类映射的合法性已由"同一声明点 + 拓扑签名一致 + 布局门兼容"三重证据保证
+	 * （见 {@link #matchRenamedAcrossScopes}），前缀不变量对它们只会误杀。
+	 * 真实嵌套类（父级确实存在）仍走原检查，不放松。</p>
+	 */
+	public static void validateRenameMap(Map<String, String> renameMap, String hostSlash,
+	                                     Map<AnonInfo, AnonInfo> matchedNewToOld,
+	                                     Set<String> knownNames) {
 		if (renameMap == null || renameMap.isEmpty()) return;
 		Set<String> seenTargets = new HashSet<>();
 		for (Map.Entry<String, String> e : renameMap.entrySet()) {
@@ -816,11 +876,17 @@ public final class AnonClassAligner {
 				 "non-injective mapping: multiple classes map to " + tgt + " [ANON_ALIGN_VALIDATION]");
 			}
 			String srcParent      = getParentName(hostSlash, src);
-			String expectedPrefix = renameMap.getOrDefault(srcParent, srcParent);
-			if (!tgt.startsWith(expectedPrefix + "$")) {
+			boolean phantomParent = knownNames != null && !knownNames.contains(srcParent);
+			if (!phantomParent) {
+				String expectedPrefix = renameMap.getOrDefault(srcParent, srcParent);
+				if (!tgt.startsWith(expectedPrefix + "$")) {
+					throw new AlignmentRejectedException(hostSlash,
+					 "prefix invariant violated for " + src + " -> " + tgt +
+					 " (expected prefix: " + expectedPrefix + "$) [ANON_ALIGN_VALIDATION]");
+				}
+			} else if (!tgt.contains("$")) {
 				throw new AlignmentRejectedException(hostSlash,
-				 "prefix invariant violated for " + src + " -> " + tgt +
-				 " (expected prefix: " + expectedPrefix + "$) [ANON_ALIGN_VALIDATION]");
+				 "renamed declaration target " + tgt + " for " + src + " is not an anonymous slot [ANON_ALIGN_VALIDATION]");
 			}
 		}
 		if (matchedNewToOld != null && !matchedNewToOld.isEmpty()) {
@@ -860,6 +926,13 @@ public final class AnonClassAligner {
 	public static boolean isAnonymousClass(ClassNode cn, String hostClassName) {
 		if (cn == null || hostClassName == null) return false;
 		if ((cn.access & Opcodes.ACC_ENUM) != 0) return false;
+		String host = Names.internal(hostClassName);
+		// EnclosingMethod 是权威：kotlinc 的 Host$方法名$序号 在名字上不像匿名类，只有属性说得清。
+		if (cn.outerClass != null && !cn.outerClass.isEmpty()) {
+			// 宿主组会收集整族（含嵌套层）：外层匿名类的宿主是 host，内层的 EnclosingMethod 指外层匿名类，
+			// 因此沿 $ 边界做祖先判定，而不是只认相等。
+			return cn.outerClass.equals(host) || cn.outerClass.startsWith(host + "$");
+		}
 		if (cn.innerClasses != null) {
 			for (org.objectweb.asm.tree.InnerClassNode icn : cn.innerClasses) {
 				if (cn.name.equals(icn.name)) {
@@ -870,7 +943,7 @@ public final class AnonClassAligner {
 				}
 			}
 		}
-		return isAnonymousClassName(hostClassName, cn.name);
+		return AnonHostResolver.isAnonymousName(cn.name, host);
 	}
 
 	/** 字节版：解析失败一律按"不是匿名类"处理（解不开的字节也进不了对齐器，布局门仍会兜底）。 */
@@ -896,10 +969,11 @@ public final class AnonClassAligner {
 	 */
 	public static boolean isBatchAnonClass(String className, byte[] bytes) {
 		if (className == null || bytes == null) return false;
-		String host = batchAnonHost(className);
-		if (host == null || host.equals(className)) return false;
-		if (!isAnonymousClassName(host, className)) return false;
-		return isAnonymousClass(bytes, host);
+		// 宿主与"是否匿名"都由字节码属性决定：kotlinc 的 Host$方法名$序号 剥尾部数字会得到不存在的宿主，
+		// 只有 EnclosingMethod 能给出真实宿主（见 AnonHostResolver 的说明）。
+		AnonHostResolver.Identity id = AnonHostResolver.resolve(className, bytes);
+		if (!id.anonymous()) return false;
+		return !id.host().equals(Names.internal(className));
 	}
 
 	/** 匿名类的直接宿主（去掉尾部 {@code $数字} 链）。调用方须先用 {@link #isBatchAnonClass} 确认它是真匿名类。 */
@@ -932,9 +1006,15 @@ public final class AnonClassAligner {
 	public static Map<String, Map<String, byte[]>> groupBatchAnons(Map<String, byte[]> changedClasses) {
 		Map<String, Map<String, byte[]>> out = new LinkedHashMap<>();
 		if (changedClasses == null) return out;
+		java.util.Set<String> known = new java.util.HashSet<>();
+		for (String k : changedClasses.keySet()) {
+			known.add(k);
+			known.add(Names.internal(k));
+		}
 		for (Map.Entry<String, byte[]> e : changedClasses.entrySet()) {
 			if (!isBatchAnonClass(e.getKey(), e.getValue())) continue;
-			out.computeIfAbsent(batchAnonHost(e.getKey()), k -> new LinkedHashMap<>())
+			out.computeIfAbsent(AnonHostResolver.groupHost(e.getKey(), e.getValue(), known),
+					k -> new LinkedHashMap<>())
 				.put(e.getKey(), e.getValue());
 		}
 		return out;
@@ -1139,6 +1219,14 @@ public final class AnonClassAligner {
 		final List<String>               fields;
 		final List<String>               methods;
 		final int                        orderIndex;
+		/**
+		 * 解析出的**直接外层类**（内部名）：优先取该类自己的 {@code EnclosingMethod}，取不到时退回名字剥离。
+		 * 嵌套匿名对象的父级是外层**匿名类**，不是宿主（实测 kotlinc：{@code $outerAnon$1$innerObj$1}
+		 * → {@code $outerAnon$1}）。
+		 */
+		final String                     enclosing;
+		/** 解析出的嵌套层级：直接挂在宿主下为 1，挂在某个匿名类下为父级层级 + 1。 */
+		final int                        level;
 		/** 拓扑签名；{@code null} 表示未知（不得当作与任何签名相等） */
 		final TopologySignature          topology;
 		/**
@@ -1169,6 +1257,8 @@ public final class AnonClassAligner {
 		 List<String> methods,
 		 int orderIndex,
 		 TopologySignature topology,
+		 String enclosing,
+		 int level,
 		 List<LayoutGate.FieldInfo> fieldInfos,
 		 List<LayoutGate.FieldInfo> rawFieldInfos) {
 			this.name = name;
@@ -1182,6 +1272,8 @@ public final class AnonClassAligner {
 			this.methods = methods;
 			this.orderIndex = orderIndex;
 			this.topology = topology;
+			this.enclosing = enclosing;
+			this.level = level;
 			this.fieldInfos = fieldInfos;
 			this.rawFieldInfos = rawFieldInfos;
 		}
@@ -1210,11 +1302,25 @@ public final class AnonClassAligner {
 		if (input == null) return result;
 		for (Map.Entry<String, byte[]> entry : input.entrySet()) {
 			String name = entry.getKey().replace('.', '/');
-			if (isAnonymousClassName(hostSlash, name)) {
+			// 与 collectAnonInfos 同一判据：属性优先。名字判据只认 Host$数字，会把 kotlinc 的
+			// Host$方法名$序号 整批过滤掉 —— 那正是"对齐器看到 0 个类、于是什么都没做"的成因。
+			ClassNode cn = parseNode(entry.getValue());
+			if (cn != null ? isAnonymousClass(cn, hostSlash) : AnonHostResolver.isAnonymousName(name, hostSlash)) {
 				result.put(name, entry.getValue());
 			}
 		}
 		return result;
+	}
+
+	private static ClassNode parseNode(byte[] bytes) {
+		if (bytes == null || bytes.length == 0) return null;
+		try {
+			ClassNode cn = new ClassNode();
+			new ClassReader(bytes).accept(cn, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+			return cn;
+		} catch (RuntimeException e) {
+			return null;
+		}
 	}
 
 	public static String normalizeEnclosingMethod(String outerMethod) {
@@ -1408,10 +1514,16 @@ public final class AnonClassAligner {
 				Collections.sort(methods);
 			}
 
-			int orderIdx = parseIndex(hostSlash, name);
+			// 序号取自解析器（尾部数字链），不能用严格名字判据：kotlinc 的 Host$方法名$序号 在
+			// parseIndex 眼里不是匿名类名，会一律返回 -1，于是"同声明点改名"配对永远没有序号可用。
+			int parsedIdx = parseIndex(hostSlash, name);
+			int orderIdx  = parsedIdx >= 0 ? parsedIdx : AnonHostResolver.resolve(name, bytes).index();
+			AnonHostResolver.Identity id = AnonHostResolver.resolve(name, bytes);
+			String enclosing = id.byAttribute() ? id.host() : getParentName(hostSlash, name);
 			list.add(new AnonInfo(
 			 name, bytes, hash, superName, interfaces,
 			 outerMethod, outerMethodDesc, fields, methods, orderIdx, topology,
+			 enclosing, hierarchyLevel(hostSlash, name, enclosing, resolver),
 			 LayoutGate.of(cn.fields, descMasker::maskDescriptor),
 			 LayoutGate.of(cn.fields)
 			));
@@ -1541,6 +1653,18 @@ public final class AnonClassAligner {
 		if (!RemoldAgent.ANON_STRICT && !remainingNew.isEmpty() && !remainingOld.isEmpty()) {
 			matchByBodySimilarity(remainingNew, remainingOld, matchedNewToOld, stats,
 			 tier4Predicate, hostSlash, startNanos);
+		}
+
+		// ---- Tier 3.6：同一**声明点**内的改名配对 ----
+		//
+		// kotlinc 把局部变量名拼进类名：`Host$makeLocalNamedAnons$first$1` 改名成
+		// `Host$makeLocalNamedAnons$renamedFirst$1` 后，旧类与新类名字不同，前四层都无从配对，
+		// 旧类只能落孤儿、存量实例永远停在旧版本（真机读数：localFirst 停在 v1）。
+		// 声明点身份是（外层方法 + 外层方法描述符 + 序号）：两者相同、双方在**剩余集**里各自唯一、
+		// 拓扑签名一致、且布局门判兼容时，才认定为"同一个声明点改了名"。
+		// 与 Tier 3.5 同理不参与 strict（strict 的语义是"没有唯一证据就整组拒绝"）。
+		if (!RemoldAgent.ANON_STRICT && !remainingNew.isEmpty() && !remainingOld.isEmpty()) {
+			matchRenamedDeclarationSites(remainingNew, remainingOld, matchedNewToOld, stats, hostSlash);
 		}
 
 		// ---- Tier 4.5：扫描可见零存活的确定性兜底 ----
@@ -1992,6 +2116,128 @@ public final class AnonClassAligner {
 	 * 日志必须显式打出 {@code deterministic-zero-scan-pair (scan-visible live instances: 0)}，
 	 * 并在宿主字段可能持有时点名字段（{@code docs/topology/04-tiers-and-rejection.md} §2.4）。</p>
 	 */
+	/**
+	 * 同一声明点改名配对：外层方法 + 描述符 + 序号相同，双方在剩余集里各自唯一。
+	 *
+	 * <p>为什么需要它：kotlinc 的类名含局部变量名，改名后旧/新类名不同，内容哈希与"同类名"这类证据
+	 * 全部失效，旧类只能落孤儿。声明点身份不随变量名变化，是这种情况下唯一可审计的线索。</p>
+	 *
+	 * <p>为什么要求拓扑签名一致：只靠"同方法同序号"会允许"删掉一个、加一个"被误当改名；
+	 * 拓扑签名（结构，不含方法体）相同才说明是同一处声明的同一形状。</p>
+	 */
+	/**
+	 * 跨作用域的"同一声明点改名"补配。
+	 *
+	 * <p>与逐层内的 {@link #matchRenamedDeclarationSites} 判据相同，区别是候选集取全局剩余集，
+	 * 因此不受"名字父级"造成的假作用域切分影响。只处理逐层推进后**仍未被认领**的类，
+	 * 不会改变任何已有配对。</p>
+	 */
+	private static void matchRenamedAcrossScopes(
+	 List<AnonInfo> oldInfos, List<AnonInfo> newInfos,
+	 Map<AnonInfo, AnonInfo> matchedNewToOld, Map<String, String> renameMap,
+	 AlignmentStats stats, String hostSlash) {
+
+		Set<String> oldNames = new HashSet<>();
+		for (AnonInfo o : oldInfos) oldNames.add(o.name);
+		Set<String> allNames = new HashSet<>(oldNames);
+		for (AnonInfo n : newInfos) allNames.add(n.name);
+
+		// 只有"映射到真实旧类"才算已配对：逐层推进会给没人认领的新类分配一个**自留名**
+		// （它自己的名字或宿主下的新编号），那不是配对证据，否则改名场景永远进不来。
+		Set<String> claimedNew = new HashSet<>();
+		for (Map.Entry<String, String> e : renameMap.entrySet()) {
+			if (oldNames.contains(e.getValue())) claimedNew.add(e.getKey());
+		}
+		Set<String> claimedOld = new HashSet<>();
+		for (AnonInfo o : matchedNewToOld.values()) claimedOld.add(o.name);
+
+		Map<String, List<AnonInfo>> oldBySite = new LinkedHashMap<>();
+		for (AnonInfo o : oldInfos) {
+			if (claimedOld.contains(o.name)) continue;
+			if (!hostSlash.equals(o.enclosing)) continue;
+			if (allNames.contains(getParentName(hostSlash, o.name))) continue;
+			oldBySite.computeIfAbsent(siteKey(o), k -> new ArrayList<>()).add(o);
+		}
+
+		// 只处理"名字父级并不存在"的类：那正是 kotlinc 把**局部变量名**拼进类名造成的假父级
+		// （`$makeLocalNamedAnons$first`）。嵌套匿名对象的父级是真实的外层匿名类，那种情形逐层推进
+		// 本来就能配对，不需要这条通道；放进来反而会把两个相邻声明（`innerObj` / `innerAnons`）误配。
+		// 判据：**属性说它是宿主的直接子类**（enclosing == 宿主），但名字把它放得更深（假父级）。
+		// 这正是"局部变量名被拼进类名 + 变量改名"的形态；真正的嵌套匿名对象 EnclosingMethod 指向
+		// 外层匿名类，不满足第一条，因此不会被这条通道捞走（否则 innerObj / innerAnons 会被误配）。
+		Map<String, List<AnonInfo>> newBySite = new LinkedHashMap<>();
+		for (AnonInfo n : newInfos) {
+			if (claimedNew.contains(n.name)) continue;
+			if (!hostSlash.equals(n.enclosing)) continue;
+			if (allNames.contains(getParentName(hostSlash, n.name))) continue;
+			newBySite.computeIfAbsent(siteKey(n), k -> new ArrayList<>()).add(n);
+		}
+
+		for (Map.Entry<String, List<AnonInfo>> e : newBySite.entrySet()) {
+			if (e.getValue().size() != 1) continue;
+			List<AnonInfo> olds = oldBySite.get(e.getKey());
+			if (olds == null || olds.size() != 1) continue;
+			AnonInfo n = e.getValue().get(0);
+			AnonInfo o = olds.get(0);
+			if (n.name.equals(o.name)) continue;                       // 同名不归本层管
+			if (n.orderIndex < 0 || o.orderIndex != n.orderIndex) continue;
+			if (n.topology == null || o.topology == null) continue;     // 拓扑未知不是证据
+			if (!n.topology.equals(o.topology)) continue;
+			if (!LayoutGate.MODE_OFF.equals(RemoldAgent.ANON_LAYOUT_GATE)
+			    && !LayoutGate.check(o.fieldInfos, n.fieldInfos).compatible()) continue;
+			matchedNewToOld.put(n, o);
+			renameMap.put(n.name, o.name);
+			if (stats != null) stats.declarationSitePairs++;
+			RemoldAgent.warn("[ANON-RENAMED-SITE] " + n.name + " -> " + o.name
+			                 + ": same declaration site (" + n.outerMethod + " #" + n.orderIndex
+			                 + ") across scopes, identical topology signature; the declaration was renamed");
+		}
+	}
+
+	private static void matchRenamedDeclarationSites(
+	 Set<AnonInfo> remainingNew, Set<AnonInfo> remainingOld,
+	 Map<AnonInfo, AnonInfo> matchedNewToOld, AlignmentStats stats, String hostSlash) {
+
+		Map<String, List<AnonInfo>> oldBySite = new LinkedHashMap<>();
+		Map<String, List<AnonInfo>> newBySite = new LinkedHashMap<>();
+		for (AnonInfo o : remainingOld) oldBySite.computeIfAbsent(siteKey(o), k -> new ArrayList<>()).add(o);
+		for (AnonInfo n : remainingNew) newBySite.computeIfAbsent(siteKey(n), k -> new ArrayList<>()).add(n);
+
+		List<AnonInfo> pairedNew = new ArrayList<>();
+		List<AnonInfo> pairedOld = new ArrayList<>();
+		for (Map.Entry<String, List<AnonInfo>> e : newBySite.entrySet()) {
+			if (e.getValue().size() != 1) continue;
+			List<AnonInfo> olds = oldBySite.get(e.getKey());
+			if (olds == null || olds.size() != 1) continue;
+			AnonInfo n = e.getValue().get(0);
+			AnonInfo o = olds.get(0);
+			if (n.name.equals(o.name)) continue;                       // 同名的不归本层管
+			if (n.orderIndex < 0 || o.orderIndex != n.orderIndex) continue;
+			if (n.topology == null || o.topology == null) continue;     // 拓扑未知不是证据
+			if (!n.topology.equals(o.topology)) continue;
+			if (!LayoutGate.MODE_OFF.equals(RemoldAgent.ANON_LAYOUT_GATE)
+			    && !LayoutGate.check(o.fieldInfos, n.fieldInfos).compatible()) continue;
+			pairedNew.add(n);
+			pairedOld.add(o);
+		}
+		for (int i = 0; i < pairedNew.size(); i++) {
+			AnonInfo n = pairedNew.get(i);
+			AnonInfo o = pairedOld.get(i);
+			matchedNewToOld.put(n, o);
+			if (stats != null) stats.declarationSitePairs++;
+			RemoldAgent.warn("[ANON-RENAMED-SITE] " + n.name + " -> " + o.name
+			                 + ": same declaration site (" + n.outerMethod + " #" + n.orderIndex
+			                 + ") with an identical topology signature; the declaration was renamed");
+		}
+		remainingOld.removeAll(pairedOld);
+		remainingNew.removeAll(pairedNew);
+	}
+
+	/** 声明点身份：外层方法 + 描述符 + 序号。 */
+	private static String siteKey(AnonInfo a) {
+		return a.outerMethod + '\u0000' + a.outerMethodDesc + '\u0000' + a.orderIndex;
+	}
+
 	private static void matchZeroScanPairs(
 	 Set<AnonInfo> remainingNew, Set<AnonInfo> remainingOld,
 	 Map<AnonInfo, AnonInfo> matchedNewToOld, AlignmentStats stats,

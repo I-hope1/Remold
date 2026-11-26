@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Kotlin 匿名类被当成"宿主不存在"的整族（P0，`reload`）**：宿主是从类名剥尾部 `$<数字>` 得到的。JVM 规范
+  里的匿名类确实叫 `Host$1`，但 kotlinc 把属性名/方法名/局部变量名拼进类名：`KtAnonTarget$propAnonA$1`、
+  `KtAnonTarget$makeUnnamedAnons$1..$3`、`KtAnonTarget$makeLocalNamedAnons$first$1`、
+  `KtAnonTarget$outerAnon$1$innerObj$1`。剥完得到的是**从不存在的宿主**（`KtAnonTarget$propAnonA`），
+  于是这一族在宿主解析阶段被整批移出，或按假宿主分组后编号冲突。实测 kotlinc 2.3.0 产物：每个匿名类都带
+  `EnclosingMethod` 指向真实外层类，而 `InnerClasses` 的 `outer_name_index` 是 0（取不到宿主）——宿主只能
+  从 `EnclosingMethod` 取。新增 `AnonHostResolver` 统一解析宿主/后缀路径/序号，分组、拒绝通道、Stage A
+  目标校验共用同一份判据。真机读数：三轮序列的违规从 8 条降到 0。
+- **对齐器对 Kotlin 具名匿名类"看不到任何类"**：`normalizeMap` 用 `Host$数字` 名字判据过滤输入，kotlinc
+  形态被整批过滤掉，对齐器看到 0 个类、产出空 rename map 却对外表现为"处理过了"。改为属性优先判据。
+- **局部变量改名后存量实例永远停在旧版本**：改名让类名从 `$m$first$1` 变成 `$m$renamedFirst$1`，名字父级
+  是从不存在的 `$m$first`，两侧被分到不同作用域（实测 `level 1: old=0 new=0`，改名类落到 level 3 的假父级），
+  逐层推进永远配不上。新增跨作用域"同声明点"补配（外层方法 + 描述符 + 序号唯一、拓扑签名一致、布局兼容），
+  并对"源码父级不存在"的映射放行前缀不变量。真机读数：改名后存量实例到达 v4。
+- **序号的来源**：`parseIndex` 对 kotlinc 形态恒返回 -1，任何按声明序号排序的层都是瞎的；改为从解析器取。
+
+### Added
+
 - **`@JvmStatic @OnReload` 双触发**：`companion object` 里的 `@JvmStatic @OnReload fun ping()` 在字节码上出现两次
   ——外层类的静态转发器 + 它委派的 `Companion` 实例方法。派发按类遍历已标注方法，于是同一次热更里回调体执行
   两遍（探针实测 `actual=2`）；重建缓存、翻转标志一类的回调会把工作做两遍。派发现在按**实现**去重

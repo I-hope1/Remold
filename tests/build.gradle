@@ -1536,6 +1536,33 @@ remoldAgentDcevmProbe("initFixUnexpressibleProbe", "InitFixUnexpressibleProbe",
 remoldAgentDcevmProbe("layoutRejectRecoverProbe", "LayoutRejectRecoverProbe",
 	"LayoutGate reject -> next-round recover E2E: reject keeps live state/caches intact, no pending poison, next legal round applies")
 
+// ------------------------------------------------------------------------------------------------
+// F3: Kotlin 2.3 anonymous-class extreme sequence on the real batch (real kotlinc fixtures).
+//
+// 三轮序列：R1 未命名匿名对象互换 + 改体 / R2 具名匿名对象新增字段（InitFix 两阶段）/
+// R3 局部变量改名 + 嵌套顺延重编号 + 捕获增长。夹具由 Gradle 缓存里的 kotlinc 2.3.0 现编
+// （不变量 C2：不用 ASM 复刻替身），编译产物目录挂在探针 classpath 上，批次走真实
+// processChanges 路径。不挂 check（需要 JBR/DCEVM）：
+//   ./gradlew :tests:kotlinAnonSequenceProbe -Pp05.jbr=/opt/idea/jbr
+// ------------------------------------------------------------------------------------------------
+remoldAgentDcevmProbe("kotlinAnonSequenceProbe", "KotlinAnonSequenceProbe",
+	"Kotlin 2.3 anonymous-class extreme sequence: unnamed swap / added field via InitFix / local rename + nested renumber + capture growth, all on real kotlinc fixtures")
+
+tasks.named("kotlinAnonSequenceProbe") {
+	def ktanonRoot = layout.buildDirectory.dir("ktanon")
+	def liveDir = ktanonRoot.map { it.dir("live") }
+	// 夹具产物目录必须在 JVM 启动时就在 classpath 上：kotlinc 是探针运行期才跑，类按需从磁盘加载。
+	classpath = sourceSets.main.runtimeClasspath + files(liveDir)
+	systemProperty "remold.ktanon.src", file("ktanon").absolutePath
+	systemProperty "remold.ktanon.dir", ktanonRoot.get().asFile.absolutePath
+	systemProperty "remold.ktanon.gradleUserHome",
+		(System.getenv("GRADLE_USER_HOME") ?: gradle.gradleUserHomeDir.absolutePath)
+	doFirst {
+		delete ktanonRoot
+		liveDir.get().asFile.mkdirs()
+	}
+}
+
 tasks.register("doubleBraceProbe", JavaExec) {
 	group = "verification"
 	description = "双括号匿名类 A~E / B2 调查探针"

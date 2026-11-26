@@ -44,6 +44,10 @@ public class NestedAnonHostOldSideProbe {
 	static int failed = 0;
 	static final List<String> logs = new ArrayList<>();
 
+	static void note(String msg) {
+		System.out.println("NOTE " + msg);
+	}
+
 	static void check(boolean ok, String msg) {
 		System.out.println((ok ? "NAH-PASS " : "NAH-FAIL ") + msg);
 		if (ok) passed++; else failed++;
@@ -119,6 +123,7 @@ public class NestedAnonHostOldSideProbe {
 		System.out.println("=== NestedAnonHostOldSideProbe: old side of an anonymous host ===");
 		Instrumentation inst = RemoldAgent.getInstrumentation();
 		check(inst != null, "P0 instrumentation is available");
+		AgentFreshness.verify(NestedAnonHostOldSideProbe::check, NestedAnonHostOldSideProbe::note);
 		check(RemoldAgent.isEnhancedHotswapEnabled(), "P0 enhanced class redefinition is enabled (JBR/DCEVM)");
 		if (inst == null) { summary(); System.exit(1); return; }
 		RemoldAgent.logger = new CaptureLogger();

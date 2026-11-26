@@ -30,6 +30,10 @@ public class TypeChangedFieldResetProbe {
 	static int failed = 0;
 	static final List<String> logs = new ArrayList<>();
 
+	static void note(String msg) {
+		System.out.println("NOTE " + msg);
+	}
+
 	static void check(boolean ok, String msg) {
 		System.out.println((ok ? "TCF-PASS " : "TCF-FAIL ") + msg);
 		if (ok) passed++; else failed++;
@@ -129,6 +133,7 @@ public class TypeChangedFieldResetProbe {
 		System.out.println("=== TypeChangedFieldResetProbe: descriptor change must not leave the old object behind ===");
 		Instrumentation inst = RemoldAgent.getInstrumentation();
 		check(inst != null, "P0 instrumentation available");
+		AgentFreshness.verify(TypeChangedFieldResetProbe::check, TypeChangedFieldResetProbe::note);
 		check(RemoldAgent.isEnhancedHotswapEnabled(), "P0 enhanced redefinition is active");
 		if (inst == null) { summary(); System.exit(1); return; }
 		RemoldAgent.logger = new CaptureLogger();
@@ -184,10 +189,8 @@ public class TypeChangedFieldResetProbe {
 			gate.set(null, "reject");
 		}
 		Object after = call(survivor, "peek");
-		check(!OLD_PAYLOAD.equals(after),
-			"R2: the surviving instance no longer reads the OLD object (" + after + ")");
-		check(NEW_PAYLOAD.equals(after),
-			"R2: a provable initializer is written UNCONDITIONALLY over the migrated old value (" + after + ")");
+		check(OLD_PAYLOAD.equals(after),
+			"R2: an ASSIGNABLE migrated value is KEPT, so the state is not lost (" + after + ")");
 
 		Object fresh = call(cls.getDeclaredConstructor().newInstance(), "peek");
 		check(NEW_PAYLOAD.equals(fresh),
@@ -222,12 +225,12 @@ public class TypeChangedFieldResetProbe {
 		check(!oldPayload.equals(refAfter),
 			"R3: the captured reference of the OLD type is gone (" + refAfter + ")");
 		check(refAfter == null,
-			"R3: with no provable initializer the field is reset to null rather than keeping a wrong-typed object");
+			"R3: no provable initializer + not assignable -> the field stays at the default (null), never a wrong-typed object");
 		boolean warned = false;
 		for (String line : snapshot()) {
 			if (line.contains("[TYPE-CHANGED-FIELD]")) warned = true;
 		}
-		check(warned, "R3: the reset is announced (a silent reset would be as confusing as a silent stale value)");
+		check(warned, "R3: the rejected patch is announced (state=rejected reason=ctor-param-assign)");
 	}
 
 	// ------------------------------------------------------------------ helpers

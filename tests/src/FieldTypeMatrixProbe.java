@@ -29,6 +29,10 @@ public class FieldTypeMatrixProbe {
 	static int passed = 0;
 	static int failed = 0;
 
+	static void note(String msg) {
+		System.out.println("FTM-NOTE " + msg);
+	}
+
 	static void check(boolean ok, String msg) {
 		System.out.println((ok ? "FTM-PASS " : "FTM-FAIL ") + msg);
 		if (ok) passed++; else failed++;
@@ -101,6 +105,7 @@ public class FieldTypeMatrixProbe {
 		check(inst != null && RemoldAgent.isEnhancedHotswapEnabled(),
 			"P0 enhanced redefinition is active");
 		if (inst == null) { summary(); return; }
+		AgentFreshness.verify(FieldTypeMatrixProbe::check, FieldTypeMatrixProbe::note);
 		int index = 0;
 		for (Cell cell : CELLS) {
 			runCell(inst, cell, "ftm/Slot" + (index++));

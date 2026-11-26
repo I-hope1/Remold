@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **回退"类型改变字段无条件写"（#73 的回归）**：`FieldTypeMatrixProbe` 在 JBR 21 与 25.0.2 上的一致读数表明，DCEVM
+  迁移引用类型字段时**按旧值对象的实际类判定**——可赋值（`String`→`String`、`Integer`→`Number`、`ArrayList`→`List`、
+  `Object` 窄化到 `String`）保留原对象；不可赋值（`Integer`→`String`、`AtomicInteger`→`Integer`）或旧值为 `null` 时槽位
+  直接是 `null`；基本类型/装箱变更一律归零值。因此 #73 之前的"仅当槽位仍是类型默认值才写"守卫本来就是正确的，
+  #73 的无条件写既无必要（不可赋值时槽位已是默认值）又有害（可赋值时覆盖了合法状态，`ArrayList[kept-state]` → 空表）。
+  现已回退该无条件写与合成的清零切片，保留 `[TYPE-CHANGED-FIELD]` **只检测不写**的三态告警。
+  变异：恢复无条件写 → 存量状态丢失断言转红；取消类型改变检测 → 告警断言转红。
+
 - **类型改变的字段会留下"旧类型的对象"**：DCEVM 把描述符变更当作"删旧+加新"，但**存量实例槽位里的旧值会被迁移保留**
   （探针实测：真机 JBR 21 读回来仍是原对象）。此前该字段虽进入"新增字段"候选，但补丁走"仅当仍是类型默认值才写"的
   条件写，那个非默认的旧值让写入**静默跳过** —— 字段就以新类型的身份带着旧类型对象留在堆里：类型可赋值时静默作用在
@@ -28,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Class.getEnclosingClass()` 指到错误的类。
 
 ### Added
+
+- **探针证据口径前置断言**：新增 `tests/src/AgentFreshness.java` 作为唯一入口，探针启动时比对"实际加载的 agent 类"与
+  `core/build/classes/java/main` 产物的 SHA-256，并打印 `sha/branch/tree`。此前的代价是真实的：变异不转红曾被误判成
+  "断言不承载因果"，实际是工作区切了分支、探针跑的是上一版代码。
+- **CI 的 P0.5 探针矩阵加入 JBR 25 腿**（`17`/`21`/`25`）：现场运行期是 JBR 25.0.2，而此前只在 17/21 上验证。
 
 - **跨宿主复用的 JVM 层可行性探针**（`tests/src/DcevmCrossHostProbe.java`，真机 JBR 21.0.8）：把「字段描述符能否原地改」「嵌套类能否改属 `NestHost`」这两条一直靠推理的假设变成读数。结论：两条都成立——描述符 `LA;`→`LB;` 被当作
   "删旧字段+加新字段"接受，`NestHost`/`NestMembers` 可在同一轮改属且改后旧类名能访问新宿主私有成员。附带发现：

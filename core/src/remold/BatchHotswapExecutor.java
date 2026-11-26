@@ -238,6 +238,9 @@ final class BatchHotswapExecutor {
 		// 记录所有对齐过程中产生的旧孤儿类（不得在本次重定义中被误更新）
 		Set<String>                       allOrphanClasses = new HashSet<>();
 		Map<String, ClassLoader>          alignedAnonLoaders = new HashMap<>();
+		// 宿主改名累积表：本批里已确定 target 的匿名宿主 -> 它在编译期的旧名字。
+		// 内层宿主组用它认"字节里还写着旧名字"的子类（现场：外层 $4 -> $3 后内层的 EnclosingMethod 仍是 $4）。
+		Map<String, Set<String>>          hostAliases = new HashMap<>();
 		Map<String, AlignmentTransaction> transactions     = new LinkedHashMap<>();
 
 		// 【指纹延后落账】类名 hash → 新磁盘指纹。循环里只登记，不写 fileDiskHashes；
@@ -344,6 +347,7 @@ final class BatchHotswapExecutor {
 			Function<String, byte[]> newRes = name -> newBatchBytes.get(name.replace('/', '.'));
 
 			AnonClassAligner.Result res;
+			AnonClassAligner.setEnclosingAliases(hostAliases.getOrDefault(hostName, Collections.emptySet()));
 			try {
 				res = alignAnonClasses(hostSlash, hostBytes, oldAnon, newAnon, oldRes, newRes,
 				 BatchHotswapExecutor::hasLiveInstances,
@@ -352,6 +356,7 @@ final class BatchHotswapExecutor {
 				 // 破坏对齐结果的可确定性。
 				 Set.copyOf(AnnotationTransformer.pendingAlignedClasses.keySet()));
 			} catch (Throwable t) {
+				AnonClassAligner.clearEnclosingAliases();
 				// docs/topology/04-tiers-and-rejection.md §4：以「宿主类 + 其下属全部匿名类」为原子单元整体拒绝。
 				//
 				// 这里**必须** continue 而不能让异常冒泡：冒泡会让整个 processChanges 中断，
@@ -379,6 +384,7 @@ final class BatchHotswapExecutor {
 					"aligned host would reference anonymous class(es) with no bytes to install: " + missingTargets));
 				continue;
 			}
+			AnonClassAligner.clearEnclosingAliases();
 			if (res.alignedHostBytes != null) {
 				newBatchBytes.put(hostName, res.alignedHostBytes);
 			}
@@ -394,6 +400,10 @@ final class BatchHotswapExecutor {
 			// 若不传播，内层对齐就会以 $4 为宿主去旧侧找 $3 的内层（old=0），随后 Stage A 判定
 			// "宿主与其匿名类未一致重定义"整族回滚，存量内层实例永远停在旧版本。
 			Map<String, Map<String, String>> ancestorPatches = new LinkedHashMap<>();
+			for (Map.Entry<String, String> rename : res.renameMap.entrySet()) {
+				hostAliases.computeIfAbsent(Names.external(rename.getValue()), k -> new java.util.LinkedHashSet<>())
+					.add(Names.external(rename.getKey()));
+			}
 			for (Map.Entry<String, String> rename : res.renameMap.entrySet()) {
 				String outerTarget = Names.external(rename.getValue());
 				Map<String, String> childRenames = propagateAnonSubspace(

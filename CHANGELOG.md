@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **外层匿名类顺移后，内层嵌套匿名类被整类移出本批（现场：Kotlin 属性里的匿名对象）**：外层被匹配回旧槽位
+  （`Host$4`→`Host$3`）后，内层 `Host$4$innerObj$1` 的分组名虽已改写为 `Host$3$innerObj$1`，但**字节里**的
+  `EnclosingMethod` 仍写着编译期的 `Host$4`，准入判据拿它比对宿主 `Host$3` 判否 → 宿主层级桶为空
+  （`level 1: old=0, new=0`）→ 子类被 `ANON-NOT-ALIGNED` 移出本批，存量与新建实例都停在旧版本。
+  对齐器现在接受"能映射到本宿主的改名前的 EnclosingMethod 名字"（别名集合按宿主组设定、对齐结束即清空），
+  配对与改名都由对齐器自己完成，不再依赖"分组时先把名字改对"这一时序前提。
+- **捕获桥日志把重排报成缩减**：成因判据从"映射方案长度"改为"捕获表本身"（缩减 / 合成增长 / 重排 /
+  换类型四档），现场 2→2 的重排不再打印 `capture list shrank`。
+
+### Added
+
 - **lazy_load 下重编号匿名类必抛 `NoClassDefFoundError`**（崩溃级，现场：Mindustry + ModTools/Arc 把模式切成
   `lazy_load`）：对齐器重编号/新合成的匿名类，其**运行期名字**在磁盘上根本不存在（磁盘只有编译期名字，如
   `Host$3` 而宿主引用 `Host$5`），按名懒加载永远找不到 → 下一次 `new Host()` 直接崩。改为对这类类主动

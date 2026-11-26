@@ -260,26 +260,67 @@ final class BatchHotswapExecutor {
 		// 单遍按宿主分桶旧匿名类，避免在 hostClassesToAlign 外层循环里对全量 loadedClassesMap / bytecodeCache 做 O(H * N) 扫描与 ASM 解析。
 		String singleAlignHost = hostClassesToAlign.size() == 1 ? hostClassesToAlign.iterator().next() : null;
 		if (!hostClassesToAlign.isEmpty()) {
+			// 候选预筛：名字落在某个待对齐宿主之下。**不能**用"名字推导宿主"来做最终判定 ——
+			// kotlinc 把属性名拼进类名（Host$3$innerObj$1），剥掉尾部数字得到的是从不存在的
+			// Host$3$innerObj，于是该类的宿主解析为 null、永远进不了旧侧桶：
+			// 现场读数 host=Host$3 恒为 old=0，纯方法体修改也会被当成新类重新编号（$innerObj$2/$3），
+			// 存量实例永久停在旧代码且绕过布局门。宿主必须按字节码属性（EnclosingMethod）解析。
+			List<String> hostPrefixes = new ArrayList<>(hostClassesToAlign.size());
+			for (String h : hostClassesToAlign) hostPrefixes.add(Names.internal(h) + "$");
 			for (Map.Entry<String, Class<?>> entry : loadedClassesMap.entrySet()) {
 				String cName = entry.getKey();
-				String host = resolveAnonHostCandidate(cName, null, hostClassesToAlign, singleAlignHost);
-				if (host == null) continue;
-				if (!AnonHostResolver.isAnonymousName(cName, host)) continue;
+				String cSlash = Names.internal(cName);
+				if (cSlash.isEmpty()) continue;
+				char last = cSlash.charAt(cSlash.length() - 1);
+				if (last < '0' || last > '9') continue;      // 便宜的预筛：尾部是数字链
+				boolean underHost = false;
+				for (String prefix : hostPrefixes) {
+					if (cSlash.startsWith(prefix)) { underHost = true; break; }
+				}
+				if (!underHost) continue;
 				if (hasRuntimeBytecode(cName)) continue;
 				byte[] bc = fetchOriginalBytecode(entry.getValue());
+				// 有字节码就按属性解析（权威），没有才退回名字口径；不要求宿主已在待对齐集合里
+				// （集合建立于改名传播之前，属性宿主可能还是它的旧名字，见下方旧侧分桶的注释）。
+				String host = bc != null
+					? AnonHostResolver.hostOf(cName, bc)
+					: resolveAnonHostCandidate(cName, null, hostClassesToAlign, singleAlignHost);
+				if (host == null || Names.internal(cName).equals(host)) continue;
+				if (!AnonHostResolver.isAnonymousName(cName, host)) continue;
 				if (bc != null && AnonClassAligner.isBatchAnonClass(cName, bc)) recordRuntimeBytecode(cName, bc);
 			}
 		}
+		// 旧侧分桶：按**字节码属性**解析出的宿主分组，但**不以"待对齐宿主集合"作为入桶过滤条件**。
+		//
+		// 现场形态：外层匿名类顺移（编译期 Host$4，旧运行期 Host$3）。集合在改名传播之前建立，于是里面只有
+		// Host$4；旧类 Host$3$innerObj$1 按属性解析出宿主 Host$3，不在集合里 → 被过滤 → 旧侧桶恒为空
+		// （level 2: old=0, new=1），每次编辑都被当成新类重新编号（$innerObj$2/$innerObj$3），存量实例永久
+		// 停在旧代码且绕过布局门。因此这里只按"名字落在某个待对齐宿主之下"做便宜预筛，**归属判定推迟到
+		// 逐个宿主对齐时**（那时 hostName 已经是传播后的最终名字）。
 		Map<String, Map<String, byte[]>> oldAnonsByHost = new HashMap<>();
 		if (!hostClassesToAlign.isEmpty()) {
+			List<String> pendingPrefixes = new ArrayList<>(hostClassesToAlign.size());
+			for (String h : hostClassesToAlign) pendingPrefixes.add(Names.internal(h) + "$");
 			for (Map.Entry<String, byte[]> entry : runtimeBytecodeEntries()) {
-				String cName = entry.getKey();
+				String cName  = entry.getKey();
+				String cSlash = Names.internal(cName);
+				boolean underPendingHost = false;
+				for (String prefix : pendingPrefixes) {
+					if (cSlash.startsWith(prefix)) { underPendingHost = true; break; }
+				}
+				if (!underPendingHost) continue;
 				byte[] src = getSourceBytecode(cName);
-				byte[] oldBytes = src != null ? src : entry.getValue();
-				String host = resolveAnonHostCandidate(cName, oldBytes, hostClassesToAlign, singleAlignHost);
-				if (host == null) continue;
+				// 源基线字节只在这个文件**确实属于本类**时才能用：对齐重命名的目标名会经 raw 名映射
+				// 拿回另一个类的文件（现场：`$3$innerObj$1` 取到 `$4$innerObj$1` 的字节，属性宿主是 $4，
+				// 于是旧类被分到 $4 桶，$3 组永远看到 old=0）。自报类名不一致时退回运行期字节。
+				byte[] oldBytes = src != null && cSlash.equals(selfInternalName(src)) ? src : entry.getValue();
+				// 宿主解析（旧侧）：属性优先，但**必须与名字自洽**；属性过期（对齐改名/注入后缓存里的
+				// EnclosingMethod 仍是旧名字）时，沿名字父链找到第一个"真实存在"的祖先。见 resolveOldAnonHost。
+				String host = resolveOldAnonHost(cName, entry.getValue(), oldBytes, loadedClassesMap,
+					hostClassesToAlign);
+				if (host == null || host.equals(cSlash)) continue;
 				if (!AnonClassAligner.isBatchAnonClass(cName, oldBytes)) continue;
-				oldAnonsByHost.computeIfAbsent(host, k -> new HashMap<>()).put(cName, oldBytes);
+				oldAnonsByHost.computeIfAbsent(Names.external(host), k -> new HashMap<>()).put(cName, oldBytes);
 			}
 		}
 
@@ -347,7 +388,12 @@ final class BatchHotswapExecutor {
 			Function<String, byte[]> newRes = name -> newBatchBytes.get(name.replace('/', '.'));
 
 			AnonClassAligner.Result res;
-			AnonClassAligner.setEnclosingAliases(hostAliases.getOrDefault(hostName, Collections.emptySet()));
+			Set<String> aliases = hostAliases.getOrDefault(hostName, Collections.emptySet());
+			AnonClassAligner.setEnclosingAliases(aliases);
+			// 宿主链改名：别名（编译期名）→ 本组宿主目标名，用于字节重写，保证属性与运行时类名自洽。
+			Map<String, String> hostRenames = new LinkedHashMap<>();
+			for (String alias : aliases) hostRenames.put(alias, hostName);
+			AnonClassAligner.setHostRenames(hostRenames);
 			try {
 				res = alignAnonClasses(hostSlash, hostBytes, oldAnon, newAnon, oldRes, newRes,
 				 BatchHotswapExecutor::hasLiveInstances,
@@ -357,6 +403,7 @@ final class BatchHotswapExecutor {
 				 Set.copyOf(AnnotationTransformer.pendingAlignedClasses.keySet()));
 			} catch (Throwable t) {
 				AnonClassAligner.clearEnclosingAliases();
+				AnonClassAligner.clearHostRenames();
 				// docs/topology/04-tiers-and-rejection.md §4：以「宿主类 + 其下属全部匿名类」为原子单元整体拒绝。
 				//
 				// 这里**必须** continue 而不能让异常冒泡：冒泡会让整个 processChanges 中断，
@@ -385,6 +432,7 @@ final class BatchHotswapExecutor {
 				continue;
 			}
 			AnonClassAligner.clearEnclosingAliases();
+			AnonClassAligner.clearHostRenames();
 			if (res.alignedHostBytes != null) {
 				newBatchBytes.put(hostName, res.alignedHostBytes);
 			}
@@ -1679,6 +1727,45 @@ final class BatchHotswapExecutor {
 		if (className == null || targetToRawName == null) return false;
 		String raw = targetToRawName.get(className);
 		return raw != null && !raw.equals(className);
+	}
+
+	/**
+	 * 旧侧匿名类的宿主解析。
+	 *
+	 * <p>顺序：运行期字节属性（须与名字自洽）→ 源基线字节属性（同样须自洽）→ 名字父链上第一个
+	 * "已加载或已在本轮待对齐集合里"的祖先 → 兜底用属性。</p>
+	 */
+	static String resolveOldAnonHost(String cName, byte[] runtimeBytes, byte[] fallbackBytes,
+	                                 Map<String, Class<?>> loadedClasses, Set<String> pendingHosts) {
+		String cSlash = Names.internal(cName);
+		String attr = AnonHostResolver.hostOf(cName, runtimeBytes);
+		if (attr != null && cSlash.startsWith(attr + "$")) return Names.external(attr);
+		String attrFallback = AnonHostResolver.hostOf(cName, fallbackBytes);
+		if (attrFallback != null && cSlash.startsWith(attrFallback + "$")) return Names.external(attrFallback);
+		// 沿名字父链逐段上溯。**必须按 '$' 切段**，不能用"剥尾部数字"（textHost）：中间段是属性名时没有
+		// 数字可剥，textHost 会原地返回，循环退化成死循环（实测直接把探针挂住 10 分钟）。
+		String parent = cSlash;
+		while (true) {
+			int lastDollar = parent.lastIndexOf('$');
+			if (lastDollar <= 0) break;
+			parent = parent.substring(0, lastDollar);
+			String parentDot = Names.external(parent);
+			if ((loadedClasses != null && loadedClasses.containsKey(parentDot))
+			    || (pendingHosts != null && (pendingHosts.contains(parentDot) || pendingHosts.contains(parent)))) {
+				return parentDot;
+			}
+		}
+		return attr != null ? Names.external(attr) : (attrFallback != null ? Names.external(attrFallback) : null);
+	}
+
+	/** 字节码自报的内部类名；解析失败返回 {@code null}（调用方据此退回运行期字节）。 */
+	static String selfInternalName(byte[] bytes) {
+		if (bytes == null || bytes.length == 0) return null;
+		try {
+			return new org.objectweb.asm.ClassReader(bytes).getClassName();
+		} catch (Throwable t) {
+			return null;
+		}
 	}
 
 	/** 匿名类层级深度：名字里 {@code $} 越多越深，用于"由外向内"处理宿主组。 */

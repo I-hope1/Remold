@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **探针证据口径前置断言**：新增 `tests/src/AgentFreshness.java` 作为唯一入口，探针启动时比对"实际加载的 agent 类"与
+  `core/build/classes/java/main` 产物的 SHA-256，并打印 `sha/branch/tree`。此前的代价是真实的：变异不转红曾被误判成
+  "断言不承载因果"，实际是工作区切了分支、探针跑的是上一版代码。
+- **CI 的 P0.5 探针矩阵加入 JBR 25 腿**（`17`/`21`/`25`）：现场运行期是 JBR 25.0.2，而此前只在 17/21 上验证。
+
 - **跨宿主复用的 JVM 层可行性探针**（`tests/src/DcevmCrossHostProbe.java`，真机 JBR 21.0.8）：把「字段描述符能否原地改」「嵌套类能否改属 `NestHost`」这两条一直靠推理的假设变成读数。结论：两条都成立——描述符 `LA;`→`LB;` 被当作
   "删旧字段+加新字段"接受，`NestHost`/`NestMembers` 可在同一轮改属且改后旧类名能访问新宿主私有成员。附带发现：
   存量实例里的旧值**不会被清空**（读到的是原对象），所以限制复用的不是"值缺失"而是"值类型错位"。

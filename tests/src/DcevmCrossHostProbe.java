@@ -148,6 +148,7 @@ public class DcevmCrossHostProbe {
 		System.out.println("=== DcevmCrossHostProbe: field descriptor change + nest host rewrite ===");
 		Instrumentation inst = RemoldAgent.getInstrumentation();
 		check(inst != null, "P0 instrumentation available");
+		AgentFreshness.verify(DcevmCrossHostProbe::check, DcevmCrossHostProbe::note);
 		check(inst != null && RemoldAgent.isEnhancedHotswapEnabled(),
 			"P0 enhanced redefinition (AllowEnhancedClassRedefinition) is active");
 		check(inst != null && inst.isRedefineClassesSupported(), "P0 redefineClasses is supported");

@@ -255,7 +255,12 @@ public class KotlinAnonSequenceProbe implements Opcodes {
 		Map<String, String> afterR3 = readSurface(host, target, propAnonA, fnObjAnon, outerAnon, unnamed, localFirst);
 		readings("R3", afterR3);
 		checkRound("R3", r3);
-		expectApplied("R3", afterR3, r3());
+		// outerAnon 的 v4 给匿名对象加了一个集合工厂初值（`innerAnons = listOf(object…)`）。InitFix 对
+		// "表达式树之外还有指令"的初值**按设计拒绝整类热更**（docs/initfix/01-safety-gate.md §1.5），
+		// 并给出重启建议。拒绝是正确行为，不能记成违规；但它必须①有具名拒绝日志、②读数停在旧版本上（没被写坏）。
+		// 其余成员仍按"必须生效"判——这条放宽只对 outerAnon 这一个成员、且必须同时满足两个条件。
+		expectApplied("R3", afterR3, r3(), "outerAnon",
+			classSimpleName(HOST + "$outerAnon$1"), afterR2.get("outerAnon"));
 		expectUnnamedIdentity("R3", afterR3, 2);
 		expectLoadable("R3", HOST + "$makeLocalNamedAnons$renamedFirst$1");
 		expectLoadable("R3", HOST + "$outerAnon$1$innerAnons$1");
@@ -349,16 +354,65 @@ public class KotlinAnonSequenceProbe implements Opcodes {
 
 	/** Every named member must reach the round's target version (the host was not rejected as a whole). */
 	private static void expectApplied(String round, Map<String, String> actual, Map<String, String> target) {
+		expectApplied(round, actual, target, null, null, null);
+	}
+
+	/**
+	 * 同上，但允许 {@code toleratedSlot} 这一个成员以"具名拒绝"结案。
+	 *
+	 * <p>放行条件缺一不可：①日志里有**点名该类**的拒绝记录（INITFIX-REFUSE / INITFIX-UNEXPRESSIBLE-INIT /
+	 * HOTSWAP-SKIPPED）；②读数仍等于上一轮的读数（旧版本继续生效、没有被写坏）。
+	 * 只对显式点名的那个成员生效，不构成对其它成员或后续轮次的普遍放宽。</p>
+	 */
+	private static void expectApplied(String round, Map<String, String> actual, Map<String, String> target,
+	                                  String toleratedSlot, String refusedClassSimpleName, String previousValue) {
 		for (String slot : NAMED_SLOTS) {
 			String want = target.get(slot);
 			String got = actual.get(slot);
 			if (want.equals(got)) {
 				pass(round + ": " + slot + " reached " + got);
-			} else {
-				violation("C1-stale", round + ": " + slot + " is '" + got + "' but must be '" + want
-					+ "' (the round did not take effect for this member)");
+				continue;
 			}
+			if (slot.equals(toleratedSlot) && refusedClassSimpleName != null
+			    && previousValue != null && sameMemberVersion(previousValue, got)
+			    && refusalLoggedFor(refusedClassSimpleName)) {
+				pass(round + ": " + slot + " kept '" + got + "' because the agent refused this class by name"
+					+ " (loud refusal with restart advice is the designed outcome for an unexpressible initializer)");
+				continue;
+			}
+			violation("C1-stale", round + ": " + slot + " is '" + got + "' but must be '" + want
+				+ "' (the round did not take effect for this member)");
 		}
+	}
+
+	/**
+	 * 被拒成员是否仍停在旧版本上。
+	 *
+	 * <p>只比较该成员**自己**的版本段（第一个 {@code >} 之前）：嵌套成员是独立的类，可以被单独配对，
+	 * 所以"外层停在旧版本 + 内层已更新"是可达的合法组合；真正要防的是外层被写到别的版本（写坏）。</p>
+	 */
+	private static boolean sameMemberVersion(String previousValue, String got) {
+		if (previousValue.equals(got)) return true;
+		int cut = previousValue.indexOf('>');
+		if (cut < 0) return false;
+		return got.startsWith(previousValue.substring(0, cut + 1));
+	}
+
+	/** 该类在本次运行里是否被**点名**拒绝过（拒绝通道的日志是唯一证据，读数本身不算）。 */
+	private static boolean refusalLoggedFor(String classSimpleName) {
+		String key = classSimpleName.replace('$', '.');
+		for (String line : snapshotLogs()) {
+			if (!(line.contains("INITFIX-REFUSE") || line.contains("INITFIX-UNEXPRESSIBLE-INIT")
+			      || line.contains("HOTSWAP-SKIPPED"))) continue;
+			if (line.contains(classSimpleName) || line.contains(key)) return true;
+		}
+		return false;
+	}
+
+	private static String classSimpleName(String internalOrDotted) {
+		String name = internalOrDotted.replace('/', '.');
+		int cut = name.lastIndexOf('.');
+		return cut < 0 ? name : name.substring(cut + 1);
 	}
 
 	/**

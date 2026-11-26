@@ -79,6 +79,33 @@ public final class AnonHostResolver {
 		return new Identity(cls, host, anonymous, path, index, byAttribute);
 	}
 
+	/**
+	 * 分组用宿主：在属性宿主与名字父级之间取**更近的那个真实类**。
+	 *
+	 * <p>两个编译器给出不同的 {@code EnclosingMethod} 语义：kotlinc 的嵌套匿名对象指向**外层匿名类**
+	 * （{@code $outerAnon$1}），javac 则一律指向**最外层类**加外层方法（{@code Host}）。若只看属性，
+	 * javac 的 {@code Host$1$1} 会被并进 {@code Host} 的组里，父匿名类那层的对齐就看不到它
+	 * （真机读数：class/prepend 两个场景由"全部 v1 或全部 v2"退化成 host=v2 而存量实例仍 v1 的半生效）。
+	 * 因此：名字父级本身就是批次里真实存在的类时用它（等于历史行为），否则用属性宿主。</p>
+	 *
+	 * @param className 被解析的匿名类
+	 * @param bytes     该类字节码（可为 null）
+	 * @param knownNames 本批里真实存在的类名集合（内部名或点分名皆可；为空时只用属性宿主）
+	 */
+	public static String groupHost(String className, byte[] bytes, java.util.Set<String> knownNames) {
+		Identity id = resolve(className, bytes);
+		String nameParent = textHost(Names.internal(className));
+		if (knownNames != null && !knownNames.isEmpty() && nameParent != null
+		    && !nameParent.equals(id.className())) {
+			String raw = Names.internal(className);
+			String parentOnly = raw.substring(0, raw.length() - (raw.length() - nameParent.length()));
+			if (knownNames.contains(parentOnly) && parentOnly.length() > id.host().length()) {
+				return adopt(parentOnly, className.indexOf('.') >= 0);
+			}
+		}
+		return id.host();
+	}
+
 	/** 便捷入口：宿主内部名；失败退化为入参自身。 */
 	public static String hostOf(String className, byte[] bytes) {
 		return resolve(className, bytes).host();

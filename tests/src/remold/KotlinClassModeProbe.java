@@ -224,9 +224,16 @@ public class KotlinClassModeProbe {
 				&& spec.v1Alpha().equals(alphaAfter) && spec.v1Beta().equals(betaAfter);
 			boolean v2State = spec.v2State().equals(after)
 				&& spec.v2Alpha().equals(alphaAfter) && spec.v2Beta().equals(betaAfter);
-			boolean coherent = v1State || v2State;
+			// 第三种合法结局：宿主生效、存量实例留在旧版本，且对齐器点名告警过。
+			// docs/topology/04-tiers-and-rejection.md §4 的非 strict 契约就是"没有唯一证据不猜，
+			// 旧匿名类保留为孤儿、存活实例继续跑旧代码、并给 RESTART 建议"。这与"静默半生效"的区别
+			// 只在告警通道上：没有具名告警就仍判 K1-partial。
+			boolean hostAligned = spec.v2State().equals(after);
+			boolean coherent = v1State || v2State
+				|| (hostAligned && orphanWarningFor(round, spec.hostClass()));
 			ok &= expect(tag, "coherent-state", coherent,
-				"end state is entirely v1 (fail-closed) or entirely v2 (aligned)",
+				"end state is entirely v1 (fail-closed), entirely v2 (aligned),"
+					+ " or the host aligned with a documented orphan warning",
 				"after=" + after + " alphaAfter=" + alphaAfter + " betaAfter=" + betaAfter);
 			if (!coherent) {
 				violation(tag, "K1-partial",
@@ -439,6 +446,20 @@ public class KotlinClassModeProbe {
 			return;
 		}
 		violation(tag, "K1-crash", "post-round call failed with " + oneLine(cause));
+	}
+
+	/**
+	 * 该轮是否就"拒绝猜 + 孤儿保留"给出过点名告警。
+	 *
+	 * <p>只认告警通道，读数本身（宿主 v2、存量 v1）不足以证明这不是静默半生效。</p>
+	 */
+	private static boolean orphanWarningFor(RoundResult round, String simpleHost) {
+		String internal = simpleHost.replace('.', '/');
+		for (String line : round.logLines()) {
+			if (!(line.contains("refused to guess") || line.contains("RESTART is required"))) continue;
+			if (line.contains(internal) || line.contains(simpleHost)) return true;
+		}
+		return false;
 	}
 
 	private static boolean expect(String tag, String what, boolean condition, String expectation, String detail) {

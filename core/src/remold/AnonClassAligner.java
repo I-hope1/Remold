@@ -1006,9 +1006,15 @@ public final class AnonClassAligner {
 	public static Map<String, Map<String, byte[]>> groupBatchAnons(Map<String, byte[]> changedClasses) {
 		Map<String, Map<String, byte[]>> out = new LinkedHashMap<>();
 		if (changedClasses == null) return out;
+		java.util.Set<String> known = new java.util.HashSet<>();
+		for (String k : changedClasses.keySet()) {
+			known.add(k);
+			known.add(Names.internal(k));
+		}
 		for (Map.Entry<String, byte[]> e : changedClasses.entrySet()) {
 			if (!isBatchAnonClass(e.getKey(), e.getValue())) continue;
-			out.computeIfAbsent(AnonHostResolver.hostOf(e.getKey(), e.getValue()), k -> new LinkedHashMap<>())
+			out.computeIfAbsent(AnonHostResolver.groupHost(e.getKey(), e.getValue(), known),
+					k -> new LinkedHashMap<>())
 				.put(e.getKey(), e.getValue());
 		}
 		return out;

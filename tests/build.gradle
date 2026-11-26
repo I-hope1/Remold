@@ -1530,6 +1530,9 @@ remoldAgentDcevmProbe("kotlinShapeBridgeProbe", "KotlinShapeBridgeProbe",
 remoldAgentDcevmProbe("onReloadJvmStaticProbe", "OnReloadJvmStaticProbe",
 	"@JvmStatic @OnReload dispatch: the static forwarder and its instance target share one callback (fires once), while a real static body plus an unrelated instance callback still both fire")
 
+remoldAgentDcevmProbe("lazyLoadRenumberProbe", "LazyLoadRenumberProbe",
+	"lazy_load field report: a renumbered anonymous class must be injected (no NoClassDefFoundError on the next NEW) and a nested anonymous object must follow its outer class's slot shift")
+
 remoldAgentDcevmProbe("hierarchyChangeProbe", "HierarchyChangeProbe",
 	"Hierarchy changes measured, not assumed: adding/removing an interface on a live class applies (surviving instance follows instanceof), while a superclass change is refused by name and leaves the class functional")
 

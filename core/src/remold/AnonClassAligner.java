@@ -896,10 +896,11 @@ public final class AnonClassAligner {
 	 */
 	public static boolean isBatchAnonClass(String className, byte[] bytes) {
 		if (className == null || bytes == null) return false;
-		String host = batchAnonHost(className);
-		if (host == null || host.equals(className)) return false;
-		if (!isAnonymousClassName(host, className)) return false;
-		return isAnonymousClass(bytes, host);
+		// 宿主与"是否匿名"都由字节码属性决定：kotlinc 的 Host$方法名$序号 剥尾部数字会得到不存在的宿主，
+		// 只有 EnclosingMethod 能给出真实宿主（见 AnonHostResolver 的说明）。
+		AnonHostResolver.Identity id = AnonHostResolver.resolve(className, bytes);
+		if (!id.anonymous()) return false;
+		return !id.host().equals(Names.internal(className));
 	}
 
 	/** 匿名类的直接宿主（去掉尾部 {@code $数字} 链）。调用方须先用 {@link #isBatchAnonClass} 确认它是真匿名类。 */
@@ -934,7 +935,7 @@ public final class AnonClassAligner {
 		if (changedClasses == null) return out;
 		for (Map.Entry<String, byte[]> e : changedClasses.entrySet()) {
 			if (!isBatchAnonClass(e.getKey(), e.getValue())) continue;
-			out.computeIfAbsent(batchAnonHost(e.getKey()), k -> new LinkedHashMap<>())
+			out.computeIfAbsent(AnonHostResolver.hostOf(e.getKey(), e.getValue()), k -> new LinkedHashMap<>())
 				.put(e.getKey(), e.getValue());
 		}
 		return out;

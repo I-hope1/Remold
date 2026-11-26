@@ -56,18 +56,19 @@ public final class AnonHostResolver {
 	 * @param bytes     该类自身的字节码；为 {@code null} 或解析失败时退回名字判据
 	 */
 	public static Identity resolve(String className, byte[] bytes) {
+		boolean dotted = className != null && className.indexOf('.') >= 0;
 		String cls = Names.internal(className);
 		ClassNode cn = parse(bytes);
 		boolean anonymous = cn != null
 			? hasAnonymousMarker(cn)
-			: isAnonymousName(cls, textHost(cls));
+			: isAnonymousName(cls, textHost(className));
 		String host;
 		boolean byAttribute = false;
 		if (cn != null && cn.outerClass != null && !cn.outerClass.isEmpty()) {
-			host = cn.outerClass;
+			host = adopt(cn.outerClass, dotted);
 			byAttribute = true;
 		} else {
-			host = textHost(cls);
+			host = textHost(className);
 		}
 		if (host == null || host.isEmpty() || host.equals(cls)) {
 			return new Identity(cls, cls, anonymous, "", -1, byAttribute);
@@ -153,6 +154,12 @@ public final class AnonHostResolver {
 
 	//region internals
 
+	/** 把内部名归一成入参的名字风格（点分入 → 点分出，斜杠入 → 斜杠出）。 */
+	private static String adopt(String internalName, boolean dotted) {
+		if (internalName == null || internalName.isEmpty()) return internalName;
+		return dotted ? Names.external(internalName) : Names.internal(internalName);
+	}
+
 	private static ClassNode parse(byte[] bytes) {
 		if (bytes == null || bytes.length == 0) return null;
 		try {
@@ -171,6 +178,9 @@ public final class AnonHostResolver {
 	 * 具名内部类、lambda 合成方法类都不该被当成匿名类对待。
 	 */
 	private static boolean hasAnonymousMarker(ClassNode cn) {
+		// 枚举常量体也是"有 EnclosingMethod 的合成类"，但它有自己的重定义通道（按常量名路由），
+		// 不能被当成宿主名下的匿名类参与对齐（S22 的教训：误路由会让它静默停留在旧版本）。
+		if ((cn.access & Opcodes.ACC_ENUM) != 0) return false;
 		if (cn.outerClass != null && !cn.outerClass.isEmpty()) return true;
 		if (cn.innerClasses == null) return false;
 		for (InnerClassNode icn : cn.innerClasses) {

@@ -2016,8 +2016,14 @@ public class RemoldAgent {
 		BatchHotswapExecutor.processAnnotationsInternal(clazz);
 	}
 
+	static String resolveAnonHostCandidate(String cName, byte[] bytes,
+	                                      Set<String> hostClassesToAlign, String singleHost) {
+		return BatchHotswapExecutor.resolveAnonHostCandidate(cName, bytes, hostClassesToAlign, singleHost);
+	}
+
+	/** 无字节码的重载：只保留给"名字足够"的调用点（单宿主模式与纯 Java 形态）。 */
 	static String resolveAnonHostCandidate(String cName, Set<String> hostClassesToAlign, String singleHost) {
-		return BatchHotswapExecutor.resolveAnonHostCandidate(cName, hostClassesToAlign, singleHost);
+		return BatchHotswapExecutor.resolveAnonHostCandidate(cName, null, hostClassesToAlign, singleHost);
 	}
 
 	static boolean isBlacklisted(String className) {

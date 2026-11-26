@@ -98,7 +98,7 @@
 ---
 
 <a id="d-anon-7"></a>
-## D-ANON-7. 继承体系变更一律熔断拒绝（提示重启）
+## D-ANON-7. 继承体系变更：父类变更一律拒绝，**接口增删在增强重定义下放行**（实测修订）
 
 - **原规划条款**：`docs/topology/06-runtime-and-perf.md` §1（原 §6.1-2）曾假定底层 JVM 支持时允许修改继承体系。
 - **实际偏离决策**：**一律熔断拒绝并提示重启**。`RemoldAgent.processChanges` 对父类（`super_class`）或接口集合（`interfaces`）发生变动的类直接标记失败并发出重编译/重启警告，绝不尝试拓扑映射或强制 Redefine。
@@ -106,6 +106,14 @@
   1. DCEVM / JBR 虽然在特定版本实验性允许修改继承树，但在 JVM 规范与多数 LTS 实现中，变更父类会彻底破坏 `vtable`/`itable` 虚方法分发布局、内联缓存（IC）以及 JIT 编译假设，具有极高崩溃风险；
   2. 匿名类对齐的核心目标是解决相同继承体系下的物理编号漂移。若继承体系本身被篡改，已超出了局部拓扑对齐的安全语义范畴，保守阻断是保证 JVM 稳定性的唯一防线。
 - **关联代码**：`RemoldAgent.processChanges`，`ClassDiff.isHierarchyChanged`。
+- **实测修订（JBR 21，`:tests:hierarchyChangeProbe` 17 条断言）**：本文早先表述为"父类**或接口**变动一律熔断"，
+  与实现不符——`ClassDiffUtil.mustRejectHierarchyChange` 对接口增删只在**没有**增强重定义时才拒绝
+  （`return !enhanced`），父类变更才无条件拒绝。真机读数：
+  1. **新增接口**（`Impl implements Alpha` → `impl Alpha, Beta`）：**存量实例**的 `instanceof Beta` 变为 `true`，
+     通过新接口调用返回新实现（`beta-v2`），新建实例同样实现该接口，原接口仍在 —— 即接口增删对活类生效；
+  2. **删除接口**：同一存量实例的 `instanceof Beta` 回到 `false`，`Alpha` 不受影响；
+  3. **父类变更**（`BaseA` → `BaseB`）：按名拒绝（`HIERARCHY-CHANGED`），本轮无异常逃逸，类继续以旧父类可用。
+  <br>结论口径改为：**父类变更不支持（任何模式）；接口增删在 JBR/DCEVM 增强重定义下支持**，标准 HotSpot 仍拒绝。
 
 ---
 

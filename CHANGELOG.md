@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **文档与实现不一致：接口变更的处置**（无代码改动，口径修正）：`docs/topology/08-decisions.md` D-ANON-7 与
+  `docs/status.md` 曾表述为"父类**或接口**变动一律熔断"，而 `ClassDiffUtil.mustRejectHierarchyChange` 对接口
+  增删只在**没有**增强重定义时拒绝。JBR 21 实测（`:tests:hierarchyChangeProbe`，17 条断言）：活类新增接口后
+  **存量实例**的 `instanceof` 立即为 `true`、经新接口调用返回新实现，删除后回到 `false`，原接口不受影响；
+  父类变更仍按名拒绝（`HIERARCHY-CHANGED`）且类继续以旧父类可用。口径统一为"父类变更不支持；接口增删在
+  JBR/DCEVM 下支持，标准 HotSpot 拒绝"。
+
+### Added
+
 - **Kotlin 匿名类被当成"宿主不存在"的整族（P0，`reload`）**：宿主是从类名剥尾部 `$<数字>` 得到的。JVM 规范
   里的匿名类确实叫 `Host$1`，但 kotlinc 把属性名/方法名/局部变量名拼进类名：`KtAnonTarget$propAnonA$1`、
   `KtAnonTarget$makeUnnamedAnons$1..$3`、`KtAnonTarget$makeLocalNamedAnons$first$1`、

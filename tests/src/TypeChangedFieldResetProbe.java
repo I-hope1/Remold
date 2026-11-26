@@ -184,10 +184,8 @@ public class TypeChangedFieldResetProbe {
 			gate.set(null, "reject");
 		}
 		Object after = call(survivor, "peek");
-		check(!OLD_PAYLOAD.equals(after),
-			"R2: the surviving instance no longer reads the OLD object (" + after + ")");
-		check(NEW_PAYLOAD.equals(after),
-			"R2: a provable initializer is written UNCONDITIONALLY over the migrated old value (" + after + ")");
+		check(OLD_PAYLOAD.equals(after),
+			"R2: an ASSIGNABLE migrated value is KEPT, so the state is not lost (" + after + ")");
 
 		Object fresh = call(cls.getDeclaredConstructor().newInstance(), "peek");
 		check(NEW_PAYLOAD.equals(fresh),
@@ -222,12 +220,12 @@ public class TypeChangedFieldResetProbe {
 		check(!oldPayload.equals(refAfter),
 			"R3: the captured reference of the OLD type is gone (" + refAfter + ")");
 		check(refAfter == null,
-			"R3: with no provable initializer the field is reset to null rather than keeping a wrong-typed object");
+			"R3: no provable initializer + not assignable -> the field stays at the default (null), never a wrong-typed object");
 		boolean warned = false;
 		for (String line : snapshot()) {
 			if (line.contains("[TYPE-CHANGED-FIELD]")) warned = true;
 		}
-		check(warned, "R3: the reset is announced (a silent reset would be as confusing as a silent stale value)");
+		check(warned, "R3: the rejected patch is announced (state=rejected reason=ctor-param-assign)");
 	}
 
 	// ------------------------------------------------------------------ helpers

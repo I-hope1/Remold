@@ -704,7 +704,11 @@ public final class AnonClassAligner {
 			validateRenameMap(renameMap, hostSlash, matchedNewToOld, knownNames);
 			dbg("renameMap=" + renameMap);
 
-			// 应用 ClassRemapper 重写所有新匿名类字节码
+			// 应用 ClassRemapper 重写所有新匿名类字节码。
+			// 字节重写用**扩充后的映射**：组内映射 + 宿主链改名（否则 EnclosingMethod/InnerClasses 里的
+			// 宿主名仍是编译期名字，运行期类名与属性不自洽，下一轮旧侧解析就找不到宿主）。
+			Map<String, String> byteMap = new LinkedHashMap<>(renameMap);
+			byteMap.putAll(HOST_RENAMES.get());
 			Map<String, byte[]> alignedAnonClasses = new LinkedHashMap<>();
 			for (AnonInfo n : newInfos) {
 				String targetName = renameMap.get(n.name);
@@ -717,12 +721,12 @@ public final class AnonClassAligner {
 						+ " Recompile without moving anonymous classes, or restart to adopt the new layout.");
 					continue;
 				}
-				byte[] remapped = remapClass(n.bytecode, renameMap);
+				byte[] remapped = remapClass(n.bytecode, byteMap);
 				alignedAnonClasses.put(targetName, remapped);
 			}
 
 			// 应用 ClassRemapper 重写宿主类字节码
-			byte[] alignedHostBytes = newHostBytes != null ? remapClass(newHostBytes, renameMap) : null;
+			byte[] alignedHostBytes = newHostBytes != null ? remapClass(newHostBytes, byteMap) : null;
 
 			return new Result(alignedHostBytes, alignedAnonClasses, renameMap, orphanOldClasses, stats);
 		} finally {
@@ -934,6 +938,35 @@ public final class AnonClassAligner {
 	 */
 	private static final ThreadLocal<Set<String>> ENCLOSING_ALIASES =
 	 ThreadLocal.withInitial(java.util.Collections::emptySet);
+
+	/**
+	 * 宿主链改名（编译期名 → 目标名），同样按线程存放，且**只用于字节重写**。
+	 *
+	 * <p>为什么需要：组内 renameMap 只描述本组匿名类的新名→目标名，不含"我的宿主自己也改名了"。
+	 * 于是重写字节时，类名被改成了目标名，而 {@code EnclosingMethod} / {@code InnerClasses} 里的
+	 * 宿主名字仍是编译期名字（现场：注入出来的 {@code $3$innerObj$2} 自报 {@code EnclosingMethod=$4}），
+	 * 运行期类名与属性不自洽 —— 下一轮旧侧解析按属性找不到宿主，又退回"重新编号"。
+	 * 顺带避免 {@code Class.getEnclosingClass()} 指到错误的类。</p>
+	 */
+	private static final ThreadLocal<Map<String, String>> HOST_RENAMES =
+	 ThreadLocal.withInitial(java.util.LinkedHashMap::new);
+
+	/** 设定本轮对齐的宿主链改名（必须/建议用内部名，可混用点分名）。 */
+	public static void setHostRenames(Map<String, String> renames) {
+		Map<String, String> norm = new java.util.LinkedHashMap<>();
+		if (renames != null) {
+			for (Map.Entry<String, String> e : renames.entrySet()) {
+				if (e.getKey() == null || e.getValue() == null || e.getKey().equals(e.getValue())) continue;
+				norm.put(Names.internal(e.getKey()), Names.internal(e.getValue()));
+			}
+		}
+		HOST_RENAMES.set(norm);
+	}
+
+	/** 清空宿主链改名，避免泄漏到下一次对齐。 */
+	public static void clearHostRenames() {
+		HOST_RENAMES.set(java.util.Collections.emptyMap());
+	}
 
 	/** 设定本轮对齐宿主可接受的 EnclosingMethod 别名（内部名/点分名皆可）。 */
 	public static void setEnclosingAliases(Collection<String> aliases) {

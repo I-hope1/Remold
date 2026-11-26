@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **匿名类宿主本身是匿名类时，旧侧永远是 0（现场：Kotlin 属性里嵌套的匿名对象）**：旧侧分桶用"名字剥尾部
+  数字 + 待对齐集合过滤"解析宿主。kotlinc 把属性名拼进类名（`Host$3$innerObj$1`），剥数字得到的是
+  从不存在的 `Host$3$innerObj`，于是该旧类进不了任何桶（`level 2: old=0, new=1`）。后果：每次编辑——哪怕
+  只改方法体——都被当成新类重新编号（`$innerObj$2/$innerObj$3`），存量实例永久停在旧代码，而且**绕过布局门**
+  （没有配对就没有布局检查）。现在宿主按字节码属性解析（属性须与名字自洽，过期时沿名字父链找到第一个真实存在的
+  祖先），并且不再用"待对齐集合"作为入桶过滤条件。
+- **字节重写漏掉宿主链改名，导致运行期类名与属性不自洽**：重写只用了组内 renameMap，`EnclosingMethod` 里
+  的宿主名字仍是编译期名字（现场：注入出来的 `$3$innerObj$2` 自报 `EnclosingMethod=$4`）。下一轮旧侧按属性
+  解析就找不到宿主，又退回"重新编号"。重写时并入宿主链改名（`$4`→`$3`），顺带避免
+  `Class.getEnclosingClass()` 指到错误的类。
+
+### Added
+
 - **外层匿名类顺移后，内层嵌套匿名类被整类移出本批（现场：Kotlin 属性里的匿名对象）**：外层被匹配回旧槽位
   （`Host$4`→`Host$3`）后，内层 `Host$4$innerObj$1` 的分组名虽已改写为 `Host$3$innerObj$1`，但**字节里**的
   `EnclosingMethod` 仍写着编译期的 `Host$4`，准入判据拿它比对宿主 `Host$3` 判否 → 宿主层级桶为空

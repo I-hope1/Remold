@@ -150,26 +150,21 @@ class AnonRenamePropagationTest {
 
 	@Test
 	void theBridgeLogDistinguishesShrinkReorderAndSyntheticGrowth() {
-		Type[] twoArgs = Type.getArgumentTypes("(ILjava/lang/String;)V");
-
-		LambdaCaptureBridge.ParamSource keep = capture(0);
-		LambdaCaptureBridge.ParamSource keepSecond = capture(1);
-		LambdaCaptureBridge.ParamSource synth = LambdaCaptureBridge.ParamSource.constant(Integer.valueOf(7));
+		List<String> oldCaps = List.of("Ljava/lang/Object;", "I");
 
 		assertEquals("capture list shrank",
-			LambdaCaptureBridge.bridgeKind(new LambdaCaptureBridge.ParamSource[]{keep}, twoArgs),
+			LambdaCaptureBridge.bridgeKind(oldCaps, List.of("Ljava/lang/Object;")),
 			"deleting a captured parameter is the shrink case");
 		assertEquals("capture list reordered",
-			LambdaCaptureBridge.bridgeKind(
-				new LambdaCaptureBridge.ParamSource[]{keepSecond, keep}, twoArgs),
-			"swapping two captured parameters must not be reported as a shrink");
+			LambdaCaptureBridge.bridgeKind(oldCaps, List.of("I", "Ljava/lang/Object;")),
+			"a 2 -> 2 swap must not be reported as a shrink (field reading: it was)");
 		assertEquals("synthetic capture growth",
-			LambdaCaptureBridge.bridgeKind(
-				new LambdaCaptureBridge.ParamSource[]{keep, keepSecond, synth}, twoArgs),
+			LambdaCaptureBridge.bridgeKind(oldCaps, List.of("Ljava/lang/Object;", "I", "J")),
 			"a bridge that manufactures an added capture is a different cause again");
-		assertEquals("capture list unchanged",
-			LambdaCaptureBridge.bridgeKind(
-				new LambdaCaptureBridge.ParamSource[]{keep, keepSecond}, twoArgs));
+		assertEquals("capture list replaced",
+			LambdaCaptureBridge.bridgeKind(oldCaps, List.of("Ljava/lang/Object;", "J")),
+			"same arity but a different type is neither a shrink nor a reorder");
+		assertEquals("capture list unchanged", LambdaCaptureBridge.bridgeKind(oldCaps, oldCaps));
 	}
 
 	@Test

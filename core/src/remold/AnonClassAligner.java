@@ -923,6 +923,38 @@ public final class AnonClassAligner {
 	 * <p>综合 JVM 规范的 {@code InnerClasses} 属性（匿名类 innerName 必为 null）、
 	 * {@code ACC_ENUM} 排除以及名称模式校验。</p>
 	 */
+	/**
+	 * 本宿主已知的"改名前的 EnclosingMethod 名字"。
+	 *
+	 * <p>现场形态：外层匿名类被匹配回旧槽位（{@code Host$4 -> Host$3}），它内层嵌套类的**字节**里
+	 * {@code EnclosingMethod} 仍写着编译期的 {@code Host$4}。分组阶段把名字改写成了 {@code Host$3$innerObj$1}，
+	 * 但准入判据拿 {@code Host$4} 去比对宿主 {@code Host$3} 会判否 —— 于是宿主的层级桶是空的
+	 * （{@code level 1: old=0, new=0}），子类被 {@code ANON-NOT-ALIGNED} 移出本批，存量与新建实例都停在旧版本。
+	 * 别名集合让"同一个宿主在改名前的名字"也认得，配对与改名都由对齐器自己完成。</p>
+	 */
+	private static final ThreadLocal<Set<String>> ENCLOSING_ALIASES =
+	 ThreadLocal.withInitial(java.util.Collections::emptySet);
+
+	/** 设定本轮对齐宿主可接受的 EnclosingMethod 别名（内部名/点分名皆可）。 */
+	public static void setEnclosingAliases(Collection<String> aliases) {
+		if (aliases == null || aliases.isEmpty()) {
+			ENCLOSING_ALIASES.set(java.util.Collections.emptySet());
+			return;
+		}
+		Set<String> norm = new java.util.LinkedHashSet<>();
+		for (String a : aliases) {
+			if (a == null || a.isEmpty()) continue;
+			norm.add(Names.internal(a));
+			norm.add(a);
+		}
+		ENCLOSING_ALIASES.set(norm);
+	}
+
+	/** 清空别名，避免泄漏到下一次对齐（与 live-instance 判定同一纪律）。 */
+	public static void clearEnclosingAliases() {
+		ENCLOSING_ALIASES.set(java.util.Collections.emptySet());
+	}
+
 	public static boolean isAnonymousClass(ClassNode cn, String hostClassName) {
 		if (cn == null || hostClassName == null) return false;
 		if ((cn.access & Opcodes.ACC_ENUM) != 0) return false;
@@ -931,7 +963,15 @@ public final class AnonClassAligner {
 		if (cn.outerClass != null && !cn.outerClass.isEmpty()) {
 			// 宿主组会收集整族（含嵌套层）：外层匿名类的宿主是 host，内层的 EnclosingMethod 指外层匿名类，
 			// 因此沿 $ 边界做祖先判定，而不是只认相等。
-			return cn.outerClass.equals(host) || cn.outerClass.startsWith(host + "$");
+			if (cn.outerClass.equals(host) || cn.outerClass.startsWith(host + "$")) return true;
+			// 改名前的名字也算：外层被匹配回旧槽位后，内层字节里的 EnclosingMethod 仍是编译期名字。
+			Set<String> aliases = ENCLOSING_ALIASES.get();
+			if (aliases.isEmpty()) return false;
+			if (aliases.contains(cn.outerClass)) return true;
+			for (String a : aliases) {
+				if (cn.outerClass.startsWith(a + "$")) return true;
+			}
+			return false;
 		}
 		if (cn.innerClasses != null) {
 			for (org.objectweb.asm.tree.InnerClassNode icn : cn.innerClasses) {

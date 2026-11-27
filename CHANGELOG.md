@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **新增字段初值引用了"本批新编译/重编号的匿名类"时整类被拒**：可见性判定只能查批次视图 / 运行期字节 / 源码基线，
+  而本批刚注入的类三处皆空 → 构造器 `protected` 判 `unknown` → `[INITFIX-REFUSE]` 把宿主踢出批次
+  （现场：`new field val movedOp = object : IntUnaryOperator { ... }`）。修法是在**注入点**把字节登记进批次旁路表
+  （`InitFix.registerBatchClassBytes`），并保证清空点在对齐/注入之前。
+- **宿主被踢出批次后未联动回滚**：`LAYOUT-WAIVE` 与子匿名类仍按"宿主在批次内"生效，旧宿主代码调用已删成员当场
+  `NoSuchMethodError`（`MovedOuterTarget$Inner.getMovedOp()`、`CounterAnonTarget$1.<init>(CounterAnonTarget)`）。
+  修法是踢出时级联匿名类族、同时摘掉 `definitions`，并在 redefine 前按跳过裁决做最后一致性剪枝。
+
 - **回退"类型改变字段无条件写"（#73 的回归）**：`FieldTypeMatrixProbe` 在 JBR 21 与 25.0.2 上的一致读数表明，DCEVM
   迁移引用类型字段时**按旧值对象的实际类判定**——可赋值（`String`→`String`、`Integer`→`Number`、`ArrayList`→`List`、
   `Object` 窄化到 `String`）保留原对象；不可赋值（`Integer`→`String`、`AtomicInteger`→`Integer`）或旧值为 `null` 时槽位

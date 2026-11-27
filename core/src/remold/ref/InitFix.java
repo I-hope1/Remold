@@ -453,11 +453,56 @@ public class InitFix {
 		       && !context.bytesByLoader().get(loader).containsKey(internalName.replace('/', '.'));
 	}
 
+	/**
+	 * 把"本批新产生、但还没进 redefine 的类字节"登记进批次视图（对齐后注入的新匿名类就是这一类）。
+	 *
+	 * <p>为什么必须登记：InitFix 在提取字段初值时会判定构造器是 {@code protected} 还是包内可见，判据来自
+	 * {@link HierarchyTreeOracle#resolveMember}，而后者只查批次视图 / 运行期字节 / 源码基线。本批新编译或重编号的
+	 * 匿名类三条都不在——于是构造器权限判不出来，{@code [INITFIX-REFUSE]} 把宿主整类踢出批次（现场：
+	 * {@code new field val movedOp = object : IntUnaryOperator { ... }}）。</p>
+	 *
+	 * @param loader 目标加载器（宿主所在加载器）
+	 * @param classes 类名（点分或内部名均可）到字节
+	 */
+	public static void registerBatchClassBytes(ClassLoader loader, Map<String, byte[]> classes) {
+		if (loader == null || classes == null || classes.isEmpty()) return;
+		Map<String, byte[]> extra = EXTRA_BYTES.computeIfAbsent(loader, ignored -> new java.util.LinkedHashMap<>());
+		for (Map.Entry<String, byte[]> e : classes.entrySet()) {
+			if (e.getKey() != null && e.getValue() != null) extra.put(Names.external(e.getKey()), e.getValue());
+		}
+		BatchContext context = BATCH_CONTEXT.get();
+		if (context == null) return;
+		Map<String, byte[]> bytes = context.bytesByLoader()
+		 .computeIfAbsent(loader, ignored -> new LinkedHashMap<>());
+		for (Map.Entry<String, byte[]> e : classes.entrySet()) {
+			if (e.getKey() == null || e.getValue() == null) continue;
+			bytes.put(Names.external(e.getKey()), e.getValue());
+		}
+	}
+
+	/**
+	 * 批次旁路字节表：**注入点在 {@link #BATCH_CONTEXT} 之外**（ThreadLocal 只在 transform 期间有值），
+	 * 所以刚注入的类必须记在这里，才能被 InitFix 的可见性判定查到。
+	 *
+	 * <p>键弱引用加载器；值只放 {@code byte[]}，不反向持 {@code Class}。</p>
+	 */
+	private static final java.util.Map<ClassLoader, java.util.Map<String, byte[]>> EXTRA_BYTES =
+	 java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+	/** 一批开始时清空旁路字节表；调用点必须在**对齐/注入之前**。 */
+	public static void clearExtraBatchBytes() {
+		EXTRA_BYTES.clear();
+	}
+
 	static byte[] batchClassBytes(ClassLoader loader, String internalName) {
 		BatchContext context = BATCH_CONTEXT.get();
 		if (context == null || internalName == null) return null;
 		Map<String, byte[]> bytes = context.bytesByLoader().get(loader);
-		return bytes == null ? null : bytes.get(internalName.replace('/', '.'));
+		String dotted = Names.external(internalName);
+		byte[] direct = bytes == null ? null : bytes.get(dotted);
+		if (direct != null) return direct;
+		Map<String, byte[]> extra = EXTRA_BYTES.get(loader);
+		return extra == null ? null : extra.get(dotted);
 	}
 
 	static Set<String> activeBatchFailures() {

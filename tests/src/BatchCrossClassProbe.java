@@ -1,6 +1,8 @@
 import remold.RemoldAgent;
+import remold.ref.InitFix;
 
 import java.lang.instrument.Instrumentation;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
@@ -59,41 +61,43 @@ public class BatchCrossClassProbe {
 
 	private static final String HOST = "bxp/Host";
 	private static final String CFG  = "bxp/Cfg";
+	private static final String LAZY_HOST = "bxplazy/LazyHost";
+	private static final String LAZY_CFG  = "bxplazy/LazyCfg";
 	private static final String HOST2 = "bxp/Host2";
 	private static final String ANON2 = "bxp/Host2$1";
 
-	private static byte[] hostV1() {
+	private static byte[] hostV1(String host) {
 		ClassWriter cw = new ClassWriter(0);
-		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, HOST, null, "java/lang/Object", null);
-		ctor(cw, HOST, "()V", null);
+		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, host, null, "java/lang/Object", null);
+		ctor(cw, host, "()V", null);
 		return cw.toByteArray();
 	}
 
 	/** v2 adds {@code cfg} and initializes it with a class that is born in this same batch. */
-	private static byte[] hostV2() {
+	private static byte[] hostV2(String host, String cfg) {
 		ClassWriter cw = new ClassWriter(0);
-		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, HOST, null, "java/lang/Object", null);
-		cw.visitField(Opcodes.ACC_PUBLIC, "cfg", "L" + CFG + ";", null, null).visitEnd();
+		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, host, null, "java/lang/Object", null);
+		cw.visitField(Opcodes.ACC_PUBLIC, "cfg", "L" + cfg + ";", null, null).visitEnd();
 		MethodVisitor init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
 		init.visitCode();
 		init.visitVarInsn(Opcodes.ALOAD, 0);
 		init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
 		init.visitVarInsn(Opcodes.ALOAD, 0);
-		init.visitTypeInsn(Opcodes.NEW, CFG);
+		init.visitTypeInsn(Opcodes.NEW, cfg);
 		init.visitInsn(Opcodes.DUP);
-		init.visitMethodInsn(Opcodes.INVOKESPECIAL, CFG, "<init>", "()V", false);
-		init.visitFieldInsn(Opcodes.PUTFIELD, HOST, "cfg", "L" + CFG + ";");
+		init.visitMethodInsn(Opcodes.INVOKESPECIAL, cfg, "<init>", "()V", false);
+		init.visitFieldInsn(Opcodes.PUTFIELD, host, "cfg", "L" + cfg + ";");
 		init.visitInsn(Opcodes.RETURN);
 		init.visitMaxs(3, 1);
 		init.visitEnd();
-		peekField(cw, HOST, "cfg", "L" + CFG + ";");
+		peekField(cw, host, "cfg", "L" + cfg + ";");
 		return cw.toByteArray();
 	}
 
-	private static byte[] cfg(String marker) {
+	private static byte[] cfg(String name, String marker) {
 		ClassWriter cw = new ClassWriter(0);
-		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, CFG, null, "java/lang/Object", null);
-		ctor(cw, CFG, "()V", null);
+		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, name, null, "java/lang/Object", null);
+		ctor(cw, name, "()V", null);
 		MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC, "who", "()Ljava/lang/String;", null, null);
 		mv.visitCode();
 		mv.visitLdcInsn(marker);
@@ -175,6 +179,7 @@ public class BatchCrossClassProbe {
 		RemoldAgent.logger = new CaptureLogger();
 		AgentFreshness.verify(BatchCrossClassProbe::check, BatchCrossClassProbe::note);
 		try { partA(inst); } catch (Throwable t) { check(false, "part A aborted: " + describe(t)); }
+		try { partALazy(inst); } catch (Throwable t) { check(false, "part A-lazy aborted: " + describe(t)); }
 		try { partB(inst); } catch (Throwable t) { check(false, "part B aborted: " + describe(t)); }
 		summary();
 	}
@@ -184,8 +189,8 @@ public class BatchCrossClassProbe {
 		System.out.println("-- A: new field initializer references a class from this same batch --");
 		Path dir = Files.createTempDirectory("remold-batch-cross-a");
 		Map<String, byte[]> v1 = new HashMap<>();
-		v1.put(HOST, hostV1());
-		v1.put(CFG, cfg("cfg-v1"));
+		v1.put(HOST, hostV1(HOST));
+		v1.put(CFG, cfg(CFG, "cfg-v1"));
 		write(dir, v1);
 		Loader loader = new Loader(v1);
 		Class<?> hostCls = Class.forName(HOST.replace('/', '.'), true, loader);
@@ -193,8 +198,8 @@ public class BatchCrossClassProbe {
 
 		logs.clear();
 		Map<String, byte[]> v2 = new HashMap<>();
-		v2.put(HOST, hostV2());
-		v2.put(CFG, cfg("cfg-v2"));
+		v2.put(HOST, hostV2(HOST, CFG));
+		v2.put(CFG, cfg(CFG, "cfg-v2"));
 		Set<Path> changed = write(dir, v2);
 		process(changed, inst);
 
@@ -207,6 +212,69 @@ public class BatchCrossClassProbe {
 			"A2: the surviving instance received the new field value (" + value + ")");
 		check("cfg-v2".equals(call(value, "who")),
 			"A3: the value really is the class from this batch (" + call(value, "who") + ")");
+	}
+
+	/**
+	 * A-lazy: the same initializer class is born in this batch, but {@code lazy_load} mounts it by name instead
+	 * of injecting it through {@code defineClass}. The injection-site registration never runs on this path, so
+	 * the batch side table is the only thing keeping the class visible to InitFix.
+	 */
+	static void partALazy(Instrumentation inst) throws Throwable {
+		System.out.println("-- A-lazy: the born class is lazy-loaded, not injected --");
+		RemoldAgent.RedefineMode previousMode = RemoldAgent.REDEFINE_MODE;
+		boolean previousUcp = RemoldAgent.UCP_APPEND;
+		RemoldAgent.REDEFINE_MODE = RemoldAgent.RedefineMode.lazy_load;
+		RemoldAgent.UCP_APPEND = true;
+		try {
+			Path dir = Files.createTempDirectory("remold-batch-cross-a-lazy");
+			Map<String, byte[]> v1 = new HashMap<>();
+			v1.put(LAZY_HOST, hostV1(LAZY_HOST));
+			v1.put(LAZY_CFG, cfg(LAZY_CFG, "lazy-cfg-v1"));
+			write(dir, v1);
+			// The loader stands in for the on-disk build output: lazy_load resolves a class by asking the loader,
+			// so the new round's bytes must be visible there without the class having been defined yet.
+			Map<String, byte[]> loaderClasses = new HashMap<>(v1);
+			Loader loader = new Loader(loaderClasses);
+			Class<?> hostCls = Class.forName(LAZY_HOST.replace('/', '.'), true, loader);
+			Object survivor = hostCls.getDeclaredConstructor().newInstance();
+
+			logs.clear();
+			Map<String, byte[]> v2 = new HashMap<>();
+			v2.put(LAZY_HOST, hostV2(LAZY_HOST, LAZY_CFG));
+			v2.put(LAZY_CFG, cfg(LAZY_CFG, "lazy-cfg-v2"));
+			Set<Path> changed = write(dir, v2);
+			loaderClasses.putAll(v2);
+			process(changed, inst);
+
+			boolean refused = false;
+			boolean injectedBorn = false;
+			for (String line : snapshot()) {
+				if (line.contains("[INITFIX-REFUSE]") && line.contains("bxplazy.LazyHost")) refused = true;
+				if (line.contains("[INJECTED]") && (line.contains("bxplazy.LazyCfg") || line.contains("bxplazy/LazyCfg"))) {
+					injectedBorn = true;
+				}
+			}
+			check(!refused, "A4: lazy_load does not refuse the host when its initializer class is only mounted");
+			check(!injectedBorn, "A5: the born class really took the lazy path (no defineClass injection)");
+			Object value = call(survivor, "peek");
+			check(value != null && "lazy-cfg-v2".equals(call(value, "who")),
+			 "A6: the surviving instance received the lazy-born class (" + call(value, "who") + ")");
+			check(extraBytesEmpty(), "A7: the per-batch side table is empty again after the batch ends");
+		} finally {
+			RemoldAgent.REDEFINE_MODE = previousMode;
+			RemoldAgent.UCP_APPEND = previousUcp;
+		}
+	}
+
+	private static boolean extraBytesEmpty() {
+		try {
+			Field field = InitFix.class.getDeclaredField("EXTRA_BYTES");
+			field.setAccessible(true);
+			Object value = field.get(null);
+			return value instanceof Map<?, ?> map && map.isEmpty();
+		} catch (Throwable t) {
+			return false;
+		}
 	}
 
 	/** B: dropping a host must take its family with it instead of leaving a half-applied batch. */

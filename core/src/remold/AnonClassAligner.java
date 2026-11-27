@@ -228,6 +228,14 @@ public final class AnonClassAligner {
 		public final Map<String, String> renameMap;
 		/** 未被匹配上的旧匿名类（孤儿类内部名），应在 JVM 中保留不动不触发重定义 */
 		public final Set<String>         orphanOldClasses;
+		/**
+		 * 真正未与任何旧匿名类配对的新匿名类（原编译内部名）。
+		 *
+		 * <p>旧调用方曾用 {@code !alignedAnonClasses.containsKey(rawName)} 反推，这会漏掉
+		 * "未配对、但恰好分配到同名目标"的新类（{@code Host$movedOp$1 -> Host$movedOp$1}）。
+		 * 对齐器在这里精确记录，供搬移统计使用；旧构造器保持空集以维护兼容。</p>
+		 */
+		public final Set<String>         unmatchedNewClasses;
 		/** 对齐统计数据 */
 		public final AlignmentStats      stats;
 
@@ -245,10 +253,23 @@ public final class AnonClassAligner {
 		 Map<String, String> renameMap,
 		 Set<String> orphanOldClasses,
 		 AlignmentStats stats) {
+			this(alignedHostBytes, alignedAnonClasses, renameMap, orphanOldClasses, stats,
+			 Collections.<String>emptySet());
+		}
+
+		public Result(
+		 byte[] alignedHostBytes,
+		 Map<String, byte[]> alignedAnonClasses,
+		 Map<String, String> renameMap,
+		 Set<String> orphanOldClasses,
+		 AlignmentStats stats,
+		 Set<String> unmatchedNewClasses) {
 			this.alignedHostBytes = alignedHostBytes;
 			this.alignedAnonClasses = Collections.unmodifiableMap(alignedAnonClasses);
 			this.renameMap = Collections.unmodifiableMap(renameMap);
 			this.orphanOldClasses = Collections.unmodifiableSet(orphanOldClasses);
+			this.unmatchedNewClasses = Collections.unmodifiableSet(
+			 unmatchedNewClasses != null ? unmatchedNewClasses : Collections.<String>emptySet());
 			this.stats = stats != null ? stats : new AlignmentStats();
 		}
 	}
@@ -616,6 +637,19 @@ public final class AnonClassAligner {
 				}
 			}
 
+			// 精确记录真正未配对的新匿名类：不能由调用方用 alignedAnonClasses 反推 ——
+			// 同名目标分配（Host$movedOp$1 -> Host$movedOp$1）会让未配对的新类也出现在该表里。
+			Set<String> matchedNewNames = new HashSet<>();
+			for (AnonInfo n : matchedNewToOld.keySet()) {
+				matchedNewNames.add(n.name);
+			}
+			Set<String> unmatchedNewClasses = new LinkedHashSet<>();
+			for (AnonInfo n : newInfos) {
+				if (!matchedNewNames.contains(n.name)) {
+					unmatchedNewClasses.add(n.name);
+				}
+			}
+
 			stats.newClasses = newInfos.size() - matchedNewToOld.size();
 			stats.orphanClasses = orphanOldClasses.size();
 			dbg("level pass done: " + stats + ", orphans=" + orphanOldClasses);
@@ -728,7 +762,8 @@ public final class AnonClassAligner {
 			// 应用 ClassRemapper 重写宿主类字节码
 			byte[] alignedHostBytes = newHostBytes != null ? remapClass(newHostBytes, byteMap) : null;
 
-			return new Result(alignedHostBytes, alignedAnonClasses, renameMap, orphanOldClasses, stats);
+			return new Result(alignedHostBytes, alignedAnonClasses, renameMap, orphanOldClasses, stats,
+			 unmatchedNewClasses);
 		} finally {
 			// 恢复调用前的实例判定，避免本次注入泄漏到后续调用
 			hotswapAlignerHasLiveInstances = prevHasLive;

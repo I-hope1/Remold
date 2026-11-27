@@ -69,6 +69,68 @@ class AnonRenamePropagationTest {
 			"nested anonymous classes come last");
 	}
 
+	/**
+	 * 深度必须对每一层嵌套都严格递增，否则"按深度升序"仍会把父/子宿主排成同键。
+	 * 三种命名形态都要覆盖：Kotlin {@code Host$1$mid$1}、Java {@code Host$1$1}、普通内部类
+	 * {@code Host$Inner$1}。
+	 */
+	@Test
+	void anonDepthIsStrictlyMonotonicAcrossNestingShapes() {
+		assertStrictlyIncreasing(
+			"example.DeepNestLocalTarget",
+			"example.DeepNestLocalTarget$2",
+			"example.DeepNestLocalTarget$2$mid$1",
+			"example.DeepNestLocalTarget$2$mid$1$leaf$1");
+		assertStrictlyIncreasing(
+			"example.JavaHost",
+			"example.JavaHost$1",
+			"example.JavaHost$1$1",
+			"example.JavaHost$1$1$1");
+		assertStrictlyIncreasing(
+			"example.InnerHost",
+			"example.InnerHost$Inner",
+			"example.InnerHost$Inner$1");
+	}
+
+	private static void assertStrictlyIncreasing(String... names) {
+		for (int i = 1; i < names.length; i++) {
+			assertTrue(BatchHotswapExecutor.anonDepth(names[i - 1]) < BatchHotswapExecutor.anonDepth(names[i]),
+				"ancestor " + names[i - 1] + " (depth " + BatchHotswapExecutor.anonDepth(names[i - 1])
+					+ ") must be strictly shallower than descendant " + names[i] + " (depth "
+					+ BatchHotswapExecutor.anonDepth(names[i]) + ")");
+		}
+	}
+
+	/**
+	 * 现场形态：输入顺序被构造成子宿主在父宿主之前（{@code $2$mid$1} 先于 {@code $2}），
+	 * 且同深度还有另一个兄弟宿主（{@code $2$mid$2}）。排序后必须：
+	 * <ol>
+	 *   <li>真实宿主在最前；</li>
+	 *   <li>父宿主先于所有子宿主；</li>
+	 *   <li>同深度兄弟保持插入顺序（class-mode prepend 探针约束，不得按名字重排）。</li>
+	 * </ol>
+	 */
+	@Test
+	void nestedAnonHostsAreSortedOuterFirstAndKeepSameDepthInsertionOrder() {
+		String real   = "example.DeepNestLocalTarget";
+		String parent = real + "$2";
+		String childA = parent + "$mid$1";
+		String childB = parent + "$mid$2";
+
+		List<String> hostOrder = new ArrayList<>(List.of(childA, childB, parent, real));
+		BatchHotswapExecutor.sortHostsOuterFirst(hostOrder);
+
+		assertEquals(List.of(real, parent, childA, childB), hostOrder,
+			"parent host must run before its nested hosts; same-depth siblings keep insertion order");
+
+		// 对照：childA/childB 若按名字排序会变成 childA, childB（恰好一致），换一组刻意逆序的兄弟
+		// 证明实现没有偷偷按名字重排。
+		List<String> reversedSiblings = new ArrayList<>(List.of(parent + "$mid$2", parent + "$mid$1", parent, real));
+		BatchHotswapExecutor.sortHostsOuterFirst(reversedSiblings);
+		assertEquals(List.of(real, parent, parent + "$mid$2", parent + "$mid$1"), reversedSiblings,
+			"same-depth hosts must stay in insertion order, never dictionary order");
+	}
+
 	@Test
 	void renameSubspaceOnlyRewritesTheSubtree() {
 		assertEquals("H$3", BatchHotswapExecutor.renameSubspace("H$4", "H$4", "H$3"));
@@ -173,11 +235,71 @@ class AnonRenamePropagationTest {
 		assertNotNull(LambdaCaptureBridge.class, "onBridgeInvoked must stay callable with a location only");
 	}
 
+	@Test
+	void threeLevelPropagationRewritesLeafEnclosingMethodAndAligns() {
+		// 现场（3 层嵌套顺移）：$3 -> $2 时，中间宿主 $3$mid$1 -> $2$mid$1 必须同时进入 subspaceMap，
+		// 否则第 3 层叶子 $3$mid$1$leaf$1 重写后 EnclosingMethod.owner 仍停在 $3$mid$1，对齐时 new=0。
+		String rawOuter = "example.Deep$3";
+		String targetOuter = "example.Deep$2";
+		String rawMid = rawOuter + "$mid$1";
+		String targetMid = targetOuter + "$mid$1";
+		String rawLeaf = rawMid + "$leaf$1";
+		String targetLeaf = targetMid + "$leaf$1";
+
+		byte[] oldLeafBytes = tinyEnclosedClass("example/Deep$2$mid$1$leaf$1", "example/Deep$2$mid$1");
+		byte[] newMidBytes = tinyEnclosedClass("example/Deep$3$mid$1", "example/Deep$3");
+		byte[] newLeafBytes = tinyEnclosedClass("example/Deep$3$mid$1$leaf$1", "example/Deep$3$mid$1");
+
+		Set<String> runtimeNames = new LinkedHashSet<>(Set.of(targetOuter, targetMid, targetLeaf));
+		List<String> hostOrder = new ArrayList<>(List.of("example.Deep", rawOuter, rawMid));
+		Map<String, Map<String, byte[]>> newAnonsByHost = new HashMap<>();
+		newAnonsByHost.put(rawOuter, new HashMap<>(Map.of(rawMid, newMidBytes)));
+		newAnonsByHost.put(rawMid, new HashMap<>(Map.of(rawLeaf, newLeafBytes)));
+		Map<String, byte[]> newBatchBytes = new HashMap<>();
+		newBatchBytes.put(rawMid, newMidBytes);
+		newBatchBytes.put(rawLeaf, newLeafBytes);
+		Map<String, String> targetToRawName = new HashMap<>();
+		targetToRawName.put(rawMid, rawMid);
+		targetToRawName.put(rawLeaf, rawLeaf);
+
+		BatchHotswapExecutor.propagateAnonSubspace(rawOuter, targetOuter, hostOrder, 0,
+			newAnonsByHost, newBatchBytes, new HashMap<>(), targetToRawName, runtimeNames);
+
+		byte[] relocatedLeaf = newAnonsByHost.get(targetMid).get(targetLeaf);
+		assertNotNull(relocatedLeaf, "leaf must move into target intermediate host bucket");
+
+		org.objectweb.asm.tree.ClassNode leafNode = new org.objectweb.asm.tree.ClassNode();
+		new org.objectweb.asm.ClassReader(relocatedLeaf).accept(leafNode, 0);
+		assertEquals("example/Deep$2$mid$1$leaf$1", leafNode.name);
+		assertEquals("example/Deep$2$mid$1", leafNode.outerClass,
+			"leaf EnclosingMethod owner must be rewritten from $3$mid$1 to $2$mid$1");
+
+		AnonClassAligner.Result leafRes = AnonClassAligner.align(
+			targetMid, null,
+			Map.of(targetLeaf, oldLeafBytes),
+			newAnonsByHost.get(targetMid),
+			n -> oldLeafBytes,
+			n -> relocatedLeaf);
+		assertTrue(leafRes.alignedAnonClasses.containsKey("example/Deep$2$mid$1$leaf$1"),
+			"3rd-level leaf must align instead of hitting new=0 / ANON-NOT-ALIGNED");
+		assertTrue(leafRes.orphanOldClasses.isEmpty(),
+			"old 3rd-level leaf must be paired, not orphaned: " + leafRes.orphanOldClasses);
+	}
+
 	/** A minimal but real classfile, so the rename path exercises ASM instead of fake bytes. */
 	private static byte[] tinyClass(String internalName) {
 		ClassWriter cw = new ClassWriter(0);
 		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER | Opcodes.ACC_SYNTHETIC,
 			internalName, null, "java/lang/Object", null);
+		cw.visitEnd();
+		return cw.toByteArray();
+	}
+
+	private static byte[] tinyEnclosedClass(String internalName, String outerInternalName) {
+		ClassWriter cw = new ClassWriter(0);
+		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER | Opcodes.ACC_SYNTHETIC,
+			internalName, null, "java/lang/Object", null);
+		cw.visitOuterClass(outerInternalName, "<init>", "(Lexample/Deep;)V");
 		cw.visitEnd();
 		return cw.toByteArray();
 	}

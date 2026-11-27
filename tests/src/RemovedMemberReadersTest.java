@@ -539,6 +539,37 @@ class RemovedMemberReadersTest {
 			+ " the failure mode this bucket exists to prevent");
 	}
 
+	/**
+	 * {@code inconclusive} 必须能按被删成员 owner 归属：A 类判不了的引用不得让同批的 B 类
+	 * 也变成"判不了"。否则一条属于 A 的 {@code Supplier.get()} 之类的引用会毒死整批。
+	 */
+	@Test
+	void inconclusiveIsAttributedToItsOwnerOnly() throws Exception {
+		Worlds w = worlds(
+			Map.of("p/A", "package p; public class A { public int x = 1; }",
+			       "p/B", "package p; public class B { public int y = 1; }",
+			       "p/Sub", "package p; public class Sub extends A { }",
+			       "p/Reader", "package p; public class Reader { static int read(Sub s) { return s.x; } }"),
+			Map.of("p/A", "package p; public class A { }",
+			       "p/B", "package p; public class B { }"));
+
+		Map<String, TypeInfo> pruned = new LinkedHashMap<>(RemovedMemberReaders.universe(w.post()));
+		pruned.remove("p/Sub");
+
+		Result r = RemovedMemberReaders.find(RemovedMemberReaders.universe(w.pre()), pruned, w.post(),
+			List.of(removedField("p/A", "x", "I", false), removedField("p/B", "y", "I", false)));
+
+		assertFalse(r.inconclusiveFor("p/A").isEmpty(),
+			"the unresolvable Sub.x reference belongs to A's removed field");
+		assertFalse(r.isConclusiveFor("p/A"), "A must stay fail-closed");
+		assertTrue(r.inconclusiveFor("p/B").isEmpty(),
+			"nothing about B's removed field is inconclusive");
+		assertTrue(r.isConclusiveFor("p/B"),
+			"B is unrelated to the A-side inconclusive and must be allowed to conclude");
+		assertFalse(r.globalInconclusive(),
+			"a member-attributable inconclusive is not a global scan failure");
+	}
+
 	// ------------------------------------------------------------------------------------------------
 	// fixtures
 	// ------------------------------------------------------------------------------------------------

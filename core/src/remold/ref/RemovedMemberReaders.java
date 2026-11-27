@@ -143,14 +143,21 @@ public final class RemovedMemberReaders {
 	 * 与 {@code dispatchShifted} 的不对称见 {@code docs/initfix/07-p05-probe-results.md} §15.4。</p>
 	 *
 	 * @param hits           改动后会悬空的引用（真正的读者）
-	 * @param inconclusive   归属对得上、但类型信息不足无法判定
+	 * @param inconclusive   归属对得上、但类型信息不足无法判定（整批汇总视图，日志兼容用）
 	 * @param retargeted     改动前指向被删字段、改动后指向了别处（不抛错，但读到的东西变了）
 	 * @param abstractMissing 具体类失去接口方法的唯一实现
 	 * @param dispatchShifted 方法分派目标从被删实现转到了祖先实现
+	 * @param incompatibleAccess 静态/实例翻转（{@code IncompatibleClassChangeError}）
+	 * @param inconclusiveByOwner 按 {@code RemovedMember.owner()} 归属的 {@code inconclusive}；
+	 *                       用于只让受影响的类 fail-closed，不毒死同批无关类
+	 * @param globalInconclusive 是否存在无法归属的失败（读者字节码本身解析不了），此时所有类
+	 *                       都必须 fail-closed
 	 */
 	public record Result(List<Hit> hits, List<String> inconclusive, List<Hit> retargeted,
 	                     List<Hit> abstractMissing, List<Hit> dispatchShifted,
-	                     List<Hit> incompatibleAccess) {
+	                     List<Hit> incompatibleAccess,
+	                     Map<String, List<String>> inconclusiveByOwner,
+	                     boolean globalInconclusive) {
 		public Result {
 			hits = List.copyOf(hits);
 			inconclusive = List.copyOf(inconclusive);
@@ -158,11 +165,47 @@ public final class RemovedMemberReaders {
 			abstractMissing = List.copyOf(abstractMissing);
 			dispatchShifted = List.copyOf(dispatchShifted);
 			incompatibleAccess = List.copyOf(incompatibleAccess);
+			Map<String, List<String>> copy = new LinkedHashMap<>();
+			if (inconclusiveByOwner != null) {
+				for (Map.Entry<String, List<String>> e : inconclusiveByOwner.entrySet()) {
+					copy.put(e.getKey(), List.copyOf(e.getValue()));
+				}
+			}
+			inconclusiveByOwner = Map.copyOf(copy);
+		}
+
+		/**
+		 * 六参便捷构造：未提供归属信息时把全部 {@code inconclusive} 视为<b>全局</b>，
+		 * 对所有被删成员 fail-closed（宁可多拦，不可把"判不了"读成"没有读者"）。
+		 */
+		public Result(List<Hit> hits, List<String> inconclusive, List<Hit> retargeted,
+		              List<Hit> abstractMissing, List<Hit> dispatchShifted,
+		              List<Hit> incompatibleAccess) {
+			this(hits, inconclusive, retargeted, abstractMissing, dispatchShifted, incompatibleAccess,
+			     Map.of(), !inconclusive.isEmpty());
 		}
 
 		/** 只有悬空与改指向时的便捷构造。 */
 		public Result(List<Hit> hits, List<String> inconclusive, List<Hit> retargeted) {
 			this(hits, inconclusive, retargeted, List.of(), List.of(), List.of());
+		}
+
+		/**
+		 * 归属于 {@code owner}（内部名）的 {@code inconclusive} 明细。
+		 *
+		 * <p>按 owner 隔离是为了不让 A 类判不了的引用毒死同批里完全无关的 B 类；全局性失败
+		 * （读者字节码无法解析）不归属任何 owner，由 {@link #globalInconclusive()} 表达。</p>
+		 */
+		public List<String> inconclusiveFor(String owner) {
+			return inconclusiveByOwner.getOrDefault(owner, List.of());
+		}
+
+		/**
+		 * 该 owner 的扫描是否<b>可以下结论</b>：既没有全局失败，也没有归属于它的
+		 * {@code inconclusive}。{@code false} 时调用方必须对该 owner 的删除 fail-closed。
+		 */
+		public boolean isConclusiveFor(String owner) {
+			return !globalInconclusive && !inconclusiveByOwner.containsKey(owner);
 		}
 
 		/**
@@ -656,6 +699,8 @@ public final class RemovedMemberReaders {
 	                          Collection<RemovedMember> removed) {
 		List<Hit> hits = new ArrayList<>();
 		Set<String> inconclusive = new LinkedHashSet<>();
+		Map<String, List<String>> inconclusiveByOwner = new LinkedHashMap<>();
+		List<String> globalInconclusive = new ArrayList<>();
 		List<Hit> retargeted = new ArrayList<>();
 		List<Hit> abstractMissing = new ArrayList<>();
 		List<Hit> dispatchShifted = new ArrayList<>();
@@ -677,7 +722,10 @@ public final class RemovedMemberReaders {
 				classRefs = refs(e.getValue());
 			} catch (RuntimeException parseFailure) {
 				// 解析不了就不能断言"没有引用"——把危险当成安全是本类最不该犯的错。
-				inconclusive.add(reader + " (unparseable: " + parseFailure.getMessage() + ")");
+				// 这条失败无法归属到某个被删成员：读者类里任何引用都可能存在，故按全局失败处理。
+				String msg = reader + " (unparseable: " + parseFailure.getMessage() + ")";
+				inconclusive.add(msg);
+				globalInconclusive.add(msg);
 				continue;
 			}
 			for (Ref ref : classRefs) {
@@ -698,7 +746,7 @@ public final class RemovedMemberReaders {
 						if (ref.owner().equals(m.owner())) {
 							TypeInfo t = typeOf(postWorld, m.owner());
 							if (t == null) {
-								inconclusive.add(where + " (post)");
+								addInconclusive(inconclusive, inconclusiveByOwner, m.owner(), where + " (post)");
 							} else {
 								String key = m.name() + ":" + m.desc();
 								boolean exists = m.isField() ? t.fields().contains(key) : t.methods().contains(key);
@@ -731,13 +779,13 @@ public final class RemovedMemberReaders {
 						classifyDispatch(preWorld, postWorld, ref, m, reader, where,
 						                 descendantsByOwner.computeIfAbsent(m.owner(),
 						                     k -> descendantsOf(preWorld, k)),
-						                 hits, inconclusive, abstractMissing, dispatchShifted);
+						                 hits, inconclusive, inconclusiveByOwner, abstractMissing, dispatchShifted);
 						continue;
 					}
 
 					Resolved before = resolve(preWorld, ref, m.isField());
 					if (before.state() == State.UNKNOWN) {
-						inconclusive.add(where + " (pre)");
+						addInconclusive(inconclusive, inconclusiveByOwner, m.owner(), where + " (pre)");
 						continue;
 					}
 					if (before.state() != State.FOUND || !before.declaring().equals(m.owner())) {
@@ -747,7 +795,7 @@ public final class RemovedMemberReaders {
 					Resolved after = resolve(postWorld, ref, m.isField());
 					switch (after.state()) {
 						case NOT_FOUND -> hits.add(new Hit(m, reader, ref.owner(), ref.kind()));
-						case UNKNOWN   -> inconclusive.add(where + " (post)");
+						case UNKNOWN   -> addInconclusive(inconclusive, inconclusiveByOwner, m.owner(), where + " (post)");
 						case FOUND     -> {
 							// 静态性翻转（无论在自身还是父类）均会抛出 ICCE，必须记录为 incompatibleAccess
 							if (isAccessKindMismatch(postWorld, after.declaring(), m)) {
@@ -769,7 +817,20 @@ public final class RemovedMemberReaders {
 			}
 		}
 		return new Result(hits, new ArrayList<>(inconclusive), retargeted,
-		                  abstractMissing, dispatchShifted, incompatibleAccess);
+		                  abstractMissing, dispatchShifted, incompatibleAccess,
+		                  inconclusiveByOwner, !globalInconclusive.isEmpty());
+	}
+
+	/** 记录一条既进入汇总视图、又按被删成员 owner 归属的 {@code inconclusive}。 */
+	private static void addInconclusive(Set<String> all, Map<String, List<String>> byOwner,
+	                                    String owner, String message) {
+		if (all.add(message)) {
+			byOwner.computeIfAbsent(owner, k -> new ArrayList<>()).add(message);
+		} else {
+			// 同一条消息可能因同一 owner 的多个引用重复出现：汇总视图去重，归属视图也要去重。
+			List<String> owned = byOwner.computeIfAbsent(owner, k -> new ArrayList<>());
+			if (!owned.contains(message)) owned.add(message);
+		}
 	}
 
 	/**
@@ -874,13 +935,14 @@ public final class RemovedMemberReaders {
 	                                     Ref ref, RemovedMember m, String reader, String where,
 	                                     Set<String> descendants,
 	                                     List<Hit> hits, Set<String> inconclusive,
+	                                     Map<String, List<String>> inconclusiveByOwner,
 	                                     List<Hit> abstractMissing, List<Hit> dispatchShifted) {
 		String receiver = bridgingSubtype(preWorld, m.owner(), descendants, ref.owner());
 		if (receiver == null) {
 			// 不是"receiver 可能是 A 的后代"的形态；退回直接解析，覆盖 owner 恰好写的是 A 的情形。
 			Resolved before = resolveMethod(preWorld, ref.owner(), m.name(), m.desc());
 			if (before.state() == State.UNKNOWN) {
-				inconclusive.add(where + " (pre)");
+				addInconclusive(inconclusive, inconclusiveByOwner, m.owner(), where + " (pre)");
 				return;
 			}
 			if (before.state() != State.FOUND || !before.declaring().equals(m.owner())) return;
@@ -892,7 +954,7 @@ public final class RemovedMemberReaders {
 		Selection sel = selectMethod(postWorld, receiver, m.name(), m.desc());
 		switch (sel.state()) {
 			case NOT_FOUND -> hits.add(new Hit(m, reader, ref.owner(), ref.kind()));
-			case UNKNOWN   -> inconclusive.add(where + " (post)");
+			case UNKNOWN   -> addInconclusive(inconclusive, inconclusiveByOwner, m.owner(), where + " (post)");
 			case FOUND     -> {
 				if (sel.abstractOnly()) {
 					abstractMissing.add(new Hit(m, reader, ref.owner(), ref.kind(),

@@ -1819,6 +1819,10 @@ public class InitFix {
 							instanceExtracts.computeIfAbsent(fe.getKey(), x -> new ArrayList<>()).add(fe.getValue());
 						}
 					}
+					KotlinDefaultCtorExtractor.extractMissingDefaults(
+						host, classNode, initMethods, rootCtorCache, rootCtorCount,
+						instanceFields, privateMethods, nest, oracle,
+						instanceExtracts, selfAssignedFields, instanceReasons);
 
 					for (String f : instanceFields) {
 						if (selfAssignedFields.contains(f)) {
@@ -2482,6 +2486,10 @@ public class InitFix {
 				 .add(fe.getValue());
 			}
 		}
+		KotlinDefaultCtorExtractor.extractMissingDefaults(
+			host, newClass, initMethods, rootCtorCache, rootCtorCount,
+			targetInstanceFields, privateMethods, nest, oracle,
+			instanceExtracts, selfAssignedFields, instanceReasons);
 
 		// ==================== 静态字段提取 ====================
 		Map<String, List<FieldExtract>> staticExtracts = new LinkedHashMap<>();

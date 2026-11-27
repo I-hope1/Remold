@@ -2165,6 +2165,7 @@ final class BatchHotswapExecutor {
 	                                                Map<Class<?>, ClassDiffUtil.ClassDiff> diffByHost) {
 		if (definitions.isEmpty() || diffByHost.isEmpty()) return;
 		List<ClassDefinition> kept = new ArrayList<>(definitions.size());
+		Set<String> droppedHosts = new LinkedHashSet<>();
 		for (ClassDefinition def : definitions) {
 			Class<?> host = def.getDefinitionClass();
 			Map<String, String> refused = InitFix.unexpressibleNewFieldInits(host, diffByHost.get(host));
@@ -2173,6 +2174,7 @@ final class BatchHotswapExecutor {
 				continue;
 			}
 			String hostName = host.getName();
+			droppedHosts.add(hostName);
 			StringBuilder detail = new StringBuilder();
 			for (Map.Entry<String, String> e : refused.entrySet()) {
 				if (detail.length() > 0) detail.append("; ");
@@ -2202,8 +2204,6 @@ final class BatchHotswapExecutor {
 		//     → 新建实例 NoSuchMethodError。
 		// 因此这里做两件事：①把被踢宿主的匿名类族一起移出本批；②把"删了成员"的其他批次类一并移出（保守：
 		// 它们的无读者证明可能依赖被踢的那个类）。
-		Set<String> droppedHosts = new LinkedHashSet<>();
-		for (ClassDefinition def : definitions) droppedHosts.add(def.getDefinitionClass().getName());
 		List<ClassDefinition> survivors = new ArrayList<>(kept.size());
 		for (ClassDefinition def : kept) {
 			Class<?> host = def.getDefinitionClass();
@@ -2222,15 +2222,16 @@ final class BatchHotswapExecutor {
 				AlignmentTransaction tx = transactions.remove(hostName);
 				if (tx != null) tx.rollback(true);
 				dropBatchClass(newBatchBytes, classToPath, hostName);
-				dropFamily(definitions, newBatchBytes, classToPath, skips, hostName);
+				droppedHosts.add(hostName);
 				InitFix.discardPending(host);
 				continue;
 			}
 			survivors.add(def);
 		}
 		// 被踢宿主的匿名类族：它们的构造器/方法签名依赖宿主的新形态，宿主不更新时它们也不能单独更新。
+		// 注意只对真正被踢出的宿主级联，绝不把存活宿主误放进 droppedHosts。
 		for (String dropped : droppedHosts) {
-			dropFamily(definitions, newBatchBytes, classToPath, skips, dropped);
+			dropFamily(survivors, newBatchBytes, classToPath, skips, dropped);
 		}
 		definitions.clear();
 		definitions.addAll(survivors);

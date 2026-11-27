@@ -124,19 +124,25 @@ public final class AnonHostResolver {
 		String c = Names.internal(className);
 		if (h.equals(c) || !c.startsWith(h + "$")) return false;
 		ClassNode cn = parse(bytes);
-		if (cn != null && hasAnonymousMarker(cn)) {
-			// 有匿名标记时以属性为准：宿主必须与属性一致（嵌套内层的宿主是外层匿名类）。
-			if (cn.outerClass != null && !cn.outerClass.isEmpty()) {
-				return cn.outerClass.equals(h);
+		if (cn != null) {
+			if (hasAnonymousMarker(cn)) {
+				// 有匿名标记时以属性为准：宿主必须与属性一致（嵌套内层的宿主是外层匿名类）。
+				if (cn.outerClass != null && !cn.outerClass.isEmpty()) {
+					return cn.outerClass.equals(h);
+				}
+				return isAnonymousName(c, h);
 			}
-			return isAnonymousName(c, h);
+			// 字节码已证明是具名内部类/局部类（innerName != null）或枚举常量体：即使类名以数字结尾（如 Box1）也不属匿名族。
+			if (hasExplicitInnerName(cn) || (cn.access & Opcodes.ACC_ENUM) != 0) {
+				return false;
+			}
 		}
 		return isAnonymousName(c, h);
 	}
 
 	/**
 	 * 名字判据：{@code host$...$<数字>}，末尾是数字段即算匿名类名（{@code Host$1}、{@code Host$prop$1}、
-	 * {@code Host$1$2} 都成立；{@code Host$Helper}、{@code Host$Helper$Deep} 不成立）。
+	 * {@code Host$1$2} 都成立；{@code Host$Helper}、{@code Host$Helper$Deep}、{@code Host$Box1} 不成立）。
 	 *
 	 * <p>与 {@link #isDigitChainAnon} 的差别：后者要求数字段前还有内容（它服务"后缀族"通道，纯 Java
 	 * 形态由 {@link AnonClassAligner#isAnonymousClassName} 覆盖）。本判据是**匿名类名**的统一口径。</p>
@@ -150,7 +156,7 @@ public final class AnonHostResolver {
 		if (suffix.isEmpty() || suffix.endsWith("$") || suffix.contains("$$")) return false;
 		int i = suffix.length();
 		while (i > 0 && Character.isDigit(suffix.charAt(i - 1))) i--;
-		return i < suffix.length();
+		return i < suffix.length() && (i == 0 || suffix.charAt(i - 1) == '$');
 	}
 
 	/**
@@ -208,12 +214,26 @@ public final class AnonHostResolver {
 		// 枚举常量体也是"有 EnclosingMethod 的合成类"，但它有自己的重定义通道（按常量名路由），
 		// 不能被当成宿主名下的匿名类参与对齐（S22 的教训：误路由会让它静默停留在旧版本）。
 		if ((cn.access & Opcodes.ACC_ENUM) != 0) return false;
+		// 具名局部类（javac Host$1Local、kotlinc Host$method$DummyBox）与具名成员内部类都带非空 innerName；
+		// 即使同时具备 EnclosingMethod，按 JVMS §4.7.6 也绝不是匿名类，必须交给原名通道 + LocalClassGuard。
+		if (hasExplicitInnerName(cn)) return false;
 		if (cn.outerClass != null && !cn.outerClass.isEmpty()) return true;
 		if (cn.innerClasses == null) return false;
 		for (InnerClassNode icn : cn.innerClasses) {
 			if (!cn.name.equals(icn.name)) continue;
 			return icn.outerName == null && icn.innerName == null
 				&& (icn.access & Opcodes.ACC_SYNTHETIC) != 0;
+		}
+		return false;
+	}
+
+	/** 自身 {@code InnerClasses} 条目带非空 {@code innerName}：具名成员内部类或具名局部类，非匿名类。 */
+	static boolean hasExplicitInnerName(ClassNode cn) {
+		if (cn == null || cn.name == null || cn.innerClasses == null) return false;
+		for (InnerClassNode icn : cn.innerClasses) {
+			if (cn.name.equals(icn.name)) {
+				return icn.innerName != null && !icn.innerName.isEmpty();
+			}
 		}
 		return false;
 	}

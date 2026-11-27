@@ -235,11 +235,71 @@ class AnonRenamePropagationTest {
 		assertNotNull(LambdaCaptureBridge.class, "onBridgeInvoked must stay callable with a location only");
 	}
 
+	@Test
+	void threeLevelPropagationRewritesLeafEnclosingMethodAndAligns() {
+		// 现场（3 层嵌套顺移）：$3 -> $2 时，中间宿主 $3$mid$1 -> $2$mid$1 必须同时进入 subspaceMap，
+		// 否则第 3 层叶子 $3$mid$1$leaf$1 重写后 EnclosingMethod.owner 仍停在 $3$mid$1，对齐时 new=0。
+		String rawOuter = "example.Deep$3";
+		String targetOuter = "example.Deep$2";
+		String rawMid = rawOuter + "$mid$1";
+		String targetMid = targetOuter + "$mid$1";
+		String rawLeaf = rawMid + "$leaf$1";
+		String targetLeaf = targetMid + "$leaf$1";
+
+		byte[] oldLeafBytes = tinyEnclosedClass("example/Deep$2$mid$1$leaf$1", "example/Deep$2$mid$1");
+		byte[] newMidBytes = tinyEnclosedClass("example/Deep$3$mid$1", "example/Deep$3");
+		byte[] newLeafBytes = tinyEnclosedClass("example/Deep$3$mid$1$leaf$1", "example/Deep$3$mid$1");
+
+		Set<String> runtimeNames = new LinkedHashSet<>(Set.of(targetOuter, targetMid, targetLeaf));
+		List<String> hostOrder = new ArrayList<>(List.of("example.Deep", rawOuter, rawMid));
+		Map<String, Map<String, byte[]>> newAnonsByHost = new HashMap<>();
+		newAnonsByHost.put(rawOuter, new HashMap<>(Map.of(rawMid, newMidBytes)));
+		newAnonsByHost.put(rawMid, new HashMap<>(Map.of(rawLeaf, newLeafBytes)));
+		Map<String, byte[]> newBatchBytes = new HashMap<>();
+		newBatchBytes.put(rawMid, newMidBytes);
+		newBatchBytes.put(rawLeaf, newLeafBytes);
+		Map<String, String> targetToRawName = new HashMap<>();
+		targetToRawName.put(rawMid, rawMid);
+		targetToRawName.put(rawLeaf, rawLeaf);
+
+		BatchHotswapExecutor.propagateAnonSubspace(rawOuter, targetOuter, hostOrder, 0,
+			newAnonsByHost, newBatchBytes, new HashMap<>(), targetToRawName, runtimeNames);
+
+		byte[] relocatedLeaf = newAnonsByHost.get(targetMid).get(targetLeaf);
+		assertNotNull(relocatedLeaf, "leaf must move into target intermediate host bucket");
+
+		org.objectweb.asm.tree.ClassNode leafNode = new org.objectweb.asm.tree.ClassNode();
+		new org.objectweb.asm.ClassReader(relocatedLeaf).accept(leafNode, 0);
+		assertEquals("example/Deep$2$mid$1$leaf$1", leafNode.name);
+		assertEquals("example/Deep$2$mid$1", leafNode.outerClass,
+			"leaf EnclosingMethod owner must be rewritten from $3$mid$1 to $2$mid$1");
+
+		AnonClassAligner.Result leafRes = AnonClassAligner.align(
+			targetMid, null,
+			Map.of(targetLeaf, oldLeafBytes),
+			newAnonsByHost.get(targetMid),
+			n -> oldLeafBytes,
+			n -> relocatedLeaf);
+		assertTrue(leafRes.alignedAnonClasses.containsKey("example/Deep$2$mid$1$leaf$1"),
+			"3rd-level leaf must align instead of hitting new=0 / ANON-NOT-ALIGNED");
+		assertTrue(leafRes.orphanOldClasses.isEmpty(),
+			"old 3rd-level leaf must be paired, not orphaned: " + leafRes.orphanOldClasses);
+	}
+
 	/** A minimal but real classfile, so the rename path exercises ASM instead of fake bytes. */
 	private static byte[] tinyClass(String internalName) {
 		ClassWriter cw = new ClassWriter(0);
 		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER | Opcodes.ACC_SYNTHETIC,
 			internalName, null, "java/lang/Object", null);
+		cw.visitEnd();
+		return cw.toByteArray();
+	}
+
+	private static byte[] tinyEnclosedClass(String internalName, String outerInternalName) {
+		ClassWriter cw = new ClassWriter(0);
+		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER | Opcodes.ACC_SYNTHETIC,
+			internalName, null, "java/lang/Object", null);
+		cw.visitOuterClass(outerInternalName, "<init>", "(Lexample/Deep;)V");
 		cw.visitEnd();
 		return cw.toByteArray();
 	}

@@ -2031,9 +2031,27 @@ final class BatchHotswapExecutor {
 			if (!renamed.equals(hostOrder.get(i))) hostOrder.set(i, renamed);
 		}
 
-		// 2) 新侧桶：桶键（宿主名）与桶内类名一起迁移，字节同步重写
+		// 2) 新侧桶：先收齐子树全部改名映射（含中间宿主 bucketHost -> newBucketHost 与任意深度的
+		//    子匿名类），再统一重写字节码。3 层以上嵌套（$3 -> $2 下有 $3$mid$1 -> $2$mid$1 与
+		//    $3$mid$1$leaf$1 -> $2$mid$1$leaf$1）若漏放中间宿主，叶子里的 EnclosingMethod owner
+		//    会仍停留在 $3$mid$1，导致第 3 层对齐时把叶子滤掉（level 2: old=1, new=0）。
 		Map<String, String> subspaceMap = new LinkedHashMap<>();
 		subspaceMap.put(Names.internal(rawDot), Names.internal(targetDot));
+		for (Map.Entry<String, Map<String, byte[]>> hostEntry : newAnonsByHost.entrySet()) {
+			String bucketHost = hostEntry.getKey();
+			String newBucketHost = renameSubspace(bucketHost, rawDot, targetDot);
+			if (!newBucketHost.equals(bucketHost)) {
+				subspaceMap.put(Names.internal(bucketHost), Names.internal(newBucketHost));
+			}
+			Map<String, byte[]> bucket = hostEntry.getValue();
+			if (bucket == null) continue;
+			for (String rawChild : bucket.keySet()) {
+				String newChild = renameSubspace(rawChild, rawDot, targetDot);
+				if (!newChild.equals(rawChild)) {
+					subspaceMap.put(Names.internal(rawChild), Names.internal(newChild));
+				}
+			}
+		}
 		for (String bucketHost : new ArrayList<>(newAnonsByHost.keySet())) {
 			String newBucketHost = renameSubspace(bucketHost, rawDot, targetDot);
 			Map<String, byte[]> bucket = newAnonsByHost.get(bucketHost);
@@ -2042,10 +2060,8 @@ final class BatchHotswapExecutor {
 			for (Map.Entry<String, byte[]> e : bucket.entrySet()) {
 				String newName = renameSubspace(e.getKey(), rawDot, targetDot);
 				if (newName.equals(e.getKey())) { moved.put(e.getKey(), e.getValue()); continue; }
-				subspaceMap.put(Names.internal(e.getKey()), Names.internal(newName));
 				childRenames.put(Names.internal(e.getKey()), Names.internal(newName));
 				byte[] remapped = AnonClassAligner.remapClass(e.getValue(), subspaceMap);
-				subspaceMap.remove(Names.internal(e.getKey()));
 				moved.put(newName, remapped);
 				moveBatchEntry(newBatchBytes, classToPath, targetToRawName, e.getKey(), newName);
 				// 迁移后再把**改过名**的字节写回批次：批次里必须留改名后的字节，

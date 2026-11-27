@@ -334,6 +334,9 @@ final class BatchHotswapExecutor {
 		// 从未被定义的槽位）。稳定排序 + 单一配对键，插入顺序原样保留。
 		hostOrder.sort(Comparator.comparingInt(h -> anonDepth(h) == 0 ? 0 : 1));
 		Set<String> runtimeNamesBefore = new HashSet<>(loadedClassesMap.keySet());
+		// 搬移统计必须整批汇合后再做：跨嵌套宿主的一次搬移（Outer$Inner$1 -> Outer$1）会把孤儿与
+		// 未配对的新类分到两个宿主组里，逐宿主上报永远看不到对方。
+		List<AnonMoveHost> anonMoveHosts = new ArrayList<>();
 		for (int hostIdx = 0; hostIdx < hostOrder.size(); hostIdx++) {
 			String hostName = hostOrder.get(hostIdx);
 			String hostSlash = hostName.replace('.', '/');
@@ -484,11 +487,9 @@ final class BatchHotswapExecutor {
 				}
 			}
 
-			// [ANON-MOVED] 计数器：同一宿主内**既有孤儿旧匿名类、又有未被配对的新匿名类**，且两者结构指纹
-			// （父类 + 接口集合）相等时，才可能是一次"跨宿主/跨位置搬移"。两维读数：活体数 live=N 与门禁结果
-			// gate=PASS|REJECT(reason)——N=0 时本来就不需要复用，而 REJECT 的原因分布决定复用值不值得做。
-			// 只统计、不改变任何行为；孤儿原因也在这里补一条明确说明（此前变成孤儿时可能是静默的）。
-			reportAnonMoves(hostName, res, oldAnon, newAnon);
+			// [ANON-MOVED] 计数器：先收齐本宿主组的孤儿与真正未配对的新匿名类，等整批宿主对齐完成后
+			// 再按顶层 NestHost 池汇合比对（跨嵌套宿主的搬移只有那时才能碰面）。
+			anonMoveHosts.add(new AnonMoveHost(hostName, res, oldAnon, newAnon));
 
 			// 先把对齐产物的字节登记进**批次的字节视图**：这些类马上会被 defineClass 出去，但在 redefine 之前
 			// 它们既不在批次视图、也不在运行期字节、也没有源码基线。InitFix 提取字段初值时用来判定构造器权限的
@@ -526,6 +527,9 @@ final class BatchHotswapExecutor {
 			}
 			transactions.put(hostName, tx);
 		}
+
+		// 全批宿主对齐完成后再汇总搬移读数：逐宿主上报会让跨嵌套宿主的搬移退化成 [ANON-ORPHAN]。
+		reportAnonMoves(anonMoveHosts);
 
 		// 变更集映射到目标类名：definitions 里的名字是 target 名，被 Mixin 重命名的类两者不同。
 		// 位置在匿名类对齐**之后**：此时 renameMap 已全部登记完，不会漏掉后处理宿主的重命名。
@@ -1783,50 +1787,144 @@ final class BatchHotswapExecutor {
 	}
 
 
+	/** 单个宿主组的搬移统计输入：孤儿/未配对集合 + 两侧字节桶。 */
+	static final class AnonMoveHost {
+		final String hostName;
+		final AnonClassAligner.Result res;
+		final Map<String, byte[]> oldAnon;
+		final Map<String, byte[]> newAnon;
+
+		AnonMoveHost(String hostName, AnonClassAligner.Result res,
+		             Map<String, byte[]> oldAnon, Map<String, byte[]> newAnon) {
+			this.hostName = hostName;
+			this.res = res;
+			this.oldAnon = oldAnon;
+			this.newAnon = newAnon;
+		}
+	}
+
+	/** 单个待比对的匿名类（孤儿旧类或未配对的新类）。 */
+	private static final class AnonMoveTarget {
+		final String internalName;
+		final byte[] bytes;
+		final String hostName;
+
+		AnonMoveTarget(String internalName, byte[] bytes, String hostName) {
+			this.internalName = internalName;
+			this.bytes = bytes;
+			this.hostName = hostName;
+		}
+	}
+
 	/**
 	 * 输出 {@code [ANON-MOVED]} 与 {@code [ANON-ORPHAN]} 读数（只统计，不改变任何行为）。
 	 *
-	 * <p>计数口径（避免攒出脏数据）：同一宿主内同时存在<b>孤儿旧匿名类</b>与<b>未被配对的新匿名类</b>，且两者的
-	 * 结构指纹（父类 + 接口集合）相等，才算一次搬移候选；普通"删旧加新"结构指纹不同，不会被计入。</p>
+	 * <p>计数口径（避免攒出脏数据）：在同一<b>顶层 NestHost 池</b>内同时存在<b>孤儿旧匿名类</b>与
+	 * <b>真正未被配对的新匿名类</b>，且两者结构指纹（父类 + 接口集合）相等，才算一次搬移候选；
+	 * 普通"删旧加新"结构指纹不同，不会被计入。不同顶层 NestHost（{@code ClassA$1} 与
+	 * {@code ClassB$1}）绝不互相匹配。</p>
+	 *
+	 * <p>必须整批汇合后再统计：跨嵌套宿主的一次搬移（{@code Outer$Inner$movedOp$1} ->
+	 * {@code Outer$movedOp$1}）会把孤儿与未配对的新类分到两个宿主组里，逐宿主上报永远看不到对方。</p>
 	 *
 	 * <p>两维读数：{@code live=N}（0 表示没有存量实例，本来就不需要复用）与 {@code gate=PASS|REJECT(reason)}
-	 * （例如 {@code capture-grew}、{@code this0-type-changed}），后者直接回答"能过复用门禁的占比"。</p>
+	 * （例如 {@code capture-grew}、{@code this0-type-changed}），后者直接回答"能过复用门禁的占比"。
+	 * {@code scope=same-host|cross-host} 与 {@code candidateHost=} 区分搬移是宿主内还是跨嵌套宿主。</p>
+	 */
+	static void reportAnonMoves(List<AnonMoveHost> hosts) {
+		Map<String, List<AnonMoveTarget>> orphansByNest = new LinkedHashMap<>();
+		Map<String, List<AnonMoveTarget>> newByNest = new LinkedHashMap<>();
+		for (AnonMoveHost host : hosts) {
+			if (host == null || host.res == null) continue;
+			Set<String> orphans = host.res.orphanOldClasses == null
+				? Set.<String>of() : host.res.orphanOldClasses;
+			for (String orphan : orphans) {
+				String orphanSlash = Names.internal(orphan);
+				byte[] orphanBytes = lookupAnonBytes(host.oldAnon, orphanSlash);
+				String nestHost = topLevelNestHost(orphanBytes, orphanSlash);
+				orphansByNest.computeIfAbsent(nestHost, k -> new ArrayList<>())
+					.add(new AnonMoveTarget(orphanSlash, orphanBytes, host.hostName));
+			}
+			Set<String> unmatched = host.res.unmatchedNewClasses == null
+				? Set.<String>of() : host.res.unmatchedNewClasses;
+			for (String raw : unmatched) {
+				String newSlash = Names.internal(raw);
+				byte[] newBytes = lookupAnonBytes(host.newAnon, newSlash);
+				String nestHost = topLevelNestHost(newBytes, newSlash);
+				newByNest.computeIfAbsent(nestHost, k -> new ArrayList<>())
+					.add(new AnonMoveTarget(newSlash, newBytes, host.hostName));
+			}
+		}
+
+		for (Map.Entry<String, List<AnonMoveTarget>> entry : orphansByNest.entrySet()) {
+			List<AnonMoveTarget> candidates = newByNest.getOrDefault(entry.getKey(), Collections.emptyList());
+			for (AnonMoveTarget orphan : entry.getValue()) {
+				String orphanShape = shapeOf(orphan.bytes, orphan.internalName);
+				boolean reported = false;
+				for (AnonMoveTarget candidate : candidates) {
+					String candidateShape = shapeOf(candidate.bytes, candidate.internalName);
+					if (orphanShape == null || !orphanShape.equals(candidateShape)) continue;
+					int live = hasLiveInstances(Names.external(orphan.internalName)) ? 1 : 0;
+					boolean captureGrew = captureTableGrew(orphan.bytes, candidate.bytes);
+					String gate = live == 0 ? "PASS(no-live-instances)"
+						: captureGrew ? "REJECT(capture-grew)" : "REJECT(live-instances;cause-unclassified)";
+					String scope = orphan.hostName.equals(candidate.hostName) ? "same-host" : "cross-host";
+					info("[ANON-MOVED] host=" + Names.internal(orphan.hostName)
+					    + " orphan=" + orphan.internalName
+					    + " candidate=" + candidate.internalName + " shape=" + orphanShape
+					    + " live=" + live + " gate=" + gate
+					    + " scope=" + scope
+					    + " candidateHost=" + Names.internal(candidate.hostName));
+					reported = true;
+				}
+				if (!reported) {
+					info("[ANON-ORPHAN] host=" + Names.internal(orphan.hostName) + " orphan=" + orphan.internalName
+					    + " shape=" + orphanShape
+					    + " live=" + (hasLiveInstances(Names.external(orphan.internalName)) ? 1 : 0)
+					    + " reason=no-structurally-equal-new-anon");
+				}
+			}
+		}
+	}
+
+	/**
+	 * 兼容旧调用点/单测的单宿主重载：语义等同只把这一组交给整批汇总。
 	 */
 	static void reportAnonMoves(String hostName, AnonClassAligner.Result res,
 	                            Map<String, byte[]> oldAnon, Map<String, byte[]> newAnon) {
-		if (res == null) return;
-		Set<String> orphans = res.orphanOldClasses == null ? Set.<String>of() : res.orphanOldClasses;
-		List<String> unmatchedNew = new ArrayList<>();
-		for (String raw : newAnon.keySet()) {
-			String rawSlash = Names.internal(raw);
-			if (res.alignedAnonClasses != null && res.alignedAnonClasses.containsKey(rawSlash)) continue;
-			unmatchedNew.add(raw);
-		}
-		for (String orphan : orphans) {
-			String orphanSlash = Names.internal(orphan);
-			// 孤儿名是内部名，旧侧桶的键是点分名：两种形态都要试，否则结构指纹恒为 null、计数恒不触发。
-			byte[] orphanBytes = oldAnon.get(orphan);
-			if (orphanBytes == null) orphanBytes = oldAnon.get(Names.external(orphanSlash));
-			String orphanShape = shapeOf(orphanBytes, orphanSlash);
-			boolean reported = false;
-			for (String candidate : unmatchedNew) {
-				String candidateShape = shapeOf(newAnon.get(candidate), Names.internal(candidate));
-				if (orphanShape == null || !orphanShape.equals(candidateShape)) continue;
-				int live = hasLiveInstances(Names.external(orphanSlash)) ? 1 : 0;
-				boolean captureGrew = captureTableGrew(orphanBytes, newAnon.get(candidate));
-				String gate = live == 0 ? "PASS(no-live-instances)"
-					: captureGrew ? "REJECT(capture-grew)" : "REJECT(live-instances;cause-unclassified)";
-				info("[ANON-MOVED] host=" + Names.internal(hostName) + " orphan=" + orphanSlash
-				    + " candidate=" + Names.internal(candidate) + " shape=" + orphanShape
-				    + " live=" + live + " gate=" + gate);
-				reported = true;
-			}
-			if (!reported) {
-				info("[ANON-ORPHAN] host=" + Names.internal(hostName) + " orphan=" + orphanSlash
-				    + " shape=" + orphanShape + " live=" + (hasLiveInstances(Names.external(orphanSlash)) ? 1 : 0)
-				    + " reason=no-structurally-equal-new-anon");
+		reportAnonMoves(Collections.singletonList(new AnonMoveHost(hostName, res, oldAnon, newAnon)));
+	}
+
+	/** 字节桶的键可能是点分名或内部名：两种形态都试，避免结构指纹意外变成 {@code null}。 */
+	private static byte[] lookupAnonBytes(Map<String, byte[]> map, String internalName) {
+		if (map == null || internalName == null) return null;
+		byte[] bytes = map.get(internalName);
+		if (bytes != null) return bytes;
+		bytes = map.get(Names.external(internalName));
+		if (bytes != null) return bytes;
+		return map.get(Names.internal(internalName));
+	}
+
+	/**
+	 * 顶层 NestHost：优先读类字节码的 {@code NestHost} 属性，缺失/解析失败时退回"首个 {@code $}
+	 * 之前的内部名"（即最外层类前缀）。同名嵌套宿主因此归入同一个搬移池。
+	 */
+	static String topLevelNestHost(byte[] bytes, String selfInternalName) {
+		String selfSlash = Names.internal(selfInternalName);
+		if (bytes != null && bytes.length > 0) {
+			try {
+				ClassNode cn = new ClassNode();
+				new ClassReader(bytes).accept(cn,
+					ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+				if (cn.nestHostClass != null && !cn.nestHostClass.isEmpty()) {
+					return Names.internal(cn.nestHostClass);
+				}
+			} catch (Throwable ignored) {
+				// 解不开就退回名字前缀；统计不因坏字节而中断。
 			}
 		}
+		int dollar = selfSlash.indexOf('$');
+		return dollar > 0 ? selfSlash.substring(0, dollar) : selfSlash;
 	}
 
 	/** 结构指纹：父类 + 排序后的接口集合；解析失败返回 {@code null}（不计数，避免脏数据）。 */

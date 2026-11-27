@@ -333,6 +333,10 @@ public class InitFix {
 	public static void endBatchBytecodeView() {
 		BATCH_CONTEXT.remove();
 		BATCH_FAILURES.remove();
+		// The side table outlives BATCH_CONTEXT (injection/lazy-load points run outside the transient view),
+		// so it must be cleared here as well; clearing only at the next batch start would leave the previous
+		// round's bytes observable after the batch has ended.
+		clearExtraBatchBytes();
 		WorkspaceRawIndex.endBatch();
 	}
 

@@ -1033,6 +1033,12 @@ final class BatchHotswapExecutor {
 								mountForClass(loader, mountPath);
 							}
 							recordRuntimeBytecode(className, bytecode);
+							// lazy_load 下未改名的新类不会走 defineClass 注入点（注入站点才登记旁路字节），
+							// 而 setBatchDefinitions 会清空批次视图重建为"仅 definitions"。若不在这里登记，
+							// InitFix 的构造器/成员可见性判定读不到本批新类，宿主新增字段会被 fail-closed
+							// 判成 INITFIX-REFUSE（现场：new field = object : IntUnaryOperator { ... }）。
+							// 字节取批次条目（已完成对齐/祖先修补），与 eventual 加载的版本一致。
+							InitFix.registerBatchClassBytes(loader, Map.of(className, bytecode));
 							// 类尚未加载：登记出生点补丁，让它第一次加载时直接拿到这次编辑的字节
 							// （加载器此刻还未知，按 ANY_SCOPE 登记；出生点的工作区归属校验兜底）。
 							PendingLoadPatch.offerAny(className, bytecode);

@@ -482,6 +482,12 @@ final class BatchHotswapExecutor {
 				}
 			}
 
+			// [ANON-MOVED] 计数器：同一宿主内**既有孤儿旧匿名类、又有未被配对的新匿名类**，且两者结构指纹
+			// （父类 + 接口集合）相等时，才可能是一次"跨宿主/跨位置搬移"。两维读数：活体数 live=N 与门禁结果
+			// gate=PASS|REJECT(reason)——N=0 时本来就不需要复用，而 REJECT 的原因分布决定复用值不值得做。
+			// 只统计、不改变任何行为；孤儿原因也在这里补一条明确说明（此前变成孤儿时可能是静默的）。
+			reportAnonMoves(hostName, res, oldAnon, newAnon);
+
 			// 将对齐重命名后的新匿名类注入批次并登记到事务
 			Path hostPath = classToPath.get(hostName);
 			Class<?> alignHostClass = loadedClassesMap.get(hostName);
@@ -1765,6 +1771,90 @@ final class BatchHotswapExecutor {
 			return new org.objectweb.asm.ClassReader(bytes).getClassName();
 		} catch (Throwable t) {
 			return null;
+		}
+	}
+
+
+	/**
+	 * 输出 {@code [ANON-MOVED]} 与 {@code [ANON-ORPHAN]} 读数（只统计，不改变任何行为）。
+	 *
+	 * <p>计数口径（避免攒出脏数据）：同一宿主内同时存在<b>孤儿旧匿名类</b>与<b>未被配对的新匿名类</b>，且两者的
+	 * 结构指纹（父类 + 接口集合）相等，才算一次搬移候选；普通"删旧加新"结构指纹不同，不会被计入。</p>
+	 *
+	 * <p>两维读数：{@code live=N}（0 表示没有存量实例，本来就不需要复用）与 {@code gate=PASS|REJECT(reason)}
+	 * （例如 {@code capture-grew}、{@code this0-type-changed}），后者直接回答"能过复用门禁的占比"。</p>
+	 */
+	static void reportAnonMoves(String hostName, AnonClassAligner.Result res,
+	                            Map<String, byte[]> oldAnon, Map<String, byte[]> newAnon) {
+		if (res == null) return;
+		Set<String> orphans = res.orphanOldClasses == null ? Set.<String>of() : res.orphanOldClasses;
+		List<String> unmatchedNew = new ArrayList<>();
+		for (String raw : newAnon.keySet()) {
+			String rawSlash = raw.replace('.', '/');
+			if (res.alignedAnonClasses != null && res.alignedAnonClasses.containsKey(rawSlash)) continue;
+			unmatchedNew.add(raw);
+		}
+		for (String orphan : orphans) {
+			String orphanSlash = Names.internal(orphan);
+			// 孤儿名是内部名，旧侧桶的键是点分名：两种形态都要试，否则结构指纹恒为 null、计数恒不触发。
+			byte[] orphanBytes = oldAnon.get(orphan);
+			if (orphanBytes == null) orphanBytes = oldAnon.get(Names.external(orphanSlash));
+			String orphanShape = shapeOf(orphanBytes, orphanSlash);
+			boolean reported = false;
+			for (String candidate : unmatchedNew) {
+				String candidateShape = shapeOf(newAnon.get(candidate), Names.internal(candidate));
+				if (orphanShape == null || !orphanShape.equals(candidateShape)) continue;
+				int live = hasLiveInstances(Names.external(orphanSlash)) ? 1 : 0;
+				boolean captureGrew = captureTableGrew(orphanBytes, newAnon.get(candidate));
+				String gate = live == 0 ? "PASS(no-live-instances)"
+					: captureGrew ? "REJECT(capture-grew)" : "REJECT(live-instances;cause-unclassified)";
+				log("[ANON-MOVED] host=" + Names.internal(hostName) + " orphan=" + orphanSlash
+				    + " candidate=" + Names.internal(candidate) + " shape=" + orphanShape
+				    + " live=" + live + " gate=" + gate);
+				reported = true;
+			}
+			if (!reported) {
+				log("[ANON-ORPHAN] host=" + Names.internal(hostName) + " orphan=" + orphanSlash
+				    + " shape=" + orphanShape + " live=" + (hasLiveInstances(Names.external(orphanSlash)) ? 1 : 0)
+				    + " reason=no-structurally-equal-new-anon");
+			}
+		}
+	}
+
+	/** 结构指纹：父类 + 排序后的接口集合；解析失败返回 {@code null}（不计数，避免脏数据）。 */
+	static String shapeOf(byte[] bytes, String selfSlash) {
+		if (bytes == null || bytes.length == 0) return null;
+		try {
+			org.objectweb.asm.ClassReader cr = new org.objectweb.asm.ClassReader(bytes);
+			String superName = cr.getSuperName();
+			String[] interfaces = cr.getInterfaces();
+			List<String> sorted = new ArrayList<>();
+			if (interfaces != null) Collections.addAll(sorted, interfaces);   // 注意：List.of(String[]) 会被当成单个元素
+			Collections.sort(sorted);
+			return superName + "|" + String.join(",", sorted);
+		} catch (Throwable t) {
+			return null;
+		}
+	}
+
+	/** 捕获表是否变大（新增合成捕获字段 = 典型"需要布局门"的形态）。 */
+	static boolean captureTableGrew(byte[] oldBytes, byte[] newBytes) {
+		return captureFieldCount(newBytes) > captureFieldCount(oldBytes);
+	}
+
+	static int captureFieldCount(byte[] bytes) {
+		if (bytes == null || bytes.length == 0) return 0;
+		try {
+			org.objectweb.asm.ClassReader cr = new org.objectweb.asm.ClassReader(bytes);
+			org.objectweb.asm.tree.ClassNode cn = new org.objectweb.asm.tree.ClassNode();
+			cr.accept(cn, org.objectweb.asm.ClassReader.SKIP_DEBUG | org.objectweb.asm.ClassReader.SKIP_FRAMES);
+			int n = 0;
+			for (org.objectweb.asm.tree.FieldNode f : cn.fields) {
+				if ((f.access & Opcodes.ACC_SYNTHETIC) != 0) n++;
+			}
+			return n;
+		} catch (Throwable t) {
+			return 0;
 		}
 	}
 

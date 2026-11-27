@@ -287,7 +287,8 @@ public class InitFix {
 	public static String typeChangedReason(String rawReason) {
 		if (rawReason == null) return "none";
 		if (rawReason.contains("written outside its extraction")) return "ctor-param-assign";
-		if (rawReason.contains("no safe initialization expression")) return "no-initializer";
+		if (rawReason.contains("no safe initialization expression")
+		    || rawReason.contains("no field initializer found in")) return "no-initializer";
 		if (rawReason.contains("self-assignment")) return "ctor-param-assign";
 		if (rawReason.contains("subsequent processing")) return "later-gate";
 		return "other";
@@ -1047,7 +1048,10 @@ public class InitFix {
 			FieldDecision decision = decisions.get(field);
 			if (decision == null || decision.status() != FieldStatus.REJECTED) continue;
 			String reason = decision.reason();
-			if (reason == null || !reason.startsWith(InitFix.UNEXPRESSIBLE_INIT_PREFIX)) continue;
+			// Only genuine unsliceable initializer expressions ("no safe initialization expression in <init>...")
+			// trigger [INITFIX-REFUSE]; fields with no initializer in constructors/clinit (e.g. lateinit var or
+			// plain Java fields populated via setter) leave the JVM default value by design.
+			if (reason == null || !reason.startsWith(InitFix.UNEXPRESSIBLE_INIT_PREFIX + " in ")) continue;
 			out.put(field, reason);
 		}
 	}
@@ -1823,7 +1827,7 @@ public class InitFix {
 						}
 						List<FieldExtract> extracts = instanceExtracts.get(f);
 						if (extracts == null || extracts.isEmpty()) {
-							unextractable.put(f, instanceReasons.getOrDefault(f, "no safe initialization expression found in constructors"));
+							unextractable.put(f, instanceReasons.getOrDefault(f, "no field initializer found in constructors"));
 							continue;
 						}
 						int fromRootCount = 0;
@@ -1866,7 +1870,7 @@ public class InitFix {
 					Map.of(), Map.of(), true, null, staticReasons, oracle);
 				for (String f : staticFields) {
 					if (!perField.containsKey(f)) {
-						unextractable.put(f, staticReasons.getOrDefault(f, "no safe initialization expression found in <clinit>"));
+						unextractable.put(f, staticReasons.getOrDefault(f, "no field initializer found in <clinit>"));
 					}
 				}
 			}
@@ -2634,7 +2638,7 @@ public class InitFix {
 			String reason = selfAssignedFields.contains(f)
 			 ? "self-assignment from constructor parameter (patch would be a no-op)"
 			 : instanceReasons.getOrDefault(f,
-			 "no safe initialization expression found in constructors");
+			 "no field initializer found in constructors");
 			instanceDecisions.put(f, FieldDecision.rejected(reason));
 		}
 		Set<String> acceptedInstance = new LinkedHashSet<>();
@@ -2682,7 +2686,7 @@ public class InitFix {
 			}
 			staticDecisions.put(f, FieldDecision.rejected(
 			 staticReasons.getOrDefault(f,
-				"no safe initialization expression found in <clinit>")));
+				"no field initializer found in <clinit>")));
 		}
 		Set<String> acceptedStatic = new LinkedHashSet<>();
 		for (String f : staticExtracts.keySet()) {

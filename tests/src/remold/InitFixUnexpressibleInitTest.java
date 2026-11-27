@@ -83,6 +83,103 @@ class InitFixUnexpressibleInitTest {
 		assertTrue(InitFix.classifyUnexpressibleNewFieldInits(report, diff).isEmpty());
 	}
 
+	@Test
+	void missingInitializerInConstructorsIsNotTreatedAsUnexpressible() {
+		// Fields with no initializer in <init> (e.g. Kotlin lateinit var or Java field populated via setter)
+		// must NOT trigger [INITFIX-REFUSE], even if the legacy fallback text was passed.
+		ClassDiff diff = diffWithAdded("lazyTag");
+		InitFix.PatchReport newFallback = reportWith(Map.of(
+			"lazyTag", InitFix.FieldDecision.rejected("no field initializer found in constructors")));
+		InitFix.PatchReport legacyFallback = reportWith(Map.of(
+			"lazyTag", InitFix.FieldDecision.rejected("no safe initialization expression found in constructors")));
+
+		assertTrue(InitFix.classifyUnexpressibleNewFieldInits(newFallback, diff).isEmpty(),
+			"a field with no constructor initializer must stay hot-swappable");
+		assertTrue(InitFix.classifyUnexpressibleNewFieldInits(legacyFallback, diff).isEmpty(),
+			"the missing-initializer fallback string must never collide with UNEXPRESSIBLE_INIT_PREFIX");
+	}
+
+	@Test
+	void endToEndUninitializedFieldWithSetterDoesNotTriggerInitFixRefuse() throws Exception {
+		// Synthesize v1 (plain class) and v2 (adds `private String lazyTag;` + `setLazyTag(String)` only,
+		// zero PUTFIELD in <init>), then run InitFix.transform end-to-end.
+		String internal = "remold/uninit/SetterBean";
+		String dot = "remold.uninit.SetterBean";
+		byte[] v1 = buildSetterBean(internal, false);
+		byte[] v2 = buildSetterBean(internal, true);
+
+		ClassLoader loader = new ClassLoader(InitFixUnexpressibleInitTest.class.getClassLoader()) {
+			@Override
+			protected Class<?> findClass(String name) throws ClassNotFoundException {
+				if (dot.equals(name)) return defineClass(name, v2, 0, v2.length);
+				return super.findClass(name);
+			}
+		};
+		Class<?> host = Class.forName(dot, true, loader);
+		ClassDiff diff = ClassDiffUtil.diff(v1, v2);
+		assertTrue(diff.addedInstanceFields.contains("lazyTag"), "diff must detect added lazyTag");
+
+		InitFix.transform(host, v2, diff);
+		Map<String, String> refused = InitFix.unexpressibleNewFieldInits(host, diff);
+		assertTrue(refused.isEmpty(),
+			"plain Java uninitialized field + setter (and Kotlin lateinit var) must NOT trigger [INITFIX-REFUSE]: "
+				+ refused);
+	}
+
+	@Test
+	void batchCascadeIgnoresAddedOnlyFieldsAndCatchesRemovalsOrTypeChanges() {
+		ClassDiff addedOnly = new ClassDiff();
+		addedOnly.changedFields.add("+ extra");
+		addedOnly.changedFields.add("+ *STATIC_CONST");
+		assertFalse(BatchHotswapExecutor.hasRemovedOrIncompatibleMembers(addedOnly),
+			"adding fields only does not rely on a no-reader proof and must not be cascaded out");
+
+		ClassDiff removedField = new ClassDiff();
+		removedField.changedFields.add("- legacy");
+		assertTrue(BatchHotswapExecutor.hasRemovedOrIncompatibleMembers(removedField),
+			"removing a field must still trigger cascade when a batch reader was dropped");
+
+		ClassDiff typeChangedField = new ClassDiff();
+		typeChangedField.changedFields.add("- tag");
+		typeChangedField.changedFields.add("+ tag");
+		assertTrue(BatchHotswapExecutor.hasRemovedOrIncompatibleMembers(typeChangedField),
+			"changing a field type must still trigger cascade");
+
+		ClassDiff removedMethod = new ClassDiff();
+		removedMethod.removedMethods.add("oldHelper()V");
+		assertTrue(BatchHotswapExecutor.hasRemovedOrIncompatibleMembers(removedMethod),
+			"removing a method must still trigger cascade");
+	}
+
+	private static byte[] buildSetterBean(String internalName, boolean withLazyTag) {
+		org.objectweb.asm.ClassWriter cw = new org.objectweb.asm.ClassWriter(0);
+		cw.visit(org.objectweb.asm.Opcodes.V17, org.objectweb.asm.Opcodes.ACC_PUBLIC,
+			internalName, null, "java/lang/Object", null);
+		if (withLazyTag) {
+			cw.visitField(org.objectweb.asm.Opcodes.ACC_PRIVATE, "lazyTag", "Ljava/lang/String;", null, null).visitEnd();
+		}
+		org.objectweb.asm.MethodVisitor init = cw.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+		init.visitCode();
+		init.visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0);
+		init.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+		init.visitInsn(org.objectweb.asm.Opcodes.RETURN);
+		init.visitMaxs(1, 1);
+		init.visitEnd();
+		if (withLazyTag) {
+			org.objectweb.asm.MethodVisitor setter = cw.visitMethod(
+				org.objectweb.asm.Opcodes.ACC_PUBLIC, "setLazyTag", "(Ljava/lang/String;)V", null, null);
+			setter.visitCode();
+			setter.visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0);
+			setter.visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 1);
+			setter.visitFieldInsn(org.objectweb.asm.Opcodes.PUTFIELD, internalName, "lazyTag", "Ljava/lang/String;");
+			setter.visitInsn(org.objectweb.asm.Opcodes.RETURN);
+			setter.visitMaxs(2, 2);
+			setter.visitEnd();
+		}
+		cw.visitEnd();
+		return cw.toByteArray();
+	}
+
 	private static ClassDiff diffWithAdded(String field) {
 		ClassDiff diff = new ClassDiff();
 		diff.addedInstanceFields.add(field);

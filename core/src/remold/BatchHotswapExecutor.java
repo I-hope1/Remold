@@ -1808,13 +1808,13 @@ final class BatchHotswapExecutor {
 				boolean captureGrew = captureTableGrew(orphanBytes, newAnon.get(candidate));
 				String gate = live == 0 ? "PASS(no-live-instances)"
 					: captureGrew ? "REJECT(capture-grew)" : "REJECT(live-instances;cause-unclassified)";
-				log("[ANON-MOVED] host=" + Names.internal(hostName) + " orphan=" + orphanSlash
+				info("[ANON-MOVED] host=" + Names.internal(hostName) + " orphan=" + orphanSlash
 				    + " candidate=" + Names.internal(candidate) + " shape=" + orphanShape
 				    + " live=" + live + " gate=" + gate);
 				reported = true;
 			}
 			if (!reported) {
-				log("[ANON-ORPHAN] host=" + Names.internal(hostName) + " orphan=" + orphanSlash
+				info("[ANON-ORPHAN] host=" + Names.internal(hostName) + " orphan=" + orphanSlash
 				    + " shape=" + orphanShape + " live=" + (hasLiveInstances(Names.external(orphanSlash)) ? 1 : 0)
 				    + " reason=no-structurally-equal-new-anon");
 			}

@@ -117,6 +117,29 @@ class LoadedClassIndexScopeTest {
 		 "the snapshot's ambiguity must be warned about as well: " + this.recorder.warns);
 	}
 
+	@Test
+	void ephemeralPredictionCopyAloneDoesNotEmitArbitratedWarning() throws Exception {
+		byte[] bytes = classBytes("live");
+		FixtureLoader liveLoader = new FixtureLoader("live");
+		Class<?> live = liveLoader.define(DOT, bytes);
+		remold.offset.LayoutPredictor.EphemeralClassLoader ephemeral =
+			new remold.offset.LayoutPredictor.EphemeralClassLoader(
+				java.util.Map.of(INTERNAL, bytes), null, liveLoader);
+		Class<?> ephemeralCopy = ephemeral.loadClass(DOT);
+
+		long liveScope = AlignmentMetaStore.INSTANCE.loaderScopeId(liveLoader);
+		long ephScope = AlignmentMetaStore.INSTANCE.loaderScopeId(ephemeral);
+
+		LoadedClassIndex index = new LoadedClassIndex();
+		index.put(liveScope, DOT, live);
+		index.put(ephScope, DOT, ephemeralCopy);
+
+		assertSame(live, index.get(DOT), "the live class must win over EphemeralClassLoader");
+		assertTrue(this.recorder.warns.isEmpty(),
+			"an internal EphemeralClassLoader copy must not emit noisy [LOADED-NAME-ARBITRATED] warnings: "
+				+ this.recorder.warns);
+	}
+
 	/** 合法 class 字节：一个 {@code mark()} 返回区分字符串，用来证明两份副本真的是两份。 */
 	private static byte[] classBytes(String mark) {
 		ClassWriter cw = new ClassWriter(0);

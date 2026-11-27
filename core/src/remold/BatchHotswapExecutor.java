@@ -1790,7 +1790,7 @@ final class BatchHotswapExecutor {
 		Set<String> orphans = res.orphanOldClasses == null ? Set.<String>of() : res.orphanOldClasses;
 		List<String> unmatchedNew = new ArrayList<>();
 		for (String raw : newAnon.keySet()) {
-			String rawSlash = raw.replace('.', '/');
+			String rawSlash = Names.internal(raw);
 			if (res.alignedAnonClasses != null && res.alignedAnonClasses.containsKey(rawSlash)) continue;
 			unmatchedNew.add(raw);
 		}

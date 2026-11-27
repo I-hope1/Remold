@@ -69,6 +69,68 @@ class AnonRenamePropagationTest {
 			"nested anonymous classes come last");
 	}
 
+	/**
+	 * 深度必须对每一层嵌套都严格递增，否则"按深度升序"仍会把父/子宿主排成同键。
+	 * 三种命名形态都要覆盖：Kotlin {@code Host$1$mid$1}、Java {@code Host$1$1}、普通内部类
+	 * {@code Host$Inner$1}。
+	 */
+	@Test
+	void anonDepthIsStrictlyMonotonicAcrossNestingShapes() {
+		assertStrictlyIncreasing(
+			"example.DeepNestLocalTarget",
+			"example.DeepNestLocalTarget$2",
+			"example.DeepNestLocalTarget$2$mid$1",
+			"example.DeepNestLocalTarget$2$mid$1$leaf$1");
+		assertStrictlyIncreasing(
+			"example.JavaHost",
+			"example.JavaHost$1",
+			"example.JavaHost$1$1",
+			"example.JavaHost$1$1$1");
+		assertStrictlyIncreasing(
+			"example.InnerHost",
+			"example.InnerHost$Inner",
+			"example.InnerHost$Inner$1");
+	}
+
+	private static void assertStrictlyIncreasing(String... names) {
+		for (int i = 1; i < names.length; i++) {
+			assertTrue(BatchHotswapExecutor.anonDepth(names[i - 1]) < BatchHotswapExecutor.anonDepth(names[i]),
+				"ancestor " + names[i - 1] + " (depth " + BatchHotswapExecutor.anonDepth(names[i - 1])
+					+ ") must be strictly shallower than descendant " + names[i] + " (depth "
+					+ BatchHotswapExecutor.anonDepth(names[i]) + ")");
+		}
+	}
+
+	/**
+	 * 现场形态：输入顺序被构造成子宿主在父宿主之前（{@code $2$mid$1} 先于 {@code $2}），
+	 * 且同深度还有另一个兄弟宿主（{@code $2$mid$2}）。排序后必须：
+	 * <ol>
+	 *   <li>真实宿主在最前；</li>
+	 *   <li>父宿主先于所有子宿主；</li>
+	 *   <li>同深度兄弟保持插入顺序（class-mode prepend 探针约束，不得按名字重排）。</li>
+	 * </ol>
+	 */
+	@Test
+	void nestedAnonHostsAreSortedOuterFirstAndKeepSameDepthInsertionOrder() {
+		String real   = "example.DeepNestLocalTarget";
+		String parent = real + "$2";
+		String childA = parent + "$mid$1";
+		String childB = parent + "$mid$2";
+
+		List<String> hostOrder = new ArrayList<>(List.of(childA, childB, parent, real));
+		BatchHotswapExecutor.sortHostsOuterFirst(hostOrder);
+
+		assertEquals(List.of(real, parent, childA, childB), hostOrder,
+			"parent host must run before its nested hosts; same-depth siblings keep insertion order");
+
+		// 对照：childA/childB 若按名字排序会变成 childA, childB（恰好一致），换一组刻意逆序的兄弟
+		// 证明实现没有偷偷按名字重排。
+		List<String> reversedSiblings = new ArrayList<>(List.of(parent + "$mid$2", parent + "$mid$1", parent, real));
+		BatchHotswapExecutor.sortHostsOuterFirst(reversedSiblings);
+		assertEquals(List.of(real, parent, parent + "$mid$2", parent + "$mid$1"), reversedSiblings,
+			"same-depth hosts must stay in insertion order, never dictionary order");
+	}
+
 	@Test
 	void renameSubspaceOnlyRewritesTheSubtree() {
 		assertEquals("H$3", BatchHotswapExecutor.renameSubspace("H$4", "H$4", "H$3"));

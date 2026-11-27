@@ -208,12 +208,37 @@ final class RemovedMemberScanner {
 			return out;
 		}
 		if (!result.inconclusive().isEmpty()) {
+			// 汇总视图保留原样（兼容既有日志），但**不再**把整批一律退回 liveness：
+			// 判不了的引用只归属到它触发的那条被删成员，同批无关类的明确"无读者"仍然有效。
 			warn("[LAYOUT-READERS] reader scan is inconclusive for " + result.inconclusive().size()
 			     + " reference(s), e.g. " + result.inconclusive().get(0)
-			     + "; falling back to the liveness check.");
-			return out;
+			     + "; falling back to the liveness check for the affected owner(s) only.");
 		}
 
+		applyScanResult(removedByClass, result, out);
+
+		long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+		info("[LAYOUT-READERS] scanned " + post.size() + " class(es) for removed members of "
+		     + removedByClass.size() + " class(es) in " + ms + "ms; dangling=" + result.hits().size()
+		     + ", abstract-gaps=" + result.abstractMissing().size()
+		     + ", dispatch-shifts=" + result.dispatchShifted().size());
+		return out;
+	}
+
+	/**
+	 * 把一次读者扫描结果落实到每个被删成员所属的类上。
+	 *
+	 * <p><b>按 owner 隔离 {@code inconclusive}</b>：{@link RemovedMemberReaders.Result} 里的
+	 * {@code inconclusive} 是整批扁平视图，原先只要有一条就整批退回 liveness——A 类判不了的引用
+	 * 会连带拒绝同批完全无关的 B 类。这里只让<b>归属到自己</b>的那条 {@code inconclusive}
+	 * （或全局解析失败）把该类保持为 {@code unscanned}；其余类按明确的命中结果下结论。</p>
+	 *
+	 * <p>{@code out} 预置为 {@code unscanned}，因此本方法只负责"何时可以下结论"：没有全局失败且
+	 * 该 owner 无归属 {@code inconclusive} 时才改成 {@code scanned=true}。</p>
+	 */
+	static void applyScanResult(Map<String, List<RemovedMemberReaders.RemovedMember>> removedByClass,
+	                            RemovedMemberReaders.Result result,
+	                            Map<String, RemovedMemberScan> out) {
 		Map<String, List<String>> readersByClass = new LinkedHashMap<>();
 		Map<String, List<String>> shiftedByClass = new LinkedHashMap<>();
 		for (String className : removedByClass.keySet()) {
@@ -230,18 +255,13 @@ final class RemovedMemberScanner {
 
 		for (Map.Entry<String, RemovedMemberScan> e : out.entrySet()) {
 			String className = e.getKey();
+			// RemovedMember.owner() 是内部名；批次键是点分名，比较前必须同口径。
+			if (!result.isConclusiveFor(internalName(className))) continue;
 			RemovedMemberScan before = e.getValue();
 			e.setValue(new RemovedMemberScan(true, readersByClass.get(className),
 			                                 shiftedByClass.get(className), before.removedMethods(),
 			                                 before.removedStaticFields(), before.constantFields()));
 		}
-
-		long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-		info("[LAYOUT-READERS] scanned " + post.size() + " class(es) for removed members of "
-		     + removedByClass.size() + " class(es) in " + ms + "ms; dangling=" + result.hits().size()
-		     + ", abstract-gaps=" + result.abstractMissing().size()
-		     + ", dispatch-shifts=" + result.dispatchShifted().size());
-		return out;
 	}
 
 	/** 把命中的 reader 归到"被删成员所属的类"上。 */

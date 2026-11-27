@@ -329,10 +329,12 @@ final class BatchHotswapExecutor {
 		// 由外向内处理宿主：外层匿名类被对齐改名后，其**内层嵌套类**的新侧名字必须跟着落到同一个
 		// 名字空间里，才谈得上与旧内层配对（见下方 propagateAnonSubspace）。
 		List<String> hostOrder = new ArrayList<>(hostClassesToAlign);
-		// 只保证"真实宿主先于匿名宿主"，**不**在匿名宿主之间重排：匿名宿主的处理顺序决定了新槽位的
-		// 分配顺序，把它按名字重排会改变对齐结果（实测：class-mode 探针的 prepend 场景因此拿到一个
-		// 从未被定义的槽位）。稳定排序 + 单一配对键，插入顺序原样保留。
-		hostOrder.sort(Comparator.comparingInt(h -> anonDepth(h) == 0 ? 0 : 1));
+		// 按 anonDepth 严格升序：真实宿主（深度 0）先于匿名宿主，且**父匿名宿主先于子匿名宿主**
+		// （Host$1 深度 1、Host$1$mid$1 深度 2）。只把"匿名/非匿名"折成两档会让子宿主抢在父宿主
+		// 之前执行——父宿主还没把改名传播下来，子宿主旧侧桶恒为空，叶子层被判 ANON-NOT-ALIGNED。
+		// 稳定排序：同深度宿主保持插入顺序，绝不按名字重排——匿名宿主的处理顺序决定新槽位分配，
+		// 按名字重排会改变对齐结果（实测：class-mode 探针的 prepend 场景因此拿到一个从未被定义的槽位）。
+		sortHostsOuterFirst(hostOrder);
 		Set<String> runtimeNamesBefore = new HashSet<>(loadedClassesMap.keySet());
 		// 搬移统计必须整批汇合后再做：跨嵌套宿主的一次搬移（Outer$Inner$1 -> Outer$1）会把孤儿与
 		// 未配对的新类分到两个宿主组里，逐宿主上报永远看不到对方。
@@ -1976,6 +1978,20 @@ final class BatchHotswapExecutor {
 		int depth = 0;
 		for (int i = 0; i < dotName.length(); i++) if (dotName.charAt(i) == '$') depth++;
 		return depth;
+	}
+
+	/**
+	 * 把宿主组按"由外向内"排序：真实宿主先于匿名宿主，父匿名宿主先于子匿名宿主。
+	 *
+	 * <p>{@link #anonDepth(String)} 对每一层嵌套都至少多一个 {@code $}，因此深度严格单调递增：
+	 * Kotlin {@code Host$1$mid$1}、Java {@code Host$1$1} 与普通内部类 {@code Host$Inner$1} 都满足
+	 * "祖先深度 &lt; 后代深度"。</p>
+	 *
+	 * <p>{@link List#sort} 是稳定排序：深度相同的宿主保持原插入顺序。这一点是硬约束——匿名宿主的
+	 * 处理顺序决定新槽位分配，按名字重排会改变对齐结果（class-mode prepend 探针）。</p>
+	 */
+	static void sortHostsOuterFirst(List<String> hostOrder) {
+		hostOrder.sort(Comparator.comparingInt(BatchHotswapExecutor::anonDepth));
 	}
 
 	/** 名字 {@code name} 若落在 {@code rawDot} 的子空间里，返回换到 {@code targetDot} 子空间后的名字。 */

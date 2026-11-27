@@ -147,6 +147,9 @@ public class InitFixOracle {
 		scenario("单例 S3：Kotlin object 新增 val l by lazy { 42 }（Lazy 委托字段 + indy）→ ?", InitFixOracle::caseKtObjectLazy);
 		scenario("单例 S4：Kotlin object 新增 val a = 1 / val b = a + 1（依赖闭包 + 拓扑序）→ 放行", InitFixOracle::caseKtObjectDependency);
 		scenario("单例 S7：Kotlin object 新增 val t = System.currentTimeMillis() → 阻断并记台账", InitFixOracle::caseKtObjectNonDeterministic);
+		scenario("Kotlin data class 主构造新增默认参数属性（常量 / trim / 跨字段依赖 / T0 零值 / var 默认）→ 从 DefaultConstructorMarker 提取并补全存量实例", InitFixOracle::caseKtDataClassDefaultParams);
+		scenario("Kotlin data class 主构造新增不安全默认参数（分支 / currentTimeMillis）→ 记 UNEXPRESSIBLE_INIT 触发 [INITFIX-REFUSE]", InitFixOracle::caseKtDataClassUnsafeDefault);
+		scenario("Kotlin data class 主构造新增无默认值的必填参数 → 保持 self-assignment，不误触发 UNEXPRESSIBLE_INIT", InitFixOracle::caseKtDataClassNoDefault);
 		scenario("A+ accepted: Kotlin trimStart/trimEnd (constant receiver + whitelisted StringsKt producer)", InitFixOracle::caseKtStringOpsAccepted);
 		scenario("A+ accepted: chained \"  a \".trim().trimStart()", InitFixOracle::caseKtTrimChain);
 		scenario("A+ rejected: branch-merged receiver (field read in one arm's provenance)", InitFixOracle::caseKtTernaryMergeRejected);
@@ -3063,6 +3066,73 @@ public class InitFixOracle {
 		check(!report.patchGenerated(), "S7：未生成任何补丁");
 		check(unpatched(fx.host).contains("t"),
 			"S7：t 已记入 FieldLedger（实际 " + InitFix.getUnpatchedFields(fx.host) + "）");
+	}
+
+	static void caseKtDataClassDefaultParams() throws Exception {
+		CompiledFixture cf = loadCompiledFixture("oracle.CaseKtDataDefault");
+		Fixture fx = cf.fx;
+
+		InitFix.PatchReport report = fx.transform();
+		expect(report, false, "extra", InitFix.FieldStatus.ACCEPTED, null);
+		expect(report, false, "tag", InitFix.FieldStatus.ACCEPTED, null);
+		expect(report, false, "derived", InitFix.FieldStatus.ACCEPTED, null);
+		expect(report, false, "zeroCount", InitFix.FieldStatus.NOTHING_TO_PATCH, null);
+		expect(report, false, "mutableFlag", InitFix.FieldStatus.ACCEPTED, null);
+		check(report.patchGenerated(), "KtDataDefault: patch generated");
+		check(InitFix.classifyUnexpressibleNewFieldInits(report, ClassDiffUtil.diff(fx.v1, fx.v2)).isEmpty(),
+			"KtDataDefault: no unexpressible init refusal");
+
+		Class<?> markerClass = Class.forName("kotlin.jvm.internal.DefaultConstructorMarker");
+		Constructor<?> defCtor = fx.host.getDeclaredConstructor(
+			int.class, String.class, int.class, String.class, String.class, int.class, int.class,
+			int.class, markerClass);
+		defCtor.setAccessible(true);
+		int addedMask = (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6);
+		Object control = defCtor.newInstance(7, "alpha", 0, null, null, 0, 0, addedMask, null);
+
+		Object subject = defCtor.newInstance(7, "alpha", 0, null, null, 0, 0, addedMask, null);
+		// Register before zeroing new fields (mirrors real runtime where live instances exist before redefine;
+		// WeakHashMap.put calls data class hashCode() which dereferences non-null String properties).
+		InstanceTracker.register(subject);
+		resetToDefault(fx.host, subject, "extra", "I");
+		resetToDefault(fx.host, subject, "tag", "Ljava/lang/String;");
+		resetToDefault(fx.host, subject, "derived", "Ljava/lang/String;");
+		resetToDefault(fx.host, subject, "zeroCount", "I");
+		resetToDefault(fx.host, subject, "mutableFlag", "I");
+
+		fx.apply();
+
+		expectValue(fx, subject, control, "extra");
+		expectValue(fx, subject, control, "tag");
+		expectValue(fx, subject, control, "derived");
+		expectValue(fx, subject, control, "zeroCount");
+		expectValue(fx, subject, control, "mutableFlag");
+		check("alpha:99".equals(read(fx.host, subject, "derived")),
+			"KtDataDefault: derived depends on existing label + newly patched extra (got="
+				+ describe(read(fx.host, subject, "derived")) + ")");
+	}
+
+	static void caseKtDataClassUnsafeDefault() throws Exception {
+		CompiledFixture cf = loadCompiledFixture("oracle.CaseKtDataUnsafeDefault");
+		Fixture fx = cf.fx;
+
+		InitFix.PatchReport report = fx.transform();
+		expect(report, false, "tag", InitFix.FieldStatus.REJECTED, InitFix.UNEXPRESSIBLE_INIT_PREFIX);
+		expect(report, false, "ts", InitFix.FieldStatus.REJECTED, InitFix.UNEXPRESSIBLE_INIT_PREFIX);
+		Map<String, String> refused = InitFix.classifyUnexpressibleNewFieldInits(report, ClassDiffUtil.diff(fx.v1, fx.v2));
+		check(refused.containsKey("tag") && refused.containsKey("ts"),
+			"KtDataUnsafeDefault: unsafe primary-ctor defaults must trigger [INITFIX-REFUSE] (got=" + refused + ")");
+	}
+
+	static void caseKtDataClassNoDefault() throws Exception {
+		CompiledFixture cf = loadCompiledFixture("oracle.CaseKtDataNoDefault");
+		Fixture fx = cf.fx;
+
+		InitFix.PatchReport report = fx.transform();
+		expect(report, false, "requiredTag", InitFix.FieldStatus.REJECTED, "self-assignment");
+		Map<String, String> refused = InitFix.classifyUnexpressibleNewFieldInits(report, ClassDiffUtil.diff(fx.v1, fx.v2));
+		check(refused.isEmpty(),
+			"KtDataNoDefault: required param without default stays ordinary self-assignment (got=" + refused + ")");
 	}
 
 	// ==================== A+：Object.toString() 强制转换的来源判定 ====================

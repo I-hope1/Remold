@@ -158,7 +158,9 @@ public final class LoadedClassIndex extends ConcurrentHashMap<String, Class<?>> 
 		if (copies.size() == 1) return copies.values().iterator().next();
 		Class<?> authoritative = strictlyPreferred(copies.values());
 		if (authoritative != null) {
-			if (warned.add(name)) {
+			// EphemeralClassLoader 是 Remold 内部用于离线布局预测的抛弃式加载器；仅因它尚未 GC 留下临时副本
+			// 不构成宿主侧多 loader 竞争，避免无意义的 [LOADED-NAME-ARBITRATED] 告警刷屏。
+			if (hasMultipleNonEphemeralCopies(copies.values()) && warned.add(name)) {
 				RemoldAgent.warn("[LOADED-NAME-ARBITRATED] " + name + " has " + copies.size()
 				 + " loaded copies (" + describe(copies) + "); returning the copy the repository-wide copy"
 				 + " arbitration ranks uniquely above the others (" + authoritative.getClassLoader()
@@ -173,6 +175,16 @@ public final class LoadedClassIndex extends ConcurrentHashMap<String, Class<?>> 
 			 + " (scope, name) lookup.");
 		}
 		return null;
+	}
+
+	private static boolean hasMultipleNonEphemeralCopies(Collection<Class<?>> copies) {
+		int liveCount = 0;
+		for (Class<?> candidate : copies) {
+			if (!LayoutPredictor.isEphemeralLoader(candidate.getClassLoader())) {
+				if (++liveCount > 1) return true;
+			}
+		}
+		return false;
 	}
 
 	/**

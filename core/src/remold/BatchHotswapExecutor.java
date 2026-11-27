@@ -2209,12 +2209,15 @@ final class BatchHotswapExecutor {
 			Class<?> host = def.getDefinitionClass();
 			String hostName = host.getName();
 			ClassDiffUtil.ClassDiff diff = diffByHost.get(host);
-			boolean removedSomething = diff != null
-				&& (!diff.removedMethods.isEmpty() || !diff.changedFields.isEmpty());
-			if (removedSomething) {
+			if (hasRemovedOrIncompatibleMembers(diff)) {
+				List<String> removedSummary = new ArrayList<>(diff.removedMethods);
+				if (!diff.changedFields.isEmpty()) {
+					LayoutGate.Result fieldCheck = LayoutGate.checkChangedFields(diff.changedFields);
+					if (!fieldCheck.compatible()) removedSummary.add(fieldCheck.detail());
+				}
 				warn("[BATCH-CASCADE] " + hostName + ": a host in this batch was dropped (INITFIX-UNEXPRESSIBLE-INIT)"
-				     + " and this class removes member(s) [" + (diff == null ? "" :
-				        String.join(", ", diff.removedMethods)) + "]. The no-in-batch-reader proof that allowed the"
+				     + " and this class removes member(s) [" + String.join(", ", removedSummary)
+				     + "]. The no-in-batch-reader proof that allowed the"
 				     + " removal no longer holds, so this class is kept out of this batch too. RESTART to adopt it.");
 				skips.add(hostName, RoundSkips.verdict("BATCH-CASCADE-LAYOUT",
 					"removal was waived because a reader was in this batch; that reader was dropped",
@@ -2235,6 +2238,17 @@ final class BatchHotswapExecutor {
 		}
 		definitions.clear();
 		definitions.addAll(survivors);
+	}
+
+	/**
+	 * 判定一个类是否真正删除了成员或做了不兼容字段布局变更（纯新增字段 {@code + field} 不属于删除，
+	 * 不依赖跨类读者证明，不应因同批其他类被 {@code INITFIX-REFUSE} 踢出而被误级联）。
+	 */
+	static boolean hasRemovedOrIncompatibleMembers(ClassDiffUtil.ClassDiff diff) {
+		if (diff == null) return false;
+		if (!diff.removedMethods.isEmpty()) return true;
+		if (diff.changedFields.isEmpty()) return false;
+		return !LayoutGate.checkChangedFields(diff.changedFields).compatible();
 	}
 
 	/** 把 {@code host} 名下的匿名类族（{@code host$...}）一起移出本批，并记录原因。 */

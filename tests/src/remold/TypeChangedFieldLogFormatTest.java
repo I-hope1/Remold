@@ -22,6 +22,8 @@ class TypeChangedFieldLogFormatTest {
 			remold.ref.InitFix.typeChangedReason("field written outside its extraction in a/B.<init> at index 4"));
 		assertEquals("no-initializer",
 			remold.ref.InitFix.typeChangedReason("no safe initialization expression found in constructors"));
+		assertEquals("no-initializer",
+			remold.ref.InitFix.typeChangedReason("no field initializer found in constructors"));
 		assertEquals("none", remold.ref.InitFix.typeChangedReason(null),
 			"an accepted field has no reason; it must not print null");
 	}

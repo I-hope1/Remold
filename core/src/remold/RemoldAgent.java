@@ -2080,6 +2080,10 @@ public class RemoldAgent {
 			PackageUnsealer.unsealClassPackage(loader, className);
 			Reflect.defineClass(className, bytes, 0, bytes.length, loader, null);
 			info("[INJECTED] Successfully defined new class: " + className + " into " + loader);
+			// 刚注入的类在磁盘上多半还没有同名文件，运行期字节也还没登记：InitFix 判定构造器/成员可见性时
+			// 三者皆空，只能判 "unknown" 并 fail-closed 把宿主整类踢出批次（现场：新增字段的初值是本批新
+			// 编译的匿名类）。把它登记进批次字节视图，可见性判定才有据可依。
+			InitFix.registerBatchClassBytes(loader, java.util.Map.of(className, bytes));
 			return true;
 		} catch (LinkageError le) {
 			// 同名类已经存在：只有当前已加载字节与本次字节完全一致时，才能算"已经注入成功"。

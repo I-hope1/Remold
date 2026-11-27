@@ -132,6 +132,8 @@ final class BatchHotswapExecutor {
 	 * 处理文件变化的核心逻辑（批次主体；看门狗由 {@link #processChanges} 负责登记/注销）。
 	 */
 	static void processChangesBatch(Set<Path> changedFiles, Class<?>[] classes) {
+		// 旁路字节表按批清空：必须在对齐/注入**之前**，否则本轮注入的类会在注入后被抹掉（探针实测 A1）。
+		InitFix.clearExtraBatchBytes();
 		final long batchStartNanos = System.nanoTime();
 		// 新批次开始：上一批未被 @OnReload 消费的实例引用不再需要，立即释放。
 		StageBInstanceCache.clear();
@@ -488,7 +490,10 @@ final class BatchHotswapExecutor {
 			// 只统计、不改变任何行为；孤儿原因也在这里补一条明确说明（此前变成孤儿时可能是静默的）。
 			reportAnonMoves(hostName, res, oldAnon, newAnon);
 
-			// 将对齐重命名后的新匿名类注入批次并登记到事务
+			// 先把对齐产物的字节登记进**批次的字节视图**：这些类马上会被 defineClass 出去，但在 redefine 之前
+			// 它们既不在批次视图、也不在运行期字节、也没有源码基线。InitFix 提取字段初值时用来判定构造器权限的
+			// HierarchyTreeOracle 正好只能查这三处 —— 查不到就把宿主整类判成 INITFIX-REFUSE（现场形态：
+			// new field = object : IntUnaryOperator { ... }）。登记之后权限判定能正常完成。
 			Path hostPath = classToPath.get(hostName);
 			Class<?> alignHostClass = loadedClassesMap.get(hostName);
 			if (DEBUG) log("[ANON-TARGETS] host=" + hostName + " aligned=" + res.alignedAnonClasses.keySet()
@@ -1042,6 +1047,9 @@ final class BatchHotswapExecutor {
 		// 重定义照常生效而补丁缺失，存量实例上这些字段停在类型零值 —— Kotlin 的非空 val 会因此
 		// 静默变成 null。安全优先：整类移出本批并点名，提示重启，绝不产出"只补一半"的结果。
 		dropUnexpressibleInitClasses(definitions, newBatchBytes, classToPath, transactions, skips, diffByHost);
+		// 兜底：任何**已经拿到跳过裁决**的类都不许再进 redefine。级联失效发生在批次里多处（拒绝门、对齐失败、
+		// 匿名类族连坐），逐处摘不够——探针实测过"宿主被踢出、匿名类仍单独换上新体"这种半生效。
+		pruneSkippedDefinitions(definitions, skips);
 		if (TWO_PHASE) {
 			for (ClassDefinition definition : definitions) {
 				if (InitFix.requiresTwoPhase(definition.getDefinitionClass())) {
@@ -2047,9 +2055,88 @@ final class BatchHotswapExecutor {
 			// 只丢暂存补丁：这个类根本没进 redefine，记成"redefine failed"债务是误导。
 			InitFix.discardPending(host);
 		}
-		if (kept.size() != definitions.size()) {
-			definitions.clear();
-			definitions.addAll(kept);
+		if (kept.size() == definitions.size()) return;
+
+		// ---- 级联失效 ----
+		// 一个类被踢出批次后，"批次内没人读它删掉的成员"这个前提也随之失效：LAYOUT-WAIVE 是按"读者在本批里"
+		// 给出的，读者被踢走了，waive 就不能再算数。现场形态（Mindustry + JBR 25）：
+		//   · MovedOuterTarget 被 INITFIX-REFUSE 踢出，MovedOuterTarget$Inner 仍执行了 getMovedOp() 的删除
+		//     → 旧 MovedOuterTarget.eval() 运行期 NoSuchMethodError；
+		//   · CounterAnonTarget 被踢出，其子匿名类仍把 <init>(LCounterAnonTarget;)V 改成 (LCounterAnonTarget;I)V
+		//     → 新建实例 NoSuchMethodError。
+		// 因此这里做两件事：①把被踢宿主的匿名类族一起移出本批；②把"删了成员"的其他批次类一并移出（保守：
+		// 它们的无读者证明可能依赖被踢的那个类）。
+		Set<String> droppedHosts = new LinkedHashSet<>();
+		for (ClassDefinition def : definitions) droppedHosts.add(def.getDefinitionClass().getName());
+		List<ClassDefinition> survivors = new ArrayList<>(kept.size());
+		for (ClassDefinition def : kept) {
+			Class<?> host = def.getDefinitionClass();
+			String hostName = host.getName();
+			ClassDiffUtil.ClassDiff diff = diffByHost.get(host);
+			boolean removedSomething = diff != null
+				&& (!diff.removedMethods.isEmpty() || !diff.changedFields.isEmpty());
+			if (removedSomething) {
+				warn("[BATCH-CASCADE] " + hostName + ": a host in this batch was dropped (INITFIX-UNEXPRESSIBLE-INIT)"
+				     + " and this class removes member(s) [" + (diff == null ? "" :
+				        String.join(", ", diff.removedMethods)) + "]. The no-in-batch-reader proof that allowed the"
+				     + " removal no longer holds, so this class is kept out of this batch too. RESTART to adopt it.");
+				skips.add(hostName, RoundSkips.verdict("BATCH-CASCADE-LAYOUT",
+					"removal was waived because a reader was in this batch; that reader was dropped",
+					"restart to adopt this class"));
+				AlignmentTransaction tx = transactions.remove(hostName);
+				if (tx != null) tx.rollback(true);
+				dropBatchClass(newBatchBytes, classToPath, hostName);
+				dropFamily(definitions, newBatchBytes, classToPath, skips, hostName);
+				InitFix.discardPending(host);
+				continue;
+			}
+			survivors.add(def);
+		}
+		// 被踢宿主的匿名类族：它们的构造器/方法签名依赖宿主的新形态，宿主不更新时它们也不能单独更新。
+		for (String dropped : droppedHosts) {
+			dropFamily(definitions, newBatchBytes, classToPath, skips, dropped);
+		}
+		definitions.clear();
+		definitions.addAll(survivors);
+	}
+
+	/** 把 {@code host} 名下的匿名类族（{@code host$...}）一起移出本批，并记录原因。 */
+	private static void dropFamily(List<ClassDefinition> definitions, Map<String, byte[]> newBatchBytes,
+	                               Map<String, Path> classToPath, RoundSkips skips, String hostName) {
+		String prefix = hostName + "$";
+		Set<String> family = new LinkedHashSet<>();
+		for (String key : new ArrayList<>(newBatchBytes.keySet())) {
+			String dot = Names.external(key);
+			if (dot.startsWith(prefix)) family.add(dot);
+		}
+		// 只从字节映射里摘掉是不够的：redefine 用的是 definitions，漏摘就会单独把匿名类换上去（探针实测：
+		// 宿主被踢出，匿名类仍执行到新体，运行期靠旧宿主代码调用缺失成员直接 NoSuchMethodError）。
+		for (ClassDefinition def : new ArrayList<>(definitions)) {
+			String dot = def.getDefinitionClass().getName();
+			if (dot.startsWith(prefix)) family.add(dot);
+		}
+		for (String dot : family) {
+			skips.add(dot, RoundSkips.verdict("BATCH-CASCADE-FAMILY",
+				"the host " + hostName + " was dropped from this batch",
+				"restart to adopt this class"));
+			dropBatchClass(newBatchBytes, classToPath, dot);
+			definitions.removeIf(def -> def.getDefinitionClass().getName().equals(dot));
+		}
+	}
+
+
+	/** 把已经登记了跳过裁决的类从 redefine 列表里摘掉（最后一道自检，不做判定、只做一致性）。 */
+	private static void pruneSkippedDefinitions(List<ClassDefinition> definitions, RoundSkips skips) {
+		if (definitions.isEmpty() || skips == null) return;
+		int before = definitions.size();
+		definitions.removeIf(def -> {
+			String name = def.getDefinitionClass().getName();
+			return skips.contains(name) || skips.contains(Names.external(name)) || skips.contains(Names.internal(name));
+		});
+		if (definitions.size() != before) {
+			warn("[BATCH-PRUNE] " + (before - definitions.size())
+			     + " class(es) carried a skip verdict and were dropped from this round's redefine list;"
+			     + " keeping them would apply half of a batch whose counterpart was refused.");
 		}
 	}
 

@@ -171,4 +171,83 @@ class AnonHostResolverTest {
 		assertTrue(AnonHostResolver.isFamilyMember(HOST, cls, bytes));
 		assertTrue(AnonHostResolver.resolve(cls, bytes).anonymous());
 	}
+
+	/** 合成带 EnclosingMethod 且 InnerClasses.innerName 非空的具名局部类（kotlinc/javac 真实形态）。 */
+	private static byte[] namedLocalClass(String name, String enclosing, String simpleName) {
+		ClassWriter cw = new ClassWriter(0);
+		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_SUPER,
+			name, null, "java/lang/Object", null);
+		cw.visitOuterClass(enclosing, "makeLocalAnon", "()V");
+		cw.visitInnerClass(name, null, simpleName, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL);
+		MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+		mv.visitCode();
+		mv.visitVarInsn(Opcodes.ALOAD, 0);
+		mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+		mv.visitInsn(Opcodes.RETURN);
+		mv.visitMaxs(1, 1);
+		mv.visitEnd();
+		cw.visitEnd();
+		return cw.toByteArray();
+	}
+
+	@Test
+	void kotlinNamedLocalClassWithEnclosingMethodIsNotAnonymous() {
+		String dummy = HOST + "$makeLocalAnon$DummyBox";
+		String box1 = HOST + "$makeLocalAnon$Box1";
+		byte[] dummyBytes = namedLocalClass(dummy, HOST, "DummyBox");
+		byte[] box1Bytes = namedLocalClass(box1, HOST, "Box1");
+
+		assertFalse(AnonHostResolver.resolve(dummy, dummyBytes).anonymous(),
+			"Kotlin named local class carries non-null innerName and must not be classified as anonymous");
+		assertFalse(AnonClassAligner.isBatchAnonClass(dummy, dummyBytes));
+		assertFalse(AnonClassAligner.isAnonymousClass(dummyBytes, HOST));
+		assertFalse(AnonHostResolver.isFamilyMember(HOST, dummy, dummyBytes));
+
+		assertFalse(AnonHostResolver.resolve(box1, box1Bytes).anonymous(),
+			"Named local class whose simple name ends in a digit must not be classified as anonymous");
+		assertFalse(AnonHostResolver.isFamilyMember(HOST, box1, box1Bytes));
+		assertFalse(AnonHostResolver.isAnonymousName(box1, HOST));
+		assertFalse(AnonClassAligner.isHostSuffixFamilyMember(HOST, box1));
+	}
+
+	@Test
+	void javacNamedLocalClassWithEnclosingMethodIsNotAnonymous() {
+		String local = HOST + "$1Local";
+		byte[] bytes = namedLocalClass(local, HOST, "Local");
+
+		assertFalse(AnonHostResolver.resolve(local, bytes).anonymous());
+		assertFalse(AnonClassAligner.isBatchAnonClass(local, bytes));
+		assertFalse(AnonClassAligner.isAnonymousClass(bytes, HOST));
+	}
+
+	@Test
+	void anonymousInsideKotlinLocalClassGroupsUnderLocalClassWhileLocalClassesStayExcluded() {
+		String localBox = HOST + "$makeLocalAnon$LocalBox";
+		String dummyBox = HOST + "$makeLocalAnon$DummyBox";
+		String innerAnon = localBox + "$op$1";
+
+		java.util.Map<String, byte[]> batch = new java.util.LinkedHashMap<>();
+		batch.put(HOST, plainClass(HOST));
+		batch.put(dummyBox, namedLocalClass(dummyBox, HOST, "DummyBox"));
+		batch.put(localBox, namedLocalClass(localBox, HOST, "LocalBox"));
+		batch.put(innerAnon, kotlinAnon(innerAnon, localBox));
+
+		java.util.Map<String, java.util.Map<String, byte[]>> grouped = AnonClassAligner.groupBatchAnons(batch);
+		assertFalse(grouped.containsKey(HOST),
+			"named local classes DummyBox/LocalBox must not be grouped as anonymous classes under host: " + grouped);
+		assertTrue(grouped.containsKey(localBox),
+			"anonymous object inside LocalBox must be grouped under LocalBox: " + grouped);
+		assertEquals(java.util.Set.of(innerAnon), grouped.get(localBox).keySet());
+
+		// Even if DummyBox is passed directly into align() alongside a real anon, it must never be aligned or renamed to $1.
+		String realAnon = HOST + "$makeLocalAnon$1";
+		java.util.Map<String, byte[]> oldAnons = java.util.Map.of(realAnon, kotlinAnon(realAnon, HOST));
+		java.util.Map<String, byte[]> newAnons = new java.util.LinkedHashMap<>();
+		newAnons.put(dummyBox, namedLocalClass(dummyBox, HOST, "DummyBox"));
+		newAnons.put(realAnon, kotlinAnon(realAnon, HOST));
+		AnonClassAligner.Result res = AnonClassAligner.align(HOST, plainClass(HOST), oldAnons, newAnons);
+		assertFalse(res.renameMap.containsKey(dummyBox),
+			"named local class must never be renamed by AnonClassAligner: " + res.renameMap);
+		assertEquals(realAnon, res.renameMap.get(realAnon));
+	}
 }

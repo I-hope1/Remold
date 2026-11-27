@@ -991,6 +991,9 @@ public final class AnonClassAligner {
 	public static boolean isAnonymousClass(ClassNode cn, String hostClassName) {
 		if (cn == null || hostClassName == null) return false;
 		if ((cn.access & Opcodes.ACC_ENUM) != 0) return false;
+		// 具名局部类（javac Host$1Local、kotlinc Host$method$DummyBox）同时带 EnclosingMethod 与非空 innerName；
+		// 必须先于 EnclosingMethod 检查自身 InnerClasses 条目，否则具名局部类会被误判为匿名类并改名成 $1。
+		if (AnonHostResolver.hasExplicitInnerName(cn)) return false;
 		String host = Names.internal(hostClassName);
 		// EnclosingMethod 是权威：kotlinc 的 Host$方法名$序号 在名字上不像匿名类，只有属性说得清。
 		if (cn.outerClass != null && !cn.outerClass.isEmpty()) {
@@ -1005,16 +1008,6 @@ public final class AnonClassAligner {
 				if (cn.outerClass.startsWith(a + "$")) return true;
 			}
 			return false;
-		}
-		if (cn.innerClasses != null) {
-			for (org.objectweb.asm.tree.InnerClassNode icn : cn.innerClasses) {
-				if (cn.name.equals(icn.name)) {
-					if (icn.innerName != null) {
-						return false;
-					}
-					break;
-				}
-			}
 		}
 		return AnonHostResolver.isAnonymousName(cn.name, host);
 	}
@@ -1134,7 +1127,7 @@ public final class AnonClassAligner {
 		String suffix = cls.substring(host.length() + 1);
 		int    tail   = suffix.length();
 		while (tail > 0 && Character.isDigit(suffix.charAt(tail - 1))) tail--;
-		return tail > 0 && tail < suffix.length();
+		return tail > 0 && tail < suffix.length() && suffix.charAt(tail - 1) == '$';
 	}
 
 	public static int parseIndex(String hostClassName, String className) {

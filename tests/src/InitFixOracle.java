@@ -1,5 +1,7 @@
 import remold.AnnotationTransformer;
+import remold.BatchReportScope;
 import remold.ClassDiffUtil;
+import remold.HotswapBatchReport;
 import remold.RemoldAgent;
 import remold.InstanceTracker;
 import remold.Reflect;
@@ -171,6 +173,10 @@ public class InitFixOracle {
 		scenario("值类型 new 初值重放 A2：被构造类型在本批重定义候选中 -> CONSTRUCTED-CHANGED（批次视图）", InitFixOracle::caseValueReplayConstructedChanged);
 		scenario("值类型 new 初值重放优先级：同字段被 @RemoldReinit 认领时只走一条通道（不得重复写）", InitFixOracle::caseValueReplayPriority);
 		scenario("值类型 new 初值重放与常规补丁共存：拒绝不阻断新增字段补丁、不写 FieldLedger", InitFixOracle::caseValueReplayCoexistsWithRegularPatch);
+		scenario("值类型 new 初值重放运行期 W0-W4：属性关闭不介入 / 两实例各自独立新对象 / applied 记录挡住重复重放 / 批次统计", InitFixOracle::caseValueReplayRuntimeWrites);
+		scenario("值类型 new 初值重放运行期：运行期改值或被置 null -> skipped（保留值、不记 applied、不写台账）", InitFixOracle::caseValueReplayRuntimeSkips);
+		scenario("值类型 new 初值重放运行期：静态槽位 W1-W4 替换 + applied 记录", InitFixOracle::caseValueReplayRuntimeStatic);
+		scenario("值类型 new 初值重放运行期 failed 可见性：报告/去重告警契约，且不覆盖分析期拒绝、不写台账", InitFixOracle::caseValueReplayRuntimeFailedVisible);
 
 		System.out.println();
 		System.out.println("通过 " + passed + " 条；失败 " + failed + " 条；合计 " + (passed + failed) + " 条");
@@ -3977,6 +3983,354 @@ public class InitFixOracle {
 			if (previous == null) System.clearProperty(InitFix.VALUE_REPLAY_PROPERTY);
 			else System.setProperty(InitFix.VALUE_REPLAY_PROPERTY, previous);
 		}
+	}
+
+	// ==================== 值类型 new 初值重放：运行期 W0-W4（Battle C） ====================
+	//
+	// Fixture.apply() 不做真实 redefine，但 afterRedefine -> applyPatch 与生产同一条路径：
+	// 隐藏补丁类、buildOld/buildNew 工厂句柄、W1 读 / W2 判等 / W3 新值 / W4 引用 CAS 都真实执行。
+	// 唯一的模拟成分是"宿主类仍带 v1 的构造函数"——存量实例与静态值因此天然持有旧初值，
+	// 正是 redefine 刚生效、补丁尚未写入那一刻的形态。
+
+	/**
+	 * 运行期夹具：宿主类用 <b>v1 字节</b> define（存量实例/静态值来自旧初值），再用 v2 差分走
+	 * transform → apply。与 {@link #loadMultiFixture} 的唯一区别就是宿主按 v1 定义。
+	 */
+	static Fixture loadValueReplayRuntimeFixture(String dotName, Map<String, String> v1Sources,
+	                                             Map<String, String> v2Sources) throws Exception {
+		Map<String, byte[]> v1Classes = compile(v1Sources);
+		Map<String, byte[]> v2Classes = compile(v2Sources);
+		byte[] v1 = v1Classes.get(dotName);
+		byte[] v2 = v2Classes.get(dotName);
+		if (v1 == null || v2 == null) throw new IllegalStateException("编译产物缺失：" + dotName);
+		Class<?> host = Class.forName(dotName, true, new ByteLoader(v1Classes));
+		RemoldAgent.bytecodeCache.put(dotName, v2);
+		return new Fixture(dotName, v1, v2, host);
+	}
+
+	/** 用夹具 ClassLoader 里的值类型构造新值（测试侧期望值，不经过补丁）。 */
+	static Object valueObject(Class<?> host, String typeDotName, int x, int y) throws Exception {
+		Class<?> type = Class.forName(typeDotName, false, host.getClassLoader());
+		Constructor<?> ctor = type.getDeclaredConstructor(int.class, int.class);
+		ctor.setAccessible(true);
+		return ctor.newInstance(x, y);
+	}
+
+	/** 批次报告快照（{@code finish} 是 remold 包内可见；沿用"反射读包内 API"的既有先例）。 */
+	static HotswapBatchReport finishBatchReport() {
+		try {
+			Method m = BatchReportScope.class.getDeclaredMethod("finish", List.class);
+			m.setAccessible(true);
+			return (HotswapBatchReport) m.invoke(null, List.of());
+		} catch (ReflectiveOperationException e) {
+			throw new IllegalStateException("BatchReportScope.finish(List) shape changed", e);
+		}
+	}
+
+	/** 包内可见的运行期三态回写 API（驱动在 applyPatch 内调用同一条）。 */
+	static void recordValueReplayOutcome(Class<?> host, String field,
+	                                     InitFix.FieldStatus status, String reason) {
+		try {
+			Method m = InitFix.class.getDeclaredMethod("valueReplayRecordOutcome",
+				Class.class, String.class, InitFix.FieldStatus.class, String.class);
+			m.setAccessible(true);
+			m.invoke(null, host, field, status, reason);
+		} catch (ReflectiveOperationException e) {
+			throw new IllegalStateException("InitFix.valueReplayRecordOutcome shape changed", e);
+		}
+	}
+
+	/** 失败/跳过日志按初值指纹去重的包内门（驱动按同一条判定是否输出告警）。 */
+	static boolean valueReplayFirstOutcomeLog(String className, String field,
+	                                          String fingerprint, boolean failed) {
+		try {
+			Method m = InitFix.class.getDeclaredMethod("valueReplayFirstOutcomeLog",
+				String.class, String.class, String.class, boolean.class);
+			m.setAccessible(true);
+			return (Boolean) m.invoke(null, className, field, fingerprint, failed);
+		} catch (ReflectiveOperationException e) {
+			throw new IllegalStateException("InitFix.valueReplayFirstOutcomeLog shape changed", e);
+		}
+	}
+
+	/** 运行期主链：两实例各自独立新对象（W3 不共享身份）+ applied 记录 + 批次统计。 */
+	static void caseValueReplayRuntimeWrites() throws Exception {
+		String dot = "oracle.CaseVrRuntimeWrite";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrRuntimeWrite", "\tVec v = new Vec(4, 4);", "\tVec v() { return v; }"),
+			"oracle.Vec", VR_VEC);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrRuntimeWrite", "\tVec v = new Vec(4, 12);", "\tVec v() { return v; }"),
+			"oracle.Vec", VR_VEC);
+		Fixture fx = loadValueReplayRuntimeFixture(dot, v1, v2);
+
+		Object first = construct(fx.host);
+		Object second = construct(fx.host);
+		Object oldFirst = read(fx.host, first, "v");
+		Object oldSecond = read(fx.host, second, "v");
+		check(oldFirst != null && oldSecond != null,
+			"CaseVrRuntimeWrite precondition: both live instances hold the old value");
+		check(oldFirst != oldSecond,
+			"CaseVrRuntimeWrite precondition: the two old values are distinct objects");
+		InstanceTracker.register(first);
+		InstanceTracker.register(second);
+
+		// 去触发对照：属性关闭时本通道完全不介入运行期路径（旧行为基线）。
+		withValueReplay(false, () -> {
+			InitFix.PatchReport off = fx.transform();
+			check(off.valueReplayFields().isEmpty(),
+				"CaseVrRuntimeWrite: property off plans no value replay (actual "
+					+ off.valueReplayFields() + ")");
+			check(pendingPlan(fx.host) == null,
+				"CaseVrRuntimeWrite: property off stages no pending patch");
+			fx.apply();
+			check(read(fx.host, first, "v") == oldFirst && read(fx.host, second, "v") == oldSecond,
+				"CaseVrRuntimeWrite: property off leaves both instances untouched");
+		});
+
+		Object expected = valueObject(fx.host, "oracle.Vec", 4, 12);
+		withValueReplay(true, () -> {
+			BatchReportScope.begin();
+			HotswapBatchReport batch;
+			try {
+				InitFix.PatchReport planned = fx.transform();
+				InitFix.FieldDecision decision = planned.valueReplayFields().get("v");
+				check(decision != null && decision.status() == InitFix.FieldStatus.ACCEPTED,
+					"CaseVrRuntimeWrite: analysis plans v (actual " + planned.valueReplayFields() + ")");
+				check(!planned.patchGenerated(),
+					"CaseVrRuntimeWrite: a value-replay-only round keeps patchGenerated=false");
+				fx.apply();
+				batch = finishBatchReport();
+			} finally {
+				if (BatchReportScope.isActive()) BatchReportScope.discard();
+			}
+
+			Object newFirst = read(fx.host, first, "v");
+			Object newSecond = read(fx.host, second, "v");
+			check(Objects.equals(expected, newFirst),
+				"CaseVrRuntimeWrite: first instance now holds the new initializer value (actual "
+					+ describe(newFirst) + ")");
+			check(Objects.equals(expected, newSecond),
+				"CaseVrRuntimeWrite: second instance now holds the new initializer value (actual "
+					+ describe(newSecond) + ")");
+			check(newFirst != oldFirst && newSecond != oldSecond,
+				"CaseVrRuntimeWrite: each old reference was replaced");
+			check(newFirst != newSecond,
+				"CaseVrRuntimeWrite: W3 must build one new object per instance (identity must differ)");
+
+			InitFix.PatchReport after = InitFix.getLastReport(fx.host);
+			InitFix.FieldDecision written = after.valueReplayFields().get("v");
+			check(written != null && written.status() == InitFix.FieldStatus.ACCEPTED,
+				"CaseVrRuntimeWrite: the runtime outcome is written (actual "
+					+ after.valueReplayFields() + ")");
+
+			HotswapBatchReport.InitFixStats stats = batch == null ? null : batch.getInitFixStats();
+			check(stats != null && stats.getValueReplayApplied() == 1,
+				"CaseVrRuntimeWrite: batch report counts one applied field (actual "
+					+ (stats == null ? null : stats.getValueReplayApplied()) + ")");
+			check(stats != null && stats.getValueReplaySkipped() == 0
+				&& stats.getValueReplayFailed() == 0 && stats.getValueReplayRejected() == 0,
+				"CaseVrRuntimeWrite: no skipped/failed/rejected in this round and rejected is not double counted");
+
+			// applied 记录（A0）：同一 (old -> new) 差分再跑一轮必须被记录的 newFingerprint 挡下。
+			InitFix.PatchReport again = fx.transform();
+			check(again.valueReplayFields().isEmpty(),
+				"CaseVrRuntimeWrite: the applied record suppresses a re-plan for the same new initializer (actual "
+					+ again.valueReplayFields() + ")");
+			check(pendingPlan(fx.host) == null,
+				"CaseVrRuntimeWrite: no pending patch on the suppressed round");
+		});
+	}
+
+	/** W2 空安全：运行期改过的值与置 null 都 skipped（保留值、不记 applied、不写台账）。 */
+	static void caseValueReplayRuntimeSkips() throws Exception {
+		String dot = "oracle.CaseVrRuntimeSkip";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrRuntimeSkip", "\tVec v = new Vec(4, 4);", "\tVec v() { return v; }"),
+			"oracle.Vec", VR_VEC);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrRuntimeSkip", "\tVec v = new Vec(4, 12);", "\tVec v() { return v; }"),
+			"oracle.Vec", VR_VEC);
+		Fixture fx = loadValueReplayRuntimeFixture(dot, v1, v2);
+
+		Object modified = construct(fx.host);
+		Object nulled = construct(fx.host);
+		Object modifiedValue = valueObject(fx.host, "oracle.Vec", 9, 9);
+		setField(fx.host, modified, "v", modifiedValue);
+		setField(fx.host, nulled, "v", null);
+		InstanceTracker.register(modified);
+		InstanceTracker.register(nulled);
+
+		withValueReplay(true, () -> {
+			BatchReportScope.begin();
+			HotswapBatchReport batch;
+			try {
+				InitFix.PatchReport planned = fx.transform();
+				check(planned.valueReplayFields().get("v") != null,
+					"CaseVrRuntimeSkip: analysis plans v before the runtime pass");
+				fx.apply();
+				batch = finishBatchReport();
+			} finally {
+				if (BatchReportScope.isActive()) BatchReportScope.discard();
+			}
+
+			check(read(fx.host, modified, "v") == modifiedValue,
+				"CaseVrRuntimeSkip: the runtime-modified value must be preserved (W2 skipped)");
+			check(read(fx.host, nulled, "v") == null,
+				"CaseVrRuntimeSkip: a nulled field must be skipped, not failed, and stay null");
+
+			InitFix.PatchReport after = InitFix.getLastReport(fx.host);
+			InitFix.FieldDecision decision = after.valueReplayFields().get("v");
+			check(decision != null && decision.status() == InitFix.FieldStatus.NOTHING_TO_PATCH,
+				"CaseVrRuntimeSkip: the report shows the field as skipped (actual "
+					+ after.valueReplayFields() + ")");
+			check(decision != null && decision.reason() != null
+				&& decision.reason().contains("skipped"),
+				"CaseVrRuntimeSkip: the skip reason is visible in the report (actual "
+					+ (decision == null ? null : decision.reason()) + ")");
+			check(!unpatched(fx.host).contains("v"),
+				"CaseVrRuntimeSkip: skipped/failed value replay must not write FieldLedger (actual "
+					+ InitFix.getUnpatchedFields(fx.host) + ")");
+
+			HotswapBatchReport.InitFixStats stats = batch == null ? null : batch.getInitFixStats();
+			check(stats != null && stats.getValueReplaySkipped() == 1
+				&& stats.getValueReplayApplied() == 0 && stats.getValueReplayFailed() == 0,
+				"CaseVrRuntimeSkip: batch report counts one skipped field and no applied/failed (actual "
+					+ (stats == null ? null : stats) + ")");
+
+			// skipped 不记 applied：同一差分再跑一轮仍会规划，且第二轮同样不覆盖运行期值。
+			InitFix.PatchReport again = fx.transform();
+			InitFix.FieldDecision replanned = again.valueReplayFields().get("v");
+			check(replanned != null && replanned.status() == InitFix.FieldStatus.ACCEPTED,
+				"CaseVrRuntimeSkip: skipped must not be remembered as applied (actual "
+					+ again.valueReplayFields() + ")");
+			fx.apply();
+			check(read(fx.host, modified, "v") == modifiedValue && read(fx.host, nulled, "v") == null,
+				"CaseVrRuntimeSkip: a second round still preserves runtime values");
+			InitFix.afterRedefineFailed(fx.host);
+		});
+	}
+
+	/** 静态槽位：W1-W4 单槽位替换 + applied 记录（非 final 静态字段，不依赖 enhanced）。 */
+	static void caseValueReplayRuntimeStatic() throws Exception {
+		String dot = "oracle.CaseVrRuntimeStatic";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrRuntimeStatic", "\tstatic Vec s = new Vec(4, 4);", "\tstatic Vec s() { return s; }"),
+			"oracle.Vec", VR_VEC);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrRuntimeStatic", "\tstatic Vec s = new Vec(4, 12);", "\tstatic Vec s() { return s; }"),
+			"oracle.Vec", VR_VEC);
+		Fixture fx = loadValueReplayRuntimeFixture(dot, v1, v2);
+
+		Object oldStatic = read(fx.host, null, "s");
+		check(oldStatic != null, "CaseVrRuntimeStatic precondition: the static field holds the old value");
+		Object expected = valueObject(fx.host, "oracle.Vec", 4, 12);
+
+		withValueReplay(true, () -> {
+			BatchReportScope.begin();
+			HotswapBatchReport batch;
+			try {
+				InitFix.PatchReport planned = fx.transform();
+				InitFix.FieldDecision decision = planned.valueReplayFields().get("s");
+				check(decision != null && decision.status() == InitFix.FieldStatus.ACCEPTED,
+					"CaseVrRuntimeStatic: analysis plans the static target (actual "
+						+ planned.valueReplayFields() + ")");
+				check(!planned.staticFields().containsKey("s"),
+					"CaseVrRuntimeStatic: the value-replay target stays out of the default static decisions");
+				fx.apply();
+				batch = finishBatchReport();
+			} finally {
+				if (BatchReportScope.isActive()) BatchReportScope.discard();
+			}
+
+			Object newStatic = read(fx.host, null, "s");
+			check(Objects.equals(expected, newStatic),
+				"CaseVrRuntimeStatic: the static slot holds the new initializer value (actual "
+					+ describe(newStatic) + ")");
+			check(newStatic != oldStatic, "CaseVrRuntimeStatic: the old static reference was replaced");
+
+			InitFix.PatchReport after = InitFix.getLastReport(fx.host);
+			InitFix.FieldDecision written = after.valueReplayFields().get("s");
+			check(written != null && written.status() == InitFix.FieldStatus.ACCEPTED,
+				"CaseVrRuntimeStatic: the runtime outcome is written");
+			HotswapBatchReport.InitFixStats stats = batch == null ? null : batch.getInitFixStats();
+			check(stats != null && stats.getValueReplayApplied() == 1,
+				"CaseVrRuntimeStatic: batch report counts one applied field");
+
+			InitFix.PatchReport again = fx.transform();
+			check(again.valueReplayFields().isEmpty(),
+				"CaseVrRuntimeStatic: the applied record suppresses a re-plan for the same new initializer");
+		});
+	}
+
+	/**
+	 * failed 可见性契约（{@code docs/initfix/14} §3 / §8）：报告里是 REJECTED 且带判决码、
+	 * 不写 FieldLedger、按初值指纹去重告警，且运行期结论不得掩盖分析期拒绝。
+	 *
+	 * <p>模拟原因：A3 保证 buildOld/buildNew 纯净、CAS 竞争需要真实并发，模拟环境里没有确定性
+	 * 失败源；这里直接走驱动写回调同一条包内 API，锁住"failed 必须可见"的报告/日志契约。</p>
+	 */
+	static void caseValueReplayRuntimeFailedVisible() throws Exception {
+		String dot = "oracle.CaseVrRuntimeFailed";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrRuntimeFailed", "\tVec v = new Vec(4, 4);", "\tVec v() { return v; }"),
+			"oracle.Vec", VR_VEC);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrRuntimeFailed", "\tVec v = new Vec(4, 12);", "\tVec v() { return v; }"),
+			"oracle.Vec", VR_VEC);
+		Fixture fx = loadValueReplayRuntimeFixture(dot, v1, v2);
+
+		withValueReplay(true, () -> {
+			InitFix.PatchReport planned = fx.transform();
+			check(planned.valueReplayFields().get("v") != null,
+				"CaseVrRuntimeFailed: analysis plans v before the runtime pass (baseline)");
+			InitFix.PatchPlan plan = pendingPlan(fx.host);
+			String fingerprint = plan == null || plan.valueReplayTasks().isEmpty()
+				? null : plan.valueReplayTasks().get(0).newFingerprint();
+
+			recordValueReplayOutcome(fx.host, "v", InitFix.FieldStatus.REJECTED,
+				"failed: VALUE-REPLAY-CAS-EXHAUSTED: simulated for the report contract");
+			InitFix.PatchReport after = InitFix.getLastReport(fx.host);
+			InitFix.FieldDecision failed = after.valueReplayFields().get("v");
+			check(failed != null && failed.status() == InitFix.FieldStatus.REJECTED,
+				"CaseVrRuntimeFailed: a runtime failure is visible in PatchReport.valueReplayFields (actual "
+					+ after.valueReplayFields() + ")");
+			check(failed != null && failed.reason() != null
+				&& failed.reason().contains("VALUE-REPLAY-CAS-EXHAUSTED"),
+				"CaseVrRuntimeFailed: the failure reason carries VALUE-REPLAY-CAS-EXHAUSTED (actual "
+					+ (failed == null ? null : failed.reason()) + ")");
+			check(!unpatched(fx.host).contains("v"),
+				"CaseVrRuntimeFailed: a failure must not write FieldLedger");
+			check(!after.instanceFields().containsKey("v") && !after.staticFields().containsKey("v"),
+				"CaseVrRuntimeFailed: the failure stays in the value-replay component");
+			check(valueReplayFirstOutcomeLog(fx.dotName, "v", fingerprint, true),
+				"CaseVrRuntimeFailed: the first failure for an initializer fingerprint must be logged");
+			check(!valueReplayFirstOutcomeLog(fx.dotName, "v", fingerprint, true),
+				"CaseVrRuntimeFailed: the same failure fingerprint must not be logged twice");
+			InitFix.afterRedefineFailed(fx.host);
+		});
+
+		// 分析期拒绝记录不得被运行期回写掩盖。
+		String rejDot = "oracle.CaseVrRuntimeKeepReject";
+		Map<String, String> rejV1 = Map.of(rejDot,
+			vrHost("CaseVrRuntimeKeepReject", "\tfinal VecEqCustom v = new VecEqCustom(4, 4);", ""),
+			"oracle.VecEqCustom", VR_VEC_EQ_CUSTOM);
+		Map<String, String> rejV2 = Map.of(rejDot,
+			vrHost("CaseVrRuntimeKeepReject", "\tfinal VecEqCustom v = new VecEqCustom(4, 12);", ""),
+			"oracle.VecEqCustom", VR_VEC_EQ_CUSTOM);
+		Fixture rej = loadMultiFixture(rejDot, rejV1, rejV2);
+		withValueReplay(true, () -> {
+			InitFix.PatchReport report = rej.transform();
+			check(report.valueReplayFields().get("v") != null
+				&& report.valueReplayFields().get("v").status() == InitFix.FieldStatus.REJECTED,
+				"CaseVrRuntimeFailed precondition: the analysis rejection exists");
+			recordValueReplayOutcome(rej.host, "v", InitFix.FieldStatus.ACCEPTED, "written");
+			InitFix.FieldDecision kept = InitFix.getLastReport(rej.host).valueReplayFields().get("v");
+			check(kept != null && kept.status() == InitFix.FieldStatus.REJECTED
+				&& kept.reason() != null && kept.reason().contains("VALUE-REPLAY-EQ-CUSTOM"),
+				"CaseVrRuntimeFailed: a runtime outcome must not clobber the analysis rejection (actual "
+					+ (kept == null ? null : kept.reason()) + ")");
+		});
 	}
 
 	// ==================== 夹具装配 ====================

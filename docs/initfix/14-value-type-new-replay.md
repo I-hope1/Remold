@@ -168,6 +168,17 @@ for each 存活实例 i:
 - 绝不能用 applied 记录掩盖 skipped/failed；failed 的可见性由 §8 的批次报告兜底。
 - 静态字段的写入同样走 W1~W4；`static final` 的可见性额外依赖 A4 的 enhanced 门。
 
+**状态映射与聚合**（进入 `PatchReport.valueReplayFields` 与 `InitFixStats`）：
+
+- 分析期 planned → `ACCEPTED`（"task planned"，不代表已写入）；rejected → `REJECTED` + `VALUE-REPLAY-*` 原因；
+  A0 未触发保持缺省；
+- 运行期 written → `ACCEPTED`；skipped → `NOTHING_TO_PATCH` + `skipped: ...` 原因；
+  failed → `REJECTED` + `failed: ...` 原因（分析期 REJECTED 不被覆盖）；
+- **字段级聚合**：任一实例 failed ⇒ 字段 failed（不写 applied 记录，失败不被掩盖）；否则任一实例
+  written ⇒ written；否则 skipped。`InitFixStats` 的 applied/skipped/failed 计数为权威口径，
+  failed/rejected 列表元素为 `host.field: reason`；
+- 日志按 `(host, field, newFingerprint)` 去重，同一初值指纹只打一条 skipped/failed。
+
 ## 4. 指纹与代际
 
 自动重放的 applied 键由三部分组成：

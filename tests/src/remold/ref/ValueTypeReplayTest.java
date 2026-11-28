@@ -321,6 +321,23 @@ class ValueTypeReplayTest {
 	}
 
 	@Test
+	void kotlinCustomEqualsIsRejected() {
+		// Negative control for the bytecode-shape heuristic: a class carrying kotlin/Metadata,
+		// componentN and copy but with a hand-written equals (here identity-only, potentially
+		// side-effecting in real code) must not be accepted as a data class.
+		Map<String, byte[]> v1 = kotlinHost(4, 4);
+		Map<String, byte[]> v2 = kotlinHost(4, 12);
+		byte[] custom = kotlinDataClass(true, false, true);
+
+		ValueTypeReplay.Plan plan = planWith(v1, v2, name -> KOTLIN_VEC.equals(name) ? custom : null,
+			name -> false, false);
+
+		assertEquals(ValueTypeReplay.Reason.EQ_CUSTOM, plan.rejected().get("v"),
+			"detail=" + plan.details().get("v"));
+		assertTrue(plan.fields().isEmpty());
+	}
+
+	@Test
 	void kotlinVarPrimaryFieldIsRejected() {
 		Map<String, byte[]> v1 = kotlinHost(4, 4);
 		Map<String, byte[]> v2 = kotlinHost(4, 12);
@@ -703,6 +720,10 @@ class ValueTypeReplayTest {
 	 * @param extraField   true models an extra class-body instance field
 	 */
 	private static byte[] kotlinDataClass(boolean fieldsFinal, boolean extraField) {
+		return kotlinDataClass(fieldsFinal, extraField, false);
+	}
+
+	private static byte[] kotlinDataClass(boolean fieldsFinal, boolean extraField, boolean customEquals) {
 		String name = "kx/Vec";
 		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
 		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_SUPER, name, null,
@@ -743,7 +764,8 @@ class ValueTypeReplayTest {
 		copy.visitMaxs(0, 0);
 		copy.visitEnd();
 
-		kotlinEquals(cw, name);
+		if (customEquals) kotlinCustomEquals(cw, name);
+		else kotlinEquals(cw, name);
 		kotlinHashCode(cw, name);
 		cw.visitEnd();
 		return cw.toByteArray();
@@ -754,6 +776,24 @@ class ValueTypeReplayTest {
 		mv.visitCode();
 		mv.visitVarInsn(Opcodes.ALOAD, 0);
 		mv.visitFieldInsn(Opcodes.GETFIELD, name, fieldName, "I");
+		mv.visitInsn(Opcodes.IRETURN);
+		mv.visitMaxs(0, 0);
+		mv.visitEnd();
+	}
+
+	/** Hand-written identity equals: does not match the generated kotlinc shape. */
+	private static void kotlinCustomEquals(ClassWriter cw, String name) {
+		MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC, "equals",
+			"(Ljava/lang/Object;)Z", null, null);
+		mv.visitCode();
+		Label notSame = new Label();
+		mv.visitVarInsn(Opcodes.ALOAD, 0);
+		mv.visitVarInsn(Opcodes.ALOAD, 1);
+		mv.visitJumpInsn(Opcodes.IF_ACMPNE, notSame);
+		mv.visitInsn(Opcodes.ICONST_1);
+		mv.visitInsn(Opcodes.IRETURN);
+		mv.visitLabel(notSame);
+		mv.visitInsn(Opcodes.ICONST_0);
 		mv.visitInsn(Opcodes.IRETURN);
 		mv.visitMaxs(0, 0);
 		mv.visitEnd();

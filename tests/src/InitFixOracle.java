@@ -3688,6 +3688,9 @@ public class InitFixOracle {
 
 		// 去触发对照：属性关闭时本通道完全不参与，行为与旧版一致（无计划、无补丁、无组件）。
 		withValueReplay(false, () -> {
+			ClassDiffUtil.ClassDiff fullDiff = ClassDiffUtil.diff(fx.v1, fx.v2);
+			check(!InitFix.needsMethodBodies(fx.host, fullDiff),
+				"CaseVrPlanned: property off must not change the full-diff decision (needsMethodBodies=false)");
 			InitFix.PatchReport off = fx.transform();
 			check(off.valueReplayFields().isEmpty(),
 				"CaseVrPlanned: property off must not produce value-replay decisions (actual "
@@ -3700,6 +3703,8 @@ public class InitFixOracle {
 
 		withValueReplay(true, () -> {
 			InitFix.PatchReport on = fx.transform();
+			check(InitFix.needsMethodBodies(fx.host, ClassDiffUtil.diff(fx.v1, fx.v2)),
+				"CaseVrPlanned: property on must request full ClassDiff bodies for the initializer expressions");
 			InitFix.FieldDecision planned = on.valueReplayFields().get("v");
 			check(planned != null && planned.status() == InitFix.FieldStatus.ACCEPTED,
 				"CaseVrPlanned: v is planned for value replay (actual " + on.valueReplayFields() + ")");
@@ -4228,8 +4233,8 @@ public class InitFixOracle {
 				"CaseVrRuntimeSkip: the report shows the field as skipped (actual "
 					+ after.valueReplayFields() + ")");
 			check(decision != null && decision.reason() != null
-				&& decision.reason().contains("skipped"),
-				"CaseVrRuntimeSkip: the skip reason is visible in the report (actual "
+				&& decision.reason().startsWith("skipped: "),
+				"CaseVrRuntimeSkip: the skip reason prefix is pinned to skipped: (actual "
 					+ (decision == null ? null : decision.reason()) + ")");
 			check(!unpatched(fx.host).contains("v"),
 				"CaseVrRuntimeSkip: skipped/failed value replay must not write FieldLedger (actual "
@@ -4339,8 +4344,8 @@ public class InitFixOracle {
 				"CaseVrRuntimeFailed: a runtime failure is visible in PatchReport.valueReplayFields (actual "
 					+ after.valueReplayFields() + ")");
 			check(failed != null && failed.reason() != null
-				&& failed.reason().contains("VALUE-REPLAY-CAS-EXHAUSTED"),
-				"CaseVrRuntimeFailed: the failure reason carries VALUE-REPLAY-CAS-EXHAUSTED (actual "
+				&& failed.reason().startsWith("failed: VALUE-REPLAY-CAS-EXHAUSTED"),
+				"CaseVrRuntimeFailed: the failure reason prefix is pinned to failed: <code> (actual "
 					+ (failed == null ? null : failed.reason()) + ")");
 			check(!unpatched(fx.host).contains("v"),
 				"CaseVrRuntimeFailed: a failure must not write FieldLedger");

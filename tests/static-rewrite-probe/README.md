@@ -65,6 +65,10 @@ deopt 屏障**，让读者重新编译并读到新值。结论支撑把“既有
 | `patchGenerated()` | `false`（无补丁任务） | `true` |
 | `afterRedefine` 后 `MSG` | `stale`（未写入） | `new`（已改写） |
 
+JBR 25.0.4.1（`ext25` 构建）同读数：plain `REJECTED` / `patchGenerated=false` / `afterApply=stale`；
+enhanced `ACCEPTED` / `patchGenerated=true` / `afterApply=new`；`single`/`two` 的 A-B 读数与 21 一致
+（`single` patch 后热读者 `OLD`，`two` 阶段 C 后 `NEW`）。
+
 探针在断言不成立时抛异常并以非零码退出；`run.sh` 的 `run_gate` 会把非零码当失败并中止。
 
 ## 边界

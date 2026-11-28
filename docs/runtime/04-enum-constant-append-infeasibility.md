@@ -139,6 +139,13 @@ OBS jit.after.forcedDeopt.hotLen       = 3     # 再次 redefine（触发 deopt�
 class 文件，deopt 不会改回——这正是 `@RemoldReinit` Javadoc"static final 编译期常量对批外读者无效"
 所标注的限制；deopt 只救运行时初始化的引用/非常量字段。
 
+**运行时前提（补测，2026-11-28）**：以上"重定义宿主可 deopt 跨类读者"的读数在 **enhanced JBR**
+（`-XX:+AllowEnhancedClassRedefinition`）上取得。`build/probe/deopt` 的补测显示：stock HotSpot 21/25
+与 JBR 21/25 **未启用**该 flag 时，重定义宿主只失效宿主自身方法，跨类已折叠读者仍读旧值；非 final
+静态字段不参与折叠。InitFix 因此对非 enhanced 运行时上的既有 `static final` 字段改写逐字段
+fail-closed（[`docs/status.md`](../status.md) §5.2 风险 34）。实现上本门排除 `ConstantValue`：
+javac 已内联字面量，改写内存对已编译读者无影响，deopt 也无法刷新。
+
 ### 3.5 已初始化的 `$SwitchMap$` 持有类无法补 case
 
 `switch-on-enum` 走 `$SwitchMap$Color`（javac 把该字段放在合成类 `X$1` 里，`static final int[]`，

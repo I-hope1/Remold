@@ -11,6 +11,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.stream.Collectors;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -196,7 +197,7 @@ final class RemovedMemberScanner {
 				list.stream().anyMatch(m -> !m.isField()),
 				list.stream().anyMatch(m -> m.isField() && m.isStatic()),
 				list.stream().filter(RemovedMemberReaders.RemovedMember::hasConstantValue)
-				    .map(RemovedMemberReaders.RemovedMember::name).toList()));
+				    .map(RemovedMemberReaders.RemovedMember::name).collect(Collectors.toUnmodifiableList())));
 		}
 
 		RemovedMemberReaders.Result result;
@@ -370,7 +371,7 @@ final class RemovedMemberScanner {
 	private static void collectClassFiles(Path root, Map<String, byte[]> into) {
 		if (!Files.isDirectory(root)) return;
 		try (var walk = Files.walk(root)) {
-			for (Path p : walk.filter(Files::isRegularFile).toList()) {
+			for (Path p : walk.filter(Files::isRegularFile).collect(Collectors.toUnmodifiableList())) {
 				if (into.size() > MAX_READER_SCAN_CLASSES) {
 					warn("[LAYOUT-READERS] class file cap (" + MAX_READER_SCAN_CLASSES
 					     + ") reached under " + root + "; reader scan may be incomplete.");
@@ -417,7 +418,7 @@ final class RemovedMemberScanner {
 		};
 		inst.addTransformer(capture, true);
 		try {
-			RemoldAgent.enterInternalRetransform(new LinkedHashSet<>(classes.stream().map(Class::getName).toList()));
+			RemoldAgent.enterInternalRetransform(new LinkedHashSet<>(classes.stream().map(Class::getName).collect(Collectors.toUnmodifiableList())));
 			try {
 				inst.retransformClasses(targets);
 			} finally {

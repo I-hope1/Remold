@@ -288,7 +288,7 @@ final class BatchLayoutCoordinator {
 	 * 回滚事务"。</p>
 	 *
 	 * <p>候选宿主 = 本批里出现的局部类（{@code EnclosingMethod.owner}）。对每个候选宿主，旧侧扫
-	 * {@link #loadedClassesMap} 中其 {@code host$...} 已加载家族；新旧两侧交给纯函数按
+	 * {@link RemoldAgent#loadedClassesMap} 中其 {@code host$...} 已加载家族；新旧两侧交给纯函数按
 	 * {@code (宿主, 简单名)} 归并，任一侧同名计数 ≥2 即命中。{@code reject} 时把宿主及其
 	 * {@code host$...} 整族移出本批。</p>
 	 */

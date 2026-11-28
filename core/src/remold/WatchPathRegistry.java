@@ -47,7 +47,7 @@ final class WatchPathRegistry {
 	/** 来源分槽映射表：sourceId -> 该来源下的待监控 Jar 集合 */
 	private static final Map<String, Set<Path>> watchJarSources = new ConcurrentHashMap<>();
 
-	/** 只读视图：供 {@link RemoldAgent#isProjectLocation} 判定"这个 CodeSource 是否属于工程自身"。 */
+	/** 只读视图：供 {@link RemoldAgentBootstrap#isProjectLocation} 判定"这个 CodeSource 是否属于工程自身"。 */
 	static Map<String, Set<Path>> dirSources() {
 		return watchDirSources;
 	}

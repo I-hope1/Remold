@@ -38,16 +38,16 @@ public class ProfilerTransformer implements ClassFileTransformer {
 			return set.isEmpty() ? null : set;
 		});
 	}
-	public static boolean hasTargetMethod(Class<?> clazz, String n) {
-		Set<String> set = targetMethods.get(ClassIdentity.canonicalize(clazz));
-		return set != null && set.contains(n);
-	}
-
 	/**
 	 * A shadow Class object (JBR rewrite of a static-field Class reference) has the same name and
 	 * loader as the canonical one but is a different reference. Match it by name+loader so a
 	 * stale key cannot silently disable profiling.
 	 */
+	public static boolean hasTargetMethod(Class<?> clazz, String n) {
+		Set<String> set = targetMethods.get(ClassIdentity.canonicalize(clazz));
+		return set != null && set.contains(n);
+	}
+
 	/**
 	 * Forensic dump for the ClassFormatError investigation (opt-in):
 	 * {@code -Dremold.profiler.dump.dir=<dir>} writes in/out bytes and logs duplicate members.

@@ -32,7 +32,7 @@ import java.util.Set;
  *
  * <h2>为什么枚举"已登记子类型"就够</h2>
  * <p>子类要产生存活实例，必先被加载；类的加载必然经过 agent 的 transform 并登记进继承图
- * （见 {@link AnnotationTransformer.HierarchyTree#knownSubtypes(String, ClassLoader)}）。
+ * （见 {@link remold.AnnotationTransformer.HierarchyTree#knownSubtypes(String, ClassLoader)}）。
  * 因此<b>没有登记 ⇒ 不可能有该子类的存活实例</b>。未加载的第三方向子类即便存在，也不会有实例被
  * 本轮补丁看到，不构成覆盖风险。</p>
  *

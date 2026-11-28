@@ -11,7 +11,6 @@ import remold.vcs.ChangesetLog;
 import remold.vcs.GenerationalFieldLedger;
 import remold.vcs.GenerationalReplayGate;
 import remold.vcs.ScopeVerdicts;
-import remold.util.ClassIdentity;
 import remold.util.LibTool;
 import remold.util.Names;
 import org.objectweb.asm.*;
@@ -21,16 +20,15 @@ import org.objectweb.asm.tree.analysis.Frame;
 
 import java.lang.instrument.ClassDefinition;
 import java.lang.invoke.*;
-import java.lang.invoke.MethodHandles.Lookup;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Array;
-import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.BiConsumer;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 import static remold.RemoldAgent.log;
 
@@ -304,7 +302,7 @@ public class InitFix {
 	 * <p>{@code other} 是兜底项，**不应当出现**：出现即说明归因没做完，探针框架会把它当失败处理。要新增原因，
 	 * 必须同时更新本集合与 {@code TypeChangedFieldLogFormatTest} 的断言。</p>
 	 */
-	public static final java.util.Set<String> TYPE_CHANGED_REASONS = java.util.Set.of(
+	public static final Set<String> TYPE_CHANGED_REASONS = Set.of(
 		"none", "ctor-param-assign", "no-initializer", "later-gate", "type-unchanged", "key-mismatch",
 		"reinit-owned", "other");
 
@@ -328,7 +326,7 @@ public class InitFix {
 		}
 	}
 
-	/** 只读视图：当前台账里该宿主的未决字段（测试与诊断用）。 */
+	//region 同批字节视图：离线分析期可见，批末清空
 	/** Install the transient same-batch bytecode view used by offline analysis. */
 	public static void beginBatchBytecodeView(Map<ClassLoader, Map<String, byte[]>> byLoader) {
 		Map<ClassLoader, Map<String, byte[]>> copy = new IdentityHashMap<>();
@@ -365,6 +363,7 @@ public class InitFix {
 		clearExtraBatchBytes();
 		WorkspaceRawIndex.endBatch();
 	}
+	//endregion
 
 	/** Replace the provisional layout-gate view with the definitions that can actually be installed. */
 	public static void setBatchDefinitions(List<ClassDefinition> definitions) {
@@ -403,7 +402,7 @@ public class InitFix {
 		List<BatchInput> inputs = allInputs.stream().filter(input -> {
 			Map<String, byte[]> bytes = context.bytesByLoader().get(input.host().getClassLoader());
 			return bytes != null && bytes.containsKey(input.host().getName());
-		}).toList();
+		}).collect(Collectors.toUnmodifiableList());
 		Map<String, Set<String>> candidates = new LinkedHashMap<>(context.candidateFields());
 		for (BatchInput input : allInputs) {
 			ClassDiff diff = input.diff();
@@ -496,15 +495,15 @@ public class InitFix {
 	 */
 	public static void registerBatchClassBytes(ClassLoader loader, Map<String, byte[]> classes) {
 		if (loader == null || classes == null || classes.isEmpty()) return;
-		Map<String, byte[]> extra = EXTRA_BYTES.computeIfAbsent(loader, ignored -> new java.util.LinkedHashMap<>());
-		for (Map.Entry<String, byte[]> e : classes.entrySet()) {
+		Map<String, byte[]> extra = EXTRA_BYTES.computeIfAbsent(loader, ignored -> new LinkedHashMap<>());
+		for (var e : classes.entrySet()) {
 			if (e.getKey() != null && e.getValue() != null) extra.put(Names.external(e.getKey()), e.getValue());
 		}
 		BatchContext context = BATCH_CONTEXT.get();
 		if (context == null) return;
 		Map<String, byte[]> bytes = context.bytesByLoader()
 		 .computeIfAbsent(loader, ignored -> new LinkedHashMap<>());
-		for (Map.Entry<String, byte[]> e : classes.entrySet()) {
+		for (var e : classes.entrySet()) {
 			if (e.getKey() == null || e.getValue() == null) continue;
 			bytes.put(Names.external(e.getKey()), e.getValue());
 		}
@@ -516,8 +515,8 @@ public class InitFix {
 	 *
 	 * <p>键弱引用加载器；值只放 {@code byte[]}，不反向持 {@code Class}。</p>
 	 */
-	private static final java.util.Map<ClassLoader, java.util.Map<String, byte[]>> EXTRA_BYTES =
-	 java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+	private static final Map<ClassLoader, Map<String, byte[]>> EXTRA_BYTES =
+	 Collections.synchronizedMap(new WeakHashMap<>());
 
 	/** 一批开始时清空旁路字节表；调用点必须在**对齐/注入之前**。 */
 	public static void clearExtraBatchBytes() {
@@ -572,6 +571,7 @@ public class InitFix {
 		return context.candidateFields().getOrDefault(batchHostKey(context, hostName, loader), Set.of());
 	}
 
+	/** 只读视图：当前台账里该宿主的未决字段（测试与诊断用）。 */
 	public static Set<UnpatchedField> getUnpatchedFields(Class<?> host) {
 		if (host == null) return Set.of();
 		synchronized (LEDGER) {
@@ -624,7 +624,7 @@ public class InitFix {
 		}
 	}
 
-	// ==================== @RemoldReinit 已应用记录（docs/initfix/03-runtime-driver.md §4） ====================
+	//region @RemoldReinit 已应用记录（docs/initfix/03-runtime-driver.md §4）
 
 	private static String reinitAppliedGet(Class<?> host, String fieldName) {
 		synchronized (REINIT_APPLIED) {
@@ -820,6 +820,7 @@ public class InitFix {
 		 ? "unchanged-initializer (skipped)"
 		 : "initializer-changed";
 	}
+	//endregion
 
 	/**
 	 * 封闭表达式判定：切片是否只由常量、算术、类型转换、栈操作与最终的那条写指令构成。
@@ -1159,11 +1160,9 @@ public class InitFix {
 	 * 已装配、等待重定义生效后执行的补丁。
 	 *
 	 * <p><b>不持有实例快照</b>：存活实例在 {@code applyPatch} 里、重定义生效<b>之后</b>才枚举。
-	 * 早期版本在 {@code transform}/{@code beforeRedefine} 阶段先拍快照，快照完成到重定义生效之间
-	 * 新建的实例永远进不了快照，其新增字段永久停在类型默认值（{@code docs/status.md} 风险 6）。
-	 * 重定义之后枚举则天然完备：此后不可能再产生旧布局的实例，而新实例由新构造器初始化。</p>
-	 */
-	/**
+	 * 若在重定义生效前拍快照，快照完成到生效之间新建的实例会漏掉，其新增字段永久停在类型默认值
+	 * （{@code docs/status.md} 风险 6）。重定义之后枚举天然完备：此后不可能再产生旧布局的实例，
+	 * 而新实例由新构造器初始化。</p>
 	 * @param replayOwners L1 重放字段 -> 事实所属类（内部名）。L1 写的是<b>继承</b>字段，事实与台账键都在
 	 *                     声明类上，运行期记账（CAS 未命中 / OVERWRITE 闭环）必须用同一个键。
 	 */
@@ -1204,7 +1203,7 @@ public class InitFix {
 	 * 停在类型零值 —— 对 Kotlin 的非空 {@code val} 就是"声明非空却读到 null"，NPE 会出现在离热更
 	 * 很远的地方。因此调用方必须把这类类整批拒绝并提示重启，而不是只补一半。</p>
 	 *
-	 * <p>只认 {@link InitFixSafetyGate#UNEXPRESSIBLE_INIT_PREFIX} 这一族：初值来自构造器参数、
+	 * <p>只认 {@link InitFix#UNEXPRESSIBLE_INIT_PREFIX} 这一族：初值来自构造器参数、
 	 * 或压根没写初值的字段不在此列（默认零值本来就是源码语义）。</p>
 	 *
 	 * @param host 已加载宿主类
@@ -1427,33 +1426,10 @@ public class InitFix {
 	}
 
 	/**
-	 * 本轮补丁是否要求"重定义生效 → 补丁完成"之间不能有新方法体上线（两阶段读穿保护，
-	 * {@code docs/initfix/04-target-design.md} §1）。
-	 *
-	 * <p>判据认两类任务：</p>
-	 * <ol>
-	 *   <li><b>新增/类型变更字段</b>：补丁前处于类型默认值（{@code null}/{@code 0}），新方法体读到会 NPE
-	 *       或静默读零；</li>
-	 *   <li><b>既有静态字段的重写</b>（{@code @RemoldReinit} / 重放写任务，且不是 {@code ConstantValue}
-	 *       编译期字面量常量）：补丁写内存不会通知 JIT，单阶段下窗口期内重编译的读者可能一直读旧值；
-	 *       阶段 C 的第二次 redefine 作为补丁后的 deopt 屏障。实测见
-	 *       {@code tests/static-rewrite-probe}。</li>
-	 * </ol>
-	 * <p>实例字段的既有值重写（{@code @RemoldReinit} 实例字段 / L1 实例重放）默认值是旧值而不是零值，
-	 * 不构成读穿，跟随单阶段路径即可；A 档 apply 重放写入的是<b>另一个类型</b>的字段，宿主阶段 C 的
-	 * deopt 覆盖不到那个类型，故不纳入本判据。</p>
-	 */
-	/**
-	 * 记录一档重放事实（{@code docs/vcs/01-bytecode-changeset-vcs.md} §3.8）。
-	 *
-	 * <p>只在批次分析期内累积：事实来自纯函数计划，不依赖运行期写回结果。字面量按描述符定型，
-	 * {@code float}/{@code double} 存原始位模式而不是十进制近似。</p>
-	 */
-	/**
 	 * 该键的代际事实是否被窗口裁剪过（{@code docs/vcs/07} L5）。
 	 *
 	 * <p>裁剪之后 {@code resolve} 可能返回 {@code MISS_NO_FACT}，而它的语义是"索引里没有证据"。
-	 * 若真相是"曾经有、被裁掉了"，继续按 OBLIVIOUS 放行就是把遗忘当成从未发生。</p>
+	 * 若真相是"事实存在但已被裁掉"，继续按 OBLIVIOUS 放行就是把遗忘当成从未发生。</p>
 	 */
 	private static boolean prunedFromLedger(ClassLoader loader, String className, String field) {
 		if (className == null || field == null) return false;
@@ -1468,6 +1444,12 @@ public class InitFix {
 		}
 	}
 
+	/**
+	 * 记录一档重放事实（{@code docs/vcs/01-bytecode-changeset-vcs.md} §3.8）。
+	 *
+	 * <p>只在批次分析期内累积：事实来自纯函数计划，不依赖运行期写回结果。字面量按描述符定型，
+	 * {@code float}/{@code double} 存原始位模式而不是十进制近似。</p>
+	 */
 	private static void captureReplayFacts(Class<?> host,
 	                                       Map<String, InitializerReplay.ReplayField> l1,
 	                                       Map<String, ApplyInitializerReplay.ReplayField> apply) {
@@ -1583,23 +1565,6 @@ public class InitFix {
 	}
 
 	/**
-	 * 把 {@link GenerationalFieldLedger#resolve} 接进重放决策（
-	 * {@code docs/vcs/05-generational-field-ledger.md} §3.3 / A14 / G6～G8）。
-	 *
-	 * <p><b>为什么要接</b>：L1 与 A 档的 {@code KIND_CONDITIONAL_EXPECTED} 期望值原本取自当轮
-	 * {@code ClassDiff} 的旧初值。一旦发生过回退，那份 {@code ClassDiff} 描述的是"回退后 JVM 在跑的
-	 * 字节"，而堆上的值可能是<b>被回退掉的污染代</b>写入的——用当轮旧初值做期望，会把污染代的写入值
-	 * 当成"已经是目标代的值"，回退在堆侧静默 no-op。代际台账给出的 {@code (oldLiteral, newLiteral)}
-	 * 一对才是可校验的期望与写入值（§3.3 / D12）。</p>
-	 *
-	 * <p><b>三种结论</b>：{@code OBLIVIOUS} 不动（索引里没有这条键的代际证据，沿用当轮 {@code ClassDiff}，
-	 * 与引入代际对账前逐字节一致）；{@code FACT} 记一条 {@link GenerationalReplay}，发射时改写期望与写入值；
-	 * {@code REFUSED} 把该字段从重放候选里摘掉、记 {@code rejected:} 决策（走既有 warn 出口）、并把债务
-	 * 落到 {@link GenerationalFieldLedger#markUnclosed}（<b>不</b>碰瞬时补丁槽 {@link #PENDING}）。</p>
-	 *
-	 * @return {@code L1:/A: + key} -> 事实带出的期望与写入常量（只有 {@code FACT} 才有条目）
-	 */
-	/**
 	 * 该键是否存在"确实写进堆"的记录（{@code OVERWRITE} / 恢复写入）。
 	 *
 	 * <p>判据只有一类可信来源：调用方在真正写出之后落的 {@code REINIT_APPLIED} 行。没写过就说明
@@ -1616,6 +1581,23 @@ public class InitFix {
 		return false;
 	}
 
+	/**
+	 * 把 {@link GenerationalFieldLedger#resolve} 接进重放决策（
+	 * {@code docs/vcs/05-generational-field-ledger.md} §3.3 / A14 / G6～G8）。
+	 *
+	 * <p><b>为什么要接</b>：L1 与 A 档的 {@code KIND_CONDITIONAL_EXPECTED} 期望值原本取自当轮
+	 * {@code ClassDiff} 的旧初值。一旦发生过回退，那份 {@code ClassDiff} 描述的是"回退后 JVM 在跑的
+	 * 字节"，而堆上的值可能是<b>被回退掉的污染代</b>写入的——用当轮旧初值做期望，会把污染代的写入值
+	 * 当成"已经是目标代的值"，回退在堆侧静默 no-op。代际台账给出的 {@code (oldLiteral, newLiteral)}
+	 * 一对才是可校验的期望与写入值（§3.3 / D12）。</p>
+	 *
+	 * <p><b>三种结论</b>：{@code OBLIVIOUS} 不动（索引里没有这条键的代际证据，沿用当轮 {@code ClassDiff}，
+	 * 与引入代际对账前逐字节一致）；{@code FACT} 记一条 {@link GenerationalReplay}，发射时改写期望与写入值；
+	 * {@code REFUSED} 把该字段从重放候选里摘掉、记 {@code rejected:} 决策（走既有 warn 出口）、并把债务
+	 * 落到 {@link GenerationalFieldLedger#markUnclosed}（<b>不</b>碰瞬时补丁槽 {@link #PENDING}）。</p>
+	 *
+	 * @return {@code L1:/A: + key} -> 事实带出的期望与写入常量（只有 {@code FACT} 才有条目）
+	 */
 	private static Map<String, GenerationalReplay> gateGenerationalReplay(
 	 Class<?> host, String className,
 	 Map<String, InitializerReplay.ReplayField> replayFields,
@@ -1651,7 +1633,7 @@ public class InitFix {
 			if (!revertContext && GenerationalFieldLedger.INSTANCE.isUnclosed(loader, owner, replay.name())
 			    && !hasAppliedWrite(loader, owner, replay.name(), resolved.fromGeneration())) {
 				// 欠债且<b>待对账那一代</b>没有确认写入：那条 ReplayFact 只是理论初值（§4-R3），
-				// 它的 newLiteral 从没进过堆。判据必须落在"该代"，不能是"历史上曾经写过任何一代"——
+				// 它的 newLiteral 从没进过堆。判据必须落在"该代"，不能是"任何一代有写入记录"——
 				// 否则回退保留的旧代 written 记录会给一条未写成的事实背书。
 				refuseGenerationalReplay(loader, owner, replay.name());
 				replayFields.remove(field);
@@ -1838,7 +1820,7 @@ public class InitFix {
 		}
 		List<String> ordered = InitFixBatchGraph.graph(edges).topologicalHosts(byKey.keySet());
 		if (ordered.isEmpty() && !byKey.isEmpty()) return List.copyOf(hosts);
-		return ordered.stream().map(byKey::get).filter(Objects::nonNull).toList();
+		return ordered.stream().map(byKey::get).filter(Objects::nonNull).collect(Collectors.toUnmodifiableList());
 	}
 
 	static String batchHostKeyCurrent(Class<?> host) {
@@ -1846,6 +1828,23 @@ public class InitFix {
 		return context == null ? host.getName() : batchHostKey(context, host);
 	}
 
+	/**
+	 * 本轮补丁是否要求"重定义生效 → 补丁完成"之间不能有新方法体上线（两阶段读穿保护，
+	 * {@code docs/initfix/04-target-design.md} §1）。
+	 *
+	 * <p>判据认两类任务：</p>
+	 * <ol>
+	 *   <li><b>新增/类型变更字段</b>：补丁前处于类型默认值（{@code null}/{@code 0}），新方法体读到会 NPE
+	 *       或静默读零；</li>
+	 *   <li><b>既有静态字段的重写</b>（{@code @RemoldReinit} / 重放写任务，且不是 {@code ConstantValue}
+	 *       编译期字面量常量）：补丁写内存不会通知 JIT，单阶段下窗口期内重编译的读者可能一直读旧值；
+	 *       阶段 C 的第二次 redefine 作为补丁后的 deopt 屏障。实测见
+	 *       {@code tests/static-rewrite-probe}。</li>
+	 * </ol>
+	 * <p>实例字段的既有值重写（{@code @RemoldReinit} 实例字段 / L1 实例重放）默认值是旧值而不是零值，
+	 * 不构成读穿，跟随单阶段路径即可；A 档 apply 重放写入的是<b>另一个类型</b>的字段，宿主阶段 C 的
+	 * deopt 覆盖不到那个类型，故不纳入本判据。</p>
+	 */
 	public static boolean requiresTwoPhase(Class<?> host) {
 		return requiresTwoPhase(host, true);
 	}
@@ -2771,7 +2770,7 @@ public class InitFix {
 
 		List<MethodNode> initMethods = newClass.methods.stream()
 		 .filter(m -> "<init>".equals(m.name))
-		 .toList();
+		 .collect(Collectors.toUnmodifiableList());
 		MethodNode clinitMethod = newClass.methods.stream()
 		 .filter(m -> "<clinit>".equals(m.name) && "()V".equals(m.desc))
 		 .findFirst().orElse(null);
@@ -2791,7 +2790,7 @@ public class InitFix {
 		HierarchyTreeOracle oracle = new HierarchyTreeOracle(host == null ? null : host.getClassLoader(), newClass);
 		InitFixSafetyGate.NestView nest = InitFixSafetyGate.NestView.of(host, newClass, oracle);
 
-		// ==================== docs/initfix/03-runtime-driver.md §4 存量重置扩展：候选集 ====================
+		//region docs/initfix/03-runtime-driver.md §4 存量重置扩展：候选集
 		// 默认只处理新增字段；标了 @RemoldReinit 的已有字段按显式声明进入候选集。
 		Map<String, ReinitField> reinitFields         = preScannedReinit != null ? preScannedReinit : scanReinitFields(newClass);
 		captureReinitFacts(host, reinitFields);
@@ -2894,7 +2893,8 @@ public class InitFix {
 			    + " re-entered the candidate set: " + pendingLedger.keySet());
 		}
 
-		// ==================== 实例字段提取 ====================
+		//endregion
+		//region 实例字段提取
 		Map<String, List<FieldExtract>> instanceExtracts   = new LinkedHashMap<>();
 		Set<String>                     selfAssignedFields = new HashSet<>();
 		Map<String, String>             instanceReasons    = new LinkedHashMap<>();
@@ -2930,7 +2930,8 @@ public class InitFix {
 			instanceExtractFields, privateMethods, nest, oracle,
 			instanceExtracts, selfAssignedFields, instanceReasons);
 
-		// ==================== 静态字段提取 ====================
+		//endregion
+		//region 静态字段提取
 		Map<String, List<FieldExtract>> staticExtracts = new LinkedHashMap<>();
 		Map<String, String>             staticReasons  = new LinkedHashMap<>();
 		Set<String> staticExtractFields = new LinkedHashSet<>(targetStaticFields);
@@ -2966,7 +2967,8 @@ public class InitFix {
 		List<MethodNode> staticScanMethods = new ArrayList<>(initMethods);
 		if (clinitMethod != null) staticScanMethods.add(clinitMethod);
 
-		// ==================== L1：存量初值重放的补丁前校验 ====================
+		//endregion
+		//region L1：存量初值重放的补丁前校验
 		// 计划阶段只确认"旧/新初值都是常量"；这里再让正式提取器过一遍，确认写入切片确实
 		// 是自包含的常量表达式、且每个根构造器都覆盖。失败的不进补丁、也不写台账（L1 是尽力重放）。
 		Set<String>         acceptedReplay  = new LinkedHashSet<>();
@@ -2983,7 +2985,8 @@ public class InitFix {
 			}
 		}
 
-		// ==================== 阶段 0.4：@RemoldReinit 初值指纹（docs/initfix/03-runtime-driver.md §4） ====================
+		//endregion
+		//region 阶段 0.4：@RemoldReinit 初值指纹（docs/initfix/03-runtime-driver.md §4）
 		// 只对"封闭表达式"建指纹：它的值完全由自身字节码决定，字节码没变就等于值没变。
 		// 开放表达式（跨类调用、他类静态字段……）这里拿不到 key —— 它们的值可能被外部改动带走，
 		// 指纹相同也不能据此跳过，否则会静默留下过期值。
@@ -2996,7 +2999,8 @@ public class InitFix {
 			if (key != null) reinitKeys.put(f, key);
 		}
 
-		// ==================== 阶段 0.5：T0 零值等价过滤（docs/initfix/01-safety-gate.md §1） ====================
+		//endregion
+		//region 阶段 0.5：T0 零值等价过滤（docs/initfix/01-safety-gate.md §1）
 		// 显式 = null / = 0 / = false、仅声明未赋值、以及 static ConstantValue 按位为零的字段，
 		// 存量实例与静态环境本来就是默认值：零开销放行，不生成补丁（也不会生成恒等 CAS 写）。
 		// 浮点按位判定，-0.0f / -0.0d / NaN 的位模式非零，不算零值等价。
@@ -3038,7 +3042,8 @@ public class InitFix {
 			    + ": instance=" + zeroInstanceFields + ", static=" + zeroStaticFields);
 		}
 
-		// ==================== 阶段 0.6：@RemoldReinit 触发判定（docs/initfix/03-runtime-driver.md §4） ====================
+		//endregion
+		//region 阶段 0.6：@RemoldReinit 触发判定（docs/initfix/03-runtime-driver.md §4）
 		// 注解字段每轮都被拉进候选集（它永远不会再出现在 Diff 里）。若它的初值表达式一个字都没变，
 		// 且表达式封闭（值只由自身字节码决定），这一轮重置唯一的效果就是把运行期改过的值打回去 ——
 		// 只改了个方法体的热更不该动数据，跳过。
@@ -3074,7 +3079,8 @@ public class InitFix {
 				+ "instance=" + unchangedInstance + ", static=" + unchangedStatic);
 		}
 
-		// ==================== 阶段 1：单字段判定（实例） ====================
+		//endregion
+		//region 阶段 1：单字段判定（实例）
 		// 先把所有待处理字段标记为拒绝；有 extract 的会在此后覆盖为 ACCEPTED 或被具体原因拒绝。
 		// 这样即便某字段在 extractFieldInits 里就被拒（不进 instanceExtracts），
 		// PatchReport 里依然有它的一条决策记录，且原因是提取期记录下来的真实原因。
@@ -3130,7 +3136,8 @@ public class InitFix {
 			}
 		}
 
-		// ==================== 静态字段：增强重定义能力门禁 ====================
+		//endregion
+		//region 静态字段：增强重定义能力门禁
 		// 既有 static final 字段（运行期初始化、非 ConstantValue）的读者可能已把值折叠进机器码。
 		// 标准 HotSpot 上重定义宿主只失效宿主自身的已编译方法，补丁写内存后跨类读者仍读旧值；
 		// 增强重定义的阶段 C 才是这类读者的 deopt 屏障。没有该能力时逐字段失败关闭（不是整类拒绝），
@@ -3144,8 +3151,8 @@ public class InitFix {
 				    + " is not rewritten without enhanced class redefinition");
 			}
 		}
-
-		// ==================== 静态字段：接受 clinit 的提取结果 ====================
+		//endregion
+		//region 静态字段：接受 clinit 的提取结果
 		// 同上：先全部标记拒绝（带提取期记录的真实原因），再让 extract 命中的字段覆盖。
 		Map<String, FieldDecision> staticDecisions = new LinkedHashMap<>();
 		for (String f : targetStaticFields) {
@@ -3167,6 +3174,8 @@ public class InitFix {
 			staticDecisions.put(f, FieldDecision.ACCEPTED);
 		}
 
+		//endregion
+		//region 值类型重放拒绝映射
 		// 值类型重放的拒绝：进入对应的 instance/static 决策表，由统一的 warn 出口发英文告警
 		// （docs/initfix/14 §6 判决码）；同时进 PatchReport.valueReplayFields（见 makeReport）。
 		for (Map.Entry<String, ValueTypeReplay.Reason> entry : valueReplay.rejected().entrySet()) {
@@ -3181,8 +3190,8 @@ public class InitFix {
 				instanceDecisions.putIfAbsent(field, rejected);
 			}
 		}
-
-		// ==================== 阶段 1.5 + 阶段 2：闭包迭代 ====================
+		//endregion
+		//region 阶段 1.5 + 阶段 2：闭包迭代
 		// 依赖门禁的判定基准：候选集减去 T0 零值等价字段。
 		// 零值字段的存量值本来就是该类型的默认值，补丁不生成也"已经是对的"，
 		// 因此它不构成"读到未补的新字段"—— 若不排除，a = f(b)（b = 0）会被误杀：
@@ -3329,7 +3338,7 @@ public class InitFix {
 				}
 			}
 
-			// ==================== 阶段 2.6：出口后置闭合校验（主防线） ====================
+			//region 阶段 2.6：出口后置闭合校验（主防线）
 			// 不依赖前面的顺序是否正确：最终放行的集合必须对依赖闭合 ——
 			// 每个放行字段读到的"本轮受补字段"都必须在放行集合内（T0 零值字段除外）。
 			// 它同时覆盖 docs/initfix/02-closure-and-ledger.md §1（成环后依赖方不重判）与 docs/initfix/03-runtime-driver.md §2（静态依赖边缺失）以及将来
@@ -3351,6 +3360,7 @@ public class InitFix {
 				acceptedInstance.clear();
 				acceptedStatic.clear();
 			}
+			//endregion
 		};
 		close.run();
 		return new PatchAnalysis(instanceDecisions, staticDecisions, crossDependencies, (field, reason) -> {
@@ -3361,6 +3371,7 @@ public class InitFix {
 		 acceptedInstance, acceptedStatic, acceptedReplay, replayFields, replayDecisions, applyFields,
 		 applyDecisions, reinitFields, reinitKeys, crossDependencies, generational, shadowAncestors,
 		 valueReplay));
+		//endregion
 	}
 
 	private static BuiltPatch emitPatch(Class<?> host, String className, int hostVersion,
@@ -3374,7 +3385,7 @@ public class InitFix {
 	 Map<String, Set<InitFixBatchGraph.FieldKey>> crossDependencies,
 	 Map<String, GenerationalReplay> generational, Map<String, String> shadowAncestors,
 	 ValueReplayRound valueReplay) {
-		// ==================== 阶段 2.5：拓扑排序 ====================
+		//region 阶段 2.5：拓扑排序
 		// 到这里成环已被排除（阶段 2 的固定点），排序必定成功。
 		List<String> orderedInstance = acceptedInstance.isEmpty()
 		 ? List.of()
@@ -3401,7 +3412,8 @@ public class InitFix {
 			orderedStatic = List.of();
 		}
 
-		// ==================== 阶段 3：逐字段发射（docs/initfix/03-runtime-driver.md §1 每字段独立静态方法） ====================
+		//endregion
+		//region 阶段 3：逐字段发射（docs/initfix/03-runtime-driver.md §1 每字段独立静态方法）
 		// 每个放行字段单独一个静态直线方法：一行抛异常只影响该字段，不会像"单方法承载全部
 		// 字段"那样跳过其后所有字段（docs/initfix/03-runtime-driver.md §2 的驱动依赖这一点做失败隔离）。
 		String      hostInternal      = Type.getInternalName(host);
@@ -3590,10 +3602,11 @@ public class InitFix {
 		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
 		patch.accept(cw);
 		return new BuiltPatch(cw.toByteArray(), plan, report, replayOwners);
+		//endregion
 	}
 
 	/**
-	 * 组装 {@link PatchReport}：L1/A 档重放字段不进 {@link #instanceFields}（否则会被台账/告警当成
+	 * 组装 {@link PatchReport}：L1/A 档重放字段不进 {@link PatchReport#instanceFields}（否则会被台账/告警当成
 	 * "本应补但没补"），也不改变"默认补丁是否生成"的语义。
 	 */
 	private static PatchReport makeReport(
@@ -4056,7 +4069,7 @@ public class InitFix {
 		return deps;
 	}
 
-	// ==================== 拓扑排序 ====================
+	//region 拓扑排序
 
 	/**
 	 * 对一组已放行字段做拓扑排序，保证被依赖字段先执行。
@@ -4222,9 +4235,7 @@ public class InitFix {
 	 *
 	 * <p>判定基准 = {@code depInstance ∪ depStatic} 再扣掉 T0 零值字段：零值字段存量值
 	 * 本来就是默认值，读它不算读"未补的值"。<b>必须是并集</b> —— 只传实例侧会把切片里的
-	 * GETSTATIC 整个漏掉，而"实例字段读静态字段"恰恰是跨组漏网的主要形态：
-	 * 曾经只传 {@code depInstance}，导致这道校验对它的目标场景完全失明
-	 * （已由"关闭闭包传播"的安全探针实测暴露）。</p>
+	 * GETSTATIC 整个漏掉，而"实例字段读静态字段"恰恰是跨组漏网的主要形态。</p>
 	 * @return 违规描述；闭合则返回 {@code null}
 	 */
 	private static String closureViolation(
@@ -4277,8 +4288,9 @@ public class InitFix {
 		order.add(f);
 		return true;
 	}
+	//endregion
 
-	// ==================== docs/initfix/03-runtime-driver.md §4 存量重置扩展：注解扫描 ====================
+	//region docs/initfix/03-runtime-driver.md §4 存量重置扩展：注解扫描
 
 	/**
 	 * 扫描带 {@code @RemoldReinit} 的字段，解析其写入协议与实例作用域。
@@ -4374,7 +4386,7 @@ public class InitFix {
 	 *
 	 * <p>用途是 {@link #transform} 的快速路径：没有任何新增字段时它本来会直接返回，
 	 * 但"改了已有字段初值 + 标注解"恰恰是没有任何新增字段的形态，必须放行到
-	 * {@link #buildPatch}。这里跳过全部方法字节码，只读字段表与注解。</p>
+	 * {@link #analyzePatch}。这里跳过全部方法字节码，只读字段表与注解。</p>
 	 */
 	private static boolean hasReinitAnnotation(byte[] bytes) {
 		final boolean[] found = {false};
@@ -4419,9 +4431,9 @@ public class InitFix {
 	 * 决策按原因聚合后逐条 {@code warn}。
 	 *
 	 * <p>存在的理由：提取期的拒绝本来就发 warn（{@code extractFieldInits}），但闭包阶段
-	 * 的拒绝（后续加工、依赖、成环、根构造器覆盖不全、指纹不一致）历史上只调
-	 * {@code log(...)} —— 而 {@code log} 是 {@code DEBUG} 门控的，默认环境<b>什么都不打印</b>。
-	 * 于是同一种"拒绝补丁"的结论，两个阶段对用户的可见性完全不同。</p>
+	 * 的拒绝（后续加工、依赖、成环、根构造器覆盖不全、指纹不一致）若只调 {@code log(...)}，
+	 * 而 {@code log} 是 {@code DEBUG} 门控的，默认环境<b>什么都不打印</b>；同一种"拒绝补丁"
+	 * 的结论，两个阶段对用户的可见性就完全不同。</p>
 	 *
 	 * <p>把出口收敛到一处后，"哪些拒绝该吵醒用户"不再依赖各阶段各自的日志级别；
 	 * 每条原因只发一条 warn，同一原因下多个字段合并列出，避免逐字段刷屏。</p>
@@ -4465,9 +4477,9 @@ public class InitFix {
 			ledgerRemove(host, fieldName);
 		}
 	}
+	//endregion
 
-
-	// ==================== 后续加工检查 ====================
+	//region 后续加工检查
 
 	private static String subsequentProcessingReason(
 	 String fieldName,
@@ -4526,8 +4538,9 @@ public class InitFix {
 		}
 		return null;
 	}
+	//endregion
 
-	// ==================== docs/initfix/03-runtime-driver.md §4 注解豁免的告警 ====================
+	//region docs/initfix/03-runtime-driver.md §4 注解豁免的告警
 
 	/**
 	 * {@code @RemoldReinit} 豁免了"构造器里用过该字段"这条门时，把风险显式喊出来。
@@ -4573,8 +4586,9 @@ public class InitFix {
 		}
 		return sb.toString();
 	}
+	//endregion
 
-	// ==================== 依赖闭包 ====================
+	//region 依赖闭包
 
 	private static String depReason(
 	 String self,
@@ -4615,8 +4629,9 @@ public class InitFix {
 		}
 		return null;
 	}
+	//endregion
 
-	// ==================== 指令指纹 ====================
+	//region 指令指纹
 
 	private static String fingerprint(List<AbstractInsnNode> insns) {
 		StringBuilder sb = new StringBuilder();
@@ -4792,5 +4807,6 @@ public class InitFix {
 	public static boolean isInitialized(Class<?> clazz) {
 		return InitFixRuntimeDriver.isInitialized(clazz);
 	}
+	//endregion
 
 }

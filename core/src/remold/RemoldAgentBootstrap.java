@@ -146,7 +146,7 @@ final class RemoldAgentBootstrap {
 	 * 若 paths 为空，则移除该来源对应的监控路径。
 	 *
 	 * <p>锁纪律：路径变更会重建监听器并重扫已加载类，必须与热更互斥，因此统一在此持
-	 * {@link #HOTSWAP_LOCK}；分槽记账与聚合见 {@link WatchPathRegistry}。</p>
+	 * {@link RemoldAgent#HOTSWAP_LOCK}；分槽记账与聚合见 {@link WatchPathRegistry}。</p>
 	 *
 	 * @param source 来源标识符（如 "cli", "mod-tools", "runtime" 等）
 	 * @param paths  待监控路径（支持分号或冒号分隔）
@@ -449,7 +449,7 @@ final class RemoldAgentBootstrap {
 	/**
 	 * 构建完成 marker 的配置接线：解析路径并启动/停止专用 watcher。
 	 *
-	 * <p>marker 是<b>叠加</b>的快路径：未配置时只保留 {@link #FILE_SHAKE_MS} 兜底，行为与旧版本一致。
+	 * <p>marker 是<b>叠加</b>的快路径：未配置时只保留 {@link RemoldAgent#FILE_SHAKE_MS} 兜底，行为与旧版本一致。
 	 * watcher 只在 agent 已挂载（{@code inst != null}）时启动，避免单测里 {@code initConfig()}
 	 * 拉起真实文件监听线程。</p>
 	 */

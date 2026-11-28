@@ -4,7 +4,6 @@ import org.objectweb.asm.*;
 import org.objectweb.asm.commons.*;
 import org.objectweb.asm.tree.*;
 import org.objectweb.asm.tree.analysis.*;
-import remold.LambdaAligner.AlignmentEvent;
 import remold.LambdaAligner.MatchContext;
 import remold.LambdaAligner.SyntheticInfo;
 import remold.vcs.DerivedDataCache;
@@ -16,8 +15,23 @@ import java.util.*;
 /**
  * Lambda 对齐字节码转换、消费者数据流分析、匿名类引用扫描与 LVT 形参提取助手（从 {@link LambdaAligner} 拆出）。
  */
+@SuppressWarnings("SequencedCollectionMethodCanBeUsed")
 final class LambdaBytecodeScanner {
 
+	/**
+	 * 捕获表里代表"外层 {@code this}"的占位名。
+	 *
+	 * <p>它不是源码变量名，只用来保证两侧相等。同一个外层 {@code this} 的
+	 * {@code LocalVariableTable} 名字并不统一：javac 写 {@code "this"}，
+	 * {@code forceStaticLambdas} 新加的槽没有条目（{@code null}），kotlinc 写
+	 * {@code "this$0"}。不归一掉这些差异，"任一位缺名字就整体放弃按名映射"会把这些
+	 * lambda 全判成没证据。</p>
+	 *
+	 * <p>名字本身不算证明（{@code this$0} 是合法标识符）。真正的判据在
+	 * {@link #captureNamesOf}：宿主槽号能证明是 {@code aload 0} 压上来的接收者时以槽号为准，
+	 * 名字只在回溯失败时兜底。</p>
+	 */
+	public static final String RECEIVER_NAME = "$this";
 	private LambdaBytecodeScanner() {}
 
 	/**
@@ -509,13 +523,13 @@ final class LambdaBytecodeScanner {
 	}
 
 	/**
-	 * {@link #findConsumers} 的按方法缓存版：命中时按指令下标重建本轮节点映射，未命中走原实现。
+	 * {@link #findConsumers} 的按方法缓存版：命中时按指令下标重建本轮节点映射，未命中时直接重算。
 	 *
 	 * <p>缓存键 = {@code (blob 内容, 方法 name+desc)}：方法维度必须带<b>描述符</b>（同名重载是合法形态，
 	 * 只用名字会互相覆盖），且同一份 blob 里不同方法的标记表完全不同，漏掉维度会让标记整表错位。
 	 * 值里存下标而不是 {@code AbstractInsnNode}：节点是本轮解析出来的可变对象，跨轮持有既会过期也会驻留整棵解析树。</p>
 	 *
-	 * <p>以下情形一律走原实现（不读不写缓存）：方法里没有消费者位点（标记永远不会被读，
+	 * <p>以下情形一律绕开缓存（不读不写）：方法里没有消费者位点（标记永远不会被读，
 	 * 见 {@link #hasConsumerSite}）、缓存已关闭、blob 键不可用、{@link LambdaAligner#ACTIVE_MUTATION} 非空
 	 * ——最后一项是设计级变异测试的钩子，其结果不得跨变异档位复用。</p>
 	 */
@@ -557,7 +571,7 @@ final class LambdaBytecodeScanner {
 	 *
 	 * <p><b>静态方法的首形参可能是被前置的接收者</b>：{@code forceStaticLambdas} 会把实例方法
 	 * 改成静态方法并把 {@code this} 变成显式首形参，而那个槽是<b>新加的、没有 LVT 条目</b>的，
-	 * 读出来是 {@code null}。这里统一记成 {@link #LambdaAligner.RECEIVER_NAME}——否则"任一位缺名字就整体
+	 * 读出来是 {@code null}。这里统一记成 {@link #RECEIVER_NAME}——否则"任一位缺名字就整体
 	 * 放弃按名映射"那条严格判据会把这类 lambda 全部判成没证据。</p>
 	 *
 	 * <p><b>这里只归一 {@code null} 与 {@code "this"}，不碰 {@code "this$0"}</b>：前两者是
@@ -655,15 +669,14 @@ final class LambdaBytecodeScanner {
 
 			@Override
 			public void visitEnd() {
-				// 静态方法的首形参可能是 forceStaticLambdas 前置的接收者：槽是新增的，
-				// 没有 LVT 条目，读出来是 null；若它本来就是实例方法、只是被改成静态，
-				// LVT 里留着 javac 写的 "this"。两者指同一个东西，统一记成 LambdaAligner.RECEIVER_NAME，
-				// 否则同一个 lambda 在两种来源之间切换会因 "this" vs null 对不上而丢掉按名映射。
+				// 静态方法的首形参可能是 forceStaticLambdas 前置的接收者：这个槽是新加的，
+				// LVT 里没有名字；如果只是把实例方法改成静态，LVT 里还是 javac 写的 "this"。
+				// 两种形态都归一成 RECEIVER_NAME，否则同一个 lambda 换来源后按名映射会对不上。
 				// 判据是"类型是本类"而不是"名字为空"——真正的同名局部变量会带自己的名字。
 				if (isStatic && names.length > 0
 				    && (names[0] == null || "this".equals(names[0]))
 				    && isReceiverType(args[0].getDescriptor(), owner)) {
-					names[0] = LambdaAligner.RECEIVER_NAME;
+					names[0] = RECEIVER_NAME;
 				}
 				super.visitEnd();
 			}
@@ -675,8 +688,8 @@ final class LambdaBytecodeScanner {
 	 * 把合成方法的形参名裁成"捕获名"：前 {@code captured - offset} 项即捕获变量
 	 * （实例 lambda 的形参表不含接收者，故 {@code captured[0]} 由这里补上）。
 	 *
-	 * <p>接收者槽一律记作 {@link #LambdaAligner.RECEIVER_NAME}。静态方法里那个"被前置的接收者"有<b>三种</b>
-	 * 字节码来源（见 {@link #LambdaAligner.RECEIVER_NAME}），{@code LocalVariableTable} 各不相同，所以归一
+	 * <p>接收者槽一律记作 {@link #RECEIVER_NAME}。静态方法里那个"被前置的接收者"有<b>三种</b>
+	 * 字节码来源（见 {@link #RECEIVER_NAME}），{@code LocalVariableTable} 各不相同，所以归一
 	 * 分两档：</p>
 	 * <ul>
 	 *   <li><b>结构证据优先</b>：{@code captureSlots[0] == 0} 且宿主是非静态方法，说明这一位
@@ -701,12 +714,12 @@ final class LambdaBytecodeScanner {
 		int n = captured.size() - offset;
 		if (n < 0 || paramNames.length < n) return null;
 		List<String> out = new ArrayList<>(captured.size());
-		if (!isStatic) out.add(LambdaAligner.RECEIVER_NAME);                     // 接收者没有源码名
+		if (!isStatic) out.add(RECEIVER_NAME);  // 接收者没有源码名
 		for (int i = 0; i < n; i++) out.add(paramNames[i]);
 		if (!out.isEmpty() && isReceiverType(captured.get(0), owner)) {
 			boolean structural = captureSlots != null && !captureSlots.isEmpty() && !hostIsStatic;
 			boolean receiver = structural ? captureSlots.get(0) == 0 : isReceiverName(out.get(0));
-			if (receiver) out.set(0, LambdaAligner.RECEIVER_NAME);
+			if (receiver) out.set(0, RECEIVER_NAME);
 		}
 		return out;
 	}
@@ -719,7 +732,7 @@ final class LambdaBytecodeScanner {
 	 * 三者指同一个东西。</p>
 	 */
 	private static boolean isReceiverName(String n) {
-		return n == null || LambdaAligner.RECEIVER_NAME.equals(n) || "this".equals(n) || "this$0".equals(n);
+		return n == null || RECEIVER_NAME.equals(n) || "this".equals(n) || "this$0".equals(n);
 	}
 
 	/** 该描述符是不是"当前类自己的引用"（{@code forceStaticLambdas} 前置 receiver 的形态）。 */

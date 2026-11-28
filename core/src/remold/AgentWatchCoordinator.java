@@ -503,7 +503,7 @@ final class AgentWatchCoordinator {
 	}
 
 	/**
-	 * 门闩未放行时的重查挂载：固定间隔（不小于 {@link #GATE_RETRY_MIN_MS}），
+	 * 门闩未放行时的重查挂载：固定间隔（不小于 {@link RemoldAgent#GATE_RETRY_MIN_MS}），
 	 * 绝不复用 {@link #rescheduleDebounce()}——防抖已到期时它的延迟是 0，会变成锁内自旋。
 	 */
 	private static void rescheduleStartupGateRetry() {
@@ -522,7 +522,7 @@ final class AgentWatchCoordinator {
 	 *
 	 * <p><b>唯一批次入口</b>：启动就绪门闩在这里生效——宿主未就绪时<b>只</b>把变更留在
 	 * {@code pendingChanges} / {@code pendingAssetChanges} 里，绝不进入 {@link #runClassBatch}
-	 * 或 {@link #processChanges}（后者硬性要求持有 {@code HOTSWAP_LOCK}）。</p>
+	 * 或 {@link RemoldAgent#processChanges}（后者硬性要求持有 {@code HOTSWAP_LOCK}）。</p>
 	 */
 	static void triggerDueHotswap() {
 		if (inst == null) {
@@ -589,7 +589,7 @@ final class AgentWatchCoordinator {
 	/**
 	 * 执行一批已经静默的 Class 变更；错误边界与手动触发保持一致。
 	 *
-	 * <p><b>看门狗不在这里</b>：{@link BatchWatchdog} 挂在 {@link #processChanges} 上，
+	 * <p><b>看门狗不在这里</b>：{@link BatchWatchdog} 挂在 {@link RemoldAgent#processChanges} 上，
 	 * 这样手动 {@link #triggerHotswap()} 等入口也能覆盖。本方法<b>不得</b>再独立
 	 * {@code arm} 一个看门狗——那会让同一批次出现两条 {@code [HOTSWAP-STALL]}
 	 * （一次批次两次 dump = 前缀被训练成噪声）。这里只保留错误边界与批次统计的清理。</p>

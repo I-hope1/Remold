@@ -61,7 +61,7 @@ public final class StartupGate {
 	}
 
 	/**
-	 * 标记宿主已就绪：状态翻到 {@link #READY} 且不再回退。
+	 * 标记宿主已就绪：状态翻到 {@code READY} 且不再回退。
 	 *
 	 * @return {@code true} 表示本次调用真正发生了 {@code PENDING → READY}（用于"每次
 	 *         就绪状态变化只打一条日志"的判定）
@@ -81,7 +81,7 @@ public final class StartupGate {
 	 * 以调用方给出的"现在"评估就绪状态，包含超时自动放行。
 	 *
 	 * <p>第一次调用（且配置了超时）时开始计时：{@code PENDING} 从"首次观测"算起。
-	 * 超时后自动翻到 {@link #READY}，并通过 {@link #isTimedOutRelease()} 标明归因，
+	 * 超时后自动翻到 {@code READY}，并通过 {@link #isTimedOutRelease()} 标明归因，
 	 * 方便日志写成"超时放行"而不是伪装成宿主真的就绪了。</p>
 	 *
 	 * @param nowNanos 当前单调时钟读数（纳秒），必须与 {@link System#nanoTime()} 同一时钟

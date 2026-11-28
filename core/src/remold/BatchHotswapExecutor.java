@@ -129,7 +129,7 @@ final class BatchHotswapExecutor {
 	private BatchHotswapExecutor() {}
 
 	/**
-	 * 处理文件变化的核心逻辑（批次主体；看门狗由 {@link #processChanges} 负责登记/注销）。
+	 * 处理文件变化的核心逻辑（批次主体；看门狗由 {@link RemoldAgent#processChanges} 负责登记/注销）。
 	 */
 	static void processChangesBatch(Set<Path> changedFiles, Class<?>[] classes) {
 		// 旁路字节表按批清空：必须在对齐/注入**之前**，否则本轮注入的类会在注入后被抹掉（探针实测 A1）。
@@ -1340,7 +1340,7 @@ final class BatchHotswapExecutor {
 	 * 保持 {@code public static} 只因调用方（{@code tests/src/remold/evict} 包）与
 	 * {@link RemoldAgent} 不同包——同包可见性改不了。语义/签名随批次演进不承诺兼容。</p>
 	 *
-	 * <p>单测用 {@link #logger} 捕获告警做终局断言，而不是复制一份比对逻辑（复制出来的那份不会随实现漂移）。</p>
+	 * <p>单测用 {@link RemoldAgent#logger} 捕获告警做终局断言，而不是复制一份比对逻辑（复制出来的那份不会随实现漂移）。</p>
 	 *
 	 * @param newBytes 本轮生效字节（键为目标类名）
 	 * @param oldBytes 重定义前的有效字节（键同上；缺键表示没有基线，不判定，也不当作"没变"）
@@ -1461,7 +1461,7 @@ final class BatchHotswapExecutor {
 		LIVENESS_BATCH_DONE.set(LIVENESS_BATCH.size() < 2);
 	}
 
-	/** 批次级惰性存活预探测：整批一次遍历，结果填进 {@link #LIVE_INSTANCE_CACHE}。 */
+	/** 批次级惰性存活预探测：整批一次遍历，结果填进 {@link RemoldAgent#LIVE_INSTANCE_CACHE}。 */
 	private static void prefetchBatchLiveness() {
 		if (LIVENESS_BATCH_DONE.get() || !LIVENESS_BATCH_DONE.compareAndSet(false, true)) return;
 		Set<String> names = LIVENESS_BATCH;

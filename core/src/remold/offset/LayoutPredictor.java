@@ -327,6 +327,15 @@ public final class LayoutPredictor {
 		}
 	}
 
+	/** 沿父类链查找声明字段。 */
+	private static Field findField(Class<?> type, String name) {
+		for (Class<?> c = type; c != null && c != Object.class; c = c.getSuperclass()) {
+			try { return c.getDeclaredField(name); }
+			catch (NoSuchFieldException ignored) { }
+		}
+		return null;
+	}
+
 	/**
 	 * 扫描目标类自身及其所有已加载子孙类中发生物理偏移漂移的所有实例字段（简化视图）。
 	 *
@@ -337,14 +346,6 @@ public final class LayoutPredictor {
 	 * @param descendantSupplier 获取已加载子孙类的提供器
 	 * @return 发生漂移的字段列表；若无漂移则返回空列表；若无法预测目标类则返回 null
 	 */
-	private static Field findField(Class<?> type, String name) {
-		for (Class<?> c = type; c != null && c != Object.class; c = c.getSuperclass()) {
-			try { return c.getDeclaredField(name); }
-			catch (NoSuchFieldException ignored) { }
-		}
-		return null;
-	}
-
 	public static List<DriftingField> findDriftingFields(
 		Class<?> targetClass,
 		byte[] newBytes,

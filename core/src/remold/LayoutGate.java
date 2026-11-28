@@ -31,7 +31,7 @@ import java.util.*;
  * <ul>
  *   <li><b>匿名类合成字段</b>：由本门作为谓词包装在 {@link AnonClassAligner}（Tier 4 配对前）接入
  *       （受 {@link RemoldAgent#ANON_LAYOUT_GATE} 控制）；</li>
- *   <li><b>具名类/用户显式字段</b>：在重定义层由 {@link RemoldAgent} 接入 {@link #checkRedefine}
+ *   <li><b>具名类/用户显式字段</b>：在重定义层由 {@link RemoldAgent} 接入 {@link #checkChangedFields}
  *       （受 {@link RemoldAgent#LAYOUT_GATE} 控制）；</li>
  *   <li><b>局部类（{@code Foo$1Local}）</b>：局部类不进匿名类对齐器，其编号漂移已由独立的
  *       {@link LocalClassGuard}（受 {@link RemoldAgent#LOCAL_CLASS_GUARD} 控制）进行防御。</li>

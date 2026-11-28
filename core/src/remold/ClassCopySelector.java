@@ -4,6 +4,7 @@ import remold.offset.LayoutPredictor;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * 同名类多副本仲裁（全仓唯一策略）。
@@ -98,7 +99,7 @@ public final class ClassCopySelector {
 		if (copies == null || copies.isEmpty()) return "[]";
 		List<String> names = copies.stream()
 			.map(c -> String.valueOf(c.getClassLoader()))
-			.toList();
+			.collect(Collectors.toUnmodifiableList());
 		return names.toString();
 	}
 }

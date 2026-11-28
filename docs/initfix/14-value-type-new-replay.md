@@ -282,6 +282,12 @@ for each 存活实例 i:
 2. 确认编译事件后再执行写入与断言；
 3. 负向基线同样要求编译事件出现，否则"stale"可能只是没编译。
 
+### 真实 JVM E2E
+
+`tests/value-replay-probe/`（JBR 21.0.8 与 25.0.4.1，真实 `Instrumentation.redefineClasses` + 生产链路）
+必须保持通过：instance/skip/off/static/static-plain 五场景，含 C2 编译顺序、两实例独立身份、
+Stage C 前后 stale→新值、plain JBR 的 A4 拒绝。该探针为手动脚本，不挂 `check`。
+
 ### 变异检查
 
 - 移除 W2 判等直接写 → "运行期改值"场景必红；

@@ -36,6 +36,7 @@
 | 偏移稳定性与漂移 | `./gradlew :tests:offsetStabilityProbe -Pp05.jbr=<jbr>` | 实测单类布局、父类漂移、Updater 破坏与 C2 逆优化 |
 | Lambda 对齐压力与捕获桥 | `LambdaAlignTortureTest`、`LambdaBridgeAlignTest`、`:tests:lambdaBridgeProbe -Pp05.jbr=<jbr>` | 前插/删除/重排与捕获桥运行时失败形态 |
 | 批次堆扫描生命周期 | `BatchScanLocalRefLifetimeTest`、`BatchHeapScanEquivalenceTest`、`BatchLivenessPrefetchTest`、`:tests:initFixBatchScanProbe` | 必须守住 `GetObjectsWithTags` 局部帧弹出 UAF 与 `K` 次→`1` 次遍历计数 |
+| 值类型 `new` 初值重放 E2E | `bash tests/value-replay-probe/build.sh`（`JAR_TOOL=/home/ubuntu/.jdks/ms-25.0.4.1/bin/jar`）→ `bash tests/value-replay-probe/run.sh`；`JBR_HOME`（默认 `/opt/idea/jbr`）、`JBR25_HOME`（默认 `/home/ubuntu/deopt-study/jbr/ext25`） | 真实 `Instrumentation.redefineClasses` + 生产 `InitFix.transform/afterRedefine`；5 场景（instance/skip/off/static/static-plain）× 2 套 enhanced JBR；验证 C2 编译顺序（`-Xlog:jit+compilation` 的 reader 编译行先于写入）、两实例独立 new 身份、运行期改值 skip、Stage C deopt 前后 4→12、plain JBR A4 拒绝 |
 | 代际 VCS 与台账（PR1/PR3/B2） | `:tests:vcsPackProbe`、`:tests:vcsTwoPhaseProbe`、`:tests:vcsRevertProbe`、`:tests:vcsRevertSyncProbe`、`:tests:vcsA14Probe`、`:tests:vcsLedgerGcProbe` | 含真实 DCEVM 回退与 GC/堆占用基线读数 |
 
 ## 3. 日志与耗时统计口径约定

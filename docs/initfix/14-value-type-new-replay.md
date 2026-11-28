@@ -51,8 +51,8 @@ redefine 候选（字节码变化 / 结构变化 / 重放写目标）集合中�
 
 理由：`rebuildOld()` 在 redefine 之后执行，跑的是**新**的 `<init>`；构造链一旦变化，
 重建出的"旧值"不可信，此时条件 CAS 的判等前提失效。该场景不允许自动退化为
-"强制重放 / OVERWRITE"——那会无差别覆盖运行期改过的值。用户若确需无条件覆盖，走显式
-`@RemoldReinit(OVERWRITE)` 并自行承担旧值不可信的风险。
+"强制重放 / OVERWRITE"——那会无差别覆盖运行期改过的值。显式 `@RemoldReinit(OVERWRITE)`
+是独立逃生口（见 §8），是否无条件覆盖由用户决定，不经过本规格的自动判等。
 
 ### A3 值等价、构造纯度与类型限制
 
@@ -63,8 +63,8 @@ MVP 只接受以下形态（`T` 为被构造类型）：
 2. Kotlin data class：全部主构造属性为基本类型或 `String`，且全为 `val`（final 字段）；
    **无额外类体实例字段**（含委托属性 backing field）；**未覆写 `equals`/`hashCode`**；
    直接超类为 `Object` 或仅含接口（不继承带实例字段/自定义 `equals` 的超类）；
-3. 显式 `@RemoldReinit(OVERWRITE)` 通道：不依赖 `equals` 判等，但 A2/A4/A5 与本节构造
-   纯度门仍全部适用。
+显式 `@RemoldReinit(OVERWRITE)` 是不走本通道的独立逃生口，不受本节形态/纯度门约束
+（见 §8）。
 
 **构造纯度门**（`T.<init>` 与 `super()` 链，含 Java compact constructor / Kotlin `init {}`
 与类体属性初始化编译进 `<init>` 的代码）只允许：
@@ -105,8 +105,8 @@ MVP 只接受以下形态（`T` 为被构造类型）：
   （`VALUE-REPLAY-STATIC-FINAL-NEEDS-ENHANCED`）：未启用
   `-XX:+AllowEnhancedClassRedefinition` 时，阶段 C 重定义宿主不会 deopt 跨类折叠读者，
   写入后读者仍读旧值；
-- 适用不变量 1：宿主类必须已完成初始化（`UNSAFE.shouldBeInitialized(host) == true` 的直接
-  跳过/拒绝），不得因补丁触发 `<clinit>`；
+- 适用不变量 1：宿主类必须已完成初始化（`UNSAFE.shouldBeInitialized(host) == true` 即宿主尚未完成
+  初始化，直接跳过/拒绝），不得因补丁触发 `<clinit>`；
 - 非 final 静态字段不需要 enhanced 前提（JIT 不折叠，实测读者可见），但仍受 A1~A3/A5 约束。
 
 ### A5 多根构造器共识
@@ -167,7 +167,7 @@ for each 存活实例 i:
   `rebuildOld()` 跑的是新构造器，重放要么被 W2 判成 skipped，要么等价于无意义地换一个
   等值新对象；
 - `@RemoldReinit(OVERWRITE)` 与既有规则一致：注解优先于自动重放；open 表达式按既有约定
-  每轮重算。
+  每轮重算。该显式通道不进入本节指纹判据（不受 A2 影响），见 §8。
 
 ## 5. JIT 可见性与 deopt 边界
 
@@ -202,6 +202,7 @@ for each 存活实例 i:
 |:--|:--|
 | `VALUE-REPLAY-EXPR-NOT-CONSTANT` | A1 参数不可重建 / Kotlin 默认参数合成构造器 |
 | `VALUE-REPLAY-CONSTRUCTED-CHANGED` | A2 构造链在本批变化 |
+| `VALUE-REPLAY-EQ-NOT-PURE` | A3 类型形态不满足：非 record/data class、复合组件、Kotlin `var`、类体额外实例字段、带状态超类 |
 | `VALUE-REPLAY-EQ-CUSTOM` | A3 自定义 `equals`/`hashCode` |
 | `VALUE-REPLAY-CTOR-IMPURE` | A3 构造纯度门失败 / `<clinit>` 有副作用 |
 | `VALUE-REPLAY-HOST-RECORD` | A4 实例字段声明类为 record/hidden |
@@ -255,8 +256,8 @@ for each 存活实例 i:
 
 ## 8. 与现有机制的关系
 
-- `@RemoldReinit(OVERWRITE)`：显式通道，绕过 W2，但保留 A2/A3 纯度门/A4/A5；A2 的旧值
-  不可信风险由用户承担；
+- `@RemoldReinit(OVERWRITE)`：显式逃生口，**不受本规格 A2/A3 约束**（只受既有 InitFix
+  安全门 + A4/A5）；它不重建旧值（W2），因此不存在"旧值不可信"问题，覆盖决策由用户承担；
 - L1 / A 档：不交叉；本通道处理"对象引用级替换"，不写 `FieldLedger`（不是新增字段）；
 - 失败/跳过只进 `PatchReport` 与日志，不落台账；静态 final 的 enhanced 门与
   `docs/status.md` 已登记的同源缺口共用同一判据；

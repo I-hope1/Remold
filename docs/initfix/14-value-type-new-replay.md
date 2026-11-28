@@ -12,6 +12,9 @@
 Kotlin `apply {}` 静态持有者重放见 [`13-kotlin-apply-replay.md`](13-kotlin-apply-replay.md)。
 本文只定义判据、写入协议与 JIT 边界，不含实现状态。
 
+**开关**：本通道为显式重放通道，默认关闭；启用方式为
+`-Dremold.agent.init_drift.value_replay=true`（与 L1/A 档的默认关口径一致）。
+
 ## 1. 术语与触发条件
 
 - `oldExpr` / `newExpr`：改动前 / 后的字段初值表达式，均为直线 `new T(c...)`。

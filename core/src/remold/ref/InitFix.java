@@ -1310,9 +1310,11 @@ public class InitFix {
 	 * @param valueReplayFields 值类型 {@code new} 初值重放（{@code docs/initfix/14-value-type-new-replay.md}）：
 	 *                     字段名 -> 决策。分析期填 planned（{@link FieldStatus#ACCEPTED}，语义是
 	 *                     "已规划重放任务"）与被拒（{@link FieldStatus#REJECTED}，原因带 §6 判决码）；
-	 *                     未触发的字段不出现。运行期 outcome（applied/skipped/failed）由驱动回写，
-	 *                     见 {@code docs/status.md}。独立于 {@link #instanceFields}：值类型重放不写
-	 *                     {@code FieldLedger}，也不改变 {@code patchGenerated} 的"默认补丁"语义。
+	 *                     运行期由驱动经 {@link #valueReplayRecordOutcome} 回写三态：written 保持
+	 *                     {@code ACCEPTED}，skipped 记 {@code NOTHING_TO_PATCH}，failed 记
+	 *                     {@code REJECTED}（分析期拒绝不被覆盖）。未触发的字段不出现。独立于
+	 *                     {@link #instanceFields}：值类型重放不写 {@code FieldLedger}，也不改变
+	 *                     {@code patchGenerated} 的"默认补丁"语义。
 	 */
 	public record PatchReport(
 	 Map<String, FieldDecision> instanceFields,
@@ -3913,6 +3915,62 @@ public class InitFix {
 		REPORTS.put(host, new PatchReport(base.instanceFields(), base.staticFields(),
 		 base.patchGenerated(), replay, apply, recoveredAll, base.valueReplayFields()));
 	}
+
+	/**
+	 * 运行期驱动回写值类型重放的三态结果（{@code docs/initfix/14} §3 / §8）。
+	 *
+	 * <p>克隆并替换 {@link PatchReport#valueReplayFields()} 里的目标字段（与
+	 * {@link #recordReplayOutcome} 同一手法），<b>不</b>触碰分析期拒绝记录：只有 planned
+	 * （{@link FieldStatus#ACCEPTED}）的字段会被运行期结论覆盖，{@link FieldStatus#REJECTED}
+	 * 的字段保持原判。状态映射：written 保持 {@code ACCEPTED}；skipped 记
+	 * {@code NOTHING_TO_PATCH}（运行期值已改过，按设计保留）；failed 记 {@code REJECTED}
+	 * （原因带 {@code VALUE-REPLAY-CAS-EXHAUSTED} 或英文失败文本），失败必须可见。</p>
+	 *
+	 * @param host      宿主类（applyPatch 已归一化）
+	 * @param fieldName 字段名
+	 * @param status    运行期结论对应的状态
+	 * @param reason    英文原因（{@code null} 表示无说明）
+	 */
+	static void valueReplayRecordOutcome(Class<?> host, String fieldName,
+	                                     FieldStatus status, String reason) {
+		if (host == null || fieldName == null || status == null) return;
+		PatchReport base = REPORTS.get(host);
+		if (base == null) return;
+		FieldDecision current = base.valueReplayFields().get(fieldName);
+		// 分析期拒绝记录不得被运行期结论掩盖（被拒字段根本不会产生重放任务，这里是兜底）。
+		if (current != null && current.status() == FieldStatus.REJECTED) return;
+		Map<String, FieldDecision> fields = new LinkedHashMap<>(base.valueReplayFields());
+		fields.put(fieldName, new FieldDecision(status, reason, List.of()));
+		REPORTS.put(host, new PatchReport(base.instanceFields(), base.staticFields(),
+		 base.patchGenerated(), base.replayFields(), base.applyReplayFields(),
+		 base.recoveredFields(), fields));
+	}
+
+	/**
+	 * 运行期失败/跳过日志的去重门（{@code docs/initfix/14} §3：failed 按初值指纹去重，
+	 * 下一次初值变化才重新进入）。键只含类名字符串、字段名与指纹，不反向持有 {@code Class}。
+	 *
+	 * @return {@code true} 表示本次是该键的第一次，调用方应该输出日志
+	 */
+	static boolean valueReplayFirstOutcomeLog(String className, String fieldName,
+	                                          String newFingerprint, boolean failed) {
+		String key = (failed ? "failed|" : "skipped|") + className + '|' + fieldName + '|'
+		             + (newFingerprint == null ? "" : newFingerprint);
+		synchronized (VALUE_REPLAY_OUTCOME_LOGS) {
+			return VALUE_REPLAY_OUTCOME_LOGS.put(key, Boolean.TRUE) == null;
+		}
+	}
+
+	/** 值类型重放失败/跳过日志的去重集合上限（LRU，避免长进程无界增长）。 */
+	private static final int MAX_VALUE_REPLAY_OUTCOME_LOGS = 4096;
+
+	private static final Map<String, Boolean> VALUE_REPLAY_OUTCOME_LOGS =
+	 Collections.synchronizedMap(new LinkedHashMap<>(64, 0.75f, true) {
+		 @Override
+		 protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+			 return size() > MAX_VALUE_REPLAY_OUTCOME_LOGS;
+		 }
+	 });
 
 	/** A 档 apply 重放的成功明细（每个候选一行 info；拒绝已由 {@link #logApplyReplayDecisions} 报过）。 */
 	private static void logApplyReplayResult(

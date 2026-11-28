@@ -7,6 +7,7 @@ import remold.InstanceTracker;
 import remold.Reflect;
 import remold.ref.InitFix;
 import remold.ref.HotswapBridge;
+import remold.ref.ValueTypeReplay;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;
@@ -177,6 +178,7 @@ public class InitFixOracle {
 		scenario("值类型 new 初值重放运行期：运行期改值或被置 null -> skipped（保留值、不记 applied、不写台账）", InitFixOracle::caseValueReplayRuntimeSkips);
 		scenario("值类型 new 初值重放运行期：静态槽位 W1-W4 替换 + applied 记录", InitFixOracle::caseValueReplayRuntimeStatic);
 		scenario("值类型 new 初值重放运行期 failed 可见性：报告/去重告警契约，且不覆盖分析期拒绝、不写台账", InitFixOracle::caseValueReplayRuntimeFailedVisible);
+		scenario("值类型 new 初值重放 Kotlin data class 真实字节：A3 形状识别 + v1 存量实例被替换", InitFixOracle::caseValueReplayKotlinDataClass);
 
 		System.out.println();
 		System.out.println("通过 " + passed + " 条；失败 " + failed + " 条；合计 " + (passed + failed) + " 条");
@@ -2947,13 +2949,27 @@ public class InitFixOracle {
 	/** 构建期编译的 Kotlin 夹具：v1/v2 字节 + 各自独立的 ByteLoader 定义出的 Class。 */
 	static final class CompiledFixture {
 		final Fixture         fx;
-		final Class<?>        oldHost;   // v1 定义，仅供护栏比对
-		final Map<String, byte[]> v2;    // v2 全量字节，供再加载控制组
+		final Class<?>        oldHost;   // v1 定义，仅供护栏比对（运行期夹具里与 host 同一份定义）
+		final Map<String, byte[]> v1;    // v1 全量字节
+		final Map<String, byte[]> v2;    // v2 全量字节，供再加载控制组 / 纯分析字节来源
 
-		CompiledFixture(Fixture fx, Class<?> oldHost, Map<String, byte[]> v2) {
+		CompiledFixture(Fixture fx, Class<?> oldHost, Map<String, byte[]> v1, Map<String, byte[]> v2) {
 			this.fx = fx;
 			this.oldHost = oldHost;
+			this.v1 = v1;
 			this.v2 = v2;
+		}
+
+		/**
+		 * 纯分析用字节来源：优先新版本，缺失时回退旧版本（未变化的被构造类型走这一支）。
+		 *
+		 * <p>{@link ValueTypeReplay#plan} 以**内部名**（{@code oracle/KtVec}）查询字节，而
+		 * {@code readCompiledClasses} 的键是点分类名，这里做一次归一。</p>
+		 */
+		byte[] bytesOf(String internalOrDotted) {
+			String dot = internalOrDotted.replace('/', '.');
+			byte[] bytes = v2.get(dot);
+			return bytes != null ? bytes : v1.get(dot);
 		}
 	}
 
@@ -2983,7 +2999,34 @@ public class InitFixOracle {
 			throw new IllegalStateException("Kotlin 夹具加载失败：" + dotName, e);
 		}
 		RemoldAgent.bytecodeCache.put(dotName, b2);
-		return new CompiledFixture(new Fixture(dotName, b1, b2, host), oldHost, v2);
+		return new CompiledFixture(new Fixture(dotName, b1, b2, host), oldHost, v1, v2);
+	}
+
+	/**
+	 * 运行期夹具：宿主类用 <b>v1 字节</b>定义（存量实例因此天然持有旧初值），再用 v2 差分走
+	 * transform → apply。与 {@link #loadCompiledFixture} 的唯一区别就是主类按 v1 定义；
+	 * 与 {@link #loadValueReplayRuntimeFixture} 的区别是字节来自构建期 kotlinc 产物而不是内存 javac。
+	 */
+	static CompiledFixture loadCompiledRuntimeFixture(String dotName) {
+		Map<String, byte[]> v1 = readCompiledClasses(System.getProperty("remold.ktfix.v1"), dotName);
+		Map<String, byte[]> v2 = readCompiledClasses(System.getProperty("remold.ktfix.v2"), dotName);
+
+		byte[] b1 = v1.get(dotName);
+		byte[] b2 = v2.get(dotName);
+		if (b1 == null || b2 == null) {
+			throw new IllegalStateException("Kotlin 夹具主类缺失：" + dotName
+				+ "（v1=" + (b1 != null) + "，v2=" + (b2 != null) + "）");
+		}
+
+		Class<?> host;
+		try {
+			host = Class.forName(dotName, true, new ByteLoader(v1));
+		} catch (ClassNotFoundException e) {
+			throw new IllegalStateException("Kotlin 夹具加载失败：" + dotName, e);
+		}
+		// 生产环境里 transform 目标的新字节本来就在 bytecodeCache 中（§2.1「优先读取新版本」）。
+		RemoldAgent.bytecodeCache.put(dotName, b2);
+		return new CompiledFixture(new Fixture(dotName, b1, b2, host), host, v1, v2);
 	}
 
 	/** 按名字读取目录（{@code pathSeparator} 分隔的多个目录）下的**全部** .class，含 $ 附属类。 */
@@ -4331,6 +4374,97 @@ public class InitFixOracle {
 				"CaseVrRuntimeFailed: a runtime outcome must not clobber the analysis rejection (actual "
 					+ (kept == null ? null : kept.reason()) + ")");
 		});
+	}
+
+	// ==================== 值类型 new 初值重放：Kotlin data class 真实字节 ====================
+	//
+	// 夹具 tests/ktfix/v1|v2/oracle/KtVec.kt + KtHolder.kt 是构建期 kotlinc 真实产物：
+	//   data class KtVec(val x: Int, val y: Int)  +  class KtHolder { val v = KtVec(4, 4) }
+	// A3 的 Kotlin data class 形态判定必须在这份真实字节上通过；运行期用 v1 字节定义宿主
+	// （存量实例因此持有旧初值），transform 用 v1 -> v2 差分，apply 后要求实例字段被替换。
+
+	/** Kotlin data class 真实字节：A3 形状识别 + v1 存量实例被替换（docs/initfix/14 §7 正向）。 */
+	static void caseValueReplayKotlinDataClass() throws Exception {
+		String dot = "oracle.KtHolder";
+		CompiledFixture cf = loadCompiledRuntimeFixture(dot);
+		Fixture fx = cf.fx;
+
+		check(!Arrays.equals(fx.v1, fx.v2), "KtKtVec guard: v1/v2 host bytes differ");
+		// 纯分析核心直接在真实 kotlinc 字节上判 A3：Kotlin data class（组件全为基本类型、无自定义
+		// equals/hashCode）必须被识别为可重放值类型，而不是落到 VALUE-REPLAY-EQ-NOT-PURE。
+		ValueTypeReplay.Plan shape = ValueTypeReplay.plan(
+			ClassDiffUtil.diff(fx.v1, fx.v2), cf::bytesOf, name -> false, false);
+		check(shape.fields().containsKey("v"),
+			"KtKtVec A3: the Kotlin data class is accepted as a value type (planned=" + shape.fields()
+				+ ", rejected=" + shape.rejected() + ")");
+		check(shape.rejected().isEmpty(),
+			"KtKtVec A3: no rejection for the Kotlin data-class host (actual " + shape.rejected() + ")");
+
+		Object instance = construct(fx.host);
+		Object oldValue = read(fx.host, instance, "v");
+		check(oldValue != null, "KtKtVec precondition: the live host instance holds a KtVec value");
+		check(ktComponent(oldValue, "getX") == 4 && ktComponent(oldValue, "getY") == 4,
+			"KtKtVec precondition: the live value is KtVec(4,4) (actual x=" + ktComponent(oldValue, "getX")
+				+ ", y=" + ktComponent(oldValue, "getY") + ")");
+		InstanceTracker.register(instance);
+
+		withValueReplay(true, () -> {
+			BatchReportScope.begin();
+			HotswapBatchReport batch;
+			try {
+				InitFix.PatchReport planned = fx.transform();
+				InitFix.FieldDecision decision = planned.valueReplayFields().get("v");
+				check(decision != null && decision.status() == InitFix.FieldStatus.ACCEPTED,
+					"KtKtVec: analysis plans the Kotlin data-class field (actual "
+						+ planned.valueReplayFields() + ")");
+				check(!planned.patchGenerated(),
+					"KtKtVec: a value-replay-only round keeps patchGenerated=false");
+				InitFix.PatchPlan plan = pendingPlan(fx.host);
+				check(plan != null && plan.valueReplayTasks().size() == 1,
+					"KtKtVec: exactly one value-replay task (actual "
+						+ (plan == null ? "no plan" : plan.valueReplayTasks()) + ")");
+				if (plan != null && !plan.valueReplayTasks().isEmpty()) {
+					InitFix.ValueReplayTask task = plan.valueReplayTasks().get(0);
+					check("v".equals(task.fieldName()) && !task.isStatic(),
+						"KtKtVec: the task targets the Kotlin instance field v (actual " + task + ")");
+					check("Loracle/KtVec;".equals(task.desc()),
+						"KtKtVec: the task carries the KtVec descriptor (actual " + task.desc() + ")");
+				}
+				fx.apply();
+				batch = finishBatchReport();
+			} finally {
+				if (BatchReportScope.isActive()) BatchReportScope.discard();
+			}
+
+			Object newValue = read(fx.host, instance, "v");
+			check(newValue != null && newValue != oldValue,
+				"KtKtVec: the old KtVec reference was replaced");
+			check(ktComponent(newValue, "getX") == 4 && ktComponent(newValue, "getY") == 12,
+				"KtKtVec: the live instance now holds KtVec(4,12) (actual x=" + ktComponent(newValue, "getX")
+					+ ", y=" + ktComponent(newValue, "getY") + ")");
+
+			InitFix.PatchReport after = InitFix.getLastReport(fx.host);
+			InitFix.FieldDecision written = after.valueReplayFields().get("v");
+			check(written != null && written.status() == InitFix.FieldStatus.ACCEPTED,
+				"KtKtVec: the runtime outcome is written (actual " + after.valueReplayFields() + ")");
+			HotswapBatchReport.InitFixStats stats = batch == null ? null : batch.getInitFixStats();
+			check(stats != null && stats.getValueReplayApplied() == 1,
+				"KtKtVec: batch report counts one applied field (actual "
+					+ (stats == null ? null : stats.getValueReplayApplied()) + ")");
+			check(stats != null && stats.getValueReplaySkipped() == 0
+				&& stats.getValueReplayFailed() == 0 && stats.getValueReplayRejected() == 0,
+				"KtKtVec: no skipped/failed/rejected in this round");
+		});
+	}
+
+	/** 读 Kotlin data class 属性的 getter（getX/getY）；夹具是真实 kotlinc 产物。 */
+	static int ktComponent(Object value, String getter) {
+		try {
+			Method m = value.getClass().getMethod(getter);
+			return (Integer) m.invoke(value);
+		} catch (ReflectiveOperationException e) {
+			throw new IllegalStateException("Kotlin 属性读取失败：" + getter, e);
+		}
 	}
 
 	// ==================== 夹具装配 ====================

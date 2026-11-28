@@ -154,7 +154,7 @@ public final class ValueTypeReplay {
 	 *
 	 * <p>Both slices are straight-line {@code NEW T; DUP; <constants>; INVOKESPECIAL T.<init>} sequences
 	 * that only reference compile-time constants and the constructed type, so a caller can re-emit them
-	 * as factory methods ({@code ()LT;}) in a patch class. The nodes are <b>live</b> {@code ClassNode}
+	 * as factory methods ({@code ()Ljava/lang/Object;}) in a patch class. The nodes are <b>live</b> {@code ClassNode}
 	 * instructions: callers that move them into another method must clone them (ASM nodes cannot belong
 	 * to two instruction lists).</p>
 	 *
@@ -320,6 +320,15 @@ public final class ValueTypeReplay {
 	                           Map<String, String> details, Map<String, Carved> expressions) {
 		boolean isStatic = (newField.access & Opcodes.ACC_STATIC) != 0;
 		if (oldSide.writes().isEmpty() && newSide.writes().isEmpty()) return; // not triggered: no initializer write
+		// A0 scope: this channel only owns `new T(constants)` (and the Kotlin default synthetic form).
+		// A field whose two sides never carry such an expression is someone else's business; staying
+		// silent here prevents unrelated String/List initializers from being reported as value-replay
+		// rejections just because the host was edited.
+		if (!hasValueTypeWrite(oldSide.writes()) && !hasValueTypeWrite(newSide.writes())) return;
+		// Nothing changed on this field between the two versions (same write-set fingerprints), so A0 is
+		// not triggered even when unrelated root constructors were added/removed or an unrelated method
+		// was edited.
+		if (sameWriteFingerprints(oldSide.writes(), newSide.writes())) return;
 		if (oldSide.writes().isEmpty()) return; // newly initialized from nothing: no old value to rebuild
 		if (newSide.writes().isEmpty()) {
 			reject(name, Reason.EXPR_NOT_CONSTANT, "initializer expression disappeared in the new version", rejected, details);
@@ -371,7 +380,7 @@ public final class ValueTypeReplay {
 		Reason hostReason = hostReason(oldHost, newHost, newField, enhanced);
 		if (hostReason != null) {
 			String detail = hostReason == Reason.HOST_RECORD
-				? "instant field is hosted by a record or hidden class"
+				? "instance field is hosted by a record or hidden class"
 				: "static final reference target requires enhanced hotswap";
 			reject(name, hostReason, detail, rejected, details);
 			return;
@@ -394,6 +403,24 @@ public final class ValueTypeReplay {
 		Set<String> fingerprints = new LinkedHashSet<>();
 		for (Expr expr : writes) fingerprints.add(expr.fingerprint());
 		return fingerprints.size();
+	}
+
+	/** Whether any write on this side is the value-type channel's {@code new T(...)} (or Kotlin default form). */
+	private static boolean hasValueTypeWrite(List<Expr> writes) {
+		for (Expr expr : writes) {
+			if (expr.kind() == ExprKind.NEW_EXPR || expr.kind() == ExprKind.SYNTHETIC_DEFAULT) return true;
+		}
+		return false;
+	}
+
+	/** True when both sides have the same set of initializer-expression fingerprints (nothing changed). */
+	private static boolean sameWriteFingerprints(List<Expr> oldWrites, List<Expr> newWrites) {
+		if (oldWrites.isEmpty() && newWrites.isEmpty()) return true;
+		Set<String> oldFingerprints = new LinkedHashSet<>();
+		for (Expr expr : oldWrites) oldFingerprints.add(expr.fingerprint());
+		Set<String> newFingerprints = new LinkedHashSet<>();
+		for (Expr expr : newWrites) newFingerprints.add(expr.fingerprint());
+		return oldFingerprints.equals(newFingerprints);
 	}
 
 	private static void reject(String name, Reason reason, String detail,
@@ -914,8 +941,49 @@ public final class ValueTypeReplay {
 
 		List<String> chainTexts = new ArrayList<>();
 		Set<String> closureOwners = new LinkedHashSet<>();
+		Reason oldChain = validateConstructorChain(typeName, type, oldCtorDesc, classBytes, batchCandidate,
+			chainTexts, closureOwners, details, fieldName);
+		if (oldChain != null) return oldChain;
+		if (!newCtorDesc.equals(oldCtorDesc)) {
+			Reason newChain = validateConstructorChain(typeName, type, newCtorDesc, classBytes, batchCandidate,
+				chainTexts, closureOwners, details, fieldName);
+			if (newChain != null) return newChain;
+		}
+		// A2: every class read by either constructor's verified call closure must be batch-stable.
+		for (String owner : closureOwners) {
+			if (batchCandidate.test(owner)) {
+				details.put(fieldName, "verified call closure class " + owner
+				                       + " is redefined in this batch; the constructor is not provably stable");
+				return Reason.CONSTRUCTED_CHANGED;
+			}
+		}
+		fingerprints.ctorFingerprint = sha256(String.join("\n", chainTexts));
+		MethodNode equals = findMethod(type, "equals", "(Ljava/lang/Object;)Z");
+		MethodNode hashCode = findMethod(type, "hashCode", "()I");
+		if (equals == null || hashCode == null) {
+			details.put(fieldName, "type " + typeName + " has no generated equals/hashCode pair");
+			return Reason.EQ_NOT_PURE;
+		}
+		fingerprints.equalsFingerprint = sha256(
+			BytecodeNormalFingerprint.normalizedMethod(equals) + '\n'
+			+ BytecodeNormalFingerprint.normalizedMethod(hashCode));
+		return null;
+	}
+
+	/**
+	 * Validates one full constructor chain starting at {@code (typeName, ctorDesc)}: walks the super
+	 * chain, rejects {@code this(...)} delegation (the revisited owner trips the cycle guard), checks
+	 * each {@code <clinit>}, and accumulates the normalized chain texts and verified call-closure owners.
+	 *
+	 * @return the first rejection reason, or {@code null} when the whole chain is pure and resolvable
+	 */
+	private static Reason validateConstructorChain(String typeName, ClassNode type, String ctorDesc,
+	                                               Function<String, byte[]> classBytes,
+	                                               Predicate<String> batchCandidate,
+	                                               List<String> chainTexts, Set<String> closureOwners,
+	                                               Map<String, String> details, String fieldName) {
 		String currentName = typeName;
-		String currentCtorDesc = oldCtorDesc;
+		String currentCtorDesc = ctorDesc;
 		ClassNode current = type;
 		Set<String> visited = new HashSet<>();
 		while (true) {
@@ -968,40 +1036,6 @@ public final class ValueTypeReplay {
 			currentCtorDesc = purity.superDesc();
 			current = superNode;
 		}
-		for (String owner : closureOwners) {
-			if (batchCandidate.test(owner)) {
-				details.put(fieldName, "verified call closure class " + owner
-				                       + " is redefined in this batch; the constructor is not provably stable");
-				return Reason.CONSTRUCTED_CHANGED;
-			}
-		}
-
-		MethodNode newCtor = findConstructor(type, newCtorDesc);
-		if (newCtor == null) {
-			details.put(fieldName, "constructor " + typeName + "." + newCtorDesc + " is missing");
-			return Reason.CTOR_CHAIN_UNRESOLVED;
-		}
-		if (!newCtorDesc.equals(oldCtorDesc)) {
-			Purity newPurity = validateConstructor(type, newCtor, classBytes);
-			if (newPurity.problem() != null) {
-				details.put(fieldName, "constructor " + typeName + "." + newCtorDesc + " is impure: "
-				                       + newPurity.problem());
-				return Reason.CTOR_IMPURE;
-			}
-			chainTexts.add(typeName + "#" + newCtorDesc + '\n'
-			               + BytecodeNormalFingerprint.normalizedMethod(newCtor));
-			closureOwners.addAll(newPurity.closureOwners());
-		}
-		fingerprints.ctorFingerprint = sha256(String.join("\n", chainTexts));
-		MethodNode equals = findMethod(type, "equals", "(Ljava/lang/Object;)Z");
-		MethodNode hashCode = findMethod(type, "hashCode", "()I");
-		if (equals == null || hashCode == null) {
-			details.put(fieldName, "type " + typeName + " has no generated equals/hashCode pair");
-			return Reason.EQ_NOT_PURE;
-		}
-		fingerprints.equalsFingerprint = sha256(
-			BytecodeNormalFingerprint.normalizedMethod(equals) + '\n'
-			+ BytecodeNormalFingerprint.normalizedMethod(hashCode));
 		return null;
 	}
 
@@ -1209,8 +1243,7 @@ public final class ValueTypeReplay {
 				continue;
 			}
 			if (insn instanceof MethodInsnNode call) {
-				if (call.getOpcode() != Opcodes.INVOKESTATIC || !INTRINSICS.equals(call.owner)
-					|| !"areEqual".equals(call.name)) return false;
+				if (!isAllowedKotlinEqualsCall(call)) return false;
 				continue;
 			}
 			if (insn instanceof VarInsnNode load && opcode == Opcodes.ALOAD) continue;
@@ -1220,10 +1253,24 @@ public final class ValueTypeReplay {
 		return castFound && storeFound && getFieldFound;
 	}
 
+	/**
+	 * Calls the generated Kotlin data-class {@code equals} may contain: {@code Intrinsics.areEqual} for
+	 * reference components, plus the primitive comparison helpers kotlinc emits for {@code Float} and
+	 * {@code Double} components. Anything else keeps the custom-{@code equals} rejection.
+	 */
+	private static boolean isAllowedKotlinEqualsCall(MethodInsnNode call) {
+		if (call.getOpcode() != Opcodes.INVOKESTATIC) return false;
+		if (INTRINSICS.equals(call.owner) && "areEqual".equals(call.name)) return true;
+		return "java/lang/Float".equals(call.owner) && "compare".equals(call.name) && "(FF)I".equals(call.desc)
+		       || "java/lang/Double".equals(call.owner) && "compare".equals(call.name) && "(DD)I".equals(call.desc);
+	}
+
 	private static boolean isAllowedKotlinEqualsOpcode(int opcode) {
 		return opcode == Opcodes.IF_ACMPNE || opcode == Opcodes.IFNE || opcode == Opcodes.IFEQ
 		       || opcode == Opcodes.INSTANCEOF || opcode == Opcodes.IF_ICMPEQ || opcode == Opcodes.IF_ICMPNE
 		       || opcode == Opcodes.ICONST_0 || opcode == Opcodes.ICONST_1
+		       || opcode == Opcodes.LCMP || opcode == Opcodes.FCMPL || opcode == Opcodes.FCMPG
+		       || opcode == Opcodes.DCMPL || opcode == Opcodes.DCMPG
 		       || opcode == Opcodes.IRETURN || opcode == Opcodes.GOTO;
 	}
 
@@ -1280,6 +1327,8 @@ public final class ValueTypeReplay {
 				Opcodes.ICONST_4, Opcodes.ICONST_5, Opcodes.BIPUSH, Opcodes.SIPUSH,
 				Opcodes.IMUL, Opcodes.IADD, Opcodes.ISUB, Opcodes.INEG, Opcodes.ISHL, Opcodes.ISHR,
 				Opcodes.IUSHR, Opcodes.IAND, Opcodes.IOR, Opcodes.IXOR, Opcodes.IRETURN,
+				// Nullable components (e.g. String?) guard the hashCode call with a null test and a join.
+				Opcodes.IFNULL, Opcodes.IFNONNULL, Opcodes.GOTO,
 				Opcodes.NOP -> true;
 			default -> false;
 		};
@@ -1376,8 +1425,9 @@ public final class ValueTypeReplay {
 					}
 					Frame<SourceValue> frame = frames[i];
 					if (frame == null) return Purity.rejected("missing stack frame for a field write");
-					int valueSize = Type.getType(field.desc).getSize();
-					int receiverIndex = frame.getStackSize() - 1 - valueSize;
+					// PUTFIELD consumes exactly two Frame values (receiver + value); long/double values
+					// still occupy one Frame entry, so the receiver is always the penultimate entry.
+					int receiverIndex = frame.getStackSize() - 2;
 					if (receiverIndex < 0) return Purity.rejected("invalid field write stack shape");
 					if (!isThis(frame.getStack(receiverIndex))) {
 						return Purity.rejected("writes a field on a receiver that is not 'this'");
@@ -1543,14 +1593,6 @@ public final class ValueTypeReplay {
 	private static boolean isValidationException(String internalName) {
 		if (!internalName.startsWith("java/lang/")) return false;
 		return internalName.endsWith("Exception") || internalName.endsWith("Error");
-	}
-
-	private static boolean isParameterLoad(AbstractInsnNode insn, List<AbstractInsnNode> nodes, int start) {
-		return insn instanceof VarInsnNode variable && (variable.getOpcode() == Opcodes.ALOAD
-		                                                || variable.getOpcode() == Opcodes.ILOAD
-		                                                || variable.getOpcode() == Opcodes.LLOAD
-		                                                || variable.getOpcode() == Opcodes.FLOAD
-		                                                || variable.getOpcode() == Opcodes.DLOAD);
 	}
 
 	private static Reason clinitReason(ClassNode type) {

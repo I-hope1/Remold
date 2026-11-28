@@ -390,10 +390,10 @@ class ValueTypeReplayWiringTest {
 			new MethodInsnNode(Opcodes.INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "()V", false));
 
 		MethodNode method = InitFixPatchEmitter.expressionFactoryMethod(
-			"buildNew$v", "java/lang/StringBuilder", expression);
+			"buildNew$v", expression);
 
 		assertEquals("buildNew$v", method.name);
-		assertEquals("()Ljava/lang/StringBuilder;", method.desc);
+		assertEquals("()Ljava/lang/Object;", method.desc);
 		assertEquals((Opcodes.ACC_STATIC | Opcodes.ACC_PUBLIC), method.access & (Opcodes.ACC_STATIC | Opcodes.ACC_PUBLIC));
 		assertEquals(expression.size() + 1, method.instructions.size());
 		assertEquals(Opcodes.NEW, method.instructions.get(0).getOpcode());
@@ -413,7 +413,7 @@ class ValueTypeReplayWiringTest {
 		ClassNode reparsed = new ClassNode();
 		new ClassReader(writer.toByteArray()).accept(reparsed, 0);
 		assertEquals(1, reparsed.methods.size());
-		assertEquals("()Ljava/lang/StringBuilder;", reparsed.methods.get(0).desc);
+		assertEquals("()Ljava/lang/Object;", reparsed.methods.get(0).desc);
 	}
 
 	@Test

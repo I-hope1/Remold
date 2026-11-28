@@ -179,6 +179,8 @@ public class InitFixOracle {
 		scenario("值类型 new 初值重放运行期：静态槽位 W1-W4 替换 + applied 记录", InitFixOracle::caseValueReplayRuntimeStatic);
 		scenario("值类型 new 初值重放运行期 failed 可见性：报告/去重告警契约，且不覆盖分析期拒绝、不写台账", InitFixOracle::caseValueReplayRuntimeFailedVisible);
 		scenario("值类型 new 初值重放 Kotlin data class 真实字节：A3 形状识别 + v1 存量实例被替换", InitFixOracle::caseValueReplayKotlinDataClass);
+		scenario("值类型 new 初值重放 Kotlin data class Float/Double/Long 真实字节：A3 形状识别 + 实例被替换", InitFixOracle::caseValueReplayKotlinFloatDoubleLong);
+		scenario("值类型 new 初值重放宿主字段声明为 Object/接口：buildOld/buildNew 运行期绑定无 NoSuchMethodException", InitFixOracle::caseValueReplayRuntimeSupertypeHost);
 
 		System.out.println();
 		System.out.println("通过 " + passed + " 条；失败 " + failed + " 条；合计 " + (passed + failed) + " 条");
@@ -3729,10 +3731,10 @@ public class InitFixOracle {
 				check(!task.oldFingerprint().equals(task.newFingerprint()),
 					"CaseVrPlanned: A0 fingerprints must differ after an argument change");
 				Set<String> methods = patchMethods(pendingBytes(fx.host));
-				check(methods.contains(task.buildOldMethod() + "()Loracle/Vec;"),
-					"CaseVrPlanned: buildOld factory emitted as ()Loracle/Vec; (actual " + methods + ")");
-				check(methods.contains(task.buildNewMethod() + "()Loracle/Vec;"),
-					"CaseVrPlanned: buildNew factory emitted as ()Loracle/Vec; (actual " + methods + ")");
+				check(methods.contains(task.buildOldMethod() + "()Ljava/lang/Object;"),
+					"CaseVrPlanned: buildOld factory emitted as ()Ljava/lang/Object; (actual " + methods + ")");
+				check(methods.contains(task.buildNewMethod() + "()Ljava/lang/Object;"),
+					"CaseVrPlanned: buildNew factory emitted as ()Ljava/lang/Object; (actual " + methods + ")");
 			}
 		});
 	}
@@ -4462,11 +4464,160 @@ public class InitFixOracle {
 		});
 	}
 
+	/**
+	 * 宿主字段声明为 {@code Object} 或接口时，buildOld/buildNew 工厂仍按 {@code ()Object} 绑定，
+	 * 运行期重放不得出现 {@code NoSuchMethodException}。
+	 */
+	static void caseValueReplayRuntimeSupertypeHost() throws Exception {
+		String objectDot = "oracle.CaseVrObjectHost";
+		Map<String, String> objectV1 = new LinkedHashMap<>();
+		objectV1.put(objectDot, vrHost("CaseVrObjectHost", "\tObject v = new Vec(4, 4);", "\tObject v() { return v; }"));
+		objectV1.put("oracle.Vec", VR_VEC);
+		Map<String, String> objectV2 = new LinkedHashMap<>();
+		objectV2.put(objectDot, vrHost("CaseVrObjectHost", "\tObject v = new Vec(4, 12);", "\tObject v() { return v; }"));
+		objectV2.put("oracle.Vec", VR_VEC);
+		runSupertypeHostReplay(objectDot, objectV1, objectV2);
+
+		String shapeDot = "oracle.CaseVrShapeHost";
+		String shape = "package oracle;\npublic interface Shape { }\n";
+		String shapeVec = "package oracle;\npublic record Vec(int x, int y) implements Shape { }\n";
+		Map<String, String> shapeV1 = new LinkedHashMap<>();
+		shapeV1.put(shapeDot, vrHost("CaseVrShapeHost", "\tShape v = new Vec(4, 4);", "\tObject v() { return v; }"));
+		shapeV1.put("oracle.Shape", shape);
+		shapeV1.put("oracle.Vec", shapeVec);
+		Map<String, String> shapeV2 = new LinkedHashMap<>();
+		shapeV2.put(shapeDot, vrHost("CaseVrShapeHost", "\tShape v = new Vec(4, 12);", "\tObject v() { return v; }"));
+		shapeV2.put("oracle.Shape", shape);
+		shapeV2.put("oracle.Vec", shapeVec);
+		runSupertypeHostReplay(shapeDot, shapeV1, shapeV2);
+	}
+
+	/** 单个 supertype 宿主的端到端重放：transform -> apply -> 实例字段被替换为 v2 初值。 */
+	static void runSupertypeHostReplay(String dot, Map<String, String> v1, Map<String, String> v2) throws Exception {
+		Fixture fx = loadValueReplayRuntimeFixture(dot, v1, v2);
+		Object instance = construct(fx.host);
+		Object oldValue = read(fx.host, instance, "v");
+		check(oldValue != null, dot + " precondition: the live instance holds the old value");
+		InstanceTracker.register(instance);
+		Object expected = valueObject(fx.host, "oracle.Vec", 4, 12);
+
+		withValueReplay(true, () -> {
+			BatchReportScope.begin();
+			HotswapBatchReport batch;
+			try {
+				InitFix.PatchReport planned = fx.transform();
+				InitFix.FieldDecision decision = planned.valueReplayFields().get("v");
+				check(decision != null && decision.status() == InitFix.FieldStatus.ACCEPTED,
+					dot + ": analysis plans v (actual " + planned.valueReplayFields() + ")");
+				fx.apply();
+				batch = finishBatchReport();
+			} finally {
+				if (BatchReportScope.isActive()) BatchReportScope.discard();
+			}
+
+			Object newValue = read(fx.host, instance, "v");
+			check(Objects.equals(expected, newValue),
+				dot + ": the live field was replayed to Vec(4,12) without a binding failure (actual "
+					+ describe(newValue) + ")");
+			check(newValue != oldValue, dot + ": the old reference was replaced");
+
+			InitFix.PatchReport after = InitFix.getLastReport(fx.host);
+			InitFix.FieldDecision written = after.valueReplayFields().get("v");
+			check(written != null && written.status() == InitFix.FieldStatus.ACCEPTED,
+				dot + ": the runtime outcome is written (actual " + after.valueReplayFields() + ")");
+			HotswapBatchReport.InitFixStats stats = batch == null ? null : batch.getInitFixStats();
+			check(stats != null && stats.getValueReplayApplied() == 1,
+				dot + ": batch report counts one applied field (actual "
+					+ (stats == null ? null : stats.getValueReplayApplied()) + ")");
+			check(stats != null && stats.getValueReplayFailed() == 0,
+				dot + ": no binding failure is reported");
+		});
+	}
+
+	/**
+	 * Kotlin data class 的 Float/Double/Long 组件真实字节：kotlinc 生成 Float.compare /
+	 * Double.compare / LCMP 与 Float/Double/Long.hashCode，A3 必须仍判为编译器生成。
+	 */
+	static void caseValueReplayKotlinFloatDoubleLong() throws Exception {
+		String dot = "oracle.KtFdlHolder";
+		CompiledFixture cf = loadCompiledRuntimeFixture(dot);
+		Fixture fx = cf.fx;
+
+		check(!Arrays.equals(fx.v1, fx.v2), "KtFdl: v1/v2 host bytes differ");
+		ValueTypeReplay.Plan shape = ValueTypeReplay.plan(
+			ClassDiffUtil.diff(fx.v1, fx.v2), cf::bytesOf, name -> false, false);
+		check(shape.fields().containsKey("v"),
+			"KtFdl A3: the Float/Double/Long data class is accepted as a value type (planned="
+				+ shape.fields() + ", rejected=" + shape.rejected() + ")");
+		check(shape.rejected().isEmpty(),
+			"KtFdl A3: no rejection for the Float/Double/Long data-class host (actual "
+				+ shape.rejected() + ")");
+
+		Object instance = construct(fx.host);
+		Object oldValue = read(fx.host, instance, "v");
+		check(oldValue != null, "KtFdl precondition: the live host instance holds a KtVecFdl value");
+		check(ktNumber(oldValue, "getX") == 1.5 && ktNumber(oldValue, "getY") == 2.5
+			&& ktNumber(oldValue, "getZ") == 3.0,
+			"KtFdl precondition: the live value is KtVecFdl(1.5, 2.5, 3) (actual x="
+				+ ktNumber(oldValue, "getX") + ", y=" + ktNumber(oldValue, "getY")
+				+ ", z=" + ktNumber(oldValue, "getZ") + ")");
+		InstanceTracker.register(instance);
+
+		withValueReplay(true, () -> {
+			BatchReportScope.begin();
+			HotswapBatchReport batch;
+			try {
+				InitFix.PatchReport planned = fx.transform();
+				InitFix.FieldDecision decision = planned.valueReplayFields().get("v");
+				check(decision != null && decision.status() == InitFix.FieldStatus.ACCEPTED,
+					"KtFdl: analysis plans the Float/Double/Long data-class field (actual "
+						+ planned.valueReplayFields() + ")");
+				check(!planned.patchGenerated(),
+					"KtFdl: a value-replay-only round keeps patchGenerated=false");
+				fx.apply();
+				batch = finishBatchReport();
+			} finally {
+				if (BatchReportScope.isActive()) BatchReportScope.discard();
+			}
+
+			Object newValue = read(fx.host, instance, "v");
+			check(newValue != null && newValue != oldValue,
+				"KtFdl: the old KtVecFdl reference was replaced");
+			check(ktNumber(newValue, "getX") == 1.5 && ktNumber(newValue, "getY") == 12.5
+				&& ktNumber(newValue, "getZ") == 3.0,
+				"KtFdl: the live instance now holds KtVecFdl(1.5,12.5,3) (actual x="
+					+ ktNumber(newValue, "getX") + ", y=" + ktNumber(newValue, "getY")
+					+ ", z=" + ktNumber(newValue, "getZ") + ")");
+
+			InitFix.PatchReport after = InitFix.getLastReport(fx.host);
+			InitFix.FieldDecision written = after.valueReplayFields().get("v");
+			check(written != null && written.status() == InitFix.FieldStatus.ACCEPTED,
+				"KtFdl: the runtime outcome is written (actual " + after.valueReplayFields() + ")");
+			HotswapBatchReport.InitFixStats stats = batch == null ? null : batch.getInitFixStats();
+			check(stats != null && stats.getValueReplayApplied() == 1,
+				"KtFdl: batch report counts one applied field (actual "
+					+ (stats == null ? null : stats.getValueReplayApplied()) + ")");
+			check(stats != null && stats.getValueReplaySkipped() == 0
+				&& stats.getValueReplayFailed() == 0 && stats.getValueReplayRejected() == 0,
+				"KtFdl: no skipped/failed/rejected in this round");
+		});
+	}
+
 	/** 读 Kotlin data class 属性的 getter（getX/getY）；夹具是真实 kotlinc 产物。 */
 	static int ktComponent(Object value, String getter) {
 		try {
 			Method m = value.getClass().getMethod(getter);
 			return (Integer) m.invoke(value);
+		} catch (ReflectiveOperationException e) {
+			throw new IllegalStateException("Kotlin 属性读取失败：" + getter, e);
+		}
+	}
+
+	/** 以 double 读取 Kotlin 的 Float/Double/Long getter，夹具是真实 kotlinc 产物。 */
+	static double ktNumber(Object value, String getter) {
+		try {
+			Method m = value.getClass().getMethod(getter);
+			return ((Number) m.invoke(value)).doubleValue();
 		} catch (ReflectiveOperationException e) {
 			throw new IllegalStateException("Kotlin 属性读取失败：" + getter, e);
 		}

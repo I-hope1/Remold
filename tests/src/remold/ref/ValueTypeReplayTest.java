@@ -321,6 +321,24 @@ class ValueTypeReplayTest {
 	}
 
 	@Test
+	void kotlinFloatDoubleLongDataClassShapeIsAccepted() {
+		// Synthetic kotlinc 2.x shape for Float/Double/Long components: equals uses
+		// Float.compare/Double.compare + LCMP, hashCode uses Float/Double/Long.hashCode.
+		Map<String, byte[]> v1 = kotlinFdlHost(1.5f, 2.5, 3L);
+		Map<String, byte[]> v2 = kotlinFdlHost(1.5f, 12.5, 3L);
+		byte[] kotlinFdl = kotlinFdlDataClass();
+
+		ValueTypeReplay.Plan plan = planWith(v1, v2, name -> "kx/Fdl".equals(name) ? kotlinFdl : null,
+			name -> false, false);
+
+		ValueTypeReplay.Field field = plan.fields().get("v");
+		assertNotNull(field, "rejected=" + plan.rejected() + " details=" + plan.details());
+		assertTrue(plan.rejected().isEmpty(), plan.rejected().toString());
+		assertNotBlank(field.ctorFingerprint());
+		assertNotBlank(field.equalsFingerprint());
+	}
+
+	@Test
 	void kotlinCustomEqualsIsRejected() {
 		// Negative control for the bytecode-shape heuristic: a class carrying kotlin/Metadata,
 		// componentN and copy but with a hand-written equals (here identity-only, potentially
@@ -472,6 +490,132 @@ class ValueTypeReplayTest {
 		assertNotNull(plan.fields().get("v"), "rejected=" + plan.rejected() + " details=" + plan.details());
 	}
 
+	// ==================== A0 scope: unrelated / unchanged fields stay silent ====================
+
+	@Test
+	void unrelatedStringFieldInMultiRootHostIsNotRejected() {
+		// Neither side carries a `new T(...)` initializer, so value-type replay has no business
+		// reporting the String disagreement as MULTI_ROOT_MISMATCH.
+		String hostV1 = "package fx;\npublic class Host {\n"
+		                + "  String s;\n"
+		                + "  Host() { s = \"a\"; }\n"
+		                + "  Host(int ignored) { s = \"a\"; }\n}\n";
+		String hostV2 = "package fx;\npublic class Host {\n"
+		                + "  String s;\n"
+		                + "  Host() { s = \"b\"; }\n"
+		                + "  Host(int ignored) { s = \"a\"; }\n}\n";
+		Map<String, byte[]> v1 = compile(Map.of("fx/Host.java", hostV1));
+		Map<String, byte[]> v2 = compile(Map.of("fx/Host.java", hostV2));
+
+		ValueTypeReplay.Plan plan = plan(v1, v2, name -> false, false);
+
+		assertTrue(plan.fields().isEmpty(), plan.fields().toString());
+		assertTrue(plan.rejected().isEmpty(), "unrelated String initializers must stay silent: "
+		                                      + plan.rejected() + " details=" + plan.details());
+	}
+
+	@Test
+	void removedNonNewInitializerIsNotRejected() {
+		String hostV1 = "package fx;\npublic class Host { String s = \"a\"; }\n";
+		String hostV2 = "package fx;\npublic class Host { String s; }\n";
+		Map<String, byte[]> v1 = compile(Map.of("fx/Host.java", hostV1));
+		Map<String, byte[]> v2 = compile(Map.of("fx/Host.java", hostV2));
+
+		ValueTypeReplay.Plan plan = plan(v1, v2, name -> false, false);
+
+		assertTrue(plan.fields().isEmpty(), plan.fields().toString());
+		assertTrue(plan.rejected().isEmpty(), "removing a non-new initializer is outside this channel: "
+		                                      + plan.rejected() + " details=" + plan.details());
+	}
+
+	@Test
+	void removedNewInitializerIsStillRejected() {
+		// Negative control for the scope guard: an old `new Vec(...)` initializer that disappears must
+		// still be rejected because the old value can no longer be rebuilt.
+		String vec = "package fx;\npublic record Vec(int x, int y) {}\n";
+		String hostV1 = "package fx;\npublic class Host { Vec v = new Vec(4, 4); }\n";
+		String hostV2 = "package fx;\npublic class Host { Vec v; }\n";
+		Map<String, byte[]> v1 = compile(Map.of("fx/Vec.java", vec, "fx/Host.java", hostV1));
+		Map<String, byte[]> v2 = compile(Map.of("fx/Vec.java", vec, "fx/Host.java", hostV2));
+
+		ValueTypeReplay.Plan plan = plan(v1, v2, name -> false, false);
+
+		assertEquals(ValueTypeReplay.Reason.EXPR_NOT_CONSTANT, plan.rejected().get("v"),
+			"detail=" + plan.details().get("v"));
+		assertTrue(plan.fields().isEmpty());
+	}
+
+	@Test
+	void unchangedNewFieldWithAddedRootIsNotRejected() {
+		// The `new Vec(4,4)` writes are identical on both sides; a new root constructor that simply does
+		// not initialize the field changes the root count but not this field's expressions, so A0 is
+		// not triggered (no MULTI_ROOT_MISMATCH).
+		String vec = "package fx;\npublic record Vec(int x, int y) {}\n";
+		String hostV1 = "package fx;\npublic class Host {\n"
+		                + "  Vec v;\n"
+		                + "  Host() { v = new Vec(4, 4); }\n"
+		                + "  Host(int ignored) { v = new Vec(4, 4); }\n}\n";
+		String hostV2 = "package fx;\npublic class Host {\n"
+		                + "  Vec v;\n"
+		                + "  Host() { v = new Vec(4, 4); }\n"
+		                + "  Host(int ignored) { v = new Vec(4, 4); }\n"
+		                + "  Host(String ignored) { }\n}\n";
+		Map<String, byte[]> v1 = compile(Map.of("fx/Vec.java", vec, "fx/Host.java", hostV1));
+		Map<String, byte[]> v2 = compile(Map.of("fx/Vec.java", vec, "fx/Host.java", hostV2));
+
+		ValueTypeReplay.Plan plan = plan(v1, v2, name -> false, false);
+
+		assertTrue(plan.fields().isEmpty(), "an unchanged field must not be replanned: " + plan.fields());
+		assertTrue(plan.rejected().isEmpty(), "unchanged expressions must not be rejected: "
+		                                      + plan.rejected() + " details=" + plan.details());
+	}
+
+	// ==================== A2: both constructor chains are validated ====================
+
+	@Test
+	void delegatingNewCtorIsRejected() {
+		// old host uses the canonical (II) constructor; new host switches to (I), which delegates via
+		// this(x, 0). The new chain must be walked and fail closed as an unresolved chain.
+		String vec = "package fx;\npublic record Vec(int x, int y) {\n"
+		             + "  public Vec(int x) { this(x, 0); }\n}\n";
+		String hostV1 = "package fx;\npublic class Host { final Vec v = new Vec(4, 4); }\n";
+		String hostV2 = "package fx;\npublic class Host { final Vec v = new Vec(4); }\n";
+		Map<String, byte[]> v1 = compile(Map.of("fx/Vec.java", vec, "fx/Host.java", hostV1));
+		Map<String, byte[]> v2 = compile(Map.of("fx/Vec.java", vec, "fx/Host.java", hostV2));
+
+		ValueTypeReplay.Plan plan = plan(v1, v2, name -> false, false);
+
+		assertEquals(ValueTypeReplay.Reason.CTOR_CHAIN_UNRESOLVED, plan.rejected().get("v"),
+			"detail=" + plan.details().get("v"));
+		assertTrue(plan.fields().isEmpty());
+	}
+
+	@Test
+	void newCtorConstantValueFromBatchCandidateIsRejected() {
+		// old host uses the pure canonical (II) constructor. The new (I) constructor reads a
+		// ConstantValue from kx/Const, which is a redefine candidate in this batch, so A2 must reject
+		// CONSTRUCTED_CHANGED after validating both chains.
+		String stub = "package kx;\nclass Vec { Vec(int x, int y) {} Vec(int x) {} }\n";
+		String hostV1 = "package kx;\nclass Host { final Vec v = new Vec(4, 4); }\n";
+		String hostV2 = "package kx;\nclass Host { final Vec v = new Vec(4); }\n";
+		Map<String, byte[]> v1 = compile(Map.of("kx/Vec.java", stub, "kx/Host.java", hostV1));
+		Map<String, byte[]> v2 = compile(Map.of("kx/Vec.java", stub, "kx/Host.java", hostV2));
+		byte[] kotlinVec = kotlinDataClassWithConstantCtor();
+		byte[] constantOwner = constantOwner();
+
+		ValueTypeReplay.Plan plan = planWith(v1, v2,
+			name -> switch (name) {
+				case "kx/Vec" -> kotlinVec;
+				case "kx/Const" -> constantOwner;
+				default -> null;
+			},
+			"kx/Const"::equals, false);
+
+		assertEquals(ValueTypeReplay.Reason.CONSTRUCTED_CHANGED, plan.rejected().get("v"),
+			"detail=" + plan.details().get("v"));
+		assertTrue(plan.fields().isEmpty());
+	}
+
 	// ==================== BytecodeNormalFingerprint ====================
 
 	@Test
@@ -595,6 +739,12 @@ class ValueTypeReplayTest {
 		String stub = "package kx;\nclass Vec { Vec(int x, int y) {} }\n";
 		String host = "package kx;\nclass Host { final Vec v = new Vec(" + x + ", " + y + "); }\n";
 		return compile(Map.of("kx/Vec.java", stub, "kx/Host.java", host));
+	}
+
+	private static Map<String, byte[]> kotlinFdlHost(float x, double y, long z) {
+		String stub = "package kx;\nclass Fdl { Fdl(float x, double y, long z) {} }\n";
+		String host = "package kx;\nclass Host { final Fdl v = new Fdl(" + x + "f, " + y + ", " + z + "L); }\n";
+		return compile(Map.of("kx/Fdl.java", stub, "kx/Host.java", host));
 	}
 
 	/** In-memory javac; returns internal class name ({@code pkg/Name}) to bytes. */
@@ -724,6 +874,15 @@ class ValueTypeReplayTest {
 	}
 
 	private static byte[] kotlinDataClass(boolean fieldsFinal, boolean extraField, boolean customEquals) {
+		return kotlinDataClass(fieldsFinal, extraField, customEquals, false);
+	}
+
+	private static byte[] kotlinDataClassWithConstantCtor() {
+		return kotlinDataClass(true, false, false, true);
+	}
+
+	private static byte[] kotlinDataClass(boolean fieldsFinal, boolean extraField, boolean customEquals,
+	                                      boolean constantCtor) {
 		String name = "kx/Vec";
 		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
 		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_SUPER, name, null,
@@ -749,6 +908,20 @@ class ValueTypeReplayTest {
 		ctor.visitInsn(Opcodes.RETURN);
 		ctor.visitMaxs(0, 0);
 		ctor.visitEnd();
+
+		if (constantCtor) {
+			// A second, non-delegating constructor that reads a compile-time constant from another
+			// class. Java source cannot express this shape; it exists only to drive the A2 closure gate.
+			MethodVisitor extraCtor = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "(I)V", null, null);
+			extraCtor.visitCode();
+			extraCtor.visitVarInsn(Opcodes.ALOAD, 0);
+			extraCtor.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+			extraCtor.visitFieldInsn(Opcodes.GETSTATIC, "kx/Const", "K", "I");
+			extraCtor.visitInsn(Opcodes.POP);
+			extraCtor.visitInsn(Opcodes.RETURN);
+			extraCtor.visitMaxs(0, 0);
+			extraCtor.visitEnd();
+		}
 
 		component(cw, name, "component1", "x");
 		component(cw, name, "component2", "y");
@@ -862,5 +1035,170 @@ class ValueTypeReplayTest {
 		mv.visitInsn(Opcodes.IRETURN);
 		mv.visitMaxs(0, 0);
 		mv.visitEnd();
+	}
+
+	/**
+	 * Synthetic kotlinc 2.x data class with {@code Float}/{@code Double}/{@code Long} components.
+	 * {@code equals} compares with {@code Float.compare}/{@code Double.compare}/{@code LCMP};
+	 * {@code hashCode} delegates to the boxed static hash helpers.
+	 */
+	private static byte[] kotlinFdlDataClass() {
+		String name = "kx/Fdl";
+		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_SUPER, name, null,
+			"java/lang/Object", null);
+		AnnotationVisitor metadata = cw.visitAnnotation("Lkotlin/Metadata;", true);
+		metadata.visit("k", 1);
+		metadata.visitEnd();
+		int fieldAccess = Opcodes.ACC_PRIVATE | Opcodes.ACC_FINAL;
+		cw.visitField(fieldAccess, "x", "F", null, null).visitEnd();
+		cw.visitField(fieldAccess, "y", "D", null, null).visitEnd();
+		cw.visitField(fieldAccess, "z", "J", null, null).visitEnd();
+
+		MethodVisitor ctor = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "(FDJ)V", null, null);
+		ctor.visitCode();
+		ctor.visitVarInsn(Opcodes.ALOAD, 0);
+		ctor.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+		ctor.visitVarInsn(Opcodes.ALOAD, 0);
+		ctor.visitVarInsn(Opcodes.FLOAD, 1);
+		ctor.visitFieldInsn(Opcodes.PUTFIELD, name, "x", "F");
+		ctor.visitVarInsn(Opcodes.ALOAD, 0);
+		ctor.visitVarInsn(Opcodes.DLOAD, 2);
+		ctor.visitFieldInsn(Opcodes.PUTFIELD, name, "y", "D");
+		ctor.visitVarInsn(Opcodes.ALOAD, 0);
+		ctor.visitVarInsn(Opcodes.LLOAD, 4);
+		ctor.visitFieldInsn(Opcodes.PUTFIELD, name, "z", "J");
+		ctor.visitInsn(Opcodes.RETURN);
+		ctor.visitMaxs(0, 0);
+		ctor.visitEnd();
+
+		fdlComponent(cw, name, "component1", "x", "F", Opcodes.FRETURN);
+		fdlComponent(cw, name, "component2", "y", "D", Opcodes.DRETURN);
+		fdlComponent(cw, name, "component3", "z", "J", Opcodes.LRETURN);
+
+		MethodVisitor copy = cw.visitMethod(Opcodes.ACC_PUBLIC, "copy", "(FDJ)L" + name + ";", null, null);
+		copy.visitCode();
+		copy.visitTypeInsn(Opcodes.NEW, name);
+		copy.visitInsn(Opcodes.DUP);
+		copy.visitVarInsn(Opcodes.FLOAD, 1);
+		copy.visitVarInsn(Opcodes.DLOAD, 2);
+		copy.visitVarInsn(Opcodes.LLOAD, 4);
+		copy.visitMethodInsn(Opcodes.INVOKESPECIAL, name, "<init>", "(FDJ)V", false);
+		copy.visitInsn(Opcodes.ARETURN);
+		copy.visitMaxs(0, 0);
+		copy.visitEnd();
+
+		kotlinFdlEquals(cw, name);
+		kotlinFdlHashCode(cw, name);
+		cw.visitEnd();
+		return cw.toByteArray();
+	}
+
+	private static void fdlComponent(ClassWriter cw, String name, String methodName, String fieldName,
+	                                 String desc, int returnOpcode) {
+		MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL, methodName, "()" + desc, null, null);
+		mv.visitCode();
+		mv.visitVarInsn(Opcodes.ALOAD, 0);
+		mv.visitFieldInsn(Opcodes.GETFIELD, name, fieldName, desc);
+		mv.visitInsn(returnOpcode);
+		mv.visitMaxs(0, 0);
+		mv.visitEnd();
+	}
+
+	private static void kotlinFdlEquals(ClassWriter cw, String name) {
+		MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC, "equals", "(Ljava/lang/Object;)Z", null, null);
+		mv.visitCode();
+		Label notSame = new Label();
+		Label isType = new Label();
+		Label xEqual = new Label();
+		Label yEqual = new Label();
+		Label zEqual = new Label();
+		mv.visitVarInsn(Opcodes.ALOAD, 0);
+		mv.visitVarInsn(Opcodes.ALOAD, 1);
+		mv.visitJumpInsn(Opcodes.IF_ACMPNE, notSame);
+		mv.visitInsn(Opcodes.ICONST_1);
+		mv.visitInsn(Opcodes.IRETURN);
+		mv.visitLabel(notSame);
+		mv.visitVarInsn(Opcodes.ALOAD, 1);
+		mv.visitTypeInsn(Opcodes.INSTANCEOF, name);
+		mv.visitJumpInsn(Opcodes.IFNE, isType);
+		mv.visitInsn(Opcodes.ICONST_0);
+		mv.visitInsn(Opcodes.IRETURN);
+		mv.visitLabel(isType);
+		mv.visitVarInsn(Opcodes.ALOAD, 1);
+		mv.visitTypeInsn(Opcodes.CHECKCAST, name);
+		mv.visitVarInsn(Opcodes.ASTORE, 2);
+
+		mv.visitVarInsn(Opcodes.ALOAD, 0);
+		mv.visitFieldInsn(Opcodes.GETFIELD, name, "x", "F");
+		mv.visitVarInsn(Opcodes.ALOAD, 2);
+		mv.visitFieldInsn(Opcodes.GETFIELD, name, "x", "F");
+		mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Float", "compare", "(FF)I", false);
+		mv.visitJumpInsn(Opcodes.IFEQ, xEqual);
+		mv.visitInsn(Opcodes.ICONST_0);
+		mv.visitInsn(Opcodes.IRETURN);
+		mv.visitLabel(xEqual);
+
+		mv.visitVarInsn(Opcodes.ALOAD, 0);
+		mv.visitFieldInsn(Opcodes.GETFIELD, name, "y", "D");
+		mv.visitVarInsn(Opcodes.ALOAD, 2);
+		mv.visitFieldInsn(Opcodes.GETFIELD, name, "y", "D");
+		mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Double", "compare", "(DD)I", false);
+		mv.visitJumpInsn(Opcodes.IFEQ, yEqual);
+		mv.visitInsn(Opcodes.ICONST_0);
+		mv.visitInsn(Opcodes.IRETURN);
+		mv.visitLabel(yEqual);
+
+		mv.visitVarInsn(Opcodes.ALOAD, 0);
+		mv.visitFieldInsn(Opcodes.GETFIELD, name, "z", "J");
+		mv.visitVarInsn(Opcodes.ALOAD, 2);
+		mv.visitFieldInsn(Opcodes.GETFIELD, name, "z", "J");
+		mv.visitInsn(Opcodes.LCMP);
+		mv.visitJumpInsn(Opcodes.IFEQ, zEqual);
+		mv.visitInsn(Opcodes.ICONST_0);
+		mv.visitInsn(Opcodes.IRETURN);
+		mv.visitLabel(zEqual);
+		mv.visitInsn(Opcodes.ICONST_1);
+		mv.visitInsn(Opcodes.IRETURN);
+		mv.visitMaxs(0, 0);
+		mv.visitEnd();
+	}
+
+	private static void kotlinFdlHashCode(ClassWriter cw, String name) {
+		MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC, "hashCode", "()I", null, null);
+		mv.visitCode();
+		mv.visitVarInsn(Opcodes.ALOAD, 0);
+		mv.visitFieldInsn(Opcodes.GETFIELD, name, "x", "F");
+		mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Float", "hashCode", "(F)I", false);
+		mv.visitVarInsn(Opcodes.ISTORE, 1);
+		mv.visitVarInsn(Opcodes.ILOAD, 1);
+		mv.visitIntInsn(Opcodes.BIPUSH, 31);
+		mv.visitInsn(Opcodes.IMUL);
+		mv.visitVarInsn(Opcodes.ALOAD, 0);
+		mv.visitFieldInsn(Opcodes.GETFIELD, name, "y", "D");
+		mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Double", "hashCode", "(D)I", false);
+		mv.visitInsn(Opcodes.IADD);
+		mv.visitVarInsn(Opcodes.ISTORE, 1);
+		mv.visitVarInsn(Opcodes.ILOAD, 1);
+		mv.visitIntInsn(Opcodes.BIPUSH, 31);
+		mv.visitInsn(Opcodes.IMUL);
+		mv.visitVarInsn(Opcodes.ALOAD, 0);
+		mv.visitFieldInsn(Opcodes.GETFIELD, name, "z", "J");
+		mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false);
+		mv.visitInsn(Opcodes.IADD);
+		mv.visitVarInsn(Opcodes.ISTORE, 1);
+		mv.visitVarInsn(Opcodes.ILOAD, 1);
+		mv.visitInsn(Opcodes.IRETURN);
+		mv.visitMaxs(0, 0);
+		mv.visitEnd();
+	}
+
+	/** Synthetic owner with a single compile-time {@code ConstantValue} field. */
+	private static byte[] constantOwner() {
+		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+		cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, "kx/Const", null, "java/lang/Object", null);
+		cw.visitField(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL, "K", "I", null, 7).visitEnd();
+		cw.visitEnd();
+		return cw.toByteArray();
 	}
 }

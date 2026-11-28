@@ -3550,9 +3550,9 @@ public class InitFix {
 			String buildNew = InitFixPatchEmitter.uniqueMethodName(
 			 VALUE_REPLAY_NEW_PREFIX, fieldName, usedMethodNames);
 			patch.methods.add(InitFixPatchEmitter.expressionFactoryMethod(
-			 buildOld, carved.type(), carved.oldExpression()));
+			 buildOld, carved.oldExpression()));
 			patch.methods.add(InitFixPatchEmitter.expressionFactoryMethod(
-			 buildNew, carved.type(), carved.newExpression()));
+			 buildNew, carved.newExpression()));
 			valueReplayTasks.add(new ValueReplayTask(fieldName, planned.isStatic(), planned.desc(),
 			 planned.oldFingerprint(), planned.newFingerprint(), planned.ctorFingerprint(),
 			 planned.equalsFingerprint(), buildOld, buildNew));

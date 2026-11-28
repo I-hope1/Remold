@@ -704,9 +704,9 @@ final class InitFixRuntimeDriver {
 				HotswapBridge.ReferenceFieldSlot slot = HotswapBridge.resolveReferenceField(
 				 host, fieldName, task.desc(), task.isStatic());
 				MethodHandle buildOld = bindValueReplayFactory(
-				 patchLookup, patchClass, host, task.buildOldMethod(), task.desc());
+				 patchLookup, patchClass, task.buildOldMethod());
 				MethodHandle buildNew = bindValueReplayFactory(
-				 patchLookup, patchClass, host, task.buildNewMethod(), task.desc());
+				 patchLookup, patchClass, task.buildNewMethod());
 				// W0：旧值每字段只重建一次（静态槽位与全部实例共用）。
 				Object rebuiltOld = buildOld.invokeExact();
 
@@ -791,14 +791,15 @@ final class InitFixRuntimeDriver {
 		 List.copyOf(failedFields), List.copyOf(failedDetails));
 	}
 
-	/** 绑定补丁类里 {@code ()LT;} 形式的 buildOld/buildNew 工厂方法为 {@code ()Object}。 */
+	/**
+	 * 绑定补丁类里 {@code ()Ljava/lang/Object;} 形式的 buildOld/buildNew 工厂方法。
+	 *
+	 * <p>发射器固定返回 {@code Object}（宿主字段可能声明为 {@code Object} 或接口，表达式构造类型不必
+	 * 与字段描述符一致），因此查找类型就是 {@code ()Object}，无需按字段描述符解析。</p>
+	 */
 	private static MethodHandle bindValueReplayFactory(Lookup patchLookup, Class<?> patchClass,
-	                                                   Class<?> host, String methodName,
-	                                                   String fieldDesc) throws Throwable {
-		MethodType type = MethodType.fromMethodDescriptorString(
-		 "()" + fieldDesc, host.getClassLoader());
-		return patchLookup.findStatic(patchClass, methodName, type)
-		 .asType(MethodType.methodType(Object.class));
+	                                                   String methodName) throws Throwable {
+		return patchLookup.findStatic(patchClass, methodName, MethodType.methodType(Object.class));
 	}
 
 	/** 值类型重放 task 的 applied 记录形态（记录键与 {@link ValueTypeReplay.Field} 同构）。 */

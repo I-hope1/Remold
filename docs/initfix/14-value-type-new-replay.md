@@ -45,6 +45,11 @@ applied 记录失效/重算，**不单独触发写入**。failed 不构成该判
 
 > 参数来自构造器参数、字段读取、方法调用返回值等不可重建形态时拒绝。
 
+- **旧侧也必须是直线 `new T(...)`**：旧初值是字面量 / 方法调用等非 NEW 形态时，本通道
+  不触发（不报 REJECTED；初值漂移仍由 L0 检测并告警），因为不存在可重建的旧值；
+- **委托构造器（`this(...)`）MVP fail-closed**：只支持 record canonical ctor / Kotlin 主构造器；
+  构造器链出现委托调用时按 `VALUE-REPLAY-CTOR-CHAIN-UNRESOLVED` 拒绝。
+
 ### A2 构造链在批次内稳定
 
 `T`、`T` 的各级 `super()` 构造链、以及 A1/A3 验证闭包内被调用的类，任一出现在本批
@@ -89,6 +94,17 @@ MVP 只接受以下形态（`T` 为被构造类型）：
 
 > MVP 不做递归组件指纹：A3 把组件限制在基本类型 / `String` 后，生成 `equals` 的行为只由
 > `T` 自身的 `<init>`/`equals` 字节码决定，无需递归组件类型指纹。
+
+A3 判定边界：
+
+- **Kotlin data class 按字节码形态判定**（`kotlin/Metadata` 注解存在 + `componentN`/`copy`
+  方法 + 主构造字段全 `private final` + 类体无额外实例字段 + 直接超类 `Object`/仅接口），
+  **不解析 `Metadata` 内容**；手写同形态类会被当作 data class（MVP 接受该边界，由
+  `equals`/`hashCode` 生成形态门兜底）；
+- **构造纯度门的 `GETSTATIC` 只允许批内字节可解析的 `ConstantValue` 常量**；JDK 常量
+  （如 `Integer.MAX_VALUE`）因取不到 owner 字节而 fail-closed；
+- record 宿主的拒绝需要 A0 提取器识别"构造器参数一跳写入字段"的形态（javac compact
+  constructor 不直接从 `NEW` 写字段），否则 record 宿主会漏判。
 
 ### A4 目标字段类型与宿主限制
 
@@ -211,6 +227,8 @@ for each 存活实例 i:
 | `VALUE-REPLAY-HOST-RECORD` | A4 实例字段声明类为 record/hidden |
 | `VALUE-REPLAY-STATIC-FINAL-NEEDS-ENHANCED` | A4 静态 final 目标但无 enhanced |
 | `VALUE-REPLAY-CAS-EXHAUSTED` | W4 有界重试用尽 |
+| `VALUE-REPLAY-MULTI-ROOT-MISMATCH` | A5 多根构造器初值不一致 / 某根未写该字段 |
+| `VALUE-REPLAY-CTOR-CHAIN-UNRESOLVED` | A2 构造器链字节不可读 / 委托构造器 `this(...)` |
 
 **迁移说明**：本通道收窄前，非 enhanced 运行时也可能对既有 `static final` 引用字段执行
 `@RemoldReinit` 覆写；收窄后该形态 fail-closed。需要保留能力的用户应启用
@@ -236,6 +254,7 @@ for each 存活实例 i:
   constructor 注入副作用；
 - A4：record 宿主实例字段；非 enhanced 静态 final；宿主未完成初始化；
 - 触发：初值指纹未变、只有构造链变化 → 不写入（applied 记录失效但不重放）；
+- 旧侧非 NEW 形态（如 `= someCall()`）→ 不触发、不报 REJECTED；委托构造器 → `CTOR_CHAIN-UNRESOLVED`；
 - W4：CAS 竞争用尽 → failed，不记 applied；并发修改后重试必须重新走 W1/W2；
 - failed 可见性与不自动重试：同一初值指纹的下一轮不得重试；批次报告的 failed 计数/字段/原因存在；
 - 可见性负基线：不触发 redefine 时，对静态 final 折叠读者断言 stale（证明测试确实能抓到问题）。

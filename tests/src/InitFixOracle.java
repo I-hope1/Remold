@@ -1,10 +1,13 @@
 import remold.AnnotationTransformer;
+import remold.BatchReportScope;
 import remold.ClassDiffUtil;
+import remold.HotswapBatchReport;
 import remold.RemoldAgent;
 import remold.InstanceTracker;
 import remold.Reflect;
 import remold.ref.InitFix;
 import remold.ref.HotswapBridge;
+import remold.ref.ValueTypeReplay;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;
@@ -37,6 +40,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -163,6 +167,20 @@ public class InitFixOracle {
 		scenario("§4.2 前提：跨类调用 / 他类静态字段型初值确实会被放行", InitFixOracle::caseExternalDependencyAccepted);
 		scenario("§4.2 @RemoldReinit 只在初值表达式变了时重置：封闭可跳过、开放必须照写", InitFixOracle::caseReinitOnlyWhenInitializerChanges);
 		scenario("§4.2 注解摘掉再重新加上：记录必须作废，否则重置被吃掉", InitFixOracle::caseReinitReaddedAfterRemoval);
+		scenario("§5.1 风险 34：既有 static final 字段改写无增强重定义时逐字段拒绝（非 final/ConstantValue/实例字段不受影响）", InitFixOracle::caseStaticFinalEnhancedGate);
+		scenario("值类型 new 初值重放：属性关闭行为不变 / 打开后 planned + buildOld/buildNew 工厂方法 + 不污染台账", InitFixOracle::caseValueReplayPlanned);
+		scenario("值类型 new 初值重放 A0：初值表达式未变 -> 既不 planned 也不 rejected", InitFixOracle::caseValueReplayA0Untriggered);
+		scenario("值类型 new 初值重放 A3/A4 拒绝码：EQ-CUSTOM / CTOR-IMPURE / STATIC-FINAL-NEEDS-ENHANCED / EXPR-NOT-CONSTANT / MULTI-ROOT", InitFixOracle::caseValueReplayRejectedCodes);
+		scenario("值类型 new 初值重放 A2：被构造类型在本批重定义候选中 -> CONSTRUCTED-CHANGED（批次视图）", InitFixOracle::caseValueReplayConstructedChanged);
+		scenario("值类型 new 初值重放优先级：同字段被 @RemoldReinit 认领时只走一条通道（不得重复写）", InitFixOracle::caseValueReplayPriority);
+		scenario("值类型 new 初值重放与常规补丁共存：拒绝不阻断新增字段补丁、不写 FieldLedger", InitFixOracle::caseValueReplayCoexistsWithRegularPatch);
+		scenario("值类型 new 初值重放运行期 W0-W4：属性关闭不介入 / 两实例各自独立新对象 / applied 记录挡住重复重放 / 批次统计", InitFixOracle::caseValueReplayRuntimeWrites);
+		scenario("值类型 new 初值重放运行期：运行期改值或被置 null -> skipped（保留值、不记 applied、不写台账）", InitFixOracle::caseValueReplayRuntimeSkips);
+		scenario("值类型 new 初值重放运行期：静态槽位 W1-W4 替换 + applied 记录", InitFixOracle::caseValueReplayRuntimeStatic);
+		scenario("值类型 new 初值重放运行期 failed 可见性：报告/去重告警契约，且不覆盖分析期拒绝、不写台账", InitFixOracle::caseValueReplayRuntimeFailedVisible);
+		scenario("值类型 new 初值重放 Kotlin data class 真实字节：A3 形状识别 + v1 存量实例被替换", InitFixOracle::caseValueReplayKotlinDataClass);
+		scenario("值类型 new 初值重放 Kotlin data class Float/Double/Long 真实字节：A3 形状识别 + 实例被替换", InitFixOracle::caseValueReplayKotlinFloatDoubleLong);
+		scenario("值类型 new 初值重放宿主字段声明为 Object/接口：buildOld/buildNew 运行期绑定无 NoSuchMethodException", InitFixOracle::caseValueReplayRuntimeSupertypeHost);
 
 		System.out.println();
 		System.out.println("通过 " + passed + " 条；失败 " + failed + " 条；合计 " + (passed + failed) + " 条");
@@ -1131,6 +1149,141 @@ public class InitFixOracle {
 		check("twenty".equals(read(f8.host, s8, "count")),
 			"CaseN8：存量实例写入了新类型初值（期望 twenty，实际 " + describe(read(f8.host, s8, "count")) + "）");
 		expectReinitHint("CaseN8", "count (OVERWRITE, instance)");
+	}
+
+	// ==================== 场景 14b：§5.1 风险 34 —— 既有 static final 需要增强重定义 ====================
+
+	static final String CASE_SF_GATE_V1 = """
+		package oracle;
+		public class CaseSfGate {
+			private static final StringBuilder MSG = new StringBuilder("old");
+			public static String msg() { return MSG.toString(); }
+		}
+		""";
+
+	static final String CASE_SF_GATE_V2 = """
+		package oracle;
+		public class CaseSfGate {
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private static final StringBuilder MSG = new StringBuilder("new");
+			public static String msg() { return MSG.toString(); }
+		}
+		""";
+
+	static final String CASE_SF_GATE_MIX_V1 = """
+		package oracle;
+		public class CaseSfGateMix {
+			private static final StringBuilder MSG = new StringBuilder("old");
+			private static String plain = "old";
+			private static final String CONST = "a";
+			private static String derived = "x";
+			private String tag = "old";
+			public static String msg() { return MSG.toString(); }
+			public static String plain() { return plain; }
+			public static String constValue() { return CONST; }
+			public static String derived() { return derived; }
+			public String tag() { return tag; }
+		}
+		""";
+
+	static final String CASE_SF_GATE_MIX_V2 = """
+		package oracle;
+		public class CaseSfGateMix {
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private static final StringBuilder MSG = new StringBuilder("new");
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private static String plain = "new";
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private static final String CONST = "b";
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private static String derived = "x" + MSG;
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private String tag = "new";
+			public static String msg() { return MSG.toString(); }
+			public static String plain() { return plain; }
+			public static String constValue() { return CONST; }
+			public static String derived() { return derived; }
+			public String tag() { return tag; }
+		}
+		""";
+
+	/**
+	 * A runtime-initialized {@code static final} reference field (no {@code ConstantValue}) can be
+	 * folded into compiled cross-class readers, and only enhanced class redefinition (stage C) deopts
+	 * those readers. Without {@code -XX:+AllowEnhancedClassRedefinition} the rewrite must fail closed
+	 * per field, with a warn naming the flag. Non-final static, {@code ConstantValue} and instance
+	 * fields must stay unaffected (no behavior change for them).
+	 */
+	static void caseStaticFinalEnhancedGate() throws Exception {
+		check(!RemoldAgent.isEnhancedHotswapEnabled(),
+			"precondition: this oracle JVM has no enhanced class redefinition (flag off)");
+
+		// ---- A: only an existing static final rewrite -> rejected per field, no patch task, no write ----
+		Fixture f1 = loadFixture("oracle.CaseSfGate", CASE_SF_GATE_V1, CASE_SF_GATE_V2);
+		setStaticField(f1.host, "MSG", new StringBuilder("stale"));
+		check("stale".equals(staticMsg(f1.host)),
+			"CaseSfGate precondition: static environment holds the old runtime value (actual "
+			+ describe(staticMsg(f1.host)) + ")");
+
+		InitFix.PatchReport r1 = f1.transform();
+		expect(r1, true, "MSG", InitFix.FieldStatus.REJECTED, "enhanced");
+		InitFix.FieldDecision d1 = r1.staticFields().get("MSG");
+		check(d1.reason() != null && d1.reason().contains("-XX:+AllowEnhancedClassRedefinition"),
+			"CaseSfGate：拒绝原因点名增强重定义开关（实际：" + (d1 == null ? null : d1.reason()) + "）");
+		check(!r1.patchGenerated(), "CaseSfGate：被拒字段不生成任何补丁任务");
+		check(agentWarnings.stream().anyMatch(w ->
+				w.contains("CaseSfGate") && w.contains("-XX:+AllowEnhancedClassRedefinition")),
+			"CaseSfGate：拒绝经 transform 的 warn 出口发出且点名开关（实际 warns="
+			+ agentWarnings.size() + " 条）");
+		f1.apply();
+		check("stale".equals(staticMsg(f1.host)),
+			"CaseSfGate：未发生写入，存量值保持 stale（实际 " + describe(staticMsg(f1.host)) + "）");
+
+		// ---- B: same class also has non-final static / ConstantValue / instance rewrites: they stay
+		//         unaffected (per-field rejection, not whole-class), so mutation of the ACC_FINAL
+		//         condition (or removal of the gate) must turn this scenario red. ----
+		Fixture f2 = loadFixture("oracle.CaseSfGateMix", CASE_SF_GATE_MIX_V1, CASE_SF_GATE_MIX_V2);
+		setStaticField(f2.host, "MSG", new StringBuilder("stale"));
+		setStaticField(f2.host, "plain", "old");
+		setStaticField(f2.host, "CONST", "a");
+		setStaticField(f2.host, "derived", "pre-derived");
+		Object inst = construct(f2.host);
+		setField(f2.host, inst, "tag", "old");
+		InstanceTracker.register(inst);
+
+		InitFix.PatchReport r2 = f2.transform();
+		expect(r2, true, "MSG", InitFix.FieldStatus.REJECTED, "enhanced");
+		expect(r2, true, "plain", InitFix.FieldStatus.ACCEPTED, null);
+		expect(r2, true, "CONST", InitFix.FieldStatus.ACCEPTED, null);
+		expect(r2, false, "tag", InitFix.FieldStatus.ACCEPTED, null);
+		// Dependency closure: "derived" reads the rejected MSG, so it must be rejected per field too
+		// (not accepted, and not silently patched with a stale read) — and it must not drag the whole
+		// class down (plain/CONST/tag stay accepted).
+		expect(r2, true, "derived", InitFix.FieldStatus.REJECTED, "reads new static field 'MSG'");
+		check(r2.staticFields().get("plain").status() != r2.staticFields().get("MSG").status(),
+			"CaseSfGateMix：非 final 静态字段与 final 静态字段得到不同判决（逐字段而非整类）");
+		check(r2.patchGenerated(),
+			"CaseSfGateMix：非 final 静态 / ConstantValue / 实例字段照常生成补丁");
+		f2.apply();
+		check("stale".equals(staticMsg(f2.host)),
+			"CaseSfGateMix：被拒的 static final 仍未被写入（实际 " + describe(staticMsg(f2.host)) + "）");
+		check("new".equals(read(f2.host, null, "plain")),
+			"CaseSfGateMix：非 final 静态字段照常改写（期望 new，实际 "
+			+ describe(read(f2.host, null, "plain")) + "）");
+		check("pre-derived".equals(read(f2.host, null, "derived")),
+			"CaseSfGateMix：依赖被拒字段的 derived 同样不写入（期望 pre-derived，实际 "
+			+ describe(read(f2.host, null, "derived")) + "）");
+		check("b".equals(read(f2.host, null, "CONST")),
+			"CaseSfGateMix：ConstantValue 静态 final 不受门禁影响（期望 b，实际 "
+			+ describe(read(f2.host, null, "CONST")) + "）");
+		check("new".equals(read(f2.host, inst, "tag")),
+			"CaseSfGateMix：同类的实例字段照常改写（期望 new，实际 "
+			+ describe(read(f2.host, inst, "tag")) + "）");
+	}
+
+	static String staticMsg(Class<?> host) {
+		Object v = read(host, null, "MSG");
+		return v == null ? null : v.toString();
 	}
 
 	// ==================== 探针：外部依赖型初值（跨类调用 / 他类静态字段）是否被放行 ====================
@@ -2798,13 +2951,27 @@ public class InitFixOracle {
 	/** 构建期编译的 Kotlin 夹具：v1/v2 字节 + 各自独立的 ByteLoader 定义出的 Class。 */
 	static final class CompiledFixture {
 		final Fixture         fx;
-		final Class<?>        oldHost;   // v1 定义，仅供护栏比对
-		final Map<String, byte[]> v2;    // v2 全量字节，供再加载控制组
+		final Class<?>        oldHost;   // v1 定义，仅供护栏比对（运行期夹具里与 host 同一份定义）
+		final Map<String, byte[]> v1;    // v1 全量字节
+		final Map<String, byte[]> v2;    // v2 全量字节，供再加载控制组 / 纯分析字节来源
 
-		CompiledFixture(Fixture fx, Class<?> oldHost, Map<String, byte[]> v2) {
+		CompiledFixture(Fixture fx, Class<?> oldHost, Map<String, byte[]> v1, Map<String, byte[]> v2) {
 			this.fx = fx;
 			this.oldHost = oldHost;
+			this.v1 = v1;
 			this.v2 = v2;
+		}
+
+		/**
+		 * 纯分析用字节来源：优先新版本，缺失时回退旧版本（未变化的被构造类型走这一支）。
+		 *
+		 * <p>{@link ValueTypeReplay#plan} 以**内部名**（{@code oracle/KtVec}）查询字节，而
+		 * {@code readCompiledClasses} 的键是点分类名，这里做一次归一。</p>
+		 */
+		byte[] bytesOf(String internalOrDotted) {
+			String dot = internalOrDotted.replace('/', '.');
+			byte[] bytes = v2.get(dot);
+			return bytes != null ? bytes : v1.get(dot);
 		}
 	}
 
@@ -2834,7 +3001,34 @@ public class InitFixOracle {
 			throw new IllegalStateException("Kotlin 夹具加载失败：" + dotName, e);
 		}
 		RemoldAgent.bytecodeCache.put(dotName, b2);
-		return new CompiledFixture(new Fixture(dotName, b1, b2, host), oldHost, v2);
+		return new CompiledFixture(new Fixture(dotName, b1, b2, host), oldHost, v1, v2);
+	}
+
+	/**
+	 * 运行期夹具：宿主类用 <b>v1 字节</b>定义（存量实例因此天然持有旧初值），再用 v2 差分走
+	 * transform → apply。与 {@link #loadCompiledFixture} 的唯一区别就是主类按 v1 定义；
+	 * 与 {@link #loadValueReplayRuntimeFixture} 的区别是字节来自构建期 kotlinc 产物而不是内存 javac。
+	 */
+	static CompiledFixture loadCompiledRuntimeFixture(String dotName) {
+		Map<String, byte[]> v1 = readCompiledClasses(System.getProperty("remold.ktfix.v1"), dotName);
+		Map<String, byte[]> v2 = readCompiledClasses(System.getProperty("remold.ktfix.v2"), dotName);
+
+		byte[] b1 = v1.get(dotName);
+		byte[] b2 = v2.get(dotName);
+		if (b1 == null || b2 == null) {
+			throw new IllegalStateException("Kotlin 夹具主类缺失：" + dotName
+				+ "（v1=" + (b1 != null) + "，v2=" + (b2 != null) + "）");
+		}
+
+		Class<?> host;
+		try {
+			host = Class.forName(dotName, true, new ByteLoader(v1));
+		} catch (ClassNotFoundException e) {
+			throw new IllegalStateException("Kotlin 夹具加载失败：" + dotName, e);
+		}
+		// 生产环境里 transform 目标的新字节本来就在 bytecodeCache 中（§2.1「优先读取新版本」）。
+		RemoldAgent.bytecodeCache.put(dotName, b2);
+		return new CompiledFixture(new Fixture(dotName, b1, b2, host), host, v1, v2);
 	}
 
 	/** 按名字读取目录（{@code pathSeparator} 分隔的多个目录）下的**全部** .class，含 $ 附属类。 */
@@ -3451,6 +3645,984 @@ public class InitFixOracle {
 		return "";
 	}
 
+	// ==================== 值类型 new 初值重放（docs/initfix/14，Battle B 接线） ====================
+
+	static final String VR_VEC = """
+		package oracle;
+		public record Vec(int x, int y) { }
+		""";
+
+	static final String VR_VEC_EQ_CUSTOM = """
+		package oracle;
+		public record VecEqCustom(int x, int y) {
+			@Override public boolean equals(Object o) {
+				return o instanceof VecEqCustom other && other.x == x && other.y == y;
+			}
+			@Override public int hashCode() { return x * 31 + y; }
+		}
+		""";
+
+	static final String VR_VEC_CTOR_IMPURE = """
+		package oracle;
+		public record VecImpure(int x, int y) {
+			static int touched;
+			public VecImpure { touched++; }
+		}
+		""";
+
+	/** Minimal Java source for a value-replay host class. */
+	static String vrHost(String simpleName, String fields, String methods) {
+		return "package oracle;\npublic class " + simpleName + " {\n"
+			+ fields + "\n" + methods + "\n}\n";
+	}
+
+	/** 计划命中：属性关闭是旧行为基线；打开后只产生值类型重放任务与 PatchReport 组件。 */
+	static void caseValueReplayPlanned() throws Exception {
+		String dot = "oracle.CaseVrPlanned";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrPlanned", "\tfinal Vec v = new Vec(4, 4);", "\tint stamp() { return 1; }"),
+			"oracle.Vec", VR_VEC);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrPlanned", "\tfinal Vec v = new Vec(4, 12);", "\tint stamp() { return 2; }"),
+			"oracle.Vec", VR_VEC);
+		Fixture fx = loadMultiFixture(dot, v1, v2);
+		check(!Arrays.equals(fx.v1, fx.v2), "CaseVrPlanned: fixtures must differ (A0 premise)");
+
+		// 去触发对照：属性关闭时本通道完全不参与，行为与旧版一致（无计划、无补丁、无组件）。
+		withValueReplay(false, () -> {
+			ClassDiffUtil.ClassDiff fullDiff = ClassDiffUtil.diff(fx.v1, fx.v2);
+			check(!InitFix.needsMethodBodies(fx.host, fullDiff),
+				"CaseVrPlanned: property off must not change the full-diff decision (needsMethodBodies=false)");
+			InitFix.PatchReport off = fx.transform();
+			check(off.valueReplayFields().isEmpty(),
+				"CaseVrPlanned: property off must not produce value-replay decisions (actual "
+					+ off.valueReplayFields() + ")");
+			check(off.instanceFields().isEmpty() && off.staticFields().isEmpty(),
+				"CaseVrPlanned: property off keeps the existing candidate set empty");
+			check(!off.patchGenerated(), "CaseVrPlanned: property off generates no patch");
+			check(pendingPlan(fx.host) == null, "CaseVrPlanned: property off stages no pending patch");
+		});
+
+		withValueReplay(true, () -> {
+			InitFix.PatchReport on = fx.transform();
+			check(InitFix.needsMethodBodies(fx.host, ClassDiffUtil.diff(fx.v1, fx.v2)),
+				"CaseVrPlanned: property on must request full ClassDiff bodies for the initializer expressions");
+			InitFix.FieldDecision planned = on.valueReplayFields().get("v");
+			check(planned != null && planned.status() == InitFix.FieldStatus.ACCEPTED,
+				"CaseVrPlanned: v is planned for value replay (actual " + on.valueReplayFields() + ")");
+			check(!on.patchGenerated(),
+				"CaseVrPlanned: a value-replay-only round must not claim the default init patch");
+			check(!unpatched(fx.host).contains("v"),
+				"CaseVrPlanned: value replay must not write FieldLedger (actual "
+					+ InitFix.getUnpatchedFields(fx.host) + ")");
+
+			InitFix.PatchPlan plan = pendingPlan(fx.host);
+			check(plan != null, "CaseVrPlanned: a pending patch carries the replay tasks");
+			if (plan != null) {
+				check(plan.valueReplayTasks().size() == 1,
+					"CaseVrPlanned: exactly one value-replay task (actual " + plan.valueReplayTasks() + ")");
+				check(plan.allTasks().isEmpty(),
+					"CaseVrPlanned: value-replay tasks stay out of the ledger-facing allTasks()");
+				InitFix.ValueReplayTask task = plan.valueReplayTasks().get(0);
+				check(task.fieldName().equals("v") && !task.isStatic(),
+					"CaseVrPlanned: task describes instance field v (actual " + task + ")");
+				check(task.desc().equals("Loracle/Vec;"),
+					"CaseVrPlanned: task carries the field descriptor (actual " + task.desc() + ")");
+				check(!task.oldFingerprint().equals(task.newFingerprint()),
+					"CaseVrPlanned: A0 fingerprints must differ after an argument change");
+				Set<String> methods = patchMethods(pendingBytes(fx.host));
+				check(methods.contains(task.buildOldMethod() + "()Ljava/lang/Object;"),
+					"CaseVrPlanned: buildOld factory emitted as ()Ljava/lang/Object; (actual " + methods + ")");
+				check(methods.contains(task.buildNewMethod() + "()Ljava/lang/Object;"),
+					"CaseVrPlanned: buildNew factory emitted as ()Ljava/lang/Object; (actual " + methods + ")");
+			}
+		});
+	}
+
+	/** A0：初值表达式未变（只改其它方法）时既不 planned 也不 rejected，也不产生待补补丁。 */
+	static void caseValueReplayA0Untriggered() throws Exception {
+		String dot = "oracle.CaseVrSame";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrSame", "\tfinal Vec v = new Vec(4, 4);", "\tint stamp() { return 1; }"),
+			"oracle.Vec", VR_VEC);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrSame", "\tfinal Vec v = new Vec(4, 4);", "\tint stamp() { return 2; }"),
+			"oracle.Vec", VR_VEC);
+		Fixture fx = loadMultiFixture(dot, v1, v2);
+		check(!Arrays.equals(fx.v1, fx.v2), "CaseVrSame: fixtures must differ so the diff is non-trivial");
+
+		withValueReplay(true, () -> {
+			InitFix.PatchReport report = fx.transform();
+			check(report.valueReplayFields().isEmpty(),
+				"CaseVrSame A0: identical initializer -> neither planned nor rejected (actual "
+					+ report.valueReplayFields() + ")");
+			check(!report.instanceFields().containsKey("v") && !report.staticFields().containsKey("v"),
+				"CaseVrSame A0: the field must stay out of the candidate decisions");
+			check(!unpatched(fx.host).contains("v"),
+				"CaseVrSame A0: no FieldLedger entry for a not-triggered field");
+			check(pendingPlan(fx.host) == null,
+				"CaseVrSame A0: a not-triggered field must not stage a pending patch");
+		});
+	}
+
+	/** A3/A4/A5 拒绝码：每个夹具都断言判决码、warn 出口与"不写台账"。 */
+	static void caseValueReplayRejectedCodes() throws Exception {
+		// A3: 手写 equals/hashCode -> EQ-CUSTOM
+		expectValueReplayRejected("oracle.CaseVrEqCustom",
+			vrHost("CaseVrEqCustom", "\tfinal VecEqCustom v = new VecEqCustom(4, 4);", ""),
+			vrHost("CaseVrEqCustom", "\tfinal VecEqCustom v = new VecEqCustom(4, 12);", ""),
+			"oracle.VecEqCustom", VR_VEC_EQ_CUSTOM, "v", "VALUE-REPLAY-EQ-CUSTOM");
+
+		// A3: 构造器有副作用（compact constructor 写静态字段）-> CTOR-IMPURE
+		expectValueReplayRejected("oracle.CaseVrImpure",
+			vrHost("CaseVrImpure", "\tfinal VecImpure v = new VecImpure(4, 4);", ""),
+			vrHost("CaseVrImpure", "\tfinal VecImpure v = new VecImpure(4, 12);", ""),
+			"oracle.VecImpure", VR_VEC_CTOR_IMPURE, "v", "VALUE-REPLAY-CTOR-IMPURE");
+
+		// A4: 非 enhanced 运行时的 static final 引用目标 -> STATIC-FINAL-NEEDS-ENHANCED
+		expectValueReplayRejected("oracle.CaseVrStaticFinal",
+			vrHost("CaseVrStaticFinal", "\tstatic final Vec s = new Vec(4, 4);", ""),
+			vrHost("CaseVrStaticFinal", "\tstatic final Vec s = new Vec(4, 12);", ""),
+			"oracle.Vec", VR_VEC, "s", "VALUE-REPLAY-STATIC-FINAL-NEEDS-ENHANCED");
+
+		// A1: 实参来自构造器参数 -> EXPR-NOT-CONSTANT
+		expectValueReplayRejected("oracle.CaseVrNotConstant",
+			"package oracle;\npublic class CaseVrNotConstant {\n"
+				+ "\tfinal Vec v;\n\tpublic CaseVrNotConstant(int n) { this.v = new Vec(n, 4); }\n}\n",
+			"package oracle;\npublic class CaseVrNotConstant {\n"
+				+ "\tfinal Vec v;\n\tpublic CaseVrNotConstant(int n) { this.v = new Vec(n, 12); }\n}\n",
+			"oracle.Vec", VR_VEC, "v", "VALUE-REPLAY-EXPR-NOT-CONSTANT");
+
+		// A5: 多根构造器初值不一致 -> MULTI-ROOT-MISMATCH
+		String multiRootV1 = "package oracle;\npublic class CaseVrMultiRoot {\n"
+			+ "\tfinal Vec v;\n"
+			+ "\tpublic CaseVrMultiRoot() { this.v = new Vec(4, 4); }\n"
+			+ "\tpublic CaseVrMultiRoot(int ignored) { this.v = new Vec(4, 4); }\n}\n";
+		String multiRootV2 = "package oracle;\npublic class CaseVrMultiRoot {\n"
+			+ "\tfinal Vec v;\n"
+			+ "\tpublic CaseVrMultiRoot() { this.v = new Vec(4, 12); }\n"
+			+ "\tpublic CaseVrMultiRoot(int ignored) { this.v = new Vec(4, 4); }\n}\n";
+		expectValueReplayRejected("oracle.CaseVrMultiRoot", multiRootV1, multiRootV2,
+			"oracle.Vec", VR_VEC, "v", "VALUE-REPLAY-MULTI-ROOT-MISMATCH");
+	}
+
+	/** 属性关闭基线 + 属性打开后的拒绝断言（判决码、warn 出口、台账隔离）。 */
+	static void expectValueReplayRejected(String dot, String hostV1, String hostV2,
+	                                      String vecName, String vecSource,
+	                                      String field, String code) throws Exception {
+		Map<String, String> v1 = Map.of(dot, hostV1, vecName, vecSource);
+		Map<String, String> v2 = Map.of(dot, hostV2, vecName, vecSource);
+		Fixture fx = loadMultiFixture(dot, v1, v2);
+
+		// 去触发对照：属性关闭时旧行为不受影响。
+		withValueReplay(false, () -> {
+			InitFix.PatchReport off = fx.transform();
+			check(off.valueReplayFields().isEmpty(),
+				dot + ": property off must not produce value-replay decisions");
+		});
+
+		withValueReplay(true, () -> {
+			InitFix.PatchReport report = fx.transform();
+			InitFix.FieldDecision decision = report.valueReplayFields().get(field);
+			check(decision != null && decision.status() == InitFix.FieldStatus.REJECTED,
+				dot + "." + field + " must be rejected (actual " + report.valueReplayFields() + ")");
+			check(decision != null && decision.reason() != null && decision.reason().contains(code),
+				dot + "." + field + " reason must carry " + code + " (actual "
+					+ (decision == null ? null : decision.reason()) + ")");
+			check(!unpatched(fx.host).contains(field),
+				dot + "." + field + " must NOT pollute FieldLedger (actual "
+					+ InitFix.getUnpatchedFields(fx.host) + ")");
+			boolean warned = false;
+			for (String w : agentWarnings) {
+				if (w.contains(dot.replace('.', '/')) && w.contains(code)) {
+					warned = true;
+					break;
+				}
+			}
+			check(warned, dot + ": the rejection must reach the warn outlet with " + code
+				+ " (warnings=" + agentWarnings + ")");
+			check(report.instanceFields().getOrDefault(field, report.staticFields().get(field)) != null,
+				dot + "." + field + " must also be mapped into the instance/static decision table");
+		});
+	}
+
+	/** A2：被构造类型出现在本批重新定义候选里时，重建旧值不可信 -> CONSTRUCTED-CHANGED。 */
+	static void caseValueReplayConstructedChanged() throws Exception {
+		String dot = "oracle.CaseVrA2";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrA2", "\tfinal Vec v = new Vec(4, 4);", ""),
+			"oracle.Vec", VR_VEC);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrA2", "\tfinal Vec v = new Vec(4, 12);", ""),
+			"oracle.Vec", VR_VEC);
+		Fixture fx = loadMultiFixture(dot, v1, v2);
+
+		// 批次视图：宿主与 oracle.Vec 都登记为本批重新定义候选（Vec 的构造链因此不再可信）。
+		Map<String, byte[]> byLoader = new LinkedHashMap<>();
+		byLoader.put(dot, fx.v2);
+		byLoader.put("oracle.Vec", compile(Map.of("oracle.Vec", VR_VEC)).get("oracle.Vec"));
+		Map<ClassLoader, Map<String, byte[]>> view = new IdentityHashMap<>();
+		view.put(fx.host.getClassLoader(), byLoader);
+
+		withValueReplay(false, () -> {
+			InitFix.beginBatchBytecodeView(view);
+			try {
+				InitFix.transform(fx.host, fx.v2, ClassDiffUtil.diff(fx.v1, fx.v2));
+				InitFix.finishBatchTransforms();
+			} finally {
+				InitFix.endBatchBytecodeView();
+			}
+			InitFix.PatchReport off = InitFix.getLastReport(fx.host);
+			check(off == null || off.valueReplayFields().isEmpty(),
+				"CaseVrA2: property off must not produce value-replay decisions");
+		});
+
+		withValueReplay(true, () -> {
+			InitFix.beginBatchBytecodeView(view);
+			try {
+				InitFix.transform(fx.host, fx.v2, ClassDiffUtil.diff(fx.v1, fx.v2));
+				InitFix.finishBatchTransforms();
+			} finally {
+				InitFix.endBatchBytecodeView();
+			}
+			InitFix.PatchReport report = InitFix.getLastReport(fx.host);
+			check(report != null, "CaseVrA2: batch transform must publish a report");
+			InitFix.FieldDecision decision = report == null ? null : report.valueReplayFields().get("v");
+			check(decision != null && decision.status() == InitFix.FieldStatus.REJECTED,
+				"CaseVrA2: a constructed type redefined in the same batch must be rejected (actual "
+					+ (report == null ? null : report.valueReplayFields()) + ")");
+			check(decision != null && decision.reason() != null
+				&& decision.reason().contains("VALUE-REPLAY-CONSTRUCTED-CHANGED"),
+				"CaseVrA2: reason must carry VALUE-REPLAY-CONSTRUCTED-CHANGED (actual "
+					+ (decision == null ? null : decision.reason()) + ")");
+			check(!unpatched(fx.host).contains("v"),
+				"CaseVrA2: the rejection must not pollute FieldLedger");
+			check(pendingPlan(fx.host) == null,
+				"CaseVrA2: a rejected field must not stage a value-replay task");
+		});
+	}
+
+	/** 优先级：同一字段被 @RemoldReinit 认领时值类型通道让位，任务只能有一条。 */
+	static void caseValueReplayPriority() throws Exception {
+		String dot = "oracle.CaseVrPriority";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrPriority", "\tVec v = new Vec(4, 4);", "\tVec v() { return v; }"),
+			"oracle.Vec", VR_VEC);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrPriority",
+				"\t@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)\n"
+					+ "\tVec v = new Vec(4, 12);",
+				"\tVec v() { return v; }"),
+			"oracle.Vec", VR_VEC);
+		Fixture fx = loadMultiFixture(dot, v1, v2);
+
+		withValueReplay(true, () -> {
+			InitFix.PatchReport report = fx.transform();
+			check(report.valueReplayFields().isEmpty(),
+				"CaseVrPriority: an @RemoldReinit field must not also claim value replay (actual "
+					+ report.valueReplayFields() + ")");
+			check(report.instanceFields().containsKey("v"),
+				"CaseVrPriority: the annotation path still owns the field decision");
+			InitFix.PatchPlan plan = pendingPlan(fx.host);
+			check(plan != null, "CaseVrPriority: annotation path stages a pending patch");
+			if (plan != null) {
+				check(plan.valueReplayTasks().isEmpty(),
+					"CaseVrPriority: no value-replay task for a claimed field (actual "
+						+ plan.valueReplayTasks() + ")");
+				int tasks = 0;
+				for (InitFix.FieldPatchTask task : plan.allTasks()) {
+					if (task.fieldName().equals("v")) tasks++;
+				}
+				check(tasks <= 1, "CaseVrPriority: the field must be applied at most once (tasks=" + tasks + ")");
+			}
+		});
+	}
+
+	/** 与常规补丁共存：值类型拒绝不阻断新增字段补丁，也不写台账；开关关闭时常规决策完全一致。 */
+	static void caseValueReplayCoexistsWithRegularPatch() throws Exception {
+		String dot = "oracle.CaseVrCoexist";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrCoexist", "\tfinal VecEqCustom v = new VecEqCustom(4, 4);", ""),
+			"oracle.VecEqCustom", VR_VEC_EQ_CUSTOM);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrCoexist",
+				"\tfinal VecEqCustom v = new VecEqCustom(4, 12);\n\tstatic String s = \"x\";", ""),
+			"oracle.VecEqCustom", VR_VEC_EQ_CUSTOM);
+		Fixture fx = loadMultiFixture(dot, v1, v2);
+
+		InitFix.FieldStatus[] offStatus = new InitFix.FieldStatus[1];
+		withValueReplay(false, () -> {
+			InitFix.PatchReport off = fx.transform();
+			InitFix.FieldDecision s = off.staticFields().get("s");
+			offStatus[0] = s == null ? null : s.status();
+			check(Boolean.TRUE.equals(off.patchGenerated()), "CaseVrCoexist: property off patches the added field");
+		});
+
+		withValueReplay(true, () -> {
+			InitFix.PatchReport report = fx.transform();
+			InitFix.FieldDecision s = report.staticFields().get("s");
+			check(s != null && s.status() == offStatus[0],
+				"CaseVrCoexist: the regular decision for the added field is unchanged (off="
+					+ offStatus[0] + ", on=" + (s == null ? null : s.status()) + ")");
+			check(report.patchGenerated(), "CaseVrCoexist: the added-field patch is still generated");
+			InitFix.FieldDecision rejected = report.valueReplayFields().get("v");
+			check(rejected != null && rejected.status() == InitFix.FieldStatus.REJECTED,
+				"CaseVrCoexist: the value-replay field is rejected (actual " + report.valueReplayFields() + ")");
+			check(report.instanceFields().get("v") != null
+				&& report.instanceFields().get("v").status() == InitFix.FieldStatus.REJECTED,
+				"CaseVrCoexist: the rejection is mapped into the instance decision table for the warn outlet (actual "
+					+ report.instanceFields() + ")");
+			check(unpatched(fx.host).isEmpty(),
+				"CaseVrCoexist: neither the added field nor the rejected value-replay field may be ledgered (actual "
+					+ InitFix.getUnpatchedFields(fx.host) + ")");
+		});
+	}
+
+	/** 补丁类的方法签名集合（用于断言 buildOld/buildNew 工厂方法确实被发射）。 */
+	static Set<String> patchMethods(byte[] bytes) {
+		Set<String> out = new LinkedHashSet<>();
+		if (bytes == null) return out;
+		ClassNode node = new ClassNode();
+		new ClassReader(bytes).accept(node, 0);
+		for (var method : node.methods) out.add(method.name + method.desc);
+		return out;
+	}
+
+	/** 待补补丁的任务计划（生产 API 只在 ref 包内可见，这里按既有先例用反射读取）。 */
+	static InitFix.PatchPlan pendingPlan(Class<?> host) {
+		try {
+			Method m = InitFix.class.getDeclaredMethod("pendingPlanForTest", Class.class);
+			m.setAccessible(true);
+			return (InitFix.PatchPlan) m.invoke(null, host);
+		} catch (ReflectiveOperationException e) {
+			throw new IllegalStateException("InitFix.pendingPlanForTest is gone", e);
+		}
+	}
+
+	static byte[] pendingBytes(Class<?> host) {
+		try {
+			Method m = InitFix.class.getDeclaredMethod("pendingBytesForTest", Class.class);
+			m.setAccessible(true);
+			return (byte[]) m.invoke(null, host);
+		} catch (ReflectiveOperationException e) {
+			throw new IllegalStateException("InitFix.pendingBytesForTest is gone", e);
+		}
+	}
+
+	/** 多类夹具：v1/v2 各编译整组源文件（T 与 super 链要能被加载），宿主用 v2 字节 define。 */
+	static Fixture loadMultiFixture(String dotName, Map<String, String> v1Sources,
+	                                Map<String, String> v2Sources) throws Exception {
+		Map<String, byte[]> v1Classes = compile(v1Sources);
+		Map<String, byte[]> v2Classes = compile(v2Sources);
+		byte[] v1 = v1Classes.get(dotName);
+		byte[] v2 = v2Classes.get(dotName);
+		if (v1 == null || v2 == null) throw new IllegalStateException("编译产物缺失：" + dotName);
+		Class<?> host = Class.forName(dotName, true, new ByteLoader(v2Classes));
+		RemoldAgent.bytecodeCache.put(dotName, v2);
+		return new Fixture(dotName, v1, v2, host);
+	}
+
+	/** 在值类型重放开关的设置/恢复窗口内执行（finally 必恢复，避免污染后续场景）。 */
+	static void withValueReplay(boolean enabled, Scenario body) throws Exception {
+		String previous = System.getProperty(InitFix.VALUE_REPLAY_PROPERTY);
+		if (enabled) System.setProperty(InitFix.VALUE_REPLAY_PROPERTY, "true");
+		else System.clearProperty(InitFix.VALUE_REPLAY_PROPERTY);
+		try {
+			body.run();
+		} finally {
+			if (previous == null) System.clearProperty(InitFix.VALUE_REPLAY_PROPERTY);
+			else System.setProperty(InitFix.VALUE_REPLAY_PROPERTY, previous);
+		}
+	}
+
+	// ==================== 值类型 new 初值重放：运行期 W0-W4（Battle C） ====================
+	//
+	// Fixture.apply() 不做真实 redefine，但 afterRedefine -> applyPatch 与生产同一条路径：
+	// 隐藏补丁类、buildOld/buildNew 工厂句柄、W1 读 / W2 判等 / W3 新值 / W4 引用 CAS 都真实执行。
+	// 唯一的模拟成分是"宿主类仍带 v1 的构造函数"——存量实例与静态值因此天然持有旧初值，
+	// 正是 redefine 刚生效、补丁尚未写入那一刻的形态。
+
+	/**
+	 * 运行期夹具：宿主类用 <b>v1 字节</b> define（存量实例/静态值来自旧初值），再用 v2 差分走
+	 * transform → apply。与 {@link #loadMultiFixture} 的唯一区别就是宿主按 v1 定义。
+	 */
+	static Fixture loadValueReplayRuntimeFixture(String dotName, Map<String, String> v1Sources,
+	                                             Map<String, String> v2Sources) throws Exception {
+		Map<String, byte[]> v1Classes = compile(v1Sources);
+		Map<String, byte[]> v2Classes = compile(v2Sources);
+		byte[] v1 = v1Classes.get(dotName);
+		byte[] v2 = v2Classes.get(dotName);
+		if (v1 == null || v2 == null) throw new IllegalStateException("编译产物缺失：" + dotName);
+		Class<?> host = Class.forName(dotName, true, new ByteLoader(v1Classes));
+		RemoldAgent.bytecodeCache.put(dotName, v2);
+		return new Fixture(dotName, v1, v2, host);
+	}
+
+	/** 用夹具 ClassLoader 里的值类型构造新值（测试侧期望值，不经过补丁）。 */
+	static Object valueObject(Class<?> host, String typeDotName, int x, int y) throws Exception {
+		Class<?> type = Class.forName(typeDotName, false, host.getClassLoader());
+		Constructor<?> ctor = type.getDeclaredConstructor(int.class, int.class);
+		ctor.setAccessible(true);
+		return ctor.newInstance(x, y);
+	}
+
+	/** 批次报告快照（{@code finish} 是 remold 包内可见；沿用"反射读包内 API"的既有先例）。 */
+	static HotswapBatchReport finishBatchReport() {
+		try {
+			Method m = BatchReportScope.class.getDeclaredMethod("finish", List.class);
+			m.setAccessible(true);
+			return (HotswapBatchReport) m.invoke(null, List.of());
+		} catch (ReflectiveOperationException e) {
+			throw new IllegalStateException("BatchReportScope.finish(List) shape changed", e);
+		}
+	}
+
+	/** 包内可见的运行期三态回写 API（驱动在 applyPatch 内调用同一条）。 */
+	static void recordValueReplayOutcome(Class<?> host, String field,
+	                                     InitFix.FieldStatus status, String reason) {
+		try {
+			Method m = InitFix.class.getDeclaredMethod("valueReplayRecordOutcome",
+				Class.class, String.class, InitFix.FieldStatus.class, String.class);
+			m.setAccessible(true);
+			m.invoke(null, host, field, status, reason);
+		} catch (ReflectiveOperationException e) {
+			throw new IllegalStateException("InitFix.valueReplayRecordOutcome shape changed", e);
+		}
+	}
+
+	/** 失败/跳过日志按初值指纹去重的包内门（驱动按同一条判定是否输出告警）。 */
+	static boolean valueReplayFirstOutcomeLog(String className, String field,
+	                                          String fingerprint, boolean failed) {
+		try {
+			Method m = InitFix.class.getDeclaredMethod("valueReplayFirstOutcomeLog",
+				String.class, String.class, String.class, boolean.class);
+			m.setAccessible(true);
+			return (Boolean) m.invoke(null, className, field, fingerprint, failed);
+		} catch (ReflectiveOperationException e) {
+			throw new IllegalStateException("InitFix.valueReplayFirstOutcomeLog shape changed", e);
+		}
+	}
+
+	/** 运行期主链：两实例各自独立新对象（W3 不共享身份）+ applied 记录 + 批次统计。 */
+	static void caseValueReplayRuntimeWrites() throws Exception {
+		String dot = "oracle.CaseVrRuntimeWrite";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrRuntimeWrite", "\tVec v = new Vec(4, 4);", "\tVec v() { return v; }"),
+			"oracle.Vec", VR_VEC);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrRuntimeWrite", "\tVec v = new Vec(4, 12);", "\tVec v() { return v; }"),
+			"oracle.Vec", VR_VEC);
+		Fixture fx = loadValueReplayRuntimeFixture(dot, v1, v2);
+
+		Object first = construct(fx.host);
+		Object second = construct(fx.host);
+		Object oldFirst = read(fx.host, first, "v");
+		Object oldSecond = read(fx.host, second, "v");
+		check(oldFirst != null && oldSecond != null,
+			"CaseVrRuntimeWrite precondition: both live instances hold the old value");
+		check(oldFirst != oldSecond,
+			"CaseVrRuntimeWrite precondition: the two old values are distinct objects");
+		InstanceTracker.register(first);
+		InstanceTracker.register(second);
+
+		// 去触发对照：属性关闭时本通道完全不介入运行期路径（旧行为基线）。
+		withValueReplay(false, () -> {
+			InitFix.PatchReport off = fx.transform();
+			check(off.valueReplayFields().isEmpty(),
+				"CaseVrRuntimeWrite: property off plans no value replay (actual "
+					+ off.valueReplayFields() + ")");
+			check(pendingPlan(fx.host) == null,
+				"CaseVrRuntimeWrite: property off stages no pending patch");
+			fx.apply();
+			check(read(fx.host, first, "v") == oldFirst && read(fx.host, second, "v") == oldSecond,
+				"CaseVrRuntimeWrite: property off leaves both instances untouched");
+		});
+
+		Object expected = valueObject(fx.host, "oracle.Vec", 4, 12);
+		withValueReplay(true, () -> {
+			BatchReportScope.begin();
+			HotswapBatchReport batch;
+			try {
+				InitFix.PatchReport planned = fx.transform();
+				InitFix.FieldDecision decision = planned.valueReplayFields().get("v");
+				check(decision != null && decision.status() == InitFix.FieldStatus.ACCEPTED,
+					"CaseVrRuntimeWrite: analysis plans v (actual " + planned.valueReplayFields() + ")");
+				check(!planned.patchGenerated(),
+					"CaseVrRuntimeWrite: a value-replay-only round keeps patchGenerated=false");
+				fx.apply();
+				batch = finishBatchReport();
+			} finally {
+				if (BatchReportScope.isActive()) BatchReportScope.discard();
+			}
+
+			Object newFirst = read(fx.host, first, "v");
+			Object newSecond = read(fx.host, second, "v");
+			check(Objects.equals(expected, newFirst),
+				"CaseVrRuntimeWrite: first instance now holds the new initializer value (actual "
+					+ describe(newFirst) + ")");
+			check(Objects.equals(expected, newSecond),
+				"CaseVrRuntimeWrite: second instance now holds the new initializer value (actual "
+					+ describe(newSecond) + ")");
+			check(newFirst != oldFirst && newSecond != oldSecond,
+				"CaseVrRuntimeWrite: each old reference was replaced");
+			check(newFirst != newSecond,
+				"CaseVrRuntimeWrite: W3 must build one new object per instance (identity must differ)");
+
+			InitFix.PatchReport after = InitFix.getLastReport(fx.host);
+			InitFix.FieldDecision written = after.valueReplayFields().get("v");
+			check(written != null && written.status() == InitFix.FieldStatus.ACCEPTED,
+				"CaseVrRuntimeWrite: the runtime outcome is written (actual "
+					+ after.valueReplayFields() + ")");
+
+			HotswapBatchReport.InitFixStats stats = batch == null ? null : batch.getInitFixStats();
+			check(stats != null && stats.getValueReplayApplied() == 1,
+				"CaseVrRuntimeWrite: batch report counts one applied field (actual "
+					+ (stats == null ? null : stats.getValueReplayApplied()) + ")");
+			check(stats != null && stats.getValueReplaySkipped() == 0
+				&& stats.getValueReplayFailed() == 0 && stats.getValueReplayRejected() == 0,
+				"CaseVrRuntimeWrite: no skipped/failed/rejected in this round and rejected is not double counted");
+
+			// applied 记录（A0）：同一 (old -> new) 差分再跑一轮必须被记录的 newFingerprint 挡下。
+			InitFix.PatchReport again = fx.transform();
+			check(again.valueReplayFields().isEmpty(),
+				"CaseVrRuntimeWrite: the applied record suppresses a re-plan for the same new initializer (actual "
+					+ again.valueReplayFields() + ")");
+			check(pendingPlan(fx.host) == null,
+				"CaseVrRuntimeWrite: no pending patch on the suppressed round");
+		});
+	}
+
+	/** W2 空安全：运行期改过的值与置 null 都 skipped（保留值、不记 applied、不写台账）。 */
+	static void caseValueReplayRuntimeSkips() throws Exception {
+		String dot = "oracle.CaseVrRuntimeSkip";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrRuntimeSkip", "\tVec v = new Vec(4, 4);", "\tVec v() { return v; }"),
+			"oracle.Vec", VR_VEC);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrRuntimeSkip", "\tVec v = new Vec(4, 12);", "\tVec v() { return v; }"),
+			"oracle.Vec", VR_VEC);
+		Fixture fx = loadValueReplayRuntimeFixture(dot, v1, v2);
+
+		Object modified = construct(fx.host);
+		Object nulled = construct(fx.host);
+		Object modifiedValue = valueObject(fx.host, "oracle.Vec", 9, 9);
+		setField(fx.host, modified, "v", modifiedValue);
+		setField(fx.host, nulled, "v", null);
+		InstanceTracker.register(modified);
+		InstanceTracker.register(nulled);
+
+		withValueReplay(true, () -> {
+			BatchReportScope.begin();
+			HotswapBatchReport batch;
+			try {
+				InitFix.PatchReport planned = fx.transform();
+				check(planned.valueReplayFields().get("v") != null,
+					"CaseVrRuntimeSkip: analysis plans v before the runtime pass");
+				fx.apply();
+				batch = finishBatchReport();
+			} finally {
+				if (BatchReportScope.isActive()) BatchReportScope.discard();
+			}
+
+			check(read(fx.host, modified, "v") == modifiedValue,
+				"CaseVrRuntimeSkip: the runtime-modified value must be preserved (W2 skipped)");
+			check(read(fx.host, nulled, "v") == null,
+				"CaseVrRuntimeSkip: a nulled field must be skipped, not failed, and stay null");
+
+			InitFix.PatchReport after = InitFix.getLastReport(fx.host);
+			InitFix.FieldDecision decision = after.valueReplayFields().get("v");
+			check(decision != null && decision.status() == InitFix.FieldStatus.NOTHING_TO_PATCH,
+				"CaseVrRuntimeSkip: the report shows the field as skipped (actual "
+					+ after.valueReplayFields() + ")");
+			check(decision != null && decision.reason() != null
+				&& decision.reason().startsWith("skipped: "),
+				"CaseVrRuntimeSkip: the skip reason prefix is pinned to skipped: (actual "
+					+ (decision == null ? null : decision.reason()) + ")");
+			check(!unpatched(fx.host).contains("v"),
+				"CaseVrRuntimeSkip: skipped/failed value replay must not write FieldLedger (actual "
+					+ InitFix.getUnpatchedFields(fx.host) + ")");
+
+			HotswapBatchReport.InitFixStats stats = batch == null ? null : batch.getInitFixStats();
+			check(stats != null && stats.getValueReplaySkipped() == 1
+				&& stats.getValueReplayApplied() == 0 && stats.getValueReplayFailed() == 0,
+				"CaseVrRuntimeSkip: batch report counts one skipped field and no applied/failed (actual "
+					+ (stats == null ? null : stats) + ")");
+
+			// skipped 不记 applied：同一差分再跑一轮仍会规划，且第二轮同样不覆盖运行期值。
+			InitFix.PatchReport again = fx.transform();
+			InitFix.FieldDecision replanned = again.valueReplayFields().get("v");
+			check(replanned != null && replanned.status() == InitFix.FieldStatus.ACCEPTED,
+				"CaseVrRuntimeSkip: skipped must not be remembered as applied (actual "
+					+ again.valueReplayFields() + ")");
+			fx.apply();
+			check(read(fx.host, modified, "v") == modifiedValue && read(fx.host, nulled, "v") == null,
+				"CaseVrRuntimeSkip: a second round still preserves runtime values");
+			InitFix.afterRedefineFailed(fx.host);
+		});
+	}
+
+	/** 静态槽位：W1-W4 单槽位替换 + applied 记录（非 final 静态字段，不依赖 enhanced）。 */
+	static void caseValueReplayRuntimeStatic() throws Exception {
+		String dot = "oracle.CaseVrRuntimeStatic";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrRuntimeStatic", "\tstatic Vec s = new Vec(4, 4);", "\tstatic Vec s() { return s; }"),
+			"oracle.Vec", VR_VEC);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrRuntimeStatic", "\tstatic Vec s = new Vec(4, 12);", "\tstatic Vec s() { return s; }"),
+			"oracle.Vec", VR_VEC);
+		Fixture fx = loadValueReplayRuntimeFixture(dot, v1, v2);
+
+		Object oldStatic = read(fx.host, null, "s");
+		check(oldStatic != null, "CaseVrRuntimeStatic precondition: the static field holds the old value");
+		Object expected = valueObject(fx.host, "oracle.Vec", 4, 12);
+
+		withValueReplay(true, () -> {
+			BatchReportScope.begin();
+			HotswapBatchReport batch;
+			try {
+				InitFix.PatchReport planned = fx.transform();
+				InitFix.FieldDecision decision = planned.valueReplayFields().get("s");
+				check(decision != null && decision.status() == InitFix.FieldStatus.ACCEPTED,
+					"CaseVrRuntimeStatic: analysis plans the static target (actual "
+						+ planned.valueReplayFields() + ")");
+				check(!planned.staticFields().containsKey("s"),
+					"CaseVrRuntimeStatic: the value-replay target stays out of the default static decisions");
+				fx.apply();
+				batch = finishBatchReport();
+			} finally {
+				if (BatchReportScope.isActive()) BatchReportScope.discard();
+			}
+
+			Object newStatic = read(fx.host, null, "s");
+			check(Objects.equals(expected, newStatic),
+				"CaseVrRuntimeStatic: the static slot holds the new initializer value (actual "
+					+ describe(newStatic) + ")");
+			check(newStatic != oldStatic, "CaseVrRuntimeStatic: the old static reference was replaced");
+
+			InitFix.PatchReport after = InitFix.getLastReport(fx.host);
+			InitFix.FieldDecision written = after.valueReplayFields().get("s");
+			check(written != null && written.status() == InitFix.FieldStatus.ACCEPTED,
+				"CaseVrRuntimeStatic: the runtime outcome is written");
+			HotswapBatchReport.InitFixStats stats = batch == null ? null : batch.getInitFixStats();
+			check(stats != null && stats.getValueReplayApplied() == 1,
+				"CaseVrRuntimeStatic: batch report counts one applied field");
+
+			InitFix.PatchReport again = fx.transform();
+			check(again.valueReplayFields().isEmpty(),
+				"CaseVrRuntimeStatic: the applied record suppresses a re-plan for the same new initializer");
+		});
+	}
+
+	/**
+	 * failed 可见性契约（{@code docs/initfix/14} §3 / §8）：报告里是 REJECTED 且带判决码、
+	 * 不写 FieldLedger、按初值指纹去重告警，且运行期结论不得掩盖分析期拒绝。
+	 *
+	 * <p>模拟原因：A3 保证 buildOld/buildNew 纯净、CAS 竞争需要真实并发，模拟环境里没有确定性
+	 * 失败源；这里直接走驱动写回调同一条包内 API，锁住"failed 必须可见"的报告/日志契约。</p>
+	 */
+	static void caseValueReplayRuntimeFailedVisible() throws Exception {
+		String dot = "oracle.CaseVrRuntimeFailed";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrRuntimeFailed", "\tVec v = new Vec(4, 4);", "\tVec v() { return v; }"),
+			"oracle.Vec", VR_VEC);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrRuntimeFailed", "\tVec v = new Vec(4, 12);", "\tVec v() { return v; }"),
+			"oracle.Vec", VR_VEC);
+		Fixture fx = loadValueReplayRuntimeFixture(dot, v1, v2);
+
+		withValueReplay(true, () -> {
+			InitFix.PatchReport planned = fx.transform();
+			check(planned.valueReplayFields().get("v") != null,
+				"CaseVrRuntimeFailed: analysis plans v before the runtime pass (baseline)");
+			InitFix.PatchPlan plan = pendingPlan(fx.host);
+			String fingerprint = plan == null || plan.valueReplayTasks().isEmpty()
+				? null : plan.valueReplayTasks().get(0).newFingerprint();
+
+			recordValueReplayOutcome(fx.host, "v", InitFix.FieldStatus.REJECTED,
+				"failed: VALUE-REPLAY-CAS-EXHAUSTED: simulated for the report contract");
+			InitFix.PatchReport after = InitFix.getLastReport(fx.host);
+			InitFix.FieldDecision failed = after.valueReplayFields().get("v");
+			check(failed != null && failed.status() == InitFix.FieldStatus.REJECTED,
+				"CaseVrRuntimeFailed: a runtime failure is visible in PatchReport.valueReplayFields (actual "
+					+ after.valueReplayFields() + ")");
+			check(failed != null && failed.reason() != null
+				&& failed.reason().startsWith("failed: VALUE-REPLAY-CAS-EXHAUSTED"),
+				"CaseVrRuntimeFailed: the failure reason prefix is pinned to failed: <code> (actual "
+					+ (failed == null ? null : failed.reason()) + ")");
+			check(!unpatched(fx.host).contains("v"),
+				"CaseVrRuntimeFailed: a failure must not write FieldLedger");
+			check(!after.instanceFields().containsKey("v") && !after.staticFields().containsKey("v"),
+				"CaseVrRuntimeFailed: the failure stays in the value-replay component");
+			check(valueReplayFirstOutcomeLog(fx.dotName, "v", fingerprint, true),
+				"CaseVrRuntimeFailed: the first failure for an initializer fingerprint must be logged");
+			check(!valueReplayFirstOutcomeLog(fx.dotName, "v", fingerprint, true),
+				"CaseVrRuntimeFailed: the same failure fingerprint must not be logged twice");
+			InitFix.afterRedefineFailed(fx.host);
+		});
+
+		// 分析期拒绝记录不得被运行期回写掩盖。
+		String rejDot = "oracle.CaseVrRuntimeKeepReject";
+		Map<String, String> rejV1 = Map.of(rejDot,
+			vrHost("CaseVrRuntimeKeepReject", "\tfinal VecEqCustom v = new VecEqCustom(4, 4);", ""),
+			"oracle.VecEqCustom", VR_VEC_EQ_CUSTOM);
+		Map<String, String> rejV2 = Map.of(rejDot,
+			vrHost("CaseVrRuntimeKeepReject", "\tfinal VecEqCustom v = new VecEqCustom(4, 12);", ""),
+			"oracle.VecEqCustom", VR_VEC_EQ_CUSTOM);
+		Fixture rej = loadMultiFixture(rejDot, rejV1, rejV2);
+		withValueReplay(true, () -> {
+			InitFix.PatchReport report = rej.transform();
+			check(report.valueReplayFields().get("v") != null
+				&& report.valueReplayFields().get("v").status() == InitFix.FieldStatus.REJECTED,
+				"CaseVrRuntimeFailed precondition: the analysis rejection exists");
+			recordValueReplayOutcome(rej.host, "v", InitFix.FieldStatus.ACCEPTED, "written");
+			InitFix.FieldDecision kept = InitFix.getLastReport(rej.host).valueReplayFields().get("v");
+			check(kept != null && kept.status() == InitFix.FieldStatus.REJECTED
+				&& kept.reason() != null && kept.reason().contains("VALUE-REPLAY-EQ-CUSTOM"),
+				"CaseVrRuntimeFailed: a runtime outcome must not clobber the analysis rejection (actual "
+					+ (kept == null ? null : kept.reason()) + ")");
+		});
+	}
+
+	// ==================== 值类型 new 初值重放：Kotlin data class 真实字节 ====================
+	//
+	// 夹具 tests/ktfix/v1|v2/oracle/KtVec.kt + KtHolder.kt 是构建期 kotlinc 真实产物：
+	//   data class KtVec(val x: Int, val y: Int)  +  class KtHolder { val v = KtVec(4, 4) }
+	// A3 的 Kotlin data class 形态判定必须在这份真实字节上通过；运行期用 v1 字节定义宿主
+	// （存量实例因此持有旧初值），transform 用 v1 -> v2 差分，apply 后要求实例字段被替换。
+
+	/** Kotlin data class 真实字节：A3 形状识别 + v1 存量实例被替换（docs/initfix/14 §7 正向）。 */
+	static void caseValueReplayKotlinDataClass() throws Exception {
+		String dot = "oracle.KtHolder";
+		CompiledFixture cf = loadCompiledRuntimeFixture(dot);
+		Fixture fx = cf.fx;
+
+		check(!Arrays.equals(fx.v1, fx.v2), "KtKtVec guard: v1/v2 host bytes differ");
+		// 纯分析核心直接在真实 kotlinc 字节上判 A3：Kotlin data class（组件全为基本类型、无自定义
+		// equals/hashCode）必须被识别为可重放值类型，而不是落到 VALUE-REPLAY-EQ-NOT-PURE。
+		ValueTypeReplay.Plan shape = ValueTypeReplay.plan(
+			ClassDiffUtil.diff(fx.v1, fx.v2), cf::bytesOf, name -> false, false);
+		check(shape.fields().containsKey("v"),
+			"KtKtVec A3: the Kotlin data class is accepted as a value type (planned=" + shape.fields()
+				+ ", rejected=" + shape.rejected() + ")");
+		check(shape.rejected().isEmpty(),
+			"KtKtVec A3: no rejection for the Kotlin data-class host (actual " + shape.rejected() + ")");
+
+		Object instance = construct(fx.host);
+		Object oldValue = read(fx.host, instance, "v");
+		check(oldValue != null, "KtKtVec precondition: the live host instance holds a KtVec value");
+		check(ktComponent(oldValue, "getX") == 4 && ktComponent(oldValue, "getY") == 4,
+			"KtKtVec precondition: the live value is KtVec(4,4) (actual x=" + ktComponent(oldValue, "getX")
+				+ ", y=" + ktComponent(oldValue, "getY") + ")");
+		InstanceTracker.register(instance);
+
+		withValueReplay(true, () -> {
+			BatchReportScope.begin();
+			HotswapBatchReport batch;
+			try {
+				InitFix.PatchReport planned = fx.transform();
+				InitFix.FieldDecision decision = planned.valueReplayFields().get("v");
+				check(decision != null && decision.status() == InitFix.FieldStatus.ACCEPTED,
+					"KtKtVec: analysis plans the Kotlin data-class field (actual "
+						+ planned.valueReplayFields() + ")");
+				check(!planned.patchGenerated(),
+					"KtKtVec: a value-replay-only round keeps patchGenerated=false");
+				InitFix.PatchPlan plan = pendingPlan(fx.host);
+				check(plan != null && plan.valueReplayTasks().size() == 1,
+					"KtKtVec: exactly one value-replay task (actual "
+						+ (plan == null ? "no plan" : plan.valueReplayTasks()) + ")");
+				if (plan != null && !plan.valueReplayTasks().isEmpty()) {
+					InitFix.ValueReplayTask task = plan.valueReplayTasks().get(0);
+					check("v".equals(task.fieldName()) && !task.isStatic(),
+						"KtKtVec: the task targets the Kotlin instance field v (actual " + task + ")");
+					check("Loracle/KtVec;".equals(task.desc()),
+						"KtKtVec: the task carries the KtVec descriptor (actual " + task.desc() + ")");
+				}
+				fx.apply();
+				batch = finishBatchReport();
+			} finally {
+				if (BatchReportScope.isActive()) BatchReportScope.discard();
+			}
+
+			Object newValue = read(fx.host, instance, "v");
+			check(newValue != null && newValue != oldValue,
+				"KtKtVec: the old KtVec reference was replaced");
+			check(ktComponent(newValue, "getX") == 4 && ktComponent(newValue, "getY") == 12,
+				"KtKtVec: the live instance now holds KtVec(4,12) (actual x=" + ktComponent(newValue, "getX")
+					+ ", y=" + ktComponent(newValue, "getY") + ")");
+
+			InitFix.PatchReport after = InitFix.getLastReport(fx.host);
+			InitFix.FieldDecision written = after.valueReplayFields().get("v");
+			check(written != null && written.status() == InitFix.FieldStatus.ACCEPTED,
+				"KtKtVec: the runtime outcome is written (actual " + after.valueReplayFields() + ")");
+			HotswapBatchReport.InitFixStats stats = batch == null ? null : batch.getInitFixStats();
+			check(stats != null && stats.getValueReplayApplied() == 1,
+				"KtKtVec: batch report counts one applied field (actual "
+					+ (stats == null ? null : stats.getValueReplayApplied()) + ")");
+			check(stats != null && stats.getValueReplaySkipped() == 0
+				&& stats.getValueReplayFailed() == 0 && stats.getValueReplayRejected() == 0,
+				"KtKtVec: no skipped/failed/rejected in this round");
+		});
+	}
+
+	/**
+	 * 宿主字段声明为 {@code Object} 或接口时，buildOld/buildNew 工厂仍按 {@code ()Object} 绑定，
+	 * 运行期重放不得出现 {@code NoSuchMethodException}。
+	 */
+	static void caseValueReplayRuntimeSupertypeHost() throws Exception {
+		String objectDot = "oracle.CaseVrObjectHost";
+		Map<String, String> objectV1 = new LinkedHashMap<>();
+		objectV1.put(objectDot, vrHost("CaseVrObjectHost", "\tObject v = new Vec(4, 4);", "\tObject v() { return v; }"));
+		objectV1.put("oracle.Vec", VR_VEC);
+		Map<String, String> objectV2 = new LinkedHashMap<>();
+		objectV2.put(objectDot, vrHost("CaseVrObjectHost", "\tObject v = new Vec(4, 12);", "\tObject v() { return v; }"));
+		objectV2.put("oracle.Vec", VR_VEC);
+		runSupertypeHostReplay(objectDot, objectV1, objectV2);
+
+		String shapeDot = "oracle.CaseVrShapeHost";
+		String shape = "package oracle;\npublic interface Shape { }\n";
+		String shapeVec = "package oracle;\npublic record Vec(int x, int y) implements Shape { }\n";
+		Map<String, String> shapeV1 = new LinkedHashMap<>();
+		shapeV1.put(shapeDot, vrHost("CaseVrShapeHost", "\tShape v = new Vec(4, 4);", "\tObject v() { return v; }"));
+		shapeV1.put("oracle.Shape", shape);
+		shapeV1.put("oracle.Vec", shapeVec);
+		Map<String, String> shapeV2 = new LinkedHashMap<>();
+		shapeV2.put(shapeDot, vrHost("CaseVrShapeHost", "\tShape v = new Vec(4, 12);", "\tObject v() { return v; }"));
+		shapeV2.put("oracle.Shape", shape);
+		shapeV2.put("oracle.Vec", shapeVec);
+		runSupertypeHostReplay(shapeDot, shapeV1, shapeV2);
+	}
+
+	/** 单个 supertype 宿主的端到端重放：transform -> apply -> 实例字段被替换为 v2 初值。 */
+	static void runSupertypeHostReplay(String dot, Map<String, String> v1, Map<String, String> v2) throws Exception {
+		Fixture fx = loadValueReplayRuntimeFixture(dot, v1, v2);
+		Object instance = construct(fx.host);
+		Object oldValue = read(fx.host, instance, "v");
+		check(oldValue != null, dot + " precondition: the live instance holds the old value");
+		InstanceTracker.register(instance);
+		Object expected = valueObject(fx.host, "oracle.Vec", 4, 12);
+
+		withValueReplay(true, () -> {
+			BatchReportScope.begin();
+			HotswapBatchReport batch;
+			try {
+				InitFix.PatchReport planned = fx.transform();
+				InitFix.FieldDecision decision = planned.valueReplayFields().get("v");
+				check(decision != null && decision.status() == InitFix.FieldStatus.ACCEPTED,
+					dot + ": analysis plans v (actual " + planned.valueReplayFields() + ")");
+				fx.apply();
+				batch = finishBatchReport();
+			} finally {
+				if (BatchReportScope.isActive()) BatchReportScope.discard();
+			}
+
+			Object newValue = read(fx.host, instance, "v");
+			check(Objects.equals(expected, newValue),
+				dot + ": the live field was replayed to Vec(4,12) without a binding failure (actual "
+					+ describe(newValue) + ")");
+			check(newValue != oldValue, dot + ": the old reference was replaced");
+
+			InitFix.PatchReport after = InitFix.getLastReport(fx.host);
+			InitFix.FieldDecision written = after.valueReplayFields().get("v");
+			check(written != null && written.status() == InitFix.FieldStatus.ACCEPTED,
+				dot + ": the runtime outcome is written (actual " + after.valueReplayFields() + ")");
+			HotswapBatchReport.InitFixStats stats = batch == null ? null : batch.getInitFixStats();
+			check(stats != null && stats.getValueReplayApplied() == 1,
+				dot + ": batch report counts one applied field (actual "
+					+ (stats == null ? null : stats.getValueReplayApplied()) + ")");
+			check(stats != null && stats.getValueReplayFailed() == 0,
+				dot + ": no binding failure is reported");
+		});
+	}
+
+	/**
+	 * Kotlin data class 的 Float/Double/Long 组件真实字节：kotlinc 生成 Float.compare /
+	 * Double.compare / LCMP 与 Float/Double/Long.hashCode，A3 必须仍判为编译器生成。
+	 */
+	static void caseValueReplayKotlinFloatDoubleLong() throws Exception {
+		String dot = "oracle.KtFdlHolder";
+		CompiledFixture cf = loadCompiledRuntimeFixture(dot);
+		Fixture fx = cf.fx;
+
+		check(!Arrays.equals(fx.v1, fx.v2), "KtFdl: v1/v2 host bytes differ");
+		ValueTypeReplay.Plan shape = ValueTypeReplay.plan(
+			ClassDiffUtil.diff(fx.v1, fx.v2), cf::bytesOf, name -> false, false);
+		check(shape.fields().containsKey("v"),
+			"KtFdl A3: the Float/Double/Long data class is accepted as a value type (planned="
+				+ shape.fields() + ", rejected=" + shape.rejected() + ")");
+		check(shape.rejected().isEmpty(),
+			"KtFdl A3: no rejection for the Float/Double/Long data-class host (actual "
+				+ shape.rejected() + ")");
+
+		Object instance = construct(fx.host);
+		Object oldValue = read(fx.host, instance, "v");
+		check(oldValue != null, "KtFdl precondition: the live host instance holds a KtVecFdl value");
+		check(ktNumber(oldValue, "getX") == 1.5 && ktNumber(oldValue, "getY") == 2.5
+			&& ktNumber(oldValue, "getZ") == 3.0,
+			"KtFdl precondition: the live value is KtVecFdl(1.5, 2.5, 3) (actual x="
+				+ ktNumber(oldValue, "getX") + ", y=" + ktNumber(oldValue, "getY")
+				+ ", z=" + ktNumber(oldValue, "getZ") + ")");
+		InstanceTracker.register(instance);
+
+		withValueReplay(true, () -> {
+			BatchReportScope.begin();
+			HotswapBatchReport batch;
+			try {
+				InitFix.PatchReport planned = fx.transform();
+				InitFix.FieldDecision decision = planned.valueReplayFields().get("v");
+				check(decision != null && decision.status() == InitFix.FieldStatus.ACCEPTED,
+					"KtFdl: analysis plans the Float/Double/Long data-class field (actual "
+						+ planned.valueReplayFields() + ")");
+				check(!planned.patchGenerated(),
+					"KtFdl: a value-replay-only round keeps patchGenerated=false");
+				fx.apply();
+				batch = finishBatchReport();
+			} finally {
+				if (BatchReportScope.isActive()) BatchReportScope.discard();
+			}
+
+			Object newValue = read(fx.host, instance, "v");
+			check(newValue != null && newValue != oldValue,
+				"KtFdl: the old KtVecFdl reference was replaced");
+			check(ktNumber(newValue, "getX") == 1.5 && ktNumber(newValue, "getY") == 12.5
+				&& ktNumber(newValue, "getZ") == 3.0,
+				"KtFdl: the live instance now holds KtVecFdl(1.5,12.5,3) (actual x="
+					+ ktNumber(newValue, "getX") + ", y=" + ktNumber(newValue, "getY")
+					+ ", z=" + ktNumber(newValue, "getZ") + ")");
+
+			InitFix.PatchReport after = InitFix.getLastReport(fx.host);
+			InitFix.FieldDecision written = after.valueReplayFields().get("v");
+			check(written != null && written.status() == InitFix.FieldStatus.ACCEPTED,
+				"KtFdl: the runtime outcome is written (actual " + after.valueReplayFields() + ")");
+			HotswapBatchReport.InitFixStats stats = batch == null ? null : batch.getInitFixStats();
+			check(stats != null && stats.getValueReplayApplied() == 1,
+				"KtFdl: batch report counts one applied field (actual "
+					+ (stats == null ? null : stats.getValueReplayApplied()) + ")");
+			check(stats != null && stats.getValueReplaySkipped() == 0
+				&& stats.getValueReplayFailed() == 0 && stats.getValueReplayRejected() == 0,
+				"KtFdl: no skipped/failed/rejected in this round");
+		});
+	}
+
+	/** 读 Kotlin data class 属性的 getter（getX/getY）；夹具是真实 kotlinc 产物。 */
+	static int ktComponent(Object value, String getter) {
+		try {
+			Method m = value.getClass().getMethod(getter);
+			return (Integer) m.invoke(value);
+		} catch (ReflectiveOperationException e) {
+			throw new IllegalStateException("Kotlin 属性读取失败：" + getter, e);
+		}
+	}
+
+	/** 以 double 读取 Kotlin 的 Float/Double/Long getter，夹具是真实 kotlinc 产物。 */
+	static double ktNumber(Object value, String getter) {
+		try {
+			Method m = value.getClass().getMethod(getter);
+			return ((Number) m.invoke(value)).doubleValue();
+		} catch (ReflectiveOperationException e) {
+			throw new IllegalStateException("Kotlin 属性读取失败：" + getter, e);
+		}
+	}
+
 	// ==================== 夹具装配 ====================
 
 	static final class Fixture {
@@ -3747,6 +4919,20 @@ public class InitFixOracle {
 				case "D" -> Reflect.UNSAFE.putDouble(host, off, 0.0d);
 				default -> throw new IllegalArgumentException("resetStaticToDefault 不支持 " + desc);
 			}
+		} catch (NoSuchFieldException e) {
+			throw new IllegalStateException(e);
+		}
+	}
+
+	/**
+	 * 设置静态字段（含 {@code static final}）：反射 {@code Field.set} 不允许写 final 静态字段，
+	 * 只能走字段偏移。用于给"存量静态环境"造出旧值。
+	 */
+	@SuppressWarnings({"removal", "deprecation"})
+	static void setStaticField(Class<?> host, String field, Object value) {
+		try {
+			Field f = host.getDeclaredField(field);
+			Reflect.UNSAFE.putObject(host, Reflect.UNSAFE.staticFieldOffset(f), value);
 		} catch (NoSuchFieldException e) {
 			throw new IllegalStateException(e);
 		}

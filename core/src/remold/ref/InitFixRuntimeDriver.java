@@ -74,6 +74,9 @@ final class InitFixRuntimeDriver {
 				ledgerPut(clazz, task.fieldName(), "patch aborted: " + e);
 				publishBatchFailure(clazz, task.fieldName());
 			}
+			// 中止的轮次不是"失败"：值类型重放的 applied 记录整类作废，下一轮重新判定，
+			// 不能让半途写成功的记录把中止轮说成已应用（docs/initfix/14 §3）。
+			valueReplayAppliedClear(clazz);
 			RemoldAgent.error("Field init patch failed: " + e.getMessage(), e);
 		}
 	}
@@ -92,6 +95,7 @@ final class InitFixRuntimeDriver {
 		if (dropped == null) return;
 		// 类没重定义 ⇒ 本轮什么都没写进去：作废"已应用"指纹，下一轮必须重新判定。
 		reinitAppliedClear(clazz);
+		valueReplayAppliedClear(clazz);
 		log("Dropped pending field init patch for " + clazz.getName()
 		    + " (the class was kept out of the batch by a gate; nothing was redefined)");
 	}
@@ -102,6 +106,7 @@ final class InitFixRuntimeDriver {
 		if (dropped != null) {
 			// 补丁一个字段都没写进去，"已应用"记录跟着作废：下一轮必须重新判定，不能凭旧指纹跳过。
 			reinitAppliedClear(clazz);
+			valueReplayAppliedClear(clazz);
 			// docs/initfix/02-closure-and-ledger.md §2 的核心场景：redefine 失败，但补丁计划已经生成、类结构随时可能推进；
 			// 这些字段一个都没补，必须记账，否则它们再也不会出现在 Diff 里。
 			for (FieldPatchTask task : dropped.plan().allTasks()) {
@@ -204,8 +209,12 @@ final class InitFixRuntimeDriver {
 		for (FieldPatchTask task : plan.allTasks()) {
 			if (task.replay()) replayTaskFields.add(task.fieldName());
 		}
+		// 值类型 new 初值重放（docs/initfix/14 §3）：只跑 W0-W4 写入，不写 FieldLedger、
+		// 不改变默认补丁语义。实例目标需要和常规补丁同一份存活实例枚举。
+		boolean hasValueReplay = !plan.valueReplayTasks().isEmpty();
+		boolean valueReplayHasInstance = hasInstanceValueReplay(plan);
 		Object[] alive = null;
-		if (plan.hasInstance()) {
+		if (plan.hasInstance() || valueReplayHasInstance) {
 			long tBeforeCollect = perfLog ? System.nanoTime() : 0L;
 			Object[] raw = collectRawInstancesForPatch(host);
 			long tAfterCollect = perfLog ? System.nanoTime() : 0L;
@@ -218,7 +227,9 @@ final class InitFixRuntimeDriver {
 				tCollectNs = tAfterCollect - tBeforeCollect;
 				tCompactNs = tAfterCompact - tAfterCollect;
 			}
-			if (alive.length == 0 && !plan.hasStatic()) {
+			// 纯值类型实例重放的空枚举是"无存活实例"的 no-op（docs/initfix/14 A6），不是失败，
+			// 因此不能在这里早退：要让值类型重放段把 skipped/no-live-instance 结论落进报告。
+			if (alive.length == 0 && !plan.hasStatic() && !hasValueReplay) {
 				if (perfLog) {
 					RemoldAgent.info(formatApplyPatchPerf(host, tPatchStart, 0,
 					 tCollectNs, tCompactNs, 0L, 0L, 0L, 0L, 0L, 0L));
@@ -429,6 +440,23 @@ final class InitFixRuntimeDriver {
 		long tAfterInst = perfLog ? System.nanoTime() : 0L;
 		if (perfLog) tInstNs = tAfterInst - tBeforeInst;
 
+		// ---- 值类型 new 初值重放：W0-W4（docs/initfix/14 §3） ----
+		// 放在静态 / apply / 实例阶段之后：这些字段是既有字段的对象级替换，不参与上面任何"补丁"语义
+		// （不写 FieldLedger、不进 FieldPatchTask 台账口径、不改变 patchGenerated）。
+		ValueReplayResult valueReplayResult = ValueReplayResult.EMPTY;
+		if (hasValueReplay) {
+			long start = System.nanoTime();
+			valueReplayResult = runValueReplay(host, plan, alive, h, pc);
+			long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+			if (valueReplayResult.hasOutcome()) {
+				RemoldAgent.info("[VALUE-REPLAY] " + host.getName() + " done: applied="
+				                 + valueReplayResult.appliedFields()
+				                 + ", skipped=" + valueReplayResult.skippedFields()
+				                 + ", failed=" + valueReplayResult.failedFields()
+				                 + ", elapsed=" + elapsedMs + "ms");
+			}
+		}
+
 		// 没真正写进去的注解字段：撤回"已应用"记录，否则下一轮会被"初值未变"误跳过，永久停在旧值。
 		for (String f : plan.reinitFields().keySet()) {
 			if (failedFields.contains(f) || skippedFields.contains(f)) reinitAppliedRemove(host, f);
@@ -602,10 +630,225 @@ final class InitFixRuntimeDriver {
 				alive == null ? 0 : alive.length,
 				new ArrayList<>(patchedFieldNames), incomplete.size());
 		}
+		// 值类型重放的运行期三态进批次报告（docs/initfix/14 §8）：分析期已登记 rejected，
+		// 这里 valueReplayRejected 固定 0 以免重复计数。纯值类型轮由它提供 liveInstances/字段名。
+		if (hasValueReplay && valueReplayResult.hasOutcome()) {
+			BatchReportScope.recordInitFix(host.getName(),
+				patchedFieldNames.isEmpty() ? (alive == null ? 0 : alive.length) : 0,
+				valueReplayResult.fieldNames(), 0,
+				valueReplayResult.appliedFields().size(),
+				valueReplayResult.skippedFields().size(),
+				valueReplayResult.failedFields().size(), 0,
+				valueReplayResult.failedDetails(), null);
+		}
 		if (perfLog) {
 			long tPostNs = System.nanoTime() - tAfterInst;
 			RemoldAgent.info(formatApplyPatchPerf(host, tPatchStart, alive == null ? 0 : alive.length,
 			 tCollectNs, tCompactNs, tSelfScanNs, tDefineNs, tStaticNs, tApplyReplayNs, tInstNs, tPostNs));
+		}
+	}
+
+	// ==================== 值类型 new 初值重放执行（docs/initfix/14 §3 W0-W4） ====================
+
+	/** W4 有界重试次数：CAS 竞争时单实例从 W1 重新开始的最大尝试次数。 */
+	private static final int VALUE_REPLAY_MAX_ATTEMPTS = 3;
+
+	/** 一轮真实执行过的值类型重放字段三态（供日志、PatchReport 回写与批次报告使用）。 */
+	private record ValueReplayResult(List<String> appliedFields, List<String> skippedFields,
+	                                 List<String> failedFields, List<String> failedDetails) {
+
+		static final ValueReplayResult EMPTY =
+		 new ValueReplayResult(List.of(), List.of(), List.of(), List.of());
+
+		boolean hasOutcome() {
+			return !appliedFields.isEmpty() || !skippedFields.isEmpty() || !failedFields.isEmpty();
+		}
+
+		/** 本轮本通道碰过的字段名（去重、保序）：作为批次报告的 fieldNames。 */
+		List<String> fieldNames() {
+			Set<String> names = new LinkedHashSet<>();
+			names.addAll(appliedFields);
+			names.addAll(skippedFields);
+			names.addAll(failedFields);
+			return new ArrayList<>(names);
+		}
+	}
+
+	/** 本轮是否有需要存活实例枚举的值类型重放任务（实例目标；静态目标不需要枚举）。 */
+	private static boolean hasInstanceValueReplay(PatchPlan plan) {
+		for (ValueReplayTask task : plan.valueReplayTasks()) {
+			if (!task.isStatic()) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * 执行本轮所有值类型 {@code new} 初值重放任务（{@code docs/initfix/14} §3）。
+	 *
+	 * <p>字段级三态：至少一个实例写入成功且无实例失败 → written/applied（写 applied 记录）；
+	 * 全部实例 skipped（或实例枚举为空）→ skipped；任一实例失败 / W0-W3 异常 / 槽位不可解析
+	 * → failed。failed 与 skipped 都<b>不</b>写 applied 记录，也<b>不</b>写 {@code FieldLedger}，
+	 * 只进 {@code PatchReport}、批次报告与英文日志。异常按字段隔离；{@code LinkageError} 仍按
+	 * 不变量 4 判定是否熔断。</p>
+	 */
+	private static ValueReplayResult runValueReplay(Class<?> host, PatchPlan plan, Object[] alive,
+	                                                Lookup patchLookup, Class<?> patchClass) {
+		List<String> appliedFields = new ArrayList<>();
+		List<String> skippedFields = new ArrayList<>();
+		List<String> failedFields = new ArrayList<>();
+		List<String> failedDetails = new ArrayList<>();
+
+		for (ValueReplayTask task : plan.valueReplayTasks()) {
+			String fieldName = task.fieldName();
+			try {
+				HotswapBridge.ReferenceFieldSlot slot = HotswapBridge.resolveReferenceField(
+				 host, fieldName, task.desc(), task.isStatic());
+				MethodHandle buildOld = bindValueReplayFactory(
+				 patchLookup, patchClass, task.buildOldMethod());
+				MethodHandle buildNew = bindValueReplayFactory(
+				 patchLookup, patchClass, task.buildNewMethod());
+				// W0：旧值每字段只重建一次（静态槽位与全部实例共用）。
+				Object rebuiltOld = buildOld.invokeExact();
+
+				if (task.isStatic()) {
+					HotswapBridge.ReferenceReplayOutcome outcome = HotswapBridge.replayReferenceField(
+					 slot, null, rebuiltOld, () -> buildNew.invokeExact(),
+					 VALUE_REPLAY_MAX_ATTEMPTS, null);
+					switch (outcome) {
+						case WRITTEN -> recordValueReplayWritten(host, task, appliedFields);
+						case SKIPPED -> recordValueReplaySkipped(host, task,
+						 "skipped: the live static value no longer equals the rebuilt old initializer,"
+						 + " so the write was preserved by design", skippedFields);
+						case EXHAUSTED -> recordValueReplayFailed(host, task,
+						 "VALUE-REPLAY-CAS-EXHAUSTED: the reference CAS never matched after "
+						 + VALUE_REPLAY_MAX_ATTEMPTS + " attempts", failedFields, failedDetails);
+					}
+					continue;
+				}
+
+				if (alive == null || alive.length == 0) {
+					// A6：scope 内没有存活实例 = no-op，不是失败；不写 applied 记录、不标 written。
+					recordValueReplaySkipped(host, task,
+					 "skipped: no live instance to replay (no-op by design)", skippedFields);
+					continue;
+				}
+
+				int writtenInstances = 0;
+				int skippedInstances = 0;
+				int failedInstances = 0;
+				String instanceFailure = null;
+				for (Object target : alive) {
+					HotswapBridge.ReferenceReplayOutcome outcome;
+					try {
+						// W1-W4：新值每实例独立构造；重试复用同一实例的新值并重读/重判等。
+						outcome = HotswapBridge.replayReferenceField(
+						 slot, target, rebuiltOld, () -> buildNew.invokeExact(),
+						 VALUE_REPLAY_MAX_ATTEMPTS, null);
+					} catch (LinkageError le) {
+						if (!isolatableLinkFailure(le)) throw le;
+						failedInstances++;
+						if (instanceFailure == null) instanceFailure = String.valueOf(le);
+						continue;
+					} catch (Throwable t) {
+						failedInstances++;
+						if (instanceFailure == null) instanceFailure = String.valueOf(t);
+						continue;
+					}
+					switch (outcome) {
+						case WRITTEN -> writtenInstances++;
+						case SKIPPED -> skippedInstances++;
+						case EXHAUSTED -> {
+							failedInstances++;
+							if (instanceFailure == null) {
+								instanceFailure = "VALUE-REPLAY-CAS-EXHAUSTED: the reference CAS never"
+								 + " matched after " + VALUE_REPLAY_MAX_ATTEMPTS + " attempts";
+							}
+						}
+					}
+				}
+				if (failedInstances > 0) {
+					recordValueReplayFailed(host, task, instanceFailure
+					 + " (instances: written=" + writtenInstances + ", skipped=" + skippedInstances
+					 + ", failed=" + failedInstances + ")", failedFields, failedDetails);
+				} else if (writtenInstances > 0) {
+					// 至少一个实例写入成功：字段记 applied；skipped 实例是"按设计保留"，不掩盖写入。
+					recordValueReplayWritten(host, task, appliedFields);
+				} else {
+					recordValueReplaySkipped(host, task,
+					 "skipped: every live instance no longer equals the rebuilt old initializer,"
+					 + " so the writes were preserved by design", skippedFields);
+				}
+			} catch (LinkageError le) {
+				if (!isolatableLinkFailure(le)) throw le;
+				recordValueReplayFailed(host, task, "runtime failure: " + le,
+				 failedFields, failedDetails);
+			} catch (Throwable t) {
+				recordValueReplayFailed(host, task, "runtime failure: " + t,
+				 failedFields, failedDetails);
+			}
+		}
+		return new ValueReplayResult(List.copyOf(appliedFields), List.copyOf(skippedFields),
+		 List.copyOf(failedFields), List.copyOf(failedDetails));
+	}
+
+	/**
+	 * 绑定补丁类里 {@code ()Ljava/lang/Object;} 形式的 buildOld/buildNew 工厂方法。
+	 *
+	 * <p>发射器固定返回 {@code Object}（宿主字段可能声明为 {@code Object} 或接口，表达式构造类型不必
+	 * 与字段描述符一致），因此查找类型就是 {@code ()Object}，无需按字段描述符解析。</p>
+	 */
+	private static MethodHandle bindValueReplayFactory(Lookup patchLookup, Class<?> patchClass,
+	                                                   String methodName) throws Throwable {
+		return patchLookup.findStatic(patchClass, methodName, MethodType.methodType(Object.class));
+	}
+
+	/** 值类型重放 task 的 applied 记录形态（记录键与 {@link ValueTypeReplay.Field} 同构）。 */
+	private static ValueTypeReplay.Field valueReplayAppliedField(ValueReplayTask task) {
+		return new ValueTypeReplay.Field(task.fieldName(), task.isStatic(), task.desc(),
+		 task.oldFingerprint(), task.newFingerprint(), task.ctorFingerprint(),
+		 task.equalsFingerprint());
+	}
+
+	private static void recordValueReplayWritten(Class<?> host, ValueReplayTask task,
+	                                             List<String> appliedFields) {
+		String fieldName = task.fieldName();
+		if (!appliedFields.contains(fieldName)) appliedFields.add(fieldName);
+		InitFix.valueReplayAppliedMarkWritten(host, valueReplayAppliedField(task));
+		InitFix.valueReplayRecordOutcome(host, fieldName, InitFix.FieldStatus.ACCEPTED, null);
+		RemoldAgent.info("[VALUE-REPLAY] " + host.getName() + "." + fieldName
+		 + " applied: the live value(s) equalled the rebuilt old initializer and the conditional"
+		 + " reference CAS succeeded; the applied record is written");
+	}
+
+	private static void recordValueReplaySkipped(Class<?> host, ValueReplayTask task,
+	                                             String reason, List<String> skippedFields) {
+		String fieldName = task.fieldName();
+		if (!skippedFields.contains(fieldName)) skippedFields.add(fieldName);
+		InitFix.valueReplayAppliedMarkSkipped(host, fieldName);
+		InitFix.valueReplayRecordOutcome(host, fieldName, InitFix.FieldStatus.NOTHING_TO_PATCH, reason);
+		if (InitFix.valueReplayFirstOutcomeLog(
+		 host.getName(), fieldName, task.newFingerprint(), false)) {
+			RemoldAgent.info("[VALUE-REPLAY] " + host.getName() + "." + fieldName + " " + reason
+			 + " (no applied record; the channel re-enters only when the initializer changes again)");
+		}
+	}
+
+	private static void recordValueReplayFailed(Class<?> host, ValueReplayTask task, String detail,
+	                                            List<String> failedFields,
+	                                            List<String> failedDetails) {
+		String fieldName = task.fieldName();
+		if (!failedFields.contains(fieldName)) failedFields.add(fieldName);
+		InitFix.valueReplayAppliedMarkFailed(host, fieldName);
+		InitFix.valueReplayRecordOutcome(host, fieldName, InitFix.FieldStatus.REJECTED,
+		 "failed: " + detail + " (not recorded in FieldLedger; not retried automatically)");
+		if (!failedDetails.contains(host.getName() + "." + fieldName + ": " + detail)) {
+			failedDetails.add(host.getName() + "." + fieldName + ": " + detail);
+		}
+		if (InitFix.valueReplayFirstOutcomeLog(
+		 host.getName(), fieldName, task.newFingerprint(), true)) {
+			RemoldAgent.warn("[VALUE-REPLAY] " + host.getName() + "." + fieldName + " failed: " + detail
+			 + " (not recorded in FieldLedger; the channel will not retry automatically,"
+			 + " the next initializer change or an explicit force re-enters it)");
 		}
 	}
 
@@ -1222,7 +1465,8 @@ final class InitFixRuntimeDriver {
 	 *
 	 * <p>过滤规则（与 {@code applyPatch} 的入口守卫一一对应）：宿主先经
 	 * {@link ClassIdentity#canonicalize} 归一（影子类上枚举恒为 0），未初始化
-	 * （{@link #isInitialized} 为 false）的类剔除，没有实例任务的宿主不参与。过滤后不足
+	 * （{@link #isInitialized} 为 false）的类剔除，既没有常规实例任务、也没有值类型重放实例
+	 * 目标的宿主不参与。过滤后不足
 	 * {@link #InitFix.BATCH_HEAP_SCAN_MIN_TARGETS} 个宿主时直接返回：<b>小批次走原逐类路径，零额外开销</b>
 	 * （K=1 自然也在此列）。</p>
 	 *
@@ -1242,7 +1486,8 @@ final class InitFixRuntimeDriver {
 			Class<?> canonical = ClassIdentity.canonicalize(host);
 			if (!isInitialized(canonical)) continue;
 			PendingPatch patch = PENDING.get(canonical);
-			if (patch == null || !patch.plan().hasInstance()) continue;
+			if (patch == null) continue;
+			if (!patch.plan().hasInstance() && !hasInstanceValueReplay(patch.plan())) continue;
 			targets.add(canonical);
 		}
 		if (!batchHeapScanEnabled) return;

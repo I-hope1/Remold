@@ -7,6 +7,7 @@ import org.objectweb.asm.*;
 import java.lang.invoke.*;
 import java.lang.invoke.MethodHandles.Lookup;
 import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -1011,6 +1012,208 @@ public final class HotswapBridge {
 			throw new BootstrapMethodError(
 			 "Cannot resolve field offset for " + owner.getName() + "." + fieldName + ":" + fieldDesc, t);
 		}
+	}
+
+	// ==================== 值类型 new 初值重放：引用字段读写（docs/initfix/14 §3） ====================
+
+	/**
+	 * 值类型 {@code new} 初值重放单槽位的 W1-W4 结果。
+	 *
+	 * <p>这是<b>单槽位</b>结论（一个实例字段或一个静态字段槽位）；字段级三态聚合由驱动完成。</p>
+	 */
+	enum ReferenceReplayOutcome {
+		/** CAS 命中：该槽位已换成新构造的对象。 */
+		WRITTEN,
+		/** W2 判等失败：槽位运行期被改过（含被置 {@code null}），按设计保留旧值。 */
+		SKIPPED,
+		/** CAS 竞争有界重试用尽（{@code VALUE-REPLAY-CAS-EXHAUSTED}）。 */
+		EXHAUSTED
+	}
+
+	/**
+	 * W1 读之后、W2 判等之前的测试钩子（生产路径传 {@code null}）。
+	 *
+	 * <p>存在的唯一理由是让"读后被并发改写"在测试里<b>确定性</b>发生：不靠线程竞态复现，
+	 * 由钩子直接改写槽位。实现必须保证钩子返回后仍从 W1 重读、重跑 W2。</p>
+	 */
+	@FunctionalInterface
+	interface ReferenceReplayReadHook {
+		void afterRead(Object current, int attempt);
+	}
+
+	/** 值类型重放的新值工厂：每次调用产出一个新对象；重试期间由调用方只调一次并复用。 */
+	@FunctionalInterface
+	interface ReferenceReplayValueFactory {
+		Object create() throws Throwable;
+	}
+
+	/**
+	 * 已解析的引用字段槽：解析一次 {@code (owner, 字段名, 描述符)} 得到静态性与偏移，
+	 * 之后逐实例复用 W1 volatile 读 / W4 引用 CAS，不再走反射查字段。
+	 *
+	 * <p>实例槽位的读写目标由调用方逐个传入；静态槽位把 {@code staticFieldBase} 与偏移一起绑定，
+	 * 调用方传 {@code null} 目标即可。</p>
+	 */
+	static final class ReferenceFieldSlot {
+		private final boolean isStatic;
+		private final String  display;
+		private final MethodHandle getter;   // (Object)Object：实例目标；静态槽位忽略该参数
+		private final MethodHandle cas;      // (Object,Object,Object)boolean
+
+		private ReferenceFieldSlot(boolean isStatic, String display,
+		                           MethodHandle getter, MethodHandle cas) {
+			this.isStatic = isStatic;
+			this.display = display;
+			this.getter = getter;
+			this.cas = cas;
+		}
+
+		boolean isStatic() { return isStatic; }
+
+		/** 供日志使用的字段标识 {@code 类名.字段名}。 */
+		String display() { return display; }
+
+		/** W1：{@code getReferenceVolatile}（JDK 9+ 内部 Unsafe）/ {@code getObjectVolatile}。 */
+		Object read(Object target) throws Throwable {
+			return getter.invokeExact(target);
+		}
+
+		/** W4：{@code compareAndSetReference}（JDK 12+）/ {@code compareAndSetObject} / {@code compareAndSwapObject}。 */
+		boolean cas(Object target, Object expected, Object value) throws Throwable {
+			return (boolean) cas.invokeExact(target, expected, value);
+		}
+	}
+
+	private static volatile MethodHandle REFERENCE_VOLATILE_GETTER;
+	private static volatile MethodHandle REFERENCE_FIELD_CAS;
+
+	private static MethodHandle referenceVolatileGetter() throws NoSuchMethodException {
+		MethodHandle cached = REFERENCE_VOLATILE_GETTER;
+		if (cached != null) return cached;
+		MethodType type = MethodType.methodType(Object.class, Object.class, long.class);
+		MethodHandle getter = tryFind("getReferenceVolatile", type);
+		if (getter == null) getter = tryFind("getObjectVolatile", type);
+		if (getter == null) {
+			throw new NoSuchMethodException("no volatile reference read is available"
+			                                + " (tried getReferenceVolatile and getObjectVolatile)");
+		}
+		REFERENCE_VOLATILE_GETTER = getter;
+		return getter;
+	}
+
+	private static MethodHandle referenceFieldCas() throws NoSuchMethodException {
+		MethodHandle cached = REFERENCE_FIELD_CAS;
+		if (cached != null) return cached;
+		MethodType type = MethodType.methodType(
+		 boolean.class, Object.class, long.class, Object.class, Object.class);
+		MethodHandle cas = tryFind("compareAndSetReference", type);
+		if (cas == null) cas = tryFind("compareAndSetObject", type);
+		if (cas == null) cas = tryFind("compareAndSwapObject", type);
+		if (cas == null) {
+			throw new NoSuchMethodException("no reference CAS is available (tried"
+			                                + " compareAndSetReference, compareAndSetObject and compareAndSwapObject)");
+		}
+		REFERENCE_FIELD_CAS = cas;
+		return cas;
+	}
+
+	/**
+	 * 解析值类型重放用的引用字段槽（{@code docs/initfix/14} §3 W1/W4）。
+	 *
+	 * <p>fail-closed：非引用描述符、字段不存在、静态性与任务不符都抛 {@link BootstrapMethodError}
+	 * （cause 为非 {@code LinkageError}，由驱动按"单字段链接失败"隔离而不熔断整轮）。
+	 * 不检查 {@code final}：实例 {@code final} 字段与 enhanced 下的 {@code static final} 都在本通道
+	 * 的写入范围内（A4 门已在分析期判定）。</p>
+	 *
+	 * @param owner          字段声明宿主（运行期驱动传入已归一化的 canonical 类）
+	 * @param fieldName      字段名
+	 * @param fieldDesc      字段描述符（只接受 {@code L...;}）
+	 * @param expectedStatic 任务声明的静态性
+	 */
+	static ReferenceFieldSlot resolveReferenceField(Class<?> owner, String fieldName,
+	                                                String fieldDesc, boolean expectedStatic) {
+		if (owner == null || fieldName == null || fieldDesc == null) {
+			throw new BootstrapMethodError(
+			 "Cannot resolve a value-replay reference field (owner/name/descriptor is null)");
+		}
+		try {
+			if (!fieldDesc.startsWith("L")) {
+				throw new IllegalArgumentException(
+				 "value-type replay only supports reference fields, got " + fieldDesc);
+			}
+			Field field = findField(owner, fieldName, fieldDesc);
+			boolean isStatic = Modifier.isStatic(field.getModifiers());
+			if (isStatic != expectedStatic) {
+				throw new NoSuchFieldException("field " + field + " static-ness differs from the"
+				                               + " value-replay task (expected static=" + expectedStatic + ")");
+			}
+			long offset = isStatic ? UNSAFE.staticFieldOffset(field) : UNSAFE.objectFieldOffset(field);
+			Object base = isStatic ? UNSAFE.staticFieldBase(field) : null;
+
+			MethodHandle getter = MethodHandles.insertArguments(referenceVolatileGetter(), 1, offset);
+			MethodHandle cas = MethodHandles.insertArguments(referenceFieldCas(), 1, offset);
+			if (isStatic) {
+				getter = MethodHandles.insertArguments(getter, 0, base);
+				getter = MethodHandles.dropArguments(getter, 0, Object.class);
+				cas = MethodHandles.insertArguments(cas, 0, base);
+				cas = MethodHandles.dropArguments(cas, 0, Object.class);
+			}
+			return new ReferenceFieldSlot(isStatic, owner.getName() + "." + fieldName,
+			 getter.asType(MethodType.methodType(Object.class, Object.class)),
+			 cas.asType(MethodType.methodType(boolean.class, Object.class, Object.class, Object.class)));
+		} catch (Throwable t) {
+			throw new BootstrapMethodError("Cannot resolve a value-replay reference field for "
+			                               + owner.getName() + "." + fieldName + ":" + fieldDesc, t);
+		}
+	}
+
+	/**
+	 * W1-W4：单槽位引用字段的有界条件重放（{@code docs/initfix/14} §3）。
+	 *
+	 * <p>顺序固定：W1 读 {@code cur} → W2 {@code Objects.equals(cur, rebuiltOld)}（{@code null}
+	 * 同样走 skipped）→ W3 惰性构造一次新值 → W4 CAS(expected=cur)。CAS 失败时
+	 * <b>从 W1 重新开始</b>（重读 + 重跑 W2），期间复用已构造的新值；最多 {@code maxAttempts} 次。
+	 * 禁止原地只重试 CAS —— 那会绕过并发修改后的判等检查。</p>
+	 *
+	 * @param slot        已解析的字段槽
+	 * @param target      实例目标；静态字段传 {@code null}
+	 * @param rebuiltOld  W0 的旧值重建结果
+	 * @param newValue    W3 新值工厂（最多调用一次；W2 判等失败时一次都不调用）
+	 * @param maxAttempts 有界重试次数（至少 1）
+	 * @param hook        W1 之后的测试钩子（生产传 {@code null}）
+	 */
+	static ReferenceReplayOutcome replayReferenceField(
+	 ReferenceFieldSlot slot, Object target, Object rebuiltOld,
+	 ReferenceReplayValueFactory newValue, int maxAttempts,
+	 ReferenceReplayReadHook hook) throws Throwable {
+
+		if (slot == null) throw new IllegalArgumentException("missing value-replay field slot");
+		if (newValue == null) throw new IllegalArgumentException("missing value-replay value factory");
+		int attempts = Math.max(1, maxAttempts);
+		Object fresh = null;
+		for (int attempt = 1; attempt <= attempts; attempt++) {
+			Object current = slot.read(target);                                  // W1
+			if (hook != null) hook.afterRead(current, attempt);
+			if (!valueReplayPrecheck(current, rebuiltOld)) {                     // W2
+				return ReferenceReplayOutcome.SKIPPED;
+			}
+			if (fresh == null) fresh = newValue.create();                        // W3（重试复用）
+			if (slot.cas(target, current, fresh)) {                              // W4
+				return ReferenceReplayOutcome.WRITTEN;
+			}
+		}
+		return ReferenceReplayOutcome.EXHAUSTED;
+	}
+
+	/**
+	 * W2 空安全判等：{@code Objects.equals(cur, rebuiltOld)}。
+	 *
+	 * <p>{@code cur == null}（非 final 字段运行期被业务置空）与 {@code rebuiltOld == null} 都按
+	 * {@link Objects#equals} 的 {@code null} 规则处理，<b>不</b>抛 {@code NPE}：被置空的字段属于
+	 * "运行期已改值"，结论是 skipped，不是 failed。</p>
+	 */
+	static boolean valueReplayPrecheck(Object current, Object rebuiltOld) {
+		return Objects.equals(current, rebuiltOld);
 	}
 
 	/**

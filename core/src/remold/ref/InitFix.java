@@ -1720,6 +1720,36 @@ public class InitFix {
 	}
 
 	/**
+	 * 既有静态 final 字段的拒绝原因（无增强重定义能力时）。稳定字符串：PatchReport 与告警文案共用。
+	 */
+	private static final String ENHANCED_STATIC_FINAL_REASON =
+	 "rewriting an existing static final field requires the enhanced class redefinition of"
+	 + " JetBrains Runtime (JBR) with -XX:+AllowEnhancedClassRedefinition: without it a compiled"
+	 + " cross-class reader can keep the folded old value after the patch";
+
+	/**
+	 * 既有 {@code static final} 字段（运行期初始化，非 {@code ConstantValue}）的改写是否依赖增强重定义。
+	 *
+	 * <p>仅把值写进字段内存不会让已编译的跨类读者退优化：标准 HotSpot 上重定义宿主只失效宿主自身
+	 * 的已编译方法，折叠了该 final 值的读者在补丁后仍读旧值。增强重定义的 Stage C 才会让它们退优化，
+	 * 因此没有该能力时这类字段必须逐字段失败关闭（{@code docs/status.md} §5.1 风险 34）。</p>
+	 *
+	 * <p>判据与 {@link #rewritesExistingStaticField} 同口径：新增静态字段、类型变更字段、
+	 * {@code ConstantValue} 编译期常量、非 final 静态字段都不受影响 —— 非 final 静态字段不会被折叠，
+	 * 读者能读到补丁写入的新值。</p>
+	 */
+	private static boolean requiresEnhancedForExistingStaticFinal(
+	 ClassDiff diff, Map<String, FieldNode> fieldNodes, String fieldName) {
+		if (diff == null || fieldNodes == null || fieldName == null) return false;
+		if (diff.addedStaticFields != null && diff.addedStaticFields.contains(fieldName)) return false;
+		if (diff.typeChangedFields != null && diff.typeChangedFields.contains(fieldName)) return false;
+		if (isCompileTimeConstant(diff, fieldName)) return false;
+		FieldNode field = fieldNodes.get(fieldName);
+		if (field == null) return false;
+		return (field.access & Opcodes.ACC_FINAL) != 0;
+	}
+
+	/**
 	 * 判定本次热更是否真正需要读取方法体指令（字段新增、{@code @RemoldReinit}、未修补台账或初值重放）。
 	 * 返回 {@code false} 时，动态重定义路径可只保留 {@code SKIP_CODE} 结构差异，跳过全类方法指令解码与指纹计算。
 	 */
@@ -2043,7 +2073,7 @@ public class InitFix {
 		String className = diff.newClass.name;
 		warnHashSemanticDependencies(diff.newClass, newBytes, addedInstanceFields);
 		try {
-			PatchAnalysis analysis = analyzePatch(host, diff.newClass, newBytes, className,
+			PatchAnalysis analysis = analyzePatch(host, diff, diff.newClass, newBytes, className,
 			 addedStaticFields, addedInstanceFields, diff.typeChangedFields, pending, preScannedReinit, replayFields, applyFields,
 			 replayDecisions, applyDecisions, generational);
 			if (diff.typeChangedFields != null) {
@@ -2325,7 +2355,7 @@ public class InitFix {
 	}
 
 	private static PatchAnalysis analyzePatch(
-	 Class<?> host, ClassNode preParsedNewClass, byte[] newBytes, String className,
+	 Class<?> host, ClassDiff diff, ClassNode preParsedNewClass, byte[] newBytes, String className,
 	 Set<String> addedStaticFields, Set<String> addedInstanceFields, Set<String> typeChangedFields,
 	 Map<String, String> pendingLedger,
 	 Map<String, ReinitField> preScannedReinit,
@@ -2685,6 +2715,21 @@ public class InitFix {
 			} else {
 				acceptedInstance.add(fieldName);
 				instanceDecisions.put(fieldName, FieldDecision.ACCEPTED);
+			}
+		}
+
+		// ==================== 静态字段：增强重定义能力门禁 ====================
+		// 既有 static final 字段（运行期初始化、非 ConstantValue）的读者可能已把值折叠进机器码。
+		// 标准 HotSpot 上重定义宿主只失效宿主自身的已编译方法，补丁写内存后跨类读者仍读旧值；
+		// 增强重定义的阶段 C 才是这类读者的 deopt 屏障。没有该能力时逐字段失败关闭（不是整类拒绝），
+		// 新增/类型变更/ConstantValue/非 final 字段不受影响（docs/status.md §5.1 风险 34）。
+		if (!RemoldAgent.isEnhancedHotswapEnabled()) {
+			for (String f : new ArrayList<>(staticExtracts.keySet())) {
+				if (!requiresEnhancedForExistingStaticFinal(diff, fieldNodes, f)) continue;
+				staticExtracts.remove(f);
+				staticReasons.put(f, ENHANCED_STATIC_FINAL_REASON);
+				log("Static field '" + f + "' of " + className
+				    + " is not rewritten without enhanced class redefinition");
 			}
 		}
 

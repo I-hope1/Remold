@@ -163,6 +163,7 @@ public class InitFixOracle {
 		scenario("§4.2 前提：跨类调用 / 他类静态字段型初值确实会被放行", InitFixOracle::caseExternalDependencyAccepted);
 		scenario("§4.2 @RemoldReinit 只在初值表达式变了时重置：封闭可跳过、开放必须照写", InitFixOracle::caseReinitOnlyWhenInitializerChanges);
 		scenario("§4.2 注解摘掉再重新加上：记录必须作废，否则重置被吃掉", InitFixOracle::caseReinitReaddedAfterRemoval);
+		scenario("§5.1 风险 34：既有 static final 字段改写无增强重定义时逐字段拒绝（非 final/ConstantValue/实例字段不受影响）", InitFixOracle::caseStaticFinalEnhancedGate);
 
 		System.out.println();
 		System.out.println("通过 " + passed + " 条；失败 " + failed + " 条；合计 " + (passed + failed) + " 条");
@@ -1131,6 +1132,141 @@ public class InitFixOracle {
 		check("twenty".equals(read(f8.host, s8, "count")),
 			"CaseN8：存量实例写入了新类型初值（期望 twenty，实际 " + describe(read(f8.host, s8, "count")) + "）");
 		expectReinitHint("CaseN8", "count (OVERWRITE, instance)");
+	}
+
+	// ==================== 场景 14b：§5.1 风险 34 —— 既有 static final 需要增强重定义 ====================
+
+	static final String CASE_SF_GATE_V1 = """
+		package oracle;
+		public class CaseSfGate {
+			private static final StringBuilder MSG = new StringBuilder("old");
+			public static String msg() { return MSG.toString(); }
+		}
+		""";
+
+	static final String CASE_SF_GATE_V2 = """
+		package oracle;
+		public class CaseSfGate {
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private static final StringBuilder MSG = new StringBuilder("new");
+			public static String msg() { return MSG.toString(); }
+		}
+		""";
+
+	static final String CASE_SF_GATE_MIX_V1 = """
+		package oracle;
+		public class CaseSfGateMix {
+			private static final StringBuilder MSG = new StringBuilder("old");
+			private static String plain = "old";
+			private static final String CONST = "a";
+			private static String derived = "x";
+			private String tag = "old";
+			public static String msg() { return MSG.toString(); }
+			public static String plain() { return plain; }
+			public static String constValue() { return CONST; }
+			public static String derived() { return derived; }
+			public String tag() { return tag; }
+		}
+		""";
+
+	static final String CASE_SF_GATE_MIX_V2 = """
+		package oracle;
+		public class CaseSfGateMix {
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private static final StringBuilder MSG = new StringBuilder("new");
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private static String plain = "new";
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private static final String CONST = "b";
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private static String derived = "x" + MSG;
+			@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)
+			private String tag = "new";
+			public static String msg() { return MSG.toString(); }
+			public static String plain() { return plain; }
+			public static String constValue() { return CONST; }
+			public static String derived() { return derived; }
+			public String tag() { return tag; }
+		}
+		""";
+
+	/**
+	 * A runtime-initialized {@code static final} reference field (no {@code ConstantValue}) can be
+	 * folded into compiled cross-class readers, and only enhanced class redefinition (stage C) deopts
+	 * those readers. Without {@code -XX:+AllowEnhancedClassRedefinition} the rewrite must fail closed
+	 * per field, with a warn naming the flag. Non-final static, {@code ConstantValue} and instance
+	 * fields must stay unaffected (no behavior change for them).
+	 */
+	static void caseStaticFinalEnhancedGate() throws Exception {
+		check(!RemoldAgent.isEnhancedHotswapEnabled(),
+			"precondition: this oracle JVM has no enhanced class redefinition (flag off)");
+
+		// ---- A: only an existing static final rewrite -> rejected per field, no patch task, no write ----
+		Fixture f1 = loadFixture("oracle.CaseSfGate", CASE_SF_GATE_V1, CASE_SF_GATE_V2);
+		setStaticField(f1.host, "MSG", new StringBuilder("stale"));
+		check("stale".equals(staticMsg(f1.host)),
+			"CaseSfGate precondition: static environment holds the old runtime value (actual "
+			+ describe(staticMsg(f1.host)) + ")");
+
+		InitFix.PatchReport r1 = f1.transform();
+		expect(r1, true, "MSG", InitFix.FieldStatus.REJECTED, "enhanced");
+		InitFix.FieldDecision d1 = r1.staticFields().get("MSG");
+		check(d1.reason() != null && d1.reason().contains("-XX:+AllowEnhancedClassRedefinition"),
+			"CaseSfGate：拒绝原因点名增强重定义开关（实际：" + (d1 == null ? null : d1.reason()) + "）");
+		check(!r1.patchGenerated(), "CaseSfGate：被拒字段不生成任何补丁任务");
+		check(agentWarnings.stream().anyMatch(w ->
+				w.contains("CaseSfGate") && w.contains("-XX:+AllowEnhancedClassRedefinition")),
+			"CaseSfGate：拒绝经 transform 的 warn 出口发出且点名开关（实际 warns="
+			+ agentWarnings.size() + " 条）");
+		f1.apply();
+		check("stale".equals(staticMsg(f1.host)),
+			"CaseSfGate：未发生写入，存量值保持 stale（实际 " + describe(staticMsg(f1.host)) + "）");
+
+		// ---- B: same class also has non-final static / ConstantValue / instance rewrites: they stay
+		//         unaffected (per-field rejection, not whole-class), so mutation of the ACC_FINAL
+		//         condition (or removal of the gate) must turn this scenario red. ----
+		Fixture f2 = loadFixture("oracle.CaseSfGateMix", CASE_SF_GATE_MIX_V1, CASE_SF_GATE_MIX_V2);
+		setStaticField(f2.host, "MSG", new StringBuilder("stale"));
+		setStaticField(f2.host, "plain", "old");
+		setStaticField(f2.host, "CONST", "a");
+		setStaticField(f2.host, "derived", "pre-derived");
+		Object inst = construct(f2.host);
+		setField(f2.host, inst, "tag", "old");
+		InstanceTracker.register(inst);
+
+		InitFix.PatchReport r2 = f2.transform();
+		expect(r2, true, "MSG", InitFix.FieldStatus.REJECTED, "enhanced");
+		expect(r2, true, "plain", InitFix.FieldStatus.ACCEPTED, null);
+		expect(r2, true, "CONST", InitFix.FieldStatus.ACCEPTED, null);
+		expect(r2, false, "tag", InitFix.FieldStatus.ACCEPTED, null);
+		// Dependency closure: "derived" reads the rejected MSG, so it must be rejected per field too
+		// (not accepted, and not silently patched with a stale read) — and it must not drag the whole
+		// class down (plain/CONST/tag stay accepted).
+		expect(r2, true, "derived", InitFix.FieldStatus.REJECTED, "reads new static field 'MSG'");
+		check(r2.staticFields().get("plain").status() != r2.staticFields().get("MSG").status(),
+			"CaseSfGateMix：非 final 静态字段与 final 静态字段得到不同判决（逐字段而非整类）");
+		check(r2.patchGenerated(),
+			"CaseSfGateMix：非 final 静态 / ConstantValue / 实例字段照常生成补丁");
+		f2.apply();
+		check("stale".equals(staticMsg(f2.host)),
+			"CaseSfGateMix：被拒的 static final 仍未被写入（实际 " + describe(staticMsg(f2.host)) + "）");
+		check("new".equals(read(f2.host, null, "plain")),
+			"CaseSfGateMix：非 final 静态字段照常改写（期望 new，实际 "
+			+ describe(read(f2.host, null, "plain")) + "）");
+		check("pre-derived".equals(read(f2.host, null, "derived")),
+			"CaseSfGateMix：依赖被拒字段的 derived 同样不写入（期望 pre-derived，实际 "
+			+ describe(read(f2.host, null, "derived")) + "）");
+		check("b".equals(read(f2.host, null, "CONST")),
+			"CaseSfGateMix：ConstantValue 静态 final 不受门禁影响（期望 b，实际 "
+			+ describe(read(f2.host, null, "CONST")) + "）");
+		check("new".equals(read(f2.host, inst, "tag")),
+			"CaseSfGateMix：同类的实例字段照常改写（期望 new，实际 "
+			+ describe(read(f2.host, inst, "tag")) + "）");
+	}
+
+	static String staticMsg(Class<?> host) {
+		Object v = read(host, null, "MSG");
+		return v == null ? null : v.toString();
 	}
 
 	// ==================== 探针：外部依赖型初值（跨类调用 / 他类静态字段）是否被放行 ====================
@@ -3747,6 +3883,20 @@ public class InitFixOracle {
 				case "D" -> Reflect.UNSAFE.putDouble(host, off, 0.0d);
 				default -> throw new IllegalArgumentException("resetStaticToDefault 不支持 " + desc);
 			}
+		} catch (NoSuchFieldException e) {
+			throw new IllegalStateException(e);
+		}
+	}
+
+	/**
+	 * 设置静态字段（含 {@code static final}）：反射 {@code Field.set} 不允许写 final 静态字段，
+	 * 只能走字段偏移。用于给"存量静态环境"造出旧值。
+	 */
+	@SuppressWarnings({"removal", "deprecation"})
+	static void setStaticField(Class<?> host, String field, Object value) {
+		try {
+			Field f = host.getDeclaredField(field);
+			Reflect.UNSAFE.putObject(host, Reflect.UNSAFE.staticFieldOffset(f), value);
 		} catch (NoSuchFieldException e) {
 			throw new IllegalStateException(e);
 		}

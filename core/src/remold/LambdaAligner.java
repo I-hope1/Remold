@@ -1305,7 +1305,8 @@ public class LambdaAligner {
 				}
 
 				if (++settleRound >= MAX_FIXPOINT_ROUNDS) {
-					RemoldAgent.warn("[LambdaAligner] settled loop reached limit (64) without converging for " + ctx.currentClass);
+					RemoldAgent.warn("[LambdaAligner] settled loop reached limit (" + MAX_FIXPOINT_ROUNDS
+					                 + ") without converging for " + ctx.currentClass);
 					break;
 				}
 			}
@@ -3634,8 +3635,9 @@ public class LambdaAligner {
 				// 正常 javac 产物不会成环（lambda 的构造关系是 DAG），这里只是防御：
 				// 真出现环时，宁可让少数方法按当前（可能不完整的）语义指纹参与匹配，
 				// 也不能让整次热更失败。
-				RemoldAgent.warn("[LambdaAligner] Recursive semantic fingerprint did not converge in 64 rounds for " + className
-				                  + "; proceeding with current values");
+				RemoldAgent.warn("[LambdaAligner] Recursive semantic fingerprint did not converge in "
+				                 + MAX_FIXPOINT_ROUNDS + " rounds for " + className
+				                 + "; proceeding with current values");
 			}
 		}
 	}

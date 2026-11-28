@@ -1637,7 +1637,7 @@ public class RemoldAgent {
 	 * 注册在它之后则天然拿到对齐后的字节，而且本 transformer <b>永远返回 {@code null}</b>
 	 * （不改字节、不参与任何决策），对加载流程零影响。</p>
 	 *
-	 * <p>只抄工程自身的类：判定见 {@link #isProjectLocation}。数组类与 hidden class 不会走到这里。</p>
+	 * <p>只抄工程自身的类：判定见 {@link RemoldAgentBootstrap#isProjectLocation}。数组类与 hidden class 不会走到这里。</p>
 	 */
 	/**
 	 * <p><b>为什么是 public</b>：集成探针 {@code CacheWarmingProbe} 要注册<b>同一个类</b>来验证
@@ -2401,7 +2401,7 @@ public class RemoldAgent {
 	/**
 	 * 类名 → 最近一次拒绝的记录。
 	 *
-	 * <p>拒绝<b>不会</b>更新运行态字节码（{@link #dropFromBatch} 只把类移出本批），而源码已经改了，
+	 * <p>拒绝<b>不会</b>更新运行态字节码（{@code BatchLayoutCoordinator.dropFromBatch} 只把类移出本批），而源码已经改了，
 	 * 于是源码与运行态之间的差异会一直保留：下一次热更会 diff 出同一条变更、得到同一个结论。
 	 * 这不是缺陷——放行就会让批次外读者在运行期抛 {@code LinkageError}——但用户很容易误以为
 	 * "再热一次就好了"。这里统计次数，第二次起额外提示"这是循环，需要重启"。</p>
@@ -2749,7 +2749,7 @@ public class RemoldAgent {
 	 * 两阶段 Schema-First 重定义的生产接线（{@code docs/initfix/04-target-design.md} §1）。
 	 *
 	 * <p><b>为什么需要它</b>：{@code redefineClasses} 返回后新方法体立刻可执行，而新增字段要等
-	 * {@link InitFix#applyPatch} 枚举完堆才写入。重定义那一帧里如果业务线程（渲染/逻辑）先跑了
+	 * {@link remold.ref.InitFixRuntimeDriver#applyPatch} 枚举完堆才写入。重定义那一帧里如果业务线程（渲染/逻辑）先跑了
 	 * 新方法体，读到的就是 {@code null}/{@code 0}——引用类型直接 NPE。两阶段把「结构上线」与
 	 * 「新方法体上线」拆成两次重定义，中间夹一次补丁；窗口内的旧方法体在编译期就不知道新增字段，
 	 * 不可能读穿。</p>

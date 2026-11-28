@@ -16,6 +16,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.stream.Collectors;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -292,7 +293,7 @@ public final class BytecodePack {
 		if (root == null || !Files.isDirectory(root)) return List.of();
 		TreeSet<Long> seqs = new TreeSet<>();
 		try (Stream<Path> s = Files.list(root)) {
-			for (Path p : s.toList()) {
+			for (Path p : s.collect(Collectors.toUnmodifiableList())) {
 				if (!Files.isDirectory(p)) continue;
 				long seq = roundSeqOf(p.getFileName().toString());
 				if (seq > 0 && Files.isRegularFile(p.resolve(MANIFEST_FILE))) seqs.add(seq);
@@ -345,7 +346,7 @@ public final class BytecodePack {
 		try (Stream<Path> s = Files.list(root)) {
 			files = s.filter(p -> p.getFileName().toString().endsWith(PACK_SUFFIX))
 				.sorted(Comparator.comparing(p -> p.getFileName().toString()))
-				.toList();
+				.collect(Collectors.toUnmodifiableList());
 		}
 		List<Entry> out = new ArrayList<>(files.size());
 		for (Path p : files) {
@@ -360,7 +361,7 @@ public final class BytecodePack {
 	public static void clear(Path root) throws IOException {
 		if (root == null || !Files.isDirectory(root)) return;
 		try (Stream<Path> s = Files.list(root)) {
-			for (Path p : s.toList()) {
+			for (Path p : s.collect(Collectors.toUnmodifiableList())) {
 				String n = p.getFileName().toString();
 				if (Files.isDirectory(p) && roundSeqOf(n) > 0) deleteTree(p);
 				else if (n.endsWith(PACK_SUFFIX) || n.endsWith(TMP_SUFFIX)) Files.deleteIfExists(p);
@@ -567,7 +568,7 @@ public final class BytecodePack {
 
 	private static void clearDir(Path dir) throws IOException {
 		try (Stream<Path> s = Files.list(dir)) {
-			for (Path p : s.toList()) {
+			for (Path p : s.collect(Collectors.toUnmodifiableList())) {
 				String n = p.getFileName().toString();
 				if (n.endsWith(PACK_SUFFIX) || n.endsWith(TMP_SUFFIX)) Files.deleteIfExists(p);
 			}
@@ -577,7 +578,7 @@ public final class BytecodePack {
 	private static void deleteTree(Path dir) throws IOException {
 		List<Path> all;
 		try (Stream<Path> s = Files.walk(dir)) {
-			all = s.sorted(Comparator.reverseOrder()).toList();
+			all = s.sorted(Comparator.reverseOrder()).collect(Collectors.toUnmodifiableList());
 		}
 		for (Path p : all) Files.deleteIfExists(p);
 	}

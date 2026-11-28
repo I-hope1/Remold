@@ -4,13 +4,12 @@ import remold.vcs.AlignmentMetaStore;
 import remold.vcs.DerivedDataCache;
 import remold.util.*;
 import org.objectweb.asm.*;
-import org.objectweb.asm.commons.*;
 import org.objectweb.asm.tree.*;
-import org.objectweb.asm.tree.analysis.*;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -86,7 +85,7 @@ import java.util.function.Supplier;
  * 这些<b>与内容无关</b>的结构信息。删一个加一个、或者把叶子包进新容器时，位置信息会把
  * <b>别人的名字</b>交给一个语义不同的方法体：老 {@code CallSite} 不抛异常、静默跑错。
  * 因此这三趟在配对前都要过 {@link #fallbackPairingAllowed}：只有"方法体逐条等价
- * （{@link #bodyFingerprint}，常量池索引/局部槽位/可折叠算式已归一）"、"同名 + 同宿主形态"、
+ * （{@code LambdaBodyFingerprint.bodyFingerprint}，常量池索引/局部槽位/可折叠算式已归一）"、"同名 + 同宿主形态"、
  * "消费端在宿主内有区分度"、"骨架全类唯一"、"子身份已定案"、"与已定案配对顺序一致"之一成立才放行；
  * 都不成立就 {@code BODY_MISMATCH} WARN + 拒绝配对：旧名走幽灵桩（老 {@code CallSite} 熔断、
  * 响亮失败），新方法去阶段二拿避障名。</p>
@@ -124,6 +123,11 @@ import java.util.function.Supplier;
  * @see remold.RemoldAgent
  */
 public class LambdaAligner {
+
+	/** 形状 / 深度 / 语义指纹定点计算的最大轮数。 */
+	private static final int MAX_FIXPOINT_ROUNDS = 64;
+	/** 最后一轮（用于未收敛告警判定）。 */
+	private static final int LAST_FIXPOINT_ROUND = MAX_FIXPOINT_ROUNDS - 1;
 
 	/**
 	 * 活体对齐的基线选择开关（Run R / Run E），**默认开启**。
@@ -280,7 +284,7 @@ public class LambdaAligner {
 		public final int consumerMismatchDebugPairs;
 		/** 触发同构缩减告警的数量。 */
 		public final int prunedPairs;
-		/** 因"方法体不等价且无独立身份证据"被拒绝配对的次数（{@link #bodyMismatchRefusals} 的对外读数）。 */
+		/** 因"方法体不等价且无独立身份证据"被拒绝配对的次数（对外读数）。 */
 		public final int bodyMismatchRefusals;
 
 		public AlignmentStats(int step1Pairs, int passAPairs, int passBPairs) {
@@ -336,11 +340,11 @@ public class LambdaAligner {
 	/**
 	 * 一次 {@link #align} 的结果快照。
 	 *
-	 * <p><b>为什么收成一个对象</b>：早先这些信息散在十个 {@code volatile} 静态字段里，读者
-	 * 逐个读，读到的可能是<b>不同轮次</b>的拼接——{@code CellPropertyRef} 就同时读
-	 * {@link #methodMapping} 与 {@link #alignedClass} 并比较两者是否自洽，两个独立字段之间
-	 * 没有任何顺序保证，热更期间一旦插进另一轮对齐，比较的就是跨轮的结论。
-	 * 收成不可变对象后只有<b>一次</b> volatile 读，快照天然一致。</p>
+	 * <p><b>为什么收成一个对象</b>：读者逐个读十个 {@code volatile} 静态字段时，读到的可能是
+	 * <b>不同轮次</b>的拼接——{@code CellPropertyRef} 就同时读 {@link #methodMapping} 与
+	 * {@link #alignedClass} 并比较两者是否自洽，两个独立字段之间没有任何顺序保证，热更期间
+	 * 一旦插进另一轮对齐，比较的就是跨轮的结论。收成不可变对象后只有<b>一次</b> volatile 读，
+	 * 快照天然一致。</p>
 	 *
 	 * <p>空值语义分两种，不要混：{@link #inventedNames} 永远非 {@code null}（空集即"没有自造名"，
 	 * 调用方会直接把它喂回下一轮）；而 {@link #stats}、{@link #oldAnonHashes}、
@@ -513,7 +517,7 @@ public class LambdaAligner {
 	 *
 	 * <p>调用方（agent）必须把 {@link AlignmentResult#inventedNames} 存起来，并在下一轮作为
 	 * {@code inventedOldNames} 传回去。不传的后果见 {@link #align(byte[], byte[],
-	 * java.util.function.Function, java.util.function.Function, java.util.Set)} 的说明：
+	 * Function, Function, java.util.Set)} 的说明：
 	 * 自造名会被误当成 javac 原名，让"同名优先"把老 CallSite 绑到别的 lambda 上。</p>
 	 *
 	 * <p>{@code null} 表示"本轮还没跑过"（进程刚起，或测试显式清空以检测是否记录）。</p>
@@ -561,7 +565,6 @@ public class LambdaAligner {
 
 	/**
 	 * 单次发布：写全局单槽 + 按类记账。
-	 *
 	 * @param slashName 内部名；{@code null} 表示字节不可解析（只写全局单槽，不做按类记账）
 	 */
 	private static void publishResult(String slashName, AlignmentResult result) {
@@ -648,9 +651,8 @@ public class LambdaAligner {
 	/**
 	 * 诊断开关：打开后打印配对决策的细节（谁在哪个阶段拿了哪个旧名字）。
 	 *
-	 * <p><b>为什么做成常设开关</b>：排查本对齐器的顺序问题时，临时插日志打印是必需的；但临时探针有两个反复出现的代价 ——
-	 * 忘了移除（污染生产日志），以及 <b>改了没生效却察觉不到</b>
-	 * （曾因 hstest 加载陈旧 jar，数轮结论都建立在旧字节码上）。
+	 * <p><b>为什么做成常设开关</b>：排查顺序问题时，临时插日志的两个代价是忘了移除（污染生产日志），
+	 * 以及 <b>改了没生效却察觉不到</b>（例如加载了陈旧 jar，数轮结论都建立在旧字节码上）。
 	 * 做成开关后，排查只需设属性/环境变量，<b>不必改代码</b>。</p>
 	 *
 	 * <p>开启方式（任一）：</p>
@@ -815,8 +817,8 @@ public class LambdaAligner {
 		 * 上一轮由对齐器自造的 lambda 方法名（仍在旧类里）。
 		 *
 		 * <p>这些名字<b>不是</b> javac 会产出的编号，因此不能作为"同名 = 同一个 lambda"
-		 * 的证据。见 {@link #align(byte[], byte[], java.util.function.Function,
-		 * java.util.function.Function, java.util.Set)}。</p>
+		 * 的证据。见 {@link #align(byte[], byte[], Function,
+		 * Function, java.util.Set)}。</p>
 		 */
 		java.util.Set<String> inventedOldNames = java.util.Set.of();
 
@@ -840,7 +842,7 @@ public class LambdaAligner {
 		 *
 		 * <p>桥是"老名字+老描述符 → 新方法"的适配器。它<b>不参与改名</b>：新方法保留自己的
 		 * 名字，桥占用老键，两者共存（老键的 desc 与新方法的 desc 必然不同，不会撞车）。
-		 * 见 {@link #stepCaptureBridge}。</p>
+		 * 见 {@link LambdaCaptureBridge#stepCaptureBridge}。</p>
 		 */
 		final Map<String, LambdaCaptureBridge.BridgeSpec> bridges = new HashMap<>(16);
 
@@ -971,7 +973,8 @@ public class LambdaAligner {
 			effPrevCn = null;
 			effPrevBytes = null;
 			positionalFallbacks = 0;
-			runRGate = RunRGate.META_OFF;			oldGroups.clear();
+			runRGate = RunRGate.META_OFF;
+			oldGroups.clear();
 			newGroups.clear();
 			childIndex.clear();
 			oldNameIndex.clear();
@@ -1074,27 +1077,12 @@ public class LambdaAligner {
 	 * @return 对齐后的字节码
 	 */
 	public static byte[] align(byte[] oldBytes, byte[] newBytes,
-	                           java.util.function.Function<String, byte[]> oldBytecodeResolver,
-	                           java.util.function.Function<String, byte[]> newBytecodeResolver) {
+	                           Function<String, byte[]> oldBytecodeResolver,
+	                           Function<String, byte[]> newBytecodeResolver) {
 		return align(oldBytes, newBytes, oldBytecodeResolver, newBytecodeResolver, java.util.Set.of());
 	}
 
-	/**
-	 * 对齐主入口（带"上一轮由本对齐器自造的名字"集合）。
-	 *
-	 * <p><b>为什么需要这个参数</b>：对齐会给"在旧类里找不到对应物"的新 lambda 分配一个
-	 * 避障用的新槽位名（例如旧类占用了 {@code $0..$2}，新 lambda 就拿 {@code $4}）。
-	 * 这个 {@code $4} 不是 javac 会产出的名字，但对齐完成后它就**留在类里**了。
-	 * 下一轮 javac 重新从 0 编号时，某个真正的新 lambda 完全可能正好也叫 {@code $4}——
-	 * 此时"同名优先"会把旧 {@code $4}（其实是上一轮另一个 lambda）当成它的对应物，
-	 * 于是老 CallSite 被绑到一个语义不同的方法体上：<b>不抛异常、静默跑错</b>。
-	 *
-	 * <p>把自造名传进来后，"同名"这条证据只在旧名字确实是 javac 原名时才被采信，
-	 * 自造名一律退回按顺序配对（顺序配对在这种情况下是正确的：javac 按源序降序发射
-	 * 合成方法，前置插入只会让整体位移，不会打乱相对次序）。</p>
-	 *
-	 * @param inventedOldNames 上一轮由对齐器自造、且仍在旧类里的 lambda 方法名；可为 null
-	 */
+	/** 快速判断：类字节里是否出现 lambda 合成方法名。 */
 	public static boolean hasPotentialLambdas(byte[] bytes) {
 		if (bytes == null || bytes.length < 8) return false;
 		int len = bytes.length;
@@ -1121,9 +1109,25 @@ public class LambdaAligner {
 		return false;
 	}
 
+	/**
+	 * 对齐主入口（带"上一轮由本对齐器自造的名字"集合）。
+	 *
+	 * <p><b>为什么需要这个参数</b>：对齐会给"在旧类里找不到对应物"的新 lambda 分配一个
+	 * 避障用的新槽位名（例如旧类占用了 {@code $0..$2}，新 lambda 就拿 {@code $4}）。
+	 * 这个 {@code $4} 不是 javac 会产出的名字，但对齐完成后它就**留在类里**了。
+	 * 下一轮 javac 重新从 0 编号时，某个真正的新 lambda 完全可能正好也叫 {@code $4}——
+	 * 此时"同名优先"会把旧 {@code $4}（其实是上一轮另一个 lambda）当成它的对应物，
+	 * 于是老 CallSite 被绑到一个语义不同的方法体上：<b>不抛异常、静默跑错</b>。</p>
+	 *
+	 * <p>把自造名传进来后，"同名"这条证据只在旧名字确实是 javac 原名时才被采信，
+	 * 自造名一律退回按顺序配对（顺序配对在这种情况下是正确的：javac 按源序降序发射
+	 * 合成方法，前置插入只会让整体位移，不会打乱相对次序）。</p>
+	 *
+	 * @param inventedOldNames 上一轮由对齐器自造、且仍在旧类里的 lambda 方法名；可为 {@code null}
+	 */
 	public static byte[] align(byte[] oldBytes, byte[] newBytes,
-	                           java.util.function.Function<String, byte[]> oldBytecodeResolver,
-	                           java.util.function.Function<String, byte[]> newBytecodeResolver,
+	                           Function<String, byte[]> oldBytecodeResolver,
+	                           Function<String, byte[]> newBytecodeResolver,
 	                           java.util.Set<String> inventedOldNames) {
 		return align(oldBytes, newBytes, oldBytecodeResolver, newBytecodeResolver, inventedOldNames, null);
 	}
@@ -1135,8 +1139,8 @@ public class LambdaAligner {
 	 * 传 {@code null} 表示"无 loader 维度"（引导类 / 直接调用场景）。</p>
 	 */
 	public static byte[] align(byte[] oldBytes, byte[] newBytes,
-	                           java.util.function.Function<String, byte[]> oldBytecodeResolver,
-	                           java.util.function.Function<String, byte[]> newBytecodeResolver,
+	                           Function<String, byte[]> oldBytecodeResolver,
+	                           Function<String, byte[]> newBytecodeResolver,
 	                           java.util.Set<String> inventedOldNames,
 	                           ClassLoader loader) {
 		int  oldLen  = oldBytes == null ? -1 : oldBytes.length;
@@ -1160,7 +1164,7 @@ public class LambdaAligner {
 		publishResult(alignKey, AlignmentResult.empty(oldLen, newLen, oldHash, newHash));
 		if (oldBytes == null || oldBytes.length == 0) return newBytes;
 
-		// ---- Run R 准入（规格 §3.2）：三道闸门全过才允许换旧侧，任一不成立整类退回 Run E ----
+		//region Run R 准入（规格 §3.2）：三道闸门全过才允许换旧侧，任一不成立整类退回 Run E
 		RunRGate gate;
 		byte[] rawPrevBytes = null;
 		Map<String, String> rawToEff = Map.of();
@@ -1209,6 +1213,7 @@ public class LambdaAligner {
 			rawPrevBytes = null;
 			rawToEff = Map.of();
 		}
+		//endregion
 
 		MatchContext ctx = CONTEXT.get();
 		try {
@@ -1299,7 +1304,7 @@ public class LambdaAligner {
 					dbg(() -> "SETTLED " + ni.name + " desc=" + ni.desc);
 				}
 
-				if (++settleRound >= 64) {
+				if (++settleRound >= MAX_FIXPOINT_ROUNDS) {
 					RemoldAgent.warn("[LambdaAligner] settled loop reached limit (64) without converging for " + ctx.currentClass);
 					break;
 				}
@@ -1316,13 +1321,9 @@ public class LambdaAligner {
 			// "父保住名字、子丢了名字"这类静默错位：老 CallSite 拿到了父，
 			// 但父内部指向的已经换人。
 			//
-			// 曾用"shape 是否相等"做这道校验，但那是**恒真**的：shape 在 scan 里定稿后不再变，
-			// 而所有配对路径都已强制 sameNestingLevel（shape 相等），因此它永不触发，
-			// 只提供虚假的安全感。改为引用归属后是独立信息。
-			//
-			// 与当初那个 save3 形状 bug 的关系：那个 bug 是**两侧算成同一个错值**，
-			// 任何等值校验都放行；它已被两处修复解决（shape 迭代到定稿、哨兵改用 null），
-			// 见 scan 末尾对子树形状的定点迭代。本校验防的是另一类失败（子归属错位）。
+			// 不能用"shape 是否相等"做这道校验：shape 在 scan 里定稿后不再变，而所有配对路径
+			// 都已强制 sameNestingLevel（shape 相等），因此它恒真、只提供虚假的安全感。
+			// 引用归属是独立信息，能抓到"父保住名字、子丢了名字"的错位。
 			verifyRefConsistency(ctx);
 
 			// 【阶段二前】诊断摘要：只在 DEBUG 下，且每个未配对方法**只打一行**。
@@ -1695,7 +1696,6 @@ public class LambdaAligner {
 	 * <p>为什么必须是"唯一 + 严格最大"：交集并列说明内容证据分不开它们，此时任何偏袒都只是把
 	 * 一种编辑形态的错误换成镜像形态的错误（删 {@code $0} 改 {@code $1} 与删 {@code $1} 改
 	 * {@code $0} 完全对称）。分不开就老老实实退回既有规则。</p>
-	 *
 	 * @return 唯一严格最大者；交集全零、并列最大、或候选不足两个时返回 {@code null}
 	 */
 	private static SyntheticInfo uniqueStrictMaxOverlap(SyntheticInfo ni, List<SyntheticInfo> legal) {
@@ -1903,7 +1903,7 @@ public class LambdaAligner {
 
 				// 撤销：清掉改名登记与双方的匹配状态。
 				// 注意**不回滚** simpleNameWitness / renameBySimpleName：那两张表记录的是
-				// "同一 simpleName 的唯一目标"，撤销配对并不会抹掉"曾经见证过"这一事实。
+				// "同一 simpleName 的唯一目标"，撤销配对并不会抹掉已经记录下的见证。
 				// 后果偏保守（该名字仍可能被判已使用/歧义），不会产生错误映射。
 				// 不尝试回滚的原因：witnessSimpleName 未记录"本次调用是否插入/改写了该条目"，
 				// 盲目 remove 会把别的配对写入的见证一并删掉，反而制造不一致。
@@ -2035,15 +2035,33 @@ public class LambdaAligner {
 	 * 新旧内层也同 hash，仅凭 hash 无法区分谁是谁。</p>
 	 */
 	private static boolean sameNestingLevel(SyntheticInfo ni, SyntheticInfo oi) {
-		// 比**子树形状**：只由 indy 引用拓扑决定，与方法体内容无关。
-		//
-		// 演进过程（两个方向都踩过）：
-		//   • 早先比 childHashes 的**值** ⇒ 后代被编辑时祖先形状被误判（实测 save3 的
-		//     单轮 V2→V3，整条祖先链被幽灵化）；
-		//   • 改成只比"有无子 + 子数量"⇒ 外层与中层结构等价（都是 1 个子），互换无人拦
-		//     （实测 save3 两轮序列：$3 与 $4 互换，老回调静默改了语义）。
-		// 形状同时解决两者：与内容无关、但能区分外层/中层/叶子。
+		// 比子树形状：只由 indy 引用拓扑决定，与方法体内容无关；
+		// 形状能区分外层/中层/叶子，避免同 hash 的层级互换。
 		return ni.shape.equals(oi.shape);
+	}
+
+	/**
+	 * 反复跑同一趟匹配，直到不再产生新配对。
+	 *
+	 * @param pass 接收 {@code (newGroup, oldGroup)}，返回本组是否有新配对
+	 */
+	private static boolean runPassUntilConverged(
+	 LongObjectMap<List<SyntheticInfo>> newGroups,
+	 LongObjectMap<List<SyntheticInfo>> oldGroups,
+	 BiPredicate<List<SyntheticInfo>, List<SyntheticInfo>> pass) {
+		boolean any = false;
+		while (true) {
+			boolean progressed = false;
+			for (int idx : groupOrder(newGroups)) {
+				List<SyntheticInfo> newGroup = newGroups.valueAt(idx);
+				List<SyntheticInfo> oldGroup = oldGroups.get(newGroups.keyAt(idx));
+				if (newGroup == null || oldGroup == null) continue;
+				progressed |= pass.test(newGroup, oldGroup);
+			}
+			any |= progressed;
+			if (!progressed) break;
+		}
+		return any;
 	}
 
 	/**
@@ -2056,9 +2074,8 @@ public class LambdaAligner {
 		boolean                            anyProgressed = false;
 
 		// 1. Step 1（宿主序列锚点 + 同组同 hash + 跨组指纹，证据匹配，迭代至收敛）
-		boolean progressed;
-		do {
-			progressed = false;
+		while (true) {
+			boolean progressed = false;
 			// 1a. 宿主序列锚点匹配：按普通方法 (name+desc) 或 lambda 票据指纹 (hash) 做 LCS 对齐，
 			// 在叶子与多候选同 hash 桶内进行结构消歧，防止误配向上传导
 			progressed |= alignByHostSequence(ctx);
@@ -2071,47 +2088,21 @@ public class LambdaAligner {
 			}
 			progressed |= matchByFingerprintAcrossGroups(ctx);
 			anyProgressed |= progressed;
-		} while (progressed);
+			if (!progressed) break;
+		}
 
 		// 2. 骨架趟：同组内骨架（忽略字面量）在两侧都唯一的对。放在 Pass A 之前，
 		//    让"只改了常量"的编辑先按指令结构锁定，而不是退化成 (深度, shape) 的盲盒。
-		boolean skelProgressed;
-		do {
-			skelProgressed = false;
-			for (int idx : groupOrder(newGroups)) {
-				List<SyntheticInfo> newGroup = newGroups.valueAt(idx);
-				List<SyntheticInfo> oldGroup = oldGroups.get(newGroups.keyAt(idx));
-				if (newGroup == null || oldGroup == null) continue;
-				skelProgressed |= step2SkeletonPass(ctx, newGroup, oldGroup);
-			}
-			anyProgressed |= skelProgressed;
-		} while (skelProgressed);
+		anyProgressed |= runPassUntilConverged(newGroups, oldGroups,
+		 (newGroup, oldGroup) -> step2SkeletonPass(ctx, newGroup, oldGroup));
 
 		// 3. A 趟：全类范围配对"上行深度 + shape 都相等"的对（迭代至收敛）
-		boolean aProgressed;
-		do {
-			aProgressed = false;
-			for (int idx : groupOrder(newGroups)) {
-				List<SyntheticInfo> newGroup = newGroups.valueAt(idx);
-				List<SyntheticInfo> oldGroup = oldGroups.get(newGroups.keyAt(idx));
-				if (newGroup == null || oldGroup == null) continue;
-				aProgressed |= step2PassA(ctx, newGroup, oldGroup);
-			}
-			anyProgressed |= aProgressed;
-		} while (aProgressed);
+		anyProgressed |= runPassUntilConverged(newGroups, oldGroups,
+		 (newGroup, oldGroup) -> step2PassA(ctx, newGroup, oldGroup));
 
 		// 3. B 趟：顺序回退兜底（迭代至收敛）
-		boolean step2Progressed;
-		do {
-			step2Progressed = false;
-			for (int idx : groupOrder(newGroups)) {
-				List<SyntheticInfo> newGroup = newGroups.valueAt(idx);
-				List<SyntheticInfo> oldGroup = oldGroups.get(newGroups.keyAt(idx));
-				if (newGroup == null || oldGroup == null) continue;
-				step2Progressed |= step2(ctx, newGroup, oldGroup);
-			}
-			anyProgressed |= step2Progressed;
-		} while (step2Progressed);
+		anyProgressed |= runPassUntilConverged(newGroups, oldGroups,
+		 (newGroup, oldGroup) -> step2(ctx, newGroup, oldGroup));
 
 		return anyProgressed;
 	}
@@ -2145,7 +2136,6 @@ public class LambdaAligner {
 	 * </ul>
 	 * 在每个锚点组内，对按 indy 顺序出现的 lambda 序列执行 LCS 最长公共子序列匹配，
 	 * 消除同 hash 桶内在增删元素后的同名/首选错位向上传导缺陷。</p>
-	 *
 	 * @return 本趟是否至少产生了新配对
 	 */
 	private static boolean alignByHostSequence(MatchContext ctx) {
@@ -2165,7 +2155,6 @@ public class LambdaAligner {
 				}
 			}
 			if (!hasUnmatchedNew) continue;
-
 			boolean hasUnmatchedOld = false;
 			for (SyntheticInfo oi : os) {
 				if (!oi.matched && oi.renameable && !oi.ghost && !ctx.isOldNameClaimed(oi)) {
@@ -2356,8 +2345,8 @@ public class LambdaAligner {
 	 * "同名"能不能当证据用。
 	 *
 	 * <p>同名的前提是<b>两侧名字都出自 javac</b>。旧侧如果是上一轮对齐器自造的避障名
-	 * （见 {@link #align(byte[], byte[], java.util.function.Function,
-	 * java.util.function.Function, java.util.Set)}），那这个"同名"可能纯属巧合：javac 这一轮
+	 * （见 {@link #align(byte[], byte[], Function,
+	 * Function, java.util.Set)}），那这个"同名"可能纯属巧合：javac 这一轮
 	 * 从头编号，某个真正的新 lambda 完全可能正好落在这个号上。此时按同名配对会把老
 	 * CallSite 绑到别的 lambda 体上——不抛异常、静默跑错。</p>
 	 *
@@ -2496,7 +2485,7 @@ public class LambdaAligner {
 		return legalOld;
 	}
 
-	/** PASS_A 的统一落账点（两段共用）：告警口径与计数器必须与旧实现逐字一致。 */
+	/** PASS_A 的统一落账点（两段共用）：告警口径与计数器保持一致。 */
 	private static void pairPassA(MatchContext ctx, SyntheticInfo ni, SyntheticInfo bestOld) {
 		dbg(() -> "A-PASS ni=" + ni.name + " depth=" + ni.upDepth + " shape=" + ni.shape
 		          + " old=" + bestOld.name);
@@ -2791,13 +2780,13 @@ public class LambdaAligner {
 
 	/**
 	 * 清空"只报一次"的去重缓存（{@link #WARNED_REALIGNMENTS} 与
-	 * {@link #LOGGED_ORPHANS}）。
+	 * {@link LambdaOrphanEmitter#LOGGED_ORPHANS}）。
 	 *
 	 * <p><b>当前未被调用</b>（按项目决定保留为可选 API）。因此两个去重集合
 	 * <b>在本进程内只增不减</b>，带来两个已知后果：</p>
 	 * <ul>
 	 *   <li>某个 lambda 在 V2 被删除、V3 又被加回时，其孤儿日志不会再次打印；</li>
-	 *   <li>集合大小随"历史上出现过的不同 location 数"单调增长（量级通常很小）。</li>
+	 *   <li>集合大小随本进程见过的不同 location 数单调增长（量级通常很小）。</li>
 	 * </ul>
 	 *
 	 * <p>若要接入热更流程，应在每轮 transform 开始时调用一次，使"每轮都能重新报告"
@@ -2827,7 +2816,7 @@ public class LambdaAligner {
 	 * 都没有就 WARN + 拒绝配对，让旧名走幽灵桩（老 CallSite 熔断、响亮失败），新方法去阶段二拿避障名：</p>
 	 *
 	 * <ol>
-	 *   <li><b>逐条等价</b>：递归语义指纹相同，或 {@link #bodyFingerprint} 相同
+	 *   <li><b>逐条等价</b>：递归语义指纹相同，或 {@code LambdaBodyFingerprint.bodyFingerprint} 相同
 	 *       （常量池索引 / 局部槽位 / 可折叠算式已归一）。这是<b>证明</b>，与名字、位置无关；</li>
 	 *   <li><b>身份锚定</b>：同名 + 同宿主形态（{@code M:}/{@code L:}）。javac 的合成方法名在同一
 	 *       宿主方法内就是"槽位身份"，宿主形态不变意味着这个名字没被搬到别人的嵌套层级下——
@@ -3162,12 +3151,12 @@ public class LambdaAligner {
 	/**
 	 * 按 blob 缓存的"方法 → 每条指令的消费者标记"索引（Per-Blob Derived Data）。
 	 *
-	 * <p><b>为什么缓存这一项</b>：{@link #findConsumers} 用 ASM {@code Analyzer} 做反向数据流分析，
+	 * <p><b>为什么缓存这一项</b>：{@link LambdaBytecodeScanner#findConsumers} 用 ASM {@code Analyzer} 做反向数据流分析，
 	 * 是 {@code align()} 里唯一的重量级派生（占对齐耗时的绝大部分，读数见
 	 * {@code docs/vcs/01-bytecode-changeset-vcs.md} §3.7）。它的输出只由「这份 blob 的这个方法」决定，
 	 * 与轮次、loader、{@code inventedOldNames}、resolver 都无关，因此可以跨轮复用。</p>
 	 *
-	 * <p><b>为什么键里必须带方法、值里必须带指令序号</b>：{@link #findConsumers} 返回值的键是
+	 * <p><b>为什么键里必须带方法、值里必须带指令序号</b>：{@link LambdaBytecodeScanner#findConsumers} 返回值的键是
 	 * {@code AbstractInsnNode}——那是<b>本轮</b>解析出来的可变节点，不能跨轮持有。所以缓存值改存
 	 * "按指令流下标对齐的标记表"，命中后用本轮新解析出的节点按下标重建映射。方法维度不能省：
 	 * 同一份 blob 里不同方法的标记表完全不同，漏掉方法维度会让标记整表错位。</p>
@@ -3455,7 +3444,7 @@ public class LambdaAligner {
 		// groups 的遍历顺序不确定，父可能先于子被处理；此时**读到未定稿的子就跳过本轮**，
 		// 绝不用哨兵值冒充叶子。收敛判据是"没有未定稿 且 无变化"。
 		//
-		// 性能：串接缓冲在**循环外**分配一次、每轮复用，代替原先每轮每方法的
+		// 性能：串接缓冲在**循环外**分配一次、每轮复用，避免每轮每方法都
 		// `new ArrayList` + `String.join`。
 		//
 		// 说明：子形状**必须排序**后才能比较（否则同一形状因子顺序不同而被判为不同，
@@ -3467,7 +3456,7 @@ public class LambdaAligner {
 		//（equals 支持 CharSequence 比较）由 {@link String#contentEquals(CharSequence)} 提供。
 		// LookupKey 适合"稳定 key 反复查哈希表"的场景，不是这里。
 		StringBuilder shapeBuf = new StringBuilder(64);
-		for (int round = 0; round < 64; round++) {
+		for (int round = 0; round < MAX_FIXPOINT_ROUNDS; round++) {
 			boolean changed = false, pending = false;
 			for (int idx = groups.nextEntry(-1); idx != -1; idx = groups.nextEntry(idx)) {
 				List<SyntheticInfo> g = groups.valueAt(idx);
@@ -3509,11 +3498,11 @@ public class LambdaAligner {
 				}
 			}
 			if (!changed && !pending) break;
-			if (round == 63) {
+			if (round == LAST_FIXPOINT_ROUND) {
 				// 明确区分"没算完"与"算完了"：这里留下的是**未定稿**（形状可能为 null），
 				// 而不是一个看似合法的错值。
 				RemoldAgent.warn("[LambdaAligner] Subtree shape in " + (isOld ? "old" : "new")
-				                  + " side did not converge in 64 rounds (cycle or abnormal reference); retaining current values");
+				                 + " side did not converge in " + MAX_FIXPOINT_ROUNDS + " rounds (cycle or abnormal reference); retaining current values");
 			}
 		}
 		// 仍为 null 的（理论上只在成环时出现）退化为叶子形状，保证后续比较不 NPE。
@@ -3545,7 +3534,7 @@ public class LambdaAligner {
 					}
 				}
 			}
-			for (int round = 0; round < 64; round++) {
+			for (int round = 0; round < MAX_FIXPOINT_ROUNDS; round++) {
 				boolean changed = false, pending = false;
 				for (int idx = groups.nextEntry(-1); idx != -1; idx = groups.nextEntry(idx)) {
 					List<SyntheticInfo> g = groups.valueAt(idx);
@@ -3586,12 +3575,12 @@ public class LambdaAligner {
 					}
 				}
 				// 与形状定点计算一致：收敛判据是"没有未定稿 且 无变化"。
-				// 原先只判 changed，于是"引用者未定稿"（成环等）时第一轮即静默 break，
-				// upDepth 停在 -1，而那行告警**永远打不出来** —— 未收敛被完全静默。
+				// 只判 changed 时，"引用者未定稿"（成环等）会让第一轮静默 break，
+				// upDepth 停在 -1，未收敛告警打不出来。
 				if (!changed && !pending) break;
-				if (round == 63) {
+				if (round == LAST_FIXPOINT_ROUND) {
 					RemoldAgent.warn("[LambdaAligner] Ascendant depth in " + (isOld ? "old" : "new")
-					                  + " side did not converge in 64 rounds (possible cycle); unfinalized nodes keep -1");
+					                 + " side did not converge in " + MAX_FIXPOINT_ROUNDS + " rounds (possible cycle); unfinalized nodes keep -1");
 				}
 			}
 		}
@@ -3611,7 +3600,7 @@ public class LambdaAligner {
 	private static void computeSemanticHashes(MatchContext ctx,
 	                                          LongObjectMap<List<SyntheticInfo>> groups,
 	                                          boolean isOld, String className) {
-		for (int round = 0; round < 64; round++) {
+		for (int round = 0; round < MAX_FIXPOINT_ROUNDS; round++) {
 			boolean changed = false;
 			for (int idx = groups.nextEntry(-1); idx != -1; idx = groups.nextEntry(idx)) {
 				List<SyntheticInfo> g = groups.valueAt(idx);
@@ -3640,7 +3629,7 @@ public class LambdaAligner {
 				}
 			}
 			if (!changed) break;
-			if (round == 63) {
+			if (round == LAST_FIXPOINT_ROUND) {
 				// 跑满上限仍未收敛：降级为"沿用当前值并留痕"，绝不抛异常。
 				// 正常 javac 产物不会成环（lambda 的构造关系是 DAG），这里只是防御：
 				// 真出现环时，宁可让少数方法按当前（可能不完整的）语义指纹参与匹配，
@@ -3684,39 +3673,13 @@ public class LambdaAligner {
 		return LambdaBytecodeScanner.readLambdaParamNames(bytes);
 	}
 
-	/**
-	 * 接收者在捕获表里的统一名字。
-	 *
-	 * <p>它<b>不是</b>源码里的变量名，只是一个"两侧必然相等"的占位符。归一它的理由是
-	 * 同一个"捕获到的外层 {@code this}"在不同来源下留下的 {@code LocalVariableTable}
-	 * 不一样，而"任一位缺名字就整体放弃按名映射"这条严格判据会把它们判成"没证据"：</p>
-	 * <ul>
-	 *   <li>实例方法被 {@code forceStaticLambdas} 改成静态：javac 原本给槽 0 写了
-	 *       {@code "this"}，改写不动 LVT，读出来是 {@code "this"}；</li>
-	 *   <li>零捕获静态 lambda 被前置 receiver：槽 0 是新增的，<b>没有 LVT 条目</b>，读出来是 {@code null}；</li>
-	 *   <li><b>kotlinc 原生产物</b>：Indy lambda 天生就是 {@code ACC_STATIC}，槽 0 的 LVT 名字是
-	 *       {@code "this$0"}（kotlinc 对外层 this 的一贯写法，与它给内部类合成字段的命名同源）。
-	 *       实测（kotlin-compiler-embeddable 2.1.20，{@code -jvm-target 21}）：
-	 *       <pre>
-	 *   private static final void d$lambda$0(K, int);        // flags: ACC_PRIVATE|STATIC|FINAL
-	 *       LocalVariableTable:
-	 *           0      11     0 this$0   LK;                 // ← 不是 "this"
-	 *           0      11     1    $k   I
-	 *       </pre></li>
-	 * </ul>
-	 *
-	 * <p>归一本身是<b>启发式</b>：{@code this$0} 是合法的 Java 标识符（源码里真能写
-	 * {@code void d(Foo this$0)}），光看名字分不清"接收者"与"恰好这么命名的局部变量"。
-	 * 所以真正的判据在 {@link #captureNamesOf}：能拿到宿主槽号时以槽号为准（接收者的来源恒为
-	 * 宿主实例方法的 {@code aload 0}），名字只在回溯失败时兜底。</p>
-	 */
-	public static final String RECEIVER_NAME = "$this";
-
+	/** 对外暴露的 {@link LambdaBytecodeScanner#RECEIVER_NAME} 别名，方便调用方和测试引用。 */
+	public static final String RECEIVER_NAME = LambdaBytecodeScanner.RECEIVER_NAME;
 
 	/** 在已扫描的旧/新分组里按名字找 SyntheticInfo（供子指纹计算使用）。 */
-	static SyntheticInfo infoByName(MatchContext ctx, boolean isOld, String name) {		// O(1) 查索引。早先是"遍历所有 group 的所有成员"的双重循环，而本方法被
-		// **三个 64 轮定稿循环**按"每个方法 × 每个子"调用，最坏合计 O(64·N²)。
-		// 见 MatchContext.oldNameIndex / newNameIndex 的说明。
+	static SyntheticInfo infoByName(MatchContext ctx, boolean isOld, String name) {
+		// O(1) 索引查询。本方法被三个 64 轮定稿循环按"每个方法 × 每个子"调用，
+		// 最坏 O(64·N²)。见 MatchContext.oldNameIndex/newNameIndex。
 		return (isOld ? ctx.oldNameIndex : ctx.newNameIndex).get(name);
 	}
 
@@ -3773,7 +3736,7 @@ public class LambdaAligner {
 	}
 
 	/**
-	 * 兼容旧代码与历史测试的别名方法。
+	 * 兼容既有调用方的别名方法。
 	 * @deprecated 请使用 {@link #isOrphanBreakerTriggered()}
 	 */
 	@Deprecated
@@ -3834,44 +3797,13 @@ public class LambdaAligner {
 		}
 	}
 
-	/**
-	 * 方法体"逐条等价"指纹：{@link #fallbackPairingAllowed} 的<b>等价证明</b>判据。
-	 *
-	 * <p>兜底趟（骨架 / Pass A / Pass B）没有指纹证据，只能靠位置猜。猜之前必须回答
-	 * "这两个方法体是不是同一个逻辑体，只被净化/改写掉了表示差异"。本方法给出这个回答：
-	 * 三处归一化，缺任何一处都会把<b>同一个方法体</b>误判成不同，进而制造假拒绝：</p>
-	 *
-	 * <ol>
-	 *   <li><b>常量池索引</b>：常量只按值编码（{@code ldc 1000} / {@code sipush 1000} /
-	 *       {@code iconst_*} 是同一个常量）。常量池编号本身不参与 —— 它随同批其它字面量增删
-	 *       而整体位移。</li>
-	 *   <li><b>局部变量槽位</b>：按"首次出现顺序"重编号。捕获表增删会让槽号整体位移，
-	 *       原样比对会把"同一个体、槽号平移"判成不同。</li>
-	 *   <li><b>可折叠算式</b>：{@code 2 * 3} 与 {@code 6} 折叠成同一个常量（{@code int} /
-	 *       {@code long} 的四则、位运算、{@code i2l}/{@code l2i}、取负）。</li>
-	 * </ol>
-	 *
-	 * <p><b>与 {@link #skeletonHash} 的分工</b>：骨架把字面量<b>值</b>也抹掉，因此"只改常量"
-	 * 的两个方法骨架相同 —— 骨架只回答"指令结构是否同形"。本方法保留常量值，因此
-	 * {@code "A2:v1"} 与 {@code "A9:v1"} <b>不同</b>：值变了就是行为变了，不能当等价证明。</p>
-	 *
-	 * <p><b>已知边界（实测见 {@code LambdaAlignTortureTest}）</b>：槽位按首次出现顺序归一化，
-	 * 因此两个"访问顺序相反但取值不同"的方法体可能被归一成同一串 token（例如
-	 * {@code {load a; load b}} 与 {@code {load b; load a}} 都编成 {@code 1,2}）。
-	 * 这条边界与 {@code -g:none} 下槽号不可信同源，属于自觉取舍：宁可把"结构同形"放宽，
-	 * 也不把"只是槽号位移"的原地编辑误判成重绑。</p>
-	 */
-	/**
-	 * 测试钩子：对给定类字节里 {@code name+desc} 的方法计算体指纹（取不到返回 0）。
-	 * 仅用于单测，生产代码不得引用。
-	 */
+	/** 测试钩子：对给定类字节里 {@code name+desc} 的方法计算体指纹（取不到返回 0）。 */
 	public static long bodyFingerprintForTest(byte[] classBytes, String name, String desc) {
 		return LambdaBodyFingerprint.bodyFingerprintForTest(classBytes, name, desc);
 	}
 
 	/**
 	 * 测试钩子：按被调集合验证"唯一严格最大正交集"择优规则。
-	 *
 	 * @param newCallees 新 lambda 的被调集合
 	 * @param oldCallees 各候选旧 lambda 的被调集合（顺序即原顺序）
 	 * @return 被选中的候选下标；{@code -1} 表示规则不介入（交集全零 / 并列最大 / 候选不足两个）
@@ -4227,7 +4159,7 @@ public class LambdaAligner {
 	 * 整体位移”不会拆散同一逻辑组。</p>
 	 *
 	 * <p><b>为什么用归一化描述符</b>：分组是阶段一匹配的前置条件。若直接拿原始描述符做键，
-	 * “老版本是静态方法（{@code this} 显式首参数）、新版本是实例方法（{@code this} 隐式）”
+	 * “旧字节里是静态方法（{@code this} 显式首参数）、新字节里是实例方法（{@code this} 隐式）”
 	 * 这一对<b>根本不会落进同一个组</b>，{@link #isSignatureCompatible} 再宽容也没有机会执行。
 	 * 归一化后两者同键，阶段一即可识别为同一 lambda，避免生成 {@code lambda$build$21}
 	 * 这类避障名。<b>注意</b>：分组是“放宽”，真正的取舍仍由
@@ -4380,7 +4312,7 @@ public class LambdaAligner {
 		 *
 		 * <p>兜底趟（骨架 / Pass A / Pass B）在把旧名字交给一个候选之前，必须能<b>证明</b>
 		 * 两侧是同一个逻辑体，否则就是"名字换了主人"——老 CallSite 静默执行别人的方法体。
-		 * 本指纹提供这份证明（见 {@link #bodyFingerprint}）：等值 ⇒ 可以配对；
+		 * 本指纹提供这份证明（见 {@code LambdaBodyFingerprint.bodyFingerprint}）：等值 ⇒ 可以配对；
 		 * 不等值 ⇒ 只有"名字 + 宿主形态"这类独立身份证据才能兜住，否则 WARN + 拒绝配对。</p>
 		 *
 		 * <p>{@code 0} 表示未知（方法体缺失）。</p>
@@ -4424,20 +4356,14 @@ public class LambdaAligner {
 		 *   叶子 = "()"      中层 = "(())"      外层 = "((()))"
 		 * </pre>
 		 *
-		 * <p>用途（实测问题）：{@link #sameNestingLevel} 早先只比"有无子 + 子数量"，
-		 * 于是<b>外层与中层结构等价</b>（都是 1 个子），互换时无人拦截 —— save3 的
-		 * 两轮序列里 `$3`（旧外层）与 `$4`（旧中层）真的互换了，持有 `$3` 的老回调
-		 * 从此执行中层的逻辑，延迟与嵌套层数都变了却不报错。</p>
-		 *
-		 * <p>形状与内容无关，所以"编辑叶子方法体"不会改变它（不会重现上一轮那个
-		 * "祖先因后代被编辑而失去证据"的问题），但它能区分外层与中层。</p>
+		 * <p>用途：{@link #sameNestingLevel} 不能只比"有无子 + 子数量"——外层与中层
+		 * 结构等价（都是 1 个子），互换时无人拦截。形状与内容无关，但能区分外层/中层/叶子。</p>
 		 *
 		 * <p>{@code null} 表示<b>尚未定稿</b>。</p>
 		 *
-		 * <p><b>为什么用 null 而不是 "()"</b>：{@code "()"} 本身就是叶子的合法形状。
-		 * 若用它兼作"未算完"的哨兵，父读到未定稿的子时无法与"真叶子"区分，会算出一个
-		 * <b>看似合法实则错误</b>的值 —— 这正是 save3 两轮互换那个 bug 的类别：
-		 * 新旧两侧同错，任何等值校验都说不出话。用 null 之后，"未算完"与"叶子"永远可分。</p>
+		 * <p><b>为什么用 null 而不是 "()"</b>：{@code "()"} 是叶子的合法形状。若用它兼作
+		 * "未算完"的哨兵，父读到未定稿的子时无法与真叶子区分，会算出<b>看似合法实则错误</b>的值。
+		 * 用 null 之后，"未算完"与"叶子"永远可分。</p>
 		 */
 		String shape;
 

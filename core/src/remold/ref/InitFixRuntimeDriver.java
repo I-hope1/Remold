@@ -1467,7 +1467,7 @@ final class InitFixRuntimeDriver {
 	 * {@link ClassIdentity#canonicalize} 归一（影子类上枚举恒为 0），未初始化
 	 * （{@link #isInitialized} 为 false）的类剔除，既没有常规实例任务、也没有值类型重放实例
 	 * 目标的宿主不参与。过滤后不足
-	 * {@link #InitFix.BATCH_HEAP_SCAN_MIN_TARGETS} 个宿主时直接返回：<b>小批次走原逐类路径，零额外开销</b>
+	 * {@link InitFix#BATCH_HEAP_SCAN_MIN_TARGETS} 个宿主时直接返回：<b>小批次走原逐类路径，零额外开销</b>
 	 * （K=1 自然也在此列）。</p>
 	 *
 	 * <p>无 native 库（{@link LibTool#initialized()} 为 false 且初始化失败）时同样直接返回，

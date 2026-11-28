@@ -145,7 +145,6 @@ final class OrphanBodyRetention {
 		}
 	}
 
-	/** 合成 lambda 方法名（javac {@code lambda$...} 与 MethodFingerprinter 认可的自造名）。 */
 	/**
 	 * 合成 lambda 方法名：javac {@code lambda$...}、Kotlin {@code $lambda}、Scala {@code $anonfun$}。
 	 *

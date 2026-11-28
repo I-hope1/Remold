@@ -1475,7 +1475,7 @@ final class LambdaCaptureBridge {
 	/**
 	 * 解析上一轮注入的桥体：跳过标记前缀，按顺序收集被加载的老形参，最后那条调用就是目标。
 	 *
-	 * <p>与 {@link #getPureDelegate} 的关键区别：<b>允许跳过形参槽位</b>。桥本来就是
+	 * <p>与 {@link LambdaOrphanEmitter#getPureDelegate} 的关键区别：<b>允许跳过形参槽位</b>。桥本来就是
 	 * "少加载几个形参"的，若沿用那条"每个形参必须按槽位顺序恰好加载一次"的严格判据，
 	 * 跳槽位的桥在下一轮会判不出 delegate，直接退化成死幽灵——第一轮的成果当场作废。</p>
 	 *
@@ -1616,7 +1616,7 @@ final class LambdaCaptureBridge {
 	/**
 	 * 反查：这个旧方法在本轮被配给了哪个新方法。
 	 *
-	 * <p>{@link #pair} 只写 {@code ni.matchedWith = oi}（新侧单向指针），旧侧的
+	 * <p>{@code pair} 只写 {@code ni.matchedWith = oi}（新侧单向指针），旧侧的
 	 * {@code matchedWith} 始终是 {@code null}，所以从旧找新必须扫新侧。</p>
 	 */
 	private static LambdaAligner.SyntheticInfo findNewForOld(LambdaAligner.MatchContext ctx, LambdaAligner.SyntheticInfo oi) {
@@ -1652,7 +1652,7 @@ final class LambdaCaptureBridge {
 	/**
 	 * 捕获桥被调用时进入（由注入的桥体字节码调用）。
 	 *
-	 * <p><b>刻意不查熔断器</b>：{@link #onOrphanInvoked} 在 {@code SMART_ADAPTIVE} 下先判
+	 * <p><b>刻意不查熔断器</b>：{@link LambdaOrphanEmitter#onOrphanInvoked} 在 {@code SMART_ADAPTIVE} 下先判
 	 * {@code isOrphanBreakerTriggered()} 再抛 {@link NoSuchMethodError}，而桥按构造就
 	 * <b>不是</b>死孤儿——它的目标方法存在、且被三道门证明过兼容。若复用那个入口，
 	 * 挂在 UI / 定时器熔断器上的回调会在转发之前被直接炸断，桥等于白建。</p>

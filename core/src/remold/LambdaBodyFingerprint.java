@@ -55,6 +55,32 @@ final class LambdaBodyFingerprint {
 		return r == null ? null : r.a;
 	}
 
+	/**
+	 * 方法体"逐条等价"指纹，供 {@link LambdaAligner} 的兜底配对当等价证明。
+	 *
+	 * <p>兜底趟（骨架 / Pass A / Pass B）没有指纹证据，只能靠位置猜。猜之前要回答
+	 * "这两个方法体是不是同一个逻辑体，只被净化/改写掉了表示差异"。这里做三处归一化，
+	 * 缺任何一处都会把同一个方法体误判成不同，进而制造假拒绝：</p>
+	 *
+	 * <ol>
+	 *   <li><b>常量池索引</b>：常量只按值编码（{@code ldc 1000} / {@code sipush 1000} /
+	 *       {@code iconst_*} 是同一个常量）。常量池编号随同批其它字面量增删而整体位移，不参与。</li>
+	 *   <li><b>局部变量槽位</b>：按"首次出现顺序"重编号。捕获表增删会让槽号整体位移，
+	 *       原样比对会把"同一个体、槽号平移"判成不同。</li>
+	 *   <li><b>可折叠算式</b>：{@code 2 * 3} 与 {@code 6} 折叠成同一个常量（{@code int} /
+	 *       {@code long} 的四则、位运算、{@code i2l}/{@code l2i}、取负）。</li>
+	 * </ol>
+	 *
+	 * <p><b>与骨架指纹的分工</b>：骨架把字面量值也抹掉，因此"只改常量"的两个方法骨架相同——
+	 * 骨架只回答"指令结构是否同形"。本方法保留常量值，所以 {@code "A2:v1"} 与 {@code "A9:v1"}
+	 * 不同：值变了就是行为变了，不能当等价证明。</p>
+	 *
+	 * <p><b>已知边界</b>（实测见 {@code LambdaAlignTortureTest}）：槽位按首次出现顺序归一化，
+	 * 两个"访问顺序相反但取值不同"的方法体可能被归一成同一串 token（例如
+	 * {@code {load a; load b}} 与 {@code {load b; load a}} 都编成 {@code 1,2}）。
+	 * 这与 {@code -g:none} 下槽号不可信同源，属于自觉取舍：宁可把"结构同形"放宽，
+	 * 也不把"只是槽号位移"的原地编辑误判成重绑。</p>
+	 */
 	static long bodyFingerprint(MethodNode mn, String owner) {
 		if (mn == null || mn.instructions == null) return 0L;
 

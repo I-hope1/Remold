@@ -33,8 +33,8 @@ subprojects {
 		}
 	}
 	tasks.withType(JavaCompile).configureEach {
-		sourceCompatibility = JavaVersion.VERSION_21
-		targetCompatibility = JavaVersion.VERSION_21
+		sourceCompatibility = JavaVersion.VERSION_25 // 这里只是用于idea提示，在compiler下被忽略
+		targetCompatibility = JavaVersion.VERSION_25 // 这里只是用于idea提示，在compiler下被忽略
 		options.encoding = 'UTF-8'
 		options.compilerArgs += [
 			"-AtargetVersion=11",

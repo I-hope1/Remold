@@ -24,7 +24,8 @@ Kotlin `apply {}` 静态持有者重放见 [`13-kotlin-apply-replay.md`](13-kotl
 
 **触发条件（A0）**：本通道只在 `oldExpr` 与 `newExpr` 的**初值切片指纹不同**时触发。
 初值指纹相同（典型为只改了宿主其它方法）时不进入重放；§4 的构造链指纹变化只用于让
-applied 记录失效/重算，**不单独触发写入**。
+applied 记录失效/重算，**不单独触发写入**。failed 不构成该判据的例外：不自动重试，
+需下一次初值变化或显式 force 才重新进入。
 
 ## 2. 准入判据
 
@@ -142,8 +143,10 @@ for each 存活实例 i:
   - `written/applied`：CAS 成功，记录 `(initializerFingerprint, mode)`；
   - `skipped`：W2 不等（运行期值被改过，按设计保留），**不记 applied**，日志按初值指纹去重；
   - `failed`：重试用尽、`rebuildOld()`/`buildNew()` 异常、参数不可重建、构造纯度门失败等，
-    **不记 applied**，上报并受既有 per-field 失败预算约束。
-- 绝不能用 applied 记录掩盖 skipped/failed，否则该字段在初值不变时永远不会再尝试。
+    **不记 applied、也不自动重试**：A0 严格，初值指纹不变不触发；CAS 持续竞争极罕见，
+    而确定性异常重试没有意义。failed 必须进入批次报告（§8）并按初值指纹去重告警，
+    下一次初值变化或显式 force 才重新进入。
+- 绝不能用 applied 记录掩盖 skipped/failed；failed 的可见性由 §8 的批次报告兜底。
 - 静态字段的写入同样走 W1~W4；`static final` 的可见性额外依赖 A4 的 enhanced 门。
 
 ## 4. 指纹与代际
@@ -233,7 +236,8 @@ for each 存活实例 i:
   constructor 注入副作用；
 - A4：record 宿主实例字段；非 enhanced 静态 final；宿主未完成初始化；
 - 触发：初值指纹未变、只有构造链变化 → 不写入（applied 记录失效但不重放）；
-- W4：CAS 竞争用尽 → failed，不记 applied，下一轮仍可重试；并发修改后重试必须重新走 W1/W2；
+- W4：CAS 竞争用尽 → failed，不记 applied；并发修改后重试必须重新走 W1/W2；
+- failed 可见性与不自动重试：同一初值指纹的下一轮不得重试；批次报告的 failed 计数/字段/原因存在；
 - 可见性负基线：不触发 redefine 时，对静态 final 折叠读者断言 stale（证明测试确实能抓到问题）。
 
 ### 防 JIT 时序抖动
@@ -263,8 +267,11 @@ for each 存活实例 i:
   `docs/status.md` 已登记的同源缺口共用同一判据；
 - 两阶段：实例通道不因本通道新增 read-through 阶段；静态 final 通道沿用既有
   "既有静态字段重写" 的两阶段路径，并叠加 enhanced 门；
-- **框架联动信号口**：本通道的 written/applied 字段列表进入 `PatchReport`；外部插件
-  （缓存清理、UI 刷新、配置重绑）监听器直接消费该列表即可，不需要侵入本通道或新增机制。
+- **批次报告信号（最小集）**：在 `api/src/remold/HotswapBatchReport.InitFixStats` 上**只做加法**
+  暴露本通道的 `applied` / `skipped` / `failed` / `rejected` 四个计数，以及 `failed`/`rejected`
+  的"字段标识 + 原因"列表；旧值、指纹等明细不暴露（core 内部 `PatchReport` 保留）。插件
+  （缓存清理、UI 刷新、配置重绑）消费这些计数即可；failed 不自动重试，必须可见，否则会静默
+  停在旧值。
 
 ## 9. MVP 不做
 

@@ -149,6 +149,42 @@ public final class ValueTypeReplay {
 		}
 	}
 
+	/**
+	 * Carved instruction slices of one accepted field's old/new initializer expressions.
+	 *
+	 * <p>Both slices are straight-line {@code NEW T; DUP; <constants>; INVOKESPECIAL T.<init>} sequences
+	 * that only reference compile-time constants and the constructed type, so a caller can re-emit them
+	 * as factory methods ({@code ()LT;}) in a patch class. The nodes are <b>live</b> {@code ClassNode}
+	 * instructions: callers that move them into another method must clone them (ASM nodes cannot belong
+	 * to two instruction lists).</p>
+	 *
+	 * @param type          internal name of the constructed type (same on both sides; A1 checks it)
+	 * @param oldExpression old-side expression instructions, no labels/frames/line numbers
+	 * @param newExpression new-side expression instructions, no labels/frames/line numbers
+	 */
+	public record Carved(String type, List<AbstractInsnNode> oldExpression,
+	                     List<AbstractInsnNode> newExpression) {
+		public Carved {
+			Objects.requireNonNull(type, "type");
+			oldExpression = List.copyOf(Objects.requireNonNull(oldExpression, "oldExpression"));
+			newExpression = List.copyOf(Objects.requireNonNull(newExpression, "newExpression"));
+		}
+	}
+
+	/**
+	 * {@link #plan} plus the carved expressions needed to emit replay factory methods.
+	 *
+	 * @param plan        the frozen planning result
+	 * @param expressions carved expressions of exactly the fields in {@code plan.fields()}
+	 */
+	public record DetailedPlan(Plan plan, Map<String, Carved> expressions) {
+		public DetailedPlan {
+			Objects.requireNonNull(plan, "plan");
+			expressions = Collections.unmodifiableMap(
+				new LinkedHashMap<>(Objects.requireNonNull(expressions, "expressions")));
+		}
+	}
+
 	private static final String OBJECT = "java/lang/Object";
 	private static final String RECORD = "java/lang/Record";
 	private static final String KOTLIN_METADATA = "Lkotlin/Metadata;";
@@ -183,13 +219,32 @@ public final class ValueTypeReplay {
 	 */
 	public static Plan plan(ClassDiff diff, Function<String, byte[]> classBytes,
 	                        Predicate<String> batchCandidate, boolean enhanced) {
+		return planDetailed(diff, classBytes, batchCandidate, enhanced).plan();
+	}
+
+	/**
+	 * Same planning as {@link #plan}, additionally returning the carved old/new expression instruction
+	 * slices of every accepted field so a caller can emit {@code buildOld$F}/{@code buildNew$F} factories.
+	 *
+	 * <p>The returned expression nodes are the live instruction nodes of the parsed diff; callers must
+	 * clone them before inserting them into another method.</p>
+	 *
+	 * @param diff            full old/new class diff of the host class
+	 * @param classBytes      internal class name to bytes ({@code T} and non-bootstrap super classes)
+	 * @param batchCandidate  reports whether a class is a redefine candidate in this batch
+	 * @param enhanced        whether enhanced hotswap is enabled
+	 * @return immutable detailed plan; never {@code null}
+	 */
+	public static DetailedPlan planDetailed(ClassDiff diff, Function<String, byte[]> classBytes,
+	                                        Predicate<String> batchCandidate, boolean enhanced) {
 		Objects.requireNonNull(classBytes, "classBytes");
 		Objects.requireNonNull(batchCandidate, "batchCandidate");
 		Map<String, Field> fields = new LinkedHashMap<>();
 		Map<String, Reason> rejected = new LinkedHashMap<>();
 		Map<String, String> details = new LinkedHashMap<>();
+		Map<String, Carved> expressions = new LinkedHashMap<>();
 		if (diff == null || diff.oldClass == null || diff.newClass == null) {
-			return new Plan(fields, rejected, details);
+			return new DetailedPlan(new Plan(fields, rejected, details), expressions);
 		}
 		ClassNode oldHost = diff.oldClass;
 		ClassNode newHost = diff.newClass;
@@ -213,7 +268,7 @@ public final class ValueTypeReplay {
 			String name = newField.name;
 			if (isStatic) {
 				planStaticField(name, newField, oldHost, newHost, classBytes, batchCandidate, enhanced,
-					fields, rejected, details);
+					fields, rejected, details, expressions);
 				continue;
 			}
 			if (!rootsComputed) {
@@ -222,9 +277,9 @@ public final class ValueTypeReplay {
 				rootsComputed = true;
 			}
 			planInstanceField(name, newField, oldHost, newHost, oldRoots, newRoots,
-				classBytes, batchCandidate, enhanced, fields, rejected, details);
+				classBytes, batchCandidate, enhanced, fields, rejected, details, expressions);
 		}
-		return new Plan(fields, rejected, details);
+		return new DetailedPlan(new Plan(fields, rejected, details), expressions);
 	}
 
 	/** Reference descriptors only; arrays are not a value-type target. */
@@ -239,22 +294,22 @@ public final class ValueTypeReplay {
 	                                      Function<String, byte[]> classBytes,
 	                                      Predicate<String> batchCandidate, boolean enhanced,
 	                                      Map<String, Field> fields, Map<String, Reason> rejected,
-	                                      Map<String, String> details) {
+	                                      Map<String, String> details, Map<String, Carved> expressions) {
 		FieldSide oldSide = instanceSide(oldHost, name, newField.desc, oldRoots);
 		FieldSide newSide = instanceSide(newHost, name, newField.desc, newRoots);
 		decide(name, newField, oldHost, newHost, oldSide, newSide, classBytes, batchCandidate, enhanced,
-			fields, rejected, details);
+			fields, rejected, details, expressions);
 	}
 
 	private static void planStaticField(String name, FieldNode newField, ClassNode oldHost, ClassNode newHost,
 	                                    Function<String, byte[]> classBytes,
 	                                    Predicate<String> batchCandidate, boolean enhanced,
 	                                    Map<String, Field> fields, Map<String, Reason> rejected,
-	                                    Map<String, String> details) {
+	                                    Map<String, String> details, Map<String, Carved> expressions) {
 		FieldSide oldSide = staticSide(oldHost, name, newField.desc);
 		FieldSide newSide = staticSide(newHost, name, newField.desc);
 		decide(name, newField, oldHost, newHost, oldSide, newSide, classBytes, batchCandidate, enhanced,
-			fields, rejected, details);
+			fields, rejected, details, expressions);
 	}
 
 	private static void decide(String name, FieldNode newField, ClassNode oldHost, ClassNode newHost,
@@ -262,7 +317,7 @@ public final class ValueTypeReplay {
 	                           Function<String, byte[]> classBytes,
 	                           Predicate<String> batchCandidate, boolean enhanced,
 	                           Map<String, Field> fields, Map<String, Reason> rejected,
-	                           Map<String, String> details) {
+	                           Map<String, String> details, Map<String, Carved> expressions) {
 		boolean isStatic = (newField.access & Opcodes.ACC_STATIC) != 0;
 		if (oldSide.writes().isEmpty() && newSide.writes().isEmpty()) return; // not triggered: no initializer write
 		if (oldSide.writes().isEmpty()) return; // newly initialized from nothing: no old value to rebuild
@@ -332,6 +387,7 @@ public final class ValueTypeReplay {
 		}
 		fields.put(name, new Field(name, isStatic, newField.desc, oldExpr.fingerprint(),
 			newExpr.fingerprint(), fingerprints.ctorFingerprint, fingerprints.equalsFingerprint));
+		expressions.put(name, new Carved(oldExpr.type(), oldExpr.instructions(), newExpr.instructions()));
 	}
 
 	private static int distinct(List<Expr> writes) {
@@ -373,7 +429,7 @@ public final class ValueTypeReplay {
 	 * @param rejectDetail A1 violation detail, {@code null} when the arguments are reconstructible
 	 */
 	private record Expr(String key, String fingerprint, ExprKind kind, String type, String ctorDesc,
-	                    String rejectDetail) { }
+	                    String rejectDetail, List<AbstractInsnNode> instructions) { }
 
 	private record FieldSide(int rootCount, List<Expr> writes) { }
 
@@ -424,12 +480,12 @@ public final class ValueTypeReplay {
 		}
 		if (writes.isEmpty()) return null;
 		if (writes.size() > 1) {
-			return new Expr(methodKey(method), "multiple-writes", ExprKind.OTHER, null, null, null);
+			return new Expr(methodKey(method), "multiple-writes", ExprKind.OTHER, null, null, null, List.of());
 		}
 		int putIndex = writes.get(0);
 		int start = expressionStart(nodes, putIndex, Type.getType(desc).getSize());
 		if (start < 0) {
-			return new Expr(methodKey(method), "unresolved", ExprKind.OTHER, null, null, null);
+			return new Expr(methodKey(method), "unresolved", ExprKind.OTHER, null, null, null, List.of());
 		}
 		List<AbstractInsnNode> expression = slice(nodes, start, putIndex);
 		// javac records / compact constructors first assign the new expression to the component
@@ -463,27 +519,27 @@ public final class ValueTypeReplay {
 			expression = slice(nodes, start, putIndex);
 		}
 		if (expression.isEmpty()) {
-			return new Expr(methodKey(method), "empty", ExprKind.OTHER, null, null, null);
+			return new Expr(methodKey(method), "empty", ExprKind.OTHER, null, null, null, List.of());
 		}
 		boolean hasBranch = containsBranch(nodes, start, putIndex);
 		String fingerprint = expressionFingerprint(expression);
 		MethodInsnNode terminal = terminalCtorCall(expression);
 		if (terminal == null) {
 			if (containsSyntheticDefaultCall(expression)) {
-				return new Expr(methodKey(method), fingerprint, ExprKind.SYNTHETIC_DEFAULT, null, null, null);
+				return new Expr(methodKey(method), fingerprint, ExprKind.SYNTHETIC_DEFAULT, null, null, null, List.of());
 			}
-			return new Expr(methodKey(method), fingerprint, ExprKind.OTHER, null, null, null);
+			return new Expr(methodKey(method), fingerprint, ExprKind.OTHER, null, null, null, List.of());
 		}
 		if (isDefaultMarkerCtor(terminal)) {
-			return new Expr(methodKey(method), fingerprint, ExprKind.SYNTHETIC_DEFAULT, null, null, null);
+			return new Expr(methodKey(method), fingerprint, ExprKind.SYNTHETIC_DEFAULT, null, null, null, List.of());
 		}
 		if (!hasNewOf(expression, terminal.owner)) {
-			return new Expr(methodKey(method), fingerprint, ExprKind.OTHER, null, null, null);
+			return new Expr(methodKey(method), fingerprint, ExprKind.OTHER, null, null, null, List.of());
 		}
 		String reject = hasBranch
 			? "initializer expression is not straight-line (contains a branch or switch)"
 			: validateArguments(expression);
-		return new Expr(methodKey(method), fingerprint, ExprKind.NEW_EXPR, terminal.owner, terminal.desc, reject);
+		return new Expr(methodKey(method), fingerprint, ExprKind.NEW_EXPR, terminal.owner, terminal.desc, reject, expression);
 	}
 
 	private static List<AbstractInsnNode> slice(List<AbstractInsnNode> nodes, int start, int end) {

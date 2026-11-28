@@ -37,6 +37,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -164,6 +165,12 @@ public class InitFixOracle {
 		scenario("§4.2 @RemoldReinit 只在初值表达式变了时重置：封闭可跳过、开放必须照写", InitFixOracle::caseReinitOnlyWhenInitializerChanges);
 		scenario("§4.2 注解摘掉再重新加上：记录必须作废，否则重置被吃掉", InitFixOracle::caseReinitReaddedAfterRemoval);
 		scenario("§5.1 风险 34：既有 static final 字段改写无增强重定义时逐字段拒绝（非 final/ConstantValue/实例字段不受影响）", InitFixOracle::caseStaticFinalEnhancedGate);
+		scenario("值类型 new 初值重放：属性关闭行为不变 / 打开后 planned + buildOld/buildNew 工厂方法 + 不污染台账", InitFixOracle::caseValueReplayPlanned);
+		scenario("值类型 new 初值重放 A0：初值表达式未变 -> 既不 planned 也不 rejected", InitFixOracle::caseValueReplayA0Untriggered);
+		scenario("值类型 new 初值重放 A3/A4 拒绝码：EQ-CUSTOM / CTOR-IMPURE / STATIC-FINAL-NEEDS-ENHANCED / EXPR-NOT-CONSTANT / MULTI-ROOT", InitFixOracle::caseValueReplayRejectedCodes);
+		scenario("值类型 new 初值重放 A2：被构造类型在本批重定义候选中 -> CONSTRUCTED-CHANGED（批次视图）", InitFixOracle::caseValueReplayConstructedChanged);
+		scenario("值类型 new 初值重放优先级：同字段被 @RemoldReinit 认领时只走一条通道（不得重复写）", InitFixOracle::caseValueReplayPriority);
+		scenario("值类型 new 初值重放与常规补丁共存：拒绝不阻断新增字段补丁、不写 FieldLedger", InitFixOracle::caseValueReplayCoexistsWithRegularPatch);
 
 		System.out.println();
 		System.out.println("通过 " + passed + " 条；失败 " + failed + " 条；合计 " + (passed + failed) + " 条");
@@ -3585,6 +3592,391 @@ public class InitFixOracle {
 			if (u.fieldName().equals(field)) return u.reason() == null ? "" : u.reason();
 		}
 		return "";
+	}
+
+	// ==================== 值类型 new 初值重放（docs/initfix/14，Battle B 接线） ====================
+
+	static final String VR_VEC = """
+		package oracle;
+		public record Vec(int x, int y) { }
+		""";
+
+	static final String VR_VEC_EQ_CUSTOM = """
+		package oracle;
+		public record VecEqCustom(int x, int y) {
+			@Override public boolean equals(Object o) {
+				return o instanceof VecEqCustom other && other.x == x && other.y == y;
+			}
+			@Override public int hashCode() { return x * 31 + y; }
+		}
+		""";
+
+	static final String VR_VEC_CTOR_IMPURE = """
+		package oracle;
+		public record VecImpure(int x, int y) {
+			static int touched;
+			public VecImpure { touched++; }
+		}
+		""";
+
+	/** Minimal Java source for a value-replay host class. */
+	static String vrHost(String simpleName, String fields, String methods) {
+		return "package oracle;\npublic class " + simpleName + " {\n"
+			+ fields + "\n" + methods + "\n}\n";
+	}
+
+	/** 计划命中：属性关闭是旧行为基线；打开后只产生值类型重放任务与 PatchReport 组件。 */
+	static void caseValueReplayPlanned() throws Exception {
+		String dot = "oracle.CaseVrPlanned";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrPlanned", "\tfinal Vec v = new Vec(4, 4);", "\tint stamp() { return 1; }"),
+			"oracle.Vec", VR_VEC);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrPlanned", "\tfinal Vec v = new Vec(4, 12);", "\tint stamp() { return 2; }"),
+			"oracle.Vec", VR_VEC);
+		Fixture fx = loadMultiFixture(dot, v1, v2);
+		check(!Arrays.equals(fx.v1, fx.v2), "CaseVrPlanned: fixtures must differ (A0 premise)");
+
+		// 去触发对照：属性关闭时本通道完全不参与，行为与旧版一致（无计划、无补丁、无组件）。
+		withValueReplay(false, () -> {
+			InitFix.PatchReport off = fx.transform();
+			check(off.valueReplayFields().isEmpty(),
+				"CaseVrPlanned: property off must not produce value-replay decisions (actual "
+					+ off.valueReplayFields() + ")");
+			check(off.instanceFields().isEmpty() && off.staticFields().isEmpty(),
+				"CaseVrPlanned: property off keeps the existing candidate set empty");
+			check(!off.patchGenerated(), "CaseVrPlanned: property off generates no patch");
+			check(pendingPlan(fx.host) == null, "CaseVrPlanned: property off stages no pending patch");
+		});
+
+		withValueReplay(true, () -> {
+			InitFix.PatchReport on = fx.transform();
+			InitFix.FieldDecision planned = on.valueReplayFields().get("v");
+			check(planned != null && planned.status() == InitFix.FieldStatus.ACCEPTED,
+				"CaseVrPlanned: v is planned for value replay (actual " + on.valueReplayFields() + ")");
+			check(!on.patchGenerated(),
+				"CaseVrPlanned: a value-replay-only round must not claim the default init patch");
+			check(!unpatched(fx.host).contains("v"),
+				"CaseVrPlanned: value replay must not write FieldLedger (actual "
+					+ InitFix.getUnpatchedFields(fx.host) + ")");
+
+			InitFix.PatchPlan plan = pendingPlan(fx.host);
+			check(plan != null, "CaseVrPlanned: a pending patch carries the replay tasks");
+			if (plan != null) {
+				check(plan.valueReplayTasks().size() == 1,
+					"CaseVrPlanned: exactly one value-replay task (actual " + plan.valueReplayTasks() + ")");
+				check(plan.allTasks().isEmpty(),
+					"CaseVrPlanned: value-replay tasks stay out of the ledger-facing allTasks()");
+				InitFix.ValueReplayTask task = plan.valueReplayTasks().get(0);
+				check(task.fieldName().equals("v") && !task.isStatic(),
+					"CaseVrPlanned: task describes instance field v (actual " + task + ")");
+				check(task.desc().equals("Loracle/Vec;"),
+					"CaseVrPlanned: task carries the field descriptor (actual " + task.desc() + ")");
+				check(!task.oldFingerprint().equals(task.newFingerprint()),
+					"CaseVrPlanned: A0 fingerprints must differ after an argument change");
+				Set<String> methods = patchMethods(pendingBytes(fx.host));
+				check(methods.contains(task.buildOldMethod() + "()Loracle/Vec;"),
+					"CaseVrPlanned: buildOld factory emitted as ()Loracle/Vec; (actual " + methods + ")");
+				check(methods.contains(task.buildNewMethod() + "()Loracle/Vec;"),
+					"CaseVrPlanned: buildNew factory emitted as ()Loracle/Vec; (actual " + methods + ")");
+			}
+		});
+	}
+
+	/** A0：初值表达式未变（只改其它方法）时既不 planned 也不 rejected，也不产生待补补丁。 */
+	static void caseValueReplayA0Untriggered() throws Exception {
+		String dot = "oracle.CaseVrSame";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrSame", "\tfinal Vec v = new Vec(4, 4);", "\tint stamp() { return 1; }"),
+			"oracle.Vec", VR_VEC);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrSame", "\tfinal Vec v = new Vec(4, 4);", "\tint stamp() { return 2; }"),
+			"oracle.Vec", VR_VEC);
+		Fixture fx = loadMultiFixture(dot, v1, v2);
+		check(!Arrays.equals(fx.v1, fx.v2), "CaseVrSame: fixtures must differ so the diff is non-trivial");
+
+		withValueReplay(true, () -> {
+			InitFix.PatchReport report = fx.transform();
+			check(report.valueReplayFields().isEmpty(),
+				"CaseVrSame A0: identical initializer -> neither planned nor rejected (actual "
+					+ report.valueReplayFields() + ")");
+			check(!report.instanceFields().containsKey("v") && !report.staticFields().containsKey("v"),
+				"CaseVrSame A0: the field must stay out of the candidate decisions");
+			check(!unpatched(fx.host).contains("v"),
+				"CaseVrSame A0: no FieldLedger entry for a not-triggered field");
+			check(pendingPlan(fx.host) == null,
+				"CaseVrSame A0: a not-triggered field must not stage a pending patch");
+		});
+	}
+
+	/** A3/A4/A5 拒绝码：每个夹具都断言判决码、warn 出口与"不写台账"。 */
+	static void caseValueReplayRejectedCodes() throws Exception {
+		// A3: 手写 equals/hashCode -> EQ-CUSTOM
+		expectValueReplayRejected("oracle.CaseVrEqCustom",
+			vrHost("CaseVrEqCustom", "\tfinal VecEqCustom v = new VecEqCustom(4, 4);", ""),
+			vrHost("CaseVrEqCustom", "\tfinal VecEqCustom v = new VecEqCustom(4, 12);", ""),
+			"oracle.VecEqCustom", VR_VEC_EQ_CUSTOM, "v", "VALUE-REPLAY-EQ-CUSTOM");
+
+		// A3: 构造器有副作用（compact constructor 写静态字段）-> CTOR-IMPURE
+		expectValueReplayRejected("oracle.CaseVrImpure",
+			vrHost("CaseVrImpure", "\tfinal VecImpure v = new VecImpure(4, 4);", ""),
+			vrHost("CaseVrImpure", "\tfinal VecImpure v = new VecImpure(4, 12);", ""),
+			"oracle.VecImpure", VR_VEC_CTOR_IMPURE, "v", "VALUE-REPLAY-CTOR-IMPURE");
+
+		// A4: 非 enhanced 运行时的 static final 引用目标 -> STATIC-FINAL-NEEDS-ENHANCED
+		expectValueReplayRejected("oracle.CaseVrStaticFinal",
+			vrHost("CaseVrStaticFinal", "\tstatic final Vec s = new Vec(4, 4);", ""),
+			vrHost("CaseVrStaticFinal", "\tstatic final Vec s = new Vec(4, 12);", ""),
+			"oracle.Vec", VR_VEC, "s", "VALUE-REPLAY-STATIC-FINAL-NEEDS-ENHANCED");
+
+		// A1: 实参来自构造器参数 -> EXPR-NOT-CONSTANT
+		expectValueReplayRejected("oracle.CaseVrNotConstant",
+			"package oracle;\npublic class CaseVrNotConstant {\n"
+				+ "\tfinal Vec v;\n\tpublic CaseVrNotConstant(int n) { this.v = new Vec(n, 4); }\n}\n",
+			"package oracle;\npublic class CaseVrNotConstant {\n"
+				+ "\tfinal Vec v;\n\tpublic CaseVrNotConstant(int n) { this.v = new Vec(n, 12); }\n}\n",
+			"oracle.Vec", VR_VEC, "v", "VALUE-REPLAY-EXPR-NOT-CONSTANT");
+
+		// A5: 多根构造器初值不一致 -> MULTI-ROOT-MISMATCH
+		String multiRootV1 = "package oracle;\npublic class CaseVrMultiRoot {\n"
+			+ "\tfinal Vec v;\n"
+			+ "\tpublic CaseVrMultiRoot() { this.v = new Vec(4, 4); }\n"
+			+ "\tpublic CaseVrMultiRoot(int ignored) { this.v = new Vec(4, 4); }\n}\n";
+		String multiRootV2 = "package oracle;\npublic class CaseVrMultiRoot {\n"
+			+ "\tfinal Vec v;\n"
+			+ "\tpublic CaseVrMultiRoot() { this.v = new Vec(4, 12); }\n"
+			+ "\tpublic CaseVrMultiRoot(int ignored) { this.v = new Vec(4, 4); }\n}\n";
+		expectValueReplayRejected("oracle.CaseVrMultiRoot", multiRootV1, multiRootV2,
+			"oracle.Vec", VR_VEC, "v", "VALUE-REPLAY-MULTI-ROOT-MISMATCH");
+	}
+
+	/** 属性关闭基线 + 属性打开后的拒绝断言（判决码、warn 出口、台账隔离）。 */
+	static void expectValueReplayRejected(String dot, String hostV1, String hostV2,
+	                                      String vecName, String vecSource,
+	                                      String field, String code) throws Exception {
+		Map<String, String> v1 = Map.of(dot, hostV1, vecName, vecSource);
+		Map<String, String> v2 = Map.of(dot, hostV2, vecName, vecSource);
+		Fixture fx = loadMultiFixture(dot, v1, v2);
+
+		// 去触发对照：属性关闭时旧行为不受影响。
+		withValueReplay(false, () -> {
+			InitFix.PatchReport off = fx.transform();
+			check(off.valueReplayFields().isEmpty(),
+				dot + ": property off must not produce value-replay decisions");
+		});
+
+		withValueReplay(true, () -> {
+			InitFix.PatchReport report = fx.transform();
+			InitFix.FieldDecision decision = report.valueReplayFields().get(field);
+			check(decision != null && decision.status() == InitFix.FieldStatus.REJECTED,
+				dot + "." + field + " must be rejected (actual " + report.valueReplayFields() + ")");
+			check(decision != null && decision.reason() != null && decision.reason().contains(code),
+				dot + "." + field + " reason must carry " + code + " (actual "
+					+ (decision == null ? null : decision.reason()) + ")");
+			check(!unpatched(fx.host).contains(field),
+				dot + "." + field + " must NOT pollute FieldLedger (actual "
+					+ InitFix.getUnpatchedFields(fx.host) + ")");
+			boolean warned = false;
+			for (String w : agentWarnings) {
+				if (w.contains(dot.replace('.', '/')) && w.contains(code)) {
+					warned = true;
+					break;
+				}
+			}
+			check(warned, dot + ": the rejection must reach the warn outlet with " + code
+				+ " (warnings=" + agentWarnings + ")");
+			check(report.instanceFields().getOrDefault(field, report.staticFields().get(field)) != null,
+				dot + "." + field + " must also be mapped into the instance/static decision table");
+		});
+	}
+
+	/** A2：被构造类型出现在本批重新定义候选里时，重建旧值不可信 -> CONSTRUCTED-CHANGED。 */
+	static void caseValueReplayConstructedChanged() throws Exception {
+		String dot = "oracle.CaseVrA2";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrA2", "\tfinal Vec v = new Vec(4, 4);", ""),
+			"oracle.Vec", VR_VEC);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrA2", "\tfinal Vec v = new Vec(4, 12);", ""),
+			"oracle.Vec", VR_VEC);
+		Fixture fx = loadMultiFixture(dot, v1, v2);
+
+		// 批次视图：宿主与 oracle.Vec 都登记为本批重新定义候选（Vec 的构造链因此不再可信）。
+		Map<String, byte[]> byLoader = new LinkedHashMap<>();
+		byLoader.put(dot, fx.v2);
+		byLoader.put("oracle.Vec", compile(Map.of("oracle.Vec", VR_VEC)).get("oracle.Vec"));
+		Map<ClassLoader, Map<String, byte[]>> view = new IdentityHashMap<>();
+		view.put(fx.host.getClassLoader(), byLoader);
+
+		withValueReplay(false, () -> {
+			InitFix.beginBatchBytecodeView(view);
+			try {
+				InitFix.transform(fx.host, fx.v2, ClassDiffUtil.diff(fx.v1, fx.v2));
+				InitFix.finishBatchTransforms();
+			} finally {
+				InitFix.endBatchBytecodeView();
+			}
+			InitFix.PatchReport off = InitFix.getLastReport(fx.host);
+			check(off == null || off.valueReplayFields().isEmpty(),
+				"CaseVrA2: property off must not produce value-replay decisions");
+		});
+
+		withValueReplay(true, () -> {
+			InitFix.beginBatchBytecodeView(view);
+			try {
+				InitFix.transform(fx.host, fx.v2, ClassDiffUtil.diff(fx.v1, fx.v2));
+				InitFix.finishBatchTransforms();
+			} finally {
+				InitFix.endBatchBytecodeView();
+			}
+			InitFix.PatchReport report = InitFix.getLastReport(fx.host);
+			check(report != null, "CaseVrA2: batch transform must publish a report");
+			InitFix.FieldDecision decision = report == null ? null : report.valueReplayFields().get("v");
+			check(decision != null && decision.status() == InitFix.FieldStatus.REJECTED,
+				"CaseVrA2: a constructed type redefined in the same batch must be rejected (actual "
+					+ (report == null ? null : report.valueReplayFields()) + ")");
+			check(decision != null && decision.reason() != null
+				&& decision.reason().contains("VALUE-REPLAY-CONSTRUCTED-CHANGED"),
+				"CaseVrA2: reason must carry VALUE-REPLAY-CONSTRUCTED-CHANGED (actual "
+					+ (decision == null ? null : decision.reason()) + ")");
+			check(!unpatched(fx.host).contains("v"),
+				"CaseVrA2: the rejection must not pollute FieldLedger");
+			check(pendingPlan(fx.host) == null,
+				"CaseVrA2: a rejected field must not stage a value-replay task");
+		});
+	}
+
+	/** 优先级：同一字段被 @RemoldReinit 认领时值类型通道让位，任务只能有一条。 */
+	static void caseValueReplayPriority() throws Exception {
+		String dot = "oracle.CaseVrPriority";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrPriority", "\tVec v = new Vec(4, 4);", "\tVec v() { return v; }"),
+			"oracle.Vec", VR_VEC);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrPriority",
+				"\t@remold.annotation.RemoldReinit(mode = remold.annotation.RemoldReinit.Mode.OVERWRITE)\n"
+					+ "\tVec v = new Vec(4, 12);",
+				"\tVec v() { return v; }"),
+			"oracle.Vec", VR_VEC);
+		Fixture fx = loadMultiFixture(dot, v1, v2);
+
+		withValueReplay(true, () -> {
+			InitFix.PatchReport report = fx.transform();
+			check(report.valueReplayFields().isEmpty(),
+				"CaseVrPriority: an @RemoldReinit field must not also claim value replay (actual "
+					+ report.valueReplayFields() + ")");
+			check(report.instanceFields().containsKey("v"),
+				"CaseVrPriority: the annotation path still owns the field decision");
+			InitFix.PatchPlan plan = pendingPlan(fx.host);
+			check(plan != null, "CaseVrPriority: annotation path stages a pending patch");
+			if (plan != null) {
+				check(plan.valueReplayTasks().isEmpty(),
+					"CaseVrPriority: no value-replay task for a claimed field (actual "
+						+ plan.valueReplayTasks() + ")");
+				int tasks = 0;
+				for (InitFix.FieldPatchTask task : plan.allTasks()) {
+					if (task.fieldName().equals("v")) tasks++;
+				}
+				check(tasks <= 1, "CaseVrPriority: the field must be applied at most once (tasks=" + tasks + ")");
+			}
+		});
+	}
+
+	/** 与常规补丁共存：值类型拒绝不阻断新增字段补丁，也不写台账；开关关闭时常规决策完全一致。 */
+	static void caseValueReplayCoexistsWithRegularPatch() throws Exception {
+		String dot = "oracle.CaseVrCoexist";
+		Map<String, String> v1 = Map.of(dot,
+			vrHost("CaseVrCoexist", "\tfinal VecEqCustom v = new VecEqCustom(4, 4);", ""),
+			"oracle.VecEqCustom", VR_VEC_EQ_CUSTOM);
+		Map<String, String> v2 = Map.of(dot,
+			vrHost("CaseVrCoexist",
+				"\tfinal VecEqCustom v = new VecEqCustom(4, 12);\n\tstatic String s = \"x\";", ""),
+			"oracle.VecEqCustom", VR_VEC_EQ_CUSTOM);
+		Fixture fx = loadMultiFixture(dot, v1, v2);
+
+		InitFix.FieldStatus[] offStatus = new InitFix.FieldStatus[1];
+		withValueReplay(false, () -> {
+			InitFix.PatchReport off = fx.transform();
+			InitFix.FieldDecision s = off.staticFields().get("s");
+			offStatus[0] = s == null ? null : s.status();
+			check(Boolean.TRUE.equals(off.patchGenerated()), "CaseVrCoexist: property off patches the added field");
+		});
+
+		withValueReplay(true, () -> {
+			InitFix.PatchReport report = fx.transform();
+			InitFix.FieldDecision s = report.staticFields().get("s");
+			check(s != null && s.status() == offStatus[0],
+				"CaseVrCoexist: the regular decision for the added field is unchanged (off="
+					+ offStatus[0] + ", on=" + (s == null ? null : s.status()) + ")");
+			check(report.patchGenerated(), "CaseVrCoexist: the added-field patch is still generated");
+			InitFix.FieldDecision rejected = report.valueReplayFields().get("v");
+			check(rejected != null && rejected.status() == InitFix.FieldStatus.REJECTED,
+				"CaseVrCoexist: the value-replay field is rejected (actual " + report.valueReplayFields() + ")");
+			check(report.instanceFields().get("v") != null
+				&& report.instanceFields().get("v").status() == InitFix.FieldStatus.REJECTED,
+				"CaseVrCoexist: the rejection is mapped into the instance decision table for the warn outlet (actual "
+					+ report.instanceFields() + ")");
+			check(unpatched(fx.host).isEmpty(),
+				"CaseVrCoexist: neither the added field nor the rejected value-replay field may be ledgered (actual "
+					+ InitFix.getUnpatchedFields(fx.host) + ")");
+		});
+	}
+
+	/** 补丁类的方法签名集合（用于断言 buildOld/buildNew 工厂方法确实被发射）。 */
+	static Set<String> patchMethods(byte[] bytes) {
+		Set<String> out = new LinkedHashSet<>();
+		if (bytes == null) return out;
+		ClassNode node = new ClassNode();
+		new ClassReader(bytes).accept(node, 0);
+		for (var method : node.methods) out.add(method.name + method.desc);
+		return out;
+	}
+
+	/** 待补补丁的任务计划（生产 API 只在 ref 包内可见，这里按既有先例用反射读取）。 */
+	static InitFix.PatchPlan pendingPlan(Class<?> host) {
+		try {
+			Method m = InitFix.class.getDeclaredMethod("pendingPlanForTest", Class.class);
+			m.setAccessible(true);
+			return (InitFix.PatchPlan) m.invoke(null, host);
+		} catch (ReflectiveOperationException e) {
+			throw new IllegalStateException("InitFix.pendingPlanForTest is gone", e);
+		}
+	}
+
+	static byte[] pendingBytes(Class<?> host) {
+		try {
+			Method m = InitFix.class.getDeclaredMethod("pendingBytesForTest", Class.class);
+			m.setAccessible(true);
+			return (byte[]) m.invoke(null, host);
+		} catch (ReflectiveOperationException e) {
+			throw new IllegalStateException("InitFix.pendingBytesForTest is gone", e);
+		}
+	}
+
+	/** 多类夹具：v1/v2 各编译整组源文件（T 与 super 链要能被加载），宿主用 v2 字节 define。 */
+	static Fixture loadMultiFixture(String dotName, Map<String, String> v1Sources,
+	                                Map<String, String> v2Sources) throws Exception {
+		Map<String, byte[]> v1Classes = compile(v1Sources);
+		Map<String, byte[]> v2Classes = compile(v2Sources);
+		byte[] v1 = v1Classes.get(dotName);
+		byte[] v2 = v2Classes.get(dotName);
+		if (v1 == null || v2 == null) throw new IllegalStateException("编译产物缺失：" + dotName);
+		Class<?> host = Class.forName(dotName, true, new ByteLoader(v2Classes));
+		RemoldAgent.bytecodeCache.put(dotName, v2);
+		return new Fixture(dotName, v1, v2, host);
+	}
+
+	/** 在值类型重放开关的设置/恢复窗口内执行（finally 必恢复，避免污染后续场景）。 */
+	static void withValueReplay(boolean enabled, Scenario body) throws Exception {
+		String previous = System.getProperty(InitFix.VALUE_REPLAY_PROPERTY);
+		if (enabled) System.setProperty(InitFix.VALUE_REPLAY_PROPERTY, "true");
+		else System.clearProperty(InitFix.VALUE_REPLAY_PROPERTY);
+		try {
+			body.run();
+		} finally {
+			if (previous == null) System.clearProperty(InitFix.VALUE_REPLAY_PROPERTY);
+			else System.setProperty(InitFix.VALUE_REPLAY_PROPERTY, previous);
+		}
 	}
 
 	// ==================== 夹具装配 ====================

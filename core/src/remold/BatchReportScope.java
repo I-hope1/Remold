@@ -86,6 +86,35 @@ public final class BatchReportScope {
 	 */
 	public static void recordInitFix(String className, int liveInstances,
 	                                 List<String> fieldNames, int incompleteFields) {
+		recordInitFix(className, liveInstances, fieldNames, incompleteFields,
+			0, 0, 0, 0, null, null);
+	}
+
+	/**
+	 * 记录一个宿主的 InitFix 规模，并附加值类型 {@code new} 初值重放
+	 * （{@code docs/initfix/14-value-type-new-replay.md} §8）的四个计数与明细列表。
+	 *
+	 * <p><b>分析期也可调用</b>：分析阶段能确定"被拒"计数（运行期 applied/skipped/failed 由驱动
+	 * 在 {@code applyPatch} 之后补齐），因此本重载允许分两次累加。{@code fieldNames} 为 {@code null}
+	 * 表示不追加字段名，明细列表 {@code null} 视为空。</p>
+	 *
+	 * @param className                 宿主点分类名
+	 * @param liveInstances             枚举到的实例位点数
+	 * @param fieldNames                参与修补的字段名（可空）
+	 * @param incompleteFields          失败/被放弃的字段数
+	 * @param valueReplayApplied        值类型重放写入成功数
+	 * @param valueReplaySkipped        值类型重放跳过数
+	 * @param valueReplayFailed         值类型重放失败数
+	 * @param valueReplayRejected       值类型重放分析期拒绝数
+	 * @param valueReplayFailedFields   失败明细（{@code 点分类名.字段: 原因}，可空）
+	 * @param valueReplayRejectedFields 拒绝明细（{@code 点分类名.字段: 判决码/原因}，可空）
+	 */
+	public static void recordInitFix(String className, int liveInstances,
+	                                 List<String> fieldNames, int incompleteFields,
+	                                 int valueReplayApplied, int valueReplaySkipped,
+	                                 int valueReplayFailed, int valueReplayRejected,
+	                                 List<String> valueReplayFailedFields,
+	                                 List<String> valueReplayRejectedFields) {
 		if (className == null) {
 			return;
 		}
@@ -98,6 +127,16 @@ public final class BatchReportScope {
 		state.incompleteFields += Math.max(0, incompleteFields);
 		if (fieldNames != null) {
 			state.fieldNames.addAll(fieldNames);
+		}
+		state.valueReplayApplied += Math.max(0, valueReplayApplied);
+		state.valueReplaySkipped += Math.max(0, valueReplaySkipped);
+		state.valueReplayFailed += Math.max(0, valueReplayFailed);
+		state.valueReplayRejected += Math.max(0, valueReplayRejected);
+		if (valueReplayFailedFields != null) {
+			state.valueReplayFailedFields.addAll(valueReplayFailedFields);
+		}
+		if (valueReplayRejectedFields != null) {
+			state.valueReplayRejectedFields.addAll(valueReplayRejectedFields);
 		}
 	}
 
@@ -120,8 +159,14 @@ public final class BatchReportScope {
 		final List<HotswapBatchReport.MixinChange> mixinChanges = new ArrayList<>();
 		final Set<String> patchedClasses = new LinkedHashSet<>();
 		final Set<String> fieldNames = new LinkedHashSet<>();
+		final List<String> valueReplayFailedFields = new ArrayList<>();
+		final List<String> valueReplayRejectedFields = new ArrayList<>();
 		int liveInstances;
 		int incompleteFields;
+		int valueReplayApplied;
+		int valueReplaySkipped;
+		int valueReplayFailed;
+		int valueReplayRejected;
 
 		State(long startNanos, State previous) {
 			this.startNanos = startNanos;
@@ -134,7 +179,9 @@ public final class BatchReportScope {
 			}
 			return new HotswapBatchReport.InitFixStats(
 				new ArrayList<>(patchedClasses), liveInstances, fieldNames.size(),
-				incompleteFields, new ArrayList<>(fieldNames));
+				incompleteFields, new ArrayList<>(fieldNames),
+				valueReplayApplied, valueReplaySkipped, valueReplayFailed, valueReplayRejected,
+				valueReplayFailedFields, valueReplayRejectedFields);
 		}
 	}
 }

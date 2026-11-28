@@ -39,6 +39,32 @@ final class InitFixPatchEmitter {
 		return m;
 	}
 
+	/**
+	 * 生成一个静态工厂方法：{@code methodName()L<type>;}，体内为初值表达式 + {@code ARETURN}。
+	 *
+	 * <p>值类型 {@code new} 初值重放（{@code docs/initfix/14-value-type-new-replay.md}）用它把
+	 * {@code oldExpr}/{@code newExpr} 的直线构造表达式固化成补丁类里的两个工厂方法：
+	 * {@code buildOld$F()} 重建旧值、{@code buildNew$F()} 每个实例独立构造新值。
+	 * 表达式只含常量、{@code NEW}、装箱与 {@code T.<init>}（A1 已保证），因此无局部变量、无控制流。</p>
+	 *
+	 * @param methodName 方法名（调用方保证唯一）
+	 * @param type       被构造类型的内部名
+	 * @param expression 初值表达式指令（来自 {@link ValueTypeReplay.Carved}；此处 clone 后插入，
+	 *                   避免节点同时挂到两个指令表上）
+	 */
+	static MethodNode expressionFactoryMethod(
+	 String methodName, String type, List<AbstractInsnNode> expression) {
+		MethodNode m = new MethodNode(
+		 Opcodes.ACC_STATIC | Opcodes.ACC_PUBLIC,
+		 methodName, "()L" + type + ";", null, null);
+		Map<LabelNode, LabelNode> noLabels = Collections.emptyMap();
+		for (AbstractInsnNode insn : expression) {
+			m.instructions.add(insn.clone(noLabels));
+		}
+		m.instructions.add(new InsnNode(Opcodes.ARETURN));
+		return m;
+	}
+
 	private static final int    BATCH_LOCAL_TARGETS  = 0;
 	private static final int    BATCH_LOCAL_FROM     = 1;
 	private static final int    BATCH_LOCAL_TO       = 2;

@@ -204,15 +204,25 @@ public final class HotswapBatchReport {
 	 */
 	public static final class InitFixStats {
 		public static final InitFixStats EMPTY =
-			new InitFixStats(Collections.emptyList(), 0, 0, 0, Collections.emptyList());
+			new InitFixStats(Collections.emptyList(), 0, 0, 0, Collections.emptyList(),
+				0, 0, 0, 0, Collections.emptyList(), Collections.emptyList());
 
 		private final List<String> patchedClasses;
 		private final int liveInstances;
 		private final int patchedFields;
 		private final int incompleteFields;
 		private final List<String> fieldNames;
+		private final int valueReplayApplied;
+		private final int valueReplaySkipped;
+		private final int valueReplayFailed;
+		private final int valueReplayRejected;
+		private final List<String> valueReplayFailedFields;
+		private final List<String> valueReplayRejectedFields;
 
 		/**
+		 * 兼容构造（既有 5 参数语义完全不变）：值类型 {@code new} 初值重放的四个计数与两个明细
+		 * 列表全部为 {@code 0}/空。
+		 *
 		 * @param patchedClasses   真的执行完补丁的宿主类名
 		 * @param liveInstances    枚举到的实例位点数（按类求和）
 		 * @param patchedFields    参与修补的字段数（实例 + 静态，去重）
@@ -221,11 +231,40 @@ public final class HotswapBatchReport {
 		 */
 		public InitFixStats(List<String> patchedClasses, int liveInstances, int patchedFields,
 		                    int incompleteFields, List<String> fieldNames) {
+			this(patchedClasses, liveInstances, patchedFields, incompleteFields, fieldNames,
+				0, 0, 0, 0, Collections.emptyList(), Collections.emptyList());
+		}
+
+		/**
+		 * @param patchedClasses           真的执行完补丁的宿主类名
+		 * @param liveInstances            枚举到的实例位点数（按类求和）
+		 * @param patchedFields            参与修补的字段数（实例 + 静态，去重）
+		 * @param incompleteFields         运行期失败或因依赖失败被放弃的字段数
+		 * @param fieldNames               参与修补的字段名（去重）
+		 * @param valueReplayApplied       值类型 new 初值重放：写入成功（CAS 命中）的字段数
+		 * @param valueReplaySkipped       值类型 new 初值重放：运行期值已被改过而跳过的字段数
+		 * @param valueReplayFailed        值类型 new 初值重放：重试用尽 / 重建异常而失败的字段数
+		 * @param valueReplayRejected      值类型 new 初值重放：分析期被安全门拒绝的字段数
+		 * @param valueReplayFailedFields  失败字段明细（{@code 点分类名.字段: 原因}）
+		 * @param valueReplayRejectedFields 拒绝字段明细（{@code 点分类名.字段: 判决码/原因}）
+		 */
+		public InitFixStats(List<String> patchedClasses, int liveInstances, int patchedFields,
+		                    int incompleteFields, List<String> fieldNames,
+		                    int valueReplayApplied, int valueReplaySkipped,
+		                    int valueReplayFailed, int valueReplayRejected,
+		                    List<String> valueReplayFailedFields,
+		                    List<String> valueReplayRejectedFields) {
 			this.patchedClasses = immutableCopy(patchedClasses);
 			this.liveInstances = nonNegative(liveInstances);
 			this.patchedFields = nonNegative(patchedFields);
 			this.incompleteFields = nonNegative(incompleteFields);
 			this.fieldNames = immutableCopy(fieldNames);
+			this.valueReplayApplied = nonNegative(valueReplayApplied);
+			this.valueReplaySkipped = nonNegative(valueReplaySkipped);
+			this.valueReplayFailed = nonNegative(valueReplayFailed);
+			this.valueReplayRejected = nonNegative(valueReplayRejected);
+			this.valueReplayFailedFields = immutableCopy(valueReplayFailedFields);
+			this.valueReplayRejectedFields = immutableCopy(valueReplayRejectedFields);
 		}
 
 		public List<String> getPatchedClasses() {
@@ -248,15 +287,49 @@ public final class HotswapBatchReport {
 			return fieldNames;
 		}
 
-		/** @return 本轮是否真的修补过任何字段 */
+		/** @return 值类型 new 初值重放写入成功的字段数 */
+		public int getValueReplayApplied() {
+			return valueReplayApplied;
+		}
+
+		/** @return 值类型 new 初值重放因运行期值已被改过而跳过的字段数 */
+		public int getValueReplaySkipped() {
+			return valueReplaySkipped;
+		}
+
+		/** @return 值类型 new 初值重放失败的字段数 */
+		public int getValueReplayFailed() {
+			return valueReplayFailed;
+		}
+
+		/** @return 值类型 new 初值重放在分析期被拒绝的字段数 */
+		public int getValueReplayRejected() {
+			return valueReplayRejected;
+		}
+
+		/** @return 失败字段明细（{@code 点分类名.字段: 原因}） */
+		public List<String> getValueReplayFailedFields() {
+			return valueReplayFailedFields;
+		}
+
+		/** @return 拒绝字段明细（{@code 点分类名.字段: 判决码/原因}） */
+		public List<String> getValueReplayRejectedFields() {
+			return valueReplayRejectedFields;
+		}
+
+		/** @return 本轮是否真的修补过任何字段（含值类型重放通道的活动） */
 		public boolean hasActivity() {
-			return patchedFields > 0 || liveInstances > 0 || !patchedClasses.isEmpty();
+			return patchedFields > 0 || liveInstances > 0 || !patchedClasses.isEmpty()
+				|| valueReplayApplied > 0 || valueReplaySkipped > 0
+				|| valueReplayFailed > 0 || valueReplayRejected > 0;
 		}
 
 		@Override
 		public String toString() {
 			return "InitFixStats{classes=" + patchedClasses.size() + ", instances=" + liveInstances
-				+ ", fields=" + patchedFields + ", incomplete=" + incompleteFields + '}';
+				+ ", fields=" + patchedFields + ", incomplete=" + incompleteFields
+				+ ", valueReplay{applied=" + valueReplayApplied + ", skipped=" + valueReplaySkipped
+				+ ", failed=" + valueReplayFailed + ", rejected=" + valueReplayRejected + "}" + '}';
 		}
 	}
 
